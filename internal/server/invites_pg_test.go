@@ -283,8 +283,9 @@ func TestInviteAccept_EmailMismatch_409(t *testing.T) {
 	}
 }
 
-// TestInviteAccept_EmptyEmail_409: a JWT with no email claim can't match an
-// invite → 409.
+// TestInviteAccept_EmptyEmail_409: a JWT with no email claim, from a principal
+// holding no identity with the invited address → 409, and the message names
+// the missing address readably rather than "signed in as ."
 func TestInviteAccept_EmptyEmail_409(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
@@ -293,16 +294,103 @@ func TestInviteAccept_EmptyEmail_409(t *testing.T) {
 	invitee := r.seedUser()
 
 	token := "tok-noemail-" + uuid.NewString()
-	seedInvite(t, r.h, orgID.String(), invitee.String()+"@test", "member", "", sha256Of(token),
+	seedInvite(t, r.h, orgID.String(), "elsewhere@test", "member", "", sha256Of(token),
 		time.Now().Add(24*time.Hour), false, false)
 
 	claims := validClaimsFor(invitee)
 	delete(claims, "email")
 	sid := r.signInWithClaims(invitee, claims)
 	resp := postAccept(r, sid, token)
+	raw := readBody(resp)
 	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("status = %d; want 409 (body=%s)", resp.StatusCode, readBody(resp))
+		t.Fatalf("status = %d; want 409 (body=%s)", resp.StatusCode, raw)
 	}
+	if !strings.Contains(raw, "an account with no email") {
+		t.Errorf("body %s; want the placeholder for a caller with no email", raw)
+	}
+}
+
+// TestInviteAccept_UntrustedSSOIdentity_409: an SSO sign-in whose assertion
+// carries the invited address, on a domain nobody verified for its connection,
+// cannot accept. The token's email claim equals the invite address — GoTrue
+// marks it verified — but TF recorded the address untrusted, and acceptance
+// matches on TF's record, not the claim. No login extension is registered in
+// this package, so the callback's trust check answers no, which is exactly
+// ee/sso's answer for such a domain. The invite stays pending.
+func TestInviteAccept_UntrustedSSOIdentity_409(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	owner := r.seedUser()
+	orgID, _ := r.seedOrg(owner, "accept-untrusted-sso")
+
+	const invited = "carol@corp.example"
+	token := "tok-untrusted-" + uuid.NewString()
+	inviteID := seedInvite(t, r.h, orgID.String(), invited, "member", "", sha256Of(token),
+		time.Now().Add(24*time.Hour), false, false)
+
+	samlAuth := uuid.New()
+	r.h.SeedAuthUser(t, samlAuth.String(), samlAuth.String()+"@auth.test")
+	claims := validClaimsFor(samlAuth)
+	claims["email"] = invited
+	claims["email_verified"] = true
+	resp := r.driveSSOCallbackClaims(claims, uuid.NewString())
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("sso callback status = %d; want 302", resp.StatusCode)
+	}
+	sid := r.sidFromResp(resp)
+
+	accept := postAccept(r, sid, token)
+	raw := readBody(accept)
+	if accept.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d; want 409 (body=%s)", accept.StatusCode, raw)
+	}
+	var body struct {
+		Errors []struct {
+			Reason string `json:"reason"`
+		} `json:"errors"`
+	}
+	_ = json.Unmarshal([]byte(raw), &body)
+	if len(body.Errors) != 1 || body.Errors[0].Reason != httpx.ReasonInviteEmailMismatch {
+		t.Fatalf("errors = %+v; want one INVITE_EMAIL_MISMATCH item", body.Errors)
+	}
+	var accepted bool
+	if err := r.h.AdminDB.QueryRow(
+		`SELECT accepted_at IS NOT NULL FROM org_invites WHERE id = $1`, inviteID,
+	).Scan(&accepted); err != nil {
+		t.Fatalf("read invite: %v", err)
+	}
+	if accepted {
+		t.Error("invite was stamped accepted; want it still pending")
+	}
+}
+
+// TestInviteAccept_TrustedLinkedIdentity_Accepted: the invitee signs in with
+// GitHub under one address but holds the invited address verified on another
+// of their login identities (a linked SSO sign-in on a verified domain). That
+// identity proves the address is theirs, so the invite is accepted even though
+// the session's email claim names a different one.
+func TestInviteAccept_TrustedLinkedIdentity_Accepted(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	owner := r.seedUser()
+	orgID, _ := r.seedOrg(owner, "accept-linked")
+	invitee := r.seedUser()
+	const workEmail = "invitee@corp.example"
+	seedExtraIdentity(t, r.h, invitee.String(), workEmail, true)
+
+	token := "tok-linked-" + uuid.NewString()
+	inviteID := seedInvite(t, r.h, orgID.String(), workEmail, "member", "", sha256Of(token),
+		time.Now().Add(24*time.Hour), false, false)
+
+	sid := r.signInAs(invitee) // GitHub; email claim = invitee@test
+	resp := postAccept(r, sid, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d; want 200 (body=%s)", resp.StatusCode, readBody(resp))
+	}
+	if n := countOrgMemberships(t, r.h, invitee.String(), orgID.String()); n != 1 {
+		t.Errorf("org_memberships = %d; want 1", n)
+	}
+	assertAcceptedBy(t, r.h, inviteID, invitee.String())
 }
 
 // TestInviteAccept_AlreadyMember_Idempotent200: an invitee who is already an
@@ -731,10 +819,15 @@ func TestInvitePreview_ValidAndUnknown(t *testing.T) {
 
 // ---------- helpers ----------
 
-// signInAs completes the OAuth callback for userID with the default claims
-// (email = userID@test) and returns the sid cookie value.
+// signInAs completes a GitHub OAuth callback for userID with the default
+// claims (email = userID@test) reported verified, as GitHub reports a verified
+// primary address, and returns the sid cookie value. The verified flag is what
+// keeps the seeded identity holding its address after the login's refresh,
+// which is what invite acceptance matches on.
 func (r *authRig) signInAs(userID uuid.UUID) string {
-	return r.signInWithClaims(userID, validClaimsFor(userID))
+	claims := validClaimsFor(userID)
+	claims["email_verified"] = true
+	return r.signInWithClaims(userID, claims)
 }
 
 // doInviteReq fires a request at the mux with an optional sid cookie + a

@@ -13,8 +13,8 @@ import (
 // effectively unused there (the single local user is implicitly the operator).
 //
 // All emails are lower-cased/trimmed at the store boundary so callers never
-// have to normalize — Add, Remove, and IsOperator all fold case, matching how
-// the request gate compares claims.Email.
+// have to normalize — Add and Remove both fold case, and IsOperatorUserSystem
+// compares against the lower-cased addresses of a principal's identities.
 type OperatorStore interface {
 	// Add records email as an operator, idempotently (re-adding an existing
 	// operator is a no-op that succeeds). addedBy is best-effort provenance.
@@ -31,8 +31,18 @@ type OperatorStore interface {
 	// Exempt from the returned-row rule: it is a delete.
 	Remove(ctx context.Context, email string) (removed bool, err error)
 
-	// IsOperator reports whether email is a deployment operator.
-	IsOperator(ctx context.Context, email string) (bool, error)
+	// IsOperatorUserSystem reports whether the principal userID is a
+	// deployment operator: whether any of its login identities holds an
+	// operator address with email_verified set. That flag is TF's trust
+	// decision for the address (a SAML identity's counts only on a domain its
+	// connection's org has verified), so an identity provider that merely
+	// asserts an operator's address does not make its user one. The token's
+	// email claim is never consulted.
+	//
+	// Admin pool / claims-free: operators has no policy and the caller is the
+	// deployment-scoped fleet gate. SQLite returns (false, nil): local mode has
+	// no login identities, and the gate admits its single user before asking.
+	IsOperatorUserSystem(ctx context.Context, userID string) (bool, error)
 
 	// List returns every operator, email order — backs `operator list`.
 	List(ctx context.Context) ([]domain.Operator, error)

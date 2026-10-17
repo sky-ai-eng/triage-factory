@@ -1071,6 +1071,7 @@ func (s *Server) routes() {
 		az:      s.az,
 		admin:   s.db,
 		invites: s.allStores.Invites,
+		users:   s.allStores.Users,
 		publicURL: func() string {
 			if s.deployCfg == nil {
 				return ""

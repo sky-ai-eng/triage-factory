@@ -435,13 +435,31 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// provider — those are GoTrue-internal and version-fragile.
 	isSSO := state.ProviderID != ""
 
+	// Whether TF trusts this sign-in's email as an address its signer owns,
+	// decided once and used for linking, the identity row and the login hook.
+	// GitHub's verified flag is trusted as reported. GoTrue marks every SAML
+	// assertion's email verified, so an SSO sign-in's address is trusted only on
+	// a domain verified for the org whose connection it came through. A failed
+	// lookup fails the sign-in: falling back to trust would hand an identity
+	// provider whatever account holds the address it asserts.
+	emailTrusted := claims.EmailVerified
+	if isSSO && emailTrusted {
+		emailTrusted, err = s.loginExtension().TrustsSSOEmail(r.Context(), state.ProviderID, claims.Email)
+		if err != nil {
+			s.recordLoginFailure(r, "email_trust_failed", authMethod(isSSO), claims.Email)
+			internalError(w, "auth", fmt.Errorf("sso email trust for %s: %w", authUserID, err))
+			return
+		}
+	}
+
 	// Resolve the GoTrue login identity to its PRINCIPAL (the public.users row).
-	// A new identity links to an existing principal when its verified email
-	// matches, else mints one — GoTrue keeps each SAML login as its own
-	// auth.users (it excludes SSO from account linking), so TF unifies a human's
-	// identities here. From this point userUUID is the principal: memberships,
-	// JIT, and the session all key on the human, not the per-provider identity.
-	userUUID, err := resolveOrCreatePrincipal(r.Context(), s.db, authUserID, claims, state.ProviderID)
+	// A new identity links to the principal that holds its address when the
+	// address is trusted, else mints one — GoTrue keeps each SAML login as its
+	// own auth.users (it excludes SSO from account linking), so TF unifies a
+	// human's identities here. From this point userUUID is the principal:
+	// memberships, JIT, and the session all key on the human, not the
+	// per-provider identity.
+	userUUID, err := resolveOrCreatePrincipal(r.Context(), s.db, authUserID, claims, emailTrusted, state.ProviderID)
 	if err != nil {
 		s.recordLoginFailure(r, "principal_resolve_failed", authMethod(isSSO), claims.Email)
 		internalError(w, "auth", fmt.Errorf("resolve principal %s: %w", authUserID, err))
@@ -464,7 +482,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		State:         toLoginState(state),
 		UserID:        userUUID,
 		Email:         claims.Email,
-		EmailVerified: claims.EmailVerified,
+		EmailVerified: emailTrusted,
 		IsSSO:         isSSO,
 	})
 	if err != nil {
@@ -938,12 +956,14 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	resp.Teams = []teamRow{}
 	resp.Email = claims.Email
 	resp.OrgCreationEnabled = runmode.OrgCreationEnabled()
-	// Deployment-operator flag (TFAC-589): a plain lookup of the verified
-	// session email against the org-less operators table. Admin-pool read
+	// Deployment-operator flag: whether any of the principal's login identities
+	// holds an operator address verified — the same read the fleet gate makes,
+	// so the flag and the console agree. Never claims.Email: an SSO token
+	// carries whatever address its identity provider asserted. Admin-pool read
 	// (operators has no RLS policy); best-effort — a lookup error leaves it
 	// false (fail closed, the console 404s), never fails the identity read.
-	if s.allStores.Operators != nil && claims.Email != "" {
-		if ok, err := s.allStores.Operators.IsOperator(r.Context(), claims.Email); err != nil {
+	if s.allStores.Operators != nil {
+		if ok, err := s.allStores.Operators.IsOperatorUserSystem(r.Context(), claims.Subject); err != nil {
 			serverLog.Warn("operator lookup failed on /api/me", "error", err)
 		} else {
 			resp.IsOperator = ok
@@ -1327,16 +1347,31 @@ func distinctNonEmpty(vs []string) []string {
 // refuses to link them. TF unifies them in public.user_identities:
 //
 //   - returning identity (auth_user_id already linked) → its principal;
-//   - new identity whose VERIFIED email matches an existing principal → link to
-//     that principal (this is how a later SSO login attaches to the same human
-//     as an earlier GitHub login — no duplicate account, no migration);
+//   - new identity whose email is TRUSTED and held by an existing principal →
+//     link to that principal (this is how a later SSO login attaches to the
+//     same human as an earlier GitHub login — no duplicate account, no
+//     migration);
 //   - otherwise → a fresh principal.
 //
-// Linking is gated on a *verified* email only: an unverified or absent email
-// never links (the safe default is a separate principal). A per-email advisory
-// lock serializes concurrent first-logins for the same verified email so a race
-// can't fork one human into two principals — the only way the "one principal
-// per verified email" invariant could otherwise break.
+// emailTrusted is the caller's trust decision for claims.Email, and it is what
+// the identity row's email_verified records — never the provider's own flag. A
+// GitHub sign-in's address is trusted when GitHub reports it verified. An SSO
+// sign-in's is trusted only when its domain is verified for the org whose
+// connection it came through: GoTrue marks every SAML assertion's email
+// verified, and an identity provider asserts whatever address it is configured
+// to, so without the domain check any org admin could sign in as anyone. An
+// untrusted SSO address therefore mints a separate principal, which JIT then
+// provisions into the connection's org only. A trusted address always links;
+// there is no setting to turn that off.
+//
+// At most one principal holds a given verified address, and the database
+// enforces it (user_identities_one_principal_per_verified_email). A per-email
+// advisory lock serializes every login that carries the address, so two
+// concurrent first-logins link to one principal rather than racing into two,
+// and a returning identity's refresh can check for another holder before it
+// writes. When a returning identity's provider now asserts a trusted address
+// another principal already holds, the row stores the address unverified and
+// the sign-in proceeds: the address stays with its first holder.
 //
 // Runs on the admin pool (the actor has no membership/claims yet, so RLS can't
 // express these reads/writes — same rationale as org provisioning).
@@ -1352,7 +1387,7 @@ func distinctNonEmpty(vs []string) []string {
 // SSO user binds GitHub later via PAT/Connect). An Entra assertion can carry a
 // preferred_username that is a UPN/email, not a github.com handle, so mirroring
 // it would mint a bogus identity — hence the gate.
-func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid.UUID, claims *verify.Claims, ssoProviderID string) (uuid.UUID, error) {
+func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid.UUID, claims *verify.Claims, emailTrusted bool, ssoProviderID string) (uuid.UUID, error) {
 	isSSO := ssoProviderID != ""
 	provider := "github"
 	if isSSO {
@@ -1407,26 +1442,53 @@ func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid
 			`SELECT pg_advisory_xact_lock(hashtextextended($1, 1))`, authUserID.String()); err != nil {
 			return fmt.Errorf("acquire identity lock: %w", err)
 		}
-		// Additionally serialize concurrent first-logins by DIFFERENT identities that
-		// share a verified email (salt 0), so they link to one principal rather than
-		// racing into two. A missing or unverified email skips this — those never
-		// link. Consistent lock order (identity then email) avoids deadlock.
-		if email != "" && claims.EmailVerified {
+		// Additionally serialize every login by a DIFFERENT identity carrying the same
+		// email (salt 0): concurrent first-logins with a trusted address link to one
+		// principal rather than racing into two, and the refresh's other-holder check
+		// below sees a settled answer. Taken whether or not the address is trusted,
+		// because an untrusted login can become a trusted one at its next sign-in.
+		// Consistent lock order (identity then email) avoids deadlock.
+		if email != "" {
 			if _, err := tx.ExecContext(ctx,
 				`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, email); err != nil {
 				return fmt.Errorf("acquire email lock: %w", err)
 			}
 		}
 
+		// What this identity's row records as email_verified. Starts as the trust
+		// decision; a returning identity can lose it below to an earlier holder.
+		verified := emailTrusted
+
 		lookupErr := tx.QueryRowContext(ctx,
 			`SELECT user_id FROM public.user_identities WHERE auth_user_id = $1`, authUserID,
 		).Scan(&principalID)
 		switch {
 		case lookupErr == nil:
-			// Returning identity — fall through to the profile/email refresh below.
+			// Returning identity — fall through to the profile/email refresh below,
+			// unless its provider now asserts a trusted address another principal
+			// holds. The first holder keeps it; this row records it unverified, and
+			// the sign-in itself still succeeds.
+			if email != "" && emailTrusted {
+				var heldElsewhere bool
+				if err := tx.QueryRowContext(ctx, `
+					SELECT EXISTS (
+						SELECT 1 FROM public.user_identities
+						 WHERE lower(email) = $1 AND email_verified AND user_id <> $2
+					)`, email, principalID,
+				).Scan(&heldElsewhere); err != nil {
+					return fmt.Errorf("verified-email holder check: %w", err)
+				}
+				if heldElsewhere {
+					verified = false
+					authLog.Warn("login identity's trusted email is held verified by another principal; recording it unverified",
+						"auth_user_id", authUserID, "principal", principalID)
+				}
+			}
 		case errors.Is(lookupErr, sql.ErrNoRows):
-			// New identity. Link to an existing principal by verified email, else mint.
-			if email != "" && claims.EmailVerified {
+			// New identity. Link to the principal holding its trusted address, else
+			// mint. At most one principal holds a verified address, so any matching
+			// row names the same one.
+			if email != "" && emailTrusted {
 				if lerr := tx.QueryRowContext(ctx, `
 					SELECT user_id FROM public.user_identities
 					 WHERE lower(email) = $1 AND email_verified
@@ -1448,7 +1510,7 @@ func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid
 				INSERT INTO public.user_identities
 					(auth_user_id, user_id, provider, provider_subject, sso_provider_id, login, email, email_verified, created_at, updated_at)
 				VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, ''), $8, now(), now())
-			`, authUserID, principalID, provider, providerSubject, ssoProviderID, loginHandle, email, claims.EmailVerified); err != nil {
+			`, authUserID, principalID, provider, providerSubject, ssoProviderID, loginHandle, email, verified); err != nil {
 				return fmt.Errorf("link identity: %w", err)
 			}
 		default:
@@ -1467,13 +1529,13 @@ func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid
 		`, principalID, displayName, avatarURL); err != nil {
 			return fmt.Errorf("refresh principal: %w", err)
 		}
-		// Refresh email + its verification from the claim, but only when the claim
-		// actually carries an email: a later login that omits it must NOT NULL out a
-		// known email or downgrade its verified flag (that would silently disable
-		// future linking). When an email IS present we take the provider's current
-		// truth for it — including a genuine un-verify — rather than forcing
-		// monotonicity, since a stale verified=true on a changed/unverified email
-		// would be the unsafe direction (it could let a later identity wrongly link).
+		// Refresh email + its verification, but only when the claim actually carries
+		// an email: a later login that omits it must NOT NULL out a known email or
+		// downgrade its verified flag (that would silently disable future linking).
+		// When an email IS present we take this login's trust decision for it —
+		// including a genuine un-verify — rather than forcing monotonicity, since a
+		// stale verified=true on a changed/untrusted email would be the unsafe
+		// direction (it could let a later identity wrongly link).
 		// The provider id and the GitHub handle are refreshed the same way — only
 		// when this login carries one — so a row that predates either stamp gains
 		// it at the next sign-in, and a login that lacks one never blanks it.
@@ -1485,7 +1547,7 @@ func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid
 			       login           = COALESCE(NULLIF($5, ''), login),
 			       updated_at      = now()
 			 WHERE auth_user_id = $1
-		`, authUserID, email, claims.EmailVerified, ssoProviderID, loginHandle); err != nil {
+		`, authUserID, email, verified, ssoProviderID, loginHandle); err != nil {
 			return fmt.Errorf("refresh identity: %w", err)
 		}
 
@@ -1501,7 +1563,7 @@ func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid
 		// choice, and make "Change" on the settings page a verb that does not hold.
 		if !isSSO && ghUsername != "" {
 			githubEmail := ""
-			if claims.EmailVerified {
+			if emailTrusted {
 				githubEmail = email
 			}
 			if _, err := tx.ExecContext(ctx, `

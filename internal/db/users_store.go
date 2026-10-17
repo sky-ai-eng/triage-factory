@@ -314,11 +314,13 @@ type UsersStore interface {
 	// VERIFIED login-identity email equal to email (case-insensitive), on the
 	// admin pool — the set-valued formalization of the inline auto-link query the
 	// login path uses (internal/server/auth_handlers.go's resolveOrCreatePrincipal).
-	// Set-valued because one verified email can appear on identities of more than
-	// one principal; the caller decides what ambiguity means (the Slack identity
-	// resolver, TFAC-531, treats it as unresolved and never guesses). Empty slice,
-	// not error, on no match. email is lowercased/trimmed here so callers pass it
-	// as captured.
+	// "Verified" is TF's trust decision for the address (see that function), and
+	// the database holds at most one principal per verified address
+	// (user_identities_one_principal_per_verified_email), so the result has at
+	// most one element. It stays a slice so the caller's ambiguity handling (the
+	// Slack identity resolver treats more than one as unresolved and never
+	// guesses) needs no second spelling. Empty slice, not error, on no match.
+	// email is lowercased/trimmed here so callers pass it as captured.
 	//
 	// Admin pool / claims-free: the only caller (today) is the Slack identity
 	// resolver, which runs detached from any request with no JWT-claims context.
@@ -327,6 +329,18 @@ type UsersStore interface {
 	// bridge — local mode is N=1 with no login concept — so it always returns
 	// (nil, nil); best-effort callers already treat an empty result as no-match.
 	UserIDsForVerifiedEmailSystem(ctx context.Context, email string) ([]string, error)
+
+	// HoldsVerifiedEmailSystem reports whether any login identity of the
+	// principal userID holds email (case-insensitive, trimmed) with
+	// email_verified set — TF's trust decision for the address, so an SSO
+	// identity's counts only on a domain its connection's org has verified.
+	// It is how a request proves its caller owns an address (invite
+	// acceptance) without trusting the token's email claim. An empty email is
+	// false, not an error.
+	//
+	// Admin pool / claims-free: user_identities has no policy. SQLite returns
+	// (false, nil), for the reason UserIDsForVerifiedEmailSystem does.
+	HoldsVerifiedEmailSystem(ctx context.Context, userID, email string) (bool, error)
 
 	// GetLastActingTeam returns users.last_acting_team_id — the user's
 	// sticky default team — or "" if unset (NULL) or the row is missing.

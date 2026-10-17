@@ -81,9 +81,12 @@ func (r *authRig) deleteSSOConnection(providerID string) {
 // the SSO login path won't mint a github identity row from it.
 func validSAMLClaimsFor(userID uuid.UUID, jwtProviderID string) jwt.MapClaims {
 	return jwt.MapClaims{
-		"sub":            userID.String(),
-		"email":          userID.String() + "@corp.example",
-		"email_verified": true, // SAML assertion emails are verified by definition
+		"sub":   userID.String(),
+		"email": userID.String() + "@corp.example",
+		// GoTrue marks every SAML assertion's email verified, whatever the
+		// identity provider asserted. TF trusts it only on a domain verified for
+		// the connection's org, which is what the tests below vary.
+		"email_verified": true,
 		"iss":            testIssuer,
 		"aud":            testAudience,
 		"exp":            time.Now().Add(1 * time.Hour).Unix(),
@@ -114,8 +117,60 @@ func (r *authRig) startSAML(providerID string) (cookies []*http.Cookie, csrf str
 // window between start and callback.
 func (r *authRig) completeSAMLLogin(cookies []*http.Cookie, csrf string, userID uuid.UUID, jwtProviderID string) *http.Response {
 	r.t.Helper()
-	r.fake.stageToken(r.signKey.mintJWT(r.t, validSAMLClaimsFor(userID, jwtProviderID)))
+	return r.completeSAMLLoginClaims(cookies, csrf, validSAMLClaimsFor(userID, jwtProviderID))
+}
+
+// completeSAMLLoginClaims is completeSAMLLogin with caller-shaped claims.
+func (r *authRig) completeSAMLLoginClaims(cookies []*http.Cookie, csrf string, claims jwt.MapClaims) *http.Response {
+	r.t.Helper()
+	r.fake.stageToken(r.signKey.mintJWT(r.t, claims))
 	return r.fireCallback(cookies, csrf, url.Values{"code": {"fake-" + uuid.NewString()}})
+}
+
+// driveSAMLLoginAs completes an honest SAML login through providerID for the
+// identity authUserID whose assertion carries email.
+func (r *authRig) driveSAMLLoginAs(authUserID uuid.UUID, providerID, email string) *http.Response {
+	r.t.Helper()
+	claims := validSAMLClaimsFor(authUserID, providerID)
+	claims["email"] = email
+	cookies, csrf := r.startSAML(providerID)
+	return r.completeSAMLLoginClaims(cookies, csrf, claims)
+}
+
+// identityEmail reads back what the callback stored for a login identity: its
+// address and TF's trust decision for it.
+func (r *authRig) identityEmail(authUserID uuid.UUID) (email string, verified bool) {
+	r.t.Helper()
+	if err := r.h.AdminDB.QueryRow(
+		`SELECT COALESCE(email, ''), email_verified FROM user_identities WHERE auth_user_id = $1`, authUserID,
+	).Scan(&email, &verified); err != nil {
+		r.t.Fatalf("read identity %s: %v", authUserID, err)
+	}
+	return email, verified
+}
+
+// orgIDsOf returns the orgs a principal belongs to, sorted, for before/after
+// comparisons.
+func (r *authRig) orgIDsOf(userID uuid.UUID) []string {
+	r.t.Helper()
+	rows, err := r.h.AdminDB.Query(
+		`SELECT org_id::text FROM org_memberships WHERE user_id = $1 ORDER BY org_id`, userID)
+	if err != nil {
+		r.t.Fatalf("list memberships: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			r.t.Fatalf("scan membership: %v", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		r.t.Fatalf("iterate memberships: %v", err)
+	}
+	return out
 }
 
 // driveSAMLCallback completes a full SAML login: SP-initiated start (state cookie
@@ -588,7 +643,7 @@ func TestSAMLStart_MissingProviderID_400(t *testing.T) {
 // principals, failing here. Both legs are GitHub callbacks to isolate the
 // verifier + link logic; the real cross-provider GitHub→SAML round-trip (where
 // the second leg also skips the github-identity write) is
-// TestSSOLogin_SAMLEmailLinksExistingGitHubPrincipal.
+// TestSSOLogin_VerifiedDomain_SAMLEmailLinksExistingGitHubPrincipal.
 func TestSSOLogin_VerifiedEmailLinksToOnePrincipal(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
@@ -628,12 +683,23 @@ func TestSSOLogin_VerifiedEmailLinksToOnePrincipal(t *testing.T) {
 	}
 }
 
-// The real cross-provider round-trip through the SAML HTTP path: a human logs in
-// via GitHub (minting a principal), then via Entra SAML with the same VERIFIED
-// email — the SAML callback must LINK to the existing GitHub principal (not mint
-// a second) and JIT that principal into the SSO org. Guards the SAML-specific
-// link path the github-on-both test above can't reach.
-func TestSSOLogin_SAMLEmailLinksExistingGitHubPrincipal(t *testing.T) {
+// githubLoginWithEmail signs a fresh identity in through GitHub with a verified
+// address and returns the principal it resolved to.
+func (r *authRig) githubLoginWithEmail(email string) (authUserID, principal uuid.UUID) {
+	r.t.Helper()
+	authUserID = r.seedAuthOnlyUser()
+	if resp := r.driveGitHubLogin(authUserID, email); resp.StatusCode != http.StatusFound {
+		r.t.Fatalf("github login status=%d, want 302", resp.StatusCode)
+	}
+	return authUserID, r.principalOf(authUserID)
+}
+
+// A SAML sign-in through a connection whose org has verified no domain carries
+// the address of an existing GitHub account. GoTrue marks the address verified,
+// but nothing proves the identity provider owns it, so the sign-in gets its own
+// principal, provisioned only into the connection's org, and the identity row
+// records the address untrusted. The GitHub account is untouched.
+func TestSSOLogin_UnverifiedDomain_SAMLEmailGetsSeparatePrincipal(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
 
@@ -642,21 +708,54 @@ func TestSSOLogin_SAMLEmailLinksExistingGitHubPrincipal(t *testing.T) {
 	orgA, _ := r.seedOrg(owner, "acme")
 	r.seedSSOConnection(orgA, providerID, "member", true)
 
-	// validSAMLClaimsFor uses <id>@corp.example as the verified email; reuse that
-	// exact address for the prior GitHub login so the SAML login links to it.
+	const sharedEmail = "dana@corp.example"
+	_, ghPrincipal := r.githubLoginWithEmail(sharedEmail)
+	ownerX := r.seedUser()
+	orgX, _ := r.seedOrg(ownerX, "dana-home")
+	pgMember(t, r, ghPrincipal, orgX)
+	before := r.orgIDsOf(ghPrincipal)
+
 	samlAuth := r.seedAuthOnlyUser()
-	sharedEmail := samlAuth.String() + "@corp.example"
-
-	githubAuth := r.seedAuthOnlyUser()
-	gh := validClaimsFor(githubAuth)
-	gh["email"] = sharedEmail
-	gh["email_verified"] = true
-	if resp, _ := r.driveCallbackClaims(gh); resp.StatusCode != http.StatusFound {
-		t.Fatalf("github login status=%d, want 302", resp.StatusCode)
+	if resp := r.driveSAMLLoginAs(samlAuth, providerID, sharedEmail); resp.StatusCode != http.StatusFound {
+		t.Fatalf("saml login status=%d, want 302", resp.StatusCode)
 	}
-	principal := r.principalOf(githubAuth)
 
-	if resp := r.driveSAMLCallback(samlAuth, providerID, providerID); resp.StatusCode != http.StatusFound {
+	samlPrincipal := r.principalOf(samlAuth)
+	if samlPrincipal == ghPrincipal {
+		t.Fatal("SAML login on an unverified domain linked to the GitHub principal holding its address — want a separate principal")
+	}
+	if got := r.orgIDsOf(samlPrincipal); len(got) != 1 || got[0] != orgA.String() {
+		t.Errorf("SAML principal orgs=%v, want only the connection's org %s", got, orgA)
+	}
+	if email, verified := r.identityEmail(samlAuth); email != sharedEmail || verified {
+		t.Errorf("SAML identity row = (%q, verified=%v), want (%q, verified=false)", email, verified, sharedEmail)
+	}
+	if after := r.orgIDsOf(ghPrincipal); strings.Join(after, ",") != strings.Join(before, ",") {
+		t.Errorf("GitHub principal memberships changed: before=%v after=%v", before, after)
+	}
+}
+
+// The real cross-provider round-trip through the SAML HTTP path: a human logs in
+// via GitHub (minting a principal), then via Entra SAML with the same address on
+// a domain verified for the connection's org — the SAML callback must LINK to
+// the existing GitHub principal (not mint a second) and JIT that principal into
+// the SSO org. Guards the SAML-specific link path the github-on-both test above
+// can't reach.
+func TestSSOLogin_VerifiedDomain_SAMLEmailLinksExistingGitHubPrincipal(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+
+	providerID := uuid.NewString()
+	owner := r.seedUser()
+	orgA, _ := r.seedOrg(owner, "acme")
+	r.seedSSOConnection(orgA, providerID, "member", true)
+	r.seedVerifiedDomain(orgA, providerID, "corp.example")
+
+	const sharedEmail = "erin@corp.example"
+	_, principal := r.githubLoginWithEmail(sharedEmail)
+
+	samlAuth := r.seedAuthOnlyUser()
+	if resp := r.driveSAMLLoginAs(samlAuth, providerID, sharedEmail); resp.StatusCode != http.StatusFound {
 		t.Fatalf("saml login status=%d, want 302", resp.StatusCode)
 	}
 	if got := r.principalOf(samlAuth); got != principal {
@@ -665,5 +764,155 @@ func TestSSOLogin_SAMLEmailLinksExistingGitHubPrincipal(t *testing.T) {
 	// The linked principal (not a fresh one) is what gets JIT'd into the SSO org.
 	if got := r.membershipCount(principal, orgA); got != 1 {
 		t.Errorf("linked principal memberships in the SSO org=%d, want 1", got)
+	}
+	if _, verified := r.identityEmail(samlAuth); !verified {
+		t.Error("SAML identity on a verified domain recorded its address untrusted")
+	}
+}
+
+// Cross-org takeover. Org B has verified globex.example and Bob, a GitHub user
+// at that domain, is a member of B. Org M's admin registers a connection to an
+// identity provider they run, verifies no domain, and has it assert Bob's
+// address. The sign-in must not become Bob: it gets a new principal outside B,
+// and Bob's principal and memberships are untouched.
+func TestSSOLogin_CrossOrgTakeover_AssertedAddressDoesNotLink(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+
+	providerB := uuid.NewString()
+	ownerB := r.seedUser()
+	orgB, _ := r.seedOrg(ownerB, "globex")
+	r.seedSSOConnection(orgB, providerB, "member", true)
+	r.seedVerifiedDomain(orgB, providerB, "globex.example")
+
+	const bobEmail = "bob@globex.example"
+	bobAuth, bob := r.githubLoginWithEmail(bobEmail)
+	pgMember(t, r, bob, orgB)
+	bobOrgsBefore := r.orgIDsOf(bob)
+
+	providerM := uuid.NewString()
+	ownerM := r.seedUser()
+	orgM, _ := r.seedOrg(ownerM, "mallory")
+	r.seedSSOConnection(orgM, providerM, "member", true)
+
+	attacker := r.seedAuthOnlyUser()
+	resp := r.driveSAMLLoginAs(attacker, providerM, bobEmail)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("saml login status=%d, want 302", resp.StatusCode)
+	}
+
+	got := r.principalOf(attacker)
+	if got == bob {
+		t.Fatal("TAKEOVER: org M's identity provider signed its user in as Bob")
+	}
+	if n := r.membershipCount(got, orgB); n != 0 {
+		t.Errorf("LEAK: the asserted-address principal is a member of org B (%d rows)", n)
+	}
+	if me := r.me(r.sidFromResp(resp)); me.ID == bob.String() {
+		t.Error("TAKEOVER: the session's principal is Bob")
+	}
+	if r.principalOf(bobAuth) != bob {
+		t.Error("Bob's GitHub identity moved to another principal")
+	}
+	if email, verified := r.identityEmail(bobAuth); email != bobEmail || !verified {
+		t.Errorf("Bob's identity = (%q, verified=%v), want (%q, verified=true)", email, verified, bobEmail)
+	}
+	if after := r.orgIDsOf(bob); strings.Join(after, ",") != strings.Join(bobOrgsBefore, ",") {
+		t.Errorf("Bob's memberships changed: before=%v after=%v", bobOrgsBefore, after)
+	}
+}
+
+// A domain verified by a different org than the connection's vouches for
+// nothing on this connection: the address is untrusted even though some org
+// owns the domain.
+func TestSSOLogin_DomainVerifiedByAnotherOrg_NotTrusted(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+
+	providerB := uuid.NewString()
+	ownerB := r.seedUser()
+	orgB, _ := r.seedOrg(ownerB, "owns-domain")
+	r.seedSSOConnection(orgB, providerB, "member", true)
+	r.seedVerifiedDomain(orgB, providerB, "corp.example")
+
+	providerM := uuid.NewString()
+	ownerM := r.seedUser()
+	orgM, _ := r.seedOrg(ownerM, "other-org")
+	r.seedSSOConnection(orgM, providerM, "member", true)
+
+	user := r.seedAuthOnlyUser()
+	const email = "frank@corp.example"
+	if resp := r.driveSAMLLoginAs(user, providerM, email); resp.StatusCode != http.StatusFound {
+		t.Fatalf("saml login status=%d, want 302", resp.StatusCode)
+	}
+	if got, verified := r.identityEmail(user); got != email || verified {
+		t.Errorf("identity = (%q, verified=%v), want (%q, verified=false): org B's domain is not org M's to vouch for", got, verified, email)
+	}
+
+	// The same address through the connection of the org that verified it is
+	// trusted — so the refusal above is about the connection, not the address.
+	user2 := r.seedAuthOnlyUser()
+	if resp := r.driveSAMLLoginAs(user2, providerB, "grace@corp.example"); resp.StatusCode != http.StatusFound {
+		t.Fatalf("saml login via owning org status=%d, want 302", resp.StatusCode)
+	}
+	if _, verified := r.identityEmail(user2); !verified {
+		t.Error("an address on the connection's own verified domain recorded untrusted")
+	}
+}
+
+// A returning identity whose provider now asserts a trusted address another
+// principal already holds keeps signing in, but its row records the address
+// unverified: the address stays with its first holder, and the database's
+// one-principal-per-verified-address rule is never tested by the login.
+func TestSSOLogin_RefreshCollision_SecondHolderRecordedUnverified(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+
+	providerID := uuid.NewString()
+	owner := r.seedUser()
+	orgA, _ := r.seedOrg(owner, "acme")
+	r.seedSSOConnection(orgA, providerID, "member", true)
+	r.seedVerifiedDomain(orgA, providerID, "corp.example")
+
+	const contested = "x@corp.example"
+	p1Auth, p1 := r.githubLoginWithEmail(contested)
+	p1OrgsBefore := r.orgIDsOf(p1)
+
+	// I2 signs in first under its own address, minting principal P2.
+	i2 := r.seedAuthOnlyUser()
+	if resp := r.driveSAMLLoginAs(i2, providerID, "i2@corp.example"); resp.StatusCode != http.StatusFound {
+		t.Fatalf("first I2 login status=%d, want 302", resp.StatusCode)
+	}
+	p2 := r.principalOf(i2)
+	if p2 == p1 {
+		t.Fatal("I2 linked to P1 on a distinct address")
+	}
+
+	// Its identity provider now asserts P1's address, on a verified domain.
+	resp := r.driveSAMLLoginAs(i2, providerID, contested)
+	if resp.StatusCode != http.StatusFound || !r.gotSidCookie(resp) {
+		t.Fatalf("returning I2 login status=%d (session=%v), want 302 with a session", resp.StatusCode, r.gotSidCookie(resp))
+	}
+	if got := r.principalOf(i2); got != p2 {
+		t.Errorf("I2 moved to principal %s, want P2 %s", got, p2)
+	}
+	if email, verified := r.identityEmail(i2); email != contested || verified {
+		t.Errorf("I2 row = (%q, verified=%v), want (%q, verified=false)", email, verified, contested)
+	}
+	if email, verified := r.identityEmail(p1Auth); email != contested || !verified {
+		t.Errorf("P1's identity = (%q, verified=%v), want (%q, verified=true)", email, verified, contested)
+	}
+	if after := r.orgIDsOf(p1); strings.Join(after, ",") != strings.Join(p1OrgsBefore, ",") {
+		t.Errorf("P1 memberships changed: before=%v after=%v", p1OrgsBefore, after)
+	}
+}
+
+// pgMember adds userID to orgID as a plain member (admin pool fixture).
+func pgMember(t *testing.T, r *authRig, userID, orgID uuid.UUID) {
+	t.Helper()
+	if _, err := r.h.AdminDB.Exec(
+		`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`,
+		userID, orgID); err != nil {
+		t.Fatalf("seed membership: %v", err)
 	}
 }

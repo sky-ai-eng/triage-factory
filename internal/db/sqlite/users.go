@@ -71,6 +71,12 @@ func (s *usersStore) UserIDsForVerifiedEmailSystem(context.Context, string) ([]s
 	return nil, nil
 }
 
+// HoldsVerifiedEmailSystem always returns (false, nil), for the reason
+// UserIDsForVerifiedEmailSystem does: no login identities in local mode.
+func (s *usersStore) HoldsVerifiedEmailSystem(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+
 func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBaseURL, login, githubUserID, email, source string) error {
 	// FK on user_id enforces the row-exists contract: a missing user
 	// surfaces as a FOREIGN KEY constraint error, matching the old

@@ -18,8 +18,8 @@ The nav entry is gated on **three** conditions, all of which must hold:
 
 1. **Multi-mode** (`TF_MODE=multi`).
 2. **The `fleet` entitlement** is active — i.e. your license includes `fleet`.
-3. **You are a deployment operator** — your login email is in the `operators`
-   set.
+3. **You are a deployment operator** — one of your sign-in methods holds a
+   verified email that is in the `operators` set.
 
 Licensing the feature satisfies (2) but not (3). The common surprise:
 
@@ -50,10 +50,16 @@ docker compose exec triagefactory triagefactory operator list
 docker compose exec triagefactory triagefactory operator remove you@example.com
 ```
 
-- **Use your login email.** For a bootstrap-floor deployment that's your GitHub
-  OAuth email; for an SSO user it's the email in the assertion. The console gate
-  compares this against your session's email. Emails are lower-cased and trimmed
-  at the store boundary, so case and surrounding whitespace don't matter.
+- **Use a verified email from one of your sign-in methods.** The console gate
+  matches the operator set against the verified addresses of every sign-in
+  method (GitHub, SSO) on the account you are signed in to — not the email of
+  the session in front of it. A GitHub sign-in's address counts when GitHub
+  reports it verified. An SSO sign-in's address counts only when its domain is
+  verified for the org whose connection it came through; an identity provider
+  can assert any address, so an unverified domain proves nothing. For a
+  bootstrap-floor deployment that's your verified GitHub OAuth email. Emails are
+  lower-cased and trimmed at the store boundary, so case and surrounding
+  whitespace don't matter.
 - **`add` is idempotent** — re-granting an existing operator is a no-op that
   succeeds.
 - Each grant/revoke appends a best-effort `auth_events` audit row (org-less, so
@@ -79,10 +85,13 @@ It's a DB-backed live view (10-second poll, no Prometheus dependency) over:
 
 - **Licensed `fleet` but no Fleet tab.** You're almost certainly not an operator
   yet — run `operator add` above and reload. Confirm with `operator list`.
-- **Granted operator but still no tab.** Check the email matches your session's
-  login email exactly (it's normalized, but a *different* address won't match),
-  and that the license actually includes `fleet` (a community build ignores the
-  license entirely — see [self-host setup](install.md)).
+- **Granted operator but still no tab.** Check the email matches a verified
+  address on one of your sign-in methods exactly (it's normalized, but a
+  *different* address won't match). If it's your SSO address, its domain must be
+  verified for your org — otherwise grant the address of a sign-in method that
+  is verified, such as your GitHub email. Also check that the license actually
+  includes `fleet` (a community build ignores the license entirely — see
+  [self-host setup](install.md)).
 - **`operator` CLI errors on the DB.** It needs the same database env the server
   uses; run it via `docker compose exec triagefactory …` (the control service),
   not on the host where that env is absent.

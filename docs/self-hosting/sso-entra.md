@@ -252,6 +252,14 @@ A user's Entra email **must be a real, verified email** — just-in-time
 provisioning uses the email Entra returns in the assertion to create the user's
 account.
 
+An SSO sign-in joins an **existing** Triage Factory account (for example, a
+colleague who already signs in with GitHub at the same address) only when the
+email's domain is **verified for your org**: claimed with `POST /api/sso/domains`
+and verified through its DNS TXT record with
+`POST /api/sso/domains/{id}/verify`. Until the domain is verified, every SSO
+sign-in gets a separate account that belongs to your org only. See
+[Accounts and email addresses](#accounts-and-email-addresses).
+
 ## 2.5 Register the connection in Triage Factory
 
 Hand the metadata URL from step 2.3 to Triage Factory. A forthcoming "Configure
@@ -308,9 +316,12 @@ in a **live round-trip**, so verify one before you flip the connection on (you c
 test a connection that is still disabled — that's the point):
 
 - In the Configure-SSO admin screen, click **Test SSO**. It opens a real sign-in
-  in a new window and renders a **pass/fail** page with the authenticated email,
-  whether that email is verified, and whether its domain matches one of your
-  verified domains.
+  in a new window and renders a **pass/fail** page with the authenticated email
+  and a **Matches existing accounts** row. *Yes* means the email's domain is
+  verified for your organization, so a real sign-in with that address joins the
+  account that already holds it. *No* means it is not, so a sign-in with that
+  address gets a separate account in your organization only. The row is
+  informational: the test passes either way.
 - Under the hood this is the normal SP-initiated flow with a test flag in TF's
   signed state. The callback completes the GoTrue code exchange and verifies the
   returned token — proving the assertion is valid and readable — then **stops
@@ -350,8 +361,38 @@ Once the connection is registered, the SP-initiated login works end to end:
    no onboarding, no manual invite. Promote them later from the org's People
    roster.
 
-A SAML login is always its own account — GoTrue does not link it to a GitHub
-login even at a matching email — and TF writes no GitHub identity row for it.
+TF writes no GitHub identity row for a SAML login.
+
+### Accounts and email addresses
+
+GoTrue keeps every SAML login as a login identity of its own and never links it
+to a GitHub login, so Triage Factory decides which account each sign-in belongs
+to, by email:
+
+- **An SSO sign-in's email is trusted only on a verified domain.** Its domain
+  must be verified for the org whose connection the sign-in came through. GoTrue
+  marks every SAML assertion's email as verified, and an identity provider
+  asserts whatever address it is configured to, so the verified domain is the
+  only proof that the address belongs to the person signing in. A domain that a
+  different org verified does not count.
+- **A GitHub sign-in's email is trusted when GitHub reports it verified.**
+- **A trusted address always joins the account that holds it.** Someone who
+  signs in with GitHub and later through your connection at the same address is
+  one account with two sign-in methods. There is no setting to turn this off.
+- **An untrusted address gets a separate account.** That account is
+  provisioned into your org only. Its address does not count anywhere Triage
+  Factory matches a person by verified email: joining other accounts, accepting
+  invitations, the fleet console's operator list, Slack sender resolution, and
+  break-glass designation.
+- **One verified address belongs to at most one account**, and the database
+  enforces it. If a sign-in method later asserts a trusted address that another
+  account already holds, the sign-in still succeeds, and the address stays with
+  the account that held it first.
+
+**Known limit: address reuse.** If your directory gives an address on a
+verified domain to a different person, that person's first sign-in joins the
+previous holder's account. Triage Factory cannot tell the two people apart
+without directory provisioning (SCIM), which it does not support yet.
 
 ## What's next
 
@@ -359,9 +400,6 @@ Still in progress (not configured here yet):
 
 - **Identifier-first login + a "Sign in with SSO" button** — so users reach the
   start endpoint by typing their email, not just via the tile.
-- **Email-domain claim + DNS-TXT verification** — proves your org owns a domain
-  and routes that domain's logins to your connection, with verified-domain global
-  uniqueness as the cross-org isolation guarantee.
 - **A "Configure SSO" admin UI** for the steps in Part 2.
 
 ## Auditing SSO changes

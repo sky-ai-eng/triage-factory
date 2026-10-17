@@ -149,6 +149,22 @@ func (s *usersStore) UserIDsForVerifiedEmailSystem(ctx context.Context, email st
 	return scanIDs(rows, "user_identities.user_id")
 }
 
+func (s *usersStore) HoldsVerifiedEmailSystem(ctx context.Context, userID, email string) (bool, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" || strings.TrimSpace(userID) == "" {
+		return false, nil
+	}
+	var ok bool
+	if err := s.admin.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM public.user_identities
+			 WHERE user_id = $1 AND lower(email) = $2 AND email_verified
+		)`, userID, email).Scan(&ok); err != nil {
+		return false, fmt.Errorf("read user_identities verified email for principal: %w", err)
+	}
+	return ok, nil
+}
+
 // scanIDs drains rows of a single user_id::text column into a []string,
 // closing rows and wrapping any scan error with errContext. Shared by the
 // UserIDsFor*System reverse lookups above and below, which differ only in

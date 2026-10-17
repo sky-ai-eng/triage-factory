@@ -49,20 +49,22 @@ func (s *operatorStore) Remove(ctx context.Context, email string) (bool, error) 
 	return n > 0, err
 }
 
-func (s *operatorStore) IsOperator(ctx context.Context, email string) (bool, error) {
-	norm := normalizeEmail(email)
-	if norm == "" {
+func (s *operatorStore) IsOperatorUserSystem(ctx context.Context, userID string) (bool, error) {
+	if strings.TrimSpace(userID) == "" {
 		return false, nil
 	}
-	var exists int
-	err := s.admin.QueryRowContext(ctx, `SELECT 1 FROM operators WHERE email = $1 LIMIT 1`, norm).Scan(&exists)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
+	var ok bool
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM public.operators o
+			  JOIN public.user_identities i ON lower(i.email) = o.email
+			 WHERE i.user_id = $1 AND i.email_verified
+		)`, userID).Scan(&ok)
 	if err != nil {
-		return false, wrapAdminPoolPermErr(err, "operators.IsOperator")
+		return false, wrapAdminPoolPermErr(err, "operators.IsOperatorUserSystem")
 	}
-	return true, nil
+	return ok, nil
 }
 
 func (s *operatorStore) List(ctx context.Context) ([]domain.Operator, error) {

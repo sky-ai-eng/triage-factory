@@ -4,63 +4,64 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
-// OperatorStoreFactory hands the conformance suite a wired store. operators has
-// no FK chain (email is the PK), so there is nothing to seed.
-type OperatorStoreFactory func(t *testing.T) db.OperatorStore
+// OperatorStoreFactory hands the conformance suite a wired store, plus the
+// login-identity seeder IsOperatorUserSystem resolves through (nil on a backend
+// without login identities). operators itself has no FK chain (email is the
+// PK), so nothing else needs seeding.
+type OperatorStoreFactory func(t *testing.T) (db.OperatorStore, *LoginIdentitySeeder)
 
-// RunOperatorStoreConformance covers the contract every backend must hold:
-// absence reads false; Add then IsOperator is true and case-insensitive; Add is
-// idempotent; Remove reports matched then false; List is email-ordered and
-// normalized.
+// RunOperatorStoreConformance covers the contract every backend must hold: Add
+// is case-folding and idempotent; Remove reports matched then false; List is
+// email-ordered and normalized; IsOperatorUserSystem matches a principal only
+// through a verified identity holding an operator address, case-insensitively,
+// and a backend without login identities answers false for everyone.
 func RunOperatorStoreConformance(t *testing.T, mk OperatorStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
 
-	t.Run("absent_is_operator_false", func(t *testing.T) {
-		store := mk(t)
-		ok, err := store.IsOperator(ctx, "nobody@example.com")
+	emails := func(t *testing.T, store db.OperatorStore) []string {
+		t.Helper()
+		list, err := store.List(ctx)
 		if err != nil {
-			t.Fatalf("is-operator: %v", err)
+			t.Fatalf("list: %v", err)
 		}
-		if ok {
-			t.Fatalf("absent email must not be an operator")
+		out := make([]string, len(list))
+		for i, op := range list {
+			out[i] = op.Email
 		}
-	})
+		return out
+	}
 
-	t.Run("add_then_is_operator_case_insensitive", func(t *testing.T) {
-		store := mk(t)
-		if err := store.Add(ctx, "Ada@Example.com", "root"); err != nil {
+	t.Run("add_normalizes_email", func(t *testing.T) {
+		store, _ := mk(t)
+		if err := store.Add(ctx, "  Ada@Example.com ", "root"); err != nil {
 			t.Fatalf("add: %v", err)
 		}
-		// Query with different casing + surrounding whitespace.
-		ok, err := store.IsOperator(ctx, "  ADA@example.COM ")
-		if err != nil || !ok {
-			t.Fatalf("case-insensitive lookup failed: ok=%v err=%v", ok, err)
+		if got := emails(t, store); len(got) != 1 || got[0] != "ada@example.com" {
+			t.Fatalf("operators = %v, want [ada@example.com]", got)
 		}
 	})
 
 	t.Run("add_is_idempotent", func(t *testing.T) {
-		store := mk(t)
+		store, _ := mk(t)
 		if err := store.Add(ctx, "dup@example.com", "a"); err != nil {
 			t.Fatalf("add 1: %v", err)
 		}
 		if err := store.Add(ctx, "DUP@example.com", "b"); err != nil {
 			t.Fatalf("re-add must not error: %v", err)
 		}
-		list, err := store.List(ctx)
-		if err != nil {
-			t.Fatalf("list: %v", err)
-		}
-		if len(list) != 1 {
-			t.Fatalf("idempotent add should leave one row, got %d: %+v", len(list), list)
+		if got := emails(t, store); len(got) != 1 {
+			t.Fatalf("idempotent add should leave one row, got %v", got)
 		}
 	})
 
 	t.Run("remove_reports_matched_then_false", func(t *testing.T) {
-		store := mk(t)
+		store, _ := mk(t)
 		_ = store.Add(ctx, "gone@example.com", "")
 		removed, err := store.Remove(ctx, "GONE@example.com")
 		if err != nil || !removed {
@@ -73,14 +74,13 @@ func RunOperatorStoreConformance(t *testing.T, mk OperatorStoreFactory) {
 		if removed {
 			t.Fatalf("second remove should report matched=false")
 		}
-		ok, _ := store.IsOperator(ctx, "gone@example.com")
-		if ok {
-			t.Fatalf("removed operator must not be an operator")
+		if got := emails(t, store); len(got) != 0 {
+			t.Fatalf("removed operator still listed: %v", got)
 		}
 	})
 
 	t.Run("list_is_ordered_and_normalized", func(t *testing.T) {
-		store := mk(t)
+		store, _ := mk(t)
 		_ = store.Add(ctx, "Zoe@Example.com", "")
 		_ = store.Add(ctx, "amy@example.com", "root")
 		list, err := store.List(ctx)
@@ -95,6 +95,59 @@ func RunOperatorStoreConformance(t *testing.T, mk OperatorStoreFactory) {
 		}
 		if list[1].AddedAt.IsZero() {
 			t.Fatalf("added_at not stamped")
+		}
+	})
+
+	t.Run("is_operator_user_system", func(t *testing.T) {
+		store, seed := mk(t)
+		if err := store.Add(ctx, "ops@example.com", "root"); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+		isOp := func(t *testing.T, userID string) bool {
+			t.Helper()
+			ok, err := store.IsOperatorUserSystem(ctx, userID)
+			if err != nil {
+				t.Fatalf("IsOperatorUserSystem(%s): %v", userID, err)
+			}
+			return ok
+		}
+
+		if seed == nil {
+			// No login identities on this backend: nobody resolves to an
+			// operator through one, whatever the operators table holds.
+			if isOp(t, uuid.NewString()) {
+				t.Fatal("a backend without login identities must answer false")
+			}
+			return
+		}
+
+		verified := seed.Principal(t)
+		seed.Identity(t, verified, "Ops@Example.COM", true)
+		if !isOp(t, verified) {
+			t.Error("a principal holding the operator address verified (in another case) must be an operator")
+		}
+
+		unverified := seed.Principal(t)
+		seed.Identity(t, unverified, "ops@example.com", false)
+		if isOp(t, unverified) {
+			t.Error("an unverified identity holding the operator address must not make its principal an operator")
+		}
+
+		bystander := seed.Principal(t)
+		seed.Identity(t, bystander, "someone@example.com", true)
+		if isOp(t, bystander) {
+			t.Error("a principal with no operator address must not be an operator")
+		}
+
+		if isOp(t, uuid.NewString()) {
+			t.Error("an unknown principal must not be an operator")
+		}
+
+		if _, err := store.Remove(ctx, "ops@example.com"); err != nil {
+			t.Fatalf("remove: %v", err)
+		}
+		if isOp(t, verified) {
+			t.Error("removing the operator address must revoke the match")
 		}
 	})
 }

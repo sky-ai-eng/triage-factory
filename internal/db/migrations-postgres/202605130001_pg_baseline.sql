@@ -58,6 +58,12 @@ $$;
 -- SQL surface. The preloaded C library stays (image-managed) but is unreachable.
 DROP EXTENSION IF EXISTS supabase_vault CASCADE;
 
+-- btree_gist supplies the scalar operator classes a GiST exclusion constraint
+-- needs for `=` and `<>` (user_identities' one-principal-per-verified-email
+-- rule). A trusted extension, so the image's non-superuser `postgres` role can
+-- create it; it lives in the image's `extensions` schema with the others.
+CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA extensions;
+
 -- pg_dump emits functions before the tables some bodies reference (e.g.
 -- tf.team_in_current_org -> teams); bodies are still parsed at first invocation.
 SET check_function_bodies = false;
@@ -4705,10 +4711,21 @@ CREATE TABLE public.user_identities (
     -- for github rows from before the stamp; refreshed at every login.
     login text,
     email text,
+    -- TF's trust decision for this address, not the provider's claim: a
+    -- github identity's address is trusted when GitHub reports it verified, a
+    -- saml identity's only when its domain is verified (sso_domains) for the
+    -- connection the sign-in came through. Every reader that resolves a person
+    -- by address (account linking, the fleet console's operator match, invite
+    -- acceptance, Slack sender resolution, break-glass designation) keys on it.
     email_verified boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT user_identities_provider_check CHECK ((provider = ANY (ARRAY['github'::text, 'saml'::text])))
+    CONSTRAINT user_identities_provider_check CHECK ((provider = ANY (ARRAY['github'::text, 'saml'::text]))),
+    -- At most one principal holds a given verified address, case-insensitively.
+    -- Two identities of one principal may share it (a GitHub and a SAML sign-in
+    -- of the same person); two principals may share an unverified one. A
+    -- violation raises 23P01.
+    CONSTRAINT user_identities_one_principal_per_verified_email EXCLUDE USING gist (lower(email) WITH =, user_id WITH <>) WHERE (email_verified)
 );
 
 ALTER TABLE ONLY public.user_identities
