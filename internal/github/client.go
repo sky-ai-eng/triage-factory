@@ -501,6 +501,10 @@ func (e gqlErrors) first(context string) error {
 // A query is a read, so it goes through doIdempotent: a rate limit or a
 // transient failure retries like a GET. A mutation goes through
 // PostGraphQLMutation instead.
+//
+// TODO(TFAC-1115): record each query's cost (rateLimit { cost }) on
+// upstream.RecordQueryCost by operation name; the documents are anonymous
+// today, so each needs a name first.
 func (c *Client) PostGraphQL(ctx context.Context, body any) ([]byte, error) {
 	return c.postGraphQL(ctx, body, true)
 }
