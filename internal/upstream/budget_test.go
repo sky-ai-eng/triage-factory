@@ -82,6 +82,40 @@ func TestBudgetRegistry_WarnsOncePerWindow(t *testing.T) {
 	}
 }
 
+// TestBudgetRegistry_DropsStaleEntries pins eviction: record's sweep drops an
+// entry once its reading is past its reset and its WARN, if any, is for a
+// window that has ended. A reading with no reset never goes stale, and neither
+// does a WARN fired for one, since only a reading back above the threshold
+// clears it.
+func TestBudgetRegistry_DropsStaleEntries(t *testing.T) {
+	r := newBudgetRegistry()
+	t0 := time.Unix(1_000_000, 0)
+	key := func(credential string) budgetKey { return budgetKey{GitHub, "org-1", credential, "core"} }
+
+	r.record(key("installation:1"), Budget{Remaining: 4000, Limit: 5000, Reset: t0.Add(time.Minute)}, t0)
+	r.record(key("installation:2"), Budget{Remaining: 10, Limit: 5000, Reset: t0.Add(time.Minute)}, t0) // warned
+	r.record(key("installation:3"), Budget{Remaining: 4000, Limit: 5000}, t0)                           // no reset
+	r.record(key("installation:4"), Budget{Remaining: 10, Limit: 5000}, t0)                             // warned, no reset
+	// A later reading of installation:4 states a reset, which then passes; the
+	// WARN it carries came from a reading with none, so it stays.
+	r.record(key("installation:4"), Budget{Remaining: 9, Limit: 5000, Reset: t0.Add(time.Minute)}, t0)
+
+	// Any record past sweepEvery sweeps the whole registry.
+	r.record(key("installation:5"), Budget{Remaining: 4000, Limit: 5000, Reset: t0.Add(time.Hour)}, t0.Add(2*time.Minute))
+
+	for credential, want := range map[string]bool{
+		"installation:1": false,
+		"installation:2": false,
+		"installation:3": true,
+		"installation:4": true,
+		"installation:5": true,
+	} {
+		if _, got := r.get(key(credential)); got != want {
+			t.Errorf("%s kept = %v, want %v", credential, got, want)
+		}
+	}
+}
+
 // TestWaitOnLimit_HonorsContext: the wait ends with the caller's ctx, like
 // Sleep, and a non-positive wait returns at once.
 func TestWaitOnLimit_HonorsContext(t *testing.T) {
@@ -169,5 +203,8 @@ func TestBudgetMetrics_RealScrape(t *testing.T) {
 		if !seen[w] {
 			t.Errorf("scrape lacks %q", w)
 		}
+	}
+	if b, ok := BudgetForTest(GitHub, "org-3", "pat", "core"); ok {
+		t.Errorf("the scrape kept the expired reading %+v; observe drops what it skips", b)
 	}
 }

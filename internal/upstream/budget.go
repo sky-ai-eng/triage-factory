@@ -114,19 +114,51 @@ type budgetEntry struct {
 	warnedUntil time.Time
 }
 
+// stale reports whether e can be dropped at now: its reading is past its
+// reset, and any low-budget WARN it carries is for a window that has ended.
+// A WARN fired for a reading with no reset clears only on a reading back above
+// the threshold, so an entry holding one is kept.
+func (e *budgetEntry) stale(now time.Time) bool {
+	if e.current(now) {
+		return false
+	}
+	return !e.warned || (!e.warnedUntil.IsZero() && !now.Before(e.warnedUntil))
+}
+
+// sweepEvery bounds how often record walks the registry for stale entries.
+// observe drops them on every scrape; this is what drops them in a process
+// whose gauges are never scraped (local mode without TF_METRICS_ADDR),
+// without walking the map on every response.
+const sweepEvery = time.Minute
+
 type budgetRegistry struct {
 	mu    sync.Mutex
 	byKey map[budgetKey]*budgetEntry
+	// swept is when record last walked byKey for stale entries.
+	swept time.Time
 }
 
 func newBudgetRegistry() *budgetRegistry {
 	return &budgetRegistry{byKey: map[budgetKey]*budgetEntry{}}
 }
 
+// dropStale deletes every stale entry. Callers hold r.mu.
+func (r *budgetRegistry) dropStale(now time.Time) {
+	for k, e := range r.byKey {
+		if e.stale(now) {
+			delete(r.byKey, k)
+		}
+	}
+}
+
 // record stores b under k and reports whether it warrants the low-budget WARN.
 func (r *budgetRegistry) record(k budgetKey, b Budget, now time.Time) (warn bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if now.Sub(r.swept) >= sweepEvery {
+		r.dropStale(now)
+		r.swept = now
+	}
 	e, ok := r.byKey[k]
 	if !ok {
 		e = &budgetEntry{}
@@ -153,13 +185,18 @@ func (r *budgetRegistry) get(k budgetKey) (Budget, bool) {
 	return e.Budget, true
 }
 
-// observe reports every current reading through the budget gauges. A reading
-// that did not say its bucket's size reports no limit or ratio, and one that
-// did not say its reset reports no time until it.
+// observe reports every current reading through the budget gauges, and drops
+// the stale entries it meets. A reading that did not say its bucket's size
+// reports no limit or ratio, and one that did not say its reset reports no
+// time until it.
 func (r *budgetRegistry) observe(o metric.Observer, g budgetGauges, now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for k, e := range r.byKey {
+		if e.stale(now) {
+			delete(r.byKey, k)
+			continue
+		}
 		if !e.current(now) {
 			continue
 		}

@@ -93,9 +93,7 @@ type readyzOrgSource struct {
 // never flip the HTTP status — polling can be legitimately idle (no orgs
 // configured yet) or intentionally slow, so a staleness threshold beyond
 // the endpoint's own default (readyzDegradedFactor) is the operator's
-// call, not this handler's. Rate-limit budgets are not here: they change
-// nothing about whether this pod should take traffic, and they are on
-// /metrics (internal/upstream's recorder). Pre-auth, mirroring /api/health — see the
+// call, not this handler's. Pre-auth, mirroring /api/health — see the
 // doc-comment block above routes() and the Design decisions in TFAC-573
 // for why there is no verbose/admin mode.
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {

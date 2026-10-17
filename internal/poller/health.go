@@ -66,9 +66,10 @@ type OrgPollHealth struct {
 //
 // The active-org list and each org's settings row are each read exactly
 // once here and shared across the per-source branches below — not once per
-// branch — since one settings read carries every source's poll interval. A probe hit is meant to be cheap and frequent (an LB
-// health check can poll every few seconds), so avoiding N redundant reads
-// per org here matters at multi-mode scale.
+// branch — since one settings read carries every source's poll interval. A
+// probe hit is meant to be cheap and frequent (an LB health check can poll
+// every few seconds), so avoiding N redundant reads per org here matters at
+// multi-mode scale.
 func (m *Manager) Health(ctx context.Context) HealthSnapshot {
 	orgIDs, err := m.orgs.ListActiveSystem(ctx)
 	if err != nil {
