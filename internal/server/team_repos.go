@@ -459,7 +459,8 @@ func (s *Server) reachabilityClients(ctx context.Context, orgID, userID string) 
 		return e
 	})
 	if creds.GitHubPAT != "" && orgSet.GitHubBaseURL != "" {
-		clients = append(clients, ghclient.NewClient(orgSet.GitHubBaseURL, creds.GitHubPAT).WithOrg(orgID))
+		clients = append(clients, ghclient.NewClient(orgSet.GitHubBaseURL, creds.GitHubPAT).WithOrg(orgID).
+			WithCredential(ghclient.CredentialPAT))
 	}
 
 	// App installation sources, one client per account installed on the org's

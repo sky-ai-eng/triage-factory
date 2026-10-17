@@ -21,3 +21,19 @@ func SetMeterProviderForTest(t TestT, provider metric.MeterProvider) {
 	global.Store(newInstruments(provider))
 	t.Cleanup(func() { global.Store(prev) })
 }
+
+// ResetBudgetsForTest gives t an empty rate-limit budget registry, and
+// restores the previous one via t.Cleanup. Like SetMeterProviderForTest it
+// swaps a process global, so tests that call it must not run in parallel with
+// each other.
+func ResetBudgetsForTest(t TestT) {
+	t.Helper()
+	prev := liveBudgets.Swap(newBudgetRegistry())
+	t.Cleanup(func() { liveBudgets.Store(prev) })
+}
+
+// BudgetForTest returns the latest reading RecordBudget kept for the key, so a
+// client's own tests can read what its responses reported.
+func BudgetForTest(name Name, orgID, credential, bucket string) (Budget, bool) {
+	return liveBudgets.Load().get(budgetKey{name, orgID, credential, bucket})
+}

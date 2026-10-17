@@ -36,7 +36,6 @@ type readyzResponse struct {
 	Version    string            `json:"version"`
 	Checks     map[string]string `json:"checks"` // "ok" | "failed" | "standby" (poller_* only) per hard check
 	Sources    readyzSources     `json:"sources"`
-	RateLimit  readyzRateLimit   `json:"rate_limit"`
 	ActiveRuns int               `json:"active_runs"`
 	// Lease is the background-brain lease state (TFAC-583) — present on
 	// every control pod's response (holder or standby), omitted entirely
@@ -67,22 +66,6 @@ type readyzSources struct {
 	Linear map[string]readyzOrgSource `json:"linear"`
 }
 
-// readyzRateLimit is the soft rate-limit signal (TFAC-573 follow-up):
-// each org's last-observed primary GitHub rate-limit budget, as reported
-// by the poller's resolver (see poller.HealthSnapshot.GitHubRateLimit).
-// GitHub-only — Jira has no equivalent concept in this codebase. An org
-// absent from GitHub means no observation yet, not zero remaining budget;
-// never flips the top-level status or the HTTP code.
-type readyzRateLimit struct {
-	GitHub map[string]readyzOrgRateLimit `json:"github"`
-}
-
-type readyzOrgRateLimit struct {
-	Remaining int   `json:"remaining"`
-	ResetUnix int64 `json:"reset_unix"`
-	Used      int   `json:"used"`
-}
-
 // readyzOrgSource is one org's soft poll-staleness signal for one source.
 // LastSuccessUnix/AgeSeconds are omitted (zero value, tag'd omitempty)
 // when the org has never completed a poll of this source — "never
@@ -105,14 +88,14 @@ type readyzOrgSource struct {
 // by design, and hard-failing it would pull every non-leader control pod
 // out of LB rotation and collapse the HA shape to leader-only serving.
 // poller_github/poller_jira/poller_linear report the literal string "standby" there
-// instead of "ok"/"failed". Poll staleness per org, per-org GitHub
-// rate-limit budget, and active_runs are SOFT signals on the holder,
-// reported for the operator to alert on but never flip the HTTP status —
-// polling can be legitimately idle (no orgs configured yet) or
-// intentionally slow, and a low rate-limit budget is informational (the
-// client already backs off on its own), so a staleness threshold beyond
+// instead of "ok"/"failed". Poll staleness per org and active_runs are
+// SOFT signals on the holder, reported for the operator to alert on but
+// never flip the HTTP status — polling can be legitimately idle (no orgs
+// configured yet) or intentionally slow, so a staleness threshold beyond
 // the endpoint's own default (readyzDegradedFactor) is the operator's
-// call, not this handler's. Pre-auth, mirroring /api/health — see the
+// call, not this handler's. Rate-limit budgets are not here: they change
+// nothing about whether this pod should take traffic, and they are on
+// /metrics (internal/upstream's recorder). Pre-auth, mirroring /api/health — see the
 // doc-comment block above routes() and the Design decisions in TFAC-573
 // for why there is no verbose/admin mode.
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
@@ -153,8 +136,6 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		isHolder = holds
 	}
 
-	resp.RateLimit.GitHub = map[string]readyzOrgRateLimit{}
-
 	degraded := false
 	switch {
 	case !isHolder:
@@ -180,14 +161,6 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		resp.Sources.Linear = linearSources
 		hardOK = hardOK && ghAlive && jiraAlive && linearAlive
 		degraded = ghDegraded || jiraDegraded || linearDegraded
-
-		for orgID, st := range snap.GitHubRateLimit {
-			resp.RateLimit.GitHub[orgID] = readyzOrgRateLimit{
-				Remaining: st.Remaining,
-				ResetUnix: st.Reset.Unix(),
-				Used:      st.Used,
-			}
-		}
 	default:
 		// Not wired (a bare test/dev Server construction that skipped
 		// SetPollerManager) — report the gap loudly rather than nil-
