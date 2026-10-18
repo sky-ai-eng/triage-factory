@@ -641,17 +641,20 @@ change, so an edit takes effect after `docker compose restart prometheus`.
 After every response that states a rate-limit budget, TF keeps the reading,
 the latest for each upstream, org, credential and bucket, and exports it. Slack
 states no budget on its responses, so for Slack the reading is a count TF keeps
-of its own calls (see **Slack** below):
+of its own calls (see **Slack** below). Jira Cloud states no count for its
+hourly quota, only whether it is close to its limit, so that reading is
+`near_limit` (see **Jira** below):
 
 | Metric | Labels | Value |
 | --- | --- | --- |
 | `tf_upstream_rate_limit_remaining` | `upstream`, `org_id`, `credential`, `bucket` | What the latest response said is left of the bucket. For Slack, the method's published limit less `used`, and no series for a method with no published limit. |
 | `tf_upstream_rate_limit_used` | `upstream`, `org_id`, `credential`, `bucket` | Slack only: the calls this pod made against the bucket in the last minute, as of its latest call. |
+| `tf_upstream_rate_limit_near_limit` | `upstream`, `org_id`, `credential`, `bucket` | Jira Cloud's `quota` only: 1 when the latest response said less than 20% of the bucket is left, 0 when it said not. A bucket with this series has no `remaining`, `limit` or `remaining_ratio`. |
 | `tf_upstream_rate_limit_limit` | `upstream`, `org_id`, `credential`, `bucket` | The bucket's size. No series when the response did not state it. |
 | `tf_upstream_rate_limit_remaining_ratio` | `upstream`, `org_id`, `credential`, `bucket` | `remaining` divided by `limit`, from 0 to 1. No series when the size was not stated. |
 | `tf_upstream_rate_limit_until_reset_seconds` | `upstream`, `org_id`, `credential`, `bucket` | Seconds until the bucket refills. No series when the reset was not stated. |
 | `tf_upstream_rate_limit_wait_seconds_total` | `upstream`, `org_id` | Time spent waiting on a rate limit before sending a request: a spent budget's reset, or a rate-limited response's `Retry-After` or backoff. |
-| `tf_upstream_rate_limit_refused_total` | `upstream`, `org_id`, `credential`, `bucket` | Slack only: rate-limited responses, by the bucket that refused them. |
+| `tf_upstream_rate_limit_refused_total` | `upstream`, `org_id`, `credential`, `bucket` | Slack and Jira only: rate-limited responses, by the bucket that refused them. For Jira Cloud, `bucket` is the 429's `RateLimit-Reason`. |
 
 A reading is reported until its bucket's reset. After that the bucket has
 refilled, so a credential nothing has used since then has no series until its
@@ -659,10 +662,10 @@ next response, rather than its last window's low number.
 
 The rate-limited responses themselves are
 `tf_upstream_requests_total{outcome="rate_limited"}` (see
-[Source connections](#source-connections)). For Slack,
+[Source connections](#source-connections)). For Slack and Jira,
 `tf_upstream_rate_limit_refused_total` also says which bucket refused each one.
 
-`github`, `linear` and `slack` report budgets so far.
+`github`, `linear`, `slack` and `jira` report budgets.
 
 **GitHub**
 
@@ -705,6 +708,55 @@ The rate-limited responses themselves are
   and 5,000 requests and 2,000,000 points for an OAuth app, per user or app
   user. It raises an app install's limits with the workspace's paid seats, so
   read `tf_upstream_rate_limit_limit` rather than the published figures.
+
+**Jira**
+
+Jira Cloud and Jira Data Center send different headers that mean different
+things, so their buckets have different names.
+
+- `credential` is what Jira meters, named by how it was connected. The
+  workspace's service credential, which the poller and the agent's
+  `triagefactory exec jira` verbs use, is `cloud_api_token` (an Atlassian API
+  token) or `dc_pat` (a Data Center personal access token). A workspace has one
+  at a time. `cloud_oauth` is a person's Connect to Jira Cloud, which TF uses
+  for the writes they make from the board (claim, undo, requeue). Atlassian
+  documents the hourly quota as the OAuth app's rather than the person's, so
+  the workspace's Connect writes share one `cloud_oauth` budget. A person's own
+  API token or personal access token reports no reading: each is metered by
+  its user, and a user is never a label.
+- Jira Cloud has two buckets:
+  - `quota` is the hourly points quota Atlassian enforces on OAuth 2.0 (3LO),
+    Forge and Connect apps. It does not apply to API tokens, so in practice
+    only `cloud_oauth` reports it. A response states no count for it, only
+    `X-RateLimit-NearLimit: true` once less than 20% is left, so it is reported
+    as `near_limit` with no `remaining` or `limit`. A `cloud_oauth` response
+    without the header records 0. Jira states the quota's reset only on a 429
+    (`X-RateLimit-Reset`), so any other reading is kept for an hour after its
+    response, the longest the quota's window can make it true, and
+    `until_reset_seconds` counts down that hour. Atlassian documents one quota
+    per app, by default shared by every Jira site the app serves, so a
+    deployment app (`TF_ATLASSIAN_CLIENT_ID`) used by several workspaces spends
+    one quota across all of them, while each workspace reports what its own
+    requests saw.
+  - `burst` is the per-second request allowance for the endpoint, from
+    `X-RateLimit-Limit` and `X-RateLimit-Remaining`. It is not the hourly
+    quota. Its window is a second, so a reading is reported for a second
+    after its response and rarely appears in a scrape; the low-budget WARN
+    below is the signal for it.
+- Each Jira Cloud 429 is added to `tf_upstream_rate_limit_refused_total`
+  under its `RateLimit-Reason`: `jira-quota-global-based`,
+  `jira-quota-tenant-based`, `jira-burst-based` or `jira-per-issue-on-write`.
+  A 429 with any other reason, or none, is counted as `other` and logged at
+  WARN with the reason it carried (`jira rate limit refused a request for a
+  reason TF does not recognize`). A quota or burst 429 also records its bucket
+  with the reset the refusal states.
+- Jira Data Center limits nothing until an admin turns rate limiting on. Then
+  every response states one token bucket per user, reported as `requests`:
+  `limit` is the bucket's size and `remaining` the tokens left.
+  `until_reset_seconds` counts down to when the bucket is full again, from
+  `X-RateLimit-FillRate` tokens every `X-RateLimit-Interval-Seconds`, and is at
+  least one interval. A 429 is counted under `requests`. With rate limiting
+  off, no headers arrive and no series appears.
 
 **Slack**
 
@@ -752,6 +804,7 @@ readings are the exception: each pod counts only its own calls, so `sum` its
 min by (upstream, org_id, credential, bucket) (tf_upstream_rate_limit_remaining_ratio)   # not an alert: the share left, per budget
 sum by (upstream, org_id) (rate(tf_upstream_rate_limit_wait_seconds_total[15m]))         # not an alert: how much of the time each org's requests spend waiting
 sum by (org_id, credential, bucket) (tf_upstream_rate_limit_used{upstream="slack"}) / max by (org_id, credential, bucket) (tf_upstream_rate_limit_limit{upstream="slack"})   # not an alert: the share of each Slack method's minute this deployment's pods counted
+max by (org_id, credential) (tf_upstream_rate_limit_near_limit{upstream="jira"})   # not an alert: 1 where any pod's latest reading says a Jira quota is near its limit
 ```
 
 In multi mode, the requests a delegated run makes from inside its sandbox spend
@@ -763,7 +816,7 @@ mode without `TF_METRICS_ADDR`):
 
 | When | Level | Message and attributes |
 | --- | --- | --- |
-| A bucket's reading is below 20% left for the first time in its window | WARN | `rate-limit budget low`, with `upstream`, `org`, `credential`, `bucket`, `remaining`, `limit` and `reset`. It is logged again once that window has reset, or after the bucket climbs back above 20%. |
+| A bucket's reading is below 20% left, or says it is near its limit, for the first time in its window | WARN | `rate-limit budget low`, with `upstream`, `org`, `credential`, `bucket`, `remaining`, `limit` and `reset`, or `near_limit` and `reset` for Jira Cloud's `quota`. It is logged again once that window has reset, or after a reading that is no longer near the limit. |
 | A request waits on a rate limit | WARN | `waiting on a rate limit`, with `upstream`, `org` and `wait`. |
 
 GitHub and Linear also state what each GraphQL query cost against their

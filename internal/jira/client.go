@@ -130,6 +130,17 @@ func DeploymentForMarker(method AuthMethod, host string) Deployment {
 	}
 }
 
+// SystemAuthMethod is the AuthMethod of an org's service credential on d: an
+// org connects Jira Cloud with an API token and Data Center with a personal
+// access token. It names the credential a client built from the org's
+// service credential is metered against (Client.WithCredential).
+func SystemAuthMethod(d Deployment) AuthMethod {
+	if d == DeploymentCloud {
+		return AuthMethodCloudAPIToken
+	}
+	return AuthMethodDCPAT
+}
+
 // authScheme renders the Authorization header onto a request. It is
 // unexported by design: callers pick a named constructor (DataCenterPAT,
 // CloudAPIToken) instead of assembling a scheme themselves.
@@ -344,9 +355,14 @@ type Client struct {
 	// orgID is the org this client makes its calls for, the org_id every
 	// request is counted under (upstream.Record). Set by WithOrg; empty for a
 	// client that makes its calls for no org.
-	orgID   string
-	selfMu  sync.RWMutex
-	selfVal *currentUserResponse
+	orgID string
+	// credential names the credential the client's requests are metered
+	// against, the key its rate-limit readings are recorded under. Set by
+	// WithCredential; empty for a client whose readings are not recorded
+	// (see recordBudgets).
+	credential AuthMethod
+	selfMu     sync.RWMutex
+	selfVal    *currentUserResponse
 }
 
 // NewClient builds a Client from a Config. Construct the Config with a named
@@ -365,6 +381,20 @@ func NewClient(cfg Config) *Client {
 // under that org, and returns c. Call it before c's first request.
 func (c *Client) WithOrg(orgID string) *Client {
 	c.orgID = orgID
+	return c
+}
+
+// WithCredential sets the credential c's requests are metered against, so
+// its rate-limit readings are recorded for its org under that credential, and
+// returns c. Call it before c's first request.
+//
+// A credential is named by its AuthMethod. The org's service credential is a
+// cloud_api_token or a dc_pat, and an org has one at a time. cloud_oauth is a
+// user's Connect, whose hourly quota Atlassian documents as the OAuth app's
+// rather than the user's, so every user of an org connected through it spends
+// one budget.
+func (c *Client) WithCredential(method AuthMethod) *Client {
+	c.credential = method
 	return c
 }
 
@@ -1490,6 +1520,7 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 			continue
 		}
 		upstream.MarkAnswered(ctx, host)
+		c.recordBudgets(resp.StatusCode, resp.Header, time.Now())
 
 		var data []byte
 		var rerr error
@@ -1541,19 +1572,27 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 // retryAfter counts the decision to retry and then waits it out.
 func (c *Client) retryAfter(ctx context.Context, attempt int, class upstream.Class, wait time.Duration, reason string) error {
 	upstream.RecordRetry(ctx, upstream.Jira, c.orgID, class)
-	return awaitRetry(ctx, attempt, wait, reason)
+	return c.awaitRetry(ctx, attempt, class, wait, reason)
 }
 
 // awaitRetry blocks out one backoff between attempts under its own span,
 // the Jira twin of internal/github's. doRequest can sleep several times
 // per logical call, so reason separates the two causes — a reset
-// connection is a different problem from a 429.
-func awaitRetry(ctx context.Context, attempt int, wait time.Duration, reason string) error {
+// connection is a different problem from a 429. A rate limit's wait is also
+// logged and counted (upstream.WaitOnLimit); a transient failure's backoff is
+// not.
+func (c *Client) awaitRetry(ctx context.Context, attempt int, class upstream.Class, wait time.Duration, reason string) error {
 	ctx, span := tracer.Start(ctx, "jira.retry.backoff",
 		trace.WithAttributes(telemetry.Attempt(attempt), telemetry.Disposition(reason)))
 	defer span.End()
 
-	if err := upstream.Sleep(ctx, wait); err != nil {
+	var err error
+	if class == upstream.RateLimited {
+		err = upstream.WaitOnLimit(ctx, upstream.Jira, c.orgID, wait)
+	} else {
+		err = upstream.Sleep(ctx, wait)
+	}
+	if err != nil {
 		span.SetAttributes(telemetry.Outcome("cancelled"))
 		return err
 	}
