@@ -55,7 +55,7 @@ func (c *Client) GetReview(ctx context.Context, reviewNodeID string) (*Submitted
 	if reviewNodeID == "" {
 		return nil, fmt.Errorf("get review: empty review id")
 	}
-	query := `query($id: ID!) {
+	const query = `query Review($id: ID!) {
 		node(id: $id) {
 			... on PullRequestReview {
 				state
@@ -66,8 +66,9 @@ func (c *Client) GetReview(ctx context.Context, reviewNodeID string) (*Submitted
 				}
 			}
 		}
+		rateLimit { cost }
 	}`
-	data, err := c.PostGraphQL(ctx, map[string]any{"query": query, "variables": map[string]any{"id": reviewNodeID}})
+	data, err := c.PostGraphQL(ctx, query, map[string]any{"id": reviewNodeID})
 	if err != nil {
 		return nil, err
 	}

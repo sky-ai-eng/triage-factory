@@ -66,7 +66,7 @@ func TestPostGraphQL_QueryRetriesTransient(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	if _, err := clientAgainst(srv.URL).PostGraphQL(context.Background(), map[string]any{"query": "{ viewer { login } }"}); err != nil {
+	if _, err := clientAgainst(srv.URL).PostGraphQL(context.Background(), "{ viewer { login } }", nil); err != nil {
 		t.Fatalf("PostGraphQL: %v", err)
 	}
 	if got := posts.Load(); got != 2 {

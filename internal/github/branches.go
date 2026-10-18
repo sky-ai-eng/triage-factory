@@ -78,9 +78,9 @@ func (c *Client) branchesExistBatch(ctx context.Context, refs []BranchRef, out m
 		vars[nv] = r.Repo
 		vars[qv] = "refs/heads/" + r.Branch
 	}
-	query := fmt.Sprintf("query(%s) {\n%s}", decls.String(), fields.String())
+	query := fmt.Sprintf("query BranchesExist(%s) {\n%s  rateLimit { cost }\n}", decls.String(), fields.String())
 
-	data, err := c.PostGraphQL(ctx, map[string]any{"query": query, "variables": vars})
+	data, err := c.PostGraphQL(ctx, query, vars)
 	if err != nil {
 		return fmt.Errorf("branch existence check: %w", err)
 	}

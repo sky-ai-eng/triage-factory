@@ -218,7 +218,7 @@ func (c *Client) do(ctx context.Context, doc string, vars map[string]any, idempo
 	if err != nil {
 		return fmt.Errorf("linear: encode request: %w", err)
 	}
-	op := operationName(doc)
+	op := upstream.OperationName(doc)
 	var rateLimitWaited time.Duration
 	for attempt := 1; ; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.Endpoint, bytes.NewReader(body))
@@ -441,24 +441,6 @@ func recordQueryCost(op string, h http.Header) {
 		return
 	}
 	upstream.RecordQueryCost(upstream.Linear, op, points)
-}
-
-// operationName is the name a document gives its operation: IssuesByID for
-// "query IssuesByID($ids: [ID!]!, ...) {". Every document is a constant in
-// this package and names its operation, so the names are a closed set. Empty
-// for a document that names none.
-func operationName(doc string) string {
-	keyword, rest, ok := strings.Cut(strings.TrimSpace(doc), " ")
-	if !ok || (keyword != "query" && keyword != "mutation") {
-		return ""
-	}
-	end := strings.IndexFunc(rest, func(r rune) bool {
-		return r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r)
-	})
-	if end < 0 {
-		end = len(rest)
-	}
-	return rest[:end]
 }
 
 // classify is Linear's own reading of a response, ahead of the default. Linear

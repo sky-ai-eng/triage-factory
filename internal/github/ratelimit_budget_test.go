@@ -38,8 +38,8 @@ func budgetServer(t *testing.T, limit int, reset time.Time, remaining map[string
 	return srv
 }
 
-// gqlProbe is a GraphQL query body for tests that only need the request sent.
-var gqlProbe = map[string]any{"query": "query { viewer { login } }"}
+// gqlProbe is a GraphQL query for tests that only need the request sent.
+const gqlProbe = "query { viewer { login } }"
 
 func counter(n int32) *atomic.Int32 {
 	c := new(atomic.Int32)
@@ -69,7 +69,7 @@ func TestRecordRateLimit_KeyedByResource(t *testing.T) {
 	if _, err := c.Get(ctx, "/x"); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if _, err := c.PostGraphQL(ctx, gqlProbe); err != nil {
+	if _, err := c.PostGraphQL(ctx, gqlProbe, nil); err != nil {
 		t.Fatalf("PostGraphQL: %v", err)
 	}
 
@@ -127,7 +127,7 @@ func TestRecordRateLimit_MissingResourceHeader(t *testing.T) {
 	t.Cleanup(srv.Close)
 	c := patClient(srv.URL)
 
-	if _, err := c.PostGraphQL(context.Background(), gqlProbe); err != nil {
+	if _, err := c.PostGraphQL(context.Background(), gqlProbe, nil); err != nil {
 		t.Fatalf("PostGraphQL: %v", err)
 	}
 	if _, _, ok := c.RateLimit(bucketCore); ok {
@@ -177,7 +177,7 @@ func TestPreflight_SpentGraphQLDoesNotHoldREST(t *testing.T) {
 	c := patClient(srv.URL)
 	ctx := context.Background()
 
-	if _, err := c.PostGraphQL(ctx, gqlProbe); err != nil {
+	if _, err := c.PostGraphQL(ctx, gqlProbe, nil); err != nil {
 		t.Fatalf("seed PostGraphQL: %v", err)
 	}
 	start := time.Now()
@@ -187,7 +187,7 @@ func TestPreflight_SpentGraphQLDoesNotHoldREST(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Errorf("REST call took %v; a spent graphql budget must not hold it", elapsed)
 	}
-	_, err := c.PostGraphQL(ctx, gqlProbe)
+	_, err := c.PostGraphQL(ctx, gqlProbe, nil)
 	var rl *ErrRateLimited
 	if !errors.As(err, &rl) {
 		t.Fatalf("second PostGraphQL err = %v, want *ErrRateLimited from the pre-flight", err)

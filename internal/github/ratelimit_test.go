@@ -478,7 +478,7 @@ func TestPostGraphQL_RetriesOn429(t *testing.T) {
 	defer srv.Close()
 
 	c := clientAgainst(srv.URL)
-	data, err := c.PostGraphQL(context.Background(), map[string]any{"query": "{ __typename }"})
+	data, err := c.PostGraphQL(context.Background(), "{ __typename }", nil)
 	if err != nil {
 		t.Fatalf("PostGraphQL: %v", err)
 	}

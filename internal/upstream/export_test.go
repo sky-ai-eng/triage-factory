@@ -94,6 +94,7 @@ func TestQueryCost_RealScrape(t *testing.T) {
 
 	RecordQueryCost(Linear, "IssuesByID", 5500)
 	RecordQueryCost(Linear, "IssuesByID", 110)
+	RecordQueryCost(GitHub, "RefreshPRsWithChecks", 6)
 
 	rec := httptest.NewRecorder()
 	promhttp.HandlerFor(registry, promhttp.HandlerOpts{}).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
@@ -114,6 +115,9 @@ func TestQueryCost_RealScrape(t *testing.T) {
 		`tf_upstream_query_cost_bucket{op="IssuesByID",upstream="linear",le="250"} 1`,
 		`tf_upstream_query_cost_bucket{op="IssuesByID",upstream="linear",le="5000"} 1`,
 		`tf_upstream_query_cost_bucket{op="IssuesByID",upstream="linear",le="7500"} 2`,
+		`tf_upstream_query_cost_count{op="RefreshPRsWithChecks",upstream="github"} 1`,
+		`tf_upstream_query_cost_bucket{op="RefreshPRsWithChecks",upstream="github",le="5"} 0`,
+		`tf_upstream_query_cost_bucket{op="RefreshPRsWithChecks",upstream="github",le="10"} 1`,
 	} {
 		if !got[w] {
 			t.Errorf("scrape lacks %q", w)
@@ -123,11 +127,29 @@ func TestQueryCost_RealScrape(t *testing.T) {
 	// below the first or above the last.
 	var les []string
 	for line := range got {
-		if strings.HasPrefix(line, "tf_upstream_query_cost_bucket{") {
+		if strings.HasPrefix(line, `tf_upstream_query_cost_bucket{op="IssuesByID",`) {
 			les = append(les, line[strings.Index(line, `le="`)+4:strings.LastIndex(line, `"`)])
 		}
 	}
 	if len(les) != len(queryCostBounds)+1 {
 		t.Errorf("scrape has %d buckets %v, want queryCostBounds plus +Inf", len(les), les)
+	}
+}
+
+func TestOperationName(t *testing.T) {
+	for doc, want := range map[string]string{
+		"query IssuesByID($ids: [ID!]!) {":         "IssuesByID",
+		"\n\t\tquery DiscoverPRs($q: String!) {\n": "DiscoverPRs",
+		"query Viewer { viewer { id } }":           "Viewer",
+		"mutation CommentCreate($input: X!) {":     "CommentCreate",
+		"query($ids: [ID!]!) { nodes(ids: $ids) }": "",
+		"query { viewer { id } }":                  "",
+		"{ viewer { id } }":                        "",
+		"subscription S { x }":                     "",
+		"":                                         "",
+	} {
+		if got := OperationName(doc); got != want {
+			t.Errorf("OperationName(%q) = %q, want %q", doc, got, want)
+		}
 	}
 }

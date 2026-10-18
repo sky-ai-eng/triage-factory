@@ -192,6 +192,16 @@ fragment PRFullFields on PullRequest {
 }
 `
 
+var discoverPRsQuery = fmt.Sprintf(`
+	query DiscoverPRs($q: String!, $limit: Int!) {
+		search(query: $q, type: ISSUE, first: $limit) {
+			nodes { ...PRDiscoveryFields }
+		}
+		rateLimit { cost }
+	}
+	%s
+`, prDiscoveryFragment)
+
 // DiscoveredPR is a PR returned from a discovery search, including its GraphQL node ID.
 type DiscoveredPR struct {
 	NodeID   string
@@ -205,19 +215,7 @@ func (c *Client) DiscoverPRs(ctx context.Context, searchQuery string, limit int)
 		limit = 50
 	}
 
-	query := fmt.Sprintf(`
-		query($q: String!, $limit: Int!) {
-			search(query: $q, type: ISSUE, first: $limit) {
-				nodes { ...PRDiscoveryFields }
-			}
-		}
-		%s
-	`, prDiscoveryFragment)
-
-	data, err := c.PostGraphQL(ctx, map[string]any{
-		"query":     query,
-		"variables": map[string]any{"q": searchQuery, "limit": limit},
-	})
+	data, err := c.PostGraphQL(ctx, discoverPRsQuery, map[string]any{"q": searchQuery, "limit": limit})
 	if err != nil {
 		return nil, fmt.Errorf("discover PRs: %w", err)
 	}
@@ -287,26 +285,35 @@ func (c *Client) RefreshPRs(ctx context.Context, nodeIDs []string, includeCheckR
 	return results, nil
 }
 
+// The two documents a refresh batch sends, one per fragment. Each names its
+// own operation so their costs are recorded apart: the full fragment, with
+// check runs and timeline items, costs more per pull request.
+var (
+	refreshPRsWithChecksQuery = fmt.Sprintf(`
+	query RefreshPRsWithChecks($ids: [ID!]!) {
+		nodes(ids: $ids) { ...PRFullFields }
+		rateLimit { cost }
+	}
+	%s
+`, prFullFragment)
+
+	refreshPRsWithoutChecksQuery = fmt.Sprintf(`
+	query RefreshPRsWithoutChecks($ids: [ID!]!) {
+		nodes(ids: $ids) { ...PRDiscoveryFields }
+		rateLimit { cost }
+	}
+	%s
+`, prDiscoveryFragment)
+)
+
 // refreshPRsBatch is the single-call implementation for one batch of IDs.
 func (c *Client) refreshPRsBatch(ctx context.Context, nodeIDs []string, includeCheckRuns bool) (map[string]domain.PRSnapshot, error) {
-	fragment := prDiscoveryFragment
-	fragmentSpread := "PRDiscoveryFields"
+	query := refreshPRsWithoutChecksQuery
 	if includeCheckRuns {
-		fragment = prFullFragment
-		fragmentSpread = "PRFullFields"
+		query = refreshPRsWithChecksQuery
 	}
 
-	query := fmt.Sprintf(`
-		query($ids: [ID!]!) {
-			nodes(ids: $ids) { ...%s }
-		}
-		%s
-	`, fragmentSpread, fragment)
-
-	data, err := c.PostGraphQL(ctx, map[string]any{
-		"query":     query,
-		"variables": map[string]any{"ids": nodeIDs},
-	})
+	data, err := c.PostGraphQL(ctx, query, map[string]any{"ids": nodeIDs})
 	if err != nil {
 		return nil, fmt.Errorf("refresh PRs: %w", err)
 	}

@@ -492,21 +492,63 @@ func (e gqlErrors) first(context string) error {
 	return fmt.Errorf("%s: GraphQL error (%s): %s", context, e[0].Type, e[0].Message)
 }
 
-// PostGraphQL sends a GraphQL query to GitHub's GraphQL API. ctx cancels the
-// request. Only a transport-level (>= 400) non-2xx returns a *HTTPError; the
-// load-bearing 200-carrying-errors[] partial-vs-total-failure path below is
-// preserved exactly — a usable `data` block degrades to the partial result,
-// an absent/null `data` is a genuine failure.
+// PostGraphQL sends a GraphQL query document, with its variables, to GitHub's
+// GraphQL API. ctx cancels the request. Only a transport-level (>= 400)
+// non-2xx returns a *HTTPError; the load-bearing 200-carrying-errors[]
+// partial-vs-total-failure path below is preserved exactly — a usable `data`
+// block degrades to the partial result, an absent/null `data` is a genuine
+// failure.
 //
 // A query is a read, so it goes through doIdempotent: a rate limit or a
 // transient failure retries like a GET. A mutation goes through
 // PostGraphQLMutation instead.
 //
-// TODO(TFAC-1115): record each query's cost (rateLimit { cost }) on
-// upstream.RecordQueryCost by operation name; the documents are anonymous
-// today, so each needs a name first.
-func (c *Client) PostGraphQL(ctx context.Context, body any) ([]byte, error) {
-	return c.postGraphQL(ctx, body, true)
+// Each query's cost is recorded under the operation its document names
+// (recordQueryCost). Every query document in this package therefore names
+// its operation and selects rateLimit { cost }.
+func (c *Client) PostGraphQL(ctx context.Context, query string, variables map[string]any) ([]byte, error) {
+	data, err := c.postGraphQL(ctx, graphqlRequest{Query: query, Variables: variables}, true)
+	if err != nil {
+		return nil, err
+	}
+	recordQueryCost(upstream.OperationName(query), data)
+	return data, nil
+}
+
+// graphqlRequest is the body of a GraphQL query.
+type graphqlRequest struct {
+	Query     string         `json:"query"`
+	Variables map[string]any `json:"variables,omitempty"`
+}
+
+// recordQueryCost records the points GitHub says a query cost against the
+// graphql bucket. No header states it: X-RateLimit-Remaining says what is
+// left of the bucket, which other requests on the same credential spend too,
+// so the cost is read from the body, where the document's rateLimit { cost }
+// puts it. Selecting rateLimit adds nothing to the cost: GitHub counts the
+// requests a query's connections need, and rateLimit is not a connection.
+//
+// It is recorded for every client: the cost follows from the document and its
+// variables, whoever sends it. A document that names no operation records
+// nothing, and so does a response whose rateLimit is null, which the schema
+// allows and a GHES instance with rate limits off may send.
+func recordQueryCost(op string, data []byte) {
+	if op == "" {
+		return
+	}
+	var resp struct {
+		Data *struct {
+			RateLimit *struct {
+				Cost *int64 `json:"cost"`
+			} `json:"rateLimit"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(data, &resp) != nil || resp.Data == nil || resp.Data.RateLimit == nil {
+		return
+	}
+	if cost := resp.Data.RateLimit.Cost; cost != nil && *cost >= 0 {
+		upstream.RecordQueryCost(upstream.GitHub, op, *cost)
+	}
 }
 
 // PostGraphQLMutation is PostGraphQL for a GraphQL mutation. It goes through
