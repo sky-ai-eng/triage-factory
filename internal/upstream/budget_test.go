@@ -134,9 +134,11 @@ func TestWaitOnLimit_HonorsContext(t *testing.T) {
 }
 
 // TestBudgetMetrics_RealScrape pins the names and labels the monitoring doc
-// uses for the rate-limit gauges and the wait counter, through an exporter
-// configured as production's is (see TestExportedNames_RealScrape), and that
-// a reading past its reset is not reported.
+// uses for the rate-limit gauges, the refusal counter and the wait counter,
+// through an exporter configured as production's is (see
+// TestExportedNames_RealScrape), that a reading past its reset is not
+// reported, and that a counted reading reports what was used, and what is
+// left only against a published limit.
 func TestBudgetMetrics_RealScrape(t *testing.T) {
 	ResetBudgetsForTest(t)
 	registry := prometheus.NewRegistry()
@@ -156,6 +158,10 @@ func TestBudgetMetrics_RealScrape(t *testing.T) {
 	RecordBudget(GitHub, "org-2", "pat", "core", Budget{Remaining: 7})
 	// Its window has reset since, so the bucket has refilled: not reported.
 	RecordBudget(GitHub, "org-3", "pat", "core", Budget{Remaining: 3, Limit: 5000, Reset: time.Now().Add(-time.Minute)})
+	// Counted readings: one against a published limit, one with none.
+	RecordBudget(Slack, "org-4", "bot:T1:A1", "chat.update", Budget{Used: 12, Remaining: 38, Limit: 50, Reset: time.Now().Add(time.Minute)})
+	RecordBudget(Slack, "org-4", "bot:T1:A1", "chat.postMessage", Budget{Used: 3, Reset: time.Now().Add(time.Minute)})
+	RecordRefused(Slack, "org-4", "bot:T1:A1", "chat.update")
 	if err := WaitOnLimit(context.Background(), GitHub, "org-1", time.Millisecond); err != nil {
 		t.Fatalf("WaitOnLimit: %v", err)
 	}
@@ -177,9 +183,17 @@ func TestBudgetMetrics_RealScrape(t *testing.T) {
 		`tf_upstream_rate_limit_limit{bucket="graphql",credential="installation:42",org_id="org-1",upstream="github"} 5000`,
 		`tf_upstream_rate_limit_remaining_ratio{bucket="graphql",credential="installation:42",org_id="org-1",upstream="github"} 0.25`,
 		`tf_upstream_rate_limit_remaining{bucket="core",credential="pat",org_id="org-2",upstream="github"} 7`,
+		`tf_upstream_rate_limit_used{bucket="chat.update",credential="bot:T1:A1",org_id="org-4",upstream="slack"} 12`,
+		`tf_upstream_rate_limit_remaining{bucket="chat.update",credential="bot:T1:A1",org_id="org-4",upstream="slack"} 38`,
+		`tf_upstream_rate_limit_limit{bucket="chat.update",credential="bot:T1:A1",org_id="org-4",upstream="slack"} 50`,
+		`tf_upstream_rate_limit_remaining_ratio{bucket="chat.update",credential="bot:T1:A1",org_id="org-4",upstream="slack"} 0.76`,
+		`tf_upstream_rate_limit_used{bucket="chat.postMessage",credential="bot:T1:A1",org_id="org-4",upstream="slack"} 3`,
+		`tf_upstream_rate_limit_refused_total{bucket="chat.update",credential="bot:T1:A1",org_id="org-4",upstream="slack"} 1`,
 	}
 	prefixed := []string{
 		`tf_upstream_rate_limit_until_reset_seconds{bucket="graphql",credential="installation:42",org_id="org-1",upstream="github"} `,
+		`tf_upstream_rate_limit_until_reset_seconds{bucket="chat.update",credential="bot:T1:A1",org_id="org-4",upstream="slack"} `,
+		`tf_upstream_rate_limit_until_reset_seconds{bucket="chat.postMessage",credential="bot:T1:A1",org_id="org-4",upstream="slack"} `,
 		`tf_upstream_rate_limit_wait_seconds_total{org_id="org-1",upstream="github"} `,
 	}
 	seen := map[string]bool{}

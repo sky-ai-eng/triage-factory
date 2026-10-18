@@ -132,7 +132,7 @@ func (r *TitleResolver) resolveTitle(ctx context.Context, ws slackstore.Workspac
 	}
 
 	var channelName string
-	if info, err := slackConversationsInfo(ctx, r.client, ws.OrgID, botToken, ref.channel); err != nil {
+	if info, err := slackConversationsInfo(ctx, r.client, slackBotCaller(ws.OrgID, ws.WorkspaceID, ws.APIAppID), botToken, ref.channel); err != nil {
 		slackLog.Warn("title: conversations.info failed", "workspace", ws.WorkspaceID, "channel", ref.channel, "error", err)
 	} else {
 		channelName = info.Name
@@ -163,9 +163,10 @@ func (r *TitleResolver) resolveTitle(ctx context.Context, ws slackstore.Workspac
 // an empty user — has no author, and neither does a bot or deactivated
 // profile; each falls back rather than naming an app on the card.
 func (r *TitleResolver) resolveAuthorName(ctx context.Context, ws slackstore.Workspace, botToken string, ref threadTitleRef) string {
+	caller := slackBotCaller(ws.OrgID, ws.WorkspaceID, ws.APIAppID)
 	authorID := ref.mentionUser
 	if !ref.isRoot {
-		msgs, _, _, err := slackConversationsRepliesPage(ctx, r.client, ws.OrgID, botToken, ref.channel, ref.rootTS, 1, "")
+		msgs, _, _, err := slackConversationsRepliesPage(ctx, r.client, caller, botToken, ref.channel, ref.rootTS, 1, "")
 		if err != nil {
 			slackLog.Warn("title: conversations.replies failed", "workspace", ws.WorkspaceID, "entity", ref.entityID, "error", err)
 			return ""
@@ -179,7 +180,7 @@ func (r *TitleResolver) resolveAuthorName(ctx context.Context, ws slackstore.Wor
 		return ""
 	}
 
-	info, err := slackUsersInfo(ctx, r.client, ws.OrgID, botToken, authorID)
+	info, err := slackUsersInfo(ctx, r.client, caller, botToken, authorID)
 	if err != nil {
 		slackLog.Warn("title: users.info failed", "workspace", ws.WorkspaceID, "slack_user", authorID, "error", err)
 		return ""

@@ -253,7 +253,8 @@ func (a *lifecycleAdapter) acknowledgeMention(ctx context.Context, orgID, eventI
 	if !ok {
 		return
 	}
-	if err := slackReactionsAdd(ctx, a.client, orgID, token, channel, meta.TS, slackLifecycleAckReaction); err != nil {
+	caller := slackBotCaller(orgID, meta.WorkspaceID, meta.APIAppID)
+	if err := slackReactionsAdd(ctx, a.client, caller, token, channel, meta.TS, slackLifecycleAckReaction); err != nil {
 		slackLog.Warn("slack lifecycle: reactions.add failed", "error", err)
 	}
 }
@@ -282,7 +283,8 @@ func (a *lifecycleAdapter) replyNotConfigured(ctx context.Context, orgID, eventI
 	if threadTS == "" {
 		threadTS = meta.TS
 	}
-	if _, err := slackChatPostMessage(ctx, a.client, orgID, token, slackMessageParams{
+	caller := slackBotCaller(orgID, meta.WorkspaceID, meta.APIAppID)
+	if _, err := slackChatPostMessage(ctx, a.client, caller, token, slackMessageParams{
 		Channel: channel, ThreadTS: threadTS, Text: slackLifecycleNoMatchCopy,
 	}); err != nil {
 		slackLog.Warn("slack lifecycle: not-configured reply failed", "error", err)
@@ -360,7 +362,8 @@ func (a *lifecycleAdapter) resolveBotToken(ctx context.Context, orgID, workspace
 // --- conversation-status / conversation-activity consumer: setStatus lifecycle + failure note ---
 
 // conversationEntry is the per-conversationID cache entry: the resolved slack-or-not verdict
-// (and, when true, the channel/thread/token context a worker needs), plus
+// (and, when true, the channel/thread/token context a worker needs, and the
+// caller its calls are made as), plus
 // whichever per-conversation status worker is currently live. Owned exclusively by
 // the single dispatch goroutine — no locking, since nothing else ever
 // touches this map.
@@ -368,6 +371,7 @@ type conversationEntry struct {
 	isSlack           bool
 	channel, threadTS string
 	botToken          string
+	caller            slackCaller
 	worker            *conversationStatusWorker
 	// agentLive records whether the current worker has seen "running" — a
 	// worker started by a pre-"running" progress status shows setup-phase
@@ -464,7 +468,7 @@ func (a *lifecycleAdapter) handleConversationStatus(ctx context.Context, evt dom
 	case meta.Status == "running":
 		switch {
 		case entry.worker == nil:
-			entry.worker = newConversationStatusWorker(ctx, a.client, a.publicURL, evt.OrgID, meta.ConversationID, entry.channel, entry.threadTS, entry.botToken, initialIndicatorText, entry.prevDone)
+			entry.worker = newConversationStatusWorker(ctx, a.client, a.publicURL, entry.caller, meta.ConversationID, entry.channel, entry.threadTS, entry.botToken, initialIndicatorText, entry.prevDone)
 		case !entry.agentLive:
 			// Started by a setup-phase status — that phase is over; show the
 			// generic working pair until tool activity refines it.
@@ -483,12 +487,12 @@ func (a *lifecycleAdapter) handleConversationStatus(ctx context.Context, evt dom
 			// The conversation failed before any status-bearing sentinel started a
 			// worker — still owe the failure note; nothing to clear since no
 			// worker ever set a status.
-			postSlackFailureReply(ctx, a.client, a.publicURL, evt.OrgID, meta.ConversationID, entry.channel, entry.threadTS, entry.botToken)
+			postSlackFailureReply(ctx, a.client, a.publicURL, entry.caller, meta.ConversationID, entry.channel, entry.threadTS, entry.botToken)
 		}
 	default:
 		if text, ok := preRunIndicatorText(meta.Status); ok {
 			if entry.worker == nil {
-				entry.worker = newConversationStatusWorker(ctx, a.client, a.publicURL, evt.OrgID, meta.ConversationID, entry.channel, entry.threadTS, entry.botToken, text, entry.prevDone)
+				entry.worker = newConversationStatusWorker(ctx, a.client, a.publicURL, entry.caller, meta.ConversationID, entry.channel, entry.threadTS, entry.botToken, text, entry.prevDone)
 				entry.agentLive = false
 			} else {
 				entry.worker.sendActivity(text)
@@ -581,6 +585,7 @@ func (a *lifecycleAdapter) resolveConversationEntry(ctx context.Context, orgID, 
 	entry.channel = channel
 	entry.threadTS = threadTS
 	entry.botToken = token
+	entry.caller = slackBotCaller(orgID, meta.WorkspaceID, meta.APIAppID)
 	return entry
 }
 
@@ -725,12 +730,12 @@ func humanizeToolName(name string) string {
 // a "Details: <url>" fragment built from the multi-mode run URL shape
 // (/orgs/{org}/runs/{id}) only when publicURL() is non-empty — per the
 // ticket, omit the link entirely rather than guess a wrong fallback.
-func postSlackFailureReply(ctx context.Context, client *http.Client, publicURL func() string, orgID, conversationID, channel, threadTS, botToken string) {
+func postSlackFailureReply(ctx context.Context, client *http.Client, publicURL func() string, caller slackCaller, conversationID, channel, threadTS, botToken string) {
 	text := slackLifecycleFailureCopy
 	if u := publicURL(); u != "" {
-		text += fmt.Sprintf(" Details: %s/orgs/%s/runs/%s", u, orgID, conversationID)
+		text += fmt.Sprintf(" Details: %s/orgs/%s/runs/%s", u, caller.orgID, conversationID)
 	}
-	if _, err := slackChatPostMessage(ctx, client, orgID, botToken, slackMessageParams{
+	if _, err := slackChatPostMessage(ctx, client, caller, botToken, slackMessageParams{
 		Channel: channel, ThreadTS: threadTS, Text: text,
 	}); err != nil {
 		slackLog.Warn("slack lifecycle: failure reply post failed", "conversation", conversationID, "error", err)
@@ -751,7 +756,8 @@ type conversationStatusWorker struct {
 	ctx                         context.Context
 	client                      *http.Client
 	publicURL                   func() string
-	orgID, conversationID       string
+	caller                      slackCaller
+	conversationID              string
 	channel, threadTS, botToken string
 	// initial is the first indicator text the worker shows — the generic
 	// working pair for a worker started by "running", a setup-phase pair for
@@ -779,10 +785,10 @@ type conversationStatusWorker struct {
 // itself returns with no guarantee the initial call has started (or even
 // been scheduled) yet — callers that need to observe it must poll, not
 // assume synchronous completion.
-func newConversationStatusWorker(ctx context.Context, client *http.Client, publicURL func() string, orgID, conversationID, channel, threadTS, botToken string, initial indicatorText, predecessor <-chan struct{}) *conversationStatusWorker {
+func newConversationStatusWorker(ctx context.Context, client *http.Client, publicURL func() string, caller slackCaller, conversationID, channel, threadTS, botToken string, initial indicatorText, predecessor <-chan struct{}) *conversationStatusWorker {
 	w := &conversationStatusWorker{
 		ctx: ctx, client: client, publicURL: publicURL,
-		orgID: orgID, conversationID: conversationID, channel: channel, threadTS: threadTS, botToken: botToken,
+		caller: caller, conversationID: conversationID, channel: channel, threadTS: threadTS, botToken: botToken,
 		initial:     initial,
 		predecessor: predecessor,
 		activityCh:  make(chan indicatorText, 1),
@@ -964,7 +970,7 @@ func (w *conversationStatusWorker) setStatus(text indicatorText) {
 	if text.loading != "" {
 		loading = []string{text.loading}
 	}
-	if err := slackAssistantSetStatus(w.ctx, w.client, w.orgID, w.botToken, w.channel, w.threadTS, text.status, loading); err != nil {
+	if err := slackAssistantSetStatus(w.ctx, w.client, w.caller, w.botToken, w.channel, w.threadTS, text.status, loading); err != nil {
 		slackLog.Warn("slack lifecycle: setStatus failed", "conversation", w.conversationID, "error", err)
 	}
 }
@@ -974,7 +980,7 @@ func (w *conversationStatusWorker) setStatus(text indicatorText) {
 func (w *conversationStatusWorker) clearStatus() { w.setStatus(indicatorText{}) }
 
 func (w *conversationStatusWorker) postFailureReply() {
-	postSlackFailureReply(w.ctx, w.client, w.publicURL, w.orgID, w.conversationID, w.channel, w.threadTS, w.botToken)
+	postSlackFailureReply(w.ctx, w.client, w.publicURL, w.caller, w.conversationID, w.channel, w.threadTS, w.botToken)
 }
 
 // resetLifecycleTimer safely stops-drains-resets a running *time.Timer —

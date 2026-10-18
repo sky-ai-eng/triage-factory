@@ -134,25 +134,28 @@ func (h *slackExecHandler) resolveWorkspaceIdentity(ctx context.Context, rt agen
 	return ws, nil
 }
 
-// resolveToken resolves which bot token to act as for channelID: relay the
-// workspace-identity decision, then select that (workspace, app)'s token from
-// the sealed bundle.
-func (h *slackExecHandler) resolveToken(ctx context.Context, rt agenthost.ExtensionRuntime, channelID string) (string, error) {
+// resolveToken resolves which bot token to act as for channelID, and the
+// caller its calls are made as: relay the workspace-identity decision, then
+// select that (workspace, app)'s token from the sealed bundle.
+func (h *slackExecHandler) resolveToken(ctx context.Context, rt agenthost.ExtensionRuntime, channelID string) (slackCaller, string, error) {
 	ws, err := h.resolveWorkspaceIdentity(ctx, rt, channelID)
 	if err != nil {
-		return "", err
+		return slackCaller{}, "", err
 	}
-	return selectBotToken(ctx, rt, ws)
+	token, err := selectBotToken(ctx, rt, ws)
+	return slackBotCaller(rt.Info().OrgID, ws.WorkspaceID, ws.APIAppID), token, err
 }
 
 // resolveTokenForDownload resolves a bot token for `download`, which carries no
-// channel: relay the download workspace-identity decision, then select.
-func (h *slackExecHandler) resolveTokenForDownload(ctx context.Context, rt agenthost.ExtensionRuntime) (string, error) {
+// channel, and the caller its calls are made as: relay the download
+// workspace-identity decision, then select.
+func (h *slackExecHandler) resolveTokenForDownload(ctx context.Context, rt agenthost.ExtensionRuntime) (slackCaller, string, error) {
 	var ws slackWorkspaceIdentity
 	if err := rt.Relay(ctx, "slack", opResolveWorkspaceForDownload, struct{}{}, &ws); err != nil {
-		return "", err
+		return slackCaller{}, "", err
 	}
-	return selectBotToken(ctx, rt, ws)
+	token, err := selectBotToken(ctx, rt, ws)
+	return slackBotCaller(rt.Info().OrgID, ws.WorkspaceID, ws.APIAppID), token, err
 }
 
 // authorizeFileChannels is download's gate, run after files.info resolves the
@@ -209,12 +212,12 @@ func (h *slackExecHandler) send(ctx context.Context, rt agenthost.ExtensionRunti
 	if err != nil {
 		return slackSendResult{}, err
 	}
-	orgID := rt.Info().OrgID
+	caller := slackBotCaller(rt.Info().OrgID, ws.WorkspaceID, ws.APIAppID)
 
 	var ts string
 	var attachErr error
 	if a.Body != "" {
-		ts, err = slackChatPostMessage(ctx, h.client, orgID, token, slackMessageParams{
+		ts, err = slackChatPostMessage(ctx, h.client, caller, token, slackMessageParams{
 			Channel: a.Channel, ThreadTS: a.ThreadTS, Text: a.Body, MarkdownBody: a.Body,
 		})
 		if err != nil {
@@ -228,7 +231,7 @@ func (h *slackExecHandler) send(ctx context.Context, rt agenthost.ExtensionRunti
 			if attachThreadTS == "" {
 				attachThreadTS = ts
 			}
-			if uerr := h.uploadAttachment(ctx, orgID, token, a.Channel, attachThreadTS, a); uerr != nil {
+			if uerr := h.uploadAttachment(ctx, caller, token, a.Channel, attachThreadTS, a); uerr != nil {
 				// The message already posted — record it below like any other
 				// successful send, then surface the attach failure loudly rather
 				// than returning early and leaving a real post unrecorded.
@@ -240,13 +243,13 @@ func (h *slackExecHandler) send(ctx context.Context, rt agenthost.ExtensionRunti
 		if derr != nil {
 			return slackSendResult{}, derr
 		}
-		fileID, uerr := slackFilesUpload(ctx, h.client, orgID, token, slackFileUploadParams{
+		fileID, uerr := slackFilesUpload(ctx, h.client, caller, token, slackFileUploadParams{
 			Filename: name, Length: len(decoded), Channel: a.Channel, ThreadTS: a.ThreadTS, Body: bytes.NewReader(decoded),
 		})
 		if uerr != nil {
 			return slackSendResult{}, fmt.Errorf("slack: upload file: %w", uerr)
 		}
-		ts, err = h.findRecentMessageTSForFile(ctx, orgID, token, a.Channel, a.ThreadTS, fileID)
+		ts, err = h.findRecentMessageTSForFile(ctx, caller, token, a.Channel, a.ThreadTS, fileID)
 		if err != nil {
 			return slackSendResult{}, fmt.Errorf("slack: file uploaded but could not resolve its message ts: %w", err)
 		}
@@ -271,7 +274,7 @@ func (h *slackExecHandler) send(ctx context.Context, rt agenthost.ExtensionRunti
 	// threadRootErr already reports below. There is deliberately no gate here
 	// to prevent that fallback from firing; recordThreadRoot's retries are the
 	// mitigation, not a hard guarantee.
-	h.recordMessage(ctx, rt, domain.ActionSlackMessagePosted, a.Channel, rootTS, ts, h.permalinkBestEffort(ctx, orgID, token, a.Channel, ts))
+	h.recordMessage(ctx, rt, domain.ActionSlackMessagePosted, a.Channel, rootTS, ts, h.permalinkBestEffort(ctx, caller, token, a.Channel, ts))
 	switch {
 	case attachErr != nil && threadRootErr != nil:
 		return slackSendResult{Channel: a.Channel, TS: ts}, fmt.Errorf("%w; %w", attachErr, threadRootErr)
@@ -316,19 +319,18 @@ func (h *slackExecHandler) edit(ctx context.Context, rt agenthost.ExtensionRunti
 		return slackEditResult{}, err
 	}
 	a.Channel = channel
-	token, err := h.resolveToken(ctx, rt, a.Channel)
+	caller, token, err := h.resolveToken(ctx, rt, a.Channel)
 	if err != nil {
 		return slackEditResult{}, err
 	}
-	orgID := rt.Info().OrgID
-	if err := slackChatUpdate(ctx, h.client, orgID, token, slackMessageParams{
+	if err := slackChatUpdate(ctx, h.client, caller, token, slackMessageParams{
 		Channel: a.Channel, ThreadTS: a.TS, Text: a.Body, MarkdownBody: a.Body,
 	}); err != nil {
 		return slackEditResult{}, fmt.Errorf("slack: update message: %w", err)
 	}
 
-	rootTS := h.resolveMessageRootTS(ctx, orgID, token, a.Channel, a.TS)
-	h.recordMessage(ctx, rt, domain.ActionSlackMessageEdited, a.Channel, rootTS, a.TS, h.permalinkBestEffort(ctx, orgID, token, a.Channel, a.TS))
+	rootTS := h.resolveMessageRootTS(ctx, caller, token, a.Channel, a.TS)
+	h.recordMessage(ctx, rt, domain.ActionSlackMessageEdited, a.Channel, rootTS, a.TS, h.permalinkBestEffort(ctx, caller, token, a.Channel, a.TS))
 	return slackEditResult{Channel: a.Channel, TS: a.TS}, nil
 }
 
@@ -341,16 +343,15 @@ func (h *slackExecHandler) react(ctx context.Context, rt agenthost.ExtensionRunt
 		return slackReactResult{}, err
 	}
 	a.Channel = channel
-	token, err := h.resolveToken(ctx, rt, a.Channel)
+	caller, token, err := h.resolveToken(ctx, rt, a.Channel)
 	if err != nil {
 		return slackReactResult{}, err
 	}
-	orgID := rt.Info().OrgID
-	if err := slackReactionsAdd(ctx, h.client, orgID, token, a.Channel, a.TS, a.Emoji); err != nil {
+	if err := slackReactionsAdd(ctx, h.client, caller, token, a.Channel, a.TS, a.Emoji); err != nil {
 		return slackReactResult{}, fmt.Errorf("slack: add reaction: %w", err)
 	}
 
-	rootTS := h.resolveMessageRootTS(ctx, orgID, token, a.Channel, a.TS)
+	rootTS := h.resolveMessageRootTS(ctx, caller, token, a.Channel, a.TS)
 	detail, _ := json.Marshal(map[string]string{"emoji": a.Emoji})
 	rt.Record(ctx, nil, &domain.ExternalAction{
 		Provider:   domain.ArtifactProviderSlack,
@@ -448,8 +449,8 @@ func (h *slackExecHandler) recordMessage(ctx context.Context, rt agenthost.Exten
 
 // permalinkBestEffort resolves ts's shareable link; "" on any failure — a
 // permalink is a nice-to-have on the artifact row, never load-bearing.
-func (h *slackExecHandler) permalinkBestEffort(ctx context.Context, orgID, token, channel, ts string) string {
-	link, err := slackChatGetPermalink(ctx, h.client, orgID, token, channel, ts)
+func (h *slackExecHandler) permalinkBestEffort(ctx context.Context, caller slackCaller, token, channel, ts string) string {
+	link, err := slackChatGetPermalink(ctx, h.client, caller, token, channel, ts)
 	if err != nil {
 		return ""
 	}
@@ -469,8 +470,8 @@ func (h *slackExecHandler) permalinkBestEffort(ctx context.Context, orgID, token
 // or a lookup failure) rather than erroring — an edit/react's recording is
 // best-effort and must not fail the already-applied Slack write over a
 // cosmetic Target grouping.
-func (h *slackExecHandler) resolveMessageRootTS(ctx context.Context, orgID, token, channel, ts string) string {
-	msgs, _, _, err := slackConversationsRepliesPage(ctx, h.client, orgID, token, channel, ts, 1, "")
+func (h *slackExecHandler) resolveMessageRootTS(ctx context.Context, caller slackCaller, token, channel, ts string) string {
+	msgs, _, _, err := slackConversationsRepliesPage(ctx, h.client, caller, token, channel, ts, 1, "")
 	if err != nil || len(msgs) == 0 {
 		return ts
 	}
@@ -482,14 +483,14 @@ func (h *slackExecHandler) resolveMessageRootTS(ctx context.Context, orgID, toke
 // if threadTS is set, else channel history) for a message carrying fileID
 // among its files. Slack's v2 upload flow doesn't return the sharing
 // message's ts directly, so this is the best available signal.
-func (h *slackExecHandler) findRecentMessageTSForFile(ctx context.Context, orgID, token, channel, threadTS, fileID string) (string, error) {
+func (h *slackExecHandler) findRecentMessageTSForFile(ctx context.Context, caller slackCaller, token, channel, threadTS, fileID string) (string, error) {
 	const scanWindow = 20
 	var msgs []slackMessage
 	var err error
 	if threadTS != "" {
-		msgs, _, err = slackConversationsReplies(ctx, h.client, orgID, token, channel, threadTS, scanWindow)
+		msgs, _, err = slackConversationsReplies(ctx, h.client, caller, token, channel, threadTS, scanWindow)
 	} else {
-		msgs, err = slackConversationsHistory(ctx, h.client, orgID, token, slackConversationsHistoryParams{Channel: channel, Limit: scanWindow})
+		msgs, err = slackConversationsHistory(ctx, h.client, caller, token, slackConversationsHistoryParams{Channel: channel, Limit: scanWindow})
 	}
 	if err != nil {
 		return "", err
@@ -523,12 +524,12 @@ func decodeAttachment(name, base64Body string) (decoded []byte, resolvedName str
 // uploadAttachment decodes a.AttachBase64 and uploads it into channel,
 // threaded under threadTS (the just-posted message's own ts) — a reply
 // carrying the file rather than a separate top-level share.
-func (h *slackExecHandler) uploadAttachment(ctx context.Context, orgID, token, channel, threadTS string, a slackSendArgs) error {
+func (h *slackExecHandler) uploadAttachment(ctx context.Context, caller slackCaller, token, channel, threadTS string, a slackSendArgs) error {
 	decoded, name, err := decodeAttachment(a.AttachName, a.AttachBase64)
 	if err != nil {
 		return err
 	}
-	_, err = slackFilesUpload(ctx, h.client, orgID, token, slackFileUploadParams{
+	_, err = slackFilesUpload(ctx, h.client, caller, token, slackFileUploadParams{
 		Filename: name, Length: len(decoded), Channel: channel, ThreadTS: threadTS, Body: bytes.NewReader(decoded),
 	})
 	return err
@@ -545,12 +546,11 @@ func (h *slackExecHandler) readThread(ctx context.Context, rt agenthost.Extensio
 		return nil, err
 	}
 	a.Channel = channel
-	token, err := h.resolveToken(ctx, rt, a.Channel)
+	caller, token, err := h.resolveToken(ctx, rt, a.Channel)
 	if err != nil {
 		return nil, err
 	}
-	orgID := rt.Info().OrgID
-	msgs, _, err := slackConversationsReplies(ctx, h.client, orgID, token, a.Channel, a.TS, a.Limit)
+	msgs, _, err := slackConversationsReplies(ctx, h.client, caller, token, a.Channel, a.TS, a.Limit)
 	if err != nil {
 		return nil, fmt.Errorf("slack: read thread: %w", err)
 	}
@@ -560,7 +560,7 @@ func (h *slackExecHandler) readThread(ctx context.Context, rt agenthost.Extensio
 	// runtime, relayed to the orchestrator on the sidecar. `read channel` is
 	// set-returning and never touches.
 	rt.RecordReadTouch(ctx, domain.ArtifactProviderSlack, domain.SlackSourceID(a.Channel, a.TS), "", "")
-	return h.viewMessages(ctx, orgID, token, msgs), nil
+	return h.viewMessages(ctx, caller, token, msgs), nil
 }
 
 // defaultReadChannelLimit bounds a plain (non-anchored) `read channel` call
@@ -577,37 +577,36 @@ func (h *slackExecHandler) readChannel(ctx context.Context, rt agenthost.Extensi
 		return nil, err
 	}
 	a.Channel = channel
-	token, err := h.resolveToken(ctx, rt, a.Channel)
+	caller, token, err := h.resolveToken(ctx, rt, a.Channel)
 	if err != nil {
 		return nil, err
 	}
-	orgID := rt.Info().OrgID
 
 	var msgs []slackMessage
 	if a.TS != "" && (a.NumPrior > 0 || a.NumFollowing > 0) {
-		msgs, err = h.readChannelAnchored(ctx, orgID, token, a)
+		msgs, err = h.readChannelAnchored(ctx, caller, token, a)
 	} else {
 		limit := a.Limit
 		if limit <= 0 {
 			limit = defaultReadChannelLimit
 		}
-		msgs, err = slackConversationsHistory(ctx, h.client, orgID, token, slackConversationsHistoryParams{Channel: a.Channel, Limit: limit})
+		msgs, err = slackConversationsHistory(ctx, h.client, caller, token, slackConversationsHistoryParams{Channel: a.Channel, Limit: limit})
 	}
 	if err != nil {
 		return nil, fmt.Errorf("slack: read channel: %w", err)
 	}
 	sortMessagesByTS(msgs)
-	return h.viewMessages(ctx, orgID, token, msgs), nil
+	return h.viewMessages(ctx, caller, token, msgs), nil
 }
 
 // readChannelAnchored builds the N-prior/N-following window around a.TS: up
 // to two bounded conversations.history calls (before/after) plus the anchor
 // message itself, rather than one unbounded fetch — mirrors
 // slackConversationsHistory's own "no internal pagination loop" posture.
-func (h *slackExecHandler) readChannelAnchored(ctx context.Context, orgID, token string, a slackReadChannelArgs) ([]slackMessage, error) {
+func (h *slackExecHandler) readChannelAnchored(ctx context.Context, caller slackCaller, token string, a slackReadChannelArgs) ([]slackMessage, error) {
 	var out []slackMessage
 	if a.NumPrior > 0 {
-		before, err := slackConversationsHistory(ctx, h.client, orgID, token, slackConversationsHistoryParams{
+		before, err := slackConversationsHistory(ctx, h.client, caller, token, slackConversationsHistoryParams{
 			Channel: a.Channel, Latest: a.TS, Inclusive: false, Limit: a.NumPrior,
 		})
 		if err != nil {
@@ -615,7 +614,7 @@ func (h *slackExecHandler) readChannelAnchored(ctx context.Context, orgID, token
 		}
 		out = append(out, before...)
 	}
-	anchor, err := slackConversationsHistory(ctx, h.client, orgID, token, slackConversationsHistoryParams{
+	anchor, err := slackConversationsHistory(ctx, h.client, caller, token, slackConversationsHistoryParams{
 		Channel: a.Channel, Latest: a.TS, Inclusive: true, Limit: 1,
 	})
 	if err != nil {
@@ -623,7 +622,7 @@ func (h *slackExecHandler) readChannelAnchored(ctx context.Context, orgID, token
 	}
 	out = append(out, anchor...)
 	if a.NumFollowing > 0 {
-		after, err := slackConversationsHistory(ctx, h.client, orgID, token, slackConversationsHistoryParams{
+		after, err := slackConversationsHistory(ctx, h.client, caller, token, slackConversationsHistoryParams{
 			Channel: a.Channel, Oldest: a.TS, Inclusive: false, Limit: a.NumFollowing,
 		})
 		if err != nil {
@@ -676,7 +675,7 @@ func parseSlackTSParts(ts string) (seconds, fracNanos int64) {
 // with many messages from the same few people doesn't re-resolve the same
 // user repeatedly. A name-resolution failure never fails the read: the
 // message is still returned with SenderName left empty.
-func (h *slackExecHandler) viewMessages(ctx context.Context, orgID, token string, msgs []slackMessage) []slackMessageView {
+func (h *slackExecHandler) viewMessages(ctx context.Context, caller slackCaller, token string, msgs []slackMessage) []slackMessageView {
 	names := map[string]string{}
 	out := make([]slackMessageView, 0, len(msgs))
 	for _, m := range msgs {
@@ -689,7 +688,7 @@ func (h *slackExecHandler) viewMessages(ctx context.Context, orgID, token string
 			if cached, ok := names[m.User]; ok {
 				senderName = cached
 			} else {
-				info, err := slackUsersInfo(ctx, h.client, orgID, token, m.User)
+				info, err := slackUsersInfo(ctx, h.client, caller, token, m.User)
 				if err == nil && info != nil {
 					senderName = nonEmpty(info.DisplayName, info.RealName)
 				}
@@ -711,12 +710,12 @@ func (h *slackExecHandler) download(ctx context.Context, rt agenthost.ExtensionR
 	if a.FileID == "" {
 		return slackDownloadResult{}, fmt.Errorf("slack: --id is required")
 	}
-	token, err := h.resolveTokenForDownload(ctx, rt)
+	caller, token, err := h.resolveTokenForDownload(ctx, rt)
 	if err != nil {
 		return slackDownloadResult{}, err
 	}
 
-	fi, err := slackFilesInfo(ctx, h.client, rt.Info().OrgID, token, a.FileID)
+	fi, err := slackFilesInfo(ctx, h.client, caller, token, a.FileID)
 	if err != nil {
 		return slackDownloadResult{}, fmt.Errorf("slack: look up file: %w", err)
 	}
@@ -733,7 +732,7 @@ func (h *slackExecHandler) download(ctx context.Context, rt agenthost.ExtensionR
 		return slackDownloadResult{}, fmt.Errorf("slack: file is %d bytes, exceeds the %d-byte download cap", fi.Size, slackExecMaxFileBytes)
 	}
 	var buf bytes.Buffer
-	if err := slackFileDownload(ctx, h.client, rt.Info().OrgID, token, fi.URLPrivate, &buf); err != nil {
+	if err := slackFileDownload(ctx, h.client, caller, token, fi.URLPrivate, &buf); err != nil {
 		return slackDownloadResult{}, fmt.Errorf("slack: download file: %w", err)
 	}
 	return slackDownloadResult{Name: fi.Name, Base64: base64.StdEncoding.EncodeToString(buf.Bytes())}, nil

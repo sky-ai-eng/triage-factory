@@ -55,7 +55,7 @@ func TestSlackUsersInfo_GoldenDecode(t *testing.T) {
 		})
 	})
 
-	got, err := slackUsersInfo(context.Background(), srv.Client(), "org-1", "xoxb-test", "U0MENTION1")
+	got, err := slackUsersInfo(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", "U0MENTION1")
 	if err != nil {
 		t.Fatalf("slackUsersInfo: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestSlackUsersInfo_NotOk(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "user_not_found"})
 	})
 
-	_, err := slackUsersInfo(context.Background(), srv.Client(), "org-1", "xoxb-test", "U0GONE0001")
+	_, err := slackUsersInfo(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", "U0GONE0001")
 	if err == nil {
 		t.Fatal("slackUsersInfo with {ok:false} should return an error")
 	}
@@ -89,7 +89,7 @@ func TestSlackUsersInfo_HTTPError(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	})
 
-	_, err := slackUsersInfo(context.Background(), srv.Client(), "org-1", "xoxb-test", "U0THROTTL1")
+	_, err := slackUsersInfo(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", "U0THROTTL1")
 	if err == nil {
 		t.Fatal("slackUsersInfo with HTTP 429 should return an error")
 	}
@@ -109,7 +109,7 @@ func TestSlackUsersInfo_BotAndDeletedFlags(t *testing.T) {
 		})
 	})
 
-	got, err := slackUsersInfo(context.Background(), srv.Client(), "org-1", "xoxb-test", "U0BOT00001")
+	got, err := slackUsersInfo(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", "U0BOT00001")
 	if err != nil {
 		t.Fatalf("slackUsersInfo: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestSlackConversationsInfo_GoldenDecode(t *testing.T) {
 		})
 	})
 
-	got, err := slackConversationsInfo(context.Background(), srv.Client(), "org-1", "xoxb-test", "C0MENTION1")
+	got, err := slackConversationsInfo(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", "C0MENTION1")
 	if err != nil {
 		t.Fatalf("slackConversationsInfo: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestSlackConversationsInfo_NotOk(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "channel_not_found"})
 	})
 
-	_, err := slackConversationsInfo(context.Background(), srv.Client(), "org-1", "xoxb-test", "C0GONE0001")
+	_, err := slackConversationsInfo(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", "C0GONE0001")
 	if err == nil {
 		t.Fatal("slackConversationsInfo with {ok:false} should return an error")
 	}
@@ -169,7 +169,7 @@ func TestSlackConversationsInfo_HTTPError(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	})
 
-	_, err := slackConversationsInfo(context.Background(), srv.Client(), "org-1", "xoxb-test", "C0THROTTL1")
+	_, err := slackConversationsInfo(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", "C0THROTTL1")
 	if err == nil {
 		t.Fatal("slackConversationsInfo with HTTP 429 should return an error")
 	}
@@ -224,7 +224,7 @@ func fakePaginatedChannels(t *testing.T, total, pageSize int) *httptest.Server {
 // reported truncated.
 func TestSlackConversationsList_PaginatesAcrossPages(t *testing.T) {
 	srv := fakePaginatedChannels(t, 25, 10)
-	got, truncated, err := slackConversationsList(context.Background(), srv.Client(), "org-1", "xoxb-test")
+	got, truncated, err := slackConversationsList(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test")
 	if err != nil {
 		t.Fatalf("slackConversationsList: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestSlackConversationsList_PaginatesAcrossPages(t *testing.T) {
 func TestSlackConversationsList_CapTruncates(t *testing.T) {
 	withLoweredCap(t, 15)
 	srv := fakePaginatedChannels(t, 40, 10)
-	got, truncated, err := slackConversationsList(context.Background(), srv.Client(), "org-1", "xoxb-test")
+	got, truncated, err := slackConversationsList(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test")
 	if err != nil {
 		t.Fatalf("slackConversationsList: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestSlackConversationsList_CapTruncates(t *testing.T) {
 func TestSlackConversationsList_CapExactlyMatchesTotal_NotTruncated(t *testing.T) {
 	withLoweredCap(t, 20)
 	srv := fakePaginatedChannels(t, 20, 10)
-	got, truncated, err := slackConversationsList(context.Background(), srv.Client(), "org-1", "xoxb-test")
+	got, truncated, err := slackConversationsList(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test")
 	if err != nil {
 		t.Fatalf("slackConversationsList: %v", err)
 	}
@@ -281,7 +281,7 @@ func recordSlackWaits(t *testing.T) func() []time.Duration {
 	var mu sync.Mutex
 	var waits []time.Duration
 	orig := slackWait
-	slackWait = func(ctx context.Context, d time.Duration) error {
+	slackWait = func(ctx context.Context, _ string, d time.Duration) error {
 		mu.Lock()
 		waits = append(waits, d)
 		mu.Unlock()
@@ -326,7 +326,7 @@ func TestDoSlackJSON_429ThenSuccess_WaitsRetryAfterAndRetriesOnce(t *testing.T) 
 		OK    bool   `json:"ok"`
 		Value string `json:"value"`
 	}
-	if err := doSlackJSON(ctx, srv.Client(), "org-1", newSlackTestRequest(t, ctx), &out); err != nil {
+	if err := doSlackJSON(ctx, srv.Client(), slackCaller{orgID: "org-1"}, newSlackTestRequest(t, ctx), &out); err != nil {
 		t.Fatalf("doSlackJSON: %v", err)
 	}
 	if !out.OK || out.Value != "x" {
@@ -361,7 +361,7 @@ func TestDoSlackJSON_429AtCap_Retries(t *testing.T) {
 	var out struct {
 		OK bool `json:"ok"`
 	}
-	if err := doSlackJSON(context.Background(), srv.Client(), "org-1", newSlackTestRequest(t, context.Background()), &out); err != nil {
+	if err := doSlackJSON(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, newSlackTestRequest(t, context.Background()), &out); err != nil {
 		t.Fatalf("doSlackJSON: %v", err)
 	}
 	if got := atomic.LoadInt32(&hits); got != 2 {
@@ -390,7 +390,7 @@ func TestDoSlackJSON_429OverCap_ReturnsWithoutWaitOrRetry(t *testing.T) {
 		OK bool `json:"ok"`
 	}
 	start := time.Now()
-	err := doSlackJSON(ctx, srv.Client(), "org-1", newSlackTestRequest(t, ctx), &out)
+	err := doSlackJSON(ctx, srv.Client(), slackCaller{orgID: "org-1"}, newSlackTestRequest(t, ctx), &out)
 	elapsed := time.Since(start)
 
 	var rl *slackRateLimitError
@@ -433,7 +433,7 @@ func TestDoSlackJSON_DoublePermanent429_ReturnsTypedError(t *testing.T) {
 	var out struct {
 		OK bool `json:"ok"`
 	}
-	err := doSlackJSON(context.Background(), srv.Client(), "org-1", newSlackTestRequest(t, context.Background()), &out)
+	err := doSlackJSON(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, newSlackTestRequest(t, context.Background()), &out)
 	if err == nil {
 		t.Fatal("doSlackJSON with two consecutive 429s should return an error")
 	}
@@ -482,7 +482,7 @@ func TestDoSlackJSON_NonOK_ErrorCarriesExcerptNotBody(t *testing.T) {
 			var out struct {
 				OK bool `json:"ok"`
 			}
-			err := doSlackJSON(ctx, srv.Client(), "org-1", newSlackTestRequest(t, ctx), &out)
+			err := doSlackJSON(ctx, srv.Client(), slackCaller{orgID: "org-1"}, newSlackTestRequest(t, ctx), &out)
 			if err == nil {
 				t.Fatal("doSlackJSON with a non-200 should return an error")
 			}
@@ -515,7 +515,7 @@ func TestDoSlackJSON_TransportFailure_CountedOnceNotRetried(t *testing.T) {
 	var out struct {
 		OK bool `json:"ok"`
 	}
-	err := doSlackJSON(ctx, client, "org-1", newSlackTestRequest(t, ctx), &out)
+	err := doSlackJSON(ctx, client, slackCaller{orgID: "org-1"}, newSlackTestRequest(t, ctx), &out)
 	if err == nil {
 		t.Fatal("doSlackJSON against a closed server should return an error")
 	}
@@ -553,7 +553,7 @@ func TestDoSlackJSON_LargePageDecodes(t *testing.T) {
 			ID string `json:"id"`
 		} `json:"channels"`
 	}
-	if err := doSlackJSON(context.Background(), srv.Client(), "org-1", newSlackTestRequest(t, context.Background()), &out); err != nil {
+	if err := doSlackJSON(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, newSlackTestRequest(t, context.Background()), &out); err != nil {
 		t.Fatalf("doSlackJSON: %v", err)
 	}
 	if len(out.Channels) != 200 {
@@ -574,7 +574,7 @@ func TestDoSlackJSON_CanceledContext_NotCounted(t *testing.T) {
 	var out struct {
 		OK bool `json:"ok"`
 	}
-	if err := doSlackJSON(ctx, srv.Client(), "org-1", newSlackTestRequest(t, ctx), &out); !errors.Is(err, context.Canceled) {
+	if err := doSlackJSON(ctx, srv.Client(), slackCaller{orgID: "org-1"}, newSlackTestRequest(t, ctx), &out); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v; want context.Canceled", err)
 	}
 	if got := tally.Attempts(); got != 0 {
@@ -601,7 +601,7 @@ func TestDoSlackJSON_429_RespectsContextCancellation(t *testing.T) {
 		OK bool `json:"ok"`
 	}
 	start := time.Now()
-	err := doSlackJSON(ctx, srv.Client(), "org-1", newSlackTestRequest(t, ctx), &out)
+	err := doSlackJSON(ctx, srv.Client(), slackCaller{orgID: "org-1"}, newSlackTestRequest(t, ctx), &out)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("doSlackJSON should fail once ctx is canceled mid-wait")
@@ -638,7 +638,7 @@ func TestSlackConversationsJoin_429ThenSuccess_BodyPreservedOnRetry(t *testing.T
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
 
-	if err := slackConversationsJoin(context.Background(), srv.Client(), "org-1", "xoxb-test", "C0RETRY01"); err != nil {
+	if err := slackConversationsJoin(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", "C0RETRY01"); err != nil {
 		t.Fatalf("slackConversationsJoin: %v", err)
 	}
 	if got := atomic.LoadInt32(&hits); got != 2 {

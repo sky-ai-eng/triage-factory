@@ -25,11 +25,13 @@ const meterName = "internal/upstream"
 // outcome are closed vocabularies (Name, Class); org_id is not, so the series
 // count grows with the number of orgs, by at most 30 per counter for each (6
 // names × 5 classes). That per-org breakdown is what the metrics are for. The
+// refusal counter is keyed like the gauges, by credential and bucket. The
 // histogram carries no org_id, so its series are bounded by the operations
 // TF's clients declare.
 type instruments struct {
 	requests  metric.Int64Counter
 	retries   metric.Int64Counter
+	refused   metric.Int64Counter
 	waited    metric.Float64Counter
 	queryCost metric.Int64Histogram
 }
@@ -50,6 +52,7 @@ func newInstruments(provider metric.MeterProvider) *instruments {
 	}
 	mk(&in.requests, "upstream.requests", "HTTP attempts against an upstream system, by outcome; a retried call counts once per attempt.")
 	mk(&in.retries, "upstream.retries", "Decisions to retry a request, by the outcome that caused the retry.")
+	mk(&in.refused, "upstream.rate_limit.refused", "Rate-limited responses, by the bucket that refused them, for an upstream whose refusal names one.")
 	waited, err := m.Float64Counter("upstream.rate_limit.wait", metric.WithUnit("s"),
 		metric.WithDescription("Time spent waiting on an upstream's rate limit before sending a request."))
 	if err != nil {

@@ -16,7 +16,9 @@ import (
 const lowBudgetShare = 0.2
 
 // Budget is one reading of a rate-limit bucket: what an upstream's response
-// said is left of it for the credential that made the request.
+// said is left of it for the credential that made the request, or, for an
+// upstream whose responses state nothing of it, what TF counted itself
+// spending of it (Used).
 //
 // TODO(TFAC-1111): a near_limit reading, for a bucket whose upstream says only
 // that it is close (Jira Cloud's hourly quota), with the low-budget WARN keyed
@@ -29,6 +31,13 @@ type Budget struct {
 	// not say. A reading is current until then and is not reported after it:
 	// by then the bucket has refilled, whatever it said was left.
 	Reset time.Time
+	// Used is how many calls this process counted against the bucket in its
+	// window, on a reading TF counted itself: Slack sends no budget, so its
+	// client counts its own calls to each method and reads Remaining off the
+	// limit Slack publishes for it. Such a reading is recorded for a call just
+	// made, so Used is at least 1 on it, and 0 on a reading an upstream
+	// stated. A counted reading with no published limit has Used alone.
+	Used int
 }
 
 // Share is the fraction of the bucket left. ok is false when the upstream did
@@ -38,6 +47,13 @@ func (b Budget) Share() (share float64, ok bool) {
 		return 0, false
 	}
 	return float64(b.Remaining) / float64(b.Limit), true
+}
+
+// statesRemaining reports whether b says what is left of its bucket. A
+// reading an upstream stated always does; a counted one does only against a
+// published limit.
+func (b Budget) statesRemaining() bool {
+	return b.Used == 0 || b.Limit > 0
 }
 
 // current reports whether b still describes its bucket at now.
@@ -69,6 +85,22 @@ func RecordBudget(name Name, orgID, credential, bucket string, b Budget) {
 			"upstream", name, "org", orgID, "credential", credential, "bucket", bucket,
 			"remaining", b.Remaining, "limit", b.Limit, "reset", b.Reset)
 	}
+}
+
+// RecordRefused counts one response from name that a rate limit refused,
+// made for orgID with credential, under the bucket that refused it. It is for
+// an upstream whose refusal says which bucket it was: Slack meters each method
+// separately, so a 429 from one is that method's. The response is also
+// counted by Record under RateLimited; this count is what says which bucket
+// it came from, so a refusal against a bucket whose counted reading still
+// shows headroom says the published limit counted against is wrong.
+func RecordRefused(name Name, orgID, credential, bucket string) {
+	current().refused.Add(context.Background(), 1, metric.WithAttributes(
+		telemetry.Upstream(string(name)),
+		telemetry.OrgID(orgID),
+		telemetry.Credential(credential),
+		telemetry.Bucket(bucket),
+	))
 }
 
 // WaitOnLimit waits d out as Sleep does, for a request to name made for orgID
@@ -187,8 +219,9 @@ func (r *budgetRegistry) get(k budgetKey) (Budget, bool) {
 
 // observe reports every current reading through the budget gauges, and drops
 // the stale entries it meets. A reading that did not say its bucket's size
-// reports no limit or ratio, and one that did not say its reset reports no
-// time until it.
+// reports no limit or ratio, one that did not say its reset reports no time
+// until it, and only a counted reading reports what was used (statesRemaining
+// says when it reports what is left).
 func (r *budgetRegistry) observe(o metric.Observer, g budgetGauges, now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -206,7 +239,12 @@ func (r *budgetRegistry) observe(o metric.Observer, g budgetGauges, now time.Tim
 			telemetry.Credential(k.credential),
 			telemetry.Bucket(k.bucket),
 		)
-		o.ObserveInt64(g.remaining, int64(e.Remaining), attrs)
+		if e.statesRemaining() {
+			o.ObserveInt64(g.remaining, int64(e.Remaining), attrs)
+		}
+		if e.Used > 0 {
+			o.ObserveInt64(g.used, int64(e.Used), attrs)
+		}
 		if share, ok := e.Share(); ok {
 			o.ObserveInt64(g.limit, int64(e.Limit), attrs)
 			o.ObserveFloat64(g.ratio, share, attrs)
@@ -220,6 +258,7 @@ func (r *budgetRegistry) observe(o metric.Observer, g budgetGauges, now time.Tim
 // budgetGauges are the observable gauges the registry is reported through.
 type budgetGauges struct {
 	remaining  metric.Int64ObservableGauge
+	used       metric.Int64ObservableGauge
 	limit      metric.Int64ObservableGauge
 	ratio      metric.Float64ObservableGauge
 	untilReset metric.Float64ObservableGauge
@@ -242,6 +281,9 @@ func registerBudgetGauges(m metric.Meter) {
 	g.remaining, err = m.Int64ObservableGauge("upstream.rate_limit.remaining",
 		metric.WithDescription("What the upstream's latest response said is left of a rate-limit bucket for the credential."))
 	keep(err)
+	g.used, err = m.Int64ObservableGauge("upstream.rate_limit.used",
+		metric.WithDescription("Calls this process counted against a rate-limit bucket in its window, for an upstream whose responses state no budget."))
+	keep(err)
 	g.limit, err = m.Int64ObservableGauge("upstream.rate_limit.limit",
 		metric.WithDescription("The rate-limit bucket's size, as the upstream's latest response stated it."))
 	keep(err)
@@ -258,7 +300,7 @@ func registerBudgetGauges(m metric.Meter) {
 	if _, err := m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		liveBudgets.Load().observe(o, g, time.Now())
 		return nil
-	}, g.remaining, g.limit, g.ratio, g.untilReset); err != nil {
+	}, g.remaining, g.used, g.limit, g.ratio, g.untilReset); err != nil {
 		log.Warn("rate-limit gauge callback registration failed", "error", err)
 	}
 }

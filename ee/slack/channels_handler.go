@@ -478,13 +478,14 @@ func (h *channelsHandler) liveSlackCandidates(ctx context.Context, orgID string,
 			anyFailed = true
 			continue
 		}
-		pub, pubTruncated, err := slackConversationsList(ctx, h.client, orgID, botToken)
+		caller := slackBotCaller(orgID, ws.WorkspaceID, ws.APIAppID)
+		pub, pubTruncated, err := slackConversationsList(ctx, h.client, caller, botToken)
 		if err != nil {
 			slackLog.Warn("channels: conversations.list failed", "workspace", ws.WorkspaceID, "error", err)
 			anyFailed = true
 			continue
 		}
-		mine, mineTruncated, err := slackUsersConversations(ctx, h.client, orgID, botToken)
+		mine, mineTruncated, err := slackUsersConversations(ctx, h.client, caller, botToken)
 		if err != nil {
 			slackLog.Warn("channels: users.conversations failed", "workspace", ws.WorkspaceID, "error", err)
 			anyFailed = true
@@ -571,12 +572,12 @@ func (h *channelsHandler) ensureAndAutoJoin(ctx context.Context, orgID, userID s
 		// pre-deciding from a flag the live-candidate view can never
 		// actually report as "private AND not a member" (users.conversations
 		// only ever lists the bot's OWN current memberships).
-		botToken, ok := h.botTokenForWorkspace(ctx, orgID, workspaces, workspaceID)
+		caller, botToken, ok := h.botTokenForWorkspace(ctx, orgID, workspaces, workspaceID)
 		if !ok {
 			warnings = append(warnings, channelsWarning{ChannelID: channelID, Reason: "join_failed"})
 			continue
 		}
-		err := slackConversationsJoin(ctx, h.client, orgID, botToken, channelID)
+		err := slackConversationsJoin(ctx, h.client, caller, botToken, channelID)
 		if err == nil {
 			continue
 		}
@@ -590,18 +591,20 @@ func (h *channelsHandler) ensureAndAutoJoin(ctx context.Context, orgID, userID s
 	return warnings
 }
 
-func (h *channelsHandler) botTokenForWorkspace(ctx context.Context, orgID string, workspaces []slackstore.Workspace, workspaceID string) (string, bool) {
+// botTokenForWorkspace resolves workspaceID's bot token among workspaces, and
+// the caller a call made with it is.
+func (h *channelsHandler) botTokenForWorkspace(ctx context.Context, orgID string, workspaces []slackstore.Workspace, workspaceID string) (slackCaller, string, bool) {
 	for _, ws := range workspaces {
 		if ws.WorkspaceID != workspaceID {
 			continue
 		}
 		token, err := h.stores.Secrets.GetSystem(ctx, orgID, ws.BotTokenRef)
 		if err != nil || token == "" {
-			return "", false
+			return slackCaller{}, "", false
 		}
-		return token, true
+		return slackBotCaller(orgID, ws.WorkspaceID, ws.APIAppID), token, true
 	}
-	return "", false
+	return slackCaller{}, "", false
 }
 
 // normalizeChannelIDs drops blanks and de-duplicates, preserving first-seen
