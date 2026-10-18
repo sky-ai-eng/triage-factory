@@ -639,15 +639,19 @@ change, so an edit takes effect after `docker compose restart prometheus`.
 ### Rate-limit budgets
 
 After every response that states a rate-limit budget, TF keeps the reading,
-the latest for each upstream, org, credential and bucket, and exports it:
+the latest for each upstream, org, credential and bucket, and exports it. Slack
+states no budget on its responses, so for Slack the reading is a count TF keeps
+of its own calls (see **Slack** below):
 
 | Metric | Labels | Value |
 | --- | --- | --- |
-| `tf_upstream_rate_limit_remaining` | `upstream`, `org_id`, `credential`, `bucket` | What the latest response said is left of the bucket. |
+| `tf_upstream_rate_limit_remaining` | `upstream`, `org_id`, `credential`, `bucket` | What the latest response said is left of the bucket. For Slack, the method's published limit less `used`, and no series for a method with no published limit. |
+| `tf_upstream_rate_limit_used` | `upstream`, `org_id`, `credential`, `bucket` | Slack only: the calls this pod made against the bucket in the last minute, as of its latest call. |
 | `tf_upstream_rate_limit_limit` | `upstream`, `org_id`, `credential`, `bucket` | The bucket's size. No series when the response did not state it. |
 | `tf_upstream_rate_limit_remaining_ratio` | `upstream`, `org_id`, `credential`, `bucket` | `remaining` divided by `limit`, from 0 to 1. No series when the size was not stated. |
 | `tf_upstream_rate_limit_until_reset_seconds` | `upstream`, `org_id`, `credential`, `bucket` | Seconds until the bucket refills. No series when the reset was not stated. |
 | `tf_upstream_rate_limit_wait_seconds_total` | `upstream`, `org_id` | Time spent waiting on a rate limit before sending a request: a spent budget's reset, or a rate-limited response's `Retry-After` or backoff. |
+| `tf_upstream_rate_limit_refused_total` | `upstream`, `org_id`, `credential`, `bucket` | Slack only: rate-limited responses, by the bucket that refused them. |
 
 A reading is reported until its bucket's reset. After that the bucket has
 refilled, so a credential nothing has used since then has no series until its
@@ -655,9 +659,10 @@ next response, rather than its last window's low number.
 
 The rate-limited responses themselves are
 `tf_upstream_requests_total{outcome="rate_limited"}` (see
-[Source connections](#source-connections)).
+[Source connections](#source-connections)). For Slack,
+`tf_upstream_rate_limit_refused_total` also says which bucket refused each one.
 
-`github` and `linear` report budgets so far.
+`github`, `linear` and `slack` report budgets so far.
 
 **GitHub**
 
@@ -701,19 +706,57 @@ The rate-limited responses themselves are
   user. It raises an app install's limits with the workspace's paid seats, so
   read `tf_upstream_rate_limit_limit` rather than the published figures.
 
+**Slack**
+
+Slack sends no budget headers. Its limits are per method, for one app in one
+workspace, in published tiers of calls per minute, and its only signal on the
+wire is a 429 with `Retry-After`. So each pod counts its own calls to each
+method over the last minute and reports the count against the method's
+published limit.
+
+- `credential` is what Slack meters: `bot:<workspace id>:<app id>` for the bot
+  token of an app installed in a workspace, and `app:<app id>` for an app-level
+  token, which Socket Mode uses to open its connection. A TF workspace that
+  connects several Slack workspaces, or several apps in one, has one
+  credential for each install. The ids are Slack's own team and app ids.
+  Calls made while a workspace is being connected, with tokens that are not
+  stored yet, are not counted.
+- `bucket` is the method, such as `chat.update` or `users.info`. Every attempt
+  Slack answers counts, a 429 included. The limit is the floor of the method's
+  tier: 20 a minute for Tier 2 (`conversations.list`), 50 for Tier 3, 100 for
+  Tier 4, and 600 for `assistant.threads.setStatus`. Slack tolerates bursts
+  above a tier's floor. `auth.test`, `chat.getPermalink` and
+  `chat.postMessage` have no published figure per method and minute
+  (`chat.postMessage` is limited per channel, at about one message a second),
+  so they report `used` with no `limit` or `remaining`.
+- `until_reset_seconds` counts down to a minute after the latest call, when
+  every call counted has left the window. A reading is updated only by a call,
+  so between calls `used` is the count as of the latest one.
+- A 429 is added to `tf_upstream_rate_limit_refused_total` under its method. A
+  refusal against a bucket whose `remaining` is well above 0 means the
+  published limit is wrong for this workspace, or that calls this pod did not
+  make spent the budget.
+- The count is a floor. It covers only the pod's own calls: another control
+  pod's calls, and in multi mode the `triagefactory exec slack` verbs a
+  delegated run calls through its sidecar, spend the same budget without being
+  counted here.
+
 A response states the upstream's own count of what is left for the
 credential, so each pod's latest reading is accurate as of when it was taken,
 and nothing is combined across pods. Do not sum these gauges. `min` gives the
-tightest reading any pod holds, which may be older than another pod's:
+tightest reading any pod holds, which may be older than another pod's. Slack's
+readings are the exception: each pod counts only its own calls, so `sum` its
+`used` across pods and compare that with `limit`:
 
 ```
 min by (upstream, org_id, credential, bucket) (tf_upstream_rate_limit_remaining_ratio)   # not an alert: the share left, per budget
 sum by (upstream, org_id) (rate(tf_upstream_rate_limit_wait_seconds_total[15m]))         # not an alert: how much of the time each org's requests spend waiting
+sum by (org_id, credential, bucket) (tf_upstream_rate_limit_used{upstream="slack"}) / max by (org_id, credential, bucket) (tf_upstream_rate_limit_limit{upstream="slack"})   # not an alert: the share of each Slack method's minute this deployment's pods counted
 ```
 
 In multi mode, the requests a delegated run makes from inside its sandbox spend
-the same budgets without reporting a reading. The next response a pod sees
-still states what that spending left.
+the same budgets without reporting a reading. For every upstream but Slack, the
+next response a pod sees still states what that spending left.
 
 The log carries the same signal, for a deployment that serves no metrics (local
 mode without `TF_METRICS_ADDR`):

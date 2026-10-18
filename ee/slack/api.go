@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"time"
 
@@ -53,7 +54,7 @@ type authTestResult struct {
 // partially-populated result — bot_id in particular feeds straight into
 // slackBotsInfo, so a silently-empty value here would surface later as a
 // confusing bots.info failure instead of a clear one at its actual source.
-func slackAuthTest(ctx context.Context, client *http.Client, orgID, botToken string) (*authTestResult, error) {
+func slackAuthTest(ctx context.Context, client *http.Client, caller slackCaller, botToken string) (*authTestResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, slackAPIBase+"/auth.test", nil)
 	if err != nil {
 		return nil, err
@@ -69,7 +70,7 @@ func slackAuthTest(ctx context.Context, client *http.Client, orgID, botToken str
 		BotID        string `json:"bot_id"`
 		EnterpriseID string `json:"enterprise_id"`
 	}
-	if err := doSlackJSON(ctx, client, orgID, req, &out); err != nil {
+	if err := doSlackJSON(ctx, client, caller, req, &out); err != nil {
 		return nil, err
 	}
 	if !out.OK {
@@ -105,7 +106,7 @@ type botsInfoResult struct {
 // a Slack-level {"ok":false} both surface as an error; the connect handler
 // treats any error here as fatal (400, connect refused) — the app id is now
 // key material, not an optional enrichment, so there is no fallback.
-func slackBotsInfo(ctx context.Context, client *http.Client, orgID, botToken, botID string) (*botsInfoResult, error) {
+func slackBotsInfo(ctx context.Context, client *http.Client, caller slackCaller, botToken, botID string) (*botsInfoResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		slackAPIBase+"/bots.info?bot="+url.QueryEscape(botID), nil)
 	if err != nil {
@@ -120,7 +121,7 @@ func slackBotsInfo(ctx context.Context, client *http.Client, orgID, botToken, bo
 			AppID string `json:"app_id"`
 		} `json:"bot"`
 	}
-	if err := doSlackJSON(ctx, client, orgID, req, &out); err != nil {
+	if err := doSlackJSON(ctx, client, caller, req, &out); err != nil {
 		return nil, err
 	}
 	if !out.OK {
@@ -137,8 +138,8 @@ func slackBotsInfo(ctx context.Context, client *http.Client, orgID, botToken, bo
 // check: a successful call returns a wss:// URL good for one connection,
 // which this leaf discards (the socket connection manager that actually
 // dials one, socket_conn.go, calls slackConnectionsOpen directly instead).
-func slackOpenConnection(ctx context.Context, client *http.Client, orgID, appToken string) error {
-	_, err := slackConnectionsOpen(ctx, client, orgID, appToken)
+func slackOpenConnection(ctx context.Context, client *http.Client, caller slackCaller, appToken string) error {
+	_, err := slackConnectionsOpen(ctx, client, caller, appToken)
 	return err
 }
 
@@ -173,7 +174,7 @@ func isSlackAuthError(err error) bool {
 // short-lived, single-use wss:// URL it mints for one connection — the
 // Socket Mode handshake's first call. A fresh call is required per
 // (re)connect; the returned URL is never reused.
-func slackConnectionsOpen(ctx context.Context, client *http.Client, orgID, appToken string) (string, error) {
+func slackConnectionsOpen(ctx context.Context, client *http.Client, caller slackCaller, appToken string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, slackAPIBase+"/apps.connections.open", nil)
 	if err != nil {
 		return "", err
@@ -185,7 +186,7 @@ func slackConnectionsOpen(ctx context.Context, client *http.Client, orgID, appTo
 		Error string `json:"error"`
 		URL   string `json:"url"`
 	}
-	if err := doSlackJSON(ctx, client, orgID, req, &out); err != nil {
+	if err := doSlackJSON(ctx, client, caller, req, &out); err != nil {
 		return "", err
 	}
 	if !out.OK {
@@ -219,7 +220,7 @@ type usersInfoResult struct {
 // response or a Slack-level {"ok":false} both surface as an error; the
 // resolver treats any error here as transient (it writes nothing, so the
 // next mention retries — see ee/slack/identity.go).
-func slackUsersInfo(ctx context.Context, client *http.Client, orgID, botToken, slackUserID string) (*usersInfoResult, error) {
+func slackUsersInfo(ctx context.Context, client *http.Client, caller slackCaller, botToken, slackUserID string) (*usersInfoResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		slackAPIBase+"/users.info?user="+url.QueryEscape(slackUserID), nil)
 	if err != nil {
@@ -240,7 +241,7 @@ func slackUsersInfo(ctx context.Context, client *http.Client, orgID, botToken, s
 			} `json:"profile"`
 		} `json:"user"`
 	}
-	if err := doSlackJSON(ctx, client, orgID, req, &out); err != nil {
+	if err := doSlackJSON(ctx, client, caller, req, &out); err != nil {
 		return nil, err
 	}
 	if !out.OK {
@@ -269,7 +270,7 @@ type conversationsInfoResult struct {
 // {"ok":false} both surface as an error; the caller treats any error here
 // as transient — it writes nothing, so the next sighting or stale-name
 // sweep retries (see ee/slack/channels.go).
-func slackConversationsInfo(ctx context.Context, client *http.Client, orgID, botToken, channelID string) (*conversationsInfoResult, error) {
+func slackConversationsInfo(ctx context.Context, client *http.Client, caller slackCaller, botToken, channelID string) (*conversationsInfoResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		slackAPIBase+"/conversations.info?channel="+url.QueryEscape(channelID), nil)
 	if err != nil {
@@ -284,7 +285,7 @@ func slackConversationsInfo(ctx context.Context, client *http.Client, orgID, bot
 			Name string `json:"name"`
 		} `json:"channel"`
 	}
-	if err := doSlackJSON(ctx, client, orgID, req, &out); err != nil {
+	if err := doSlackJSON(ctx, client, caller, req, &out); err != nil {
 		return nil, err
 	}
 	if !out.OK {
@@ -305,10 +306,13 @@ const slackRetryAfterCap = 30 * time.Second
 // so this only guards against a malformed upstream response.
 const slackRetryAfterDefault = 1 * time.Second
 
-// slackWait sits out a 429's wait before the retry, returning early with
-// ctx's error when ctx ends first. A var so a test can record the requested
-// duration instead of sleeping through it.
-var slackWait = upstream.Sleep
+// slackWait sits out a 429's wait before the retry, made for orgID, returning
+// early with ctx's error when ctx ends first. It waits through
+// upstream.WaitOnLimit, which logs the wait and counts the time waited. A var
+// so a test can record the requested duration instead of sleeping through it.
+var slackWait = func(ctx context.Context, orgID string, d time.Duration) error {
+	return upstream.WaitOnLimit(ctx, upstream.Slack, orgID, d)
+}
 
 // slackRateLimitError is doSlackJSON's error for a rate limit it did not
 // wait out: a second consecutive 429 after the single retry, or a first 429
@@ -330,12 +334,39 @@ func isSlackRateLimitError(err error) bool {
 	return errors.As(err, &e)
 }
 
+// slackCaller is who a Web API call is made for: the org its attempts are
+// counted under, and the credential whose per-method budget it spends
+// (countCall). credential is empty for a call made with a token that is not
+// stored yet, as the connect handler's checks are: its attempts are counted
+// under the org, but toward no budget.
+type slackCaller struct {
+	orgID string
+	// credential is an opaque id for the token, a metric label:
+	// slackBotCaller's or slackAppCaller's, never the token itself.
+	credential string
+}
+
+// slackBotCaller is a call made for orgID with the bot token of apiAppID's
+// install in workspaceID. Slack meters a bot token's calls to each method for
+// that (workspace, app) pair, so the pair is the credential.
+func slackBotCaller(orgID, workspaceID, apiAppID string) slackCaller {
+	return slackCaller{orgID: orgID, credential: "bot:" + workspaceID + ":" + apiAppID}
+}
+
+// slackAppCaller is a call made for orgID with apiAppID's app-level token,
+// which belongs to the app rather than to its install in any one workspace.
+func slackAppCaller(orgID, apiAppID string) slackCaller {
+	return slackCaller{orgID: orgID, credential: "app:" + apiAppID}
+}
+
 // doSlackJSON executes req and decodes the JSON body into out. Slack
 // answers 200 even for most application-level failures (the {"ok":false}
 // convention) — a non-2xx here means something more fundamental (rate
 // limit, upstream outage), so it's surfaced with the status and an excerpt
 // of the body rather than attempting to parse it as the {ok,...} shape.
-// Every attempt is counted against orgID under upstream.Slack.
+// Every attempt is counted against caller's org under upstream.Slack, and
+// every attempt Slack answers counts toward the budget of req's method, the
+// last element of its path, for caller's credential (countCall).
 //
 // A 429 is a special case. When its Retry-After (or slackRetryAfterDefault,
 // absent one) is at most slackRetryAfterCap, doSlackJSON waits it out,
@@ -344,8 +375,9 @@ func isSlackRateLimitError(err error) bool {
 // *slackRateLimitError after the first attempt, with no wait and no retry.
 // Nothing else is retried: a 5xx or a transport failure returns on the
 // attempt that met it.
-func doSlackJSON(ctx context.Context, client *http.Client, orgID string, req *http.Request, out any) error {
-	resp, body, err := doSlackRequest(ctx, client, orgID, req)
+func doSlackJSON(ctx context.Context, client *http.Client, caller slackCaller, req *http.Request, out any) error {
+	method := path.Base(req.URL.Path)
+	resp, body, err := doSlackCall(ctx, client, caller, method, req)
 	if err != nil {
 		return err
 	}
@@ -355,15 +387,15 @@ func doSlackJSON(ctx context.Context, client *http.Client, orgID string, req *ht
 		if wait > slackRetryAfterCap {
 			return &slackRateLimitError{retryAfter: wait}
 		}
-		upstream.RecordRetry(ctx, upstream.Slack, orgID, upstream.RateLimited)
-		if err := slackWait(ctx, wait); err != nil {
+		upstream.RecordRetry(ctx, upstream.Slack, caller.orgID, upstream.RateLimited)
+		if err := slackWait(ctx, caller.orgID, wait); err != nil {
 			return err
 		}
 		retryReq, err := cloneSlackRequest(ctx, req)
 		if err != nil {
 			return fmt.Errorf("slack api: rebuild request for retry: %w", err)
 		}
-		resp, body, err = doSlackRequest(ctx, client, orgID, retryReq)
+		resp, body, err = doSlackCall(ctx, client, caller, method, retryReq)
 		if err != nil {
 			return err
 		}
@@ -379,6 +411,18 @@ func doSlackJSON(ctx context.Context, client *http.Client, orgID string, req *ht
 		return fmt.Errorf("slack api: decode response: %w", err)
 	}
 	return nil
+}
+
+// doSlackCall makes one attempt at a Web API method (doSlackRequest) and
+// counts it toward the method's budget for caller's credential, unless it met
+// no response.
+func doSlackCall(ctx context.Context, client *http.Client, caller slackCaller, method string, req *http.Request) (*http.Response, []byte, error) {
+	resp, body, err := doSlackRequest(ctx, client, caller.orgID, req)
+	if err != nil {
+		return nil, nil, err
+	}
+	caller.countCall(method, resp.StatusCode == http.StatusTooManyRequests)
+	return resp, body, nil
 }
 
 // slackMaxResponseBody bounds how much of a successful Web API response
@@ -483,16 +527,16 @@ var slackConversationsListCap = 1000
 // truncated=true means the cap was hit before Slack ran out of pages — the
 // returned list is a prefix, not the whole universe (see
 // slackConversationsListCap).
-func slackConversationsList(ctx context.Context, client *http.Client, orgID, botToken string) (channels []slackConversation, truncated bool, err error) {
-	return slackConversationsPaginate(ctx, client, orgID, botToken, "conversations.list", "types=public_channel&exclude_archived=true&limit=200")
+func slackConversationsList(ctx context.Context, client *http.Client, caller slackCaller, botToken string) (channels []slackConversation, truncated bool, err error) {
+	return slackConversationsPaginate(ctx, client, caller, botToken, "conversations.list", "types=public_channel&exclude_archived=true&limit=200")
 }
 
 // slackUsersConversations enumerates the bot's own channel memberships
 // (public + private) via users.conversations — the source of BotIsMember /
 // IsPrivate for the live candidate merge. truncated has the same meaning as
 // slackConversationsList's.
-func slackUsersConversations(ctx context.Context, client *http.Client, orgID, botToken string) (channels []slackConversation, truncated bool, err error) {
-	return slackConversationsPaginate(ctx, client, orgID, botToken, "users.conversations", "types=public_channel,private_channel&exclude_archived=true&limit=200")
+func slackUsersConversations(ctx context.Context, client *http.Client, caller slackCaller, botToken string) (channels []slackConversation, truncated bool, err error) {
+	return slackConversationsPaginate(ctx, client, caller, botToken, "users.conversations", "types=public_channel,private_channel&exclude_archived=true&limit=200")
 }
 
 // slackConversationsPaginate is the shared pagination loop for
@@ -504,7 +548,7 @@ func slackUsersConversations(ctx context.Context, client *http.Client, orgID, bo
 // means slackConversationsListCap was hit while Slack still had more pages
 // (a non-empty next_cursor) — the caller must not treat the returned list as
 // exhaustive; it surfaces a warning rather than silently under-reporting.
-func slackConversationsPaginate(ctx context.Context, client *http.Client, orgID, botToken, method, query string) (out []slackConversation, truncated bool, err error) {
+func slackConversationsPaginate(ctx context.Context, client *http.Client, caller slackCaller, botToken, method, query string) (out []slackConversation, truncated bool, err error) {
 	cursor := ""
 	for {
 		reqURL := slackAPIBase + "/" + method + "?" + query
@@ -529,7 +573,7 @@ func slackConversationsPaginate(ctx context.Context, client *http.Client, orgID,
 				NextCursor string `json:"next_cursor"`
 			} `json:"response_metadata"`
 		}
-		if err := doSlackJSON(ctx, client, orgID, req, &resp); err != nil {
+		if err := doSlackJSON(ctx, client, caller, req, &resp); err != nil {
 			return nil, false, err
 		}
 		if !resp.OK {
@@ -581,7 +625,7 @@ func isSlackJoinPrivateChannelError(err error) bool {
 // since #561). A private-channel failure surfaces as
 // *slackJoinPrivateChannelError (see isSlackJoinPrivateChannelError); any
 // other non-ok response is a plain error (join_failed).
-func slackConversationsJoin(ctx context.Context, client *http.Client, orgID, botToken, channelID string) error {
+func slackConversationsJoin(ctx context.Context, client *http.Client, caller slackCaller, botToken, channelID string) error {
 	form := url.Values{"channel": {channelID}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, slackAPIBase+"/conversations.join",
 		bytes.NewReader([]byte(form.Encode())))
@@ -595,7 +639,7 @@ func slackConversationsJoin(ctx context.Context, client *http.Client, orgID, bot
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`
 	}
-	if err := doSlackJSON(ctx, client, orgID, req, &resp); err != nil {
+	if err := doSlackJSON(ctx, client, caller, req, &resp); err != nil {
 		return err
 	}
 	if !resp.OK {
@@ -681,7 +725,7 @@ func slackMarkdownBlocksFor(markdown string) ([]slackMarkdownBlock, error) {
 // applies uniformly; the JSON body is built from a bytes.Reader, so
 // doSlackJSON's retry clone (cloneSlackRequest) can always replay it via
 // the standard library's auto-populated GetBody.
-func slackPostJSON(ctx context.Context, client *http.Client, orgID, botToken, method string, payload, out any) error {
+func slackPostJSON(ctx context.Context, client *http.Client, caller slackCaller, botToken, method string, payload, out any) error {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("slack api: marshal %s payload: %w", method, err)
@@ -692,7 +736,7 @@ func slackPostJSON(ctx context.Context, client *http.Client, orgID, botToken, me
 	}
 	req.Header.Set("Authorization", "Bearer "+botToken)
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	return doSlackJSON(ctx, client, orgID, req, out)
+	return doSlackJSON(ctx, client, caller, req, out)
 }
 
 // slackChatPostMessage posts a new message via chat.postMessage, returning
@@ -702,7 +746,7 @@ func slackPostJSON(ctx context.Context, client *http.Client, orgID, botToken, me
 // is sent as a single {type:"markdown"} block alongside params.Text as the
 // plain-text notification fallback — blocks are never sent alone, so a
 // screen reader or notification surface still has something to render.
-func slackChatPostMessage(ctx context.Context, client *http.Client, orgID, botToken string, params slackMessageParams) (ts string, err error) {
+func slackChatPostMessage(ctx context.Context, client *http.Client, caller slackCaller, botToken string, params slackMessageParams) (ts string, err error) {
 	blocks, err := slackMarkdownBlocksFor(params.MarkdownBody)
 	if err != nil {
 		return "", err
@@ -720,7 +764,7 @@ func slackChatPostMessage(ctx context.Context, client *http.Client, orgID, botTo
 		Error string `json:"error"`
 		TS    string `json:"ts"`
 	}
-	if err := slackPostJSON(ctx, client, orgID, botToken, "chat.postMessage", body, &out); err != nil {
+	if err := slackPostJSON(ctx, client, caller, botToken, "chat.postMessage", body, &out); err != nil {
 		return "", err
 	}
 	if !out.OK {
@@ -739,7 +783,7 @@ func slackChatPostMessage(ctx context.Context, client *http.Client, orgID, botTo
 // markdown formatting across an edit MUST re-supply MarkdownBody — this
 // wrapper does not fetch-and-preserve the prior body on the caller's
 // behalf.
-func slackChatUpdate(ctx context.Context, client *http.Client, orgID, botToken string, params slackMessageParams) error {
+func slackChatUpdate(ctx context.Context, client *http.Client, caller slackCaller, botToken string, params slackMessageParams) error {
 	blocks, err := slackMarkdownBlocksFor(params.MarkdownBody)
 	if err != nil {
 		return err
@@ -753,7 +797,7 @@ func slackChatUpdate(ctx context.Context, client *http.Client, orgID, botToken s
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`
 	}
-	if err := slackPostJSON(ctx, client, orgID, botToken, "chat.update", body, &out); err != nil {
+	if err := slackPostJSON(ctx, client, caller, botToken, "chat.update", body, &out); err != nil {
 		return err
 	}
 	if !out.OK {
@@ -766,7 +810,7 @@ func slackChatUpdate(ctx context.Context, client *http.Client, orgID, botToken s
 // Slack's own "already_reacted" error means the reaction is already there —
 // exactly the caller's desired end state — so it's treated as success
 // rather than surfaced as an error.
-func slackReactionsAdd(ctx context.Context, client *http.Client, orgID, botToken, channel, ts, name string) error {
+func slackReactionsAdd(ctx context.Context, client *http.Client, caller slackCaller, botToken, channel, ts, name string) error {
 	form := url.Values{"channel": {channel}, "timestamp": {ts}, "name": {name}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, slackAPIBase+"/reactions.add",
 		bytes.NewReader([]byte(form.Encode())))
@@ -780,7 +824,7 @@ func slackReactionsAdd(ctx context.Context, client *http.Client, orgID, botToken
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`
 	}
-	if err := doSlackJSON(ctx, client, orgID, req, &resp); err != nil {
+	if err := doSlackJSON(ctx, client, caller, req, &resp); err != nil {
 		return err
 	}
 	if !resp.OK && resp.Error != "already_reacted" {
@@ -823,7 +867,7 @@ var slackConversationsRepliesCap = 1000
 // limit=1, that loop would cost one HTTP request PER REPLY (each potentially
 // blocking on a 429 Retry-After) just to reach cursor exhaustion, for a
 // value already known after this one page.
-func slackConversationsRepliesPage(ctx context.Context, client *http.Client, orgID, botToken, channel, ts string, limit int, cursor string) (messages []slackMessage, nextCursor string, hasMore bool, err error) {
+func slackConversationsRepliesPage(ctx context.Context, client *http.Client, caller slackCaller, botToken, channel, ts string, limit int, cursor string) (messages []slackMessage, nextCursor string, hasMore bool, err error) {
 	q := url.Values{"channel": {channel}, "ts": {ts}}
 	if limit > 0 {
 		q.Set("limit", strconv.Itoa(limit))
@@ -856,7 +900,7 @@ func slackConversationsRepliesPage(ctx context.Context, client *http.Client, org
 			NextCursor string `json:"next_cursor"`
 		} `json:"response_metadata"`
 	}
-	if err := doSlackJSON(ctx, client, orgID, req, &resp); err != nil {
+	if err := doSlackJSON(ctx, client, caller, req, &resp); err != nil {
 		return nil, "", false, err
 	}
 	if !resp.OK {
@@ -878,10 +922,10 @@ func slackConversationsRepliesPage(ctx context.Context, client *http.Client, org
 // truncated=true means the cap was hit before Slack ran out of pages — the
 // same contract as slackConversationsList's truncated. limit, when > 0, is
 // passed through as the per-page size Slack should return.
-func slackConversationsReplies(ctx context.Context, client *http.Client, orgID, botToken, channel, ts string, limit int) (messages []slackMessage, truncated bool, err error) {
+func slackConversationsReplies(ctx context.Context, client *http.Client, caller slackCaller, botToken, channel, ts string, limit int) (messages []slackMessage, truncated bool, err error) {
 	cursor := ""
 	for {
-		page, nextCursor, hasMore, err := slackConversationsRepliesPage(ctx, client, orgID, botToken, channel, ts, limit, cursor)
+		page, nextCursor, hasMore, err := slackConversationsRepliesPage(ctx, client, caller, botToken, channel, ts, limit, cursor)
 		if err != nil {
 			return nil, false, err
 		}
@@ -916,7 +960,7 @@ type slackConversationsHistoryParams struct {
 // anchor (Inclusive=false) for the messages just before it, Oldest=anchor
 // (Inclusive=false) for the messages just after — rather than this wrapper
 // walking cursors on its own.
-func slackConversationsHistory(ctx context.Context, client *http.Client, orgID, botToken string, params slackConversationsHistoryParams) ([]slackMessage, error) {
+func slackConversationsHistory(ctx context.Context, client *http.Client, caller slackCaller, botToken string, params slackConversationsHistoryParams) ([]slackMessage, error) {
 	q := url.Values{"channel": {params.Channel}}
 	if params.Latest != "" {
 		q.Set("latest", params.Latest)
@@ -951,7 +995,7 @@ func slackConversationsHistory(ctx context.Context, client *http.Client, orgID, 
 			} `json:"files"`
 		} `json:"messages"`
 	}
-	if err := doSlackJSON(ctx, client, orgID, req, &resp); err != nil {
+	if err := doSlackJSON(ctx, client, caller, req, &resp); err != nil {
 		return nil, err
 	}
 	if !resp.OK {
@@ -988,7 +1032,7 @@ func slackMessageFilesFrom(files []struct {
 
 // slackChatGetPermalink resolves a message's shareable URL via
 // chat.getPermalink. No extra scopes needed beyond what's already granted.
-func slackChatGetPermalink(ctx context.Context, client *http.Client, orgID, botToken, channel, messageTS string) (string, error) {
+func slackChatGetPermalink(ctx context.Context, client *http.Client, caller slackCaller, botToken, channel, messageTS string) (string, error) {
 	q := url.Values{"channel": {channel}, "message_ts": {messageTS}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, slackAPIBase+"/chat.getPermalink?"+q.Encode(), nil)
 	if err != nil {
@@ -1001,7 +1045,7 @@ func slackChatGetPermalink(ctx context.Context, client *http.Client, orgID, botT
 		Error     string `json:"error"`
 		Permalink string `json:"permalink"`
 	}
-	if err := doSlackJSON(ctx, client, orgID, req, &out); err != nil {
+	if err := doSlackJSON(ctx, client, caller, req, &out); err != nil {
 		return "", err
 	}
 	if !out.OK {
@@ -1028,7 +1072,7 @@ const slackAssistantLoadingMessagesMax = 10
 // loading_messages is a real JSON string array on the wire, the shape the
 // official SDKs send — a form-encoded scalar would need a joining
 // convention the API doesn't document.
-func slackAssistantSetStatus(ctx context.Context, client *http.Client, orgID, botToken, channel, threadTS, status string, loadingMessages []string) error {
+func slackAssistantSetStatus(ctx context.Context, client *http.Client, caller slackCaller, botToken, channel, threadTS, status string, loadingMessages []string) error {
 	if len(loadingMessages) > slackAssistantLoadingMessagesMax {
 		loadingMessages = loadingMessages[:slackAssistantLoadingMessagesMax]
 	}
@@ -1041,7 +1085,7 @@ func slackAssistantSetStatus(ctx context.Context, client *http.Client, orgID, bo
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`
 	}
-	if err := slackPostJSON(ctx, client, orgID, botToken, "assistant.threads.setStatus", payload, &resp); err != nil {
+	if err := slackPostJSON(ctx, client, caller, botToken, "assistant.threads.setStatus", payload, &resp); err != nil {
 		return err
 	}
 	if !resp.OK {
@@ -1072,7 +1116,7 @@ type slackFileInfoResult struct {
 // slackFilesInfo looks up a file's metadata via files.info — the
 // prerequisite for slackFileDownload, which needs URLPrivate, and for
 // authorizing the download against the file's channel(s).
-func slackFilesInfo(ctx context.Context, client *http.Client, orgID, botToken, fileID string) (*slackFileInfoResult, error) {
+func slackFilesInfo(ctx context.Context, client *http.Client, caller slackCaller, botToken, fileID string) (*slackFileInfoResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		slackAPIBase+"/files.info?file="+url.QueryEscape(fileID), nil)
 	if err != nil {
@@ -1097,7 +1141,7 @@ func slackFilesInfo(ctx context.Context, client *http.Client, orgID, botToken, f
 			} `json:"shares"`
 		} `json:"file"`
 	}
-	if err := doSlackJSON(ctx, client, orgID, req, &out); err != nil {
+	if err := doSlackJSON(ctx, client, caller, req, &out); err != nil {
 		return nil, err
 	}
 	if !out.OK {
@@ -1143,7 +1187,7 @@ func unionSlackFileChannels(channels, groups []string, shareMaps ...map[string]j
 // NOT flow through doSlackJSON (this isn't a slack.com/api {ok,...}
 // endpoint, and the response body is opaque file bytes, not JSON) — no 429
 // retry here, matching the rest of this function's plain-HTTP posture.
-func slackFileDownload(ctx context.Context, client *http.Client, orgID, botToken, urlPrivate string, w io.Writer) error {
+func slackFileDownload(ctx context.Context, client *http.Client, caller slackCaller, botToken, urlPrivate string, w io.Writer) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlPrivate, nil)
 	if err != nil {
 		return err
@@ -1152,18 +1196,18 @@ func slackFileDownload(ctx context.Context, client *http.Client, orgID, botToken
 
 	resp, err := client.Do(req)
 	if err != nil {
-		recordSlackTransport(ctx, orgID, err)
+		recordSlackTransport(ctx, caller.orgID, err)
 		return fmt.Errorf("slack file download request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := upstream.ReadErrorBody(resp.Body)
-		upstream.Record(ctx, upstream.Slack, orgID, upstream.ClassifyResponse(resp.StatusCode, resp.Header, body))
+		upstream.Record(ctx, upstream.Slack, caller.orgID, upstream.ClassifyResponse(resp.StatusCode, resp.Header, body))
 		return fmt.Errorf("slack file download: http %d: %s", resp.StatusCode, upstream.Excerpt(body))
 	}
 	// The attempt is counted by its response; a failure while streaming the
 	// file after a 200 is returned but not counted a second time.
-	upstream.Record(ctx, upstream.Slack, orgID, upstream.OK)
+	upstream.Record(ctx, upstream.Slack, caller.orgID, upstream.OK)
 	if _, err := io.Copy(w, resp.Body); err != nil {
 		return fmt.Errorf("slack file download: copy response body: %w", err)
 	}
@@ -1184,7 +1228,7 @@ type slackUploadedFile struct {
 // changelog), so this — files.getUploadURLExternal +
 // files.completeUploadExternal — is the only current path. It reserves a
 // short-lived upload destination sized for a file of length bytes.
-func slackGetUploadURLExternal(ctx context.Context, client *http.Client, orgID, botToken, filename string, length int) (uploadURL, fileID string, err error) {
+func slackGetUploadURLExternal(ctx context.Context, client *http.Client, caller slackCaller, botToken, filename string, length int) (uploadURL, fileID string, err error) {
 	form := url.Values{"filename": {filename}, "length": {strconv.Itoa(length)}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, slackAPIBase+"/files.getUploadURLExternal",
 		bytes.NewReader([]byte(form.Encode())))
@@ -1200,7 +1244,7 @@ func slackGetUploadURLExternal(ctx context.Context, client *http.Client, orgID, 
 		UploadURL string `json:"upload_url"`
 		FileID    string `json:"file_id"`
 	}
-	if err := doSlackJSON(ctx, client, orgID, req, &out); err != nil {
+	if err := doSlackJSON(ctx, client, caller, req, &out); err != nil {
 		return "", "", err
 	}
 	if !out.OK {
@@ -1215,14 +1259,14 @@ func slackGetUploadURLExternal(ctx context.Context, client *http.Client, orgID, 
 // doSlackJSON envelope decode (Slack's response here isn't the {ok,...}
 // shape). Streams from r rather than buffering, mirroring
 // slackFileDownload's rationale in the opposite direction.
-func slackUploadFileBytes(ctx context.Context, client *http.Client, orgID, uploadURL string, r io.Reader) error {
+func slackUploadFileBytes(ctx context.Context, client *http.Client, caller slackCaller, uploadURL string, r io.Reader) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, r)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 
-	resp, body, err := doSlackRequest(ctx, client, orgID, req)
+	resp, body, err := doSlackRequest(ctx, client, caller.orgID, req)
 	if err != nil {
 		return fmt.Errorf("slack file upload: %w", err)
 	}
@@ -1236,7 +1280,7 @@ func slackUploadFileBytes(ctx context.Context, client *http.Client, orgID, uploa
 // slackGetUploadURLExternal and uploaded via slackUploadFileBytes, sharing
 // them into channel (in-thread when threadTS is set) — the second leg of
 // the v2 upload flow.
-func slackCompleteUploadExternal(ctx context.Context, client *http.Client, orgID, botToken, channel, threadTS string, files []slackUploadedFile) error {
+func slackCompleteUploadExternal(ctx context.Context, client *http.Client, caller slackCaller, botToken, channel, threadTS string, files []slackUploadedFile) error {
 	body := map[string]any{"files": files}
 	if channel != "" {
 		body["channel_id"] = channel
@@ -1249,7 +1293,7 @@ func slackCompleteUploadExternal(ctx context.Context, client *http.Client, orgID
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`
 	}
-	if err := slackPostJSON(ctx, client, orgID, botToken, "files.completeUploadExternal", body, &out); err != nil {
+	if err := slackPostJSON(ctx, client, caller, botToken, "files.completeUploadExternal", body, &out); err != nil {
 		return err
 	}
 	if !out.OK {
@@ -1273,15 +1317,15 @@ type slackFileUploadParams struct {
 // (slackGetUploadURLExternal), upload the bytes (slackUploadFileBytes),
 // complete (slackCompleteUploadExternal) — landing it in Channel, in-thread
 // when ThreadTS is set. Returns the file id Slack assigned.
-func slackFilesUpload(ctx context.Context, client *http.Client, orgID, botToken string, params slackFileUploadParams) (fileID string, err error) {
-	uploadURL, fileID, err := slackGetUploadURLExternal(ctx, client, orgID, botToken, params.Filename, params.Length)
+func slackFilesUpload(ctx context.Context, client *http.Client, caller slackCaller, botToken string, params slackFileUploadParams) (fileID string, err error) {
+	uploadURL, fileID, err := slackGetUploadURLExternal(ctx, client, caller, botToken, params.Filename, params.Length)
 	if err != nil {
 		return "", err
 	}
-	if err := slackUploadFileBytes(ctx, client, orgID, uploadURL, params.Body); err != nil {
+	if err := slackUploadFileBytes(ctx, client, caller, uploadURL, params.Body); err != nil {
 		return "", err
 	}
-	if err := slackCompleteUploadExternal(ctx, client, orgID, botToken, params.Channel, params.ThreadTS,
+	if err := slackCompleteUploadExternal(ctx, client, caller, botToken, params.Channel, params.ThreadTS,
 		[]slackUploadedFile{{ID: fileID, Title: params.Title}}); err != nil {
 		return "", err
 	}

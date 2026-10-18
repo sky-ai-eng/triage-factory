@@ -31,7 +31,7 @@ func TestSlackChatPostMessage_PlainText(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "ts": "1700000000.000001"})
 	})
 
-	ts, err := slackChatPostMessage(context.Background(), srv.Client(), "org-1", "xoxb-test",
+	ts, err := slackChatPostMessage(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test",
 		slackMessageParams{Channel: "C1", Text: "hello"})
 	if err != nil {
 		t.Fatalf("slackChatPostMessage: %v", err)
@@ -59,7 +59,7 @@ func TestSlackChatPostMessage_MarkdownBody_SendsBlocksAndTextFallback(t *testing
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "ts": "1700000000.000002"})
 	})
 
-	_, err := slackChatPostMessage(context.Background(), srv.Client(), "org-1", "xoxb-test", slackMessageParams{
+	_, err := slackChatPostMessage(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", slackMessageParams{
 		Channel: "C1", ThreadTS: "1699999999.000001", Text: "fallback", MarkdownBody: "**bold**",
 	})
 	if err != nil {
@@ -92,7 +92,7 @@ func TestSlackChatPostMessage_MarkdownTooLong_ReturnsTypedError_NoRequestSent(t 
 	})
 
 	over := strings.Repeat("a", slackMarkdownBodyMaxRunes+1)
-	_, err := slackChatPostMessage(context.Background(), srv.Client(), "org-1", "xoxb-test",
+	_, err := slackChatPostMessage(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test",
 		slackMessageParams{Channel: "C1", Text: "t", MarkdownBody: over})
 	if err == nil {
 		t.Fatal("slackChatPostMessage with an over-cap markdown body should error")
@@ -118,7 +118,7 @@ func TestSlackChatUpdate_SendsTSNotThreadTS_AndPairsBlocksWithText(t *testing.T)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
 
-	err := slackChatUpdate(context.Background(), srv.Client(), "org-1", "xoxb-test", slackMessageParams{
+	err := slackChatUpdate(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", slackMessageParams{
 		Channel: "C1", ThreadTS: "1700000000.000003", Text: "edited", MarkdownBody: "*edited*",
 	})
 	if err != nil {
@@ -144,7 +144,7 @@ func TestSlackChatUpdate_NotOk(t *testing.T) {
 	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "message_not_found"})
 	})
-	err := slackChatUpdate(context.Background(), srv.Client(), "org-1", "xoxb-test", slackMessageParams{Channel: "C1", ThreadTS: "1.0", Text: "x"})
+	err := slackChatUpdate(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", slackMessageParams{Channel: "C1", ThreadTS: "1.0", Text: "x"})
 	if err == nil {
 		t.Fatal("slackChatUpdate with {ok:false} should return an error")
 	}
@@ -159,7 +159,7 @@ func TestSlackReactionsAdd_AlreadyReacted_TreatedAsSuccess(t *testing.T) {
 	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "already_reacted"})
 	})
-	if err := slackReactionsAdd(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1.0", "eyes"); err != nil {
+	if err := slackReactionsAdd(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", "C1", "1.0", "eyes"); err != nil {
 		t.Errorf("slackReactionsAdd(already_reacted) = %v; want nil", err)
 	}
 }
@@ -176,7 +176,7 @@ func TestSlackReactionsAdd_OtherError_Surfaces(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "invalid_name"})
 	})
-	if err := slackReactionsAdd(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1.0", "eyes"); err == nil {
+	if err := slackReactionsAdd(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", "C1", "1.0", "eyes"); err == nil {
 		t.Fatal("slackReactionsAdd(invalid_name) should return an error")
 	}
 }
@@ -228,7 +228,7 @@ func withLoweredRepliesCap(t *testing.T, n int) {
 // truncated.
 func TestSlackConversationsReplies_PaginatesAcrossPages(t *testing.T) {
 	srv := fakePaginatedReplies(t, 25, 10)
-	got, truncated, err := slackConversationsReplies(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1600000000.000000", 0)
+	got, truncated, err := slackConversationsReplies(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", "C1", "1600000000.000000", 0)
 	if err != nil {
 		t.Fatalf("slackConversationsReplies: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestSlackConversationsReplies_PaginatesAcrossPages(t *testing.T) {
 func TestSlackConversationsReplies_CapTruncates(t *testing.T) {
 	withLoweredRepliesCap(t, 15)
 	srv := fakePaginatedReplies(t, 40, 10)
-	got, truncated, err := slackConversationsReplies(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1600000000.000000", 0)
+	got, truncated, err := slackConversationsReplies(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", "C1", "1600000000.000000", 0)
 	if err != nil {
 		t.Fatalf("slackConversationsReplies: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestSlackConversationsReplies_NotOk(t *testing.T) {
 	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "thread_not_found"})
 	})
-	_, _, err := slackConversationsReplies(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1.0", 0)
+	_, _, err := slackConversationsReplies(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", "C1", "1.0", 0)
 	if err == nil {
 		t.Fatal("slackConversationsReplies with {ok:false} should return an error")
 	}
@@ -293,7 +293,7 @@ func TestSlackConversationsHistory_ParamsAndBounds(t *testing.T) {
 		})
 	})
 
-	got, err := slackConversationsHistory(context.Background(), srv.Client(), "org-1", "xoxb-test", slackConversationsHistoryParams{
+	got, err := slackConversationsHistory(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", slackConversationsHistoryParams{
 		Channel: "C1", Latest: "1700000000.000000", Limit: 5,
 	})
 	if err != nil {
@@ -317,7 +317,7 @@ func TestSlackConversationsHistory_OldestInclusive(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "messages": []map[string]any{}})
 	})
-	if _, err := slackConversationsHistory(context.Background(), srv.Client(), "org-1", "xoxb-test", slackConversationsHistoryParams{
+	if _, err := slackConversationsHistory(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", slackConversationsHistoryParams{
 		Channel: "C1", Oldest: "1700000000.000000", Inclusive: true,
 	}); err != nil {
 		t.Fatalf("slackConversationsHistory: %v", err)
@@ -335,7 +335,7 @@ func TestSlackChatGetPermalink_GoldenDecode(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "permalink": "https://acme.slack.com/archives/C1/p1700000000000000"})
 	})
-	got, err := slackChatGetPermalink(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1700000000.000000")
+	got, err := slackChatGetPermalink(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", "C1", "1700000000.000000")
 	if err != nil {
 		t.Fatalf("slackChatGetPermalink: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestSlackChatGetPermalink_NotOk(t *testing.T) {
 	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "message_not_found"})
 	})
-	_, err := slackChatGetPermalink(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1.0")
+	_, err := slackChatGetPermalink(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", "C1", "1.0")
 	if err == nil {
 		t.Fatal("slackChatGetPermalink with {ok:false} should return an error")
 	}
@@ -384,7 +384,7 @@ func TestSlackAssistantSetStatus_GoldenParams(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
-	err := slackAssistantSetStatus(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1700000000.000000",
+	err := slackAssistantSetStatus(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", "C1", "1700000000.000000",
 		"is thinking...", []string{"step one, with a comma", "step two"})
 	if err != nil {
 		t.Fatalf("slackAssistantSetStatus: %v", err)
@@ -412,7 +412,7 @@ func TestSlackAssistantSetStatus_EmptyStatusClears(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
-	if err := slackAssistantSetStatus(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1.0", "", nil); err != nil {
+	if err := slackAssistantSetStatus(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", "C1", "1.0", "", nil); err != nil {
 		t.Fatalf("slackAssistantSetStatus: %v", err)
 	}
 }
@@ -436,7 +436,7 @@ func TestSlackAssistantSetStatus_TruncatesLoadingMessagesOver10(t *testing.T) {
 	for i := range many {
 		many[i] = fmt.Sprintf("step %d", i)
 	}
-	if err := slackAssistantSetStatus(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1.0", "working", many); err != nil {
+	if err := slackAssistantSetStatus(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", "C1", "1.0", "working", many); err != nil {
 		t.Fatalf("slackAssistantSetStatus: %v", err)
 	}
 }
@@ -456,7 +456,7 @@ func TestSlackFilesInfo_GoldenDecode(t *testing.T) {
 			},
 		})
 	})
-	got, err := slackFilesInfo(context.Background(), srv.Client(), "org-1", "xoxb-test", "F1")
+	got, err := slackFilesInfo(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", "F1")
 	if err != nil {
 		t.Fatalf("slackFilesInfo: %v", err)
 	}
@@ -479,7 +479,7 @@ func TestSlackFileDownload_StreamsBodyWithBearerAuth(t *testing.T) {
 
 	var buf bytes.Buffer
 	ctx, tally := upstream.WithTally(context.Background())
-	if err := slackFileDownload(ctx, srv.Client(), "org-1", "xoxb-test", srv.URL+"/files-pri/T1-F1/x.txt", &buf); err != nil {
+	if err := slackFileDownload(ctx, srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", srv.URL+"/files-pri/T1-F1/x.txt", &buf); err != nil {
 		t.Fatalf("slackFileDownload: %v", err)
 	}
 	if buf.String() != payload {
@@ -503,7 +503,7 @@ func TestSlackFileDownload_HTTPError(t *testing.T) {
 
 	var buf bytes.Buffer
 	ctx, tally := upstream.WithTally(context.Background())
-	err := slackFileDownload(ctx, srv.Client(), "org-1", "xoxb-test", srv.URL+"/x.txt", &buf)
+	err := slackFileDownload(ctx, srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", srv.URL+"/x.txt", &buf)
 	if err == nil {
 		t.Fatal("slackFileDownload with HTTP 403 should return an error")
 	}
@@ -529,7 +529,7 @@ func TestSlackUploadFileBytes_HTTPError(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	ctx, tally := upstream.WithTally(context.Background())
-	err := slackUploadFileBytes(ctx, srv.Client(), "org-1", srv.URL+"/upload/v1/XYZ", strings.NewReader("x"))
+	err := slackUploadFileBytes(ctx, srv.Client(), slackCaller{orgID: "org-1"}, srv.URL+"/upload/v1/XYZ", strings.NewReader("x"))
 	if err == nil {
 		t.Fatal("slackUploadFileBytes with HTTP 500 should return an error")
 	}
@@ -583,7 +583,7 @@ func TestSlackFilesUpload_FullFlow(t *testing.T) {
 	slackAPIBase = srv.URL
 	t.Cleanup(func() { slackAPIBase = orig })
 
-	fileID, err := slackFilesUpload(context.Background(), srv.Client(), "org-1", "xoxb-test", slackFileUploadParams{
+	fileID, err := slackFilesUpload(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", slackFileUploadParams{
 		Filename: "report.txt", Length: 11, Title: "Report", Channel: "C1", ThreadTS: "1700000000.000000",
 		Body: strings.NewReader("hello world"),
 	})
@@ -617,7 +617,7 @@ func TestSlackFilesUpload_GetUploadURLFails(t *testing.T) {
 		hits++
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "invalid_length"})
 	})
-	_, err := slackFilesUpload(context.Background(), srv.Client(), "org-1", "xoxb-test", slackFileUploadParams{
+	_, err := slackFilesUpload(context.Background(), srv.Client(), slackCaller{orgID: "org-1"}, "xoxb-test", slackFileUploadParams{
 		Filename: "x.txt", Length: 1, Channel: "C1", Body: strings.NewReader("x"),
 	})
 	if err == nil {
