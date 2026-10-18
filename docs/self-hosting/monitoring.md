@@ -686,9 +686,11 @@ The rate-limited responses themselves are
   write they make from TF) report no reading: Linear meters each user
   separately, and a user is never a label.
 - `bucket` is `requests`, counted in requests, or `complexity`, counted in
-  query points. When an endpoint's own limit applies, Linear states it too, as
-  a count of requests to that endpoint, and it is reported as
-  `endpoint:<name>`, with the name Linear sends in `X-RateLimit-Endpoint-Name`.
+  query points. Some endpoints have a limit of their own, such as
+  `searchIssues` at 30 requests a minute. Linear states one only in the
+  response that refuses a request for it, as a count of requests to that
+  endpoint, so it is reported at 0 left, as `endpoint:<name>`, with the name
+  Linear sends in `X-RateLimit-Endpoint-Name`.
   Linear does not publish those names, so each pod reports at most 32 of them,
   each at most 64 letters, digits, `_`, `.` or `-`. A name outside that is not
   reported, and the first one refused for the limit of 32 is logged at WARN

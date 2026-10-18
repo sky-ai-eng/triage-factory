@@ -650,8 +650,12 @@ save under the new workspace never touches them.
 A request still rate limited after the client's 30 seconds of waiting ends the
 org's cycle where it lands. Nothing further is sent to Linear that cycle, the
 writes already made stand, and the poll-complete sentinel is not emitted. When
-Linear said when the window resets, the org's next cycle is scheduled for then
-instead of at its poll interval, and a settings save does not bring it forward.
+Linear said when the limit that refused the request resets, the org's next
+cycle is scheduled for then instead of at its poll interval, and a settings
+save does not bring it forward. That limit is the one the refusal shows with
+nothing left, which can be an endpoint's own limit with a window of a minute;
+a refusal that shows none spent is read as the later of the hourly request and
+complexity limits.
 A rate-limited request says nothing about the issues it asked for, so it never
 leads to `unreachable`.
 
