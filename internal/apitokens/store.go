@@ -93,9 +93,11 @@ type Identity struct {
 	TokenID string
 	UserID  string
 	OrgID   string
-	// Email is the address the principal's login identity carries, empty when
-	// none does. Display and claims material only; the token, not the address,
-	// is what authenticated.
+	// Email is a verified address one of the principal's login identities
+	// holds, empty when none does. Unverified addresses are never carried: one
+	// may be whatever an identity provider asserted, and this value becomes the
+	// request's claims email. Display and claims material only; the token, not
+	// the address, is what authenticated.
 	Email string
 	// AllowedCIDRs is the token's IP allowlist, nil when it has none. Lookup
 	// carries the ranges and decides nothing about them: matching a request's
@@ -286,9 +288,9 @@ func (s *Store) LookupSystem(ctx context.Context, raw string) (*Identity, error)
 		cidrsJSON sql.NullString
 	)
 	// The email comes from the principal's login identities, not from
-	// public.users, which stores none. A principal may hold several; the
-	// verified one wins, then the oldest, so the answer is stable rather than
-	// whichever row the planner reached first.
+	// public.users, which stores none. Only verified rows count (see
+	// Identity.Email). A principal may hold several; the oldest wins, so the
+	// answer is stable rather than whichever row the planner reached first.
 	err := s.db.QueryRowContext(ctx, `
 		SELECT t.id::text, t.user_id::text, t.org_id::text,
 		       COALESCE(em.email, ''),
@@ -298,8 +300,8 @@ func (s *Store) LookupSystem(ctx context.Context, raw string) (*Identity, error)
 		  LEFT JOIN LATERAL (
 		       SELECT ui.email
 		         FROM public.user_identities ui
-		        WHERE ui.user_id = t.user_id AND COALESCE(ui.email, '') <> ''
-		        ORDER BY ui.email_verified DESC, ui.created_at ASC
+		        WHERE ui.user_id = t.user_id AND COALESCE(ui.email, '') <> '' AND ui.email_verified
+		        ORDER BY ui.created_at ASC
 		        LIMIT 1
 		  ) em ON true
 		 WHERE t.token_hash = $1

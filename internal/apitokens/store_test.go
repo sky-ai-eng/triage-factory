@@ -893,6 +893,28 @@ func TestLookupCarriesIdentityEmailAndCIDRs(t *testing.T) {
 	}
 }
 
+// TestLookupOmitsUnverifiedEmail: a principal whose only address is unverified
+// gets no email on its token identity. That value becomes the request's claims
+// email, and an unverified address may be whatever an identity provider
+// asserted.
+func TestLookupOmitsUnverifiedEmail(t *testing.T) {
+	store, h, userID, orgID := newStoreForTest(t)
+	ctx := context.Background()
+	pgtest.SeedIdentity(t, h, userID, "asserted@corp.example", false)
+
+	_, plaintext, err := store.MintSystem(ctx, userID, orgID, "id", nil, nil, userID)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	id, err := store.LookupSystem(ctx, plaintext)
+	if err != nil || id == nil {
+		t.Fatalf("Lookup: %v / %+v", err, id)
+	}
+	if id.Email != "" {
+		t.Errorf("Email = %q, want empty: the principal holds no verified address", id.Email)
+	}
+}
+
 func TestTouchLastUsed(t *testing.T) {
 	store, _, userID, orgID := newStoreForTest(t)
 	ctx := context.Background()

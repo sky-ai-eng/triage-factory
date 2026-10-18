@@ -53,12 +53,14 @@ func (s *operatorStore) IsOperatorUserSystem(ctx context.Context, userID string)
 	if strings.TrimSpace(userID) == "" {
 		return false, nil
 	}
+	// Both sides folded: Add stores the address lower-cased, but a row written
+	// by hand in another case would otherwise never match, silently.
 	var ok bool
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT EXISTS (
 			SELECT 1
 			  FROM public.operators o
-			  JOIN public.user_identities i ON lower(i.email) = o.email
+			  JOIN public.user_identities i ON lower(i.email) = lower(o.email)
 			 WHERE i.user_id = $1 AND i.email_verified
 		)`, userID).Scan(&ok)
 	if err != nil {

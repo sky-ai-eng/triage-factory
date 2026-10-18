@@ -1448,9 +1448,16 @@ func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid
 		// below sees a settled answer. Taken whether or not the address is trusted,
 		// because an untrusted login can become a trusted one at its next sign-in.
 		// Consistent lock order (identity then email) avoids deadlock.
+		//
+		// The lock key and both lookups below fold the address with Postgres lower(),
+		// the function the one-principal-per-verified-email constraint folds with, so
+		// all three agree on what "the same address" is. Go's strings.ToLower above
+		// only normalizes what is stored; where its Unicode folding differs from the
+		// database's, two logins keyed on it could take different locks and then
+		// meet at the constraint.
 		if email != "" {
 			if _, err := tx.ExecContext(ctx,
-				`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, email); err != nil {
+				`SELECT pg_advisory_xact_lock(hashtextextended(lower($1), 0))`, email); err != nil {
 				return fmt.Errorf("acquire email lock: %w", err)
 			}
 		}
@@ -1473,7 +1480,7 @@ func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid
 				if err := tx.QueryRowContext(ctx, `
 					SELECT EXISTS (
 						SELECT 1 FROM public.user_identities
-						 WHERE lower(email) = $1 AND email_verified AND user_id <> $2
+						 WHERE lower(email) = lower($1) AND email_verified AND user_id <> $2
 					)`, email, principalID,
 				).Scan(&heldElsewhere); err != nil {
 					return fmt.Errorf("verified-email holder check: %w", err)
@@ -1491,7 +1498,7 @@ func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid
 			if email != "" && emailTrusted {
 				if lerr := tx.QueryRowContext(ctx, `
 					SELECT user_id FROM public.user_identities
-					 WHERE lower(email) = $1 AND email_verified
+					 WHERE lower(email) = lower($1) AND email_verified
 					 LIMIT 1`, email,
 				).Scan(&principalID); lerr != nil && !errors.Is(lerr, sql.ErrNoRows) {
 					return fmt.Errorf("verified-email link lookup: %w", lerr)

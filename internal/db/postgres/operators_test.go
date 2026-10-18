@@ -1,6 +1,7 @@
 package postgres_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/google/uuid"
@@ -19,6 +20,25 @@ func TestOperatorStore_Postgres_Conformance(t *testing.T) {
 		h.Reset(t)
 		return pgstore.NewOperatorStore(h.AdminDB), loginIdentitySeeder(h)
 	})
+}
+
+// TestOperatorStore_Postgres_MixedCaseRowMatches: Add stores operators
+// lower-cased, but a row written by hand in another case must still match the
+// principal holding that address.
+func TestOperatorStore_Postgres_MixedCaseRowMatches(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	pgtest.MustExec(t, h.AdminDB, `INSERT INTO operators (email) VALUES ('Ops@Example.COM')`)
+	principal := pgtest.SeedUser(t, h, "mixed-case-operator")
+	pgtest.SeedIdentity(t, h, principal, "ops@example.com", true)
+
+	ok, err := pgstore.NewOperatorStore(h.AdminDB).IsOperatorUserSystem(context.Background(), principal)
+	if err != nil {
+		t.Fatalf("IsOperatorUserSystem: %v", err)
+	}
+	if !ok {
+		t.Error("a hand-written mixed-case operator row did not match the principal holding that address")
+	}
 }
 
 // loginIdentitySeeder is the Postgres seeder for the suites that resolve a
