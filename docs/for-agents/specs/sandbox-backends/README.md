@@ -179,15 +179,10 @@ fails one is not a backend.
 TF's sidecar is the jail's only way out on every backend (invariant 2), and
 the egress policy is enforced once, in TF code:
 
-- **Interception and credential injection are written once, in the sidecar.**
-  The tunnel lane passes TLS through opaquely today, which leaves a gap when
-  an allowlisted host shares CDN addresses with other sites (SPACE's red team
-  showed it against PyPI's Fastly edge). The fix is TLS interception in the
-  sidecar with a per-run CA, name-constrained to the run's allowlist and
-  delivered through the trust file the gh channel already uses
-  (`internal/ghinjector/cert.go`). Header-scoped credential injection
-  (sandbox-fleet §7) rides on the same termination. gVisor needs this
-  regardless, so a second backend adds no extra enforcement code.
+- **Interception and credential injection are written once, in the sidecar**
+  (§6.1). Header-scoped credential injection (sandbox-fleet §7) rides on the
+  same termination. gVisor needs interception regardless, so a second backend
+  adds no extra enforcement code.
 - **A backend's own egress controls are a backstop, never the policy.**
   SPACE ships its own gateway with interception and credential rules. Under
   TF it is configured to admit only the run's sidecar. Using SPACE's gateway
@@ -195,10 +190,79 @@ the egress policy is enforced once, in TF code:
   rules into two implementations with different rule formats (SPACE accepts
   IPs, CIDRs and wildcard domains; TF's allowlist is exact hostnames).
 - **The sidecar authenticates its caller with a per-run token on every
-  backend.** On gVisor, network position already isolates cells (each veth
-  leads to one sidecar), but on a backend where the sidecar is reached over a
-  shared network the token is the only isolation. One auth model means one
-  sidecar code path, and gVisor gains a second layer.
+  backend.** Every listener that holds a credential already does: the LLM,
+  git and egress proxies, the gh injector and the API proxies. The fetch
+  relays hold none and take no token (`internal/egressrelay/relay.go`). On
+  gVisor network position isolates cells, since each veth leads to one sidecar
+  and the jail is admitted only to its sidecar's ports. On a backend where the
+  sidecar is reached over a shared network the token is the only isolation,
+  so the relays gain one with that backend.
+
+### 6.1 TLS interception in the sidecar
+
+TFAC-1117. The tunnel lane passes TLS through opaquely, so it acts only on
+the hostname in the `CONNECT` line. That leaves two gaps:
+
+- **Writes to allowlisted registries.** `npm publish` is a PUT to
+  `registry.npmjs.org`, which is allowlisted. An agent given an attacker's npm
+  token in hostile PR text can publish the repository as a public package.
+- **Fronting through shared CDN edges.** An allowlisted name can resolve to an
+  edge that also serves other sites, and the client inside the tunnel can
+  handshake for one of them. SPACE's red team showed it against PyPI's Fastly
+  edge.
+
+Closing either means terminating TLS, which reverses the rule in
+`internal/egressproxy/CLAUDE.md` and `internal/egressrelay/CLAUDE.md` that no
+lane terminates the agent's TLS. That rule kept TF out of the content trust
+chain: with TLS end to end, the proxy cannot change what a package manager
+downloads. Interception gives that up for the hosts it covers, so it is built
+only under these conditions:
+
+1. **A per-run CA**, name-constrained to the run's allowlist, generated in the
+   sidecar, delivered through the trust file the gh channel already uses
+   (`internal/ghinjector/cert.go`), and trusted only by that run's jail.
+   GitHub and the LLM provider are never intercepted; they keep their explicit
+   endpoints.
+2. **Pure pass-through.** After the policy decision the upstream body is
+   copied verbatim, and nothing in the interceptor can rewrite a body. No
+   cache, so one bad response cannot reach another run or a later fetch.
+3. **Registries are read-only:** GET and HEAD. This closes the publish path.
+4. **One hostname end to end.** The leaf the jail sees is minted for the
+   `CONNECT` host only, so a client whose SNI differs fails its handshake, and
+   the upstream `ServerName` is the same host. This closes fronting.
+5. **Upstream TLS comes from one constructor with no settings:** system
+   roots, Go's default versions and ciphers, nothing read from config or the
+   environment. A guard in `scripts/lint.sh` refuses `InsecureSkipVerify` or a
+   hand-built `tls.Config` in the interceptor's package, and tests prove that
+   a self-signed, expired or wrong-host certificate, and a valid certificate
+   for a different allowlisted host, are all refused. Today each client
+   verifies its registry itself and a mistake fails loudly; afterwards one
+   dial verifies for every toolchain, and a mistake there would weaken all of
+   them while each client still saw a valid certificate.
+6. **Failures are loud.** An upstream verification failure is an explicit
+   error to the jail and a recorded denial, never a fallback to tunnelling.
+7. **Every toolchain trusts the CA through its own variable**
+   (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, pip's, and any other toolchain
+   with its own store), and the guardrail prompt forbids disabling
+   verification. A toolchain left out fails with certificate errors, and an
+   agent's fix for those (`strict-ssl=false`, `--trusted-host`) ends up
+   committed to the customer's repository.
+
+**Accepted residual.** For npm and pip, a new dependency's bytes now pass
+through TF with only TLS behind them. That stays contained. An install outside
+TF re-fetches from the real registry and checks the lockfile's hash (`npm ci`
+fails with `EINTEGRITY`, pip's hash-checking mode with a mismatch), so a forged
+package is caught at the first such install, and an unpinned one was never
+recorded. Go is covered even inside the run, because the checksum database's
+key ships with the toolchain. What remains is build output committed to a
+repository, such as a `dist/` bundle, which can embed a forged dependency that
+only a CI job rebuilding it would notice. That is accepted. A second-opinion
+lockfile check from the control plane and a separate interceptor process were
+considered and not taken.
+
+The step that builds this rewrites the two package guides, the relay lane's
+integrity prerequisite and `docs/security/sandbox-egress.md` to match. Until
+then they describe the code as it is.
 
 ## 7. Capability differences are data
 
@@ -291,14 +355,14 @@ suite.
 
 ## 10. Order of work
 
-1. **Extract the interface with gVisor behind it, and the suite.** No
-   behaviour change. *Done.* The suite passes on gVisor. It found two
-   defects, both fixed as part of this step (§11).
-2. **Per-run token auth on the sidecar** (§6), on gVisor first.
-3. **TLS interception and destination-scoped credential injection in the
-   sidecar** (§6, sandbox-fleet §7). Replaces the opaque tunnel lane.
-4. **The SPACE backend**, built against the suite. Starts with the spike in
-   §13.
+1. **Extract the interface with gVisor behind it, and the suite.** *Done.*
+   The extraction changes no behaviour. The suite passes on gVisor; it found
+   two defects, both fixed in this step (§11).
+2. **TLS interception in the sidecar** (§6.1, TFAC-1117).
+3. **The SPACE backend**, built against the suite, with a per-run token on
+   the fetch relays (§6). Starts with the spike in §13.
+4. **Destination-scoped credential injection** (sandbox-fleet §7), on the
+   termination step 2 builds.
 5. **Capabilities, profile requirements and claim eligibility** (§7).
 
 ## 11. What the suite found on gVisor
@@ -413,7 +477,7 @@ Spike items, each with a pass/fail result written back here:
   and preference on the claim.
 - `docs/security/privilege-separation.md` — the four-process split every
   backend preserves.
-- `docs/security/sandbox-egress.md` — the egress lanes §6 replaces the tunnel
-  lane of.
+- `docs/security/sandbox-egress.md` — the egress lanes; §6.1 changes the
+  tunnel lane.
 - `docs/benchmarks/gvisor-cpu-tax.md` — why a VM backend is attractive for
   build and test bursts, and why gVisor stays the portable default.

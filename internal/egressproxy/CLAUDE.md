@@ -34,5 +34,8 @@ guide.
 - No shared storage namespaces, ever, regardless of how convenient the
   entry would be — the tunnel matches hostnames, not paths, so such an
   entry admits every tenant of the storage service.
-- No TLS termination. If a feature seems to need the proxy to see inside
-  the stream, the answer is a different lane, not MITM.
+- No TLS termination today. The only sanctioned way to add it is the
+  interception design in `docs/for-agents/specs/sandbox-backends/` §6.1
+  (TFAC-1117), with every condition listed there. Until that ships, a
+  feature that seems to need the proxy to see inside the stream uses a
+  different lane. Never an ad-hoc MITM.

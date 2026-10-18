@@ -43,6 +43,15 @@ hands an agent that reads attacker-authored PR text a writable,
 credential-free exfiltration channel. The fetch relay exists for exactly
 the registries those two constraints would otherwise strand.
 
+Acting only on hostnames leaves the tunnel two gaps it cannot close. It
+cannot tell a read from a write on an allowlisted host, so `npm publish` to
+`registry.npmjs.org` gets through. And it cannot see which name a client
+asks a shared CDN edge for once the tunnel is open, so an allowlisted name
+can front for another site on the same edge. TLS interception in the
+sidecar closes both, under conditions designed in
+`docs/for-agents/specs/sandbox-backends/` §6.1 (TFAC-1117). It is not built
+yet.
+
 ## Which lane does an ecosystem need? Probe — never assume
 
 ```bash
