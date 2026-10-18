@@ -2,8 +2,10 @@ package upstream
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
@@ -66,9 +68,11 @@ func newInstruments(provider metric.MeterProvider) *instruments {
 }
 
 // queryCostBounds are the query-cost histogram's bucket boundaries, in
-// points. They end at 10,000, the most Linear lets one query cost, and 7500
-// splits the top decade where a full 50-issue read lands (about 5,500).
-var queryCostBounds = []float64{10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 7500, 10000}
+// points. They start at 1 because GitHub charges most queries a few points
+// and never less than 1. They end at 10,000, the most Linear lets one query
+// cost, and 7500 splits the top decade where a full 50-issue read lands (about
+// 5,500).
+var queryCostBounds = []float64{1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 7500, 10000}
 
 var (
 	globalOnce sync.Once
@@ -136,13 +140,31 @@ func progressFrom(ctx context.Context) func() {
 }
 
 // RecordQueryCost records what name said one GraphQL query cost against its
-// points budget (Linear's X-Complexity), under the operation the query's
-// document names. op must come from a document the client declares as a
-// constant, so the label stays a closed set. No org is recorded: a query's
-// cost follows from its document and variables, not from who sent it.
+// points budget (Linear's X-Complexity, GitHub's rateLimit { cost }), under
+// the operation the query's document names. op must come from a document the
+// client declares in its own source (OperationName), so the label stays a
+// closed set. No org is recorded: a query's cost follows from its document and
+// variables, not from who sent it.
 func RecordQueryCost(name Name, op string, points int64) {
 	current().queryCost.Record(context.Background(), points,
 		metric.WithAttributes(telemetry.Upstream(string(name)), telemetry.Op(op)))
+}
+
+// OperationName is the name a GraphQL document gives its operation:
+// IssuesByID for "query IssuesByID($ids: [ID!]!, ...) {". Empty for an
+// anonymous document ("query($ids: ...) {", "{ ... }").
+func OperationName(doc string) string {
+	keyword, rest, ok := strings.Cut(strings.TrimSpace(doc), " ")
+	if !ok || (keyword != "query" && keyword != "mutation") {
+		return ""
+	}
+	end := strings.IndexFunc(rest, func(r rune) bool {
+		return r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	if end < 0 {
+		end = len(rest)
+	}
+	return rest[:end]
 }
 
 // RecordRetry counts one decision to retry a request against name; c is the

@@ -15,7 +15,7 @@ const reviewPageSize = 50
 const reviewCommentCap = 100
 
 var prReviewsQuery = fmt.Sprintf(`
-	query($id: ID!, $before: String) {
+	query PRReviews($id: ID!, $before: String) {
 		node(id: $id) {
 			... on PullRequest {
 				reviews(last: %d, before: $before, states: [%s]) {
@@ -35,6 +35,7 @@ var prReviewsQuery = fmt.Sprintf(`
 				}
 			}
 		}
+		rateLimit { cost }
 	}
 `, reviewPageSize, submittedReviewStates, reviewCommentCap)
 
@@ -86,7 +87,7 @@ func (c *Client) PRReviewsBefore(ctx context.Context, prNodeID, before string) (
 	if before != "" {
 		vars["before"] = before
 	}
-	data, err := c.PostGraphQL(ctx, map[string]any{"query": prReviewsQuery, "variables": vars})
+	data, err := c.PostGraphQL(ctx, prReviewsQuery, vars)
 	if err != nil {
 		return PRReviewPage{}, fmt.Errorf("read reviews: %w", err)
 	}

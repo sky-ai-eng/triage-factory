@@ -172,7 +172,7 @@ func TestClient_EmptyToken_UnauthenticatedAcrossMethods(t *testing.T) {
 			return err
 		}},
 		{"PostGraphQL", func() error {
-			_, err := c.PostGraphQL(context.Background(), map[string]any{"query": "{__typename}"})
+			_, err := c.PostGraphQL(context.Background(), "{__typename}", nil)
 			return err
 		}},
 	}
@@ -271,7 +271,7 @@ func TestPostGraphQL_PartialError_ReturnsData(t *testing.T) {
 	t.Cleanup(func() { githubLog = prev })
 
 	body := `{"data":{"nodes":[{"number":1}]},"errors":[{"type":"FORBIDDEN","path":["nodes",0,"commits","nodes",0,"commit","statusCheckRollup"],"message":"Resource not accessible by integration"}]}`
-	data, err := clientAgainst(graphqlServing(t, body)).PostGraphQL(context.Background(), map[string]any{"query": "{ __typename }"})
+	data, err := clientAgainst(graphqlServing(t, body)).PostGraphQL(context.Background(), "{ __typename }", nil)
 	if err != nil {
 		t.Fatalf("PostGraphQL with partial data should not error, got %v", err)
 	}
@@ -318,7 +318,7 @@ func TestPostGraphQL_TotalError_Errors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := clientAgainst(graphqlServing(t, tt.body)).PostGraphQL(context.Background(), map[string]any{"query": "{ __typename }"})
+			_, err := clientAgainst(graphqlServing(t, tt.body)).PostGraphQL(context.Background(), "{ __typename }", nil)
 			if err == nil {
 				t.Fatalf("expected an error for %s, got nil", tt.name)
 			}
@@ -495,7 +495,7 @@ func TestPostGraphQL_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
 	go func() {
-		_, err := c.PostGraphQL(ctx, map[string]any{"query": "{ __typename }"})
+		_, err := c.PostGraphQL(ctx, "{ __typename }", nil)
 		errc <- err
 	}()
 
@@ -557,7 +557,7 @@ func TestNewProxyClient_AnUnreachableProxyIsNotAnUpstreamOutage(t *testing.T) {
 // unaffected — only the viaProxy flag trips the guard.
 func TestNewProxyClient_GraphQLFailsClosed(t *testing.T) {
 	c := NewProxyClient("http://10.42.5.1:34567", "per-run-placeholder")
-	_, err := c.PostGraphQL(context.Background(), map[string]any{"query": "{ viewer { login } }"})
+	_, err := c.PostGraphQL(context.Background(), "{ viewer { login } }", nil)
 	if err == nil {
 		t.Fatal("PostGraphQL on a proxy client must fail closed, got nil error")
 	}

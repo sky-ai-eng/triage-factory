@@ -290,16 +290,13 @@ func TestQueryCost_ByOperationForEveryClient(t *testing.T) {
 
 func TestOperationName(t *testing.T) {
 	for doc, want := range map[string]string{
-		issuesByIDQuery:           "IssuesByID",
-		searchIssuesQuery:         "SearchIssues",
-		viewerQuery:               "Viewer",
-		commentCreateMutation:     "CommentCreate",
-		"query { viewer { id } }": "",
-		"{ viewer { id } }":       "",
-		"":                        "",
+		issuesByIDQuery:       "IssuesByID",
+		searchIssuesQuery:     "SearchIssues",
+		viewerQuery:           "Viewer",
+		commentCreateMutation: "CommentCreate",
 	} {
-		if got := operationName(doc); got != want {
-			t.Errorf("operationName(%.30q) = %q, want %q", doc, got, want)
+		if got := upstream.OperationName(doc); got != want {
+			t.Errorf("OperationName(%.30q) = %q, want %q", doc, got, want)
 		}
 	}
 }
@@ -316,7 +313,7 @@ func TestOperationName_EveryDocumentNamesOne(t *testing.T) {
 		t.Fatal("found no documents in documents.go")
 	}
 	for _, head := range heads {
-		if operationName(head) == "" {
+		if upstream.OperationName(head) == "" {
 			t.Errorf("document %q names no operation", head)
 		}
 	}

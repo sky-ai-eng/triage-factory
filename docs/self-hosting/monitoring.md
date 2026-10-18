@@ -721,17 +721,32 @@ mode without `TF_METRICS_ADDR`):
 | A bucket's reading is below 20% left for the first time in its window | WARN | `rate-limit budget low`, with `upstream`, `org`, `credential`, `bucket`, `remaining`, `limit` and `reset`. It is logged again once that window has reset, or after the bucket climbs back above 20%. |
 | A request waits on a rate limit | WARN | `waiting on a rate limit`, with `upstream`, `org` and `wait`. |
 
-Linear also states what each query cost against `complexity`, in
-`X-Complexity`. TF records it by the name of the query's operation. Like the
-request counters it is per process, so `sum` across pods:
+GitHub and Linear also state what each GraphQL query cost against their
+points buckets, `graphql` and `complexity`. TF records it by the name of the
+query's operation. Like the request counters it is per process, so `sum`
+across pods:
 
 | Metric | Labels | Value |
 | --- | --- | --- |
-| `tf_upstream_query_cost` (histogram) | `upstream`, `op` | Points one query cost. `op` is the operation the query's document names (`IssuesByID`, `SearchIssues`, `CommentCreate`, …). Bucket boundaries are 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 7500 and 10000 points; Linear refuses a query that would cost more than 10,000. Recorded whichever credential made the request, except for a delegated run's requests from inside its sandbox in multi mode. |
+| `tf_upstream_query_cost` (histogram) | `upstream`, `op` | Points one query cost. `op` is the operation the query's document names. Bucket boundaries are 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 7500 and 10000 points; GitHub charges a query at least 1 point, and Linear refuses a query that would cost more than 10,000. Recorded whichever credential made the request, except for a delegated run's requests from inside its sandbox in multi mode. |
 
 ```
-sum by (op) (rate(tf_upstream_query_cost_sum{upstream="linear"}[1h])) / sum by (op) (rate(tf_upstream_query_cost_count{upstream="linear"}[1h]))   # not an alert: mean points per query, by operation
+sum by (upstream, op) (rate(tf_upstream_query_cost_sum[1h])) / sum by (upstream, op) (rate(tf_upstream_query_cost_count[1h]))   # not an alert: mean points per query, by operation
 ```
+
+- **GitHub** states a query's cost only in the response body, so every query
+  TF's GitHub client sends selects `rateLimit { cost }`. Selecting it does not
+  change the cost: GitHub counts the requests a query's connections need, and
+  `rateLimit` is not a connection. The field may be null, as on a GHES
+  instance with rate limits turned off, and then nothing is recorded. The
+  operations are `DiscoverPRs` (a search for pull requests),
+  `RefreshPRsWithChecks` and `RefreshPRsWithoutChecks` (the poller's refresh
+  batches of up to 20 pull requests, with and without check runs),
+  `PRComments`, `PRReviews`, `Review`, `BranchesExist`, `UserTeamsInOrg` and
+  `OrgTeams`. Mutations are not recorded.
+- **Linear** states it in `X-Complexity`, for queries and mutations alike. The
+  operations are the documents' own names (`IssuesByID`, `SearchIssues`,
+  `CommentCreate`, …).
 
 ## Traces — `TF_TRACES_ENDPOINT`
 

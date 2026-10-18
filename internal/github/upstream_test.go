@@ -364,7 +364,7 @@ func TestTruncatedBody_GraphQLQueryRetried(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	data, err := clientAgainst(srv.URL).PostGraphQL(context.Background(), map[string]any{"query": "{ viewer { login } }"})
+	data, err := clientAgainst(srv.URL).PostGraphQL(context.Background(), "{ viewer { login } }", nil)
 	if err != nil {
 		t.Fatalf("PostGraphQL: %v", err)
 	}

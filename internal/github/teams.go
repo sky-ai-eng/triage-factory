@@ -158,7 +158,7 @@ func (c *Client) ListMyTeamsDetailed(ctx context.Context) ([]UserTeam, error) {
 // rather than assert it has no teams.
 func (c *Client) ListUserTeamsInOrg(ctx context.Context, orgLogin, userLogin string) ([]UserTeam, error) {
 	const query = `
-		query($org: String!, $login: String!, $cursor: String) {
+		query UserTeamsInOrg($org: String!, $login: String!, $cursor: String) {
 			organization(login: $org) {
 				teams(first: 100, userLogins: [$login], after: $cursor) {
 					pageInfo { hasNextPage endCursor }
@@ -169,18 +169,16 @@ func (c *Client) ListUserTeamsInOrg(ctx context.Context, orgLogin, userLogin str
 					}
 				}
 			}
+			rateLimit { cost }
 		}
 	`
 	var out []UserTeam
 	var cursor *string
 	for page := 1; page <= teamsPageCap; page++ {
-		data, err := c.PostGraphQL(ctx, map[string]any{
-			"query": query,
-			"variables": map[string]any{
-				"org":    orgLogin,
-				"login":  userLogin,
-				"cursor": cursor,
-			},
+		data, err := c.PostGraphQL(ctx, query, map[string]any{
+			"org":    orgLogin,
+			"login":  userLogin,
+			"cursor": cursor,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("list teams for %s in org %s: %w", userLogin, orgLogin, err)
@@ -257,7 +255,7 @@ func (c *Client) ListUserTeamsInOrg(ctx context.Context, orgLogin, userLogin str
 // Requires read:org / Members:read for the org, same as ListOrgTeams.
 func (c *Client) ListOrgTeamsDetailed(ctx context.Context, orgLogin string) ([]UserTeam, error) {
 	const query = `
-		query($org: String!, $cursor: String) {
+		query OrgTeams($org: String!, $cursor: String) {
 			organization(login: $org) {
 				teams(first: 100, after: $cursor) {
 					pageInfo { hasNextPage endCursor }
@@ -268,17 +266,15 @@ func (c *Client) ListOrgTeamsDetailed(ctx context.Context, orgLogin string) ([]U
 					}
 				}
 			}
+			rateLimit { cost }
 		}
 	`
 	var out []UserTeam
 	var cursor *string
 	for page := 1; page <= teamsPageCap; page++ {
-		data, err := c.PostGraphQL(ctx, map[string]any{
-			"query": query,
-			"variables": map[string]any{
-				"org":    orgLogin,
-				"cursor": cursor,
-			},
+		data, err := c.PostGraphQL(ctx, query, map[string]any{
+			"org":    orgLogin,
+			"cursor": cursor,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("list teams for org %s: %w", orgLogin, err)

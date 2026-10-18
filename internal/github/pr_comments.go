@@ -11,7 +11,7 @@ import (
 const commentPageSize = 50
 
 var prCommentsQuery = fmt.Sprintf(`
-	query($id: ID!, $before: String) {
+	query PRComments($id: ID!, $before: String) {
 		node(id: $id) {
 			... on PullRequest {
 				comments(last: %d, before: $before) {
@@ -26,6 +26,7 @@ var prCommentsQuery = fmt.Sprintf(`
 				}
 			}
 		}
+		rateLimit { cost }
 	}
 `, commentPageSize)
 
@@ -62,7 +63,7 @@ func (c *Client) PRCommentsBefore(ctx context.Context, prNodeID, before string) 
 	if before != "" {
 		vars["before"] = before
 	}
-	data, err := c.PostGraphQL(ctx, map[string]any{"query": prCommentsQuery, "variables": vars})
+	data, err := c.PostGraphQL(ctx, prCommentsQuery, vars)
 	if err != nil {
 		return PRCommentPage{}, fmt.Errorf("read comments: %w", err)
 	}
