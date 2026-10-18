@@ -503,9 +503,9 @@ func (e gqlErrors) first(context string) error {
 // transient failure retries like a GET. A mutation goes through
 // PostGraphQLMutation instead.
 //
-// What the query cost is recorded under the operation its document names
-// (recordQueryCost), so every query document in this package names one and
-// selects rateLimit { cost }.
+// Each query's cost is recorded under the operation its document names
+// (recordQueryCost). Every query document in this package therefore names
+// its operation and selects rateLimit { cost }.
 func (c *Client) PostGraphQL(ctx context.Context, query string, variables map[string]any) ([]byte, error) {
 	data, err := c.postGraphQL(ctx, graphqlRequest{Query: query, Variables: variables}, true)
 	if err != nil {
