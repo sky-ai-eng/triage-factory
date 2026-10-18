@@ -5,6 +5,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 )
 
@@ -140,6 +141,25 @@ func (hostOps) TeardownNetwork(ctx context.Context, state NetworkState) error {
 		fmt.Fprintf(os.Stderr, "sandbox: teardown network: %v\n", err)
 	}
 	return nil
+}
+
+func (hostOps) AdmitJailPorts(ctx context.Context, conversationID string, subnetIdx uint8, ports []int) (JailIngress, error) {
+	if err := ValidateJailPorts(ports); err != nil {
+		return JailIngress{}, err
+	}
+	// The veth must be one this host actually has: a rule naming an
+	// interface that does not exist is accepted by iptables and matches
+	// nothing, and a request for one is a caller naming a network that
+	// was never built.
+	vethHost := vethHostName(conversationID, subnetIdx)
+	if _, err := net.InterfaceByName(vethHost); err != nil {
+		return JailIngress{}, fmt.Errorf("sandbox: admit jail ports: no run network %s: %w", vethHost, err)
+	}
+	rules, err := admitJailPorts(ctx, vethHost, hostIP(subnetIdx), ports)
+	if err != nil {
+		return JailIngress{}, fmt.Errorf("sandbox: %w", err)
+	}
+	return JailIngress{Rules: rules}, nil
 }
 
 func (hostOps) EnsureRootfs(ctx context.Context, selector RootfsSelector) (string, error) {

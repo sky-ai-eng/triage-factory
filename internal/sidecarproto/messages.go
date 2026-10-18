@@ -96,6 +96,14 @@ type AgentHostInfo struct {
 type StartProxiesResult struct {
 	Env []string `json:"env"`
 
+	// JailEndpoints are the "host:port" listeners Env (and the gh channel)
+	// point the jail at: the egress proxy, the fetch relays, the git proxy
+	// and the gh injector. The jail is admitted to these ports of its gateway
+	// and no others, so a listener the jail is not told about — the LLM
+	// proxy, the API proxies only this sidecar and the orchestrator dial —
+	// stays closed to it.
+	JailEndpoints []string `json:"jail_endpoints,omitempty"`
+
 	// LLMEnv is the LLM proxy's address plus this run's placeholder, in the
 	// same provider vocabulary Env would have carried them in. It is here
 	// unconditionally, for the caller whose model calls originate in the

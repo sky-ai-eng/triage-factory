@@ -4,6 +4,9 @@ package sandbox
 
 import (
 	"context"
+	"slices"
+	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -12,11 +15,17 @@ import (
 // and returns a populated NetworkState, so the RunNetwork ownership split —
 // who builds the veth and who tears it down — is observable rather than
 // assumed. It embeds fakePrivilegedOps for every other method and overrides
-// only the two network ops (pointer receiver, for the atomic counters).
+// only the network ops (pointer receiver, for the counters). It also records
+// each port admission and the state the last teardown was handed, so what a
+// teardown removes is observable too.
 type recordingNetOps struct {
 	fakePrivilegedOps
 	setups    atomic.Int32
 	teardowns atomic.Int32
+
+	mu           sync.Mutex
+	admitted     [][]int
+	tornDownWith NetworkState
 }
 
 func (r *recordingNetOps) SetupNetwork(_ context.Context, _ string, idx uint8) (NetworkState, error) {
@@ -29,9 +38,23 @@ func (r *recordingNetOps) SetupNetwork(_ context.Context, _ string, idx uint8) (
 	}, nil
 }
 
-func (r *recordingNetOps) TeardownNetwork(_ context.Context, _ NetworkState) error {
+func (r *recordingNetOps) TeardownNetwork(_ context.Context, state NetworkState) error {
 	r.teardowns.Add(1)
+	r.mu.Lock()
+	r.tornDownWith = state
+	r.mu.Unlock()
 	return nil
+}
+
+func (r *recordingNetOps) AdmitJailPorts(_ context.Context, _ string, idx uint8, ports []int) (JailIngress, error) {
+	r.mu.Lock()
+	r.admitted = append(r.admitted, append([]int(nil), ports...))
+	r.mu.Unlock()
+	var in JailIngress
+	for _, p := range ports {
+		in.Rules = append(in.Rules, iptablesRule{Table: "filter", Chain: "INPUT", Args: []string{"-d", hostIP(idx), "--dport", strconv.Itoa(p), "-j", "ACCEPT"}})
+	}
+	return in, nil
 }
 
 var _ SandboxOps = (*recordingNetOps)(nil)
@@ -166,5 +189,76 @@ func TestRunNetworkClose_ReleasesIndexAfterCancelledRun(t *testing.T) {
 	}
 	if !defaultAllocator().IsFree(net.Idx) {
 		t.Fatalf("subnet idx %d is still held after the stop's teardown; it must come back at teardown, not at the next boot", net.Idx)
+	}
+}
+
+// TestRunNetwork_AdmitJailPorts pins the admission bookkeeping: each port is
+// asked for once however many launches name it, the rules the privileged side
+// installed are handed to the network's teardown, and a closed network admits
+// nothing.
+func TestRunNetwork_AdmitJailPorts(t *testing.T) {
+	rec := installRecordingNetOps(t)
+	ctx := context.Background()
+
+	net, err := SetupRunNetwork(ctx, "run-admit")
+	if err != nil {
+		t.Fatalf("SetupRunNetwork: %v", err)
+	}
+	if err := net.AdmitJailPorts(ctx, []int{443, 34567}); err != nil {
+		t.Fatalf("first admission: %v", err)
+	}
+	// A relaunch into the same network asks only for what is new.
+	if err := net.AdmitJailPorts(ctx, []int{34567, 40001}); err != nil {
+		t.Fatalf("second admission: %v", err)
+	}
+	if err := net.AdmitJailPorts(ctx, []int{443}); err != nil {
+		t.Fatalf("repeat admission: %v", err)
+	}
+	if err := net.AdmitJailPorts(ctx, []int{0}); err == nil {
+		t.Error("admitted port 0")
+	}
+
+	rec.mu.Lock()
+	admitted := rec.admitted
+	rec.mu.Unlock()
+	if want := [][]int{{443, 34567}, {40001}}; !slices.EqualFunc(admitted, want, slices.Equal[[]int]) {
+		t.Fatalf("privileged admissions = %v, want %v", admitted, want)
+	}
+
+	if err := net.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	rec.mu.Lock()
+	rules := rec.tornDownWith.EgressRules
+	rec.mu.Unlock()
+	if len(rules) != 3 {
+		t.Fatalf("teardown was handed %d rules, want the 3 admitted ones: %v", len(rules), rules)
+	}
+	if err := net.AdmitJailPorts(ctx, []int{50000}); err == nil {
+		t.Error("a closed network admitted a port")
+	}
+}
+
+// TestRunNetwork_AdmitJailPortsCap: the cap counts every port admitted over
+// the network's life, not just the ports of one request.
+func TestRunNetwork_AdmitJailPortsCap(t *testing.T) {
+	installRecordingNetOps(t)
+	ctx := context.Background()
+
+	net, err := SetupRunNetwork(ctx, "run-admit-cap")
+	if err != nil {
+		t.Fatalf("SetupRunNetwork: %v", err)
+	}
+	t.Cleanup(func() { _ = net.Close() })
+
+	first := make([]int, MaxJailPorts)
+	for i := range first {
+		first[i] = 1000 + i
+	}
+	if err := net.AdmitJailPorts(ctx, first); err != nil {
+		t.Fatalf("admission up to the cap: %v", err)
+	}
+	if err := net.AdmitJailPorts(ctx, []int{5000}); err == nil {
+		t.Error("admitted a port past the cap")
 	}
 }

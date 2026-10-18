@@ -202,17 +202,18 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		return launchFailed(errors.New("launch tool host: no cell was provisioned for this engagement — multi mode is always per-run-isolated"))
 	}
 	launched, err := runCell.Launch(ctx, cell.LaunchSpec{
-		WorkspaceKey:    namespace,
-		RunTree:         claudeCwd,
-		Env:             s.nativeAgentEnv(ctx, orgID, conversationID, namespace, cfg, triggerType, creatorUserID),
-		ProxyEnv:        cfg.sidecar.jailEnv(),
-		AgentHostSocket: agenthost.SocketPathFor(conversationID),
-		GHChannel:       cellGHChannel(cfg.sidecar.ghChannel(conversationID)),
-		SkillsSource:    cfg.skillsSourcePath,
-		MemorySource:    cfg.memorySourcePath,
-		OrgID:           orgID,
-		ClaimID:         cfg.claimID,
-		RecordActuals:   s.recordSandboxActuals,
+		WorkspaceKey:     namespace,
+		RunTree:          claudeCwd,
+		Env:              s.nativeAgentEnv(ctx, orgID, conversationID, namespace, cfg, triggerType, creatorUserID),
+		ProxyEnv:         cfg.sidecar.jailEnv(),
+		SidecarEndpoints: cfg.sidecar.jailEndpoints(),
+		AgentHostSocket:  agenthost.SocketPathFor(conversationID),
+		GHChannel:        cellGHChannel(cfg.sidecar.ghChannel(conversationID)),
+		SkillsSource:     cfg.skillsSourcePath,
+		MemorySource:     cfg.memorySourcePath,
+		OrgID:            orgID,
+		ClaimID:          cfg.claimID,
+		RecordActuals:    s.recordSandboxActuals,
 	})
 	if err != nil {
 		return launchFailed(fmt.Errorf("launch tool host: %w", err))

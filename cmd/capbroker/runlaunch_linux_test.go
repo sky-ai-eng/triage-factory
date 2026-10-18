@@ -658,3 +658,27 @@ func TestBrokerRun_StderrTailCrossesTheWire(t *testing.T) {
 		t.Errorf("Stderr after Wait = %q, want %q", got, tail)
 	}
 }
+
+// A run's wait drops only its own registry entry: a successor registered under
+// the same container id survives it, and its own wait still finds it.
+func TestBrokerServer_WaitLeavesSuccessorRegistered(t *testing.T) {
+	s := NewServer(&fakeOps{})
+	const id = "tf-abc-1"
+
+	first := &runEntry{done: make(chan struct{})}
+	close(first.done)
+	successor := &runEntry{done: make(chan struct{})}
+	close(successor.done)
+	s.runs[id] = successor
+
+	s.forgetRun(id, first)
+	if s.runs[id] != successor {
+		t.Fatal("forgetting the first run dropped its successor's entry")
+	}
+	if _, err := s.waitRun(context.Background(), waitRunArgs{ContainerID: id}); err != nil {
+		t.Fatalf("successor's wait: %v", err)
+	}
+	if _, ok := s.runs[id]; ok {
+		t.Error("the successor's wait left its entry registered")
+	}
+}

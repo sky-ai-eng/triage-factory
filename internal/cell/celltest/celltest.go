@@ -139,16 +139,43 @@ func testJailIsNotRoot(t *testing.T, h Harness) {
 	}
 }
 
-// testOnlyTheSidecarIsReachable: the jail reaches its own sidecar's egress
-// proxy, and nothing else on the host that serves it — not even a listener
-// that happens to be bound on every interface, which is what an executor's
-// metrics or debug endpoint would be.
+// testOnlyTheSidecarIsReachable: the jail reaches every sidecar endpoint it
+// was told about, and nothing else on the host that serves it — not the
+// sidecar's own listeners that only host-side clients dial (the LLM proxy,
+// the GitHub API proxy), and not a listener that happens to be bound on every
+// interface, which is what an executor's metrics or debug endpoint would be.
 func testOnlyTheSidecarIsReachable(t *testing.T, h Harness) {
 	l := start(t, h, newConversationID(t))
 
-	host, port := l.egressProxy(t)
-	if !l.reaches(t, host, port) {
-		t.Fatalf("the jail cannot reach its own sidecar's egress proxy at %s:%d — every negative below would pass vacuously", host, port)
+	if len(l.res.JailEndpoints) == 0 {
+		t.Fatal("the sidecar reported no jail endpoints — every negative below would pass vacuously")
+	}
+	for _, ep := range l.res.JailEndpoints {
+		host, port := splitEndpoint(t, ep)
+		if !l.reaches(t, host, port) {
+			t.Errorf("the jail cannot reach its sidecar endpoint %s", ep)
+		}
+	}
+
+	var hostOnly []string
+	for _, kv := range l.res.LLMEnv {
+		if _, v, ok := strings.Cut(kv, "="); ok {
+			if u, err := url.Parse(v); err == nil && u.Port() != "" {
+				hostOnly = append(hostOnly, u.Host)
+			}
+		}
+	}
+	if u, err := url.Parse(l.res.GitHubAPIURL); err == nil && u.Port() != "" {
+		hostOnly = append(hostOnly, u.Host)
+	}
+	if len(hostOnly) < 2 {
+		t.Fatalf("the sidecar reported no LLM proxy or GitHub API proxy address (LLMEnv %v, GitHubAPIURL %q)", l.res.LLMEnv, l.res.GitHubAPIURL)
+	}
+	for _, ep := range hostOnly {
+		host, port := splitEndpoint(t, ep)
+		if l.reaches(t, host, port) {
+			t.Errorf("the jail reached %s, a sidecar listener only host-side clients are given", ep)
+		}
 	}
 
 	ln, err := net.Listen("tcp", ":0")
@@ -393,11 +420,12 @@ func start(t *testing.T, h Harness, conversationID string) *liveCell {
 		gh = &cell.GHChannel{Host: res.GHChannelHost, Token: res.GHChannelToken, CertSourcePath: agenthost.CertPathFor(conversationID)}
 	}
 	jail, err := c.Launch(ctx, cell.LaunchSpec{
-		WorkspaceKey:    conversationID,
-		RunTree:         runTree,
-		ProxyEnv:        res.Env,
-		AgentHostSocket: agenthost.SocketPathFor(conversationID),
-		GHChannel:       gh,
+		WorkspaceKey:     conversationID,
+		RunTree:          runTree,
+		ProxyEnv:         res.Env,
+		SidecarEndpoints: res.JailEndpoints,
+		AgentHostSocket:  agenthost.SocketPathFor(conversationID),
+		GHChannel:        gh,
 	})
 	if err != nil {
 		t.Fatalf("launch: %v", err)
@@ -505,6 +533,20 @@ func (l *liveCell) reaches(t *testing.T, host string, port int) bool {
 	}
 	t.Fatalf("connect probe to %s:%d gave no verdict (is nc in the rootfs?): %s", host, port, out)
 	return false
+}
+
+// splitEndpoint splits a "host:port" endpoint for a connect probe.
+func splitEndpoint(t *testing.T, ep string) (string, int) {
+	t.Helper()
+	host, portStr, err := net.SplitHostPort(ep)
+	if err != nil {
+		t.Fatalf("endpoint %q: %v", ep, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("endpoint %q has no port", ep)
+	}
+	return host, port
 }
 
 // egressProxy is the host and port of the sidecar's egress proxy, as the jail

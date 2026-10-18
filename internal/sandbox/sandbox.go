@@ -153,11 +153,18 @@ type Config struct {
 // identity, the file-side counterpart of the sidecar being killed before the
 // index goes: an index's uids are handed to another run only once no process
 // and no file still carries them.
+//
+// The gateway ports the jail is admitted to (AdmitJailPorts) are recorded the
+// same way, as rules in the network's state, and removed with the network.
 type RunNetwork struct {
 	Idx       uint8
 	Subnet    string
 	HostIP    string
 	NetnsPath string
+
+	// conversationID is the conversation the network was built for, which
+	// the privileged side re-derives the network's names from.
+	conversationID string
 
 	// netSt holds the platform-specific teardown state (a NetworkState on
 	// Linux) so Close can reverse exactly what SetupRunNetwork created,
@@ -174,6 +181,7 @@ type RunNetwork struct {
 	socketsFor     string
 	handedOffTrees []string
 	grantedStaging []string
+	admittedPorts  []int
 }
 
 // Mount declares an additional bind mount in the sandbox. Source is

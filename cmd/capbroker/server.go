@@ -282,6 +282,17 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return emptyResult{}, s.ops.TeardownNetwork(ctx, a.State)
 
+	case methodAdmitJailPorts:
+		var a admitJailPortsArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		ingress, err := s.ops.AdmitJailPorts(ctx, a.ConversationID, a.SubnetIdx, a.Ports)
+		if err != nil {
+			return nil, err
+		}
+		return admitJailPortsResult{Ingress: ingress}, nil
+
 	case methodEnsureRootfs:
 		var a ensureRootfsArgs
 		if err := dec(&a); err != nil {

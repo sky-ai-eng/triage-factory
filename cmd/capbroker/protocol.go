@@ -38,7 +38,11 @@ const maxFrameSize = 1 * 1024 * 1024 // 1 MiB
 // old orchestrator against a new broker would send launches with no jail
 // identity and hand-offs with no target; the mismatch has to surface as a
 // version error, not as a run that cannot write its own tree.
-const ProtocolVersion = 3
+//
+// Bumped to 4 for AdmitJailPorts: SetupNetwork closes the jail's gateway
+// until the orchestrator admits the sidecar's ports, so an orchestrator that
+// never sends the new call would launch jails that can reach nothing.
+const ProtocolVersion = 4
 
 // request is the envelope for every RPC. Method identifies the operation;
 // Args is the method-specific payload (JSON-encoded).
@@ -128,6 +132,16 @@ type setupNetworkResult struct {
 
 type teardownNetworkArgs struct {
 	State sandbox.NetworkState `json:"state"`
+}
+
+type admitJailPortsArgs struct {
+	ConversationID string `json:"conversation_id"`
+	SubnetIdx      uint8  `json:"subnet_idx"`
+	Ports          []int  `json:"ports"`
+}
+
+type admitJailPortsResult struct {
+	Ingress sandbox.JailIngress `json:"ingress"`
 }
 
 type ensureRootfsArgs struct {
@@ -276,6 +290,7 @@ const (
 	methodPing            = "Ping"
 	methodSetupNetwork    = "SetupNetwork"
 	methodTeardownNetwork = "TeardownNetwork"
+	methodAdmitJailPorts  = "AdmitJailPorts"
 	methodEnsureRootfs    = "EnsureRootfs"
 	methodReapOrphans     = "ReapOrphans"
 	methodLaunchRun       = "LaunchRun"

@@ -8,8 +8,8 @@ import "testing"
 // uses to find leaked Part B host-side egress rules. The
 // load-bearing properties: the gateway IP must match exactly (not as a
 // substring of a longer address), both the bare and "/32" address forms
-// must match, and the negated "! -d" form iptables actually prints must
-// be recognized.
+// must match, the negated "! -d" form iptables actually prints must
+// be recognized, and an ACCEPT is ours only in the admitted-port shape.
 func TestEgressRuleLineMatches(t *testing.T) {
 	const gw = "10.42.7.1"
 	cases := []struct {
@@ -63,6 +63,30 @@ func TestEgressRuleLineMatches(t *testing.T) {
 		{
 			name:  "not_a_drop",
 			line:  "-A INPUT -i vh-abcd7 ! -d 10.42.7.1/32 -j ACCEPT",
+			chain: "INPUT",
+			want:  false,
+		},
+		{
+			name:  "gateway_drop",
+			line:  "-A INPUT -i vh-abcd7 -d 10.42.7.1/32 -j DROP",
+			chain: "INPUT",
+			want:  true,
+		},
+		{
+			name:  "admitted_port",
+			line:  "-A INPUT -d 10.42.7.1/32 -i vh-abcd7 -p tcp -m tcp --dport 34567 -j ACCEPT",
+			chain: "INPUT",
+			want:  true,
+		},
+		{
+			name:  "accept_without_port",
+			line:  "-A INPUT -i vh-abcd7 -d 10.42.7.1/32 -j ACCEPT",
+			chain: "INPUT",
+			want:  false,
+		},
+		{
+			name:  "admitted_port_other_gateway",
+			line:  "-A INPUT -d 10.42.3.1/32 -i vh-abcd3 -p tcp -m tcp --dport 34567 -j ACCEPT",
 			chain: "INPUT",
 			want:  false,
 		},

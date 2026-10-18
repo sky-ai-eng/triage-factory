@@ -52,3 +52,8 @@ func (n *RunNetwork) HandOffRunTree(_ context.Context, _ string) error {
 func (n *RunNetwork) GrantStaging(_ context.Context, _ string) error {
 	return ErrUnsupportedPlatform
 }
+
+// AdmitJailPorts is unreachable off Linux, like the network it belongs to.
+func (n *RunNetwork) AdmitJailPorts(_ context.Context, _ []int) error {
+	return ErrUnsupportedPlatform
+}

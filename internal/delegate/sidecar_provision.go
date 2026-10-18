@@ -164,15 +164,24 @@ func (rs *runSidecar) nudgeCredentialRelay(ctx context.Context) error {
 }
 
 // jailEnv is the non-secret env the jail is launched with: the coordinates and
-// placeholders the sidecar's proxies produced (git / egress URLs, the single
-// GIT_CONFIG_* block, and the LLM proxy for an engagement that dials it from
-// inside the jail), threaded into cell.LaunchSpec.ProxyEnv.
+// placeholders the sidecar's proxies produced (git / egress / relay URLs and
+// the single GIT_CONFIG_* block), threaded into cell.LaunchSpec.ProxyEnv.
 // nil-safe.
 func (rs *runSidecar) jailEnv() []string {
 	if rs == nil || rs.res == nil {
 		return nil
 	}
 	return rs.res.Env
+}
+
+// jailEndpoints are the sidecar listeners jailEnv and the gh channel point
+// the jail at, threaded into cell.LaunchSpec.SidecarEndpoints: the only host
+// addresses the jail is admitted to. nil-safe.
+func (rs *runSidecar) jailEndpoints() []string {
+	if rs == nil || rs.res == nil {
+		return nil
+	}
+	return rs.res.JailEndpoints
 }
 
 // engineLLMEnv is this engagement's provider coordinates for an engine that runs in

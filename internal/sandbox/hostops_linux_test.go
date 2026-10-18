@@ -21,6 +21,9 @@ func (f fakePrivilegedOps) SetupNetwork(ctx context.Context, conversationID stri
 func (f fakePrivilegedOps) TeardownNetwork(ctx context.Context, state NetworkState) error {
 	return nil
 }
+func (f fakePrivilegedOps) AdmitJailPorts(ctx context.Context, conversationID string, subnetIdx uint8, ports []int) (JailIngress, error) {
+	return JailIngress{}, nil
+}
 func (f fakePrivilegedOps) EnsureRootfs(ctx context.Context, selector RootfsSelector) (string, error) {
 	return f.tag, nil
 }

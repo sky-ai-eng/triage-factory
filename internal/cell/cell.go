@@ -125,6 +125,12 @@ type LaunchSpec struct {
 	// coordinates and per-run placeholders, appended verbatim.
 	ProxyEnv []string
 
+	// SidecarEndpoints are the "host:port" sidecar listeners ProxyEnv and the
+	// gh channel point the jail at, each on ProxyHost. They are the only host
+	// addresses the jail can reach: every other listener on the host, the
+	// sidecar's own included, stays closed to it.
+	SidecarEndpoints []string
+
 	// AgentHostSocket is the host path of the exec-verb socket the sidecar
 	// serves. Required: without it every exec verb inside the jail is
 	// stranded.

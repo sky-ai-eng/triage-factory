@@ -37,6 +37,17 @@ type PrivilegedOps interface {
 	// — safe to call against partial or zero-value state.
 	TeardownNetwork(ctx context.Context, state NetworkState) error
 
+	// AdmitJailPorts opens TCP ports on the gateway of conversationID's
+	// network at subnetIdx to its jail: the listeners of the run's
+	// credential sidecar the jail was told to use. SetupNetwork leaves
+	// every other connection from the jail to the host dropped, so these
+	// are the only ones it can complete. The veth and gateway are derived
+	// here from (conversationID, subnetIdx) rather than taken from the
+	// caller, and the ports are validated (ValidateJailPorts). Returns the
+	// rules installed, which the caller keeps with the network's state so
+	// TeardownNetwork removes them.
+	AdmitJailPorts(ctx context.Context, conversationID string, subnetIdx uint8, ports []int) (JailIngress, error)
+
 	// EnsureRootfs idempotently bakes (or returns the cached path to)
 	// the curated rootfs matching selector. v1 has exactly one curated
 	// variant; selector exists now so a broker-owned catalog can grow
@@ -218,6 +229,12 @@ type NetworkState struct {
 	VethSandbox    string
 	MasqueradeRule iptablesRule
 	EgressRules    []iptablesRule
+}
+
+// JailIngress is the host-side rules AdmitJailPorts installed, carried back
+// to the network's owner so TeardownNetwork can remove them with the rest.
+type JailIngress struct {
+	Rules []iptablesRule
 }
 
 // RootfsSelector names which curated rootfs variant the broker should

@@ -3,8 +3,9 @@
 // Acceptance: drive the REAL Wrap()/applyEgressPolicy path with a
 // live gVisor sandbox and prove the per-sandbox egress allowlist actually
 // blocks a compromised run from reaching a *sibling* run's gateway/proxy
-// IP — the cross-tenant credential-abuse hole — while leaving the run's own
-// gateway reachable (no over-block).
+// IP — the cross-tenant credential-abuse hole — and every port of its own
+// gateway it was not admitted to, while leaving the admitted port reachable
+// (no over-block).
 //
 // This is the gVisor half the netns-only repro couldn't cover: gVisor's
 // user-space netstack writes frames straight onto the veth, so the in-netns
@@ -20,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -68,6 +70,7 @@ func TestIntegration_CrossTenantEgressBlocked(t *testing.T) {
 	// collision into a clean skip rather than a confusing false pass.
 	const sibIP = "10.42.250.1"
 	const port = "9999"
+	const unadmittedPort = "9998"
 	mustRun(t, "ip", "link", "add", "tfsib0", "type", "dummy")
 	defer exec.Command("ip", "link", "del", "tfsib0").Run()
 	mustRun(t, "ip", "addr", "add", sibIP+"/24", "dev", "tfsib0")
@@ -86,7 +89,8 @@ func TestIntegration_CrossTenantEgressBlocked(t *testing.T) {
 	// busybox nc: exit 0 = connected (REACHABLE), non-zero = dropped/refused.
 	script := `OWN=$(cat /work/own_gw); ` +
 		`if printf '' | timeout 4 nc -w 2 ` + sibIP + ` ` + port + ` >/dev/null 2>&1; then echo SIBLING=REACHABLE; else echo SIBLING=BLOCKED; fi; ` +
-		`if printf '' | timeout 4 nc -w 2 "$OWN" ` + port + ` >/dev/null 2>&1; then echo OWNGW=REACHABLE; else echo OWNGW=BLOCKED; fi`
+		`if printf '' | timeout 4 nc -w 2 "$OWN" ` + port + ` >/dev/null 2>&1; then echo OWNGW=REACHABLE; else echo OWNGW=BLOCKED; fi; ` +
+		`if printf '' | timeout 4 nc -w 2 "$OWN" ` + unadmittedPort + ` >/dev/null 2>&1; then echo UNADMITTED=REACHABLE; else echo UNADMITTED=BLOCKED; fi`
 	cfg.Argv = []string{"/bin/sh", "-c", script}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -108,8 +112,22 @@ func TestIntegration_CrossTenantEgressBlocked(t *testing.T) {
 		t.Skipf("run gateway %s collided with sibling stand-in %s; rerun with fewer concurrent sandboxes", sb.HostIP, sibIP)
 	}
 
-	// Now that the run's gateway IP is known, (a) tell the payload what it is
-	// and (b) stand up a listener there so the own-gateway control can succeed.
+	// Now that the run's gateway IP is known, (a) admit the jail to the one
+	// port it may use, the way a cell admits its sidecar's listeners, (b) tell
+	// the payload what the gateway is and (c) stand up listeners there so the
+	// own-gateway control can succeed and the unadmitted one has something to
+	// refuse. The run built its own network, so its teardown does not know the
+	// admitted rule; the test removes it.
+	admitted, _ := strconv.Atoi(port)
+	ingress, err := defaultOps.AdmitJailPorts(ctx, cfg.ConversationID, sb.SubnetIdx, []int{admitted})
+	if err != nil {
+		t.Fatalf("admit jail port %s: %v", port, err)
+	}
+	t.Cleanup(func() {
+		for _, r := range ingress.Rules {
+			_ = teardownIptables(context.Background(), r)
+		}
+	})
 	if err := os.WriteFile(filepath.Join(cfg.Worktree, "own_gw"), []byte(sb.HostIP+"\n"), 0o644); err != nil {
 		t.Fatalf("write own_gw: %v", err)
 	}
@@ -119,6 +137,12 @@ func TestIntegration_CrossTenantEgressBlocked(t *testing.T) {
 	}
 	defer ownLn.Close()
 	acceptEcho(t, ownLn)
+	unadmittedLn, err := net.Listen("tcp", sb.HostIP+":"+unadmittedPort)
+	if err != nil {
+		t.Fatalf("listen own gateway %s:%s: %v", sb.HostIP, unadmittedPort, err)
+	}
+	defer unadmittedLn.Close()
+	acceptEcho(t, unadmittedLn)
 
 	out, err := runToCompletion(t, run)
 	if err != nil {
@@ -131,6 +155,9 @@ func TestIntegration_CrossTenantEgressBlocked(t *testing.T) {
 		t.Errorf("CROSS-TENANT HOLE OPEN: sandbox reached sibling proxy IP %s — egress allowlist did not block it.\noutput:\n%s", sibIP, got)
 	}
 	if !strings.Contains(got, "OWNGW=REACHABLE") {
-		t.Errorf("OVER-BLOCK: sandbox could not reach its OWN gateway %s — the allowlist is too tight (legit proxy path broken).\noutput:\n%s", sb.HostIP, got)
+		t.Errorf("OVER-BLOCK: sandbox could not reach the admitted port on its OWN gateway %s — the allowlist is too tight (legit proxy path broken).\noutput:\n%s", sb.HostIP, got)
+	}
+	if !strings.Contains(got, "UNADMITTED=BLOCKED") {
+		t.Errorf("HOST HOLE OPEN: sandbox reached %s:%s, a port of its gateway it was never admitted to — anything the host listens on is open to it.\noutput:\n%s", sb.HostIP, unadmittedPort, got)
 	}
 }

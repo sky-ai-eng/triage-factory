@@ -57,7 +57,7 @@ func setupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (
 	// sha1 of the conversationID. Same conversationID → same fragment, every time.
 	idFrag := netnsIDFrag(conversationID)
 	netnsName := NetnsNameForRun(conversationID, subnetIdx)
-	vethHost := fmt.Sprintf("vh-%s%d", idFrag[:min(len(idFrag), 4)], subnetIdx)
+	vethHost := vethHostName(conversationID, subnetIdx)
 	vethSandbox := fmt.Sprintf("vs-%s%d", idFrag[:min(len(idFrag), 4)], subnetIdx)
 	netnsPath := "/var/run/netns/" + netnsName
 
@@ -264,4 +264,13 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// vethHostName is the host-side veth of conversationID's network at
+// subnetIdx. Derived, like every per-run network name, so a privileged op
+// that needs it (AdmitJailPorts) re-derives it rather than trusting a name
+// it is handed.
+func vethHostName(conversationID string, subnetIdx uint8) string {
+	idFrag := netnsIDFrag(conversationID)
+	return fmt.Sprintf("vh-%s%d", idFrag[:min(len(idFrag), 4)], subnetIdx)
 }

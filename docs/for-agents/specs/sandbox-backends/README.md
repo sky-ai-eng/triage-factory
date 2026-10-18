@@ -129,6 +129,11 @@ second implementation is most likely to get wrong:
   short bring-up timeout kills the jail when the timeout's cancel runs.
 - **`Freeze` that cannot freeze is an error.** A checkpoint that went ahead on
   a jail it believed frozen would read a moving tree.
+- **`LaunchSpec.SidecarEndpoints` are the only host addresses the jail can
+  reach.** They are the sidecar's jail-facing listeners as the sidecar
+  reported them after `StartProxies`. A backend opens exactly these before the
+  jail starts and nothing else on the host, the sidecar's host-only listeners
+  (the LLM proxy, the API proxies) included.
 
 ### 4.1 The jail filesystem contract
 
@@ -254,7 +259,7 @@ The cases, one per invariant except 8:
 | Case | Invariant |
 | --- | --- |
 | `PropertyB` | 1 — four canaries (LLM key, PAT, gh CLI token, repo token) absent from the jail's env, `/proc/1/environ`, `/proc/1/cmdline`, and every file under `/work /run /opt /etc /tmp /root /home /usr/local/bin`; the sidecar's placeholders present as the positive control |
-| `OnlyTheSidecarIsReachable` | 2 — the jail reaches its sidecar's egress proxy, and does not reach a listener the executor binds on all interfaces |
+| `OnlyTheSidecarIsReachable` | 2 — the jail reaches every endpoint its sidecar reported, and does not reach the sidecar's LLM or GitHub API proxy or a listener the executor binds on all interfaces |
 | `InternalDenylistUnreachable` | 3 — cloud metadata, the internet directly, and every executor address are closed |
 | `CellsAreIsolated` | 4 — two live cells; neither jail reaches the other's sidecar or sees the other's run tree |
 | `RunTreeAtWork` | 5 — the caller's seed is at `/work`; the jail's write is in the caller's tree after `Stop` |
@@ -287,8 +292,8 @@ suite.
 ## 10. Order of work
 
 1. **Extract the interface with gVisor behind it, and the suite.** No
-   behaviour change. *Done.* The suite passes on gVisor except
-   `OnlyTheSidecarIsReachable` (§11).
+   behaviour change. *Done.* The suite passes on gVisor. It found two
+   defects, both fixed as part of this step (§11).
 2. **Per-run token auth on the sidecar** (§6), on gVisor first.
 3. **TLS interception and destination-scoped credential injection in the
    sidecar** (§6, sandbox-fleet §7). Replaces the opaque tunnel lane.
@@ -298,35 +303,44 @@ suite.
 
 ## 11. What the suite found on gVisor
 
-**`OnlyTheSidecarIsReachable` fails on gVisor today.** The host-side veth rule
-(`applyEgressPolicy` layer 2) drops jail traffic whose destination is not the
-cell's gateway IP, but it accepts every *port* on that IP. Anything the
-executor binds on all interfaces is therefore reachable from every jail at
-`<gateway>:<port>`. In multi mode that includes the `/metrics` listener,
-which binds `:9464` by default (`internal/telemetry`) and is unauthenticated;
-the executor's healthz listener is loopback-only and unaffected. The suite
-reproduces it with an ordinary `:0` listener in the orchestrator process.
+**Every port of the gateway was open to the jail.** The host-side veth rule
+(`applyEgressPolicy` layer 2) dropped jail traffic whose destination was not
+the cell's gateway IP, but accepted every *port* on that IP. Anything the
+executor bound on all interfaces was reachable from every jail at
+`<gateway>:<port>`. In multi mode that included the `/metrics` listener, which
+binds `:9464` by default (`internal/telemetry`) and is unauthenticated, and
+the sidecar's own LLM and API proxies, which no jail is pointed at. The
+executor's healthz listener is loopback-only and was unaffected.
 
-The fix needs a decision, so it is not in step 1. The options:
+It is closed by admitting only the sidecar's jail-facing ports:
 
-- **Admit only the sidecar's ports.** After `StartProxies` returns, the broker
-  installs ACCEPT rules on the veth's INPUT chain for exactly the ports the
-  sidecar bound, followed by a DROP. One more broker RPC per cell. The proxy
-  ports are ephemeral today, so the rule set is per cell.
-- **Give the sidecar its own network namespace** holding the veth's host end,
-  so the jail's only neighbour is a namespace in which only the sidecar
-  listens. Structural rather than rule-based; a larger privsep change.
-- **Operator mitigation in the meantime:** bind metrics to a specific
-  non-veth address (`TF_METRICS_ADDR=<pod-ip>:9464`) or to loopback.
+- Layer 2 drops every packet from the jail, including those to the gateway
+  IP. A cell whose ports were never admitted reaches nothing on the host.
+- The sidecar reports the listeners it points the jail at
+  (`StartProxiesResult.JailEndpoints`): the egress proxy, each fetch relay,
+  the git proxy, and the gh injector or shared origin.
+- `Cell.Launch` admits those ports before the jail starts. On gVisor that is
+  `RunNetwork.AdmitJailPorts`, a broker RPC (protocol version 4) that installs
+  one ACCEPT per port at the head of the veth's INPUT chain. The broker derives
+  the veth and gateway from (conversation, subnet index), refuses a veth that
+  does not exist, and caps a cell at `sandbox.MaxJailPorts`. The rules are
+  recorded with the network's state, removed at teardown, and matched by the
+  boot-time reaper.
+
+Giving the sidecar its own network namespace, holding the veth's host end so
+the jail's only neighbour is a namespace in which only the sidecar listens,
+would close the same hole structurally. It is a larger privsep change and was
+not needed for this fix.
 
 **Broker run registry.** `waitRun` (`cmd/capbroker/runlaunch_linux.go`)
-deletes `s.runs[containerID]` without checking the entry is still the one it
+deleted `s.runs[containerID]` without checking the entry was still the one it
 waited on. Container ids are deterministic per (conversation, subnet index),
 so a successor launched under the same id before the predecessor's `WaitRun`
-returns loses its registry entry ("unknown run"). Production does not reach
-it — every ending stops the jail, and `Jail.Close` waits for the reap when it
-records actuals — but the suite hit it once while its teardown skipped
-`Stop`. A one-line identity check closes it.
+returned lost its registry entry ("unknown run"). Production did not reach it,
+because every ending stops the jail and `Jail.Close` waits for the reap when
+it records actuals, but the suite hit it once while its teardown skipped
+`Stop`. `forgetRun` now deletes the entry only if it is still the one waited
+on.
 
 ## 12. What step 1 leaves gVisor-only
 

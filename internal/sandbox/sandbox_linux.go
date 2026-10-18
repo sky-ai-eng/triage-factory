@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"sync"
 	"time"
 )
@@ -310,11 +311,12 @@ func setupRunNetwork(ctx context.Context, conversationID string) (*RunNetwork, e
 		return nil, fmt.Errorf("sandbox: %w", serr)
 	}
 	return &RunNetwork{
-		Idx:       idx,
-		Subnet:    netSt.Subnet,
-		HostIP:    netSt.HostIP,
-		NetnsPath: netSt.NetnsPath,
-		netSt:     netSt,
+		Idx:            idx,
+		Subnet:         netSt.Subnet,
+		HostIP:         netSt.HostIP,
+		NetnsPath:      netSt.NetnsPath,
+		conversationID: conversationID,
+		netSt:          netSt,
 	}, nil
 }
 
@@ -361,6 +363,43 @@ func (n *RunNetwork) GrantStaging(ctx context.Context, dir string) error {
 	n.grantedStaging = appendOnce(n.grantedStaging, dir)
 	defer stagingGrants.lock(dir)()
 	return defaultOps.GrantRunStaging(ctx, dir, n.Idx)
+}
+
+// AdmitJailPorts opens TCP ports on this network's gateway to its jail — the
+// sidecar listeners the jail was told to use — and records the rules with the
+// network's state so Close removes them. Until it runs, the jail can complete
+// no connection to the host at all. Ports already admitted are skipped, so a
+// relaunch into the same network asks only for what is new.
+func (n *RunNetwork) AdmitJailPorts(ctx context.Context, ports []int) error {
+	if err := ValidateJailPorts(ports); err != nil {
+		return err
+	}
+	n.grantsMu.Lock()
+	defer n.grantsMu.Unlock()
+	if n.closed {
+		return fmt.Errorf("sandbox: admit jail ports on a closed run network")
+	}
+	var fresh []int
+	for _, p := range ports {
+		if !slices.Contains(n.admittedPorts, p) {
+			fresh = append(fresh, p)
+		}
+	}
+	if len(fresh) == 0 {
+		return nil
+	}
+	if len(n.admittedPorts)+len(fresh) > MaxJailPorts {
+		return fmt.Errorf("sandbox: admitting %d more jail ports would exceed %d", len(fresh), MaxJailPorts)
+	}
+	ingress, err := defaultOps.AdmitJailPorts(ctx, n.conversationID, n.Idx, fresh)
+	if err != nil {
+		return err
+	}
+	ns, _ := n.netSt.(NetworkState)
+	ns.EgressRules = append(ns.EgressRules, ingress.Rules...)
+	n.netSt = ns
+	n.admittedPorts = append(n.admittedPorts, fresh...)
+	return nil
 }
 
 func appendOnce(list []string, v string) []string {
