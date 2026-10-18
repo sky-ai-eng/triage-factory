@@ -200,11 +200,11 @@ func (c *Client) mutate(ctx context.Context, doc string, vars map[string]any, ou
 //
 // Each attempt is counted under the client's org, and each response's
 // rate-limit headers and query cost are recorded (recordBudgets,
-// recordQueryCost). A rate-limited attempt waits for the later of Linear's
-// request and complexity windows to reset, as long as the request's
-// rate-limit waits stay within rateLimitWaitCap in total; a transient failure
-// of an idempotent request waits out an exponential backoff. No request gets
-// more than maxAttempts attempts, and every wait ends when ctx does.
+// recordQueryCost). A rate-limited attempt waits until the limit that refused
+// it resets (rateLimitReset), as long as the request's rate-limit waits stay
+// within rateLimitWaitCap in total; a transient failure of an idempotent
+// request waits out an exponential backoff. No request gets more than
+// maxAttempts attempts, and every wait ends when ctx does.
 //
 // Under a fail-fast scope (upstream.WithFailFast), a request that ends in a
 // transient failure marks Linear unreachable for the rest of the scope, so
@@ -333,13 +333,22 @@ func (c *Client) wait(ctx context.Context, class upstream.Class, d time.Duration
 
 // The rate-limit buckets Linear meters for a credential, each per hour:
 // requests counts requests and complexity counts query points. An endpoint
-// with a limit of its own also states it, as a count of requests to that
-// endpoint, reported as its own bucket, endpointBucketPrefix followed by the
-// name Linear sends in X-RateLimit-Endpoint-Name (endpointBucket).
+// with a limit of its own states it only in a response refusing a request for
+// that limit, as a count of requests to the endpoint, reported as its own
+// bucket, endpointBucketPrefix followed by the name Linear sends in
+// X-RateLimit-Endpoint-Name (endpointBucket).
 const (
 	bucketRequests       = "requests"
 	bucketComplexity     = "complexity"
 	endpointBucketPrefix = "endpoint:"
+)
+
+// The header prefixes Linear states each bucket under, as prefix+"Remaining",
+// prefix+"Limit" and prefix+"Reset" (readBudget).
+const (
+	headerRequests   = "X-RateLimit-Requests-"
+	headerComplexity = "X-RateLimit-Complexity-"
+	headerEndpoint   = "X-RateLimit-Endpoint-Requests-"
 )
 
 // maxEndpointNames bounds how many distinct endpoint names a process reports
@@ -404,11 +413,11 @@ func (c *Client) recordBudgets(h http.Header) {
 			upstream.RecordBudget(upstream.Linear, c.orgID, c.credential, bucket, b)
 		}
 	}
-	report(bucketRequests, "X-RateLimit-Requests-")
-	report(bucketComplexity, "X-RateLimit-Complexity-")
+	report(bucketRequests, headerRequests)
+	report(bucketComplexity, headerComplexity)
 	if name := strings.TrimSpace(h.Get("X-RateLimit-Endpoint-Name")); name != "" {
 		if bucket, ok := endpointBucket(name); ok {
-			report(bucket, "X-RateLimit-Endpoint-Requests-")
+			report(bucket, headerEndpoint)
 		}
 	}
 }
@@ -513,17 +522,32 @@ func pathStrings(path []any) []string {
 	return out
 }
 
-// rateLimitReset is when the limit lifts: the later of Linear's request and
-// complexity windows' resets, each sent as UTC epoch milliseconds. Linear sends
-// no Retry-After, but a 429 from something in front of it may, so that is the
-// fallback. Zero when none of the headers is present.
+// rateLimitReset is when the limit that refused a request lifts: the latest
+// reset among the buckets the response shows as spent, with nothing
+// remaining. Linear states each bucket's reset as one window from the
+// response, however much of the bucket is left, so the hourly buckets always
+// reset an hour out. A request refused by an endpoint's own limit, whose
+// window can be a minute, would otherwise wait for an hour that has nothing to
+// do with it, and one refused by a window longer than the hourly ones would be
+// retried before it lifts.
 //
-// TODO(TFAC-1116): an endpoint's own limit states a reset of its own, which
-// this ignores, so a request only that limit refused waits for the wrong one.
+// A response showing no bucket spent falls back to the later of the request
+// and complexity resets. Linear sends every reset as UTC epoch milliseconds
+// and no Retry-After, but a 429 from something in front of it may, so that is
+// the last fallback. Zero when none of the headers is present.
 func rateLimitReset(h http.Header) time.Time {
+	var spent time.Time
+	for _, prefix := range []string{headerRequests, headerComplexity, headerEndpoint} {
+		if b, ok := readBudget(h, prefix); ok && b.Remaining <= 0 && b.Reset.After(spent) {
+			spent = b.Reset
+		}
+	}
+	if !spent.IsZero() {
+		return spent
+	}
 	var reset time.Time
-	for _, name := range []string{"X-RateLimit-Requests-Reset", "X-RateLimit-Complexity-Reset"} {
-		if t, ok := epochMillis(h, name); ok && t.After(reset) {
+	for _, prefix := range []string{headerRequests, headerComplexity} {
+		if t, ok := epochMillis(h, prefix+"Reset"); ok && t.After(reset) {
 			reset = t
 		}
 	}

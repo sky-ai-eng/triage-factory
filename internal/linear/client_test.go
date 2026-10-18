@@ -255,6 +255,184 @@ func TestRateLimitReset_LaterOfTheTwoWindows(t *testing.T) {
 	}
 }
 
+// searchIssuesRefusal is a refusal by searchIssues' own limit, 30 requests a
+// minute, as Linear sent it: the status, Date, rate-limit headers and body
+// verbatim. Only the endpoint's bucket is spent, and it resets a minute after
+// the response; the hourly buckets, barely touched, reset an hour after it.
+var searchIssuesRefusal = reply{
+	status: http.StatusTooManyRequests,
+	header: map[string]string{
+		"Date":                                    "Sun, 18 Oct 2026 00:04:15 GMT",
+		"X-Complexity":                            "3",
+		"X-Ratelimit-Complexity-Limit":            "3000000",
+		"X-Ratelimit-Complexity-Remaining":        "2999985",
+		"X-Ratelimit-Complexity-Reset":            "1792285455565",
+		"X-Ratelimit-Endpoint-Name":               "searchIssues",
+		"X-Ratelimit-Endpoint-Requests-Limit":     "30",
+		"X-Ratelimit-Endpoint-Requests-Remaining": "0",
+		"X-Ratelimit-Endpoint-Requests-Reset":     "1792281915567",
+		"X-Ratelimit-Requests-Limit":              "2500",
+		"X-Ratelimit-Requests-Remaining":          "2470",
+		"X-Ratelimit-Requests-Reset":              "1792285455565",
+	},
+	body: `{"errors":[{"message":"ratelimit exceeded","extensions":{"type":"ratelimited","code":"RATELIMITED","statusCode":429,"userError":true,"userPresentableMessage":"You're trying to search issues too fast. Please wait for a while before trying again.","meta":{"rateLimitResult":{"allowed":false,"requested":1,"remaining":0,"duration":60000,"limit":30}},"http":{"headers":{},"status":429}}}]}`,
+}
+
+// searchIssuesRefusalAt is searchIssuesRefusal as if Linear had sent it at
+// now: its Date is now and each reset is moved by as much, so every reset is
+// as far from the response as it was.
+func searchIssuesRefusalAt(t *testing.T, now time.Time) reply {
+	t.Helper()
+	sent, err := http.ParseTime(searchIssuesRefusal.header["Date"])
+	if err != nil {
+		t.Fatalf("fixture Date: %v", err)
+	}
+	header := make(map[string]string, len(searchIssuesRefusal.header))
+	for name, value := range searchIssuesRefusal.header {
+		if strings.HasSuffix(name, "-Reset") {
+			ms, err := strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				t.Fatalf("fixture %s: %v", name, err)
+			}
+			value = strconv.FormatInt(time.UnixMilli(ms).Add(now.Sub(sent)).UnixMilli(), 10)
+		}
+		header[name] = value
+	}
+	header["Date"] = now.UTC().Format(http.TimeFormat)
+	return reply{status: searchIssuesRefusal.status, header: header, body: searchIssuesRefusal.body}
+}
+
+func TestRateLimitReset_RealEndpointRefusal(t *testing.T) {
+	h := http.Header{}
+	for name, value := range searchIssuesRefusal.header {
+		h.Set(name, value)
+	}
+	if got, want := rateLimitReset(h), time.UnixMilli(1_792_281_915_567); !got.Equal(want) {
+		t.Errorf("reset = %v, want the endpoint's reset %v, not the hourly buckets' an hour later", got, want)
+	}
+}
+
+// TestRateLimited_RealEndpointRefusalReturnsItsReset: a refusal by an
+// endpoint's minute-long limit is not waited out within the request's budget,
+// and the caller is told the minute, not the hour.
+func TestRateLimited_RealEndpointRefusalReturnsItsReset(t *testing.T) {
+	shortWaits(t)
+	refusal := searchIssuesRefusalAt(t, time.Now())
+	s := newStub(t, scripted(refusal, reply{body: viewerOK}))
+	ms, _ := strconv.ParseInt(refusal.header["X-Ratelimit-Endpoint-Requests-Reset"], 10, 64)
+	want := time.UnixMilli(ms)
+
+	_, err := s.client().Viewer(context.Background())
+	var rle *RateLimitError
+	if !errors.As(err, &rle) || !rle.Reset.Equal(want) {
+		t.Fatalf("err = %v, want a *RateLimitError carrying the endpoint's reset %v", err, want)
+	}
+	var gqlErr *GraphQLError
+	if !errors.As(err, &gqlErr) || gqlErr.Code != codeRateLimited || gqlErr.Status != http.StatusTooManyRequests {
+		t.Errorf("err = %#v, want it to wrap the 429 RATELIMITED *GraphQLError", err)
+	}
+	if n := len(s.requests()); n != 1 {
+		t.Errorf("attempts = %d, want 1", n)
+	}
+}
+
+// TestRateLimited_WaitsForTheSpentBucketOnly: a request refused by an
+// endpoint's limit that lifts within the budget is retried once it lifts,
+// though the hourly buckets reset far later.
+func TestRateLimited_WaitsForTheSpentBucketOnly(t *testing.T) {
+	shortWaits(t)
+	now := time.Now()
+	s := newStub(t, scripted(reply{
+		status: http.StatusTooManyRequests,
+		header: map[string]string{
+			"X-RateLimit-Requests-Remaining":          "2470",
+			"X-RateLimit-Requests-Reset":              strconv.FormatInt(now.Add(time.Hour).UnixMilli(), 10),
+			"X-RateLimit-Complexity-Remaining":        "2999985",
+			"X-RateLimit-Complexity-Reset":            strconv.FormatInt(now.Add(time.Hour).UnixMilli(), 10),
+			"X-RateLimit-Endpoint-Name":               "searchIssues",
+			"X-RateLimit-Endpoint-Requests-Remaining": "0",
+			"X-RateLimit-Endpoint-Requests-Reset":     strconv.FormatInt(now.Add(150*time.Millisecond).UnixMilli(), 10),
+		},
+		body: `{"errors":[{"message":"ratelimit exceeded","extensions":{"code":"RATELIMITED"}}]}`,
+	}, reply{body: viewerOK}))
+
+	start := time.Now()
+	if _, err := s.client().Viewer(context.Background()); err != nil {
+		t.Fatalf("Viewer: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
+		t.Errorf("retried after %v, want the wait until the endpoint's reset", elapsed)
+	}
+	if n := len(s.requests()); n != 2 {
+		t.Errorf("attempts = %d, want 2", n)
+	}
+}
+
+func TestRateLimitReset_LatestSpentBucket(t *testing.T) {
+	at := func(minutes int) time.Time {
+		return time.UnixMilli(1_900_000_000_000).Add(time.Duration(minutes) * time.Minute)
+	}
+	type bucket struct {
+		remaining string
+		reset     time.Time
+	}
+	cases := []struct {
+		name                           string
+		requests, complexity, endpoint bucket
+		want                           time.Time
+	}{
+		{
+			name:     "endpoint spent, resetting before the hourly buckets",
+			requests: bucket{"2470", at(60)}, complexity: bucket{"2999985", at(60)}, endpoint: bucket{"0", at(1)},
+			want: at(1),
+		},
+		{
+			name:     "endpoint spent, resetting after the hourly buckets",
+			requests: bucket{"2470", at(60)}, complexity: bucket{"2999985", at(60)}, endpoint: bucket{"0", at(120)},
+			want: at(120),
+		},
+		{
+			name:     "requests spent, endpoint not",
+			requests: bucket{"0", at(60)}, complexity: bucket{"2999985", at(90)}, endpoint: bucket{"5", at(120)},
+			want: at(60),
+		},
+		{
+			name:     "several spent: the latest of them",
+			requests: bucket{"0", at(60)}, complexity: bucket{"-12", at(90)}, endpoint: bucket{"0", at(1)},
+			want: at(90),
+		},
+		{
+			name:     "none spent: the later hourly reset, never the endpoint's",
+			requests: bucket{"3", at(60)}, complexity: bucket{"100", at(90)}, endpoint: bucket{"5", at(120)},
+			want: at(90),
+		},
+		{
+			name:     "a spent bucket with no reset says nothing",
+			requests: bucket{"0", time.Time{}}, complexity: bucket{"100", at(90)},
+			want: at(90),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := http.Header{}
+			set := func(prefix string, b bucket) {
+				if b.remaining != "" {
+					h.Set(prefix+"Remaining", b.remaining)
+				}
+				if !b.reset.IsZero() {
+					h.Set(prefix+"Reset", strconv.FormatInt(b.reset.UnixMilli(), 10))
+				}
+			}
+			set("X-RateLimit-Requests-", tc.requests)
+			set("X-RateLimit-Complexity-", tc.complexity)
+			set("X-RateLimit-Endpoint-Requests-", tc.endpoint)
+			if got := rateLimitReset(h); !got.Equal(tc.want) {
+				t.Errorf("reset = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestServerError_QueryRetried(t *testing.T) {
 	shortWaits(t)
 	s := newStub(t, scripted(reply{status: http.StatusServiceUnavailable, body: "<html>down</html>"}, reply{body: viewerOK}))
