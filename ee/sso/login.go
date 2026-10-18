@@ -37,6 +37,29 @@ func (le *loginExt) IdPForProviders(ctx context.Context, providerIDs []string) (
 	return le.stores().Connections.IdPsByProviderIDs(ctx, providerIDs)
 }
 
+// TrustsSSOEmail answers core's trust question for an SSO sign-in's email:
+// true iff the address's domain is a verified sso_domains row whose
+// connection is the one providerID names. Verified domains are globally
+// unique, so at most one connection can match, and a domain another org has
+// verified is not this connection's to vouch for. Admin pool: the actor is
+// mid-login with no membership, the same read discovery and enforcement make.
+// Neither the connection's enabled flag nor the org's license enters it — this
+// is a statement about who owns an address, and JIT gates on both separately.
+func (le *loginExt) TrustsSSOEmail(ctx context.Context, providerID, email string) (bool, error) {
+	if providerID == "" {
+		return false, nil
+	}
+	dom, ok := le.api.EmailDomain(email)
+	if !ok {
+		return false, nil
+	}
+	route, err := le.stores().Domains.GetVerifiedByDomain(ctx, dom)
+	if err != nil {
+		return false, err
+	}
+	return route != nil && route.ProviderID == providerID, nil
+}
+
 // StartSSO handles GET /api/auth/oauth/saml — the SP-initiated SAML start.
 // Given a TF-registered provider_id it POSTs GoTrue's /sso and forwards the
 // 303 to the IdP. A non-"saml" provider is declined (core reports it).
@@ -355,32 +378,22 @@ func (le *loginExt) OnTestCallback(w http.ResponseWriter, r *http.Request, st se
 		return true
 	}
 
-	res := samlTestResult{
-		Email:         strings.TrimSpace(claims.Email),
-		EmailVerified: claims.EmailVerified,
-	}
+	res := samlTestResult{Email: strings.TrimSpace(claims.Email)}
 	if res.Email == "" {
 		res.Reason = "Sign-in completed, but the assertion carried no email claim. In your identity provider, map the user's email (or UPN) to the email claim."
 		le.renderSAMLTestResult(w, res)
 		return true
 	}
 
-	// Domain match (informational, never gates pass/fail), scoped to the
-	// connection's org via the provider binding.
-	if dom, ok := le.api.EmailDomain(res.Email); ok {
-		res.Domain = dom
-		binding, berr := le.stores().Connections.GetByProviderID(r.Context(), st.ProviderID)
-		if berr != nil {
-			ssoLog.Warn("saml test: provider lookup for domain-match failed", "error", berr)
-		} else if binding != nil {
-			route, derr := le.stores().Domains.GetVerifiedByDomain(r.Context(), dom)
-			if derr != nil {
-				ssoLog.Warn("saml test: verified-domain lookup failed", "error", derr)
-			} else if route != nil && route.OrgID == binding.OrgID {
-				res.DomainMatch = true
-			}
-		}
+	// Whether a real sign-in with this address would join the account that
+	// already holds it — the same decision the login path makes. Informational:
+	// it never gates pass/fail, so a failed lookup logs and reads as "no".
+	res.Domain, _ = le.api.EmailDomain(res.Email)
+	trusted, terr := le.TrustsSSOEmail(r.Context(), st.ProviderID, res.Email)
+	if terr != nil {
+		ssoLog.Warn("saml test: email trust lookup failed", "error", terr)
 	}
+	res.MatchesExisting = trusted
 
 	// Durably record the pass — best-effort.
 	if err := le.stores().Connections.MarkTestedByProviderID(r.Context(), st.ProviderID); err != nil {
@@ -393,12 +406,13 @@ func (le *loginExt) OnTestCallback(w http.ResponseWriter, r *http.Request, st se
 }
 
 type samlTestResult struct {
-	Pass          bool
-	Email         string
-	EmailVerified bool
-	Domain        string
-	DomainMatch   bool
-	Reason        string
+	Pass   bool
+	Email  string
+	Domain string
+	// MatchesExisting is TrustsSSOEmail for the asserted address: whether a
+	// sign-in with it links to the account that already holds it.
+	MatchesExisting bool
+	Reason          string
 }
 
 func samlTestErrorReason(code, desc string) string {
@@ -446,9 +460,8 @@ var samlTestResultTmpl = template.Must(template.New("sso-test").Parse(`<!doctype
   {{if .Email}}
   <dl>
     <dt>Authenticated email</dt><dd>{{.Email}}</dd>
-    <dt>Email verified</dt><dd>{{if .EmailVerified}}Yes{{else}}No{{end}}</dd>
-    <dt>Domain match</dt>
-    <dd>{{if .DomainMatch}}Yes &mdash; {{.Domain}} is verified for your organization{{else}}No{{if .Domain}} &mdash; {{.Domain}} is not a verified domain for your organization{{end}}{{end}}</dd>
+    <dt>Matches existing accounts</dt>
+    <dd>{{if .MatchesExisting}}Yes &mdash; {{.Domain}} is verified for your organization{{else}}No{{if .Domain}} &mdash; {{.Domain}} is not a verified domain for your organization. Sign-ins with this address get a separate account in your organization only.{{end}}{{end}}</dd>
   </dl>
   {{end}}
   <p class="hint">You can close this window and return to Settings.</p>

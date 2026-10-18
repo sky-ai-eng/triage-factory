@@ -134,19 +134,36 @@ func (s *usersStore) UserIDsForGitHubLoginSystem(ctx context.Context, githubBase
 }
 
 func (s *usersStore) UserIDsForVerifiedEmailSystem(ctx context.Context, email string) ([]string, error) {
-	// Mirrors auth_handlers.go's inline auto-link lookup: lowercase/trim
-	// before matching against public.user_identities' lower(email) index.
-	email = strings.ToLower(strings.TrimSpace(email))
+	// Mirrors auth_handlers.go's inline auto-link lookup: both sides fold with
+	// Postgres lower(), the function the one-principal-per-verified-email
+	// constraint and the lower(email) index use.
+	email = strings.TrimSpace(email)
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT DISTINCT user_id::text
 		FROM public.user_identities
-		WHERE lower(email) = $1 AND email_verified
+		WHERE lower(email) = lower($1) AND email_verified
 		ORDER BY user_id ASC
 	`, email)
 	if err != nil {
 		return nil, fmt.Errorf("read user_identities by verified email: %w", err)
 	}
 	return scanIDs(rows, "user_identities.user_id")
+}
+
+func (s *usersStore) HoldsVerifiedEmailSystem(ctx context.Context, userID, email string) (bool, error) {
+	email = strings.TrimSpace(email)
+	if email == "" || strings.TrimSpace(userID) == "" {
+		return false, nil
+	}
+	var ok bool
+	if err := s.admin.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM public.user_identities
+			 WHERE user_id = $1 AND lower(email) = lower($2) AND email_verified
+		)`, userID, email).Scan(&ok); err != nil {
+		return false, fmt.Errorf("read user_identities verified email for principal: %w", err)
+	}
+	return ok, nil
 }
 
 // scanIDs drains rows of a single user_id::text column into a []string,

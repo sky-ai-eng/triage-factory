@@ -143,8 +143,9 @@ func TestSSOTest_ValidRoundTrip_PassesAndWritesNothing(t *testing.T) {
 }
 
 // When the authenticated email's domain is a VERIFIED sso_domains row for the
-// connection's org, the result reports a domain match (informational — it tells
-// the admin identifier-first login will also route here).
+// connection, the result says sign-ins with the address match existing
+// accounts (informational — it tells the admin a real sign-in would link to the
+// account that already holds the address).
 func TestSSOTest_DomainMatch_WhenVerifiedDomainExists(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
@@ -163,13 +164,15 @@ func TestSSOTest_DomainMatch_WhenVerifiedDomainExists(t *testing.T) {
 	if !strings.Contains(body, "SSO test passed") {
 		t.Fatalf("expected a pass result:\n%s", body)
 	}
-	if !strings.Contains(body, "is verified for your organization") {
-		t.Errorf("expected a positive domain-match line for a verified domain:\n%s", body)
+	if !strings.Contains(body, "Matches existing accounts") ||
+		!strings.Contains(body, "Yes &mdash; corp.example is verified for your organization") {
+		t.Errorf("expected a positive match line for a verified domain:\n%s", body)
 	}
 }
 
 // With no verified domain, the result still PASSES (the SP-initiated/tile flow
-// doesn't need a verified domain) but reports the domain as not matched.
+// doesn't need a verified domain) but says sign-ins with the address get a
+// separate account.
 func TestSSOTest_NoDomainMatch_StillPasses(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
@@ -186,8 +189,35 @@ func TestSSOTest_NoDomainMatch_StillPasses(t *testing.T) {
 	if !strings.Contains(body, "SSO test passed") {
 		t.Fatalf("expected a pass result even without a verified domain:\n%s", body)
 	}
-	if !strings.Contains(body, "is not a verified domain for your organization") {
-		t.Errorf("expected a negative domain-match line:\n%s", body)
+	if !strings.Contains(body, "No &mdash; corp.example is not a verified domain for your organization. Sign-ins with this address get a separate account in your organization only.") {
+		t.Errorf("expected a negative match line:\n%s", body)
+	}
+}
+
+// A domain another org verified does not match on this connection: the page
+// answers the question the login path asks, which is about the connection.
+func TestSSOTest_DomainVerifiedByAnotherOrg_DoesNotMatch(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+
+	providerID := uuid.NewString()
+	owner := r.seedUser()
+	orgA, _ := r.seedOrg(owner, "acme")
+	r.seedSSOConnection(orgA, providerID, "member", true)
+
+	otherProvider := uuid.NewString()
+	otherOwner := r.seedUser()
+	orgB, _ := r.seedOrg(otherOwner, "owns-corp")
+	r.seedSSOConnection(orgB, otherProvider, "member", true)
+	r.seedVerifiedSSODomain(orgB, otherProvider, "corp.example")
+
+	user := r.seedAuthOnlyUser()
+	body := readBody(r.driveSAMLTest(owner, validSAMLClaimsFor(user, providerID)))
+	if !strings.Contains(body, "SSO test passed") {
+		t.Fatalf("expected a pass result:\n%s", body)
+	}
+	if !strings.Contains(body, "No &mdash; corp.example is not a verified domain for your organization") {
+		t.Errorf("another org's verified domain must not match this connection:\n%s", body)
 	}
 }
 

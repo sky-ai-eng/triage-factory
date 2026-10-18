@@ -46,6 +46,16 @@ type LoginExtension interface {
 	// path). Never both. (activeOrg is only honored when done=false, err=nil.)
 	OnLoginResolved(w http.ResponseWriter, r *http.Request, in LoginResolved) (activeOrg uuid.NullUUID, done bool, err error)
 
+	// TrustsSSOEmail reports whether an SSO sign-in through providerID may
+	// treat email as an address its signer owns: true only when the address's
+	// domain is verified for the org whose connection providerID names. GoTrue
+	// marks every SAML assertion's email verified, and an org admin can point a
+	// connection at an identity provider they run, so the assertion alone
+	// proves nothing about the mailbox; the verified domain is the proof. The
+	// no-op returns false. Core fails the sign-in on an error rather than
+	// trusting the address.
+	TrustsSSOEmail(ctx context.Context, providerID, email string) (bool, error)
+
 	// IdPForProviders is the read-side seam: for each SSO provider id that
 	// backs one of a principal's login identities, which identity-provider
 	// product it is (the closed vocabulary the extension's connection store
@@ -67,9 +77,10 @@ type LoginState struct {
 }
 
 // LoginResolved is what core hands OnLoginResolved after principal
-// resolution. Email/EmailVerified come from the verified GoTrue JWT;
-// UserID is the resolved principal (public.users row); IsSSO is
-// State.ProviderID != "" (TF's own authoritative SSO signal).
+// resolution. Email comes from the verified GoTrue JWT; EmailVerified is TF's
+// trust decision for it (the JWT's flag, and for an SSO sign-in also
+// TrustsSSOEmail); UserID is the resolved principal (public.users row); IsSSO
+// is State.ProviderID != "" (TF's own authoritative SSO signal).
 type LoginResolved struct {
 	State         LoginState
 	UserID        uuid.UUID
@@ -92,6 +103,10 @@ func (noopLoginExtension) OnTestCallback(http.ResponseWriter, *http.Request, Log
 
 func (noopLoginExtension) OnLoginResolved(http.ResponseWriter, *http.Request, LoginResolved) (uuid.NullUUID, bool, error) {
 	return uuid.NullUUID{}, false, nil
+}
+
+func (noopLoginExtension) TrustsSSOEmail(context.Context, string, string) (bool, error) {
+	return false, nil
 }
 
 func (noopLoginExtension) IdPForProviders(context.Context, []string) (map[string]string, error) {

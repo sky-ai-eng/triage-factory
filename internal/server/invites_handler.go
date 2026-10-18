@@ -43,6 +43,8 @@ type invitesHandler struct {
 	az      *authz.Checker
 	admin   *sql.DB
 	invites db.InvitesStore
+	// users answers whether the invitee holds the invited address verified.
+	users db.UsersStore
 
 	// publicURL returns the externally-visible deployment base for building
 	// accept_url. Read lazily: deployCfg is populated after routes() runs.
@@ -600,11 +602,18 @@ func (ih *invitesHandler) handleInviteAccept(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Strict email match against the JWT *primary* email. Matching the full
-	// GitHub verified-email set is a separate follow-up (capture
-	// provider_token at the OAuth callback, match against /user/emails).
-	callerEmail := strings.ToLower(strings.TrimSpace(claims.Email))
-	if callerEmail == "" || callerEmail != invite.Email {
+	// The invitee must hold the invited address verified on one of their login
+	// identities — TF's trust decision for it, so an SSO identity's address
+	// counts only on a domain its connection's org has verified. The token's
+	// email claim is not proof: an SSO token carries whatever address its
+	// identity provider asserted. claims.Email is only displayed below.
+	holds, err := ih.users.HoldsVerifiedEmailSystem(r.Context(), inviteeID.String(), invite.Email)
+	if err != nil {
+		internalError(w, "invites", err)
+		return
+	}
+	if !holds {
+		callerEmail := strings.ToLower(strings.TrimSpace(claims.Email))
 		// Its own reason rather than the former private invited_email key:
 		// the message names both addresses, and the client keys the
 		// switch-account affordance on the code.

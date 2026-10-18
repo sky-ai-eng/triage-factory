@@ -46,20 +46,11 @@ func (s *operatorStore) Remove(ctx context.Context, email string) (bool, error) 
 	return n > 0, err
 }
 
-func (s *operatorStore) IsOperator(ctx context.Context, email string) (bool, error) {
-	norm := normalizeEmail(email)
-	if norm == "" {
-		return false, nil
-	}
-	var exists int
-	err := s.q.QueryRowContext(ctx, `SELECT 1 FROM operators WHERE email = ? LIMIT 1`, norm).Scan(&exists)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
+// IsOperatorUserSystem always returns (false, nil): an operator is matched
+// through a principal's login identities, which local mode does not have, and
+// the fleet gate admits local mode's single user before it asks.
+func (s *operatorStore) IsOperatorUserSystem(context.Context, string) (bool, error) {
+	return false, nil
 }
 
 func (s *operatorStore) List(ctx context.Context) ([]domain.Operator, error) {

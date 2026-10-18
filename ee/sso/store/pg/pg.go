@@ -398,14 +398,17 @@ func (s *ssoBreakGlassStore) List(ctx context.Context, orgID string) ([]ssostore
 	// Admin pool: the email comes from user_identities, admin-pool-only by
 	// the principal-model design. The handler has gated org-admin and this
 	// read is strictly scoped to bg.org_id = $1, so admin leaks nothing
-	// cross-org. Newest designation first.
+	// cross-org. Newest designation first. Only a verified address is shown:
+	// an unverified one may be whatever an identity provider asserted, and an
+	// admin reading this list takes the address as who the principal is. A
+	// principal with none shows no email and the client names them otherwise.
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT bg.user_id::text,
 		       COALESCE(u.display_name, ''),
 		       COALESCE((
 		           SELECT i.email FROM user_identities i
-		            WHERE i.user_id = bg.user_id AND i.email IS NOT NULL
-		            ORDER BY i.email_verified DESC, i.updated_at DESC
+		            WHERE i.user_id = bg.user_id AND i.email IS NOT NULL AND i.email_verified
+		            ORDER BY i.updated_at DESC
 		            LIMIT 1
 		       ), ''),
 		       bg.created_at

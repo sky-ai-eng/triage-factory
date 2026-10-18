@@ -683,11 +683,12 @@ func TestGitHubConnect_IdentityPersistsAcrossLoginProvider(t *testing.T) {
 	claims := &verify.Claims{
 		Subject:       samlID.String(),
 		Email:         "alice@corp.example",
-		EmailVerified: true,                                         // SAML assertion emails are verified by definition
+		EmailVerified: true,
 		UserMetadata:  map[string]any{"full_name": "Alice Example"}, // no user_name
 	}
 	const providerID = "11111111-2222-3333-4444-555555555555"
-	got, err := resolveOrCreatePrincipal(context.Background(), rig.h.AdminDB, samlID, claims, providerID)
+	// Trusted, as it would be on a domain verified for the connection's org.
+	got, err := resolveOrCreatePrincipal(context.Background(), rig.h.AdminDB, samlID, claims, true, providerID)
 	if err != nil {
 		t.Fatalf("resolveOrCreatePrincipal: %v", err)
 	}

@@ -548,3 +548,37 @@ func createDomain(t *testing.T, stores db.Stores, ctx context.Context, orgID, us
 	}
 	return id
 }
+
+// TestSSOBreakGlassStore_Postgres_ListShowsOnlyVerifiedEmail: the admin-facing
+// list names a principal by a verified address only. One whose sole address is
+// unverified — possibly whatever an identity provider asserted — lists with no
+// email rather than with that one.
+func TestSSOBreakGlassStore_Postgres_ListShowsOnlyVerifiedEmail(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, ownerID, _ := pgtest.SeedOrgWithUser(t, h, "bg-email")
+	pgtest.SeedIdentity(t, h, ownerID, "owner@corp.example", true)
+	pgtest.SeedIdentity(t, h, ownerID, "owner-other@corp.example", false)
+	asserted := pgtest.SeedUser(t, h, "bg-asserted")
+	pgtest.SeedIdentity(t, h, asserted, "bob@globex.example", false)
+	for _, uid := range []string{ownerID, asserted} {
+		pgtest.MustExec(t, h.AdminDB,
+			`INSERT INTO sso_break_glass (org_id, user_id) VALUES ($1, $2)`, orgID, uid)
+	}
+
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	list, err := ssostore.FromStores(stores).BreakGlass.List(context.Background(), orgID)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	got := map[string]string{}
+	for _, p := range list {
+		got[p.UserID] = p.Email
+	}
+	if got[ownerID] != "owner@corp.example" {
+		t.Errorf("owner email = %q, want the verified address", got[ownerID])
+	}
+	if e, ok := got[asserted]; !ok || e != "" {
+		t.Errorf("unverified-only principal: listed=%v email=%q, want listed with no email", ok, e)
+	}
+}

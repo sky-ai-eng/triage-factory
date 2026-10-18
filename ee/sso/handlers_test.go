@@ -48,15 +48,16 @@ func TestSSOTestResultRendering(t *testing.T) {
 		deny []string
 	}{
 		{
-			name: "pass with domain match",
-			res:  samlTestResult{Pass: true, Email: "a@corp.com", EmailVerified: true, Domain: "corp.com", DomainMatch: true},
-			want: []string{"SSO test passed", "a@corp.com", "is verified for your organization"},
-			deny: []string{"SSO test failed"},
+			name: "pass matching existing accounts",
+			res:  samlTestResult{Pass: true, Email: "a@corp.com", Domain: "corp.com", MatchesExisting: true},
+			want: []string{"SSO test passed", "a@corp.com", "Matches existing accounts", "Yes &mdash; corp.com is verified for your organization"},
+			deny: []string{"SSO test failed", "Email verified", "Domain match", "separate account"},
 		},
 		{
-			name: "pass without domain match",
-			res:  samlTestResult{Pass: true, Email: "a@corp.com", EmailVerified: true, Domain: "corp.com"},
-			want: []string{"SSO test passed", "is not a verified domain for your organization"},
+			name: "pass not matching existing accounts",
+			res:  samlTestResult{Pass: true, Email: "a@corp.com", Domain: "corp.com"},
+			want: []string{"SSO test passed", "Matches existing accounts",
+				"No &mdash; corp.com is not a verified domain for your organization. Sign-ins with this address get a separate account in your organization only."},
 		},
 		{
 			name: "fail surfaces the reason",

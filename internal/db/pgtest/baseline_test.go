@@ -505,6 +505,63 @@ func TestBaseline_SourceCHECKsDropped(t *testing.T) {
 	}
 }
 
+// TestBaseline_UserIdentities_OnePrincipalPerVerifiedEmail pins the exclusion
+// constraint behind account linking: a verified address belongs to at most one
+// principal, compared case-insensitively. Two identities of ONE principal may
+// share it, and an unverified address may be shared by anyone.
+func TestBaseline_UserIdentities_OnePrincipalPerVerifiedEmail(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	alice := SeedUser(t, h, "alice")
+	bob := SeedUser(t, h, "bob")
+
+	insert := func(principalID, email string, verified bool) error {
+		var authID string
+		if err := h.AdminDB.QueryRow(`SELECT gen_random_uuid()`).Scan(&authID); err != nil {
+			t.Fatalf("gen auth_user_id: %v", err)
+		}
+		h.SeedAuthUser(t, authID, authID+"@auth.test")
+		_, err := h.AdminDB.Exec(`
+			INSERT INTO user_identities (auth_user_id, user_id, provider, email, email_verified)
+			VALUES ($1, $2, 'github', $3, $4)
+		`, authID, principalID, email, verified)
+		return err
+	}
+
+	if err := insert(alice, "shared@corp.example", true); err != nil {
+		t.Fatalf("first verified identity: %v", err)
+	}
+	if err := insert(alice, "SHARED@corp.example", true); err != nil {
+		t.Errorf("a second identity of the SAME principal with the address verified: %v (must be allowed)", err)
+	}
+
+	err := insert(bob, "Shared@Corp.Example", true)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23P01" {
+		t.Errorf("another principal's verified identity with the address in a different case: err = %v, want SQLSTATE 23P01", err)
+	}
+
+	if err := insert(bob, "shared@corp.example", false); err != nil {
+		t.Errorf("another principal holding the address UNVERIFIED: %v (must be allowed)", err)
+	}
+	if err := insert(bob, "loose@corp.example", false); err != nil {
+		t.Fatalf("unverified identity: %v", err)
+	}
+	if err := insert(alice, "loose@corp.example", false); err != nil {
+		t.Errorf("two principals sharing an unverified address: %v (must be allowed)", err)
+	}
+
+	// Flipping an existing row to verified is held to the same rule.
+	_, err = h.AdminDB.Exec(`
+		UPDATE user_identities SET email_verified = true
+		 WHERE user_id = $1 AND email = 'shared@corp.example'
+	`, bob)
+	if !errors.As(err, &pgErr) || pgErr.Code != "23P01" {
+		t.Errorf("verifying bob's copy of alice's address: err = %v, want SQLSTATE 23P01", err)
+	}
+}
+
 // TestRLS_AdminConnectionBypassesRLS pins the harness contract: tests
 // run through AdminDB see all rows regardless of RLS policies. If
 // this ever fails, it means tf_app or some other role's BYPASSRLS bit

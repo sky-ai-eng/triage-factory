@@ -323,6 +323,36 @@ func (r *authRig) driveCallbackClaims(claims jwt.MapClaims) (resp *http.Response
 	return rec.Result(), token
 }
 
+// driveSSOCallbackClaims is driveCallbackClaims for an SSO sign-in: TF's
+// signed state carries providerID, which is what makes the callback treat the
+// login as SSO. This package registers no login extension, so the no-op's
+// TrustsSSOEmail answers no and every address driven here is recorded
+// untrusted — ee/sso's answer for a domain not verified for the connection.
+func (r *authRig) driveSSOCallbackClaims(claims jwt.MapClaims, providerID string) *http.Response {
+	r.t.Helper()
+	token := r.signKey.mintJWT(r.t, claims)
+	r.srv.authDeps.gotrueExchange = func(ctx context.Context, code, verifier string) (string, string, int64, error) {
+		return token, "refresh-" + uuid.NewString(), time.Now().Add(time.Hour).Unix(), nil
+	}
+	csrf := "test-csrf-" + uuid.NewString()
+	state := stateClaims{
+		ReturnTo: "/dashboard", CSRF: csrf, CodeVerifier: "test-pkce-verifier", ProviderID: providerID,
+		ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
+	}
+	signed, err := state.sign(r.srv.deployCfg.hmacKey)
+	if err != nil {
+		r.t.Fatalf("sign state: %v", err)
+	}
+	q := url.Values{}
+	q.Set("state", csrf)
+	q.Set("code", "fake-auth-code-"+uuid.NewString())
+	req := httptest.NewRequest("GET", "/api/auth/callback?"+q.Encode(), nil)
+	req.AddCookie(&http.Cookie{Name: stateCookieName, Value: signed})
+	rec := httptest.NewRecorder()
+	r.srv.mux.ServeHTTP(rec, req)
+	return rec.Result()
+}
+
 // sidFromResp pulls the sid cookie from a callback response, fatal on miss.
 func (r *authRig) sidFromResp(resp *http.Response) string {
 	r.t.Helper()
