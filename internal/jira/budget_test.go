@@ -133,8 +133,8 @@ func TestRecordBudgets_CloudBurst(t *testing.T) {
 	after := time.Now()
 
 	b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", "cloud_api_token", "burst")
-	if !ok || b.Remaining != 90 || b.Limit != 100 || !withinWindow(b.Reset, before, after, time.Second) {
-		t.Errorf("burst = (%+v, %v), want 90 of 100 resetting a second after the response", b, ok)
+	if !ok || b.Remaining != 90 || b.Limit != 100 || !withinWindow(b.Reset, before, after, time.Second) || !b.Quiet {
+		t.Errorf("burst = (%+v, %v), want 90 of 100 resetting a second after the response, quiet", b, ok)
 	}
 	if b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", "cloud_api_token", "quota"); ok {
 		t.Errorf("recorded a quota reading %+v from a response that states none", b)
@@ -295,8 +295,8 @@ func TestRecordBudgets_DataCenterTokenBucket(t *testing.T) {
 			}
 			after := time.Now()
 			b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", "dc_pat", "requests")
-			if !ok || b.Remaining != c.remaining || b.Limit != 500 {
-				t.Fatalf("requests = (%+v, %v), want %d of 500", b, ok, c.remaining)
+			if !ok || b.Remaining != c.remaining || b.Limit != 500 || b.Quiet {
+				t.Fatalf("requests = (%+v, %v), want %d of 500, not quiet", b, ok, c.remaining)
 			}
 			if c.toFull == 0 {
 				if !b.Reset.IsZero() {

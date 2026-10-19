@@ -741,8 +741,10 @@ things, so their buckets have different names.
   - `burst` is the per-second request allowance for the endpoint, from
     `X-RateLimit-Limit` and `X-RateLimit-Remaining`. It is not the hourly
     quota. Its window is a second, so a reading is reported for a second
-    after its response and rarely appears in a scrape; the low-budget WARN
-    below is the signal for it.
+    after its response and rarely appears in a scrape. It never logs the
+    low-budget WARN below, which would repeat about once a second while an
+    endpoint stays busy. A burst refusal is counted under `jira-burst-based`,
+    and its wait is logged.
 - Each Jira Cloud 429 is added to `tf_upstream_rate_limit_refused_total`
   under its `RateLimit-Reason`: `jira-quota-global-based`,
   `jira-quota-tenant-based`, `jira-burst-based` or `jira-per-issue-on-write`.
@@ -816,7 +818,7 @@ mode without `TF_METRICS_ADDR`):
 
 | When | Level | Message and attributes |
 | --- | --- | --- |
-| A bucket's reading is below 20% left, or says it is near its limit, for the first time in its window | WARN | `rate-limit budget low`, with `upstream`, `org`, `credential`, `bucket`, `remaining`, `limit` and `reset`, or `near_limit` and `reset` for Jira Cloud's `quota`. It is logged again once that window has reset, or after a reading that is no longer near the limit. |
+| A bucket's reading is below 20% left, or says it is near its limit, for the first time in its window. Jira Cloud's `burst` never logs it. | WARN | `rate-limit budget low`, with `upstream`, `org`, `credential`, `bucket`, `remaining`, `limit` and `reset`, or `near_limit` and `reset` for Jira Cloud's `quota`. It is logged again once that window has reset, or after a reading that is no longer near the limit. |
 | A request waits on a rate limit | WARN | `waiting on a rate limit`, with `upstream`, `org` and `wait`. |
 
 GitHub and Linear also state what each GraphQL query cost against their

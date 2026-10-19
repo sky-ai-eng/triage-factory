@@ -122,7 +122,8 @@ func (c *Client) recordBudgets(status int, h http.Header, now time.Time) {
 // for it, a response without X-RateLimit-NearLimit says the quota is not near.
 // An API token is not subject to the quota, so its responses record it only
 // if one says so. A 429 for the quota or for burst takes its reading's reset
-// from the refusal (refusalReset).
+// from the refusal (refusalReset). Burst readings are Quiet: a busy endpoint
+// can stay below 20% of its per-second allowance for many seconds in a row.
 //
 // TODO(TFAC-1120): read the quota's remaining and limit from Beta-RateLimit /
 // Beta-RateLimit-Policy (or RateLimit / RateLimit-Policy) if a real Cloud
@@ -146,6 +147,7 @@ func (c *Client) recordCloud(status int, h http.Header, now time.Time) {
 
 	if b, ok := readCount(h); ok {
 		b.Reset = now.Add(burstWindow)
+		b.Quiet = true
 		if reason == reasonBurst {
 			b.Reset = refusalReset(h, now, burstWindow)
 		}
@@ -166,7 +168,7 @@ func (c *Client) countRefusal(h http.Header) string {
 		reason = reasonOther
 		if raw != "" {
 			if len(raw) > maxLoggedReason {
-				raw = raw[:maxLoggedReason]
+				raw = strings.ToValidUTF8(raw[:maxLoggedReason], "")
 			}
 			jiraLog.Warn("jira rate limit refused a request for a reason TF does not recognize",
 				"org", c.orgID, "credential", string(c.credential), "reason", raw)

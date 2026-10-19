@@ -113,6 +113,25 @@ func TestBudgetRegistry_WarnsOnNearLimit(t *testing.T) {
 	}
 }
 
+// TestBudgetRegistry_QuietNeverWarns: a Quiet reading never warns, however
+// often its short window resets while it stays low, and does not hold off the
+// WARN for a reading that is not Quiet.
+func TestBudgetRegistry_QuietNeverWarns(t *testing.T) {
+	r := newBudgetRegistry()
+	k := budgetKey{Jira, "org-1", "cloud_api_token", "burst"}
+	now := time.Unix(1_000_000, 0)
+	for i := range 5 {
+		at := now.Add(time.Duration(i) * time.Second)
+		if r.record(k, Budget{Remaining: 2, Limit: 100, Reset: at.Add(time.Second), Quiet: true}, at) {
+			t.Errorf("second %d: a quiet reading warned", i)
+		}
+	}
+	at := now.Add(5 * time.Second)
+	if !r.record(k, Budget{Remaining: 2, Limit: 100, Reset: at.Add(time.Second)}, at) {
+		t.Error("a low reading that is not quiet did not warn after quiet ones")
+	}
+}
+
 // TestBudget_NearLimit: a near-limit reading says what the upstream said and
 // nothing of what is left; a counted reading is near below 20% of a stated
 // size, and says neither without one.

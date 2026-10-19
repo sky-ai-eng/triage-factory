@@ -35,6 +35,12 @@ type Budget struct {
 	// made, so Used is at least 1 on it, and 0 on a reading an upstream
 	// stated. A counted reading with no published limit has Used alone.
 	Used int
+	// Quiet keeps the reading out of the low-budget WARN. It is for a bucket
+	// whose window is so short that the WARN, which re-arms once a window has
+	// reset, would fire about once a window for as long as the bucket stays
+	// low: Jira Cloud's per-second burst allowance. A refusal from such a
+	// bucket is still counted and a wait on it logged.
+	Quiet bool
 	// nearOnly marks a NearLimitReading, and near is what it said.
 	nearOnly bool
 	near     bool
@@ -96,8 +102,8 @@ func (b Budget) current(now time.Time) bool {
 // caller is accurate and nothing is summed, here or across pods.
 //
 // The reading is logged at WARN when its bucket is first seen near its limit
-// (Budget.NearLimit) in a window. It is logged again once the warned reading's
-// reset has passed, or after a reading that is not near.
+// (Budget.NearLimit) in a window, unless it is Quiet. It is logged again once
+// the warned reading's reset has passed, or after a reading that is not near.
 func RecordBudget(name Name, orgID, credential, bucket string, b Budget) {
 	// The gauges that report the registry are created with the counters.
 	current()
@@ -226,7 +232,7 @@ func (r *budgetRegistry) record(k budgetKey, b Budget, now time.Time) (warn bool
 	}
 	e.Budget = b
 	switch near, known := b.NearLimit(); {
-	case !known || !near:
+	case b.Quiet || !known || !near:
 		e.warned = false
 	case !e.warned || (!e.warnedUntil.IsZero() && !now.Before(e.warnedUntil)):
 		e.warned, e.warnedUntil, warn = true, b.Reset, true
