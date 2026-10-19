@@ -26,9 +26,9 @@ import { isSSORequired } from './lib/apiClient'
  *   authed + 0 orgs   → redirect to /onboarding (create-or-invite entry)
  *   authed + N orgs, URL has unknown org_id → redirect to /orgs/<active> (preserve tail)
  *   authed + N orgs, URL not under /orgs/:id → redirect to /orgs/<active>
- *   authed + N orgs, the session's org requires SSO this session did not
- *     come through and the resolved org does not → move the session to the
- *     resolved org, then continue
+ *   authed + N orgs, the session has no org it can act in (its org requires
+ *     SSO this session did not come through, or is gone) and the resolved
+ *     org is usable → move the session to the resolved org, then continue
  *   authed + N orgs, resolved org requires SSO this session did not come
  *     through → the SSO-required interstitial instead of the page
  *   authed + N orgs, URL under /orgs/:id → render children
@@ -59,29 +59,31 @@ function LocalAuthGate({ children }: { children: React.ReactNode }) {
 }
 
 /**
- * useMoveSessionOffBarredOrg moves the session's org to the org on screen when
- * the session's org requires an SSO this session did not come through and the
- * org on screen does not. Routes with no org in their path — the teams list,
- * entitlements, the websocket — act in the session's org, not the URL's, so
- * otherwise every such read on the page answers 403 SSO_REQUIRED while
- * /api/me reports the org on screen usable, and no re-read of /api/me changes
- * that. Nothing can use a barred session org: the gate shows a barred org's
- * sign-in, which reads only /api/me. A session org that is usable is left
- * where it is, whichever org is on screen.
+ * useMoveSessionToOrgOnScreen moves the session's org to the org on screen when
+ * the session has no org it can act in and the org on screen is usable.
+ * /api/me reports no active_org_id when the session's org requires an SSO this
+ * session did not come through, when that membership is gone, or when none was
+ * set. Routes with no org in their path — the teams list, entitlements, the
+ * websocket — act in the session's org, not the URL's, so otherwise every such
+ * read on the page fails while /api/me reports the org on screen usable; for a
+ * barred session org the failure is 403 SSO_REQUIRED, and no re-read of
+ * /api/me changes it. A session with a usable org is left where it is,
+ * whichever org is on screen.
  *
  * Returns true until the move has been attempted, so the gate holds the page
  * and its first reads go to the org it shows. Each move is attempted once; a
  * refused or failed one renders the page anyway.
  */
-function useMoveSessionOffBarredOrg(activeOrgId: string | null): boolean {
+function useMoveSessionToOrgOnScreen(activeOrgId: string | null): boolean {
   const { orgs, serverActiveOrgId, revalidate } = useAuth()
-  const sessionOrgBarred = orgs.some((o) => o.id === serverActiveOrgId && o.sso_required)
-  const target = orgs.some((o) => o.id === activeOrgId && !o.sso_required) ? activeOrgId : null
-  const move = sessionOrgBarred && target ? `${serverActiveOrgId}>${target}` : null
+  const target =
+    serverActiveOrgId === null && orgs.some((o) => o.id === activeOrgId && !o.sso_required)
+      ? activeOrgId
+      : null
   const [attempted, setAttempted] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!move || !target || move === attempted) return
+    if (!target || target === attempted) return
     void (async () => {
       try {
         await persistActiveOrg(target)
@@ -89,23 +91,23 @@ function useMoveSessionOffBarredOrg(activeOrgId: string | null): boolean {
         // On SSO_REQUIRED the org on screen started requiring SSO too, and the
         // re-read below shows its sign-in.
         if (!isSSORequired(err)) {
-          console.warn('[org-switch] moving the session off an SSO-required org failed:', err)
+          console.warn('[org-switch] moving the session to the org on screen failed:', err)
         }
       }
       // Re-read so active_org_id names the org the session is in now.
       await revalidate()
-      setAttempted(move)
+      setAttempted(target)
     })()
-  }, [move, target, attempted, revalidate])
+  }, [target, attempted, revalidate])
 
-  return move !== null && move !== attempted
+  return target !== null && target !== attempted
 }
 
 function MultiAuthGate({ children }: { children: React.ReactNode }) {
   const auth = useAuth()
   const { activeOrgId, urlOrgInvalid } = useOrgContext()
   const location = useLocation()
-  const movingSessionOrg = useMoveSessionOffBarredOrg(activeOrgId)
+  const movingSessionOrg = useMoveSessionToOrgOnScreen(activeOrgId)
 
   if (auth.status === 'loading') {
     return <Loading />

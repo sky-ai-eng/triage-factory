@@ -22,7 +22,10 @@ vi.mock('../contexts/AuthContext', () => {
     status: 'authed',
     me: { id: 'u1', orgs: authMock.orgs },
     orgs: authMock.orgs,
-    serverActiveOrgId: null,
+    // The session is in the usable org, as after signing in: a session with no
+    // usable org is moved to the org on screen first, which AuthGate.sessionOrg
+    // covers.
+    serverActiveOrgId: 'org-y',
     error: null,
     refresh: vi.fn(),
     revalidate: authMock.revalidate,

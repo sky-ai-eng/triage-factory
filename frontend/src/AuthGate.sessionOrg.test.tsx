@@ -1,9 +1,10 @@
 // MultiAuthGate and the session's org. Routes with no org in their path act in
-// the session's org rather than the URL's, so a session left in an org that
-// requires SSO breaks every such read on another org's page while /api/me
-// calls that page usable. What's pinned is that the gate moves the session to
-// the org on screen before rendering its page, only when the session's org is
-// barred, and attempts it once.
+// the session's org rather than the URL's, so a session with no org it can act
+// in — left in an org that requires SSO, or with none set — breaks every such
+// read on another org's page while /api/me calls that page usable. What's
+// pinned is that the gate moves the session to the org on screen before
+// rendering its page, only when the session has no usable org, and attempts it
+// once.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import { useEffect } from 'react'
@@ -22,8 +23,8 @@ vi.mock('./hooks/useWebSocket', async (importOriginal) => ({
 
 const SSO_REQUIRED_BODY = { errors: [{ reason: 'SSO_REQUIRED', message: 'requires SSO' }] }
 
-// The server's side: the session's org, which orgs require SSO, and how the
-// next POST /api/me/active-org answers.
+// The server's side: the session's org ('' for none), which orgs require SSO,
+// and how the next POST /api/me/active-org answers.
 let sessionOrg: string
 let barredIds: Set<string>
 let moveAnswer: 'ok' | 'sso' | number
@@ -35,15 +36,18 @@ function org(id: string, name: string): AuthOrg {
     : { id, name, role: 'member', sso_required: false }
 }
 
+// As the server answers it: active_org_id is omitted when the session's org
+// is barred to it, as when none is set.
 function me(): MeResponse {
-  return {
+  const body: MeResponse = {
     id: 'u1',
     orgs: [org('org-a', 'Alpha'), org('org-b', 'Beta'), org('org-c', 'Gamma')],
-    active_org_id: sessionOrg,
     teams: [],
     org_creation_enabled: true,
     is_operator: false,
   }
+  if (sessionOrg && !barredIds.has(sessionOrg)) body.active_org_id = sessionOrg
+  return body
 }
 
 function moveCalls() {
@@ -121,6 +125,15 @@ describe('MultiAuthGate with the session in an SSO-required org', () => {
     )
     expect(sessionOrgAtMount).toBe('org-a')
     expect(reconnectWebSocket).toHaveBeenCalledTimes(1)
+  })
+
+  it('moves a session with no org set the same way', async () => {
+    sessionOrg = ''
+    renderAt('/orgs/org-a/board')
+
+    expect(await screen.findByText('the page')).toBeInTheDocument()
+    expect(moveCalls()).toHaveLength(1)
+    expect(sessionOrgAtMount).toBe('org-a')
   })
 
   it('leaves a session org that is usable where it is', async () => {
