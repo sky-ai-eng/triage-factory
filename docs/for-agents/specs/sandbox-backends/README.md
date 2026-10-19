@@ -65,8 +65,7 @@ cell, and the sidecar enforces egress. SPACE under TF would mean:
   machine from their executor, whose admission would then measure a machine
   the VMs do not use.
 
-A spike measured SPACE on one KVM host (`space-spike-results.md`) and found
-more:
+Measuring SPACE on one KVM host found more:
 
 - SPACE's per-sandbox nftables drop guest connections to every RFC 1918 range
   before tenant policy is read, so a guest reaches a sidecar on the executor
@@ -652,16 +651,16 @@ version and checksum.
 
 | Contract member | Firecracker | Open question, and the spike's answer |
 | --- | --- | --- |
-| `Provision` | `RunNetwork` as on gVisor (netns, veth, gateway rules, IPv6 off), plus a tap device in the netns bridged to the veth's inner end, so the guest's network card carries the jail IP. The broker launches the sidecar at its uid as today | Does the bridge pass the network conformance cases with the host rules unchanged? **Yes.** With `SetupRunNetwork` and `AdmitJailPorts` unchanged, the guest reaches only its admitted sidecar port, before and after it changes its own address and MAC as root, IPv6 included (`firecracker-spike-results.md` §2) |
+| `Provision` | `RunNetwork` as on gVisor (netns, veth, gateway rules, IPv6 off), plus a tap device in the netns bridged to the veth's inner end, so the guest's network card carries the jail IP. The broker launches the sidecar at its uid as today | Does the bridge pass the network conformance cases with the host rules unchanged? **Yes.** With `SetupRunNetwork` and `AdmitJailPorts` unchanged, the guest reaches only its admitted sidecar port, before and after it changes its own address and MAC as root, IPv6 included |
 | `ProxyHost` | The veth's host-side IP | — |
-| `HandOffRunTree` | Builds the run-tree image from the host tree (§13.3) | Cost on a large tree: **1.5 s** for `mkfs.ext4 -d` at the jail uid on 48,744 entries and 469 MB, 0.13 s on a fresh checkout, with owners, modes, symlinks and hard links kept (`firecracker-spike-results.md` §3) |
-| `Launch` | The broker runs `jailer`, which chroots the VMM, gives it private mount and pid namespaces, joins it to the cell's netns, puts it in a cgroup and drops it to the jail uid and gid. The VM's configuration comes from a fixed template, as the OCI spec does on gVisor: the guest kernel, the read-only rootfs image, the read-only input images, the run-tree image, one network card on the tap, one vsock device, memory and vCPUs from the profile's class, and Firecracker's metadata service off | Bring-up latency against gVisor's: **the same.** `jailer` exec to the tool host's first answer p50 154 ms, p95 181 ms; with the cell built first, as gVisor's spawn counts it, p50 282 ms against gVisor's ~171–292 ms (`firecracker-spike-results.md` §8) |
-| `Connect` | The tool host dials the host over vsock. Firecracker hands a guest's connection to port N to the unix socket `<vsock path>_N`, on which the executor listens inside the jailer directory | Round trip per tool call against the unix socket: **0.04 ms p50, 0.06 ms p95** for a no-op call, the same as a unix socket on the host (`firecracker-spike-results.md` §1) |
+| `HandOffRunTree` | Builds the run-tree image from the host tree (§13.3) | Cost on a large tree: **1.5 s** for `mkfs.ext4 -d` at the jail uid on 48,744 entries and 469 MB, 0.13 s on a fresh checkout, with owners, modes, symlinks and hard links kept |
+| `Launch` | The broker runs `jailer`, which chroots the VMM, gives it private mount and pid namespaces, joins it to the cell's netns, puts it in a cgroup and drops it to the jail uid and gid. The VM's configuration comes from a fixed template, as the OCI spec does on gVisor: the guest kernel, the read-only rootfs image, the read-only input images, the run-tree image, one network card on the tap, one vsock device, memory and vCPUs from the profile's class, and Firecracker's metadata service off | Bring-up latency against gVisor's: **the same.** `jailer` exec to the tool host's first answer p50 154 ms, p95 181 ms; with the cell built first, as gVisor's spawn counts it, p50 282 ms against gVisor's ~171–292 ms |
+| `Connect` | The tool host dials the host over vsock. Firecracker hands a guest's connection to port N to the unix socket `<vsock path>_N`, on which the executor listens inside the jailer directory | Round trip per tool call against the unix socket: **0.04 ms p50, 0.06 ms p95** for a no-op call, the same as a unix socket on the host |
 | Exec verbs (`/run/tf.sock`) | A relay in the guest listens on `/run/tf.sock` and dials a second vsock port, whose host socket is the sidecar's agenthost socket | — |
-| `Freeze` / `Thaw` | `Freeze` asks the init to freeze `/work`, then pauses the VMM over its API socket, which only the broker uses; `Thaw` resumes the VMM, then unfreezes `/work`. If the init does not confirm, the VMM is paused anyway, so every process is still held still, and a capture reads what the guest last flushed; only that run's capture is affected | Measured: freezing `/work` takes 51–57 ms and the pause about 1 ms; a tool call sent while paused waits and is answered after `Thaw` (`firecracker-spike-results.md` §3) |
-| `Stop` | Stop the VM, wait for the VMM to exit, then copy the run tree out (§13.3) | Cost of the copy-out: **2.2 s** for the large tree whole and 0.33–0.40 s for changed paths only, after a capture-VM boot of about 0.15 s; 0.23–0.31 s and 22 ms on a fresh checkout (`firecracker-spike-results.md` §3) |
+| `Freeze` / `Thaw` | `Freeze` asks the init to freeze `/work`, then pauses the VMM over its API socket, which only the broker uses; `Thaw` resumes the VMM, then unfreezes `/work`. If the init does not confirm, the VMM is paused anyway, so every process is still held still, and a capture reads what the guest last flushed; only that run's capture is affected | Measured: freezing `/work` takes 51–57 ms and the pause about 1 ms; a tool call sent while paused waits and is answered after `Thaw` |
+| `Stop` | Stop the VM, wait for the VMM to exit, then copy the run tree out (§13.3) | Cost of the copy-out: **2.2 s** for the large tree whole and 0.33–0.40 s for changed paths only, after a capture-VM boot of about 0.15 s; 0.23–0.31 s and 22 ms on a fresh checkout |
 | `Close` | Delete the jailer directory and the images; network teardown as on gVisor | — |
-| `OOMKilled`, actuals | The actuals come from the VMM's cgroup: CPU, and a `memory.peak` that is the most guest memory the VM touched, which is what it held on the host. The cgroup's limit sits above guest memory plus VMM overhead, so the guest's own OOM killer acts first and the cgroup records nothing. The init reports the guest's `/proc/vmstat` `oom_kill` count over vsock; `OOMKilled` is that count, or the cgroup's own `oom_kill`, which means the host killed the VMM and the cell is gone | Answered: an OOM inside the guest leaves the cgroup's events at zero (`firecracker-spike-results.md`, OOM behaviour) |
+| `OOMKilled`, actuals | The actuals come from the VMM's cgroup: CPU, and a `memory.peak` that is the most guest memory the VM touched, which is what it held on the host. The cgroup's limit sits above guest memory plus VMM overhead, so the guest's own OOM killer acts first and the cgroup records nothing. The init reports the guest's `/proc/vmstat` `oom_kill` count over vsock; `OOMKilled` is that count, or the cgroup's own `oom_kill`, which means the host killed the VMM and the cell is gone | Answered: an OOM inside the guest leaves the cgroup's events at zero |
 | `ReapOrphans` | Kill VMMs and delete jailer directories the broker's ledger does not hold; reap netns as on gVisor | — |
 
 A guest reaches the host over vsock only at sockets that exist under its own
@@ -738,8 +737,7 @@ points:
   reports out-of-memory kills. Nothing else runs in the guest unless the agent
   starts it. The hostname matters because a cell has no reachable resolver:
   musl waits out its whole 5 s timeout on a name it cannot resolve locally,
-  and git looks up the hostname to build a default identity, which turned a
-  0.3 s test into a 10 s one in the spike.
+  and git looks up the hostname to build a default identity.
 - **Root.** When the profile requires `root` (§7), the tool host runs as uid
   0, and the guest kernel is the agent's boundary, with the VMM and `jailer`
   behind it. Property B is unaffected, because nothing real is in the guest
@@ -777,57 +775,46 @@ data plane, the builders and object storage, the Kubernetes adapter, the
 egress gateway and the credential manager each do a job a TF component
 already does (§1.1).
 
-### 13.6 Spike
+### 13.6 Spike results
 
-Each item gets a pass/fail result written back here. The results, with
-method and raw numbers, are in `firecracker-spike-results.md`; the section
-numbers below are its.
+Measured on one KVM host, with Firecracker v1.17.0 under `jailer` and TF's
+own cell network code.
 
-1. **Tool-call round trip** over vsock against the unix-socket floor, on a
-   replayed run. Budget, set before measuring: p50 ≤ 5 ms and p95 ≤ 25 ms per
-   no-op call. **Pass:** p50 0.04 ms, p95 0.06 ms, the same as a unix socket
-   on the host; a fixed agent-shaped sequence of 300 calls stood in for the
-   replayed run (§1).
-2. **The cell network.** The tap bridged into the cell's netns passes
-   `OnlyTheSidecarIsReachable`, `InternalDenylistUnreachable` and
-   `CellsAreIsolated` with the host rules unchanged, IPv6 included. **Pass:**
-   with TF's own `SetupRunNetwork` and `AdmitJailPorts`, only the admitted
-   sidecar port answers, before and after the guest changes its address and
-   MAC as root (§2).
-3. **The run tree in and out**, for a fresh checkout and a ~1 GB tree with
-   dependencies installed: in as a populated ext4 image and as a tar stream
-   over vsock; out through the capture microVM, both the whole tree and
-   changed paths only. Modes, symlinks and ownership survive both ways.
-   **Pass:** in by `mkfs.ext4 -d` 1.5 s or by tar 1.6–1.7 s on the large tree;
-   out 2.2 s whole or 0.33–0.40 s changed paths; everything matches both ways
-   (§3).
+1. **Tool-call round trip over vsock**, against a budget set before
+   measuring of p50 ≤ 5 ms and p95 ≤ 25 ms per no-op call. **Pass:** p50
+   0.04 ms and p95 0.06 ms, the same as a unix socket on the host.
+2. **The cell network.** **Pass:** a guest on a tap bridged into a cell that
+   `SetupRunNetwork` and `AdmitJailPorts` built, unchanged, reaches only its
+   admitted sidecar port, before and after it changes its own address and MAC
+   as root. Cloud metadata, the internet, the executor's other listeners, the
+   other cell and IPv6 all stay closed.
+3. **The run tree in and out**, for a fresh checkout and a ~470 MB tree with
+   dependencies installed. **Pass:** in by `mkfs.ext4 -d` in 0.13 s and
+   1.5 s; out through a capture microVM in 0.2–0.3 s and 2.2 s for the whole
+   tree, or 22 ms and 0.3–0.4 s for changed paths only, after a capture-VM
+   boot of about 0.15 s. Contents, modes, symlinks, hard links, mtimes and
+   ownership match both ways.
 4. **`workspace add`** pushed into a live guest. **Not run:** needs the
    backend.
 5. **A `git push`** from the guest through the run's sidecar, with push
-   policy enforced. **Not run:** needs the backend and its sidecar wiring.
-6. **A snapshot** of a parked conversation with a database running inside,
-   restored on the same host: snapshot size, time to take and to restore, the
-   database's rows intact, and the tool host reachable afterwards. **Pass:**
-   1 GiB snapshot in 0.57–0.61 s, restore in 30–39 ms, rows intact and the
-   writer still running; the tool host redials because vsock connections reset
-   on restore, and the guest clock needs a step (§6).
-7. **Idle memory** per cell against gVisor's measured ~24 MB per idle jail,
-   plus the ~24 MB sidecar every backend pays
-   (`docs/benchmarks/sandbox-bench.md`), and how much of its configured
-   memory an idle guest touches. **Measured:** 55 MB per idle 512 MB VM, 2.3
-   times gVisor's; the guest touches 52 MB of its 512 (§7).
-8. **Bring-up latency**, from launch to the tool host's first answer,
-   against gVisor's spawn p50 of ~171–292 ms
-   (`docs/benchmarks/sandbox-bench.md`). **Pass:** p50 154 ms from `jailer`,
-   282 ms with the cell built first (§8).
-9. **A build burst**: wall time and host CPU for `go test` and a frontend
-   build, native against inside the guest
-   (`docs/benchmarks/gvisor-cpu-tax.md`). **Pass:** native wall time; 1.19
-   times native host CPU on `go test`, the same on the frontend build (§9).
+   policy enforced. **Not run:** needs the backend.
+6. **A snapshot** of a guest with a database running inside, restored on the
+   same host. **Pass:** a 1 GiB guest snapshots in about 0.6 s and restores in
+   30–39 ms with its rows and processes intact. The tool host reconnects and
+   the clock needs a step (§8).
+7. **Idle memory per cell.** About 55 MB per idle 512 MB VM, of which the
+   guest has touched 52 MB: 2.3 times gVisor's ~24 MB per idle jail
+   (`docs/benchmarks/sandbox-bench.md`), before the ~24 MB sidecar every
+   backend pays.
+8. **Bring-up latency.** **Pass:** p50 154 ms from `jailer` to the tool
+   host's first answer, and 282 ms including the cell, against gVisor's spawn
+   p50 of ~171–292 ms.
+9. **A build burst.** **Pass:** `go test` at native wall time on 1.19 times
+   native host CPU, and a frontend build the same as native.
 10. **One week** of TF's own delegations on one KVM host. **Not run:** needs
     the backend.
-11. **The conformance suite** passing against the Firecracker backend
-    unmodified. **Not run:** needs the backend.
+11. **The conformance suite** against the Firecracker backend, unmodified.
+    **Not run:** needs the backend.
 
 ## Related
 
@@ -846,7 +833,5 @@ numbers below are its.
 - Firecracker's own documentation (`github.com/firecracker-microvm/firecracker`,
   `docs/`): `jailer.md`, `vsock.md` and `snapshotting/snapshot-support.md`
   for the parts §13 relies on.
-- `firecracker-spike-results.md` and `space-spike-results.md`, next to this
-  file — the method and raw numbers behind §13.6 and §1.1.
 - SPACE (`github.com/perplexityai/SPACE`) — §1.1 for why it is not a
   dependency, §13.5 for what TF takes from it.
