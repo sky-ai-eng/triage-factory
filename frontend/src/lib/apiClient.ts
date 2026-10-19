@@ -255,6 +255,22 @@ export function apiErrors(e: unknown): ApiErrorItem[] {
   }
 }
 
+/** The reason a 403 carries when the org requires signing in through its own
+ *  single sign-on and the request's session or token was not. It is a 403, not
+ *  a 401 — the credential authenticated, so the re-auth funnel never sees it —
+ *  and the way out is that org's sign-in (`AuthOrg.sso_start_url`), not a fresh
+ *  session of the same kind. */
+export const SSO_REQUIRED = 'SSO_REQUIRED'
+
+/** isSSORequired reports whether a caught error is the 403 SSO_REQUIRED. */
+export function isSSORequired(e: unknown): boolean {
+  return (
+    e instanceof HttpError &&
+    e.status === 403 &&
+    apiErrors(e).some((item) => item.reason === SSO_REQUIRED)
+  )
+}
+
 /** httpErrorMessage extracts a user-facing string from a caught error: the
  *  envelope's first `message` when present, else the supplied fallback. The
  *  legacy top-level `{ error }` fallback is gone — every `/api/*` failure

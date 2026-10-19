@@ -177,13 +177,13 @@ func TestAuthEvents_LogoutAll_Recorded(t *testing.T) {
 	enc := r.srv.authDeps.sessions
 	// s1 (the cookie used for the request) carries a real active org so the
 	// recorded event is org-scoped.
-	s1, err := enc.CreateSystem(context.Background(), userID, r.signKey.mintJWT(t, validClaimsFor(userID)),
+	s1, err := enc.CreateSystem(context.Background(), userID, userID, "", r.signKey.mintJWT(t, validClaimsFor(userID)),
 		"refresh-1", time.Now().Add(time.Hour), time.Now().Add(30*24*time.Hour), "d1", "1.1.1.1",
 		uuid.NullUUID{UUID: orgID, Valid: true})
 	if err != nil {
 		t.Fatalf("create s1: %v", err)
 	}
-	if _, err := enc.CreateSystem(context.Background(), userID, r.signKey.mintJWT(t, validClaimsFor(userID)),
+	if _, err := enc.CreateSystem(context.Background(), userID, userID, "", r.signKey.mintJWT(t, validClaimsFor(userID)),
 		"refresh-2", time.Now().Add(time.Hour), time.Now().Add(30*24*time.Hour), "d2", "2.2.2.2", uuid.NullUUID{}); err != nil {
 		t.Fatalf("create s2: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestAuthEvents_RefreshFailure_Recorded(t *testing.T) {
 	r.seedOrg(userID, "alice-org")
 
 	enc := r.srv.authDeps.sessions
-	sess, err := enc.CreateSystem(context.Background(), userID, r.signKey.mintJWT(t, validClaimsFor(userID)),
+	sess, err := enc.CreateSystem(context.Background(), userID, userID, "", r.signKey.mintJWT(t, validClaimsFor(userID)),
 		"refresh-orig",
 		time.Now().Add(30*time.Second).UTC(), // near-expiry JWT → needsRefresh
 		time.Now().Add(30*24*time.Hour).UTC(),
@@ -250,7 +250,7 @@ func TestAuthEvents_JWTVerifyFailure_Recorded(t *testing.T) {
 	badKey := newTestKey(t)
 	badJWT := badKey.mintJWT(t, validClaimsFor(userID))
 	enc := r.srv.authDeps.sessions
-	sess, err := enc.CreateSystem(context.Background(), userID, badJWT, "refresh-x",
+	sess, err := enc.CreateSystem(context.Background(), userID, userID, "", badJWT, "refresh-x",
 		time.Now().Add(time.Hour).UTC(), // far from expiry → no refresh, verify runs
 		time.Now().Add(30*24*time.Hour).UTC(),
 		"ua", "127.0.0.1", uuid.NullUUID{})

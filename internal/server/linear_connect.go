@@ -428,6 +428,11 @@ func (s *Server) handleLinearConnectCallback(w http.ResponseWriter, r *http.Requ
 		redirectLinearConnect(w, r, fallbackOrg, "", "state")
 		return
 	}
+	// The cookie's org is the one this writes into, so "Require SSO" is asked
+	// about it here rather than left to withSession, which judged the cursor.
+	if s.refuseSSOBarred(w, r, orgID) {
+		return
+	}
 	returnTo := cs.ReturnTo
 
 	if oErr := r.URL.Query().Get("error"); oErr != "" {

@@ -6,6 +6,7 @@ import { useGitHubIdentity } from './hooks/useGitHubIdentity'
 import { useJiraIdentity } from './hooks/useJiraIdentity'
 import { useLinearIdentity } from './hooks/useLinearIdentity'
 import { LOCAL_DEFAULT_ORG_ID } from './lib/githubApp'
+import SSORequiredOrg from './components/SSORequiredOrg'
 
 /**
  * AuthGate routes between the local-mode first-run/provision flow and the
@@ -22,6 +23,8 @@ import { LOCAL_DEFAULT_ORG_ID } from './lib/githubApp'
  *   authed + 0 orgs   → redirect to /onboarding (create-or-invite entry)
  *   authed + N orgs, URL has unknown org_id → redirect to /orgs/<active> (preserve tail)
  *   authed + N orgs, URL not under /orgs/:id → redirect to /orgs/<active>
+ *   authed + N orgs, resolved org requires SSO this session did not come
+ *     through → the SSO-required interstitial instead of the page
  *   authed + N orgs, URL under /orgs/:id → render children
  *
  * /setup is a live route in BOTH modes — the single create-time wizard the
@@ -100,6 +103,14 @@ function MultiAuthGate({ children }: { children: React.ReactNode }) {
   // OrgContext picking — render loading until both line up.
   if (!activeOrgId) {
     return <Loading />
+  }
+  // The resolved org — the URL's, or for /setup the context's pick — requires
+  // signing in through its own SSO and this session did not. Every org-scoped
+  // read there would answer 403 SSO_REQUIRED, so the page is replaced by the
+  // org's sign-in rather than rendered as a wall of failures.
+  const activeOrg = auth.orgs.find((o) => o.id === activeOrgId)
+  if (activeOrg?.sso_required) {
+    return <SSORequiredOrg org={activeOrg} />
   }
   return <>{children}</>
 }

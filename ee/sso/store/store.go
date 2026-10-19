@@ -64,10 +64,12 @@ type SSOConnection struct {
 	ProviderID  string // GoTrue sso_providers.id (UUID), opaque to TF
 	DefaultRole string // org_role JIT grants: 'admin' | 'member' (never 'owner')
 	Enabled     bool
-	// Enforced is the "Require SSO" switch: when true, a non-SSO (GitHub)
-	// login whose verified email is on one of this connection's verified
-	// domains is rejected unless the principal is break-glass. Separate
-	// axis from Enabled ("allow SSO" vs "require SSO").
+	// Enforced is the "Require SSO" switch: when true (and Enabled), a
+	// non-SSO (GitHub) login whose verified email is on one of this
+	// connection's verified domains is rejected, and no session or API token
+	// acts in the org unless it was signed in through this connection —
+	// break-glass principals excepted from both. Separate axis from Enabled
+	// ("allow SSO" vs "require SSO").
 	Enforced bool
 	// LastTestedAt is stamped when a verify-before-enforce Test passes
 	// end-to-end. nil = never passed a Test. Enforcement gates on non-nil.
@@ -197,6 +199,12 @@ type SSOConnectionStore interface {
 	GetByProviderID(ctx context.Context, providerID string) (*SSOProviderBinding, error)
 	SetEnforced(ctx context.Context, orgID, id string, enforced bool) error
 	MarkTestedByProviderID(ctx context.Context, providerID string) error
+	// EnforcedProviderForOrg returns the provider_id of the org's connection
+	// when that connection is both enabled and enforced, else "". It is the
+	// per-request read behind "Require SSO" for org access, so it runs on the
+	// admin pool: the caller may be barred from the org it is asking about, and
+	// no RLS context exists for an org the request may not act in.
+	EnforcedProviderForOrg(ctx context.Context, orgID string) (string, error)
 	// IdPsByProviderIDs answers, for each provider id that names a connection
 	// with a known IdP, which IdP it is. Ids that match no connection or a
 	// connection whose IdP is not known are absent from the map rather than
@@ -227,6 +235,11 @@ type SSOBreakGlassStore interface {
 	RemoveGuarded(ctx context.Context, orgID, userID string) (removed, blockedLast bool, err error)
 	SeedOwnerIfEmpty(ctx context.Context, orgID string) error
 	IsBreakGlass(ctx context.Context, orgID, userID string) (bool, error)
+	// Includes answers IsBreakGlass on the app pool, so it sees the caller's
+	// own transaction — the Require SSO toggle asks it right after
+	// SeedOwnerIfEmpty may have inserted the caller. RLS admits only an org
+	// admin, which every caller of it already is.
+	Includes(ctx context.Context, orgID, userID string) (bool, error)
 	ResolveVerifiedEmailMember(ctx context.Context, orgID, email string) (string, error)
 }
 

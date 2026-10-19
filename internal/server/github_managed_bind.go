@@ -654,6 +654,11 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 		s.renderBindOutcome(w, orgID, refuseNotWorkspaceAdmin)
 		return
 	}
+	// The record's org, not the session's cursor, is the one this writes into,
+	// so "Require SSO" is asked about it here rather than left to withSession.
+	if s.refuseSSOBarred(w, r, orgID) {
+		return
+	}
 
 	// The record decides which leg this is. Nothing on the query string does:
 	// a callback carrying an installation_id into an authorize-leg ceremony is

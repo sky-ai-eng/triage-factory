@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -343,6 +344,19 @@ func (h *ssoDomainsHandler) handleDomainDelete(w http.ResponseWriter, r *http.Re
 			return nil
 		}
 		existed = true
+		// Require SSO needs a verified domain, as turning it on does: it is
+		// how a GitHub sign-in on the org's addresses is recognised and
+		// refused. Removing the last one while required is refused rather
+		// than leaving the requirement half in force.
+		if claim.VerifiedAt != nil {
+			last, e := lastVerifiedWhileEnforced(r.Context(), sso, orgID, id)
+			if e != nil {
+				return e
+			}
+			if last {
+				return errTurnOffEnforcementFirst
+			}
+		}
 		if e := sso.Domains.Delete(r.Context(), orgID, id); e != nil {
 			return e
 		}
@@ -355,6 +369,10 @@ func (h *ssoDomainsHandler) handleDomainDelete(w http.ResponseWriter, r *http.Re
 			DetailJSON:  domain.AccessDetailSSODomain(claim.Domain),
 		})
 	}); err != nil {
+		if errors.Is(err, errTurnOffEnforcementFirst) {
+			turnOffEnforcementFirst(w)
+			return
+		}
 		httpx.InternalError(w, "sso", err)
 		return
 	}
@@ -363,6 +381,36 @@ func (h *ssoDomainsHandler) handleDomainDelete(w http.ResponseWriter, r *http.Re
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// lastVerifiedWhileEnforced reports whether domainID is the org's only
+// verified domain while one of its connections requires SSO. Read inside the
+// caller's transaction, beside the delete it decides.
+func lastVerifiedWhileEnforced(ctx context.Context, sso *ssostore.Bundle, orgID, domainID string) (bool, error) {
+	conns, err := sso.Connections.ListByOrg(ctx, orgID)
+	if err != nil {
+		return false, err
+	}
+	enforced := false
+	for _, c := range conns {
+		if c.Enforced {
+			enforced = true
+			break
+		}
+	}
+	if !enforced {
+		return false, nil
+	}
+	doms, err := sso.Domains.ListByOrg(ctx, orgID)
+	if err != nil {
+		return false, err
+	}
+	for _, d := range doms {
+		if d.ID != domainID && d.VerifiedAt != nil {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // findOrgDomain returns the org's claim on domainName (already normalized),

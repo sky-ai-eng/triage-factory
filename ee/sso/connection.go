@@ -419,6 +419,12 @@ func (h *ssoConnectionHandler) handleSSOConnectionUpdate(w http.ResponseWriter, 
 		if body.Enabled != nil {
 			enabled = *body.Enabled
 		}
+		// A disabled connection is one nobody can sign in through, so while it
+		// is required that would leave only break-glass accounts able to act in
+		// the org. Requirement first, then the connection.
+		if body.Enabled != nil && !enabled && before.Enforced {
+			return errTurnOffEnforcementFirst
+		}
 		if e := sso.Connections.Update(r.Context(), orgID, existing.ID, ssostore.UpdateSSOConnectionParams{
 			Enabled: enabled,
 			IdP:     idp,
@@ -446,6 +452,10 @@ func (h *ssoConnectionHandler) handleSSOConnectionUpdate(w http.ResponseWriter, 
 	}); err != nil {
 		if errors.Is(err, errNoConnection) {
 			httpx.NotFound(w, "sso connection")
+			return
+		}
+		if errors.Is(err, errTurnOffEnforcementFirst) {
+			turnOffEnforcementFirst(w)
 			return
 		}
 		httpx.InternalError(w, "sso", err)
@@ -524,6 +534,20 @@ func (h *ssoConnectionHandler) handleSSOEnforcementUpdate(w http.ResponseWriter,
 			if e := sso.BreakGlass.SeedOwnerIfEmpty(r.Context(), orgID); e != nil {
 				return e
 			}
+			// Requiring SSO bars every request that did not come through this
+			// connection, the caller's own included. An admin who is neither
+			// signed in through it nor break-glass would lock themselves out
+			// with their next request, so the switch refuses them. Checked
+			// after the seed, which can make the owner break-glass right here.
+			if httpx.SignInProviderFrom(r.Context()) != conn.ProviderID {
+				isBG, e := sso.BreakGlass.Includes(r.Context(), orgID, userID)
+				if e != nil {
+					return e
+				}
+				if !isBG {
+					return errEnforceLocksOutCaller
+				}
+			}
 		}
 		if e := sso.Connections.SetEnforced(r.Context(), orgID, existing.ID, *body.Enforced); e != nil {
 			return e
@@ -555,6 +579,8 @@ func (h *ssoConnectionHandler) handleSSOEnforcementUpdate(w http.ResponseWriter,
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "run a successful Test before requiring SSO"})
 		case errors.Is(err, errEnforceNoVerifiedDomain):
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "verify a domain before requiring SSO"})
+		case errors.Is(err, errEnforceLocksOutCaller):
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "Sign in through single sign-on, or be designated break-glass, before requiring it."})
 		case errors.Is(err, errNoConnection):
 			httpx.NotFound(w, "sso connection")
 		default:
@@ -578,7 +604,17 @@ var (
 	errEnforceNotEnabled       = errors.New("sso: connection not enabled")
 	errEnforceNotTested        = errors.New("sso: connection not tested")
 	errEnforceNoVerifiedDomain = errors.New("sso: no verified domain")
+	errEnforceLocksOutCaller   = errors.New("sso: caller neither signed in through sso nor break-glass")
+	// errTurnOffEnforcementFirst: a change that would leave Require SSO on
+	// with nothing to sign in through — disabling the connection, or removing
+	// its last verified domain. Shared by both, which answer the same 409.
+	errTurnOffEnforcementFirst = errors.New("sso: require sso is on")
 )
+
+// turnOffEnforcementFirst is the 409 for errTurnOffEnforcementFirst.
+func turnOffEnforcementFirst(w http.ResponseWriter) {
+	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "Turn off Require SSO first."})
+}
 
 func anyVerified(doms []ssostore.SSODomain) bool {
 	for _, d := range doms {

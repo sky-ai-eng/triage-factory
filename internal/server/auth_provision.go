@@ -35,7 +35,7 @@ import (
 // lookupEarliestMembership needs. Kept as an interface so the helper can
 // run against either the connection pool or a transaction.
 type membershipQueryer interface {
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
 // execer is the minimal write surface shared by *sql.Tx and *sql.DB so
@@ -106,29 +106,51 @@ func grantOrgMembership(ctx context.Context, ex execer,
 }
 
 // lookupEarliestMembership returns the user's earliest org membership
-// (created_at ASC, org_id ASC as deterministic tiebreak), or
-// uuid.NullUUID{Valid: false} if the user has zero memberships.
-// sql.ErrNoRows is folded into the Valid=false return so callers
-// only branch on Valid.
+// (created_at ASC, org_id ASC as deterministic tiebreak) that is not barred to
+// a sign-in through ssoProviderID ("" for GitHub), or
+// uuid.NullUUID{Valid: false} if there is none. A membership in an org that
+// requires its own single sign-on is skipped rather than made the default: a
+// session that lands there could do nothing but answer 403.
 //
 // The OAuth callback uses this to default a returning user's session to
 // their earliest org. A genuinely-first-signup user has no memberships
 // (signup provisions nothing), so this returns invalid and the session
 // is created with a NULL active_org_id — the zero-membership state the
-// onboarding entry handles.
-func (s *Server) lookupEarliestMembership(ctx context.Context, q membershipQueryer, userID uuid.UUID) (uuid.NullUUID, error) {
-	var existing uuid.NullUUID
-	err := q.QueryRowContext(ctx, `
+// onboarding entry handles. An SSO sign-in never needs it: its default is
+// its own connection's org, which by construction does not bar it.
+func (s *Server) lookupEarliestMembership(ctx context.Context, q membershipQueryer, userID uuid.UUID, ssoProviderID string) (uuid.NullUUID, error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT org_id
 		  FROM public.org_memberships
 		 WHERE user_id = $1
 		 ORDER BY created_at ASC, org_id ASC
-		 LIMIT 1
-	`, userID).Scan(&existing)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	`, userID)
+	if err != nil {
 		return uuid.NullUUID{}, err
 	}
-	return existing, nil
+	var orgs []uuid.UUID
+	for rows.Next() {
+		var org uuid.UUID
+		if err := rows.Scan(&org); err != nil {
+			rows.Close()
+			return uuid.NullUUID{}, err
+		}
+		orgs = append(orgs, org)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return uuid.NullUUID{}, err
+	}
+	for _, org := range orgs {
+		gate, err := s.ssoGateFor(ctx, org.String(), userID.String(), ssoProviderID)
+		if err != nil {
+			return uuid.NullUUID{}, fmt.Errorf("sso gate for org %s: %w", org, err)
+		}
+		if !gate.Barred {
+			return uuid.NullUUID{UUID: org, Valid: true}, nil
+		}
+	}
+	return uuid.NullUUID{}, nil
 }
 
 // provisionOrg creates a net-new org for the founder with default

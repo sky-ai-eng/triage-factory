@@ -53,6 +53,10 @@ type invitesHandler struct {
 	// accept so the recipient lands inside the org. Read lazily: authDeps is
 	// populated after routes() runs.
 	setActiveOrg func(ctx context.Context, sessID, orgID uuid.UUID) error
+	// refuseSSOBarred answers 403 SSO_REQUIRED (and returns true) when the
+	// invite's org requires single sign-on the caller's session did not come
+	// through.
+	refuseSSOBarred func(w http.ResponseWriter, r *http.Request, orgID string) bool
 }
 
 // createInviteRequest is the POST /api/invites body. target_team_id is
@@ -631,6 +635,14 @@ func (ih *invitesHandler) handleInviteAccept(w http.ResponseWriter, r *http.Requ
 	orgUUID, err := uuid.Parse(invite.OrgID)
 	if err != nil {
 		internalError(w, "invites", fmt.Errorf("parse invite org_id: %w", err))
+		return
+	}
+
+	// An org that requires its own single sign-on is joined through it, not
+	// through an invite redeemed on some other sign-in: that would hand the
+	// session a membership it could not use. Refused before any write, so the
+	// invite stays pending for the sign-in that can accept it.
+	if ih.refuseSSOBarred(w, r, orgUUID.String()) {
 		return
 	}
 
