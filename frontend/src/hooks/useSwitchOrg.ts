@@ -28,34 +28,11 @@ export function useSwitchOrg(): (newOrgId: string) => Promise<void> {
     if (newOrgId === activeOrgId) return
     setActiveOrgId(newOrgId)
 
-    // Persist the choice on the session row so the server's
-    // withSession picks up the new active org for every subsequent
-    // request (and so cross-tab /api/me reads agree). Fire-and-log
-    // failures: the local pick already updated OrgContext, and the
-    // next /api/me will reconcile a transient persistence failure on
-    // the user's next interaction.
+    // Fire-and-log failures: the local pick already updated OrgContext, and
+    // the next /api/me will reconcile a transient persistence failure on the
+    // user's next interaction.
     try {
-      await apiFetch('/api/me/active-org', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ org_id: newOrgId }),
-      })
-      // Drop the cached /api/teams response only AFTER the active org
-      // is persisted server-side. /api/teams is session-org-scoped, so
-      // invalidating before the POST commits would race and refetch the
-      // OLD org's teams; doing it here guarantees the reload reads the
-      // new org's set.
-      invalidateTeams()
-      // Entitlements are scoped to the active org too (multi mode), so drop
-      // their cache on the same commit — the new org may license a different
-      // EE feature set. Same post-persist ordering rationale as teams.
-      invalidateEntitlements()
-      // Force the WS to re-handshake so the hub's per-(user, org)
-      // Broadcast filter routes events for the just-switched
-      // tenant rather than the previous one. Without this the
-      // user keeps receiving the old org's events until the next
-      // unrelated disconnect.
-      reconnectWebSocket()
+      await persistActiveOrg(newOrgId)
     } catch (err) {
       if (isSSORequired(err)) {
         // The org started requiring SSO after the last /api/me read, so the
@@ -80,4 +57,36 @@ export function useSwitchOrg(): (newOrgId: string) => Promise<void> {
     const tail = swapped?.[1] ?? ''
     navigate('/orgs/' + newOrgId + tail, { replace: false })
   }
+}
+
+/**
+ * persistActiveOrg moves the session's org — the org every route with no org
+ * in its path acts in — and drops what was read from the previous one. It
+ * throws when the server refuses the move, and then drops nothing.
+ */
+export async function persistActiveOrg(orgId: string): Promise<void> {
+  // Persist the choice on the session row so the server's withSession picks
+  // up the new active org for every subsequent request (and so cross-tab
+  // /api/me reads agree).
+  await apiFetch('/api/me/active-org', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ org_id: orgId }),
+  })
+  // Drop the cached /api/teams response only AFTER the active org
+  // is persisted server-side. /api/teams is session-org-scoped, so
+  // invalidating before the POST commits would race and refetch the
+  // OLD org's teams; doing it here guarantees the reload reads the
+  // new org's set.
+  invalidateTeams()
+  // Entitlements are scoped to the active org too (multi mode), so drop
+  // their cache on the same commit — the new org may license a different
+  // EE feature set. Same post-persist ordering rationale as teams.
+  invalidateEntitlements()
+  // Force the WS to re-handshake so the hub's per-(user, org)
+  // Broadcast filter routes events for the just-switched
+  // tenant rather than the previous one. Without this the
+  // user keeps receiving the old org's events until the next
+  // unrelated disconnect.
+  reconnectWebSocket()
 }
