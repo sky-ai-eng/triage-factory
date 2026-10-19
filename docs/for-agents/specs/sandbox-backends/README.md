@@ -59,6 +59,17 @@ cell, and the sidecar enforces egress. SPACE under TF would mean:
   machine from their executor, whose admission would then measure a machine
   the VMs do not use.
 
+A spike measured SPACE on one KVM host (`space-spike-results.md`), and found
+four more costs:
+
+- SPACE's per-sandbox nftables drop guest connections to every RFC 1918 range
+  before tenant policy is read, so a guest reaches a sidecar on the executor
+  only through SPACE's data plane.
+- The bidirectional stream the tool host needs is an Incubating API, and a
+  call sent to a paused sandbox closes it.
+- An idle sandbox costs about 104 MB of host memory, against gVisor's ~24 MB.
+- SPACE's stats report neither the guest's memory nor its OOM kills.
+
 Firecracker is the part that runs one VM: one process per microVM, configured
 over a unix-socket API, with `jailer` to confine that process on the host.
 Everything above one VM is already TF's, so TF drives Firecracker directly.
