@@ -288,9 +288,9 @@ func seedQueuedLinearTask(t *testing.T, db *sql.DB, taskID string, state domain.
 	}
 	entityID := "e_" + taskID
 	if _, err := db.Exec(
-		`INSERT INTO entities (id, source, source_id, external_id, kind, state, scope, snapshot_json)
-		 VALUES (?, 'linear', ?, ?, 'issue', 'active', ?, ?)`,
-		entityID, linearIssueIdentifier, linearIssueUUID, linearTestWorkspaceID, string(snap),
+		`INSERT INTO entities (id, source, source_id, external_id, kind, state, scope, snapshot_json, linear_team_id)
+		 VALUES (?, 'linear', ?, ?, 'issue', 'active', ?, ?, ?)`,
+		entityID, linearIssueIdentifier, linearIssueUUID, linearTestWorkspaceID, string(snap), linearTeamEng,
 	); err != nil {
 		t.Fatalf("seed linear entity: %v", err)
 	}
@@ -424,6 +424,29 @@ func TestTaskClaim_LinearTask_AssignsAsTheActingUser(t *testing.T) {
 	}
 
 	want := []linearWrite{{kind: "assign", value: linearMe}, {kind: "transition", value: linearStateDoing}}
+	if got := fake.waitForWrites(t, len(want)); !slices.Equal(got, want) {
+		t.Errorf("Linear writes = %v, want %v", got, want)
+	}
+}
+
+// TestTaskClaim_LinearTask_ClearedSnapshotStillFindsTheRule: the rule is found
+// through the entity's Linear team column, so an issue whose snapshot a source
+// pause cleared still moves to its team's in-progress state on a claim.
+func TestTaskClaim_LinearTask_ClearedSnapshotStillFindsTheRule(t *testing.T) {
+	fake := newLinearIssueFake(t, &linear.User{ID: linearMe}, linearFixtureState(t, linearStateTodo))
+	res := &recordingLinearResolver{userClient: fake.client()}
+	s := newLinearClaimServer(t, res, true)
+	const taskID = "00000000-0000-4000-8000-000000000306"
+	seedQueuedLinearTask(t, s.db, taskID, linearStateTodoRef)
+	if _, err := s.db.Exec(`UPDATE entities SET snapshot_json = NULL WHERE id = ?`, "e_"+taskID); err != nil {
+		t.Fatalf("clear snapshot: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	want := []linearWrite{{kind: "transition", value: linearStateDoing}}
 	if got := fake.waitForWrites(t, len(want)); !slices.Equal(got, want) {
 		t.Errorf("Linear writes = %v, want %v", got, want)
 	}

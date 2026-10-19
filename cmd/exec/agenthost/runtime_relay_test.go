@@ -126,7 +126,7 @@ func TestRelayRuntime_RecordReadTouch_RoundTrips(t *testing.T) {
 	rt := newRelayRuntime(directDispatchConn{srv: srv}, info, nil)
 	ctx := context.Background()
 
-	rt.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, "octo/repo#7", "", "")
+	rt.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, "octo/repo#7", "", "", "")
 
 	ent, err := stores.Entities.GetBySource(ctx, info.OrgID, "github", "https://github.com", "octo/repo#7")
 	if err != nil || ent == nil {
@@ -134,6 +134,41 @@ func TestRelayRuntime_RecordReadTouch_RoundTrips(t *testing.T) {
 	}
 	if role := touchRole(t, conn, info.ConversationID, ent.ID); role != domain.MemoryRoleTouched {
 		t.Errorf("relayed touch role = %q, want %q", role, domain.MemoryRoleTouched)
+	}
+}
+
+// TestRelayRuntime_LinearTouchCarriesTheTeam: the Linear team rides both
+// relayed touches — a read's, and a write's — so a Linear entity the
+// orchestrator creates for the sidecar carries it. A Linear touch that names no
+// team creates nothing: a Linear entity is created only with its team.
+func TestRelayRuntime_LinearTouchCarriesTheTeam(t *testing.T) {
+	conn, stores, info := newCaptureStoresConn(t, true)
+	if _, err := conn.Exec(`UPDATE org_settings SET linear_workspace_id = ? WHERE org_id = ?`, testScope("linear"), info.OrgID); err != nil {
+		t.Fatalf("record linear workspace: %v", err)
+	}
+	srv := NewRelayServer(stores, info, nil)
+	rt := newRelayRuntime(directDispatchConn{srv: srv}, info, nil)
+	ctx := context.Background()
+
+	rt.RecordReadTouch(ctx, domain.ArtifactProviderLinear, "ENG-1", "uuid-read", "team-eng", "")
+	rt.Record(ctx, &domain.Artifact{
+		Provider: domain.ArtifactProviderLinear, Kind: domain.ArtifactKindIssue,
+		Target: "OPS-2", ExternalID: "uuid-write", State: domain.ArtifactStateIssueCreated,
+		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindIssue, "uuid-write", ""),
+	}, &domain.ExternalAction{
+		Provider: domain.ArtifactProviderLinear, Action: domain.ActionIssueCreated,
+		Target: "OPS-2", ExternalID: "uuid-write", Credential: domain.CredentialLinearOrg,
+	}, "team-ops")
+	rt.RecordReadTouch(ctx, domain.ArtifactProviderLinear, "ENG-3", "uuid-teamless", "", "")
+
+	for uuid, team := range map[string]string{"uuid-read": "team-eng", "uuid-write": "team-ops"} {
+		ent, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ArtifactProviderLinear, testScope("linear"), uuid)
+		if err != nil || ent == nil || ent.LinearTeamID != team {
+			t.Errorf("entity for %s = %+v err=%v, want one in %s", uuid, ent, err, team)
+		}
+	}
+	if ent, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ArtifactProviderLinear, testScope("linear"), "uuid-teamless"); err != nil || ent != nil {
+		t.Errorf("a teamless Linear touch created %+v (err=%v), want nothing", ent, err)
 	}
 }
 

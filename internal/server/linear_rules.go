@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -12,12 +11,13 @@ import (
 
 // lookupLinearRuleForTask resolves the per-team Linear rule that governs the
 // given task's issue: the task's team's linear_team_rules row, in workspaceID,
-// for the Linear team the entity's snapshot names. The Linear sibling of
-// lookupJiraRuleForTask. The Linear team comes from the snapshot rather than
-// from the identifier's prefix, because a team key can be renamed and the
-// team id cannot. Returns nil when the task is not Linear-backed, has no
-// TeamID stamped, its entity has no snapshot naming a team, or the team has
-// no rule for that Linear team in workspaceID.
+// for the Linear team the entity sits in (entities.linear_team_id). The Linear
+// sibling of lookupJiraRuleForTask. The Linear team comes from that column
+// rather than from the identifier's prefix, because a team key can be renamed
+// and the team id cannot, and rather than from the snapshot, which turning
+// the source off clears. Returns nil when the task is not Linear-backed, has
+// no TeamID stamped, its entity names no Linear team, or the team has no rule
+// for that Linear team in workspaceID.
 //
 // Runs inside the caller's transaction so the rule read goes through the
 // app-pool ListForTeam, where the linear_rules_* RLS policies gate it by team
@@ -31,15 +31,7 @@ func lookupLinearRuleForTask(ctx context.Context, tx db.TxStores, orgID, workspa
 		linearRuleLog.Warn("read entity for rule lookup failed", "entity", task.EntityID, "error", err)
 		return nil
 	}
-	if entity == nil || entity.SnapshotJSON == "" {
-		return nil
-	}
-	var snap domain.LinearSnapshot
-	if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil {
-		linearRuleLog.Warn("parse entity snapshot for rule lookup failed", "entity", task.EntityID, "error", err)
-		return nil
-	}
-	if snap.TeamID == "" {
+	if entity == nil || entity.LinearTeamID == "" {
 		return nil
 	}
 	rules, err := tx.LinearTeamRules.ListForTeam(ctx, *task.TeamID, workspaceID)
@@ -48,7 +40,7 @@ func lookupLinearRuleForTask(ctx context.Context, tx db.TxStores, orgID, workspa
 		return nil
 	}
 	for i := range rules {
-		if rules[i].LinearTeamID == snap.TeamID {
+		if rules[i].LinearTeamID == entity.LinearTeamID {
 			return &rules[i]
 		}
 	}

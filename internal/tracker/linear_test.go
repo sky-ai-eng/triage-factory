@@ -326,6 +326,9 @@ func TestRefreshLinear_PickupDiscoverySeedsQuietly(t *testing.T) {
 	if snap.ID != "uuid-1" || snap.TeamID != linTeamID || snap.State.ID != linTodo.ID {
 		t.Errorf("snapshot = %+v", snap)
 	}
+	if got := fx.entity(t, "ENG-1").LinearTeamID; got != linTeamID {
+		t.Errorf("entity's Linear team = %q, want %q from the discovery response", got, linTeamID)
+	}
 	if snap.OpenChildCount != 2 {
 		t.Errorf("open_child_count = %d, want 2 (an unknown state counts as open)", snap.OpenChildCount)
 	}
@@ -521,7 +524,7 @@ func TestRefreshLinear_ArchivedDoneIsTheTerminalPath(t *testing.T) {
 // and seeded without a diff.
 func TestRefreshLinear_SnapshotlessEntitySeedsQuietly(t *testing.T) {
 	fx := newLinearFixture(t)
-	if _, _, err := fx.stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "linear", linWorkspace, "ENG-7", "uuid-7", "issue", "", ""); err != nil {
+	if _, _, err := fx.stores.Entities.FindOrCreateLinearSystem(context.Background(), runmode.LocalDefaultOrgID, linWorkspace, "ENG-7", "uuid-7", linTeamID, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	is := linIssue(7)
@@ -546,17 +549,52 @@ func TestRefreshLinear_SnapshotlessEntitySeedsQuietly(t *testing.T) {
 	}
 }
 
-// TestRefreshLinear_SnapshotlessUnreachable: an entity with no snapshot that
-// Linear answers not-found for has no stored team and no issue to read one
-// from. Its unreachable names no team rather than one parsed out of its
-// identifier, whose prefix can name a team the issue no longer belongs to.
+// TestRefreshLinear_SnapshotlessUnreachable: an entity with no snapshot (one a
+// source pause cleared) that Linear answers not-found for still names the team
+// it was tracked in, from its column, so the router's gate can route the event
+// to that team's handlers. The key went with the snapshot and nothing answered
+// to supply it.
 func TestRefreshLinear_SnapshotlessUnreachable(t *testing.T) {
 	fx := newLinearFixture(t)
-	if _, _, err := fx.stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "linear", linWorkspace, "ENG-9", "uuid-9", "issue", "", ""); err != nil {
+	if _, _, err := fx.stores.Entities.FindOrCreateLinearSystem(context.Background(), runmode.LocalDefaultOrgID, linWorkspace, "ENG-9", "uuid-9", linTeamID, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	fx.client.notFound = map[string]bool{"uuid-9": true}
 
+	meta := fx.unreachable(t)
+	if meta.LinearTeamID != linTeamID || meta.LinearTeamKey != "" || meta.IssueIdentifier != "ENG-9" || meta.IssueID != "uuid-9" {
+		t.Errorf("metadata = %+v, want the identity and the entity's team", meta)
+	}
+	if meta.Reason != events.LinearUnreachableNotFound {
+		t.Errorf("reason = %q, want not_found", meta.Reason)
+	}
+}
+
+// TestRefreshLinear_UnreachableNamesNoTeamWithoutOne: a row that predates the
+// team column and has no snapshot to have learned its team from has nothing
+// that names one. Its unreachable names no team rather than one parsed out of
+// its identifier, whose prefix can name a team the issue no longer belongs to.
+func TestRefreshLinear_UnreachableNamesNoTeamWithoutOne(t *testing.T) {
+	fx := newLinearFixture(t)
+	stub, _, err := fx.stores.Entities.FindOrCreateLinearSystem(context.Background(), runmode.LocalDefaultOrgID, linWorkspace, "ENG-9", "uuid-9", linTeamID, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.tr.database.Exec(`UPDATE entities SET linear_team_id = NULL WHERE id = ?`, stub.ID); err != nil {
+		t.Fatal(err)
+	}
+	fx.client.notFound = map[string]bool{"uuid-9": true}
+
+	meta := fx.unreachable(t)
+	if meta.LinearTeamID != "" || meta.LinearTeamKey != "" || meta.IssueIdentifier != "ENG-9" || meta.IssueID != "uuid-9" {
+		t.Errorf("metadata = %+v, want the identity and no team", meta)
+	}
+}
+
+// unreachable runs a cycle that must emit exactly one unreachable, and returns
+// its metadata.
+func (fx *linearFixture) unreachable(t *testing.T) events.LinearIssueUnreachableMetadata {
+	t.Helper()
 	evts, err := fx.cycle(t, linRules())
 	if err != nil {
 		t.Fatalf("RefreshLinear: %v", err)
@@ -568,12 +606,7 @@ func TestRefreshLinear_SnapshotlessUnreachable(t *testing.T) {
 	if err := json.Unmarshal([]byte(evts[0].MetadataJSON), &meta); err != nil {
 		t.Fatal(err)
 	}
-	if meta.LinearTeamID != "" || meta.LinearTeamKey != "" || meta.IssueIdentifier != "ENG-9" || meta.IssueID != "uuid-9" {
-		t.Errorf("metadata = %+v, want the identity and no team", meta)
-	}
-	if meta.Reason != events.LinearUnreachableNotFound {
-		t.Errorf("reason = %q, want not_found", meta.Reason)
-	}
+	return meta
 }
 
 // TestRefreshLinear_LosingCASHasNoEffect: a refresh whose snapshot CAS loses
@@ -823,7 +856,7 @@ func TestRefreshLinear_FailingConfirmationsRotate(t *testing.T) {
 func TestRefreshLinear_ConfirmationQueueIsOldestFirst(t *testing.T) {
 	fx := newLinearFixture(t)
 	fx.seed(t, linIssue(1))
-	if _, _, err := fx.stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "linear", linWorkspace, "ENG-2", "uuid-2", "issue", "", ""); err != nil {
+	if _, _, err := fx.stores.Entities.FindOrCreateLinearSystem(context.Background(), runmode.LocalDefaultOrgID, linWorkspace, "ENG-2", "uuid-2", linTeamID, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	fx.client.put(linIssue(2))

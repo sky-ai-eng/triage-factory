@@ -527,7 +527,10 @@ func TestLinearVerbs_RecordArtifacts(t *testing.T) {
 
 // TestLinearVerbs_TouchTheIssuesEntity pins that a read and a write both
 // attach the issue's entity to the conversation, keyed under the org's Linear
-// workspace and the issue's UUID.
+// workspace and the issue's UUID, and that an entity either one creates
+// carries the Linear team the response named — the team a Linear entity cannot
+// be created without. The write runs on an issue TF has no entity for, so its
+// touch is the one that creates it.
 func TestLinearVerbs_TouchTheIssuesEntity(t *testing.T) {
 	ctx := context.Background()
 	_, srv := startFakeLinear(t)
@@ -541,20 +544,28 @@ func TestLinearVerbs_TouchTheIssuesEntity(t *testing.T) {
 	if _, err := lc.LinearGetIssue(ctx, fakeLinearIssueUUID); err != nil {
 		t.Fatalf("LinearGetIssue: %v", err)
 	}
-	ent, err := stores.Entities.GetByExternalIDSystem(ctx, runmode.LocalDefaultOrgID, domain.ArtifactProviderLinear, testScope("linear"), fakeLinearIssueUUID)
-	if err != nil || ent == nil {
-		t.Fatalf("entity for the read issue: %v, %v", ent, err)
+	if _, err := lc.LinearCreateIssue(ctx, LinearCreateIssueRequest{TeamKey: "ENG", Title: "New"}); err != nil {
+		t.Fatalf("LinearCreateIssue: %v", err)
 	}
-	if ent.SourceID != "ENG-7" {
-		t.Errorf("entity source_id = %q, want the identifier Linear answered with", ent.SourceID)
-	}
-	var n int
-	if err := conn.QueryRow(`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ? AND entity_id = ?`,
-		info.ConversationID, ent.ID).Scan(&n); err != nil {
-		t.Fatalf("read touches: %v", err)
-	}
-	if n != 1 {
-		t.Errorf("touch rows = %d, want 1", n)
+	for _, tc := range []struct{ uuid, identifier string }{
+		{fakeLinearIssueUUID, "ENG-7"},
+		{fakeLinearCreated, "ENG-8"},
+	} {
+		ent, err := stores.Entities.GetByExternalIDSystem(ctx, runmode.LocalDefaultOrgID, domain.ArtifactProviderLinear, testScope("linear"), tc.uuid)
+		if err != nil || ent == nil {
+			t.Fatalf("entity for %s: %v, %v", tc.identifier, ent, err)
+		}
+		if ent.SourceID != tc.identifier || ent.LinearTeamID != "team-eng" {
+			t.Errorf("entity = %+v, want %s in team-eng, as Linear answered", ent, tc.identifier)
+		}
+		var n int
+		if err := conn.QueryRow(`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ? AND entity_id = ?`,
+			info.ConversationID, ent.ID).Scan(&n); err != nil {
+			t.Fatalf("read touches: %v", err)
+		}
+		if n != 1 {
+			t.Errorf("%s touch rows = %d, want 1", tc.identifier, n)
+		}
 	}
 }
 

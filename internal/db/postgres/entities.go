@@ -55,7 +55,18 @@ var _ db.EntityStore = (*entityStore)(nil)
 const pgEntitySelectCols = `id, source, scope, source_id, COALESCE(external_id, ''), kind,
        COALESCE(title, ''), COALESCE(url, ''),
        COALESCE(snapshot_json::text, ''), COALESCE(description, ''), state,
-       created_at, last_polled_at, closed_at, poll_seq`
+       created_at, last_polled_at, closed_at, poll_seq, COALESCE(linear_team_id, '')`
+
+// pgLinearTeamFromSnapshot is the SET clause every snapshot write carries, so a
+// Linear row's linear_team_id moves with the snapshot that observed its team,
+// in the same statement: on a Linear row it takes the team_id of the snapshot
+// bound at param, and keeps its value when that snapshot names none. Every
+// other row keeps its NULL.
+func pgLinearTeamFromSnapshot(param string) string {
+	return `linear_team_id = CASE WHEN source = 'linear'
+		THEN COALESCE(NULLIF(` + param + `::jsonb->>'team_id', ''), linear_team_id)
+		ELSE linear_team_id END`
+}
 
 // pgEntityKeyOrder is the key lookup's preference among rows sharing a key:
 // the active one (there is at most one), otherwise the most recently closed.
@@ -430,14 +441,24 @@ func (s *entityStore) ListActiveJiraTeamScoped(ctx context.Context, orgID, teamI
 // --- Mutation ---
 
 func (s *entityStore) FindOrCreate(ctx context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error) {
-	return findOrCreateEntity(ctx, s.q, orgID, source, scope, sourceID, externalID, kind, title, url)
+	return findOrCreateEntity(ctx, s.q, orgID, source, scope, sourceID, externalID, "", kind, title, url)
 }
 
 func (s *entityStore) FindOrCreateSystem(ctx context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error) {
-	return findOrCreateEntity(ctx, s.admin, orgID, source, scope, sourceID, externalID, kind, title, url)
+	return findOrCreateEntity(ctx, s.admin, orgID, source, scope, sourceID, externalID, "", kind, title, url)
 }
 
-func findOrCreateEntity(ctx context.Context, q queryer, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error) {
+func (s *entityStore) FindOrCreateLinearSystem(ctx context.Context, orgID, scope, identifier, issueID, linearTeamID, title, url string) (*domain.Entity, bool, error) {
+	if err := db.ValidateLinearEntityCreate(identifier, issueID, linearTeamID); err != nil {
+		return nil, false, err
+	}
+	return findOrCreateEntity(ctx, s.admin, orgID, domain.ArtifactProviderLinear, scope, identifier, issueID, linearTeamID, "issue", title, url)
+}
+
+// findOrCreateEntity is the identity rule's find-or-create. linearTeamID is
+// the team a new Linear row is created with, and empty for every other
+// source; with it empty, a Linear row is found but not created.
+func findOrCreateEntity(ctx context.Context, q queryer, orgID, source, scope, sourceID, externalID, linearTeamID, kind, title, url string) (*domain.Entity, bool, error) {
 	if scope == "" {
 		return nil, false, fmt.Errorf("%w: %s %s", db.ErrEntityScopeRequired, source, sourceID)
 	}
@@ -456,6 +477,9 @@ func findOrCreateEntity(ctx context.Context, q queryer, orgID, source, scope, so
 	if existing != nil {
 		return existing, false, nil
 	}
+	if source == domain.ArtifactProviderLinear && linearTeamID == "" {
+		return nil, false, fmt.Errorf("%w: %s in %s", db.ErrEntityLinearTeamRequired, sourceID, scope)
+	}
 
 	id := uuid.New().String()
 	now := time.Now().UTC()
@@ -463,10 +487,10 @@ func findOrCreateEntity(ctx context.Context, q queryer, orgID, source, scope, so
 	// caller's enclosing transaction, and a lost race is an answer here, not
 	// an error. The re-read below decides what the loser sees.
 	res, err := q.ExecContext(ctx, `
-		INSERT INTO entities (id, org_id, source, scope, source_id, external_id, kind, title, url, state, created_at, last_polled_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active', $10, $11)
+		INSERT INTO entities (id, org_id, source, scope, source_id, external_id, kind, title, url, state, created_at, last_polled_at, linear_team_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active', $10, $11, $12)
 		ON CONFLICT DO NOTHING
-	`, id, orgID, source, scope, sourceID, nullString(externalID), kind, title, url, now, now)
+	`, id, orgID, source, scope, sourceID, nullString(externalID), kind, title, url, now, now, nullString(linearTeamID))
 	if err != nil {
 		return nil, false, err
 	}
@@ -500,6 +524,7 @@ func findOrCreateEntity(ctx context.Context, q queryer, orgID, source, scope, so
 		State:        "active",
 		CreatedAt:    now,
 		LastPolledAt: &now,
+		LinearTeamID: linearTeamID,
 	}, true, nil
 }
 
@@ -713,7 +738,8 @@ func (s *entityStore) UpdateSnapshotCASSystem(ctx context.Context, orgID, id, sn
 func updateSnapshotCAS(ctx context.Context, q queryer, orgID, id, snapshotJSON string, expectedPollSeq int64) (bool, error) {
 	res, err := q.ExecContext(ctx, `
 		UPDATE entities
-		SET snapshot_json = $1::jsonb, last_polled_at = $2, poll_seq = poll_seq + 1
+		SET snapshot_json = $1::jsonb, last_polled_at = $2, poll_seq = poll_seq + 1,
+		    `+pgLinearTeamFromSnapshot("$1")+`
 		WHERE org_id = $3 AND id = $4 AND poll_seq = $5
 	`, snapshotJSON, time.Now().UTC(), orgID, id, expectedPollSeq)
 	if err != nil {
@@ -728,7 +754,8 @@ func updateSnapshotCAS(ctx context.Context, q queryer, orgID, id, snapshotJSON s
 
 func (s *entityStore) PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON string) (domain.Entity, error) {
 	return scanWrittenEntity(s.q.QueryRowContext(ctx,
-		`UPDATE entities SET snapshot_json = $1::jsonb WHERE org_id = $2 AND id = $3
+		`UPDATE entities SET snapshot_json = $1::jsonb, `+pgLinearTeamFromSnapshot("$1")+`
+		 WHERE org_id = $2 AND id = $3
 		 RETURNING `+pgEntitySelectCols,
 		snapshotJSON, orgID, id))
 }
@@ -872,10 +899,11 @@ func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, e
 				UPDATE entities SET
 				  state = 'active', closed_at = NULL,
 				  source_id = $1, url = $2, snapshot_json = $3::jsonb, title = $4, description = $5,
-				  last_polled_at = $6, poll_seq = GREATEST(poll_seq, $7) + 1
+				  last_polled_at = $6, poll_seq = GREATEST(poll_seq, $7) + 1,
+				  linear_team_id = COALESCE($10, linear_team_id)
 				WHERE org_id = $8 AND id = $9`,
 				loser.SourceID, loser.URL, loserSnapshot, loser.Title, loser.Description,
-				loser.LastPolledAt, loser.PollSeq, orgID, survivor.ID); err != nil {
+				loser.LastPolledAt, loser.PollSeq, orgID, survivor.ID, nullString(loser.LinearTeamID)); err != nil {
 				return fmt.Errorf("survivor takes live state: %w", err)
 			}
 		}
@@ -965,7 +993,8 @@ func closeActiveEntity(ctx context.Context, q queryer, orgID, id string) (*domai
 func (s *entityStore) ReactivateWithSnapshotCASSystem(ctx context.Context, orgID, id, snapshotJSON string, expectedPollSeq int64) (bool, error) {
 	res, err := s.admin.ExecContext(ctx, `
 		UPDATE entities
-		SET state = 'active', closed_at = NULL, snapshot_json = $1::jsonb, last_polled_at = $2, poll_seq = poll_seq + 1
+		SET state = 'active', closed_at = NULL, snapshot_json = $1::jsonb, last_polled_at = $2, poll_seq = poll_seq + 1,
+		    `+pgLinearTeamFromSnapshot("$1")+`
 		WHERE org_id = $3 AND id = $4 AND state = 'closed' AND poll_seq = $5
 	`, snapshotJSON, time.Now().UTC(), orgID, id, expectedPollSeq)
 	if err != nil {
@@ -986,7 +1015,8 @@ func (s *entityStore) CloseWithSnapshotCASSystem(ctx context.Context, orgID, id,
 	now := time.Now().UTC()
 	res, err := s.admin.ExecContext(ctx, `
 		UPDATE entities
-		SET state = 'closed', closed_at = COALESCE(closed_at, $1), snapshot_json = $2::jsonb, last_polled_at = $1, poll_seq = poll_seq + 1
+		SET state = 'closed', closed_at = COALESCE(closed_at, $1), snapshot_json = $2::jsonb, last_polled_at = $1, poll_seq = poll_seq + 1,
+		    `+pgLinearTeamFromSnapshot("$2")+`
 		WHERE org_id = $3 AND id = $4 AND poll_seq = $5
 	`, now, snapshotJSON, orgID, id, expectedPollSeq)
 	if err != nil {
@@ -1110,7 +1140,7 @@ func scanEntityRow(row *sql.Row) (*domain.Entity, error) {
 	var e domain.Entity
 	err := row.Scan(&e.ID, &e.Source, &e.Scope, &e.SourceID, &e.ExternalID, &e.Kind, &e.Title, &e.URL,
 		&e.SnapshotJSON, &e.Description, &e.State,
-		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq)
+		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq, &e.LinearTeamID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1126,7 +1156,7 @@ func scanEntityList(rows *sql.Rows) ([]domain.Entity, error) {
 		var e domain.Entity
 		if err := rows.Scan(&e.ID, &e.Source, &e.Scope, &e.SourceID, &e.ExternalID, &e.Kind, &e.Title, &e.URL,
 			&e.SnapshotJSON, &e.Description, &e.State,
-			&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq); err != nil {
+			&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq, &e.LinearTeamID); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

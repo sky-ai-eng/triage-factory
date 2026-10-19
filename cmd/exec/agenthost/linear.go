@@ -142,9 +142,9 @@ func (c *LocalClient) LinearGetIssue(ctx context.Context, issue string) (_ *line
 	if err != nil {
 		return nil, err
 	}
-	// The addressed issue is the touched entity. The identifier and UUID come
-	// off the response, since the argument may have been either one.
-	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderLinear, got.Identifier, got.ID, got.URL)
+	// The addressed issue is the touched entity. The identifier, UUID and team
+	// come off the response, since the argument may have been either key.
+	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderLinear, got.Identifier, got.ID, got.Team.ID, got.URL)
 	return got, nil
 }
 
@@ -608,7 +608,7 @@ func (c *LocalClient) recordLinearIssue(ctx context.Context, issue *linearclient
 		DedupKey:    domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindIssue, issue.ID, ""),
 		DetailsJSON: detailsJSON,
 	}
-	c.upsertLinearArtifact(ctx, &a, linearAction(a, action, fromState, toState))
+	c.upsertLinearArtifact(ctx, &a, linearAction(a, action, fromState, toState), issue.Team.ID)
 }
 
 // recordLinearComment upserts a `comment` artifact keyed on the issue's UUID
@@ -627,15 +627,16 @@ func (c *LocalClient) recordLinearComment(ctx context.Context, issue *linearclie
 		DedupKey:    domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindComment, issue.ID, commentID),
 		DetailsJSON: artifactDetailsJSON(map[string]any{"body": artifactBodySnippet(body)}),
 	}
-	c.upsertLinearArtifact(ctx, &a, linearAction(a, domain.ActionIssueCommentPosted, "", ""))
+	c.upsertLinearArtifact(ctx, &a, linearAction(a, domain.ActionIssueCommentPosted, "", ""), issue.Team.ID)
 }
 
 // upsertLinearArtifact stamps the provider onto a and writes it with its
 // external-action row through the shared recording funnel (RecordExternalWrite),
-// which logs and swallows a failure.
-func (c *LocalClient) upsertLinearArtifact(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction) {
+// which logs and swallows a failure. linearTeamID is the team of the issue the
+// write touched, which the funnel's touch creates the issue's entity with.
+func (c *LocalClient) upsertLinearArtifact(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction, linearTeamID string) {
 	a.Provider = domain.ArtifactProviderLinear
-	c.rt.Record(ctx, a, act)
+	c.rt.Record(ctx, a, act, linearTeamID)
 }
 
 // linearAction builds the external-action row for a Linear write, under the

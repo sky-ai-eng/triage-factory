@@ -35,25 +35,25 @@ func RunEntityKeyConformance(t *testing.T, mk EntityKeyFactory) {
 
 	t.Run("key_lookup_prefers_active_then_most_recently_closed", func(t *testing.T) {
 		s, orgID := mk(t)
-		first, _, err := s.FindOrCreate(ctx, orgID, "linear", scope, "KEY-1", "uuid-k1-a", "issue", "first", "")
+		first, _, err := s.FindOrCreate(ctx, orgID, "jira", scope, "KEY-1", "uuid-k1-a", "issue", "first", "")
 		if err != nil {
 			t.Fatalf("create first: %v", err)
 		}
 		if _, err := s.MarkClosed(ctx, orgID, first.ID); err != nil {
 			t.Fatalf("close first: %v", err)
 		}
-		second, created, err := s.FindOrCreate(ctx, orgID, "linear", scope, "KEY-1", "uuid-k1-b", "issue", "second", "")
+		second, created, err := s.FindOrCreate(ctx, orgID, "jira", scope, "KEY-1", "uuid-k1-b", "issue", "second", "")
 		if err != nil || !created {
 			t.Fatalf("create second under the closed key: created=%v err=%v, want a new row", created, err)
 		}
-		got, err := s.GetBySource(ctx, orgID, "linear", scope, "KEY-1")
+		got, err := s.GetBySource(ctx, orgID, "jira", scope, "KEY-1")
 		if err != nil || got == nil || got.ID != second.ID {
 			t.Fatalf("GetBySource = %+v err=%v, want the active row %s", got, err, second.ID)
 		}
 		if _, err := s.MarkClosed(ctx, orgID, second.ID); err != nil {
 			t.Fatalf("close second: %v", err)
 		}
-		got, err = s.GetBySource(ctx, orgID, "linear", scope, "KEY-1")
+		got, err = s.GetBySource(ctx, orgID, "jira", scope, "KEY-1")
 		if err != nil || got == nil || got.ID != second.ID {
 			t.Errorf("GetBySource with both closed = %+v err=%v, want the most recently closed %s", got, err, second.ID)
 		}
@@ -61,17 +61,17 @@ func RunEntityKeyConformance(t *testing.T, mk EntityKeyFactory) {
 
 	t.Run("an_active_key_refuses_a_different_object", func(t *testing.T) {
 		s, orgID := mk(t)
-		holder, _, err := s.FindOrCreate(ctx, orgID, "linear", scope, "KEY-2", "uuid-k2-a", "issue", "holder", "")
+		holder, _, err := s.FindOrCreate(ctx, orgID, "jira", scope, "KEY-2", "uuid-k2-a", "issue", "holder", "")
 		if err != nil {
 			t.Fatalf("create holder: %v", err)
 		}
-		got, created, err := s.FindOrCreate(ctx, orgID, "linear", scope, "KEY-2", "uuid-k2-b", "issue", "newcomer", "")
+		got, created, err := s.FindOrCreate(ctx, orgID, "jira", scope, "KEY-2", "uuid-k2-b", "issue", "newcomer", "")
 		if !errors.Is(err, db.ErrEntityKeyOccupied) || got != nil || created {
 			t.Fatalf("FindOrCreate under an occupied key = (%+v, %v, %v), want ErrEntityKeyOccupied", got, created, err)
 		}
 		// The refusal wrote nothing, and the caller's transaction is still
 		// usable: the next statement on the same store succeeds.
-		still, err := s.GetBySource(ctx, orgID, "linear", scope, "KEY-2")
+		still, err := s.GetBySource(ctx, orgID, "jira", scope, "KEY-2")
 		if err != nil || still == nil || still.ID != holder.ID || still.ExternalID != "uuid-k2-a" {
 			t.Errorf("GetBySource after the refusal = %+v err=%v, want the holder untouched", still, err)
 		}
@@ -79,11 +79,11 @@ func RunEntityKeyConformance(t *testing.T, mk EntityKeyFactory) {
 
 	t.Run("a_keyless_create_returns_the_row_under_the_key", func(t *testing.T) {
 		s, orgID := mk(t)
-		row, _, err := s.FindOrCreate(ctx, orgID, "linear", scope, "KEY-3", "uuid-k3", "issue", "t", "")
+		row, _, err := s.FindOrCreate(ctx, orgID, "jira", scope, "KEY-3", "uuid-k3", "issue", "t", "")
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		again, created, err := s.FindOrCreate(ctx, orgID, "linear", scope, "KEY-3", "", "issue", "t", "")
+		again, created, err := s.FindOrCreate(ctx, orgID, "jira", scope, "KEY-3", "", "issue", "t", "")
 		if err != nil || created || again.ID != row.ID {
 			t.Errorf("FindOrCreate with no id = (%+v, %v, %v), want the existing row", again, created, err)
 		}
@@ -91,14 +91,14 @@ func RunEntityKeyConformance(t *testing.T, mk EntityKeyFactory) {
 
 	t.Run("a_given_id_wins_over_the_key", func(t *testing.T) {
 		s, orgID := mk(t)
-		row, _, err := s.FindOrCreate(ctx, orgID, "linear", scope, "KEY-4", "uuid-k4", "issue", "t", "")
+		row, _, err := s.FindOrCreate(ctx, orgID, "jira", scope, "KEY-4", "uuid-k4", "issue", "t", "")
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
 		if row.ExternalID != "uuid-k4" || row.Scope != scope {
 			t.Errorf("created row = %+v, want external_id and scope written at insert", row)
 		}
-		got, created, err := s.FindOrCreate(ctx, orgID, "linear", scope, "MOVED-4", "uuid-k4", "issue", "t", "")
+		got, created, err := s.FindOrCreate(ctx, orgID, "jira", scope, "MOVED-4", "uuid-k4", "issue", "t", "")
 		if err != nil || created || got.ID != row.ID || got.SourceID != "KEY-4" {
 			t.Errorf("FindOrCreate(new key, same id) = (%+v, %v, %v), want the existing row under its stored key", got, created, err)
 		}
@@ -106,30 +106,30 @@ func RunEntityKeyConformance(t *testing.T, mk EntityKeyFactory) {
 
 	t.Run("scope_separates_identical_keys_and_ids", func(t *testing.T) {
 		s, orgID := mk(t)
-		a, createdA, err := s.FindOrCreate(ctx, orgID, "linear", "ws-one", "KEY-5", "uuid-k5", "issue", "a", "")
+		a, createdA, err := s.FindOrCreate(ctx, orgID, "jira", "ws-one", "KEY-5", "uuid-k5", "issue", "a", "")
 		if err != nil || !createdA {
 			t.Fatalf("create in ws-one: created=%v err=%v", createdA, err)
 		}
-		b, createdB, err := s.FindOrCreate(ctx, orgID, "linear", "ws-two", "KEY-5", "uuid-k5", "issue", "b", "")
+		b, createdB, err := s.FindOrCreate(ctx, orgID, "jira", "ws-two", "KEY-5", "uuid-k5", "issue", "b", "")
 		if err != nil || !createdB || b.ID == a.ID {
 			t.Fatalf("create in ws-two = (%+v, %v, %v), want a second row", b, createdB, err)
 		}
-		gotA, _ := s.GetBySource(ctx, orgID, "linear", "ws-one", "KEY-5")
-		gotB, _ := s.GetBySource(ctx, orgID, "linear", "ws-two", "KEY-5")
+		gotA, _ := s.GetBySource(ctx, orgID, "jira", "ws-one", "KEY-5")
+		gotB, _ := s.GetBySource(ctx, orgID, "jira", "ws-two", "KEY-5")
 		if gotA == nil || gotB == nil || gotA.ID != a.ID || gotB.ID != b.ID {
 			t.Errorf("GetBySource per scope = %+v / %+v, want each scope's own row", gotA, gotB)
 		}
-		if miss, _ := s.GetBySource(ctx, orgID, "linear", "ws-three", "KEY-5"); miss != nil {
+		if miss, _ := s.GetBySource(ctx, orgID, "jira", "ws-three", "KEY-5"); miss != nil {
 			t.Errorf("GetBySource in a third scope = %+v, want nil", miss)
 		}
 	})
 
 	t.Run("no_scope_creates_nothing_and_matches_nothing", func(t *testing.T) {
 		s, orgID := mk(t)
-		if _, _, err := s.FindOrCreate(ctx, orgID, "linear", "", "KEY-6", "uuid-k6", "issue", "t", ""); !errors.Is(err, db.ErrEntityScopeRequired) {
+		if _, _, err := s.FindOrCreate(ctx, orgID, "jira", "", "KEY-6", "uuid-k6", "issue", "t", ""); !errors.Is(err, db.ErrEntityScopeRequired) {
 			t.Errorf("FindOrCreate with no scope: err=%v, want ErrEntityScopeRequired", err)
 		}
-		if got, err := s.GetBySource(ctx, orgID, "linear", "", "KEY-6"); err != nil || got != nil {
+		if got, err := s.GetBySource(ctx, orgID, "jira", "", "KEY-6"); err != nil || got != nil {
 			t.Errorf("GetBySource with no scope = %+v err=%v, want (nil, nil)", got, err)
 		}
 	})
@@ -194,7 +194,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 
 	t.Run("GetByExternalIDSystem_finds_the_row_under_any_key", func(t *testing.T) {
 		s, orgID, _ := mk(t)
-		row, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "linear", scope, "ENG-1", "uuid-1", "issue", "t", "")
+		row, _, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "ENG-1", "uuid-1", "team-eng", "t", "")
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
@@ -250,7 +250,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		s, orgID, seed := mk(t)
 		const oldURL = "https://linear.app/acme/issue/ENG-4/fix-it"
 		const newURL = "https://linear.app/acme/issue/OPS-77/fix-it"
-		row, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "linear", scope, "ENG-4", "uuid-4", "issue", "Fix it", oldURL)
+		row, _, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "ENG-4", "uuid-4", "team-eng", "Fix it", oldURL)
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
@@ -258,15 +258,16 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 			t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
 		}
 		// The control: a key with the renamed one as a string prefix.
-		neighbour, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "linear", scope, "ENG-41", "uuid-41", "issue", "Neighbour",
+		neighbour, _, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "ENG-41", "uuid-41", "team-eng", "Neighbour",
 			"https://linear.app/acme/issue/ENG-41/neighbour")
+
 		if err != nil {
 			t.Fatalf("create neighbour: %v", err)
 		}
 		// The other control: the same identifier in another workspace, whose
 		// UUID has the renamed one as a string prefix.
 		const otherURL = "https://linear.app/other/issue/ENG-4/fix-it"
-		if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "linear", "ws-b", "ENG-4", "uuid-4b", "issue", "Other", otherURL); err != nil {
+		if _, _, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, "ws-b", "ENG-4", "uuid-4b", "team-eng", "Other", otherURL); err != nil {
 			t.Fatalf("create the other workspace's ENG-4: %v", err)
 		}
 		taskID := seed.Task(t, row.ID, "rename")
@@ -355,7 +356,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		s, orgID, seed := mk(t)
 		const oldURL = "https://linear.app/acme/issue/ENG-9/café-menu"
 		const newURL = "https://linear.app/acme/issue/OPS-9/café-menu"
-		if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "linear", scope, "ENG-9", "uuid-9", "issue", "Café", oldURL); err != nil {
+		if _, _, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "ENG-9", "uuid-9", "team-eng", "Café", oldURL); err != nil {
 			t.Fatalf("create: %v", err)
 		}
 		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, scope, "ENG-9", oldURL+"#comment-c9", "rename-non-ascii")
@@ -604,7 +605,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 
 	t.Run("RenameSystem_is_idempotent", func(t *testing.T) {
 		s, orgID, _ := mk(t)
-		if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "linear", scope, "ENG-5", "uuid-5", "issue", "t", ""); err != nil {
+		if _, _, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "ENG-5", "uuid-5", "team-eng", "t", ""); err != nil {
 			t.Fatalf("create: %v", err)
 		}
 		if out, err := s.Entities.RenameSystem(ctx, orgID, "linear", scope, "uuid-5", "OPS-5", ""); err != nil || !out.Renamed {
@@ -633,11 +634,11 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 
 	t.Run("RenameSystem_refuses_a_key_an_active_row_holds", func(t *testing.T) {
 		s, orgID, _ := mk(t)
-		row, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "linear", scope, "ENG-6", "uuid-6", "issue", "t", "")
+		row, _, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "ENG-6", "uuid-6", "team-eng", "t", "")
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		holder, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "linear", scope, "OPS-6", "uuid-other", "issue", "t", "")
+		holder, _, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "OPS-6", "uuid-other", "team-eng", "t", "")
 		if err != nil {
 			t.Fatalf("create holder: %v", err)
 		}
@@ -658,11 +659,11 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 
 	t.Run("RenameSystem_refuses_an_ambiguous_id", func(t *testing.T) {
 		s, orgID, seed := mk(t)
-		a, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "linear", scope, "ENG-7", "uuid-7", "issue", "t", "")
+		a, _, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "ENG-7", "uuid-7", "team-eng", "t", "")
 		if err != nil {
 			t.Fatalf("create a: %v", err)
 		}
-		b, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "linear", scope, "ENG-8", "", "issue", "t", "")
+		b, _, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "ENG-8", "uuid-8", "team-eng", "t", "")
 		if err != nil {
 			t.Fatalf("create b: %v", err)
 		}
@@ -674,6 +675,139 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 			if got, _ := s.Entities.GetSystem(ctx, orgID, id); got.SourceID == "OPS-7" {
 				t.Errorf("refused rename moved %s", id)
 			}
+		}
+	})
+
+	t.Run("a_linear_row_is_created_with_its_team_and_only_with_it", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		row, created, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "ENG-20", "uuid-20", "team-eng", "t", "")
+		if err != nil || !created || row.LinearTeamID != "team-eng" {
+			t.Fatalf("FindOrCreateLinearSystem = (%+v, %v, %v), want a new row carrying team-eng", row, created, err)
+		}
+		if stored, err := s.Entities.GetSystem(ctx, orgID, row.ID); err != nil || stored == nil ||
+			stored.LinearTeamID != "team-eng" || stored.ExternalID != "uuid-20" || stored.Kind != "issue" {
+			t.Errorf("point read of the created row = %+v err=%v, want team-eng, uuid-20, kind issue", stored, err)
+		}
+
+		// A found row is returned as stored: the team is not rewritten from
+		// the call, whose team a later snapshot write would have to agree with.
+		again, created, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "ENG-20", "uuid-20", "team-ops", "t", "")
+		if err != nil || created || again.ID != row.ID || again.LinearTeamID != "team-eng" {
+			t.Errorf("second FindOrCreateLinearSystem = (%+v, %v, %v), want the row as stored", again, created, err)
+		}
+		// The generic door finds a Linear row like any other.
+		found, created, err := s.Entities.FindOrCreateSystem(ctx, orgID, "linear", scope, "ENG-20", "uuid-20", "issue", "t", "")
+		if err != nil || created || found.ID != row.ID {
+			t.Errorf("FindOrCreateSystem on a known Linear row = (%+v, %v, %v), want it found", found, created, err)
+		}
+
+		// ...and creates none.
+		if got, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "linear", scope, "ENG-21", "uuid-21", "issue", "t", ""); !errors.Is(err, db.ErrEntityLinearTeamRequired) || got != nil {
+			t.Errorf("FindOrCreateSystem creating a Linear row = (%+v, %v), want ErrEntityLinearTeamRequired", got, err)
+		}
+		if _, _, err := s.Entities.FindOrCreate(ctx, orgID, "linear", scope, "ENG-21", "uuid-21", "issue", "t", ""); !errors.Is(err, db.ErrEntityLinearTeamRequired) {
+			t.Errorf("FindOrCreate creating a Linear row: err=%v, want ErrEntityLinearTeamRequired", err)
+		}
+		if _, _, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "ENG-21", "uuid-21", "", "t", ""); !errors.Is(err, db.ErrEntityLinearTeamRequired) {
+			t.Errorf("FindOrCreateLinearSystem with no team: err=%v, want ErrEntityLinearTeamRequired", err)
+		}
+		if _, _, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "ENG-21", "", "team-eng", "t", ""); err == nil {
+			t.Error("FindOrCreateLinearSystem with no issue id: err=nil, want a refusal")
+		}
+		if got, _ := s.Entities.GetByExternalIDSystem(ctx, orgID, "linear", scope, "uuid-21"); got != nil {
+			t.Errorf("a refused create wrote %+v", got)
+		}
+
+		other, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", scope, "SKY-20", "20020", "issue", "t", "")
+		if err != nil || other.LinearTeamID != "" {
+			t.Errorf("a Jira row = %+v err=%v, want no Linear team", other, err)
+		}
+	})
+
+	t.Run("snapshot_writes_move_the_linear_team_and_clearing_keeps_it", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		team := func(id string) string {
+			t.Helper()
+			got, err := s.Entities.GetSystem(ctx, orgID, id)
+			if err != nil || got == nil {
+				t.Fatalf("read %s: %+v err=%v", id, got, err)
+			}
+			return got.LinearTeamID
+		}
+		pollSeq := func(id string) int64 {
+			t.Helper()
+			got, _ := s.Entities.GetSystem(ctx, orgID, id)
+			return got.PollSeq
+		}
+		row, _, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "ENG-22", "uuid-22", "team-eng", "t", "")
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+
+		if ok, err := s.Entities.UpdateSnapshotCASSystem(ctx, orgID, row.ID, `{"id":"uuid-22","team_id":"team-ops"}`, pollSeq(row.ID)); err != nil || !ok {
+			t.Fatalf("snapshot write: ok=%v err=%v", ok, err)
+		}
+		if got := team(row.ID); got != "team-ops" {
+			t.Errorf("after UpdateSnapshotCASSystem the team is %q, want the snapshot's team-ops", got)
+		}
+		// A CAS that misses writes neither half.
+		if ok, err := s.Entities.UpdateSnapshotCASSystem(ctx, orgID, row.ID, `{"id":"uuid-22","team_id":"team-lost"}`, pollSeq(row.ID)-1); err != nil || ok {
+			t.Fatalf("stale snapshot write: ok=%v err=%v, want a miss", ok, err)
+		}
+		if got := team(row.ID); got != "team-ops" {
+			t.Errorf("a missed CAS moved the team to %q", got)
+		}
+		// A snapshot that names no team leaves the column where it was.
+		if ok, err := s.Entities.UpdateSnapshotCASSystem(ctx, orgID, row.ID, `{"id":"uuid-22"}`, pollSeq(row.ID)); err != nil || !ok {
+			t.Fatalf("teamless snapshot write: ok=%v err=%v", ok, err)
+		}
+		if got := team(row.ID); got != "team-ops" {
+			t.Errorf("a snapshot naming no team moved the team to %q", got)
+		}
+
+		if ok, err := s.Entities.CloseWithSnapshotCASSystem(ctx, orgID, row.ID, `{"id":"uuid-22","team_id":"team-close"}`, pollSeq(row.ID)); err != nil || !ok {
+			t.Fatalf("close with snapshot: ok=%v err=%v", ok, err)
+		}
+		if got := team(row.ID); got != "team-close" {
+			t.Errorf("after CloseWithSnapshotCASSystem the team is %q, want team-close", got)
+		}
+		if ok, err := s.Entities.ReactivateWithSnapshotCASSystem(ctx, orgID, row.ID, `{"id":"uuid-22","team_id":"team-reopen"}`, pollSeq(row.ID)); err != nil || !ok {
+			t.Fatalf("reactivate with snapshot: ok=%v err=%v", ok, err)
+		}
+		if got := team(row.ID); got != "team-reopen" {
+			t.Errorf("after ReactivateWithSnapshotCASSystem the team is %q, want team-reopen", got)
+		}
+		patched, err := s.Entities.PatchSnapshot(ctx, orgID, row.ID, `{"id":"uuid-22","team_id":"team-patch"}`)
+		if err != nil || patched.LinearTeamID != "team-patch" {
+			t.Errorf("PatchSnapshot = %+v err=%v, want the row carrying team-patch", patched, err)
+		}
+
+		// The event queue's snapshot commit is the same CAS statement.
+		if ok, _, err := s.EventQueue.EnqueueBatchWithSnapshotCAS(ctx, orgID, row.ID, `{"id":"uuid-22","team_id":"team-queue"}`, pollSeq(row.ID), nil, nil); err != nil || !ok {
+			t.Fatalf("EnqueueBatchWithSnapshotCAS: ok=%v err=%v", ok, err)
+		}
+		if got := team(row.ID); got != "team-queue" {
+			t.Errorf("after EnqueueBatchWithSnapshotCAS the team is %q, want team-queue", got)
+		}
+
+		if _, err := s.Entities.ClearSnapshotsForSourceSystem(ctx, orgID, "linear"); err != nil {
+			t.Fatalf("clear: %v", err)
+		}
+		got, _ := s.Entities.GetSystem(ctx, orgID, row.ID)
+		if got.SnapshotJSON != "" || got.LinearTeamID != "team-queue" {
+			t.Errorf("after the clear: snapshot %q, team %q; want no snapshot and team-queue kept", got.SnapshotJSON, got.LinearTeamID)
+		}
+
+		// A snapshot write never gives another source's row a Linear team.
+		jira, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", scope, "SKY-22", "20022", "issue", "t", "")
+		if err != nil {
+			t.Fatalf("create jira: %v", err)
+		}
+		if ok, err := s.Entities.UpdateSnapshotCASSystem(ctx, orgID, jira.ID, `{"key":"SKY-22","team_id":"team-eng"}`, jira.PollSeq); err != nil || !ok {
+			t.Fatalf("jira snapshot write: ok=%v err=%v", ok, err)
+		}
+		if got := team(jira.ID); got != "" {
+			t.Errorf("a Jira row took the Linear team %q from its snapshot", got)
 		}
 	})
 }

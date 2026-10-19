@@ -259,7 +259,7 @@ func (t *Tracker) seedDiscoveredLinear(ctx context.Context, scope string, state 
 	}
 	created := false
 	if entity == nil {
-		entity, created, err = t.entities.FindOrCreateSystem(context.Background(), orgID, "linear", scope, snap.Identifier, snap.ID, "issue", snap.Title, snap.URL)
+		entity, created, err = t.entities.FindOrCreateLinearSystem(context.Background(), orgID, scope, snap.Identifier, snap.ID, snap.TeamID, snap.Title, snap.URL)
 		if errors.Is(err, db.ErrEntityKeyOccupied) {
 			// Another tracked issue still holds the identifier: a team key
 			// freed and reused before the old holder's rename was observed.
@@ -548,13 +548,16 @@ func (t *Tracker) applyLinearIssue(ctx context.Context, client LinearClient, org
 		e, renamed = next, true
 	}
 	// Whether the issue left the Linear team it was tracked in comes from the
-	// snapshot, not from this call's rename: a cycle that renamed the entity
-	// and stopped before retiring it is finished by the next one, and a team
-	// key rename keeps the team, so it is not a move. With no snapshot, this
-	// call's rename is the only evidence.
-	moved := renamed
-	if prev != nil {
-		moved = prev.TeamID != snap.TeamID
+	// entity's stored team, not from this call's rename: a cycle that renamed
+	// the entity and stopped before retiring it is finished by the next one,
+	// because the stored team moves only with a snapshot write, which a
+	// retiring issue never gets; and a team key rename keeps the team, so it
+	// is not a move. The stored team outlives a cleared snapshot. A row that
+	// predates the column and has no snapshot to have learned it from has only
+	// this call's rename as evidence.
+	moved := e.LinearTeamID != snap.TeamID
+	if e.LinearTeamID == "" {
+		moved = renamed
 	}
 	reason, answer := linearIssueGone(issue, teams), &issue
 	if reason == "" && moved && teams.ForTeam(snap.TeamID) == nil {
@@ -737,13 +740,15 @@ func linearIssueGone(issue linear.Issue, teams LinearRules) string {
 // longer follow, with reason in its metadata. The metadata is the stored
 // snapshot's last-known state; a field the snapshot lacks is filled from the
 // issue when there is one (a trashed or archived issue still answered). The
-// team in particular comes from one of those two and never from the
-// identifier, whose prefix is a display key a move or a rename changes. An
-// event that names no team — an entity with no snapshot that Linear has no
-// answer for — reaches no team's handlers: the router's gate refuses it, and
-// the close relations still close the entity and its tasks. Published rather
-// than committed with a snapshot, as Jira's is: there is no new snapshot, and
-// closing the entity is the router's job.
+// team is the entity's own (entities.linear_team_id): the team it was tracked
+// in, which a source pause does not clear, so an issue whose snapshot the
+// pause cleared still names it. It never comes from the identifier, whose
+// prefix is a display key a move or a rename changes. Only a row that predates
+// the column, with no snapshot to have learned it from and no answer, names no
+// team; its event reaches no team's handlers (the router's gate refuses it),
+// and the close relations still close the entity and its tasks. Published
+// rather than committed with a snapshot, as Jira's is: there is no new
+// snapshot, and closing the entity is the router's job.
 func (t *Tracker) emitLinearUnreachable(ctx context.Context, orgID string, e domain.Entity, issue *linear.Issue, reason string) {
 	var snap domain.LinearSnapshot
 	if e.SnapshotJSON != "" && e.SnapshotJSON != "{}" {
@@ -753,13 +758,21 @@ func (t *Tracker) emitLinearUnreachable(ctx context.Context, orgID string, e dom
 			snap = domain.LinearSnapshot{}
 		}
 	}
+	if e.LinearTeamID != "" && e.LinearTeamID != snap.TeamID {
+		// The key a snapshot names belongs to the snapshot's team, so it
+		// goes with it; the answer below fills it when it is the same team.
+		snap.TeamID, snap.TeamKey = e.LinearTeamID, ""
+	}
 	if issue != nil {
 		fresh := linearIssueToState(*issue, nil).Snap
 		if snap.ID == "" {
 			snap.ID = fresh.ID
 		}
-		if snap.TeamID == "" {
+		switch {
+		case snap.TeamID == "":
 			snap.TeamID, snap.TeamKey = fresh.TeamID, fresh.TeamKey
+		case snap.TeamKey == "" && fresh.TeamID == snap.TeamID:
+			snap.TeamKey = fresh.TeamKey
 		}
 		if snap.Title == "" {
 			snap.Title = fresh.Title
@@ -775,7 +788,7 @@ func (t *Tracker) emitLinearUnreachable(ctx context.Context, orgID string, e dom
 		snap.ID = e.ExternalID
 	}
 	if snap.TeamID == "" {
-		trackerLog.WarnContext(ctx, "no snapshot or answer names this issue's Linear team; its unreachable event names no team, so no team's handlers receive it",
+		trackerLog.WarnContext(ctx, "neither the entity, its snapshot nor an answer names this issue's Linear team; its unreachable event names no team, so no team's handlers receive it",
 			"source_id", e.SourceID, "entity_id", e.ID)
 	}
 	snap.Identifier = e.SourceID

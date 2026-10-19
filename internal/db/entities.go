@@ -64,6 +64,17 @@ import (
 // the row carrying it. Every key-based method takes the scope: no entity is
 // created, found or renamed without one.
 //
+// # A Linear issue's team
+//
+// linear_team_id is the UUID of the Linear team a Linear issue sits in, the id
+// linear_team_rules is keyed by: required on a Linear row and absent on every
+// other. It is set when the row is created (FindOrCreateLinearSystem, the only
+// door that creates one) and every snapshot write moves it to the team the
+// snapshot names, in the same statement, so a move to another team lands with
+// the snapshot that observed it. Nothing else writes it, and clearing the
+// snapshot leaves it: readers that need an issue's team read the column, never
+// the snapshot.
+//
 // # State and snapshot are one write
 //
 // Every write that changes state or writes a terminal snapshot is one
@@ -100,10 +111,10 @@ import (
 // swap guards whose bool already answers whether the write landed),
 // CloseTerminalSystem (a composition across entities and tasks that answers
 // with what it closed), and MergeDuplicateEntitiesSystem (a composition across
-// tables that answers with the surviving id). FindOrCreate / FindOrCreateSystem
-// already return the row, StampExternalIDSystem returns the row it stamped,
-// and RenameSystem is a composition across entities, artifacts and the audit
-// ledger that answers with what it moved.
+// tables that answers with the surviving id). FindOrCreate, FindOrCreateSystem
+// and FindOrCreateLinearSystem already return the row, StampExternalIDSystem
+// returns the row it stamped, and RenameSystem is a composition across
+// entities, artifacts and the audit ledger that answers with what it moved.
 
 // Errors the identity writes refuse with. Both describe stored state a write
 // cannot be applied over without making a key or an id name two objects, so
@@ -131,6 +142,14 @@ var (
 	// refused: it matches nothing, which is the right answer for a source
 	// that has no scope in the org (Linear with no workspace bound).
 	ErrEntityScopeRequired = errors.New("entity scope is required")
+
+	// ErrEntityLinearTeamRequired refuses to create a Linear row without the
+	// Linear team it sits in: FindOrCreate and FindOrCreateSystem find a
+	// Linear row like any other but create none, and FindOrCreateLinearSystem
+	// refuses an empty team. Readers that scope an issue to the TF teams
+	// tracking it read the column, so a row created without it would be in no
+	// team's view until something learned its team.
+	ErrEntityLinearTeamRequired = errors.New("a linear entity is created with its linear team")
 )
 
 // TerminalCloseResult is what EntityStore.CloseTerminalSystem committed.
@@ -226,7 +245,9 @@ type EntityStore interface {
 	// loses to a concurrent one re-reads and returns the winner. A create
 	// refused because an active row holding the key carries a different id is
 	// ErrEntityKeyOccupied, and one with an empty scope ErrEntityScopeRequired.
-	// Never rewrites kind, title or url on a known row.
+	// Never rewrites kind, title or url on a known row. A Linear row is found
+	// but never created here (ErrEntityLinearTeamRequired): it is created
+	// through FindOrCreateLinearSystem, with its team.
 	FindOrCreate(ctx context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error)
 
 	// PatchSnapshot writes the new snapshot_json **without** touching
@@ -420,6 +441,17 @@ type EntityStore interface {
 
 	FindOrCreateSystem(ctx context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error)
 
+	// FindOrCreateLinearSystem is FindOrCreateSystem for a Linear issue
+	// (source 'linear', kind 'issue'): identifier is its key, issueID its UUID,
+	// and a new row is created carrying linearTeamID, the UUID of the Linear
+	// team the issue sits in, read off the same response as the other two. An
+	// empty linearTeamID or issueID is refused (ErrEntityLinearTeamRequired, or
+	// an error naming the id) before anything is read. A row found is returned
+	// as stored: its team moves with its snapshot writes, never through here.
+	// Admin pool: the tracker and the exec recording funnel create Linear
+	// rows with no JWT claims.
+	FindOrCreateLinearSystem(ctx context.Context, orgID, scope, identifier, issueID, linearTeamID, title, url string) (*domain.Entity, bool, error)
+
 	// UpdateSnapshotCASSystem writes the tracker snapshot under a
 	// compare-and-swap on poll_seq (TFAC-579): the write only lands when
 	// the row's current poll_seq still equals expectedPollSeq (the value
@@ -434,6 +466,10 @@ type EntityStore interface {
 	// it diffed (the snapshot-diff is the sole re-emit prevention — see
 	// the tracker) and lets the next poll cycle reconcile. There is no
 	// blind-write variant: every snapshot write goes through the CAS.
+	//
+	// On a Linear row the same statement moves linear_team_id to the snapshot's
+	// team_id, and leaves it where it is when the snapshot names none; the
+	// reactivate and close twins below do the same, as does PatchSnapshot.
 	//
 	// Exempt from the returned-row rule: a compare-and-swap guard. ok is the
 	// write's own answer about whether it landed, and it is the whole point of
@@ -535,6 +571,10 @@ type EntityStore interface {
 	// ACTIVE only, deliberately: a closed entity is never diffed again, so
 	// clearing it would buy nothing and would blank the snapshot the personal
 	// dashboard renders its merged PRs from.
+	//
+	// linear_team_id is left alone: it is what keeps a cleared Linear row on
+	// its teams' belts and its unreachable event routable while the source is
+	// off.
 	//
 	// The poll_seq bump is what makes this safe against a cycle already in
 	// flight: that cycle diffed against the snapshot being cleared, and its
@@ -698,6 +738,22 @@ type EntityStore interface {
 // stamps on the newer row's tasks it dismisses. It names exactly those tasks,
 // which is what the merge's cancel of their running blueprints selects on.
 const DuplicateEntityMergedCloseReason = "duplicate_entity_merged"
+
+// ValidateLinearEntityCreate is FindOrCreateLinearSystem's argument check,
+// shared by both dialects: a Linear row is created with its identifier, its
+// UUID and its team, and a call missing any of them is refused before
+// anything is read.
+func ValidateLinearEntityCreate(identifier, issueID, linearTeamID string) error {
+	switch {
+	case identifier == "":
+		return errors.New("create linear entity: empty identifier")
+	case issueID == "":
+		return fmt.Errorf("create linear entity %s: empty issue id", identifier)
+	case linearTeamID == "":
+		return fmt.Errorf("%w: %s", ErrEntityLinearTeamRequired, identifier)
+	}
+	return nil
+}
 
 // DuplicateEntityPair decides which of two rows MergeDuplicateEntitiesSystem
 // keeps: the older (earliest created_at, ties broken by id). It refuses a pair
