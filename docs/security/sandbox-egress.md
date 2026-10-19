@@ -34,8 +34,8 @@ that sidecar owns. Supporting a new verb-backed provider such as Linear adds no
 allowlist entry. The LLM proxy is not a lane either: the native agent loop runs
 in the executor and dials it from the host, so the jail is never pointed at it.
 
-Two constraints shape the whole design. The tunnel never terminates TLS,
-so it can act only on hostnames — content integrity belongs to the package
+Two constraints shape the whole design. The tunnel does not terminate TLS
+today, so it can act only on hostnames — content integrity belongs to the package
 managers' own verification (lockfile hashes, go.sum), never to us. And a
 shared storage namespace (`storage.googleapis.com`, presigned S3) can
 never be allowlisted: a hostname match admits every tenant's bucket, which
