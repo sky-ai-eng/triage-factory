@@ -2,8 +2,10 @@ package slack
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // TestBuildSlackManifest_Socket: socket_mode_enabled true, bot_events carries
@@ -100,6 +102,24 @@ func assertFullScopeSet(t *testing.T, got []string) {
 		if !wantSet[s] {
 			t.Errorf("unexpected scope %q in manifest", s)
 		}
+	}
+}
+
+// TestBuildSlackManifest_DisplayCopyWithinSlackLimits: Slack refuses to
+// create an app from a manifest whose description runs past 140 characters
+// or whose long_description falls outside 175–4000, and it counts characters,
+// not bytes (the long description carries multi-byte bullets and arrows).
+func TestBuildSlackManifest_DisplayCopyWithinSlackLimits(t *testing.T) {
+	d := buildSlackManifest("Acme", transportSocket, "https://tf.acme.example", "org-123").DisplayInformation
+
+	if n := utf8.RuneCountInString(d.Description); n == 0 || n > 140 {
+		t.Errorf("description is %d characters; Slack allows 1–140", n)
+	}
+	if n := utf8.RuneCountInString(d.LongDescription); n < 175 || n > 4000 {
+		t.Errorf("long_description is %d characters; Slack allows 175–4000", n)
+	}
+	if !regexp.MustCompile(`^#[0-9a-fA-F]{6}$`).MatchString(d.BackgroundColor) {
+		t.Errorf("background_color = %q, want a #rrggbb hex color", d.BackgroundColor)
 	}
 }
 
