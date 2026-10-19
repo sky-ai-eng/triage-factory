@@ -30,7 +30,7 @@ import (
 // HelpText is the help block for `workspace` commands, surfaced both
 // from `workspace --help` and the top-level `exec --help`.
 const HelpText = `Workspace Commands:
-  workspace list                       Print configured + materialized repos for this run (JSON)
+  workspace list                       Print tracked + materialized repos for this run (JSON)
   workspace add <owner/repo>           Materialize a worktree on the repo's base branch (detached)
   workspace add <owner/repo> --ref B   ... on an existing branch B (detached at its tip)
   workspace add <owner/repo> --pr N    ... on PR #N's head (fork-aware; no fork credential needed)
@@ -38,7 +38,7 @@ const HelpText = `Workspace Commands:
 Discovery:
   Run 'workspace list' first when you're not sure which repo to materialize.
   Output has two sections:
-    - "available": configured repos you could materialize via 'add'
+    - "available": repos your team tracks that you could materialize via 'add'
     - "materialized": worktrees you've already added for this run, with
       absolute paths and the checkout each landed on
 

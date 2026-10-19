@@ -11,9 +11,10 @@ import (
 
 // listOutput is the JSON shape printed by `workspace list`. Two sections:
 //
-//   - available: every repo configured in Triage Factory the agent COULD
-//     `workspace add`. Sourced from the repositories table. Empty list
-//     means no repos are configured (delegated agents shouldn't ever see
+//   - available: every repo the run's team tracks that the agent COULD
+//     `workspace add`. Sourced from the repositories table through the
+//     team's tracked set, the same gate `workspace add` applies. Empty list
+//     means the team tracks no repos (delegated agents shouldn't ever see
 //     this since the spawner gates on profile readiness, but the shape
 //     stays consistent).
 //   - materialized: repos the agent has already `workspace add`'d for
@@ -62,7 +63,7 @@ type listMaterialized struct {
 // Conversation-agnostic (TFAC-498), mirroring materializeWorkspace: it serves any
 // conversation — Jira, GitHub, or taskless — since `workspace add` does too. It only
 // needs the conversation identity (for scoping the materialized list) plus the
-// org-configured repos, not the task.
+// repos its team tracks, not the task.
 //
 // All reads route through the agenthost client — in local mode the
 // LocalClient hits the SQLite store directly, in sandbox mode the
@@ -83,9 +84,9 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 		return listOutput{}, fmt.Errorf("%w: %s", errConversationNotFound, info.ConversationID)
 	}
 
-	configured, err := host.ListRepos(ctx)
+	tracked, err := host.ListRepos(ctx)
 	if err != nil {
-		return listOutput{}, fmt.Errorf("workspace list: load configured repos: %w", err)
+		return listOutput{}, fmt.Errorf("workspace list: load tracked repos: %w", err)
 	}
 	rows, err := host.ListConversationWorktrees(ctx)
 	if err != nil {
@@ -112,16 +113,16 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 		})
 	}
 
-	// Available = configured-and-profilable minus already-materialized.
-	// Skeleton rows in repositories (added to the configured list
-	// but not yet profiled — clone_url is empty) are filtered out:
+	// Available = tracked-and-profilable minus already-materialized.
+	// Skeleton rows in repositories (tracked but not yet profiled —
+	// clone_url is empty) are filtered out:
 	// `workspace add` would reject them later with "no clone URL on
 	// its profile" anyway, so surfacing them here as discoverable
 	// options would just send the agent toward unusable choices.
 	// Materialized filter keeps the list framed as "what's still
 	// unmaterialized," matching the agent's mental model.
-	available := make([]listAvailable, 0, len(configured))
-	for _, p := range configured {
+	available := make([]listAvailable, 0, len(tracked))
+	for _, p := range tracked {
 		if p.CloneURL == "" {
 			continue
 		}

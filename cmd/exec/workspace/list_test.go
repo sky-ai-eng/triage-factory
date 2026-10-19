@@ -165,6 +165,8 @@ func TestListWorkspaces_AvailableSurfacesDescription(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("upsert skeleton: %v", err)
 	}
+	trackForRunTeam(t, database, "owner", "alpha")
+	trackForRunTeam(t, database, "owner", "skeleton")
 
 	out, err := listWorkspaces(hostFor(stores, "r1"))
 	if err != nil {
@@ -184,5 +186,45 @@ func TestListWorkspaces_AvailableSurfacesDescription(t *testing.T) {
 	}
 	if _, found := byRepo["owner/skeleton"]; found {
 		t.Errorf("owner/skeleton (no clone_url) should NOT appear in available; got %+v", out.Available)
+	}
+}
+
+// TestListWorkspaces_AvailableIsTheTeamsTrackedSet pins that `available` is
+// the run's team's tracked set — the set `workspace add` admits — rather than
+// every registry row: a repository only another team tracks, and one the run's
+// team stopped tracking, both have rows with clone URLs and neither is offered.
+func TestListWorkspaces_AvailableIsTheTeamsTrackedSet(t *testing.T) {
+	stores, database := newTestDB(t)
+	seedJiraConversation(t, database, "r1", "SKY-1")
+	store := sqlitestore.New(database.Conn)
+	ctx := context.Background()
+
+	for _, repo := range []string{"theirs", "dropped"} {
+		if _, err := store.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
+			Host: dbtest.TestGitHubHost, Owner: "owner", Repo: repo,
+			CloneURL: "https://x/" + repo, DefaultBranch: "main",
+		}); err != nil {
+			t.Fatalf("upsert %s: %v", repo, err)
+		}
+	}
+	const otherTeam = "team-b-0000-0000-0000-000000000001"
+	if _, err := database.Conn.Exec(`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, 'team-b', 'team-b')`, otherTeam, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("seed team-b: %v", err)
+	}
+	if err := store.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, otherTeam, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "theirs"}}); err != nil {
+		t.Fatalf("track owner/theirs for team-b: %v", err)
+	}
+	trackForRunTeam(t, database, "owner", "dropped")
+	seedRepository(t, database, "owner", "mine", "https://x/mine", "main")
+	if err := store.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "mine"}}); err != nil {
+		t.Fatalf("untrack owner/dropped: %v", err)
+	}
+
+	out, err := listWorkspaces(hostFor(stores, "r1"))
+	if err != nil {
+		t.Fatalf("listWorkspaces: %v", err)
+	}
+	if len(out.Available) != 1 || out.Available[0].Repo != "owner/mine" {
+		t.Errorf("available = %+v, want only owner/mine", out.Available)
 	}
 }

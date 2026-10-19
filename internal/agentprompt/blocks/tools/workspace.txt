@@ -4,7 +4,7 @@ A run on a Jira or Linear issue starts with no codebase. Your initial cwd is the
 
 Discovery:
 - `triagefactory exec workspace list` — JSON inventory with two sections:
-  - `available`: configured repos you could `add` but haven't yet, each with a `description` field (one-line upstream metadata, e.g. "Core API service") that's your strongest disambiguation signal when the issue alone isn't conclusive
+  - `available`: repos your team tracks that you could `add` but haven't yet, each with a `description` field (one-line upstream metadata, e.g. "Core API service") that's your strongest disambiguation signal when the issue alone isn't conclusive
   - `materialized`: worktrees you've already added for this run, with their absolute paths and the checkout each landed on
   Run this first when the issue text doesn't make the target repo obvious. The `available` section is your universe of options; `add` rejects anything outside it.
 

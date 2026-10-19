@@ -222,7 +222,7 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 	}
 	// UNION (not UNION ALL) dedups a user who is both an org admin and a
 	// tracking-team member. The tracking arm mirrors
-	// repoProfileTrackedByViewerTeams (the REST read's scoping) join for
+	// repoTrackedByATeam (the REST read's scoping) join for
 	// join — including its deliberate LACK of a teams.deleted_at filter:
 	// archiving force-stops a team's work but hides nothing (Archive
 	// touches no memberships/tracking rows, and the repo keeps being

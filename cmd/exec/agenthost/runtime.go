@@ -38,6 +38,9 @@ type Runtime interface {
 	ListConversationArtifacts(ctx context.Context) ([]domain.Artifact, error)
 	GetConversation(ctx context.Context) (*domain.Conversation, error)
 	GetTask(ctx context.Context, taskID string) (*domain.Task, error)
+	// ListRepos lists the repositories the run's team tracks — the set
+	// TeamTracksRepo admits, so every repository `workspace list` offers is
+	// one `workspace add` will materialize.
 	ListRepos(ctx context.Context) ([]domain.Repository, error)
 
 	// GetRepo takes the "owner/repo" the agent typed and resolves it against
@@ -401,7 +404,7 @@ func (r *directRuntime) ListRepos(ctx context.Context) ([]domain.Repository, err
 	if err != nil {
 		return nil, err
 	}
-	return r.stores.Repos.ListSystem(ctx, r.info.OrgID, host)
+	return r.stores.Repos.ListTrackedByTeamSystem(ctx, r.info.OrgID, r.info.TeamID, host)
 }
 
 // GetRepo is the verb boundary for `tfac exec workspace add owner/repo`: the

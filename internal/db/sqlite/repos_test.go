@@ -71,38 +71,47 @@ func TestRepositoryStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if _, _, err := stores.Repos.List(t.Context(), bogusOrg, dbtest.TestGitHubHost, db.ListOpts{}); err == nil {
 		t.Errorf("List with non-local orgID should error")
 	}
+	if _, _, err := stores.Repos.ListTrackedSystem(t.Context(), bogusOrg, dbtest.TestGitHubHost, db.ListOpts{}); err == nil {
+		t.Errorf("ListTrackedSystem with non-local orgID should error")
+	}
+	if _, err := stores.Repos.ListTrackedByTeamSystem(t.Context(), bogusOrg, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost); err == nil {
+		t.Errorf("ListTrackedByTeamSystem with non-local orgID should error")
+	}
 }
 
-// TestRepositoryStore_SQLite_ListTeamScoped_MirrorsList pins the local-mode
-// asymmetry (TFAC-559): N=1 has no other team to scope away, so
-// ListTeamScoped returns the identical set List does — unlike the
-// Postgres impl, which semi-joins through team_github_repos under RLS.
-func TestRepositoryStore_SQLite_ListTeamScoped_MirrorsList(t *testing.T) {
+// TestRepositoryStore_SQLite_ListTeamScoped_MirrorsTrackedSet pins the
+// local-mode asymmetry: N=1 has no other team to scope away, so
+// ListTeamScoped returns the identical set ListTrackedSystem does — unlike the
+// Postgres impl, which semi-joins through team_github_repos under RLS. A
+// registry row no team tracks is in neither.
+func TestRepositoryStore_SQLite_ListTeamScoped_MirrorsTrackedSet(t *testing.T) {
 	conn := newSQLiteForRepoTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := t.Context()
 
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
-		{Owner: "a", Repo: "one"},
-		{Owner: "b", Repo: "two"},
-	}); err != nil {
-		t.Fatalf("track repos: %v", err)
+	track := func(repos ...domain.TeamGitHubRepo) {
+		t.Helper()
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, repos); err != nil {
+			t.Fatalf("track repos: %v", err)
+		}
 	}
+	track(domain.TeamGitHubRepo{Owner: "a", Repo: "one"}, domain.TeamGitHubRepo{Owner: "b", Repo: "two"}, domain.TeamGitHubRepo{Owner: "c", Repo: "gone"})
+	track(domain.TeamGitHubRepo{Owner: "a", Repo: "one"}, domain.TeamGitHubRepo{Owner: "b", Repo: "two"})
 
-	all, _, err := stores.Repos.List(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, db.ListOpts{Limit: 50})
+	tracked, _, err := stores.Repos.ListTrackedSystem(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, db.ListOpts{Limit: 50})
 	if err != nil {
-		t.Fatalf("List: %v", err)
+		t.Fatalf("ListTrackedSystem: %v", err)
 	}
-	scoped, _, err := stores.Repos.ListTeamScoped(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, db.ListOpts{Limit: 50})
+	scoped, total, err := stores.Repos.ListTeamScoped(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, db.ListOpts{Limit: 50})
 	if err != nil {
 		t.Fatalf("ListTeamScoped: %v", err)
 	}
-	if len(scoped) != len(all) {
-		t.Fatalf("ListTeamScoped returned %d rows, want %d (unscoped local mode)", len(scoped), len(all))
+	if len(scoped) != 2 || total != 2 || len(tracked) != len(scoped) {
+		t.Fatalf("ListTeamScoped returned %d rows (total %d), ListTrackedSystem %d; want 2 on both — c/gone is untracked", len(scoped), total, len(tracked))
 	}
-	for i := range all {
-		if all[i].ID != scoped[i].ID {
-			t.Errorf("row %d: List=%s ListTeamScoped=%s", i, all[i].ID, scoped[i].ID)
+	for i := range tracked {
+		if tracked[i].ID != scoped[i].ID {
+			t.Errorf("row %d: ListTrackedSystem=%s ListTeamScoped=%s", i, tracked[i].ID, scoped[i].ID)
 		}
 	}
 }

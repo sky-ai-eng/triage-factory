@@ -349,9 +349,10 @@ func (a *App) wireCloneStatusCallback() {
 	})
 }
 
-// bootstrapBareClones reads the configured repos and asks the worktree
-// package to ensure each is materialized on disk as a bare clone with the
-// right origin URL. Called after profiling completes (profiling populates
+// bootstrapBareClones reads the repos at least one team tracks and asks the
+// worktree package to ensure each is materialized on disk as a bare clone with
+// the right origin URL. A registry row no team tracks is not warmed: nothing
+// polls or profiles it. Called after profiling completes (profiling populates
 // repositories.clone_url; targets without a CloneURL are skipped). DB read
 // errors are logged and skipped — the lazy clone inside CreateForPR /
 // CreateForBranch recovers affected delegations on the next run.
@@ -361,7 +362,7 @@ func bootstrapBareClones(repos db.RepositoryStore, orgs db.OrgsStore, secrets db
 		worktreeLog.Warn("bootstrap: load org settings failed", "error", err)
 		return
 	}
-	profiles, err := repos.ListSystem(context.Background(), runmode.LocalDefaultOrgID, db.EffectiveGitHubHost(orgSet.GitHubBaseURL))
+	profiles, _, err := repos.ListTrackedSystem(context.Background(), runmode.LocalDefaultOrgID, db.EffectiveGitHubHost(orgSet.GitHubBaseURL), db.Unwindowed)
 	if err != nil {
 		worktreeLog.Warn("bootstrap: load repositories failed", "error", err)
 		return

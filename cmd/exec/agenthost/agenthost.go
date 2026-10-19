@@ -255,6 +255,8 @@ type Client interface {
 
 	GetConversation(ctx context.Context) (*domain.Conversation, error)
 	GetTask(ctx context.Context, taskID string) (*domain.Task, error)
+	// ListRepos lists the repositories the run's team tracks, the set
+	// TeamTracksRepo admits.
 	ListRepos(ctx context.Context) ([]domain.Repository, error)
 	// GetRepo resolves the "owner/repo" the agent typed to its registry row,
 	// or nil when nothing answers to that name. The agent surface speaks
