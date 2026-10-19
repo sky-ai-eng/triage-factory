@@ -63,14 +63,17 @@ Everything that is the product is shared and identical on every backend:
 
 A backend owns only what differs between isolation technologies:
 
-| Backend-specific | gVisor today |
-| --- | --- |
-| Building and destroying a cell, and reaping orphans at boot | netns + veth + iptables, the per-run uid bands, runsc, all through the cap-broker |
-| Where the sidecar's proxies listen, reachable from the host and the jail | the veth's host-side IP |
-| Putting the run tree in front of the jail | `ChownRunTree` / `ParkRunTree` hand-off of a host directory |
-| Starting the tool host and returning a connection to it | runsc with a bind-mounted unix socket the in-jail host dials |
-| Freezing and thawing the jail | `runsc pause` / `resume` |
-| Measuring what the jail cost | the per-run memory cgroup |
+| Backend-specific | gVisor today | Firecracker microVM (SPACE), roughly |
+| --- | --- | --- |
+| Building and destroying a cell, and reaping orphans at boot | netns + veth + iptables, the per-run uid bands, runsc, all through the cap-broker | the sidecar still launched by the cap-broker under a per-run uid; the VM created and deleted through SPACE's API with a network policy admitting only that sidecar; orphans found by an executor-id label and deleted |
+| Where the sidecar's proxies listen, reachable from the host and the jail | the veth's host-side IP | an executor address the guest's network policy admits, or a guest-local port the tool host forwards over its stream |
+| Putting the run tree in front of the jail | `ChownRunTree` / `ParkRunTree` hand-off of a host directory | a copy into the guest at launch (SPACE's file API or a tar stream) and back out at capture; there is no shared filesystem |
+| Starting the tool host and returning a connection to it | runsc with a bind-mounted unix socket the in-jail host dials | `tf-harness-tools serve` as a long-lived SPACE process session, the executor attached to its stdio stream, which also carries the exec verbs |
+| Freezing and thawing the jail | `runsc pause` / `resume` | SPACE pause / wake |
+| Measuring what the jail cost | the per-run memory cgroup | SPACE's per-sandbox stats |
+
+The microVM column is a sketch; §13 has the mapping per contract member and
+what each row still has to prove.
 
 ## 4. The interface (`internal/cell`)
 
