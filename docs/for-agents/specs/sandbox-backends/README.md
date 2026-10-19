@@ -232,7 +232,14 @@ only under these conditions:
 3. **Pure pass-through.** After the policy decision the upstream body is
    copied verbatim, and nothing in the interceptor can rewrite a body. No
    cache, so one bad response cannot reach another run or a later fetch.
-4. **Registries are read-only:** GET and HEAD. This closes the publish path.
+4. **Registries are read-only:** GET and HEAD, plus POST to the paths a
+   registry serves reads on, listed per registry as data and probed like any
+   allowlist entry. For npm that is the audit endpoints `npm install` calls by
+   default (`/-/npm/v1/security/advisories/bulk`, and
+   `/-/npm/v1/security/audits/quick` it falls back to). With `Host` pinned
+   that body reaches only the registry's own advisory service. Every other
+   POST, and every PUT, PATCH and DELETE, is refused. This closes the publish
+   path.
 5. **One request shape.** Upgrade and a nested `CONNECT` are refused, and so
    are a request with ambiguous framing (both `Content-Length` and
    `Transfer-Encoding`, or conflicting lengths), a GET or HEAD with a body,
