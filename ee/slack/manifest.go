@@ -63,10 +63,10 @@ type slackManifestDisplayInfo struct {
 // manifest_test.go pins both bounds.
 const slackManifestDescription = "Mention @Triage Factory in Slack to hand work to an AI agent."
 
-const slackManifestLongDescription = `Triage Factory connects to Slack so your team can hand work to an AI agent from the thread where the work came up.
+const slackManifestLongDescription = `Triage Factory connects to Slack so your team can hand work to an AI agent directly.
 
 How it works
-• Mention @Triage Factory in a channel your team tracks.
+• Mention @Triage Factory in a channel your TF team tracks.
 • An agent picks it up. It reads the thread, any files shared in it, and the repositories your team works in, then does what your team has set it up to do: fix a bug, open a pull request, review code, update a ticket, or answer a question.
 • While the agent works, the thread shows a live status line. When it finishes, it replies in the thread with what it did and a link to the full run.
 • Replies in the same thread go to the same agent, so you can correct or extend the request without mentioning the bot again.
