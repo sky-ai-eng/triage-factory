@@ -394,6 +394,86 @@ verified domain to a different person, that person's first sign-in joins the
 previous holder's account. Triage Factory cannot tell the two people apart
 without directory provisioning (SCIM), which it does not support yet.
 
+## Requiring SSO
+
+**Require SSO** (`PATCH /api/sso/connection/enforcement` with
+`{"enforced": true}`, or the switch under **Settings → Single sign-on**) means
+nobody uses your org except through your identity provider. It is two rules:
+
+- **Sign-in.** A GitHub sign-in whose trusted email is on one of your verified
+  domains is refused, and the person is sent back to the login page to sign in
+  with SSO.
+- **Org access.** Every request that acts in your org must come from a session
+  or API token that was signed in through your org's own connection. That covers
+  every member, whatever their email: a contractor invited with a personal
+  GitHub account, and a member who changed their GitHub email, both lose access
+  until they sign in through your identity provider. It applies to sessions and
+  tokens that existed before you turned the requirement on, and it is checked on
+  every request.
+
+**Break-glass** principals are exempt from both rules. They are your recovery
+path if the identity provider is unavailable. The first time you require SSO,
+the org owner is added as break-glass if the list is empty.
+
+What a member who is not signed in through your connection sees:
+
+- Requests to the org answer `403` with reason `SSO_REQUIRED`. `GET /api/me`
+  still answers, and lists the org with `sso_required: true` and the
+  `sso_start_url` that begins your org's sign-in. The app shows that sign-in in
+  place of the org's pages.
+- They can switch to another org they belong to, log out, or sign in through
+  your identity provider. A GitHub sign-in no longer lands them in your org by
+  default.
+- They cannot switch into your org, mint an API token for it, or accept an
+  invitation to it. A refused invitation stays pending.
+- An open websocket to your org is closed with code `4002` on the next
+  revalidation sweep, every `TF_WS_SESSION_REVALIDATE_SECONDS` seconds (60 by
+  default).
+
+API tokens carry the sign-in of the credential that minted them: a token
+minted from a session signed in through your connection keeps working, and one
+minted from a GitHub session does not, whenever it was minted. Members who use
+tokens for automation should mint new ones after signing in with SSO.
+
+Turning the requirement on is refused with `409` until each of these holds:
+
+| Refused when | Message |
+| ------------ | ------- |
+| The connection is disabled | "enable the connection before requiring SSO" |
+| The connection has not passed a Test | "run a successful Test before requiring SSO" |
+| No domain is verified | "verify a domain before requiring SSO" |
+| The admin turning it on is neither signed in through the connection nor break-glass | "Sign in through single sign-on, or be designated break-glass, before requiring it." |
+
+While the requirement is on, these changes are refused with `409`, because each
+would leave members with no working sign-in or the org with no recovery path:
+
+| Change | Message |
+| ------ | ------- |
+| Disabling the connection | "Turn off Require SSO first." |
+| Removing your last verified domain | "Turn off Require SSO first." |
+| Removing your last break-glass principal | "can't remove the last break-glass principal while SSO is required — stop requiring SSO first" |
+
+Each of these checks is made under a lock on the connection, so two changes
+made at the same moment cannot both pass against the state before the other.
+
+If your SSO entitlement lapses, both rules stop applying, so a lapsed licence
+can never lock everyone out.
+
+A refused sign-in is recorded in `auth_events` as `sso_enforcement_rejected`,
+and a break-glass sign-in that bypassed it as `break_glass_login`. A refused
+request is not recorded, since that would be one row per request; turning the
+requirement on and off is in `access_change_log` (see below).
+
+**Known limits.**
+
+- A session or token signed in through your connection keeps working until it
+  expires (sessions last 30 days), your org's API token age cap ends it, or an
+  admin removes the member. Disabling someone in your identity provider does not
+  end their existing Triage Factory session; remove them from the org's People
+  roster. Directory provisioning (SCIM) is not supported yet.
+- Background work is not affected: delegated runs, pollers and webhooks do not
+  pass through these checks, and runs started before you required SSO continue.
+
 ## What's next
 
 Still in progress (not configured here yet):

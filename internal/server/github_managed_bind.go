@@ -273,6 +273,15 @@ var (
 		message: "You need to be an admin of this workspace to connect a GitHub account.",
 	}
 
+	// The workspace requires signing in through its own single sign-on, and
+	// the session completing the ceremony was not. Asked of the record's org,
+	// the workspace the bind writes into, after the admin re-check.
+	refuseSSORequired = bindRefusal{
+		code:    "sso_required",
+		status:  http.StatusForbidden,
+		message: "This workspace requires signing in through its single sign-on. Sign in that way, then connect GitHub again.",
+	}
+
 	// GitHub did not confirm who the caller is: the code exchange failed, or
 	// the whoami did.
 	refuseIdentityUnproven = bindRefusal{
@@ -652,6 +661,19 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 	}
 	if !isAdmin {
 		s.renderBindOutcome(w, orgID, refuseNotWorkspaceAdmin)
+		return
+	}
+	// The record's org, not the session's cursor, is the one this writes into,
+	// so "Require SSO" is asked about it here rather than left to withSession.
+	// Answered as a page like every other refusal here, because this is a
+	// browser navigation.
+	gate, err := s.requestSSOGate(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "github-managed-bind", err)
+		return
+	}
+	if gate.Barred {
+		s.renderBindOutcome(w, orgID, refuseSSORequired)
 		return
 	}
 

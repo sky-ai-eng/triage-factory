@@ -68,6 +68,8 @@ export function linearConnectErrorText(code: string | null): string | null {
       return 'Your workspace hasn’t connected Linear yet. Ask an admin to connect it in Workspace Settings first.'
     case 'workspace_mismatch':
       return 'The Linear account you authorized belongs to a different Linear workspace. Sign in to Linear with your account in the connected workspace, or paste an API key from it below.'
+    case 'sso_required':
+      return 'This organization requires signing in through its single sign-on. Sign in that way, then connect Linear again.'
     default:
       return 'Something went wrong connecting your Linear account. Please try again, or paste an API key below.'
   }

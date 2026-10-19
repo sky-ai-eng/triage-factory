@@ -41,7 +41,17 @@ const entityIDInChunkSize = 500
 const entitySelectCols = `id, source, scope, source_id, COALESCE(external_id, ''), kind,
        COALESCE(title, ''), COALESCE(url, ''),
        COALESCE(snapshot_json, ''), COALESCE(description, ''), state,
-       created_at, last_polled_at, closed_at, poll_seq`
+       created_at, last_polled_at, closed_at, poll_seq, COALESCE(linear_team_id, '')`
+
+// linearTeamFromSnapshot is the SET clause every snapshot write carries, so a
+// Linear row's linear_team_id moves with the snapshot that observed its team,
+// in the same statement: on a Linear row it takes the snapshot's team_id, and
+// keeps its value when the snapshot names none or is not JSON. Every other row
+// keeps its NULL. It binds the snapshot twice, after whatever the statement
+// binds before it.
+const linearTeamFromSnapshot = `linear_team_id = CASE WHEN source = 'linear' AND json_valid(?)
+		THEN COALESCE(NULLIF(json_extract(?, '$.team_id'), ''), linear_team_id)
+		ELSE linear_team_id END`
 
 // entityKeyOrder is the key lookup's preference among rows sharing a key: the
 // active one (there is at most one), otherwise the most recently closed. id
@@ -186,6 +196,20 @@ func (s *entityStore) ListActiveJiraTeamScoped(ctx context.Context, orgID, _ str
 // --- Mutation ---
 
 func (s *entityStore) FindOrCreate(ctx context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error) {
+	return s.findOrCreate(ctx, orgID, source, scope, sourceID, externalID, "", kind, title, url)
+}
+
+func (s *entityStore) FindOrCreateLinearSystem(ctx context.Context, orgID, scope, identifier, issueID, linearTeamID, title, url string) (*domain.Entity, bool, error) {
+	if err := db.ValidateLinearEntityCreate(identifier, issueID, linearTeamID); err != nil {
+		return nil, false, err
+	}
+	return s.findOrCreate(ctx, orgID, domain.ArtifactProviderLinear, scope, identifier, issueID, linearTeamID, "issue", title, url)
+}
+
+// findOrCreate is the identity rule's find-or-create. linearTeamID is the team
+// a new Linear row is created with, and empty for every other source; with it
+// empty, a Linear row is found but not created.
+func (s *entityStore) findOrCreate(ctx context.Context, orgID, source, scope, sourceID, externalID, linearTeamID, kind, title, url string) (*domain.Entity, bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, false, err
 	}
@@ -207,16 +231,19 @@ func (s *entityStore) FindOrCreate(ctx context.Context, orgID, source, scope, so
 	if existing != nil {
 		return existing, false, nil
 	}
+	if source == domain.ArtifactProviderLinear && linearTeamID == "" {
+		return nil, false, fmt.Errorf("%w: %s in %s", db.ErrEntityLinearTeamRequired, sourceID, scope)
+	}
 
 	id := uuid.New().String()
 	now := time.Now().UTC()
 	// DO NOTHING rather than a raised violation, so a lost race is an answer
 	// rather than an error, and the re-read below decides what the loser sees.
 	res, err := s.q.ExecContext(ctx, `
-		INSERT INTO entities (id, source, scope, source_id, external_id, kind, title, url, state, created_at, last_polled_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+		INSERT INTO entities (id, source, scope, source_id, external_id, kind, title, url, state, created_at, last_polled_at, linear_team_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
 		ON CONFLICT DO NOTHING
-	`, id, source, scope, sourceID, nullStringValue(externalID), kind, title, url, now, now)
+	`, id, source, scope, sourceID, nullStringValue(externalID), kind, title, url, now, now, nullStringValue(linearTeamID))
 	if err != nil {
 		return nil, false, err
 	}
@@ -250,6 +277,7 @@ func (s *entityStore) FindOrCreate(ctx context.Context, orgID, source, scope, so
 		State:        "active",
 		CreatedAt:    now,
 		LastPolledAt: &now,
+		LinearTeamID: linearTeamID,
 	}, true, nil
 }
 
@@ -273,8 +301,8 @@ func (s *entityStore) PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON
 		return domain.Entity{}, err
 	}
 	return scanWrittenEntity(s.q.QueryRowContext(ctx,
-		`UPDATE entities SET snapshot_json = ? WHERE id = ? RETURNING `+entitySelectCols,
-		snapshotJSON, id))
+		`UPDATE entities SET snapshot_json = ?, `+linearTeamFromSnapshot+` WHERE id = ? RETURNING `+entitySelectCols,
+		snapshotJSON, snapshotJSON, snapshotJSON, id))
 }
 
 func (s *entityStore) UpdateTitle(ctx context.Context, orgID, id, title string) (domain.Entity, error) {
@@ -681,9 +709,10 @@ func (s *entityStore) UpdateSnapshotCASSystem(ctx context.Context, orgID, id, sn
 func updateSnapshotCAS(ctx context.Context, q queryer, id, snapshotJSON string, expectedPollSeq int64) (bool, error) {
 	res, err := q.ExecContext(ctx, `
 		UPDATE entities
-		SET snapshot_json = ?, last_polled_at = ?, poll_seq = poll_seq + 1
+		SET snapshot_json = ?, last_polled_at = ?, poll_seq = poll_seq + 1,
+		    `+linearTeamFromSnapshot+`
 		WHERE id = ? AND poll_seq = ?
-	`, snapshotJSON, time.Now().UTC(), id, expectedPollSeq)
+	`, snapshotJSON, time.Now().UTC(), snapshotJSON, snapshotJSON, id, expectedPollSeq)
 	if err != nil {
 		return false, err
 	}
@@ -825,10 +854,11 @@ func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, e
 				UPDATE entities SET
 				  state = 'active', closed_at = NULL,
 				  source_id = ?, url = ?, snapshot_json = ?, title = ?, description = ?,
-				  last_polled_at = ?, poll_seq = MAX(poll_seq, ?) + 1
+				  last_polled_at = ?, poll_seq = MAX(poll_seq, ?) + 1,
+				  linear_team_id = COALESCE(?, linear_team_id)
 				WHERE id = ?`,
 				loser.SourceID, loser.URL, loserSnapshot, loser.Title, loser.Description,
-				loser.LastPolledAt, loser.PollSeq, survivor.ID); err != nil {
+				loser.LastPolledAt, loser.PollSeq, nullStringValue(loser.LinearTeamID), survivor.ID); err != nil {
 				return fmt.Errorf("survivor takes live state: %w", err)
 			}
 		}
@@ -881,9 +911,10 @@ func (s *entityStore) ReactivateWithSnapshotCASSystem(ctx context.Context, orgID
 	}
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE entities
-		SET state = 'active', closed_at = NULL, snapshot_json = ?, last_polled_at = ?, poll_seq = poll_seq + 1
+		SET state = 'active', closed_at = NULL, snapshot_json = ?, last_polled_at = ?, poll_seq = poll_seq + 1,
+		    `+linearTeamFromSnapshot+`
 		WHERE id = ? AND state = 'closed' AND poll_seq = ?
-	`, snapshotJSON, time.Now().UTC(), id, expectedPollSeq)
+	`, snapshotJSON, time.Now().UTC(), snapshotJSON, snapshotJSON, id, expectedPollSeq)
 	if err != nil {
 		return false, err
 	}
@@ -905,9 +936,10 @@ func (s *entityStore) CloseWithSnapshotCASSystem(ctx context.Context, orgID, id,
 	now := time.Now().UTC()
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE entities
-		SET state = 'closed', closed_at = COALESCE(closed_at, ?), snapshot_json = ?, last_polled_at = ?, poll_seq = poll_seq + 1
+		SET state = 'closed', closed_at = COALESCE(closed_at, ?), snapshot_json = ?, last_polled_at = ?, poll_seq = poll_seq + 1,
+		    `+linearTeamFromSnapshot+`
 		WHERE id = ? AND poll_seq = ?
-	`, now, snapshotJSON, now, id, expectedPollSeq)
+	`, now, snapshotJSON, now, snapshotJSON, snapshotJSON, id, expectedPollSeq)
 	if err != nil {
 		return false, err
 	}
@@ -1110,7 +1142,7 @@ func scanEntityRow(row *sql.Row) (*domain.Entity, error) {
 	var e domain.Entity
 	err := row.Scan(&e.ID, &e.Source, &e.Scope, &e.SourceID, &e.ExternalID, &e.Kind, &e.Title, &e.URL,
 		&e.SnapshotJSON, &e.Description, &e.State,
-		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq)
+		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq, &e.LinearTeamID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1124,7 +1156,7 @@ func scanEntityFromRows(rows *sql.Rows) (*domain.Entity, error) {
 	var e domain.Entity
 	if err := rows.Scan(&e.ID, &e.Source, &e.Scope, &e.SourceID, &e.ExternalID, &e.Kind, &e.Title, &e.URL,
 		&e.SnapshotJSON, &e.Description, &e.State,
-		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq); err != nil {
+		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq, &e.LinearTeamID); err != nil {
 		return nil, err
 	}
 	return &e, nil

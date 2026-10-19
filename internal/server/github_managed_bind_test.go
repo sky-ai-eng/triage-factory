@@ -1390,6 +1390,31 @@ func TestManagedBind_ConnectRequiresWorkspaceAdmin(t *testing.T) {
 	}
 }
 
+// TestManagedBind_RequiresSSOOfTheRecordsOrg is Require SSO at the callback:
+// the workspace the record names started requiring an SSO this session did not
+// come through after the ceremony began. The callback is a browser navigation,
+// so the refusal is the outcome page every other refusal renders, not an API
+// error body, and nothing is bound.
+func TestManagedBind_RequiresSSOOfTheRecordsOrg(t *testing.T) {
+	gh := newFakeGitHub()
+	rig := newBindRig(t, gh)
+	ext := &barringLoginExt{}
+	rig.srv.loginExt = ext
+
+	cookie := rig.ceremony(t)
+	ext.bar(rig.orgID.String())
+	out := rig.callback(t, cookie, defaultCallbackQuery(4242))
+
+	assertOutcome(t, out, "sso_required")
+	if out.Code != http.StatusForbidden {
+		t.Errorf("status=%d, want 403", out.Code)
+	}
+	if ct := out.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("content-type=%q, want the outcome page", ct)
+	}
+	rig.assertNothingBound(t)
+}
+
 func TestManagedBind_InstallationBoundElsewhere(t *testing.T) {
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
@@ -1778,6 +1803,7 @@ func TestManagedBind_RefusalSetIsClosedAndDistinct(t *testing.T) {
 		refuseNoInstallation,
 		refuseSessionRequired,
 		refuseNotWorkspaceAdmin,
+		refuseSSORequired,
 		refuseIdentityUnproven,
 		refuseIdentityNotLinked,
 		refuseIdentityMismatch.withAccount("octocat"),

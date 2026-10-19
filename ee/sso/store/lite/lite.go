@@ -63,8 +63,16 @@ func (s *ssoConnectionStore) SetEnforced(context.Context, string, string, bool) 
 	return db.ErrNotApplicableInLocal
 }
 
+func (s *ssoConnectionStore) LockForOrg(context.Context, string) error {
+	return db.ErrNotApplicableInLocal
+}
+
 func (s *ssoConnectionStore) MarkTestedByProviderID(context.Context, string) error {
 	return db.ErrNotApplicableInLocal
+}
+
+func (s *ssoConnectionStore) EnforcedProviderForOrg(context.Context, string) (string, error) {
+	return "", db.ErrNotApplicableInLocal
 }
 
 func (s *ssoConnectionStore) IdPsByProviderIDs(context.Context, []string) (map[string]string, error) {
@@ -125,6 +133,10 @@ func (s *ssoBreakGlassStore) RemoveGuarded(context.Context, string, string) (boo
 
 func (s *ssoBreakGlassStore) SeedOwnerIfEmpty(context.Context, string) error {
 	return db.ErrNotApplicableInLocal
+}
+
+func (s *ssoBreakGlassStore) Includes(context.Context, string, string) (bool, error) {
+	return false, db.ErrNotApplicableInLocal
 }
 
 func (s *ssoBreakGlassStore) IsBreakGlass(context.Context, string, string) (bool, error) {

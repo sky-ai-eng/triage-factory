@@ -1,25 +1,23 @@
 import { useEffect, useRef, useState } from 'react'
-import { useLocation, useNavigate } from 'react-router'
 import { ChevronDown, Check } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import { useOrgContext } from '../contexts/OrgContext'
-import { reconnectWebSocket } from '../hooks/useWebSocket'
-import { invalidateTeams } from '../hooks/useTeams'
-import { invalidateEntitlements } from '../hooks/useEntitlements'
-import { apiFetch } from '../lib/apiClient'
+import { useSwitchOrg } from '../hooks/useSwitchOrg'
 
 /**
  * Topbar dropdown for switching between orgs the user belongs to.
- * Mounted only in multi mode (Shell decides). When the user picks a
- * new org, we both update OrgContext and rewrite the URL so deep
- * links to the same sub-path inside the new org work — e.g. switching
- * from /orgs/A/triage to /orgs/B/triage preserves the /triage tail.
+ * Mounted only in multi mode (Shell decides). Picking an org moves the
+ * session there through useSwitchOrg, which also rewrites the URL so deep
+ * links to the same sub-path inside the new org work.
+ *
+ * An org that requires an SSO this session did not come through is listed
+ * with that org's sign-in instead: switching to it would only be refused, so
+ * the row is a link to its start URL and never calls /api/me/active-org.
  */
 export default function OrgPicker() {
   const auth = useAuth()
-  const { activeOrgId, setActiveOrgId } = useOrgContext()
-  const navigate = useNavigate()
-  const location = useLocation()
+  const { activeOrgId } = useOrgContext()
+  const switchOrg = useSwitchOrg()
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
 
@@ -47,51 +45,7 @@ export default function OrgPicker() {
 
   const handlePick = async (newOrgId: string) => {
     setOpen(false)
-    if (newOrgId === activeOrgId) return
-    setActiveOrgId(newOrgId)
-
-    // Persist the choice on the session row so the server's
-    // withSession picks up the new active org for every subsequent
-    // request (and so cross-tab /api/me reads agree). Fire-and-log
-    // failures: the local pick already updated OrgContext, and the
-    // next /api/me will reconcile a transient persistence failure on
-    // the user's next interaction.
-    try {
-      await apiFetch('/api/me/active-org', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ org_id: newOrgId }),
-      })
-      // Drop the cached /api/teams response only AFTER the active org
-      // is persisted server-side. /api/teams is session-org-scoped, so
-      // invalidating before the POST commits would race and refetch the
-      // OLD org's teams; doing it here guarantees the reload reads the
-      // new org's set. (Codex review on PR #263.)
-      invalidateTeams()
-      // Entitlements are scoped to the active org too (multi mode), so drop
-      // their cache on the same commit — the new org may license a different
-      // EE feature set. Same post-persist ordering rationale as teams.
-      invalidateEntitlements()
-      // Force the WS to re-handshake so the hub's per-(user, org)
-      // Broadcast filter routes events for the just-switched
-      // tenant rather than the previous one. Without this the
-      // user keeps receiving the old org's events until the next
-      // unrelated disconnect.
-      reconnectWebSocket()
-    } catch (err) {
-      // A refusal (revoked membership) or a network drop both land here. The
-      // picker rolling back the local selection would conflict with whatever
-      // URL navigation is about to happen below; for now log and let the
-      // AuthGate / /api/me reconciliation correct it on the next page render.
-      console.warn('[org-picker] active-org POST failed:', err)
-    }
-
-    // Rewrite the URL: swap the org_id segment, preserve everything
-    // after it. Routes that don't start with /orgs/<id> fall back to
-    // the new org's root.
-    const swapped = location.pathname.match(/^\/orgs\/[^/]+(\/.*)?$/)
-    const tail = swapped?.[1] ?? ''
-    navigate('/orgs/' + newOrgId + tail, { replace: false })
+    await switchOrg(newOrgId)
   }
 
   return (
@@ -114,6 +68,21 @@ export default function OrgPicker() {
         >
           {auth.orgs.map((org) => {
             const isActive = org.id === active.id
+            if (org.sso_required && org.sso_start_url) {
+              return (
+                <a
+                  key={org.id}
+                  href={org.sso_start_url}
+                  className="w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-body text-ink-1 hover:bg-tint-2 transition-colors"
+                >
+                  <span className="flex flex-col">
+                    <span className="font-medium">{org.name}</span>
+                    <span className="text-reported text-warm">Sign in with single sign-on</span>
+                  </span>
+                  {isActive && <Check size={14} className="text-warm shrink-0" />}
+                </a>
+              )
+            }
             return (
               <button
                 key={org.id}

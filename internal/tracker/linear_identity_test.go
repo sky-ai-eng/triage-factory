@@ -125,6 +125,9 @@ func TestRefreshLinear_MoveBetweenArmedTeams(t *testing.T) {
 	if snap := fx.snapshot(t, "OPS-77"); snap.Identifier != "OPS-77" || snap.TeamID != opsTeamID {
 		t.Errorf("snapshot = %+v, want the move committed", snap)
 	}
+	if got := fx.entity(t, "OPS-77").LinearTeamID; got != opsTeamID {
+		t.Errorf("entity's Linear team = %q, want %q moved with the snapshot", got, opsTeamID)
+	}
 
 	if evts, err := fx.cycle(t, linRulesWithOps()); err != nil || len(evts) != 0 {
 		t.Fatalf("next cycle: events=%v err=%v, want the move not re-emitted", eventTypes(evts), err)
@@ -263,6 +266,9 @@ func TestRefreshLinear_ReopensUnderANewIdentifier(t *testing.T) {
 	if snap := fx.snapshot(t, "OPS-79"); snap.Identifier != "OPS-79" || snap.TeamID != opsTeamID {
 		t.Errorf("snapshot = %+v, want the fresh identity committed", snap)
 	}
+	if got := fx.entity(t, "OPS-79").LinearTeamID; got != opsTeamID {
+		t.Errorf("entity's Linear team = %q, want %q moved with the snapshot", got, opsTeamID)
+	}
 	if evts, err := fx.cycle(t, linRulesWithOps()); err != nil || len(evts) != 0 {
 		t.Fatalf("next cycle: events=%v err=%v, want the move not re-emitted", eventTypes(evts), err)
 	}
@@ -309,6 +315,44 @@ func TestRefreshLinear_RetiresAMoveAnEarlierCycleRenamed(t *testing.T) {
 	}
 }
 
+// TestRefreshLinear_RetiresAMoveAfterTheSnapshotWasCleared: the same move as
+// above, with the snapshot cleared by a source pause in between. The entity's
+// stored team still names the team the issue left, so the move is seen
+// without a snapshot to diff, and the unreachable names that team; there is no
+// identifier_changed, which is the difference from a snapshot there is none of.
+func TestRefreshLinear_RetiresAMoveAfterTheSnapshotWasCleared(t *testing.T) {
+	fx := newLinearFixture(t)
+	is := linIssue(5)
+	fx.seed(t, is)
+	before := fx.entity(t, "ENG-5")
+	moved := movedToOps(is, 78)
+	if _, err := fx.stores.Entities.RenameSystem(context.Background(), runmode.LocalDefaultOrgID, "linear", linWorkspace, is.ID, moved.Identifier, moved.URL); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if _, err := fx.stores.Entities.ClearSnapshotsForSourceSystem(context.Background(), runmode.LocalDefaultOrgID, "linear"); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	fx.client.put(moved)
+
+	evts, err := fx.cycle(t, linRules())
+	if err != nil {
+		t.Fatalf("RefreshLinear: %v", err)
+	}
+	if got := eventTypes(evts); !slices.Equal(got, []string{domain.EventLinearIssueUnreachable}) {
+		t.Fatalf("events = %v, want unreachable alone", got)
+	}
+	var gone events.LinearIssueUnreachableMetadata
+	if err := json.Unmarshal([]byte(evts[0].MetadataJSON), &gone); err != nil {
+		t.Fatal(err)
+	}
+	if gone.Reason != events.LinearUnreachableMoved || gone.LinearTeamID != linTeamID || gone.IssueIdentifier != "OPS-78" {
+		t.Errorf("unreachable metadata = %+v, want reason moved naming the old team", gone)
+	}
+	if evts[0].EntityID == nil || *evts[0].EntityID != before.ID {
+		t.Errorf("unreachable entity = %v, want %s", evts[0].EntityID, before.ID)
+	}
+}
+
 // TestRefreshLinear_KeyRenameOfAnUnarmedTeamIsNotAMove: an issue whose team no
 // rule arms any more stays tracked when that team's key is renamed. The issue
 // stayed in its team, and removing a team's rules never retires its issues.
@@ -338,7 +382,7 @@ func TestRefreshLinear_KeyRenameOfAnUnarmedTeamIsNotAMove(t *testing.T) {
 // is the difference from the stored snapshot, and there is none to diff from.
 func TestRefreshLinear_SnapshotlessRenameIsQuiet(t *testing.T) {
 	fx := newLinearFixture(t)
-	stub, _, err := fx.stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "linear", linWorkspace, "ENG-7", "uuid-7", "issue", "", "")
+	stub, _, err := fx.stores.Entities.FindOrCreateLinearSystem(context.Background(), runmode.LocalDefaultOrgID, linWorkspace, "ENG-7", "uuid-7", linTeamID, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +439,7 @@ func TestRefreshLinear_WorkspaceSwitch(t *testing.T) {
 	fx.seed(t, linIssue(1))
 	oldActive := fx.entity(t, "ENG-1")
 	// A closed old row whose identifier a new issue will reuse.
-	closed, _, err := fx.stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "linear", linWorkspace, "ENG-2", "uuid-2", "issue", "Old two", "")
+	closed, _, err := fx.stores.Entities.FindOrCreateLinearSystem(context.Background(), runmode.LocalDefaultOrgID, linWorkspace, "ENG-2", "uuid-2", linTeamID, "Old two", "")
 	if err != nil {
 		t.Fatal(err)
 	}

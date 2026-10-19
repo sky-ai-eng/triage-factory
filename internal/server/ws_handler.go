@@ -34,7 +34,10 @@ import (
 //     no_active_org rather than registered as unscoped — the
 //     unscoped carveout exists for the no-identity path, not for
 //     authenticated callers with no org. Without this gate such a
-//     client would receive every tenant's broadcasts.
+//     client would receive every tenant's broadcasts. A credential
+//     withSession found barred from its org (the org requires SSO it
+//     was not signed in through) lands here too, and gets the 403
+//     SSO_REQUIRED every other route gives it.
 //
 // Stale-active-org gate (TFAC-75): withSession resolves orgID from the
 // session's active_org_id WITHOUT re-checking membership (the FK only
@@ -64,6 +67,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	orgID := OrgIDFrom(r.Context())
 	if userID != "" && orgID == "" {
+		// The same split RequireOrg makes: an org this credential is barred
+		// from is not an org to re-pick, it is one to sign in to differently.
+		if httpx.BarredOrgFrom(r.Context()) != "" {
+			httpx.WriteSSORequired(w)
+			return
+		}
 		s.writeNoActiveOrg(w)
 		return
 	}

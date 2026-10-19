@@ -6,6 +6,8 @@ import {
   apiList,
   httpErrorMessage,
   HttpError,
+  isSSORequired,
+  setSSORequiredHandler,
   setUnauthHandler,
 } from './apiClient'
 
@@ -144,6 +146,7 @@ describe('apiJSON non-JSON guard', () => {
 describe('apiFetch allow', () => {
   afterEach(() => {
     setUnauthHandler(null)
+    setSSORequiredHandler(null)
   })
 
   function stubFetch(status: number, body = '') {
@@ -199,6 +202,56 @@ describe('apiFetch allow', () => {
     const err = await caught(apiFetch('/api/repos'))
     expect(onUnauth).toHaveBeenCalledTimes(1)
     expect(err).toBeInstanceOf(HttpError)
+  })
+
+  it('routes a 403 SSO_REQUIRED through the shared error parser, never the unauth handler', async () => {
+    // The credential authenticated; only this org refuses it. Re-authenticating
+    // would mint another session of the same kind and land back here.
+    const onUnauth = vi.fn()
+    setUnauthHandler(onUnauth)
+    const message = 'This organization requires signing in through its single sign-on.'
+    stubFetch(403, JSON.stringify({ errors: [{ reason: 'SSO_REQUIRED', message }] }))
+    const err = await caught(apiJSON('/api/teams/list'))
+    expect(onUnauth).not.toHaveBeenCalled()
+    expect(err).toBeInstanceOf(HttpError)
+    expect(isSSORequired(err)).toBe(true)
+    expect(apiErrors(err)).toEqual([{ reason: 'SSO_REQUIRED', message }])
+    expect(httpErrorMessage(err, 'fallback')).toBe(message)
+  })
+
+  it('notifies the SSO_REQUIRED handler before throwing, and only for that refusal', async () => {
+    const onSSORequired = vi.fn()
+    setSSORequiredHandler(onSSORequired)
+    stubFetch(403, JSON.stringify({ errors: [{ reason: 'SSO_REQUIRED', message: 'x' }] }))
+    expect(await caught(apiJSON('/api/teams/list'))).toBeInstanceOf(HttpError)
+    expect(onSSORequired).toHaveBeenCalledTimes(1)
+
+    stubFetch(403, JSON.stringify({ errors: [{ reason: 'FORBIDDEN', message: 'no' }] }))
+    await caught(apiJSON('/api/sso/connection'))
+    expect(onSSORequired).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves an allowed 403 SSO_REQUIRED to the caller', async () => {
+    const onSSORequired = vi.fn()
+    setSSORequiredHandler(onSSORequired)
+    stubFetch(403, JSON.stringify({ errors: [{ reason: 'SSO_REQUIRED', message: 'x' }] }))
+    const res = await apiFetch('/api/teams/list', { allow: [403] })
+    expect(res.status).toBe(403)
+    expect(onSSORequired).not.toHaveBeenCalled()
+  })
+
+  it('does not read another 403 as SSO_REQUIRED', async () => {
+    stubFetch(
+      403,
+      JSON.stringify({ errors: [{ reason: 'FORBIDDEN', message: 'org admin role required' }] }),
+    )
+    const err = await caught(apiJSON('/api/sso/connection'))
+    expect(isSSORequired(err)).toBe(false)
+    expect(
+      isSSORequired(
+        new HttpError(409, JSON.stringify({ errors: [{ reason: 'SSO_REQUIRED', message: 'x' }] })),
+      ),
+    ).toBe(false)
   })
 
   it('threads allow through apiJSON, parsing the allowed status body', async () => {

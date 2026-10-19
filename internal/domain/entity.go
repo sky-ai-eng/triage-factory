@@ -158,6 +158,13 @@ type Entity struct {
 	// has not learned it (a Jira entity created before issue ids were
 	// recorded, until a response names its id).
 	ExternalID string `json:"external_id,omitempty"`
+	// LinearTeamID is the UUID of the Linear team a Linear issue sits in, the
+	// id linear_team_rules is keyed by. Every Linear row carries it and no
+	// other row does. It moves with the snapshot writes, so it follows a move
+	// to another team, and it survives the snapshot being cleared, which is
+	// why readers take an issue's team from here rather than from
+	// SnapshotJSON.
+	LinearTeamID string `json:"linear_team_id,omitempty"`
 	// Kind is "pr" | "issue" | "epic" for the poller-backed sources. For
 	// Slack, kind encodes thread engagement: "thread" when the bot is why
 	// the thread exists (its root message was a mention, or a conversation posted

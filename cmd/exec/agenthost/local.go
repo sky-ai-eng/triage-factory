@@ -991,7 +991,7 @@ func (c *LocalClient) JiraGetIssue(ctx context.Context, key string) (_ *jiraclie
 	// its new one, so the response is the only place the issue's current
 	// canonical key is known, and the id is what its entity is found by. An
 	// entity stored under an older key is renamed onto the one answered here.
-	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderJira, issue.Key, issue.ID, "")
+	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderJira, issue.Key, issue.ID, "", "")
 	return issue, nil
 }
 
@@ -1305,7 +1305,7 @@ func (c *LocalClient) upsertJiraArtifact(ctx context.Context, a *domain.Artifact
 	if a != nil {
 		a.Provider = domain.ArtifactProviderJira
 	}
-	c.rt.Record(ctx, a, act)
+	c.rt.Record(ctx, a, act, "")
 }
 
 // jiraSiteBase returns the org's configured Jira site URL, trailing slash
@@ -1714,7 +1714,7 @@ func (c *LocalClient) GithubGetReviewDetail(ctx context.Context, owner, repo str
 // actions download-logs) never call this — the rule is addressed → touch,
 // returned-in-a-set → never.
 func (c *LocalClient) touchPR(ctx context.Context, owner, repo string, number int) {
-	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, domain.PullRequestTarget(owner+"/"+repo, number), "", "")
+	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, domain.PullRequestTarget(owner+"/"+repo, number), "", "", "")
 }
 
 // RecordReadTouch is the Client-interface escape hatch for an addressed read
@@ -1726,7 +1726,7 @@ func (c *LocalClient) touchPR(ctx context.Context, owner, repo string, number in
 // No provider id crosses this door, so a Jira coordinate through it touches
 // nothing: a Jira read records its own touch from the response it read.
 func (c *LocalClient) RecordReadTouch(ctx context.Context, provider, target, url string) {
-	c.rt.RecordReadTouch(ctx, provider, target, "", url)
+	c.rt.RecordReadTouch(ctx, provider, target, "", "", url)
 }
 
 // memoryLoadSources is the set of entity source values `memory load` accepts —
@@ -2424,7 +2424,7 @@ func (c *LocalClient) recordGithubPR(ctx context.Context, owner, repo, head, bas
 // re-records the artifact without a new GitHub write).
 func (c *LocalClient) upsertGithubArtifact(ctx context.Context, a domain.Artifact, act *domain.ExternalAction) {
 	a.Provider = domain.ArtifactProviderGitHub
-	c.rt.Record(ctx, &a, act)
+	c.rt.Record(ctx, &a, act, "")
 }
 
 // --- external-action recording (TFAC-483) ---
@@ -2448,7 +2448,7 @@ func (c *LocalClient) upsertGithubArtifact(ctx context.Context, a domain.Artifac
 // (RecordExternalWrite, record.go) with a nil artifact; best-effort like every
 // other funnel here.
 func (c *LocalClient) recordBotAction(ctx context.Context, act *domain.ExternalAction) {
-	c.rt.Record(ctx, nil, act)
+	c.rt.Record(ctx, nil, act, "")
 }
 
 // RecordGitDenied appends a git_denied external-action audit row for a git op

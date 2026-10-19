@@ -291,6 +291,8 @@ const (
 	ctxKeyOrgID
 	ctxKeyAuthIdentityID
 	ctxKeyTokenAuth
+	ctxKeySignInProvider
+	ctxKeyBarredOrg
 )
 
 // WithClaims returns ctx carrying the verified JWT claims. The session
@@ -373,14 +375,61 @@ func TokenAuthFrom(ctx context.Context) *TokenAuth {
 	return v
 }
 
+// WithSignInProvider returns ctx carrying the SSO provider the request's
+// credential was signed in through — a session's, or the one an API token
+// inherited at mint. "" is a GitHub sign-in.
+func WithSignInProvider(ctx context.Context, providerID string) context.Context {
+	return context.WithValue(ctx, ctxKeySignInProvider, providerID)
+}
+
+// SignInProviderFrom returns the SSO provider this request's credential was
+// signed in through, or "" for a GitHub sign-in and for a request no
+// credential authenticated. It is what an org that requires SSO compares
+// against its own connection.
+func SignInProviderFrom(ctx context.Context) string {
+	v, _ := ctx.Value(ctxKeySignInProvider).(string)
+	return v
+}
+
+// WithBarredOrg returns ctx naming the org the credential points at but may
+// not act in, because that org requires its own single sign-on and the
+// credential was not signed in through it. The session middleware sets this
+// INSTEAD of WithOrgID, so a handler reading OrgIDFrom sees no org at all.
+func WithBarredOrg(ctx context.Context, orgID string) context.Context {
+	return context.WithValue(ctx, ctxKeyBarredOrg, orgID)
+}
+
+// BarredOrgFrom returns the org WithBarredOrg recorded, or "". It exists only
+// so the no-org answers can say why there is no org; nothing may act in it.
+func BarredOrgFrom(ctx context.Context) string {
+	v, _ := ctx.Value(ctxKeyBarredOrg).(string)
+	return v
+}
+
+// WriteSSORequired writes the one answer a request gets for an org that
+// requires single sign-on its credential was not signed in through: 403, not
+// 404, because the caller is a member and can see the org in /api/me, and not
+// 401, because the credential did authenticate.
+func WriteSSORequired(w http.ResponseWriter) {
+	WriteErrors(w, http.StatusForbidden, ErrorItem{
+		Reason:  ReasonSSORequired,
+		Message: "This organization requires signing in through its single sign-on.",
+	})
+}
+
 // RequireOrg returns the active org ID from request context, or writes a 409
-// NO_ACTIVE_ORG and returns ok=false. In local mode the shim guarantees a
-// sentinel org so the empty branch never fires.
+// NO_ACTIVE_ORG and returns ok=false — a 403 SSO_REQUIRED instead when the
+// credential points at an org it is barred from. In local mode the shim
+// guarantees a sentinel org so the empty branch never fires.
 // Usage: orgID, ok := httpx.RequireOrg(w, r); if !ok { return }
 func RequireOrg(w http.ResponseWriter, r *http.Request) (string, bool) {
 	orgID := OrgIDFrom(r.Context())
 	if orgID != "" {
 		return orgID, true
+	}
+	if BarredOrgFrom(r.Context()) != "" {
+		WriteSSORequired(w)
+		return "", false
 	}
 	WriteErrors(w, http.StatusConflict, ErrorItem{
 		Reason:  ReasonNoActiveOrg,

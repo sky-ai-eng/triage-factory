@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -335,6 +336,12 @@ func (h *ssoDomainsHandler) handleDomainDelete(w http.ResponseWriter, r *http.Re
 	var existed bool
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		sso := ssostore.FromTx(tx)
+		// Locked before the last-verified-domain check reads the enforced flag,
+		// so a concurrent Require SSO toggle cannot pass its own domain check
+		// against this domain while this one passes against the flag unset.
+		if e := sso.Connections.LockForOrg(r.Context(), orgID); e != nil {
+			return e
+		}
 		claim, e := sso.Domains.GetByID(r.Context(), orgID, id)
 		if e != nil {
 			return e
@@ -343,6 +350,19 @@ func (h *ssoDomainsHandler) handleDomainDelete(w http.ResponseWriter, r *http.Re
 			return nil
 		}
 		existed = true
+		// Turning Require SSO on needs a verified domain, and the sign-in rule
+		// uses it to recognise and refuse a GitHub sign-in on the org's
+		// addresses. Removing the last one while required would leave that
+		// rule matching nothing, so it is refused.
+		if claim.VerifiedAt != nil {
+			last, e := lastVerifiedWhileEnforced(r.Context(), sso, orgID, id)
+			if e != nil {
+				return e
+			}
+			if last {
+				return errTurnOffEnforcementFirst
+			}
+		}
 		if e := sso.Domains.Delete(r.Context(), orgID, id); e != nil {
 			return e
 		}
@@ -355,6 +375,10 @@ func (h *ssoDomainsHandler) handleDomainDelete(w http.ResponseWriter, r *http.Re
 			DetailJSON:  domain.AccessDetailSSODomain(claim.Domain),
 		})
 	}); err != nil {
+		if errors.Is(err, errTurnOffEnforcementFirst) {
+			turnOffEnforcementFirst(w)
+			return
+		}
 		httpx.InternalError(w, "sso", err)
 		return
 	}
@@ -363,6 +387,37 @@ func (h *ssoDomainsHandler) handleDomainDelete(w http.ResponseWriter, r *http.Re
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// lastVerifiedWhileEnforced reports whether domainID is the org's only
+// verified domain while one of its connections requires SSO. The caller holds
+// the org's connection lock, which is what keeps the answer true until its
+// delete commits.
+func lastVerifiedWhileEnforced(ctx context.Context, sso *ssostore.Bundle, orgID, domainID string) (bool, error) {
+	conns, err := sso.Connections.ListByOrg(ctx, orgID)
+	if err != nil {
+		return false, err
+	}
+	enforced := false
+	for _, c := range conns {
+		if c.Enforced {
+			enforced = true
+			break
+		}
+	}
+	if !enforced {
+		return false, nil
+	}
+	doms, err := sso.Domains.ListByOrg(ctx, orgID)
+	if err != nil {
+		return false, err
+	}
+	for _, d := range doms {
+		if d.ID != domainID && d.VerifiedAt != nil {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // findOrgDomain returns the org's claim on domainName (already normalized),

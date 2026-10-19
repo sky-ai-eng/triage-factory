@@ -48,7 +48,11 @@ var attachLog = logging.Component("memoryentities")
 // (domain.ArtifactEntityIdentity), and attaches nothing when the key names no
 // id — it was recorded before Jira artifacts were keyed on one — or names
 // another site than the org's current one. Its target can be older than the
-// entity's key, so the entity is never renamed from it.
+// entity's key, so the entity is never renamed from it. A Linear artifact
+// attaches only an entity that already exists: the artifact does not record
+// the issue's Linear team, and a Linear entity is created with one. The
+// write's own touch creates it from the response the verb read, so a Linear
+// artifact finds no entity here only when that touch failed, which is logged.
 //
 // A nil store is an absent capability, not an error, and the two cases are not
 // the same: a nil TaskMemory is nowhere to write, so nothing is attached at all
@@ -92,7 +96,7 @@ func Attach(ctx context.Context, stores db.Stores, orgID, conversationID, primar
 			continue
 		}
 		ref.Scope = scope
-		ent, err := entityscope.Resolve(ctx, entities, orgID, ref, kind, a.URL, false)
+		ent, err := entityscope.Resolve(ctx, entities, orgID, ref, "", kind, a.URL, false)
 		if err != nil || ent == nil {
 			attachLog.Warn("resolve produced entity for conversation memory failed",
 				"conversation", conversationID, "provider", a.Provider, "target", a.Target, "error", err)

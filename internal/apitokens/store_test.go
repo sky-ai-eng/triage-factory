@@ -112,7 +112,7 @@ func TestMintLookupRoundtrip(t *testing.T) {
 	store, h, userID, orgID := newStoreForTest(t)
 	ctx := context.Background()
 
-	tok, plaintext, err := store.MintSystem(ctx, userID, orgID, "ci", nil, nil, userID)
+	tok, plaintext, err := store.MintSystem(ctx, userID, orgID, "ci", nil, nil, "", userID)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestMintReturnsTheStoredRow(t *testing.T) {
 
 	exp := time.Now().Add(72 * time.Hour).UTC().Truncate(time.Microsecond)
 	tok, _, err := store.MintSystem(ctx, userID, orgID, "deploy", &exp,
-		[]string{"10.0.0.0/8", "192.168.1.5"}, userID)
+		[]string{"10.0.0.0/8", "192.168.1.5"}, "", userID)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestRenameReturnsTheStoredRow(t *testing.T) {
 	store, _, userID, orgID := newStoreForTest(t)
 	ctx := context.Background()
 
-	tok, _, err := store.MintSystem(ctx, userID, orgID, "before", nil, nil, userID)
+	tok, _, err := store.MintSystem(ctx, userID, orgID, "before", nil, nil, "", userID)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestMintRejectsUnusableCIDRs(t *testing.T) {
 	ctx := context.Background()
 
 	for _, bad := range []string{"not-an-ip", "10.0.0.1/8", "10.0.0.0/33", ""} {
-		if _, _, err := store.MintSystem(ctx, userID, orgID, "n", nil, []string{bad}, userID); !errors.Is(err, ErrInvalidCIDR) {
+		if _, _, err := store.MintSystem(ctx, userID, orgID, "n", nil, []string{bad}, "", userID); !errors.Is(err, ErrInvalidCIDR) {
 			t.Errorf("Mint with allowed_cidrs %q: got %v, want ErrInvalidCIDR", bad, err)
 		}
 	}
@@ -271,7 +271,7 @@ func TestMintRejectsUnusableCIDRs(t *testing.T) {
 	for i := range tooMany {
 		tooMany[i] = "10.0.0.0/8"
 	}
-	if _, _, err := store.MintSystem(ctx, userID, orgID, "n", nil, tooMany, userID); !errors.Is(err, ErrTooManyCIDRs) {
+	if _, _, err := store.MintSystem(ctx, userID, orgID, "n", nil, tooMany, "", userID); !errors.Is(err, ErrTooManyCIDRs) {
 		t.Errorf("Mint with %d CIDRs: got %v, want ErrTooManyCIDRs", len(tooMany), err)
 	}
 	var n int
@@ -287,7 +287,7 @@ func TestHashUniqueness(t *testing.T) {
 	store, h, userID, orgID := newStoreForTest(t)
 	ctx := context.Background()
 
-	_, plaintext, err := store.MintSystem(ctx, userID, orgID, "one", nil, nil, userID)
+	_, plaintext, err := store.MintSystem(ctx, userID, orgID, "one", nil, nil, "", userID)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestExpiry(t *testing.T) {
 	t.Run("stored expires_at is honored", func(t *testing.T) {
 		store, h, userID, orgID := newStoreForTest(t)
 		exp := time.Now().Add(time.Hour)
-		tok, plaintext, err := store.MintSystem(ctx, userID, orgID, "short", &exp, nil, userID)
+		tok, plaintext, err := store.MintSystem(ctx, userID, orgID, "short", &exp, nil, "", userID)
 		if err != nil {
 			t.Fatalf("Mint: %v", err)
 		}
@@ -334,7 +334,7 @@ func TestExpiry(t *testing.T) {
 	t.Run("cap alone expires a token with no stored expiry", func(t *testing.T) {
 		store, h, userID, orgID := newStoreForTest(t)
 		setCap(t, h, orgID, days(30))
-		tok, plaintext, err := store.MintSystem(ctx, userID, orgID, "capped", nil, nil, userID)
+		tok, plaintext, err := store.MintSystem(ctx, userID, orgID, "capped", nil, nil, "", userID)
 		if err != nil {
 			t.Fatalf("Mint: %v", err)
 		}
@@ -352,7 +352,7 @@ func TestExpiry(t *testing.T) {
 
 	t.Run("tightening the cap expires live tokens immediately", func(t *testing.T) {
 		store, h, userID, orgID := newStoreForTest(t)
-		tok, plaintext, err := store.MintSystem(ctx, userID, orgID, "live", nil, nil, userID)
+		tok, plaintext, err := store.MintSystem(ctx, userID, orgID, "live", nil, nil, "", userID)
 		if err != nil {
 			t.Fatalf("Mint: %v", err)
 		}
@@ -376,7 +376,7 @@ func TestExpiry(t *testing.T) {
 		store, h, userID, orgID := newStoreForTest(t)
 		setCap(t, h, orgID, days(365))
 		exp := time.Now().Add(24 * time.Hour)
-		tok, plaintext, err := store.MintSystem(ctx, userID, orgID, "short", &exp, nil, userID)
+		tok, plaintext, err := store.MintSystem(ctx, userID, orgID, "short", &exp, nil, "", userID)
 		if err != nil {
 			t.Fatalf("Mint: %v", err)
 		}
@@ -394,7 +394,7 @@ func TestRevoke(t *testing.T) {
 	store, _, userID, orgID := newStoreForTest(t)
 	ctx := context.Background()
 
-	tok, plaintext, err := store.MintSystem(ctx, userID, orgID, "doomed", nil, nil, userID)
+	tok, plaintext, err := store.MintSystem(ctx, userID, orgID, "doomed", nil, nil, "", userID)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -425,7 +425,7 @@ func TestGetForUserSystem(t *testing.T) {
 	store, h, userID, orgID := newStoreForTest(t)
 	ctx := context.Background()
 
-	tok, _, err := store.MintSystem(ctx, userID, orgID, "readable", nil, []string{"10.0.0.0/8"}, userID)
+	tok, _, err := store.MintSystem(ctx, userID, orgID, "readable", nil, []string{"10.0.0.0/8"}, "", userID)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -467,7 +467,7 @@ func TestRevokeRefusesAnotherUsersToken(t *testing.T) {
 	ctx := context.Background()
 
 	other := pgtest.SeedUser(t, h, "intruder")
-	tok, plaintext, err := store.MintSystem(ctx, userID, orgID, "mine", nil, nil, userID)
+	tok, plaintext, err := store.MintSystem(ctx, userID, orgID, "mine", nil, nil, "", userID)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -486,15 +486,15 @@ func TestRevokeForUserInOrgLeavesOtherOrgsAlone(t *testing.T) {
 	otherOrg := pgtest.SeedOrg(t, h, "second-org", userID)
 	admin := pgtest.SeedUser(t, h, "org-admin")
 
-	_, hereA, err := store.MintSystem(ctx, userID, orgID, "here-a", nil, nil, userID)
+	_, hereA, err := store.MintSystem(ctx, userID, orgID, "here-a", nil, nil, "", userID)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
-	_, hereB, err := store.MintSystem(ctx, userID, orgID, "here-b", nil, nil, userID)
+	_, hereB, err := store.MintSystem(ctx, userID, orgID, "here-b", nil, nil, "", userID)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
-	_, elsewhere, err := store.MintSystem(ctx, userID, otherOrg, "elsewhere", nil, nil, userID)
+	_, elsewhere, err := store.MintSystem(ctx, userID, otherOrg, "elsewhere", nil, nil, "", userID)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -527,14 +527,14 @@ func TestList(t *testing.T) {
 	otherOrg := pgtest.SeedOrg(t, h, "list-second", userID)
 	stranger := pgtest.SeedUser(t, h, "stranger")
 	for _, name := range []string{"a", "b", "c"} {
-		if _, _, err := store.MintSystem(ctx, userID, orgID, name, nil, nil, userID); err != nil {
+		if _, _, err := store.MintSystem(ctx, userID, orgID, name, nil, nil, "", userID); err != nil {
 			t.Fatalf("Mint %s: %v", name, err)
 		}
 	}
-	if _, _, err := store.MintSystem(ctx, userID, otherOrg, "other", nil, nil, userID); err != nil {
+	if _, _, err := store.MintSystem(ctx, userID, otherOrg, "other", nil, nil, "", userID); err != nil {
 		t.Fatalf("Mint other: %v", err)
 	}
-	if _, _, err := store.MintSystem(ctx, stranger, orgID, "theirs", nil, nil, stranger); err != nil {
+	if _, _, err := store.MintSystem(ctx, stranger, orgID, "theirs", nil, nil, "", stranger); err != nil {
 		t.Fatalf("Mint stranger: %v", err)
 	}
 
@@ -582,16 +582,16 @@ func TestTokenLimit(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < MaxPerUserOrg; i++ {
-		if _, _, err := store.MintSystem(ctx, userID, orgID, "bulk", nil, nil, userID); err != nil {
+		if _, _, err := store.MintSystem(ctx, userID, orgID, "bulk", nil, nil, "", userID); err != nil {
 			t.Fatalf("Mint %d: %v", i, err)
 		}
 	}
-	if _, _, err := store.MintSystem(ctx, userID, orgID, "one too many", nil, nil, userID); !errors.Is(err, ErrTokenLimit) {
+	if _, _, err := store.MintSystem(ctx, userID, orgID, "one too many", nil, nil, "", userID); !errors.Is(err, ErrTokenLimit) {
 		t.Errorf("mint past the cap: got %v, want ErrTokenLimit", err)
 	}
 	// The cap is per (user, org): the same user in another org is unaffected.
 	otherOrg := pgtest.SeedOrg(t, h, "limit-second", userID)
-	if _, _, err := store.MintSystem(ctx, userID, otherOrg, "elsewhere", nil, nil, userID); err != nil {
+	if _, _, err := store.MintSystem(ctx, userID, otherOrg, "elsewhere", nil, nil, "", userID); err != nil {
 		t.Errorf("mint in a second org at the first org's cap: %v", err)
 	}
 	// Revoking makes room again.
@@ -602,7 +602,7 @@ func TestTokenLimit(t *testing.T) {
 	if err := store.RevokeSystem(ctx, userID, got[0].ID, userID); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	if _, _, err := store.MintSystem(ctx, userID, orgID, "replacement", nil, nil, userID); err != nil {
+	if _, _, err := store.MintSystem(ctx, userID, orgID, "replacement", nil, nil, "", userID); err != nil {
 		t.Errorf("mint after freeing a slot: %v", err)
 	}
 }
@@ -612,7 +612,7 @@ func TestConcurrentMintsDoNotOvershootTheLimit(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < MaxPerUserOrg-1; i++ {
-		if _, _, err := store.MintSystem(ctx, userID, orgID, "bulk", nil, nil, userID); err != nil {
+		if _, _, err := store.MintSystem(ctx, userID, orgID, "bulk", nil, nil, "", userID); err != nil {
 			t.Fatalf("Mint %d: %v", i, err)
 		}
 	}
@@ -651,7 +651,7 @@ func TestConcurrentMintsDoNotOvershootTheLimit(t *testing.T) {
 			// without a round trip of its own.
 			conn.Close()
 
-			_, _, err = store.MintSystem(ctx, userID, orgID, "racer", nil, nil, userID)
+			_, _, err = store.MintSystem(ctx, userID, orgID, "racer", nil, nil, "", userID)
 			mu.Lock()
 			defer mu.Unlock()
 			switch {
@@ -686,7 +686,7 @@ func TestAuditRows(t *testing.T) {
 	setCap(t, h, orgID, days(90))
 
 	exp := time.Now().Add(48 * time.Hour)
-	tok, _, err := store.MintSystem(ctx, userID, orgID, "audited", &exp, []string{"10.0.0.0/8"}, userID)
+	tok, _, err := store.MintSystem(ctx, userID, orgID, "audited", &exp, []string{"10.0.0.0/8"}, "", userID)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -738,7 +738,7 @@ func TestAuditRowsForMembershipRemoval(t *testing.T) {
 	admin := pgtest.SeedUser(t, h, "remover")
 
 	for _, name := range []string{"one", "two"} {
-		if _, _, err := store.MintSystem(ctx, userID, orgID, name, nil, nil, userID); err != nil {
+		if _, _, err := store.MintSystem(ctx, userID, orgID, name, nil, nil, "", userID); err != nil {
 			t.Fatalf("Mint %s: %v", name, err)
 		}
 	}
@@ -773,7 +773,7 @@ func TestAuditFailureRollsBackTheWrite(t *testing.T) {
 
 	// An actor that isn't a UUID fails the audit INSERT's cast. The token
 	// write is in the same transaction, so it must not survive.
-	if _, _, err := store.MintSystem(ctx, userID, orgID, "orphan", nil, nil, "not-a-uuid"); err == nil {
+	if _, _, err := store.MintSystem(ctx, userID, orgID, "orphan", nil, nil, "", "not-a-uuid"); err == nil {
 		t.Fatal("Mint with an unwritable audit actor succeeded")
 	}
 	var tokens, audits int
@@ -789,7 +789,7 @@ func TestAuditFailureRollsBackTheWrite(t *testing.T) {
 
 	// Same for the revoke path: the row stays live rather than dying
 	// unrecorded.
-	tok, plaintext, err := store.MintSystem(ctx, userID, orgID, "keeper", nil, nil, userID)
+	tok, plaintext, err := store.MintSystem(ctx, userID, orgID, "keeper", nil, nil, "", userID)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -806,19 +806,19 @@ func TestReaper(t *testing.T) {
 	ctx := context.Background()
 	const retention = 30 * 24 * time.Hour
 
-	longRevoked, _, err := store.MintSystem(ctx, userID, orgID, "long-revoked", nil, nil, userID)
+	longRevoked, _, err := store.MintSystem(ctx, userID, orgID, "long-revoked", nil, nil, "", userID)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
-	justRevoked, _, err := store.MintSystem(ctx, userID, orgID, "just-revoked", nil, nil, userID)
+	justRevoked, _, err := store.MintSystem(ctx, userID, orgID, "just-revoked", nil, nil, "", userID)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
-	longExpired, _, err := store.MintSystem(ctx, userID, orgID, "long-expired", nil, nil, userID)
+	longExpired, _, err := store.MintSystem(ctx, userID, orgID, "long-expired", nil, nil, "", userID)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
-	active, _, err := store.MintSystem(ctx, userID, orgID, "active", nil, nil, userID)
+	active, _, err := store.MintSystem(ctx, userID, orgID, "active", nil, nil, "", userID)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -877,7 +877,7 @@ func TestLookupCarriesIdentityEmailAndCIDRs(t *testing.T) {
 	pgtest.SeedIdentity(t, h, userID, "shadow@test", false)
 	pgtest.SeedIdentity(t, h, userID, "real@test", true)
 
-	_, plaintext, err := store.MintSystem(ctx, userID, orgID, "id", nil, []string{"2001:db8::/32"}, userID)
+	_, plaintext, err := store.MintSystem(ctx, userID, orgID, "id", nil, []string{"2001:db8::/32"}, "", userID)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -902,7 +902,7 @@ func TestLookupOmitsUnverifiedEmail(t *testing.T) {
 	ctx := context.Background()
 	pgtest.SeedIdentity(t, h, userID, "asserted@corp.example", false)
 
-	_, plaintext, err := store.MintSystem(ctx, userID, orgID, "id", nil, nil, userID)
+	_, plaintext, err := store.MintSystem(ctx, userID, orgID, "id", nil, nil, "", userID)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -919,7 +919,7 @@ func TestTouchLastUsed(t *testing.T) {
 	store, _, userID, orgID := newStoreForTest(t)
 	ctx := context.Background()
 
-	tok, _, err := store.MintSystem(ctx, userID, orgID, "touched", nil, nil, userID)
+	tok, _, err := store.MintSystem(ctx, userID, orgID, "touched", nil, nil, "", userID)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -951,14 +951,14 @@ func TestIsLiveSystem(t *testing.T) {
 
 	live := func(id string) bool {
 		t.Helper()
-		got, err := s.IsLiveSystem(ctx, id)
+		got, _, err := s.IsLiveSystem(ctx, id)
 		if err != nil {
 			t.Fatalf("IsLiveSystem: %v", err)
 		}
 		return got
 	}
 
-	fresh, _, err := s.MintSystem(ctx, userID, orgID, "fresh", nil, nil, userID)
+	fresh, _, err := s.MintSystem(ctx, userID, orgID, "fresh", nil, nil, "", userID)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -966,7 +966,7 @@ func TestIsLiveSystem(t *testing.T) {
 		t.Error("a freshly minted token reads as dead")
 	}
 
-	revoked, _, err := s.MintSystem(ctx, userID, orgID, "revoked", nil, nil, userID)
+	revoked, _, err := s.MintSystem(ctx, userID, orgID, "revoked", nil, nil, "", userID)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -977,7 +977,7 @@ func TestIsLiveSystem(t *testing.T) {
 		t.Error("a revoked token reads as live")
 	}
 
-	lapsed, _, err := s.MintSystem(ctx, userID, orgID, "lapsed", nil, nil, userID)
+	lapsed, _, err := s.MintSystem(ctx, userID, orgID, "lapsed", nil, nil, "", userID)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -988,7 +988,7 @@ func TestIsLiveSystem(t *testing.T) {
 
 	// The org's cap applies here exactly as it does at use: tighten it and a
 	// token that was live a moment ago is not.
-	capped, _, err := s.MintSystem(ctx, userID, orgID, "capped", nil, nil, userID)
+	capped, _, err := s.MintSystem(ctx, userID, orgID, "capped", nil, nil, "", userID)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -1006,7 +1006,37 @@ func TestIsLiveSystem(t *testing.T) {
 	if live("00000000-0000-0000-0000-000000000000") {
 		t.Error("an unknown id reads as live")
 	}
-	if got, err := s.IsLiveSystem(ctx, "not-a-uuid"); err != nil || got {
+	if got, _, err := s.IsLiveSystem(ctx, "not-a-uuid"); err != nil || got {
 		t.Errorf("IsLiveSystem(non-uuid) = (%v, %v), want (false, nil)", got, err)
+	}
+}
+
+// TestSignInProviderRoundTrips pins that the SSO provider a token was minted
+// under reaches both reads an org's SSO requirement is judged from: the
+// request path's lookup by secret and the websocket sweep's probe by id. A
+// GitHub-minted token reads back "" on both.
+func TestSignInProviderRoundTrips(t *testing.T) {
+	s, _, userID, orgID := newStoreForTest(t)
+	ctx := context.Background()
+
+	for _, provider := range []string{"", "provider-123"} {
+		tok, plaintext, err := s.MintSystem(ctx, userID, orgID, "signed-in", nil, nil, provider, userID)
+		if err != nil {
+			t.Fatalf("mint: %v", err)
+		}
+		id, err := s.LookupSystem(ctx, plaintext)
+		if err != nil || id == nil {
+			t.Fatalf("lookup: (%v, %v)", id, err)
+		}
+		if id.SSOProviderID != provider {
+			t.Errorf("LookupSystem provider = %q, want %q", id.SSOProviderID, provider)
+		}
+		live, got, err := s.IsLiveSystem(ctx, tok.ID)
+		if err != nil || !live {
+			t.Fatalf("IsLiveSystem: (%v, %v)", live, err)
+		}
+		if got != provider {
+			t.Errorf("IsLiveSystem provider = %q, want %q", got, provider)
+		}
 	}
 }

@@ -939,7 +939,7 @@ func TestAuthFlow_ConcurrentRefresh_SerializesAndDedupes(t *testing.T) {
 	// JWT exp. Bypasses the callback handler entirely so we control
 	// the timing precisely.
 	encStore := r.srv.authDeps.sessions
-	sess, err := encStore.CreateSystem(context.Background(), userID, jwtBefore, "refresh-token-original",
+	sess, err := encStore.CreateSystem(context.Background(), userID, userID, "", jwtBefore, "refresh-token-original",
 		time.Now().Add(30*time.Second).UTC(),  // JWT expires in 30s → needsRefresh = true
 		time.Now().Add(30*24*time.Hour).UTC(), // session valid for 30d
 		"test-ua", "127.0.0.1", uuid.NullUUID{})
@@ -1021,7 +1021,7 @@ func TestAuthFlow_RefreshIgnoresCallerCtxCancellation(t *testing.T) {
 
 	jwtBefore := r.signKey.mintJWT(t, validClaimsFor(userID))
 	encStore := r.srv.authDeps.sessions
-	sess, err := encStore.CreateSystem(context.Background(), userID, jwtBefore, "refresh-original",
+	sess, err := encStore.CreateSystem(context.Background(), userID, userID, "", jwtBefore, "refresh-original",
 		time.Now().Add(30*time.Second).UTC(),
 		time.Now().Add(30*24*time.Hour).UTC(),
 		"test-ua", "127.0.0.1", uuid.NullUUID{})
@@ -1107,12 +1107,12 @@ func TestAuthFlow_LogoutAll_RevokesEverySessionForUser(t *testing.T) {
 	jwt1 := r.signKey.mintJWT(t, validClaimsFor(userID))
 	jwt2 := r.signKey.mintJWT(t, validClaimsFor(userID))
 	encStore := r.srv.authDeps.sessions
-	s1, err := encStore.CreateSystem(t.Context(), userID, jwt1, "refresh-1",
+	s1, err := encStore.CreateSystem(t.Context(), userID, userID, "", jwt1, "refresh-1",
 		time.Now().Add(1*time.Hour), time.Now().Add(30*24*time.Hour), "device-1", "1.1.1.1", uuid.NullUUID{})
 	if err != nil {
 		t.Fatalf("Create s1: %v", err)
 	}
-	s2, err := encStore.CreateSystem(t.Context(), userID, jwt2, "refresh-2",
+	s2, err := encStore.CreateSystem(t.Context(), userID, userID, "", jwt2, "refresh-2",
 		time.Now().Add(1*time.Hour), time.Now().Add(30*24*time.Hour), "device-2", "2.2.2.2", uuid.NullUUID{})
 	if err != nil {
 		t.Fatalf("Create s2: %v", err)

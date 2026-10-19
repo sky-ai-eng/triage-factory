@@ -232,16 +232,86 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 
 		ctx := httpx.WithClaims(r.Context(), claims)
 		ctx = httpx.WithAuthIdentityID(ctx, authIdentityID)
+		ctx = httpx.WithSignInProvider(ctx, sess.SSOProviderID)
 		ctx = context.WithValue(ctx, ctxKeySession, sess)
 		// Surface the session's active org so OrgIDFrom() works
 		// uniformly in multi mode without per-handler plumbing. Sessions
 		// whose user has zero memberships carry NULL here — we leave
 		// the active org unset and handlers that require an org return 409.
+		var activeOrg string
 		if sess.ActiveOrgID.Valid {
-			ctx = httpx.WithOrgID(ctx, sess.ActiveOrgID.UUID.String())
+			activeOrg = sess.ActiveOrgID.UUID.String()
 		}
-		next.ServeHTTP(w, r.WithContext(ctx))
+		s.serveOrgScoped(w, r.WithContext(ctx), next, activeOrg)
 	})
+}
+
+// serveOrgScoped finishes withSession for either credential: it seeds the org
+// the credential points at — a session's cursor or a token's sealed org — and
+// applies "Require SSO" to it and to the org the path names, before next runs.
+//
+// A credential barred from its own org gets no org at all: the org lands under
+// httpx.WithBarredOrg instead of httpx.WithOrgID, so every cursor-scoped route
+// answers through RequireOrg (403 SSO_REQUIRED) and every direct OrgIDFrom
+// reader gives its existing no-org answer. Viewer-relative routes — /api/me,
+// switching the active org, logging out — keep working, which is how a barred
+// caller gets back out.
+//
+// A path org is judged here too, because ServeMux has already matched the
+// route and its {org_id} is the authorization subject of every route that has
+// one. A barred path org answers 403 SSO_REQUIRED to a member and is left to
+// the route's own gate otherwise, whose 404 then tells a non-member nothing
+// about whether the org requires SSO. A token naming an org other than its own
+// is likewise left to the scope gate's 404: to that credential the org does not
+// exist.
+//
+// Every decision is read per request, and a failed read is a 500 rather than
+// a pass.
+func (s *Server) serveOrgScoped(w http.ResponseWriter, r *http.Request, next http.Handler, credOrg string) {
+	ctx := r.Context()
+	var credBarred bool
+	if credOrg != "" {
+		gate, err := s.requestSSOGate(ctx, credOrg)
+		if err != nil {
+			httpx.InternalError(w, "auth", fmt.Errorf("sso gate for org %s: %w", credOrg, err))
+			return
+		}
+		credBarred = gate.Barred
+		if credBarred {
+			ctx = httpx.WithBarredOrg(ctx, credOrg)
+		} else {
+			ctx = httpx.WithOrgID(ctx, credOrg)
+		}
+	}
+
+	if pathOrg, err := uuid.Parse(r.PathValue("org_id")); err == nil {
+		barred := false
+		switch tok := httpx.TokenAuthFrom(ctx); {
+		case pathOrg.String() == credOrg:
+			barred = credBarred
+		case tok != nil:
+			// Another org than the token's own: the scope gate answers 404.
+		default:
+			gate, err := s.requestSSOGate(ctx, pathOrg.String())
+			if err != nil {
+				httpx.InternalError(w, "auth", fmt.Errorf("sso gate for org %s: %w", pathOrg, err))
+				return
+			}
+			barred = gate.Barred
+		}
+		if barred {
+			member, err := s.az.UserHasOrgAccess(ctx, httpx.ClaimsFrom(ctx).Subject, pathOrg.String())
+			if err != nil {
+				httpx.InternalError(w, "auth", fmt.Errorf("member check for org %s: %w", pathOrg, err))
+				return
+			}
+			if member {
+				httpx.WriteSSORequired(w)
+				return
+			}
+		}
+	}
+	next.ServeHTTP(w, r.WithContext(ctx))
 }
 
 // bearerScheme is the one Authorization scheme this server accepts, matched
@@ -339,15 +409,20 @@ func refuseTokenAuth(w http.ResponseWriter, r *http.Request, requirement string)
 // are deliberately indistinguishable: telling a caller which one applied tells
 // them how close they got.
 //
-// What this does NOT do, deliberately: re-check the principal's org membership,
-// their seat, or whether the org has since turned on SSO. That is not an
-// omission, it is parity — the cookie path checks the same things exactly once,
-// at mint, and leaves per-request enforcement to the RLS membership predicates
-// every read runs under, the authz probes each gate re-runs, and revocation at
-// the moment access is taken away (org removal revokes the org's tokens beside
-// its sessions). A per-request membership read here would buy a few seconds of
-// latency on a removal the revoke already handles, at the cost of a database
-// round-trip on every headless call.
+// What this does NOT do, deliberately: re-check the principal's org membership
+// or their seat. That is not an omission, it is parity — the cookie path checks
+// the same things exactly once, at mint, and leaves per-request enforcement to
+// the RLS membership predicates every read runs under, the authz probes each
+// gate re-runs, and revocation at the moment access is taken away (org removal
+// revokes the org's tokens beside its sessions). A per-request membership read
+// here would buy a few seconds of latency on a removal the revoke already
+// handles, at the cost of a database round-trip on every headless call.
+//
+// What it does re-check on every request, also in parity with the cookie path,
+// is whether the token's org requires SSO: the token carries the SSO provider
+// the credential that minted it was signed in through, and serveOrgScoped bars
+// the org when that is not the org's own connection. Nothing else would ever
+// take the org away from a token minted before the requirement was turned on.
 func (s *Server) serveTokenAuth(w http.ResponseWriter, r *http.Request, next http.Handler, header string) {
 	if s.authDeps.apiTokens == nil {
 		// A wiring gap, not a caller fault: refuse rather than fall through to
@@ -433,15 +508,15 @@ func (s *Server) serveTokenAuth(w http.ResponseWriter, r *http.Request, next htt
 		Subject: identity.UserID,
 		Email:   identity.Email,
 	})
-	// The token's org is the request's tenant, injected exactly where the
-	// session path injects the session cursor's active org. That is what makes
-	// the ~130 cursor-scoped routes work Bearer-only with no re-plumbing.
-	ctx = httpx.WithOrgID(ctx, identity.OrgID)
+	ctx = httpx.WithSignInProvider(ctx, identity.SSOProviderID)
 	ctx = httpx.WithTokenAuth(ctx, &httpx.TokenAuth{
 		TokenID: identity.TokenID,
 		OrgID:   identity.OrgID,
 	})
-	next.ServeHTTP(w, r.WithContext(ctx))
+	// The token's org is the request's tenant, injected exactly where the
+	// session path injects the session cursor's active org. That is what makes
+	// the ~130 cursor-scoped routes work Bearer-only with no re-plumbing.
+	s.serveOrgScoped(w, r.WithContext(ctx), next, identity.OrgID)
 }
 
 // addrInCIDRs reports whether ip falls inside a token's allowlist. An empty

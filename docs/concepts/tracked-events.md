@@ -758,7 +758,11 @@ until its next refresh.
 ### Linear Issue Snapshot
 
 The entity itself carries `source_id` (the identifier), `external_id` (the
-UUID, which it is matched on) and `scope` (the org's Linear workspace id).
+UUID, which it is matched on), `scope` (the org's Linear workspace id) and
+`linear_team_id` (the UUID of the Linear team the issue sits in). The team is
+set when the entity is created, from the response that found the issue, and
+every snapshot write moves it to the snapshot's `team_id`, so it follows a
+move to another team.
 
 - `id` (UUID), `identifier` (the entity's `source_id`), `title`, `url`
 - `body_hash` — fingerprint of the raw markdown description; the description itself is mirrored onto the entity, capped at 2,000 codepoints
@@ -775,11 +779,14 @@ UUID, which it is matched on) and `scope` (the org's Linear workspace id).
 - `created_at`, `updated_at`, `archived`, `trashed`
 
 Turning Linear off for an org clears these snapshots, as it does for any
-source. The factory belt places a Linear issue by its snapshot's `team_id`, so
-while Linear is off its issues are not on the belt. They return on the first
-cycle after Linear is turned back on: an entity with no snapshot is read by
-UUID in the same batches as the rest and seeded without events. Jira issues
-stay on the belt through a pause, because a Jira key's prefix is its project.
+source, and leaves the entity's `linear_team_id`. Everything that needs an
+issue's team reads that column: the factory belt and team activity, the claim
+and requeue rules, the terminal-state checker, and the tracker, which takes an
+unreachable issue's `linear_team_id` from it and compares it with a fresh read
+to tell a move. So while Linear is off its issues stay on their teams' belts,
+and one that goes unreachable still reaches its team's handlers. On the first
+cycle after Linear is turned back on, an entity with no snapshot is read by
+UUID in the same batches as the rest and seeded without events.
 
 ## Event lifecycle
 

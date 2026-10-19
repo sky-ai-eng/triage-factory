@@ -42,6 +42,19 @@ export function setUnauthHandler(handler: UnauthHandler | null) {
   unauthHandler = handler
 }
 
+type SSORequiredHandler = () => void
+
+let ssoRequiredHandler: SSORequiredHandler | null = null
+
+/** Registers the handler for a 403 SSO_REQUIRED from any call: the org
+ *  started requiring a sign-in this session did not use, so the client's
+ *  view of its orgs (`/api/me`) is out of date. AuthContext calls this once
+ *  at mount to re-read it, which is what replaces the page with the org's
+ *  sign-in. One consumer at a time, like the 401 handler. */
+export function setSSORequiredHandler(handler: SSORequiredHandler | null) {
+  ssoRequiredHandler = handler
+}
+
 export interface ApiFetchOptions extends RequestInit {
   /** Statuses that resolve rather than throw — the response comes back and the
    *  caller branches on `status` itself. This is how a call says "a 404 here is
@@ -77,7 +90,11 @@ export async function apiFetch(path: string, options: ApiFetchOptions = {}): Pro
 
   if (!resp.ok && !allowed) {
     const body = await resp.text().catch(() => '')
-    throw new HttpError(resp.status, body)
+    const err = new HttpError(resp.status, body)
+    // Same order as the 401 hook: notify before throwing, so the client's
+    // org view refreshes whether or not the caller catches.
+    if (ssoRequiredHandler && isSSORequired(err)) ssoRequiredHandler()
+    throw err
   }
   return resp
 }
@@ -253,6 +270,23 @@ export function apiErrors(e: unknown): ApiErrorItem[] {
   } catch {
     return []
   }
+}
+
+/** The reason a 403 carries when the org requires signing in through its own
+ *  single sign-on and the request's session or token was not. It is a 403, not
+ *  a 401 — the credential authenticated, so the re-auth funnel never sees it —
+ *  and what the user needs is that org's sign-in (`AuthOrg.sso_start_url`),
+ *  not a fresh session of the same kind. Every call that receives one notifies
+ *  the handler registered with `setSSORequiredHandler`. */
+export const SSO_REQUIRED = 'SSO_REQUIRED'
+
+/** isSSORequired reports whether a caught error is the 403 SSO_REQUIRED. */
+export function isSSORequired(e: unknown): boolean {
+  return (
+    e instanceof HttpError &&
+    e.status === 403 &&
+    apiErrors(e).some((item) => item.reason === SSO_REQUIRED)
+  )
 }
 
 /** httpErrorMessage extracts a user-facing string from a caught error: the

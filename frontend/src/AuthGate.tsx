@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { Navigate, useLocation } from 'react-router'
 import { useAuthStatus } from './hooks/useAuthStatus'
 import { useAuth, useOptionalAuth } from './contexts/AuthContext'
@@ -6,6 +7,9 @@ import { useGitHubIdentity } from './hooks/useGitHubIdentity'
 import { useJiraIdentity } from './hooks/useJiraIdentity'
 import { useLinearIdentity } from './hooks/useLinearIdentity'
 import { LOCAL_DEFAULT_ORG_ID } from './lib/githubApp'
+import SSORequiredOrg from './components/SSORequiredOrg'
+import { persistActiveOrg } from './hooks/useSwitchOrg'
+import { isSSORequired } from './lib/apiClient'
 
 /**
  * AuthGate routes between the local-mode first-run/provision flow and the
@@ -22,6 +26,11 @@ import { LOCAL_DEFAULT_ORG_ID } from './lib/githubApp'
  *   authed + 0 orgs   → redirect to /onboarding (create-or-invite entry)
  *   authed + N orgs, URL has unknown org_id → redirect to /orgs/<active> (preserve tail)
  *   authed + N orgs, URL not under /orgs/:id → redirect to /orgs/<active>
+ *   authed + N orgs, the session has no org it can act in (its org requires
+ *     SSO this session did not come through, or is gone) and the resolved
+ *     org is usable → move the session to the resolved org, then continue
+ *   authed + N orgs, resolved org requires SSO this session did not come
+ *     through → the SSO-required interstitial instead of the page
  *   authed + N orgs, URL under /orgs/:id → render children
  *
  * /setup is a live route in BOTH modes — the single create-time wizard the
@@ -49,10 +58,56 @@ function LocalAuthGate({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
+/**
+ * useMoveSessionToOrgOnScreen moves the session's org to the org on screen when
+ * the session has no org it can act in and the org on screen is usable.
+ * /api/me reports no active_org_id when the session's org requires an SSO this
+ * session did not come through, when that membership is gone, or when none was
+ * set. Routes with no org in their path — the teams list, entitlements, the
+ * websocket — act in the session's org, not the URL's, so otherwise every such
+ * read on the page fails while /api/me reports the org on screen usable; for a
+ * barred session org the failure is 403 SSO_REQUIRED, and no re-read of
+ * /api/me changes it. A session with a usable org is left where it is,
+ * whichever org is on screen.
+ *
+ * Returns true until the move has been attempted, so the gate holds the page
+ * and its first reads go to the org it shows. Each move is attempted once; a
+ * refused or failed one renders the page anyway.
+ */
+function useMoveSessionToOrgOnScreen(activeOrgId: string | null): boolean {
+  const { orgs, serverActiveOrgId, revalidate } = useAuth()
+  const target =
+    serverActiveOrgId === null && orgs.some((o) => o.id === activeOrgId && !o.sso_required)
+      ? activeOrgId
+      : null
+  const [attempted, setAttempted] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!target || target === attempted) return
+    void (async () => {
+      try {
+        await persistActiveOrg(target)
+      } catch (err) {
+        // On SSO_REQUIRED the org on screen started requiring SSO too, and the
+        // re-read below shows its sign-in.
+        if (!isSSORequired(err)) {
+          console.warn('[org-switch] moving the session to the org on screen failed:', err)
+        }
+      }
+      // Re-read so active_org_id names the org the session is in now.
+      await revalidate()
+      setAttempted(target)
+    })()
+  }, [target, attempted, revalidate])
+
+  return target !== null && target !== attempted
+}
+
 function MultiAuthGate({ children }: { children: React.ReactNode }) {
   const auth = useAuth()
   const { activeOrgId, urlOrgInvalid } = useOrgContext()
   const location = useLocation()
+  const movingSessionOrg = useMoveSessionToOrgOnScreen(activeOrgId)
 
   if (auth.status === 'loading') {
     return <Loading />
@@ -100,6 +155,17 @@ function MultiAuthGate({ children }: { children: React.ReactNode }) {
   // OrgContext picking — render loading until both line up.
   if (!activeOrgId) {
     return <Loading />
+  }
+  if (movingSessionOrg) {
+    return <Loading />
+  }
+  // The resolved org — the URL's, or for /setup the context's pick — requires
+  // signing in through its own SSO and this session did not. Every org-scoped
+  // read there would answer 403 SSO_REQUIRED, so the org's sign-in is shown
+  // instead of a page whose reads all fail.
+  const activeOrg = auth.orgs.find((o) => o.id === activeOrgId)
+  if (activeOrg?.sso_required) {
+    return <SSORequiredOrg org={activeOrg} />
   }
   return <>{children}</>
 }

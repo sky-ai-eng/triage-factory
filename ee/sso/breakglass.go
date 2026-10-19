@@ -151,6 +151,12 @@ func (h *ssoBreakGlassHandler) handleBreakGlassRemove(w http.ResponseWriter, r *
 
 	var lastWhileEnforced bool
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		// RemoveGuarded reads the enforced flag and the list in one statement,
+		// but a Require SSO toggle in flight has not committed its flag yet, and
+		// it decides against the list as it was. The lock orders the two.
+		if e := ssostore.FromTx(tx).Connections.LockForOrg(r.Context(), orgID); e != nil {
+			return e
+		}
 		removed, blocked, e := ssostore.FromTx(tx).BreakGlass.RemoveGuarded(r.Context(), orgID, target)
 		if e != nil {
 			return e
