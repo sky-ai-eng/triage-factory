@@ -5,7 +5,13 @@
    another. The HMR boundary trade-off is acceptable for stable
    plumbing. */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { apiFetch, apiJSON, HttpError, setUnauthHandler } from '../lib/apiClient'
+import {
+  apiFetch,
+  apiJSON,
+  HttpError,
+  setSSORequiredHandler,
+  setUnauthHandler,
+} from '../lib/apiClient'
 import {
   setWsAuthCloseHandler,
   WS_CLOSE_MEMBERSHIP_CHANGED,
@@ -53,6 +59,9 @@ interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
+
+/** The shortest gap between two /api/me re-reads triggered by SSO_REQUIRED. */
+const SSO_REFRESH_MIN_INTERVAL_MS = 5000
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('loading')
@@ -123,6 +132,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     })
     return () => setUnauthHandler(null)
   }, [])
+
+  // Register the apiClient SSO_REQUIRED hook. A 403 SSO_REQUIRED means an
+  // org this session belongs to now requires a sign-in the session did not
+  // use, so /api/me's per-org sso_required is stale: re-read it, and
+  // MultiAuthGate replaces the org's pages with its sign-in. Every read on
+  // the page may fail at once, so one re-read serves the burst, and a
+  // re-read that answers "not required" is not repeated for a short window,
+  // which keeps a disagreement between the two reads from looping.
+  const ssoRefresh = useRef<{ inFlight: boolean; lastAt: number }>({ inFlight: false, lastAt: 0 })
+  useEffect(() => {
+    setSSORequiredHandler(() => {
+      const state = ssoRefresh.current
+      if (state.inFlight || Date.now() - state.lastAt < SSO_REFRESH_MIN_INTERVAL_MS) return
+      state.inFlight = true
+      void refresh().finally(() => {
+        state.inFlight = false
+        state.lastAt = Date.now()
+      })
+    })
+    return () => setSSORequiredHandler(null)
+  }, [refresh])
 
   // Register the websocket auth-kick hook (TFAC-75). The server closes a
   // socket when its session is revoked or the user loses the org it's

@@ -106,8 +106,8 @@ function MultiAuthGate({ children }: { children: React.ReactNode }) {
   }
   // The resolved org — the URL's, or for /setup the context's pick — requires
   // signing in through its own SSO and this session did not. Every org-scoped
-  // read there would answer 403 SSO_REQUIRED, so the page is replaced by the
-  // org's sign-in rather than rendered as a wall of failures.
+  // read there would answer 403 SSO_REQUIRED, so the org's sign-in is shown
+  // instead of a page whose reads all fail.
   const activeOrg = auth.orgs.find((o) => o.id === activeOrgId)
   if (activeOrg?.sso_required) {
     return <SSORequiredOrg org={activeOrg} />

@@ -435,18 +435,29 @@ minted from a session signed in through your connection keeps working, and one
 minted from a GitHub session does not, whenever it was minted. Members who use
 tokens for automation should mint new ones after signing in with SSO.
 
-Three changes are refused with `409` while SSO is required, so the requirement
-can never be left without a way in:
+Turning the requirement on is refused with `409` until each of these holds:
+
+| Refused when | Message |
+| ------------ | ------- |
+| The connection is disabled | "enable the connection before requiring SSO" |
+| The connection has not passed a Test | "run a successful Test before requiring SSO" |
+| No domain is verified | "verify a domain before requiring SSO" |
+| The admin turning it on is neither signed in through the connection nor break-glass | "Sign in through single sign-on, or be designated break-glass, before requiring it." |
+
+While the requirement is on, these changes are refused with `409`, because each
+would leave members with no working sign-in or the org with no recovery path:
 
 | Change | Message |
 | ------ | ------- |
-| Requiring SSO from a session not signed in through the connection, by an admin who is not break-glass | "Sign in through single sign-on, or be designated break-glass, before requiring it." |
 | Disabling the connection | "Turn off Require SSO first." |
 | Removing your last verified domain | "Turn off Require SSO first." |
+| Removing your last break-glass principal | "can't remove the last break-glass principal while SSO is required — stop requiring SSO first" |
 
-Requiring SSO also needs an enabled connection that has passed a Test and at
-least one verified domain. If your SSO entitlement lapses, both rules stop
-applying, so a lapsed licence can never lock everyone out.
+Each of these checks is made under a lock on the connection, so two changes
+made at the same moment cannot both pass against the state before the other.
+
+If your SSO entitlement lapses, both rules stop applying, so a lapsed licence
+can never lock everyone out.
 
 A refused sign-in is recorded in `auth_events` as `sso_enforcement_rejected`,
 and a break-glass sign-in that bypassed it as `break_glass_login`. A refused

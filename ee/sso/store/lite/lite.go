@@ -63,6 +63,10 @@ func (s *ssoConnectionStore) SetEnforced(context.Context, string, string, bool) 
 	return db.ErrNotApplicableInLocal
 }
 
+func (s *ssoConnectionStore) LockForOrg(context.Context, string) error {
+	return db.ErrNotApplicableInLocal
+}
+
 func (s *ssoConnectionStore) MarkTestedByProviderID(context.Context, string) error {
 	return db.ErrNotApplicableInLocal
 }

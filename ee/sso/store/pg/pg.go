@@ -252,6 +252,18 @@ func (s *ssoConnectionStore) SetEnforced(ctx context.Context, orgID, id string, 
 	return nil
 }
 
+func (s *ssoConnectionStore) LockForOrg(ctx context.Context, orgID string) error {
+	// Under READ COMMITTED a statement that waits on these locks, and every
+	// statement after it, reads what the holder committed, so the caller's
+	// checks that follow see the other change rather than the state before it.
+	if _, err := s.app.ExecContext(ctx, `
+		SELECT id FROM sso_connections WHERE org_id = $1 ORDER BY id FOR UPDATE
+	`, orgID); err != nil {
+		return fmt.Errorf("lock sso_connections for org: %w", err)
+	}
+	return nil
+}
+
 func (s *ssoConnectionStore) MarkTestedByProviderID(ctx context.Context, providerID string) error {
 	// Admin pool: the verify-before-enforce Test callback carries TF's
 	// signed state (the provider_id) but no membership claims, so this

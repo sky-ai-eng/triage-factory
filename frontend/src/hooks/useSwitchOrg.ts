@@ -1,9 +1,10 @@
 import { useLocation, useNavigate } from 'react-router'
+import { useAuth } from '../contexts/AuthContext'
 import { useOrgContext } from '../contexts/OrgContext'
 import { reconnectWebSocket } from './useWebSocket'
 import { invalidateTeams } from './useTeams'
 import { invalidateEntitlements } from './useEntitlements'
-import { apiFetch } from '../lib/apiClient'
+import { apiFetch, isSSORequired } from '../lib/apiClient'
 
 /**
  * useSwitchOrg returns the one way the SPA moves to another org the user
@@ -13,11 +14,12 @@ import { apiFetch } from '../lib/apiClient'
  * /triage. OrgPicker uses it, and so does the SSO-required interstitial, which
  * renders where the picker cannot.
  *
- * It is never for an org that requires an SSO the session did not come
- * through: the server refuses that switch, and the way in is the org's own
- * sign-in (`AuthOrg.sso_start_url`), a full-page navigation.
+ * Callers do not offer it for an org that requires an SSO the session did not
+ * come through: the server refuses that switch, and the user needs the org's
+ * own sign-in (`AuthOrg.sso_start_url`), a full-page navigation.
  */
 export function useSwitchOrg(): (newOrgId: string) => Promise<void> {
+  const { refresh } = useAuth()
   const { activeOrgId, setActiveOrgId } = useOrgContext()
   const navigate = useNavigate()
   const location = useLocation()
@@ -55,11 +57,19 @@ export function useSwitchOrg(): (newOrgId: string) => Promise<void> {
       // unrelated disconnect.
       reconnectWebSocket()
     } catch (err) {
-      // A refusal (revoked membership) or a network drop both land here. Rolling
-      // back the local selection would conflict with the URL navigation about
-      // to happen below; log and let the AuthGate / /api/me reconciliation
-      // correct it on the next page render.
-      console.warn('[org-switch] active-org POST failed:', err)
+      if (isSSORequired(err)) {
+        // The org started requiring SSO after the last /api/me read, so the
+        // list offered it as a plain switch. Re-read before navigating, and
+        // the org's route renders its sign-in rather than pages whose reads
+        // all answer 403.
+        await refresh()
+      } else {
+        // A refusal (revoked membership) or a network drop. Rolling back the
+        // local selection would conflict with the URL navigation below; log
+        // and let the AuthGate / /api/me reconciliation correct it on the
+        // next page render.
+        console.warn('[org-switch] active-org POST failed:', err)
+      }
     }
 
     // Rewrite the URL: swap the org_id segment, preserve everything

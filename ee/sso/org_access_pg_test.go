@@ -467,8 +467,8 @@ func TestOrgAccess_EnableRequiresAnAdmittedCaller(t *testing.T) {
 	}
 }
 
-// While the requirement is on, neither the connection nor the org's last
-// verified domain can be removed out from under it.
+// While the requirement is on, the connection cannot be disabled and the
+// org's last verified domain cannot be removed.
 func TestOrgAccess_RequirementPinsConnectionAndLastDomain(t *testing.T) {
 	r := newAuthRig(t)
 	owner := r.seedUser()

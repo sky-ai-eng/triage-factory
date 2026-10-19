@@ -400,9 +400,14 @@ func (h *ssoConnectionHandler) handleSSOConnectionUpdate(w http.ResponseWriter, 
 	var updated *ssostore.SSOConnection
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		sso := ssostore.FromTx(tx)
+		// Locked first, so a concurrent Require SSO toggle commits before or
+		// after this read rather than between it and the Update below: the
+		// disable refusal turns on the enforced flag this reads.
+		if e := sso.Connections.LockForOrg(r.Context(), orgID); e != nil {
+			return e
+		}
 		// Re-read inside the tx: the audit row turns on whether this call
-		// actually flipped the switch, and the check must see the same snapshot
-		// the Update writes against. The PATCH is idempotent, so an admin
+		// actually flipped the switch. The PATCH is idempotent, so an admin
 		// re-saving an already-enabled connection must not read back as a
 		// second enablement.
 		before, e := sso.Connections.GetByID(r.Context(), orgID, existing.ID)
@@ -505,10 +510,16 @@ func (h *ssoConnectionHandler) handleSSOEnforcementUpdate(w http.ResponseWriter,
 	var updated *ssostore.SSOConnection
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		sso := ssostore.FromTx(tx)
-		// Re-read state inside the tx so the gate checks can't race a
-		// concurrent disable/un-verify. Hoisted out of the enforce-ON branch
-		// because the audit row below needs the prior enforced value on BOTH
-		// directions, and it has to come from this same snapshot.
+		// The gate checks below read the connection, the org's domains and its
+		// break-glass list, and a concurrent disable, domain removal or
+		// break-glass removal writes them. The lock makes each of those commit
+		// before these reads or wait until this transaction ends, so the checks
+		// never pass against state another change is replacing.
+		if e := sso.Connections.LockForOrg(r.Context(), orgID); e != nil {
+			return e
+		}
+		// Hoisted out of the enforce-ON branch because the audit row below
+		// needs the prior enforced value on BOTH directions.
 		conn, e := sso.Connections.GetByID(r.Context(), orgID, existing.ID)
 		if e != nil {
 			return e

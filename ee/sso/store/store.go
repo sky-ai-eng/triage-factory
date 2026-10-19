@@ -198,6 +198,15 @@ type SSOConnectionStore interface {
 	Delete(ctx context.Context, orgID, id string) error
 	GetByProviderID(ctx context.Context, providerID string) (*SSOProviderBinding, error)
 	SetEnforced(ctx context.Context, orgID, id string, enforced bool) error
+	// LockForOrg row-locks every connection the org holds until the caller's
+	// transaction ends. Each change that Require SSO depends on, or that
+	// depends on it — turning it on, disabling the connection, removing a
+	// verified domain, removing a break-glass principal — takes it before
+	// reading the state it checks. Each one checks a row the other writes,
+	// so without the lock two of them can both pass against the state as it
+	// was and commit a combination neither allows. App pool: every caller is
+	// an org admin, whom the update policy admits.
+	LockForOrg(ctx context.Context, orgID string) error
 	MarkTestedByProviderID(ctx context.Context, providerID string) error
 	// EnforcedProviderForOrg returns the provider_id of the org's connection
 	// when that connection is both enabled and enforced, else "". It is the

@@ -1,19 +1,43 @@
+import { useEffect } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useSwitchOrg } from '../hooks/useSwitchOrg'
 import type { AuthOrg } from '../types'
 
+/** How often the interstitial re-reads /api/me while it is shown. */
+const RECHECK_INTERVAL_MS = 30000
+
 /**
- * SSORequiredOrg stands in for an org's pages when the org requires signing in
- * through its own single sign-on and this session was not: every org-scoped
- * call there answers 403 SSO_REQUIRED, so instead of a page of failed reads the
- * viewer gets the way in — that org's sign-in, a full-page navigation to its
- * start URL. The shell and its org picker are not rendered here, so the other
- * orgs this session can use are offered beside it.
+ * SSORequiredOrg is shown in place of an org's pages when the org requires
+ * signing in through its own single sign-on and this session was not: every
+ * org-scoped call there answers 403 SSO_REQUIRED, so the user gets a link to
+ * the org's sign-in (a full-page navigation to its start URL) instead of pages
+ * whose reads all fail. The shell and its org picker are not rendered here, so
+ * the other orgs this session can use are listed beside it.
+ *
+ * A barred session has no websocket to hear that the requirement was lifted,
+ * so the interstitial re-reads /api/me on an interval and whenever the tab
+ * becomes visible or focused; once the org no longer requires SSO, the gate
+ * renders its pages again.
  */
 export default function SSORequiredOrg({ org }: { org: AuthOrg }) {
   const auth = useAuth()
   const switchOrg = useSwitchOrg()
   const others = auth.orgs.filter((o) => o.id !== org.id && !o.sso_required)
+  const { refresh } = auth
+
+  useEffect(() => {
+    const recheck = () => {
+      if (document.visibilityState === 'visible') void refresh()
+    }
+    const timer = window.setInterval(recheck, RECHECK_INTERVAL_MS)
+    window.addEventListener('focus', recheck)
+    document.addEventListener('visibilitychange', recheck)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', recheck)
+      document.removeEventListener('visibilitychange', recheck)
+    }
+  }, [refresh])
 
   return (
     <div className="min-h-screen bg-ground flex items-center justify-center px-4">

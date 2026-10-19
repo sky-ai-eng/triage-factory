@@ -336,6 +336,12 @@ func (h *ssoDomainsHandler) handleDomainDelete(w http.ResponseWriter, r *http.Re
 	var existed bool
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		sso := ssostore.FromTx(tx)
+		// Locked before the last-verified-domain check reads the enforced flag,
+		// so a concurrent Require SSO toggle cannot pass its own domain check
+		// against this domain while this one passes against the flag unset.
+		if e := sso.Connections.LockForOrg(r.Context(), orgID); e != nil {
+			return e
+		}
 		claim, e := sso.Domains.GetByID(r.Context(), orgID, id)
 		if e != nil {
 			return e
@@ -344,10 +350,10 @@ func (h *ssoDomainsHandler) handleDomainDelete(w http.ResponseWriter, r *http.Re
 			return nil
 		}
 		existed = true
-		// Require SSO needs a verified domain, as turning it on does: it is
-		// how a GitHub sign-in on the org's addresses is recognised and
-		// refused. Removing the last one while required is refused rather
-		// than leaving the requirement half in force.
+		// Turning Require SSO on needs a verified domain, and the sign-in rule
+		// uses it to recognise and refuse a GitHub sign-in on the org's
+		// addresses. Removing the last one while required would leave that
+		// rule matching nothing, so it is refused.
 		if claim.VerifiedAt != nil {
 			last, e := lastVerifiedWhileEnforced(r.Context(), sso, orgID, id)
 			if e != nil {
@@ -384,8 +390,9 @@ func (h *ssoDomainsHandler) handleDomainDelete(w http.ResponseWriter, r *http.Re
 }
 
 // lastVerifiedWhileEnforced reports whether domainID is the org's only
-// verified domain while one of its connections requires SSO. Read inside the
-// caller's transaction, beside the delete it decides.
+// verified domain while one of its connections requires SSO. The caller holds
+// the org's connection lock, which is what keeps the answer true until its
+// delete commits.
 func lastVerifiedWhileEnforced(ctx context.Context, sso *ssostore.Bundle, orgID, domainID string) (bool, error) {
 	conns, err := sso.Connections.ListByOrg(ctx, orgID)
 	if err != nil {

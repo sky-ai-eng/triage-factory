@@ -13,7 +13,10 @@ import { OrgProvider } from '../contexts/OrgContext'
 import { jsonBody } from '../test/apiResponse'
 import type { AuthOrg } from '../types'
 
-const authMock = vi.hoisted(() => ({ orgs: [] as AuthOrg[] }))
+const authMock = vi.hoisted(() => ({
+  orgs: [] as AuthOrg[],
+  refresh: null as unknown as () => Promise<void>,
+}))
 vi.mock('../contexts/AuthContext', () => {
   const value = () => ({
     status: 'authed',
@@ -21,7 +24,7 @@ vi.mock('../contexts/AuthContext', () => {
     orgs: authMock.orgs,
     serverActiveOrgId: null,
     error: null,
-    refresh: vi.fn(),
+    refresh: authMock.refresh,
     logout: vi.fn(),
   })
   return { useAuth: value, useOptionalAuth: value }
@@ -47,6 +50,7 @@ beforeEach(() => {
   fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, ...jsonBody({}) })
   vi.stubGlobal('fetch', fetchMock)
   window.localStorage.clear()
+  authMock.refresh = vi.fn().mockResolvedValue(undefined)
 })
 
 function activeOrgCalls() {
@@ -109,6 +113,69 @@ describe('SSO-required interstitial', () => {
     expect(activeOrgCalls()[0][1]).toEqual(
       expect.objectContaining({ method: 'POST', body: JSON.stringify({ org_id: 'org-y' }) }),
     )
+    expect(await screen.findByText('at /orgs/org-y/board')).toBeInTheDocument()
+  })
+
+  it('re-reads /api/me when the tab regains focus, and on an interval', () => {
+    vi.useFakeTimers()
+    try {
+      authMock.orgs = [barred, open]
+      renderGate('/orgs/org-x/board')
+      expect(authMock.refresh).not.toHaveBeenCalled()
+
+      fireEvent.focus(window)
+      expect(authMock.refresh).toHaveBeenCalledTimes(1)
+
+      vi.advanceTimersByTime(30000)
+      expect(authMock.refresh).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('renders the page once a re-read says the org no longer requires SSO', () => {
+    authMock.orgs = [barred, open]
+    const view = renderGate('/orgs/org-x/board')
+    expect(screen.getByText('This organization requires single sign-on')).toBeInTheDocument()
+
+    authMock.orgs = [{ ...barred, sso_required: false, sso_start_url: undefined }, open]
+    view.rerender(
+      <MemoryRouter initialEntries={['/orgs/org-x/board']}>
+        <OrgProvider>
+          <Routes>
+            <Route
+              path="/orgs/:org_id/*"
+              element={
+                <AuthGate mode="multi">
+                  <p>the page</p>
+                </AuthGate>
+              }
+            />
+          </Routes>
+        </OrgProvider>
+      </MemoryRouter>,
+    )
+    expect(screen.getByText('the page')).toBeInTheDocument()
+  })
+
+  it('re-reads /api/me before landing on an org that started requiring SSO since the last read', async () => {
+    authMock.orgs = [barred, open]
+    fetchMock.mockImplementation((url: unknown) =>
+      Promise.resolve(
+        String(url) === '/api/me/active-org'
+          ? {
+              ok: false,
+              status: 403,
+              ...jsonBody({ errors: [{ reason: 'SSO_REQUIRED', message: 'requires SSO' }] }),
+            }
+          : { ok: true, status: 200, ...jsonBody({}) },
+      ),
+    )
+    renderGate('/orgs/org-x/board')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Beta' }))
+
+    await waitFor(() => expect(authMock.refresh).toHaveBeenCalled())
     expect(await screen.findByText('at /orgs/org-y/board')).toBeInTheDocument()
   })
 
