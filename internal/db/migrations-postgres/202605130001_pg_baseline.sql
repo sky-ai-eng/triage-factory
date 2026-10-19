@@ -5516,6 +5516,48 @@ REVOKE ALL ON public.org_event_sources FROM anon, authenticated, service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_event_sources TO tf_app;
 
 
+-- rate_limit_readings: the latest reading of every rate-limit bucket an org's
+-- credentials are metered on, keyed (upstream, credential, bucket) within the
+-- org. Each serving pod keeps its readings in memory and writes the ones that
+-- changed here, so GET /api/orgs/{org_id}/integrations/rate-limits answers for
+-- every pod whichever one serves it; an upsert keeps a key's newest
+-- observation. credential is the opaque id the upstream's client names it by,
+-- never a token or a login. A NULL column is a value the reading did not
+-- state, which is not the same as zero; reset_at NULL means the reading named
+-- no reset, and such a reading is reported for an hour after observed_at
+-- (domain.RateLimitReadingMaxAge).
+CREATE TABLE public.rate_limit_readings (
+    org_id       uuid NOT NULL,
+    upstream     text NOT NULL,
+    credential   text NOT NULL,
+    bucket       text NOT NULL,
+    remaining    integer,
+    bucket_limit integer,
+    used         integer,
+    near_limit   boolean,
+    reset_at     timestamp with time zone,
+    observed_at  timestamp with time zone NOT NULL
+);
+
+ALTER TABLE ONLY public.rate_limit_readings
+    ADD CONSTRAINT rate_limit_readings_pkey PRIMARY KEY (org_id, upstream, credential, bucket);
+
+ALTER TABLE ONLY public.rate_limit_readings
+    ADD CONSTRAINT rate_limit_readings_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+ALTER TABLE public.rate_limit_readings ENABLE ROW LEVEL SECURITY;
+
+-- Member SELECT only. Every write is the flusher's or the brain's expiry
+-- sweep, on the admin pool with no request claims, so tf_app holds no write
+-- grant and there is no write policy to give it.
+CREATE POLICY rate_limit_readings_select ON public.rate_limit_readings FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+REVOKE ALL ON public.rate_limit_readings FROM PUBLIC;
+REVOKE ALL ON public.rate_limit_readings FROM anon, authenticated, service_role;
+
+GRANT SELECT ON TABLE public.rate_limit_readings TO tf_app;
+
+
 -- model_availability: per (org, provider, model) evidence that the org's
 -- credentials can invoke that model, established by spending one minimal real
 -- request. A probe rather than a control-plane lookup because no provider API

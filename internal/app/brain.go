@@ -9,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/memoryprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
+	"github.com/sky-ai-eng/triage-factory/internal/ratelimits"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/workmetrics"
@@ -160,6 +161,11 @@ func (a *App) startBrain(term int64) {
 	// deletes nothing. Recovering a dead executor's claims is not the brain's
 	// job: every dispatcher takes over expired claims on its own pass.
 	go instance.RunRegistryGC(brainCtx, a.stores.Instances, instance.RegistryGCStaleAfter, instance.RegistryGCInterval)
+	// Rate-limit reading expiry: deletes every org's readings past their
+	// reset. The route already leaves them out; one sweeper is enough, and
+	// the readings themselves are written by every serving process's flusher
+	// (startWorkers).
+	go ratelimits.RunExpirySweep(brainCtx, a.stores.RateLimitReadings, ratelimits.SweepInterval)
 	// Sealed-credential-bundle provisioner sweeps (TFAC-614): the backstop
 	// for a dropped cred_request notification, and the re-seal of a running
 	// engagement's bundle — periodically for its hour-lived GitHub tokens, and

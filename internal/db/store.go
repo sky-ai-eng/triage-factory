@@ -472,6 +472,13 @@ type Stores struct {
 	// JWT-less readers.
 	OrgEventSources OrgEventSourceStore
 
+	// RateLimitReadings owns the rate_limit_readings table — the latest
+	// reading of every rate-limit bucket an org's credentials are metered on,
+	// written by each serving process's flusher so any control pod can answer
+	// for every pod. Split-pool in Postgres: member SELECT through the app pool
+	// under RLS, writes and the expiry sweep on the admin pool.
+	RateLimitReadings RateLimitReadingStore
+
 	// ModelAvailability owns the model_availability table — per (org,
 	// provider, model) evidence that the org's credentials can actually invoke
 	// that model, established by spending one minimal real request on it.
@@ -581,6 +588,7 @@ type TxStores struct {
 	ConversationPendingInput ConversationPendingInputStore
 	Permissions              PermissionStore
 	OrgEventSources          OrgEventSourceStore
+	RateLimitReadings        RateLimitReadingStore
 	ModelAvailability        ModelAvailabilityStore
 
 	// Ext carries opaque store bundles built by registered

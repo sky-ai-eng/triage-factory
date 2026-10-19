@@ -1521,6 +1521,12 @@ func (s *Server) routes() {
 	s.api("GET /api/orgs/{org_id}/sources/{kind}", s.handleOrgSource)
 	s.apiMutating("PATCH /api/orgs/{org_id}/sources/{kind}", s.handleOrgSourcePatch)
 
+	// How much of each rate-limit budget the org's credentials have left, as
+	// the processes making its requests last saw it — member-gated like the
+	// sources read, since every member renders an integration's settings card.
+	// See rate_limits_handler.go.
+	s.api("GET /api/orgs/{org_id}/integrations/rate-limits", s.handleOrgRateLimits)
+
 	// Durable work across every registered kind — the depth of each queue
 	// and the operator controls over its rows. Gated per kind's declared
 	// access policy inside the handler; every kind runs on the admin pool
