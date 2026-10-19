@@ -125,9 +125,10 @@ func (c *Client) recordBudgets(status int, h http.Header, now time.Time) {
 // from the refusal (refusalReset). Burst readings are Quiet: a busy endpoint
 // can stay below 20% of its per-second allowance for many seconds in a row.
 //
-// TODO(TFAC-1120): read the quota's remaining and limit from Beta-RateLimit /
-// Beta-RateLimit-Policy (or RateLimit / RateLimit-Policy) if a real Cloud
-// response shows Atlassian still sends them.
+// Cloud also sends RateLimit and RateLimit-Policy, but on a Cloud OAuth
+// response they describe only jira-burst-based, which X-RateLimit-Remaining
+// and X-RateLimit-Limit already give (and whose policy q disagrees with that
+// limit). They carry no entry for the hourly quota, so they are not read.
 func (c *Client) recordCloud(status int, h http.Header, now time.Time) {
 	var reason string
 	if status == http.StatusTooManyRequests {
