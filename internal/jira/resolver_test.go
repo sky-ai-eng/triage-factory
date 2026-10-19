@@ -79,6 +79,9 @@ func TestForSystem_BuildsOrgClient(t *testing.T) {
 	if auth, _ := rec.read(); auth != "Bearer org-pat" {
 		t.Errorf("Authorization = %q, want %q (system path uses the org service cred)", auth, "Bearer org-pat")
 	}
+	if c.orgID != testOrgID || c.credential != AuthMethodDCPAT {
+		t.Errorf("readings recorded under (%q, %q), want (%q, dc_pat)", c.orgID, c.credential, testOrgID)
+	}
 }
 
 // TestForSystem_MissingCredential pins ErrNoJiraSystemCredential when either
@@ -173,6 +176,9 @@ func TestForSystem_BuildsCloudClient(t *testing.T) {
 	if path != "/rest/api/3/issue/PROJ-1" {
 		t.Errorf("path = %q, want /rest/api/3/issue/PROJ-1 (cloud uses REST v3)", path)
 	}
+	if c.orgID != testOrgID || c.credential != AuthMethodCloudAPIToken {
+		t.Errorf("readings recorded under (%q, %q), want (%q, cloud_api_token)", c.orgID, c.credential, testOrgID)
+	}
 }
 
 // TestForSystem_CloudMissingCredential pins that a Cloud marker without the
@@ -247,6 +253,10 @@ func TestForUser_UsesUserToken(t *testing.T) {
 	if want := UserTokenKey(srv.URL); secrets.gotUserKey != want {
 		t.Errorf("GetUserSystem key = %q, want %q", secrets.gotUserKey, want)
 	}
+	// A user's PAT is metered by its user, who may not be a metric label.
+	if c.credential != "" {
+		t.Errorf("credential = %q, want none: a user's own token records no readings", c.credential)
+	}
 }
 
 // TestForUser_CloudEnvelope pins the Cloud per-user path: a stored
@@ -287,6 +297,9 @@ func TestForUser_CloudEnvelope(t *testing.T) {
 	}
 	if path != "/rest/api/3/issue/PROJ-1" {
 		t.Errorf("path = %q, want /rest/api/3/issue/PROJ-1 (cloud uses REST v3)", path)
+	}
+	if c.credential != "" {
+		t.Errorf("credential = %q, want none: a user's own token records no readings", c.credential)
 	}
 }
 
@@ -601,6 +614,11 @@ func TestForUser_CloudOAuthEnvelope(t *testing.T) {
 	}
 	if got := req.Header.Get("Authorization"); got != "Bearer acc-tok" {
 		t.Errorf("Authorization = %q, want Bearer acc-tok", got)
+	}
+	// The hourly quota is the OAuth app's, not the user's, so its readings
+	// are recorded, under the method rather than the user.
+	if c.orgID != testOrgID || c.credential != AuthMethodCloudOAuth {
+		t.Errorf("readings recorded under (%q, %q), want (%q, cloud_oauth)", c.orgID, c.credential, testOrgID)
 	}
 }
 

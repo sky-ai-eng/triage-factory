@@ -82,6 +82,81 @@ func TestBudgetRegistry_WarnsOncePerWindow(t *testing.T) {
 	}
 }
 
+// TestBudgetRegistry_WarnsOnNearLimit: a reading that states only whether its
+// bucket is near its limit warns as a low count does, on the first near
+// reading in a window, again once that window's reset has passed, and again
+// after a reading that is not near.
+func TestBudgetRegistry_WarnsOnNearLimit(t *testing.T) {
+	r := newBudgetRegistry()
+	k := budgetKey{Jira, "org-1", "cloud_oauth", "quota"}
+	now := time.Unix(1_000_000, 0)
+	window1 := now.Add(time.Hour)
+	window2 := now.Add(2 * time.Hour)
+
+	steps := []struct {
+		name string
+		b    Budget
+		at   time.Time
+		warn bool
+	}{
+		{"not near", NearLimitReading(false, window1), now, false},
+		{"near", NearLimitReading(true, window1), now, true},
+		{"still near, same window", NearLimitReading(true, window1), now.Add(time.Minute), false},
+		{"still near, after the window's reset", NearLimitReading(true, window2), window1, true},
+		{"not near again", NearLimitReading(false, window2), window1.Add(time.Minute), false},
+		{"near again, same window", NearLimitReading(true, window2), window1.Add(2 * time.Minute), true},
+	}
+	for _, s := range steps {
+		if got := r.record(k, s.b, s.at); got != s.warn {
+			t.Errorf("%s: warn = %v, want %v", s.name, got, s.warn)
+		}
+	}
+}
+
+// TestBudgetRegistry_QuietNeverWarns: a Quiet reading never warns, however
+// often its short window resets while it stays low, and does not hold off the
+// WARN for a reading that is not Quiet.
+func TestBudgetRegistry_QuietNeverWarns(t *testing.T) {
+	r := newBudgetRegistry()
+	k := budgetKey{Jira, "org-1", "cloud_api_token", "burst"}
+	now := time.Unix(1_000_000, 0)
+	for i := range 5 {
+		at := now.Add(time.Duration(i) * time.Second)
+		if r.record(k, Budget{Remaining: 2, Limit: 100, Reset: at.Add(time.Second), Quiet: true}, at) {
+			t.Errorf("second %d: a quiet reading warned", i)
+		}
+	}
+	at := now.Add(5 * time.Second)
+	if !r.record(k, Budget{Remaining: 2, Limit: 100, Reset: at.Add(time.Second)}, at) {
+		t.Error("a low reading that is not quiet did not warn after quiet ones")
+	}
+}
+
+// TestBudget_NearLimit: a near-limit reading says what the upstream said and
+// nothing of what is left; a counted reading is near below 20% of a stated
+// size, and says neither without one.
+func TestBudget_NearLimit(t *testing.T) {
+	for _, c := range []struct {
+		name               string
+		b                  Budget
+		near, ok, stateRem bool
+	}{
+		{"stated near", NearLimitReading(true, time.Time{}), true, true, false},
+		{"stated not near", NearLimitReading(false, time.Time{}), false, true, false},
+		{"19% left", Budget{Remaining: 19, Limit: 100}, true, true, true},
+		{"20% left", Budget{Remaining: 20, Limit: 100}, false, true, true},
+		{"no size", Budget{Remaining: 0}, false, false, true},
+	} {
+		near, ok := c.b.NearLimit()
+		if near != c.near || ok != c.ok {
+			t.Errorf("%s: NearLimit = (%v, %v), want (%v, %v)", c.name, near, ok, c.near, c.ok)
+		}
+		if got := c.b.statesRemaining(); got != c.stateRem {
+			t.Errorf("%s: statesRemaining = %v, want %v", c.name, got, c.stateRem)
+		}
+	}
+}
+
 // TestBudgetRegistry_DropsStaleEntries pins eviction: record's sweep drops an
 // entry once its reading is past its reset and its WARN, if any, is for a
 // window that has ended. A reading with no reset never goes stale, and neither
@@ -137,8 +212,9 @@ func TestWaitOnLimit_HonorsContext(t *testing.T) {
 // uses for the rate-limit gauges, the refusal counter and the wait counter,
 // through an exporter configured as production's is (see
 // TestExportedNames_RealScrape), that a reading past its reset is not
-// reported, and that a counted reading reports what was used, and what is
-// left only against a published limit.
+// reported, that a counted reading reports what was used, and what is left
+// only against a published limit, and that a near-limit reading reports
+// near_limit and nothing of what is left.
 func TestBudgetMetrics_RealScrape(t *testing.T) {
 	ResetBudgetsForTest(t)
 	registry := prometheus.NewRegistry()
@@ -162,6 +238,10 @@ func TestBudgetMetrics_RealScrape(t *testing.T) {
 	RecordBudget(Slack, "org-4", "bot:T1:A1", "chat.update", Budget{Used: 12, Remaining: 38, Limit: 50, Reset: time.Now().Add(time.Minute)})
 	RecordBudget(Slack, "org-4", "bot:T1:A1", "chat.postMessage", Budget{Used: 3, Reset: time.Now().Add(time.Minute)})
 	RecordRefused(Slack, "org-4", "bot:T1:A1", "chat.update")
+	// Near-limit readings: near_limit and the reset, never a remaining.
+	RecordBudget(Jira, "org-5", "cloud_oauth", "quota", NearLimitReading(true, time.Now().Add(time.Hour)))
+	RecordBudget(Jira, "org-6", "cloud_oauth", "quota", NearLimitReading(false, time.Now().Add(time.Hour)))
+	RecordRefused(Jira, "org-5", "cloud_oauth", "jira-quota-global-based")
 	if err := WaitOnLimit(context.Background(), GitHub, "org-1", time.Millisecond); err != nil {
 		t.Fatalf("WaitOnLimit: %v", err)
 	}
@@ -189,11 +269,16 @@ func TestBudgetMetrics_RealScrape(t *testing.T) {
 		`tf_upstream_rate_limit_remaining_ratio{bucket="chat.update",credential="bot:T1:A1",org_id="org-4",upstream="slack"} 0.76`,
 		`tf_upstream_rate_limit_used{bucket="chat.postMessage",credential="bot:T1:A1",org_id="org-4",upstream="slack"} 3`,
 		`tf_upstream_rate_limit_refused_total{bucket="chat.update",credential="bot:T1:A1",org_id="org-4",upstream="slack"} 1`,
+		`tf_upstream_rate_limit_near_limit{bucket="quota",credential="cloud_oauth",org_id="org-5",upstream="jira"} 1`,
+		`tf_upstream_rate_limit_near_limit{bucket="quota",credential="cloud_oauth",org_id="org-6",upstream="jira"} 0`,
+		`tf_upstream_rate_limit_refused_total{bucket="jira-quota-global-based",credential="cloud_oauth",org_id="org-5",upstream="jira"} 1`,
 	}
 	prefixed := []string{
 		`tf_upstream_rate_limit_until_reset_seconds{bucket="graphql",credential="installation:42",org_id="org-1",upstream="github"} `,
 		`tf_upstream_rate_limit_until_reset_seconds{bucket="chat.update",credential="bot:T1:A1",org_id="org-4",upstream="slack"} `,
 		`tf_upstream_rate_limit_until_reset_seconds{bucket="chat.postMessage",credential="bot:T1:A1",org_id="org-4",upstream="slack"} `,
+		`tf_upstream_rate_limit_until_reset_seconds{bucket="quota",credential="cloud_oauth",org_id="org-5",upstream="jira"} `,
+		`tf_upstream_rate_limit_until_reset_seconds{bucket="quota",credential="cloud_oauth",org_id="org-6",upstream="jira"} `,
 		`tf_upstream_rate_limit_wait_seconds_total{org_id="org-1",upstream="github"} `,
 	}
 	seen := map[string]bool{}

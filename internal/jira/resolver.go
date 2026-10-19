@@ -257,7 +257,7 @@ func (r *resolver) ForSystem(ctx context.Context, orgID string) (*Client, error)
 		if email == "" || token == "" {
 			return nil, fmt.Errorf("%w: org=%s", ErrNoJiraSystemCredential, orgID)
 		}
-		return NewClient(CloudAPIToken(host, email, token)).WithOrg(orgID), nil
+		return NewClient(CloudAPIToken(host, email, token)).WithOrg(orgID).WithCredential(AuthMethodCloudAPIToken), nil
 	}
 
 	pat, err := r.secrets.GetSystem(ctx, orgID, keyJiraPAT)
@@ -267,7 +267,7 @@ func (r *resolver) ForSystem(ctx context.Context, orgID string) (*Client, error)
 	if pat == "" {
 		return nil, fmt.Errorf("%w: org=%s", ErrNoJiraSystemCredential, orgID)
 	}
-	return NewClient(DataCenterPAT(host, pat)).WithOrg(orgID), nil
+	return NewClient(DataCenterPAT(host, pat)).WithOrg(orgID).WithCredential(AuthMethodDCPAT), nil
 }
 
 // SystemCredential is the org's Jira service credential in raw, serializable
@@ -370,6 +370,10 @@ func (r *resolver) systemSite(ctx context.Context, orgID string) (string, error)
 // write to the bot). A backend read error propagates rather than being
 // misreported as "not connected"; a corrupt envelope or an unknown method
 // likewise propagates rather than silently degrading to the bot.
+//
+// Only a Cloud OAuth client records rate-limit readings (WithCredential): its
+// hourly quota is the OAuth app's, not the user's. An API token or a PAT is
+// metered by the user it belongs to, and a user may not be a metric label.
 func (r *resolver) ForUser(ctx context.Context, orgID, userID string) (*Client, error) {
 	orgSet, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
@@ -434,7 +438,7 @@ func (r *resolver) ForUser(ctx context.Context, orgID, userID string) (*Client, 
 		if err != nil {
 			return nil, fmt.Errorf("mint jira oauth access token for org %s user %s: %w", orgID, userID, err)
 		}
-		return NewClient(CloudOAuth(cloudID, accessToken)).WithOrg(orgID), nil
+		return NewClient(CloudOAuth(cloudID, accessToken)).WithOrg(orgID).WithCredential(AuthMethodCloudOAuth), nil
 	default:
 		// An unknown/empty method is corruption or a forward-version credential
 		// (e.g. a future OAuth method this build predates). Surface it rather than

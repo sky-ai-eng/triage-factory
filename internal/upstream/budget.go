@@ -18,11 +18,8 @@ const lowBudgetShare = 0.2
 // Budget is one reading of a rate-limit bucket: what an upstream's response
 // said is left of it for the credential that made the request, or, for an
 // upstream whose responses state nothing of it, what TF counted itself
-// spending of it (Used).
-//
-// TODO(TFAC-1111): a near_limit reading, for a bucket whose upstream says only
-// that it is close (Jira Cloud's hourly quota), with the low-budget WARN keyed
-// on it as well.
+// spending of it (Used), or, for one whose responses state no count, whether
+// it said the bucket is close to its limit (NearLimitReading).
 type Budget struct {
 	Remaining int
 	// Limit is the bucket's size, 0 when the upstream did not say.
@@ -38,6 +35,36 @@ type Budget struct {
 	// made, so Used is at least 1 on it, and 0 on a reading an upstream
 	// stated. A counted reading with no published limit has Used alone.
 	Used int
+	// Quiet keeps the reading out of the low-budget WARN. It is for a bucket
+	// whose window is so short that the WARN, which re-arms once a window has
+	// reset, would fire about once a window for as long as the bucket stays
+	// low: Jira Cloud's per-second burst allowance. A refusal from such a
+	// bucket is still counted and a wait on it logged.
+	Quiet bool
+	// nearOnly marks a NearLimitReading, and near is what it said.
+	nearOnly bool
+	near     bool
+}
+
+// NearLimitReading is a reading of a bucket whose upstream states no count
+// for it, only whether it is close to its limit: Jira Cloud's hourly points
+// quota, which a response marks with X-RateLimit-NearLimit: true once less
+// than 20% of it is left. It reports no remaining or limit. reset is when the
+// reading stops describing the bucket, the zero Time when nothing says.
+func NearLimitReading(near bool, reset time.Time) Budget {
+	return Budget{Reset: reset, nearOnly: true, near: near}
+}
+
+// NearLimit reports whether the bucket is close to its limit: what the
+// upstream said, on a NearLimitReading, and otherwise whether less than
+// lowBudgetShare of it is left. ok is false for a reading that states neither,
+// one that did not say its bucket's size.
+func (b Budget) NearLimit() (near, ok bool) {
+	if b.nearOnly {
+		return b.near, true
+	}
+	share, ok := b.Share()
+	return ok && share < lowBudgetShare, ok
 }
 
 // Share is the fraction of the bucket left. ok is false when the upstream did
@@ -50,10 +77,10 @@ func (b Budget) Share() (share float64, ok bool) {
 }
 
 // statesRemaining reports whether b says what is left of its bucket. A
-// reading an upstream stated always does; a counted one does only against a
-// published limit.
+// reading an upstream stated does, unless it states only whether the bucket
+// is near its limit; a counted one does only against a published limit.
 func (b Budget) statesRemaining() bool {
-	return b.Used == 0 || b.Limit > 0
+	return !b.nearOnly && (b.Used == 0 || b.Limit > 0)
 }
 
 // current reports whether b still describes its bucket at now.
@@ -74,17 +101,24 @@ func (b Budget) current(now time.Time) bool {
 // headers state its own count of what is left, so the latest reading from any
 // caller is accurate and nothing is summed, here or across pods.
 //
-// The reading is logged at WARN when its bucket is first seen below
-// lowBudgetShare in a window. It is logged again once the warned reading's
-// reset has passed, or after a reading back above the threshold.
+// The reading is logged at WARN when its bucket is first seen near its limit
+// (Budget.NearLimit) in a window, unless it is Quiet. It is logged again once
+// the warned reading's reset has passed, or after a reading that is not near.
 func RecordBudget(name Name, orgID, credential, bucket string, b Budget) {
 	// The gauges that report the registry are created with the counters.
 	current()
-	if liveBudgets.Load().record(budgetKey{name, orgID, credential, bucket}, b, time.Now()) {
+	if !liveBudgets.Load().record(budgetKey{name, orgID, credential, bucket}, b, time.Now()) {
+		return
+	}
+	if b.nearOnly {
 		log.Warn("rate-limit budget low",
 			"upstream", name, "org", orgID, "credential", credential, "bucket", bucket,
-			"remaining", b.Remaining, "limit", b.Limit, "reset", b.Reset)
+			"near_limit", true, "reset", b.Reset)
+		return
 	}
+	log.Warn("rate-limit budget low",
+		"upstream", name, "org", orgID, "credential", credential, "bucket", bucket,
+		"remaining", b.Remaining, "limit", b.Limit, "reset", b.Reset)
 }
 
 // RecordRefused counts one response from name that a rate limit refused,
@@ -140,8 +174,8 @@ type budgetKey struct {
 type budgetEntry struct {
 	Budget
 	// warned is whether the low-budget WARN has fired for this bucket since
-	// it was last at or above lowBudgetShare; warnedUntil is the reset of the
-	// reading it fired for, past which a low reading is a new window's.
+	// a reading last said it was not near its limit; warnedUntil is the reset
+	// of the reading it fired for, past which a low reading is a new window's.
 	warned      bool
 	warnedUntil time.Time
 }
@@ -197,9 +231,8 @@ func (r *budgetRegistry) record(k budgetKey, b Budget, now time.Time) (warn bool
 		r.byKey[k] = e
 	}
 	e.Budget = b
-	share, known := b.Share()
-	switch {
-	case !known || share >= lowBudgetShare:
+	switch near, known := b.NearLimit(); {
+	case b.Quiet || !known || !near:
 		e.warned = false
 	case !e.warned || (!e.warnedUntil.IsZero() && !now.Before(e.warnedUntil)):
 		e.warned, e.warnedUntil, warn = true, b.Reset, true
@@ -220,8 +253,9 @@ func (r *budgetRegistry) get(k budgetKey) (Budget, bool) {
 // observe reports every current reading through the budget gauges, and drops
 // the stale entries it meets. A reading that did not say its bucket's size
 // reports no limit or ratio, one that did not say its reset reports no time
-// until it, and only a counted reading reports what was used (statesRemaining
-// says when it reports what is left).
+// until it, only a counted reading reports what was used (statesRemaining
+// says when it reports what is left), and only a NearLimitReading reports
+// near_limit.
 func (r *budgetRegistry) observe(o metric.Observer, g budgetGauges, now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -245,6 +279,13 @@ func (r *budgetRegistry) observe(o metric.Observer, g budgetGauges, now time.Tim
 		if e.Used > 0 {
 			o.ObserveInt64(g.used, int64(e.Used), attrs)
 		}
+		if e.nearOnly {
+			var near int64
+			if e.near {
+				near = 1
+			}
+			o.ObserveInt64(g.nearLimit, near, attrs)
+		}
 		if share, ok := e.Share(); ok {
 			o.ObserveInt64(g.limit, int64(e.Limit), attrs)
 			o.ObserveFloat64(g.ratio, share, attrs)
@@ -259,6 +300,7 @@ func (r *budgetRegistry) observe(o metric.Observer, g budgetGauges, now time.Tim
 type budgetGauges struct {
 	remaining  metric.Int64ObservableGauge
 	used       metric.Int64ObservableGauge
+	nearLimit  metric.Int64ObservableGauge
 	limit      metric.Int64ObservableGauge
 	ratio      metric.Float64ObservableGauge
 	untilReset metric.Float64ObservableGauge
@@ -284,6 +326,9 @@ func registerBudgetGauges(m metric.Meter) {
 	g.used, err = m.Int64ObservableGauge("upstream.rate_limit.used",
 		metric.WithDescription("Calls this process counted against a rate-limit bucket in its window, for an upstream whose responses state no budget."))
 	keep(err)
+	g.nearLimit, err = m.Int64ObservableGauge("upstream.rate_limit.near_limit",
+		metric.WithDescription("1 when the upstream's latest response said a rate-limit bucket is close to its limit, 0 when it said it is not, for an upstream that states no count for the bucket."))
+	keep(err)
 	g.limit, err = m.Int64ObservableGauge("upstream.rate_limit.limit",
 		metric.WithDescription("The rate-limit bucket's size, as the upstream's latest response stated it."))
 	keep(err)
@@ -300,7 +345,7 @@ func registerBudgetGauges(m metric.Meter) {
 	if _, err := m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		liveBudgets.Load().observe(o, g, time.Now())
 		return nil
-	}, g.remaining, g.used, g.limit, g.ratio, g.untilReset); err != nil {
+	}, g.remaining, g.used, g.nearLimit, g.limit, g.ratio, g.untilReset); err != nil {
 		log.Warn("rate-limit gauge callback registration failed", "error", err)
 	}
 }
