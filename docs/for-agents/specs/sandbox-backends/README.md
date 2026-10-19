@@ -11,16 +11,14 @@ conformance suite) is implemented.** Builds on the sandbox-fleet profiles spec
 (`docs/for-agents/specs/sandbox-fleet/`, TFAC-408) and the placement design in
 `docs/for-agents/specs/horizontal-scaling/` §6.4.
 
-Scope note: multi mode only. Local mode runs the SDK runtime under bubblewrap
-(`internal/agentproc/localsandbox`) with no sidecar and no cell, and stays out
-of this interface. Putting it behind the contract would add a fourth
-implementation of nothing.
+This is for multi-tenant mode only. Local mode runs the SDK runtime with no sidecar
+and no cell, and stays out of this interface.
 
 ---
 
 ## 1. Why more than one backend
 
-Triage Factory sells the triage engine, not the isolation substrate. The gVisor
+Triage Factory's value is the triage engine, not the sandboxing. The gVisor
 cell runs on any Linux host with the capabilities a privileged container
 grants, and it is the right default for a single-machine or few-machine
 deployment. A deployment that already runs microVM infrastructure, or that
