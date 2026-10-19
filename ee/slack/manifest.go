@@ -51,8 +51,32 @@ type slackManifest struct {
 }
 
 type slackManifestDisplayInfo struct {
-	Name string `json:"name"`
+	Name            string `json:"name"`
+	Description     string `json:"description"`
+	LongDescription string `json:"long_description"`
+	BackgroundColor string `json:"background_color"`
 }
+
+// slackManifestDescription and slackManifestLongDescription are the app's
+// directory copy. Slack rejects a manifest whose description exceeds 140
+// characters or whose long_description falls outside 175–4000, so
+// manifest_test.go pins both bounds.
+const slackManifestDescription = "Mention @Triage Factory in Slack to hand work to an AI agent."
+
+const slackManifestLongDescription = `Triage Factory connects to Slack so your team can hand work to an AI agent directly.
+
+How it works
+• Mention @Triage Factory in a channel your TF team tracks.
+• An agent picks it up. It reads the thread, any files shared in it, and the repositories your team works in, then does what your team has set it up to do: fix a bug, open a pull request, review code, update a ticket, or answer a question.
+• While the agent works, the thread shows a live status line. When it finishes, it replies in the thread with what it did and a link to the full run.
+• Replies in the same thread go to the same agent, so you can correct or extend the request without mentioning the bot again.
+• If a run fails, the bot posts a short note in the thread with a link to the details.
+• Agents started by GitHub, Jira, or Linear activity can also post updates to channels your team tracks.
+
+What it reads
+The bot responds only to @mentions and to replies in threads it is already working in. It ignores everything else in the channel. A team admin decides which channels it works in, under Team Settings → Slack. It joins public channels on its own. Private channels need an /invite.`
+
+const slackManifestBackgroundColor = "#d15700"
 
 type slackManifestFeatures struct {
 	BotUser slackManifestBotUser `json:"bot_user"`
@@ -115,7 +139,12 @@ func slackWebhookPath(orgID string) string {
 // handleManifest's 409.
 func buildSlackManifest(orgName, transport, publicURL, orgID string) slackManifest {
 	m := slackManifest{
-		DisplayInformation: slackManifestDisplayInfo{Name: slackManifestName(orgName)},
+		DisplayInformation: slackManifestDisplayInfo{
+			Name:            slackManifestName(orgName),
+			Description:     slackManifestDescription,
+			LongDescription: slackManifestLongDescription,
+			BackgroundColor: slackManifestBackgroundColor,
+		},
 		Features: slackManifestFeatures{
 			BotUser: slackManifestBotUser{DisplayName: "Triage Factory", AlwaysOnline: true},
 		},
