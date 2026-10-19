@@ -136,7 +136,7 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 		// Archiving a team force-stops its work but hides nothing: it
 		// tombstones the teams row without touching memberships or
 		// tracking rows, the repo keeps being polled/profiled, and the
-		// REST read's scoping (repoProfileTrackedByViewerTeams / the
+		// REST read's scoping (repoTrackedByATeam / the
 		// team_github_repos_select RLS policy) carries no deleted_at
 		// filter — so the member still sees the repo on GET /api/repos.
 		// The WS audience must match, or their Repos page goes silently

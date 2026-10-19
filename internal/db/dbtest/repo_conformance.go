@@ -53,6 +53,9 @@ type RepositorySeeder struct {
 //   - Upsert preserves clone_status/clone_error/clone_error_kind on
 //     a re-profile (same reason).
 //   - List returns ordered "owner/repo" entries.
+//   - The tracked reads (ListTrackedSystem, ListTrackedByTeamSystem,
+//     ListTeamScoped) leave out a registry row no team tracks, which List
+//     and ListSystem keep.
 //   - CountConfigured returns the row count.
 //   - UpdateBaseBranch + UpdateCloneStatusByRef mutate only the targeted
 //     fields, and every name-keyed method folds case on owner/repo.
@@ -362,6 +365,98 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// hatch and must return everything rather than an empty page.
 		if all, _, err := s.List(ctx, orgID, TestGitHubHost, db.Unwindowed); err != nil || len(all) != 3 {
 			t.Errorf("unwindowed List = %d rows, %v; want all 3", len(all), err)
+		}
+	})
+
+	t.Run("Tracked_reads_list_only_rows_a_team_tracks", func(t *testing.T) {
+		// The registry outlives tracking: z/gone keeps its row after its only
+		// team drops it. The tracked reads leave it out, the whole-registry
+		// reads keep it, and a repository two teams track is one row.
+		s, orgID, seed := mk(t)
+		teamB := seed.Team(t, "team-b")
+		idle := seed.Team(t, "team-idle")
+		trackRepos(t, seed, orgID, seed.TeamID, "a/one", "a/two", "z/gone")
+		trackRepos(t, seed, orgID, teamB, "a/two", "b/three")
+		trackRepos(t, seed, orgID, seed.TeamID, "a/one", "a/two")
+
+		slugs := func(rows []domain.Repository) []string {
+			out := make([]string, len(rows))
+			for i, r := range rows {
+				out[i] = r.Slug()
+			}
+			return out
+		}
+		tracked := []string{"a/one", "a/two", "b/three"}
+
+		registry, total, err := s.List(ctx, orgID, TestGitHubHost, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if got, want := slugs(registry), append(append([]string{}, tracked...), "z/gone"); !equalStringSlice(got, want) || total != len(want) {
+			t.Errorf("List = %v (total %d), want the whole registry %v", got, total, want)
+		}
+
+		rows, total, err := s.ListTrackedSystem(ctx, orgID, TestGitHubHost, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("ListTrackedSystem: %v", err)
+		}
+		if got := slugs(rows); !equalStringSlice(got, tracked) || total != len(tracked) {
+			t.Errorf("ListTrackedSystem = %v (total %d), want %v", got, total, tracked)
+		}
+		// Rows, not just names: each is the registry row a point read finds.
+		for _, row := range rows {
+			stored, err := s.GetByRef(ctx, orgID, repoRef(row.Slug()))
+			if err != nil || stored == nil || stored.ID != row.ID || stored.Host != TestGitHubHost {
+				t.Errorf("ListTrackedSystem row %s (id %s) differs from the stored row %+v (err %v)", row.Slug(), row.ID, stored, err)
+			}
+		}
+		if names, err := s.ListTrackedNamesSystem(ctx, orgID, TestGitHubHost); err != nil || !equalStringSlice(names, tracked) {
+			t.Errorf("ListTrackedNamesSystem = %v, %v; want the same set as ListTrackedSystem %v", names, err, tracked)
+		}
+
+		first, total, err := s.ListTrackedSystem(ctx, orgID, TestGitHubHost, db.ListOpts{Limit: 2})
+		if err != nil {
+			t.Fatalf("ListTrackedSystem page 1: %v", err)
+		}
+		second, total2, err := s.ListTrackedSystem(ctx, orgID, TestGitHubHost, db.ListOpts{Limit: 2, Offset: 2})
+		if err != nil {
+			t.Fatalf("ListTrackedSystem page 2: %v", err)
+		}
+		if walked := append(slugs(first), slugs(second)...); !equalStringSlice(walked, tracked) || total != 3 || total2 != 3 {
+			t.Errorf("paged walk = %v (totals %d, %d), want %v with total 3 on both", walked, total, total2, tracked)
+		}
+		coRows, coTotal, err := s.ListTrackedSystem(ctx, orgID, TestGitHubHost, db.ListOpts{CountOnly: true})
+		if err != nil {
+			t.Fatalf("ListTrackedSystem count-only: %v", err)
+		}
+		AssertCountOnlyList(t, "repositories.ListTrackedSystem", len(coRows), coTotal, len(tracked))
+
+		for _, c := range []struct {
+			name, teamID string
+			want         []string
+		}{
+			{"seed team", seed.TeamID, []string{"a/one", "a/two"}},
+			{"team-b", teamB, []string{"a/two", "b/three"}},
+			{"team-idle", idle, []string{}},
+		} {
+			got, err := s.ListTrackedByTeamSystem(ctx, orgID, c.teamID, TestGitHubHost)
+			if err != nil {
+				t.Fatalf("ListTrackedByTeamSystem(%s): %v", c.name, err)
+			}
+			if got == nil || !equalStringSlice(slugs(got), c.want) {
+				t.Errorf("ListTrackedByTeamSystem(%s) = %v, want %v", c.name, got, c.want)
+			}
+		}
+
+		// The non-admin discovery read never surfaces an untracked row either.
+		// Both pools are the same connection here, so in Postgres "the
+		// viewer's teams" is every team and the set is the tracked one.
+		scoped, _, err := s.ListTeamScoped(ctx, orgID, TestGitHubHost, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("ListTeamScoped: %v", err)
+		}
+		if got := slugs(scoped); !equalStringSlice(got, tracked) {
+			t.Errorf("ListTeamScoped = %v, want %v", got, tracked)
 		}
 	})
 
@@ -981,6 +1076,20 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			if !equalStringSlice(names, c.want) {
 				t.Errorf("ListTrackedNamesSystem(%s) = %v, want %v", c.host, names, c.want)
 			}
+			trackedRows, trackedTotal, err := s.ListTrackedSystem(ctx, orgID, c.host, db.Unwindowed)
+			if err != nil {
+				t.Fatalf("ListTrackedSystem(%s): %v", c.host, err)
+			}
+			if got := listed(trackedRows, c.host); !equalStringSlice(got, c.want) || trackedTotal != len(c.want) {
+				t.Errorf("ListTrackedSystem(%s) = %v (total %d), want %v", c.host, got, trackedTotal, c.want)
+			}
+			teamRows, err := s.ListTrackedByTeamSystem(ctx, orgID, seed.TeamID, c.host)
+			if err != nil {
+				t.Fatalf("ListTrackedByTeamSystem(%s): %v", c.host, err)
+			}
+			if got := listed(teamRows, c.host); !equalStringSlice(got, c.want) {
+				t.Errorf("ListTrackedByTeamSystem(%s) = %v, want %v", c.host, got, c.want)
+			}
 			if n, err := s.CountConfigured(ctx, orgID, c.host); err != nil || n != len(c.want) {
 				t.Errorf("CountConfigured(%s) = %d, %v; want %d", c.host, n, err, len(c.want))
 			}
@@ -1056,6 +1165,10 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		check("CountConfigured", err)
 		_, err = s.ListTrackedNamesSystem(ctx, orgID, "")
 		check("ListTrackedNamesSystem", err)
+		_, _, err = s.ListTrackedSystem(ctx, orgID, "", db.Unwindowed)
+		check("ListTrackedSystem", err)
+		_, err = s.ListTrackedByTeamSystem(ctx, orgID, seed.TeamID, "")
+		check("ListTrackedByTeamSystem", err)
 		_, err = s.ListIdentitiesSystem(ctx, orgID, "")
 		check("ListIdentitiesSystem", err)
 		check("ReplaceForTeam", seed.Tracking.ReplaceForTeam(ctx, orgID, seed.TeamID, "", []domain.TeamGitHubRepo{{Owner: "octo", Repo: "other"}}))

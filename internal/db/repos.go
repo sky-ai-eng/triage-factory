@@ -91,7 +91,10 @@ func RequireRepoHost(host string) error {
 // store exposes no create of its own — and survives the last team untracking
 // it, because team_github_repos and conversation_worktrees both reference
 // this row by id and a reference must not outlive what it names.
-// ListTrackedNamesSystem is the read that means "what does TF poll".
+// ListTrackedNamesSystem is the read that means "what does TF poll", and
+// ListTrackedSystem / ListTrackedByTeamSystem are the row-shaped reads of the
+// same set for the consumers that need more than a name. List and ListSystem
+// read the whole registry, untracked rows included.
 //
 // # Scoped by GitHub host
 //
@@ -211,9 +214,10 @@ type RepositoryStore interface {
 	// around this method instead — an admin calls List (the org-wide
 	// view), never this one.
 	//
-	// Local mode (SQLite, N=1): returns the same set as List — there is
-	// no other team to scope away, mirroring the local-mode asymmetry of
-	// ListActiveJiraTeamScoped / FactoryReadStore.Entities.
+	// Local mode (SQLite, N=1): returns the same set as ListTrackedSystem —
+	// there is no other team to scope away, mirroring the local-mode
+	// asymmetry of ListActiveJiraTeamScoped / FactoryReadStore.Entities. A
+	// row no team tracks is left out in both dialects.
 	//
 	// Confined to host, like List.
 	ListTeamScoped(ctx context.Context, orgID, host string, opts ListOpts) ([]domain.Repository, int, error)
@@ -283,6 +287,9 @@ type RepositoryStore interface {
 	// before any request can have arrived). Behavior is identical
 	// to the non-System variants — same SQL, same return shape.
 
+	// ListSystem is the whole registry on host, rows no team tracks included.
+	// A consumer asking which repositories TF works with reads
+	// ListTrackedSystem instead.
 	ListSystem(ctx context.Context, orgID, host string) ([]domain.Repository, error)
 
 	// GetSystem is Get on the admin pool, for the claims-free callers that
@@ -313,6 +320,32 @@ type RepositoryStore interface {
 	// one. Handing back ids would make all four resolve straight back to the
 	// name, and the ids would be dead weight in the poll loop's hot path.
 	ListTrackedNamesSystem(ctx context.Context, orgID, host string) ([]string, error)
+
+	// ListTrackedSystem returns one page of the repository rows on host that
+	// at least one team in the org tracks, plus the unpaged total — the
+	// tracked set ListTrackedNamesSystem names, as rows. Ordered and paged
+	// like List; db.Unwindowed returns every row.
+	//
+	// Its consumers mean "the repositories TF works with" and need the row:
+	// the startup clone warm reads each one's clone URL, and the org admin's
+	// repository list renders it. A row every team has stopped tracking is
+	// left out; it stays in the registry for the references that still name
+	// it.
+	//
+	// Admin pool in Postgres, which is what lets "at least one team" reach
+	// teams the caller is not on: the app pool's team_github_repos_select
+	// policy narrows a team to the viewer's own, which is ListTeamScoped. A
+	// request handler calls this only behind an org-admin gate.
+	ListTrackedSystem(ctx context.Context, orgID, host string, opts ListOpts) ([]domain.Repository, int, error)
+
+	// ListTrackedByTeamSystem returns the repository rows on host that teamID
+	// tracks, ordered by (owner, repo, id). It is the listing half of the gate
+	// TeamGitHubReposStore.TracksRepoSystem applies: a delegated run is offered
+	// the repositories its team tracks, which are the ones `workspace add`
+	// will materialize and the git proxy will push to. Admin pool in Postgres:
+	// the caller is a run's agenthost, which has no JWT claims.
+	ListTrackedByTeamSystem(ctx context.Context, orgID, teamID, host string) ([]domain.Repository, error)
+
 	UpdateCloneStatusByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) (*domain.Repository, error)
 	GetByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error)
 	UpsertSystem(ctx context.Context, orgID string, p domain.Repository) (domain.Repository, error)

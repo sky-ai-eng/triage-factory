@@ -163,6 +163,33 @@ func TestHandleRepositories_TeamScoped(t *testing.T) {
 	}
 }
 
+// TestHandleRepositories_AdminListLeavesOutUntrackedRows pins that the org
+// admin's union is the tracked set, not the registry: a repository its only
+// team stopped tracking keeps its row but drops out of the list, while a repo
+// tracked only by a team the admin is not on stays in it.
+func TestHandleRepositories_AdminListLeavesOutUntrackedRows(t *testing.T) {
+	rig := newRepoScopeRig(t)
+	rig.replaceTeamRepos(t, rig.orgOwner, rig.teamA,
+		domain.TeamGitHubRepo{Owner: "acme", Repo: "api"},
+		domain.TeamGitHubRepo{Owner: "acme", Repo: "old"})
+	rig.replaceTeamRepos(t, rig.orgOwner, rig.teamA, domain.TeamGitHubRepo{Owner: "acme", Repo: "api"})
+	oldID := rig.repoID(t, "acme", "old") // the registry row survives untracking
+
+	owner := rig.listRepos(t, rig.orgOwner)
+	if got := listedRepoSlugs(owner); !equalSlugs(got, []string{"acme/api", "acme/web"}) || owner.Total() != 2 {
+		t.Errorf("owner (org admin) repos = %v (total %d), want the tracked set [acme/api acme/web]", got, owner.Total())
+	}
+
+	// The row is still the admin's to read by id; it is only no longer listed.
+	rec := httptest.NewRecorder()
+	req := rig.req(http.MethodGet, "/api/repos/"+oldID, rig.orgOwner, nil)
+	req.SetPathValue("id", oldID)
+	rig.s.handleRepoGet(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET the untracked row by id as the org admin = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // baseBranch reads a repository row's stored base_branch straight off the
 // admin pool, so a "the write was rejected" assertion checks the row rather
 // than trusting the status code.

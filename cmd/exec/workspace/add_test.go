@@ -247,8 +247,17 @@ func seedRepository(t *testing.T, database *db.DB, owner, repo, cloneURL, defaul
 	}
 	// Track the repo for the run's team too — materializeWorkspace gates
 	// `workspace add` on team-tracking (org-configured ≠ team-tracked), so an
-	// org-only seed would be rejected. Additive so a test seeding several repos
-	// keeps them all tracked.
+	// org-only seed would be rejected.
+	trackForRunTeam(t, database, owner, repo)
+	return row.ID
+}
+
+// trackForRunTeam adds owner/repo to the run's team's tracked set on the
+// default GitHub host. Additive so a test seeding several repos keeps them all
+// tracked.
+func trackForRunTeam(t *testing.T, database *db.DB, owner, repo string) {
+	t.Helper()
+	store := sqlitestore.New(database.Conn)
 	tracked, err := store.TeamGitHubRepos.ListForTeamSystem(context.Background(), runmode.LocalDefaultTeamID, dbtest.TestGitHubHost)
 	if err != nil {
 		t.Fatalf("list team repos: %v", err)
@@ -257,7 +266,6 @@ func seedRepository(t *testing.T, database *db.DB, owner, repo, cloneURL, defaul
 	if err := store.TeamGitHubRepos.ReplaceForTeam(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, tracked); err != nil {
 		t.Fatalf("track team repo: %v", err)
 	}
-	return row.ID
 }
 
 // repoRowID is the id of an already-seeded repository on the default GitHub

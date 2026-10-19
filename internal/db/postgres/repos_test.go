@@ -86,6 +86,23 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Errorf("orgB CountConfigured = %d, want 0", n)
 	}
 
+	// The tracked reads run on the admin pool, so the org_id filter is the
+	// only thing between orgB and orgA's tracked set — including when orgB
+	// names orgA's own team.
+	teamA := firstTeamForOrg(t, h, orgA)
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "octo", Repo: "widget"}}); err != nil {
+		t.Fatalf("track octo/widget in orgA: %v", err)
+	}
+	if got, total, err := stores.Repos.ListTrackedSystem(ctx, orgB, dbtest.TestGitHubHost, db.Unwindowed); err != nil || len(got) != 0 || total != 0 {
+		t.Errorf("orgB ListTrackedSystem = %d rows (total %d), %v; want 0 / 0", len(got), total, err)
+	}
+	if got, err := stores.Repos.ListTrackedByTeamSystem(ctx, orgB, teamA, dbtest.TestGitHubHost); err != nil || len(got) != 0 {
+		t.Errorf("orgB ListTrackedByTeamSystem(orgA's team) = %d rows, %v; want 0", len(got), err)
+	}
+	if got, _, err := stores.Repos.ListTrackedSystem(ctx, orgA, dbtest.TestGitHubHost, db.Unwindowed); err != nil || len(got) != 1 {
+		t.Errorf("orgA ListTrackedSystem = %d rows, %v; want its 1 tracked repo", len(got), err)
+	}
+
 	// UpdateBaseBranch cross-org must not touch orgA's row. The id-keyed
 	// writer is handed orgA's REAL row id under orgB's org scope, which is the
 	// only shape of this attack that survives the split: a caller who has
@@ -246,6 +263,26 @@ func TestRepositoryStore_Postgres_ListTeamScoped_RLS(t *testing.T) {
 	}
 	if got := listAs(carol); len(got) != 0 {
 		t.Errorf("teamless carol ListTeamScoped = %v, want empty", got)
+	}
+
+	// The same predicate on the admin pool counts every team in the org: the
+	// org-wide tracked set an admin's list reads, which no member's RLS view
+	// of team_github_repos reaches on its own.
+	all, total, err := stores.Repos.ListTrackedSystem(ctx, orgA, dbtest.TestGitHubHost, db.Unwindowed)
+	if err != nil {
+		t.Fatalf("ListTrackedSystem: %v", err)
+	}
+	if got, want := repoIDs(all), []string{"acme/api", "acme/web"}; !pgStrsEqual(got, want) || total != 2 {
+		t.Errorf("ListTrackedSystem = %v (total %d), want %v", got, total, want)
+	}
+	for team, want := range map[string][]string{teamA: {"acme/api"}, teamB: {"acme/web"}} {
+		rows, err := stores.Repos.ListTrackedByTeamSystem(ctx, orgA, team, dbtest.TestGitHubHost)
+		if err != nil {
+			t.Fatalf("ListTrackedByTeamSystem(%s): %v", team, err)
+		}
+		if got := repoIDs(rows); !pgStrsEqual(got, want) {
+			t.Errorf("ListTrackedByTeamSystem(%s) = %v, want %v", team, got, want)
+		}
 	}
 }
 

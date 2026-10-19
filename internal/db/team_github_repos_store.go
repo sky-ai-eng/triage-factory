@@ -143,7 +143,7 @@ type TeamGitHubReposStore interface {
 	// member of a team that tracks the repo, matched case-insensitively
 	// on both fields. This deliberately mirrors the REST read's
 	// visibility (org admins get the org-wide union, members their teams'
-	// tracked sets — the repoProfileTrackedByViewerTeams semi-join behind
+	// tracked sets — the repoTrackedByATeam semi-join behind
 	// ListTeamScoped), because the websocket hub scopes connections on
 	// (org, user) only and the repoevent.Notifier fans one event per
 	// returned id onto that axis. Mirroring includes the archived-team
