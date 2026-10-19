@@ -103,6 +103,10 @@ type Identity struct {
 	// carries the ranges and decides nothing about them: matching a request's
 	// address against them belongs where that address is resolved.
 	AllowedCIDRs []string
+	// SSOProviderID is the SSO provider the credential that minted this token
+	// was signed in through, "" for a GitHub sign-in. The token carries it the
+	// way a session does, so an org that requires SSO judges both alike.
+	SSOProviderID string
 }
 
 // mintLockSalt is this package's hashtextextended salt (see the registry in
@@ -175,6 +179,11 @@ func scanToken(scan func(...any) error) (Token, error) {
 // that outlives the current cap is a fact about what was asked for, and the cap
 // in force at this moment is recorded in the audit row instead.
 //
+// ssoProviderID is the SSO provider the minting credential was signed in
+// through ("" for GitHub, stored NULL). A token inherits it rather than
+// starting from none, so a session that could not reach an org that requires
+// SSO cannot mint a credential that can.
+//
 // The whole thing is one transaction, and the audit row is inside it: a token
 // that exists without a log line is a credential nobody can account for. The
 // count-then-insert is serialized deployment-wide by an advisory lock on
@@ -184,6 +193,7 @@ func (s *Store) MintSystem(
 	userID, orgID, name string,
 	expiresAt *time.Time,
 	allowedCIDRs []string,
+	ssoProviderID string,
 	actorForAudit string,
 ) (Token, string, error) {
 	cidrs, err := normalizeCIDRs(allowedCIDRs)
@@ -242,14 +252,14 @@ func (s *Store) MintSystem(
 		row, err := scanToken(tx.QueryRowContext(ctx, `
 			WITH ins AS (
 				INSERT INTO public.user_api_tokens
-					(user_id, org_id, name, token_hash, token_prefix, allowed_cidrs, expires_at)
-				VALUES ($1, $2, $3, $4, $5, $6::text[]::cidr[], $7)
+					(user_id, org_id, name, token_hash, token_prefix, allowed_cidrs, expires_at, sso_provider_id)
+				VALUES ($1, $2, $3, $4, $5, $6::text[]::cidr[], $7, NULLIF($8, ''))
 				RETURNING *
 			)
 			SELECT `+tokenColumns+`
 			  FROM ins t
 			  LEFT JOIN public.org_settings os ON os.org_id = t.org_id
-		`, userID, orgID, name, hash, prefix, cidrArg, expiresAt).Scan)
+		`, userID, orgID, name, hash, prefix, cidrArg, expiresAt, ssoProviderID).Scan)
 		if err != nil {
 			return fmt.Errorf("insert api token: %w", err)
 		}
@@ -294,7 +304,8 @@ func (s *Store) LookupSystem(ctx context.Context, raw string) (*Identity, error)
 	err := s.db.QueryRowContext(ctx, `
 		SELECT t.id::text, t.user_id::text, t.org_id::text,
 		       COALESCE(em.email, ''),
-		       array_to_json(t.allowed_cidrs)::text
+		       array_to_json(t.allowed_cidrs)::text,
+		       COALESCE(t.sso_provider_id, '')
 		  FROM public.user_api_tokens t
 		  LEFT JOIN public.org_settings os ON os.org_id = t.org_id
 		  LEFT JOIN LATERAL (
@@ -306,7 +317,7 @@ func (s *Store) LookupSystem(ctx context.Context, raw string) (*Identity, error)
 		  ) em ON true
 		 WHERE t.token_hash = $1
 		   AND `+liveTokenPredicate+`
-	`, hashOf(raw)).Scan(&id.TokenID, &id.UserID, &id.OrgID, &id.Email, &cidrsJSON)
+	`, hashOf(raw)).Scan(&id.TokenID, &id.UserID, &id.OrgID, &id.Email, &cidrsJSON, &id.SSOProviderID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -322,34 +333,34 @@ func (s *Store) LookupSystem(ctx context.Context, raw string) (*Identity, error)
 }
 
 // IsLiveSystem answers LookupSystem's question for a token already known by
-// id: is this row still one that would authenticate. It exists because the
-// websocket revalidation sweep holds a token ID and not the secret — a
-// connection stashes the id at handshake, never the plaintext, which exists in
-// exactly one place and this is not it — and so cannot ask the question the way
-// the request path does.
+// id: is this row still one that would authenticate, and if so, which SSO
+// provider its credential was signed in through ("" for GitHub). It exists
+// because the websocket revalidation sweep holds a token ID and not the secret
+// — a connection stashes the id at handshake, never the plaintext, which exists
+// in exactly one place and this is not it — and so cannot ask the question the
+// way the request path does.
 //
 // False means the row is gone, revoked, expired, or past the org's current cap;
 // an error means the database failed and is not that answer, so a caller
 // deciding whether to disconnect somebody should treat it as "ask again later"
 // rather than as a revocation.
-func (s *Store) IsLiveSystem(ctx context.Context, tokenID string) (bool, error) {
+func (s *Store) IsLiveSystem(ctx context.Context, tokenID string) (live bool, ssoProviderID string, err error) {
 	if !isValidUUID(tokenID) {
-		return false, nil
+		return false, "", nil
 	}
-	var live bool
-	err := s.db.QueryRowContext(ctx, `
-		SELECT true
+	err = s.db.QueryRowContext(ctx, `
+		SELECT true, COALESCE(t.sso_provider_id, '')
 		  FROM `+tokenFrom+`
 		 WHERE t.id = $1
 		   AND `+liveTokenPredicate+`
-	`, tokenID).Scan(&live)
+	`, tokenID).Scan(&live, &ssoProviderID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return false, "", nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("probe api token liveness: %w", err)
+		return false, "", fmt.Errorf("probe api token liveness: %w", err)
 	}
-	return live, nil
+	return live, ssoProviderID, nil
 }
 
 // ListForUserSystem returns the user's un-revoked tokens, newest first, with

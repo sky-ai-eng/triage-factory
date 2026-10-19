@@ -52,7 +52,7 @@ func TestStore_CreateLookupRoundtrip(t *testing.T) {
 	jwtExp := time.Now().Add(1 * time.Hour).UTC()
 	sessExp := time.Now().Add(30 * 24 * time.Hour).UTC()
 
-	created, err := store.CreateSystem(ctx, uid, jwt, refresh, jwtExp, sessExp, "test-ua", "127.0.0.1", uuid.NullUUID{})
+	created, err := store.CreateSystem(ctx, uid, uid, "", jwt, refresh, jwtExp, sessExp, "test-ua", "127.0.0.1", uuid.NullUUID{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -82,6 +82,44 @@ func TestStore_CreateLookupRoundtrip(t *testing.T) {
 	if got.IPAddr != "127.0.0.1" {
 		t.Errorf("ip_addr: got %q want %q", got.IPAddr, "127.0.0.1")
 	}
+	if got.AuthUserID != uid {
+		t.Errorf("auth_user_id: got %s want %s", got.AuthUserID, uid)
+	}
+	if got.SSOProviderID != "" {
+		t.Errorf("sso_provider_id for a GitHub sign-in: got %q want \"\"", got.SSOProviderID)
+	}
+}
+
+// TestStore_SSOProviderRoundtrip pins that the SSO provider a session was
+// signed in through reads back from both projections that scan a session — the
+// per-request lookup and the active list — since an org that requires SSO is
+// judged from that value.
+func TestStore_SSOProviderRoundtrip(t *testing.T) {
+	store, _, uid := newStoreForTest(t)
+	ctx := context.Background()
+
+	created, err := store.CreateSystem(ctx, uid, uid, "provider-abc", "j", "r",
+		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "", uuid.NullUUID{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created.SSOProviderID != "provider-abc" {
+		t.Errorf("Create returned provider %q", created.SSOProviderID)
+	}
+	got, err := store.LookupSystem(ctx, created.ID)
+	if err != nil || got == nil {
+		t.Fatalf("Lookup: (%v, %v)", got, err)
+	}
+	if got.SSOProviderID != "provider-abc" {
+		t.Errorf("Lookup provider: got %q", got.SSOProviderID)
+	}
+	list, err := store.ListActiveForUserSystem(ctx, uid)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("ListActive: (%d, %v)", len(list), err)
+	}
+	if list[0].SSOProviderID != "provider-abc" || list[0].AuthUserID != uid {
+		t.Errorf("ListActive identity: got (%q, %s)", list[0].SSOProviderID, list[0].AuthUserID)
+	}
 }
 
 func TestStore_CiphertextAtRest(t *testing.T) {
@@ -91,7 +129,7 @@ func TestStore_CiphertextAtRest(t *testing.T) {
 	ctx := context.Background()
 
 	plainJWT := "header.payload.signature"
-	created, err := store.CreateSystem(ctx, uid, plainJWT, "ref",
+	created, err := store.CreateSystem(ctx, uid, uid, "", plainJWT, "ref",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "", uuid.NullUUID{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -133,7 +171,7 @@ func TestStore_Lookup_NotFound(t *testing.T) {
 func TestStore_Lookup_FiltersRevoked(t *testing.T) {
 	store, _, uid := newStoreForTest(t)
 	ctx := context.Background()
-	c, err := store.CreateSystem(ctx, uid, "j", "r",
+	c, err := store.CreateSystem(ctx, uid, uid, "", "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "", uuid.NullUUID{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -155,7 +193,7 @@ func TestStore_Lookup_FiltersExpired(t *testing.T) {
 	// still future, expires_at in the past forces re-login.
 	store, h, uid := newStoreForTest(t)
 	ctx := context.Background()
-	c, err := store.CreateSystem(ctx, uid, "j", "r",
+	c, err := store.CreateSystem(ctx, uid, uid, "", "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "", uuid.NullUUID{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -184,7 +222,7 @@ func TestStore_Lookup_FiltersExpired(t *testing.T) {
 func TestStore_UpdateJWT(t *testing.T) {
 	store, _, uid := newStoreForTest(t)
 	ctx := context.Background()
-	c, err := store.CreateSystem(ctx, uid, "old-jwt", "old-ref",
+	c, err := store.CreateSystem(ctx, uid, uid, "", "old-jwt", "old-ref",
 		time.Now().Add(1*time.Minute), time.Now().Add(24*time.Hour), "", "", uuid.NullUUID{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -213,7 +251,7 @@ func TestStore_UpdateJWT(t *testing.T) {
 func TestStore_UpdateJWT_OnRevokedReturnsErr(t *testing.T) {
 	store, _, uid := newStoreForTest(t)
 	ctx := context.Background()
-	c, err := store.CreateSystem(ctx, uid, "j", "r",
+	c, err := store.CreateSystem(ctx, uid, uid, "", "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "", uuid.NullUUID{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -231,7 +269,7 @@ func TestStore_Revoke_PreservesRow(t *testing.T) {
 	// Acceptance bullet: logout flips revoked_at; row persists for audit.
 	store, h, uid := newStoreForTest(t)
 	ctx := context.Background()
-	c, err := store.CreateSystem(ctx, uid, "j", "r",
+	c, err := store.CreateSystem(ctx, uid, uid, "", "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "", uuid.NullUUID{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -253,7 +291,7 @@ func TestStore_Revoke_PreservesRow(t *testing.T) {
 func TestStore_Revoke_Idempotent(t *testing.T) {
 	store, _, uid := newStoreForTest(t)
 	ctx := context.Background()
-	c, err := store.CreateSystem(ctx, uid, "j", "r",
+	c, err := store.CreateSystem(ctx, uid, uid, "", "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "", uuid.NullUUID{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -269,7 +307,7 @@ func TestStore_Revoke_Idempotent(t *testing.T) {
 func TestStore_TouchLastSeen(t *testing.T) {
 	store, h, uid := newStoreForTest(t)
 	ctx := context.Background()
-	c, err := store.CreateSystem(ctx, uid, "j", "r",
+	c, err := store.CreateSystem(ctx, uid, uid, "", "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "", uuid.NullUUID{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -300,11 +338,11 @@ func TestStore_ListActiveForUser_AndRevokeAll(t *testing.T) {
 	// Three sessions for the same user. Mix of states:
 	//   active1, active2 — show up in ListActive
 	//   revoked          — pre-revoked, filtered out
-	active1, _ := store.CreateSystem(ctx, uid, "jwt-1", "ref-1",
+	active1, _ := store.CreateSystem(ctx, uid, uid, "", "jwt-1", "ref-1",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "ua-1", "1.1.1.1", uuid.NullUUID{})
-	active2, _ := store.CreateSystem(ctx, uid, "jwt-2", "ref-2",
+	active2, _ := store.CreateSystem(ctx, uid, uid, "", "jwt-2", "ref-2",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "ua-2", "2.2.2.2", uuid.NullUUID{})
-	revoked, _ := store.CreateSystem(ctx, uid, "jwt-3", "ref-3",
+	revoked, _ := store.CreateSystem(ctx, uid, uid, "", "jwt-3", "ref-3",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "", uuid.NullUUID{})
 	if err := store.RevokeSystem(ctx, revoked.ID); err != nil {
 		t.Fatalf("pre-revoke: %v", err)
@@ -312,7 +350,7 @@ func TestStore_ListActiveForUser_AndRevokeAll(t *testing.T) {
 
 	// Another user's session — must NOT appear in our list.
 	other := seedUser(t, h)
-	otherSess, _ := store.CreateSystem(ctx, other, "jwt-other", "ref-other",
+	otherSess, _ := store.CreateSystem(ctx, other, other, "", "jwt-other", "ref-other",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "", uuid.NullUUID{})
 
 	got, err := store.ListActiveForUserSystem(ctx, uid)
@@ -404,7 +442,7 @@ func TestStore_CreateLookupRoundtrip_WithActiveOrg(t *testing.T) {
 	orgID := seedOrg(t, h, uid, "active-org-test")
 	active := uuid.NullUUID{UUID: orgID, Valid: true}
 
-	created, err := store.CreateSystem(ctx, uid, "j", "r",
+	created, err := store.CreateSystem(ctx, uid, uid, "", "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "", active)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -432,7 +470,7 @@ func TestStore_CreateLookupRoundtrip_NullActiveOrg(t *testing.T) {
 	store, _, uid := newStoreForTest(t)
 	ctx := context.Background()
 
-	created, err := store.CreateSystem(ctx, uid, "j", "r",
+	created, err := store.CreateSystem(ctx, uid, uid, "", "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "", uuid.NullUUID{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -461,7 +499,7 @@ func TestStore_UpdateActiveOrg(t *testing.T) {
 	orgA := seedOrg(t, h, uid, "org-a")
 	orgB := seedOrg(t, h, uid, "org-b")
 
-	created, err := store.CreateSystem(ctx, uid, "j", "r",
+	created, err := store.CreateSystem(ctx, uid, uid, "", "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "",
 		uuid.NullUUID{UUID: orgA, Valid: true})
 	if err != nil {
@@ -488,7 +526,7 @@ func TestStore_UpdateActiveOrg_FromNull(t *testing.T) {
 	store, h, uid := newStoreForTest(t)
 	ctx := context.Background()
 
-	created, err := store.CreateSystem(ctx, uid, "j", "r",
+	created, err := store.CreateSystem(ctx, uid, uid, "", "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "", uuid.NullUUID{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -516,7 +554,7 @@ func TestStore_UpdateActiveOrg_OnRevokedReturnsNoRows(t *testing.T) {
 	ctx := context.Background()
 
 	orgID := seedOrg(t, h, uid, "rev-org")
-	created, err := store.CreateSystem(ctx, uid, "j", "r",
+	created, err := store.CreateSystem(ctx, uid, uid, "", "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "", uuid.NullUUID{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -548,7 +586,7 @@ func TestStore_RevokeForUserInOrg(t *testing.T) {
 	// clear message rather than as a confusing nil-deref later in the test.
 	mustCreate := func(user uuid.UUID, jwt string, org uuid.UUID) *Session {
 		t.Helper()
-		s, err := store.CreateSystem(ctx, user, jwt, "r",
+		s, err := store.CreateSystem(ctx, user, user, "", jwt, "r",
 			time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "",
 			uuid.NullUUID{UUID: org, Valid: true})
 		if err != nil {
@@ -631,11 +669,11 @@ func TestStore_ReapExpired(t *testing.T) {
 	//   keep — fresh, non-revoked
 	//   reap-rev — revoked 31 days ago (older than retention)
 	//   reap-exp — expired 31 days ago, never revoked
-	keep, _ := store.CreateSystem(ctx, uid, "j", "r",
+	keep, _ := store.CreateSystem(ctx, uid, uid, "", "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "", uuid.NullUUID{})
-	reapRev, _ := store.CreateSystem(ctx, uid, "j", "r",
+	reapRev, _ := store.CreateSystem(ctx, uid, uid, "", "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "", uuid.NullUUID{})
-	reapExp, _ := store.CreateSystem(ctx, uid, "j", "r",
+	reapExp, _ := store.CreateSystem(ctx, uid, uid, "", "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "", uuid.NullUUID{})
 
 	if _, err := h.AdminDB.Exec(

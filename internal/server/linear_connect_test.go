@@ -437,6 +437,22 @@ func TestLinearConnect_ReturnTo(t *testing.T) {
 }
 
 func TestLinearConnect_Refusals(t *testing.T) {
+	// The org started requiring an SSO the session did not come through while
+	// the person was at Linear. Refused before the code is exchanged, so there
+	// is no grant to revoke, and redirected like every other refusal here: the
+	// org's page is where the app offers its sign-in.
+	t.Run("sso required", func(t *testing.T) {
+		r := newLinearConnectRig(t)
+		ext := &barringLoginExt{}
+		r.s.loginExt = ext
+		cookie, state := r.startConnect(t, "/setup")
+		ext.bar(runmode.LocalDefaultOrgID)
+		expectConnectError(t, r.get(t, linearConnectCallback(url.Values{"code": {"good-code"}, "state": {state}}), cookie), "sso_required", "/setup")
+		if got := r.oauth.Revoked(); len(got) != 0 {
+			t.Errorf("revoked %v, want nothing: no code was exchanged", got)
+		}
+		r.assertNoUserCredential(t)
+	})
 	t.Run("workspace mismatch revokes the pair", func(t *testing.T) {
 		r := newLinearConnectRig(t)
 		cookie, state := r.startConnect(t, "/setup")

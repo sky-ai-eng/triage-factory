@@ -102,6 +102,9 @@ func (s *Server) handleFleetPlacement(w http.ResponseWriter, r *http.Request) {
 	if !s.az.RequireOrgAdminRole(w, r, orgID, claims.Subject) {
 		return
 	}
+	if s.refuseSSOBarred(w, r, orgID) {
+		return
+	}
 
 	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
 	if kind == "" {

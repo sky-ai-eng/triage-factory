@@ -206,15 +206,24 @@ func (s *Server) handleAPITokenCreate(w http.ResponseWriter, r *http.Request) {
 		forbidden(w, "an API token may only mint tokens in its own org; use a session, or a token issued for that org")
 		return
 	}
+	// A credential barred from the org is refused here rather than handed a
+	// token it could not use: the new token inherits this request's sign-in,
+	// so it would be barred from the org on its first call.
+	if s.refuseSSOBarred(w, r, orgID) {
+		return
+	}
 
 	if !s.checkTokenAgeCap(w, r, orgID, expiresAt) {
 		return
 	}
 
 	// The actor is the caller: a self-mint records the principal who asked,
-	// which for this route is always the token's own owner.
+	// which for this route is always the token's own owner. The new token is
+	// signed in however the minting credential was — a session's provider, or
+	// the minting token's own inherited one — so a token is never a way to
+	// reach an org that requires SSO without having come through it.
 	tokenRow, plaintext, err := store.MintSystem(
-		r.Context(), userID, orgID, name, expiresAt, cidrs, userID)
+		r.Context(), userID, orgID, name, expiresAt, cidrs, httpx.SignInProviderFrom(r.Context()), userID)
 	switch {
 	case errors.Is(err, apitokens.ErrTokenLimit):
 		conflict(w, err.Error())

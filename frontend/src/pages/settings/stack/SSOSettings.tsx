@@ -477,6 +477,13 @@ function DomainRow({
 }
 
 // ── Part 4: require SSO (enforcement) + break-glass ─────────────────────────
+
+// What turning the requirement on does, said once for the hint and the
+// confirm alike: it covers every member, whatever their email, and existing
+// sessions and tokens included.
+const REQUIRE_SSO_EFFECT =
+  'Everyone must sign in through your identity provider to use this organization, except break-glass accounts. People signed in any other way lose access on their next request.'
+
 function EnforcementBlock({
   resp,
   setResp,
@@ -515,9 +522,7 @@ function EnforcementBlock({
     // Guard the ON direction in the UI too (the switch is disabled when it can't
     // enforce, but a confirm on the irreversible-feeling action is worth it).
     if (next) {
-      const ok = window.confirm(
-        'Require SSO for your verified domains? Members on those domains will no longer be able to sign in with GitHub — only via SSO. Break-glass principals (below) keep GitHub access so you can recover.',
-      )
+      const ok = window.confirm(REQUIRE_SSO_EFFECT)
       if (!ok) return
     }
     setToggling(true)
@@ -530,8 +535,9 @@ function EnforcementBlock({
       setResp(updated)
       toast.success(next ? 'SSO is now required' : 'SSO is no longer required')
     } catch (e) {
-      // The 409 gating messages ("enable the connection first", etc.) surface
-      // verbatim — a race where the connection changed under the admin.
+      // The 409 gating messages ("enable the connection first", "sign in
+      // through single sign-on … before requiring it", etc.) surface verbatim:
+      // the server is the one that knows how this admin is signed in.
       toast.error(httpErrorMessage(e, 'Could not update SSO enforcement.'))
     } finally {
       setToggling(false)
@@ -540,10 +546,7 @@ function EnforcementBlock({
 
   return (
     <div className="space-y-3">
-      <BlockHeader
-        title="Require SSO"
-        hint="Make SSO mandatory for your verified domains. Members on those domains must sign in via SSO instead of GitHub. Off-domain users (e.g. invited externals) are unaffected."
-      />
+      <BlockHeader title="Require SSO" hint={REQUIRE_SSO_EFFECT} />
 
       <div className="flex items-center justify-between gap-4 rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40 px-4 py-3">
         <div className="min-w-0">

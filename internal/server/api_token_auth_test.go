@@ -28,7 +28,7 @@ import (
 func (r *authRig) mintToken(userID, orgID uuid.UUID, name string, cidrs ...string) (apitokens.Token, string) {
 	r.t.Helper()
 	tok, plaintext, err := r.srv.authDeps.apiTokens.MintSystem(
-		context.Background(), userID.String(), orgID.String(), name, nil, cidrs, userID.String())
+		context.Background(), userID.String(), orgID.String(), name, nil, cidrs, "", userID.String())
 	if err != nil {
 		r.t.Fatalf("mint token: %v", err)
 	}

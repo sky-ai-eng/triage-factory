@@ -80,6 +80,9 @@ func (s *Server) handleFleetQueue(w http.ResponseWriter, r *http.Request) {
 	if !s.az.RequireOrgAdminRole(w, r, orgID, claims.Subject) {
 		return
 	}
+	if s.refuseSSOBarred(w, r, orgID) {
+		return
+	}
 
 	shares, err := s.fleetQueue.FleetQueueShares(r.Context())
 	if err != nil {

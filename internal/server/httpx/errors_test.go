@@ -135,6 +135,26 @@ func TestRequireOrg_Envelope(t *testing.T) {
 	}
 }
 
+// TestRequireOrg_BarredOrg pins the other no-org answer: a credential the
+// middleware found barred from its org gets 403 SSO_REQUIRED rather than the
+// 409 that would send the client off to pick an org it already has, and the
+// barred org never surfaces as the request's org.
+func TestRequireOrg_BarredOrg(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	req = req.WithContext(WithBarredOrg(req.Context(), "11111111-1111-1111-1111-111111111111"))
+	if orgID, ok := RequireOrg(rec, req); ok || orgID != "" {
+		t.Fatalf("RequireOrg on a barred org = (%q, %v), want (\"\", false)", orgID, ok)
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", rec.Code)
+	}
+	items := decodeEnvelope(t, rec)
+	if len(items) != 1 || items[0].Reason != ReasonSSORequired || items[0].Field != "" {
+		t.Errorf("items = %+v, want one SSO_REQUIRED with no field", items)
+	}
+}
+
 // TestInternalError_Envelope covers the two contracts InternalError must keep
 // while adopting the envelope: local mode exposes the raw error, multi mode
 // redacts it to a generic message (raw driver strings must not reach other

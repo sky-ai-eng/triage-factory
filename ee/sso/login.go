@@ -60,6 +60,36 @@ func (le *loginExt) TrustsSSOEmail(ctx context.Context, providerID, email string
 	return route != nil && route.ProviderID == providerID, nil
 }
 
+// SSOGate answers core's org-access question for "Require SSO": orgID is
+// barred to a credential signed in through signInProviderID unless the org has
+// no enabled, enforced connection, that connection is the one the credential
+// came through, the org is not licensed for SSO, or userID is break-glass
+// there. Each read is the admin pool's, made on every call: the requester may
+// be the one the org is about to refuse, and a cached answer is a window in
+// which a requirement just turned on would not apply.
+func (le *loginExt) SSOGate(ctx context.Context, orgID, userID, signInProviderID string) (server.SSOGateResult, error) {
+	// The licence check is in memory, so it goes first: an org without SSO is
+	// answered without the read every request would otherwise pay.
+	if runmode.Current() == runmode.ModeLocal || !entitlements.For(orgID).Has(entitlements.FeatureSSO) {
+		return server.SSOGateResult{}, nil
+	}
+	providerID, err := le.stores().Connections.EnforcedProviderForOrg(ctx, orgID)
+	if err != nil {
+		return server.SSOGateResult{}, err
+	}
+	if providerID == "" || providerID == signInProviderID {
+		return server.SSOGateResult{}, nil
+	}
+	isBG, err := le.stores().BreakGlass.IsBreakGlass(ctx, orgID, userID)
+	if err != nil {
+		return server.SSOGateResult{}, err
+	}
+	if isBG {
+		return server.SSOGateResult{}, nil
+	}
+	return server.SSOGateResult{Barred: true, StartURL: ssoStartURL(providerID, "/")}, nil
+}
+
 // StartSSO handles GET /api/auth/oauth/saml — the SP-initiated SAML start.
 // Given a TF-registered provider_id it POSTs GoTrue's /sso and forwards the
 // 303 to the IdP. A non-"saml" provider is declined (core reports it).

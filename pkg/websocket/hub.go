@@ -561,6 +561,51 @@ func (h *Hub) RevalidateTokens(isValid func(tokenID string) bool) int {
 	return h.revalidateBy(func(c *client) string { return c.tokenID }, isValid, "api token revoked")
 }
 
+// RevalidateOrgAccess closes every locally-connected socket whose identity
+// fails isAllowed, with CloseMembershipChanged: the credential is still good,
+// but the org the connection is scoped to no longer admits it (an org that
+// requires SSO the credential was not signed in through). The client refreshes
+// its view of its orgs and re-handshakes, as it does on a removal, and the
+// handshake answers for itself.
+//
+// isAllowed is called once per DISTINCT identity — the credential together
+// with the user and org it was scoped to at handshake, since one session's
+// tabs can hold sockets in different orgs after a switch. Connections with no
+// credential or no org (unscoped, local mode) are skipped. Returns the number
+// of connections closed.
+//
+// Nil-receiver-safe (returns 0), matching the rest of this type.
+func (h *Hub) RevalidateOrgAccess(isAllowed func(ConnIdentity) bool) int {
+	if h == nil {
+		return 0
+	}
+	h.mu.RLock()
+	byIdentity := make(map[ConnIdentity][]*client)
+	for c := range h.clients {
+		if (c.sid == "" && c.tokenID == "") || c.userID == "" || c.orgID == "" {
+			continue
+		}
+		id := ConnIdentity{UserID: c.userID, OrgID: c.orgID, SessionID: c.sid, TokenID: c.tokenID}
+		byIdentity[id] = append(byIdentity[id], c)
+	}
+	h.mu.RUnlock()
+
+	var closed int
+	for id, clients := range byIdentity {
+		if isAllowed(id) {
+			continue
+		}
+		for _, c := range clients {
+			go func(c *client) {
+				// Best-effort, as in revalidateBy.
+				_ = c.conn.Close(CloseMembershipChanged, "organization requires single sign-on")
+			}(c)
+		}
+		closed += len(clients)
+	}
+	return closed
+}
+
 // revalidateBy is the shared sweep: group live connections by the credential
 // credOf reads off each, ask isValid once per distinct value, and close every
 // connection under one that fails. A client whose credOf is empty carries no

@@ -56,6 +56,17 @@ type LoginExtension interface {
 	// trusting the address.
 	TrustsSSOEmail(ctx context.Context, providerID, email string) (bool, error)
 
+	// SSOGate is the org-access half of "Require SSO": whether orgID is barred
+	// to a request whose principal is userID and whose credential — session or
+	// API token — was signed in through signInProviderID ("" for GitHub). An org
+	// is barred when it requires SSO through an enabled connection, holds the
+	// sso entitlement, the credential did not come through that connection, and
+	// the principal is not break-glass there. StartURL, set only when barred, is
+	// where that org's sign-in begins. It is read on every request with no
+	// cache, because a cache is a window in which a requirement just turned on
+	// does not apply; core fails closed on an error. The no-op never bars.
+	SSOGate(ctx context.Context, orgID, userID, signInProviderID string) (SSOGateResult, error)
+
 	// IdPForProviders is the read-side seam: for each SSO provider id that
 	// backs one of a principal's login identities, which identity-provider
 	// product it is (the closed vocabulary the extension's connection store
@@ -89,6 +100,12 @@ type LoginResolved struct {
 	IsSSO         bool
 }
 
+// SSOGateResult is SSOGate's answer. StartURL is empty unless Barred.
+type SSOGateResult struct {
+	Barred   bool
+	StartURL string
+}
+
 // noopLoginExtension is the default when no extension is registered — SSO
 // off. Every method declines.
 type noopLoginExtension struct{}
@@ -107,6 +124,10 @@ func (noopLoginExtension) OnLoginResolved(http.ResponseWriter, *http.Request, Lo
 
 func (noopLoginExtension) TrustsSSOEmail(context.Context, string, string) (bool, error) {
 	return false, nil
+}
+
+func (noopLoginExtension) SSOGate(context.Context, string, string, string) (SSOGateResult, error) {
+	return SSOGateResult{}, nil
 }
 
 func (noopLoginExtension) IdPForProviders(context.Context, []string) (map[string]string, error) {

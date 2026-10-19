@@ -1084,6 +1084,7 @@ func (s *Server) routes() {
 			}
 			return s.authDeps.sessions.UpdateActiveOrgSystem(ctx, sessID, orgID)
 		},
+		refuseSSOBarred: s.refuseSSOBarred,
 	}
 	s.apiMutating("POST /api/invites/list", ih.handleInviteList)
 	s.apiMutating("POST /api/invites", ih.handleInviteCreate)
