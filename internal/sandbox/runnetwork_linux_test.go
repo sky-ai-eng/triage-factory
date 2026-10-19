@@ -253,7 +253,7 @@ func TestRunNetwork_AdmitJailPortsCap(t *testing.T) {
 
 	first := make([]int, MaxJailPorts)
 	for i := range first {
-		first[i] = 1000 + i
+		first[i] = 2000 + i
 	}
 	if err := net.AdmitJailPorts(ctx, first); err != nil {
 		t.Fatalf("admission up to the cap: %v", err)

@@ -396,9 +396,10 @@ func (h *RunProxyHandle) GitProxy() (url, token string) {
 }
 
 // JailEndpoints returns the "host:port" listeners the sandbox env this handle
-// produced points the jail at. They are the only ports of the gateway the jail
-// is admitted to; every other listener of the run — the LLM proxy, and on the
-// sidecar the API proxies its own clients use — stays closed to the jail.
+// produced points the jail at. With the gh injector the sidecar adds beside
+// them, they are the only ports of the gateway the jail is admitted to; every
+// other listener of the run — the LLM proxy, and on the sidecar the API
+// proxies its own clients use — stays closed to the jail.
 func (h *RunProxyHandle) JailEndpoints() []string {
 	if h == nil || h.p == nil {
 		return nil
@@ -662,7 +663,11 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 		}
 		bundle.git = gitSrv
 		bundle.gitProxyURL, bundle.gitProxyToken = gitProxyURL, gitProxyToken
-		bundle.jailEndpoints = append(bundle.jailEndpoints, strings.TrimPrefix(gitProxyURL, "http://"))
+		// The jail's git dials this listener only when the shared origin does
+		// not carry git; otherwise the origin's own endpoint covers it.
+		if !routesGitAtSharedOrigin(git.SharedOriginHost, git.SharedOriginCAPath) {
+			bundle.jailEndpoints = append(bundle.jailEndpoints, strings.TrimPrefix(gitProxyURL, "http://"))
+		}
 		gitPairs = append(gitPairs, proxyPairs...)
 		// The proxy owns push capture for this run: it observes each push's
 		// actual upstream outcome (artifact on 2xx, audit failure row
@@ -1060,15 +1065,21 @@ func gitProxyPairs(proxyURL, upstream, incomingToken, sharedOriginHost, sharedOr
 	creds := gitProxyBasicUser + ":" + incomingToken
 	extraHeader := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(creds))
 
-	// The shared origin needs both halves to be usable — an address with no CA
-	// would route git at a TLS listener it cannot verify, which is worse than
-	// not routing it there at all. Both-or-neither, so a half-wired caller
-	// degrades to the proxy's own address rather than to a broken remote.
-	if sharedOriginHost == "" || sharedOriginCAPath == "" {
+	if !routesGitAtSharedOrigin(sharedOriginHost, sharedOriginCAPath) {
 		return appendGitProxyPairs(nil, base, upstreamPrefix, upstream, extraHeader, "", includeSSH)
 	}
 	base = "https://" + sharedOriginHost + "/"
 	return appendGitProxyPairs(nil, base, upstreamPrefix, upstream, extraHeader, sharedOriginCAPath, includeSSH)
+}
+
+// routesGitAtSharedOrigin reports whether the sandbox's git is routed at the
+// shared origin rather than at the git proxy's own address. The shared origin
+// needs both halves to be usable — an address with no CA would route git at a
+// TLS listener it cannot verify, which is worse than not routing it there at
+// all. Both-or-neither, so a half-wired caller degrades to the proxy's own
+// address rather than to a broken remote.
+func routesGitAtSharedOrigin(sharedOriginHost, sharedOriginCAPath string) bool {
+	return sharedOriginHost != "" && sharedOriginCAPath != ""
 }
 
 func appendGitProxyPairs(pairs [][2]string, base, upstreamPrefix, upstream, extraHeader, caPath string, includeSSH bool) [][2]string {

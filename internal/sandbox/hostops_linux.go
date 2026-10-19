@@ -131,6 +131,14 @@ func (hostOps) TeardownNetwork(ctx context.Context, state NetworkState) error {
 			fmt.Fprintf(os.Stderr, "sandbox: teardown egress rule: %v\n", err)
 		}
 	}
+	// Then any rule for this gateway the state did not record: an admission
+	// whose reply never reached the orchestrator installed rules nobody kept.
+	// Left behind, such an ACCEPT outlives its veth and opens its port to the
+	// next network given the same veth name. The subnet index is still held
+	// here, so nothing else can own a rule naming this gateway.
+	if state.HostIP != "" {
+		reapEgressForGateway(ctx, state.HostIP)
+	}
 	netSt := &netState{
 		netnsName:   state.NetnsName,
 		netnsPath:   state.NetnsPath,
@@ -147,10 +155,15 @@ func (hostOps) AdmitJailPorts(ctx context.Context, conversationID string, subnet
 	if err := ValidateJailPorts(ports); err != nil {
 		return JailIngress{}, err
 	}
-	// The veth must be one this host actually has: a rule naming an
-	// interface that does not exist is accepted by iptables and matches
-	// nothing, and a request for one is a caller naming a network that
-	// was never built.
+	// The network must be one this process built for this conversation and
+	// has not torn down. The veth name carries only a short fragment of the
+	// conversation id, so it alone could name another conversation's
+	// network at the same index; the ledger holds the whole id.
+	if owner, live := netnsLiveRun(NetnsNameForRun(conversationID, subnetIdx)); !live || owner != conversationID {
+		return JailIngress{}, fmt.Errorf("sandbox: admit jail ports: no live run network for this conversation at subnet index %d", subnetIdx)
+	}
+	// And the veth must exist: a rule naming an interface that does not is
+	// accepted by iptables and matches nothing.
 	vethHost := vethHostName(conversationID, subnetIdx)
 	if _, err := net.InterfaceByName(vethHost); err != nil {
 		return JailIngress{}, fmt.Errorf("sandbox: admit jail ports: no run network %s: %w", vethHost, err)

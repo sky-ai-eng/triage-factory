@@ -7,8 +7,12 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -155,24 +159,24 @@ func setupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (
 		}
 	}
 
-	// Defense-in-depth: disable IPv6 inside the netns so the
-	// Part B egress allowlist — which is IPv4-only (iptables, not
-	// ip6tables; the runner image bundles only iptables) — can't be
-	// flanked over v6. Today this is belt-and-suspenders, not an open
-	// hole: the LLM proxy binds an IPv4 literal (10.42.<idx>.1), so a
-	// sibling run has no v6 listener to reach, and the netns is given no
-	// v6 address or route above, so there's no v6 path off-link anyway.
-	// But that safety is implicit; pinning disable_ipv6 makes it safe by
-	// construction, so a future dual-stack proxy or a host that
-	// autoconfigures v6 on the veth can't silently reopen the
-	// cross-tenant reach below the v4 filter.
-	//
-	// Best-effort by design (runIPNoErr swallows failure): if `sysctl`
-	// is absent on some image, a hard failure here would break every
-	// sandbox run for no security gain (v6 is unreachable regardless),
-	// so we proceed rather than fail the run. Writing 1 to `all`
-	// disables v6 on every interface in the netns (existing + future),
-	// flushing any link-local the veth or lo may have picked up.
+	// The egress filter is IPv4-only (iptables, not ip6tables; the runner
+	// image bundles only iptables), so IPv6 must not work across the veth at
+	// all. Left on, the kernel gives the host side a link-local address, and
+	// a jail with IPv6 of its own reaches every host listener bound to "::"
+	// through it, below the filter that closes the gateway. The host side is
+	// the enforced half: with IPv6 off on the interface, the host drops every
+	// IPv6 packet that arrives on it, whatever the netns side sends. A kernel
+	// that has IPv6 and refuses the write gets no network.
+	if err := disableIPv6On(procRoot, vethHost); err != nil {
+		return state, fmt.Errorf("netns: host veth: %w", err)
+	}
+
+	// The netns side as well, so the jail has no IPv6 address to send from.
+	// Best-effort (runIPNoErr swallows failure): it needs `sysctl` on the
+	// host, and the host-side disable above already drops anything the jail
+	// could send. Writing 1 to `all` disables v6 on every interface in the
+	// netns (existing + future), flushing any link-local the veth or lo may
+	// have picked up.
 	_ = runIPNoErr(ctx, "netns", "exec", netnsName,
 		"sysctl", "-wq", "net.ipv6.conf.all.disable_ipv6=1")
 
@@ -264,6 +268,30 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// procRoot is where disableIPv6On finds the kernel's sysctls.
+const procRoot = "/proc"
+
+// disableIPv6On turns IPv6 off on the interface iface. A kernel built or
+// booted without IPv6 has no sys/net/ipv6 under root and nothing to turn off.
+// The file is opened, never created, so a missing interface is an error.
+func disableIPv6On(root, iface string) error {
+	if _, err := os.Stat(filepath.Join(root, "sys/net/ipv6")); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	f, err := os.OpenFile(filepath.Join(root, "sys/net/ipv6/conf", iface, "disable_ipv6"), os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("disable ipv6 on %s: %w", iface, err)
+	}
+	_, werr := f.WriteString("1\n")
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return fmt.Errorf("disable ipv6 on %s: %w", iface, werr)
+	}
+	return nil
 }
 
 // vethHostName is the host-side veth of conversationID's network at

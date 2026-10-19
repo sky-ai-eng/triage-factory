@@ -430,6 +430,11 @@ func (s *Server) dialVetted(ctx context.Context, host string) (net.Conn, error) 
 
 // tunnel completes the CONNECT: hijack the client conn, confirm with
 // 200, then pipe bytes both ways until either side closes.
+//
+// TODO(TFAC-1117): the bytes are opaque here, so the client can handshake for
+// any name the CDN edge behind an allowlisted host also serves, and reach that
+// site through the allowed one. Closing it needs the sidecar to terminate TLS
+// and hold the client's SNI and Host to the CONNECT host.
 func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, upstream net.Conn) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {

@@ -312,7 +312,9 @@ func testStopLeavesNothingRunning(t *testing.T, h Harness) {
 	if !l.jail.Exited() {
 		t.Fatal("Stop returned but the jail reports processes still running")
 	}
-	if out, err := l.tools.Call("bash", map[string]any{"command": "echo alive", "timeout": 10}); err == nil && out.Protocol == nil {
+	// A tool host that is gone fails the call itself; any reply at all, a
+	// protocol error included, came from a process that is still running.
+	if out, err := l.tools.Call("bash", map[string]any{"command": "echo alive", "timeout": 10}); err == nil {
 		t.Fatalf("the tool host answered after Stop: %+v", out)
 	}
 	if err := l.jail.Stop(); err != nil {

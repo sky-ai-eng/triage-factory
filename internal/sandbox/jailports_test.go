@@ -5,7 +5,7 @@ import "testing"
 func TestValidateJailPorts(t *testing.T) {
 	tooMany := make([]int, MaxJailPorts+1)
 	for i := range tooMany {
-		tooMany[i] = 1000 + i
+		tooMany[i] = 2000 + i
 	}
 	cases := []struct {
 		name  string
@@ -20,6 +20,9 @@ func TestValidateJailPorts(t *testing.T) {
 		{"negative", []int{-1}, false},
 		{"above_range", []int{65536}, false},
 		{"duplicate", []int{443, 443}, false},
+		{"shared_origin", []int{SharedOriginPort}, true},
+		{"privileged", []int{22}, false},
+		{"lowest_unprivileged", []int{1024}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

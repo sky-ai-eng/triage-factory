@@ -240,10 +240,9 @@ func buildSandboxEnv(extraEnv []string) []string {
 	// does the same (matching the GIT_CONFIG_COUNT note above) — and the
 	// relay's own copy is appended LAST, after this function's output
 	// (the tool-host launch appends the sidecar's proxy env to the assembled
-	// env). So an
-	// inherited GOPROXY threaded through ExtraEnv would shadow the relay's
-	// and point the jail's cmd/go at a host the allowlist doesn't carry,
-	// presenting as a broken network. The keys come from the catalog
+	// env). So an inherited GOPROXY threaded through ExtraEnv would shadow
+	// the relay's and point the jail's cmd/go at a host the allowlist doesn't
+	// carry, presenting as a broken network. The keys come from the catalog
 	// (egressrelay.CatalogEnvKeys) so a future entry's key is protected the
 	// moment it exists, with no second list to update.
 	drop := append([]string{SandboxMarkerEnvVar, goToolchainEnvKey}, egressrelay.CatalogEnvKeys()...)

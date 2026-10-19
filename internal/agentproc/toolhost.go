@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -95,9 +96,9 @@ type ToolHostOptions struct {
 }
 
 // ToolHostJail is a launched tool-host sandbox, the gVisor backend's
-// cell.Jail. The caller Connects to the in-jail host, drives the engagement, then closes: the server
-// observes EOF at a frame boundary and exits, and Close reclaims the jail
-// either way.
+// cell.Jail. The caller Connects to the in-jail host, drives the engagement,
+// then closes: the server observes EOF at a frame boundary and exits, and
+// Close reclaims the jail either way.
 type ToolHostJail struct {
 	// SocketPath is the host-side path of the tool host's unix socket. It
 	// exists before the jail starts — this side binds it — and is what the
@@ -120,6 +121,11 @@ type ToolHostJail struct {
 	claimID         string
 	recordActuals   func(ctx context.Context, orgID, claimID string, actuals sandbox.RunActuals) error
 	releaseLiveJail func()
+
+	// closeOnce makes Close idempotent, as cell.Jail requires: a second
+	// release could drop a successor's live-jail entry under the same
+	// container id, and a second actuals stamp is a write nobody asked for.
+	closeOnce sync.Once
 }
 
 // Connect waits for the in-jail tool host to dial in and returns the
@@ -184,7 +190,7 @@ func (j *ToolHostJail) Stop() error {
 
 // Exited reports whether the jail's runtime has been reaped.
 func (j *ToolHostJail) Exited() bool {
-	if j.waitDone == nil {
+	if j == nil || j.waitDone == nil {
 		return true
 	}
 	select {
@@ -232,22 +238,24 @@ func (j *ToolHostJail) Close() error {
 	if j == nil {
 		return nil
 	}
-	if j.listener != nil {
-		_ = j.listener.Close()
-	}
-	if j.run != nil {
-		_ = j.run.Close()
-		j.recordActualsOnce()
-	}
-	if j.releaseLiveJail != nil {
-		j.releaseLiveJail()
-	}
-	if j.sb != nil {
-		_ = j.sb.Close()
-	}
-	if j.SocketPath != "" {
-		_ = os.Remove(j.SocketPath)
-	}
+	j.closeOnce.Do(func() {
+		if j.listener != nil {
+			_ = j.listener.Close()
+		}
+		if j.run != nil {
+			_ = j.run.Close()
+			j.recordActualsOnce()
+		}
+		if j.releaseLiveJail != nil {
+			j.releaseLiveJail()
+		}
+		if j.sb != nil {
+			_ = j.sb.Close()
+		}
+		if j.SocketPath != "" {
+			_ = os.Remove(j.SocketPath)
+		}
+	})
 	return nil
 }
 

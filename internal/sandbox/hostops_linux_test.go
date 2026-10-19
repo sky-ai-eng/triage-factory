@@ -96,3 +96,29 @@ func TestSetPrivilegedOps_ReplacesDefault(t *testing.T) {
 		t.Errorf("defaultOps.EnsureRootfs = %q, want the fake's sentinel — SetPrivilegedOps did not take effect", path)
 	}
 }
+
+// TestHostOpsAdmitJailPorts_RefusesUnknownNetworks: the privileged side opens
+// ports only on a network it built for the conversation asking, and only on a
+// veth that exists. Both refusals come before any iptables call, so this runs
+// without root.
+func TestHostOpsAdmitJailPorts_RefusesUnknownNetworks(t *testing.T) {
+	ctx := context.Background()
+	const idx = 213
+
+	if _, err := (hostOps{}).AdmitJailPorts(ctx, "conv-never-built", idx, []int{40001}); err == nil {
+		t.Error("admitted ports on a network this process never built")
+	}
+
+	// A network live for one conversation does not admit another's request.
+	name := NetnsNameForRun("conv-owner", idx)
+	markNetnsLive(name, "conv-owner")
+	t.Cleanup(func() { forgetNetns(name) })
+	if _, err := (hostOps{}).AdmitJailPorts(ctx, "conv-someone-else", idx, []int{40001}); err == nil {
+		t.Error("admitted ports on another conversation's network")
+	}
+
+	// The owner's request, on a network whose veth does not exist here.
+	if _, err := (hostOps{}).AdmitJailPorts(ctx, "conv-owner", idx, []int{40001}); err == nil {
+		t.Error("admitted ports on a veth that does not exist")
+	}
+}

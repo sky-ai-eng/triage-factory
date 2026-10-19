@@ -238,7 +238,12 @@ fi
 blue "Stage 4c: cell conformance suite (gVisor backend)"
 conf_log="$LOG_DIR/conformance.log"
 if in_private_cgroupns go test -count=1 -v -tags integration -run TestConformance ./internal/cell/gvisor/ > "$conf_log" 2>&1; then
-  green "  conformance suite PASS"
+  # A missing prerequisite skips the suite with exit 0, which is not a pass.
+  if grep -q -- "--- SKIP: TestConformance" "$conf_log"; then
+    yellow "  conformance suite SKIP — $(grep -m1 -B1 -- '--- SKIP: TestConformance' "$conf_log" | head -1 | sed 's/^ *//')"
+  else
+    green "  conformance suite PASS"
+  fi
 else
   red   "  conformance suite FAIL — full log: $conf_log"
   echo "---- last 80 lines ----"

@@ -263,7 +263,13 @@ func runIptablesInNetns(ctx context.Context, netnsName string, args ...string) e
 // an ACCEPT left behind cannot open a port to the next run that gets the
 // same veth name.
 func reapEgressForSubnet(ctx context.Context, idx uint8) {
-	gw := hostIP(idx)
+	reapEgressForGateway(ctx, hostIP(idx))
+}
+
+// reapEgressForGateway removes every host-side egress rule naming the gateway
+// IP gw on a vh- veth. A gateway belongs to one subnet index, so while that
+// index is held nothing but its own network's rules can match.
+func reapEgressForGateway(ctx context.Context, gw string) {
 	for _, chain := range []string{"INPUT", "FORWARD"} {
 		// "-t filter" is explicit even though it's the default, to match
 		// every other iptables call in this file and make clear we're

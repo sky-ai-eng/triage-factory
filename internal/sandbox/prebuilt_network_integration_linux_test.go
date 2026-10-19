@@ -5,6 +5,8 @@ package sandbox
 import (
 	"context"
 	"os"
+	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -90,5 +92,90 @@ func TestIntegration_PrebuiltNetwork_LaunchAndOwnership(t *testing.T) {
 	}
 	if _, statErr := os.Stat(netnsPath); statErr == nil {
 		t.Fatalf("netns %s still present after net.Close", netnsPath)
+	}
+}
+
+// TestIntegration_RunNetwork_HostVethHasNoIPv6: the egress filter is IPv4-only,
+// so the host side of the veth must refuse IPv6 outright. Otherwise the host
+// gives it a link-local address and a jail with IPv6 reaches every host
+// listener bound to "::" below that filter.
+func TestIntegration_RunNetwork_HostVethHasNoIPv6(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("run network setup needs root for netns/veth; skipping")
+	}
+	if _, err := os.Stat("/proc/sys/net/ipv6"); err != nil {
+		t.Skip("this kernel has no IPv6; nothing to disable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const conversationID = "itest-veth-ipv6"
+	net, err := SetupRunNetwork(ctx, conversationID)
+	if err != nil {
+		t.Fatalf("SetupRunNetwork: %v", err)
+	}
+	t.Cleanup(func() { _ = net.Close() })
+
+	veth := vethHostName(conversationID, net.Idx)
+	got, err := os.ReadFile("/proc/sys/net/ipv6/conf/" + veth + "/disable_ipv6")
+	if err != nil {
+		t.Fatalf("read %s's IPv6 switch: %v", veth, err)
+	}
+	if strings.TrimSpace(string(got)) != "1" {
+		t.Fatalf("IPv6 is on for the host veth %s (disable_ipv6 = %q)", veth, strings.TrimSpace(string(got)))
+	}
+	out, err := exec.Command("ip", "-6", "addr", "show", "dev", veth).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ip -6 addr show dev %s: %v (%s)", veth, err, out)
+	}
+	if strings.Contains(string(out), "inet6") {
+		t.Errorf("the host veth %s carries an IPv6 address:\n%s", veth, out)
+	}
+}
+
+// TestIntegration_RunNetwork_CloseRemovesUnrecordedAdmissions: an admission
+// whose reply never reached the network's owner leaves rules nobody recorded.
+// Close removes them anyway, or the ACCEPT would outlive its veth and open its
+// port to the next network given the same veth name.
+func TestIntegration_RunNetwork_CloseRemovesUnrecordedAdmissions(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("run network setup needs root for netns/veth/iptables; skipping")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const conversationID = "itest-unrecorded-admit"
+	net, err := SetupRunNetwork(ctx, conversationID)
+	if err != nil {
+		t.Fatalf("SetupRunNetwork: %v", err)
+	}
+	// Straight to the privileged op, as a lost reply would leave it: the rule
+	// is installed and the network's state does not know.
+	if _, err := defaultOps.AdmitJailPorts(ctx, conversationID, net.Idx, []int{45678}); err != nil {
+		_ = net.Close()
+		t.Fatalf("AdmitJailPorts: %v", err)
+	}
+	gatewayRules := func() []string {
+		out, err := exec.Command("iptables", "-t", "filter", "-S", "INPUT").Output()
+		if err != nil {
+			t.Fatalf("iptables -S INPUT: %v", err)
+		}
+		var rules []string
+		for _, line := range strings.Split(string(out), "\n") {
+			if egressRuleLineMatches(line, "INPUT", net.HostIP) {
+				rules = append(rules, line)
+			}
+		}
+		return rules
+	}
+	if got := gatewayRules(); !slices.ContainsFunc(got, func(l string) bool { return strings.Contains(l, "--dport 45678") }) {
+		t.Fatalf("the admitted port is not in INPUT: %v", got)
+	}
+
+	if err := net.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := gatewayRules(); len(got) != 0 {
+		t.Errorf("rules for the closed network's gateway %s survived Close: %v", net.HostIP, got)
 	}
 }
