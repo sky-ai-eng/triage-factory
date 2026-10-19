@@ -54,7 +54,15 @@ interface AuthContextValue {
    *  client state. */
   serverActiveOrgId: string | null
   error: string | null
+  /** Re-reads /api/me for a caller that needs the answer now — after a write
+   *  that changed it, or from a Retry button. A failure other than 401 moves
+   *  to 'error', which the gates show with a Retry. */
   refresh: () => Promise<void>
+  /** Re-reads /api/me in the background — on a timer, a focus event, or a
+   *  refusal from some other call. A failure other than 401 keeps what is
+   *  already loaded: the user is looking at something that works, and an
+   *  error screen nothing re-reads would replace it until they reload. */
+  revalidate: () => Promise<void>
   logout: () => Promise<void>
 }
 
@@ -77,7 +85,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     statusRef.current = status
   }, [status])
 
-  const refresh = useCallback(async () => {
+  // readMe is the one /api/me read behind refresh and revalidate. They differ
+  // only in what a failure other than 401 does: refresh reports it, revalidate
+  // keeps the session already loaded and leaves the next re-read to recover.
+  const readMe = useCallback(async (onFailure: 'report' | 'keep') => {
     try {
       const data = await apiJSON<MeResponse>('/api/me')
       setMe(data)
@@ -90,6 +101,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setStatus('unauth')
         return
       }
+      if (onFailure === 'keep') {
+        console.warn('[auth] background /api/me read failed; keeping the loaded session', err)
+        return
+      }
       // Network failure or unexpected status — surface as 'error'
       // rather than 'unauth' so the UI can distinguish transient
       // server issues from genuine not-logged-in state.
@@ -98,6 +113,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setStatus('error')
     }
   }, [])
+  const refresh = useCallback(() => readMe('report'), [readMe])
+  const revalidate = useCallback(() => readMe('keep'), [readMe])
 
   const logout = useCallback(async () => {
     try {
@@ -139,20 +156,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // MultiAuthGate replaces the org's pages with its sign-in. Every read on
   // the page may fail at once, so one re-read serves the burst, and a
   // re-read that answers "not required" is not repeated for a short window,
-  // which keeps a disagreement between the two reads from looping.
+  // which keeps a disagreement between the two reads from looping. It is a
+  // background re-read: a failure keeps the page the user is on.
   const ssoRefresh = useRef<{ inFlight: boolean; lastAt: number }>({ inFlight: false, lastAt: 0 })
   useEffect(() => {
     setSSORequiredHandler(() => {
       const state = ssoRefresh.current
       if (state.inFlight || Date.now() - state.lastAt < SSO_REFRESH_MIN_INTERVAL_MS) return
       state.inFlight = true
-      void refresh().finally(() => {
+      void revalidate().finally(() => {
         state.inFlight = false
         state.lastAt = Date.now()
       })
     })
     return () => setSSORequiredHandler(null)
-  }, [refresh])
+  }, [revalidate])
 
   // Register the websocket auth-kick hook (TFAC-75). The server closes a
   // socket when its session is revoked or the user loses the org it's
@@ -168,13 +186,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setMe(null)
         setStatus('unauth')
       } else if (code === WS_CLOSE_MEMBERSHIP_CHANGED) {
-        // Active org may be gone — re-fetch /api/me so the gates re-route
-        // (a remaining org, or /onboarding if none are left).
-        void refresh()
+        // Active org may be gone, or now requires SSO — re-fetch /api/me so
+        // the gates re-route (a remaining org, the org's sign-in, or
+        // /onboarding if none are left). A background re-read, so a failure
+        // keeps the page rather than replacing it with the error screen.
+        void revalidate()
       }
     })
     return () => setWsAuthCloseHandler(null)
-  }, [refresh])
+  }, [revalidate])
 
   const value = useMemo<AuthContextValue>(
     () => ({
@@ -184,9 +204,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       serverActiveOrgId: me?.active_org_id ?? null,
       error,
       refresh,
+      revalidate,
       logout,
     }),
-    [status, me, error, refresh, logout],
+    [status, me, error, refresh, revalidate, logout],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

@@ -19,7 +19,7 @@ import { apiFetch, isSSORequired } from '../lib/apiClient'
  * own sign-in (`AuthOrg.sso_start_url`), a full-page navigation.
  */
 export function useSwitchOrg(): (newOrgId: string) => Promise<void> {
-  const { refresh } = useAuth()
+  const { revalidate } = useAuth()
   const { activeOrgId, setActiveOrgId } = useOrgContext()
   const navigate = useNavigate()
   const location = useLocation()
@@ -61,8 +61,9 @@ export function useSwitchOrg(): (newOrgId: string) => Promise<void> {
         // The org started requiring SSO after the last /api/me read, so the
         // list offered it as a plain switch. Re-read before navigating, and
         // the org's route renders its sign-in rather than pages whose reads
-        // all answer 403.
-        await refresh()
+        // all answer 403. A failed re-read keeps the loaded session; the
+        // reads on the new route retry it.
+        await revalidate()
       } else {
         // A refusal (revoked membership) or a network drop. Rolling back the
         // local selection would conflict with the URL navigation below; log

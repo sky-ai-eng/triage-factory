@@ -15,7 +15,7 @@ import type { AuthOrg } from '../types'
 
 const authMock = vi.hoisted(() => ({
   orgs: [] as AuthOrg[],
-  refresh: null as unknown as () => Promise<void>,
+  revalidate: null as unknown as () => Promise<void>,
 }))
 vi.mock('../contexts/AuthContext', () => {
   const value = () => ({
@@ -24,7 +24,8 @@ vi.mock('../contexts/AuthContext', () => {
     orgs: authMock.orgs,
     serverActiveOrgId: null,
     error: null,
-    refresh: authMock.refresh,
+    refresh: vi.fn(),
+    revalidate: authMock.revalidate,
     logout: vi.fn(),
   })
   return { useAuth: value, useOptionalAuth: value }
@@ -50,7 +51,7 @@ beforeEach(() => {
   fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, ...jsonBody({}) })
   vi.stubGlobal('fetch', fetchMock)
   window.localStorage.clear()
-  authMock.refresh = vi.fn().mockResolvedValue(undefined)
+  authMock.revalidate = vi.fn().mockResolvedValue(undefined)
 })
 
 function activeOrgCalls() {
@@ -121,13 +122,13 @@ describe('SSO-required interstitial', () => {
     try {
       authMock.orgs = [barred, open]
       renderGate('/orgs/org-x/board')
-      expect(authMock.refresh).not.toHaveBeenCalled()
+      expect(authMock.revalidate).not.toHaveBeenCalled()
 
       fireEvent.focus(window)
-      expect(authMock.refresh).toHaveBeenCalledTimes(1)
+      expect(authMock.revalidate).toHaveBeenCalledTimes(1)
 
       vi.advanceTimersByTime(30000)
-      expect(authMock.refresh).toHaveBeenCalledTimes(2)
+      expect(authMock.revalidate).toHaveBeenCalledTimes(2)
     } finally {
       vi.useRealTimers()
     }
@@ -175,7 +176,7 @@ describe('SSO-required interstitial', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Beta' }))
 
-    await waitFor(() => expect(authMock.refresh).toHaveBeenCalled())
+    await waitFor(() => expect(authMock.revalidate).toHaveBeenCalled())
     expect(await screen.findByText('at /orgs/org-y/board')).toBeInTheDocument()
   })
 

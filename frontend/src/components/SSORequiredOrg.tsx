@@ -23,11 +23,13 @@ export default function SSORequiredOrg({ org }: { org: AuthOrg }) {
   const auth = useAuth()
   const switchOrg = useSwitchOrg()
   const others = auth.orgs.filter((o) => o.id !== org.id && !o.sso_required)
-  const { refresh } = auth
+  const { revalidate } = auth
 
+  // Background re-reads: a failed one keeps this screen up, and the next
+  // tick or focus tries again.
   useEffect(() => {
     const recheck = () => {
-      if (document.visibilityState === 'visible') void refresh()
+      if (document.visibilityState === 'visible') void revalidate()
     }
     const timer = window.setInterval(recheck, RECHECK_INTERVAL_MS)
     window.addEventListener('focus', recheck)
@@ -37,7 +39,7 @@ export default function SSORequiredOrg({ org }: { org: AuthOrg }) {
       window.removeEventListener('focus', recheck)
       document.removeEventListener('visibilitychange', recheck)
     }
-  }, [refresh])
+  }, [revalidate])
 
   return (
     <div className="min-h-screen bg-ground flex items-center justify-center px-4">
