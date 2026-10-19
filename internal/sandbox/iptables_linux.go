@@ -263,13 +263,12 @@ func runIptablesInNetns(ctx context.Context, netnsName string, args ...string) e
 // an ACCEPT left behind cannot open a port to the next run that gets the
 // same veth name.
 func reapEgressForSubnet(ctx context.Context, idx uint8) {
-	reapEgressForGateway(ctx, hostIP(idx))
+	reapEgressRules(ctx, hostIP(idx), "")
 }
 
-// reapEgressForGateway removes every host-side egress rule naming the gateway
-// IP gw on a vh- veth. A gateway belongs to one subnet index, so while that
-// index is held nothing but its own network's rules can match.
-func reapEgressForGateway(ctx context.Context, gw string) {
+// reapEgressRules removes the host-side egress rules naming the gateway IP gw
+// on a vh- veth. A non-empty veth narrows it to rules arriving on that veth.
+func reapEgressRules(ctx context.Context, gw, veth string) {
 	for _, chain := range []string{"INPUT", "FORWARD"} {
 		// "-t filter" is explicit even though it's the default, to match
 		// every other iptables call in this file and make clear we're
@@ -280,6 +279,9 @@ func reapEgressForGateway(ctx context.Context, gw string) {
 		}
 		for _, line := range strings.Split(string(out), "\n") {
 			if !egressRuleLineMatches(line, chain, gw) {
+				continue
+			}
+			if veth != "" && !argsNameVeth(strings.Fields(line), veth) {
 				continue
 			}
 			delRule := strings.Replace(line, "-A "+chain, "-D "+chain, 1)
@@ -334,6 +336,17 @@ func egressRuleLineMatches(line, chain, gw string) bool {
 		return false
 	}
 	return hasDrop || (hasAccept && !gatewayNegated && hasDport)
+}
+
+// argsNameVeth reports whether an iptables rule's arguments match packets
+// arriving on veth ("-i <veth>").
+func argsNameVeth(args []string, veth string) bool {
+	for i, a := range args {
+		if a == "-i" && i+1 < len(args) && args[i+1] == veth {
+			return true
+		}
+	}
+	return false
 }
 
 // ipFieldMatches reports whether an iptables address field equals ip,

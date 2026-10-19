@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 )
 
 // defaultOps is the PrivilegedOps implementation the package's
@@ -123,22 +124,6 @@ func (hostOps) TeardownNetwork(ctx context.Context, state NetworkState) error {
 	if err := teardownIptables(ctx, state.MasqueradeRule); err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox: teardown iptables: %v\n", err)
 	}
-	// Host-side egress-allowlist rules (Part B). The in-netns OUTPUT
-	// rules vanish with the netns delete below and need no explicit
-	// removal.
-	for _, r := range state.EgressRules {
-		if err := teardownIptables(ctx, r); err != nil {
-			fmt.Fprintf(os.Stderr, "sandbox: teardown egress rule: %v\n", err)
-		}
-	}
-	// Then any rule for this gateway the state did not record: an admission
-	// whose reply never reached the orchestrator installed rules nobody kept.
-	// Left behind, such an ACCEPT outlives its veth and opens its port to the
-	// next network given the same veth name. The subnet index is still held
-	// here, so nothing else can own a rule naming this gateway.
-	if state.HostIP != "" {
-		reapEgressForGateway(ctx, state.HostIP)
-	}
 	netSt := &netState{
 		netnsName:   state.NetnsName,
 		netnsPath:   state.NetnsPath,
@@ -148,7 +133,42 @@ func (hostOps) TeardownNetwork(ctx context.Context, state NetworkState) error {
 	if err := teardownNetwork(ctx, netSt); err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox: teardown network: %v\n", err)
 	}
+	// The in-netns OUTPUT rules went with the netns; the host-side ones are
+	// removed here.
+	removeHostEgressRules(ctx, state)
 	return nil
+}
+
+// removeHostEgressRules removes the host-side egress rules of the veth state
+// names, once that veth is gone. The state is the caller's, so teardown must
+// not be a way to strip a live network's filter while its veth stays up:
+// only rules naming this veth come off, and only after it has been deleted.
+// A veth that survived its delete keeps its rules, closed as they were.
+//
+// Beyond the recorded rules it removes any other rule for this veth and
+// gateway: an admission whose reply never reached the orchestrator installed
+// rules nobody kept, and an ACCEPT left behind would open its port to the next
+// network given the same veth name.
+func removeHostEgressRules(ctx context.Context, state NetworkState) {
+	if state.VethHost == "" {
+		return
+	}
+	if _, err := net.InterfaceByName(state.VethHost); err == nil {
+		sandboxLog.Warn("run veth survived its teardown; leaving its egress rules in place", "veth", state.VethHost)
+		return
+	}
+	for _, r := range state.EgressRules {
+		if !argsNameVeth(r.Args, state.VethHost) {
+			sandboxLog.Warn("refusing to remove an egress rule for another veth", "veth", state.VethHost, "rule", strings.Join(r.Args, " "))
+			continue
+		}
+		if err := teardownIptables(ctx, r); err != nil {
+			fmt.Fprintf(os.Stderr, "sandbox: teardown egress rule: %v\n", err)
+		}
+	}
+	if state.HostIP != "" {
+		reapEgressRules(ctx, state.HostIP, state.VethHost)
+	}
 }
 
 func (hostOps) AdmitJailPorts(ctx context.Context, conversationID string, subnetIdx uint8, ports []int) (JailIngress, error) {

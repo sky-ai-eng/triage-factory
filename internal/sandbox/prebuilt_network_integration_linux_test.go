@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	stdnet "net"
 	"os"
 	"os/exec"
 	"slices"
@@ -155,27 +156,72 @@ func TestIntegration_RunNetwork_CloseRemovesUnrecordedAdmissions(t *testing.T) {
 		_ = net.Close()
 		t.Fatalf("AdmitJailPorts: %v", err)
 	}
-	gatewayRules := func() []string {
-		out, err := exec.Command("iptables", "-t", "filter", "-S", "INPUT").Output()
-		if err != nil {
-			t.Fatalf("iptables -S INPUT: %v", err)
-		}
-		var rules []string
-		for _, line := range strings.Split(string(out), "\n") {
-			if egressRuleLineMatches(line, "INPUT", net.HostIP) {
-				rules = append(rules, line)
-			}
-		}
-		return rules
-	}
-	if got := gatewayRules(); !slices.ContainsFunc(got, func(l string) bool { return strings.Contains(l, "--dport 45678") }) {
+	if got := gatewayRules(t, net.HostIP); !slices.ContainsFunc(got, func(l string) bool { return strings.Contains(l, "--dport 45678") }) {
 		t.Fatalf("the admitted port is not in INPUT: %v", got)
 	}
 
 	if err := net.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if got := gatewayRules(); len(got) != 0 {
+	if got := gatewayRules(t, net.HostIP); len(got) != 0 {
 		t.Errorf("rules for the closed network's gateway %s survived Close: %v", net.HostIP, got)
 	}
+}
+
+// TestIntegration_RunNetwork_TeardownCannotOpenALiveNetwork: a teardown whose
+// state names a live network's gateway and rules, but a veth that does not
+// exist, removes nothing of that network. The state is the caller's, so
+// teardown must not be a way to strip a live network's filter while its veth
+// stays up.
+func TestIntegration_RunNetwork_TeardownCannotOpenALiveNetwork(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("run network setup needs root for netns/veth/iptables; skipping")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const conversationID = "itest-live-network"
+	live, err := SetupRunNetwork(ctx, conversationID)
+	if err != nil {
+		t.Fatalf("SetupRunNetwork: %v", err)
+	}
+	t.Cleanup(func() { _ = live.Close() })
+	state, _ := live.netSt.(NetworkState)
+	before := gatewayRules(t, live.HostIP)
+	if len(before) == 0 {
+		t.Fatalf("the live network has no rules for its gateway %s; the check below would pass vacuously", live.HostIP)
+	}
+
+	forged := NetworkState{
+		NetnsName:   "tf-00000000-250",
+		VethHost:    "vh-0000250",
+		HostIP:      live.HostIP,
+		EgressRules: state.EgressRules,
+	}
+	if err := defaultOps.TeardownNetwork(ctx, forged); err != nil {
+		t.Fatalf("TeardownNetwork: %v", err)
+	}
+
+	if after := gatewayRules(t, live.HostIP); !slices.Equal(after, before) {
+		t.Errorf("a teardown naming another veth changed the live network's rules:\nbefore %v\nafter  %v", before, after)
+	}
+	if _, err := stdnet.InterfaceByName(vethHostName(conversationID, live.Idx)); err != nil {
+		t.Errorf("the live network's veth is gone: %v", err)
+	}
+}
+
+// gatewayRules lists the INPUT rules naming gateway gw on a vh- veth.
+func gatewayRules(t *testing.T, gw string) []string {
+	t.Helper()
+	out, err := exec.Command("iptables", "-t", "filter", "-S", "INPUT").Output()
+	if err != nil {
+		t.Fatalf("iptables -S INPUT: %v", err)
+	}
+	var rules []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if egressRuleLineMatches(line, "INPUT", gw) {
+			rules = append(rules, line)
+		}
+	}
+	return rules
 }

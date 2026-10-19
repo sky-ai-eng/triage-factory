@@ -2,7 +2,10 @@
 
 package sandbox
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestEgressRuleLineMatches pins the field-matching the orphan reaper
 // uses to find leaked Part B host-side egress rules. The
@@ -107,6 +110,28 @@ func TestEgressRuleLineMatches(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if got := egressRuleLineMatches(c.line, c.chain, gw); got != c.want {
 				t.Errorf("egressRuleLineMatches(%q, %q, %q) = %v, want %v", c.line, c.chain, gw, got, c.want)
+			}
+		})
+	}
+}
+
+func TestArgsNameVeth(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"recorded_rule", []string{"-i", "vh-abcd7", "!", "-d", "10.42.7.1", "-j", "DROP"}, true},
+		{"listed_rule", strings.Fields("-A INPUT -d 10.42.7.1/32 -i vh-abcd7 -p tcp -m tcp --dport 34567 -j ACCEPT"), true},
+		{"other_veth", []string{"-i", "vh-abcd70", "-d", "10.42.7.1", "-j", "DROP"}, false},
+		{"output_interface", []string{"-o", "vh-abcd7", "-j", "DROP"}, false},
+		{"no_interface", []string{"-d", "10.42.7.1", "-j", "DROP"}, false},
+		{"dangling_flag", []string{"-j", "DROP", "-i"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := argsNameVeth(c.args, "vh-abcd7"); got != c.want {
+				t.Errorf("argsNameVeth(%v) = %v, want %v", c.args, got, c.want)
 			}
 		})
 	}
