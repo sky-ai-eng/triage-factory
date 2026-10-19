@@ -511,7 +511,8 @@ Spike items, each with a pass/fail result written back here:
    still enforced.
 3. A parked conversation suspended with a database running inside, resumed
    on another node.
-4. Idle memory per cell versus gVisor's (~0.5 GB planning budget).
+4. Idle memory per cell versus gVisor's measured ~24 MB per idle jail, plus
+   the ~24 MB sidecar every backend pays (`docs/benchmarks/sandbox-bench.md`).
 5. One week of TF's own delegations on one bare-metal SPACE host.
 6. The conformance suite passing against the SPACE backend unmodified.
 
