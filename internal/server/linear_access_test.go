@@ -667,7 +667,7 @@ func TestLinearSource_PauseAndCreateGate(t *testing.T) {
 
 	r.bind(t, "lin_api_ada")
 	ctx := t.Context()
-	ent, _, err := r.stores.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "linear", "ws-test", "ENG-1", "", "issue", "An issue", "")
+	ent, _, err := r.stores.Entities.FindOrCreateLinearSystem(ctx, runmode.LocalDefaultOrgID, "ws-test", "ENG-1", "uuid-eng-1", "team-eng", "An issue", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -688,6 +688,9 @@ func TestLinearSource_PauseAndCreateGate(t *testing.T) {
 	}
 	if got.SnapshotJSON != "" {
 		t.Errorf("linear snapshot = %q after disable, want cleared", got.SnapshotJSON)
+	}
+	if got.LinearTeamID != "team-eng" {
+		t.Errorf("linear team = %q after disable, want team-eng kept", got.LinearTeamID)
 	}
 	if code := createRule(); code != http.StatusUnprocessableEntity {
 		t.Errorf("create a linear rule while paused = %d, want 422", code)

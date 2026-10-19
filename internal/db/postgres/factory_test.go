@@ -484,20 +484,25 @@ func TestFactoryReadStore_Postgres_LinearScopedToTrackedTeam(t *testing.T) {
 	`, teamID); err != nil {
 		t.Fatalf("seed linear team rule: %v", err)
 	}
-	seed := func(identifier, snapshot string) string {
+	seed := func(identifier, linearTeamID string, snapshot any) string {
 		t.Helper()
 		id := uuid.New().String()
 		if _, err := h.AdminDB.Exec(`
-			INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-			VALUES ($1, $2, 'linear', $3, 'issue', $3, '', $4::jsonb, $5, 'ws-test')
-		`, id, orgID, identifier, snapshot, time.Now().UTC()); err != nil {
+			INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, linear_team_id)
+			VALUES ($1, $2, 'linear', $3, 'issue', $3, '', $4::jsonb, $5, 'ws-test', $6)
+		`, id, orgID, identifier, snapshot, time.Now().UTC(), linearTeamID); err != nil {
 			t.Fatalf("seed linear entity %s: %v", identifier, err)
 		}
 		return id
 	}
-	tracked := seed("ENG-1", `{"identifier":"ENG-1","team_id":"lt-eng"}`)
-	untracked := seed("OPS-1", `{"identifier":"OPS-1","team_id":"lt-ops"}`)
-	unseeded := seed("ENG-2", `{}`)
+	tracked := seed("ENG-1", "lt-eng", `{"identifier":"ENG-1","team_id":"lt-eng"}`)
+	untracked := seed("OPS-1", "lt-ops", `{"identifier":"OPS-1","team_id":"lt-ops"}`)
+	// A snapshot the source pause cleared: the team is the column's, so the
+	// row stays on its team's belt.
+	cleared := seed("ENG-2", "lt-eng", nil)
+	// A snapshot that names a team the row is not in is not where the belt
+	// looks.
+	snapshotOnly := seed("OPS-2", "lt-ops", `{"identifier":"OPS-2","team_id":"lt-eng"}`)
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	read := func(teamIDs []string) map[string]bool {
@@ -519,10 +524,13 @@ func TestFactoryReadStore_Postgres_LinearScopedToTrackedTeam(t *testing.T) {
 	if got[untracked] {
 		t.Error("Linear entity on an untracked Linear team leaked through")
 	}
-	if got[unseeded] {
-		t.Error("Linear entity with no snapshot rode the belt before any team could claim it")
+	if !got[cleared] {
+		t.Error("Linear entity with a cleared snapshot left its tracked team's belt")
 	}
-	if !read([]string{teamID})[tracked] {
+	if got[snapshotOnly] {
+		t.Error("the belt took a Linear entity's team from its snapshot rather than its column")
+	}
+	if perTeam := read([]string{teamID}); !perTeam[tracked] || !perTeam[cleared] {
 		t.Error("the per-team filter dropped a Linear entity its team tracks")
 	}
 	if read([]string{uuid.New().String()})[tracked] {

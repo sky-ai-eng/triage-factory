@@ -214,10 +214,12 @@ func (r *Router) teamTracksEventProject(ctx context.Context, evt domain.Event, t
 // could never fire otherwise.
 //
 // Metadata that parses but names no team is refused rather than allowed. The
-// tracker sets linear_team_id on every Linear event from the stored snapshot or
-// a fresh read of the issue, and leaves it empty only on an unreachable issue
-// that has neither, so no team can be shown to track it. The event still
-// closes the entity's tasks; the close relations do not read this gate.
+// tracker sets linear_team_id on every Linear event from a fresh read of the
+// issue or, on an unreachable one, from the entity's own team column, which a
+// source pause does not clear. It is empty only on an unreachable issue whose
+// row predates that column and has nothing else to name a team, so no team can
+// be shown to track it. The event still closes the entity's tasks; the close
+// relations do not read this gate.
 func (r *Router) teamTracksEventLinearTeam(ctx context.Context, evt domain.Event, teamID string) bool {
 	var m struct {
 		LinearTeamID    string `json:"linear_team_id"`

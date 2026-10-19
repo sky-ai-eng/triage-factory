@@ -254,7 +254,7 @@ func TestLinearAssigned_RoutesToAssigneesTrackingTeam(t *testing.T) {
 	setLinearWorkspace(t, database)
 	seedLinearUserOnTeam(t, database, teamA, "lu-alice")
 
-	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "linear", "ws-test", "ENG-1", "", "issue", "An issue", "")
+	entity, _, err := st.Entities.FindOrCreateLinearSystem(ctx, runmode.LocalDefaultOrgID, "ws-test", "ENG-1", "uuid-eng-1", "lt-eng", "An issue", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +291,7 @@ func reassignFixture(t *testing.T) (database *sql.DB, router *Router, teamA, tea
 	seedLinearUserOnTeam(t, database, teamB, "lu-bob")
 	seedSystemJiraRule(t, database, teamA, domain.EventLinearIssueAssigned)
 	seedSystemJiraRule(t, database, teamB, domain.EventLinearIssueAssigned)
-	e, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "linear", "ws-test", "ENG-9", "", "issue", "An issue", "")
+	e, _, err := sqlitestore.New(database).Entities.FindOrCreateLinearSystem(context.Background(), runmode.LocalDefaultOrgID, "ws-test", "ENG-9", "uuid-eng-9", "lt-eng", "An issue", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +455,7 @@ func TestHandleEvent_TurnedOffLinear_RecordsButCreatesNoTask(t *testing.T) {
 	seedLinearUserOnTeam(t, database, team, "lu-alice")
 	turnOffSource(t, database, eventsource.KindLinear)
 
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "linear", "ws-test", "ENG-off", "", "issue", "An issue", "")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreateLinearSystem(ctx, runmode.LocalDefaultOrgID, "ws-test", "ENG-off", "uuid-eng-off", "lt-eng", "An issue", "")
 	if err != nil {
 		t.Fatal(err)
 	}

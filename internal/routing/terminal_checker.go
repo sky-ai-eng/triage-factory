@@ -227,9 +227,10 @@ func capIDs(ids []string) []string {
 // discovery time. GitHub reads it straight off the snapshot; Jira asks whether
 // the status is in ITS OWN project's done set, which is why the per-project map
 // is threaded here rather than collapsed to a union; Linear asks the same of
-// its snapshot's own Linear team. An entity whose project or team has no
-// configured rules is never terminal, matching the tracker's behavior for one
-// the user removed from settings while its entities were still active.
+// the entity's own Linear team (entities.linear_team_id). An entity whose
+// project or team has no configured rules is never terminal, matching the
+// tracker's behavior for one the user removed from settings while its
+// entities were still active.
 func snapshotIsTerminal(entity domain.Entity, doneByProject map[string][]domain.JiraStatusRef, doneByLinearTeam map[string][]domain.LinearStateRef) bool {
 	switch entity.Source {
 	case "github":
@@ -249,7 +250,7 @@ func snapshotIsTerminal(entity domain.Entity, doneByProject map[string][]domain.
 		if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil || snap.State.IsZero() {
 			return false
 		}
-		return domain.ContainsState(doneByLinearTeam[snap.TeamID], snap.StateRef())
+		return domain.ContainsState(doneByLinearTeam[entity.LinearTeamID], snap.StateRef())
 	default:
 		// Sources with no poller-owned terminal notion (Slack threads) are
 		// not the checker's business — the store never surfaces them either.

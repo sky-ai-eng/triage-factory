@@ -1007,7 +1007,13 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		// no snapshot at all).
 		seedSnap := func(sourceID, source, snapshot string) string {
 			t.Helper()
-			e, _, err := s.FindOrCreate(ctx, orgID, source, TestScope(source), sourceID, "", "pr", sourceID, "")
+			var e *domain.Entity
+			var err error
+			if source == "linear" {
+				e, _, err = s.FindOrCreateLinearSystem(ctx, orgID, TestScope(source), sourceID, "uuid-"+sourceID, "team-tc", sourceID, "")
+			} else {
+				e, _, err = s.FindOrCreate(ctx, orgID, source, TestScope(source), sourceID, "", "pr", sourceID, "")
+			}
 			if err != nil {
 				t.Fatalf("create %s: %v", sourceID, err)
 			}

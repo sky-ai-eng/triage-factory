@@ -505,7 +505,17 @@ CREATE TABLE public.entities (
     -- CAS token on the tracker's snapshot write: without it a straggler ex-leader
     -- (a poll cycle in flight across a lease handoff) blindly overwrites a newer
     -- snapshot and loses a transition. Bumped by 1 on every snapshot write.
-    poll_seq bigint DEFAULT 0 NOT NULL
+    poll_seq bigint DEFAULT 0 NOT NULL,
+    -- The UUID of the Linear team a Linear issue sits in: the id
+    -- linear_team_rules is keyed by. Set at creation from the response that
+    -- found the issue, and moved by every snapshot write to the snapshot's
+    -- team, so it follows a move to another team. Clearing the snapshot leaves
+    -- it. NULL for every other source.
+    linear_team_id text,
+    CONSTRAINT entities_linear_team_id_check CHECK (
+        CASE WHEN source = 'linear' THEN COALESCE(linear_team_id, '') <> ''
+             ELSE linear_team_id IS NULL END
+    )
 );
 
 
