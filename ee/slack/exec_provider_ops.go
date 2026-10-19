@@ -75,8 +75,10 @@ type (
 )
 
 // slackOpAuthorizeChannel is the stage-1 gate: does the conversation's team track the
-// channel (mirrors exec workspace add's team-tracked-repo gate). Answers with
-// the id the channel has now, for the verb to act on.
+// channel (mirrors exec workspace add's team-tracked-repo gate). The agent's
+// channel id resolves through the registry, so one Slack has since replaced
+// still names the channel; answers with the id the channel has now, for the
+// verb to act on.
 func slackOpAuthorizeChannel(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, args json.RawMessage) (any, error) {
 	var a slackChannelArg
 	if err := json.Unmarshal(args, &a); err != nil {
@@ -86,18 +88,21 @@ func slackOpAuthorizeChannel(ctx context.Context, stores db.Stores, info agentho
 	if bundle == nil {
 		return nil, fmt.Errorf("slack: not available")
 	}
-	channel, err := bundle.Channels.CurrentIDSystem(ctx, info.OrgID, a.Channel)
+	channel, err := bundle.Channels.ResolveSystem(ctx, info.OrgID, a.Channel)
 	if err != nil {
 		return nil, fmt.Errorf("slack: resolve channel %s: %w", a.Channel, err)
 	}
-	tracks, err := bundle.TeamChannels.TracksChannelSystem(ctx, info.OrgID, info.TeamID, channel)
+	if channel == nil {
+		return nil, fmt.Errorf("slack: this team does not track channel %s", a.Channel)
+	}
+	tracks, err := bundle.TeamChannels.TracksChannelSystem(ctx, info.OrgID, info.TeamID, channel.ID)
 	if err != nil {
 		return nil, fmt.Errorf("slack: check channel authorization: %w", err)
 	}
 	if !tracks {
 		return nil, fmt.Errorf("slack: this team does not track channel %s", a.Channel)
 	}
-	return slackAuthorizedResult{Authorized: true, Channel: channel}, nil
+	return slackAuthorizedResult{Authorized: true, Channel: channel.ChannelID}, nil
 }
 
 // slackOpResolveWorkspace resolves which (workspace, app) IDENTITY to act as for
@@ -106,9 +111,9 @@ func slackOpAuthorizeChannel(ctx context.Context, stores db.Stores, info agentho
 // SAME channel, that message's (workspace_id, api_app_id) is authoritative;
 // otherwise every connected workspace matching the channel's WorkspaceID is
 // listed: exactly one → use it; more than one → refuse rather than guess.
-// Both channel ids compare as the ids the channel has now, so a message
-// recorded before Slack moved its channel to a new id still names the
-// channel the verb acts on.
+// Both channel ids resolve to registry rows and compare as rows, so a message
+// recorded before Slack moved its channel to a new id still names the channel
+// the verb acts on.
 func slackOpResolveWorkspace(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, args json.RawMessage) (any, error) {
 	var a slackChannelArg
 	if err := json.Unmarshal(args, &a); err != nil {
@@ -118,11 +123,7 @@ func slackOpResolveWorkspace(ctx context.Context, stores db.Stores, info agentho
 	if bundle == nil {
 		return nil, fmt.Errorf("slack: not available")
 	}
-	channelID, err := bundle.Channels.CurrentIDSystem(ctx, info.OrgID, a.Channel)
-	if err != nil {
-		return nil, fmt.Errorf("slack: resolve channel %s: %w", a.Channel, err)
-	}
-	channel, err := bundle.Channels.GetSystem(ctx, info.OrgID, channelID)
+	channel, err := bundle.Channels.ResolveSystem(ctx, info.OrgID, a.Channel)
 	if err != nil {
 		return nil, fmt.Errorf("slack: look up channel %s: %w", a.Channel, err)
 	}
@@ -135,11 +136,11 @@ func slackOpResolveWorkspace(ctx context.Context, stores db.Stores, info agentho
 		return nil, err
 	}
 	if ok {
-		metaChannelID, err := bundle.Channels.CurrentIDSystem(ctx, info.OrgID, metaChannel)
+		metaRow, err := bundle.Channels.ResolveSystem(ctx, info.OrgID, metaChannel)
 		if err != nil {
 			return nil, fmt.Errorf("slack: resolve channel %s: %w", metaChannel, err)
 		}
-		if metaChannelID == channelID {
+		if metaRow != nil && metaRow.ID == channel.ID {
 			return slackWorkspaceIdentity{WorkspaceID: ws.WorkspaceID, APIAppID: ws.APIAppID}, nil
 		}
 	}
@@ -205,7 +206,14 @@ func slackOpAuthorizeFileChannels(ctx context.Context, stores db.Stores, info ag
 		return nil, fmt.Errorf("slack: not available")
 	}
 	for _, channelID := range a.Channels {
-		tracks, err := bundle.TeamChannels.TracksChannelSystem(ctx, info.OrgID, info.TeamID, channelID)
+		channel, err := bundle.Channels.ResolveSystem(ctx, info.OrgID, channelID)
+		if err != nil {
+			return nil, fmt.Errorf("slack: resolve channel %s: %w", channelID, err)
+		}
+		if channel == nil {
+			continue
+		}
+		tracks, err := bundle.TeamChannels.TracksChannelSystem(ctx, info.OrgID, info.TeamID, channel.ID)
 		if err != nil {
 			return nil, fmt.Errorf("slack: check channel authorization: %w", err)
 		}
@@ -219,10 +227,10 @@ func slackOpAuthorizeFileChannels(ctx context.Context, stores db.Stores, info ag
 // slackOpRecordThreadRoot is exec_host.go send()'s companion for a
 // channel-root post (no --thread-ts): the conversation's own message IS the thread's
 // root, so the thread is engaged the same way a root mention engages one at
-// ingest (ingest.go's handleEventCallback) — idempotent FindOrCreateSystem
-// with kind="thread", titled from the posted text. FindOrCreate never
-// rewrites kind on an already-known row, so exec_host.go calls this — and
-// awaits it — before the generic touched-entity resolution
+// ingest (ingest.go's handleEventCallback) — idempotent
+// FindOrCreateThreadSystem with kind="thread", titled from the posted text.
+// It never rewrites kind on an already-known row, so exec_host.go calls this —
+// and awaits it — before the generic touched-entity resolution
 // (cmd/exec/agenthost/record.go) that recordMessage triggers next can find/
 // create the same (channel, ts) key first and default it to kind="message".
 // Only on first creation, dispatches the same best-effort permalink
@@ -235,27 +243,33 @@ func slackOpRecordThreadRoot(ctx context.Context, stores db.Stores, info agentho
 	if a.Channel == "" || a.TS == "" {
 		return nil, fmt.Errorf("slack: record_thread_root requires channel and ts")
 	}
-	sourceID := domain.SlackSourceID(a.Channel, a.TS)
-	entity, created, err := stores.Entities.FindOrCreateSystem(ctx, info.OrgID, "slack", domain.SlackScope, sourceID, "", "thread", mentionTitle(a.Text), "")
+	bundle := slackstore.FromStores(stores)
+	if bundle == nil {
+		return nil, fmt.Errorf("slack: not available")
+	}
+	channel, err := bundle.Channels.ResolveSystem(ctx, info.OrgID, a.Channel)
+	if err != nil {
+		return nil, fmt.Errorf("slack: resolve channel %s: %w", a.Channel, err)
+	}
+	if channel == nil {
+		return nil, fmt.Errorf("slack: channel %s is not visible to Triage Factory", a.Channel)
+	}
+	entityID, created, err := bundle.Channels.FindOrCreateThreadSystem(ctx, info.OrgID, channel.ID, a.TS, "thread", mentionTitle(a.Text), "")
 	if err != nil {
 		return nil, fmt.Errorf("slack: record thread root entity: %w", err)
 	}
 	if !created {
 		return nil, nil
 	}
-	bundle := slackstore.FromStores(stores)
-	if bundle == nil {
-		return nil, nil
-	}
 	ws, err := bundle.Workspaces.GetByWorkspaceAppSystem(ctx, a.WorkspaceID, a.APIAppID)
 	if err != nil {
-		slackLog.Warn("record thread root: resolve workspace for permalink failed", "workspace", a.WorkspaceID, "entity", entity.ID, "error", err)
+		slackLog.Warn("record thread root: resolve workspace for permalink failed", "workspace", a.WorkspaceID, "entity", entityID, "error", err)
 		return nil, nil
 	}
 	if ws == nil {
 		return nil, nil
 	}
-	NewPermalinkResolver(stores).dispatch(*ws, entity.ID, a.Channel, a.TS)
+	NewPermalinkResolver(stores).dispatch(*ws, entityID, channel.ChannelID, a.TS)
 	return nil, nil
 }
 

@@ -21,16 +21,20 @@ func newChannelRegistryStore(q, _ db.Execer) slackstore.ChannelRegistryStore {
 
 var _ slackstore.ChannelRegistryStore = (*channelRegistryStore)(nil)
 
-func (s *channelRegistryStore) UpsertSightingSystem(context.Context, string, string, string, time.Time) (bool, error) {
-	return false, db.ErrNotApplicableInLocal
+func (s *channelRegistryStore) UpsertSightingSystem(context.Context, string, string, string, time.Time) (slackstore.Channel, error) {
+	return slackstore.Channel{}, db.ErrNotApplicableInLocal
 }
 
-func (s *channelRegistryStore) EnsureSystem(context.Context, string, string, string, string) error {
-	return db.ErrNotApplicableInLocal
+func (s *channelRegistryStore) EnsureSystem(context.Context, string, string, string, string) (slackstore.Channel, error) {
+	return slackstore.Channel{}, db.ErrNotApplicableInLocal
 }
 
 func (s *channelRegistryStore) SetNameSystem(context.Context, string, string, string) error {
 	return db.ErrNotApplicableInLocal
+}
+
+func (s *channelRegistryStore) ResolveSystem(context.Context, string, string) (*slackstore.Channel, error) {
+	return nil, db.ErrNotApplicableInLocal
 }
 
 func (s *channelRegistryStore) GetSystem(context.Context, string, string) (*slackstore.Channel, error) {
@@ -41,14 +45,10 @@ func (s *channelRegistryStore) ListForOrg(context.Context, string) ([]slackstore
 	return nil, db.ErrNotApplicableInLocal
 }
 
+func (s *channelRegistryStore) FindOrCreateThreadSystem(context.Context, string, string, string, string, string, string) (string, bool, error) {
+	return "", false, db.ErrNotApplicableInLocal
+}
+
 func (s *channelRegistryStore) MoveSystem(context.Context, string, string, string) (slackstore.ChannelMove, error) {
 	return slackstore.ChannelMove{}, db.ErrNotApplicableInLocal
-}
-
-func (s *channelRegistryStore) CurrentIDSystem(context.Context, string, string) (string, error) {
-	return "", db.ErrNotApplicableInLocal
-}
-
-func (s *channelRegistryStore) SettleSystem(context.Context, string, string) (string, error) {
-	return "", db.ErrNotApplicableInLocal
 }

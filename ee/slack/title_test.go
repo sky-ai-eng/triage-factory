@@ -319,9 +319,11 @@ func TestHandleEventCallback_DispatchesTitleResolutionOnCreated(t *testing.T) {
 
 			titles := newFakeEntityTitleUpdater()
 			titles.done = make(chan struct{}, 1)
+			entities := newFakeEntities()
 			p := &ingestPipeline{
-				entities:   newFakeEntities(),
+				entities:   entities,
 				deliveries: newFakeDeliveries(),
+				channels:   newFakeChannelRegistryFor(entities),
 				publish:    func(context.Context, domain.Event) {},
 				title:      &TitleResolver{secrets: &fakeSecrets{token: "xoxb-test"}, entities: titles, client: http.DefaultClient},
 			}

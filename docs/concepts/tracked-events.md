@@ -667,7 +667,7 @@ Slack support is an Enterprise, multi-mode-only feature, configured per-org from
 |-------|----|---------|
 | **Message to bot** | `slack:message` | A human addressed the TF bot in a Slack channel — either an explicit @-mention, or a follow-up in a thread the bot already owns (an *engaged thread*) |
 
-Mention-ness is metadata (`SlackMessageMetadata.Mentioned`), not a separate event type — the same taxonomy rule that only splits an event when the two cases are genuinely different situations. A handler can still narrow to explicit mentions with the predicate's `mentioned_only` flag, or to specific channels with `channel_in`.
+Mention-ness is metadata (`SlackMessageMetadata.Mentioned`), not a separate event type — the same taxonomy rule that only splits an event when the two cases are genuinely different situations. A handler can still narrow to explicit mentions with the predicate's `mentioned_only` flag, or to specific channels with `channel_in`, which names channels by their registry id (the `id` field of `GET /api/slack/teams/{team_id}/channels`), not by the ID Slack gives them.
 
 ### Engaged threads
 
@@ -690,11 +690,11 @@ Follow-up ingestion (the un-mentioned `message.channels` / `message.groups` deli
 
 ### Channel ID changes
 
-A thread's entity is keyed by its channel's ID and its root message's timestamp. Slack gives a private channel a new ID when it's shared with another organization through Slack Connect (`G…` becomes `C…`), announces it with `channel_id_changed`, and uses the new ID for everything after. TF follows the change in one transaction: the channel's registry row, each team's tracking of it, the thread entities and their permalinks, the Slack artifacts and audit-log links that name it, and the `channel_in` filter of every `slack:message` handler. It emits no event.
+TF registers every channel it sees or a team tracks, and everything that refers to a channel holds that registry row: each team's tracking of it, each thread's entity, and the `channel_in` filter of every `slack:message` handler. A thread's entity is keyed by its channel's ID and its root message's timestamp. Slack gives a private channel a new ID when it's shared with another organization through Slack Connect (`G…` becomes `C…`), announces it with `channel_id_changed`, and uses the new ID for everything after. TF follows the change in one transaction: the registry row takes the new ID, and so do the values that spell it — the thread entities' keys and permalinks, and the Slack artifacts and audit-log links that name it. Tracking and handler filters need nothing. It emits no event.
 
 TF also records the change, because event metadata is immutable: a message recorded before the share names the old ID for good. Everything that acts on a recorded message reads its channel as the current ID — handler filters, the team gate and owner resolution, a run's task context and injected follow-ups, the exec verbs, and the bot's own reactions, replies and working indicator — and so does ingest, for a message Slack generated before the change but delivered after it.
 
-Slack doesn't order the change against other deliveries. A message made under the new ID that arrives before the change has no thread to land in yet: an un-mentioned follow-up is dropped, and a mention starts a new thread entity. When the change arrives, the thread's original entity takes the key, and the one the mention started is closed beside it, keeping its own task and conversation. A change Slack delivers again, or delivers after a later change to the same channel, leaves the channel on its latest ID.
+Slack doesn't order the change against other deliveries. A message made under the new ID that arrives before the change has no thread to land in yet: an un-mentioned follow-up is dropped, and a mention registers the new ID as a channel of its own and starts a new thread entity. When the change arrives, that registry row is merged into the channel's — its tracking, threads and handler filters move onto the channel — the thread's original entity takes the key, and the one the mention started is closed beside it, keeping its own task and conversation. A change Slack delivers again, or delivers after a later change to the same channel, leaves the channel on its latest ID.
 
 ## System Events
 

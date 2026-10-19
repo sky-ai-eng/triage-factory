@@ -226,54 +226,14 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 	})
 
-	t.Run("FindOrCreate_supports_slack_message_entities", func(t *testing.T) {
-		// TFAC-513: Slack threads resolve through the same canonical resolver
-		// (source='slack', kind='message', source_id='<channel>/<thread_ts>').
-		// There is no CHECK on source/kind in either dialect, so this needs no
-		// migration — pin that both backends round-trip it and the natural key
-		// dedups a re-resolved thread.
-		s, orgID, _ := mk(t)
-
-		const sid = "C0125/1700000000.000100"
-		ent, created, err := s.FindOrCreate(ctx, orgID, "slack", "slack.com", sid, "", "message",
-			"first message text", "https://slack.example/archives/C0125/p1700000000000100")
-		if err != nil {
-			t.Fatalf("FindOrCreate(slack): %v", err)
-		}
-		if !created {
-			t.Fatalf("expected created=true on first slack resolve")
-		}
-		if ent.Source != "slack" || ent.Kind != "message" || ent.SourceID != sid {
-			t.Errorf("unexpected slack entity: %+v", ent)
-		}
-		// Slack entities are complete-at-create — title + permalink, no snapshot.
-		if ent.Title != "first message text" {
-			t.Errorf("title = %q, want the first message text", ent.Title)
-		}
-
-		again, created2, err := s.FindOrCreate(ctx, orgID, "slack", "slack.com", sid, "", "message", "ignored", "")
-		if err != nil {
-			t.Fatalf("FindOrCreate(slack) re-resolve: %v", err)
-		}
-		if created2 {
-			t.Errorf("re-resolving the same thread must return created=false")
-		}
-		if again.ID != ent.ID {
-			t.Errorf("re-resolve id = %s, want %s", again.ID, ent.ID)
-		}
-	})
-
 	t.Run("FindOrCreate_never_rewrites_kind_on_an_existing_row", func(t *testing.T) {
-		// Slack's two ingest paths (a root mention vs. a run's own root post)
-		// each mint kind="thread"; a mid-thread summons and the generic
-		// touched-entity resolver default to kind="message". Whichever
-		// resolves the entity first must stick — a later resolve under a
-		// different kind (e.g. a reply/edit landing on an already-"thread"
-		// entity) must not downgrade it back to "message".
+		// Whichever caller resolves an entity first sets its kind — a later
+		// resolve under a different kind (a generic touched-entity resolve
+		// defaulting the kind) must not rewrite it.
 		s, orgID, _ := mk(t)
 
-		const sid = "C0777/1700000000.000400"
-		first, created, err := s.FindOrCreate(ctx, orgID, "slack", "slack.com", sid, "", "thread", "root text", "")
+		const sid = "owner/repo#777"
+		first, created, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", sid, "", "thread", "root text", "")
 		if err != nil {
 			t.Fatalf("FindOrCreate(thread): %v", err)
 		}
@@ -281,7 +241,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Fatalf("expected created=true on first resolve")
 		}
 
-		second, created2, err := s.FindOrCreate(ctx, orgID, "slack", "slack.com", sid, "", "message", "ignored", "")
+		second, created2, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", sid, "", "message", "ignored", "")
 		if err != nil {
 			t.Fatalf("FindOrCreate(message, re-resolve): %v", err)
 		}
@@ -321,12 +281,12 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("GetBySourceSystem_mirrors_GetBySource", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		want, _, err := s.FindOrCreate(ctx, orgID, "slack", "slack.com", "C0999/1700000000.000300", "", "thread", "root text", "")
+		want, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#999", "", "thread", "root text", "")
 		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
 
-		got, err := s.GetBySourceSystem(ctx, orgID, "slack", "slack.com", "C0999/1700000000.000300")
+		got, err := s.GetBySourceSystem(ctx, orgID, "github", "https://github.com", "owner/repo#999")
 		if err != nil {
 			t.Fatalf("GetBySourceSystem: %v", err)
 		}
@@ -334,7 +294,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Errorf("GetBySourceSystem = %+v, want the seeded entity %+v", got, want)
 		}
 
-		miss, err := s.GetBySourceSystem(ctx, orgID, "slack", "slack.com", "C0999/nonexistent")
+		miss, err := s.GetBySourceSystem(ctx, orgID, "github", "https://github.com", "owner/repo#nonexistent")
 		if err != nil {
 			t.Fatalf("GetBySourceSystem(miss): %v", err)
 		}
@@ -538,15 +498,15 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("UpdateURLSystem_round_trips_and_is_a_noop_on_missing", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		ent, _, err := s.FindOrCreate(ctx, orgID, "slack", "slack.com", "C0125/1700000000.000200", "", "message", "T", "")
+		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#125", "", "pr", "T", "")
 		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
 		if ent.URL != "" {
-			t.Fatalf("seeded entity url = %q, want empty (permalink not yet resolved)", ent.URL)
+			t.Fatalf("seeded entity url = %q, want empty (link not yet resolved)", ent.URL)
 		}
 
-		const permalink = "https://acme.slack.com/archives/C0125/p1700000000000200"
+		const permalink = "https://github.com/owner/repo/pull/125"
 		if _, err := s.UpdateURLSystem(ctx, orgID, ent.ID, permalink); err != nil {
 			t.Fatalf("UpdateURLSystem: %v", err)
 		}

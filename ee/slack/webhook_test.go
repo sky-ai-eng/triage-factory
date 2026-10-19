@@ -190,10 +190,11 @@ func newWebhookRig(t *testing.T, signingSecretRef string, licensed bool) *webhoo
 
 	published := &[]domain.Event{}
 	deliveries := newFakeDeliveries()
-	channels := newFakeChannelRegistry()
+	entities := newFakeEntities()
+	channels := newFakeChannelRegistryFor(entities)
 	stats, metrics := newTestStats()
 	pipeline := &ingestPipeline{
-		entities:   newFakeEntities(),
+		entities:   entities,
 		deliveries: deliveries,
 		channels:   channels,
 		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
@@ -572,9 +573,11 @@ func TestHandleWebhook_TwoAppsOneWorkspace_SignatureSelectionFollowsRow(t *testi
 	}}
 	stores := db.Stores{Secrets: secrets, Ext: map[string]any{slackstore.ExtKey: &slackstore.Bundle{Workspaces: wsStore}}}
 	published := &[]domain.Event{}
+	entities := newFakeEntities()
 	pipeline := &ingestPipeline{
-		entities:   newFakeEntities(),
+		entities:   entities,
 		deliveries: newFakeDeliveries(),
+		channels:   newFakeChannelRegistryFor(entities),
 		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
 	}
 	h := &webhookHandler{stores: stores, pipeline: pipeline}

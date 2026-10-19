@@ -328,7 +328,7 @@ func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info Conver
 	// The poll cycle (or, for Slack, the ingest pipeline) seeds the title from
 	// context; neither an ExternalAction nor an addressed read carries one.
 	// url rides through when present.
-	entity, err := entityscope.Resolve(ctx, stores.Entities, info.OrgID, ref, kind, c.url, true)
+	entity, err := entityscope.Resolve(ctx, stores, info.OrgID, ref, kind, c.url, true)
 	if err != nil {
 		return "", err
 	}

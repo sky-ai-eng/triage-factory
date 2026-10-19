@@ -87,8 +87,11 @@ type trackerView struct {
 
 // channelView is one merged row of the GET/PUT response's channels array —
 // the union of a team's tracked rows, the org's sighting registry, and live
-// Slack candidates, deduped by channel_id.
+// Slack candidates, deduped by channel_id. ID is the channel's registry row,
+// what a slack:message handler's channel_in names; it is empty for a live
+// Slack channel TF holds no row for yet.
 type channelView struct {
+	ID            string        `json:"id,omitempty"`
 	ChannelID     string        `json:"channel_id"`
 	Name          string        `json:"name"`
 	WorkspaceID   string        `json:"workspace_id"`
@@ -174,14 +177,27 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	admin := slackstore.FromStores(h.stores)
-	// A client holding a channel's id from before Slack moved it (a settings
-	// page left open across the share) would otherwise track an id no message
-	// will ever carry again, and prune the moved row.
-	desired, err := currentChannelIDs(r.Context(), admin.Channels, orgID, normalizeChannelIDs(req.ChannelIDs))
+	requested := normalizeChannelIDs(req.ChannelIDs)
+
+	// Tracking holds the channel's registry row, so every requested channel
+	// gets one first, a channel TF has never seen a mention in included. The
+	// ensure resolves an id Slack has since replaced (a settings page left
+	// open across a Slack Connect share) to the channel's row, rather than
+	// tracking an id no message will carry again.
+	var workspaces []slackstore.Workspace
+	var candidates []slackCandidate
+	if len(requested) > 0 {
+		workspaces = h.orgWorkspaces(r.Context(), orgID, userID)
+		candidates, _, _ = h.liveSlackCandidates(r.Context(), orgID, workspaces)
+	}
+	channels, err := h.ensureChannels(r.Context(), orgID, workspaces, candidates, requested)
 	if err != nil {
 		httpx.InternalError(w, "slack/channels", err)
 		return
+	}
+	desired := make([]string, 0, len(channels))
+	for _, ch := range channels {
+		desired = append(desired, ch.ID)
 	}
 
 	var prior []slackstore.TeamChannel
@@ -218,7 +234,7 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 
 	touched := append(append([]string{}, added...), removed...)
 	if len(touched) > 0 {
-		if err := admin.TeamChannels.ReconcilePrimariesSystem(r.Context(), orgID, touched); err != nil {
+		if err := slackstore.FromStores(h.stores).TeamChannels.ReconcilePrimariesSystem(r.Context(), orgID, touched); err != nil {
 			httpx.InternalError(w, "slack/channels", err)
 			return
 		}
@@ -226,16 +242,15 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 
 	var joinWarnings []channelsWarning
 	if len(added) > 0 {
-		joinWarnings = h.ensureAndAutoJoin(r.Context(), orgID, userID, added)
-	}
-	// A change committing after currentChannelIDs resolved the set leaves
-	// this save's rows under the retired id; settling moves them on before
-	// the response reads them back.
-	for _, channelID := range desired {
-		if _, err := admin.Channels.SettleSystem(r.Context(), orgID, channelID); err != nil {
-			httpx.InternalError(w, "slack/channels", err)
-			return
+		byRow := make(map[string]slackstore.Channel, len(channels))
+		for _, ch := range channels {
+			byRow[ch.ID] = ch
 		}
+		addedChannels := make([]slackstore.Channel, 0, len(added))
+		for _, id := range added {
+			addedChannels = append(addedChannels, byRow[id])
+		}
+		joinWarnings = h.autoJoin(r.Context(), orgID, workspaces, candidates, addedChannels)
 	}
 
 	resp, err := h.buildChannelsResponse(r.Context(), orgID, userID, teamID, "admin")
@@ -296,11 +311,16 @@ func (h *channelsHandler) handlePrimary(w http.ResponseWriter, r *http.Request) 
 	}
 
 	admin := slackstore.FromStores(h.stores)
-	if channelID, err = admin.Channels.CurrentIDSystem(r.Context(), orgID, channelID); err != nil {
+	channel, err := admin.Channels.ResolveSystem(r.Context(), orgID, channelID)
+	if err != nil {
 		httpx.InternalError(w, "slack/channels", err)
 		return
 	}
-	if err := admin.TeamChannels.SetPrimarySystem(r.Context(), orgID, channelID, teamID); err != nil {
+	if channel == nil {
+		httpx.BadRequest(w, "team does not track this channel")
+		return
+	}
+	if err := admin.TeamChannels.SetPrimarySystem(r.Context(), orgID, channel.ID, teamID); err != nil {
 		if errors.Is(err, slackstore.ErrTeamNotTrackingChannel) {
 			httpx.BadRequest(w, "team does not track this channel")
 			return
@@ -359,12 +379,14 @@ func (h *channelsHandler) buildChannelsResponse(ctx context.Context, orgID, user
 
 	for _, tc := range tracked {
 		v := get(tc.ChannelID)
+		v.ID = tc.SlackChannelID
 		v.Tracked = true
 		v.IsPrimary = tc.IsPrimary
 		v.Source = "tracked"
 	}
 	for _, c := range registry {
 		v := get(c.ChannelID)
+		v.ID = c.ID
 		if v.Source == "" {
 			v.Source = "sighting"
 		}
@@ -400,12 +422,13 @@ func (h *channelsHandler) buildChannelsResponse(ctx context.Context, orgID, user
 		v.BotIsMember = sc.BotIsMember
 	}
 
-	for channelID, trackers := range trackersByChannel {
-		v, ok := merged[channelID]
+	for _, trackers := range trackersByChannel {
+		// Every tracker of one channel carries the channel's Slack id, and the
+		// registry read above lists every tracked channel's row, so this
+		// misses only on a row added between the two reads — skipped rather
+		// than fabricated as a bare entry.
+		v, ok := merged[trackers[0].ChannelID]
 		if !ok {
-			// Every tracked channel gets a registry row (Channels.EnsureSystem,
-			// see ensureAndAutoJoin), so this shouldn't happen in practice —
-			// skip defensively rather than fabricate a bare entry.
 			continue
 		}
 		tb := make([]trackerView, 0, len(trackers))
@@ -518,49 +541,72 @@ func (h *channelsHandler) liveSlackCandidates(ctx context.Context, orgID string,
 	return candidates, anyFailed, anyTruncated
 }
 
-// ensureAndAutoJoin is PUT's step 4 (post-commit, admin pool + live Slack
-// calls, never rolls back the tracking write): Channels.EnsureSystem for
-// every added channel the registry has never seen, then best-effort
-// conversations.join for added PUBLIC channels the bot isn't already a
-// member of. Returns the join-related warnings — a tracked-but-botless
-// channel is never silently reported as healthy.
-func (h *channelsHandler) ensureAndAutoJoin(ctx context.Context, orgID, userID string, added []string) []channelsWarning {
+// orgWorkspaces lists the org's connected workspaces for PUT's ensure and
+// auto-join. A failed read is logged and degrades to none: the ensure then
+// records no workspace, and the auto-join warns join_failed.
+func (h *channelsHandler) orgWorkspaces(ctx context.Context, orgID, userID string) []slackstore.Workspace {
 	var workspaces []slackstore.Workspace
 	if err := h.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
 		workspaces, e = slackstore.FromTx(tx).Workspaces.ListForOrg(ctx, orgID)
 		return e
 	}); err != nil {
-		slackLog.Warn("channels: list workspaces for auto-join failed", "org_id", orgID, "error", err)
+		slackLog.Warn("channels: list workspaces failed", "org_id", orgID, "error", err)
 	}
+	return workspaces
+}
 
-	candidates, _, _ := h.liveSlackCandidates(ctx, orgID, workspaces)
+// ensureChannels is PUT's registry step, ahead of the tracking write:
+// Channels.EnsureSystem for every requested channel, which returns its row —
+// the reference the tracking row holds. Two requested ids naming one channel
+// (one Slack has since replaced, and the one it has now) yield one row.
+// workspace_id and name come from the live candidate when there is one; an
+// org with exactly one connected workspace has no ambiguity, so a channel
+// with no live match (it fell outside the enumeration cap) is recorded under
+// it, while a multi-workspace org leaves workspace_id blank (EnsureSystem's
+// "refresh only non-empty" contract).
+func (h *channelsHandler) ensureChannels(ctx context.Context, orgID string, workspaces []slackstore.Workspace, candidates []slackCandidate, channelIDs []string) ([]slackstore.Channel, error) {
 	byID := make(map[string]slackCandidate, len(candidates))
 	for _, c := range candidates {
 		byID[c.ChannelID] = c
 	}
-	// Best-effort workspace_id fallback for EnsureSystem when a just-added
-	// channel has no live-candidate match (e.g. it fell outside the
-	// enumeration cap): an org with exactly one connected workspace has no
-	// ambiguity, so use it; a multi-workspace org with no live match leaves
-	// workspace_id blank (EnsureSystem's "refresh only non-empty" contract).
 	soleWorkspaceID := ""
 	if len(workspaces) == 1 {
 		soleWorkspaceID = workspaces[0].WorkspaceID
 	}
-
-	admin := slackstore.FromStores(h.stores)
-	var warnings []channelsWarning
-	for _, channelID := range added {
-		cand, known := byID[channelID]
+	registry := slackstore.FromStores(h.stores).Channels
+	seen := make(map[string]bool, len(channelIDs))
+	out := make([]slackstore.Channel, 0, len(channelIDs))
+	for _, channelID := range channelIDs {
 		workspaceID, name := soleWorkspaceID, ""
-		if known {
+		if cand, ok := byID[channelID]; ok {
 			workspaceID, name = cand.WorkspaceID, cand.Name
 		}
-		if err := admin.Channels.EnsureSystem(ctx, orgID, workspaceID, channelID, name); err != nil {
-			slackLog.Warn("channels: ensure registry row failed", "org_id", orgID, "channel", channelID, "error", err)
+		ch, err := registry.EnsureSystem(ctx, orgID, workspaceID, channelID, name)
+		if err != nil {
+			return nil, fmt.Errorf("ensure slack channel %s: %w", channelID, err)
 		}
+		if seen[ch.ID] {
+			continue
+		}
+		seen[ch.ID] = true
+		out = append(out, ch)
+	}
+	return out, nil
+}
 
+// autoJoin is PUT's post-commit step (live Slack calls, never rolls back the
+// tracking write): best-effort conversations.join for added PUBLIC channels
+// the bot isn't already a member of. Returns the join-related warnings — a
+// tracked-but-botless channel is never silently reported as healthy.
+func (h *channelsHandler) autoJoin(ctx context.Context, orgID string, workspaces []slackstore.Workspace, candidates []slackCandidate, added []slackstore.Channel) []channelsWarning {
+	byID := make(map[string]slackCandidate, len(candidates))
+	for _, c := range candidates {
+		byID[c.ChannelID] = c
+	}
+	var warnings []channelsWarning
+	for _, ch := range added {
+		cand, known := byID[ch.ChannelID]
 		if known && cand.BotIsMember {
 			continue
 		}
@@ -572,21 +618,21 @@ func (h *channelsHandler) ensureAndAutoJoin(ctx context.Context, orgID, userID s
 		// pre-deciding from a flag the live-candidate view can never
 		// actually report as "private AND not a member" (users.conversations
 		// only ever lists the bot's OWN current memberships).
-		caller, botToken, ok := h.botTokenForWorkspace(ctx, orgID, workspaces, workspaceID)
+		caller, botToken, ok := h.botTokenForWorkspace(ctx, orgID, workspaces, ch.WorkspaceID)
 		if !ok {
-			warnings = append(warnings, channelsWarning{ChannelID: channelID, Reason: "join_failed"})
+			warnings = append(warnings, channelsWarning{ChannelID: ch.ChannelID, Reason: "join_failed"})
 			continue
 		}
-		err := slackConversationsJoin(ctx, h.client, caller, botToken, channelID)
+		err := slackConversationsJoin(ctx, h.client, caller, botToken, ch.ChannelID)
 		if err == nil {
 			continue
 		}
 		if isSlackJoinPrivateChannelError(err) {
-			warnings = append(warnings, channelsWarning{ChannelID: channelID, Reason: "invite_required"})
+			warnings = append(warnings, channelsWarning{ChannelID: ch.ChannelID, Reason: "invite_required"})
 			continue
 		}
-		slackLog.Warn("channels: auto-join failed", "org_id", orgID, "channel", channelID, "error", err)
-		warnings = append(warnings, channelsWarning{ChannelID: channelID, Reason: "join_failed"})
+		slackLog.Warn("channels: auto-join failed", "org_id", orgID, "channel", ch.ChannelID, "error", err)
+		warnings = append(warnings, channelsWarning{ChannelID: ch.ChannelID, Reason: "join_failed"})
 	}
 	return warnings
 }
@@ -608,9 +654,8 @@ func (h *channelsHandler) botTokenForWorkspace(ctx context.Context, orgID string
 }
 
 // normalizeChannelIDs drops blanks and de-duplicates, preserving first-seen
-// order — mirrors the pg TeamChannelStore's own ReplaceForTeam normalization
-// so the "first-track" empty→non-empty check (handlePut) and the added/
-// removed diff (diffChannelIDs) agree with what actually got persisted.
+// order — mirrors the pg TeamChannelStore's own ReplaceForTeam normalization,
+// so the requested set PUT ensures is the one it tracks.
 func normalizeChannelIDs(ids []string) []string {
 	seen := make(map[string]bool, len(ids))
 	out := make([]string, 0, len(ids))
@@ -624,27 +669,13 @@ func normalizeChannelIDs(ids []string) []string {
 	return out
 }
 
-// currentChannelIDs maps each id to the id its channel has now, dropping the
-// duplicate a list naming a channel by both its ids would otherwise carry.
-func currentChannelIDs(ctx context.Context, channels slackstore.ChannelRegistryStore, orgID string, ids []string) ([]string, error) {
-	out := make([]string, 0, len(ids))
-	for _, id := range ids {
-		current, err := channels.CurrentIDSystem(ctx, orgID, id)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, current)
-	}
-	return normalizeChannelIDs(out), nil
-}
-
-// diffChannelIDs computes added/removed against the prior tracked set —
-// used both for ReconcilePrimariesSystem's touched-channel set and for the
-// auto-join pass (added only).
+// diffChannelIDs computes added/removed registry rows against the prior
+// tracked set — used both for ReconcilePrimariesSystem's touched-channel set
+// and for the auto-join pass (added only).
 func diffChannelIDs(prior []slackstore.TeamChannel, desired []string) (added, removed []string) {
 	priorSet := make(map[string]bool, len(prior))
 	for _, p := range prior {
-		priorSet[p.ChannelID] = true
+		priorSet[p.SlackChannelID] = true
 	}
 	desiredSet := make(map[string]bool, len(desired))
 	for _, id := range desired {
@@ -654,8 +685,8 @@ func diffChannelIDs(prior []slackstore.TeamChannel, desired []string) (added, re
 		}
 	}
 	for _, p := range prior {
-		if !desiredSet[p.ChannelID] {
-			removed = append(removed, p.ChannelID)
+		if !desiredSet[p.SlackChannelID] {
+			removed = append(removed, p.SlackChannelID)
 		}
 	}
 	return added, removed

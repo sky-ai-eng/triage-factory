@@ -20,19 +20,23 @@ import (
 // TFAC-510's owner ladder — channel-primary owns, the mentioning sender is
 // audit-only).
 //
-// Three DATA states resolve to routing.Unowned() — untracked/unclaimed,
+// Four DATA states resolve to routing.Unowned() — untracked/unclaimed,
 // recorded taskless, only an applies_to_unowned watcher can still fire:
 // metadata this package can't read (never expected from its own ingest, but
 // the hook must not panic the drain goroutine on it), a message carrying no
-// channel, and a channel with no primary team. Each SAYS it resolved rather
-// than returning the empty value, which is what lets the seam refuse the
-// fourth shape — an empty answer nobody claimed.
+// channel, a channel TF holds no registry row for, and a channel with no
+// primary team. The recorded channel id resolves through the registry, so a
+// message recorded before Slack moved its channel resolves to the channel as
+// it is. Each SAYS it resolved rather than returning the empty value, which
+// is what lets the seam refuse the remaining shape — an empty answer nobody
+// claimed.
 //
-// A failed primary-team lookup is none of those — it is "could not find out" —
-// so it propagates and the mention is replayed. Degrading that read to "nobody
-// owns this" loses the mention outright (Slack ingest has no snapshot-diff to
-// re-derive it from), or hands it to a team that merely watches the channel,
-// which then answers — and owns — another team's conversation.
+// A failed channel or primary-team lookup is none of those — it is "could not
+// find out" — so it propagates and the mention is replayed. Degrading that
+// read to "nobody owns this" loses the mention outright (Slack ingest has no
+// snapshot-diff to re-derive it from), or hands it to a team that merely
+// watches the channel, which then answers — and owns — another team's
+// conversation.
 func slackChannelOwner(bundle *slackstore.Bundle) func(ctx context.Context, orgID string, evt domain.Event, entityID string) (routing.OwnerResolution, error) {
 	return func(ctx context.Context, orgID string, evt domain.Event, entityID string) (routing.OwnerResolution, error) {
 		var meta SlackMessageMetadata
@@ -44,7 +48,15 @@ func slackChannelOwner(bundle *slackstore.Bundle) func(ctx context.Context, orgI
 			slackLog.Error("slack owner resolution: message metadata missing channel", "org_id", orgID, "entity_id", entityID)
 			return routing.Unowned(), nil
 		}
-		team, err := bundle.TeamChannels.PrimaryTeamForChannelSystem(ctx, orgID, meta.Channel)
+		channel, err := bundle.Channels.ResolveSystem(ctx, orgID, meta.Channel)
+		if err != nil {
+			slackLog.Error("slack owner resolution: channel lookup failed", "org_id", orgID, "channel", meta.Channel, "error", err)
+			return routing.OwnerResolution{}, fmt.Errorf("slack channel %s: %w", meta.Channel, err)
+		}
+		if channel == nil {
+			return routing.Unowned(), nil
+		}
+		team, err := bundle.TeamChannels.PrimaryTeamForChannelSystem(ctx, orgID, channel.ID)
 		if err != nil {
 			slackLog.Error("slack owner resolution: primary team lookup failed", "org_id", orgID, "channel", meta.Channel, "error", err)
 			return routing.OwnerResolution{}, fmt.Errorf("slack primary team for channel %s: %w", meta.Channel, err)
@@ -57,7 +69,9 @@ func slackChannelOwner(bundle *slackstore.Bundle) func(ctx context.Context, orgI
 }
 
 // slackTeamTracksChannel builds routing.SourceHooks.TracksScope for the
-// Slack source: does teamID track the mention's channel. Fails OPEN — on
+// Slack source: does teamID track the mention's channel, resolved through the
+// registry like slackChannelOwner (a channel TF holds no row for is tracked by
+// no team). Fails OPEN — on
 // malformed metadata or a store error alike — mirroring
 // teamTracksEventRepo (internal/routing/team_routing.go): dropping
 // legitimate work on a transient DB blip (or an unexpected metadata shape)
@@ -74,7 +88,15 @@ func slackTeamTracksChannel(bundle *slackstore.Bundle) func(ctx context.Context,
 		if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil || meta.Channel == "" {
 			return true
 		}
-		tracks, err := bundle.TeamChannels.TracksChannelSystem(ctx, evt.OrgID, teamID, meta.Channel)
+		channel, err := bundle.Channels.ResolveSystem(ctx, evt.OrgID, meta.Channel)
+		if err != nil {
+			slackLog.Warn("slack channel lookup failed, allowing", "team_id", teamID, "channel", meta.Channel, "error", err)
+			return true
+		}
+		if channel == nil {
+			return false
+		}
+		tracks, err := bundle.TeamChannels.TracksChannelSystem(ctx, evt.OrgID, teamID, channel.ID)
 		if err != nil {
 			slackLog.Warn("slack team-channel tracking lookup failed, allowing", "team_id", teamID, "channel", meta.Channel, "error", err)
 			return true

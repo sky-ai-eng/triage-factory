@@ -35,15 +35,15 @@ func TestResolveChannelName_GoldenPath(t *testing.T) {
 	})
 	channels := newFakeChannelRegistry()
 	ws := testWorkspaceForChannelResolver()
-	channels.rows[channelKey(ws.OrgID, "C1")] = &slackstore.Channel{OrgID: ws.OrgID, ChannelID: "C1"}
+	c1 := channels.register(ws.OrgID, "", "C1")
 	r := &ChannelResolver{secrets: &fakeSecrets{token: "xoxb-test"}, channels: channels, client: client}
 
-	r.resolveChannelName(context.Background(), ws, "C1")
+	r.resolveChannelName(context.Background(), ws, *c1)
 
 	if *hits != 1 {
 		t.Fatalf("conversations.info hits = %d; want 1", *hits)
 	}
-	row := channels.rows[channelKey(ws.OrgID, "C1")]
+	row := channels.row(ws.OrgID, "C1")
 	if row.Name != "general" {
 		t.Errorf("Name = %q; want general", row.Name)
 	}
@@ -59,15 +59,15 @@ func TestResolveChannelName_BotTokenReadFailed(t *testing.T) {
 	client, hits := newConversationsInfoServer(t, map[string]any{"ok": true, "channel": map[string]any{"name": "general"}})
 	channels := newFakeChannelRegistry()
 	ws := testWorkspaceForChannelResolver()
-	channels.rows[channelKey(ws.OrgID, "C1")] = &slackstore.Channel{OrgID: ws.OrgID, ChannelID: "C1"}
+	c1 := channels.register(ws.OrgID, "", "C1")
 	r := &ChannelResolver{secrets: &fakeSecrets{err: context.DeadlineExceeded}, channels: channels, client: client}
 
-	r.resolveChannelName(context.Background(), ws, "C1")
+	r.resolveChannelName(context.Background(), ws, *c1)
 
 	if *hits != 0 {
 		t.Errorf("conversations.info hits = %d; want 0 (bot token read failed)", *hits)
 	}
-	if row := channels.rows[channelKey(ws.OrgID, "C1")]; row.Name != "" {
+	if row := channels.row(ws.OrgID, "C1"); row.Name != "" {
 		t.Errorf("Name = %q; want empty (never written on bot-token failure)", row.Name)
 	}
 }
@@ -80,7 +80,7 @@ func TestResolveChannelName_NoBotTokenConfigured(t *testing.T) {
 	ws := testWorkspaceForChannelResolver()
 	r := &ChannelResolver{secrets: &fakeSecrets{token: ""}, channels: channels, client: client}
 
-	r.resolveChannelName(context.Background(), ws, "C1")
+	r.resolveChannelName(context.Background(), ws, slackstore.Channel{ID: "row-C1", OrgID: ws.OrgID, ChannelID: "C1"})
 
 	if *hits != 0 {
 		t.Errorf("conversations.info hits = %d; want 0 (no bot token configured)", *hits)
@@ -96,12 +96,12 @@ func TestResolveChannelName_ConversationsInfoFailed(t *testing.T) {
 	})
 	channels := newFakeChannelRegistry()
 	ws := testWorkspaceForChannelResolver()
-	channels.rows[channelKey(ws.OrgID, "C1")] = &slackstore.Channel{OrgID: ws.OrgID, ChannelID: "C1"}
+	c1 := channels.register(ws.OrgID, "", "C1")
 	r := &ChannelResolver{secrets: &fakeSecrets{token: "xoxb-test"}, channels: channels, client: srv.Client()}
 
-	r.resolveChannelName(context.Background(), ws, "C1")
+	r.resolveChannelName(context.Background(), ws, *c1)
 
-	if row := channels.rows[channelKey(ws.OrgID, "C1")]; row.Name != "" {
+	if row := channels.row(ws.OrgID, "C1"); row.Name != "" {
 		t.Errorf("Name = %q; want empty (never written on conversations.info failure)", row.Name)
 	}
 }
@@ -116,12 +116,13 @@ func TestResolveChannelName_EmptyNameNeverWrites(t *testing.T) {
 	channels := newFakeChannelRegistry()
 	ws := testWorkspaceForChannelResolver()
 	resolvedAt := time.Now().Add(-8 * 24 * time.Hour)
-	channels.rows[channelKey(ws.OrgID, "C1")] = &slackstore.Channel{OrgID: ws.OrgID, ChannelID: "C1", Name: "old-name", NameResolvedAt: &resolvedAt}
+	c1 := channels.register(ws.OrgID, "", "C1")
+	c1.Name, c1.NameResolvedAt = "old-name", &resolvedAt
 	r := &ChannelResolver{secrets: &fakeSecrets{token: "xoxb-test"}, channels: channels, client: srv.Client()}
 
-	r.resolveChannelName(context.Background(), ws, "C1")
+	r.resolveChannelName(context.Background(), ws, *c1)
 
-	if row := channels.rows[channelKey(ws.OrgID, "C1")]; row.Name != "old-name" {
+	if row := channels.row(ws.OrgID, "C1"); row.Name != "old-name" {
 		t.Errorf("Name = %q; want old-name preserved (empty response name must not overwrite)", row.Name)
 	}
 }
@@ -145,10 +146,10 @@ func TestChannelResolverDispatch_DedupsConcurrentResolutions(t *testing.T) {
 	channels := newFakeChannelRegistry()
 	channels.done = make(chan struct{}, 1)
 	ws := testWorkspaceForChannelResolver()
-	channels.rows[channelKey(ws.OrgID, "C1")] = &slackstore.Channel{OrgID: ws.OrgID, ChannelID: "C1"}
+	c1 := channels.register(ws.OrgID, "", "C1")
 	r := &ChannelResolver{secrets: &fakeSecrets{token: "xoxb-test"}, channels: channels, client: srv.Client()}
 
-	r.dispatch(ws, "C1")
+	r.dispatch(ws, *c1)
 
 	deadline := time.After(2 * time.Second)
 	for {
@@ -168,7 +169,7 @@ func TestChannelResolverDispatch_DedupsConcurrentResolutions(t *testing.T) {
 	// Further dispatches while the first is still blocked in
 	// conversations.info must not spawn another resolution.
 	for i := 0; i < 5; i++ {
-		r.dispatch(ws, "C1")
+		r.dispatch(ws, *c1)
 	}
 
 	close(release)

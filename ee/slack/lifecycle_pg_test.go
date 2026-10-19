@@ -196,10 +196,11 @@ func seedSlackMessageEvent(t *testing.T, h *pgtest.Harness, orgID, workspaceID, 
 	if root == "" {
 		root = ts
 	}
+	channelRow := seedSlackChannelRow(t, h, orgID, workspaceID, channel)
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, scope)
-		VALUES ($1, $2, 'slack', $3, 'message', 'test thread', 'slack.com')
-	`, entityID, orgID, domain.SlackSourceID(channel, root)); err != nil {
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, scope, slack_channel_id)
+		VALUES ($1, $2, 'slack', $3, 'message', 'test thread', 'slack.com', $4)
+	`, entityID, orgID, domain.SlackSourceID(channel, root), channelRow); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 
@@ -210,7 +211,7 @@ func seedSlackMessageEvent(t *testing.T, h *pgtest.Harness, orgID, workspaceID, 
 		text = "hey <@BOT> can you take a look?"
 	}
 	meta = SlackMessageMetadata{
-		WorkspaceID: workspaceID, APIAppID: apiAppID, Channel: channel, TS: ts, ThreadTS: threadTS,
+		WorkspaceID: workspaceID, APIAppID: apiAppID, Channel: channel, ChannelRowID: channelRow, TS: ts, ThreadTS: threadTS,
 		SenderID: "U1", Text: text, EventID: "Ev" + uuid.New().String(), Mentioned: mentioned,
 	}
 	metaJSON, err := json.Marshal(meta)
@@ -225,6 +226,21 @@ func seedSlackMessageEvent(t *testing.T, h *pgtest.Harness, orgID, workspaceID, 
 		t.Fatalf("seed event: %v", err)
 	}
 	return eventID, meta
+}
+
+// seedSlackChannelRow returns the registry row of channel in orgID,
+// registering it under workspaceID — the row a Slack entity references.
+func seedSlackChannelRow(t *testing.T, h *pgtest.Harness, orgID, workspaceID, channel string) string {
+	t.Helper()
+	var id string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO slack_channels (org_id, channel_id, workspace_id) VALUES ($1, $2, $3)
+		ON CONFLICT (org_id, channel_id) DO UPDATE SET workspace_id = slack_channels.workspace_id
+		RETURNING id::text
+	`, orgID, channel, workspaceID).Scan(&id); err != nil {
+		t.Fatalf("seed slack channel %s: %v", channel, err)
+	}
+	return id
 }
 
 // slackConversationFixture is what seedSlackMessageConversation returns: the ids a
@@ -1082,7 +1098,8 @@ func TestLifecycleAdapter_ConversationStatus_NonSlackConversation_CachedAfterFir
 	if err := h.AdminDB.QueryRow(`SELECT entity_id FROM tasks WHERE id = $1`, taskID).Scan(&entityID); err != nil {
 		t.Fatalf("look up task's entity: %v", err)
 	}
-	if _, err := h.AdminDB.Exec(`UPDATE entities SET source = 'slack' WHERE id = $1`, entityID); err != nil {
+	channelRow := seedSlackChannelRow(t, h, orgID, "T1", "C1")
+	if _, err := h.AdminDB.Exec(`UPDATE entities SET source = 'slack', slack_channel_id = $2 WHERE id = $1`, entityID, channelRow); err != nil {
 		t.Fatalf("mutate entity source: %v", err)
 	}
 	if _, err := h.AdminDB.Exec(`UPDATE tasks SET event_type = $1 WHERE id = $2`, domain.EventSlackMessage, taskID); err != nil {

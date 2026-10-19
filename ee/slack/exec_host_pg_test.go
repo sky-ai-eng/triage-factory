@@ -243,18 +243,23 @@ func (r *slackExecRig) seedWorkspace(orgID, userID, workspaceID, apiAppID, botTo
 func (r *slackExecRig) seedChannel(orgID, workspaceID, channelID string) {
 	r.t.Helper()
 	admin := slackstore.FromStores(r.stor)
-	if err := admin.Channels.EnsureSystem(r.t.Context(), orgID, workspaceID, channelID, "general"); err != nil {
+	if _, err := admin.Channels.EnsureSystem(r.t.Context(), orgID, workspaceID, channelID, "general"); err != nil {
 		r.t.Fatalf("ensure channel: %v", err)
 	}
 }
 
-// trackChannel makes teamID a tracker of channelID, via the app-pool
-// team-admin-gated ReplaceForTeam under userID's claims (userID must be a
-// team admin — pgtest.SeedOrgWithUser's owner qualifies).
+// trackChannel makes teamID a tracker of channelID — registering the channel
+// first, as the channels API does — via the app-pool team-admin-gated
+// ReplaceForTeam under userID's claims (userID must be a team admin —
+// pgtest.SeedOrgWithUser's owner qualifies).
 func (r *slackExecRig) trackChannel(orgID, userID, teamID, channelID string) {
 	r.t.Helper()
+	channel, err := slackstore.FromStores(r.stor).Channels.EnsureSystem(r.t.Context(), orgID, "", channelID, "")
+	if err != nil {
+		r.t.Fatalf("ensure channel: %v", err)
+	}
 	if err := r.stor.Tx.WithTx(r.t.Context(), orgID, userID, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(r.t.Context(), orgID, teamID, []string{channelID})
+		return slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(r.t.Context(), orgID, teamID, []string{channel.ID})
 	}); err != nil {
 		r.t.Fatalf("track channel: %v", err)
 	}
@@ -1029,6 +1034,9 @@ func TestSlackExecHandler_Send_ChannelMovedToANewID(t *testing.T) {
 	}
 }
 
+// TestSlackExecHandler_Send_UnknownChannel: a channel TF holds no registry row
+// for is tracked by no team — tracking references the row — so the stage-1
+// gate refuses it before any Slack call.
 func TestSlackExecHandler_Send_UnknownChannel(t *testing.T) {
 	r := newSlackExecRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-unknown-chan")
@@ -1037,17 +1045,15 @@ func TestSlackExecHandler_Send_UnknownChannel(t *testing.T) {
 	conversationID := r.seedConversation(orgID, teamID, owner, true)
 	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
-	// authorizeChannel runs before channel resolution and would itself refuse
-	// (an unregistered channel is never tracked either) — track it explicitly
-	// so this test isolates the channel-registry lookup, not authz.
-	r.trackChannel(orgID, owner, teamID, "C1")
-
 	_, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{Channel: "C1", Body: "hi"})
 	if err == nil {
 		t.Fatal("expected an unknown-channel error, got nil")
 	}
-	if !strings.Contains(err.Error(), "not visible") {
-		t.Errorf("error = %q, want it to mention the channel isn't visible to TF", err)
+	if !strings.Contains(err.Error(), "does not track channel C1") {
+		t.Errorf("error = %q, want the team-tracking refusal", err)
+	}
+	if r.fake.lastPostChannel != "" {
+		t.Errorf("posted to %q; want no Slack call", r.fake.lastPostChannel)
 	}
 }
 

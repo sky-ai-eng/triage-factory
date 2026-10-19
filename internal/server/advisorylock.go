@@ -44,7 +44,8 @@ func (s *Server) acquireKeyedLock(ctx context.Context, mu *sync.Map, salt int64,
 //	12 — internal/linearoauth                     (org id:user id, session;
 //	    UserCredentialLockSalt)
 //	0x43484944 ("CHID") — ee/slack/store/pg                   (org id, xact;
-//	    exclusive to move, shared to settle; channelMoveLockSalt)
+//	    exclusive to move, shared to the writes that spell a channel id;
+//	    channelMoveLockSalt)
 //	0x53454154 ("SEAT") — internal/db/postgres/auth_events.go (seat period, xact)
 //	0x544f4b4e ("TOKN") — internal/apitokens                  (user:org, xact)
 //

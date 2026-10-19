@@ -317,16 +317,20 @@ func (a *lifecycleAdapter) messageMetadata(ctx context.Context, orgID, eventID s
 
 // currentChannel resolves a channel id read from event metadata to the id
 // the channel has now: the event may have been recorded before Slack moved
-// the channel to a new one. ok=false on a failed read, logged: every caller is
+// the channel to a new one. A channel TF holds no registry row for keeps the
+// id it was read with. ok=false on a failed read, logged: every caller is
 // best-effort and skips its Slack call rather than send it to an id that may
 // be retired.
 func (a *lifecycleAdapter) currentChannel(ctx context.Context, orgID, channelID string) (string, bool) {
-	channel, err := slackstore.FromStores(a.stores).Channels.CurrentIDSystem(ctx, orgID, channelID)
+	channel, err := slackstore.FromStores(a.stores).Channels.ResolveSystem(ctx, orgID, channelID)
 	if err != nil {
 		slackLog.Warn("slack lifecycle: resolve channel id failed", "channel", channelID, "error", err)
 		return "", false
 	}
-	return channel, true
+	if channel == nil {
+		return channelID, true
+	}
+	return channel.ChannelID, true
 }
 
 // resolveBotToken resolves the (workspace, api_app_id) pair to its bot

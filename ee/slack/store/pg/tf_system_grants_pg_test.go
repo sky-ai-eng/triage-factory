@@ -38,27 +38,33 @@ func TestTfSystem_SlackProviderReads(t *testing.T) {
 	mustWithUser(t, seed, ctx, orgID, userID, func(tx db.TxStores) error {
 		return slackstore.FromTx(tx).Workspaces.Upsert(ctx, testWorkspace(orgID, workspaceID))
 	})
-	if err := slackstore.FromStores(seed).Channels.EnsureSystem(ctx, orgID, workspaceID, channelID, "general"); err != nil {
+	channel, err := slackstore.FromStores(seed).Channels.EnsureSystem(ctx, orgID, workspaceID, channelID, "general")
+	if err != nil {
 		t.Fatalf("seed slack_channels: %v", err)
 	}
 	mustWithUser(t, seed, ctx, orgID, userID, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(ctx, orgID, teamID, []string{channelID})
+		return slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(ctx, orgID, teamID, []string{channel.ID})
 	})
 
 	// The executor's read path: admin half is tf_system.
 	sys := slackstore.FromStores(pgstore.New(h.SystemDB, h.AppDB, pgtest.SecretKey))
 
-	if _, err := sys.TeamChannels.TracksChannelSystem(ctx, orgID, teamID, channelID); err != nil {
+	if _, err := sys.TeamChannels.TracksChannelSystem(ctx, orgID, teamID, channel.ID); err != nil {
 		t.Errorf("TeamChannels.TracksChannelSystem (team_slack_channels grant): %v", err)
 	}
-	if _, err := sys.Channels.GetSystem(ctx, orgID, channelID); err != nil {
+	if _, err := sys.Channels.GetSystem(ctx, orgID, channel.ID); err != nil {
 		t.Errorf("Channels.GetSystem (slack_channels grant): %v", err)
 	}
-	if _, err := sys.Channels.CurrentIDSystem(ctx, orgID, channelID); err != nil {
-		t.Errorf("Channels.CurrentIDSystem (slack_channel_id_changes grant): %v", err)
+	if _, err := sys.Channels.ResolveSystem(ctx, orgID, channelID); err != nil {
+		t.Errorf("Channels.ResolveSystem (slack_channels + slack_channel_id_changes grants): %v", err)
 	}
-	if _, err := sys.TeamChannels.PrimaryTeamForChannelSystem(ctx, orgID, channelID); err != nil {
-		t.Errorf("TeamChannels.PrimaryTeamForChannelSystem (team_slack_channels + slack_channel_id_changes grants): %v", err)
+	if _, err := sys.TeamChannels.PrimaryTeamForChannelSystem(ctx, orgID, channel.ID); err != nil {
+		t.Errorf("TeamChannels.PrimaryTeamForChannelSystem (team_slack_channels grant): %v", err)
+	}
+	// record_thread_root and the touched-entity resolver create threads on the
+	// executor.
+	if _, _, err := sys.Channels.FindOrCreateThreadSystem(ctx, orgID, channel.ID, "1700000000.000100", "thread", "", ""); err != nil {
+		t.Errorf("Channels.FindOrCreateThreadSystem (slack_channels + entities grants): %v", err)
 	}
 	if _, err := sys.Workspaces.GetByWorkspaceAppSystem(ctx, workspaceID, apiAppID); err != nil {
 		t.Errorf("Workspaces.GetByWorkspaceAppSystem (org_slack_workspaces grant): %v", err)

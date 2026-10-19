@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -30,8 +31,46 @@ func Of(ctx context.Context, stores db.Stores, orgID, source string) (string, er
 	return domain.EntityScope(source, settings), nil
 }
 
+// A Resolver finds or creates the entity a source keys under sourceID, in
+// place of the entity store, for a source whose entities hold a reference
+// only the source can fill in: a Slack thread holds its channel's registry
+// row, which ee/slack resolves. stores are the resolving process's; kind and
+// url are what Resolve would create the row with.
+type Resolver func(ctx context.Context, stores db.Stores, orgID, sourceID, kind, url string) (*domain.Entity, error)
+
+var (
+	resolverMu sync.RWMutex
+	resolvers  = map[string]Resolver{}
+)
+
+// RegisterResolver installs source's Resolver. A resolver is handed the
+// stores of the process resolving — an executor installs no routes, and it
+// records the entities its runs touch — so a source registers it from init().
+// Panics on an empty source, a nil resolver, or a second registration for the
+// source — wiring bugs, the posture of events.RegisterCurrentView.
+func RegisterResolver(source string, r Resolver) {
+	resolverMu.Lock()
+	defer resolverMu.Unlock()
+	if source == "" || r == nil {
+		panic("entityscope.RegisterResolver: source and resolver are required")
+	}
+	if _, dup := resolvers[source]; dup {
+		panic(fmt.Sprintf("entityscope.RegisterResolver: duplicate registration for %q", source))
+	}
+	resolvers[source] = r
+}
+
+// ResetResolver removes source's Resolver. Test-only.
+func ResetResolver(source string) {
+	resolverMu.Lock()
+	defer resolverMu.Unlock()
+	delete(resolvers, source)
+}
+
 // Resolve returns the entity for ref, creating one when no row answers for
-// it. ref.Scope must be set (Of). The order is the identity rule's:
+// it. ref.Scope must be set (Of). A source that registered a Resolver
+// resolves its own entities. For every other source the order is the
+// identity rule's:
 //
 //   - with ref.ExternalID, the row carrying it in the scope, whatever key it is
 //     stored under. When follow is true, ref.SourceID is the key the provider
@@ -52,10 +91,17 @@ func Of(ctx context.Context, stores db.Stores, orgID, source string) (string, er
 // url is the link a new or renamed row is stored under where TF does not build
 // it from the key itself (domain.EntityURL). title is left empty: the poll
 // cycle, or the source's own ingest, fills it.
-func Resolve(ctx context.Context, entities db.EntityStore, orgID string, ref domain.EntityRef, kind, url string, follow bool) (*domain.Entity, error) {
+func Resolve(ctx context.Context, stores db.Stores, orgID string, ref domain.EntityRef, kind, url string, follow bool) (*domain.Entity, error) {
 	if link := domain.EntityURL(ref.Source, ref.Scope, ref.SourceID); link != "" {
 		url = link
 	}
+	resolverMu.RLock()
+	r := resolvers[ref.Source]
+	resolverMu.RUnlock()
+	if r != nil {
+		return r(ctx, stores, orgID, ref.SourceID, kind, url)
+	}
+	entities := stores.Entities
 	if ref.ExternalID != "" {
 		e, err := entities.GetByExternalIDSystem(ctx, orgID, ref.Source, ref.Scope, ref.ExternalID)
 		if err != nil {

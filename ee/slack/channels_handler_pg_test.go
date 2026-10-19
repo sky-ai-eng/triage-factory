@@ -314,7 +314,16 @@ func TestChannelsHandler_TeamAdminPUT_OK(t *testing.T) {
 	}
 	got := decodeChannels(t, rec)
 	if len(got.Channels) != 1 || !got.Channels[0].Tracked {
-		t.Errorf("channels = %+v; want one tracked channel", got.Channels)
+		t.Fatalf("channels = %+v; want one tracked channel", got.Channels)
+	}
+	// The response names the channel's registry row: what tracking holds and
+	// a slack:message handler's channel_in names.
+	row, err := slackstore.FromStores(r.stor).Channels.ResolveSystem(t.Context(), orgID, "C1")
+	if err != nil || row == nil {
+		t.Fatalf("registry row for C1 = %+v, %v; want the one PUT registered", row, err)
+	}
+	if got.Channels[0].ID != row.ID {
+		t.Errorf("channel id = %q; want the registry row %q", got.Channels[0].ID, row.ID)
 	}
 }
 

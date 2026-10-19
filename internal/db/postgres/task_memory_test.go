@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -558,14 +559,29 @@ func TestTaskMemoryStore_Postgres_MultiEntityAttachTeamScoped(t *testing.T) {
 // explicit (source, source_id, kind) — so a fixture that needs several entities
 // more than one run engages uses each provider's real source/kind pair (a
 // Slack thread is source 'slack', a Jira issue 'jira', a GitHub PR 'github')
-// rather than pinning everything to one source. Returns its id.
+// rather than pinning everything to one source. A Slack thread references its
+// channel's registry row, registered here under the channel id its key starts
+// with. Returns its id.
 func seedPgSharedEntity(t *testing.T, h *pgtest.Harness, orgID, source, sourceID, kind string) string {
 	t.Helper()
+	var channelRow *string
+	if source == "slack" {
+		channel, _, _ := strings.Cut(sourceID, "/")
+		var row string
+		if err := h.AdminDB.QueryRow(`
+			INSERT INTO slack_channels (org_id, channel_id, workspace_id) VALUES ($1, $2, 'T0SHARED')
+			ON CONFLICT (org_id, channel_id) DO UPDATE SET workspace_id = slack_channels.workspace_id
+			RETURNING id::text
+		`, orgID, channel).Scan(&row); err != nil {
+			t.Fatalf("seed slack channel %s: %v", channel, err)
+		}
+		channelRow = &row
+	}
 	id := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope)
-		VALUES ($1, $2, $3, $4, $5, $6, 'https://example/x', '{}'::jsonb, now(), 'active', CASE $3 WHEN 'github' THEN 'https://github.com' WHEN 'jira' THEN 'https://jira.example.com' WHEN 'slack' THEN 'slack.com' WHEN 'linear' THEN 'ws-test' ELSE 'test-scope' END)
-	`, id, orgID, source, sourceID, kind, sourceID); err != nil {
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope, slack_channel_id)
+		VALUES ($1, $2, $3, $4, $5, $6, 'https://example/x', '{}'::jsonb, now(), 'active', CASE $3 WHEN 'github' THEN 'https://github.com' WHEN 'jira' THEN 'https://jira.example.com' WHEN 'slack' THEN 'slack.com' WHEN 'linear' THEN 'ws-test' ELSE 'test-scope' END, $7::uuid)
+	`, id, orgID, source, sourceID, kind, sourceID, channelRow); err != nil {
 		t.Fatalf("seed shared entity %s/%s: %v", source, sourceID, err)
 	}
 	return id

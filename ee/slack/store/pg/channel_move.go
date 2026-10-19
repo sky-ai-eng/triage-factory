@@ -19,11 +19,14 @@ const channelMoveLockSalt int64 = 0x43484944
 
 // MoveSystem — see the interface doc. The per-org advisory lock serializes
 // two deliveries of the same change (each app the org has in the channel
-// receives its own) and holds off SettleSystem until the move commits.
+// receives its own), and holds off the writes that spell a channel id
+// (lockChannelWrites) until the move commits.
 //
-// The rows live in tables core owns as well as in the Slack ones, and they
-// move in one transaction because a half-moved channel routes a thread's
-// messages to an entity no team tracks. The rules for the core rows are
+// References to the channel hold its registry row and need nothing. What
+// moves is the row's channel_id and the display values that spell it, which
+// live in tables core owns as well as in the Slack ones; they move in the same
+// transaction because a thread whose key still spells the old id is one a
+// message under the new id does not find. The rules for the core rows are
 // Slack's own — a thread key is a channel id and a timestamp, a Slack
 // artifact's key is the message's key — so they are written here rather than
 // as a source-agnostic method on the entity store.
@@ -44,22 +47,34 @@ func (s *channelRegistryStore) MoveSystem(ctx context.Context, orgID, oldID, new
 			return err
 		}
 		out.To = to
-		if err := moveRegistryRow(ctx, q, orgID, oldID, to); err != nil {
+		channel, err := registryRowFor(ctx, q, orgID, oldID)
+		if err != nil {
 			return err
 		}
-		if out.Trackers, err = moveTrackingRows(ctx, q, orgID, oldID, to); err != nil {
-			return err
-		}
-		if out.Entities, out.Superseded, err = moveThreadEntities(ctx, q, orgID, oldID, to); err != nil {
-			return err
+		if channel != "" {
+			absorbed, err := registryRowFor(ctx, q, orgID, to)
+			if err != nil {
+				return err
+			}
+			if absorbed != "" {
+				out.Absorbed = absorbed
+				if out.Trackers, out.Handlers, out.SkippedHandlers, err = absorbRegistryRow(ctx, q, orgID, channel, absorbed); err != nil {
+					return err
+				}
+			}
+			if _, err := q.ExecContext(ctx, `
+				UPDATE slack_channels SET channel_id = $3 WHERE org_id = $1 AND id = $2
+			`, orgID, channel, to); err != nil {
+				return fmt.Errorf("move slack_channels row: %w", err)
+			}
+			if out.Entities, out.Superseded, err = moveThreadKeys(ctx, q, orgID, channel, oldID, to); err != nil {
+				return err
+			}
 		}
 		if out.Artifacts, err = moveArtifacts(ctx, q, orgID, oldID, to); err != nil {
 			return err
 		}
 		if out.Actions, err = moveActionPointers(ctx, q, orgID, oldID, to); err != nil {
-			return err
-		}
-		if out.Handlers, out.SkippedHandlers, err = moveHandlerFilters(ctx, q, orgID, oldID, to); err != nil {
 			return err
 		}
 		return nil
@@ -125,99 +140,130 @@ func recordedChange(ctx context.Context, q db.Execer, orgID, channelID string) (
 	return to, true, nil
 }
 
-// moveRegistryRow moves the slack_channels row, merging it into the row newID
-// already has when a message under the new id was sighted first. The newID
-// row's workspace is the more recent sighting and is kept; its name is kept
-// when it has one.
-func moveRegistryRow(ctx context.Context, q db.Execer, orgID, oldID, newID string) error {
-	if _, err := q.ExecContext(ctx, `
-		INSERT INTO slack_channels (org_id, channel_id, workspace_id, name, name_resolved_at, first_seen_at, last_mention_at)
-		SELECT org_id, $3, workspace_id, name, name_resolved_at, first_seen_at, last_mention_at
-		FROM slack_channels
-		WHERE org_id = $1 AND channel_id = $2
-		ON CONFLICT (org_id, channel_id) DO UPDATE SET
-			first_seen_at    = LEAST(slack_channels.first_seen_at, EXCLUDED.first_seen_at),
-			last_mention_at  = GREATEST(slack_channels.last_mention_at, EXCLUDED.last_mention_at),
-			name             = CASE WHEN slack_channels.name <> '' THEN slack_channels.name ELSE EXCLUDED.name END,
-			name_resolved_at = CASE WHEN slack_channels.name <> '' THEN slack_channels.name_resolved_at ELSE EXCLUDED.name_resolved_at END
-	`, orgID, oldID, newID); err != nil {
-		return fmt.Errorf("move slack_channels row: %w", err)
+// registryRowFor returns the id of the slack_channels row Slack's channelID
+// names, locked for the move, or "" when TF has none.
+func registryRowFor(ctx context.Context, q db.Execer, orgID, channelID string) (string, error) {
+	var id string
+	err := q.QueryRowContext(ctx, `
+		SELECT id::text FROM slack_channels WHERE org_id = $1 AND channel_id = $2 FOR UPDATE
+	`, orgID, channelID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
 	}
-	if _, err := q.ExecContext(ctx, `
-		DELETE FROM slack_channels WHERE org_id = $1 AND channel_id = $2
-	`, orgID, oldID); err != nil {
-		return fmt.Errorf("drop moved slack_channels row: %w", err)
+	if err != nil {
+		return "", fmt.Errorf("read slack_channels row for %s: %w", channelID, err)
 	}
-	return nil
+	return id, nil
 }
 
-// moveTrackingRows moves team_slack_channels. The statements are ordered so
-// the one-primary index never sees two primaries for the new id: a primary
-// the new id gained is demoted first, when the old id has one.
-func moveTrackingRows(ctx context.Context, q db.Execer, orgID, oldID, newID string) (int, error) {
+// absorbRegistryRow merges the row the new id already had (a message under
+// the new id was sighted, or a team tracked it, before the change arrived)
+// into the channel's row, moves every reference to it onto the channel's row,
+// and deletes it. The absorbed row's workspace is the more recent sighting and
+// is kept when it has one; so is its name.
+func absorbRegistryRow(ctx context.Context, q db.Execer, orgID, channel, absorbed string) (int, int, []string, error) {
+	if _, err := q.ExecContext(ctx, `
+		UPDATE slack_channels c SET
+			first_seen_at    = LEAST(c.first_seen_at, a.first_seen_at),
+			last_mention_at  = GREATEST(c.last_mention_at, a.last_mention_at),
+			workspace_id     = CASE WHEN a.workspace_id <> '' THEN a.workspace_id ELSE c.workspace_id END,
+			name             = CASE WHEN a.name <> '' THEN a.name ELSE c.name END,
+			name_resolved_at = CASE WHEN a.name <> '' THEN a.name_resolved_at ELSE c.name_resolved_at END
+		FROM slack_channels a
+		WHERE c.org_id = $1 AND c.id = $2 AND a.org_id = $1 AND a.id = $3
+	`, orgID, channel, absorbed); err != nil {
+		return 0, 0, nil, fmt.Errorf("merge absorbed slack_channels row: %w", err)
+	}
+	trackers, err := absorbTrackingRows(ctx, q, orgID, channel, absorbed)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	if _, err := q.ExecContext(ctx, `
+		UPDATE entities SET slack_channel_id = $2 WHERE org_id = $1 AND slack_channel_id = $3
+	`, orgID, channel, absorbed); err != nil {
+		return 0, 0, nil, fmt.Errorf("move absorbed slack channel's entities: %w", err)
+	}
+	handlers, skipped, err := moveHandlerFilters(ctx, q, orgID, absorbed, channel)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	if _, err := q.ExecContext(ctx, `
+		DELETE FROM slack_channels WHERE org_id = $1 AND id = $2
+	`, orgID, absorbed); err != nil {
+		return 0, 0, nil, fmt.Errorf("drop absorbed slack_channels row: %w", err)
+	}
+	return trackers, handlers, skipped, nil
+}
+
+// absorbTrackingRows moves the absorbed row's team_slack_channels onto the
+// channel's. The statements are ordered so the one-primary index never sees
+// two primaries for the channel: a primary the absorbed row gained is demoted
+// first, when the channel has one.
+func absorbTrackingRows(ctx context.Context, q db.Execer, orgID, channel, absorbed string) (int, error) {
 	var trackers int
 	if err := q.QueryRowContext(ctx, `
-		SELECT count(*) FROM team_slack_channels WHERE org_id = $1 AND channel_id = $2
-	`, orgID, oldID).Scan(&trackers); err != nil {
-		return 0, fmt.Errorf("count team_slack_channels to move: %w", err)
+		SELECT count(*) FROM team_slack_channels WHERE org_id = $1 AND slack_channel_id = $2
+	`, orgID, absorbed).Scan(&trackers); err != nil {
+		return 0, fmt.Errorf("count team_slack_channels to absorb: %w", err)
 	}
 	if trackers == 0 {
 		return 0, nil
 	}
 	if _, err := q.ExecContext(ctx, `
 		UPDATE team_slack_channels SET is_primary = false
-		WHERE org_id = $1 AND channel_id = $3 AND is_primary
+		WHERE org_id = $1 AND slack_channel_id = $3 AND is_primary
 		  AND EXISTS (
 		      SELECT 1 FROM team_slack_channels
-		      WHERE org_id = $1 AND channel_id = $2 AND is_primary
+		      WHERE org_id = $1 AND slack_channel_id = $2 AND is_primary
 		  )
-	`, orgID, oldID, newID); err != nil {
-		return 0, fmt.Errorf("demote new channel id's primary: %w", err)
+	`, orgID, channel, absorbed); err != nil {
+		return 0, fmt.Errorf("demote absorbed slack channel's primary: %w", err)
 	}
-	// A team tracking both ids keeps its new-id row, carrying over the old
-	// row's primary and its created_at, which primary succession orders on.
+	// A team tracking both keeps its row on the channel, carrying over the
+	// absorbed row's primary and the older created_at, which primary
+	// succession orders on.
 	if _, err := q.ExecContext(ctx, `
-		UPDATE team_slack_channels n SET
-			is_primary = n.is_primary OR o.is_primary,
-			created_at = LEAST(n.created_at, o.created_at)
-		FROM team_slack_channels o
-		WHERE n.org_id = $1 AND n.channel_id = $3
-		  AND o.org_id = $1 AND o.channel_id = $2 AND o.team_id = n.team_id
-	`, orgID, oldID, newID); err != nil {
-		return 0, fmt.Errorf("merge team_slack_channels tracking both ids: %w", err)
+		UPDATE team_slack_channels c SET
+			is_primary = c.is_primary OR a.is_primary,
+			created_at = LEAST(c.created_at, a.created_at)
+		FROM team_slack_channels a
+		WHERE c.org_id = $1 AND c.slack_channel_id = $2
+		  AND a.org_id = $1 AND a.slack_channel_id = $3 AND a.team_id = c.team_id
+	`, orgID, channel, absorbed); err != nil {
+		return 0, fmt.Errorf("merge team_slack_channels tracking both rows: %w", err)
 	}
 	if _, err := q.ExecContext(ctx, `
-		DELETE FROM team_slack_channels o
-		WHERE o.org_id = $1 AND o.channel_id = $2
+		DELETE FROM team_slack_channels a
+		WHERE a.org_id = $1 AND a.slack_channel_id = $3
 		  AND EXISTS (
-		      SELECT 1 FROM team_slack_channels n
-		      WHERE n.org_id = $1 AND n.channel_id = $3 AND n.team_id = o.team_id
+		      SELECT 1 FROM team_slack_channels c
+		      WHERE c.org_id = $1 AND c.slack_channel_id = $2 AND c.team_id = a.team_id
 		  )
-	`, orgID, oldID, newID); err != nil {
+	`, orgID, channel, absorbed); err != nil {
 		return 0, fmt.Errorf("drop merged team_slack_channels rows: %w", err)
 	}
 	if _, err := q.ExecContext(ctx, `
-		UPDATE team_slack_channels SET channel_id = $3 WHERE org_id = $1 AND channel_id = $2
-	`, orgID, oldID, newID); err != nil {
-		return 0, fmt.Errorf("move team_slack_channels rows: %w", err)
+		UPDATE team_slack_channels SET slack_channel_id = $2 WHERE org_id = $1 AND slack_channel_id = $3
+	`, orgID, channel, absorbed); err != nil {
+		return 0, fmt.Errorf("move absorbed team_slack_channels rows: %w", err)
 	}
 	return trackers, nil
 }
 
-// moveThreadEntities rekeys every Slack entity under oldID, in any state.
-// Only an active row can collide (keys are unique among active rows), and
-// only with another active row for the same thread: one the new id minted
-// before the change arrived, or one a writer the move overtook left under the
-// old id after it. The older is the thread's original and keeps the key; the
-// newer is closed, and moves with it. A tie keeps the entity under the old
-// key, the original in the first case.
-func moveThreadEntities(ctx context.Context, q db.Execer, orgID, oldID, newID string) (int, []string, error) {
+// moveThreadKeys rekeys every thread entity of the channel keyed under oldID,
+// in any state. Only an active row can collide (keys are unique among active
+// rows), and only with another active row for the same thread: one the new id
+// minted before the change arrived. The older is the thread's original and
+// keeps the key; the newer is closed, and moves with it. A tie keeps the
+// entity under the old key, the original.
+func moveThreadKeys(ctx context.Context, q db.Execer, orgID, channel, oldID, newID string) (int, []string, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, source_id, COALESCE(url, ''), state, created_at FROM entities
-		WHERE org_id = $1 AND source = 'slack' AND scope = $2 AND starts_with(source_id, $3)
+		WHERE org_id = $1 AND source = 'slack' AND scope = $2 AND slack_channel_id = $3
+		  AND starts_with(source_id, $4)
 		ORDER BY id
 		FOR UPDATE
-	`, orgID, domain.SlackScope, oldID+"/")
+	`, orgID, domain.SlackScope, channel, oldID+"/")
 	if err != nil {
 		return 0, nil, fmt.Errorf("list slack entities to move: %w", err)
 	}
@@ -391,18 +437,19 @@ func moveActionPointers(ctx context.Context, q db.Execer, orgID, oldID, newID st
 }
 
 // moveHandlerFilters rewrites the channel_in filter of every slack:message
-// handler naming oldID. Only that key changes; every other predicate field is
-// carried through as stored. A handler whose filter cannot be decoded is
-// skipped and reported rather than failing the move: the rest of the
-// channel's rows do not wait on one bad row.
-func moveHandlerFilters(ctx context.Context, q db.Execer, orgID, oldID, newID string) (int, []string, error) {
+// handler naming the registry row oldRef to name newRef. Only that key
+// changes; every other predicate field is carried through as stored. A
+// handler whose filter cannot be decoded is skipped and reported rather than
+// failing the move: the rest of the channel's rows do not wait on one bad
+// row.
+func moveHandlerFilters(ctx context.Context, q db.Execer, orgID, oldRef, newRef string) (int, []string, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, scope_predicate_json::text FROM event_handlers
 		WHERE org_id = $1 AND event_type = $2
 		  AND scope_predicate_json->'channel_in' @> jsonb_build_array($3::text)
 		ORDER BY id
 		FOR UPDATE
-	`, orgID, domain.EventSlackMessage, oldID)
+	`, orgID, domain.EventSlackMessage, oldRef)
 	if err != nil {
 		return 0, nil, fmt.Errorf("list slack handlers to move: %w", err)
 	}
@@ -415,7 +462,7 @@ func moveHandlerFilters(ctx context.Context, q db.Execer, orgID, oldID, newID st
 			rows.Close()
 			return 0, nil, err
 		}
-		predicate, ok, err := moveChannelInPredicate(raw, oldID, newID)
+		predicate, ok, err := moveChannelInPredicate(raw, oldRef, newRef)
 		switch {
 		case err != nil:
 			skipped = append(skipped, id)
@@ -465,46 +512,4 @@ func moveChannelInPredicate(raw, oldID, newID string) (string, bool, error) {
 		return "", false, err
 	}
 	return string(out), true, nil
-}
-
-// CurrentIDSystem — see the interface doc. Every recorded change points at
-// the id the channel has now, so one read answers.
-func (s *channelRegistryStore) CurrentIDSystem(ctx context.Context, orgID, channelID string) (string, error) {
-	to, changed, err := recordedChange(ctx, s.admin, orgID, channelID)
-	switch {
-	case err != nil:
-		return "", err
-	case !changed:
-		return channelID, nil
-	}
-	return to, nil
-}
-
-// SettleSystem — see the interface doc. The shared lock is the barrier: it
-// waits for a move holding the exclusive one to commit, and a move that takes
-// the exclusive one after it reads every row the caller committed first.
-func (s *channelRegistryStore) SettleSystem(ctx context.Context, orgID, channelID string) (string, error) {
-	var to string
-	var changed bool
-	err := inTx(ctx, s.admin, func(q db.Execer) error {
-		if _, err := q.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended($1, $2))`, orgID, channelMoveLockSalt); err != nil {
-			return fmt.Errorf("lock channel move: %w", err)
-		}
-		var err error
-		to, changed, err = recordedChange(ctx, q, orgID, channelID)
-		return err
-	})
-	if err != nil {
-		return "", err
-	}
-	if !changed {
-		return channelID, nil
-	}
-	// channelID is retired, so the move records nothing and takes its rows
-	// to whatever its record names when the move runs.
-	moved, err := s.MoveSystem(ctx, orgID, channelID, to)
-	if err != nil {
-		return "", err
-	}
-	return moved.To, nil
 }

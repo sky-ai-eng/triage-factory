@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
+
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // channelRegistryStore is the Postgres impl of slackstore.ChannelRegistryStore.
@@ -16,10 +19,10 @@ import (
 //   - app: ListForOrg — the member-visible read (slack_channels_select RLS
 //     gates on org membership; there is no app-pool write policy at all,
 //     see the migration's RLS notes).
-//   - admin: every write (UpsertSightingSystem, EnsureSystem,
-//     SetNameSystem) and GetSystem — ingest sightings, name resolution, and
-//     the channels API's ensure/get are all system-initiated, claims-free
-//     callers.
+//   - admin: every write (UpsertSightingSystem, EnsureSystem, SetNameSystem,
+//     FindOrCreateThreadSystem, MoveSystem) and ResolveSystem — ingest
+//     sightings, name resolution, thread creation and the channels API's
+//     ensure/resolve are all system-initiated, claims-free callers.
 type channelRegistryStore struct {
 	app   db.Execer
 	admin db.Execer
@@ -32,14 +35,14 @@ func newChannelRegistryStore(app, admin db.Execer) slackstore.ChannelRegistrySto
 var _ slackstore.ChannelRegistryStore = (*channelRegistryStore)(nil)
 
 const channelColumns = `
-	org_id::text, channel_id, workspace_id, name, name_resolved_at, first_seen_at, last_mention_at
+	id::text, org_id::text, channel_id, workspace_id, name, name_resolved_at, first_seen_at, last_mention_at
 `
 
 func scanChannel(sc rowScanner) (slackstore.Channel, error) {
 	var c slackstore.Channel
 	var nameResolvedAt, lastMentionAt sql.NullTime
 	if err := sc.Scan(
-		&c.OrgID, &c.ChannelID, &c.WorkspaceID, &c.Name, &nameResolvedAt, &c.FirstSeenAt, &lastMentionAt,
+		&c.ID, &c.OrgID, &c.ChannelID, &c.WorkspaceID, &c.Name, &nameResolvedAt, &c.FirstSeenAt, &lastMentionAt,
 	); err != nil {
 		return slackstore.Channel{}, err
 	}
@@ -52,36 +55,50 @@ func scanChannel(sc rowScanner) (slackstore.Channel, error) {
 	return c, nil
 }
 
-// UpsertSightingSystem tries the INSERT first (mirrors DeliveryStore.
-// MarkDeliveredSystem's ON CONFLICT DO NOTHING + RowsAffected shape):
-// RowsAffected > 0 means this sighting created the row, so created=true and
-// there is nothing left to do. Otherwise a row already existed and a second
-// statement bumps workspace_id + last_mention_at in place, leaving
-// first_seen_at and name untouched.
-func (s *channelRegistryStore) UpsertSightingSystem(ctx context.Context, orgID, workspaceID, channelID string, at time.Time) (bool, error) {
-	res, err := s.admin.ExecContext(ctx, `
-		INSERT INTO slack_channels (org_id, channel_id, workspace_id, first_seen_at, last_mention_at)
-		VALUES ($1, $2, $3, $4, $4)
-		ON CONFLICT (org_id, channel_id) DO NOTHING
-	`, orgID, channelID, workspaceID, at)
-	if err != nil {
-		return false, fmt.Errorf("insert slack_channels sighting: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("rows affected slack_channels sighting: %w", err)
-	}
-	if n > 0 {
-		return true, nil
-	}
+// currentChannelIDSQL resolves the channel id bound at the given placeholder
+// to the id the channel has now, inline. Every recorded change points at the
+// channel's current id (MoveSystem keeps it so), so one hop answers. The org
+// is always $1.
+func currentChannelIDSQL(placeholder string) string {
+	return `COALESCE((SELECT x.new_channel_id FROM slack_channel_id_changes x
+		WHERE x.org_id = $1 AND x.old_channel_id = ` + placeholder + `), ` + placeholder + `)`
+}
 
-	if _, err := s.admin.ExecContext(ctx, `
-		UPDATE slack_channels SET workspace_id = $3, last_mention_at = $4
-		WHERE org_id = $1 AND channel_id = $2
-	`, orgID, channelID, workspaceID, at); err != nil {
-		return false, fmt.Errorf("bump slack_channels sighting: %w", err)
+// lockChannelWrites takes the per-org channel move lock in shared mode, for a
+// write that resolves a channel id and writes rows spelling it: a move holds
+// the lock exclusively, so it waits for the write to commit, and the write
+// waits for a move in progress and then reads the change it recorded.
+func lockChannelWrites(ctx context.Context, q db.Execer, orgID string) error {
+	if _, err := q.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended($1, $2))`, orgID, channelMoveLockSalt); err != nil {
+		return fmt.Errorf("lock channel move: %w", err)
 	}
-	return false, nil
+	return nil
+}
+
+// UpsertSightingSystem is one statement under the shared move lock: the
+// insert arm records the first sight, the conflict arm bumps workspace_id +
+// last_mention_at in place, leaving first_seen_at and name untouched.
+func (s *channelRegistryStore) UpsertSightingSystem(ctx context.Context, orgID, workspaceID, channelID string, at time.Time) (slackstore.Channel, error) {
+	var c slackstore.Channel
+	err := inTx(ctx, s.admin, func(q db.Execer) error {
+		if err := lockChannelWrites(ctx, q, orgID); err != nil {
+			return err
+		}
+		var err error
+		c, err = scanChannel(q.QueryRowContext(ctx, `
+			INSERT INTO slack_channels (org_id, channel_id, workspace_id, first_seen_at, last_mention_at)
+			VALUES ($1, `+currentChannelIDSQL("$2")+`, $3, $4, $4)
+			ON CONFLICT (org_id, channel_id) DO UPDATE SET
+				workspace_id    = EXCLUDED.workspace_id,
+				last_mention_at = EXCLUDED.last_mention_at
+			RETURNING `+channelColumns,
+			orgID, channelID, workspaceID, at))
+		return err
+	})
+	if err != nil {
+		return slackstore.Channel{}, fmt.Errorf("upsert slack_channels sighting: %w", err)
+	}
+	return c, nil
 }
 
 // EnsureSystem inserts a skeleton row when absent, deliberately leaving
@@ -89,36 +106,61 @@ func (s *channelRegistryStore) UpsertSightingSystem(ctx context.Context, orgID, 
 // stamping a mention that never happened. On conflict it refreshes
 // workspace_id/name only when the caller supplied a non-empty value,
 // preserving whatever a prior sighting or ensure already established.
-func (s *channelRegistryStore) EnsureSystem(ctx context.Context, orgID, workspaceID, channelID, name string) error {
-	if _, err := s.admin.ExecContext(ctx, `
-		INSERT INTO slack_channels (org_id, channel_id, workspace_id, name, name_resolved_at)
-		VALUES ($1, $2, $3, $4, CASE WHEN $4 <> '' THEN now() END)
-		ON CONFLICT (org_id, channel_id) DO UPDATE SET
-			workspace_id     = CASE WHEN EXCLUDED.workspace_id <> '' THEN EXCLUDED.workspace_id ELSE slack_channels.workspace_id END,
-			name             = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE slack_channels.name END,
-			name_resolved_at = CASE WHEN EXCLUDED.name <> '' THEN now() ELSE slack_channels.name_resolved_at END
-	`, orgID, channelID, workspaceID, name); err != nil {
-		return fmt.Errorf("ensure slack_channels: %w", err)
+func (s *channelRegistryStore) EnsureSystem(ctx context.Context, orgID, workspaceID, channelID, name string) (slackstore.Channel, error) {
+	var c slackstore.Channel
+	err := inTx(ctx, s.admin, func(q db.Execer) error {
+		if err := lockChannelWrites(ctx, q, orgID); err != nil {
+			return err
+		}
+		var err error
+		c, err = scanChannel(q.QueryRowContext(ctx, `
+			INSERT INTO slack_channels (org_id, channel_id, workspace_id, name, name_resolved_at)
+			VALUES ($1, `+currentChannelIDSQL("$2")+`, $3, $4, CASE WHEN $4 <> '' THEN now() END)
+			ON CONFLICT (org_id, channel_id) DO UPDATE SET
+				workspace_id     = CASE WHEN EXCLUDED.workspace_id <> '' THEN EXCLUDED.workspace_id ELSE slack_channels.workspace_id END,
+				name             = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE slack_channels.name END,
+				name_resolved_at = CASE WHEN EXCLUDED.name <> '' THEN now() ELSE slack_channels.name_resolved_at END
+			RETURNING `+channelColumns,
+			orgID, channelID, workspaceID, name))
+		return err
+	})
+	if err != nil {
+		return slackstore.Channel{}, fmt.Errorf("ensure slack_channels: %w", err)
 	}
-	return nil
+	return c, nil
 }
 
-func (s *channelRegistryStore) SetNameSystem(ctx context.Context, orgID, channelID, name string) error {
+func (s *channelRegistryStore) SetNameSystem(ctx context.Context, orgID, id, name string) error {
 	if _, err := s.admin.ExecContext(ctx, `
 		UPDATE slack_channels SET name = $3, name_resolved_at = now()
-		WHERE org_id = $1 AND channel_id = $2
-	`, orgID, channelID, name); err != nil {
+		WHERE org_id = $1 AND id = $2
+	`, orgID, id, name); err != nil {
 		return fmt.Errorf("set name slack_channels: %w", err)
 	}
 	return nil
 }
 
-func (s *channelRegistryStore) GetSystem(ctx context.Context, orgID, channelID string) (*slackstore.Channel, error) {
+func (s *channelRegistryStore) ResolveSystem(ctx context.Context, orgID, channelID string) (*slackstore.Channel, error) {
 	c, err := scanChannel(s.admin.QueryRowContext(ctx, `
 		SELECT `+channelColumns+`
 		FROM slack_channels
-		WHERE org_id = $1 AND channel_id = $2
-	`, orgID, channelID))
+		WHERE org_id = $1 AND channel_id = `+currentChannelIDSQL("$2"),
+		orgID, channelID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resolve slack_channels: %w", err)
+	}
+	return &c, nil
+}
+
+func (s *channelRegistryStore) GetSystem(ctx context.Context, orgID, id string) (*slackstore.Channel, error) {
+	c, err := scanChannel(s.admin.QueryRowContext(ctx, `
+		SELECT `+channelColumns+`
+		FROM slack_channels
+		WHERE org_id = $1 AND id = $2
+	`, orgID, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -133,7 +175,7 @@ func (s *channelRegistryStore) ListForOrg(ctx context.Context, orgID string) ([]
 		SELECT `+channelColumns+`
 		FROM slack_channels
 		WHERE org_id = $1
-		ORDER BY last_mention_at DESC NULLS LAST, first_seen_at DESC
+		ORDER BY last_mention_at DESC NULLS LAST, first_seen_at DESC, id
 	`, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("list slack_channels: %w", err)
@@ -149,4 +191,89 @@ func (s *channelRegistryStore) ListForOrg(ctx context.Context, orgID string) ([]
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// threadKeyOrder is the key lookup's preference among entities sharing a
+// thread's key — the active one (there is at most one), otherwise the most
+// recently closed — the order db.EntityStore's key lookup reads in.
+const threadKeyOrder = `ORDER BY (state = 'active') DESC, closed_at DESC NULLS LAST, created_at DESC, id DESC`
+
+// FindOrCreateThreadSystem — see the interface doc. It writes the entities
+// row itself because the row references the channel's registry row, which
+// only this store resolves; the insert is the entity store's (DO NOTHING on a
+// lost race, then a re-read decides what the loser sees).
+func (s *channelRegistryStore) FindOrCreateThreadSystem(ctx context.Context, orgID, id, threadTS, kind, title, url string) (string, bool, error) {
+	if threadTS == "" {
+		return "", false, errors.New("find or create slack thread: empty thread ts")
+	}
+	var (
+		entityID string
+		created  bool
+	)
+	err := inTx(ctx, s.admin, func(q db.Execer) error {
+		if err := lockChannelWrites(ctx, q, orgID); err != nil {
+			return err
+		}
+		var channelID string
+		if err := q.QueryRowContext(ctx, `
+			SELECT channel_id FROM slack_channels WHERE org_id = $1 AND id = $2
+		`, orgID, id).Scan(&channelID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("slack channel %s is not registered", id)
+			}
+			return fmt.Errorf("read slack channel %s: %w", id, err)
+		}
+		key := domain.SlackSourceID(channelID, threadTS)
+		find := func() (string, error) {
+			var found string
+			err := q.QueryRowContext(ctx, `
+				SELECT id FROM entities
+				WHERE org_id = $1 AND source = 'slack' AND scope = $2 AND source_id = $3
+				`+threadKeyOrder+` LIMIT 1
+			`, orgID, domain.SlackScope, key).Scan(&found)
+			if errors.Is(err, sql.ErrNoRows) {
+				return "", nil
+			}
+			return found, err
+		}
+		existing, err := find()
+		if err != nil {
+			return fmt.Errorf("find slack thread %s: %w", key, err)
+		}
+		if existing != "" {
+			entityID = existing
+			return nil
+		}
+
+		newID := uuid.New().String()
+		now := time.Now().UTC()
+		res, err := q.ExecContext(ctx, `
+			INSERT INTO entities (id, org_id, source, scope, source_id, kind, title, url, state, created_at, last_polled_at, slack_channel_id)
+			VALUES ($1, $2, 'slack', $3, $4, $5, $6, $7, 'active', $8, $8, $9)
+			ON CONFLICT DO NOTHING
+		`, newID, orgID, domain.SlackScope, key, kind, title, url, now, id)
+		if err != nil {
+			return fmt.Errorf("insert slack thread %s: %w", key, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			entityID, created = newID, true
+			return nil
+		}
+		if existing, err = find(); err != nil {
+			return fmt.Errorf("find slack thread %s: %w", key, err)
+		}
+		if existing == "" {
+			return fmt.Errorf("%w: slack %s in %s", db.ErrEntityKeyOccupied, key, domain.SlackScope)
+		}
+		entityID = existing
+		return nil
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return entityID, created, nil
 }
