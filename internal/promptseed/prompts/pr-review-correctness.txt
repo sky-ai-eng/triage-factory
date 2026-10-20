@@ -39,7 +39,7 @@ Never record:
 - Style, formatting, naming, or import-ordering preferences. Tooling owns those.
 - Praise, apology, or filler.
 - Restating what the PR does. The author wrote it.
-- "Consider adding a test" with no named failing scenario (see category 10 in <focus>).
+- "Consider adding a test" with no named failing scenario (see category 9 in <focus>).
 - A best-practice recommendation you cannot tie to either a concrete failure or a convention visible in this codebase. "I would do this differently" is not a finding; "this file/package already does X this way and this hunk doesn't" is.
 - A finding whose trigger you cannot name or whose fix you cannot articulate.
 - A finding you cannot validate from the code in front of you.

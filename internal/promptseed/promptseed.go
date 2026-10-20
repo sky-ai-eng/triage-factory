@@ -32,6 +32,17 @@ var prReviewCorrectness string
 //go:embed prompts/pr-review-aggregate.txt
 var prReviewAggregate string
 
+// Each pass also ships alone, as a 1-step blueprint no trigger fires: the same
+// method as its pass above, but the reviewer posts the review itself instead of
+// handing findings to an aggregator. The sections that define a finding are
+// shared verbatim with the pass (TestStandaloneReviewsShareTheirPassMethod).
+//
+//go:embed prompts/pr-security-review.txt
+var prSecurityReview string
+
+//go:embed prompts/pr-correctness-review.txt
+var prCorrectnessReview string
+
 // One implementation body ships as two prompts, one per tracker. Each is
 // wrapped by its own blueprint because a blueprint is fired by exactly one
 // trigger, and each tracker's assignment event needs a trigger of its own.
@@ -55,10 +66,10 @@ var fixReviewFeedback string
 // seed chain, so the paths can't diverge.
 //
 // Order is not significant for prompts (each upserts independently), but note
-// the seed chains through blueprints: each shipped prompt is wrapped by a
-// 1-step blueprint (Blueprints), and the shipped event handlers
+// the seed chains through blueprints: each shipped prompt is a step of one
+// shipped blueprint (Blueprints), and the shipped event handlers
 // (db.ShippedEventHandlers) carry trigger rows whose blueprint_id FKs into
-// those blueprints — so any seed flow must run prompts → blueprints →
+// most of those blueprints — so any seed flow must run prompts → blueprints →
 // handlers. The SystemSlug values here must stay in sync with the slugs
 // Blueprints wraps and the BlueprintID references in db.ShippedEventHandlers.
 //
@@ -87,6 +98,12 @@ func Prompts() []domain.Prompt {
 		{SystemSlug: "system-pr-review-correctness", Name: "PR Review: Correctness", Body: prReviewCorrectness, Source: "system"},
 		{SystemSlug: "system-pr-review-aggregate", Name: "PR Review: Assemble & Submit", Body: prReviewAggregate, Source: "system"},
 
+		// Standalone single-pass reviews that post their own review. No
+		// shipped trigger fires them; they are there to delegate by hand or
+		// to wire to a trigger of the team's own.
+		{SystemSlug: "system-pr-security-review", Name: "PR Security Review", Body: prSecurityReview, Source: "system"},
+		{SystemSlug: "system-pr-correctness-review", Name: "PR Correctness Review", Body: prCorrectnessReview, Source: "system"},
+
 		// Merge conflict resolution prompt — auto-fired on merge
 		// conflicts on the user's own PRs via the matching trigger.
 		{SystemSlug: "system-conflict-resolution", Name: "Merge Conflict Resolution", Body: conflictResolution, Source: "system"},
@@ -112,9 +129,11 @@ func Prompts() []domain.Prompt {
 // Blueprints returns the shipped blueprints. Most are a 1-step blueprint
 // wrapping a single prompt: the blueprint reuses the wrapped prompt's
 // system_slug (distinct table, no collision) and its single step points at that
-// prompt's slug. Each such prompt is fired by a trigger (CI-fix,
-// conflict-resolution, jira-implement, linear-implement, fix-review-feedback),
-// so wrapping it keeps the trigger→blueprint reference resolvable.
+// prompt's slug. Wrapping keeps a shipped trigger's blueprint reference
+// resolvable (CI-fix, conflict-resolution, jira-implement, linear-implement,
+// fix-review-feedback), and it puts the prompt under the drift sync, which
+// walks blueprints — the reason the standalone security and correctness
+// reviews are wrapped though no trigger fires them.
 //
 // The exception is PR review (system-pr-review), the one multi-step shipped
 // blueprint: security → correctness → aggregate. Its step prompts
