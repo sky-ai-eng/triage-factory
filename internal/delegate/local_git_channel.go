@@ -168,8 +168,10 @@ func (s *Spawner) startLocalGitChannel(ctx context.Context, orgID string, task d
 	auditHost := agenthost.NewLocal(stores, info)
 	auditHost.SetGitHubResolver(resolver)
 	owner, _ := ownerRepoForTask(task)
-	if identity := ghclient.TokenIdentity(ctx, resolver, orgID, owner); identity != ghclient.IdentityUnknown {
-		auditHost.SetGitHubCredential(identity.Credential())
+	// Only a PAT is pinned: the App is what an unset credential already reads
+	// as, and leaving it unset keeps the per-artifact classification in play.
+	if ghclient.TokenIdentity(ctx, resolver, orgID, owner) == ghclient.IdentityPAT {
+		auditHost.SetGitHubCredential(domain.CredentialGitHubPAT)
 	}
 
 	cfg := s.managedGitGate(info, stores, auditHost)
