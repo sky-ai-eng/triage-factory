@@ -246,9 +246,9 @@ func TestTaskRequeue_JiraTask_PutsTheTicketBack(t *testing.T) {
 
 	const taskID = "00000000-0000-4000-8000-000000000400"
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope, snapshot_json)
-		 VALUES ('e_jira_unclaim', 'jira', 'SKY-5', 'issue', 'active', 'https://jira.example.com', ?)`,
-		`{"key":"SKY-5","status":"To Do","status_id":"`+statusToDoID+`","assignee":""}`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, snapshot_json, jira_project_id)
+		 VALUES ('e_jira_unclaim', 'jira', 'SKY-5', 'issue', 'active', 'https://jira.example.com', ?, ?)`,
+		`{"key":"SKY-5","project_id":"id-SKY","project_key":"SKY","status":"To Do","status_id":"`+statusToDoID+`","assignee":""}`, project,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

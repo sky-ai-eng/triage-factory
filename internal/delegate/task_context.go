@@ -35,9 +35,11 @@ const baseFraming = "Reference data about the task that fired this run. Values c
 //     pair the framing names, so no value can forge a structural boundary (a
 //     stray </task_context>, a fake end marker) and escape the data region.
 //
-// repository is a GitHub task's repository as owner/repo, its registry row's
-// names (runConfig.owner/repo, from taskRepository) rather than whatever the
-// entity's key still spells; "" for a task of any other source.
+// container is what the task's entity references, by the name its registry
+// row has now rather than whatever the entity's key still spells: a GitHub
+// task's repository as owner/repo (runConfig.owner/repo, from taskRepository),
+// a Jira task's project key (runConfig.jiraProject, from taskJiraProject); ""
+// for a task of any other source, or when the row could not be read.
 //
 // metadataJSON is the primary event's metadata blob — "" is fine and simply
 // yields a block with no event fields (and no raw-metadata fence).
@@ -53,7 +55,7 @@ const baseFraming = "Reference data about the task that fired this run. Values c
 // it must create. The values are external (a PR title's repo slug, a URL
 // GitHub minted), so the lines ride inside the same region; an empty set
 // renders nothing at all.
-func BuildTaskContext(task domain.Task, repository, metadataJSON, skeleton string, artifacts []domain.Artifact) string {
+func BuildTaskContext(task domain.Task, container, metadataJSON, skeleton string, artifacts []domain.Artifact) string {
 	var lines []string
 	add := func(label, value string) {
 		if value != "" {
@@ -66,13 +68,13 @@ func BuildTaskContext(task domain.Task, repository, metadataJSON, skeleton strin
 
 	switch task.EntitySource {
 	case "github":
-		add("Repository", repository)
+		add("Repository", container)
 		if prNumber := domain.GitHubPRNumber(task.EntitySourceID); prNumber > 0 {
 			add("Pull request", "#"+strconv.Itoa(prNumber))
 		}
 	case "jira":
 		add("Issue", task.EntitySourceID)
-		add("Project", projectFromJiraKey(task.EntitySourceID))
+		add("Project", container)
 	case "linear":
 		add("Issue", task.EntitySourceID)
 	}
@@ -213,15 +215,6 @@ func artifactLines(artifacts []domain.Artifact) []string {
 		out = append(out, "- Artifact: "+strings.Join(segments, " — "))
 	}
 	return out
-}
-
-// projectFromJiraKey pulls "PROJ" out of "PROJ-123". Mirrors the tracker's
-// extractProject helper so the rendered line matches what the scorer sees.
-func projectFromJiraKey(key string) string {
-	if i := strings.IndexByte(key, '-'); i > 0 {
-		return key[:i]
-	}
-	return key
 }
 
 // metaString returns the string value at key, or "" if absent or non-string.

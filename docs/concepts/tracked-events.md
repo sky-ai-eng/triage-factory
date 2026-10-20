@@ -390,9 +390,13 @@ the project. Its numeric id never changes. So a Jira entity's `source_id` is
 the key — what everything displays, searches and calls Jira with — and its
 `external_id` is the id, which is what TF matches it on once it is known.
 Entities are keyed within a `scope`, the org's Jira site (its base URL),
-because ids and keys repeat across sites. Every Jira event's metadata carries
-`issue_key`, `issue_id` and `project` — the key's project, which is what the
-router's team gate reads.
+because ids and keys repeat across sites. An entity also references the
+project its issue sits in, by `jira_project_id`, the project's row in the
+`jira_projects` registry on the entity's site (see below). Every Jira event's
+metadata carries `issue_key`, `issue_id`, `project` — the project's key as the
+read that produced the event spelled it, which predicates match on — and
+`jira_project_id`, the project's registry row, which is what the router's
+team gate reads.
 
 When a tracked issue answers under a new key, the entity is renamed in the
 same cycle: its `source_id` and `url`, and the target of every artifact
@@ -408,8 +412,9 @@ The refresh emits `key_changed` first, ahead of anything else it found (a move
 to another project usually changes the issue's status too), in the same commit
 as the new snapshot. Its metadata carries the usual identity fields for the
 issue as it is now (`issue_key`, `issue_id`, `project`, `assignee`,
-`assignee_account_id`, `issue_type`, `summary`) plus `old_issue_key` and
-`old_project`, and predicates can filter it on `project` and `old_project`. It
+`assignee_account_id`, `issue_type`, `summary`) plus `old_issue_key`,
+`old_project` and `old_jira_project_id`, and predicates can filter it on
+`project` and `old_project`. It
 is always the difference from the stored snapshot, so an entity with no
 snapshot (one a source pause cleared) is renamed without it, the way it is
 seeded without every other event. It is the one Jira event the team gate
@@ -420,26 +425,41 @@ event goes only to the teams tracking the issue's new project.
 
 A move is told from a project key rename by the project's id, which a rename
 keeps: a key rename renames every entity in the project and retires none of
-them. The teams' rules do not name the key at all. A team's tracked set
+them. Nothing reads a project off an issue key. A team's tracked set
 references the project's row in the `jira_projects` registry, keyed by Jira's
-project id on the org's Jira site, and every Jira cycle reads each tracked
-project by that id before discovery, a watched project as well as an armed
-one, so a rename moves the registry row's key and nothing else: discovery
-asks for the project by id, the rule lookups and the team gate match the
-issues under the key they now carry, and the team's settings show that key. If no rule
+project id on the org's Jira site, and so does every Jira entity
+(`jira_project_id`), so a rename moves the registry row's key and nothing
+else: discovery asks for the project by id, and the rule lookups (completion,
+claim and requeue, the board mirror, the stock deck, the terminal-state
+checker), the router's team gate and the multi-mode read scoping (the deck,
+the factory belt, team activity) all meet the issue and the team's rule on
+that row. Every Jira cycle reads each tracked project by its id before
+discovery, a watched project as well as an armed one, and registers the
+project of every issue it reads, refreshing the row's key and name from the
+read; that is what keeps the team's settings and the task context showing
+the key the project has now.
+
+An entity's `jira_project_id` is set when it is created, from the response
+that found the issue (an agent's read or write registers the project the
+same way the cycle does, so an issue in a project no team tracks has a row to
+reference), and every snapshot write moves it to the row of the snapshot's
+`project_id`, so it follows a move. Clearing a snapshot leaves it. If no rule
 configures the project an issue moved to, TF has nothing to follow it with:
 the entity is renamed, `key_changed` is emitted, and it retires as
 `unreachable` with reason `moved`. That event names the project the issue
-left, which is the project whose teams were tracking it.
+left, which is the project whose teams were tracking it and the one the
+entity still references.
 
 A closed issue that reopens is matched by its id too, so it reactivates its
 original entity even after a move. The cycle that reactivates it renames it
 and still emits `key_changed`, naming the key it was closed under.
 
 A project deleted and recreated under the same key gives new issues the keys
-of old ones. A new issue is skipped while the entity of the old issue that
-held its key is still active, and gets an entity of its own once that one is
-confirmed gone and retires; it never inherits the old issue's history.
+of old ones. The recreated project has a new id, so it is a project of its
+own, which a team tracks by adding it. A new issue is skipped while the entity
+of the old issue that held its key is still active, and gets an entity of its
+own once that one is confirmed gone and retires; it never inherits the old
+issue's history.
 
 An entity created before TF recorded Jira issue ids (every Jira entity of an
 install upgraded from a version without them) carries no `external_id`, and
@@ -755,9 +775,10 @@ Every GitHub event's metadata names its repository twice: `repo`, the `owner/nam
 ### Jira Issue Snapshot
 
 The entity itself carries `source_id` (the key), `external_id` (the issue id,
-which it is matched on once known) and `scope` (the org's Jira site).
+which it is matched on once known), `scope` (the org's Jira site) and
+`jira_project_id`, the registry row of the project the issue sits in.
 
-- `id` (issue id), `key` (the entity's `source_id`), `project_id`, `summary`, `url`
+- `id` (issue id), `key` (the entity's `source_id`), `project_id`, `project_key` (the project's key as the read spelled it), `summary`, `url`
 - `body_hash` — fingerprint of the complete description; the description itself is mirrored onto the entity, capped at 2,000 codepoints
 - `status`, `status_id` — compared by id
 - `assignee` (display name), `assignee_account_id`, `priority`
@@ -768,8 +789,13 @@ which it is matched on once known) and `scope` (the org's Jira site).
 - `open_subtask_count` — subtasks not in a configured done status
 - `created_at`, `updated_at`
 
-`id` and `project_id` are empty on a snapshot stored before they were recorded,
-until its next refresh.
+`id`, `project_id` and `project_key` are empty on a snapshot stored before
+they were recorded, until its next refresh.
+
+Turning Jira off for an org clears these snapshots and leaves the entity's
+`jira_project_id`, which everything that needs an issue's project reads, so
+while Jira is off its issues stay on their teams' belts and one that goes
+unreachable still reaches its project's teams.
 
 ### Linear Issue Snapshot
 

@@ -49,7 +49,7 @@ func commentedSources() []commentedSource {
 			eventType: domain.EventJiraIssueCommented,
 			diff: func(comments []NewComment) []domain.Event {
 				snap := domain.JiraSnapshot{ID: "10001", Key: "SKY-1", Status: "To Do", UpdatedAt: "2026-10-01T10:00:00.000+0000"}
-				return DiffJiraSnapshots(snap, snap, testEntityID, testDoneStatuses, comments)
+				return DiffJiraSnapshots(snap, snap, testEntityID, JiraEventProjects{}, testDoneStatuses, comments)
 			},
 			meta: func(t *testing.T, evt domain.Event) commentedMeta {
 				var m struct {
@@ -784,7 +784,7 @@ func TestRefreshLinear_FailedCommentReadIsRetried(t *testing.T) {
 func TestMarkTFComments_ReadsOnlyItsScope(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
-	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, runmode.LocalDefaultOrgID)
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, runmode.LocalDefaultOrgID)
 	fx := &linearFixture{tr: tr, stores: stores, workspace: "ws-other"}
 	fx.postedByTF(t, 1, "c-1")
 

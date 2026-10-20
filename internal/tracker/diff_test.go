@@ -1197,7 +1197,7 @@ func TestDiffJira_FirstDiscovery_Assigned(t *testing.T) {
 		AssigneeAccountID: testUserAccountID,
 		Priority:          "High",
 	}
-	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	if len(evts) != 1 || evts[0].EventType != domain.EventJiraIssueAssigned {
 		t.Errorf("expected [jira:issue:assigned], got %v", eventTypes(evts))
 	}
@@ -1213,7 +1213,7 @@ func TestDiffJira_FirstDiscovery_Available(t *testing.T) {
 		Status: "To Do",
 		// no Assignee
 	}
-	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	if len(evts) != 1 || evts[0].EventType != domain.EventJiraIssueAvailable {
 		t.Errorf("expected [jira:issue:available], got %v", eventTypes(evts))
 	}
@@ -1221,7 +1221,7 @@ func TestDiffJira_FirstDiscovery_Available(t *testing.T) {
 
 func TestDiffJira_FirstDiscovery_Completed(t *testing.T) {
 	curr := domain.JiraSnapshot{Key: "SKY-125", Status: "Done"}
-	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	if len(evts) != 1 || evts[0].EventType != domain.EventJiraIssueCompleted {
 		t.Errorf("expected [jira:issue:completed], got %v", eventTypes(evts))
 	}
@@ -1231,7 +1231,7 @@ func TestDiffJira_StatusChanged_DedupKey(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", Status: "To Do"}
 	curr := domain.JiraSnapshot{Key: "SKY-1", Status: "In Review"}
 
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	evt := findEvent(evts, domain.EventJiraIssueStatusChanged)
 	if evt == nil {
 		t.Fatal("expected status_changed event")
@@ -1246,7 +1246,7 @@ func TestDiffJira_StatusChanged_Terminal_AlsoEmitsCompleted(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", Status: "In Progress"}
 	curr := domain.JiraSnapshot{Key: "SKY-1", Status: "Done"}
 
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	types := eventTypes(evts)
 	hasStatusChanged := false
 	hasCompleted := false
@@ -1270,7 +1270,7 @@ func TestDiffJira_Reassigned(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", Assignee: testUser, AssigneeAccountID: testUserAccountID}
 	curr := domain.JiraSnapshot{Key: "SKY-1", Assignee: "bob", AssigneeAccountID: "557058:xyz-bob"}
 
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	evt := findEvent(evts, domain.EventJiraIssueAssigned)
 	if evt == nil {
 		t.Fatal("expected assigned event on reassignment")
@@ -1288,7 +1288,7 @@ func TestDiffJira_Unassigned(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", Assignee: testUser}
 	curr := domain.JiraSnapshot{Key: "SKY-1", Assignee: ""}
 
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	if findEvent(evts, domain.EventJiraIssueAvailable) == nil {
 		t.Error("expected available event when assignee removed")
 	}
@@ -1298,7 +1298,7 @@ func TestDiffJira_PriorityChanged_DedupKey(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", Priority: "Low"}
 	curr := domain.JiraSnapshot{Key: "SKY-1", Priority: "High"}
 
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	evt := findEvent(evts, domain.EventJiraIssuePriorityChanged)
 	if evt == nil {
 		t.Fatal("expected priority_changed event")
@@ -1322,7 +1322,7 @@ func TestDiffJira_FirstDiscovery_OpenSubtasks_NoEvents(t *testing.T) {
 		Priority:         "High",
 		OpenSubtaskCount: 2,
 	}
-	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	if len(evts) != 0 {
 		t.Errorf("expected 0 events for parent-with-subtasks on first discovery, got %d: %v",
 			len(evts), eventTypes(evts))
@@ -1338,7 +1338,7 @@ func TestDiffJira_FirstDiscovery_OpenSubtasks_AvailableSuppressed(t *testing.T) 
 		OpenSubtaskCount: 1,
 		// no Assignee — would normally emit Available
 	}
-	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	if len(evts) != 0 {
 		t.Errorf("expected 0 events for unassigned parent-with-subtasks, got %d: %v",
 			len(evts), eventTypes(evts))
@@ -1356,7 +1356,7 @@ func TestDiffJira_FirstDiscovery_TerminalWithSubtasks_EmitsCompleted(t *testing.
 		Assignee:         testUser,
 		OpenSubtaskCount: 3,
 	}
-	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	if len(evts) != 1 || evts[0].EventType != domain.EventJiraIssueCompleted {
 		t.Errorf("expected [jira:issue:completed] even with open subtasks, got %v", eventTypes(evts))
 	}
@@ -1375,6 +1375,7 @@ func TestDiffJira_BecameAtomic_DownwardTransition(t *testing.T) {
 	}
 	curr := domain.JiraSnapshot{
 		Key:               "SKY-300",
+		ProjectKey:        "SKY",
 		Status:            "In Progress",
 		Assignee:          testUser,
 		AssigneeAccountID: testUserAccountID,
@@ -1383,7 +1384,7 @@ func TestDiffJira_BecameAtomic_DownwardTransition(t *testing.T) {
 		IssueType:         "Story",
 		OpenSubtaskCount:  0,
 	}
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	evt := findEvent(evts, domain.EventJiraIssueBecameAtomic)
 	if evt == nil {
 		t.Fatalf("expected became_atomic on 1->0 transition, got events: %v", eventTypes(evts))
@@ -1407,7 +1408,7 @@ func TestDiffJira_BecameAtomic_NoTransition_NoEvent(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-301", OpenSubtaskCount: 0, Assignee: testUser}
 	curr := domain.JiraSnapshot{Key: "SKY-301", OpenSubtaskCount: 0, Assignee: testUser}
 
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	if findEvent(evts, domain.EventJiraIssueBecameAtomic) != nil {
 		t.Error("should not emit became_atomic when prev count was already 0")
 	}
@@ -1421,7 +1422,7 @@ func TestDiffJira_BecameAtomic_AddedThenRemoved_NoEventOnAdd(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-302", OpenSubtaskCount: 0, Assignee: testUser}
 	curr := domain.JiraSnapshot{Key: "SKY-302", OpenSubtaskCount: 2, Assignee: testUser}
 
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	if findEvent(evts, domain.EventJiraIssueBecameAtomic) != nil {
 		t.Error("became_atomic should only fire on downward transition, not upward")
 	}
@@ -1443,7 +1444,7 @@ func TestDiffJira_Reassigned_WithOpenSubtasks_NoEvent(t *testing.T) {
 		Assignee:         testUser,
 		OpenSubtaskCount: 2,
 	}
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	if findEvent(evts, domain.EventJiraIssueAssigned) != nil {
 		t.Error("should not emit assigned on reassignment while parent still has open subtasks")
 	}
@@ -1464,7 +1465,7 @@ func TestDiffJira_Unassigned_WithOpenSubtasks_NoEvent(t *testing.T) {
 		Assignee:         "",
 		OpenSubtaskCount: 1,
 	}
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	if findEvent(evts, domain.EventJiraIssueAvailable) != nil {
 		t.Error("should not emit available on unassignment while parent still has open subtasks")
 	}
@@ -1476,7 +1477,7 @@ func TestDiffJira_Reassigned_NoSubtasks_StillFires(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-312", Assignee: "", OpenSubtaskCount: 0}
 	curr := domain.JiraSnapshot{Key: "SKY-312", Assignee: testUser, OpenSubtaskCount: 0}
 
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	if findEvent(evts, domain.EventJiraIssueAssigned) == nil {
 		t.Error("expected assigned on reassignment of atomic ticket")
 	}
@@ -1501,7 +1502,7 @@ func TestDiffJira_BecameAtomic_TerminalStatus_NoEvent(t *testing.T) {
 		OpenSubtaskCount: 0,
 	}
 
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	if findEvent(evts, domain.EventJiraIssueBecameAtomic) != nil {
 		t.Error("should not emit became_atomic when transitioning to terminal status")
 	}
@@ -1676,7 +1677,7 @@ func TestDiffJiraSnapshots_StatusChangeUsesUpdatedAtAsSourceTime(t *testing.T) {
 		Status:    "In Progress",
 		UpdatedAt: "2026-04-25T18:30:00Z",
 	}
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	assertOccurredAt(t, findEvent(evts, domain.EventJiraIssueStatusChanged),
 		time.Date(2026, 4, 25, 18, 30, 0, 0, time.UTC))
 }
@@ -1693,23 +1694,7 @@ func TestDiffJiraSnapshots_StatusChangeParsesJiraNativeFormat(t *testing.T) {
 		Status:    "In Progress",
 		UpdatedAt: "2026-04-27T19:02:11.123+0000",
 	}
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	assertOccurredAt(t, findEvent(evts, domain.EventJiraIssueStatusChanged),
 		time.Date(2026, 4, 27, 19, 2, 11, 123_000_000, time.UTC))
-}
-
-// --- extractProject helper --------------------------------------------------
-
-func TestExtractProject(t *testing.T) {
-	cases := []struct{ key, want string }{
-		{"SKY-123", "SKY"},
-		{"PROJ-1", "PROJ"},
-		{"NOHYPHEN", "NOHYPHEN"},
-	}
-	for _, tc := range cases {
-		got := extractProject(tc.key)
-		if got != tc.want {
-			t.Errorf("extractProject(%q) = %q, want %q", tc.key, got, tc.want)
-		}
-	}
 }

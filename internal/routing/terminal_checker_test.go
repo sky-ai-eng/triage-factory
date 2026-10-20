@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -49,10 +50,13 @@ func seedDivergentEntity(t *testing.T, database *sql.DB, source, sourceID, snaps
 	}
 	var entity *domain.Entity
 	var err error
-	if source == "linear" {
+	switch source {
+	case "linear":
 		// The snapshot written below moves the team to the one it names.
 		entity, _, err = st.Entities.FindOrCreateLinearSystem(ctx, runmode.LocalDefaultOrgID, testScope(source), sourceID, "uuid-"+sourceID, "lt-seed", sourceID, "")
-	} else {
+	case "jira":
+		entity, _, err = st.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, testScope(source), sourceID, "", dbseed.JiraIssueProject(sourceID), sourceID, "")
+	default:
 		entity, _, err = st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, source, testScope(source), sourceID, "", kind, sourceID, "")
 	}
 	if err != nil {
@@ -309,6 +313,41 @@ func TestTerminalChecker_JiraDoneIsPerProject(t *testing.T) {
 	}
 }
 
+// TestTerminalChecker_JiraDoneFollowsAProjectKeyRename: the done set an issue
+// is judged by is its project's, found by the registry row its entity
+// references, so an issue whose key no longer spells the project's old key —
+// the project's key was renamed — is still judged by that project's rule.
+func TestTerminalChecker_JiraDoneFollowsAProjectKeyRename(t *testing.T) {
+	ctx := context.Background()
+	database := newTestDB(t)
+	r := newCheckerRouter(t, database)
+	seedJiraDoneRules(t, database, runmode.LocalDefaultTeamID, domain.JiraProjectStatusRules{
+		ProjectKey: "PROJ", PickupMembers: jiraRefs("To Do"),
+		InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
+		DoneMembers: jiraRefs("Shipped"), DoneCanonical: jiraRef("Shipped"),
+	})
+	entityID, _ := seedDivergentEntity(t, database, "jira", "PROJ-8", `{"key":"PROJ-8","status":"Shipped"}`, domain.EventJiraIssueAssigned)
+
+	st := sqlitestore.New(database)
+	e, err := st.Entities.GetSystem(ctx, runmode.LocalDefaultOrgID, entityID)
+	if err != nil || e == nil {
+		t.Fatalf("read the entity: %v", err)
+	}
+	if _, err := st.JiraProjects.RefreshSystem(ctx, runmode.LocalDefaultOrgID, e.JiraProjectID, "id-PROJ", "CORE", "Core"); err != nil {
+		t.Fatalf("re-key the registry row: %v", err)
+	}
+	if _, err := st.Entities.StampExternalIDSystem(ctx, runmode.LocalDefaultOrgID, entityID, "10008"); err != nil {
+		t.Fatalf("stamp the issue id: %v", err)
+	}
+	if _, err := st.Entities.RenameSystem(ctx, runmode.LocalDefaultOrgID, "jira", testScope("jira"), "10008", "CORE-8", ""); err != nil {
+		t.Fatalf("rename the issue: %v", err)
+	}
+
+	if a, _, _ := r.checkOrgTerminalInvariant(ctx, runmode.LocalDefaultOrgID); a != 1 {
+		t.Errorf("count = %d, want 1 — CORE-8 sits in its project's done status", a)
+	}
+}
+
 // TestRunTerminalInvariantChecker_CountsOnItsOwnTicker covers the loop
 // itself — the per-org iteration and the ticker — since a checker nothing
 // drives is not an alarm.
@@ -341,7 +380,7 @@ func testScope(source string) string {
 	case "github":
 		return "https://github.com"
 	case "jira":
-		return "https://jira.example.com"
+		return jiraTestHost
 	case "slack":
 		return "slack.com"
 	case "linear":

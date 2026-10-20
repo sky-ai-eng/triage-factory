@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -156,7 +157,7 @@ func settleConversationBlueprint(t *testing.T, database *sql.DB, conversationID,
 // GitHub PR run.
 func seedJiraConversation(t *testing.T, database *sql.DB, conversationID, sessionID, worktreePath string) {
 	t.Helper()
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-"+conversationID, "", "issue", "T-"+conversationID, "https://x/"+conversationID)
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", "SKY-"+conversationID, "", dbseed.JiraIssueProject("SKY-"+conversationID), "T-"+conversationID, "https://x/"+conversationID)
 	if err != nil {
 		t.Fatalf("create jira entity: %v", err)
 	}

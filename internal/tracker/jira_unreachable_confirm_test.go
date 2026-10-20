@@ -15,6 +15,7 @@ import (
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 )
 
@@ -51,7 +52,7 @@ func TestRefreshJira_ConfirmedUnreachableRetiresEntity(t *testing.T) {
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	projects := JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
 
-	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "SKY-1", "10001", "issue", "", ""); err != nil {
+	if _, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "SKY-1", "10001", dbseed.JiraIssueProject("SKY-1"), "", ""); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	if _, err := database.Exec(
@@ -62,7 +63,7 @@ func TestRefreshJira_ConfirmedUnreachableRetiresEntity(t *testing.T) {
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
@@ -103,7 +104,7 @@ func TestRefreshJira_MissingButResolvableIssueIsNotRetired(t *testing.T) {
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	projects := JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
 
-	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "SKY-1", "10001", "issue", "", ""); err != nil {
+	if _, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "SKY-1", "10001", dbseed.JiraIssueProject("SKY-1"), "", ""); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	if _, err := database.Exec(
@@ -114,7 +115,7 @@ func TestRefreshJira_MissingButResolvableIssueIsNotRetired(t *testing.T) {
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
@@ -162,13 +163,13 @@ func TestRefreshJira_IdlessMovedIssueLearnsItsIDAndIsRenamed(t *testing.T) {
 	const site = "https://jira.example.com"
 	// FindOrCreate stamps last_polled_at at creation: this is the entity's
 	// first miss.
-	old, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", site, "OLD-7", "", "issue", "History stays here", site+"/browse/OLD-7")
+	old, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, site, "OLD-7", "", dbseed.JiraIssueProject("OLD-7"), "History stays here", site+"/browse/OLD-7")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	if _, err := tr.RefreshJira(ctx, site, client, site, JiraRules{{Key: "OLD"}, {Key: "NEW"}}); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
@@ -202,16 +203,16 @@ func TestRefreshJira_LegacyDuplicatePairMergesIntoTheOlderRow(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 	const site = "https://jira.example.com"
-	old, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", site, "OLD-9", "", "issue", "old", "")
+	old, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, site, "OLD-9", "", dbseed.JiraIssueProject("OLD-9"), "old", "")
 	if err != nil {
 		t.Fatalf("seed old: %v", err)
 	}
-	current, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", site, "NEW-9", "10009", "issue", "current", "")
+	current, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, site, "NEW-9", "10009", dbseed.JiraIssueProject("NEW-9"), "current", "")
 	if err != nil {
 		t.Fatalf("seed current: %v", err)
 	}
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
-	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	if _, err := tr.RefreshJira(ctx, site, client, site, JiraRules{{Key: "OLD"}, {Key: "NEW"}}); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
@@ -239,12 +240,12 @@ func TestRefreshJira_RecentlyAnsweredKeyIsNotConfirmed(t *testing.T) {
 
 	// FindOrCreate stamps last_polled_at at creation, so this entity reads as
 	// freshly answered — no backdating.
-	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "SKY-1", "10001", "issue", "", ""); err != nil {
+	if _, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "SKY-1", "10001", dbseed.JiraIssueProject("SKY-1"), "", ""); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
@@ -268,7 +269,7 @@ func TestRefreshJira_FailedConfirmationLeavesEntityTracked(t *testing.T) {
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	projects := JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
 
-	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "SKY-1", "10001", "issue", "", ""); err != nil {
+	if _, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "SKY-1", "10001", dbseed.JiraIssueProject("SKY-1"), "", ""); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	if _, err := database.Exec(
@@ -279,7 +280,7 @@ func TestRefreshJira_FailedConfirmationLeavesEntityTracked(t *testing.T) {
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}

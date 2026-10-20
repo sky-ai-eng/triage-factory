@@ -166,14 +166,14 @@ func deletesUnrecordedComment(ctx context.Context, stores db.Stores, info Conver
 // written on its own (recordActionAlone), and each failure is counted against
 // what it lost.
 func RecordExternalWrite(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, act *domain.ExternalAction) {
-	recordExternalWrite(ctx, stores, info, a, act, "")
+	recordExternalWrite(ctx, stores, info, a, act, domain.EntityContainer{})
 }
 
-// recordExternalWrite is RecordExternalWrite carrying linearTeamID: the Linear
-// team of the issue a Linear write touched, read off the response the verb
-// acted on, which the touch needs to create that issue's entity. Empty for
-// every other write.
-func recordExternalWrite(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, act *domain.ExternalAction, linearTeamID string) {
+// recordExternalWrite is RecordExternalWrite carrying container: what the
+// response the verb acted on says the touched issue sits in (a Linear issue's
+// team, a Jira issue's project), which the touch needs to create that issue's
+// entity. Zero for every other write.
+func recordExternalWrite(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, act *domain.ExternalAction, container domain.EntityContainer) {
 	if a != nil {
 		if stores.Artifacts == nil {
 			return
@@ -267,7 +267,7 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 			"conversation", info.ConversationID, "kind", kind, "target", target, "error", err)
 	}
 	// Resolve the touched entity outside the audit write (TFAC-513 §2).
-	touched := recordTouchInfo(ctx, stores, info, a, act, linearTeamID)
+	touched := recordTouchInfo(ctx, stores, info, a, act, container)
 	// Same placement, same reason: an admin-pool write, so it must run after
 	// withWriteInfo's tx has settled. It takes the touch's resolution because
 	// on the common path the two want the same entity — githubAction copies the
@@ -294,10 +294,10 @@ type entityCoordinate struct {
 	// one: a Jira artifact's dedup key carries its site. "" means the org's
 	// current scope.
 	scope string
-	// linearTeamID is the Linear team the response named, for a Linear
-	// coordinate: a Linear entity is created carrying it, and none is created
-	// without it.
-	linearTeamID string
+	// container is what the response says the object sits in, for a Linear
+	// or Jira coordinate: a Linear entity is created carrying its team and a
+	// Jira entity its project, and neither is created without it.
+	container domain.EntityContainer
 }
 
 // resolveTouchedEntityInfo maps a coordinate to an entities row, returning an
@@ -340,7 +340,7 @@ func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info Conver
 	// The poll cycle (or, for Slack, the ingest pipeline) seeds the title from
 	// context; neither an ExternalAction nor an addressed read carries one.
 	// url rides through when present.
-	entity, err := entityscope.Resolve(ctx, stores, info.OrgID, ref, c.linearTeamID, kind, c.url, true)
+	entity, err := entityscope.Resolve(ctx, stores, info.OrgID, ref, c.container, kind, c.url, true)
 	if err != nil {
 		return "", err
 	}
@@ -406,11 +406,11 @@ func (r resolvedEntity) matches(provider, target string) bool {
 // + outside-the-tx contract.
 //
 // Returns what it resolved, for stampPRAttribution to reuse — see the funnel.
-func recordTouchInfo(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, act *domain.ExternalAction, linearTeamID string) resolvedEntity {
+func recordTouchInfo(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, act *domain.ExternalAction, container domain.EntityContainer) resolvedEntity {
 	if act == nil {
 		return resolvedEntity{}
 	}
-	c := entityCoordinate{provider: act.Provider, target: act.Target, url: act.URL, linearTeamID: linearTeamID}
+	c := entityCoordinate{provider: act.Provider, target: act.Target, url: act.URL, container: container}
 	if a != nil && a.Provider == act.Provider {
 		if scope, externalID, ok := domain.ArtifactEntityIdentity(a.Provider, a.DedupKey); ok {
 			c.scope, c.externalID = scope, externalID

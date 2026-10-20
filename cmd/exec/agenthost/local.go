@@ -991,7 +991,12 @@ func (c *LocalClient) JiraGetIssue(ctx context.Context, key string) (_ *jiraclie
 	// its new one, so the response is the only place the issue's current
 	// canonical key is known, and the id is what its entity is found by. An
 	// entity stored under an older key is renamed onto the one answered here.
-	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderJira, issue.Key, issue.ID, "", "")
+	// So does the project, which an entity the touch creates is created in.
+	var project jiraclient.Project
+	if issue.Fields.Project != nil {
+		project = *issue.Fields.Project
+	}
+	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderJira, issue.Key, issue.ID, jiraContainer(project), "")
 	return issue, nil
 }
 
@@ -1070,7 +1075,18 @@ func (c *LocalClient) JiraCreateIssue(ctx context.Context, project, issueType, s
 	if err != nil {
 		return "", err
 	}
-	c.recordJiraIssueRef(ctx, created, created.Key, domain.ActionIssueCreated, domain.ArtifactStateIssueCreated, "", "")
+	// The create's response names no project, and the issue's entity is
+	// created in one, so the issue is read back for it. A failed read-back
+	// costs only the entity: the artifact is keyed on the id the create
+	// answered with.
+	ref := created
+	if back, err := client.GetIssueRef(ctx, created.Key); err == nil && back.ID == created.ID {
+		ref = back
+	} else {
+		agenthostLog.Warn("could not read back the jira issue a create made; recording it without its project",
+			"conversation", c.info.ConversationID, "issue", created.Key, "error", err)
+	}
+	c.recordJiraIssueRef(ctx, ref, created.Key, domain.ActionIssueCreated, domain.ArtifactStateIssueCreated, "", "")
 	return created.Key, nil
 }
 
@@ -1169,10 +1185,11 @@ func (c *LocalClient) JiraListIssueTypes(ctx context.Context, project string) (_
 // without leaving an audit trail.
 
 // resolveJiraIssue reads which issue a verb that named key acted on: its id,
-// which is what its artifacts are keyed on and its entity is found by, and the
+// which is what its artifacts are keyed on and its entity is found by, the
 // key it has now — Jira follows a moved issue's old key to its new one, so an
 // agent writing to an old key records against the issue's current key and its
-// existing entity. Read after the write, on the same credential, so a failure
+// existing entity — and the project it sits in, which an entity the write's
+// touch creates is created in. Read after the write, on the same credential, so a failure
 // here is rare and costs only the artifact: the zero ref it then returns makes
 // the caller record the action alone.
 func (c *LocalClient) resolveJiraIssue(ctx context.Context, client *jiraclient.Client, key string) jiraclient.IssueRef {
@@ -1233,7 +1250,7 @@ func (c *LocalClient) recordJiraIssueRef(ctx context.Context, ref jiraclient.Iss
 			Provider: domain.ArtifactProviderJira, Action: action, Target: named,
 			URL: c.jiraBrowseURL(ctx, named), ToState: toState,
 			Credential: domain.CredentialJiraOrg, DetailJSON: detailsJSON,
-		})
+		}, domain.EntityContainer{})
 		return
 	}
 	key := domain.NormalizeJiraKey(ref.Key)
@@ -1246,7 +1263,7 @@ func (c *LocalClient) recordJiraIssueRef(ctx context.Context, ref jiraclient.Iss
 		DedupKey:    domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue, resource, ""),
 		DetailsJSON: detailsJSON,
 	}
-	c.upsertJiraArtifact(ctx, &a, jiraAction(a, action, "", toState))
+	c.upsertJiraArtifact(ctx, &a, jiraAction(a, action, "", toState), jiraContainer(ref.Project))
 }
 
 // recordJiraComment upserts a `comment` artifact keyed on the issue's site and
@@ -1276,7 +1293,7 @@ func (c *LocalClient) recordJiraComment(ctx context.Context, client *jiraclient.
 			Provider: domain.ArtifactProviderJira, Action: domain.ActionIssueCommentPosted, Target: named,
 			ExternalID: commentID, URL: c.jiraCommentURL(ctx, named, commentID),
 			Credential: domain.CredentialJiraOrg, DetailJSON: detail,
-		})
+		}, domain.EntityContainer{})
 		return
 	}
 	// Deduped on the issue and the comment id, so the key only rides along as
@@ -1292,7 +1309,7 @@ func (c *LocalClient) recordJiraComment(ctx context.Context, client *jiraclient.
 		DedupKey:    domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindComment, resource, commentID),
 		DetailsJSON: detail,
 	}
-	c.upsertJiraArtifact(ctx, &a, jiraAction(a, domain.ActionIssueCommentPosted, "", ""))
+	c.upsertJiraArtifact(ctx, &a, jiraAction(a, domain.ActionIssueCommentPosted, "", ""), jiraContainer(ref.Project))
 }
 
 // upsertJiraArtifact stamps the provider onto a and writes it best-effort via
@@ -1301,11 +1318,19 @@ func (c *LocalClient) recordJiraComment(ctx context.Context, client *jiraclient.
 // applied Jira action. act is the external-action audit row appended in the
 // SAME write as the artifact (TFAC-483), under the org Jira service-account
 // credential. A nil a records the action alone. See upsertGithubArtifact.
-func (c *LocalClient) upsertJiraArtifact(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction) {
+// container is the project the touched issue sits in, which the funnel's
+// touch creates the issue's entity in.
+func (c *LocalClient) upsertJiraArtifact(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction, container domain.EntityContainer) {
 	if a != nil {
 		a.Provider = domain.ArtifactProviderJira
 	}
-	c.rt.Record(ctx, a, act, "")
+	c.rt.Record(ctx, a, act, container)
+}
+
+// jiraContainer is what a Jira issue's entity is created in: the project a
+// response says the issue sits in, zero when it named none.
+func jiraContainer(p jiraclient.Project) domain.EntityContainer {
+	return domain.EntityContainer{JiraProject: domain.JiraProjectRef{ID: p.ID, Key: p.Key, Name: p.Name}}
 }
 
 // jiraSiteBase returns the org's configured Jira site URL, trailing slash
@@ -1714,7 +1739,7 @@ func (c *LocalClient) GithubGetReviewDetail(ctx context.Context, owner, repo str
 // actions download-logs) never call this — the rule is addressed → touch,
 // returned-in-a-set → never.
 func (c *LocalClient) touchPR(ctx context.Context, owner, repo string, number int) {
-	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, domain.PullRequestTarget(owner+"/"+repo, number), "", "", "")
+	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, domain.PullRequestTarget(owner+"/"+repo, number), "", domain.EntityContainer{}, "")
 }
 
 // RecordReadTouch is the Client-interface escape hatch for an addressed read
@@ -1726,7 +1751,7 @@ func (c *LocalClient) touchPR(ctx context.Context, owner, repo string, number in
 // No provider id crosses this door, so a Jira coordinate through it touches
 // nothing: a Jira read records its own touch from the response it read.
 func (c *LocalClient) RecordReadTouch(ctx context.Context, provider, target, url string) {
-	c.rt.RecordReadTouch(ctx, provider, target, "", "", url)
+	c.rt.RecordReadTouch(ctx, provider, target, "", domain.EntityContainer{}, url)
 }
 
 // memoryLoadSources is the set of entity source values `memory load` accepts —
@@ -2424,7 +2449,7 @@ func (c *LocalClient) recordGithubPR(ctx context.Context, owner, repo, head, bas
 // re-records the artifact without a new GitHub write).
 func (c *LocalClient) upsertGithubArtifact(ctx context.Context, a domain.Artifact, act *domain.ExternalAction) {
 	a.Provider = domain.ArtifactProviderGitHub
-	c.rt.Record(ctx, &a, act, "")
+	c.rt.Record(ctx, &a, act, domain.EntityContainer{})
 }
 
 // --- external-action recording (TFAC-483) ---
@@ -2448,7 +2473,7 @@ func (c *LocalClient) upsertGithubArtifact(ctx context.Context, a domain.Artifac
 // (RecordExternalWrite, record.go) with a nil artifact; best-effort like every
 // other funnel here.
 func (c *LocalClient) recordBotAction(ctx context.Context, act *domain.ExternalAction) {
-	c.rt.Record(ctx, nil, act, "")
+	c.rt.Record(ctx, nil, act, domain.EntityContainer{})
 }
 
 // RecordGitDenied appends a git_denied external-action audit row for a git op

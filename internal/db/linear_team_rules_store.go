@@ -57,7 +57,7 @@ type LinearTeamRulesStore interface {
 
 	// TracksTeamSystem reports whether the team has a row for linearTeamID in
 	// workspaceID — the router's team gate. Admin pool. Mirrors
-	// JiraStatusRulesStore.TracksProjectSystem.
+	// JiraStatusRulesStore.TracksJiraProjectSystem.
 	TracksTeamSystem(ctx context.Context, teamID, workspaceID, linearTeamID string) (bool, error)
 
 	// ReplaceForTeam makes rules the team's whole set in workspaceID in one

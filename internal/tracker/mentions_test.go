@@ -359,7 +359,7 @@ func TestRefreshGitHub_MentionedEndToEnd(t *testing.T) {
 		commentPage, reviewPage)
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, "", nil, mentionResolver); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
@@ -396,7 +396,7 @@ func TestRefreshGitHub_KeepsBodyMentionsWithoutTheBody(t *testing.T) {
 	reads := 0
 	srv := commentRefreshServer(t, `{"totalCount":0,"nodes":[]}`, `{}`, &reads)
 
-	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, runmode.LocalDefaultOrgID)
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, runmode.LocalDefaultOrgID)
 	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, ghclient.NewClient(srv.URL, "tok"), "", nil, mentionResolver); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
@@ -487,7 +487,7 @@ func TestRefreshGitHub_OpenedPRBodyMentions(t *testing.T) {
 		openPRJSON(3, "carol", "cc @bob", start.Add(-time.Hour)),
 		openPRJSON(4, "carol", "cc @erin", start.Add(-time.Minute)))
 	client := ghclient.NewClient(openedPRServer(t, first, second).URL, "tok")
-	tr := New(database, &recordingPreEnqueuedPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, &recordingPreEnqueuedPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	resolver := knownLogins{"bob": true, "carol": true, "erin": true}
 
 	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, "", []string{"octo/repo"}, resolver); err != nil {

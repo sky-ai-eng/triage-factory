@@ -42,9 +42,10 @@ type registryRow struct {
 	id, site, externalID string
 }
 
-func registryByKey(t *testing.T, database *sql.DB) map[string]registryRow {
+// registryOnSite is the registry rows on site, by project key.
+func registryOnSite(t *testing.T, database *sql.DB, site string) map[string]registryRow {
 	t.Helper()
-	rows, err := database.Query(`SELECT id, site, COALESCE(external_id, ''), project_key FROM jira_projects`)
+	rows, err := database.Query(`SELECT id, site, COALESCE(external_id, ''), project_key FROM jira_projects WHERE site = ?`, site)
 	if err != nil {
 		t.Fatalf("read jira_projects: %v", err)
 	}
@@ -101,7 +102,7 @@ func TestMigrate_JiraProjectRegistry(t *testing.T) {
 
 	migrateProviderScopes(t, database)
 
-	reg := registryByKey(t, database)
+	reg := registryOnSite(t, database, site)
 	want := map[string]string{"SKY": "10000", "OPS": "", "OLD": "", "NEW": "30000"}
 	if len(reg) != len(want) {
 		t.Fatalf("registry = %+v, want one row each for %v", reg, want)
@@ -162,6 +163,23 @@ func TestMigrate_JiraProjectRegistry(t *testing.T) {
 		t.Errorf("team-1 order = %v, want the registry ids of OLD, SKY, OPS, NEW in that order", order)
 	}
 
+	// Every issue references its project's row on its own site: by the id its
+	// snapshot names (OLD-1's is NEW's project now), else by its key's
+	// project key. SKY-9, read from another site, registered its project
+	// there, under its own id.
+	far := registryOnSite(t, database, "https://other.example.com")
+	if len(far) != 1 || far["SKY"].externalID != "99999" {
+		t.Errorf("registry on the other site = %+v, want SKY under 99999 alone", far)
+	}
+	for entity, wantRow := range map[string]string{
+		"e-sky-1": reg["SKY"].id, "e-sky-2": reg["SKY"].id, "e-sky-bad": reg["SKY"].id,
+		"e-sky-far": far["SKY"].id, "e-old": reg["NEW"].id, "e-new": reg["NEW"].id,
+	} {
+		if got := queryString(t, database, `SELECT COALESCE(jira_project_id, '') FROM entities WHERE id = ?`, entity); got != wantRow {
+			t.Errorf("%s references %q, want %q", entity, got, wantRow)
+		}
+	}
+
 	// The rules now reference the registry, and the schema holds them to it.
 	if _, err := database.Exec(`INSERT INTO jira_project_status_rules (team_id, jira_project_id, org_id) VALUES ('team-1', 'no-such-row', ?)`, runmode.LocalDefaultOrgID); err == nil {
 		t.Error("a rule naming no registry row was stored")
@@ -198,7 +216,7 @@ func TestMigrate_JiraProjectRegistryEvidenceWithoutAPollTime(t *testing.T) {
 
 			migrateProviderScopes(t, database)
 
-			reg := registryByKey(t, database)
+			reg := registryOnSite(t, database, site)
 			if reg[tc.resolved].externalID != "30000" || reg[tc.unresolved].externalID != "" {
 				t.Errorf("registry = %+v, want 30000 on %s alone", reg, tc.resolved)
 			}

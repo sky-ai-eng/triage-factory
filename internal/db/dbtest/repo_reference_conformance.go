@@ -315,7 +315,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 
 	t.Run("Other_sources_reference_no_repository", func(t *testing.T) {
 		s, orgID, _, _ := mk(t)
-		issue, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", "https://jira.example.com", "OCTO-1", "10001", "issue", "", "")
+		issue, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "OCTO-1", "10001", TestJiraProject, "", "")
 		if err != nil {
 			t.Fatalf("FindOrCreateSystem (jira): %v", err)
 		}

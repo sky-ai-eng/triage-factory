@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -342,7 +343,7 @@ func TestHandleEvent_BecameAtomicSuppression_PublishesTasklessNotError(t *testin
 	seedHandlerFKTargets(t, database)
 	stores := sqlitestore.New(database)
 
-	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-dispsuppress", "", "issue", "Suppress", "https://example.com/suppress")
+	entity, _, err := stores.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", "SKY-dispsuppress", "", dbseed.JiraIssueProject("SKY-dispsuppress"), "Suppress", "https://example.com/suppress")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -415,7 +416,7 @@ func TestHandleEvent_MultipleTeams_TriggersFiredCountsOnlyCommitted(t *testing.T
 		t.Fatalf("add agent to team B: %v", err)
 	}
 
-	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-dispfired", "", "issue", "Disp fired", "https://example.com/dispfired")
+	entity, _, err := stores.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", "SKY-dispfired", "", dbseed.JiraIssueProject("SKY-dispfired"), "Disp fired", "https://example.com/dispfired")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}

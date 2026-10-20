@@ -222,12 +222,11 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 			parentURL = strings.TrimRight(orgSet.JiraBaseURL, "/") + "/browse/" + snap.ParentKey
 		}
 
-		projectKey := projectFromKey(snap.Key)
 		baseTicket := stockTicket{
 			IssueKey:  snap.Key,
 			Summary:   snap.Summary,
 			Status:    snap.Status,
-			Project:   projectKey,
+			Project:   snap.ProjectKey,
 			IssueType: snap.IssueType,
 			Priority:  snap.Priority,
 			ParentKey: snap.ParentKey,
@@ -235,11 +234,12 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 			URL:       snap.URL,
 		}
 
-		// Per-project rule lookup. nil means the ticket's project_key
-		// has no row — degrade like "no rules configured": skip the
-		// available bucket entirely (we can't classify pickup status)
-		// and leave prefilled actions empty for assigned tickets.
-		projectRule := domain.RuleForProject(jiraRules, projectKey)
+		// Per-project rule lookup, by the registry row the entity references.
+		// nil means the ticket's project has no rule — degrade like "no
+		// rules configured": skip the available bucket entirely (we can't
+		// classify pickup status) and leave prefilled actions empty for
+		// assigned tickets.
+		projectRule := domain.RuleForJiraProject(jiraRules, e.JiraProjectID)
 
 		// "Is this assigned to me?" uses the Atlassian account ID
 		// — the stable identifier — rather than display name. Display name
@@ -266,7 +266,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 			// (in-progress orphan, stale Done), or project has no
 			// configured rules — no action in carry-over.
 			if projectRule == nil {
-				stockLog.Warn("skipping entity, project has no configured status rules", "key", snap.Key, "project", projectKey)
+				stockLog.Warn("skipping entity, project has no configured status rules", "key", snap.Key, "jira_project_id", e.JiraProjectID)
 			}
 			continue
 		}
@@ -760,12 +760,12 @@ func (s *Server) resolveStockTicket(r *http.Request, b *stockBatch, issueKey str
 	}
 	snap = currentJiraIdentity(*entity, snap)
 
-	// Per-project rule lookup. Tickets whose project_key has no configured
-	// rules fall through every status branch below — there's no terminal
-	// check and no available bucket — so the only action they support is
-	// queue on an assigned ticket (the synthesized event doesn't depend on
-	// status rules).
-	rule := domain.RuleForProject(b.jiraRules, projectFromKey(snap.Key))
+	// Per-project rule lookup, by the registry row the entity references.
+	// Tickets whose project has no configured rules fall through every status
+	// branch below — there's no terminal check and no available bucket — so
+	// the only action they support is queue on an assigned ticket (the
+	// synthesized event doesn't depend on status rules).
+	rule := domain.RuleForJiraProject(b.jiraRules, entity.JiraProjectID)
 
 	isSelf := (snap.AssigneeAccountID != "" && snap.AssigneeAccountID == b.localAccountID) ||
 		(snap.AssigneeAccountID == "" && snap.Assignee == b.localDisplayName)
@@ -824,7 +824,7 @@ func (s *Server) stockQueueTicket(r *http.Request, b *stockBatch, entity *domain
 			eventType = domain.EventJiraIssueAvailable
 			record = recordCarryOverAvailableEvent
 		}
-		eventID, e := record(r.Context(), tx.Events, b.orgID, entity.ID, snap)
+		eventID, e := record(r.Context(), tx.Events, b.orgID, *entity, snap)
 		if e != nil {
 			return e
 		}
@@ -881,7 +881,7 @@ func (s *Server) stockClaimTicket(r *http.Request, b *stockBatch, entity *domain
 	// metadata is accurate for either starting state.
 	var claimOK bool
 	if err := s.tx.WithTx(r.Context(), b.orgID, b.userID, func(tx db.TxStores) error {
-		eventID, e := recordCarryOverAssignedEvent(r.Context(), tx.Events, b.orgID, entity.ID, snap)
+		eventID, e := recordCarryOverAssignedEvent(r.Context(), tx.Events, b.orgID, *entity, snap)
 		if e != nil {
 			return fmt.Errorf("record event: %w", e)
 		}
@@ -947,8 +947,10 @@ func (s *Server) stockDoneTicket(r *http.Request, b *stockBatch, entity *domain.
 //
 // Account ID flows through from the (caller-mutated) snap so the
 // metadata carries the stable identifier the matcher needs. The display
-// name in metadata is informational; matching keys on account ID.
-func recordCarryOverAssignedEvent(ctx context.Context, events_ db.EventStore, orgID, entityID string, snap domain.JiraSnapshot) (string, error) {
+// name in metadata is informational; matching keys on account ID. The
+// project is the one the entity references, as on every Jira event: its row
+// for routing, and its key as the snapshot recorded it for display.
+func recordCarryOverAssignedEvent(ctx context.Context, events_ db.EventStore, orgID string, entity domain.Entity, snap domain.JiraSnapshot) (string, error) {
 	meta := jiraevents.JiraIssueAssignedMetadata{
 		Assignee:          snap.Assignee,
 		AssigneeAccountID: snap.AssigneeAccountID,
@@ -956,7 +958,8 @@ func recordCarryOverAssignedEvent(ctx context.Context, events_ db.EventStore, or
 		ReporterAccountID: snap.ReporterAccountID,
 		IssueKey:          snap.Key,
 		IssueID:           snap.ID,
-		Project:           projectFromKey(snap.Key),
+		Project:           snap.ProjectKey,
+		JiraProjectID:     entity.JiraProjectID,
 		IssueType:         snap.IssueType,
 		Priority:          snap.Priority,
 		Status:            snap.Status,
@@ -967,7 +970,7 @@ func recordCarryOverAssignedEvent(ctx context.Context, events_ db.EventStore, or
 	if err != nil {
 		return "", err
 	}
-	eid := entityID
+	eid := entity.ID
 	return events_.Record(ctx, orgID, domain.Event{
 		EntityID:     &eid,
 		EventType:    domain.EventJiraIssueAssigned,
@@ -981,13 +984,14 @@ func recordCarryOverAssignedEvent(ctx context.Context, events_ db.EventStore, or
 // row to hang the task off. Mirrors the tracker's own emission path for
 // first-discovered available tickets (diff.go). No assignee is carried on
 // this event — the ticket is unassigned by definition.
-func recordCarryOverAvailableEvent(ctx context.Context, events_ db.EventStore, orgID, entityID string, snap domain.JiraSnapshot) (string, error) {
+func recordCarryOverAvailableEvent(ctx context.Context, events_ db.EventStore, orgID string, entity domain.Entity, snap domain.JiraSnapshot) (string, error) {
 	meta := jiraevents.JiraIssueAvailableMetadata{
 		Reporter:          snap.Reporter,
 		ReporterAccountID: snap.ReporterAccountID,
 		IssueKey:          snap.Key,
 		IssueID:           snap.ID,
-		Project:           projectFromKey(snap.Key),
+		Project:           snap.ProjectKey,
+		JiraProjectID:     entity.JiraProjectID,
 		IssueType:         snap.IssueType,
 		Priority:          snap.Priority,
 		Status:            snap.Status,
@@ -998,21 +1002,12 @@ func recordCarryOverAvailableEvent(ctx context.Context, events_ db.EventStore, o
 	if err != nil {
 		return "", err
 	}
-	eid := entityID
+	eid := entity.ID
 	return events_.Record(ctx, orgID, domain.Event{
 		EntityID:     &eid,
 		EventType:    domain.EventJiraIssueAvailable,
 		MetadataJSON: string(metaJSON),
 	})
-}
-
-// projectFromKey pulls the project prefix out of a Jira key (e.g. "ABC" out
-// of "ABC-123"). Mirrors tracker.extractProject.
-func projectFromKey(key string) string {
-	if i := strings.IndexByte(key, '-'); i > 0 {
-		return key[:i]
-	}
-	return key
 }
 
 // claimStatusRef pairs a live claim read's status name with its id, so the

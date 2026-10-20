@@ -42,17 +42,25 @@ const entitySelectCols = `id, source, scope, source_id, COALESCE(external_id, ''
        COALESCE(title, ''), COALESCE(url, ''),
        COALESCE(snapshot_json, ''), COALESCE(description, ''), state,
        created_at, last_polled_at, closed_at, poll_seq, COALESCE(linear_team_id, ''),
-       COALESCE(repository_id, '')`
+       COALESCE(repository_id, ''), COALESCE(jira_project_id, '')`
 
-// linearTeamFromSnapshot is the SET clause every snapshot write carries, so a
-// Linear row's linear_team_id moves with the snapshot that observed its team,
-// in the same statement: on a Linear row it takes the snapshot's team_id, and
-// keeps its value when the snapshot names none or is not JSON. Every other row
-// keeps its NULL. It binds the snapshot twice, after whatever the statement
-// binds before it.
-const linearTeamFromSnapshot = `linear_team_id = CASE WHEN source = 'linear' AND json_valid(?)
+// containersFromSnapshot is the SET clause every snapshot write carries, so a
+// row's container moves with the snapshot that observed it, in the same
+// statement. On a Linear row linear_team_id takes the snapshot's team_id. On a
+// Jira row jira_project_id takes the registry row on the entity's own site
+// carrying the snapshot's project_id. Each keeps its value when the snapshot
+// names none, is not JSON, or (for Jira) names a project the registry has no
+// row for; every other row keeps its NULLs. It binds the snapshot four times,
+// after whatever the statement binds before it.
+const containersFromSnapshot = `linear_team_id = CASE WHEN source = 'linear' AND json_valid(?)
 		THEN COALESCE(NULLIF(json_extract(?, '$.team_id'), ''), linear_team_id)
-		ELSE linear_team_id END`
+		ELSE linear_team_id END,
+		jira_project_id = CASE WHEN source = 'jira' AND json_valid(?)
+		THEN COALESCE((SELECT p.id FROM jira_projects p
+		                WHERE p.org_id = entities.org_id AND p.site = entities.scope
+		                  AND p.external_id = CAST(json_extract(?, '$.project_id') AS TEXT)),
+		              jira_project_id)
+		ELSE jira_project_id END`
 
 // entityKeyOrder is the key lookup's preference among rows sharing a key: the
 // active one (there is at most one), otherwise the most recently closed. id
@@ -197,22 +205,30 @@ func (s *entityStore) ListActiveJiraTeamScoped(ctx context.Context, orgID, _ str
 // --- Mutation ---
 
 func (s *entityStore) FindOrCreate(ctx context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error) {
-	return s.findOrCreate(ctx, orgID, source, scope, sourceID, externalID, "", kind, title, url)
+	return s.findOrCreate(ctx, orgID, source, scope, sourceID, externalID, domain.EntityContainer{}, kind, title, url)
 }
 
 func (s *entityStore) FindOrCreateLinearSystem(ctx context.Context, orgID, scope, identifier, issueID, linearTeamID, title, url string) (*domain.Entity, bool, error) {
 	if err := db.ValidateLinearEntityCreate(identifier, issueID, linearTeamID); err != nil {
 		return nil, false, err
 	}
-	return s.findOrCreate(ctx, orgID, domain.ArtifactProviderLinear, scope, identifier, issueID, linearTeamID, "issue", title, url)
+	return s.findOrCreate(ctx, orgID, domain.ArtifactProviderLinear, scope, identifier, issueID, domain.EntityContainer{LinearTeamID: linearTeamID}, "issue", title, url)
 }
 
-// findOrCreate is the identity rule's find-or-create. linearTeamID is the team
-// a new Linear row is created with, and empty for every other source; with it
-// empty, a Linear row is found but not created. A new GitHub row is created
-// referencing its repository's registry row, got or created in the same
-// transaction as the insert (db.GitHubEntityRepoRef names it).
-func (s *entityStore) findOrCreate(ctx context.Context, orgID, source, scope, sourceID, externalID, linearTeamID, kind, title, url string) (*domain.Entity, bool, error) {
+func (s *entityStore) FindOrCreateJiraSystem(ctx context.Context, orgID, scope, key, issueID string, project domain.JiraProjectRef, title, url string) (*domain.Entity, bool, error) {
+	if err := db.ValidateJiraEntityCreate(key, project); err != nil {
+		return nil, false, err
+	}
+	return s.findOrCreate(ctx, orgID, domain.ArtifactProviderJira, scope, key, issueID, domain.EntityContainer{JiraProject: project}, "issue", title, url)
+}
+
+// findOrCreate is the identity rule's find-or-create. container is what a new
+// row of a source that needs one is created in: a Linear row's team, a Jira
+// row's project. With it empty, such a row is found but not created. A new
+// GitHub row is created referencing its repository's registry row, and a new
+// Jira row its project's, each got or created in the same transaction as the
+// insert (db.GitHubEntityRepoRef names the repository).
+func (s *entityStore) findOrCreate(ctx context.Context, orgID, source, scope, sourceID, externalID string, container domain.EntityContainer, kind, title, url string) (*domain.Entity, bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, false, err
 	}
@@ -234,8 +250,12 @@ func (s *entityStore) findOrCreate(ctx context.Context, orgID, source, scope, so
 	if existing != nil {
 		return existing, false, nil
 	}
+	linearTeamID := container.LinearTeamID
 	if source == domain.ArtifactProviderLinear && linearTeamID == "" {
 		return nil, false, fmt.Errorf("%w: %s in %s", db.ErrEntityLinearTeamRequired, sourceID, scope)
+	}
+	if source == domain.ArtifactProviderJira && container.JiraProject.ID == "" {
+		return nil, false, fmt.Errorf("%w: %s in %s", db.ErrEntityJiraProjectRequired, sourceID, scope)
 	}
 	var repoRef domain.RepoRef
 	if source == domain.ArtifactProviderGitHub {
@@ -249,21 +269,29 @@ func (s *entityStore) findOrCreate(ctx context.Context, orgID, source, scope, so
 	var out *domain.Entity
 	created := false
 	err = inTx(ctx, s.q, func(tx queryer) error {
-		var repositoryID string
-		if source == domain.ArtifactProviderGitHub {
+		var repositoryID, jiraProjectID string
+		switch source {
+		case domain.ArtifactProviderGitHub:
 			var err error
 			if repositoryID, err = getOrCreateRepositoryID(ctx, tx, repoRef); err != nil {
 				return fmt.Errorf("resolve repository of %s: %w", sourceID, err)
 			}
+		case domain.ArtifactProviderJira:
+			p := container.JiraProject
+			project, err := findOrCreateJiraProject(ctx, tx, orgID, scope, p.ID, p.Key, p.Name)
+			if err != nil {
+				return fmt.Errorf("resolve project of %s: %w", sourceID, err)
+			}
+			jiraProjectID = project.ID
 		}
 		// DO NOTHING rather than a raised violation, so a lost race is an
 		// answer rather than an error, and the re-read below decides what the
 		// loser sees.
 		res, err := tx.ExecContext(ctx, `
-			INSERT INTO entities (id, source, scope, source_id, external_id, kind, title, url, state, created_at, last_polled_at, linear_team_id, repository_id)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+			INSERT INTO entities (id, source, scope, source_id, external_id, kind, title, url, state, created_at, last_polled_at, linear_team_id, repository_id, jira_project_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
 			ON CONFLICT DO NOTHING
-		`, id, source, scope, sourceID, nullStringValue(externalID), kind, title, url, now, now, nullStringValue(linearTeamID), nullStringValue(repositoryID))
+		`, id, source, scope, sourceID, nullStringValue(externalID), kind, title, url, now, now, nullStringValue(linearTeamID), nullStringValue(repositoryID), nullStringValue(jiraProjectID))
 		if err != nil {
 			return err
 		}
@@ -287,19 +315,20 @@ func (s *entityStore) findOrCreate(ctx context.Context, orgID, source, scope, so
 			return nil
 		}
 		out = &domain.Entity{
-			ID:           id,
-			Source:       source,
-			Scope:        scope,
-			SourceID:     sourceID,
-			ExternalID:   externalID,
-			Kind:         kind,
-			Title:        title,
-			URL:          url,
-			State:        "active",
-			CreatedAt:    now,
-			LastPolledAt: &now,
-			LinearTeamID: linearTeamID,
-			RepositoryID: repositoryID,
+			ID:            id,
+			Source:        source,
+			Scope:         scope,
+			SourceID:      sourceID,
+			ExternalID:    externalID,
+			Kind:          kind,
+			Title:         title,
+			URL:           url,
+			State:         "active",
+			CreatedAt:     now,
+			LastPolledAt:  &now,
+			LinearTeamID:  linearTeamID,
+			RepositoryID:  repositoryID,
+			JiraProjectID: jiraProjectID,
 		}
 		created = true
 		return nil
@@ -330,8 +359,8 @@ func (s *entityStore) PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON
 		return domain.Entity{}, err
 	}
 	return scanWrittenEntity(s.q.QueryRowContext(ctx,
-		`UPDATE entities SET snapshot_json = ?, `+linearTeamFromSnapshot+` WHERE id = ? RETURNING `+entitySelectCols,
-		snapshotJSON, snapshotJSON, snapshotJSON, id))
+		`UPDATE entities SET snapshot_json = ?, `+containersFromSnapshot+` WHERE id = ? RETURNING `+entitySelectCols,
+		snapshotJSON, snapshotJSON, snapshotJSON, snapshotJSON, snapshotJSON, id))
 }
 
 func (s *entityStore) UpdateTitle(ctx context.Context, orgID, id, title string) (domain.Entity, error) {
@@ -739,9 +768,9 @@ func updateSnapshotCAS(ctx context.Context, q queryer, id, snapshotJSON string, 
 	res, err := q.ExecContext(ctx, `
 		UPDATE entities
 		SET snapshot_json = ?, last_polled_at = ?, poll_seq = poll_seq + 1,
-		    `+linearTeamFromSnapshot+`
+		    `+containersFromSnapshot+`
 		WHERE id = ? AND poll_seq = ?
-	`, snapshotJSON, time.Now().UTC(), snapshotJSON, snapshotJSON, id, expectedPollSeq)
+	`, snapshotJSON, time.Now().UTC(), snapshotJSON, snapshotJSON, snapshotJSON, snapshotJSON, id, expectedPollSeq)
 	if err != nil {
 		return false, err
 	}
@@ -885,11 +914,12 @@ func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, e
 				  source_id = ?, url = ?, snapshot_json = ?, title = ?, description = ?,
 				  last_polled_at = ?, poll_seq = MAX(poll_seq, ?) + 1,
 				  linear_team_id = COALESCE(?, linear_team_id),
-				  repository_id = COALESCE(?, repository_id)
+				  repository_id = COALESCE(?, repository_id),
+				  jira_project_id = COALESCE(?, jira_project_id)
 				WHERE id = ?`,
 				loser.SourceID, loser.URL, loserSnapshot, loser.Title, loser.Description,
 				loser.LastPolledAt, loser.PollSeq, nullStringValue(loser.LinearTeamID),
-				nullStringValue(loser.RepositoryID), survivor.ID); err != nil {
+				nullStringValue(loser.RepositoryID), nullStringValue(loser.JiraProjectID), survivor.ID); err != nil {
 				return fmt.Errorf("survivor takes live state: %w", err)
 			}
 		}
@@ -943,9 +973,9 @@ func (s *entityStore) ReactivateWithSnapshotCASSystem(ctx context.Context, orgID
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE entities
 		SET state = 'active', closed_at = NULL, snapshot_json = ?, last_polled_at = ?, poll_seq = poll_seq + 1,
-		    `+linearTeamFromSnapshot+`
+		    `+containersFromSnapshot+`
 		WHERE id = ? AND state = 'closed' AND poll_seq = ?
-	`, snapshotJSON, time.Now().UTC(), snapshotJSON, snapshotJSON, id, expectedPollSeq)
+	`, snapshotJSON, time.Now().UTC(), snapshotJSON, snapshotJSON, snapshotJSON, snapshotJSON, id, expectedPollSeq)
 	if err != nil {
 		return false, err
 	}
@@ -968,9 +998,9 @@ func (s *entityStore) CloseWithSnapshotCASSystem(ctx context.Context, orgID, id,
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE entities
 		SET state = 'closed', closed_at = COALESCE(closed_at, ?), snapshot_json = ?, last_polled_at = ?, poll_seq = poll_seq + 1,
-		    `+linearTeamFromSnapshot+`
+		    `+containersFromSnapshot+`
 		WHERE id = ? AND poll_seq = ?
-	`, now, snapshotJSON, now, snapshotJSON, snapshotJSON, id, expectedPollSeq)
+	`, now, snapshotJSON, now, snapshotJSON, snapshotJSON, snapshotJSON, snapshotJSON, id, expectedPollSeq)
 	if err != nil {
 		return false, err
 	}
@@ -1173,7 +1203,7 @@ func scanEntityRow(row *sql.Row) (*domain.Entity, error) {
 	var e domain.Entity
 	err := row.Scan(&e.ID, &e.Source, &e.Scope, &e.SourceID, &e.ExternalID, &e.Kind, &e.Title, &e.URL,
 		&e.SnapshotJSON, &e.Description, &e.State,
-		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq, &e.LinearTeamID, &e.RepositoryID)
+		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq, &e.LinearTeamID, &e.RepositoryID, &e.JiraProjectID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1187,7 +1217,7 @@ func scanEntityFromRows(rows *sql.Rows) (*domain.Entity, error) {
 	var e domain.Entity
 	if err := rows.Scan(&e.ID, &e.Source, &e.Scope, &e.SourceID, &e.ExternalID, &e.Kind, &e.Title, &e.URL,
 		&e.SnapshotJSON, &e.Description, &e.State,
-		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq, &e.LinearTeamID, &e.RepositoryID); err != nil {
+		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq, &e.LinearTeamID, &e.RepositoryID, &e.JiraProjectID); err != nil {
 		return nil, err
 	}
 	return &e, nil

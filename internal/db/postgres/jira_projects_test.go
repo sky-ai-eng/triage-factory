@@ -25,6 +25,7 @@ func TestJiraProjectStore_Postgres(t *testing.T) {
 			Projects:    stores.JiraProjects,
 			Rules:       stores.JiraStatusRules,
 			Teams:       stores.Teams,
+			Entities:    stores.Entities,
 			OrgID:       orgID,
 			TeamID:      teamID,
 			OtherTeamID: otherTeamID,
@@ -36,6 +37,17 @@ func TestJiraProjectStore_Postgres(t *testing.T) {
 					orgID, site, key,
 				).Scan(&id); err != nil {
 					t.Fatalf("seed unresolved jira project: %v", err)
+				}
+				return id
+			},
+			SeedIssue: func(t *testing.T, site, key, jiraProjectID string) string {
+				t.Helper()
+				var id string
+				if err := h.AdminDB.QueryRow(
+					`INSERT INTO entities (org_id, source, scope, source_id, kind, jira_project_id) VALUES ($1, 'jira', $2, $3, 'issue', $4) RETURNING id`,
+					orgID, site, key, jiraProjectID,
+				).Scan(&id); err != nil {
+					t.Fatalf("seed jira issue: %v", err)
 				}
 				return id
 			},

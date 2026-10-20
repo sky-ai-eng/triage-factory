@@ -598,11 +598,8 @@ type Issue struct {
 		Reporter *IssueUser `json:"reporter,omitempty"`
 		// Project is the project the issue is in now. Its ID survives a
 		// project key rename, which is what tells a rename from a move.
-		Project *struct {
-			ID  string `json:"id"`
-			Key string `json:"key"`
-		} `json:"project,omitempty"`
-		Parent *struct {
+		Project *Project `json:"project,omitempty"`
+		Parent  *struct {
 			ID  string `json:"id"`
 			Key string `json:"key"`
 		} `json:"parent,omitempty"`
@@ -851,17 +848,26 @@ func (c *Client) GetIssue(ctx context.Context, idOrKey string) (*Issue, error) {
 	return &issue, nil
 }
 
-// GetIssueRef reads which issue idOrKey names: its id and its current key,
-// and nothing else. A key the issue no longer has resolves the way GetIssue's
-// does, to the issue under its current key.
+// GetIssueRef reads which issue idOrKey names: its id, its current key and
+// the project it sits in, and nothing else. A key the issue no longer has
+// resolves the way GetIssue's does, to the issue under its current key.
 func (c *Client) GetIssueRef(ctx context.Context, idOrKey string) (IssueRef, error) {
-	body, err := c.get(ctx, c.apiURL("issue/%s?fields=summary", idOrKey))
+	body, err := c.get(ctx, c.apiURL("issue/%s?fields=project", idOrKey))
 	if err != nil {
 		return IssueRef{}, err
 	}
-	var ref IssueRef
-	if err := json.Unmarshal(body, &ref); err != nil {
+	var issue struct {
+		IssueRef
+		Fields struct {
+			Project *Project `json:"project"`
+		} `json:"fields"`
+	}
+	if err := json.Unmarshal(body, &issue); err != nil {
 		return IssueRef{}, fmt.Errorf("parse issue: %w", err)
+	}
+	ref := issue.IssueRef
+	if issue.Fields.Project != nil {
+		ref.Project = *issue.Fields.Project
 	}
 	return ref, nil
 }
@@ -1178,6 +1184,9 @@ func (c *Client) ListIssueTypes(ctx context.Context, projectKey string) ([]Issue
 type IssueRef struct {
 	ID  string `json:"id"`
 	Key string `json:"key"`
+	// Project is the project the issue sits in, set by GetIssueRef and empty
+	// on a create's response, which names none.
+	Project Project `json:"-"`
 }
 
 // CreateIssue creates a new issue. parentKey and priority are optional (pass empty to skip).

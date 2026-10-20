@@ -1789,7 +1789,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	t.Run("JiraStatusRules_TeamID_And_OrgUnion_RoundTrip", func(t *testing.T) {
 		// TeamID populates on every List* read, ListForOrgSystem
 		// returns the org-wide union (every team's rows), and
-		// TracksProjectSystem answers the router gate.
+		// TracksJiraProjectSystem answers the router gate.
 		stores, ids := factory(t)
 		input := []domain.JiraProjectStatusRules{{
 			ProjectKey: "SKY", PickupMembers: jiraRefs("To Do"),
@@ -1825,17 +1825,29 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			t.Errorf("ListForOrgSystem = %+v; want one SKY row with TeamID=%q", union, ids.TeamID)
 		}
 
-		// TracksProjectSystem: tracked vs untracked.
+		// TracksJiraProjectSystem: tracked vs registered but untracked, the
+		// tracked project asked about on another site, and an id that names
+		// no row (metadata is external input, so a malformed one answers
+		// false rather than failing).
+		ops, err := stores.JiraProjects.FindOrCreate(ctx, ids.OrgID, jiraSite, "id-OPS", "OPS", "")
+		if err != nil {
+			t.Fatalf("register OPS: %v", err)
+		}
 		for _, c := range []struct {
-			project string
-			want    bool
-		}{{"SKY", true}, {"OPS", false}} {
-			got, err := stores.JiraStatusRules.TracksProjectSystem(ctx, ids.TeamID, jiraSite, c.project)
+			name, site, id string
+			want           bool
+		}{
+			{"tracked", jiraSite, input[0].JiraProjectID, true},
+			{"untracked", jiraSite, ops.ID, false},
+			{"another site", "https://other.atlassian.net", input[0].JiraProjectID, false},
+			{"no such row", jiraSite, "not-a-uuid", false},
+		} {
+			got, err := stores.JiraStatusRules.TracksJiraProjectSystem(ctx, ids.TeamID, c.site, c.id)
 			if err != nil {
-				t.Fatalf("TracksProjectSystem(%s): %v", c.project, err)
+				t.Fatalf("TracksJiraProjectSystem(%s): %v", c.name, err)
 			}
 			if got != c.want {
-				t.Errorf("TracksProjectSystem(%s) = %v; want %v", c.project, got, c.want)
+				t.Errorf("TracksJiraProjectSystem(%s) = %v; want %v", c.name, got, c.want)
 			}
 		}
 	})

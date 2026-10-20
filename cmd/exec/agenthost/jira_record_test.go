@@ -52,7 +52,8 @@ func startFakeJira(t *testing.T) *httptest.Server {
 		switch {
 		case r.Method == http.MethodGet && strings.Contains(path, "/issue/") && !strings.Contains(path, "/transitions"):
 			key := strings.ToUpper(path[strings.LastIndex(path, "/")+1:])
-			_, _ = io.WriteString(w, `{"id":"`+fakeJiraIssueID(key)+`","key":"`+key+`"}`)
+			project, _, _ := strings.Cut(key, "-")
+			_, _ = io.WriteString(w, `{"id":"`+fakeJiraIssueID(key)+`","key":"`+key+`","fields":{"project":{"id":"id-`+project+`","key":"`+project+`"}}}`)
 		case strings.HasSuffix(path, "/myself"):
 			_, _ = io.WriteString(w, `{"name":"bot","accountId":""}`)
 		case strings.Contains(path, "/transitions"):

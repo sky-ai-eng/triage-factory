@@ -2,8 +2,8 @@
 -- +goose Up
 -- Every external object is keyed within the provider namespace it lives in, a
 -- GitHub entity references its repository's registry row, a team's Jira
--- tracked set references a Jira project registry row, Linear becomes a
--- tracked source, and five smaller changes ride along: the org GitHub App's
+-- tracked set and every Jira issue entity reference a Jira project registry
+-- row, Linear becomes a tracked source, and five smaller changes ride along: the org GitHub App's
 -- unusable state, the claim's source manifest, the retirement of the
 -- 'completed' conversation status, node ids on artifacts and audit-ledger
 -- rows, and the table of rate-limit readings.
@@ -281,7 +281,9 @@ CREATE UNIQUE INDEX org_linear_installs_workspace_live
 --   entities                      scope, and the provider's own id beside the
 --                                 key (external_id); a GitHub row also
 --                                 references its repository's registry row
---                                 (repository_id)
+--                                 (repository_id). The table is rebuilt in
+--                                 section 5, once the Jira project registry
+--                                 a Jira row references exists.
 --   repositories                  host
 --   team_github_groups            host
 --   org_github_app_installations  github_host joins the primary key
@@ -501,6 +503,10 @@ CREATE UNIQUE INDEX repositories_external_identity
 -- 3c. entities.scope, external_id and repository_id
 -- ---------------------------------------------------------------------------
 --
+-- What each existing row is keyed under and references is computed here; the
+-- table itself is rebuilt in section 5, after the Jira project registry a Jira
+-- row also references (jira_project_id) exists.
+--
 --   scope        the namespace the entity's key and id are unique within: the
 --                GitHub host, the Jira site, the Linear workspace id, or
 --                domain.SlackScope.
@@ -518,6 +524,9 @@ CREATE UNIQUE INDEX repositories_external_identity
 -- site its own url names: that is the site the issue actually came from, even
 -- if the org has since been pointed at another one. No new key can collide,
 -- because source_id was unique per source.
+--
+-- entity_scope holds each row's scope. A url with no '/browse/' looks up an
+-- empty prefix, which host_case never holds, so the row takes its org's site.
 --
 -- linear_team_id is the UUID of the Linear team a Linear issue sits in, the id
 -- linear_team_rules is keyed by. It is a column rather than a field read out
@@ -550,6 +559,23 @@ CREATE UNIQUE INDEX repositories_external_identity
 -- the one that stands, so the newest key's casing is the one a new row
 -- stores. A registry row is not tracking: nothing is added to what TF polls,
 -- profiles or clones.
+CREATE TEMP TABLE entity_scope (
+    entity_id TEXT PRIMARY KEY,
+    scope     TEXT NOT NULL
+);
+
+INSERT INTO entity_scope (entity_id, scope)
+SELECT e.id,
+       COALESCE(
+           CASE WHEN e.source = 'jira' THEN
+               (SELECT c.canonical FROM host_case c
+                 WHERE c.raw = substr(e.url, 1, instr(e.url, '/browse/') - 1))
+           END,
+           s.scope,
+           '')
+  FROM entities e
+  LEFT JOIN org_scope s ON s.org_id = e.org_id AND s.provider = e.source;
+
 CREATE TEMP TABLE github_entity_repo AS
 SELECT entity_id, org_id, host, created_at,
        substr(path, 1, instr(path, '/') - 1) AS owner,
@@ -571,94 +597,6 @@ SELECT lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' ||
        owner, repo, 'github', host, org_id, CURRENT_TIMESTAMP
   FROM github_entity_repo
  ORDER BY created_at DESC, entity_id;
-
-CREATE TABLE entities_new (
-    id                       TEXT PRIMARY KEY,
-    source                   TEXT NOT NULL,
-    scope                    TEXT NOT NULL,
-    source_id                TEXT NOT NULL,
-    external_id              TEXT,
-    kind                     TEXT NOT NULL,
-    title                    TEXT,
-    url                      TEXT,
-    snapshot_json            TEXT,
-    description              TEXT NOT NULL DEFAULT '',
-    state                    TEXT NOT NULL DEFAULT 'active',
-    created_at               DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    last_polled_at           DATETIME,
-    closed_at                DATETIME,
-    owning_team_id           TEXT REFERENCES teams(id) ON DELETE SET NULL,
-    org_id                   TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
-    poll_seq                 INTEGER NOT NULL DEFAULT 0,
-    commissioned_by_user_id  TEXT REFERENCES users(id) ON DELETE SET NULL,
-    linear_team_id           TEXT,
-    repository_id            TEXT REFERENCES repositories(id),
-    CONSTRAINT entities_repository_required CHECK (source <> 'github' OR repository_id IS NOT NULL)
-);
-
--- A url with no '/browse/' looks up an empty prefix, which host_case never
--- holds, so the row takes its org's site.
-INSERT INTO entities_new (
-    id, source, scope, source_id, external_id, kind, title, url, snapshot_json,
-    description, state, created_at, last_polled_at, closed_at, owning_team_id,
-    org_id, poll_seq, commissioned_by_user_id, repository_id
-)
-SELECT
-    e.id, e.source,
-    COALESCE(
-        CASE WHEN e.source = 'jira' THEN
-            (SELECT c.canonical FROM host_case c
-              WHERE c.raw = substr(e.url, 1, instr(e.url, '/browse/') - 1))
-        END,
-        s.scope,
-        ''),
-    e.source_id, NULL, e.kind, e.title, e.url, e.snapshot_json,
-    e.description, e.state, e.created_at, e.last_polled_at, e.closed_at, e.owning_team_id,
-    e.org_id, e.poll_seq, e.commissioned_by_user_id,
-    (SELECT r.id
-       FROM github_entity_repo g
-       JOIN repositories r
-         ON r.org_id = g.org_id AND r.source = 'github' AND r.host = g.host
-        AND LOWER(r.owner) = LOWER(g.owner) AND LOWER(r.repo) = LOWER(g.repo)
-      WHERE g.entity_id = e.id)
-FROM entities e
-LEFT JOIN org_scope s ON s.org_id = e.org_id AND s.provider = e.source;
-
-DROP TABLE entities;
-ALTER TABLE entities_new RENAME TO entities;
-
-CREATE INDEX        idx_entities_state           ON entities(state);
-CREATE INDEX        idx_entities_source_polled   ON entities(source, last_polled_at);
-CREATE INDEX        idx_entities_closed_at       ON entities(closed_at) WHERE closed_at IS NOT NULL;
-CREATE UNIQUE INDEX entities_id_org_unique       ON entities (id, org_id);
-CREATE INDEX        idx_entities_github_author
-    ON entities (json_extract(snapshot_json, '$.author'))
-    WHERE source = 'github' AND snapshot_json IS NOT NULL AND snapshot_json != ''
-      AND json_valid(snapshot_json);
-CREATE INDEX        idx_entities_commissioned_by
-    ON entities (commissioned_by_user_id)
-    WHERE commissioned_by_user_id IS NOT NULL;
-
--- An entity's identity: one row per provider id in a scope.
-CREATE UNIQUE INDEX entities_identity
-    ON entities (org_id, source, scope, external_id)
-    WHERE external_id IS NOT NULL;
-
--- A key names one live object in a scope; closed rows may share it.
-CREATE UNIQUE INDEX entities_active_key
-    ON entities (org_id, source, scope, source_id)
-    WHERE state = 'active';
-
--- The key lookup, which reads the active row or else the most recently closed.
-CREATE INDEX        idx_entities_key
-    ON entities (org_id, source, scope, source_id);
-
--- Serves the joins that scope a GitHub entity by its repository.
-CREATE INDEX        idx_entities_repository
-    ON entities (repository_id)
-    WHERE repository_id IS NOT NULL;
-
-DROP TABLE github_entity_repo;
 
 -- ---------------------------------------------------------------------------
 -- 3d. team_github_groups.host
@@ -966,7 +904,8 @@ ALTER TABLE placement_overrides_new RENAME TO placement_overrides;
 --
 -- A registry row is one project on one Jira site. external_id is Jira's
 -- numeric project id, unique per (org, site); a row this migration could not
--- find one for keeps it NULL until the poll resolves it by its key.
+-- find one for keeps it NULL until the poll, or the tracker reading one of its
+-- issues, resolves it by its key.
 
 CREATE TABLE jira_projects (
     id           TEXT PRIMARY KEY,
@@ -991,6 +930,23 @@ CREATE UNIQUE INDEX jira_projects_external_identity
 CREATE UNIQUE INDEX jira_projects_unresolved_key
     ON jira_projects (org_id, site, project_key) WHERE external_id IS NULL;
 
+-- jira_entity is every Jira entity with the site 3c keyed it under, its key's
+-- project key (NULL for a key with no '-', which names no project), and the
+-- project id its snapshot records, if any. A snapshot records the project the
+-- issue was in when it was read. json_extract raises on malformed JSON, and a
+-- WHERE clause does not promise to test json_valid first, so the CASE guards
+-- it.
+CREATE TEMP TABLE jira_entity AS
+SELECT e.id AS entity_id, e.org_id, es.scope AS site, e.source_id AS issue_key,
+       CASE WHEN instr(e.source_id, '-') > 1
+            THEN substr(e.source_id, 1, instr(e.source_id, '-') - 1) END AS project_key,
+       NULLIF(CAST(CASE WHEN json_valid(e.snapshot_json)
+                        THEN json_extract(e.snapshot_json, '$.project_id') END AS TEXT), '') AS external_id,
+       e.last_polled_at AS polled_at
+  FROM entities e
+  JOIN entity_scope es ON es.entity_id = e.id
+ WHERE e.source = 'jira';
+
 -- jira_site is the site each org's rules are registered under: the org's Jira
 -- scope from org_scope, which is domain.EntityScope("jira", settings). An org
 -- with no usable base URL takes the site its Jira issues were last polled
@@ -1000,9 +956,9 @@ CREATE UNIQUE INDEX jira_projects_unresolved_key
 CREATE TEMP TABLE jira_site AS
 SELECT org_id, site
   FROM (SELECT s.org_id, COALESCE(NULLIF(s.scope, ''),
-               (SELECT e.scope FROM entities e
-                 WHERE e.org_id = s.org_id AND e.source = 'jira' AND e.scope <> ''
-                 ORDER BY e.last_polled_at DESC, e.id
+               (SELECT j.site FROM jira_entity j
+                 WHERE j.org_id = s.org_id AND j.site <> ''
+                 ORDER BY j.polled_at DESC, j.entity_id
                  LIMIT 1)) AS site
           FROM org_scope s
          WHERE s.provider = 'jira')
@@ -1028,22 +984,14 @@ SELECT DISTINCT t.org_id, s.site, r.project_key
   JOIN jira_site s ON s.org_id = t.org_id
  WHERE r.project_key <> '';
 
--- json_extract raises on malformed JSON, and a WHERE clause does not promise
--- to test json_valid first, so the CASE guards it.
 CREATE TEMP TABLE jira_evidence AS
-SELECT e.org_id, e.scope AS site,
-       substr(e.source_id, 1, instr(e.source_id, '-') - 1) AS project_key,
-       CASE WHEN json_valid(e.snapshot_json)
-            THEN json_extract(e.snapshot_json, '$.project_id') END AS external_id,
-       e.last_polled_at AS polled_at, e.id AS entity_id
-  FROM entities e
- WHERE e.source = 'jira' AND instr(e.source_id, '-') > 1;
-
-DELETE FROM jira_evidence WHERE COALESCE(CAST(external_id AS TEXT), '') = '';
+SELECT org_id, site, project_key, external_id, polled_at, entity_id
+  FROM jira_entity
+ WHERE project_key IS NOT NULL AND external_id IS NOT NULL;
 
 UPDATE jira_seed
    SET (external_id, polled_at) = (
-       SELECT CAST(v.external_id AS TEXT), v.polled_at
+       SELECT v.external_id, v.polled_at
          FROM jira_evidence v
         WHERE v.org_id = jira_seed.org_id AND v.site = jira_seed.site
           AND v.project_key = jira_seed.project_key
@@ -1076,6 +1024,64 @@ SELECT lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' ||
        substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))),
        org_id, site, external_id, project_key
   FROM jira_seed;
+
+-- Every Jira issue entity references the registry row of its project as well
+-- (section 5), so the registry also gets a row for every project TF holds an
+-- issue in, whether or not a team tracks it.
+--
+-- An issue whose snapshot names its project id references the row carrying
+-- that id on its site. When none does, one is created under the project key
+-- of the most recently polled issue there that names the id, which is the
+-- project's key as last read: the identity index keeps the first insert for an
+-- id, and rows the rules already registered stand.
+INSERT OR IGNORE INTO jira_projects (id, org_id, site, external_id, project_key)
+SELECT lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' ||
+       substr(lower(hex(randomblob(2))), 2) || '-' ||
+       substr('89ab', abs(random()) % 4 + 1, 1) ||
+       substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))),
+       org_id, site, external_id, COALESCE(project_key, issue_key)
+  FROM jira_entity
+ WHERE site <> '' AND external_id IS NOT NULL
+ ORDER BY polled_at DESC, entity_id;
+
+-- An issue with no project id in its snapshot (a stub nothing polled yet, or a
+-- snapshot from before project ids were recorded) references the row on its
+-- site holding its key's project key. When no row does, an unresolved one is
+-- created, which the poll resolves if a team tracks the project and the
+-- tracker resolves when it next reads the issue.
+INSERT OR IGNORE INTO jira_projects (id, org_id, site, project_key)
+SELECT lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' ||
+       substr(lower(hex(randomblob(2))), 2) || '-' ||
+       substr('89ab', abs(random()) % 4 + 1, 1) ||
+       substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))),
+       j.org_id, j.site, COALESCE(j.project_key, j.issue_key)
+  FROM jira_entity j
+ WHERE j.site <> '' AND j.external_id IS NULL
+   AND NOT EXISTS (
+       SELECT 1 FROM jira_projects p
+        WHERE p.org_id = j.org_id AND p.site = j.site
+          AND p.project_key = COALESCE(j.project_key, j.issue_key));
+
+-- jira_entity_project is the row each issue references: by its project id when
+-- its snapshot names one, else by its key's project key, a resolved row first.
+-- An issue with no site gets none (section 5).
+CREATE TEMP TABLE jira_entity_project (
+    entity_id       TEXT PRIMARY KEY,
+    jira_project_id TEXT NOT NULL
+);
+
+INSERT INTO jira_entity_project (entity_id, jira_project_id)
+SELECT j.entity_id,
+       COALESCE(
+           (SELECT p.id FROM jira_projects p
+             WHERE p.org_id = j.org_id AND p.site = j.site AND p.external_id = j.external_id),
+           (SELECT p.id FROM jira_projects p
+             WHERE p.org_id = j.org_id AND p.site = j.site
+               AND p.project_key = COALESCE(j.project_key, j.issue_key)
+             ORDER BY p.external_id IS NULL, p.id
+             LIMIT 1))
+  FROM jira_entity j
+ WHERE j.site <> '';
 
 -- ---------------------------------------------------------------------------
 -- 4a. jira_project_status_rules: (team_id, project_key) -> (team_id, jira_project_id)
@@ -1158,9 +1164,113 @@ UPDATE team_settings
            ON p.org_id = t.org_id AND p.site = s.site AND p.project_key = j.value), '[]')
  WHERE json_valid(jira_projects);
 
+DROP TABLE jira_entity;
 DROP TABLE jira_evidence;
 DROP TABLE jira_seed;
 DROP TABLE jira_site;
+
+-- ===========================================================================
+-- 5. entities
+-- ===========================================================================
+--
+-- The rebuild 3c prepared: each row takes the scope entity_scope gave it, a
+-- GitHub row the repository github_entity_repo resolved, and a Jira row the
+-- project registry row jira_entity_project resolved in section 4.
+--
+-- The CHECK lets a Jira row with no scope go without a project: a row whose
+-- url names no site, in an org with no Jira site configured, has no site a
+-- registry row could be keyed under. No read asks for an empty scope and no
+-- write creates one (the store refuses it), so such a row is inert.
+
+CREATE TABLE entities_new (
+    id                       TEXT PRIMARY KEY,
+    source                   TEXT NOT NULL,
+    scope                    TEXT NOT NULL,
+    source_id                TEXT NOT NULL,
+    external_id              TEXT,
+    kind                     TEXT NOT NULL,
+    title                    TEXT,
+    url                      TEXT,
+    snapshot_json            TEXT,
+    description              TEXT NOT NULL DEFAULT '',
+    state                    TEXT NOT NULL DEFAULT 'active',
+    created_at               DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_polled_at           DATETIME,
+    closed_at                DATETIME,
+    owning_team_id           TEXT REFERENCES teams(id) ON DELETE SET NULL,
+    org_id                   TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+    poll_seq                 INTEGER NOT NULL DEFAULT 0,
+    commissioned_by_user_id  TEXT REFERENCES users(id) ON DELETE SET NULL,
+    linear_team_id           TEXT,
+    repository_id            TEXT REFERENCES repositories(id),
+    jira_project_id          TEXT REFERENCES jira_projects(id),
+    CONSTRAINT entities_repository_required CHECK (source <> 'github' OR repository_id IS NOT NULL),
+    CONSTRAINT entities_jira_project_required CHECK (source <> 'jira' OR jira_project_id IS NOT NULL OR scope = '')
+);
+
+INSERT INTO entities_new (
+    id, source, scope, source_id, external_id, kind, title, url, snapshot_json,
+    description, state, created_at, last_polled_at, closed_at, owning_team_id,
+    org_id, poll_seq, commissioned_by_user_id, repository_id, jira_project_id
+)
+SELECT
+    e.id, e.source, es.scope,
+    e.source_id, NULL, e.kind, e.title, e.url, e.snapshot_json,
+    e.description, e.state, e.created_at, e.last_polled_at, e.closed_at, e.owning_team_id,
+    e.org_id, e.poll_seq, e.commissioned_by_user_id,
+    (SELECT r.id
+       FROM github_entity_repo g
+       JOIN repositories r
+         ON r.org_id = g.org_id AND r.source = 'github' AND r.host = g.host
+        AND LOWER(r.owner) = LOWER(g.owner) AND LOWER(r.repo) = LOWER(g.repo)
+      WHERE g.entity_id = e.id),
+    (SELECT j.jira_project_id FROM jira_entity_project j WHERE j.entity_id = e.id)
+FROM entities e
+JOIN entity_scope es ON es.entity_id = e.id;
+
+DROP TABLE entities;
+ALTER TABLE entities_new RENAME TO entities;
+
+CREATE INDEX        idx_entities_state           ON entities(state);
+CREATE INDEX        idx_entities_source_polled   ON entities(source, last_polled_at);
+CREATE INDEX        idx_entities_closed_at       ON entities(closed_at) WHERE closed_at IS NOT NULL;
+CREATE UNIQUE INDEX entities_id_org_unique       ON entities (id, org_id);
+CREATE INDEX        idx_entities_github_author
+    ON entities (json_extract(snapshot_json, '$.author'))
+    WHERE source = 'github' AND snapshot_json IS NOT NULL AND snapshot_json != ''
+      AND json_valid(snapshot_json);
+CREATE INDEX        idx_entities_commissioned_by
+    ON entities (commissioned_by_user_id)
+    WHERE commissioned_by_user_id IS NOT NULL;
+
+-- An entity's identity: one row per provider id in a scope.
+CREATE UNIQUE INDEX entities_identity
+    ON entities (org_id, source, scope, external_id)
+    WHERE external_id IS NOT NULL;
+
+-- A key names one live object in a scope; closed rows may share it.
+CREATE UNIQUE INDEX entities_active_key
+    ON entities (org_id, source, scope, source_id)
+    WHERE state = 'active';
+
+-- The key lookup, which reads the active row or else the most recently closed.
+CREATE INDEX        idx_entities_key
+    ON entities (org_id, source, scope, source_id);
+
+-- Serves the joins that scope a GitHub entity by its repository.
+CREATE INDEX        idx_entities_repository
+    ON entities (repository_id)
+    WHERE repository_id IS NOT NULL;
+
+-- Serves the registry merge's move of a project's issues.
+CREATE INDEX        idx_entities_jira_project
+    ON entities (jira_project_id)
+    WHERE jira_project_id IS NOT NULL;
+
+DROP TABLE jira_entity_project;
+DROP TABLE github_entity_repo;
+DROP TABLE entity_scope;
+
 
 DROP TABLE org_scope;
 DROP TABLE host_case;

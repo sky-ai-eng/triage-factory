@@ -2028,15 +2028,18 @@ func seedBlueprintRun(t *testing.T, h *Harness, orgID, creatorID, taskID string)
 
 func seedEntity(t *testing.T, h *Harness, orgID, source, sourceID string) string {
 	t.Helper()
-	var repositoryID any
-	if source == "github" {
+	var repositoryID, jiraProjectID any
+	switch source {
+	case "github":
 		repositoryID = dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, "https://github.com", sourceID)
+	case "jira":
+		jiraProjectID = dbseed.JiraIssueProjectID(t, h.AdminDB, orgID, "https://jira.example.com", sourceID)
 	}
 	var id string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO entities (org_id, source, source_id, kind, title, scope, repository_id)
-		VALUES ($1, $2, $3, 'pr', 'test pr', CASE $2 WHEN 'github' THEN 'https://github.com' WHEN 'jira' THEN 'https://jira.example.com' WHEN 'slack' THEN 'slack.com' WHEN 'linear' THEN 'ws-test' ELSE 'test-scope' END, $4) RETURNING id
-	`, orgID, source, sourceID, repositoryID).Scan(&id); err != nil {
+		INSERT INTO entities (org_id, source, source_id, kind, title, scope, repository_id, jira_project_id)
+		VALUES ($1, $2, $3, 'pr', 'test pr', CASE $2 WHEN 'github' THEN 'https://github.com' WHEN 'jira' THEN 'https://jira.example.com' WHEN 'slack' THEN 'slack.com' WHEN 'linear' THEN 'ws-test' ELSE 'test-scope' END, $4, $5) RETURNING id
+	`, orgID, source, sourceID, repositoryID, jiraProjectID).Scan(&id); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	return id
@@ -3320,13 +3323,55 @@ func TestBaseline_GitHubEntityReferencesItsRepository(t *testing.T) {
 	if err := insert(orgA, "github", "acme/api#3", repoA); err != nil {
 		t.Errorf("a github row referencing its org's repository = %v; want it stored", err)
 	}
-	if err := insert(orgA, "jira", "ACME-1", nil); err != nil {
-		t.Errorf("a jira row with no repository = %v; want it stored", err)
+	if err := insert(orgA, "linear", "ACME-1", nil); err != nil {
+		t.Errorf("a linear row with no repository = %v; want it stored", err)
 	}
 
 	_, err = h.AdminDB.Exec(`UPDATE entities SET repository_id = NULL WHERE org_id = $1 AND source_id = 'acme/api#3'`, orgA)
 	if !errors.As(err, &pgErr) || pgErr.Code != "23514" || pgErr.ConstraintName != "entities_repository_required" {
 		t.Errorf("clearing a github row's repository = %v; want a 23514 violation of entities_repository_required", err)
+	}
+}
+
+// TestBaseline_JiraEntityReferencesItsProject pins entities.jira_project_id: a
+// Jira row needs one, on insert and on update, it can only name a registry row
+// of its own org, and no other source needs one.
+func TestBaseline_JiraEntityReferencesItsProject(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+	orgA := SeedOrg(t, h, "entity-jira-a", SeedUser(t, h, "entity-jira-a-owner"))
+	orgB := SeedOrg(t, h, "entity-jira-b", SeedUser(t, h, "entity-jira-b-owner"))
+	projectA := dbseed.JiraProject(t, h.AdminDB, orgA, dbseed.JiraSite, "ACME")
+	projectB := dbseed.JiraProject(t, h.AdminDB, orgB, dbseed.JiraSite, "ACME")
+	repoA := SeedRepositoryOnHost(t, h, orgA, dbtest.TestGitHubHost, "acme", "api")
+
+	insert := func(orgID, source, key string, jiraProjectID, repositoryID any) error {
+		_, err := h.AdminDB.Exec(`
+			INSERT INTO entities (org_id, source, scope, source_id, kind, jira_project_id, repository_id)
+			VALUES ($1, $2, $3, $4, 'issue', $5, $6)
+		`, orgID, source, dbseed.JiraSite, key, jiraProjectID, repositoryID)
+		return err
+	}
+
+	var pgErr *pgconn.PgError
+	err := insert(orgA, "jira", "ACME-1", nil, nil)
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" || pgErr.ConstraintName != "entities_jira_project_required" {
+		t.Errorf("a jira row with no project = %v; want a 23514 violation of entities_jira_project_required", err)
+	}
+	err = insert(orgA, "jira", "ACME-2", projectB, nil)
+	if !errors.As(err, &pgErr) || pgErr.Code != "23503" || pgErr.ConstraintName != "entities_jira_project_id_fkey" {
+		t.Errorf("a jira row referencing another org's project = %v; want a 23503 violation of entities_jira_project_id_fkey", err)
+	}
+	if err := insert(orgA, "jira", "ACME-3", projectA, nil); err != nil {
+		t.Errorf("a jira row referencing its org's project = %v; want it stored", err)
+	}
+	if err := insert(orgA, "github", "acme/api#1", nil, repoA); err != nil {
+		t.Errorf("a github row with no project = %v; want it stored", err)
+	}
+
+	_, err = h.AdminDB.Exec(`UPDATE entities SET jira_project_id = NULL WHERE org_id = $1 AND source_id = 'ACME-3'`, orgA)
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" || pgErr.ConstraintName != "entities_jira_project_required" {
+		t.Errorf("clearing a jira row's project = %v; want a 23514 violation of entities_jira_project_required", err)
 	}
 }
 

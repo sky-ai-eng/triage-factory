@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -154,9 +155,9 @@ func seedSQLiteConversationForWorktree(t *testing.T, conn *sql.DB, suffix string
 	entityID := uuid.New().String()
 	sourceID := fmt.Sprintf("run-worktree-%s-%d", suffix, now.UnixNano())
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope)
-		VALUES (?, 'jira', ?, 'issue', 'ConversationWorktree Conformance', 'https://example/x', '{}', ?, 'active', 'https://jira.example.com')
-	`, entityID, sourceID, now); err != nil {
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope, jira_project_id)
+		VALUES (?, 'jira', ?, 'issue', 'ConversationWorktree Conformance', 'https://example/x', '{}', ?, 'active', 'https://jira.example.com', ?)
+	`, entityID, sourceID, now, dbseed.JiraIssueProjectID(t, conn, runmode.LocalDefaultOrgID, "https://jira.example.com", sourceID)); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	eventID := uuid.New().String()

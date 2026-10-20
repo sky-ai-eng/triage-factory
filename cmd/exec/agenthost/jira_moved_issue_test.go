@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -56,7 +57,7 @@ func TestLocalClient_JiraWriteOnAnOldKey_ResolvesTheExistingEntity(t *testing.T)
 	conn, stores, info := newJiraRecordingStoresConn(t, jira.URL, true)
 	ctx := context.Background()
 	site := jira.URL
-	existing, _, err := stores.Entities.FindOrCreateSystem(ctx, runmode.LocalDefaultOrgID, "jira", site, "NEW-7", "10007", "issue", "Moved", site+"/browse/NEW-7")
+	existing, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, site, "NEW-7", "10007", dbseed.JiraIssueProject("NEW-7"), "Moved", site+"/browse/NEW-7")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +99,7 @@ func TestLocalClient_JiraReadOnAnOldKey_RenamesTheEntity(t *testing.T) {
 	_, stores, info := newJiraRecordingStoresConn(t, jira.URL, true)
 	ctx := context.Background()
 	site := jira.URL
-	stale, _, err := stores.Entities.FindOrCreateSystem(ctx, runmode.LocalDefaultOrgID, "jira", site, "OLD-7", "10007", "issue", "Moved", site+"/browse/OLD-7")
+	stale, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, site, "OLD-7", "10007", dbseed.JiraIssueProject("OLD-7"), "Moved", site+"/browse/OLD-7")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +120,7 @@ func TestLocalClient_MemoryLoad_OldJiraKeyFindsTheEntity(t *testing.T) {
 	conn, stores, info := newJiraRecordingStoresConn(t, jira.URL, true)
 	ctx := context.Background()
 	site := jira.URL
-	ent, _, err := stores.Entities.FindOrCreateSystem(ctx, runmode.LocalDefaultOrgID, "jira", site, "NEW-7", "10007", "issue", "Moved", "")
+	ent, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, site, "NEW-7", "10007", dbseed.JiraIssueProject("NEW-7"), "Moved", "")
 	if err != nil {
 		t.Fatal(err)
 	}

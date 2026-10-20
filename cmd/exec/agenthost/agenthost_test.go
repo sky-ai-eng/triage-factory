@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -109,7 +110,7 @@ func seedConversation(t *testing.T, stores db.Stores, conn *sql.DB, conversation
 	t.Helper()
 	ctx := context.Background()
 	orgID := runmode.LocalDefaultOrgID
-	entity, _, err := stores.Entities.FindOrCreate(ctx, orgID, "jira", "https://jira.example.com", "TEST-"+conversationID, "", "issue", "T-"+conversationID, "https://x/"+conversationID)
+	entity, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "TEST-"+conversationID, "", dbseed.JiraIssueProject("TEST-"+conversationID), "T-"+conversationID, "https://x/"+conversationID)
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

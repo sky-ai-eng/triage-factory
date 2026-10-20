@@ -170,6 +170,14 @@ var (
 	// row (repository_id), and the create resolves that row from the key, so
 	// a key that is not "owner/repo#N" leaves nothing to resolve.
 	ErrEntityRepositoryRequired = errors.New("a github entity is created with its repository")
+
+	// ErrEntityJiraProjectRequired refuses to create a Jira row without the
+	// project its issue sits in: FindOrCreate and FindOrCreateSystem find a
+	// Jira row like any other but create none, and FindOrCreateJiraSystem
+	// refuses a project with no id or key. A Jira row references its
+	// project's registry row (jira_project_id), which every reader that
+	// scopes, gates or classifies an issue by its project reads.
+	ErrEntityJiraProjectRequired = errors.New("a jira entity is created with its project")
 )
 
 // GitHubEntityRepoRef is the repository a GitHub entity keyed sourceID in
@@ -238,9 +246,8 @@ type EntityStore interface {
 	// Multi-mode (Postgres): returns only active Jira entities whose
 	// project has a jira_project_status_rules row — the table a team
 	// populates to declare which Jira projects it tracks — where the
-	// project is the jira_projects registry row on the entity's own site
-	// whose current key is the prefix of source_id ("PROJ" in
-	// "PROJ-123"). That table's
+	// project is the jira_projects registry row the entity references
+	// (jira_project_id). That table's
 	// RLS (jira_rules_select) is team-membership-scoped, so under the
 	// app pool (tf_app) the semi-join auto-scopes to the projects
 	// attached to the viewer's teams with no explicit team_id in the
@@ -284,7 +291,8 @@ type EntityStore interface {
 	// ErrEntityKeyOccupied, and one with an empty scope ErrEntityScopeRequired.
 	// Never rewrites kind, title or url on a known row. A Linear row is found
 	// but never created here (ErrEntityLinearTeamRequired): it is created
-	// through FindOrCreateLinearSystem, with its team.
+	// through FindOrCreateLinearSystem, with its team. A Jira row likewise
+	// (ErrEntityJiraProjectRequired), through FindOrCreateJiraSystem.
 	FindOrCreate(ctx context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error)
 
 	// PatchSnapshot writes the new snapshot_json **without** touching
@@ -489,6 +497,22 @@ type EntityStore interface {
 	// rows with no JWT claims.
 	FindOrCreateLinearSystem(ctx context.Context, orgID, scope, identifier, issueID, linearTeamID, title, url string) (*domain.Entity, bool, error)
 
+	// FindOrCreateJiraSystem is FindOrCreateSystem for a Jira issue (source
+	// 'jira', kind 'issue'): key is its key, issueID Jira's issue id, and a new
+	// row is created referencing the jira_projects row of project, the project
+	// the same response says the issue sits in, on the issue's site (scope).
+	// That row is got or created in the same transaction as the insert, the
+	// way JiraProjectStore.FindOrCreate gets it: by Jira's project id, else an
+	// unresolved row holding the project's key, which it resolves; else a new
+	// row. So an issue in a project no team tracks has a row to reference. A
+	// call missing the key or the project's id or key is refused
+	// (ValidateJiraEntityCreate) before anything is read; issueID may be empty,
+	// as on FindOrCreateSystem. A row found is
+	// returned as stored: its project moves with its snapshot writes, never
+	// through here. Admin pool: the tracker and the exec recording funnel
+	// create Jira rows with no JWT claims.
+	FindOrCreateJiraSystem(ctx context.Context, orgID, scope, key, issueID string, project domain.JiraProjectRef, title, url string) (*domain.Entity, bool, error)
+
 	// UpdateSnapshotCASSystem writes the tracker snapshot under a
 	// compare-and-swap on poll_seq (TFAC-579): the write only lands when
 	// the row's current poll_seq still equals expectedPollSeq (the value
@@ -506,7 +530,13 @@ type EntityStore interface {
 	//
 	// On a Linear row the same statement moves linear_team_id to the snapshot's
 	// team_id, and leaves it where it is when the snapshot names none; the
-	// reactivate and close twins below do the same, as does PatchSnapshot.
+	// reactivate and close twins below do the same, as does PatchSnapshot. On
+	// a Jira row it moves jira_project_id the same way, to the registry row on
+	// the entity's site carrying the snapshot's project_id, and leaves it where
+	// it is when the snapshot names no project or the registry has no row for
+	// it: a writer that wants the move registers the project first
+	// (JiraProjectStore.FindOrCreateSystem), as the tracker does for every
+	// project it reads.
 	//
 	// Exempt from the returned-row rule: a compare-and-swap guard. ok is the
 	// write's own answer about whether it landed, and it is the whole point of
@@ -609,9 +639,9 @@ type EntityStore interface {
 	// clearing it would buy nothing and would blank the snapshot the personal
 	// dashboard renders its merged PRs from.
 	//
-	// linear_team_id is left alone: it is what keeps a cleared Linear row on
-	// its teams' belts and its unreachable event routable while the source is
-	// off.
+	// linear_team_id and jira_project_id are left alone: they are what keep a
+	// cleared row on its teams' belts and its unreachable event routable while
+	// the source is off.
 	//
 	// The poll_seq bump is what makes this safe against a cycle already in
 	// flight: that cycle diffed against the snapshot being cleared, and its
@@ -775,6 +805,19 @@ type EntityStore interface {
 // stamps on the newer row's tasks it dismisses. It names exactly those tasks,
 // which is what the merge's cancel of their running blueprints selects on.
 const DuplicateEntityMergedCloseReason = "duplicate_entity_merged"
+
+// ValidateJiraEntityCreate is FindOrCreateJiraSystem's argument check, shared
+// by both dialects: a Jira row is created with its key and its project's id
+// and key, and a call missing any of them is refused before anything is read.
+func ValidateJiraEntityCreate(key string, project domain.JiraProjectRef) error {
+	switch {
+	case key == "":
+		return errors.New("create jira entity: empty key")
+	case project.ID == "" || project.Key == "":
+		return fmt.Errorf("%w: %s", ErrEntityJiraProjectRequired, key)
+	}
+	return nil
+}
 
 // ValidateLinearEntityCreate is FindOrCreateLinearSystem's argument check,
 // shared by both dialects: a Linear row is created with its identifier, its

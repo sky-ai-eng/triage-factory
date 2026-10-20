@@ -205,7 +205,7 @@ func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, ta
 // (struct of method holders + store references) so per-cycle
 // allocation is fine.
 func (m *Manager) trackerForOrg(orgID string) *tracker.Tracker {
-	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, m.artifacts, m.eventQueue, orgID)
+	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, m.jiraProjects, m.artifacts, m.eventQueue, orgID)
 }
 
 // sourceDisabled reports whether this cycle must not run, and the span outcome
@@ -1642,6 +1642,7 @@ func toTrackerJiraRules(rules []domain.JiraProjectStatusRules) tracker.JiraRules
 	for _, id := range order {
 		m := byProject[id]
 		out = append(out, tracker.JiraProjectRules{
+			JiraProjectID: id,
 			Key:           m.key,
 			ProjectID:     m.projectID,
 			PickupMembers: m.pickup,

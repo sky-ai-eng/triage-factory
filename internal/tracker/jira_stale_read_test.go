@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -74,11 +75,11 @@ func jiraRefreshFixture(t *testing.T, srv *httptest.Server) (*Tracker, *recordin
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 
-	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "SKY-1", "", "issue", "", ""); err != nil {
+	if _, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "SKY-1", "", dbseed.JiraIssueProject("SKY-1"), "", ""); err != nil {
 		t.Fatalf("seed stub: %v", err)
 	}
 	pub := &recordingPublisher{}
-	return New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org), pub, stores
+	return New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org), pub, stores
 }
 
 // storedJiraStatus reads back the status the entity's snapshot currently holds.

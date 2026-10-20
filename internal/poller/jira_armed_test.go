@@ -103,7 +103,7 @@ func TestToTrackerJiraRules_UnarmedTeamDoesNotDiluteAnArmedOne(t *testing.T) {
 	if k := mergedKeys(got); k != "SKY" {
 		t.Fatalf("merged keys = %q, want SKY", k)
 	}
-	rule := got.ForKey("SKY")
+	rule := got.ForProject("jp-SKY")
 	if len(rule.PickupMembers) != 1 || rule.PickupMembers[0].Name != "Backlog" {
 		t.Errorf("pickup = %v, want the armed team's members alone", rule.PickupMembers)
 	}
@@ -119,7 +119,7 @@ func TestToTrackerJiraRules_MergesArmedTeams(t *testing.T) {
 		armedRule("team-a", "SKY", []string{"To Do", "Backlog"}, []string{"Done"}),
 		armedRule("team-b", "SKY", []string{"Backlog", "Selected"}, []string{"Done", "Verified"}),
 	})
-	rule := got.ForKey("SKY")
+	rule := got.ForProject("jp-SKY")
 	if rule == nil {
 		t.Fatalf("merged = %+v, want SKY", got)
 	}

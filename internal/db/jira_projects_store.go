@@ -21,8 +21,13 @@ var ErrJiraProjectIdentityConflict = errors.New("jira project answered with anot
 // JiraProjectStore owns the jira_projects registry: one row per Jira project on
 // one Jira site, the target every stored reference to a Jira project points at
 // (domain.JiraProject). A team's tracked set references a row by its id
-// (JiraStatusRulesStore), so a project key rename is a write to the row's key
-// and nothing else.
+// (JiraStatusRulesStore), and so does every Jira issue entity
+// (entities.jira_project_id), so a project key rename is a write to the row's
+// key and nothing else.
+//
+// The registry is therefore every project TF records an issue in, not the
+// tracked set: an issue an agent touched in a project no team tracks
+// registers its project too. What a team tracks is its rules.
 //
 // Rows are durable. Untracking a project deletes its rules and leaves the row,
 // and nothing here deletes one except the merge RefreshSystem performs.
@@ -32,8 +37,9 @@ var ErrJiraProjectIdentityConflict = errors.New("jira project answered with anot
 //   - FindOrCreate runs on the app pool, inside the team settings write that
 //     adds the project. jira_projects_all gates it to the caller's org; the
 //     handler gates it to a team admin adding the project to that team.
-//   - RefreshSystem and GetSystem run on the admin pool, for the poller. A
-//     merge rewrites the tracked sets of teams the caller may not belong to.
+//   - FindOrCreateSystem, RefreshSystem and GetSystem run on the admin pool,
+//     for the poller and the tracker. A merge rewrites the tracked sets of
+//     teams the caller may not belong to.
 //
 // SQLite collapses the split to one connection.
 type JiraProjectStore interface {
@@ -49,13 +55,22 @@ type JiraProjectStore interface {
 	// is the project and is resolved in place. Every argument is required.
 	FindOrCreate(ctx context.Context, orgID, site, externalID, key, name string) (domain.JiraProject, error)
 
+	// FindOrCreateSystem is FindOrCreate on the admin pool: the tracker
+	// registers the project of every issue it reads before writing the
+	// issue's snapshot, which is what moves the issue's entity onto the
+	// project's row (EntityStore.UpdateSnapshotCASSystem). name may be empty,
+	// which keeps a found row's name. A found row whose key and name already
+	// match is returned without a write.
+	FindOrCreateSystem(ctx context.Context, orgID, site, externalID, key, name string) (domain.JiraProject, error)
+
 	// RefreshSystem writes what Jira answered for the registry row id: its
 	// project id, key and name. The row is the one returned, unless it was
 	// unresolved and another row on its site already carries externalID: the
 	// two are one project, so this row is merged into that one — its rules
 	// move to that row (a team holding both keeps the row it is merged into),
-	// the team settings that list it list that row instead, and the row is
-	// deleted. The surviving row is returned either way.
+	// the team settings that list it list that row instead, the issue
+	// entities that reference it reference that row, and the row is deleted.
+	// The surviving row is returned either way.
 	//
 	// ErrNoSuchJiraProject when id names no row in the org;
 	// ErrJiraProjectIdentityConflict when the row is resolved to a different

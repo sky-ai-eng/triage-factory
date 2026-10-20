@@ -17,6 +17,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -96,6 +97,24 @@ func RenameRepositoryOnly(t testing.TB, conn Conn, id, owner, repo string) {
 // particular one: what domain.EntityScope("jira", ...) answers for an org whose
 // Jira base URL is https://acme.atlassian.net.
 const JiraSite = "https://acme.atlassian.net"
+
+// JiraIssueProject is the project a fixture's Jira issue keyed issueKey sits
+// in: the project its key's prefix names, under the Jira project id
+// JiraProject registers that project key with. So an issue created through it
+// (db.EntityStore.FindOrCreateJiraSystem) and a rule seeded through
+// JiraProject on the same site reference one registry row.
+func JiraIssueProject(issueKey string) domain.JiraProjectRef {
+	key, _, _ := strings.Cut(issueKey, "-")
+	return domain.JiraProjectRef{ID: "id-" + key, Key: key}
+}
+
+// JiraIssueProjectID is JiraProject for the project a fixture's Jira issue
+// keyed issueKey sits in (JiraIssueProject): the registry row a raw entity
+// INSERT names as its jira_project_id.
+func JiraIssueProjectID(t testing.TB, conn Conn, orgID, site, issueKey string) string {
+	t.Helper()
+	return JiraProject(t, conn, orgID, site, JiraIssueProject(issueKey).Key)
+}
 
 // JiraProject returns the id of the registry row for the project keyed key on
 // site in orgID, creating it when none answers to the key there. A created

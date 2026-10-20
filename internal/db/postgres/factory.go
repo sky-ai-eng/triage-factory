@@ -280,8 +280,8 @@ const pgFactoryEntitySelectColumns = `
 // The multi-mode factory belt sources entity visibility from each team's
 // *tracked set*, not from task existence. An entity belongs on a team's
 // factory iff it sits in that team's tracked set — a GitHub entity whose
-// owner/name is one of the team's tracked repos (team_github_repos), a
-// Jira entity whose project key is attached to the team
+// repository is one of the team's tracked repos (team_github_repos), a
+// Jira entity whose project is attached to the team
 // (jira_project_status_rules), or a Linear entity whose Linear team the team
 // tracks (linear_team_rules). This decouples the belt from task
 // creation: an untasked PR on a tracked repo now appears, where the prior
@@ -297,10 +297,6 @@ const pgFactoryEntitySelectColumns = `
 // defense-in-depth so the filter still holds on the admin pool where RLS
 // is bypassed: team_github_repos and jira_project_status_rules bind it on
 // their own org_id, linear_team_rules through the teams join.
-//
-// Jira keys are hyphen-free, so split_part(source_id, '-', 1) is the project
-// key (e.g. "PROJ" in "PROJ-123"), matched against the registry row on the
-// entity's site, as in jiraTeamProjectMembershipExists.
 
 // factoryGitHubRepoTrackedExists scopes a github entities row (alias e)
 // to the tracked repos of the viewer's teams.
@@ -317,16 +313,14 @@ const factoryGitHubRepoTrackedExists = `EXISTS (
 
 // factoryJiraProjectTrackedExists scopes a jira entities row (alias e) to
 // the projects attached to the viewer's teams. Mirrors
-// jiraTeamProjectMembershipExists (the Jira deck's semi-join).
-//
-// TODO(TFAC-1130): match e's own jira_project_id against jr.jira_project_id
-// here and in factoryJiraProjectTrackedForTeams instead of parsing the key.
+// jiraTeamProjectMembershipExists (the Jira deck's semi-join): the entity
+// and the rule both reference the project's registry row, so they meet on its
+// id, which a project key rename does not move, and the column outlives the
+// snapshot, so a row stays on its teams' belts while its source is turned off.
 const factoryJiraProjectTrackedExists = `EXISTS (
 	SELECT 1 FROM jira_project_status_rules jr
-	JOIN jira_projects jp ON jp.id = jr.jira_project_id
 	WHERE jr.org_id = e.org_id
-	  AND jp.site = e.scope
-	  AND jp.project_key = split_part(e.source_id, '-', 1)
+	  AND jr.jira_project_id = e.jira_project_id
 )`
 
 // factoryLinearTeamTrackedExists scopes a linear entities row (alias e) to
@@ -377,11 +371,9 @@ func factoryGitHubRepoTrackedForTeams(placeholders string) string {
 func factoryJiraProjectTrackedForTeams(placeholders string) string {
 	return `EXISTS (
 		SELECT 1 FROM jira_project_status_rules jr
-		JOIN jira_projects jp ON jp.id = jr.jira_project_id
 		WHERE jr.org_id = e.org_id
 		  AND jr.team_id IN (` + placeholders + `)
-		  AND jp.site = e.scope
-		  AND jp.project_key = split_part(e.source_id, '-', 1)
+		  AND jr.jira_project_id = e.jira_project_id
 	)`
 }
 

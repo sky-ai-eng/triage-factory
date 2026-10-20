@@ -309,7 +309,7 @@ func TestRefreshGitHub_RateLimitStopsFanOutAndPropagatesDistinctly(t *testing.T)
 	}
 	trackRepos(t, stores, org, repos)
 
-	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	_, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", repos, nil)
@@ -373,7 +373,7 @@ func TestRefreshGitHub_RateLimitSeedsAlreadyDiscoveredReposBeforeStopping(t *tes
 	org := runmode.LocalDefaultOrgID
 	trackRepos(t, stores, org, repos)
 
-	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	_, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", repos, nil)

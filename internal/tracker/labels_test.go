@@ -44,7 +44,7 @@ func jiraLabelSnap(labels ...string) domain.JiraSnapshot {
 		labels = []string{}
 	}
 	return domain.JiraSnapshot{
-		ID: "10001", Key: "SKY-1", Summary: "Fix the thing", Status: "To Do",
+		ID: "10001", Key: "SKY-1", ProjectID: "10000", ProjectKey: "SKY", Summary: "Fix the thing", Status: "To Do",
 		Assignee: testUser, AssigneeAccountID: testUserAccountID,
 		Reporter: "Grace", ReporterAccountID: "557058:grace",
 		IssueType: "Task", Priority: "High", Labels: labels,
@@ -76,7 +76,7 @@ func TestDiffJira_Labels(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := labelEvents(DiffJiraSnapshots(tc.prev, tc.curr, testEntityID, testDoneStatuses, nil))
+			got := labelEvents(DiffJiraSnapshots(tc.prev, tc.curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil))
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("label events = %v, want %v", got, tc.want)
 			}
@@ -85,7 +85,7 @@ func TestDiffJira_Labels(t *testing.T) {
 }
 
 func TestDiffJira_LabelMetadataAndPredicates(t *testing.T) {
-	evts := DiffJiraSnapshots(jiraLabelSnap("backend"), jiraLabelSnap("backend", "tf-agent"), testEntityID, testDoneStatuses, nil)
+	evts := DiffJiraSnapshots(jiraLabelSnap("backend"), jiraLabelSnap("backend", "tf-agent"), testEntityID, JiraEventProjects{Current: "jp-sky", Previous: "jp-sky"}, testDoneStatuses, nil)
 	evt := findEvent(evts, domain.EventJiraIssueLabelAdded)
 	if evt == nil {
 		t.Fatalf("no label_added in %v", eventTypes(evts))
@@ -95,7 +95,7 @@ func TestDiffJira_LabelMetadataAndPredicates(t *testing.T) {
 	want := events.JiraIssueLabelMetadata{
 		Assignee: testUser, AssigneeAccountID: testUserAccountID,
 		Reporter: "Grace", ReporterAccountID: "557058:grace",
-		IssueKey: "SKY-1", IssueID: "10001", Project: "SKY", IssueType: "Task",
+		IssueKey: "SKY-1", IssueID: "10001", Project: "SKY", JiraProjectID: "jp-sky", IssueType: "Task",
 		Priority: "High", Status: "To Do", Summary: "Fix the thing",
 		LabelName: "tf-agent", Labels: []string{"backend", "tf-agent"},
 	}
@@ -122,7 +122,7 @@ func TestDiffJira_LabelMetadataAndPredicates(t *testing.T) {
 		}
 	}
 
-	removedEvts := DiffJiraSnapshots(jiraLabelSnap("backend", "tf-agent"), jiraLabelSnap("backend"), testEntityID, testDoneStatuses, nil)
+	removedEvts := DiffJiraSnapshots(jiraLabelSnap("backend", "tf-agent"), jiraLabelSnap("backend"), testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 	removedEvt := findEvent(removedEvts, domain.EventJiraIssueLabelRemoved)
 	if removedEvt == nil {
 		t.Fatalf("no label_removed in %v", eventTypes(removedEvts))
@@ -149,7 +149,7 @@ func TestDiffJira_LabelledAtDiscoveryMatchesHasLabel(t *testing.T) {
 			jiraLabelSnap("tf-agent"), domain.EventJiraIssueBecameAtomic},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			evts := DiffJiraSnapshots(tc.prev, tc.curr, testEntityID, testDoneStatuses, nil)
+			evts := DiffJiraSnapshots(tc.prev, tc.curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil)
 			if got := labelEvents(evts); len(got) != 0 {
 				t.Errorf("label events = %v, want none", got)
 			}

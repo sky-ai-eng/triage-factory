@@ -151,51 +151,48 @@ func (r *Router) githubEventHost(ctx context.Context, evt domain.Event) (string,
 	return dbpkg.OrgGitHubHostSystem(ctx, r.orgs, evt.OrgID)
 }
 
-// teamTracksEventProject extracts the Jira project key from an event's
-// metadata and asks the store whether teamID tracks it on the org's current
-// Jira site. Every Jira issue metadata struct carries a top-level "project"
-// (the project key, e.g. "SKY" — see internal/domain/events/jira.go), so a
-// minimal unmarshal is enough; the store matches it against the project
-// registry's key, which the poller refreshes from Jira before the cycle that
-// emits the event, so a renamed project's events match under its new key.
-// Fail-open on a missing / malformed project or a store error: dropping a
+// teamTracksEventProject reads the Jira project an event is about off its
+// metadata — jira_project_id, the jira_projects registry row the tracker
+// stamps on every Jira event beside the project's display key (see
+// internal/domain/events/jira.go) — and asks the store whether teamID tracks
+// that row on the org's current Jira site. A project key rename moves no
+// reference, so a renamed project's events match its teams whatever key they
+// carry. Fail-open on a missing / malformed id or a store error: dropping a
 // legitimate task on a transient DB blip or an unexpected metadata shape is
 // worse than the pre-ticket behavior, and the events feeding this path come
-// from TF's own trusted poller. Same deliberate split from the ladder's
-// propagate posture as teamTracksEventRepo — see there for the asymmetry that
+// from TF's own trusted poller (an event recorded before the id rode the
+// metadata names none). Same deliberate split from the ladder's propagate
+// posture as teamTracksEventRepo — see there for the asymmetry that
 // justifies it.
 //
-// TODO(TFAC-1130): gate on the registry id the event metadata will carry
-// beside the key, instead of the key.
-//
 // key_changed is the one event about two projects, the one the issue is in
-// now and the one it left (old_project), and it passes for a team that tracks
-// either. A team whose issue moved to a project it does not track keeps its
-// tasks on the entity, and this event is the only thing that tells it the
+// now and the one it left (old_jira_project_id), and it passes for a team that
+// tracks either. A team whose issue moved to a project it does not track keeps
+// its tasks on the entity, and this event is the only thing that tells it the
 // issue left; a handler filtered on old_project could never fire otherwise.
 // Every other Jira event routes on its project alone.
 func (r *Router) teamTracksEventProject(ctx context.Context, evt domain.Event, teamID string) bool {
 	var m struct {
-		Project    string `json:"project"`
-		OldProject string `json:"old_project"`
+		JiraProjectID    string `json:"jira_project_id"`
+		OldJiraProjectID string `json:"old_jira_project_id"`
 	}
-	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil || m.Project == "" {
+	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil || m.JiraProjectID == "" {
 		return true
 	}
-	projects := []string{m.Project}
-	if evt.EventType == domain.EventJiraIssueKeyChanged && m.OldProject != "" && m.OldProject != m.Project {
-		projects = append(projects, m.OldProject)
+	projects := []string{m.JiraProjectID}
+	if evt.EventType == domain.EventJiraIssueKeyChanged && m.OldJiraProjectID != "" && m.OldJiraProjectID != m.JiraProjectID {
+		projects = append(projects, m.OldJiraProjectID)
 	}
 	settings, err := r.orgs.GetSettingsSystem(ctx, evt.OrgID)
 	if err != nil {
-		routerLog.Warn("team-project gate: org settings read failed, allowing", "team_id", teamID, "project", m.Project, "error", err)
+		routerLog.Warn("team-project gate: org settings read failed, allowing", "team_id", teamID, "jira_project_id", m.JiraProjectID, "error", err)
 		return true
 	}
 	site := domain.EntityScope("jira", settings)
 	for _, project := range projects {
-		tracks, err := r.jiraRules.TracksProjectSystem(ctx, teamID, site, project)
+		tracks, err := r.jiraRules.TracksJiraProjectSystem(ctx, teamID, site, project)
 		if err != nil {
-			routerLog.Warn("team-project gate lookup failed, allowing", "team_id", teamID, "project", project, "error", err)
+			routerLog.Warn("team-project gate lookup failed, allowing", "team_id", teamID, "jira_project_id", project, "error", err)
 			return true
 		}
 		if tracks {

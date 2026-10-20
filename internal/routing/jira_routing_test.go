@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -59,6 +60,18 @@ func trackJiraProjects(t *testing.T, database *sql.DB, teamID string, rules ...d
 	if err := st.JiraStatusRules.ReplaceForTeam(t.Context(), teamID, jiraTestHost, rules); err != nil {
 		t.Fatalf("track jira projects: %v", err)
 	}
+}
+
+// jiraProjectRow is the registry row of the project keyed key on the Jira test
+// host, registered under the Jira id trackJiraProjects gives it when no team
+// tracks it yet: the id a tracked or untracked project's events carry.
+func jiraProjectRow(t *testing.T, database *sql.DB, key string) string {
+	t.Helper()
+	p, err := sqlitestore.New(database).JiraProjects.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, jiraTestHost, "id-"+key, key, "")
+	if err != nil {
+		t.Fatalf("register jira project %s: %v", key, err)
+	}
+	return p.ID
 }
 
 // seedJiraUserOnTeam creates a user, enrolls them on teamID, and binds the
@@ -115,7 +128,7 @@ func seedUserJiraRule(t *testing.T, database *sql.DB, teamID, eventType string) 
 
 func jiraEntity(t *testing.T, database *sql.DB, sourceID string) string {
 	t.Helper()
-	e, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", sourceID, "", "issue", "Jira issue", "https://example.com/"+sourceID)
+	e, _, err := sqlitestore.New(database).Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", sourceID, "", dbseed.JiraIssueProject(sourceID), "Jira issue", "https://example.com/"+sourceID)
 	if err != nil {
 		t.Fatalf("create jira entity: %v", err)
 	}

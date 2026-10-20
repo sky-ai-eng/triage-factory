@@ -126,7 +126,7 @@ func TestRelayRuntime_RecordReadTouch_RoundTrips(t *testing.T) {
 	rt := newRelayRuntime(directDispatchConn{srv: srv}, info, nil)
 	ctx := context.Background()
 
-	rt.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, "octo/repo#7", "", "", "")
+	rt.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, "octo/repo#7", "", domain.EntityContainer{}, "")
 
 	ent, err := stores.Entities.GetBySource(ctx, info.OrgID, "github", "https://github.com", "octo/repo#7")
 	if err != nil || ent == nil {
@@ -150,7 +150,7 @@ func TestRelayRuntime_LinearTouchCarriesTheTeam(t *testing.T) {
 	rt := newRelayRuntime(directDispatchConn{srv: srv}, info, nil)
 	ctx := context.Background()
 
-	rt.RecordReadTouch(ctx, domain.ArtifactProviderLinear, "ENG-1", "uuid-read", "team-eng", "")
+	rt.RecordReadTouch(ctx, domain.ArtifactProviderLinear, "ENG-1", "uuid-read", domain.EntityContainer{LinearTeamID: "team-eng"}, "")
 	rt.Record(ctx, &domain.Artifact{
 		Provider: domain.ArtifactProviderLinear, Kind: domain.ArtifactKindIssue,
 		Target: "OPS-2", ExternalID: "uuid-write", State: domain.ArtifactStateIssueCreated,
@@ -158,8 +158,8 @@ func TestRelayRuntime_LinearTouchCarriesTheTeam(t *testing.T) {
 	}, &domain.ExternalAction{
 		Provider: domain.ArtifactProviderLinear, Action: domain.ActionIssueCreated,
 		Target: "OPS-2", ExternalID: "uuid-write", Credential: domain.CredentialLinearOrg,
-	}, "team-ops")
-	rt.RecordReadTouch(ctx, domain.ArtifactProviderLinear, "ENG-3", "uuid-teamless", "", "")
+	}, domain.EntityContainer{LinearTeamID: "team-ops"})
+	rt.RecordReadTouch(ctx, domain.ArtifactProviderLinear, "ENG-3", "uuid-teamless", domain.EntityContainer{}, "")
 
 	for uuid, team := range map[string]string{"uuid-read": "team-eng", "uuid-write": "team-ops"} {
 		ent, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ArtifactProviderLinear, testScope("linear"), uuid)
@@ -169,6 +169,47 @@ func TestRelayRuntime_LinearTouchCarriesTheTeam(t *testing.T) {
 	}
 	if ent, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ArtifactProviderLinear, testScope("linear"), "uuid-teamless"); err != nil || ent != nil {
 		t.Errorf("a teamless Linear touch created %+v (err=%v), want nothing", ent, err)
+	}
+}
+
+// TestRelayRuntime_JiraTouchCarriesTheProject: the Jira project rides both
+// relayed touches, a read's and a write's, so a Jira entity the orchestrator
+// creates for the sidecar references its project's registry row, registered
+// on the org's site when it had none. A Jira touch that names no project
+// creates nothing: a Jira entity is created only with its project.
+func TestRelayRuntime_JiraTouchCarriesTheProject(t *testing.T) {
+	_, stores, info := newCaptureStoresConn(t, true)
+	srv := NewRelayServer(stores, info, nil)
+	rt := newRelayRuntime(directDispatchConn{srv: srv}, info, nil)
+	ctx := context.Background()
+	site := testScope("jira")
+	eng := domain.EntityContainer{JiraProject: domain.JiraProjectRef{ID: "10100", Key: "ENG", Name: "Engineering"}}
+	ops := domain.EntityContainer{JiraProject: domain.JiraProjectRef{ID: "10200", Key: "OPS"}}
+
+	rt.RecordReadTouch(ctx, domain.ArtifactProviderJira, "ENG-1", "20001", eng, "")
+	resource := domain.JiraIssueResource(site, "20002")
+	rt.Record(ctx, &domain.Artifact{
+		Provider: domain.ArtifactProviderJira, Kind: domain.ArtifactKindIssue,
+		Target: "OPS-2", ExternalID: "20002", State: domain.ArtifactStateIssueCreated,
+		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue, resource, ""),
+	}, &domain.ExternalAction{
+		Provider: domain.ArtifactProviderJira, Action: domain.ActionIssueCreated,
+		Target: "OPS-2", Credential: domain.CredentialJiraOrg,
+	}, ops)
+	rt.RecordReadTouch(ctx, domain.ArtifactProviderJira, "ENG-3", "20003", domain.EntityContainer{}, "")
+
+	for issueID, want := range map[string]domain.JiraProjectRef{"20001": eng.JiraProject, "20002": ops.JiraProject} {
+		ent, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ArtifactProviderJira, site, issueID)
+		if err != nil || ent == nil {
+			t.Fatalf("entity for %s = %+v err=%v, want one", issueID, ent, err)
+		}
+		project, err := stores.JiraProjects.GetSystem(ctx, info.OrgID, ent.JiraProjectID)
+		if err != nil || project == nil || project.Site != site || project.ExternalID != want.ID || project.Key != want.Key {
+			t.Errorf("project of %s = %+v err=%v, want %s under %s on %s", issueID, project, err, want.Key, want.ID, site)
+		}
+	}
+	if ent, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ArtifactProviderJira, site, "20003"); err != nil || ent != nil {
+		t.Errorf("a projectless Jira touch created %+v (err=%v), want nothing", ent, err)
 	}
 }
 

@@ -17,6 +17,12 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // metadata carries the *_account_id alongside the existing display-name
 // fields; the matcher compares account IDs via stringInSliceFold.
 //
+// Project is the project's key as the read that produced the event spelled
+// it, a display value predicates match on. jira_project_id is the
+// jira_projects registry row of the same project, which routing gates on: a
+// project key rename changes the key and not the row, so a team that tracks
+// the project keeps receiving its events under the new key.
+//
 // TODO(TFAC-878): status predicates are free-text names the user types, matched
 // against the name on the event. Nothing validates them against the project's
 // live workflow, so a status renamed in Jira leaves a predicate that matches
@@ -37,6 +43,7 @@ type JiraIssueAssignedMetadata struct {
 	IssueKey          string   `json:"issue_key"` // "PROJ-123"
 	IssueID           string   `json:"issue_id"`  // Jira's numeric issue id
 	Project           string   `json:"project"`   // "SKY"
+	JiraProjectID     string   `json:"jira_project_id"`
 	IssueType         string   `json:"issue_type"`
 	Priority          string   `json:"priority"`
 	Status            string   `json:"status"`
@@ -74,6 +81,7 @@ type JiraIssueAvailableMetadata struct {
 	IssueKey          string   `json:"issue_key"`
 	IssueID           string   `json:"issue_id"`
 	Project           string   `json:"project"`
+	JiraProjectID     string   `json:"jira_project_id"`
 	IssueType         string   `json:"issue_type"`
 	Priority          string   `json:"priority"`
 	Status            string   `json:"status"`
@@ -111,6 +119,7 @@ type JiraIssueStatusChangedMetadata struct {
 	IssueKey          string `json:"issue_key"`
 	IssueID           string `json:"issue_id"`
 	Project           string `json:"project"`
+	JiraProjectID     string `json:"jira_project_id"`
 	IssueType         string `json:"issue_type"`
 	OldStatus         string `json:"old_status"`
 	NewStatus         string `json:"new_status"` // also the event's dedup_key
@@ -143,6 +152,7 @@ type JiraIssuePriorityChangedMetadata struct {
 	IssueKey          string `json:"issue_key"`
 	IssueID           string `json:"issue_id"`
 	Project           string `json:"project"`
+	JiraProjectID     string `json:"jira_project_id"`
 	OldPriority       string `json:"old_priority"`
 	NewPriority       string `json:"new_priority"` // also the event's dedup_key
 }
@@ -179,6 +189,7 @@ type JiraIssueCommentedMetadata struct {
 	IssueKey            string   `json:"issue_key"`
 	IssueID             string   `json:"issue_id"`
 	Project             string   `json:"project"`
+	JiraProjectID       string   `json:"jira_project_id"`
 }
 
 type JiraIssueCommentedPredicate struct {
@@ -205,6 +216,7 @@ type JiraIssueCompletedMetadata struct {
 	IssueKey          string `json:"issue_key"`
 	IssueID           string `json:"issue_id"`
 	Project           string `json:"project"`
+	JiraProjectID     string `json:"jira_project_id"`
 	IssueType         string `json:"issue_type"`
 	FinalStatus       string `json:"final_status"`
 }
@@ -238,6 +250,7 @@ type JiraIssueBecameAtomicMetadata struct {
 	IssueKey          string   `json:"issue_key"`
 	IssueID           string   `json:"issue_id"`
 	Project           string   `json:"project"`
+	JiraProjectID     string   `json:"jira_project_id"`
 	IssueType         string   `json:"issue_type"`
 	Priority          string   `json:"priority"`
 	Status            string   `json:"status"`
@@ -285,6 +298,7 @@ type JiraIssueLabelMetadata struct {
 	IssueKey          string   `json:"issue_key"`
 	IssueID           string   `json:"issue_id"`
 	Project           string   `json:"project"`
+	JiraProjectID     string   `json:"jira_project_id"`
 	IssueType         string   `json:"issue_type"`
 	Priority          string   `json:"priority"`
 	Status            string   `json:"status"`
@@ -357,6 +371,7 @@ type JiraIssueUnreachableMetadata struct {
 	IssueKey          string `json:"issue_key"`
 	IssueID           string `json:"issue_id"`
 	Project           string `json:"project"`
+	JiraProjectID     string `json:"jira_project_id"`
 	IssueType         string `json:"issue_type"`
 	LastStatus        string `json:"last_status"`
 	Summary           string `json:"summary"`
@@ -395,10 +410,12 @@ type JiraIssueKeyChangedMetadata struct {
 	IssueKey          string `json:"issue_key"`
 	IssueID           string `json:"issue_id"`
 	Project           string `json:"project"`
+	JiraProjectID     string `json:"jira_project_id"`
 	IssueType         string `json:"issue_type"`
 	Summary           string `json:"summary"`
 	OldIssueKey       string `json:"old_issue_key"`
 	OldProject        string `json:"old_project"`
+	OldJiraProjectID  string `json:"old_jira_project_id"`
 }
 
 type JiraIssueKeyChangedPredicate struct {

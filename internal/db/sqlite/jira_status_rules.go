@@ -64,13 +64,13 @@ func (s *jiraStatusRulesStore) ListForOrgSystem(ctx context.Context, orgID, site
 	return scanJiraStatusRules(rows, err)
 }
 
-func (s *jiraStatusRulesStore) TracksProjectSystem(ctx context.Context, teamID, site, projectKey string) (bool, error) {
+func (s *jiraStatusRulesStore) TracksJiraProjectSystem(ctx context.Context, teamID, site, jiraProjectID string) (bool, error) {
 	var n int
 	err := s.q.QueryRowContext(ctx, `
 		SELECT 1 `+jiraRuleFrom+`
-		  AND r.team_id = ? AND p.project_key = ?
+		  AND r.team_id = ? AND r.jira_project_id = ?
 		LIMIT 1
-	`, site, teamID, projectKey).Scan(&n)
+	`, site, teamID, jiraProjectID).Scan(&n)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil

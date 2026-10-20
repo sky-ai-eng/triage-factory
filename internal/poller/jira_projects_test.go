@@ -117,8 +117,8 @@ func TestRunJiraCycleForOrg_RefreshesARenamedProjectBeforeDiscovery(t *testing.T
 	if len(rules) != 1 || rules[0].JiraProjectID != project.ID || rules[0].ProjectKey != "NEW" {
 		t.Errorf("team rules after the cycle = %+v, want the same rule under NEW", rules)
 	}
-	if tracks, err := stores.JiraStatusRules.TracksProjectSystem(ctx, team, site, "NEW"); err != nil || !tracks {
-		t.Errorf("TracksProjectSystem(NEW) = %v, %v; want the team to track the renamed project", tracks, err)
+	if tracks, err := stores.JiraStatusRules.TracksJiraProjectSystem(ctx, team, site, project.ID); err != nil || !tracks {
+		t.Errorf("TracksJiraProjectSystem = %v, %v; want the team to track the renamed project", tracks, err)
 	}
 }
 

@@ -392,7 +392,7 @@ func TestRelayedRecords_RetriedRecordStaysAheadOfLaterOnes(t *testing.T) {
 		&domain.ExternalAction{
 			Provider: domain.ArtifactProviderGitHub, Action: domain.ActionCommentPosted,
 			Target: "octo/repo#1", ExternalID: "7", Credential: domain.CredentialGitHubApp,
-		}, "")
+		}, domain.EntityContainer{})
 	rt.Record(context.Background(),
 		&domain.Artifact{
 			Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindComment,
@@ -401,7 +401,7 @@ func TestRelayedRecords_RetriedRecordStaysAheadOfLaterOnes(t *testing.T) {
 		&domain.ExternalAction{
 			Provider: domain.ArtifactProviderGitHub, Action: domain.ActionCommentDeleted,
 			Target: "octo/repo", ExternalID: "7", Credential: domain.CredentialGitHubApp,
-		}, "")
+		}, domain.EntityContainer{})
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {

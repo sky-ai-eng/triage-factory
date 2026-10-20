@@ -525,8 +525,19 @@ CREATE TABLE public.entities (
     -- tracks has a row to reference. Required for source 'github' (the foreign
     -- key is added after repositories below).
     repository_id uuid,
+    -- The project a Jira issue sits in, by its jira_projects row on the
+    -- issue's site. The key ("SKY-123") names the project by the key it has
+    -- now, which a project key rename changes; this does not. Set at creation
+    -- from the response that found the issue, through the registry's
+    -- get-or-create, so an issue in a project no team tracks has a row to
+    -- reference, and moved by every snapshot write to the row of the
+    -- snapshot's project, so it follows a move to another project. Clearing
+    -- the snapshot leaves it. Required for source 'jira' (the foreign key is
+    -- added after jira_projects below).
+    jira_project_id uuid,
     CONSTRAINT entities_slack_channel_required CHECK (source <> 'slack' OR slack_channel_id IS NOT NULL),
     CONSTRAINT entities_repository_required CHECK (source <> 'github' OR repository_id IS NOT NULL),
+    CONSTRAINT entities_jira_project_required CHECK (source <> 'jira' OR jira_project_id IS NOT NULL),
     CONSTRAINT entities_linear_team_id_check CHECK (
         CASE WHEN source = 'linear' THEN COALESCE(linear_team_id, '') <> ''
              ELSE linear_team_id IS NULL END
@@ -1864,6 +1875,12 @@ CREATE INDEX idx_entities_org_state ON public.entities USING btree (org_id, stat
 CREATE INDEX idx_entities_repository ON public.entities USING btree (repository_id) WHERE (repository_id IS NOT NULL);
 
 
+-- Serves the registry merge's move of a project's issues, and the joins that
+-- scope a Jira entity by its project.
+
+CREATE INDEX idx_entities_jira_project ON public.entities USING btree (jira_project_id) WHERE (jira_project_id IS NOT NULL);
+
+
 CREATE INDEX idx_entity_links_from_kind ON public.entity_links USING btree (from_entity_id, kind);
 
 
@@ -2165,6 +2182,10 @@ ALTER TABLE ONLY public.entities
 -- org's repository row.
 ALTER TABLE ONLY public.entities
     ADD CONSTRAINT entities_repository_id_fkey FOREIGN KEY (repository_id, org_id) REFERENCES public.repositories(id, org_id);
+
+
+ALTER TABLE ONLY public.entities
+    ADD CONSTRAINT entities_jira_project_id_fkey FOREIGN KEY (jira_project_id, org_id) REFERENCES public.jira_projects(id, org_id);
 
 
 ALTER TABLE ONLY public.entity_links
@@ -6468,8 +6489,14 @@ GRANT SELECT ON TABLE public.org_github_apps TO tf_system;
 GRANT SELECT ON TABLE public.org_github_app_installations TO tf_system;
 GRANT SELECT ON TABLE public.events TO tf_system;
 GRANT SELECT ON TABLE public.jira_project_status_rules TO tf_system;
--- The rule reads join the registry for the project's current key.
+-- The rule reads join the registry for the project's current key. A run that
+-- records an issue in a project with no registry row creates the row its
+-- entity references, through the same get-or-create the tracker runs, which
+-- resolves an unresolved row in place and refreshes a found row's display
+-- values; it can write nothing else on the row.
 GRANT SELECT ON TABLE public.jira_projects TO tf_system;
+GRANT INSERT (org_id, site, external_id, project_key, project_name) ON TABLE public.jira_projects TO tf_system;
+GRANT UPDATE (external_id, project_key, project_name) ON TABLE public.jira_projects TO tf_system;
 -- llm_spend is security_invoker: reading it needs SELECT on its base tables
 -- too, not just the view.
 GRANT SELECT ON TABLE public.llm_spend TO tf_system;

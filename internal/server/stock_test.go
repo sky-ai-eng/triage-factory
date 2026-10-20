@@ -11,7 +11,9 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -57,14 +59,16 @@ func seedStockConfig(t *testing.T, s *Server) {
 // deck's assigned bucket surfaces and the queue route accepts.
 func seedStockTicket(t *testing.T, s *Server, issueKey string) {
 	t.Helper()
+	project := dbseed.JiraIssueProject(issueKey)
 	snapshot := fmt.Sprintf(
-		`{"key":%q,"summary":"Carry over me","status":"To Do","issue_type":"Task","priority":"Medium","assignee":"Tester","assignee_account_id":"acc-1","url":"https://jira.example.com/browse/%s"}`,
-		issueKey, issueKey,
+		`{"key":%q,"project_id":%q,"project_key":%q,"summary":"Carry over me","status":"To Do","issue_type":"Task","priority":"Medium","assignee":"Tester","assignee_account_id":"acc-1","url":"https://jira.example.com/browse/%s"}`,
+		issueKey, project.ID, project.Key, issueKey,
 	)
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, title, url, state, snapshot_json, scope)
-		 VALUES (?, 'jira', ?, 'issue', 'Carry over me', ?, 'active', ?, 'https://jira.example.com')`,
+		`INSERT INTO entities (id, source, source_id, kind, title, url, state, snapshot_json, scope, jira_project_id)
+		 VALUES (?, 'jira', ?, 'issue', 'Carry over me', ?, 'active', ?, 'https://jira.example.com', ?)`,
 		"e_stock_"+issueKey, issueKey, "https://jira.example.com/browse/"+issueKey, snapshot,
+		dbseed.JiraIssueProjectID(t, s.db, runmode.LocalDefaultOrgID, "https://jira.example.com", issueKey),
 	); err != nil {
 		t.Fatalf("seed jira entity %s: %v", issueKey, err)
 	}
@@ -285,4 +289,81 @@ func TestStockDeck_ListsAndActsOnTheEntitysCurrentKey(t *testing.T) {
 	if !strings.Contains(meta, `"issue_key":"SKY-9"`) || !strings.Contains(meta, `"issue_id":"10001"`) {
 		t.Errorf("event metadata = %s, want the current key and the issue id", meta)
 	}
+}
+
+// TestJiraReaders_FollowAProjectKeyRename: a project whose key is renamed keeps
+// its registry row, which the issue's entity and the team's rule both
+// reference. Once the issue answers under the new key, the deck still
+// classifies it under its project's rule (an unassigned ticket in a pickup
+// status is still available to claim) and the claim/requeue path still finds
+// that rule: before the poll has re-keyed the registry row, when no key the
+// issue carries matches the rule's, and after it.
+func TestJiraReaders_FollowAProjectKeyRename(t *testing.T) {
+	keyring.MockInit()
+	s := newTestServer(t)
+	seedStockConfig(t, s)
+	ctx := t.Context()
+	const (
+		org      = runmode.LocalDefaultOrgID
+		site     = "https://jira.example.com"
+		entityID = "e_stock_renamed"
+	)
+	project := dbseed.JiraIssueProject("SKY-2")
+	row := dbseed.JiraIssueProjectID(t, s.db, org, site, "SKY-2")
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, title, url, state, snapshot_json, scope, jira_project_id)
+		 VALUES (?, 'jira', 'SKY-2', 'issue', 'Pick me up', ?, 'active', ?, ?, ?)`,
+		entityID, site+"/browse/SKY-2",
+		`{"key":"SKY-2","project_id":"`+project.ID+`","project_key":"SKY","summary":"Pick me up","status":"To Do","assignee":""}`,
+		site, row,
+	); err != nil {
+		t.Fatalf("seed jira entity: %v", err)
+	}
+	if err := s.allStores.PollReadiness.MarkPollComplete(ctx, org, "jira", time.Time{}); err != nil {
+		t.Fatalf("mark jira poll complete: %v", err)
+	}
+
+	// The issue renamed by its id and its snapshot refreshed from a read
+	// that names the new key, as the tracker applies a rename.
+	if _, err := s.allStores.Entities.StampExternalIDSystem(ctx, org, entityID, "10002"); err != nil {
+		t.Fatalf("stamp the issue id: %v", err)
+	}
+	if _, err := s.allStores.Entities.RenameSystem(ctx, org, "jira", site, "10002", "CORE-2", site+"/browse/CORE-2"); err != nil {
+		t.Fatalf("rename the issue: %v", err)
+	}
+	if _, err := s.allStores.Entities.PatchSnapshot(ctx, org, entityID,
+		`{"id":"10002","key":"CORE-2","project_id":"`+project.ID+`","project_key":"CORE","summary":"Pick me up","status":"To Do","assignee":""}`,
+	); err != nil {
+		t.Fatalf("refresh the snapshot: %v", err)
+	}
+
+	team := runmode.LocalDefaultTeamID
+	task := &domain.Task{EntityID: entityID, EntitySource: "jira", EntitySourceID: "CORE-2", TeamID: &team}
+	check := func(stage, ruleKey string) {
+		t.Helper()
+		deck := readStockDeckKeys(t, s)
+		available, _ := deck["available"].([]any)
+		if len(available) != 1 {
+			t.Fatalf("%s: available = %v, want the renamed ticket still under its project's pickup rule", stage, deck["available"])
+		}
+		if got, _ := available[0].(map[string]any); got["issue_key"] != "CORE-2" || got["project"] != "CORE" {
+			t.Errorf("%s: deck row = %v, want CORE-2 in CORE", stage, got)
+		}
+		var rule *domain.JiraProjectStatusRules
+		if err := s.tx.WithReadTx(ctx, org, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
+			rule = lookupJiraRuleForTask(ctx, tx, org, site, task)
+			return nil
+		}); err != nil {
+			t.Fatalf("%s: read the rule: %v", stage, err)
+		}
+		if rule == nil || rule.JiraProjectID != row || rule.ProjectKey != ruleKey || rule.InProgressCanonical.Name != "In Progress" {
+			t.Errorf("%s: claim rule = %+v, want the project's rule under %s", stage, rule, ruleKey)
+		}
+	}
+	check("before the registry row is re-keyed", "SKY")
+
+	if _, err := s.allStores.JiraProjects.RefreshSystem(ctx, org, row, project.ID, "CORE", "Core"); err != nil {
+		t.Fatalf("rename the project: %v", err)
+	}
+	check("after the registry row is re-keyed", "CORE")
 }

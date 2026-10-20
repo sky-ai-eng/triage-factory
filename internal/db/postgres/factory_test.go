@@ -305,10 +305,11 @@ func seedPgJiraEntityRaw(t *testing.T, h *pgtest.Harness, orgID, projectKey stri
 	t.Helper()
 	id := uuid.New().String()
 	sourceID := fmt.Sprintf("%s-%d", projectKey, number)
+	project := dbseed.JiraProject(t, h.AdminDB, orgID, pgJiraSite, projectKey)
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES ($1, $2, 'jira', $3, 'issue', $4, '', '{}'::jsonb, $5, 'https://jira.example.com')
-	`, id, orgID, sourceID, "Issue "+sourceID, time.Now().UTC()); err != nil {
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, jira_project_id)
+		VALUES ($1, $2, 'jira', $3, 'issue', $4, '', '{}'::jsonb, $5, $6, $7)
+	`, id, orgID, sourceID, "Issue "+sourceID, time.Now().UTC(), pgJiraSite, project); err != nil {
 		t.Fatalf("seed jira entity %s: %v", sourceID, err)
 	}
 	return id
@@ -502,6 +503,74 @@ func TestFactoryReadStore_Postgres_JiraScopedToTrackedProject(t *testing.T) {
 	if got[onUnattached] {
 		t.Errorf("Jira entity on unattached project %s leaked through — tracked-project semi-join not applied", onUnattached)
 	}
+}
+
+// TestFactoryReadStore_Postgres_JiraFollowsTheRegistryAfterAKeyRename: the
+// belt, and the team activity node that shares its tracked-set predicate,
+// place a Jira issue by the registry row it references, never by its key's
+// prefix. After the project's key is renamed the issue stays on its team's
+// belt and its events stay counted — once the issue is renamed while the
+// registry still holds the old key, and again once the registry is re-keyed.
+// An issue in another project whose key now carries the renamed project's key
+// is on neither.
+func TestFactoryReadStore_Postgres_JiraFollowsTheRegistryAfterAKeyRename(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+	orgID, _ := seedPgFactoryOrg(t, h)
+	teamID := firstTeamForOrg(t, h, orgID)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	project := seedPgJiraRule(t, h, teamID, "OLD")
+	issue, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, orgID, pgJiraSite, "OLD-1", "10001", dbseed.JiraIssueProject("OLD-1"), "Renamed", "")
+	if err != nil {
+		t.Fatalf("seed OLD-1: %v", err)
+	}
+	keyLies, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, orgID, pgJiraSite, "NEW-9", "10009", dbseed.JiraIssueProject("NEW-9"), "Untracked", "")
+	if err != nil {
+		t.Fatalf("seed NEW-9: %v", err)
+	}
+	now := time.Now().UTC()
+	seedPgEvent(t, h, orgID, issue.ID, domain.EventJiraIssueAssigned, now.Add(-time.Minute))
+	seedPgEvent(t, h, orgID, keyLies.ID, domain.EventJiraIssueAssigned, now.Add(-time.Minute))
+
+	check := func(stage string) {
+		t.Helper()
+		for _, teamIDs := range [][]string{nil, {teamID}} {
+			rows, err := stores.Factory.Entities(ctx, orgID, 100, teamIDs)
+			if err != nil {
+				t.Fatalf("Entities(%v): %v", teamIDs, err)
+			}
+			got := map[string]bool{}
+			for _, r := range rows {
+				got[r.Entity.ID] = true
+			}
+			if !got[issue.ID] {
+				t.Errorf("%s, teams %v: the renamed project's issue is off the belt", stage, teamIDs)
+			}
+			if got[keyLies.ID] {
+				t.Errorf("%s, teams %v: an untracked project's issue keyed NEW rides the belt; the key was read, not the row", stage, teamIDs)
+			}
+		}
+		activity, err := stores.TeamActivity.TeamActivity(ctx, orgID, teamID, now.Add(-time.Hour), now)
+		if err != nil {
+			t.Fatalf("TeamActivity: %v", err)
+		}
+		for _, row := range activity.BySource {
+			if row.Source == "jira" && (row.Events == nil || *row.Events != 1) {
+				t.Errorf("%s: jira events = %v, want the renamed project's one event", stage, row.Events)
+			}
+		}
+	}
+
+	if _, err := stores.Entities.RenameSystem(ctx, orgID, "jira", pgJiraSite, "10001", "NEW-1", ""); err != nil {
+		t.Fatalf("RenameSystem: %v", err)
+	}
+	check("issue renamed, registry still on OLD")
+	if _, err := stores.JiraProjects.RefreshSystem(ctx, orgID, project, "id-OLD", "NEW", ""); err != nil {
+		t.Fatalf("RefreshSystem: %v", err)
+	}
+	check("registry re-keyed to NEW")
 }
 
 // TestFactoryReadStore_Postgres_LinearScopedToTrackedTeam is the Linear

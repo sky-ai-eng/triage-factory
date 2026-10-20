@@ -2031,6 +2031,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 	case "jira":
 		cfg.scope = fmt.Sprintf("Jira issue: %s", task.EntitySourceID)
 		cfg.sources = s.sourceDocsFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindJira)
+		cfg.jiraProject = s.taskJiraProject(ctx, orgID, task)
 	case "linear":
 		cfg.scope = fmt.Sprintf("Linear issue: %s", task.EntitySourceID)
 		cfg.sources = s.sourceDocsFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindLinear)

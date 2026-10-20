@@ -43,10 +43,11 @@ func seedPgSourceTask(t *testing.T, conn *sql.DB, orgID, userID, source, snapsho
 	entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
 	sourceID := "src-" + entityID
 	var kind, scope, eventType string
-	var linearTeamID, repositoryID any
+	var linearTeamID, repositoryID, jiraProjectID any
 	switch source {
 	case "jira":
 		kind, scope, eventType = "issue", "https://jira.example.com", "jira:issue:assigned"
+		jiraProjectID = dbseed.JiraIssueProjectID(t, conn, orgID, scope, sourceID)
 	case "linear":
 		kind, scope, eventType = "issue", "ws-test", "linear:issue:available"
 		linearTeamID = "lt-test"
@@ -56,9 +57,9 @@ func seedPgSourceTask(t *testing.T, conn *sql.DB, orgID, userID, source, snapsho
 		repositoryID = dbseed.GitHubEntityRepository(t, conn, orgID, scope, sourceID)
 	}
 	if _, err := conn.Exec(
-		`INSERT INTO entities (id, org_id, source, source_id, kind, snapshot_json, scope, linear_team_id, repository_id)
-		 VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)`,
-		entityID, orgID, source, sourceID, kind, snapshot, scope, linearTeamID, repositoryID,
+		`INSERT INTO entities (id, org_id, source, source_id, kind, snapshot_json, scope, linear_team_id, repository_id, jira_project_id)
+		 VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10)`,
+		entityID, orgID, source, sourceID, kind, snapshot, scope, linearTeamID, repositoryID, jiraProjectID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

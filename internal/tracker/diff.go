@@ -443,7 +443,12 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, usern
 // comments is every comment made since prev, oldest first, with TF's marked
 // (jiraNewComments). The snapshot holds only a count and the newest comment,
 // so the caller reads them.
-func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStatuses []domain.JiraStatusRef, comments []NewComment) []domain.Event {
+//
+// projects names the registry rows the events carry as jira_project_id and
+// old_jira_project_id (JiraEventProjects). The project key every event shows
+// is the one the read spelled (curr.ProjectKey, and prev.ProjectKey for
+// key_changed's old_project), never one parsed out of an issue key.
+func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, projects JiraEventProjects, doneStatuses []domain.JiraStatusRef, comments []NewComment) []domain.Event {
 	terminal := func(snap domain.JiraSnapshot) bool {
 		return domain.ContainsStatus(doneStatuses, snap.StatusRef())
 	}
@@ -465,7 +470,7 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 		if terminal(curr) {
 			emit(domain.EventJiraIssueCompleted, "", events.JiraIssueCompletedMetadata{
 				Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
-				IssueKey: curr.Key, IssueID: curr.ID, Project: extractProject(curr.Key),
+				IssueKey: curr.Key, IssueID: curr.ID, Project: curr.ProjectKey, JiraProjectID: projects.Current,
 				IssueType: curr.IssueType, FinalStatus: curr.Status,
 			})
 		} else if curr.OpenSubtaskCount > 0 {
@@ -480,14 +485,14 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 			emit(domain.EventJiraIssueAssigned, "", events.JiraIssueAssignedMetadata{
 				Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 				Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
-				IssueKey: curr.Key, IssueID: curr.ID, Project: extractProject(curr.Key),
+				IssueKey: curr.Key, IssueID: curr.ID, Project: curr.ProjectKey, JiraProjectID: projects.Current,
 				IssueType: curr.IssueType, Priority: curr.Priority,
 				Status: curr.Status, Summary: curr.Summary, Labels: curr.Labels,
 			})
 		} else {
 			emit(domain.EventJiraIssueAvailable, "", events.JiraIssueAvailableMetadata{
 				Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
-				IssueKey: curr.Key, IssueID: curr.ID, Project: extractProject(curr.Key),
+				IssueKey: curr.Key, IssueID: curr.ID, Project: curr.ProjectKey, JiraProjectID: projects.Current,
 				IssueType: curr.IssueType, Priority: curr.Priority,
 				Status: curr.Status, Summary: curr.Summary, Labels: curr.Labels,
 			})
@@ -495,13 +500,13 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 		return evts
 	}
 
-	evts = append(evts, jiraKeyChangedEvents(prev, curr, entityID)...)
+	evts = append(evts, jiraKeyChangedEvents(prev, curr, entityID, projects)...)
 
-	project := extractProject(curr.Key)
+	project := curr.ProjectKey
 	if prev.BodyHash != "" && curr.BodyHash != "" && prev.BodyHash != curr.BodyHash {
 		emit(domain.EventJiraIssueBodyUpdated, "", events.JiraIssueBodyUpdatedMetadata{
 			Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
-			IssueKey: curr.Key, IssueID: curr.ID, Project: project, IssueType: curr.IssueType,
+			IssueKey: curr.Key, IssueID: curr.ID, Project: project, JiraProjectID: projects.Current, IssueType: curr.IssueType,
 			Summary: curr.Summary, Labels: curr.Labels,
 			PreviousBodyHash: prev.BodyHash, BodyHash: curr.BodyHash,
 		})
@@ -511,13 +516,13 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 	if !prev.StatusRef().SameStatus(curr.StatusRef()) && curr.Status != "" {
 		emit(domain.EventJiraIssueStatusChanged, curr.Status, events.JiraIssueStatusChangedMetadata{
 			Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
-			IssueKey: curr.Key, IssueID: curr.ID, Project: project, IssueType: curr.IssueType,
+			IssueKey: curr.Key, IssueID: curr.ID, Project: project, JiraProjectID: projects.Current, IssueType: curr.IssueType,
 			OldStatus: prev.Status, NewStatus: curr.Status, Priority: curr.Priority,
 		})
 		if terminal(curr) {
 			emit(domain.EventJiraIssueCompleted, "", events.JiraIssueCompletedMetadata{
 				Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
-				IssueKey: curr.Key, IssueID: curr.ID, Project: project,
+				IssueKey: curr.Key, IssueID: curr.ID, Project: project, JiraProjectID: projects.Current,
 				IssueType: curr.IssueType, FinalStatus: curr.Status,
 			})
 		}
@@ -535,14 +540,14 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 			emit(domain.EventJiraIssueAssigned, "", events.JiraIssueAssignedMetadata{
 				Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 				Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
-				IssueKey: curr.Key, IssueID: curr.ID, Project: project,
+				IssueKey: curr.Key, IssueID: curr.ID, Project: project, JiraProjectID: projects.Current,
 				IssueType: curr.IssueType, Priority: curr.Priority,
 				Status: curr.Status, Summary: curr.Summary, Labels: curr.Labels,
 			})
 		} else {
 			emit(domain.EventJiraIssueAvailable, "", events.JiraIssueAvailableMetadata{
 				Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
-				IssueKey: curr.Key, IssueID: curr.ID, Project: project,
+				IssueKey: curr.Key, IssueID: curr.ID, Project: project, JiraProjectID: projects.Current,
 				IssueType: curr.IssueType, Priority: curr.Priority,
 				Status: curr.Status, Summary: curr.Summary, Labels: curr.Labels,
 			})
@@ -553,17 +558,17 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 	if prev.Priority != curr.Priority && curr.Priority != "" {
 		emit(domain.EventJiraIssuePriorityChanged, curr.Priority, events.JiraIssuePriorityChangedMetadata{
 			Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
-			IssueKey: curr.Key, IssueID: curr.ID, Project: project,
+			IssueKey: curr.Key, IssueID: curr.ID, Project: project, JiraProjectID: projects.Current,
 			OldPriority: prev.Priority, NewPriority: curr.Priority,
 		})
 	}
 
 	addedLabels, removedLabels := labelChanges(prev.Labels, curr.Labels)
 	for _, label := range addedLabels {
-		emit(domain.EventJiraIssueLabelAdded, label, jiraLabelMetadata(curr, label))
+		emit(domain.EventJiraIssueLabelAdded, label, jiraLabelMetadata(curr, projects.Current, label))
 	}
 	for _, label := range removedLabels {
-		emit(domain.EventJiraIssueLabelRemoved, label, jiraLabelMetadata(curr, label))
+		emit(domain.EventJiraIssueLabelRemoved, label, jiraLabelMetadata(curr, projects.Current, label))
 	}
 
 	// New comments: one event for the ones TF did not post, however many,
@@ -572,7 +577,7 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 		emitWithFallback(domain.EventJiraIssueCommented, "", commentedAt(newest, curr.UpdatedAt), events.JiraIssueCommentedMetadata{
 			Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 			Commenter: newest.Author, CommenterAccountID: newest.AuthorID, CommenterAccountIDs: authors,
-			CommentID: newest.ID, IssueKey: curr.Key, IssueID: curr.ID, Project: project,
+			CommentID: newest.ID, IssueKey: curr.Key, IssueID: curr.ID, Project: project, JiraProjectID: projects.Current,
 		}, eid, now, &evts)
 	}
 
@@ -586,7 +591,7 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 		emit(domain.EventJiraIssueBecameAtomic, "", events.JiraIssueBecameAtomicMetadata{
 			Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 			Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
-			IssueKey: curr.Key, IssueID: curr.ID, Project: project,
+			IssueKey: curr.Key, IssueID: curr.ID, Project: project, JiraProjectID: projects.Current,
 			IssueType: curr.IssueType, Priority: curr.Priority,
 			Status: curr.Status, Summary: curr.Summary, Labels: curr.Labels,
 		})
@@ -595,12 +600,23 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 	return evts
 }
 
-// jiraLabelMetadata is the metadata of a label event on curr, for label.
-func jiraLabelMetadata(curr domain.JiraSnapshot, label string) events.JiraIssueLabelMetadata {
+// JiraEventProjects is the registry rows a Jira diff's events name. Current is
+// the jira_projects row of the project a fresh read says the issue is in,
+// which every event carries as jira_project_id. Previous is the row its entity
+// referenced before the read, which key_changed carries as
+// old_jira_project_id: the same row after a project key rename, another after
+// a move.
+type JiraEventProjects struct {
+	Current, Previous string
+}
+
+// jiraLabelMetadata is the metadata of a label event on curr, for label;
+// jiraProjectID is the registry row of curr's project.
+func jiraLabelMetadata(curr domain.JiraSnapshot, jiraProjectID, label string) events.JiraIssueLabelMetadata {
 	return events.JiraIssueLabelMetadata{
 		Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 		Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
-		IssueKey: curr.Key, IssueID: curr.ID, Project: extractProject(curr.Key),
+		IssueKey: curr.Key, IssueID: curr.ID, Project: curr.ProjectKey, JiraProjectID: jiraProjectID,
 		IssueType: curr.IssueType, Priority: curr.Priority,
 		Status: curr.Status, Summary: curr.Summary,
 		LabelName: label, Labels: curr.Labels,
@@ -610,16 +626,16 @@ func jiraLabelMetadata(curr domain.JiraSnapshot, label string) events.JiraIssueL
 // jiraKeyChangedEvents is key_changed for an issue whose key went from prev's
 // to curr's, or nothing when it did not change. Its source time is curr's
 // updated, as for every other Jira transition: a move bumps it.
-func jiraKeyChangedEvents(prev, curr domain.JiraSnapshot, entityID string) []domain.Event {
+func jiraKeyChangedEvents(prev, curr domain.JiraSnapshot, entityID string, projects JiraEventProjects) []domain.Event {
 	if prev.Key == "" || curr.Key == "" || prev.Key == curr.Key {
 		return nil
 	}
 	var evts []domain.Event
 	emitWithFallback(domain.EventJiraIssueKeyChanged, "", curr.UpdatedAt, events.JiraIssueKeyChangedMetadata{
 		Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
-		IssueKey: curr.Key, IssueID: curr.ID, Project: extractProject(curr.Key),
+		IssueKey: curr.Key, IssueID: curr.ID, Project: curr.ProjectKey, JiraProjectID: projects.Current,
 		IssueType: curr.IssueType, Summary: curr.Summary,
-		OldIssueKey: prev.Key, OldProject: extractProject(prev.Key),
+		OldIssueKey: prev.Key, OldProject: prev.ProjectKey, OldJiraProjectID: projects.Previous,
 	}, &entityID, time.Now(), &evts)
 	return evts
 }
@@ -759,14 +775,4 @@ func prevReview(prev, curr map[string]domain.ReviewState, reviewer string) domai
 		return domain.ReviewState{}
 	}
 	return prev[slug]
-}
-
-// extractProject extracts the project key from a Jira issue key (e.g. "ABC" from "ABC-123").
-func extractProject(key string) string {
-	for i, c := range key {
-		if c == '-' {
-			return key[:i]
-		}
-	}
-	return key
 }

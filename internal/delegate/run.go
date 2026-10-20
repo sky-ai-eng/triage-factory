@@ -365,7 +365,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		cfg.appendSysPrompt,
 	)
 	systemPrompt := sdkSystemPrompt(systemBlock, agentBin)
-	taskContext := BuildTaskContext(task, cfg.repoSlug(), metadataJSON, cfg.prSkeleton, artifacts)
+	taskContext := BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton, artifacts)
 
 	// The task context's retention, on the same terms as the native path: the
 	// row carrying these bytes is compacted like any other, and this file is the

@@ -38,7 +38,7 @@ func (r *gateRuntime) TaskOwnRepo(context.Context, string, string) (bool, error)
 	return r.taskRepo, nil
 }
 
-func (r *gateRuntime) Record(_ context.Context, _ *domain.Artifact, act *domain.ExternalAction, _ string) {
+func (r *gateRuntime) Record(_ context.Context, _ *domain.Artifact, act *domain.ExternalAction, _ domain.EntityContainer) {
 	r.denied = append(r.denied, act.Target)
 }
 

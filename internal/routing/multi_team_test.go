@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -226,7 +227,7 @@ func TestHandleEvent_BecameAtomic_Suppressed(t *testing.T) {
 		t.Fatalf("seed team B: %v", err)
 	}
 
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-700", "", "issue", "Cross-team atomic", "https://jira.example.com/browse/SKY-700")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", "SKY-700", "", dbseed.JiraIssueProject("SKY-700"), "Cross-team atomic", "https://jira.example.com/browse/SKY-700")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -443,7 +444,7 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 		t.Fatalf("add agent to team B: %v", err)
 	}
 
-	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-onerun", "", "issue", "One-run issue", "https://example.com/onerun")
+	entity, _, err := stores.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", "SKY-onerun", "", dbseed.JiraIssueProject("SKY-onerun"), "One-run issue", "https://example.com/onerun")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -550,7 +551,7 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 		t.Fatalf("add agent to team B: %v", err)
 	}
 
-	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-attr", "", "issue", "Attr issue", "https://example.com/attr")
+	entity, _, err := stores.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", "SKY-attr", "", dbseed.JiraIssueProject("SKY-attr"), "Attr issue", "https://example.com/attr")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
