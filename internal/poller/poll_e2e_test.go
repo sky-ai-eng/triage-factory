@@ -14,8 +14,10 @@ package poller_test
 // e2e/sso/run.sh reads too, and skips otherwise, so a contributor without one
 // never runs it. A relative ORRERY_DIR is read from the repository root. The
 // test builds Orrery there with cargo (a no-op when nothing changed) and serves
-// the binary it built. Locally, with Orrery checked out beside this
-// repository:
+// the binary it built. CI builds the commit e2e/ORRERY_REF pins, and the test
+// logs a warning when the checkout is elsewhere; moving to a newer Orrery is a
+// pull request here that changes that file. Locally, with Orrery checked out
+// beside this repository:
 //
 //	ORRERY_DIR=../orrery go test ./internal/poller -run TestPollEmitsTrackedEvents
 
@@ -96,11 +98,18 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 	repo.checkout("main")
 	repo.commit("app.txt", "version 2 (main)\n", "bump on main")
 	repo.push("main")
+	// Branched after main's bump, so it does not conflict.
+	repo.branch("draft", "main")
+	repo.commit("draft.txt", "draft\n", "add draft")
+	repo.push("draft")
 
 	pulls := "/api/v3/repos/acme/webapp/pulls"
 	checksPR := w.githubREST(alice, "POST", pulls, map[string]any{"title": "Checks", "head": "checks", "base": "main"}, 201)
 	w.githubREST(alice, "POST", pulls, map[string]any{"title": "Conflict", "head": "conflict", "base": "main"}, 201)
 	reviewPR := w.githubREST(alice, "POST", pulls, map[string]any{"title": "Review", "head": "review", "base": "main"}, 201)
+	draftPR := w.githubREST(alice, "POST", pulls, map[string]any{"title": "Draft", "head": "draft", "base": "main", "draft": true}, 201)
+	labels := "/api/v3/repos/acme/webapp/issues/1/labels"
+	w.githubRESTList(alice, "POST", labels, map[string]any{"labels": []string{"bug"}}, 200)
 
 	checkRuns := "/api/v3/repos/acme/webapp/check-runs"
 	checksHead := sha(checksPR)
@@ -113,7 +122,8 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 
 	p := newPollRig(t, ctx, w, shape)
 
-	// The first sight of each pull request reports what is already on it.
+	// The first sight of each pull request reports what is already on it: its
+	// checks, reviews and conflicts, though not its labels or its draft state.
 	p.cycle(t, ctx, map[string]int{
 		"acme/webapp#1 " + domain.EventGitHubPRCICheckPassed:          1,
 		"acme/webapp#1 " + domain.EventGitHubPRCICheckFailed:          1,
@@ -131,7 +141,11 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 		t.Error("the unchanged cycle's pull request list was not a 304")
 	}
 
-	// Every kind of change the world can make through GitHub's API today.
+	// Every kind of change the world can make through GitHub's API today, a
+	// minute on. Orrery's clock moves only when told to, and a pull request
+	// whose updated_at and head are unchanged is not re-read, so without it a
+	// change that bumps only updated_at (#4's) would go unseen.
+	w.advance(60)
 	w.githubREST(ci, "PATCH", fmt.Sprintf("%s/%v", checkRuns, running["id"]), map[string]any{"status": "completed", "conclusion": "success"}, 200)
 	w.githubREST(bob, "POST", pulls+"/3/reviews", map[string]any{"event": "APPROVE", "body": "thanks"}, 200)
 	w.githubREST(carol, "POST", "/api/v3/repos/acme/webapp/issues/3/comments", map[string]any{"body": "merging after lunch"}, 201)
@@ -140,15 +154,24 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 	repo.commit("checks.txt", "checks, again\n", "another commit")
 	repo.push("checks")
 	w.githubREST(alice, "PATCH", pulls+"/2", map[string]any{"state": "closed"}, 200)
+	w.githubRESTList(alice, "POST", labels, map[string]any{"labels": []string{"needs-review"}}, 200)
+	w.githubRESTList(alice, "DELETE", labels+"/bug", nil, 200)
+	w.githubGraphQL(alice, `mutation($id: ID!) {
+		markPullRequestReadyForReview(input: {pullRequestId: $id}) { pullRequest { isDraft } }
+	}`, map[string]any{"id": draftPR["node_id"]})
 	p.cycle(t, ctx, map[string]int{
-		"acme/webapp#1 " + domain.EventGitHubPRNewCommits:     1,
-		"acme/webapp#2 " + domain.EventGitHubPRClosed:         1,
-		"acme/webapp#3 " + domain.EventGitHubPRCICheckPassed:  1,
-		"acme/webapp#3 " + domain.EventGitHubPRReviewApproved: 1,
-		"acme/webapp#3 " + domain.EventGitHubPRCommented:      1,
-		"acme/webapp#3 " + domain.EventGitHubPRBodyUpdated:    1,
+		"acme/webapp#1 " + domain.EventGitHubPRNewCommits:                   1,
+		"acme/webapp#1 " + domain.EventGitHubPRLabelAdded + " needs-review": 1,
+		"acme/webapp#1 " + domain.EventGitHubPRLabelRemoved + " bug":        1,
+		"acme/webapp#2 " + domain.EventGitHubPRClosed:                       1,
+		"acme/webapp#3 " + domain.EventGitHubPRCICheckPassed:                1,
+		"acme/webapp#3 " + domain.EventGitHubPRReviewApproved:               1,
+		"acme/webapp#3 " + domain.EventGitHubPRCommented:                    1,
+		"acme/webapp#3 " + domain.EventGitHubPRBodyUpdated:                  1,
+		"acme/webapp#4 " + domain.EventGitHubPRReadyForReview:               1,
 	})
 
+	w.advance(60)
 	w.githubREST(alice, "PUT", pulls+"/3/merge", map[string]any{}, 200)
 	p.cycle(t, ctx, map[string]int{
 		"acme/webapp#3 " + domain.EventGitHubPRMerged: 1,
@@ -281,7 +304,8 @@ func newPollRig(t *testing.T, ctx context.Context, w *orreryWorld, shape deploym
 }
 
 // cycle runs one GitHub poll cycle and compares the github:* events it
-// emitted, keyed "<source id> <event type>", with want.
+// emitted, keyed "<source id> <event type>" plus " <dedup key>" when the event
+// has one, with want.
 func (r *pollRig) cycle(t *testing.T, ctx context.Context, want map[string]int) {
 	t.Helper()
 	r.pub.take()
@@ -302,6 +326,9 @@ func (r *pollRig) cycle(t *testing.T, ctx context.Context, want map[string]int) 
 			if err == nil && e != nil {
 				key = e.SourceID + " " + evt.EventType
 			}
+		}
+		if evt.DedupKey != "" {
+			key += " " + evt.DedupKey
 		}
 		got[key]++
 	}
@@ -446,6 +473,7 @@ func buildOrrery(t *testing.T, dir string) string {
 	if _, err := os.Stat(filepath.Join(dir, "Cargo.toml")); err != nil {
 		t.Fatalf("ORRERY_DIR=%s is not an Orrery checkout: %v", dir, err)
 	}
+	warnUnpinnedOrrery(t, dir)
 	cmd := exec.Command("cargo", "build", "--quiet", "-p", "orrery")
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -459,6 +487,25 @@ func buildOrrery(t *testing.T, dir string) string {
 		target = filepath.Join(dir, target)
 	}
 	return filepath.Join(target, "debug", "orrery")
+}
+
+// warnUnpinnedOrrery logs when the checkout at dir is not at the Orrery commit
+// e2e/ORRERY_REF pins, which is the one CI builds. A local run against another
+// commit is allowed; its result just may not match CI's.
+func warnUnpinnedOrrery(t *testing.T, dir string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "e2e", "ORRERY_REF"))
+	if err != nil {
+		t.Fatalf("read the pinned Orrery commit: %v", err)
+	}
+	pinned := strings.TrimSpace(string(raw))
+	head := "unknown"
+	if out, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output(); err == nil {
+		head = strings.TrimSpace(string(out))
+	}
+	if head != pinned {
+		t.Logf("warning: %s is at %s, not the pinned Orrery commit %s (e2e/ORRERY_REF)", dir, head, pinned)
+	}
 }
 
 // repoRoot is the directory holding this module's go.mod. go test runs in the
@@ -590,7 +637,50 @@ func (w *orreryWorld) githubREST(token, method, path string, body map[string]any
 	return w.call(token, method, path, body, want)
 }
 
+// githubRESTList is githubREST for a call GitHub answers with a JSON array,
+// such as the label writes, which answer with the issue's labels.
+func (w *orreryWorld) githubRESTList(token, method, path string, body map[string]any, want int) []any {
+	w.t.Helper()
+	got := w.send(token, method, path, body, want)
+	var out []any
+	if err := json.Unmarshal(got, &out); err != nil {
+		w.t.Fatalf("%s %s: response is not a JSON array: %v: %s", method, path, err, got)
+	}
+	return out
+}
+
+// githubGraphQL runs a GraphQL operation as the actor holding token and
+// returns its data. GraphQL reports a failed operation in a 200, so any entry
+// in errors fails the test.
+func (w *orreryWorld) githubGraphQL(token, query string, variables map[string]any) map[string]any {
+	w.t.Helper()
+	out := w.call(token, "POST", "/api/graphql", map[string]any{"query": query, "variables": variables}, http.StatusOK)
+	if errs, ok := out["errors"].([]any); ok && len(errs) > 0 {
+		w.t.Fatalf("graphql: %v", errs)
+	}
+	data, ok := out["data"].(map[string]any)
+	if !ok {
+		w.t.Fatalf("graphql: no data in the response: %v", out)
+	}
+	return data
+}
+
 func (w *orreryWorld) call(token, method, path string, body map[string]any, want int) map[string]any {
+	w.t.Helper()
+	got := w.send(token, method, path, body, want)
+	// Every call this test makes through here answers with a JSON object;
+	// anything else is a failure here rather than an empty map the caller
+	// reads as absent fields.
+	out := map[string]any{}
+	if err := json.Unmarshal(got, &out); err != nil {
+		w.t.Fatalf("%s %s: response is not a JSON object: %v: %s", method, path, err, got)
+	}
+	return out
+}
+
+// send makes the request and returns the response body, failing the test
+// unless the status is want.
+func (w *orreryWorld) send(token, method, path string, body map[string]any, want int) []byte {
 	w.t.Helper()
 	var reqBody io.Reader
 	if body != nil {
@@ -622,13 +712,13 @@ func (w *orreryWorld) call(token, method, path string, body map[string]any, want
 	if resp.StatusCode != want {
 		w.t.Fatalf("%s %s: status %d, want %d: %s", method, path, resp.StatusCode, want, got)
 	}
-	// Every call this test makes answers with a JSON object; anything else is
-	// a failure here rather than an empty map the caller reads as absent fields.
-	out := map[string]any{}
-	if err := json.Unmarshal(got, &out); err != nil {
-		w.t.Fatalf("%s %s: response is not a JSON object: %v: %s", method, path, err, got)
-	}
-	return out
+	return got
+}
+
+// advance moves the world's clock forward by seconds.
+func (w *orreryWorld) advance(seconds int) {
+	w.t.Helper()
+	w.call("", "POST", "/_orrery/clock/advance", map[string]any{"seconds": seconds}, http.StatusOK)
 }
 
 func (w *orreryWorld) clock() int64 {

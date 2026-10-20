@@ -31,6 +31,14 @@ if [ ! -f "$ORRERY_DIR/Cargo.toml" ]; then
   exit 1
 fi
 
+# CI builds the Orrery commit e2e/ORRERY_REF names. A local run uses whatever
+# the checkout holds, so say when that differs.
+pinned=$(tr -d '[:space:]' <"$ROOT/e2e/ORRERY_REF")
+checked_out=$(git -C "$ORRERY_DIR" rev-parse HEAD 2>/dev/null || echo unknown)
+if [ "$checked_out" != "$pinned" ]; then
+  echo "warning: $ORRERY_DIR is at $checked_out, not the pinned Orrery commit $pinned (e2e/ORRERY_REF)" >&2
+fi
+
 # 1. Every port the stack and the test servers bind must be free: a stale
 # process on one of them would answer in place of the one under test.
 busy=()
