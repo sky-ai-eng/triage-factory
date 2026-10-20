@@ -207,8 +207,13 @@ func NewSchema[Meta any, Pred interface{ Matches(Meta) bool }](eventType string,
 			// No predicate = match-all (task_rules with NULL scope_predicate_json).
 			return true, nil
 		}
+		// Strict, like ValidatePredicateJSON: a stored predicate naming a
+		// field the type does not have fails closed. Decoded leniently, the
+		// unknown key is dropped and the rule silently widens to match-all.
 		var pred Pred
-		if err := json.Unmarshal([]byte(predJSON), &pred); err != nil {
+		dec := json.NewDecoder(strings.NewReader(predJSON))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&pred); err != nil {
 			return false, fmt.Errorf("decode %s predicate: %w", eventType, err)
 		}
 		return pred.Matches(meta), nil

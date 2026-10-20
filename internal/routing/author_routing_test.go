@@ -52,7 +52,7 @@ func seedSystemRule(t *testing.T, database *sql.DB, teamID, eventType string) {
 			(id, org_id, team_id, creator_user_id, kind, event_type,
 			 system_slug, scope_predicate_json, enabled, source, name, default_priority, sort_order,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, NULL, 'rule', ?, ?, '{"author_in":[]}', 1, 'system', 'sys rule', 0.75, 0, ?, ?)
+		VALUES (?, ?, ?, NULL, 'rule', ?, ?, NULL, 1, 'system', 'sys rule', 0.75, 0, ?, ?)
 	`, "sys-"+key, runmode.LocalDefaultOrgID, teamID,
 		eventType, "system-rule-"+key, time.Now(), time.Now()); err != nil {
 		t.Fatalf("seed system rule (%s) for team %s: %v", eventType, teamID, err)

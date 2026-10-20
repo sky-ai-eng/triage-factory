@@ -117,11 +117,11 @@ func openedSince(snap domain.PRSnapshot, lastListed time.Time) bool {
 
 // openedPRMentions returns a mentioned event for each identity TF knows that
 // the body of a newly opened pull request (openedSince) mentions.
-func openedPRMentions(entityID string, snap domain.PRSnapshot, resolver ReviewerResolver) []domain.Event {
+func openedPRMentions(entityID, repositoryID string, snap domain.PRSnapshot, resolver ReviewerResolver) []domain.Event {
 	var evts []domain.Event
 	now := time.Now()
 	for _, m := range prMentions(domain.PRSnapshot{BodyMentions: []string{}}, snap, nil, nil) {
-		appendMentioned(&evts, &entityID, now, snap, m, resolver)
+		appendMentioned(&evts, &entityID, repositoryID, now, snap, m, resolver)
 	}
 	return evts
 }
@@ -129,7 +129,7 @@ func openedPRMentions(entityID string, snap domain.PRSnapshot, resolver Reviewer
 // appendMentioned appends the mentioned event for m on the pull request curr,
 // when resolver knows the identity m names. Its time is m's, or curr's
 // updatedAt when m's does not parse.
-func appendMentioned(evts *[]domain.Event, entityID *string, now time.Time, curr domain.PRSnapshot, m prMention, resolver ReviewerResolver) {
+func appendMentioned(evts *[]domain.Event, entityID *string, repositoryID string, now time.Time, curr domain.PRSnapshot, m prMention, resolver ReviewerResolver) {
 	login, team, known := resolveReviewer(resolver, m.handle)
 	if !known {
 		return
@@ -141,7 +141,7 @@ func appendMentioned(evts *[]domain.Event, entityID *string, now time.Time, curr
 	emitWithFallback(domain.EventGitHubPRMentioned, reviewerDedupKey(m.handle), at, events.GitHubPRMentionedMetadata{
 		Author: curr.Author, Commenter: m.commenter, CommentID: m.commentID,
 		MentionedLogin: login, MentionedTeam: team, MentionSource: m.source,
-		Repo: curr.Repo, PRNumber: curr.Number,
+		Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 		IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 	}, entityID, now, evts)
 }

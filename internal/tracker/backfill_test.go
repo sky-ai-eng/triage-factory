@@ -32,7 +32,7 @@ func TestBackfillReviewRequestedEvent_Shape(t *testing.T) {
 		CreatedAt: prCreatedAt,
 	}
 
-	got, err := backfillReviewRequestedEvent("entity-xyz", snap, "bob", "")
+	got, err := backfillReviewRequestedEvent("entity-xyz", testRepositoryID, snap, "bob", "")
 	if err != nil {
 		t.Fatalf("backfillReviewRequestedEvent: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestBackfillReviewRequestedEvent_Shape(t *testing.T) {
 // identity shape: a requested TEAM keys the event by the team, so a team
 // request and a personal one on the same PR are two tasks rather than one.
 func TestBackfillReviewRequestedEvent_TeamReviewerKeysOnTheTeam(t *testing.T) {
-	got, err := backfillReviewRequestedEvent("entity-team", domain.PRSnapshot{Repo: "owner/repo", Number: 7, Author: "alice"}, "", "org/reviewers")
+	got, err := backfillReviewRequestedEvent("entity-team", testRepositoryID, domain.PRSnapshot{Repo: "owner/repo", Number: 7, Author: "alice"}, "", "org/reviewers")
 	if err != nil {
 		t.Fatalf("backfillReviewRequestedEvent: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestBackfillReviewRequestedEvent_TeamReviewerKeysOnTheTeam(t *testing.T) {
 // OccurredAt is zero, so propagating zero is the right signal — the
 // router doesn't need a synthesized "now" from the tracker.
 func TestBackfillReviewRequestedEvent_MissingCreatedAt_LeavesOccurredAtZero(t *testing.T) {
-	got, err := backfillReviewRequestedEvent("entity-zero", domain.PRSnapshot{
+	got, err := backfillReviewRequestedEvent("entity-zero", testRepositoryID, domain.PRSnapshot{
 		Repo:   "owner/repo",
 		Number: 99,
 		Author: "alice",

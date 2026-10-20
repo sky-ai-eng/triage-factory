@@ -12,7 +12,7 @@
 // half-saved team), while the per-slice savers let a surface that only touched
 // one slice (e.g. Settings' change-aware save) write just that one.
 
-import { apiFetch, apiJSON, httpErrorMessage } from '../../lib/apiClient'
+import { apiFetch, apiJSON, apiListAll, httpErrorMessage } from '../../lib/apiClient'
 import type { JiraStatusRef, JiraStatusRuleValue } from '../../components/JiraStatusRule'
 import type { GitHubTeamCandidate } from '../../lib/githubTeams'
 import type { LinearStateOption, LinearStateRef } from '../../lib/linearTeams'
@@ -715,6 +715,28 @@ export async function saveTeamGitHubGroups(
 // slack namespace).
 const slackChannelsPath = (teamId: string) =>
   `/api/slack/teams/${encodeURIComponent(teamId)}/channels`
+
+// TrackedRepository is a row of POST /api/repos/list as the repo_in picker
+// reads it: the registry id a filter stores, and the owner/repo it is shown as.
+export interface TrackedRepository {
+  id: string
+  slug: string
+}
+
+// fetchTeamTrackedRepos returns the repositories teamId tracks, with their
+// registry ids, or null on failure. Same null-vs-empty contract as
+// fetchTeamRepos: a failed load is not "tracks nothing."
+export async function fetchTeamTrackedRepos(teamId: string): Promise<TrackedRepository[] | null> {
+  return apiListAll<TrackedRepository>('/api/repos/list', { team_id: teamId }).catch(() => null)
+}
+
+// fetchRepositorySlug names a registry row by id, for a stored repo_in entry
+// the team no longer tracks; null when the caller cannot read the row.
+export async function fetchRepositorySlug(id: string): Promise<string | null> {
+  return apiJSON<TrackedRepository>(`/api/repos/${encodeURIComponent(id)}`)
+    .then((row) => row.slug)
+    .catch(() => null)
+}
 
 // fetchTeamSlackChannels returns the merged channel list (tracked + sighting
 // registry + live Slack candidates, deduped by channel_id) for teamId, or

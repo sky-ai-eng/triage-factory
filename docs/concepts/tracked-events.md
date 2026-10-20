@@ -163,7 +163,7 @@ comment or review: a review's id for `review`, and both empty for `body`. The
 event also carries the PR's `author`, `repo`, `pr_number`, `is_draft`,
 `head_sha` and `labels`. Predicates can filter on `mentioned_login`,
 `mentioned_team`, `mention_source`, `commenter_in`, `commenter`, `author_in`,
-`author`, `repo`, `is_draft` and `has_label`; a body mention has no commenter,
+`author`, `repo_in`, `is_draft` and `has_label`; a body mention has no commenter,
 so no `commenter_in` list matches it. The event's time is the comment's
 creation or the review's submission. The body records no time for an edit, so a
 body mention takes the PR's `updatedAt`.
@@ -290,7 +290,7 @@ comment an integration posted names the integration as `commenter` and has no
 user id, so no `commenter_in` list matches it. On GitHub the commenter is a
 login, `<slug>[bot]` for a bot, whose comments emit like anyone's; the GitHub
 event also carries the PR's `author`, `repo`, `pr_number`, `is_draft`,
-`head_sha` and `labels`, and predicates can filter it on `author_in`, `repo`,
+`head_sha` and `labels`, and predicates can filter it on `author_in`, `repo_in`,
 `is_draft` and `has_label`. The event's time is the newest comment's.
 
 GitHub's event covers the PR's conversation only. A comment in a review thread
@@ -743,6 +743,8 @@ The tracker stores these fields for each PR and diffs them between cycles:
 - `comment_marker` — the newest conversation comment TF has read, `{id, created_at}`; see [Comments](#comments)
 
 `author` and each review's `author` are logins as GitHub's REST API spells them: a bot is `<slug>[bot]` (`dependabot[bot]`), the form event metadata carries as `author` and `reviewer` and the form a handler predicate such as `author_in` must use. GraphQL returns a bot's login without the suffix; the snapshot builder adds it.
+
+Every GitHub event's metadata names its repository twice: `repo`, the `owner/name` it had when the event fired, and `repository_id`, the repository's registry row, which a rename does not move. A handler predicate scopes to repositories with `repo_in`, which names them by registry id (the `id` field of `POST /api/repos/list` with `team_id`), not by `owner/name`. A team's handlers only ever see events from repositories the team tracks, so an empty `repo_in` matches every one of them, and each entry must be a repository the handler's team tracks. Creating, editing or promoting a handler refuses any other entry, an `owner/name` included, with `422 INVALID_FIELD` on `scope_predicate`. An edit is checked only for the entries it adds, so a repository the team has since stopped tracking never blocks an edit that leaves it in place.
 
 ### Jira Issue Snapshot
 

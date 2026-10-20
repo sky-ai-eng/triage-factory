@@ -439,14 +439,42 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			{"team-b", teamB, []string{"a/two", "b/three"}},
 			{"team-idle", idle, []string{}},
 		} {
-			got, err := s.ListTrackedByTeamSystem(ctx, orgID, c.teamID, TestGitHubHost)
+			got, total, err := s.ListTrackedByTeamSystem(ctx, orgID, c.teamID, TestGitHubHost, db.Unwindowed)
 			if err != nil {
 				t.Fatalf("ListTrackedByTeamSystem(%s): %v", c.name, err)
 			}
-			if got == nil || !equalStringSlice(slugs(got), c.want) {
-				t.Errorf("ListTrackedByTeamSystem(%s) = %v, want %v", c.name, got, c.want)
+			if got == nil || !equalStringSlice(slugs(got), c.want) || total != len(c.want) {
+				t.Errorf("ListTrackedByTeamSystem(%s) = %v (total %d), want %v", c.name, got, total, c.want)
+			}
+			// Both pools are the same connection here, so the app-pool read
+			// answers as the system one does.
+			app, appTotal, err := s.ListTrackedByTeam(ctx, orgID, c.teamID, TestGitHubHost, db.Unwindowed)
+			if err != nil {
+				t.Fatalf("ListTrackedByTeam(%s): %v", c.name, err)
+			}
+			if app == nil || !equalStringSlice(slugs(app), c.want) || appTotal != len(c.want) {
+				t.Errorf("ListTrackedByTeam(%s) = %v (total %d), want %v", c.name, app, appTotal, c.want)
 			}
 		}
+
+		// The team read pages like every list: a window of one, the full
+		// total on each page, and a count-only read.
+		page1, total1, err := s.ListTrackedByTeam(ctx, orgID, teamB, TestGitHubHost, db.ListOpts{Limit: 1})
+		if err != nil {
+			t.Fatalf("ListTrackedByTeam page 1: %v", err)
+		}
+		page2, total2, err := s.ListTrackedByTeam(ctx, orgID, teamB, TestGitHubHost, db.ListOpts{Limit: 1, Offset: 1})
+		if err != nil {
+			t.Fatalf("ListTrackedByTeam page 2: %v", err)
+		}
+		if walked := append(slugs(page1), slugs(page2)...); !equalStringSlice(walked, []string{"a/two", "b/three"}) || total1 != 2 || total2 != 2 {
+			t.Errorf("ListTrackedByTeam paged walk = %v (totals %d, %d), want [a/two b/three] with total 2 on both", walked, total1, total2)
+		}
+		teamCount, teamCountTotal, err := s.ListTrackedByTeam(ctx, orgID, teamB, TestGitHubHost, db.ListOpts{CountOnly: true})
+		if err != nil {
+			t.Fatalf("ListTrackedByTeam count-only: %v", err)
+		}
+		AssertCountOnlyList(t, "repositories.ListTrackedByTeam", len(teamCount), teamCountTotal, 2)
 
 		// The non-admin discovery read never surfaces an untracked row either.
 		// Both pools are the same connection here, so in Postgres "the
@@ -1083,7 +1111,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			if got := listed(trackedRows, c.host); !equalStringSlice(got, c.want) || trackedTotal != len(c.want) {
 				t.Errorf("ListTrackedSystem(%s) = %v (total %d), want %v", c.host, got, trackedTotal, c.want)
 			}
-			teamRows, err := s.ListTrackedByTeamSystem(ctx, orgID, seed.TeamID, c.host)
+			teamRows, _, err := s.ListTrackedByTeamSystem(ctx, orgID, seed.TeamID, c.host, db.Unwindowed)
 			if err != nil {
 				t.Fatalf("ListTrackedByTeamSystem(%s): %v", c.host, err)
 			}
@@ -1167,8 +1195,10 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		check("ListTrackedNamesSystem", err)
 		_, _, err = s.ListTrackedSystem(ctx, orgID, "", db.Unwindowed)
 		check("ListTrackedSystem", err)
-		_, err = s.ListTrackedByTeamSystem(ctx, orgID, seed.TeamID, "")
+		_, _, err = s.ListTrackedByTeamSystem(ctx, orgID, seed.TeamID, "", db.Unwindowed)
 		check("ListTrackedByTeamSystem", err)
+		_, _, err = s.ListTrackedByTeam(ctx, orgID, seed.TeamID, "", db.Unwindowed)
+		check("ListTrackedByTeam", err)
 		_, err = s.ListIdentitiesSystem(ctx, orgID, "")
 		check("ListIdentitiesSystem", err)
 		check("ReplaceForTeam", seed.Tracking.ReplaceForTeam(ctx, orgID, seed.TeamID, "", []domain.TeamGitHubRepo{{Owner: "octo", Repo: "other"}}))

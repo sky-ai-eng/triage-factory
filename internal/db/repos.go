@@ -343,13 +343,23 @@ type RepositoryStore interface {
 	// request handler calls this only behind an org-admin gate.
 	ListTrackedSystem(ctx context.Context, orgID, host string, opts ListOpts) ([]domain.Repository, int, error)
 
-	// ListTrackedByTeamSystem returns the repository rows on host that teamID
-	// tracks, ordered by (owner, repo, id). It is the listing half of the gate
-	// TeamGitHubReposStore.TracksRepoSystem applies: a delegated run is offered
-	// the repositories its team tracks, which are the ones `workspace add`
-	// will materialize and the git proxy will push to. Admin pool in Postgres:
-	// the caller is a run's agenthost, which has no JWT claims.
-	ListTrackedByTeamSystem(ctx context.Context, orgID, teamID, host string) ([]domain.Repository, error)
+	// ListTrackedByTeamSystem returns one page of the repository rows on host
+	// that teamID tracks, ordered by (owner, repo, id), plus the unpaged total.
+	// It is the listing half of the gate TeamGitHubReposStore.TracksRepoSystem
+	// applies: a delegated run is offered the repositories its team tracks,
+	// which are the ones `workspace add` will materialize and the git proxy
+	// will push to. Admin pool in Postgres, for callers with no JWT claims (a
+	// run's agenthost) and for an org admin reading a team they are not on,
+	// which the app pool's team_github_repos_select policy would hide.
+	ListTrackedByTeamSystem(ctx context.Context, orgID, teamID, host string, opts ListOpts) ([]domain.Repository, int, error)
+
+	// ListTrackedByTeam is ListTrackedByTeamSystem on the app pool. In
+	// Postgres team_github_repos_select admits only the caller's own teams'
+	// tracking rows, so for a team the caller is not on it returns nothing.
+	// It is the read for a member acting on their team: the repos list's
+	// team filter and an event handler's repo_in check, which only a team
+	// member can write. SQLite (N=1) answers as the system read does.
+	ListTrackedByTeam(ctx context.Context, orgID, teamID, host string, opts ListOpts) ([]domain.Repository, int, error)
 
 	// FindOrCreateByRefSystem returns the row the provider calls
 	// ref.Owner/ref.Repo on ref.Host, creating it when nothing answers to the

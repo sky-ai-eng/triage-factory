@@ -108,7 +108,7 @@ func TestDiffPRSnapshots_Commented(t *testing.T) {
 			prev := basePRSnapshot()
 			curr := basePRSnapshot()
 			curr.IsDraft, curr.Labels = true, []string{"needs-reply"}
-			evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil, nil, tc.comments)
+			evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testUser, nil, nil, tc.comments)
 			evt := findEvent(evts, domain.EventGitHubPRCommented)
 			if tc.wantID == 0 {
 				if evt != nil {
@@ -150,7 +150,7 @@ func TestDiffPRSnapshots_Commented(t *testing.T) {
 // comments it carries.
 func TestDiffPRSnapshots_CommentedNotOnFirstDiscovery(t *testing.T) {
 	comments := []NewComment{{ID: "1", Author: "alice", AuthorID: "alice", CreatedAt: "2026-10-01T09:00:00Z"}}
-	if evt := findEvent(DiffPRSnapshots(domain.PRSnapshot{}, basePRSnapshot(), testEntityID, testUser, nil, nil, comments), domain.EventGitHubPRCommented); evt != nil {
+	if evt := findEvent(DiffPRSnapshots(domain.PRSnapshot{}, basePRSnapshot(), testEntityID, testRepositoryID, testUser, nil, nil, comments), domain.EventGitHubPRCommented); evt != nil {
 		t.Errorf("first discovery emitted commented: %s", evt.MetadataJSON)
 	}
 }

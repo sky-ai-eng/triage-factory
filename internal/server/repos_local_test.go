@@ -275,6 +275,23 @@ func TestHandleRepositories_LocalModeLeavesOutUntrackedRows(t *testing.T) {
 	}
 }
 
+// TestHandleRepositories_TeamFilter pins team_id: it narrows the list to the
+// repositories that team tracks, the set a repo_in filter picks from, and a
+// team_id that is not a team id is refused rather than ignored.
+func TestHandleRepositories_TeamFilter(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	apiID := seedConfiguredRepo(t, s, "acme", "api")
+
+	page := decodeList[repoJSON](t, doJSON(t, s, http.MethodPost, "/api/repos/list", map[string]any{"team_id": runmode.LocalDefaultTeamID}))
+	if len(page.Items) != 1 || page.Items[0].ID != apiID || page.Total() != 1 {
+		t.Errorf("team list = %v (total %d), want only acme/api by its registry id", listedRepoSlugs(page), page.Total())
+	}
+	if rec := doJSON(t, s, http.MethodPost, "/api/repos/list", map[string]any{"team_id": "not-a-team"}); rec.Code != http.StatusBadRequest {
+		t.Errorf("malformed team_id = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestRepoRoutes_NoGitHubURL pins what the repository routes answer for an org
 // with no GitHub URL, which has no host and so no repository on one. The reads
 // answer empty or 404, and a write that has to name a host is refused as a

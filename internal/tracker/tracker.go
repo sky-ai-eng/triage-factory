@@ -394,7 +394,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			// identities its body mentions were mentioned just now, so they
 			// emit. Any other pull request's body is a baseline.
 			if !terminal && openedSince(snap, lastListed[snap.Repo]) {
-				backfilled = append(backfilled, openedPRMentions(entity.ID, snap, resolver)...)
+				backfilled = append(backfilled, openedPRMentions(entity.ID, entity.RepositoryID, snap, resolver)...)
 			}
 			if !terminal && snap.Author != username {
 				for _, reviewer := range snap.ReviewRequests {
@@ -402,7 +402,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 					if !known {
 						continue
 					}
-					evt, err := backfillReviewRequestedEvent(entity.ID, snap, login, team)
+					evt, err := backfillReviewRequestedEvent(entity.ID, entity.RepositoryID, snap, login, team)
 					if err != nil {
 						trackerLog.Error("build backfill review_requested failed", "source_id", sid, "reviewer", reviewer, "error", err)
 						continue
@@ -626,6 +626,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 					meta, _ := json.Marshal(events.GitHubPRReviewRequestRemovedMetadata{
 						Author:         snap.Author,
 						Repo:           snap.Repo,
+						RepositoryID:   e.RepositoryID,
 						PRNumber:       snap.Number,
 						IsDraft:        snap.IsDraft,
 						HeadSHA:        snap.HeadSHA,
@@ -792,7 +793,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		}
 
 		// Diff against previous snapshot.
-		events := DiffPRSnapshots(item.snap, newSnap, item.entity.ID, username, resolver, newReviews[item.nodeID], newComments[item.nodeID])
+		events := DiffPRSnapshots(item.snap, newSnap, item.entity.ID, item.entity.RepositoryID, username, resolver, newReviews[item.nodeID], newComments[item.nodeID])
 
 		// The close obligation: this entity is active (Phase 2 lists only
 		// active rows) and its snapshot was ALREADY terminal last cycle, so
@@ -1346,7 +1347,7 @@ func splitOwnerRepo(s string) (owner, repo string) {
 // requested identity (login or "org/slug" team) plus the PR author on the
 // metadata, and keys the event by that identity, so the router routes the
 // per-reviewer task and the predicate matcher can do its work.
-func backfillReviewRequestedEvent(entityID string, snap domain.PRSnapshot, requestedLogin, requestedTeam string) (domain.Event, error) {
+func backfillReviewRequestedEvent(entityID, repositoryID string, snap domain.PRSnapshot, requestedLogin, requestedTeam string) (domain.Event, error) {
 	reviewer := requestedLogin
 	if reviewer == "" {
 		reviewer = requestedTeam
@@ -1354,6 +1355,7 @@ func backfillReviewRequestedEvent(entityID string, snap domain.PRSnapshot, reque
 	meta := events.GitHubPRReviewRequestedMetadata{
 		Author:         snap.Author,
 		Repo:           snap.Repo,
+		RepositoryID:   repositoryID,
 		PRNumber:       snap.Number,
 		IsDraft:        snap.IsDraft,
 		HeadSHA:        snap.HeadSHA,

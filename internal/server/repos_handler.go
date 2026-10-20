@@ -505,11 +505,16 @@ func repoToJSON(row domain.Repository, canEdit bool) repoJSON {
 	return out
 }
 
-// repoListRequest is the body of POST /api/repos/list. The registry read has
-// no filters of its own — which rows a caller sees is decided by their role,
-// not by the body.
+// repoListRequest is the body of POST /api/repos/list. Which rows a caller may
+// see is decided by their role; TeamID only narrows that to one team's tracked
+// repositories, the set a team's event-handler repo_in filter picks from.
 type repoListRequest struct {
 	httpx.PageRequest
+	TeamID string `json:"team_id"`
+}
+
+type repoListFilterKey struct {
+	TeamID string `json:"team_id"`
 }
 
 // handleRepositories returns the tracked repository rows from the DB. Org
@@ -520,6 +525,10 @@ type repoListRequest struct {
 // branch. Neither branch lists a registry row no team tracks: the registry
 // keeps it for the references that name it, and an admin's single-row reads
 // still answer for it by id.
+//
+// team_id narrows either branch to the repositories that team tracks. An admin
+// reads any team's; a member's read is RLS-scoped, so a team they are not on
+// lists nothing, as the tasks list's team filter does.
 //
 // POST /api/repos/list
 func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
@@ -534,7 +543,8 @@ func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var v httpx.Validation
-	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	teamIDFilterField(&v, req.TeamID)
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(repoListFilterKey{TeamID: req.TeamID}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -566,7 +576,11 @@ func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 		// team_github_repos_select policy hides the tracking rows of teams the
 		// admin is not on, which would narrow "tracked by a team" to the
 		// admin's own teams.
-		repos, total, err = s.allStores.Repos.ListTrackedSystem(r.Context(), orgID, host, opts)
+		if req.TeamID != "" {
+			repos, total, err = s.allStores.Repos.ListTrackedByTeamSystem(r.Context(), orgID, req.TeamID, host, opts)
+		} else {
+			repos, total, err = s.allStores.Repos.ListTrackedSystem(r.Context(), orgID, host, opts)
+		}
 		if err != nil {
 			internalError(w, "repos", err)
 			return
@@ -577,7 +591,11 @@ func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		repos, total, e = tx.Repos.ListTeamScoped(r.Context(), orgID, host, opts)
+		if req.TeamID != "" {
+			repos, total, e = tx.Repos.ListTrackedByTeam(r.Context(), orgID, req.TeamID, host, opts)
+		} else {
+			repos, total, e = tx.Repos.ListTeamScoped(r.Context(), orgID, host, opts)
+		}
 		if e != nil {
 			return e
 		}

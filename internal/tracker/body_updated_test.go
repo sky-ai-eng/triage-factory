@@ -36,7 +36,7 @@ func TestBodyUpdatedDiff(t *testing.T) {
 			jiraPrev := domain.JiraSnapshot{Key: "PROJ-1", BodyHash: tc.prev}
 			jiraCurr := domain.JiraSnapshot{Key: "PROJ-1", BodyHash: tc.curr, UpdatedAt: updated}
 			for _, evt := range []*domain.Event{
-				findEvent(DiffPRSnapshots(ghPrev, ghCurr, testEntityID, testUser, nil, nil, nil), domain.EventGitHubPRBodyUpdated),
+				findEvent(DiffPRSnapshots(ghPrev, ghCurr, testEntityID, testRepositoryID, testUser, nil, nil, nil), domain.EventGitHubPRBodyUpdated),
 				findEvent(DiffJiraSnapshots(jiraPrev, jiraCurr, testEntityID, nil, nil), domain.EventJiraIssueBodyUpdated),
 			} {
 				if (evt != nil) != tc.want {
@@ -55,7 +55,7 @@ func TestBodyUpdatedDiff(t *testing.T) {
 			}
 		})
 	}
-	if evt := findEvent(DiffPRSnapshots(domain.PRSnapshot{}, domain.PRSnapshot{Number: 1, BodyHash: "first"}, testEntityID, testUser, nil, nil, nil), domain.EventGitHubPRBodyUpdated); evt != nil {
+	if evt := findEvent(DiffPRSnapshots(domain.PRSnapshot{}, domain.PRSnapshot{Number: 1, BodyHash: "first"}, testEntityID, testRepositoryID, testUser, nil, nil, nil), domain.EventGitHubPRBodyUpdated); evt != nil {
 		t.Fatal("first discovery emitted a body update")
 	}
 	if evt := findEvent(DiffJiraSnapshots(domain.JiraSnapshot{}, domain.JiraSnapshot{Key: "PROJ-1", BodyHash: "first"}, testEntityID, nil, nil), domain.EventJiraIssueBodyUpdated); evt != nil {
