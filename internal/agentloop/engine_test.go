@@ -187,6 +187,9 @@ func TestRun_WorkspaceRebuiltNoticeIsProvenanceDriven(t *testing.T) {
 		if !strings.Contains(n.Content, "uncommitted and untracked files") {
 			t.Errorf("a snapshot carries the uncaptured-by-git work, and the agent needs to know it is there: %q", n.Content)
 		}
+		if !strings.Contains(n.Content, "Gitignored files") {
+			t.Errorf("a snapshot does not carry gitignored files, and an agent told otherwise builds against missing dependencies: %q", n.Content)
+		}
 		if strings.Contains(n.Content, "different executor") {
 			t.Errorf("a rebuild on the same executor must not claim the run moved: %q", n.Content)
 		}
