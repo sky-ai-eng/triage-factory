@@ -384,7 +384,9 @@ declared and matched, never branched on:
   Otherwise a conversation whose first claim landed on a VM would come to rely
   on root, then lose it when a later claim resumed on gVisor. With the grant
   tied to the requirement, every claim of a conversation gives the agent the
-  same environment, and the eligibility term below makes sure the backend can.
+  same environment, and the eligibility term below makes sure the backend can,
+  until a person moves the conversation to another profile (sandbox-fleet
+  §6).
   `container_runtime` implies `root` inside the guest, because a user who can
   drive the container runtime is root there anyway. `memory_checkpoint` is
   invisible to the agent: it is a cache the backend uses when it parks a jail,
@@ -397,15 +399,23 @@ declared and matched, never branched on:
   got is an execution manifest on the claim, next to
   `claims.source_manifest`: the backend and the capabilities granted. It is
   per claim because one conversation's claims can land on different backends
-  (§8), and the `instances` row holds only the current boot's values.
+  (§8) or run under different profile copies after a move, and the
+  `instances` row holds only the current boot's values.
 - **Placement matches them.** A run's requirements become an eligibility term
   on the claim, the layer horizontal-scaling §6.4 already defines
   ("eligibility is a constraint"): an aged run never spills to an executor
   that cannot run it, the enqueue-time stamp ranks only eligible executors,
   and a run no live executor can serve fails fast with a `failure_kind`.
   Mixed fleets then work without branching code.
-- **The agent learns from `<run_context>`.** The execution manifest is
-  rendered as one line per granted capability. The `agentprompt` blocks stay
+- **The agent learns from `<run_context>`, then from the conversation.**
+  `<run_context>` is composed once, by the claim that launches the
+  conversation, and every later claim sends the same bytes
+  (`conversations.system_block`). It renders that claim's execution manifest
+  as one line per granted capability. A later change never edits it: after a
+  move to another profile, the next claim injects a message into the
+  conversation naming the capabilities gained and lost, as the
+  workspace-restored notice is injected (`injection:executor-changed`,
+  `internal/agentloop/repair.go`). The `agentprompt` blocks stay
   byte-identical across backends.
 
 None of §7 is built in step 1: nothing consumes a capability yet, and the
@@ -431,7 +441,17 @@ directory is a gitignored path in a checkout. Capturing service volumes is not
 designed. It would need a capture format of its own, because a data directory
 is large binary state that a git patch carries badly, and a running
 database's files are at best crash-consistent. A warm resume keeps everything,
-since the guest's memory and disks come back as they were.
+since the guest's memory and disks come back as they were. An engagement that
+starts in a rebuilt tree after earlier work is told so by an injected notice
+(`injection:executor-changed`).
+
+Anything a backend keeps for a conversation beyond the capture is a cache: no
+resume may depend on it. That rule is what keeps a move to another profile
+(sandbox-fleet §6) possible. The run tree comes back from the capture on any
+backend. A move discards every cache the new profile cannot use, and always
+the memory snapshot, since a restore needs the same VM configuration.
+Whatever the old profile granted and the new one does not, such as a
+container runtime's images and volumes, is lost with those caches.
 
 On Firecracker the checkpoint is a snapshot: the guest's memory and the VM's
 device state, taken with the VM paused, kept together with the run-tree disk
@@ -448,6 +468,8 @@ deleted otherwise:
   between; the tree's latest capture must be the one taken at that park.
 - **The host still runs the Firecracker and kernel it was taken on.**
   Firecracker restores a snapshot only onto identical software and hardware.
+- **The conversation still references the profile copy it was taken
+  under.** A move to another profile deletes it.
 - **It has not been restored before.** A snapshot is restored at most once,
   never into a second VM, so the duplicated guest state Firecracker's
   documentation warns about (random-number state, tokens, identifiers) cannot

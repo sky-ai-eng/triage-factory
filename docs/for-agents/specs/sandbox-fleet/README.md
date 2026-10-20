@@ -277,7 +277,18 @@ cross-org recipe-sharing invariant — are specified in
   (`blueprint_runs.step_plan`). Everything a run reads from its profile
   (image, egress, resources, `mem_budget_mb`, capability requirements) comes
   from the copy, so an edit changes only conversations minted after it, and a
-  queued or parked conversation keeps what it was minted with.
+  queued or parked conversation keeps what it was minted with unless a person
+  moves it (below).
+- **Moving a conversation to another profile.** Not built; the design keeps
+  it possible. A person may move a queued or parked conversation, one with no
+  active claim, to another profile their team has enabled, under the same
+  authorization as binding a profile to a rule, after the UI has warned what
+  the move loses. The move freezes a copy of the new profile and points the
+  conversation at it; earlier claims keep the execution manifests that record
+  what they ran with (sandbox-backends §7). The agent never moves itself: it
+  has read hostile input, and a move to a profile with root or wider egress
+  is the escalation an injected agent would ask for. What survives the move
+  and what the agent is told are in sandbox-backends §7 and §8.
 - **Defaults.** A built-in "base" profile (today's behavior) is the default when a
   rule names none, so existing rules keep working unchanged.
 
