@@ -128,8 +128,6 @@ func slackMessageCurrentView(channels slackstore.ChannelRegistryStore) events.Cu
 // registering it now is data-only — resolution behavior (which team
 // actually owns a given channel) arrives with TFAC-542's SourceHooks
 // (routing.go).
-// RegisterPredicateReferenceCheck makes the event-handler write routes run
-// channelInFaults against a predicate's channel_in.
 // GateEventSource activates every TFAC-524 dormancy surface for slack:*
 // (event-types/schemas lists, handler create, router freeze) — FeatureSlack
 // is already in entitlements.AllFeatures() (TFAC-529), so the composition-
