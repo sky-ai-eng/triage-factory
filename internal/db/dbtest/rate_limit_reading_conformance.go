@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -17,7 +18,8 @@ type RateLimitReadingStoreFactory func(t *testing.T) (store db.RateLimitReadingS
 
 // RunRateLimitReadingStoreConformance covers the contract every backend impl
 // must hold: a key keeps its newest observation whatever order flushes land
-// in; a field the reading did not state reads back nil, never zero; List
+// in, including two readings of it in one call; a call larger than one
+// statement's batch writes every reading; a field the reading did not state reads back nil, never zero; List
 // returns only readings that still describe their buckets; and the expiry
 // sweep deletes exactly the rows List leaves out.
 func RunRateLimitReadingStoreConformance(t *testing.T, mk RateLimitReadingStoreFactory) {
@@ -64,6 +66,55 @@ func RunRateLimitReadingStoreConformance(t *testing.T, mk RateLimitReadingStoreF
 		}
 		if len(got) != 1 || *got[0].Remaining != 3980 {
 			t.Errorf("List after a newer flush = %+v, want 3980", got)
+		}
+	})
+
+	t.Run("one_call_holding_a_key_twice_keeps_the_newer", func(t *testing.T) {
+		// Postgres refuses a statement that updates one row twice, so the
+		// store must reduce the call to one reading per key itself.
+		store, orgID := mk(t)
+		older := domain.RateLimitReading{
+			OrgID: orgID, Upstream: "github", Credential: "pat", Bucket: "core",
+			Remaining: intp(4000), Limit: intp(5000), ResetAt: timep(now.Add(time.Hour)), ObservedAt: now.Add(-time.Minute),
+		}
+		newer := older
+		newer.Remaining, newer.ObservedAt = intp(3990), now
+		if err := store.UpsertSystem(ctx, []domain.RateLimitReading{newer, older}); err != nil {
+			t.Fatalf("UpsertSystem: %v", err)
+		}
+		got, err := store.List(ctx, orgID, now)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(got) != 1 || *got[0].Remaining != 3990 {
+			t.Errorf("List = %+v, want the newer reading (3990) alone", got)
+		}
+	})
+
+	t.Run("a_write_larger_than_one_batch_lands_whole", func(t *testing.T) {
+		store, orgID := mk(t)
+		const n = 250
+		readings := make([]domain.RateLimitReading, 0, n)
+		for i := range n {
+			readings = append(readings, domain.RateLimitReading{
+				OrgID: orgID, Upstream: "github", Credential: "pat", Bucket: fmt.Sprintf("bucket-%03d", i),
+				Remaining: intp(i), Limit: intp(n), ResetAt: timep(now.Add(time.Hour)), ObservedAt: now,
+			})
+		}
+		if err := store.UpsertSystem(ctx, readings); err != nil {
+			t.Fatalf("UpsertSystem: %v", err)
+		}
+		got, err := store.List(ctx, orgID, now)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(got) != n {
+			t.Fatalf("List = %d readings, want %d", len(got), n)
+		}
+		for i, r := range got {
+			if r.Bucket != fmt.Sprintf("bucket-%03d", i) || *r.Remaining != i {
+				t.Fatalf("reading %d = %+v, want bucket-%03d with %d remaining", i, r, i, i)
+			}
 		}
 	})
 

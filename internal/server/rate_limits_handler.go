@@ -46,7 +46,9 @@ type rateLimitReadingView struct {
 //
 // Member-readable: every member renders an integration's settings card, and
 // the numbers name nothing a member cannot already see there. A reading past
-// its reset is left out, because by then the bucket has refilled.
+// its reset is left out, because by then the bucket has refilled. A credential
+// whose name cannot be read is served by id rather than failing the route
+// (ratelimits.Names).
 //
 // GET /api/orgs/{org_id}/integrations/rate-limits
 func (s *Server) handleOrgRateLimits(w http.ResponseWriter, r *http.Request) {
@@ -55,28 +57,24 @@ func (s *Server) handleOrgRateLimits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var (
-		readings []domain.RateLimitReading
-		names    map[upstream.Name]map[string]string
-	)
+	var readings []domain.RateLimitReading
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var err error
 		readings, err = tx.RateLimitReadings.List(r.Context(), orgID, timeNow())
-		if err != nil {
-			return err
-		}
-		var upstreams []upstream.Name
-		for _, rd := range readings {
-			if name := upstream.Name(rd.Upstream); !slices.Contains(upstreams, name) {
-				upstreams = append(upstreams, name)
-			}
-		}
-		names, err = ratelimits.Names(r.Context(), tx, orgID, upstreams)
 		return err
 	}); err != nil {
 		internalError(w, "rate-limits", err)
 		return
 	}
+	var upstreams []upstream.Name
+	for _, rd := range readings {
+		if name := upstream.Name(rd.Upstream); !slices.Contains(upstreams, name) {
+			upstreams = append(upstreams, name)
+		}
+	}
+	names := ratelimits.Names(r.Context(), orgID, upstreams, func(fn func(db.TxStores) error) error {
+		return s.tx.WithReadTx(r.Context(), orgID, userID, fn)
+	})
 
 	out := rateLimitsResponse{Readings: make([]rateLimitReadingView, 0, len(readings))}
 	for _, rd := range readings {

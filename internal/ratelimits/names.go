@@ -43,7 +43,13 @@ func RegisterNamer(name upstream.Name, namer Namer) {
 // Names returns the display names of the credentials of every upstream in
 // upstreams, keyed by upstream and then credential id. An upstream with no
 // Namer contributes nothing.
-func Names(ctx context.Context, tx db.TxStores, orgID string, upstreams []upstream.Name) (map[upstream.Name]map[string]string, error) {
+//
+// Naming is best-effort, because a name only labels a reading the reader gets
+// either way: an upstream whose Namer fails is logged and left out, and the
+// reader shows its credentials by id. Each Namer runs in its own transaction
+// from inTx, so one that fails (in Postgres, aborting the transaction it ran
+// in) costs no other upstream its names.
+func Names(ctx context.Context, orgID string, upstreams []upstream.Name, inTx func(func(db.TxStores) error) error) map[upstream.Name]map[string]string {
 	out := map[upstream.Name]map[string]string{}
 	for _, name := range upstreams {
 		namer, ok := namers[name]
@@ -53,13 +59,18 @@ func Names(ctx context.Context, tx db.TxStores, orgID string, upstreams []upstre
 		if _, done := out[name]; done {
 			continue
 		}
-		names, err := namer(ctx, tx, orgID)
-		if err != nil {
-			return nil, fmt.Errorf("name %s credentials: %w", name, err)
+		var names map[string]string
+		if err := inTx(func(tx db.TxStores) error {
+			var err error
+			names, err = namer(ctx, tx, orgID)
+			return err
+		}); err != nil {
+			log.Warn("rate-limit credentials left unnamed", "upstream", name, "org_id", orgID, "error", err)
+			continue
 		}
 		out[name] = names
 	}
-	return out, nil
+	return out
 }
 
 // githubNames names each of the org's App installations by the GitHub account

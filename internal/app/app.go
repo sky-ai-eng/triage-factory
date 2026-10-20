@@ -232,6 +232,11 @@ type App struct {
 	// calls this once the drain is over. nil before startWorkers.
 	stopHeartbeat func()
 
+	// stopFlusher ends the rate-limit reading flusher and waits for its last
+	// write. Like the heartbeat it is not bound to runCtx (see startWorkers);
+	// Run calls this once the drain is over. nil before startWorkers.
+	stopFlusher func()
+
 	// brainMu guards brainRunning/brainCancel — the background brain's
 	// start/stop state (TFAC-583, brain.go). Transitions happen from the
 	// lease manager's own goroutine (Run's tick loop) or, at role=all,
@@ -455,6 +460,7 @@ func (a *App) Run(ctx context.Context) error {
 	a.runStartupTasks(ctx)
 	a.startWorkers(ctx)
 	defer a.stopHeartbeat()
+	defer a.stopFlusher()
 	if a.metricsAddr != "" {
 		// Fire-and-forget on every role: Serve logs its own bind failure and
 		// a dead metrics listener must never take the process with it.

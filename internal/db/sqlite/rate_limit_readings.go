@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -72,13 +73,22 @@ func (s *rateLimitReadingStore) UpsertSystem(ctx context.Context, readings []dom
 		if err := assertLocalOrg(r.OrgID); err != nil {
 			return err
 		}
-		var reset any
-		if r.ResetAt != nil {
-			reset = r.ResetAt.UTC()
+	}
+	for _, batch := range db.RateLimitUpsertBatches(readings) {
+		values := make([]string, 0, len(batch))
+		args := make([]any, 0, len(batch)*10)
+		for _, r := range batch {
+			var reset any
+			if r.ResetAt != nil {
+				reset = r.ResetAt.UTC()
+			}
+			values = append(values, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			args = append(args, r.OrgID, r.Upstream, r.Credential, r.Bucket,
+				r.Remaining, r.Limit, r.Used, r.NearLimit, reset, r.ObservedAt.UTC())
 		}
 		if _, err := s.q.ExecContext(ctx, `
 			INSERT INTO rate_limit_readings (`+sqliteRateLimitReadingCols+`)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES `+strings.Join(values, ", ")+`
 			ON CONFLICT (org_id, upstream, credential, bucket) DO UPDATE SET
 				remaining    = excluded.remaining,
 				bucket_limit = excluded.bucket_limit,
@@ -86,9 +96,7 @@ func (s *rateLimitReadingStore) UpsertSystem(ctx context.Context, readings []dom
 				near_limit   = excluded.near_limit,
 				reset_at     = excluded.reset_at,
 				observed_at  = excluded.observed_at
-			WHERE rate_limit_readings.observed_at < excluded.observed_at`,
-			r.OrgID, r.Upstream, r.Credential, r.Bucket,
-			r.Remaining, r.Limit, r.Used, r.NearLimit, reset, r.ObservedAt.UTC()); err != nil {
+			WHERE rate_limit_readings.observed_at < excluded.observed_at`, args...); err != nil {
 			return err
 		}
 	}

@@ -140,8 +140,23 @@ func (a *App) startWorkers(ctx context.Context) {
 	// for all of them. A plain executor records none: its secret store is
 	// disabled, so it resolves no org credential to make such a request with,
 	// and a run's provider traffic goes through its sidecar's proxies.
+	//
+	// Like the heartbeat below, it outlives ctx by the shutdown drain: the
+	// requests the drain finishes record readings too. Run stops it once the
+	// drain returns and waits for its last write, which lands before main's
+	// deferred Close takes the pools away.
+	a.stopFlusher = func() {}
 	if a.plan.serveHTTP || a.plan.brain {
-		go ratelimits.RunFlusher(ctx, a.stores.RateLimitReadings, ratelimits.FlushInterval)
+		flushCtx, cancelFlush := context.WithCancel(context.WithoutCancel(ctx))
+		flushDone := make(chan struct{})
+		go func() {
+			defer close(flushDone)
+			ratelimits.RunFlusher(flushCtx, a.stores.RateLimitReadings, ratelimits.FlushInterval)
+		}()
+		a.stopFlusher = func() {
+			cancelFlush()
+			<-flushDone
+		}
 	}
 
 	// Instance-registry heartbeat: every role renews its fleet registry row

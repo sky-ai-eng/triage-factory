@@ -3,6 +3,8 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -53,10 +55,19 @@ func (s *rateLimitReadingStore) List(ctx context.Context, orgID string, now time
 }
 
 func (s *rateLimitReadingStore) UpsertSystem(ctx context.Context, readings []domain.RateLimitReading) error {
-	for _, r := range readings {
+	for _, batch := range db.RateLimitUpsertBatches(readings) {
+		values := make([]string, 0, len(batch))
+		args := make([]any, 0, len(batch)*10)
+		for _, r := range batch {
+			n := len(args)
+			values = append(values, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				n+1, n+2, n+3, n+4, n+5, n+6, n+7, n+8, n+9, n+10))
+			args = append(args, r.OrgID, r.Upstream, r.Credential, r.Bucket,
+				nullIntPtr(r.Remaining), nullIntPtr(r.Limit), nullIntPtr(r.Used), nullBoolPtr(r.NearLimit), utcPtr(r.ResetAt), r.ObservedAt.UTC())
+		}
 		if _, err := s.admin.ExecContext(ctx, `
 			INSERT INTO rate_limit_readings (`+pgRateLimitReadingCols+`)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			VALUES `+strings.Join(values, ", ")+`
 			ON CONFLICT (org_id, upstream, credential, bucket) DO UPDATE SET
 				remaining    = EXCLUDED.remaining,
 				bucket_limit = EXCLUDED.bucket_limit,
@@ -64,9 +75,7 @@ func (s *rateLimitReadingStore) UpsertSystem(ctx context.Context, readings []dom
 				near_limit   = EXCLUDED.near_limit,
 				reset_at     = EXCLUDED.reset_at,
 				observed_at  = EXCLUDED.observed_at
-			WHERE rate_limit_readings.observed_at < EXCLUDED.observed_at`,
-			r.OrgID, r.Upstream, r.Credential, r.Bucket,
-			nullIntPtr(r.Remaining), nullIntPtr(r.Limit), nullIntPtr(r.Used), nullBoolPtr(r.NearLimit), utcPtr(r.ResetAt), r.ObservedAt.UTC()); err != nil {
+			WHERE rate_limit_readings.observed_at < EXCLUDED.observed_at`, args...); err != nil {
 			return err
 		}
 	}

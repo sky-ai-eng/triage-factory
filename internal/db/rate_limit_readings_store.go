@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -31,7 +32,12 @@ type RateLimitReadingStore interface {
 	// UpsertSystem writes readings, for any orgs, keeping each key's newest
 	// observation: a reading observed before the one stored for its key is
 	// ignored, so two processes flushing the same bucket in either order leave
-	// the later reading.
+	// the later reading. Two readings of one key in readings are the same
+	// case: the newer is kept.
+	//
+	// One multi-row statement per RateLimitUpsertBatches batch, not one
+	// transaction for the whole call: a failure partway leaves the earlier
+	// batches written, which the newest-wins rule makes safe to write again.
 	//
 	// Exempt from the returned-row rule: a bulk sync write, whose caller wants
 	// only to know that it landed.
@@ -42,4 +48,31 @@ type RateLimitReadingStore interface {
 	// leaves them out; this keeps the table from holding every key a process
 	// ever recorded.
 	DeleteExpiredSystem(ctx context.Context, now time.Time) (int64, error)
+}
+
+// rateLimitUpsertBatchSize is how many readings one UpsertSystem statement
+// writes. Each binds ten parameters, so a batch stays far below both
+// dialects' limits on bound parameters (32766 in SQLite, 65535 in Postgres).
+const rateLimitUpsertBatchSize = 100
+
+// RateLimitUpsertBatches splits readings into the batches each dialect's
+// UpsertSystem writes one statement per, keeping only the newest reading of
+// each key. The deduplication is not an optimization: Postgres refuses an
+// INSERT … ON CONFLICT DO UPDATE that would update one row twice.
+func RateLimitUpsertBatches(readings []domain.RateLimitReading) [][]domain.RateLimitReading {
+	type key struct{ org, upstream, credential, bucket string }
+	at := make(map[key]int, len(readings))
+	latest := make([]domain.RateLimitReading, 0, len(readings))
+	for _, r := range readings {
+		k := key{r.OrgID, r.Upstream, r.Credential, r.Bucket}
+		if i, seen := at[k]; seen {
+			if r.ObservedAt.After(latest[i].ObservedAt) {
+				latest[i] = r
+			}
+			continue
+		}
+		at[k] = len(latest)
+		latest = append(latest, r)
+	}
+	return slices.Collect(slices.Chunk(latest, rateLimitUpsertBatchSize))
 }
