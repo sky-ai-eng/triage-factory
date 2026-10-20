@@ -245,6 +245,7 @@ export default function TriggerConfigPanel({
               >
                 <PredicateEditor
                   eventType={trigger.event_type}
+                  teamId={trigger.team_id}
                   value={predicate}
                   onChange={setPredicate}
                 />

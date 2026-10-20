@@ -3,12 +3,15 @@ package slack
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/server"
 )
 
 // SlackMessageMetadata is the durable audit shape for one inbound Slack
@@ -53,7 +56,7 @@ type SlackMessageMetadata struct {
 
 // SlackMessagePredicate narrows which messages a handler fires on.
 type SlackMessagePredicate struct {
-	ChannelIn []string `json:"channel_in,omitempty" doc:"Match only messages in these channels, by registry id (the id field of GET /api/slack/teams/{team_id}/channels; empty = no filter, matches any channel)."`
+	ChannelIn []string `json:"channel_in,omitempty" doc:"Match only messages in these channels, each one the team tracks, by registry id (the id field of GET /api/slack/teams/{team_id}/channels, not Slack's channel id). Empty matches every channel the team tracks."`
 	// MentionedOnly, when true, restricts to messages that explicitly
 	// @-mentioned the bot — excluding engaged-thread follow-ups that
 	// didn't. false (the default) matches both.
@@ -140,5 +143,76 @@ func slackMessageCurrentView(channels slackstore.ChannelRegistryStore) events.Cu
 func init() {
 	events.Register(events.NewSchema[SlackMessageMetadata, SlackMessagePredicate](
 		domain.EventSlackMessage, events.OwnershipOwned))
+	server.RegisterPredicateReferenceCheck(domain.EventSlackMessage, channelInFaults)
 	entitlements.GateEventSource("slack", entitlements.FeatureSlack)
+}
+
+// channelInFaults is slack:message's server.PredicateReferenceCheck: every
+// channel_in entry the predicate adds must be the registry id of a channel the
+// handler's team tracks. That is the set the predicate editor offers, and the
+// only set that can match, because the routing hooks deliver a team's handlers
+// only messages from channels the team tracks (slackTeamTracksChannel). A Slack
+// channel id, the value a caller would naturally reach for, is refused here
+// rather than stored as a filter that never fires.
+//
+// Local mode tracks no Slack channels, so there every added entry is refused.
+func channelInFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, predicate, prior *string) ([]string, error) {
+	priorIn, err := predicateChannelIn(prior)
+	if err != nil {
+		return nil, err
+	}
+	nextIn, err := predicateChannelIn(predicate)
+	if err != nil {
+		return nil, err
+	}
+	// seen starts as the stored entries, which are not re-checked, and also
+	// keeps an entry the predicate repeats from being reported twice.
+	seen := make(map[string]bool, len(priorIn))
+	for _, id := range priorIn {
+		seen[id] = true
+	}
+	var added []string
+	for _, id := range nextIn {
+		if !seen[id] {
+			seen[id] = true
+			added = append(added, id)
+		}
+	}
+	if len(added) == 0 {
+		return nil, nil
+	}
+
+	bundle := slackstore.FromTx(tx)
+	if bundle == nil {
+		return nil, errors.New("slack store bundle absent from the transaction: the slack store extension is not registered")
+	}
+	rows, err := bundle.TeamChannels.ListForTeam(ctx, orgID, teamID)
+	if err != nil && !errors.Is(err, db.ErrNotApplicableInLocal) {
+		return nil, fmt.Errorf("read team tracked channels: %w", err)
+	}
+	tracked := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		tracked[row.SlackChannelID] = true
+	}
+	var faults []string
+	for _, id := range added {
+		if !tracked[id] {
+			faults = append(faults, fmt.Sprintf("channel_in: %q is not the registry id of a channel this team tracks "+
+				"(channel_in takes the id field of GET /api/slack/teams/{team_id}/channels, not Slack's channel id)", id))
+		}
+	}
+	return faults, nil
+}
+
+// predicateChannelIn reads channel_in from a slack:message predicate; nil for
+// match-all.
+func predicateChannelIn(predicate *string) ([]string, error) {
+	if predicate == nil {
+		return nil, nil
+	}
+	var p SlackMessagePredicate
+	if err := json.Unmarshal([]byte(*predicate), &p); err != nil {
+		return nil, fmt.Errorf("decode slack message predicate: %w", err)
+	}
+	return p.ChannelIn, nil
 }
