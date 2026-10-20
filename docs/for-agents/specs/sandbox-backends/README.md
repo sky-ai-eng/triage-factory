@@ -418,9 +418,20 @@ The durable record of a parked conversation is TF's run-tree capture, in the
 one capture format every backend produces. A backend's own memory checkpoint
 is a cache for a warm resume on the same host and is discarded otherwise. A
 parked conversation therefore resumes on any backend its profile is eligible
-for. Service state (a database running inside the cell) does not survive a
-cold resume, which matches the fleet spec's position that services are
-rebuilt from seed data per engagement.
+for.
+
+A cold resume restores what the capture carries and nothing else: each
+checkout as a git delta (its HEAD, a bundle of its local commits, and a patch
+of every uncommitted change `git add -A` would stage, so gitignored files are
+left out), plus the run root's `_tfac` scratch (`internal/worktree/snapshot.go`,
+`internal/worktree/scratch.go`). A service's state survives a cold resume only
+if it is in that set. A database whose data is in a container runtime's
+volume, outside the run tree, does not, and neither does one whose data
+directory is a gitignored path in a checkout. Capturing service volumes is not
+designed. It would need a capture format of its own, because a data directory
+is large binary state that a git patch carries badly, and a running
+database's files are at best crash-consistent. A warm resume keeps everything,
+since the guest's memory and disks come back as they were.
 
 On Firecracker the checkpoint is a snapshot: the guest's memory and the VM's
 device state, taken with the VM paused, kept together with the run-tree disk
@@ -728,7 +739,10 @@ points:
   (`rootfsCacheKey`), packed into an ext4 image and attached read-only, so
   the rule in horizontal-scaling §6.4 for sharing a baked rootfs across
   tenants holds. Writable paths outside `/work` are tmpfs and are discarded
-  at `Stop`, as a gVisor jail's are.
+  at `Stop`, as a gVisor jail's are. A guest with a container runtime gets a
+  scratch disk image for the runtime's images and volumes instead, since on
+  tmpfs they would count against guest memory; it is discarded at `Stop` the
+  same way (§8).
 - **Init.** A small TF-owned PID 1. It mounts the images at the §4.1 paths,
   configures the network card from the kernel command line, sets a hostname
   that `/etc/hosts` resolves, starts the exec-verb relay, starts the tool host
