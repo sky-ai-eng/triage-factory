@@ -203,6 +203,11 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 		return outcomeError, fmt.Errorf("record slack channel sighting: %w", err)
 	}
 
+	// TODO(TFAC-1139): the delivery is recorded before the thread write and
+	// the event's durable enqueue, so a failure in either loses the mention:
+	// Slack's redelivery is dropped as a duplicate, and PublishEvent drops an
+	// event whose enqueue fails. Needs the mark, thread and queue row in one
+	// admin-pool transaction, with the bus fan-out after commit.
 	fresh, err := p.deliveries.MarkDeliveredSystem(ctx, ws.APIAppID, ev.EventID)
 	if err != nil {
 		return outcomeError, fmt.Errorf("mark slack delivery: %w", err)
@@ -360,6 +365,12 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 	// (6) Past every drop: record the delivery (dedup Slack's redeliveries)
 	// and publish. The delivery insert lands only here so the table tracks
 	// exactly the messages TF acts on.
+	//
+	// TODO(TFAC-1139): the delivery is recorded before the event's durable
+	// enqueue, and PublishEvent drops an event whose enqueue fails, so that
+	// failure loses the message: Slack's redelivery is dropped as a
+	// duplicate. Needs the mark and queue row in one admin-pool transaction,
+	// with the bus fan-out after commit.
 	fresh, err := p.deliveries.MarkDeliveredSystem(ctx, ws.APIAppID, ev.EventID)
 	if err != nil {
 		return outcomeError, fmt.Errorf("mark slack delivery: %w", err)
