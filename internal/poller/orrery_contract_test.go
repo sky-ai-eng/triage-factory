@@ -6,11 +6,13 @@ package poller_test
 // transition the world goes through must come out as exactly the events the
 // tracker's taxonomy (docs/concepts/tracked-events.md) promises.
 //
-// Runs only when ORRERY_BIN names a built Orrery binary; the orrery-contract
-// workflow builds one. Locally:
+// Runs only when ORRERY_BIN is the absolute path of a built Orrery binary (go
+// test runs in this package's directory, so a relative path would resolve
+// from here); the orrery-contract workflow builds one. Locally, from the
+// repository root:
 //
 //	cargo build --manifest-path ../orrery/Cargo.toml -p orrery
-//	ORRERY_BIN=../orrery/target/debug/orrery go test ./internal/poller -run TestPollerAgainstOrrery
+//	ORRERY_BIN=$PWD/../orrery/target/debug/orrery go test ./internal/poller -run TestPollerAgainstOrrery
 
 import (
 	"bytes"
@@ -45,6 +47,9 @@ func TestPollerAgainstOrrery(t *testing.T) {
 	bin := os.Getenv("ORRERY_BIN")
 	if bin == "" {
 		t.Skip("ORRERY_BIN is not set; see the comment at the top of this file")
+	}
+	if !filepath.IsAbs(bin) {
+		t.Fatalf("ORRERY_BIN must be an absolute path, got %q", bin)
 	}
 	runmode.SetForTest(t, runmode.ModeMulti)
 	ctx := context.Background()
@@ -101,9 +106,10 @@ func TestPollerAgainstOrrery(t *testing.T) {
 	})
 
 	// Nothing changed: no events, and the pull request list answers 304.
-	before := p.tr.count(http.StatusNotModified)
+	pullsList := "GET /api/v3/repos/acme/webapp/pulls"
+	before := p.tr.count(pullsList, http.StatusNotModified)
 	p.cycle(t, ctx, map[string]int{})
-	if p.tr.count(http.StatusNotModified) == before {
+	if p.tr.count(pullsList, http.StatusNotModified) == before {
 		t.Error("the unchanged cycle's pull request list was not a 304")
 	}
 
@@ -130,7 +136,7 @@ func TestPollerAgainstOrrery(t *testing.T) {
 		"acme/webapp#3 " + domain.EventGitHubPRMerged: 1,
 	})
 
-	if n := p.tr.count(http.StatusNotImplemented); n > 0 {
+	if n := len(p.tr.notMocked()); n > 0 {
 		t.Errorf("%d request(s) reached surface Orrery does not mock: %v", n, p.tr.notMocked())
 	}
 }
@@ -303,12 +309,12 @@ func (r *orreryResolver) OrgIdentityFor(context.Context, string) (string, string
 	return "", "", false
 }
 
-// countingTransport counts responses by status, and keeps the paths Orrery
-// answered with its 501 not-mocked envelope.
+// countingTransport counts responses by request and status, and keeps the
+// requests Orrery answered with its 501 not-mocked envelope.
 type countingTransport struct {
 	base     http.RoundTripper
 	mu       sync.Mutex
-	byStatus map[int]int
+	counts   map[string]int // "<method> <path> <status>"
 	unmocked []string
 }
 
@@ -318,10 +324,10 @@ func (c *countingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		return resp, err
 	}
 	c.mu.Lock()
-	if c.byStatus == nil {
-		c.byStatus = map[int]int{}
+	if c.counts == nil {
+		c.counts = map[string]int{}
 	}
-	c.byStatus[resp.StatusCode]++
+	c.counts[fmt.Sprintf("%s %s %d", req.Method, req.URL.Path, resp.StatusCode)]++
 	if resp.StatusCode == http.StatusNotImplemented {
 		c.unmocked = append(c.unmocked, req.Method+" "+req.URL.Path)
 	}
@@ -329,10 +335,11 @@ func (c *countingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	return resp, nil
 }
 
-func (c *countingTransport) count(status int) int {
+// count is how many responses to request ("<method> <path>") had status.
+func (c *countingTransport) count(request string, status int) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.byStatus[status]
+	return c.counts[fmt.Sprintf("%s %d", request, status)]
 }
 
 func (c *countingTransport) notMocked() []string {
@@ -349,8 +356,24 @@ type orreryWorld struct {
 }
 
 // startOrrery serves a fresh world on a free loopback port for the length of
-// the test.
+// the test. The port is found by binding port 0 and closing it before Orrery
+// binds it, so another process can take it in between; Orrery then exits on
+// its bind error and the start is retried on a new port.
 func startOrrery(t *testing.T, bin string) *orreryWorld {
+	t.Helper()
+	var lastLog string
+	for attempt := 0; attempt < 3; attempt++ {
+		w, log, ok := tryStartOrrery(t, bin)
+		if ok {
+			return w
+		}
+		lastLog = log
+	}
+	t.Fatalf("orrery did not start in 3 attempts; last log:\n%s", lastLog)
+	return nil
+}
+
+func tryStartOrrery(t *testing.T, bin string) (*orreryWorld, string, bool) {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -364,35 +387,68 @@ func startOrrery(t *testing.T, bin string) *orreryWorld {
 	if err := os.WriteFile(cfg, []byte(fmt.Sprintf("[instance]\ndir = %q\n\n[server]\nlisten = %q\n", filepath.Join(dir, "instance"), addr)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var logs bytes.Buffer
+	logs := &syncBuffer{}
 	cmd := exec.Command(bin, "serve", "--config", cfg)
-	cmd.Stdout, cmd.Stderr = &logs, &logs
+	cmd.Stdout, cmd.Stderr = logs, logs
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start orrery: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
+	exited := make(chan struct{})
+	go func() {
 		_ = cmd.Wait()
-		if t.Failed() {
-			t.Logf("orrery log:\n%s", logs.String())
-		}
-	})
+		close(exited)
+	}()
+	stop := func() {
+		_ = cmd.Process.Kill()
+		<-exited
+	}
 
 	w := &orreryWorld{t: t, base: "http://" + addr}
 	deadline := time.Now().Add(30 * time.Second)
 	for {
+		select {
+		case <-exited:
+			return nil, logs.String(), false
+		default:
+		}
 		resp, err := http.Get(w.base + "/_orrery/healthz")
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
-				return w
+				t.Cleanup(func() {
+					stop()
+					if t.Failed() {
+						t.Logf("orrery log:\n%s", logs.String())
+					}
+				})
+				return w, "", true
 			}
 		}
 		if time.Now().After(deadline) {
+			stop()
 			t.Fatalf("orrery did not become healthy at %s:\n%s", w.base, logs.String())
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// syncBuffer is Orrery's log: os/exec copies the process's output into it from
+// its own goroutine while the test reads it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // actor mints an actor on the control plane and returns its token.
@@ -412,15 +468,21 @@ func (w *orreryWorld) githubREST(token, method, path string, body map[string]any
 
 func (w *orreryWorld) call(token, method, path string, body map[string]any, want int) map[string]any {
 	w.t.Helper()
-	raw, err := json.Marshal(body)
+	var reqBody io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			w.t.Fatal(err)
+		}
+		reqBody = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequest(method, w.base+path, reqBody)
 	if err != nil {
 		w.t.Fatal(err)
 	}
-	req, err := http.NewRequest(method, w.base+path, bytes.NewReader(raw))
-	if err != nil {
-		w.t.Fatal(err)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
-	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		req.Header.Set("Authorization", "token "+token)
 	}

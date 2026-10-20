@@ -56,7 +56,9 @@ permissions:
 
 concurrency:
   group: sso-e2e-${{ github.ref }}
-  cancel-in-progress: true
+  # A main push's run covers fork PRs, which skip the job, so only a pull
+  # request's run is cancelled by a newer one.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   sso-e2e:
@@ -77,8 +79,12 @@ jobs:
             echo "ok=false" >>"$GITHUB_OUTPUT"
           fi
 
+      # Neither checkout leaves its token in .git/config: the job runs the
+      # pull request's code, and nothing here pushes.
       - uses: actions/checkout@v4
         if: steps.access.outputs.ok == 'true'
+        with:
+          persist-credentials: false
 
       - name: Check out Orrery
         if: steps.access.outputs.ok == 'true'
@@ -87,6 +93,7 @@ jobs:
           repository: sky-ai-eng/orrery
           token: ${{ secrets.ORRERY_TOKEN }}
           path: orrery
+          persist-credentials: false
 
       - uses: Swatinem/rust-cache@v2
         if: steps.access.outputs.ok == 'true'
