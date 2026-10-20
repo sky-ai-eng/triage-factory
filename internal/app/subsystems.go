@@ -481,7 +481,7 @@ func (a *App) scorerCallbacks() ai.RunnerCallbacks {
 func (a *App) newPollerManager() *poller.Manager {
 	// An installed org polls as its app user, through the process's one Linear
 	// token cache (buildRunCredentials).
-	m := poller.NewManager(a.database, a.ingestor, a.stores.Users, a.stores.Tasks, a.stores.Entities, a.stores.Repos, a.stores.Artifacts, a.stores.EventQueue, a.stores.Orgs, a.stores.JiraStatusRules, a.stores.LinearTeamRules, a.stores.TeamGitHubGroups, a.stores.Secrets, a.stores.GitHubApps, a.stores.PollReadiness, a.ghResolver, a.linearResolver)
+	m := poller.NewManager(a.database, a.ingestor, a.stores.Users, a.stores.Tasks, a.stores.Entities, a.stores.Repos, a.stores.Artifacts, a.stores.EventQueue, a.stores.Orgs, a.stores.JiraStatusRules, a.stores.JiraProjects, a.stores.LinearTeamRules, a.stores.TeamGitHubGroups, a.stores.Secrets, a.stores.GitHubApps, a.stores.PollReadiness, a.ghResolver, a.linearResolver)
 	// The App-installation grant mirror, refreshed by pull at the head of every
 	// GitHub cycle. Deliberately NOT a system:poll: subscriber like the scorer /
 	// profiler / reconciler: those all hang off a poll COMPLETION,

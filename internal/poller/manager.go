@@ -47,6 +47,7 @@ type Manager struct {
 	artifacts    db.ArtifactStore         // the comments TF posted, which the tracker emits no commented event for
 	orgs         db.OrgsStore             // enumerate active orgs at each poll tick + per-org settings (GitHub/Jira base URLs, poll intervals)
 	jiraRules    db.JiraStatusRulesStore  // per-team Jira project rules; discovery polls the org-wide union (every team's rules)
+	jiraProjects db.JiraProjectStore      // the Jira project registry the rules reference; refreshed from Jira before each cycle's discovery
 	linearRules  db.LinearTeamRulesStore  // per-team Linear team rules; discovery polls the org-wide union, merged per Linear team
 	githubGroups db.TeamGitHubGroupsStore // GitHub-team → TF-team mappings; reconciled (stale-team prune) each GitHub cycle
 	secrets      db.SecretStore           // integration creds via SecretStore (keychain in local, vault in multi)
@@ -174,7 +175,7 @@ type Manager struct {
 	lastLinearSuccess map[string]time.Time
 }
 
-func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, artifacts db.ArtifactStore, eventQueue db.EventQueueStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, linearRules db.LinearTeamRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, connections db.PollReadinessStore, resolver ghclient.Resolver, linearResolver linear.Resolver) *Manager {
+func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, artifacts db.ArtifactStore, eventQueue db.EventQueueStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, jiraProjects db.JiraProjectStore, linearRules db.LinearTeamRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, connections db.PollReadinessStore, resolver ghclient.Resolver, linearResolver linear.Resolver) *Manager {
 	return &Manager{
 		database:       database,
 		pub:            pub,
@@ -186,6 +187,7 @@ func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, ta
 		artifacts:      artifacts,
 		orgs:           orgs,
 		jiraRules:      jiraRules,
+		jiraProjects:   jiraProjects,
 		linearRules:    linearRules,
 		githubGroups:   githubGroups,
 		secrets:        secrets,
@@ -479,16 +481,16 @@ func (m *Manager) PollGitHubOnce(ctx context.Context, orgID string) {
 }
 
 // loadJiraRules pulls the UNION of every team's per-project Jira status
-// rules across the org (not just the default team's), so a non-default
-// team's Jira config is discovered and polled too. toTrackerJiraRules
-// then merges the rows per project_key. Local mode collapses to N=1 (the
-// single default team), where the union equals what the poller read
-// before. Empty list on error.
-func (m *Manager) loadJiraRules(ctx context.Context, orgID string) []domain.JiraProjectStatusRules {
+// rules across the org (not just the default team's) on the org's Jira site,
+// so a non-default team's Jira config is discovered and polled too.
+// toTrackerJiraRules then merges the rows per project. Local mode collapses
+// to N=1 (the single default team), where the union equals what the poller
+// read before. Empty list on error.
+func (m *Manager) loadJiraRules(ctx context.Context, orgID, site string) []domain.JiraProjectStatusRules {
 	if m.jiraRules == nil {
 		return nil
 	}
-	rules, err := m.jiraRules.ListForOrgSystem(ctx, orgID)
+	rules, err := m.jiraRules.ListForOrgSystem(ctx, orgID, site)
 	if err != nil {
 		pollerLog.Warn("list jira rules (org union) failed", "org", orgID, "error", err)
 		return nil
@@ -1510,8 +1512,8 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 		m.reportError("jira", orgID, lerr)
 		return
 	}
-	rules := m.loadJiraRules(ctx, orgID)
 	scope := domain.EntityScope("jira", orgSet)
+	rules := m.loadJiraRules(ctx, orgID, scope)
 	// "Configured" is decided by the auth-method marker (via JiraSystemConfig),
 	// not key presence: a configured org has a URL plus the scheme's secret
 	// matching its jira_auth_method (DC PAT, or Cloud email + token). Reading
@@ -1520,12 +1522,9 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 	// rules are missing — adding/removing a tenant's Jira config doesn't need
 	// a poller restart this way.
 	_, configured := integrations.JiraSystemConfig(creds, orgSet.JiraBaseURL)
-	// Only ARMED projects can be polled: the discovery JQL is built from
+	// Only ARMED projects are discovered: the discovery JQL is built from
 	// pickup and done members, so a watched-but-unmapped project has nothing
-	// to ask about. That already fell out of the merge below producing empty
-	// member sets, but "the cycle ran and asked nothing" and "the cycle
-	// declined to run" are different facts and only one of them is true — so
-	// the skip is stated here rather than left to emerge downstream.
+	// to ask about.
 	projects := toTrackerJiraRules(rules)
 	if configured && len(projects) == 0 {
 		// Nothing on this site to poll, but issues a previous site left
@@ -1541,11 +1540,6 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 		conn.skip("unconfigured")
 		return
 	}
-	if len(projects) == 0 {
-		span.SetAttributes(telemetry.Outcome("no_armed_projects"))
-		conn.skip("no_armed_projects")
-		return
-	}
 	// creds load above gates configuration + supplies the baseURL fallback;
 	// ForSystem (reading the same secrets, routed Cloud-vs-DC by the stored
 	// auth-method marker) builds the authenticated client. The gate
@@ -1558,6 +1552,26 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 		m.reportError("jira", orgID, cerr)
 		return
 	}
+	if m.syncJiraProjects(ctx, client, orgID, rules) {
+		// A refreshed key, or a merge, changes what the rules say, so the
+		// cycle polls from what the registry holds now. A sync never empties
+		// the set — a merge keeps every project's rules on one row — so an
+		// empty re-read is a failed one, and the cycle keeps the rules it
+		// already has rather than polling with none.
+		if reloaded := m.loadJiraRules(ctx, orgID, scope); len(reloaded) > 0 {
+			projects = toTrackerJiraRules(reloaded)
+		}
+	}
+	// A set of only watched projects was refreshed above and has nothing for
+	// discovery to ask. "The cycle asked nothing" and "the cycle declined to
+	// poll" are different facts, so the skip is stated here rather than left
+	// to emerge from empty member sets downstream. The project reads above
+	// still record the connection's state.
+	if len(projects) == 0 {
+		span.SetAttributes(telemetry.Outcome("no_armed_projects"))
+		conn.skip("no_armed_projects")
+		return
+	}
 	if _, err := m.trackerForOrg(orgID).RefreshJira(ctx, scope, client, orgSet.JiraBaseURL, projects); err != nil {
 		span.SetStatus(codes.Error, "refresh")
 		jiraLog.Log(ctx, upstream.LogLevel(err, slog.LevelError), "tracker error", "org", orgID, "error", err)
@@ -1568,9 +1582,11 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 }
 
 // toTrackerJiraRules collapses the org-wide rule union into the
-// tracker-local per-project view — one entry per distinct project_key, so
-// a project two teams both track is polled once (entities are org-shared:
+// tracker-local per-project view — one entry per registry row, so a
+// project two teams both track is polled once (entities are org-shared:
 // one row per Jira issue regardless of how many teams track its project).
+// Each entry carries the project's key and Jira id as the registry holds
+// them, which is what the discovery JQL is written against.
 //
 // Unarmed rows are dropped first. A team may WATCH a project before mapping
 // its workflow's statuses, and such a row carries no members to build a JQL
@@ -1590,13 +1606,15 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 // shared entity. Team-specific scoping lives downstream in the router
 // gate, not in discovery. Kept narrow on purpose — the tracker only needs
 // pickup/done statuses, not the canonicals. Input arrives ordered by
-// (project_key, team_id), so the merged output is deterministic.
+// (project key, jira_project_id, team_id), so the merged output is
+// deterministic.
 func toTrackerJiraRules(rules []domain.JiraProjectStatusRules) tracker.JiraRules {
 	type merged struct {
+		key, projectID       string
 		pickup, done         []domain.JiraStatusRef
 		pickupSeen, doneSeen map[string]bool
 	}
-	byKey := map[string]*merged{}
+	byProject := map[string]*merged{}
 	order := make([]string, 0, len(rules))
 	addUnique := func(dst []domain.JiraStatusRef, seen map[string]bool, src []domain.JiraStatusRef) []domain.JiraStatusRef {
 		for _, ref := range src {
@@ -1611,20 +1629,21 @@ func toTrackerJiraRules(rules []domain.JiraProjectStatusRules) tracker.JiraRules
 		if !p.Armed() {
 			continue
 		}
-		m := byKey[p.ProjectKey]
+		m := byProject[p.JiraProjectID]
 		if m == nil {
-			m = &merged{pickupSeen: map[string]bool{}, doneSeen: map[string]bool{}}
-			byKey[p.ProjectKey] = m
-			order = append(order, p.ProjectKey)
+			m = &merged{key: p.ProjectKey, projectID: p.ProjectExternalID, pickupSeen: map[string]bool{}, doneSeen: map[string]bool{}}
+			byProject[p.JiraProjectID] = m
+			order = append(order, p.JiraProjectID)
 		}
 		m.pickup = addUnique(m.pickup, m.pickupSeen, p.PickupMembers)
 		m.done = addUnique(m.done, m.doneSeen, p.DoneMembers)
 	}
 	out := make(tracker.JiraRules, 0, len(order))
-	for _, key := range order {
-		m := byKey[key]
+	for _, id := range order {
+		m := byProject[id]
 		out = append(out, tracker.JiraProjectRules{
-			Key:           key,
+			Key:           m.key,
+			ProjectID:     m.projectID,
 			PickupMembers: m.pickup,
 			DoneMembers:   m.done,
 		})

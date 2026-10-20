@@ -2,7 +2,9 @@
 // write a row that references them. It is the one helper every fixture seeding
 // a GitHub entity by hand goes through, in either dialect: a GitHub entity row
 // references its repository's registry row (entities.repository_id, required),
-// so the registry row has to exist first and the INSERT has to name it.
+// so the registry row has to exist first and the INSERT has to name it. The
+// same holds for a Jira rule, which references its project's registry row
+// (jira_project_status_rules.jira_project_id).
 //
 // It imports nothing from internal/db, so package db's own tests can use it.
 package dbseed
@@ -10,6 +12,7 @@ package dbseed
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -63,4 +66,38 @@ func GitHubEntityRepository(t testing.TB, conn Conn, orgID, host, sourceID strin
 		t.Fatalf("dbseed: github entity key %q names no owner/repo", sourceID)
 	}
 	return GitHubRepository(t, conn, orgID, host, owner, repo)
+}
+
+// JiraSite is the Jira site fixtures register projects on unless they need a
+// particular one: what domain.EntityScope("jira", ...) answers for an org whose
+// Jira base URL is https://acme.atlassian.net.
+const JiraSite = "https://acme.atlassian.net"
+
+// JiraProject returns the id of the registry row for the project keyed key on
+// site in orgID, creating it when none answers to the key there. A created
+// row carries a Jira project id derived from the key, so it is resolved, as
+// every row the settings write creates is. On Postgres conn has to be one that
+// may write the org's rows (the harness's admin connection).
+func JiraProject(t testing.TB, conn Conn, orgID, site, key string) string {
+	t.Helper()
+	ctx := context.Background()
+	var id string
+	err := conn.QueryRowContext(ctx, `
+		SELECT CAST(id AS TEXT) FROM jira_projects
+		 WHERE org_id = $1 AND site = $2 AND project_key = $3
+	`, orgID, site, key).Scan(&id)
+	if err == nil {
+		return id
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("dbseed: read jira project %s on %s: %v", key, site, err)
+	}
+	id = uuid.NewString()
+	if _, err := conn.ExecContext(ctx, `
+		INSERT INTO jira_projects (id, org_id, site, external_id, project_key)
+		VALUES ($1, $2, $3, $4, $5)
+	`, id, orgID, site, "id-"+key, key); err != nil {
+		t.Fatalf("dbseed: create jira project %s on %s: %v", key, site, err)
+	}
+	return id
 }

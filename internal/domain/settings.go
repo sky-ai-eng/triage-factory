@@ -596,12 +596,11 @@ func EffectiveCloneProtocol(stored string, multiMode bool) string {
 }
 
 // TeamSettings is the team-scope settings row (team_settings table).
-// JiraProjects holds the team's tracked Jira project keys — the full
-// per-project rule rows live in jira_project_status_rules and are
-// owned by JiraStatusRulesStore, not this struct. JiraProjects on
-// this row is a denormalized fast path for "which projects to poll"
-// without joining; the rules table is the source of truth for the
-// per-project status semantics.
+// JiraProjects holds the display order of the team's tracked Jira projects,
+// by their jira_projects registry row ids. It is an order, not the
+// membership: the per-project rule rows live in jira_project_status_rules,
+// owned by JiraStatusRulesStore, and they are the source of truth for which
+// projects the team tracks.
 //
 // DefaultModel + AutoDelegateEnabled moved off user_settings:
 // the team owns the AI behavior policy, users do not override in v1.
@@ -901,9 +900,25 @@ func JiraStatusDedupKey(r JiraStatusRef) string {
 	return "name:" + r.Name
 }
 
+// JiraProject is one row of the jira_projects registry: one Jira project on
+// one Jira site, and what every stored reference to a Jira project points at.
+//
+// ExternalID is Jira's numeric project id, which a project key rename does not
+// move; it is unique per (org, site). Key and Name are display values
+// refreshed from Jira. A row with no ExternalID has not been resolved against
+// Jira yet, which only a migrated row can be: the poll resolves it by its key.
+type JiraProject struct {
+	ID         string
+	OrgID      string
+	Site       string
+	ExternalID string
+	Key        string
+	Name       string
+}
+
 // JiraProjectStatusRules is one row of jira_project_status_rules —
 // the team's status configuration for a single Jira project. Multiple
-// rows per team (keyed `(team_id, project_key)`) so two projects on
+// rows per team (keyed `(team_id, jira_project_id)`) so two projects on
 // the same team can have different workflows.
 //
 // A row is the team's commitment to WATCH the project. Whether it is ARMED —
@@ -916,8 +931,17 @@ type JiraProjectStatusRules struct {
 	// parameter). Needed by the poller's per-project member merge (to
 	// break canonical ties by lowest team_id) and the router's team↔project
 	// gate (to look up the handler's team).
-	TeamID     string
-	ProjectKey string
+	TeamID string
+	// JiraProjectID is the jira_projects row the rule is about, and the only
+	// project field ReplaceForTeam stores. ProjectKey, ProjectName and
+	// ProjectExternalID are that row's display values and Jira project id as
+	// the List* methods read them through the registry, so a lookup by key
+	// finds the rule under the project's key as Jira spells it today.
+	// ProjectExternalID is empty while the row is unresolved.
+	JiraProjectID     string
+	ProjectKey        string
+	ProjectName       string
+	ProjectExternalID string
 	// The four rules. A canonical is always one of its rule's members, so it
 	// carries no information its member entry doesn't — it is stored as a full
 	// ref anyway so a caller performing a transition has the id and the name in

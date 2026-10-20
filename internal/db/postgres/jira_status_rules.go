@@ -31,50 +31,56 @@ func newJiraStatusRulesStore(app, admin queryer) db.JiraStatusRulesStore {
 
 var _ db.JiraStatusRulesStore = (*jiraStatusRulesStore)(nil)
 
-func (s *jiraStatusRulesStore) ListForTeam(ctx context.Context, teamID string) ([]domain.JiraProjectStatusRules, error) {
-	return listJiraStatusRules(ctx, s.app, teamID)
+func (s *jiraStatusRulesStore) ListForTeam(ctx context.Context, teamID, site string) ([]domain.JiraProjectStatusRules, error) {
+	return listJiraStatusRules(ctx, s.app, teamID, site)
 }
 
-func (s *jiraStatusRulesStore) ListForTeamSystem(ctx context.Context, teamID string) ([]domain.JiraProjectStatusRules, error) {
-	return listJiraStatusRules(ctx, s.admin, teamID)
+func (s *jiraStatusRulesStore) ListForTeamSystem(ctx context.Context, teamID, site string) ([]domain.JiraProjectStatusRules, error) {
+	return listJiraStatusRules(ctx, s.admin, teamID, site)
 }
 
-// jiraRuleCols is the SELECT list every reader shares — team_id first so
-// TeamID is populated, then the jsonb columns rendered as text, which is what
-// database/sql + pgx stdlib hands a Go string. The members and the canonicals
-// are jsonb rather than text[] / text because a rule member is a status
-// REFERENCE — the workflow's stable id plus the display name captured with it
-// — and an array of scalars has nowhere to put the second half.
-const jiraRuleCols = `team_id, project_key,
-	       pickup_members::text,
-	       in_progress_members::text,
-	       in_progress_canonical::text,
-	       in_review_members::text,
-	       in_review_canonical::text,
-	       done_members::text,
-	       done_canonical::text`
+// jiraRuleCols is the SELECT list every reader shares, over the rules (alias
+// r) joined to their registry row (alias p) — team_id first so TeamID is
+// populated, then the project as the registry holds it now, then the jsonb
+// columns rendered as text, which is what database/sql + pgx stdlib hands a
+// Go string. The members and the canonicals are jsonb rather than text[] /
+// text because a rule member is a status REFERENCE — the workflow's stable id
+// plus the display name captured with it — and an array of scalars has
+// nowhere to put the second half.
+const jiraRuleCols = `r.team_id, r.jira_project_id, p.project_key, p.project_name, COALESCE(p.external_id, ''),
+	       r.pickup_members::text,
+	       r.in_progress_members::text,
+	       r.in_progress_canonical::text,
+	       r.in_review_members::text,
+	       r.in_review_canonical::text,
+	       r.done_members::text,
+	       r.done_canonical::text`
 
-func (s *jiraStatusRulesStore) ListForOrgSystem(ctx context.Context, orgID string) ([]domain.JiraProjectStatusRules, error) {
+// jiraRuleFrom joins each rule to its registry row and confines the read to
+// the site bound as $1. An empty site matches no row: every registry row
+// carries the site it was saved under.
+const jiraRuleFrom = `FROM jira_project_status_rules r
+		JOIN jira_projects p ON p.id = r.jira_project_id
+		WHERE p.site = $1 AND p.site <> ''`
+
+func (s *jiraStatusRulesStore) ListForOrgSystem(ctx context.Context, orgID, site string) ([]domain.JiraProjectStatusRules, error) {
 	// Admin pool — the union spans teams the caller may not belong to.
-	// Org scope rides the teams join; jira_project_status_rules carries no
-	// org_id column (consistent with the table's org-via-team-FK scoping).
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT `+jiraRuleCols+`
-		FROM jira_project_status_rules r
-		JOIN teams t ON t.id = r.team_id
-		WHERE t.org_id = $1
-		ORDER BY r.project_key ASC, r.team_id ASC
-	`, orgID)
+		`+jiraRuleFrom+`
+		  AND r.org_id = $2
+		ORDER BY p.project_key ASC, r.jira_project_id ASC, r.team_id ASC
+	`, site, orgID)
 	return scanJiraStatusRules(rows, err)
 }
 
-func (s *jiraStatusRulesStore) TracksProjectSystem(ctx context.Context, teamID, projectKey string) (bool, error) {
+func (s *jiraStatusRulesStore) TracksProjectSystem(ctx context.Context, teamID, site, projectKey string) (bool, error) {
 	var n int
 	err := s.admin.QueryRowContext(ctx, `
-		SELECT 1 FROM jira_project_status_rules
-		WHERE team_id = $1 AND project_key = $2
+		SELECT 1 `+jiraRuleFrom+`
+		  AND r.team_id = $2 AND p.project_key = $3
 		LIMIT 1
-	`, teamID, projectKey).Scan(&n)
+	`, site, teamID, projectKey).Scan(&n)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
@@ -84,13 +90,13 @@ func (s *jiraStatusRulesStore) TracksProjectSystem(ctx context.Context, teamID, 
 	return true, nil
 }
 
-func listJiraStatusRules(ctx context.Context, q queryer, teamID string) ([]domain.JiraProjectStatusRules, error) {
+func listJiraStatusRules(ctx context.Context, q queryer, teamID, site string) ([]domain.JiraProjectStatusRules, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT `+jiraRuleCols+`
-		FROM jira_project_status_rules r
-		WHERE team_id = $1
-		ORDER BY project_key ASC
-	`, teamID)
+		`+jiraRuleFrom+`
+		  AND r.team_id = $2
+		ORDER BY p.project_key ASC, r.jira_project_id ASC
+	`, site, teamID)
 	return scanJiraStatusRules(rows, err)
 }
 
@@ -106,7 +112,7 @@ func scanJiraStatusRules(rows *sql.Rows, err error) ([]domain.JiraProjectStatusR
 			pickupJSON, inProgressJSON, inReviewJSON, doneJSON string
 			inProgressCanon, inReviewCanon, doneCanon          sql.NullString
 		)
-		if err := rows.Scan(&r.TeamID, &r.ProjectKey, &pickupJSON,
+		if err := rows.Scan(&r.TeamID, &r.JiraProjectID, &r.ProjectKey, &r.ProjectName, &r.ProjectExternalID, &pickupJSON,
 			&inProgressJSON, &inProgressCanon,
 			&inReviewJSON, &inReviewCanon,
 			&doneJSON, &doneCanon); err != nil {
@@ -152,17 +158,9 @@ func scanJiraStatusRules(rows *sql.Rows, err error) ([]domain.JiraProjectStatusR
 	return out, rows.Err()
 }
 
-func (s *jiraStatusRulesStore) ReplaceForTeam(ctx context.Context, teamID string, rules []domain.JiraProjectStatusRules) error {
-	// Refuse empty ProjectKey up front. Silently skipping the row in
-	// the upsert loop would also drop the key from the prune list, so
-	// a slice of all-empty entries would clear the team — sharply
-	// different behavior from "rules is nil/empty, clear all" that the
-	// caller almost certainly didn't ask for. Clear-all semantics
-	// stay exclusively gated on rules being nil/empty.
-	for i, r := range rules {
-		if r.ProjectKey == "" {
-			return fmt.Errorf("ReplaceForTeam: rules[%d] has empty ProjectKey", i)
-		}
+func (s *jiraStatusRulesStore) ReplaceForTeam(ctx context.Context, teamID, site string, rules []domain.JiraProjectStatusRules) error {
+	if err := db.ValidateJiraStatusRulesInput(site, rules); err != nil {
+		return err
 	}
 	return inTx(ctx, s.app, func(tx queryer) error {
 		for _, r := range rules {
@@ -170,14 +168,22 @@ func (s *jiraStatusRulesStore) ReplaceForTeam(ctx context.Context, teamID string
 			if err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `
+			// The SELECT resolves org_id from the team and admits the registry
+			// row only on the site being saved and in the team's org, so a rule
+			// naming any other row inserts nothing and is refused below.
+			res, err := tx.ExecContext(ctx, `
 				INSERT INTO jira_project_status_rules (
-					team_id, project_key,
+					team_id, jira_project_id, org_id,
 					pickup_members, in_progress_members, in_progress_canonical,
 					in_review_members, in_review_canonical,
 					done_members, done_canonical, updated_at
-				) VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, now())
-				ON CONFLICT (team_id, project_key) DO UPDATE SET
+				)
+				SELECT t.id, p.id, t.org_id,
+				       $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, now()
+				  FROM teams t
+				  JOIN jira_projects p ON p.org_id = t.org_id
+				 WHERE t.id = $1 AND p.id = $2 AND p.site = $3
+				ON CONFLICT (team_id, jira_project_id) DO UPDATE SET
 					pickup_members = EXCLUDED.pickup_members,
 					in_progress_members = EXCLUDED.in_progress_members,
 					in_progress_canonical = EXCLUDED.in_progress_canonical,
@@ -187,35 +193,32 @@ func (s *jiraStatusRulesStore) ReplaceForTeam(ctx context.Context, teamID string
 					done_canonical = EXCLUDED.done_canonical,
 					updated_at = now()
 			`,
-				teamID, r.ProjectKey,
+				teamID, r.JiraProjectID, site,
 				cols.pickup,
 				cols.inProgress, nullString(cols.inProgressCanonical),
 				cols.inReview, nullString(cols.inReviewCanonical),
 				cols.done, nullString(cols.doneCanonical),
-			); err != nil {
-				return fmt.Errorf("upsert jira_project_status_rules[%s]: %w", r.ProjectKey, err)
+			)
+			if err != nil {
+				return fmt.Errorf("upsert jira_project_status_rules[%s]: %w", r.JiraProjectID, err)
+			}
+			if n, err := res.RowsAffected(); err != nil {
+				return fmt.Errorf("upsert jira_project_status_rules[%s]: %w", r.JiraProjectID, err)
+			} else if n == 0 {
+				return fmt.Errorf("upsert jira_project_status_rules[%s]: %w", r.JiraProjectID, db.ErrJiraRuleProjectNotOnSite)
 			}
 		}
 
-		// Prune rows for project keys no longer in the input. NOT IN
-		// against an empty list trivially keeps every row, so the
-		// "rules is nil/empty, clear all" case takes the simpler
-		// unconditional DELETE. Empty ProjectKey entries can't reach
-		// here — the pre-loop validation refuses them.
-		keys := projectKeys(rules)
-		if len(keys) == 0 {
-			if _, err := tx.ExecContext(ctx,
-				`DELETE FROM jira_project_status_rules WHERE team_id = $1`,
-				teamID,
-			); err != nil {
-				return fmt.Errorf("clear jira_project_status_rules: %w", err)
-			}
-			return nil
-		}
-		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM jira_project_status_rules
-			 WHERE team_id = $1 AND project_key <> ALL($2)`,
-			teamID, keys,
+		// Prune the team's rules for projects on this site that the input no
+		// longer names. <> ALL against an empty list keeps nothing back, so
+		// an empty input clears the team's rules on the site. A rule for a
+		// project on another site is never this save's to delete.
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM jira_project_status_rules
+			 WHERE team_id = $1
+			   AND jira_project_id IN (SELECT id FROM jira_projects WHERE site = $2)
+			   AND jira_project_id <> ALL($3::uuid[])`,
+			teamID, site, jiraProjectIDs(rules),
 		); err != nil {
 			return fmt.Errorf("prune jira_project_status_rules: %w", err)
 		}
@@ -223,10 +226,10 @@ func (s *jiraStatusRulesStore) ReplaceForTeam(ctx context.Context, teamID string
 	})
 }
 
-func projectKeys(rules []domain.JiraProjectStatusRules) []string {
+func jiraProjectIDs(rules []domain.JiraProjectStatusRules) []string {
 	out := make([]string, 0, len(rules))
 	for _, r := range rules {
-		out = append(out, r.ProjectKey)
+		out = append(out, r.JiraProjectID)
 	}
 	return out
 }

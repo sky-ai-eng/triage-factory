@@ -34,6 +34,7 @@ type SettingsStores struct {
 	Teams            db.TeamsStore
 	Users            db.UsersStore
 	JiraStatusRules  db.JiraStatusRulesStore
+	JiraProjects     db.JiraProjectStore
 	TeamGitHubGroups db.TeamGitHubGroupsStore
 	TeamGitHubRepos  db.TeamGitHubReposStore
 	OrgEventSources  db.OrgEventSourceStore
@@ -56,7 +57,7 @@ type SettingsIDs struct {
 //   - GitHubCloneProtocol defaulting: "" upserts as "https" (the column
 //     CHECK rejects empty strings on both backends).
 //   - JiraStatusRulesStore.ReplaceForTeam bulk-replace semantics:
-//     upsert wins on conflict, missing project keys get pruned.
+//     upsert wins on conflict, missing projects get pruned.
 //   - UserSettings round-trips its fields through both arms of the upsert,
 //     each returning the row it stored, and a nil field clears its column —
 //     the write takes the row's end state, not a delta.
@@ -1719,10 +1720,11 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 				DoneCanonical:       jiraRef("Closed"),
 			},
 		}
-		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, input); err != nil {
+		registerJiraProjects(t, stores, ids, input)
+		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, jiraSite, input); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
 		}
-		got, err := stores.JiraStatusRules.ListForTeamSystem(ctx, ids.TeamID)
+		got, err := stores.JiraStatusRules.ListForTeamSystem(ctx, ids.TeamID, jiraSite)
 		if err != nil {
 			t.Fatalf("ListForTeamSystem: %v", err)
 		}
@@ -1758,16 +1760,17 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			InReviewMembers: jiraRefs("Code Review"), InReviewCanonical: jiraRef("Code Review"),
 			DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
 		}}
-		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, mapped); err != nil {
+		registerJiraProjects(t, stores, ids, mapped)
+		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, jiraSite, mapped); err != nil {
 			t.Fatalf("ReplaceForTeam (mapped): %v", err)
 		}
 		cleared := mapped
 		cleared[0].InReviewMembers = nil
 		cleared[0].InReviewCanonical = domain.JiraStatusRef{}
-		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, cleared); err != nil {
+		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, jiraSite, cleared); err != nil {
 			t.Fatalf("ReplaceForTeam (cleared): %v", err)
 		}
-		got, err := stores.JiraStatusRules.ListForTeamSystem(ctx, ids.TeamID)
+		got, err := stores.JiraStatusRules.ListForTeamSystem(ctx, ids.TeamID, jiraSite)
 		if err != nil {
 			t.Fatalf("ListForTeamSystem: %v", err)
 		}
@@ -1793,17 +1796,18 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
 			DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
 		}}
-		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, input); err != nil {
+		registerJiraProjects(t, stores, ids, input)
+		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, jiraSite, input); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
 		}
 
 		// ListForTeam[System] populate TeamID.
 		for _, got := range [][]domain.JiraProjectStatusRules{
 			mustListJira(t, func() ([]domain.JiraProjectStatusRules, error) {
-				return stores.JiraStatusRules.ListForTeam(ctx, ids.TeamID)
+				return stores.JiraStatusRules.ListForTeam(ctx, ids.TeamID, jiraSite)
 			}),
 			mustListJira(t, func() ([]domain.JiraProjectStatusRules, error) {
-				return stores.JiraStatusRules.ListForTeamSystem(ctx, ids.TeamID)
+				return stores.JiraStatusRules.ListForTeamSystem(ctx, ids.TeamID, jiraSite)
 			}),
 		} {
 			if len(got) != 1 || got[0].TeamID != ids.TeamID {
@@ -1813,7 +1817,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 
 		// ListForOrgSystem returns the union (here, the single team's row)
 		// with TeamID set.
-		union, err := stores.JiraStatusRules.ListForOrgSystem(ctx, ids.OrgID)
+		union, err := stores.JiraStatusRules.ListForOrgSystem(ctx, ids.OrgID, jiraSite)
 		if err != nil {
 			t.Fatalf("ListForOrgSystem: %v", err)
 		}
@@ -1826,7 +1830,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			project string
 			want    bool
 		}{{"SKY", true}, {"OPS", false}} {
-			got, err := stores.JiraStatusRules.TracksProjectSystem(ctx, ids.TeamID, c.project)
+			got, err := stores.JiraStatusRules.TracksProjectSystem(ctx, ids.TeamID, jiraSite, c.project)
 			if err != nil {
 				t.Fatalf("TracksProjectSystem(%s): %v", c.project, err)
 			}
@@ -1852,14 +1856,15 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 				DoneMembers: jiraRefs("Closed"), DoneCanonical: jiraRef("Closed"),
 			},
 		}
-		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, two); err != nil {
+		registerJiraProjects(t, stores, ids, two)
+		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, jiraSite, two); err != nil {
 			t.Fatalf("seed ReplaceForTeam: %v", err)
 		}
 		one := two[:1]
-		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, one); err != nil {
+		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, jiraSite, one); err != nil {
 			t.Fatalf("prune ReplaceForTeam: %v", err)
 		}
-		got, err := stores.JiraStatusRules.ListForTeamSystem(ctx, ids.TeamID)
+		got, err := stores.JiraStatusRules.ListForTeamSystem(ctx, ids.TeamID, jiraSite)
 		if err != nil {
 			t.Fatalf("ListForTeamSystem: %v", err)
 		}
@@ -1875,13 +1880,14 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
 			DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
 		}}
-		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, seed); err != nil {
+		registerJiraProjects(t, stores, ids, seed)
+		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, jiraSite, seed); err != nil {
 			t.Fatalf("seed ReplaceForTeam: %v", err)
 		}
-		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, nil); err != nil {
+		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, jiraSite, nil); err != nil {
 			t.Fatalf("empty ReplaceForTeam: %v", err)
 		}
-		got, err := stores.JiraStatusRules.ListForTeamSystem(ctx, ids.TeamID)
+		got, err := stores.JiraStatusRules.ListForTeamSystem(ctx, ids.TeamID, jiraSite)
 		if err != nil {
 			t.Fatalf("ListForTeamSystem: %v", err)
 		}
@@ -1890,8 +1896,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
-	t.Run("JiraStatusRules_ReplaceForTeam_EmptyProjectKeyRefused", func(t *testing.T) {
-		// Regression guard: a rules slice carrying an empty ProjectKey
+	t.Run("JiraStatusRules_ReplaceForTeam_EmptyJiraProjectIDRefused", func(t *testing.T) {
+		// Regression guard: a rules slice carrying an empty JiraProjectID
 		// must be refused outright. Silently skipping the row in the
 		// upsert loop AND filtering it out of the prune list would
 		// turn an all-empty input into a stealth clear-all, sharply
@@ -1906,19 +1912,20 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
 			DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
 		}}
-		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, seed); err != nil {
+		registerJiraProjects(t, stores, ids, seed)
+		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, jiraSite, seed); err != nil {
 			t.Fatalf("seed ReplaceForTeam: %v", err)
 		}
 		bad := []domain.JiraProjectStatusRules{{
-			ProjectKey: "", PickupMembers: jiraRefs("x"),
+			JiraProjectID: "", PickupMembers: jiraRefs("x"),
 			InProgressMembers: jiraRefs("y"), InProgressCanonical: jiraRef("y"),
 			DoneMembers: jiraRefs("z"), DoneCanonical: jiraRef("z"),
 		}}
-		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, bad); err == nil {
-			t.Error("ReplaceForTeam accepted empty ProjectKey; expected error")
+		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, jiraSite, bad); err == nil {
+			t.Error("ReplaceForTeam accepted empty JiraProjectID; expected error")
 		}
 		// Original row survives — no partial writes / stealth clear.
-		got, err := stores.JiraStatusRules.ListForTeamSystem(ctx, ids.TeamID)
+		got, err := stores.JiraStatusRules.ListForTeamSystem(ctx, ids.TeamID, jiraSite)
 		if err != nil {
 			t.Fatalf("ListForTeamSystem: %v", err)
 		}
@@ -1929,7 +1936,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 
 	t.Run("JiraStatusRules_EmptyTeam_ReturnsEmptySlice", func(t *testing.T) {
 		stores, ids := factory(t)
-		got, err := stores.JiraStatusRules.ListForTeamSystem(ctx, ids.TeamID)
+		got, err := stores.JiraStatusRules.ListForTeamSystem(ctx, ids.TeamID, jiraSite)
 		if err != nil {
 			t.Fatalf("ListForTeamSystem: %v", err)
 		}
@@ -2425,6 +2432,21 @@ func jiraRefs(names ...string) []domain.JiraStatusRef {
 		refs = append(refs, jiraRef(n))
 	}
 	return refs
+}
+
+// registerJiraProjects gives each rule a registry row on jiraSite for its
+// ProjectKey, the way the settings write does before it saves the rules, and
+// stamps the rule with the row as every rule read hands it back.
+func registerJiraProjects(t *testing.T, stores SettingsStores, ids SettingsIDs, rules []domain.JiraProjectStatusRules) {
+	t.Helper()
+	for i := range rules {
+		p, err := stores.JiraProjects.FindOrCreate(context.Background(), ids.OrgID, jiraSite, "id-"+rules[i].ProjectKey, rules[i].ProjectKey, "")
+		if err != nil {
+			t.Fatalf("register jira project %s: %v", rules[i].ProjectKey, err)
+		}
+		rules[i].JiraProjectID = p.ID
+		rules[i].ProjectExternalID = p.ExternalID
+	}
 }
 
 func sortRulesByKey(rules []domain.JiraProjectStatusRules) {

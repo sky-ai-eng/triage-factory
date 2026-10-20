@@ -410,10 +410,10 @@ type Status struct {
 	Name string `json:"name"`
 }
 
-// ProjectStatuses returns all unique statuses available in a project,
-// deduplicated across issue types.
-func (c *Client) ProjectStatuses(ctx context.Context, projectKey string) ([]Status, error) {
-	url := c.apiURL("project/%s/statuses", projectKey)
+// ProjectStatuses returns all unique statuses available in a project, named by
+// its id or its key, deduplicated across issue types.
+func (c *Client) ProjectStatuses(ctx context.Context, idOrKey string) ([]Status, error) {
+	url := c.apiURL("project/%s/statuses", idOrKey)
 	body, err := c.get(ctx, url)
 	if err != nil {
 		return nil, err
@@ -688,11 +688,11 @@ func (c *Client) ListPriorities(ctx context.Context) ([]Priority, error) {
 	return priorities, nil
 }
 
-// Project is one entry of the instance's project catalog: the key rules and
-// JQL are written against, plus the display name a picker renders beside it.
-// Nothing more — this catalog is read live for a picker, not mirrored for
-// anything downstream to consume.
+// Project is one entry of the instance's project catalog: Jira's numeric id,
+// which a project key rename does not move and which TF's project registry is
+// keyed by, the key a picker and a person name it with, and the display name.
 type Project struct {
+	ID   string `json:"id"`
 	Key  string `json:"key"`
 	Name string `json:"name"`
 }
@@ -817,12 +817,13 @@ func (c *Client) listProjectsDataCenter(ctx context.Context, query string, start
 	return page, nil
 }
 
-// GetProject reads one project by key. Both deployments serve /project/{key}
-// with the same key and name fields, so there is no Cloud-vs-Data-Center arm.
-// A project this credential cannot see is a 404 (IsNotFound), the same answer
-// Jira gives for one that does not exist.
-func (c *Client) GetProject(ctx context.Context, projectKey string) (Project, error) {
-	body, err := c.get(ctx, c.apiURL("project/%s", projectKey))
+// GetProject reads one project by its id or its key. Both deployments serve
+// /project/{idOrKey} with the same id, key and name fields, so there is no
+// Cloud-vs-Data-Center arm. Asked by id, the answer carries the key the
+// project has now. A project this credential cannot see is a 404
+// (IsNotFound), the same answer Jira gives for one that does not exist.
+func (c *Client) GetProject(ctx context.Context, idOrKey string) (Project, error) {
+	body, err := c.get(ctx, c.apiURL("project/%s", idOrKey))
 	if err != nil {
 		return Project{}, err
 	}

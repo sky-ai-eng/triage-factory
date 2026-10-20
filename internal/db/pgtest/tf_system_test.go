@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -596,7 +597,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if _, err := stores.GitHubApps.ListInstallationsForOrgSystem(ctx, orgID); err != nil {
 			t.Errorf("GitHubApps.ListInstallationsForOrgSystem: %v", err)
 		}
-		if _, err := stores.JiraStatusRules.ListForTeamSystem(ctx, teamID); err != nil {
+		if _, err := stores.JiraStatusRules.ListForTeamSystem(ctx, teamID, dbseed.JiraSite); err != nil {
 			t.Errorf("JiraStatusRules.ListForTeamSystem: %v", err)
 		}
 		if _, err := stores.Spend.SpendByCategorySystem(ctx, orgID, time.Now().Add(-24*time.Hour), time.Time{}); err != nil {

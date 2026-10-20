@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -179,21 +180,79 @@ func TestEntityStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	})
 }
 
+// pgJiraSite is the Jira site the package's Jira entity fixtures are scoped
+// under, and so the site their projects are registered on.
+const pgJiraSite = "https://jira.example.com"
+
 // seedPgJiraRule inserts a fully-configured jira_project_status_rules
-// row attaching projectKey to teamID. The members/canonical fields
-// satisfy the jpsr_*_populated CHECK constraints; the test only cares
-// that the row exists so the membership semi-join can match on
-// project_key.
-func seedPgJiraRule(t *testing.T, h *pgtest.Harness, teamID, projectKey string) {
+// row attaching projectKey to teamID, registering the project on
+// pgJiraSite first. The members/canonical fields satisfy the
+// jpsr_*_populated CHECK constraints; the test only cares that the row
+// exists so the membership semi-join can match the project. Returns the
+// registry row's id.
+func seedPgJiraRule(t *testing.T, h *pgtest.Harness, teamID, projectKey string) string {
 	t.Helper()
+	var orgID string
+	if err := h.AdminDB.QueryRow(`SELECT org_id FROM teams WHERE id = $1`, teamID).Scan(&orgID); err != nil {
+		t.Fatalf("read org of team %s: %v", teamID, err)
+	}
+	project := dbseed.JiraProject(t, h.AdminDB, orgID, pgJiraSite, projectKey)
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO jira_project_status_rules
-			(team_id, project_key, pickup_members, in_progress_members, in_progress_canonical, done_members, done_canonical)
-		VALUES ($1, $2, '[{"id":"10000","name":"To Do"}]'::jsonb,
+			(team_id, jira_project_id, org_id, pickup_members, in_progress_members, in_progress_canonical, done_members, done_canonical)
+		VALUES ($1, $2, $3, '[{"id":"10000","name":"To Do"}]'::jsonb,
 			'[{"id":"10001","name":"In Progress"}]'::jsonb, '{"id":"10001","name":"In Progress"}'::jsonb,
 			'[{"id":"10002","name":"Done"}]'::jsonb, '{"id":"10002","name":"Done"}'::jsonb)
-	`, teamID, projectKey); err != nil {
+	`, teamID, project, orgID); err != nil {
 		t.Fatalf("seed jira rule %s for team %s: %v", projectKey, teamID, err)
+	}
+	return project
+}
+
+// TestEntityStore_Postgres_ListActiveJiraTeamScoped_FollowsTheRegistry: the
+// deck matches an issue to its project through the registry's current key on
+// the issue's own site. After a project key rename — the registry row moved
+// to the new key and the issue renamed under it, as the poll does — the issue
+// is still on the deck, and an issue under the same key on another Jira site
+// never is.
+func TestEntityStore_Postgres_ListActiveJiraTeamScoped_FollowsTheRegistry(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, _ := seedPgEntityOrg(t, h)
+	team := firstTeamForOrg(t, h, orgID)
+	project := seedPgJiraRule(t, h, team, "OLD")
+	issue, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "jira", pgJiraSite, "OLD-1", "10001", "issue", "Renamed", "")
+	if err != nil {
+		t.Fatalf("FindOrCreateSystem: %v", err)
+	}
+	elsewhere, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "jira", "https://other.example.com", "NEW-1", "20001", "issue", "Elsewhere", "")
+	if err != nil {
+		t.Fatalf("FindOrCreateSystem (other site): %v", err)
+	}
+
+	if _, err := stores.JiraProjects.RefreshSystem(ctx, orgID, project, "id-OLD", "NEW", ""); err != nil {
+		t.Fatalf("RefreshSystem: %v", err)
+	}
+	if _, err := stores.Entities.RenameSystem(ctx, orgID, "jira", pgJiraSite, "10001", "NEW-1", ""); err != nil {
+		t.Fatalf("RenameSystem: %v", err)
+	}
+
+	got, err := stores.Entities.ListActiveJiraTeamScoped(ctx, orgID, team)
+	if err != nil {
+		t.Fatalf("ListActiveJiraTeamScoped: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, e := range got {
+		ids[e.ID] = true
+	}
+	if !ids[issue.ID] {
+		t.Error("the renamed project's issue left the deck")
+	}
+	if ids[elsewhere.ID] {
+		t.Error("an issue under the project's key on another Jira site joined the deck")
 	}
 }
 

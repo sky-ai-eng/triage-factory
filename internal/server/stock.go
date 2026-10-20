@@ -120,7 +120,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		if e != nil {
 			return e
 		}
-		jiraRules, e = tx.JiraStatusRules.ListForTeam(r.Context(), teamID)
+		jiraRules, e = tx.JiraStatusRules.ListForTeam(r.Context(), teamID, domain.EntityScope("jira", orgSet))
 		if e != nil {
 			return fmt.Errorf("list jira rules: %w", e)
 		}
@@ -169,7 +169,8 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		var e error
 		// Team-scoped discovery read: in multi-mode this returns only
 		// Jira entities whose project is attached to one of the viewer's
-		// teams (via the jira_project_status_rules RLS semi-join), so an
+		// teams (via the jira_project_status_rules RLS semi-join, on the
+		// entity's own Jira site), so an
 		// org-wide poller can't surface another team's untriaged backlog
 		// on this user's swipe deck. Local mode (SQLite) returns the full
 		// active set — N=1, nothing to scope away.
@@ -465,7 +466,7 @@ func (s *Server) applyStockAction(w http.ResponseWriter, r *http.Request, action
 		if e != nil {
 			return e
 		}
-		jiraRules, e = tx.JiraStatusRules.ListForTeam(r.Context(), teamID)
+		jiraRules, e = tx.JiraStatusRules.ListForTeam(r.Context(), teamID, domain.EntityScope("jira", orgSet))
 		if e != nil {
 			return fmt.Errorf("list jira rules: %w", e)
 		}

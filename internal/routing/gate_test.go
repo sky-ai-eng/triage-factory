@@ -257,12 +257,8 @@ func TestJiraGate_DisjointProjects_DropsUntrackingTeam(t *testing.T) {
 		InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
 		DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
 	}}
-	if err := st.JiraStatusRules.ReplaceForTeam(ctx, teamA, skyRule); err != nil {
-		t.Fatalf("teamA track SKY: %v", err)
-	}
-	if err := st.JiraStatusRules.ReplaceForTeam(ctx, teamB, opsRule); err != nil {
-		t.Fatalf("teamB track OPS: %v", err)
-	}
+	trackJiraProjects(t, dbh, teamA, skyRule...)
+	trackJiraProjects(t, dbh, teamB, opsRule...)
 
 	seedMatchAllJiraAssignedRule(t, dbh, teamA)
 	seedMatchAllJiraAssignedRule(t, dbh, teamB)
@@ -490,19 +486,16 @@ func TestGate_LocalN1_NoOp(t *testing.T) {
 // reads old_project.
 func TestJiraGate_KeyChangedReachesBothProjectsTeams(t *testing.T) {
 	dbh := newGateDB(t)
-	st := sqlitestore.New(dbh)
 	ctx := context.Background()
 	teamA := runmode.LocalDefaultTeamID
 	teamB := seedGateTeam(t, dbh, "team-b")
 	teamC := seedGateTeam(t, dbh, "team-c")
 	for team, project := range map[string]string{teamA: "ENG", teamB: "OPS", teamC: "WEB"} {
-		if err := st.JiraStatusRules.ReplaceForTeam(ctx, team, []domain.JiraProjectStatusRules{{
+		trackJiraProjects(t, dbh, team, domain.JiraProjectStatusRules{
 			ProjectKey: project, PickupMembers: jiraRefs("To Do"),
 			InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
 			DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
-		}}); err != nil {
-			t.Fatalf("team tracks %s: %v", project, err)
-		}
+		})
 	}
 	r := gateRouter(dbh)
 

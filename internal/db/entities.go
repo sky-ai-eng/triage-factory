@@ -234,9 +234,11 @@ type EntityStore interface {
 	// viewer's teams.
 	//
 	// Multi-mode (Postgres): returns only active Jira entities whose
-	// project key (the prefix of source_id, e.g. "PROJ" in "PROJ-123")
-	// matches a jira_project_status_rules row — the table a team
-	// populates to declare which Jira projects it tracks. That table's
+	// project has a jira_project_status_rules row — the table a team
+	// populates to declare which Jira projects it tracks — where the
+	// project is the jira_projects registry row on the entity's own site
+	// whose current key is the prefix of source_id ("PROJ" in
+	// "PROJ-123"). That table's
 	// RLS (jira_rules_select) is team-membership-scoped, so under the
 	// app pool (tf_app) the semi-join auto-scopes to the projects
 	// attached to the viewer's teams with no explicit team_id in the

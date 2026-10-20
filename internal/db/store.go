@@ -241,13 +241,19 @@ type Stores struct {
 	Teams TeamsStore
 
 	// JiraStatusRules owns the jira_project_status_rules table —
-	// one row per (team_id, project_key) carrying the team's per-
+	// one row per (team_id, jira_project_id) carrying the team's per-
 	// project pickup/in_progress/done configuration. App pool in
 	// Postgres for the request-handler reads/writes (RLS gates by
 	// team membership / team admin); admin pool for the boot-time
 	// `...System` reads the poller manager + scorer make. Bulk-
 	// replace semantics on ReplaceForTeam match config.Save() today.
 	JiraStatusRules JiraStatusRulesStore
+
+	// JiraProjects owns the jira_projects registry — one row per Jira
+	// project on one site, the row a team's Jira rules reference. App pool
+	// in Postgres for the settings write that adds a project; admin pool
+	// for the poller's refresh, whose merge spans teams.
+	JiraProjects JiraProjectStore
 
 	// LinearTeamRules owns the linear_team_rules table — one row per
 	// (team_id, linear_team_id), the Linear sibling of JiraStatusRules.
@@ -568,6 +574,7 @@ type TxStores struct {
 	OrgMemberships           OrgMembershipsStore
 	Teams                    TeamsStore
 	JiraStatusRules          JiraStatusRulesStore
+	JiraProjects             JiraProjectStore
 	LinearTeamRules          LinearTeamRulesStore
 	TeamGitHubGroups         TeamGitHubGroupsStore
 	TeamGitHubRepos          TeamGitHubReposStore

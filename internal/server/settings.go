@@ -196,7 +196,9 @@ func cloneJiraProjects(in []domain.JiraProjectStatusRules) []domain.JiraProjectS
 // jiraProjectsEqual compares two per-project lists by value, treating
 // order as significant (the user-facing UI keeps projects in the order
 // they were added; reordering counts as a change worth restarting the
-// poller for). Rules are compared with set-equality on Members.
+// poller for). Projects are compared by registry row, so a key the
+// registry refreshed is not a change; rules are compared with
+// set-equality on Members.
 //
 // InReview is deliberately absent from the comparison. This function exists to
 // answer one question — did anything the Jira poller asks change? — and the
@@ -208,7 +210,7 @@ func jiraProjectsEqual(a, b []domain.JiraProjectStatusRules) bool {
 		return false
 	}
 	for i := range a {
-		if a[i].ProjectKey != b[i].ProjectKey {
+		if a[i].JiraProjectID != b[i].JiraProjectID {
 			return false
 		}
 		if !ruleEqual(a[i].PickupMembers, domain.JiraStatusRef{}, b[i].PickupMembers, domain.JiraStatusRef{}) ||
@@ -259,32 +261,33 @@ type jiraProjectSettings struct {
 	Done       jiraStatusRuleJSON `json:"done"`
 }
 
-// rulesToProjectConfigsOrdered reorders the stored rules to match order.
-// Keys present in order but missing from rules are skipped (the store is
-// the source of truth for rule existence); keys in rules but not in order
-// get appended after the ordered set in their store-returned (ASC)
-// position so a manual DB poke that adds a row without updating
-// team_settings.jira_projects still surfaces.
+// rulesToProjectConfigsOrdered reorders the stored rules to match order, the
+// team's registry row ids in display order (team_settings.jira_projects).
+// Ids present in order but missing from rules are skipped (the store is
+// the source of truth for rule existence, and a rule on another Jira site
+// is not read at all); rules not in order get appended after the ordered
+// set in their store-returned (key ASC) position so a manual DB poke that
+// adds a row without updating team_settings.jira_projects still surfaces.
 func rulesToProjectConfigsOrdered(rules []domain.JiraProjectStatusRules, order []string) []domain.JiraProjectStatusRules {
 	if len(rules) == 0 {
 		return nil
 	}
-	byKey := make(map[string]domain.JiraProjectStatusRules, len(rules))
+	byID := make(map[string]domain.JiraProjectStatusRules, len(rules))
 	for _, r := range rules {
-		byKey[r.ProjectKey] = r
+		byID[r.JiraProjectID] = r
 	}
 	out := make([]domain.JiraProjectStatusRules, 0, len(rules))
 	seen := make(map[string]bool, len(rules))
-	for _, k := range order {
-		r, ok := byKey[k]
-		if !ok {
+	for _, id := range order {
+		r, ok := byID[id]
+		if !ok || seen[id] {
 			continue
 		}
 		out = append(out, r)
-		seen[k] = true
+		seen[id] = true
 	}
 	for _, r := range rules {
-		if seen[r.ProjectKey] {
+		if seen[r.JiraProjectID] {
 			continue
 		}
 		out = append(out, r)
@@ -320,16 +323,17 @@ func toJiraStatusRuleJSON(members []domain.JiraStatusRef, canonical domain.JiraS
 	return out
 }
 
-// projectKeysFromConfigs returns the ordered project keys from a
-// per-project rule slice with empty entries filtered out.
-func projectKeysFromConfigs(projects []domain.JiraProjectStatusRules) []string {
-	keys := make([]string, 0, len(projects))
+// jiraProjectIDsFromConfigs returns the ordered registry row ids from a
+// per-project rule slice — the display order team_settings.jira_projects
+// stores.
+func jiraProjectIDsFromConfigs(projects []domain.JiraProjectStatusRules) []string {
+	ids := make([]string, 0, len(projects))
 	for _, p := range projects {
-		if p.ProjectKey != "" {
-			keys = append(keys, p.ProjectKey)
+		if p.JiraProjectID != "" {
+			ids = append(ids, p.JiraProjectID)
 		}
 	}
-	return keys
+	return ids
 }
 
 // The org's Jira service credential body, one struct per deployment. The

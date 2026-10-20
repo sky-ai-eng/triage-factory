@@ -293,17 +293,18 @@ const pgFactoryEntitySelectColumns = `
 // policies already constrain visible rows to the viewer's team memberships, so each EXISTS
 // auto-scopes to the viewer's teams with no explicit team_id — the same
 // RLS-does-the-scoping pattern ListActiveJiraTeamScoped uses
-// for the Jira discovery deck. The teams join binds org (via e.org_id) as
+// for the Jira discovery deck. The org bind (via e.org_id) is
 // defense-in-depth so the filter still holds on the admin pool where RLS
-// is bypassed: team_github_repos, jira_project_status_rules and
-// linear_team_rules carry no org_id column, so org scope rides the teams FK.
+// is bypassed: team_github_repos and linear_team_rules bind it through the
+// teams join, jira_project_status_rules on its own org_id.
 //
 // GitHub source_id is "owner/repo#N" (tracker.ghSourceID): split_part on
 // '/' yields the owner, split_part on '/' then '#' yields the repo.
 // Matching is case-insensitive on both axes, mirroring TracksRepoSystem
 // (GitHub identifiers are case-insensitive). Jira keys are hyphen-free,
 // so split_part(source_id, '-', 1) is the project key (e.g. "PROJ" in
-// "PROJ-123"), matching jiraTeamProjectMembershipExists.
+// "PROJ-123"), matched against the registry row on the entity's site,
+// as in jiraTeamProjectMembershipExists.
 
 // factoryGitHubRepoTrackedExists scopes a github entities row (alias e)
 // to the tracked repos of the viewer's teams.
@@ -331,11 +332,15 @@ const factoryGitHubRepoTrackedExists = `EXISTS (
 // factoryJiraProjectTrackedExists scopes a jira entities row (alias e) to
 // the projects attached to the viewer's teams. Mirrors
 // jiraTeamProjectMembershipExists (the Jira deck's semi-join).
+//
+// TODO(TFAC-1130): match e's own jira_project_id against jr.jira_project_id
+// here and in factoryJiraProjectTrackedForTeams instead of parsing the key.
 const factoryJiraProjectTrackedExists = `EXISTS (
 	SELECT 1 FROM jira_project_status_rules jr
-	JOIN teams tm ON tm.id = jr.team_id
-	WHERE tm.org_id = e.org_id
-	  AND jr.project_key = split_part(e.source_id, '-', 1)
+	JOIN jira_projects jp ON jp.id = jr.jira_project_id
+	WHERE jr.org_id = e.org_id
+	  AND jp.site = e.scope
+	  AND jp.project_key = split_part(e.source_id, '-', 1)
 )`
 
 // factoryLinearTeamTrackedExists scopes a linear entities row (alias e) to
@@ -390,10 +395,11 @@ func factoryGitHubRepoTrackedForTeams(placeholders string) string {
 func factoryJiraProjectTrackedForTeams(placeholders string) string {
 	return `EXISTS (
 		SELECT 1 FROM jira_project_status_rules jr
-		JOIN teams tm ON tm.id = jr.team_id
-		WHERE tm.org_id = e.org_id
+		JOIN jira_projects jp ON jp.id = jr.jira_project_id
+		WHERE jr.org_id = e.org_id
 		  AND jr.team_id IN (` + placeholders + `)
-		  AND jr.project_key = split_part(e.source_id, '-', 1)
+		  AND jp.site = e.scope
+		  AND jp.project_key = split_part(e.source_id, '-', 1)
 	)`
 }
 

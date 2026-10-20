@@ -42,6 +42,25 @@ func setJiraHost(t *testing.T, database *sql.DB) {
 	}
 }
 
+// trackJiraProjects makes rules teamID's Jira set on the org's Jira site, the
+// way the settings write does: the org is pointed at jiraTestHost, and each
+// rule's project, named by its ProjectKey, is registered there first.
+func trackJiraProjects(t *testing.T, database *sql.DB, teamID string, rules ...domain.JiraProjectStatusRules) {
+	t.Helper()
+	setJiraHost(t, database)
+	st := sqlitestore.New(database)
+	for i := range rules {
+		p, err := st.JiraProjects.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, jiraTestHost, "id-"+rules[i].ProjectKey, rules[i].ProjectKey, "")
+		if err != nil {
+			t.Fatalf("register jira project %s: %v", rules[i].ProjectKey, err)
+		}
+		rules[i].JiraProjectID = p.ID
+	}
+	if err := st.JiraStatusRules.ReplaceForTeam(t.Context(), teamID, jiraTestHost, rules); err != nil {
+		t.Fatalf("track jira projects: %v", err)
+	}
+}
+
 // seedJiraUserOnTeam creates a user, enrolls them on teamID, and binds the
 // Atlassian accountID on the jira test host.
 func seedJiraUserOnTeam(t *testing.T, database *sql.DB, teamID, accountID, displayName string) string {

@@ -94,6 +94,15 @@ type projectPlan struct {
 	pickup, inProgress, inReview, done ruleWish
 }
 
+// statusRef names the project to Jira's status read: by its project id when
+// one is known, which a key rename does not move, else by its key.
+func (p projectPlan) statusRef() string {
+	if p.row.ProjectExternalID != "" {
+		return p.row.ProjectExternalID
+	}
+	return p.row.ProjectKey
+}
+
 // changedIDs is every status id this plan still has to resolve, across all four
 // rules — the one place the rule set is enumerated for the "does this project
 // need Jira at all?" question.
@@ -113,10 +122,18 @@ func (p projectPlan) needsJira() bool {
 // status ids — each is looked up in the project's workflow, which both refuses
 // the unknown ones and supplies the display names.
 //
+// A stored project keeps its registry row (JiraProjectID). A key being added
+// has none yet: the gate resolves it to the project Jira describes — its id,
+// its key as Jira spells it, its name — into ProjectExternalID, ProjectKey and
+// ProjectName, and the write registers the row. Two entries Jira calls one
+// project are refused, whatever keys they arrived under.
+//
+// site is the org's Jira site, which every row added here is registered on.
+//
 // It writes the response and returns false when the write must not proceed.
 func (s *Server) gateJiraProjects(
 	w http.ResponseWriter, r *http.Request,
-	orgID, userID string,
+	orgID, userID, site string,
 	wishes []jiraProjectWish, stored []domain.JiraProjectStatusRules,
 ) ([]domain.JiraProjectStatusRules, bool) {
 	storedByKey := make(map[string]domain.JiraProjectStatusRules, len(stored))
@@ -131,9 +148,15 @@ func (s *Server) gateJiraProjects(
 	needsJira := false
 	for _, wish := range wishes {
 		prior, isStored := storedByKey[wish.key]
+		row := domain.JiraProjectStatusRules{ProjectKey: wish.key}
+		if isStored {
+			row.JiraProjectID = prior.JiraProjectID
+			row.ProjectName = prior.ProjectName
+			row.ProjectExternalID = prior.ProjectExternalID
+		}
 		p := projectPlan{
 			wish:       wish,
-			row:        domain.JiraProjectStatusRules{ProjectKey: wish.key},
+			row:        row,
 			newKey:     !isStored,
 			pickup:     requestedPickup(wish.write.Pickup, prior.PickupMembers),
 			inProgress: requestedRule(wish.write.InProgress, prior.InProgressMembers, prior.InProgressCanonical),
@@ -171,13 +194,20 @@ func (s *Server) gateJiraProjects(
 	if !ok {
 		return nil, false
 	}
+	// A connected credential implies a usable site, so this holds only if the
+	// two ever disagree on what a usable base URL is.
+	if site == "" {
+		writeNotConfigured(w, "Jira has no site configured for this workspace, so a project or a status mapping cannot be added")
+		return nil, false
+	}
 
 	var v httpx.Validation
 	out := make([]domain.JiraProjectStatusRules, 0, len(plans))
-	for _, p := range plans {
+	for i := range plans {
+		p := &plans[i]
 		base := fmt.Sprintf("jira_projects[%d]", p.wish.index)
 		if p.newKey {
-			visible, err := jiraProjectVisible(r.Context(), client, p.wish.key)
+			project, visible, err := jiraProjectVisible(r.Context(), client, p.wish.key)
 			if err != nil {
 				writeJiraGateStopped(w, &v, orgID, "project "+p.wish.key, err)
 				return nil, false
@@ -186,6 +216,9 @@ func (s *Server) gateJiraProjects(
 				v.Invalid(base+".key", "no Jira project "+p.wish.key+" is visible to this workspace's Jira credential")
 				continue
 			}
+			p.row.ProjectExternalID = project.ID
+			p.row.ProjectKey = normalizeJiraProjectKey(project.Key)
+			p.row.ProjectName = project.Name
 		}
 		if p.changedIDs() == 0 {
 			out = append(out, p.row)
@@ -194,7 +227,7 @@ func (s *Server) gateJiraProjects(
 		// One fetch per project with a changed rule, shared by all four rules
 		// and doing both jobs at once: it is the gate, and it is where every
 		// display name comes from.
-		statuses, err := client.ProjectStatuses(r.Context(), p.wish.key)
+		statuses, err := client.ProjectStatuses(r.Context(), p.statusRef())
 		if err != nil {
 			writeJiraGateStopped(w, &v, orgID, "the statuses of project "+p.wish.key, err)
 			return nil, false
@@ -230,6 +263,25 @@ func (s *Server) gateJiraProjects(
 			row.DoneCanonical = resolveOne(p.done.canonicalID, byID, &v, base+".done.canonical_id", p.wish.key)
 		}
 		out = append(out, row)
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return nil, false
+	}
+	// Every entry now names its project by Jira's id where one is known, so two
+	// keys for one project — an old key stored before a rename and the new one
+	// being added — show up as one id. The gate answers one row per wish, in
+	// order, so a row's position is its wish's.
+	firstByID := map[string]int{}
+	for i, row := range out {
+		if row.ProjectExternalID == "" {
+			continue
+		}
+		if j, dup := firstByID[row.ProjectExternalID]; dup {
+			v.Invalid(fmt.Sprintf("jira_projects[%d].key", plans[i].wish.index),
+				fmt.Sprintf("Jira project %s is the project already in this set at jira_projects[%d] as %s", plans[i].wish.key, plans[j].wish.index, out[j].ProjectKey))
+			continue
+		}
+		firstByID[row.ProjectExternalID] = i
 	}
 	if v.Flush(w, http.StatusBadRequest) {
 		return nil, false
@@ -352,29 +404,34 @@ func writeJiraGateUpstream(w http.ResponseWriter, orgID, what string, err error)
 }
 
 // jiraProjectVisible reports whether key names a project this credential can
-// see, reading the same live catalog the picker's list route serves from.
+// see, and the project it names, reading the same live catalog the picker's
+// list route serves from.
 //
 // The filter is matched against key AND name upstream, so the exact key is
 // looked for across the pages that filter returns rather than assumed to be the
 // first row. Exhausting the page budget is an ERROR, not an absence: the walk
 // stopped without establishing anything, and reporting "no such project" there
-// would refuse a project that exists.
-func jiraProjectVisible(ctx context.Context, client *jira.Client, key string) (bool, error) {
+// would refuse a project that exists. So is a match with no project id, since
+// the project could not be registered by the identity that outlives its key.
+func jiraProjectVisible(ctx context.Context, client *jira.Client, key string) (jira.Project, bool, error) {
 	startAt := 0
 	for page := 0; page < jiraGateMaxPages; page++ {
 		got, err := client.ListProjects(ctx, key, startAt, jiraGateWindow)
 		if err != nil {
-			return false, err
+			return jira.Project{}, false, err
 		}
 		for _, p := range got.Projects {
 			if normalizeJiraProjectKey(p.Key) == key {
-				return true, nil
+				if p.ID == "" {
+					return jira.Project{}, false, fmt.Errorf("jira listed project %s without its id", key)
+				}
+				return p, true, nil
 			}
 		}
 		if got.NextStartAt == 0 {
-			return false, nil
+			return jira.Project{}, false, nil
 		}
 		startAt = got.NextStartAt
 	}
-	return false, fmt.Errorf("jira project catalog for %s still had pages after %d", key, jiraGateMaxPages)
+	return jira.Project{}, false, fmt.Errorf("jira project catalog for %s still had pages after %d", key, jiraGateMaxPages)
 }

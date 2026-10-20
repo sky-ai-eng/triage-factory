@@ -101,9 +101,7 @@ func taskCloseReason(t *testing.T, database *sql.DB, taskID string) (status, rea
 // vocabulary that decides whether a Jira snapshot reads terminal.
 func seedJiraDoneRules(t *testing.T, database *sql.DB, teamID string, rules ...domain.JiraProjectStatusRules) {
 	t.Helper()
-	if err := sqlitestore.New(database).JiraStatusRules.ReplaceForTeam(t.Context(), teamID, rules); err != nil {
-		t.Fatalf("seed jira status rules: %v", err)
-	}
+	trackJiraProjects(t, database, teamID, rules...)
 }
 
 // tableFingerprint renders every entities and tasks row as one string, so a

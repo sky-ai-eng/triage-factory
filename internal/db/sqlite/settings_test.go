@@ -37,6 +37,7 @@ func TestSettingsStores_SQLite(t *testing.T) {
 				Teams:            stores.Teams,
 				Users:            stores.Users,
 				JiraStatusRules:  stores.JiraStatusRules,
+				JiraProjects:     stores.JiraProjects,
 				TeamGitHubGroups: stores.TeamGitHubGroups,
 				TeamGitHubRepos:  stores.TeamGitHubRepos,
 				OrgEventSources:  stores.OrgEventSources,

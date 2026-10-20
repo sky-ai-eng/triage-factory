@@ -259,6 +259,9 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// admin half stays pinned to s.admin so ListForTeamSystem
 		// inside WithTx routes outside the tx.
 		JiraStatusRules: newJiraStatusRulesStore(tx, s.admin),
+		// JiraProjects: same split — FindOrCreate composes with the
+		// settings write's claims tx, RefreshSystem stays on s.admin.
+		JiraProjects: newJiraProjectStore(tx, s.admin),
 		// LinearTeamRules: same split as JiraStatusRules.
 		LinearTeamRules: newLinearTeamRulesStore(tx, s.admin),
 		// TeamGitHubGroups: app-side writes (SetForTeam) route through

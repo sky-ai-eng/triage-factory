@@ -2,10 +2,12 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -44,9 +46,10 @@ type fakeJiraStatus struct {
 
 // jiraCatalogFake stands in for a Data Center instance's three read endpoints:
 // /project, which serves the whole project catalog in one unpaged, unfiltered
-// response; /project/{key}, which serves one project of it; and
-// /project/{key}/statuses, which serves one project's workflow statuses
-// grouped by issue type.
+// response; /project/{idOrKey}, which serves one project of it; and
+// /project/{idOrKey}/statuses, which serves one project's workflow statuses
+// grouped by issue type. Every project's id is fakeJiraProjectID of its key,
+// and the two reads addressed at one project answer the same whichever names it.
 //
 // It is the right fixture for every reader under test — the catalog routes and
 // both halves of the PUT's write gate — because each page or lookup they
@@ -63,6 +66,7 @@ type jiraCatalogFake struct {
 	failFor  map[string]bool
 	hidden   map[string]bool
 	calls    int
+	onCall   func()
 }
 
 // newJiraCatalogFake starts a fake serving the given project keys, each with
@@ -76,11 +80,16 @@ func newJiraCatalogFake(t *testing.T, keys ...string) *jiraCatalogFake {
 		failing, keys := f.failing, append([]string(nil), f.keys...)
 		project, isStatuses := projectFromStatusesPath(r.URL.Path)
 		single, isProject := projectFromProjectPath(r.URL.Path)
+		project, single = fakeJiraProjectKey(project), fakeJiraProjectKey(single)
 		statuses, custom := f.statuses[project]
 		failing = failing || (isStatuses && f.failFor[project])
 		hidden := (isStatuses && f.hidden[project]) ||
 			(isProject && (f.hidden[single] || !slices.Contains(keys, single)))
+		onCall := f.onCall
 		f.mu.Unlock()
+		if onCall != nil {
+			onCall()
+		}
 
 		if failing {
 			// 401 rather than a 5xx: an idempotent GET retries a 5xx three
@@ -98,7 +107,7 @@ func newJiraCatalogFake(t *testing.T, keys ...string) *jiraCatalogFake {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if isProject {
-			_, _ = io.WriteString(w, `{"key": "`+single+`", "name": "`+single+` Project", "lead": {"name": "admin"}}`)
+			_, _ = io.WriteString(w, `{"id": "`+fakeJiraProjectID(single)+`", "key": "`+single+`", "name": "`+single+` Project", "lead": {"name": "admin"}}`)
 			return
 		}
 		if isStatuses {
@@ -113,7 +122,7 @@ func newJiraCatalogFake(t *testing.T, keys ...string) *jiraCatalogFake {
 		}
 		rows := make([]string, len(keys))
 		for i, k := range keys {
-			rows[i] = `{"key": "` + k + `", "name": "` + k + ` Project"}`
+			rows[i] = `{"id": "` + fakeJiraProjectID(k) + `", "key": "` + k + `", "name": "` + k + ` Project"}`
 		}
 		_, _ = io.WriteString(w, "["+strings.Join(rows, ",")+"]")
 	}))
@@ -122,7 +131,37 @@ func newJiraCatalogFake(t *testing.T, keys ...string) *jiraCatalogFake {
 	return f
 }
 
-// projectFromStatusesPath recognizes /rest/api/{v}/project/{key}/statuses.
+// fakeJiraProjectID is the Jira project id the fake gives key: "4" and then
+// each character's two-digit code, so distinct keys get distinct ids and an id
+// can be read back into its key.
+func fakeJiraProjectID(key string) string {
+	var b strings.Builder
+	b.WriteString("4")
+	for _, c := range key {
+		fmt.Fprintf(&b, "%02d", c)
+	}
+	return b.String()
+}
+
+// fakeJiraProjectKey reads a path segment naming a project by id or by key
+// back into its key. A key starts with a letter, so a segment starting with a
+// digit is an id.
+func fakeJiraProjectKey(idOrKey string) string {
+	if idOrKey == "" || idOrKey[0] != '4' || (len(idOrKey)-1)%2 != 0 {
+		return idOrKey
+	}
+	var b strings.Builder
+	for i := 1; i < len(idOrKey); i += 2 {
+		n, err := strconv.Atoi(idOrKey[i : i+2])
+		if err != nil {
+			return idOrKey
+		}
+		b.WriteRune(rune(n))
+	}
+	return b.String()
+}
+
+// projectFromStatusesPath recognizes /rest/api/{v}/project/{idOrKey}/statuses.
 func projectFromStatusesPath(path string) (string, bool) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) == 6 && parts[3] == "project" && parts[5] == "statuses" {
@@ -131,7 +170,7 @@ func projectFromStatusesPath(path string) (string, bool) {
 	return "", false
 }
 
-// projectFromProjectPath recognizes /rest/api/{v}/project/{key}.
+// projectFromProjectPath recognizes /rest/api/{v}/project/{idOrKey}.
 func projectFromProjectPath(path string) (string, bool) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) == 5 && parts[3] == "project" {
@@ -146,6 +185,13 @@ func (f *jiraCatalogFake) Calls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
+}
+
+// OnCall runs fn as each request arrives, before the fake answers it.
+func (f *jiraCatalogFake) OnCall(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onCall = fn
 }
 
 // SetKeys replaces the catalog, standing in for a project created or deleted in
