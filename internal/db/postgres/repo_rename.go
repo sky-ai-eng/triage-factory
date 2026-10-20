@@ -16,6 +16,10 @@ import (
 //	renameRepositoryRow    — the repository's own row. The rename itself.
 //	rewriteSlugDerivedKeys — text keys with a slug embedded in them.
 //
+// Before either, absorbBareRepository folds in a bare registry row an entity
+// create minted under the target name: the one occupant of that name a rename
+// can prove is the same repository.
+//
 // The tracked set, the worktree ledger and GitHub entities (repository_id)
 // reference the repository by the registry row's id, so a rename moves the slug
 // on one row and every one of them still resolves without being touched.
@@ -54,8 +58,7 @@ import (
 // Everything here runs on the ADMIN pool. The rewrite spans tables owned by
 // every team in the org — tracked sets, entities, artifacts — and no
 // request-scoped identity can see all of them, so RLS cannot express the
-// operation; org_id is bound by argument in every statement instead, and
-// team_github_repos (which has no org_id of its own) is bound through teams.
+// operation; org_id is bound by argument in every statement instead.
 
 func (s *repoStore) ListIdentitiesSystem(ctx context.Context, orgID, host string) ([]domain.RepoRef, error) {
 	if err := db.RequireRepoHost(host); err != nil {
@@ -106,29 +109,32 @@ func (s *repoStore) RenameSystem(ctx context.Context, orgID string, observed dom
 		// rename serialize here; the second one's SELECT re-evaluates against
 		// the row the winner committed (READ COMMITTED re-reads a row it
 		// blocked on), sees the slug already current, and returns a no-op.
-		stored, err := storedSlugsForIdentity(ctx, tx, orgID, source, observed.Host, observed.ExternalID)
+		stored, err := storedRowsForIdentity(ctx, tx, orgID, source, observed.Host, observed.ExternalID)
 		if err != nil {
 			return err
 		}
 		if len(stored) == 0 {
 			return nil // no row carries this id — nothing to rename
 		}
-		for _, slug := range stored {
-			if domain.SameRepoSlug(slug, observed.Slug()) {
+		for _, row := range stored {
+			if domain.SameRepoSlug(row.slug, observed.Slug()) {
 				return nil // already current: the idempotent no-op
 			}
 		}
 		if len(stored) > 1 {
 			return fmt.Errorf("%w: %s", db.ErrRepoIdentityAmbiguous, observed.ExternalID)
 		}
-		from, to := stored[0], observed.Slug()
+		renamed := stored[0]
+		from, to := renamed.slug, observed.Slug()
 
-		occupied, err := slugHeldByAnotherRepository(ctx, tx, orgID, source, observed)
+		occupant, err := repositoryHoldingSlug(ctx, tx, orgID, source, observed, renamed.id)
 		if err != nil {
 			return err
 		}
-		if occupied {
-			return fmt.Errorf("%w: %s", db.ErrRepoSlugOccupied, to)
+		if occupant != nil {
+			if err := absorbBareRepository(ctx, tx, orgID, *occupant, renamed.id, to); err != nil {
+				return err
+			}
 		}
 
 		if err := renameRepositoryRow(ctx, tx, orgID, source, from, observed); err != nil {
@@ -146,14 +152,18 @@ func (s *repoStore) RenameSystem(ctx context.Context, orgID string, observed dom
 	return out, nil
 }
 
-// storedSlugsForIdentity returns the slug of every repository row carrying one
-// provider identity on host, locking each against a concurrent rename. The
-// identity index allows one, so more than one is a corrupt state rather than a
-// shape the caller handles, and the plural return exists to let the caller SAY
-// that instead of silently picking a row.
-func storedSlugsForIdentity(ctx context.Context, q queryer, orgID, source, host, externalID string) ([]string, error) {
+// identityRow is one repository row carrying the provider identity a rename
+// keys on: its registry id and the slug it is stored under.
+type identityRow struct{ id, slug string }
+
+// storedRowsForIdentity returns every repository row carrying one provider
+// identity on host, locking each against a concurrent rename. The identity
+// index allows one, so more than one is a corrupt state rather than a shape
+// the caller handles, and the plural return exists to let the caller SAY that
+// instead of silently picking a row.
+func storedRowsForIdentity(ctx context.Context, q queryer, orgID, source, host, externalID string) ([]identityRow, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT owner, repo FROM repositories
+		SELECT id, owner, repo FROM repositories
 		 WHERE org_id = $1 AND source = $2 AND host = $3 AND external_id = $4
 		 ORDER BY owner, repo
 		 FOR UPDATE
@@ -162,39 +172,112 @@ func storedSlugsForIdentity(ctx context.Context, q queryer, orgID, source, host,
 		return nil, err
 	}
 	defer rows.Close()
-	var out []string
+	var out []identityRow
 	for rows.Next() {
-		var owner, repo string
-		if err := rows.Scan(&owner, &repo); err != nil {
+		var id, owner, repo string
+		if err := rows.Scan(&id, &owner, &repo); err != nil {
 			return nil, err
 		}
-		out = append(out, owner+"/"+repo)
+		out = append(out, identityRow{id: id, slug: owner + "/" + repo})
 	}
 	return out, rows.Err()
 }
 
-// slugHeldByAnotherRepository reports whether a repository row on the same
-// host other than the one being renamed already spells the target slug.
-//
-// TODO(TFAC-1149): a bare row (no external_id, tracked by no team) that an
-// entity create minted under the new name before the rename was observed
-// counts as occupying it, so the rename is refused until the row is absorbed.
-func slugHeldByAnotherRepository(ctx context.Context, q queryer, orgID, source string, observed domain.RepoRef) (bool, error) {
-	var found int
+// slugOccupant is a repository row, other than the one being renamed, that
+// already answers to the target slug on the host. The folded identity index
+// allows at most one.
+type slugOccupant struct {
+	id string
+	// identified is whether the row carries a provider id.
+	identified bool
+}
+
+// repositoryHoldingSlug returns the row occupying the target slug, or nil,
+// locked FOR UPDATE because absorbBareRepository decides on what references
+// the row. A concurrent insert of a tracking, ledger or entity row naming it
+// takes a key share lock on it for its foreign key check, which conflicts with
+// this one: an insert that got there first commits before this lock is
+// granted and is seen by the reads after it, and one that comes later waits
+// and then fails its foreign key against the deleted row.
+func repositoryHoldingSlug(ctx context.Context, q queryer, orgID, source string, observed domain.RepoRef, renamedID string) (*slugOccupant, error) {
+	var occ slugOccupant
 	err := q.QueryRowContext(ctx, `
-		SELECT 1 FROM repositories
-		 WHERE org_id = $1 AND source = $2 AND host = $6
-		   AND lower(owner) = lower($3) AND lower(repo) = lower($4)
-		   AND (external_id IS NULL OR external_id <> $5)
-		 LIMIT 1
-	`, orgID, source, observed.Owner, observed.Repo, observed.ExternalID, observed.Host).Scan(&found)
+		SELECT id, COALESCE(external_id, '') <> '' FROM repositories
+		 WHERE org_id = $1 AND source = $2 AND host = $3
+		   AND lower(owner) = lower($4) AND lower(repo) = lower($5)
+		   AND id <> $6
+		 FOR UPDATE
+	`, orgID, source, observed.Host, observed.Owner, observed.Repo, renamedID).Scan(&occ.id, &occ.identified)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return nil, nil
 	}
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	return true, nil
+	return &occ, nil
+}
+
+// absorbBareRepository folds the row occupying the target slug into the
+// renamed row, or refuses with ErrRepoSlugOccupied when it cannot.
+//
+// The occupant it absorbs is a bare row: no provider id and tracked by no
+// team. A GitHub entity create mints exactly that when it writes under the new
+// name before TF observes the rename: an agent touch on a pull request GitHub
+// serves through the redirect, or a pull request read off GraphQL, which keys
+// it by GitHub's current name. GitHub has just reported that the name belongs
+// to the renamed row's id, so the bare row is the same repository under a
+// second row. Nothing in the product lists or deletes an untracked registry
+// row, so refusing over it would stall the rename for good.
+//
+// Every other occupant refuses:
+//
+//   - one with a provider id is a different repository, one GitHub no longer
+//     serves under this name;
+//   - one a team tracks carries that team's decision, which the delete would
+//     cascade away (team_github_repos is ON DELETE CASCADE), so tracking is
+//     checked here rather than left to the foreign key;
+//   - one a worktree ledger row names is refused by that foreign key, which
+//     has no ON DELETE action, and the violation maps to ErrRepoSlugOccupied
+//     rather than surfacing as a raw constraint error.
+//
+// The occupant's entities move to the renamed row before the delete. Their
+// keys already spell the target slug, so the source_id rewrite after this
+// leaves them as they are, and a pull request with an entity under each name
+// still collides there and refuses the whole rename, this absorb included.
+//
+// A bare clone cached under the occupant's id (<StateRoot>/repos/<id>.git) is
+// left behind. The cache belongs to whichever process ran a checkout, often
+// an executor pod rather than the one applying the rename, and the ledger
+// foreign key has already established that no run still names the id. The
+// reaper's TTL pass reclaims it in multi; local's cache is unbounded.
+func absorbBareRepository(ctx context.Context, q queryer, orgID string, occupant slugOccupant, renamedID, to string) error {
+	if occupant.identified {
+		return fmt.Errorf("%w: %s", db.ErrRepoSlugOccupied, to)
+	}
+	var tracked bool
+	if err := q.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM team_github_repos WHERE org_id = $1 AND repository_id = $2)
+	`, orgID, occupant.id).Scan(&tracked); err != nil {
+		return fmt.Errorf("read tracking of %s: %w", to, err)
+	}
+	if tracked {
+		return fmt.Errorf("%w: %s is tracked by a team", db.ErrRepoSlugOccupied, to)
+	}
+
+	if _, err := q.ExecContext(ctx, `
+		UPDATE entities SET repository_id = $1 WHERE org_id = $2 AND repository_id = $3
+	`, renamedID, orgID, occupant.id); err != nil {
+		return fmt.Errorf("re-point entities of the bare %s row: %w", to, err)
+	}
+	if _, err := q.ExecContext(ctx, `
+		DELETE FROM repositories WHERE id = $1 AND org_id = $2
+	`, occupant.id, orgID); err != nil {
+		if isForeignKeyViolation(err) {
+			return fmt.Errorf("%w: a worktree still references the bare %s row: %v", db.ErrRepoSlugOccupied, to, err)
+		}
+		return fmt.Errorf("delete the bare %s row: %w", to, err)
+	}
+	return nil
 }
 
 // renameRepositoryRow moves the repository's own row. The row is keyed on a
@@ -439,11 +522,11 @@ func rewriteArtifactSlugs(ctx context.Context, q queryer, orgID, host, from, to 
 // key (org_id, source, scope, source_id) and artifacts' (org_id, scope,
 // dedup_key).
 // The entity rename and a stamp of an external id on an entity reach it too.
-// Both keys are reachable without any corruption: a record carries the
-// provider's own identity, not the registry row slugHeldByAnotherRepository
-// looks at, so a name no repositories row answers to can still be spoken for
-// by records alone. Mapping the violation is what makes that a documented
-// terminal state rather than a raw driver string the caller retries forever.
+// Both keys are reachable without any corruption: a record spells the name
+// itself, whatever registry row repositoryHoldingSlug finds, so a name can be
+// spoken for by records alone. Mapping the violation is what makes that a
+// documented terminal state rather than a raw driver string the caller
+// retries forever.
 //
 // Mapped at the write rather than pre-checked on purpose: a pre-check inside
 // this transaction still races a concurrent entity insert, so the index has to
@@ -455,4 +538,13 @@ func isUniqueViolation(err error) bool {
 	const uniqueViolation = "23505"
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == uniqueViolation
+}
+
+// isForeignKeyViolation reports whether err is Postgres' foreign-key failure
+// (SQLSTATE 23503): a delete absorbBareRepository issues against a row that
+// something without an ON DELETE action still references.
+func isForeignKeyViolation(err error) bool {
+	const foreignKeyViolation = "23503"
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolation
 }

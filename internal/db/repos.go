@@ -18,9 +18,11 @@ var (
 	// ErrRepoSlugOccupied means something already answers to the slug the
 	// rename would move onto. Two causes, one remedy:
 	//
-	//   - A different repository row — one with a different provider id. GitHub
-	//     cannot serve two live repositories under one name, so the occupant is
-	//     a repository TF still has a row for and GitHub no longer does.
+	//   - A repository row the rename cannot prove is the same repository: one
+	//     with a different provider id (GitHub cannot serve two live
+	//     repositories under one name, so the occupant is a repository TF still
+	//     has a row for and GitHub no longer does), or one without an id that a
+	//     team tracks or a worktree ledger row names.
 	//   - A durable record keyed on that name: an entity ("owner/repo#18") or
 	//     an artifact dedup key. Entity keys and artifact dedup keys spell the
 	//     slug themselves, whatever row an entity's repository_id references,
@@ -28,10 +30,17 @@ var (
 	//     forward-only), so a name can be spoken for by records alone.
 	//
 	// Neither is resolved by deleting the occupant. The first would drop a
-	// repository row; the second would destroy durable work — an entity carries
-	// tasks, conversations and memory, and an artifact is the audit record of a
-	// real external object. Retiring stale untracked state is a user-initiated
-	// action, never a side effect of a rename.
+	// repository row that holds a provider id, a team's tracking decision or a
+	// run's record of a checkout; the second would destroy durable work — an
+	// entity carries tasks, conversations and memory, and an artifact is the
+	// audit record of a real external object. Retiring stale untracked state is
+	// a user-initiated action, never a side effect of a rename.
+	//
+	// The one occupant a rename does absorb is a bare row (no provider id, no
+	// tracking, no ledger row) that a GitHub entity create minted under the
+	// new name before the rename was observed. The provider has just said the
+	// name belongs to the renamed row's id, so that row is the same repository
+	// and is folded in rather than refused over; see RenameSystem.
 	ErrRepoSlugOccupied = errors.New("target repository slug is already taken")
 
 	// ErrRepoIdentityAmbiguous means more than one repository row carries the
@@ -455,13 +464,22 @@ type RepositoryStore interface {
 	//   - the stored slug already matches, case-insensitively — the second run
 	//     of a rename that already applied, which is the steady state.
 	//
+	// One occupant of the target slug is absorbed rather than refused: a bare
+	// row, with no provider id, no tracking row and no worktree ledger row,
+	// which a GitHub entity create minted under the new name before TF
+	// observed the rename (an agent touch through GitHub's redirect, or a pull
+	// request read off GraphQL, which keys by the current name). The provider
+	// has just reported that the name belongs to the renamed row's id, so the
+	// bare row is the same repository: its entities are re-pointed to the
+	// renamed row and it is deleted, in the rename's transaction.
+	//
 	// Two states are refused instead, because writing through either would
 	// destroy a row rather than move one: ErrRepoSlugOccupied when anything
-	// already answers to the target slug — another repository row, or a durable
-	// entity/artifact keyed on that name — and ErrRepoIdentityAmbiguous when
-	// more than one row claims the id. Both are terminal for the attempt, and
-	// a caller that retries them will fail identically until a human retires
-	// whatever holds the name.
+	// else already answers to the target slug — another repository row, or a
+	// durable entity/artifact keyed on that name — and ErrRepoIdentityAmbiguous
+	// when more than one row claims the id. Both are terminal for the attempt,
+	// and a caller that retries them will fail identically until a human
+	// retires whatever holds the name. A refusal rolls back the absorb too.
 	//
 	// System (claims-free) variant only, and admin-pool in Postgres: the
 	// rewrite spans tables belonging to every team in the org (tracked sets,

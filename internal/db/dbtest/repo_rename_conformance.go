@@ -726,6 +726,173 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 	})
 
+	t.Run("Rename_absorbs_a_bare_row_minted_under_the_new_name", func(t *testing.T) {
+		// TF wrote a pull request under the new name before it observed the
+		// rename: an agent touch through GitHub's redirect, or a GraphQL read
+		// keyed by the current name. Creating that entity minted a bare
+		// registry row under the new name. GitHub has now reported that the
+		// name belongs to the renamed row's id, so the rename folds the bare
+		// row in rather than refusing over it.
+		s, orgID, seed := mk(t)
+		fx := seedRenameFixture(t, s, orgID, seed, "absorb")
+		renamed, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef(renameOldSlug))
+		if err != nil || renamed == nil {
+			t.Fatalf("resolve %s: got=%v err=%v", renameOldSlug, renamed, err)
+		}
+
+		early, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", "https://github.com", renameNewSlug+"#25", "", "pr", "Written under the new name",
+			"https://github.com/"+renameNewSlug+"/pull/25")
+		if err != nil {
+			t.Fatalf("seed the entity written under the new name: %v", err)
+		}
+		bare, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef(renameNewSlug))
+		if err != nil || bare == nil {
+			t.Fatalf("resolve %s: got=%v err=%v; want the bare row the entity create minted", renameNewSlug, bare, err)
+		}
+		if bare.ID == renamed.ID || bare.ExternalID != "" || early.RepositoryID != bare.ID {
+			t.Fatalf("premise: bare row = %+v, entity references %q; want a second, id-less row the entity references", bare, early.RepositoryID)
+		}
+
+		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Host:  TestGitHubHost,
+			Owner: "octo", Repo: "platform-api", ExternalID: fx.externalID,
+		})
+		if err != nil {
+			t.Fatalf("RenameSystem: %v", err)
+		}
+		if !out.Renamed || out.From != renameOldSlug || out.To != renameNewSlug {
+			t.Fatalf("outcome = %+v, want a rename %s -> %s", out, renameOldSlug, renameNewSlug)
+		}
+
+		moved, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef(renameNewSlug))
+		if err != nil || moved == nil {
+			t.Fatalf("resolve %s after the rename: got=%v err=%v", renameNewSlug, moved, err)
+		}
+		if moved.ID != renamed.ID || moved.ExternalID != fx.externalID {
+			t.Errorf("%s resolves to %+v, want the renamed row %s carrying %s", renameNewSlug, moved, renamed.ID, fx.externalID)
+		}
+		if got, err := s.Repos.GetSystem(ctx, orgID, bare.ID); !errors.Is(err, db.ErrNoSuchRepository) {
+			t.Errorf("bare row after the rename = %+v, %v; want ErrNoSuchRepository", got, err)
+		}
+
+		// The entity written early keeps its id, key and link, and now
+		// references the renamed row.
+		got, err := s.Entities.GetBySourceSystem(ctx, orgID, "github", "https://github.com", renameNewSlug+"#25")
+		if err != nil || got == nil {
+			t.Fatalf("entity under the new name = %v, %v; want the early entity", got, err)
+		}
+		if got.ID != early.ID || got.RepositoryID != renamed.ID {
+			t.Errorf("early entity = {id %s, repository %s}, want {id %s, repository %s}", got.ID, got.RepositoryID, early.ID, renamed.ID)
+		}
+		if want := "https://github.com/" + renameNewSlug + "/pull/25"; got.URL != want {
+			t.Errorf("early entity url = %q, want %q unchanged", got.URL, want)
+		}
+		// The renamed repository's own entity moved as in any rename.
+		pr, err := s.Entities.GetBySourceSystem(ctx, orgID, "github", "https://github.com", renameNewSlug+"#18")
+		if err != nil || pr == nil || pr.ID != fx.entityID || pr.RepositoryID != renamed.ID {
+			t.Errorf("renamed repository's entity = %+v, %v; want %s referencing %s", pr, err, fx.entityID, renamed.ID)
+		}
+
+		tracked, err := s.TeamGitHubRepos.ListForTeamSystem(ctx, seed.TeamID, TestGitHubHost)
+		if err != nil {
+			t.Fatalf("ListForTeamSystem: %v", err)
+		}
+		if got := trackedSlugs(tracked); !sameSet(got, []string{renameNewSlug, renameNeighbourSlug}) {
+			t.Errorf("tracked set = %v, want [%s %s]", got, renameNewSlug, renameNeighbourSlug)
+		}
+	})
+
+	t.Run("Rename_refuses_a_bare_occupant_a_team_tracks", func(t *testing.T) {
+		// Tracking mints the same bare row an entity create does, but the
+		// row then carries a team's decision, and deleting it would cascade
+		// that tracking row away.
+		s, orgID, seed := mk(t)
+		fx := seedRenameFixture(t, s, orgID, seed, "bare-tracked")
+		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, seed.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
+			{Owner: "octo", Repo: "api"},
+			{Owner: "octo", Repo: "api-gateway"},
+			{Owner: "octo", Repo: "platform-api"},
+		}); err != nil {
+			t.Fatalf("track the new name: %v", err)
+		}
+		bare, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef(renameNewSlug))
+		if err != nil || bare == nil || bare.ExternalID != "" {
+			t.Fatalf("premise: %s = %+v, %v; want a tracked, id-less row", renameNewSlug, bare, err)
+		}
+
+		_, err = s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Host:  TestGitHubHost,
+			Owner: "octo", Repo: "platform-api", ExternalID: fx.externalID,
+		})
+		if !errors.Is(err, db.ErrRepoSlugOccupied) {
+			t.Fatalf("err = %v, want ErrRepoSlugOccupied", err)
+		}
+
+		if got, err := s.Repos.GetSystem(ctx, orgID, bare.ID); err != nil || got == nil {
+			t.Errorf("the tracked occupant = %v, %v; want it kept", got, err)
+		}
+		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef(renameOldSlug)); got == nil {
+			t.Error("the repository row moved despite the refusal")
+		}
+		tracked, _ := s.TeamGitHubRepos.ListForTeamSystem(ctx, seed.TeamID, TestGitHubHost)
+		if want := []string{renameOldSlug, renameNeighbourSlug, renameNewSlug}; !sameSet(trackedSlugs(tracked), want) {
+			t.Errorf("tracked set = %v, want %v untouched", trackedSlugs(tracked), want)
+		}
+	})
+
+	t.Run("Rename_refuses_a_bare_occupant_a_worktree_references", func(t *testing.T) {
+		// A run materialized a checkout of the bare row. The ledger FK has no
+		// ON DELETE action, so the delete is refused, and the refusal reads as
+		// the classified terminal state rather than a raw constraint error.
+		s, orgID, seed := mk(t)
+		fx := seedRenameFixture(t, s, orgID, seed, "bare-worktree")
+		early, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", "https://github.com", renameNewSlug+"#25", "", "pr", "Written under the new name", "")
+		if err != nil {
+			t.Fatalf("seed the entity written under the new name: %v", err)
+		}
+		bare, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef(renameNewSlug))
+		if err != nil || bare == nil || bare.ExternalID != "" {
+			t.Fatalf("premise: %s = %+v, %v; want an id-less row", renameNewSlug, bare, err)
+		}
+		conversationID := seed.Conversation(t, "bare-worktree-ledger")
+		if _, _, err := s.ConversationWorktrees.Insert(ctx, orgID, domain.ConversationWorktree{
+			ConversationID: conversationID, RepositoryID: bare.ID, Ref: "pr-25",
+			Path: "/tmp/wt/" + conversationID + "/octo/platform-api/pr-25",
+		}); err != nil {
+			t.Fatalf("seed the occupant's worktree: %v", err)
+		}
+
+		_, err = s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Host:  TestGitHubHost,
+			Owner: "octo", Repo: "platform-api", ExternalID: fx.externalID,
+		})
+		if !errors.Is(err, db.ErrRepoSlugOccupied) {
+			t.Fatalf("err = %v, want ErrRepoSlugOccupied — a raw constraint violation reads as retryable", err)
+		}
+
+		// All tables or none: the entity re-point that ran before the delete
+		// rolled back with it.
+		if got, err := s.Repos.GetSystem(ctx, orgID, bare.ID); err != nil || got == nil {
+			t.Errorf("the occupant = %v, %v; want it kept", got, err)
+		}
+		if got, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", "https://github.com", renameNewSlug+"#25"); got == nil || got.RepositoryID != bare.ID {
+			t.Errorf("early entity = %+v, want it still referencing the occupant %s", got, bare.ID)
+		}
+		if got, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", "https://github.com", renameOldSlug+"#18"); got == nil {
+			t.Error("the renamed repository's entity moved despite the refusal")
+		}
+		if early.RepositoryID != bare.ID {
+			t.Fatalf("premise: early entity referenced %q, want the occupant %s", early.RepositoryID, bare.ID)
+		}
+		worktrees, err := s.ConversationWorktrees.ListSystem(ctx, orgID, conversationID)
+		if err != nil {
+			t.Fatalf("worktrees ListSystem: %v", err)
+		}
+		if len(worktrees) != 1 || worktrees[0].RepositoryID != bare.ID {
+			t.Errorf("occupant's worktree ledger = %+v, want one row on %s", worktrees, bare.ID)
+		}
+	})
+
 	t.Run("Rename_refuses_when_a_durable_entity_already_answers_to_the_target", func(t *testing.T) {
 		// The reference tables absorb an orphan; entities and artifacts must
 		// NOT. An entity carries tasks, conversations and memory, and an
@@ -741,8 +908,9 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		// terminal rather than retrying it every poll cycle.
 		s, orgID, _ := mk(t)
 
-		// A PR of a repository no registry row answers to any more. The entity
-		// is durable and was never keyed on the row.
+		// A PR recorded under the name before the rename was observed.
+		// Creating it minted a bare registry row, which the rename absorbs;
+		// the refusal comes from the entity key, and rolls the absorb back.
 		orphan, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", "https://github.com", "octo/api#18", "", "pr", "the untracked repo's PR", "")
 		if err != nil {
 			t.Fatalf("seed the orphaned entity: %v", err)
@@ -776,8 +944,11 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			t.Error("the live entity's source id moved despite the refusal")
 		}
 		kept, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", "https://github.com", "octo/api#18")
-		if kept == nil || kept.ID != orphan.ID {
+		if kept == nil || kept.ID != orphan.ID || kept.RepositoryID != orphan.RepositoryID {
 			t.Errorf("the orphaned entity = %+v, want it untouched — a rename never destroys durable work", kept)
+		}
+		if got, err := s.Repos.GetSystem(ctx, orgID, orphan.RepositoryID); err != nil || got == nil {
+			t.Errorf("the orphaned entity's registry row = %v, %v; want it kept by the rollback", got, err)
 		}
 	})
 
