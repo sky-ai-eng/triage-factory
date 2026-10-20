@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -408,10 +409,11 @@ func seedLifecycleTask(t *testing.T, database *sql.DB, suffix string, opts lifec
 	eventID := "ev_lc_" + suffix
 	taskID := uuid.New().String()
 
+	repoID := dbseed.GitHubRepository(t, database, runmode.LocalDefaultOrgID, "https://github.com", "owner", "repo")
 	if _, err := database.ExecContext(ctx,
-		`INSERT INTO entities (id, source, source_id, kind, state, scope)
-		 VALUES (?, 'github', ?, 'pr', 'active', 'https://github.com')`,
-		entityID, "owner/repo#lc-"+suffix,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		 VALUES (?, 'github', ?, 'pr', 'active', 'https://github.com', ?)`,
+		entityID, "owner/repo#lc-"+suffix, repoID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -86,14 +87,11 @@ func (r *teamPRsRig) seedTrackedPR(t *testing.T, orgID, teamID, login string, nu
 		t.Fatalf("marshal snapshot: %v", err)
 	}
 	now := time.Now().UTC()
+	repoID := dbseed.GitHubRepository(t, r.h.AdminDB, orgID, dbtest.TestGitHubHost, owner, repo)
 	pgtest.MustExec(t, r.h.AdminDB, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, last_polled_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', $4, '', $5::jsonb, $6, $6, 'https://github.com')
-	`, uuid.New().String(), orgID, fmt.Sprintf("%s/%s#%d", owner, repo, number), snap.Title, string(blob), now)
-	pgtest.MustExec(t, r.h.AdminDB, `
-		INSERT INTO repositories (org_id, source, host, owner, repo) VALUES ($1, 'github', $2, $3, $4)
-		ON CONFLICT DO NOTHING
-	`, orgID, dbtest.TestGitHubHost, owner, repo)
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, last_polled_at, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', $4, '', $5::jsonb, $6, $6, 'https://github.com', $7)
+	`, uuid.New().String(), orgID, fmt.Sprintf("%s/%s#%d", owner, repo, number), snap.Title, string(blob), now, repoID)
 	pgtest.MustExec(t, r.h.AdminDB, `
 		INSERT INTO team_github_repos (team_id, repository_id, org_id)
 		VALUES ($1, (SELECT id FROM repositories WHERE org_id = $2 AND host = $3 AND owner = $4 AND repo = $5), $2)

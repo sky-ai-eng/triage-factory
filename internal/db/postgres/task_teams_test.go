@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
@@ -209,12 +210,13 @@ func seedSharedTask(t *testing.T, h *pgtest.Harness, orgID, creatorUserID, owner
 	entityID := uuid.New().String()
 	eventID := uuid.New().String()
 	taskID := uuid.New().String()
-	sourceID := fmt.Sprintf("shared-%d", now.UnixNano())
+	sourceID := fmt.Sprintf("octo/shared#%d", now.UnixNano())
 
+	repositoryID := dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, "https://github.com", sourceID)
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Shared PR', $4, '{}'::jsonb, $5, 'https://github.com')
-	`, entityID, orgID, sourceID, "https://example/"+sourceID, now)
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Shared PR', $4, '{}'::jsonb, $5, 'https://github.com', $6)
+	`, entityID, orgID, sourceID, "https://example/"+sourceID, now, repositoryID)
 	pgtest.MustExec(t, h.AdminDB, `
 		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
 		VALUES ($1, $2, $3, 'github:pr:ci_check_failed', '', '{}'::jsonb, $4)
@@ -242,12 +244,13 @@ func seedUnownedTask(t *testing.T, h *pgtest.Harness, orgID, creatorUserID strin
 	entityID := uuid.New().String()
 	eventID := uuid.New().String()
 	taskID := uuid.New().String()
-	sourceID := fmt.Sprintf("unowned-%d", now.UnixNano())
+	sourceID := fmt.Sprintf("octo/unowned#%d", now.UnixNano())
 
+	repositoryID := dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, "https://github.com", sourceID)
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Unowned PR', $4, '{}'::jsonb, $5, 'https://github.com')
-	`, entityID, orgID, sourceID, "https://example/"+sourceID, now)
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Unowned PR', $4, '{}'::jsonb, $5, 'https://github.com', $6)
+	`, entityID, orgID, sourceID, "https://example/"+sourceID, now, repositoryID)
 	pgtest.MustExec(t, h.AdminDB, `
 		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
 		VALUES ($1, $2, $3, 'github:pr:ci_check_failed', '', '{}'::jsonb, $4)

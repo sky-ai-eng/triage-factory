@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -68,11 +69,12 @@ func seedSQLiteEntityForEvents(t *testing.T, conn *sql.DB, suffix string) string
 	t.Helper()
 	id := uuid.New().String()
 	now := time.Now().UTC()
-	sourceID := fmt.Sprintf("events-conformance-%s-%d", suffix, now.UnixNano())
+	sourceID := fmt.Sprintf("octo/events-conformance#%s-%d", suffix, now.UnixNano())
+	repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES (?, 'github', ?, 'pr', 'Events Conformance', 'https://example/x', '{}', ?, 'https://github.com')
-	`, id, sourceID, now); err != nil {
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES (?, 'github', ?, 'pr', 'Events Conformance', 'https://example/x', '{}', ?, 'https://github.com', ?)
+	`, id, sourceID, now, repoID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	return id

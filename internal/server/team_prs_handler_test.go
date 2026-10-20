@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -41,12 +42,13 @@ func seedTeamPR(t *testing.T, s *Server, snap domain.PRSnapshot, owningTeam, ent
 	}
 	now := time.Now().UTC()
 	sourceID := fmt.Sprintf("%s#%d", snap.Repo, snap.Number)
+	repoID := dbseed.GitHubEntityRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 	if _, err := s.db.ExecContext(context.Background(), `
 		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, state,
-		                      owning_team_id, created_at, last_polled_at, scope)
-		VALUES (?, ?, 'github', ?, 'pr', ?, ?, ?, ?, ?, ?, ?, 'https://github.com')
+		                      owning_team_id, created_at, last_polled_at, scope, repository_id)
+		VALUES (?, ?, 'github', ?, 'pr', ?, ?, ?, ?, ?, ?, ?, 'https://github.com', ?)
 	`, "ent-"+sourceID, runmode.LocalDefaultOrgID, sourceID, snap.Title, snap.URL, string(blob),
-		entityState, owning, now, now); err != nil {
+		entityState, owning, now, now, repoID); err != nil {
 		t.Fatalf("seed entity %s: %v", sourceID, err)
 	}
 }

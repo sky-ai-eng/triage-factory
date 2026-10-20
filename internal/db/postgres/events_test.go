@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -217,11 +218,12 @@ func seedPgEntityForEvents(t *testing.T, h *pgtest.Harness, orgID, suffix string
 	t.Helper()
 	id := uuid.New().String()
 	now := time.Now().UTC()
-	sourceID := fmt.Sprintf("events-conf-%s-%s-%d", orgID[:8], suffix, now.UnixNano())
+	sourceID := fmt.Sprintf("octo/events-conf-%s-%s#%d", orgID[:8], suffix, now.UnixNano())
+	repositoryID := dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, "https://github.com", sourceID)
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Events Conformance', 'https://example/x', '{}'::jsonb, $4, 'active', 'https://github.com')
-	`, id, orgID, sourceID, now); err != nil {
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Events Conformance', 'https://example/x', '{}'::jsonb, $4, 'active', 'https://github.com', $5)
+	`, id, orgID, sourceID, now, repositoryID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	return id

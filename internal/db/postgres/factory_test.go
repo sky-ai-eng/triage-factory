@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -117,17 +118,12 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 			owner := "tf-test"
 			repo := fmt.Sprintf("%s-%s", suffix, id[:8])
 			sourceID := fmt.Sprintf("%s/%s#1", owner, repo)
+			repositoryID := dbseed.GitHubRepository(t, conn, orgID, dbtest.TestGitHubHost, owner, repo)
 			if _, err := conn.Exec(`
-				INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-				VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6, 'https://github.com')
-			`, id, orgID, sourceID, "Conformance "+suffix, "https://example/"+sourceID, time.Now().UTC()); err != nil {
+				INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+				VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6, 'https://github.com', $7)
+			`, id, orgID, sourceID, "Conformance "+suffix, "https://example/"+sourceID, time.Now().UTC(), repositoryID); err != nil {
 				t.Fatalf("seed entity %s: %v", suffix, err)
-			}
-			if _, err := conn.Exec(`
-				INSERT INTO repositories (org_id, source, host, owner, repo) VALUES ($1, 'github', $2, $3, $4)
-				ON CONFLICT DO NOTHING
-			`, orgID, dbtest.TestGitHubHost, owner, repo); err != nil {
-				t.Fatalf("seed entity repository %s/%s: %v", owner, repo, err)
 			}
 			if _, err := conn.Exec(`
 				INSERT INTO team_github_repos (team_id, repository_id, org_id)
@@ -295,10 +291,11 @@ func seedPgGitHubEntityOnHost(t *testing.T, h *pgtest.Harness, orgID, host, owne
 	t.Helper()
 	id := uuid.New().String()
 	sourceID := fmt.Sprintf("%s/%s#%d", owner, repo, number)
+	repositoryID := dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, host, sourceID)
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', $4, '', '{}'::jsonb, $5, $6)
-	`, id, orgID, sourceID, "PR "+sourceID, time.Now().UTC(), host); err != nil {
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', $4, '', '{}'::jsonb, $5, $6, $7)
+	`, id, orgID, sourceID, "PR "+sourceID, time.Now().UTC(), host, repositoryID); err != nil {
 		t.Fatalf("seed github entity %s on %s: %v", sourceID, host, err)
 	}
 	return id

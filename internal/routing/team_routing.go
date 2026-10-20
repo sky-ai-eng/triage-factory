@@ -108,6 +108,9 @@ func (r *Router) teamTracksEventScope(ctx context.Context, evt domain.Event, tea
 // open costs a briefly-too-wide gate that the next event corrects; the
 // ladder's reads DECIDE the owner, and a wrong answer there sticks to the
 // entity for the rest of its life.
+//
+// TODO(TFAC-1126): check the event entity's repository_id against the team's
+// tracked set by id rather than resolving the metadata's "repo" name.
 func (r *Router) teamTracksEventRepo(ctx context.Context, evt domain.Event, teamID string) bool {
 	var m struct {
 		Repo string `json:"repo"`

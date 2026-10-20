@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -106,12 +107,13 @@ func seedPgTaskForSwipes(t *testing.T, conn *sql.DB, orgID, userID string) strin
 	entityID := uuid.New().String()
 	taskID := uuid.New().String()
 	eventID := uuid.New().String()
-	sourceID := fmt.Sprintf("swipe-conformance-%d", now.UnixNano())
+	sourceID := fmt.Sprintf("octo/swipe-conformance#%d", now.UnixNano())
 
+	repositoryID := dbseed.GitHubEntityRepository(t, conn, orgID, "https://github.com", sourceID)
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Swipe Conformance', 'https://example/x', '{}'::jsonb, $4, 'https://github.com')
-	`, entityID, orgID, sourceID, now); err != nil {
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Swipe Conformance', 'https://example/x', '{}'::jsonb, $4, 'https://github.com', $5)
+	`, entityID, orgID, sourceID, now, repositoryID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	if _, err := conn.Exec(`

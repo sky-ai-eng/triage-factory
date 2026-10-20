@@ -717,6 +717,12 @@ These are internal signals, not shown in the triage UI.
 
 ### GitHub PR Snapshot
 
+The entity itself carries `source_id` (`owner/repo#N`), `scope` (the org's
+GitHub host) and `repository_id`, the registry row of its repository. That row
+is created with the entity when TF holds none for the repository, so a pull
+request in a repository no team tracks has one too, and a repository rename
+leaves the reference in place while it rewrites `source_id`.
+
 The tracker stores these fields for each PR and diffs them between cycles:
 
 - `number`, `title`, `author`, `repo`, `head_repo`, `url`

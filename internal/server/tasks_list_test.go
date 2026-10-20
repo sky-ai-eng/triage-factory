@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -87,16 +88,17 @@ func seedTaskFixture(t *testing.T, database *sql.DB, f taskFixture) string {
 	entityID := uuid.New().String()
 	eventID := uuid.New().String()
 	taskID := uuid.New().String()
-	sourceID := fmt.Sprintf("list-%s-%d", f.name, now.UnixNano())
+	sourceID := fmt.Sprintf("octo/list#%s-%d", f.name, now.UnixNano())
 	eventType := f.eventType
 	if eventType == "" {
 		eventType = domain.EventGitHubPRCICheckFailed
 	}
 
+	repoID := dbseed.GitHubEntityRepository(t, database, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 	execSQL(t, database, `
-		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?, 'https://github.com')`,
-		entityID, sourceID, "List fixture "+f.name, "https://example/"+sourceID, now)
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?, 'https://github.com', ?)`,
+		entityID, sourceID, "List fixture "+f.name, "https://example/"+sourceID, now, repoID)
 	execSQL(t, database, `
 		INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json, created_at)
 		VALUES (?, ?, ?, '', '{}', ?)`,

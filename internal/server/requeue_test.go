@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -41,9 +42,10 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversatio
 	// is lifecycle-only, claim is responsibility. Statements split
 	// (modernc.org/sqlite multi-statement Exec is unreliable on FK
 	// chains).
+	repoID := dbseed.GitHubRepository(t, database, runmode.LocalDefaultOrgID, "https://github.com", "owner", "repo")
 	if _, err := database.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope)
-		 VALUES ('e_pa', 'github', 'owner/repo#pa', 'pr', 'active', 'https://github.com')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		 VALUES ('e_pa', 'github', 'owner/repo#pa', 'pr', 'active', 'https://github.com', ?)`, repoID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -460,9 +462,14 @@ func TestTaskClaim_WithoutPendingApprovalIsNoOp(t *testing.T) {
 	// the queue looks like — the event/task FK chain mirrors
 	// pendingApprovalFixture but stops short of any conversations or reviews.
 	const eventType = "github:pr:opened"
+	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 	if _, err := s.db.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, state, scope)
-		VALUES ('e1', 'github', 'sky/repo#1', 'pr', 'active', 'https://github.com');
+		INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		VALUES ('e1', 'github', 'sky/repo#1', 'pr', 'active', 'https://github.com', ?)
+	`, repoID); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(`
 		INSERT INTO events (id, entity_id, event_type, dedup_key)
 		VALUES ('ev1', 'e1', ?, '');
 		INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
@@ -503,9 +510,10 @@ func TestTaskClaim_WithoutPendingApprovalIsNoOp(t *testing.T) {
 func TestTaskClaim_AgainstBotClaimedIsTakeover(t *testing.T) {
 	s := newTestServer(t)
 	const eventType = "github:pr:opened"
+	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope)
-		 VALUES ('e_bot', 'github', 'sky/repo#bot', 'pr', 'active', 'https://github.com')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		 VALUES ('e_bot', 'github', 'sky/repo#bot', 'pr', 'active', 'https://github.com', ?)`, repoID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -563,9 +571,10 @@ func TestTaskClaim_RefusedLeavesNoAuditRow(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed other user: %v", err)
 	}
+	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope)
-		 VALUES ('e_refuse', 'github', 'sky/repo#refuse', 'pr', 'active', 'https://github.com')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		 VALUES ('e_refuse', 'github', 'sky/repo#refuse', 'pr', 'active', 'https://github.com', ?)`, repoID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -633,9 +642,10 @@ func TestTaskDelegate_RefusedLeavesNoAuditRow(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed other user: %v", err)
 	}
+	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope)
-		 VALUES ('e_drefuse', 'github', 'sky/repo#drefuse', 'pr', 'active', 'https://github.com')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		 VALUES ('e_drefuse', 'github', 'sky/repo#drefuse', 'pr', 'active', 'https://github.com', ?)`, repoID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -701,9 +711,10 @@ func TestTaskClaim_RefusedOnTerminalTask(t *testing.T) {
 		t.Run(terminalStatus, func(t *testing.T) {
 			s := newTestServer(t)
 			const eventType = "github:pr:opened"
+			repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 			if _, err := s.db.Exec(
-				`INSERT INTO entities (id, source, source_id, kind, state, scope)
-				 VALUES ('e_term', 'github', 'sky/repo#term', 'pr', 'active', 'https://github.com')`,
+				`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+				 VALUES ('e_term', 'github', 'sky/repo#term', 'pr', 'active', 'https://github.com', ?)`, repoID,
 			); err != nil {
 				t.Fatalf("seed entity: %v", err)
 			}
@@ -780,9 +791,10 @@ func TestTaskDelegate_DifferentiatesRefusalReasons(t *testing.T) {
 	t.Run("terminal_task_409_with_closed_message", func(t *testing.T) {
 		s := newTestServer(t)
 		const eventType = "github:pr:opened"
+		repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 		if _, err := s.db.Exec(
-			`INSERT INTO entities (id, source, source_id, kind, state, scope)
-			 VALUES ('e_term_del', 'github', 'sky/repo#td', 'pr', 'active', 'https://github.com')`,
+			`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+			 VALUES ('e_term_del', 'github', 'sky/repo#td', 'pr', 'active', 'https://github.com', ?)`, repoID,
 		); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
@@ -820,9 +832,10 @@ func TestTaskDelegate_DifferentiatesRefusalReasons(t *testing.T) {
 		); err != nil {
 			t.Fatalf("seed other user: %v", err)
 		}
+		repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 		if _, err := s.db.Exec(
-			`INSERT INTO entities (id, source, source_id, kind, state, scope)
-			 VALUES ('e_diff_del', 'github', 'sky/repo#dd', 'pr', 'active', 'https://github.com')`,
+			`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+			 VALUES ('e_diff_del', 'github', 'sky/repo#dd', 'pr', 'active', 'https://github.com', ?)`, repoID,
 		); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
@@ -867,9 +880,10 @@ func TestTaskDelegate_RefusedWhenBotDisabled(t *testing.T) {
 		t.Fatalf("disable bot: %v", err)
 	}
 	const eventType = "github:pr:opened"
+	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope)
-		 VALUES ('e_bot_off', 'github', 'sky/repo#off', 'pr', 'active', 'https://github.com')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		 VALUES ('e_bot_off', 'github', 'sky/repo#off', 'pr', 'active', 'https://github.com', ?)`, repoID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -931,9 +945,10 @@ func TestTaskDelegate_RefusedWhenBotDisabled(t *testing.T) {
 func TestTaskPatchSnooze_RefusesOnClaimedTask(t *testing.T) {
 	s := newTestServer(t)
 	const eventType = "github:pr:opened"
+	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope)
-		 VALUES ('e_snz_claim', 'github', 'sky/repo#sz', 'pr', 'active', 'https://github.com')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		 VALUES ('e_snz_claim', 'github', 'sky/repo#sz', 'pr', 'active', 'https://github.com', ?)`, repoID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -1007,9 +1022,10 @@ func TestTaskDelegate_TransfersOwnUserClaim(t *testing.T) {
 	// pre-condition right before a You → Agent drag fires the
 	// delegate swipe.
 	const eventType = "github:pr:opened"
+	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope)
-		 VALUES ('e_y2a', 'github', 'sky/repo#y2a', 'pr', 'active', 'https://github.com')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		 VALUES ('e_y2a', 'github', 'sky/repo#y2a', 'pr', 'active', 'https://github.com', ?)`, repoID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -1094,9 +1110,10 @@ func TestTaskClaim_AgainstOtherUserClaimReturns409(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed other user: %v", err)
 	}
+	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope)
-		 VALUES ('e_oth', 'github', 'sky/repo#oth', 'pr', 'active', 'https://github.com')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		 VALUES ('e_oth', 'github', 'sky/repo#oth', 'pr', 'active', 'https://github.com', ?)`, repoID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -1232,9 +1249,10 @@ func TestHandleUndo_NoPendingApprovalIsNoOp(t *testing.T) {
 	// Jira reversal skipped because EntitySource isn't 'jira'). Post-B+
 	// this is status='queued' + claimed_by_user_id; pre-B+
 	// it was status='claimed'.
+	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "owner", "repo")
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope)
-		 VALUES ('e_plain', 'github', 'owner/repo#plain', 'pr', 'active', 'https://github.com')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		 VALUES ('e_plain', 'github', 'owner/repo#plain', 'pr', 'active', 'https://github.com', ?)`, repoID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -1285,9 +1303,10 @@ func TestHandleUndo_ClearsClaimColumns(t *testing.T) {
 	// unclaimed" invariant, so the snooze_until pre-stage is dropped.
 	// Snooze-clearing on undo is covered by /requeue's existing test
 	// against unclaimed-snoozed rows.)
+	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "owner", "repo")
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope)
-		 VALUES ('e_undo_claim', 'github', 'owner/repo#u1', 'pr', 'active', 'https://github.com')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		 VALUES ('e_undo_claim', 'github', 'owner/repo#u1', 'pr', 'active', 'https://github.com', ?)`, repoID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -1414,9 +1433,10 @@ func runningRunFixture(t *testing.T, database *sql.DB, suffix string) (taskID, c
 	const eventType = "github:pr:ci_check_failed"
 	entityID, eventID, promptID := fixtureUUID("e_"+suffix), fixtureUUID("ev_"+suffix), fixtureUUID("p_"+suffix)
 	taskID, conversationID = fixtureUUID("t_"+suffix), fixtureUUID("r_"+suffix)
+	repoID := dbseed.GitHubRepository(t, database, runmode.LocalDefaultOrgID, "https://github.com", "owner", "repo")
 	execSQL(t, database,
-		`INSERT INTO entities (id, source, source_id, kind, state, scope) VALUES (?, 'github', ?, 'pr', 'active', 'https://github.com')`,
-		entityID, "owner/repo#"+suffix)
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id) VALUES (?, 'github', ?, 'pr', 'active', 'https://github.com', ?)`,
+		entityID, "owner/repo#"+suffix, repoID)
 	execSQL(t, database,
 		`INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES (?, ?, ?, '')`,
 		eventID, entityID, eventType)

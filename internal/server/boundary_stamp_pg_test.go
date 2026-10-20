@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -100,10 +101,11 @@ func TestTaskReassign_StampsNothing(t *testing.T) {
 	r := newViewerRig(t)
 
 	var entityID, evtID, taskID string
+	repoID := dbseed.GitHubRepository(t, r.h.AdminDB, r.orgID, "https://github.com", "octo", "reassign")
 	if err := r.h.AdminDB.QueryRow(`
-		INSERT INTO entities (org_id, source, source_id, kind, title, scope)
-		VALUES ($1, 'github', $2, 'pr', 'test pr', 'https://github.com') RETURNING id
-	`, r.orgID, "octo/reassign#"+t.Name()).Scan(&entityID); err != nil {
+		INSERT INTO entities (org_id, source, source_id, kind, title, scope, repository_id)
+		VALUES ($1, 'github', $2, 'pr', 'test pr', 'https://github.com', $3) RETURNING id
+	`, r.orgID, "octo/reassign#"+t.Name(), repoID).Scan(&entityID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	if err := r.h.AdminDB.QueryRow(`

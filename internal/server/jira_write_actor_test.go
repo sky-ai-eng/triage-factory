@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
@@ -205,9 +206,10 @@ func TestTaskClaim_GitHubTask_SkipsJiraResolver(t *testing.T) {
 	s.jiraResolver = res
 
 	const eventType = "github:pr:opened"
+	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope)
-		 VALUES ('e_gh', 'github', 'sky/repo#1', 'pr', 'active', 'https://github.com')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		 VALUES ('e_gh', 'github', 'sky/repo#1', 'pr', 'active', 'https://github.com', ?)`, repoID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

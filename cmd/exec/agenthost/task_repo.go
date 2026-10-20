@@ -40,6 +40,8 @@ func IsTaskOwnRepo(ctx context.Context, stores db.Stores, info ConversationInfo,
 	if err != nil || task == nil {
 		return false
 	}
+	// TODO(TFAC-1126): compare the repository by the task entity's
+	// repository_id rather than by the name parsed from its key.
 	taskRepo := domain.GitHubTaskRepo(*task)
 	if taskRepo == "" || !strings.EqualFold(taskRepo, owner+"/"+repo) {
 		return false

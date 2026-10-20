@@ -1315,9 +1315,12 @@ func (s *Spawner) setWorktreePath(ctx context.Context, orgID, conversationID, cl
 // repo on the GitHub host the task's pull request was polled from — its
 // entity's scope — not on whatever host the org names now. A task polled from a
 // host the org has since left keeps resolving to that host's repository, never
-// to a same-named one on the new host. A repository with no row is an error: a
-// PR is polled only from a tracked repository, and tracking is what mints the
-// row.
+// to a same-named one on the new host. A repository with no row is an error:
+// creating a GitHub entity registers its repository's row, so every task's
+// pull request has one.
+//
+// TODO(TFAC-1126): read the row by the entity's repository_id; the lookup by
+// owner/repo on the entity's host is the name-parsing path that replaces.
 func (s *Spawner) taskRepository(ctx context.Context, orgID string, task domain.Task, owner, repo string) (*domain.Repository, error) {
 	return s.entityRepository(ctx, orgID, task.EntityID, owner, repo)
 }

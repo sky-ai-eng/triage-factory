@@ -10,6 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -66,10 +67,12 @@ func seedSQLiteConversationsForStats(t *testing.T, conn *sql.DB, promptID string
 	entityID := uuid.New().String()
 	taskID := uuid.New().String()
 	eventID := uuid.New().String()
+	sourceID := fmt.Sprintf("octo/conformance-runs#%d", now.UnixNano())
+	repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES (?, 'github', ?, 'pr', 'Conformance Entity', 'https://example/x', '{}', ?, 'https://github.com')
-	`, entityID, fmt.Sprintf("conformance-runs-%d", now.UnixNano()), now); err != nil {
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES (?, 'github', ?, 'pr', 'Conformance Entity', 'https://example/x', '{}', ?, 'https://github.com', ?)
+	`, entityID, sourceID, now, repoID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	if _, err := conn.Exec(`

@@ -10,6 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -62,11 +63,12 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 		Entity: func(t *testing.T, suffix string) string {
 			t.Helper()
 			id := uuid.New().String()
-			sourceID := fmt.Sprintf("factory-%s-%s", suffix, id[:8])
+			sourceID := fmt.Sprintf("octo/factory#%s-%s", suffix, id[:8])
+			repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 			if _, err := conn.Exec(`
-				INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-				VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?, 'https://github.com')
-			`, id, sourceID, "Conformance "+suffix, "https://example/"+sourceID, time.Now().UTC()); err != nil {
+				INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+				VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?, 'https://github.com', ?)
+			`, id, sourceID, "Conformance "+suffix, "https://example/"+sourceID, time.Now().UTC(), repoID); err != nil {
 				t.Fatalf("seed entity %s: %v", suffix, err)
 			}
 			return id
@@ -226,10 +228,12 @@ func TestFactoryReadStore_SQLite_ShowsUntaskedEntities(t *testing.T) {
 
 	// An active entity with an event but no task at all.
 	id := uuid.New().String()
+	sourceID := "octo/untasked#" + id[:8]
+	repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES (?, 'github', ?, 'pr', 'Untriaged PR', 'https://example/u', '{}', ?, 'https://github.com')
-	`, id, "untasked-"+id[:8], time.Now().UTC()); err != nil {
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES (?, 'github', ?, 'pr', 'Untriaged PR', 'https://example/u', '{}', ?, 'https://github.com', ?)
+	`, id, sourceID, time.Now().UTC(), repoID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	if _, err := conn.Exec(`
@@ -274,10 +278,12 @@ func TestFactoryReadStore_SQLite_CountersUnscoped(t *testing.T) {
 	}
 
 	id := uuid.New().String()
+	sourceID := "octo/ctr#" + id[:8]
+	repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES (?, 'github', ?, 'pr', 'Untriaged', 'https://example/u', '{}', ?, 'https://github.com')
-	`, id, "ctr-"+id[:8], time.Now().UTC()); err != nil {
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES (?, 'github', ?, 'pr', 'Untriaged', 'https://example/u', '{}', ?, 'https://github.com', ?)
+	`, id, sourceID, time.Now().UTC(), repoID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	if _, err := conn.Exec(`

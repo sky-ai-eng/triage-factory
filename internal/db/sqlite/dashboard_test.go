@@ -11,6 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -62,13 +63,14 @@ func seedSQLiteDashboardPR(t *testing.T, conn *sql.DB, fx dbtest.DashboardPRFixt
 	}
 	now := time.Now().UTC()
 	entityID := uuid.New().String()
-	sourceID := fmt.Sprintf("dashboard-conformance-%d-%d", fx.Snapshot.Number, now.UnixNano())
+	sourceID := fmt.Sprintf("octo/dashboard-conformance#%d-%d", fx.Snapshot.Number, now.UnixNano())
+	repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 	if _, err := conn.Exec(`
 		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, state,
-		                      commissioned_by_user_id, created_at, last_polled_at, scope)
-		VALUES (?, 'github', ?, 'pr', ?, ?, ?, ?, ?, ?, ?, 'https://github.com')
+		                      commissioned_by_user_id, created_at, last_polled_at, scope, repository_id)
+		VALUES (?, 'github', ?, 'pr', ?, ?, ?, ?, ?, ?, ?, 'https://github.com', ?)
 	`, entityID, sourceID, fx.Snapshot.Title, fx.Snapshot.URL, string(blob), state,
-		commissioned, now, now); err != nil {
+		commissioned, now, now, repoID); err != nil {
 		t.Fatalf("seed entity for snapshot %d: %v", fx.Snapshot.Number, err)
 	}
 	return entityID

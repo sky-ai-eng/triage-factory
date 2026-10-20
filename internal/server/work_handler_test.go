@@ -15,6 +15,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -173,10 +174,11 @@ func localEventQueueKind(t *testing.T) (db.WorkKindHandle, *sql.DB) {
 func parkLocalEvent(t *testing.T, database *sql.DB, title string) int64 {
 	t.Helper()
 	entityID := uuid.NewString()
+	repoID := dbseed.GitHubRepository(t, database, runmode.LocalDefaultOrgID, "https://github.com", "owner", "repo")
 	if _, err := database.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES (?, ?, 'github', ?, 'pr', ?, '', '{}', datetime('now'), 'https://github.com')
-	`, entityID, runmode.LocalDefaultOrgID, "owner/repo#"+entityID[:6], title); err != nil {
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES (?, ?, 'github', ?, 'pr', ?, '', '{}', datetime('now'), 'https://github.com', ?)
+	`, entityID, runmode.LocalDefaultOrgID, "owner/repo#"+entityID[:6], title, repoID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	store := sqlitestore.New(database).EventQueue
@@ -681,10 +683,11 @@ func TestWorkHandler_Gate_Postgres(t *testing.T) {
 	pgtest.AddOrgMember(t, h, member, orgID, teamID, "member", "member")
 
 	entityID := uuid.New().String()
+	repoID := dbseed.GitHubRepository(t, h.AdminDB, orgID, "https://github.com", "owner", "repo")
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Parked PR', '', '{}'::jsonb, now(), 'https://github.com')
-	`, entityID, orgID, "owner/repo#"+entityID[:8])
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Parked PR', '', '{}'::jsonb, now(), 'https://github.com', $4)
+	`, entityID, orgID, "owner/repo#"+entityID[:8], repoID)
 	ctx := context.Background()
 	if _, err := stores.EventQueue.Enqueue(ctx, orgID, domain.Event{
 		EntityID: &entityID, EventType: domain.EventGitHubPRCICheckFailed,
@@ -808,11 +811,12 @@ func parkLocalFiring(t *testing.T, database *sql.DB, title string) int64 {
 	stores := sqlitestore.New(database)
 	ctx := context.Background()
 	entityID, eventID, taskID, triggerID, promptID, blueprintID := "e-"+suf, "ev-"+suf, "t-"+suf, "tr-"+suf, "p-"+suf, "bp-"+suf
+	repoID := dbseed.GitHubRepository(t, database, runmode.LocalDefaultOrgID, "https://github.com", "owner", "repo")
 	for _, stmt := range []struct {
 		q    string
 		args []any
 	}{
-		{`INSERT INTO entities (id, source, source_id, kind, title, url, scope) VALUES (?, 'github', ?, 'pr', ?, '', 'https://github.com')`, []any{entityID, "owner/repo#" + suf, title}},
+		{`INSERT INTO entities (id, source, source_id, kind, title, url, scope, repository_id) VALUES (?, 'github', ?, 'pr', ?, '', 'https://github.com', ?)`, []any{entityID, "owner/repo#" + suf, title, repoID}},
 		{`INSERT INTO prompts (id, name, body, source, creator_user_id, team_id) VALUES (?, 'Test', 'x', 'user', ?, ?)`, []any{promptID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID}},
 		{`INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES (?, ?, ?, '')`, []any{eventID, entityID, domain.EventGitHubPRCICheckFailed}},
 		{`INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id, status, scoring_status) VALUES (?, ?, ?, '', ?, 'queued', 'pending')`, []any{taskID, entityID, domain.EventGitHubPRCICheckFailed, eventID}},
@@ -951,11 +955,12 @@ func parkLocalReEvaluation(t *testing.T, database *sql.DB, title string) int64 {
 	stores := sqlitestore.New(database)
 	ctx := context.Background()
 	entityID, eventID, taskID := "e-"+suf, "ev-"+suf, "t-"+suf
+	repoID := dbseed.GitHubRepository(t, database, runmode.LocalDefaultOrgID, "https://github.com", "owner", "repo")
 	for _, stmt := range []struct {
 		q    string
 		args []any
 	}{
-		{`INSERT INTO entities (id, source, source_id, kind, title, url, scope) VALUES (?, 'github', ?, 'pr', ?, '', 'https://github.com')`, []any{entityID, "owner/repo#" + suf, title}},
+		{`INSERT INTO entities (id, source, source_id, kind, title, url, scope, repository_id) VALUES (?, 'github', ?, 'pr', ?, '', 'https://github.com', ?)`, []any{entityID, "owner/repo#" + suf, title, repoID}},
 		{`INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES (?, ?, ?, '')`, []any{eventID, entityID, domain.EventGitHubPRCICheckFailed}},
 		{`INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id, status, scoring_status) VALUES (?, ?, ?, '', ?, 'queued', 'pending')`, []any{taskID, entityID, domain.EventGitHubPRCICheckFailed, eventID}},
 	} {

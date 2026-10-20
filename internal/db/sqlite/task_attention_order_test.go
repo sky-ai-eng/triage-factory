@@ -10,6 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -38,12 +39,13 @@ func TestTaskStore_AttentionOrder_SQLite(t *testing.T) {
 				t.Helper()
 				now := time.Now().UTC()
 				entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
-				sourceID := fmt.Sprintf("attn-%s-%d", f.Suffix, now.UnixNano())
+				sourceID := fmt.Sprintf("octo/attn#%s-%d", f.Suffix, now.UnixNano())
 				eventType := domain.EventGitHubPRCICheckFailed
+				repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 				if _, err := conn.Exec(`
-					INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-					VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?, 'https://github.com')
-				`, entityID, sourceID, f.Title, "https://example/"+sourceID, now); err != nil {
+					INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+					VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?, 'https://github.com', ?)
+				`, entityID, sourceID, f.Title, "https://example/"+sourceID, now, repoID); err != nil {
 					t.Fatalf("seed entity: %v", err)
 				}
 				if _, err := conn.Exec(`

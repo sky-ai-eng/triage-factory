@@ -10,6 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -81,13 +82,14 @@ func seedSQLiteTaskChain(t *testing.T, conn *sql.DB, suffix string) (entityID, e
 	taskID = uuid.New().String()
 	eventID = uuid.New().String()
 	// suffix + nanos keeps source_id unique within and across subtests.
-	sourceID := fmt.Sprintf("conformance-%s-%d", suffix, now.UnixNano())
+	sourceID := fmt.Sprintf("octo/conformance#%s-%d", suffix, now.UnixNano())
 	eventType := domain.EventGitHubPRCICheckFailed
+	repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?, 'https://github.com')
-	`, entityID, sourceID, "Conformance "+suffix, "https://example/"+sourceID, now); err != nil {
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?, 'https://github.com', ?)
+	`, entityID, sourceID, "Conformance "+suffix, "https://example/"+sourceID, now, repoID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	if _, err := conn.Exec(`

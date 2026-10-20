@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -484,9 +485,10 @@ func TestTaskClaim_GitHubTask_SkipsLinearResolver(t *testing.T) {
 	s := newTestServer(t)
 	s.linearResolver = res
 	const eventType = "github:pr:opened"
+	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope)
-		 VALUES ('e_gh_lin', 'github', 'sky/repo#3', 'pr', 'active', 'https://github.com')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		 VALUES ('e_gh_lin', 'github', 'sky/repo#3', 'pr', 'active', 'https://github.com', ?)`, repoID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

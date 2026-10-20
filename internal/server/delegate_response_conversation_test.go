@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -42,9 +43,10 @@ func TestTaskDelegate_ConversationIDResolvesToAConversation(t *testing.T) {
 		blueprintID, promptID); err != nil {
 		t.Fatalf("seed blueprint step: %v", err)
 	}
+	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope)
-		 VALUES ('e_dresp', 'github', 'sky/repo#dresp', 'pr', 'active', 'https://github.com')`); err != nil {
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		 VALUES ('e_dresp', 'github', 'sky/repo#dresp', 'pr', 'active', 'https://github.com', ?)`, repoID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	if _, err := s.db.Exec(

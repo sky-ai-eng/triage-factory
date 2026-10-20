@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -42,9 +43,15 @@ func seedSQLiteSourceTask(t *testing.T, conn *sql.DB, source, snapshot string) s
 	t.Helper()
 	entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
 	kind, scope, eventType := sourceStatusFixture(source)
+	sourceID := "src-" + entityID
+	var repositoryID any
+	if source == "github" {
+		sourceID = "octo/src#" + entityID
+		repositoryID = dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, scope, sourceID)
+	}
 	if _, err := conn.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, snapshot_json, scope) VALUES (?, ?, ?, ?, ?, ?)`,
-		entityID, source, "src-"+entityID, kind, snapshot, scope,
+		`INSERT INTO entities (id, source, source_id, kind, snapshot_json, scope, repository_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		entityID, source, sourceID, kind, snapshot, scope, repositoryID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -197,11 +198,12 @@ func seedSQLiteConversationForTaskMemory(t *testing.T, conn *sql.DB, suffix stri
 	t.Helper()
 	entityID = uuid.New().String()
 	now := time.Now().UTC()
-	sourceID := fmt.Sprintf("task-memory-%s-%d", suffix, now.UnixNano())
+	sourceID := fmt.Sprintf("octo/task-memory#%s-%d", suffix, now.UnixNano())
+	repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope)
-		VALUES (?, 'github', ?, 'pr', 'Task Memory Conformance', 'https://example/x', '{}', ?, 'active', 'https://github.com')
-	`, entityID, sourceID, now); err != nil {
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope, repository_id)
+		VALUES (?, 'github', ?, 'pr', 'Task Memory Conformance', 'https://example/x', '{}', ?, 'active', 'https://github.com', ?)
+	`, entityID, sourceID, now, repoID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	eventID := uuid.New().String()
@@ -247,11 +249,12 @@ func seedSQLiteBlueprintRunForTaskMemory(t *testing.T, conn *sql.DB, suffix stri
 	t.Helper()
 	now := time.Now().UTC()
 	entityID := uuid.New().String()
-	sourceID := fmt.Sprintf("bp-run-%s-%d", suffix, now.UnixNano())
+	sourceID := fmt.Sprintf("octo/bp-run#%s-%d", suffix, now.UnixNano())
+	repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope)
-		VALUES (?, 'github', ?, 'pr', 'Blueprint Run Conformance', 'https://example/bp', '{}', ?, 'active', 'https://github.com')
-	`, entityID, sourceID, now); err != nil {
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope, repository_id)
+		VALUES (?, 'github', ?, 'pr', 'Blueprint Run Conformance', 'https://example/bp', '{}', ?, 'active', 'https://github.com', ?)
+	`, entityID, sourceID, now, repoID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	eventID := uuid.New().String()

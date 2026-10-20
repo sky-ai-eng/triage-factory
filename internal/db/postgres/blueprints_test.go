@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -1043,10 +1044,11 @@ func ensurePgTeamForOrg(t *testing.T, h *pgtest.Harness, orgID, userID string) s
 func seedPgTask(t *testing.T, h *pgtest.Harness, orgID, userID string) string {
 	t.Helper()
 	entityID := uuid.New().String()
+	repositoryID := dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, "https://github.com", "octo/blueprints-test#"+entityID[:8])
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Blueprints Test Entity', 'https://example/x', '{}'::jsonb, now(), 'https://github.com')
-	`, entityID, orgID, "blueprints-test-"+entityID[:8]); err != nil {
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Blueprints Test Entity', 'https://example/x', '{}'::jsonb, now(), 'https://github.com', $4)
+	`, entityID, orgID, "octo/blueprints-test#"+entityID[:8], repositoryID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	eventID := uuid.New().String()

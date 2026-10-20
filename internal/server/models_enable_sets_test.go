@@ -11,6 +11,7 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -339,9 +340,10 @@ func TestDelegate_ModelProviderUnavailable_SurfacesTheRemedy(t *testing.T) {
 		blueprintID, promptID); err != nil {
 		t.Fatalf("seed blueprint step: %v", err)
 	}
+	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope)
-		 VALUES ('e_prov', 'github', 'sky/repo#prov', 'pr', 'active', 'https://github.com')`); err != nil {
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		 VALUES ('e_prov', 'github', 'sky/repo#prov', 'pr', 'active', 'https://github.com', ?)`, repoID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	if _, err := s.db.Exec(
