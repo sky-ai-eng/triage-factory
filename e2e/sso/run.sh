@@ -59,6 +59,10 @@ FAKES_PID=""
 TF_PID=""
 cleanup() {
   local status=$?
+  # Teardown runs every step whatever the one before it returned (wait on a
+  # signalled child returns 128+n), and the script exits with the suite's
+  # status, not a teardown step's.
+  set +e
   if [ "${SSO_E2E_KEEP_UP:-}" = 1 ]; then
     log "SSO_E2E_KEEP_UP=1: leaving the stack up (TF pid ${TF_PID:-none}, fakes pid ${FAKES_PID:-none})"
     exit "$status"
