@@ -140,10 +140,6 @@ type admitJailPortsArgs struct {
 	Ports          []int  `json:"ports"`
 }
 
-type admitJailPortsResult struct {
-	Ingress sandbox.JailIngress `json:"ingress"`
-}
-
 type ensureRootfsArgs struct {
 	Selector sandbox.RootfsSelector `json:"selector"`
 }

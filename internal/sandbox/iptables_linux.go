@@ -21,11 +21,11 @@ import (
 // Also enables net.ipv4.ip_forward (idempotent — checks current
 // value first so we don't toggle on every run).
 //
-// Returns the rule's literal args so teardownIptables can mirror
-// them in a -D call.
-func applyMasquerade(ctx context.Context, subnet, upstreamIF string) (iptablesRule, error) {
+// Teardown finds the rule by its subnet (reapIptablesForSubnet), so
+// nothing about it is returned.
+func applyMasquerade(ctx context.Context, subnet, upstreamIF string) error {
 	if err := ensureIPForward(); err != nil {
-		return iptablesRule{}, fmt.Errorf("iptables: ip_forward: %w", err)
+		return fmt.Errorf("iptables: ip_forward: %w", err)
 	}
 
 	rule := iptablesRule{
@@ -38,13 +38,11 @@ func applyMasquerade(ctx context.Context, subnet, upstreamIF string) (iptablesRu
 		},
 	}
 	args := append([]string{"-t", rule.Table, "-A", rule.Chain}, rule.Args...)
-	if err := runIptables(ctx, args...); err != nil {
-		return iptablesRule{}, err
-	}
-	return rule, nil
+	return runIptables(ctx, args...)
 }
 
-// teardownIptables removes the masquerade rule. Idempotent — a
+// teardownIptables deletes rule, mirroring the -A or -I that installed
+// it: the rollback of a policy that failed partway. Idempotent — a
 // missing rule errors with exit code 1 from iptables, which we
 // silence.
 func teardownIptables(ctx context.Context, rule iptablesRule) error {
@@ -82,14 +80,13 @@ func teardownIptables(ctx context.Context, rule iptablesRule) error {
 //     backstop that catches gVisor's netstack traffic: drop every packet
 //     arriving from the sandbox, to the gateway IP and to anywhere else.
 //     The sidecar's listeners are opened afterwards, port by port, by
-//     admitJailPorts, once the sidecar has bound them. Returned for
-//     teardown, mirroring applyMasquerade.
+//     admitJailPorts, once the sidecar has bound them.
 //
 // Until admitJailPorts runs the sandbox can complete no connection to the
-// host at all, so a launch path that never admits fails closed. Returns
-// the host-side rules so Close can remove them; the in-netns rules need
-// no teardown.
-func applyEgressPolicy(ctx context.Context, netnsName, vethHost, gatewayIP string) ([]iptablesRule, error) {
+// host at all, so a launch path that never admits fails closed. Teardown
+// finds the host-side rules by veth and gateway (reapEgressRules); the
+// in-netns rules go with the netns.
+func applyEgressPolicy(ctx context.Context, netnsName, vethHost, gatewayIP string) error {
 	// Layer 1 — in-netns OUTPUT allowlist. Add the ACCEPTs before
 	// flipping the policy to DROP (config-time, no traffic in flight,
 	// but the ordering keeps the intent obvious). gVisor traffic may
@@ -103,7 +100,7 @@ func applyEgressPolicy(ctx context.Context, netnsName, vethHost, gatewayIP strin
 	}
 	for _, args := range netnsSteps {
 		if err := runIptablesInNetns(ctx, netnsName, args...); err != nil {
-			return nil, fmt.Errorf("egress: in-netns %s: %w", strings.Join(args, " "), err)
+			return fmt.Errorf("egress: in-netns %s: %w", strings.Join(args, " "), err)
 		}
 	}
 
@@ -148,20 +145,20 @@ func applyEgressPolicy(ctx context.Context, netnsName, vethHost, gatewayIP strin
 			for _, installed := range hostRules {
 				_ = teardownIptables(ctx, installed)
 			}
-			return nil, fmt.Errorf("egress: host-side %s: %w", r.chain, err)
+			return fmt.Errorf("egress: host-side %s: %w", r.chain, err)
 		}
 		hostRules = append(hostRules, rule)
 	}
-	return hostRules, nil
+	return nil
 }
 
 // admitJailPorts opens TCP ports on a sandbox's gateway IP to its jail:
 // one ACCEPT per port on the run's veth, inserted at the head of INPUT so
 // it precedes the DROPs applyEgressPolicy installed. These are the only
-// connections the jail can complete to the host. Returns the rules for
-// teardown; on failure the ones already installed are removed and none are
-// returned.
-func admitJailPorts(ctx context.Context, vethHost, gatewayIP string, ports []int) ([]iptablesRule, error) {
+// connections the jail can complete to the host. On failure the ones
+// already installed are removed; teardown finds the rest by veth and gateway
+// (reapEgressRules).
+func admitJailPorts(ctx context.Context, vethHost, gatewayIP string, ports []int) error {
 	var rules []iptablesRule
 	for _, port := range ports {
 		rule := iptablesRule{
@@ -179,11 +176,11 @@ func admitJailPorts(ctx context.Context, vethHost, gatewayIP string, ports []int
 			for _, installed := range rules {
 				_ = teardownIptables(ctx, installed)
 			}
-			return nil, fmt.Errorf("admit jail port %d: %w", port, err)
+			return fmt.Errorf("admit jail port %d: %w", port, err)
 		}
 		rules = append(rules, rule)
 	}
-	return rules, nil
+	return nil
 }
 
 // reapIptablesForSubnet removes every POSTROUTING MASQUERADE rule

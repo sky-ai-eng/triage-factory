@@ -116,18 +116,11 @@ func TestIntegration_CrossTenantEgressBlocked(t *testing.T) {
 	// port it may use, the way a cell admits its sidecar's listeners, (b) tell
 	// the payload what the gateway is and (c) stand up listeners there so the
 	// own-gateway control can succeed and the unadmitted one has something to
-	// refuse. The run built its own network, so its teardown does not know the
-	// admitted rule; the test removes it.
+	// refuse. The run's own teardown removes the admitted rule with the rest.
 	admitted, _ := strconv.Atoi(port)
-	ingress, err := defaultOps.AdmitJailPorts(ctx, cfg.ConversationID, sb.SubnetIdx, []int{admitted})
-	if err != nil {
+	if err := defaultOps.AdmitJailPorts(ctx, cfg.ConversationID, sb.SubnetIdx, []int{admitted}); err != nil {
 		t.Fatalf("admit jail port %s: %v", port, err)
 	}
-	t.Cleanup(func() {
-		for _, r := range ingress.Rules {
-			_ = teardownIptables(context.Background(), r)
-		}
-	})
 	if err := os.WriteFile(filepath.Join(cfg.Worktree, "own_gw"), []byte(sb.HostIP+"\n"), 0o644); err != nil {
 		t.Fatalf("write own_gw: %v", err)
 	}

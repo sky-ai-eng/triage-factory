@@ -152,7 +152,7 @@ func TestIntegration_RunNetwork_CloseRemovesUnrecordedAdmissions(t *testing.T) {
 	}
 	// Straight to the privileged op, as a lost reply would leave it: the rule
 	// is installed and the network's state does not know.
-	if _, err := defaultOps.AdmitJailPorts(ctx, conversationID, net.Idx, []int{45678}); err != nil {
+	if err := defaultOps.AdmitJailPorts(ctx, conversationID, net.Idx, []int{45678}); err != nil {
 		_ = net.Close()
 		t.Fatalf("AdmitJailPorts: %v", err)
 	}
@@ -169,10 +169,10 @@ func TestIntegration_RunNetwork_CloseRemovesUnrecordedAdmissions(t *testing.T) {
 }
 
 // TestIntegration_RunNetwork_TeardownCannotOpenALiveNetwork: a teardown whose
-// state names a live network's gateway and rules, but a veth that does not
-// exist, removes nothing of that network. The state is the caller's, so
-// teardown must not be a way to strip a live network's filter while its veth
-// stays up.
+// state names a live network's gateway, but another network's namespace and
+// veth, is refused and removes nothing of the live network. The state is the
+// caller's, so teardown must not be a way to strip a live network's filter
+// while its veth stays up.
 func TestIntegration_RunNetwork_TeardownCannotOpenALiveNetwork(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("run network setup needs root for netns/veth/iptables; skipping")
@@ -186,20 +186,18 @@ func TestIntegration_RunNetwork_TeardownCannotOpenALiveNetwork(t *testing.T) {
 		t.Fatalf("SetupRunNetwork: %v", err)
 	}
 	t.Cleanup(func() { _ = live.Close() })
-	state, _ := live.netSt.(NetworkState)
 	before := gatewayRules(t, live.HostIP)
 	if len(before) == 0 {
 		t.Fatalf("the live network has no rules for its gateway %s; the check below would pass vacuously", live.HostIP)
 	}
 
 	forged := NetworkState{
-		NetnsName:   "tf-00000000-250",
-		VethHost:    "vh-0000250",
-		HostIP:      live.HostIP,
-		EgressRules: state.EgressRules,
+		NetnsName: "tf-00000000-250",
+		VethHost:  "vh-0000250",
+		HostIP:    live.HostIP,
 	}
-	if err := defaultOps.TeardownNetwork(ctx, forged); err != nil {
-		t.Fatalf("TeardownNetwork: %v", err)
+	if err := defaultOps.TeardownNetwork(ctx, forged); err == nil {
+		t.Error("TeardownNetwork accepted a state naming another network's gateway")
 	}
 
 	if after := gatewayRules(t, live.HostIP); !slices.Equal(after, before) {

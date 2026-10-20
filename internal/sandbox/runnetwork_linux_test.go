@@ -5,7 +5,6 @@ package sandbox
 import (
 	"context"
 	"slices"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,16 +15,14 @@ import (
 // who builds the veth and who tears it down — is observable rather than
 // assumed. It embeds fakePrivilegedOps for every other method and overrides
 // only the network ops (pointer receiver, for the counters). It also records
-// each port admission and the state the last teardown was handed, so what a
-// teardown removes is observable too.
+// each port admission.
 type recordingNetOps struct {
 	fakePrivilegedOps
 	setups    atomic.Int32
 	teardowns atomic.Int32
 
-	mu           sync.Mutex
-	admitted     [][]int
-	tornDownWith NetworkState
+	mu       sync.Mutex
+	admitted [][]int
 }
 
 func (r *recordingNetOps) SetupNetwork(_ context.Context, _ string, idx uint8) (NetworkState, error) {
@@ -38,23 +35,16 @@ func (r *recordingNetOps) SetupNetwork(_ context.Context, _ string, idx uint8) (
 	}, nil
 }
 
-func (r *recordingNetOps) TeardownNetwork(_ context.Context, state NetworkState) error {
+func (r *recordingNetOps) TeardownNetwork(_ context.Context, _ NetworkState) error {
 	r.teardowns.Add(1)
-	r.mu.Lock()
-	r.tornDownWith = state
-	r.mu.Unlock()
 	return nil
 }
 
-func (r *recordingNetOps) AdmitJailPorts(_ context.Context, _ string, idx uint8, ports []int) (JailIngress, error) {
+func (r *recordingNetOps) AdmitJailPorts(_ context.Context, _ string, _ uint8, ports []int) error {
 	r.mu.Lock()
 	r.admitted = append(r.admitted, append([]int(nil), ports...))
 	r.mu.Unlock()
-	var in JailIngress
-	for _, p := range ports {
-		in.Rules = append(in.Rules, iptablesRule{Table: "filter", Chain: "INPUT", Args: []string{"-d", hostIP(idx), "--dport", strconv.Itoa(p), "-j", "ACCEPT"}})
-	}
-	return in, nil
+	return nil
 }
 
 var _ SandboxOps = (*recordingNetOps)(nil)
@@ -193,8 +183,7 @@ func TestRunNetworkClose_ReleasesIndexAfterCancelledRun(t *testing.T) {
 }
 
 // TestRunNetwork_AdmitJailPorts pins the admission bookkeeping: each port is
-// asked for once however many launches name it, the rules the privileged side
-// installed are handed to the network's teardown, and a closed network admits
+// asked for once however many launches name it, and a closed network admits
 // nothing.
 func TestRunNetwork_AdmitJailPorts(t *testing.T) {
 	rec := installRecordingNetOps(t)
@@ -227,12 +216,6 @@ func TestRunNetwork_AdmitJailPorts(t *testing.T) {
 
 	if err := net.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
-	}
-	rec.mu.Lock()
-	rules := rec.tornDownWith.EgressRules
-	rec.mu.Unlock()
-	if len(rules) != 3 {
-		t.Fatalf("teardown was handed %d rules, want the 3 admitted ones: %v", len(rules), rules)
 	}
 	if err := net.AdmitJailPorts(ctx, []int{50000}); err == nil {
 		t.Error("a closed network admitted a port")

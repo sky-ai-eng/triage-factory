@@ -21,7 +21,7 @@ import (
 type fakeOps struct {
 	setupNetworkFn    func(ctx context.Context, conversationID string, subnetIdx uint8) (sandbox.NetworkState, error)
 	teardownNetworkFn func(ctx context.Context, state sandbox.NetworkState) error
-	admitJailPortsFn  func(ctx context.Context, conversationID string, subnetIdx uint8, ports []int) (sandbox.JailIngress, error)
+	admitJailPortsFn  func(ctx context.Context, conversationID string, subnetIdx uint8, ports []int) error
 	ensureRootfsFn    func(ctx context.Context, selector sandbox.RootfsSelector) (string, error)
 	reapOrphansFn     func(ctx context.Context) error
 	chownRunTreeFn    func(ctx context.Context, root, subpath string, jailUID int) error
@@ -38,7 +38,7 @@ func (f *fakeOps) SetupNetwork(ctx context.Context, conversationID string, subne
 func (f *fakeOps) TeardownNetwork(ctx context.Context, state sandbox.NetworkState) error {
 	return f.teardownNetworkFn(ctx, state)
 }
-func (f *fakeOps) AdmitJailPorts(ctx context.Context, conversationID string, subnetIdx uint8, ports []int) (sandbox.JailIngress, error) {
+func (f *fakeOps) AdmitJailPorts(ctx context.Context, conversationID string, subnetIdx uint8, ports []int) error {
 	return f.admitJailPortsFn(ctx, conversationID, subnetIdx, ports)
 }
 func (f *fakeOps) EnsureRootfs(ctx context.Context, selector sandbox.RootfsSelector) (string, error) {
@@ -138,22 +138,22 @@ func TestIPCRoundTrip_AdmitJailPorts(t *testing.T) {
 	var gotSubnetIdx uint8
 	var gotPorts []int
 	client := serveTestBroker(t, &fakeOps{
-		admitJailPortsFn: func(ctx context.Context, conversationID string, subnetIdx uint8, ports []int) (sandbox.JailIngress, error) {
+		admitJailPortsFn: func(ctx context.Context, conversationID string, subnetIdx uint8, ports []int) error {
 			gotConversationID, gotSubnetIdx, gotPorts = conversationID, subnetIdx, ports
 			if len(ports) == 0 {
-				return sandbox.JailIngress{}, errors.New("no ports")
+				return errors.New("no ports")
 			}
-			return sandbox.JailIngress{}, nil
+			return nil
 		},
 	})
 
-	if _, err := client.AdmitJailPorts(context.Background(), "run-abc123", 7, []int{443, 34567}); err != nil {
+	if err := client.AdmitJailPorts(context.Background(), "run-abc123", 7, []int{443, 34567}); err != nil {
 		t.Fatalf("AdmitJailPorts: %v", err)
 	}
 	if gotConversationID != "run-abc123" || gotSubnetIdx != 7 || !reflect.DeepEqual(gotPorts, []int{443, 34567}) {
 		t.Errorf("broker saw conversationID=%q subnetIdx=%d ports=%v, want run-abc123/7/[443 34567]", gotConversationID, gotSubnetIdx, gotPorts)
 	}
-	if _, err := client.AdmitJailPorts(context.Background(), "run-abc123", 7, nil); err == nil || !strings.Contains(err.Error(), "no ports") {
+	if err := client.AdmitJailPorts(context.Background(), "run-abc123", 7, nil); err == nil || !strings.Contains(err.Error(), "no ports") {
 		t.Errorf("AdmitJailPorts refusal = %v, want the broker's error", err)
 	}
 }

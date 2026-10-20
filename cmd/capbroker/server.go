@@ -287,11 +287,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		ingress, err := s.ops.AdmitJailPorts(ctx, a.ConversationID, a.SubnetIdx, a.Ports)
-		if err != nil {
-			return nil, err
-		}
-		return admitJailPortsResult{Ingress: ingress}, nil
+		return emptyResult{}, s.ops.AdmitJailPorts(ctx, a.ConversationID, a.SubnetIdx, a.Ports)
 
 	case methodEnsureRootfs:
 		var a ensureRootfsArgs

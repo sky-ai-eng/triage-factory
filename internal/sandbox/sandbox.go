@@ -154,8 +154,8 @@ type Config struct {
 // index goes: an index's uids are handed to another run only once no process
 // and no file still carries them.
 //
-// The gateway ports the jail is admitted to (AdmitJailPorts) are recorded the
-// same way, as rules in the network's state, and removed with the network.
+// The gateway ports the jail is admitted to (AdmitJailPorts) are removed with
+// the network.
 type RunNetwork struct {
 	Idx       uint8
 	Subnet    string

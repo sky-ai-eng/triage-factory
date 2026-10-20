@@ -35,12 +35,8 @@ func TestApplyEgressPolicy_FailsClosed(t *testing.T) {
 		bogusGateway = "10.42.250.1"
 	)
 
-	rules, err := applyEgressPolicy(ctx, bogusNetns, bogusVeth, bogusGateway)
-	if err == nil {
+	if err := applyEgressPolicy(ctx, bogusNetns, bogusVeth, bogusGateway); err == nil {
 		t.Fatal("applyEgressPolicy returned nil error for a nonexistent netns; " +
 			"the egress allowlist must fail closed (return an error so wrap aborts the run), not silently no-op")
-	}
-	if rules != nil {
-		t.Errorf("applyEgressPolicy returned %d rule(s) alongside its error; a failed apply must return no rules so teardown has nothing stale to chase", len(rules))
 	}
 }

@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -33,7 +35,46 @@ func netnsIDFrag(conversationID string) string {
 // would accept any tf-shaped path. Exported so the launch validation and
 // its tests build the same name this package's setup produces.
 func NetnsNameForRun(conversationID string, subnetIdx uint8) string {
-	return fmt.Sprintf("tf-%s-%d", netnsIDFrag(conversationID), subnetIdx)
+	return runNetNames(netnsIDFrag(conversationID), subnetIdx).netnsName
+}
+
+// runNetNames is every name of the run network at subnetIdx for a run id
+// hashing to idFrag. setupNetwork builds from it, and TeardownNetwork accepts
+// only a state that names exactly what it gives, so a teardown can delete
+// nothing a setup would not have built.
+func runNetNames(idFrag string, subnetIdx uint8) *netState {
+	netnsName := fmt.Sprintf("tf-%s-%d", idFrag, subnetIdx)
+	short := idFrag[:min(len(idFrag), 4)]
+	return &netState{
+		netnsName:   netnsName,
+		netnsPath:   "/var/run/netns/" + netnsName,
+		vethHost:    fmt.Sprintf("vh-%s%d", short, subnetIdx),
+		vethSandbox: fmt.Sprintf("vs-%s%d", short, subnetIdx),
+		subnet:      subnetCIDR(subnetIdx),
+	}
+}
+
+// runNetnsRE is the namespace name runNetNames builds: an id fragment of
+// exactly netnsIDFrag's length and a decimal subnet index.
+var runNetnsRE = regexp.MustCompile(`^tf-([0-9a-f]{8})-([0-9]{1,3})$`)
+
+// runNetFromNetnsName inverts runNetNames: the names of the run network whose
+// namespace is name, and its subnet index, if name is one runNetNames builds.
+func runNetFromNetnsName(name string) (*netState, uint8, bool) {
+	m := runNetnsRE.FindStringSubmatch(name)
+	if m == nil {
+		return nil, 0, false
+	}
+	n, err := strconv.Atoi(m[2])
+	if err != nil || n > 255 {
+		return nil, 0, false
+	}
+	names := runNetNames(m[1], uint8(n))
+	if names.netnsName != name {
+		// A non-canonical index such as "007" names no namespace setup builds.
+		return nil, 0, false
+	}
+	return names, uint8(n), true
 }
 
 // setupNetwork creates the netns + veth pair + addressing matching
@@ -59,23 +100,13 @@ func setupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (
 	// conversationID to be hex (TraceID may be "live-smoke" or any free-form
 	// string), so derive a deterministic 8-hex-char fragment from a
 	// sha1 of the conversationID. Same conversationID → same fragment, every time.
-	idFrag := netnsIDFrag(conversationID)
-	netnsName := NetnsNameForRun(conversationID, subnetIdx)
-	vethHost := vethHostName(conversationID, subnetIdx)
-	vethSandbox := fmt.Sprintf("vs-%s%d", idFrag[:min(len(idFrag), 4)], subnetIdx)
-	netnsPath := "/var/run/netns/" + netnsName
+	state := runNetNames(netnsIDFrag(conversationID), subnetIdx)
+	netnsName := state.netnsName
+	vethHost := state.vethHost
+	vethSandbox := state.vethSandbox
 
 	hostAddr := hostIP(subnetIdx)
 	sandboxAddr := sandboxIP(subnetIdx)
-	subnet := subnetCIDR(subnetIdx)
-
-	state := &netState{
-		netnsName:   netnsName,
-		netnsPath:   netnsPath,
-		vethHost:    vethHost,
-		vethSandbox: vethSandbox,
-		subnet:      subnet,
-	}
 
 	// Discover the upstream interface from the default route. Fly
 	// Machines use eth0 but self-host customers may differ.
@@ -299,6 +330,5 @@ func disableIPv6On(root, iface string) error {
 // that needs it (AdmitJailPorts) re-derives it rather than trusting a name
 // it is handed.
 func vethHostName(conversationID string, subnetIdx uint8) string {
-	idFrag := netnsIDFrag(conversationID)
-	return fmt.Sprintf("vh-%s%d", idFrag[:min(len(idFrag), 4)], subnetIdx)
+	return runNetNames(netnsIDFrag(conversationID), subnetIdx).vethHost
 }
