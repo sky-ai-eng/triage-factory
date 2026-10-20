@@ -90,8 +90,9 @@ type FactoryReadStore interface {
 	// Multi-mode (Postgres) scopes to the viewer's teams by the
 	// *tracked set*: a GitHub entity is included iff its owner/name is
 	// one of the viewer's teams' tracked repos (team_github_repos), a
-	// Jira entity iff its project key is attached to one of those teams
-	// (jira_project_status_rules). This is independent of whether any
+	// Jira entity iff its project — the registry row on its site — is
+	// attached to one of those teams (jira_project_status_rules). This is
+	// independent of whether any
 	// task was ever minted on the entity — an untasked PR on a tracked
 	// repo rides the belt. The org-level GitHub App polls org-wide, so
 	// polling produces org-wide entities; the entity↔team relationship

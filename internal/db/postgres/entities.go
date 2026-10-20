@@ -380,22 +380,27 @@ func listActiveEntities(ctx context.Context, q queryer, orgID, source string) ([
 // to the projects attached to the viewer's teams. A team "attaches" a
 // Jira project by configuring its status rules, so an entity belongs in
 // the viewer's discovery deck iff a jira_project_status_rules row exists
-// for the entity's project key (the prefix of source_id, e.g. "PROJ" in
-// "PROJ-123"). split_part(source_id, '-', 1) extracts the key — Jira keys
-// are hyphen-free, so the first segment is always the project key.
+// for the entity's project: the registry row on the entity's site whose
+// key is the prefix of source_id ("PROJ" in "PROJ-123"). Jira keys are
+// hyphen-free, so split_part(source_id, '-', 1) is always the key, and the
+// registry's key is the project's key now, which is what the tracker renames
+// the issue keys to.
 //
 // The team scoping is free: under the app pool (tf_app, RLS active) the
 // jira_rules_select policy already constrains visible rows to the
 // viewer's team memberships, so the EXISTS auto-scopes with no explicit
 // team_id — the same RLS-does-the-scoping pattern as the factory belt's
-// task-membership semi-join. The teams join binds org_id as
-// defense-in-depth (jira_project_status_rules has no org_id column) so
-// the filter holds even on the admin pool where RLS is bypassed.
+// task-membership semi-join. The org_id bind is defense-in-depth so the
+// filter holds even on the admin pool where RLS is bypassed.
+//
+// TODO(TFAC-1130): match e's own jira_project_id against jr.jira_project_id
+// instead of parsing the key prefix.
 const jiraTeamProjectMembershipExists = `EXISTS (
 	SELECT 1 FROM jira_project_status_rules jr
-	JOIN teams tm ON tm.id = jr.team_id
-	WHERE jr.project_key = split_part(e.source_id, '-', 1)
-	  AND tm.org_id = $1
+	JOIN jira_projects jp ON jp.id = jr.jira_project_id
+	WHERE jr.org_id = $1
+	  AND jp.site = e.scope
+	  AND jp.project_key = split_part(e.source_id, '-', 1)
 )`
 
 // jiraTeamProjectMembershipForTeam is the single-team variant of
@@ -406,10 +411,11 @@ const jiraTeamProjectMembershipExists = `EXISTS (
 // org bind.
 const jiraTeamProjectMembershipForTeam = `EXISTS (
 	SELECT 1 FROM jira_project_status_rules jr
-	JOIN teams tm ON tm.id = jr.team_id
-	WHERE jr.project_key = split_part(e.source_id, '-', 1)
-	  AND tm.org_id = $1
+	JOIN jira_projects jp ON jp.id = jr.jira_project_id
+	WHERE jr.org_id = $1
 	  AND jr.team_id = $2
+	  AND jp.site = e.scope
+	  AND jp.project_key = split_part(e.source_id, '-', 1)
 )`
 
 func (s *entityStore) ListActiveJiraTeamScoped(ctx context.Context, orgID, teamID string) ([]domain.Entity, error) {

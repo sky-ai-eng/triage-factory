@@ -37,6 +37,7 @@ func TestSettingsStores_Postgres(t *testing.T) {
 				Teams:            stores.Teams,
 				Users:            stores.Users,
 				JiraStatusRules:  stores.JiraStatusRules,
+				JiraProjects:     stores.JiraProjects,
 				TeamGitHubGroups: stores.TeamGitHubGroups,
 				TeamGitHubRepos:  stores.TeamGitHubRepos,
 				OrgEventSources:  stores.OrgEventSources,
@@ -186,23 +187,32 @@ func TestJiraStatusRulesStore_Postgres_ReplaceForTeam_TeamAdminGated(t *testing.
 
 	// Owner seeds a baseline rule.
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	const site = "https://acme.atlassian.net"
+	sky, err := stores.JiraProjects.FindOrCreate(context.Background(), orgID, site, "10000", "SKY", "")
+	if err != nil {
+		t.Fatalf("register SKY: %v", err)
+	}
+	eng, err := stores.JiraProjects.FindOrCreate(context.Background(), orgID, site, "10001", "ENG", "")
+	if err != nil {
+		t.Fatalf("register ENG: %v", err)
+	}
 	seed := []domain.JiraProjectStatusRules{{
-		ProjectKey:          "SKY",
+		JiraProjectID:       sky.ID,
 		PickupMembers:       jiraRefs("To Do"),
 		InProgressMembers:   jiraRefs("In Progress"),
 		InProgressCanonical: jiraRef("In Progress"),
 		DoneMembers:         jiraRefs("Done"),
 		DoneCanonical:       jiraRef("Done"),
 	}}
-	if err := stores.JiraStatusRules.ReplaceForTeam(context.Background(), teamID, seed); err != nil {
+	if err := stores.JiraStatusRules.ReplaceForTeam(context.Background(), teamID, site, seed); err != nil {
 		t.Fatalf("owner seed ReplaceForTeam: %v", err)
 	}
 
 	// Plain member's ReplaceForTeam must be refused.
-	err := h.WithUser(t, member, orgID, func(tx *sql.Tx) error {
+	err = h.WithUser(t, member, orgID, func(tx *sql.Tx) error {
 		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
-		return stores.JiraStatusRules.ReplaceForTeam(context.Background(), teamID, []domain.JiraProjectStatusRules{{
-			ProjectKey:          "ENG",
+		return stores.JiraStatusRules.ReplaceForTeam(context.Background(), teamID, site, []domain.JiraProjectStatusRules{{
+			JiraProjectID:       eng.ID,
 			PickupMembers:       jiraRefs("New"),
 			InProgressMembers:   jiraRefs("Doing"),
 			InProgressCanonical: jiraRef("Doing"),
@@ -219,7 +229,7 @@ func TestJiraStatusRulesStore_Postgres_ReplaceForTeam_TeamAdminGated(t *testing.
 	}
 
 	// Original rule survives.
-	got, err := stores.JiraStatusRules.ListForTeamSystem(context.Background(), teamID)
+	got, err := stores.JiraStatusRules.ListForTeamSystem(context.Background(), teamID, site)
 	if err != nil {
 		t.Fatalf("ListForTeamSystem: %v", err)
 	}

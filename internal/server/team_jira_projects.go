@@ -31,6 +31,14 @@ import (
 // server resolves them from the same fetch that validates the ids, so a stored
 // name is always one Jira gave us and a caller cannot store a name that lies.
 //
+// A key is how a caller names a project, not what TF stores: the rules
+// reference the project's row in the jira_projects registry, which is keyed by
+// Jira's own project id on the org's Jira site. A project added here is
+// registered under the id the gate's catalog read returns, so a later key
+// rename moves the registry row's key and leaves this team's set intact. A key
+// that names a project already in the set under another key — its old key,
+// stored before a rename the poll has not caught up with — is refused.
+//
 // An absent rule keeps the stored one. That is what makes the replace-set
 // survivable for rules a client cannot express — the name-only rows written
 // before statuses were identified, which have no ids to send — and it is the
@@ -135,7 +143,7 @@ func (s *Server) handleTeamJiraProjectsPut(w http.ResponseWriter, r *http.Reques
 	// The pre-image: what this team has stored right now. It is what an absent
 	// rule is carried from, what the gates grandfather, and what the poller
 	// restart decision is compared against.
-	prev, err := s.storedJiraProjects(r.Context(), orgID, userID, teamID)
+	prev, site, err := s.storedJiraProjects(r.Context(), orgID, userID, teamID)
 	if err != nil {
 		internalError(w, "settings/team/jira-projects", err)
 		return
@@ -145,7 +153,7 @@ func (s *Server) handleTeamJiraProjectsPut(w http.ResponseWriter, r *http.Reques
 	// project keys being added must exist, and status ids in a rule that
 	// changed must be in that project's workflow — the same fetch resolving
 	// each id to its display name.
-	next, ok := s.gateJiraProjects(w, r, orgID, userID, wishes, prev)
+	next, ok := s.gateJiraProjects(w, r, orgID, userID, site, wishes, prev)
 	if !ok {
 		return
 	}
@@ -163,18 +171,37 @@ func (s *Server) handleTeamJiraProjectsPut(w http.ResponseWriter, r *http.Reques
 	}
 
 	// team_settings.jira_projects holds the display ORDER; jira_project_status_
-	// rules holds the rules themselves. Both are written in one transaction, so
-	// the order can never name a project whose rules didn't land.
+	// rules holds the rules themselves. Both are written in one transaction with
+	// the registry rows of the projects being added, so the order can never name
+	// a project whose rules didn't land, and a rule never names a project that
+	// has no registry row.
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		for i := range next {
+			if next[i].JiraProjectID != "" {
+				continue
+			}
+			project, err := tx.JiraProjects.FindOrCreate(r.Context(), orgID, site,
+				next[i].ProjectExternalID, next[i].ProjectKey, next[i].ProjectName)
+			if err != nil {
+				return fmt.Errorf("register jira project %s: %w", next[i].ProjectKey, err)
+			}
+			next[i].JiraProjectID = project.ID
+		}
 		teamSet, err := tx.Teams.GetSettings(r.Context(), teamID)
 		if err != nil {
 			return fmt.Errorf("load team settings: %w", err)
 		}
-		teamSet.JiraProjects = projectKeysFromConfigs(next)
+		teamSet.JiraProjects = jiraProjectIDsFromConfigs(next)
 		if _, err := tx.Teams.UpdateSettings(r.Context(), teamID, teamSet); err != nil {
 			return fmt.Errorf("save team settings: %w", err)
 		}
-		if err := tx.JiraStatusRules.ReplaceForTeam(r.Context(), teamID, next); err != nil {
+		// With no Jira site there is nothing stored to replace: every read
+		// confines itself to the site, and a set naming a project never gets
+		// past the gate without one.
+		if site == "" {
+			return nil
+		}
+		if err := tx.JiraStatusRules.ReplaceForTeam(r.Context(), teamID, site, next); err != nil {
 			return fmt.Errorf("save jira rules: %w", err)
 		}
 		return nil
@@ -209,17 +236,26 @@ type jiraProjectWish struct {
 	write jiraProjectWrite
 }
 
-// storedJiraProjects reads the team's rules in their display order — the same
-// shape and order the GET renders, so "already stored" means exactly what a
-// client that just read the resource would resend.
-func (s *Server) storedJiraProjects(ctx context.Context, orgID, userID, teamID string) ([]domain.JiraProjectStatusRules, error) {
-	var out []domain.JiraProjectStatusRules
+// storedJiraProjects reads the team's rules on the org's Jira site in their
+// display order — the same shape and order the GET renders, so "already
+// stored" means exactly what a client that just read the resource would
+// resend — and the site, which the write saves under.
+func (s *Server) storedJiraProjects(ctx context.Context, orgID, userID, teamID string) ([]domain.JiraProjectStatusRules, string, error) {
+	var (
+		out  []domain.JiraProjectStatusRules
+		site string
+	)
 	err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		orgSet, err := tx.Orgs.GetSettings(ctx, orgID)
+		if err != nil {
+			return fmt.Errorf("load org settings: %w", err)
+		}
+		site = domain.EntityScope("jira", orgSet)
 		teamSet, err := tx.Teams.GetSettings(ctx, teamID)
 		if err != nil {
 			return fmt.Errorf("load team settings: %w", err)
 		}
-		rules, err := tx.JiraStatusRules.ListForTeam(ctx, teamID)
+		rules, err := tx.JiraStatusRules.ListForTeam(ctx, teamID, site)
 		if err != nil {
 			return fmt.Errorf("load jira rules: %w", err)
 		}
@@ -227,7 +263,7 @@ func (s *Server) storedJiraProjects(ctx context.Context, orgID, userID, teamID s
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return out, nil
+	return out, site, nil
 }

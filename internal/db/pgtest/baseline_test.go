@@ -25,7 +25,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 
 	expectedTables := []string{
 		"orgs", "teams", "users", "user_github_identities", "user_jira_identities", "user_linear_identities", "memberships", "org_memberships", "sessions", "user_api_tokens",
-		"org_settings", "team_settings", "user_settings", "jira_project_status_rules",
+		"org_settings", "team_settings", "user_settings", "jira_project_status_rules", "jira_projects",
 		"linear_team_rules",
 		"team_github_groups", "team_github_repos",
 		"prompts", "events_catalog", "entities", "entity_links", "events",
@@ -315,13 +315,13 @@ func TestBaseline_JiraStatusRulesCompleteOrEmpty_CHECKsFire(t *testing.T) {
 	owner := SeedUser(t, h, "check-owner")
 	orgID := SeedOrg(t, h, "check-org", owner)
 	teamID := SeedTeam(t, h, orgID, "check-team")
-	_ = orgID // referenced only for FK chain
+	project := func(key string) string { return dbseed.JiraProject(t, h.AdminDB, orgID, dbseed.JiraSite, key) }
 
 	const insertRule = `INSERT INTO jira_project_status_rules
-		(team_id, project_key, pickup_members,
+		(team_id, jira_project_id, pickup_members,
 		 in_progress_members, in_progress_canonical,
-		 done_members, done_canonical)
-		VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb)`
+		 done_members, done_canonical, org_id)
+		VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb, $8)`
 
 	const (
 		toDo       = `[{"id":"10000","name":"To Do"}]`
@@ -364,8 +364,8 @@ func TestBaseline_JiraStatusRulesCompleteOrEmpty_CHECKsFire(t *testing.T) {
 	}
 	for _, tc := range refused {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := h.AdminDB.Exec(insertRule, teamID, "SKY",
-				tc.pickup, tc.inProgMembers, tc.inProgCanon, tc.doneMembers, tc.doneCanon)
+			_, err := h.AdminDB.Exec(insertRule, teamID, project("SKY"),
+				tc.pickup, tc.inProgMembers, tc.inProgCanon, tc.doneMembers, tc.doneCanon, orgID)
 			if err == nil {
 				t.Fatalf("expected CHECK violation for %q, got nil", tc.name)
 			}
@@ -393,8 +393,8 @@ func TestBaseline_JiraStatusRulesCompleteOrEmpty_CHECKsFire(t *testing.T) {
 	}
 	for _, tc := range accepted {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := h.AdminDB.Exec(insertRule, teamID, tc.key,
-				tc.pickup, tc.inProgMembers, tc.inProgCanon, tc.doneMembers, tc.doneCanon); err != nil {
+			if _, err := h.AdminDB.Exec(insertRule, teamID, project(tc.key),
+				tc.pickup, tc.inProgMembers, tc.inProgCanon, tc.doneMembers, tc.doneCanon, orgID); err != nil {
 				t.Fatalf("expected %q to be storable, got: %v", tc.name, err)
 			}
 		})
@@ -1149,17 +1149,18 @@ func TestRLS_SettingsAdminOnly(t *testing.T) {
 	// are team-keyed; bob is a team member but not a team admin.) Use
 	// fully-populated values so we surface the RLS error rather than
 	// the jpsr_*_populated CHECK constraints.
+	sky := dbseed.JiraProject(t, h.AdminDB, orgA, dbseed.JiraSite, "SKY")
 	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
 		_, err := tx.Exec(`
 			INSERT INTO jira_project_status_rules (
-				team_id, project_key,
+				team_id, jira_project_id, org_id,
 				pickup_members, in_progress_members, in_progress_canonical,
 				done_members, done_canonical
-			) VALUES ($1, 'SKY',
+			) VALUES ($1, $2, $3,
 				'[{"id":"10000","name":"To Do"}]'::jsonb,
 				'[{"id":"10001","name":"In Progress"}]'::jsonb, '{"id":"10001","name":"In Progress"}'::jsonb,
 				'[{"id":"10002","name":"Done"}]'::jsonb, '{"id":"10002","name":"Done"}'::jsonb)
-		`, teamA)
+		`, teamA, sky, orgA)
 		return err
 	})
 	if err == nil {
@@ -1178,14 +1179,14 @@ func TestRLS_SettingsAdminOnly(t *testing.T) {
 	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
 		_, err := tx.Exec(`
 			INSERT INTO jira_project_status_rules (
-				team_id, project_key,
+				team_id, jira_project_id, org_id,
 				pickup_members, in_progress_members, in_progress_canonical,
 				done_members, done_canonical
-			) VALUES ($1, 'SKY',
+			) VALUES ($1, $2, $3,
 				'[{"id":"10000","name":"To Do"}]'::jsonb,
 				'[{"id":"10001","name":"In Progress"}]'::jsonb, '{"id":"10001","name":"In Progress"}'::jsonb,
 				'[{"id":"10002","name":"Done"}]'::jsonb, '{"id":"10002","name":"Done"}'::jsonb)
-		`, teamA)
+		`, teamA, sky, orgA)
 		return err
 	})
 	if err != nil {
@@ -3326,5 +3327,57 @@ func TestBaseline_GitHubEntityReferencesItsRepository(t *testing.T) {
 	_, err = h.AdminDB.Exec(`UPDATE entities SET repository_id = NULL WHERE org_id = $1 AND source_id = 'acme/api#3'`, orgA)
 	if !errors.As(err, &pgErr) || pgErr.Code != "23514" || pgErr.ConstraintName != "entities_repository_required" {
 		t.Errorf("clearing a github row's repository = %v; want a 23514 violation of entities_repository_required", err)
+	}
+}
+
+// TestBaseline_JiraRulesReferenceTheRegistry pins the jira_projects registry
+// and the rules' reference to it: a rule can only name a registry row of its
+// own team's org, a project id is one row per site, and a key is one unresolved
+// row per site.
+func TestBaseline_JiraRulesReferenceTheRegistry(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+	orgA, _, teamA := SeedOrgWithUser(t, h, "jira-registry-a")
+	orgB, _, _ := SeedOrgWithUser(t, h, "jira-registry-b")
+	projectA := dbseed.JiraProject(t, h.AdminDB, orgA, dbseed.JiraSite, "SKY")
+	projectB := dbseed.JiraProject(t, h.AdminDB, orgB, dbseed.JiraSite, "SKY")
+
+	insertRule := func(projectID, orgID string) error {
+		_, err := h.AdminDB.Exec(
+			`INSERT INTO jira_project_status_rules (team_id, jira_project_id, org_id) VALUES ($1, $2, $3)`,
+			teamA, projectID, orgID)
+		return err
+	}
+	var pgErr *pgconn.PgError
+	if err := insertRule(projectB, orgA); !errors.As(err, &pgErr) || pgErr.Code != "23503" || pgErr.ConstraintName != "jira_project_status_rules_jira_project_id_fkey" {
+		t.Errorf("a rule naming another org's project = %v; want a 23503 violation of jira_project_status_rules_jira_project_id_fkey", err)
+	}
+	if err := insertRule(projectB, orgB); !errors.As(err, &pgErr) || pgErr.Code != "23503" || pgErr.ConstraintName != "jira_project_status_rules_team_id_fkey" {
+		t.Errorf("a rule stamped with another org than its team's = %v; want a 23503 violation of jira_project_status_rules_team_id_fkey", err)
+	}
+	if err := insertRule(projectA, orgA); err != nil {
+		t.Errorf("a rule naming its org's project = %v; want it stored", err)
+	}
+
+	insertProject := func(site, externalID any, key string) error {
+		_, err := h.AdminDB.Exec(
+			`INSERT INTO jira_projects (org_id, site, external_id, project_key) VALUES ($1, $2, $3, $4)`,
+			orgA, site, externalID, key)
+		return err
+	}
+	if err := insertProject(dbseed.JiraSite, "id-SKY", "RENAMED"); !errors.As(err, &pgErr) || pgErr.Code != "23505" || pgErr.ConstraintName != "jira_projects_external_identity" {
+		t.Errorf("a second row for one project id = %v; want a 23505 violation of jira_projects_external_identity", err)
+	}
+	if err := insertProject("https://other.example", "id-SKY", "SKY"); err != nil {
+		t.Errorf("the same project id on another site = %v; want it stored", err)
+	}
+	if err := insertProject(dbseed.JiraSite, nil, "OPS"); err != nil {
+		t.Errorf("an unresolved row = %v; want it stored", err)
+	}
+	if err := insertProject(dbseed.JiraSite, nil, "OPS"); !errors.As(err, &pgErr) || pgErr.Code != "23505" || pgErr.ConstraintName != "jira_projects_unresolved_key" {
+		t.Errorf("a second unresolved row for one key = %v; want a 23505 violation of jira_projects_unresolved_key", err)
+	}
+	if err := insertProject("", "id-EMPTY", "EMPTY"); !errors.As(err, &pgErr) || pgErr.Code != "23514" || pgErr.ConstraintName != "jira_projects_site_populated" {
+		t.Errorf("a row with no site = %v; want a 23514 violation of jira_projects_site_populated", err)
 	}
 }

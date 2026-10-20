@@ -1,8 +1,10 @@
 package sqlite_test
 
 import (
+	"database/sql"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -18,20 +20,21 @@ import (
 // until the team next saves that rule through the API.
 func TestJiraStatusRules_SQLite_LegacyNameOnlyRow(t *testing.T) {
 	conn := openSQLiteForTest(t)
+	project := seedLocalJiraProject(t, conn, "SKY")
 	if _, err := conn.Exec(`
 		INSERT INTO jira_project_status_rules (
-			team_id, project_key,
+			team_id, jira_project_id, org_id,
 			pickup_members, in_progress_members, in_progress_canonical,
 			done_members, done_canonical
-		) VALUES (?, 'SKY',
+		) VALUES (?, ?, ?,
 			'["To Do","Backlog"]',
 			'["In Progress"]', 'In Progress',
 			'["Done"]', 'Done')
-	`, runmode.LocalDefaultTeamID); err != nil {
+	`, runmode.LocalDefaultTeamID, project, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("seed legacy row: %v", err)
 	}
 
-	got, err := sqlite.New(conn).JiraStatusRules.ListForTeamSystem(t.Context(), runmode.LocalDefaultTeamID)
+	got, err := sqlite.New(conn).JiraStatusRules.ListForTeamSystem(t.Context(), runmode.LocalDefaultTeamID, localJiraSite)
 	if err != nil {
 		t.Fatalf("ListForTeamSystem: %v", err)
 	}
@@ -73,18 +76,19 @@ func TestJiraStatusRules_SQLite_LegacyNameOnlyRow(t *testing.T) {
 func TestJiraStatusRules_SQLite_SavingALegacyRowFillsIDs(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlite.New(conn)
+	project := seedLocalJiraProject(t, conn, "SKY")
 	if _, err := conn.Exec(`
 		INSERT INTO jira_project_status_rules (
-			team_id, project_key, pickup_members,
+			team_id, jira_project_id, org_id, pickup_members,
 			in_progress_members, in_progress_canonical,
 			done_members, done_canonical
-		) VALUES (?, 'SKY', '["To Do"]', '["In Progress"]', 'In Progress', '["Done"]', 'Done')
-	`, runmode.LocalDefaultTeamID); err != nil {
+		) VALUES (?, ?, ?, '["To Do"]', '["In Progress"]', 'In Progress', '["Done"]', 'Done')
+	`, runmode.LocalDefaultTeamID, project, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("seed legacy row: %v", err)
 	}
 
 	identified := []domain.JiraProjectStatusRules{{
-		ProjectKey:          "SKY",
+		JiraProjectID:       project,
 		PickupMembers:       []domain.JiraStatusRef{{ID: "10000", Name: "To Do"}},
 		InProgressMembers:   []domain.JiraStatusRef{{ID: "10001", Name: "In Progress"}},
 		InProgressCanonical: domain.JiraStatusRef{ID: "10001", Name: "In Progress"},
@@ -93,10 +97,10 @@ func TestJiraStatusRules_SQLite_SavingALegacyRowFillsIDs(t *testing.T) {
 		DoneMembers:         []domain.JiraStatusRef{{ID: "10002", Name: "Done"}},
 		DoneCanonical:       domain.JiraStatusRef{ID: "10002", Name: "Done"},
 	}}
-	if err := stores.JiraStatusRules.ReplaceForTeam(t.Context(), runmode.LocalDefaultTeamID, identified); err != nil {
+	if err := stores.JiraStatusRules.ReplaceForTeam(t.Context(), runmode.LocalDefaultTeamID, localJiraSite, identified); err != nil {
 		t.Fatalf("ReplaceForTeam: %v", err)
 	}
-	got, err := stores.JiraStatusRules.ListForTeamSystem(t.Context(), runmode.LocalDefaultTeamID)
+	got, err := stores.JiraStatusRules.ListForTeamSystem(t.Context(), runmode.LocalDefaultTeamID, localJiraSite)
 	if err != nil {
 		t.Fatalf("ListForTeamSystem: %v", err)
 	}
@@ -111,4 +115,21 @@ func TestJiraStatusRules_SQLite_SavingALegacyRowFillsIDs(t *testing.T) {
 	if got[0].InReviewCanonical != (domain.JiraStatusRef{ID: "10003", Name: "Code Review"}) {
 		t.Errorf("in-review canonical = %+v, want the newly mapped rule", got[0].InReviewCanonical)
 	}
+}
+
+// localJiraSite is the Jira site the SQLite tests register projects on.
+const localJiraSite = "https://acme.atlassian.net"
+
+// seedLocalJiraProject inserts a resolved registry row for key on
+// localJiraSite in the local org and returns its id.
+func seedLocalJiraProject(t *testing.T, conn *sql.DB, key string) string {
+	t.Helper()
+	id := uuid.NewString()
+	if _, err := conn.Exec(
+		`INSERT INTO jira_projects (id, org_id, site, external_id, project_key) VALUES (?, ?, ?, ?, ?)`,
+		id, runmode.LocalDefaultOrgID, localJiraSite, "id-"+key, key,
+	); err != nil {
+		t.Fatalf("seed jira project %s: %v", key, err)
+	}
+	return id
 }

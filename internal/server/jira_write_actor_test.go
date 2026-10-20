@@ -276,11 +276,12 @@ func seedStockGate(t *testing.T, s *Server) {
 	}); err != nil {
 		t.Fatalf("save jira creds: %v", err)
 	}
+	project := dbseed.JiraProject(t, s.db, runmode.LocalDefaultOrgID, "https://jira.example.com", "SKY")
 	if _, err := s.db.Exec(
 		`INSERT INTO jira_project_status_rules
-		   (team_id, project_key, pickup_members, in_progress_members, in_progress_canonical, done_members, done_canonical)
-		 VALUES (?, 'SKY', '["To Do"]', '["In Progress"]', 'In Progress', '["Done"]', 'Done')`,
-		runmode.LocalDefaultTeamID,
+		   (team_id, jira_project_id, org_id, pickup_members, in_progress_members, in_progress_canonical, done_members, done_canonical)
+		 VALUES (?, ?, ?, '["To Do"]', '["In Progress"]', 'In Progress', '["Done"]', 'Done')`,
+		runmode.LocalDefaultTeamID, project, runmode.LocalDefaultOrgID,
 	); err != nil {
 		t.Fatalf("seed jira rule: %v", err)
 	}

@@ -244,6 +244,8 @@ func snapshotIsTerminal(entity domain.Entity, doneByProject map[string][]domain.
 		if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil || snap.Status == "" {
 			return false
 		}
+		// TODO(TFAC-1130): key the done sets by the entity's jira_project_id
+		// instead of the issue key's prefix.
 		return domain.ContainsStatus(doneByProject[jiraProjectKey(entity.SourceID)], snap.StatusRef())
 	case "linear":
 		var snap domain.LinearSnapshot
@@ -258,8 +260,9 @@ func snapshotIsTerminal(entity domain.Entity, doneByProject map[string][]domain.
 	}
 }
 
-// jiraDoneStatusesByProject reads the org's per-project done statuses, merged
-// across every team that tracks the project. The merge is set-union in
+// jiraDoneStatusesByProject reads the org's per-project done statuses on its
+// current Jira site, keyed by the project's key as the registry holds it and
+// merged across every team that tracks the project. The merge is set-union in
 // first-seen order, matching the poller's toTrackerJiraRules exactly: entities
 // are org-shared (one row per issue no matter how many teams track its
 // project), so any team's notion of "done" is what the poll would have closed
@@ -273,7 +276,12 @@ func (r *Router) jiraDoneStatusesByProject(ctx context.Context, orgID string) ma
 	if r.jiraRules == nil {
 		return out
 	}
-	rules, err := r.jiraRules.ListForOrgSystem(ctx, orgID)
+	settings, err := r.orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		lifecycleLog.Error("terminal checker: read org settings for the jira site failed, skipping jira this pass", "org", orgID, "error", err)
+		return out
+	}
+	rules, err := r.jiraRules.ListForOrgSystem(ctx, orgID, domain.EntityScope("jira", settings))
 	if err != nil {
 		lifecycleLog.Error("terminal checker: list jira status rules failed, skipping jira this pass", "org", orgID, "error", err)
 		return out

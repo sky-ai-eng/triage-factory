@@ -338,19 +338,20 @@ func (s *Server) readTeamSettings(w http.ResponseWriter, r *http.Request, orgID,
 		}
 		resp.TeamSettings = settings
 
-		rules, err := tx.JiraStatusRules.ListForTeam(r.Context(), teamID)
+		// Only the org's current Jira site's and Linear workspace's rules: a
+		// rule saved under another names a project or team this one does not
+		// have.
+		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
+		if err != nil {
+			return fmt.Errorf("org settings: %w", err)
+		}
+		rules, err := tx.JiraStatusRules.ListForTeam(r.Context(), teamID, domain.EntityScope("jira", orgSet))
 		if err != nil {
 			return fmt.Errorf("jira rules: %w", err)
 		}
 		projects := rulesToProjectConfigsOrdered(rules, settings.JiraProjects)
 		resp.JiraProjects = toJiraProjectSettings(projects)
 
-		// Only the org's current Linear workspace's rules: a rule saved under
-		// another workspace names a team this one does not have.
-		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
-		if err != nil {
-			return fmt.Errorf("org settings: %w", err)
-		}
 		linearRules, err := tx.LinearTeamRules.ListForTeam(r.Context(), teamID, domain.EntityScope("linear", orgSet))
 		if err != nil {
 			return fmt.Errorf("linear rules: %w", err)

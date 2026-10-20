@@ -67,15 +67,18 @@ import (
 const jiraMirrorTimeout = 30 * time.Second
 
 // lookupJiraRuleForTaskSystem resolves the per-team Jira status rule governing
-// the task's source project, under the admin pool (ListForTeamSystem) — the
-// spawner runs in system context, not RLS. The system-door twin of
+// the task's source project on site, under the admin pool (ListForTeamSystem)
+// — the spawner runs in system context, not RLS. The system-door twin of
 // server.lookupJiraRuleForTask. Returns nil when the task is not Jira-backed,
 // carries no TeamID, or the team has no rule for the ticket's project.
-func lookupJiraRuleForTaskSystem(ctx context.Context, jiraRules db.JiraStatusRulesStore, task *domain.Task) *domain.JiraProjectStatusRules {
+//
+// TODO(TFAC-1130): resolve the rule by the entity's jira_project_id instead of
+// the issue key's prefix.
+func lookupJiraRuleForTaskSystem(ctx context.Context, jiraRules db.JiraStatusRulesStore, site string, task *domain.Task) *domain.JiraProjectStatusRules {
 	if task == nil || task.EntitySource != "jira" || task.TeamID == nil || *task.TeamID == "" {
 		return nil
 	}
-	rules, err := jiraRules.ListForTeamSystem(ctx, *task.TeamID)
+	rules, err := jiraRules.ListForTeamSystem(ctx, *task.TeamID, site)
 	if err != nil {
 		jiraLog.Warn("mirror: list status rules for team failed", "team", *task.TeamID, "error", err)
 		return nil
@@ -83,15 +86,21 @@ func lookupJiraRuleForTaskSystem(ctx context.Context, jiraRules db.JiraStatusRul
 	return domain.RuleForProject(rules, projectFromJiraKey(task.EntitySourceID))
 }
 
-// jiraMirrorRule resolves the status rule for the task's project, returning nil
-// when the mirror is disabled (no resolver or rules store wired — tests, or
-// local without Jira) or the task isn't a rule-backed Jira task. Callers branch
-// on the single nil check.
-func (s *Spawner) jiraMirrorRule(task *domain.Task) *domain.JiraProjectStatusRules {
-	if s.jiraRules == nil || s.getJiraResolver() == nil {
+// jiraMirrorRule resolves the status rule for the task's project on the org's
+// Jira site, returning nil when the mirror is disabled (no resolver, rules or
+// orgs store wired — tests, or local without Jira) or the task isn't a
+// rule-backed Jira task. Callers branch on the single nil check.
+func (s *Spawner) jiraMirrorRule(orgID string, task *domain.Task) *domain.JiraProjectStatusRules {
+	if s.jiraRules == nil || s.orgs == nil || s.getJiraResolver() == nil {
 		return nil
 	}
-	return lookupJiraRuleForTaskSystem(context.Background(), s.jiraRules, task)
+	ctx := context.Background()
+	settings, err := s.orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		jiraLog.Warn("mirror: read org settings for the jira site failed", "org", orgID, "error", err)
+		return nil
+	}
+	return lookupJiraRuleForTaskSystem(ctx, s.jiraRules, domain.EntityScope("jira", settings), task)
 }
 
 // mirrorJiraInProgress mirrors a bot-owned task's board move onto its Jira
@@ -100,7 +109,7 @@ func (s *Spawner) jiraMirrorRule(task *domain.Task) *domain.JiraProjectStatusRul
 // the board WS update; a no-op for non-Jira tasks or when no rule resolves
 // (skip + log, like the user path's "no in_progress rule configured" branch).
 func (s *Spawner) mirrorJiraInProgress(orgID string, task *domain.Task) {
-	rule := s.jiraMirrorRule(task)
+	rule := s.jiraMirrorRule(orgID, task)
 	if rule == nil {
 		return
 	}

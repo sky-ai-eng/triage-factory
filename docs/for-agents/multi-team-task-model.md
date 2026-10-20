@@ -53,7 +53,7 @@ So: **unclaimed task → visible to all matched/tracking teams; claimed task →
 
 - `jira:issue:assigned` → one task (the assignee's).
 - `jira:issue:available` (unassigned, pickup-status) → **one shared task**, visible to tracking teams, claim consolidates. This is the canonical shared-backlog case.
-- Team scope comes from **`jira_project_status_rules`** (PK `(team_id, project_key)`) — already exists, already used by the Jira discovery deck (**SKY-367**). It's a team declaring "I track these projects."
+- Team scope comes from **`jira_project_status_rules`** (PK `(team_id, jira_project_id)`, a reference to the project's `jira_projects` registry row, keyed by Jira's project id on the org's Jira site) — already exists, already used by the Jira discovery deck (**SKY-367**). It's a team declaring "I track these projects."
 
 ---
 

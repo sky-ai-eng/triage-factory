@@ -13,6 +13,7 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
@@ -330,10 +331,14 @@ func TestSettingsPatch_PerProjectRules_RoundTrip(t *testing.T) {
 			DoneCanonical:       jiraRef("Resolved"),
 		},
 	}
-	if err := s.jiraRules.ReplaceForTeam(ctx, teamID, rules); err != nil {
+	const site = "https://jira.example.com"
+	for i := range rules {
+		rules[i].JiraProjectID = dbseed.JiraProject(t, s.db, runmode.LocalDefaultOrgID, site, rules[i].ProjectKey)
+	}
+	if err := s.jiraRules.ReplaceForTeam(ctx, teamID, site, rules); err != nil {
 		t.Fatalf("ReplaceForTeam: %v", err)
 	}
-	got, err := s.jiraRules.ListForTeamSystem(ctx, teamID)
+	got, err := s.jiraRules.ListForTeamSystem(ctx, teamID, site)
 	if err != nil {
 		t.Fatalf("ListForTeamSystem: %v", err)
 	}
@@ -350,10 +355,10 @@ func TestSettingsPatch_PerProjectRules_RoundTrip(t *testing.T) {
 			rules[i].PickupMembers = jiraRefs("Ready")
 		}
 	}
-	if err := s.jiraRules.ReplaceForTeam(ctx, teamID, rules); err != nil {
+	if err := s.jiraRules.ReplaceForTeam(ctx, teamID, site, rules); err != nil {
 		t.Fatalf("ReplaceForTeam (edit SKY): %v", err)
 	}
-	got, err = s.jiraRules.ListForTeamSystem(ctx, teamID)
+	got, err = s.jiraRules.ListForTeamSystem(ctx, teamID, site)
 	if err != nil {
 		t.Fatalf("ListForTeamSystem: %v", err)
 	}
@@ -371,10 +376,10 @@ func TestSettingsPatch_PerProjectRules_RoundTrip(t *testing.T) {
 			kept = append(kept, p)
 		}
 	}
-	if err := s.jiraRules.ReplaceForTeam(ctx, teamID, kept); err != nil {
+	if err := s.jiraRules.ReplaceForTeam(ctx, teamID, site, kept); err != nil {
 		t.Fatalf("ReplaceForTeam (drop SKY): %v", err)
 	}
-	got, err = s.jiraRules.ListForTeamSystem(ctx, teamID)
+	got, err = s.jiraRules.ListForTeamSystem(ctx, teamID, site)
 	if err != nil {
 		t.Fatalf("ListForTeamSystem: %v", err)
 	}
@@ -387,9 +392,8 @@ func TestSettingsPatch_PerProjectRules_RoundTrip(t *testing.T) {
 }
 
 // TestSettingsPatch_DuplicateProjectKey_Rejected verifies that the
-// handler rejects two entries with the same key — the rules table
-// keys on (team_id, project_key) and a duplicate would silently
-// last-write-win.
+// handler rejects two entries with the same key — two entries for one
+// project would silently last-write-win.
 func TestTeamJiraProjectsPut_DuplicateProjectKey_Rejected(t *testing.T) {
 	s := newTestServer(t)
 	body := map[string]any{

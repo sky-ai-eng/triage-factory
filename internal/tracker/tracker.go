@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -1389,7 +1390,12 @@ func backfillReviewRequestedEvent(entityID string, snap domain.PRSnapshot, reque
 // but kept independent so the tracker doesn't depend on internal/config
 // — call sites in the poller manager convert at the boundary.
 type JiraProjectRules struct {
-	Key string
+	// Key is the project's key as the registry holds it, refreshed from Jira
+	// before every cycle. ProjectID is Jira's numeric project id, empty for a
+	// project the registry has not resolved yet; discovery asks by it when it
+	// is known, so a key renamed mid-cycle still matches.
+	Key       string
+	ProjectID string
 	// The status sets discovery queries on. They are refs — id plus the display
 	// name captured with it — because the two uses want different halves: the
 	// JQL is built from ids, which survive a rename in Jira, while classifying
@@ -1397,6 +1403,39 @@ type JiraProjectRules struct {
 	// records.
 	PickupMembers []domain.JiraStatusRef
 	DoneMembers   []domain.JiraStatusRef
+}
+
+// ref names the project to Jira's REST API: by its id when the registry has
+// resolved it, else by its key.
+func (p JiraProjectRules) ref() string {
+	if jiraProjectIDValid(p.ProjectID) {
+		return p.ProjectID
+	}
+	return p.Key
+}
+
+// jqlProject is the value a JQL `project =` term names the project with. A
+// resolved project is named by its id, an unquoted number, which JQL reads as
+// the id and which no key rename changes; an unresolved one by its quoted key.
+// The id is only ever digits, and anything else is treated as unresolved, so
+// nothing reaches the query unquoted that JQL could read as syntax.
+func (p JiraProjectRules) jqlProject() string {
+	if jiraProjectIDValid(p.ProjectID) {
+		return p.ProjectID
+	}
+	return strconv.Quote(p.Key)
+}
+
+func jiraProjectIDValid(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, c := range id {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // JiraRules is a slice of per-project rules with lookup helpers.
@@ -1449,6 +1488,9 @@ func (r JiraRules) AllDoneMembers() []domain.JiraStatusRef {
 // "done" word (e.g. OLD-1 transitioning to "Resolved" when NEW project
 // also uses "Resolved" as Done) — emits a spurious jira:issue:completed
 // for an entity whose actual workflow has nothing to do with NEW's.
+//
+// TODO(TFAC-1130): look the rule up by the issue's project id rather than its
+// key's prefix, here and in jiraCycle.terminal and the move check.
 func (r JiraRules) doneMembersForKey(issueKey string) []domain.JiraStatusRef {
 	if rule := r.ForKey(extractProject(issueKey)); rule != nil {
 		return rule.DoneMembers
@@ -2436,6 +2478,7 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 	// the assigned-to-me query leaves it nil — see salvageJiraQuery.
 	type queryWithDone struct {
 		projectKey            string
+		projectRef            string // Jira's project id when known, else the key: what the salvage reads the workflow by
 		jql                   string
 		build                 func([]domain.JiraStatusRef) string
 		members               []domain.JiraStatusRef
@@ -2450,6 +2493,7 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 		if p.Key == "" {
 			continue
 		}
+		project := p.jqlProject()
 
 		// An empty pickup set yields no query at all rather than an unfiltered
 		// one: "no statuses to pick up from" must never widen into "every
@@ -2459,11 +2503,11 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 			if terms == "" {
 				return ""
 			}
-			return fmt.Sprintf(`project = %q AND status IN (%s) AND assignee IS EMPTY`, p.Key, terms)
+			return fmt.Sprintf(`project = %s AND status IN (%s) AND assignee IS EMPTY`, project, terms)
 		}
 		if jql := pickupJQL(p.PickupMembers); jql != "" {
 			queries = append(queries, queryWithDone{
-				projectKey: p.Key, jql: jql, build: pickupJQL, members: p.PickupMembers,
+				projectKey: p.Key, projectRef: p.ref(), jql: jql, build: pickupJQL, members: p.PickupMembers,
 				doneMembers: allDone,
 			})
 		}
@@ -2475,7 +2519,7 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 		// rather than falling back to a hardcoded list that would
 		// contradict the user's workflow.
 		assignedJQL := func(members []domain.JiraStatusRef) string {
-			jql := fmt.Sprintf(`project = %q AND assignee = currentUser()`, p.Key)
+			jql := fmt.Sprintf(`project = %s AND assignee = currentUser()`, project)
 			if done := jiraStatusTerms(members); done != "" {
 				jql += fmt.Sprintf(` AND status NOT IN (%s)`, done)
 			}
@@ -2486,7 +2530,7 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 		// why that is unsound even though the members here are just as capable
 		// of naming a status Jira has deleted.
 		queries = append(queries, queryWithDone{
-			projectKey: p.Key, jql: assignedJQL(p.DoneMembers),
+			projectKey: p.Key, projectRef: p.ref(), jql: assignedJQL(p.DoneMembers),
 			doneMembers: allDone, assignedToCurrentUser: true,
 		})
 	}
@@ -2511,7 +2555,7 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 		// workflow read, which only adds a request to a host already refusing
 		// them.
 		if class, _ := upstream.ClassOf(err); err != nil && q.build != nil && class == upstream.Rejected {
-			if jql, dropped := t.salvageJiraQuery(ctx, client, q.projectKey, q.members, q.build, liveStatuses); jql != "" {
+			if jql, dropped := t.salvageJiraQuery(ctx, client, q.projectRef, q.members, q.build, liveStatuses); jql != "" {
 				trackerLog.WarnContext(ctx, "jira discovery query rebuilt without statuses the workflow no longer has",
 					"project", q.projectKey, "dropped", domain.JiraStatusNames(dropped), "error", err)
 				issues, err = client.SearchIssues(ctx, jql, fields, 100)
@@ -2595,25 +2639,27 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 // never a narrower one. The stored rule is never edited: a status that
 // vanished upstream is the team's to remove, and the settings board is where
 // they are told.
+//
+// project names the project by Jira's id or, unresolved, by its key.
 func (t *Tracker) salvageJiraQuery(
 	ctx context.Context, client *jiraclient.Client,
-	projectKey string, members []domain.JiraStatusRef,
+	project string, members []domain.JiraStatusRef,
 	build func([]domain.JiraStatusRef) string,
 	live map[string][]domain.JiraStatusRef,
 ) (jql string, dropped []domain.JiraStatusRef) {
-	known, cached := live[projectKey]
+	known, cached := live[project]
 	if !cached {
-		statuses, err := client.ProjectStatuses(ctx, projectKey)
+		statuses, err := client.ProjectStatuses(ctx, project)
 		if err != nil {
 			trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "jira workflow read failed; cannot tell whether the query names a dead status",
-				"project", projectKey, "error", err)
+				"project", project, "error", err)
 			return "", nil
 		}
 		known = make([]domain.JiraStatusRef, 0, len(statuses))
 		for _, st := range statuses {
 			known = append(known, domain.JiraStatusRef{ID: st.ID, Name: st.Name})
 		}
-		live[projectKey] = known
+		live[project] = known
 	}
 
 	surviving := make([]domain.JiraStatusRef, 0, len(members))

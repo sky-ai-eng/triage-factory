@@ -291,6 +291,9 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// (poller manager + scorer reads at boot/poll-tick without
 		// JWT claims).
 		JiraStatusRules: newJiraStatusRulesStore(app, admin),
+		// JiraProjects: app for the settings write's FindOrCreate, admin
+		// for the poller's RefreshSystem.
+		JiraProjects: newJiraProjectStore(app, admin),
 		// LinearTeamRules: the same split as JiraStatusRules — app for
 		// ListForTeam + ReplaceForTeam under the linear_rules_* RLS
 		// policies, admin for the poller's and router's ...System reads.
@@ -531,6 +534,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		OrgMemberships:        newOrgMembershipsStore(tx, tx),
 		Teams:                 newTeamsStore(tx, tx),
 		JiraStatusRules:       newJiraStatusRulesStore(tx, tx),
+		JiraProjects:          newJiraProjectStore(tx, tx),
 		LinearTeamRules:       newLinearTeamRulesStore(tx, tx),
 		TeamGitHubGroups:      newTeamGitHubGroupsStore(tx, tx),
 		TeamGitHubRepos:       newTeamGitHubReposStore(tx, tx),

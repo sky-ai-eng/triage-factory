@@ -782,7 +782,11 @@ func (s *Server) syncJiraClaim(r *http.Request, orgID, userID, id string, jiraUs
 		if e != nil {
 			return e
 		}
-		rule = lookupJiraRuleForTask(r.Context(), tx, task)
+		orgSet, e := tx.Orgs.GetSettings(r.Context(), orgID)
+		if e != nil {
+			return e
+		}
+		rule = lookupJiraRuleForTask(r.Context(), tx, domain.EntityScope("jira", orgSet), task)
 		return nil
 	})
 	if err != nil || task == nil || task.EntitySource != "jira" {

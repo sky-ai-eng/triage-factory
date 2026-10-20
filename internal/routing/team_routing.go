@@ -160,15 +160,21 @@ func (r *Router) githubEventHost(ctx context.Context, evt domain.Event) (string,
 }
 
 // teamTracksEventProject extracts the Jira project key from an event's
-// metadata and asks the store whether teamID tracks it. Every
-// Jira issue metadata struct carries a top-level "project" (the project
-// key, e.g. "SKY" — see internal/domain/events/jira.go), so a minimal
-// unmarshal is enough. Fail-open on a missing / malformed project or a
-// store error: dropping a legitimate task on a transient DB blip or an
-// unexpected metadata shape is worse than the pre-ticket behavior, and
-// the events feeding this path come from TF's own trusted poller. Same
-// deliberate split from the ladder's propagate posture as
-// teamTracksEventRepo — see there for the asymmetry that justifies it.
+// metadata and asks the store whether teamID tracks it on the org's current
+// Jira site. Every Jira issue metadata struct carries a top-level "project"
+// (the project key, e.g. "SKY" — see internal/domain/events/jira.go), so a
+// minimal unmarshal is enough; the store matches it against the project
+// registry's key, which the poller refreshes from Jira before the cycle that
+// emits the event, so a renamed project's events match under its new key.
+// Fail-open on a missing / malformed project or a store error: dropping a
+// legitimate task on a transient DB blip or an unexpected metadata shape is
+// worse than the pre-ticket behavior, and the events feeding this path come
+// from TF's own trusted poller. Same deliberate split from the ladder's
+// propagate posture as teamTracksEventRepo — see there for the asymmetry that
+// justifies it.
+//
+// TODO(TFAC-1130): gate on the registry id the event metadata will carry
+// beside the key, instead of the key.
 //
 // key_changed is the one event about two projects, the one the issue is in
 // now and the one it left (old_project), and it passes for a team that tracks
@@ -188,8 +194,14 @@ func (r *Router) teamTracksEventProject(ctx context.Context, evt domain.Event, t
 	if evt.EventType == domain.EventJiraIssueKeyChanged && m.OldProject != "" && m.OldProject != m.Project {
 		projects = append(projects, m.OldProject)
 	}
+	settings, err := r.orgs.GetSettingsSystem(ctx, evt.OrgID)
+	if err != nil {
+		routerLog.Warn("team-project gate: org settings read failed, allowing", "team_id", teamID, "project", m.Project, "error", err)
+		return true
+	}
+	site := domain.EntityScope("jira", settings)
 	for _, project := range projects {
-		tracks, err := r.jiraRules.TracksProjectSystem(ctx, teamID, project)
+		tracks, err := r.jiraRules.TracksProjectSystem(ctx, teamID, site, project)
 		if err != nil {
 			routerLog.Warn("team-project gate lookup failed, allowing", "team_id", teamID, "project", project, "error", err)
 			return true

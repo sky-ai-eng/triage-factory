@@ -1,0 +1,94 @@
+package db
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"slices"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+)
+
+// ErrNoSuchJiraProject is returned when a registry row id names no row in the
+// org.
+var ErrNoSuchJiraProject = errors.New("no such jira project")
+
+// ErrJiraProjectIdentityConflict is returned when a refresh names a Jira
+// project id other than the one the row already carries. A row's id is the
+// project's identity, so a different answer is a different project, never a
+// refresh of this one.
+var ErrJiraProjectIdentityConflict = errors.New("jira project answered with another project id")
+
+// JiraProjectStore owns the jira_projects registry: one row per Jira project on
+// one Jira site, the target every stored reference to a Jira project points at
+// (domain.JiraProject). A team's tracked set references a row by its id
+// (JiraStatusRulesStore), so a project key rename is a write to the row's key
+// and nothing else.
+//
+// Rows are durable. Untracking a project deletes its rules and leaves the row,
+// and nothing here deletes one except the merge RefreshSystem performs.
+//
+// # Pool split (Postgres)
+//
+//   - FindOrCreate runs on the app pool, inside the team settings write that
+//     adds the project. jira_projects_all gates it to the caller's org; the
+//     handler gates it to a team admin adding the project to that team.
+//   - RefreshSystem and GetSystem run on the admin pool, for the poller. A
+//     merge rewrites the tracked sets of teams the caller may not belong to.
+//
+// SQLite collapses the split to one connection.
+type JiraProjectStore interface {
+	// GetSystem returns the registry row id names in the org, or nil when it
+	// names none. Admin pool.
+	GetSystem(ctx context.Context, orgID, id string) (*domain.JiraProject, error)
+
+	// FindOrCreate returns the registry row for the project Jira identifies as
+	// externalID on site, creating it when none exists, with key and name
+	// written as its display values. The row is found by externalID, so a row
+	// created under the project's old key answers under the new one. When no
+	// row carries externalID but an unresolved row on site holds key, that row
+	// is the project and is resolved in place. Every argument is required.
+	FindOrCreate(ctx context.Context, orgID, site, externalID, key, name string) (domain.JiraProject, error)
+
+	// RefreshSystem writes what Jira answered for the registry row id: its
+	// project id, key and name. The row is the one returned, unless it was
+	// unresolved and another row on its site already carries externalID: the
+	// two are one project, so this row is merged into that one — its rules
+	// move to that row (a team holding both keeps the row it is merged into),
+	// the team settings that list it list that row instead, and the row is
+	// deleted. The surviving row is returned either way.
+	//
+	// ErrNoSuchJiraProject when id names no row in the org;
+	// ErrJiraProjectIdentityConflict when the row is resolved to a different
+	// project id. Admin pool.
+	RefreshSystem(ctx context.Context, orgID, id, externalID, key, name string) (domain.JiraProject, error)
+}
+
+// JiraProjectColumns is the projection ScanJiraProject reads, in its order — the
+// list every jira_projects read and RETURNING clause shares in both dialects.
+const JiraProjectColumns = `id, org_id, site, COALESCE(external_id, ''), project_key, project_name`
+
+// ScanJiraProject reads one row projected by JiraProjectColumns.
+func ScanJiraProject(row *sql.Row) (domain.JiraProject, error) {
+	var p domain.JiraProject
+	err := row.Scan(&p.ID, &p.OrgID, &p.Site, &p.ExternalID, &p.Key, &p.Name)
+	return p, err
+}
+
+// ReplaceJiraProjectInOrder is a team's display order of tracked projects with
+// the registry row from replaced by to, kept where from stood. When to is
+// already listed, from is dropped instead, so the merged project appears once.
+func ReplaceJiraProjectInOrder(order []string, from, to string) []string {
+	hasTo := slices.Contains(order, to)
+	out := make([]string, 0, len(order))
+	for _, id := range order {
+		switch {
+		case id != from:
+			out = append(out, id)
+		case !hasTo:
+			out = append(out, to)
+			hasTo = true
+		}
+	}
+	return out
+}

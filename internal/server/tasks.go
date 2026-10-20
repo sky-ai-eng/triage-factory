@@ -1594,11 +1594,11 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 	var rule *domain.JiraProjectStatusRules
 	var accountID string
 	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		rule = lookupJiraRuleForTask(ctx, tx, task)
 		orgSet, e := tx.Orgs.GetSettings(ctx, orgID)
 		if e != nil {
 			return fmt.Errorf("load org settings: %w", e)
 		}
+		rule = lookupJiraRuleForTask(ctx, tx, domain.EntityScope("jira", orgSet), task)
 		accountID, _, e = tx.Users.GetJiraIdentity(ctx, userID, orgSet.JiraBaseURL)
 		return e
 	}); err != nil {

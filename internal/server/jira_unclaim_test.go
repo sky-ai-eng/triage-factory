@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -231,8 +232,9 @@ func TestTaskRequeue_JiraTask_PutsTheTicketBack(t *testing.T) {
 	if err := s.users.UpsertJiraIdentity(ctx, runmode.LocalDefaultUserID, "https://jira.example.com", jiraMeKey, "Me", "pat"); err != nil {
 		t.Fatalf("seed jira identity: %v", err)
 	}
-	if err := s.jiraRules.ReplaceForTeam(ctx, runmode.LocalDefaultTeamID, []domain.JiraProjectStatusRules{{
-		ProjectKey:          "SKY",
+	project := dbseed.JiraProject(t, s.db, runmode.LocalDefaultOrgID, "https://jira.example.com", "SKY")
+	if err := s.jiraRules.ReplaceForTeam(ctx, runmode.LocalDefaultTeamID, "https://jira.example.com", []domain.JiraProjectStatusRules{{
+		JiraProjectID:       project,
 		PickupMembers:       []domain.JiraStatusRef{{ID: statusToDoID, Name: "To Do"}},
 		InProgressMembers:   jiraUnclaimInProgress,
 		InProgressCanonical: domain.JiraStatusRef{ID: statusInProgressID, Name: "In Progress"},

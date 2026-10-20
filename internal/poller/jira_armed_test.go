@@ -26,11 +26,15 @@ func jiraRefs(names ...string) []domain.JiraStatusRef {
 	return refs
 }
 
-// armedRule is a fully-mapped rule for key, owned by team.
+// armedRule is a fully-mapped rule for key, owned by team. The project's
+// registry row and Jira id are derived from the key, so two rules for one key
+// name one project.
 func armedRule(team, key string, pickup, done []string) domain.JiraProjectStatusRules {
 	return domain.JiraProjectStatusRules{
 		TeamID:              team,
+		JiraProjectID:       "jp-" + key,
 		ProjectKey:          key,
+		ProjectExternalID:   "id-" + key,
 		PickupMembers:       jiraRefs(pickup...),
 		InProgressMembers:   jiraRefs("In Progress"),
 		InProgressCanonical: jiraRef("In Progress"),
@@ -124,5 +128,24 @@ func TestToTrackerJiraRules_MergesArmedTeams(t *testing.T) {
 	}
 	if want := "Done,Verified"; strings.Join(domain.JiraStatusNames(rule.DoneMembers), ",") != want {
 		t.Errorf("done = %v, want the union %q", rule.DoneMembers, want)
+	}
+}
+
+// TestToTrackerJiraRules_OneEntryPerRegistryRow: the merge is per project, by
+// its registry row, and each entry carries the key and Jira id the registry
+// holds — what the discovery JQL is written against.
+func TestToTrackerJiraRules_OneEntryPerRegistryRow(t *testing.T) {
+	unresolved := armedRule("team-b", "OPS", []string{"Open"}, []string{"Closed"})
+	unresolved.ProjectExternalID = ""
+	got := toTrackerJiraRules([]domain.JiraProjectStatusRules{
+		armedRule("team-a", "SKY", []string{"To Do"}, []string{"Done"}),
+		unresolved,
+		armedRule("team-b", "SKY", []string{"Backlog"}, []string{"Done"}),
+	})
+	if k := mergedKeys(got); k != "SKY,OPS" {
+		t.Fatalf("merged keys = %q, want SKY,OPS", k)
+	}
+	if got[0].ProjectID != "id-SKY" || got[1].ProjectID != "" {
+		t.Errorf("project ids = %q, %q; want id-SKY and none for the unresolved OPS", got[0].ProjectID, got[1].ProjectID)
 	}
 }

@@ -605,9 +605,40 @@ CREATE TABLE public.events_catalog (
 -- goose_db_version is managed by goose itself — do NOT recreate.
 
 
+-- The registry of the Jira projects TF tracks, and the target every Jira
+-- project reference in this schema points at: one row per project on one Jira
+-- site. external_id is Jira's numeric project id, the half of the identity a
+-- project key rename does not move, so it is unique per (org, site);
+-- project_key and project_name are display values refreshed from Jira. A row
+-- whose external_id is NULL has not been resolved against Jira yet: the poll
+-- resolves it by its key, and until then it is the only row on its site
+-- holding that key. site is the Jira site (domain.EntityScope("jira", ...)):
+-- project ids are per-deployment sequences, so nothing matches across sites,
+-- and every read is confined to the org's current site. Durable: untracking
+-- never deletes it.
+CREATE TABLE public.jira_projects (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    org_id uuid NOT NULL,
+    site text NOT NULL,
+    external_id text,
+    project_key text NOT NULL,
+    project_name text DEFAULT ''::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT jira_projects_site_populated CHECK (site <> ''),
+    CONSTRAINT jira_projects_key_populated CHECK (project_key <> ''),
+    CONSTRAINT jira_projects_external_id_populated CHECK (external_id IS NULL OR external_id <> '')
+);
+
+
+-- One row per (team, Jira project) the team watches. The project is referenced
+-- by its jira_projects row, so a project key rename leaves every row here
+-- resolving. org_id is denormalized from the team so both foreign keys are
+-- COMPOSITE, letting the DB check the team and the project share an org.
 CREATE TABLE public.jira_project_status_rules (
     team_id uuid NOT NULL,
-    project_key text NOT NULL,
+    jira_project_id uuid NOT NULL,
+    org_id uuid NOT NULL,
     -- Members are jsonb arrays of {"id","name"} status refs; a canonical is one
     -- such object. The id is the identity and survives a Jira status rename; the
     -- name is a display snapshot from when the rule was saved.
@@ -1388,6 +1419,9 @@ CREATE TABLE public.team_agents (
 
 CREATE TABLE public.team_settings (
     team_id uuid NOT NULL,
+    -- The jira_projects row ids this team tracks, in display order. Display
+    -- order only: jira_project_status_rules is the truth for which projects
+    -- are tracked.
     jira_projects text[] DEFAULT '{}'::text[] NOT NULL,
     -- The Linear team UUIDs this team tracks, in display order. Display order
     -- only: linear_team_rules is the truth for which Linear teams are tracked,
@@ -1590,8 +1624,17 @@ ALTER TABLE ONLY public.events
     ADD CONSTRAINT events_pkey PRIMARY KEY (id);
 
 
+ALTER TABLE ONLY public.jira_projects
+    ADD CONSTRAINT jira_projects_pkey PRIMARY KEY (id);
+
+
+-- Composite-FK target for jira_project_status_rules (jira_project_id, org_id).
+ALTER TABLE ONLY public.jira_projects
+    ADD CONSTRAINT jira_projects_id_org_id_key UNIQUE (id, org_id);
+
+
 ALTER TABLE ONLY public.jira_project_status_rules
-    ADD CONSTRAINT jira_project_status_rules_pkey PRIMARY KEY (team_id, project_key);
+    ADD CONSTRAINT jira_project_status_rules_pkey PRIMARY KEY (team_id, jira_project_id);
 
 
 ALTER TABLE ONLY public.linear_team_rules
@@ -2023,6 +2066,18 @@ CREATE INDEX team_agents_team_idx ON public.team_agents USING btree (team_id);
 CREATE INDEX team_github_repos_repository_idx ON public.team_github_repos USING btree (repository_id, team_id);
 
 
+-- A project's identity, per site: Jira's id once it is known, and the key of a
+-- row not yet resolved, so a second unresolved row for one key cannot be made.
+CREATE UNIQUE INDEX jira_projects_external_identity ON public.jira_projects USING btree (org_id, site, external_id) WHERE (external_id IS NOT NULL);
+
+
+CREATE UNIQUE INDEX jira_projects_unresolved_key ON public.jira_projects USING btree (org_id, site, project_key) WHERE (external_id IS NULL);
+
+
+-- The reverse lookup the read-scoping semi-joins and the registry merge take.
+CREATE INDEX jira_project_status_rules_project_idx ON public.jira_project_status_rules USING btree (jira_project_id, team_id);
+
+
 -- Reverse (host, login) -> user lookup for the routing subscribers. lower(login)
 -- because GitHub logins are case-insensitive while writers store them as captured;
 -- github_base_url leads because identity is host-scoped.
@@ -2045,6 +2100,9 @@ CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.event_handlers FOR EACH RO
 
 
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.jira_project_status_rules FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+
+
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.jira_projects FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
 
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.linear_team_rules FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
@@ -2154,7 +2212,17 @@ ALTER TABLE ONLY public.events
 
 
 ALTER TABLE ONLY public.jira_project_status_rules
-    ADD CONSTRAINT jira_project_status_rules_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
+    ADD CONSTRAINT jira_project_status_rules_team_id_fkey FOREIGN KEY (team_id, org_id) REFERENCES public.teams(id, org_id) ON DELETE CASCADE;
+
+
+-- A rule is a statement about a project, so it cannot outlive the registry row;
+-- the converse does not hold, and untracking leaves the registry row standing.
+ALTER TABLE ONLY public.jira_project_status_rules
+    ADD CONSTRAINT jira_project_status_rules_jira_project_id_fkey FOREIGN KEY (jira_project_id, org_id) REFERENCES public.jira_projects(id, org_id) ON DELETE CASCADE;
+
+
+ALTER TABLE ONLY public.jira_projects
+    ADD CONSTRAINT jira_projects_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
 ALTER TABLE ONLY public.linear_team_rules
@@ -2547,6 +2615,15 @@ ALTER TABLE public.events ENABLE ROW LEVEL SECURITY;
 
 
 CREATE POLICY events_all ON public.events USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+
+ALTER TABLE public.jira_projects ENABLE ROW LEVEL SECURITY;
+
+
+-- Org-scoped like repositories_all: the registry is org-wide, and a write is
+-- a team admin adding a project to a team's tracked set, which the handler
+-- gates.
+CREATE POLICY jira_projects_all ON public.jira_projects USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
 
 
 ALTER TABLE public.jira_project_status_rules ENABLE ROW LEVEL SECURITY;
@@ -3079,6 +3156,13 @@ GRANT ALL ON TABLE public.jira_project_status_rules TO anon;
 GRANT ALL ON TABLE public.jira_project_status_rules TO authenticated;
 GRANT ALL ON TABLE public.jira_project_status_rules TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.jira_project_status_rules TO tf_app;
+
+
+GRANT ALL ON TABLE public.jira_projects TO postgres;
+GRANT ALL ON TABLE public.jira_projects TO anon;
+GRANT ALL ON TABLE public.jira_projects TO authenticated;
+GRANT ALL ON TABLE public.jira_projects TO service_role;
+GRANT SELECT,INSERT,UPDATE ON TABLE public.jira_projects TO tf_app;
 
 
 GRANT ALL ON TABLE public.linear_team_rules TO postgres;
@@ -6384,6 +6468,8 @@ GRANT SELECT ON TABLE public.org_github_apps TO tf_system;
 GRANT SELECT ON TABLE public.org_github_app_installations TO tf_system;
 GRANT SELECT ON TABLE public.events TO tf_system;
 GRANT SELECT ON TABLE public.jira_project_status_rules TO tf_system;
+-- The rule reads join the registry for the project's current key.
+GRANT SELECT ON TABLE public.jira_projects TO tf_system;
 -- llm_spend is security_invoker: reading it needs SELECT on its base tables
 -- too, not just the view.
 GRANT SELECT ON TABLE public.llm_spend TO tf_system;

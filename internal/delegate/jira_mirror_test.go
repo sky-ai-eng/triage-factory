@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -555,6 +556,10 @@ func TestRunJiraMirror_InProgress_AssignFails_SkipsTransition(t *testing.T) {
 
 // --- lookupJiraRuleForTaskSystem ------------------------------------------
 
+// jiraMirrorSite is the Jira site the mirror fixtures' org is configured on,
+// as domain.EntityScope("jira", ...) spells it.
+const jiraMirrorSite = "https://jira.example.com"
+
 func seedJiraMirrorRule(t *testing.T, database *sql.DB) {
 	t.Helper()
 	// The org's Jira site is the one the fixtures' issues are on
@@ -562,11 +567,12 @@ func seedJiraMirrorRule(t *testing.T, database *sql.DB) {
 	if _, err := testSpawnerStores(database).Orgs.SetSourceBaseURL(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com"); err != nil {
 		t.Fatalf("set jira site: %v", err)
 	}
+	project := dbseed.JiraProject(t, database, runmode.LocalDefaultOrgID, jiraMirrorSite, "SKY")
 	if _, err := database.Exec(
 		`INSERT INTO jira_project_status_rules
-		   (team_id, project_key, pickup_members, in_progress_members, in_progress_canonical, done_members, done_canonical)
-		 VALUES (?, 'SKY', '["To Do"]', '["In Progress"]', 'In Progress', '["Done"]', 'Done')`,
-		runmode.LocalDefaultTeamID,
+		   (team_id, jira_project_id, org_id, pickup_members, in_progress_members, in_progress_canonical, done_members, done_canonical)
+		 VALUES (?, ?, ?, '["To Do"]', '["In Progress"]', 'In Progress', '["Done"]', 'Done')`,
+		runmode.LocalDefaultTeamID, project, runmode.LocalDefaultOrgID,
 	); err != nil {
 		t.Fatalf("seed jira rule: %v", err)
 	}
@@ -581,7 +587,7 @@ func TestLookupJiraRuleForTaskSystem(t *testing.T) {
 	rules := sqlitestore.New(database).JiraStatusRules
 	team := runmode.LocalDefaultTeamID
 
-	rule := lookupJiraRuleForTaskSystem(context.Background(), rules, &domain.Task{EntitySource: "jira", EntitySourceID: "SKY-123", TeamID: &team})
+	rule := lookupJiraRuleForTaskSystem(context.Background(), rules, jiraMirrorSite, &domain.Task{EntitySource: "jira", EntitySourceID: "SKY-123", TeamID: &team})
 	if rule == nil || rule.InProgressCanonical.Name != "In Progress" || rule.DoneCanonical.Name != "Done" {
 		t.Errorf("SKY task rule = %+v, want the SKY rule's InProgress/Done canonicals", rule)
 	}
@@ -590,7 +596,7 @@ func TestLookupJiraRuleForTaskSystem(t *testing.T) {
 		"no team":         {EntitySource: "jira", EntitySourceID: "SKY-123"},
 		"unruled project": {EntitySource: "jira", EntitySourceID: "OTHER-9", TeamID: &team},
 	} {
-		if rule := lookupJiraRuleForTaskSystem(context.Background(), rules, task); rule != nil {
+		if rule := lookupJiraRuleForTaskSystem(context.Background(), rules, jiraMirrorSite, task); rule != nil {
 			t.Errorf("%s: rule = %+v, want nil", name, rule)
 		}
 	}

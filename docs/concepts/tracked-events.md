@@ -420,7 +420,12 @@ event goes only to the teams tracking the issue's new project.
 
 A move is told from a project key rename by the project's id, which a rename
 keeps: a key rename renames every entity in the project and retires none of
-them, even while the teams' rules still name the old key. If no rule
+them. The teams' rules do not name the key at all. A team's tracked set
+references the project's row in the `jira_projects` registry, keyed by Jira's
+project id on the org's Jira site, and every Jira cycle reads each project it
+polls by that id before discovery, so a rename moves the registry row's key
+and nothing else: discovery asks for the project by id, and the rule lookups
+and the team gate match the issues under the key they now carry. If no rule
 configures the project an issue moved to, TF has nothing to follow it with:
 the entity is renamed, `key_changed` is emitted, and it retires as
 `unreachable` with reason `moved`. That event names the project the issue

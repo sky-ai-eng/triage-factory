@@ -24,45 +24,53 @@ func newJiraStatusRulesStore(q, _ queryer) db.JiraStatusRulesStore {
 
 var _ db.JiraStatusRulesStore = (*jiraStatusRulesStore)(nil)
 
-func (s *jiraStatusRulesStore) ListForTeam(ctx context.Context, teamID string) ([]domain.JiraProjectStatusRules, error) {
-	return listJiraStatusRules(ctx, s.q, teamID)
+func (s *jiraStatusRulesStore) ListForTeam(ctx context.Context, teamID, site string) ([]domain.JiraProjectStatusRules, error) {
+	return listJiraStatusRules(ctx, s.q, teamID, site)
 }
 
-func (s *jiraStatusRulesStore) ListForTeamSystem(ctx context.Context, teamID string) ([]domain.JiraProjectStatusRules, error) {
-	return listJiraStatusRules(ctx, s.q, teamID)
+func (s *jiraStatusRulesStore) ListForTeamSystem(ctx context.Context, teamID, site string) ([]domain.JiraProjectStatusRules, error) {
+	return listJiraStatusRules(ctx, s.q, teamID, site)
 }
 
-// jiraRuleCols is the SELECT list every reader shares — team_id first so
-// TeamID is populated, then each rule's columns in the order the scanner binds
-// them.
-const jiraRuleCols = `team_id, project_key,
-	       pickup_members,
-	       in_progress_members, in_progress_canonical,
-	       in_review_members, in_review_canonical,
-	       done_members, done_canonical`
+// jiraRuleCols is the SELECT list every reader shares, over the rules (alias
+// r) joined to their registry row (alias p) — team_id first so TeamID is
+// populated, then the project as the registry holds it now, then each rule's
+// columns in the order the scanner binds them.
+const jiraRuleCols = `r.team_id, r.jira_project_id, p.project_key, p.project_name, COALESCE(p.external_id, ''),
+	       r.pickup_members,
+	       r.in_progress_members, r.in_progress_canonical,
+	       r.in_review_members, r.in_review_canonical,
+	       r.done_members, r.done_canonical`
 
-func (s *jiraStatusRulesStore) ListForOrgSystem(ctx context.Context, orgID string) ([]domain.JiraProjectStatusRules, error) {
+// jiraRuleFrom joins each rule to its registry row and confines the read to
+// one site, bound first. An empty site matches no row: every registry row
+// carries the site it was saved under.
+const jiraRuleFrom = `FROM jira_project_status_rules r
+		JOIN jira_projects p ON p.id = r.jira_project_id
+		WHERE p.site = ? AND p.site <> ''`
+
+func (s *jiraStatusRulesStore) ListForOrgSystem(ctx context.Context, orgID, site string) ([]domain.JiraProjectStatusRules, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	// SQLite is single-org, so the union is every row. team_id rides each
-	// row (no teams join needed) and is scanned into TeamID for the
-	// poller's per-project merge tie-break.
+	// SQLite is single-org, so the union is every rule on the site. team_id
+	// rides each row and is scanned into TeamID for the poller's per-project
+	// merge tie-break.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+jiraRuleCols+`
-		FROM jira_project_status_rules
-		ORDER BY project_key ASC, team_id ASC
-	`)
+		`+jiraRuleFrom+`
+		ORDER BY p.project_key ASC, r.jira_project_id ASC, r.team_id ASC
+	`, site)
 	return scanJiraStatusRules(rows, err)
 }
 
-func (s *jiraStatusRulesStore) TracksProjectSystem(ctx context.Context, teamID, projectKey string) (bool, error) {
+func (s *jiraStatusRulesStore) TracksProjectSystem(ctx context.Context, teamID, site, projectKey string) (bool, error) {
 	var n int
 	err := s.q.QueryRowContext(ctx, `
-		SELECT 1 FROM jira_project_status_rules
-		WHERE team_id = ? AND project_key = ?
+		SELECT 1 `+jiraRuleFrom+`
+		  AND r.team_id = ? AND p.project_key = ?
 		LIMIT 1
-	`, teamID, projectKey).Scan(&n)
+	`, site, teamID, projectKey).Scan(&n)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
@@ -72,13 +80,13 @@ func (s *jiraStatusRulesStore) TracksProjectSystem(ctx context.Context, teamID, 
 	return true, nil
 }
 
-func listJiraStatusRules(ctx context.Context, q queryer, teamID string) ([]domain.JiraProjectStatusRules, error) {
+func listJiraStatusRules(ctx context.Context, q queryer, teamID, site string) ([]domain.JiraProjectStatusRules, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT `+jiraRuleCols+`
-		FROM jira_project_status_rules
-		WHERE team_id = ?
-		ORDER BY project_key ASC
-	`, teamID)
+		`+jiraRuleFrom+`
+		  AND r.team_id = ?
+		ORDER BY p.project_key ASC, r.jira_project_id ASC
+	`, site, teamID)
 	return scanJiraStatusRules(rows, err)
 }
 
@@ -94,7 +102,7 @@ func scanJiraStatusRules(rows *sql.Rows, err error) ([]domain.JiraProjectStatusR
 			pickupJSON, inProgressJSON, inReviewJSON, doneJSON string
 			inProgressCanon, inReviewCanon, doneCanon          sql.NullString
 		)
-		if err := rows.Scan(&r.TeamID, &r.ProjectKey, &pickupJSON,
+		if err := rows.Scan(&r.TeamID, &r.JiraProjectID, &r.ProjectKey, &r.ProjectName, &r.ProjectExternalID, &pickupJSON,
 			&inProgressJSON, &inProgressCanon,
 			&inReviewJSON, &inReviewCanon,
 			&doneJSON, &doneCanon); err != nil {
@@ -140,15 +148,9 @@ func scanJiraStatusRules(rows *sql.Rows, err error) ([]domain.JiraProjectStatusR
 	return out, rows.Err()
 }
 
-func (s *jiraStatusRulesStore) ReplaceForTeam(ctx context.Context, teamID string, rules []domain.JiraProjectStatusRules) error {
-	// Refuse empty ProjectKey up front — see the Postgres impl's
-	// matching guard. Clear-all semantics stay exclusively gated on
-	// rules being nil/empty so an all-empty input doesn't silently
-	// wipe the team's rows.
-	for i, r := range rules {
-		if r.ProjectKey == "" {
-			return fmt.Errorf("ReplaceForTeam: rules[%d] has empty ProjectKey", i)
-		}
+func (s *jiraStatusRulesStore) ReplaceForTeam(ctx context.Context, teamID, site string, rules []domain.JiraProjectStatusRules) error {
+	if err := db.ValidateJiraStatusRulesInput(site, rules); err != nil {
+		return err
 	}
 	return inTx(ctx, s.q, func(tx queryer) error {
 		for _, r := range rules {
@@ -180,14 +182,21 @@ func (s *jiraStatusRulesStore) ReplaceForTeam(ctx context.Context, teamID string
 			if err != nil {
 				return fmt.Errorf("marshal done_canonical for %s: %w", r.ProjectKey, err)
 			}
-			if _, err := tx.ExecContext(ctx, `
+			// The SELECT resolves org_id from the team and admits the registry
+			// row only on the site being saved and in the team's org, so a rule
+			// naming any other row inserts nothing and is refused below.
+			res, err := tx.ExecContext(ctx, `
 				INSERT INTO jira_project_status_rules (
-					team_id, project_key,
+					team_id, jira_project_id, org_id,
 					pickup_members, in_progress_members, in_progress_canonical,
 					in_review_members, in_review_canonical,
 					done_members, done_canonical, updated_at
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-				ON CONFLICT(team_id, project_key) DO UPDATE SET
+				)
+				SELECT t.id, p.id, t.org_id, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+				  FROM teams t
+				  JOIN jira_projects p ON p.org_id = t.org_id
+				 WHERE t.id = ? AND p.id = ? AND p.site = ?
+				ON CONFLICT(team_id, jira_project_id) DO UPDATE SET
 					pickup_members = excluded.pickup_members,
 					in_progress_members = excluded.in_progress_members,
 					in_progress_canonical = excluded.in_progress_canonical,
@@ -197,43 +206,47 @@ func (s *jiraStatusRulesStore) ReplaceForTeam(ctx context.Context, teamID string
 					done_canonical = excluded.done_canonical,
 					updated_at = CURRENT_TIMESTAMP
 			`,
-				teamID, r.ProjectKey,
 				pickupJSON,
 				inProgressJSON, nullStringValue(inProgressCanonJSON),
 				inReviewJSON, nullStringValue(inReviewCanonJSON),
 				doneJSON, nullStringValue(doneCanonJSON),
-			); err != nil {
-				return fmt.Errorf("upsert jira_project_status_rules[%s]: %w", r.ProjectKey, err)
+				teamID, r.JiraProjectID, site,
+			)
+			if err != nil {
+				return fmt.Errorf("upsert jira_project_status_rules[%s]: %w", r.JiraProjectID, err)
+			}
+			if n, err := res.RowsAffected(); err != nil {
+				return fmt.Errorf("upsert jira_project_status_rules[%s]: %w", r.JiraProjectID, err)
+			} else if n == 0 {
+				return fmt.Errorf("upsert jira_project_status_rules[%s]: %w", r.JiraProjectID, db.ErrJiraRuleProjectNotOnSite)
 			}
 		}
 
-		// Prune rows for project keys no longer in the input. SQLite
-		// has no array binding; build the placeholder list dynamically.
-		// Empty ProjectKey entries can't reach here — the pre-loop
-		// validation refuses them.
-		keys := make([]string, 0, len(rules))
-		for _, r := range rules {
-			keys = append(keys, r.ProjectKey)
-		}
-		if len(keys) == 0 {
+		// Prune the team's rules for projects on this site that the input no
+		// longer names. SQLite has no array binding, so the NOT IN list is
+		// built per call; an empty input takes the unconditional delete,
+		// since NOT IN () would keep every row. A rule for a project on
+		// another site is never this save's to delete.
+		onSite := `jira_project_id IN (SELECT id FROM jira_projects WHERE site = ?)`
+		if len(rules) == 0 {
 			if _, err := tx.ExecContext(ctx,
-				`DELETE FROM jira_project_status_rules WHERE team_id = ?`,
-				teamID,
+				`DELETE FROM jira_project_status_rules WHERE team_id = ? AND `+onSite,
+				teamID, site,
 			); err != nil {
 				return fmt.Errorf("clear jira_project_status_rules: %w", err)
 			}
 			return nil
 		}
-		placeholders := make([]string, len(keys))
-		args := make([]any, 0, len(keys)+1)
-		args = append(args, teamID)
-		for i, k := range keys {
+		placeholders := make([]string, len(rules))
+		args := make([]any, 0, len(rules)+2)
+		args = append(args, teamID, site)
+		for i, r := range rules {
 			placeholders[i] = "?"
-			args = append(args, k)
+			args = append(args, r.JiraProjectID)
 		}
 		query := fmt.Sprintf(
-			`DELETE FROM jira_project_status_rules WHERE team_id = ? AND project_key NOT IN (%s)`,
-			strings.Join(placeholders, ", "),
+			`DELETE FROM jira_project_status_rules WHERE team_id = ? AND %s AND jira_project_id NOT IN (%s)`,
+			onSite, strings.Join(placeholders, ", "),
 		)
 		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 			return fmt.Errorf("prune jira_project_status_rules: %w", err)
