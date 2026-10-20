@@ -237,6 +237,8 @@ func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string
 		// not browsed, so a page would silently narrow what can be imported.
 		// The registry on the org's current host: its owners are the ones the
 		// credential below lists teams of.
+		// TODO(TFAC-1150): includes repositories no team tracks that a GitHub
+		// entity created a row for; owners should come from tracked rows.
 		repos, _, e = tx.Repos.List(ctx, orgID, host, db.Unwindowed)
 		return e
 	}); err != nil {

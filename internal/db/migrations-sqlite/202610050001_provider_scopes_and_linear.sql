@@ -538,7 +538,9 @@ CREATE UNIQUE INDEX repositories_external_identity
 -- Every existing GitHub row's repository is read off its key the way
 -- db.GitHubEntityRepoRef reads it — the part before '#' is owner/repo, split at
 -- the first '/' — on the host the row is scoped under below, which is the host
--- 3b gave the org's repositories. Every GitHub key a release wrote has that
+-- 3b gave the org's repositories. The SQL cuts at the first '#' and the Go at
+-- the last; they agree because a GitHub owner or repository name cannot
+-- contain '#', so a key holds one. Every GitHub key a release wrote has that
 -- shape: the tracker and the dashboard backfill build "owner/repo#N" from the
 -- pull request they polled, and the exec funnel and the memory attach create
 -- only a key domain.ParsePRTarget accepts. A repository with no registry row

@@ -173,6 +173,10 @@ func storedSlugsForIdentity(ctx context.Context, q queryer, source, host, extern
 
 // slugHeldByAnotherRepository reports whether a repository row other than the
 // one being renamed already spells the target slug.
+//
+// TODO(TFAC-1149): a bare row (no external_id, tracked by no team) that an
+// entity create minted under the new name before the rename was observed
+// counts as occupying it, so the rename is refused until the row is absorbed.
 func slugHeldByAnotherRepository(ctx context.Context, q queryer, source string, observed domain.RepoRef) (bool, error) {
 	var found int
 	err := q.QueryRowContext(ctx, `

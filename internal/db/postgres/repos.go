@@ -158,8 +158,11 @@ func (s *repoStore) FindOrCreateByRefSystem(ctx context.Context, orgID string, r
 // create in entities.go (a GitHub entity references the row), and the door,
 // FindOrCreateByRefSystem. It takes a queryer so it composes inside the
 // caller's transaction — lookup, create and re-read then answer for one point
-// in time rather than three, and the row commits or rolls back with whatever
-// references it.
+// in time rather than three, and a row it mints commits or rolls back with
+// that transaction. The transaction can commit without referencing the row: an
+// entity create that loses a concurrent insert of the same key returns the
+// winner's entity instead. That leaves nothing stray, because the identity
+// index allows a repository one row and the winner's entity references it.
 //
 // An existing row is left exactly as it stands — same id, same profile text,
 // same base branch, same clone and poll state. The lookup before the insert is

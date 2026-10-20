@@ -364,6 +364,9 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		snap.NodeID = d.NodeID
 
 		sid := ghSourceID(snap.Repo, snap.Number)
+		// TODO(TFAC-1127): pass d.NodeID as the external id. Without it a PR
+		// read under a renamed repository's new name before the rename is
+		// applied gets a second entity, which then refuses the rename.
 		entity, created, err := t.entities.FindOrCreateSystem(context.Background(), orgID, "github", scope, sid, "", "pr", snap.Title, snap.URL)
 		if err != nil {
 			trackerLog.Error("create entity failed", "source_id", sid, "error", err)
