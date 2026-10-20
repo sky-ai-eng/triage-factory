@@ -2,9 +2,9 @@
 
 Signs in to a real multi-mode stack the way people do: through GoTrue, two
 SAML identity providers and GitHub (served by
-[Orrery](https://github.com/sky-ai-eng/orrery)), in Chromium. The Go tests in `ee/sso` fake
-GoTrue in-process and hand-build its tokens; this suite is what runs the real
-thing.
+[Orrery](https://github.com/sky-ai-eng/orrery)), in Chromium. The Go tests in
+`ee/sso` fake GoTrue in-process and hand-build its tokens; this suite is what
+runs the real thing.
 
 ## What it proves
 
