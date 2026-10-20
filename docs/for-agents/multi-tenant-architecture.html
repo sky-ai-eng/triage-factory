@@ -2252,7 +2252,7 @@ GOTRUE_EXTERNAL_GITHUB_REDIRECT_URI=
       <p>Required for corp customer's broader rollout. SAML 2.0 IdP-initiated and SP-initiated. Multi-tenant: each org gets its own <code>sso_provider_id</code>.</p>
       <pre class="code" style="font-size: 11px;"><span class="com"># GoTrue config</span>
 GOTRUE_SAML_ENABLED=<span class="str">"true"</span>
-GOTRUE_SAML_PRIVATE_KEY=&lt;ES256 key&gt;
+GOTRUE_SAML_PRIVATE_KEY=&lt;RSA key, DER, base64&gt;
 
 <span class="com"># Per-org: register IdP via admin API</span>
 POST /admin/sso/providers
@@ -3159,15 +3159,16 @@ POST /admin/sso/providers
       <p>Required for the corp customer's broader rollout (1000 devs).</p>
       <h5>What changes</h5>
       <ul>
-        <li>GoTrue env: <code>GOTRUE_SAML_ENABLED=true</code>, ES256 SAML signing key</li>
+        <li>GoTrue env: <code>GOTRUE_SAML_ENABLED=true</code>, an RSA SAML signing key (DER, base64-encoded)</li>
         <li>Per-org SAML provider registration via GoTrue admin API</li>
         <li>Org admin UI: "Configure SSO" — paste IdP metadata URL, get back ACS URL + entity ID</li>
         <li>Login screen: "Sign in with SSO" → email lookup → SAML redirect</li>
-        <li><code>auth.users.app_metadata.sso_provider_id</code> mapped to <code>org_id</code> for tenant isolation</li>
+        <li>The <code>provider_id</code> in TF's own signed login state, set at the SAML start, mapped to <code>org_id</code> through <code>sso_connections</code> for tenant isolation; nothing is read back from the GoTrue JWT's <code>app_metadata</code></li>
       </ul>
       <h5>Acceptance</h5>
       <ul>
         <li>Manual end-to-end against an Entra ID test tenant</li>
+        <li>The SSO end-to-end suite (<code>e2e/sso</code>) against a real GoTrue and two test identity providers, in CI</li>
         <li>Org A's SAML config can't authenticate Org B's users</li>
       </ul>
     </div>

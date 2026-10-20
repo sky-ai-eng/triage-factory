@@ -170,13 +170,14 @@ func (s *Server) SetAuthDeps(
 	s.authCfg = cfg
 	s.authProxy = proxy
 	s.authDeps = &authDeps{
-		verifier:       verifier,
-		sessions:       sessionStore,
-		apiTokens:      tokenStore,
-		gotrueRefresh:  s.gotrueRefreshFunc(cfg),
-		gotrueExchange: s.gotrueExchangeFunc(cfg),
-		gotrueSSO:      s.gotrueSSOFunc(cfg),
-		gotrueLogout:   s.gotrueLogoutFunc(cfg),
+		verifier:            verifier,
+		sessions:            sessionStore,
+		apiTokens:           tokenStore,
+		gotrueRefresh:       s.gotrueRefreshFunc(cfg),
+		gotrueExchange:      s.gotrueExchangeFunc(cfg),
+		gotrueSSO:           s.gotrueSSOFunc(cfg),
+		gotrueLogout:        s.gotrueLogoutFunc(cfg),
+		gotrueProviderEmail: s.gotrueProviderEmailFunc(cfg),
 	}
 
 	// Spawn the session reaper. Cadence + retention follow the arch
@@ -484,6 +485,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		Email:         claims.Email,
 		EmailVerified: emailTrusted,
 		IsSSO:         isSSO,
+		AccessToken:   accessToken,
 	})
 	if err != nil {
 		internalError(w, "sso", err)
@@ -1746,6 +1748,47 @@ func (s *Server) gotrueLogoutFunc(cfg *authConfig) func(context.Context, string)
 			return fmt.Errorf("logout http %d: %s", resp.StatusCode, bytes.TrimSpace(b))
 		}
 		return nil
+	}
+}
+
+// gotrueProviderEmailFunc — GET /user with the login's own access token, then
+// the email in the named provider's identity. Only GoTrue writes an identity's
+// data, from the provider's answer on each sign-in; the user can rewrite
+// user_metadata, which is why that copy is never read for this.
+func (s *Server) gotrueProviderEmailFunc(cfg *authConfig) func(context.Context, string, string) (string, bool, error) {
+	return func(ctx context.Context, accessToken, provider string) (string, bool, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.gotrueURL+"/user", nil)
+		if err != nil {
+			return "", false, err
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		resp, err := gotrueHTTPClient.Do(req)
+		if err != nil {
+			return "", false, fmt.Errorf("user http: %w", err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		if resp.StatusCode != http.StatusOK {
+			return "", false, fmt.Errorf("user http %d: %s", resp.StatusCode, bytes.TrimSpace(body))
+		}
+		var user struct {
+			Identities []struct {
+				Provider     string `json:"provider"`
+				IdentityData struct {
+					Email         string `json:"email"`
+					EmailVerified bool   `json:"email_verified"`
+				} `json:"identity_data"`
+			} `json:"identities"`
+		}
+		if err := json.Unmarshal(body, &user); err != nil {
+			return "", false, fmt.Errorf("decode user: %w", err)
+		}
+		for _, id := range user.Identities {
+			if id.Provider == provider {
+				return strings.TrimSpace(id.IdentityData.Email), id.IdentityData.EmailVerified, nil
+			}
+		}
+		return "", false, fmt.Errorf("user has no %s identity", provider)
 	}
 }
 

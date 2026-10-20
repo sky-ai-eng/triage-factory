@@ -146,8 +146,25 @@ func (le *loginExt) OnLoginResolved(w http.ResponseWriter, r *http.Request, in s
 	// SSO enforcement: a non-SSO (GitHub) login whose VERIFIED email is on an
 	// org's enforced verified domain is rejected — unless the principal is a
 	// designated break-glass account. Only the non-SSO path is gated.
-	if !in.IsSSO && in.EmailVerified {
-		if dom, okDom := le.api.EmailDomain(in.Email); okDom {
+	//
+	// The email is the one GitHub reported on this sign-in, not the JWT's: the
+	// JWT carries the account's email from signup, so a person who has since
+	// moved their GitHub address off the domain would be refused everywhere,
+	// for good. Org access does not rest on this check — every request to an
+	// org that requires SSO is barred unless it came through that org's
+	// connection — so following the address loses nothing there. For the same
+	// reason a failed read (GoTrue unreachable, or an account with no GitHub
+	// identity) checks the signup email instead of failing the sign-in: a
+	// GoTrue outage must not lock out every GitHub sign-in, the break-glass
+	// account's included.
+	if !in.IsSSO {
+		email, verified, perr := le.api.GotrueProviderEmail(r.Context(), in.AccessToken, "github")
+		if perr != nil {
+			ssoLog.Warn("sso enforcement: read github email failed, checking the signup email", "user", in.UserID, "error", perr)
+			email, verified = in.Email, in.EmailVerified
+		}
+		dom, okDom := le.api.EmailDomain(email)
+		if verified && okDom {
 			route, rerr := le.stores().Domains.GetVerifiedByDomain(r.Context(), dom)
 			if rerr != nil {
 				httpx.InternalError(w, "sso", rerr)

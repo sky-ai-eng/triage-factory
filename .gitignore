@@ -40,3 +40,9 @@ bench-results/
 compose.override.yml
 docker-compose.override.yml
 secrets/
+
+# SSO end-to-end suite: per-run keys, certificates, licence and logs, and
+# Playwright's output.
+e2e/sso/.state/
+e2e/sso/test-results/
+e2e/sso/playwright-report/

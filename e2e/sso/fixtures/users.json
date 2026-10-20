@@ -1,0 +1,20 @@
+{
+  "github": [
+    { "login": "globex-admin", "name": "Globex Admin", "email": "admin@globex.test" },
+    { "login": "bob", "name": "Bob", "email": "bob@globex.test" },
+    { "login": "mallory", "name": "Mallory", "email": "mallory@mallory.test" },
+    { "login": "ops", "name": "Ops", "email": "ops@operator.test" },
+    { "login": "contractor", "name": "Contractor", "email": "contractor@gmail.test" }
+  ],
+  "idps": {
+    "globex": [
+      { "user": "alice", "password": "alice-test-only", "email": "alice@globex.test" },
+      { "user": "bob", "password": "bob-test-only", "email": "bob@globex.test" }
+    ],
+    "mallory": [
+      { "user": "bob", "password": "bob-test-only", "email": "bob@globex.test" },
+      { "user": "ops", "password": "ops-test-only", "email": "ops@operator.test" },
+      { "user": "carol", "password": "carol-test-only", "email": "carol@globex.test" }
+    ]
+  }
+}
