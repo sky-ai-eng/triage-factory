@@ -27,9 +27,9 @@ that reason). A deployment that has KVM hosts and wants what a VM gives an
 agent (root, a container runtime, near-native CPU on build and test bursts,
 memory snapshots) should be able to use them without TF choosing for it. The
 two run side by side: a few executors on KVM hosts for the profiles that need
-a VM, and a gVisor fleet for the rest (§7, §13.1).
+a VM, and a gVisor fleet for the rest (§7, §12.1).
 
-Measured on one host (§13.6), a Firecracker cell starts as fast as a gVisor
+Measured on one host (§12.6), a Firecracker cell starts as fast as a gVisor
 one and runs a `go test` burst at native wall time on 1.19 times native CPU,
 where gVisor under systrap costs about 14 times native CPU on syscall-heavy
 work (`docs/benchmarks/gvisor-cpu-tax.md`). In exchange an idle cell holds
@@ -75,7 +75,7 @@ Measuring SPACE on one KVM host found more:
 - The bidirectional stream the tool host needs is an Incubating API, and a
   call sent to a paused sandbox closes it.
 - Its public API cannot place a sandbox on a chosen node, so the same-host
-  layout (§13.1) is not available through it.
+  layout (§12.1) is not available through it.
 - An idle sandbox costs about 104 MB of host memory, against gVisor's ~24 MB,
   and bring-up takes a p50 of 1.3 s, against gVisor's ~171–292 ms.
 - SPACE's stats report neither the guest's memory nor its OOM kills.
@@ -84,7 +84,7 @@ Firecracker is the part that runs one VM: one process per microVM, configured
 over a unix-socket API, with `jailer` to confine that process on the host.
 Everything above one VM is already TF's, so TF drives Firecracker directly.
 SPACE is an Apache-2.0 implementation of agent sandboxes on Firecracker, so
-TF reads it and takes code from it (§13.5) without running any of its
+TF reads it and takes code from it (§12.5) without running any of its
 services.
 
 ## 2. Vocabulary
@@ -122,14 +122,14 @@ A backend owns only what differs between isolation technologies:
 | Backend-specific | gVisor | Firecracker |
 | --- | --- | --- |
 | Starting and destroying the jail, and reaping orphans at boot | `runsc` at the jail uid, through the cap-broker | the VMM under `jailer` at the jail uid, through the cap-broker, with a tap device in the cell's netns for the guest's network card; orphans found by their jailer directories |
-| Putting the run tree in front of the jail | `ChownRunTree` / `ParkRunTree` hand-off of a host directory | a disk image built from the host tree at launch, copied back out at `Stop`, with host writes pushed in between (§13.3) |
+| Putting the run tree in front of the jail | `ChownRunTree` / `ParkRunTree` hand-off of a host directory | a disk image built from the host tree at launch, copied back out at `Stop`, with host writes pushed in between (§12.3) |
 | Delivering TF's inputs (binaries, trust file, skills, memory) | bind mounts | read-only disk images built at launch |
 | Starting the tool host and returning a connection to it | runsc with a bind-mounted unix socket the in-jail host dials | the guest's init starts the tool host, which dials the executor over vsock; the exec verbs use a second vsock port to the sidecar |
 | Freezing and thawing the jail | `runsc pause` / `resume` | the VMM's pause and resume |
 | Keeping a parked jail's memory | not supported | a Firecracker snapshot on the executor's disk (§8) |
 | Measuring what the jail cost | the per-run memory cgroup | the cgroup `jailer` puts the VMM in, plus out-of-memory kills the guest reports |
 
-§13 maps each contract member and lists what each row still has to prove.
+§12 maps each contract member and lists what each row still has to prove.
 
 ## 4. The interface (`internal/cell`)
 
@@ -203,7 +203,7 @@ jail: the run tree at `/work`, TF's binaries at the fixed destinations in
 `sandbox.TrustedSkillsDestination` / `TrustedMemoryDestination`. `LaunchSpec`
 names the inputs by their host source; the backend decides how they arrive.
 Firecracker has no shared-filesystem device, so its backend attaches them as
-read-only disk images mounted at the same paths (§13.3).
+read-only disk images mounted at the same paths (§12.3).
 
 ## 5. Invariants every backend holds
 
@@ -463,7 +463,7 @@ device state, taken with the VM paused, kept together with the run-tree disk
 image, which Firecracker leaves to its caller. Placement already sends a
 resume to the machine that holds it: a resume is stamped with the executor of
 the conversation's newest claim (horizontal-scaling §6.2), which on the
-same-host layout (§13.1) is the host with the snapshot. If that executor is
+same-host layout (§12.1) is the host with the snapshot. If that executor is
 dead or draining, the run goes to another eligible executor and restores cold
 from the capture. A snapshot is used only when all of these hold, and is
 deleted otherwise:
@@ -499,7 +499,7 @@ oldest first; an evicted snapshot costs a cold resume and nothing else.
 
 The run-tree image keeps Firecracker's default drive cache mode, which does
 not pass the guest's flushes through to the host's disk. Everything durable
-leaves the VM in a capture or the copy-out at `Stop` (§13.3), so a host crash
+leaves the VM in a capture or the copy-out at `Stop` (§12.3), so a host crash
 loses only the image and the snapshots, which are caches.
 
 ## 9. The conformance suite (`internal/cell/celltest`)
@@ -541,7 +541,7 @@ case per capability, run on the backends that declare it.
 
 Two cases hold a VM backend to the hard parts of its design: `RunTreeAtWork`
 reads the jail's write back after `Stop`, which fails unless `Stop` copies the
-tree out (§13.3), and the network cases run against the tap with the host's
+tree out (§12.3), and the network cases run against the tap with the host's
 rules unchanged.
 
 Every network negative is paired with a positive control (the jail reaches
@@ -566,11 +566,9 @@ suite.
 ## 10. Order of work
 
 1. **Extract the interface with gVisor behind it, and the suite.** *Done.*
-   The extraction changes no behaviour. The suite passes on gVisor; it found
-   two defects, both fixed in this step (§11).
 2. **TLS interception in the sidecar** (§6.1, TFAC-1117).
 3. **The Firecracker backend**, built against the suite. The spike items
-   that could run without it pass (§13.6); the rest run against it. It
+   that could run without it pass (§12.6); the rest run against it. It
    isolates cells by network position as gVisor does, so it does not wait for
    a token on the fetch relays (§6).
 4. **Capabilities, profile requirements and claim eligibility** (§7). Until
@@ -580,48 +578,7 @@ suite.
 5. **Destination-scoped credential injection** (sandbox-fleet §7), on the
    termination step 2 builds.
 
-## 11. What the suite found on gVisor
-
-**Every port of the gateway was open to the jail.** The host-side veth rule
-(`applyEgressPolicy` layer 2) dropped jail traffic whose destination was not
-the cell's gateway IP, but accepted every *port* on that IP. Anything the
-executor bound on all interfaces was reachable from every jail at
-`<gateway>:<port>`. In multi mode that included the `/metrics` listener, which
-binds `:9464` by default (`internal/telemetry`) and is unauthenticated, and
-the sidecar's own LLM and API proxies, which no jail is pointed at. The
-executor's healthz listener is loopback-only and was unaffected.
-
-It is closed by admitting only the sidecar's jail-facing ports:
-
-- Layer 2 drops every packet from the jail, including those to the gateway
-  IP. A cell whose ports were never admitted reaches nothing on the host.
-- The sidecar reports the listeners it points the jail at
-  (`StartProxiesResult.JailEndpoints`): the egress proxy, each fetch relay,
-  the git proxy, and the gh injector or shared origin.
-- `Cell.Launch` admits those ports before the jail starts. On gVisor that is
-  `RunNetwork.AdmitJailPorts`, a broker RPC (protocol version 4) that installs
-  one ACCEPT per port at the head of the veth's INPUT chain. The broker derives
-  the veth and gateway from (conversation, subnet index), refuses a veth that
-  does not exist, and caps a cell at `sandbox.MaxJailPorts`. The rules are
-  recorded with the network's state, removed at teardown, and matched by the
-  boot-time reaper.
-
-Giving the sidecar its own network namespace, holding the veth's host end so
-the jail's only neighbour is a namespace in which only the sidecar listens,
-would close the same hole structurally. It is a larger privsep change and was
-not needed for this fix.
-
-**Broker run registry.** `waitRun` (`cmd/capbroker/runlaunch_linux.go`)
-deleted `s.runs[containerID]` without checking the entry was still the one it
-waited on. Container ids are deterministic per (conversation, subnet index),
-so a successor launched under the same id before the predecessor's `WaitRun`
-returned lost its registry entry ("unknown run"). Production did not reach it,
-because every ending stops the jail and `Jail.Close` waits for the reap when
-it records actuals, but the suite hit it once while its teardown skipped
-`Stop`. `forgetRun` now deletes the entry only if it is still the one waited
-on.
-
-## 12. What step 1 leaves gVisor-only
+## 11. What step 1 leaves gVisor-only
 
 Step 1 moves the cell lifecycle behind the interface and nothing else. These
 paths still reach `internal/sandbox` directly, and each becomes an interface
@@ -630,14 +587,14 @@ member when the Firecracker backend needs it:
 - **Run-tree residency.** The run tree is a host directory built by
   `internal/worktree` and handed to the jail, and host code writes into it
   while the jail runs. A VM backend copies it in at launch and out at `Stop`,
-  and pushes host writes in between (§13.3). `HandOffRunTree(root)` is the
+  and pushes host writes in between (§12.3). `HandOffRunTree(root)` is the
   seam for the copy in and `Stop` already precedes every read of the tree,
   so only the push becomes a new contract member.
 - **Capture.** Checkpoints and endings capture the run tree with a
   broker-launched capture jail reading the host directory
   (`sandbox.CaptureRunTree`, `internal/delegate/capture_jail.go`). On
   Firecracker the capture jail is a capture microVM reading the run-tree image
-  (§13.3). This becomes `Cell.CaptureTree`.
+  (§12.3). This becomes `Cell.CaptureTree`.
 - **Staging grants.** Skills and memory staging directories are granted to
   the jail identity (`RunNetwork.GrantStaging`) inside the gVisor launch. On
   Firecracker they become read-only input images.
@@ -656,9 +613,9 @@ member when the Firecracker backend needs it:
   gVisor's do. Only a backend without a subnet index would need its own
   allocator.
 
-## 13. The Firecracker backend
+## 12. The Firecracker backend
 
-### 13.1 Where it runs
+### 12.1 Where it runs
 
 An executor on the Firecracker backend runs on the KVM host whose VMs it
 manages, with its cap-broker and its sidecars, as a gVisor executor runs
@@ -685,18 +642,18 @@ runs its Firecracker executors elsewhere. Each host runs cgroup v2 and carries
 the `firecracker` and `jailer` binaries and a guest kernel, all pinned by
 version and checksum.
 
-### 13.2 The contract, member by member
+### 12.2 The contract, member by member
 
 | Contract member | Firecracker | Open question, and the spike's answer |
 | --- | --- | --- |
 | `Provision` | `RunNetwork` as on gVisor (netns, veth, gateway rules, IPv6 off), plus a tap device in the netns bridged to the veth's inner end, so the guest's network card carries the jail IP. The broker launches the sidecar at its uid as today | Does the bridge pass the network conformance cases with the host rules unchanged? **Yes.** With `SetupRunNetwork` and `AdmitJailPorts` unchanged, the guest reaches only its admitted sidecar port, before and after it changes its own address and MAC as root, IPv6 included |
 | `ProxyHost` | The veth's host-side IP | — |
-| `HandOffRunTree` | Builds the run-tree image from the host tree (§13.3) | Cost on a large tree: **1.5 s** for `mkfs.ext4 -d` at the jail uid on 48,744 entries and 469 MB, 0.13 s on a fresh checkout, with owners, modes, symlinks and hard links kept |
+| `HandOffRunTree` | Builds the run-tree image from the host tree (§12.3) | Cost on a large tree: **1.5 s** for `mkfs.ext4 -d` at the jail uid on 48,744 entries and 469 MB, 0.13 s on a fresh checkout, with owners, modes, symlinks and hard links kept |
 | `Launch` | The broker runs `jailer`, which chroots the VMM, gives it private mount and pid namespaces, joins it to the cell's netns, puts it in a cgroup and drops it to the jail uid and gid. The VM's configuration comes from a fixed template, as the OCI spec does on gVisor: the guest kernel, the read-only rootfs image, the read-only input images, the run-tree image, one network card on the tap, one vsock device, memory and vCPUs from the profile's class, and Firecracker's metadata service off | Bring-up latency against gVisor's: **the same.** `jailer` exec to the tool host's first answer p50 154 ms, p95 181 ms; with the cell built first, as gVisor's spawn counts it, p50 282 ms against gVisor's ~171–292 ms |
 | `Connect` | The tool host dials the host over vsock. Firecracker hands a guest's connection to port N to the unix socket `<vsock path>_N`, on which the executor listens inside the jailer directory | Round trip per tool call against the unix socket: **0.04 ms p50, 0.06 ms p95** for a no-op call, the same as a unix socket on the host |
 | Exec verbs (`/run/tf.sock`) | A relay in the guest listens on `/run/tf.sock` and dials a second vsock port, whose host socket is the sidecar's agenthost socket | — |
 | `Freeze` / `Thaw` | `Freeze` asks the init to freeze `/work`, then pauses the VMM over its API socket, which only the broker uses; `Thaw` resumes the VMM, then unfreezes `/work`. If the init does not confirm, the VMM is paused anyway, so every process is still held still, and a capture reads what the guest last flushed; only that run's capture is affected | Measured: freezing `/work` takes 51–57 ms and the pause about 1 ms; a tool call sent while paused waits and is answered after `Thaw` |
-| `Stop` | Stop the VM, wait for the VMM to exit, then copy the run tree out (§13.3) | Cost of the copy-out: **2.2 s** for the large tree whole and 0.33–0.40 s for changed paths only, after a capture-VM boot of about 0.15 s; 0.23–0.31 s and 22 ms on a fresh checkout |
+| `Stop` | Stop the VM, wait for the VMM to exit, then copy the run tree out (§12.3) | Cost of the copy-out: **2.2 s** for the large tree whole and 0.33–0.40 s for changed paths only, after a capture-VM boot of about 0.15 s; 0.23–0.31 s and 22 ms on a fresh checkout |
 | `Close` | Delete the jailer directory and the images; network teardown as on gVisor | — |
 | `OOMKilled`, actuals | The actuals come from the VMM's cgroup: CPU, and a `memory.peak` that is the most guest memory the VM touched, which is what it held on the host. The cgroup's limit sits above guest memory plus VMM overhead, so the guest's own OOM killer acts first and the cgroup records nothing. The init reports the guest's `/proc/vmstat` `oom_kill` count over vsock; `OOMKilled` is that count, or the cgroup's own `oom_kill`, which means the host killed the VMM and the cell is gone | Answered: an OOM inside the guest leaves the cgroup's events at zero |
 | `ReapOrphans` | Kill VMMs and delete jailer directories the broker's ledger does not hold; reap netns as on gVisor | — |
@@ -711,7 +668,7 @@ Bridged frames do not pass through the netns's iptables unless
 the guest. The host-side drops on the veth are what confine it, as they are
 for gVisor's netstack (`internal/sandbox/iptables_linux.go`).
 
-### 13.3 The run tree
+### 12.3 The run tree
 
 Firecracker has no shared-filesystem device: it emulates network, block,
 vsock and balloon devices and does not implement virtio-fs. A host directory
@@ -728,7 +685,7 @@ points:
 - **Out, at `Stop` and at every capture.** `Stop` copies the tree into the
   host tree once the VMM has exited. That is what invariant 5 requires, and it
   leaves host code that reads a run tree between engagements unchanged. A
-  capture (§12) streams the capture manifest out the same way. Neither mounts
+  capture (§11) streams the capture manifest out the same way. Neither mounts
   the image on the host: a filesystem image the guest has written is
   attacker-shaped input to the host kernel's ext4 driver. A capture microVM
   reads it instead, a short-lived VM that runs only TF's capture code with
@@ -756,7 +713,7 @@ points:
   code that reads or writes a live run tree moves to an engagement boundary or
   goes through the same push; the step that builds the backend lists them.
 
-### 13.4 The guest
+### 12.4 The guest
 
 - **Kernel.** Built from Firecracker's recommended guest configuration and
   pinned by version and checksum. This is the guest-kernel supply chain
@@ -788,7 +745,7 @@ points:
   reports. It can also change its own address; the host rules match on the
   veth, not on an address, so that reaches nothing more.
 
-### 13.5 What TF takes from SPACE
+### 12.5 What TF takes from SPACE
 
 SPACE is Apache-2.0, copyright Perplexity AI. The license lets TF copy and
 modify its code under TF's own license, provided TF meets its section 4: a
@@ -816,7 +773,7 @@ data plane, the builders and object storage, the Kubernetes adapter, the
 egress gateway and the credential manager each do a job a TF component
 already does (§1.1).
 
-### 13.6 Spike results
+### 12.6 Spike results
 
 Measured on one KVM host, with Firecracker v1.17.0 under `jailer` and TF's
 own cell network code.
@@ -870,9 +827,9 @@ own cell network code.
 - `docs/benchmarks/gvisor-cpu-tax.md` — why a VM backend is attractive for
   build and test bursts, and why gVisor stays the default.
 - `docs/benchmarks/sandbox-bench.md` — gVisor's idle memory and spawn
-  latency, the baselines §13.6 measures against.
+  latency, the baselines §12.6 measures against.
 - Firecracker's own documentation (`github.com/firecracker-microvm/firecracker`,
   `docs/`): `jailer.md`, `vsock.md` and `snapshotting/snapshot-support.md`
-  for the parts §13 relies on.
+  for the parts §12 relies on.
 - SPACE (`github.com/perplexityai/SPACE`) — §1.1 for why it is not a
-  dependency, §13.5 for what TF takes from it.
+  dependency, §12.5 for what TF takes from it.
