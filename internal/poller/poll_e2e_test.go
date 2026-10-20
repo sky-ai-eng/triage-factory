@@ -34,6 +34,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -79,8 +80,16 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 	alice := w.actor("alice", "user")
 	bob := w.actor("bob", "user")
 	carol := w.actor("carol", "user")
+	dave := w.actor(knownLogin, "user")
 	ci := w.actor("ci", "bot")
 	w.githubREST(alice, "POST", "/api/v3/orgs/acme/repos", map[string]any{"name": "webapp"}, 201)
+
+	// Two GitHub teams, both mapped to the TF team, with dave on one of them.
+	orgs := "/api/v3/orgs/acme"
+	w.githubREST(alice, "PUT", orgs+"/memberships/"+knownLogin, map[string]any{"role": "member"}, 200)
+	w.githubREST(alice, "POST", orgs+"/teams", map[string]any{"name": "Reviewers"}, 201)
+	w.githubREST(alice, "POST", orgs+"/teams", map[string]any{"name": "Release"}, 201)
+	w.githubREST(alice, "PUT", orgs+"/teams/reviewers/memberships/"+knownLogin, map[string]any{"role": "member"}, 200)
 
 	// main, then three branches off it: one for checks, one that will
 	// conflict with main, one for reviews. main then changes the line the
@@ -171,6 +180,36 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 		"acme/webapp#4 " + domain.EventGitHubPRReadyForReview:               1,
 	})
 
+	// Review requests and mentions. Only identities TF knows produce events:
+	// dave and the mapped acme/reviewers, never carol.
+	w.advance(60)
+	w.githubREST(alice, "POST", pulls+"/1/requested_reviewers", map[string]any{
+		"reviewers": []string{knownLogin, "carol"}, "team_reviewers": []string{"reviewers"},
+	}, 201)
+	w.githubREST(carol, "POST", "/api/v3/repos/acme/webapp/issues/4/comments", map[string]any{
+		"body": "@" + knownLogin + " and @acme/reviewers, can you look? cc @bob",
+	}, 201)
+	p.cycle(t, ctx, map[string]int{
+		"acme/webapp#1 " + domain.EventGitHubPRReviewRequested + " user:" + knownLogin:  1,
+		"acme/webapp#1 " + domain.EventGitHubPRReviewRequested + " team:acme/reviewers": 1,
+		"acme/webapp#4 " + domain.EventGitHubPRCommented:                                1,
+		"acme/webapp#4 " + domain.EventGitHubPRMentioned + " user:" + knownLogin:        1,
+		"acme/webapp#4 " + domain.EventGitHubPRMentioned + " team:acme/reviewers":       1,
+	})
+
+	// dave's review answers his request; the team's request stays. Deleting
+	// acme/release prunes its mapping on the next cycle, and acme/reviewers'
+	// mapping stays because the team still exists.
+	w.advance(60)
+	w.githubREST(dave, "POST", pulls+"/1/reviews", map[string]any{"event": "COMMENT", "body": "looked"}, 200)
+	w.send(alice, "DELETE", orgs+"/teams/release", nil, http.StatusNoContent)
+	p.cycle(t, ctx, map[string]int{
+		"acme/webapp#1 " + domain.EventGitHubPRReviewCommented:                              1,
+		"acme/webapp#1 " + domain.EventGitHubPRReviewRequestRemoved + " user:" + knownLogin: 1,
+	})
+	p.assertMapped(t, ctx, "reviewers", true)
+	p.assertMapped(t, ctx, "release", false)
+
 	w.advance(60)
 	w.githubREST(alice, "PUT", pulls+"/3/merge", map[string]any{}, 200)
 	p.cycle(t, ctx, map[string]int{
@@ -188,6 +227,8 @@ type pollRig struct {
 	mgr    *poller.Manager
 	stores db.Stores
 	orgID  string
+	teamID string
+	host   string
 	pub    *recordingPublisher
 	tr     *countingTransport
 	errs   []string
@@ -195,8 +236,7 @@ type pollRig struct {
 }
 
 // deploymentShape is one way TF is deployed: its run mode, its stores, and the
-// org and team those stores poll for. prepare runs once the org's GitHub host
-// is known, for what the shape needs keyed by it.
+// org and team those stores poll for.
 type deploymentShape func(t *testing.T, ctx context.Context) deployment
 
 type deployment struct {
@@ -205,30 +245,40 @@ type deployment struct {
 	orgID    string
 	teamID   string
 	adminID  string
-	prepare  func(host, pollerLogin string)
+	// pollerLogin is the GitHub login the poll credential belongs to.
+	pollerLogin string
+	// identitySource is how the admin's GitHub identity was captured.
+	identitySource string
 }
+
+// The person TF knows on GitHub: the admin's login in both shapes, and in
+// local mode also the poll credential's owner. A review request or mention
+// naming anyone else routes to nobody.
+const knownLogin = "dave"
 
 // multiOnPostgres is a multi-mode control plane: Postgres stores, a real org
 // and team, and no local user, so the poller resolves reviewers against the
-// stores.
+// stores. It polls as the org's machine user.
 func multiOnPostgres(t *testing.T, ctx context.Context) deployment {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "acme-tf")
 	return deployment{
-		database: h.AdminDB,
-		stores:   pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey),
-		orgID:    orgID,
-		teamID:   teamID,
-		adminID:  owner,
-		prepare:  func(string, string) {},
+		database:       h.AdminDB,
+		stores:         pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey),
+		orgID:          orgID,
+		teamID:         teamID,
+		adminID:        owner,
+		pollerLogin:    "tf-poller",
+		identitySource: "connect_oauth",
 	}
 }
 
 // localOnSQLite is local mode: one SQLite file's stores, the local default org
 // and team, and a local user whose GitHub login is the poll credential's
-// owner, as when someone runs TF with their own PAT.
+// owner, as when someone runs TF with their own PAT. The poller resolves
+// reviewers against that login and the teams GitHub lists for it.
 func localOnSQLite(t *testing.T, ctx context.Context) deployment {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	database, err := sql.Open("sqlite", db.TestDSNMemory)
@@ -240,23 +290,21 @@ func localOnSQLite(t *testing.T, ctx context.Context) deployment {
 	if err := db.BootstrapSchemaForTest(database); err != nil {
 		t.Fatal(err)
 	}
-	stores := sqlitestore.New(database)
 	return deployment{
-		database: database,
-		stores:   stores,
-		orgID:    runmode.LocalDefaultOrgID,
-		teamID:   runmode.LocalDefaultTeamID,
-		adminID:  runmode.LocalDefaultUserID,
-		prepare: func(host, pollerLogin string) {
-			if err := stores.Users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, host, pollerLogin, "", "", "pat"); err != nil {
-				t.Fatal(err)
-			}
-		},
+		database:       database,
+		stores:         sqlitestore.New(database),
+		orgID:          runmode.LocalDefaultOrgID,
+		teamID:         runmode.LocalDefaultTeamID,
+		adminID:        runmode.LocalDefaultUserID,
+		pollerLogin:    knownLogin,
+		identitySource: "pat",
 	}
 }
 
 // newPollRig wires a poller over the shape's stores, tracking acme/webapp on
-// the org whose GitHub is the Orrery world.
+// the org whose GitHub is the Orrery world. The admin's GitHub identity is
+// knownLogin, and the team is mapped to the GitHub teams acme/reviewers and
+// acme/release.
 func newPollRig(t *testing.T, ctx context.Context, w *orreryWorld, shape deploymentShape) *pollRig {
 	t.Helper()
 	d := shape(t, ctx)
@@ -274,23 +322,31 @@ func newPollRig(t *testing.T, ctx context.Context, w *orreryWorld, shape deploym
 		t.Fatal(err)
 	}
 	if err := stores.Tx.WithTx(ctx, d.orgID, d.adminID, func(tx db.TxStores) error {
-		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, d.orgID, d.teamID, host,
-			[]domain.TeamGitHubRepo{{Owner: "acme", Repo: "webapp"}})
+		if err := tx.TeamGitHubRepos.ReplaceForTeam(ctx, d.orgID, d.teamID, host,
+			[]domain.TeamGitHubRepo{{Owner: "acme", Repo: "webapp"}}); err != nil {
+			return err
+		}
+		if err := tx.Users.UpsertGitHubIdentity(ctx, d.adminID, host, knownLogin, "", "", d.identitySource); err != nil {
+			return err
+		}
+		return tx.TeamGitHubGroups.SetForTeam(ctx, d.teamID, host, []domain.TeamGitHubGroup{
+			{OrgLogin: "acme", TeamSlug: "reviewers"},
+			{OrgLogin: "acme", TeamSlug: "release"},
+		})
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	// The poll credential belongs to an actor of its own: the org's machine
-	// user in multi mode, the person running TF in local mode.
-	const pollerLogin = "tf-poller"
-	token := w.actor(pollerLogin, "user")
-	d.prepare(host, pollerLogin)
+	token := w.tokens[d.pollerLogin]
+	if token == "" {
+		token = w.actor(d.pollerLogin, "user")
+	}
 	tr := &countingTransport{base: http.DefaultTransport}
 	resolver := &orreryResolver{
 		client: ghclient.NewClientWithHTTPClient(w.base, token, &http.Client{Transport: tr}),
 		base:   w.base,
 	}
-	r := &pollRig{stores: stores, orgID: d.orgID, pub: &recordingPublisher{}, tr: tr}
+	r := &pollRig{stores: stores, orgID: d.orgID, teamID: d.teamID, host: host, pub: &recordingPublisher{}, tr: tr}
 	r.mgr = poller.NewManager(d.database, r.pub,
 		stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, stores.Orgs,
 		stores.JiraStatusRules, stores.LinearTeamRules, stores.TeamGitHubGroups, stores.Secrets, stores.GitHubApps, stores.PollReadiness,
@@ -334,6 +390,19 @@ func (r *pollRig) cycle(t *testing.T, ctx context.Context, want map[string]int) 
 	}
 	if !equalCounts(got, want) {
 		t.Errorf("events:\n got  %s\n want %s", describe(got), describe(want))
+	}
+}
+
+// assertMapped checks whether the GitHub team acme/<slug> is still mapped to
+// the rig's TF team.
+func (r *pollRig) assertMapped(t *testing.T, ctx context.Context, slug string, want bool) {
+	t.Helper()
+	teams, err := r.stores.TeamGitHubGroups.TeamsForGroupSystem(ctx, r.orgID, r.host, "acme", slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := slices.Contains(teams, r.teamID); got != want {
+		t.Errorf("acme/%s mapped to the team: %v, want %v", slug, got, want)
 	}
 }
 
@@ -460,6 +529,8 @@ func (c *countingTransport) notMocked() []string {
 type orreryWorld struct {
 	t    *testing.T
 	base string
+	// tokens holds each actor's token by login.
+	tokens map[string]string
 }
 
 // buildOrrery builds the orrery binary in the checkout at dir and returns its
@@ -574,7 +645,7 @@ func tryStartOrrery(t *testing.T, bin string) (*orreryWorld, string, bool) {
 		<-exited
 	}
 
-	w := &orreryWorld{t: t, base: "http://" + addr}
+	w := &orreryWorld{t: t, base: "http://" + addr, tokens: map[string]string{}}
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		select {
@@ -627,6 +698,7 @@ func (w *orreryWorld) actor(login, kind string) string {
 	w.t.Helper()
 	out := w.call("", "POST", "/_orrery/actors", map[string]any{"login": login, "kind": kind}, http.StatusCreated)
 	token, _ := out["token"].(string)
+	w.tokens[login] = token
 	return token
 }
 
