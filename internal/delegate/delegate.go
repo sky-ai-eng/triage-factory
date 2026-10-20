@@ -119,6 +119,15 @@ type runConfig struct {
 	localGit *localGitChannel
 }
 
+// repoSlug is the run's GitHub repository as owner/repo, or "" for a run with
+// none.
+func (c runConfig) repoSlug() string {
+	if c.owner == "" || c.repo == "" {
+		return ""
+	}
+	return c.owner + "/" + c.repo
+}
+
 // ErrTaskBusy is returned by Delegate, on either path, when the insert loses
 // to the one-active-run-per-task index: something already holds this task's
 // single live engagement. On the event path that is a different (event,
@@ -306,7 +315,10 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	// enable-set is what each step's pin is held to. The GitHub client is
 	// resolved per-claim by the dispatcher (the queue path defers all workspace
 	// setup off this call).
-	owner, repo := ownerRepoForTask(task)
+	owner, repo, err := s.taskOwnerRepo(context.Background(), orgID, task)
+	if err != nil {
+		return "", err
+	}
 	_, teamModels, err := s.resolveRunCredentials(context.Background(), orgID, owner, repo, teamID)
 	if err != nil {
 		return "", err
@@ -553,20 +565,6 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	return blueprintRunID, nil
 }
 
-// ownerRepoForTask is the task's GitHub repo as the (owner, repo) pair this
-// package's callers want; ("", "") for a task of any other source, which has
-// no single owner/repo — the live resolver then resolves the org's sole App
-// installation, falling through to PAT when ambiguous. Every call site needs
-// both halves (the repo disambiguates a bundle-backed credential lookup, since
-// unlike the live resolver's account-wide App installation token, a bundle's
-// RepoTokens are scoped per-repo), so this returns the pair rather than
-// splitting into separate owner-only/repo-only helpers nobody calls
-// independently.
-func ownerRepoForTask(task domain.Task) (owner, repo string) {
-	owner, repo, _ = strings.Cut(domain.GitHubTaskRepo(task), "/")
-	return owner, repo
-}
-
 // cloneHostBase returns the scheme://host of an HTTPS clone URL — the insteadOf
 // upstream the executor's git-proxy clone routing rewrites, matching the sandbox
 // agent's own git-proxy pairs (which key off the org's git host base). An
@@ -696,18 +694,20 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 		return runConfig{}, errNoGitHubClient
 	}
 
-	owner, repo, prNumber := domain.SplitGitHubEntitySourceID(task.EntitySourceID)
-	if owner == "" || repo == "" {
-		return runConfig{}, fmt.Errorf("cannot parse owner/repo from entity source ID: %q", task.EntitySourceID)
-	}
+	prNumber := domain.GitHubPRNumber(task.EntitySourceID)
 	if prNumber == 0 {
 		return runConfig{}, fmt.Errorf("invalid PR number from task.EntitySourceID: %q", task.EntitySourceID)
 	}
-	// The registry row keys the ledger entry and the bare clone below.
-	repoRow, err := s.taskRepository(ctx, orgID, task, owner, repo)
+	// The registry row keys the ledger entry and the bare clone below, and its
+	// owner/repo are the names GitHub answers to now.
+	repoRow, err := s.taskRepository(ctx, orgID, task)
 	if err != nil {
 		return runConfig{}, err
 	}
+	if repoRow == nil {
+		return runConfig{}, fmt.Errorf("task %s is a %q task, not a GitHub one", task.ID, task.EntitySource)
+	}
+	owner, repo := repoRow.Owner, repoRow.Repo
 
 	s.updatePhase(ctx, orgID, conversationID, claimID, domain.ClaimPhaseFetching)
 	// Named for the phase it reports, so the trace and the run station agree

@@ -126,12 +126,12 @@ func TestGitHubUnreachable_ClosesEntityAndTasks(t *testing.T) {
 }
 
 // TestGate_HostIsPartOfTheRepoMatch: a slug names a different repository on
-// another GitHub host, so the team↔repo gate matches on (host, owner, repo).
-// Team A tracks acme/api on the org's current host and team B tracks acme/api on
-// another; both have a match-all watch rule. An event about the other host's
-// acme/api reaches team B only, and one about the current host's reaches team A
-// only. The host comes from the event's metadata when it carries one
-// (github:pr:unreachable), else from the scope of the entity it is about.
+// another GitHub host, so each host's acme/api has its own registry row, and the
+// team↔repo gate matches the row the event's entity references. Team A tracks
+// acme/api on the org's current host and team B tracks acme/api on another; both
+// have a match-all watch rule. An event about the other host's acme/api reaches
+// team B only, and one about the current host's reaches team A only, whether or
+// not the event's metadata names a host (github:pr:unreachable does).
 func TestGate_HostIsPartOfTheRepoMatch(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -210,9 +210,9 @@ func TestGate_HostIsPartOfTheRepoMatch(t *testing.T) {
 	}
 }
 
-// TestGitHubEventHost_Precedence pins where the gate reads an event's GitHub
-// host from: the metadata's "host" when the event carries one, else the scope
-// of the entity it is about, else the org's current host.
+// TestGitHubEventHost_Precedence pins where the requested-team lookup reads an
+// event's GitHub host from: the metadata's "host" when the event carries one,
+// else the scope of the entity it is about, else the org's current host.
 func TestGitHubEventHost_Precedence(t *testing.T) {
 	database := newGateDB(t)
 	st := sqlitestore.New(database)

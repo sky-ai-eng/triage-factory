@@ -143,6 +143,43 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		}
 	})
 
+	t.Run("Tracking_is_answered_by_the_registry_row_id", func(t *testing.T) {
+		s, orgID, teamID, _ := mk(t)
+		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{
+			{Owner: "octo", Repo: "kept"},
+		}); err != nil {
+			t.Fatalf("ReplaceForTeam: %v", err)
+		}
+		kept, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef(keptSlug))
+		if err != nil || kept == nil {
+			t.Fatalf("resolve %s: got=%v err=%v", keptSlug, kept, err)
+		}
+		untracked, err := s.Repos.FindOrCreateByRefSystem(ctx, orgID, repoRef(untrackedSlug))
+		if err != nil {
+			t.Fatalf("FindOrCreateByRefSystem(%s): %v", untrackedSlug, err)
+		}
+		// The same name on another host is another repository.
+		otherHost, err := s.Repos.FindOrCreateByRefSystem(ctx, orgID, domain.RepoRef{Host: TestOtherGitHubHost, Owner: "octo", Repo: "kept"})
+		if err != nil {
+			t.Fatalf("FindOrCreateByRefSystem(%s on another host): %v", keptSlug, err)
+		}
+		const otherTeam = "00000000-0000-0000-0000-0000000000ff"
+		for _, c := range []struct {
+			name, team, repositoryID string
+			want                     bool
+		}{
+			{"the tracked row", teamID, kept.ID, true},
+			{"an untracked row", teamID, untracked.ID, false},
+			{"the tracked name's row on another host", teamID, otherHost.ID, false},
+			{"the tracked row, for another team", otherTeam, kept.ID, false},
+		} {
+			got, err := s.TeamGitHubRepos.TracksRepositorySystem(ctx, c.team, c.repositoryID)
+			if err != nil || got != c.want {
+				t.Errorf("TracksRepositorySystem(%s) = %v, %v; want %v", c.name, got, err, c.want)
+			}
+		}
+	})
+
 	t.Run("A_worktree_cannot_be_reserved_for_a_repository_with_no_row", func(t *testing.T) {
 		// The reference is checked rather than assumed: a reservation naming a
 		// repository id no row answers to fails at the point the caller is

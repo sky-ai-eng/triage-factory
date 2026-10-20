@@ -1000,13 +1000,17 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// On the executor path sidecar is non-nil and setupGitHub routes GetPR
 	// through the sidecar's GitHub-REST proxy instead — this client is unused
 	// there (the executor's secret store is disabled).
-	owner, repo := ownerRepoForTask(*task)
+	// A failed read of the task's repository is a failed resolve: setupGitHub
+	// then refuses for want of a client, and the refusal carries this cause.
 	var (
 		gh           *ghclient.Client
 		ghResolveErr error
 	)
 	if sidecar == nil {
-		gh, ghResolveErr = s.resolveGHClient(ctx, orgID, owner, repo)
+		var owner, repo string
+		if owner, repo, ghResolveErr = s.taskOwnerRepo(ctx, orgID, *task); ghResolveErr == nil {
+			gh, ghResolveErr = s.resolveGHClient(ctx, orgID, owner, repo)
+		}
 	}
 
 	// Build (step 0, first claim) or rehydrate (later steps / crash re-claim) the
@@ -1255,7 +1259,14 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		return
 	}
 
-	owner, _ := ownerRepoForTask(*task)
+	// The owner only keys the local gh channel's credential, a channel the
+	// agent can do without, so an unreadable repository costs the resumed
+	// session that pinning and not the resume.
+	owner, _, err := s.taskOwnerRepo(ctx, orgID, *task)
+	if err != nil {
+		dispatchLog.Warn("resume: read the task's repository failed; the local gh channel resolves the org's default credential",
+			"conversation", conv.ID, "task", task.ID, "error", err)
+	}
 	var extraTools string
 	if conv.PromptID != "" {
 		if p, perr := s.prompts.GetSystem(ctx, orgID, conv.PromptID); perr == nil && p != nil {
@@ -2000,9 +2011,16 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		Runtime: conv.Runtime, WorktreePath: warm, BlueprintRunID: br.ID,
 	}
 	cfg := runConfig{orgID: orgID}
+	// repoRow is a GitHub task's repository, read once: its names configure the
+	// run and its id keys the PR checkout's ledger row below.
+	var repoRow *domain.Repository
 	switch task.EntitySource {
 	case "github":
-		owner, repo, prNumber := parseGitHubTask(task)
+		var err error
+		if repoRow, err = s.taskRepository(ctx, orgID, task); err != nil {
+			return runConfig{}, err
+		}
+		owner, repo, prNumber := repoRow.Owner, repoRow.Repo, domain.GitHubPRNumber(task.EntitySourceID)
 		cfg.owner, cfg.repo, cfg.prNumber = owner, repo, prNumber
 		cfg.scope = fmt.Sprintf("Repository: %s/%s\nPR: #%d", owner, repo, prNumber)
 		cfg.sources = s.sourceDocsFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindGitHub)
@@ -2053,7 +2071,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 				"root", root, "conversation", conv.ID, "error", err)
 		}
 	}
-	if cfg.prNumber > 0 && cfg.owner != "" && cfg.repo != "" {
+	if repoRow != nil && cfg.prNumber > 0 {
 		cfg.prCheckout = filepath.Join(root, cfg.owner, cfg.repo, worktree.PRRefSlug(cfg.prNumber))
 		// This conversation gets its own conversation_worktrees row for the
 		// task's PR checkout. Push authority is per conversation: the gate reads
@@ -2078,17 +2096,12 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// store stuck on a lock costs a denied push, never the step's start.
 		if s.conversationWorktrees != nil {
 			ledgerCtx, cancelLedger := context.WithTimeout(context.WithoutCancel(ctx), ledgerWriteTimeout)
-			var werr error
-			if repoRow, rerr := s.taskRepository(ledgerCtx, orgID, task, cfg.owner, cfg.repo); rerr != nil {
-				werr = rerr
-			} else {
-				werr = s.recordCheckout(ledgerCtx, orgID, conv.ClaimID, domain.ConversationWorktree{
-					ConversationID: conv.ID,
-					RepositoryID:   repoRow.ID,
-					Path:           cfg.prCheckout,
-					Ref:            worktree.PRRefSlug(cfg.prNumber),
-				})
-			}
+			werr := s.recordCheckout(ledgerCtx, orgID, conv.ClaimID, domain.ConversationWorktree{
+				ConversationID: conv.ID,
+				RepositoryID:   repoRow.ID,
+				Path:           cfg.prCheckout,
+				Ref:            worktree.PRRefSlug(cfg.prNumber),
+			})
 			if werr != nil && !errors.Is(werr, db.ErrClaimReleased) {
 				dispatchLog.Warn("record the PR checkout in conversation_worktrees failed; pushes to this repo will be denied for this conversation",
 					"path", cfg.prCheckout,
@@ -2201,13 +2214,6 @@ func (s *Spawner) stampRunWorktreePath(ctx context.Context, orgID string, br *do
 	if _, err := s.blueprints.SetRunWorktreePathSystem(context.WithoutCancel(ctx), orgID, br.ID, path); err != nil {
 		dispatchLog.Warn("set worktree_path for blueprint_run failed", "blueprint_run", br.ID, "error", err)
 	}
-}
-
-// parseGitHubTask splits a GitHub PR task's "owner/repo#N" entity source id into
-// its parts. prNumber is 0 when absent/unparseable; callers surface that as a
-// setup failure.
-func parseGitHubTask(task domain.Task) (owner, repo string, prNumber int) {
-	return domain.SplitGitHubEntitySourceID(task.EntitySourceID)
 }
 
 // materializeStepSkill places one blueprint step's SKILL.md where this host's

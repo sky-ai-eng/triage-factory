@@ -295,38 +295,24 @@ const pgFactoryEntitySelectColumns = `
 // RLS-does-the-scoping pattern ListActiveJiraTeamScoped uses
 // for the Jira discovery deck. The org bind (via e.org_id) is
 // defense-in-depth so the filter still holds on the admin pool where RLS
-// is bypassed: team_github_repos and linear_team_rules bind it through the
-// teams join, jira_project_status_rules on its own org_id.
+// is bypassed: team_github_repos and jira_project_status_rules bind it on
+// their own org_id, linear_team_rules through the teams join.
 //
-// GitHub source_id is "owner/repo#N" (tracker.ghSourceID): split_part on
-// '/' yields the owner, split_part on '/' then '#' yields the repo.
-// Matching is case-insensitive on both axes, mirroring TracksRepoSystem
-// (GitHub identifiers are case-insensitive). Jira keys are hyphen-free,
-// so split_part(source_id, '-', 1) is the project key (e.g. "PROJ" in
-// "PROJ-123"), matched against the registry row on the entity's site,
-// as in jiraTeamProjectMembershipExists.
+// Jira keys are hyphen-free, so split_part(source_id, '-', 1) is the project
+// key (e.g. "PROJ" in "PROJ-123"), matched against the registry row on the
+// entity's site, as in jiraTeamProjectMembershipExists.
 
 // factoryGitHubRepoTrackedExists scopes a github entities row (alias e)
 // to the tracked repos of the viewer's teams.
 //
-// The slug entities.source_id carries ("owner/repo#18") is matched against the
-// registry, and the registry row is what the tracking row points at. The extra
-// join is what keeps the two ends agreeing on identity: the fold lives in the
-// registry, once. The entity's scope is the GitHub host it was polled from and
-// the registry row's host is the one it lives on, so a pull request matches
-// tracking only on its own host.
-//
-// TODO(TFAC-1126): join on e.repository_id = g.repository_id instead of
-// parsing the key; this and factoryGitHubRepoTrackedForTeams still resolve
-// the repository by name.
+// The entity and the tracking row both reference the repository's registry
+// row, so they meet on its id. A rename moves only the registry row's name,
+// and a registry row lives on one GitHub host, so a pull request matches
+// tracking only on its own host without the host being compared.
 const factoryGitHubRepoTrackedExists = `EXISTS (
 	SELECT 1 FROM team_github_repos g
-	JOIN teams tm ON tm.id = g.team_id
-	JOIN repositories r ON r.id = g.repository_id
-	WHERE tm.org_id = e.org_id
-	  AND r.host = e.scope
-	  AND lower(r.owner) = lower(split_part(e.source_id, '/', 1))
-	  AND lower(r.repo) = lower(split_part(split_part(e.source_id, '/', 2), '#', 1))
+	WHERE g.org_id = e.org_id
+	  AND g.repository_id = e.repository_id
 )`
 
 // factoryJiraProjectTrackedExists scopes a jira entities row (alias e) to
@@ -377,18 +363,14 @@ const factoryEntityTrackedExists = `(
 // in placeholders (the comma-joined "$3, $4" list bound to team ids).
 // Each branch stays RLS-scoped to the viewer under tf_app (a forged team
 // id the caller isn't on is filtered by the SELECT policy) and org-bound
-// via the teams join for the admin pool — the same shape as
+// for the admin pool the way its unnarrowed twin is — the same shape as
 // jiraTeamProjectMembershipForTeam, widened to an IN list.
 func factoryGitHubRepoTrackedForTeams(placeholders string) string {
 	return `EXISTS (
 		SELECT 1 FROM team_github_repos g
-		JOIN teams tm ON tm.id = g.team_id
-		JOIN repositories r ON r.id = g.repository_id
-		WHERE tm.org_id = e.org_id
+		WHERE g.org_id = e.org_id
 		  AND g.team_id IN (` + placeholders + `)
-		  AND r.host = e.scope
-		  AND lower(r.owner) = lower(split_part(e.source_id, '/', 1))
-		  AND lower(r.repo) = lower(split_part(split_part(e.source_id, '/', 2), '#', 1))
+		  AND g.repository_id = e.repository_id
 	)`
 }
 

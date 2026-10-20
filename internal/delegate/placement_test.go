@@ -2,9 +2,11 @@ package delegate
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/placement"
@@ -36,18 +38,26 @@ func githubTask() domain.Task {
 	return domain.Task{ID: "t1", EntitySource: "github", EntitySourceID: "acme/web#42"}
 }
 
-// placementSpawner returns a spawner whose entity store holds the GitHub task's
-// entity on host, and that task.
+// placementSpawner returns a spawner whose stores hold the GitHub task's entity
+// on host and the repository row its create registered, and that task.
 func placementSpawner(t *testing.T, host string) (*Spawner, domain.Task) {
 	t.Helper()
-	stores := sqlitestore.New(newDelegateTestDB(t))
+	s, task, _ := placementSpawnerWithDB(t, host)
+	return s, task
+}
+
+// placementSpawnerWithDB is placementSpawner with the database behind it.
+func placementSpawnerWithDB(t *testing.T, host string) (*Spawner, domain.Task, *sql.DB) {
+	t.Helper()
+	database := newDelegateTestDB(t)
+	stores := sqlitestore.New(database)
 	e, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", host, "acme/web#42", "", "pr", "T", host+"/acme/web/pull/42")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	task := githubTask()
 	task.EntityID = e.ID
-	return &Spawner{entities: stores.Entities}, task
+	return &Spawner{entities: stores.Entities, repos: stores.Repos}, task, database
 }
 
 func TestPreferredExecutorFor_StampsRendezvousOwner(t *testing.T) {
@@ -64,6 +74,25 @@ func TestPreferredExecutorFor_StampsRendezvousOwner(t *testing.T) {
 	}
 	if fp.lastHost != "https://github.com" {
 		t.Fatalf("resolver read the override on %q, want the entity's host", fp.lastHost)
+	}
+}
+
+// TestPreferredExecutorFor_KeysOnTheRepositorysCurrentName pins that the key
+// is the task's registry row's name, read through the id its entity
+// references: a repository renamed with no key rewritten is keyed by its new
+// name, the one its overrides are written under.
+func TestPreferredExecutorFor_KeysOnTheRepositorysCurrentName(t *testing.T) {
+	s, task, database := placementSpawnerWithDB(t, "https://github.com")
+	e, err := s.entities.GetSystem(context.Background(), runmode.LocalDefaultOrgID, task.EntityID)
+	if err != nil || e == nil {
+		t.Fatalf("read entity: %v, %v", e, err)
+	}
+	dbseed.RenameRepositoryOnly(t, database, e.RepositoryID, "acme", "site")
+	fp := &fakePlacement{enabled: true, wantKey: "acme/site", owner: "exec-owner"}
+	s.SetPlacement(fp, db.ClaimPlacement{Enabled: true})
+
+	if got := s.preferredExecutorFor(context.Background(), runmode.LocalDefaultOrgID, task, "run-1"); got != "exec-owner" {
+		t.Fatalf("preferred = %q (keyed %q), want exec-owner keyed acme/site", got, fp.lastKey)
 	}
 }
 

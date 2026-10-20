@@ -421,6 +421,56 @@ func TestFactoryReadStore_Postgres_GitHubMatchesTrackingOnItsOwnHost(t *testing.
 	}
 }
 
+// TestFactoryReadStore_Postgres_GitHubMatchesTrackingByRepositoryID pins that
+// the belt meets the tracked set on the entity's repository_id and reads
+// nothing out of its key. The tracked repository is renamed with no key
+// rewritten, and its pull request stays on the belt; another entity whose key
+// spells the tracked repository's new name but which references an untracked
+// row stays off it.
+func TestFactoryReadStore_Postgres_GitHubMatchesTrackingByRepositoryID(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, _ := seedPgFactoryOrg(t, h)
+	teamID := firstTeamForOrg(t, h, orgID)
+
+	trackPgRepo(t, h, orgID, teamID, "acme", "old")
+	tracked := seedPgGitHubEntityRaw(t, h, orgID, "acme", "old", 1)
+	var trackedRepositoryID string
+	if err := h.AdminDB.QueryRow(`SELECT repository_id FROM entities WHERE id = $1`, tracked).Scan(&trackedRepositoryID); err != nil {
+		t.Fatalf("read repository_id: %v", err)
+	}
+	dbseed.RenameRepositoryOnly(t, h.AdminDB, trackedRepositoryID, "acme", "new")
+
+	untrackedRepositoryID := dbseed.GitHubRepository(t, h.AdminDB, orgID, dbtest.TestGitHubHost, "acme", "elsewhere")
+	keyLies := uuid.New().String()
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES ($1, $2, 'github', 'acme/new#2', 'pr', 'PR', '', '{}'::jsonb, now(), $3, $4)
+	`, keyLies, orgID, dbtest.TestGitHubHost, untrackedRepositoryID); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	// The unfiltered belt and the one narrowed to the team read the two
+	// variants of the predicate.
+	for _, teamIDs := range [][]string{nil, {teamID}} {
+		rows, err := stores.Factory.Entities(context.Background(), orgID, 100, teamIDs)
+		if err != nil {
+			t.Fatalf("Entities(%v): %v", teamIDs, err)
+		}
+		got := map[string]bool{}
+		for _, r := range rows {
+			got[r.Entity.ID] = true
+		}
+		if !got[tracked] {
+			t.Errorf("teams %v: pull request in the renamed tracked repository is off the belt; its key still spells acme/old", teamIDs)
+		}
+		if got[keyLies] {
+			t.Errorf("teams %v: entity keyed acme/new#2 in an untracked repository rides the belt; the key was read, not the id", teamIDs)
+		}
+	}
+}
+
 // TestFactoryReadStore_Postgres_JiraScopedToTrackedProject is the Jira
 // mirror of the GitHub test: a Jira entity whose project key is attached
 // to one of the viewer's teams (a jira_project_status_rules row) rides the

@@ -639,20 +639,16 @@ func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, co
 		out = append(out, repoID)
 	}
 	// A checkout names its repository by registry id. The bundle reaches
-	// owner/repo on host, so a checkout counts only when it is of that host's
-	// row; one of the same owner/repo on another host is another repository. A
+	// repositories on host, so a checkout counts only when its row is on that
+	// host; one of the same owner/repo on another host is another repository. A
 	// row this cannot confirm is treated the same way.
 	anchoredElsewhere := false
 	onHost := func(w domain.ConversationWorktree) bool {
 		if m.stores.Repos == nil || w.RepositoryID == "" {
 			return false
 		}
-		owner, repo, ok := strings.Cut(w.RepoID, "/")
-		if !ok {
-			return false
-		}
-		row, err := m.stores.Repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Host: host, Owner: owner, Repo: repo})
-		return err == nil && row != nil && row.ID == w.RepositoryID
+		row, err := m.stores.Repos.GetSystem(ctx, orgID, w.RepositoryID)
+		return err == nil && row != nil && row.Host == host
 	}
 
 	if repoID, scope := m.taskGitHubRepo(ctx, orgID, taskID); repoID != "" {
@@ -713,37 +709,28 @@ func (m *Manager) taskPrimaryRepo(ctx context.Context, orgID, taskID, host strin
 	return repo
 }
 
-// taskGitHubRepo resolves a GitHub task's own target repo as "owner/repo"
-// from its entity source id ("owner/repo#42" for a PR/issue task), and the
-// GitHub host its entity was polled from (the entity's scope; "" when the
-// entity cannot be read). It uses the same parse delegate.ownerRepoForTask
-// uses, duplicated here rather than exported since it's a two-line string
-// split and importing internal/delegate from here would be a layering
-// inversion (delegate is the executor-side consumer, not something the
-// brain-side provisioner should depend on). "" for a non-GitHub task (e.g.
-// Jira) or a malformed id.
+// taskGitHubRepo resolves a GitHub task's own target repo as "owner/repo", and
+// the GitHub host it lives on: the registry row the task's entity references
+// (entities.repository_id), read by that id, so the name is the repository's
+// now whatever the entity's key still spells. "" for a non-GitHub task, whose
+// entity references no repository, or when any read fails.
 func (m *Manager) taskGitHubRepo(ctx context.Context, orgID, taskID string) (repo, scope string) {
-	if m.stores.Tasks == nil || taskID == "" {
+	if m.stores.Tasks == nil || m.stores.Entities == nil || m.stores.Repos == nil || taskID == "" {
 		return "", ""
 	}
 	task, err := m.stores.Tasks.GetSystem(ctx, orgID, taskID)
 	if err != nil || task == nil || task.EntitySource != "github" {
 		return "", ""
 	}
-	if m.stores.Entities != nil {
-		if entity, err := m.stores.Entities.GetSystem(ctx, orgID, task.EntityID); err == nil && entity != nil {
-			scope = entity.Scope
-		}
-	}
-	repoStr := task.EntitySourceID
-	if idx := strings.LastIndex(repoStr, "#"); idx >= 0 {
-		repoStr = repoStr[:idx]
-	}
-	o, r, ok := strings.Cut(repoStr, "/")
-	if !ok || o == "" || r == "" {
+	entity, err := m.stores.Entities.GetSystem(ctx, orgID, task.EntityID)
+	if err != nil || entity == nil || entity.RepositoryID == "" {
 		return "", ""
 	}
-	return repoStr, scope
+	row, err := m.stores.Repos.GetSystem(ctx, orgID, entity.RepositoryID)
+	if err != nil || row == nil {
+		return "", ""
+	}
+	return row.Slug(), row.Host
 }
 
 // resolveJira resolves the org's Jira service credential to its raw,

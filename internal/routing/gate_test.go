@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -180,6 +181,62 @@ func TestGate_SharedRepo_VisibleToBoth(t *testing.T) {
 	sort.Strings(want)
 	if len(vis) != 2 || vis[0] != want[0] || vis[1] != want[1] {
 		t.Fatalf("visibility = %v, want both teams %v", vis, want)
+	}
+}
+
+// TestGate_MatchesTheEntitysRepositoryByID pins that the team↔repo gate reads
+// the event entity's repository_id and nothing named. Team A tracks owner/old,
+// which is then renamed with no key rewritten, so its pull request's key and
+// the event's metadata both still spell the old name; team A still passes.
+// Another entity's key spells the renamed repository but references the one
+// team B tracks, and only team B passes for it.
+func TestGate_MatchesTheEntitysRepositoryByID(t *testing.T) {
+	dbh := newGateDB(t)
+	st := sqlitestore.New(dbh)
+	ctx := context.Background()
+
+	teamA := runmode.LocalDefaultTeamID
+	teamB := seedGateTeam(t, dbh, "team-b")
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "old"}}); err != nil {
+		t.Fatalf("teamA track: %v", err)
+	}
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamB, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "other"}}); err != nil {
+		t.Fatalf("teamB track: %v", err)
+	}
+
+	renamed, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", dbtest.TestGitHubHost, "owner/old#1", "", "pr", "PR", "")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	dbseed.RenameRepositoryOnly(t, dbh, renamed.RepositoryID, "owner", "new")
+
+	other, err := st.Repos.GetByRefSystem(ctx, runmode.LocalDefaultOrgID, domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "owner", Repo: "other"})
+	if err != nil || other == nil {
+		t.Fatalf("resolve owner/other: %v, %v", other, err)
+	}
+	keyLies := uuid.New().String()
+	if _, err := dbh.Exec(`
+		INSERT INTO entities (id, source, scope, source_id, kind, title, url, state, created_at, repository_id)
+		VALUES (?, 'github', ?, 'owner/new#2', 'pr', 'PR', '', 'active', ?, ?)
+	`, keyLies, dbtest.TestGitHubHost, time.Now(), other.ID); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+
+	r := gateRouter(dbh)
+	for _, c := range []struct {
+		name     string
+		evt      domain.Event
+		team     string
+		wantPass bool
+	}{
+		{"renamed repository, its tracking team", ciEvent(t, renamed.ID, "owner/old"), teamA, true},
+		{"renamed repository, another team", ciEvent(t, renamed.ID, "owner/old"), teamB, false},
+		{"key spelling team A's repository, team A", ciEvent(t, keyLies, "owner/new"), teamA, false},
+		{"key spelling team A's repository, the team tracking its row", ciEvent(t, keyLies, "owner/new"), teamB, true},
+	} {
+		if got := r.teamTracksEventScope(ctx, c.evt, c.team); got != c.wantPass {
+			t.Errorf("%s: gate = %v, want %v", c.name, got, c.wantPass)
+		}
 	}
 }
 

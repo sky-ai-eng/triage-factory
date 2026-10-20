@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,8 +11,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -70,9 +73,8 @@ func (h *fakeGitHubHost) listPR(repo string, number int, nodeID, title string) {
 func (h *fakeGitHubHost) basicPR(sourceID, nodeID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	_, _, number := domain.SplitGitHubEntitySourceID(sourceID)
 	h.basics[sourceID] = map[string]any{
-		"number": number, "node_id": nodeID, "title": "Stub", "state": "open", "merged": false,
+		"number": domain.GitHubPRNumber(sourceID), "node_id": nodeID, "title": "Stub", "state": "open", "merged": false,
 		"html_url": "https://example.invalid/" + sourceID,
 		"user":     map[string]any{"login": "bob"},
 		"head":     map[string]any{"sha": "sha-" + nodeID, "ref": "feat"}, "base": map[string]any{"ref": "main"},
@@ -148,9 +150,10 @@ func (h *fakeGitHubHost) notModified() int {
 // githubScopeFixture is one org's tracker over a real SQLite store, polling
 // whichever fake host a cycle names.
 type githubScopeFixture struct {
-	stores db.Stores
-	pub    *recordingPublisher
-	tr     *Tracker
+	database *sql.DB
+	stores   db.Stores
+	pub      *recordingPublisher
+	tr       *Tracker
 }
 
 func newGitHubScopeFixture(t *testing.T) *githubScopeFixture {
@@ -159,7 +162,7 @@ func newGitHubScopeFixture(t *testing.T) *githubScopeFixture {
 	stores := sqlitestore.New(database)
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, runmode.LocalDefaultOrgID)
-	return &githubScopeFixture{stores: stores, pub: pub, tr: tr}
+	return &githubScopeFixture{database: database, stores: stores, pub: pub, tr: tr}
 }
 
 // cycle runs one GitHub poll cycle on host the way the poller does — the
@@ -237,10 +240,10 @@ func unreachableByEntity(t *testing.T, evts []domain.Event) map[string]events.Gi
 // org's GitHub host changes, every active pull request polled from another host
 // emits github:pr:unreachable exactly once per pass, carrying the host it was
 // polled from, reason scope_changed and the fields of its stored snapshot — or,
-// for a stub with no snapshot, the repo and number in its key. A pull request on
-// the current host emits nothing. The method takes no client, so retiring
-// cannot ask GitHub anything; the end-to-end test below pins that against a
-// cycle that does hold one.
+// for a stub with no snapshot, its repository's name and the number in its key.
+// A pull request on the current host emits nothing. The method takes no client,
+// so retiring cannot ask GitHub anything; the end-to-end test below pins that
+// against a cycle that does hold one.
 func TestRetireGitHubOutOfScope_EmitsUnreachableWithTheLastKnownFields(t *testing.T) {
 	fx := newGitHubScopeFixture(t)
 	snap := &domain.PRSnapshot{
@@ -272,7 +275,7 @@ func TestRetireGitHubOutOfScope_EmitsUnreachableWithTheLastKnownFields(t *testin
 	}
 	wantStub := events.GitHubPRUnreachableMetadata{Repo: "octo/tools", PRNumber: 7, Host: ghOldHost, Reason: events.GitHubUnreachableScopeChanged}
 	if m := got[stub.ID]; !metadataEqual(m, wantStub) {
-		t.Errorf("metadata for the stub = %+v, want %+v (repo and number from its key)", m, wantStub)
+		t.Errorf("metadata for the stub = %+v, want %+v (its repository's name, the number from its key)", m, wantStub)
 	}
 
 	// The rows are not moved or rewritten; closing them is the router's job.
@@ -302,6 +305,45 @@ func TestRetireGitHubOutOfScope_EmitsUnreachableWithTheLastKnownFields(t *testin
 	// No host is no answer: nothing is retired against it.
 	if n := fx.tr.RetireGitHubOutOfScope(context.Background(), ""); n != 0 {
 		t.Errorf("retired = %d against an empty host, want 0", n)
+	}
+}
+
+// TestGitHubScope_ReadsTheRepositoryByTheEntitysID: every reader here takes a
+// pull request's repository from the registry row its entity references, never
+// from its key. Each row is renamed with no key rewritten, so a reader that
+// parsed the key would name a repository that no longer answers to it.
+func TestGitHubScope_ReadsTheRepositoryByTheEntitysID(t *testing.T) {
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	fx := newGitHubScopeFixture(t)
+
+	// A stub retired off the old host carries its repository's new name, and
+	// that repository's listing cursor is the one dropped.
+	retiredStub := fx.seedPR(t, ghOldHost, "octo/tools#7", nil)
+	dbseed.RenameRepositoryOnly(t, fx.database, retiredStub.RepositoryID, "octo", "gadgets")
+	renamedRef := domain.RepoRef{Host: ghOldHost, Owner: "octo", Repo: "gadgets"}
+	if err := fx.stores.Repos.SetPullsPollStateByRefSystem(ctx, org, renamedRef, `"etag-before"`, time.Now()); err != nil {
+		t.Fatalf("seed pulls cursor: %v", err)
+	}
+	fx.tr.RetireGitHubOutOfScope(ctx, ghNewHost)
+	m, ok := unreachableByEntity(t, fx.pub.nonSystemEvents())[retiredStub.ID]
+	if !ok || m.Repo != "octo/gadgets" || m.PRNumber != 7 {
+		t.Errorf("unreachable for the stub = %+v (found %v), want repo octo/gadgets and number 7", m, ok)
+	}
+	if etag, _, err := fx.stores.Repos.GetPullsPollStateByRefSystem(ctx, org, renamedRef); err != nil || etag != "" {
+		t.Errorf("pulls cursor after retirement = %q, %v; want it cleared", etag, err)
+	}
+
+	// A stub on the current host is resolved by asking GitHub for the pull
+	// request under its repository's new name; the fake host fails the test on
+	// any other request.
+	stub := fx.seedPR(t, ghNewHost, "octo/repo#5", nil)
+	dbseed.RenameRepositoryOnly(t, fx.database, stub.RepositoryID, "octo", "renamed")
+	host, client := newFakeGitHubHost(t)
+	host.basicPR("octo/renamed#5", "PR_new5")
+	fx.cycle(t, ghNewHost, client, nil)
+	if paths := host.askedPaths(); !slices.Contains(paths, "/repos/octo/renamed/pulls/5") {
+		t.Errorf("requests = %v, want the stub resolved under octo/renamed", paths)
 	}
 }
 

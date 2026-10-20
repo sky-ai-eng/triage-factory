@@ -160,14 +160,21 @@ func (f *fakeConversationWorktrees) ListForTaskSystem(context.Context, string, s
 	return f.taskRows, nil
 }
 
-// fakeEntities answers every entity read with one entity polled from scope.
+// fakeEntities answers every entity read with one pull request entity polled
+// from scope, referencing fakeRepos' row for repo on that host (acme/widgets
+// when repo is unset).
 type fakeEntities struct {
 	db.EntityStore
 	scope string
+	repo  string
 }
 
 func (f *fakeEntities) GetSystem(context.Context, string, string) (*domain.Entity, error) {
-	return &domain.Entity{Source: "github", Scope: f.scope}, nil
+	repo := f.repo
+	if repo == "" {
+		repo = "acme/widgets"
+	}
+	return &domain.Entity{Source: "github", Scope: f.scope, RepositoryID: fakeRepoID(f.scope, repo)}, nil
 }
 
 // fakeRepos has a repository row for every owner/repo on every host, with the
@@ -178,6 +185,15 @@ type fakeRepos struct {
 
 func (fakeRepos) GetByRefSystem(_ context.Context, _ string, ref domain.RepoRef) (*domain.Repository, error) {
 	return &domain.Repository{ID: fakeRepoID(ref.Host, ref.Slug()), Host: ref.Host, Owner: ref.Owner, Repo: ref.Repo}, nil
+}
+
+func (fakeRepos) GetSystem(_ context.Context, _ string, id string) (*domain.Repository, error) {
+	host, slug, ok := strings.Cut(id, "|")
+	owner, repo, okSlug := strings.Cut(slug, "/")
+	if !ok || !okSlug {
+		return nil, db.ErrNoSuchRepository
+	}
+	return &domain.Repository{ID: id, Host: host, Owner: owner, Repo: repo}, nil
 }
 
 func fakeRepoID(host, slug string) string { return host + "|" + strings.ToLower(slug) }
@@ -402,6 +418,43 @@ func TestManager_resolveGitHub_GatesTrackingOnTheOrgsCurrentHost(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestManager_resolveGitHub_TaskRepoIsTheEntitysRepositoryRow: the task's own
+// repository is the registry row its entity references, under the row's name.
+// The task's key still spells acme/widgets, a name its repository no longer
+// has; the bundle mints for acme/renamed, the name the row carries now, and
+// nothing for the key's.
+func TestManager_resolveGitHub_TaskRepoIsTheEntitysRepositoryRow(t *testing.T) {
+	res := &fakeScopedResolver{
+		base:    dbtest.TestGitHubHost,
+		hasCred: true,
+		token:   githubapp.Token{Value: "ghs_scoped", ExpiresAt: time.Now().Add(time.Hour)},
+	}
+	m := &Manager{
+		stores: db.Stores{
+			Orgs:                  &fakeOrgs{},
+			TeamGitHubRepos:       &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true, "acme/renamed": true}},
+			Tasks:                 &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
+			Entities:              &fakeEntities{scope: dbtest.TestGitHubHost, repo: "acme/renamed"},
+			Repos:                 fakeRepos{},
+			ConversationWorktrees: &fakeConversationWorktrees{},
+		},
+		ghResolver: res,
+	}
+	gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "conv-1")
+	if err != nil {
+		t.Fatalf("resolveGitHub: %v", err)
+	}
+	var minted []string
+	if gh != nil {
+		for repoID := range gh.RepoTokens {
+			minted = append(minted, repoID)
+		}
+	}
+	if len(minted) != 1 || minted[0] != "acme/renamed" {
+		t.Errorf("RepoTokens minted for %v, want [acme/renamed]", minted)
 	}
 }
 

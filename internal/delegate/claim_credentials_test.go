@@ -8,10 +8,13 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // fakeUsers is a minimal UsersStore for the co-author lookup: it returns a
@@ -261,32 +264,46 @@ func TestResumeWithMessage_RequiresModel(t *testing.T) {
 	}
 }
 
-// TestOwnerRepoForTask pins the per-(org, owner, repo) key derivation:
-// GitHub PR tasks resolve owner+repo from "owner/repo#N"; Jira (and any
-// non-github source) resolves to ("", "") so the resolver picks the org's
-// sole installation.
-func TestOwnerRepoForTask(t *testing.T) {
+// TestTaskOwnerRepo pins the per-(org, owner, repo) key derivation: a GitHub
+// task's pair is its registry row's names, read through the id its entity
+// references, so a repository renamed with no key rewritten keys on its new
+// name. Every other source resolves to ("", "") so the resolver picks the
+// org's sole installation; a Slack address splits on "/" as readily as a repo
+// slug does, and is never read as one. A GitHub task whose entity cannot be
+// read is an error, not an empty pair.
+func TestTaskOwnerRepo(t *testing.T) {
+	ctx := context.Background()
+	database := newDelegateTestDB(t)
+	stores := sqlitestore.New(database)
+	entity, _, err := stores.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "acme/widgets#42", "", "pr", "T", "")
+	if err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	dbseed.RenameRepositoryOnly(t, database, entity.RepositoryID, "acme", "gadgets")
+	s := &Spawner{repos: stores.Repos, entities: stores.Entities}
+
 	cases := []struct {
 		name      string
 		task      domain.Task
 		wantOwner string
 		wantRepo  string
 	}{
-		{"github PR", domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}, "acme", "widgets"},
-		{"github no PR number", domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets"}, "acme", "widgets"},
+		{"github PR", domain.Task{EntityID: entity.ID, EntitySource: "github", EntitySourceID: "acme/widgets#42"}, "acme", "gadgets"},
 		{"jira", domain.Task{EntitySource: "jira", EntitySourceID: "SKY-123"}, "", ""},
-		// A Slack address splits on "/" as readily as a repo slug does, so
-		// the source gate is the only thing between it and a bogus pair.
 		{"slack", domain.Task{EntitySource: "slack", EntitySourceID: "C024BE91L/1712345678.000200"}, "", ""},
-		{"malformed", domain.Task{EntitySource: "github", EntitySourceID: "nostructure"}, "", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			owner, repo := ownerRepoForTask(tc.task)
-			if owner != tc.wantOwner || repo != tc.wantRepo {
-				t.Errorf("ownerRepoForTask(%+v) = (%q, %q); want (%q, %q)", tc.task, owner, repo, tc.wantOwner, tc.wantRepo)
+			owner, repo, err := s.taskOwnerRepo(ctx, runmode.LocalDefaultOrgID, tc.task)
+			if err != nil || owner != tc.wantOwner || repo != tc.wantRepo {
+				t.Errorf("taskOwnerRepo(%+v) = (%q, %q, %v); want (%q, %q, nil)", tc.task, owner, repo, err, tc.wantOwner, tc.wantRepo)
 			}
 		})
+	}
+
+	missing := domain.Task{EntityID: "no-such-entity", EntitySource: "github", EntitySourceID: "acme/widgets#42"}
+	if owner, repo, err := s.taskOwnerRepo(ctx, runmode.LocalDefaultOrgID, missing); err == nil {
+		t.Errorf("taskOwnerRepo(task with no entity) = (%q, %q, nil); want an error", owner, repo)
 	}
 }
 

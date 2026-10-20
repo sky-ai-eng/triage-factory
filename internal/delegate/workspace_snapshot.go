@@ -1181,7 +1181,7 @@ type checkoutRestorer struct {
 func (s *Spawner) checkoutRestorerFor(orgID, entityID string, sidecar *runSidecar, localGit *localGitChannel) checkoutRestorer {
 	return checkoutRestorer{
 		repository: func(ctx context.Context, owner, repo string) (string, error) {
-			row, err := s.entityRepository(ctx, orgID, entityID, owner, repo)
+			row, err := s.legacyCheckoutRepository(ctx, orgID, entityID, owner, repo)
 			if err != nil {
 				return "", err
 			}

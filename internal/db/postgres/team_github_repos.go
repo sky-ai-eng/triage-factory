@@ -17,13 +17,13 @@ import (
 //   - app: ListForTeam + the whole of ReplaceForTeam (registry get-or-create +
 //     team-row write, atomic in the caller's claims tx, org-serialized by an
 //     advisory lock). RLS gates the team-row write by team admin.
-//   - admin: ListForTeamSystem, TracksRepoSystem — claims-free reads for
-//     the router gate / poll callers.
+//   - admin: ListForTeamSystem, TracksRepoSystem, TracksRepositorySystem —
+//     claims-free reads for the router gate / poll callers.
 //
-// A row points at a repository by the registry row's id. The store's own
-// surface is still (owner, repo) — that is what a request body carries and
-// what the router gate is asked about — so every read joins the registry to
-// project the slug and every write resolves the slug to a row first.
+// A row points at a repository by the registry row's id. Most of the store's
+// surface is still (owner, repo) — that is what a request body carries — so
+// those reads join the registry to project the slug and every write resolves
+// the slug to a row first.
 type teamGitHubReposStore struct {
 	app   queryer
 	admin queryer
@@ -208,6 +208,21 @@ func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, hos
 			return false, nil
 		}
 		return false, fmt.Errorf("tracks repo: %w", err)
+	}
+	return true, nil
+}
+
+func (s *teamGitHubReposStore) TracksRepositorySystem(ctx context.Context, teamID, repositoryID string) (bool, error) {
+	var n int
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT 1 FROM team_github_repos
+		WHERE team_id = $1 AND repository_id = $2
+	`, teamID, repositoryID).Scan(&n)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("tracks repository: %w", err)
 	}
 	return true, nil
 }
