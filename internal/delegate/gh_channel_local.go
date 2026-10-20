@@ -11,7 +11,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/ghbin"
 	"github.com/sky-ai-eng/triage-factory/internal/ghchannel"
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
@@ -74,16 +73,12 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 	}
 
 	// Which credential the injector will attach, settled once here rather than
-	// per observation: it comes from the same resolver call the TokenSource
-	// below makes, so the two can never disagree, and a run's channel holds one
-	// credential for its whole life. A resolve failure leaves the App default
-	// and costs a label — the first real request surfaces the same failure
-	// where it is actionable.
-	credential := domain.CredentialGitHubApp
-	if tok, terr := resolver.TokenFor(ctx, orgID, owner); terr == nil && tok.Value != "" && tok.ExpiresAt.IsZero() {
-		// No expiry is the PAT tell: an installation token always carries one.
-		credential = domain.CredentialGitHubPAT
-	}
+	// per observation: it comes from the same resolution the TokenSource below
+	// makes, so the two can never disagree, and a run's channel holds one
+	// credential for its whole life. A resolve failure reads as the App and
+	// costs a label — the first real request surfaces the same failure where
+	// it is actionable.
+	credential := ghclient.TokenIdentity(ctx, resolver, orgID, owner).Credential()
 
 	// The injector sends the org's credential to the org's GitHub and no
 	// other, so with no GitHub URL to name it there is no channel.

@@ -7,7 +7,7 @@
 // once.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
-import { useEffect } from 'react'
+import { useLayoutEffect } from 'react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import AuthGate from './AuthGate'
 import { AuthProvider } from './contexts/AuthContext'
@@ -83,10 +83,12 @@ beforeEach(() => {
 })
 
 // The org the session was in when the page mounted, which is the org its
-// first reads with no org in their path would act in.
+// first reads with no org in their path would act in. Recorded in a layout
+// effect, which runs in the commit that renders the page's text, so it is set
+// by the time findByText sees that text; a passive effect can run after.
 let sessionOrgAtMount: string | null
 function Page() {
-  useEffect(() => {
+  useLayoutEffect(() => {
     sessionOrgAtMount = sessionOrg
   }, [])
   return <p>the page</p>

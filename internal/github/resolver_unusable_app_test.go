@@ -44,7 +44,7 @@ func TestResolver_UnusableAppMintsNothing(t *testing.T) {
 					return err
 				},
 				"TokenForRepoScoped": func() error {
-					_, err := r.(ScopedResolver).TokenForRepoScoped(ctx, "org-1", "acme", "api", nil)
+					_, _, err := r.(ScopedResolver).TokenForRepoScoped(ctx, "org-1", "acme", "api", nil)
 					return err
 				},
 				"ClientForRepoScoped": func() error {

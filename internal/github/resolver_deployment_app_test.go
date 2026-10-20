@@ -257,7 +257,7 @@ func TestResolver_ManagedClass_EveryEntryPoint(t *testing.T) {
 			return "", err
 		}},
 		{"TokenForRepoScoped", func(r Resolver) (string, error) {
-			tok, err := r.(ScopedResolver).TokenForRepoScoped(ctx, "org-1", "acme", "widget", nil)
+			tok, _, err := r.(ScopedResolver).TokenForRepoScoped(ctx, "org-1", "acme", "widget", nil)
 			return tok.Value, err
 		}},
 		{"TokenForReposScoped", func(r Resolver) (string, error) {
@@ -395,7 +395,7 @@ func assertManagedRefusal(t *testing.T, r Resolver, gh *deploymentGH, when strin
 		{"ClientForRepo", func() (string, error) { _, err := r.ClientForRepo(ctx, "org-1", "acme", "widget"); return "", err }},
 		{"TokenFor", func() (string, error) { tok, err := r.TokenFor(ctx, "org-1", "acme"); return tok.Value, err }},
 		{"TokenForRepoScoped", func() (string, error) {
-			tok, err := r.(ScopedResolver).TokenForRepoScoped(ctx, "org-1", "acme", "widget", nil)
+			tok, _, err := r.(ScopedResolver).TokenForRepoScoped(ctx, "org-1", "acme", "widget", nil)
 			return tok.Value, err
 		}},
 		{"TokenForReposScoped", func() (string, error) {

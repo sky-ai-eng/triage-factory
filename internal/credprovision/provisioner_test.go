@@ -49,7 +49,8 @@ type fakeScopedResolver struct {
 	email      string
 	hasCred    bool
 	token      githubapp.Token
-	errFor     map[string]error // keyed by "owner/repo" (single) or "owner" (repos-scoped); returned instead of token
+	identity   ghclient.Identity // the tier TokenForRepoScoped reports
+	errFor     map[string]error  // keyed by "owner/repo" (single) or "owner" (repos-scoped); returned instead of token
 	calls      []scopedCall
 	reposCalls []reposScopedCall
 }
@@ -66,12 +67,12 @@ func (f *fakeScopedResolver) HasAnyCredential(context.Context, string) (bool, er
 	return f.hasCred, nil
 }
 
-func (f *fakeScopedResolver) TokenForRepoScoped(_ context.Context, _, owner, repo string, perms map[string]string) (githubapp.Token, error) {
+func (f *fakeScopedResolver) TokenForRepoScoped(_ context.Context, _, owner, repo string, perms map[string]string) (githubapp.Token, ghclient.Identity, error) {
 	f.calls = append(f.calls, scopedCall{owner: owner, repo: repo, perms: perms})
 	if err := f.errFor[owner+"/"+repo]; err != nil {
-		return githubapp.Token{}, err
+		return githubapp.Token{}, ghclient.IdentityUnknown, err
 	}
-	return f.token, nil
+	return f.token, f.identity, nil
 }
 
 func (f *fakeScopedResolver) TokenForReposScoped(_ context.Context, _, owner string, repos []string, perms map[string]string) (githubapp.Token, error) {
@@ -571,14 +572,16 @@ func TestCLIChannelScope(t *testing.T) {
 }
 
 // TestManager_resolveGitHub_PATFallback pins the no-App path: an org without
-// a GitHub App borrows its PAT (a zero-expiry token that TokenForRepoScoped
-// returns unchanged, since a PAT cannot be narrowed), and the bundle records
-// mode "pat" so the executor treats it as an unscoped, all-repos credential.
+// a GitHub App borrows its PAT (which TokenForRepoScoped returns unchanged and
+// reports as IdentityPAT, since a PAT cannot be narrowed), and the bundle
+// records mode "pat" so the executor treats it as an unscoped, all-repos
+// credential.
 func TestManager_resolveGitHub_PATFallback(t *testing.T) {
 	res := &fakeScopedResolver{
-		base:    "https://github.com",
-		hasCred: true,
-		token:   githubapp.Token{Value: "ghp_borrowed"}, // zero ExpiresAt == PAT
+		base:     "https://github.com",
+		hasCred:  true,
+		token:    githubapp.Token{Value: "ghp_borrowed"},
+		identity: ghclient.IdentityPAT,
 	}
 	m := &Manager{
 		stores: db.Stores{
@@ -600,10 +603,45 @@ func TestManager_resolveGitHub_PATFallback(t *testing.T) {
 		t.Fatal("resolveGitHub returned nil for a PAT-only org")
 	}
 	if gh.Mode != "pat" {
-		t.Errorf("Mode = %q, want %q (a zero-expiry token is a PAT)", gh.Mode, "pat")
+		t.Errorf("Mode = %q, want %q (the resolver reported a PAT)", gh.Mode, "pat")
 	}
 	if gh.PAT != "ghp_borrowed" {
 		t.Errorf("PAT = %q, want ghp_borrowed", gh.PAT)
+	}
+}
+
+// TestManager_resolveGitHub_ModeFollowsReportedTier pins that the bundle's mode
+// is the tier the resolver reports, never one read off the token: a token
+// with no expiry that the resolver reports as the App leaves the bundle in App
+// mode with no PAT.
+func TestManager_resolveGitHub_ModeFollowsReportedTier(t *testing.T) {
+	res := &fakeScopedResolver{
+		base:     "https://github.com",
+		hasCred:  true,
+		token:    githubapp.Token{Value: "ghs_no_expiry"},
+		identity: ghclient.IdentityApp,
+	}
+	m := &Manager{
+		stores: db.Stores{
+			Orgs:                  &fakeOrgs{},
+			TeamGitHubRepos:       &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true}},
+			Tasks:                 &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
+			Entities:              &fakeEntities{scope: dbtest.TestGitHubHost},
+			Repos:                 fakeRepos{},
+			ConversationWorktrees: &fakeConversationWorktrees{},
+		},
+		ghResolver: res,
+	}
+
+	gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "conv-1")
+	if err != nil {
+		t.Fatalf("resolveGitHub: %v", err)
+	}
+	if gh == nil {
+		t.Fatal("resolveGitHub returned nil")
+	}
+	if gh.Mode != "app" || gh.PAT != "" {
+		t.Errorf("(Mode, PAT) = (%q, %q), want (app, \"\")", gh.Mode, gh.PAT)
 	}
 }
 
