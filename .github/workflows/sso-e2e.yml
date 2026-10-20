@@ -4,27 +4,40 @@ name: sso-e2e
 # real GoTrue, signing in through two test SAML identity providers and a fake
 # GitHub, driven by Playwright. See e2e/sso/README.md for what it proves.
 #
-# Triggered on PRs that touch the sign-in path, SSO, the fleet console's gate,
-# the compose stack the suite runs on, or the suite itself, and on every push to
-# main.
+# Triggered on PRs that touch the sign-in path, SSO, the licence and the
+# entitlement gate, the fleet console's gate, the SPA screens the suite drives,
+# the stack the suite runs on (compose files, Postgres schema, Go modules), or
+# the suite itself, and on every push to main.
 
 on:
   pull_request:
     paths:
+      - 'ee/*.go'
       - 'ee/sso/**'
       - 'ee/fleet/**'
+      - 'ee/license/**'
+      - 'internal/entitlements/**'
       - 'internal/server/auth*.go'
       - 'internal/server/middleware.go'
       - 'internal/server/invites_handler.go'
       - 'internal/server/login_ext.go'
+      - 'internal/server/extension.go'
       - 'internal/auth/**'
       - 'internal/sessions/**'
       - 'internal/apitokens/**'
+      - 'internal/db/migrations-postgres/**'
       - 'frontend/src/pages/Login.tsx'
+      - 'frontend/src/pages/InviteAccept.tsx'
       - 'frontend/src/pages/settings/stack/SSOSettings.tsx'
+      - 'frontend/src/components/SSORequiredOrg.tsx'
+      - 'frontend/src/contexts/AuthContext.tsx'
       - 'frontend/src/AuthGate.tsx'
       - 'docker-compose.yml'
+      - 'docker/compose.hostbind.yml'
       - 'scripts/multi-mode-dev.sh'
+      - 'scripts/ci-images.sh'
+      - 'go.mod'
+      - 'go.sum'
       - 'e2e/**'
       - '.github/workflows/sso-e2e.yml'
   push:
