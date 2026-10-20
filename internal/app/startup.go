@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/ratelimits"
 	"github.com/sky-ai-eng/triage-factory/internal/repoevent"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
@@ -130,6 +131,31 @@ func (a *App) startWorkers(ctx context.Context) {
 				appLog.Warn("conversation signal purge age", "error", perr)
 			}
 			go a.spawner.ConversationSignalPurgeReaper(ctx, delegate.DefaultConversationSignalPurgeInterval, purgeAge)
+		}
+	}
+
+	// Rate-limit readings: every process that serves the API or runs the brain
+	// makes requests on orgs' behalf (handlers, pollers, the scorer) and writes
+	// the readings those responses carried, so any control pod's route answers
+	// for all of them. A plain executor records none: its secret store is
+	// disabled, so it resolves no org credential to make such a request with,
+	// and a run's provider traffic goes through its sidecar's proxies.
+	//
+	// Like the heartbeat below, it outlives ctx by the shutdown drain: the
+	// requests the drain finishes record readings too. Run stops it once the
+	// drain returns and waits for its last write, which lands before main's
+	// deferred Close takes the pools away.
+	a.stopFlusher = func() {}
+	if a.plan.serveHTTP || a.plan.brain {
+		flushCtx, cancelFlush := context.WithCancel(context.WithoutCancel(ctx))
+		flushDone := make(chan struct{})
+		go func() {
+			defer close(flushDone)
+			ratelimits.RunFlusher(flushCtx, a.stores.RateLimitReadings, ratelimits.FlushInterval)
+		}()
+		a.stopFlusher = func() {
+			cancelFlush()
+			<-flushDone
 		}
 	}
 

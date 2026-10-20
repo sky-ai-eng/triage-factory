@@ -660,6 +660,14 @@ A reading is reported until its bucket's reset. After that the bucket has
 refilled, so a credential nothing has used since then has no series until its
 next response, rather than its last window's low number.
 
+The same readings are also served to the org, without Prometheus, at
+`GET /api/orgs/{org_id}/integrations/rate-limits` (any org member). Every
+control pod writes the readings that changed to the database about every 15
+seconds, and the newest reading of each bucket wins, so the route answers for
+every pod whichever one serves it. A reading that states no reset is served for
+an hour after it was observed. Executors write none: they make no request with
+an org's credentials themselves.
+
 The rate-limited responses themselves are
 `tf_upstream_requests_total{outcome="rate_limited"}` (see
 [Source connections](#source-connections)). For Slack and Jira,

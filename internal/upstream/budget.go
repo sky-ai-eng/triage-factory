@@ -8,6 +8,7 @@ import (
 
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
@@ -156,10 +157,6 @@ func WaitOnLimit(ctx context.Context, name Name, orgID string, d time.Duration) 
 // liveBudgets is the process-wide registry: in-memory, so a restart loses it
 // and the next response repopulates it. A pointer only so a test can swap in
 // an empty one (ResetBudgetsForTest).
-//
-// TODO(TFAC-1108): write each pod's changed readings to a shared table, serve
-// an org's readings from it at GET /api/orgs/{org_id}/integrations/rate-limits,
-// and show them on each integration's settings card.
 var liveBudgets atomic.Pointer[budgetRegistry]
 
 func init() { liveBudgets.Store(newBudgetRegistry()) }
@@ -173,6 +170,10 @@ type budgetKey struct {
 
 type budgetEntry struct {
 	Budget
+	// observed is when the reading was recorded, and seq the number of the
+	// change that recorded it (budgetRegistry.seq).
+	observed time.Time
+	seq      uint64
 	// warned is whether the low-budget WARN has fired for this bucket since
 	// a reading last said it was not near its limit; warnedUntil is the reset
 	// of the reading it fired for, past which a low reading is a new window's.
@@ -202,6 +203,9 @@ type budgetRegistry struct {
 	byKey map[budgetKey]*budgetEntry
 	// swept is when record last walked byKey for stale entries.
 	swept time.Time
+	// seq numbers the readings recorded, one per record call, so a reader can
+	// ask for the ones recorded since it last asked (ChangedReadings).
+	seq uint64
 }
 
 func newBudgetRegistry() *budgetRegistry {
@@ -231,6 +235,8 @@ func (r *budgetRegistry) record(k budgetKey, b Budget, now time.Time) (warn bool
 		r.byKey[k] = e
 	}
 	e.Budget = b
+	r.seq++
+	e.observed, e.seq = now, r.seq
 	switch near, known := b.NearLimit(); {
 	case b.Quiet || !known || !near:
 		e.warned = false
@@ -238,6 +244,64 @@ func (r *budgetRegistry) record(k budgetKey, b Budget, now time.Time) (warn bool
 		e.warned, e.warnedUntil, warn = true, b.Reset, true
 	}
 	return warn
+}
+
+// ChangedReadings returns every reading recorded after the change numbered
+// since that still describes its bucket, and the number of the latest change.
+// A caller that writes the readings somewhere passes the returned number on
+// its next call once the write succeeded, and its previous number again if it
+// failed, so a reading recorded during a failed write is returned again. 0
+// returns every current reading.
+//
+// Only the latest reading of each bucket is kept, so a bucket recorded twice
+// since is returned once, with its latest reading.
+func ChangedReadings(since uint64) ([]domain.RateLimitReading, uint64) {
+	return liveBudgets.Load().changed(since, time.Now())
+}
+
+func (r *budgetRegistry) changed(since uint64, now time.Time) ([]domain.RateLimitReading, uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []domain.RateLimitReading
+	for k, e := range r.byKey {
+		if e.seq <= since || !e.current(now) {
+			continue
+		}
+		out = append(out, e.reading(k))
+	}
+	return out, r.seq
+}
+
+// reading is e as the domain row it is stored as. A field the reading did not
+// state is nil: statesRemaining says when it states what is left, a reading
+// that did not say its bucket's size or its reset leaves those nil, only a
+// counted reading states what was used, and only a NearLimitReading states
+// near_limit.
+func (e *budgetEntry) reading(k budgetKey) domain.RateLimitReading {
+	out := domain.RateLimitReading{
+		OrgID:      k.orgID,
+		Upstream:   string(k.name),
+		Credential: k.credential,
+		Bucket:     k.bucket,
+		ObservedAt: e.observed.UTC(),
+	}
+	remaining, limit, used, near, reset := e.Remaining, e.Limit, e.Used, e.near, e.Reset.UTC()
+	if e.statesRemaining() {
+		out.Remaining = &remaining
+	}
+	if limit > 0 {
+		out.Limit = &limit
+	}
+	if used > 0 {
+		out.Used = &used
+	}
+	if e.nearOnly {
+		out.NearLimit = &near
+	}
+	if !e.Reset.IsZero() {
+		out.ResetAt = &reset
+	}
+	return out
 }
 
 func (r *budgetRegistry) get(k budgetKey) (Budget, bool) {

@@ -189,6 +189,9 @@ func New(conn *sql.DB) db.Stores {
 		// OrgEventSources is split-pool in Postgres; SQLite collapses to the
 		// one connection (N=1, no RLS) and asserts the local org instead.
 		OrgEventSources: newOrgEventSourceStore(conn),
+		// RateLimitReadings is split-pool in Postgres; SQLite collapses to
+		// the one connection (N=1, no RLS) and asserts the local org instead.
+		RateLimitReadings: newRateLimitReadingStore(conn),
 		// ModelAvailability is app-pool-only in Postgres; SQLite collapses to
 		// the one connection (N=1, no RLS) and asserts the local org instead.
 		// Never written in local mode — nothing probes there — but present so
