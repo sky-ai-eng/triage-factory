@@ -95,11 +95,12 @@ func (t *Tracker) forgetPullsCursor(ctx context.Context, repo *domain.Repository
 }
 
 // emitGitHubUnreachable publishes github:pr:unreachable for e, from its stored
-// snapshot. A stub with no snapshot carries its repository's name from repo, its
-// registry row (entityRepository; nil leaves the name blank), and its number
-// from its key, which no rename changes. Publish, not the snapshot-CAS enqueue:
-// there is no new snapshot to advance, and the entity's close is the router's
-// job.
+// snapshot. A snapshot missing its repo or number takes the repository's name
+// from repo, its registry row (entityRepository), and the number from its key,
+// which no rename changes; each is replaced only by a value it actually has,
+// so a row that could not be read leaves the snapshot's name, or none for a
+// stub. Publish, not the snapshot-CAS enqueue: there is no new snapshot to
+// advance, and the entity's close is the router's job.
 func (t *Tracker) emitGitHubUnreachable(ctx context.Context, e domain.Entity, repo *domain.Repository, reason string) {
 	var snap domain.PRSnapshot
 	if e.SnapshotJSON != "" && e.SnapshotJSON != "{}" {
@@ -110,8 +111,9 @@ func (t *Tracker) emitGitHubUnreachable(ctx context.Context, e domain.Entity, re
 		}
 	}
 	if snap.Repo == "" || snap.Number == 0 {
-		snap.Number = domain.GitHubPRNumber(e.SourceID)
-		snap.Repo = ""
+		if n := domain.GitHubPRNumber(e.SourceID); n > 0 {
+			snap.Number = n
+		}
 		if repo != nil {
 			snap.Repo = repo.Slug()
 		}

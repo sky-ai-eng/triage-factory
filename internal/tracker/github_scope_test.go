@@ -347,6 +347,19 @@ func TestGitHubScope_ReadsTheRepositoryByTheEntitysID(t *testing.T) {
 	}
 }
 
+// TestEmitGitHubUnreachable_AnUnreadableRowKeepsTheSnapshotsName: a snapshot
+// missing its number takes the number from the key, and keeps the repository
+// name it has when the registry row could not be read, rather than blanking it.
+func TestEmitGitHubUnreachable_AnUnreadableRowKeepsTheSnapshotsName(t *testing.T) {
+	fx := newGitHubScopeFixture(t)
+	e := domain.Entity{ID: "ent-1", Source: "github", Scope: ghOldHost, SourceID: "octo/repo#42", SnapshotJSON: `{"repo":"octo/repo"}`}
+	fx.tr.emitGitHubUnreachable(context.Background(), e, nil, events.GitHubUnreachableScopeChanged)
+	m, ok := unreachableByEntity(t, fx.pub.nonSystemEvents())["ent-1"]
+	if !ok || m.Repo != "octo/repo" || m.PRNumber != 42 {
+		t.Errorf("unreachable = %+v (found %v), want repo octo/repo and number 42", m, ok)
+	}
+}
+
 func metadataEqual(a, b events.GitHubPRUnreachableMetadata) bool {
 	return a.Author == b.Author && a.Repo == b.Repo && a.PRNumber == b.PRNumber && a.IsDraft == b.IsDraft &&
 		a.HeadSHA == b.HeadSHA && slices.Equal(a.Labels, b.Labels) && a.Title == b.Title &&
