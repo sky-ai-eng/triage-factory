@@ -354,16 +354,18 @@ func TestMigrate_EntityScopeKeepsEveryReference(t *testing.T) {
 	assertNoDanglingReferences(t, database)
 
 	// The key is unique among active rows only: a closed row's key is free.
+	// Both rows are in octo/api, the repository the backfill resolved for e1.
+	repositoryID := queryString(t, database, `SELECT repository_id FROM entities WHERE id = 'e1'`)
 	if _, err := database.Exec(`
-		INSERT INTO entities (id, source, scope, source_id, kind, state)
-		VALUES ('e3', 'github', 'https://github.com', 'octo/api#2', 'pr', 'active')
-	`); err != nil {
+		INSERT INTO entities (id, source, scope, source_id, kind, state, repository_id)
+		VALUES ('e3', 'github', 'https://github.com', 'octo/api#2', 'pr', 'active', ?)
+	`, repositoryID); err != nil {
 		t.Errorf("a new active row under a closed row's key was refused: %v", err)
 	}
 	if _, err := database.Exec(`
-		INSERT INTO entities (id, source, scope, source_id, kind, state)
-		VALUES ('e4', 'github', 'https://github.com', 'octo/api#1', 'pr', 'active')
-	`); err == nil || !strings.Contains(err.Error(), "UNIQUE") {
+		INSERT INTO entities (id, source, scope, source_id, kind, state, repository_id)
+		VALUES ('e4', 'github', 'https://github.com', 'octo/api#1', 'pr', 'active', ?)
+	`, repositoryID); err == nil || !strings.Contains(err.Error(), "UNIQUE") {
 		t.Errorf("a second active row under one key: err=%v, want a UNIQUE violation", err)
 	}
 }
