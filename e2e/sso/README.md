@@ -1,7 +1,8 @@
 # SSO end-to-end suite
 
 Signs in to a real multi-mode stack the way people do: through GoTrue, two
-SAML identity providers and GitHub, in Chromium. The Go tests in `ee/sso` fake
+SAML identity providers and GitHub (served by
+[Orrery](https://github.com/sky-ai-eng/orrery)), in Chromium. The Go tests in `ee/sso` fake
 GoTrue in-process and hand-build its tokens; this suite is what runs the real
 thing.
 
@@ -43,25 +44,25 @@ repository. The test round trip itself runs in the browser.
 
 Two things are done outside the product's own flows: a claimed domain is marked
 verified in Postgres, because `.test` names cannot serve DNS TXT records (the
-TXT check is covered by `ee/sso`'s Postgres tests), and the fake GitHub changes
-Bob's email through a test-only route.
+TXT check is covered by `ee/sso`'s Postgres tests), and Bob's GitHub address is
+changed through Orrery's control plane, as GitHub has no API for it.
 
 ## The test servers
 
 `fakes/` is a Go program in its own module (`e2e/go.mod`), so its dependencies
-stay out of the product's. It serves, over HTTPS on every interface:
+stay out of the product's. It serves `idp-globex.test:8443` and
+`idp-mallory.test:8444` over HTTPS on every interface: two
+[crewjam/saml](https://github.com/crewjam/saml) identity providers with the
+users in `fixtures/users.json`.
 
-- `idp-globex.test:8443` and `idp-mallory.test:8444`, two
-  [crewjam/saml](https://github.com/crewjam/saml) identity providers with the
-  users in `fixtures/users.json`;
-- `github.test:8445`, the calls GoTrue's GitHub provider makes when
-  `GOTRUE_EXTERNAL_GITHUB_URL` points at it (`/login/oauth/authorize`,
-  `/login/oauth/access_token`, `/api/v3/user`, `/api/v3/user/emails`), signing
-  in by username alone.
+GitHub is Orrery, built from a checkout and served at `github.test:8445` over
+HTTP. `run.sh` creates one Orrery actor per GitHub user in `users.json`, gives
+each its address, and registers the OAuth app GoTrue's GitHub provider signs in
+through. Orrery's authorize page signs an actor in by username alone.
 
-GoTrue reaches them from its container through the host gateway
-(`compose.e2e.yml`) and trusts the CA they were issued from; Chromium maps
-`*.test` to loopback and ignores certificate errors.
+GoTrue reaches all three from its container through the host gateway
+(`compose.e2e.yml`) and trusts the CA the identity providers' certificates come
+from; Chromium maps `*.test` to loopback and ignores certificate errors.
 
 `fakes license` mints an Enterprise Edition licence signed by a key made for
 the run. `run.sh` builds the binary with that key's public half as
@@ -70,11 +71,14 @@ directory.
 
 ## Running it
 
-Needs Docker, Go, Node 22 and pnpm. Ports 3000, 5432, 8333, 8443, 8444, 8445
+Needs Docker, Go, Rust, Node 22, pnpm, `jq`, and a checkout of
+[sky-ai-eng/orrery](https://github.com/sky-ai-eng/orrery) (private), by default
+at `../orrery` beside this repository. Ports 3000, 5432, 8333, 8443, 8444, 8445
 and 9999 must be free; stop a running `scripts/multi-mode-dev.sh` stack first.
 
 ```bash
 e2e/sso/run.sh                            # build, bring up, test, tear down
+ORRERY_DIR=~/src/orrery e2e/sso/run.sh    # Orrery checked out elsewhere
 SSO_E2E_SKIP_FRONTEND=1 e2e/sso/run.sh    # reuse an existing frontend/dist
 SSO_E2E_KEEP_UP=1 e2e/sso/run.sh          # leave the stack up afterwards
 ```
@@ -83,8 +87,8 @@ The first run needs Playwright's Chromium:
 `cd e2e/sso && pnpm install && pnpm exec playwright install chromium`.
 
 Everything the run generates (certificates, the licence and its key, the SAML
-signing key, the env file, the binary and the logs `tf.log`, `fakes.log` and
-`gotrue.log`) is written to `e2e/sso/.state/`, which is gitignored and replaced
+signing key, the env file, the binary, Orrery's world and the logs `tf.log`,
+`fakes.log`, `orrery.log` and `gotrue.log`) is written to `e2e/sso/.state/`, which is gitignored and replaced
 on every run. The stack runs as the `tf-multi-dev` compose project, the same one
 `scripts/multi-mode-dev.sh` uses.
 
@@ -93,4 +97,6 @@ To rerun the tests against a stack left up with `SSO_E2E_KEEP_UP=1`, run
 they pass only against a fresh stack.
 
 CI runs the suite in `.github/workflows/sso-e2e.yml` and uploads the report and
-the three logs when it fails.
+the four logs when it fails. It checks Orrery out with the `ORRERY_TOKEN`
+secret; a pull request from a fork has no secrets, so the job skips the suite
+with a notice, and the suite runs on `main` after the merge.

@@ -38,7 +38,7 @@ async function newSession(browser: Browser): Promise<Session> {
   return { context, page, api: context.request }
 }
 
-/** Signs in through the fake GitHub from the login page. */
+/** Signs in through GitHub (Orrery) from the login page. */
 export async function signInGitHub(browser: Browser, login: string): Promise<Session> {
   const s = await newSession(browser)
   await s.page.goto('/login')
@@ -271,20 +271,16 @@ export function psql(sql: string): string {
   ]).toString()
 }
 
-/** Changes a fake GitHub user's email (a test-only route on the fake). */
+/** Gives a GitHub user one verified primary address, through Orrery's control plane. */
 export function setGitHubEmail(login: string, email: string) {
   execFileSync('curl', [
     '-fsS',
-    '--cacert',
-    path.join(STATE, 'ca.pem'),
-    '--resolve',
-    'github.test:8445:127.0.0.1',
     '-X',
     'PUT',
     '-H',
     'Content-Type: application/json',
     '--data',
-    JSON.stringify({ email }),
-    `https://github.test:8445/users/${encodeURIComponent(login)}`,
+    JSON.stringify({ emails: [{ email, primary: true, verified: true }] }),
+    `http://127.0.0.1:8445/_orrery/actors/${encodeURIComponent(login)}/emails`,
   ])
 }

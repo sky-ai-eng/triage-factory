@@ -1,6 +1,6 @@
-// Command fakes runs the test servers the SSO end-to-end suite signs in
-// through: two SAML identity providers and a GitHub stand-in, each over HTTPS
-// with a certificate from a CA it generates. The `license` subcommand mints an
+// Command fakes runs the SAML identity providers the SSO end-to-end suite signs
+// in through, each over HTTPS with a certificate from a CA it generates.
+// GitHub is Orrery's, not this program's. The `license` subcommand mints an
 // Enterprise Edition licence signed by a key generated for the run, for a
 // binary built to trust that key.
 package main
@@ -21,16 +21,10 @@ import (
 	"time"
 )
 
-// users.json, the one place the suite's people are defined.
+// users.json, the one place the suite's people are defined. Its GitHub users
+// are Orrery actors, which run.sh creates.
 type fixtures struct {
-	GitHub []githubUser             `json:"github"`
-	IdPs   map[string][]samlIdPUser `json:"idps"`
-}
-
-type githubUser struct {
-	Login string `json:"login"`
-	Name  string `json:"name"`
-	Email string `json:"email"`
+	IdPs map[string][]samlIdPUser `json:"idps"`
 }
 
 type samlIdPUser struct {
@@ -55,7 +49,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: fakes serve -state DIR -users FILE -github-client-id ID -github-client-secret SECRET")
+	fmt.Fprintln(os.Stderr, "usage: fakes serve -state DIR -users FILE")
 	fmt.Fprintln(os.Stderr, "       fakes license -state DIR")
 	os.Exit(2)
 }
@@ -64,10 +58,8 @@ func serve(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	stateDir := fs.String("state", "", "directory holding the CA and leaf certificate (created when absent)")
 	usersPath := fs.String("users", "", "path to users.json")
-	clientID := fs.String("github-client-id", "", "OAuth client id GoTrue presents to the fake GitHub")
-	clientSecret := fs.String("github-client-secret", "", "OAuth client secret GoTrue presents to the fake GitHub")
 	_ = fs.Parse(args)
-	if *stateDir == "" || *usersPath == "" || *clientID == "" || *clientSecret == "" {
+	if *stateDir == "" || *usersPath == "" {
 		usage()
 	}
 
@@ -80,7 +72,7 @@ func serve(args []string) {
 		log.Fatalf("parse users: %v", err)
 	}
 
-	leaf, err := ensureCertificates(*stateDir, []string{hostGlobex, hostMallory, hostGitHub})
+	leaf, err := ensureCertificates(*stateDir, []string{hostGlobex, hostMallory})
 	if err != nil {
 		log.Fatalf("certificates: %v", err)
 	}
@@ -93,12 +85,9 @@ func serve(args []string) {
 	if err != nil {
 		log.Fatalf("mallory idp: %v", err)
 	}
-	gh := newFakeGitHub(fx.GitHub, *clientID, *clientSecret)
-
 	servers := []*http.Server{
 		listen(":8443", globex, leaf),
 		listen(":8444", mallory, leaf),
-		listen(":8445", gh, leaf),
 	}
 	errc := make(chan error, len(servers))
 	for _, srv := range servers {
@@ -108,7 +97,7 @@ func serve(args []string) {
 			}
 		}()
 	}
-	log.Printf("serving %s:8443, %s:8444, %s:8445", hostGlobex, hostMallory, hostGitHub)
+	log.Printf("serving %s:8443, %s:8444", hostGlobex, hostMallory)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -127,7 +116,6 @@ func serve(args []string) {
 const (
 	hostGlobex  = "idp-globex.test"
 	hostMallory = "idp-mallory.test"
-	hostGitHub  = "github.test"
 )
 
 // listen binds every interface: GoTrue reaches these servers from inside its

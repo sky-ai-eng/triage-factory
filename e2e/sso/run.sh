@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Runs the SSO end-to-end suite: the real multi-mode stack (Postgres, GoTrue,
 # SeaweedFS, and the host-built control binary) signing in through two test
-# SAML identity providers and a fake GitHub, driven by Playwright. Every key,
-# certificate and secret is generated into e2e/sso/.state/ for this run and
-# nothing outside it is written except the compose project's containers.
+# SAML identity providers and GitHub as Orrery serves it, driven by Playwright.
+# Every key, certificate and secret is generated into e2e/sso/.state/ for this
+# run and nothing outside it is written except the compose project's
+# containers and Orrery's own build output.
 #
 #   e2e/sso/run.sh                      build, bring up, test, tear down
 #   SSO_E2E_KEEP_UP=1 e2e/sso/run.sh    leave the stack running afterwards
 #   SSO_E2E_SKIP_FRONTEND=1 ...         reuse an existing frontend/dist
+#   ORRERY_DIR=/path/to/orrery ...      an Orrery checkout (default: ../orrery
+#                                       beside this repository)
 #
 # Exits with Playwright's status. See e2e/sso/README.md.
 
@@ -19,8 +22,14 @@ SUITE="$ROOT/e2e/sso"
 STATE="$SUITE/.state"
 DEV="$ROOT/scripts/multi-mode-dev.sh"
 BIN="$STATE/triagefactory"
+ORRERY_DIR=${ORRERY_DIR:-$(cd "$ROOT/.." && pwd)/orrery}
 
 log() { printf '\n==> %s\n' "$*"; }
+
+if [ ! -f "$ORRERY_DIR/Cargo.toml" ]; then
+  echo "no Orrery checkout at $ORRERY_DIR — clone sky-ai-eng/orrery there or set ORRERY_DIR" >&2
+  exit 1
+fi
 
 # 1. Every port the stack and the test servers bind must be free: a stale
 # process on one of them would answer in place of the one under test.
@@ -56,6 +65,7 @@ rm -rf "$STATE"
 mkdir -p "$STATE"
 
 FAKES_PID=""
+ORRERY_PID=""
 TF_PID=""
 cleanup() {
   local status=$?
@@ -64,7 +74,7 @@ cleanup() {
   # status, not a teardown step's.
   set +e
   if [ "${SSO_E2E_KEEP_UP:-}" = 1 ]; then
-    log "SSO_E2E_KEEP_UP=1: leaving the stack up (TF pid ${TF_PID:-none}, fakes pid ${FAKES_PID:-none})"
+    log "SSO_E2E_KEEP_UP=1: leaving the stack up (TF pid ${TF_PID:-none}, fakes pid ${FAKES_PID:-none}, orrery pid ${ORRERY_PID:-none})"
     exit "$status"
   fi
   log "tearing down"
@@ -75,24 +85,21 @@ cleanup() {
   [ -n "$gotrue" ] && docker logs "$gotrue" >"$STATE/gotrue.log" 2>&1
   MULTI_DEV_ENV_FILE="$STATE/env" MULTI_DEV_COMPOSE_OVERLAY="$SUITE/compose.e2e.yml" "$DEV" down || true
   [ -n "$FAKES_PID" ] && kill "$FAKES_PID" 2>/dev/null && wait "$FAKES_PID" 2>/dev/null
+  [ -n "$ORRERY_PID" ] && kill "$ORRERY_PID" 2>/dev/null && wait "$ORRERY_PID" 2>/dev/null
   exit "$status"
 }
 trap cleanup EXIT
 
-# 3. The test servers.
-log "starting the test identity providers and fake GitHub"
-GH_CLIENT_ID=sso-e2e
-GH_CLIENT_SECRET=$(openssl rand -hex 16)
+# 3. The test identity providers.
+log "starting the test identity providers"
 (cd "$ROOT/e2e" && go build -o "$STATE/fakes" ./sso/fakes)
 "$STATE/fakes" serve -state "$STATE" -users "$SUITE/fixtures/users.json" \
-  -github-client-id "$GH_CLIENT_ID" -github-client-secret "$GH_CLIENT_SECRET" \
   >"$STATE/fakes.log" 2>&1 &
 FAKES_PID=$!
 fakes_curl() {
   curl -fsS --cacert "$STATE/ca.pem" \
     --resolve idp-globex.test:8443:127.0.0.1 \
-    --resolve idp-mallory.test:8444:127.0.0.1 \
-    --resolve github.test:8445:127.0.0.1 "$@"
+    --resolve idp-mallory.test:8444:127.0.0.1 "$@"
 }
 for _ in $(seq 1 30); do
   fakes_curl -o /dev/null https://idp-globex.test:8443/metadata 2>/dev/null && break
@@ -100,7 +107,41 @@ for _ in $(seq 1 30); do
 done
 fakes_curl -o /dev/null https://idp-globex.test:8443/metadata
 
-# 4. The run's licence, SAML key and env file.
+# 4. GitHub, from Orrery: one actor per GitHub user in users.json, holding that
+# user's address, and the OAuth app GoTrue signs in through. It listens on
+# every interface because GoTrue reaches it from its container through the
+# host gateway.
+log "building and starting Orrery"
+cargo build --quiet --manifest-path "$ORRERY_DIR/Cargo.toml" -p orrery
+cat >"$STATE/orrery.toml" <<EOF
+[instance]
+dir = "$STATE/orrery"
+
+[server]
+listen = "0.0.0.0:8445"
+base_url = "http://github.test:8445"
+EOF
+"$ORRERY_DIR/target/debug/orrery" serve --config "$STATE/orrery.toml" >"$STATE/orrery.log" 2>&1 &
+ORRERY_PID=$!
+ORRERY=http://127.0.0.1:8445
+for _ in $(seq 1 30); do
+  curl -fsS -o /dev/null "$ORRERY/_orrery/healthz" 2>/dev/null && break
+  sleep 1
+done
+orrery_call() { curl -fsS -H 'Content-Type: application/json' "$@"; }
+jq -c '.github[]' "$SUITE/fixtures/users.json" | while read -r user; do
+  login=$(jq -r .login <<<"$user")
+  orrery_call -o /dev/null -X POST "$ORRERY/_orrery/actors" \
+    --data "$(jq -c '{login, kind: "user"}' <<<"$user")"
+  orrery_call -o /dev/null -X PUT "$ORRERY/_orrery/actors/$login/emails" \
+    --data "$(jq -c '{emails: [{email, primary: true, verified: true}]}' <<<"$user")"
+done
+app=$(orrery_call -X POST "$ORRERY/_orrery/oauth-apps" \
+  --data '{"name":"Triage Factory","callback_url":"http://localhost:3000/auth/v1/callback"}')
+GH_CLIENT_ID=$(jq -r .client_id <<<"$app")
+GH_CLIENT_SECRET=$(jq -r .client_secret <<<"$app")
+
+# 5. The run's licence, SAML key and env file.
 log "generating the licence, SAML key and env file"
 TF_LICENSE=$("$STATE/fakes" license -state "$STATE")
 GOTRUE_SAML_PRIVATE_KEY=$(openssl genpkey -algorithm rsa -pkeyopt rsa_keygen_bits:2048 -outform DER 2>/dev/null | base64 | tr -d '\n')
@@ -124,7 +165,7 @@ TF_WS_SESSION_REVALIDATE_SECONDS=2
 EOF
 umask 022
 
-# 5. The frontend and a binary that trusts this run's licence key. The key is
+# 6. The frontend and a binary that trusts this run's licence key. The key is
 # an ldflags override on this build alone; release builds keep the source
 # default.
 log "building the frontend and the binary"
@@ -139,11 +180,11 @@ export MULTI_DEV_ENV_FILE="$STATE/env"
 export MULTI_DEV_COMPOSE_OVERLAY="$SUITE/compose.e2e.yml"
 export MULTI_DEV_BIN="$BIN"
 
-# 6. The stack.
+# 7. The stack.
 log "bringing up postgres, gotrue and seaweedfs"
 "$DEV" up
 
-# 7. The control half.
+# 8. The control half.
 log "starting triagefactory (control)"
 "$DEV" run control >"$STATE/tf.log" 2>&1 &
 TF_PID=$!
@@ -170,7 +211,7 @@ for idp in idp-globex.test:8443 idp-mallory.test:8444; do
   fakes_curl -X PUT --data-binary @"$STATE/sp-metadata.xml" "https://$idp/services/gotrue"
 done
 
-# 8. The deployment operator, against the database `run` uses.
+# 9. The deployment operator, against the database `run` uses.
 log "adding the deployment operator"
 (
   set -a
@@ -182,7 +223,7 @@ log "adding the deployment operator"
     "$BIN" operator add ops@operator.test
 )
 
-# 9. The suite.
+# 10. The suite.
 log "running playwright"
 cd "$SUITE"
 pnpm install --frozen-lockfile

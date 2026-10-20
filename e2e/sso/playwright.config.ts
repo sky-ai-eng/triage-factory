@@ -16,7 +16,7 @@ export default defineConfig({
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     launchOptions: {
-      // The test IdPs and fake GitHub listen on loopback under .test names.
+      // The test IdPs and Orrery listen on loopback under .test names.
       args: ['--host-resolver-rules=MAP *.test 127.0.0.1'],
     },
   },
