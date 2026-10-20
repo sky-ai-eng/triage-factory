@@ -1,0 +1,86 @@
+name: poll-e2e
+
+# Runs the GitHub poll path end to end (internal/poller/poll_e2e_test.go): the
+# real poller and tracker poll a GitHub world as its pull requests change, and
+# must emit exactly the events docs/concepts/tracked-events.md promises. The
+# world is served by Orrery, a deterministic GitHub built from real git; a call
+# Orrery answers "not mocked" fails the run, so a poll-path query Orrery doesn't
+# serve shows up here rather than as a quietly wrong answer.
+#
+# Orrery is a private repository, read with the ORRERY_TOKEN secret (read-only
+# contents access to sky-ai-eng/orrery). Pull requests from forks get no
+# secrets, so for them the test is skipped with a notice and runs on main after
+# the merge instead.
+
+on:
+  pull_request:
+    paths:
+      - 'internal/poller/**'
+      - 'internal/tracker/**'
+      - 'internal/github/**'
+      - 'internal/domain/**'
+      - 'internal/db/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/poll-e2e.yml'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: poll-e2e-${{ github.ref }}
+  # A main push's run covers fork PRs, which skip the job, so only a pull
+  # request's run is cancelled by a newer one.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  poll-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check for Orrery access
+        id: access
+        env:
+          ORRERY_TOKEN: ${{ secrets.ORRERY_TOKEN }}
+        run: |
+          if [ -n "$ORRERY_TOKEN" ]; then
+            echo "ok=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "::notice title=Poll end-to-end test skipped::ORRERY_TOKEN is not available to this run (a pull request from a fork); the test runs on main after merge."
+            echo "ok=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      # Neither checkout leaves its token in .git/config: the job runs the
+      # pull request's code, and nothing here pushes.
+      - uses: actions/checkout@v4
+        if: steps.access.outputs.ok == 'true'
+        with:
+          persist-credentials: false
+
+      - name: Check out Orrery
+        if: steps.access.outputs.ok == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: sky-ai-eng/orrery
+          token: ${{ secrets.ORRERY_TOKEN }}
+          path: orrery
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.access.outputs.ok == 'true'
+        with:
+          workspaces: orrery
+
+      - uses: actions/setup-go@v5
+        if: steps.access.outputs.ok == 'true'
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Poll path against Orrery
+        if: steps.access.outputs.ok == 'true'
+        env:
+          ORRERY_DIR: orrery
+        run: go test ./internal/poller -run TestPollEmitsTrackedEvents -count=1
