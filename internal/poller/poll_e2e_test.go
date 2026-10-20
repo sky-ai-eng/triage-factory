@@ -1,10 +1,14 @@
 package poller_test
 
-// The GitHub poll path against Orrery (github.com/sky-ai-eng/orrery), a
-// deterministic GitHub served from real git: a real poller.Manager over real
-// SQLite stores polls a world built through Orrery's GitHub API, and every
-// transition the world goes through must come out as exactly the events the
-// tracker's taxonomy (docs/concepts/tracked-events.md) promises.
+// The GitHub poll path end to end: a real poller.Manager and tracker, over real
+// SQLite stores, poll a GitHub world while its pull requests change, and each
+// cycle must emit exactly the events the tracker's taxonomy
+// (docs/concepts/tracked-events.md) promises — and none when nothing changed.
+//
+// The world is served by Orrery (github.com/sky-ai-eng/orrery), a deterministic
+// GitHub built from real git, and is authored through its GitHub API. A call
+// Orrery answers "not mocked" fails the test, so a poll-path query Orrery does
+// not serve surfaces here instead of as a quietly wrong answer.
 //
 // Opt-in: it runs only when ORRERY_DIR names an Orrery checkout, the variable
 // e2e/sso/run.sh reads too, and skips otherwise, so a contributor without one
@@ -13,7 +17,7 @@ package poller_test
 // the binary it built. Locally, with Orrery checked out beside this
 // repository:
 //
-//	ORRERY_DIR=../orrery go test ./internal/poller -run TestPollerAgainstOrrery
+//	ORRERY_DIR=../orrery go test ./internal/poller -run TestPollEmitsTrackedEvents
 
 import (
 	"bytes"
@@ -44,7 +48,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-func TestPollerAgainstOrrery(t *testing.T) {
+func TestPollEmitsTrackedEvents(t *testing.T) {
 	dir := os.Getenv("ORRERY_DIR")
 	if dir == "" {
 		t.Skip("ORRERY_DIR is not set; see the comment at the top of this file")

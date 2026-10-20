@@ -1,10 +1,11 @@
-name: orrery-contract
+name: poll-e2e
 
-# Runs the GitHub poll path against Orrery (internal/poller/orrery_contract_test.go):
-# a real poller and tracker poll a world built through Orrery's GitHub API, and
-# every change to the world must come out as the events the tracker promises.
-# It fails on any call Orrery answers "not mocked", which is how a new or
-# changed query on the poll path shows up.
+# Runs the GitHub poll path end to end (internal/poller/poll_e2e_test.go): the
+# real poller and tracker poll a GitHub world as its pull requests change, and
+# must emit exactly the events docs/concepts/tracked-events.md promises. The
+# world is served by Orrery, a deterministic GitHub built from real git; a call
+# Orrery answers "not mocked" fails the run, so a poll-path query Orrery doesn't
+# serve shows up here rather than as a quietly wrong answer.
 #
 # Orrery is a private repository, read with the ORRERY_TOKEN secret (read-only
 # contents access to sky-ai-eng/orrery). Pull requests from forks get no
@@ -21,7 +22,7 @@ on:
       - 'internal/db/**'
       - 'go.mod'
       - 'go.sum'
-      - '.github/workflows/orrery-contract.yml'
+      - '.github/workflows/poll-e2e.yml'
   push:
     branches: [main]
 
@@ -29,13 +30,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: orrery-contract-${{ github.ref }}
+  group: poll-e2e-${{ github.ref }}
   # A main push's run covers fork PRs, which skip the job, so only a pull
   # request's run is cancelled by a newer one.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  orrery-contract:
+  poll-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -47,7 +48,7 @@ jobs:
           if [ -n "$ORRERY_TOKEN" ]; then
             echo "ok=true" >>"$GITHUB_OUTPUT"
           else
-            echo "::notice title=Orrery contract test skipped::ORRERY_TOKEN is not available to this run (a pull request from a fork); the test runs on main after merge."
+            echo "::notice title=Poll end-to-end test skipped::ORRERY_TOKEN is not available to this run (a pull request from a fork); the test runs on main after merge."
             echo "ok=false" >>"$GITHUB_OUTPUT"
           fi
 
@@ -82,4 +83,4 @@ jobs:
         if: steps.access.outputs.ok == 'true'
         env:
           ORRERY_DIR: orrery
-        run: go test ./internal/poller -run TestPollerAgainstOrrery -count=1
+        run: go test ./internal/poller -run TestPollEmitsTrackedEvents -count=1
