@@ -1,10 +1,11 @@
 -- +goose NO TRANSACTION
 -- +goose Up
--- Every external object is keyed within the provider namespace it lives in,
--- Linear becomes a tracked source, and five smaller changes ride along: the
--- org GitHub App's unusable state, the claim's source manifest, the retirement
--- of the 'completed' conversation status, node ids on artifacts and
--- audit-ledger rows, and the table of rate-limit readings.
+-- Every external object is keyed within the provider namespace it lives in, a
+-- GitHub entity references its repository's registry row, Linear becomes a
+-- tracked source, and five smaller changes ride along: the org GitHub App's
+-- unusable state, the claim's source manifest, the retirement of the
+-- 'completed' conversation status, node ids on artifacts and audit-ledger
+-- rows, and the table of rate-limit readings.
 --
 -- NO TRANSACTION because rebuilding a table other tables reference needs
 -- foreign keys off, and PRAGMA foreign_keys is a no-op inside a transaction:
@@ -277,7 +278,9 @@ CREATE UNIQUE INDEX org_linear_installs_workspace_live
 -- namespace, its scope:
 --
 --   entities                      scope, and the provider's own id beside the
---                                 key (external_id)
+--                                 key (external_id); a GitHub row also
+--                                 references its repository's registry row
+--                                 (repository_id)
 --   repositories                  host
 --   team_github_groups            host
 --   org_github_app_installations  github_host joins the primary key
@@ -451,112 +454,7 @@ UPDATE OR IGNORE org_github_app_installations
  WHERE github_host IN (SELECT raw FROM host_case WHERE canonical <> raw);
 
 -- ---------------------------------------------------------------------------
--- 3b. entities.scope and entities.external_id
--- ---------------------------------------------------------------------------
---
---   scope        the namespace the entity's key and id are unique within: the
---                GitHub host, the Jira site, the Linear workspace id, or
---                domain.SlackScope.
---   external_id  the provider's id for the object, which a key change does not
---                move. NULL is "not learned yet".
---
--- source_id stays the key everything reads and displays. A key change is a
--- rename of the row that carries the id, rather than a second row.
---
--- Keys are unique among ACTIVE rows of one scope only: a key a provider frees
--- and hands to a new object (a project deleted and recreated, a team key
--- reused) must not collide with the closed history it used to name. That
--- replaces the table-level UNIQUE(source, source_id), so the table is rebuilt.
--- A row's scope is its org's for its source, except that a Jira row takes the
--- site its own url names: that is the site the issue actually came from, even
--- if the org has since been pointed at another one. No new key can collide,
--- because source_id was unique per source.
---
--- linear_team_id is the UUID of the Linear team a Linear issue sits in, the id
--- linear_team_rules is keyed by. It is a column rather than a field read out
--- of snapshot_json because turning a source off clears the snapshot, and an
--- issue's team has to survive that: the belt places the issue by it, and an
--- issue that goes unreachable while the source is off names it for the
--- router's team gate. It is set at creation from the response that found the
--- issue and moved by every snapshot write to the snapshot's team, and clearing
--- the snapshot leaves it. Required for a Linear row and NULL for every other
--- source, enforced by the store. No row needs it filled here: no release
--- before this migration polled Linear.
-CREATE TABLE entities_new (
-    id                       TEXT PRIMARY KEY,
-    source                   TEXT NOT NULL,
-    scope                    TEXT NOT NULL,
-    source_id                TEXT NOT NULL,
-    external_id              TEXT,
-    kind                     TEXT NOT NULL,
-    title                    TEXT,
-    url                      TEXT,
-    snapshot_json            TEXT,
-    description              TEXT NOT NULL DEFAULT '',
-    state                    TEXT NOT NULL DEFAULT 'active',
-    created_at               DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    last_polled_at           DATETIME,
-    closed_at                DATETIME,
-    owning_team_id           TEXT REFERENCES teams(id) ON DELETE SET NULL,
-    org_id                   TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
-    poll_seq                 INTEGER NOT NULL DEFAULT 0,
-    commissioned_by_user_id  TEXT REFERENCES users(id) ON DELETE SET NULL,
-    linear_team_id           TEXT
-);
-
--- A url with no '/browse/' looks up an empty prefix, which host_case never
--- holds, so the row takes its org's site.
-INSERT INTO entities_new (
-    id, source, scope, source_id, external_id, kind, title, url, snapshot_json,
-    description, state, created_at, last_polled_at, closed_at, owning_team_id,
-    org_id, poll_seq, commissioned_by_user_id
-)
-SELECT
-    e.id, e.source,
-    COALESCE(
-        CASE WHEN e.source = 'jira' THEN
-            (SELECT c.canonical FROM host_case c
-              WHERE c.raw = substr(e.url, 1, instr(e.url, '/browse/') - 1))
-        END,
-        s.scope,
-        ''),
-    e.source_id, NULL, e.kind, e.title, e.url, e.snapshot_json,
-    e.description, e.state, e.created_at, e.last_polled_at, e.closed_at, e.owning_team_id,
-    e.org_id, e.poll_seq, e.commissioned_by_user_id
-FROM entities e
-LEFT JOIN org_scope s ON s.org_id = e.org_id AND s.provider = e.source;
-
-DROP TABLE entities;
-ALTER TABLE entities_new RENAME TO entities;
-
-CREATE INDEX        idx_entities_state           ON entities(state);
-CREATE INDEX        idx_entities_source_polled   ON entities(source, last_polled_at);
-CREATE INDEX        idx_entities_closed_at       ON entities(closed_at) WHERE closed_at IS NOT NULL;
-CREATE UNIQUE INDEX entities_id_org_unique       ON entities (id, org_id);
-CREATE INDEX        idx_entities_github_author
-    ON entities (json_extract(snapshot_json, '$.author'))
-    WHERE source = 'github' AND snapshot_json IS NOT NULL AND snapshot_json != ''
-      AND json_valid(snapshot_json);
-CREATE INDEX        idx_entities_commissioned_by
-    ON entities (commissioned_by_user_id)
-    WHERE commissioned_by_user_id IS NOT NULL;
-
--- An entity's identity: one row per provider id in a scope.
-CREATE UNIQUE INDEX entities_identity
-    ON entities (org_id, source, scope, external_id)
-    WHERE external_id IS NOT NULL;
-
--- A key names one live object in a scope; closed rows may share it.
-CREATE UNIQUE INDEX entities_active_key
-    ON entities (org_id, source, scope, source_id)
-    WHERE state = 'active';
-
--- The key lookup, which reads the active row or else the most recently closed.
-CREATE INDEX        idx_entities_key
-    ON entities (org_id, source, scope, source_id);
-
--- ---------------------------------------------------------------------------
--- 3c. repositories.host
+-- 3b. repositories.host
 -- ---------------------------------------------------------------------------
 --
 -- host joins both of a repository's keys, its name and its provider id:
@@ -597,6 +495,167 @@ UPDATE repositories
 CREATE UNIQUE INDEX repositories_external_identity
     ON repositories(org_id, source, host, external_id)
     WHERE external_id IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- 3c. entities.scope, external_id and repository_id
+-- ---------------------------------------------------------------------------
+--
+--   scope        the namespace the entity's key and id are unique within: the
+--                GitHub host, the Jira site, the Linear workspace id, or
+--                domain.SlackScope.
+--   external_id  the provider's id for the object, which a key change does not
+--                move. NULL is "not learned yet".
+--
+-- source_id stays the key everything reads and displays. A key change is a
+-- rename of the row that carries the id, rather than a second row.
+--
+-- Keys are unique among ACTIVE rows of one scope only: a key a provider frees
+-- and hands to a new object (a project deleted and recreated, a team key
+-- reused) must not collide with the closed history it used to name. That
+-- replaces the table-level UNIQUE(source, source_id), so the table is rebuilt.
+-- A row's scope is its org's for its source, except that a Jira row takes the
+-- site its own url names: that is the site the issue actually came from, even
+-- if the org has since been pointed at another one. No new key can collide,
+-- because source_id was unique per source.
+--
+-- linear_team_id is the UUID of the Linear team a Linear issue sits in, the id
+-- linear_team_rules is keyed by. It is a column rather than a field read out
+-- of snapshot_json because turning a source off clears the snapshot, and an
+-- issue's team has to survive that: the belt places the issue by it, and an
+-- issue that goes unreachable while the source is off names it for the
+-- router's team gate. It is set at creation from the response that found the
+-- issue and moved by every snapshot write to the snapshot's team, and clearing
+-- the snapshot leaves it. Required for a Linear row and NULL for every other
+-- source, enforced by the store. No row needs it filled here: no release
+-- before this migration polled Linear.
+--
+-- repository_id is the registry row of the repository a GitHub entity belongs
+-- to. The key names the repository by the name it has now, which a rename
+-- changes; this does not. The store sets it when it creates the row, from the
+-- key, through the registry's get-or-create, so a pull request in a repository
+-- no team tracks has a row to reference. Required for a GitHub row, by CHECK.
+--
+-- Every existing GitHub row's repository is read off its key the way
+-- db.GitHubEntityRepoRef reads it — the part before '#' is owner/repo, split at
+-- the first '/' — on the host the row is scoped under below, which is the host
+-- 3b gave the org's repositories. Every GitHub key a release wrote has that
+-- shape: the tracker and the dashboard backfill build "owner/repo#N" from the
+-- pull request they polled, and the exec funnel and the memory attach create
+-- only a key domain.ParsePRTarget accepts. A repository with no registry row
+-- gets a bare one, identity columns only, as the store's get-or-create would
+-- mint it; the folded identity index makes the first insert for a repository
+-- the one that stands, so the newest key's casing is the one a new row
+-- stores. A registry row is not tracking: nothing is added to what TF polls,
+-- profiles or clones.
+CREATE TEMP TABLE github_entity_repo AS
+SELECT entity_id, org_id, host, created_at,
+       substr(path, 1, instr(path, '/') - 1) AS owner,
+       substr(path, instr(path, '/') + 1)    AS repo
+  FROM (SELECT e.id AS entity_id, e.org_id, s.scope AS host, e.created_at,
+               CASE WHEN instr(e.source_id, '#') > 0
+                    THEN substr(e.source_id, 1, instr(e.source_id, '#') - 1)
+                    ELSE e.source_id END AS path
+          FROM entities e
+          JOIN org_scope s ON s.org_id = e.org_id AND s.provider = 'github'
+         WHERE e.source = 'github')
+ WHERE instr(path, '/') > 1 AND instr(path, '/') < length(path);
+
+INSERT OR IGNORE INTO repositories (id, owner, repo, source, host, org_id, updated_at)
+SELECT lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' ||
+       substr(lower(hex(randomblob(2))), 2) || '-' ||
+       substr('89ab', abs(random()) % 4 + 1, 1) ||
+       substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))),
+       owner, repo, 'github', host, org_id, CURRENT_TIMESTAMP
+  FROM github_entity_repo
+ ORDER BY created_at DESC, entity_id;
+
+CREATE TABLE entities_new (
+    id                       TEXT PRIMARY KEY,
+    source                   TEXT NOT NULL,
+    scope                    TEXT NOT NULL,
+    source_id                TEXT NOT NULL,
+    external_id              TEXT,
+    kind                     TEXT NOT NULL,
+    title                    TEXT,
+    url                      TEXT,
+    snapshot_json            TEXT,
+    description              TEXT NOT NULL DEFAULT '',
+    state                    TEXT NOT NULL DEFAULT 'active',
+    created_at               DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_polled_at           DATETIME,
+    closed_at                DATETIME,
+    owning_team_id           TEXT REFERENCES teams(id) ON DELETE SET NULL,
+    org_id                   TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+    poll_seq                 INTEGER NOT NULL DEFAULT 0,
+    commissioned_by_user_id  TEXT REFERENCES users(id) ON DELETE SET NULL,
+    linear_team_id           TEXT,
+    repository_id            TEXT REFERENCES repositories(id),
+    CONSTRAINT entities_repository_required CHECK (source <> 'github' OR repository_id IS NOT NULL)
+);
+
+-- A url with no '/browse/' looks up an empty prefix, which host_case never
+-- holds, so the row takes its org's site.
+INSERT INTO entities_new (
+    id, source, scope, source_id, external_id, kind, title, url, snapshot_json,
+    description, state, created_at, last_polled_at, closed_at, owning_team_id,
+    org_id, poll_seq, commissioned_by_user_id, repository_id
+)
+SELECT
+    e.id, e.source,
+    COALESCE(
+        CASE WHEN e.source = 'jira' THEN
+            (SELECT c.canonical FROM host_case c
+              WHERE c.raw = substr(e.url, 1, instr(e.url, '/browse/') - 1))
+        END,
+        s.scope,
+        ''),
+    e.source_id, NULL, e.kind, e.title, e.url, e.snapshot_json,
+    e.description, e.state, e.created_at, e.last_polled_at, e.closed_at, e.owning_team_id,
+    e.org_id, e.poll_seq, e.commissioned_by_user_id,
+    (SELECT r.id
+       FROM github_entity_repo g
+       JOIN repositories r
+         ON r.org_id = g.org_id AND r.source = 'github' AND r.host = g.host
+        AND LOWER(r.owner) = LOWER(g.owner) AND LOWER(r.repo) = LOWER(g.repo)
+      WHERE g.entity_id = e.id)
+FROM entities e
+LEFT JOIN org_scope s ON s.org_id = e.org_id AND s.provider = e.source;
+
+DROP TABLE entities;
+ALTER TABLE entities_new RENAME TO entities;
+
+CREATE INDEX        idx_entities_state           ON entities(state);
+CREATE INDEX        idx_entities_source_polled   ON entities(source, last_polled_at);
+CREATE INDEX        idx_entities_closed_at       ON entities(closed_at) WHERE closed_at IS NOT NULL;
+CREATE UNIQUE INDEX entities_id_org_unique       ON entities (id, org_id);
+CREATE INDEX        idx_entities_github_author
+    ON entities (json_extract(snapshot_json, '$.author'))
+    WHERE source = 'github' AND snapshot_json IS NOT NULL AND snapshot_json != ''
+      AND json_valid(snapshot_json);
+CREATE INDEX        idx_entities_commissioned_by
+    ON entities (commissioned_by_user_id)
+    WHERE commissioned_by_user_id IS NOT NULL;
+
+-- An entity's identity: one row per provider id in a scope.
+CREATE UNIQUE INDEX entities_identity
+    ON entities (org_id, source, scope, external_id)
+    WHERE external_id IS NOT NULL;
+
+-- A key names one live object in a scope; closed rows may share it.
+CREATE UNIQUE INDEX entities_active_key
+    ON entities (org_id, source, scope, source_id)
+    WHERE state = 'active';
+
+-- The key lookup, which reads the active row or else the most recently closed.
+CREATE INDEX        idx_entities_key
+    ON entities (org_id, source, scope, source_id);
+
+-- Serves the joins that scope a GitHub entity by its repository.
+CREATE INDEX        idx_entities_repository
+    ON entities (repository_id)
+    WHERE repository_id IS NOT NULL;
+
+DROP TABLE github_entity_repo;
 
 -- ---------------------------------------------------------------------------
 -- 3d. team_github_groups.host

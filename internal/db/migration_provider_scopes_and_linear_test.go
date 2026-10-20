@@ -99,6 +99,7 @@ func TestMigrate_ProviderScopesMatchGo(t *testing.T) {
 				`SELECT scope FROM entities WHERE id = 'e-jira-stub'`:               domain.EntityScope("jira", settings),
 				`SELECT scope FROM entities WHERE id = 'e-jira-elsewhere'`:          "https://other.example.com/Ctx",
 				`SELECT host FROM repositories WHERE id = 'r1'`:                     githubHost,
+				`SELECT repository_id FROM entities WHERE id = 'e-github'`:          "r1",
 				`SELECT host FROM team_github_groups WHERE team_id = 'team-1'`:      githubHost,
 				`SELECT host FROM placement_overrides WHERE key_value = 'octo/api'`: githubHost,
 			}
@@ -743,6 +744,107 @@ func TestMigrate_ProviderScopesFailureCommitsNothing(t *testing.T) {
 
 // seedProviderScopesOrg stages the local org, one team and one user; a migrated
 // database carries none of them until boot seeds them.
+// The migration gives every GitHub entity the registry row of its repository,
+// minting the rows that do not exist yet, and then requires one on every GitHub
+// row. Its failure modes are quiet: two rows minted for one repository spelled
+// two ways, a row minted when one already answers to the name, or a row that
+// tracking would then read as tracked. So this stages each case in the schema
+// the migration starts from, migrates, and reads every row back.
+// TestMigrate_ProviderScopesMatchGo pins that the row resolves on the host the
+// entity is scoped under, for every spelling of the org's GitHub URL.
+func TestMigrate_ProviderScopesGiveGitHubEntitiesTheirRepository(t *testing.T) {
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	for _, stmt := range []string{
+		// A repository a team tracks, already in the registry.
+		`INSERT INTO repositories (id, owner, repo, source) VALUES ('repo-tracked', 'octo', 'tracked', 'github')`,
+		`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ('team-1', 'repo-tracked', '` + runmode.LocalDefaultOrgID + `')`,
+
+		// A pull request in it, its key spelled in another casing: it takes
+		// the existing row rather than minting a second.
+		`INSERT INTO entities (id, source, source_id, kind, created_at)
+		 VALUES ('e-tracked', 'github', 'Octo/Tracked#1', 'pr', '2026-01-01 00:00:00')`,
+
+		// Two pull requests in a repository with no row, spelled two ways:
+		// one row is minted, carrying the newer key's casing.
+		`INSERT INTO entities (id, source, source_id, kind, created_at)
+		 VALUES ('e-new-old', 'github', 'acme/widgets#2', 'pr', '2026-01-01 00:00:00')`,
+		`INSERT INTO entities (id, source, source_id, kind, created_at, state, closed_at)
+		 VALUES ('e-new-new', 'github', 'Acme/Widgets#3', 'pr', '2026-02-01 00:00:00', 'closed', '2026-02-02 00:00:00')`,
+
+		// Other sources reference no repository.
+		`INSERT INTO entities (id, source, source_id, kind) VALUES ('e-jira', 'jira', 'OCTO-1', 'issue')`,
+	} {
+		mustExec(t, database, stmt)
+	}
+
+	migrateProviderScopes(t, database)
+
+	repositoryOf := func(entityID string) string {
+		t.Helper()
+		var id sql.NullString
+		if err := database.QueryRow(`SELECT repository_id FROM entities WHERE id = ?`, entityID).Scan(&id); err != nil {
+			t.Fatalf("read repository_id of %s: %v", entityID, err)
+		}
+		return id.String
+	}
+
+	if got := repositoryOf("e-tracked"); got != "repo-tracked" {
+		t.Errorf("e-tracked references %q, want the existing row repo-tracked", got)
+	}
+
+	var widgetsID, owner, repo, host string
+	if err := database.QueryRow(`
+		SELECT id, owner, repo, host FROM repositories
+		 WHERE LOWER(owner) = 'acme' AND LOWER(repo) = 'widgets'
+	`).Scan(&widgetsID, &owner, &repo, &host); err != nil {
+		t.Fatalf("registry row for acme/widgets: %v", err)
+	}
+	if owner != "Acme" || repo != "Widgets" {
+		t.Errorf("minted row is %s/%s, want the newer key's casing Acme/Widgets", owner, repo)
+	}
+	if want := queryString(t, database, `SELECT scope FROM entities WHERE id = 'e-new-old'`); host != want {
+		t.Errorf("minted row is on %q, want the host its entities are scoped under, %q", host, want)
+	}
+	for _, e := range []string{"e-new-old", "e-new-new"} {
+		if got := repositoryOf(e); got != widgetsID {
+			t.Errorf("%s references %q, want the one minted row %s", e, got, widgetsID)
+		}
+	}
+	if got := repositoryOf("e-jira"); got != "" {
+		t.Errorf("e-jira references %q, want no repository", got)
+	}
+	if n := queryString(t, database, `SELECT COUNT(*) FROM repositories`); n != "2" {
+		t.Errorf("registry holds %s rows, want 2: the tracked row and the one minted", n)
+	}
+	if n := queryString(t, database, `SELECT COUNT(*) FROM team_github_repos WHERE repository_id = ?`, widgetsID); n != "0" {
+		t.Errorf("the minted row is tracked by %s teams, want none", n)
+	}
+
+	refused := func(what, stmt string) {
+		t.Helper()
+		_, err := database.Exec(stmt)
+		if err == nil || !strings.Contains(err.Error(), "entities_repository_required") {
+			t.Errorf("%s = %v, want the entities_repository_required CHECK to refuse it", what, err)
+		}
+	}
+	refused("a github insert with no repository",
+		`INSERT INTO entities (id, source, scope, source_id, kind) VALUES ('e-bare', 'github', 'https://github.com', 'octo/tracked#5', 'pr')`)
+	refused("clearing a github row's repository",
+		`UPDATE entities SET repository_id = NULL WHERE id = 'e-tracked'`)
+	refused("turning a row into a github row with no repository",
+		`UPDATE entities SET source = 'github' WHERE id = 'e-jira'`)
+
+	mustExec(t, database, `INSERT INTO entities (id, source, scope, source_id, kind, repository_id)
+		VALUES ('e-ok', 'github', 'https://github.com', 'octo/tracked#6', 'pr', 'repo-tracked')`)
+	mustExec(t, database, `INSERT INTO entities (id, source, scope, source_id, external_id, kind)
+		VALUES ('e-jira-2', 'jira', 'https://jira.example.com', 'OCTO-2', '10002', 'issue')`)
+	if _, err := database.Exec(`INSERT INTO entities (id, source, scope, source_id, kind, repository_id)
+		VALUES ('e-ghost', 'github', 'https://github.com', 'ghost/repo#1', 'pr', 'no-such-repository')`); err == nil {
+		t.Error("a github insert naming a repository row that does not exist succeeded; the foreign key should refuse it")
+	}
+}
+
 func seedProviderScopesOrg(t *testing.T, database *sql.DB) {
 	t.Helper()
 	mustExec(t, database, `INSERT INTO orgs (id, slug, name) VALUES (?, 'local', 'Local')`, runmode.LocalDefaultOrgID)
