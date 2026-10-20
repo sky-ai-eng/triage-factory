@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -31,12 +32,14 @@ func channelRows(t *testing.T, stores db.Stores, ctx context.Context, orgID stri
 	return out
 }
 
-// replaceChannels tracks the Slack channels channelIDs for teamID.
+// replaceChannels registers the Slack channels channelIDs and tracks them for
+// teamID.
 func replaceChannels(t *testing.T, stores db.Stores, ctx context.Context, orgID, userID, teamID string, channelIDs []string) {
 	t.Helper()
-	rows := channelRows(t, stores, ctx, orgID, channelIDs)
+	channelRows(t, stores, ctx, orgID, channelIDs)
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(ctx, orgID, teamID, rows)
+		_, err := slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(ctx, orgID, teamID, channelIDs)
+		return err
 	})
 }
 
@@ -109,6 +112,120 @@ func TestTeamChannel_Postgres_ReplaceForTeam_PreservesCreatedAtAndPrimary(t *tes
 	}
 }
 
+// TestTeamChannel_Postgres_ReplaceForTeam_ResolvesTheIDsItIsGiven: the
+// tracking write resolves Slack ids itself, on the app pool. A row registered
+// for a save and then absorbed by a move before the write (the channels PUT's
+// race) tracks the surviving row; an id Slack has since replaced tracks the
+// channel's row; and an id with no row is ErrChannelNotRegistered, leaving the
+// set as it was.
+func TestTeamChannel_Postgres_ReplaceForTeam_ResolvesTheIDsItIsGiven(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "tc-resolve")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	channels := slackstore.FromStores(stores).Channels
+	ctx := context.Background()
+
+	survivor := channelRow(t, stores, ctx, orgID, "G0RESOLV1")
+	absorbed := channelRow(t, stores, ctx, orgID, "C0RESOLV1")
+	if _, err := channels.MoveSystem(ctx, orgID, "G0RESOLV1", "C0RESOLV1"); err != nil {
+		t.Fatalf("MoveSystem: %v", err)
+	}
+	if row, _ := channels.GetSystem(ctx, orgID, absorbed); row != nil {
+		t.Fatalf("row %s survived the move; want it absorbed", absorbed)
+	}
+
+	for _, named := range []string{"C0RESOLV1", "G0RESOLV1"} {
+		var tracked []string
+		mustWithUser(t, stores, ctx, orgID, owner, func(tx db.TxStores) error {
+			var err error
+			tracked, err = slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(ctx, orgID, teamID, []string{named})
+			return err
+		})
+		if len(tracked) != 1 || tracked[0] != survivor {
+			t.Errorf("ReplaceForTeam(%s) tracked %v; want the surviving row %s", named, tracked, survivor)
+		}
+	}
+
+	err := stores.Tx.WithTx(ctx, orgID, owner, func(tx db.TxStores) error {
+		_, err := slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(ctx, orgID, teamID, []string{"C0NOROW01"})
+		return err
+	})
+	if !errors.Is(err, slackstore.ErrChannelNotRegistered) {
+		t.Errorf("ReplaceForTeam(unregistered) err = %v; want ErrChannelNotRegistered", err)
+	}
+	if got := listForTeamChannels(t, stores, ctx, orgID, owner, teamID); len(got) != 1 || got[0].SlackChannelID != survivor {
+		t.Errorf("tracked set after the refused write = %+v; want the surviving row alone", got)
+	}
+}
+
+// TestTeamChannel_Postgres_ReplaceForTeam_WaitsForAMoveInProgress: a tracking
+// write naming the new id while a move absorbs that id's row waits for the
+// move, then tracks the surviving row. Resolving before the move commits would
+// pick the row being deleted, and the insert would fail its foreign key.
+func TestTeamChannel_Postgres_ReplaceForTeam_WaitsForAMoveInProgress(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "tc-move-wait")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	survivor := channelRow(t, stores, ctx, orgID, "G0WAIT001")
+	absorbed := channelRow(t, stores, ctx, orgID, "C0WAIT001")
+
+	// The move's own steps, uncommitted: the lock, the change, the absorbed
+	// row deleted and the channel's row moved onto the new id.
+	move, err := h.AdminDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin move: %v", err)
+	}
+	defer func() { _ = move.Rollback() }()
+	for _, stmt := range []struct {
+		sql  string
+		args []any
+	}{
+		{`SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`, []any{orgID, int64(0x43484944)}},
+		{`INSERT INTO slack_channel_id_changes (org_id, old_channel_id, new_channel_id) VALUES ($1, 'G0WAIT001', 'C0WAIT001')`, []any{orgID}},
+		{`DELETE FROM slack_channels WHERE id = $1`, []any{absorbed}},
+		{`UPDATE slack_channels SET channel_id = 'C0WAIT001' WHERE id = $1`, []any{survivor}},
+	} {
+		if _, err := move.ExecContext(ctx, stmt.sql, stmt.args...); err != nil {
+			t.Fatalf("move step %q: %v", stmt.sql, err)
+		}
+	}
+
+	type result struct {
+		tracked []string
+		err     error
+	}
+	wrote := make(chan result, 1)
+	go func() {
+		var r result
+		r.err = stores.Tx.WithTx(ctx, orgID, owner, func(tx db.TxStores) error {
+			var err error
+			r.tracked, err = slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(ctx, orgID, teamID, []string{"C0WAIT001"})
+			return err
+		})
+		wrote <- r
+	}()
+	select {
+	case r := <-wrote:
+		t.Fatalf("ReplaceForTeam returned %+v while the move held its lock; want it to wait", r)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := move.Commit(); err != nil {
+		t.Fatalf("commit move: %v", err)
+	}
+	select {
+	case r := <-wrote:
+		if r.err != nil || len(r.tracked) != 1 || r.tracked[0] != survivor {
+			t.Errorf("ReplaceForTeam after the move = %v, %v; want the surviving row %s", r.tracked, r.err, survivor)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ReplaceForTeam still waiting after the move committed")
+	}
+}
+
 // TestTeamChannel_Postgres_RLS_MemberWriteRefused: a plain (non-admin) team
 // member's ReplaceForTeam write is refused by RLS (team_slack_channels_insert
 // requires team-admin) — the call errors and the existing row set survives
@@ -124,9 +241,10 @@ func TestTeamChannel_Postgres_RLS_MemberWriteRefused(t *testing.T) {
 
 	replaceChannels(t, stores, ctx, orgID, owner, teamID, []string{"C0RLS0001"})
 
-	rows := channelRows(t, stores, ctx, orgID, []string{"C0RLS0001", "C0RLS0002"})
+	channelRows(t, stores, ctx, orgID, []string{"C0RLS0001", "C0RLS0002"})
 	err := stores.Tx.WithTx(ctx, orgID, member, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(ctx, orgID, teamID, rows)
+		_, err := slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(ctx, orgID, teamID, []string{"C0RLS0001", "C0RLS0002"})
+		return err
 	})
 	if err == nil {
 		t.Fatal("member ReplaceForTeam succeeded; want RLS refusal (team-admin gate)")

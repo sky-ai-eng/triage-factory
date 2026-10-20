@@ -43,7 +43,8 @@ func TestTfSystem_SlackProviderReads(t *testing.T) {
 		t.Fatalf("seed slack_channels: %v", err)
 	}
 	mustWithUser(t, seed, ctx, orgID, userID, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(ctx, orgID, teamID, []string{channel.ID})
+		_, err := slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(ctx, orgID, teamID, []string{channelID})
+		return err
 	})
 
 	// The executor's read path: admin half is tf_system.

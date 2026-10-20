@@ -259,7 +259,8 @@ func (r *slackExecRig) trackChannel(orgID, userID, teamID, channelID string) {
 		r.t.Fatalf("ensure channel: %v", err)
 	}
 	if err := r.stor.Tx.WithTx(r.t.Context(), orgID, userID, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(r.t.Context(), orgID, teamID, []string{channel.ID})
+		_, err := slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(r.t.Context(), orgID, teamID, []string{channel.ChannelID})
+		return err
 	}); err != nil {
 		r.t.Fatalf("track channel: %v", err)
 	}

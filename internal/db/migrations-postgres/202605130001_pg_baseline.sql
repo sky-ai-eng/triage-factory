@@ -5141,9 +5141,10 @@ GRANT SELECT, INSERT, DELETE ON public.team_slack_channels TO tf_app;
 -- resolved to a registry row through this table. One hop: when an ID moves
 -- again, every row pointing at it is pointed at its new ID. Per org, like
 -- slack_channels: each org's app receives its own delivery and moves its own
--- rows. Admin-pool-only system table (RLS enabled, no policy): ingest writes it
--- with no request claims, and tf_system reads it for the Slack provider policy
--- ops.
+-- rows. Member-read, system-write, like slack_channels: ingest writes it with no
+-- request claims, the channels API's tracking write resolves the ids a request
+-- names through it on the app pool, and tf_system reads it for the Slack
+-- provider policy ops.
 CREATE TABLE public.slack_channel_id_changes (
     org_id uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
     old_channel_id text NOT NULL,
@@ -5160,8 +5161,12 @@ CREATE INDEX slack_channel_id_changes_new_idx
 
 ALTER TABLE public.slack_channel_id_changes ENABLE ROW LEVEL SECURITY;
 
+CREATE POLICY slack_channel_id_changes_select ON public.slack_channel_id_changes FOR SELECT TO tf_app
+  USING ((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id));
+
 REVOKE ALL ON public.slack_channel_id_changes FROM PUBLIC;
 REVOKE ALL ON public.slack_channel_id_changes FROM anon, authenticated, service_role;
+GRANT SELECT ON public.slack_channel_id_changes TO tf_app;
 
 
 -- === Marketplace V1 ======================================================

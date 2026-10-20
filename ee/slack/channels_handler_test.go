@@ -53,18 +53,3 @@ func TestDiffChannelIDs(t *testing.T) {
 		t.Errorf("removed = %v; want [row-1]", removed)
 	}
 }
-
-// TestNormalizeChannelIDs pins the blank-drop + dedup + order-preserving
-// contract diffChannelIDs and the first-track check rely on.
-func TestNormalizeChannelIDs(t *testing.T) {
-	got := normalizeChannelIDs([]string{"C1", "", "C2", "C1", "C3"})
-	want := []string{"C1", "C2", "C3"}
-	if len(got) != len(want) {
-		t.Fatalf("normalizeChannelIDs = %v; want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("normalizeChannelIDs = %v; want %v", got, want)
-		}
-	}
-}

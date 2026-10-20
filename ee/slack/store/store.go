@@ -404,8 +404,9 @@ var ErrTeamNotTrackingChannel = errors.New("slackstore: team does not track this
 // routing hooks read, and the source of a channel's primary owning team.
 // Every channel argument is a registry row id (Channel.ID); a caller holding
 // a Slack channel id resolves it first (ChannelRegistryStore.ResolveSystem,
-// or EnsureSystem to start tracking one). Postgres-only; the SQLite impl is a
-// stub returning db.ErrNotApplicableInLocal, same posture as WorkspaceStore.
+// or EnsureSystem to start tracking one) — except ReplaceForTeam's, which
+// resolves its own. Postgres-only; the SQLite impl is a stub returning
+// db.ErrNotApplicableInLocal, same posture as WorkspaceStore.
 //
 // is_primary is never written by ReplaceForTeam (the app-pool, team-admin-
 // gated method) — RLS cannot gate a single column, so this is a store-layer
@@ -423,8 +424,13 @@ type TeamChannelStore interface {
 	// team_github_repos.ReplaceForTeam shape — see
 	// sqlite/team_github_repos.go's ReplaceForTeam), preserving kept rows'
 	// created_at AND is_primary untouched; new rows insert is_primary=false.
-	// App pool (team-admin RLS).
-	ReplaceForTeam(ctx context.Context, orgID, teamID string, slackChannelIDs []string) error
+	// App pool (team-admin RLS). It takes Slack channel ids, an id Slack has
+	// since replaced included, and resolves each to its registry row in the
+	// same transaction as the write, under the shared move lock: a row id
+	// read earlier can be absorbed and deleted by a move before the write. A
+	// channel no row answers to is ErrChannelNotRegistered. Returns the row
+	// ids now tracked, in request order, one per channel.
+	ReplaceForTeam(ctx context.Context, orgID, teamID string, channelIDs []string) ([]string, error)
 
 	// TracksChannelSystem is the router's stage-1 scope gate: does teamID
 	// track the channel. Admin pool — the router has no request claims.

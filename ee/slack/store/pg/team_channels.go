@@ -74,22 +74,46 @@ func (s *teamChannelStore) ListForTeam(ctx context.Context, orgID, teamID string
 // NOTHING preserves an existing row's created_at AND is_primary untouched;
 // a wholly new channel always inserts is_primary=false, never true — the
 // store-layer half of the "is_primary is never written from the app pool"
-// contract (see the TeamChannelStore doc). Runs in one transaction so the
-// insert pass and the prune can't leave a partial mid-save state.
-func (s *teamChannelStore) ReplaceForTeam(ctx context.Context, orgID, teamID string, slackChannelIDs []string) error {
-	unique := normalizeChannelIDs(slackChannelIDs)
-	return inTx(ctx, s.app, func(q db.Execer) error {
-		for _, ch := range unique {
+// contract (see the TeamChannelStore doc). Runs in one transaction, under the
+// shared move lock, so the resolve, the insert pass and the prune commit
+// together and a move waits for them.
+func (s *teamChannelStore) ReplaceForTeam(ctx context.Context, orgID, teamID string, channelIDs []string) ([]string, error) {
+	var tracked []string
+	err := inTx(ctx, s.app, func(q db.Execer) error {
+		if err := lockChannelWrites(ctx, q, orgID); err != nil {
+			return err
+		}
+		seen := make(map[string]bool, len(channelIDs))
+		for _, channelID := range channelIDs {
+			var row string
+			err := q.QueryRowContext(ctx, `
+				SELECT id::text FROM slack_channels
+				WHERE org_id = $1 AND channel_id = `+currentChannelIDSQL("$2"),
+				orgID, channelID).Scan(&row)
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w: %s", slackstore.ErrChannelNotRegistered, channelID)
+			}
+			if err != nil {
+				return fmt.Errorf("resolve slack channel %s: %w", channelID, err)
+			}
+			if seen[row] {
+				continue
+			}
+			seen[row] = true
+			tracked = append(tracked, row)
+		}
+
+		for _, row := range tracked {
 			if _, err := q.ExecContext(ctx, `
 				INSERT INTO team_slack_channels (org_id, team_id, slack_channel_id, is_primary)
 				VALUES ($1, $2, $3, false)
 				ON CONFLICT (team_id, slack_channel_id) DO NOTHING
-			`, orgID, teamID, ch); err != nil {
-				return fmt.Errorf("insert team_slack_channels[%s]: %w", ch, err)
+			`, orgID, teamID, row); err != nil {
+				return fmt.Errorf("insert team_slack_channels[%s]: %w", row, err)
 			}
 		}
 
-		if len(unique) == 0 {
+		if len(tracked) == 0 {
 			if _, err := q.ExecContext(ctx, `
 				DELETE FROM team_slack_channels WHERE org_id = $1 AND team_id = $2
 			`, orgID, teamID); err != nil {
@@ -101,26 +125,15 @@ func (s *teamChannelStore) ReplaceForTeam(ctx context.Context, orgID, teamID str
 		if _, err := q.ExecContext(ctx, `
 			DELETE FROM team_slack_channels
 			WHERE org_id = $1 AND team_id = $2 AND NOT (slack_channel_id = ANY($3::uuid[]))
-		`, orgID, teamID, unique); err != nil {
+		`, orgID, teamID, tracked); err != nil {
 			return fmt.Errorf("prune team_slack_channels: %w", err)
 		}
 		return nil
 	})
-}
-
-// normalizeChannelIDs drops blanks and de-duplicates, preserving first-seen
-// order.
-func normalizeChannelIDs(ids []string) []string {
-	seen := make(map[string]bool, len(ids))
-	out := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if id == "" || seen[id] {
-			continue
-		}
-		seen[id] = true
-		out = append(out, id)
+	if err != nil {
+		return nil, err
 	}
-	return out
+	return tracked, nil
 }
 
 func (s *teamChannelStore) TracksChannelSystem(ctx context.Context, orgID, teamID, slackChannelID string) (bool, error) {
