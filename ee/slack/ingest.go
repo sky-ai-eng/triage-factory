@@ -327,39 +327,28 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 	// (5) engagement gate: the thread's entity must already exist, be a
 	// bot-owned thread (kind="thread", not a mid-thread "message" summons into
 	// someone else's thread), and still be active. An unknown thread, someone
-	// else's thread, or a closed one is chatter the bot doesn't listen to.
+	// else's thread, or a closed one is chatter the bot doesn't listen to. The
+	// channel is resolved first: a thread references its channel's row, so a
+	// channel TF holds no row for has no engaged thread and costs this one
+	// lookup, and a thread is keyed under the id its channel has now, which
+	// the row carries when the delivered id is one Slack has since replaced.
+	channel, err := p.resolveChannel(ctx, ws, ev.Channel)
+	if err != nil {
+		return outcomeError, err
+	}
+	if channel == nil {
+		slackLog.Debug("dropping slack message: channel has no engaged thread", "workspace", ws.WorkspaceID, "channel", ev.Channel)
+		return dropNotEngaged, nil
+	}
+	ev.Channel = channel.ChannelID
 	sourceID := domain.SlackSourceID(ev.Channel, ev.ThreadTS)
 	entity, err := p.entities.GetBySourceSystem(ctx, ws.OrgID, "slack", domain.SlackScope, sourceID)
 	if err != nil {
 		return outcomeError, fmt.Errorf("get slack thread entity: %w", err)
 	}
-	var channel *slackstore.Channel
-	if entity == nil {
-		// A thread whose channel has since moved to a new id is keyed under
-		// the new one. Resolved only on a miss, so the channel chatter dropped
-		// below costs the one lookup above.
-		if channel, err = p.resolveChannel(ctx, ws, ev.Channel); err != nil {
-			return outcomeError, err
-		}
-		if channel != nil && channel.ChannelID != ev.Channel {
-			ev.Channel = channel.ChannelID
-			sourceID = domain.SlackSourceID(ev.Channel, ev.ThreadTS)
-			if entity, err = p.entities.GetBySourceSystem(ctx, ws.OrgID, "slack", domain.SlackScope, sourceID); err != nil {
-				return outcomeError, fmt.Errorf("get slack thread entity: %w", err)
-			}
-		}
-	}
 	if entity == nil || entity.Kind != "thread" || entity.State != "active" {
 		slackLog.Debug("dropping slack message: no active engaged thread", "workspace", ws.WorkspaceID, "source_id", sourceID)
 		return dropNotEngaged, nil
-	}
-	if channel == nil {
-		if channel, err = p.resolveChannel(ctx, ws, ev.Channel); err != nil {
-			return outcomeError, err
-		}
-		if channel == nil {
-			return outcomeError, fmt.Errorf("slack channel %s has a thread entity but no registry row", ev.Channel)
-		}
 	}
 
 	// (6) Past every drop: record the delivery (dedup Slack's redeliveries)
