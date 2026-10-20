@@ -91,13 +91,16 @@ type LoginState struct {
 // resolution. Email comes from the verified GoTrue JWT; EmailVerified is TF's
 // trust decision for it (the JWT's flag, and for an SSO sign-in also
 // TrustsSSOEmail); UserID is the resolved principal (public.users row); IsSSO
-// is State.ProviderID != "" (TF's own authoritative SSO signal).
+// is State.ProviderID != "" (TF's own authoritative SSO signal). AccessToken is
+// the GoTrue access token this sign-in received, for reads that must reflect
+// the provider's answer on this sign-in (GotrueProviderEmail).
 type LoginResolved struct {
 	State         LoginState
 	UserID        uuid.UUID
 	Email         string
 	EmailVerified bool
 	IsSSO         bool
+	AccessToken   string
 }
 
 // SSOGateResult is SSOGate's answer. StartURL is empty unless Barred.

@@ -1,0 +1,18 @@
+# Compose overlay for the SSO end-to-end suite (e2e/sso/run.sh), passed to
+# scripts/multi-mode-dev.sh as MULTI_DEV_COMPOSE_OVERLAY. It turns GoTrue's
+# SAML service provider on and points its GitHub provider at the suite's fake
+# GitHub. The test servers run on the host, so GoTrue reaches their .test names
+# through the host gateway and trusts the CA they were issued from.
+services:
+  gotrue:
+    environment:
+      GOTRUE_SAML_ENABLED: "true"
+      GOTRUE_SAML_PRIVATE_KEY: ${GOTRUE_SAML_PRIVATE_KEY:?missing GOTRUE_SAML_PRIVATE_KEY}
+      GOTRUE_EXTERNAL_GITHUB_URL: https://github.test:8445
+      SSL_CERT_FILE: /etc/sso-e2e/ca.pem
+    extra_hosts:
+      - "idp-globex.test:host-gateway"
+      - "idp-mallory.test:host-gateway"
+      - "github.test:host-gateway"
+    volumes:
+      - ./e2e/sso/.state/ca.pem:/etc/sso-e2e/ca.pem:ro

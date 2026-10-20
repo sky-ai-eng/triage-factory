@@ -1,0 +1,98 @@
+name: sso-e2e
+
+# Runs the SSO end-to-end suite (e2e/sso/run.sh): the multi-mode stack with a
+# real GoTrue, signing in through two test SAML identity providers and a fake
+# GitHub, driven by Playwright. See e2e/sso/README.md for what it proves.
+#
+# Triggered on PRs that touch the sign-in path, SSO, the fleet console's gate,
+# the compose stack the suite runs on, or the suite itself, and on every push to
+# main.
+
+on:
+  pull_request:
+    paths:
+      - 'ee/sso/**'
+      - 'ee/fleet/**'
+      - 'internal/server/auth*.go'
+      - 'internal/server/middleware.go'
+      - 'internal/server/invites_handler.go'
+      - 'internal/server/login_ext.go'
+      - 'internal/auth/**'
+      - 'internal/sessions/**'
+      - 'internal/apitokens/**'
+      - 'frontend/src/pages/Login.tsx'
+      - 'frontend/src/pages/settings/stack/SSOSettings.tsx'
+      - 'frontend/src/AuthGate.tsx'
+      - 'docker-compose.yml'
+      - 'scripts/multi-mode-dev.sh'
+      - 'e2e/**'
+      - '.github/workflows/sso-e2e.yml'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  # Pulls the stack's images' copies from GHCR (see mirror-images.yml).
+  packages: read
+
+concurrency:
+  group: sso-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sso-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: |
+            frontend/pnpm-lock.yaml
+            e2e/sso/pnpm-lock.yaml
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            e2e/go.sum
+
+      # Postgres, GoTrue and SeaweedFS come from their GHCR copies
+      # (mirror-images.yml) rather than Docker Hub.
+      - name: Pull the stack's images from the mirror
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/ci-images.sh prefetch compose
+
+      - name: Install Playwright's Chromium
+        working-directory: e2e/sso
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec playwright install --with-deps chromium
+
+      - name: SSO end-to-end suite
+        run: e2e/sso/run.sh
+
+      # The report, plus the server and test-server logs. The rest of .state
+      # (the run's keys and licence) stays behind.
+      - name: Upload the report and logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sso-e2e
+          path: |
+            e2e/sso/playwright-report/
+            e2e/sso/test-results/
+            e2e/sso/.state/tf.log
+            e2e/sso/.state/fakes.log
+            e2e/sso/.state/gotrue.log
+          if-no-files-found: ignore

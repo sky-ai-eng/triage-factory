@@ -85,6 +85,13 @@ type authDeps struct {
 	// upstream. Called from handleLogout as best-effort — if it fails
 	// we still revoke the row locally and clear the cookie.
 	gotrueLogout func(ctx context.Context, accessToken string) error
+
+	// gotrueProviderEmail reads, through GoTrue's /user with the sign-in's own
+	// access token, the email the named provider reported for this login
+	// identity on its latest sign-in. GoTrue rewrites that identity's data on
+	// every sign-in but keeps the account email from signup, which is what the
+	// JWT's email claim carries.
+	gotrueProviderEmail func(ctx context.Context, accessToken, provider string) (email string, verified bool, err error)
 }
 
 // withSession wraps a handler in the session middleware. The check for
