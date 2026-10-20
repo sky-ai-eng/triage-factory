@@ -78,12 +78,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build Orrery
-        if: steps.access.outputs.ok == 'true'
-        run: cargo build --quiet --manifest-path orrery/Cargo.toml -p orrery
-
       - name: Poll path against Orrery
         if: steps.access.outputs.ok == 'true'
         env:
-          ORRERY_BIN: ${{ github.workspace }}/orrery/target/debug/orrery
+          ORRERY_DIR: orrery
         run: go test ./internal/poller -run TestPollerAgainstOrrery -count=1

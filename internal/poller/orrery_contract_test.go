@@ -6,13 +6,14 @@ package poller_test
 // transition the world goes through must come out as exactly the events the
 // tracker's taxonomy (docs/concepts/tracked-events.md) promises.
 //
-// Runs only when ORRERY_BIN is the absolute path of a built Orrery binary (go
-// test runs in this package's directory, so a relative path would resolve
-// from here); the orrery-contract workflow builds one. Locally, from the
-// repository root:
+// Opt-in: it runs only when ORRERY_DIR names an Orrery checkout, the variable
+// e2e/sso/run.sh reads too, and skips otherwise, so a contributor without one
+// never runs it. A relative ORRERY_DIR is read from the repository root. The
+// test builds Orrery there with cargo (a no-op when nothing changed) and serves
+// the binary it built. Locally, with Orrery checked out beside this
+// repository:
 //
-//	cargo build --manifest-path ../orrery/Cargo.toml -p orrery
-//	ORRERY_BIN=$PWD/../orrery/target/debug/orrery go test ./internal/poller -run TestPollerAgainstOrrery
+//	ORRERY_DIR=../orrery go test ./internal/poller -run TestPollerAgainstOrrery
 
 import (
 	"bytes"
@@ -44,13 +45,11 @@ import (
 )
 
 func TestPollerAgainstOrrery(t *testing.T) {
-	bin := os.Getenv("ORRERY_BIN")
-	if bin == "" {
-		t.Skip("ORRERY_BIN is not set; see the comment at the top of this file")
+	dir := os.Getenv("ORRERY_DIR")
+	if dir == "" {
+		t.Skip("ORRERY_DIR is not set; see the comment at the top of this file")
 	}
-	if !filepath.IsAbs(bin) {
-		t.Fatalf("ORRERY_BIN must be an absolute path, got %q", bin)
-	}
+	bin := buildOrrery(t, dir)
 	runmode.SetForTest(t, runmode.ModeMulti)
 	ctx := context.Background()
 
@@ -353,6 +352,50 @@ func (c *countingTransport) notMocked() []string {
 type orreryWorld struct {
 	t    *testing.T
 	base string
+}
+
+// buildOrrery builds the orrery binary in the checkout at dir and returns its
+// path. Having opted in, a missing checkout or toolchain fails the test rather
+// than skipping it.
+func buildOrrery(t *testing.T, dir string) string {
+	t.Helper()
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(repoRoot(t), dir)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "Cargo.toml")); err != nil {
+		t.Fatalf("ORRERY_DIR=%s is not an Orrery checkout: %v", dir, err)
+	}
+	cmd := exec.Command("cargo", "build", "--quiet", "-p", "orrery")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("cargo build in %s: %v\n%s", dir, err, out)
+	}
+	target := os.Getenv("CARGO_TARGET_DIR")
+	switch {
+	case target == "":
+		target = filepath.Join(dir, "target")
+	case !filepath.IsAbs(target):
+		target = filepath.Join(dir, target)
+	}
+	return filepath.Join(target, "debug", "orrery")
+}
+
+// repoRoot is the directory holding this module's go.mod. go test runs in the
+// package's directory, so a relative path is read from there by default.
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for d := wd; ; d = filepath.Dir(d) {
+		if _, err := os.Stat(filepath.Join(d, "go.mod")); err == nil {
+			return d
+		}
+		if filepath.Dir(d) == d {
+			t.Fatalf("no go.mod above %s", wd)
+		}
+	}
 }
 
 // startOrrery serves a fresh world on a free loopback port for the length of
