@@ -6,33 +6,9 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/pressly/goose/v3"
-
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
-
-// jiraRegistryVersion is 202610200001_jira_project_registry.sql; every fixture
-// here is written in the schema of the version before it.
-const jiraRegistryVersion int64 = 202610200001
-
-func migrateJiraRegistry(t *testing.T, database *sql.DB) {
-	t.Helper()
-	treeFS, dir, err := migrationsFor("sqlite3")
-	if err != nil {
-		t.Fatalf("migrationsFor: %v", err)
-	}
-	gooseMu.Lock()
-	goose.SetBaseFS(treeFS)
-	upErr := goose.SetDialect("sqlite3")
-	if upErr == nil {
-		upErr = goose.UpTo(database, dir, jiraRegistryVersion)
-	}
-	gooseMu.Unlock()
-	if upErr != nil {
-		t.Fatalf("goose.UpTo jira project registry: %v", upErr)
-	}
-}
 
 // seedLegacyJiraRule writes a rule the way the schema before the registry kept
 // it: keyed by the project key.
@@ -45,9 +21,11 @@ func seedLegacyJiraRule(t *testing.T, database *sql.DB, teamID, key, pickup stri
 		teamID, key, pickup)
 }
 
-// seedJiraIssue writes a Jira entity on scope whose snapshot carries
-// projectID (none when empty), polled at polledAt.
-func seedJiraIssue(t *testing.T, database *sql.DB, id, scope, key, projectID, polledAt string) {
+// seedJiraIssue writes a Jira entity read from site, whose snapshot carries
+// projectID (none when empty), polled at polledAt (NULL when nil). The schema
+// before the migration has no scope column; the migration takes a Jira row's
+// scope from the site its url names.
+func seedJiraIssue(t *testing.T, database *sql.DB, id, site, key, projectID string, polledAt any) {
 	t.Helper()
 	snap := map[string]string{"key": key}
 	if projectID != "" {
@@ -55,8 +33,8 @@ func seedJiraIssue(t *testing.T, database *sql.DB, id, scope, key, projectID, po
 	}
 	raw, _ := json.Marshal(snap)
 	mustExec(t, database, `
-		INSERT INTO entities (id, source, scope, source_id, kind, title, url, snapshot_json, last_polled_at)
-		VALUES (?, 'jira', ?, ?, 'issue', 't', '', ?, ?)`, id, scope, key, string(raw), polledAt)
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, last_polled_at)
+		VALUES (?, 'jira', ?, 'issue', 't', ?, ?, ?)`, id, key, site+"/browse/"+key, string(raw), polledAt)
 }
 
 // registryRow is one jira_projects row as the migration left it.
@@ -93,7 +71,7 @@ func registryByKey(t *testing.T, database *sql.DB) map[string]registryRow {
 // snapshots carry; the rules and the team's display order reference the rows;
 // and the rules keep everything they held.
 func TestMigrate_JiraProjectRegistry(t *testing.T) {
-	database := openMigrationsTestDBAt(t, TestDSNMemory, providerScopesVersion)
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
 	seedProviderScopesOrg(t, database)
 	mustExec(t, database, `INSERT INTO teams (id, org_id, slug, name) VALUES ('team-2', ?, 'other', 'Other')`, runmode.LocalDefaultOrgID)
 	const base = "Https://Acme.Atlassian.net/"
@@ -113,15 +91,15 @@ func TestMigrate_JiraProjectRegistry(t *testing.T) {
 	seedJiraIssue(t, database, "e-sky-1", site, "SKY-1", "10000", "2026-09-01 00:00:00")
 	seedJiraIssue(t, database, "e-sky-2", site, "SKY-2", "10000", "2026-09-02 00:00:00")
 	seedJiraIssue(t, database, "e-sky-far", "https://other.example.com", "SKY-9", "99999", "2026-09-30 00:00:00")
-	mustExec(t, database, `INSERT INTO entities (id, source, scope, source_id, kind, title, url, snapshot_json)
-		VALUES ('e-sky-bad', 'jira', ?, 'SKY-3', 'issue', 't', '', '{')`, site)
+	mustExec(t, database, `INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json)
+		VALUES ('e-sky-bad', 'jira', 'SKY-3', 'issue', 't', ?, '{')`, site+"/browse/SKY-3")
 	// OLD and NEW are one project: the team re-added it under its new key,
 	// and the tracker renamed most of its issues; NEW's evidence is newer.
 	seedJiraIssue(t, database, "e-old", site, "OLD-1", "30000", "2026-08-01 00:00:00")
 	seedJiraIssue(t, database, "e-new", site, "NEW-1", "30000", "2026-09-01 00:00:00")
 	// OPS has no issues, so nothing names its id.
 
-	migrateJiraRegistry(t, database)
+	migrateProviderScopes(t, database)
 
 	reg := registryByKey(t, database)
 	want := map[string]string{"SKY": "10000", "OPS": "", "OLD": "", "NEW": "30000"}
@@ -191,6 +169,44 @@ func TestMigrate_JiraProjectRegistry(t *testing.T) {
 	if _, err := database.Exec(`INSERT INTO jira_projects (id, org_id, site, project_key) VALUES ('dup', ?, ?, 'OPS')`, runmode.LocalDefaultOrgID, site); err == nil {
 		t.Error("a second unresolved row for OPS was stored")
 	}
+	assertNoDanglingReferences(t, database)
+}
+
+// TestMigrate_JiraProjectRegistryEvidenceWithoutAPollTime: an issue row can
+// carry no poll time. When two keys' evidence names one project id, the id
+// still lands on exactly one registry row, so the identity index holds and the
+// migration completes: a key with a poll time wins over one without, and the
+// lower key wins when neither has one.
+func TestMigrate_JiraProjectRegistryEvidenceWithoutAPollTime(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		oldPolled, newPolled any
+		resolved, unresolved string
+	}{
+		{name: "one has a poll time", oldPolled: "2026-09-01 00:00:00", newPolled: nil, resolved: "OLD", unresolved: "NEW"},
+		{name: "neither has one", oldPolled: nil, newPolled: nil, resolved: "NEW", unresolved: "OLD"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+			seedProviderScopesOrg(t, database)
+			const site = "https://acme.atlassian.net"
+			setOrgBaseURL(t, database, runmode.LocalDefaultOrgID, "jira", site)
+			seedLegacyJiraRule(t, database, "team-1", "OLD", `[]`)
+			seedLegacyJiraRule(t, database, "team-1", "NEW", `[]`)
+			seedJiraIssue(t, database, "e-old", site, "OLD-1", "30000", tc.oldPolled)
+			seedJiraIssue(t, database, "e-new", site, "NEW-1", "30000", tc.newPolled)
+
+			migrateProviderScopes(t, database)
+
+			reg := registryByKey(t, database)
+			if reg[tc.resolved].externalID != "30000" || reg[tc.unresolved].externalID != "" {
+				t.Errorf("registry = %+v, want 30000 on %s alone", reg, tc.resolved)
+			}
+			if n := queryInt(t, database, `SELECT count(*) FROM jira_project_status_rules`); n != 2 {
+				t.Errorf("rules = %d, want both carried", n)
+			}
+		})
+	}
 }
 
 // TestMigrate_JiraProjectRegistrySiteMatchesGo: the site every registry row
@@ -207,12 +223,12 @@ func TestMigrate_JiraProjectRegistrySiteMatchesGo(t *testing.T) {
 		"Https://Jira.Example.com/Jira",
 	} {
 		t.Run(base, func(t *testing.T) {
-			database := openMigrationsTestDBAt(t, TestDSNMemory, providerScopesVersion)
+			database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
 			seedProviderScopesOrg(t, database)
 			setOrgBaseURL(t, database, runmode.LocalDefaultOrgID, "jira", base)
 			seedLegacyJiraRule(t, database, "team-1", "SKY", `[]`)
 
-			migrateJiraRegistry(t, database)
+			migrateProviderScopes(t, database)
 
 			want := domain.EntityScope("jira", domain.OrgSettings{JiraBaseURL: base})
 			if got := queryString(t, database, `SELECT site FROM jira_projects WHERE project_key = 'SKY'`); got != want {
@@ -228,14 +244,14 @@ func TestMigrate_JiraProjectRegistrySiteMatchesGo(t *testing.T) {
 // its rules are not carried.
 func TestMigrate_JiraProjectRegistryWithoutAConfiguredSite(t *testing.T) {
 	t.Run("issues name the site", func(t *testing.T) {
-		database := openMigrationsTestDBAt(t, TestDSNMemory, providerScopesVersion)
+		database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
 		seedProviderScopesOrg(t, database)
 		setOrgBaseURL(t, database, runmode.LocalDefaultOrgID, "jira", "")
 		seedLegacyJiraRule(t, database, "team-1", "SKY", `[]`)
 		seedJiraIssue(t, database, "e-old", "https://old.example.com", "SKY-1", "10000", "2026-08-01 00:00:00")
 		seedJiraIssue(t, database, "e-new", "https://last.example.com", "SKY-2", "10000", "2026-09-01 00:00:00")
 
-		migrateJiraRegistry(t, database)
+		migrateProviderScopes(t, database)
 
 		if got := queryString(t, database, `SELECT site FROM jira_projects WHERE project_key = 'SKY'`); got != "https://last.example.com" {
 			t.Errorf("site = %q, want the one SKY was last polled from", got)
@@ -248,11 +264,11 @@ func TestMigrate_JiraProjectRegistryWithoutAConfiguredSite(t *testing.T) {
 		}
 	})
 	t.Run("nothing names a site", func(t *testing.T) {
-		database := openMigrationsTestDBAt(t, TestDSNMemory, providerScopesVersion)
+		database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
 		seedProviderScopesOrg(t, database)
 		seedLegacyJiraRule(t, database, "team-1", "SKY", `[]`)
 
-		migrateJiraRegistry(t, database)
+		migrateProviderScopes(t, database)
 
 		if n := queryInt(t, database, `SELECT count(*) FROM jira_projects`); n != 0 {
 			t.Errorf("registry rows = %d, want none", n)

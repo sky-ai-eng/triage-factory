@@ -4,10 +4,12 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // teamJiraRules reads the default team's stored rules on the org's Jira site,
@@ -117,5 +119,44 @@ func TestJiraProjectsPut_RefusesASecondKeyForOneProject(t *testing.T) {
 	}
 	if got := teamJiraProjectKeys(t, s); len(got) != 1 || got[0] != "OLD" {
 		t.Errorf("stored keys after the refused write = %v, want [OLD]", got)
+	}
+}
+
+// TestJiraProjectsPut_ConflictsWithAMergeMidSave: while a save that read the
+// team's set is asking Jira about an added key, the poll merges a stored
+// project's unresolved registry row into the row that carries its Jira id. The
+// save names a row that no longer exists, so it is refused as a conflict to
+// read again, and nothing it carried is written.
+func TestJiraProjectsPut_ConflictsWithAMergeMidSave(t *testing.T) {
+	s, fake := newServerWithJiraCatalog(t, "SKY", "OPS")
+	if rec := putJiraProjects(t, s, "SKY"); rec.Code != http.StatusOK {
+		t.Fatalf("PUT = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	stored, site := teamJiraRules(t, s)
+	if _, err := s.db.Exec(`UPDATE jira_projects SET external_id = NULL WHERE id = ?`, stored[0].JiraProjectID); err != nil {
+		t.Fatalf("unresolve SKY: %v", err)
+	}
+	if _, err := s.allStores.JiraProjects.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, site, "777", "SKYNEW", "Sky"); err != nil {
+		t.Fatalf("FindOrCreate: %v", err)
+	}
+	var merge sync.Once
+	fake.OnCall(func() {
+		merge.Do(func() {
+			if _, err := s.allStores.JiraProjects.RefreshSystem(t.Context(), runmode.LocalDefaultOrgID,
+				stored[0].JiraProjectID, "777", "SKYNEW", "Sky"); err != nil {
+				t.Errorf("RefreshSystem: %v", err)
+			}
+		})
+	})
+
+	rec := putJiraProjects(t, s, "SKY", "OPS")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("PUT racing a merge = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if items := decodeErrorItems(t, rec); len(items) != 1 || items[0].Reason != httpx.ReasonConflict {
+		t.Errorf("errors = %+v, want one CONFLICT", items)
+	}
+	if got := teamJiraProjectKeys(t, s); !slices.Equal(got, []string{"SKYNEW"}) {
+		t.Errorf("stored keys after the refused write = %v, want the merged [SKYNEW] alone", got)
 	}
 }

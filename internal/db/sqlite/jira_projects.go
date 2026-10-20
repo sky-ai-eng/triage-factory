@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -183,7 +184,7 @@ func mergeJiraProject(ctx context.Context, tx queryer, orgID, from, to string) e
 	}
 	rows.Close()
 	for _, o := range orders {
-		next, err := marshalJSONArray(db.ReplaceJiraProjectInOrder(o.order, from, to))
+		next, err := marshalJSONArray(replaceJiraProjectInOrder(o.order, from, to))
 		if err != nil {
 			return fmt.Errorf("marshal team_settings.jira_projects: %w", err)
 		}
@@ -198,4 +199,22 @@ func mergeJiraProject(ctx context.Context, tx queryer, orgID, from, to string) e
 		return fmt.Errorf("delete merged jira project %s: %w", from, err)
 	}
 	return nil
+}
+
+// replaceJiraProjectInOrder is a team's display order of tracked projects with
+// the registry row from replaced by to, kept where from stood. When to is
+// already listed, from is dropped instead, so the merged project appears once.
+func replaceJiraProjectInOrder(order []string, from, to string) []string {
+	hasTo := slices.Contains(order, to)
+	out := make([]string, 0, len(order))
+	for _, id := range order {
+		switch {
+		case id != from:
+			out = append(out, id)
+		case !hasTo:
+			out = append(out, to)
+			hasTo = true
+		}
+	}
+	return out
 }

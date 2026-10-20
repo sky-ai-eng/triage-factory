@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"slices"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -73,22 +72,4 @@ func ScanJiraProject(row *sql.Row) (domain.JiraProject, error) {
 	var p domain.JiraProject
 	err := row.Scan(&p.ID, &p.OrgID, &p.Site, &p.ExternalID, &p.Key, &p.Name)
 	return p, err
-}
-
-// ReplaceJiraProjectInOrder is a team's display order of tracked projects with
-// the registry row from replaced by to, kept where from stood. When to is
-// already listed, from is dropped instead, so the merged project appears once.
-func ReplaceJiraProjectInOrder(order []string, from, to string) []string {
-	hasTo := slices.Contains(order, to)
-	out := make([]string, 0, len(order))
-	for _, id := range order {
-		switch {
-		case id != from:
-			out = append(out, id)
-		case !hasTo:
-			out = append(out, to)
-			hasTo = true
-		}
-	}
-	return out
 }

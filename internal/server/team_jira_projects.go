@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -206,6 +207,16 @@ func (s *Server) handleTeamJiraProjectsPut(w http.ResponseWriter, r *http.Reques
 		}
 		return nil
 	}); err != nil {
+		// Every project's row was read on this site in this org above, so a
+		// row the rules write cannot place moved since: the poll merged it
+		// into the row its Jira id names. The caller's set is stale, not wrong.
+		if errors.Is(err, db.ErrJiraRuleProjectNotOnSite) {
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+				Reason:  httpx.ReasonConflict,
+				Message: "a tracked Jira project changed while saving; read the team's projects again and retry",
+			})
+			return
+		}
 		internalError(w, "settings/team/jira-projects", err)
 		return
 	}

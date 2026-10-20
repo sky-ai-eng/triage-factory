@@ -66,6 +66,7 @@ type jiraCatalogFake struct {
 	failFor  map[string]bool
 	hidden   map[string]bool
 	calls    int
+	onCall   func()
 }
 
 // newJiraCatalogFake starts a fake serving the given project keys, each with
@@ -84,7 +85,11 @@ func newJiraCatalogFake(t *testing.T, keys ...string) *jiraCatalogFake {
 		failing = failing || (isStatuses && f.failFor[project])
 		hidden := (isStatuses && f.hidden[project]) ||
 			(isProject && (f.hidden[single] || !slices.Contains(keys, single)))
+		onCall := f.onCall
 		f.mu.Unlock()
+		if onCall != nil {
+			onCall()
+		}
 
 		if failing {
 			// 401 rather than a 5xx: an idempotent GET retries a 5xx three
@@ -180,6 +185,13 @@ func (f *jiraCatalogFake) Calls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
+}
+
+// OnCall runs fn as each request arrives, before the fake answers it.
+func (f *jiraCatalogFake) OnCall(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onCall = fn
 }
 
 // SetKeys replaces the catalog, standing in for a project created or deleted in

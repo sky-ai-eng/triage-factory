@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -148,46 +147,18 @@ func mergeJiraProject(ctx context.Context, tx queryer, orgID, from, to string) e
 		return fmt.Errorf("drop jira rules of %s: %w", from, err)
 	}
 
-	type teamOrder struct {
-		teamID string
-		order  []string
-	}
-	rows, err := tx.QueryContext(ctx, `
-		SELECT ts.team_id, array_to_json(ts.jira_projects)::text
-		  FROM team_settings ts
-		  JOIN teams t ON t.id = ts.team_id
-		 WHERE t.org_id = $1 AND $2 = ANY (ts.jira_projects)`,
-		orgID, from)
-	if err != nil {
-		return fmt.Errorf("read team project orders: %w", err)
-	}
-	var orders []teamOrder
-	for rows.Next() {
-		var (
-			o   teamOrder
-			raw string
-		)
-		if err := rows.Scan(&o.teamID, &raw); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan team project order: %w", err)
-		}
-		if err := json.Unmarshal([]byte(raw), &o.order); err != nil {
-			rows.Close()
-			return fmt.Errorf("unmarshal team_settings.jira_projects: %w", err)
-		}
-		orders = append(orders, o)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-	for _, o := range orders {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE team_settings SET jira_projects = $2 WHERE team_id = $1`,
-			o.teamID, db.ReplaceJiraProjectInOrder(o.order, from, to)); err != nil {
-			return fmt.Errorf("rewrite project order of team %s: %w", o.teamID, err)
-		}
+	// One statement, so each team's order is rewritten from the row it locks:
+	// a settings save that commits first is the value rewritten, never
+	// overwritten with an earlier read of it.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE team_settings ts
+		   SET jira_projects = CASE WHEN $3::text = ANY (ts.jira_projects)
+		                            THEN array_remove(ts.jira_projects, $2::text)
+		                            ELSE array_replace(ts.jira_projects, $2::text, $3::text) END
+		  FROM teams t
+		 WHERE t.id = ts.team_id AND t.org_id = $1 AND $2::text = ANY (ts.jira_projects)`,
+		orgID, from, to); err != nil {
+		return fmt.Errorf("rewrite team project orders: %w", err)
 	}
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM jira_projects WHERE id = $1`, from); err != nil {
