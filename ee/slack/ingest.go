@@ -197,14 +197,11 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 	occurredAt := parseSlackTS(ev.TS)
 	// Before the dedup insert, so a failed write leaves the delivery
 	// unrecorded and Slack's redelivery can still land it; recording a
-	// redelivered sighting again changes nothing. The sighting resolves the
-	// delivered channel id to the channel's row — an id Slack has since
-	// replaced included — and the message carries the id the row has now.
-	channel, err := p.channels.UpsertSightingSystem(ctx, ws.OrgID, ws.WorkspaceID, ev.Channel, occurredAt)
-	if err != nil {
+	// redelivered sighting again changes nothing. The sighting registers the
+	// channel the thread below references.
+	if _, err := p.channels.UpsertSightingSystem(ctx, ws.OrgID, ws.WorkspaceID, ev.Channel, occurredAt); err != nil {
 		return outcomeError, fmt.Errorf("record slack channel sighting: %w", err)
 	}
-	ev.Channel = channel.ChannelID
 
 	fresh, err := p.deliveries.MarkDeliveredSystem(ctx, ws.APIAppID, ev.EventID)
 	if err != nil {
@@ -214,7 +211,6 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 		slackLog.Debug("dropping duplicate slack delivery", "workspace", ws.WorkspaceID, "app", ws.APIAppID, "event_id", ev.EventID)
 		return dropDuplicate, nil
 	}
-	p.resolveChannelNameIfStale(ws, channel)
 
 	root := ev.ThreadTS
 	// kind encodes thread engagement: an empty ThreadTS means this mention
@@ -227,10 +223,17 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 	} else {
 		root = ev.TS
 	}
-	entityID, created, err := p.channels.FindOrCreateThreadSystem(ctx, ws.OrgID, channel.ID, root, kind, slackThreadTitle, "")
+	// By the delivered id, not the sighting's row: a move committing since the
+	// sighting can absorb that row, and the delivery is already recorded, so
+	// a failure here would lose the mention. The thread resolves the id under
+	// the move lock, and the message carries the row and id it found.
+	thread, err := p.channels.FindOrCreateThreadSystem(ctx, ws.OrgID, ev.Channel, root, kind, slackThreadTitle, "")
 	if err != nil {
 		return outcomeError, fmt.Errorf("find or create slack thread entity: %w", err)
 	}
+	entityID, created, channel := thread.EntityID, thread.Created, thread.Channel
+	ev.Channel = channel.ChannelID
+	p.resolveChannelNameIfStale(ws, channel)
 	// Only on create: the thread-root permalink is stable once minted, and
 	// repeat mentions on an already-known thread shouldn't re-resolve it.
 	if created && p.permalink != nil {

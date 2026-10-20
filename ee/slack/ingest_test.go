@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
@@ -78,6 +79,10 @@ func (f *fakeEntities) seedThread(orgID, sourceID, kind, state string) {
 type fakeDeliveries struct {
 	seen map[string]bool
 	err  error
+
+	// onFresh, if set, runs after a delivery is recorded as new — the gap
+	// between the dedup insert and the thread write.
+	onFresh func()
 }
 
 func newFakeDeliveries() *fakeDeliveries { return &fakeDeliveries{seen: map[string]bool{}} }
@@ -91,6 +96,9 @@ func (f *fakeDeliveries) MarkDeliveredSystem(_ context.Context, workspaceID, eve
 		return false, nil
 	}
 	f.seen[key] = true
+	if f.onFresh != nil {
+		f.onFresh()
+	}
 	return true, nil
 }
 
@@ -246,23 +254,28 @@ func (f *fakeChannelRegistry) ListForOrg(context.Context, string) ([]slackstore.
 
 // FindOrCreateThreadSystem creates the thread in the linked fakeEntities,
 // keyed under the id the channel's row carries.
-func (f *fakeChannelRegistry) FindOrCreateThreadSystem(_ context.Context, orgID, id, threadTS, kind, title, url string) (string, bool, error) {
+func (f *fakeChannelRegistry) FindOrCreateThreadSystem(_ context.Context, orgID, channelID, threadTS, kind, title, url string) (slackstore.Thread, error) {
 	f.mu.Lock()
-	row, ok := f.rows[id]
+	row := f.lookup(orgID, channelID)
+	var channel slackstore.Channel
+	if row != nil {
+		channel = *row
+	}
 	f.mu.Unlock()
-	if !ok {
-		return "", false, errors.New("fake registry: unknown channel row " + id)
+	if row == nil {
+		return slackstore.Thread{}, fmt.Errorf("%w: %s", slackstore.ErrChannelNotRegistered, channelID)
 	}
-	e, created, err := f.entities.findOrCreate(orgID, "slack", domain.SlackScope, domain.SlackSourceID(row.ChannelID, threadTS), kind, title, url)
+	e, created, err := f.entities.findOrCreate(orgID, "slack", domain.SlackScope, domain.SlackSourceID(channel.ChannelID, threadTS), kind, title, url)
 	if err != nil {
-		return "", false, err
+		return slackstore.Thread{}, err
 	}
-	return e.ID, created, nil
+	return slackstore.Thread{EntityID: e.ID, Created: created, Channel: channel}, nil
 }
 
 // MoveSystem records the change so a retired id resolves to the channel's
-// row, moves the row onto the new id, and records the call itself in
-// sawMoves; moveErr fails it.
+// row, moves the row onto the new id — deleting a row the new id already
+// had, as the store absorbs it — and records the call itself in sawMoves;
+// moveErr fails it.
 func (f *fakeChannelRegistry) MoveSystem(_ context.Context, orgID, oldID, newID string) (slackstore.ChannelMove, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -271,6 +284,11 @@ func (f *fakeChannelRegistry) MoveSystem(_ context.Context, orgID, oldID, newID 
 		return slackstore.ChannelMove{}, f.moveErr
 	}
 	row := f.lookup(orgID, oldID)
+	if row != nil {
+		if absorbed := f.lookup(orgID, newID); absorbed != nil && absorbed != row {
+			delete(f.rows, absorbed.ID)
+		}
+	}
 	if f.moved == nil {
 		f.moved = map[string]string{}
 	}
@@ -338,6 +356,41 @@ func TestHandleEventCallback_PublishesCorrectEventShape(t *testing.T) {
 	}
 	if row := p.channels.(*fakeChannelRegistry).row("org-1", "C1"); row == nil || meta.ChannelRowID != row.ID {
 		t.Errorf("ChannelRowID = %q; want the channel's registry row %+v", meta.ChannelRowID, row)
+	}
+}
+
+// TestHandleEventCallback_MentionSurvivesAMoveAfterDedup: a mention under a
+// channel's new id registers a row of its own, and a move committing right
+// after the delivery is recorded absorbs that row. The delivery cannot be
+// retried past the dedup, so the thread and the message land on the
+// surviving row.
+func TestHandleEventCallback_MentionSurvivesAMoveAfterDedup(t *testing.T) {
+	p, entities, deliveries, published := newTestPipeline()
+	channels := p.channels.(*fakeChannelRegistry)
+	ws := testWorkspaceRow("org-1")
+	survivor := channels.register("org-1", ws.WorkspaceID, "G1")
+	deliveries.onFresh = func() {
+		if _, err := channels.MoveSystem(context.Background(), "org-1", "G1", "C1"); err != nil {
+			t.Errorf("MoveSystem: %v", err)
+		}
+	}
+
+	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "C1", User: "U1", Text: "hi", TS: "1600000000.000100"}
+	if err := p.handleEventCallback(context.Background(), ws, ev); err != nil {
+		t.Fatalf("handleEventCallback: %v", err)
+	}
+	if len(*published) != 1 {
+		t.Fatalf("published %d events; want 1", len(*published))
+	}
+	var meta SlackMessageMetadata
+	if err := json.Unmarshal([]byte((*published)[0].MetadataJSON), &meta); err != nil {
+		t.Fatalf("metadata: %v", err)
+	}
+	if meta.ChannelRowID != survivor.ID || meta.Channel != "C1" {
+		t.Errorf("metadata channel = %q (row %q); want C1 on the surviving row %s", meta.Channel, meta.ChannelRowID, survivor.ID)
+	}
+	if e, _ := entities.GetBySourceSystem(context.Background(), "org-1", "slack", domain.SlackScope, "C1/1600000000.000100"); e == nil {
+		t.Error("no thread entity under C1/1600000000.000100")
 	}
 }
 

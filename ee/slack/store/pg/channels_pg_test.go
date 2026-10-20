@@ -2,6 +2,7 @@ package pg_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -274,9 +275,10 @@ func TestChannelRegistry_Postgres_ListForOrg_MemberScopedTwoOrgsIndependent(t *t
 
 // TestChannelRegistry_Postgres_FindOrCreateThread: a thread entity is created
 // once per key, referencing its channel's row; a second call finds it and
-// never rewrites its kind; the key names the id the channel has now; and the
-// core entity store cannot create a Slack entity at all, since it has no
-// channel row to reference.
+// never rewrites its kind; the key names the id the channel has now, whichever
+// id the call names it by; a channel with no row is ErrChannelNotRegistered;
+// and the core entity store cannot create a Slack entity at all, since it has
+// no channel row to reference.
 func TestChannelRegistry_Postgres_FindOrCreateThread(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -289,10 +291,14 @@ func TestChannelRegistry_Postgres_FindOrCreateThread(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
-	id, created, err := channels.FindOrCreateThreadSystem(ctx, orgID, row.ID, "1700000000.000100", "thread", "root", "https://x/p1")
-	if err != nil || !created {
-		t.Fatalf("FindOrCreateThreadSystem (first) = %s, %v, %v; want created", id, created, err)
+	first, err := channels.FindOrCreateThreadSystem(ctx, orgID, "G0THREAD1", "1700000000.000100", "thread", "root", "https://x/p1")
+	if err != nil || !first.Created {
+		t.Fatalf("FindOrCreateThreadSystem (first) = %+v, %v; want created", first, err)
 	}
+	if first.Channel.ID != row.ID || first.Channel.ChannelID != "G0THREAD1" {
+		t.Errorf("answer's channel = %+v; want the row %s", first.Channel, row.ID)
+	}
+	id := first.EntityID
 	e, err := stores.Entities.GetSystem(ctx, orgID, id)
 	if err != nil || e == nil {
 		t.Fatalf("read thread entity: %+v, %v", e, err)
@@ -305,9 +311,9 @@ func TestChannelRegistry_Postgres_FindOrCreateThread(t *testing.T) {
 		t.Errorf("slack_channel_id = %q; want the channel's row %s", got, row.ID)
 	}
 
-	again, created, err := channels.FindOrCreateThreadSystem(ctx, orgID, row.ID, "1700000000.000100", "message", "ignored", "")
-	if err != nil || created || again != id {
-		t.Errorf("FindOrCreateThreadSystem (again) = %s, %v, %v; want %s found", again, created, err, id)
+	again, err := channels.FindOrCreateThreadSystem(ctx, orgID, "G0THREAD1", "1700000000.000100", "message", "ignored", "")
+	if err != nil || again.Created || again.EntityID != id {
+		t.Errorf("FindOrCreateThreadSystem (again) = %+v, %v; want %s found", again, err, id)
 	}
 	if e, _ := stores.Entities.GetSystem(ctx, orgID, id); e.Kind != "thread" {
 		t.Errorf("kind = %q; want thread (unchanged by a later message-kind resolve)", e.Kind)
@@ -316,12 +322,18 @@ func TestChannelRegistry_Postgres_FindOrCreateThread(t *testing.T) {
 	if _, err := channels.MoveSystem(ctx, orgID, "G0THREAD1", "C0THREAD1"); err != nil {
 		t.Fatalf("MoveSystem: %v", err)
 	}
-	moved, created, err := channels.FindOrCreateThreadSystem(ctx, orgID, row.ID, "1700000000.000200", "thread", "next", "")
-	if err != nil || !created {
-		t.Fatalf("FindOrCreateThreadSystem (after move) = %s, %v, %v", moved, created, err)
+	for _, named := range []string{"G0THREAD1", "C0THREAD1"} {
+		moved, err := channels.FindOrCreateThreadSystem(ctx, orgID, named, "1700000000.000200", "thread", "next", "")
+		if err != nil || moved.Channel.ID != row.ID || moved.Channel.ChannelID != "C0THREAD1" {
+			t.Fatalf("FindOrCreateThreadSystem (after move, by %s) = %+v, %v; want the row under its new id", named, moved, err)
+		}
+		if e, _ := stores.Entities.GetSystem(ctx, orgID, moved.EntityID); e.SourceID != "C0THREAD1/1700000000.000200" {
+			t.Errorf("key after the move, by %s = %q; want it under the channel's new id", named, e.SourceID)
+		}
 	}
-	if e, _ := stores.Entities.GetSystem(ctx, orgID, moved); e.SourceID != "C0THREAD1/1700000000.000200" {
-		t.Errorf("key after the move = %q; want it under the channel's new id", e.SourceID)
+
+	if _, err := channels.FindOrCreateThreadSystem(ctx, orgID, "C0UNKNOWN", "1700000000.000100", "thread", "", ""); !errors.Is(err, slackstore.ErrChannelNotRegistered) {
+		t.Errorf("FindOrCreateThreadSystem (unregistered) err = %v; want ErrChannelNotRegistered", err)
 	}
 
 	if _, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "slack", domain.SlackScope, "C0THREAD1/1700000000.000300", "", "message", "", ""); err == nil {

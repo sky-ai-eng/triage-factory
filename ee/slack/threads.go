@@ -33,23 +33,16 @@ func resolveSlackThread(ctx context.Context, stores db.Stores, orgID, sourceID, 
 	if bundle == nil {
 		return nil, fmt.Errorf("slack: not available")
 	}
-	channel, err := bundle.Channels.ResolveSystem(ctx, orgID, channelID)
+	thread, err := bundle.Channels.FindOrCreateThreadSystem(ctx, orgID, channelID, threadTS, kind, "", url)
 	if err != nil {
-		return nil, fmt.Errorf("slack: resolve channel %s: %w", channelID, err)
+		return nil, fmt.Errorf("slack: thread %s: %w", sourceID, err)
 	}
-	if channel == nil {
-		return nil, fmt.Errorf("slack: channel %s is not registered", channelID)
-	}
-	entityID, _, err := bundle.Channels.FindOrCreateThreadSystem(ctx, orgID, channel.ID, threadTS, kind, "", url)
-	if err != nil {
-		return nil, err
-	}
-	entity, err := stores.Entities.GetSystem(ctx, orgID, entityID)
+	entity, err := stores.Entities.GetSystem(ctx, orgID, thread.EntityID)
 	if err != nil {
 		return nil, err
 	}
 	if entity == nil {
-		return nil, fmt.Errorf("slack: thread entity %s vanished after its find-or-create", entityID)
+		return nil, fmt.Errorf("slack: thread entity %s vanished after its find-or-create", thread.EntityID)
 	}
 	return entity, nil
 }

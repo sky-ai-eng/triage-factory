@@ -45,8 +45,8 @@ func (s *channelRegistryStore) ListForOrg(context.Context, string) ([]slackstore
 	return nil, db.ErrNotApplicableInLocal
 }
 
-func (s *channelRegistryStore) FindOrCreateThreadSystem(context.Context, string, string, string, string, string, string) (string, bool, error) {
-	return "", false, db.ErrNotApplicableInLocal
+func (s *channelRegistryStore) FindOrCreateThreadSystem(context.Context, string, string, string, string, string, string) (slackstore.Thread, error) {
+	return slackstore.Thread{}, db.ErrNotApplicableInLocal
 }
 
 func (s *channelRegistryStore) MoveSystem(context.Context, string, string, string) (slackstore.ChannelMove, error) {

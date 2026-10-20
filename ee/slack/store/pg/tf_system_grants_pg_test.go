@@ -63,7 +63,7 @@ func TestTfSystem_SlackProviderReads(t *testing.T) {
 	}
 	// record_thread_root and the touched-entity resolver create threads on the
 	// executor.
-	if _, _, err := sys.Channels.FindOrCreateThreadSystem(ctx, orgID, channel.ID, "1700000000.000100", "thread", "", ""); err != nil {
+	if _, err := sys.Channels.FindOrCreateThreadSystem(ctx, orgID, channelID, "1700000000.000100", "thread", "", ""); err != nil {
 		t.Errorf("Channels.FindOrCreateThreadSystem (slack_channels + entities grants): %v", err)
 	}
 	if _, err := sys.Workspaces.GetByWorkspaceAppSystem(ctx, workspaceID, apiAppID); err != nil {

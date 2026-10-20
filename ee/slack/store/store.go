@@ -267,6 +267,18 @@ type Channel struct {
 	FirstSeenAt                             time.Time
 }
 
+// Thread is FindOrCreateThreadSystem's answer: the thread's entity, whether
+// the call created it, and the channel's row as the call read it.
+type Thread struct {
+	EntityID string
+	Created  bool
+	Channel  Channel
+}
+
+// ErrChannelNotRegistered is FindOrCreateThreadSystem's error for a channel
+// id no registry row answers to.
+var ErrChannelNotRegistered = errors.New("slackstore: channel is not registered")
+
 // ChannelRegistryStore owns slack_channels. Postgres-only; the SQLite impl
 // is a stub returning db.ErrNotApplicableInLocal, same posture as
 // WorkspaceStore. Every write is a `...System` method on the admin pool —
@@ -314,14 +326,18 @@ type ChannelRegistryStore interface {
 	ListForOrg(ctx context.Context, orgID string) ([]Channel, error)
 
 	// FindOrCreateThreadSystem returns the entity of the thread rooted at
-	// threadTS in the channel whose row is id, creating one (kind, title, url)
-	// when no entity answers to the thread's key. A Slack entity references
-	// its channel's row, so every Slack entity is created here. The key
-	// (domain.SlackSourceID) names the channel's Slack id as it is when the
-	// call runs: the call holds off a move for its duration. Like
+	// threadTS in the channel channelID names, creating one (kind, title,
+	// url) when no entity answers to the thread's key, or
+	// ErrChannelNotRegistered when no row answers to channelID. A Slack
+	// entity references its channel's row, so every Slack entity is created
+	// here. It takes the Slack id rather than a row id read earlier because a
+	// move can absorb that row and delete it; resolving the id and writing
+	// the entity under one hold of the move lock leaves no such gap, and the
+	// answer carries the row the call used. The key (domain.SlackSourceID)
+	// names the channel's Slack id as it is when the call runs. Like
 	// db.EntityStore.FindOrCreateSystem, a key only a closed entity holds
 	// returns that entity, and an existing entity's kind is never rewritten.
-	FindOrCreateThreadSystem(ctx context.Context, orgID, id, threadTS, kind, title, url string) (entityID string, created bool, err error)
+	FindOrCreateThreadSystem(ctx context.Context, orgID, channelID, threadTS, kind, title, url string) (Thread, error)
 
 	// MoveSystem follows Slack's change of a channel's id (the
 	// channel_id_changed event: a private channel shared through Slack

@@ -62,16 +62,16 @@ func trackersOf(t *testing.T, h *pgtest.Harness, orgID, row string) map[string]s
 	return out
 }
 
-func seedThreadEntity(t *testing.T, stores db.Stores, orgID, row, threadTS, kind, url string) domain.Entity {
+func seedThreadEntity(t *testing.T, stores db.Stores, orgID, channelID, threadTS, kind, url string) domain.Entity {
 	t.Helper()
 	ctx := context.Background()
-	id, _, err := slackstore.FromStores(stores).Channels.FindOrCreateThreadSystem(ctx, orgID, row, threadTS, kind, "thread", url)
+	thread, err := slackstore.FromStores(stores).Channels.FindOrCreateThreadSystem(ctx, orgID, channelID, threadTS, kind, "thread", url)
 	if err != nil {
-		t.Fatalf("seed thread %s in %s: %v", threadTS, row, err)
+		t.Fatalf("seed thread %s in %s: %v", threadTS, channelID, err)
 	}
-	e, err := stores.Entities.GetSystem(ctx, orgID, id)
+	e, err := stores.Entities.GetSystem(ctx, orgID, thread.EntityID)
 	if err != nil || e == nil {
-		t.Fatalf("read seeded thread %s: %+v, %v", id, e, err)
+		t.Fatalf("read seeded thread %s: %+v, %v", thread.EntityID, e, err)
 	}
 	return *e
 }
@@ -189,12 +189,12 @@ func TestChannelMove_Postgres_MovesTheChannel(t *testing.T) {
 	seedTracker(t, h, orgID, teamB, row, false, created.Add(time.Hour))
 	seedTracker(t, h, orgID, teamA, neighbourRow, true, created)
 
-	open := seedThreadEntity(t, stores, orgID, row, "1700000000.000100", "thread", movePermalink(moveOld, "1700000000000100"))
-	done := seedThreadEntity(t, stores, orgID, row, "1700000000.000200", "message", "")
+	open := seedThreadEntity(t, stores, orgID, moveOld, "1700000000.000100", "thread", movePermalink(moveOld, "1700000000000100"))
+	done := seedThreadEntity(t, stores, orgID, moveOld, "1700000000.000200", "message", "")
 	if _, err := stores.Entities.CloseSystem(ctx, orgID, done.ID); err != nil {
 		t.Fatalf("close entity: %v", err)
 	}
-	neighbour := seedThreadEntity(t, stores, orgID, neighbourRow, "1700000000.000100", "thread", movePermalink(moveNeighbour, "1700000000000100"))
+	neighbour := seedThreadEntity(t, stores, orgID, moveNeighbour, "1700000000.000100", "thread", movePermalink(moveNeighbour, "1700000000000100"))
 
 	artifact := seedMessageArtifact(t, stores, orgID, teamA, moveOld, "1700000000.000100", "1700000000.000300")
 	neighbourArtifact := seedMessageArtifact(t, stores, orgID, teamA, moveNeighbour, "1700000000.000100", "1700000000.000300")
@@ -348,8 +348,8 @@ func TestChannelMove_Postgres_AbsorbsWhatTheNewIDGotFirst(t *testing.T) {
 	seedTracker(t, h, orgID, teamA, absorbed.ID, false, created.Add(47*time.Hour))
 	seedTracker(t, h, orgID, teamB, absorbed.ID, true, created.Add(47*time.Hour))
 
-	original := seedThreadEntity(t, stores, orgID, channel.ID, "1700000000.000100", "thread", "")
-	newcomer := seedThreadEntity(t, stores, orgID, absorbed.ID, "1700000000.000100", "message", "")
+	original := seedThreadEntity(t, stores, orgID, moveOld, "1700000000.000100", "thread", "")
+	newcomer := seedThreadEntity(t, stores, orgID, moveNew, "1700000000.000100", "message", "")
 
 	kept := seedMessageArtifact(t, stores, orgID, teamA, moveOld, "1700000000.000100", "1700000000.000500")
 	held := seedMessageArtifact(t, stores, orgID, teamA, moveNew, "1700000000.000100", "1700000000.000500")
@@ -438,6 +438,43 @@ func TestChannelMove_Postgres_AbsorbsWhatTheNewIDGotFirst(t *testing.T) {
 	}
 }
 
+// TestChannelMove_Postgres_ThreadAfterTheSightingsRowIsAbsorbed is ingest's
+// mention path with a move landing between its two writes: a mention under
+// the new id registers a row of its own, the move absorbs and deletes that
+// row, and the thread created next by the delivered id lands on the
+// surviving row.
+func TestChannelMove_Postgres_ThreadAfterTheSightingsRowIsAbsorbed(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "chan-absorb-thread")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	channels := slackstore.FromStores(stores).Channels
+	ctx := context.Background()
+
+	row := channelRowNamed(t, channels, orgID, moveOld, "")
+	sighting, err := channels.UpsertSightingSystem(ctx, orgID, "T0MOVE001", moveNew, time.Now())
+	if err != nil {
+		t.Fatalf("sighting under the new id: %v", err)
+	}
+	if sighting.ID == row {
+		t.Fatalf("sighting under the new id resolved to the channel's row %s; want a row of its own", row)
+	}
+	if _, err := channels.MoveSystem(ctx, orgID, moveOld, moveNew); err != nil {
+		t.Fatalf("MoveSystem: %v", err)
+	}
+
+	thread, err := channels.FindOrCreateThreadSystem(ctx, orgID, moveNew, "1700000000.000100", "thread", "", "")
+	if err != nil {
+		t.Fatalf("FindOrCreateThreadSystem by the delivered id: %v", err)
+	}
+	if !thread.Created || thread.Channel.ID != row || thread.Channel.ChannelID != moveNew {
+		t.Errorf("thread = %+v; want created on the surviving row %s under %s", thread, row, moveNew)
+	}
+	if got := entityChannelRow(t, h, thread.EntityID); got != row {
+		t.Errorf("slack_channel_id = %q; want the surviving row %s", got, row)
+	}
+}
+
 // TestChannelMove_Postgres_ChainsAndReversals: every recorded change resolves
 // in one read to the channel's row, carrying the id it has now, through a
 // second move and through a move back.
@@ -517,7 +554,7 @@ func TestChannelMove_Postgres_StaleChangesDoNotRegress(t *testing.T) {
 	// Out of order: the second change first. A thread under the first id goes
 	// straight to the id the channel has now.
 	outOfOrder := channelRowNamed(t, channels, orgID, "G0STALE11", "")
-	thread := seedThreadEntity(t, stores, orgID, outOfOrder, "1700000000.000100", "thread", "")
+	thread := seedThreadEntity(t, stores, orgID, "G0STALE11", "1700000000.000100", "thread", "")
 	move("C0STALE11", "C0STALE12", "C0STALE12")
 	move("G0STALE11", "C0STALE11", "C0STALE12")
 	resolvesTo(t, channels, orgID, outOfOrder, "C0STALE12", "G0STALE11", "C0STALE11")
@@ -574,7 +611,9 @@ func TestChannelMove_Postgres_WritesWaitForAMoveInProgress(t *testing.T) {
 	wrote := make(chan result, 1)
 	go func() {
 		var r result
-		if r.thread, _, r.err = channels.FindOrCreateThreadSystem(ctx, orgID, row, "1700000000.000100", "thread", "", ""); r.err == nil {
+		var thread slackstore.Thread
+		if thread, r.err = channels.FindOrCreateThreadSystem(ctx, orgID, moveOld, "1700000000.000100", "thread", "", ""); r.err == nil {
+			r.thread = thread.EntityID
 			var ch slackstore.Channel
 			ch, r.err = channels.EnsureSystem(ctx, orgID, "", moveOld, "")
 			r.ensured = ch.ID

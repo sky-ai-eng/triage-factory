@@ -3,6 +3,7 @@ package slack
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
@@ -247,20 +248,17 @@ func slackOpRecordThreadRoot(ctx context.Context, stores db.Stores, info agentho
 	if bundle == nil {
 		return nil, fmt.Errorf("slack: not available")
 	}
-	channel, err := bundle.Channels.ResolveSystem(ctx, info.OrgID, a.Channel)
-	if err != nil {
-		return nil, fmt.Errorf("slack: resolve channel %s: %w", a.Channel, err)
-	}
-	if channel == nil {
+	thread, err := bundle.Channels.FindOrCreateThreadSystem(ctx, info.OrgID, a.Channel, a.TS, "thread", mentionTitle(a.Text), "")
+	if errors.Is(err, slackstore.ErrChannelNotRegistered) {
 		return nil, fmt.Errorf("slack: channel %s is not visible to Triage Factory", a.Channel)
 	}
-	entityID, created, err := bundle.Channels.FindOrCreateThreadSystem(ctx, info.OrgID, channel.ID, a.TS, "thread", mentionTitle(a.Text), "")
 	if err != nil {
 		return nil, fmt.Errorf("slack: record thread root entity: %w", err)
 	}
-	if !created {
+	if !thread.Created {
 		return nil, nil
 	}
+	entityID := thread.EntityID
 	ws, err := bundle.Workspaces.GetByWorkspaceAppSystem(ctx, a.WorkspaceID, a.APIAppID)
 	if err != nil {
 		slackLog.Warn("record thread root: resolve workspace for permalink failed", "workspace", a.WorkspaceID, "entity", entityID, "error", err)
@@ -269,7 +267,7 @@ func slackOpRecordThreadRoot(ctx context.Context, stores db.Stores, info agentho
 	if ws == nil {
 		return nil, nil
 	}
-	NewPermalinkResolver(stores).dispatch(*ws, entityID, channel.ChannelID, a.TS)
+	NewPermalinkResolver(stores).dispatch(*ws, entityID, thread.Channel.ChannelID, a.TS)
 	return nil, nil
 }
 

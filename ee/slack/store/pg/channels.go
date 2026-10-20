@@ -202,28 +202,28 @@ const threadKeyOrder = `ORDER BY (state = 'active') DESC, closed_at DESC NULLS L
 // row itself because the row references the channel's registry row, which
 // only this store resolves; the insert is the entity store's (DO NOTHING on a
 // lost race, then a re-read decides what the loser sees).
-func (s *channelRegistryStore) FindOrCreateThreadSystem(ctx context.Context, orgID, id, threadTS, kind, title, url string) (string, bool, error) {
+func (s *channelRegistryStore) FindOrCreateThreadSystem(ctx context.Context, orgID, channelID, threadTS, kind, title, url string) (slackstore.Thread, error) {
 	if threadTS == "" {
-		return "", false, errors.New("find or create slack thread: empty thread ts")
+		return slackstore.Thread{}, errors.New("find or create slack thread: empty thread ts")
 	}
-	var (
-		entityID string
-		created  bool
-	)
+	var out slackstore.Thread
 	err := inTx(ctx, s.admin, func(q db.Execer) error {
 		if err := lockChannelWrites(ctx, q, orgID); err != nil {
 			return err
 		}
-		var channelID string
-		if err := q.QueryRowContext(ctx, `
-			SELECT channel_id FROM slack_channels WHERE org_id = $1 AND id = $2
-		`, orgID, id).Scan(&channelID); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("slack channel %s is not registered", id)
-			}
-			return fmt.Errorf("read slack channel %s: %w", id, err)
+		channel, err := scanChannel(q.QueryRowContext(ctx, `
+			SELECT `+channelColumns+`
+			FROM slack_channels
+			WHERE org_id = $1 AND channel_id = `+currentChannelIDSQL("$2"),
+			orgID, channelID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: %s", slackstore.ErrChannelNotRegistered, channelID)
 		}
-		key := domain.SlackSourceID(channelID, threadTS)
+		if err != nil {
+			return fmt.Errorf("resolve slack channel %s: %w", channelID, err)
+		}
+		out.Channel = channel
+		key := domain.SlackSourceID(channel.ChannelID, threadTS)
 		find := func() (string, error) {
 			var found string
 			err := q.QueryRowContext(ctx, `
@@ -241,7 +241,7 @@ func (s *channelRegistryStore) FindOrCreateThreadSystem(ctx context.Context, org
 			return fmt.Errorf("find slack thread %s: %w", key, err)
 		}
 		if existing != "" {
-			entityID = existing
+			out.EntityID = existing
 			return nil
 		}
 
@@ -251,7 +251,7 @@ func (s *channelRegistryStore) FindOrCreateThreadSystem(ctx context.Context, org
 			INSERT INTO entities (id, org_id, source, scope, source_id, kind, title, url, state, created_at, last_polled_at, slack_channel_id)
 			VALUES ($1, $2, 'slack', $3, $4, $5, $6, $7, 'active', $8, $8, $9)
 			ON CONFLICT DO NOTHING
-		`, newID, orgID, domain.SlackScope, key, kind, title, url, now, id)
+		`, newID, orgID, domain.SlackScope, key, kind, title, url, now, channel.ID)
 		if err != nil {
 			return fmt.Errorf("insert slack thread %s: %w", key, err)
 		}
@@ -260,7 +260,7 @@ func (s *channelRegistryStore) FindOrCreateThreadSystem(ctx context.Context, org
 			return err
 		}
 		if n > 0 {
-			entityID, created = newID, true
+			out.EntityID, out.Created = newID, true
 			return nil
 		}
 		if existing, err = find(); err != nil {
@@ -269,11 +269,11 @@ func (s *channelRegistryStore) FindOrCreateThreadSystem(ctx context.Context, org
 		if existing == "" {
 			return fmt.Errorf("%w: slack %s in %s", db.ErrEntityKeyOccupied, key, domain.SlackScope)
 		}
-		entityID = existing
+		out.EntityID = existing
 		return nil
 	})
 	if err != nil {
-		return "", false, err
+		return slackstore.Thread{}, err
 	}
-	return entityID, created, nil
+	return out, nil
 }
