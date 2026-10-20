@@ -1118,8 +1118,9 @@ are exactly what "counts + memory" fails to capture:
 - **Admission becomes budget-based the day two resource classes
   exist.** Today's `max_runs` and the ~512 MB/run rule assume uniform
   runs; a browser profile is several × that. The profile carries a
-  `mem_budget_mb`, the conversation row is stamped with it at enqueue, the
-  claim admits on `reserved_mb + budget ≤ capacity` (keeping
+  `mem_budget_mb`, the claim reads it from the copy of the profile the
+  conversation was minted with (sandbox-fleet §6) and admits on
+  `reserved_mb + budget ≤ capacity` (keeping
   `max_runs` as an absolute ceiling and the TFAC-552 floor as the
   actual-memory backstop), and the heartbeat reports `reserved_mb`
   alongside `active_runs`.
@@ -1207,7 +1208,7 @@ are exactly what "counts + memory" fails to capture:
   at once") — orthogonal to the operator's memory-denominated compute
   quota; the claim composes both (plus fairness ordering and the capacity
   floor). Lands with budget admission below (needs `mem_budget_mb` on the
-  profile + run), and is console-EE / SaaS-only.
+  profile and its frozen copy), and is console-EE / SaaS-only.
 
 None of this is needed while only the "base" profile exists — P1–P3
 deliberately assume one variant and a uniform budget. The gate:

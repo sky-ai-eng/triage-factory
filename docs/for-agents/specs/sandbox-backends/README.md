@@ -391,9 +391,9 @@ declared and matched, never branched on:
   never a promise (§8).
 - **Three records, one per question.** What an executor can build goes on its
   `instances` row with its backend name, written at each boot. What a run
-  needs is its profile's requirements, stamped on the conversation at enqueue
-  the way horizontal-scaling §6.4 stamps `mem_budget_mb`, so editing a
-  profile does not change work already queued or parked. What an engagement
+  needs is in the copy of its profile frozen when the conversation was minted,
+  which the conversation references (sandbox-fleet §6), so editing a profile
+  does not change work already queued or parked. What an engagement
   got is an execution manifest on the claim, next to
   `claims.source_manifest`: the backend and the capabilities granted. It is
   per claim because one conversation's claims can land on different backends

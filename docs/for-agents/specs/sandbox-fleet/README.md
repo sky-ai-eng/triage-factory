@@ -265,10 +265,19 @@ cross-org recipe-sharing invariant — are specified in
 - **Rule binding.** The router (`internal/routing/router.go`) already matches
   events to `task_rules` and fires `prompt_triggers` for auto-delegation. The
   binding adds a profile reference to the trigger/rule, which the delegation
-  spawner (`internal/delegate/spawner.go`) resolves to `sandbox.Config` (image
-  variant, rlimits, the proxy's allowlist/denylist) + the Machine class. Keep
-  selection **explicit and data-driven** — a CI-triage rule must never
-  accidentally spin a heavy browser sandbox.
+  spawner (`internal/delegate/spawner.go`) resolves, through the frozen copy
+  below, to `sandbox.Config` (image variant, rlimits, the proxy's
+  allowlist/denylist) + the Machine class. Keep selection **explicit and
+  data-driven** — a CI-triage rule must never accidentally spin a heavy
+  browser sandbox.
+- **A conversation runs on a frozen copy.** The profile row is the editable
+  definition. When a conversation is minted, the definition it resolves to is
+  copied and frozen, and the conversation references that copy by foreign
+  key, the way a blueprint run freezes its step plan at mint
+  (`blueprint_runs.step_plan`). Everything a run reads from its profile
+  (image, egress, resources, `mem_budget_mb`, capability requirements) comes
+  from the copy, so an edit changes only conversations minted after it, and a
+  queued or parked conversation keeps what it was minted with.
 - **Defaults.** A built-in "base" profile (today's behavior) is the default when a
   rule names none, so existing rules keep working unchanged.
 
