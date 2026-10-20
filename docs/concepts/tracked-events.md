@@ -726,10 +726,16 @@ These are internal signals, not shown in the triage UI.
 ### GitHub PR Snapshot
 
 The entity itself carries `source_id` (`owner/repo#N`), `scope` (the org's
-GitHub host) and `repository_id`, the registry row of its repository. That row
-is created with the entity when TF holds none for the repository, so a pull
-request in a repository no team tracks has one too, and a repository rename
-leaves the reference in place while it rewrites `source_id`.
+GitHub host), `external_id` (the pull request's GraphQL node id, which it is
+matched on once known) and `repository_id`, the registry row of its
+repository. That row is created with the entity when TF holds none for the
+repository, so a pull request in a repository no team tracks has one too, and
+a repository rename leaves the reference in place while it rewrites
+`source_id`. Because a pull request is matched on its node id, a read of it
+under its repository's new name before TF applies the rename (a search names a
+repository as GitHub does now) lands on the existing entity, and `source_id`
+moves only with the repository rename. An entity an agent's touch created
+from a key alone learns its node id from the next poll.
 
 The tracker stores these fields for each PR and diffs them between cycles:
 

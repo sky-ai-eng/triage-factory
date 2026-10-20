@@ -61,8 +61,10 @@ import (
 // reuses never collides with the history it used to name. Where the provider
 // has an id that a key change does not move, external_id holds it and is
 // unique per scope; that is the identity, and a key change is RenameSystem on
-// the row carrying it. Every key-based method takes the scope: no entity is
-// created, found or renamed without one.
+// the row carrying it, except a pull request's (a GitHub row's external_id is
+// its node id), whose key moves only with its repository's name (below).
+// Every key-based method takes the scope: no entity is created, found or
+// renamed without one.
 //
 // # A Linear issue's team
 //

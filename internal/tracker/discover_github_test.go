@@ -38,6 +38,15 @@ const openPRBody = `[
   }
 ]`
 
+// openPRBodyFor is openPRBody as the repository a listing request's path names
+// lists it: the same pull request #42, with a node id of its own, since no two
+// pull requests share one.
+func openPRBodyFor(listingPath string) string {
+	_, rest, _ := strings.Cut(listingPath, "/repos/")
+	repo := strings.TrimSuffix(rest, "/pulls")
+	return strings.ReplaceAll(openPRBody, `"PR_kwDOabc"`, `"PR_kwDOabc_`+strings.ReplaceAll(repo, "/", "_")+`"`)
+}
+
 // TestRefreshGitHub_RESTDiscovery_SeedsEntityAndConditionalSkips is the
 // integration-level acceptance for the discovery rewrite:
 //

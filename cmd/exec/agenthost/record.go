@@ -399,8 +399,8 @@ func (r resolvedEntity) matches(provider, target string) bool {
 // recordTouchInfo persists the write funnel's touched entity: it unwraps the
 // external action into its (provider, target, url) and records the
 // conversation→entity touch. The provider id the entity is identified by comes
-// off the artifact's dedup key when the artifact is the same provider's (a
-// Jira artifact's key names its site and issue id; see
+// off the artifact when it is the same provider's (a Jira artifact's key names
+// its site and issue id, a pull request's artifact carries its node id; see
 // domain.ArtifactEntityIdentity). A nil action (an audit-only write with no
 // external action) touches nothing. See recordEntityTouch for the best-effort
 // + outside-the-tx contract.
@@ -411,8 +411,11 @@ func recordTouchInfo(ctx context.Context, stores db.Stores, info ConversationInf
 		return resolvedEntity{}
 	}
 	c := entityCoordinate{provider: act.Provider, target: act.Target, url: act.URL, linearTeamID: linearTeamID}
-	if a != nil && a.Provider == act.Provider {
-		if scope, externalID, ok := domain.ArtifactEntityIdentity(a.Provider, a.DedupKey); ok {
+	// A Jira or Linear artifact's key names the issue every action beside it
+	// is about. A pull request artifact's node id names one pull request,
+	// which is the action's only when the two targets agree.
+	if a != nil && a.Provider == act.Provider && (a.Provider != domain.ArtifactProviderGitHub || a.Target == act.Target) {
+		if scope, externalID, ok := domain.ArtifactEntityIdentity(*a); ok {
 			c.scope, c.externalID = scope, externalID
 		}
 	}
@@ -478,7 +481,8 @@ func stampPRAttribution(ctx context.Context, stores db.Stores, info Conversation
 	entityID := touched.entityID
 	if !touched.matches(a.Provider, a.Target) {
 		var err error
-		entityID, err = resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: a.Provider, target: a.Target, url: a.URL})
+		_, nodeID, _ := domain.ArtifactEntityIdentity(*a)
+		entityID, err = resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: a.Provider, target: a.Target, url: a.URL, externalID: nodeID})
 		if err != nil {
 			agenthostLog.Warn("PR attribution stamp skipped: entity resolve failed",
 				"conversation", info.ConversationID, "target", a.Target, "error", err)

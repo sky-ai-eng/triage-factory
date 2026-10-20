@@ -21,7 +21,7 @@ import (
 
 const cursorTestHost = "https://github.com"
 
-// listingServer answers every repo's open-PR listing with openPRBody under
+// listingServer answers every repo's open-PR listing with openPRBodyFor under
 // ETag "etag-1", a listing that sends that ETag with a 304, and the Phase-2
 // refresh with an inaccessible node. It records each listing's If-None-Match
 // and the time each listing arrived, and answers a listing after delay.
@@ -52,7 +52,7 @@ func newListingServer(t *testing.T, delay time.Duration) *listingServer {
 				return
 			}
 			w.Header().Set("ETag", `"etag-1"`)
-			_, _ = w.Write([]byte(openPRBody))
+			_, _ = w.Write([]byte(openPRBodyFor(r.URL.Path)))
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusNotFound)
@@ -279,7 +279,7 @@ func TestRefreshGitHub_ExpiredCycleContextKeepsFinishedCursor(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("ETag", `"etag-ok"`)
-		_, _ = w.Write([]byte(openPRBody))
+		_, _ = w.Write([]byte(openPRBodyFor(r.URL.Path)))
 	}))
 	t.Cleanup(srv.Close)
 

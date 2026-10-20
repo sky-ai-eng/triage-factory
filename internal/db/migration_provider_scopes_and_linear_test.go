@@ -847,6 +847,62 @@ func TestMigrate_ProviderScopesGiveGitHubEntitiesTheirRepository(t *testing.T) {
 	}
 }
 
+// Every GitHub row with a snapshot takes its pull request's node id as its
+// external id. A stub, a snapshot with no node id and a malformed snapshot
+// stay NULL. Two rows for one pull request, created under two names of its
+// repository, would break the identity index: the older keeps the id and the
+// newer stays NULL. Jira rows are left NULL.
+func TestMigrate_ProviderScopesRecordGitHubNodeIDs(t *testing.T) {
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	for _, stmt := range []string{
+		`INSERT INTO entities (id, source, source_id, kind, snapshot_json, created_at)
+		 VALUES ('e-polled', 'github', 'octo/repo#1', 'pr', '{"node_id":"PR_1","number":1,"repo":"octo/repo"}', '2026-01-01 00:00:00')`,
+		`INSERT INTO entities (id, source, source_id, kind, created_at)
+		 VALUES ('e-stub', 'github', 'octo/repo#2', 'pr', '2026-01-01 00:00:00')`,
+		`INSERT INTO entities (id, source, source_id, kind, snapshot_json, created_at)
+		 VALUES ('e-no-node', 'github', 'octo/repo#3', 'pr', '{"number":3}', '2026-01-01 00:00:00')`,
+		`INSERT INTO entities (id, source, source_id, kind, snapshot_json, created_at)
+		 VALUES ('e-malformed', 'github', 'octo/repo#4', 'pr', '{not json', '2026-01-01 00:00:00')`,
+
+		// One pull request under its repository's old and new names.
+		`INSERT INTO entities (id, source, source_id, kind, snapshot_json, created_at)
+		 VALUES ('e-old-name', 'github', 'octo/old#7', 'pr', '{"node_id":"PR_7","number":7,"repo":"octo/old"}', '2026-01-01 00:00:00')`,
+		`INSERT INTO entities (id, source, source_id, kind, snapshot_json, created_at)
+		 VALUES ('e-new-name', 'github', 'octo/new#7', 'pr', '{"node_id":"PR_7","number":7,"repo":"octo/new"}', '2026-02-01 00:00:00')`,
+
+		`INSERT INTO entities (id, source, source_id, kind, snapshot_json)
+		 VALUES ('e-jira', 'jira', 'OCTO-1', 'issue', '{"node_id":"PR_1","id":"10001"}')`,
+	} {
+		mustExec(t, database, stmt)
+	}
+
+	migrateProviderScopes(t, database)
+
+	for entityID, want := range map[string]string{
+		"e-polled":    "PR_1",
+		"e-stub":      "",
+		"e-no-node":   "",
+		"e-malformed": "",
+		"e-old-name":  "PR_7",
+		"e-new-name":  "",
+		"e-jira":      "",
+	} {
+		var got sql.NullString
+		if err := database.QueryRow(`SELECT external_id FROM entities WHERE id = ?`, entityID).Scan(&got); err != nil {
+			t.Fatalf("read external_id of %s: %v", entityID, err)
+		}
+		if got.String != want {
+			t.Errorf("%s external_id = %q, want %q", entityID, got.String, want)
+		}
+	}
+
+	// The identity index holds afterwards: a second row for PR_7 is refused.
+	if _, err := database.Exec(`UPDATE entities SET external_id = 'PR_7' WHERE id = 'e-new-name'`); err == nil {
+		t.Error("a second row carrying PR_7 was accepted; the identity index should refuse it")
+	}
+}
+
 func seedProviderScopesOrg(t *testing.T, database *sql.DB) {
 	t.Helper()
 	mustExec(t, database, `INSERT INTO orgs (id, slug, name) VALUES (?, 'local', 'Local')`, runmode.LocalDefaultOrgID)
