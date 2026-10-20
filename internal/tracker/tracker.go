@@ -947,6 +947,9 @@ func (t *Tracker) learnPRNodeID(ctx context.Context, e domain.Entity, nodeID str
 	if e.ExternalID != "" || nodeID == "" {
 		return
 	}
+	// The write takes context.Background(), as every entity write in a cycle
+	// does (see RefreshGitHub): it is durable bookkeeping a cancelled cycle
+	// must not cut short. ctx only carries the cycle's trace into the logs.
 	_, err := t.entities.StampExternalIDSystem(context.Background(), t.orgID, e.ID, nodeID)
 	switch {
 	case errors.Is(err, db.ErrEntityIdentityAmbiguous):

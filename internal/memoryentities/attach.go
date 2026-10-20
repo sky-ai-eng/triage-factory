@@ -50,11 +50,11 @@ var attachLog = logging.Component("memoryentities")
 // another site than the org's current one. A pull request's artifact resolves
 // through the node id it carries, when a writer learned one. An artifact's
 // target can be older than the entity's key, so the entity is never renamed
-// from it. A Linear artifact
-// attaches only an entity that already exists: the artifact does not record
-// the issue's Linear team, and a Linear entity is created with one. The
-// write's own touch creates it from the response the verb read, so a Linear
-// artifact finds no entity here only when that touch failed, which is logged.
+// from it. A Linear artifact attaches only an entity that already exists: the
+// artifact does not record the issue's Linear team, and a Linear entity is
+// created with one. The write's own touch creates it from the response the
+// verb read, so a Linear artifact finds no entity here only when that touch
+// failed, which is logged.
 //
 // A nil store is an absent capability, not an error, and the two cases are not
 // the same: a nil TaskMemory is nowhere to write, so nothing is attached at all
