@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -538,12 +539,19 @@ func (w *orreryWorld) call(token, method, path string, body map[string]any, want
 		w.t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	got, _ := io.ReadAll(resp.Body)
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		w.t.Fatalf("%s %s: read response: %v", method, path, err)
+	}
 	if resp.StatusCode != want {
 		w.t.Fatalf("%s %s: status %d, want %d: %s", method, path, resp.StatusCode, want, got)
 	}
+	// Every call this test makes answers with a JSON object; anything else is
+	// a failure here rather than an empty map the caller reads as absent fields.
 	out := map[string]any{}
-	_ = json.Unmarshal(got, &out)
+	if err := json.Unmarshal(got, &out); err != nil {
+		w.t.Fatalf("%s %s: response is not a JSON object: %v: %s", method, path, err, got)
+	}
 	return out
 }
 
@@ -566,6 +574,10 @@ type gitRepo struct {
 	w      *orreryWorld
 	dir    string
 	remote string
+	// auth is the HTTP Authorization header git sends to Orrery. It reaches
+	// git through the environment rather than the remote URL or an argument,
+	// so neither a failed command's message nor git's own output carries it.
+	auth string
 }
 
 func (w *orreryWorld) clone(t *testing.T, token, fullName string) *gitRepo {
@@ -573,7 +585,8 @@ func (w *orreryWorld) clone(t *testing.T, token, fullName string) *gitRepo {
 	r := &gitRepo{
 		w:      w,
 		dir:    t.TempDir(),
-		remote: strings.Replace(w.base, "http://", "http://x-access-token:"+token+"@", 1) + "/" + fullName + ".git",
+		remote: w.base + "/" + fullName + ".git",
+		auth:   "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)),
 	}
 	r.git("init", "-q", "-b", "main", ".")
 	return r
@@ -588,7 +601,8 @@ func (r *gitRepo) git(args ...string) {
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_TERMINAL_PROMPT=0",
 		"GIT_AUTHOR_NAME=alice", "GIT_AUTHOR_EMAIL=alice@orrery.invalid",
 		"GIT_COMMITTER_NAME=alice", "GIT_COMMITTER_EMAIL=alice@orrery.invalid",
-		"GIT_AUTHOR_DATE="+date, "GIT_COMMITTER_DATE="+date)
+		"GIT_AUTHOR_DATE="+date, "GIT_COMMITTER_DATE="+date,
+		"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.extraHeader", "GIT_CONFIG_VALUE_0="+r.auth)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		r.w.t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
