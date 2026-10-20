@@ -22,9 +22,9 @@ var (
 	//     cannot serve two live repositories under one name, so the occupant is
 	//     a repository TF still has a row for and GitHub no longer does.
 	//   - A durable record keyed on that name: an entity ("owner/repo#18") or
-	//     an artifact dedup key. Entities, tasks and artifacts carry the slug
-	//     themselves rather than a reference to the repositories row, and
-	//     nothing that retires a repository row touches them (tracking is
+	//     an artifact dedup key. Entity keys and artifact dedup keys spell the
+	//     slug themselves, whatever row an entity's repository_id references,
+	//     and nothing that retires a repository row touches them (tracking is
 	//     forward-only), so a name can be spoken for by records alone.
 	//
 	// Neither is resolved by deleting the occupant. The first would drop a
@@ -86,15 +86,20 @@ func RequireRepoHost(host string) error {
 // the AI-generated profile cache, the clone-attempt state and the poller's
 // conditional-request cursor.
 //
-// The registry is not the tracked set. A row is created when a repository is
-// first tracked — TeamGitHubReposStore.ReplaceForTeam is the door, and this
-// store exposes no create of its own — and survives the last team untracking
-// it, because team_github_repos and conversation_worktrees both reference
-// this row by id and a reference must not outlive what it names.
-// ListTrackedNamesSystem is the read that means "what does TF poll", and
-// ListTrackedSystem / ListTrackedByTeamSystem are the row-shaped reads of the
-// same set for the consumers that need more than a name. List and ListSystem
-// read the whole registry, untracked rows included.
+// The registry is not the tracked set. It holds every repository TF records
+// something in: a row is created when a repository is first tracked
+// (TeamGitHubReposStore.ReplaceForTeam) or when TF first records a GitHub
+// entity in it (EntityStore's create), both through one get-or-create, which
+// FindOrCreateByRefSystem exposes as the door. A row survives the last team
+// untracking it, because team_github_repos, conversation_worktrees and
+// entities all reference it by id and a reference must not outlive what it
+// names. So a row says nothing about whether any team works with the
+// repository: an agent commenting on a pull request in a repository no team
+// tracks gives that repository a row. ListTrackedNamesSystem is the read that
+// means "what does TF poll", and ListTrackedSystem / ListTrackedByTeamSystem
+// are the row-shaped reads of the same set for the consumers that need more
+// than a name. List and ListSystem read the whole registry, untracked rows
+// included.
 //
 // # Scoped by GitHub host
 //
@@ -345,6 +350,36 @@ type RepositoryStore interface {
 	// will materialize and the git proxy will push to. Admin pool in Postgres:
 	// the caller is a run's agenthost, which has no JWT claims.
 	ListTrackedByTeamSystem(ctx context.Context, orgID, teamID, host string) ([]domain.Repository, error)
+
+	// FindOrCreateByRefSystem returns the row the provider calls
+	// ref.Owner/ref.Repo on ref.Host, creating it when nothing answers to the
+	// name: the registry's door, for a GitHub object TF records in a
+	// repository it may hold no row for yet. It is the same get-or-create
+	// TeamGitHubReposStore.ReplaceForTeam resolves each tracked repository
+	// through, and the one EntityStore's create resolves a GitHub entity's
+	// repository through inside its own transaction.
+	//
+	// An existing row is returned exactly as it stands: the lookup folds case
+	// on owner/repo, so a ref spelling a registered repository differently
+	// gets that row and its stored casing, and nothing cached on it moves. A
+	// new row is bare — identity columns only, no provider id (the poller and
+	// profiler record it), no profile — and it is not tracked: creating it
+	// adds nothing to what TF polls, profiles, clones or lists. Two
+	// concurrent creators of one repository resolve to one row; the folded
+	// identity index is what refuses the second insert.
+	//
+	// The row returned is the one the call's transaction resolved, created or
+	// found. It is read in that transaction rather than off RETURNING: the
+	// insert is ON CONFLICT DO NOTHING, which returns nothing when the row
+	// already exists or a concurrent creator won, and those are the common
+	// cases. ref.Host is required (ErrRepoHostRequired) and ref.Source
+	// normalizes like Upsert's; ref.ExternalID is ignored, since the row is
+	// created bare.
+	//
+	// Admin pool in Postgres, and callable from an executor: the executor's
+	// role may insert a repository's identity columns and nothing else, which
+	// is what lets a run record a pull request in a repository no team tracks.
+	FindOrCreateByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef) (domain.Repository, error)
 
 	UpdateCloneStatusByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) (*domain.Repository, error)
 	GetByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error)

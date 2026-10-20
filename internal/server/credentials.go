@@ -158,6 +158,8 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		// Repositories on the org's current GitHub host: one the org tracked on
 		// a host it has left is not a repository it has configured here, and
 		// an org with no GitHub URL has configured none.
+		// TODO(TFAC-1150): counts every registry row, including repositories
+		// no team tracks that a GitHub entity created a row for.
 		if host := db.EffectiveGitHubHost(orgSet.GitHubBaseURL); host != "" {
 			if repoCount, e = tx.Repos.CountConfigured(r.Context(), orgID, host); e != nil {
 				return e

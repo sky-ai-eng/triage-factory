@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 )
 
 // Shared seed helpers used by both the pgtest baseline suite and the
@@ -77,12 +78,11 @@ func SeedTeam(t *testing.T, h *Harness, orgID, slug string) string {
 // SeedRepository mints a registry row for owner/repo in orgID, on the org's
 // current GitHub host (db.EffectiveGitHubHost of its configured base URL), and
 // returns its id — the value every repository reference in the schema stores.
-// team_github_repos and conversation_worktrees both
-// point at it, and none of the stores behind them will create it (the
-// executor's role holds no INSERT on repositories at all), so a fixture that
-// tracks a repository or checks one out has to bring the row into existence
-// first, exactly as production tracking does. Idempotent on the folded
-// identity key, so repeated calls for one repository return its single row.
+// team_github_repos, conversation_worktrees and GitHub entities all point at
+// it, so a fixture that writes any of them by hand has to bring the row into
+// existence first, as the stores' own get-or-create does. Idempotent on the
+// folded identity key, so repeated calls for one repository return its single
+// row.
 func SeedRepository(t *testing.T, h *Harness, orgID, owner, repo string) string {
 	t.Helper()
 	return SeedRepositoryOnHost(t, h, orgID, OrgGitHubHost(t, h, orgID), owner, repo)
@@ -92,19 +92,7 @@ func SeedRepository(t *testing.T, h *Harness, orgID, owner, repo string) string 
 // that stage the same owner/repo on two hosts.
 func SeedRepositoryOnHost(t *testing.T, h *Harness, orgID, host, owner, repo string) string {
 	t.Helper()
-	MustExec(t, h.AdminDB, `
-		INSERT INTO repositories (org_id, source, host, owner, repo) VALUES ($1, 'github', $2, $3, $4)
-		ON CONFLICT DO NOTHING
-	`, orgID, host, owner, repo)
-	var id string
-	if err := h.AdminDB.QueryRow(`
-		SELECT id::text FROM repositories
-		 WHERE org_id = $1 AND source = 'github' AND host = $2
-		   AND lower(owner) = lower($3) AND lower(repo) = lower($4)
-	`, orgID, host, owner, repo).Scan(&id); err != nil {
-		t.Fatalf("seed repository %s/%s on %s: %v", owner, repo, host, err)
-	}
-	return id
+	return dbseed.GitHubRepository(t, h.AdminDB, orgID, host, owner, repo)
 }
 
 // OrgGitHubHost returns orgID's current GitHub host as the stores resolve it:

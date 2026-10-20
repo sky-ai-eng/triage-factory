@@ -164,9 +164,11 @@ func TestEntityStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_write_denied", func(t *testing.T) {
 		// bob's claims point at orgB; FindOrCreate against orgA
-		// would land a row with org_id=orgA. entities_modify
-		// WITH CHECK requires org_id = tf.current_org_id(), so 42501
-		// is the expected outcome.
+		// would land rows with org_id=orgA. The create registers the
+		// pull request's repository before it inserts the entity, so
+		// repositories_all's WITH CHECK (org_id = tf.current_org_id())
+		// is the first to refuse, with the 42501 entities_all would
+		// raise for the entity insert.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
 			_, _, e := pgstore.NewForTx(tx, pgtest.SecretKey).Entities.FindOrCreate(
 				ctx, orgA, "github", "https://github.com", "owner/repo#rls-write", "", "pr", "Cross-org write", "",

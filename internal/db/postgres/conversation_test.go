@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -122,11 +123,12 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 		Entity: func(t *testing.T, suffix string) string {
 			t.Helper()
 			id := uuid.New().String()
-			sourceID := fmt.Sprintf("conv-%s-%s", suffix, id[:8])
+			sourceID := fmt.Sprintf("octo/conv-%s#%s", suffix, id[:8])
+			repositoryID := dbseed.GitHubEntityRepository(t, conn, orgID, "https://github.com", sourceID)
 			if _, err := conn.Exec(`
-				INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-				VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6, 'https://github.com')
-			`, id, orgID, sourceID, "Conformance "+suffix, "https://example/"+sourceID, time.Now().UTC()); err != nil {
+				INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+				VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6, 'https://github.com', $7)
+			`, id, orgID, sourceID, "Conformance "+suffix, "https://example/"+sourceID, time.Now().UTC(), repositoryID); err != nil {
 				t.Fatalf("seed entity %s: %v", suffix, err)
 			}
 			return id
@@ -465,10 +467,11 @@ func TestConversationStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		entityID := uuid.New().String()
 		eventID := uuid.New().String()
 		taskID = uuid.New().String()
+		repositoryID := dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, "https://github.com", "octo/xleak#"+orgID[:8])
 		if _, err := h.AdminDB.Exec(`
-			INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-			VALUES ($1, $2, 'github', $3, 'pr', 'Cross-org test', '', '{}'::jsonb, now(), 'https://github.com')
-		`, entityID, orgID, "xleak-"+orgID[:8]); err != nil {
+			INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+			VALUES ($1, $2, 'github', $3, 'pr', 'Cross-org test', '', '{}'::jsonb, now(), 'https://github.com', $4)
+		`, entityID, orgID, "octo/xleak#"+orgID[:8], repositoryID); err != nil {
 			t.Fatalf("entity: %v", err)
 		}
 		if _, err := h.AdminDB.Exec(`
@@ -545,10 +548,11 @@ func TestConversationStore_Postgres_QueuePositionIsOrgLocal(t *testing.T) {
 		entityID := uuid.New().String()
 		eventID := uuid.New().String()
 		taskID := uuid.New().String()
+		repositoryID := dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, "https://github.com", "octo/qpos#"+orgID[:8])
 		if _, err := h.AdminDB.Exec(`
-			INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-			VALUES ($1, $2, 'github', $3, 'pr', 'Queue position test', '', '{}'::jsonb, now(), 'https://github.com')
-		`, entityID, orgID, "qpos-"+orgID[:8]); err != nil {
+			INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+			VALUES ($1, $2, 'github', $3, 'pr', 'Queue position test', '', '{}'::jsonb, now(), 'https://github.com', $4)
+		`, entityID, orgID, "octo/qpos#"+orgID[:8], repositoryID); err != nil {
 			t.Fatalf("entity: %v", err)
 		}
 		if _, err := h.AdminDB.Exec(`
@@ -673,10 +677,11 @@ func TestConversationStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	eventA := uuid.New().String()
 	taskA := uuid.New().String()
 	convA := uuid.New().String()
+	repositoryID := dbseed.GitHubEntityRepository(t, h.AdminDB, orgA, "https://github.com", "octo/rls-cross#"+orgA[:8])
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', 'RLS Cross-org', '', '{}'::jsonb, now(), 'https://github.com')
-	`, entityA, orgA, "rls-cross-"+orgA[:8]); err != nil {
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', 'RLS Cross-org', '', '{}'::jsonb, now(), 'https://github.com', $4)
+	`, entityA, orgA, "octo/rls-cross#"+orgA[:8], repositoryID); err != nil {
 		t.Fatalf("entity: %v", err)
 	}
 	if _, err := h.AdminDB.Exec(`
@@ -795,10 +800,11 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 	entityID := uuid.New().String()
 	eventID := uuid.New().String()
 	taskID := uuid.New().String()
+	repositoryID := dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, "https://github.com", "octo/lc#"+orgID[:8])
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', 'LC Test', '', '{}'::jsonb, now(), 'https://github.com')
-	`, entityID, orgID, "lc-"+orgID[:8]); err != nil {
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', 'LC Test', '', '{}'::jsonb, now(), 'https://github.com', $4)
+	`, entityID, orgID, "octo/lc#"+orgID[:8], repositoryID); err != nil {
 		t.Fatalf("entity: %v", err)
 	}
 	if _, err := h.AdminDB.Exec(`
@@ -1019,10 +1025,11 @@ func TestConversationStore_Postgres_RuntimeDefaultsToSDK(t *testing.T) {
 	entityID := uuid.New().String()
 	eventID := uuid.New().String()
 	taskID := uuid.New().String()
+	repositoryID := dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, "https://github.com", "octo/runtime#"+orgID[:8])
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Runtime Test', '', '{}'::jsonb, now(), 'https://github.com')
-	`, entityID, orgID, "runtime-"+orgID[:8]); err != nil {
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Runtime Test', '', '{}'::jsonb, now(), 'https://github.com', $4)
+	`, entityID, orgID, "octo/runtime#"+orgID[:8], repositoryID); err != nil {
 		t.Fatalf("entity: %v", err)
 	}
 	if _, err := h.AdminDB.Exec(`
@@ -1095,10 +1102,11 @@ func TestConversationStore_Postgres_HandOffGuardHoldsForANonCreator(t *testing.T
 	seedPgConversationPromptIn(t, h, "p_handoff_rls", orgID, creator)
 
 	entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
+	repositoryID := dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, "https://github.com", "octo/handoff#"+orgID[:8])
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Handoff RLS', '', '{}'::jsonb, now(), 'https://github.com')
-	`, entityID, orgID, "handoff-"+orgID[:8])
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Handoff RLS', '', '{}'::jsonb, now(), 'https://github.com', $4)
+	`, entityID, orgID, "octo/handoff#"+orgID[:8], repositoryID)
 	pgtest.MustExec(t, h.AdminDB, `
 		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
 		VALUES ($1, $2, $3, 'github:pr:ci_check_failed', '', '{}'::jsonb, now())
@@ -1197,10 +1205,11 @@ func TestConversationStore_Postgres_ResumeStampsTheWarmExecutorForANonCreator(t 
 	seedPgConversationPromptIn(t, h, "p_resume_affinity_rls", orgID, creator)
 
 	entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
+	repositoryID := dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, "https://github.com", "octo/resume-affinity#"+orgID[:8])
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Resume Affinity RLS', '', '{}'::jsonb, now(), 'https://github.com')
-	`, entityID, orgID, "resume-affinity-"+orgID[:8])
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Resume Affinity RLS', '', '{}'::jsonb, now(), 'https://github.com', $4)
+	`, entityID, orgID, "octo/resume-affinity#"+orgID[:8], repositoryID)
 	pgtest.MustExec(t, h.AdminDB, `
 		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
 		VALUES ($1, $2, $3, 'github:pr:ci_check_failed', '', '{}'::jsonb, now())
@@ -1356,10 +1365,11 @@ func TestConversationStore_Postgres_ClearNextAttemptUnderTheSendersClaims(t *tes
 	seedPgConversationPromptIn(t, h, "p_next_attempt_rls", orgID, creator)
 
 	entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
+	repositoryID := dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, "https://github.com", "octo/next-attempt#"+orgID[:8])
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Next attempt RLS', '', '{}'::jsonb, now(), 'https://github.com')
-	`, entityID, orgID, "next-attempt-"+orgID[:8])
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Next attempt RLS', '', '{}'::jsonb, now(), 'https://github.com', $4)
+	`, entityID, orgID, "octo/next-attempt#"+orgID[:8], repositoryID)
 	pgtest.MustExec(t, h.AdminDB, `
 		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
 		VALUES ($1, $2, $3, 'github:pr:ci_check_failed', '', '{}'::jsonb, now())

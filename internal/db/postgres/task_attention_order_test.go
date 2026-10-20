@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -33,14 +34,15 @@ func TestTaskStore_AttentionOrder_Postgres(t *testing.T) {
 				t.Helper()
 				now := time.Now().UTC()
 				entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
-				sourceID := fmt.Sprintf("attn-%s-%d", f.Suffix, now.UnixNano())
+				sourceID := fmt.Sprintf("octo/attn-%s#%d", f.Suffix, now.UnixNano())
 				// In the seeded events_catalog, so the FK resolves without
 				// re-seeding it inline.
 				eventType := "github:pr:ci_check_failed"
+				repositoryID := dbseed.GitHubEntityRepository(t, conn, orgID, "https://github.com", sourceID)
 				if _, err := conn.Exec(`
-					INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-					VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6, 'https://github.com')
-				`, entityID, orgID, sourceID, f.Title, "https://example/"+sourceID, now); err != nil {
+					INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+					VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6, 'https://github.com', $7)
+				`, entityID, orgID, sourceID, f.Title, "https://example/"+sourceID, now, repositoryID); err != nil {
 					t.Fatalf("seed entity: %v", err)
 				}
 				if _, err := conn.Exec(`

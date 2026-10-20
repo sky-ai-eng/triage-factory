@@ -604,29 +604,46 @@ func TestSetupGitHub_ResolvesTheTaskRepositoryOnTheEntitysHost(t *testing.T) {
 	}
 }
 
-// TestSetupGitHub_NoRepositoryOnTheEntitysHostFailsBeforeTheFetch: a PR task
-// whose owner/repo has no row on its entity's host has no repository to key a
-// ledger row or a bare by. A same-named row on the org's current host is a
-// different repository and is not borrowed; the setup fails before it reads
-// the pull request or records anything.
-func TestSetupGitHub_NoRepositoryOnTheEntitysHostFailsBeforeTheFetch(t *testing.T) {
+// TestSetupGitHub_KeysTheCheckoutByTheRowTheEntityRegistered: a PR task whose
+// owner/repo nothing else registered on its entity's host still has a row
+// there, because creating the entity registered it (bare, with no clone url).
+// The setup keys its ledger row and its bare by that row. A same-named row on
+// the org's current host is a different repository and is not borrowed.
+func TestSetupGitHub_KeysTheCheckoutByTheRowTheEntityRegistered(t *testing.T) {
 	const ghe = "https://github.corp.example.com"
-	f := newSnapshotFixture(t, "task-setup-norow")
-	var fetches atomic.Int32
-	srv := f.prServer(t, &fetches)
-	entityID, _ := f.taskRegistry(t, ghe, dbtest.TestGitHubHost)
+	ctx := context.Background()
+	f := newSnapshotFixture(t, "task-setup-registered")
+	srv := f.prServer(t, nil)
+	entityID, rows := f.taskRegistry(t, ghe, dbtest.TestGitHubHost)
 	f.s.conversations = &setupConversations{}
+	entity, err := f.s.entities.GetSystem(ctx, runmode.LocalDefaultOrgID, entityID)
+	if err != nil || entity == nil || entity.RepositoryID == "" {
+		t.Fatalf("seeded entity = %+v, err=%v; want it to reference the row its create registered", entity, err)
+	}
+	other := rows[dbtest.TestGitHubHost]
+	if entity.RepositoryID == other.ID {
+		t.Fatalf("the entity on %s references the %s row", ghe, dbtest.TestGitHubHost)
+	}
 
 	task := domain.Task{ID: f.key, EntityID: entityID, EntitySource: "github", EntitySourceID: "acme/app#7"}
-	_, err := f.s.setupGitHub(context.Background(), runmode.LocalDefaultOrgID, fixtureConversation, "claim-1", f.key, "user-1", task, ghclient.NewProxyClient(srv.URL, "placeholder"), nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "acme/app") || !strings.Contains(err.Error(), ghe) {
-		t.Fatalf("setupGitHub = %v, want an error naming acme/app on %s", err, ghe)
+	if _, err := f.s.setupGitHub(ctx, runmode.LocalDefaultOrgID, fixtureConversation, "claim-1", f.key, "user-1", task, ghclient.NewProxyClient(srv.URL, "placeholder"), nil, nil); err != nil {
+		t.Fatalf("setupGitHub: %v", err)
 	}
-	if n := fetches.Load(); n != 0 {
-		t.Errorf("setup made %d GitHub requests before failing; it resolves the repository first", n)
+	recorded := f.ledger.recordedRows()
+	if len(recorded) != 1 || recorded[0].RepositoryID != entity.RepositoryID {
+		t.Fatalf("setup recorded %+v, want one ledger row naming the entity's repository %s", recorded, entity.RepositoryID)
 	}
-	if rows := f.ledger.recordedRows(); len(rows) != 0 {
-		t.Errorf("setup recorded %v without a repository", rows)
+	bare, err := worktree.RepoDir(entity.RepositoryID)
+	if err != nil {
+		t.Fatalf("RepoDir: %v", err)
+	}
+	if _, err := os.Stat(bare); err != nil {
+		t.Errorf("no bare under the entity's repository %s: %v", entity.RepositoryID, err)
+	}
+	if otherBare, err := worktree.RepoDir(other.ID); err == nil {
+		if _, err := os.Stat(otherBare); !os.IsNotExist(err) {
+			t.Errorf("setup built a bare under the org host's repository %s (stat err %v)", other.ID, err)
+		}
 	}
 }
 
@@ -1143,32 +1160,48 @@ func TestEnsureWorkspace_ColdRehydrate_LegacyManifestResolvesOnTheEntitysHost(t 
 	}
 }
 
-// TestEnsureWorkspace_ColdRehydrate_LegacyManifestWithNoRowOnTheEntitysHost: a
-// legacy manifest whose owner/repo has no row on the entity's host has nothing
-// to rebuild against. A row of that name on another host is another
-// repository, so the restore fails, naming the checkout, and leaves nothing
-// behind.
-func TestEnsureWorkspace_ColdRehydrate_LegacyManifestWithNoRowOnTheEntitysHost(t *testing.T) {
+// TestEnsureWorkspace_ColdRehydrate_LegacyManifestResolvesTheRowTheEntityRegistered:
+// a legacy manifest names its checkout by owner/repo alone, and on the
+// entity's host that resolves to the row creating the entity registered, even
+// when nothing else ever registered the repository there. That row is bare: it
+// has no clone url, so the restore fails, naming the checkout, rather than
+// borrowing the clone url of the same-named row on another host. The run root
+// is removed and the ledger rows the restore recorded are taken back out.
+func TestEnsureWorkspace_ColdRehydrate_LegacyManifestResolvesTheRowTheEntityRegistered(t *testing.T) {
 	const ghe = "https://github.corp.example.com"
-	f := newSnapshotFixture(t, "task-restore-legacy-norow")
+	ctx := context.Background()
+	f := newSnapshotFixture(t, "task-restore-legacy-registered")
 	f.addCheckout(t, "acme/app", "default")
 	f.writeLegacySnapshot(t)
 	f.loseRoot(t)
 
 	entityID, _ := f.taskRegistry(t, ghe, dbtest.TestGitHubHost)
-	restorer := f.s.checkoutRestorerFor(runmode.LocalDefaultOrgID, entityID, nil, nil)
-	_, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), restorer, failingFreshBuilder(t))
-	if err == nil {
-		t.Fatal("ensureWorkspace restored a checkout whose repository has no row on the entity's host")
+	entity, err := f.s.entities.GetSystem(ctx, runmode.LocalDefaultOrgID, entityID)
+	if err != nil || entity == nil || entity.RepositoryID == "" {
+		t.Fatalf("seeded entity = %+v, err=%v; want it to reference the row its create registered", entity, err)
 	}
-	if !strings.Contains(err.Error(), "acme/app/default") {
-		t.Errorf("error = %v, want it to name the checkout acme/app/default", err)
+	restorer := f.s.checkoutRestorerFor(runmode.LocalDefaultOrgID, entityID, nil, nil)
+	_, _, _, err = f.s.ensureWorkspace(ctx, runmode.LocalDefaultOrgID, f.conv(""), restorer, failingFreshBuilder(t))
+	if err == nil {
+		t.Fatal("ensureWorkspace restored a checkout whose repository row has no clone url")
+	}
+	if !strings.Contains(err.Error(), "acme/app default") {
+		t.Errorf("error = %v, want it to name the checkout acme/app default", err)
 	}
 	if _, err := os.Stat(f.root); !os.IsNotExist(err) {
 		t.Errorf("the run root survived a failed restore (stat err %v)", err)
 	}
-	if rows := f.ledger.recordedRows(); len(rows) != 0 {
-		t.Errorf("a failed restore recorded %v", rows)
+	recorded, deleted := f.ledger.recordedRows(), f.ledger.deletedRows()
+	if len(recorded) == 0 {
+		t.Fatal("the restore recorded no ledger row; it records the checkouts it is about to rebuild")
+	}
+	for _, row := range recorded {
+		if row.RepositoryID != entity.RepositoryID {
+			t.Errorf("the restore recorded %+v, want every row to name the entity's repository %s", row, entity.RepositoryID)
+		}
+	}
+	if len(deleted) != len(recorded) {
+		t.Errorf("the failed restore recorded %d rows and took back %d: recorded %+v, deleted %+v", len(recorded), len(deleted), recorded, deleted)
 	}
 }
 

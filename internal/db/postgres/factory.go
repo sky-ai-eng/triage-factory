@@ -308,13 +308,16 @@ const pgFactoryEntitySelectColumns = `
 // factoryGitHubRepoTrackedExists scopes a github entities row (alias e)
 // to the tracked repos of the viewer's teams.
 //
-// entities.source_id stays the pull request's natural key ("owner/repo#18") —
-// it is not a repository reference and never becomes one — so the slug it
-// carries is matched against the registry, and the registry row is what the
-// tracking row points at. The extra join is what keeps the two ends agreeing
-// on identity: the fold lives in the registry, once. The entity's scope is the
-// GitHub host it was polled from and the registry row's host is the one it
-// lives on, so a pull request matches tracking only on its own host.
+// The slug entities.source_id carries ("owner/repo#18") is matched against the
+// registry, and the registry row is what the tracking row points at. The extra
+// join is what keeps the two ends agreeing on identity: the fold lives in the
+// registry, once. The entity's scope is the GitHub host it was polled from and
+// the registry row's host is the one it lives on, so a pull request matches
+// tracking only on its own host.
+//
+// TODO(TFAC-1126): join on e.repository_id = g.repository_id instead of
+// parsing the key; this and factoryGitHubRepoTrackedForTeams still resolve
+// the repository by name.
 const factoryGitHubRepoTrackedExists = `EXISTS (
 	SELECT 1 FROM team_github_repos g
 	JOIN teams tm ON tm.id = g.team_id

@@ -117,6 +117,40 @@ func TestResolveTouchedEntity_MapsProviderAndTarget(t *testing.T) {
 	}
 }
 
+// TestResolveTouchedEntity_PRInAnUntrackedRepository: a touch on a pull
+// request in a repository no team tracks creates its entity referencing a
+// registry row for that repository, created with it and tracked by nobody.
+func TestResolveTouchedEntity_PRInAnUntrackedRepository(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+
+	id, err := resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ArtifactProviderGitHub, target: "upstream/lib#3"})
+	if err != nil || id == "" {
+		t.Fatalf("resolveTouchedEntityInfo = %q, %v; want a new entity", id, err)
+	}
+	ent, err := stores.Entities.GetSystem(ctx, org, id)
+	if err != nil || ent == nil {
+		t.Fatalf("GetSystem(%s) = %v, %v", id, ent, err)
+	}
+	row, err := stores.Repos.GetByRefSystem(ctx, org, domain.RepoRef{Host: ent.Scope, Owner: "upstream", Repo: "lib"})
+	if err != nil || row == nil {
+		t.Fatalf("registry row for upstream/lib = %v, %v; want the one the touch created", row, err)
+	}
+	if ent.RepositoryID != row.ID {
+		t.Errorf("entity references repository %q, want %s", ent.RepositoryID, row.ID)
+	}
+	tracked, err := stores.Repos.ListTrackedNamesSystem(ctx, org, ent.Scope)
+	if err != nil {
+		t.Fatalf("ListTrackedNamesSystem: %v", err)
+	}
+	for _, name := range tracked {
+		if name == "upstream/lib" {
+			t.Errorf("tracked names %v include upstream/lib; a touch tracks nothing", tracked)
+		}
+	}
+}
+
 // TestResolveTouchedEntity_FollowsAMovedJiraIssue: a touch naming the key a
 // Jira issue answers under now, with its id, resolves the issue's existing
 // entity and renames it onto that key — never a second entity — and a touch by

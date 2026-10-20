@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -22,10 +23,11 @@ import (
 func seedMultiTeamTask(t *testing.T, h *pgtest.Harness, orgID, userID, teamID, suffix string) string {
 	t.Helper()
 	entityID := uuid.New().String()
+	repositoryID := dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, "https://github.com", "octo/mt-"+suffix+"#"+entityID[:8])
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, now(), 'https://github.com')
-	`, entityID, orgID, "mt-"+suffix+"-"+entityID[:8], "Multi-team "+suffix, "https://example/"+suffix); err != nil {
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, now(), 'https://github.com', $6)
+	`, entityID, orgID, "octo/mt-"+suffix+"#"+entityID[:8], "Multi-team "+suffix, "https://example/"+suffix, repositoryID); err != nil {
 		t.Fatalf("seed entity %s: %v", suffix, err)
 	}
 	eventID := uuid.New().String()

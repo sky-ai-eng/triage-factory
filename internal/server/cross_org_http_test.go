@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 )
 
 // End-to-end HTTP cross-org tests. Each test seeds two users (alice in
@@ -143,12 +144,13 @@ func seedTaskInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, suffix str
 	entityID := uuid.NewString()
 	eventID := uuid.NewString()
 	taskID := uuid.NewString()
-	sourceID := suffix + "-" + entityID[:8]
+	sourceID := "octo/" + suffix + "#" + entityID[:8]
+	repoID := dbseed.GitHubEntityRepository(t, r.h.AdminDB, orgID.String(), "https://github.com", sourceID)
 
 	if _, err := r.h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', 'cross-org seed', '', '{}'::jsonb, now(), 'https://github.com')
-	`, entityID, orgID, sourceID); err != nil {
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', 'cross-org seed', '', '{}'::jsonb, now(), 'https://github.com', $4)
+	`, entityID, orgID, sourceID, repoID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	if _, err := r.h.AdminDB.Exec(`

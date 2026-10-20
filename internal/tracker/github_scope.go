@@ -63,6 +63,8 @@ func (t *Tracker) forgetPullsCursor(ctx context.Context, e domain.Entity, done m
 	if t.repos == nil || e.Scope == "" {
 		return
 	}
+	// TODO(TFAC-1126): key the cursor's repository by e.RepositoryID rather
+	// than by the name parsed from the key.
 	owner, repo, _ := domain.SplitGitHubEntitySourceID(e.SourceID)
 	if owner == "" || repo == "" {
 		return

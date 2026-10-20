@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -149,13 +150,14 @@ func seedPgDashboardPR(t *testing.T, conn *sql.DB, orgID string, fx dbtest.Dashb
 	}
 	now := time.Now().UTC()
 	entityID := uuid.New().String()
-	sourceID := fmt.Sprintf("dashboard-conformance-%d-%d", fx.Snapshot.Number, now.UnixNano())
+	sourceID := fmt.Sprintf("octo/dashboard-conformance-%d#%d", fx.Snapshot.Number, now.UnixNano())
+	repositoryID := dbseed.GitHubEntityRepository(t, conn, orgID, "https://github.com", sourceID)
 	if _, err := conn.Exec(`
 		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, state,
-		                      commissioned_by_user_id, created_at, last_polled_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, $6::jsonb, $7, $8, $9, $9, 'https://github.com')
+		                      commissioned_by_user_id, created_at, last_polled_at, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, $6::jsonb, $7, $8, $9, $9, 'https://github.com', $10)
 	`, entityID, orgID, sourceID, fx.Snapshot.Title, fx.Snapshot.URL, string(blob), state,
-		commissioned, now); err != nil {
+		commissioned, now, repositoryID); err != nil {
 		t.Fatalf("seed entity for snapshot %d: %v", fx.Snapshot.Number, err)
 	}
 	return entityID

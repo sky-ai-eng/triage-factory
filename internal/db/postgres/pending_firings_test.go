@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -228,10 +229,11 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, stores db.Stores, orgID, userI
 		blueprintID := uuid.New().String()
 		sourceID := fmt.Sprintf("owner/repo#%s", entityID[:8])
 
+		repositoryID := dbseed.GitHubEntityRepository(t, conn, orgID, "https://github.com", sourceID)
 		if _, err := conn.Exec(`
-			INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-			VALUES ($1, $2, 'github', $3, 'pr', 'Test PR', '', '{}'::jsonb, now(), 'https://github.com')
-		`, entityID, orgID, sourceID); err != nil {
+			INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+			VALUES ($1, $2, 'github', $3, 'pr', 'Test PR', '', '{}'::jsonb, now(), 'https://github.com', $4)
+		`, entityID, orgID, sourceID, repositoryID); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
 		if _, err := conn.Exec(`

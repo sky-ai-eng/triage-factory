@@ -75,6 +75,20 @@ import (
 // snapshot leaves it: readers that need an issue's team read the column, never
 // the snapshot.
 //
+// # A GitHub entity's repository
+//
+// repository_id is the registry row (RepositoryStore) of the repository a
+// GitHub entity belongs to: required on a GitHub row and absent on every
+// other. The create resolves it from the key — the owner/repo of
+// "owner/repo#N" on the scope's host, through GitHubEntityRepoRef — and gets
+// or creates that row in the same transaction as the entity insert, so no
+// caller passes or parses it, and a PR in a repository no team tracks gets a
+// registry row of its own. A repository rename rewrites the key
+// (RepositoryStore.RenameSystem) and leaves the reference alone, because the
+// row it names is the one that was renamed. The one write that moves it is a
+// duplicate merge whose survivor takes the other row's live key: the
+// reference goes with the key.
+//
 // # State and snapshot are one write
 //
 // Every write that changes state or writes a terminal snapshot is one
@@ -150,7 +164,26 @@ var (
 	// tracking it read the column, so a row created without it would be in no
 	// team's view until something learned its team.
 	ErrEntityLinearTeamRequired = errors.New("a linear entity is created with its linear team")
+
+	// ErrEntityRepositoryRequired refuses to create a GitHub row whose key
+	// names no repository. A GitHub row references its repository's registry
+	// row (repository_id), and the create resolves that row from the key, so
+	// a key that is not "owner/repo#N" leaves nothing to resolve.
+	ErrEntityRepositoryRequired = errors.New("a github entity is created with its repository")
 )
+
+// GitHubEntityRepoRef is the repository a GitHub entity keyed sourceID in
+// scope belongs to: the owner/repo of its "owner/repo#N" key, on the host the
+// scope is. Both dialects' create paths resolve the row they reference through
+// it, so they cannot disagree about which repository a key names. A key with
+// no owner or repo is ErrEntityRepositoryRequired.
+func GitHubEntityRepoRef(scope, sourceID string) (domain.RepoRef, error) {
+	owner, repo, _ := domain.SplitGitHubEntitySourceID(sourceID)
+	if owner == "" || repo == "" {
+		return domain.RepoRef{}, fmt.Errorf("%w: %q in %s names no owner/repo", ErrEntityRepositoryRequired, sourceID, scope)
+	}
+	return domain.RepoRef{Source: domain.RepoSourceGitHub, Host: scope, Owner: owner, Repo: repo}, nil
+}
 
 // TerminalCloseResult is what EntityStore.CloseTerminalSystem committed.
 type TerminalCloseResult struct {

@@ -8,6 +8,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
@@ -103,10 +104,11 @@ func newSQLiteEventQueueSeeder(conn *sql.DB) dbtest.EventQueueSeeder {
 		t.Helper()
 		suf := uuid.New().String()[:8]
 		entityID := "e-" + suf
+		repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", "owner/repo#"+suf)
 		if _, err := conn.Exec(`
-			INSERT INTO entities (id, source, source_id, kind, title, url, scope)
-			VALUES (?, 'github', ?, 'pr', 'Test PR', '', 'https://github.com')
-		`, entityID, "owner/repo#"+suf); err != nil {
+			INSERT INTO entities (id, source, source_id, kind, title, url, scope, repository_id)
+			VALUES (?, 'github', ?, 'pr', 'Test PR', '', 'https://github.com', ?)
+		`, entityID, "owner/repo#"+suf, repoID); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
 		return entityID

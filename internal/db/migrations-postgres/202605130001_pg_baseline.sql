@@ -518,7 +518,15 @@ CREATE TABLE public.entities (
     -- team, so it follows a move to another team. Clearing the snapshot leaves
     -- it. NULL for every other source.
     linear_team_id text,
+    -- The repository a GitHub entity belongs to, by its repositories row. The
+    -- key ("owner/repo#18") names the repository by the name it has now, which
+    -- a rename changes; this does not. Set at creation from the key, through
+    -- the registry's get-or-create, so a pull request in a repository no team
+    -- tracks has a row to reference. Required for source 'github' (the foreign
+    -- key is added after repositories below).
+    repository_id uuid,
     CONSTRAINT entities_slack_channel_required CHECK (source <> 'slack' OR slack_channel_id IS NOT NULL),
+    CONSTRAINT entities_repository_required CHECK (source <> 'github' OR repository_id IS NOT NULL),
     CONSTRAINT entities_linear_team_id_check CHECK (
         CASE WHEN source = 'linear' THEN COALESCE(linear_team_id, '') <> ''
              ELSE linear_team_id IS NULL END
@@ -925,13 +933,16 @@ CREATE TABLE public.prompts (
 );
 
 
--- The registry of the repositories TF works with, and the target every
--- repository reference in this schema points at. (source, host, external_id) is
--- the half of a repository identity a rename does not move; source is
--- app-validated. host is the GitHub host (domain.GitHubHost) the repository
--- lives on: repository ids are per-deployment sequences and names repeat across
--- deployments, so nothing matches across hosts. Durable: untracking never
--- deletes it, since a worktree or task may name it.
+-- The registry of the repositories TF records anything in, and the target every
+-- repository reference in this schema points at. A row is created when a team
+-- first tracks the repository or TF first records a GitHub entity in it, so a
+-- row is not a tracked repository: team_github_repos is the tracked set.
+-- (source, host, external_id) is the half of a repository identity a rename
+-- does not move; source is app-validated. host is the GitHub host
+-- (domain.GitHubHost) the repository lives on: repository ids are
+-- per-deployment sequences and names repeat across deployments, so nothing
+-- matches across hosts. Durable: untracking never deletes it, since a worktree
+-- or entity references it.
 CREATE TABLE public.repositories (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -1646,7 +1657,7 @@ ALTER TABLE ONLY public.repositories
     ADD CONSTRAINT repositories_pkey PRIMARY KEY (id);
 
 
--- Composite-FK target for team_github_repos(repository_id, org_id): Postgres
+-- Composite-FK target for team_github_repos and entities (repository_id, org_id): Postgres
 -- requires a unique constraint over exactly the referenced columns.
 ALTER TABLE ONLY public.repositories
     ADD CONSTRAINT repositories_id_org_id_key UNIQUE (id, org_id);
@@ -1803,6 +1814,11 @@ CREATE INDEX idx_entities_org_source_polled ON public.entities USING btree (org_
 
 
 CREATE INDEX idx_entities_org_state ON public.entities USING btree (org_id, state);
+
+
+-- Serves the joins that scope a GitHub entity by its repository.
+
+CREATE INDEX idx_entities_repository ON public.entities USING btree (repository_id) WHERE (repository_id IS NOT NULL);
 
 
 CREATE INDEX idx_entity_links_from_kind ON public.entity_links USING btree (from_entity_id, kind);
@@ -2085,6 +2101,12 @@ ALTER TABLE ONLY public.entities
 
 ALTER TABLE ONLY public.entities
     ADD CONSTRAINT entities_commissioned_by_user_id_fkey FOREIGN KEY (commissioned_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+-- Pins the org, like team_github_repos: an entity can only reference its own
+-- org's repository row.
+ALTER TABLE ONLY public.entities
+    ADD CONSTRAINT entities_repository_id_fkey FOREIGN KEY (repository_id, org_id) REFERENCES public.repositories(id, org_id);
 
 
 ALTER TABLE ONLY public.entity_links
@@ -6352,8 +6374,12 @@ GRANT SELECT ON TABLE public.users TO tf_system;
 GRANT SELECT ON TABLE public.user_github_identities TO tf_system;
 GRANT SELECT ON TABLE public.team_github_repos TO tf_system;
 -- UpdateCloneStatusSystem is local-mode-only in the current call graph,
--- granted ahead of the multi-mode bare-clone-cache path.
+-- granted ahead of the multi-mode bare-clone-cache path. INSERT covers the
+-- identity columns alone: a run that records a pull request in a repository
+-- with no registry row creates the bare row its entity references, and can
+-- set no profile, clone url or provider id on it.
 GRANT SELECT, UPDATE ON TABLE public.repositories TO tf_system;
+GRANT INSERT (org_id, source, host, owner, repo) ON TABLE public.repositories TO tf_system;
 GRANT SELECT ON TABLE public.org_github_apps TO tf_system;
 GRANT SELECT ON TABLE public.org_github_app_installations TO tf_system;
 GRANT SELECT ON TABLE public.events TO tf_system;

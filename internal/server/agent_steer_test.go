@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -37,7 +38,8 @@ func seedSteerConversation(t *testing.T, database *sql.DB, suffix, status string
 	t.Helper()
 	const eventType = "github:pr:ci_check_failed"
 	e, ev, p, tk, rn := fixtureUUID("e_"+suffix), fixtureUUID("ev_"+suffix), fixtureUUID("p_"+suffix), fixtureUUID("t_"+suffix), fixtureUUID("r_"+suffix)
-	execSQL(t, database, `INSERT INTO entities (id, source, source_id, kind, state, scope) VALUES (?, 'github', ?, 'pr', 'active', 'https://github.com')`, e, "owner/repo#"+suffix)
+	repoID := dbseed.GitHubEntityRepository(t, database, runmode.LocalDefaultOrgID, "https://github.com", "owner/repo#"+suffix)
+	execSQL(t, database, `INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id) VALUES (?, 'github', ?, 'pr', 'active', 'https://github.com', ?)`, e, "owner/repo#"+suffix, repoID)
 	execSQL(t, database, `INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES (?, ?, ?, '')`, ev, e, eventType)
 	execSQL(t, database, `INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES (?, 'P', 'b', ?, ?)`, p, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID)
 	execSQL(t, database, `INSERT INTO tasks (id, entity_id, event_type, primary_event_id) VALUES (?, ?, ?, ?)`, tk, e, eventType, ev)

@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -119,10 +120,11 @@ func (r *viewerRig) seedPrompt(t *testing.T, name string) string {
 func (r *viewerRig) seedTask(t *testing.T) string {
 	t.Helper()
 	var entityID string
+	repoID := dbseed.GitHubRepository(t, r.h.AdminDB, r.orgID, "https://github.com", "octo", "repo")
 	if err := r.h.AdminDB.QueryRow(`
-		INSERT INTO entities (org_id, source, source_id, kind, title, scope)
-		VALUES ($1, 'github', 'octo/repo#1', 'pr', 'test pr', 'https://github.com') RETURNING id
-	`, r.orgID).Scan(&entityID); err != nil {
+		INSERT INTO entities (org_id, source, source_id, kind, title, scope, repository_id)
+		VALUES ($1, 'github', 'octo/repo#1', 'pr', 'test pr', 'https://github.com', $2) RETURNING id
+	`, r.orgID, repoID).Scan(&entityID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	var evtID string

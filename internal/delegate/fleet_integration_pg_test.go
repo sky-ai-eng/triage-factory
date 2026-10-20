@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -49,10 +50,12 @@ func seedFleetFixture(t *testing.T, h *pgtest.Harness) fleetFixture {
 	`, promptID, orgID, teamID, userID)
 
 	entityID := uuid.New().String()
+	sourceID := "octo/fleet-test#" + entityID[:8]
+	repoID := dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, "https://github.com", sourceID)
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Fleet Test Entity', 'https://example/x', '{}'::jsonb, now(), 'https://github.com')
-	`, entityID, orgID, "fleet-test-"+entityID[:8])
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Fleet Test Entity', 'https://example/x', '{}'::jsonb, now(), 'https://github.com', $4)
+	`, entityID, orgID, sourceID, repoID)
 
 	eventID := uuid.New().String()
 	pgtest.MustExec(t, h.AdminDB, `

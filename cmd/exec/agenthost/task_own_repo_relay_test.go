@@ -3,6 +3,8 @@ package agenthost
 import (
 	"context"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 )
 
 // TestRelayRuntime_TaskOwnRepo_AnsweredByTheOrchestrator pins where the repo
@@ -14,7 +16,8 @@ import (
 func TestRelayRuntime_TaskOwnRepo_AnsweredByTheOrchestrator(t *testing.T) {
 	conn, stores, info := newCaptureStoresConn(t, true)
 	ctx := context.Background()
-	if _, err := conn.Exec(`INSERT INTO entities (id, source, source_id, kind, scope) VALUES ('ent-1', 'github', 'octo/repo#7', 'pr', 'https://github.com')`); err != nil {
+	repoID := dbseed.GitHubEntityRepository(t, conn, info.OrgID, "https://github.com", "octo/repo#7")
+	if _, err := conn.Exec(`INSERT INTO entities (id, source, source_id, kind, scope, repository_id) VALUES ('ent-1', 'github', 'octo/repo#7', 'pr', 'https://github.com', ?)`, repoID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	if _, err := conn.Exec(`INSERT INTO events (id, event_type, entity_id) VALUES ('evt-1', 'github:pr:ci_check_failed', 'ent-1')`); err != nil {

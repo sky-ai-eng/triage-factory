@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -23,10 +24,11 @@ func TestTaskUndo_RefusesAGestureAnotherUserHasActedPast(t *testing.T) {
 	r := newViewerRig(t)
 
 	var entityID string
+	repoID := dbseed.GitHubRepository(t, r.h.AdminDB, r.orgID, "https://github.com", "octo", "undo")
 	if err := r.h.AdminDB.QueryRow(`
-		INSERT INTO entities (org_id, source, source_id, kind, title, scope)
-		VALUES ($1, 'github', $2, 'pr', 'test pr', 'https://github.com') RETURNING id
-	`, r.orgID, "octo/undo#"+t.Name()).Scan(&entityID); err != nil {
+		INSERT INTO entities (org_id, source, source_id, kind, title, scope, repository_id)
+		VALUES ($1, 'github', $2, 'pr', 'test pr', 'https://github.com', $3) RETURNING id
+	`, r.orgID, "octo/undo#"+t.Name(), repoID).Scan(&entityID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	var evtID string
@@ -112,9 +114,10 @@ func TestTaskClaim_ReassignHappyPath(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed toUser membership: %v", err)
 	}
+	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope)
-		 VALUES ('e_re', 'github', 'sky/repo#re', 'pr', 'active', 'https://github.com')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		 VALUES ('e_re', 'github', 'sky/repo#re', 'pr', 'active', 'https://github.com', ?)`, repoID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -188,9 +191,10 @@ func TestTaskClaim_ReassignRefusalReasons(t *testing.T) {
 		if _, err := s.db.Exec(`INSERT INTO users (id, display_name) VALUES (?, 'Other')`, otherUserID); err != nil {
 			t.Fatalf("seed user: %v", err)
 		}
+		repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 		if _, err := s.db.Exec(
-			`INSERT INTO entities (id, source, source_id, kind, state, scope)
-			 VALUES ('e_ret', 'github', 'sky/repo#ret', 'pr', 'active', 'https://github.com')`,
+			`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+			 VALUES ('e_ret', 'github', 'sky/repo#ret', 'pr', 'active', 'https://github.com', ?)`, repoID,
 		); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
@@ -215,9 +219,10 @@ func TestTaskClaim_ReassignRefusalReasons(t *testing.T) {
 
 	t.Run("unclaimed_task_409", func(t *testing.T) {
 		s := newTestServer(t)
+		repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 		if _, err := s.db.Exec(
-			`INSERT INTO entities (id, source, source_id, kind, state, scope)
-			 VALUES ('e_reu', 'github', 'sky/repo#reu', 'pr', 'active', 'https://github.com')`,
+			`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+			 VALUES ('e_reu', 'github', 'sky/repo#reu', 'pr', 'active', 'https://github.com', ?)`, repoID,
 		); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
@@ -241,9 +246,10 @@ func TestTaskClaim_ReassignRefusalReasons(t *testing.T) {
 
 	t.Run("bot_claimed_task_409", func(t *testing.T) {
 		s := newTestServer(t)
+		repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 		if _, err := s.db.Exec(
-			`INSERT INTO entities (id, source, source_id, kind, state, scope)
-			 VALUES ('e_reb', 'github', 'sky/repo#reb', 'pr', 'active', 'https://github.com')`,
+			`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+			 VALUES ('e_reb', 'github', 'sky/repo#reb', 'pr', 'active', 'https://github.com', ?)`, repoID,
 		); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
@@ -294,9 +300,10 @@ func TestTaskClaim_RejectsBlankTarget(t *testing.T) {
 // without disturbing the claim, mirroring the self-claim arm's idempotency.
 func TestTaskClaim_ReassignIdempotentToCurrentClaimant(t *testing.T) {
 	s := newTestServer(t)
+	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope)
-		 VALUES ('e_rei', 'github', 'sky/repo#rei', 'pr', 'active', 'https://github.com')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		 VALUES ('e_rei', 'github', 'sky/repo#rei', 'pr', 'active', 'https://github.com', ?)`, repoID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -351,10 +358,11 @@ func TestTaskClaimReassign_PermissionModel(t *testing.T) {
 	seedClaimedTask := func(t *testing.T, claimant string) string {
 		t.Helper()
 		var entityID string
+		repoID := dbseed.GitHubRepository(t, r.h.AdminDB, r.orgID, "https://github.com", "octo", "reassign")
 		if err := r.h.AdminDB.QueryRow(`
-			INSERT INTO entities (org_id, source, source_id, kind, title, scope)
-			VALUES ($1, 'github', $2, 'pr', 'test pr', 'https://github.com') RETURNING id
-		`, r.orgID, "octo/reassign#"+t.Name()).Scan(&entityID); err != nil {
+			INSERT INTO entities (org_id, source, source_id, kind, title, scope, repository_id)
+			VALUES ($1, 'github', $2, 'pr', 'test pr', 'https://github.com', $3) RETURNING id
+		`, r.orgID, "octo/reassign#"+t.Name(), repoID).Scan(&entityID); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
 		var evtID string

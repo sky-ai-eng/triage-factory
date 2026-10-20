@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -40,8 +41,9 @@ func TestSourceStatus_Postgres(t *testing.T) {
 func seedPgSourceTask(t *testing.T, conn *sql.DB, orgID, userID, source, snapshot string) string {
 	t.Helper()
 	entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
+	sourceID := "src-" + entityID
 	var kind, scope, eventType string
-	var linearTeamID any
+	var linearTeamID, repositoryID any
 	switch source {
 	case "jira":
 		kind, scope, eventType = "issue", "https://jira.example.com", "jira:issue:assigned"
@@ -50,11 +52,13 @@ func seedPgSourceTask(t *testing.T, conn *sql.DB, orgID, userID, source, snapsho
 		linearTeamID = "lt-test"
 	default:
 		kind, scope, eventType = "pr", "https://github.com", "github:pr:opened"
+		sourceID = "octo/src#" + entityID
+		repositoryID = dbseed.GitHubEntityRepository(t, conn, orgID, scope, sourceID)
 	}
 	if _, err := conn.Exec(
-		`INSERT INTO entities (id, org_id, source, source_id, kind, snapshot_json, scope, linear_team_id)
-		 VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)`,
-		entityID, orgID, source, "src-"+entityID, kind, snapshot, scope, linearTeamID,
+		`INSERT INTO entities (id, org_id, source, source_id, kind, snapshot_json, scope, linear_team_id, repository_id)
+		 VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)`,
+		entityID, orgID, source, sourceID, kind, snapshot, scope, linearTeamID, repositoryID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

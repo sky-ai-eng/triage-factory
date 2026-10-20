@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -49,10 +50,12 @@ func seedMarketplaceStatsTask(t *testing.T, h *Harness, orgID, userID, teamID st
 	entityID := uuid.New().String()
 	eventID := uuid.New().String()
 	taskID := uuid.New().String()
+	sourceID := "octo/stats-fixture#" + entityID
+	repositoryID := dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, "https://github.com", sourceID)
 	MustExec(t, h.AdminDB, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Stats Fixture Entity', 'https://example/x', '{}'::jsonb, $4, 'https://github.com')
-	`, entityID, orgID, "stats-fixture-"+entityID, now)
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Stats Fixture Entity', 'https://example/x', '{}'::jsonb, $4, 'https://github.com', $5)
+	`, entityID, orgID, sourceID, now, repositoryID)
 	MustExec(t, h.AdminDB, `
 		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
 		VALUES ($1, $2, $3, 'github:pr:opened', '', '{}'::jsonb, $4)

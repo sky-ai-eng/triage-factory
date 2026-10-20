@@ -343,11 +343,9 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	t.Run("conversation_worktrees", func(t *testing.T) {
 		conversationID := seedStepConversation(t, h, ctx, orgID, taskID, promptID, blueprintRunID, userID)
 		// The registry row is seeded on the admin pool, not minted by the
-		// store: the executor's role holds SELECT and UPDATE on repositories
-		// and deliberately no INSERT, so a worktree reservation checks the
-		// repository id and never creates a row. That IS part of this
-		// conformance — InsertSystem below has to reach the row through a
-		// SELECT alone.
+		// store: a worktree reservation checks the repository id and never
+		// creates a row. That IS part of this conformance — InsertSystem
+		// below has to reach the row through a SELECT alone.
 		repositoryID := SeedRepository(t, h, orgID, "octo", "repo")
 		if inserted, _, err := stores.ConversationWorktrees.InsertSystem(ctx, orgID, domain.ConversationWorktree{
 			ConversationID: conversationID, RepositoryID: repositoryID, Path: "/tmp/conformance-wt", Ref: "main",
@@ -422,9 +420,15 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	})
 
 	t.Run("entities_touched_resolution", func(t *testing.T) {
-		ent, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", "https://github.com", "octo/repo#999", "", "pr", "conformance pr", "https://example.test/pr")
+		// A pull request in a repository with no registry row: the create
+		// mints the bare row its entity references, which takes the
+		// executor's column-scoped INSERT on repositories.
+		ent, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", "https://github.com", "octo/untouched#999", "", "pr", "conformance pr", "https://example.test/pr")
 		if err != nil {
 			t.Fatalf("Entities.FindOrCreateSystem: %v", err)
+		}
+		if ent.RepositoryID == "" {
+			t.Errorf("Entities.FindOrCreateSystem: entity references no repository")
 		}
 		if _, err := stores.Entities.GetSystem(ctx, orgID, ent.ID); err != nil {
 			t.Errorf("Entities.GetSystem: %v", err)
@@ -613,6 +617,20 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if _, err := stores.Repos.UpdateCloneStatusByRefSystem(ctx, orgID, ref, "ok", "", ""); err != nil {
 			t.Errorf("Repos.UpdateCloneStatusByRefSystem: %v", err)
 		}
+		if got, err := stores.Repos.FindOrCreateByRefSystem(ctx, orgID, domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "octo", Repo: "minted-by-executor"}); err != nil || got.ID == "" {
+			t.Errorf("Repos.FindOrCreateByRefSystem: got=%+v err=%v", got, err)
+		}
+	})
+
+	t.Run("repositories_insert_is_identity_columns_only", func(t *testing.T) {
+		// The grant is column-scoped: an executor can register a repository's
+		// identity, never set the clone url, profile or provider id a control
+		// pod's profiler owns.
+		_, err := h.SystemDB.ExecContext(ctx, `
+			INSERT INTO repositories (org_id, host, owner, repo, clone_url)
+			VALUES ($1, $2, 'octo', 'clone-url-smuggle', 'https://attacker.example/repo.git')
+		`, orgID, dbtest.TestGitHubHost)
+		assertPgCode(t, err, "42501", "executor INSERT naming clone_url")
 	})
 
 	t.Run("claim_credentials", func(t *testing.T) {

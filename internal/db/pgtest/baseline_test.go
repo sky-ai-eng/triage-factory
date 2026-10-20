@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -2025,11 +2027,15 @@ func seedBlueprintRun(t *testing.T, h *Harness, orgID, creatorID, taskID string)
 
 func seedEntity(t *testing.T, h *Harness, orgID, source, sourceID string) string {
 	t.Helper()
+	var repositoryID any
+	if source == "github" {
+		repositoryID = dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, "https://github.com", sourceID)
+	}
 	var id string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO entities (org_id, source, source_id, kind, title, scope)
-		VALUES ($1, $2, $3, 'pr', 'test pr', CASE $2 WHEN 'github' THEN 'https://github.com' WHEN 'jira' THEN 'https://jira.example.com' WHEN 'slack' THEN 'slack.com' WHEN 'linear' THEN 'ws-test' ELSE 'test-scope' END) RETURNING id
-	`, orgID, source, sourceID).Scan(&id); err != nil {
+		INSERT INTO entities (org_id, source, source_id, kind, title, scope, repository_id)
+		VALUES ($1, $2, $3, 'pr', 'test pr', CASE $2 WHEN 'github' THEN 'https://github.com' WHEN 'jira' THEN 'https://jira.example.com' WHEN 'slack' THEN 'slack.com' WHEN 'linear' THEN 'ws-test' ELSE 'test-scope' END, $4) RETURNING id
+	`, orgID, source, sourceID, repositoryID).Scan(&id); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	return id
@@ -3277,5 +3283,48 @@ func TestBaseline_HostAndScopeRefuseEmpty(t *testing.T) {
 				t.Errorf("the same insert with a value = %v; want it stored", err)
 			}
 		})
+	}
+}
+
+// TestBaseline_GitHubEntityReferencesItsRepository pins entities.repository_id:
+// a GitHub row references a repositories row (entities_repository_required),
+// only one of its own org's (the composite foreign key), and no other source
+// is asked for one. The store resolves the reference on every create; these
+// hold for a write that goes around it.
+func TestBaseline_GitHubEntityReferencesItsRepository(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+	orgA := SeedOrg(t, h, "entity-repo-a", SeedUser(t, h, "entity-repo-a-owner"))
+	orgB := SeedOrg(t, h, "entity-repo-b", SeedUser(t, h, "entity-repo-b-owner"))
+	repoA := SeedRepositoryOnHost(t, h, orgA, dbtest.TestGitHubHost, "acme", "api")
+	repoB := SeedRepositoryOnHost(t, h, orgB, dbtest.TestGitHubHost, "acme", "api")
+
+	insert := func(orgID, source, key string, repositoryID any) error {
+		_, err := h.AdminDB.Exec(`
+			INSERT INTO entities (org_id, source, scope, source_id, kind, repository_id, linear_team_id)
+			VALUES ($1, $2, $3, $4, 'pr', $5, CASE WHEN $2 = 'linear' THEN 'team-1' END)
+		`, orgID, source, dbtest.TestGitHubHost, key, repositoryID)
+		return err
+	}
+
+	var pgErr *pgconn.PgError
+	err := insert(orgA, "github", "acme/api#1", nil)
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" || pgErr.ConstraintName != "entities_repository_required" {
+		t.Errorf("a github row with no repository = %v; want a 23514 violation of entities_repository_required", err)
+	}
+	err = insert(orgA, "github", "acme/api#2", repoB)
+	if !errors.As(err, &pgErr) || pgErr.Code != "23503" || pgErr.ConstraintName != "entities_repository_id_fkey" {
+		t.Errorf("a github row referencing another org's repository = %v; want a 23503 violation of entities_repository_id_fkey", err)
+	}
+	if err := insert(orgA, "github", "acme/api#3", repoA); err != nil {
+		t.Errorf("a github row referencing its org's repository = %v; want it stored", err)
+	}
+	if err := insert(orgA, "jira", "ACME-1", nil); err != nil {
+		t.Errorf("a jira row with no repository = %v; want it stored", err)
+	}
+
+	_, err = h.AdminDB.Exec(`UPDATE entities SET repository_id = NULL WHERE org_id = $1 AND source_id = 'acme/api#3'`, orgA)
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" || pgErr.ConstraintName != "entities_repository_required" {
+		t.Errorf("clearing a github row's repository = %v; want a 23514 violation of entities_repository_required", err)
 	}
 }

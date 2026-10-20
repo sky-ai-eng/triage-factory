@@ -100,12 +100,42 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.Repositor
 	return scanRepositoryFull(row)
 }
 
-// getOrCreateRepositoryID returns the surrogate id of one repository's registry
-// row, minting the row if it does not exist yet. It is the resolver the
-// tracked-set reconcile in team_github_repos.go uses: a save holding a slug
-// needs the id the tracking row's FK points at, and the store contract keeps
-// the surrogate out of domain.Repository. It takes a queryer so it composes
-// inside the reconcile's transaction.
+// FindOrCreateByRefSystem is the registry door: the get-or-create below, then
+// the row it resolved, read in the same transaction.
+func (s *repoStore) FindOrCreateByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef) (domain.Repository, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return domain.Repository{}, err
+	}
+	var out domain.Repository
+	err := inTx(ctx, s.q, func(tx queryer) error {
+		id, err := getOrCreateRepositoryID(ctx, tx, ref)
+		if err != nil {
+			return err
+		}
+		p, err := scanRepositoryFull(tx.QueryRowContext(ctx, `
+			SELECT `+repoProfileFullColumns+`
+			FROM repositories WHERE id = ?
+		`, id))
+		if err != nil {
+			return err
+		}
+		out = p
+		return nil
+	})
+	return out, err
+}
+
+// getOrCreateRepositoryID returns the id of one repository's registry row,
+// minting the row if it does not exist yet. It is the registry's one
+// get-or-create, and it has three callers: the tracked-set reconcile in
+// team_github_repos.go (a tracking row references the row), the GitHub entity
+// create in entities.go (a GitHub entity references the row), and the door,
+// FindOrCreateByRefSystem. It takes a queryer so it composes inside the
+// caller's transaction, and a row it mints commits or rolls back with that
+// transaction. The transaction can commit without referencing the row: an
+// entity create that loses a concurrent insert of the same key returns the
+// winner's entity instead. That leaves nothing stray, because the identity
+// index allows a repository one row and the winner's entity references it.
 //
 // An existing row is left exactly as it stands — same id, same profile text,
 // same base branch, same clone and poll state. The lookup before the insert is

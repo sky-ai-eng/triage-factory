@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -125,7 +126,8 @@ func TestTeamActivity_MergedAndFailedAreWindowedByTheAsk(t *testing.T) {
 	before, after := day+"T08:00:00Z", day+"T15:00:00Z"
 
 	entityID := fixtureUUID("e_conv")
-	execSQL(t, s.db, `INSERT INTO entities (id, source, source_id, kind, state, scope) VALUES (?, 'github', 'owner/repo#77', 'pr', 'active', 'https://github.com')`, entityID)
+	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "owner", "repo")
+	execSQL(t, s.db, `INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id) VALUES (?, 'github', 'owner/repo#77', 'pr', 'active', 'https://github.com', ?)`, entityID, repoID)
 	for i, at := range []string{before, after} {
 		execSQL(t, s.db,
 			`INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json, created_at) VALUES (?, ?, ?, '', '{}', ?)`,

@@ -55,7 +55,8 @@ var _ db.EntityStore = (*entityStore)(nil)
 const pgEntitySelectCols = `id, source, scope, source_id, COALESCE(external_id, ''), kind,
        COALESCE(title, ''), COALESCE(url, ''),
        COALESCE(snapshot_json::text, ''), COALESCE(description, ''), state,
-       created_at, last_polled_at, closed_at, poll_seq, COALESCE(linear_team_id, '')`
+       created_at, last_polled_at, closed_at, poll_seq, COALESCE(linear_team_id, ''),
+       COALESCE(repository_id::text, '')`
 
 // pgLinearTeamFromSnapshot is the SET clause every snapshot write carries, so a
 // Linear row's linear_team_id moves with the snapshot that observed its team,
@@ -457,12 +458,14 @@ func (s *entityStore) FindOrCreateLinearSystem(ctx context.Context, orgID, scope
 
 // findOrCreateEntity is the identity rule's find-or-create. linearTeamID is
 // the team a new Linear row is created with, and empty for every other
-// source; with it empty, a Linear row is found but not created.
+// source; with it empty, a Linear row is found but not created. A new GitHub
+// row is created referencing its repository's registry row, got or created in
+// the same transaction as the insert (db.GitHubEntityRepoRef names it).
 func findOrCreateEntity(ctx context.Context, q queryer, orgID, source, scope, sourceID, externalID, linearTeamID, kind, title, url string) (*domain.Entity, bool, error) {
 	if scope == "" {
 		return nil, false, fmt.Errorf("%w: %s %s", db.ErrEntityScopeRequired, source, sourceID)
 	}
-	find := func() (*domain.Entity, error) {
+	find := func(q queryer) (*domain.Entity, error) {
 		if externalID != "" {
 			if e, err := entityByExternalID(ctx, q, orgID, source, scope, externalID); err != nil || e != nil {
 				return e, err
@@ -470,7 +473,7 @@ func findOrCreateEntity(ctx context.Context, q queryer, orgID, source, scope, so
 		}
 		return entityByKey(ctx, q, orgID, source, scope, sourceID, externalID)
 	}
-	existing, err := find()
+	existing, err := find(q)
 	if err != nil {
 		return nil, false, err
 	}
@@ -480,52 +483,77 @@ func findOrCreateEntity(ctx context.Context, q queryer, orgID, source, scope, so
 	if source == domain.ArtifactProviderLinear && linearTeamID == "" {
 		return nil, false, fmt.Errorf("%w: %s in %s", db.ErrEntityLinearTeamRequired, sourceID, scope)
 	}
+	var repoRef domain.RepoRef
+	if source == domain.ArtifactProviderGitHub {
+		if repoRef, err = db.GitHubEntityRepoRef(scope, sourceID); err != nil {
+			return nil, false, err
+		}
+	}
 
 	id := uuid.New().String()
 	now := time.Now().UTC()
-	// DO NOTHING rather than a raised violation: a raised one would abort a
-	// caller's enclosing transaction, and a lost race is an answer here, not
-	// an error. The re-read below decides what the loser sees.
-	res, err := q.ExecContext(ctx, `
-		INSERT INTO entities (id, org_id, source, scope, source_id, external_id, kind, title, url, state, created_at, last_polled_at, linear_team_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active', $10, $11, $12)
-		ON CONFLICT DO NOTHING
-	`, id, orgID, source, scope, sourceID, nullString(externalID), kind, title, url, now, now, nullString(linearTeamID))
-	if err != nil {
-		return nil, false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return nil, false, err
-	}
-	if n == 0 {
-		// A concurrent first discovery won, or an active row already answers
-		// to the key. The re-read finds the former; the latter carries a
-		// different id, so the key lookup skips it and the create is refused.
-		existing, err := find()
+	var out *domain.Entity
+	created := false
+	err = inTx(ctx, q, func(tx queryer) error {
+		var repositoryID string
+		if source == domain.ArtifactProviderGitHub {
+			var err error
+			if repositoryID, err = getOrCreateRepositoryID(ctx, tx, orgID, repoRef); err != nil {
+				return fmt.Errorf("resolve repository of %s: %w", sourceID, err)
+			}
+		}
+		// DO NOTHING rather than a raised violation: a raised one would abort
+		// a caller's enclosing transaction, and a lost race is an answer here,
+		// not an error. The re-read below decides what the loser sees.
+		res, err := tx.ExecContext(ctx, `
+			INSERT INTO entities (id, org_id, source, scope, source_id, external_id, kind, title, url, state, created_at, last_polled_at, linear_team_id, repository_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active', $10, $11, $12, $13)
+			ON CONFLICT DO NOTHING
+		`, id, orgID, source, scope, sourceID, nullString(externalID), kind, title, url, now, now, nullString(linearTeamID), nullString(repositoryID))
 		if err != nil {
-			return nil, false, err
+			return err
 		}
-		if existing != nil {
-			return existing, false, nil
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
 		}
-		return nil, false, fmt.Errorf("%w: %s %s in %s", db.ErrEntityKeyOccupied, source, sourceID, scope)
+		if n == 0 {
+			// A concurrent first discovery won, or an active row already
+			// answers to the key. The re-read finds the former; the latter
+			// carries a different id, so the key lookup skips it and the
+			// create is refused.
+			existing, err := find(tx)
+			if err != nil {
+				return err
+			}
+			if existing == nil {
+				return fmt.Errorf("%w: %s %s in %s", db.ErrEntityKeyOccupied, source, sourceID, scope)
+			}
+			out = existing
+			return nil
+		}
+		out = &domain.Entity{
+			ID:           id,
+			Source:       source,
+			Scope:        scope,
+			SourceID:     sourceID,
+			ExternalID:   externalID,
+			Kind:         kind,
+			Title:        title,
+			URL:          url,
+			State:        "active",
+			CreatedAt:    now,
+			LastPolledAt: &now,
+			LinearTeamID: linearTeamID,
+			RepositoryID: repositoryID,
+		}
+		created = true
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
 	}
-
-	return &domain.Entity{
-		ID:           id,
-		Source:       source,
-		Scope:        scope,
-		SourceID:     sourceID,
-		ExternalID:   externalID,
-		Kind:         kind,
-		Title:        title,
-		URL:          url,
-		State:        "active",
-		CreatedAt:    now,
-		LastPolledAt: &now,
-		LinearTeamID: linearTeamID,
-	}, true, nil
+	return out, created, nil
 }
 
 // RenameSystem — see the interface doc. The FOR UPDATE on the identity row is
@@ -900,10 +928,12 @@ func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, e
 				  state = 'active', closed_at = NULL,
 				  source_id = $1, url = $2, snapshot_json = $3::jsonb, title = $4, description = $5,
 				  last_polled_at = $6, poll_seq = GREATEST(poll_seq, $7) + 1,
-				  linear_team_id = COALESCE($10, linear_team_id)
+				  linear_team_id = COALESCE($10, linear_team_id),
+				  repository_id = COALESCE($11::uuid, repository_id)
 				WHERE org_id = $8 AND id = $9`,
 				loser.SourceID, loser.URL, loserSnapshot, loser.Title, loser.Description,
-				loser.LastPolledAt, loser.PollSeq, orgID, survivor.ID, nullString(loser.LinearTeamID)); err != nil {
+				loser.LastPolledAt, loser.PollSeq, orgID, survivor.ID, nullString(loser.LinearTeamID),
+				nullString(loser.RepositoryID)); err != nil {
 				return fmt.Errorf("survivor takes live state: %w", err)
 			}
 		}
@@ -1140,7 +1170,7 @@ func scanEntityRow(row *sql.Row) (*domain.Entity, error) {
 	var e domain.Entity
 	err := row.Scan(&e.ID, &e.Source, &e.Scope, &e.SourceID, &e.ExternalID, &e.Kind, &e.Title, &e.URL,
 		&e.SnapshotJSON, &e.Description, &e.State,
-		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq, &e.LinearTeamID)
+		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq, &e.LinearTeamID, &e.RepositoryID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1156,7 +1186,7 @@ func scanEntityList(rows *sql.Rows) ([]domain.Entity, error) {
 		var e domain.Entity
 		if err := rows.Scan(&e.ID, &e.Source, &e.Scope, &e.SourceID, &e.ExternalID, &e.Kind, &e.Title, &e.URL,
 			&e.SnapshotJSON, &e.Description, &e.State,
-			&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq, &e.LinearTeamID); err != nil {
+			&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq, &e.LinearTeamID, &e.RepositoryID); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

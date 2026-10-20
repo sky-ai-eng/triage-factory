@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -155,10 +156,11 @@ func seedPgUntrackedEntity(t *testing.T, h *pgtest.Harness, orgID, suffix string
 	t.Helper()
 	id := uuid.New().String()
 	sourceID := fmt.Sprintf("tf-test/%s-%s#1", suffix, id[:8])
+	repositoryID := dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, "https://github.com", sourceID)
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, now(), 'https://github.com')
-	`, id, orgID, sourceID, "Untracked "+suffix, "https://example/"+sourceID); err != nil {
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, now(), 'https://github.com', $6)
+	`, id, orgID, sourceID, "Untracked "+suffix, "https://example/"+sourceID, repositoryID); err != nil {
 		t.Fatalf("seed untracked entity %s: %v", suffix, err)
 	}
 	return id

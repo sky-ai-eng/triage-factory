@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -125,11 +126,12 @@ func seedSQLiteTeamPR(t *testing.T, conn *sql.DB, fx dbtest.TeamPRFixture) strin
 	now := time.Now().UTC()
 	entityID := uuid.New().String()
 	sourceID := fmt.Sprintf("%s#%d", snap.Repo, snap.Number)
+	repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 	if _, err := conn.Exec(`
 		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, state,
-		                      owning_team_id, created_at, last_polled_at, scope)
-		VALUES (?, 'github', ?, 'pr', ?, ?, ?, ?, ?, ?, ?, 'https://github.com')
-	`, entityID, sourceID, snap.Title, snap.URL, string(blob), state, owning, now, now); err != nil {
+		                      owning_team_id, created_at, last_polled_at, scope, repository_id)
+		VALUES (?, 'github', ?, 'pr', ?, ?, ?, ?, ?, ?, ?, 'https://github.com', ?)
+	`, entityID, sourceID, snap.Title, snap.URL, string(blob), state, owning, now, now, repoID); err != nil {
 		t.Fatalf("seed entity %s: %v", sourceID, err)
 	}
 	return entityID

@@ -11,6 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -105,17 +106,18 @@ func seedSQLiteTasks(t *testing.T, conn *sql.DB, n int) []string {
 		entityID := uuid.New().String()
 		taskID := uuid.New().String()
 		eventID := uuid.New().String()
-		sourceID := fmt.Sprintf("conformance-pr-%d-%d", i, now.UnixNano())
+		sourceID := fmt.Sprintf("octo/conformance-pr#%d-%d", i, now.UnixNano())
 		// events_catalog must include the event_type before the FK
 		// fires. The bootstrap seed includes the standard catalog;
 		// "github:pr:opened" is a stable entry that matches
 		// domain.EventGitHubPROpened.
 		eventType := "github:pr:opened"
 
+		repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 		if _, err := conn.Exec(`
-			INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-			VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?, 'https://github.com')
-		`, entityID, sourceID, fmt.Sprintf("Conformance PR %d", i), "https://example/pr/"+sourceID, now); err != nil {
+			INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+			VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?, 'https://github.com', ?)
+		`, entityID, sourceID, fmt.Sprintf("Conformance PR %d", i), "https://example/pr/"+sourceID, now, repoID); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
 		if _, err := conn.Exec(`

@@ -16,16 +16,17 @@ import (
 //	renameRepositoryRow    — the repository's own row. The rename itself.
 //	rewriteSlugDerivedKeys — text keys with a slug embedded in them.
 //
-// The tracked set and the worktree ledger reference the repository by the
-// registry row's id, so a rename moves the slug on one
-// row and every one of them still resolves without being touched.
+// The tracked set, the worktree ledger and GitHub entities (repository_id)
+// reference the repository by the registry row's id, so a rename moves the slug
+// on one row and every one of them still resolves without being touched.
 //
-// What is left cannot become a foreign key. A pull request is identified by its
-// repository AND its number, so entities.source_id stays the composite string
-// "owner/repo#18"; an artifact's dedup_key is a contract between two writers
-// that would re-mint every artifact if its shape moved; placement_overrides'
-// key_value is a slug that names a repository with or without a registry row,
-// so no FK can hold it.
+// What is left cannot become a foreign key. A pull request's key is its
+// repository's name AND its number, so entities.source_id stays the composite
+// display key "owner/repo#18" beside the entity's repository_id, and moves
+// because it is what everything reads and shows; an artifact's dedup_key is a
+// contract between two writers that would re-mint every artifact if its shape
+// moved; placement_overrides' key_value is a slug that names a repository with
+// or without a registry row, so no FK can hold it.
 //
 // Stored links move with the keys. entities.url is rewritten alongside
 // source_id — a redirect stops the moment the freed name is re-claimed,
@@ -174,6 +175,10 @@ func storedSlugsForIdentity(ctx context.Context, q queryer, orgID, source, host,
 
 // slugHeldByAnotherRepository reports whether a repository row on the same
 // host other than the one being renamed already spells the target slug.
+//
+// TODO(TFAC-1149): a bare row (no external_id, tracked by no team) that an
+// entity create minted under the new name before the rename was observed
+// counts as occupying it, so the rename is refused until the row is absorbed.
 func slugHeldByAnotherRepository(ctx context.Context, q queryer, orgID, source string, observed domain.RepoRef) (bool, error) {
 	var found int
 	err := q.QueryRowContext(ctx, `

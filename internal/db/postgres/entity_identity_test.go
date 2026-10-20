@@ -108,7 +108,7 @@ func TestEntityIdentity_Postgres(t *testing.T) {
 			},
 			Conversation: func(t *testing.T, suffix string) string {
 				t.Helper()
-				host := seedPgSharedEntity(t, h, orgID, "github", "conversation-host-"+suffix, "pr")
+				host := seedPgSharedEntity(t, h, orgID, "github", "octo/conversation-host#"+suffix, "pr")
 				return seedPgTeamConversationOnEntity(t, h, orgID, userID, seedPgTaskMemoryPrompt(t, h, orgID, userID), teamID, host, suffix)
 			},
 			Link: func(t *testing.T, from, to string) {
