@@ -306,8 +306,9 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		TeamGitHubGroups: newTeamGitHubGroupsStore(app, admin),
 		// TeamGitHubRepos holds both pools: app for ListForTeam + the
 		// team-row write inside ReplaceForTeam (RLS gates by team admin)
-		// and admin for ListForTeamSystem + TracksRepoSystem (router gate,
-		// no JWT claims) + the repositories reconcile (org-wide union,
+		// and admin for ListForTeamSystem + TracksRepoSystem +
+		// TracksRepositorySystem (router gate, no JWT claims) + the
+		// repositories reconcile (org-wide union,
 		// commits autonomously).
 		TeamGitHubRepos: newTeamGitHubReposStore(app, admin),
 		// GitHubApps: app pool for request-handler reads/writes

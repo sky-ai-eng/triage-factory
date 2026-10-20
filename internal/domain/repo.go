@@ -127,20 +127,21 @@ func (r Repository) Ref() RepoRef {
 	return RepoRef{Source: r.Source, Host: r.Host, Owner: r.Owner, Repo: r.Repo, ExternalID: r.ExternalID}
 }
 
-// SplitGitHubEntitySourceID splits a GitHub entity's source id into its parts:
+// SplitGitHubEntitySourceID splits a GitHub entity's key into its parts:
 // "owner/repo#42" for a pull request or issue, "owner/repo" for a repository.
-// prNumber is 0 when the id names no number, and an unparseable id yields
+// prNumber is 0 when the key names no number, and an unparseable key yields
 // empty parts rather than an error — every caller gates on a value it can
-// check, and a malformed id is the same answer as a missing one.
+// check, and a malformed key is the same answer as a missing one.
 //
-// The "#N" suffix is cut BEFORE the owner/repo split, which is the reason this
-// is one helper rather than a split spelled out per call site: splitting the
-// raw id leaves the repository named "repo#42", which no repository row and no
-// remote resolves, and the resulting failure surfaces far downstream of the
-// parse that caused it. It lives here because the parse decides an
-// authorization input on two separate gates (the git proxy's and exec-gh's),
-// and a per-package copy is how those two would come to disagree about which
-// repo a task is on.
+// It is the boundary where a GitHub entity's repository enters TF: the
+// entity's create resolves the owner/repo the key names to a registry row
+// once (db.GitHubEntityRepoRef) and stores the row's id in
+// entities.repository_id. A rename leaves the name in a key stale until the
+// key is rewritten, so nothing past the create reads a repository out of a
+// key; GitHubPRNumber reads the part a rename does not change.
+//
+// The "#N" suffix is cut BEFORE the owner/repo split: splitting the raw key
+// leaves the repository named "repo#42", which no repository row resolves.
 func SplitGitHubEntitySourceID(sourceID string) (owner, repo string, prNumber int) {
 	repoStr := sourceID
 	if idx := strings.LastIndex(sourceID, "#"); idx >= 0 {
@@ -154,20 +155,11 @@ func SplitGitHubEntitySourceID(sourceID string) (owner, repo string, prNumber in
 	return owner, repo, prNumber
 }
 
-// GitHubTaskRepo is the "owner/repo" a GitHub task targets, or "" for a task
-// of any other source.
-//
-// The source gate is load-bearing beyond politeness: a Slack entity's source
-// id ("<channel>/<timestamp>") splits on "/" perfectly well, so a caller that
-// skipped the check would read a nonexistent repo out of a Slack task and
-// authorize against it.
-func GitHubTaskRepo(task Task) string {
-	if task.EntitySource != "github" {
-		return ""
-	}
-	owner, repo, _ := SplitGitHubEntitySourceID(task.EntitySourceID)
-	if owner == "" || repo == "" {
-		return ""
-	}
-	return owner + "/" + repo
+// GitHubPRNumber is the number a GitHub entity key ends in ("owner/repo#42" is
+// 42), or 0 when it ends in none. The number is the pull request's identity
+// within its repository and no rename changes it, so a reader takes the
+// repository from entities.repository_id and only the number from the key.
+func GitHubPRNumber(sourceID string) int {
+	_, _, n := SplitGitHubEntitySourceID(sourceID)
+	return n
 }

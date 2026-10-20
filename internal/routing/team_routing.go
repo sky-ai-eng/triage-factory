@@ -90,17 +90,16 @@ func (r *Router) teamTracksEventScope(ctx context.Context, evt domain.Event, tea
 	}
 }
 
-// teamTracksEventRepo extracts the repo from a GitHub event's metadata
-// and asks the store whether teamID tracks it on the event's GitHub host
-// (githubEventHost). Every GitHub PR metadata struct carries a top-level
-// "repo" ("owner/name"), so a minimal unmarshal is enough — no per-type
-// decoding. The host is part of the match because a slug names a different
-// repository on another host: a team tracking acme/api on one host is not
-// tracking the acme/api of another. Fail-open on a missing /
-// malformed repo or a store error: dropping a legitimate task on a
-// transient DB blip or an unexpected metadata shape is worse than the
-// pre-ticket behavior, and the events feeding this path come from TF's
-// own trusted poller.
+// teamTracksEventRepo asks the store whether teamID tracks the repository of
+// the pull request a GitHub event is about: the registry row its entity
+// references (entities.repository_id). The id is what the team's tracked set
+// references too, so the gate reads no name: a repository renamed since the
+// event was emitted is still the one the team tracks, and a registry row lives
+// on one GitHub host, so a team tracking acme/api on one host is not tracking
+// the acme/api of another. Fail-open on an entity that cannot be read, one
+// that names no repository, or a store error: dropping a legitimate task on a
+// transient DB blip is worse than the pre-ticket behavior, and the events
+// feeding this path come from TF's own trusted poller.
 //
 // This is the deliberate posture split from the owning-team ladder next
 // door, where a failed read propagates instead of degrading. The gate only
@@ -108,28 +107,21 @@ func (r *Router) teamTracksEventScope(ctx context.Context, evt domain.Event, tea
 // open costs a briefly-too-wide gate that the next event corrects; the
 // ladder's reads DECIDE the owner, and a wrong answer there sticks to the
 // entity for the rest of its life.
-//
-// TODO(TFAC-1126): check the event entity's repository_id against the team's
-// tracked set by id rather than resolving the metadata's "repo" name.
 func (r *Router) teamTracksEventRepo(ctx context.Context, evt domain.Event, teamID string) bool {
-	var m struct {
-		Repo string `json:"repo"`
-	}
-	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil || m.Repo == "" {
+	if evt.EntityID == nil || r.entities == nil {
 		return true
 	}
-	owner, name, ok := strings.Cut(m.Repo, "/")
-	if !ok || owner == "" || name == "" {
-		return true
-	}
-	host, err := r.githubEventHost(ctx, evt)
+	e, err := r.entities.GetSystem(ctx, evt.OrgID, *evt.EntityID)
 	if err != nil {
-		routerLog.Warn("team-repo gate host lookup failed, allowing", "team_id", teamID, "repo", m.Repo, "error", err)
+		routerLog.Warn("team-repo gate entity read failed, allowing", "team_id", teamID, "entity_id", *evt.EntityID, "error", err)
 		return true
 	}
-	tracks, err := r.teamRepos.TracksRepoSystem(ctx, teamID, host, owner, name)
+	if e == nil || e.RepositoryID == "" {
+		return true
+	}
+	tracks, err := r.teamRepos.TracksRepositorySystem(ctx, teamID, e.RepositoryID)
 	if err != nil {
-		routerLog.Warn("team-repo gate lookup failed, allowing", "team_id", teamID, "repo", m.Repo, "error", err)
+		routerLog.Warn("team-repo gate lookup failed, allowing", "team_id", teamID, "repository_id", e.RepositoryID, "error", err)
 		return true
 	}
 	return tracks

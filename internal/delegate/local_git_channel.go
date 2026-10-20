@@ -167,7 +167,14 @@ func (s *Spawner) startLocalGitChannel(ctx context.Context, orgID string, task d
 	}
 	auditHost := agenthost.NewLocal(stores, info)
 	auditHost.SetGitHubResolver(resolver)
-	owner, _ := ownerRepoForTask(task)
+	// The owner only pins the audit's credential label below. A GitHub task
+	// whose repository cannot be read fails its setup on the same read, so an
+	// unpinned channel never carries a run that far.
+	owner, _, err := s.taskOwnerRepo(ctx, orgID, task)
+	if err != nil {
+		delegateLog.Warn("local git channel: read the task's repository failed; the audit credential is left unpinned",
+			"conversation", info.ConversationID, "task", task.ID, "error", err)
+	}
 	// Only a PAT is pinned: the App is what an unset credential already reads
 	// as, and leaving it unset keeps the per-artifact classification in play.
 	if ghclient.TokenIdentity(ctx, resolver, orgID, owner) == ghclient.IdentityPAT {

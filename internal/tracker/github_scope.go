@@ -3,7 +3,6 @@ package tracker
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -39,59 +38,70 @@ func (t *Tracker) RetireGitHubOutOfScope(ctx context.Context, scope string) int 
 		return 0
 	}
 	retired := 0
-	forgotten := map[domain.RepoRef]bool{}
+	forgotten := map[string]bool{}
 	for _, e := range entities {
 		if e.Scope == scope {
 			continue
 		}
-		t.forgetPullsCursor(ctx, e, forgotten)
-		t.emitGitHubUnreachable(ctx, e, events.GitHubUnreachableScopeChanged)
+		repo := t.entityRepository(ctx, e)
+		t.forgetPullsCursor(ctx, repo, forgotten)
+		t.emitGitHubUnreachable(ctx, e, repo, events.GitHubUnreachableScopeChanged)
 		retired++
 	}
 	return retired
 }
 
-// forgetPullsCursor clears the stored ETag of the open-PR listing of e's
-// repository on e's host, keeping its poll time, so the next listing there is
-// unconditional. Without it, an org that returns to the host would replay the
-// ETag stored before it left; a listing nothing changed in since answers 304,
-// discovery sees none of its pull requests, and the ones retired in the
-// meantime stay closed until something in the repository changes. done holds
-// the repositories already handled this pass. Best-effort: a cursor left in
-// place costs that delay, never a wrong event.
-func (t *Tracker) forgetPullsCursor(ctx context.Context, e domain.Entity, done map[domain.RepoRef]bool) {
-	if t.repos == nil || e.Scope == "" {
-		return
+// entityRepository is the registry row a GitHub entity references
+// (entities.repository_id), or nil when it cannot be read. The row's name is
+// the repository's now, whatever the entity's key still spells. A failed read
+// is logged here, and every caller treats nil as best-effort.
+func (t *Tracker) entityRepository(ctx context.Context, e domain.Entity) *domain.Repository {
+	if t.repos == nil || e.RepositoryID == "" {
+		return nil
 	}
-	// TODO(TFAC-1126): key the cursor's repository by e.RepositoryID rather
-	// than by the name parsed from the key.
-	owner, repo, _ := domain.SplitGitHubEntitySourceID(e.SourceID)
-	if owner == "" || repo == "" {
-		return
-	}
-	ref := domain.RepoRef{Host: e.Scope, Owner: strings.ToLower(owner), Repo: strings.ToLower(repo)}
-	if done[ref] {
-		return
-	}
-	done[ref] = true
-	etag, polledAt, err := t.repos.GetPullsPollStateByRefSystem(ctx, t.orgID, ref)
+	repo, err := t.repos.GetSystem(ctx, t.orgID, e.RepositoryID)
 	if err != nil {
-		trackerLog.WarnContext(ctx, "read pulls poll state of a retired pull request's repository failed", "host", e.Scope, "repo", owner+"/"+repo, "error", err)
+		trackerLog.WarnContext(ctx, "read a pull request's repository failed", "entity_id", e.ID, "repository_id", e.RepositoryID, "error", err)
+		return nil
+	}
+	return repo
+}
+
+// forgetPullsCursor clears the stored ETag of the open-PR listing of repo —
+// the registry row of a retired pull request, on the host it was polled from —
+// keeping its poll time, so the next listing there is unconditional. Without
+// it, an org that returns to the host would replay the ETag stored before it
+// left; a listing nothing changed in since answers 304, discovery sees none of
+// its pull requests, and the ones retired in the meantime stay closed until
+// something in the repository changes. done holds the ids of the repositories
+// already handled this pass. Best-effort: a cursor left in place (repo nil, or
+// a failed write) costs that delay, never a wrong event.
+func (t *Tracker) forgetPullsCursor(ctx context.Context, repo *domain.Repository, done map[string]bool) {
+	if repo == nil || done[repo.ID] {
+		return
+	}
+	done[repo.ID] = true
+	etag, polledAt, err := t.repos.GetPullsPollStateByRefSystem(ctx, t.orgID, repo.Ref())
+	if err != nil {
+		trackerLog.WarnContext(ctx, "read pulls poll state of a retired pull request's repository failed", "host", repo.Host, "repo", repo.Slug(), "error", err)
 		return
 	}
 	if etag == "" || polledAt == nil {
 		return
 	}
-	if err := t.repos.SetPullsPollStateByRefSystem(ctx, t.orgID, ref, "", *polledAt); err != nil {
-		trackerLog.WarnContext(ctx, "clear pulls poll state of a retired pull request's repository failed", "host", e.Scope, "repo", owner+"/"+repo, "error", err)
+	if err := t.repos.SetPullsPollStateByRefSystem(ctx, t.orgID, repo.Ref(), "", *polledAt); err != nil {
+		trackerLog.WarnContext(ctx, "clear pulls poll state of a retired pull request's repository failed", "host", repo.Host, "repo", repo.Slug(), "error", err)
 	}
 }
 
 // emitGitHubUnreachable publishes github:pr:unreachable for e, from its stored
-// snapshot. A stub with no snapshot carries its repo and number parsed from its
-// key, which is what it has. Publish, not the snapshot-CAS enqueue: there is no
-// new snapshot to advance, and the entity's close is the router's job.
-func (t *Tracker) emitGitHubUnreachable(ctx context.Context, e domain.Entity, reason string) {
+// snapshot. A snapshot missing its repo or number takes the repository's name
+// from repo, its registry row (entityRepository), and the number from its key,
+// which no rename changes; each is replaced only by a value it actually has,
+// so a row that could not be read leaves the snapshot's name, or none for a
+// stub. Publish, not the snapshot-CAS enqueue: there is no new snapshot to
+// advance, and the entity's close is the router's job.
+func (t *Tracker) emitGitHubUnreachable(ctx context.Context, e domain.Entity, repo *domain.Repository, reason string) {
 	var snap domain.PRSnapshot
 	if e.SnapshotJSON != "" && e.SnapshotJSON != "{}" {
 		if err := json.Unmarshal([]byte(e.SnapshotJSON), &snap); err != nil {
@@ -101,9 +111,11 @@ func (t *Tracker) emitGitHubUnreachable(ctx context.Context, e domain.Entity, re
 		}
 	}
 	if snap.Repo == "" || snap.Number == 0 {
-		owner, repo, number := domain.SplitGitHubEntitySourceID(e.SourceID)
-		if owner != "" && repo != "" {
-			snap.Repo, snap.Number = owner+"/"+repo, number
+		if n := domain.GitHubPRNumber(e.SourceID); n > 0 {
+			snap.Number = n
+		}
+		if repo != nil {
+			snap.Repo = repo.Slug()
 		}
 	}
 	entityID := e.ID

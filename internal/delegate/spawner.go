@@ -969,7 +969,7 @@ func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, repo,
 // mint GitHub did not answer from a credential nobody bound.
 //
 // repo is the specific repo the call concerns, when the caller has one in
-// view (every real caller does — see ownerRepoForTask). It disambiguates
+// view (every real caller does — see taskOwnerRepo). It disambiguates
 // the TF_ROLE=executor bundle lookup below: unlike the live resolver's
 // account-wide App installation token, a bundle's RepoTokens are scoped
 // per-repo, so an owner alone is ambiguous whenever a run's authorized set
@@ -1311,39 +1311,73 @@ func (s *Spawner) setWorktreePath(ctx context.Context, orgID, conversationID, cl
 	return err
 }
 
-// taskRepository is the registry row of a GitHub task's own repository: owner/
-// repo on the GitHub host the task's pull request was polled from — its
-// entity's scope — not on whatever host the org names now. A task polled from a
-// host the org has since left keeps resolving to that host's repository, never
-// to a same-named one on the new host. A repository with no row is an error:
-// creating a GitHub entity registers its repository's row, so every task's
-// pull request has one.
-//
-// TODO(TFAC-1126): read the row by the entity's repository_id; the lookup by
-// owner/repo on the entity's host is the name-parsing path that replaces.
-func (s *Spawner) taskRepository(ctx context.Context, orgID string, task domain.Task, owner, repo string) (*domain.Repository, error) {
-	return s.entityRepository(ctx, orgID, task.EntityID, owner, repo)
-}
-
-// entityRepository resolves owner/repo on the GitHub host of entityID's scope.
-// See taskRepository.
-func (s *Spawner) entityRepository(ctx context.Context, orgID, entityID, owner, repo string) (*domain.Repository, error) {
+// taskRepository is the registry row of a GitHub task's own repository: the
+// row its entity references (entities.repository_id), read by that id. Its
+// owner/repo are the repository's names now, whatever the entity's key still
+// spells, and its host is the one the task's pull request was polled from, not
+// whatever host the org names now. A task of any other source has no
+// repository and answers nil with no error. A GitHub entity always references
+// a row (the schema requires it), so failing to read one is an error.
+func (s *Spawner) taskRepository(ctx context.Context, orgID string, task domain.Task) (*domain.Repository, error) {
+	if task.EntitySource != "github" {
+		return nil, nil
+	}
 	if s.repos == nil || s.entities == nil {
 		return nil, errors.New("resolve the task's repository: no repository or entity store")
 	}
-	entity, err := s.entities.GetSystem(ctx, orgID, entityID)
+	entity, err := s.entities.GetSystem(ctx, orgID, task.EntityID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve the task's repository: read entity: %w", err)
 	}
-	if entity == nil || entity.Scope == "" {
-		return nil, fmt.Errorf("resolve the task's repository: entity %s names no GitHub host", entityID)
+	if entity == nil || entity.RepositoryID == "" {
+		return nil, fmt.Errorf("resolve the task's repository: entity %s references no repository", task.EntityID)
 	}
-	row, err := s.repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Host: entity.Scope, Owner: owner, Repo: repo})
+	row, err := s.repos.GetSystem(ctx, orgID, entity.RepositoryID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve the task's repository: %w", err)
 	}
 	if row == nil {
-		return nil, fmt.Errorf("resolve the task's repository: no repository row for %s/%s on %s", owner, repo, entity.Scope)
+		return nil, fmt.Errorf("resolve the task's repository: no repository row %s", entity.RepositoryID)
+	}
+	return row, nil
+}
+
+// taskOwnerRepo is taskRepository's owner/repo, the pair the credential
+// lookups key on; ("", "") for a task of any other source, which has no single
+// owner/repo — the live resolver then resolves the org's sole App
+// installation, falling through to PAT when ambiguous. The repo half matters
+// as much as the owner: a bundle's RepoTokens are scoped per repo, unlike the
+// live resolver's account-wide App installation token (resolveGHClient).
+func (s *Spawner) taskOwnerRepo(ctx context.Context, orgID string, task domain.Task) (owner, repo string, err error) {
+	row, err := s.taskRepository(ctx, orgID, task)
+	if err != nil || row == nil {
+		return "", "", err
+	}
+	return row.Owner, row.Repo, nil
+}
+
+// legacyCheckoutRepository resolves owner/repo on the GitHub host of entityID's
+// scope. It is the boundary where an older snapshot manifest, which names a
+// checkout by owner/repo rather than by registry id, enters a restore; the
+// host is the task's, so the name never resolves to a same-named repository
+// on the host the org has moved to since.
+func (s *Spawner) legacyCheckoutRepository(ctx context.Context, orgID, entityID, owner, repo string) (*domain.Repository, error) {
+	if s.repos == nil || s.entities == nil {
+		return nil, errors.New("resolve the checkout's repository: no repository or entity store")
+	}
+	entity, err := s.entities.GetSystem(ctx, orgID, entityID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve the checkout's repository: read entity: %w", err)
+	}
+	if entity == nil || entity.Scope == "" {
+		return nil, fmt.Errorf("resolve the checkout's repository: entity %s names no GitHub host", entityID)
+	}
+	row, err := s.repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Host: entity.Scope, Owner: owner, Repo: repo})
+	if err != nil {
+		return nil, fmt.Errorf("resolve the checkout's repository: %w", err)
+	}
+	if row == nil {
+		return nil, fmt.Errorf("resolve the checkout's repository: no repository row for %s/%s on %s", owner, repo, entity.Scope)
 	}
 	return row, nil
 }

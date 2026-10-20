@@ -23,9 +23,10 @@ var ErrTeamNotInOrg = errors.New("db: team does not belong to that org")
 //
 // A row here references a repository by the registry row's id, so a rename
 // moves one column on one row in `repositories` and every tracking row still
-// resolves without being rewritten. The store's own surface stays (owner,
-// repo) — that is what a request body carries and what the router gate asks
-// about — so reads join the registry and writes resolve the slug first.
+// resolves without being rewritten. Most of the store's surface stays (owner,
+// repo) — that is what a request body and an agent's push carry — so those
+// reads join the registry and writes resolve the slug first. A caller holding
+// the registry row's id asks TracksRepositorySystem instead.
 //
 // The two tables have different lifetimes, and the direction matters.
 // ReplaceForTeam creates a registry row for a newly-tracked repository (it has
@@ -61,9 +62,9 @@ var ErrTeamNotInOrg = errors.New("db: team does not belong to that org")
 //     reconcile runs in the caller's tx (atomic), serialized per org by a
 //     transaction advisory lock so concurrent same-org saves can't race
 //     repositories into an inconsistent state.
-//   - ListForTeamSystem, TracksRepoSystem run on the admin pool. The
-//     router gate + any poll caller resolve tracking without a
-//     JWT-claims context.
+//   - ListForTeamSystem, TracksRepoSystem, TracksRepositorySystem run on
+//     the admin pool. The router gate + any poll caller resolve tracking
+//     without a JWT-claims context.
 //
 // SQLite collapses the pool split to one connection; the `...System`
 // variant delegates to its non-System counterpart, the union read needs
@@ -134,9 +135,18 @@ type TeamGitHubReposStore interface {
 
 	// TracksRepoSystem reports whether the team tracks (owner, repo) on host,
 	// matched case-insensitively on both fields (GitHub identifiers are
-	// case-insensitive). This is the router gate lookup. Admin pool in
-	// Postgres: the router goroutine has no JWT claims.
+	// case-insensitive). It is the lookup for a name a run hands TF — a push
+	// through the git proxy, a `workspace add` — where no registry id is held
+	// yet. Admin pool in Postgres: those callers have no JWT claims.
 	TracksRepoSystem(ctx context.Context, teamID, host, owner, repo string) (bool, error)
+
+	// TracksRepositorySystem reports whether the team tracks the repository
+	// whose registry row is repositoryID. It is the lookup for a caller that
+	// already holds the row's id, as a GitHub entity does
+	// (entities.repository_id); TracksRepoSystem is for one that holds a name.
+	// No host is asked about: a registry row lives on one host, so the id
+	// already names it. Admin pool in Postgres, like TracksRepoSystem.
+	TracksRepositorySystem(ctx context.Context, teamID, repositoryID string) (bool, error)
 
 	// RepoUpdateRecipientsSystem returns the distinct, sorted ids of every
 	// user who may receive a repository_updated websocket event for

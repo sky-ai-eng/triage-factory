@@ -2,7 +2,6 @@ package agenthost
 
 import (
 	"context"
-	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -26,10 +25,15 @@ import (
 // It is a supplement to the ledger, never a replacement: it authorizes exactly
 // one repo, the one named by the run's own task. ConversationInfo carries no
 // task id, so the conversation is resolved to its task here rather than
-// trusted from a field a caller stamped. Non-GitHub tasks and any resolution
-// failure report false, leaving the ledger gate to answer — fail closed.
+// trusted from a field a caller stamped. The task's repository is the registry
+// row its entity references (entities.repository_id); owner/repo is the name
+// the asking gate was handed, resolved to a row on host here and compared by
+// id, so a repository renamed since the task was created is still its own and
+// nothing is read out of the entity's key. Non-GitHub tasks, whose entities
+// reference no repository, and any resolution failure report false, leaving
+// the ledger gate to answer — fail closed.
 func IsTaskOwnRepo(ctx context.Context, stores db.Stores, info ConversationInfo, host, owner, repo string) bool {
-	if stores.Conversations == nil || stores.Tasks == nil || stores.Entities == nil || info.ConversationID == "" || host == "" {
+	if stores.Conversations == nil || stores.Tasks == nil || stores.Entities == nil || stores.Repos == nil || info.ConversationID == "" || host == "" {
 		return false
 	}
 	conv, err := stores.Conversations.GetSystem(ctx, info.OrgID, info.ConversationID)
@@ -40,12 +44,10 @@ func IsTaskOwnRepo(ctx context.Context, stores db.Stores, info ConversationInfo,
 	if err != nil || task == nil {
 		return false
 	}
-	// TODO(TFAC-1126): compare the repository by the task entity's
-	// repository_id rather than by the name parsed from its key.
-	taskRepo := domain.GitHubTaskRepo(*task)
-	if taskRepo == "" || !strings.EqualFold(taskRepo, owner+"/"+repo) {
+	entity, err := stores.Entities.GetSystem(ctx, info.OrgID, task.EntityID)
+	if err != nil || entity == nil || entity.RepositoryID == "" {
 		return false
 	}
-	entity, err := stores.Entities.GetSystem(ctx, info.OrgID, task.EntityID)
-	return err == nil && entity != nil && entity.Scope == host
+	row, err := stores.Repos.GetByRefSystem(ctx, info.OrgID, domain.RepoRef{Host: host, Owner: owner, Repo: repo})
+	return err == nil && row != nil && row.ID == entity.RepositoryID
 }

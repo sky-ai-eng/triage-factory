@@ -443,7 +443,7 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, task domain.Task, m
 		// subjects, issue bodies — which is why it carries untrusted markers,
 		// and text sitting inside the agent's own instructions reads as
 		// instruction however it is marked.
-		taskContext: BuildTaskContext(task, metadataJSON, cfg.prSkeleton, artifacts),
+		taskContext: BuildTaskContext(task, cfg.repoSlug(), metadataJSON, cfg.prSkeleton, artifacts),
 	}
 }
 

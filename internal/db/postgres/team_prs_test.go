@@ -68,6 +68,33 @@ func TestTeamPRStore_Postgres(t *testing.T) {
 		}
 	})
 
+	// The tracked set is matched on the entity's repository_id, never on the
+	// name in its key: a tracked repository renamed with no key rewritten
+	// keeps its pull requests on the list.
+	t.Run("tracked_set_is_matched_by_repository_id", func(t *testing.T) {
+		h.Reset(t)
+		orgID, _ := seedPgOrgAndUserForDashboard(t, h)
+		teamID := firstTeamForOrg(t, h, orgID)
+		seed := newPgTeamPRSeeder(h, orgID, teamID)
+		seed.Member(t, "member-a")
+		entityID := seed.PR(t, dbtest.TeamPRFixture{Snapshot: domain.PRSnapshot{
+			Number: 1, Author: "member-a", State: "OPEN", Repo: "tf-test/old",
+		}})
+		var repositoryID string
+		if err := h.AdminDB.QueryRow(`SELECT repository_id FROM entities WHERE id = $1`, entityID).Scan(&repositoryID); err != nil {
+			t.Fatalf("read repository_id: %v", err)
+		}
+		dbseed.RenameRepositoryOnly(t, h.AdminDB, repositoryID, "tf-test", "new")
+
+		prs, total, err := stores.TeamPRs.TeamPRs(t.Context(), orgID, teamID, dbtest.TestGitHubHost, db.PRListFilter{}, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("TeamPRs: %v", err)
+		}
+		if len(prs) != 1 || total != 1 || prs[0].Number != 1 {
+			t.Fatalf("got %+v (total %d), want #1 — its repository was renamed, and its key still spells the old name", prs, total)
+		}
+	})
+
 	// Entities are org-wide, so the org_id predicate is the only thing
 	// keeping another tenant's pull requests out of this team's list. Nothing
 	// else can assert it: SQLite is N=1 against a single sentinel org.

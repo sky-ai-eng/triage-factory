@@ -41,15 +41,15 @@ func (s *Spawner) claimPlacement() db.ClaimPlacement {
 
 // preferredExecutorFor computes the placement stamp for a run about to be
 // enqueued: the rendezvous winner for the run's (org, repo) key, spread
-// across the top-K when a hot-key replica override is in effect. The override
-// that applies is the one on the GitHub host of the task's entity (its
-// scope), since a slug names a repository only within one host. Empty (no
-// affinity) whenever placement is off, the task has no resolvable GitHub repo
-// (Jira/Slack tasks, or an unparseable source id), its entity cannot be read,
-// or the placement read fails — a failed or absent stamp only costs a cold
-// clone, never a claim, so this never blocks minting work. conversationID is
-// the id of the row being enqueued; it selects which replica owns the run
-// under a K>1 override.
+// across the top-K when a hot-key replica override is in effect. The
+// repository is the task's registry row (taskRepository), and the override
+// that applies is the one on that row's GitHub host, since a slug names a
+// repository only within one host. Empty (no affinity) whenever placement is
+// off, the task has no GitHub repository (Jira/Slack tasks), its repository
+// cannot be read, or the placement read fails — a failed or absent stamp only
+// costs a cold clone, never a claim, so this never blocks minting work.
+// conversationID is the id of the row being enqueued; it selects which
+// replica owns the run under a K>1 override.
 func (s *Spawner) preferredExecutorFor(ctx context.Context, orgID string, task domain.Task, conversationID string) string {
 	s.mu.Lock()
 	resolver := s.placementResolver
@@ -57,36 +57,20 @@ func (s *Spawner) preferredExecutorFor(ctx context.Context, orgID string, task d
 	if resolver == nil || !resolver.Enabled() {
 		return ""
 	}
-	owner, repo := ownerRepoForTask(task)
-	if owner == "" || repo == "" {
+	repo, err := s.taskRepository(ctx, orgID, task)
+	if err != nil {
+		delegateLog.Warn("placement: read the task's repository failed; enqueuing with no affinity",
+			"org", orgID, "task", task.ID, "error", err)
 		return ""
 	}
-	host := s.taskEntityScope(ctx, orgID, task)
-	if host == "" {
+	if repo == nil {
 		return ""
 	}
-	plan, err := resolver.Resolve(ctx, orgID, domain.PlacementKindRepo, host, owner+"/"+repo)
+	plan, err := resolver.Resolve(ctx, orgID, domain.PlacementKindRepo, repo.Host, repo.Slug())
 	if err != nil {
 		delegateLog.Warn("placement resolve failed; enqueuing with no affinity",
-			"org", orgID, "repo", owner+"/"+repo, "error", err)
+			"org", orgID, "repo", repo.Slug(), "error", err)
 		return ""
 	}
 	return plan.PreferredForConversation(conversationID)
-}
-
-// taskEntityScope returns the scope of the task's entity — for a GitHub task,
-// the host its repository lives on — or "" when the entity cannot be read.
-func (s *Spawner) taskEntityScope(ctx context.Context, orgID string, task domain.Task) string {
-	if s.entities == nil || task.EntityID == "" {
-		return ""
-	}
-	e, err := s.entities.GetSystem(ctx, orgID, task.EntityID)
-	if err != nil || e == nil {
-		if err != nil {
-			delegateLog.Warn("placement: read task entity failed; enqueuing with no affinity",
-				"org", orgID, "entity", task.EntityID, "error", err)
-		}
-		return ""
-	}
-	return e.Scope
 }

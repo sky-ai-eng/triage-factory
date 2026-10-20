@@ -41,13 +41,27 @@ func TestRelayRuntime_TaskOwnRepo_AnsweredByTheOrchestrator(t *testing.T) {
 		t.Fatalf("TaskOwnRepo(another repo) = (%v, %v), want (false, nil)", other, err)
 	}
 
+	// The task's repository is the row its entity references, so a rename that
+	// rewrites no key moves the answer with the row: the new name is the
+	// task's, and the old one, which the key still spells, names nothing.
+	dbseed.RenameRepositoryOnly(t, conn, repoID, "octo", "renamed")
+	renamed, err := rt.TaskOwnRepo(ctx, "octo", "renamed")
+	if err != nil || !renamed {
+		t.Fatalf("TaskOwnRepo(task's repo under its new name) = (%v, %v), want (true, nil)", renamed, err)
+	}
+	stale, err := rt.TaskOwnRepo(ctx, "octo", "repo")
+	if err != nil || stale {
+		t.Fatalf("TaskOwnRepo(the name the task's key still spells) = (%v, %v), want (false, nil)", stale, err)
+	}
+
 	// A task polled from a GitHub host other than the org's current one is about
 	// a repository on that host. The same owner/repo on the current host, which
 	// is what the asking gate reaches, is not the task's.
-	if _, err := conn.Exec(`UPDATE entities SET scope = 'https://ghe.example.com' WHERE id = 'ent-1'`); err != nil {
+	gheRepoID := dbseed.GitHubRepository(t, conn, info.OrgID, "https://ghe.example.com", "octo", "renamed")
+	if _, err := conn.Exec(`UPDATE entities SET scope = 'https://ghe.example.com', repository_id = ? WHERE id = 'ent-1'`, gheRepoID); err != nil {
 		t.Fatalf("move entity to another host: %v", err)
 	}
-	elsewhere, err := rt.TaskOwnRepo(ctx, "octo", "repo")
+	elsewhere, err := rt.TaskOwnRepo(ctx, "octo", "renamed")
 	if err != nil || elsewhere {
 		t.Fatalf("TaskOwnRepo(task's repo, task polled from another host) = (%v, %v), want (false, nil)", elsewhere, err)
 	}

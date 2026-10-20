@@ -881,12 +881,15 @@ func (t *Tracker) refreshPRBatch(ctx context.Context, client *ghclient.Client, n
 // entity so the Phase-2 refresh can fetch its full snapshot. Stubs are created
 // outside the poller (exec-touch FindOrCreate) and carry no
 // node_id, so they can't ride the entity-based GraphQL refresh until we resolve
-// one. The source_id is "owner/repo#N"; a cheap REST read (GetPRBasic) returns
-// the node_id plus enough state to route the seed to the open (full fragment) or
-// terminal (discovery fragment) batch.
+// one. The pull request is asked for by its repository's registry row — the
+// name it has now, whatever the key still spells — and the number its key ends
+// in; a cheap REST read (GetPRBasic) returns the node_id plus enough state to
+// route the seed to the open (full fragment) or terminal (discovery fragment)
+// batch.
 //
-// Returns ok=false (with a logged reason) when source_id isn't a PR target or
-// the PR can't be read this cycle — the caller skips it and retries next cycle.
+// Returns ok=false (with a logged reason) when the repository can't be read,
+// the key names no number, or the PR can't be read this cycle — the caller
+// skips it and retries next cycle.
 // One extra fetch per stub, only until it carries a node_id. Caveat: a PR that
 // is permanently unreadable (deleted, or org-private after the App loses access)
 // never gets a node_id, so ListActiveSystem keeps returning it and it costs one
@@ -894,12 +897,13 @@ func (t *Tracker) refreshPRBatch(ctx context.Context, client *ghclient.Client, n
 // dismiss affordance lands (separate ticket) — a 404 is deliberately NOT treated
 // as terminal here, since a transient permission blip must not close a live PR.
 func (t *Tracker) resolveStubNodeID(ctx context.Context, client *ghclient.Client, e domain.Entity) (nodeID string, terminal, ok bool) {
-	owner, repo, number, parsed := domain.ParsePRTarget(e.SourceID)
-	if !parsed {
-		trackerLog.Warn("stub enrich: unparseable github source_id", "source_id", e.SourceID)
+	repo := t.entityRepository(ctx, e)
+	number := domain.GitHubPRNumber(e.SourceID)
+	if repo == nil || number == 0 {
+		trackerLog.Warn("stub enrich: no repository or pull request number", "source_id", e.SourceID, "repository_id", e.RepositoryID)
 		return "", false, false
 	}
-	pr, err := client.GetPRBasic(ctx, owner, repo, number)
+	pr, err := client.GetPRBasic(ctx, repo.Owner, repo.Repo, number)
 	if err != nil {
 		trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "stub enrich: GetPRBasic failed", "source_id", e.SourceID, "error", err)
 		return "", false, false

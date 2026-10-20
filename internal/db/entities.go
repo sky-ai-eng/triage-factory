@@ -175,8 +175,10 @@ var (
 // GitHubEntityRepoRef is the repository a GitHub entity keyed sourceID in
 // scope belongs to: the owner/repo of its "owner/repo#N" key, on the host the
 // scope is. Both dialects' create paths resolve the row they reference through
-// it, so they cannot disagree about which repository a key names. A key with
-// no owner or repo is ErrEntityRepositoryRequired.
+// it, so they cannot disagree about which repository a key names. It is the
+// one place a key's name is read as a repository: the create is where the key
+// enters TF, and every reader after it takes the repository from
+// repository_id. A key with no owner or repo is ErrEntityRepositoryRequired.
 func GitHubEntityRepoRef(scope, sourceID string) (domain.RepoRef, error) {
 	owner, repo, _ := domain.SplitGitHubEntitySourceID(sourceID)
 	if owner == "" || repo == "" {

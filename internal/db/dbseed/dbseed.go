@@ -6,6 +6,10 @@
 // same holds for a Jira rule, which references its project's registry row
 // (jira_project_status_rules.jira_project_id).
 //
+// It also renames a registry row the way no production path does
+// (RenameRepositoryOnly), which is how a test proves a reader resolves a
+// repository by id.
+//
 // It imports nothing from internal/db, so package db's own tests can use it.
 package dbseed
 
@@ -57,8 +61,10 @@ func GitHubRepository(t testing.TB, conn Conn, orgID, host, owner, repo string) 
 
 // GitHubEntityRepository is GitHubRepository for the repository a GitHub
 // entity key names: the owner/repo of "owner/repo#N", on host (the entity's
-// scope). It returns the id the fixture's INSERT INTO entities sets as
-// repository_id. A key with no owner/repo fails the test.
+// scope). It stands in for the entity create, the boundary where a key's name
+// is resolved to a row (db.GitHubEntityRepoRef), and returns the id the
+// fixture's INSERT INTO entities sets as repository_id. A key with no
+// owner/repo fails the test.
 func GitHubEntityRepository(t testing.TB, conn Conn, orgID, host, sourceID string) string {
 	t.Helper()
 	owner, repo, _ := domain.SplitGitHubEntitySourceID(sourceID)
@@ -66,6 +72,24 @@ func GitHubEntityRepository(t testing.TB, conn Conn, orgID, host, sourceID strin
 		t.Fatalf("dbseed: github entity key %q names no owner/repo", sourceID)
 	}
 	return GitHubRepository(t, conn, orgID, host, owner, repo)
+}
+
+// RenameRepositoryOnly renames the registry row id to owner/repo and moves
+// nothing else. RepositoryStore.RenameSystem also rewrites every key that
+// spells the old name, which is what a reader parsing a key would need; after
+// this, an entity's key still spells the old name and only its repository_id
+// reaches the new one. A reader that answers for the renamed repository
+// afterwards resolved it by id.
+func RenameRepositoryOnly(t testing.TB, conn Conn, id, owner, repo string) {
+	t.Helper()
+	res, err := conn.ExecContext(context.Background(),
+		`UPDATE repositories SET owner = $1, repo = $2 WHERE id = $3`, owner, repo, id)
+	if err != nil {
+		t.Fatalf("dbseed: rename repository %s to %s/%s: %v", id, owner, repo, err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		t.Fatalf("dbseed: rename repository %s to %s/%s: %d rows, %v", id, owner, repo, n, err)
+	}
 }
 
 // JiraSite is the Jira site fixtures register projects on unless they need a

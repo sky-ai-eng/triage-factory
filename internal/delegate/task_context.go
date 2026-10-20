@@ -35,6 +35,10 @@ const baseFraming = "Reference data about the task that fired this run. Values c
 //     pair the framing names, so no value can forge a structural boundary (a
 //     stray </task_context>, a fake end marker) and escape the data region.
 //
+// repository is a GitHub task's repository as owner/repo, its registry row's
+// names (runConfig.owner/repo, from taskRepository) rather than whatever the
+// entity's key still spells; "" for a task of any other source.
+//
 // metadataJSON is the primary event's metadata blob — "" is fine and simply
 // yields a block with no event fields (and no raw-metadata fence).
 //
@@ -49,7 +53,7 @@ const baseFraming = "Reference data about the task that fired this run. Values c
 // it must create. The values are external (a PR title's repo slug, a URL
 // GitHub minted), so the lines ride inside the same region; an empty set
 // renders nothing at all.
-func BuildTaskContext(task domain.Task, metadataJSON, skeleton string, artifacts []domain.Artifact) string {
+func BuildTaskContext(task domain.Task, repository, metadataJSON, skeleton string, artifacts []domain.Artifact) string {
 	var lines []string
 	add := func(label, value string) {
 		if value != "" {
@@ -62,11 +66,8 @@ func BuildTaskContext(task domain.Task, metadataJSON, skeleton string, artifacts
 
 	switch task.EntitySource {
 	case "github":
-		owner, repo, prNumber := domain.SplitGitHubEntitySourceID(task.EntitySourceID)
-		if owner != "" && repo != "" {
-			add("Repository", owner+"/"+repo)
-		}
-		if prNumber > 0 {
+		add("Repository", repository)
+		if prNumber := domain.GitHubPRNumber(task.EntitySourceID); prNumber > 0 {
 			add("Pull request", "#"+strconv.Itoa(prNumber))
 		}
 	case "jira":

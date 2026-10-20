@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -647,6 +649,49 @@ func TestSetupGitHub_KeysTheCheckoutByTheRowTheEntityRegistered(t *testing.T) {
 	}
 }
 
+// TestSetupGitHub_ResolvesTheRepositoryByTheEntitysID: setup reads the task's
+// repository through the registry row its entity references, never through
+// the entity's key. The row is renamed with no key rewritten, and GitHub
+// answers the pull request only under the new name, so a setup that read the
+// key would fetch nothing. The checkout lands under the new name, and the
+// run's config carries it.
+func TestSetupGitHub_ResolvesTheRepositoryByTheEntitysID(t *testing.T) {
+	ctx := context.Background()
+	f := newSnapshotFixture(t, "task-setup-renamed")
+	origin := f.upstream(t, "acme/app")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/acme/renamed/pulls/7" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"number": 7,
+			"head":   map[string]any{"ref": "feature", "repo": map[string]any{"clone_url": origin}},
+			"base":   map[string]any{"ref": "main", "repo": map[string]any{"clone_url": origin}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	entityID, rows := f.taskRegistry(t, dbtest.TestGitHubHost, dbtest.TestGitHubHost)
+	f.s.conversations = &setupConversations{}
+	row := rows[dbtest.TestGitHubHost]
+	dbseed.RenameRepositoryOnly(t, f.database, row.ID, "acme", "renamed")
+
+	task := domain.Task{ID: f.key, EntityID: entityID, EntitySource: "github", EntitySourceID: "acme/app#7"}
+	cfg, err := f.s.setupGitHub(ctx, runmode.LocalDefaultOrgID, fixtureConversation, "claim-1", f.key, "user-1", task, ghclient.NewProxyClient(srv.URL, "placeholder"), nil, nil)
+	if err != nil {
+		t.Fatalf("setupGitHub: %v", err)
+	}
+	if cfg.owner != "acme" || cfg.repo != "renamed" || cfg.prNumber != 7 {
+		t.Errorf("config repository = %s/%s#%d, want acme/renamed#7", cfg.owner, cfg.repo, cfg.prNumber)
+	}
+	if want := filepath.Join(f.root, "acme", "renamed", "pr-7"); cfg.prCheckout != want {
+		t.Errorf("checkout = %q, want %q", cfg.prCheckout, want)
+	}
+	if recorded := f.ledger.recordedRows(); len(recorded) != 1 || recorded[0].RepositoryID != row.ID {
+		t.Errorf("setup recorded %+v, want one ledger row naming repository %s", recorded, row.ID)
+	}
+}
+
 // TestSnapshotWorkspace_UnstattableCheckoutFailsThePersist: a checkout the
 // capture cannot stat for any reason but its absence fails the snapshot, and
 // the blob already under the key, which carries that checkout, stands. A blob
@@ -1217,6 +1262,8 @@ type snapshotFixture struct {
 	root   string
 	// upstreams maps "owner/repo" to the origin its checkouts were cloned from.
 	upstreams map[string]string
+	// database is what taskRegistry backs the spawner's stores with.
+	database *sql.DB
 }
 
 // fixtureConversation is the conversation every fixture checkout belongs to.
@@ -1340,7 +1387,8 @@ func (f *snapshotFixture) prServer(t *testing.T, fetches *atomic.Int32) *httptes
 func (f *snapshotFixture) taskRegistry(t *testing.T, entityHost string, hosts ...string) (string, map[string]domain.Repository) {
 	t.Helper()
 	ctx := context.Background()
-	stores := sqlitestore.New(newDelegateTestDB(t))
+	f.database = newDelegateTestDB(t)
+	stores := sqlitestore.New(f.database)
 	entity, _, err := stores.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", entityHost, "acme/app#7", "", "pr", "T", entityHost+"/acme/app/pull/7")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
