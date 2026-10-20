@@ -658,6 +658,74 @@ func TestResolver_TokenFor_Tier3_PAT(t *testing.T) {
 	}
 }
 
+// TokenForWithIdentity names the tier of the token it returns, from the branch
+// that returned it, so a caller labelling a token never reads the tier off the
+// token. TokenIdentity is the same answer through a plain Resolver, and
+// IdentityUnknown wherever there is no answer.
+func TestResolver_TokenForWithIdentity_ReportsTier(t *testing.T) {
+	t.Run("active App → IdentityApp", func(t *testing.T) {
+		gh := newGHTestServer(t)
+		r := newTestResolver(
+			&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
+			&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
+			&fakeOrgs{base: gh.srv.URL},
+			&fakeAgents{},
+			nil,
+		)
+		tok, identity, err := r.(TokenIdentityResolver).TokenForWithIdentity(context.Background(), "org-1", "acme")
+		if err != nil {
+			t.Fatalf("TokenForWithIdentity: %v", err)
+		}
+		if tok.Value != "ghs_minted" || identity != IdentityApp {
+			t.Errorf("got (%q, %v), want the minted App token and IdentityApp", tok.Value, identity)
+		}
+		if got := TokenIdentity(context.Background(), r, "org-1", "acme"); got != IdentityApp {
+			t.Errorf("TokenIdentity = %v, want IdentityApp", got)
+		}
+	})
+
+	t.Run("no App → IdentityPAT", func(t *testing.T) {
+		r := newTestResolver(
+			&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}},
+			&fakeApps{app: nil},
+			&fakeOrgs{base: "https://github.com"},
+			&fakeAgents{},
+			nil,
+		)
+		tok, identity, err := r.(TokenIdentityResolver).TokenForWithIdentity(context.Background(), "org-1", "acme")
+		if err != nil {
+			t.Fatalf("TokenForWithIdentity: %v", err)
+		}
+		if tok.Value != "ghp_test" || identity != IdentityPAT {
+			t.Errorf("got (%q, %v), want the org PAT and IdentityPAT", tok.Value, identity)
+		}
+	})
+
+	t.Run("nothing resolves → IdentityUnknown", func(t *testing.T) {
+		r := newTestResolver(
+			&fakeSecrets{vals: map[string]string{}},
+			&fakeApps{app: nil},
+			&fakeOrgs{base: "https://github.com"},
+			&fakeAgents{},
+			nil,
+		)
+		_, identity, err := r.(TokenIdentityResolver).TokenForWithIdentity(context.Background(), "org-1", "acme")
+		if !errors.Is(err, ErrNoGitHubCredentials) || identity != IdentityUnknown {
+			t.Errorf("got (%v, %v), want ErrNoGitHubCredentials and IdentityUnknown", err, identity)
+		}
+		if got := TokenIdentity(context.Background(), r, "org-1", "acme"); got != IdentityUnknown {
+			t.Errorf("TokenIdentity = %v, want IdentityUnknown", got)
+		}
+	})
+
+	t.Run("resolver that cannot say → IdentityUnknown", func(t *testing.T) {
+		var plain Resolver = struct{ Resolver }{}
+		if got := TokenIdentity(context.Background(), plain, "org-1", "acme"); got != IdentityUnknown {
+			t.Errorf("TokenIdentity = %v, want IdentityUnknown", got)
+		}
+	})
+}
+
 // No App and no PAT → ErrNoGitHubCredentials, same sentinel ClientFor returns
 // so callers can distinguish "not configured" from a backend error.
 func TestResolver_TokenFor_NoCredentials(t *testing.T) {

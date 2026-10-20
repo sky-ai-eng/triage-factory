@@ -157,6 +157,29 @@ type RepoIdentityResolver interface {
 	ClientForRepoWithIdentity(ctx context.Context, orgID, owner, repo string) (*Client, Identity, error)
 }
 
+// TokenIdentityResolver is the optional extension of Resolver, implemented by
+// the production resolver, that reports the Identity of the credential TokenFor
+// would return, from the same resolution, so a caller labelling what a token
+// acts as never infers the tier from the token itself.
+type TokenIdentityResolver interface {
+	TokenForWithIdentity(ctx context.Context, orgID, githubTarget string) (githubapp.Token, Identity, error)
+}
+
+// TokenIdentity is the Identity of the credential resolver.TokenFor would
+// return for githubTarget. IdentityUnknown when it cannot say: a resolver that
+// doesn't implement TokenIdentityResolver, or a resolution that failed.
+func TokenIdentity(ctx context.Context, resolver Resolver, orgID, githubTarget string) Identity {
+	tr, ok := resolver.(TokenIdentityResolver)
+	if !ok {
+		return IdentityUnknown
+	}
+	_, identity, err := tr.TokenForWithIdentity(ctx, orgID, githubTarget)
+	if err != nil {
+		return IdentityUnknown
+	}
+	return identity
+}
+
 // ScopedResolver is the optional extension, implemented by the production
 // resolver, that mints a per-repo down-scoped credential and probes overall
 // credential presence. Callers that need a least-privilege token narrowed to
@@ -252,17 +275,17 @@ type Resolver interface {
 
 	// TokenFor returns the raw credential ClientFor would authenticate
 	// with — the App installation token (tier 1) or the org PAT (tier 3) —
-	// for callers that need to hand it to a subprocess rather than make API
-	// calls through a *Client. The host-side `git clone` / `git fetch` in
-	// internal/worktree is the motivating consumer: it injects the
-	// token as an HTTPS auth header on a private-repo clone, and a *Client
-	// gives it no way to reach the token (*Client.pat is private).
+	// for callers that hand it to a subprocess or a proxy rather than make
+	// API calls through a *Client, which gives no way to reach its token
+	// (*Client.pat is private).
 	//
-	// Same tier order and cache as ClientFor, so the clone and the API
+	// Same tier order and cache as ClientFor, so a subprocess and the API
 	// client share one minted installation token. The tier-1 githubapp.Token
 	// carries the real ~1h expiry; the tier-3 PAT is returned as a Token with
-	// a zero ExpiresAt (PATs have no mint lifetime we track). Returns
-	// ErrNoGitHubCredentials when neither tier resolves.
+	// a zero ExpiresAt (PATs have no mint lifetime we track). The expiry is
+	// for refreshing, not for telling the tiers apart: a caller that needs the
+	// tier asks TokenIdentityResolver. Returns ErrNoGitHubCredentials when
+	// neither tier resolves.
 	TokenFor(ctx context.Context, orgID, githubTarget string) (githubapp.Token, error)
 
 	// BaseURLFor returns the org's user-facing GitHub host base — github.com
@@ -795,9 +818,18 @@ func (r *resolver) appScopedToken(ctx context.Context, orgID string, app resolve
 // credential instead of a *Client — see the Resolver interface doc for why
 // (the host-side git clone needs the token as an HTTPS auth header).
 func (r *resolver) TokenFor(ctx context.Context, orgID, target string) (githubapp.Token, error) {
+	tok, _, err := r.TokenForWithIdentity(ctx, orgID, target)
+	return tok, err
+}
+
+// TokenForWithIdentity is TokenFor plus the Identity of the credential it
+// resolved (see TokenIdentityResolver): the branch that returns the token is
+// the one that names its tier. TokenFor delegates here and discards the
+// identity.
+func (r *resolver) TokenForWithIdentity(ctx context.Context, orgID, target string) (githubapp.Token, Identity, error) {
 	oc, err := r.orgContextFor(ctx, orgID)
 	if err != nil {
-		return githubapp.Token{}, err
+		return githubapp.Token{}, IdentityUnknown, err
 	}
 	base := oc.base
 
@@ -806,11 +838,14 @@ func (r *resolver) TokenFor(ctx context.Context, orgID, target string) (githubap
 	// or fail; never fall to a PAT.
 	app, err := r.activeApp(ctx, orgID, oc.class, fixedHost(base))
 	if err != nil {
-		return githubapp.Token{}, err
+		return githubapp.Token{}, IdentityUnknown, err
 	}
 	if app.present() {
 		tok, _, err := r.appToken(ctx, orgID, app, target, base)
-		return tok, err
+		if err != nil {
+			return githubapp.Token{}, IdentityUnknown, err
+		}
+		return tok, IdentityApp, nil
 	}
 
 	// No active App → PAT-borrow, returned as a Token with no mint expiry. A
@@ -818,7 +853,7 @@ func (r *resolver) TokenFor(ctx context.Context, orgID, target string) (githubap
 	// configured".
 	pat, err := r.orgPAT(ctx, orgID)
 	if err != nil {
-		return githubapp.Token{}, err
+		return githubapp.Token{}, IdentityUnknown, err
 	}
 	if pat != "" {
 		// patBorrowUser does a DB read purely to label this trace line, so
@@ -827,10 +862,10 @@ func (r *resolver) TokenFor(ctx context.Context, orgID, target string) (githubap
 			ghResolverLog.Debug("resolved pat",
 				"org", orgID, "target", target, "user", r.patBorrowUser(ctx, orgID))
 		}
-		return githubapp.Token{Value: pat}, nil
+		return githubapp.Token{Value: pat}, IdentityPAT, nil
 	}
 
-	return githubapp.Token{}, fmt.Errorf("%w: org=%s target=%s", ErrNoGitHubCredentials, orgID, target)
+	return githubapp.Token{}, IdentityUnknown, fmt.Errorf("%w: org=%s target=%s", ErrNoGitHubCredentials, orgID, target)
 }
 
 // TokenForRepoScoped mints a credential narrowed to owner/repo (see the

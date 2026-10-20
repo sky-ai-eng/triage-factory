@@ -168,8 +168,8 @@ func (s *Spawner) startLocalGitChannel(ctx context.Context, orgID string, task d
 	auditHost := agenthost.NewLocal(stores, info)
 	auditHost.SetGitHubResolver(resolver)
 	owner, _ := ownerRepoForTask(task)
-	if tok, tokErr := resolver.TokenFor(ctx, orgID, owner); tokErr == nil && tok.Value != "" && tok.ExpiresAt.IsZero() {
-		auditHost.SetGitHubCredential(domain.CredentialGitHubPAT)
+	if identity := ghclient.TokenIdentity(ctx, resolver, orgID, owner); identity != ghclient.IdentityUnknown {
+		auditHost.SetGitHubCredential(identity.Credential())
 	}
 
 	cfg := s.managedGitGate(info, stores, auditHost)
