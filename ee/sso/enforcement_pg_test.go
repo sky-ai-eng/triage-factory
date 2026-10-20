@@ -129,6 +129,115 @@ func TestSSOEnforcement_RejectsGitHubOnEnforcedDomain(t *testing.T) {
 	}
 }
 
+// The email Rule A reads is the one GitHub reported on this sign-in, not the
+// JWT's, which keeps the account's email from signup. A person who moved their
+// GitHub address off the enforced domain signs in.
+func TestSSOEnforcement_FollowsGitHubEmailOffTheDomain(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+
+	providerID := uuid.NewString()
+	owner := r.seedUser()
+	orgA, _ := r.seedOrg(owner, "acme")
+	r.seedSSOConnection(orgA, providerID, "member", true)
+	r.seedVerifiedDomain(orgA, providerID, "corp.example")
+	r.setConnectionEnforced(providerID, true)
+
+	user := r.seedAuthOnlyUser()
+	r.fake.setGitHubEmail(user.String(), "alice@personal.example")
+	resp := r.driveGitHubLogin(user, "alice@corp.example")
+
+	if rejectedForSSO(resp) {
+		t.Fatalf("Location=%q: refused on the signup email after GitHub's address moved off the domain", resp.Header.Get("Location"))
+	}
+	if !r.gotSidCookie(resp) {
+		t.Errorf("status=%d: no session minted", resp.StatusCode)
+	}
+}
+
+// And the other way: an address moved onto the enforced domain at GitHub is
+// refused, though the JWT still carries the signup email.
+func TestSSOEnforcement_FollowsGitHubEmailOntoTheDomain(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+
+	providerID := uuid.NewString()
+	owner := r.seedUser()
+	orgA, _ := r.seedOrg(owner, "acme")
+	r.seedSSOConnection(orgA, providerID, "member", true)
+	r.seedVerifiedDomain(orgA, providerID, "corp.example")
+	r.setConnectionEnforced(providerID, true)
+
+	user := r.seedAuthOnlyUser()
+	r.fake.setGitHubEmail(user.String(), "alice@corp.example")
+	resp := r.driveGitHubLogin(user, "alice@personal.example")
+
+	if !rejectedForSSO(resp) {
+		t.Errorf("status=%d Location=%q, want an /login?error=sso_required bounce", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	if r.gotSidCookie(resp) {
+		t.Error("a session was minted for a GitHub address on the enforced domain")
+	}
+}
+
+// When GitHub's address for the sign-in cannot be read, the signup email is
+// checked instead: an off-domain one signs in, an on-domain one is refused.
+func TestSSOEnforcement_GitHubEmailUnreadableChecksTheSignupEmail(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+
+	providerID := uuid.NewString()
+	owner := r.seedUser()
+	orgA, _ := r.seedOrg(owner, "acme")
+	r.seedSSOConnection(orgA, providerID, "member", true)
+	r.seedVerifiedDomain(orgA, providerID, "corp.example")
+	r.setConnectionEnforced(providerID, true)
+
+	r.fake.mu.Lock()
+	r.fake.failUser = true
+	r.fake.mu.Unlock()
+
+	off := r.driveGitHubLogin(r.seedAuthOnlyUser(), "alice@personal.example")
+	if rejectedForSSO(off) || !r.gotSidCookie(off) {
+		t.Errorf("off-domain signup email: status=%d Location=%q, want a session", off.StatusCode, off.Header.Get("Location"))
+	}
+
+	on := r.driveGitHubLogin(r.seedAuthOnlyUser(), "bob@corp.example")
+	if !rejectedForSSO(on) {
+		t.Errorf("on-domain signup email: status=%d Location=%q, want an /login?error=sso_required bounce", on.StatusCode, on.Header.Get("Location"))
+	}
+	if r.gotSidCookie(on) {
+		t.Error("a session was minted for an on-domain signup email under enforcement")
+	}
+}
+
+// The break-glass account is the recovery path, so it still signs in through
+// GitHub while GoTrue cannot answer /user.
+func TestSSOEnforcement_BreakGlassAllowedWhenGitHubEmailUnreadable(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+
+	providerID := uuid.NewString()
+	owner := r.seedUser()
+	orgA, _ := r.seedOrg(owner, "acme")
+	r.seedSSOConnection(orgA, providerID, "member", true)
+	r.seedVerifiedDomain(orgA, providerID, "corp.example")
+	r.setConnectionEnforced(providerID, true)
+	r.addBreakGlass(orgA, owner)
+
+	r.fake.mu.Lock()
+	r.fake.failUser = true
+	r.fake.mu.Unlock()
+
+	resp := r.driveGitHubLogin(owner, "owner@corp.example")
+	if rejectedForSSO(resp) {
+		t.Error("break-glass principal was rejected while /user was failing")
+	}
+	if !r.gotSidCookie(resp) {
+		t.Errorf("status=%d: no session minted for the break-glass principal", resp.StatusCode)
+	}
+}
+
 // The break-glass principal still gets in via GitHub even under enforcement —
 // the recovery path so they can un-enforce if the IdP breaks.
 func TestSSOEnforcement_BreakGlassGitHubAllowed(t *testing.T) {

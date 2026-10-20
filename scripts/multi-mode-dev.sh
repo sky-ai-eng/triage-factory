@@ -29,6 +29,12 @@
 # State: secrets + the GoTrue signing keypair persist in .env.multi-dev
 # (gitignored) across runs, so `up` after a `down` reuses the same identity.
 # Delete that file to start over with fresh secrets.
+#
+# Three optional variables let another harness (e2e/sso/run.sh) drive this
+# script against its own state; with none set, nothing changes:
+#   MULTI_DEV_ENV_FILE         env file to read and generate (default .env.multi-dev)
+#   MULTI_DEV_COMPOSE_OVERLAY  one more compose file layered over the two below
+#   MULTI_DEV_BIN              the binary to run (default ./triagefactory)
 
 set -euo pipefail
 
@@ -36,9 +42,13 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
 PROJECT=tf-multi-dev
-ENV_FILE="$ROOT/.env.multi-dev"
+ENV_FILE="${MULTI_DEV_ENV_FILE:-$ROOT/.env.multi-dev}"
 PUBLIC_URL=http://localhost:3000
-BIN="$ROOT/triagefactory"
+BIN="${MULTI_DEV_BIN:-$ROOT/triagefactory}"
+COMPOSE_FILES=(-f docker-compose.yml -f docker/compose.hostbind.yml)
+if [ -n "${MULTI_DEV_COMPOSE_OVERLAY:-}" ]; then
+  COMPOSE_FILES+=(-f "$MULTI_DEV_COMPOSE_OVERLAY")
+fi
 DEPS=(postgres postgres-postinit gotrue seaweedfs seaweedfs-postinit)
 
 # dc() reads DC_ENV_FILE rather than ENV_FILE directly so cmd_down's
@@ -46,10 +56,10 @@ DEPS=(postgres postgres-postinit gotrue seaweedfs seaweedfs-postinit)
 # override, restored once that function returns) instead of duplicating
 # the docker compose invocation.
 DC_ENV_FILE="$ENV_FILE"
-dc() { docker compose -p "$PROJECT" --env-file "$DC_ENV_FILE" -f docker-compose.yml -f docker/compose.hostbind.yml "$@"; }
+dc() { docker compose -p "$PROJECT" --env-file "$DC_ENV_FILE" "${COMPOSE_FILES[@]}" "$@"; }
 
 need_bin() {
-  [ -x "$BIN" ] || { echo "no ./triagefactory binary — build one first: go build -o triagefactory ." >&2; exit 1; }
+  [ -x "$BIN" ] || { echo "no $BIN binary — build one first: go build -o triagefactory ." >&2; exit 1; }
 }
 
 # `docker compose up --wait` treats a one-shot sidecar that exits 0 (by
@@ -212,6 +222,7 @@ TF_COOKIE_SECRET=unused
 TF_SECRET_ENCRYPTION_KEY=unused
 TF_BLOB_ACCESS_KEY=unused
 TF_BLOB_SECRET_KEY=unused
+GOTRUE_SAML_PRIVATE_KEY=unused
 EOF
   local DC_ENV_FILE="$tmp_env"
   dc down -v --remove-orphans

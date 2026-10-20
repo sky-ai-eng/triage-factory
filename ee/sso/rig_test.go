@@ -167,12 +167,53 @@ type ssoFakeGoTrue struct {
 	ssoCount    int
 	lastSSOBody map[string]string
 	ssoLocation string // the IdP redirect /sso answers with (303 Location)
+	// githubEmail overrides, by JWT subject, the email /user reports for the
+	// GitHub identity, standing in for an address changed at GitHub after
+	// signup. Absent, /user reports the JWT's own email.
+	githubEmail map[string]string
+	failUser    bool // when set, /user answers 500
 }
 
 func newSSOFakeGoTrue(t *testing.T, wantToken string) *ssoFakeGoTrue {
 	t.Helper()
-	f := &ssoFakeGoTrue{wantToken: wantToken, ssoLocation: "https://idp.example/saml/redirect"}
+	f := &ssoFakeGoTrue{wantToken: wantToken, ssoLocation: "https://idp.example/saml/redirect", githubEmail: map[string]string{}}
 	mux := http.NewServeMux()
+
+	// The login identity's provider data, as GoTrue's /user reports it. The
+	// caller's bearer is a rig-minted JWT; its claims stand in for the
+	// identity data GoTrue would have written at this sign-in.
+	mux.HandleFunc("/user", func(w http.ResponseWriter, r *http.Request) {
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		var claims jwt.MapClaims
+		if _, _, err := jwt.NewParser().ParseUnverified(token, &claims); err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		sub, _ := claims["sub"].(string)
+		email, _ := claims["email"].(string)
+		verified, _ := claims["email_verified"].(bool)
+		f.mu.Lock()
+		if f.failUser {
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if changed, ok := f.githubEmail[sub]; ok {
+			email, verified = changed, true
+		}
+		f.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"id": sub,
+			"identities": []any{map[string]any{
+				"provider":      "github",
+				"identity_data": map[string]any{"email": email, "email_verified": verified},
+			}},
+		})
+	})
 
 	// Admin SSO provider create. GoTrue authenticates the admin call by the
 	// service-role token; assert TF presented exactly the configured token.
@@ -243,6 +284,14 @@ func newSSOFakeGoTrue(t *testing.T, wantToken string) *ssoFakeGoTrue {
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+// setGitHubEmail makes /user report email, verified, as the GitHub identity's
+// current address for the login identity authUserID.
+func (f *ssoFakeGoTrue) setGitHubEmail(authUserID, email string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.githubEmail[authUserID] = email
 }
 
 // stageToken arms the next /token exchange to return this access token.

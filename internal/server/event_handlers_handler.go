@@ -426,10 +426,16 @@ func (eh *eventHandlersHandler) insertEventHandler(w http.ResponseWriter, r *htt
 		if e != nil {
 			return e
 		}
+		if e := checkPredicateReferences(r.Context(), tx, orgID, teamID, h.EventType, h.ScopePredicateJSON, nil); e != nil {
+			return e
+		}
 		stored, e = tx.EventHandlers.Create(r.Context(), orgID, teamID, h)
 		return e
 	}); err != nil {
 		if teamscope.WriteIfSelectionError(w, err) {
+			return
+		}
+		if writePredicateReferenceError(w, err) {
 			return
 		}
 		// A unique-constraint failure leaks schema/index names; translate to a
@@ -821,10 +827,16 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 
 	var stored domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		if e := checkPredicateReferences(r.Context(), tx, orgID, existing.TeamID, existing.EventType, updated.ScopePredicateJSON, existing.ScopePredicateJSON); e != nil {
+			return e
+		}
 		var e error
 		stored, e = tx.EventHandlers.Update(r.Context(), orgID, updated)
 		return e
 	}); err != nil {
+		if writePredicateReferenceError(w, err) {
+			return
+		}
 		// The row was loaded a moment ago, so a miss here means it was deleted
 		// in between. 404 rather than a 200 over a write that touched nothing.
 		if errors.Is(err, db.ErrNoSuchEventHandler) {
@@ -1011,10 +1023,16 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 	}
 	var promoted domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		if e := checkPredicateReferences(r.Context(), tx, orgID, existing.TeamID, existing.EventType, predicate, existing.ScopePredicateJSON); e != nil {
+			return e
+		}
 		var e error
 		promoted, e = tx.EventHandlers.Promote(r.Context(), orgID, id, target)
 		return e
 	}); err != nil {
+		if writePredicateReferenceError(w, err) {
+			return
+		}
 		// The blueprintHasTrigger pre-check and this Promote run in separate
 		// transactions, so a concurrent promote onto the same blueprint can pass
 		// the check window and hit the partial-unique index here — surface a

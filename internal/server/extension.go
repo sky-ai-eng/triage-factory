@@ -145,6 +145,11 @@ type ExtensionAPI interface {
 	GotrueSSO(ctx context.Context, providerID, redirectTo, codeChallenge string) (location string, err error)
 	// GotrueExchange completes the PKCE auth-code exchange, returning the tokens.
 	GotrueExchange(ctx context.Context, authCode, codeVerifier string) (accessToken, refreshToken string, err error)
+	// GotrueProviderEmail returns the email, and GoTrue's verified flag for it,
+	// that provider reported for the login identity behind accessToken on its
+	// latest sign-in. The JWT's email claim is the account's email from signup
+	// and does not follow a later change at the provider.
+	GotrueProviderEmail(ctx context.Context, accessToken, provider string) (email string, verified bool, err error)
 	// VerifyAccessToken verifies a GoTrue access token and returns its claims.
 	VerifyAccessToken(accessToken string) (*verify.Claims, error)
 	// PKCEChallenge derives the S256 code_challenge from a PKCE verifier.
@@ -325,6 +330,13 @@ func (a serverExtensionAPI) GotrueExchange(ctx context.Context, authCode, codeVe
 	}
 	at, rt, _, err := a.s.authDeps.gotrueExchange(ctx, authCode, codeVerifier)
 	return at, rt, err
+}
+
+func (a serverExtensionAPI) GotrueProviderEmail(ctx context.Context, accessToken, provider string) (string, bool, error) {
+	if a.s.authDeps == nil {
+		return "", false, errAuthNotWired
+	}
+	return a.s.authDeps.gotrueProviderEmail(ctx, accessToken, provider)
 }
 
 func (a serverExtensionAPI) VerifyAccessToken(accessToken string) (*verify.Claims, error) {

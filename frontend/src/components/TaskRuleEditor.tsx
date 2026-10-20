@@ -368,6 +368,7 @@ export default function TaskRuleEditor({
                     <div className="bg-tint-2 rounded-lg border border-line-1 p-3">
                       <PredicateEditor
                         eventType={eventType}
+                        teamId={rule ? rule.team_id : effectiveTeam}
                         value={predicate}
                         onChange={setPredicate}
                       />

@@ -669,6 +669,8 @@ Slack support is an Enterprise, multi-mode-only feature, configured per-org from
 
 Mention-ness is metadata (`SlackMessageMetadata.Mentioned`), not a separate event type — the same taxonomy rule that only splits an event when the two cases are genuinely different situations. A handler can still narrow to explicit mentions with the predicate's `mentioned_only` flag, or to specific channels with `channel_in`, which names channels by their registry id (the `id` field of `GET /api/slack/teams/{team_id}/channels`), not by the ID Slack gives them.
 
+A team's handlers only ever see messages from channels the team tracks, so an empty `channel_in` matches every one of them, and each entry must be a channel the handler's team tracks. Creating, editing or promoting a handler refuses any other entry, Slack's own channel ID included, with `422 INVALID_FIELD` on `scope_predicate`. An edit is checked only for the entries it adds, so a channel the team has since stopped tracking never blocks an edit that leaves it in place. The default trigger TF creates when a team first tracks a channel names no channels, so it fires on every channel the team tracks, including ones tracked later.
+
 ### Engaged threads
 
 A Slack thread is **engaged** when the bot is the reason it exists:

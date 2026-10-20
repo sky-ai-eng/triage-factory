@@ -21,11 +21,11 @@ is **no env-driven / startup-bootstrap SSO**. This guide has two halves:
 > in with GitHub and configures SSO for everyone else.
 
 > **What this page covers.** Enabling GoTrue SAML, registering an org's
-> connection (the provider + the org↔role binding), and the SP-initiated login
-> flow with just-in-time provisioning. **Email-domain routing** — so users can
-> sign in by typing their email instead of clicking the tile — is a follow-up
-> still in progress; until it lands, the My Apps tile (the Sign on URL below) is
-> the way in.
+> connection (the provider + the org↔role binding), claiming and verifying your
+> email domains, the SP-initiated login flow with just-in-time provisioning, and
+> requiring SSO. Users reach your identity provider either by typing their work
+> email on the login page, once their domain is verified for your org, or from
+> the My Apps tile (the Sign on URL below).
 
 ## How it fits together
 
@@ -164,10 +164,10 @@ are what you paste into Entra. Substitute your deployment's `TF_PUBLIC_URL`
 | **Entity ID** (SP identifier) | `{TF_PUBLIC_URL}/auth/v1/sso/saml/metadata` |
 | **ACS** (Assertion Consumer Service) | `{TF_PUBLIC_URL}/auth/v1/sso/saml/acs` |
 
-Triage Factory also returns these to you directly — `GET /api/sso/connection`
-includes `entity_id` and `acs_url` in its response (and a forthcoming "Configure
-SSO" admin screen surfaces them for copy-paste), so you never have to
-hand-assemble them.
+Triage Factory also shows these to you directly, so you never have to
+hand-assemble them: the org's **Settings → Single sign-on** section lists them
+as **Identifier (Entity ID)** and **Reply URL (ACS)**, each with a copy button,
+and `GET /api/sso/connection` includes them as `entity_id` and `acs_url`.
 
 ## 2.2 Create the Entra enterprise application
 
@@ -203,9 +203,10 @@ that true IdP-initiated SAML leaves open — same one-click tile UX, safer flow.
 > the registration call returns (also shown by `GET /api/sso/connection`). The
 > start endpoint validates it against your org's connection and rejects an
 > unknown or disabled one, so TF only ever initiates a flow for a connection you
-> registered. (A forthcoming identifier-first login will also let users reach
-> this endpoint by typing their email on the login screen — the bookmark tile is
-> the zero-typing path.)
+> registered. Once the connection exists, **Settings → Single sign-on** shows
+> the full value as **Sign-on URL**. (Users whose email domain is verified for
+> your org can also reach this endpoint by typing their email on the login page;
+> the tile is the zero-typing path.)
 
 Leave Relay State and Logout Url blank.
 
@@ -254,17 +255,19 @@ account.
 
 An SSO sign-in joins an **existing** Triage Factory account (for example, a
 colleague who already signs in with GitHub at the same address) only when the
-email's domain is **verified for your org**: claimed with `POST /api/sso/domains`
-and verified through its DNS TXT record with
-`POST /api/sso/domains/{id}/verify`. Until the domain is verified, every SSO
+email's domain is **verified for your org**: claimed under **Settings → Single
+sign-on** with **Add domain** (or `POST /api/sso/domains`), then, once you have
+published the DNS TXT record it shows, verified with **Verify** (or
+`POST /api/sso/domains/{id}/verify`). Until the domain is verified, every SSO
 sign-in gets a separate account that belongs to your org only. See
 [Accounts and email addresses](#accounts-and-email-addresses).
 
 ## 2.5 Register the connection in Triage Factory
 
-Hand the metadata URL from step 2.3 to Triage Factory. A forthcoming "Configure
-SSO" admin screen will make this a paste-and-save form; until then, an org admin
-POSTs it directly:
+Hand the metadata URL from step 2.3 to Triage Factory. As an org admin, open
+your org's **Settings** tab, expand **Single sign-on**, paste the URL into **App
+Federation Metadata URL** and click **Connect**. The screen calls the same route
+any API client can:
 
 ```http
 POST /api/sso/connection
@@ -307,15 +310,18 @@ Only org admins can reach these endpoints (a non-admin gets a 404), and a
 connection is always bound to the caller's own org — so it can never be attached
 to an org you don't administer.
 
-## 2.6 Test the connection before enabling it
+## 2.6 Test the connection
 
-The common SSO failures are Entra-side — the wrong Identifier/Reply URL pasted in,
-a certificate mismatch, the test user not assigned, or the assertion missing the
-email claim — and none of them show up in metadata validation. They only surface
-in a **live round-trip**, so verify one before you flip the connection on (you can
-test a connection that is still disabled — that's the point):
+A connection is created **enabled**, so people whose sign-in reaches it can use
+it straight away. The common SSO failures are Entra-side — the wrong
+Identifier/Reply URL pasted in, a certificate mismatch, the test user not
+assigned, or the assertion missing the email claim — and none of them show up in
+metadata validation. They only surface in a **live round-trip**, so run one
+before you tell people to use it. You can also turn the connection off with the
+**Enable SSO** switch while you get it working; a disabled connection can still
+be tested. Requiring SSO is refused until a test has passed.
 
-- In the Configure-SSO admin screen, click **Test SSO**. It opens a real sign-in
+- Under **Settings → Single sign-on**, click **Test SSO**. It opens a real sign-in
   in a new window and renders a **pass/fail** page with the authenticated email
   and a **Matches existing accounts** row. *Yes* means the email's domain is
   verified for your organization, so a real sign-in with that address joins the
@@ -340,8 +346,10 @@ GET /api/sso/connection/test      # org-admin only; opens in a popup
 ```
 
 A failed test shows an actionable reason (e.g. *"the assertion carried no email
-claim — map the user's email/UPN to the email claim"*). Fix the Entra side, retest,
-and only then `PATCH { "enabled": true }`.
+claim — map the user's email/UPN to the email claim"*). Fix the Entra side and
+retest. If you turned the connection off while testing, turn it back on
+(`PATCH /api/sso/connection` with `{ "enabled": true }`, or the **Enable SSO**
+switch).
 
 ## The login flow
 
@@ -402,7 +410,12 @@ nobody uses your org except through your identity provider. It is two rules:
 
 - **Sign-in.** A GitHub sign-in whose trusted email is on one of your verified
   domains is refused, and the person is sent back to the login page to sign in
-  with SSO.
+  with SSO. The email is the verified address GitHub reports on that sign-in,
+  not the one the person's Triage Factory account was created with: someone who
+  moves their GitHub address off your domain can sign in with GitHub again, and
+  the org-access rule below still keeps them out of your org. If Triage
+  Factory cannot read GitHub's address from GoTrue, it checks the account's
+  original email instead.
 - **Org access.** Every request that acts in your org must come from a session
   or API token that was signed in through your org's own connection. That covers
   every member, whatever their email: a contractor invited with a personal
@@ -473,14 +486,6 @@ requirement on and off is in `access_change_log` (see below).
   roster. Directory provisioning (SCIM) is not supported yet.
 - Background work is not affected: delegated runs, pollers and webhooks do not
   pass through these checks, and runs started before you required SSO continue.
-
-## What's next
-
-Still in progress (not configured here yet):
-
-- **Identifier-first login + a "Sign in with SSO" button** — so users reach the
-  start endpoint by typing their email, not just via the tile.
-- **A "Configure SSO" admin UI** for the steps in Part 2.
 
 ## Auditing SSO changes
 
