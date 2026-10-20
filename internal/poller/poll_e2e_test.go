@@ -141,7 +141,11 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 		t.Error("the unchanged cycle's pull request list was not a 304")
 	}
 
-	// Every kind of change the world can make through GitHub's API today.
+	// Every kind of change the world can make through GitHub's API today, a
+	// minute on. Orrery's clock moves only when told to, and a pull request
+	// whose updated_at and head are unchanged is not re-read, so without it a
+	// change that bumps only updated_at (#4's) would go unseen.
+	w.advance(60)
 	w.githubREST(ci, "PATCH", fmt.Sprintf("%s/%v", checkRuns, running["id"]), map[string]any{"status": "completed", "conclusion": "success"}, 200)
 	w.githubREST(bob, "POST", pulls+"/3/reviews", map[string]any{"event": "APPROVE", "body": "thanks"}, 200)
 	w.githubREST(carol, "POST", "/api/v3/repos/acme/webapp/issues/3/comments", map[string]any{"body": "merging after lunch"}, 201)
@@ -167,6 +171,7 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 		"acme/webapp#4 " + domain.EventGitHubPRReadyForReview:               1,
 	})
 
+	w.advance(60)
 	w.githubREST(alice, "PUT", pulls+"/3/merge", map[string]any{}, 200)
 	p.cycle(t, ctx, map[string]int{
 		"acme/webapp#3 " + domain.EventGitHubPRMerged: 1,
@@ -708,6 +713,12 @@ func (w *orreryWorld) send(token, method, path string, body map[string]any, want
 		w.t.Fatalf("%s %s: status %d, want %d: %s", method, path, resp.StatusCode, want, got)
 	}
 	return got
+}
+
+// advance moves the world's clock forward by seconds.
+func (w *orreryWorld) advance(seconds int) {
+	w.t.Helper()
+	w.call("", "POST", "/_orrery/clock/advance", map[string]any{"seconds": seconds}, http.StatusOK)
 }
 
 func (w *orreryWorld) clock() int64 {
