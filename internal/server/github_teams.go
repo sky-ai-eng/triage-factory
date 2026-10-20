@@ -31,7 +31,7 @@ import (
 //     person, so /user/teams can't be used. Instead we take the user's
 //     host-verified GitHub login (captured by the Connect OAuth flow) and
 //     ask GraphQL's organization.teams(userLogins:) connection per
-//     configured-repo owner — O(orgs) queries, not a per-team probe.
+//     tracked-repo owner — O(orgs) queries, not a per-team probe.
 //
 // The write target is the existing PUT /api/teams/{team_id}/github-groups
 // (replace-set, idempotent, team-admin gated).
@@ -80,32 +80,23 @@ func (s *Server) userTeamsLocal(ctx context.Context, orgID, userID string) ([]gh
 // Connect OAuth flow persists the user's GitHub *login* (not a reusable
 // token), and the org credential is an App installation that isn't a
 // person — so /user/teams is out. Instead: resolve the login, then for
-// each configured-repo owner ask GraphQL which of that org's teams the
+// each tracked-repo owner ask GraphQL which of that org's teams the
 // login belongs to. Per-owner failures (a user-account owner, an org the
 // token can't read org-members on) are skipped — best-effort, never
 // fatal — so a single unreadable org doesn't blank the whole step.
 func (s *Server) userTeamsMulti(ctx context.Context, orgID, userID string) ([]ghclient.UserTeam, error) {
-	var (
-		login string
-		repos []domain.Repository
-	)
+	var host, login string
 	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		orgSet, lerr := tx.Orgs.GetSettings(ctx, orgID)
 		if lerr != nil {
 			return lerr
 		}
-		host, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
+		h, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
 		if !okHost {
 			return nil
 		}
-		if login, lerr = tx.Users.GetGitHubLogin(ctx, userID, host); lerr != nil {
-			return lerr
-		}
-		// Unwindowed for the same reason as the group candidates: this
-		// derives a set from the whole registry rather than browsing it.
-		// TODO(TFAC-1150): includes repositories no team tracks that a GitHub
-		// entity created a row for; owners should come from tracked rows.
-		repos, _, lerr = tx.Repos.List(ctx, orgID, host, db.Unwindowed)
+		host = h
+		login, lerr = tx.Users.GetGitHubLogin(ctx, userID, host)
 		return lerr
 	}); err != nil {
 		return nil, err
@@ -115,6 +106,14 @@ func (s *Server) userTeamsMulti(ctx context.Context, orgID, userID string) ([]gh
 	// than erroring — the user can still Skip.
 	if login == "" {
 		return nil, nil
+	}
+	// Owners from the repositories at least one team in the org tracks, read
+	// the same way and for the same reasons as the group candidates: tracked
+	// rows rather than the whole registry, unwindowed, on the admin pool, and
+	// only the owners are used.
+	repos, _, err := s.allStores.Repos.ListTrackedSystem(ctx, orgID, host, db.Unwindowed)
+	if err != nil {
+		return nil, err
 	}
 
 	var out []ghclient.UserTeam

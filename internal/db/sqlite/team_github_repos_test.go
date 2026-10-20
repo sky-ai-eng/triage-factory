@@ -5,6 +5,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -339,7 +340,7 @@ func TestTeamGitHubRepos_SQLite_TrackedRowCarriesIdentity(t *testing.T) {
 	if again.ID != got.ID {
 		t.Errorf("second team's save resolved to id %q, want the tracked row's %q", again.ID, got.ID)
 	}
-	if n, _ := stores.Repos.CountConfigured(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost); n != 1 {
-		t.Errorf("repositories rows = %d, want 1", n)
+	if _, n, err := stores.Repos.List(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, db.ListOpts{CountOnly: true}); err != nil || n != 1 {
+		t.Errorf("repositories rows = %d, %v; want 1", n, err)
 	}
 }

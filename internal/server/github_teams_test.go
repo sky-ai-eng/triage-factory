@@ -165,6 +165,62 @@ func TestGitHubGroupCandidates_ResolvedButNoTeams(t *testing.T) {
 	}
 }
 
+// TestGitHubGroupCandidates_OwnersFromTrackedReposOnly pins where the owners
+// come from: the repositories a team tracks, not the whole registry. A
+// registry row no team tracks (a GitHub entity's repository gets one) names
+// an owner the org does not work with, so the credential is never asked for
+// that owner's teams and none of them become candidates.
+func TestGitHubGroupCandidates_OwnersFromTrackedReposOnly(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	ctx := context.Background()
+
+	var askedOrgs []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/graphql") {
+			http.NotFound(w, r)
+			return
+		}
+		var req struct {
+			Variables struct {
+				Org string `json:"org"`
+			} `json:"variables"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		askedOrgs = append(askedOrgs, req.Variables.Org)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"organization":{"teams":{
+			"pageInfo":{"hasNextPage":false,"endCursor":""},
+			"nodes":[{"slug":"platform","name":"Platform","members":{"totalCount":8}}]}}}}`))
+	}))
+	t.Cleanup(ts.Close)
+
+	dbtest.SeedOrgSettings(t, srv.orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL})
+	seedSourceHost(t, srv, eventsource.KindGitHub, ts.URL)
+	if err := integrations.Save(ctx, srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
+		GitHubPAT: "ghp-test",
+	}); err != nil {
+		t.Fatalf("seed creds: %v", err)
+	}
+	seedConfiguredRepo(t, srv, "acme", "api")
+	seedUntrackedRepo(t, srv, "other", "thing")
+
+	rec := doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET github-groups = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp teamGitHubGroupsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode body: %v; raw=%s", err, rec.Body.String())
+	}
+	if len(askedOrgs) != 1 || askedOrgs[0] != "acme" {
+		t.Errorf("teams asked for owners %v; want [acme] — an untracked repository's owner is not one the org works with", askedOrgs)
+	}
+	if len(resp.Candidates) != 1 || resp.Candidates[0].OrgLogin != "acme" {
+		t.Errorf("candidates = %+v; want acme/platform alone", resp.Candidates)
+	}
+}
+
 // TestGitHubGroupCandidates_NoReposNotMissing guards the inverse: with no
 // tracked repos there is no owner to resolve, so credentials_missing must stay
 // false — an unconfigured team is not a creds failure, and the wizard reaches
@@ -189,7 +245,8 @@ func TestGitHubGroupCandidates_NoReposNotMissing(t *testing.T) {
 // TestUserTeamsMulti_ReconstructsViaGraphQL drives the multi-mode path
 // (userTeamsMulti) directly: it resolves the caller's host-verified login,
 // fans out one GraphQL organization.teams(userLogins:) query per
-// configured-repo owner, and de-dupes the result. Calling the method
+// tracked-repo owner (an untracked registry row's owner is not asked), and
+// de-dupes the result. Calling the method
 // rather than the HTTP handler sidesteps the multi-mode session/claims
 // middleware the local-mode test harness doesn't stand up, while still
 // exercising the membership-reconstruction logic the reviewer flagged.
@@ -198,7 +255,10 @@ func TestUserTeamsMulti_ReconstructsViaGraphQL(t *testing.T) {
 	srv := newTestServer(t)
 	ctx := context.Background()
 
-	var gotLogin, gotOrg string
+	var (
+		gotLogin string
+		gotOrgs  []string
+	)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/graphql" {
 			// patBorrowUser's whoami (logging only) and anything else can
@@ -213,7 +273,8 @@ func TestUserTeamsMulti_ReconstructsViaGraphQL(t *testing.T) {
 			} `json:"variables"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		gotLogin, gotOrg = req.Variables.Login, req.Variables.Org
+		gotLogin = req.Variables.Login
+		gotOrgs = append(gotOrgs, req.Variables.Org)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"organization":{"teams":{
 			"pageInfo":{"hasNextPage":false,"endCursor":""},
@@ -242,15 +303,17 @@ func TestUserTeamsMulti_ReconstructsViaGraphQL(t *testing.T) {
 	if err := srv.users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, host, "octocat", "", "", "connect_oauth"); err != nil {
 		t.Fatalf("seed identity: %v", err)
 	}
-	// A configured repo under owner "acme" is the org the fan-out queries.
+	// A tracked repo under owner "acme" is the org the fan-out queries. The
+	// registry row no team tracks names an owner the fan-out skips.
 	seedConfiguredRepo(t, srv, "acme", "api")
+	seedUntrackedRepo(t, srv, "other", "thing")
 
 	teams, err := srv.userTeamsMulti(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID)
 	if err != nil {
 		t.Fatalf("userTeamsMulti: %v", err)
 	}
-	if gotLogin != "octocat" || gotOrg != "acme" {
-		t.Errorf("GraphQL query vars = (%q, %q); want (octocat, acme)", gotLogin, gotOrg)
+	if gotLogin != "octocat" || len(gotOrgs) != 1 || gotOrgs[0] != "acme" {
+		t.Errorf("GraphQL queries = login %q, orgs %v; want octocat, [acme]", gotLogin, gotOrgs)
 	}
 	if len(teams) != 2 {
 		t.Fatalf("got %d teams, want 2: %+v", len(teams), teams)

@@ -56,7 +56,6 @@ type RepositorySeeder struct {
 //   - The tracked reads (ListTrackedSystem, ListTrackedByTeamSystem,
 //     ListTeamScoped) leave out a registry row no team tracks, which List
 //     and ListSystem keep.
-//   - CountConfigured returns the row count.
 //   - UpdateBaseBranch + UpdateCloneStatusByRef mutate only the targeted
 //     fields, and every name-keyed method folds case on owner/repo.
 //   - Tracking mints one bare identity row per repository, however often
@@ -532,7 +531,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// resolves.
 		trackRepos(t, seed, orgID, seed.TeamID, "acme/api", "octo/new")
 
-		if n, _ := s.CountConfigured(ctx, orgID, TestGitHubHost); n != 2 {
+		if n := registryRows(t, s, orgID); n != 2 {
 			t.Fatalf("rows = %d, want 2 — a casing difference is not a second repository", n)
 		}
 		got, err := s.GetByRef(ctx, orgID, repoRef("acme/api"))
@@ -569,22 +568,6 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		}
 		if etag != `"etag-v1"` || polledAt == nil {
 			t.Errorf("poll state = (%q, %v), want it kept — losing it re-lists every open PR", etag, polledAt)
-		}
-	})
-
-	t.Run("CountConfigured_reflects_table_size", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		n, err := s.CountConfigured(ctx, orgID, TestGitHubHost)
-		if err != nil {
-			t.Fatalf("CountConfigured initial: %v", err)
-		}
-		if n != 0 {
-			t.Errorf("initial CountConfigured = %d, want 0", n)
-		}
-		trackRepos(t, seed, orgID, seed.TeamID, "a/b", "c/d", "e/f")
-		n, _ = s.CountConfigured(ctx, orgID, TestGitHubHost)
-		if n != 3 {
-			t.Errorf("CountConfigured after tracking 3 = %d, want 3", n)
 		}
 	})
 
@@ -816,9 +799,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 				t.Errorf("repeat %d resolved to id %q, want %q", i, again.ID, first.ID)
 			}
 		}
-		if n, err := s.CountConfigured(ctx, orgID, TestGitHubHost); err != nil {
-			t.Fatalf("CountConfigured: %v", err)
-		} else if n != 1 {
+		if n := registryRows(t, s, orgID); n != 1 {
 			t.Errorf("rows after 5 saves by 2 teams = %d, want 1", n)
 		}
 	})
@@ -847,7 +828,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		if got.Slug() != "Acme/Api" {
 			t.Errorf("slug = %q, want Acme/Api — stored casing is sticky", got.Slug())
 		}
-		if n, _ := s.CountConfigured(ctx, orgID, TestGitHubHost); n != 1 {
+		if n := registryRows(t, s, orgID); n != 1 {
 			t.Errorf("rows = %d, want 1 — a casing difference is not a second repository", n)
 		}
 	})
@@ -904,7 +885,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		if ghost, _ := s.GetByRef(ctx, orgID, repoRef("ghost/repo")); ghost != nil {
 			t.Errorf("fill created a row for an untracked repo: %+v — it writes, never creates", ghost)
 		}
-		if n, _ := s.CountConfigured(ctx, orgID, TestGitHubHost); n != 3 {
+		if n := registryRows(t, s, orgID); n != 3 {
 			t.Errorf("rows = %d, want 3 — a fill adds none", n)
 		}
 
@@ -999,7 +980,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			t.Fatalf("differently-cased Upsert: %v", err)
 		}
 
-		if n, _ := s.CountConfigured(ctx, orgID, TestGitHubHost); n != 1 {
+		if n := registryRows(t, s, orgID); n != 1 {
 			t.Fatalf("rows = %d, want 1 — a differently-cased upsert must not mint a second repository", n)
 		}
 		got, _ := s.GetByRef(ctx, orgID, repoRef("Acme/Api"))
@@ -1025,7 +1006,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		}); err == nil {
 			t.Error("Upsert accepted an unknown source; want an error")
 		}
-		if n, _ := s.CountConfigured(ctx, orgID, TestGitHubHost); n != 0 {
+		if n := registryRows(t, s, orgID); n != 0 {
 			t.Errorf("rows = %d, want 0 — a refused source must not write", n)
 		}
 	})
@@ -1118,9 +1099,6 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			if got := listed(teamRows, c.host); !equalStringSlice(got, c.want) {
 				t.Errorf("ListTrackedByTeamSystem(%s) = %v, want %v", c.host, got, c.want)
 			}
-			if n, err := s.CountConfigured(ctx, orgID, c.host); err != nil || n != len(c.want) {
-				t.Errorf("CountConfigured(%s) = %d, %v; want %d", c.host, n, err, len(c.want))
-			}
 		}
 
 		// Untracking everything on one host leaves the other host's tracked
@@ -1189,8 +1167,6 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		check("List", err)
 		_, err = s.ListSystem(ctx, orgID, "")
 		check("ListSystem", err)
-		_, err = s.CountConfigured(ctx, orgID, "")
-		check("CountConfigured", err)
 		_, err = s.ListTrackedNamesSystem(ctx, orgID, "")
 		check("ListTrackedNamesSystem", err)
 		_, _, err = s.ListTrackedSystem(ctx, orgID, "", db.Unwindowed)
@@ -1211,7 +1187,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		if got.CloneStatus == "failed" || got.ExternalID != "" || got.ProfileText != "" {
 			t.Errorf("row after the refusals = %+v; a refused call must not write", got)
 		}
-		if n, _ := s.CountConfigured(ctx, orgID, TestGitHubHost); n != 1 {
+		if n := registryRows(t, s, orgID); n != 1 {
 			t.Errorf("rows = %d, want 1 — a refused tracking save must not mint", n)
 		}
 	})
@@ -1377,6 +1353,18 @@ func trackReposOnHost(t *testing.T, seed RepositorySeeder, orgID, teamID, host s
 	if err := seed.Tracking.ReplaceForTeam(context.Background(), orgID, teamID, host, repos); err != nil {
 		t.Fatalf("track %v on %s for team %s: %v", slugs, host, teamID, err)
 	}
+}
+
+// registryRows counts the registry rows on TestGitHubHost, tracked or not,
+// through the count-only List read. The cases that pin "no second row" or "a
+// refused write minted nothing" are about the registry, not the tracked set.
+func registryRows(t *testing.T, s db.RepositoryStore, orgID string) int {
+	t.Helper()
+	_, n, err := s.List(context.Background(), orgID, TestGitHubHost, db.ListOpts{CountOnly: true})
+	if err != nil {
+		t.Fatalf("count registry rows: %v", err)
+	}
+	return n
 }
 
 // unknownRepoID is a well-formed registry id no row carries. Well-formed

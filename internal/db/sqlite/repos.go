@@ -323,18 +323,6 @@ func (s *repoStore) ListTeamScoped(ctx context.Context, orgID, host string, opts
 	return s.ListTrackedSystem(ctx, orgID, host, opts)
 }
 
-func (s *repoStore) CountConfigured(ctx context.Context, orgID, host string) (int, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return 0, err
-	}
-	if err := db.RequireRepoHost(host); err != nil {
-		return 0, err
-	}
-	var count int
-	err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM repositories WHERE host = ?`, host).Scan(&count)
-	return count, err
-}
-
 func (s *repoStore) UpdateBaseBranch(ctx context.Context, orgID, id, baseBranch string) (domain.Repository, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return domain.Repository{}, err
