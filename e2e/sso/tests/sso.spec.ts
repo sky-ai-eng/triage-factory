@@ -88,7 +88,7 @@ test('1. an admin connects SSO and tests it', async ({ browser }) => {
   await popup.close()
   expect((await getSSOConnection(admin.api)).connection?.tested).toBe(true)
 
-  await claimVerifiedDomain(admin.api, 'globex.test')
+  await claimVerifiedDomain(admin.api, globexId, 'globex.test')
 
   popup = await runTest()
   await expect(popup.getByText('Yes — globex.test is verified for your organization')).toBeVisible()
@@ -163,7 +163,7 @@ test('4. Require SSO turns away a GitHub sign-in on the domain, but not break-gl
   await bob.context.close()
 
   const owner = await signInGitHub(browser, 'globex-admin')
-  await expectLandedIn(owner, globexId)
+  await expectLandedIn(owner, globexId, { admin: true })
   await owner.context.close()
 })
 
@@ -204,8 +204,12 @@ test('7. an invite cannot be accepted with an address another IdP asserts', asyn
   const r = await fake.api.post('/api/invites/accept', { data: { token: tokenOf(acceptURL) } })
   expect(r.status(), await r.text()).toBe(409)
   expect((await r.json()).errors[0].reason).toBe('INVITE_EMAIL_MISMATCH')
+  expect((await me(fake.api)).orgs.map((o) => o.id)).not.toContain(globexId)
   await fake.context.close()
 
+  // The list holds only invites that are still open (not accepted, revoked or
+  // expired), so Carol's invite being there means the refused accept did not
+  // use it up.
   const list = await json<{ items: { email: string }[] }>(
     await admin.api.post('/api/invites/list', { data: {} }),
     200,

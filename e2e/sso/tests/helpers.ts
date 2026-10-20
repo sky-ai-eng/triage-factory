@@ -116,15 +116,20 @@ export async function me(api: APIRequestContext): Promise<Me> {
 
 /**
  * Asserts a sign-in landed in orgId. The SPA routes an org member under
- * /orgs/<id>/ (the GitHub-identity gate's connect-github page included), and an
- * admin of an org whose setup is unfinished to /setup, which carries no org in
- * its path, so the session's active org is checked too.
+ * /orgs/<id>/ (the GitHub-identity gate's connect-github page included). An
+ * admin of an org whose setup is unfinished goes to /setup instead, which
+ * carries no org in its path, so /setup passes only when the caller expects an
+ * admin, and the session's active org is checked either way.
  */
-export async function expectLandedIn(s: Session, orgId: string) {
+export async function expectLandedIn(s: Session, orgId: string, opts: { admin?: boolean } = {}) {
   await expect
     .poll(() => {
       const p = new URL(s.page.url()).pathname
-      return p.startsWith(`/orgs/${orgId}/`) || p === `/orgs/${orgId}` || p === '/setup'
+      return (
+        p.startsWith(`/orgs/${orgId}/`) ||
+        p === `/orgs/${orgId}` ||
+        (opts.admin === true && p === '/setup')
+      )
     })
     .toBe(true)
   expect((await me(s.api)).active_org_id).toBe(orgId)
@@ -179,14 +184,18 @@ export async function getSSOConnection(api: APIRequestContext): Promise<Connecti
 }
 
 /**
- * Claims domain for the active org and marks it verified in the database.
- * Real DNS cannot serve TXT records for .test names; the TXT check itself is
- * covered by the Postgres tests.
+ * Claims domain for orgId (the caller's active org) and marks that org's claim
+ * verified in the database. Real DNS cannot serve TXT records for .test names;
+ * the TXT check itself is covered by the Postgres tests.
  */
-export async function claimVerifiedDomain(api: APIRequestContext, domain: string) {
+export async function claimVerifiedDomain(api: APIRequestContext, orgId: string, domain: string) {
   const r = await api.post('/api/sso/domains', { data: { domain } })
   expect([200, 201], await r.text()).toContain(r.status())
-  psql(`UPDATE sso_domains SET verified_at = now() WHERE domain = '${domain}'`)
+  // -t drops headers but not the command tag, so count the returned ids.
+  const ids = psql(
+    `UPDATE sso_domains SET verified_at = now() WHERE org_id = '${orgId}' AND domain = '${domain}' AND verified_at IS NULL RETURNING id`,
+  ).match(/^[0-9a-f-]{36}$/gm)
+  expect(ids, `verify ${domain} for org ${orgId}`).toHaveLength(1)
 }
 
 export async function invite(api: APIRequestContext, email: string): Promise<string> {
