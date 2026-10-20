@@ -1066,12 +1066,15 @@ func TestResolver_TokenForRepoScoped_AppXorPAT(t *testing.T) {
 			&fakeAgents{},
 			nil,
 		)
-		tok, err := r.(ScopedResolver).TokenForRepoScoped(context.Background(), "org-1", "acme", "widget", map[string]string{"contents": "write"})
+		tok, identity, err := r.(ScopedResolver).TokenForRepoScoped(context.Background(), "org-1", "acme", "widget", map[string]string{"contents": "write"})
 		if err != nil {
 			t.Fatalf("TokenForRepoScoped: %v", err)
 		}
 		if tok.Value != "ghs_minted" {
 			t.Errorf("token = %q, want the minted App token, not the PAT (App XOR PAT)", tok.Value)
+		}
+		if identity != IdentityApp {
+			t.Errorf("identity = %v, want IdentityApp", identity)
 		}
 	})
 
@@ -1084,8 +1087,12 @@ func TestResolver_TokenForRepoScoped_AppXorPAT(t *testing.T) {
 			&fakeAgents{},
 			nil,
 		)
-		if _, err := r.(ScopedResolver).TokenForRepoScoped(context.Background(), "org-1", "globex", "widget", nil); !errors.Is(err, ErrNoGitHubCredentials) {
+		_, identity, err := r.(ScopedResolver).TokenForRepoScoped(context.Background(), "org-1", "globex", "widget", nil)
+		if !errors.Is(err, ErrNoGitHubCredentials) {
 			t.Errorf("err = %v, want ErrNoGitHubCredentials (no installation; no PAT fallback)", err)
+		}
+		if identity != IdentityUnknown {
+			t.Errorf("identity = %v, want IdentityUnknown on the error path", identity)
 		}
 	})
 
@@ -1097,12 +1104,15 @@ func TestResolver_TokenForRepoScoped_AppXorPAT(t *testing.T) {
 			&fakeAgents{},
 			nil,
 		)
-		tok, err := r.(ScopedResolver).TokenForRepoScoped(context.Background(), "org-1", "acme", "widget", map[string]string{"contents": "write"})
+		tok, identity, err := r.(ScopedResolver).TokenForRepoScoped(context.Background(), "org-1", "acme", "widget", map[string]string{"contents": "write"})
 		if err != nil {
 			t.Fatalf("TokenForRepoScoped: %v", err)
 		}
 		if tok.Value != "ghp_test" {
 			t.Errorf("token = %q, want the PAT (no App → PAT, unscoped)", tok.Value)
+		}
+		if identity != IdentityPAT {
+			t.Errorf("identity = %v, want IdentityPAT", identity)
 		}
 		if !tok.ExpiresAt.IsZero() {
 			t.Errorf("PAT token should carry a zero expiry, got %v", tok.ExpiresAt)
@@ -1164,7 +1174,7 @@ func TestResolver_ScopedMint_DisabledSecretStore_FailsLoudlyWithoutLoadingKey(t 
 		nil,
 	)
 
-	_, err := r.(ScopedResolver).TokenForRepoScoped(context.Background(), "org-1", "acme", "widget", map[string]string{"contents": "write"})
+	_, _, err := r.(ScopedResolver).TokenForRepoScoped(context.Background(), "org-1", "acme", "widget", map[string]string{"contents": "write"})
 	if !errors.Is(err, db.ErrSecretStoreUnavailable) {
 		t.Fatalf("err = %v, want it to wrap db.ErrSecretStoreUnavailable (a stray executor mint must fail loudly at the sentinel)", err)
 	}

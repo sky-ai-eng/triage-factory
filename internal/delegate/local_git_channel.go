@@ -219,7 +219,7 @@ func (s *Spawner) startLocalGitChannel(ctx context.Context, orgID string, task d
 // a refusal, which fails the setup within its own budget instead.
 func localGitTokenSource(scoped ghclient.ScopedResolver, orgID string) gitproxy.TokenSource {
 	return func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
-		tok, err := ghclient.TokenForManagedGit(ctx, scoped, orgID, owner, repo)
+		tok, _, err := ghclient.TokenForManagedGit(ctx, scoped, orgID, owner, repo)
 		if err != nil {
 			if markedUpstreamOutage(err) {
 				return gitproxy.Token{}, err

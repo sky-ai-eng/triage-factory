@@ -79,8 +79,8 @@ func TestLocalGHChannel_AnUnresolvableCredentialIsARefusalNotAnOutage(t *testing
 // scopedResolverStub answers every scoped mint with err.
 type scopedResolverStub struct{ err error }
 
-func (s scopedResolverStub) TokenForRepoScoped(context.Context, string, string, string, map[string]string) (githubapp.Token, error) {
-	return githubapp.Token{}, s.err
+func (s scopedResolverStub) TokenForRepoScoped(context.Context, string, string, string, map[string]string) (githubapp.Token, ghclient.Identity, error) {
+	return githubapp.Token{}, ghclient.IdentityUnknown, s.err
 }
 
 func (s scopedResolverStub) TokenForReposScoped(context.Context, string, string, []string, map[string]string) (githubapp.Token, error) {

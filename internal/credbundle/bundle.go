@@ -138,8 +138,8 @@ type GitHubCreds struct {
 // re-derived from an opaque bearer token — so it is read here and reported
 // outward rather than guessed at each recording site.
 //
-// It follows Mode, which the provisioner flips to PAT the moment ANY repo in
-// the run's authorized set resolves without an expiry. That is deliberately
+// It follows Mode, which the provisioner flips to PAT the moment the resolver
+// reports a PAT for ANY repo in the run's authorized set. That is deliberately
 // coarser than ResolveRepoToken's per-repo answer: a run in a mixed org can
 // spend both tiers, and naming the weaker one is the honest summary — a PAT was
 // in play — where naming the stronger would understate what a row's write could

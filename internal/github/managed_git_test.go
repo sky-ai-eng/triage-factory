@@ -11,9 +11,9 @@ type recordingManagedGitResolver struct {
 	permissions map[string]string
 }
 
-func (r *recordingManagedGitResolver) TokenForRepoScoped(_ context.Context, _, _, _ string, permissions map[string]string) (githubapp.Token, error) {
+func (r *recordingManagedGitResolver) TokenForRepoScoped(_ context.Context, _, _, _ string, permissions map[string]string) (githubapp.Token, Identity, error) {
 	r.permissions = permissions
-	return githubapp.Token{Value: "installation-grant"}, nil
+	return githubapp.Token{Value: "installation-grant"}, IdentityApp, nil
 }
 
 func (*recordingManagedGitResolver) TokenForReposScoped(context.Context, string, string, []string, map[string]string) (githubapp.Token, error) {
@@ -26,7 +26,7 @@ func (*recordingManagedGitResolver) HasAnyCredential(context.Context, string) (b
 
 func TestTokenForManagedGit_InheritsInstallationPermissions(t *testing.T) {
 	resolver := &recordingManagedGitResolver{}
-	tok, err := TokenForManagedGit(context.Background(), resolver, "org-1", "acme", "widgets")
+	tok, _, err := TokenForManagedGit(context.Background(), resolver, "org-1", "acme", "widgets")
 	if err != nil {
 		t.Fatalf("TokenForManagedGit: %v", err)
 	}

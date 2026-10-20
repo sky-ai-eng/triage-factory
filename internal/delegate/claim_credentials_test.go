@@ -59,11 +59,11 @@ type fakeResolver struct {
 // optional extension credprovision's resolveGitHub type-asserts for. The scoped token is
 // the same f.token the unscoped TokenFor hands back (the fake doesn't model
 // per-repo narrowing — the proxy/gate tests cover that).
-func (f *fakeResolver) TokenForRepoScoped(ctx context.Context, orgID, owner, repo string, permissions map[string]string) (githubapp.Token, error) {
+func (f *fakeResolver) TokenForRepoScoped(ctx context.Context, orgID, owner, repo string, permissions map[string]string) (githubapp.Token, ghclient.Identity, error) {
 	if f.err != nil {
-		return githubapp.Token{}, f.err
+		return githubapp.Token{}, ghclient.IdentityUnknown, f.err
 	}
-	return f.token, nil
+	return f.token, ghclient.IdentityUnknown, nil
 }
 
 func (f *fakeResolver) HasAnyCredential(ctx context.Context, orgID string) (bool, error) {

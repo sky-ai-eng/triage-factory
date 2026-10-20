@@ -189,10 +189,10 @@ func TokenIdentity(ctx context.Context, resolver Resolver, orgID, githubTarget s
 // Resolver fakes don't have to grow methods they never exercise.
 type ScopedResolver interface {
 	// TokenForRepoScoped mints a credential narrowed to exactly owner/repo
-	// (and, when permissions is non-empty, that permission subset). App tier
-	// only narrows — a PAT is returned unchanged (it cannot be scoped). See
-	// the impl for the tier order and the 422-fall-through to PAT.
-	TokenForRepoScoped(ctx context.Context, orgID, owner, repo string, permissions map[string]string) (githubapp.Token, error)
+	// (and, when permissions is non-empty, that permission subset), and
+	// reports the tier it resolved. App tier only narrows — a PAT is returned
+	// unchanged (it cannot be scoped). See the impl for the tier order.
+	TokenForRepoScoped(ctx context.Context, orgID, owner, repo string, permissions map[string]string) (githubapp.Token, Identity, error)
 	// TokenForReposScoped mints ONE credential narrowed to the given set of
 	// repos under a single owner (bare repo names, all under owner's
 	// installation) — the real-gh channel's single team-set-scoped token. App
@@ -216,8 +216,9 @@ type ScopedResolver interface {
 // cannot narrow them.
 //
 // Both local's live token source and multi's sealed-bundle provisioner use this
-// helper so their App permission request cannot drift.
-func TokenForManagedGit(ctx context.Context, resolver ScopedResolver, orgID, owner, repo string) (githubapp.Token, error) {
+// helper so their App permission request cannot drift. The Identity is the
+// tier the resolver chose, which the provisioner records as the bundle's mode.
+func TokenForManagedGit(ctx context.Context, resolver ScopedResolver, orgID, owner, repo string) (githubapp.Token, Identity, error) {
 	return resolver.TokenForRepoScoped(ctx, orgID, owner, repo, nil)
 }
 
@@ -875,28 +876,31 @@ func (r *resolver) TokenForWithIdentity(ctx context.Context, orgID, target strin
 // rather than silently degrading to an unscoped, decommissioning PAT). Only an
 // org with no active App uses the PAT, returned unscoped (a PAT can't be
 // narrowed; Layers 2/3 enforce it). All-miss: ErrNoGitHubCredentials.
-func (r *resolver) TokenForRepoScoped(ctx context.Context, orgID, owner, repo string, permissions map[string]string) (githubapp.Token, error) {
+func (r *resolver) TokenForRepoScoped(ctx context.Context, orgID, owner, repo string, permissions map[string]string) (githubapp.Token, Identity, error) {
 	oc, err := r.orgContextFor(ctx, orgID)
 	if err != nil {
-		return githubapp.Token{}, err
+		return githubapp.Token{}, IdentityUnknown, err
 	}
 	base := oc.base
 	app, err := r.activeApp(ctx, orgID, oc.class, fixedHost(base))
 	if err != nil {
-		return githubapp.Token{}, err
+		return githubapp.Token{}, IdentityUnknown, err
 	}
 	if app.present() {
 		tok, _, err := r.appScopedToken(ctx, orgID, app, owner, repo, base, permissions)
-		return tok, err
+		if err != nil {
+			return githubapp.Token{}, IdentityUnknown, err
+		}
+		return tok, IdentityApp, nil
 	}
 	pat, err := r.orgPAT(ctx, orgID)
 	if err != nil {
-		return githubapp.Token{}, err
+		return githubapp.Token{}, IdentityUnknown, err
 	}
 	if pat != "" {
-		return githubapp.Token{Value: pat}, nil
+		return githubapp.Token{Value: pat}, IdentityPAT, nil
 	}
-	return githubapp.Token{}, fmt.Errorf("%w: org=%s repo=%s/%s", ErrNoGitHubCredentials, orgID, owner, repo)
+	return githubapp.Token{}, IdentityUnknown, fmt.Errorf("%w: org=%s repo=%s/%s", ErrNoGitHubCredentials, orgID, owner, repo)
 }
 
 // TokenForReposScoped mints ONE credential narrowed to a set of repos under a

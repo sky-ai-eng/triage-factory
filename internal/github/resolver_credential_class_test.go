@@ -57,7 +57,7 @@ func TestResolver_UnknownCredentialClass_Refuses(t *testing.T) {
 			return err
 		}},
 		{"TokenForRepoScoped", func(r Resolver) error {
-			_, err := r.(ScopedResolver).TokenForRepoScoped(ctx, "org-1", "acme", "api", nil)
+			_, _, err := r.(ScopedResolver).TokenForRepoScoped(ctx, "org-1", "acme", "api", nil)
 			return err
 		}},
 		{"TokenForReposScoped", func(r Resolver) error {
@@ -215,7 +215,7 @@ func TestResolver_ResolvesOrgSettingsOncePerCall(t *testing.T) {
 			return err
 		}},
 		{"TokenForRepoScoped_pat", domain.GitHubCredentialClassPAT, nil, nil, func(r Resolver) error {
-			_, err := r.(ScopedResolver).TokenForRepoScoped(ctx, "org-1", "acme", "api", nil)
+			_, _, err := r.(ScopedResolver).TokenForRepoScoped(ctx, "org-1", "acme", "api", nil)
 			return err
 		}},
 		{"TokenForReposScoped_pat", domain.GitHubCredentialClassPAT, nil, nil, func(r Resolver) error {

@@ -491,14 +491,14 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, conv
 		if !ok {
 			continue
 		}
-		tok, err := ghclient.TokenForManagedGit(ctx, scoped, orgID, owner, repo)
+		tok, identity, err := ghclient.TokenForManagedGit(ctx, scoped, orgID, owner, repo)
 		if err != nil {
 			if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 				continue
 			}
 			return nil, fmt.Errorf("mint token for %s: %w", repoID, err)
 		}
-		if tok.ExpiresAt.IsZero() {
+		if identity == ghclient.IdentityPAT {
 			gh.Mode = credbundle.GitHubModePAT
 			gh.PAT = tok.Value
 		}
