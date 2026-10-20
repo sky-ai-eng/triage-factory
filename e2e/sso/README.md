@@ -88,9 +88,9 @@ The first run needs Playwright's Chromium:
 
 Everything the run generates (certificates, the licence and its key, the SAML
 signing key, the env file, the binary, Orrery's world and the logs `tf.log`,
-`fakes.log`, `orrery.log` and `gotrue.log`) is written to `e2e/sso/.state/`, which is gitignored and replaced
-on every run. The stack runs as the `tf-multi-dev` compose project, the same one
-`scripts/multi-mode-dev.sh` uses.
+`fakes.log`, `orrery.log` and `gotrue.log`) is written to `e2e/sso/.state/`,
+which is gitignored and replaced on every run. The stack runs as the
+`tf-multi-dev` compose project, the same one `scripts/multi-mode-dev.sh` uses.
 
 To rerun the tests against a stack left up with `SSO_E2E_KEEP_UP=1`, run
 `pnpm exec playwright test` in `e2e/sso`. The scenarios build on each other, so
