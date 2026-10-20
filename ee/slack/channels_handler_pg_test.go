@@ -8,6 +8,7 @@ package slack
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -41,6 +42,12 @@ type fakeChannelsSlack struct {
 	joinCalls     []string
 	failList      map[string]bool // bot token -> conversations.list itself should fail (ok:false)
 	moreAvailable map[string]bool // bot token -> conversations.list should claim more pages exist
+	// info is what conversations.info knows, by bot token then channel id (the
+	// channel's name); any other channel is channel_not_found. infoFailCode
+	// fails every conversations.info call for a bot token with that code.
+	info         map[string]map[string]string
+	infoFailCode map[string]string
+	infoCalls    int
 }
 
 func newFakeChannelsSlack(t *testing.T) *fakeChannelsSlack {
@@ -51,6 +58,8 @@ func newFakeChannelsSlack(t *testing.T) *fakeChannelsSlack {
 		joinFailCode:  map[string]string{},
 		failList:      map[string]bool{},
 		moreAvailable: map[string]bool{},
+		info:          map[string]map[string]string{},
+		infoFailCode:  map[string]string{},
 	}
 	withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		token := bearerToken(r)
@@ -74,6 +83,21 @@ func newFakeChannelsSlack(t *testing.T) *fakeChannelsSlack {
 			chans := f.mine[token]
 			f.mu.Unlock()
 			writeSlackFakeJSON(w, map[string]any{"ok": true, "channels": chans, "response_metadata": map[string]any{"next_cursor": ""}})
+		case strings.HasSuffix(r.URL.Path, "/conversations.info"):
+			channelID := r.URL.Query().Get("channel")
+			f.mu.Lock()
+			f.infoCalls++
+			name, known := f.info[token][channelID]
+			code := f.infoFailCode[token]
+			f.mu.Unlock()
+			switch {
+			case code != "":
+				writeSlackFakeJSON(w, map[string]any{"ok": false, "error": code})
+			case known:
+				writeSlackFakeJSON(w, map[string]any{"ok": true, "channel": map[string]any{"id": channelID, "name": name}})
+			default:
+				writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "channel_not_found"})
+			}
 		case strings.HasSuffix(r.URL.Path, "/conversations.join"):
 			_ = r.ParseForm()
 			channelID := r.FormValue("channel")
@@ -116,6 +140,29 @@ func (f *fakeChannelsSlack) setMoreAvailable(botToken string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.moreAvailable[botToken] = true
+}
+
+// knowChannel makes conversations.info answer for channelID under botToken.
+func (f *fakeChannelsSlack) knowChannel(botToken, channelID, name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.info[botToken] == nil {
+		f.info[botToken] = map[string]string{}
+	}
+	f.info[botToken][channelID] = name
+}
+
+// failInfo makes every conversations.info call under botToken fail with code.
+func (f *fakeChannelsSlack) failInfo(botToken, code string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.infoFailCode[botToken] = code
+}
+
+func (f *fakeChannelsSlack) infoCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.infoCalls
 }
 
 // failJoin makes conversations.join fail with a generic, non-private-channel
@@ -439,6 +486,61 @@ func TestChannelsHandler_PUT_AddsOnlyChannelsAWorkspaceAnswersFor(t *testing.T) 
 	}
 	if row, _ := registry.ResolveSystem(t.Context(), orgID, "C0LISTED1"); row == nil || row.WorkspaceID != "T0LISTED1" {
 		t.Errorf("registered row = %+v; want it under the workspace that listed it, T0LISTED1", row)
+	}
+}
+
+// TestChannelsHandler_PUT_LooksUpChannelsPastATruncatedListing: a listing
+// that stopped at its cap says nothing about the channels past it, so the gate
+// asks Slack about each one. A channel Slack knows is registered under the
+// workspace that answered; one no workspace can see is a 400 naming it; a
+// lookup that fails is a 502; and a save needing more lookups than
+// channelLookupLimit is refused before any are made.
+func TestChannelsHandler_PUT_LooksUpChannelsPastATruncatedListing(t *testing.T) {
+	withLoweredCap(t, 1)
+	r := newSlackChannelsRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-put-truncated")
+	r.seedWorkspace(orgID, owner, "T0BIG0001", "xoxb-big")
+	listed := []map[string]any{{"id": "C0LIST001", "name": "listed", "is_private": false}}
+	r.fake.setChannels("xoxb-big", listed, listed)
+	r.fake.setMoreAvailable("xoxb-big")
+	r.fake.knowChannel("xoxb-big", "C0BEYOND1", "beyond")
+
+	put := func(ids ...string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+			map[string]any{"channel_ids": ids}))
+		return rec
+	}
+
+	if rec := put("C0BEYOND1"); rec.Code != http.StatusOK {
+		t.Fatalf("channel past the cap that Slack knows: status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if row, _ := slackstore.FromStores(r.stor).Channels.ResolveSystem(t.Context(), orgID, "C0BEYOND1"); row == nil || row.WorkspaceID != "T0BIG0001" || row.Name != "beyond" {
+		t.Errorf("registered row = %+v; want it under T0BIG0001, named beyond", row)
+	}
+
+	rec := put("C0BEYOND1", "C0NOWHERE")
+	if errs := decodeErrors(t, rec); rec.Code != http.StatusBadRequest || len(errs) != 1 || errs[0].Field != "channel_ids[1]" {
+		t.Errorf("channel no workspace can see: status %d, errors %+v; want 400 naming channel_ids[1]", rec.Code, errs)
+	}
+
+	many := []string{"C0BEYOND1"}
+	for i := 0; i <= channelLookupLimit; i++ {
+		many = append(many, fmt.Sprintf("C0MANY%03d", i))
+	}
+	calls := r.fake.infoCallCount()
+	rec = put(many...)
+	if errs := decodeErrors(t, rec); rec.Code != http.StatusBadRequest || len(errs) != 1 || errs[0].Field != "channel_ids" || errs[0].Reason != httpx.ReasonOutOfRange {
+		t.Errorf("%d lookups: status %d, errors %+v; want 400 OUT_OF_RANGE channel_ids", len(many)-1, rec.Code, errs)
+	}
+	if got := r.fake.infoCallCount(); got != calls {
+		t.Errorf("conversations.info calls = %d after the refused save; want none (%d before)", got, calls)
+	}
+
+	r.fake.failInfo("xoxb-big", "internal_error")
+	rec = put("C0BEYOND1", "C0OTHER01")
+	if errs := decodeErrors(t, rec); rec.Code != http.StatusBadGateway || len(errs) != 1 || errs[0].Reason != httpx.ReasonUpstreamUnavailable {
+		t.Errorf("failed lookup: status %d, errors %+v; want 502 UPSTREAM_UNAVAILABLE", rec.Code, errs)
 	}
 }
 

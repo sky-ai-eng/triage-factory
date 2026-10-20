@@ -263,13 +263,20 @@ type conversationsInfoResult struct {
 	Name string
 }
 
+// errSlackChannelNotFound is conversations.info's "channel_not_found": the
+// bot cannot see the channel, because it does not exist or is a private
+// channel the bot is not in.
+var errSlackChannelNotFound = errors.New("slack: channel_not_found")
+
 // slackConversationsInfo looks up a channel's display name via
-// conversations.info — the channel name resolver's only network call
-// (channels.go). Requires the channels:read/groups:read scopes (already in
-// the shipped manifest, #561). A non-2xx HTTP response or a Slack-level
-// {"ok":false} both surface as an error; the caller treats any error here
-// as transient — it writes nothing, so the next sighting or stale-name
-// sweep retries (see ee/slack/channels.go).
+// conversations.info — the channel name resolver's network call
+// (channels.go), and the channels PUT's check on a channel a truncated
+// listing may have stopped short of. Requires the channels:read/groups:read
+// scopes (already in the shipped manifest, #561). A non-2xx HTTP response or a
+// Slack-level {"ok":false} both surface as an error, "channel_not_found" as
+// errSlackChannelNotFound. The name resolver treats any error here as
+// transient — it writes nothing, so the next sighting or stale-name sweep
+// retries (see ee/slack/channels.go).
 func slackConversationsInfo(ctx context.Context, client *http.Client, caller slackCaller, botToken, channelID string) (*conversationsInfoResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		slackAPIBase+"/conversations.info?channel="+url.QueryEscape(channelID), nil)
@@ -287,6 +294,9 @@ func slackConversationsInfo(ctx context.Context, client *http.Client, caller sla
 	}
 	if err := doSlackJSON(ctx, client, caller, req, &out); err != nil {
 		return nil, err
+	}
+	if out.Error == "channel_not_found" {
+		return nil, errSlackChannelNotFound
 	}
 	if !out.OK {
 		return nil, fmt.Errorf("slack conversations.info: %s", nonEmpty(out.Error, "not ok"))

@@ -598,6 +598,17 @@ type channelWish struct {
 	channelID, workspaceID, name string
 }
 
+// channelLookupLimit bounds the channels one save may add that the gate has
+// to ask Slack about one by one (conversations.info, a rate-limited call), when
+// a listing stopped at slackConversationsListCap before reaching them.
+const channelLookupLimit = 20
+
+// notVisibleMessage is the gate's refusal of a channel no connected workspace
+// answers for.
+func notVisibleMessage(channelID string) string {
+	return "channel " + channelID + " is not one the Slack app can see in a connected workspace; invite the app to a private channel before tracking it"
+}
+
 // gateChannels checks a save against what the settings page offers, which is
 // every channel GET lists. A channel the team already tracks is kept without
 // asking Slack, so an outage, or a channel the app has since lost, never
@@ -605,9 +616,10 @@ type channelWish struct {
 // channel the save adds must be one a connected workspace answers for: a live
 // candidate there, or a channel the registry holds under a connected
 // workspace, which Slack delivered a mention from. Anything else is the
-// caller's mistake: a 400 naming each entry. A workspace whose listing failed
-// establishes nothing, so a channel it might hold is a 502 rather than a row
-// registered on a guess.
+// caller's mistake: a 400 naming each entry. A listing that stopped at its
+// cap says nothing about the channels past it, so those are asked about one by
+// one (lookUpChannel). A workspace whose listing failed establishes nothing,
+// so a channel it might hold is a 502 rather than a row registered on a guess.
 func (h *channelsHandler) gateChannels(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string, channelIDs []string) (channelGate, bool) {
 	ctx := r.Context()
 	var prior []slackstore.TeamChannel
@@ -652,7 +664,7 @@ func (h *channelsHandler) gateChannels(w http.ResponseWriter, r *http.Request, o
 		httpx.InternalError(w, "slack/channels", err)
 		return channelGate{}, false
 	}
-	candidates, anyFailed, _ := h.liveSlackCandidates(ctx, orgID, workspaces)
+	candidates, anyFailed, anyTruncated := h.liveSlackCandidates(ctx, orgID, workspaces)
 	gate.workspaces, gate.candidates = workspaces, candidates
 	connected := make(map[string]bool, len(workspaces))
 	for _, ws := range workspaces {
@@ -665,7 +677,8 @@ func (h *channelsHandler) gateChannels(w http.ResponseWriter, r *http.Request, o
 
 	var v httpx.Validation
 	var unverified []string
-	for _, a := range adding {
+	var unlisted []int // indexes into adding of the channels to ask Slack about
+	for i, a := range adding {
 		cand, listed := byID[a.channelID]
 		if !listed && a.row != nil {
 			cand, listed = byID[a.row.ChannelID]
@@ -677,9 +690,31 @@ func (h *channelsHandler) gateChannels(w http.ResponseWriter, r *http.Request, o
 			gate.adding = append(gate.adding, channelWish{channelID: a.channelID, workspaceID: a.row.WorkspaceID})
 		case anyFailed:
 			unverified = append(unverified, a.channelID)
+		case anyTruncated:
+			unlisted = append(unlisted, i)
 		default:
-			v.Invalid(fmt.Sprintf("channel_ids[%d]", a.index),
-				"channel "+a.channelID+" is not one the Slack app lists in a connected workspace or has been mentioned in; invite the app to a private channel before tracking it")
+			v.Invalid(fmt.Sprintf("channel_ids[%d]", a.index), notVisibleMessage(a.channelID))
+		}
+	}
+	if len(unlisted) > channelLookupLimit {
+		v.OutOfRange("channel_ids", fmt.Sprintf(
+			"%d channels are past the end of a workspace's channel listing; at most %d of those can be added in one save",
+			len(unlisted), channelLookupLimit))
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return channelGate{}, false
+	}
+	for _, i := range unlisted {
+		a := adding[i]
+		wish, found, err := h.lookUpChannel(ctx, orgID, workspaces, a.channelID)
+		switch {
+		case err != nil:
+			slackLog.Warn("channels: conversations.info failed", "org_id", orgID, "channel", a.channelID, "error", err)
+			unverified = append(unverified, a.channelID)
+		case found:
+			gate.adding = append(gate.adding, wish)
+		default:
+			v.Invalid(fmt.Sprintf("channel_ids[%d]", a.index), notVisibleMessage(a.channelID))
 		}
 	}
 	if v.Flush(w, http.StatusBadRequest) {
@@ -693,6 +728,27 @@ func (h *channelsHandler) gateChannels(w http.ResponseWriter, r *http.Request, o
 		return channelGate{}, false
 	}
 	return gate, true
+}
+
+// lookUpChannel asks each connected workspace for channelID directly, for a
+// channel a truncated listing may have stopped short of. found=false with a
+// nil error means every workspace answered that the bot cannot see it.
+func (h *channelsHandler) lookUpChannel(ctx context.Context, orgID string, workspaces []slackstore.Workspace, channelID string) (channelWish, bool, error) {
+	for _, ws := range workspaces {
+		caller, botToken, ok := h.botTokenForWorkspace(ctx, orgID, workspaces, ws.WorkspaceID)
+		if !ok {
+			return channelWish{}, false, fmt.Errorf("bot token unavailable for workspace %s", ws.WorkspaceID)
+		}
+		info, err := slackConversationsInfo(ctx, h.client, caller, botToken, channelID)
+		if errors.Is(err, errSlackChannelNotFound) {
+			continue
+		}
+		if err != nil {
+			return channelWish{}, false, err
+		}
+		return channelWish{channelID: channelID, workspaceID: ws.WorkspaceID, name: info.Name}, true, nil
+	}
+	return channelWish{}, false, nil
 }
 
 // autoJoin is PUT's post-commit step (live Slack calls, never rolls back the
