@@ -147,6 +147,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		ConversationPendingInput: newConversationPendingInputStore(tx),
 		Permissions:              newPermissionStore(tx),
 		OrgEventSources:          newOrgEventSourceStore(tx),
+		RateLimitReadings:        newRateLimitReadingStore(tx),
 		ModelAvailability:        newModelAvailabilityStore(tx),
 		Ext:                      db.BuildStoreExtensions(db.DialectSQLite, tx, tx),
 	}

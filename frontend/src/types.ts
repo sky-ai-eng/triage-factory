@@ -726,6 +726,13 @@ export interface AuthOrg {
   id: string
   name: string
   role: string
+  /** The org requires signing in through its own single sign-on and this
+   *  session (or token) was not, so every org-scoped call to it answers 403
+   *  SSO_REQUIRED. The server always sends it; absent reads as false. */
+  sso_required?: boolean
+  /** Where that sign-in begins (`/api/auth/oauth/saml?…`), present only when
+   *  `sso_required` is. A full-page navigation, not an API call. */
+  sso_start_url?: string
 }
 
 /** AuthTeam is one team-membership row in MeResponse.teams: a team the

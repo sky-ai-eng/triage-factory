@@ -90,7 +90,7 @@ func (r *orgMembersRig) newSession(t *testing.T, userID, orgID string) uuid.UUID
 	if orgID != "" {
 		active = uuid.NullUUID{UUID: uuid.MustParse(orgID), Valid: true}
 	}
-	s, err := r.sess.CreateSystem(context.Background(), uuid.MustParse(userID),
+	s, err := r.sess.CreateSystem(context.Background(), uuid.MustParse(userID), uuid.MustParse(userID), "",
 		"jwt", "ref", time.Now().Add(time.Hour), time.Now().Add(24*time.Hour),
 		"ua", "1.2.3.4", active)
 	if err != nil {

@@ -47,7 +47,14 @@ func seedDivergentEntity(t *testing.T, database *sql.DB, source, sourceID, snaps
 	if source == "jira" || source == "linear" {
 		kind = "issue"
 	}
-	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, source, testScope(source), sourceID, "", kind, sourceID, "")
+	var entity *domain.Entity
+	var err error
+	if source == "linear" {
+		// The snapshot written below moves the team to the one it names.
+		entity, _, err = st.Entities.FindOrCreateLinearSystem(ctx, runmode.LocalDefaultOrgID, testScope(source), sourceID, "uuid-"+sourceID, "lt-seed", sourceID, "")
+	} else {
+		entity, _, err = st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, source, testScope(source), sourceID, "", kind, sourceID, "")
+	}
 	if err != nil {
 		t.Fatalf("create entity %s: %v", sourceID, err)
 	}

@@ -41,18 +41,20 @@ func seedPgSourceTask(t *testing.T, conn *sql.DB, orgID, userID, source, snapsho
 	t.Helper()
 	entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
 	var kind, scope, eventType string
+	var linearTeamID any
 	switch source {
 	case "jira":
 		kind, scope, eventType = "issue", "https://jira.example.com", "jira:issue:assigned"
 	case "linear":
 		kind, scope, eventType = "issue", "ws-test", "linear:issue:available"
+		linearTeamID = "lt-test"
 	default:
 		kind, scope, eventType = "pr", "https://github.com", "github:pr:opened"
 	}
 	if _, err := conn.Exec(
-		`INSERT INTO entities (id, org_id, source, source_id, kind, snapshot_json, scope)
-		 VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)`,
-		entityID, orgID, source, "src-"+entityID, kind, snapshot, scope,
+		`INSERT INTO entities (id, org_id, source, source_id, kind, snapshot_json, scope, linear_team_id)
+		 VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)`,
+		entityID, orgID, source, "src-"+entityID, kind, snapshot, scope, linearTeamID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

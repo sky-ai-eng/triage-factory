@@ -17,6 +17,11 @@ vi.mock('../../../lib/apiClient', async (importOriginal) => {
   return { ...actual, apiJSON: apiMocks.apiJSON, apiFetch: apiMocks.apiFetch }
 })
 
+const toasts = vi.hoisted(() => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() },
+}))
+vi.mock('../../../components/Toast/toastStore', () => toasts)
+
 import SSOSettings from './SSOSettings'
 
 const SP = {
@@ -58,6 +63,13 @@ let breakGlass: BreakGlassPrincipal[]
 // When set, the verify endpoint throws it instead of stamping verified — drives
 // the two 409 states (DNS-not-found-yet / already-claimed).
 let verifyError: HttpError | null
+// Refusals keyed "METHOD path": the call throws the error instead of applying,
+// the way the server answers a guard's 409.
+let refusals: Record<string, HttpError>
+
+function conflict(message: string): HttpError {
+  return new HttpError(409, JSON.stringify({ errors: [{ reason: 'CONFLICT', message }] }))
+}
 
 // seedConnected primes the load with an existing connection (+ optional domains)
 // so a test starts past the register step. entityID is overridable to exercise
@@ -71,6 +83,7 @@ function installApi() {
   apiMocks.apiJSON.mockImplementation(
     async (path: string, opts?: { method?: string; body?: string }) => {
       const method = opts?.method ?? 'GET'
+      if (refusals[`${method} ${path}`]) throw refusals[`${method} ${path}`]
 
       if (path === '/api/sso/connection') {
         if (method === 'GET') return connState
@@ -139,6 +152,8 @@ function installApi() {
   )
 
   apiMocks.apiFetch.mockImplementation(async (path: string, opts?: { method?: string }) => {
+    if (refusals[`${opts?.method ?? 'GET'} ${path}`])
+      throw refusals[`${opts?.method ?? 'GET'} ${path}`]
     const delMatch = path.match(/^\/api\/sso\/domains\/(.+)$/)
     if (delMatch && opts?.method === 'DELETE') {
       domainList = domainList.filter((d) => d.id !== delMatch[1])
@@ -161,6 +176,9 @@ beforeEach(() => {
   domainList = []
   breakGlass = []
   verifyError = null
+  refusals = {}
+  toasts.toast.error.mockReset()
+  toasts.toast.success.mockReset()
   window.confirm = vi.fn(() => true)
   // jsdom's window.open is a noisy no-op; stub it so the Test SSO popup launch is
   // assertable and doesn't log "Not implemented".
@@ -417,6 +435,63 @@ describe('SSOSettings — require SSO (enforcement)', () => {
       ),
     )
     expect(await screen.findByText(/sso required/i)).toBeInTheDocument()
+  })
+
+  it('says what requiring SSO does, in the hint and in the confirm', async () => {
+    const effect =
+      'Everyone must sign in through your identity provider to use this organization, except break-glass accounts. People signed in any other way lose access on their next request.'
+    seedEnforceReady()
+    render(<SSOSettings />)
+
+    expect(await screen.findByText(effect)).toBeInTheDocument()
+    expect(screen.queryByText(/off-domain users/i)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('switch', { name: /require sso/i }))
+    await waitFor(() => expect(window.confirm).toHaveBeenCalledWith(effect))
+  })
+
+  it('shows the refusal when the admin would lock themselves out', async () => {
+    seedEnforceReady()
+    const message =
+      'Sign in through single sign-on, or be designated break-glass, before requiring it.'
+    refusals['PATCH /api/sso/connection/enforcement'] = conflict(message)
+    render(<SSOSettings />)
+
+    fireEvent.click(await screen.findByRole('switch', { name: /require sso/i }))
+
+    await waitFor(() => expect(toasts.toast.error).toHaveBeenCalledWith(message))
+    expect(screen.getByRole('switch', { name: /require sso/i })).not.toBeChecked()
+  })
+
+  it('shows the refusal to disable the connection while SSO is required', async () => {
+    seedEnforceReady()
+    connState = {
+      ...connState,
+      connection: makeConnection({ enabled: true, tested: true, enforced: true }),
+    }
+    refusals['PATCH /api/sso/connection'] = conflict('Turn off Require SSO first.')
+    render(<SSOSettings />)
+
+    fireEvent.click(await screen.findByRole('switch', { name: /enable sso/i }))
+
+    await waitFor(() =>
+      expect(toasts.toast.error).toHaveBeenCalledWith('Turn off Require SSO first.'),
+    )
+    expect(screen.getByRole('switch', { name: /enable sso/i })).toBeChecked()
+  })
+
+  it('shows the refusal to remove the last verified domain while SSO is required', async () => {
+    seedEnforceReady()
+    refusals['DELETE /api/sso/domains/dom-1'] = conflict('Turn off Require SSO first.')
+    render(<SSOSettings />)
+
+    await screen.findByText('example.com')
+    fireEvent.click(screen.getByRole('button', { name: /remove example\.com/i }))
+
+    await waitFor(() =>
+      expect(toasts.toast.error).toHaveBeenCalledWith('Turn off Require SSO first.'),
+    )
+    expect(screen.getByText('example.com')).toBeInTheDocument()
   })
 
   it('adds a break-glass principal by email', async () => {

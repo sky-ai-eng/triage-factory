@@ -485,6 +485,21 @@ func TestLinearInstall_OtherOAuthErrorsAreFailures(t *testing.T) {
 	}
 }
 
+// TestLinearInstall_SSORequired: the org started requiring an SSO the admin's
+// session did not come through while they were at Linear. The callback is a
+// browser navigation, so the refusal is a redirect with its code like every
+// other refusal here, and nothing is exchanged or written.
+func TestLinearInstall_SSORequired(t *testing.T) {
+	r := newLinearInstallRig(t)
+	ext := &barringLoginExt{}
+	r.s.loginExt = ext
+	cookie, state := r.start(t)
+	ext.bar(runmode.LocalDefaultOrgID)
+	rec := r.get(t, callbackPath(url.Values{"code": {"good-code"}, "state": {state}}), cookie)
+	expectRedirect(t, rec, "linear_error", "sso_required")
+	r.assertNothingWritten(t)
+}
+
 func TestLinearInstall_FailedExchange(t *testing.T) {
 	r := newLinearInstallRig(t)
 	cookie, state := r.start(t)

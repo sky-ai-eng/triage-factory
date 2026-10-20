@@ -512,7 +512,17 @@ CREATE TABLE public.entities (
     -- which can change; this does not. Required for source 'slack' (the
     -- foreign key is added after slack_channels below).
     slack_channel_id uuid,
-    CONSTRAINT entities_slack_channel_required CHECK (source <> 'slack' OR slack_channel_id IS NOT NULL)
+    -- The UUID of the Linear team a Linear issue sits in: the id
+    -- linear_team_rules is keyed by. Set at creation from the response that
+    -- found the issue, and moved by every snapshot write to the snapshot's
+    -- team, so it follows a move to another team. Clearing the snapshot leaves
+    -- it. NULL for every other source.
+    linear_team_id text,
+    CONSTRAINT entities_slack_channel_required CHECK (source <> 'slack' OR slack_channel_id IS NOT NULL),
+    CONSTRAINT entities_linear_team_id_check CHECK (
+        CASE WHEN source = 'linear' THEN COALESCE(linear_team_id, '') <> ''
+             ELSE linear_team_id IS NULL END
+    )
 );
 
 
@@ -1263,6 +1273,13 @@ CREATE TABLE public.sessions (
     user_agent text,
     ip_addr inet,
     active_org_id uuid,
+    -- The GoTrue login identity (auth.users) the session was signed in as.
+    auth_user_id uuid NOT NULL,
+    -- The GoTrue SSO provider the session was signed in through
+    -- (sso_providers.id, the value sso_connections.provider_id binds to an
+    -- org); NULL for a GitHub sign-in. An org that requires SSO admits the
+    -- session only when this names that org's own connection.
+    sso_provider_id text,
     CONSTRAINT sessions_check CHECK ((expires_at > created_at)),
     CONSTRAINT sessions_check1 CHECK ((jwt_expires_at <= expires_at))
 );
@@ -2331,6 +2348,10 @@ ALTER TABLE ONLY public.conversations
 
 ALTER TABLE ONLY public.sessions
     ADD CONSTRAINT sessions_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT sessions_auth_user_id_fkey FOREIGN KEY (auth_user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
 
 
 -- SET NULL so an org delete leaves sessions with no active org (handler 409).
@@ -4538,10 +4559,12 @@ CREATE TABLE public.sso_connections (
     -- 'owner' is the orgs.owner_user_id sentinel, never granted via SSO.
     default_role public.org_role NOT NULL DEFAULT 'member',
     enabled      boolean NOT NULL DEFAULT true,
-    -- When true, a login via a non-SSO identity whose verified email is on one
-    -- of this connection's verified domains is rejected unless the principal is
-    -- break-glass. A separate axis from enabled. The handler gates the toggle
-    -- on a proven-working connection (enabled + verified domain + passed Test).
+    -- "Require SSO". When true (and enabled), a login via a non-SSO identity
+    -- whose verified email is on one of this connection's verified domains is
+    -- rejected, and no session or API token acts in the org unless it was signed
+    -- in through this connection — break-glass principals excepted from both. A
+    -- separate axis from enabled. The handler gates the toggle on a
+    -- proven-working connection (enabled + verified domain + passed Test).
     enforced     boolean NOT NULL DEFAULT false,
     -- Stamped when a Test passes end-to-end (NULL = never); enforcement gates on it.
     last_tested_at timestamptz NULL,
@@ -4559,6 +4582,10 @@ CREATE TABLE public.sso_connections (
 
 -- One org per GoTrue provider, deployment-wide: provider_id → org is a function.
 CREATE UNIQUE INDEX sso_connections_provider_uniq ON public.sso_connections (provider_id);
+
+-- Every authenticated request asks whether its org requires SSO; this answers
+-- it from the index for the orgs that do and from an empty probe for the rest.
+CREATE INDEX sso_connections_enforced_org_idx ON public.sso_connections (org_id) WHERE enabled AND enforced;
 
 -- (id, org_id) is trivially unique, declared so sso_domains can FK the pair:
 -- RLS gates the org_id column, only this FK pins connection_id to the same org.
@@ -5539,6 +5566,48 @@ REVOKE ALL ON public.org_event_sources FROM anon, authenticated, service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_event_sources TO tf_app;
 
 
+-- rate_limit_readings: the latest reading of every rate-limit bucket an org's
+-- credentials are metered on, keyed (upstream, credential, bucket) within the
+-- org. Each serving pod keeps its readings in memory and writes the ones that
+-- changed here, so GET /api/orgs/{org_id}/integrations/rate-limits answers for
+-- every pod whichever one serves it; an upsert keeps a key's newest
+-- observation. credential is the opaque id the upstream's client names it by,
+-- never a token or a login. A NULL column is a value the reading did not
+-- state, which is not the same as zero; reset_at NULL means the reading named
+-- no reset, and such a reading is reported for an hour after observed_at
+-- (domain.RateLimitReadingMaxAge).
+CREATE TABLE public.rate_limit_readings (
+    org_id       uuid NOT NULL,
+    upstream     text NOT NULL,
+    credential   text NOT NULL,
+    bucket       text NOT NULL,
+    remaining    integer,
+    bucket_limit integer,
+    used         integer,
+    near_limit   boolean,
+    reset_at     timestamp with time zone,
+    observed_at  timestamp with time zone NOT NULL
+);
+
+ALTER TABLE ONLY public.rate_limit_readings
+    ADD CONSTRAINT rate_limit_readings_pkey PRIMARY KEY (org_id, upstream, credential, bucket);
+
+ALTER TABLE ONLY public.rate_limit_readings
+    ADD CONSTRAINT rate_limit_readings_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+ALTER TABLE public.rate_limit_readings ENABLE ROW LEVEL SECURITY;
+
+-- Member SELECT only. Every write is the flusher's or the brain's expiry
+-- sweep, on the admin pool with no request claims, so tf_app holds no write
+-- grant and there is no write policy to give it.
+CREATE POLICY rate_limit_readings_select ON public.rate_limit_readings FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+REVOKE ALL ON public.rate_limit_readings FROM PUBLIC;
+REVOKE ALL ON public.rate_limit_readings FROM anon, authenticated, service_role;
+
+GRANT SELECT ON TABLE public.rate_limit_readings TO tf_app;
+
+
 -- model_availability: per (org, provider, model) evidence that the org's
 -- credentials can invoke that model, established by spending one minimal real
 -- request. A probe rather than a control-plane lookup because no provider API
@@ -6114,7 +6183,13 @@ CREATE TABLE public.user_api_tokens (
     created_at    timestamp with time zone NOT NULL DEFAULT now(),
     last_used_at  timestamp with time zone,
     expires_at    timestamp with time zone CHECK (expires_at IS NULL OR expires_at > created_at),
-    revoked_at    timestamp with time zone
+    revoked_at    timestamp with time zone,
+    -- The SSO provider the credential that minted this token was signed in
+    -- through, copied from it: a session's sessions.sso_provider_id, or the
+    -- minting token's own. NULL for a GitHub sign-in. Same rule as sessions:
+    -- an org that requires SSO admits the token only when this names that
+    -- org's own connection.
+    sso_provider_id text
 );
 
 CREATE UNIQUE INDEX user_api_tokens_hash_uniq ON public.user_api_tokens (token_hash);

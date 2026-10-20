@@ -344,6 +344,10 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// stays pinned to s.admin so the router's and poller's ...System read
 		// routes around RLS the way every other claims-less read does.
 		OrgEventSources: newOrgEventSourceStore(tx, s.admin),
+		// RateLimitReadings: app half is the tx, so the member read runs under
+		// the caller's claims; the admin half stays pinned to s.admin for the
+		// flusher's claims-less writes.
+		RateLimitReadings: newRateLimitReadingStore(tx, s.admin),
 		// ModelAvailability has no admin half: every write is a request-path
 		// gesture, so the tx IS the whole store.
 		ModelAvailability: newModelAvailabilityStore(tx),

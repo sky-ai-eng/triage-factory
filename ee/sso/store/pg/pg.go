@@ -193,6 +193,27 @@ func (s *ssoConnectionStore) GetByProviderID(ctx context.Context, providerID str
 	return &b, nil
 }
 
+func (s *ssoConnectionStore) EnforcedProviderForOrg(ctx context.Context, orgID string) (string, error) {
+	// Admin pool, like GetByProviderID: this is read for requests the org may
+	// be about to refuse. An org holds at most one connection today; the
+	// ordering keeps the answer deterministic if that ever stops being so.
+	var providerID string
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT provider_id
+		FROM sso_connections
+		WHERE org_id = $1 AND enabled AND enforced
+		ORDER BY created_at, id
+		LIMIT 1
+	`, orgID).Scan(&providerID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("enforced sso_connection for org: %w", err)
+	}
+	return providerID, nil
+}
+
 func (s *ssoConnectionStore) IdPsByProviderIDs(ctx context.Context, providerIDs []string) (map[string]string, error) {
 	out := map[string]string{}
 	if len(providerIDs) == 0 {
@@ -227,6 +248,18 @@ func (s *ssoConnectionStore) SetEnforced(ctx context.Context, orgID, id string, 
 		WHERE id = $2 AND org_id = $3
 	`, enforced, id, orgID); err != nil {
 		return fmt.Errorf("set sso_connection enforced: %w", err)
+	}
+	return nil
+}
+
+func (s *ssoConnectionStore) LockForOrg(ctx context.Context, orgID string) error {
+	// Under READ COMMITTED a statement that waits on these locks, and every
+	// statement after it, reads what the holder committed, so the caller's
+	// checks that follow see the other change rather than the state before it.
+	if _, err := s.app.ExecContext(ctx, `
+		SELECT id FROM sso_connections WHERE org_id = $1 ORDER BY id FOR UPDATE
+	`, orgID); err != nil {
+		return fmt.Errorf("lock sso_connections for org: %w", err)
 	}
 	return nil
 }
@@ -520,6 +553,16 @@ func (s *ssoBreakGlassStore) ResolveVerifiedEmailMember(ctx context.Context, org
 		return "", fmt.Errorf("resolve verified-email member: %w", err)
 	}
 	return userID, nil
+}
+
+func (s *ssoBreakGlassStore) Includes(ctx context.Context, orgID, userID string) (bool, error) {
+	var ok bool
+	if err := s.app.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM sso_break_glass WHERE org_id = $1 AND user_id = $2)
+	`, orgID, userID).Scan(&ok); err != nil {
+		return false, fmt.Errorf("sso_break_glass includes: %w", err)
+	}
+	return ok, nil
 }
 
 func (s *ssoBreakGlassStore) IsBreakGlass(ctx context.Context, orgID, userID string) (bool, error) {

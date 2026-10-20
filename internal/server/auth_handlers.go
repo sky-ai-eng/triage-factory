@@ -505,14 +505,16 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Non-SSO login (or SSO with no active binding): default the session to the
-	// user's earliest existing membership, or NULL for a first-time user, who
-	// lands at the zero-membership onboarding entry. Signup provisions nothing —
+	// user's earliest existing membership whose org does not require an SSO
+	// this sign-in did not come through, or NULL when there is none — a
+	// first-time user, who lands at the zero-membership onboarding entry, or one
+	// whose every org requires its own SSO. Signup provisions nothing —
 	// org creation is a deliberate user action (the onboarding "Start your
 	// Factory" CTA → the create-org flow), so the callback never mints a tenant.
 	// Whether that screen's create affordance is enabled is governed separately
 	// by runmode.OrgCreationEnabled() (TF_PREVENT_ORG_CREATION).
 	if !defaultOrg.Valid {
-		defaultOrg, err = s.lookupEarliestMembership(r.Context(), s.db, userUUID)
+		defaultOrg, err = s.lookupEarliestMembership(r.Context(), s.db, userUUID, state.ProviderID)
 		if err != nil {
 			internalError(w, "auth", fmt.Errorf("resolve active org for %s: %w", userUUID, err))
 			return
@@ -525,7 +527,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	jwtExp := claims.ExpiresAt
 
 	sessExp := timeNow().Add(30 * 24 * time.Hour)
-	sess, err := s.authDeps.sessions.CreateSystem(r.Context(), userUUID,
+	sess, err := s.authDeps.sessions.CreateSystem(r.Context(), userUUID, authUserID, state.ProviderID,
 		accessToken, refreshToken, jwtExp, sessExp,
 		r.UserAgent(), clientIP(r), defaultOrg,
 	)
@@ -790,6 +792,11 @@ func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "org")
 		return
 	}
+	// A member may not point the cursor at an org their session is barred
+	// from: it would only turn every following request into the same 403.
+	if s.refuseSSOBarred(w, r, orgUUID.String()) {
+		return
+	}
 
 	if err := s.authDeps.sessions.UpdateActiveOrgSystem(r.Context(), sess.ID, orgUUID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -822,6 +829,13 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		ID   string `json:"id"`
 		Name string `json:"name"`
 		Role string `json:"role"`
+		// SSORequired reports that this org requires signing in through its
+		// own single sign-on and the credential behind this request was not,
+		// so every org-scoped call to it answers 403 SSO_REQUIRED. SSOStartURL
+		// is where that sign-in begins, present only when SSORequired is.
+		// Not omitempty — false is the answer for every org the caller can use.
+		SSORequired bool   `json:"sso_required"`
+		SSOStartURL string `json:"sso_start_url,omitempty"`
 	}
 	type teamRow struct {
 		ID    string `json:"id"`
@@ -1117,6 +1131,20 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		internalError(w, "auth", fmt.Errorf("/api/me for %s: %w", claims.Subject, err))
 		return
+	}
+
+	// Which of the caller's orgs this credential may not act in, so the client
+	// can offer each one's sign-in instead of a page that will only answer 403.
+	// The same per-request read every enforcement point makes; a failure fails
+	// the read rather than reporting an org as usable.
+	for i := range resp.Orgs {
+		gate, err := s.requestSSOGate(r.Context(), resp.Orgs[i].ID)
+		if err != nil {
+			internalError(w, "auth", fmt.Errorf("/api/me sso gate for org %s: %w", resp.Orgs[i].ID, err))
+			return
+		}
+		resp.Orgs[i].SSORequired = gate.Barred
+		resp.Orgs[i].SSOStartURL = gate.StartURL
 	}
 
 	// Drop a stale ActiveOrgID. sessions.active_org_id's FK only points

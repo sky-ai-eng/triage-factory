@@ -321,7 +321,7 @@ func TestRunLinearCycleForOrg_AnotherWorkspacesRulesDoNotApply(t *testing.T) {
 		t.Fatalf("bind other workspace: %v", err)
 	}
 	stores := sqlitestore.New(database)
-	stale, _, err := stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "linear", linearTestWorkspace, "ENG-1", "uuid-1", "issue", "Old", "")
+	stale, _, err := stores.Entities.FindOrCreateLinearSystem(context.Background(), runmode.LocalDefaultOrgID, linearTestWorkspace, "ENG-1", "uuid-1", "team-eng", "Old", "")
 	if err != nil {
 		t.Fatal(err)
 	}

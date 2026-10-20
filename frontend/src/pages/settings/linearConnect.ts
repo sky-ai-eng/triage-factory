@@ -120,6 +120,8 @@ export function linearInstallErrorText(code: string | null | undefined): string 
       return 'That Linear workspace is already connected to another Triage Factory organization. A workspace can be installed in only one.'
     case 'install_revoked':
       return 'Triage Factory was removed from the Linear workspace, so Linear access stopped. Install it again or paste an API key.'
+    case 'sso_required':
+      return 'This organization requires signing in through its single sign-on. Sign in that way, then install Linear again.'
     default:
       return 'Something went wrong connecting Linear. Try again.'
   }

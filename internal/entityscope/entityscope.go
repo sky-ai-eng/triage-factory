@@ -88,10 +88,16 @@ func ResetResolver(source string) {
 //     was recorded learns it by.
 //   - otherwise a new row, carrying ref.ExternalID.
 //
+// linearTeamID is the Linear team a new Linear row is created with, read off
+// the same response as ref: a Linear row is created only with its team
+// (db.EntityStore.FindOrCreateLinearSystem), so with it empty a Linear ref
+// that matches no row is refused with db.ErrEntityLinearTeamRequired. Every
+// other source ignores it.
+//
 // url is the link a new or renamed row is stored under where TF does not build
 // it from the key itself (domain.EntityURL). title is left empty: the poll
 // cycle, or the source's own ingest, fills it.
-func Resolve(ctx context.Context, stores db.Stores, orgID string, ref domain.EntityRef, kind, url string, follow bool) (*domain.Entity, error) {
+func Resolve(ctx context.Context, stores db.Stores, orgID string, ref domain.EntityRef, linearTeamID, kind, url string, follow bool) (*domain.Entity, error) {
 	if link := domain.EntityURL(ref.Source, ref.Scope, ref.SourceID); link != "" {
 		url = link
 	}
@@ -127,7 +133,13 @@ func Resolve(ctx context.Context, stores db.Stores, orgID string, ref domain.Ent
 			return e, nil
 		}
 	}
-	e, _, err := entities.FindOrCreateSystem(ctx, orgID, ref.Source, ref.Scope, ref.SourceID, ref.ExternalID, kind, "", url)
+	var e *domain.Entity
+	var err error
+	if ref.Source == domain.ArtifactProviderLinear && linearTeamID != "" {
+		e, _, err = entities.FindOrCreateLinearSystem(ctx, orgID, ref.Scope, ref.SourceID, ref.ExternalID, linearTeamID, "", url)
+	} else {
+		e, _, err = entities.FindOrCreateSystem(ctx, orgID, ref.Source, ref.Scope, ref.SourceID, ref.ExternalID, kind, "", url)
+	}
 	if err != nil {
 		return nil, err
 	}

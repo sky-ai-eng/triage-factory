@@ -1084,6 +1084,7 @@ func (s *Server) routes() {
 			}
 			return s.authDeps.sessions.UpdateActiveOrgSystem(ctx, sessID, orgID)
 		},
+		refuseSSOBarred: s.refuseSSOBarred,
 	}
 	s.apiMutating("POST /api/invites/list", ih.handleInviteList)
 	s.apiMutating("POST /api/invites", ih.handleInviteCreate)
@@ -1520,6 +1521,12 @@ func (s *Server) routes() {
 	// — and because unbinding its credential already takes an org admin.
 	s.api("GET /api/orgs/{org_id}/sources/{kind}", s.handleOrgSource)
 	s.apiMutating("PATCH /api/orgs/{org_id}/sources/{kind}", s.handleOrgSourcePatch)
+
+	// How much of each rate-limit budget the org's credentials have left, as
+	// the processes making its requests last saw it — member-gated like the
+	// sources read, since every member renders an integration's settings card.
+	// See rate_limits_handler.go.
+	s.api("GET /api/orgs/{org_id}/integrations/rate-limits", s.handleOrgRateLimits)
 
 	// Durable work across every registered kind — the depth of each queue
 	// and the operator controls over its rows. Gated per kind's declared

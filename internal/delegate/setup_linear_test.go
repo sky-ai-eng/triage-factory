@@ -20,7 +20,7 @@ func TestSetupLinear_RunRootAndTools(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	stores := sqlitestore.New(database)
 
-	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "linear", "ws-1", "ENG-7", "uuid-7", "issue", "Fix it", "https://linear.app/acme/issue/ENG-7")
+	entity, _, err := stores.Entities.FindOrCreateLinearSystem(ctx, org, "ws-1", "ENG-7", "uuid-7", "team-eng", "Fix it", "https://linear.app/acme/issue/ENG-7")
 	if err != nil {
 		t.Fatalf("create linear entity: %v", err)
 	}

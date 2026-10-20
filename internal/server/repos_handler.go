@@ -512,11 +512,14 @@ type repoListRequest struct {
 	httpx.PageRequest
 }
 
-// handleRepositories returns the configured repository rows from the DB. Org
-// admins get the org-wide union; non-admin members get only the repos
-// tracked by their own teams (TFAC-559) — the table is org-wide, so an
-// unscoped read would leak every team's repos to a teammate on none of them.
-// Local mode (N=1) has no team boundary and stays unscoped.
+// handleRepositories returns the tracked repository rows from the DB. Org
+// admins get the org-wide union: every row at least one team tracks. Non-admin
+// members get only the repos tracked by their own teams, because the table is
+// org-wide and an unscoped read would leak every team's repos to a teammate on
+// none of them. Local mode (N=1) has no team boundary and takes the admin
+// branch. Neither branch lists a registry row no team tracks: the registry
+// keeps it for the references that name it, and an admin's single-row reads
+// still answer for it by id.
 //
 // POST /api/repos/list
 func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
@@ -557,24 +560,28 @@ func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 		total   int
 		canEdit []bool
 	)
-	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		opts := db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly}
-		if isAdmin {
-			repos, total, e = tx.Repos.List(r.Context(), orgID, host, opts)
-		} else {
-			repos, total, e = tx.Repos.ListTeamScoped(r.Context(), orgID, host, opts)
+	opts := db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly}
+	if isAdmin {
+		// Admin pool, gated by the isOrgAdmin answer above: the app pool's
+		// team_github_repos_select policy hides the tracking rows of teams the
+		// admin is not on, which would narrow "tracked by a team" to the
+		// admin's own teams.
+		repos, total, err = s.allStores.Repos.ListTrackedSystem(r.Context(), orgID, host, opts)
+		if err != nil {
+			internalError(w, "repos", err)
+			return
 		}
+		canEdit = make([]bool, len(repos))
+		for i := range canEdit {
+			canEdit[i] = true
+		}
+	} else if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		repos, total, e = tx.Repos.ListTeamScoped(r.Context(), orgID, host, opts)
 		if e != nil {
 			return e
 		}
 		canEdit = make([]bool, len(repos))
-		if isAdmin {
-			for i := range canEdit {
-				canEdit[i] = true
-			}
-			return nil
-		}
 		// One EXISTS per row of THIS page — bounded by the page size now
 		// rather than by the caller's whole tracked set, and still inside the
 		// single transaction the list read used.

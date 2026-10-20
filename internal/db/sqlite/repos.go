@@ -215,14 +215,45 @@ func insertRepositoryRow(ctx context.Context, q queryer, ref domain.RepoRef) err
 }
 
 func (s *repoStore) List(ctx context.Context, orgID, host string, opts db.ListOpts) ([]domain.Repository, int, error) {
+	return s.listRepositories(ctx, orgID, host, opts, "")
+}
+
+// repoTrackedByATeam scopes a repositories row to the rows at least one team
+// tracks. Without RLS every team counts, so it is the Postgres predicate's
+// admin-pool reading.
+const repoTrackedByATeam = `EXISTS (
+	SELECT 1 FROM team_github_repos g
+	 WHERE g.repository_id = repositories.id
+)`
+
+// repoTrackedByTeam scopes a repositories row to the rows one team tracks; its
+// one placeholder is the team id.
+const repoTrackedByTeam = `EXISTS (
+	SELECT 1 FROM team_github_repos g
+	 WHERE g.team_id = ?
+	   AND g.repository_id = repositories.id
+)`
+
+// listRepositories is the one paged read of the registry on host. filter
+// narrows it — empty for the whole registry, else a predicate on the
+// repositories row — and filterArgs binds its placeholders. The count runs
+// under the same filter as the page.
+func (s *repoStore) listRepositories(ctx context.Context, orgID, host string, opts db.ListOpts, filter string, filterArgs ...any) ([]domain.Repository, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, 0, err
 	}
 	if err := db.RequireRepoHost(host); err != nil {
 		return nil, 0, err
 	}
+	where := `host = ?`
+	if filter != "" {
+		where += `
+		  AND ` + filter
+	}
+	args := append([]any{host}, filterArgs...)
+
 	var total int
-	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM repositories WHERE host = ?`, host).Scan(&total); err != nil {
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM repositories WHERE `+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if opts.CountOnly {
@@ -231,9 +262,8 @@ func (s *repoStore) List(ctx context.Context, orgID, host string, opts db.ListOp
 	query := `
 		SELECT ` + repoProfileFullColumns + `
 		FROM repositories
-		WHERE host = ?
+		WHERE ` + where + `
 		ORDER BY owner, repo, id`
-	args := []any{host}
 	if opts.Limit > 0 {
 		query += `
 		LIMIT ? OFFSET ?`
@@ -256,11 +286,11 @@ func (s *repoStore) List(ctx context.Context, orgID, host string, opts db.ListOp
 	return out, total, rows.Err()
 }
 
-// ListTeamScoped mirrors List in local mode — N=1, so there is no other
+// ListTeamScoped is the tracked set in local mode — N=1, so there is no other
 // team to scope away (matches the ListActiveJiraTeamScoped /
 // FactoryReadStore.Entities local-mode asymmetry, TFAC-559).
 func (s *repoStore) ListTeamScoped(ctx context.Context, orgID, host string, opts db.ListOpts) ([]domain.Repository, int, error) {
-	return s.List(ctx, orgID, host, opts)
+	return s.ListTrackedSystem(ctx, orgID, host, opts)
 }
 
 func (s *repoStore) CountConfigured(ctx context.Context, orgID, host string) (int, error) {
@@ -382,6 +412,15 @@ func scanUpdatedRepository(row rowScanner, id string) (domain.Repository, error)
 func (s *repoStore) ListSystem(ctx context.Context, orgID, host string) ([]domain.Repository, error) {
 	// Unwindowed: system callers resolve the whole registry.
 	rows, _, err := s.List(ctx, orgID, host, db.Unwindowed)
+	return rows, err
+}
+
+func (s *repoStore) ListTrackedSystem(ctx context.Context, orgID, host string, opts db.ListOpts) ([]domain.Repository, int, error) {
+	return s.listRepositories(ctx, orgID, host, opts, repoTrackedByATeam)
+}
+
+func (s *repoStore) ListTrackedByTeamSystem(ctx context.Context, orgID, teamID, host string) ([]domain.Repository, error) {
+	rows, _, err := s.listRepositories(ctx, orgID, host, db.Unwindowed, repoTrackedByTeam, teamID)
 	return rows, err
 }
 

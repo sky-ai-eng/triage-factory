@@ -17,7 +17,8 @@ import (
 // whose VERIFIED email is on an enforced verified domain is rejected unless the
 // principal is break-glass; off-domain and non-enforced logins are untouched.
 // The handler tests prove the toggle's lockout-safety gating + the
-// can't-remove-the-last-break-glass guard.
+// can't-remove-the-last-break-glass guard. That a sign-in let through here
+// still cannot act in the org without SSO is org_access_pg_test.go's subject.
 
 // ---------- enforcement test helpers ----------
 

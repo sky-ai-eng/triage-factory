@@ -252,6 +252,29 @@ func TestRepoRoutes_RowOnAnotherHostIsInvisible(t *testing.T) {
 	}
 }
 
+// TestHandleRepositories_LocalModeLeavesOutUntrackedRows pins that local mode,
+// which takes the admin branch, lists the tracked set rather than the registry:
+// a repository the team stopped tracking keeps its row and drops out of the
+// list.
+func TestHandleRepositories_LocalModeLeavesOutUntrackedRows(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedConfiguredRepo(t, s, "acme", "api")
+	goneID := seedConfiguredRepo(t, s, "acme", "gone")
+	if err := s.allStores.TeamGitHubRepos.ReplaceForTeam(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seedRepoHost(t, s),
+		[]domain.TeamGitHubRepo{{Owner: "acme", Repo: "api"}}); err != nil {
+		t.Fatalf("untrack acme/gone: %v", err)
+	}
+
+	page := decodeList[repoJSON](t, doJSON(t, s, http.MethodPost, "/api/repos/list", map[string]any{}))
+	if got := listedRepoSlugs(page); !equalSlugs(got, []string{"acme/api"}) || page.Total() != 1 {
+		t.Errorf("list = %v (total %d), want only the tracked acme/api", got, page.Total())
+	}
+	if rec := doJSON(t, s, http.MethodGet, "/api/repos/"+goneID, nil); rec.Code != http.StatusOK {
+		t.Errorf("GET the untracked row by id = %d, want 200 — the row is kept, only unlisted; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestRepoRoutes_NoGitHubURL pins what the repository routes answer for an org
 // with no GitHub URL, which has no host and so no repository on one. The reads
 // answer empty or 404, and a write that has to name a host is refused as a

@@ -427,6 +427,10 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// the ...System read runs on the admin pool for the router and the
 		// poller, neither of which carries request claims.
 		OrgEventSources: newOrgEventSourceStore(app, admin),
+		// RateLimitReadings is split-pool: the member read runs on the app
+		// pool under RLS, and the flusher's writes and the brain's expiry
+		// sweep on the admin pool, neither of which carries request claims.
+		RateLimitReadings: newRateLimitReadingStore(app, admin),
 		// ModelAvailability is app-pool only: member SELECT so the model list
 		// can render the badge, org-admin write because a probe spends the
 		// org's money. Nothing without request claims writes here — a
@@ -549,6 +553,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		StagedInjections:         newStagedInjectionStore(tx),
 		ConversationPendingInput: newConversationPendingInputStore(tx),
 		OrgEventSources:          newOrgEventSourceStore(tx, tx),
+		RateLimitReadings:        newRateLimitReadingStore(tx, tx),
 		ModelAvailability:        newModelAvailabilityStore(tx),
 		Ext:                      db.BuildStoreExtensions("postgres", tx, tx),
 	}

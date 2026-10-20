@@ -253,38 +253,76 @@ func insertRepositoryRow(ctx context.Context, q queryer, orgID string, ref domai
 }
 
 func (s *repoStore) List(ctx context.Context, orgID, host string, opts db.ListOpts) ([]domain.Repository, int, error) {
-	return listRepositories(ctx, s.q, orgID, host, opts)
+	return listRepositories(ctx, s.q, orgID, host, opts, "")
 }
 
 func (s *repoStore) ListSystem(ctx context.Context, orgID, host string) ([]domain.Repository, error) {
 	// System callers resolve the whole registry (a slug lookup, a profiling
 	// pass), so they take the unwindowed read and discard the count.
-	rows, _, err := listRepositories(ctx, s.admin, orgID, host, db.Unwindowed)
+	rows, _, err := listRepositories(ctx, s.admin, orgID, host, db.Unwindowed, "")
 	return rows, err
 }
 
-func listRepositories(ctx context.Context, q queryer, orgID, host string, opts db.ListOpts) ([]domain.Repository, int, error) {
+// repoTrackedByATeam scopes a repositories row (alias rp) to the rows at least
+// one team tracks, and the pool decides which teams count. Under the app pool
+// (tf_app, RLS active) team_github_repos_select constrains visible tracking
+// rows to the caller's own memberships, so the EXISTS auto-scopes to the
+// viewer's teams with no explicit team_id — the RLS-does-the-scoping
+// semi-join pattern factory.go's factoryGitHubRepoTrackedExists and
+// entities.go's jiraTeamProjectMembershipExists use for the same class of
+// org-wide-entity-list leak. Under the admin pool every team in the
+// org counts, and the teams join on rp.org_id is what keeps it to that org.
+//
+// The match is on the row id rather than a folded slug comparison, so it is an
+// index lookup on team_github_repos_repository_idx and cannot disagree with
+// the registry about what "the same repository" means.
+const repoTrackedByATeam = `EXISTS (
+	SELECT 1 FROM team_github_repos g
+	JOIN teams tm ON tm.id = g.team_id
+	WHERE tm.org_id = rp.org_id
+	  AND g.repository_id = rp.id
+)`
+
+// repoTrackedByTeam scopes a repositories row (alias rp) to the rows one team
+// tracks. The team id binds $3, the first placeholder after listRepositories'
+// own org and host. Same predicate TracksRepoSystem answers for one name.
+const repoTrackedByTeam = `EXISTS (
+	SELECT 1 FROM team_github_repos g
+	WHERE g.team_id = $3
+	  AND g.repository_id = rp.id
+)`
+
+// listRepositories is the one paged read of the registry on host. filter
+// narrows it — empty for the whole registry, else a predicate on the row
+// aliased rp whose placeholders start at $3 — and filterArgs binds them. The
+// count runs under the same filter on the same connection as the page.
+func listRepositories(ctx context.Context, q queryer, orgID, host string, opts db.ListOpts, filter string, filterArgs ...any) ([]domain.Repository, int, error) {
 	if err := db.RequireRepoHost(host); err != nil {
 		return nil, 0, err
 	}
+	where := `rp.org_id = $1 AND rp.host = $2`
+	if filter != "" {
+		where += `
+		  AND ` + filter
+	}
+	args := append([]any{orgID, host}, filterArgs...)
+
 	var total int
 	if err := q.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM repositories WHERE org_id = $1 AND host = $2
-	`, orgID, host).Scan(&total); err != nil {
+		SELECT COUNT(*) FROM repositories rp WHERE `+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if opts.CountOnly {
 		return []domain.Repository{}, total, nil
 	}
 	query := `
-		SELECT ` + repoProfileFullColumns + `
-		FROM repositories
-		WHERE org_id = $1 AND host = $2
-		ORDER BY owner, repo, id`
-	args := []any{orgID, host}
+		SELECT ` + repoProfileFullColumnsAliased + `
+		FROM repositories rp
+		WHERE ` + where + `
+		ORDER BY rp.owner, rp.repo, rp.id`
 	if opts.Limit > 0 {
-		query += `
-		LIMIT $3 OFFSET $4`
+		query += fmt.Sprintf(`
+		LIMIT $%d OFFSET $%d`, len(args)+1, len(args)+2)
 		args = append(args, opts.Limit, opts.Offset)
 	}
 	rows, err := q.QueryContext(ctx, query, args...)
@@ -304,69 +342,17 @@ func listRepositories(ctx context.Context, q queryer, orgID, host string, opts d
 	return out, total, rows.Err()
 }
 
-// repoProfileTrackedByViewerTeams scopes a repositories row (alias rp) to
-// the tracked repos of the viewer's teams — the RLS-does-the-scoping
-// semi-join pattern factory.go's factoryGitHubRepoTrackedExists and
-// entities.go's jiraTeamProjectMembershipExists use for the same class of
-// org-wide-entity-list leak (TFAC-559). Under the app pool (tf_app, RLS
-// active) team_github_repos_select already constrains visible rows to the
-// caller's memberships, so the EXISTS auto-scopes with no explicit team_id.
-// The teams join binds org (rp.org_id) as defense-in-depth for the admin
-// pool, where team_github_repos carries no org_id column of its own.
-//
-// The match is on the row id rather than a folded slug comparison, so it is an
-// index lookup on team_github_repos_repository_idx and cannot disagree with
-// the registry about what "the same repository" means.
-const repoProfileTrackedByViewerTeams = `EXISTS (
-	SELECT 1 FROM team_github_repos g
-	JOIN teams tm ON tm.id = g.team_id
-	WHERE tm.org_id = rp.org_id
-	  AND g.repository_id = rp.id
-)`
-
 func (s *repoStore) ListTeamScoped(ctx context.Context, orgID, host string, opts db.ListOpts) ([]domain.Repository, int, error) {
-	if err := db.RequireRepoHost(host); err != nil {
-		return nil, 0, err
-	}
-	var total int
-	if err := s.q.QueryRowContext(ctx, `
-		SELECT COUNT(*)
-		FROM repositories rp
-		WHERE rp.org_id = $1 AND rp.host = $2
-		  AND `+repoProfileTrackedByViewerTeams+`
-	`, orgID, host).Scan(&total); err != nil {
-		return nil, 0, err
-	}
-	if opts.CountOnly {
-		return []domain.Repository{}, total, nil
-	}
-	query := `
-		SELECT ` + repoProfileFullColumnsAliased + `
-		FROM repositories rp
-		WHERE rp.org_id = $1 AND rp.host = $2
-		  AND ` + repoProfileTrackedByViewerTeams + `
-		ORDER BY rp.owner, rp.repo, rp.id`
-	args := []any{orgID, host}
-	if opts.Limit > 0 {
-		query += `
-		LIMIT $3 OFFSET $4`
-		args = append(args, opts.Limit, opts.Offset)
-	}
-	rows, err := s.q.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close()
+	return listRepositories(ctx, s.q, orgID, host, opts, repoTrackedByATeam)
+}
 
-	out := []domain.Repository{}
-	for rows.Next() {
-		p, err := pgScanRepositoryFull(rows)
-		if err != nil {
-			return nil, 0, err
-		}
-		out = append(out, p)
-	}
-	return out, total, rows.Err()
+func (s *repoStore) ListTrackedSystem(ctx context.Context, orgID, host string, opts db.ListOpts) ([]domain.Repository, int, error) {
+	return listRepositories(ctx, s.admin, orgID, host, opts, repoTrackedByATeam)
+}
+
+func (s *repoStore) ListTrackedByTeamSystem(ctx context.Context, orgID, teamID, host string) ([]domain.Repository, error) {
+	rows, _, err := listRepositories(ctx, s.admin, orgID, host, db.Unwindowed, repoTrackedByTeam, teamID)
+	return rows, err
 }
 
 func (s *repoStore) ListTrackedNamesSystem(ctx context.Context, orgID, host string) ([]string, error) {

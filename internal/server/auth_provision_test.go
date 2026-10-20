@@ -20,7 +20,7 @@ func TestLookupEarliestMembership_ZeroMemberships(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
 
-	got, err := r.srv.lookupEarliestMembership(context.Background(), r.srv.db, userID)
+	got, err := r.srv.lookupEarliestMembership(context.Background(), r.srv.db, userID, "")
 	if err != nil {
 		t.Fatalf("lookupEarliestMembership: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestLookupEarliestMembership_ReturnsEarliest(t *testing.T) {
 	userID := r.seedUser()
 	orgID, _ := r.seedOrg(userID, "earliest-org")
 
-	got, err := r.srv.lookupEarliestMembership(context.Background(), r.srv.db, userID)
+	got, err := r.srv.lookupEarliestMembership(context.Background(), r.srv.db, userID, "")
 	if err != nil {
 		t.Fatalf("lookupEarliestMembership: %v", err)
 	}

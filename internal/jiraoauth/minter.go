@@ -57,10 +57,12 @@ const (
 
 // ConnectScopes is the space-delimited 3LO scope set the Connect flow requests.
 // read/write:jira-work cover the board-claim ticket actions the per-user client
-// performs; read:me derives the bound account; offline_access is REQUIRED to be
-// issued a refresh token at all (without it Atlassian returns only an access
-// token, and there's nothing durable to store).
-const ConnectScopes = "read:jira-work write:jira-work read:me offline_access"
+// performs; read:jira-user covers /rest/api/3/myself, which the callback reads
+// to derive the bound account (read:me covers only api.atlassian.com/me, not
+// Jira's /myself); offline_access is REQUIRED to be issued a refresh token at
+// all (without it Atlassian returns only an access token, and there's nothing
+// durable to store).
+const ConnectScopes = "read:jira-work write:jira-work read:jira-user read:me offline_access"
 
 // ErrTokenEndpoint wraps a refusal from the Atlassian token endpoint (e.g.
 // invalid_grant on an exhausted/rotated refresh token), as distinct from an

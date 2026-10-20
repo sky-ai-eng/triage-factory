@@ -191,6 +191,77 @@ func TestBudgetRegistry_DropsStaleEntries(t *testing.T) {
 	}
 }
 
+// TestBudgetRegistry_ChangedReadings pins what a flusher is handed: each
+// bucket recorded after its mark, once, with its latest reading, and the mark
+// to pass next time. A reading past its reset is not handed over, and a mark
+// that did not advance (a failed write) hands the same readings back.
+func TestBudgetRegistry_ChangedReadings(t *testing.T) {
+	r := newBudgetRegistry()
+	now := time.Unix(1_000_000, 0)
+	reset := now.Add(time.Hour)
+	core := budgetKey{GitHub, "org-1", "installation:1", "core"}
+	graphql := budgetKey{GitHub, "org-1", "installation:1", "graphql"}
+
+	r.record(core, Budget{Remaining: 4000, Limit: 5000, Reset: reset}, now)
+	r.record(graphql, Budget{Remaining: 10, Limit: 5000, Reset: reset}, now)
+	r.record(core, Budget{Remaining: 3999, Limit: 5000, Reset: reset}, now.Add(time.Second))
+
+	got, mark := r.changed(0, now.Add(time.Second))
+	if len(got) != 2 {
+		t.Fatalf("changed(0) = %d readings, want 2 (one per bucket): %+v", len(got), got)
+	}
+	for _, rd := range got {
+		if rd.Bucket == "core" && (rd.Remaining == nil || *rd.Remaining != 3999) {
+			t.Errorf("core reading = %+v, want the latest (3999)", rd)
+		}
+	}
+	if again, _ := r.changed(0, now.Add(time.Second)); len(again) != 2 {
+		t.Errorf("changed(0) after a write that did not advance the mark = %d readings, want 2", len(again))
+	}
+
+	if none, same := r.changed(mark, now.Add(time.Second)); len(none) != 0 || same != mark {
+		t.Errorf("changed(mark) with nothing recorded since = (%+v, %d), want (none, %d)", none, same, mark)
+	}
+
+	r.record(graphql, Budget{Remaining: 9, Limit: 5000, Reset: reset}, now.Add(2*time.Second))
+	got, next := r.changed(mark, now.Add(2*time.Second))
+	if len(got) != 1 || got[0].Bucket != "graphql" || next <= mark {
+		t.Errorf("changed(mark) after one record = (%+v, %d), want graphql alone and a later mark than %d", got, next, mark)
+	}
+
+	if past, _ := r.changed(0, reset); len(past) != 0 {
+		t.Errorf("changed(0) at the reset = %+v, want none: the buckets have refilled", past)
+	}
+}
+
+// TestBudgetEntry_Reading pins which fields a stored reading states: what
+// the upstream said, and nil for what it did not, never a zero standing in
+// for "not stated".
+func TestBudgetEntry_Reading(t *testing.T) {
+	observed := time.Unix(1_000_000, 0)
+	reset := observed.Add(time.Minute)
+	k := budgetKey{Jira, "org-1", "cloud_oauth", "quota"}
+
+	stated := (&budgetEntry{Budget: Budget{Remaining: 0, Limit: 350, Reset: reset}, observed: observed}).reading(k)
+	if stated.Remaining == nil || *stated.Remaining != 0 || stated.Limit == nil || *stated.Limit != 350 ||
+		stated.Used != nil || stated.NearLimit != nil || stated.ResetAt == nil || !stated.ResetAt.Equal(reset) {
+		t.Errorf("stated reading = %+v, want remaining 0 (not nil), limit 350, reset, no used or near_limit", stated)
+	}
+	if !stated.ObservedAt.Equal(observed) || stated.Upstream != "jira" || stated.Credential != "cloud_oauth" || stated.Bucket != "quota" {
+		t.Errorf("stated reading key/observed = %+v", stated)
+	}
+
+	near := (&budgetEntry{Budget: NearLimitReading(true, time.Time{}), observed: observed}).reading(k)
+	if near.NearLimit == nil || !*near.NearLimit || near.Remaining != nil || near.Limit != nil || near.ResetAt != nil {
+		t.Errorf("near-limit reading = %+v, want near_limit true and nothing else stated", near)
+	}
+
+	counted := (&budgetEntry{Budget: Budget{Used: 3}, observed: observed}).reading(k)
+	if counted.Used == nil || *counted.Used != 3 || counted.Remaining != nil {
+		t.Errorf("counted reading with no published limit = %+v, want used 3 and no remaining", counted)
+	}
+}
+
 // TestWaitOnLimit_HonorsContext: the wait ends with the caller's ctx, like
 // Sleep, and a non-positive wait returns at once.
 func TestWaitOnLimit_HonorsContext(t *testing.T) {

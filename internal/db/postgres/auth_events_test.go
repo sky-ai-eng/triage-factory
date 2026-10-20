@@ -24,9 +24,9 @@ func seedAuthExpiredSession(t *testing.T, h *pgtest.Harness, sessID, userID stri
 	t.Helper()
 	pgtest.MustExec(t, h.AdminDB, `
 		INSERT INTO public.sessions
-			(id, user_id, jwt_enc, jwt_nonce, refresh_token_enc, refresh_nonce,
+			(id, user_id, auth_user_id, jwt_enc, jwt_nonce, refresh_token_enc, refresh_nonce,
 			 jwt_expires_at, expires_at, created_at, last_seen_at)
-		VALUES ($1, $2, '\x00', '\x00', '\x00', '\x00',
+		VALUES ($1, $2, $2, '\x00', '\x00', '\x00', '\x00',
 			now() - interval '61 days', now() - interval '60 days',
 			now() - interval '62 days', now() - interval '60 days')
 	`, sessID, userID)

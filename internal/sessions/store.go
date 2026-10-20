@@ -55,6 +55,13 @@ type Session struct {
 	// then return 409 and the SPA prompts the user to pick or join one.
 	// Switched server-side via POST /api/me/active-org.
 	ActiveOrgID uuid.NullUUID
+	// AuthUserID is the GoTrue login identity (auth.users id) the session was
+	// signed in as — one of the N identities UserID's principal may hold.
+	AuthUserID uuid.UUID
+	// SSOProviderID is the SSO provider the session was signed in through, ""
+	// for a GitHub sign-in. It is what an org that requires SSO checks: the
+	// session reaches that org only when this names the org's own connection.
+	SSOProviderID string
 }
 
 // Create encrypts the tokens and inserts a fresh row. Returns the
@@ -64,9 +71,13 @@ type Session struct {
 // memberships at login time; the row stores NULL and handlers that
 // require an org-scoped identity will 409 until the user calls
 // POST /api/me/active-org.
+//
+// authUserID is the login identity the JWT names, and ssoProviderID the SSO
+// provider the sign-in came through ("" for GitHub, stored NULL).
 func (s *Store) CreateSystem(
 	ctx context.Context,
-	userID uuid.UUID,
+	userID, authUserID uuid.UUID,
+	ssoProviderID string,
 	jwt, refresh string,
 	jwtExp, sessExp time.Time,
 	userAgent, ipAddr string,
@@ -96,20 +107,25 @@ func (s *Store) CreateSystem(
 	row := s.db.QueryRowContext(ctx, `
 		INSERT INTO public.sessions
 		    (user_id, jwt_enc, jwt_nonce, refresh_token_enc, refresh_nonce,
-		     jwt_expires_at, expires_at, user_agent, ip_addr, active_org_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''), NULLIF($9, '')::inet, $10)
+		     jwt_expires_at, expires_at, user_agent, ip_addr, active_org_id,
+		     auth_user_id, sso_provider_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''), NULLIF($9, '')::inet, $10,
+		        $11, NULLIF($12, ''))
 		RETURNING id, created_at, last_seen_at
-	`, userID, jwtEnc, jwtNonce, refEnc, refNonce, jwtExp, sessExp, userAgent, ipAddr, activeOrgID)
+	`, userID, jwtEnc, jwtNonce, refEnc, refNonce, jwtExp, sessExp, userAgent, ipAddr, activeOrgID,
+		authUserID, ssoProviderID)
 
 	out := &Session{
-		UserID:       userID,
-		JWT:          jwt,
-		RefreshToken: refresh,
-		JWTExpiresAt: jwtExp,
-		ExpiresAt:    sessExp,
-		UserAgent:    userAgent,
-		IPAddr:       ipAddr,
-		ActiveOrgID:  activeOrgID,
+		UserID:        userID,
+		JWT:           jwt,
+		RefreshToken:  refresh,
+		JWTExpiresAt:  jwtExp,
+		ExpiresAt:     sessExp,
+		UserAgent:     userAgent,
+		IPAddr:        ipAddr,
+		ActiveOrgID:   activeOrgID,
+		AuthUserID:    authUserID,
+		SSOProviderID: ssoProviderID,
 	}
 	if err := row.Scan(&out.ID, &out.CreatedAt, &out.LastSeenAt); err != nil {
 		return nil, fmt.Errorf("insert session: %w", err)
@@ -132,7 +148,8 @@ func (s *Store) LookupSystem(ctx context.Context, sid uuid.UUID) (*Session, erro
 		SELECT id, user_id,
 		       jwt_enc, jwt_nonce, refresh_token_enc, refresh_nonce,
 		       jwt_expires_at, expires_at, created_at, last_seen_at, revoked_at,
-		       COALESCE(user_agent, ''), COALESCE(host(ip_addr), ''), active_org_id
+		       COALESCE(user_agent, ''), COALESCE(host(ip_addr), ''), active_org_id,
+		       auth_user_id, COALESCE(sso_provider_id, '')
 		  FROM public.sessions
 		 WHERE id = $1
 		   AND revoked_at IS NULL
@@ -148,6 +165,7 @@ func (s *Store) LookupSystem(ctx context.Context, sid uuid.UUID) (*Session, erro
 		&jwtEnc, &jwtNonce, &refEnc, &refNonce,
 		&out.JWTExpiresAt, &out.ExpiresAt, &out.CreatedAt, &out.LastSeenAt, &out.RevokedAt,
 		&out.UserAgent, &out.IPAddr, &out.ActiveOrgID,
+		&out.AuthUserID, &out.SSOProviderID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -258,7 +276,8 @@ func (s *Store) ListActiveForUserSystem(ctx context.Context, userID uuid.UUID) (
 		SELECT id, user_id,
 		       jwt_enc, jwt_nonce, refresh_token_enc, refresh_nonce,
 		       jwt_expires_at, expires_at, created_at, last_seen_at, revoked_at,
-		       COALESCE(user_agent, ''), COALESCE(host(ip_addr), ''), active_org_id
+		       COALESCE(user_agent, ''), COALESCE(host(ip_addr), ''), active_org_id,
+		       auth_user_id, COALESCE(sso_provider_id, '')
 		  FROM public.sessions
 		 WHERE user_id = $1
 		   AND revoked_at IS NULL
@@ -282,6 +301,7 @@ func (s *Store) ListActiveForUserSystem(ctx context.Context, userID uuid.UUID) (
 			&jwtEnc, &jwtNonce, &refEnc, &refNonce,
 			&sess.JWTExpiresAt, &sess.ExpiresAt, &sess.CreatedAt, &sess.LastSeenAt, &sess.RevokedAt,
 			&sess.UserAgent, &sess.IPAddr, &sess.ActiveOrgID,
+			&sess.AuthUserID, &sess.SSOProviderID,
 		); err != nil {
 			return nil, fmt.Errorf("scan session: %w", err)
 		}

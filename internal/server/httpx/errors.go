@@ -38,6 +38,12 @@ const (
 	// the message, which names both sides.
 	ReasonInviteEmailMismatch = "INVITE_EMAIL_MISMATCH"
 
+	// The org requires signing in through its own single sign-on and this
+	// request's credential was not. Its own code because the client's response
+	// is neither "pick an org" nor "sign in again" in general but "sign in
+	// through that org's identity provider" — /api/me carries where to start.
+	ReasonSSORequired = "SSO_REQUIRED"
+
 	// 422-class: well-formed but semantically invalid for this data.
 	ReasonOutOfRange   = "OUT_OF_RANGE"
 	ReasonCrossTeamRef = "CROSS_TEAM_REF"

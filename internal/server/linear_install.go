@@ -199,6 +199,19 @@ func (s *Server) handleLinearInstallCallback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	returnTo := cs.ReturnTo
+	// The cookie's org is the one this writes into, so "Require SSO" is asked
+	// about it here rather than left to withSession, which judged the cursor.
+	// Redirected like every other refusal here, into the org's own page,
+	// where the app offers the org's sign-in.
+	gate, err := s.requestSSOGate(ctx, orgID)
+	if err != nil {
+		internalError(w, "linear-install", err)
+		return
+	}
+	if gate.Barred {
+		redirectLinearInstallError(w, r, orgID, returnTo, "sso_required")
+		return
+	}
 
 	if oErr := r.URL.Query().Get("error"); oErr != "" {
 		linearInstallLog.Warn("linear oauth error", "linear_error", oErr, "org", orgID)

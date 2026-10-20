@@ -1,10 +1,10 @@
 -- +goose NO TRANSACTION
 -- +goose Up
 -- Every external object is keyed within the provider namespace it lives in,
--- Linear becomes a tracked source, and four smaller changes ride along: the
+-- Linear becomes a tracked source, and five smaller changes ride along: the
 -- org GitHub App's unusable state, the claim's source manifest, the retirement
--- of the 'completed' conversation status, and node ids on artifacts and
--- audit-ledger rows.
+-- of the 'completed' conversation status, node ids on artifacts and
+-- audit-ledger rows, and the table of rate-limit readings.
 --
 -- NO TRANSACTION because rebuilding a table other tables reference needs
 -- foreign keys off, and PRAGMA foreign_keys is a no-op inside a transaction:
@@ -78,6 +78,29 @@ SET status = 'open',
     completed_at = COALESCE(completed_at, ended_at, started_at),
     park_reason = NULL
 WHERE status = 'completed';
+
+-- The latest reading of every rate-limit bucket the org's credentials are
+-- metered on, keyed (upstream, credential, bucket) within the org. The process
+-- making requests keeps its readings in memory and writes the ones that changed
+-- here, and GET /api/orgs/{org_id}/integrations/rate-limits reads them; an
+-- upsert keeps a key's newest observation. credential is the opaque id the
+-- upstream's client names it by, never a token or a login. A NULL column is a
+-- value the reading did not state, which is not the same as zero; reset_at
+-- NULL means the reading named no reset, and such a reading is reported for an
+-- hour after observed_at (domain.RateLimitReadingMaxAge).
+CREATE TABLE rate_limit_readings (
+    org_id       TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    upstream     TEXT NOT NULL,
+    credential   TEXT NOT NULL,
+    bucket       TEXT NOT NULL,
+    remaining    INTEGER,
+    bucket_limit INTEGER,
+    used         INTEGER,
+    near_limit   BOOLEAN,
+    reset_at     DATETIME,
+    observed_at  DATETIME NOT NULL,
+    PRIMARY KEY (org_id, upstream, credential, bucket)
+);
 
 -- ===========================================================================
 -- 2. Linear
@@ -448,6 +471,17 @@ UPDATE OR IGNORE org_github_app_installations
 -- site its own url names: that is the site the issue actually came from, even
 -- if the org has since been pointed at another one. No new key can collide,
 -- because source_id was unique per source.
+--
+-- linear_team_id is the UUID of the Linear team a Linear issue sits in, the id
+-- linear_team_rules is keyed by. It is a column rather than a field read out
+-- of snapshot_json because turning a source off clears the snapshot, and an
+-- issue's team has to survive that: the belt places the issue by it, and an
+-- issue that goes unreachable while the source is off names it for the
+-- router's team gate. It is set at creation from the response that found the
+-- issue and moved by every snapshot write to the snapshot's team, and clearing
+-- the snapshot leaves it. Required for a Linear row and NULL for every other
+-- source, enforced by the store. No row needs it filled here: no release
+-- before this migration polled Linear.
 CREATE TABLE entities_new (
     id                       TEXT PRIMARY KEY,
     source                   TEXT NOT NULL,
@@ -466,7 +500,8 @@ CREATE TABLE entities_new (
     owning_team_id           TEXT REFERENCES teams(id) ON DELETE SET NULL,
     org_id                   TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
     poll_seq                 INTEGER NOT NULL DEFAULT 0,
-    commissioned_by_user_id  TEXT REFERENCES users(id) ON DELETE SET NULL
+    commissioned_by_user_id  TEXT REFERENCES users(id) ON DELETE SET NULL,
+    linear_team_id           TEXT
 );
 
 -- A url with no '/browse/' looks up an empty prefix, which host_case never

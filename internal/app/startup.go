@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/ratelimits"
 	"github.com/sky-ai-eng/triage-factory/internal/repoevent"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
@@ -130,6 +131,31 @@ func (a *App) startWorkers(ctx context.Context) {
 				appLog.Warn("conversation signal purge age", "error", perr)
 			}
 			go a.spawner.ConversationSignalPurgeReaper(ctx, delegate.DefaultConversationSignalPurgeInterval, purgeAge)
+		}
+	}
+
+	// Rate-limit readings: every process that serves the API or runs the brain
+	// makes requests on orgs' behalf (handlers, pollers, the scorer) and writes
+	// the readings those responses carried, so any control pod's route answers
+	// for all of them. A plain executor records none: its secret store is
+	// disabled, so it resolves no org credential to make such a request with,
+	// and a run's provider traffic goes through its sidecar's proxies.
+	//
+	// Like the heartbeat below, it outlives ctx by the shutdown drain: the
+	// requests the drain finishes record readings too. Run stops it once the
+	// drain returns and waits for its last write, which lands before main's
+	// deferred Close takes the pools away.
+	a.stopFlusher = func() {}
+	if a.plan.serveHTTP || a.plan.brain {
+		flushCtx, cancelFlush := context.WithCancel(context.WithoutCancel(ctx))
+		flushDone := make(chan struct{})
+		go func() {
+			defer close(flushDone)
+			ratelimits.RunFlusher(flushCtx, a.stores.RateLimitReadings, ratelimits.FlushInterval)
+		}()
+		a.stopFlusher = func() {
+			cancelFlush()
+			<-flushDone
 		}
 	}
 
@@ -349,9 +375,10 @@ func (a *App) wireCloneStatusCallback() {
 	})
 }
 
-// bootstrapBareClones reads the configured repos and asks the worktree
-// package to ensure each is materialized on disk as a bare clone with the
-// right origin URL. Called after profiling completes (profiling populates
+// bootstrapBareClones reads the repos at least one team tracks and asks the
+// worktree package to ensure each is materialized on disk as a bare clone with
+// the right origin URL. A registry row no team tracks is not warmed: nothing
+// polls or profiles it. Called after profiling completes (profiling populates
 // repositories.clone_url; targets without a CloneURL are skipped). DB read
 // errors are logged and skipped — the lazy clone inside CreateForPR /
 // CreateForBranch recovers affected delegations on the next run.
@@ -361,7 +388,7 @@ func bootstrapBareClones(repos db.RepositoryStore, orgs db.OrgsStore, secrets db
 		worktreeLog.Warn("bootstrap: load org settings failed", "error", err)
 		return
 	}
-	profiles, err := repos.ListSystem(context.Background(), runmode.LocalDefaultOrgID, db.EffectiveGitHubHost(orgSet.GitHubBaseURL))
+	profiles, _, err := repos.ListTrackedSystem(context.Background(), runmode.LocalDefaultOrgID, db.EffectiveGitHubHost(orgSet.GitHubBaseURL), db.Unwindowed)
 	if err != nil {
 		worktreeLog.Warn("bootstrap: load repositories failed", "error", err)
 		return
