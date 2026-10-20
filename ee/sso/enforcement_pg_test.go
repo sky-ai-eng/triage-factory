@@ -180,23 +180,61 @@ func TestSSOEnforcement_FollowsGitHubEmailOntoTheDomain(t *testing.T) {
 	}
 }
 
-// When GitHub's address for the sign-in cannot be read, the sign-in fails:
-// neither the signup email nor letting it through is a safe stand-in.
-func TestSSOEnforcement_GitHubEmailUnreadableFailsTheSignIn(t *testing.T) {
+// When GitHub's address for the sign-in cannot be read, the signup email is
+// checked instead: an off-domain one signs in, an on-domain one is refused.
+func TestSSOEnforcement_GitHubEmailUnreadableChecksTheSignupEmail(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
 
-	user := r.seedAuthOnlyUser()
+	providerID := uuid.NewString()
+	owner := r.seedUser()
+	orgA, _ := r.seedOrg(owner, "acme")
+	r.seedSSOConnection(orgA, providerID, "member", true)
+	r.seedVerifiedDomain(orgA, providerID, "corp.example")
+	r.setConnectionEnforced(providerID, true)
+
 	r.fake.mu.Lock()
 	r.fake.failUser = true
 	r.fake.mu.Unlock()
-	resp := r.driveGitHubLogin(user, "alice@personal.example")
 
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Errorf("status=%d, want 500", resp.StatusCode)
+	off := r.driveGitHubLogin(r.seedAuthOnlyUser(), "alice@personal.example")
+	if rejectedForSSO(off) || !r.gotSidCookie(off) {
+		t.Errorf("off-domain signup email: status=%d Location=%q, want a session", off.StatusCode, off.Header.Get("Location"))
 	}
-	if r.gotSidCookie(resp) {
-		t.Error("a session was minted without reading GitHub's address")
+
+	on := r.driveGitHubLogin(r.seedAuthOnlyUser(), "bob@corp.example")
+	if !rejectedForSSO(on) {
+		t.Errorf("on-domain signup email: status=%d Location=%q, want an /login?error=sso_required bounce", on.StatusCode, on.Header.Get("Location"))
+	}
+	if r.gotSidCookie(on) {
+		t.Error("a session was minted for an on-domain signup email under enforcement")
+	}
+}
+
+// The break-glass account is the recovery path, so it still signs in through
+// GitHub while GoTrue cannot answer /user.
+func TestSSOEnforcement_BreakGlassAllowedWhenGitHubEmailUnreadable(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+
+	providerID := uuid.NewString()
+	owner := r.seedUser()
+	orgA, _ := r.seedOrg(owner, "acme")
+	r.seedSSOConnection(orgA, providerID, "member", true)
+	r.seedVerifiedDomain(orgA, providerID, "corp.example")
+	r.setConnectionEnforced(providerID, true)
+	r.addBreakGlass(orgA, owner)
+
+	r.fake.mu.Lock()
+	r.fake.failUser = true
+	r.fake.mu.Unlock()
+
+	resp := r.driveGitHubLogin(owner, "owner@corp.example")
+	if rejectedForSSO(resp) {
+		t.Error("break-glass principal was rejected while /user was failing")
+	}
+	if !r.gotSidCookie(resp) {
+		t.Errorf("status=%d: no session minted for the break-glass principal", resp.StatusCode)
 	}
 }
 

@@ -152,13 +152,16 @@ func (le *loginExt) OnLoginResolved(w http.ResponseWriter, r *http.Request, in s
 	// moved their GitHub address off the domain would be refused everywhere,
 	// for good. Org access does not rest on this check — every request to an
 	// org that requires SSO is barred unless it came through that org's
-	// connection — so following the address loses nothing there. A failed read
-	// fails the sign-in rather than falling back to either address.
+	// connection — so following the address loses nothing there. For the same
+	// reason a failed read (GoTrue unreachable, or an account with no GitHub
+	// identity) checks the signup email instead of failing the sign-in: a
+	// GoTrue outage must not lock out every GitHub sign-in, the break-glass
+	// account's included.
 	if !in.IsSSO {
 		email, verified, perr := le.api.GotrueProviderEmail(r.Context(), in.AccessToken, "github")
 		if perr != nil {
-			ssoLog.Error("sso enforcement: read github email failed", "user", in.UserID, "error", perr)
-			return uuid.NullUUID{}, false, perr
+			ssoLog.Warn("sso enforcement: read github email failed, checking the signup email", "user", in.UserID, "error", perr)
+			email, verified = in.Email, in.EmailVerified
 		}
 		dom, okDom := le.api.EmailDomain(email)
 		if verified && okDom {

@@ -413,7 +413,9 @@ nobody uses your org except through your identity provider. It is two rules:
   with SSO. The email is the verified address GitHub reports on that sign-in,
   not the one the person's Triage Factory account was created with: someone who
   moves their GitHub address off your domain can sign in with GitHub again, and
-  the org-access rule below still keeps them out of your org.
+  the org-access rule below still keeps them out of your org. If Triage
+  Factory cannot read GitHub's address from GoTrue, it checks the account's
+  original email instead.
 - **Org access.** Every request that acts in your org must come from a session
   or API token that was signed in through your org's own connection. That covers
   every member, whatever their email: a contractor invited with a personal
