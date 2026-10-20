@@ -236,9 +236,7 @@ func (s *Server) waitRun(ctx context.Context, a waitRunArgs) (any, error) {
 		return nil, ctx.Err()
 	}
 
-	s.runsMu.Lock()
-	delete(s.runs, a.ContainerID)
-	s.runsMu.Unlock()
+	s.forgetRun(a.ContainerID, entry)
 
 	res := waitRunResult{
 		OOMKilled:  entry.oom,
@@ -250,6 +248,19 @@ func (s *Server) waitRun(ctx context.Context, a waitRunArgs) (any, error) {
 		res.ExitError = entry.waitErr.Error()
 	}
 	return res, nil
+}
+
+// forgetRun drops containerID's registry entry if it is still entry. Container
+// ids are deterministic per (conversation, subnet index), so a relaunch of the
+// same engagement can register its run under the id between this run's exit
+// and its wait; deleting by id alone would drop the successor, and the
+// successor's own wait would then find no run.
+func (s *Server) forgetRun(containerID string, entry *runEntry) {
+	s.runsMu.Lock()
+	defer s.runsMu.Unlock()
+	if s.runs[containerID] == entry {
+		delete(s.runs, containerID)
+	}
 }
 
 // killRun SIGKILLs the run's runtime. Idempotent: an unknown run (already

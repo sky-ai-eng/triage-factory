@@ -9,12 +9,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/egressrelay"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/llmproxy"
@@ -557,6 +560,98 @@ func TestStartProxiesForSandbox_GitProxyStandsDownPrePushHook(t *testing.T) {
 	})
 	if got := envValue(envNoGit, githooks.PushCaptureEnvVar); got != "" {
 		t.Errorf("%s = %q with no git proxy, want absent (the hook keeps capture)", githooks.PushCaptureEnvVar, got)
+	}
+}
+
+// TestStartProxiesForSandbox_JailEndpoints pins what the jail is admitted to:
+// every address the sandbox env points the jail at is a reported endpoint, so
+// nothing the jail is told to use stays closed to it, and the LLM proxy, which
+// no jail is pointed at, is not one.
+func TestStartProxiesForSandbox_JailEndpoints(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer upstream.Close()
+	creds := map[string]string{"ANTHROPIC_API_KEY": "sk-ant-x", "ANTHROPIC_BASE_URL": upstream.URL}
+	git := &GitProxyConfig{
+		TokenSource: func(context.Context, string, string) (gitproxy.Token, error) {
+			return gitproxy.Token{Value: "ghs"}, nil
+		},
+		Upstream: upstream.URL,
+	}
+	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, git, egressproxy.GitHubHosts{}, nil, nil)
+	if err != nil {
+		t.Fatalf("startProxiesForSandbox: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = bundle.Shutdown(ctx)
+	})
+	h := &RunProxyHandle{p: bundle}
+	endpoints := h.JailEndpoints()
+
+	// The egress proxy, one per relay, the git proxy.
+	if want := 2 + len(egressrelay.Catalog()); len(endpoints) != want {
+		t.Fatalf("JailEndpoints = %v, want %d entries", endpoints, want)
+	}
+	// The upstream shares the loopback address, and the git config names it as
+	// the URL the proxy stands in for; it is not an address the jail dials.
+	upstreamAddr := strings.TrimPrefix(upstream.URL, "http://")
+	addr := regexp.MustCompile(`127\.0\.0\.1:[0-9]+`)
+	pointed := 0
+	for _, kv := range env {
+		for _, a := range addr.FindAllString(kv, -1) {
+			if a == upstreamAddr {
+				continue
+			}
+			pointed++
+			if !slices.Contains(endpoints, a) {
+				t.Errorf("the jail env points at %s (%s), which is not a jail endpoint", a, kv)
+			}
+		}
+	}
+	if pointed == 0 {
+		t.Fatal("the jail env points at no address — the check above is vacuous")
+	}
+	for _, kv := range h.LLMEnv() {
+		for _, a := range addr.FindAllString(kv, -1) {
+			if slices.Contains(endpoints, a) {
+				t.Errorf("the LLM proxy %s is a jail endpoint", a)
+			}
+		}
+	}
+}
+
+// TestStartProxiesForSandbox_JailEndpointsSharedOrigin: when the shared
+// origin carries git, the jail's git config names the origin rather than the
+// git proxy's own listener, so that listener is not a jail endpoint.
+func TestStartProxiesForSandbox_JailEndpointsSharedOrigin(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer upstream.Close()
+	creds := map[string]string{"ANTHROPIC_API_KEY": "sk-ant-x", "ANTHROPIC_BASE_URL": upstream.URL}
+	git := &GitProxyConfig{
+		TokenSource: func(context.Context, string, string) (gitproxy.Token, error) {
+			return gitproxy.Token{Value: "ghs"}, nil
+		},
+		Upstream:           upstream.URL,
+		SharedOriginHost:   "127.0.0.1",
+		SharedOriginCAPath: "/run/tf-gh/cert.pem",
+	}
+	bundle, _, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, git, egressproxy.GitHubHosts{}, nil, nil)
+	if err != nil {
+		t.Fatalf("startProxiesForSandbox: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = bundle.Shutdown(ctx)
+	})
+	endpoints := (&RunProxyHandle{p: bundle}).JailEndpoints()
+	if want := 1 + len(egressrelay.Catalog()); len(endpoints) != want {
+		t.Fatalf("JailEndpoints = %v, want %d entries (the egress proxy and the relays)", endpoints, want)
+	}
+	gitAddr := strings.TrimPrefix(bundle.gitProxyURL, "http://")
+	if slices.Contains(endpoints, gitAddr) {
+		t.Errorf("the git proxy's own listener %s is a jail endpoint though the shared origin carries git", gitAddr)
 	}
 }
 

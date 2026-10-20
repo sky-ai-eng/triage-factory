@@ -7,8 +7,14 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -29,7 +35,46 @@ func netnsIDFrag(conversationID string) string {
 // would accept any tf-shaped path. Exported so the launch validation and
 // its tests build the same name this package's setup produces.
 func NetnsNameForRun(conversationID string, subnetIdx uint8) string {
-	return fmt.Sprintf("tf-%s-%d", netnsIDFrag(conversationID), subnetIdx)
+	return runNetNames(netnsIDFrag(conversationID), subnetIdx).netnsName
+}
+
+// runNetNames is every name of the run network at subnetIdx for a run id
+// hashing to idFrag. setupNetwork builds from it, and TeardownNetwork accepts
+// only a state that names exactly what it gives, so a teardown can delete
+// nothing a setup would not have built.
+func runNetNames(idFrag string, subnetIdx uint8) *netState {
+	netnsName := fmt.Sprintf("tf-%s-%d", idFrag, subnetIdx)
+	short := idFrag[:min(len(idFrag), 4)]
+	return &netState{
+		netnsName:   netnsName,
+		netnsPath:   "/var/run/netns/" + netnsName,
+		vethHost:    fmt.Sprintf("vh-%s%d", short, subnetIdx),
+		vethSandbox: fmt.Sprintf("vs-%s%d", short, subnetIdx),
+		subnet:      subnetCIDR(subnetIdx),
+	}
+}
+
+// runNetnsRE is the namespace name runNetNames builds: an id fragment of
+// exactly netnsIDFrag's length and a decimal subnet index.
+var runNetnsRE = regexp.MustCompile(`^tf-([0-9a-f]{8})-([0-9]{1,3})$`)
+
+// runNetFromNetnsName inverts runNetNames: the names of the run network whose
+// namespace is name, and its subnet index, if name is one runNetNames builds.
+func runNetFromNetnsName(name string) (*netState, uint8, bool) {
+	m := runNetnsRE.FindStringSubmatch(name)
+	if m == nil {
+		return nil, 0, false
+	}
+	n, err := strconv.Atoi(m[2])
+	if err != nil || n > 255 {
+		return nil, 0, false
+	}
+	names := runNetNames(m[1], uint8(n))
+	if names.netnsName != name {
+		// A non-canonical index such as "007" names no namespace setup builds.
+		return nil, 0, false
+	}
+	return names, uint8(n), true
 }
 
 // setupNetwork creates the netns + veth pair + addressing matching
@@ -55,23 +100,13 @@ func setupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (
 	// conversationID to be hex (TraceID may be "live-smoke" or any free-form
 	// string), so derive a deterministic 8-hex-char fragment from a
 	// sha1 of the conversationID. Same conversationID → same fragment, every time.
-	idFrag := netnsIDFrag(conversationID)
-	netnsName := NetnsNameForRun(conversationID, subnetIdx)
-	vethHost := fmt.Sprintf("vh-%s%d", idFrag[:min(len(idFrag), 4)], subnetIdx)
-	vethSandbox := fmt.Sprintf("vs-%s%d", idFrag[:min(len(idFrag), 4)], subnetIdx)
-	netnsPath := "/var/run/netns/" + netnsName
+	state := runNetNames(netnsIDFrag(conversationID), subnetIdx)
+	netnsName := state.netnsName
+	vethHost := state.vethHost
+	vethSandbox := state.vethSandbox
 
 	hostAddr := hostIP(subnetIdx)
 	sandboxAddr := sandboxIP(subnetIdx)
-	subnet := subnetCIDR(subnetIdx)
-
-	state := &netState{
-		netnsName:   netnsName,
-		netnsPath:   netnsPath,
-		vethHost:    vethHost,
-		vethSandbox: vethSandbox,
-		subnet:      subnet,
-	}
 
 	// Discover the upstream interface from the default route. Fly
 	// Machines use eth0 but self-host customers may differ.
@@ -155,24 +190,24 @@ func setupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (
 		}
 	}
 
-	// Defense-in-depth: disable IPv6 inside the netns so the
-	// Part B egress allowlist — which is IPv4-only (iptables, not
-	// ip6tables; the runner image bundles only iptables) — can't be
-	// flanked over v6. Today this is belt-and-suspenders, not an open
-	// hole: the LLM proxy binds an IPv4 literal (10.42.<idx>.1), so a
-	// sibling run has no v6 listener to reach, and the netns is given no
-	// v6 address or route above, so there's no v6 path off-link anyway.
-	// But that safety is implicit; pinning disable_ipv6 makes it safe by
-	// construction, so a future dual-stack proxy or a host that
-	// autoconfigures v6 on the veth can't silently reopen the
-	// cross-tenant reach below the v4 filter.
-	//
-	// Best-effort by design (runIPNoErr swallows failure): if `sysctl`
-	// is absent on some image, a hard failure here would break every
-	// sandbox run for no security gain (v6 is unreachable regardless),
-	// so we proceed rather than fail the run. Writing 1 to `all`
-	// disables v6 on every interface in the netns (existing + future),
-	// flushing any link-local the veth or lo may have picked up.
+	// The egress filter is IPv4-only (iptables, not ip6tables; the runner
+	// image bundles only iptables), so IPv6 must not work across the veth at
+	// all. Left on, the kernel gives the host side a link-local address, and
+	// a jail with IPv6 of its own reaches every host listener bound to "::"
+	// through it, below the filter that closes the gateway. The host side is
+	// the enforced half: with IPv6 off on the interface, the host drops every
+	// IPv6 packet that arrives on it, whatever the netns side sends. A kernel
+	// that has IPv6 and refuses the write gets no network.
+	if err := disableIPv6On(procRoot, vethHost); err != nil {
+		return state, fmt.Errorf("netns: host veth: %w", err)
+	}
+
+	// The netns side as well, so the jail has no IPv6 address to send from.
+	// Best-effort (runIPNoErr swallows failure): it needs `sysctl` on the
+	// host, and the host-side disable above already drops anything the jail
+	// could send. Writing 1 to `all` disables v6 on every interface in the
+	// netns (existing + future), flushing any link-local the veth or lo may
+	// have picked up.
 	_ = runIPNoErr(ctx, "netns", "exec", netnsName,
 		"sysctl", "-wq", "net.ipv6.conf.all.disable_ipv6=1")
 
@@ -264,4 +299,36 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// procRoot is where disableIPv6On finds the kernel's sysctls.
+const procRoot = "/proc"
+
+// disableIPv6On turns IPv6 off on the interface iface. A kernel built or
+// booted without IPv6 has no sys/net/ipv6 under root and nothing to turn off.
+// The file is opened, never created, so a missing interface is an error.
+func disableIPv6On(root, iface string) error {
+	if _, err := os.Stat(filepath.Join(root, "sys/net/ipv6")); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	f, err := os.OpenFile(filepath.Join(root, "sys/net/ipv6/conf", iface, "disable_ipv6"), os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("disable ipv6 on %s: %w", iface, err)
+	}
+	_, werr := f.WriteString("1\n")
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return fmt.Errorf("disable ipv6 on %s: %w", iface, werr)
+	}
+	return nil
+}
+
+// vethHostName is the host-side veth of conversationID's network at
+// subnetIdx. Derived, like every per-run network name, so a privileged op
+// that needs it (AdmitJailPorts) re-derives it rather than trusting a name
+// it is handed.
+func vethHostName(conversationID string, subnetIdx uint8) string {
+	return runNetNames(netnsIDFrag(conversationID), subnetIdx).vethHost
 }

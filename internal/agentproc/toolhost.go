@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -94,10 +95,10 @@ type ToolHostOptions struct {
 	RecordSandboxActuals func(ctx context.Context, orgID, claimID string, actuals sandbox.RunActuals) error
 }
 
-// ToolHostJail is a launched tool-host sandbox. The caller Accepts the
-// in-jail host's connection, drives the engagement, then closes: the server
-// observes EOF at a frame boundary and exits, and Close reclaims the jail
-// either way.
+// ToolHostJail is a launched tool-host sandbox, the gVisor backend's
+// cell.Jail. The caller Connects to the in-jail host, drives the engagement,
+// then closes: the server observes EOF at a frame boundary and exits, and
+// Close reclaims the jail either way.
 type ToolHostJail struct {
 	// SocketPath is the host-side path of the tool host's unix socket. It
 	// exists before the jail starts — this side binds it — and is what the
@@ -120,17 +121,24 @@ type ToolHostJail struct {
 	claimID         string
 	recordActuals   func(ctx context.Context, orgID, claimID string, actuals sandbox.RunActuals) error
 	releaseLiveJail func()
+
+	// closeOnce makes Close idempotent, as cell.Jail requires: a second
+	// release could drop a successor's live-jail entry under the same
+	// container id, and a second actuals stamp is a write nobody asked for.
+	closeOnce sync.Once
 }
 
-// Accept waits for the in-jail tool host to dial in and returns the resulting
-// connection.
+// Connect waits for the in-jail tool host to dial in and returns the
+// resulting connection. The jail dials rather than listens because it runs
+// with --host-uds=open (see prepareToolHostSocket), so on this backend
+// connecting to the tool host means accepting its call.
 //
 // It fails early rather than waiting out the deadline when the jail exits
 // first. That case is otherwise indistinguishable from a slow start and was
 // the difference between a one-line diagnosis and a silent timeout: a tool
 // host that cannot exec, or refuses its arguments, dies immediately and would
 // leave the caller blocked on a connection nobody was ever going to make.
-func (j *ToolHostJail) Accept(ctx context.Context, timeout time.Duration) (net.Conn, error) {
+func (j *ToolHostJail) Connect(ctx context.Context, timeout time.Duration) (net.Conn, error) {
 	type accepted struct {
 		conn net.Conn
 		err  error
@@ -182,7 +190,7 @@ func (j *ToolHostJail) Stop() error {
 
 // Exited reports whether the jail's runtime has been reaped.
 func (j *ToolHostJail) Exited() bool {
-	if j.waitDone == nil {
+	if j == nil || j.waitDone == nil {
 		return true
 	}
 	select {
@@ -230,22 +238,24 @@ func (j *ToolHostJail) Close() error {
 	if j == nil {
 		return nil
 	}
-	if j.listener != nil {
-		_ = j.listener.Close()
-	}
-	if j.run != nil {
-		_ = j.run.Close()
-		j.recordActualsOnce()
-	}
-	if j.releaseLiveJail != nil {
-		j.releaseLiveJail()
-	}
-	if j.sb != nil {
-		_ = j.sb.Close()
-	}
-	if j.SocketPath != "" {
-		_ = os.Remove(j.SocketPath)
-	}
+	j.closeOnce.Do(func() {
+		if j.listener != nil {
+			_ = j.listener.Close()
+		}
+		if j.run != nil {
+			_ = j.run.Close()
+			j.recordActualsOnce()
+		}
+		if j.releaseLiveJail != nil {
+			j.releaseLiveJail()
+		}
+		if j.sb != nil {
+			_ = j.sb.Close()
+		}
+		if j.SocketPath != "" {
+			_ = os.Remove(j.SocketPath)
+		}
+	})
 	return nil
 }
 

@@ -126,6 +126,7 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 	if err != nil {
 		t.Fatalf("injector Start: %v", err)
 	}
+	admitInjector(ctx, t, net, addr)
 	t.Cleanup(func() {
 		sctx, c := context.WithTimeout(context.Background(), 5*time.Second)
 		defer c()
@@ -278,6 +279,7 @@ func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("injector Start on the shared-origin port: %v", err)
 	}
+	admitInjector(ctx, t, net, addr)
 	t.Cleanup(func() {
 		sctx, c := context.WithTimeout(context.Background(), 5*time.Second)
 		defer c()
@@ -356,5 +358,22 @@ func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
 	}
 	if inj.RequestCount() == 0 {
 		t.Error("injector observed zero requests — the jail did not route gh through the shared origin")
+	}
+}
+
+// admitInjector opens the injector's port on the run's gateway to the jail,
+// the way a cell admits its sidecar's listeners before launch.
+func admitInjector(ctx context.Context, t *testing.T, net *sandbox.RunNetwork, addr string) {
+	t.Helper()
+	_, portStr, err := stdnet.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("injector address %q: %v", addr, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("injector address %q: %v", addr, err)
+	}
+	if err := net.AdmitJailPorts(ctx, []int{port}); err != nil {
+		t.Fatalf("admit the jail to the injector's port: %v", err)
 	}
 }

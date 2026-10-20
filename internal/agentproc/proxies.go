@@ -111,6 +111,12 @@ type runProxies struct {
 	// no git proxy was started. Read via RunProxyHandle.GitProxy.
 	gitProxyURL   string
 	gitProxyToken string
+
+	// jailEndpoints are the "host:port" listeners the sandbox env points the
+	// jail at: the egress proxy, each fetch relay, and the git proxy. The LLM
+	// proxy is not among them — no jail is pointed at it. Read via
+	// RunProxyHandle.JailEndpoints.
+	jailEndpoints []string
 }
 
 // Shutdown stops every proxy in the bundle. Returns errors.Join of
@@ -389,6 +395,18 @@ func (h *RunProxyHandle) GitProxy() (url, token string) {
 	return h.p.gitProxyURL, h.p.gitProxyToken
 }
 
+// JailEndpoints returns the "host:port" listeners the sandbox env this handle
+// produced points the jail at. With the gh injector the sidecar adds beside
+// them, they are the only ports of the gateway the jail is admitted to; every
+// other listener of the run — the LLM proxy, and on the sidecar the API
+// proxies its own clients use — stays closed to the jail.
+func (h *RunProxyHandle) JailEndpoints() []string {
+	if h == nil || h.p == nil {
+		return nil
+	}
+	return append([]string(nil), h.p.jailEndpoints...)
+}
+
 // LLMEnv returns the LLM proxy's address and per-run placeholder in the
 // provider vocabulary, for a caller whose model calls originate outside the
 // jail. Non-secret: the placeholder authenticates the caller to this run's own
@@ -581,7 +599,7 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 	// `pip install` work inside the L3-locked sandbox. Started for
 	// every sandbox run — prompt-only runs never dial it, and one idle
 	// listener is cheaper than a second wiring path.
-	egressEnv, egressSrv, err := startEgressProxyForSandbox(hostVethIP, gh, recordEgressDenial)
+	egressEnv, egressSrv, egressAddr, err := startEgressProxyForSandbox(hostVethIP, gh, recordEgressDenial)
 	if err != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -589,6 +607,7 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 		return nil, nil, err
 	}
 	bundle.egress = egressSrv
+	bundle.jailEndpoints = append(bundle.jailEndpoints, egressAddr)
 	env = append(env, egressEnv...)
 
 	// Fetch relays: one per egressrelay catalog entry, each on its own
@@ -599,7 +618,7 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 	// package doc and CLAUDE.md. Which ecosystems get a relay, their route
 	// tables, and their env pointing are all catalog data; this wiring is
 	// ecosystem-blind.
-	relayEnv, relaySrvs, err := startFetchRelaysForSandbox(hostVethIP)
+	relayEnv, relaySrvs, relayAddrs, err := startFetchRelaysForSandbox(hostVethIP)
 	if err != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -607,6 +626,7 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 		return nil, nil, err
 	}
 	bundle.relays = relaySrvs
+	bundle.jailEndpoints = append(bundle.jailEndpoints, relayAddrs...)
 	env = append(env, relayEnv...)
 
 	// Assemble the single GIT_CONFIG_* block for the sandboxed git. It
@@ -643,6 +663,11 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 		}
 		bundle.git = gitSrv
 		bundle.gitProxyURL, bundle.gitProxyToken = gitProxyURL, gitProxyToken
+		// The jail's git dials this listener only when the shared origin does
+		// not carry git; otherwise the origin's own endpoint covers it.
+		if !routesGitAtSharedOrigin(git.SharedOriginHost, git.SharedOriginCAPath) {
+			bundle.jailEndpoints = append(bundle.jailEndpoints, strings.TrimPrefix(gitProxyURL, "http://"))
+		}
 		gitPairs = append(gitPairs, proxyPairs...)
 		// The proxy owns push capture for this run: it observes each push's
 		// actual upstream outcome (artifact on 2xx, audit failure row
@@ -704,10 +729,10 @@ func startGitProxyForSandbox(ctx context.Context, hostVethIP string, git *GitPro
 // the DB lives on the orchestrator and this runs in the capless sidecar, so the
 // only thing this layer can do is carry the hook. nil leaves denials at the
 // slog line the proxy always writes.
-func startEgressProxyForSandbox(hostVethIP string, gh egressproxy.GitHubHosts, recordDenial func(ctx context.Context, denied egressproxy.DeniedConnect)) ([]string, *egressproxy.Server, error) {
+func startEgressProxyForSandbox(hostVethIP string, gh egressproxy.GitHubHosts, recordDenial func(ctx context.Context, denied egressproxy.DeniedConnect)) ([]string, *egressproxy.Server, string, error) {
 	incoming, err := randomHexToken()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	srv, err := egressproxy.New(egressproxy.Config{
 		AllowedHosts:     egressproxy.DefaultRegistryHosts(),
@@ -717,20 +742,20 @@ func startEgressProxyForSandbox(hostVethIP string, gh egressproxy.GitHubHosts, r
 		RecordDenial:     recordDenial,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("agentproc: construct egress proxy: %w", err)
+		return nil, nil, "", fmt.Errorf("agentproc: construct egress proxy: %w", err)
 	}
 	addr, err := srv.Start(net.JoinHostPort(hostVethIP, "0"))
 	if err != nil {
-		return nil, nil, fmt.Errorf("agentproc: start egress proxy on %s: %w", hostVethIP, err)
+		return nil, nil, "", fmt.Errorf("agentproc: start egress proxy on %s: %w", hostVethIP, err)
 	}
-	return sandboxEgressProxyEnv(addr, hostVethIP, incoming), srv, nil
+	return sandboxEgressProxyEnv(addr, hostVethIP, incoming), srv, addr, nil
 }
 
 // startFetchRelaysForSandbox starts every egressrelay catalog entry on a
-// free port of hostVethIP and returns the combined env entries plus the
-// servers for the shutdown bundle. Ecosystem-blind by design: adding a
-// relay is a catalog edit (internal/egressrelay/catalog.go), never a
-// change here.
+// free port of hostVethIP and returns the combined env entries, the
+// servers for the shutdown bundle, and their addresses. Ecosystem-blind by
+// design: adding a relay is a catalog edit (internal/egressrelay/catalog.go),
+// never a change here.
 //
 // Every relay starts for every sandbox run, like the egress proxy: a run
 // that never uses the ecosystem never dials it, and an idle listener is
@@ -744,16 +769,16 @@ func startEgressProxyForSandbox(hostVethIP string, gh egressproxy.GitHubHosts, r
 // Self-contained on failure: any relays already started are shut down
 // here, so the caller never receives a half-started set alongside an
 // error.
-func startFetchRelaysForSandbox(hostVethIP string) ([]string, []*egressrelay.Server, error) {
-	var env []string
+func startFetchRelaysForSandbox(hostVethIP string) ([]string, []*egressrelay.Server, []string, error) {
+	var env, addrs []string
 	var servers []*egressrelay.Server
-	fail := func(err error) ([]string, []*egressrelay.Server, error) {
+	fail := func(err error) ([]string, []*egressrelay.Server, []string, error) {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		for _, srv := range servers {
 			_ = srv.Shutdown(shutdownCtx)
 		}
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	for _, entry := range egressrelay.Catalog() {
 		cfg := entry.Config
@@ -767,9 +792,10 @@ func startFetchRelaysForSandbox(hostVethIP string) ([]string, []*egressrelay.Ser
 			return fail(fmt.Errorf("agentproc: start %s relay on %s: %w", entry.Config.Name, hostVethIP, err))
 		}
 		servers = append(servers, srv)
+		addrs = append(addrs, addr)
 		env = append(env, entry.Env(addr)...)
 	}
-	return env, servers, nil
+	return env, servers, addrs, nil
 }
 
 // sandboxEgressProxyEnv builds the proxy env entries that route the
@@ -1039,15 +1065,21 @@ func gitProxyPairs(proxyURL, upstream, incomingToken, sharedOriginHost, sharedOr
 	creds := gitProxyBasicUser + ":" + incomingToken
 	extraHeader := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(creds))
 
-	// The shared origin needs both halves to be usable — an address with no CA
-	// would route git at a TLS listener it cannot verify, which is worse than
-	// not routing it there at all. Both-or-neither, so a half-wired caller
-	// degrades to the proxy's own address rather than to a broken remote.
-	if sharedOriginHost == "" || sharedOriginCAPath == "" {
+	if !routesGitAtSharedOrigin(sharedOriginHost, sharedOriginCAPath) {
 		return appendGitProxyPairs(nil, base, upstreamPrefix, upstream, extraHeader, "", includeSSH)
 	}
 	base = "https://" + sharedOriginHost + "/"
 	return appendGitProxyPairs(nil, base, upstreamPrefix, upstream, extraHeader, sharedOriginCAPath, includeSSH)
+}
+
+// routesGitAtSharedOrigin reports whether the sandbox's git is routed at the
+// shared origin rather than at the git proxy's own address. The shared origin
+// needs both halves to be usable — an address with no CA would route git at a
+// TLS listener it cannot verify, which is worse than not routing it there at
+// all. Both-or-neither, so a half-wired caller degrades to the proxy's own
+// address rather than to a broken remote.
+func routesGitAtSharedOrigin(sharedOriginHost, sharedOriginCAPath string) bool {
+	return sharedOriginHost != "" && sharedOriginCAPath != ""
 }
 
 func appendGitProxyPairs(pairs [][2]string, base, upstreamPrefix, upstream, extraHeader, caPath string, includeSSH bool) [][2]string {

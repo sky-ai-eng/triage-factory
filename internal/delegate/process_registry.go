@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
@@ -336,6 +337,21 @@ func (s *Spawner) SetExecutorID(id string, bootEpoch int64) {
 	defer s.mu.Unlock()
 	s.executorID = id
 	s.bootEpoch = bootEpoch
+}
+
+// SetCellBackend wires the backend this spawner's engagements build their
+// cells with. Call once at startup, before RunDispatcher starts.
+func (s *Spawner) SetCellBackend(b cell.Backend) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cells = b
+}
+
+// cellBackend is the read side of SetCellBackend.
+func (s *Spawner) cellBackend() cell.Backend {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cells
 }
 
 // executorIdentity returns the current (executorID, bootEpoch) pair under

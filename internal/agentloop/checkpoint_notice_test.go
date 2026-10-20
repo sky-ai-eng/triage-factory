@@ -75,6 +75,9 @@ func TestCheckpointRestoredNotice(t *testing.T) {
 		if !strings.Contains(n, "restored from a checkpoint taken during the interrupted engagement") {
 			t.Errorf("the notice must say the restore is a checkpoint of the interrupted engagement: %q", n)
 		}
+		if !strings.Contains(n, "Gitignored files") {
+			t.Errorf("a checkpoint does not carry gitignored files, and the notice must say so: %q", n)
+		}
 		// b, c and e: the flow-control call touches no workspace and is not one.
 		if !strings.Contains(n, "`bash: make test -j4` and the 2 tool calls after it came after the checkpoint") {
 			t.Errorf("the notice must name the first call after the checkpoint and count the rest: %q", n)

@@ -48,6 +48,30 @@ func TestRuntime_SharedOriginHostDropsThePort(t *testing.T) {
 	}
 }
 
+// TestRuntime_GHInjectorEndpointCarriesThePort: GH_HOST names the shared
+// origin bare, but the jail's gateway is opened by port, so the endpoint the
+// sidecar reports for it is the origin listener's full address.
+func TestRuntime_GHInjectorEndpointCarriesThePort(t *testing.T) {
+	rt, err := newCredRuntime()
+	if err != nil {
+		t.Fatalf("newCredRuntime: %v", err)
+	}
+	if got := rt.ghInjectorEndpoint("10.42.7.1:40001"); got != "10.42.7.1:40001" {
+		t.Errorf("ghInjectorEndpoint with no shared origin = %q, want the injector's own address", got)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	rt.setSharedOriginListener(ln)
+
+	if got, want := rt.ghInjectorEndpoint(rt.sharedOriginHost()), ln.Addr().String(); got != want {
+		t.Errorf("ghInjectorEndpoint on the shared origin = %q, want %q", got, want)
+	}
+}
+
 // TestRuntime_StartProxiesRoutesGitAtTheSharedOrigin is the end of the wiring
 // this ticket adds: when the broker handed down a shared-origin listener and the
 // run wants a gh channel, the sandbox's git config rewrites the upstream onto

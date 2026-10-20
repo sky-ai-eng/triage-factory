@@ -5,6 +5,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 )
 
@@ -86,17 +87,12 @@ func (hostOps) SetupNetwork(ctx context.Context, conversationID string, subnetId
 		return state, err
 	}
 
-	rule, err := applyMasquerade(ctx, netSt.subnet, netSt.upstreamIF)
-	if err != nil {
+	if err := applyMasquerade(ctx, netSt.subnet, netSt.upstreamIF); err != nil {
 		return state, err
 	}
-	state.MasqueradeRule = rule
-
-	egressRules, err := applyEgressPolicy(ctx, netSt.netnsName, netSt.vethHost, state.HostIP)
-	if err != nil {
+	if err := applyEgressPolicy(ctx, netSt.netnsName, netSt.vethHost, state.HostIP); err != nil {
 		return state, fmt.Errorf("egress policy: %w", err)
 	}
-	state.EgressRules = egressRules
 
 	return state, nil
 }
@@ -118,26 +114,79 @@ func networkStateFrom(netSt *netState, subnetIdx uint8) NetworkState {
 	}
 }
 
+// TeardownNetwork reverses SetupNetwork. state comes from the caller, so no
+// name or rule in it reaches a command: the network is identified by its
+// namespace name, which has to be one SetupNetwork builds, and state has to be
+// exactly the state SetupNetwork reports for that network. Anything else is
+// refused before anything runs, so a forged state cannot aim the deletes at a
+// host interface, a namespace the broker did not build, or another network's
+// firewall rules. The rules are then found by subnet, veth and gateway, as the
+// boot reap finds a leaked network's.
 func (hostOps) TeardownNetwork(ctx context.Context, state NetworkState) error {
-	if err := teardownIptables(ctx, state.MasqueradeRule); err != nil {
-		fmt.Fprintf(os.Stderr, "sandbox: teardown iptables: %v\n", err)
+	netSt, idx, err := teardownTarget(state)
+	if err != nil || netSt == nil {
+		return err
 	}
-	// Host-side egress-allowlist rules (Part B). The in-netns OUTPUT
-	// rules vanish with the netns delete below and need no explicit
-	// removal.
-	for _, r := range state.EgressRules {
-		if err := teardownIptables(ctx, r); err != nil {
-			fmt.Fprintf(os.Stderr, "sandbox: teardown egress rule: %v\n", err)
-		}
-	}
-	netSt := &netState{
-		netnsName:   state.NetnsName,
-		netnsPath:   state.NetnsPath,
-		vethHost:    state.VethHost,
-		vethSandbox: state.VethSandbox,
-	}
+	reapIptablesForSubnet(ctx, netSt.subnet)
 	if err := teardownNetwork(ctx, netSt); err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox: teardown network: %v\n", err)
+	}
+	// The in-netns OUTPUT rules went with the netns; the host-side ones are
+	// removed here.
+	removeHostEgressRules(ctx, netSt.vethHost, hostIP(idx))
+	return nil
+}
+
+// teardownTarget is the network TeardownNetwork removes for state, and its
+// subnet index. A zero state, which is what a setup that failed before
+// building anything reports, names nothing to remove.
+func teardownTarget(state NetworkState) (*netState, uint8, error) {
+	if state == (NetworkState{}) {
+		return nil, 0, nil
+	}
+	netSt, idx, ok := runNetFromNetnsName(state.NetnsName)
+	if !ok {
+		return nil, 0, fmt.Errorf("sandbox: teardown network: %q is not a run network's namespace", state.NetnsName)
+	}
+	if state != networkStateFrom(netSt, idx) {
+		return nil, 0, fmt.Errorf("sandbox: teardown network: the state does not match run network %s", state.NetnsName)
+	}
+	return netSt, idx, nil
+}
+
+// removeHostEgressRules removes the host-side egress rules of veth, whose
+// gateway is gw, once that veth is gone. A veth that survived its delete keeps
+// its rules, closed as they were. The rules are found by listing the chains,
+// not from a record, so an admission whose reply never reached the
+// orchestrator is removed too, and an ACCEPT left behind cannot open its port
+// to the next network given this veth's name.
+func removeHostEgressRules(ctx context.Context, veth, gw string) {
+	if _, err := net.InterfaceByName(veth); err == nil {
+		sandboxLog.Warn("run veth survived its teardown; leaving its egress rules in place", "veth", veth)
+		return
+	}
+	reapEgressRules(ctx, gw, veth)
+}
+
+func (hostOps) AdmitJailPorts(ctx context.Context, conversationID string, subnetIdx uint8, ports []int) error {
+	if err := ValidateJailPorts(ports); err != nil {
+		return err
+	}
+	// The network must be one this process built for this conversation and
+	// has not torn down. The veth name carries only a short fragment of the
+	// conversation id, so it alone could name another conversation's
+	// network at the same index; the ledger holds the whole id.
+	if owner, live := netnsLiveRun(NetnsNameForRun(conversationID, subnetIdx)); !live || owner != conversationID {
+		return fmt.Errorf("sandbox: admit jail ports: no live run network for this conversation at subnet index %d", subnetIdx)
+	}
+	// And the veth must exist: a rule naming an interface that does not is
+	// accepted by iptables and matches nothing.
+	vethHost := vethHostName(conversationID, subnetIdx)
+	if _, err := net.InterfaceByName(vethHost); err != nil {
+		return fmt.Errorf("sandbox: admit jail ports: no run network %s: %w", vethHost, err)
+	}
+	if err := admitJailPorts(ctx, vethHost, hostIP(subnetIdx), ports); err != nil {
+		return fmt.Errorf("sandbox: %w", err)
 	}
 	return nil
 }

@@ -27,6 +27,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/credprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -195,6 +196,12 @@ type App struct {
 	// only when the boot-time orphan reap succeeded. buildClaims hands it to
 	// the spawner, whose boot reset runs only when it is true.
 	cellsConfirmedClean bool
+
+	// cells is the backend this process builds delegated runs' cells with
+	// (docs/for-agents/specs/sandbox-backends/). Set by openStores in multi
+	// mode, ahead of the boot-time orphan reap that goes through it; nil in
+	// local mode, which builds no cells.
+	cells cell.Backend
 
 	// credProvisioner is the brain-side sealed-credential-bundle
 	// provisioner (TFAC-614, spec's "channel") — resolves a run's LLM/

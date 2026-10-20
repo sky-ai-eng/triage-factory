@@ -32,6 +32,12 @@ import (
 func DefaultRegistryHosts() []string {
 	return []string{
 		// npm / pnpm
+		//
+		// TODO(TFAC-1117): the tunnel sees only this hostname, so it also
+		// admits `npm publish`, a PUT to the same host: an agent holding an
+		// attacker's token can publish the repository. Closing it needs the
+		// sidecar to terminate TLS and allow registries only reads: GET, HEAD
+		// and POST to their listed read paths (npm's audit endpoints).
 		"registry.npmjs.org",
 		// Go modules + checksum database. Both are now VESTIGIAL for a
 		// sandboxed run: GOPROXY points cmd/go at the per-run fetch relay

@@ -5,8 +5,16 @@ mechanisms, and how to add support for a new ecosystem. This is the
 contributor-facing map; the per-lane working guides live next to the code
 (`internal/egressproxy/CLAUDE.md`, `internal/egressrelay/CLAUDE.md`).
 
-A delegated run executes in a gVisor jail whose L3 egress is pinned to its
-own gateway IP — the only way out is through host-side, per-run services.
+A delegated run executes in a gVisor jail whose L3 egress is pinned to the
+listeners of its own credential sidecar: the jail's gateway drops every
+connection except to the ports the sidecar reports as jail-facing
+(`StartProxiesResult.JailEndpoints`), which the cell admits before the jail
+starts (`RunNetwork.AdmitJailPorts`). The only way out is through those
+host-side, per-run services; anything else the executor listens on, including
+the sidecar's own LLM and API proxies, is closed to the jail. A new kind of
+jail-facing listener is unreachable until it is added to `JailEndpoints`
+(`internal/agentproc/proxies.go`, `cmd/runsidecar/runtime.go`); a new fetch
+relay is added automatically, because the relays are started from the catalog.
 Beneath every lane sits the operator-owned, compiled-in internal denylist
 (`internal/egressproxy/denylist.go`): cloud metadata, private ranges, the
 sandbox pool, sibling gateways. No lane, entry, or profile can widen it.
@@ -17,7 +25,7 @@ sandbox pool, sibling gateways. No lane, entry, or profile can widen it.
 | --- | --- | --- | --- |
 | **Tunnel** | CONNECT proxy + hostname allowlist; no TLS termination | Registries serving artifacts from their own or a dedicated hostname | Allowlist entry — `egressproxy.DefaultRegistryHosts` (per-profile data under TFAC-408) |
 | **Fetch relay** | Host-side HTTP relay; redirects resolved on the host, every hop denylist-vetted | Registries that redirect artifacts into shared multi-tenant storage hostnames | Catalog entry — `internal/egressrelay/catalog.go` |
-| **Credential** | Per-run credential-injecting proxies (git, LLM, `gh`) | Authenticated egress | Its own design; see `privilege-separation.md` |
+| **Credential** | Per-run credential-injecting proxies (git, `gh`) | Authenticated egress | Its own design; see `privilege-separation.md` |
 
 The API proxies behind the `tfac exec` verbs (GitHub REST, Jira REST, Linear
 GraphQL) are not lanes: the jail never reaches their upstreams, because a verb
@@ -25,14 +33,22 @@ rides the agenthost socket to the run's sidecar, whose daemon calls the proxy
 that sidecar owns. Supporting a new verb-backed provider such as Linear adds no
 allowlist entry.
 
-Two constraints shape the whole design. The tunnel never terminates TLS,
-so it can act only on hostnames — content integrity belongs to the package
+Two constraints shape the whole design. The tunnel does not terminate TLS
+today, so it can act only on hostnames — content integrity belongs to the package
 managers' own verification (lockfile hashes, go.sum), never to us. And a
 shared storage namespace (`storage.googleapis.com`, presigned S3) can
 never be allowlisted: a hostname match admits every tenant's bucket, which
 hands an agent that reads attacker-authored PR text a writable,
 credential-free exfiltration channel. The fetch relay exists for exactly
 the registries those two constraints would otherwise strand.
+
+Acting only on hostnames leaves the tunnel two gaps it cannot close. It
+cannot tell a read from a write on an allowlisted host, so `npm publish` to
+`registry.npmjs.org` gets through. And it cannot see which name a client
+asks a shared CDN edge for once the tunnel is open, so an allowlisted name
+can front for another site on the same edge. TLS interception in the
+sidecar closes both, under conditions designed in
+`docs/for-agents/specs/sandbox-backends/` §6.1 (TFAC-1117).
 
 ## Which lane does an ecosystem need? Probe — never assume
 

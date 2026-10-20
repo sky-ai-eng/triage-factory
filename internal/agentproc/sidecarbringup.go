@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
@@ -162,7 +162,7 @@ type SidecarBringUpParams struct {
 // the opaque ciphertext) → relay the ciphertext down → ask the sidecar to bind
 // its proxies on HostVethIP. The orchestrator never opens the bundle; only the
 // sidecar holds the private key.
-func BringUpRunSidecar(ctx context.Context, sc sandbox.LaunchedSidecar, provision SidecarProvisionFunc, params SidecarBringUpParams) (*sidecarproto.StartProxiesResult, *sidecarproto.Conn, error) {
+func BringUpRunSidecar(ctx context.Context, sc cell.Sidecar, provision SidecarProvisionFunc, params SidecarBringUpParams) (*sidecarproto.StartProxiesResult, *sidecarproto.Conn, error) {
 	stream := sc.Supervision()
 	if stream == nil {
 		return nil, nil, fmt.Errorf("agentproc: launched sidecar exposes no supervision channel")

@@ -27,8 +27,9 @@ const (
 	// WorkspaceProvenanceRehydrated is a tree rebuilt from the durable
 	// snapshot because the warm copy was gone — another executor, a wiped
 	// run root, a startup sweep. Snapshots are taken at graceful dormancy
-	// points, so everything up to that point is present, uncommitted and
-	// untracked files included; work done after it is not.
+	// points, so what a capture carries is present as of that point: commits,
+	// uncommitted and untracked files, and the run root's _tfac, but not
+	// gitignored files or the rest of the run root. Work done after it is not.
 	WorkspaceProvenanceRehydrated WorkspaceProvenance = "rehydrated"
 	// WorkspaceProvenanceFresh is a tree the source setup built from
 	// nothing — a first claim's clone and checkout. No snapshot is involved

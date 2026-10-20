@@ -184,6 +184,10 @@ func (c *IPCClient) TeardownNetwork(ctx context.Context, state sandbox.NetworkSt
 	return c.call(ctx, methodTeardownNetwork, teardownNetworkArgs{State: state}, nil)
 }
 
+func (c *IPCClient) AdmitJailPorts(ctx context.Context, conversationID string, subnetIdx uint8, ports []int) error {
+	return c.call(ctx, methodAdmitJailPorts, admitJailPortsArgs{ConversationID: conversationID, SubnetIdx: subnetIdx, Ports: ports}, nil)
+}
+
 func (c *IPCClient) EnsureRootfs(ctx context.Context, selector sandbox.RootfsSelector) (string, error) {
 	var res ensureRootfsResult
 	if err := c.call(ctx, methodEnsureRootfs, ensureRootfsArgs{Selector: selector}, &res); err != nil {

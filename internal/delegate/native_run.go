@@ -19,6 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
@@ -78,7 +79,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 			reason:         db.ParkStopped(stopParkReason(ctx), ""),
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
-			network:        runTreeHandOff(cfg.sidecar.runNetwork()),
+			cell:           cfg.sidecar.treeHandOff(),
 		}
 		if shutdownCancelled(ctx) {
 			return engagementDisposition{fenced: s.handBackOnShutdown(ctx, park, ""), handedBack: true}
@@ -93,8 +94,11 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// The tool-host jail, once launched, is stopped before any of these exits
 	// reads the tree: the snapshot a park takes must not run beside a process
 	// of the run.
-	var jail *agentproc.ToolHostJail
+	var jail cell.Jail
 	stopJail := func() {
+		if jail == nil {
+			return
+		}
 		if err := jail.Stop(); err != nil {
 			delegateLog.Error("the run's tool host jail did not stop; its tree is not captured while it runs",
 				"conversation", conversationID, "error", err)
@@ -191,27 +195,33 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		return engagementDisposition{fenced: true}
 	}
 
-	jail, err := agentproc.LaunchToolHost(ctx, agentproc.ToolHostOptions{
-		ConversationID:       conversationID,
-		WorkspaceKey:         namespace,
-		Worktree:             claudeCwd,
-		ExtraEnv:             s.nativeAgentEnv(ctx, orgID, conversationID, namespace, cfg, triggerType, creatorUserID),
-		PrebuiltNetwork:      cfg.sidecar.runNetwork(),
-		PrebuiltProxyEnv:     cfg.sidecar.jailEnv(),
-		AgentHostSocket:      agenthost.SocketMountFor(conversationID),
-		GHChannel:            cfg.sidecar.ghChannel(conversationID),
-		SkillsSourcePath:     cfg.skillsSourcePath,
-		MemorySourcePath:     cfg.memorySourcePath,
-		OrgID:                orgID,
-		ClaimID:              cfg.claimID,
-		RecordSandboxActuals: s.recordSandboxActuals,
+	// This process holds no credential, so a native engagement without a cell
+	// is a wiring bug, not a case to degrade through.
+	runCell := cfg.sidecar.runCell()
+	if runCell == nil {
+		return launchFailed(errors.New("launch tool host: no cell was provisioned for this engagement — multi mode is always per-run-isolated"))
+	}
+	launched, err := runCell.Launch(ctx, cell.LaunchSpec{
+		WorkspaceKey:     namespace,
+		RunTree:          claudeCwd,
+		Env:              s.nativeAgentEnv(ctx, orgID, conversationID, namespace, cfg, triggerType, creatorUserID),
+		ProxyEnv:         cfg.sidecar.jailEnv(),
+		SidecarEndpoints: cfg.sidecar.jailEndpoints(),
+		AgentHostSocket:  agenthost.SocketPathFor(conversationID),
+		GHChannel:        cellGHChannel(cfg.sidecar.ghChannel(conversationID)),
+		SkillsSource:     cfg.skillsSourcePath,
+		MemorySource:     cfg.memorySourcePath,
+		OrgID:            orgID,
+		ClaimID:          cfg.claimID,
+		RecordActuals:    s.recordSandboxActuals,
 	})
 	if err != nil {
 		return launchFailed(fmt.Errorf("launch tool host: %w", err))
 	}
+	jail = launched
 	defer func() { _ = jail.Close() }()
 
-	conn, err := jail.Accept(ctx, toolHostDialTimeout)
+	conn, err := jail.Connect(ctx, toolHostDialTimeout)
 	if err != nil {
 		return launchFailed(fmt.Errorf("connect to tool host: %w", err))
 	}
@@ -780,7 +790,7 @@ func (s *Spawner) recordNativeResult(
 			reason:         db.ParkStopped(stopParkReason(ctx), ""),
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
-			network:        runTreeHandOff(cfg.sidecar.runNetwork()),
+			cell:           cfg.sidecar.treeHandOff(),
 		}
 		// Nor is a shutdown a stop. The loop's transcript is already whole
 		// up to the turn it was on — the next claim's repair pass answers a
@@ -838,7 +848,7 @@ func (s *Spawner) recordNativeResult(
 			claimID:        cfg.claimID,
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
-			network:        runTreeHandOff(cfg.sidecar.runNetwork()),
+			cell:           cfg.sidecar.treeHandOff(),
 		}, "", cfg.upstreamHandBacks, lastErr, creatorUserID)
 
 	case agentloop.ResultParked:
@@ -858,7 +868,7 @@ func (s *Spawner) recordNativeResult(
 			reason:         db.ParkIdle(),
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
-			network:        runTreeHandOff(cfg.sidecar.runNetwork()),
+			cell:           cfg.sidecar.treeHandOff(),
 		}, "")}
 	}
 

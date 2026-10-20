@@ -21,6 +21,9 @@ func (f fakePrivilegedOps) SetupNetwork(ctx context.Context, conversationID stri
 func (f fakePrivilegedOps) TeardownNetwork(ctx context.Context, state NetworkState) error {
 	return nil
 }
+func (f fakePrivilegedOps) AdmitJailPorts(ctx context.Context, conversationID string, subnetIdx uint8, ports []int) error {
+	return nil
+}
 func (f fakePrivilegedOps) EnsureRootfs(ctx context.Context, selector RootfsSelector) (string, error) {
 	return f.tag, nil
 }
@@ -91,5 +94,79 @@ func TestSetPrivilegedOps_ReplacesDefault(t *testing.T) {
 	}
 	if path != "swapped" {
 		t.Errorf("defaultOps.EnsureRootfs = %q, want the fake's sentinel — SetPrivilegedOps did not take effect", path)
+	}
+}
+
+// TestHostOpsAdmitJailPorts_RefusesUnknownNetworks: the privileged side opens
+// ports only on a network it built for the conversation asking, and only on a
+// veth that exists. Both refusals come before any iptables call, so this runs
+// without root.
+func TestHostOpsAdmitJailPorts_RefusesUnknownNetworks(t *testing.T) {
+	ctx := context.Background()
+	const idx = 213
+
+	if err := (hostOps{}).AdmitJailPorts(ctx, "conv-never-built", idx, []int{40001}); err == nil {
+		t.Error("admitted ports on a network this process never built")
+	}
+
+	// A network live for one conversation does not admit another's request.
+	name := NetnsNameForRun("conv-owner", idx)
+	markNetnsLive(name, "conv-owner")
+	t.Cleanup(func() { forgetNetns(name) })
+	if err := (hostOps{}).AdmitJailPorts(ctx, "conv-someone-else", idx, []int{40001}); err == nil {
+		t.Error("admitted ports on another conversation's network")
+	}
+
+	// The owner's request, on a network whose veth does not exist here.
+	if err := (hostOps{}).AdmitJailPorts(ctx, "conv-owner", idx, []int{40001}); err == nil {
+		t.Error("admitted ports on a veth that does not exist")
+	}
+}
+
+// TestTeardownTarget_AcceptsWhatSetupReports: the state SetupNetwork reports
+// for a network, whole, is the one state TeardownNetwork acts on, and the
+// network it acts on is that one.
+func TestTeardownTarget_AcceptsWhatSetupReports(t *testing.T) {
+	const idx = 9
+	built := runNetNames(netnsIDFrag("conv-a"), idx)
+	netSt, gotIdx, err := teardownTarget(networkStateFrom(built, idx))
+	if err != nil {
+		t.Fatalf("teardownTarget refused the state setup reports: %v", err)
+	}
+	if gotIdx != idx || *netSt != *built {
+		t.Errorf("teardownTarget = %+v at %d, want %+v at %d", *netSt, gotIdx, *built, idx)
+	}
+	if netSt, _, err := teardownTarget(NetworkState{}); err != nil || netSt != nil {
+		t.Errorf("a zero state, which a setup that built nothing reports, = %v, %v; want nothing to remove", netSt, err)
+	}
+}
+
+// TestTeardownTarget_RefusesStatesSetupDidNotBuild: the state is the caller's,
+// so a teardown whose names are not exactly what SetupNetwork builds is
+// refused. TeardownNetwork refuses on this before any `ip` or `iptables` call;
+// the cases run against teardownTarget rather than TeardownNetwork, so a
+// regression run as root fails here instead of deleting the host's eth0.
+func TestTeardownTarget_RefusesStatesSetupDidNotBuild(t *testing.T) {
+	const idx = 9
+	good := networkStateFrom(runNetNames(netnsIDFrag("conv-a"), idx), idx)
+	other := networkStateFrom(runNetNames(netnsIDFrag("conv-b"), idx+1), idx+1)
+	with := func(f func(*NetworkState)) NetworkState {
+		s := good
+		f(&s)
+		return s
+	}
+	for name, state := range map[string]NetworkState{
+		"a host interface":               with(func(s *NetworkState) { s.VethHost = "eth0" }),
+		"another network's veth":         with(func(s *NetworkState) { s.VethHost = other.VethHost }),
+		"another network's gateway":      with(func(s *NetworkState) { s.HostIP = other.HostIP }),
+		"another network's subnet":       with(func(s *NetworkState) { s.Subnet = other.Subnet }),
+		"a namespace setup never builds": {NetnsName: "default"},
+		"a path out of the netns dir":    {NetnsName: "../../etc/tf-deadbeef-9"},
+		"a non-canonical index":          with(func(s *NetworkState) { s.NetnsName = "tf-" + netnsIDFrag("conv-a") + "-009" }),
+		"a veth with no namespace":       {VethHost: "eth0"},
+	} {
+		if _, _, err := teardownTarget(state); err == nil {
+			t.Errorf("%s: teardownTarget accepted %+v", name, state)
+		}
 	}
 }

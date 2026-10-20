@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -20,11 +21,11 @@ import (
 // Also enables net.ipv4.ip_forward (idempotent — checks current
 // value first so we don't toggle on every run).
 //
-// Returns the rule's literal args so teardownIptables can mirror
-// them in a -D call.
-func applyMasquerade(ctx context.Context, subnet, upstreamIF string) (iptablesRule, error) {
+// Teardown finds the rule by its subnet (reapIptablesForSubnet), so
+// nothing about it is returned.
+func applyMasquerade(ctx context.Context, subnet, upstreamIF string) error {
 	if err := ensureIPForward(); err != nil {
-		return iptablesRule{}, fmt.Errorf("iptables: ip_forward: %w", err)
+		return fmt.Errorf("iptables: ip_forward: %w", err)
 	}
 
 	rule := iptablesRule{
@@ -37,13 +38,11 @@ func applyMasquerade(ctx context.Context, subnet, upstreamIF string) (iptablesRu
 		},
 	}
 	args := append([]string{"-t", rule.Table, "-A", rule.Chain}, rule.Args...)
-	if err := runIptables(ctx, args...); err != nil {
-		return iptablesRule{}, err
-	}
-	return rule, nil
+	return runIptables(ctx, args...)
 }
 
-// teardownIptables removes the masquerade rule. Idempotent — a
+// teardownIptables deletes rule, mirroring the -A or -I that installed
+// it: the rollback of a policy that failed partway. Idempotent — a
 // missing rule errors with exit code 1 from iptables, which we
 // silence.
 func teardownIptables(ctx context.Context, rule iptablesRule) error {
@@ -56,39 +55,38 @@ func teardownIptables(ctx context.Context, rule iptablesRule) error {
 	return nil
 }
 
-// applyEgressPolicy restricts a sandbox's egress to its own gateway IP
-// (gatewayIP, = 10.42.<idx>.1) plus loopback, default-dropping
-// everything else. This closes two holes at once:
+// applyEgressPolicy closes a sandbox's network to everything but the
+// listeners of its own credential sidecar. This closes three holes:
 //
-//   - cross-tenant: a compromised sandbox can no longer reach a
-//     *sibling* run's gateway (and thus that run's credential proxy)
-//     via the shared host namespace's weak-host delivery.
-//   - exfil: the sandbox can no longer reach the open internet
-//     directly; its only legitimate destinations are the per-run
-//     proxies bound on its own gateway IP.
-//
-// IP-scoped, not port-scoped: multiple proxies bind to the gateway IP
-// (LLM now, the git proxy later), so the whole gateway IP is
-// allowed rather than a single port.
+//   - cross-tenant: a compromised sandbox cannot reach a *sibling*
+//     run's gateway (and thus that run's credential proxy) via the
+//     shared host namespace's weak-host delivery.
+//   - exfil: the sandbox cannot reach the open internet directly.
+//   - the host: the sandbox cannot reach anything else the executor
+//     listens on. The gateway IP is a local address of the host, so a
+//     listener bound on every interface (an executor's metrics endpoint)
+//     answers on it unless the gateway itself is closed.
 //
 // Two layers, because the sandbox runs under gVisor whose user-space
 // netstack injects packets onto the veth below the in-netns netfilter
 // hooks and so may not traverse the in-netns OUTPUT chain the way an
 // ordinary process does:
 //
-//  1. In-netns OUTPUT allowlist. Proven to work for ordinary-namespace
-//     traffic (the acceptance repro probes from a socat process
-//     inside the netns). Vanishes with the netns — no teardown needed.
-//  2. Host-side ingress filter on the run's veth (vethHost): drop any
-//     packet arriving from the sandbox whose destination is not the
-//     gateway IP. This is the backstop that catches gVisor's netstack
-//     traffic. Returned for teardown, mirroring applyMasquerade.
+//  1. In-netns OUTPUT allowlist: the gateway IP plus loopback. Proven to
+//     work for ordinary-namespace traffic (the acceptance repro probes
+//     from a socat process inside the netns). Vanishes with the netns —
+//     no teardown needed.
+//  2. Host-side ingress filter on the run's veth (vethHost), the
+//     backstop that catches gVisor's netstack traffic: drop every packet
+//     arriving from the sandbox, to the gateway IP and to anywhere else.
+//     The sidecar's listeners are opened afterwards, port by port, by
+//     admitJailPorts, once the sidecar has bound them.
 //
-// Own-gateway traffic is excluded from the drop ("! -d gatewayIP") in
-// both layers, so the legitimate proxy hop is never affected. Returns
-// the host-side rules so Close can remove them; the in-netns rules need
-// no teardown.
-func applyEgressPolicy(ctx context.Context, netnsName, vethHost, gatewayIP string) ([]iptablesRule, error) {
+// Until admitJailPorts runs the sandbox can complete no connection to the
+// host at all, so a launch path that never admits fails closed. Teardown
+// finds the host-side rules by veth and gateway (reapEgressRules); the
+// in-netns rules go with the netns.
+func applyEgressPolicy(ctx context.Context, netnsName, vethHost, gatewayIP string) error {
 	// Layer 1 — in-netns OUTPUT allowlist. Add the ACCEPTs before
 	// flipping the policy to DROP (config-time, no traffic in flight,
 	// but the ordering keeps the intent obvious). gVisor traffic may
@@ -102,45 +100,87 @@ func applyEgressPolicy(ctx context.Context, netnsName, vethHost, gatewayIP strin
 	}
 	for _, args := range netnsSteps {
 		if err := runIptablesInNetns(ctx, netnsName, args...); err != nil {
-			return nil, fmt.Errorf("egress: in-netns %s: %w", strings.Join(args, " "), err)
+			return fmt.Errorf("egress: in-netns %s: %w", strings.Join(args, " "), err)
 		}
 	}
 
-	// Layer 2 — host-side ingress filter on the run's veth. Drop every
-	// packet arriving on vethHost whose destination is not the gateway
-	// IP: that covers both local delivery to a sibling gateway (INPUT —
-	// the cross-tenant hole, since a sibling gateway is a local IP the
-	// weak-host model would otherwise accept) and forwarded
-	// internet/cross-subnet traffic (FORWARD — the exfil hole).
+	// Layer 2 — host-side ingress filter on the run's veth. Every packet
+	// arriving on vethHost is dropped:
 	//
-	// Inserted at the head of each chain (-I) so the DROP wins over any
+	//   - not to the gateway IP: local delivery to a sibling gateway
+	//     (INPUT — the cross-tenant hole, since a sibling gateway is a
+	//     local IP the weak-host model would otherwise accept) and
+	//     forwarded internet/cross-subnet traffic (FORWARD — the exfil
+	//     hole);
+	//   - to the gateway IP (INPUT only; the gateway is local, so nothing
+	//     addressed to it is forwarded): every port of the host, until
+	//     admitJailPorts opens the sidecar's.
+	//
+	// The two DROPs stay separate rules, each naming the gateway, so the
+	// orphan reaper can still find a leaked one by its gateway address.
+	//
+	// Inserted at the head of each chain (-I) so the DROPs win over any
 	// pre-existing broad ACCEPT (e.g. a default-accept FORWARD policy
 	// that lets the MASQUERADE'd internet path work today). The
-	// "-i vethHost" match scopes it tightly to this one run's veth, so
+	// "-i vethHost" match scopes them tightly to this one run's veth, so
 	// head-insertion can't affect unrelated host traffic.
 	var hostRules []iptablesRule
-	for _, chain := range []string{"INPUT", "FORWARD"} {
+	for _, r := range []struct {
+		chain string
+		dest  []string
+	}{
+		{"INPUT", []string{"!", "-d", gatewayIP}},
+		{"FORWARD", []string{"!", "-d", gatewayIP}},
+		{"INPUT", []string{"-d", gatewayIP}},
+	} {
 		rule := iptablesRule{
 			Table: "filter",
-			Chain: chain,
-			Args: []string{
-				"-i", vethHost,
-				"!", "-d", gatewayIP,
-				"-j", "DROP",
-			},
+			Chain: r.chain,
+			Args:  append(append([]string{"-i", vethHost}, r.dest...), "-j", "DROP"),
 		}
 		args := append([]string{"-t", rule.Table, "-I", rule.Chain}, rule.Args...)
 		if err := runIptables(ctx, args...); err != nil {
 			// Roll back any host rules already installed before failing,
 			// so a partial apply doesn't leak a half-policy.
-			for _, r := range hostRules {
-				_ = teardownIptables(ctx, r)
+			for _, installed := range hostRules {
+				_ = teardownIptables(ctx, installed)
 			}
-			return nil, fmt.Errorf("egress: host-side %s: %w", chain, err)
+			return fmt.Errorf("egress: host-side %s: %w", r.chain, err)
 		}
 		hostRules = append(hostRules, rule)
 	}
-	return hostRules, nil
+	return nil
+}
+
+// admitJailPorts opens TCP ports on a sandbox's gateway IP to its jail:
+// one ACCEPT per port on the run's veth, inserted at the head of INPUT so
+// it precedes the DROPs applyEgressPolicy installed. These are the only
+// connections the jail can complete to the host. On failure the ones
+// already installed are removed; teardown finds the rest by veth and gateway
+// (reapEgressRules).
+func admitJailPorts(ctx context.Context, vethHost, gatewayIP string, ports []int) error {
+	var rules []iptablesRule
+	for _, port := range ports {
+		rule := iptablesRule{
+			Table: "filter",
+			Chain: "INPUT",
+			Args: []string{
+				"-i", vethHost,
+				"-d", gatewayIP,
+				"-p", "tcp", "--dport", strconv.Itoa(port),
+				"-j", "ACCEPT",
+			},
+		}
+		args := append([]string{"-t", rule.Table, "-I", rule.Chain}, rule.Args...)
+		if err := runIptables(ctx, args...); err != nil {
+			for _, installed := range rules {
+				_ = teardownIptables(ctx, installed)
+			}
+			return fmt.Errorf("admit jail port %d: %w", port, err)
+		}
+		rules = append(rules, rule)
+	}
+	return nil
 }
 
 // reapIptablesForSubnet removes every POSTROUTING MASQUERADE rule
@@ -207,18 +247,25 @@ func runIptablesInNetns(ctx context.Context, netnsName string, args ...string) e
 	return nil
 }
 
-// reapEgressForSubnet removes leaked host-side egress DROP rules for a
-// given subnet idx (the Part B host-side layer). Matches the
-// rules by the gateway IP (10.42.<idx>.1) on a vh- veth in the
-// INPUT/FORWARD chains. Mirrors reapIptablesForSubnet: best-effort,
-// called from the orphan reaper when a netns was leaked by a
+// reapEgressForSubnet removes leaked host-side egress rules for a given
+// subnet idx (the Part B host-side layer and the ports admitJailPorts
+// opened). Matches the rules by the gateway IP (10.42.<idx>.1) on a vh-
+// veth in the INPUT/FORWARD chains. Mirrors reapIptablesForSubnet:
+// best-effort, called from the orphan reaper when a netns was leaked by a
 // hard-crashed previous TF process.
 //
 // A leaked host-side rule is already inert (its -i vh-<idx> interface
 // was deleted with the netns, so no packet can match it), but we reap
-// it for hygiene so a reused idx doesn't accrete duplicate rules.
+// it for hygiene so a reused idx doesn't accrete duplicate rules — and so
+// an ACCEPT left behind cannot open a port to the next run that gets the
+// same veth name.
 func reapEgressForSubnet(ctx context.Context, idx uint8) {
-	gw := hostIP(idx)
+	reapEgressRules(ctx, hostIP(idx), "")
+}
+
+// reapEgressRules removes the host-side egress rules naming the gateway IP gw
+// on a vh- veth. A non-empty veth narrows it to rules arriving on that veth.
+func reapEgressRules(ctx context.Context, gw, veth string) {
 	for _, chain := range []string{"INPUT", "FORWARD"} {
 		// "-t filter" is explicit even though it's the default, to match
 		// every other iptables call in this file and make clear we're
@@ -229,6 +276,9 @@ func reapEgressForSubnet(ctx context.Context, idx uint8) {
 		}
 		for _, line := range strings.Split(string(out), "\n") {
 			if !egressRuleLineMatches(line, chain, gw) {
+				continue
+			}
+			if veth != "" && !argsNameVeth(strings.Fields(line), veth) {
 				continue
 			}
 			delRule := strings.Replace(line, "-A "+chain, "-D "+chain, 1)
@@ -244,9 +294,10 @@ func reapEgressForSubnet(ctx context.Context, idx uint8) {
 }
 
 // egressRuleLineMatches reports whether an `iptables -S <chain>` line is
-// one of our host-side egress DROP rules for gateway IP gw. Pulled out
-// as a pure function so the field-matching logic — the bug-prone part —
-// is unit-testable without root or a live iptables.
+// one of our host-side rules for gateway IP gw: an egress DROP
+// (applyEgressPolicy) or an admitted jail port (admitJailPorts). Pulled
+// out as a pure function so the field-matching logic — the bug-prone part
+// — is unit-testable without root or a live iptables.
 //
 // Field-based (not substring) matching so that:
 //   - the gateway IP can't be a substring of a longer address (10.42.0.1
@@ -254,26 +305,45 @@ func reapEgressForSubnet(ctx context.Context, idx uint8) {
 //   - it tolerates iptables printing the destination either as
 //     "10.42.0.1" or "10.42.0.1/32" (nft vs legacy backends differ).
 //
-// The destination in our rule is negated ("! -d <gw>"); -S prints the
-// "!" as its own token before "-d", so scanning for "-d" still finds
-// the address field that follows it.
+// The DROPs name the gateway either negated ("! -d <gw>", which -S prints
+// with the "!" as its own token before "-d") or plain. An ACCEPT is ours
+// only in the admitted shape: the plain destination and a --dport.
 func egressRuleLineMatches(line, chain, gw string) bool {
 	if !strings.HasPrefix(line, "-A "+chain+" ") {
 		return false
 	}
 	fields := strings.Fields(line)
-	var hasVethIn, hasDrop, hasGateway bool
+	var hasVethIn, hasDrop, hasAccept, hasGateway, gatewayNegated, hasDport bool
 	for i, f := range fields {
 		switch {
 		case f == "-i" && i+1 < len(fields) && strings.HasPrefix(fields[i+1], "vh-"):
 			hasVethIn = true
 		case f == "-j" && i+1 < len(fields) && fields[i+1] == "DROP":
 			hasDrop = true
+		case f == "-j" && i+1 < len(fields) && fields[i+1] == "ACCEPT":
+			hasAccept = true
 		case f == "-d" && i+1 < len(fields) && ipFieldMatches(fields[i+1], gw):
 			hasGateway = true
+			gatewayNegated = i > 0 && fields[i-1] == "!"
+		case f == "--dport":
+			hasDport = true
 		}
 	}
-	return hasVethIn && hasDrop && hasGateway
+	if !hasVethIn || !hasGateway {
+		return false
+	}
+	return hasDrop || (hasAccept && !gatewayNegated && hasDport)
+}
+
+// argsNameVeth reports whether an iptables rule's arguments match packets
+// arriving on veth ("-i <veth>").
+func argsNameVeth(args []string, veth string) bool {
+	for i, a := range args {
+		if a == "-i" && i+1 < len(args) && args[i+1] == veth {
+			return true
+		}
+	}
+	return false
 }
 
 // ipFieldMatches reports whether an iptables address field equals ip,
@@ -285,7 +355,7 @@ func ipFieldMatches(field, ip string) bool {
 // ensureIPForward reads /proc/sys/net/ipv4/ip_forward and writes "1"
 // only if it's not already 1. Avoids fighting with other workloads
 // on the host that might toggle it (Docker does too, idempotently —
-// we mirror its behaviour).
+// we mirror its behavior).
 func ensureIPForward() error {
 	const path = "/proc/sys/net/ipv4/ip_forward"
 	cur, err := os.ReadFile(path)

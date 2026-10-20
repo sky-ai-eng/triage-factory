@@ -34,8 +34,22 @@ type PrivilegedOps interface {
 
 	// TeardownNetwork reverses SetupNetwork: removes the iptables
 	// rules, deletes the veth pair + netns. Idempotent and best-effort
-	// — safe to call against partial or zero-value state.
+	// — safe to call against partial or zero-value state. It refuses a
+	// state that is not exactly one SetupNetwork reported, and acts on
+	// no name in it as given: every name and rule is derived from the
+	// network's namespace name.
 	TeardownNetwork(ctx context.Context, state NetworkState) error
+
+	// AdmitJailPorts opens TCP ports on the gateway of conversationID's
+	// network at subnetIdx to its jail: the listeners of the run's
+	// credential sidecar the jail was told to use. SetupNetwork leaves
+	// every other connection from the jail to the host dropped, so these
+	// are the only ones it can complete. The veth and gateway are derived
+	// here from (conversationID, subnetIdx) rather than taken from the
+	// caller, and the ports are validated (ValidateJailPorts).
+	// TeardownNetwork removes the rules with the network's others, found
+	// by veth and gateway.
+	AdmitJailPorts(ctx context.Context, conversationID string, subnetIdx uint8, ports []int) error
 
 	// EnsureRootfs idempotently bakes (or returns the cached path to)
 	// the curated rootfs matching selector. v1 has exactly one curated
@@ -198,9 +212,9 @@ type SandboxOps interface {
 }
 
 // NetworkState is the serializable per-run network state SetupNetwork
-// returns and TeardownNetwork consumes. Every field is a plain string
-// or a small value struct so the whole thing round-trips as JSON over
-// a future broker RPC.
+// returns and TeardownNetwork consumes. Every field is a plain string,
+// so the whole thing round-trips as JSON over the broker RPC and
+// compares with ==.
 type NetworkState struct {
 	// Subnet, HostIP, NetnsPath are SetupNetwork's documented return
 	// per spec §4.
@@ -208,16 +222,12 @@ type NetworkState struct {
 	HostIP    string
 	NetnsPath string
 
-	// The rest is teardown-only bookkeeping. A future broker keeps this
-	// broker-internal once Teardown becomes a bare run-id RPC (PS-P3);
-	// P0 has no broker process to hold it, so it travels alongside the
-	// documented fields so this same process can reverse its own setup
-	// without re-deriving names.
-	NetnsName      string
-	VethHost       string
-	VethSandbox    string
-	MasqueradeRule iptablesRule
-	EgressRules    []iptablesRule
+	// The names of what SetupNetwork built. TeardownNetwork does not act
+	// on them as given: it derives every name from NetnsName and refuses
+	// a state that disagrees.
+	NetnsName   string
+	VethHost    string
+	VethSandbox string
 }
 
 // RootfsSelector names which curated rootfs variant the broker should

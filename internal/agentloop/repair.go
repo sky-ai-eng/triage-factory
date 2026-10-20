@@ -47,14 +47,24 @@ func interruptedToolResult(prov domain.WorkspaceProvenance, executorChanged, aft
 		"verify state before repeating any side-effectful action."
 }
 
+// uncapturedSentence names what no capture carries. A capture keeps each
+// repository's commits and every change git would stage, plus /work/_tfac/, so
+// gitignored files and the rest of the run root are absent from any restored
+// tree — the toolchains' caches among them, since the jail's home directory is
+// /work. An agent told its tree is whole would build against dependencies that
+// are not there.
+const uncapturedSentence = "Gitignored files, such as installed dependencies and build output, and anything " +
+	"under /work outside your repositories and /work/_tfac/, such as the toolchain caches in your home directory, " +
+	"were not kept: reinstall dependencies before you build or run tests. "
+
 // snapshotRestoredBody describes a workspace rebuilt from its snapshot
-// exactly: snapshots are taken at graceful dormancy points, so everything up
-// to the last park or step boundary survived — including uncommitted and
-// untracked files — and precisely the interrupted engagement's work since that
-// point is absent.
+// exactly: snapshots are taken at graceful dormancy points, so what a capture
+// carries survived as of the last park or step boundary, uncapturedSentence
+// names what it does not, and precisely the interrupted engagement's work
+// since that point is absent.
 const snapshotRestoredBody = "Your workspace was restored from its last snapshot. " +
-	"Everything committed or written up to that snapshot is present, " +
-	"including uncommitted and untracked files. Any changes made after it — during the engagement that was " +
+	"As of that snapshot, your commits and your uncommitted and untracked files are present, and so is " +
+	"/work/_tfac/. " + uncapturedSentence + "Any changes made after it — during the engagement that was " +
 	"interrupted — are not present. Check the working tree and git log before building on what you remember doing."
 
 // builtFreshBody is the other rebuild, and it is a strictly larger loss: no
@@ -76,7 +86,8 @@ const builtFreshBody = "Your workspace was built from scratch — there was no s
 // missing is exactly the tool calls after the checkpoint, and the transcript
 // names them.
 const checkpointRestoredLead = "Your workspace was restored from a checkpoint taken during the interrupted engagement. " +
-	"Everything up to that checkpoint is present, including uncommitted and untracked files. "
+	"As of that checkpoint, your commits and your uncommitted and untracked files are present, and so is " +
+	"/work/_tfac/. " + uncapturedSentence
 
 // checkpointSummarizedSentence covers the calls a compaction took out of the
 // window: a summary written after the checkpoint may describe work made

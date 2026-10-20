@@ -242,7 +242,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	// The LLM coordinates travel back to the orchestrator's own engine only —
 	// no jail is ever pointed at the proxy. The proxy holds the key; the
 	// caller holds a per-run placeholder.
-	result := sidecarproto.StartProxiesResult{Env: env, LLMEnv: handle.LLMEnv()}
+	result := sidecarproto.StartProxiesResult{Env: env, LLMEnv: handle.LLMEnv(), JailEndpoints: handle.JailEndpoints()}
 	// Surface the git proxy's address + per-run placeholder so the orchestrator
 	// routes its OWN pre-sandbox clone through this same proxy — the real token
 	// stays here. Empty when no git proxy was started (GitEnabled false).
@@ -320,6 +320,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 			return nil, gerr
 		}
 		result.GHChannelHost, result.GHChannelToken = host, token
+		result.JailEndpoints = append(result.JailEndpoints, r.ghInjectorEndpoint(host))
 	}
 
 	// Host the exec-verb socket server in THIS capless process rather than the
@@ -557,6 +558,17 @@ func (r *credRuntime) startGHInjector(hostVethIP, upstream, conversationID strin
 	}
 	r.ghInjector = srv
 	return addr, token, nil
+}
+
+// ghInjectorEndpoint is the gh injector's "host:port" as the jail dials it.
+// On the shared origin GHChannelHost is the bare host, its port implied by
+// https, so the endpoint is the origin listener's own address; otherwise it is
+// the address the injector bound.
+func (r *credRuntime) ghInjectorEndpoint(host string) string {
+	if r.sharedOrigin != nil {
+		return r.sharedOrigin.Addr().String()
+	}
+	return host
 }
 
 // ghInjectorConfig builds the gh channel's per-run wiring, the sibling of

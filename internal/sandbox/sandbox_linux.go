@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"sync"
 	"time"
 )
@@ -37,16 +38,8 @@ type teardownState struct {
 	// Sandbox.Close still reclaims it.
 }
 
-// iptablesRule names a single MASQUERADE rule so teardown can
-// remove exactly what we added. Stored as the literal -A arguments
-// so the teardown -D call mirrors the insertion verbatim.
-//
-// Fields are exported (despite the type itself being unexported)
-// because iptablesRule embeds into NetworkState, which
-// docs/for-agents/specs/privsep/README.md §4 requires to round-trip as JSON over
-// a future broker RPC — encoding/json silently drops unexported
-// fields, which would make MasqueradeRule/EgressRules serialize to
-// "{}" and lose the teardown data.
+// iptablesRule is one rule as the literal arguments that installed it, so
+// a rollback's -D call mirrors the insertion verbatim.
 type iptablesRule struct {
 	Table string // "nat"
 	Chain string // "POSTROUTING"
@@ -310,11 +303,12 @@ func setupRunNetwork(ctx context.Context, conversationID string) (*RunNetwork, e
 		return nil, fmt.Errorf("sandbox: %w", serr)
 	}
 	return &RunNetwork{
-		Idx:       idx,
-		Subnet:    netSt.Subnet,
-		HostIP:    netSt.HostIP,
-		NetnsPath: netSt.NetnsPath,
-		netSt:     netSt,
+		Idx:            idx,
+		Subnet:         netSt.Subnet,
+		HostIP:         netSt.HostIP,
+		NetnsPath:      netSt.NetnsPath,
+		conversationID: conversationID,
+		netSt:          netSt,
 	}, nil
 }
 
@@ -361,6 +355,39 @@ func (n *RunNetwork) GrantStaging(ctx context.Context, dir string) error {
 	n.grantedStaging = appendOnce(n.grantedStaging, dir)
 	defer stagingGrants.lock(dir)()
 	return defaultOps.GrantRunStaging(ctx, dir, n.Idx)
+}
+
+// AdmitJailPorts opens TCP ports on this network's gateway to its jail — the
+// sidecar listeners the jail was told to use. Close removes the rules with the
+// network. Until it runs, the jail can complete no connection to the host at
+// all. Ports already admitted are skipped, so a
+// relaunch into the same network asks only for what is new.
+func (n *RunNetwork) AdmitJailPorts(ctx context.Context, ports []int) error {
+	if err := ValidateJailPorts(ports); err != nil {
+		return err
+	}
+	n.grantsMu.Lock()
+	defer n.grantsMu.Unlock()
+	if n.closed {
+		return fmt.Errorf("sandbox: admit jail ports on a closed run network")
+	}
+	var fresh []int
+	for _, p := range ports {
+		if !slices.Contains(n.admittedPorts, p) {
+			fresh = append(fresh, p)
+		}
+	}
+	if len(fresh) == 0 {
+		return nil
+	}
+	if len(n.admittedPorts)+len(fresh) > MaxJailPorts {
+		return fmt.Errorf("sandbox: admitting %d more jail ports would exceed %d", len(fresh), MaxJailPorts)
+	}
+	if err := defaultOps.AdmitJailPorts(ctx, n.conversationID, n.Idx, fresh); err != nil {
+		return err
+	}
+	n.admittedPorts = append(n.admittedPorts, fresh...)
+	return nil
 }
 
 func appendOnce(list []string, v string) []string {

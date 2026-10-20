@@ -10,38 +10,35 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	"go.opentelemetry.io/otel/trace"
 )
 
-// runSidecar is this engagement's credential sidecar — the process holding its
-// unsealed bundle — plus the network that process's proxies bind on and the
-// coordinates for reaching them. The dispatcher stands it up on
-// TF_ROLE=executor BEFORE the pre-sandbox clone, so the clone (and GetPR, and
-// the agenthost) route through those proxies while the orchestrator holds no
-// credential. It owns its own teardown, which the dispatcher defers until after
-// the agent run returns.
+// runSidecar is this engagement's cell (internal/cell) with its credential
+// sidecar brought up: the process holding the unsealed bundle, the
+// supervision channel to it, and the coordinates for reaching its proxies. The
+// dispatcher stands it up on TF_ROLE=executor BEFORE the pre-sandbox clone, so
+// the clone (and GetPR, and the agenthost) route through those proxies while
+// the orchestrator holds no credential. It owns its own teardown, which the
+// dispatcher defers until after the agent run returns.
 //
-// It is NOT the jail. The jail is built later by the cap-broker, out of the network
-// and env this hands to agentproc.Run.
+// It is NOT the jail. The jail is launched later into the cell, with the env
+// this hands it.
 type runSidecar struct {
-	net  *sandbox.RunNetwork
-	proc sandbox.LaunchedSidecar
+	cell cell.Cell
 	conn *sidecarproto.Conn
 	res  *sidecarproto.StartProxiesResult
 
 	// conversationID is the conversation this cell serves, for teardown's log
-	// lines. The per-run files under the socket root are the network's to
-	// release (sandbox.RunNetwork.PrepareSockets), with the rest of the jail
-	// identity's grants.
+	// lines.
 	conversationID string
 
 	// stopRelay stops the credential-refresh relay goroutine; closed once by
@@ -57,13 +54,11 @@ type runSidecar struct {
 	credNudge chan credRelayNudge
 }
 
-// Close tears the run sidecar down in the order that keeps the veth alive
+// Close tears the run sidecar down in the order that keeps the cell alive
 // under anything still using it: stop the refresh relay, drain the sidecar's
-// audit records, stop the supervision reader, SIGKILL the sidecar (freeing its
-// proxies + unsealed bundle), then close the network — which takes back every
-// grant made under the run's jail identity (its socket directories, its run
-// tree, its staging), tears down the veth the proxies were bound on, and only
-// then releases the subnet index. Safe on nil.
+// audit records, stop the supervision reader, then close the cell — which
+// kills the sidecar (freeing its proxies + unsealed bundle) and only then
+// releases the cell's identity and every grant made under it. Safe on nil.
 //
 // The drain comes before anything that would cut the sidecar off: it is the
 // last chance for records the sidecar still holds — ones the orchestrator
@@ -73,10 +68,9 @@ type runSidecar struct {
 // sidecar that has stopped answering, hold the teardown for the drain's bound
 // (agentproc.DrainRecords: the sidecar's 10s wait plus a little slack).
 //
-// The network goes last because the release it ends with is what lets another
-// engagement have this index — its sidecar uid and its jail identity — and by
-// then nothing of this engagement may still hold either: the jail was closed
-// before this ran, and the sidecar is killed just above.
+// The cell goes last because the release it ends with is what lets another
+// engagement have this cell's identity, and by then nothing of this engagement
+// may still hold it: the jail was closed before this ran.
 func (rs *runSidecar) Close() {
 	if rs == nil {
 		return
@@ -89,19 +83,17 @@ func (rs *runSidecar) Close() {
 		rs.drainAuditRecords()
 		_ = rs.conn.Close()
 	}
-	if rs.proc != nil {
-		_ = rs.proc.Close()
-	}
-	if rs.net != nil {
-		_ = rs.net.Close()
+	if rs.cell != nil {
+		_ = rs.cell.Close()
 	}
 	// A stop that queues a message re-claims the conversation within a scan
 	// tick, so this teardown routinely overlaps its own successor's bring-up.
-	// Every resource it frees — the subnet index, the sidecar uid derived from
-	// it, the netns name — is one the successor may be waiting on, so how long
-	// it took is worth having in the log next to the successor's first line.
+	// Every resource it frees — on gVisor the subnet index, the sidecar uid
+	// derived from it, the netns name — is one the successor may be waiting
+	// on, so how long it took is worth having in the log next to the
+	// successor's first line.
 	if elapsed := time.Since(started); elapsed > slowCellTeardown {
-		dispatchLog.Warn("cell teardown was slow; the run's subnet index and sidecar uid stayed held for that long",
+		dispatchLog.Warn("cell teardown was slow; the cell's identity stayed held for that long",
 			"conversation", rs.conversationID, "took", elapsed)
 	}
 }
@@ -172,15 +164,24 @@ func (rs *runSidecar) nudgeCredentialRelay(ctx context.Context) error {
 }
 
 // jailEnv is the non-secret env the jail is launched with: the coordinates and
-// placeholders the sidecar's proxies produced (git / egress URLs, the single
-// GIT_CONFIG_* block, and the LLM proxy for an engagement that dials it from
-// inside the jail), threaded into agentproc.RunOptions.PrebuiltProxyEnv.
+// placeholders the sidecar's proxies produced (git / egress / relay URLs and
+// the single GIT_CONFIG_* block), threaded into cell.LaunchSpec.ProxyEnv.
 // nil-safe.
 func (rs *runSidecar) jailEnv() []string {
 	if rs == nil || rs.res == nil {
 		return nil
 	}
 	return rs.res.Env
+}
+
+// jailEndpoints are the sidecar listeners jailEnv and the gh channel point
+// the jail at, threaded into cell.LaunchSpec.SidecarEndpoints: the only host
+// addresses the jail is admitted to. nil-safe.
+func (rs *runSidecar) jailEndpoints() []string {
+	if rs == nil || rs.res == nil {
+		return nil
+	}
+	return rs.res.JailEndpoints
 }
 
 // engineLLMEnv is this engagement's provider coordinates for an engine that runs in
@@ -195,12 +196,22 @@ func (rs *runSidecar) engineLLMEnv() []string {
 	return rs.res.LLMEnv
 }
 
-// runNetwork is the prebuilt network handed to agentproc.RunOptions.PrebuiltNetwork.
-func (rs *runSidecar) runNetwork() *sandbox.RunNetwork {
+// runCell is the engagement's cell, which the jail launches into. nil-safe.
+func (rs *runSidecar) runCell() cell.Cell {
 	if rs == nil {
 		return nil
 	}
-	return rs.net
+	return rs.cell
+}
+
+// treeHandOff is the cell as an ending's treeHandOff, nil when there is no
+// cell: a nil pointer stored in the interface would read as a cell that is
+// there.
+func (rs *runSidecar) treeHandOff() treeHandOff {
+	if rs == nil || rs.cell == nil {
+		return nil
+	}
+	return rs.cell
 }
 
 // ghChannel is the real-gh channel params threaded into agentproc.RunOptions.
@@ -219,6 +230,14 @@ func (rs *runSidecar) ghChannel(conversationID string) *agentproc.GHChannelParam
 	}
 }
 
+// cellGHChannel is gc in the cell contract's shape, nil when gc is.
+func cellGHChannel(gc *agentproc.GHChannelParams) *cell.GHChannel {
+	if gc == nil {
+		return nil
+	}
+	return &cell.GHChannel{Host: gc.Host, Token: gc.Token, CertSourcePath: gc.CertSourcePath}
+}
+
 // GitCloneAuth builds the CloneAuth that routes a host-side fetch of cloneURL
 // through this run's sidecar git proxy, so the orchestrator holds no token
 // and the real credential is injected host-side on the sidecar's upstream
@@ -230,18 +249,18 @@ func (rs *runSidecar) GitCloneAuth(cloneURL string) worktree.CloneAuth {
 	return worktree.CloneAuthViaGitProxy(rs.res.GitProxyURL, cloneHostBase(cloneURL), rs.res.GitProxyToken)
 }
 
-// bringUpRunSidecar stands up the run network, launches the credential
-// sidecar, provisions it (publishing the sidecar's public key so the brain
-// seals THIS run's bundle to it, without the orchestrator ever unsealing), and
-// binds the sidecar's proxies on the veth. Gated on the MODE, not the role:
-// multi mode is always per-run-isolated, so every multi dispatch takes the
-// sidecar path (in practice only executors dispatch — control runs no
-// dispatcher and the all role is local-only — but hanging the gate on the
-// mode means a future multi caller can never silently fall back to the
-// in-process credential path; on a pod with no cap-broker it fails loudly at
-// construction instead). Returns nil in local mode and on an unwired test
-// fixture — the caller then keeps the in-process proxy path (agentproc
-// allocates the network and runs the proxies itself).
+// bringUpRunSidecar provisions the engagement's cell (its network and
+// credential sidecar process), provisions the sidecar (publishing its public
+// key so the brain seals THIS run's bundle to it, without the orchestrator
+// ever unsealing), and binds the sidecar's proxies on the cell's proxy host.
+// Gated on the MODE, not the role: multi mode is always per-run-isolated, so
+// every multi dispatch takes the sidecar path (in practice only executors
+// dispatch — control runs no dispatcher and the all role is local-only — but
+// hanging the gate on the mode means a future multi caller can never silently
+// fall back to the in-process credential path; with no cell backend, or on a
+// pod with no cap-broker, it fails loudly instead). Returns nil in local mode
+// and on an unwired test fixture — the caller then keeps the in-process proxy
+// path.
 //
 // On any error the partial state (network, sidecar) is already torn down; the
 // caller does not Close a nil return.
@@ -255,53 +274,31 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 		return nil, nil
 	}
 
+	backend := s.cellBackend()
+	if backend == nil {
+		return nil, errors.New("no cell backend is configured; a multi-mode delegation never runs without a cell")
+	}
+
 	// The four-process choreography, from the executor's viewpoint. Every leg
 	// below is a round trip into a process that exports nothing itself — the
-	// cap-broker for the network, the sidecar for the credentials — so this
+	// cap-broker for the cell, the sidecar for the credentials — so this
 	// side's client spans are the only place the timings exist.
 	ctx, bringUpSpan := tracer.Start(ctx, "engagement.sandbox.bringup")
 	defer bringUpSpan.End()
 
-	// Each broker round trip below is its own operation for the stall
+	// Each step of the cell's bring-up is its own operation for the stall
 	// watchdog, with a deadline past the broker's own per-call bound: the
 	// bound fires first and fails the bring-up as the error it is.
 	activity := s.activityFor(conv.ID)
-	netCtx, netSpan := tracer.Start(ctx, "sandbox.network.setup")
-	endNet := activity.begin("sidecar_network", sidecarOpDeadline)
-	net, err := sandbox.SetupRunNetwork(netCtx, conv.ID)
-	endNet()
-	recordSpanError(netSpan, err)
-	netSpan.End()
+	c, err := backend.Provision(ctx, cell.ProvisionSpec{
+		ConversationID: conv.ID,
+		Step: func(name string) func() {
+			return activity.begin(name, sidecarOpDeadline)
+		},
+	})
 	if err != nil {
 		recordSpanError(bringUpSpan, err)
-		return nil, fmt.Errorf("set up run network: %w", err)
-	}
-	// The run's socket directories, made for this engagement's index before
-	// its sidecar exists: the sidecar can create its socket and cert nowhere
-	// else. Making them replaces whatever an earlier engagement of this
-	// conversation left at the same paths, which is what lets a re-claim that
-	// races the previous cell's teardown come up instead of failing.
-	sockCtx, sockSpan := tracer.Start(ctx, "sandbox.sockets.prepare")
-	endSockets := activity.begin("sidecar_sockets", sidecarOpDeadline)
-	err = net.PrepareSockets(sockCtx, conv.ID)
-	endSockets()
-	recordSpanError(sockSpan, err)
-	sockSpan.End()
-	if err != nil {
-		recordSpanError(bringUpSpan, err)
-		_ = net.Close()
-		return nil, fmt.Errorf("prepare run socket directories: %w", err)
-	}
-	scCtx, scSpan := tracer.Start(ctx, "sandbox.sidecar.launch")
-	endLaunch := activity.begin("sidecar_launch", sidecarOpDeadline)
-	sc, err := sandbox.LaunchSidecar(scCtx, sandbox.SidecarConfig{ConversationID: conv.ID, SubnetIdx: net.Idx})
-	endLaunch()
-	recordSpanError(scSpan, err)
-	scSpan.End()
-	if err != nil {
-		recordSpanError(bringUpSpan, err)
-		_ = net.Close()
-		return nil, fmt.Errorf("launch credential sidecar: %w", err)
+		return nil, err
 	}
 
 	stores, storesSet := s.getStores()
@@ -341,7 +338,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	// the relayed workspace-add materialization clones through the run's proxies.
 	relaySrv := agenthost.NewRelayServer(stores, info, git)
 	params := agentproc.SidecarBringUpParams{
-		HostVethIP: net.HostIP,
+		HostVethIP: c.ProxyHost(),
 		Git:        git,
 		// The org-bound op server the sidecar's relay envelope dispatches to:
 		// the git proxy's push authz/audit (backed by the same git gate) plus
@@ -381,12 +378,11 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	// The provisioning inside this call replaces the operation with the
 	// credentials wait for as long as it lasts (sidecarProvisionFor).
 	endBringUp := activity.begin("sidecar_bringup", sidecarOpDeadline)
-	res, conn, err := agentproc.BringUpRunSidecar(ctx, sc, s.sidecarProvisionFor(orgID, conv.ID), params)
+	res, conn, err := agentproc.BringUpRunSidecar(ctx, c.Sidecar(), s.sidecarProvisionFor(orgID, conv.ID), params)
 	endBringUp()
 	if err != nil {
 		recordSpanError(bringUpSpan, err)
-		_ = sc.Close()
-		_ = net.Close()
+		_ = c.Close()
 		return nil, fmt.Errorf("bring up credential sidecar: %w", err)
 	}
 	// The engagement root, captured once, so every op this run's relay server
@@ -419,7 +415,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 		auditHost.SetGitHubCredential(res.GitHubCredential)
 	}
 
-	es := &runSidecar{conversationID: conv.ID, net: net, proc: sc, conn: conn, res: res, stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
+	es := &runSidecar{conversationID: conv.ID, cell: c, conn: conn, res: res, stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
 	_, myBootEpoch := s.executorIdentity()
 
 	// A relayed `workspace add` widens this run's authorized repo set, which

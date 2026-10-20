@@ -98,7 +98,10 @@ entry.
 
 ## Never
 
-- TLS termination / MITM of agent traffic, in any lane, for any reason.
+- TLS termination / MITM of agent traffic, in any lane, outside the
+  interception design in `docs/for-agents/specs/sandbox-backends/` §6.1
+  (TFAC-1117) and its conditions. That design is not built yet; nothing
+  terminates the agent's TLS today.
 - Allowlisting a shared storage namespace as the "simpler" alternative.
 - Env that disables the client's own verification.
 - A per-ecosystem fork of the engine — if `relay.go` can't express what

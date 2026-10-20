@@ -265,10 +265,30 @@ cross-org recipe-sharing invariant — are specified in
 - **Rule binding.** The router (`internal/routing/router.go`) already matches
   events to `task_rules` and fires `prompt_triggers` for auto-delegation. The
   binding adds a profile reference to the trigger/rule, which the delegation
-  spawner (`internal/delegate/spawner.go`) resolves to `sandbox.Config` (image
-  variant, rlimits, the proxy's allowlist/denylist) + the Machine class. Keep
-  selection **explicit and data-driven** — a CI-triage rule must never
-  accidentally spin a heavy browser sandbox.
+  spawner (`internal/delegate/spawner.go`) resolves, through the frozen copy
+  below, to `sandbox.Config` (image variant, rlimits, the proxy's
+  allowlist/denylist) + the Machine class. Keep selection **explicit and
+  data-driven** — a CI-triage rule must never accidentally spin a heavy
+  browser sandbox.
+- **A conversation runs on a frozen copy.** The profile row is the editable
+  definition. When a conversation is minted, the definition it resolves to is
+  copied and frozen, and the conversation references that copy by foreign
+  key, the way a blueprint run freezes its step plan at mint
+  (`blueprint_runs.step_plan`). Everything a run reads from its profile
+  (image, egress, resources, `mem_budget_mb`, capability requirements) comes
+  from the copy, so an edit changes only conversations minted after it, and a
+  queued or parked conversation keeps what it was minted with unless a person
+  moves it (below).
+- **Moving a conversation to another profile.** Not built; the design keeps
+  it possible. A person may move a queued or parked conversation, one with no
+  active claim, to another profile their team has enabled, under the same
+  authorization as binding a profile to a rule, after the UI has warned what
+  the move loses. The move freezes a copy of the new profile and points the
+  conversation at it; earlier claims keep the execution manifests that record
+  what they ran with (sandbox-backends §7). The agent never moves itself: it
+  has read hostile input, and a move to a profile with root or wider egress
+  is the escalation an injected agent would ask for. What survives the move
+  and what the agent is told are in sandbox-backends §7 and §8.
 - **Defaults.** A built-in "base" profile (today's behavior) is the default when a
   rule names none, so existing rules keep working unchanged.
 

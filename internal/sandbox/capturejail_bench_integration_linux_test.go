@@ -295,6 +295,9 @@ func TestIntegration_FreezeConns(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = tl.Close() })
 	port := tl.Addr().(*net.TCPAddr).Port
+	if err := network.AdmitJailPorts(ctx, []int{port}); err != nil {
+		t.Fatalf("admit jail port %d: %v", port, err)
+	}
 
 	tree := RunTreeRoot(cfg.ConversationID)
 	if err := os.MkdirAll(tree, 0o700); err != nil {

@@ -11,11 +11,11 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/aead"
+	"github.com/sky-ai-eng/triage-factory/internal/cell/gvisor"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
 )
 
@@ -169,8 +169,9 @@ func (a *App) openStores(ctx context.Context) error {
 		// from the capless orchestrator. Any pre-upgrade leftovers from a
 		// container that once sandboxed are container-scoped (netns, veth,
 		// iptables) and die with the container's recreation.
+		a.cells = gvisor.New()
 		if a.plan.role != runmode.RoleControl {
-			if err := sandbox.ReapOrphans(ctx); err != nil {
+			if err := a.cells.ReapOrphans(ctx); err != nil {
 				sandboxLog.Warn("reap orphans at boot failed; the previous boot's claims will be taken over after their leases rather than released now", "error", err)
 			} else {
 				a.cellsConfirmedClean = true
