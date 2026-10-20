@@ -12,6 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -39,10 +40,12 @@ func newIngestTestDB(t *testing.T) *sql.DB {
 func seedIngestEntity(t *testing.T, conn *sql.DB) string {
 	t.Helper()
 	id := "e-" + uuid.New().String()[:8]
+	sourceID := "owner/repo#" + id
+	repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url, scope)
-		VALUES (?, 'github', ?, 'pr', 'PR', '', 'https://github.com')
-	`, id, "owner/repo#"+id); err != nil {
+		INSERT INTO entities (id, source, source_id, kind, title, url, scope, repository_id)
+		VALUES (?, 'github', ?, 'pr', 'PR', '', 'https://github.com', ?)
+	`, id, sourceID, repoID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	return id

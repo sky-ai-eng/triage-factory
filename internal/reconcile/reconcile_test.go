@@ -18,6 +18,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
@@ -291,7 +292,9 @@ func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, conversationID
 	ctx := context.Background()
 
 	seedConversation := func(entityID, conversationID string) {
-		if _, err := conn.Exec(`INSERT INTO entities (id, source, source_id, kind, scope) VALUES (?, 'github', ?, 'pull_request', 'https://github.com')`, entityID, entityID); err != nil {
+		sourceID := "octo/repo#" + entityID
+		repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
+		if _, err := conn.Exec(`INSERT INTO entities (id, source, source_id, kind, scope, repository_id) VALUES (?, 'github', ?, 'pull_request', 'https://github.com', ?)`, entityID, sourceID, repoID); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
 		if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status, completed_at) VALUES (?, 'interactive', 'open', CURRENT_TIMESTAMP)`, conversationID); err != nil {

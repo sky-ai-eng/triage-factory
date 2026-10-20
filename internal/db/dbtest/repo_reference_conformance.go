@@ -18,18 +18,20 @@ type RepoReferenceFactory func(t *testing.T) (stores db.Stores, orgID, teamID st
 
 // RunRepoReferenceConformance covers what it means for a table to reference a
 // repository by the registry row's id rather than by its slug. One case per
-// converted site — the tracked set and the worktree ledger — plus the
-// lifetime rule that governs both.
+// converted site — the tracked set, the worktree ledger and GitHub entities —
+// plus the lifetime rule that governs them.
 //
 // The rule is asymmetric, and the asymmetry is the whole design:
 //
-//   - A repository is brought into the registry by tracking it. Nothing else
-//     creates one; a worktree reservation resolves the row and refuses if it
-//     is absent, because in multi mode that path runs on the executor, which
-//     holds no INSERT on the table at all.
+//   - A repository is brought into the registry by tracking it, or by TF
+//     recording a GitHub entity in it, both through the registry's one
+//     get-or-create (RepositoryStore.FindOrCreateByRefSystem). A row is not
+//     tracking: one an entity brought in is in no tracked set. A worktree
+//     reservation resolves the row and refuses if it is absent, because a
+//     checkout of a repository TF holds nothing for is a caller's mistake.
 //   - Untracking deletes the tracking row and NOTHING else. A registry row
 //     outlives the tracking decision that created it, because a
-//     conversation's worktree ledger or a task may still name the
+//     conversation's worktree ledger or an entity may still reference the
 //     repository — tracking is forward-only in both directions.
 //
 // The other half of the conversion, that a rename rewrites none of these rows,
@@ -145,8 +147,8 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		// The reference is checked rather than assumed: a reservation naming a
 		// repository id no row answers to fails at the point the caller is
 		// wrong instead of recording a reference to nothing. The store checks
-		// rather than creates on purpose — the executor's role holds no INSERT
-		// on repositories.
+		// rather than creates on purpose: a reservation holds an id, and an id
+		// that resolves to nothing is a broken handle, not a name to register.
 		s, orgID, _, conversation := mk(t)
 		convID := conversation(t, "unknown")
 		if _, _, err := s.ConversationWorktrees.InsertSystem(ctx, orgID, domain.ConversationWorktree{
@@ -156,6 +158,138 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		}
 		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef("ghost/repo")); got != nil {
 			t.Errorf("the refused reservation minted a repository row: %+v", got)
+		}
+	})
+
+	t.Run("The_door_creates_a_bare_untracked_row_once", func(t *testing.T) {
+		s, orgID, _, _ := mk(t)
+		created, err := s.Repos.FindOrCreateByRefSystem(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "Octo", Repo: "Door"})
+		if err != nil {
+			t.Fatalf("FindOrCreateByRefSystem: %v", err)
+		}
+		if created.ID == "" || created.Slug() != "Octo/Door" || created.Host != TestGitHubHost || created.Source != domain.RepoSourceGitHub {
+			t.Fatalf("created row = %+v, want Octo/Door on %s with an id", created, TestGitHubHost)
+		}
+		if created.ExternalID != "" || created.ProfileText != "" || created.CloneURL != "" || created.CloneStatus != "pending" {
+			t.Errorf("created row = %+v, want a bare row: no provider id, no profile, no clone url, clone pending", created)
+		}
+		AssertWriteReturnedStoredRow(t, "FindOrCreateByRefSystem", created, func() (*domain.Repository, error) {
+			return s.Repos.GetSystem(ctx, orgID, created.ID)
+		})
+
+		// Another spelling of the same repository is the same row, keeping
+		// the stored casing.
+		again, err := s.Repos.FindOrCreateByRefSystem(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "octo", Repo: "door"})
+		if err != nil {
+			t.Fatalf("FindOrCreateByRefSystem (again): %v", err)
+		}
+		if again.ID != created.ID || again.Slug() != "Octo/Door" {
+			t.Errorf("second call = %s %s, want the existing row %s under its stored casing", again.ID, again.Slug(), created.ID)
+		}
+
+		// It is in the registry and in no tracked set.
+		all, err := s.Repos.ListSystem(ctx, orgID, TestGitHubHost)
+		if err != nil || len(all) != 1 {
+			t.Fatalf("ListSystem = %d rows, err=%v; want the one row", len(all), err)
+		}
+		tracked, _, err := s.Repos.ListTrackedSystem(ctx, orgID, TestGitHubHost, db.Unwindowed)
+		if err != nil || len(tracked) != 0 {
+			t.Errorf("ListTrackedSystem = %+v, err=%v; want nothing — the door tracks nothing", tracked, err)
+		}
+
+		// The same name on another host is another repository.
+		other, err := s.Repos.FindOrCreateByRefSystem(ctx, orgID, domain.RepoRef{Host: TestOtherGitHubHost, Owner: "Octo", Repo: "Door"})
+		if err != nil || other.ID == created.ID || other.Host != TestOtherGitHubHost {
+			t.Errorf("FindOrCreateByRefSystem on %s = %+v, err=%v; want a row of its own", TestOtherGitHubHost, other, err)
+		}
+
+		if _, err := s.Repos.FindOrCreateByRefSystem(ctx, orgID, domain.RepoRef{Owner: "octo", Repo: "hostless"}); !errors.Is(err, db.ErrRepoHostRequired) {
+			t.Errorf("FindOrCreateByRefSystem without a host = %v, want db.ErrRepoHostRequired", err)
+		}
+	})
+
+	t.Run("A_github_entity_references_its_repository_row", func(t *testing.T) {
+		s, orgID, teamID, _ := mk(t)
+		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{
+			{Owner: "octo", Repo: "kept"},
+		}); err != nil {
+			t.Fatalf("ReplaceForTeam: %v", err)
+		}
+		kept, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef(keptSlug))
+		if err != nil || kept == nil {
+			t.Fatalf("resolve %s: got=%v err=%v", keptSlug, kept, err)
+		}
+
+		// A pull request in a tracked repository references the row tracking
+		// minted, whatever casing its key spells.
+		pr, created, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", TestGitHubHost, "Octo/Kept#7", "", "pr", "a pr", "")
+		if err != nil || !created {
+			t.Fatalf("FindOrCreateSystem: created=%v err=%v", created, err)
+		}
+		if pr.RepositoryID != kept.ID {
+			t.Errorf("created entity's repository = %q, want the tracked row %s", pr.RepositoryID, kept.ID)
+		}
+		if got, err := s.Entities.GetSystem(ctx, orgID, pr.ID); err != nil || got == nil || got.RepositoryID != kept.ID {
+			t.Errorf("GetSystem = %+v, err=%v; want repository %s stored", got, err, kept.ID)
+		}
+
+		// A pull request in a repository nothing tracks gets a registry row of
+		// its own, untracked, and a second one in that repository reuses it.
+		// The request-path create resolves through the same door.
+		first, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", TestGitHubHost, "elsewhere/lib#1", "", "pr", "", "")
+		if err != nil {
+			t.Fatalf("FindOrCreateSystem (untracked): %v", err)
+		}
+		lib, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef("elsewhere/lib"))
+		if err != nil || lib == nil {
+			t.Fatalf("registry row for elsewhere/lib = %v, err=%v; want the one the create minted", lib, err)
+		}
+		if first.RepositoryID != lib.ID {
+			t.Errorf("untracked pr's repository = %q, want the minted row %s", first.RepositoryID, lib.ID)
+		}
+		second, _, err := s.Entities.FindOrCreate(ctx, orgID, "github", TestGitHubHost, "Elsewhere/Lib#2", "", "pr", "", "")
+		if err != nil || second.RepositoryID != lib.ID {
+			t.Errorf("FindOrCreate (second pr) repository = %q, err=%v; want the same row %s", second.RepositoryID, err, lib.ID)
+		}
+		names, err := s.Repos.ListTrackedNamesSystem(ctx, orgID, TestGitHubHost)
+		if err != nil || len(names) != 1 || names[0] != keptSlug {
+			t.Errorf("tracked names = %v, err=%v; want [%s] — an entity tracks nothing", names, err, keptSlug)
+		}
+
+		// A row found is returned as stored, and creates nothing.
+		found, created, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", TestGitHubHost, "elsewhere/lib#1", "", "pr", "", "")
+		if err != nil || created || found.ID != first.ID || found.RepositoryID != lib.ID {
+			t.Errorf("FindOrCreateSystem on a known key = (%+v, %v, %v), want the stored row", found, created, err)
+		}
+	})
+
+	t.Run("A_github_entity_key_naming_no_repository_is_refused", func(t *testing.T) {
+		s, orgID, _, _ := mk(t)
+		for _, key := range []string{"no-slash#4", "/repo#4", "owner/#4", ""} {
+			got, created, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", TestGitHubHost, key, "", "pr", "", "")
+			if !errors.Is(err, db.ErrEntityRepositoryRequired) || got != nil || created {
+				t.Errorf("FindOrCreateSystem(%q) = (%+v, %v, %v), want db.ErrEntityRepositoryRequired", key, got, created, err)
+			}
+		}
+		if all, err := s.Repos.ListSystem(ctx, orgID, TestGitHubHost); err != nil || len(all) != 0 {
+			t.Errorf("registry after the refusals = %+v, err=%v; want nothing minted", all, err)
+		}
+	})
+
+	t.Run("Other_sources_reference_no_repository", func(t *testing.T) {
+		s, orgID, _, _ := mk(t)
+		issue, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", "https://jira.example.com", "OCTO-1", "10001", "issue", "", "")
+		if err != nil {
+			t.Fatalf("FindOrCreateSystem (jira): %v", err)
+		}
+		if issue.RepositoryID != "" {
+			t.Errorf("jira entity's repository = %q, want none", issue.RepositoryID)
+		}
+		if got, err := s.Entities.GetSystem(ctx, orgID, issue.ID); err != nil || got == nil || got.RepositoryID != "" {
+			t.Errorf("GetSystem (jira) = %+v, err=%v; want no repository stored", got, err)
+		}
+		if all, err := s.Repos.ListSystem(ctx, orgID, TestGitHubHost); err != nil || len(all) != 0 {
+			t.Errorf("registry after a jira create = %+v, err=%v; want nothing minted", all, err)
 		}
 	})
 }

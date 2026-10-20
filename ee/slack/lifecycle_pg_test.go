@@ -14,6 +14,7 @@ import (
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -295,10 +296,11 @@ func seedGitHubTaskAndConversation(t *testing.T, h *pgtest.Harness, orgID, creat
 	t.Helper()
 	entityID := uuid.New().String()
 	sourceID := "octo/repo#" + uuid.New().String()
+	repoID := dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, "https://github.com", sourceID)
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, scope)
-		VALUES ($1, $2, 'github', $3, 'pull_request', 'test pr', 'https://github.com')
-	`, entityID, orgID, sourceID); err != nil {
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, scope, repository_id)
+		VALUES ($1, $2, 'github', $3, 'pull_request', 'test pr', 'https://github.com', $4)
+	`, entityID, orgID, sourceID, repoID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	eventID := uuid.New().String()

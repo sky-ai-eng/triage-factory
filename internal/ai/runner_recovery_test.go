@@ -13,6 +13,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -300,13 +301,14 @@ func seedScoringTasks(t *testing.T, database *sql.DB, n int) []string {
 		entityID := uuid.New().String()
 		eventID := uuid.New().String()
 		taskID := uuid.New().String()
-		sourceID := fmt.Sprintf("scoring-pr-%d-%d", i, time.Now().UnixNano())
+		sourceID := fmt.Sprintf("octo/scoring#%d%d", i, time.Now().UnixNano())
 		const eventType = "github:pr:opened" // seeded in events_catalog
 
+		repoID := dbseed.GitHubEntityRepository(t, database, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 		if _, err := database.Exec(`
-			INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-			VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?, 'https://github.com')
-		`, entityID, sourceID, fmt.Sprintf("Scoring PR %d", i), "https://example/pr/"+sourceID, now); err != nil {
+			INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+			VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?, 'https://github.com', ?)
+		`, entityID, sourceID, fmt.Sprintf("Scoring PR %d", i), "https://example/pr/"+sourceID, now, repoID); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
 		if _, err := database.Exec(`

@@ -7,7 +7,9 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // createEntityForTest inserts an entity row directly via raw SQL so
@@ -25,10 +27,14 @@ func createEntityForTest(t *testing.T, database *sql.DB, source, sourceID, kind,
 	t.Helper()
 	id := uuid.New().String()
 	now := time.Now()
+	var repositoryID any
+	if source == "github" {
+		repositoryID = dbseed.GitHubEntityRepository(t, database, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
+	}
 	_, err := database.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url, state, created_at, last_polled_at, scope)
-		VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, CASE ? WHEN 'github' THEN 'https://github.com' WHEN 'jira' THEN 'https://jira.example.com' WHEN 'slack' THEN 'slack.com' WHEN 'linear' THEN 'ws-test' ELSE 'test-scope' END)
-	`, id, source, sourceID, kind, title, url, now, now, source)
+		INSERT INTO entities (id, source, source_id, kind, title, url, state, created_at, last_polled_at, scope, repository_id)
+		VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, CASE ? WHEN 'github' THEN 'https://github.com' WHEN 'jira' THEN 'https://jira.example.com' WHEN 'slack' THEN 'slack.com' WHEN 'linear' THEN 'ws-test' ELSE 'test-scope' END, ?)
+	`, id, source, sourceID, kind, title, url, now, now, source, repositoryID)
 	if err != nil {
 		t.Fatalf("createEntityForTest: %v", err)
 	}

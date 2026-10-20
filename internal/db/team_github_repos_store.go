@@ -97,11 +97,11 @@ type TeamGitHubReposStore interface {
 	// host, and the prune reaches only rows whose repository is on host: the
 	// team's tracking on another host is left exactly as it stands.
 	//
-	// This is the single door that brings a repository into the repositories
-	// table: in the same transaction it get-or-creates the registry row each
-	// entry references, so a repository gets its row when it is first tracked
-	// rather than when profiling first succeeds, and RepositoryStore exposes
-	// no create of its own. The row it mints is bare — identity columns only,
+	// In the same transaction it get-or-creates the registry row each entry
+	// references — the get-or-create RepositoryStore.FindOrCreateByRefSystem
+	// exposes, and the one a GitHub entity's create resolves its repository
+	// through — so a repository gets its row when it is first tracked rather
+	// than when profiling first succeeds. The row it mints is bare — identity columns only,
 	// no provider id (tracking learns none; the poller and profiler record
 	// it), no profile. An existing row is left exactly as it stands: the
 	// lookup is case-insensitive on owner/repo (GitHub identifiers are), so a
@@ -116,9 +116,10 @@ type TeamGitHubReposStore interface {
 	// the team-row write by team admin. orgID must be the team's org (the
 	// request's authorized org).
 	//
-	// Control-plane only: the executor's Postgres role holds SELECT and
-	// UPDATE on repositories, not INSERT, so a repository is brought into
-	// the table by the side that tracks, never by a running agent's pod.
+	// Control-plane only: tracking is a team admin's write. The executor's
+	// Postgres role can mint a bare registry row (a run recording a pull
+	// request in a repository no team tracks), but holds nothing on
+	// team_github_repos beyond SELECT, so it never adds to a tracked set.
 	//
 	// Untracking is a delete HERE and nowhere else: the registry row for a
 	// repository no team tracks anymore survives, with its profile, base

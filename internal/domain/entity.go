@@ -165,6 +165,11 @@ type Entity struct {
 	// why readers take an issue's team from here rather than from
 	// SnapshotJSON.
 	LinearTeamID string `json:"linear_team_id,omitempty"`
+	// RepositoryID is the registry row (Repository.ID) of the repository a
+	// GitHub entity belongs to. Every GitHub row carries it and no other row
+	// does. The store resolves it from SourceID when it creates the row, and a
+	// repository rename leaves it alone while rewriting SourceID.
+	RepositoryID string `json:"repository_id,omitempty"`
 	// Kind is "pr" | "issue" | "epic" for the poller-backed sources. For
 	// Slack, kind encodes thread engagement: "thread" when the bot is why
 	// the thread exists (its root message was a mention, or a conversation posted
