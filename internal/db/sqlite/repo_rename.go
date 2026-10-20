@@ -243,7 +243,9 @@ func repositoryHoldingSlug(ctx context.Context, q queryer, source string, observ
 // left behind. The cache belongs to whichever process ran a checkout, often
 // an executor pod rather than the one applying the rename, and the ledger
 // foreign key has already established that no run still names the id. The
-// reaper's TTL pass reclaims it in multi; local's cache is unbounded.
+// reaper's TTL pass reclaims it in multi.
+//
+// TODO(TFAC-1152): local never reclaims it; its reaper evicts nothing.
 func absorbBareRepository(ctx context.Context, q queryer, occupant slugOccupant, renamedID, to string) error {
 	if occupant.identified {
 		return fmt.Errorf("%w: %s", db.ErrRepoSlugOccupied, to)
