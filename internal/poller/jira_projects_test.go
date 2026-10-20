@@ -200,3 +200,59 @@ func TestRunJiraCycleForOrg_ResolvesAnUnresolvedProjectByKey(t *testing.T) {
 		}
 	}
 }
+
+// TestRunJiraCycleForOrg_RefreshesAWatchedProject: a project a team watches
+// without mapping any statuses has nothing for discovery to ask, but its key is
+// still what the team's settings show. The cycle reads it by id and renames its
+// registry row, and sends no discovery query.
+func TestRunJiraCycleForOrg_RefreshesAWatchedProject(t *testing.T) {
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/project/10000") {
+			_, _ = w.Write([]byte(`{"id":"10000","key":"NEW","name":"Renamed"}`))
+			return
+		}
+		t.Errorf("unexpected jira request: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	database := newMigratedSQLiteForPoller(t)
+	stores := sqlitestore.New(database)
+	org, team := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
+	if _, err := stores.Orgs.SetSourceBaseURL(ctx, org, "jira", srv.URL); err != nil {
+		t.Fatalf("set jira site: %v", err)
+	}
+	orgSet, err := stores.Orgs.GetSettingsSystem(ctx, org)
+	if err != nil {
+		t.Fatalf("GetSettingsSystem: %v", err)
+	}
+	site := domain.EntityScope("jira", orgSet)
+	project, err := stores.JiraProjects.FindOrCreate(ctx, org, site, "10000", "OLD", "Old")
+	if err != nil {
+		t.Fatalf("FindOrCreate: %v", err)
+	}
+	watched := domain.JiraProjectStatusRules{TeamID: team, ProjectKey: "OLD", JiraProjectID: project.ID}
+	if err := stores.JiraStatusRules.ReplaceForTeam(ctx, team, site, []domain.JiraProjectStatusRules{watched}); err != nil {
+		t.Fatalf("ReplaceForTeam: %v", err)
+	}
+
+	m := &Manager{
+		database: database, pub: &capturingPublisher{},
+		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
+		orgs: stores.Orgs, users: stores.Users, secrets: jiraSecrets{},
+		jiraRules: stores.JiraStatusRules, jiraProjects: stores.JiraProjects,
+		EventSources: stores.OrgEventSources,
+	}
+	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
+	m.runJiraCycleForOrg(ctx, stubJiraResolver{client: client}, org, time.Now())
+
+	got, err := stores.JiraProjects.GetSystem(ctx, org, project.ID)
+	if err != nil || got == nil {
+		t.Fatalf("GetSystem = %+v, %v", got, err)
+	}
+	if got.Key != "NEW" || got.Name != "Renamed" {
+		t.Errorf("registry row after the cycle = %+v, want the watched project renamed to NEW", got)
+	}
+}

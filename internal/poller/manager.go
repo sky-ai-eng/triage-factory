@@ -1522,12 +1522,9 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 	// rules are missing — adding/removing a tenant's Jira config doesn't need
 	// a poller restart this way.
 	_, configured := integrations.JiraSystemConfig(creds, orgSet.JiraBaseURL)
-	// Only ARMED projects can be polled: the discovery JQL is built from
+	// Only ARMED projects are discovered: the discovery JQL is built from
 	// pickup and done members, so a watched-but-unmapped project has nothing
-	// to ask about. That already fell out of the merge below producing empty
-	// member sets, but "the cycle ran and asked nothing" and "the cycle
-	// declined to run" are different facts and only one of them is true — so
-	// the skip is stated here rather than left to emerge downstream.
+	// to ask about.
 	projects := toTrackerJiraRules(rules)
 	if configured && len(projects) == 0 {
 		// Nothing on this site to poll, but issues a previous site left
@@ -1541,11 +1538,6 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 		// status.
 		span.SetAttributes(telemetry.Outcome("unconfigured"))
 		conn.skip("unconfigured")
-		return
-	}
-	if len(projects) == 0 {
-		span.SetAttributes(telemetry.Outcome("no_armed_projects"))
-		conn.skip("no_armed_projects")
 		return
 	}
 	// creds load above gates configuration + supplies the baseURL fallback;
@@ -1569,6 +1561,16 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 		if reloaded := m.loadJiraRules(ctx, orgID, scope); len(reloaded) > 0 {
 			projects = toTrackerJiraRules(reloaded)
 		}
+	}
+	// A set of only watched projects was refreshed above and has nothing for
+	// discovery to ask. "The cycle asked nothing" and "the cycle declined to
+	// poll" are different facts, so the skip is stated here rather than left
+	// to emerge from empty member sets downstream. The project reads above
+	// still record the connection's state.
+	if len(projects) == 0 {
+		span.SetAttributes(telemetry.Outcome("no_armed_projects"))
+		conn.skip("no_armed_projects")
+		return
 	}
 	if _, err := m.trackerForOrg(orgID).RefreshJira(ctx, scope, client, orgSet.JiraBaseURL, projects); err != nil {
 		span.SetStatus(codes.Error, "refresh")

@@ -11,22 +11,25 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
-// syncJiraProjects brings the registry rows of the projects this cycle polls
-// up to date with Jira, and reports whether it wrote any. It runs before the
-// tracker reads a single issue, so a project key renamed since the last cycle
-// is already the registry's key when the cycle's rules are built, and every
-// rule read by key — the tracker's terminal check, the router gate, the
-// deck — finds the rule under the key the issues now carry.
+// syncJiraProjects brings the registry rows of every project the org's teams
+// track, armed or only watched, up to date with Jira, and reports whether it
+// wrote any. It runs before the tracker reads a single issue, so a project key
+// renamed since the last cycle is already the registry's key when the cycle's
+// rules are built, and every rule read by key — the tracker's terminal check,
+// the router gate, the deck — finds the rule under the key the issues now
+// carry.
 //
 // A resolved row is read by Jira's project id, which answers with the key the
 // project has now; a row not yet resolved is read by its key, and the answer
 // resolves it (merging it into the row that already carries the id, when one
 // does).
 //
-// One request per armed project per cycle, and only for the projects the
-// cycle is about to query anyway. Best-effort like reporename.Apply: a project
-// Jira will not describe is left as stored, and the discovery that follows
-// reports whatever is actually wrong with it.
+// One request per tracked project per cycle, however many teams track it. A
+// watched project is read too, though discovery never asks about it: its key
+// is what the team's settings show and what a client sends back, so it has to
+// follow a rename like an armed one. Best-effort like reporename.Apply: a
+// project Jira will not describe is left as stored, and the discovery that
+// follows reports whatever is actually wrong with it.
 func (m *Manager) syncJiraProjects(ctx context.Context, client *jiraclient.Client, orgID string, rules []domain.JiraProjectStatusRules) bool {
 	if m.jiraProjects == nil {
 		return false
@@ -34,7 +37,7 @@ func (m *Manager) syncJiraProjects(ctx context.Context, client *jiraclient.Clien
 	seen := map[string]bool{}
 	wrote := false
 	for _, r := range rules {
-		if !r.Armed() || seen[r.JiraProjectID] {
+		if seen[r.JiraProjectID] {
 			continue
 		}
 		seen[r.JiraProjectID] = true
