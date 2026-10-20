@@ -1,8 +1,8 @@
 package poller_test
 
 // The GitHub poll path end to end: a real poller.Manager and tracker, over real
-// SQLite stores, poll a GitHub world while its pull requests change, and each
-// cycle must emit exactly the events the tracker's taxonomy
+// stores, poll a GitHub world while its pull requests change, and each cycle
+// must emit exactly the events the tracker's taxonomy
 // (docs/concepts/tracked-events.md) promises — and none when nothing changed.
 //
 // The world is served by Orrery (github.com/sky-ai-eng/orrery), a deterministic
@@ -41,6 +41,8 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
+	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -49,15 +51,27 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
+// The scenario runs once per shape TF ships in: multi mode on Postgres, and
+// local mode on SQLite. The two poll differently — local mode polls as the
+// local user, reading their login and teams and running the dashboard
+// searches — and every expectation holds for both. The Postgres shape skips
+// without Docker, as every pgtest test does.
 func TestPollEmitsTrackedEvents(t *testing.T) {
 	dir := os.Getenv("ORRERY_DIR")
 	if dir == "" {
 		t.Skip("ORRERY_DIR is not set; see the comment at the top of this file")
 	}
 	bin := buildOrrery(t, dir)
-	runmode.SetForTest(t, runmode.ModeMulti)
-	ctx := context.Background()
+	t.Run("multi on Postgres", func(t *testing.T) {
+		runPollScenario(t, bin, multiOnPostgres)
+	})
+	t.Run("local on SQLite", func(t *testing.T) {
+		runPollScenario(t, bin, localOnSQLite)
+	})
+}
 
+func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
+	ctx := context.Background()
 	w := startOrrery(t, bin)
 	w.actor("acme", "org")
 	alice := w.actor("alice", "user")
@@ -97,7 +111,7 @@ func TestPollEmitsTrackedEvents(t *testing.T) {
 	w.githubREST(bob, "POST", pulls+"/2/reviews", map[string]any{"event": "COMMENT", "body": "this one conflicts"}, 200)
 	w.githubREST(carol, "POST", pulls+"/3/reviews", map[string]any{"event": "REQUEST_CHANGES", "body": "needs a test"}, 200)
 
-	p := newPollRig(t, ctx, w)
+	p := newPollRig(t, ctx, w, shape)
 
 	// The first sight of each pull request reports what is already on it.
 	p.cycle(t, ctx, map[string]int{
@@ -157,10 +171,43 @@ type pollRig struct {
 	errsMu sync.Mutex
 }
 
-// newPollRig wires a poller over in-memory SQLite, tracking acme/webapp on the
-// org whose GitHub is the Orrery world, the way the poll-bench harness does.
-func newPollRig(t *testing.T, ctx context.Context, w *orreryWorld) *pollRig {
-	t.Helper()
+// deploymentShape is one way TF is deployed: its run mode, its stores, and the
+// org and team those stores poll for. prepare runs once the org's GitHub host
+// is known, for what the shape needs keyed by it.
+type deploymentShape func(t *testing.T, ctx context.Context) deployment
+
+type deployment struct {
+	database *sql.DB
+	stores   db.Stores
+	orgID    string
+	teamID   string
+	adminID  string
+	prepare  func(host, pollerLogin string)
+}
+
+// multiOnPostgres is a multi-mode control plane: Postgres stores, a real org
+// and team, and no local user, so the poller resolves reviewers against the
+// stores.
+func multiOnPostgres(t *testing.T, ctx context.Context) deployment {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "acme-tf")
+	return deployment{
+		database: h.AdminDB,
+		stores:   pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey),
+		orgID:    orgID,
+		teamID:   teamID,
+		adminID:  owner,
+		prepare:  func(string, string) {},
+	}
+}
+
+// localOnSQLite is local mode: one SQLite file's stores, the local default org
+// and team, and a local user whose GitHub login is the poll credential's
+// owner, as when someone runs TF with their own PAT.
+func localOnSQLite(t *testing.T, ctx context.Context) deployment {
+	runmode.SetForTest(t, runmode.ModeLocal)
 	database, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatal(err)
@@ -171,28 +218,57 @@ func newPollRig(t *testing.T, ctx context.Context, w *orreryWorld) *pollRig {
 		t.Fatal(err)
 	}
 	stores := sqlitestore.New(database)
-	orgID := runmode.LocalDefaultOrgID
-	if _, err := stores.Orgs.SetSourceBaseURL(ctx, orgID, "github", w.base); err != nil {
+	return deployment{
+		database: database,
+		stores:   stores,
+		orgID:    runmode.LocalDefaultOrgID,
+		teamID:   runmode.LocalDefaultTeamID,
+		adminID:  runmode.LocalDefaultUserID,
+		prepare: func(host, pollerLogin string) {
+			if err := stores.Users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, host, pollerLogin, "", "", "pat"); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+}
+
+// newPollRig wires a poller over the shape's stores, tracking acme/webapp on
+// the org whose GitHub is the Orrery world.
+func newPollRig(t *testing.T, ctx context.Context, w *orreryWorld, shape deploymentShape) *pollRig {
+	t.Helper()
+	d := shape(t, ctx)
+	stores := d.stores
+	// Configured as the org's admin would through the settings routes, under
+	// their claims: the host first, then the tracked repository on it.
+	if err := stores.Tx.WithTx(ctx, d.orgID, d.adminID, func(tx db.TxStores) error {
+		_, err := tx.Orgs.SetSourceBaseURL(ctx, d.orgID, "github", w.base)
+		return err
+	}); err != nil {
 		t.Fatal(err)
 	}
-	host, err := db.OrgGitHubHostSystem(ctx, stores.Orgs, orgID)
+	host, err := db.OrgGitHubHostSystem(ctx, stores.Orgs, d.orgID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, runmode.LocalDefaultTeamID, host,
-		[]domain.TeamGitHubRepo{{Owner: "acme", Repo: "webapp"}}); err != nil {
+	if err := stores.Tx.WithTx(ctx, d.orgID, d.adminID, func(tx db.TxStores) error {
+		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, d.orgID, d.teamID, host,
+			[]domain.TeamGitHubRepo{{Owner: "acme", Repo: "webapp"}})
+	}); err != nil {
 		t.Fatal(err)
 	}
 
-	// The poll credential is an actor of its own, as an org's PAT would be.
-	token := w.actor("tf-poller", "user")
+	// The poll credential belongs to an actor of its own: the org's machine
+	// user in multi mode, the person running TF in local mode.
+	const pollerLogin = "tf-poller"
+	token := w.actor(pollerLogin, "user")
+	d.prepare(host, pollerLogin)
 	tr := &countingTransport{base: http.DefaultTransport}
 	resolver := &orreryResolver{
 		client: ghclient.NewClientWithHTTPClient(w.base, token, &http.Client{Transport: tr}),
 		base:   w.base,
 	}
-	r := &pollRig{stores: stores, orgID: orgID, pub: &recordingPublisher{}, tr: tr}
-	r.mgr = poller.NewManager(database, r.pub,
+	r := &pollRig{stores: stores, orgID: d.orgID, pub: &recordingPublisher{}, tr: tr}
+	r.mgr = poller.NewManager(d.database, r.pub,
 		stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, stores.Orgs,
 		stores.JiraStatusRules, stores.LinearTeamRules, stores.TeamGitHubGroups, stores.Secrets, stores.GitHubApps, stores.PollReadiness,
 		resolver, nil)
