@@ -82,6 +82,9 @@ func (p Policy) unbounded() bool { return p.MaxBytes <= 0 && p.TTL <= 0 }
 //     at-rest storage is additive across tenants and must be reclaimable.
 func DefaultPolicy() Policy {
 	if runmode.Current() != runmode.ModeMulti {
+		// TODO(TFAC-1152): unbounded also keeps clones of repositories no
+		// longer tracked, or with no registry row, forever; local needs a
+		// reconcile pass against the tracked set.
 		return Policy{}
 	}
 	p := Policy{MaxBytes: defaultMultiBudgetBytes, TTL: defaultMultiTTL}
