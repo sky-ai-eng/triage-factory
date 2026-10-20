@@ -1,0 +1,81 @@
+name: orrery-contract
+
+# Runs the GitHub poll path against Orrery (internal/poller/orrery_contract_test.go):
+# a real poller and tracker poll a world built through Orrery's GitHub API, and
+# every change to the world must come out as the events the tracker promises.
+# It fails on any call Orrery answers "not mocked", which is how a new or
+# changed query on the poll path shows up.
+#
+# Orrery is a private repository, read with the ORRERY_TOKEN secret (read-only
+# contents access to sky-ai-eng/orrery). Pull requests from forks get no
+# secrets, so for them the test is skipped with a notice and runs on main after
+# the merge instead.
+
+on:
+  pull_request:
+    paths:
+      - 'internal/poller/**'
+      - 'internal/tracker/**'
+      - 'internal/github/**'
+      - 'internal/domain/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/orrery-contract.yml'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: orrery-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  orrery-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check for Orrery access
+        id: access
+        env:
+          ORRERY_TOKEN: ${{ secrets.ORRERY_TOKEN }}
+        run: |
+          if [ -n "$ORRERY_TOKEN" ]; then
+            echo "ok=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "::notice title=Orrery contract test skipped::ORRERY_TOKEN is not available to this run (a pull request from a fork); the test runs on main after merge."
+            echo "ok=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.access.outputs.ok == 'true'
+
+      - name: Check out Orrery
+        if: steps.access.outputs.ok == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: sky-ai-eng/orrery
+          token: ${{ secrets.ORRERY_TOKEN }}
+          path: orrery
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.access.outputs.ok == 'true'
+        with:
+          workspaces: orrery
+
+      - uses: actions/setup-go@v5
+        if: steps.access.outputs.ok == 'true'
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build Orrery
+        if: steps.access.outputs.ok == 'true'
+        run: cargo build --quiet --manifest-path orrery/Cargo.toml -p orrery
+
+      - name: Poll path against Orrery
+        if: steps.access.outputs.ok == 'true'
+        env:
+          ORRERY_BIN: ${{ github.workspace }}/orrery/target/debug/orrery
+        run: go test ./internal/poller -run TestPollerAgainstOrrery -count=1
