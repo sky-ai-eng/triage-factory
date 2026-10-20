@@ -653,6 +653,9 @@ export interface EventType {
 
 interface EventHandlerBase {
   id: string
+  // team_id: the owning team. Immutable; the predicate editor reads its
+  // tracked Slack channels for channel_in.
+  team_id: string
   event_type: string
   scope_predicate_json: string | null
   enabled: boolean

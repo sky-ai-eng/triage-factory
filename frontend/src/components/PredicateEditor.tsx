@@ -3,15 +3,24 @@ import { Tooltip } from '../ui/tooltip/Tooltip'
 import { Info } from 'lucide-react'
 import type { FieldSchema } from '../types'
 import IdentityListField, { type IdentityKind } from './IdentityListField'
+import SlackChannelListField from './SlackChannelListField'
 import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 interface PredicateEditorProps {
   eventType: string
+  /** The handler's team, whose tracked Slack channels `channel_in` offers.
+   *  '' when the server resolves the team (the sole team). */
+  teamId?: string
   value: Record<string, unknown>
   onChange: (value: Record<string, unknown>) => void
 }
 
-export default function PredicateEditor({ eventType, value, onChange }: PredicateEditorProps) {
+export default function PredicateEditor({
+  eventType,
+  teamId = '',
+  value,
+  onChange,
+}: PredicateEditorProps) {
   const [fields, setFields] = useState<FieldSchema[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -89,6 +98,7 @@ export default function PredicateEditor({ eventType, value, onChange }: Predicat
           key={field.name}
           field={field}
           eventType={eventType}
+          teamId={teamId}
           value={value[field.name]}
           onChange={(val) => setField(field.name, val)}
         />
@@ -102,11 +112,12 @@ export default function PredicateEditor({ eventType, value, onChange }: Predicat
 interface FieldRowProps {
   field: FieldSchema
   eventType: string
+  teamId: string
   value: unknown
   onChange: (val: unknown) => void
 }
 
-function FieldRow({ field, eventType, value, onChange }: FieldRowProps) {
+function FieldRow({ field, eventType, teamId, value, onChange }: FieldRowProps) {
   return (
     <div>
       <div className="flex items-center gap-1.5 mb-1.5">
@@ -132,15 +143,21 @@ function FieldRow({ field, eventType, value, onChange }: FieldRowProps) {
         <StringField value={value as string | undefined} onChange={onChange} />
       )}
       {field.type === 'int' && <IntField value={value as number | undefined} onChange={onChange} />}
-      {/* Every string_list field today is an identity allowlist:
+      {field.type === 'string_list' && field.name === 'channel_in' && (
+        <SlackChannelListField
+          teamId={teamId}
+          value={Array.isArray(value) ? (value as string[]) : undefined}
+          onChange={(v) => onChange(v)}
+        />
+      )}
+      {/* Every other string_list field is an identity allowlist:
           GitHub → author_in / reviewer_in / commenter_in;
           Jira → assignee_in / reporter_in / commenter_in;
           Linear → assignee_in / creator_in / commenter_in.
           IdentityListField branches on identityKind to read the right
           column (github_username, jira_account_id or linear_user_id)
-          from /api/me and the team roster. If a non-identity string_list
-          lands later (e.g. labels_any_of), branch on field.name. */}
-      {field.type === 'string_list' && (
+          from /api/me and the team roster. */}
+      {field.type === 'string_list' && field.name !== 'channel_in' && (
         <IdentityListField
           fieldName={field.name}
           identityKind={identityKindFor(eventType)}

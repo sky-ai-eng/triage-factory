@@ -892,6 +892,13 @@ const (
 // (predicate {"channel_in":[]}). Called inside the same tx as the tracking
 // write (handlePut) — see that call site's doc for why this is the
 // app-pool Create path rather than the admin-pool seeders.
+//
+// The trigger names no channels on purpose. An empty channel_in matches every
+// channel the team tracks, because the routing hooks deliver a team's
+// handlers only messages from those, so the default follows the tracked set
+// as channels are added and removed. Seeding it with the channels tracked at
+// this moment would freeze that set, and a channel tracked later would never
+// fire it.
 func seedDefaultSlackMessageBlueprint(ctx context.Context, tx db.TxStores, orgID, teamID string) error {
 	promptID := uuid.New().String()
 	if _, err := tx.Prompts.Create(ctx, orgID, teamID, domain.Prompt{
