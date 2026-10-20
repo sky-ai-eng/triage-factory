@@ -86,11 +86,25 @@ jobs:
         with:
           persist-credentials: false
 
+      # The Orrery commit this repository is tested against. Moving it is a
+      # change to e2e/ORRERY_REF, so its own pull request's run proves it.
+      - name: Read the pinned Orrery commit
+        id: orrery
+        if: steps.access.outputs.ok == 'true'
+        run: |
+          ref=$(tr -d '[:space:]' <e2e/ORRERY_REF)
+          if ! printf '%s' "$ref" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error file=e2e/ORRERY_REF::not a full commit SHA: '$ref'"
+            exit 1
+          fi
+          echo "ref=$ref" >>"$GITHUB_OUTPUT"
+
       - name: Check out Orrery
         if: steps.access.outputs.ok == 'true'
         uses: actions/checkout@v4
         with:
           repository: sky-ai-eng/orrery
+          ref: ${{ steps.orrery.outputs.ref }}
           token: ${{ secrets.ORRERY_TOKEN }}
           path: orrery
           persist-credentials: false

@@ -76,6 +76,11 @@ Needs Docker, Go, Rust, Node 22, pnpm, `jq`, and a checkout of
 at `../orrery` beside this repository. Ports 3000, 5432, 8333, 8443, 8444, 8445
 and 9999 must be free; stop a running `scripts/multi-mode-dev.sh` stack first.
 
+CI builds the Orrery commit named in `e2e/ORRERY_REF`, and `run.sh` warns when
+the local checkout is at a different one. Moving to a newer Orrery is a pull
+request here that changes that file, so its run tests the new commit before
+anything depends on it.
+
 ```bash
 e2e/sso/run.sh                            # build, bring up, test, tear down
 ORRERY_DIR=~/src/orrery e2e/sso/run.sh    # Orrery checked out elsewhere
@@ -97,6 +102,6 @@ To rerun the tests against a stack left up with `SSO_E2E_KEEP_UP=1`, run
 they pass only against a fresh stack.
 
 CI runs the suite in `.github/workflows/sso-e2e.yml` and uploads the report and
-the four logs when it fails. It checks Orrery out with the `ORRERY_TOKEN`
-secret; a pull request from a fork has no secrets, so the job skips the suite
-with a notice, and the suite runs on `main` after the merge.
+the four logs when it fails. It checks out the pinned Orrery commit with the
+`ORRERY_TOKEN` secret; a pull request from a fork has no secrets, so the job
+skips the suite with a notice, and the suite runs on `main` after the merge.
