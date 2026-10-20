@@ -355,7 +355,7 @@ func ipFieldMatches(field, ip string) bool {
 // ensureIPForward reads /proc/sys/net/ipv4/ip_forward and writes "1"
 // only if it's not already 1. Avoids fighting with other workloads
 // on the host that might toggle it (Docker does too, idempotently —
-// we mirror its behaviour).
+// we mirror its behavior).
 func ensureIPForward() error {
 	const path = "/proc/sys/net/ipv4/ip_forward"
 	cur, err := os.ReadFile(path)

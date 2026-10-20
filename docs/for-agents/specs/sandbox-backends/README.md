@@ -93,7 +93,7 @@ services.
   network, its credential sidecar, its run-tree grants and its jail. The word
   has meant this in `internal/sandbox` and `cmd/capbroker` since the privsep
   split; the interface adopts it.
-- **Jail** — the isolated process at the centre of a cell. For a native
+- **Jail** — the isolated process at the center of a cell. For a native
   engagement it runs the resident tool host (`tf-harness-tools serve`). On
   gVisor it is the `runsc` sandbox; on Firecracker it is the microVM: the VMM
   and the guest it runs.
@@ -389,7 +389,7 @@ declared and matched, never branched on:
   §6).
   `container_runtime` implies `root` inside the guest, because a user who can
   drive the container runtime is root there anyway. `memory_checkpoint` is
-  invisible to the agent: it is just a cache the backend uses when it parks a 
+  invisible to the agent: it is just a cache the backend uses when it parks a
   jail (§8).
 - **Three records, one per question.** What an executor can build goes on its
   `instances` row with its backend name, written at each boot. What a run
@@ -425,8 +425,8 @@ declared and matched, never branched on:
 
 None of §7 is built in step 1: nothing consumes a capability yet, and the
 interface carries no capability method until the first consumer lands.
-In fact, we'll probably wait to ship this until we at least scaffold the
-sandbox profiles.
+It ships after the sandbox profiles are scaffolded, because a profile's
+requirements are what a capability is matched against.
 
 ## 8. Snapshots and resume need no backend ratchet
 
@@ -608,7 +608,7 @@ member when the Firecracker backend needs it:
   in `internal/agentproc` and is reached only through the gVisor backend. It
   shares env assembly and mount helpers with the rest of that package, so
   moving it into `internal/cell/gvisor` is a later cleanup with no
-  behavioural content.
+  behavioral content.
 - **Sidecar identity.** The sidecar's uid derives from the cell's subnet
   index (`sandbox.SidecarUID`). The Firecracker backend builds its network
   through `RunNetwork` and so has a subnet index, and its uid bands derive as
