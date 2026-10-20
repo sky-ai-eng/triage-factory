@@ -69,6 +69,8 @@ func TestShippedPromptSlugsStable(t *testing.T) {
 		"system-pr-review-security":    true,
 		"system-pr-review-correctness": true,
 		"system-pr-review-aggregate":   true,
+		"system-pr-security-review":    true,
+		"system-pr-correctness-review": true,
 		"system-conflict-resolution":   true,
 		"system-ci-fix":                true,
 		"system-jira-implement":        true,
@@ -80,5 +82,43 @@ func TestShippedPromptSlugsStable(t *testing.T) {
 	}
 	if len(want) > 0 {
 		t.Errorf("shipped prompt slugs changed; missing: %v", want)
+	}
+}
+
+// promptSection matches a top-level `<tag>…</tag>` block. Anchoring both tags
+// at line start skips inline mentions like "see <focus>" inside another block.
+func promptSection(body, tag string) string {
+	return regexp.MustCompile(`(?ms)^<` + tag + `>\n.*?^</` + tag + `>$`).FindString(body)
+}
+
+// TestStandaloneReviewsShareTheirPassMethod holds each standalone review to the
+// blueprint pass it shares a method with. The two bodies differ in what happens
+// to a finding — the pass writes it to a file for the aggregator, the
+// standalone posts it — so the sections that decide what counts as a finding
+// must stay identical, or an edit to one silently skips the other.
+func TestStandaloneReviewsShareTheirPassMethod(t *testing.T) {
+	for _, c := range []struct {
+		pass, standalone, passBody, standaloneBody string
+		shared                                     []string
+	}{
+		{
+			"system-pr-review-correctness", "system-pr-correctness-review", prReviewCorrectness, prCorrectnessReview,
+			[]string{"how_to_find", "finding_test", "do_not", "focus", "tone"},
+		},
+		{
+			"system-pr-review-security", "system-pr-security-review", prReviewSecurity, prSecurityReview,
+			[]string{"method", "finding_test", "filters", "tone"},
+		},
+	} {
+		for _, tag := range c.shared {
+			want := promptSection(c.passBody, tag)
+			if want == "" {
+				t.Errorf("%s has no <%s> section", c.pass, tag)
+				continue
+			}
+			if got := promptSection(c.standaloneBody, tag); got != want {
+				t.Errorf("<%s> in %s differs from %s; the two share it verbatim", tag, c.standalone, c.pass)
+			}
+		}
 	}
 }
