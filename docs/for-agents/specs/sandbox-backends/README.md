@@ -411,12 +411,17 @@ declared and matched, never branched on:
   `<run_context>` is composed once, by the claim that launches the
   conversation, and every later claim sends the same bytes
   (`conversations.system_block`). It renders that claim's execution manifest
-  as one line per granted capability. A later change never edits it: after a
-  move to another profile, the next claim injects a message into the
-  conversation naming the capabilities gained and lost, as the
-  workspace-restored notice is injected (`injection:executor-changed`,
-  `internal/agentloop/repair.go`). The `agentprompt` blocks stay
-  byte-identical across backends.
+  as one line per granted capability. After a move to another profile, the
+  next claim injects a message into the conversation naming the capabilities
+  gained and lost, as the workspace-restored notice is injected
+  (`injection:executor-changed`, `internal/agentloop/repair.go`). The message
+  is always sent, because the turns above it were taken in the old
+  environment. The first claim after the move that finds the provider's cache
+  cold also recomposes `<run_context>` for the new profile, since a cold cache
+  re-reads the whole prompt anyway. Warmth is derived the way compaction
+  derives it (`warmCacheLive`: the newest assistant message's age against the
+  cache TTL), and a wrong guess costs one uncached read, never correctness.
+  The `agentprompt` blocks stay byte-identical across backends.
 
 None of §7 is built in step 1: nothing consumes a capability yet, and the
 interface carries no capability method until the first consumer lands.
