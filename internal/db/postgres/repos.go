@@ -410,17 +410,6 @@ func (s *repoStore) ListTrackedNamesSystem(ctx context.Context, orgID, host stri
 	return out, rows.Err()
 }
 
-func (s *repoStore) CountConfigured(ctx context.Context, orgID, host string) (int, error) {
-	if err := db.RequireRepoHost(host); err != nil {
-		return 0, err
-	}
-	var count int
-	err := s.q.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM repositories WHERE org_id = $1 AND host = $2`, orgID, host,
-	).Scan(&count)
-	return count, err
-}
-
 func (s *repoStore) UpdateBaseBranch(ctx context.Context, orgID, id, baseBranch string) (domain.Repository, error) {
 	if err := validRepoID(id); err != nil {
 		return domain.Repository{}, err

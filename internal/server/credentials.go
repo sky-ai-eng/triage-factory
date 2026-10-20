@@ -135,11 +135,10 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// SecretStore.Load + repo count both inside the same WithTx so the
-	// org_secrets read sees request.jwt.claims and repos_select RLS runs
-	// under the user's identity. Local mode collapses to one SQLite
-	// tx with the same shape. These feed the config-step fields
-	// (github/jira/github_repos), not the first-run gate.
+	// SecretStore.Load inside the WithTx so the org_secrets read sees
+	// request.jwt.claims and runs under the user's identity. Local mode
+	// collapses to one SQLite tx with the same shape. These feed the
+	// config-step fields (github/jira), not the first-run gate.
 	var (
 		creds       auth.Credentials
 		credsErr    error
@@ -154,16 +153,6 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		var e error
 		if orgSet, e = tx.Orgs.GetSettings(r.Context(), orgID); e != nil {
 			return e
-		}
-		// Repositories on the org's current GitHub host: one the org tracked on
-		// a host it has left is not a repository it has configured here, and
-		// an org with no GitHub URL has configured none.
-		// TODO(TFAC-1150): counts every registry row, including repositories
-		// no team tracks that a GitHub entity created a row for.
-		if host := db.EffectiveGitHubHost(orgSet.GitHubBaseURL); host != "" {
-			if repoCount, e = tx.Repos.CountConfigured(r.Context(), orgID, host); e != nil {
-				return e
-			}
 		}
 		if orgModel, teamModel, e = setupModelPicks(r.Context(), tx, orgID); e != nil {
 			return e
@@ -191,16 +180,29 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Repositories at least one team in the org tracks, on the org's current
+	// GitHub host: one tracked on a host the org has left is not configured
+	// here, and an org with no GitHub URL has configured none. The registry is
+	// not the count: it also holds repositories no team tracks, such as the
+	// repository of a pull request an agent commented on. Admin pool, because
+	// setup is an org-level state: on the app pool team_github_repos_select
+	// narrows the tracking rows to the caller's own teams, and a member of a
+	// team that tracks nothing would read a finished org as unfinished. Only
+	// the count leaves this handler.
+	if host := db.EffectiveGitHubHost(orgSet.GitHubBaseURL); host != "" {
+		if _, repoCount, err = s.allStores.Repos.ListTrackedSystem(r.Context(), orgID, host, db.ListOpts{CountOnly: true}); err != nil {
+			internalError(w, "setup", fmt.Errorf("count tracked repositories: %w", err))
+			return
+		}
+	}
+
 	// Setup is complete once GitHub access is configured (PAT or registered
-	// App), the org has brought at least one repo into the registry, and — in
-	// multi mode, where nothing is pre-filled — both model picks are made.
-	// ReplaceForTeam writes the registry row in the same tx it records the
-	// team's tracked repos, so repoCount is a durable signal here — it doesn't
-	// lag behind the (async) profiling pass.
-	// It counts the registry rather than the tracked set on purpose: a founder
-	// who has finished setup and later untracks everything has still finished
-	// setup, and bouncing them back through it would be a regression, not a
-	// reminder. Jira stays optional. setup_step tells the gate which configure
+	// App), at least one team tracks a repo, and — in multi mode, where
+	// nothing is pre-filled — both model picks are made. ReplaceForTeam
+	// commits the tracking rows when the team's repos are saved, so repoCount
+	// doesn't lag behind the (async) profiling pass. An org whose teams later
+	// untrack every repository is incomplete again and resumes on the team
+	// step. Jira stays optional. setup_step tells the gate which configure
 	// screen an incomplete founder resumes on.
 	setupComplete := githubReady && orgModel && teamModel && repoCount >= 1
 	// The order is the wizard's own: the org's credential and jobs model, then

@@ -236,11 +236,6 @@ type RepositoryStore interface {
 	// Confined to host, like List.
 	ListTeamScoped(ctx context.Context, orgID, host string, opts ListOpts) ([]domain.Repository, int, error)
 
-	// CountConfigured returns the number of configured repos on host. Used
-	// by the settings endpoint to short-circuit a "no repos
-	// configured yet" UI state without paying the full SELECT cost.
-	CountConfigured(ctx context.Context, orgID, host string) (int, error)
-
 	// UpdateBaseBranch sets the user-configured base branch for the
 	// repository with this registry id and returns the updated row. Empty
 	// string stores SQL NULL → falls back to the detected default_branch at
@@ -340,16 +335,20 @@ type RepositoryStore interface {
 	// tracked set ListTrackedNamesSystem names, as rows. Ordered and paged
 	// like List; db.Unwindowed returns every row.
 	//
-	// Its consumers mean "the repositories TF works with" and need the row:
-	// the startup clone warm reads each one's clone URL, and the org admin's
-	// repository list renders it. A row every team has stopped tracking is
-	// left out; it stays in the registry for the references that still name
-	// it.
+	// Its consumers mean "the repositories TF works with": the startup clone
+	// warm reads each row's clone URL, the org admin's repository list renders
+	// the rows, the setup gate counts them (ListOpts.CountOnly), and the
+	// GitHub team lookups take their owners. A row every team has stopped
+	// tracking is left out; it stays in the registry for the references that
+	// still name it.
 	//
 	// Admin pool in Postgres, which is what lets "at least one team" reach
 	// teams the caller is not on: the app pool's team_github_repos_select
 	// policy narrows a team to the viewer's own, which is ListTeamScoped. A
-	// request handler calls this only behind an org-admin gate.
+	// request handler returns these rows only behind an org-admin gate. A
+	// handler may read them for an org-level answer that returns no row: the
+	// setup gate's count, and the owners whose GitHub teams it asks the org's
+	// credential for.
 	ListTrackedSystem(ctx context.Context, orgID, host string, opts ListOpts) ([]domain.Repository, int, error)
 
 	// ListTrackedByTeamSystem returns one page of the repository rows on host

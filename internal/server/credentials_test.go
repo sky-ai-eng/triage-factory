@@ -67,6 +67,45 @@ func TestIntegrationsStatus_SetupCompleteGate(t *testing.T) {
 	}
 }
 
+// TestIntegrationsStatus_SetupCountsTrackedRepos pins that the setup gate
+// counts the repositories a team tracks, not the registry. A registry row no
+// team tracks (a GitHub entity's repository gets one) neither completes setup
+// nor shows in github_repos, and an org whose teams untrack every repository
+// resumes on the team step while both rows stay in the registry.
+func TestIntegrationsStatus_SetupCountsTrackedRepos(t *testing.T) {
+	keyring.MockInit()
+	s := newTestServer(t)
+	ctx := t.Context()
+	org := runmode.LocalDefaultOrgID
+
+	seedSourceHost(t, s, eventsource.KindGitHub, "https://github.com")
+	if err := integrations.Save(ctx, s.secrets, org, auth.Credentials{GitHubPAT: "ghp-test"}); err != nil {
+		t.Fatalf("Save creds: %v", err)
+	}
+	check := func(stage string, wantRepos float64, wantComplete bool, wantStep string) {
+		t.Helper()
+		st := getIntegrationsStatus(t, s)
+		if st["github_repos"] != wantRepos || st["setup_complete"] != wantComplete || st["setup_step"] != wantStep {
+			t.Errorf("%s: github_repos=%v setup_complete=%v setup_step=%v; want %v, %v, %v",
+				stage, st["github_repos"], st["setup_complete"], st["setup_step"], wantRepos, wantComplete, wantStep)
+		}
+	}
+
+	seedUntrackedRepo(t, s, "other", "thing")
+	check("only an untracked registry row", 0, false, "team")
+
+	seedConfiguredRepo(t, s, "acme", "widgets")
+	check("one tracked repo beside the untracked row", 1, true, "done")
+
+	if err := s.allStores.TeamGitHubRepos.ReplaceForTeam(ctx, org, runmode.LocalDefaultTeamID, seedRepoHost(t, s), nil); err != nil {
+		t.Fatalf("untrack every repo: %v", err)
+	}
+	check("every repo untracked", 0, false, "team")
+	if _, n, err := s.allStores.Repos.List(ctx, org, seedRepoHost(t, s), db.ListOpts{CountOnly: true}); err != nil || n != 2 {
+		t.Errorf("registry rows after untracking = %d, %v; want 2", n, err)
+	}
+}
+
 // getIntegrationsStatus GETs /api/integrations/status and decodes the body.
 func getIntegrationsStatus(t *testing.T, s *Server) map[string]any {
 	t.Helper()

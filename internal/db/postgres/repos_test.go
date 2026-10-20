@@ -81,11 +81,6 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Errorf("orgB List returned %d rows (total %d), want 0 / 0", len(got), total)
 	}
 
-	// CountConfigured cross-org must report 0.
-	if n, _ := stores.Repos.CountConfigured(ctx, orgB, dbtest.TestGitHubHost); n != 0 {
-		t.Errorf("orgB CountConfigured = %d, want 0", n)
-	}
-
 	// The tracked reads run on the admin pool, so the org_id filter is the
 	// only thing between orgB and orgA's tracked set — including when orgB
 	// names orgA's own team.

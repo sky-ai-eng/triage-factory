@@ -103,7 +103,7 @@ func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Reques
 	candidates := []gitHubGroupCandidateJSON{}
 	credsMissing := false
 	if role != "" {
-		candidates, credsMissing = s.gitHubGroupCandidates(r.Context(), orgID, userID)
+		candidates, credsMissing = s.gitHubGroupCandidates(r.Context(), orgID)
 		if r.URL.Query().Get("include_membership") == "true" {
 			s.annotateGitHubGroupMembership(r.Context(), orgID, userID, candidates)
 		}
@@ -197,7 +197,7 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 }
 
 // gitHubGroupCandidates fetches the org's live GitHub teams (one
-// GET /orgs/{org}/teams per distinct configured-repo owner) and returns
+// GET /orgs/{org}/teams per distinct tracked-repo owner) and returns
 // them as the flat candidate list the editor presents. Read-only — the
 // deletion-reconcile prune runs in the GitHub poll cycle
 // (poller.Manager.reconcileGitHubGroups), not here, so this GET stays a
@@ -221,28 +221,27 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 // did resolve a credential flips it back to false (the access works; that
 // owner just had nothing to import). Callers surface credsMissing as a
 // reconnect prompt instead of a silent empty list.
-func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string) ([]gitHubGroupCandidateJSON, bool) {
+func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID string) ([]gitHubGroupCandidateJSON, bool) {
 	host, err := s.orgGitHubHost(ctx, orgID)
 	if err != nil {
 		githubGroupsLog.Error("read github host failed", "error", err)
 		return nil, false
 	}
 	if host == "" {
-		return nil, false // no GitHub URL: no registry to derive owners from
+		return nil, false // no GitHub URL: no tracked repos to derive owners from
 	}
-	var repos []domain.Repository
-	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		var e error
-		// Unwindowed: the candidate set is derived from the whole registry,
-		// not browsed, so a page would silently narrow what can be imported.
-		// The registry on the org's current host: its owners are the ones the
-		// credential below lists teams of.
-		// TODO(TFAC-1150): includes repositories no team tracks that a GitHub
-		// entity created a row for; owners should come from tracked rows.
-		repos, _, e = tx.Repos.List(ctx, orgID, host, db.Unwindowed)
-		return e
-	}); err != nil {
-		githubGroupsLog.Error("load configured repos failed", "error", err)
+	// The repositories at least one team in the org tracks on its current
+	// host: their owners are the ones the credential below lists teams of.
+	// The registry also holds repositories no team tracks, whose owners are
+	// not organizations the org works with. Unwindowed: the candidate set is
+	// derived from every tracked repository, not browsed, so a page would
+	// silently narrow what can be imported. Admin pool, so the list is the
+	// same org-wide one whichever team asks (team_github_repos_select would
+	// narrow it to the caller's teams); the rows stay here, and only the
+	// owners' GitHub teams are returned.
+	repos, _, err := s.allStores.Repos.ListTrackedSystem(ctx, orgID, host, db.Unwindowed)
+	if err != nil {
+		githubGroupsLog.Error("load tracked repos failed", "error", err)
 		return nil, false
 	}
 
@@ -319,9 +318,9 @@ func (s *Server) annotateGitHubGroupMembership(ctx context.Context, orgID, userI
 	}
 }
 
-// distinctRepoOwners returns the configured repos' owners, lowercased,
-// de-duplicated, in first-seen order. These are the GitHub orgs whose
-// teams the editor offers as candidates.
+// distinctRepoOwners returns the repos' owners, lowercased, de-duplicated,
+// in first-seen order. These are the GitHub orgs whose teams the editor
+// offers as candidates.
 func distinctRepoOwners(repos []domain.Repository) []string {
 	seen := map[string]bool{}
 	out := []string{}
