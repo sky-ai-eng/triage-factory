@@ -31,29 +31,29 @@ func moveReplyPermalink(channel, ts, threadTS string) string {
 	return movePermalink(channel, ts) + "?thread_ts=" + threadTS + "&cid=" + channel
 }
 
-func seedTracker(t *testing.T, h *pgtest.Harness, orgID, teamID, channelID string, primary bool, createdAt time.Time) {
+func seedTracker(t *testing.T, h *pgtest.Harness, orgID, teamID, row string, primary bool, createdAt time.Time) {
 	t.Helper()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO team_slack_channels (org_id, team_id, channel_id, is_primary, created_at)
+		INSERT INTO team_slack_channels (org_id, team_id, slack_channel_id, is_primary, created_at)
 		VALUES ($1, $2, $3, $4, $5)
-	`, orgID, teamID, channelID, primary, createdAt); err != nil {
-		t.Fatalf("seed tracker %s on %s: %v", teamID, channelID, err)
+	`, orgID, teamID, row, primary, createdAt); err != nil {
+		t.Fatalf("seed tracker %s on %s: %v", teamID, row, err)
 	}
 }
 
-func trackersOf(t *testing.T, h *pgtest.Harness, orgID, channelID string) map[string]slackstore.TeamChannel {
+func trackersOf(t *testing.T, h *pgtest.Harness, orgID, row string) map[string]slackstore.TeamChannel {
 	t.Helper()
 	rows, err := h.AdminDB.Query(`
 		SELECT team_id::text, is_primary, created_at FROM team_slack_channels
-		WHERE org_id = $1 AND channel_id = $2
-	`, orgID, channelID)
+		WHERE org_id = $1 AND slack_channel_id = $2
+	`, orgID, row)
 	if err != nil {
-		t.Fatalf("list trackers of %s: %v", channelID, err)
+		t.Fatalf("list trackers of %s: %v", row, err)
 	}
 	defer rows.Close()
 	out := map[string]slackstore.TeamChannel{}
 	for rows.Next() {
-		tc := slackstore.TeamChannel{OrgID: orgID, ChannelID: channelID}
+		tc := slackstore.TeamChannel{OrgID: orgID, SlackChannelID: row}
 		if err := rows.Scan(&tc.TeamID, &tc.IsPrimary, &tc.CreatedAt); err != nil {
 			t.Fatalf("scan tracker: %v", err)
 		}
@@ -62,11 +62,16 @@ func trackersOf(t *testing.T, h *pgtest.Harness, orgID, channelID string) map[st
 	return out
 }
 
-func seedThreadEntity(t *testing.T, stores db.Stores, orgID, sourceID, kind, url string) domain.Entity {
+func seedThreadEntity(t *testing.T, stores db.Stores, orgID, channelID, threadTS, kind, url string) domain.Entity {
 	t.Helper()
-	e, _, err := stores.Entities.FindOrCreateSystem(context.Background(), orgID, "slack", domain.SlackScope, sourceID, "", kind, "thread", url)
+	ctx := context.Background()
+	thread, err := slackstore.FromStores(stores).Channels.FindOrCreateThreadSystem(ctx, orgID, channelID, threadTS, kind, "thread", url)
 	if err != nil {
-		t.Fatalf("seed entity %s: %v", sourceID, err)
+		t.Fatalf("seed thread %s in %s: %v", threadTS, channelID, err)
+	}
+	e, err := stores.Entities.GetSystem(ctx, orgID, thread.EntityID)
+	if err != nil || e == nil {
+		t.Fatalf("read seeded thread %s: %+v, %v", thread.EntityID, e, err)
 	}
 	return *e
 }
@@ -149,13 +154,26 @@ func readPredicate(t *testing.T, h *pgtest.Harness, id string) map[string]any {
 	return out
 }
 
-// TestChannelMove_Postgres_MovesEveryRowNamingTheChannel: one move rewrites
-// the registry row, the tracking rows, every thread entity under the old id
-// in any state, the Slack artifacts and action pointers that name it, and the
-// handler filters that list it — and nothing under a channel whose id merely
-// starts with the old one. A redelivery of the same change finds nothing
-// left to move.
-func TestChannelMove_Postgres_MovesEveryRowNamingTheChannel(t *testing.T) {
+// resolvesTo asserts each id resolves to row, which carries want as the id
+// the channel has now.
+func resolvesTo(t *testing.T, channels slackstore.ChannelRegistryStore, orgID, row, want string, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		got, err := channels.ResolveSystem(context.Background(), orgID, id)
+		if err != nil || got == nil || got.ID != row || got.ChannelID != want {
+			t.Errorf("ResolveSystem(%s) = %+v, %v; want row %s carrying %s", id, got, err, row, want)
+		}
+	}
+}
+
+// TestChannelMove_Postgres_MovesTheChannel: references to the channel hold its
+// registry row, so a move rewrites the row's channel id and the display
+// values that spell it — every thread entity's key and permalink under the old
+// id in any state, the Slack artifacts and action pointers that name it — and
+// leaves the tracking rows and handler filters as they were. Nothing under a
+// channel whose id merely starts with the old one moves. A redelivery of the
+// same change finds nothing left to move.
+func TestChannelMove_Postgres_MovesTheChannel(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamA := pgtest.SeedOrgWithUser(t, h, "chan-move")
@@ -164,23 +182,19 @@ func TestChannelMove_Postgres_MovesEveryRowNamingTheChannel(t *testing.T) {
 	channels := slackstore.FromStores(stores).Channels
 	ctx := context.Background()
 
-	if err := channels.EnsureSystem(ctx, orgID, "T0MOVE001", moveOld, "launch-plans"); err != nil {
-		t.Fatalf("seed registry: %v", err)
-	}
-	if err := channels.EnsureSystem(ctx, orgID, "T0MOVE001", moveNeighbour, "neighbour"); err != nil {
-		t.Fatalf("seed neighbour registry: %v", err)
-	}
+	row := channelRowNamed(t, channels, orgID, moveOld, "launch-plans")
+	neighbourRow := channelRowNamed(t, channels, orgID, moveNeighbour, "neighbour")
 	created := time.Now().Add(-48 * time.Hour).UTC().Truncate(time.Microsecond)
-	seedTracker(t, h, orgID, teamA, moveOld, true, created)
-	seedTracker(t, h, orgID, teamB, moveOld, false, created.Add(time.Hour))
-	seedTracker(t, h, orgID, teamA, moveNeighbour, true, created)
+	seedTracker(t, h, orgID, teamA, row, true, created)
+	seedTracker(t, h, orgID, teamB, row, false, created.Add(time.Hour))
+	seedTracker(t, h, orgID, teamA, neighbourRow, true, created)
 
-	open := seedThreadEntity(t, stores, orgID, domain.SlackSourceID(moveOld, "1700000000.000100"), "thread", movePermalink(moveOld, "1700000000000100"))
-	done := seedThreadEntity(t, stores, orgID, domain.SlackSourceID(moveOld, "1700000000.000200"), "message", "")
+	open := seedThreadEntity(t, stores, orgID, moveOld, "1700000000.000100", "thread", movePermalink(moveOld, "1700000000000100"))
+	done := seedThreadEntity(t, stores, orgID, moveOld, "1700000000.000200", "message", "")
 	if _, err := stores.Entities.CloseSystem(ctx, orgID, done.ID); err != nil {
 		t.Fatalf("close entity: %v", err)
 	}
-	neighbour := seedThreadEntity(t, stores, orgID, domain.SlackSourceID(moveNeighbour, "1700000000.000100"), "thread", movePermalink(moveNeighbour, "1700000000000100"))
+	neighbour := seedThreadEntity(t, stores, orgID, moveNeighbour, "1700000000.000100", "thread", movePermalink(moveNeighbour, "1700000000000100"))
 
 	artifact := seedMessageArtifact(t, stores, orgID, teamA, moveOld, "1700000000.000100", "1700000000.000300")
 	neighbourArtifact := seedMessageArtifact(t, stores, orgID, teamA, moveNeighbour, "1700000000.000100", "1700000000.000300")
@@ -190,48 +204,46 @@ func TestChannelMove_Postgres_MovesEveryRowNamingTheChannel(t *testing.T) {
 	seedSlackAction(t, stores, orgID, teamA, domain.SlackSourceID(moveNeighbour, "1700000000.000100"),
 		moveReplyPermalink(moveNeighbour, "1700000000000300", "1700000000.000100"), "action-neighbour")
 
-	handler := seedSlackHandler(t, h, orgID, teamA, userID, "launch", `{"channel_in":["`+moveOld+`","C0OTHER01"],"mentioned_only":true}`)
-	neighbourHandler := seedSlackHandler(t, h, orgID, teamA, userID, "neighbour", `{"channel_in":["`+moveNeighbour+`"]}`)
+	predicate := `{"channel_in":["` + row + `"],"mentioned_only":true}`
+	handler := seedSlackHandler(t, h, orgID, teamA, userID, "launch", predicate)
 
 	move, err := channels.MoveSystem(ctx, orgID, moveOld, moveNew)
 	if err != nil {
 		t.Fatalf("MoveSystem: %v", err)
 	}
-	want := slackstore.ChannelMove{To: moveNew, Entities: 2, Trackers: 2, Artifacts: 1, Actions: 1, Handlers: 1}
+	want := slackstore.ChannelMove{To: moveNew, Entities: 2, Artifacts: 1, Actions: 1}
 	if !reflect.DeepEqual(move, want) {
 		t.Errorf("MoveSystem = %+v, want %+v", move, want)
 	}
 
-	// Registry.
-	if got, err := channels.GetSystem(ctx, orgID, moveOld); err != nil || got != nil {
-		t.Errorf("registry row under the old id = %+v err=%v, want gone", got, err)
+	// Registry: the same row, carrying the new id, keeps its name and
+	// workspace; the old id resolves to it.
+	resolvesTo(t, channels, orgID, row, moveNew, moveOld, moveNew)
+	if got, _ := channels.GetSystem(ctx, orgID, row); got.Name != "launch-plans" || got.WorkspaceID != "T0MOVE001" {
+		t.Errorf("registry row = %+v, want its name and workspace kept", got)
 	}
-	if got, err := channels.GetSystem(ctx, orgID, moveNew); err != nil || got == nil || got.Name != "launch-plans" || got.WorkspaceID != "T0MOVE001" {
-		t.Errorf("registry row under the new id = %+v err=%v, want the old row's name and workspace", got, err)
+	resolvesTo(t, channels, orgID, neighbourRow, moveNeighbour, moveNeighbour)
+
+	// Tracking: nothing to move; the gates read the row.
+	tracked := trackersOf(t, h, orgID, row)
+	if a, ok := tracked[teamA]; !ok || !a.IsPrimary || !a.CreatedAt.Equal(created) {
+		t.Errorf("team A = %+v (present %v), want primary with created_at %v", a, ok, created)
+	}
+	if b, ok := tracked[teamB]; !ok || b.IsPrimary {
+		t.Errorf("team B = %+v (present %v), want a non-primary tracker", b, ok)
+	}
+	teamChannels := slackstore.FromStores(stores).TeamChannels
+	if got, err := teamChannels.PrimaryTeamForChannelSystem(ctx, orgID, row); err != nil || got != teamA {
+		t.Errorf("PrimaryTeamForChannelSystem = %q, %v; want team A", got, err)
 	}
 
-	// Tracking.
-	if old := trackersOf(t, h, orgID, moveOld); len(old) != 0 {
-		t.Errorf("trackers left on the old id: %+v", old)
-	}
-	moved := trackersOf(t, h, orgID, moveNew)
-	if a, ok := moved[teamA]; !ok || !a.IsPrimary || !a.CreatedAt.Equal(created) {
-		t.Errorf("team A on the new id = %+v (present %v), want primary with created_at %v", a, ok, created)
-	}
-	if b, ok := moved[teamB]; !ok || b.IsPrimary {
-		t.Errorf("team B on the new id = %+v (present %v), want a non-primary tracker", b, ok)
-	}
-	if n := trackersOf(t, h, orgID, moveNeighbour); len(n) != 1 || !n[teamA].IsPrimary {
-		t.Errorf("neighbour trackers = %+v, want untouched", n)
-	}
-
-	// Entities.
+	// Entities: keys and permalinks move; each keeps its channel row.
 	for _, tc := range []struct {
-		id, key, url, state string
+		id, key, url, state, row string
 	}{
-		{open.ID, domain.SlackSourceID(moveNew, "1700000000.000100"), movePermalink(moveNew, "1700000000000100"), "active"},
-		{done.ID, domain.SlackSourceID(moveNew, "1700000000.000200"), "", "closed"},
-		{neighbour.ID, domain.SlackSourceID(moveNeighbour, "1700000000.000100"), movePermalink(moveNeighbour, "1700000000000100"), "active"},
+		{open.ID, domain.SlackSourceID(moveNew, "1700000000.000100"), movePermalink(moveNew, "1700000000000100"), "active", row},
+		{done.ID, domain.SlackSourceID(moveNew, "1700000000.000200"), "", "closed", row},
+		{neighbour.ID, domain.SlackSourceID(moveNeighbour, "1700000000.000100"), movePermalink(moveNeighbour, "1700000000000100"), "active", neighbourRow},
 	} {
 		got, err := stores.Entities.GetSystem(ctx, orgID, tc.id)
 		if err != nil || got == nil {
@@ -239,6 +251,9 @@ func TestChannelMove_Postgres_MovesEveryRowNamingTheChannel(t *testing.T) {
 		}
 		if got.SourceID != tc.key || got.URL != tc.url || got.State != tc.state {
 			t.Errorf("entity %s = (%s, %q, %s), want (%s, %q, %s)", tc.id, got.SourceID, got.URL, got.State, tc.key, tc.url, tc.state)
+		}
+		if r := entityChannelRow(t, h, tc.id); r != tc.row {
+			t.Errorf("entity %s channel row = %s, want %s", tc.id, r, tc.row)
 		}
 	}
 	if got, err := stores.Entities.GetBySourceSystem(ctx, orgID, "slack", domain.SlackScope, domain.SlackSourceID(moveNew, "1700000000.000100")); err != nil || got == nil || got.ID != open.ID {
@@ -270,29 +285,9 @@ func TestChannelMove_Postgres_MovesEveryRowNamingTheChannel(t *testing.T) {
 		t.Errorf("neighbour action current_url = %q, want untouched", got.currentURL)
 	}
 
-	// Handler filters.
-	if got := readPredicate(t, h, handler); !reflect.DeepEqual(got, map[string]any{
-		"channel_in": []any{moveNew, "C0OTHER01"}, "mentioned_only": true,
-	}) {
-		t.Errorf("moved handler predicate = %v", got)
-	}
-	if got := readPredicate(t, h, neighbourHandler); !reflect.DeepEqual(got, map[string]any{"channel_in": []any{moveNeighbour}}) {
-		t.Errorf("neighbour handler predicate = %v, want untouched", got)
-	}
-
-	// The change is recorded, and the gates read the old id as the new one.
-	if got, err := channels.CurrentIDSystem(ctx, orgID, moveOld); err != nil || got != moveNew {
-		t.Errorf("CurrentIDSystem(old) = %q, %v; want %q", got, err, moveNew)
-	}
-	if got, err := channels.CurrentIDSystem(ctx, orgID, moveNeighbour); err != nil || got != moveNeighbour {
-		t.Errorf("CurrentIDSystem(neighbour) = %q, %v; want itself", got, err)
-	}
-	teamChannels := slackstore.FromStores(stores).TeamChannels
-	if ok, err := teamChannels.TracksChannelSystem(ctx, orgID, teamB, moveOld); err != nil || !ok {
-		t.Errorf("TracksChannelSystem(team B, old id) = %v, %v; want true", ok, err)
-	}
-	if got, err := teamChannels.PrimaryTeamForChannelSystem(ctx, orgID, moveOld); err != nil || got != teamA {
-		t.Errorf("PrimaryTeamForChannelSystem(old id) = %q, %v; want team A", got, err)
+	// The handler filter names the row, which did not change.
+	if got := readPredicate(t, h, handler); !reflect.DeepEqual(got, map[string]any{"channel_in": []any{row}, "mentioned_only": true}) {
+		t.Errorf("handler predicate = %v, want it as stored", got)
 	}
 
 	// A redelivery has nothing left to move.
@@ -305,84 +300,132 @@ func TestChannelMove_Postgres_MovesEveryRowNamingTheChannel(t *testing.T) {
 	}
 }
 
-// TestChannelMove_Postgres_MergesWhatTheNewIDGotFirst covers deliveries that
-// reached TF under the new id before the change did. The thread's original
-// takes the key and the entity a mention minted under the new id is closed
-// beside it; the registry and tracking rows merge, the old id's primary team
-// staying primary; an artifact key the new id already holds stays put.
-func TestChannelMove_Postgres_MergesWhatTheNewIDGotFirst(t *testing.T) {
+// channelRowNamed registers channelID under workspace T0MOVE001 with name and
+// returns its row.
+func channelRowNamed(t *testing.T, channels slackstore.ChannelRegistryStore, orgID, channelID, name string) string {
+	t.Helper()
+	ch, err := channels.EnsureSystem(context.Background(), orgID, "T0MOVE001", channelID, name)
+	if err != nil {
+		t.Fatalf("ensure %s: %v", channelID, err)
+	}
+	return ch.ID
+}
+
+// TestChannelMove_Postgres_AbsorbsWhatTheNewIDGotFirst covers deliveries that
+// reached TF under the new id before the change did, which registered the new
+// id as a channel of its own. The move absorbs that row into the channel's:
+// the registry fields merge; its tracking rows join the channel's, the
+// channel's primary team staying primary; its thread entity moves onto the
+// channel and is closed beside the thread's original, which takes the key;
+// the handler filters naming it name the channel instead, one that cannot be
+// decoded being reported and left as stored; and an artifact key the new id
+// already holds stays put.
+func TestChannelMove_Postgres_AbsorbsWhatTheNewIDGotFirst(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	orgID, _, teamA := pgtest.SeedOrgWithUser(t, h, "chan-merge")
+	orgID, userID, teamA := pgtest.SeedOrgWithUser(t, h, "chan-merge")
 	teamB := pgtest.SeedTeam(t, h, orgID, "chan-merge-b")
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	channels := slackstore.FromStores(stores).Channels
 	ctx := context.Background()
 
 	firstSeen := time.Now().Add(-72 * time.Hour).UTC().Truncate(time.Second)
-	if _, err := channels.UpsertSightingSystem(ctx, orgID, "T0OLDWS01", moveOld, firstSeen); err != nil {
+	channel, err := channels.UpsertSightingSystem(ctx, orgID, "T0OLDWS01", moveOld, firstSeen)
+	if err != nil {
 		t.Fatalf("seed old sighting: %v", err)
 	}
-	if err := channels.SetNameSystem(ctx, orgID, moveOld, "launch-plans"); err != nil {
+	if err := channels.SetNameSystem(ctx, orgID, channel.ID, "launch-plans"); err != nil {
 		t.Fatalf("name old row: %v", err)
 	}
 	lastMention := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
-	if _, err := channels.UpsertSightingSystem(ctx, orgID, "T0NEWWS01", moveNew, lastMention); err != nil {
+	absorbed, err := channels.UpsertSightingSystem(ctx, orgID, "T0NEWWS01", moveNew, lastMention)
+	if err != nil {
 		t.Fatalf("seed new sighting: %v", err)
 	}
 
 	created := time.Now().Add(-48 * time.Hour).UTC().Truncate(time.Microsecond)
-	seedTracker(t, h, orgID, teamA, moveOld, true, created)
-	seedTracker(t, h, orgID, teamA, moveNew, false, created.Add(47*time.Hour))
-	seedTracker(t, h, orgID, teamB, moveNew, true, created.Add(47*time.Hour))
+	seedTracker(t, h, orgID, teamA, channel.ID, true, created)
+	seedTracker(t, h, orgID, teamA, absorbed.ID, false, created.Add(47*time.Hour))
+	seedTracker(t, h, orgID, teamB, absorbed.ID, true, created.Add(47*time.Hour))
 
-	original := seedThreadEntity(t, stores, orgID, domain.SlackSourceID(moveOld, "1700000000.000100"), "thread", "")
-	newcomer := seedThreadEntity(t, stores, orgID, domain.SlackSourceID(moveNew, "1700000000.000100"), "message", "")
+	original := seedThreadEntity(t, stores, orgID, moveOld, "1700000000.000100", "thread", "")
+	newcomer := seedThreadEntity(t, stores, orgID, moveNew, "1700000000.000100", "message", "")
 
 	kept := seedMessageArtifact(t, stores, orgID, teamA, moveOld, "1700000000.000100", "1700000000.000500")
 	held := seedMessageArtifact(t, stores, orgID, teamA, moveNew, "1700000000.000100", "1700000000.000500")
+
+	onAbsorbed := seedSlackHandler(t, h, orgID, teamA, userID, "absorbed", `{"channel_in":["`+absorbed.ID+`","C0OTHER01"],"mentioned_only":true}`)
+	onBoth := seedSlackHandler(t, h, orgID, teamA, userID, "both", `{"channel_in":["`+channel.ID+`","`+absorbed.ID+`"]}`)
+	onChannel := seedSlackHandler(t, h, orgID, teamA, userID, "channel", `{"channel_in":["`+channel.ID+`"]}`)
+	unreadable := seedSlackHandler(t, h, orgID, teamA, userID, "unreadable", `{"channel_in":["`+absorbed.ID+`", 7]}`)
 
 	move, err := channels.MoveSystem(ctx, orgID, moveOld, moveNew)
 	if err != nil {
 		t.Fatalf("MoveSystem: %v", err)
 	}
-	if move.Entities != 1 || !reflect.DeepEqual(move.Superseded, []string{newcomer.ID}) {
-		t.Errorf("MoveSystem = %+v, want one entity moved and %s superseded", move, newcomer.ID)
+	want := slackstore.ChannelMove{
+		To: moveNew, Absorbed: absorbed.ID, Entities: 1, Superseded: []string{newcomer.ID},
+		Artifacts: 1, Trackers: 2, Handlers: 2, SkippedHandlers: []string{unreadable},
+	}
+	if !reflect.DeepEqual(move, want) {
+		t.Errorf("MoveSystem = %+v, want %+v", move, want)
 	}
 
-	// Registry: one row, the old row's name and first sighting, the new
-	// row's workspace and latest mention.
-	got, err := channels.GetSystem(ctx, orgID, moveNew)
+	// Registry: one row, the channel's, with its name and first sighting and
+	// the absorbed row's workspace and latest mention.
+	resolvesTo(t, channels, orgID, channel.ID, moveNew, moveOld, moveNew)
+	got, err := channels.GetSystem(ctx, orgID, channel.ID)
 	if err != nil || got == nil {
-		t.Fatalf("registry row under the new id = %+v, %v", got, err)
+		t.Fatalf("channel row = %+v, %v", got, err)
 	}
 	if got.Name != "launch-plans" || got.WorkspaceID != "T0NEWWS01" || !got.FirstSeenAt.Equal(firstSeen) ||
 		got.LastMentionAt == nil || !got.LastMentionAt.Equal(lastMention) {
 		t.Errorf("merged registry row = %+v", got)
 	}
-	if old, _ := channels.GetSystem(ctx, orgID, moveOld); old != nil {
-		t.Errorf("registry row under the old id = %+v, want gone", old)
+	if gone, _ := channels.GetSystem(ctx, orgID, absorbed.ID); gone != nil {
+		t.Errorf("absorbed row = %+v, want gone", gone)
 	}
 
 	// Tracking: team A keeps one row, primary, with its original created_at;
-	// team B's primary on the new id is demoted.
-	trackers := trackersOf(t, h, orgID, moveNew)
+	// team B's primary on the absorbed row is demoted.
+	trackers := trackersOf(t, h, orgID, channel.ID)
 	if len(trackers) != 2 {
-		t.Fatalf("trackers on the new id = %+v, want teams A and B", trackers)
+		t.Fatalf("trackers of the channel = %+v, want teams A and B", trackers)
 	}
 	if a := trackers[teamA]; !a.IsPrimary || !a.CreatedAt.Equal(created) {
 		t.Errorf("team A = %+v, want primary with created_at %v", a, created)
 	}
 	if trackers[teamB].IsPrimary {
-		t.Error("team B still primary; want the old id's primary to stay primary")
+		t.Error("team B still primary; want the channel's primary to stay primary")
 	}
 
-	// Entities: the original holds the key; the newcomer is closed beside it.
+	// Entities: the original holds the key; the newcomer is closed beside it,
+	// on the channel's row.
 	if got, err := stores.Entities.GetBySourceSystem(ctx, orgID, "slack", domain.SlackScope, domain.SlackSourceID(moveNew, "1700000000.000100")); err != nil || got == nil || got.ID != original.ID || got.Kind != "thread" {
 		t.Errorf("thread under its new key = %+v err=%v, want the original %s", got, err, original.ID)
 	}
 	if got, err := stores.Entities.GetSystem(ctx, orgID, newcomer.ID); err != nil || got == nil || got.State != "closed" || got.SourceID != domain.SlackSourceID(moveNew, "1700000000.000100") {
 		t.Errorf("newcomer = %+v err=%v, want closed under the new key", got, err)
+	}
+	if r := entityChannelRow(t, h, newcomer.ID); r != channel.ID {
+		t.Errorf("newcomer's channel row = %s, want the channel's %s", r, channel.ID)
+	}
+
+	// Handler filters: those naming the absorbed row name the channel; the
+	// unreadable one is left as stored.
+	if got := readPredicate(t, h, onAbsorbed); !reflect.DeepEqual(got, map[string]any{
+		"channel_in": []any{channel.ID, "C0OTHER01"}, "mentioned_only": true,
+	}) {
+		t.Errorf("handler on the absorbed row = %v", got)
+	}
+	if got := readPredicate(t, h, onBoth)["channel_in"]; !reflect.DeepEqual(got, []any{channel.ID}) {
+		t.Errorf("handler on both rows = %v, want the channel once", got)
+	}
+	if got := readPredicate(t, h, onChannel)["channel_in"]; !reflect.DeepEqual(got, []any{channel.ID}) {
+		t.Errorf("handler on the channel = %v, want it as stored", got)
+	}
+	if got := readPredicate(t, h, unreadable)["channel_in"]; !reflect.DeepEqual(got, []any{absorbed.ID, float64(7)}) {
+		t.Errorf("unreadable handler = %v, want it as stored", got)
 	}
 
 	// Artifacts: the key the new id already holds is not taken twice.
@@ -395,9 +438,46 @@ func TestChannelMove_Postgres_MergesWhatTheNewIDGotFirst(t *testing.T) {
 	}
 }
 
+// TestChannelMove_Postgres_ThreadAfterTheSightingsRowIsAbsorbed is ingest's
+// mention path with a move landing between its two writes: a mention under
+// the new id registers a row of its own, the move absorbs and deletes that
+// row, and the thread created next by the delivered id lands on the
+// surviving row.
+func TestChannelMove_Postgres_ThreadAfterTheSightingsRowIsAbsorbed(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "chan-absorb-thread")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	channels := slackstore.FromStores(stores).Channels
+	ctx := context.Background()
+
+	row := channelRowNamed(t, channels, orgID, moveOld, "")
+	sighting, err := channels.UpsertSightingSystem(ctx, orgID, "T0MOVE001", moveNew, time.Now())
+	if err != nil {
+		t.Fatalf("sighting under the new id: %v", err)
+	}
+	if sighting.ID == row {
+		t.Fatalf("sighting under the new id resolved to the channel's row %s; want a row of its own", row)
+	}
+	if _, err := channels.MoveSystem(ctx, orgID, moveOld, moveNew); err != nil {
+		t.Fatalf("MoveSystem: %v", err)
+	}
+
+	thread, err := channels.FindOrCreateThreadSystem(ctx, orgID, moveNew, "1700000000.000100", "thread", "", "")
+	if err != nil {
+		t.Fatalf("FindOrCreateThreadSystem by the delivered id: %v", err)
+	}
+	if !thread.Created || thread.Channel.ID != row || thread.Channel.ChannelID != moveNew {
+		t.Errorf("thread = %+v; want created on the surviving row %s under %s", thread, row, moveNew)
+	}
+	if got := entityChannelRow(t, h, thread.EntityID); got != row {
+		t.Errorf("slack_channel_id = %q; want the surviving row %s", got, row)
+	}
+}
+
 // TestChannelMove_Postgres_ChainsAndReversals: every recorded change resolves
-// in one read to the id the channel has now, through a second move and
-// through a move back.
+// in one read to the channel's row, carrying the id it has now, through a
+// second move and through a move back.
 func TestChannelMove_Postgres_ChainsAndReversals(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -407,14 +487,8 @@ func TestChannelMove_Postgres_ChainsAndReversals(t *testing.T) {
 	channels := slackstore.FromStores(stores).Channels
 	ctx := context.Background()
 
-	resolves := func(step string, want map[string]string) {
-		t.Helper()
-		for from, to := range want {
-			if got, err := channels.CurrentIDSystem(ctx, orgID, from); err != nil || got != to {
-				t.Errorf("%s: CurrentIDSystem(%s) = %q, %v; want %q", step, from, got, err, to)
-			}
-		}
-	}
+	row := channelRowNamed(t, channels, orgID, "G0CHAIN01", "")
+	otherRow := channelRowNamed(t, channels, otherOrg, "G0CHAIN01", "")
 
 	if _, err := channels.MoveSystem(ctx, orgID, "G0CHAIN01", "C0CHAIN01"); err != nil {
 		t.Fatalf("first move: %v", err)
@@ -422,17 +496,15 @@ func TestChannelMove_Postgres_ChainsAndReversals(t *testing.T) {
 	if _, err := channels.MoveSystem(ctx, orgID, "C0CHAIN01", "C0CHAIN02"); err != nil {
 		t.Fatalf("second move: %v", err)
 	}
-	resolves("after a second move", map[string]string{"G0CHAIN01": "C0CHAIN02", "C0CHAIN01": "C0CHAIN02", "C0CHAIN02": "C0CHAIN02"})
+	resolvesTo(t, channels, orgID, row, "C0CHAIN02", "G0CHAIN01", "C0CHAIN01", "C0CHAIN02")
 
 	if _, err := channels.MoveSystem(ctx, orgID, "C0CHAIN02", "C0CHAIN01"); err != nil {
 		t.Fatalf("move back: %v", err)
 	}
-	resolves("after a move back", map[string]string{"G0CHAIN01": "C0CHAIN01", "C0CHAIN01": "C0CHAIN01", "C0CHAIN02": "C0CHAIN01"})
+	resolvesTo(t, channels, orgID, row, "C0CHAIN01", "G0CHAIN01", "C0CHAIN01", "C0CHAIN02")
 
-	// A change is the org's own: another org's rows answer to the old id.
-	if got, err := channels.CurrentIDSystem(ctx, otherOrg, "G0CHAIN01"); err != nil || got != "G0CHAIN01" {
-		t.Errorf("CurrentIDSystem in another org = %q, %v; want the id itself", got, err)
-	}
+	// A change is the org's own: another org's row answers to the old id.
+	resolvesTo(t, channels, otherOrg, otherRow, "G0CHAIN01", "G0CHAIN01")
 
 	if _, err := channels.MoveSystem(ctx, orgID, "", "C0CHAIN01"); err == nil {
 		t.Error("MoveSystem with an empty old id succeeded; want an error")
@@ -453,7 +525,7 @@ func TestChannelMove_Postgres_ChainsAndReversals(t *testing.T) {
 // TestChannelMove_Postgres_StaleChangesDoNotRegress: a change that arrives
 // after a later one — a redelivery, or the two processed out of order —
 // leaves every recorded change pointing at the id the channel has now, and
-// moves what it finds to that id.
+// moves the channel to that id.
 func TestChannelMove_Postgres_StaleChangesDoNotRegress(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -462,14 +534,6 @@ func TestChannelMove_Postgres_StaleChangesDoNotRegress(t *testing.T) {
 	channels := slackstore.FromStores(stores).Channels
 	ctx := context.Background()
 
-	resolves := func(step string, want map[string]string) {
-		t.Helper()
-		for from, to := range want {
-			if got, err := channels.CurrentIDSystem(ctx, orgID, from); err != nil || got != to {
-				t.Errorf("%s: CurrentIDSystem(%s) = %q, %v; want %q", step, from, got, err, to)
-			}
-		}
-	}
 	move := func(oldID, newID, wantTo string) {
 		t.Helper()
 		got, err := channels.MoveSystem(ctx, orgID, oldID, newID)
@@ -481,17 +545,19 @@ func TestChannelMove_Postgres_StaleChangesDoNotRegress(t *testing.T) {
 		}
 	}
 
+	row := channelRowNamed(t, channels, orgID, "G0STALE01", "")
 	move("G0STALE01", "C0STALE01", "C0STALE01")
 	move("C0STALE01", "C0STALE02", "C0STALE02")
 	move("G0STALE01", "C0STALE01", "C0STALE02")
-	resolves("after a redelivered first change", map[string]string{"G0STALE01": "C0STALE02", "C0STALE01": "C0STALE02"})
+	resolvesTo(t, channels, orgID, row, "C0STALE02", "G0STALE01", "C0STALE01")
 
-	// Out of order: the second change first. A thread minted under the first
-	// id goes straight to the id the channel has now.
-	thread := seedThreadEntity(t, stores, orgID, "G0STALE11/1700000000.000100", "thread", "")
+	// Out of order: the second change first. A thread under the first id goes
+	// straight to the id the channel has now.
+	outOfOrder := channelRowNamed(t, channels, orgID, "G0STALE11", "")
+	thread := seedThreadEntity(t, stores, orgID, "G0STALE11", "1700000000.000100", "thread", "")
 	move("C0STALE11", "C0STALE12", "C0STALE12")
 	move("G0STALE11", "C0STALE11", "C0STALE12")
-	resolves("after changes processed out of order", map[string]string{"G0STALE11": "C0STALE12", "C0STALE11": "C0STALE12"})
+	resolvesTo(t, channels, orgID, outOfOrder, "C0STALE12", "G0STALE11", "C0STALE11")
 	if got, err := stores.Entities.GetBySourceSystem(ctx, orgID, "slack", domain.SlackScope, "C0STALE12/1700000000.000100"); err != nil || got == nil || got.ID != thread.ID {
 		t.Errorf("thread under the current id = %+v, %v; want entity %s", got, err, thread.ID)
 	}
@@ -505,100 +571,22 @@ func TestChannelMove_Postgres_StaleChangesDoNotRegress(t *testing.T) {
 	}
 }
 
-// TestChannelMove_Postgres_SettleMovesWhatLandedUnderARetiredID: rows written
-// under an id after its move committed — a writer that resolved the id just
-// before — move on when the writer settles, and settling a current id is a
-// no-op.
-func TestChannelMove_Postgres_SettleMovesWhatLandedUnderARetiredID(t *testing.T) {
+// TestChannelMove_Postgres_WritesWaitForAMoveInProgress: a write that spells
+// a channel id — a thread created, a channel ensured — waits while a move
+// holds its lock, then writes under the id the move left: a move cannot
+// commit between the write's resolve and its write.
+func TestChannelMove_Postgres_WritesWaitForAMoveInProgress(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	orgID, _, teamID := pgtest.SeedOrgWithUser(t, h, "chan-settle")
+	orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "chan-move-wait")
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	channels := slackstore.FromStores(stores).Channels
 	ctx := context.Background()
 
-	if _, err := channels.MoveSystem(ctx, orgID, moveOld, moveNew); err != nil {
-		t.Fatalf("move: %v", err)
-	}
-	if _, err := channels.UpsertSightingSystem(ctx, orgID, "T0SETTLE1", moveOld, time.Now()); err != nil {
-		t.Fatalf("late sighting: %v", err)
-	}
-	thread := seedThreadEntity(t, stores, orgID, moveOld+"/1700000000.000100", "thread", "")
-	seedTracker(t, h, orgID, teamID, moveOld, true, time.Now())
+	row := channelRowNamed(t, channels, orgID, moveOld, "")
 
-	if got, err := channels.SettleSystem(ctx, orgID, moveNew); err != nil || got != moveNew {
-		t.Fatalf("SettleSystem(current id) = %q, %v; want %q", got, err, moveNew)
-	}
-	if got, err := stores.Entities.GetBySourceSystem(ctx, orgID, "slack", domain.SlackScope, moveOld+"/1700000000.000100"); err != nil || got == nil {
-		t.Fatalf("settling the current id moved the late thread: %+v, %v", got, err)
-	}
-
-	if got, err := channels.SettleSystem(ctx, orgID, moveOld); err != nil || got != moveNew {
-		t.Fatalf("SettleSystem(retired id) = %q, %v; want %q", got, err, moveNew)
-	}
-	if got, err := stores.Entities.GetBySourceSystem(ctx, orgID, "slack", domain.SlackScope, moveNew+"/1700000000.000100"); err != nil || got == nil || got.ID != thread.ID {
-		t.Errorf("late thread under the current id = %+v, %v; want entity %s", got, err, thread.ID)
-	}
-	if row, err := channels.GetSystem(ctx, orgID, moveOld); err != nil || row != nil {
-		t.Errorf("registry row under the retired id = %+v, %v; want none", row, err)
-	}
-	if row, err := channels.GetSystem(ctx, orgID, moveNew); err != nil || row == nil {
-		t.Errorf("registry row under the current id = %+v, %v; want one", row, err)
-	}
-	if got := trackersOf(t, h, orgID, moveNew); !got[teamID].IsPrimary {
-		t.Errorf("trackers of the current id = %+v; want team %s primary", got, teamID)
-	}
-}
-
-// TestChannelMove_Postgres_SettleKeepsTheThreadsOriginal: a writer the move
-// overtook mints a second entity for a thread under the old key; the settle
-// closes that one, and the original, already under the new key, keeps it.
-func TestChannelMove_Postgres_SettleKeepsTheThreadsOriginal(t *testing.T) {
-	h := pgtest.Shared(t)
-	h.Reset(t)
-	orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "chan-settle-original")
-	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	channels := slackstore.FromStores(stores).Channels
-	ctx := context.Background()
-
-	const root = "1700000000.000100"
-	original := seedThreadEntity(t, stores, orgID, moveOld+"/"+root, "thread", "")
-	if _, err := channels.MoveSystem(ctx, orgID, moveOld, moveNew); err != nil {
-		t.Fatalf("move: %v", err)
-	}
-	late := seedThreadEntity(t, stores, orgID, moveOld+"/"+root, "message", "")
-	if late.ID == original.ID {
-		t.Fatal("late writer found the original under the old key; want a second entity")
-	}
-
-	if got, err := channels.SettleSystem(ctx, orgID, moveOld); err != nil || got != moveNew {
-		t.Fatalf("SettleSystem = %q, %v; want %q", got, err, moveNew)
-	}
-	holder, err := stores.Entities.GetBySourceSystem(ctx, orgID, "slack", domain.SlackScope, moveNew+"/"+root)
-	if err != nil || holder == nil || holder.ID != original.ID || holder.Kind != "thread" {
-		t.Errorf("active entity under the new key = %+v, %v; want the original %s", holder, err, original.ID)
-	}
-	var state, key string
-	if err := h.AdminDB.QueryRow(`SELECT state, source_id FROM entities WHERE id = $1`, late.ID).Scan(&state, &key); err != nil {
-		t.Fatalf("read late entity: %v", err)
-	}
-	if state != "closed" || key != moveNew+"/"+root {
-		t.Errorf("late entity = %s under %s; want closed under %s", state, key, moveNew+"/"+root)
-	}
-}
-
-// TestChannelMove_Postgres_SettleWaitsForAMoveInProgress: a settle that starts
-// while a move holds its lock waits for the commit and reads the change, so a
-// write made before the settle cannot fall between the move's reads and its
-// record.
-func TestChannelMove_Postgres_SettleWaitsForAMoveInProgress(t *testing.T) {
-	h := pgtest.Shared(t)
-	h.Reset(t)
-	orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "chan-settle-wait")
-	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	channels := slackstore.FromStores(stores).Channels
-	ctx := context.Background()
-
+	// A move in progress: the lock taken, the change recorded and the row
+	// moved, not yet committed.
 	move, err := h.AdminDB.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatalf("begin move: %v", err)
@@ -612,63 +600,47 @@ func TestChannelMove_Postgres_SettleWaitsForAMoveInProgress(t *testing.T) {
 	`, orgID, moveOld, moveNew); err != nil {
 		t.Fatalf("record change: %v", err)
 	}
+	if _, err := move.Exec(`UPDATE slack_channels SET channel_id = $2 WHERE id = $1`, row, moveNew); err != nil {
+		t.Fatalf("move row: %v", err)
+	}
 
 	type result struct {
-		id  string
-		err error
+		thread, ensured string
+		err             error
 	}
-	settled := make(chan result, 1)
+	wrote := make(chan result, 1)
 	go func() {
-		id, err := channels.SettleSystem(ctx, orgID, moveOld)
-		settled <- result{id, err}
+		var r result
+		var thread slackstore.Thread
+		if thread, r.err = channels.FindOrCreateThreadSystem(ctx, orgID, moveOld, "1700000000.000100", "thread", "", ""); r.err == nil {
+			r.thread = thread.EntityID
+			var ch slackstore.Channel
+			ch, r.err = channels.EnsureSystem(ctx, orgID, "", moveOld, "")
+			r.ensured = ch.ID
+		}
+		wrote <- r
 	}()
 	select {
-	case r := <-settled:
-		t.Fatalf("SettleSystem returned %q, %v while the move held its lock; want it to wait", r.id, r.err)
+	case r := <-wrote:
+		t.Fatalf("writes returned %+v while the move held its lock; want them to wait", r)
 	case <-time.After(300 * time.Millisecond):
 	}
 	if err := move.Commit(); err != nil {
 		t.Fatalf("commit move: %v", err)
 	}
 	select {
-	case r := <-settled:
-		if r.err != nil || r.id != moveNew {
-			t.Errorf("SettleSystem = %q, %v; want %q", r.id, r.err, moveNew)
+	case r := <-wrote:
+		if r.err != nil {
+			t.Fatalf("writes after the move: %v", r.err)
+		}
+		e, err := stores.Entities.GetSystem(ctx, orgID, r.thread)
+		if err != nil || e == nil || e.SourceID != moveNew+"/1700000000.000100" {
+			t.Errorf("thread = %+v, %v; want it keyed under the new id", e, err)
+		}
+		if r.ensured != row {
+			t.Errorf("ensure under the old id = row %s; want the channel's %s", r.ensured, row)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("SettleSystem still waiting after the move committed")
-	}
-}
-
-// TestChannelMove_Postgres_UnreadableHandlerFilterIsSkipped: a handler whose
-// channel_in cannot be decoded is reported and left as stored, and the move
-// still lands — including the readable handler beside it.
-func TestChannelMove_Postgres_UnreadableHandlerFilterIsSkipped(t *testing.T) {
-	h := pgtest.Shared(t)
-	h.Reset(t)
-	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "chan-bad-filter")
-	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	channels := slackstore.FromStores(stores).Channels
-	ctx := context.Background()
-
-	thread := seedThreadEntity(t, stores, orgID, moveOld+"/1700000000.000100", "thread", "")
-	bad := seedSlackHandler(t, h, orgID, teamID, userID, "bad", `{"channel_in": ["`+moveOld+`", 7]}`)
-	good := seedSlackHandler(t, h, orgID, teamID, userID, "good", `{"channel_in": ["`+moveOld+`"]}`)
-
-	move, err := channels.MoveSystem(ctx, orgID, moveOld, moveNew)
-	if err != nil {
-		t.Fatalf("MoveSystem: %v", err)
-	}
-	if !reflect.DeepEqual(move.SkippedHandlers, []string{bad}) || move.Handlers != 1 {
-		t.Errorf("handlers moved %d, skipped %v; want 1 moved and %s skipped", move.Handlers, move.SkippedHandlers, bad)
-	}
-	if got := readPredicate(t, h, bad)["channel_in"]; !reflect.DeepEqual(got, []any{moveOld, float64(7)}) {
-		t.Errorf("skipped handler's channel_in = %v; want it as stored", got)
-	}
-	if got := readPredicate(t, h, good)["channel_in"]; !reflect.DeepEqual(got, []any{moveNew}) {
-		t.Errorf("readable handler's channel_in = %v; want [%s]", got, moveNew)
-	}
-	if got, err := stores.Entities.GetBySourceSystem(ctx, orgID, "slack", domain.SlackScope, moveNew+"/1700000000.000100"); err != nil || got == nil || got.ID != thread.ID {
-		t.Errorf("thread under the new id = %+v, %v; want entity %s", got, err, thread.ID)
+		t.Fatal("writes still waiting after the move committed")
 	}
 }

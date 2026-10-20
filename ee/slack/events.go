@@ -31,12 +31,18 @@ type SlackMessageMetadata struct {
 	// resolve via WorkspaceStore.GetByWorkspaceAppSystem(workspaceID,
 	// apiAppID). No fallback for pre-release events — none exist.
 	APIAppID string `json:"api_app_id"`
-	Channel  string `json:"channel"`
-	TS       string `json:"ts"`                  // the message's own ts
-	ThreadTS string `json:"thread_ts,omitempty"` // parent thread root; empty on a root-message mention
-	SenderID string `json:"sender_id"`           // Slack user ID of the sender
-	Text     string `json:"text"`
-	EventID  string `json:"event_id"` // Slack's Ev… id — the dedup key
+	// Channel is the id Slack gave the channel when the message arrived; it
+	// can change, and the current view (slackMessageCurrentView) reads it as
+	// the id the channel has now.
+	Channel string `json:"channel"`
+	// ChannelRowID is the channel's registry row (slack_channels.id), which a
+	// change of Slack's id does not move — what channel_in filters name.
+	ChannelRowID string `json:"channel_row_id"`
+	TS           string `json:"ts"`                  // the message's own ts
+	ThreadTS     string `json:"thread_ts,omitempty"` // parent thread root; empty on a root-message mention
+	SenderID     string `json:"sender_id"`           // Slack user ID of the sender
+	Text         string `json:"text"`
+	EventID      string `json:"event_id"` // Slack's Ev… id — the dedup key
 	// Mentioned records whether this message explicitly @-mentioned the
 	// bot, as opposed to arriving as a follow-up in an already-engaged
 	// thread. Transport detail, not a different situation — see
@@ -47,7 +53,7 @@ type SlackMessageMetadata struct {
 
 // SlackMessagePredicate narrows which messages a handler fires on.
 type SlackMessagePredicate struct {
-	ChannelIn []string `json:"channel_in,omitempty" doc:"Match only messages in these Slack channel IDs (empty = no filter, matches any channel)."`
+	ChannelIn []string `json:"channel_in,omitempty" doc:"Match only messages in these channels, by registry id (the id field of GET /api/slack/teams/{team_id}/channels; empty = no filter, matches any channel)."`
 	// MentionedOnly, when true, restricts to messages that explicitly
 	// @-mentioned the bot — excluding engaged-thread follow-ups that
 	// didn't. false (the default) matches both.
@@ -55,17 +61,16 @@ type SlackMessagePredicate struct {
 }
 
 // Matches applies the *_in convention: an empty ChannelIn means "no
-// filter," matching everything. Channel IDs are case-sensitive Slack
-// tokens, so this is a strict == rather than events.stringInSliceFold's
-// case-fold (that helper is also unexported outside package events).
-// MentionedOnly is a one-directional narrowing flag, not a *_in-style
-// filter: unset (false) matches every message, set (true) requires
-// m.Mentioned.
+// filter," matching everything. ChannelIn names registry rows, compared with
+// m.ChannelRowID as the current view reads it, so a filter keeps matching a
+// channel whose Slack id changed. MentionedOnly is a one-directional
+// narrowing flag, not a *_in-style filter: unset (false) matches every
+// message, set (true) requires m.Mentioned.
 func (p SlackMessagePredicate) Matches(m SlackMessageMetadata) bool {
 	if len(p.ChannelIn) > 0 {
 		matched := false
 		for _, c := range p.ChannelIn {
-			if c == m.Channel {
+			if c == m.ChannelRowID {
 				matched = true
 				break
 			}
@@ -80,11 +85,15 @@ func (p SlackMessagePredicate) Matches(m SlackMessageMetadata) bool {
 	return true
 }
 
-// slackMessageCurrentView is slack:message's events.CurrentView: the
-// recorded channel id resolved to the id the channel has now, so a handler
-// filter, a task context or an injected follow-up recorded before Slack moved
-// the channel names the channel as it is. Metadata naming a channel that never
-// moved is returned as recorded, byte for byte.
+// slackMessageCurrentView is slack:message's events.CurrentView: the recorded
+// channel id resolved to the channel's registry row, and the metadata's
+// channel and channel_row_id set from it, so a handler filter, a task context
+// or an injected follow-up recorded before Slack moved the channel names the
+// channel as it is. Resolving through the Slack id rather than the recorded
+// row also covers a row a move absorbed (ChannelMove.Absorbed): its id was the
+// new one, which names the surviving row. Metadata that already names the
+// channel as it is, or a channel TF holds no row for, is returned as recorded,
+// byte for byte.
 func slackMessageCurrentView(channels slackstore.ChannelRegistryStore) events.CurrentView {
 	return func(ctx context.Context, orgID, metadataJSON string) (string, error) {
 		var meta SlackMessageMetadata
@@ -94,14 +103,14 @@ func slackMessageCurrentView(channels slackstore.ChannelRegistryStore) events.Cu
 		if meta.Channel == "" {
 			return metadataJSON, nil
 		}
-		current, err := channels.CurrentIDSystem(ctx, orgID, meta.Channel)
+		row, err := channels.ResolveSystem(ctx, orgID, meta.Channel)
 		if err != nil {
 			return "", err
 		}
-		if current == meta.Channel {
+		if row == nil || (row.ChannelID == meta.Channel && row.ID == meta.ChannelRowID) {
 			return metadataJSON, nil
 		}
-		meta.Channel = current
+		meta.Channel, meta.ChannelRowID = row.ChannelID, row.ID
 		out, err := json.Marshal(meta)
 		if err != nil {
 			return "", fmt.Errorf("encode slack message metadata: %w", err)

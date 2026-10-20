@@ -476,9 +476,10 @@ CREATE TABLE public.entities (
     org_id uuid NOT NULL,
     source text NOT NULL,
     -- The provider namespace source_id and external_id are unique within: the
-    -- GitHub host, the Jira site, the Linear workspace id, the Slack workspace
-    -- id. Keys and ids repeat across those, so a key is only an address inside
-    -- one of them.
+    -- GitHub host, the Jira site, the Linear workspace id. Keys and ids repeat
+    -- across those, so a key is only an address inside one of them. Slack's
+    -- channel ids are unique across workspaces, so every Slack entity shares
+    -- the one scope 'slack.com' (domain.SlackScope).
     scope text NOT NULL,
     -- The display key: "owner/repo#18", a Jira key, a Linear identifier. It can
     -- change upstream (a move, a key rename), which is a rename of this row.
@@ -506,12 +507,18 @@ CREATE TABLE public.entities (
     -- (a poll cycle in flight across a lease handoff) blindly overwrites a newer
     -- snapshot and loses a transition. Bumped by 1 on every snapshot write.
     poll_seq bigint DEFAULT 0 NOT NULL,
+    -- The channel a Slack thread is in, by its slack_channels row. The key
+    -- ("<channel id>/<thread ts>") names the id Slack gives the channel now,
+    -- which can change; this does not. Required for source 'slack' (the
+    -- foreign key is added after slack_channels below).
+    slack_channel_id uuid,
     -- The UUID of the Linear team a Linear issue sits in: the id
     -- linear_team_rules is keyed by. Set at creation from the response that
     -- found the issue, and moved by every snapshot write to the snapshot's
     -- team, so it follows a move to another team. Clearing the snapshot leaves
     -- it. NULL for every other source.
     linear_team_id text,
+    CONSTRAINT entities_slack_channel_required CHECK (source <> 'slack' OR slack_channel_id IS NOT NULL),
     CONSTRAINT entities_linear_team_id_check CHECK (
         CASE WHEN source = 'linear' THEN COALESCE(linear_team_id, '') <> ''
              ELSE linear_team_id IS NULL END
@@ -5023,16 +5030,20 @@ REVOKE ALL ON public.slack_event_deliveries FROM anon, authenticated, service_ro
 -- slack_channels: the org-wide registry of channels TF knows of (what exists;
 -- team_slack_channels below is who cares). Powers the discovery/claim UX and
 -- caches display names, since Slack event payloads carry only the channel ID.
--- org_id is part of the PK because a channel ID is globally unique and the same
--- in every workspace across Enterprise Grid / Slack Connect: two orgs each
--- running their own app in a shared channel each get their own registry row.
--- An ID can still change (slack_channel_id_changes below), and following the
--- change rewrites this row with every other row naming the channel.
--- workspace_id is the workspace the channel was last seen through — context
--- for which bot token resolves its name, not a foreign key. name = '' means
--- unresolved; render the raw channel_id. Postgres-only; the SQLite store
--- returns ErrNotApplicableInLocal.
+-- id is the channel's identity in TF, and every reference to a channel holds
+-- it: a team's tracking row, a thread entity (entities.slack_channel_id), a
+-- slack:message handler's channel_in filter. channel_id is the ID Slack gives
+-- the channel now. It can change (slack_channel_id_changes below), and
+-- following the change rewrites this one column. It is unique per org rather
+-- than globally because a channel ID is the same in every workspace across
+-- Enterprise Grid / Slack Connect: two orgs each running their own app in a
+-- shared channel each get their own registry row. workspace_id is the
+-- workspace the channel was last seen through — context for which bot token
+-- resolves its name, not a foreign key. name = '' means unresolved; render the
+-- raw channel_id. Postgres-only; the SQLite store returns
+-- ErrNotApplicableInLocal.
 CREATE TABLE public.slack_channels (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     org_id uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
     channel_id text NOT NULL,
     workspace_id text NOT NULL,
@@ -5040,9 +5051,18 @@ CREATE TABLE public.slack_channels (
     name_resolved_at timestamptz,
     first_seen_at timestamptz NOT NULL DEFAULT now(),
     last_mention_at timestamptz,
-    PRIMARY KEY (org_id, channel_id),
+    CONSTRAINT slack_channels_org_channel_key UNIQUE (org_id, channel_id),
+    -- Composite-FK target for the references below, which pin the channel to
+    -- the referencing row's org.
+    CONSTRAINT slack_channels_id_org_id_key UNIQUE (id, org_id),
     CONSTRAINT sc_channel_populated CHECK (channel_id <> '')
 );
+
+ALTER TABLE ONLY public.entities
+    ADD CONSTRAINT entities_slack_channel_id_fkey FOREIGN KEY (slack_channel_id, org_id) REFERENCES public.slack_channels(id, org_id);
+
+-- The channel move's selection of a channel's threads.
+CREATE INDEX idx_entities_slack_channel ON public.entities USING btree (slack_channel_id) WHERE (slack_channel_id IS NOT NULL);
 
 ALTER TABLE public.slack_channels ENABLE ROW LEVEL SECURITY;
 
@@ -5059,32 +5079,32 @@ GRANT SELECT ON public.slack_channels TO tf_app;
 
 -- team_slack_channels: the team <-> channel bind, the tracking half of the
 -- registry/tracking split above. Stage-1 scope gate for slack:message routing
--- and the source of a channel's primary owning team. Unlike team_github_repos,
--- org_id is denormalized here so the one-primary invariant can be a partial
--- unique index over (org_id, channel_id): channel IDs are global, so scoping on
--- channel_id alone would forbid two orgs each holding a primary tracker on the
--- same Connect channel. Do not remove the column. No FK to slack_channels: a
--- team may track a channel TF has never seen a mention in. is_primary is never
--- written from the app pool — RLS cannot gate one column, so it is a store-layer
--- contract: ReplaceForTeam always inserts is_primary = false, and promotion or
+-- and the source of a channel's primary owning team. The channel is its
+-- registry row, so tracking a channel TF has never seen a mention in ensures
+-- the row first. org_id is the RLS scope, and the composite foreign key keeps
+-- the channel in the team's org. is_primary is never written from the app
+-- pool — RLS cannot gate one column, so it is a store-layer contract:
+-- ReplaceForTeam always inserts is_primary = false, and promotion or
 -- reassignment goes through ReconcilePrimariesSystem / SetPrimarySystem.
 CREATE TABLE public.team_slack_channels (
     org_id uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
     team_id uuid NOT NULL REFERENCES public.teams(id) ON DELETE CASCADE,
-    channel_id text NOT NULL,
+    slack_channel_id uuid NOT NULL,
     is_primary boolean NOT NULL DEFAULT false,
     created_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (team_id, channel_id),
-    CONSTRAINT tsc_channel_populated CHECK (channel_id <> '')
+    PRIMARY KEY (team_id, slack_channel_id),
+    CONSTRAINT team_slack_channels_slack_channel_id_fkey FOREIGN KEY (slack_channel_id, org_id)
+        REFERENCES public.slack_channels(id, org_id) ON DELETE CASCADE
 );
 
--- At most one tracking row per (org_id, channel_id) may have is_primary = true.
+-- At most one tracking row per channel may have is_primary = true.
 CREATE UNIQUE INDEX team_slack_channels_one_primary
-    ON public.team_slack_channels (org_id, channel_id) WHERE is_primary;
+    ON public.team_slack_channels (slack_channel_id) WHERE is_primary;
 
--- Serves the cross-team reads that look up every tracker of a channel.
+-- Serves the cross-team reads that look up every tracker of a channel. The
+-- primary key leads with team_id and cannot serve them.
 CREATE INDEX team_slack_channels_channel_idx
-    ON public.team_slack_channels (org_id, channel_id);
+    ON public.team_slack_channels (slack_channel_id);
 
 ALTER TABLE public.team_slack_channels ENABLE ROW LEVEL SECURITY;
 
@@ -5110,17 +5130,21 @@ GRANT SELECT, INSERT, DELETE ON public.team_slack_channels TO tf_app;
 
 -- slack_channel_id_changes: the channel IDs Slack replaced (the channel_id_changed
 -- event — a private channel shared through Slack Connect moves from its G… ID to
--- a C… one). Following the change (the Slack store's MoveSystem) rewrites every
--- row naming the old ID in one transaction and records the change here, because
--- some copies of the old ID cannot be rewritten: event metadata is immutable,
--- so a run on a task recorded before the change is told the old ID, and Slack
--- may redeliver an event generated before the change after it. Readers that act
--- on a channel resolve an ID through this table. One hop: when an ID moves
+-- a C… one). Following the change (the Slack store's MoveSystem) rewrites the
+-- registry row's channel_id, and the display values that spell the ID (thread
+-- keys and permalinks, Slack artifact keys, the audit ledger's links), in one
+-- transaction. References hold the registry row and need nothing. It records
+-- the change here, because some copies of the old ID come from outside: event
+-- metadata is immutable, so a run on a task recorded before the change is told
+-- the old ID, an agent or a client may hold it, and Slack may redeliver an
+-- event generated before the change after it. Every channel ID TF is handed is
+-- resolved to a registry row through this table. One hop: when an ID moves
 -- again, every row pointing at it is pointed at its new ID. Per org, like
 -- slack_channels: each org's app receives its own delivery and moves its own
--- rows. Admin-pool-only system table (RLS enabled, no policy): ingest writes it
--- with no request claims, and tf_system reads it for the Slack provider policy
--- ops.
+-- rows. Member-read, system-write, like slack_channels: ingest writes it with no
+-- request claims, the channels API's tracking write resolves the ids a request
+-- names through it on the app pool, and tf_system reads it for the Slack
+-- provider policy ops.
 CREATE TABLE public.slack_channel_id_changes (
     org_id uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
     old_channel_id text NOT NULL,
@@ -5137,8 +5161,12 @@ CREATE INDEX slack_channel_id_changes_new_idx
 
 ALTER TABLE public.slack_channel_id_changes ENABLE ROW LEVEL SECURITY;
 
+CREATE POLICY slack_channel_id_changes_select ON public.slack_channel_id_changes FOR SELECT TO tf_app
+  USING ((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id));
+
 REVOKE ALL ON public.slack_channel_id_changes FROM PUBLIC;
 REVOKE ALL ON public.slack_channel_id_changes FROM anon, authenticated, service_role;
+GRANT SELECT ON public.slack_channel_id_changes TO tf_app;
 
 
 -- === Marketplace V1 ======================================================

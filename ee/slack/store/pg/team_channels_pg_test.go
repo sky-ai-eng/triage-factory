@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -11,10 +12,34 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
 
+// channelRow returns the registry row of the Slack channel channelID,
+// registering it — the reference every tracking row holds.
+func channelRow(t *testing.T, stores db.Stores, ctx context.Context, orgID, channelID string) string {
+	t.Helper()
+	ch, err := slackstore.FromStores(stores).Channels.EnsureSystem(ctx, orgID, "", channelID, "")
+	if err != nil {
+		t.Fatalf("ensure slack channel %s: %v", channelID, err)
+	}
+	return ch.ID
+}
+
+func channelRows(t *testing.T, stores db.Stores, ctx context.Context, orgID string, channelIDs []string) []string {
+	t.Helper()
+	out := make([]string, 0, len(channelIDs))
+	for _, id := range channelIDs {
+		out = append(out, channelRow(t, stores, ctx, orgID, id))
+	}
+	return out
+}
+
+// replaceChannels registers the Slack channels channelIDs and tracks them for
+// teamID.
 func replaceChannels(t *testing.T, stores db.Stores, ctx context.Context, orgID, userID, teamID string, channelIDs []string) {
 	t.Helper()
+	channelRows(t, stores, ctx, orgID, channelIDs)
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(ctx, orgID, teamID, channelIDs)
+		_, err := slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(ctx, orgID, teamID, channelIDs)
+		return err
 	})
 }
 
@@ -42,7 +67,7 @@ func TestTeamChannel_Postgres_ReplaceForTeam_PreservesCreatedAtAndPrimary(t *tes
 	ctx := context.Background()
 
 	replaceChannels(t, stores, ctx, orgID, owner, teamID, []string{"C0KEEP001", "C0DROP001"})
-	if err := slackstore.FromStores(stores).TeamChannels.ReconcilePrimariesSystem(ctx, orgID, []string{"C0KEEP001", "C0DROP001"}); err != nil {
+	if err := slackstore.FromStores(stores).TeamChannels.ReconcilePrimariesSystem(ctx, orgID, channelRows(t, stores, ctx, orgID, []string{"C0KEEP001", "C0DROP001"})); err != nil {
 		t.Fatalf("ReconcilePrimariesSystem: %v", err)
 	}
 
@@ -87,6 +112,120 @@ func TestTeamChannel_Postgres_ReplaceForTeam_PreservesCreatedAtAndPrimary(t *tes
 	}
 }
 
+// TestTeamChannel_Postgres_ReplaceForTeam_ResolvesTheIDsItIsGiven: the
+// tracking write resolves Slack ids itself, on the app pool. A row registered
+// for a save and then absorbed by a move before the write (the channels PUT's
+// race) tracks the surviving row; an id Slack has since replaced tracks the
+// channel's row; and an id with no row is ErrChannelNotRegistered, leaving the
+// set as it was.
+func TestTeamChannel_Postgres_ReplaceForTeam_ResolvesTheIDsItIsGiven(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "tc-resolve")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	channels := slackstore.FromStores(stores).Channels
+	ctx := context.Background()
+
+	survivor := channelRow(t, stores, ctx, orgID, "G0RESOLV1")
+	absorbed := channelRow(t, stores, ctx, orgID, "C0RESOLV1")
+	if _, err := channels.MoveSystem(ctx, orgID, "G0RESOLV1", "C0RESOLV1"); err != nil {
+		t.Fatalf("MoveSystem: %v", err)
+	}
+	if row, _ := channels.GetSystem(ctx, orgID, absorbed); row != nil {
+		t.Fatalf("row %s survived the move; want it absorbed", absorbed)
+	}
+
+	for _, named := range []string{"C0RESOLV1", "G0RESOLV1"} {
+		var tracked []string
+		mustWithUser(t, stores, ctx, orgID, owner, func(tx db.TxStores) error {
+			var err error
+			tracked, err = slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(ctx, orgID, teamID, []string{named})
+			return err
+		})
+		if len(tracked) != 1 || tracked[0] != survivor {
+			t.Errorf("ReplaceForTeam(%s) tracked %v; want the surviving row %s", named, tracked, survivor)
+		}
+	}
+
+	err := stores.Tx.WithTx(ctx, orgID, owner, func(tx db.TxStores) error {
+		_, err := slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(ctx, orgID, teamID, []string{"C0NOROW01"})
+		return err
+	})
+	if !errors.Is(err, slackstore.ErrChannelNotRegistered) {
+		t.Errorf("ReplaceForTeam(unregistered) err = %v; want ErrChannelNotRegistered", err)
+	}
+	if got := listForTeamChannels(t, stores, ctx, orgID, owner, teamID); len(got) != 1 || got[0].SlackChannelID != survivor {
+		t.Errorf("tracked set after the refused write = %+v; want the surviving row alone", got)
+	}
+}
+
+// TestTeamChannel_Postgres_ReplaceForTeam_WaitsForAMoveInProgress: a tracking
+// write naming the new id while a move absorbs that id's row waits for the
+// move, then tracks the surviving row. Resolving before the move commits would
+// pick the row being deleted, and the insert would fail its foreign key.
+func TestTeamChannel_Postgres_ReplaceForTeam_WaitsForAMoveInProgress(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "tc-move-wait")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	survivor := channelRow(t, stores, ctx, orgID, "G0WAIT001")
+	absorbed := channelRow(t, stores, ctx, orgID, "C0WAIT001")
+
+	// The move's own steps, uncommitted: the lock, the change, the absorbed
+	// row deleted and the channel's row moved onto the new id.
+	move, err := h.AdminDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin move: %v", err)
+	}
+	defer func() { _ = move.Rollback() }()
+	for _, stmt := range []struct {
+		sql  string
+		args []any
+	}{
+		{`SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`, []any{orgID, int64(0x43484944)}},
+		{`INSERT INTO slack_channel_id_changes (org_id, old_channel_id, new_channel_id) VALUES ($1, 'G0WAIT001', 'C0WAIT001')`, []any{orgID}},
+		{`DELETE FROM slack_channels WHERE id = $1`, []any{absorbed}},
+		{`UPDATE slack_channels SET channel_id = 'C0WAIT001' WHERE id = $1`, []any{survivor}},
+	} {
+		if _, err := move.ExecContext(ctx, stmt.sql, stmt.args...); err != nil {
+			t.Fatalf("move step %q: %v", stmt.sql, err)
+		}
+	}
+
+	type result struct {
+		tracked []string
+		err     error
+	}
+	wrote := make(chan result, 1)
+	go func() {
+		var r result
+		r.err = stores.Tx.WithTx(ctx, orgID, owner, func(tx db.TxStores) error {
+			var err error
+			r.tracked, err = slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(ctx, orgID, teamID, []string{"C0WAIT001"})
+			return err
+		})
+		wrote <- r
+	}()
+	select {
+	case r := <-wrote:
+		t.Fatalf("ReplaceForTeam returned %+v while the move held its lock; want it to wait", r)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := move.Commit(); err != nil {
+		t.Fatalf("commit move: %v", err)
+	}
+	select {
+	case r := <-wrote:
+		if r.err != nil || len(r.tracked) != 1 || r.tracked[0] != survivor {
+			t.Errorf("ReplaceForTeam after the move = %v, %v; want the surviving row %s", r.tracked, r.err, survivor)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ReplaceForTeam still waiting after the move committed")
+	}
+}
+
 // TestTeamChannel_Postgres_RLS_MemberWriteRefused: a plain (non-admin) team
 // member's ReplaceForTeam write is refused by RLS (team_slack_channels_insert
 // requires team-admin) — the call errors and the existing row set survives
@@ -102,8 +241,10 @@ func TestTeamChannel_Postgres_RLS_MemberWriteRefused(t *testing.T) {
 
 	replaceChannels(t, stores, ctx, orgID, owner, teamID, []string{"C0RLS0001"})
 
+	channelRows(t, stores, ctx, orgID, []string{"C0RLS0001", "C0RLS0002"})
 	err := stores.Tx.WithTx(ctx, orgID, member, func(tx db.TxStores) error {
-		return slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(ctx, orgID, teamID, []string{"C0RLS0001", "C0RLS0002"})
+		_, err := slackstore.FromTx(tx).TeamChannels.ReplaceForTeam(ctx, orgID, teamID, []string{"C0RLS0001", "C0RLS0002"})
+		return err
 	})
 	if err == nil {
 		t.Fatal("member ReplaceForTeam succeeded; want RLS refusal (team-admin gate)")
@@ -148,28 +289,50 @@ func TestTeamChannel_Postgres_RLS_CrossOrgTeamInvisible(t *testing.T) {
 }
 
 // TestTeamChannel_Postgres_OnePrimaryPartialIndex_Enforced: the partial
-// unique index on (org_id, channel_id) WHERE is_primary rejects a second
-// primary row for the same channel within one org, even via a direct
-// admin-pool INSERT that bypasses RLS entirely.
+// unique index on slack_channel_id WHERE is_primary rejects a second primary
+// row for the same channel, even via a direct admin-pool INSERT that bypasses
+// RLS entirely.
 func TestTeamChannel_Postgres_OnePrimaryPartialIndex_Enforced(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, _, teamA := pgtest.SeedOrgWithUser(t, h, "tc-onepri")
 	teamB := pgtest.SeedTeam(t, h, orgID, "team-b")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	row := channelRow(t, stores, context.Background(), orgID, "C0ONEPRI1")
 
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO team_slack_channels (org_id, team_id, channel_id, is_primary)
-		VALUES ($1, $2, 'C0ONEPRI1', true)
-	`, orgID, teamA); err != nil {
+		INSERT INTO team_slack_channels (org_id, team_id, slack_channel_id, is_primary)
+		VALUES ($1, $2, $3, true)
+	`, orgID, teamA, row); err != nil {
 		t.Fatalf("seed first primary: %v", err)
 	}
 
 	_, err := h.AdminDB.Exec(`
-		INSERT INTO team_slack_channels (org_id, team_id, channel_id, is_primary)
-		VALUES ($1, $2, 'C0ONEPRI1', true)
-	`, orgID, teamB)
+		INSERT INTO team_slack_channels (org_id, team_id, slack_channel_id, is_primary)
+		VALUES ($1, $2, $3, true)
+	`, orgID, teamB, row)
 	if err == nil {
-		t.Fatal("second primary INSERT for the same (org_id, channel_id) succeeded; want the partial unique index to reject it")
+		t.Fatal("second primary INSERT for the same channel succeeded; want the partial unique index to reject it")
+	}
+}
+
+// TestTeamChannel_Postgres_TrackingReferencesTheRegistry: a tracking row
+// names a registry row of its own org — the composite foreign key refuses a
+// row id that does not exist, and one of another org.
+func TestTeamChannel_Postgres_TrackingReferencesTheRegistry(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgA, _, teamA := pgtest.SeedOrgWithUser(t, h, "tc-fk-a")
+	orgB, _, _ := pgtest.SeedOrgWithUser(t, h, "tc-fk-b")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	rowB := channelRow(t, stores, context.Background(), orgB, "C0FK00001")
+
+	for name, row := range map[string]string{"unregistered": "00000000-0000-0000-0000-00000000c0de", "other org's": rowB} {
+		if _, err := h.AdminDB.Exec(`
+			INSERT INTO team_slack_channels (org_id, team_id, slack_channel_id) VALUES ($1, $2, $3)
+		`, orgA, teamA, row); err == nil {
+			t.Errorf("tracking an %s channel row was accepted; want the foreign key to refuse it", name)
+		}
 	}
 }
 
@@ -188,7 +351,7 @@ func TestTeamChannel_Postgres_ReconcilePrimariesSystem(t *testing.T) {
 
 	primaryFor := func(channelID string) string {
 		t.Helper()
-		p, err := slackstore.FromStores(stores).TeamChannels.PrimaryTeamForChannelSystem(ctx, orgID, channelID)
+		p, err := slackstore.FromStores(stores).TeamChannels.PrimaryTeamForChannelSystem(ctx, orgID, channelRow(t, stores, ctx, orgID, channelID))
 		if err != nil {
 			t.Fatalf("PrimaryTeamForChannelSystem(%s): %v", channelID, err)
 		}
@@ -196,7 +359,7 @@ func TestTeamChannel_Postgres_ReconcilePrimariesSystem(t *testing.T) {
 	}
 	reconcile := func(channelIDs ...string) {
 		t.Helper()
-		if err := slackstore.FromStores(stores).TeamChannels.ReconcilePrimariesSystem(ctx, orgID, channelIDs); err != nil {
+		if err := slackstore.FromStores(stores).TeamChannels.ReconcilePrimariesSystem(ctx, orgID, channelRows(t, stores, ctx, orgID, channelIDs)); err != nil {
 			t.Fatalf("ReconcilePrimariesSystem(%v): %v", channelIDs, err)
 		}
 	}
@@ -248,12 +411,13 @@ func TestTeamChannel_Postgres_SetPrimarySystem(t *testing.T) {
 
 	replaceChannels(t, stores, ctx, orgID, owner, teamA, []string{"C0SETPRI1"})
 	replaceChannels(t, stores, ctx, orgID, owner, teamB, []string{"C0SETPRI1"})
-	if err := slackstore.FromStores(stores).TeamChannels.ReconcilePrimariesSystem(ctx, orgID, []string{"C0SETPRI1"}); err != nil {
+	row := channelRow(t, stores, ctx, orgID, "C0SETPRI1")
+	if err := slackstore.FromStores(stores).TeamChannels.ReconcilePrimariesSystem(ctx, orgID, []string{row}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	primaryFor := func() string {
 		t.Helper()
-		p, err := slackstore.FromStores(stores).TeamChannels.PrimaryTeamForChannelSystem(ctx, orgID, "C0SETPRI1")
+		p, err := slackstore.FromStores(stores).TeamChannels.PrimaryTeamForChannelSystem(ctx, orgID, row)
 		if err != nil {
 			t.Fatalf("PrimaryTeamForChannelSystem: %v", err)
 		}
@@ -263,7 +427,7 @@ func TestTeamChannel_Postgres_SetPrimarySystem(t *testing.T) {
 		t.Fatalf("primary before reassignment = %q; want %q", p, teamA)
 	}
 
-	if err := slackstore.FromStores(stores).TeamChannels.SetPrimarySystem(ctx, orgID, "C0SETPRI1", teamB); err != nil {
+	if err := slackstore.FromStores(stores).TeamChannels.SetPrimarySystem(ctx, orgID, row, teamB); err != nil {
 		t.Fatalf("SetPrimarySystem: %v", err)
 	}
 	if p := primaryFor(); p != teamB {
@@ -274,7 +438,7 @@ func TestTeamChannel_Postgres_SetPrimarySystem(t *testing.T) {
 		t.Errorf("teamA row after reassignment = %+v; want present with is_primary=false", rowsA)
 	}
 
-	err := slackstore.FromStores(stores).TeamChannels.SetPrimarySystem(ctx, orgID, "C0SETPRI1", teamC)
+	err := slackstore.FromStores(stores).TeamChannels.SetPrimarySystem(ctx, orgID, row, teamC)
 	if !errors.Is(err, slackstore.ErrTeamNotTrackingChannel) {
 		t.Fatalf("SetPrimarySystem for a non-tracking team = %v; want ErrTeamNotTrackingChannel", err)
 	}
@@ -283,11 +447,10 @@ func TestTeamChannel_Postgres_SetPrimarySystem(t *testing.T) {
 	}
 }
 
-// TestTeamChannel_Postgres_TwoOrgsBothHoldPrimaryOnSameChannelID: the
-// partial unique index scopes on (org_id, channel_id), not channel_id
-// alone, so two different orgs each tracking the SAME global channel_id
-// (the Slack Connect / shared-channel scenario) can each independently hold
-// their own primary on it.
+// TestTeamChannel_Postgres_TwoOrgsBothHoldPrimaryOnSameChannelID: each org
+// registers its own row for a channel id, so two different orgs each
+// tracking the SAME global channel_id (the Slack Connect / shared-channel
+// scenario) can each independently hold their own primary on it.
 func TestTeamChannel_Postgres_TwoOrgsBothHoldPrimaryOnSameChannelID(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -300,18 +463,19 @@ func TestTeamChannel_Postgres_TwoOrgsBothHoldPrimaryOnSameChannelID(t *testing.T
 	replaceChannels(t, stores, ctx, orgA, ownerA, teamA, []string{shared})
 	replaceChannels(t, stores, ctx, orgB, ownerB, teamB, []string{shared})
 
-	if err := slackstore.FromStores(stores).TeamChannels.ReconcilePrimariesSystem(ctx, orgA, []string{shared}); err != nil {
+	rowA, rowB := channelRow(t, stores, ctx, orgA, shared), channelRow(t, stores, ctx, orgB, shared)
+	if err := slackstore.FromStores(stores).TeamChannels.ReconcilePrimariesSystem(ctx, orgA, []string{rowA}); err != nil {
 		t.Fatalf("Reconcile org A: %v", err)
 	}
-	if err := slackstore.FromStores(stores).TeamChannels.ReconcilePrimariesSystem(ctx, orgB, []string{shared}); err != nil {
+	if err := slackstore.FromStores(stores).TeamChannels.ReconcilePrimariesSystem(ctx, orgB, []string{rowB}); err != nil {
 		t.Fatalf("Reconcile org B: %v", err)
 	}
 
-	pA, err := slackstore.FromStores(stores).TeamChannels.PrimaryTeamForChannelSystem(ctx, orgA, shared)
+	pA, err := slackstore.FromStores(stores).TeamChannels.PrimaryTeamForChannelSystem(ctx, orgA, rowA)
 	if err != nil || pA != teamA {
 		t.Fatalf("org A primary for shared channel = (%q, %v); want (%q, nil)", pA, err, teamA)
 	}
-	pB, err := slackstore.FromStores(stores).TeamChannels.PrimaryTeamForChannelSystem(ctx, orgB, shared)
+	pB, err := slackstore.FromStores(stores).TeamChannels.PrimaryTeamForChannelSystem(ctx, orgB, rowB)
 	if err != nil || pB != teamB {
 		t.Fatalf("org B primary for shared channel = (%q, %v); want (%q, nil)", pB, err, teamB)
 	}

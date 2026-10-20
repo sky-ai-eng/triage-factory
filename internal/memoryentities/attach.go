@@ -96,7 +96,7 @@ func Attach(ctx context.Context, stores db.Stores, orgID, conversationID, primar
 			continue
 		}
 		ref.Scope = scope
-		ent, err := entityscope.Resolve(ctx, entities, orgID, ref, "", kind, a.URL, false)
+		ent, err := entityscope.Resolve(ctx, stores, orgID, ref, "", kind, a.URL, false)
 		if err != nil || ent == nil {
 			attachLog.Warn("resolve produced entity for conversation memory failed",
 				"conversation", conversationID, "provider", a.Provider, "target", a.Target, "error", err)

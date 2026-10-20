@@ -24,8 +24,8 @@ func (s *teamChannelStore) ListForTeam(context.Context, string, string) ([]slack
 	return nil, db.ErrNotApplicableInLocal
 }
 
-func (s *teamChannelStore) ReplaceForTeam(context.Context, string, string, []string) error {
-	return db.ErrNotApplicableInLocal
+func (s *teamChannelStore) ReplaceForTeam(context.Context, string, string, []string) ([]string, error) {
+	return nil, db.ErrNotApplicableInLocal
 }
 
 func (s *teamChannelStore) TracksChannelSystem(context.Context, string, string, string) (bool, error) {

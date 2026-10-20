@@ -8,6 +8,7 @@ package slack
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -41,6 +42,12 @@ type fakeChannelsSlack struct {
 	joinCalls     []string
 	failList      map[string]bool // bot token -> conversations.list itself should fail (ok:false)
 	moreAvailable map[string]bool // bot token -> conversations.list should claim more pages exist
+	// info is what conversations.info knows, by bot token then channel id (the
+	// channel's name); any other channel is channel_not_found. infoFailCode
+	// fails every conversations.info call for a bot token with that code.
+	info         map[string]map[string]string
+	infoFailCode map[string]string
+	infoCalls    int
 }
 
 func newFakeChannelsSlack(t *testing.T) *fakeChannelsSlack {
@@ -51,6 +58,8 @@ func newFakeChannelsSlack(t *testing.T) *fakeChannelsSlack {
 		joinFailCode:  map[string]string{},
 		failList:      map[string]bool{},
 		moreAvailable: map[string]bool{},
+		info:          map[string]map[string]string{},
+		infoFailCode:  map[string]string{},
 	}
 	withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		token := bearerToken(r)
@@ -74,6 +83,21 @@ func newFakeChannelsSlack(t *testing.T) *fakeChannelsSlack {
 			chans := f.mine[token]
 			f.mu.Unlock()
 			writeSlackFakeJSON(w, map[string]any{"ok": true, "channels": chans, "response_metadata": map[string]any{"next_cursor": ""}})
+		case strings.HasSuffix(r.URL.Path, "/conversations.info"):
+			channelID := r.URL.Query().Get("channel")
+			f.mu.Lock()
+			f.infoCalls++
+			name, known := f.info[token][channelID]
+			code := f.infoFailCode[token]
+			f.mu.Unlock()
+			switch {
+			case code != "":
+				writeSlackFakeJSON(w, map[string]any{"ok": false, "error": code})
+			case known:
+				writeSlackFakeJSON(w, map[string]any{"ok": true, "channel": map[string]any{"id": channelID, "name": name}})
+			default:
+				writeSlackFakeJSON(w, map[string]any{"ok": false, "error": "channel_not_found"})
+			}
 		case strings.HasSuffix(r.URL.Path, "/conversations.join"):
 			_ = r.ParseForm()
 			channelID := r.FormValue("channel")
@@ -116,6 +140,29 @@ func (f *fakeChannelsSlack) setMoreAvailable(botToken string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.moreAvailable[botToken] = true
+}
+
+// knowChannel makes conversations.info answer for channelID under botToken.
+func (f *fakeChannelsSlack) knowChannel(botToken, channelID, name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.info[botToken] == nil {
+		f.info[botToken] = map[string]string{}
+	}
+	f.info[botToken][channelID] = name
+}
+
+// failInfo makes every conversations.info call under botToken fail with code.
+func (f *fakeChannelsSlack) failInfo(botToken, code string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.infoFailCode[botToken] = code
+}
+
+func (f *fakeChannelsSlack) infoCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.infoCalls
 }
 
 // failJoin makes conversations.join fail with a generic, non-private-channel
@@ -220,6 +267,31 @@ func (r *slackChannelsRig) seedWorkspace(orgID, userID, workspaceID, botToken st
 	}
 }
 
+// listChannels connects a workspace for orgID whose listing holds every
+// channel in channelIDs, with the bot a member of each, so a PUT naming them
+// passes the gate and the auto-join has nothing to do.
+func (r *slackChannelsRig) listChannels(orgID, userID string, channelIDs ...string) {
+	r.t.Helper()
+	r.seedWorkspace(orgID, userID, "T0LISTED1", "xoxb-listed")
+	listed := make([]map[string]any, 0, len(channelIDs))
+	for _, id := range channelIDs {
+		listed = append(listed, map[string]any{"id": id, "name": strings.ToLower(id), "is_private": false})
+	}
+	r.fake.setChannels("xoxb-listed", listed, listed)
+}
+
+// decodeErrors decodes an error envelope.
+func decodeErrors(t *testing.T, rec *httptest.ResponseRecorder) []httpx.ErrorItem {
+	t.Helper()
+	var out struct {
+		Errors []httpx.ErrorItem `json:"errors"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode error envelope %q: %v", rec.Body.String(), err)
+	}
+	return out.Errors
+}
+
 func decodeChannels(t *testing.T, rec *httptest.ResponseRecorder) channelsResponse {
 	t.Helper()
 	var out channelsResponse
@@ -305,6 +377,7 @@ func TestChannelsHandler_MemberPUT_Refused(t *testing.T) {
 func TestChannelsHandler_TeamAdminPUT_OK(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-admin-put")
+	r.listChannels(orgID, owner, "C1")
 
 	rec := httptest.NewRecorder()
 	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
@@ -314,7 +387,160 @@ func TestChannelsHandler_TeamAdminPUT_OK(t *testing.T) {
 	}
 	got := decodeChannels(t, rec)
 	if len(got.Channels) != 1 || !got.Channels[0].Tracked {
-		t.Errorf("channels = %+v; want one tracked channel", got.Channels)
+		t.Fatalf("channels = %+v; want one tracked channel", got.Channels)
+	}
+	// The response names the channel's registry row: what tracking holds and
+	// a slack:message handler's channel_in names.
+	row, err := slackstore.FromStores(r.stor).Channels.ResolveSystem(t.Context(), orgID, "C1")
+	if err != nil || row == nil {
+		t.Fatalf("registry row for C1 = %+v, %v; want the one PUT registered", row, err)
+	}
+	if got.Channels[0].ID != row.ID {
+		t.Errorf("channel id = %q; want the registry row %q", got.Channels[0].ID, row.ID)
+	}
+}
+
+// TestChannelsHandler_PUT_RejectsMalformedEntries: every blank, malformed or
+// repeated entry is a fault naming its element, reported together, and a
+// missing channel_ids is one too; nothing is registered or tracked.
+func TestChannelsHandler_PUT_RejectsMalformedEntries(t *testing.T) {
+	r := newSlackChannelsRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-put-shape")
+	r.listChannels(orgID, owner, "C0SHAPE01")
+
+	rec := httptest.NewRecorder()
+	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+		map[string]any{"channel_ids": []string{"", "general", "C0SHAPE01", "C0SHAPE01", "D0DIRECT1"}}))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	want := map[string]string{
+		"channel_ids[0]": httpx.ReasonMissingField,
+		"channel_ids[1]": httpx.ReasonInvalidField,
+		"channel_ids[3]": httpx.ReasonInvalidField,
+		"channel_ids[4]": httpx.ReasonInvalidField,
+	}
+	errs := decodeErrors(t, rec)
+	got := map[string]string{}
+	for _, e := range errs {
+		got[e.Field] = e.Reason
+	}
+	if len(errs) != len(want) {
+		t.Errorf("errors = %+v; want one per bad entry, %v", errs, want)
+	}
+	for field, reason := range want {
+		if got[field] != reason {
+			t.Errorf("%s: reason %q, want %q (errors %+v)", field, got[field], reason, errs)
+		}
+	}
+	if row, _ := slackstore.FromStores(r.stor).Channels.ResolveSystem(t.Context(), orgID, "C0SHAPE01"); row != nil {
+		t.Errorf("C0SHAPE01 registered as %+v by the refused save; want no row", row)
+	}
+
+	missing := httptest.NewRecorder()
+	r.hdl.handlePut(missing, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+		map[string]any{}))
+	if errs := decodeErrors(t, missing); missing.Code != http.StatusBadRequest || len(errs) != 1 || errs[0].Field != "channel_ids" || errs[0].Reason != httpx.ReasonMissingField {
+		t.Errorf("missing channel_ids: status %d, errors %+v; want 400 MISSING_FIELD channel_ids", missing.Code, errs)
+	}
+}
+
+// TestChannelsHandler_PUT_AddsOnlyChannelsAWorkspaceAnswersFor: a channel the
+// save adds must be listed by a connected workspace (or held by the registry
+// under one); anything else is a 400 naming the entry and the whole save is
+// refused. An accepted channel is registered under the workspace that listed
+// it.
+func TestChannelsHandler_PUT_AddsOnlyChannelsAWorkspaceAnswersFor(t *testing.T) {
+	r := newSlackChannelsRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-put-gate")
+
+	none := httptest.NewRecorder()
+	r.hdl.handlePut(none, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+		map[string]any{"channel_ids": []string{"C0LISTED1"}}))
+	if errs := decodeErrors(t, none); none.Code != http.StatusBadRequest || len(errs) != 1 || errs[0].Field != "channel_ids[0]" {
+		t.Errorf("no workspace connected: status %d, errors %+v; want 400 naming channel_ids[0]", none.Code, errs)
+	}
+
+	r.listChannels(orgID, owner, "C0LISTED1")
+	rec := httptest.NewRecorder()
+	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+		map[string]any{"channel_ids": []string{"C0LISTED1", "C0UNKNOWN"}}))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if errs := decodeErrors(t, rec); len(errs) != 1 || errs[0].Field != "channel_ids[1]" || errs[0].Reason != httpx.ReasonInvalidField {
+		t.Errorf("errors = %+v; want one INVALID_FIELD naming channel_ids[1]", errs)
+	}
+	registry := slackstore.FromStores(r.stor).Channels
+	for _, id := range []string{"C0LISTED1", "C0UNKNOWN"} {
+		if row, _ := registry.ResolveSystem(t.Context(), orgID, id); row != nil {
+			t.Errorf("%s registered as %+v by the refused save; want no row", id, row)
+		}
+	}
+
+	ok := httptest.NewRecorder()
+	r.hdl.handlePut(ok, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+		map[string]any{"channel_ids": []string{"C0LISTED1"}}))
+	if ok.Code != http.StatusOK {
+		t.Fatalf("listed channel: status = %d, want 200 (body=%s)", ok.Code, ok.Body.String())
+	}
+	if row, _ := registry.ResolveSystem(t.Context(), orgID, "C0LISTED1"); row == nil || row.WorkspaceID != "T0LISTED1" {
+		t.Errorf("registered row = %+v; want it under the workspace that listed it, T0LISTED1", row)
+	}
+}
+
+// TestChannelsHandler_PUT_LooksUpChannelsPastATruncatedListing: a listing
+// that stopped at its cap says nothing about the channels past it, so the gate
+// asks Slack about each one. A channel Slack knows is registered under the
+// workspace that answered; one no workspace can see is a 400 naming it; a
+// lookup that fails is a 502; and a save needing more lookups than
+// channelLookupLimit is refused before any are made.
+func TestChannelsHandler_PUT_LooksUpChannelsPastATruncatedListing(t *testing.T) {
+	withLoweredCap(t, 1)
+	r := newSlackChannelsRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-put-truncated")
+	r.seedWorkspace(orgID, owner, "T0BIG0001", "xoxb-big")
+	listed := []map[string]any{{"id": "C0LIST001", "name": "listed", "is_private": false}}
+	r.fake.setChannels("xoxb-big", listed, listed)
+	r.fake.setMoreAvailable("xoxb-big")
+	r.fake.knowChannel("xoxb-big", "C0BEYOND1", "beyond")
+
+	put := func(ids ...string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+			map[string]any{"channel_ids": ids}))
+		return rec
+	}
+
+	if rec := put("C0BEYOND1"); rec.Code != http.StatusOK {
+		t.Fatalf("channel past the cap that Slack knows: status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if row, _ := slackstore.FromStores(r.stor).Channels.ResolveSystem(t.Context(), orgID, "C0BEYOND1"); row == nil || row.WorkspaceID != "T0BIG0001" || row.Name != "beyond" {
+		t.Errorf("registered row = %+v; want it under T0BIG0001, named beyond", row)
+	}
+
+	rec := put("C0BEYOND1", "C0NOWHERE")
+	if errs := decodeErrors(t, rec); rec.Code != http.StatusBadRequest || len(errs) != 1 || errs[0].Field != "channel_ids[1]" {
+		t.Errorf("channel no workspace can see: status %d, errors %+v; want 400 naming channel_ids[1]", rec.Code, errs)
+	}
+
+	many := []string{"C0BEYOND1"}
+	for i := 0; i <= channelLookupLimit; i++ {
+		many = append(many, fmt.Sprintf("C0MANY%03d", i))
+	}
+	calls := r.fake.infoCallCount()
+	rec = put(many...)
+	if errs := decodeErrors(t, rec); rec.Code != http.StatusBadRequest || len(errs) != 1 || errs[0].Field != "channel_ids" || errs[0].Reason != httpx.ReasonOutOfRange {
+		t.Errorf("%d lookups: status %d, errors %+v; want 400 OUT_OF_RANGE channel_ids", len(many)-1, rec.Code, errs)
+	}
+	if got := r.fake.infoCallCount(); got != calls {
+		t.Errorf("conversations.info calls = %d after the refused save; want none (%d before)", got, calls)
+	}
+
+	r.fake.failInfo("xoxb-big", "internal_error")
+	rec = put("C0BEYOND1", "C0OTHER01")
+	if errs := decodeErrors(t, rec); rec.Code != http.StatusBadGateway || len(errs) != 1 || errs[0].Reason != httpx.ReasonUpstreamUnavailable {
+		t.Errorf("failed lookup: status %d, errors %+v; want 502 UPSTREAM_UNAVAILABLE", rec.Code, errs)
 	}
 }
 
@@ -325,6 +551,7 @@ func TestChannelsHandler_TeamAdminPUT_OK(t *testing.T) {
 func TestChannelsHandler_PUTAndPrimary_RetiredIDActOnTheCurrentOne(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-retired-put")
+	r.listChannels(orgID, owner, "G0PUT0001")
 
 	first := httptest.NewRecorder()
 	r.hdl.handlePut(first, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
@@ -378,6 +605,7 @@ func TestChannelsHandler_ArchivedTeamPUT_Refused(t *testing.T) {
 func TestChannelsHandler_Primary_NonOrgAdmin_Refused(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-primary-nonadmin")
+	r.listChannels(orgID, owner, "C1")
 	member := pgtest.SeedUser(t, r.h, "chan-primary-nonadmin-member")
 	pgtest.AddOrgMember(t, r.h, member, orgID, teamID, "member", "member")
 
@@ -405,6 +633,7 @@ func TestChannelsHandler_Primary_NonOrgAdmin_Refused(t *testing.T) {
 func TestChannelsHandler_Primary_ArchivedDestinationTeam_Refused(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, team1 := pgtest.SeedOrgWithUser(t, r.h, "chan-primary-archived")
+	r.listChannels(orgID, owner, "C1")
 	team2 := pgtest.SeedTeam(t, r.h, orgID, "team2")
 	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'admin')`, owner, team2)
 
@@ -451,6 +680,7 @@ func TestChannelsHandler_Primary_ArchivedDestinationTeam_Refused(t *testing.T) {
 func TestChannelsHandler_FirstTrack_SeedsDefaultBlueprint(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-seed")
+	r.listChannels(orgID, owner, "C1")
 
 	rec := httptest.NewRecorder()
 	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
@@ -522,6 +752,7 @@ func TestChannelsHandler_FirstTrack_SeedsDefaultBlueprint(t *testing.T) {
 func TestChannelsHandler_SecondPUT_NoDuplicateTrigger(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-nodup")
+	r.listChannels(orgID, owner, "C1", "C2")
 
 	first := httptest.NewRecorder()
 	r.hdl.handlePut(first, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
@@ -560,6 +791,7 @@ func TestChannelsHandler_SecondPUT_NoDuplicateTrigger(t *testing.T) {
 func TestChannelsHandler_PreexistingTrigger_NoSeed(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-preexisting")
+	r.listChannels(orgID, owner, "C1")
 
 	// Team already configured its own slack:message trigger before ever
 	// tracking a channel.
@@ -617,6 +849,7 @@ func TestChannelsHandler_PreexistingTrigger_NoSeed(t *testing.T) {
 func TestChannelsHandler_DefaultDeleted_NoReseed(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-deleted-default")
+	r.listChannels(orgID, owner, "C1", "C2")
 
 	first := httptest.NewRecorder()
 	r.hdl.handlePut(first, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
@@ -683,6 +916,7 @@ func TestChannelsHandler_DefaultDeleted_NoReseed(t *testing.T) {
 func TestChannelsHandler_Primary_FirstTrackerDefault(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-primary-first")
+	r.listChannels(orgID, owner, "C1")
 
 	rec := httptest.NewRecorder()
 	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
@@ -696,6 +930,7 @@ func TestChannelsHandler_Primary_FirstTrackerDefault(t *testing.T) {
 func TestChannelsHandler_Primary_SecondTeamNonPrimary_ThenUntrackPromotesOldest(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, team1 := pgtest.SeedOrgWithUser(t, r.h, "chan-primary-second")
+	r.listChannels(orgID, owner, "C1")
 	team2 := pgtest.SeedTeam(t, r.h, orgID, "team2")
 	admin2 := pgtest.SeedUser(t, r.h, "chan-primary-second-admin2")
 	pgtest.AddOrgMember(t, r.h, admin2, orgID, team2, "member", "admin")
@@ -737,6 +972,7 @@ func TestChannelsHandler_Primary_SecondTeamNonPrimary_ThenUntrackPromotesOldest(
 func TestChannelsHandler_Primary_ReassignHappyPath(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, team1 := pgtest.SeedOrgWithUser(t, r.h, "chan-reassign")
+	r.listChannels(orgID, owner, "C1")
 	team2 := pgtest.SeedTeam(t, r.h, orgID, "team2")
 	// owner already has an org_memberships row (SeedOrgWithUser) — just add
 	// the team2 membership, not a second org-level row.
@@ -768,6 +1004,7 @@ func TestChannelsHandler_Primary_ReassignHappyPath(t *testing.T) {
 func TestChannelsHandler_Primary_NonTrackingTeam_400(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, team1 := pgtest.SeedOrgWithUser(t, r.h, "chan-primary-nontrack")
+	r.listChannels(orgID, owner, "C1")
 	team2 := pgtest.SeedTeam(t, r.h, orgID, "team2")
 
 	rec := httptest.NewRecorder()
@@ -790,6 +1027,8 @@ func TestChannelsHandler_Merge_DedupPrecedence(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-merge")
 	r.seedWorkspace(orgID, owner, "T0MERGE1", "xoxb-merge")
+	listedC1 := []map[string]any{{"id": "C1", "name": "eng", "is_private": false}}
+	r.fake.setChannels("xoxb-merge", listedC1, listedC1)
 
 	// C1: tracked by this team. C2: an unclaimed sighting (registry only).
 	// C3: a live Slack candidate only (never tracked or sighted).
@@ -831,17 +1070,43 @@ func TestChannelsHandler_Merge_DedupPrecedence(t *testing.T) {
 	}
 }
 
+// TestChannelsHandler_Merge_SlackUnreachable_Warning: with Slack's listing
+// down, a save keeping the channels the team already tracks still lands, since
+// nothing it adds needs asking Slack about; a save adding a channel is a 502
+// and changes nothing; and GET still lists the tracked channel, with a warning.
 func TestChannelsHandler_Merge_SlackUnreachable_Warning(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-unreachable")
 	r.seedWorkspace(orgID, owner, "T0DOWN1", "xoxb-down")
-	r.fake.failConversationsList("xoxb-down")
+	listedC1 := []map[string]any{{"id": "C1", "name": "eng", "is_private": false}}
+	r.fake.setChannels("xoxb-down", listedC1, listedC1)
 
 	put := httptest.NewRecorder()
 	r.hdl.handlePut(put, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
 		map[string]any{"channel_ids": []string{"C1"}}))
 	if put.Code != http.StatusOK {
 		t.Fatalf("PUT status = %d (body=%s)", put.Code, put.Body.String())
+	}
+	r.fake.failConversationsList("xoxb-down")
+
+	keep := httptest.NewRecorder()
+	r.hdl.handlePut(keep, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+		map[string]any{"channel_ids": []string{"C1"}}))
+	if keep.Code != http.StatusOK {
+		t.Fatalf("PUT keeping the tracked set during the outage: status = %d, want 200 (body=%s)", keep.Code, keep.Body.String())
+	}
+
+	add := httptest.NewRecorder()
+	r.hdl.handlePut(add, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+		map[string]any{"channel_ids": []string{"C1", "C2"}}))
+	if add.Code != http.StatusBadGateway {
+		t.Fatalf("PUT adding a channel during the outage: status = %d, want 502 (body=%s)", add.Code, add.Body.String())
+	}
+	if errs := decodeErrors(t, add); len(errs) != 1 || errs[0].Reason != httpx.ReasonUpstreamUnavailable {
+		t.Errorf("errors = %+v; want one UPSTREAM_UNAVAILABLE", errs)
+	}
+	if row, _ := slackstore.FromStores(r.stor).Channels.ResolveSystem(t.Context(), orgID, "C2"); row != nil {
+		t.Errorf("C2 registered as %+v by the refused save; want no row", row)
 	}
 
 	rec := httptest.NewRecorder()
@@ -925,16 +1190,19 @@ func TestChannelsHandler_AutoJoin_PublicNonMember(t *testing.T) {
 }
 
 // TestChannelsHandler_AutoJoin_Private_InviteRequiredWarning: a private
-// channel the bot isn't a member of never appears in either
-// conversations.list or users.conversations (both are scoped to the bot's
-// own visibility), so the live view can't pre-classify it — the handler
-// still attempts conversations.join, and Slack's own "channel_not_found"
-// response (what it actually returns for a private channel the bot has no
-// visibility into) is what gets classified as invite_required.
+// channel the bot was mentioned in (so the registry holds it under a connected
+// workspace) and has since left appears in neither conversations.list nor
+// users.conversations, both scoped to the bot's own visibility. The gate
+// accepts it on the registry row, the handler still attempts
+// conversations.join, and Slack's "channel_not_found" (what it returns for a
+// private channel the bot cannot see) is classified as invite_required.
 func TestChannelsHandler_AutoJoin_Private_InviteRequiredWarning(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-private")
 	r.seedWorkspace(orgID, owner, "T0PRIV1", "xoxb-priv")
+	if _, err := slackstore.FromStores(r.stor).Channels.UpsertSightingSystem(t.Context(), orgID, "T0PRIV1", "C1", time.Now()); err != nil {
+		t.Fatalf("seed C1 sighting: %v", err)
+	}
 	r.fake.setChannels("xoxb-priv", nil, nil) // C1 unknown to the live view entirely
 	r.fake.failJoinWithCode("C1", "channel_not_found")
 

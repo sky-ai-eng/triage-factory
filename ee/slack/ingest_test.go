@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,13 +20,14 @@ import (
 // fakeEntities is a minimal entityFinder fake: one (org, source, scope,
 // sourceID) maps to one entity, created on first sight — mirrors
 // FindOrCreateSystem's real contract closely enough for the pipeline tests.
+// Thread entities are created through a fakeChannelRegistry linked to it
+// (newFakeChannelRegistryFor), the way the real ones are.
 type fakeEntities struct {
 	byKey map[string]*domain.Entity
 	err   error
-	// afterFindOrCreate, if set, runs after each FindOrCreateSystem — the
-	// point where a channel move can commit between the pipeline's resolve
-	// and its settle.
-	afterFindOrCreate func()
+	// channels is the registry linked to this fake, which seedThread
+	// registers a seeded thread's channel in.
+	channels *fakeChannelRegistry
 }
 
 func newFakeEntities() *fakeEntities { return &fakeEntities{byKey: map[string]*domain.Entity{}} }
@@ -33,18 +36,15 @@ func fakeEntityKey(orgID, source, scope, sourceID string) string {
 	return orgID + "/" + source + "/" + scope + "/" + sourceID
 }
 
-func (f *fakeEntities) FindOrCreateSystem(_ context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error) {
+func (f *fakeEntities) findOrCreate(orgID, source, scope, sourceID, kind, title, url string) (*domain.Entity, bool, error) {
 	if f.err != nil {
 		return nil, false, f.err
-	}
-	if f.afterFindOrCreate != nil {
-		defer f.afterFindOrCreate()
 	}
 	key := fakeEntityKey(orgID, source, scope, sourceID)
 	if e, ok := f.byKey[key]; ok {
 		return e, false, nil
 	}
-	e := &domain.Entity{ID: "entity-" + key, Source: source, Scope: scope, SourceID: sourceID, ExternalID: externalID, Kind: kind, Title: title, URL: url, State: "active"}
+	e := &domain.Entity{ID: "entity-" + key, Source: source, Scope: scope, SourceID: sourceID, Kind: kind, Title: title, URL: url, State: "active"}
 	f.byKey[key] = e
 	return e, true, nil
 }
@@ -63,10 +63,15 @@ func (f *fakeEntities) GetBySourceSystem(_ context.Context, orgID, source, scope
 // domain.SlackScope, sourceID) with the given kind and state — the fixtures the
 // engaged-thread tests use to stand up (or deliberately mis-configure) the
 // thread a follow-up lands in, without routing through a root-mention first.
+// Its channel is registered in the linked registry, as a real thread's is.
 func (f *fakeEntities) seedThread(orgID, sourceID, kind, state string) {
 	scope := domain.SlackScope
 	key := fakeEntityKey(orgID, "slack", scope, sourceID)
 	f.byKey[key] = &domain.Entity{ID: "entity-" + key, Source: "slack", Scope: scope, SourceID: sourceID, Kind: kind, State: state}
+	if f.channels != nil {
+		channelID, _, _ := strings.Cut(sourceID, "/")
+		f.channels.register(orgID, "", channelID)
+	}
 }
 
 // fakeDeliveries is a minimal slackstore.DeliveryStore fake: an in-memory
@@ -74,6 +79,10 @@ func (f *fakeEntities) seedThread(orgID, sourceID, kind, state string) {
 type fakeDeliveries struct {
 	seen map[string]bool
 	err  error
+
+	// onFresh, if set, runs after a delivery is recorded as new — the gap
+	// between the dedup insert and the thread write.
+	onFresh func()
 }
 
 func newFakeDeliveries() *fakeDeliveries { return &fakeDeliveries{seen: map[string]bool{}} }
@@ -87,31 +96,32 @@ func (f *fakeDeliveries) MarkDeliveredSystem(_ context.Context, workspaceID, eve
 		return false, nil
 	}
 	f.seen[key] = true
+	if f.onFresh != nil {
+		f.onFresh()
+	}
 	return true, nil
 }
 
 var _ slackstore.DeliveryStore = (*fakeDeliveries)(nil)
 
 // fakeChannelRegistry is a minimal slackstore.ChannelRegistryStore fake: an
-// in-memory map keyed (orgID, channelID), tracking every UpsertSightingSystem
-// call so tests can assert dedup (dropped-before-sighting) behavior.
+// in-memory registry keyed by row id, tracking every UpsertSightingSystem
+// call so tests can assert dedup (dropped-before-sighting) behavior, and
+// creating thread entities in its linked fakeEntities.
 type fakeChannelRegistry struct {
-	mu   sync.Mutex
-	rows map[string]*slackstore.Channel
+	mu       sync.Mutex
+	rows     map[string]*slackstore.Channel
+	entities *fakeEntities
 
 	upsertErr error
-	sawUpsert []string // channelKey values, one per UpsertSightingSystem call
+	sawUpsert []string // channelKey values of the id each sighting resolved to
 
 	// moved maps channelKey(org, old id) to the id MoveSystem moved it to;
 	// sawMoves records each MoveSystem call as "<channelKey>-><new id>".
 	moved      map[string]string
 	sawMoves   []string
 	moveErr    error
-	currentErr error
-	// sawSettles records each SettleSystem call's channelKey; settleErr fails
-	// it.
-	sawSettles []string
-	settleErr  error
+	resolveErr error
 
 	// done, if non-nil, receives whenever SetNameSystem completes — the
 	// same deterministic "the detached resolver goroutine finished" signal
@@ -120,37 +130,90 @@ type fakeChannelRegistry struct {
 }
 
 func newFakeChannelRegistry() *fakeChannelRegistry {
-	return &fakeChannelRegistry{rows: map[string]*slackstore.Channel{}}
+	return newFakeChannelRegistryFor(newFakeEntities())
+}
+
+// newFakeChannelRegistryFor links a registry to entities: the threads it
+// creates are entities', and entities' seeded threads register their channel
+// in it.
+func newFakeChannelRegistryFor(entities *fakeEntities) *fakeChannelRegistry {
+	f := &fakeChannelRegistry{rows: map[string]*slackstore.Channel{}, entities: entities}
+	entities.channels = f
+	return f
 }
 
 func channelKey(orgID, channelID string) string { return orgID + "/" + channelID }
 
-func (f *fakeChannelRegistry) UpsertSightingSystem(_ context.Context, orgID, workspaceID, channelID string, at time.Time) (bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	key := channelKey(orgID, channelID)
-	f.sawUpsert = append(f.sawUpsert, key)
-	if f.upsertErr != nil {
-		return false, f.upsertErr
+// current is the id channelID goes by now. Caller holds f.mu.
+func (f *fakeChannelRegistry) current(orgID, channelID string) string {
+	if moved, ok := f.moved[channelKey(orgID, channelID)]; ok {
+		return moved
 	}
-	if row, ok := f.rows[key]; ok {
-		row.WorkspaceID = workspaceID
-		lastMention := at
-		row.LastMentionAt = &lastMention
-		return false, nil
-	}
-	firstSeen := at
-	f.rows[key] = &slackstore.Channel{OrgID: orgID, ChannelID: channelID, WorkspaceID: workspaceID, FirstSeenAt: at, LastMentionAt: &firstSeen}
-	return true, nil
+	return channelID
 }
 
-func (f *fakeChannelRegistry) EnsureSystem(context.Context, string, string, string, string) error {
+// lookup is the row channelID names now, or nil. Caller holds f.mu.
+func (f *fakeChannelRegistry) lookup(orgID, channelID string) *slackstore.Channel {
+	channelID = f.current(orgID, channelID)
+	for _, row := range f.rows {
+		if row.OrgID == orgID && row.ChannelID == channelID {
+			return row
+		}
+	}
 	return nil
 }
 
-func (f *fakeChannelRegistry) SetNameSystem(_ context.Context, orgID, channelID, name string) error {
+// register returns channelID's row, adding one if absent.
+func (f *fakeChannelRegistry) register(orgID, workspaceID, channelID string) *slackstore.Channel {
 	f.mu.Lock()
-	if row, ok := f.rows[channelKey(orgID, channelID)]; ok {
+	defer f.mu.Unlock()
+	return f.registerLocked(orgID, workspaceID, channelID)
+}
+
+func (f *fakeChannelRegistry) registerLocked(orgID, workspaceID, channelID string) *slackstore.Channel {
+	if row := f.lookup(orgID, channelID); row != nil {
+		return row
+	}
+	channelID = f.current(orgID, channelID)
+	row := &slackstore.Channel{ID: "row-" + channelKey(orgID, channelID), OrgID: orgID, ChannelID: channelID, WorkspaceID: workspaceID, FirstSeenAt: time.Now()}
+	f.rows[row.ID] = row
+	return row
+}
+
+// row is the row a Slack channel id names now, or nil.
+func (f *fakeChannelRegistry) row(orgID, channelID string) *slackstore.Channel {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lookup(orgID, channelID)
+}
+
+func (f *fakeChannelRegistry) UpsertSightingSystem(_ context.Context, orgID, workspaceID, channelID string, at time.Time) (slackstore.Channel, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sawUpsert = append(f.sawUpsert, channelKey(orgID, f.current(orgID, channelID)))
+	if f.upsertErr != nil {
+		return slackstore.Channel{}, f.upsertErr
+	}
+	row := f.registerLocked(orgID, workspaceID, channelID)
+	row.WorkspaceID = workspaceID
+	lastMention := at
+	row.LastMentionAt = &lastMention
+	return *row, nil
+}
+
+func (f *fakeChannelRegistry) EnsureSystem(_ context.Context, orgID, workspaceID, channelID, name string) (slackstore.Channel, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	row := f.registerLocked(orgID, workspaceID, channelID)
+	if name != "" {
+		row.Name = name
+	}
+	return *row, nil
+}
+
+func (f *fakeChannelRegistry) SetNameSystem(_ context.Context, orgID, id, name string) error {
+	f.mu.Lock()
+	if row, ok := f.rows[id]; ok && row.OrgID == orgID {
 		row.Name = name
 		resolvedAt := time.Now()
 		row.NameResolvedAt = &resolvedAt
@@ -162,18 +225,57 @@ func (f *fakeChannelRegistry) SetNameSystem(_ context.Context, orgID, channelID,
 	return nil
 }
 
-func (f *fakeChannelRegistry) GetSystem(_ context.Context, orgID, channelID string) (*slackstore.Channel, error) {
+func (f *fakeChannelRegistry) ResolveSystem(_ context.Context, orgID, channelID string) (*slackstore.Channel, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.rows[channelKey(orgID, channelID)], nil
+	if f.resolveErr != nil {
+		return nil, f.resolveErr
+	}
+	if row := f.lookup(orgID, channelID); row != nil {
+		c := *row
+		return &c, nil
+	}
+	return nil, nil
+}
+
+func (f *fakeChannelRegistry) GetSystem(_ context.Context, orgID, id string) (*slackstore.Channel, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if row, ok := f.rows[id]; ok && row.OrgID == orgID {
+		c := *row
+		return &c, nil
+	}
+	return nil, nil
 }
 
 func (f *fakeChannelRegistry) ListForOrg(context.Context, string) ([]slackstore.Channel, error) {
 	return nil, nil
 }
 
-// MoveSystem records the change so CurrentIDSystem resolves it, and the call
-// itself in sawMoves; moveErr fails it.
+// FindOrCreateThreadSystem creates the thread in the linked fakeEntities,
+// keyed under the id the channel's row carries.
+func (f *fakeChannelRegistry) FindOrCreateThreadSystem(_ context.Context, orgID, channelID, threadTS, kind, title, url string) (slackstore.Thread, error) {
+	f.mu.Lock()
+	row := f.lookup(orgID, channelID)
+	var channel slackstore.Channel
+	if row != nil {
+		channel = *row
+	}
+	f.mu.Unlock()
+	if row == nil {
+		return slackstore.Thread{}, fmt.Errorf("%w: %s", slackstore.ErrChannelNotRegistered, channelID)
+	}
+	e, created, err := f.entities.findOrCreate(orgID, "slack", domain.SlackScope, domain.SlackSourceID(channel.ChannelID, threadTS), kind, title, url)
+	if err != nil {
+		return slackstore.Thread{}, err
+	}
+	return slackstore.Thread{EntityID: e.ID, Created: created, Channel: channel}, nil
+}
+
+// MoveSystem records the change so a retired id resolves to the channel's
+// row, moves the row onto the new id — deleting a row the new id already
+// had, as the store absorbs it — and records the call itself in sawMoves;
+// moveErr fails it.
 func (f *fakeChannelRegistry) MoveSystem(_ context.Context, orgID, oldID, newID string) (slackstore.ChannelMove, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -181,36 +283,20 @@ func (f *fakeChannelRegistry) MoveSystem(_ context.Context, orgID, oldID, newID 
 	if f.moveErr != nil {
 		return slackstore.ChannelMove{}, f.moveErr
 	}
+	row := f.lookup(orgID, oldID)
+	if row != nil {
+		if absorbed := f.lookup(orgID, newID); absorbed != nil && absorbed != row {
+			delete(f.rows, absorbed.ID)
+		}
+	}
 	if f.moved == nil {
 		f.moved = map[string]string{}
 	}
 	f.moved[channelKey(orgID, oldID)] = newID
-	return slackstore.ChannelMove{}, nil
-}
-
-func (f *fakeChannelRegistry) CurrentIDSystem(_ context.Context, orgID, channelID string) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.currentErr != nil {
-		return "", f.currentErr
+	if row != nil {
+		row.ChannelID = newID
 	}
-	if moved, ok := f.moved[channelKey(orgID, channelID)]; ok {
-		return moved, nil
-	}
-	return channelID, nil
-}
-
-// SettleSystem resolves like CurrentIDSystem; the real store's sweep of rows
-// left under a retired id has no fake rows to act on.
-func (f *fakeChannelRegistry) SettleSystem(ctx context.Context, orgID, channelID string) (string, error) {
-	f.mu.Lock()
-	f.sawSettles = append(f.sawSettles, channelKey(orgID, channelID))
-	err := f.settleErr
-	f.mu.Unlock()
-	if err != nil {
-		return "", err
-	}
-	return f.CurrentIDSystem(ctx, orgID, channelID)
+	return slackstore.ChannelMove{To: newID}, nil
 }
 
 var _ slackstore.ChannelRegistryStore = (*fakeChannelRegistry)(nil)
@@ -227,6 +313,7 @@ func newTestPipeline() (*ingestPipeline, *fakeEntities, *fakeDeliveries, *[]doma
 	p := &ingestPipeline{
 		entities:   entities,
 		deliveries: deliveries,
+		channels:   newFakeChannelRegistryFor(entities),
 		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
 	}
 	return p, entities, deliveries, published
@@ -266,6 +353,44 @@ func TestHandleEventCallback_PublishesCorrectEventShape(t *testing.T) {
 	}
 	if !meta.Mentioned {
 		t.Error("Mentioned = false; want true (every app_mention delivery is an explicit @-mention)")
+	}
+	if row := p.channels.(*fakeChannelRegistry).row("org-1", "C1"); row == nil || meta.ChannelRowID != row.ID {
+		t.Errorf("ChannelRowID = %q; want the channel's registry row %+v", meta.ChannelRowID, row)
+	}
+}
+
+// TestHandleEventCallback_MentionSurvivesAMoveAfterDedup: a mention under a
+// channel's new id registers a row of its own, and a move committing right
+// after the delivery is recorded absorbs that row. The delivery cannot be
+// retried past the dedup, so the thread and the message land on the
+// surviving row.
+func TestHandleEventCallback_MentionSurvivesAMoveAfterDedup(t *testing.T) {
+	p, entities, deliveries, published := newTestPipeline()
+	channels := p.channels.(*fakeChannelRegistry)
+	ws := testWorkspaceRow("org-1")
+	survivor := channels.register("org-1", ws.WorkspaceID, "G1")
+	deliveries.onFresh = func() {
+		if _, err := channels.MoveSystem(context.Background(), "org-1", "G1", "C1"); err != nil {
+			t.Errorf("MoveSystem: %v", err)
+		}
+	}
+
+	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "C1", User: "U1", Text: "hi", TS: "1600000000.000100"}
+	if err := p.handleEventCallback(context.Background(), ws, ev); err != nil {
+		t.Fatalf("handleEventCallback: %v", err)
+	}
+	if len(*published) != 1 {
+		t.Fatalf("published %d events; want 1", len(*published))
+	}
+	var meta SlackMessageMetadata
+	if err := json.Unmarshal([]byte((*published)[0].MetadataJSON), &meta); err != nil {
+		t.Fatalf("metadata: %v", err)
+	}
+	if meta.ChannelRowID != survivor.ID || meta.Channel != "C1" {
+		t.Errorf("metadata channel = %q (row %q); want C1 on the surviving row %s", meta.Channel, meta.ChannelRowID, survivor.ID)
+	}
+	if e, _ := entities.GetBySourceSystem(context.Background(), "org-1", "slack", domain.SlackScope, "C1/1600000000.000100"); e == nil {
+		t.Error("no thread entity under C1/1600000000.000100")
 	}
 }
 
@@ -350,8 +475,7 @@ func TestHandleEventCallback_UnsupportedTypeDropped(t *testing.T) {
 // than being dropped.
 func TestHandleChannelIDChanged_MovesTheChannel(t *testing.T) {
 	p, _, deliveries, published := newTestPipeline()
-	channels := newFakeChannelRegistry()
-	p.channels = channels
+	channels := p.channels.(*fakeChannelRegistry)
 	ws := testWorkspaceRow("org-1")
 	ev := inboundMention{Type: "channel_id_changed", EventID: "Ev1", OldChannelID: "G1", NewChannelID: "C1"}
 
@@ -380,8 +504,7 @@ func TestHandleChannelIDChanged_MalformedDropped(t *testing.T) {
 		{Type: "channel_id_changed", EventID: "Ev3", OldChannelID: "C1", NewChannelID: "C1"},
 	} {
 		p, _, _, _ := newTestPipeline()
-		channels := newFakeChannelRegistry()
-		p.channels = channels
+		channels := p.channels.(*fakeChannelRegistry)
 		if err := p.handleEventCallback(context.Background(), testWorkspaceRow("org-1"), ev); err != nil {
 			t.Fatalf("%s: %v", ev.EventID, err)
 		}
@@ -395,9 +518,8 @@ func TestHandleChannelIDChanged_MalformedDropped(t *testing.T) {
 // the transport withholds its ack and Slack redelivers the change.
 func TestHandleChannelIDChanged_MoveErrorReturned(t *testing.T) {
 	p, _, _, _ := newTestPipeline()
-	channels := newFakeChannelRegistry()
+	channels := p.channels.(*fakeChannelRegistry)
 	channels.moveErr = errors.New("db down")
-	p.channels = channels
 	ev := inboundMention{Type: "channel_id_changed", EventID: "Ev1", OldChannelID: "G1", NewChannelID: "C1"}
 	if err := p.handleEventCallback(context.Background(), testWorkspaceRow("org-1"), ev); err == nil {
 		t.Fatal("handleEventCallback = nil; want the move's error")
@@ -410,9 +532,8 @@ func TestHandleChannelIDChanged_MoveErrorReturned(t *testing.T) {
 // metadata alike — instead of reviving the old one.
 func TestHandleEventCallback_MentionUnderARetiredChannelID(t *testing.T) {
 	p, entities, _, published := newTestPipeline()
-	channels := newFakeChannelRegistry()
+	channels := p.channels.(*fakeChannelRegistry)
 	channels.moved = map[string]string{channelKey("org-1", "G1"): "C1"}
-	p.channels = channels
 	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "G1", User: "U1", Text: "hi", TS: "1600000000.000100", ThreadTS: "1599999999.000001"}
 
 	if err := p.handleEventCallback(context.Background(), testWorkspaceRow("org-1"), ev); err != nil {
@@ -434,59 +555,8 @@ func TestHandleEventCallback_MentionUnderARetiredChannelID(t *testing.T) {
 	if meta.Channel != "C1" {
 		t.Errorf("metadata channel = %q; want C1", meta.Channel)
 	}
-}
-
-// TestHandleEventCallback_MentionSettlesAMoveAfterItsResolve: a move that
-// commits after the mention resolved its channel is settled once the entity
-// is written, and the event publishes under the new id, on the entity that
-// holds the thread's key there.
-func TestHandleEventCallback_MentionSettlesAMoveAfterItsResolve(t *testing.T) {
-	p, entities, _, published := newTestPipeline()
-	channels := newFakeChannelRegistry()
-	p.channels = channels
-	entities.afterFindOrCreate = func() {
-		channels.moved = map[string]string{channelKey("org-1", "G1"): "C1"}
-	}
-	const thread = "C1/1599999999.000001"
-	entities.seedThread("org-1", thread, "thread", "active")
-	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "G1", User: "U1", Text: "hi", TS: "1600000000.000100", ThreadTS: "1599999999.000001"}
-
-	if err := p.handleEventCallback(context.Background(), testWorkspaceRow("org-1"), ev); err != nil {
-		t.Fatalf("handleEventCallback: %v", err)
-	}
-	if want := []string{channelKey("org-1", "G1")}; !reflect.DeepEqual(channels.sawSettles, want) {
-		t.Errorf("settles = %v; want %v", channels.sawSettles, want)
-	}
-	if len(*published) != 1 {
-		t.Fatalf("published %d events; want 1", len(*published))
-	}
-	var meta SlackMessageMetadata
-	if err := json.Unmarshal([]byte((*published)[0].MetadataJSON), &meta); err != nil {
-		t.Fatalf("metadata: %v", err)
-	}
-	if meta.Channel != "C1" {
-		t.Errorf("metadata channel = %q; want C1", meta.Channel)
-	}
-	if got, want := (*published)[0].EntityID, entities.byKey[fakeEntityKey("org-1", "slack", domain.SlackScope, thread)].ID; got == nil || *got != want {
-		t.Errorf("EntityID = %v; want the thread's entity %s", got, want)
-	}
-}
-
-// TestHandleEventCallback_MentionSettleErrorStillPublishes: the delivery is
-// already recorded when the settle runs, so a failed settle publishes under
-// the id the mention resolved rather than failing into a dropped redelivery.
-func TestHandleEventCallback_MentionSettleErrorStillPublishes(t *testing.T) {
-	p, _, _, published := newTestPipeline()
-	channels := newFakeChannelRegistry()
-	channels.settleErr = errors.New("db down")
-	p.channels = channels
-	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "C1", User: "U1", Text: "hi", TS: "1600000000.000100"}
-
-	if err := p.handleEventCallback(context.Background(), testWorkspaceRow("org-1"), ev); err != nil {
-		t.Fatalf("handleEventCallback: %v", err)
-	}
-	if len(*published) != 1 {
-		t.Fatalf("published %d events; want 1", len(*published))
+	if row := channels.row("org-1", "C1"); row == nil || meta.ChannelRowID != row.ID {
+		t.Errorf("metadata channel_row_id = %q; want the channel's row %+v", meta.ChannelRowID, row)
 	}
 }
 
@@ -495,9 +565,8 @@ func TestHandleEventCallback_MentionSettleErrorStillPublishes(t *testing.T) {
 // under the new id, and publishes under it.
 func TestHandleThreadMessage_FollowUpUnderARetiredChannelID(t *testing.T) {
 	p, entities, deliveries, published := newTestPipeline()
-	channels := newFakeChannelRegistry()
+	channels := p.channels.(*fakeChannelRegistry)
 	channels.moved = map[string]string{channelKey("org-1", "G1"): "C1"}
-	p.channels = channels
 	entities.seedThread("org-1", engagedSourceID, "thread", "active")
 
 	ev := engagedFollowUp()
@@ -519,6 +588,9 @@ func TestHandleThreadMessage_FollowUpUnderARetiredChannelID(t *testing.T) {
 	if meta.Channel != "C1" {
 		t.Errorf("metadata channel = %q; want C1", meta.Channel)
 	}
+	if row := channels.row("org-1", "C1"); row == nil || meta.ChannelRowID != row.ID {
+		t.Errorf("metadata channel_row_id = %q; want the channel's row %+v", meta.ChannelRowID, row)
+	}
 	if len(deliveries.seen) != 1 {
 		t.Errorf("recorded %d deliveries; want 1", len(deliveries.seen))
 	}
@@ -529,9 +601,8 @@ func TestHandleThreadMessage_FollowUpUnderARetiredChannelID(t *testing.T) {
 // recorded, so Slack's redelivery can still land it.
 func TestHandleThreadMessage_ChannelResolveErrorBeforeDelivery(t *testing.T) {
 	p, _, deliveries, published := newTestPipeline()
-	channels := newFakeChannelRegistry()
-	channels.currentErr = errors.New("db down")
-	p.channels = channels
+	channels := p.channels.(*fakeChannelRegistry)
+	channels.resolveErr = errors.New("db down")
 
 	if err := p.handleEventCallback(context.Background(), testWorkspaceRow("org-1"), engagedFollowUp()); err == nil {
 		t.Fatal("handleEventCallback = nil; want the read's error")
@@ -806,9 +877,11 @@ func TestHandleEventCallback_DispatchesIdentityResolution(t *testing.T) {
 		identities: identities,
 		client:     client,
 	}
+	entities := newFakeEntities()
 	p := &ingestPipeline{
-		entities:   newFakeEntities(),
+		entities:   entities,
 		deliveries: newFakeDeliveries(),
+		channels:   newFakeChannelRegistryFor(entities),
 		publish:    func(context.Context, domain.Event) {},
 		identity:   resolver,
 	}
@@ -864,6 +937,7 @@ func TestHandleEventCallback_FollowUpDispatchesIdentityResolution(t *testing.T) 
 	p := &ingestPipeline{
 		entities:   entities,
 		deliveries: newFakeDeliveries(),
+		channels:   newFakeChannelRegistryFor(entities),
 		publish:    func(context.Context, domain.Event) { published++ },
 		identity:   resolver,
 	}
@@ -901,8 +975,7 @@ func TestHandleEventCallback_FollowUpDispatchesIdentityResolution(t *testing.T) 
 // sighting for its channel.
 func TestHandleEventCallback_ChannelSightingUpsertedOnFreshDelivery(t *testing.T) {
 	p, _, _, _ := newTestPipeline()
-	channels := newFakeChannelRegistry()
-	p.channels = channels
+	channels := p.channels.(*fakeChannelRegistry)
 	ws := testWorkspaceRow("org-1")
 	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "C1", User: "U1", TS: "1600000000.000100"}
 
@@ -912,18 +985,19 @@ func TestHandleEventCallback_ChannelSightingUpsertedOnFreshDelivery(t *testing.T
 	if len(channels.sawUpsert) != 1 {
 		t.Fatalf("sighting upserts = %d; want 1", len(channels.sawUpsert))
 	}
-	if row := channels.rows[channelKey("org-1", "C1")]; row == nil {
+	if row := channels.row("org-1", "C1"); row == nil {
 		t.Fatal("no sighting row recorded")
 	}
 }
 
-// TestHandleEventCallback_ChannelSightingNotUpsertedOnDuplicate pins that a
-// redelivered event_id never reaches sighting capture — it's dropped by the
-// dedup check first, same as it never reaches entity creation or publish.
-func TestHandleEventCallback_ChannelSightingNotUpsertedOnDuplicate(t *testing.T) {
+// TestHandleEventCallback_ChannelSightingRecordedBeforeDedup pins that the
+// sighting precedes the dedup insert — the message's registry row is what the
+// thread and the event reference — so a redelivered event_id records the same
+// sighting again and is then dropped, never reaching entity creation or
+// publish.
+func TestHandleEventCallback_ChannelSightingRecordedBeforeDedup(t *testing.T) {
 	p, _, _, _ := newTestPipeline()
-	channels := newFakeChannelRegistry()
-	p.channels = channels
+	channels := p.channels.(*fakeChannelRegistry)
 	ws := testWorkspaceRow("org-1")
 	ev := inboundMention{Type: "app_mention", EventID: "Ev-dup", Channel: "C1", User: "U1", TS: "1.0"}
 
@@ -933,27 +1007,27 @@ func TestHandleEventCallback_ChannelSightingNotUpsertedOnDuplicate(t *testing.T)
 	if err := p.handleEventCallback(context.Background(), ws, ev); err != nil {
 		t.Fatalf("duplicate delivery: %v", err)
 	}
-	if len(channels.sawUpsert) != 1 {
-		t.Errorf("sighting upserts across 2 identical deliveries = %d; want 1 (dropped before sighting capture)", len(channels.sawUpsert))
+	if len(channels.sawUpsert) != 2 {
+		t.Errorf("sighting upserts across 2 identical deliveries = %d; want 2 (each resolves its channel before dedup)", len(channels.sawUpsert))
 	}
 }
 
-// TestHandleEventCallback_ChannelSightingUpsertErrorDoesNotFailPipeline pins
-// the best-effort contract: a sighting-registry hiccup must never 5xx the
-// webhook or withhold the mention's own publish.
-func TestHandleEventCallback_ChannelSightingUpsertErrorDoesNotFailPipeline(t *testing.T) {
-	p, _, _, published := newTestPipeline()
-	channels := newFakeChannelRegistry()
+// TestHandleEventCallback_ChannelSightingErrorBeforeDelivery: the sighting
+// resolves the mention's channel to the registry row its thread and event
+// reference, so a failed one is the delivery's error — returned before the
+// dedup insert, so Slack's redelivery can still land the mention.
+func TestHandleEventCallback_ChannelSightingErrorBeforeDelivery(t *testing.T) {
+	p, _, deliveries, published := newTestPipeline()
+	channels := p.channels.(*fakeChannelRegistry)
 	channels.upsertErr = errors.New("boom")
-	p.channels = channels
 	ws := testWorkspaceRow("org-1")
 	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "C1", User: "U1", TS: "1.0"}
 
-	if err := p.handleEventCallback(context.Background(), ws, ev); err != nil {
-		t.Fatalf("handleEventCallback: %v (a sighting-store error must not fail the pipeline)", err)
+	if err := p.handleEventCallback(context.Background(), ws, ev); err == nil {
+		t.Fatal("handleEventCallback = nil; want the sighting's error")
 	}
-	if len(*published) != 1 {
-		t.Errorf("published %d events; want 1 (mention still publishes despite sighting error)", len(*published))
+	if len(*published) != 0 || len(deliveries.seen) != 0 {
+		t.Errorf("published %d, recorded %d deliveries; want neither", len(*published), len(deliveries.seen))
 	}
 }
 
@@ -972,11 +1046,12 @@ func TestHandleEventCallback_DispatchesChannelNameResolutionOnCreated(t *testing
 			"ok": true, "channel": map[string]any{"name": "general"},
 		})
 	})
-	channels := newFakeChannelRegistry()
+	entities := newFakeEntities()
+	channels := newFakeChannelRegistryFor(entities)
 	channels.done = make(chan struct{}, 1)
 	resolver := &ChannelResolver{secrets: &fakeSecrets{token: "xoxb-test"}, channels: channels, client: srv.Client()}
 	p := &ingestPipeline{
-		entities:    newFakeEntities(),
+		entities:    entities,
 		deliveries:  newFakeDeliveries(),
 		channels:    channels,
 		publish:     func(context.Context, domain.Event) {},
@@ -998,7 +1073,7 @@ func TestHandleEventCallback_DispatchesChannelNameResolutionOnCreated(t *testing
 	if hits != 1 {
 		t.Errorf("conversations.info hits = %d; want 1 (resolveChannelName should have called it)", hits)
 	}
-	row := channels.rows[channelKey("org-1", "C1")]
+	row := channels.row("org-1", "C1")
 	if row == nil || row.Name != "general" {
 		t.Fatalf("row = %+v; want name resolved to general", row)
 	}
@@ -1033,6 +1108,7 @@ func TestHandleEventCallback_DispatchesPermalinkResolutionOnCreated(t *testing.T
 	p := &ingestPipeline{
 		entities:   entities,
 		deliveries: newFakeDeliveries(),
+		channels:   newFakeChannelRegistryFor(entities),
 		publish:    func(context.Context, domain.Event) {},
 		permalink:  resolver,
 	}
@@ -1077,6 +1153,7 @@ func TestHandleEventCallback_DoesNotDispatchPermalinkResolutionOnReMention(t *te
 	p := &ingestPipeline{
 		entities:   entities,
 		deliveries: newFakeDeliveries(),
+		channels:   newFakeChannelRegistryFor(entities),
 		publish:    func(context.Context, domain.Event) {},
 		permalink:  resolver,
 	}

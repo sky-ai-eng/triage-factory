@@ -66,7 +66,6 @@ func TestIngestStats_OneOutcomePerDelivery(t *testing.T) {
 	stats, reader := newTestStats()
 	p, _, _, _ := newTestPipeline()
 	p.stats = stats
-	p.channels = newFakeChannelRegistry()
 	ws := testWorkspaceRow("org-1")
 	ctx := context.Background()
 

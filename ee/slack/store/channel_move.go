@@ -8,24 +8,27 @@ import (
 // ChannelMove is what ChannelRegistryStore.MoveSystem rewrote. Every count is
 // zero on a redelivery of a change already applied.
 type ChannelMove struct {
-	// To is the id the rows moved to: newID, or the id a recorded change
+	// To is the id the channel moved to: newID, or the id a recorded change
 	// names when one has overtaken this one (see MoveSystem).
 	To string
-	// Entities is how many thread entities moved.
+	// Absorbed is the registry row the new id already had, merged into the
+	// channel's row and deleted; "" when there was none.
+	Absorbed string
+	// Entities is how many thread entities' keys moved.
 	Entities int
 	// Superseded are the ids of the entities closed because an older entity
 	// for the same thread kept the key; see MoveSystem.
 	Superseded []string
-	// Trackers is how many team tracking rows named the old id.
-	Trackers int
 	// Artifacts and Actions count the artifacts and external action pointers
-	// rewritten; Handlers the slack:message handlers whose channel filter
-	// named the old id.
+	// rewritten.
 	Artifacts int
 	Actions   int
-	Handlers  int
-	// SkippedHandlers are the slack:message handlers naming the old id whose
-	// stored filter could not be decoded. They are left as stored, still
+	// Trackers is how many team tracking rows, and Handlers how many
+	// slack:message handler filters, named the absorbed row.
+	Trackers int
+	Handlers int
+	// SkippedHandlers are the slack:message handlers naming the absorbed row
+	// whose stored filter could not be decoded. They are left as stored, still
 	// naming it.
 	SkippedHandlers []string
 }
@@ -106,10 +109,10 @@ func MovePermalink(u, oldID, newID string) (string, bool) {
 	return parsed.String(), true
 }
 
-// MoveChannelFilter replaces oldID with newID in a slack:message handler's
-// channel_in list, keeping the list's order and dropping the copy of newID a
-// list naming both would otherwise hold twice. Reports false, with channels
-// unchanged, when the list does not name oldID.
+// MoveChannelFilter replaces the registry row oldID with newID in a
+// slack:message handler's channel_in list, keeping the list's order and
+// dropping the copy of newID a list naming both would otherwise hold twice.
+// Reports false, with channels unchanged, when the list does not name oldID.
 func MoveChannelFilter(channels []string, oldID, newID string) ([]string, bool) {
 	found := false
 	for _, c := range channels {

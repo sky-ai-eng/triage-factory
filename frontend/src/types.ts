@@ -1053,8 +1053,11 @@ export interface SlackChannelTracker {
  *  of this team's tracked rows, the org's sighting registry, and live Slack
  *  candidates, deduped by channel_id (TFAC-543). `name` is empty when only a
  *  bare channel_id is known (no live/sighting resolution yet) — render the
- *  raw id rather than inventing a name. */
+ *  raw id rather than inventing a name. `id` is the channel's registry row —
+ *  what a slack:message handler's channel_in names — absent for a live Slack
+ *  channel TF holds no row for yet. */
 export interface SlackChannelView {
+  id?: string
   channel_id: string
   name: string
   workspace_id: string

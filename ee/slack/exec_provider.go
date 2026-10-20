@@ -91,10 +91,10 @@ func slackProviderCredential(ctx context.Context, stores db.Stores, scope agenth
 	// The channels THIS team tracks — the authorizable set authorizeChannel
 	// gates on, so their workspaces are exactly what may be sealed.
 	trackedChannels := map[string]struct{}{}
-	for channelID, tcs := range trackers {
+	for slackChannelID, tcs := range trackers {
 		for _, tc := range tcs {
 			if tc.TeamID == scope.TeamID {
-				trackedChannels[channelID] = struct{}{}
+				trackedChannels[slackChannelID] = struct{}{}
 				break
 			}
 		}
@@ -105,10 +105,10 @@ func slackProviderCredential(ctx context.Context, stores db.Stores, scope agenth
 
 	// The distinct workspaces those channels live in.
 	workspaceIDs := map[string]struct{}{}
-	for channelID := range trackedChannels {
-		ch, err := bundle.Channels.GetSystem(ctx, scope.OrgID, channelID)
+	for slackChannelID := range trackedChannels {
+		ch, err := bundle.Channels.GetSystem(ctx, scope.OrgID, slackChannelID)
 		if err != nil {
-			return nil, fmt.Errorf("look up channel %s: %w", channelID, err)
+			return nil, fmt.Errorf("look up channel %s: %w", slackChannelID, err)
 		}
 		if ch != nil && ch.WorkspaceID != "" {
 			workspaceIDs[ch.WorkspaceID] = struct{}{}

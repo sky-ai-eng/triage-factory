@@ -230,9 +230,10 @@ func newSocketTestRig(t *testing.T, rows ...*slackstore.Workspace) *socketTestRi
 	}
 
 	published := &[]domain.Event{}
-	channels := newFakeChannelRegistry()
+	entities := newFakeEntities()
+	channels := newFakeChannelRegistryFor(entities)
 	pipeline := &ingestPipeline{
-		entities:   newFakeEntities(),
+		entities:   entities,
 		deliveries: newFakeDeliveries(),
 		channels:   channels,
 		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },

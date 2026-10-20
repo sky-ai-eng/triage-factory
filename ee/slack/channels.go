@@ -53,16 +53,16 @@ func NewChannelResolver(stores db.Stores) *ChannelResolver {
 	}
 }
 
-// dispatch starts resolveChannelName for (ws.OrgID, channelID) in a detached
-// goroutine, unless a resolution for that channel is already in flight. This
+// dispatch starts resolveChannelName for channel in a detached goroutine,
+// unless a resolution for that channel is already in flight. This
 // is the thundering-herd guard: while conversations.info is slow or failing
 // for a channel, every mention in it would otherwise re-check the same stale
 // row and spawn another goroutine hitting the Slack API, one per mention,
 // until the first one finally succeeds. Callers should call this instead of
 // spawning resolveChannelName directly — see ingest.go's
 // captureChannelSighting.
-func (r *ChannelResolver) dispatch(ws slackstore.Workspace, channelID string) {
-	key := ws.OrgID + "/" + channelID
+func (r *ChannelResolver) dispatch(ws slackstore.Workspace, channel slackstore.Channel) {
+	key := ws.OrgID + "/" + channel.ID
 	r.mu.Lock()
 	if r.inFlight == nil {
 		r.inFlight = map[string]bool{}
@@ -80,18 +80,19 @@ func (r *ChannelResolver) dispatch(ws slackstore.Workspace, channelID string) {
 			delete(r.inFlight, key)
 			r.mu.Unlock()
 		}()
-		r.resolveChannelName(context.Background(), ws, channelID)
+		r.resolveChannelName(context.Background(), ws, channel)
 	}()
 }
 
-// resolveChannelName looks up channelID's current display name and writes
-// it into the registry. Best-effort: every failure is logged and
+// resolveChannelName looks up the channel's current display name and writes
+// it into its registry row. Best-effort: every failure is logged and
 // swallowed, there is no error return, and it MUST NEVER run inline on the
 // ingest request path — callers dispatch it via dispatch (above), never
 // directly, so a slow/stuck resolution can't spawn duplicates. Never writes
 // a name on API failure — an unresolved row renders its raw channel ID
 // rather than risk a wrong fallback name.
-func (r *ChannelResolver) resolveChannelName(ctx context.Context, ws slackstore.Workspace, channelID string) {
+func (r *ChannelResolver) resolveChannelName(ctx context.Context, ws slackstore.Workspace, channel slackstore.Channel) {
+	channelID := channel.ChannelID
 	ctx, cancel := context.WithTimeout(ctx, channelNameResolveTimeout)
 	defer cancel()
 
@@ -113,7 +114,7 @@ func (r *ChannelResolver) resolveChannelName(ctx context.Context, ws slackstore.
 	if info.Name == "" {
 		return
 	}
-	if err := r.channels.SetNameSystem(ctx, ws.OrgID, channelID, info.Name); err != nil {
+	if err := r.channels.SetNameSystem(ctx, ws.OrgID, channel.ID, info.Name); err != nil {
 		slackLog.Warn("channel name: set name failed", "workspace", ws.WorkspaceID, "channel", channelID, "error", err)
 	}
 }

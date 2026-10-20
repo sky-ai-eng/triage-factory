@@ -44,27 +44,12 @@ func TestChannelsHandler_LocalMode404(t *testing.T) {
 // TestDiffChannelIDs pins the added/removed computation diffChannelIDs feeds
 // to ReconcilePrimariesSystem's touched-channel set and the auto-join pass.
 func TestDiffChannelIDs(t *testing.T) {
-	prior := []slackstore.TeamChannel{{ChannelID: "C1"}, {ChannelID: "C2"}}
-	added, removed := diffChannelIDs(prior, []string{"C2", "C3"})
-	if len(added) != 1 || added[0] != "C3" {
-		t.Errorf("added = %v; want [C3]", added)
+	prior := []slackstore.TeamChannel{{SlackChannelID: "row-1", ChannelID: "C1"}, {SlackChannelID: "row-2", ChannelID: "C2"}}
+	added, removed := diffChannelIDs(prior, []string{"row-2", "row-3"})
+	if len(added) != 1 || added[0] != "row-3" {
+		t.Errorf("added = %v; want [row-3]", added)
 	}
-	if len(removed) != 1 || removed[0] != "C1" {
-		t.Errorf("removed = %v; want [C1]", removed)
-	}
-}
-
-// TestNormalizeChannelIDs pins the blank-drop + dedup + order-preserving
-// contract diffChannelIDs and the first-track check rely on.
-func TestNormalizeChannelIDs(t *testing.T) {
-	got := normalizeChannelIDs([]string{"C1", "", "C2", "C1", "C3"})
-	want := []string{"C1", "C2", "C3"}
-	if len(got) != len(want) {
-		t.Fatalf("normalizeChannelIDs = %v; want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("normalizeChannelIDs = %v; want %v", got, want)
-		}
+	if len(removed) != 1 || removed[0] != "row-1" {
+		t.Errorf("removed = %v; want [row-1]", removed)
 	}
 }

@@ -31,22 +31,27 @@ func newTeamChannelStore(app, admin db.Execer) slackstore.TeamChannelStore {
 
 var _ slackstore.TeamChannelStore = (*teamChannelStore)(nil)
 
-const teamChannelColumns = `org_id::text, team_id::text, channel_id, is_primary, created_at`
+// teamChannelSelect reads tracking rows with the Slack id the channel has now,
+// joined from the registry for display. Aliases: t (team_slack_channels), c
+// (slack_channels).
+const teamChannelSelect = `
+	SELECT t.org_id::text, t.team_id::text, t.slack_channel_id::text, c.channel_id, t.is_primary, t.created_at
+	FROM team_slack_channels t
+	JOIN slack_channels c ON c.id = t.slack_channel_id
+`
 
 func scanTeamChannel(sc rowScanner) (slackstore.TeamChannel, error) {
 	var tc slackstore.TeamChannel
-	if err := sc.Scan(&tc.OrgID, &tc.TeamID, &tc.ChannelID, &tc.IsPrimary, &tc.CreatedAt); err != nil {
+	if err := sc.Scan(&tc.OrgID, &tc.TeamID, &tc.SlackChannelID, &tc.ChannelID, &tc.IsPrimary, &tc.CreatedAt); err != nil {
 		return slackstore.TeamChannel{}, err
 	}
 	return tc, nil
 }
 
 func (s *teamChannelStore) ListForTeam(ctx context.Context, orgID, teamID string) ([]slackstore.TeamChannel, error) {
-	rows, err := s.app.QueryContext(ctx, `
-		SELECT `+teamChannelColumns+`
-		FROM team_slack_channels
-		WHERE org_id = $1 AND team_id = $2
-		ORDER BY channel_id ASC
+	rows, err := s.app.QueryContext(ctx, teamChannelSelect+`
+		WHERE t.org_id = $1 AND t.team_id = $2
+		ORDER BY c.channel_id ASC, t.slack_channel_id ASC
 	`, orgID, teamID)
 	if err != nil {
 		return nil, fmt.Errorf("list team_slack_channels: %w", err)
@@ -67,24 +72,48 @@ func (s *teamChannelStore) ListForTeam(ctx context.Context, orgID, teamID string
 // ReplaceForTeam is insert-then-prune, mirroring
 // sqlite/team_github_repos.go's ReplaceForTeam shape: ON CONFLICT DO
 // NOTHING preserves an existing row's created_at AND is_primary untouched;
-// a wholly new channel_id always inserts is_primary=false, never true — the
+// a wholly new channel always inserts is_primary=false, never true — the
 // store-layer half of the "is_primary is never written from the app pool"
-// contract (see the TeamChannelStore doc). Runs in one transaction so the
-// insert pass and the prune can't leave a partial mid-save state.
-func (s *teamChannelStore) ReplaceForTeam(ctx context.Context, orgID, teamID string, channelIDs []string) error {
-	unique := normalizeChannelIDs(channelIDs)
-	return inTx(ctx, s.app, func(q db.Execer) error {
-		for _, ch := range unique {
+// contract (see the TeamChannelStore doc). Runs in one transaction, under the
+// shared move lock, so the resolve, the insert pass and the prune commit
+// together and a move waits for them.
+func (s *teamChannelStore) ReplaceForTeam(ctx context.Context, orgID, teamID string, channelIDs []string) ([]string, error) {
+	var tracked []string
+	err := inTx(ctx, s.app, func(q db.Execer) error {
+		if err := lockChannelWrites(ctx, q, orgID); err != nil {
+			return err
+		}
+		seen := make(map[string]bool, len(channelIDs))
+		for _, channelID := range channelIDs {
+			var row string
+			err := q.QueryRowContext(ctx, `
+				SELECT id::text FROM slack_channels
+				WHERE org_id = $1 AND channel_id = `+currentChannelIDSQL("$2"),
+				orgID, channelID).Scan(&row)
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w: %s", slackstore.ErrChannelNotRegistered, channelID)
+			}
+			if err != nil {
+				return fmt.Errorf("resolve slack channel %s: %w", channelID, err)
+			}
+			if seen[row] {
+				continue
+			}
+			seen[row] = true
+			tracked = append(tracked, row)
+		}
+
+		for _, row := range tracked {
 			if _, err := q.ExecContext(ctx, `
-				INSERT INTO team_slack_channels (org_id, team_id, channel_id, is_primary)
+				INSERT INTO team_slack_channels (org_id, team_id, slack_channel_id, is_primary)
 				VALUES ($1, $2, $3, false)
-				ON CONFLICT (team_id, channel_id) DO NOTHING
-			`, orgID, teamID, ch); err != nil {
-				return fmt.Errorf("insert team_slack_channels[%s]: %w", ch, err)
+				ON CONFLICT (team_id, slack_channel_id) DO NOTHING
+			`, orgID, teamID, row); err != nil {
+				return fmt.Errorf("insert team_slack_channels[%s]: %w", row, err)
 			}
 		}
 
-		if len(unique) == 0 {
+		if len(tracked) == 0 {
 			if _, err := q.ExecContext(ctx, `
 				DELETE FROM team_slack_channels WHERE org_id = $1 AND team_id = $2
 			`, orgID, teamID); err != nil {
@@ -95,58 +124,37 @@ func (s *teamChannelStore) ReplaceForTeam(ctx context.Context, orgID, teamID str
 
 		if _, err := q.ExecContext(ctx, `
 			DELETE FROM team_slack_channels
-			WHERE org_id = $1 AND team_id = $2 AND NOT (channel_id = ANY($3))
-		`, orgID, teamID, unique); err != nil {
+			WHERE org_id = $1 AND team_id = $2 AND NOT (slack_channel_id = ANY($3::uuid[]))
+		`, orgID, teamID, tracked); err != nil {
 			return fmt.Errorf("prune team_slack_channels: %w", err)
 		}
 		return nil
 	})
-}
-
-// normalizeChannelIDs drops blanks and de-duplicates, preserving first-seen
-// order (channel IDs need no casing normalization — unlike GitHub owner/repo,
-// Slack's are case-sensitive as issued).
-func normalizeChannelIDs(channelIDs []string) []string {
-	seen := make(map[string]bool, len(channelIDs))
-	out := make([]string, 0, len(channelIDs))
-	for _, ch := range channelIDs {
-		if ch == "" || seen[ch] {
-			continue
-		}
-		seen[ch] = true
-		out = append(out, ch)
+	if err != nil {
+		return nil, err
 	}
-	return out
+	return tracked, nil
 }
 
-// currentChannelIDSQL resolves the channel id bound at the given placeholder
-// to the id the channel has now (ChannelRegistryStore.CurrentIDSystem's
-// read), inline, so a gate judging an earlier id costs no extra round trip.
-// The org is always $1.
-func currentChannelIDSQL(placeholder string) string {
-	return `COALESCE((SELECT c.new_channel_id FROM slack_channel_id_changes c
-		WHERE c.org_id = $1 AND c.old_channel_id = ` + placeholder + `), ` + placeholder + `)`
-}
-
-func (s *teamChannelStore) TracksChannelSystem(ctx context.Context, orgID, teamID, channelID string) (bool, error) {
+func (s *teamChannelStore) TracksChannelSystem(ctx context.Context, orgID, teamID, slackChannelID string) (bool, error) {
 	var ok bool
 	if err := s.admin.QueryRowContext(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM team_slack_channels
-			WHERE org_id = $1 AND team_id = $2 AND channel_id = `+currentChannelIDSQL("$3")+`
+			WHERE org_id = $1 AND team_id = $2 AND slack_channel_id = $3
 		)
-	`, orgID, teamID, channelID).Scan(&ok); err != nil {
+	`, orgID, teamID, slackChannelID).Scan(&ok); err != nil {
 		return false, fmt.Errorf("tracks channel team_slack_channels: %w", err)
 	}
 	return ok, nil
 }
 
-func (s *teamChannelStore) PrimaryTeamForChannelSystem(ctx context.Context, orgID, channelID string) (string, error) {
+func (s *teamChannelStore) PrimaryTeamForChannelSystem(ctx context.Context, orgID, slackChannelID string) (string, error) {
 	var teamID string
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT team_id::text FROM team_slack_channels
-		WHERE org_id = $1 AND channel_id = `+currentChannelIDSQL("$2")+` AND is_primary
-	`, orgID, channelID).Scan(&teamID)
+		WHERE org_id = $1 AND slack_channel_id = $2 AND is_primary
+	`, orgID, slackChannelID).Scan(&teamID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -157,11 +165,9 @@ func (s *teamChannelStore) PrimaryTeamForChannelSystem(ctx context.Context, orgI
 }
 
 func (s *teamChannelStore) ListTrackersForOrgSystem(ctx context.Context, orgID string) (map[string][]slackstore.TeamChannel, error) {
-	rows, err := s.admin.QueryContext(ctx, `
-		SELECT `+teamChannelColumns+`
-		FROM team_slack_channels
-		WHERE org_id = $1
-		ORDER BY channel_id ASC, created_at ASC, team_id ASC
+	rows, err := s.admin.QueryContext(ctx, teamChannelSelect+`
+		WHERE t.org_id = $1
+		ORDER BY t.slack_channel_id ASC, t.created_at ASC, t.team_id ASC
 	`, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("list team_slack_channels trackers: %w", err)
@@ -174,38 +180,38 @@ func (s *teamChannelStore) ListTrackersForOrgSystem(ctx context.Context, orgID s
 		if err != nil {
 			return nil, fmt.Errorf("scan team_slack_channels trackers: %w", err)
 		}
-		out[tc.ChannelID] = append(out[tc.ChannelID], tc)
+		out[tc.SlackChannelID] = append(out[tc.SlackChannelID], tc)
 	}
 	return out, rows.Err()
 }
 
 // ReconcilePrimariesSystem is a single atomic UPDATE ... FROM: the inner
-// DISTINCT ON picks, per channel_id, the oldest tracker (created_at ASC,
+// DISTINCT ON picks, per channel, the oldest tracker (created_at ASC,
 // team_id ASC tiebreak) among channels that have at least one tracker but
 // no row with is_primary yet — a channel that already has a primary never
 // appears in that set (the NOT EXISTS), so promoting the picked row can
 // never collide with the one-primary-per-channel partial unique index.
 // One statement is enough for atomicity here; no inTx wrapper needed.
-func (s *teamChannelStore) ReconcilePrimariesSystem(ctx context.Context, orgID string, channelIDs []string) error {
-	if len(channelIDs) == 0 {
+func (s *teamChannelStore) ReconcilePrimariesSystem(ctx context.Context, orgID string, slackChannelIDs []string) error {
+	if len(slackChannelIDs) == 0 {
 		return nil
 	}
 	if _, err := s.admin.ExecContext(ctx, `
 		UPDATE team_slack_channels tsc
 		SET is_primary = true
 		FROM (
-			SELECT DISTINCT ON (t.channel_id) t.team_id, t.channel_id
+			SELECT DISTINCT ON (t.slack_channel_id) t.team_id, t.slack_channel_id
 			FROM team_slack_channels t
 			WHERE t.org_id = $1
-			  AND t.channel_id = ANY($2)
+			  AND t.slack_channel_id = ANY($2::uuid[])
 			  AND NOT EXISTS (
 			      SELECT 1 FROM team_slack_channels p
-			      WHERE p.org_id = t.org_id AND p.channel_id = t.channel_id AND p.is_primary
+			      WHERE p.slack_channel_id = t.slack_channel_id AND p.is_primary
 			  )
-			ORDER BY t.channel_id, t.created_at ASC, t.team_id ASC
+			ORDER BY t.slack_channel_id, t.created_at ASC, t.team_id ASC
 		) promoted
-		WHERE tsc.org_id = $1 AND tsc.channel_id = promoted.channel_id AND tsc.team_id = promoted.team_id
-	`, orgID, channelIDs); err != nil {
+		WHERE tsc.org_id = $1 AND tsc.slack_channel_id = promoted.slack_channel_id AND tsc.team_id = promoted.team_id
+	`, orgID, slackChannelIDs); err != nil {
 		return fmt.Errorf("reconcile team_slack_channels primaries: %w", err)
 	}
 	return nil
@@ -230,14 +236,14 @@ func (s *teamChannelStore) ReconcilePrimariesSystem(ctx context.Context, orgID s
 // (inTx's deferred Rollback fires because this returns non-nil before
 // reaching Commit), which undoes the clear too and restores the prior
 // primary.
-func (s *teamChannelStore) SetPrimarySystem(ctx context.Context, orgID, channelID, teamID string) error {
+func (s *teamChannelStore) SetPrimarySystem(ctx context.Context, orgID, slackChannelID, teamID string) error {
 	return inTx(ctx, s.admin, func(q db.Execer) error {
 		var tracks bool
 		if err := q.QueryRowContext(ctx, `
 			SELECT EXISTS (
-				SELECT 1 FROM team_slack_channels WHERE org_id = $1 AND channel_id = $2 AND team_id = $3
+				SELECT 1 FROM team_slack_channels WHERE org_id = $1 AND slack_channel_id = $2 AND team_id = $3
 			)
-		`, orgID, channelID, teamID).Scan(&tracks); err != nil {
+		`, orgID, slackChannelID, teamID).Scan(&tracks); err != nil {
 			return fmt.Errorf("check team tracks channel: %w", err)
 		}
 		if !tracks {
@@ -246,14 +252,14 @@ func (s *teamChannelStore) SetPrimarySystem(ctx context.Context, orgID, channelI
 
 		if _, err := q.ExecContext(ctx, `
 			UPDATE team_slack_channels SET is_primary = false
-			WHERE org_id = $1 AND channel_id = $2 AND is_primary
-		`, orgID, channelID); err != nil {
+			WHERE org_id = $1 AND slack_channel_id = $2 AND is_primary
+		`, orgID, slackChannelID); err != nil {
 			return fmt.Errorf("clear current primary team_slack_channels: %w", err)
 		}
 		res, err := q.ExecContext(ctx, `
 			UPDATE team_slack_channels SET is_primary = true
-			WHERE org_id = $1 AND channel_id = $2 AND team_id = $3
-		`, orgID, channelID, teamID)
+			WHERE org_id = $1 AND slack_channel_id = $2 AND team_id = $3
+		`, orgID, slackChannelID, teamID)
 		if err != nil {
 			return fmt.Errorf("set new primary team_slack_channels: %w", err)
 		}
