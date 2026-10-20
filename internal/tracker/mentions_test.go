@@ -136,7 +136,7 @@ func TestDiffPRSnapshots_Mentioned(t *testing.T) {
 			prev.ReviewMarker = &domain.ReviewMarker{}
 			curr := basePRSnapshot()
 			curr.ReviewMarker = &domain.ReviewMarker{}
-			evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, mentionResolver, tc.reviews, tc.comments)
+			evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testUser, mentionResolver, tc.reviews, tc.comments)
 			assertMentions(t, evts, testEntityID, curr, tc.want)
 		})
 	}
@@ -178,7 +178,7 @@ func TestDiffPRSnapshots_MentionedInBody(t *testing.T) {
 			prev.BodyMentions = tc.prev
 			curr := basePRSnapshot()
 			curr.BodyMentions, curr.UpdatedAt = tc.curr, updatedAt
-			evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, mentionResolver, nil, tc.comments)
+			evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testUser, mentionResolver, nil, tc.comments)
 			assertMentions(t, evts, testEntityID, curr, tc.want)
 		})
 	}
@@ -189,7 +189,7 @@ func TestDiffPRSnapshots_MentionedInBody(t *testing.T) {
 func TestDiffPRSnapshots_MentionedNotOnFirstDiscovery(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.BodyMentions = []string{"bob", "acme/backend"}
-	if evts := DiffPRSnapshots(domain.PRSnapshot{}, curr, testEntityID, testUser, mentionResolver, nil, nil); len(evts) != 0 {
+	if evts := DiffPRSnapshots(domain.PRSnapshot{}, curr, testEntityID, testRepositoryID, testUser, mentionResolver, nil, nil); len(evts) != 0 {
 		t.Errorf("first discovery emitted %v, want nothing", eventTypes(evts))
 	}
 }
@@ -198,7 +198,7 @@ func TestDiffPRSnapshots_MentionedNotOnFirstDiscovery(t *testing.T) {
 // mention by the identity mentioned, its source and its commenter.
 func TestDiffPRSnapshots_MentionedPredicate(t *testing.T) {
 	prev, curr := basePRSnapshot(), basePRSnapshot()
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, mentionResolver, nil,
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testUser, mentionResolver, nil,
 		[]NewComment{mentionComment("11", "carol", "2026-10-01T09:00:00Z", "bob")})
 	evt := findEvent(evts, domain.EventGitHubPRMentioned)
 	if evt == nil {

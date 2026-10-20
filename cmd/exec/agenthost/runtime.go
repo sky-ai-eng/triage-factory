@@ -404,7 +404,8 @@ func (r *directRuntime) ListRepos(ctx context.Context) ([]domain.Repository, err
 	if err != nil {
 		return nil, err
 	}
-	return r.stores.Repos.ListTrackedByTeamSystem(ctx, r.info.OrgID, r.info.TeamID, host)
+	repos, _, err := r.stores.Repos.ListTrackedByTeamSystem(ctx, r.info.OrgID, r.info.TeamID, host, db.Unwindowed)
+	return repos, err
 }
 
 // GetRepo is the verb boundary for `tfac exec workspace add owner/repo`: the

@@ -4,6 +4,7 @@ import { Info } from 'lucide-react'
 import type { FieldSchema } from '../types'
 import IdentityListField, { type IdentityKind } from './IdentityListField'
 import SlackChannelListField from './SlackChannelListField'
+import RepoListField from './RepoListField'
 import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 interface PredicateEditorProps {
@@ -150,6 +151,13 @@ function FieldRow({ field, eventType, teamId, value, onChange }: FieldRowProps) 
           onChange={(v) => onChange(v)}
         />
       )}
+      {field.type === 'string_list' && field.name === 'repo_in' && (
+        <RepoListField
+          teamId={teamId}
+          value={Array.isArray(value) ? (value as string[]) : undefined}
+          onChange={(v) => onChange(v)}
+        />
+      )}
       {/* Every other string_list field is an identity allowlist:
           GitHub → author_in / reviewer_in / commenter_in;
           Jira → assignee_in / reporter_in / commenter_in;
@@ -157,7 +165,7 @@ function FieldRow({ field, eventType, teamId, value, onChange }: FieldRowProps) 
           IdentityListField branches on identityKind to read the right
           column (github_username, jira_account_id or linear_user_id)
           from /api/me and the team roster. */}
-      {field.type === 'string_list' && field.name !== 'channel_in' && (
+      {field.type === 'string_list' && field.name !== 'channel_in' && field.name !== 'repo_in' && (
         <IdentityListField
           fieldName={field.name}
           identityKind={identityKindFor(eventType)}

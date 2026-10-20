@@ -36,6 +36,10 @@ func ValidatePredicateJSON(eventType, rawJSON string) (string, error) {
 	if err := dec.Decode(predPtr); err != nil {
 		return "", fmt.Errorf("invalid predicate for %s: %w", eventType, err)
 	}
+	// TODO(TFAC-1122): a duplicate or empty entry in an _in list is accepted,
+	// and every fault returns as one plain error the handler answers 400, so
+	// an enum miss is not a 422 and an unknown key carries the decoder's text
+	// instead of UNKNOWN_FIELD.
 	if err := checkEnums(reflect.ValueOf(predPtr).Elem()); err != nil {
 		return "", fmt.Errorf("invalid predicate for %s: %w", eventType, err)
 	}

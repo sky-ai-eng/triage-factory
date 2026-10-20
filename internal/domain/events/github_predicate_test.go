@@ -58,7 +58,7 @@ func TestCommentedPredicate(t *testing.T) {
 	draft := true
 	meta := GitHubPRCommentedMetadata{
 		Author: "aidan", Commenter: "alice", CommenterLogins: []string{"bob", "alice"},
-		Repo: "octo/repo", IsDraft: true, Labels: []string{"needs-reply"},
+		Repo: "octo/repo", RepositoryID: "repo-1", IsDraft: true, Labels: []string{"needs-reply"},
 	}
 	cases := []struct {
 		name string
@@ -70,8 +70,10 @@ func TestCommentedPredicate(t *testing.T) {
 		{"commenter_in names nobody who commented", GitHubPRCommentedPredicate{CommenterIn: []string{"carol"}}, false},
 		{"author_in on the PR author", GitHubPRCommentedPredicate{AuthorIn: []string{"aidan"}}, true},
 		{"author_in on a commenter", GitHubPRCommentedPredicate{AuthorIn: []string{"alice"}}, false},
-		{"repo, draft and label", GitHubPRCommentedPredicate{Repo: strPtr("octo/repo"), IsDraft: &draft, HasLabel: strPtr("needs-reply")}, true},
-		{"another repo", GitHubPRCommentedPredicate{Repo: strPtr("octo/other")}, false},
+		{"repo, draft and label", GitHubPRCommentedPredicate{RepoIn: []string{"repo-1"}, IsDraft: &draft, HasLabel: strPtr("needs-reply")}, true},
+		{"repo_in names the repository among others", GitHubPRCommentedPredicate{RepoIn: []string{"repo-2", "repo-1"}}, true},
+		{"another repository", GitHubPRCommentedPredicate{RepoIn: []string{"repo-2"}}, false},
+		{"repo_in by name matches nothing", GitHubPRCommentedPredicate{RepoIn: []string{"octo/repo"}}, false},
 		{"a label the PR lacks", GitHubPRCommentedPredicate{HasLabel: strPtr("urgent")}, false},
 	}
 	for _, tc := range cases {

@@ -264,3 +264,145 @@ describe('PredicateEditor channel_in', () => {
     )
   })
 })
+
+const teamRepos = [
+  { id: 'repo-api', slug: 'acme/api' },
+  { id: 'repo-web', slug: 'acme/web' },
+]
+
+// stubRepoField answers the schema read with a repo_in field, the team's
+// repository list with repos (a 500 when null), and a row read with its slug
+// when rows names it (a 404 otherwise).
+function stubRepoField(
+  repos: { id: string; slug: string }[] | null,
+  rows: Record<string, string> = {},
+) {
+  const fetchMock = vi.fn((url: string) => {
+    if (url.startsWith('/api/event-schemas/')) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        ...jsonBody({ fields: [{ name: 'repo_in', type: 'string_list' }] }),
+      })
+    }
+    if (url === '/api/repos/list') {
+      if (repos === null) {
+        return Promise.resolve({ ok: false, status: 500, ...jsonBody({ errors: [] }) })
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        ...jsonBody({ items: repos, next_page_token: '', total_count: repos.length }),
+      })
+    }
+    const id = decodeURIComponent(url.slice('/api/repos/'.length))
+    if (id in rows) {
+      return Promise.resolve({ ok: true, status: 200, ...jsonBody({ id, slug: rows[id] }) })
+    }
+    return Promise.resolve({ ok: false, status: 404, ...jsonBody({ errors: [] }) })
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+describe('PredicateEditor repo_in', () => {
+  it("offers the handler team's tracked repositories and writes their registry ids", async () => {
+    const fetchMock = stubRepoField(teamRepos)
+    const onChange = vi.fn()
+    render(
+      <PredicateEditor
+        eventType="github:pr:opened"
+        teamId="team-b"
+        value={{}}
+        onChange={onChange}
+      />,
+    )
+
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'acme/web' }))
+
+    expect(onChange).toHaveBeenCalledWith({ repo_in: ['repo-web'] })
+    expect(screen.getAllByRole('checkbox')).toHaveLength(2)
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/repos/list',
+      expect.objectContaining({ body: expect.stringContaining('"team_id":"team-b"') }),
+    )
+  })
+
+  it('falls back to the acting team when the handler team is not known yet', async () => {
+    const fetchMock = stubRepoField(teamRepos)
+    render(<PredicateEditor eventType="github:pr:opened" value={{}} onChange={vi.fn()} />)
+
+    await screen.findByRole('checkbox', { name: 'acme/api' })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/repos/list',
+      expect.objectContaining({ body: expect.stringContaining('"team_id":"team-acting"') }),
+    )
+  })
+
+  it('keeps a stored repository the team no longer tracks, named and removable', async () => {
+    stubRepoField(teamRepos, { 'repo-old': 'acme/old' })
+    const onChange = vi.fn()
+    render(
+      <PredicateEditor
+        eventType="github:pr:opened"
+        teamId="team-b"
+        value={{ repo_in: ['repo-api', 'repo-old', 'repo-gone'] }}
+        onChange={onChange}
+      />,
+    )
+
+    expect(await screen.findByRole('checkbox', { name: 'acme/api' })).toBeChecked()
+    expect(await screen.findByText('acme/old · not tracked')).toBeInTheDocument()
+    // A row the caller cannot read shows its id.
+    expect(screen.getByText('repo-gone · not tracked')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove acme/old' }))
+    expect(onChange).toHaveBeenCalledWith({ repo_in: ['repo-api', 'repo-gone'] })
+  })
+
+  it('clears the field when the last repository is deselected', async () => {
+    stubRepoField(teamRepos)
+    const onChange = vi.fn()
+    render(
+      <PredicateEditor
+        eventType="github:pr:opened"
+        teamId="team-b"
+        value={{ repo_in: ['repo-api'] }}
+        onChange={onChange}
+      />,
+    )
+
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'acme/api' }))
+    expect(onChange).toHaveBeenCalledWith({})
+  })
+
+  it('says so when the team tracks no repositories', async () => {
+    stubRepoField([])
+    render(
+      <PredicateEditor
+        eventType="github:pr:opened"
+        teamId="team-b"
+        value={{}}
+        onChange={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText('This team tracks no GitHub repositories.')).toBeInTheDocument()
+  })
+
+  it('says so when the repositories cannot be read', async () => {
+    stubRepoField(null)
+    render(
+      <PredicateEditor
+        eventType="github:pr:opened"
+        teamId="team-b"
+        value={{}}
+        onChange={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Could not load this team’s repositories.',
+    )
+  })
+})

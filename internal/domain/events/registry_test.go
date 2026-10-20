@@ -76,7 +76,7 @@ func TestRegistryFieldSchemaGeneration(t *testing.T) {
 		"author_in":  "string_list",
 		"author":     "string",
 		"label_name": "string",
-		"repo":       "string",
+		"repo_in":    "string_list",
 		"is_draft":   "bool",
 		"has_label":  "string",
 	}
@@ -143,10 +143,11 @@ func TestMatcherAppliesPredicate(t *testing.T) {
 	s, _ := Get(domain.EventGitHubPRCICheckFailed)
 
 	meta := GitHubPRCICheckFailedMetadata{
-		Author:    "aidan",
-		CheckName: "test",
-		Repo:      "sky-ai-eng/triage-factory",
-		Labels:    []string{"wip", "self-review"},
+		Author:       "aidan",
+		CheckName:    "test",
+		Repo:         "sky-ai-eng/triage-factory",
+		RepositoryID: "repo-tf",
+		Labels:       []string{"wip", "self-review"},
 	}
 	metaJSON, _ := json.Marshal(meta)
 
@@ -166,6 +167,8 @@ func TestMatcherAppliesPredicate(t *testing.T) {
 		{"has_label misses when absent", `{"has_label":"urgent"}`, false},
 		{"multi-field AND: all pass", `{"author_in":["aidan"],"check_name":"test"}`, true},
 		{"multi-field AND: one fails", `{"author_in":["aidan"],"check_name":"build"}`, false},
+		{"repo_in hits the event's repository id", `{"repo_in":["repo-other","repo-tf"]}`, true},
+		{"repo_in misses another repository id", `{"repo_in":["repo-other"]}`, false},
 	}
 
 	for _, tc := range cases {
@@ -178,6 +181,21 @@ func TestMatcherAppliesPredicate(t *testing.T) {
 				t.Errorf("got %v want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestMatcherRefusesUnknownPredicateField pins that a stored predicate naming a
+// field its type does not have errors instead of decoding to match-all: a rule
+// written as {"repo": ...} must not widen to every repository.
+func TestMatcherRefusesUnknownPredicateField(t *testing.T) {
+	s, _ := Get(domain.EventGitHubPRCICheckFailed)
+	metaJSON, _ := json.Marshal(GitHubPRCICheckFailedMetadata{Repo: "sky-ai-eng/other"})
+	matched, err := s.Match(`{"repo":"sky-ai-eng/triage-factory"}`, string(metaJSON))
+	if err == nil {
+		t.Fatalf("Match = %v, nil; want an unknown-field error", matched)
+	}
+	if matched {
+		t.Error("Match reported a match alongside its error")
 	}
 }
 

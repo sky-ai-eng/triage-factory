@@ -124,6 +124,14 @@ func (r *repoScopeRig) listRepos(t *testing.T, callerID string) listEnvelope[rep
 	return decodeList[repoJSON](t, rec)
 }
 
+// listTeamRepos calls the registry list as callerID, narrowed to teamID.
+func (r *repoScopeRig) listTeamRepos(t *testing.T, callerID, teamID string) listEnvelope[repoJSON] {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	r.s.handleRepositories(rec, r.req(http.MethodPost, "/api/repos/list", callerID, map[string]any{"team_id": teamID}))
+	return decodeList[repoJSON](t, rec)
+}
+
 func listedRepoSlugs(page listEnvelope[repoJSON]) []string {
 	out := make([]string, len(page.Items))
 	for i, row := range page.Items {
@@ -160,6 +168,30 @@ func TestHandleRepositories_TeamScoped(t *testing.T) {
 	teamless := rig.listRepos(t, rig.teamless)
 	if got := listedRepoSlugs(teamless); len(got) != 0 || teamless.Total() != 0 {
 		t.Errorf("teamless member repos = %v (total %d), want empty", got, teamless.Total())
+	}
+}
+
+// TestHandleRepositories_TeamFilter_Postgres pins team_id under RLS and real
+// roles: an org admin reads any team's tracked repositories, including a team
+// they are not on; a member reads their own team's; and a member asking for
+// another team's gets nothing, total included.
+func TestHandleRepositories_TeamFilter_Postgres(t *testing.T) {
+	rig := newRepoScopeRig(t)
+
+	for _, c := range []struct {
+		name, caller, team string
+		want               []string
+	}{
+		{"admin, own team", rig.orgOwner, rig.teamA, []string{"acme/api"}},
+		{"admin, a team they are not on", rig.orgOwner, rig.teamB, []string{"acme/web"}},
+		{"member, own team", rig.plainB, rig.teamB, []string{"acme/web"}},
+		{"member, another team", rig.plainB, rig.teamA, []string{}},
+		{"teamless member", rig.teamless, rig.teamA, []string{}},
+	} {
+		page := rig.listTeamRepos(t, c.caller, c.team)
+		if got := listedRepoSlugs(page); !equalSlugs(got, c.want) || page.Total() != len(c.want) {
+			t.Errorf("%s: repos = %v (total %d), want %v", c.name, got, page.Total(), c.want)
+		}
 	}
 }
 

@@ -96,7 +96,7 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	if got, total, err := stores.Repos.ListTrackedSystem(ctx, orgB, dbtest.TestGitHubHost, db.Unwindowed); err != nil || len(got) != 0 || total != 0 {
 		t.Errorf("orgB ListTrackedSystem = %d rows (total %d), %v; want 0 / 0", len(got), total, err)
 	}
-	if got, err := stores.Repos.ListTrackedByTeamSystem(ctx, orgB, teamA, dbtest.TestGitHubHost); err != nil || len(got) != 0 {
+	if got, _, err := stores.Repos.ListTrackedByTeamSystem(ctx, orgB, teamA, dbtest.TestGitHubHost, db.Unwindowed); err != nil || len(got) != 0 {
 		t.Errorf("orgB ListTrackedByTeamSystem(orgA's team) = %d rows, %v; want 0", len(got), err)
 	}
 	if got, _, err := stores.Repos.ListTrackedSystem(ctx, orgA, dbtest.TestGitHubHost, db.Unwindowed); err != nil || len(got) != 1 {
@@ -276,13 +276,38 @@ func TestRepositoryStore_Postgres_ListTeamScoped_RLS(t *testing.T) {
 		t.Errorf("ListTrackedSystem = %v (total %d), want %v", got, total, want)
 	}
 	for team, want := range map[string][]string{teamA: {"acme/api"}, teamB: {"acme/web"}} {
-		rows, err := stores.Repos.ListTrackedByTeamSystem(ctx, orgA, team, dbtest.TestGitHubHost)
+		rows, _, err := stores.Repos.ListTrackedByTeamSystem(ctx, orgA, team, dbtest.TestGitHubHost, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListTrackedByTeamSystem(%s): %v", team, err)
 		}
 		if got := repoIDs(rows); !pgStrsEqual(got, want) {
 			t.Errorf("ListTrackedByTeamSystem(%s) = %v, want %v", team, got, want)
 		}
+	}
+
+	// The app-pool team read answers a member for their own team and nothing
+	// for a team they are not on, total included: RLS hides the other team's
+	// tracking rows.
+	listTeamAs := func(userID, teamID string) ([]string, int) {
+		t.Helper()
+		var (
+			got   []domain.Repository
+			total int
+		)
+		if err := stores.Tx.WithTx(ctx, orgA, userID, func(tx db.TxStores) error {
+			var e error
+			got, total, e = tx.Repos.ListTrackedByTeam(ctx, orgA, teamID, dbtest.TestGitHubHost, db.ListOpts{Limit: 50})
+			return e
+		}); err != nil {
+			t.Fatalf("ListTrackedByTeam(%s, %s): %v", userID, teamID, err)
+		}
+		return repoIDs(got), total
+	}
+	if got, total := listTeamAs(alice, teamA); !pgStrsEqual(got, []string{"acme/api"}) || total != 1 {
+		t.Errorf("alice ListTrackedByTeam(teamA) = %v (total %d), want [acme/api] (total 1)", got, total)
+	}
+	if got, total := listTeamAs(alice, teamB); len(got) != 0 || total != 0 {
+		t.Errorf("alice ListTrackedByTeam(teamB, not her team) = %v (total %d), want nothing", got, total)
 	}
 }
 

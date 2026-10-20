@@ -74,8 +74,11 @@ func TestRepositoryStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if _, _, err := stores.Repos.ListTrackedSystem(t.Context(), bogusOrg, dbtest.TestGitHubHost, db.ListOpts{}); err == nil {
 		t.Errorf("ListTrackedSystem with non-local orgID should error")
 	}
-	if _, err := stores.Repos.ListTrackedByTeamSystem(t.Context(), bogusOrg, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost); err == nil {
+	if _, _, err := stores.Repos.ListTrackedByTeamSystem(t.Context(), bogusOrg, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, db.Unwindowed); err == nil {
 		t.Errorf("ListTrackedByTeamSystem with non-local orgID should error")
+	}
+	if _, _, err := stores.Repos.ListTrackedByTeam(t.Context(), bogusOrg, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, db.Unwindowed); err == nil {
+		t.Errorf("ListTrackedByTeam with non-local orgID should error")
 	}
 }
 

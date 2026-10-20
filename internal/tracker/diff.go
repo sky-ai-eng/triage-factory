@@ -29,13 +29,16 @@ import (
 // comments is every conversation comment made since prev, oldest first, with
 // TF's marked (githubNewComments): the snapshot holds only the newest.
 //
+// repositoryID is the entity's repository registry row, which every event's
+// metadata carries for repo_in filters to match.
+//
 // The mentions in reviews and comments, and the ones curr's body has that
 // prev's did not, emit github:pr:mentioned for each identity the resolver
 // knows (prMentions).
 //
 // Not a pure function for the review-request and mention branches: the
 // resolver may consult stores (multi-mode). Every other branch is pure.
-func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, resolver ReviewerResolver, reviews []NewReview, comments []NewComment) []domain.Event {
+func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, username string, resolver ReviewerResolver, reviews []NewReview, comments []NewComment) []domain.Event {
 	now := time.Now()
 	eid := &entityID
 	authorIsSelf := curr.Author == username
@@ -101,13 +104,13 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 		if curr.Merged {
 			emitAt(domain.EventGitHubPRMerged, "", curr.MergedAt, events.GitHubPRMergedMetadata{
 				Author: curr.Author,
-				Repo:   curr.Repo, PRNumber: curr.Number,
+				Repo:   curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				MergedBy: "", HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		} else if curr.State == "CLOSED" {
 			emitAt(domain.EventGitHubPRClosed, "", curr.ClosedAt, events.GitHubPRClosedMetadata{
 				Author: curr.Author,
-				Repo:   curr.Repo, PRNumber: curr.Number,
+				Repo:   curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				ClosedBy: "", Labels: curr.Labels,
 			})
 		}
@@ -120,7 +123,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 	// A missing fingerprint is an unknown baseline, never a body deletion.
 	if prev.BodyHash != "" && curr.BodyHash != "" && prev.BodyHash != curr.BodyHash {
 		emitAt(domain.EventGitHubPRBodyUpdated, "", curr.UpdatedAt, events.GitHubPRBodyUpdatedMetadata{
-			Author: curr.Author, Repo: curr.Repo, PRNumber: curr.Number,
+			Author: curr.Author, Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 			IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			Title: curr.Title, PreviousBodyHash: prev.BodyHash, BodyHash: curr.BodyHash,
 		})
@@ -131,7 +134,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 	if !prev.Merged && curr.Merged {
 		emitAt(domain.EventGitHubPRMerged, "", curr.MergedAt, events.GitHubPRMergedMetadata{
 			Author: curr.Author,
-			Repo:   curr.Repo, PRNumber: curr.Number,
+			Repo:   curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 			MergedBy: "", HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 		})
 	}
@@ -139,7 +142,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 	if prev.State != "CLOSED" && curr.State == "CLOSED" && !curr.Merged {
 		emitAt(domain.EventGitHubPRClosed, "", curr.ClosedAt, events.GitHubPRClosedMetadata{
 			Author: curr.Author,
-			Repo:   curr.Repo, PRNumber: curr.Number,
+			Repo:   curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 			ClosedBy: "", Labels: curr.Labels,
 		})
 	}
@@ -152,7 +155,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 	if prev.IsDraft && !curr.IsDraft {
 		emitAt(domain.EventGitHubPRReadyForReview, "", lookupReadyForReviewTime(curr.Timeline), events.GitHubPRReadyForReviewMetadata{
 			Author: curr.Author,
-			Repo:   curr.Repo, PRNumber: curr.Number,
+			Repo:   curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 			HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 		})
 	}
@@ -182,7 +185,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 					Author:     curr.Author,
 					CheckRunID: cr.ID, CheckName: cr.Name, CheckURL: cr.DetailsURL,
 					WorkflowRunID: cr.WorkflowRunID,
-					HeadSHA:       curr.HeadSHA, Repo: curr.Repo, PRNumber: curr.Number,
+					HeadSHA:       curr.HeadSHA, Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 					IsDraft: curr.IsDraft, Labels: curr.Labels,
 				})
 			} else if cr.Conclusion != "" && !domain.IsFailingConclusion(cr.Conclusion) {
@@ -198,7 +201,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 					Author:     curr.Author,
 					CheckRunID: cr.ID, CheckName: cr.Name, Conclusion: cr.Conclusion,
 					WorkflowRunID: cr.WorkflowRunID,
-					HeadSHA:       curr.HeadSHA, Repo: curr.Repo, PRNumber: curr.Number,
+					HeadSHA:       curr.HeadSHA, Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 					IsDraft: curr.IsDraft, Labels: curr.Labels,
 				})
 			}
@@ -212,7 +215,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 			Author:  curr.Author,
 			IsDraft: curr.IsDraft, CommitCount: 0, // count not available in snapshot
 			HeadSHA: curr.HeadSHA, PrevHeadSHA: prev.HeadSHA,
-			Repo: curr.Repo, PRNumber: curr.Number, Labels: curr.Labels,
+			Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number, Labels: curr.Labels,
 		})
 	}
 
@@ -225,7 +228,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 		// advances that flip mergeable don't always bump it.
 		emitNoSource(domain.EventGitHubPRConflicts, "", events.GitHubPRConflictsMetadata{
 			Author: curr.Author,
-			Repo:   curr.Repo, PRNumber: curr.Number,
+			Repo:   curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 			IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 		})
 	}
@@ -261,7 +264,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 			sourceAt := lookupReviewRequestedTimeFor(curr.Timeline, reviewer)
 			emitAt(domain.EventGitHubPRReviewRequested, reviewerDedupKey(reviewer), sourceAt, events.GitHubPRReviewRequestedMetadata{
 				Author: curr.Author,
-				Repo:   curr.Repo, PRNumber: curr.Number,
+				Repo:   curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA,
 				Labels: curr.Labels, Title: curr.Title,
 				RequestedLogin: login, RequestedTeam: team,
@@ -278,7 +281,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 			}
 			emit(domain.EventGitHubPRReviewRequestRemoved, reviewerDedupKey(reviewer), events.GitHubPRReviewRequestRemovedMetadata{
 				Author: curr.Author,
-				Repo:   curr.Repo, PRNumber: curr.Number,
+				Repo:   curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA,
 				Labels: curr.Labels, Title: curr.Title,
 				RequestedLogin: login, RequestedTeam: team,
@@ -298,28 +301,28 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 			emitAt(domain.EventGitHubPRReviewChangesRequested, "", submittedAt, events.GitHubPRReviewChangesRequestedMetadata{
 				Author: curr.Author, Reviewer: reviewer,
 				ReviewID: reviewID, CommentCount: commentCount, Paths: paths,
-				Repo: curr.Repo, PRNumber: curr.Number,
+				Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		case "APPROVED":
 			emitAt(domain.EventGitHubPRReviewApproved, "", submittedAt, events.GitHubPRReviewApprovedMetadata{
 				Author: curr.Author, Reviewer: reviewer,
 				ReviewID: reviewID, CommentCount: commentCount, Paths: paths,
-				Repo: curr.Repo, PRNumber: curr.Number,
+				Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		case "COMMENTED":
 			emitAt(domain.EventGitHubPRReviewCommented, "", submittedAt, events.GitHubPRReviewCommentedMetadata{
 				Author: curr.Author, Reviewer: reviewer,
 				ReviewID: reviewID, CommentCount: commentCount, Paths: paths,
-				Repo: curr.Repo, PRNumber: curr.Number,
+				Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		case "DISMISSED":
 			emitAt(domain.EventGitHubPRReviewDismissed, "", submittedAt, events.GitHubPRReviewDismissedMetadata{
 				Author: curr.Author, Reviewer: reviewer,
 				ReviewID: reviewID, CommentCount: commentCount, Paths: paths,
-				Repo: curr.Repo, PRNumber: curr.Number,
+				Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		}
@@ -365,7 +368,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 		commentID, _ := strconv.ParseInt(newest.ID, 10, 64)
 		emitWithFallback(domain.EventGitHubPRCommented, "", commentedAt(newest, curr.UpdatedAt), events.GitHubPRCommentedMetadata{
 			Author: curr.Author, Commenter: newest.Author, CommenterLogins: logins, CommentID: commentID,
-			Repo: curr.Repo, PRNumber: curr.Number,
+			Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 			IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 		}, eid, now, &evts)
 	}
@@ -376,7 +379,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 	// is and timed at the mention's comment or review. A body mention has no
 	// time of its own and takes the PR's updatedAt.
 	for _, m := range prMentions(prev, curr, reviews, comments) {
-		appendMentioned(&evts, eid, now, curr, m, resolver)
+		appendMentioned(&evts, eid, repositoryID, now, curr, m, resolver)
 	}
 
 	// --- Label diff --------------------------------------------------------
@@ -389,7 +392,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 		if !prevLabels[label] {
 			emitAt(domain.EventGitHubPRLabelAdded, label, lookupLabelTime(curr.Timeline, "labeled", label), events.GitHubPRLabelAddedMetadata{
 				Author:    curr.Author,
-				LabelName: label, Repo: curr.Repo, PRNumber: curr.Number,
+				LabelName: label, Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		}
@@ -398,7 +401,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 		if !currLabels[label] {
 			emitAt(domain.EventGitHubPRLabelRemoved, label, lookupLabelTime(curr.Timeline, "unlabeled", label), events.GitHubPRLabelRemovedMetadata{
 				Author:    curr.Author,
-				LabelName: label, Repo: curr.Repo, PRNumber: curr.Number,
+				LabelName: label, Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		}

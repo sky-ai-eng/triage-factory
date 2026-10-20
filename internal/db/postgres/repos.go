@@ -374,9 +374,12 @@ func (s *repoStore) ListTrackedSystem(ctx context.Context, orgID, host string, o
 	return listRepositories(ctx, s.admin, orgID, host, opts, repoTrackedByATeam)
 }
 
-func (s *repoStore) ListTrackedByTeamSystem(ctx context.Context, orgID, teamID, host string) ([]domain.Repository, error) {
-	rows, _, err := listRepositories(ctx, s.admin, orgID, host, db.Unwindowed, repoTrackedByTeam, teamID)
-	return rows, err
+func (s *repoStore) ListTrackedByTeamSystem(ctx context.Context, orgID, teamID, host string, opts db.ListOpts) ([]domain.Repository, int, error) {
+	return listRepositories(ctx, s.admin, orgID, host, opts, repoTrackedByTeam, teamID)
+}
+
+func (s *repoStore) ListTrackedByTeam(ctx context.Context, orgID, teamID, host string, opts db.ListOpts) ([]domain.Repository, int, error) {
+	return listRepositories(ctx, s.q, orgID, host, opts, repoTrackedByTeam, teamID)
 }
 
 func (s *repoStore) ListTrackedNamesSystem(ctx context.Context, orgID, host string) ([]string, error) {

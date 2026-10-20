@@ -64,6 +64,21 @@ func stringInSliceFold(pred []string, meta string) bool {
 	return false
 }
 
+// idIn is the matcher primitive for `_in` lists of row ids, such as
+// `repo_in`: an empty list means no filter, and a non-empty one requires meta
+// to be one of its entries exactly. Ids are not names, so nothing is folded.
+func idIn(pred []string, meta string) bool {
+	if len(pred) == 0 {
+		return true
+	}
+	for _, v := range pred {
+		if v == meta {
+			return true
+		}
+	}
+	return false
+}
+
 // anyInSliceFold is stringInSliceFold for metadata that names several
 // identities, such as everyone who wrote one of a poll's new comments: an empty
 // predicate matches, and a non-empty one matches when any of metas is in it.
