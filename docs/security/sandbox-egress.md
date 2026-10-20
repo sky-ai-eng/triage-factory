@@ -31,8 +31,7 @@ The API proxies behind the `tfac exec` verbs (GitHub REST, Jira REST, Linear
 GraphQL) are not lanes: the jail never reaches their upstreams, because a verb
 rides the agenthost socket to the run's sidecar, whose daemon calls the proxy
 that sidecar owns. Supporting a new verb-backed provider such as Linear adds no
-allowlist entry. The LLM proxy is not a lane either: the native agent loop runs
-in the executor and dials it from the host, so the jail is never pointed at it.
+allowlist entry.
 
 Two constraints shape the whole design. The tunnel does not terminate TLS
 today, so it can act only on hostnames — content integrity belongs to the package
@@ -49,8 +48,7 @@ cannot tell a read from a write on an allowlisted host, so `npm publish` to
 asks a shared CDN edge for once the tunnel is open, so an allowlisted name
 can front for another site on the same edge. TLS interception in the
 sidecar closes both, under conditions designed in
-`docs/for-agents/specs/sandbox-backends/` §6.1 (TFAC-1117). It is not built
-yet.
+`docs/for-agents/specs/sandbox-backends/` §6.1 (TFAC-1117).
 
 ## Which lane does an ecosystem need? Probe — never assume
 

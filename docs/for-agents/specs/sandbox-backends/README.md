@@ -212,7 +212,7 @@ fails one does not meet the contract.
 
 1. **Property B.** No real credential appears anywhere in the jail: its
    environment, its argv, or any file it can read. The jail holds
-   placeholders that only the run's own sidecar honours.
+   placeholders that only the run's own sidecar honors.
 2. **The run's sidecar is the jail's only way out.** Every connection the
    jail can complete goes to its own sidecar's proxies. Raw egress to any
    other address fails.
@@ -389,8 +389,8 @@ declared and matched, never branched on:
   §6).
   `container_runtime` implies `root` inside the guest, because a user who can
   drive the container runtime is root there anyway. `memory_checkpoint` is
-  invisible to the agent: it is a cache the backend uses when it parks a jail,
-  never a promise (§8).
+  invisible to the agent: it is just a cache the backend uses when it parks a 
+  jail (§8).
 - **Three records, one per question.** What an executor can build goes on its
   `instances` row with its backend name, written at each boot. What a run
   needs is in the copy of its profile frozen when the conversation was minted,
@@ -425,6 +425,8 @@ declared and matched, never branched on:
 
 None of §7 is built in step 1: nothing consumes a capability yet, and the
 interface carries no capability method until the first consumer lands.
+In fact, we'll probably wait to ship this until we at least scaffold the
+sandbox profiles.
 
 ## 8. Snapshots and resume need no backend ratchet
 
