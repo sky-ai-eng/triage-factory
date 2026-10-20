@@ -55,7 +55,7 @@ func TestPollerAgainstOrrery(t *testing.T) {
 	bob := w.actor("bob", "user")
 	carol := w.actor("carol", "user")
 	ci := w.actor("ci", "bot")
-	w.face(alice, "POST", "/api/v3/orgs/acme/repos", map[string]any{"name": "webapp"}, 201)
+	w.githubREST(alice, "POST", "/api/v3/orgs/acme/repos", map[string]any{"name": "webapp"}, 201)
 
 	// main, then three branches off it: one for checks, one that will
 	// conflict with main, one for reviews. main then changes the line the
@@ -75,18 +75,18 @@ func TestPollerAgainstOrrery(t *testing.T) {
 	repo.push("main")
 
 	pulls := "/api/v3/repos/acme/webapp/pulls"
-	checksPR := w.face(alice, "POST", pulls, map[string]any{"title": "Checks", "head": "checks", "base": "main"}, 201)
-	w.face(alice, "POST", pulls, map[string]any{"title": "Conflict", "head": "conflict", "base": "main"}, 201)
-	reviewPR := w.face(alice, "POST", pulls, map[string]any{"title": "Review", "head": "review", "base": "main"}, 201)
+	checksPR := w.githubREST(alice, "POST", pulls, map[string]any{"title": "Checks", "head": "checks", "base": "main"}, 201)
+	w.githubREST(alice, "POST", pulls, map[string]any{"title": "Conflict", "head": "conflict", "base": "main"}, 201)
+	reviewPR := w.githubREST(alice, "POST", pulls, map[string]any{"title": "Review", "head": "review", "base": "main"}, 201)
 
 	checkRuns := "/api/v3/repos/acme/webapp/check-runs"
 	checksHead := sha(checksPR)
-	w.face(ci, "POST", checkRuns, map[string]any{"name": "ci/test", "head_sha": checksHead, "status": "completed", "conclusion": "success"}, 201)
-	w.face(ci, "POST", checkRuns, map[string]any{"name": "ci/lint", "head_sha": checksHead, "status": "completed", "conclusion": "failure"}, 201)
-	running := w.face(ci, "POST", checkRuns, map[string]any{"name": "ci/test", "head_sha": sha(reviewPR), "status": "in_progress"}, 201)
-	w.face(bob, "POST", pulls+"/1/reviews", map[string]any{"event": "APPROVE", "body": "ship it"}, 200)
-	w.face(bob, "POST", pulls+"/2/reviews", map[string]any{"event": "COMMENT", "body": "this one conflicts"}, 200)
-	w.face(carol, "POST", pulls+"/3/reviews", map[string]any{"event": "REQUEST_CHANGES", "body": "needs a test"}, 200)
+	w.githubREST(ci, "POST", checkRuns, map[string]any{"name": "ci/test", "head_sha": checksHead, "status": "completed", "conclusion": "success"}, 201)
+	w.githubREST(ci, "POST", checkRuns, map[string]any{"name": "ci/lint", "head_sha": checksHead, "status": "completed", "conclusion": "failure"}, 201)
+	running := w.githubREST(ci, "POST", checkRuns, map[string]any{"name": "ci/test", "head_sha": sha(reviewPR), "status": "in_progress"}, 201)
+	w.githubREST(bob, "POST", pulls+"/1/reviews", map[string]any{"event": "APPROVE", "body": "ship it"}, 200)
+	w.githubREST(bob, "POST", pulls+"/2/reviews", map[string]any{"event": "COMMENT", "body": "this one conflicts"}, 200)
+	w.githubREST(carol, "POST", pulls+"/3/reviews", map[string]any{"event": "REQUEST_CHANGES", "body": "needs a test"}, 200)
 
 	p := newPollRig(t, ctx, w)
 
@@ -108,14 +108,14 @@ func TestPollerAgainstOrrery(t *testing.T) {
 	}
 
 	// Every kind of change the world can make through GitHub's API today.
-	w.face(ci, "PATCH", fmt.Sprintf("%s/%v", checkRuns, running["id"]), map[string]any{"status": "completed", "conclusion": "success"}, 200)
-	w.face(bob, "POST", pulls+"/3/reviews", map[string]any{"event": "APPROVE", "body": "thanks"}, 200)
-	w.face(carol, "POST", "/api/v3/repos/acme/webapp/issues/3/comments", map[string]any{"body": "merging after lunch"}, 201)
-	w.face(alice, "PATCH", pulls+"/3", map[string]any{"body": "Adds review.txt."}, 200)
+	w.githubREST(ci, "PATCH", fmt.Sprintf("%s/%v", checkRuns, running["id"]), map[string]any{"status": "completed", "conclusion": "success"}, 200)
+	w.githubREST(bob, "POST", pulls+"/3/reviews", map[string]any{"event": "APPROVE", "body": "thanks"}, 200)
+	w.githubREST(carol, "POST", "/api/v3/repos/acme/webapp/issues/3/comments", map[string]any{"body": "merging after lunch"}, 201)
+	w.githubREST(alice, "PATCH", pulls+"/3", map[string]any{"body": "Adds review.txt."}, 200)
 	repo.checkout("checks")
 	repo.commit("checks.txt", "checks, again\n", "another commit")
 	repo.push("checks")
-	w.face(alice, "PATCH", pulls+"/2", map[string]any{"state": "closed"}, 200)
+	w.githubREST(alice, "PATCH", pulls+"/2", map[string]any{"state": "closed"}, 200)
 	p.cycle(t, ctx, map[string]int{
 		"acme/webapp#1 " + domain.EventGitHubPRNewCommits:     1,
 		"acme/webapp#2 " + domain.EventGitHubPRClosed:         1,
@@ -125,7 +125,7 @@ func TestPollerAgainstOrrery(t *testing.T) {
 		"acme/webapp#3 " + domain.EventGitHubPRBodyUpdated:    1,
 	})
 
-	w.face(alice, "PUT", pulls+"/3/merge", map[string]any{}, 200)
+	w.githubREST(alice, "PUT", pulls+"/3/merge", map[string]any{}, 200)
 	p.cycle(t, ctx, map[string]int{
 		"acme/webapp#3 " + domain.EventGitHubPRMerged: 1,
 	})
@@ -403,8 +403,9 @@ func (w *orreryWorld) actor(login, kind string) string {
 	return token
 }
 
-// face calls Orrery's GitHub API as the actor holding token.
-func (w *orreryWorld) face(token, method, path string, body map[string]any, want int) map[string]any {
+// githubREST calls the GitHub REST API Orrery serves, as the actor holding
+// token.
+func (w *orreryWorld) githubREST(token, method, path string, body map[string]any, want int) map[string]any {
 	w.t.Helper()
 	return w.call(token, method, path, body, want)
 }
