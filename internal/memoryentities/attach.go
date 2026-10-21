@@ -47,13 +47,14 @@ var attachLog = logging.Component("memoryentities")
 // artifact resolves through the issue id its dedup key records
 // (domain.ArtifactEntityIdentity), and attaches nothing when the key names no
 // id — it was recorded before Jira artifacts were keyed on one — or names
-// another site than the org's current one. Its target can be older than the
-// entity's key, so the entity is never renamed from it. A Linear or Jira
-// artifact attaches only an entity that already exists: the artifact does not
-// record the Linear team or the Jira project its issue sits in, and such an
-// entity is created with one. The write's own touch creates it from the
-// response the verb read, so a Linear or Jira artifact finds no entity here
-// only when that touch failed, which is logged.
+// another site than the org's current one. A pull request's artifact resolves
+// through the node id it carries, when a writer learned one. An artifact's
+// target can be older than the entity's key, so the entity is never renamed
+// from it. A Linear or Jira artifact attaches only an entity that already
+// exists: the artifact does not record the Linear team or the Jira project its
+// issue sits in, and such an entity is created with one. The write's own touch
+// creates it from the response the verb read, so a Linear or Jira artifact
+// finds no entity here only when that touch failed, which is logged.
 //
 // A nil store is an absent capability, not an error, and the two cases are not
 // the same: a nil TaskMemory is nowhere to write, so nothing is attached at all
@@ -82,7 +83,7 @@ func Attach(ctx context.Context, stores db.Stores, orgID, conversationID, primar
 		return
 	}
 	for _, a := range arts {
-		keyScope, externalID, _ := domain.ArtifactEntityIdentity(a.Provider, a.DedupKey)
+		keyScope, externalID, _ := domain.ArtifactEntityIdentity(a)
 		ref, kind, ok := domain.EntityRefForExternal(a.Provider, a.Target, externalID)
 		if !ok {
 			continue

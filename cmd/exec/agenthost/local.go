@@ -1676,7 +1676,7 @@ func (c *LocalClient) GithubGetPR(ctx context.Context, owner, repo string, numbe
 	if err != nil {
 		return nil, err
 	}
-	c.touchPR(ctx, owner, repo, number)
+	c.touchPR(ctx, owner, repo, number, pr.NodeID)
 	return pr, nil
 }
 
@@ -1689,7 +1689,7 @@ func (c *LocalClient) GithubGetPRDiff(ctx context.Context, owner, repo string, n
 	if err != nil {
 		return "", err
 	}
-	c.touchPR(ctx, owner, repo, number)
+	c.touchPR(ctx, owner, repo, number, "")
 	return diff, nil
 }
 
@@ -1702,7 +1702,7 @@ func (c *LocalClient) GithubGetPRFiles(ctx context.Context, owner, repo string, 
 	if err != nil {
 		return nil, err
 	}
-	c.touchPR(ctx, owner, repo, number)
+	c.touchPR(ctx, owner, repo, number, "")
 	return files, nil
 }
 
@@ -1728,7 +1728,7 @@ func (c *LocalClient) GithubGetReviewDetail(ctx context.Context, owner, repo str
 		return nil, err
 	}
 	// The PR is the addressed entity; the review is an attribute of it.
-	c.touchPR(ctx, owner, repo, number)
+	c.touchPR(ctx, owner, repo, number, "")
 	return detail, nil
 }
 
@@ -1738,8 +1738,14 @@ func (c *LocalClient) GithubGetReviewDetail(ctx context.Context, owner, repo str
 // the poll cycle owns stub enrichment. Set-returning GitHub reads (pr list,
 // actions download-logs) never call this — the rule is addressed → touch,
 // returned-in-a-set → never.
-func (c *LocalClient) touchPR(ctx context.Context, owner, repo string, number int) {
-	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, domain.PullRequestTarget(owner+"/"+repo, number), "", domain.EntityContainer{}, "")
+//
+// nodeID is the pull request's node id when the read returned one, "" when it
+// did not. With it the touch resolves the pull request's entity under whatever
+// name of its repository the entity is stored under, so a read through
+// GitHub's redirect from a renamed repository's old name lands on the entity
+// rather than minting a second one.
+func (c *LocalClient) touchPR(ctx context.Context, owner, repo string, number int, nodeID string) {
+	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, domain.PullRequestTarget(owner+"/"+repo, number), nodeID, domain.EntityContainer{}, "")
 }
 
 // RecordReadTouch is the Client-interface escape hatch for an addressed read

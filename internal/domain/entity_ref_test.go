@@ -5,7 +5,7 @@ import "testing"
 // TestEntityRefForExternal pins the (provider, target) → entity natural-key
 // mapping shared by the exec-touch resolver and the conversation-end produced-artifact
 // attach: GitHub targets must parse as owner/repo#N (repo-level coordinates
-// map to nothing), Jira targets are issue keys and need the issue's id, Linear
+// map to nothing) and carry the pull request's node id when one is given, Jira targets are issue keys and need the issue's id, Linear
 // targets are issue identifiers and need the issue's UUID, Slack targets are a
 // SlackSourceID, and every other provider or empty key is skipped (ok=false).
 func TestEntityRefForExternal(t *testing.T) {
@@ -27,6 +27,11 @@ func TestEntityRefForExternal(t *testing.T) {
 		{
 			name:     "github PR target → pr entity",
 			provider: ArtifactProviderGitHub, target: "octo/repo#18",
+			wantOK: true, wantSource: ArtifactProviderGitHub, wantKind: "pr",
+		},
+		{
+			name:     "github PR target with its node id → pr entity carrying it",
+			provider: ArtifactProviderGitHub, target: "octo/repo#18", externalID: "PR_kwDO18",
 			wantOK: true, wantSource: ArtifactProviderGitHub, wantKind: "pr",
 		},
 		{
@@ -128,9 +133,9 @@ func TestEntityRefForExternal(t *testing.T) {
 				}
 				return
 			}
-			wantExternalID := ""
-			if tc.provider == ArtifactProviderJira || tc.provider == ArtifactProviderLinear {
-				wantExternalID = tc.externalID
+			wantExternalID := tc.externalID
+			if tc.provider == ArtifactProviderSlack {
+				wantExternalID = ""
 			}
 			if ref.ExternalID != wantExternalID {
 				t.Errorf("externalID = %q, want %q", ref.ExternalID, wantExternalID)

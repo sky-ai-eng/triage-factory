@@ -49,7 +49,7 @@ func TestRefreshGitHub_PollCompleteSentinel_OnlyOnFullWrap(t *testing.T) {
 			// EmitPollComplete on (it's a no-op when there are zero active
 			// entities, regardless of wrap completeness).
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(openPRBody))
+			_, _ = w.Write([]byte(openPRBodyFor(r.URL.Path)))
 		default:
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[]`))

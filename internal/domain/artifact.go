@@ -317,13 +317,22 @@ func EntityArtifactResource(source, scope, externalID string) string {
 	return externalID
 }
 
-// ArtifactEntityIdentity reads the identity of the entity an artifact is about
-// off its dedup key: the scope (when the key names one) and the provider id.
-// ok=false for a key that names none — a provider whose artifacts are keyed on
-// display keys (GitHub, Slack), or a Jira artifact keyed on an issue key.
-func ArtifactEntityIdentity(provider, dedupKey string) (scope, externalID string, ok bool) {
-	p, rest, found := strings.Cut(dedupKey, ":")
-	if !found || p != provider {
+// ArtifactEntityIdentity reads the identity of the entity an artifact is about:
+// the scope (when the artifact names one) and the provider id. A Jira or Linear
+// artifact carries it in its dedup key. A GitHub pull request's artifact is
+// keyed on its display key and carries the pull request's node id in NodeID.
+// ok=false for an artifact that names none — any other GitHub artifact, a
+// pull request whose node id no writer learned, a Slack artifact, or a Jira
+// artifact keyed on an issue key.
+func ArtifactEntityIdentity(a Artifact) (scope, externalID string, ok bool) {
+	if a.Provider == ArtifactProviderGitHub {
+		if a.Kind != ArtifactKindPullRequest {
+			return "", "", false
+		}
+		return "", a.NodeID, a.NodeID != ""
+	}
+	p, rest, found := strings.Cut(a.DedupKey, ":")
+	if !found || p != a.Provider {
 		return "", "", false
 	}
 	_, rest, found = strings.Cut(rest, ":")
@@ -331,7 +340,7 @@ func ArtifactEntityIdentity(provider, dedupKey string) (scope, externalID string
 		return "", "", false
 	}
 	resource, _, _ := strings.Cut(rest, ":")
-	switch provider {
+	switch a.Provider {
 	case ArtifactProviderJira:
 		return ParseJiraIssueResource(resource)
 	case ArtifactProviderLinear:

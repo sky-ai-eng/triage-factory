@@ -369,14 +369,30 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		snap.NodeID = d.NodeID
 
 		sid := ghSourceID(snap.Repo, snap.Number)
-		// TODO(TFAC-1127): pass d.NodeID as the external id. Without it a PR
-		// read under a renamed repository's new name before the rename is
-		// applied gets a second entity, which then refuses the rename.
-		entity, created, err := t.entities.FindOrCreateSystem(context.Background(), orgID, "github", scope, sid, "", "pr", snap.Title, snap.URL)
+		// The node id finds the pull request's entity under whatever key it is
+		// stored under, so a pull request read under its repository's new name
+		// before TF applies the rename lands on its existing entity rather than
+		// a second one.
+		entity, created, err := t.entities.FindOrCreateSystem(context.Background(), orgID, "github", scope, sid, snap.NodeID, "pr", snap.Title, snap.URL)
+		if errors.Is(err, db.ErrEntityKeyOccupied) {
+			// The key's active entity carries another pull request's node id:
+			// its repository was renamed away and a new one took the name, or
+			// it was deleted and recreated under it, while TF still holds the
+			// earlier pull request's entity under the key. Nothing is written
+			// for this one, and the repository keeps its listing cursor, so a
+			// later cycle tries again once the key is free.
+			trackerLog.Warn("github key still held by another pull request's entity; skipping it this cycle",
+				"source_id", sid, "node_id", snap.NodeID)
+			unstored[snap.Repo] = true
+			continue
+		}
 		if err != nil {
 			trackerLog.Error("create entity failed", "source_id", sid, "error", err)
 			unstored[snap.Repo] = true
 			continue
+		}
+		if !created {
+			t.learnPRNodeID(ctx, *entity, snap.NodeID)
 		}
 
 		if created {
@@ -578,6 +594,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			if !ok {
 				continue
 			}
+			t.learnPRNodeID(ctx, e, nodeID)
 			seedItem := entityWithSnap{entity: e, nodeID: nodeID, seed: true}
 			if terminal {
 				terminalItems = append(terminalItems, seedItem)
@@ -920,6 +937,37 @@ func (t *Tracker) resolveStubNodeID(ctx context.Context, client *ghclient.Client
 	// GraphQL forms too in case the client shape ever changes.
 	terminal = pr.Merged || pr.State == "closed" || pr.State == "CLOSED" || pr.State == "MERGED"
 	return pr.NodeID, terminal, true
+}
+
+// learnPRNodeID records a pull request's node id as the external id of an
+// entity that carries none: a stub created from a key outside the poller, or a
+// row created before node ids were recorded. Best-effort: a failed write is
+// logged, and the entity is still found by its key.
+//
+// When another entity already carries the id, the two rows are one pull
+// request, created under two names of its repository. Both stay as they are
+// and both go on being polled.
+func (t *Tracker) learnPRNodeID(ctx context.Context, e domain.Entity, nodeID string) {
+	if e.ExternalID != "" || nodeID == "" {
+		return
+	}
+	// The write takes context.Background(), as every entity write in a cycle
+	// does (see RefreshGitHub): it is durable bookkeeping a cancelled cycle
+	// must not cut short. ctx only carries the cycle's trace into the logs.
+	_, err := t.entities.StampExternalIDSystem(context.Background(), t.orgID, e.ID, nodeID)
+	switch {
+	case errors.Is(err, db.ErrEntityIdentityAmbiguous):
+		// TODO(TFAC-1157): fold a stub into the entity carrying its node id
+		// instead of leaving both. A stub a touch created under another name
+		// of a renamed repository is seeded and polled beside the real entity,
+		// so the pull request's events are emitted twice, and created before
+		// the rename is applied, it blocks the repository rename.
+		trackerLog.WarnContext(ctx, "another entity already carries this pull request's node id; leaving both",
+			"source_id", e.SourceID, "node_id", nodeID, "entity_id", e.ID)
+	case err != nil:
+		trackerLog.ErrorContext(ctx, "recording a pull request's node id failed",
+			"source_id", e.SourceID, "node_id", nodeID, "entity_id", e.ID, "error", err)
+	}
 }
 
 // maxSearchQueryLen is GitHub's limit for the q= search parameter.

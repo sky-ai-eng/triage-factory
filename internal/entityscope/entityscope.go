@@ -81,7 +81,11 @@ func ResetResolver(source string) {
 //     because an active row still holds the key, the row is returned under its
 //     stored key, which a later read renames. When follow is false the key may
 //     be older than the row's (an artifact's target), and the row is returned
-//     as stored.
+//     as stored. A GitHub row is always returned as stored: a pull request's
+//     key is its repository's name and its number, a repository rename moves
+//     every such key at once (db.RepositoryStore.RenameSystem), and a caller's
+//     key spells the repository the way the caller did, which GitHub's
+//     redirect serves under an old name as readily as the current one.
 //   - otherwise the row FindOrCreateSystem returns for the key, which skips a
 //     row carrying another id; one with no id learns ref.ExternalID
 //     (StampExternalIDSystem) — the path a row created before its provider id
@@ -115,7 +119,7 @@ func Resolve(ctx context.Context, stores db.Stores, orgID string, ref domain.Ent
 			return nil, err
 		}
 		if e != nil {
-			if !follow || e.SourceID == ref.SourceID {
+			if !follow || e.SourceID == ref.SourceID || ref.Source == domain.ArtifactProviderGitHub {
 				return e, nil
 			}
 			out, err := entities.RenameSystem(ctx, orgID, ref.Source, ref.Scope, ref.ExternalID, ref.SourceID, url)

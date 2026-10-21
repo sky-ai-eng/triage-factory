@@ -1,12 +1,13 @@
 -- +goose NO TRANSACTION
 -- +goose Up
 -- Every external object is keyed within the provider namespace it lives in, a
--- GitHub entity references its repository's registry row, a team's Jira
--- tracked set and every Jira issue entity reference a Jira project registry
--- row, Linear becomes a tracked source, and five smaller changes ride along: the org GitHub App's
--- unusable state, the claim's source manifest, the retirement of the
--- 'completed' conversation status, node ids on artifacts and audit-ledger
--- rows, and the table of rate-limit readings.
+-- GitHub entity references its repository's registry row and records its pull
+-- request's node id, a team's Jira tracked set and every Jira issue entity
+-- reference a Jira project registry row, Linear becomes a tracked source, and
+-- five smaller changes ride along: the org GitHub App's unusable state, the
+-- claim's source manifest, the retirement of the 'completed' conversation
+-- status, node ids on artifacts and audit-ledger rows, and the table of
+-- rate-limit readings.
 --
 -- NO TRANSACTION because rebuilding a table other tables reference needs
 -- foreign keys off, and PRAGMA foreign_keys is a no-op inside a transaction:
@@ -511,7 +512,8 @@ CREATE UNIQUE INDEX repositories_external_identity
 --                GitHub host, the Jira site, the Linear workspace id, or
 --                domain.SlackScope.
 --   external_id  the provider's id for the object, which a key change does not
---                move. NULL is "not learned yet".
+--                move: a pull request's GraphQL node id, a Jira issue's numeric
+--                id, a Linear issue's UUID. NULL is "not learned yet".
 --
 -- source_id stays the key everything reads and displays. A key change is a
 -- rename of the row that carries the id, rather than a second row.
@@ -597,6 +599,29 @@ SELECT lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' ||
        owner, repo, 'github', host, org_id, CURRENT_TIMESTAMP
   FROM github_entity_repo
  ORDER BY created_at DESC, entity_id;
+
+-- Every existing GitHub row with a snapshot takes its pull request's node id
+-- from it: the poller stores node_id in every snapshot it writes. A stub
+-- created from a key outside the poller has no snapshot and stays NULL until
+-- the poller reads its pull request. One pull request can sit under two rows,
+-- created under two names of its repository; the id goes to the older row
+-- (earliest created_at, ties broken by id), the one a duplicate merge keeps
+-- (db.DuplicateEntityPair), and the other stays NULL. The partition is the
+-- scope the row is copied under in section 5. json_extract raises on
+-- malformed JSON, so the CASE guards it.
+CREATE TEMP TABLE github_entity_node AS
+SELECT entity_id, node_id
+  FROM (SELECT entity_id, node_id,
+               row_number() OVER (PARTITION BY org_id, host, node_id
+                                  ORDER BY created_at, entity_id) AS n
+          FROM (SELECT e.id AS entity_id, e.org_id, s.scope AS host, e.created_at,
+                       CASE WHEN json_valid(e.snapshot_json)
+                            THEN json_extract(e.snapshot_json, '$.node_id') END AS node_id
+                  FROM entities e
+                  JOIN org_scope s ON s.org_id = e.org_id AND s.provider = 'github'
+                 WHERE e.source = 'github')
+         WHERE COALESCE(CAST(node_id AS TEXT), '') <> '')
+ WHERE n = 1;
 
 -- ---------------------------------------------------------------------------
 -- 3d. team_github_groups.host
@@ -1174,8 +1199,9 @@ DROP TABLE jira_site;
 -- ===========================================================================
 --
 -- The rebuild 3c prepared: each row takes the scope entity_scope gave it, a
--- GitHub row the repository github_entity_repo resolved, and a Jira row the
--- project registry row jira_entity_project resolved in section 4.
+-- GitHub row the repository github_entity_repo resolved and the node id
+-- github_entity_node gave it, and a Jira row the project registry row
+-- jira_entity_project resolved in section 4.
 --
 -- The CHECK lets a Jira row with no scope go without a project: a row whose
 -- url names no site, in an org with no Jira site configured, has no site a
@@ -1215,7 +1241,9 @@ INSERT INTO entities_new (
 )
 SELECT
     e.id, e.source, es.scope,
-    e.source_id, NULL, e.kind, e.title, e.url, e.snapshot_json,
+    e.source_id,
+    (SELECT CAST(n.node_id AS TEXT) FROM github_entity_node n WHERE n.entity_id = e.id),
+    e.kind, e.title, e.url, e.snapshot_json,
     e.description, e.state, e.created_at, e.last_polled_at, e.closed_at, e.owning_team_id,
     e.org_id, e.poll_seq, e.commissioned_by_user_id,
     (SELECT r.id
@@ -1269,6 +1297,7 @@ CREATE INDEX        idx_entities_jira_project
 
 DROP TABLE jira_entity_project;
 DROP TABLE github_entity_repo;
+DROP TABLE github_entity_node;
 DROP TABLE entity_scope;
 
 

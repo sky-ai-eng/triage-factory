@@ -134,7 +134,7 @@ func TestJiraIssueResource(t *testing.T) {
 			t.Errorf("JiraIssueResource(%q) = %q: the escaped site holds a separator", site, resource)
 		}
 		key := ArtifactDedupKey(ArtifactProviderJira, ArtifactKindComment, resource, "20001")
-		gotSite, gotID, ok := ArtifactEntityIdentity(ArtifactProviderJira, key)
+		gotSite, gotID, ok := ArtifactEntityIdentity(Artifact{Provider: ArtifactProviderJira, DedupKey: key})
 		if !ok || gotSite != site || gotID != "10042" {
 			t.Errorf("ArtifactEntityIdentity(%q) = (%q, %q, %v), want (%q, 10042)", key, gotSite, gotID, ok, site)
 		}
@@ -149,13 +149,24 @@ func TestJiraIssueResource(t *testing.T) {
 		t.Errorf("no id = %q, want empty", r)
 	}
 	// An artifact keyed on the issue key names no identity.
-	if _, _, ok := ArtifactEntityIdentity(ArtifactProviderJira, "jira:issue:SKY-1"); ok {
+	if _, _, ok := ArtifactEntityIdentity(Artifact{Provider: ArtifactProviderJira, DedupKey: "jira:issue:SKY-1"}); ok {
 		t.Error("a key-shaped Jira dedup key read as an identity")
 	}
-	if _, _, ok := ArtifactEntityIdentity(ArtifactProviderGitHub, "github:pull_request:o/r#1"); ok {
-		t.Error("a GitHub dedup key read as an identity")
+	// A GitHub pull request's identity is its node id, never its dedup key,
+	// and no other GitHub artifact names one.
+	pr := Artifact{Provider: ArtifactProviderGitHub, Kind: ArtifactKindPullRequest, DedupKey: "github:pull_request:o/r#1"}
+	if _, _, ok := ArtifactEntityIdentity(pr); ok {
+		t.Error("a GitHub pull request with no node id read as an identity")
 	}
-	if _, id, ok := ArtifactEntityIdentity(ArtifactProviderLinear, "linear:comment:uuid-1:c-1"); !ok || id != "uuid-1" {
+	pr.NodeID = "PR_kwDO1"
+	if scope, id, ok := ArtifactEntityIdentity(pr); !ok || scope != "" || id != "PR_kwDO1" {
+		t.Errorf("github pull request identity = (%q, %q, %v), want its node id", scope, id, ok)
+	}
+	review := Artifact{Provider: ArtifactProviderGitHub, Kind: ArtifactKindReview, DedupKey: "github:review:o/r#1:9", NodeID: "PRR_kwDO9"}
+	if _, _, ok := ArtifactEntityIdentity(review); ok {
+		t.Error("a GitHub review's node id read as its pull request's identity")
+	}
+	if _, id, ok := ArtifactEntityIdentity(Artifact{Provider: ArtifactProviderLinear, DedupKey: "linear:comment:uuid-1:c-1"}); !ok || id != "uuid-1" {
 		t.Errorf("linear identity = (%q, %v), want uuid-1", id, ok)
 	}
 	// Two sites' issue 10042 are two resources.

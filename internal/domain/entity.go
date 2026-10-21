@@ -70,8 +70,10 @@ func NormalizeJiraKey(key string) string {
 // A Jira coordinate needs externalID, the issue's numeric id, and a Linear
 // coordinate the issue's UUID: an issue key changes when the issue moves or
 // its project's (or team's) key is renamed, so an entity found or created on
-// the key alone can be another issue's, or a second row for this one. GitHub
-// and Slack ignore externalID.
+// the key alone can be another issue's, or a second row for this one. A
+// GitHub coordinate takes the pull request's node id when the caller has one,
+// and resolves on the key when it does not, since a write's request path names
+// a pull request by repository and number only. Slack ignores externalID.
 //
 // NOTE: this assumes every GitHub target is a PR (kind="pr"). Exec only writes
 // PRs/reviews today, so that holds — but a GitHub *issue* shares the
@@ -86,7 +88,7 @@ func EntityRefForExternal(provider, target, externalID string) (ref EntityRef, k
 		if _, _, _, parsed := ParsePRTarget(target); !parsed {
 			return EntityRef{}, "", false
 		}
-		return EntityRef{Source: provider, SourceID: target}, "pr", true
+		return EntityRef{Source: provider, SourceID: target, ExternalID: externalID}, "pr", true
 	case ArtifactProviderJira:
 		// Normalized rather than passed through: this is the single seam
 		// every touched/produced Jira entity resolves through, so folding
@@ -141,9 +143,12 @@ func JiraIssueURL(site, key string) string {
 // with the closed history it used to name. Where the provider has an id that a
 // key change does not move, ExternalID holds it, and that is the identity:
 // (org, source, scope, external_id) is unique, and a key change is a rename of
-// the row carrying the id (db.EntityStore.RenameSystem), never a second row.
-// That is the repository model — the slug is what everything reads, the
-// provider id beside it is what a rename is detected by.
+// the row carrying the id (db.EntityStore.RenameSystem), never a second row. A
+// pull request's key changes only with its repository's name, so a GitHub row
+// is renamed by the repository rename (db.RepositoryStore.RenameSystem), which
+// moves every key of the repository at once. That is the repository model —
+// the slug is what everything reads, the provider id beside it is what a
+// rename is detected by.
 type Entity struct {
 	ID     string `json:"id"`
 	Source string `json:"source"` // "github" | "jira" | "linear" | "slack"
@@ -153,10 +158,11 @@ type Entity struct {
 	// EntityScope.
 	Scope    string `json:"scope"`
 	SourceID string `json:"source_id"` // "owner/repo#18", a Jira issue key, a Linear identifier, etc. — the key it answers to now
-	// ExternalID is the provider's stable id for the object — a Jira issue's
-	// numeric id, a Linear issue's UUID. Empty when the source has none or TF
-	// has not learned it (a Jira entity created before issue ids were
-	// recorded, until a response names its id).
+	// ExternalID is the provider's stable id for the object — a pull request's
+	// GraphQL node id, a Jira issue's numeric id, a Linear issue's UUID. Empty
+	// when the source has none or TF has not learned it (a Jira entity created
+	// before issue ids were recorded, until a response names its id; a pull
+	// request stub created from a key, until the poller reads its node id).
 	ExternalID string `json:"external_id,omitempty"`
 	// LinearTeamID is the UUID of the Linear team a Linear issue sits in, the
 	// id linear_team_rules is keyed by. Every Linear row carries it and no

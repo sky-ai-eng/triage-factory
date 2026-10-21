@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -194,7 +195,8 @@ func seedArtifact(t *testing.T, database *sql.DB, conversationID string, a domai
 // produced attach derives an entity from it.
 func seedProducedPR(t *testing.T, database *sql.DB, conversationID, repoPath string, number int, url string) {
 	t.Helper()
-	seedArtifact(t, database, conversationID, domain.NewPullRequestArtifact(repoPath, number, "node", "head", "main", url, "produced PR", "", false))
+	nodeID := fmt.Sprintf("PR_%s_%d", repoPath, number)
+	seedArtifact(t, database, conversationID, domain.NewPullRequestArtifact(repoPath, number, nodeID, "head", "main", url, "produced PR", "", false))
 }
 
 // attachAll calls Attach with the full store bundle — what both production

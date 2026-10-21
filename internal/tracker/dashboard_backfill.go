@@ -120,20 +120,23 @@ func (t *Tracker) BackfillDashboardHistory(ctx context.Context, scope string, cl
 // the active refresh set. Mirrors the terminal branch of RefreshGitHub's
 // discovery loop.
 // Returns true when a NEW entity was created; an already-known entity is left
-// untouched (the poll cycle owns refresh) and returns false. Emits no events.
+// untouched (the poll cycle owns refresh) apart from learning its node id, and
+// returns false. Emits no events.
+//
+// The search keys a pull request by its repository's current name, which can
+// be one TF has not applied yet; the node id finds the existing entity under
+// the name it is stored under.
 func (t *Tracker) seedBackfillEntity(ctx context.Context, scope string, d ghclient.DiscoveredPR) (bool, error) {
 	snap := d.Snapshot
 	snap.NodeID = d.NodeID
 	sid := ghSourceID(snap.Repo, snap.Number)
 
-	// TODO(TFAC-1127): pass d.NodeID as the external id. Without it a PR read
-	// under a renamed repository's new name before the rename is applied gets
-	// a second entity, which then refuses the rename.
-	entity, created, err := t.entities.FindOrCreateSystem(ctx, t.orgID, "github", scope, sid, "", "pr", snap.Title, snap.URL)
+	entity, created, err := t.entities.FindOrCreateSystem(ctx, t.orgID, "github", scope, sid, snap.NodeID, "pr", snap.Title, snap.URL)
 	if err != nil {
 		return false, err
 	}
 	if !created {
+		t.learnPRNodeID(ctx, *entity, snap.NodeID)
 		return false, nil
 	}
 	snapJSON, err := json.Marshal(snap)

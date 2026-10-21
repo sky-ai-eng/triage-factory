@@ -189,6 +189,52 @@ func TestResolveTouchedEntity_FollowsAMovedJiraIssue(t *testing.T) {
 	}
 }
 
+// TestResolveTouchedEntity_FindsAPullRequestByItsNodeID: a touch carrying a
+// pull request's node id resolves the entity that carries it under whatever
+// key it is stored under, and leaves the key alone — a pull request's key
+// moves with its repository's rename, and the touch may spell either name. A
+// touch by an id-less row's key learns the id. The write funnel takes the id
+// off a pull request artifact's node id.
+func TestResolveTouchedEntity_FindsAPullRequestByItsNodeID(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	host := testScope("github")
+
+	stored, _, err := stores.Entities.FindOrCreateSystem(ctx, org, "github", host, "octo/old#7", "PR_7", "pr", "Widget", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ArtifactProviderGitHub, target: "octo/new#7", externalID: "PR_7"})
+	if err != nil || id != stored.ID {
+		t.Fatalf("resolve = %q err=%v, want the existing entity %s", id, err, stored.ID)
+	}
+	if got, _ := stores.Entities.GetSystem(ctx, org, stored.ID); got.SourceID != "octo/old#7" {
+		t.Errorf("entity key = %q, want it left at octo/old#7", got.SourceID)
+	}
+	if e, _ := stores.Entities.GetBySource(ctx, org, "github", host, "octo/new#7"); e != nil {
+		t.Errorf("octo/new#7 = %+v, want no second entity", e)
+	}
+
+	stub, _, err := stores.Entities.FindOrCreateSystem(ctx, org, "github", host, "octo/repo#8", "", "pr", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err = resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ArtifactProviderGitHub, target: "octo/repo#8", externalID: "PR_8"})
+	if err != nil || id != stub.ID {
+		t.Fatalf("resolve = %q err=%v, want the stub %s", id, err, stub.ID)
+	}
+	if got, _ := stores.Entities.GetSystem(ctx, org, stub.ID); got.ExternalID != "PR_8" {
+		t.Errorf("stub = %+v, want it to learn PR_8", got)
+	}
+
+	pr := domain.NewPullRequestArtifact("octo/new", 7, "PR_7", "feature", "main", "https://github.com/octo/new/pull/7", "Widget", "", false)
+	act := &domain.ExternalAction{Provider: domain.ArtifactProviderGitHub, Target: pr.Target, URL: pr.URL}
+	if got := recordTouchInfo(ctx, stores, info, &pr, act, domain.EntityContainer{}); got.entityID != stored.ID {
+		t.Errorf("funnel touch resolved %q, want the entity carrying the artifact's node id %s", got.entityID, stored.ID)
+	}
+}
+
 // TestRecordTouch_LiveWiring_CreatesEntityOnOrgWrite proves the resolver is wired
 // into the live recording funnels (TFAC-513 §2): a bot Jira write resolves-or-
 // creates the touched entity as a side effect of recording the action, even
