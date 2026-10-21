@@ -59,7 +59,7 @@ func newLinearWhoamiFake(t *testing.T) *linearWhoamiFake {
 		f.mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
-		email := "ada@example.com"
+		app := false
 		switch mode {
 		case "rejected":
 			w.WriteHeader(http.StatusUnauthorized)
@@ -69,10 +69,10 @@ func newLinearWhoamiFake(t *testing.T) *linearWhoamiFake {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		case "app":
-			email = "4b1b3139@oauthapp.linear.app"
+			app = true
 		}
 		writeGraphQLData(w, map[string]any{
-			"viewer":       map[string]any{"id": viewerID, "name": "ada", "displayName": "Ada", "email": email},
+			"viewer":       map[string]any{"id": viewerID, "name": "ada", "displayName": "Ada", "email": "ada@example.com", "app": app},
 			"organization": ws,
 		})
 	}))

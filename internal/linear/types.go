@@ -5,8 +5,7 @@ import (
 )
 
 // User is a Linear user. For a token minted by an app install it is the app
-// user: named after the app, with an email at @oauthapp.linear.app, never an
-// admin.
+// user: named after the app, never an admin, and App is true.
 type User struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -16,6 +15,9 @@ type User struct {
 	Admin       bool   `json:"admin"`
 	Guest       bool   `json:"guest"`
 	IsMe        bool   `json:"isMe"`
+	// App is Linear's own answer to whether the user is an app user rather
+	// than a person.
+	App bool `json:"app"`
 }
 
 // Organization is the Linear workspace a credential belongs to.

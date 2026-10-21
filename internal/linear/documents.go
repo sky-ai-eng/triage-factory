@@ -38,7 +38,7 @@ const pageInfoFields = `pageInfo { hasNextPage endCursor }`
 
 const viewerQuery = `
 query Viewer {
-  viewer { id name displayName email active admin guest isMe }
+  viewer { id name displayName email active admin guest isMe app }
 }`
 
 const organizationQuery = `
@@ -48,7 +48,7 @@ query Organization {
 
 const whoamiQuery = `
 query Whoami {
-  viewer { id name displayName email active admin guest isMe }
+  viewer { id name displayName email active admin guest isMe app }
   organization { id name urlKey }
 }`
 

@@ -288,12 +288,9 @@ func ValidateJira(ctx context.Context, cfg jira.Config) (*JiraUser, error) {
 // credential.
 var ErrLinearUnreachable = errors.New("linear unreachable")
 
-// linearAppEmailSuffix is the email domain Linear gives the app user an app
-// install acts as.
-const linearAppEmailSuffix = "@oauthapp.linear.app"
-
 // LinearUser is the Linear user a credential acts as. IsApp is true for an
-// app install's app user rather than a person.
+// app install's app user rather than a person, as Linear's User.app reports
+// it; every gate that tells the two apart reads it from here.
 type LinearUser struct {
 	ID          string
 	Name        string
@@ -329,7 +326,7 @@ func ValidateLinear(ctx context.Context, cfg linear.Config) (*LinearUser, *Linea
 		Name:        viewer.Name,
 		DisplayName: viewer.DisplayName,
 		Email:       viewer.Email,
-		IsApp:       strings.HasSuffix(strings.ToLower(viewer.Email), linearAppEmailSuffix),
+		IsApp:       viewer.App,
 	}
 	return user, &LinearOrganization{ID: org.ID, Name: org.Name, URLKey: org.URLKey}, nil
 }
