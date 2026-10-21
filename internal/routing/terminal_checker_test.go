@@ -55,7 +55,7 @@ func seedDivergentEntity(t *testing.T, database *sql.DB, source, sourceID, snaps
 		// The snapshot written below moves the team to the one it names.
 		entity, _, err = st.Entities.FindOrCreateLinearSystem(ctx, runmode.LocalDefaultOrgID, testScope(source), sourceID, "uuid-"+sourceID, "lt-seed", sourceID, "")
 	case "jira":
-		entity, _, err = st.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, testScope(source), sourceID, "", dbseed.JiraIssueProject(sourceID), sourceID, "")
+		entity, _, err = st.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, testScope(source), sourceID, dbseed.JiraIssueID(sourceID), dbseed.JiraIssueProject(sourceID), sourceID, "")
 	default:
 		entity, _, err = st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, source, testScope(source), sourceID, "", kind, sourceID, "")
 	}
@@ -336,11 +336,8 @@ func TestTerminalChecker_JiraDoneFollowsAProjectKeyRename(t *testing.T) {
 	if _, err := st.JiraProjects.RefreshSystem(ctx, runmode.LocalDefaultOrgID, e.JiraProjectID, "id-PROJ", "CORE", "Core"); err != nil {
 		t.Fatalf("re-key the registry row: %v", err)
 	}
-	if _, err := st.Entities.StampExternalIDSystem(ctx, runmode.LocalDefaultOrgID, entityID, "10008"); err != nil {
-		t.Fatalf("stamp the issue id: %v", err)
-	}
-	if _, err := st.Entities.RenameSystem(ctx, runmode.LocalDefaultOrgID, "jira", testScope("jira"), "10008", "CORE-8", ""); err != nil {
-		t.Fatalf("rename the issue: %v", err)
+	if out, err := st.Entities.RenameSystem(ctx, runmode.LocalDefaultOrgID, "jira", testScope("jira"), e.ExternalID, "CORE-8", ""); err != nil || !out.Renamed {
+		t.Fatalf("rename the issue: renamed=%v err=%v", out.Renamed, err)
 	}
 
 	if a, _, _ := r.checkOrgTerminalInvariant(ctx, runmode.LocalDefaultOrgID); a != 1 {

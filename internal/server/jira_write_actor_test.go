@@ -64,9 +64,9 @@ func seedQueuedJiraTask(t *testing.T, db *sql.DB, entityID, sourceID, taskID str
 	t.Helper()
 	project := dbseed.JiraIssueProjectID(t, db, runmode.LocalDefaultOrgID, "https://jira.example.com", sourceID)
 	if _, err := db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope, jira_project_id)
-		 VALUES (?, 'jira', ?, 'issue', 'active', 'https://jira.example.com', ?)`,
-		entityID, sourceID, project,
+		`INSERT INTO entities (id, source, source_id, external_id, kind, state, scope, jira_project_id)
+		 VALUES (?, 'jira', ?, ?, 'issue', 'active', 'https://jira.example.com', ?)`,
+		entityID, sourceID, dbseed.JiraIssueID(sourceID), project,
 	); err != nil {
 		t.Fatalf("seed jira entity: %v", err)
 	}

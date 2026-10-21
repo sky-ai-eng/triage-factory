@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -47,8 +48,8 @@ func TestJiraProjectStore_SQLite(t *testing.T) {
 				t.Helper()
 				id := uuid.NewString()
 				if _, err := conn.Exec(
-					`INSERT INTO entities (id, source, scope, source_id, kind, jira_project_id) VALUES (?, 'jira', ?, ?, 'issue', ?)`,
-					id, site, key, jiraProjectID,
+					`INSERT INTO entities (id, source, scope, source_id, external_id, kind, jira_project_id) VALUES (?, 'jira', ?, ?, ?, 'issue', ?)`,
+					id, site, key, dbseed.JiraIssueID(key), jiraProjectID,
 				); err != nil {
 					t.Fatalf("seed jira issue: %v", err)
 				}

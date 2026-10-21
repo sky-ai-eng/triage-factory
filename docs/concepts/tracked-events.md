@@ -388,15 +388,16 @@ An issue's key (`ENG-123`) is a display key: moving the issue to another
 project gives it a new one, and renaming a project's key changes every key in
 the project. Its numeric id never changes. So a Jira entity's `source_id` is
 the key — what everything displays, searches and calls Jira with — and its
-`external_id` is the id, which is what TF matches it on once it is known.
-Entities are keyed within a `scope`, the org's Jira site (its base URL),
-because ids and keys repeat across sites. An entity also references the
-project its issue sits in, by `jira_project_id`, the project's row in the
-`jira_projects` registry on the entity's site (see below). Every Jira event's
-metadata carries `issue_key`, `issue_id`, `project` — the project's key as the
-read that produced the event spelled it, for display — and `jira_project_id`,
-the project's registry row, which is what the router's team gate reads and
-what predicates match on.
+`external_id` is the id, which is what TF matches it on. TF creates every
+Jira entity with its id, and no write takes it away (for entities from before
+TF recorded ids, see below). Entities are keyed within a `scope`, the org's
+Jira site (its base URL), because ids and keys repeat across sites. An entity
+also references the project its issue sits in, by `jira_project_id`, the
+project's row in the `jira_projects` registry on the entity's site (see
+below). Every Jira event's metadata carries `issue_key`, `issue_id`,
+`project` — the project's key as the read that produced the event spelled it,
+for display — and `jira_project_id`, the project's registry row, which is
+what the router's team gate reads and what predicates match on.
 
 A handler predicate scopes to projects with `jira_project_id_in`, which names
 them by registry id (the `id` of an entry in `jira_projects` on
@@ -477,9 +478,11 @@ of the old issue that held its key is still active, and gets an entity of its
 own once that one is confirmed gone and retires; it never inherits the old
 issue's history.
 
-An entity created before TF recorded Jira issue ids (every Jira entity of an
-install upgraded from a version without them) carries no `external_id`, and
-learns it from the first response that names its issue:
+A local install upgraded from v1.15.0 or earlier, which did not record Jira
+issue ids, keeps the Jira entities those versions created. The upgrade gives
+each the id its stored snapshot names, but no snapshot those versions wrote
+names one, so each carries no `external_id` and learns it from the first
+response that names its issue:
 
 - An active entity is refreshed by key once, and takes the id from the answer.
   One whose issue moved before it learned its id gets no answer by key; it is
@@ -624,7 +627,8 @@ An issue's identifier (`ENG-123`) is a display key: moving the issue to
 another team gives it a new one, and renaming a team's key changes every
 identifier in the team. Its UUID never changes. So a Linear entity's
 `source_id` is the identifier — what everything displays — and its
-`external_id` is the UUID, which is what TF matches it on. Entities are keyed
+`external_id` is the UUID, which is what TF matches it on and every Linear
+entity is created with. Entities are keyed
 within a `scope`, the org's Linear workspace id, because identifiers repeat
 across workspaces.
 
@@ -813,7 +817,7 @@ Every GitHub event's metadata names its repository twice: `repo`, the `owner/nam
 ### Jira Issue Snapshot
 
 The entity itself carries `source_id` (the key), `external_id` (the issue id,
-which it is matched on once known), `scope` (the org's Jira site) and
+which it is matched on), `scope` (the org's Jira site) and
 `jira_project_id`, the registry row of the project the issue sits in.
 
 - `id` (issue id), `key` (the entity's `source_id`), `project_id`, `project_key` (the project's key as the read spelled it), `summary`, `url`

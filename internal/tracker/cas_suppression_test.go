@@ -271,7 +271,7 @@ func TestRefreshJira_FailedCommitSuppressesTransitions(t *testing.T) {
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	projects := JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
 
-	entity, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "SKY-1", "", dbseed.JiraIssueProject("SKY-1"), "", "")
+	entity, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "SKY-1", "10001", dbseed.JiraIssueProject("SKY-1"), "", "")
 	if err != nil {
 		t.Fatalf("seed stub: %v", err)
 	}

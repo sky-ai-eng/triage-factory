@@ -205,7 +205,7 @@ func TestClosePrepare_JiraReassignSettingsReadFails_RequeuesThenClosesOnce(t *te
 	r := newQueueWorkerRouter(t, database)
 	st := sqlitestore.New(database)
 	r.users = st.Users
-	entity, _, err := st.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", "PROJ-77", "", dbseed.JiraIssueProject("PROJ-77"), "Issue", "https://jira.example.com/PROJ-77")
+	entity, _, err := st.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", "PROJ-77", dbseed.JiraIssueID("PROJ-77"), dbseed.JiraIssueProject("PROJ-77"), "Issue", "https://jira.example.com/PROJ-77")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}

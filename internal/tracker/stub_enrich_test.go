@@ -189,7 +189,7 @@ func TestRefreshJira_EnrichesSnapshotlessStub(t *testing.T) {
 			stores := sqlitestore.New(database)
 			org := runmode.LocalDefaultOrgID
 
-			stub, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "SKY-1", "", dbseed.JiraIssueProject("SKY-1"), "", "")
+			stub, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "SKY-1", "10001", dbseed.JiraIssueProject("SKY-1"), "", "")
 			if err != nil {
 				t.Fatalf("seed stub: %v", err)
 			}

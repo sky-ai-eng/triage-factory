@@ -156,9 +156,10 @@ func TestResolveTouchedEntity_PRInAnUntrackedRepository(t *testing.T) {
 // TestResolveTouchedEntity_FollowsAMovedJiraIssue: a touch naming the key a
 // Jira issue answers under now, with its id, resolves the issue's existing
 // entity and renames it onto that key — never a second entity — and a touch by
-// an id-less row's key learns the id.
+// the key of a row the SQLite migration carried over without an id learns the
+// id.
 func TestResolveTouchedEntity_FollowsAMovedJiraIssue(t *testing.T) {
-	stores, info := newCaptureStores(t, true)
+	conn, stores, info := newCaptureStoresConn(t, true)
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
 	site := testScope("jira")
@@ -176,10 +177,11 @@ func TestResolveTouchedEntity_FollowsAMovedJiraIssue(t *testing.T) {
 		t.Errorf("entity = %+v, want it renamed onto NEW-7", got)
 	}
 
-	legacy, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, site, "SKY-8", "", dbseed.JiraIssueProject("SKY-8"), "Legacy", "")
+	legacy, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, site, "SKY-8", "10008", dbseed.JiraIssueProject("SKY-8"), "Legacy", "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	dbseed.ForgetIssueID(t, conn, legacy.ID)
 	id, err = resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ArtifactProviderJira, target: "SKY-8", externalID: "10008"})
 	if err != nil || id != legacy.ID {
 		t.Fatalf("resolve = %q err=%v, want the id-less row %s", id, err, legacy.ID)

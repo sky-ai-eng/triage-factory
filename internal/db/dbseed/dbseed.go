@@ -8,7 +8,8 @@
 //
 // It also renames a registry row the way no production path does
 // (RenameRepositoryOnly), which is how a test proves a reader resolves a
-// repository by id.
+// repository by id, and clears an entity's issue id the way only the SQLite
+// migration leaves one (ForgetIssueID).
 //
 // It imports nothing from internal/db, so package db's own tests can use it.
 package dbseed
@@ -106,6 +107,46 @@ const JiraSite = "https://acme.atlassian.net"
 func JiraIssueProject(issueKey string) domain.JiraProjectRef {
 	key, _, _ := strings.Cut(issueKey, "-")
 	return domain.JiraProjectRef{ID: "id-" + key, Key: key}
+}
+
+// JiraIssueID is the issue id a fixture's Jira issue keyed issueKey carries:
+// one derived from the key, so two fixtures naming one key name one issue and
+// two keys never share an id. A Jira entity is created with its issue id, both
+// through the store (db.EntityStore.FindOrCreateJiraSystem) and by a raw
+// INSERT, which the schema refuses without one.
+func JiraIssueID(issueKey string) string {
+	return "id-" + issueKey
+}
+
+// ForgetIssueID clears entityID's external_id, which leaves a Jira row in the
+// shape of a local row the SQLite migration carried over from before the
+// poller recorded issue ids. No write produces that shape (the
+// entities_external_id_kept trigger refuses it), so the trigger is dropped for
+// the one statement and recreated from its stored definition. SQLite only:
+// Postgres has no such rows.
+func ForgetIssueID(t testing.TB, conn Conn, entityID string) {
+	t.Helper()
+	ctx := context.Background()
+	const trigger = "entities_external_id_kept"
+	var def string
+	if err := conn.QueryRowContext(ctx,
+		`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = $1`, trigger,
+	).Scan(&def); err != nil {
+		t.Fatalf("dbseed: read trigger %s: %v", trigger, err)
+	}
+	if _, err := conn.ExecContext(ctx, `DROP TRIGGER `+trigger); err != nil {
+		t.Fatalf("dbseed: drop trigger %s: %v", trigger, err)
+	}
+	res, err := conn.ExecContext(ctx, `UPDATE entities SET external_id = NULL WHERE id = $1`, entityID)
+	if _, cerr := conn.ExecContext(ctx, def); cerr != nil {
+		t.Fatalf("dbseed: recreate trigger %s: %v", trigger, cerr)
+	}
+	if err != nil {
+		t.Fatalf("dbseed: clear external_id of %s: %v", entityID, err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		t.Fatalf("dbseed: clear external_id of %s: %d rows, %v", entityID, n, err)
+	}
 }
 
 // JiraIssueProjectID is JiraProject for the project a fixture's Jira issue

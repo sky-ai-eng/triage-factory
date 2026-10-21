@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -44,8 +45,8 @@ func TestJiraProjectStore_Postgres(t *testing.T) {
 				t.Helper()
 				var id string
 				if err := h.AdminDB.QueryRow(
-					`INSERT INTO entities (org_id, source, scope, source_id, kind, jira_project_id) VALUES ($1, 'jira', $2, $3, 'issue', $4) RETURNING id`,
-					orgID, site, key, jiraProjectID,
+					`INSERT INTO entities (org_id, source, scope, source_id, external_id, kind, jira_project_id) VALUES ($1, 'jira', $2, $3, $4, 'issue', $5) RETURNING id`,
+					orgID, site, key, dbseed.JiraIssueID(key), jiraProjectID,
 				).Scan(&id); err != nil {
 					t.Fatalf("seed jira issue: %v", err)
 				}

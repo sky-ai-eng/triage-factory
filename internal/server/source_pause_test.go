@@ -88,7 +88,7 @@ func TestOrgSource_PatchClearsSnapshotsOnDisableOnly(t *testing.T) {
 	// the rows a request wrote opens its own against the same connection.
 	st := sqlitestore.New(s.db)
 
-	ent, _, err := st.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "SKY-pause-1", "", dbseed.JiraIssueProject("SKY-pause-1"), "Ticket", "")
+	ent, _, err := st.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "SKY-pause-1", dbseed.JiraIssueID("SKY-pause-1"), dbseed.JiraIssueProject("SKY-pause-1"), "Ticket", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
