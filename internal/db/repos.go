@@ -517,6 +517,11 @@ type RepositoryStore interface {
 	// Nothing else moves: the row keeps its id, name and provider id, its
 	// tracking rows, worktree ledger rows, events, artifacts and tasks.
 	//
+	// TODO(TFAC-1163): the retired row's pull request, review and branch
+	// artifacts keep dedup keys that spell the name, so the repository now
+	// under it upserts its own PR #N or branch onto them, and a rename onto the
+	// name can collide with them. Keying those artifacts on ids frees them too.
+	//
 	// The row is matched on (source, host, external_id) and re-checked under a
 	// lock to still be stored under held's slug and not retired, so a candidate
 	// that went stale — renamed since the caller read it, or retired by a
