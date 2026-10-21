@@ -187,50 +187,50 @@ func TestTeamGitHubRepos_SQLite_TracksRepo(t *testing.T) {
 	}
 }
 
-// TestTeamGitHubRepos_SQLite_TracksRepoViewerScoped pins the local-mode
+// TestTeamGitHubRepos_SQLite_TracksRepositoryViewerScoped pins the local-mode
 // asymmetry (TFAC-559): N=1 has no team boundary to enforce, so
-// TracksRepoViewerScoped always reports true regardless of whether the
-// repo is actually tracked — unlike TracksRepoSystem, which is a real
+// TracksRepositoryViewerScoped always reports true regardless of whether the
+// repo is actually tracked — unlike TracksRepositorySystem, which is a real
 // per-team lookup. The org-id guard still applies.
-func TestTeamGitHubRepos_SQLite_TracksRepoViewerScoped(t *testing.T) {
+func TestTeamGitHubRepos_SQLite_TracksRepositoryViewerScoped(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
-	got, err := stores.TeamGitHubRepos.TracksRepoViewerScoped(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, "acme", "never-tracked")
+	got, err := stores.TeamGitHubRepos.TracksRepositoryViewerScoped(ctx, runmode.LocalDefaultOrgID, "never-tracked")
 	if err != nil {
-		t.Fatalf("TracksRepoViewerScoped: %v", err)
+		t.Fatalf("TracksRepositoryViewerScoped: %v", err)
 	}
 	if !got {
 		t.Error("local mode should report true unconditionally (N=1, no team boundary)")
 	}
 
 	const bogusOrg = "11111111-1111-1111-1111-111111111111"
-	if _, err := stores.TeamGitHubRepos.TracksRepoViewerScoped(ctx, bogusOrg, dbtest.TestGitHubHost, "acme", "api"); err == nil {
-		t.Error("TracksRepoViewerScoped with non-local orgID should error")
+	if _, err := stores.TeamGitHubRepos.TracksRepositoryViewerScoped(ctx, bogusOrg, "never-tracked"); err == nil {
+		t.Error("TracksRepositoryViewerScoped with non-local orgID should error")
 	}
 }
 
-// TestTeamGitHubRepos_SQLite_TracksRepoViewerAdminScoped pins the same
+// TestTeamGitHubRepos_SQLite_TracksRepositoryViewerAdminScoped pins the same
 // local-mode asymmetry on the mutation gate: N=1 has a single implicit
 // owner, so there is no admin/member distinction to enforce and the answer
 // is unconditionally true. The org-id guard still applies.
-func TestTeamGitHubRepos_SQLite_TracksRepoViewerAdminScoped(t *testing.T) {
+func TestTeamGitHubRepos_SQLite_TracksRepositoryViewerAdminScoped(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
-	got, err := stores.TeamGitHubRepos.TracksRepoViewerAdminScoped(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, "acme", "never-tracked")
+	got, err := stores.TeamGitHubRepos.TracksRepositoryViewerAdminScoped(ctx, runmode.LocalDefaultOrgID, "never-tracked")
 	if err != nil {
-		t.Fatalf("TracksRepoViewerAdminScoped: %v", err)
+		t.Fatalf("TracksRepositoryViewerAdminScoped: %v", err)
 	}
 	if !got {
 		t.Error("local mode should report true unconditionally (N=1, single implicit owner)")
 	}
 
 	const bogusOrg = "11111111-1111-1111-1111-111111111111"
-	if _, err := stores.TeamGitHubRepos.TracksRepoViewerAdminScoped(ctx, bogusOrg, dbtest.TestGitHubHost, "acme", "api"); err == nil {
-		t.Error("TracksRepoViewerAdminScoped with non-local orgID should error")
+	if _, err := stores.TeamGitHubRepos.TracksRepositoryViewerAdminScoped(ctx, bogusOrg, "never-tracked"); err == nil {
+		t.Error("TracksRepositoryViewerAdminScoped with non-local orgID should error")
 	}
 }
 

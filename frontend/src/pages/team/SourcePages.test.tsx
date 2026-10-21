@@ -215,6 +215,77 @@ describe('GitHub source page', () => {
     await waitFor(() => expect(screen.getByText('sky/vanished')).toBeInTheDocument())
   })
 
+  it('tells a retired repository from the one now under its name', async () => {
+    stub({
+      '/api/teams/t1/github-repos': {
+        repos: [
+          {
+            id: 'r9',
+            github_id: '9',
+            owner: 'sky',
+            repo: 'planner',
+            retired_at: '2026-10-20T12:00:00Z',
+          },
+        ],
+      },
+      '/api/github/repos/list': [{ github_id: '2', full_name: 'sky/planner' }],
+    })
+    render(<GitHubSource {...BODY} />)
+
+    // Two rows under one name: the tracked, retired row and the repository
+    // GitHub serves under the name now. Only the first carries the tag.
+    await waitFor(() => expect(screen.getAllByText(/sky\/planner/)).toHaveLength(2))
+    expect(screen.getAllByText('no longer on GitHub')).toHaveLength(1)
+  })
+
+  it('stops watching a retired repository and nothing else', async () => {
+    const fetchMock = stub({
+      '/api/teams/t1/github-repos': {
+        repos: [
+          {
+            id: 'r9',
+            github_id: '9',
+            owner: 'sky',
+            repo: 'planner',
+            retired_at: '2026-10-20T12:00:00Z',
+          },
+          { id: 'r1', github_id: '1', owner: 'sky', repo: 'docs-site' },
+        ],
+      },
+      '/api/github/repos/list': [
+        { github_id: '2', full_name: 'sky/planner' },
+        { github_id: '1', full_name: 'sky/docs-site' },
+      ],
+    })
+    const puts = () =>
+      fetchMock.mock.calls
+        .filter(([path, init]) => path === '/api/teams/t1/github-repos' && init?.method === 'PUT')
+        .map(([, init]) => JSON.parse(String(init!.body)).repository_ids)
+    render(<GitHubSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('no longer on GitHub')).toBeInTheDocument())
+
+    vi.useFakeTimers()
+    try {
+      const row = screen.getByText('no longer on GitHub').closest('[role="row"]')!
+      fireEvent.click(within(row as HTMLElement).getByRole('checkbox'))
+      // A destructive verb is held, not pressed.
+      fireEvent.pointerDown(screen.getByRole('button', { name: /^Stop watching/ }), {
+        button: 0,
+        clientX: 0,
+        clientY: 0,
+      })
+      act(() => {
+        vi.advanceTimersByTime(1_200)
+      })
+      act(() => {
+        vi.advanceTimersByTime(10_000)
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+    await waitFor(() => expect(puts()).toEqual([['r1']]))
+  })
+
   it('holds its baseline where the fortnight would be', async () => {
     stub(REPOS)
     render(<GitHubSource {...BODY} />)

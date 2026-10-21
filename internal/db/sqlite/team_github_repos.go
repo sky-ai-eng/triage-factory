@@ -42,7 +42,7 @@ func listTeamGitHubRepos(ctx context.Context, q queryer, teamID, host string) ([
 		return nil, err
 	}
 	rows, err := q.QueryContext(ctx, `
-		SELECT r.id, COALESCE(r.external_id, ''), r.owner, r.repo
+		SELECT r.id, COALESCE(r.external_id, ''), r.owner, r.repo, r.retired_at
 		FROM team_github_repos g
 		JOIN repositories r ON r.id = g.repository_id
 		WHERE g.team_id = ? AND r.host = ?
@@ -55,8 +55,12 @@ func listTeamGitHubRepos(ctx context.Context, q queryer, teamID, host string) ([
 	out := []domain.TeamGitHubRepo{}
 	for rows.Next() {
 		var r domain.TeamGitHubRepo
-		if err := rows.Scan(&r.RepositoryID, &r.ExternalID, &r.Owner, &r.Repo); err != nil {
+		var retiredAt sql.NullTime
+		if err := rows.Scan(&r.RepositoryID, &r.ExternalID, &r.Owner, &r.Repo, &retiredAt); err != nil {
 			return nil, fmt.Errorf("scan team_github_repos: %w", err)
+		}
+		if retiredAt.Valid {
+			r.RetiredAt = &retiredAt.Time
 		}
 		out = append(out, r)
 	}
@@ -75,7 +79,7 @@ func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, 
 		FROM team_github_repos g
 		JOIN teams t ON t.id = g.team_id
 		JOIN repositories r ON r.id = g.repository_id
-		WHERE r.host = ?
+		WHERE r.host = ? AND r.retired_at IS NULL
 		ORDER BY r.owner ASC, r.repo ASC, t.name ASC
 	`, host)
 	if err != nil {
@@ -216,6 +220,7 @@ func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, hos
 		SELECT 1 FROM team_github_repos g
 		JOIN repositories r ON r.id = g.repository_id
 		WHERE g.team_id = ? AND r.host = ? AND LOWER(r.owner) = LOWER(?) AND LOWER(r.repo) = LOWER(?)
+		  AND r.retired_at IS NULL
 		LIMIT 1
 	`, teamID, host, owner, repo).Scan(&n)
 	if err != nil {
@@ -269,6 +274,7 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 			JOIN memberships m ON m.team_id = g.team_id
 			WHERE t.org_id = ? AND r.host = ?
 			  AND LOWER(r.owner) = LOWER(?) AND LOWER(r.repo) = LOWER(?)
+			  AND r.retired_at IS NULL
 		)
 		ORDER BY user_id ASC
 	`, orgID, orgID, host, owner, repo)
@@ -287,8 +293,8 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 	return out, rows.Err()
 }
 
-// TracksRepoViewerScoped always reports true — this backend only ever runs
-// local mode, where N=1 has no team boundary to enforce, mirroring the
+// TracksRepositoryViewerScoped always reports true — this backend only ever
+// runs local mode, where N=1 has no team boundary to enforce, mirroring the
 // local-mode asymmetry of ListActiveJiraTeamScoped /
 // FactoryReadStore.Entities (TFAC-559).
 //
@@ -296,18 +302,15 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 // local before any store call, and multi-mode resolves against the Postgres
 // implementation instead. It exists for interface conformance, and for
 // store-level callers (tests) that address it directly.
-func (s *teamGitHubReposStore) TracksRepoViewerScoped(ctx context.Context, orgID, host, owner, repo string) (bool, error) {
+func (s *teamGitHubReposStore) TracksRepositoryViewerScoped(ctx context.Context, orgID, repositoryID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return false, err
-	}
-	if err := db.RequireRepoHost(host); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-// TracksRepoViewerAdminScoped reports true for the same reason as
-// TracksRepoViewerScoped: this backend only ever runs local mode, where
+// TracksRepositoryViewerAdminScoped reports true for the same reason as
+// TracksRepositoryViewerScoped: this backend only ever runs local mode, where
 // N=1 has a single implicit owner and so neither a team boundary nor an
 // admin/member distinction to enforce.
 //
@@ -315,11 +318,8 @@ func (s *teamGitHubReposStore) TracksRepoViewerScoped(ctx context.Context, orgID
 // in local before any store call, and multi-mode resolves against the
 // Postgres implementation instead. It exists for interface conformance,
 // and for store-level callers (tests) that address it directly.
-func (s *teamGitHubReposStore) TracksRepoViewerAdminScoped(ctx context.Context, orgID, host, owner, repo string) (bool, error) {
+func (s *teamGitHubReposStore) TracksRepositoryViewerAdminScoped(ctx context.Context, orgID, repositoryID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return false, err
-	}
-	if err := db.RequireRepoHost(host); err != nil {
 		return false, err
 	}
 	return true, nil

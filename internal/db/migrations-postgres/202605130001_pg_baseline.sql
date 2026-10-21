@@ -989,7 +989,10 @@ CREATE TABLE public.prompts (
 -- (domain.GitHubHost) the repository lives on: repository ids are
 -- per-deployment sequences and names repeat across deployments, so nothing
 -- matches across hosts. Durable: untracking never deletes it, since a worktree
--- or entity references it.
+-- or entity references it. retired_at is set when GitHub has given the row's
+-- name to another repository and the row's own id no longer answers (deleted,
+-- or no longer visible to the org's credential): the row keeps its id, name,
+-- provider id and everything referencing it, and stops holding the name.
 CREATE TABLE public.repositories (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -1013,7 +1016,8 @@ CREATE TABLE public.repositories (
     profiled_at timestamp with time zone,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     pulls_etag text,
-    pulls_polled_at timestamp with time zone
+    pulls_polled_at timestamp with time zone,
+    retired_at timestamp with time zone
 );
 
 
@@ -1926,8 +1930,10 @@ CREATE INDEX idx_events_org_type_entity ON public.events USING btree (org_id, ev
 -- owner/repo and host the deployments of one provider; lower() folds case, since
 -- GitHub identifiers are case-insensitive, so a racing writer conflicts instead
 -- of inserting a twin. An expression key must be an index, not a UNIQUE
--- constraint; the store infers it in ON CONFLICT.
-CREATE UNIQUE INDEX repositories_identity ON public.repositories USING btree (org_id, source, host, lower(owner), lower(repo));
+-- constraint; the store infers it in ON CONFLICT. A retired row holds no name,
+-- so it is left out, as entities_active_key leaves out closed entities: the
+-- repository GitHub now serves under the name gets a row of its own.
+CREATE UNIQUE INDEX repositories_identity ON public.repositories USING btree (org_id, source, host, lower(owner), lower(repo)) WHERE (retired_at IS NULL);
 
 
 -- One row per provider id on a host: what a rename keys on.

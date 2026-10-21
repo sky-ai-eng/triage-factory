@@ -37,6 +37,10 @@ type PRCoherenceSeeder struct {
 	// host if it isn't known yet.
 	Worktree func(t *testing.T, conversationID, host, slug, ref string)
 
+	// RetireRepository retires the registry row of the "owner/repo" slug on
+	// a GitHub host (RetireRepo).
+	RetireRepository func(t *testing.T, host, slug string)
+
 	// MarkEventInjected records the task's timeline row for eventID as
 	// 'injected' — the same-task additive path's mark, which is the fence
 	// the coherence query subtracts.
@@ -229,6 +233,40 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 			t.Fatalf("ListPRCoherenceTargetsSystem after the same-host checkout: %v", err)
 		}
 		requireOneCoherenceTarget(t, targets, elsewhereID)
+	})
+
+	t.Run("WorktreeArmSkipsARetiredRepository", func(t *testing.T) {
+		// A retired row keeps its name, and GitHub serves that name as another
+		// repository now. A checkout of the retired one is not a checkout of
+		// the PR's repository, so its conversation is not told this PR moved.
+		store, orgID, seed, extra := factory(t)
+		ctx := context.Background()
+
+		entityID := seed.Entity(t, "retired-subject")
+		eventID := seed.Event(t, entityID, domain.EventGitHubPRConflicts)
+
+		otherEntityID := seed.Entity(t, "retired-worker")
+		otherEventID := seed.Event(t, otherEntityID, domain.EventGitHubPRConflicts)
+		otherTaskID := seed.Task(t, otherEntityID, domain.EventGitHubPRConflicts, otherEventID)
+		workerID := seed.Conversation(t, domain.Conversation{
+			TaskID: otherTaskID, PromptID: conversationTestPromptID, Status: "open",
+			BlueprintRunID: seed.BlueprintRun(t, otherTaskID),
+		})
+		extra.Worktree(t, workerID, TestGitHubHost, coherenceRepo, coherencePRRef)
+		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
+		if err != nil {
+			t.Fatalf("ListPRCoherenceTargetsSystem: %v", err)
+		}
+		requireOneCoherenceTarget(t, targets, workerID)
+
+		extra.RetireRepository(t, TestGitHubHost, coherenceRepo)
+		targets, err = store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
+		if err != nil {
+			t.Fatalf("ListPRCoherenceTargetsSystem after the retire: %v", err)
+		}
+		if len(targets) != 0 {
+			t.Fatalf("a checkout of the retired %s reached a PR under its name: %+v", coherenceRepo, targets)
+		}
 	})
 
 	t.Run("InjectedEventFencesTheSameTaskConversation", func(t *testing.T) {

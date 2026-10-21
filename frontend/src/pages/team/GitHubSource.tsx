@@ -15,7 +15,13 @@ import {
   sinceLabel,
 } from '../../hooks/useTeamActivity'
 import { fetchTeamRepos, saveTeamRepos } from '../settings/teamConfig'
-import { candidateKeys, refFromCandidate, repoRefKey, repoRefSlug } from '../../lib/githubRepos'
+import {
+  candidateKeys,
+  isRetired,
+  refFromCandidate,
+  repoRefKey,
+  repoRefSlug,
+} from '../../lib/githubRepos'
 import type { GitHubRepo, RepoRef } from '../../lib/githubRepos'
 
 // GitHub, as this team's event source.
@@ -137,8 +143,10 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
       entries.push({ key, name: c.full_name, ref, on: !!hit })
     }
     // A tracked repository the picker cannot see is still tracked — an App
-    // installation narrowed after the fact, or a credential that stopped
-    // resolving. Dropping it would make the page lie about what it watches.
+    // installation narrowed after the fact, a credential that stopped
+    // resolving, or a repository GitHub no longer serves at all (retired,
+    // its name now another repository's). Dropping it would make the page lie
+    // about what it watches.
     for (const [key, ref] of trackedByKey) {
       if (!seen.has(key)) entries.push({ key, name: repoRefSlug(ref), ref, on: true })
     }
@@ -148,6 +156,7 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
         id: e.key,
         name: e.name,
         tracked: e.on,
+        retired: isRetired(e.ref),
         runs: null,
         last: null,
       })),
@@ -172,7 +181,17 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
       {
         key: 'name',
         label: 'REPOSITORY',
-        color: (r) => (r.tracked ? 'var(--color-ink-1)' : 'var(--color-ink-4)'),
+        // A retired row shares its name with the repository GitHub now
+        // serves under it, so the two rows have to be told apart.
+        render: (r) =>
+          r.retired ? (
+            <>
+              {r.name} <span className="sp-retired">no longer on GitHub</span>
+            </>
+          ) : (
+            r.name
+          ),
+        color: (r) => (r.tracked && !r.retired ? 'var(--color-ink-1)' : 'var(--color-ink-4)'),
       },
       {
         key: 'runs',

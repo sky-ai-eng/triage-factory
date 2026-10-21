@@ -5,18 +5,38 @@ import (
 	"strings"
 )
 
-// RepoRenameOutcome is what a rename attempt did. Renamed is false for every
-// no-op — the repository has no row, the provider reports the slug TF already
-// stores, or the caller had no provider id to key on — and those are outcomes
-// rather than errors: a rename that has already been applied is the steady
-// state, and a second attempt observing it is exactly right.
+// RepoRenameOutcome is what a rename attempt did. Renamed and Restored are
+// both false for every no-op — the repository has no row, the provider reports
+// the slug TF already stores for a row that holds it, or the caller had no
+// provider id to key on — and those are outcomes rather than errors: a rename
+// that has already been applied is the steady state, and a second attempt
+// observing it is exactly right.
 //
-// From/To are set only when Renamed is true. From is the slug as it was
-// stored, with its original casing, so a log line can name what moved.
+// Renamed is whether the stored slug moved. Restored is whether the row was
+// retired (Repository.RetiredAt) and holds a name again: the provider answered
+// for its id, so it is a live repository, under the slug it reported. A retired
+// row observed under its stored slug is Restored without being Renamed.
+//
+// From/To are set when either is true. From is the slug as it was stored, with
+// its original casing, so a log line can name what moved.
 type RepoRenameOutcome struct {
-	Renamed bool
-	From    string
-	To      string
+	Renamed  bool
+	Restored bool
+	From     string
+	To       string
+}
+
+// Changed reports whether the attempt wrote anything.
+func (o RepoRenameOutcome) Changed() bool { return o.Renamed || o.Restored }
+
+// RepoIdentity is one stored repository's identity as the detections below
+// compare it against what the provider reports: the slug the row is stored
+// under, the provider's id, and whether the row is retired. A retired row keeps
+// its slug for its history but no longer holds it, so it takes part in the id
+// half of a comparison and never in the name half.
+type RepoIdentity struct {
+	RepoRef
+	Retired bool
 }
 
 // SameRepoSlug reports whether two "owner/repo" slugs name the same
@@ -30,6 +50,8 @@ func SameRepoSlug(a, b string) bool { return strings.EqualFold(a, b) }
 // DetectRepoRenames returns the observed identities whose repository TF stores
 // under a different slug — the rename condition, stated in the only terms that
 // can express it: same (source, host, external id), different (owner, repo).
+// An observation of a retired row's id is a candidate whatever slug it
+// carries, since the row holds no name until the rename gives it one back.
 //
 // The host is part of the identity because GitHub repository ids are
 // per-deployment sequences: another host's repository can carry the same id,
@@ -43,47 +65,101 @@ func SameRepoSlug(a, b string) bool { return strings.EqualFold(a, b) }
 // followed by a new repository claiming the freed name. That case — the one
 // that corrupts data if detection keys on the wrong thing — falls out of the
 // same rule: the new repository's id differs, so it matches no stored row and
-// no rename is reported.
+// no rename is reported. DetectReassignedRepoNames reports it instead.
 //
 // The result carries the observed refs, not a diff: applying a rename re-reads
 // and re-decides under a row lock, so what this returns is a candidate list,
 // never an instruction.
-func DetectRepoRenames(stored, observed []RepoRef) []RepoRef {
+func DetectRepoRenames(stored []RepoIdentity, observed []RepoRef) []RepoRef {
 	if len(stored) == 0 || len(observed) == 0 {
 		return nil
 	}
-	// Key on (source, host, external id): an id is only an identity within the
-	// deployment of the provider that issued it.
-	type identity struct{ source, host, externalID string }
-	slugs := make(map[identity]string, len(stored))
+	type held struct {
+		slug    string
+		retired bool
+	}
+	byID := make(map[repoIdentityKey]held, len(stored))
 	for _, s := range stored {
-		if s.ExternalID == "" || s.Host == "" {
-			continue
+		if k, ok := identityKey(s.RepoRef); ok {
+			byID[k] = held{slug: s.Slug(), retired: s.Retired}
 		}
-		source, err := NormalizeRepoSource(s.Source)
-		if err != nil {
-			continue
-		}
-		slugs[identity{source, s.Host, s.ExternalID}] = s.Slug()
 	}
 
 	var out []RepoRef
 	for _, o := range observed {
-		if o.ExternalID == "" || o.Host == "" {
+		k, ok := identityKey(o)
+		if !ok {
 			continue
 		}
-		source, err := NormalizeRepoSource(o.Source)
-		if err != nil {
+		was, ok := byID[k]
+		if !ok || (!was.retired && SameRepoSlug(was.slug, o.Slug())) {
 			continue
 		}
-		was, ok := slugs[identity{source, o.Host, o.ExternalID}]
-		if !ok || SameRepoSlug(was, o.Slug()) {
-			continue
-		}
-		o.Source = source
+		o.Source = k.source
 		out = append(out, o)
 	}
 	return out
+}
+
+// DetectReassignedRepoNames returns the stored identities whose name the
+// provider reports under a different id: the repository TF holds under the name
+// is not the one the provider now serves there, so it was deleted, or renamed
+// away and the name reused. It is the mirror image of DetectRepoRenames — same
+// (source, host, folded slug), different external id — and a row it returns has
+// to be resolved by its own id (reporename.Resolve) before the name is free.
+//
+// Only rows that hold their name take part: a retired row has given its up. A
+// row whose own id is among the observations is left out too, because the
+// observation already says where it is and DetectRepoRenames acts on that. As
+// in DetectRepoRenames, neither side contributes without a host and an id.
+func DetectReassignedRepoNames(stored []RepoIdentity, observed []RepoRef) []RepoRef {
+	if len(stored) == 0 || len(observed) == 0 {
+		return nil
+	}
+	type nameKey struct{ source, host, slug string }
+	observedIDs := make(map[repoIdentityKey]bool, len(observed))
+	observedNames := make(map[nameKey]string, len(observed))
+	for _, o := range observed {
+		k, ok := identityKey(o)
+		if !ok {
+			continue
+		}
+		observedIDs[k] = true
+		observedNames[nameKey{k.source, k.host, strings.ToLower(o.Slug())}] = o.ExternalID
+	}
+
+	var out []RepoRef
+	for _, s := range stored {
+		k, ok := identityKey(s.RepoRef)
+		if !ok || s.Retired || observedIDs[k] {
+			continue
+		}
+		id, ok := observedNames[nameKey{k.source, k.host, strings.ToLower(s.Slug())}]
+		if !ok || id == s.ExternalID {
+			continue
+		}
+		ref := s.RepoRef
+		ref.Source = k.source
+		out = append(out, ref)
+	}
+	return out
+}
+
+// repoIdentityKey is a repository's identity as the detections key on it: an
+// id is only an identity within the deployment of the provider that issued it.
+type repoIdentityKey struct{ source, host, externalID string }
+
+// identityKey keys r, or reports false for a ref that cannot take part in a
+// comparison: no id, no host, or a source no provider issues.
+func identityKey(r RepoRef) (repoIdentityKey, bool) {
+	if r.ExternalID == "" || r.Host == "" {
+		return repoIdentityKey{}, false
+	}
+	source, err := NormalizeRepoSource(r.Source)
+	if err != nil {
+		return repoIdentityKey{}, false
+	}
+	return repoIdentityKey{source, r.Host, r.ExternalID}, true
 }
 
 // RewriteRepoSlugPrefix rewrites a leading repository slug in a slug-prefixed

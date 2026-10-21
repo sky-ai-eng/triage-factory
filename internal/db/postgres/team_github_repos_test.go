@@ -140,13 +140,14 @@ func TestTeamGitHubRepos_ReplaceForTeam_AppPath(t *testing.T) {
 	}
 }
 
-// TestTeamGitHubRepos_Postgres_TracksRepoViewerScoped_RLS pins the
-// per-repo, app-pool write/read gate (TFAC-559): under real RLS, a caller
-// only "tracks" a repo if one of THEIR teams tracks it — a sibling team
-// tracking the same-named repo in the org doesn't count. TracksRepoSystem
-// (a specific team, admin pool) is unaffected; this exercises the viewer-
-// scoped sibling.
-func TestTeamGitHubRepos_Postgres_TracksRepoViewerScoped_RLS(t *testing.T) {
+// TestTeamGitHubRepos_Postgres_TracksRepositoryViewerScoped_RLS pins the
+// per-repo, app-pool read gate (TFAC-559): under real RLS, a caller only
+// "tracks" a repo if one of THEIR teams tracks it — a sibling team in the org
+// doesn't count. TracksRepositorySystem (a specific team, admin pool) is
+// unaffected; this exercises the viewer-scoped sibling. It answers for the
+// row, not the name: a retired row and the repository now under its name are
+// tracked or not independently.
+func TestTeamGitHubRepos_Postgres_TracksRepositoryViewerScoped_RLS(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()
@@ -162,41 +163,67 @@ func TestTeamGitHubRepos_Postgres_TracksRepoViewerScoped_RLS(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("track acme/api for teamA: %v", err)
 	}
+	api := pgRepoRow(t, stores, orgA, "Acme", "api")
+	ghost, err := stores.Repos.FindOrCreateByRefSystem(ctx, orgA, domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "acme", Repo: "ghost"})
+	if err != nil {
+		t.Fatalf("seed untracked acme/ghost: %v", err)
+	}
 
-	tracksAs := func(userID, owner, repo string) bool {
+	tracksAs := func(userID, repositoryID string) bool {
 		t.Helper()
 		var got bool
 		if err := stores.Tx.WithTx(ctx, orgA, userID, func(tx db.TxStores) error {
 			var e error
-			got, e = tx.TeamGitHubRepos.TracksRepoViewerScoped(ctx, orgA, dbtest.TestGitHubHost, owner, repo)
+			got, e = tx.TeamGitHubRepos.TracksRepositoryViewerScoped(ctx, orgA, repositoryID)
 			return e
 		}); err != nil {
-			t.Fatalf("TracksRepoViewerScoped(%s, %s/%s): %v", userID, owner, repo, err)
+			t.Fatalf("TracksRepositoryViewerScoped(%s, %s): %v", userID, repositoryID, err)
 		}
 		return got
 	}
 
-	if !tracksAs(alice, "acme", "api") {
+	if !tracksAs(alice, api.ID) {
 		t.Error("alice's team tracks acme/api; want true")
 	}
-	if !tracksAs(alice, "ACME", "API") {
-		t.Error("match should be case-insensitive")
-	}
-	if tracksAs(bob, "acme", "api") {
+	if tracksAs(bob, api.ID) {
 		t.Error("bob's team does not track acme/api; want false even though it exists org-wide")
 	}
-	if tracksAs(alice, "acme", "ghost") {
+	if tracksAs(alice, ghost.ID) {
 		t.Error("acme/ghost is not tracked by anyone; want false")
+	}
+	if tracksAs(alice, "not-a-uuid") {
+		t.Error("a value that was never a registry id names nothing; want false")
+	}
+
+	// acme/api is deleted on GitHub and recreated under the same name: TF
+	// retires its row, and the new repository gets a row of its own.
+	if _, err := stores.Repos.FillMissingExternalIDsSystem(ctx, orgA, []domain.RepoRef{
+		{Host: dbtest.TestGitHubHost, Owner: "Acme", Repo: "api", ExternalID: "4100"},
+	}); err != nil {
+		t.Fatalf("seed acme/api id: %v", err)
+	}
+	if got, err := stores.Repos.RetireSystem(ctx, orgA, domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "Acme", Repo: "api", ExternalID: "4100"}); err != nil || got == nil {
+		t.Fatalf("RetireSystem: got=%v err=%v", got, err)
+	}
+	recreated, err := stores.Repos.FindOrCreateByRefSystem(ctx, orgA, domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "acme", Repo: "api"})
+	if err != nil || recreated.ID == api.ID {
+		t.Fatalf("recreated acme/api = %+v, err=%v; want a row of its own", recreated, err)
+	}
+	if !tracksAs(alice, api.ID) {
+		t.Error("alice's team still tracks the retired row; tracking is forward-only")
+	}
+	if tracksAs(alice, recreated.ID) {
+		t.Error("nobody tracks the recreated acme/api; sharing a name with a tracked row must not make it tracked")
 	}
 }
 
-// TestTeamGitHubRepos_Postgres_TracksRepoViewerAdminScoped_RLS pins the
+// TestTeamGitHubRepos_Postgres_TracksRepositoryViewerAdminScoped_RLS pins the
 // mutation gate for org-wide repo configuration: seeing a repo (membership)
 // and being allowed to change it (team admin) are separate answers. Repository
 // rows carry no team_id, so a member of one tracking team writing the
 // row changes behaviour for every tracking team — hence the narrower
 // predicate.
-func TestTeamGitHubRepos_Postgres_TracksRepoViewerAdminScoped_RLS(t *testing.T) {
+func TestTeamGitHubRepos_Postgres_TracksRepositoryViewerAdminScoped_RLS(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()
@@ -218,51 +245,63 @@ func TestTeamGitHubRepos_Postgres_TracksRepoViewerAdminScoped_RLS(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("track acme/api for teamA: %v", err)
 	}
+	api := pgRepoRow(t, stores, orgA, "Acme", "api")
+	ghost, err := stores.Repos.FindOrCreateByRefSystem(ctx, orgA, domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "acme", Repo: "ghost"})
+	if err != nil {
+		t.Fatalf("seed untracked acme/ghost: %v", err)
+	}
 
-	adminTracksAs := func(userID, owner, repo string) bool {
+	adminTracksAs := func(userID, repositoryID string) bool {
 		t.Helper()
 		var got bool
 		if err := stores.Tx.WithTx(ctx, orgA, userID, func(tx db.TxStores) error {
 			var e error
-			got, e = tx.TeamGitHubRepos.TracksRepoViewerAdminScoped(ctx, orgA, dbtest.TestGitHubHost, owner, repo)
+			got, e = tx.TeamGitHubRepos.TracksRepositoryViewerAdminScoped(ctx, orgA, repositoryID)
 			return e
 		}); err != nil {
-			t.Fatalf("TracksRepoViewerAdminScoped(%s, %s/%s): %v", userID, owner, repo, err)
+			t.Fatalf("TracksRepositoryViewerAdminScoped(%s, %s): %v", userID, repositoryID, err)
 		}
 		return got
 	}
-	memberTracksAs := func(userID, owner, repo string) bool {
+	memberTracksAs := func(userID, repositoryID string) bool {
 		t.Helper()
 		var got bool
 		if err := stores.Tx.WithTx(ctx, orgA, userID, func(tx db.TxStores) error {
 			var e error
-			got, e = tx.TeamGitHubRepos.TracksRepoViewerScoped(ctx, orgA, dbtest.TestGitHubHost, owner, repo)
+			got, e = tx.TeamGitHubRepos.TracksRepositoryViewerScoped(ctx, orgA, repositoryID)
 			return e
 		}); err != nil {
-			t.Fatalf("TracksRepoViewerScoped(%s, %s/%s): %v", userID, owner, repo, err)
+			t.Fatalf("TracksRepositoryViewerScoped(%s, %s): %v", userID, repositoryID, err)
 		}
 		return got
 	}
 
-	if !adminTracksAs(alice, "acme", "api") {
+	if !adminTracksAs(alice, api.ID) {
 		t.Error("alice admins the team tracking acme/api; want true")
 	}
-	if !adminTracksAs(alice, "ACME", "API") {
-		t.Error("match should be case-insensitive")
-	}
-	if adminTracksAs(alice, "acme", "ghost") {
+	if adminTracksAs(alice, ghost.ID) {
 		t.Error("acme/ghost is tracked by nobody; want false even for a team admin")
 	}
 	// The split this gate exists for: bob reads the repo, bob cannot write it.
-	if !memberTracksAs(bob, "acme", "api") {
+	if !memberTracksAs(bob, api.ID) {
 		t.Error("bob is a member of the team tracking acme/api; the read gate should pass")
 	}
-	if adminTracksAs(bob, "acme", "api") {
+	if adminTracksAs(bob, api.ID) {
 		t.Error("bob is a plain member, not a team admin; the write gate must reject him")
 	}
-	if adminTracksAs(carol, "acme", "api") {
+	if adminTracksAs(carol, api.ID) {
 		t.Error("carol admins teamB, which doesn't track acme/api; want false")
 	}
+}
+
+// pgRepoRow reads one registry row by name on the admin pool.
+func pgRepoRow(t *testing.T, stores db.Stores, orgID, owner, repo string) domain.Repository {
+	t.Helper()
+	row, err := stores.Repos.GetByRefSystem(context.Background(), orgID, domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: owner, Repo: repo})
+	if err != nil || row == nil {
+		t.Fatalf("resolve %s/%s: got=%v err=%v", owner, repo, row, err)
+	}
+	return *row
 }
 
 func pgStrsEqual(a, b []string) bool {

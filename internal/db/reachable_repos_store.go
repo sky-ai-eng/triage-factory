@@ -148,7 +148,9 @@ type ReachableReposStore interface {
 	// Tracking is read from team_github_repos (the union across every team),
 	// never from repositories: that table is a superset, since get-or-create
 	// mints a row for any repository an agent adds to a workspace, and counting
-	// those as "tracked" would under-report the finding.
+	// those as "tracked" would under-report the finding. A retired registry row
+	// tracks nothing here: it holds no name, so a team still tracking it says
+	// nothing about the repository GitHub now serves under that name.
 	//
 	// Ordered by (installation, folded owner, folded repo), which the per-class
 	// unique index makes a total order, so offset paging cannot drop or repeat a
@@ -179,7 +181,9 @@ type ReachableReposStore interface {
 	// What remains is a tracked repository under a selective grant that does not
 	// contain it, or on an account no live installation covers at all — each
 	// naming the covering installation when there is one, so the finding can
-	// point at the page where the grant is widened. Ordered by folded slug.
+	// point at the page where the grant is widened. A retired registry row is
+	// not reported: GitHub no longer serves it to the org at all, which is no
+	// grant's to fix. Ordered by folded slug.
 	ListScopeDriftSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, opts ListOpts) ([]domain.ScopeDriftRepository, int, error)
 
 	// ListReachableSystem is the picker's read: one page of the org's reachable

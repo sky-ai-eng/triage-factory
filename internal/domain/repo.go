@@ -105,6 +105,15 @@ type Repository struct {
 	CloneError     string // raw stderr / preflight output captured at failure time
 	CloneErrorKind string // "ssh" | "other" | ""
 
+	// RetiredAt is when TF retired the row: GitHub gave its name to another
+	// repository and the row's own id no longer answers, because the
+	// repository was deleted or the org's credential can no longer see it. A
+	// retired row keeps its id, name, provider id and everything that
+	// references it, and holds no name: reads by name and the lists skip it,
+	// and the repository GitHub now serves under the name gets a row of its
+	// own. Reads by id still return it. nil on a row that holds its name.
+	RetiredAt *time.Time
+
 	// PullsETag / PullsPolledAt back the GitHub poller's conditional
 	// open-PR discovery. PullsETag is the last ETag GitHub returned for
 	// the repo's GET /pulls?state=open listing; PullsPolledAt

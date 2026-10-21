@@ -7,10 +7,11 @@ import (
 
 func TestDetectRepoRenames(t *testing.T) {
 	const gh, ghe = "https://github.com", "https://ghe.example.com"
-	stored := []RepoRef{
-		{Source: "github", Host: gh, Owner: "octo", Repo: "api", ExternalID: "1"},
-		{Source: "github", Host: gh, Owner: "octo", Repo: "web", ExternalID: "2"},
-		{Source: "github", Host: gh, Owner: "octo", Repo: "no-id"},
+	stored := []RepoIdentity{
+		{RepoRef: RepoRef{Source: "github", Host: gh, Owner: "octo", Repo: "api", ExternalID: "1"}},
+		{RepoRef: RepoRef{Source: "github", Host: gh, Owner: "octo", Repo: "web", ExternalID: "2"}},
+		{RepoRef: RepoRef{Source: "github", Host: gh, Owner: "octo", Repo: "no-id"}},
+		{RepoRef: RepoRef{Source: "github", Host: gh, Owner: "octo", Repo: "gone", ExternalID: "4"}, Retired: true},
 	}
 
 	tests := []struct {
@@ -72,6 +73,18 @@ func TestDetectRepoRenames(t *testing.T) {
 			observed: []RepoRef{{Source: "gitlob", Host: gh, Owner: "octo", Repo: "renamed", ExternalID: "1"}},
 			want:     nil,
 		},
+		{
+			// A retired row holds no name, so the provider answering for its
+			// id under the very slug it is stored under still gives it one.
+			name:     "a retired row observed under its stored name is a candidate",
+			observed: []RepoRef{{Host: gh, Owner: "octo", Repo: "gone", ExternalID: "4"}},
+			want:     []string{"octo/gone"},
+		},
+		{
+			name:     "a retired row observed under another name is a candidate",
+			observed: []RepoRef{{Host: gh, Owner: "acme", Repo: "found", ExternalID: "4"}},
+			want:     []string{"acme/found"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -82,6 +95,84 @@ func TestDetectRepoRenames(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("DetectRepoRenames = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDetectReassignedRepoNames(t *testing.T) {
+	const gh, ghe = "https://github.com", "https://ghe.example.com"
+	stored := []RepoIdentity{
+		{RepoRef: RepoRef{Source: "github", Host: gh, Owner: "octo", Repo: "api", ExternalID: "1"}},
+		{RepoRef: RepoRef{Source: "github", Host: gh, Owner: "octo", Repo: "web", ExternalID: "2"}},
+		{RepoRef: RepoRef{Source: "github", Host: gh, Owner: "octo", Repo: "no-id"}},
+		{RepoRef: RepoRef{Source: "github", Host: gh, Owner: "octo", Repo: "gone", ExternalID: "4"}, Retired: true},
+	}
+
+	tests := []struct {
+		name     string
+		observed []RepoRef
+		want     []string // stored ids
+	}{
+		{
+			// Deleted and recreated, or renamed away and the name reused: the
+			// row holding the name is the one to resolve.
+			name:     "the same name under a different id reports the stored row",
+			observed: []RepoRef{{Host: gh, Owner: "octo", Repo: "api", ExternalID: "99"}},
+			want:     []string{"1"},
+		},
+		{
+			name:     "matching folds case",
+			observed: []RepoRef{{Host: gh, Owner: "Octo", Repo: "API", ExternalID: "99"}},
+			want:     []string{"1"},
+		},
+		{
+			name:     "the same name under the same id is the steady state",
+			observed: []RepoRef{{Host: gh, Owner: "octo", Repo: "api", ExternalID: "1"}},
+			want:     nil,
+		},
+		{
+			// A swap: the observation already says where id 1 went, and the
+			// rename half acts on it.
+			name: "a stored row whose own id is observed is left to the rename",
+			observed: []RepoRef{
+				{Host: gh, Owner: "octo", Repo: "api", ExternalID: "2"},
+				{Host: gh, Owner: "octo", Repo: "web", ExternalID: "1"},
+			},
+			want: nil,
+		},
+		{
+			name:     "a retired row holds no name to reassign",
+			observed: []RepoRef{{Host: gh, Owner: "octo", Repo: "gone", ExternalID: "99"}},
+			want:     nil,
+		},
+		{
+			// No id to ask GitHub about; registering the observed id or a
+			// rename onto the name takes such a row in instead.
+			name:     "a stored row with no id is never reported",
+			observed: []RepoRef{{Host: gh, Owner: "octo", Repo: "no-id", ExternalID: "99"}},
+			want:     nil,
+		},
+		{
+			name:     "an observation with no id reports nothing",
+			observed: []RepoRef{{Host: gh, Owner: "octo", Repo: "api"}},
+			want:     nil,
+		},
+		{
+			name:     "the same name on another host is another repository",
+			observed: []RepoRef{{Host: ghe, Owner: "octo", Repo: "api", ExternalID: "99"}},
+			want:     nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []string
+			for _, r := range DetectReassignedRepoNames(stored, tc.observed) {
+				got = append(got, r.ExternalID)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("DetectReassignedRepoNames = %v, want %v", got, tc.want)
 			}
 		})
 	}

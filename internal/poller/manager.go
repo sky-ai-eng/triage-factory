@@ -856,11 +856,20 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		// answers with the new one. The grant carries every repo's id
 		// alongside its current name, so the condition — same id, different
 		// name — is readable here with no request of its own, and over the
-		// WHOLE grant rather than the tracked subset.
-		if renamed := m.applyRepoRenames(ctx, orgID, scope, grant); renamed > 0 {
+		// WHOLE grant rather than the tracked subset. So is its mirror image —
+		// same name, different id — which the intersection would otherwise
+		// match by name, polling the repository GitHub now serves under a
+		// tracked name as if it were the one TF tracks.
+		//
+		// A tracked name GitHub serves under another id, whose stored row the
+		// pass could not resolve, is granted but not polled: its pull requests
+		// belong to another repository, and polling them would write them onto
+		// the stored row's entities.
+		renamed, contested := m.applyRepoRenames(ctx, orgID, scope, grant)
+		if renamed > 0 {
 			repos = m.reloadConfiguredRepos(ctx, orgID, scope, repos)
 		}
-		scoped := intersectConfigured(repos, grant, covered)
+		scoped := withoutSlugs(intersectConfigured(repos, grant, covered), contested)
 		if len(scoped) == 0 {
 			continue
 		}
@@ -1210,8 +1219,10 @@ func (m *Manager) recordRepoIDs(ctx context.Context, orgID, host string, scoped 
 	}
 }
 
-// applyRepoRenames reconciles the tracked repositories' slugs against the
-// names GitHub used in this grant listing, returning how many moved.
+// applyRepoRenames reconciles the stored repositories against the names and
+// ids GitHub used in this grant listing — renames, restores, and rows whose
+// name GitHub now serves under another id (reporename.Apply) — returning how
+// many rows changed and the names still held under another id.
 //
 // Scoped to the whole grant, unlike recordRepoIDs above: filling an id needs a
 // row to fill and so follows the tracked intersection, but detecting a rename
@@ -1219,9 +1230,9 @@ func (m *Manager) recordRepoIDs(ctx context.Context, orgID, host string, scoped 
 // for a repository TF does not track matches no stored identity and costs one
 // map lookup. host is the org's current GitHub host, which the grant was
 // read from.
-func (m *Manager) applyRepoRenames(ctx context.Context, orgID, host string, grant []ghclient.UserRepo) int {
+func (m *Manager) applyRepoRenames(ctx context.Context, orgID, host string, grant []ghclient.UserRepo) (int, []string) {
 	if m.repos == nil {
-		return 0
+		return 0, nil
 	}
 	observed := make([]domain.RepoRef, 0, len(grant))
 	for _, g := range grant {
@@ -1241,9 +1252,10 @@ func (m *Manager) applyRepoRenames(ctx context.Context, orgID, host string, gran
 }
 
 // reloadConfiguredRepos re-reads the tracked set after a rename moved a slug
-// inside it, so this cycle's intersection matches the repository under its new
-// name instead of skipping it until the next one. Re-rotated to the same
-// cursor the first read was, so the round-robin position survives.
+// inside it or a retire took one out, so this cycle's intersection matches the
+// repository under its new name instead of skipping it until the next one, and
+// never matches a retired row's old name. Re-rotated to the same cursor the
+// first read was, so the round-robin position survives.
 func (m *Manager) reloadConfiguredRepos(ctx context.Context, orgID, host string, current []string) []string {
 	refreshed, err := m.repos.ListTrackedNamesSystem(ctx, orgID, host)
 	if err != nil {
@@ -1251,6 +1263,24 @@ func (m *Manager) reloadConfiguredRepos(ctx context.Context, orgID, host string,
 		return current
 	}
 	return rotateFromCursor(refreshed, m.githubCursor(orgID))
+}
+
+// withoutSlugs returns repos less every slug in drop, compared folded.
+func withoutSlugs(repos, drop []string) []string {
+	if len(drop) == 0 {
+		return repos
+	}
+	dropped := make(map[string]bool, len(drop))
+	for _, d := range drop {
+		dropped[strings.ToLower(d)] = true
+	}
+	out := make([]string, 0, len(repos))
+	for _, r := range repos {
+		if !dropped[strings.ToLower(r)] {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func intersectConfigured(configured []string, grant []ghclient.UserRepo, covered map[string]bool) []string {

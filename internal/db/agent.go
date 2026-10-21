@@ -476,7 +476,9 @@ type ConversationStore interface {
 	// the event as injected. A checkout matches only when its repository is on
 	// the PR entity's own GitHub host (its scope), and a pending review only
 	// when the review artifact is recorded in that scope: the same slug on
-	// another host is another repository. Admin-pool only: the coherence subscriber
+	// another host is another repository. A checkout of a retired repository
+	// never matches, because its name belongs to the repository GitHub serves
+	// under it now. Admin-pool only: the coherence subscriber
 	// has no viewer claims and must see every relevant team conversation in
 	// the org.
 	ListPRCoherenceTargetsSystem(ctx context.Context, orgID string, query PRCoherenceTargetQuery) ([]domain.PRCoherenceTarget, error)

@@ -18,9 +18,19 @@ import (
 // org), so the app pool has nothing to say about it.
 func TestRepoRename_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	dbtest.RunRepoRenameConformance(t, pgRepoRenameFactory(h))
+}
 
-	dbtest.RunRepoRenameConformance(t, func(t *testing.T) (db.Stores, string, dbtest.RepoRenameSeeder) {
+// TestRepoRetire_Postgres runs the retire conformance suite on the rename
+// suite's fixtures. A retire is admin-pool by design, like a rename.
+func TestRepoRetire_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunRepoRetireConformance(t, pgRepoRenameFactory(h))
+}
+
+func pgRepoRenameFactory(h *pgtest.Harness) dbtest.RepoRenameFactory {
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	return func(t *testing.T) (db.Stores, string, dbtest.RepoRenameSeeder) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "rename")
@@ -75,7 +85,7 @@ func TestRepoRename_Postgres(t *testing.T) {
 			},
 		}
 		return stores, orgID, seed
-	})
+	}
 }
 
 // pgCategoryAReferences reads the raw stored repository reference out of each

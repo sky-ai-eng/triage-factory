@@ -600,12 +600,11 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 	})
 
 	t.Run("UpdateBaseBranch_matches_case_insensitively", func(t *testing.T) {
-		// GitHub owner/repo identifiers are case-insensitive, and the
-		// TFAC-559 repoVisible handler gate (TracksRepoViewerScoped)
-		// matches case-insensitively too. If UpdateBaseBranch's lookup were
-		// case-sensitive, a caller reaching the PATCH endpoint with
-		// different casing than what's stored could pass the gate yet
-		// silently affect 0 rows here. Stored casing ("Acme/Api") is sticky;
+		// GitHub owner/repo identifiers are case-insensitive, so a name
+		// resolves to its row whatever casing it arrives in. If the lookup
+		// the update goes through were case-sensitive, a caller holding
+		// different casing than what's stored would silently affect 0 rows
+		// here. Stored casing ("Acme/Api") is sticky;
 		// the update is issued with different casing ("acme/API") and must
 		// still find the row.
 		s, orgID, _ := mk(t)

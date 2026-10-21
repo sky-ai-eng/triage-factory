@@ -175,11 +175,16 @@ func (s *entityStore) GetBySourceSystem(ctx context.Context, orgID, source, scop
 
 // entityByKey is the key lookup. A non-empty externalID skips a row that
 // carries a different id: that row is another object that had or has the key.
+// An entity of a retired repository answers to no key, as the repository
+// answers to no name: its key spells a name GitHub has given to another
+// repository, whose objects are the ones that key means now.
 func entityByKey(ctx context.Context, q queryer, orgID, source, scope, sourceID, externalID string) (*domain.Entity, error) {
 	return scanEntityRow(q.QueryRowContext(ctx, `
 		SELECT `+pgEntitySelectCols+` FROM entities
 		WHERE org_id = $1 AND source = $2 AND scope = $3 AND source_id = $4
 		  AND ($5 = '' OR external_id IS NULL OR external_id = $5)
+		  AND NOT EXISTS (SELECT 1 FROM repositories r
+		                   WHERE r.id = entities.repository_id AND r.retired_at IS NOT NULL)
 		`+pgEntityKeyOrder+` LIMIT 1`,
 		orgID, source, scope, sourceID, externalID))
 }

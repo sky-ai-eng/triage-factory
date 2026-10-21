@@ -18,25 +18,27 @@ var (
 	// ErrRepoSlugOccupied means something already answers to the slug the
 	// rename would move onto. FindOrCreateByExternalID refuses with it too,
 	// for the first cause: the name it would register a repository under is
-	// held by a row with a different provider id. Two causes, one remedy:
+	// held by a row with a different provider id. Two causes:
 	//
 	//   - A repository row the rename cannot prove is the same repository: one
-	//     with a different provider id (GitHub cannot serve two live
-	//     repositories under one name, so the occupant is a repository TF still
-	//     has a row for and GitHub no longer does), or one without an id that a
-	//     team tracks or a worktree ledger row names.
-	//   - A durable record keyed on that name: an entity ("owner/repo#18") or
-	//     an artifact dedup key. Entity keys and artifact dedup keys spell the
-	//     slug themselves, whatever row an entity's repository_id references,
-	//     and nothing that retires a repository row touches them (tracking is
-	//     forward-only), so a name can be spoken for by records alone.
+	//     with a different provider id, or one without an id that a team
+	//     tracks or a worktree ledger row names. GitHub cannot serve two live
+	//     repositories under one name, so an occupant with another id is a
+	//     repository TF still holds under a name GitHub has given away. It is
+	//     resolved by its own id (reporename.Resolve): renamed when GitHub
+	//     answers for the id under another name, retired (RetireSystem) when it
+	//     does not answer at all, and either one frees the name.
+	//   - A durable record keyed on that name: an active entity
+	//     ("owner/repo#18") or an artifact dedup key. Entity keys and artifact
+	//     dedup keys spell the slug themselves, so a name can be spoken for by
+	//     records alone. A retired row's entities are closed, and a closed
+	//     entity holds no key, but its artifacts keep their dedup keys.
 	//
 	// Neither is resolved by deleting the occupant. The first would drop a
 	// repository row that holds a provider id, a team's tracking decision or a
 	// run's record of a checkout; the second would destroy durable work — an
 	// entity carries tasks, conversations and memory, and an artifact is the
-	// audit record of a real external object. Retiring stale untracked state is
-	// a user-initiated action, never a side effect of a rename.
+	// audit record of a real external object.
 	//
 	// The one occupant a rename does absorb is a bare row (no provider id, no
 	// tracking, no ledger row) that a GitHub entity create minted under the
@@ -155,6 +157,20 @@ func RequireRepoHost(host string) error {
 // edge parser for the surfaces that still speak one — HTTP path segments, an
 // agent's argv — and each of those resolves once, at its own boundary, next
 // to whatever access gate it already runs.
+//
+// # A retired row holds no name
+//
+// RetireSystem retires a row when GitHub has given its name to another
+// repository and its own id no longer answers (domain.Repository.RetiredAt).
+// The row keeps its id, its name and everything that references it, and from
+// then on it answers only to its id: every ref-keyed method, every list and
+// the tracked-name reads skip it, so the repository GitHub now serves under
+// the name resolves to a row of its own, and nothing polls, profiles or clones
+// the retired one. The identity index covers only rows that are not retired,
+// which is what lets the two share a name. Get and GetSystem still return a
+// retired row, and so does the team tracked-set read
+// (TeamGitHubReposStore.ListForTeam): untracking is a team's decision, and a
+// retire is not one.
 //
 // # Every single-row write returns the row it persisted
 //
@@ -473,17 +489,49 @@ type RepositoryStore interface {
 
 	// ListIdentitiesSystem returns the provider identity — source, host, slug,
 	// and the provider's own id — of every repository row on host that carries
-	// an id.
-	// Rows without one are omitted rather than returned with an empty
-	// ExternalID: a repository TF has not learned an id for is not renamable
-	// in either direction, so it is not part of the comparison at all.
+	// an id, retired rows included and marked. Rows without an id are omitted
+	// rather than returned with an empty ExternalID: a repository TF has not
+	// learned an id for is not renamable in either direction, so it is not
+	// part of the comparison at all. A retired row is: GitHub answering for its
+	// id again is what restores it.
 	//
-	// The read half of rename detection. It is the small side of the join:
-	// TF holds tens of repositories per org where a grant listing may hold
-	// thousands, so the caller reads this once and matches the provider's
-	// enumeration against it in memory (domain.DetectRepoRenames) instead of
-	// asking the database once per observed repository.
-	ListIdentitiesSystem(ctx context.Context, orgID, host string) ([]domain.RepoRef, error)
+	// The read half of rename and reassignment detection. It is the small side
+	// of the join: TF holds tens of repositories per org where a grant listing
+	// may hold thousands, so the caller reads this once and matches the
+	// provider's enumeration against it in memory (domain.DetectRepoRenames,
+	// domain.DetectReassignedRepoNames) instead of asking the database once
+	// per observed repository.
+	ListIdentitiesSystem(ctx context.Context, orgID, host string) ([]domain.RepoIdentity, error)
+
+	// RetireSystem retires the row stored under held's slug that carries
+	// held's provider id, because GitHub has given the slug to another
+	// repository and no longer answers for the id: the repository was deleted,
+	// or the org's credential can no longer see it. The caller has asked
+	// GitHub (reporename.Resolve); a retire is never inferred from a failed
+	// request.
+	//
+	// In one transaction it sets retired_at and closes the row's active
+	// entities, which frees both the name (the identity index skips retired
+	// rows) and the keys the entities spell ("owner/repo#18", which the
+	// repository now under the name has pull requests of its own under).
+	// Nothing else moves: the row keeps its id, name and provider id, its
+	// tracking rows, worktree ledger rows, events, artifacts and tasks.
+	//
+	// TODO(TFAC-1163): the retired row's pull request, review and branch
+	// artifacts keep dedup keys that spell the name, so the repository now
+	// under it upserts its own PR #N or branch onto them, and a rename onto the
+	// name can collide with them. Keying those artifacts on ids frees them too.
+	//
+	// The row is matched on (source, host, external_id) and re-checked under a
+	// lock to still be stored under held's slug and not retired, so a candidate
+	// that went stale — renamed since the caller read it, or retired by a
+	// concurrent caller — is a no-op, returned as (nil, nil). Otherwise it
+	// returns the row it retired. held.Host and held.ExternalID are required.
+	//
+	// System (claims-free) variant only, admin-pool in Postgres: a retire
+	// closes entities every team in the org may have tasks on, which no
+	// request-scoped identity can see all of.
+	RetireSystem(ctx context.Context, orgID string, held domain.RepoRef) (*domain.Repository, error)
 
 	// RenameSystem makes TF's stored slug for one repository match the slug
 	// the provider currently reports for it, rewriting every stored reference
@@ -492,8 +540,9 @@ type RepositoryStore interface {
 	// provider now uses.
 	//
 	// Everything it rewrites belongs to that host: the repository row is
-	// matched on (source, host, external_id), entities only within the host's
-	// entity scope, artifacts and audit-ledger rows only where their scope is
+	// matched on (source, host, external_id), entities are the row's own (by
+	// repository_id, so a retired row that shares the old slug keeps its
+	// history), artifacts and audit-ledger rows only where their scope is
 	// the host (with a link or without one), placement pins only on the host,
 	// and a stored link only when it is on the host (domain.RewriteRepoURL).
 	// A repository on another host with the same name or id is never touched.
@@ -511,10 +560,22 @@ type RepositoryStore interface {
 	//   - observed carries no ExternalID — nothing to key on.
 	//   - no repository row carries that (source, host, id) — nothing to
 	//     rename.
-	//   - the stored slug already matches, case-insensitively — the second run
-	//     of a rename that already applied, which is the steady state.
+	//   - the stored slug already matches, case-insensitively, on a row that
+	//     is not retired — the second run of a rename that already applied,
+	//     which is the steady state.
 	//
-	// One occupant of the target slug is absorbed rather than refused: a bare
+	// A retired row carrying the id is restored: the provider has answered for
+	// it, so it takes the slug it was observed under and clears retired_at, in
+	// the same transaction, under the same occupant rules as a rename
+	// (Restored, and Renamed too when the slug moved). Only its own entities
+	// move with it. The records keyed by the slug alone — artifacts, placement
+	// pins, audit-ledger pointers — stay where they are, because the name it
+	// was retired under is no longer its own, and whatever answers to it now
+	// may be another repository's.
+	//
+	// The occupant of the target slug is a row that holds it: a retired row
+	// under the same slug is history, not an occupant. One occupant is
+	// absorbed rather than refused: a bare
 	// row, with no provider id, no tracking row and no worktree ledger row,
 	// which a GitHub entity create minted under the new name before TF
 	// observed the rename (an agent touch through GitHub's redirect, or a pull
@@ -528,8 +589,10 @@ type RepositoryStore interface {
 	// else already answers to the target slug — another repository row, or a
 	// durable entity/artifact keyed on that name — and ErrRepoIdentityAmbiguous
 	// when more than one row claims the id. Both are terminal for the attempt,
-	// and a caller that retries them will fail identically until a human
-	// retires whatever holds the name. A refusal rolls back the absorb too.
+	// and a caller that retries them will fail identically until whatever
+	// holds the name is gone: renamed or retired once it is resolved by its own
+	// id (reporename does this for an occupant with one), or never, for a
+	// durable record. A refusal rolls back the absorb too.
 	//
 	// System (claims-free) variant only, and admin-pool in Postgres: the
 	// rewrite spans tables belonging to every team in the org (tracked sets,

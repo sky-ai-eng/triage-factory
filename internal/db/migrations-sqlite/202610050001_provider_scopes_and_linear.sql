@@ -2,9 +2,11 @@
 -- +goose Up
 -- Every external object is keyed within the provider namespace it lives in, a
 -- GitHub entity references its repository's registry row and records its pull
--- request's node id, a team's Jira tracked set and every Jira issue entity
--- reference a Jira project registry row, every Jira and Linear issue entity is
--- written with its issue id, Linear becomes a tracked source, and five smaller
+-- request's node id, a repository row can be retired to give up a name GitHub
+-- has handed to another repository, a team's Jira tracked set and every Jira
+-- issue entity reference a Jira project registry row, every Jira and Linear
+-- issue entity is written with its issue id, Linear becomes a tracked source,
+-- and five smaller
 -- changes ride along: the org GitHub App's unusable state, the claim's source
 -- manifest, the retirement of the 'completed' conversation status, node ids on
 -- artifacts and audit-ledger rows, and the table of rate-limit readings.
@@ -474,9 +476,19 @@ UPDATE repositories
    SET host = (SELECT s.scope FROM org_scope s
                 WHERE s.org_id = repositories.org_id AND s.provider = 'github');
 
+-- retired_at is set when GitHub has given a row's name to another repository
+-- and the row's own id no longer answers: the repository was deleted, or the
+-- org's credential can no longer see it. A retired row keeps its id, name,
+-- provider id and everything that references it, and stops holding the name.
+-- So the identity index covers only rows that are not retired, as
+-- entities_active_key covers only active entities: the repository now under
+-- the name gets a row of its own and never collides with the history.
+ALTER TABLE repositories ADD COLUMN retired_at DATETIME;
+
 DROP INDEX repositories_identity;
 CREATE UNIQUE INDEX repositories_identity
-    ON repositories(org_id, source, host, LOWER(owner), LOWER(repo));
+    ON repositories(org_id, source, host, LOWER(owner), LOWER(repo))
+    WHERE retired_at IS NULL;
 
 -- A provider id names one repository on its host. Nothing enforced that
 -- before, so two rows may share one; the id stays on the most recently updated

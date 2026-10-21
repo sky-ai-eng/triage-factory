@@ -52,3 +52,44 @@ func TestRepoMetaExternalID_EmptyWhenAbsent(t *testing.T) {
 		t.Errorf("ExternalID() with no id = %q, want empty", got)
 	}
 }
+
+// GetRepoByID asks by the id a rename does not move, and answers under the
+// repository's current name. A 404 is reported as one, distinctly from any
+// other failure: it is the only answer a retire may be decided on.
+func TestGetRepoByID(t *testing.T) {
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.URL.Path)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/repositories/1296269"):
+			_, _ = w.Write([]byte(`{"id":1296269,"full_name":"octo/widget-v2"}`))
+		case strings.HasSuffix(r.URL.Path, "/repositories/7"):
+			w.WriteHeader(http.StatusForbidden)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, "")
+
+	meta, err := c.GetRepoByID(context.Background(), "1296269")
+	if err != nil || meta.FullName != "octo/widget-v2" || meta.ExternalID() != "1296269" {
+		t.Errorf("GetRepoByID = %+v, %v; want octo/widget-v2 carrying 1296269", meta, err)
+	}
+	if _, err := c.GetRepoByID(context.Background(), "5"); !IsHTTP404(err) {
+		t.Errorf("deleted repository: err = %v, want a 404", err)
+	}
+	if _, err := c.GetRepoByID(context.Background(), "7"); err == nil || IsHTTP404(err) {
+		t.Errorf("forbidden: err = %v, want an error that is not a 404", err)
+	}
+
+	before := len(asked)
+	for _, bad := range []string{"", "0", "octo/widget", "12/../users"} {
+		if _, err := c.GetRepoByID(context.Background(), bad); err == nil {
+			t.Errorf("GetRepoByID(%q) succeeded; want it refused", bad)
+		}
+	}
+	if len(asked) != before {
+		t.Errorf("a malformed id reached GitHub: %v", asked[before:])
+	}
+}

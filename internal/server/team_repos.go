@@ -30,8 +30,8 @@ import (
 // in local mode — same as the sibling team routes.
 //
 // **The set is named by registry id, never by name.** The GET hands each
-// tracked repository back with its registry id, its GitHub id and its current
-// owner/repo, and the PUT takes the registry ids alone — so a rename on GitHub
+// tracked repository back with its registry id, its GitHub id, its current
+// owner/repo and whether it is retired, and the PUT takes the registry ids alone — so a rename on GitHub
 // between a client's read and its save cannot make the body name a repository
 // by a name it no longer has. A repository the registry holds no row for yet
 // is one the picker offers by GitHub id (POST /api/github/repos/list): the
@@ -54,6 +54,12 @@ type trackedRepoJSON struct {
 	// display.
 	Owner string `json:"owner"`
 	Repo  string `json:"repo"`
+	// RetiredAt is when TF retired the registry row, null while it holds its
+	// name. A retired row is a repository GitHub no longer serves to the org:
+	// its name went to another repository, which is a different entry with an
+	// id of its own. The team keeps tracking the retired row until a save
+	// drops it, and nothing polls it.
+	RetiredAt *string `json:"retired_at"`
 }
 
 type teamReposResponse struct {
@@ -300,7 +306,10 @@ func repositoryIDField(i int) string { return fmt.Sprintf("repository_ids[%d]", 
 func trackedReposJSON(repos []domain.TeamGitHubRepo) []trackedRepoJSON {
 	out := make([]trackedRepoJSON, 0, len(repos))
 	for _, r := range repos {
-		out = append(out, trackedRepoJSON{ID: r.RepositoryID, GitHubID: r.ExternalID, Owner: r.Owner, Repo: r.Repo})
+		out = append(out, trackedRepoJSON{
+			ID: r.RepositoryID, GitHubID: r.ExternalID, Owner: r.Owner, Repo: r.Repo,
+			RetiredAt: optRFC3339(r.RetiredAt),
+		})
 	}
 	return out
 }
