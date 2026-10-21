@@ -738,6 +738,26 @@ export async function fetchRepositorySlug(id: string): Promise<string | null> {
     .catch(() => null)
 }
 
+// TrackedLinearTeam is a Linear team as the linear_team_id_in picker reads it:
+// the Linear team id a filter stores, and the key and name it is shown as.
+export interface TrackedLinearTeam {
+  id: string
+  key: string
+  name: string
+}
+
+// fetchTeamTrackedLinearTeams returns the Linear teams teamId tracks in the
+// org's current Linear workspace, off the team-settings read, or null on
+// failure. Same null-vs-empty contract as fetchTeamRepos: a failed load is not
+// "tracks nothing."
+export async function fetchTeamTrackedLinearTeams(
+  teamId: string,
+): Promise<TrackedLinearTeam[] | null> {
+  const data = await fetchTeamSettings(teamId)
+  if (data === null) return null
+  return (data.linear_teams ?? []).map(({ id, key, name }) => ({ id, key, name }))
+}
+
 // fetchTeamSlackChannels returns the merged channel list (tracked + sighting
 // registry + live Slack candidates, deduped by channel_id) for teamId, or
 // null on failure — 404 when unentitled/local/non-member, or a transient

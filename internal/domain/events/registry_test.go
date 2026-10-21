@@ -106,11 +106,11 @@ func TestIssueLabelEventFields(t *testing.T) {
 		"has_label":   "string",
 	}
 	linear := map[string]string{
-		"assignee_in":     "string_list",
-		"linear_team_key": "string",
-		"label_name":      "string",
-		"label_group":     "string",
-		"has_label":       "string",
+		"assignee_in":       "string_list",
+		"linear_team_id_in": "string_list",
+		"label_name":        "string",
+		"label_group":       "string",
+		"has_label":         "string",
 	}
 	for eventType, want := range map[string]map[string]string{
 		domain.EventJiraIssueLabelAdded:     jira,

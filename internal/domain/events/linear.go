@@ -7,13 +7,16 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // Every metadata struct carries the same identity block: the issue's
 // identifier and UUID, its Linear team (id and key), its assignee (display
 // name and Linear user id) and its title. linear_team_id is what the router's
-// team gate reads (with old_linear_team_id on identifier_changed), so the
-// tracker sets it on every Linear event. It comes from
-// the stored snapshot or a fresh read of the issue, never from the
-// identifier's prefix: an identifier is a display key that a team move or a
-// team key rename changes, and the UUID is the issue's identity. The one event
-// that can lack it is unreachable for an entity that has neither a snapshot
-// nor an answer from Linear, and the gate refuses that event for every team.
+// team gate reads and what linear_team_id_in matches (with old_linear_team_id
+// and old_linear_team_id_in on identifier_changed), so the tracker sets it on
+// every Linear event. It comes from the stored snapshot or a fresh read of
+// the issue, never from the identifier's prefix: an identifier is a display
+// key that a team move or a team key rename changes, and the UUID is the
+// issue's identity. The one event that can lack it is unreachable for an
+// entity that has neither a snapshot nor an answer from Linear, and the gate
+// refuses that event for every team. linear_team_key is for display only, for
+// the same reason: a team key rename would leave a filter on it matching
+// nothing.
 // The assignee's user id is what assignee-centric routing joins against
 // user_linear_identities. The creator's is what creator_in matches; both
 // creator fields are empty for an issue an integration created.
@@ -29,9 +32,9 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 type LinearIssueIdentity struct {
 	IssueIdentifier string `json:"issue_identifier"` // "ENG-123"
 	IssueID         string `json:"issue_id"`         // Linear's UUID
-	LinearTeamID    string `json:"linear_team_id"`
-	LinearTeamKey   string `json:"linear_team_key"` // "ENG"
-	Assignee        string `json:"assignee"`        // display name
+	LinearTeamID    string `json:"linear_team_id"`   // what linear_team_id_in names
+	LinearTeamKey   string `json:"linear_team_key"`  // "ENG"
+	Assignee        string `json:"assignee"`         // display name
 	AssigneeUserID  string `json:"assignee_user_id"`
 	Creator         string `json:"creator"` // display name
 	CreatorUserID   string `json:"creator_user_id"`
@@ -50,18 +53,18 @@ type LinearIssueAssignedMetadata struct {
 }
 
 type LinearIssueAssignedPredicate struct {
-	AssigneeIn    []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
-	CreatorIn     []string `json:"creator_in,omitempty" doc:"Match issues created by anyone in this list (Linear user IDs)."`
-	LinearTeamKey *string  `json:"linear_team_key,omitempty" doc:"Scope to a specific Linear team key (e.g. ENG)."`
-	Priority      *string  `json:"priority,omitempty" doc:"Exact-match on the priority label (Urgent, High, Medium, Low, No priority)."`
-	Status        *string  `json:"status,omitempty" doc:"Filter by the issue's current state name (e.g. 'Todo')."`
-	HasLabel      *string  `json:"has_label,omitempty" doc:"Require the issue to currently bear a label of this name."`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
+	CreatorIn      []string `json:"creator_in,omitempty" doc:"Match issues created by anyone in this list (Linear user IDs)."`
+	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
+	Priority       *string  `json:"priority,omitempty" doc:"Exact-match on the priority label (Urgent, High, Medium, Low, No priority)."`
+	Status         *string  `json:"status,omitempty" doc:"Filter by the issue's current state name (e.g. 'Todo')."`
+	HasLabel       *string  `json:"has_label,omitempty" doc:"Require the issue to currently bear a label of this name."`
 }
 
 func (p LinearIssueAssignedPredicate) Matches(m LinearIssueAssignedMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeUserID) &&
 		stringInSliceFold(p.CreatorIn, m.CreatorUserID) &&
-		strEq(p.LinearTeamKey, m.LinearTeamKey) &&
+		idIn(p.LinearTeamIDIn, m.LinearTeamID) &&
 		strEq(p.Priority, m.Priority) &&
 		strEq(p.Status, m.Status) &&
 		hasLabel(p.HasLabel, m.Labels)
@@ -79,16 +82,16 @@ type LinearIssueAvailableMetadata struct {
 }
 
 type LinearIssueAvailablePredicate struct {
-	CreatorIn     []string `json:"creator_in,omitempty" doc:"Match issues created by anyone in this list (Linear user IDs)."`
-	LinearTeamKey *string  `json:"linear_team_key,omitempty" doc:"Scope to a specific Linear team key (e.g. ENG)."`
-	Priority      *string  `json:"priority,omitempty"`
-	Status        *string  `json:"status,omitempty" doc:"Filter by the issue's current state name (e.g. 'Backlog')."`
-	HasLabel      *string  `json:"has_label,omitempty" doc:"Require the issue to currently bear a label of this name."`
+	CreatorIn      []string `json:"creator_in,omitempty" doc:"Match issues created by anyone in this list (Linear user IDs)."`
+	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
+	Priority       *string  `json:"priority,omitempty"`
+	Status         *string  `json:"status,omitempty" doc:"Filter by the issue's current state name (e.g. 'Backlog')."`
+	HasLabel       *string  `json:"has_label,omitempty" doc:"Require the issue to currently bear a label of this name."`
 }
 
 func (p LinearIssueAvailablePredicate) Matches(m LinearIssueAvailableMetadata) bool {
 	return stringInSliceFold(p.CreatorIn, m.CreatorUserID) &&
-		strEq(p.LinearTeamKey, m.LinearTeamKey) &&
+		idIn(p.LinearTeamIDIn, m.LinearTeamID) &&
 		strEq(p.Priority, m.Priority) &&
 		strEq(p.Status, m.Status) &&
 		hasLabel(p.HasLabel, m.Labels)
@@ -106,15 +109,15 @@ type LinearIssueStatusChangedMetadata struct {
 }
 
 type LinearIssueStatusChangedPredicate struct {
-	AssigneeIn    []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
-	LinearTeamKey *string  `json:"linear_team_key,omitempty"`
-	NewStatus     *string  `json:"new_status,omitempty" doc:"Match transitions into a specific state (e.g. 'In Review')."`
-	OldStatus     *string  `json:"old_status,omitempty" doc:"Match transitions out of a specific state."`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
+	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
+	NewStatus      *string  `json:"new_status,omitempty" doc:"Match transitions into a specific state (e.g. 'In Review')."`
+	OldStatus      *string  `json:"old_status,omitempty" doc:"Match transitions out of a specific state."`
 }
 
 func (p LinearIssueStatusChangedPredicate) Matches(m LinearIssueStatusChangedMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeUserID) &&
-		strEq(p.LinearTeamKey, m.LinearTeamKey) &&
+		idIn(p.LinearTeamIDIn, m.LinearTeamID) &&
 		strEq(p.NewStatus, m.NewStatus) &&
 		strEq(p.OldStatus, m.OldStatus)
 }
@@ -130,15 +133,15 @@ type LinearIssuePriorityChangedMetadata struct {
 }
 
 type LinearIssuePriorityChangedPredicate struct {
-	AssigneeIn    []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
-	LinearTeamKey *string  `json:"linear_team_key,omitempty"`
-	NewPriority   *string  `json:"new_priority,omitempty"`
-	OldPriority   *string  `json:"old_priority,omitempty"`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
+	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
+	NewPriority    *string  `json:"new_priority,omitempty"`
+	OldPriority    *string  `json:"old_priority,omitempty"`
 }
 
 func (p LinearIssuePriorityChangedPredicate) Matches(m LinearIssuePriorityChangedMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeUserID) &&
-		strEq(p.LinearTeamKey, m.LinearTeamKey) &&
+		idIn(p.LinearTeamIDIn, m.LinearTeamID) &&
 		strEq(p.NewPriority, m.NewPriority) &&
 		strEq(p.OldPriority, m.OldPriority)
 }
@@ -161,15 +164,15 @@ type LinearIssueCommentedMetadata struct {
 }
 
 type LinearIssueCommentedPredicate struct {
-	AssigneeIn    []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
-	CommenterIn   []string `json:"commenter_in,omitempty" doc:"Match when anyone in this list wrote one of the new comments (Linear user IDs)."`
-	LinearTeamKey *string  `json:"linear_team_key,omitempty"`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
+	CommenterIn    []string `json:"commenter_in,omitempty" doc:"Match when anyone in this list wrote one of the new comments (Linear user IDs)."`
+	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
 }
 
 func (p LinearIssueCommentedPredicate) Matches(m LinearIssueCommentedMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeUserID) &&
 		anyInSliceFold(p.CommenterIn, m.CommenterUserIDs) &&
-		strEq(p.LinearTeamKey, m.LinearTeamKey)
+		idIn(p.LinearTeamIDIn, m.LinearTeamID)
 }
 
 // -----------------------------------------------------------------------------
@@ -183,13 +186,13 @@ type LinearIssueCompletedMetadata struct {
 }
 
 type LinearIssueCompletedPredicate struct {
-	AssigneeIn    []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
-	LinearTeamKey *string  `json:"linear_team_key,omitempty"`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
+	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
 }
 
 func (p LinearIssueCompletedPredicate) Matches(m LinearIssueCompletedMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeUserID) &&
-		strEq(p.LinearTeamKey, m.LinearTeamKey)
+		idIn(p.LinearTeamIDIn, m.LinearTeamID)
 }
 
 // -----------------------------------------------------------------------------
@@ -205,14 +208,14 @@ type LinearIssueBodyUpdatedMetadata struct {
 }
 
 type LinearIssueBodyUpdatedPredicate struct {
-	AssigneeIn    []string `json:"assignee_in,omitempty" doc:"Match assignees by Linear user ID."`
-	LinearTeamKey *string  `json:"linear_team_key,omitempty"`
-	HasLabel      *string  `json:"has_label,omitempty"`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match assignees by Linear user ID."`
+	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
+	HasLabel       *string  `json:"has_label,omitempty"`
 }
 
 func (p LinearIssueBodyUpdatedPredicate) Matches(m LinearIssueBodyUpdatedMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeUserID) &&
-		strEq(p.LinearTeamKey, m.LinearTeamKey) &&
+		idIn(p.LinearTeamIDIn, m.LinearTeamID) &&
 		hasLabel(p.HasLabel, m.Labels)
 }
 
@@ -232,14 +235,14 @@ type LinearIssueParentChangedMetadata struct {
 }
 
 type LinearIssueParentChangedPredicate struct {
-	AssigneeIn    []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
-	LinearTeamKey *string  `json:"linear_team_key,omitempty"`
-	NewParent     *string  `json:"new_parent,omitempty" doc:"Match moves under a specific parent issue (identifier, e.g. 'ENG-12')."`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
+	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
+	NewParent      *string  `json:"new_parent,omitempty" doc:"Match moves under a specific parent issue (identifier, e.g. 'ENG-12')."`
 }
 
 func (p LinearIssueParentChangedPredicate) Matches(m LinearIssueParentChangedMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeUserID) &&
-		strEq(p.LinearTeamKey, m.LinearTeamKey) &&
+		idIn(p.LinearTeamIDIn, m.LinearTeamID) &&
 		strEq(p.NewParent, m.NewParent)
 }
 
@@ -271,16 +274,16 @@ type LinearIssueLabelMetadata struct {
 }
 
 type LinearIssueLabelPredicate struct {
-	AssigneeIn    []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
-	LinearTeamKey *string  `json:"linear_team_key,omitempty" doc:"Scope to a specific Linear team key (e.g. ENG)."`
-	LabelName     *string  `json:"label_name,omitempty" doc:"Match only a label of this name (e.g. 'tf-agent')."`
-	LabelGroup    *string  `json:"label_group,omitempty" doc:"Match only a label in this label group (e.g. 'Difficulty')."`
-	HasLabel      *string  `json:"has_label,omitempty" doc:"Require the issue to bear a label of this name after the change."`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
+	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
+	LabelName      *string  `json:"label_name,omitempty" doc:"Match only a label of this name (e.g. 'tf-agent')."`
+	LabelGroup     *string  `json:"label_group,omitempty" doc:"Match only a label in this label group (e.g. 'Difficulty')."`
+	HasLabel       *string  `json:"has_label,omitempty" doc:"Require the issue to bear a label of this name after the change."`
 }
 
 func (p LinearIssueLabelPredicate) Matches(m LinearIssueLabelMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeUserID) &&
-		strEq(p.LinearTeamKey, m.LinearTeamKey) &&
+		idIn(p.LinearTeamIDIn, m.LinearTeamID) &&
 		strEq(p.LabelName, m.LabelName) &&
 		strEq(p.LabelGroup, m.LabelGroup) &&
 		hasLabel(p.HasLabel, m.Labels)
@@ -301,18 +304,18 @@ type LinearIssueBecameAtomicMetadata struct {
 }
 
 type LinearIssueBecameAtomicPredicate struct {
-	AssigneeIn    []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
-	CreatorIn     []string `json:"creator_in,omitempty" doc:"Match issues created by anyone in this list (Linear user IDs)."`
-	LinearTeamKey *string  `json:"linear_team_key,omitempty" doc:"Scope to a specific Linear team key (e.g. ENG)."`
-	Priority      *string  `json:"priority,omitempty"`
-	Status        *string  `json:"status,omitempty"`
-	HasLabel      *string  `json:"has_label,omitempty" doc:"Require the issue to currently bear a label of this name."`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
+	CreatorIn      []string `json:"creator_in,omitempty" doc:"Match issues created by anyone in this list (Linear user IDs)."`
+	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
+	Priority       *string  `json:"priority,omitempty"`
+	Status         *string  `json:"status,omitempty"`
+	HasLabel       *string  `json:"has_label,omitempty" doc:"Require the issue to currently bear a label of this name."`
 }
 
 func (p LinearIssueBecameAtomicPredicate) Matches(m LinearIssueBecameAtomicMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeUserID) &&
 		stringInSliceFold(p.CreatorIn, m.CreatorUserID) &&
-		strEq(p.LinearTeamKey, m.LinearTeamKey) &&
+		idIn(p.LinearTeamIDIn, m.LinearTeamID) &&
 		strEq(p.Priority, m.Priority) &&
 		strEq(p.Status, m.Status) &&
 		hasLabel(p.HasLabel, m.Labels)
@@ -352,13 +355,13 @@ type LinearIssueUnreachableMetadata struct {
 }
 
 type LinearIssueUnreachablePredicate struct {
-	AssigneeIn    []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
-	LinearTeamKey *string  `json:"linear_team_key,omitempty" doc:"Scope to a specific Linear team key (e.g. ENG)."`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
+	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
 }
 
 func (p LinearIssueUnreachablePredicate) Matches(m LinearIssueUnreachableMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeUserID) &&
-		strEq(p.LinearTeamKey, m.LinearTeamKey)
+		idIn(p.LinearTeamIDIn, m.LinearTeamID)
 }
 
 // -----------------------------------------------------------------------------
@@ -379,13 +382,13 @@ type LinearIssueIdentifierChangedMetadata struct {
 }
 
 type LinearIssueIdentifierChangedPredicate struct {
-	LinearTeamKey    *string `json:"linear_team_key,omitempty" doc:"Scope to the Linear team key the issue now has (e.g. OPS)."`
-	OldLinearTeamKey *string `json:"old_linear_team_key,omitempty" doc:"Scope to the Linear team key the issue had before (e.g. ENG)."`
+	LinearTeamIDIn    []string `json:"linear_team_id_in,omitempty" doc:"Match only issues now in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches any Linear team."`
+	OldLinearTeamIDIn []string `json:"old_linear_team_id_in,omitempty" doc:"Match only issues that left these Linear teams, each one the team tracks, by Linear team id. Empty matches any Linear team."`
 }
 
 func (p LinearIssueIdentifierChangedPredicate) Matches(m LinearIssueIdentifierChangedMetadata) bool {
-	return strEq(p.LinearTeamKey, m.LinearTeamKey) &&
-		strEq(p.OldLinearTeamKey, m.OldLinearTeamKey)
+	return idIn(p.LinearTeamIDIn, m.LinearTeamID) &&
+		idIn(p.OldLinearTeamIDIn, m.OldLinearTeamID)
 }
 
 // Ownership: every linear:issue:* type routes through the owning-team ladder

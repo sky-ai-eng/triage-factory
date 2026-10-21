@@ -406,3 +406,161 @@ describe('PredicateEditor repo_in', () => {
     )
   })
 })
+
+const trackedLinearTeams = [
+  { id: 'lt-eng', key: 'ENG', name: 'Engineering' },
+  { id: 'lt-ops', key: 'OPS', name: 'Operations' },
+]
+
+// stubLinearTeamField answers the schema read with the named Linear team
+// fields, the team-settings read with linearTeams as its linear_teams (a 500
+// when null), and a Linear team read with its key when known names it (a 404
+// otherwise).
+function stubLinearTeamField(
+  linearTeams: { id: string; key: string; name: string }[] | null,
+  known: Record<string, string> = {},
+  fields: string[] = ['linear_team_id_in'],
+) {
+  const fetchMock = vi.fn((url: string) => {
+    if (url.startsWith('/api/event-schemas/')) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        ...jsonBody({ fields: fields.map((name) => ({ name, type: 'string_list' })) }),
+      })
+    }
+    if (url.startsWith('/api/teams/')) {
+      if (linearTeams === null) {
+        return Promise.resolve({ ok: false, status: 500, ...jsonBody({ errors: [] }) })
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        ...jsonBody({ jira_projects: [], linear_teams: linearTeams }),
+      })
+    }
+    const id = decodeURIComponent(url.slice(url.lastIndexOf('/') + 1))
+    if (url.includes('/linear/teams/') && id in known) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        ...jsonBody({ id, key: known[id], name: known[id], private: false }),
+      })
+    }
+    return Promise.resolve({ ok: false, status: 404, ...jsonBody({ errors: [] }) })
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+describe('PredicateEditor linear_team_id_in', () => {
+  it("offers the handler team's tracked Linear teams and writes their ids", async () => {
+    const fetchMock = stubLinearTeamField(trackedLinearTeams)
+    const onChange = vi.fn()
+    render(
+      <PredicateEditor
+        eventType="linear:issue:assigned"
+        teamId="team-b"
+        value={{}}
+        onChange={onChange}
+      />,
+    )
+
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'OPS Operations' }))
+
+    expect(onChange).toHaveBeenCalledWith({ linear_team_id_in: ['lt-ops'] })
+    expect(screen.getAllByRole('checkbox')).toHaveLength(2)
+    expect(fetchMock).toHaveBeenCalledWith('/api/teams/team-b/settings', expect.anything())
+  })
+
+  it('falls back to the acting team when the handler team is not known yet', async () => {
+    const fetchMock = stubLinearTeamField(trackedLinearTeams)
+    render(<PredicateEditor eventType="linear:issue:assigned" value={{}} onChange={vi.fn()} />)
+
+    await screen.findByRole('checkbox', { name: 'ENG Engineering' })
+    expect(fetchMock).toHaveBeenCalledWith('/api/teams/team-acting/settings', expect.anything())
+  })
+
+  it('offers the same teams for the team an issue left', async () => {
+    const onChange = vi.fn()
+    stubLinearTeamField(trackedLinearTeams, {}, ['old_linear_team_id_in'])
+    render(
+      <PredicateEditor
+        eventType="linear:issue:identifier_changed"
+        teamId="team-b"
+        value={{}}
+        onChange={onChange}
+      />,
+    )
+
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'ENG Engineering' }))
+    expect(onChange).toHaveBeenCalledWith({ old_linear_team_id_in: ['lt-eng'] })
+  })
+
+  it('keeps a stored Linear team the team no longer tracks, named and removable', async () => {
+    stubLinearTeamField(trackedLinearTeams, { 'lt-old': 'OLD' })
+    const onChange = vi.fn()
+    render(
+      <PredicateEditor
+        eventType="linear:issue:assigned"
+        teamId="team-b"
+        value={{ linear_team_id_in: ['lt-eng', 'lt-old', 'lt-gone'] }}
+        onChange={onChange}
+      />,
+    )
+
+    expect(await screen.findByRole('checkbox', { name: 'ENG Engineering' })).toBeChecked()
+    expect(await screen.findByText('OLD · not tracked')).toBeInTheDocument()
+    // A team Linear does not answer for shows its id.
+    expect(screen.getByText('lt-gone · not tracked')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove OLD' }))
+    expect(onChange).toHaveBeenCalledWith({ linear_team_id_in: ['lt-eng', 'lt-gone'] })
+  })
+
+  it('clears the field when the last Linear team is deselected', async () => {
+    stubLinearTeamField(trackedLinearTeams)
+    const onChange = vi.fn()
+    render(
+      <PredicateEditor
+        eventType="linear:issue:assigned"
+        teamId="team-b"
+        value={{ linear_team_id_in: ['lt-eng'] }}
+        onChange={onChange}
+      />,
+    )
+
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'ENG Engineering' }))
+    expect(onChange).toHaveBeenCalledWith({})
+  })
+
+  it('says so when the team tracks no Linear teams', async () => {
+    stubLinearTeamField([])
+    render(
+      <PredicateEditor
+        eventType="linear:issue:assigned"
+        teamId="team-b"
+        value={{}}
+        onChange={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText('This team tracks no Linear teams.')).toBeInTheDocument()
+  })
+
+  it('says so when the Linear teams cannot be read', async () => {
+    stubLinearTeamField(null)
+    render(
+      <PredicateEditor
+        eventType="linear:issue:assigned"
+        teamId="team-b"
+        value={{}}
+        onChange={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Could not load this team’s Linear teams.',
+    )
+  })
+})

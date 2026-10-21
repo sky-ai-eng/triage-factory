@@ -351,7 +351,7 @@ still diffs every PR the batch read returned.
 for GitHub pull requests: one event per label added or removed since the last
 cycle. `label_name` names the label and `labels` is the issue's whole set after
 the change. Predicates can filter on `label_name`, `has_label`, `assignee_in`,
-and `project` (Jira) or `linear_team_key` (Linear).
+and `project` (Jira) or `linear_team_id_in` (Linear).
 
 - **Jira** labels are plain strings with no id, and cannot be renamed, so they
   compare by name and the `dedup_key` is the name.
@@ -570,6 +570,18 @@ on `assigned`, `available` and `became_atomic`; both creator fields are empty
 for an issue an integration created. `commenter_user_ids` is what
 `commenter_in` matches on `commented` (see [Comments](#comments)).
 
+A handler predicate scopes to Linear teams with `linear_team_id_in`, which
+names them by Linear team id (the `id` of an entry in `linear_teams` on
+`GET /api/teams/{team_id}/settings`), not by key, so renaming a team's key
+leaves the filter matching. It matches `linear_team_id`. A team's handlers only
+ever see events from Linear teams the team tracks, so an empty
+`linear_team_id_in` matches every one of them, and each entry must be a Linear
+team the handler's team tracks in the org's current Linear workspace. Creating,
+editing or promoting a handler refuses any other entry, a team key included,
+with `422 INVALID_FIELD` on `scope_predicate`. An edit is checked only for the
+entries it adds, so a Linear team the team has since stopped tracking never
+blocks an edit that leaves it in place.
+
 #### Identity
 
 An issue's identifier (`ENG-123`) is a display key: moving the issue to
@@ -589,9 +601,13 @@ same identifier is a different row that the rename does not touch.
 
 The refresh emits `identifier_changed` first, ahead of anything else it found
 (a move to another team usually changes the issue's workflow state too), in the
-same commit as the new snapshot. Predicates can filter it on `linear_team_key`
-and `old_linear_team_key`. It is always the difference from the stored
-snapshot, so an entity with no snapshot (one a source pause cleared) is renamed
+same commit as the new snapshot. Predicates can filter it on
+`linear_team_id_in`, the team the issue is in now, and `old_linear_team_id_in`,
+the team it left (matching `old_linear_team_id`). Both are held to the
+handler's team's tracked Linear teams, like `linear_team_id_in` on every other
+event. That is narrower than what could match, since this event reaches a team
+that tracks either of its two Linear teams, but TF keeps no record of a Linear
+team no team tracks to check an id against. It is always the difference from the stored snapshot, so an entity with no snapshot (one a source pause cleared) is renamed
 without it, the way it is seeded without every other event. It is the one Linear event the team gate passes for
 a team that tracks either the issue's current Linear team or the one it left,
 so a team still hears about an issue that moved to a team it does not track.

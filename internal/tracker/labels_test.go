@@ -294,7 +294,8 @@ func TestDiffLinear_GroupSwitchCarriesTheGroup(t *testing.T) {
 		{`{"label_name":"Medium"}`, false},
 		{`{"has_label":"Bug"}`, true},
 		{`{"has_label":"Medium"}`, false},
-		{`{"linear_team_key":"ENG"}`, true},
+		{`{"linear_team_id_in":["team-eng"]}`, true},
+		{`{"linear_team_id_in":["ENG"]}`, false},
 		{allowlist(t, "assignee_in", "u-alice"), true},
 		{allowlist(t, "assignee_in", "u-bob"), false},
 	} {

@@ -23,6 +23,13 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // nothing and a trigger that silently stops firing. They cannot simply become
 // ids: the name is also the dedup_key on stored events. Reporting the drift
 // needs the durable notification channel.
+//
+// TODO(TFAC-1133): every predicate's project (and key_changed's old_project,
+// and body_updated's project in body_updated.go) is a project key matched
+// against the key in metadata, so a project key rename leaves a predicate on
+// it matching nothing. It becomes jira_project_id_in, matched against the
+// project's registry id and checked against the team's tracked projects as
+// linear_team_id_in is, which needs event metadata to carry that id first.
 
 // -----------------------------------------------------------------------------
 // issue:assigned — issue was assigned (possibly to someone else; predicates

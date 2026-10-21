@@ -1,4 +1,4 @@
-import { apiList, apiListAll } from './apiClient'
+import { apiJSON, apiList, apiListAll } from './apiClient'
 
 /** One option in the Linear team picker. The id is what the rules are keyed
  *  on and what the save sends; key and name are what a person recognizes the
@@ -51,6 +51,18 @@ export async function listLinearTeams(
     options,
   )
   return { items: page.items, hasMore: page.next_page_token !== '' }
+}
+
+/** getLinearTeam reads one team the org's Linear credential can see, by id;
+ *  null when the read fails, which includes a team Linear no longer answers
+ *  for. */
+export async function getLinearTeam(
+  orgId: string,
+  teamId: string,
+): Promise<LinearTeamCandidate | null> {
+  return apiJSON<LinearTeamCandidate>(
+    `/api/orgs/${encodeURIComponent(orgId)}/linear/teams/${encodeURIComponent(teamId)}`,
+  ).catch(() => null)
 }
 
 /** listLinearStates reads one team's whole workflow, in board order. The list
