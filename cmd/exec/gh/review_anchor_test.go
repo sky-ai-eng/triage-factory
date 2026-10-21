@@ -41,6 +41,10 @@ func (h *reviewAnchorHost) WorkspaceRoots(ctx context.Context) (string, string, 
 	return h.checkouts.WorkspaceRoots(ctx)
 }
 
+func (h *reviewAnchorHost) GetRepo(ctx context.Context, slug string) (*domain.Repository, error) {
+	return h.checkouts.GetRepo(ctx, slug)
+}
+
 func (h *reviewAnchorHost) GithubAddPendingReviewComment(_ context.Context, owner, repo, _, _, _ string, _ int, _ *int, commitSHA string) (string, error) {
 	h.gotOwner, h.gotRepo, h.gotAnchor = owner, repo, commitSHA
 	return "comment-1", nil

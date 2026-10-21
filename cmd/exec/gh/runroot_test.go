@@ -36,6 +36,10 @@ func (h runHost) WorkspaceRoots(ctx context.Context) (string, string, error) {
 	return h.checkouts.WorkspaceRoots(ctx)
 }
 
+func (h runHost) GetRepo(ctx context.Context, slug string) (*domain.Repository, error) {
+	return h.checkouts.GetRepo(ctx, slug)
+}
+
 func (h runHost) GithubGetPR(ctx context.Context, owner, repo string, number int, verbose bool) (*ghclient.PRView, error) {
 	return h.gh.GetPR(ctx, owner, repo, number, verbose)
 }

@@ -18,11 +18,11 @@ import (
 //   - app: ListForTeam + ReplaceForTeam (the team-row write, in the caller's
 //     claims tx, org-serialized by an advisory lock). RLS gates the team-row
 //     write by team admin.
-//   - admin: ListForTeamSystem, TracksRepoSystem, TracksRepositorySystem —
-//     claims-free reads for the router gate / poll callers.
+//   - admin: ListForTeamSystem, TracksRepositorySystem — claims-free reads
+//     for the router gate / poll callers.
 //
-// A row points at a repository by the registry row's id, and the write takes
-// those ids. The (owner, repo) lookups join the registry to match a name.
+// A row points at a repository by the registry row's id, and the write and
+// the tracking read take those ids.
 type teamGitHubReposStore struct {
 	app   queryer
 	admin queryer
@@ -214,28 +214,6 @@ func requireRepositoriesOnHost(ctx context.Context, q queryer, orgID, host strin
 		}
 	}
 	return db.MissingRepositoriesError(ids, found, host)
-}
-
-func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, host, owner, repo string) (bool, error) {
-	if err := db.RequireRepoHost(host); err != nil {
-		return false, err
-	}
-	var n int
-	err := s.admin.QueryRowContext(ctx, `
-		SELECT 1 FROM team_github_repos g
-		JOIN repositories r ON r.id = g.repository_id
-		WHERE g.team_id = $1 AND r.host = $4
-		  AND lower(r.owner) = lower($2) AND lower(r.repo) = lower($3)
-		  AND r.retired_at IS NULL
-		LIMIT 1
-	`, teamID, owner, repo, host).Scan(&n)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
-		}
-		return false, fmt.Errorf("tracks repo: %w", err)
-	}
-	return true, nil
 }
 
 func (s *teamGitHubReposStore) TracksRepositorySystem(ctx context.Context, teamID, repositoryID string) (bool, error) {

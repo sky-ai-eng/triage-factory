@@ -433,7 +433,7 @@ const repoTrackedByATeam = `EXISTS (
 
 // repoTrackedByTeam scopes a repositories row (alias rp) to the rows one team
 // tracks. The team id binds $3, the first placeholder after listRepositories'
-// own org and host. Same predicate TracksRepoSystem answers for one name.
+// own org and host. Same predicate TracksRepositorySystem answers for one row.
 const repoTrackedByTeam = `EXISTS (
 	SELECT 1 FROM team_github_repos g
 	WHERE g.team_id = $3

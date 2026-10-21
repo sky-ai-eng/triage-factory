@@ -1048,7 +1048,20 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 	if err != nil {
 		return gitproxy.Decision{}, fmt.Errorf("github host read: %w", err)
 	}
-	tracks, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, info.TeamID, host, owner, repo)
+	// owner/repo is the name the proxy was handed, resolved once to the
+	// registry row it names on host — the repository a push here reaches.
+	// Tracking, the ledger and the task's own repo are each answered for that
+	// row's id. A name no row answers to is a repository no team tracks, and
+	// a checkout of the same owner/repo on another host is another row, so it
+	// earns nothing on this one.
+	repoRow, err := stores.Repos.GetByRefSystem(ctx, info.OrgID, domain.RepoRef{Host: host, Owner: owner, Repo: repo})
+	if err != nil {
+		return gitproxy.Decision{}, fmt.Errorf("repository read: %w", err)
+	}
+	if repoRow == nil {
+		return gitDenyNotTracked(repoID), nil
+	}
+	tracks, err := stores.TeamGitHubRepos.TracksRepositorySystem(ctx, info.TeamID, repoRow.ID)
 	if err != nil {
 		return gitproxy.Decision{}, fmt.Errorf("tracked-set read: %w", err)
 	}
@@ -1058,14 +1071,6 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 	rows, err := stores.ConversationWorktrees.ListSystem(ctx, info.OrgID, info.ConversationID)
 	if err != nil {
 		return gitproxy.Decision{}, fmt.Errorf("worktree ledger read: %w", err)
-	}
-	// A ledger row names its repository by registry id, and the repository a
-	// push here reaches is the row for owner/repo on host. A checkout of the
-	// same owner/repo on another host is another repository, so it earns
-	// nothing on this one. No row on host means no ledger row can name it.
-	repoRow, err := stores.Repos.GetByRefSystem(ctx, info.OrgID, domain.RepoRef{Host: host, Owner: owner, Repo: repo})
-	if err != nil {
-		return gitproxy.Decision{}, fmt.Errorf("repository read: %w", err)
 	}
 
 	// Base / protected refs are not pushable regardless of what the worktree is
@@ -1083,7 +1088,7 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 	var allowedRefs []string
 	found := false
 	for _, w := range rows {
-		if repoRow == nil || w.RepositoryID != repoRow.ID {
+		if w.RepositoryID != repoRow.ID {
 			continue
 		}
 		found = true
@@ -1109,7 +1114,7 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 		// still rejected by the receive-pack gate: read-only bootstrap, push
 		// authority is earned once the checkout's branch resolves through a real
 		// ledger row.
-		if agenthost.IsTaskOwnRepo(ctx, stores, info, host, owner, repo) {
+		if agenthost.IsTaskOwnRepository(ctx, stores, info, repoRow.ID) {
 			return gitproxy.Decision{Allowed: true, ProtectedRefs: pushpolicy.Refs(protected)}, nil
 		}
 		return gitDenyNotMaterialized(repoID), nil

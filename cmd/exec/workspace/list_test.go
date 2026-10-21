@@ -92,6 +92,40 @@ func TestListWorkspaces_AvailableFiltersOutMaterialized(t *testing.T) {
 	}
 }
 
+// TestListWorkspaces_ARetiredRowsCheckoutIsNotItsNamesakes: a checkout and a
+// tracked repository are the same repository when they reference the same
+// registry row. The run holds a checkout of owner/beta from before GitHub gave
+// the name to another repository; that repository, tracked under the same
+// name, is still available to add.
+func TestListWorkspaces_ARetiredRowsCheckoutIsNotItsNamesakes(t *testing.T) {
+	stores, database := newTestDB(t)
+	ctx := context.Background()
+	seedJiraConversation(t, database, "r1", "SKY-1")
+	dead := seedRepository(t, database, "owner", "beta", "https://x", "main")
+	if _, _, err := sqlitestore.New(database.Conn).ConversationWorktrees.Insert(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
+		ConversationID: "r1", RepositoryID: dead, Path: "/tmp/wt/beta", Ref: "default",
+	}); err != nil {
+		t.Fatalf("seed materialized: %v", err)
+	}
+	if err := dbtest.RetireRepo(ctx, sqlitestore.New(database.Conn).Repos, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, "owner/beta"); err != nil {
+		t.Fatalf("retire owner/beta: %v", err)
+	}
+	if live := seedRepository(t, database, "owner", "beta", "https://y", "main"); live == dead {
+		t.Fatalf("the namesake resolved to the retired row %s; want a row of its own", dead)
+	}
+
+	out, err := listWorkspaces(hostFor(stores, "r1"))
+	if err != nil {
+		t.Fatalf("listWorkspaces: %v", err)
+	}
+	if len(out.Available) != 1 || out.Available[0].Repo != "owner/beta" {
+		t.Errorf("available = %+v, want the live owner/beta — the run's checkout is of another repository", out.Available)
+	}
+	if len(out.Materialized) != 1 || out.Materialized[0].Path != "/tmp/wt/beta" {
+		t.Errorf("materialized = %+v, want the retired repository's checkout", out.Materialized)
+	}
+}
+
 func TestListWorkspaces_NoConfiguredRepos(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedJiraConversation(t, database, "r1", "SKY-1")

@@ -128,14 +128,14 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		if len(names) != 1 || names[0] != keptSlug {
 			t.Errorf("tracked names = %v, want [%s] — untracking must remove it from the polled set", names, keptSlug)
 		}
-		if tracked, err := s.TeamGitHubRepos.TracksRepoSystem(ctx, teamID, TestGitHubHost, "octo", "dropped"); err != nil || tracked {
-			t.Errorf("TracksRepoSystem(dropped) = %v, %v; want false", tracked, err)
-		}
 
 		// And nothing else moves.
 		row, err := s.Repos.GetByRef(ctx, orgID, repoRef(untrackedSlug))
 		if err != nil || row == nil {
 			t.Fatalf("registry row after untracking = %v, %v; want it standing — a reference may still name it", row, err)
+		}
+		if tracked, err := s.TeamGitHubRepos.TracksRepositorySystem(ctx, teamID, row.ID); err != nil || tracked {
+			t.Errorf("TracksRepositorySystem(dropped) = %v, %v; want false", tracked, err)
 		}
 		worktrees, err := s.ConversationWorktrees.ListSystem(ctx, orgID, convID)
 		if err != nil {

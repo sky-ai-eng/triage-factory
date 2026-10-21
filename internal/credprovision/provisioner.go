@@ -469,7 +469,7 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, conv
 		return nil, fmt.Errorf("resolve github host: org %s resolved an empty GitHub URL", orgID)
 	}
 
-	repoIDs, err := m.authorizedRepos(ctx, orgID, teamID, taskID, conversationID)
+	authorized, err := m.authorizedRepos(ctx, orgID, teamID, taskID, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve authorized repo set: %w", err)
 	}
@@ -486,11 +486,14 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, conv
 	// covering both the API-client uses (PR comments/reviews) and the git
 	// proxy's contents-only push, a strict subset of whatever the
 	// installation grants.
-	for _, repoID := range repoIDs {
-		owner, repo, ok := strings.Cut(repoID, "/")
-		if !ok {
-			continue
-		}
+	//
+	// RepoTokens is keyed by the repository's current "owner/repo": the
+	// sidecar matches each upstream request's path against it, and that path
+	// names the repository the way GitHub does now.
+	repoIDs := make([]string, 0, len(authorized))
+	for _, row := range authorized {
+		owner, repo, repoID := row.Owner, row.Repo, row.Slug()
+		repoIDs = append(repoIDs, repoID)
 		tok, identity, err := ghclient.TokenForManagedGit(ctx, scoped, orgID, owner, repo)
 		if err != nil {
 			if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
@@ -582,10 +585,10 @@ func cliChannelScope(primaryRepo string, repoIDs []string) (owner string, repoNa
 	return best, byOwner[best]
 }
 
-// authorizedRepos returns the conversation's authorized repo set as "owner/repo"
-// strings: every distinct repo in the conversation_worktrees ledger of the
-// conversation and of the rest of its task's conversations, PLUS the task's own
-// primary repo — all filtered to what the team tracks. The
+// authorizedRepos returns the conversation's authorized repository set as
+// registry rows: every distinct repository in the conversation_worktrees ledger
+// of the conversation and of the rest of its task's conversations, PLUS the
+// task's own primary repository — all filtered to what the team tracks. The
 // conversation_worktrees half is the credential-minting mirror of
 // gitAuthorizeDecision (internal/delegate/spawner.go), which enforces the
 // same intersection live at the git proxy; minting outside that set would
@@ -595,6 +598,12 @@ func cliChannelScope(primaryRepo string, repoIDs []string) (owner string, repoNa
 // conversation or one that already cloned before a refresh — so without it, a
 // fresh conversation's initial host-side clone (setupGitHub's clone auth,
 // before any worktree exists) would get no token at all.
+//
+// Every input already names its repository by registry id — the task's entity
+// (entities.repository_id), each ledger row (repository_id) — so the set is
+// built, deduplicated and checked against the team's tracking
+// (TracksRepositorySystem) by id. A row's name is read only where a token is
+// minted for it, which is the name it carries now.
 //
 // A conversation with no GitHub anchor — a Slack mention, a Jira issue, a taskless
 // conversation — has neither a GitHub task-repo nor any worktree, so the set above is
@@ -606,13 +615,15 @@ func cliChannelScope(primaryRepo string, repoIDs []string) (owner string, repoNa
 // conversation_worktrees ledger a `workspace add` creates. The boundary is the team's
 // own tracked repos — never another team's, never another org's.
 //
-// Every repo is checked against the team's tracking on the org's current GitHub
-// host, the host the bundle's tokens are minted on: a repository the team
-// tracked on a host the org has left is not one this bundle can reach. A task
-// or checkout on another host is dropped rather than resolved by name, and it
+// Every repository is checked against the team's tracking on the org's
+// current GitHub host, the host the bundle's tokens are minted on: a
+// repository the team tracked on a host the org has left is not one this
+// bundle can reach. A task or checkout on another host is dropped, and it
 // still anchors the conversation, so a conversation anchored only on another
-// host gets no repositories rather than the team's whole tracked set.
-func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, conversationID string) ([]string, error) {
+// host gets no repositories rather than the team's whole tracked set. A
+// retired repository is dropped the same way: a token minted for its name
+// would reach the repository GitHub serves under that name now.
+func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, conversationID string) ([]domain.Repository, error) {
 	if m.stores.TeamGitHubRepos == nil {
 		return nil, nil
 	}
@@ -621,42 +632,28 @@ func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, co
 		return nil, err
 	}
 	seen := map[string]bool{}
-	var out []string
-	add := func(repoID string) {
-		key := strings.ToLower(repoID)
-		if seen[key] {
+	var out []domain.Repository
+	// anchoredElsewhere records an anchor this bundle cannot reach: a row on
+	// another host, a retired row, or a row that cannot be read.
+	anchoredElsewhere := false
+	add := func(row *domain.Repository) {
+		if row == nil || row.Host != host || row.RetiredAt != nil {
+			anchoredElsewhere = true
 			return
 		}
-		owner, repo, ok := strings.Cut(repoID, "/")
-		if !ok {
+		if seen[row.ID] {
 			return
 		}
-		tracks, err := m.stores.TeamGitHubRepos.TracksRepoSystem(ctx, teamID, host, owner, repo)
+		tracks, err := m.stores.TeamGitHubRepos.TracksRepositorySystem(ctx, teamID, row.ID)
 		if err != nil || !tracks {
 			return
 		}
-		seen[key] = true
-		out = append(out, repoID)
-	}
-	// A checkout names its repository by registry id. The bundle reaches
-	// repositories on host, so a checkout counts only when its row is on that
-	// host; one of the same owner/repo on another host is another repository. A
-	// row this cannot confirm is treated the same way.
-	anchoredElsewhere := false
-	onHost := func(w domain.ConversationWorktree) bool {
-		if m.stores.Repos == nil || w.RepositoryID == "" {
-			return false
-		}
-		row, err := m.stores.Repos.GetSystem(ctx, orgID, w.RepositoryID)
-		return err == nil && row != nil && row.Host == host
+		seen[row.ID] = true
+		out = append(out, *row)
 	}
 
-	if repoID, scope := m.taskGitHubRepo(ctx, orgID, taskID); repoID != "" {
-		if scope == host {
-			add(repoID)
-		} else {
-			anchoredElsewhere = true
-		}
+	if row := m.taskGitHubRepo(ctx, orgID, taskID); row != nil {
+		add(row)
 	}
 	if m.stores.ConversationWorktrees != nil {
 		rows, err := m.stores.ConversationWorktrees.ListSystem(ctx, orgID, conversationID)
@@ -675,16 +672,12 @@ func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, co
 			rows = append(rows, taskRows...)
 		}
 		for _, w := range rows {
-			if onHost(w) {
-				add(w.RepoID)
-			} else {
-				anchoredElsewhere = true
-			}
+			add(m.repositoryRow(ctx, orgID, w.RepositoryID))
 		}
 	}
 
 	// Unanchored conversation: no task-repo, no worktree. Grant the team's tracked set
-	// (already the tracking source of truth, so no per-repo TracksRepoSystem
+	// (already the tracking source of truth, so no per-repo TracksRepositorySystem
 	// re-check) rather than shipping a bundle with no GitHub credential at all.
 	if len(out) == 0 && !anchoredElsewhere {
 		tracked, err := m.stores.TeamGitHubRepos.ListForTeamSystem(ctx, teamID, host)
@@ -697,45 +690,54 @@ func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, co
 			if t.RetiredAt != nil {
 				continue
 			}
-			out = append(out, t.Slug())
+			out = append(out, domain.Repository{ID: t.RepositoryID, ExternalID: t.ExternalID, Source: domain.RepoSourceGitHub, Host: host, Owner: t.Owner, Repo: t.Repo})
 		}
 	}
 	return out, nil
 }
 
-// taskPrimaryRepo is taskGitHubRepo's repo when the task's entity was polled
-// from host — a pull request from another GitHub host is about another
-// repository, whatever its name — and "" otherwise.
-func (m *Manager) taskPrimaryRepo(ctx context.Context, orgID, taskID, host string) string {
-	repo, scope := m.taskGitHubRepo(ctx, orgID, taskID)
-	if scope != host {
-		return ""
+// repositoryRow is the registry row id names, or nil when there is no id or
+// the read fails: the caller treats an unreadable row as one it cannot reach.
+func (m *Manager) repositoryRow(ctx context.Context, orgID, id string) *domain.Repository {
+	if m.stores.Repos == nil || id == "" {
+		return nil
 	}
-	return repo
+	row, err := m.stores.Repos.GetSystem(ctx, orgID, id)
+	if err != nil {
+		return nil
+	}
+	return row
 }
 
-// taskGitHubRepo resolves a GitHub task's own target repo as "owner/repo", and
-// the GitHub host it lives on: the registry row the task's entity references
-// (entities.repository_id), read by that id, so the name is the repository's
-// now whatever the entity's key still spells. "" for a non-GitHub task, whose
-// entity references no repository, or when any read fails.
-func (m *Manager) taskGitHubRepo(ctx context.Context, orgID, taskID string) (repo, scope string) {
-	if m.stores.Tasks == nil || m.stores.Entities == nil || m.stores.Repos == nil || taskID == "" {
-		return "", ""
+// taskPrimaryRepo is the "owner/repo" of the task's own repository when its
+// registry row is on host and not retired — a pull request from another GitHub
+// host is about another repository, whatever its name — and "" otherwise.
+func (m *Manager) taskPrimaryRepo(ctx context.Context, orgID, taskID, host string) string {
+	row := m.taskGitHubRepo(ctx, orgID, taskID)
+	if row == nil || row.Host != host || row.RetiredAt != nil {
+		return ""
+	}
+	return row.Slug()
+}
+
+// taskGitHubRepo resolves a GitHub task's own repository: the registry row the
+// task's entity references (entities.repository_id), read by that id, so the
+// name is the repository's now whatever the entity's key still spells. nil for
+// a non-GitHub task, whose entity references no repository, or when any read
+// fails.
+func (m *Manager) taskGitHubRepo(ctx context.Context, orgID, taskID string) *domain.Repository {
+	if m.stores.Tasks == nil || m.stores.Entities == nil || taskID == "" {
+		return nil
 	}
 	task, err := m.stores.Tasks.GetSystem(ctx, orgID, taskID)
 	if err != nil || task == nil || task.EntitySource != "github" {
-		return "", ""
+		return nil
 	}
 	entity, err := m.stores.Entities.GetSystem(ctx, orgID, task.EntityID)
-	if err != nil || entity == nil || entity.RepositoryID == "" {
-		return "", ""
+	if err != nil || entity == nil {
+		return nil
 	}
-	row, err := m.stores.Repos.GetSystem(ctx, orgID, entity.RepositoryID)
-	if err != nil || row == nil {
-		return "", ""
-	}
-	return row.Slug(), row.Host
+	return m.repositoryRow(ctx, orgID, entity.RepositoryID)
 }
 
 // resolveJira resolves the org's Jira service credential to its raw,

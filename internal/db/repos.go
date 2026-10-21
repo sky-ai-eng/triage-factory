@@ -363,7 +363,7 @@ type RepositoryStore interface {
 
 	// ListTrackedByTeamSystem returns one page of the repository rows on host
 	// that teamID tracks, ordered by (owner, repo, id), plus the unpaged total.
-	// It is the listing half of the gate TeamGitHubReposStore.TracksRepoSystem
+	// It is the listing half of the gate TeamGitHubReposStore.TracksRepositorySystem
 	// applies: a delegated run is offered the repositories its team tracks,
 	// which are the ones `workspace add` will materialize and the git proxy
 	// will push to. Admin pool in Postgres, for callers with no JWT claims (a

@@ -13,13 +13,16 @@ import (
 )
 
 type prCoherenceEvent struct {
-	repo       string
-	prNumber   int
-	headSHA    string
-	oldHeadSHA string
-	checkName  string
-	checkURL   string
-	conclusion string
+	repo string // display: the repository's name when the event was emitted
+	// repositoryID is the registry row the event's metadata records
+	// (repository_id), the fallback for a PR entity that cannot be read.
+	repositoryID string
+	prNumber     int
+	headSHA      string
+	oldHeadSHA   string
+	checkName    string
+	checkURL     string
+	conclusion   string
 }
 
 // parsePRCoherenceEvent reads the stored event's metadata, reporting false
@@ -41,7 +44,7 @@ func parsePRCoherenceEvent(evt *domain.Event) (prCoherenceEvent, bool) {
 		if json.Unmarshal([]byte(evt.MetadataJSON), &meta) != nil {
 			return parsed, false
 		}
-		parsed = prCoherenceEvent{repo: meta.Repo, prNumber: meta.PRNumber, headSHA: meta.HeadSHA, oldHeadSHA: meta.PrevHeadSHA}
+		parsed = prCoherenceEvent{repo: meta.Repo, repositoryID: meta.RepositoryID, prNumber: meta.PRNumber, headSHA: meta.HeadSHA, oldHeadSHA: meta.PrevHeadSHA}
 		// The new head is both the news and the freshness gate's input — an
 		// absent one would silently disable the gate as well as empty the copy.
 		complete = parsed.headSHA != ""
@@ -50,21 +53,21 @@ func parsePRCoherenceEvent(evt *domain.Event) (prCoherenceEvent, bool) {
 		if json.Unmarshal([]byte(evt.MetadataJSON), &meta) != nil {
 			return parsed, false
 		}
-		parsed = prCoherenceEvent{repo: meta.Repo, prNumber: meta.PRNumber, headSHA: meta.HeadSHA, checkName: meta.CheckName, checkURL: meta.CheckURL, conclusion: "failure"}
+		parsed = prCoherenceEvent{repo: meta.Repo, repositoryID: meta.RepositoryID, prNumber: meta.PRNumber, headSHA: meta.HeadSHA, checkName: meta.CheckName, checkURL: meta.CheckURL, conclusion: "failure"}
 		complete = parsed.checkName != ""
 	case domain.EventGitHubPRCICheckPassed:
 		var meta events.GitHubPRCICheckPassedMetadata
 		if json.Unmarshal([]byte(evt.MetadataJSON), &meta) != nil {
 			return parsed, false
 		}
-		parsed = prCoherenceEvent{repo: meta.Repo, prNumber: meta.PRNumber, headSHA: meta.HeadSHA, checkName: meta.CheckName, conclusion: meta.Conclusion}
+		parsed = prCoherenceEvent{repo: meta.Repo, repositoryID: meta.RepositoryID, prNumber: meta.PRNumber, headSHA: meta.HeadSHA, checkName: meta.CheckName, conclusion: meta.Conclusion}
 		complete = parsed.checkName != "" && parsed.conclusion != ""
 	case domain.EventGitHubPRConflicts:
 		var meta events.GitHubPRConflictsMetadata
 		if json.Unmarshal([]byte(evt.MetadataJSON), &meta) != nil {
 			return parsed, false
 		}
-		parsed = prCoherenceEvent{repo: meta.Repo, prNumber: meta.PRNumber, headSHA: meta.HeadSHA}
+		parsed = prCoherenceEvent{repo: meta.Repo, repositoryID: meta.RepositoryID, prNumber: meta.PRNumber, headSHA: meta.HeadSHA}
 		// The transition into CONFLICTING is itself the news; the head only
 		// says where it was observed.
 		complete = true
@@ -143,17 +146,24 @@ func (s *Spawner) HandlePRCoherence(evt domain.Event) {
 		return
 	}
 
-	headRepo, headRef := parsed.repo, ""
+	// The checkout arm matches ledger rows by registry row id. The base is the
+	// PR entity's repository, or the event's own record of it when the entity
+	// cannot be read; the event's repo name is display only, and spells the
+	// repository as it was called when the event was emitted.
+	baseRepositoryID, headRepositoryID, headRef := parsed.repositoryID, parsed.repositoryID, ""
 	if s.entities != nil {
 		entity, loadErr := s.entities.GetSystem(ctx, evt.OrgID, entityID)
 		if loadErr != nil {
 			delegateLog.Warn("PR coherence injection: load entity snapshot failed", "entity", entityID, "error", loadErr)
 		} else if entity != nil {
+			if entity.RepositoryID != "" {
+				baseRepositoryID, headRepositoryID = entity.RepositoryID, entity.RepositoryID
+			}
 			var snapshot domain.PRSnapshot
 			if json.Unmarshal([]byte(entity.SnapshotJSON), &snapshot) == nil {
 				headRef = snapshot.HeadRef
-				if strings.TrimSpace(snapshot.HeadRepo) != "" {
-					headRepo = snapshot.HeadRepo
+				if headRepo := strings.TrimSpace(snapshot.HeadRepo); headRepo != "" {
+					headRepositoryID = s.prHeadRepositoryID(ctx, evt.OrgID, entity.Scope, headRepo)
 				}
 			}
 		}
@@ -163,12 +173,12 @@ func (s *Spawner) HandlePRCoherence(evt domain.Event) {
 		branchRef = worktree.CheckoutRefSlug(headRef)
 	}
 	targets, err := s.conversations.ListPRCoherenceTargetsSystem(ctx, evt.OrgID, db.PRCoherenceTargetQuery{
-		EntityID:  entityID,
-		EventID:   original.ID,
-		BaseRepo:  parsed.repo,
-		HeadRepo:  headRepo,
-		PRRef:     worktree.PRRefSlug(parsed.prNumber),
-		BranchRef: branchRef,
+		EntityID:         entityID,
+		EventID:          original.ID,
+		BaseRepositoryID: baseRepositoryID,
+		HeadRepositoryID: headRepositoryID,
+		PRRef:            worktree.PRRefSlug(parsed.prNumber),
+		BranchRef:        branchRef,
 	})
 	if err != nil {
 		delegateLog.Warn("PR coherence injection: list conversations failed", "entity", entityID, "error", err)
@@ -197,6 +207,27 @@ func (s *Spawner) HandlePRCoherence(evt domain.Event) {
 		s.StageOrDeliverInformationalEvent(ctx, evt.OrgID, target.ConversationID, domain.StagedInjectionProducerPRCoherence, body,
 			domain.NoteProvenance{EventID: original.ID, EventType: original.EventType})
 	}
+}
+
+// prHeadRepositoryID resolves the head repository a PR snapshot names —
+// GitHub's full name for it, a fork's or the base repository's own — to its
+// registry row on the PR's host, once, here. A head with no row, such as a
+// fork TF has never recorded anything in, answers "", which no ledger row can
+// reference; so does a failed read, which is logged. Either way a checkout of
+// the head branch in the base repository still matches through the base's id.
+func (s *Spawner) prHeadRepositoryID(ctx context.Context, orgID, host, headRepo string) string {
+	if s.repos == nil || host == "" {
+		return ""
+	}
+	row, err := s.repos.GetByRefSystem(ctx, orgID, domain.RepoRefFromSlug(host, headRepo))
+	if err != nil {
+		delegateLog.Warn("PR coherence injection: resolve head repository failed", "head_repo", headRepo, "host", host, "error", err)
+		return ""
+	}
+	if row == nil {
+		return ""
+	}
+	return row.ID
 }
 
 // reviewsAnchoredAtHead returns the conversations whose pending review already

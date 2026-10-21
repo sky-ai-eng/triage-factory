@@ -636,8 +636,8 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if _, err := stores.Users.GetGitHubLoginSystem(ctx, userID, "github.com"); err != nil {
 			t.Errorf("Users.GetGitHubLoginSystem: %v", err)
 		}
-		if _, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, teamID, dbtest.TestGitHubHost, "octo", "repo"); err != nil {
-			t.Errorf("TeamGitHubRepos.TracksRepoSystem: %v", err)
+		if _, err := stores.TeamGitHubRepos.TracksRepositorySystem(ctx, teamID, uuid.NewString()); err != nil {
+			t.Errorf("TeamGitHubRepos.TracksRepositorySystem: %v", err)
 		}
 		if _, err := stores.GitHubApps.GetForOrgSystem(ctx, orgID); err != nil {
 			t.Errorf("GitHubApps.GetForOrgSystem: %v", err)

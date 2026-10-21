@@ -760,8 +760,8 @@ func (c *LocalClient) GetRepo(ctx context.Context, slug string) (*domain.Reposit
 	return c.rt.GetRepo(ctx, slug)
 }
 
-func (c *LocalClient) TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error) {
-	return c.rt.TeamTracksRepo(ctx, owner, repo)
+func (c *LocalClient) TeamTracksRepository(ctx context.Context, repositoryID string) (bool, error) {
+	return c.rt.TeamTracksRepository(ctx, repositoryID)
 }
 
 func (c *LocalClient) SourceManifest(ctx context.Context) (domain.SourceManifest, error) {
@@ -1632,6 +1632,12 @@ func (c *LocalClient) legacyRepoClient(ctx context.Context, owner, repo string) 
 // denied gh op still leaves an audit trail — symmetric with the proxy's
 // "authorize-error" path.
 //
+// owner/repo is the name the verb was handed, resolved once (GetRepo) to the
+// registry row it names on the org's current GitHub host. Tracking, the ledger
+// and the task's own repo are each answered for that row's id, so the three
+// arms cannot disagree about which repository is meant. A name no row answers
+// to is a repository no team tracks.
+//
 // The two hard-deny outcomes are deliberately distinct, because the agent's
 // recovery differs and a bare "not authorized" left it guessing (the common
 // case: a Slack-triggered taskless run that hasn't cloned anything yet, so no
@@ -1649,10 +1655,18 @@ func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) err
 		return nil
 	}
 	repoID := owner + "/" + repo
-	tracks, err := c.rt.TeamTracksRepo(ctx, owner, repo)
+	profile, err := c.rt.GetRepo(ctx, repoID)
 	if err != nil {
 		c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
 		return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, err)
+	}
+	tracks := false
+	if profile != nil {
+		tracks, err = c.rt.TeamTracksRepository(ctx, profile.ID)
+		if err != nil {
+			c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
+			return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, err)
+		}
 	}
 	if !tracks {
 		c.RecordGitDenied(ctx, owner, repo, "", "gh", "repo-not-tracked")
@@ -1663,20 +1677,12 @@ func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) err
 		c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
 		return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, lerr)
 	}
-	// A ledger row names its repository by registry id, and the repository a
-	// verb reaches is the row for owner/repo on the org's current GitHub host.
-	// A checkout of the same owner/repo on another host is another repository
-	// and authorizes nothing here.
-	if len(rows) > 0 {
-		profile, perr := c.rt.GetRepo(ctx, repoID)
-		if perr != nil {
-			c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
-			return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, perr)
-		}
-		for _, w := range rows {
-			if profile != nil && w.RepositoryID == profile.ID {
-				return nil
-			}
+	// A ledger row names its repository by registry id. A checkout of the
+	// same owner/repo on another host is another row, so it authorizes
+	// nothing here.
+	for _, w := range rows {
+		if w.RepositoryID == profile.ID {
+			return nil
 		}
 	}
 	// No ledger row. The run's OWN task repo is authorized anyway, because a
@@ -1684,7 +1690,7 @@ func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) err
 	// row for the one repo its whole mission is about — and refusing there
 	// tells an agent to `workspace add` a repo it is already standing in. The
 	// exception is exactly one repo wide and resolves on the orchestrator.
-	isTaskRepo, terr := c.rt.TaskOwnRepo(ctx, owner, repo)
+	isTaskRepo, terr := c.rt.TaskOwnRepository(ctx, profile.ID)
 	if terr != nil {
 		c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
 		return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, terr)

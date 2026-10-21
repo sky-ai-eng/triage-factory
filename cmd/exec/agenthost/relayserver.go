@@ -351,16 +351,16 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(repoSlugResult{Slug: slug})
 
-	case opTeamTracksRepo:
-		var a teamTracksRepoArgs
+	case opTeamTracksRepository:
+		var a repositoryIDArgs
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, err
 		}
-		tracks, err := s.rt.TeamTracksRepo(ctx, a.Owner, a.Repo)
+		tracks, err := s.rt.TeamTracksRepository(ctx, a.RepositoryID)
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(teamTracksRepoResult{Tracks: tracks})
+		return json.Marshal(teamTracksRepositoryResult{Tracks: tracks})
 
 	case opGetConversationWorktreeByRepoRef:
 		var a conversationWorktreeByRepoRefArgs
@@ -373,12 +373,12 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(conversationWorktreeResult{Worktree: w})
 
-	case opTaskOwnRepo:
-		var a taskOwnRepoArgs
+	case opTaskOwnRepository:
+		var a repositoryIDArgs
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, err
 		}
-		isTaskRepo, err := s.rt.TaskOwnRepo(ctx, a.Owner, a.Repo)
+		isTaskRepo, err := s.rt.TaskOwnRepository(ctx, a.RepositoryID)
 		if err != nil {
 			return nil, err
 		}

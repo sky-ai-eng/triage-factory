@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -47,24 +48,47 @@ func resolveLocalCheckout(dir string) localCheckout {
 	return localCheckout{dir: dir, headSHA: head, ok: true}
 }
 
+// prCheckouts is what prCheckout reads: the run's checkouts, and the registry
+// row a name resolves to.
+type prCheckouts interface {
+	runCheckouts
+	GetRepo(ctx context.Context, slug string) (*domain.Repository, error)
+}
+
 // prCheckout returns the run's checkout of PR number in owner/repo: the
-// conversation_worktrees row whose repo matches and whose ref is exactly
-// pr-<number>, resolved to its HEAD. It is the one frame `pr diff` diffs in and
-// `add-review-comment` anchors to. The current directory plays no part, so an
-// agent standing at the run root or in another repo's checkout still reaches
-// the PR's own code. ok=false when the run holds no such checkout; the
-// caller then uses the API diff and says so. A registry read failure is noted
-// on stderr and degrades the same way.
-func prCheckout(ctx context.Context, host runCheckouts, owner, repo string, number int) localCheckout {
+// conversation_worktrees row of the repository owner/repo names and whose ref
+// is exactly pr-<number>, resolved to its HEAD. It is the one frame `pr diff`
+// diffs in and `add-review-comment` anchors to. The current directory plays no
+// part, so an agent standing at the run root or in another repo's checkout
+// still reaches the PR's own code.
+//
+// owner/repo is resolved once to the registry row it names (GetRepo) and the
+// ledger is matched on that row's id, so a checkout of a different repository
+// under the same name — one GitHub has since given the name away from, or one
+// on another GitHub host — is not this one. ok=false when the run holds no
+// such checkout, or the name resolves to no row; the caller then uses the API
+// diff and says so. A registry read failure is noted on stderr and degrades
+// the same way.
+func prCheckout(ctx context.Context, host prCheckouts, owner, repo string, number int) localCheckout {
 	rows, err := listRunCheckouts(ctx, host)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "could not read this run's checkouts (%v); using PR #%d's live head from the GitHub API\n", err, number)
 		return localCheckout{}
 	}
-	repoID := owner + "/" + repo
+	if len(rows) == 0 {
+		return localCheckout{}
+	}
+	row, err := host.GetRepo(ctx, owner+"/"+repo)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "could not resolve %s/%s in the repository registry (%v); using PR #%d's live head from the GitHub API\n", owner, repo, err, number)
+		return localCheckout{}
+	}
+	if row == nil {
+		return localCheckout{}
+	}
 	ref := worktree.PRRefSlug(number)
 	for _, w := range rows {
-		if strings.EqualFold(w.RepoID, repoID) && w.Ref == ref {
+		if w.RepositoryID == row.ID && w.Ref == ref {
 			return resolveLocalCheckout(w.Path)
 		}
 	}
