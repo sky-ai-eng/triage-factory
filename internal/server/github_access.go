@@ -485,7 +485,7 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 		}
 		// The PAT is now the org's GitHub identity (the App is torn down below) —
 		// persist its login so OrgIdentityFor resolves the PAT tier (TFAC-452).
-		if err := persistOrgGitHubIdentity(ctx, tx, orgID, ghUser.Login, ghUser.PrimaryEmail); err != nil {
+		if err := persistOrgGitHubIdentity(ctx, tx, orgID, ghUser.Login, ghUser.UserID(), ghUser.PrimaryEmail); err != nil {
 			return fmt.Errorf("persist org github identity: %w", err)
 		}
 		if err := tx.GitHubApps.DeleteForOrg(ctx, orgID); err != nil {

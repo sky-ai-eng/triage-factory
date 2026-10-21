@@ -377,6 +377,8 @@ CREATE TABLE public.agents (
     default_autonomy_suitability real,
     github_pat_user_id uuid,
     github_org_login text,
+    -- GitHub's numeric id for the github_org_login account, written with it.
+    github_org_user_id text,
     github_org_email text,
     jira_service_account_id text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -4241,9 +4243,13 @@ CREATE TABLE public.github_pending_binds (
     -- App-validated.
     leg           text NOT NULL DEFAULT 'authorize',
     -- The GitHub login the admin named. Carried here and nowhere else, so it
-    -- never rides a URL; on the install leg it is what the installation GitHub
-    -- returns has to be on.
+    -- never rides a URL.
     account_login text NOT NULL DEFAULT '',
+    -- GitHub's numeric id for that account, once the ceremony has resolved
+    -- one: an install-leg record carries it, and the installation GitHub
+    -- returns has to be on that id. NULL on an authorize-leg record, which
+    -- names the account only as the admin typed it.
+    account_id    text,
     created_at    timestamptz NOT NULL,
     expires_at  timestamptz NOT NULL,
     consumed_at timestamptz

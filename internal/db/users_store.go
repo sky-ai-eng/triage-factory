@@ -191,6 +191,13 @@ type UsersStore interface {
 	// SQLite collapses the two variants to one connection.
 	GetGitHubLoginSystem(ctx context.Context, userID, githubBaseURL string) (string, error)
 
+	// GetGitHubIdentitySystem mirrors GetGitHubIdentity on the admin pool in
+	// Postgres. Its consumer is a delegated run, which has to tell the GitHub
+	// account of the person who delegated it apart from the org credential's
+	// account by numeric id and carries no JWT claims to read it under.
+	// SQLite collapses the two variants to one connection.
+	GetGitHubIdentitySystem(ctx context.Context, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error)
+
 	// UserIDsForGitHubLoginSystem returns every TF user bound to login
 	// on githubBaseURL in user_github_identities — the reverse of
 	// GetGitHubLogin. Host-scoped, org-agnostic (identity is keyed on

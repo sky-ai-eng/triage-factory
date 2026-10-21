@@ -8,10 +8,12 @@
 -- issue entity is written with its issue id, pull request, review and branch
 -- artifacts are keyed on ids rather than their repository's name, every
 -- artifact references the entity it is about and Jira artifacts keyed on an
--- issue key are keyed on the issue's id, Linear
--- becomes a tracked source, and five smaller changes ride along: the org GitHub App's unusable state, the claim's source
+-- issue key are keyed on the issue's id, one live App installation per account
+-- is keyed on the account's id rather than its login, Linear
+-- becomes a tracked source, and seven smaller changes ride along: the org GitHub App's unusable state, the claim's source
 -- manifest, the retirement of the 'completed' conversation status, node ids on
--- artifacts and audit-ledger rows, and the table of rate-limit readings.
+-- artifacts and audit-ledger rows, the table of rate-limit readings, and the
+-- GitHub account id on a pending bind and on the org PAT's identity.
 --
 -- NO TRANSACTION because rebuilding a table other tables reference needs
 -- foreign keys off, and PRAGMA foreign_keys is a no-op inside a transaction:
@@ -108,6 +110,20 @@ CREATE TABLE rate_limit_readings (
     observed_at  DATETIME NOT NULL,
     PRIMARY KEY (org_id, upstream, credential, bucket)
 );
+
+-- github_pending_binds.account_id: GitHub's numeric id for the account an
+-- install-leg record was minted for, which the installation GitHub returns has
+-- to be on. NULL on an authorize-leg record, which names the account only as
+-- the admin typed it, and on every record already stored. A record lives
+-- fifteen minutes, so none is backfilled; one without an id is held to its
+-- login.
+ALTER TABLE github_pending_binds ADD COLUMN account_id TEXT;
+
+-- agents.github_org_user_id: GitHub's numeric id for the account the org's PAT
+-- authenticates as, written with github_org_login on every PAT save. A run
+-- tells that account apart from the person who delegated it by this id. The
+-- PAT's next save fills it in on a stored row; until then the login decides.
+ALTER TABLE agents ADD COLUMN github_org_user_id TEXT;
 
 -- ===========================================================================
 -- 2. Linear

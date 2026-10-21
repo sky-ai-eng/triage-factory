@@ -38,12 +38,22 @@ func (s *usersStore) GetGitHubLogin(ctx context.Context, userID, githubBaseURL s
 }
 
 func (s *usersStore) GetGitHubIdentity(ctx context.Context, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error) {
+	return getGitHubIdentity(ctx, s.q, userID, githubBaseURL)
+}
+
+func (s *usersStore) GetGitHubIdentitySystem(ctx context.Context, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error) {
+	return getGitHubIdentity(ctx, s.admin, userID, githubBaseURL)
+}
+
+// getGitHubIdentity reads the user's identity row for a host on the given
+// pool; GetGitHubIdentity and its System twin differ only in the pool.
+func getGitHubIdentity(ctx context.Context, q queryer, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error) {
 	var (
 		id       domain.UserGitHubIdentity
 		ghUserID sql.NullString
 		verified sql.NullTime
 	)
-	err := s.q.QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`SELECT login, github_user_id, source, verified_at
 		   FROM user_github_identities
 		  WHERE user_id = $1 AND github_base_url = $2`,

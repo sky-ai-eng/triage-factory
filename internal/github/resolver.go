@@ -158,6 +158,25 @@ type RepoIdentityResolver interface {
 	ClientForRepoWithIdentity(ctx context.Context, orgID, owner, repo string) (*Client, Identity, error)
 }
 
+// OrgIdentity is the org's GitHub commit identity, the name and email
+// OrgIdentityFor resolves, together with GitHub's numeric id for the account
+// it is, in text form, "" when that id is not stored.
+type OrgIdentity struct {
+	Name      string
+	Email     string
+	AccountID string
+}
+
+// OrgIdentityAccountResolver is the optional extension of Resolver,
+// implemented by the production resolver, that reports OrgIdentityFor's
+// identity together with the account id it belongs to, from the same
+// resolution. A caller that has to tell the org's account apart from a
+// person's compares the ids; a Resolver that doesn't implement it leaves the
+// caller with OrgIdentityFor and the login alone.
+type OrgIdentityAccountResolver interface {
+	OrgIdentityAccountFor(ctx context.Context, orgID string) (OrgIdentity, bool)
+}
+
 // TokenIdentityResolver is the optional extension of Resolver, implemented by
 // the production resolver, that reports the Identity of the credential TokenFor
 // would return, from the same resolution, so a caller labelling what a token
@@ -339,6 +358,9 @@ type Resolver interface {
 	// login (an org bound before TFAC-452, or a read error). The caller then
 	// leaves git identity unset and the agent inherits ambient config, never a
 	// fabricated identity; it self-heals on the next PAT re-save / App re-register.
+	//
+	// OrgIdentityAccountResolver reports the same identity together with the
+	// GitHub account id it belongs to.
 	OrgIdentityFor(ctx context.Context, orgID string) (name, email string, ok bool)
 }
 
@@ -419,9 +441,10 @@ func NewResolver(secrets db.SecretStore, apps db.GitHubAppsStore, orgs db.OrgsSt
 // dropped method is a compile error rather than a silent runtime fall-through
 // to the unscoped path.
 var (
-	_ ScopedResolver          = (*resolver)(nil)
-	_ ScopedRepoResolver      = (*resolver)(nil)
-	_ RepoCoverageInvalidator = (*resolver)(nil)
+	_ ScopedResolver             = (*resolver)(nil)
+	_ ScopedRepoResolver         = (*resolver)(nil)
+	_ RepoCoverageInvalidator    = (*resolver)(nil)
+	_ OrgIdentityAccountResolver = (*resolver)(nil)
 )
 
 func (r *resolver) ClientFor(ctx context.Context, orgID, target string) (*Client, error) {
@@ -1117,11 +1140,20 @@ func (r *resolver) BaseURLFor(ctx context.Context, orgID string) (string, error)
 // the whole posture of this function is to refuse a fabricated identity, and
 // under an unrecognised class the PAT login would be exactly that.
 func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, email string, ok bool) {
+	id, ok := r.OrgIdentityAccountFor(ctx, orgID)
+	return id.Name, id.Email, ok
+}
+
+// OrgIdentityAccountFor is OrgIdentityFor with the account id of the identity
+// it resolves: the App's bot user id (org_github_apps.bot_user_id, or the
+// deployment App's) on the App tier, and agents.github_org_user_id on the PAT
+// tier, "" where it is not stored.
+func (r *resolver) OrgIdentityAccountFor(ctx context.Context, orgID string) (OrgIdentity, bool) {
 	class, host, err := r.credentialClassFor(ctx, orgID)
 	if err != nil || !class.Known() {
 		ghResolverLog.Warn("resolve credential class failed or unknown; stamping no org identity",
 			"org", orgID, "class", class, "error", err)
-		return "", "", false
+		return OrgIdentity{}, false
 	}
 
 	// App tier: the org's registered App acts as "<slug>[bot]". The slug comes
@@ -1131,19 +1163,19 @@ func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, emai
 	// PAT rather than claiming an identity the org isn't acting as — during a
 	// PAT→App switch the org is in the App system but still committing as its PAT.
 	if app, err := r.appForIdentity(ctx, orgID, class, host); err == nil && app.commitIdentityReady() {
-		name = app.slug() + "[bot]"
+		out := OrgIdentity{Name: app.slug() + "[bot]"}
 		// The numeric-id noreply form links a bot's commits to its account on
 		// github.com (contribution graph + Verified co-author badge); the plain
 		// "<slug>[bot]@..." form does NOT reliably link for bot accounts. Use the
 		// numeric form when the bot user id is known (org_github_apps.bot_user_id,
-		// fetched best-effort at registration), else fall back to the plain form —
-		// today's behavior, never a worse state (TFAC-474).
+		// fetched best-effort at registration), else fall back to the plain form.
 		if id := app.botUserID(); id != 0 {
-			email = strconv.FormatInt(id, 10) + "+" + name + "@users.noreply.github.com"
+			out.AccountID = strconv.FormatInt(id, 10)
+			out.Email = out.AccountID + "+" + out.Name + "@users.noreply.github.com"
 		} else {
-			email = name + "@users.noreply.github.com"
+			out.Email = out.Name + "@users.noreply.github.com"
 		}
-		return name, email, true
+		return out, true
 	}
 	// A managed org has no PAT tier to fall to. Its credential is the deployment
 	// App — activeApp refuses rather than borrowing a PAT — so the cached PAT
@@ -1152,7 +1184,7 @@ func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, emai
 	// looking at commit authorship. Stamp nothing instead, exactly as an
 	// unrecognised class does, and let the agent inherit ambient git config.
 	if class == domain.GitHubCredentialClassManagedApp {
-		return "", "", false
+		return OrgIdentity{}, false
 	}
 
 	// PAT tier: the identity the org PAT authenticates as. The agents columns
@@ -1170,17 +1202,17 @@ func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, emai
 	// A PAT with no GitHub URL to send it to authenticates as nobody, so it
 	// lends no identity.
 	if _, err := host(); err != nil {
-		return "", "", false
+		return OrgIdentity{}, false
 	}
 	if pat, err := r.orgPAT(ctx, orgID); err != nil || pat == "" {
-		return "", "", false
+		return OrgIdentity{}, false
 	}
 	// PAT present: trust the captured pair. A partial identity cannot stamp a
 	// commit; it self-heals on the next PAT save.
 	if agent, err := r.agents.GetForOrgSystem(ctx, orgID); err == nil && agent != nil && agent.GitHubOrgLogin != "" && agent.GitHubOrgEmail != "" {
-		return agent.GitHubOrgLogin, agent.GitHubOrgEmail, true
+		return OrgIdentity{Name: agent.GitHubOrgLogin, Email: agent.GitHubOrgEmail, AccountID: agent.GitHubOrgUserID}, true
 	}
-	return "", "", false
+	return OrgIdentity{}, false
 }
 
 // accountRef names the GitHub account whose installation a caller needs. The

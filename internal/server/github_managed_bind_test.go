@@ -208,14 +208,17 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		ids := make([]string, 0, len(f.userInstallations))
 		for _, id := range f.userInstallations {
 			login, ok := f.userInstallationAccounts[id]
+			// The fake's own installation lists its account's id as GitHub's
+			// does; any other entry names its account by login alone.
+			var accountID int64
 			switch {
 			case ok:
 			case id == f.installationID:
-				login = f.accountLogin
+				login, accountID = f.accountLogin, f.accountID
 			default:
 				login = fmt.Sprintf("acct-%d", id)
 			}
-			ids = append(ids, fmt.Sprintf(`{"id":%d,"account":{"login":%q}}`, id, login))
+			ids = append(ids, fmt.Sprintf(`{"id":%d,"account":{"id":%d,"login":%q}}`, id, accountID, login))
 		}
 		fmt.Fprintf(w, `{"total_count":%d,"installations":[%s]}`, len(ids), strings.Join(ids, ","))
 
@@ -2138,15 +2141,15 @@ func TestManagedBind_NamedAccount_NotInTheListingContinuesToInstall(t *testing.T
 			if !rig.recordConsumed(t, first) {
 				t.Error("the authorize leg's record was not spent by the hop")
 			}
-			var leg, account string
+			var leg, account, accountID string
 			if err := rig.h.AdminDB.QueryRow(`
-				SELECT leg, account_login FROM github_pending_binds
+				SELECT leg, account_login, COALESCE(account_id, '') FROM github_pending_binds
 				 WHERE org_id = $1 AND consumed_at IS NULL
-			`, rig.orgID.String()).Scan(&leg, &account); err != nil {
+			`, rig.orgID.String()).Scan(&leg, &account, &accountID); err != nil {
 				t.Fatalf("read the install-leg record: %v", err)
 			}
-			if leg != domain.GitHubBindLegInstall || account != "acme" {
-				t.Errorf("hop minted (leg %q, account %q), want (install, acme)", leg, account)
+			if leg != domain.GitHubBindLegInstall || account != "acme" || accountID != "700" {
+				t.Errorf("hop minted (leg %q, account %q, id %q), want (install, acme, 700)", leg, account, accountID)
 			}
 			var set []*http.Cookie
 			for _, c := range (&http.Response{Header: out.Header()}).Cookies() {
@@ -2203,6 +2206,49 @@ func TestManagedBind_InstallLeg_AccountMismatch(t *testing.T) {
 		}
 	}
 	rig.assertNothingBound(t)
+}
+
+// TestManagedBind_InstallLeg_HoldsTheNamedAccountByID: the install leg's
+// record carries the id the authorize leg resolved the named login to, and the
+// installation GitHub returns is held to that id. A rename between the two legs
+// still binds. Another account holding the named login by then is a mismatch,
+// whatever it is called.
+func TestManagedBind_InstallLeg_HoldsTheNamedAccountByID(t *testing.T) {
+	t.Run("the named account renamed between the legs", func(t *testing.T) {
+		gh := newFakeGitHub()
+		rig := newBindRig(t, gh)
+		cookie := rig.ceremony(t) // named acme, id 700
+
+		gh.accountLogin = "acme-renamed"
+		gh.userInstallations = []int64{4242}
+		out := rig.callback(t, cookie, defaultCallbackQuery(4242))
+		if out.Code != http.StatusFound || out.Header().Get("X-TF-Bind-Outcome") != "" {
+			t.Fatalf("callback status=%d outcome=%q body=%s, want the bind's 302",
+				out.Code, out.Header().Get("X-TF-Bind-Outcome"), out.Body.String())
+		}
+		var accountID string
+		if err := rig.h.AdminDB.QueryRow(`
+			SELECT account_id FROM org_github_app_installations
+			 WHERE org_id = $1 AND installation_id = '4242'
+		`, rig.orgID.String()).Scan(&accountID); err != nil {
+			t.Fatalf("read installation row: %v", err)
+		}
+		if accountID != "700" {
+			t.Errorf("bound account_id = %q, want 700", accountID)
+		}
+	})
+
+	t.Run("another account under the named login", func(t *testing.T) {
+		gh := newFakeGitHub()
+		rig := newBindRig(t, gh)
+		cookie := rig.ceremony(t) // named acme, id 700
+
+		gh.accountID = 900
+		gh.userInstallations = []int64{4242}
+		out := rig.callback(t, cookie, defaultCallbackQuery(4242))
+		assertOutcome(t, out, "account_mismatch")
+		rig.assertNothingBound(t)
+	})
 }
 
 // TestManagedBind_HopRequiresIdentity: the install page is offered only once

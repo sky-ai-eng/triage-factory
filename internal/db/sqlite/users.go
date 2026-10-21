@@ -202,6 +202,10 @@ func (s *usersStore) GetGitHubLoginSystem(ctx context.Context, userID, githubBas
 	return s.GetGitHubLogin(ctx, userID, githubBaseURL)
 }
 
+func (s *usersStore) GetGitHubIdentitySystem(ctx context.Context, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error) {
+	return s.GetGitHubIdentity(ctx, userID, githubBaseURL)
+}
+
 func (s *usersStore) DashboardBackfilledAtSystem(ctx context.Context, userID, githubBaseURL string) (*time.Time, error) {
 	var at sql.NullTime
 	err := s.q.QueryRowContext(ctx,

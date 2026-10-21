@@ -266,6 +266,14 @@ func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 		if got, err := stores.Users.GetGitHubIdentity(ctx, u, "https://elsewhere.example"); err != nil || got != nil {
 			t.Errorf("GetGitHubIdentity(other host) = %+v, %v; want nil — identity is host-scoped", got, err)
 		}
+		// The System twin answers the same, for the claims-free delegated run.
+		sys, err := stores.Users.GetGitHubIdentitySystem(ctx, u, host)
+		if err != nil || sys == nil || *sys != *got {
+			t.Errorf("GetGitHubIdentitySystem = %+v, %v; want %+v", sys, err, *got)
+		}
+		if sys, err := stores.Users.GetGitHubIdentitySystem(ctx, seed.User(t), host); err != nil || sys != nil {
+			t.Errorf("GetGitHubIdentitySystem(unlinked) = %+v, %v; want nil, nil", sys, err)
+		}
 	})
 
 	t.Run("IdentityEmailRoundTripsAndSurvivesAnOmission", func(t *testing.T) {

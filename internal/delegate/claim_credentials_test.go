@@ -18,15 +18,32 @@ import (
 )
 
 // fakeUsers is a minimal UsersStore for the co-author lookup: it returns a
-// fixed login from GetGitHubLoginSystem and embeds the interface so the
-// unexercised methods compile (and panic only if unexpectedly called).
+// fixed identity from GetGitHubIdentitySystem, none when login is empty, and
+// embeds the interface so the unexercised methods compile (and panic only if
+// unexpectedly called).
 type fakeUsers struct {
 	db.UsersStore
 	login string
+	id    string
 }
 
-func (f fakeUsers) GetGitHubLoginSystem(_ context.Context, _, _ string) (string, error) {
-	return f.login, nil
+func (f fakeUsers) GetGitHubIdentitySystem(_ context.Context, _, _ string) (*domain.UserGitHubIdentity, error) {
+	if f.login == "" {
+		return nil, nil
+	}
+	return &domain.UserGitHubIdentity{Login: f.login, GitHubUserID: f.id}, nil
+}
+
+// accountResolver is fakeResolver with OrgIdentityAccountFor, so the org
+// identity carries the account id the production resolver reports.
+type accountResolver struct {
+	*fakeResolver
+	accountID string
+}
+
+func (r accountResolver) OrgIdentityAccountFor(ctx context.Context, orgID string) (ghclient.OrgIdentity, bool) {
+	name, email, ok := r.OrgIdentityFor(ctx, orgID)
+	return ghclient.OrgIdentity{Name: name, Email: email, AccountID: r.accountID}, ok
 }
 
 // fakeResolver records ClientFor calls and returns a preconfigured client.
@@ -379,6 +396,23 @@ func TestResolveCommitIdentity_DelegateSeam(t *testing.T) {
 		want := "Co-authored-by: alice <alice@users.noreply.github.com>"
 		if id.CoAuthorTrailer != want {
 			t.Errorf("trailer = %q; want %q (plain human form, never numeric)", id.CoAuthorTrailer, want)
+		}
+	})
+
+	t.Run("the org account and the human are compared by id", func(t *testing.T) {
+		// The PAT owner is the delegating human under a login captured before
+		// a rename: one account, so no trailer. A different account under the
+		// PAT owner's login is a co-author.
+		same := newSpawner(accountResolver{&fakeResolver{orgLogin: "octocat"}, "583231"},
+			fakeUsers{login: "octo-renamed", id: "583231"})
+		if id := same.resolveCommitIdentity(context.Background(), orgID, "manual", "user-1"); id.CoAuthorTrailer != "" {
+			t.Errorf("trailer = %q for the PAT owner's own run; want none", id.CoAuthorTrailer)
+		}
+		other := newSpawner(accountResolver{&fakeResolver{orgLogin: "octocat"}, "583231"},
+			fakeUsers{login: "octocat", id: "777"})
+		want := "Co-authored-by: octocat <octocat@users.noreply.github.com>"
+		if id := other.resolveCommitIdentity(context.Background(), orgID, "manual", "user-1"); id.CoAuthorTrailer != want {
+			t.Errorf("trailer = %q for another account under the PAT owner's login; want %q", id.CoAuthorTrailer, want)
 		}
 	})
 }

@@ -350,11 +350,16 @@ type GitHubPendingBind struct {
 	// that found the account without the App.
 	Leg string
 	// AccountLogin is the account the admin named, the only place it is
-	// carried — never a URL. On the install leg it is what the installation
-	// GitHub returns has to be on.
+	// carried — never a URL.
 	AccountLogin string
-	CreatedAt    time.Time
-	ExpiresAt    time.Time
+	// AccountID is GitHub's numeric id for that account in its text form, once
+	// the ceremony has resolved one: an install-leg record carries it, and the
+	// installation GitHub returns has to be on that id. "" on an authorize-leg
+	// record, which names the account only as the admin typed it; a record
+	// with no id is held to AccountLogin instead.
+	AccountID string
+	CreatedAt time.Time
+	ExpiresAt time.Time
 	// ConsumedAt is when the callback spent this record, zero while it is
 	// unspent. Consumption is a conditional update rather than a read then a
 	// write, so two concurrent callbacks cannot both find it unspent.

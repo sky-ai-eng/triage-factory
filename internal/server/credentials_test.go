@@ -222,7 +222,7 @@ func TestGitHubPATPut_PersistsOrgGitHubIdentity(t *testing.T) {
 	// Fake GHE host: ValidateGitHub hits {base}/api/v3/user for non-github.com.
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v3/user" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"login": "acme-bot"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"login": "acme-bot", "id": 4242})
 			return
 		}
 		if r.URL.Path == "/api/v3/user/emails" {
@@ -238,15 +238,16 @@ func TestGitHubPATPut_PersistsOrgGitHubIdentity(t *testing.T) {
 		t.Fatalf("pat bind status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
-	// The validated account identity is captured as a pair.
-	var login, email sql.NullString
+	// The validated account identity is captured together: login, the
+	// account's numeric id, and its email.
+	var login, userID, email sql.NullString
 	if err := s.db.QueryRowContext(t.Context(),
-		`SELECT github_org_login, github_org_email FROM agents WHERE org_id = ?`, org,
-	).Scan(&login, &email); err != nil {
+		`SELECT github_org_login, github_org_user_id, github_org_email FROM agents WHERE org_id = ?`, org,
+	).Scan(&login, &userID, &email); err != nil {
 		t.Fatalf("read agents GitHub identity: %v", err)
 	}
-	if login.String != "acme-bot" || email.String != "acme-bot@example.com" {
-		t.Errorf("agents GitHub identity = %q <%s>, want acme-bot <acme-bot@example.com>", login.String, email.String)
+	if login.String != "acme-bot" || userID.String != "4242" || email.String != "acme-bot@example.com" {
+		t.Errorf("agents GitHub identity = %q (%q) <%s>, want acme-bot (4242) <acme-bot@example.com>", login.String, userID.String, email.String)
 	}
 
 	// ...and per-user identity is untouched: the bind writes ACCESS, not identity.
