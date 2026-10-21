@@ -679,7 +679,7 @@ hourly quota, only whether it is close to its limit, so that reading is
 | --- | --- | --- |
 | `tf_upstream_rate_limit_remaining` | `upstream`, `org_id`, `credential`, `bucket` | What the latest response said is left of the bucket. For Slack, the method's published limit less `used`, and no series for a method with no published limit. |
 | `tf_upstream_rate_limit_used` | `upstream`, `org_id`, `credential`, `bucket` | Slack only: the calls this pod made against the bucket in the last minute, as of its latest call. |
-| `tf_upstream_rate_limit_near_limit` | `upstream`, `org_id`, `credential`, `bucket` | Jira Cloud's `quota` only: 1 when the latest response said less than 20% of the bucket is left, 0 when it said not. A bucket with this series has no `remaining`, `limit` or `remaining_ratio`. Under `credential="cloud_oauth:deployment"` the quota is the deployment's Atlassian app's, which every org using it shares, so take `max` over `org_id` for it. |
+| `tf_upstream_rate_limit_near_limit` | `upstream`, `org_id`, `credential`, `bucket` | Jira Cloud's `quota` only: 1 when the latest response said less than 20% of the bucket is left, 0 when it said not. A bucket with this series has no `remaining`, `limit` or `remaining_ratio`. Under `credential="cloud_oauth:deployment"` the quota is the deployment's Atlassian app's, which on Atlassian's default tier every org using it shares, so take `max` over `org_id` for it (see **Jira** below). |
 | `tf_upstream_rate_limit_limit` | `upstream`, `org_id`, `credential`, `bucket` | The bucket's size. No series when the response did not state it. |
 | `tf_upstream_rate_limit_remaining_ratio` | `upstream`, `org_id`, `credential`, `bucket` | `remaining` divided by `limit`, from 0 to 1. No series when the size was not stated. |
 | `tf_upstream_rate_limit_until_reset_seconds` | `upstream`, `org_id`, `credential`, `bucket` | Seconds until the bucket refills. No series when the reset was not stated. |
@@ -778,16 +778,20 @@ things, so their buckets have different names.
     without the header records 0. Jira states the quota's reset only on a 429
     (`X-RateLimit-Reset`), so any other reading is kept for an hour after its
     response, the longest the quota's window can make it true, and
-    `until_reset_seconds` counts down that hour. Atlassian documents one quota
-    per app, by default shared by every Jira site the app serves.
-    `cloud_oauth:org` is the workspace's own. `cloud_oauth:deployment` is one
-    quota that every workspace on the deployment's app spends from, and each
-    workspace reports only what its own requests saw: a workspace whose
-    reading is `near_limit` may owe it entirely to the others, and slowing
-    its own requests then changes nothing. Take `max` over `org_id` for the
-    deployment's quota (below). The workspace's own
+    `until_reset_seconds` counts down that hour. On Atlassian's default tier
+    (Tier 1, the Global Pool), an app has one quota shared by every Jira site
+    it serves. An app Atlassian has moved to the per-tenant tier (Tier 2,
+    assigned only after Atlassian reviews the app) has one quota per site
+    instead. `cloud_oauth:org` is the workspace's own. On Tier 1,
+    `cloud_oauth:deployment` is one quota that every workspace on the
+    deployment's app spends from, and each workspace reports only what its own
+    requests saw: a workspace whose reading is `near_limit` may owe it entirely
+    to the others, and slowing its own requests then changes nothing. Take
+    `max` over `org_id` for the deployment's quota (below). On Tier 2, each
+    workspace's `cloud_oauth:deployment` reading is its own site's quota, and
+    the `max` mixes unrelated quotas. The workspace's own
     `/integrations/rate-limits` read carries the same ids, so a caller there
-    can tell the shared quota from its own.
+    can tell the deployment app's quota from its own app's.
   - `burst:<endpoint>` is the per-second request allowance, from
     `X-RateLimit-Limit` and `X-RateLimit-Remaining`. It is not the hourly
     quota. Atlassian sets it per endpoint (one API token was allowed 350 on
@@ -866,7 +870,7 @@ min by (upstream, org_id, credential, bucket) (tf_upstream_rate_limit_remaining_
 sum by (upstream, org_id) (rate(tf_upstream_rate_limit_wait_seconds_total[15m]))         # not an alert: how much of the time each org's requests spend waiting
 sum by (org_id, credential, bucket) (tf_upstream_rate_limit_used{upstream="slack"}) / max by (org_id, credential, bucket) (tf_upstream_rate_limit_limit{upstream="slack"})   # not an alert: the share of each Slack method's minute this deployment's pods counted
 max by (org_id, credential) (tf_upstream_rate_limit_near_limit{upstream="jira"})   # not an alert: 1 where any pod's latest reading says a Jira quota is near its limit
-max(tf_upstream_rate_limit_near_limit{upstream="jira", credential="cloud_oauth:deployment"})   # not an alert: 1 when any pod's latest reading, for any org, says the deployment app's shared Jira quota is near its limit
+max(tf_upstream_rate_limit_near_limit{upstream="jira", credential="cloud_oauth:deployment"})   # not an alert: 1 when any pod's latest reading, for any org, says the deployment app's shared Jira quota is near its limit (Tier 1 only)
 ```
 
 In multi mode, the requests a delegated run makes from inside its sandbox spend
