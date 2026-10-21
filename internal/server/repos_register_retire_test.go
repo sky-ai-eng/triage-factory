@@ -155,6 +155,39 @@ func TestHandleRepoRegister_FreesANameGitHubGaveAway_Postgres(t *testing.T) {
 			t.Errorf("registered = %+v, want row %s restored under acme/api-archive", got, oldRow)
 		}
 	})
+
+	t.Run("a retired row is restored onto a name a live row holds once GitHub frees it", func(t *testing.T) {
+		// 601 was retired and 602 registered under acme/api. Now the mirror
+		// lists 601 under acme/api again and GitHub has no 602.
+		r := setup(t, map[string]string{}, http.StatusNotFound)
+		oldRow := r.repoID(t, "acme", "api")
+		first := register(r, r.memberB, newID)
+		var holder repoJSON
+		if first.Code != http.StatusOK || json.Unmarshal(first.Body.Bytes(), &holder) != nil {
+			t.Fatalf("register %s = %d, want 200; body=%s", newID, first.Code, first.Body.String())
+		}
+		newRow := holder.ID
+		if err := r.s.reachableRepos.ReplaceForPATSystem(t.Context(), r.orgID, dbtest.TestGitHubHost, []domain.ReachableRepository{
+			{OrgID: r.orgID, Owner: "acme", Repo: "api", ExternalID: oldID},
+		}); err != nil {
+			t.Fatalf("seed the reachable mirror: %v", err)
+		}
+
+		rec := register(r, r.memberB, oldID)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("register %s = %d, want 200; body=%s", oldID, rec.Code, rec.Body.String())
+		}
+		var got repoJSON
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.ID != oldRow || got.Slug != "acme/api" || got.RetiredAt != nil {
+			t.Errorf("registered = %+v, want row %s restored under acme/api", got, oldRow)
+		}
+		if row, err := r.s.repos.GetSystem(t.Context(), r.orgID, newRow); err != nil || row.RetiredAt == nil {
+			t.Errorf("the row that held the name = %+v, err=%v; want it retired", row, err)
+		}
+	})
 }
 
 // serveRepositoriesByID is a GitHub whose GET /repositories/{id} answers

@@ -509,7 +509,7 @@ func (p *Profiler) applyRenameFromMeta(ctx context.Context, orgID, host, tracked
 	if !ok || owner == "" || repo == "" {
 		return "", false
 	}
-	applied := reporename.Apply(ctx, p.repos, p.resolver, repoprofileLog, orgID, host, []domain.RepoRef{{
+	applied, _ := reporename.Apply(ctx, p.repos, p.resolver, repoprofileLog, orgID, host, []domain.RepoRef{{
 		Source: domain.RepoSourceGitHub, Owner: owner, Repo: repo, ExternalID: id,
 	}})
 	if applied == 0 {

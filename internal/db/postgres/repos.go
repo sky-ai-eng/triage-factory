@@ -91,8 +91,10 @@ func upsertRepository(ctx context.Context, q queryer, orgID string, p domain.Rep
 	// one updated: the upsert lands on, or creates, the row that holds the name.
 	//
 	// The id written is p.ExternalID unless another row on the host already
-	// carries it — a rename not yet applied, or one refused. The scalar
-	// subquery answers NULL then, and COALESCE keeps whatever this row had.
+	// carries it — a rename not yet applied, or one refused, or a retired row
+	// under this same name, which is not the row the upsert lands on and is
+	// restored only through RenameSystem. The scalar subquery answers NULL
+	// then, and COALESCE keeps whatever this row had.
 	//
 	// RETURNING projects the point read's column list, so the row handed back
 	// carries the COALESCEd external_id, the stored casing and the base branch
@@ -109,7 +111,7 @@ func upsertRepository(ctx context.Context, q queryer, orgID string, p domain.Rep
 		        (SELECT NULLIF($5::text, '') WHERE NOT EXISTS (
 		            SELECT 1 FROM repositories o
 		             WHERE o.org_id = $1 AND o.source = $2 AND o.host = $14 AND o.external_id = $5::text
-		               AND NOT (lower(o.owner) = lower($3) AND lower(o.repo) = lower($4)))),
+		               AND NOT (o.retired_at IS NULL AND lower(o.owner) = lower($3) AND lower(o.repo) = lower($4)))),
 		        NULLIF($6, ''), $7, $8, $9,
 		        NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), $13)
 		ON CONFLICT (org_id, source, host, lower(owner), lower(repo)) WHERE retired_at IS NULL DO UPDATE SET

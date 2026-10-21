@@ -64,8 +64,10 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.Repositor
 	// updated: the upsert lands on, or creates, the row that holds the name.
 	//
 	// The id written is p.ExternalID unless another row on the host already
-	// carries it — a rename not yet applied, or one refused. The scalar
-	// subquery answers NULL then, and COALESCE keeps whatever this row had.
+	// carries it — a rename not yet applied, or one refused, or a retired row
+	// under this same name, which is not the row the upsert lands on and is
+	// restored only through RenameSystem. The scalar subquery answers NULL
+	// then, and COALESCE keeps whatever this row had.
 	//
 	// RETURNING projects the point read's column list, so the row handed back
 	// carries the COALESCEd external_id, the stored casing and the base branch
@@ -76,7 +78,7 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.Repositor
 		        (SELECT ?6 WHERE NOT EXISTS (
 		            SELECT 1 FROM repositories o
 		             WHERE o.source = ?4 AND o.host = ?5 AND o.external_id = ?6
-		               AND NOT (LOWER(o.owner) = LOWER(?2) AND LOWER(o.repo) = LOWER(?3)))),
+		               AND NOT (o.retired_at IS NULL AND LOWER(o.owner) = LOWER(?2) AND LOWER(o.repo) = LOWER(?3)))),
 		        ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'))
 		ON CONFLICT(org_id, source, host, LOWER(owner), LOWER(repo)) WHERE retired_at IS NULL DO UPDATE SET
 			external_id    = COALESCE(excluded.external_id, repositories.external_id),

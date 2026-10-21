@@ -347,9 +347,35 @@ describe('RepoPickerModal', () => {
     expect(current.getAttribute('aria-checked')).toBe('false')
 
     // Swapping the old row for the new repository saves the new one alone.
+    expect(old.textContent).toContain('Uncheck to stop tracking this one.')
     fireEvent.click(old)
+    expect(old.textContent).not.toContain('Uncheck')
     fireEvent.click(current)
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
     expect(onSave).toHaveBeenCalledWith([{ id: '', github_id: '21', owner: 'acme', repo: 'api' }])
+  })
+
+  it('leaves a retired repository out of a search its name does not match', async () => {
+    listRepos.mockResolvedValue(page([repo('acme/api', '21'), repo('acme/web', '13')]))
+    const retired = {
+      id: 'r-old',
+      github_id: '11',
+      owner: 'acme',
+      repo: 'api',
+      retired_at: '2026-10-20T12:00:00Z',
+    }
+    render(<RepoPickerModal inline selected={[retired]} onSave={vi.fn()} onClose={vi.fn()} />)
+    await act(async () => {
+      vi.advanceTimersByTime(300)
+    })
+    expect(await screen.findByText('no longer on GitHub')).toBeInTheDocument()
+
+    listRepos.mockResolvedValue(page([repo('acme/web', '13')]))
+    fireEvent.change(screen.getByLabelText('Search repositories'), { target: { value: 'web' } })
+    await act(async () => {
+      vi.advanceTimersByTime(300)
+    })
+    expect(await screen.findByText('acme/web')).toBeInTheDocument()
+    expect(screen.queryByText('no longer on GitHub')).not.toBeInTheDocument()
   })
 })

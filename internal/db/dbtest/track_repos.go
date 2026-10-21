@@ -3,6 +3,8 @@ package dbtest
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
+	"strconv"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -27,4 +29,33 @@ func TrackRepos(ctx context.Context, repos db.RepositoryStore, tracking db.TeamG
 		ids = append(ids, row.ID)
 	}
 	return tracking.ReplaceForTeam(ctx, orgID, teamID, host, ids)
+}
+
+// RetireRepo retires the repository registered as slug on host, as a 404 for
+// its GitHub id would. A row with no GitHub id is given one first, because a
+// retire is keyed on it.
+func RetireRepo(ctx context.Context, repos db.RepositoryStore, orgID, host, slug string) error {
+	ref := domain.RepoRefFromSlug(host, slug)
+	ref.Source = domain.RepoSourceGitHub
+	row, err := repos.GetByRefSystem(ctx, orgID, ref)
+	if err != nil || row == nil {
+		return fmt.Errorf("resolve %s on %s: row=%v err=%w", slug, host, row, err)
+	}
+	ref.ExternalID = row.ExternalID
+	if ref.ExternalID == "" {
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(host + "/" + slug))
+		ref.ExternalID = strconv.FormatUint(uint64(h.Sum32()), 10)
+		if _, err := repos.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{ref}); err != nil {
+			return fmt.Errorf("give %s an id: %w", slug, err)
+		}
+	}
+	retired, err := repos.RetireSystem(ctx, orgID, ref)
+	if err != nil {
+		return fmt.Errorf("retire %s: %w", slug, err)
+	}
+	if retired == nil {
+		return fmt.Errorf("retire %s: no row retired", slug)
+	}
+	return nil
 }

@@ -1177,6 +1177,7 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 		           FROM conversation_worktrees w
 		           JOIN repositories repo ON repo.id = w.repository_id
 		           WHERE w.conversation_id = r.id
+		             AND repo.retired_at IS NULL
 		             AND repo.host = (SELECT pe.scope FROM entities pe WHERE pe.id = ?)
 		             AND (
 		                  (LOWER(repo.owner || '/' || repo.repo) = LOWER(?) AND w.ref = ?)

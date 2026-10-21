@@ -35,7 +35,7 @@ func TestApply_RenamesOnlyWhatMoved(t *testing.T) {
 	}
 	resolver := &coverageResolver{}
 
-	n := Apply(context.Background(), store, resolver, testLog, "org-1", testHost, []domain.RepoRef{
+	n, _ := Apply(context.Background(), store, resolver, testLog, "org-1", testHost, []domain.RepoRef{
 		{Owner: "octo", Repo: "platform-api", ExternalID: "1"},
 		{Owner: "octo", Repo: "web", ExternalID: "2"},     // unchanged
 		{Owner: "octo", Repo: "unknown", ExternalID: "9"}, // TF has no row
@@ -83,7 +83,7 @@ func TestApply_NeverMatchesARepositoryOnAnotherHost(t *testing.T) {
 			},
 		}
 		resolver := &coverageResolver{}
-		if n := Apply(context.Background(), store, resolver, testLog, "org-1", otherHost,
+		if n, _ := Apply(context.Background(), store, resolver, testLog, "org-1", otherHost,
 			[]domain.RepoRef{{Owner: "acme", Repo: "platform", ExternalID: "1"}}); n != 0 {
 			t.Errorf("applied = %d, want 0", n)
 		}
@@ -113,7 +113,7 @@ func TestApply_NeverMatchesARepositoryOnAnotherHost(t *testing.T) {
 		// otherHost's repository still answers to the name it is stored under,
 		// so nothing on otherHost moved — even though testHost's row with the
 		// same id is called something else.
-		if n := Apply(context.Background(), store, resolver, testLog, "org-1", otherHost,
+		if n, _ := Apply(context.Background(), store, resolver, testLog, "org-1", otherHost,
 			[]domain.RepoRef{{Owner: "acme", Repo: "api", ExternalID: "1"}}); n != 0 {
 			t.Errorf("applied = %d on %s's steady state, want 0", n, otherHost)
 		}
@@ -122,7 +122,7 @@ func TestApply_NeverMatchesARepositoryOnAnotherHost(t *testing.T) {
 		}
 
 		// testHost's repository did move, and only its row is renamed.
-		if n := Apply(context.Background(), store, resolver, testLog, "org-1", testHost,
+		if n, _ := Apply(context.Background(), store, resolver, testLog, "org-1", testHost,
 			[]domain.RepoRef{{Owner: "octo", Repo: "platform-api", ExternalID: "1"}}); n != 1 {
 			t.Fatalf("applied = %d, want 1", n)
 		}
@@ -143,7 +143,7 @@ func TestApply_SteadyStateCostsNoTransaction(t *testing.T) {
 	// transaction per repository per cycle.
 	store := &renameStore{stored: []domain.RepoRef{{Source: "github", Host: testHost, Owner: "octo", Repo: "api", ExternalID: "1"}}}
 
-	if n := Apply(context.Background(), store, &coverageResolver{}, testLog, "org-1", testHost,
+	if n, _ := Apply(context.Background(), store, &coverageResolver{}, testLog, "org-1", testHost,
 		[]domain.RepoRef{{Owner: "Octo", Repo: "API", ExternalID: "1"}}); n != 0 {
 		t.Errorf("applied = %d, want 0", n)
 	}
@@ -162,7 +162,7 @@ func TestApply_LosingIsNotAnError(t *testing.T) {
 	}
 	resolver := &coverageResolver{}
 
-	if n := Apply(context.Background(), store, resolver, testLog, "org-1", testHost,
+	if n, _ := Apply(context.Background(), store, resolver, testLog, "org-1", testHost,
 		[]domain.RepoRef{{Owner: "octo", Repo: "platform-api", ExternalID: "1"}}); n != 0 {
 		t.Errorf("applied = %d, want 0 — losing is terminal, not a rename", n)
 	}
@@ -185,7 +185,7 @@ func TestApply_RefusalAndFailureAreSurvivable(t *testing.T) {
 				stored:  []domain.RepoRef{{Source: "github", Host: testHost, Owner: "octo", Repo: "api", ExternalID: "1"}},
 				failure: tc.err,
 			}
-			if n := Apply(context.Background(), store, &coverageResolver{}, testLog, "org-1", testHost,
+			if n, _ := Apply(context.Background(), store, &coverageResolver{}, testLog, "org-1", testHost,
 				[]domain.RepoRef{{Owner: "octo", Repo: "platform-api", ExternalID: "1"}}); n != 0 {
 				t.Errorf("applied = %d, want 0", n)
 			}
@@ -197,7 +197,7 @@ func TestApply_RefusalAndFailureAreSurvivable(t *testing.T) {
 
 func TestApply_ReadFailureIsSurvivable(t *testing.T) {
 	store := &renameStore{listErr: errors.New("db is having a day")}
-	if n := Apply(context.Background(), store, &coverageResolver{}, testLog, "org-1", testHost,
+	if n, _ := Apply(context.Background(), store, &coverageResolver{}, testLog, "org-1", testHost,
 		[]domain.RepoRef{{Owner: "octo", Repo: "platform-api", ExternalID: "1"}}); n != 0 {
 		t.Errorf("applied = %d, want 0", n)
 	}
@@ -208,13 +208,13 @@ func TestApply_ReadFailureIsSurvivable(t *testing.T) {
 
 func TestApply_NoObservationsNoRead(t *testing.T) {
 	store := &renameStore{}
-	if n := Apply(context.Background(), store, &coverageResolver{}, testLog, "org-1", testHost, nil); n != 0 {
+	if n, _ := Apply(context.Background(), store, &coverageResolver{}, testLog, "org-1", testHost, nil); n != 0 {
 		t.Errorf("applied = %d, want 0", n)
 	}
 	if store.listCalls != 0 {
 		t.Errorf("read identities %d times with nothing observed, want 0", store.listCalls)
 	}
-	if n := Apply(context.Background(), nil, &coverageResolver{}, testLog, "org-1", testHost,
+	if n, _ := Apply(context.Background(), nil, &coverageResolver{}, testLog, "org-1", testHost,
 		[]domain.RepoRef{{Owner: "octo", Repo: "api", ExternalID: "1"}}); n != 0 {
 		t.Errorf("applied = %d with a nil store, want 0", n)
 	}
@@ -227,12 +227,12 @@ func TestApply_ResolverWithoutTheExtensionIsFine(t *testing.T) {
 		stored:   []domain.RepoRef{{Source: "github", Host: testHost, Owner: "octo", Repo: "api", ExternalID: "1"}},
 		outcomes: map[string]domain.RepoRenameOutcome{"1": {Renamed: true, From: "octo/api", To: "octo/platform-api"}},
 	}
-	if n := Apply(context.Background(), store, plainResolver{}, testLog, "org-1", testHost,
+	if n, _ := Apply(context.Background(), store, plainResolver{}, testLog, "org-1", testHost,
 		[]domain.RepoRef{{Owner: "octo", Repo: "platform-api", ExternalID: "1"}}); n != 1 {
 		t.Errorf("applied = %d, want 1", n)
 	}
 	store.attempts = nil
-	if n := Apply(context.Background(), store, nil, testLog, "org-1", testHost,
+	if n, _ := Apply(context.Background(), store, nil, testLog, "org-1", testHost,
 		[]domain.RepoRef{{Owner: "octo", Repo: "platform-api", ExternalID: "1"}}); n != 1 {
 		t.Errorf("applied = %d with a nil resolver, want 1", n)
 	}

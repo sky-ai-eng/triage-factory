@@ -404,7 +404,8 @@ export default function RepoPickerModal({
             </span>
           </div>
           <p className="text-reported text-ink-3 truncate mt-0.5">
-            GitHub gave this name to another repository. Uncheck to stop tracking this one.
+            GitHub gave this name to another repository.
+            {on && ' Uncheck to stop tracking this one.'}
           </p>
         </div>
       </button>

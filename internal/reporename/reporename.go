@@ -38,8 +38,8 @@ import (
 )
 
 // Apply reconciles the repositories in observed against what TF stores for
-// them, and returns how many rows it changed. Two conditions, each keyed on a
-// provider id:
+// them, and returns how many rows it changed and the names it left contested.
+// Two conditions, each keyed on a provider id:
 //
 //   - A row TF holds under one name is observed under its own id with
 //     another: a rename (or, for a retired row, a restore), applied through
@@ -57,12 +57,18 @@ import (
 // on the next observation, and no caller's real work is worth failing over it.
 // A nil resolver skips the reassigned names, which need GitHub to resolve.
 //
+// contested is the names a stored row still holds while observed has GitHub
+// serving them under another id, because resolving the row failed or was
+// skipped. Under such a name GitHub answers with a repository that is not the
+// stored row's, so a caller must not read it as that row's until a later
+// pass frees it.
+//
 // host is the GitHub host observed was read from — the org's current one. It is
 // stamped onto every observation, and only the repositories stored on it are
 // compared against them.
-func Apply(ctx context.Context, repos db.RepositoryStore, resolver ghclient.Resolver, log *slog.Logger, orgID, host string, observed []domain.RepoRef) int {
+func Apply(ctx context.Context, repos db.RepositoryStore, resolver ghclient.Resolver, log *slog.Logger, orgID, host string, observed []domain.RepoRef) (applied int, contested []string) {
 	if repos == nil || len(observed) == 0 {
-		return 0
+		return 0, nil
 	}
 	stamped := make([]domain.RepoRef, len(observed))
 	for i, o := range observed {
@@ -73,21 +79,23 @@ func Apply(ctx context.Context, repos db.RepositoryStore, resolver ghclient.Reso
 	stored, err := repos.ListIdentitiesSystem(ctx, orgID, host)
 	if err != nil {
 		log.WarnContext(ctx, "read repository identities failed", "org", orgID, "error", err)
-		return 0
+		return 0, nil
 	}
 
-	applied := 0
-	if resolver != nil {
-		for _, held := range domain.DetectReassignedRepoNames(stored, observed) {
-			res, err := Resolve(ctx, repos, resolver, log, orgID, held)
-			if err != nil {
-				log.WarnContext(ctx, "resolving a repository whose name GitHub serves under another id failed",
-					"org", orgID, "repo", held.Slug(), "external_id", held.ExternalID, "error", err)
-				continue
-			}
-			if res != Kept {
-				applied++
-			}
+	for _, held := range domain.DetectReassignedRepoNames(stored, observed) {
+		if resolver == nil {
+			contested = append(contested, held.Slug())
+			continue
+		}
+		res, err := Resolve(ctx, repos, resolver, log, orgID, held)
+		if err != nil {
+			log.WarnContext(ctx, "resolving a repository whose name GitHub serves under another id failed",
+				"org", orgID, "repo", held.Slug(), "external_id", held.ExternalID, "error", err)
+			contested = append(contested, held.Slug())
+			continue
+		}
+		if res != Kept {
+			applied++
 		}
 	}
 
@@ -126,7 +134,7 @@ func Apply(ctx context.Context, repos db.RepositoryStore, resolver ghclient.Reso
 		}
 		invalidateCoverage(resolver, orgID, host, out.From, out.To)
 	}
-	return applied
+	return applied, contested
 }
 
 // Resolution is what Resolve did with a row holding a name GitHub serves under

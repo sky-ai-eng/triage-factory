@@ -28,7 +28,7 @@ func TestApplyRepoRenames_ReadsTheWholeGrant(t *testing.T) {
 	}
 	m := &Manager{repos: repos}
 
-	n := m.applyRepoRenames(context.Background(), "org-1", dbtest.TestGitHubHost, []ghclient.UserRepo{
+	n, _ := m.applyRepoRenames(context.Background(), "org-1", dbtest.TestGitHubHost, []ghclient.UserRepo{
 		{ID: 1, FullName: "octo/platform-api"}, // renamed — TF still tracks octo/api
 		{ID: 2, FullName: "octo/web"},          // unchanged
 		{ID: 3, FullName: "octo/untracked"},    // granted, no row
@@ -57,7 +57,7 @@ func TestApplyRepoRenames_SteadyStateWritesNothing(t *testing.T) {
 	repos := &renamePollStore{stored: []domain.RepoRef{{Source: "github", Host: dbtest.TestGitHubHost, Owner: "octo", Repo: "api", ExternalID: "1"}}}
 	m := &Manager{repos: repos}
 
-	if n := m.applyRepoRenames(context.Background(), "org-1", dbtest.TestGitHubHost,
+	if n, _ := m.applyRepoRenames(context.Background(), "org-1", dbtest.TestGitHubHost,
 		[]ghclient.UserRepo{{ID: 1, FullName: "octo/api"}}); n != 0 {
 		t.Errorf("applied = %d, want 0", n)
 	}
@@ -70,9 +70,36 @@ func TestApplyRepoRenames_SteadyStateWritesNothing(t *testing.T) {
 // panic on the way through.
 func TestApplyRepoRenames_NilStore(t *testing.T) {
 	m := &Manager{}
-	if n := m.applyRepoRenames(context.Background(), "org-1", dbtest.TestGitHubHost,
+	if n, _ := m.applyRepoRenames(context.Background(), "org-1", dbtest.TestGitHubHost,
 		[]ghclient.UserRepo{{ID: 1, FullName: "octo/api"}}); n != 0 {
 		t.Errorf("applied = %d, want 0", n)
+	}
+}
+
+// A tracked name the grant lists under another id is contested while GitHub
+// cannot be asked about the stored row's own id. The poller still counts it
+// as granted but does not poll it, because the pull requests under that name
+// are another repository's.
+func TestApplyRepoRenames_AnUnresolvedHolderIsContested(t *testing.T) {
+	repos := &renamePollStore{stored: []domain.RepoRef{
+		{Source: "github", Host: dbtest.TestGitHubHost, Owner: "octo", Repo: "api", ExternalID: "1"},
+		{Source: "github", Host: dbtest.TestGitHubHost, Owner: "octo", Repo: "web", ExternalID: "2"},
+	}}
+	m := &Manager{repos: repos, resolver: &perAccountFailResolver{failAccounts: map[string]bool{"octo": true}}}
+
+	grant := []ghclient.UserRepo{{ID: 9, FullName: "Octo/API"}, {ID: 2, FullName: "octo/web"}}
+	n, contested := m.applyRepoRenames(context.Background(), "org-1", dbtest.TestGitHubHost, grant)
+	if n != 0 || len(contested) != 1 || contested[0] != "octo/api" {
+		t.Fatalf("applied = %d, contested = %v; want 0 and [octo/api]", n, contested)
+	}
+
+	covered := map[string]bool{}
+	scoped := withoutSlugs(intersectConfigured([]string{"octo/api", "octo/web"}, grant, covered), contested)
+	if len(scoped) != 1 || scoped[0] != "octo/web" {
+		t.Errorf("polled = %v, want only octo/web", scoped)
+	}
+	if !covered["octo/api"] {
+		t.Error("octo/api is not covered; the grant lists the name, so it must not be reported as outside every installation")
 	}
 }
 

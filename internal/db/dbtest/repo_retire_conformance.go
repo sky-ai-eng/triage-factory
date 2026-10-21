@@ -336,12 +336,45 @@ func RunRepoRetireConformance(t *testing.T, mk RepoRenameFactory) {
 	// The observation trigger, end to end against the store: GitHub serves
 	// the name TF holds for retireOldID under retireNewID, and Apply asks
 	// GitHub what became of retireOldID.
+	t.Run("Upsert_never_writes_a_retired_rows_id_onto_another_row", func(t *testing.T) {
+		// GitHub serves the retired row's id under its old name again, and an
+		// upsert under that name lands first. The row it creates, and then
+		// updates, is not the retired one, so the id stays on the retired row
+		// for a restore to pick up rather than failing the external-identity
+		// index.
+		s, orgID, seed := mk(t)
+		fx := seedRetireFixture(t, s, orgID, seed, "upsert")
+		if _, err := s.Repos.RetireSystem(ctx, orgID, fx.repo.Ref()); err != nil {
+			t.Fatalf("RetireSystem: %v", err)
+		}
+		profile := domain.Repository{
+			Source: domain.RepoSourceGitHub, Host: TestGitHubHost, Owner: "octo", Repo: "api",
+			ExternalID: retireOldID, DefaultBranch: "main",
+		}
+		created, err := s.Repos.UpsertSystem(ctx, orgID, profile)
+		if err != nil {
+			t.Fatalf("Upsert creating a row under the retired name: %v", err)
+		}
+		updated, err := s.Repos.UpsertSystem(ctx, orgID, profile)
+		if err != nil {
+			t.Fatalf("Upsert updating that row: %v", err)
+		}
+		for _, got := range []domain.Repository{created, updated} {
+			if got.ID == fx.repo.ID || got.ID != created.ID || got.ExternalID != "" || got.RetiredAt != nil {
+				t.Errorf("upserted = %+v, want one new live row %s with no GitHub id", got, created.ID)
+			}
+		}
+		if old, err := s.Repos.GetSystem(ctx, orgID, fx.repo.ID); err != nil || old.ExternalID != retireOldID || old.RetiredAt == nil {
+			t.Errorf("retired row = %+v, err=%v; want it retired with its id", old, err)
+		}
+	})
+
 	t.Run("Observation_retires_a_deleted_repository", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		fx := seedRetireFixture(t, s, orgID, seed, "observe-deleted")
 		gh := serveGitHubRepositories(t, map[string]string{}, http.StatusNotFound)
 
-		if n := reporename.Apply(ctx, s.Repos, gh, retireLog, orgID, TestGitHubHost, reassignedObservation()); n != 1 {
+		if n, _ := reporename.Apply(ctx, s.Repos, gh, retireLog, orgID, TestGitHubHost, reassignedObservation()); n != 1 {
 			t.Fatalf("applied = %d, want 1", n)
 		}
 		if got, _ := s.Repos.GetSystem(ctx, orgID, fx.repo.ID); got == nil || got.RetiredAt == nil {
@@ -362,7 +395,7 @@ func RunRepoRetireConformance(t *testing.T, mk RepoRenameFactory) {
 		fx := seedRetireFixture(t, s, orgID, seed, "observe-renamed")
 		gh := serveGitHubRepositories(t, map[string]string{retireOldID: "octo/api-v1"}, http.StatusNotFound)
 
-		if n := reporename.Apply(ctx, s.Repos, gh, retireLog, orgID, TestGitHubHost, reassignedObservation()); n != 1 {
+		if n, _ := reporename.Apply(ctx, s.Repos, gh, retireLog, orgID, TestGitHubHost, reassignedObservation()); n != 1 {
 			t.Fatalf("applied = %d, want 1", n)
 		}
 		got, _ := s.Repos.GetByRef(ctx, orgID, repoRef("octo/api-v1"))
@@ -385,7 +418,7 @@ func RunRepoRetireConformance(t *testing.T, mk RepoRenameFactory) {
 		fx := seedRetireFixture(t, s, orgID, seed, "observe-failed")
 		gh := serveGitHubRepositories(t, map[string]string{}, http.StatusServiceUnavailable)
 
-		if n := reporename.Apply(ctx, s.Repos, gh, retireLog, orgID, TestGitHubHost, reassignedObservation()); n != 0 {
+		if n, _ := reporename.Apply(ctx, s.Repos, gh, retireLog, orgID, TestGitHubHost, reassignedObservation()); n != 0 {
 			t.Fatalf("applied = %d, want 0", n)
 		}
 		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef("octo/api")); got == nil || got.ID != fx.repo.ID || got.RetiredAt != nil {
@@ -404,7 +437,7 @@ func RunRepoRetireConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 		gh := serveGitHubRepositories(t, map[string]string{}, http.StatusNotFound)
 
-		if n := reporename.Apply(ctx, s.Repos, gh, retireLog, orgID, TestGitHubHost, []domain.RepoRef{
+		if n, _ := reporename.Apply(ctx, s.Repos, gh, retireLog, orgID, TestGitHubHost, []domain.RepoRef{
 			{Source: domain.RepoSourceGitHub, Owner: "acme", Repo: "api", ExternalID: retireOldID},
 		}); n != 1 {
 			t.Fatalf("applied = %d, want 1", n)

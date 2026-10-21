@@ -650,6 +650,12 @@ func TestConversationStore_SQLite_PRCoherenceTargets(t *testing.T) {
 					t.Fatalf("seed worktree: %v", err)
 				}
 			},
+			RetireRepository: func(t *testing.T, host, slug string) {
+				t.Helper()
+				if err := dbtest.RetireRepo(ctx, stores.Repos, runmode.LocalDefaultOrgID, host, slug); err != nil {
+					t.Fatal(err)
+				}
+			},
 			MarkEventInjected: func(t *testing.T, taskID, eventID string) {
 				t.Helper()
 				if _, err := conn.Exec(`

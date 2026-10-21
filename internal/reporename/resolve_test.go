@@ -197,10 +197,10 @@ func TestApply_ResolvesANameObservedUnderAnotherID(t *testing.T) {
 			{Source: "github", Host: testHost, Owner: "octo", Repo: "api", ExternalID: "1"},
 		}}
 
-		n := Apply(context.Background(), store, resolver, testLog, "org-1", testHost,
+		n, contested := Apply(context.Background(), store, resolver, testLog, "org-1", testHost,
 			[]domain.RepoRef{{Owner: "octo", Repo: "api", ExternalID: "99"}})
-		if n != 1 {
-			t.Fatalf("applied = %d, want 1", n)
+		if n != 1 || len(contested) != 0 {
+			t.Fatalf("applied = %d, contested = %v; want 1 and none", n, contested)
 		}
 		if len(store.retires) != 1 || store.retires[0].ExternalID != "1" {
 			t.Fatalf("retires = %+v, want the stored row (id 1)", store.retires)
@@ -220,7 +220,7 @@ func TestApply_ResolvesANameObservedUnderAnotherID(t *testing.T) {
 			outcomes: map[string]domain.RepoRenameOutcome{"1": {Renamed: true, From: "octo/api", To: "octo/api-v1"}},
 		}
 
-		n := Apply(context.Background(), store, &serverResolver{url: gh.serve(t).URL}, testLog, "org-1", testHost,
+		n, _ := Apply(context.Background(), store, &serverResolver{url: gh.serve(t).URL}, testLog, "org-1", testHost,
 			[]domain.RepoRef{{Owner: "octo", Repo: "api", ExternalID: "99"}})
 		if n != 1 {
 			t.Fatalf("applied = %d, want 1", n)
@@ -246,7 +246,7 @@ func TestApply_ResolvesANameObservedUnderAnotherID(t *testing.T) {
 			outcomes: map[string]domain.RepoRenameOutcome{"2": {Renamed: true, From: "octo/web", To: "octo/api"}},
 		}
 
-		n := Apply(context.Background(), store, &serverResolver{url: gh.serve(t).URL}, testLog, "org-1", testHost,
+		n, _ := Apply(context.Background(), store, &serverResolver{url: gh.serve(t).URL}, testLog, "org-1", testHost,
 			[]domain.RepoRef{{Owner: "octo", Repo: "api", ExternalID: "2"}})
 		if n != 2 {
 			t.Fatalf("applied = %d, want 2", n)
@@ -256,14 +256,15 @@ func TestApply_ResolvesANameObservedUnderAnotherID(t *testing.T) {
 		}
 	})
 
-	t.Run("a failure to reach GitHub leaves the row and is survivable", func(t *testing.T) {
+	t.Run("a failure to reach GitHub leaves the row, contested, and is survivable", func(t *testing.T) {
 		gh := &fakeGitHub{byID: map[string]string{}, status: http.StatusBadGateway}
 		store := &renameStore{stored: []domain.RepoRef{
 			{Source: "github", Host: testHost, Owner: "octo", Repo: "api", ExternalID: "1"},
 		}}
-		if n := Apply(context.Background(), store, &serverResolver{url: gh.serve(t).URL}, testLog, "org-1", testHost,
-			[]domain.RepoRef{{Owner: "octo", Repo: "api", ExternalID: "99"}}); n != 0 {
-			t.Errorf("applied = %d, want 0", n)
+		n, contested := Apply(context.Background(), store, &serverResolver{url: gh.serve(t).URL}, testLog, "org-1", testHost,
+			[]domain.RepoRef{{Owner: "octo", Repo: "api", ExternalID: "99"}})
+		if n != 0 || len(contested) != 1 || contested[0] != "octo/api" {
+			t.Errorf("applied = %d, contested = %v; want 0 and [octo/api]", n, contested)
 		}
 		if len(store.retires) != 0 {
 			t.Errorf("retired %+v on a failed request", store.retires)
@@ -274,9 +275,10 @@ func TestApply_ResolvesANameObservedUnderAnotherID(t *testing.T) {
 		store := &renameStore{stored: []domain.RepoRef{
 			{Source: "github", Host: testHost, Owner: "octo", Repo: "api", ExternalID: "1"},
 		}}
-		if n := Apply(context.Background(), store, nil, testLog, "org-1", testHost,
-			[]domain.RepoRef{{Owner: "octo", Repo: "api", ExternalID: "99"}}); n != 0 {
-			t.Errorf("applied = %d, want 0", n)
+		n, contested := Apply(context.Background(), store, nil, testLog, "org-1", testHost,
+			[]domain.RepoRef{{Owner: "octo", Repo: "api", ExternalID: "99"}})
+		if n != 0 || len(contested) != 1 || contested[0] != "octo/api" {
+			t.Errorf("applied = %d, contested = %v; want 0 and [octo/api]", n, contested)
 		}
 		if len(store.calls) != 0 {
 			t.Errorf("wrote %v with no resolver", store.calls)
@@ -292,7 +294,7 @@ func TestApply_RestoresARetiredRowGitHubAnswersFor(t *testing.T) {
 		retired:  map[string]bool{"1": true},
 		outcomes: map[string]domain.RepoRenameOutcome{"1": {Restored: true, From: "octo/api", To: "octo/api"}},
 	}
-	if n := Apply(context.Background(), store, &coverageResolver{}, testLog, "org-1", testHost,
+	if n, _ := Apply(context.Background(), store, &coverageResolver{}, testLog, "org-1", testHost,
 		[]domain.RepoRef{{Owner: "octo", Repo: "api", ExternalID: "1"}}); n != 1 {
 		t.Fatalf("applied = %d, want 1", n)
 	}
@@ -305,7 +307,7 @@ func TestApply_RestoresARetiredRowGitHubAnswersFor(t *testing.T) {
 		stored:  []domain.RepoRef{{Source: "github", Host: testHost, Owner: "octo", Repo: "api", ExternalID: "1"}},
 		retired: map[string]bool{"1": true},
 	}
-	if n := Apply(context.Background(), store, &serverResolver{url: (&fakeGitHub{}).serve(t).URL}, testLog, "org-1", testHost,
+	if n, _ := Apply(context.Background(), store, &serverResolver{url: (&fakeGitHub{}).serve(t).URL}, testLog, "org-1", testHost,
 		[]domain.RepoRef{{Owner: "octo", Repo: "api", ExternalID: "99"}}); n != 0 || len(store.calls) != 0 {
 		t.Errorf("applied = %d, writes %v; want nothing for a retired row's old name", n, store.calls)
 	}

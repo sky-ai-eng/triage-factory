@@ -692,6 +692,11 @@ func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, co
 			return nil, fmt.Errorf("list team tracked repos: %w", err)
 		}
 		for _, t := range tracked {
+			// A retired row's name belongs to another repository now, one the
+			// team never chose to track.
+			if t.RetiredAt != nil {
+				continue
+			}
 			out = append(out, t.Slug())
 		}
 	}

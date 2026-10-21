@@ -90,7 +90,10 @@ type fakeTeamRepos struct {
 	db.TeamGitHubReposStore
 	host    string
 	tracked map[string]bool // key: lowercased "owner/repo"
-	hosts   []string        // the host of every TracksRepoSystem call
+	// retired names tracked rows that are retired: listed, marked, and
+	// answering to no TracksRepoSystem name, as the store does.
+	retired map[string]bool
+	hosts   []string // the host of every TracksRepoSystem call
 }
 
 func (f *fakeTeamRepos) trackedHost() string {
@@ -105,7 +108,8 @@ func (f *fakeTeamRepos) TracksRepoSystem(_ context.Context, _, host, owner, repo
 	if host != f.trackedHost() {
 		return false, nil
 	}
-	return f.tracked[strings.ToLower(owner+"/"+repo)], nil
+	slug := strings.ToLower(owner + "/" + repo)
+	return f.tracked[slug] && !f.retired[slug], nil
 }
 
 func (f *fakeTeamRepos) ListForTeamSystem(_ context.Context, _, host string) ([]domain.TeamGitHubRepo, error) {
@@ -116,7 +120,12 @@ func (f *fakeTeamRepos) ListForTeamSystem(_ context.Context, _, host string) ([]
 	var out []domain.TeamGitHubRepo
 	for slug := range f.tracked {
 		owner, repo, _ := strings.Cut(slug, "/")
-		out = append(out, domain.TeamGitHubRepo{Owner: owner, Repo: repo})
+		row := domain.TeamGitHubRepo{Owner: owner, Repo: repo}
+		if f.retired[slug] {
+			at := time.Now()
+			row.RetiredAt = &at
+		}
+		out = append(out, row)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Slug() < out[j].Slug() })
 	return out, nil
@@ -418,6 +427,43 @@ func TestManager_resolveGitHub_GatesTrackingOnTheOrgsCurrentHost(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestManager_resolveGitHub_UnanchoredFallbackSkipsRetiredRows: a retired row
+// stays in the team's tracked set, but its name now belongs to another
+// repository, so the unanchored fallback mints nothing for it.
+func TestManager_resolveGitHub_UnanchoredFallbackSkipsRetiredRows(t *testing.T) {
+	res := &fakeScopedResolver{
+		base:    dbtest.TestGitHubHost,
+		hasCred: true,
+		token:   githubapp.Token{Value: "ghs_scoped", ExpiresAt: time.Now().Add(time.Hour)},
+	}
+	m := &Manager{
+		stores: db.Stores{
+			Orgs: &fakeOrgs{},
+			TeamGitHubRepos: &fakeTeamRepos{
+				tracked: map[string]bool{"acme/widgets": true, "acme/gears": true},
+				retired: map[string]bool{"acme/gears": true},
+			},
+			Tasks:                 &fakeTasks{task: &domain.Task{EntitySource: "jira", EntitySourceID: "SKY-1"}},
+			Entities:              &fakeEntities{scope: dbtest.TestGitHubHost},
+			Repos:                 fakeRepos{},
+			ConversationWorktrees: &fakeConversationWorktrees{},
+		},
+		ghResolver: res,
+	}
+
+	gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "conv-1")
+	if err != nil {
+		t.Fatalf("resolveGitHub: %v", err)
+	}
+	var minted []string
+	for repoID := range gh.RepoTokens {
+		minted = append(minted, repoID)
+	}
+	if strings.Join(minted, ",") != "acme/widgets" {
+		t.Errorf("RepoTokens minted for %v, want [acme/widgets]", minted)
 	}
 }
 
