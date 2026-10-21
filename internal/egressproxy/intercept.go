@@ -177,15 +177,17 @@ func (s *Server) intercept(w http.ResponseWriter, host, target string, upstream 
 	}
 
 	// A failed handshake is recorded too: besides a refused server name, it is
-	// how a toolchain that does not trust the run's CA shows up, as the
-	// unknown-authority alert it sends.
+	// how a toolchain that does not trust the run's CA shows up. The error
+	// after the reason's prefix varies by client (OpenSSL and Node clients
+	// show as a bad record MAC or EOF, Go's as a bad certificate), so the
+	// reason names the likely cause itself.
 	var mismatched *string
 	jail := tls.Server(bufferedConn(client, brw.Reader), jailTLSConfig(host, s.ca, func(serverName string) {
 		mismatched = &serverName
 	}))
 	_ = jail.SetDeadline(time.Now().Add(jailHandshakeTimeout))
 	if err := jail.HandshakeContext(ctx); err != nil {
-		reason := fmt.Sprintf("TLS handshake with the sandbox client failed: %v", err)
+		reason := fmt.Sprintf("TLS handshake with the sandbox client failed (usually a client that does not trust the run's CA bundle): %v", err)
 		if mismatched != nil {
 			reason = fmt.Sprintf("TLS server name %q is not the CONNECT host %q", *mismatched, host)
 		}

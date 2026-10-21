@@ -76,6 +76,7 @@ func requireGHInjectorLive(t *testing.T) (token, repo, denyRepo string) {
 
 func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 	token, repo, denyRepo := requireGHInjectorLive(t)
+	installInProcessLauncher(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -109,7 +110,10 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 	if err := os.Chown(certPath, net.JailUID(), sandbox.JailGID(net.Idx)); err != nil {
 		t.Fatalf("chown cert to the jail identity: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Remove(certPath) })
+	t.Cleanup(func() {
+		_ = os.Remove(certPath)
+		_ = os.Remove(filepath.Dir(certPath))
+	})
 
 	// The injector holds the REAL token; the box will get only the placeholder.
 	const placeholder = "run-placeholder-token"
@@ -222,6 +226,7 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 // test can bind because it already requires root.
 func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
 	token, repo, _ := requireGHInjectorLive(t)
+	installInProcessLauncher(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -247,7 +252,10 @@ func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
 	if err := os.Chown(certPath, net.JailUID(), sandbox.JailGID(net.Idx)); err != nil {
 		t.Fatalf("chown cert to the jail identity: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Remove(certPath) })
+	t.Cleanup(func() {
+		_ = os.Remove(certPath)
+		_ = os.Remove(filepath.Dir(certPath))
+	})
 
 	// The run's git proxy, mounted behind the injector exactly as the sidecar
 	// mounts it — same handler, same gate.
