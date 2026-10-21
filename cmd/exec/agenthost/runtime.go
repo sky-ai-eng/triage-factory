@@ -39,8 +39,8 @@ type Runtime interface {
 	GetConversation(ctx context.Context) (*domain.Conversation, error)
 	GetTask(ctx context.Context, taskID string) (*domain.Task, error)
 	// ListRepos lists the repositories the run's team tracks — the set
-	// TeamTracksRepo admits, so every repository `workspace list` offers is
-	// one `workspace add` will materialize.
+	// TeamTracksRepository admits, so every repository `workspace list`
+	// offers is one `workspace add` will materialize.
 	ListRepos(ctx context.Context) ([]domain.Repository, error)
 
 	// GetRepo takes the "owner/repo" the agent typed and resolves it against
@@ -54,10 +54,15 @@ type Runtime interface {
 	// the registry does not answer to finds the row GitHub says it means.
 	RepoSlugByExternalID(ctx context.Context, externalID string) (string, error)
 
-	TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error)
+	// TeamTracksRepository reports whether the run's team tracks the
+	// repository whose registry row is repositoryID. Every caller holds a row
+	// GetRepo resolved the agent's name to, so the name is resolved once and
+	// the gates past that point read the id.
+	TeamTracksRepository(ctx context.Context, repositoryID string) (bool, error)
 
-	// TaskOwnRepo reports whether owner/repo is the run's own task repo — the
-	// repo gate's supplement to the worktree ledger (see IsTaskOwnRepo).
+	// TaskOwnRepository reports whether the repository whose registry row is
+	// repositoryID is the run's own task repo — the repo gate's supplement to
+	// the worktree ledger (see IsTaskOwnRepository).
 	//
 	// It is a relayed op rather than a field on ConversationInfo because it is
 	// an AUTHORIZATION input and the sidecar is not authoritative for those:
@@ -66,7 +71,7 @@ type Runtime interface {
 	// own ConversationInfo so a sidecar cannot escalate by lying. A stamped
 	// task repo would be exactly such a lie. The answer is asked for only on a
 	// ledger miss, so the authorized path costs nothing.
-	TaskOwnRepo(ctx context.Context, owner, repo string) (bool, error)
+	TaskOwnRepository(ctx context.Context, repositoryID string) (bool, error)
 	GetConversationWorktreeByRepoRef(ctx context.Context, repositoryID, ref string) (*domain.ConversationWorktree, error)
 	ListConversationWorktrees(ctx context.Context) ([]domain.ConversationWorktree, error)
 	OrgJiraBaseURL(ctx context.Context) (string, error)
@@ -78,6 +83,14 @@ type Runtime interface {
 	// gh clients speak to per-run REST proxies whose reported identity is
 	// descriptive only, never the real App-vs-PAT tier.
 	ReviewPosture(ctx context.Context, owner, repo string) (ReviewPostureResolution, error)
+
+	// ArtifactPullRequest returns the pull request the run's own artifact
+	// artifactID is about, as GitHub addresses it now
+	// (db.ResolveArtifactPullRequest): its repository is read by id, through
+	// the artifact's entity, so a rename since the artifact was recorded is
+	// followed and a retired repository is reported as retired. An artifact
+	// that is not the conversation's is refused.
+	ArtifactPullRequest(ctx context.Context, artifactID string) (db.ArtifactPullRequest, error)
 
 	// Writes.
 	InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (inserted bool, winningPath string, err error)
@@ -207,8 +220,8 @@ const (
 	opListRepos                        = "list_repos"
 	opGetRepo                          = "get_repo"
 	opRepoSlugByExternalID             = "repo_slug_by_external_id"
-	opTeamTracksRepo                   = "team_tracks_repo"
-	opTaskOwnRepo                      = "task_own_repo"
+	opTeamTracksRepository             = "team_tracks_repository"
+	opTaskOwnRepository                = "task_own_repository"
 	opGetConversationWorktreeByRepoRef = "get_conversation_worktree_by_repo_ref"
 	opListConversationWorktrees        = "list_conversation_worktrees"
 	opInsertConversationWorktree       = "insert_conversation_worktree"
@@ -224,6 +237,7 @@ const (
 	opCheckEntitlement                 = "check_entitlement"
 	opSourceDisabled                   = "source_disabled"
 	opReviewPosture                    = "review_posture"
+	opArtifactPullRequest              = "artifact_pull_request"
 	// opCreateWorkspaceCheckout materializes a `workspace add` checkout. Unlike
 	// the other core ops it is FS-bearing: the sidecar relays it because it owns
 	// neither the shared bare cache nor the run-root; the orchestrator serves it.
@@ -301,6 +315,23 @@ type ReviewPostureResolution struct {
 type reviewPostureArgs struct {
 	Owner string `json:"owner"`
 	Repo  string `json:"repo"`
+}
+
+// artifactPullRequestArgs / artifactPullRequestResult are the
+// artifact_pull_request op's payloads: one of the run's artifacts, and the
+// pull request it is about (db.ArtifactPullRequest). The conversation the
+// artifact must belong to is bound orchestrator-side, so the wire carries only
+// the id.
+type artifactPullRequestArgs struct {
+	ArtifactID string `json:"artifact_id"`
+}
+
+type artifactPullRequestResult struct {
+	RepositoryID string `json:"repository_id"`
+	Owner        string `json:"owner"`
+	Repo         string `json:"repo"`
+	Number       int    `json:"number"`
+	Retired      bool   `json:"retired"`
 }
 
 // listConversationArtifactsResult / orgJiraBaseResult / recordExternalWriteArgs are the
@@ -465,20 +496,15 @@ func (r *directRuntime) RepoSlugByExternalID(ctx context.Context, externalID str
 	return "", nil
 }
 
-func (r *directRuntime) TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error) {
-	host, err := r.githubHost(ctx)
-	if err != nil {
-		return false, err
+func (r *directRuntime) TeamTracksRepository(ctx context.Context, repositoryID string) (bool, error) {
+	if repositoryID == "" {
+		return false, nil
 	}
-	return r.stores.TeamGitHubRepos.TracksRepoSystem(ctx, r.info.TeamID, host, owner, repo)
+	return r.stores.TeamGitHubRepos.TracksRepositorySystem(ctx, r.info.TeamID, repositoryID)
 }
 
-func (r *directRuntime) TaskOwnRepo(ctx context.Context, owner, repo string) (bool, error) {
-	host, err := r.githubHost(ctx)
-	if err != nil {
-		return false, err
-	}
-	return IsTaskOwnRepo(ctx, r.stores, r.info, host, owner, repo), nil
+func (r *directRuntime) TaskOwnRepository(ctx context.Context, repositoryID string) (bool, error) {
+	return IsTaskOwnRepository(ctx, r.stores, r.info, repositoryID), nil
 }
 
 func (r *directRuntime) GetConversationWorktreeByRepoRef(ctx context.Context, repositoryID, ref string) (*domain.ConversationWorktree, error) {
@@ -544,6 +570,22 @@ func (r *directRuntime) ReviewPosture(ctx context.Context, owner, repo string) (
 	}
 	out.Identity = identity
 	return out, nil
+}
+
+// ArtifactPullRequest finds the artifact among the conversation's own, through
+// the same read ListConversationArtifacts serves, so the id names nothing
+// outside this run.
+func (r *directRuntime) ArtifactPullRequest(ctx context.Context, artifactID string) (db.ArtifactPullRequest, error) {
+	arts, err := r.ListConversationArtifacts(ctx)
+	if err != nil {
+		return db.ArtifactPullRequest{}, err
+	}
+	for _, a := range arts {
+		if a.ID == artifactID {
+			return db.ResolveArtifactPullRequest(ctx, r.info.OrgID, a, r.stores.Entities.GetSystem, r.stores.Repos.GetSystem)
+		}
+	}
+	return db.ArtifactPullRequest{}, fmt.Errorf("artifact %s is not one of this conversation's", artifactID)
 }
 
 func (r *directRuntime) InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (bool, string, error) {
@@ -919,17 +961,17 @@ func (r *relayRuntime) RepoSlugByExternalID(ctx context.Context, externalID stri
 	return res.Slug, nil
 }
 
-func (r *relayRuntime) TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error) {
-	var res teamTracksRepoResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opTeamTracksRepo, teamTracksRepoArgs{Owner: owner, Repo: repo}, &res); err != nil {
+func (r *relayRuntime) TeamTracksRepository(ctx context.Context, repositoryID string) (bool, error) {
+	var res teamTracksRepositoryResult
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opTeamTracksRepository, repositoryIDArgs{RepositoryID: repositoryID}, &res); err != nil {
 		return false, err
 	}
 	return res.Tracks, nil
 }
 
-func (r *relayRuntime) TaskOwnRepo(ctx context.Context, owner, repo string) (bool, error) {
+func (r *relayRuntime) TaskOwnRepository(ctx context.Context, repositoryID string) (bool, error) {
 	var res taskOwnRepoResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opTaskOwnRepo, taskOwnRepoArgs{Owner: owner, Repo: repo}, &res); err != nil {
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opTaskOwnRepository, repositoryIDArgs{RepositoryID: repositoryID}, &res); err != nil {
 		return false, err
 	}
 	return res.IsTaskRepo, nil
@@ -965,6 +1007,20 @@ func (r *relayRuntime) ReviewPosture(ctx context.Context, owner, repo string) (R
 		return ReviewPostureResolution{}, err
 	}
 	return res, nil
+}
+
+func (r *relayRuntime) ArtifactPullRequest(ctx context.Context, artifactID string) (db.ArtifactPullRequest, error) {
+	var res artifactPullRequestResult
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opArtifactPullRequest, artifactPullRequestArgs{ArtifactID: artifactID}, &res); err != nil {
+		return db.ArtifactPullRequest{}, err
+	}
+	return db.ArtifactPullRequest{
+		RepositoryID: res.RepositoryID,
+		Owner:        res.Owner,
+		Repo:         res.Repo,
+		Number:       res.Number,
+		Retired:      res.Retired,
+	}, nil
 }
 
 func (r *relayRuntime) InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (bool, string, error) {

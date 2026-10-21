@@ -324,9 +324,9 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	orgID := t.orgID
 	startedAt := time.Now()
 	// Phase 1: Discovery — find new PRs and register as entities.
-	// quietRepos is the set of "owner/repo" whose open-PR listing returned
-	// 304 (unchanged) this cycle; their tracked entities can keep their
-	// stored snapshot through the Phase-2 gate without a refresh.
+	// quietRepos is the set of registry row ids whose open-PR listing
+	// returned 304 (unchanged) this cycle; their tracked entities can keep
+	// their stored snapshot through the Phase-2 gate without a refresh.
 	discovery, discoveryErr := t.discoverGitHub(ctx, scope, client, username, repos)
 	discovered, quietRepos, lastListed := discovery.prs, discovery.quiet, discovery.lastListed
 	var rateLimited *ghclient.ErrRateLimited
@@ -347,16 +347,21 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		}
 	}
 
-	// Build a SourceID-keyed lookup of discovery snapshots so Phase 2 can
+	// Build a node-id-keyed lookup of discovery snapshots so Phase 2 can
 	// gate refresh on (updatedAt, headSHA) without a second round-trip.
 	// Discovery already returns both fields via prDiscoveryFragment; the
-	// only cost here is the map allocation.
-	discoveredBySourceID := make(map[string]domain.PRSnapshot, len(discovered))
+	// only cost here is the map allocation. Keyed by node id rather than
+	// owner/repo#N, because a stored entity's key spells its repository's
+	// name the way it was spelled when the entity was created or last
+	// renamed, and the listing spells it the way the tracked set does now.
+	discoveredByNodeID := make(map[string]domain.PRSnapshot, len(discovered))
 	for _, d := range discovered {
-		discoveredBySourceID[ghSourceID(d.Snapshot.Repo, d.Snapshot.Number)] = d.Snapshot
+		if d.NodeID != "" {
+			discoveredByNodeID[d.NodeID] = d.Snapshot
+		}
 	}
 
-	// unstored is the set of "owner/repo" with a discovered PR this loop
+	// unstored is the set of registry row ids with a discovered PR this loop
 	// failed to store: its entity could not be created, or its closed entity
 	// could not be reactivated. Such a repo keeps the cursor it had (see the
 	// writes below the loop). A failed seed CAS for a new entity is not
@@ -383,12 +388,12 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			// later cycle tries again once the key is free.
 			trackerLog.Warn("github key still held by another pull request's entity; skipping it this cycle",
 				"source_id", sid, "node_id", snap.NodeID)
-			unstored[snap.Repo] = true
+			unstored[d.repositoryID] = true
 			continue
 		}
 		if err != nil {
 			trackerLog.Error("create entity failed", "source_id", sid, "error", err)
-			unstored[snap.Repo] = true
+			unstored[d.repositoryID] = true
 			continue
 		}
 		if !created && t.learnPRNodeID(ctx, *entity, snap.NodeID) {
@@ -417,7 +422,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			// A pull request opened since TF last listed its repository: the
 			// identities its body mentions were mentioned just now, so they
 			// emit. Any other pull request's body is a baseline.
-			if !terminal && openedSince(snap, lastListed[snap.Repo]) {
+			if !terminal && openedSince(snap, lastListed[d.repositoryID]) {
 				backfilled = append(backfilled, openedPRMentions(entity.ID, entity.RepositoryID, snap, resolver)...)
 			}
 			if !terminal && snap.Author != username {
@@ -494,10 +499,10 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 				snapJSON, _ := json.Marshal(snap)
 				if reactivated, err := t.entities.ReactivateWithSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
 					trackerLog.Error("reactivate entity failed", "source_id", sid, "error", err)
-					unstored[snap.Repo] = true
+					unstored[d.repositoryID] = true
 				} else if !reactivated {
 					trackerLog.Warn("reactivate entity CAS lost race, skipping", "source_id", sid)
-					unstored[snap.Repo] = true
+					unstored[d.repositoryID] = true
 				} else {
 					trackerLog.Info("reactivated entity (reopened)", "source_id", sid)
 				}
@@ -511,8 +516,8 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	// which a 304 against the new ETag never would. A 304 listing returned no
 	// PRs, so its cursor is always written.
 	for _, c := range discovery.cursors {
-		if !unstored[c.repo] {
-			t.recordPullsPoll(scope, c)
+		if !unstored[c.repositoryID] {
+			t.recordPullsPoll(c)
 		}
 	}
 
@@ -634,8 +639,20 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		// byte-identical to last cycle — so the stored snapshot IS the fresh
 		// state for gate purposes. Feed it back as `fresh` so quiet repos
 		// keep the skip optimization the REST conditional request earns.
-		fresh, ok := discoveredBySourceID[e.SourceID]
-		if !ok && quietRepos[snap.Repo] {
+		//
+		// Both joins are by id. The entity's node id finds its pull request
+		// in discovery whatever name its key spells, and the repository it
+		// references (entities.repository_id) is the row a quiet listing is
+		// keyed by; the stored snapshot's repo is GraphQL's nameWithOwner,
+		// which need not match the tracked name in case and goes stale on a
+		// rename. An entity without an external id yet is joined by the
+		// node id its snapshot carries, which this branch always has.
+		nodeID := e.ExternalID
+		if nodeID == "" {
+			nodeID = snap.NodeID
+		}
+		fresh, ok := discoveredByNodeID[nodeID]
+		if !ok && quietRepos[e.RepositoryID] {
 			fresh, ok = snap, true
 		}
 		if ok && shouldSkipRefresh(snap, fresh, age) {
@@ -1045,14 +1062,18 @@ const maxSearchQueryLen = 256
 // what the org tracks (an organization's SAML enforcement, say), which is the
 // auth-down state the poller records.
 //
-// scope is the GitHub host repos are on, which keys each repo's stored
-// conditional-request cursor.
+// scope is the GitHub host repos are on. Each name in repos is resolved once,
+// to the tracked registry row it names on scope (trackedRepositoryIDs), and
+// that row's id keys the listing's stored conditional-request cursor, the
+// quiet set and the last-listed times; the name itself is spent only on the
+// request path.
 func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghclient.Client, username string, repos []string) (githubDiscovery, error) {
 	seen := map[string]bool{}
-	var all []ghclient.DiscoveredPR
+	var all []discoveredPR
 	quiet := map[string]bool{}
 	lastListed := map[string]time.Time{}
 	var cursors []pullsCursor
+	trackedIDs := t.trackedRepositoryIDs(ctx, scope)
 
 	// Phase 1a: per-repo conditional open-PR enumeration, fanned out across a
 	// bounded worker pool (TFAC-570) sized by repoConcurrency() — default 4,
@@ -1119,11 +1140,12 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 			// A repo whose poll state cannot be read is taken as listed for
 			// the first time: its new pull requests' body mentions are then a
 			// baseline, where the other answer could report every open pull
-			// request's as new.
+			// request's as new. So is a name that resolved to no tracked
+			// row, which has no state to read.
 			var polledAt *time.Time
-			if t.repos != nil {
-				if stored, at, err := t.repos.GetPullsPollStateByRefSystem(ctx, t.orgID, domain.RepoRef{Host: scope, Owner: owner, Repo: name}); err != nil {
-					trackerLog.ErrorContext(ctx, "read pulls poll state failed", "repo", repoFull, "error", err)
+			if repositoryID := trackedIDs[strings.ToLower(repoFull)]; t.repos != nil && repositoryID != "" {
+				if stored, at, err := t.repos.GetPullsPollStateSystem(ctx, t.orgID, repositoryID); err != nil {
+					trackerLog.ErrorContext(ctx, "read pulls poll state failed", "repo", repoFull, "repository_id", repositoryID, "error", err)
 				} else {
 					etag, polledAt = stored, at
 				}
@@ -1189,20 +1211,27 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 		if !r.ok {
 			continue
 		}
-		cursors = append(cursors, pullsCursor{repo: repoFull, etag: r.etag, listedAt: r.listedAt})
+		// A name that resolved to no tracked row has nowhere to keep a
+		// cursor, and its listing was unconditional, so it is never quiet
+		// and has no last listing either.
+		repositoryID := trackedIDs[strings.ToLower(repoFull)]
+		if repositoryID != "" {
+			cursors = append(cursors, pullsCursor{repositoryID: repositoryID, repo: repoFull, etag: r.etag, listedAt: r.listedAt})
+		}
 		if r.notModified {
-			quiet[repoFull] = true
+			if repositoryID != "" {
+				quiet[repositoryID] = true
+			}
 			continue
 		}
-		if r.lastListed != nil {
-			lastListed[repoFull] = *r.lastListed
+		if r.lastListed != nil && repositoryID != "" {
+			lastListed[repositoryID] = *r.lastListed
 		}
 
 		for _, pr := range r.prs {
-			sid := ghSourceID(pr.Snapshot.Repo, pr.Snapshot.Number)
-			if !seen[sid] {
-				seen[sid] = true
-				all = append(all, pr)
+			if key := discoveredKey(pr); !seen[key] {
+				seen[key] = true
+				all = append(all, discoveredPR{DiscoveredPR: pr, repositoryID: repositoryID})
 			}
 		}
 	}
@@ -1249,11 +1278,12 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 				trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelError), "dashboard backfill query failed", "error", err, "query", q)
 				continue
 			}
+			// A pull request the search finds came from no listing, so it
+			// carries no listed repository.
 			for _, pr := range prs {
-				sid := ghSourceID(pr.Snapshot.Repo, pr.Snapshot.Number)
-				if !seen[sid] {
-					seen[sid] = true
-					all = append(all, pr)
+				if key := discoveredKey(pr); !seen[key] {
+					seen[key] = true
+					all = append(all, discoveredPR{DiscoveredPR: pr})
 				}
 			}
 		}
@@ -1275,19 +1305,21 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 // githubDiscovery is what discoverGitHub found.
 type githubDiscovery struct {
 	// prs is every pull request discovered, in repo order.
-	prs []ghclient.DiscoveredPR
-	// quiet is the set of "owner/repo" whose open-PR listing returned 304
-	// (unchanged open set this cycle). A quiet repo's tracked entities can
-	// keep their stored snapshot through the Phase-2 gate.
+	prs []discoveredPR
+	// quiet is the set of registry row ids whose open-PR listing returned
+	// 304 (unchanged open set this cycle). A quiet repo's tracked entities,
+	// matched by entities.repository_id, can keep their stored snapshot
+	// through the Phase-2 gate.
 	quiet map[string]bool
-	// lastListed maps each "owner/repo" listed with a 200 this cycle to the
-	// time TF sent the last listing of it whose pull requests it stored, and
-	// has no entry for a repo with no such listing. It is what tells a pull
-	// request opened since TF last looked from one that was already open
-	// (openedSince).
+	// lastListed maps the registry row id of each repo listed with a 200
+	// this cycle to the time TF sent the last listing of it whose pull
+	// requests it stored, and has no entry for a repo with no such listing.
+	// It is what tells a pull request opened since TF last looked from one
+	// that was already open (openedSince).
 	lastListed map[string]time.Time
 	// cursors holds the conditional-request state of every listing that
-	// succeeded (200 or 304), in repo order, for RefreshGitHub to write.
+	// succeeded (200 or 304) of a repo that resolved to a tracked row, in
+	// repo order, for RefreshGitHub to write.
 	cursors []pullsCursor
 	// resumeFrom is the round-robin resume point: "" when the fan-out
 	// covered every entry in repos (a full wrap — the poller resets its
@@ -1298,10 +1330,53 @@ type githubDiscovery struct {
 	resumeFrom string
 }
 
+// discoveredPR is a pull request discovery found, with the registry row id of
+// the tracked repository whose listing returned it: "" for one the dashboard
+// backfill's search found, which came from no listing.
+type discoveredPR struct {
+	ghclient.DiscoveredPR
+	repositoryID string
+}
+
+// discoveredKey is what discovery dedupes a pull request on: its node id, which
+// no rename moves and no casing changes, or its owner/repo#N key when a
+// response carried no node id.
+func discoveredKey(pr ghclient.DiscoveredPR) string {
+	if pr.NodeID != "" {
+		return pr.NodeID
+	}
+	return ghSourceID(pr.Snapshot.Repo, pr.Snapshot.Number)
+}
+
+// trackedRepositoryIDs maps the name of every repository the org tracks on
+// scope, case folded, to its registry row id. The names RefreshGitHub is
+// handed come from the same tracked set (ListTrackedNamesSystem), so this is
+// where each one is resolved to the row its listing state belongs to, once
+// per cycle. A name it does not answer for — renamed or untracked between the
+// two reads — has no row this cycle: its listing goes out unconditionally and
+// leaves no state behind. A failed read is logged and answers nothing, which
+// costs every listing this cycle its conditional request.
+func (t *Tracker) trackedRepositoryIDs(ctx context.Context, scope string) map[string]string {
+	if t.repos == nil {
+		return nil
+	}
+	rows, _, err := t.repos.ListTrackedSystem(ctx, t.orgID, scope, db.Unwindowed)
+	if err != nil {
+		trackerLog.ErrorContext(ctx, "read tracked repositories failed; listing every repository unconditionally", "error", err)
+		return nil
+	}
+	ids := make(map[string]string, len(rows))
+	for _, r := range rows {
+		ids[strings.ToLower(r.Slug())] = r.ID
+	}
+	return ids
+}
+
 // pullsCursor is the conditional-request state one successful open-PR
 // listing leaves for the repo's next listing.
 type pullsCursor struct {
-	repo string // "owner/repo", the name the listing was sent under
+	repositoryID string // the registry row the state is stored on
+	repo         string // "owner/repo", the name the listing was sent under
 	// etag is the response's on a 200 and the stored one on a 304.
 	etag string
 	// listedAt is when the listing was sent. A pull request created after
@@ -1400,14 +1475,12 @@ type repoListResult struct {
 // It writes on context.Background(), as the discovery seed's entity writes
 // do: a cycle context that a slow sibling repo's listing let expire must not
 // cost this repo the cursor of a listing that finished.
-func (t *Tracker) recordPullsPoll(scope string, c pullsCursor) {
+func (t *Tracker) recordPullsPoll(c pullsCursor) {
 	if t.repos == nil {
 		return
 	}
-	// Ref-keyed: c.repo is one of the names ListTrackedNamesSystem handed
-	// this cycle for scope, the same one that went into the request path.
-	if err := t.repos.SetPullsPollStateByRefSystem(context.Background(), t.orgID, domain.RepoRefFromSlug(scope, c.repo), c.etag, c.listedAt); err != nil {
-		trackerLog.Error("write pulls poll state failed", "repo", c.repo, "error", err)
+	if err := t.repos.SetPullsPollStateSystem(context.Background(), t.orgID, c.repositoryID, c.etag, c.listedAt); err != nil {
+		trackerLog.Error("write pulls poll state failed", "repo", c.repo, "repository_id", c.repositoryID, "error", err)
 	}
 }
 

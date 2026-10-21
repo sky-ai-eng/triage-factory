@@ -213,27 +213,6 @@ func requireRepositoriesOnHost(ctx context.Context, q queryer, host string, ids 
 	return db.MissingRepositoriesError(ids, found, host)
 }
 
-func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, host, owner, repo string) (bool, error) {
-	if err := db.RequireRepoHost(host); err != nil {
-		return false, err
-	}
-	var n int
-	err := s.q.QueryRowContext(ctx, `
-		SELECT 1 FROM team_github_repos g
-		JOIN repositories r ON r.id = g.repository_id
-		WHERE g.team_id = ? AND r.host = ? AND LOWER(r.owner) = LOWER(?) AND LOWER(r.repo) = LOWER(?)
-		  AND r.retired_at IS NULL
-		LIMIT 1
-	`, teamID, host, owner, repo).Scan(&n)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
-		}
-		return false, fmt.Errorf("tracks repo: %w", err)
-	}
-	return true, nil
-}
-
 func (s *teamGitHubReposStore) TracksRepositorySystem(ctx context.Context, teamID, repositoryID string) (bool, error) {
 	var n int
 	err := s.q.QueryRowContext(ctx, `
@@ -255,10 +234,7 @@ func (s *teamGitHubReposStore) TracksRepositorySystem(ctx context.Context, teamI
 // calls it — the repoevent.Notifier is built without a RecipientsFunc
 // there and broadcasts org-wide — but the shared conformance suite
 // exercises it, so N=1 must not be assumed here.
-func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, orgID, host, owner, repo string) ([]string, error) {
-	if err := db.RequireRepoHost(host); err != nil {
-		return nil, err
-	}
+func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, orgID, repositoryID string) ([]string, error) {
 	// UNION (not UNION ALL) dedups a user who is both an org admin and a
 	// tracking-team member. No teams.deleted_at filter, deliberately —
 	// see the Postgres impl's comment: the tracking arm mirrors the REST
@@ -274,12 +250,11 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 			JOIN teams t ON t.id = g.team_id
 			JOIN repositories r ON r.id = g.repository_id
 			JOIN memberships m ON m.team_id = g.team_id
-			WHERE t.org_id = ? AND r.host = ?
-			  AND LOWER(r.owner) = LOWER(?) AND LOWER(r.repo) = LOWER(?)
+			WHERE t.org_id = ? AND g.repository_id = ?
 			  AND r.retired_at IS NULL
 		)
 		ORDER BY user_id ASC
-	`, orgID, orgID, host, owner, repo)
+	`, orgID, orgID, repositoryID)
 	if err != nil {
 		return nil, fmt.Errorf("repo update recipients: %w", err)
 	}

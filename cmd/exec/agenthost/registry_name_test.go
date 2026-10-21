@@ -104,12 +104,16 @@ func TestLocalClient_ReviewUnderOldName_FoundByCoherenceReads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed the PR entity: %v", err)
 	}
+	repoRow, err := stores.Repos.GetByRefSystem(ctx, info.OrgID, domain.RepoRefFromSlug(testScope("github"), "octo/new-name"))
+	if err != nil || repoRow == nil {
+		t.Fatalf("read octo/new-name's registry row: %+v, %v", repoRow, err)
+	}
 	targets, err := stores.Conversations.ListPRCoherenceTargetsSystem(ctx, info.OrgID, db.PRCoherenceTargetQuery{
-		EntityID: pr.ID,
-		EventID:  "event-new-commits",
-		BaseRepo: "octo/new-name",
-		HeadRepo: "octo/new-name",
-		PRRef:    "pr-5",
+		EntityID:         pr.ID,
+		EventID:          "event-new-commits",
+		BaseRepositoryID: repoRow.ID,
+		HeadRepositoryID: repoRow.ID,
+		PRRef:            "pr-5",
 	})
 	if err != nil {
 		t.Fatalf("ListPRCoherenceTargetsSystem: %v", err)

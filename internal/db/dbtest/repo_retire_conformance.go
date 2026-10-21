@@ -88,8 +88,8 @@ func RunRepoRetireConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 
 		// Tracking is forward-only: the team keeps the row in its set, and the
-		// set says it is retired. A name-keyed tracking read says no, since the
-		// name is no longer the row's.
+		// set says it is retired. The name resolves to no row, so a caller
+		// holding only the name never reaches the row's tracking.
 		tracked, err := s.TeamGitHubRepos.ListForTeamSystem(ctx, seed.TeamID, TestGitHubHost)
 		if err != nil || len(tracked) != 1 || tracked[0].RepositoryID != fx.repo.ID || tracked[0].RetiredAt == nil {
 			t.Errorf("ListForTeamSystem = %+v, err=%v; want the retired row, marked", tracked, err)
@@ -97,8 +97,8 @@ func RunRepoRetireConformance(t *testing.T, mk RepoRenameFactory) {
 		if ok, err := s.TeamGitHubRepos.TracksRepositorySystem(ctx, seed.TeamID, fx.repo.ID); err != nil || !ok {
 			t.Errorf("TracksRepositorySystem = %v, err=%v; want the team still tracking the row", ok, err)
 		}
-		if ok, err := s.TeamGitHubRepos.TracksRepoSystem(ctx, seed.TeamID, TestGitHubHost, "octo", "api"); err != nil || ok {
-			t.Errorf("TracksRepoSystem(octo/api) = %v, err=%v; the name is not the retired row's", ok, err)
+		if row, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef("octo/api")); err != nil || row != nil {
+			t.Errorf("GetByRefSystem(octo/api) = %+v, err=%v; the name is not the retired row's", row, err)
 		}
 
 		// Its active entities are closed, and answer to no key; by id they

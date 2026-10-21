@@ -172,13 +172,19 @@ type MessageWindow struct {
 // can be working on a PR: its task entity, a pending review target, or a
 // materialized PR/head-branch checkout. EventID is the duplicate fence for
 // same-task additive delivery.
+//
+// The checkout arm names repositories by registry row id, the key a ledger row
+// holds: BaseRepositoryID is the PR entity's repository
+// (entities.repository_id), and HeadRepositoryID the head branch's — a fork's
+// row, or the base's again for a same-repository branch. HeadRepositoryID is
+// "" when the head repository has no row, which no ledger row can reference.
 type PRCoherenceTargetQuery struct {
-	EntityID  string
-	EventID   string
-	BaseRepo  string
-	HeadRepo  string
-	PRRef     string
-	BranchRef string
+	EntityID         string
+	EventID          string
+	BaseRepositoryID string
+	HeadRepositoryID string
+	PRRef            string
+	BranchRef        string
 }
 
 // Returned-row shapes. The lifecycle writes below split by which
@@ -474,13 +480,13 @@ type ConversationStore interface {
 	// excludes a conversation whose same-task additive path already recorded
 	// the event as injected. A pending review matches when its draft is about
 	// the PR entity (artifacts.entity_id), whatever name the draft's target
-	// spells. A checkout matches only when its
-	// repository is on the PR entity's own GitHub host (its scope): the same
-	// slug on another host is another repository. A checkout of a retired repository
-	// never matches, because its name belongs to the repository GitHub serves
-	// under it now. Admin-pool only: the coherence subscriber
-	// has no viewer claims and must see every relevant team conversation in
-	// the org.
+	// spells. A checkout matches when its ledger row references the base
+	// repository's registry row with the PR's ref, or the base's or head's
+	// row with the head branch's ref. Matching by row id is what keeps the
+	// same slug on another host, and a retired row whose name GitHub serves
+	// as another repository now, from matching. Admin-pool only: the coherence
+	// subscriber has no viewer claims and must see every relevant team
+	// conversation in the org.
 	ListPRCoherenceTargetsSystem(ctx context.Context, orgID string, query PRCoherenceTargetQuery) ([]domain.PRCoherenceTarget, error)
 
 	// --- The task's live conversation ---

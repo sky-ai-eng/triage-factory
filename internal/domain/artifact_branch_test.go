@@ -52,6 +52,23 @@ func TestBranchDedupKey(t *testing.T) {
 	}
 }
 
+func TestBranchArtifactRepositoryID(t *testing.T) {
+	branch := func(key string) Artifact {
+		return Artifact{Provider: ArtifactProviderGit, Kind: ArtifactKindBranch, DedupKey: key}
+	}
+	if id, ok := BranchArtifactRepositoryID(branch(BranchDedupKey("repo-uuid", "refs/heads/feature/x"))); !ok || id != "repo-uuid" {
+		t.Errorf("BranchArtifactRepositoryID = (%q, %v), want (repo-uuid, true)", id, ok)
+	}
+	// A stored row keyed on owner/repo carries no registry id.
+	if id, ok := BranchArtifactRepositoryID(branch("git:branch:octo/repo:refs/heads/x")); ok {
+		t.Errorf("BranchArtifactRepositoryID(owner/repo key) = %q, want none", id)
+	}
+	pr := Artifact{Provider: ArtifactProviderGitHub, Kind: ArtifactKindPullRequest, DedupKey: "github:pull_request:PR_x"}
+	if id, ok := BranchArtifactRepositoryID(pr); ok {
+		t.Errorf("BranchArtifactRepositoryID(pull request) = %q, want none", id)
+	}
+}
+
 // TestNewBranchArtifact_NotCreatedOmitsNew pins that created=false drops the
 // "new" key entirely (omitempty), so the hook and the proxy backstop produce
 // byte-identical details_json for the same push and never flap the row.

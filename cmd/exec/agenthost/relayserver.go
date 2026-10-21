@@ -351,16 +351,16 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(repoSlugResult{Slug: slug})
 
-	case opTeamTracksRepo:
-		var a teamTracksRepoArgs
+	case opTeamTracksRepository:
+		var a repositoryIDArgs
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, err
 		}
-		tracks, err := s.rt.TeamTracksRepo(ctx, a.Owner, a.Repo)
+		tracks, err := s.rt.TeamTracksRepository(ctx, a.RepositoryID)
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(teamTracksRepoResult{Tracks: tracks})
+		return json.Marshal(teamTracksRepositoryResult{Tracks: tracks})
 
 	case opGetConversationWorktreeByRepoRef:
 		var a conversationWorktreeByRepoRefArgs
@@ -373,12 +373,12 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(conversationWorktreeResult{Worktree: w})
 
-	case opTaskOwnRepo:
-		var a taskOwnRepoArgs
+	case opTaskOwnRepository:
+		var a repositoryIDArgs
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, err
 		}
-		isTaskRepo, err := s.rt.TaskOwnRepo(ctx, a.Owner, a.Repo)
+		isTaskRepo, err := s.rt.TaskOwnRepository(ctx, a.RepositoryID)
 		if err != nil {
 			return nil, err
 		}
@@ -477,6 +477,26 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 			return nil, err
 		}
 		return json.Marshal(res)
+
+	case opArtifactPullRequest:
+		var a artifactPullRequestArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, err
+		}
+		// The entity and registry rows live behind the stores the sidecar does
+		// not hold; the artifact is looked up among the run's own, from the
+		// orchestrator's ConversationInfo.
+		pr, err := s.rt.ArtifactPullRequest(ctx, a.ArtifactID)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(artifactPullRequestResult{
+			RepositoryID: pr.RepositoryID,
+			Owner:        pr.Owner,
+			Repo:         pr.Repo,
+			Number:       pr.Number,
+			Retired:      pr.Retired,
+		})
 
 	case opCheckEntitlement:
 		var a checkEntitlementArgs

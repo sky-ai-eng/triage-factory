@@ -1334,6 +1334,14 @@ func TestConversationStore_Postgres_PRCoherenceTargets(t *testing.T) {
 					t.Fatalf("seed worktree: %v", err)
 				}
 			},
+			Repository: func(t *testing.T, host, slug string) string {
+				t.Helper()
+				row, err := stores.Repos.FindOrCreateByRefSystem(ctx, orgID, domain.RepoRefFromSlug(host, slug))
+				if err != nil {
+					t.Fatalf("resolve repository %s on %s: %v", slug, host, err)
+				}
+				return row.ID
+			},
 			RetireRepository: func(t *testing.T, host, slug string) {
 				t.Helper()
 				if err := dbtest.RetireRepo(ctx, stores.Repos, orgID, host, slug); err != nil {

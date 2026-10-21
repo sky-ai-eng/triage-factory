@@ -61,12 +61,16 @@ type reviewArtifactCommentJSON struct {
 // ParseSeverityBadge splits it back into a chip level + clean body for display.
 // Body + event are the staged values; the whole review is local until the
 // atomic submit at approval.
+//
+// The pull request is the one the review's entity is about, under its
+// repository's current name (artifactPullRequest).
 func (ah *artifactsHandler) reviewArtifactDetails(w http.ResponseWriter, r *http.Request, orgID string, art *domain.Artifact) (reviewArtifactDetailsJSON, bool) {
-	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
-	if !ok {
-		internalError(w, "artifacts", fmt.Errorf("malformed artifact target %q (artifact %s)", art.Target, art.ID))
+	prRef, err := ah.artifactPullRequest(r.Context(), orgID, art)
+	if err != nil {
+		internalError(w, "artifacts", err)
 		return reviewArtifactDetailsJSON{}, false
 	}
+	owner, repo, number := prRef.Owner, prRef.Repo, prRef.Number
 	// Surface a corrupt details_json as a 500 rather than serving a misleadingly
 	// empty review (no body, no comments) the user might approve or act on.
 	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
@@ -104,7 +108,7 @@ func (ah *artifactsHandler) reviewArtifactDetails(w http.ResponseWriter, r *http
 	// a resolved review is immutable, so drift against the live head is
 	// meaningless (and the GitHub reads would be wasted).
 	if art.State == domain.ArtifactStateReviewPending {
-		ah.annotateReviewFreshness(r.Context(), orgID, art, details, &out)
+		ah.annotateReviewFreshness(r.Context(), orgID, art, prRef, details, &out)
 	}
 	return out, true
 }
@@ -281,10 +285,11 @@ func writeReviewNotPending(w http.ResponseWriter, state string) {
 // claim (and is included in the re-read) or loses to it (409); submitting the
 // pre-claim snapshot would post content the user had already edited away.
 func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Artifact) {
-	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
+	gh, prRef, ok := ah.ghForArtifact(w, r, orgID, art)
 	if !ok {
 		return
 	}
+	owner, repo, number := prRef.Owner, prRef.Repo, prRef.Number
 
 	// Fast path: a stale/double click on an already-resolved artifact gets a
 	// state-specific 409 without claim churn. Advisory only — the CAS below is
@@ -687,10 +692,11 @@ func (ah *artifactsHandler) reviewRefresh(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
+	gh, prRef, ok := ah.ghForArtifact(w, r, orgID, art)
 	if !ok {
 		return
 	}
+	owner, repo, number := prRef.Owner, prRef.Repo, prRef.Number
 	pr, err := gh.GetPRBasic(r.Context(), owner, repo, number)
 	if err != nil || pr.HeadSHA == "" {
 		artifactsLog.Warn("review refresh: live PR head unavailable",

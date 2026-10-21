@@ -16,11 +16,11 @@ import (
 
 // TestProfiler_FetchErrorLeavesRowUntouched pins TFAC-331 root cause 2: a repo
 // whose doc fetch ERRORS (auth / network / 5xx — anything that isn't a clean
-// 404) is skipped entirely — no UpsertSystem, so no docs classification — and
+// 404) is skipped entirely — no UpdateProfileSystem, so no docs classification — and
 // its row is left for the next run to retry, while a repo with genuine 404s is
 // persisted with false has_* flags exactly as before. A no-upsert proves the
 // erroring repo lands in neither withDocs nor withoutDocs (both end in an
-// UpsertSystem call).
+// UpdateProfileSystem call).
 func TestProfiler_FetchErrorLeavesRowUntouched(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// github.NewClient routes through APIBase → requests land under
@@ -205,7 +205,7 @@ func (oneOrgStore) GetSettingsSystem(context.Context, string) (domain.OrgSetting
 }
 
 // fetchRepositoryStore returns a fixed configured-name list and captures every
-// UpsertSystem so the test can assert which repos were persisted vs skipped.
+// UpdateProfileSystem so the test can assert which repos were persisted vs skipped.
 type fetchRepositoryStore struct {
 	db.RepositoryStore
 	names   []string
@@ -226,11 +226,11 @@ func (s *fetchRepositoryStore) GetByRefSystem(_ context.Context, _ string, ref d
 	return &domain.Repository{ID: "repo-id-" + ref.Repo, Host: ref.Host, Owner: ref.Owner, Repo: ref.Repo}, nil
 }
 
-func (s *fetchRepositoryStore) UpsertSystem(_ context.Context, _ string, p domain.Repository) (domain.Repository, error) {
+func (s *fetchRepositoryStore) UpdateProfileSystem(_ context.Context, _, id string, p domain.Repository) (domain.Repository, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.upserts = append(s.upserts, p)
-	return storedRepoRow(p), nil
+	return storedRepoRow(id, p), nil
 }
 
 func (s *fetchRepositoryStore) upsertedByID() map[string]domain.Repository {

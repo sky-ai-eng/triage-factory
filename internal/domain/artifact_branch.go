@@ -85,6 +85,25 @@ func BranchDedupKeyPrefix(repositoryID string) string {
 	return ArtifactDedupKey(ArtifactProviderGit, ArtifactKindBranch, repositoryID, "") + ":"
 }
 
+// BranchArtifactRepositoryID returns the registry row id a branch artifact's
+// dedup key carries (BranchDedupKey). ok=false for any other artifact, and for
+// a stored row whose key still names its repository by owner/repo, which no
+// registry row identified when it was keyed.
+func BranchArtifactRepositoryID(a Artifact) (string, bool) {
+	if a.Provider != ArtifactProviderGit || a.Kind != ArtifactKindBranch {
+		return "", false
+	}
+	rest, found := strings.CutPrefix(a.DedupKey, ArtifactDedupKey(ArtifactProviderGit, ArtifactKindBranch, "", ""))
+	if !found {
+		return "", false
+	}
+	id, _, found := strings.Cut(rest, ":")
+	if !found || id == "" || strings.Contains(id, "/") {
+		return "", false
+	}
+	return id, true
+}
+
 // BranchArtifactWebURL builds the web link for a pushed branch ref on a specific
 // GitHub host base — github.com, a GHES host, or a GHEC data-residency host.
 // base is the org's user-facing web base (as reported by the credential

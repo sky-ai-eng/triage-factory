@@ -1174,16 +1174,10 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 		       OR EXISTS (
 		           SELECT 1
 		           FROM conversation_worktrees w
-		           JOIN repositories repo ON repo.id = w.repository_id
 		           WHERE w.conversation_id = r.id
-		             AND repo.retired_at IS NULL
-		             AND repo.host = (SELECT pe.scope FROM entities pe WHERE pe.id = ?)
 		             AND (
-		                  (LOWER(repo.owner || '/' || repo.repo) = LOWER(?) AND w.ref = ?)
-		                  OR (w.ref = ? AND (
-		                       LOWER(repo.owner || '/' || repo.repo) = LOWER(?)
-		                       OR LOWER(repo.owner || '/' || repo.repo) = LOWER(?)
-		                  ))
+		                  (w.repository_id = ? AND w.ref = ?)
+		                  OR (w.ref = ? AND (w.repository_id = ? OR w.repository_id = ?))
 		             )
 		       )
 		  )
@@ -1192,7 +1186,7 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 		      WHERE te.task_id = r.task_id AND te.event_id = ? AND te.kind = 'injected'
 		  )
 		ORDER BY r.started_at ASC, r.id ASC
-	`, query.EntityID, query.EntityID, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, query.EntityID, query.BaseRepo, query.PRRef, query.BranchRef, query.BaseRepo, query.HeadRepo, query.EventID)
+	`, query.EntityID, query.EntityID, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, nullIfEmpty(query.BaseRepositoryID), query.PRRef, query.BranchRef, nullIfEmpty(query.BaseRepositoryID), nullIfEmpty(query.HeadRepositoryID), query.EventID)
 	if err != nil {
 		return nil, err
 	}

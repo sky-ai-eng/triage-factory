@@ -145,9 +145,9 @@ func TestTeamGitHubRepos_SQLite_CasingChangePreservesCache(t *testing.T) {
 	}
 }
 
-// TestTeamGitHubRepos_SQLite_TracksRepo pins the router-gate lookup,
-// including the case-insensitive owner match.
-func TestTeamGitHubRepos_SQLite_TracksRepo(t *testing.T) {
+// TestTeamGitHubRepos_SQLite_TracksRepository pins the router-gate lookup:
+// tracking is answered per team for the registry row's id.
+func TestTeamGitHubRepos_SQLite_TracksRepository(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -158,31 +158,26 @@ func TestTeamGitHubRepos_SQLite_TracksRepo(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("replace: %v", err)
 	}
-
-	cases := []struct {
-		owner, repo string
-		want        bool
-	}{
-		{"Acme", "api", true},
-		{"acme", "api", true},  // owner matched case-insensitively
-		{"ACME", "api", true},  // ditto
-		{"acme", "web", false}, // untracked repo
-		{"other", "api", false},
+	api, err := stores.Repos.GetByRefSystem(ctx, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "acme/API"))
+	if err != nil || api == nil {
+		t.Fatalf("resolve acme/api: got=%v err=%v", api, err)
 	}
-	for _, c := range cases {
-		got, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, teamA, dbtest.TestGitHubHost, c.owner, c.repo)
-		if err != nil {
-			t.Fatalf("TracksRepoSystem(%s/%s): %v", c.owner, c.repo, err)
-		}
-		if got != c.want {
-			t.Errorf("TracksRepoSystem(%s/%s) = %v, want %v", c.owner, c.repo, got, c.want)
-		}
+	web, err := stores.Repos.FindOrCreateByRefSystem(ctx, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "acme/web"))
+	if err != nil {
+		t.Fatalf("register acme/web: %v", err)
+	}
+
+	if got, err := stores.TeamGitHubRepos.TracksRepositorySystem(ctx, teamA, api.ID); err != nil || !got {
+		t.Errorf("TracksRepositorySystem(acme/api) = %v, %v; want true", got, err)
+	}
+	if got, err := stores.TeamGitHubRepos.TracksRepositorySystem(ctx, teamA, web.ID); err != nil || got {
+		t.Errorf("TracksRepositorySystem(acme/web, registered but untracked) = %v, %v; want false", got, err)
 	}
 
 	// A different team tracks nothing.
 	teamB := "team-b-0000-0000-0000-000000000002"
 	seedExtraTeam(t, conn, teamB, "team-b")
-	if got, _ := stores.TeamGitHubRepos.TracksRepoSystem(ctx, teamB, dbtest.TestGitHubHost, "Acme", "api"); got {
+	if got, _ := stores.TeamGitHubRepos.TracksRepositorySystem(ctx, teamB, api.ID); got {
 		t.Error("teamB should not track acme/api")
 	}
 }

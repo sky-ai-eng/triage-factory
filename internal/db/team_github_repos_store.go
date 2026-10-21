@@ -43,9 +43,10 @@ func MissingRepositoriesError(ids []string, found map[string]bool, host string) 
 // A row here references a repository by the registry row's id, so a rename
 // moves one column on one row in `repositories` and every tracking row still
 // resolves without being rewritten. The write takes registry ids and nothing
-// else, and the team's read hands each one back beside the display name. The
-// (owner, repo) lookups that remain are for callers that hold only a name — an
-// agent's push, a `workspace add` — and they join the registry to match it.
+// else, and the team's read hands each one back beside the display name. A
+// caller that holds only a name — an agent's push, a `workspace add` —
+// resolves it to a registry row first (RepositoryStore.GetByRefSystem) and
+// asks about that row's id.
 //
 // The two tables have different lifetimes, and the direction matters. A
 // registry row exists before anything tracks it — it is registered by GitHub
@@ -76,8 +77,7 @@ func MissingRepositoriesError(ids []string, found map[string]bool, host string) 
 //     ReplaceForTeam runs in the caller's tx, serialized per org by a
 //     transaction advisory lock so two concurrent saves of one team's set
 //     cannot interleave into a set neither of them asked for.
-//   - ListForTeamSystem, TracksRepoSystem, TracksRepositorySystem run on
-//     the admin pool. The router gate + any poll caller resolve tracking
+//   - ListForTeamSystem, TracksRepositorySystem run on the admin pool. The router gate + any poll caller resolve tracking
 //     without a JWT-claims context.
 //
 // SQLite collapses the pool split to one connection; the `...System`
@@ -139,40 +139,39 @@ type TeamGitHubReposStore interface {
 	// name.
 	ReplaceForTeam(ctx context.Context, orgID, teamID, host string, repositoryIDs []string) error
 
-	// TracksRepoSystem reports whether the team tracks (owner, repo) on host,
-	// matched case-insensitively on both fields (GitHub identifiers are
-	// case-insensitive). It is the lookup for a name a run hands TF — a push
-	// through the git proxy, a `workspace add` — where no registry id is held
-	// yet. Admin pool in Postgres: those callers have no JWT claims.
-	TracksRepoSystem(ctx context.Context, teamID, host, owner, repo string) (bool, error)
-
 	// TracksRepositorySystem reports whether the team tracks the repository
-	// whose registry row is repositoryID. It is the lookup for a caller that
-	// already holds the row's id, as a GitHub entity does
-	// (entities.repository_id); TracksRepoSystem is for one that holds a name.
-	// No host is asked about: a registry row lives on one host, so the id
-	// already names it. Admin pool in Postgres, like TracksRepoSystem.
+	// whose registry row is repositoryID. Every tracking question is asked by
+	// id: a GitHub entity holds one (entities.repository_id), a ledger row
+	// holds one, and a name a run hands TF — a push through the git proxy, a
+	// `workspace add` — is resolved to its row once, where it arrives. No host
+	// is asked about: a registry row lives on one host, so the id already
+	// names it. A retired row's tracking row is kept, so this answers true for
+	// it; a caller that resolved a name never holds one, because no name
+	// resolves to a retired row. Admin pool in Postgres: these callers have no
+	// JWT claims.
 	TracksRepositorySystem(ctx context.Context, teamID, repositoryID string) (bool, error)
 
 	// RepoUpdateRecipientsSystem returns the distinct, sorted ids of every
-	// user who may receive a repository_updated websocket event for
-	// (owner, repo) in orgID: the org's admins and owners, plus every
-	// member of a team that tracks the repo, matched case-insensitively
-	// on both fields. This deliberately mirrors the REST read's
-	// visibility (org admins get the org-wide union, members their teams'
-	// tracked sets — the repoTrackedByATeam semi-join behind
-	// ListTeamScoped), because the websocket hub scopes connections on
-	// (org, user) only and the repoevent.Notifier fans one event per
-	// returned id onto that axis. Mirroring includes the archived-team
-	// case: archive tombstones the team without touching memberships or
-	// tracking rows, so its members still see the repo on GET /api/repos
-	// and stay in this audience — visibility scoping, distinct from the
-	// routing reads (TeamIDsForUserInOrgSystem) that DO exclude archived
-	// teams to keep new work away from them. Admin pool in Postgres: the
-	// emitters are claims-free background jobs. Called fresh per emission
-	// so membership changes take effect immediately; local mode never
-	// calls it (N=1 broadcasts org-wide).
-	RepoUpdateRecipientsSystem(ctx context.Context, orgID, host, owner, repo string) ([]string, error)
+	// user who may receive a repository_updated websocket event for the
+	// repository whose registry row is repositoryID in orgID: the org's admins
+	// and owners, plus every member of a team that tracks the row. This
+	// deliberately mirrors the REST read's visibility (org admins get the
+	// org-wide union, members their teams' tracked sets — the
+	// repoTrackedByATeam semi-join behind ListTeamScoped), because the
+	// websocket hub scopes connections on (org, user) only and the
+	// repoevent.Notifier fans one event per returned id onto that axis.
+	// Keyed by the row id the event carries, so a rename between the write
+	// and this read changes nothing, and a retired row's tracking teams are
+	// left out the way the REST read leaves the row out. Mirroring includes
+	// the archived-team case: archive tombstones the team without touching
+	// memberships or tracking rows, so its members still see the repo on GET
+	// /api/repos and stay in this audience — visibility scoping, distinct
+	// from the routing reads (TeamIDsForUserInOrgSystem) that DO exclude
+	// archived teams to keep new work away from them. Admin pool in
+	// Postgres: the emitters are claims-free background jobs. Called fresh
+	// per emission so membership changes take effect immediately; local mode
+	// never calls it (N=1 broadcasts org-wide).
+	RepoUpdateRecipientsSystem(ctx context.Context, orgID, repositoryID string) ([]string, error)
 
 	// TracksRepositoryViewerScoped reports whether ANY team the calling user
 	// belongs to tracks the repository with this registry id (TFAC-559). The

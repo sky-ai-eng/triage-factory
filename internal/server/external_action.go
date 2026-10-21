@@ -29,15 +29,17 @@ import (
 //     AFTER the pessimistic GitHub write succeeds, so it always fires (even when
 //     the snapshot path early-returns) and never fails the user's applied edit.
 
-// githubCredentialForArtifact is ghclient.CredentialForRepo keyed off the repo
-// an artifact's own target names — the coordinates every approval-lifecycle
-// write addresses.
-func githubCredentialForArtifact(ctx context.Context, resolver ghclient.Resolver, orgID string, art *domain.Artifact) string {
-	owner, repo, _, ok := domain.ParsePRTarget(art.Target)
-	if !ok {
+// githubCredentialForPullRequest is ghclient.CredentialForRepo for the
+// repository an artifact's pull request is in (artifactPullRequest), under the
+// name GitHub serves it now — the coordinates every approval-lifecycle write
+// addresses. A pull request that could not be resolved (nil), or whose
+// repository's registry row is retired, names no repository a write is made
+// in, and is attributed to the App, as an unclassifiable repository is.
+func githubCredentialForPullRequest(ctx context.Context, resolver ghclient.Resolver, orgID string, pr *db.ArtifactPullRequest) string {
+	if pr == nil || pr.Retired {
 		return domain.CredentialGitHubApp
 	}
-	return ghclient.CredentialForRepo(ctx, resolver, orgID, owner, repo)
+	return ghclient.CredentialForRepo(ctx, resolver, orgID, pr.Owner, pr.Repo)
 }
 
 // recordExternalActionBestEffort records act in its own claims-set tx (app pool),

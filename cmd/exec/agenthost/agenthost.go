@@ -257,16 +257,18 @@ type Client interface {
 	GetConversation(ctx context.Context) (*domain.Conversation, error)
 	GetTask(ctx context.Context, taskID string) (*domain.Task, error)
 	// ListRepos lists the repositories the run's team tracks, the set
-	// TeamTracksRepo admits.
+	// TeamTracksRepository admits.
 	ListRepos(ctx context.Context) ([]domain.Repository, error)
 	// GetRepo resolves the "owner/repo" the agent typed to its registry row,
 	// or nil when nothing answers to that name. The agent surface speaks
 	// names; the resolution happens daemon-side, at the runtime.
 	GetRepo(ctx context.Context, slug string) (*domain.Repository, error)
-	// TeamTracksRepo reports whether the run's team tracks owner/repo — the
-	// gate `workspace add` applies (alongside the org-configured check) so it
-	// only materializes repos the proxy will then authorize pushes to.
-	TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error)
+	// TeamTracksRepository reports whether the run's team tracks the
+	// repository whose registry row is repositoryID — the row GetRepo
+	// resolved the agent's name to. It is the gate `workspace add` applies
+	// (alongside the org-configured check) so it only materializes repos the
+	// proxy will then authorize pushes to.
+	TeamTracksRepository(ctx context.Context, repositoryID string) (bool, error)
 	GetConversationWorktreeByRepoRef(ctx context.Context, repositoryID, ref string) (*domain.ConversationWorktree, error)
 	ListConversationWorktrees(ctx context.Context) ([]domain.ConversationWorktree, error)
 	InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (inserted bool, winningPath string, err error)

@@ -106,9 +106,9 @@ func TestRelayRuntime_RoundTripsCoreOps(t *testing.T) {
 
 	// A pure read op relays and returns the store's answer (team-tracks gate,
 	// used by the exec-gh authorize path).
-	tracks, err := rt.TeamTracksRepo(ctx, "octo", "repo")
+	tracks, err := rt.TeamTracksRepository(ctx, "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b")
 	if err != nil {
-		t.Fatalf("TeamTracksRepo relay: %v", err)
+		t.Fatalf("TeamTracksRepository relay: %v", err)
 	}
 	if tracks {
 		t.Fatal("expected the un-seeded repo to be untracked through the relay")

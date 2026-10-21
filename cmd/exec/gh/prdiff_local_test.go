@@ -345,8 +345,9 @@ func TestPersistPRDiff_CheckoutWithoutBaseWarns(t *testing.T) {
 	}
 }
 
-// TestPRCheckout_ExactPRNumber pins the registry match: the row whose repo
-// matches (case-insensitively) and whose ref is exactly pr-<N>. pr-4 must not
+// TestPRCheckout_ExactPRNumber pins the registry match: the row of the
+// repository the name resolves to (in any casing) and whose ref is exactly
+// pr-<N>. pr-4 must not
 // answer for 42 or the reverse, another repo's pr-42 must not answer for this
 // one, and the recorded host-view path is translated into this process's view.
 func TestPRCheckout_ExactPRNumber(t *testing.T) {
@@ -389,5 +390,34 @@ func TestPRCheckout_ExactPRNumber(t *testing.T) {
 		if !got.ok || got.dir != c.wantDir {
 			t.Errorf("%s/%s#%d: got %+v, want dir %s", c.owner, c.repo, c.number, got, c.wantDir)
 		}
+	}
+}
+
+// TestPRCheckout_MatchesTheResolvedRegistryRow: the ledger is matched on the
+// registry row the name resolves to, not on the name a row spells. The run
+// holds a pr-42 checkout of a repository that was called owner/repo when it
+// was checked out; owner/repo now resolves to another row (GitHub gave the name
+// to another repository), so that checkout is not this PR's, and the diff
+// comes from the API instead.
+func TestPRCheckout_MatchesTheResolvedRegistryRow(t *testing.T) {
+	agentRoot := t.TempDir()
+	gitInitAt(t, filepath.Join(agentRoot, "owner", "repo", "pr-42"))
+
+	const hostRoot = "/host/runs/task-1"
+	host := fakeCheckouts{
+		hostRoot:  hostRoot,
+		agentRoot: agentRoot,
+		rows: []domain.ConversationWorktree{
+			{RepositoryID: "repo-retired", RepoID: "owner/repo", Ref: "pr-42", Path: hostRoot + "/owner/repo/pr-42"},
+		},
+		repoIDs: map[string]string{"owner/repo": "repo-live"},
+	}
+	if got := prCheckout(context.Background(), host, "owner", "repo", 42); got.ok {
+		t.Errorf("owner/repo#42: got %+v, want no checkout — the run's checkout is of another repository", got)
+	}
+
+	host.repoIDs = map[string]string{"owner/repo": "repo-retired"}
+	if got := prCheckout(context.Background(), host, "owner", "repo", 42); !got.ok || got.dir != filepath.Join(agentRoot, "owner", "repo", "pr-42") {
+		t.Errorf("owner/repo#42 resolving to the checkout's row: got %+v, want its checkout", got)
 	}
 }

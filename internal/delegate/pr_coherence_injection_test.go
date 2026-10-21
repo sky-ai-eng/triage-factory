@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -29,7 +30,8 @@ func coherenceFixture(t *testing.T, eventType string, metadata any) (*Spawner, s
 		t.Fatalf("load fixture task/entity: %v", err)
 	}
 	snapshot, _ := json.Marshal(domain.PRSnapshot{Repo: "o/r", Number: 7, HeadRepo: "o/r", HeadRef: "feature/coherence", HeadSHA: "new-head"})
-	if _, err := database.Exec(`UPDATE entities SET source_id = 'o/r#7', external_id = ?, snapshot_json = ? WHERE id = ?`, coherencePRNodeID, string(snapshot), entityID); err != nil {
+	repositoryID := dbseed.GitHubRepository(t, database, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, "o", "r")
+	if _, err := database.Exec(`UPDATE entities SET source_id = 'o/r#7', external_id = ?, snapshot_json = ?, repository_id = ? WHERE id = ?`, coherencePRNodeID, string(snapshot), repositoryID, entityID); err != nil {
 		t.Fatalf("update PR snapshot: %v", err)
 	}
 	raw, _ := json.Marshal(metadata)
@@ -210,6 +212,37 @@ func TestHandlePRCoherence_PendingReviewAndPRCheckoutTargetOtherEntities(t *test
 		if got := flushOne(t, s, conversationID); len(got) != 1 || !strings.Contains(got[0].Body, "CONFLICTING") {
 			t.Errorf("%s did not receive coherence note: %+v", conversationID, got)
 		}
+	}
+}
+
+// TestHandlePRCoherence_ReachesACheckoutWhateverNameTheEventSpells: the
+// checkout arm names the PR's repository by the registry row its entity
+// references. An event recorded before the repository was renamed spells the
+// old name in its metadata, and still reaches the conversation holding a
+// checkout of the PR.
+func TestHandlePRCoherence_ReachesACheckoutWhateverNameTheEventSpells(t *testing.T) {
+	s, _, _, source := coherenceFixture(t, domain.EventGitHubPRConflicts, events.GitHubPRConflictsMetadata{
+		Repo: "o/r", PRNumber: 7, HeadSHA: "new-head",
+	})
+	database := s.database
+	stores := testSpawnerStores(database)
+
+	seedConversation(t, database, "pr-worker", "sess", "/tmp/pr-worker")
+	setConversationStatus(t, database, "pr-worker", "open")
+	prRepo, err := stores.Repos.GetByRefSystem(context.Background(), runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "o/r"))
+	if err != nil || prRepo == nil {
+		t.Fatalf("resolve the PR's repository: got=%v err=%v", prRepo, err)
+	}
+	if _, _, err := stores.ConversationWorktrees.InsertSystem(context.Background(), runmode.LocalDefaultOrgID, domain.ConversationWorktree{
+		ConversationID: "pr-worker", RepositoryID: prRepo.ID, Path: "/tmp/pr-worker/o/r", Ref: worktree.PRRefSlug(7),
+	}); err != nil {
+		t.Fatalf("seed PR worktree: %v", err)
+	}
+	dbseed.RenameRepositoryOnly(t, database, prRepo.ID, "o", "renamed")
+
+	s.HandlePRCoherence(coherenceDisposition(t, source, ""))
+	if got := flushOne(t, s, "pr-worker"); len(got) != 1 || !strings.Contains(got[0].Body, "CONFLICTING") {
+		t.Fatalf("checkout of the renamed repository did not receive the coherence note: %+v", got)
 	}
 }
 

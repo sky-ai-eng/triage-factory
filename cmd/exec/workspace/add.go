@@ -344,11 +344,11 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	// Team-tracking gate: a conversation may only materialize a repo its
 	// team tracks, so `workspace add` and the git proxy's push gate agree —
 	// otherwise the agent could clone a repo the proxy will then refuse to
-	// push to. Same TracksRepoSystem predicate the proxy's Authorize uses,
-	// keyed by the conversation's team. (Org-configured ≠ team-tracked: a
-	// repo can be configured org-wide yet not attached to this
-	// conversation's team.)
-	if tracks, terr := host.TeamTracksRepo(ctx, owner, repo); terr != nil {
+	// push to. Same TracksRepositorySystem predicate the proxy's Authorize
+	// uses, keyed by the conversation's team and asked about the row GetRepo
+	// resolved. (Org-configured ≠ team-tracked: a repo can be configured
+	// org-wide yet not attached to this conversation's team.)
+	if tracks, terr := host.TeamTracksRepository(ctx, profile.ID); terr != nil {
 		return "", fmt.Errorf("workspace add: check team tracking: %w", terr)
 	} else if !tracks {
 		return "", fmt.Errorf("%w: %s", errRepoNotTracked, repoID)

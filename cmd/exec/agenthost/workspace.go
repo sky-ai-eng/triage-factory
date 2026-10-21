@@ -183,7 +183,7 @@ func (c *LocalClient) createWorkspaceCheckoutIn(ctx context.Context, hostRoot, o
 	if profile == nil {
 		return "", fmt.Errorf("create workspace checkout: repo %s is not configured in Triage Factory", repoID)
 	}
-	if tracks, err := c.TeamTracksRepo(ctx, profile.Owner, profile.Repo); err != nil {
+	if tracks, err := c.TeamTracksRepository(ctx, profile.ID); err != nil {
 		return "", fmt.Errorf("create workspace checkout: check team tracking: %w", err)
 	} else if !tracks {
 		return "", fmt.Errorf("create workspace checkout: repo %s is not tracked by this conversation's team", repoID)

@@ -2310,29 +2310,34 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
-	t.Run("TeamGitHubRepos_TracksRepoSystem_OwnerCaseInsensitive", func(t *testing.T) {
+	t.Run("TeamGitHubRepos_TracksRepositorySystem_AnswersForTheResolvedRow", func(t *testing.T) {
+		// A name a run hands TF is resolved to its row once, folding case,
+		// and tracking is asked of that row's id. A registry row the team
+		// does not track, and an id no row carries, are not tracked.
 		stores, ids := factory(t)
 		if err := TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, ids.OrgID, ids.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "Acme", Repo: "api"},
 		}); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
 		}
+		if _, err := stores.Repos.FindOrCreateByRefSystem(ctx, ids.OrgID, domain.RepoRef{Host: TestGitHubHost, Owner: "acme", Repo: "web"}); err != nil {
+			t.Fatalf("register acme/web: %v", err)
+		}
 		for _, c := range []struct {
 			owner, repo string
 			want        bool
 		}{
 			{"Acme", "api", true},
-			{"acme", "api", true},
+			{"acme", "API", true},
 			{"acme", "web", false},
 			{"other", "api", false},
 		} {
-			got, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, ids.TeamID, TestGitHubHost, c.owner, c.repo)
-			if err != nil {
-				t.Fatalf("TracksRepoSystem(%s/%s): %v", c.owner, c.repo, err)
+			if got := tracksByName(t, stores, ids.OrgID, ids.TeamID, TestGitHubHost, c.owner, c.repo); got != c.want {
+				t.Errorf("tracks %s/%s = %v; want %v", c.owner, c.repo, got, c.want)
 			}
-			if got != c.want {
-				t.Errorf("TracksRepoSystem(%s/%s) = %v; want %v", c.owner, c.repo, got, c.want)
-			}
+		}
+		if got, err := stores.TeamGitHubRepos.TracksRepositorySystem(ctx, ids.TeamID, unknownRepoID); err != nil || got {
+			t.Errorf("TracksRepositorySystem(no such row) = %v, %v; want false", got, err)
 		}
 	})
 
@@ -2424,12 +2429,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			{TestOtherGitHubHost, "internal", true},
 			{TestOtherGitHubHost, "web", false},
 		} {
-			got, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, ids.TeamID, c.host, "Acme", c.repo)
-			if err != nil {
-				t.Fatalf("TracksRepoSystem(%s, acme/%s): %v", c.host, c.repo, err)
-			}
-			if got != c.want {
-				t.Errorf("TracksRepoSystem(%s, acme/%s) = %v, want %v", c.host, c.repo, got, c.want)
+			if got := tracksByName(t, stores, ids.OrgID, ids.TeamID, c.host, "Acme", c.repo); got != c.want {
+				t.Errorf("tracks (%s, acme/%s) = %v, want %v", c.host, c.repo, got, c.want)
 			}
 		}
 		withTeams, err := stores.TeamGitHubRepos.ListOrgReposWithTeamsSystem(ctx, ids.OrgID, TestOtherGitHubHost)
@@ -2487,18 +2488,14 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if got := list(TestOtherGitHubHost); !equalStringSlice(got, []string{"acme/api", "acme/internal"}) {
 			t.Errorf("ghe tracked after a github.com clear = %v, want it untouched", got)
 		}
-		if tracked, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, ids.TeamID, TestOtherGitHubHost, "acme", "api"); err != nil || !tracked {
-			t.Errorf("TracksRepoSystem(ghe, acme/api) after a github.com clear = %v, %v; want true", tracked, err)
+		if tracked := tracksByName(t, stores, ids.OrgID, ids.TeamID, TestOtherGitHubHost, "acme", "api"); !tracked {
+			t.Errorf("tracks (ghe, acme/api) after a github.com clear = %v; want true", tracked)
 		}
 
 		for name, err := range map[string]error{
 			"ReplaceForTeam": TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, ids.OrgID, ids.TeamID, "", nil),
 			"ListForTeamSystem": func() error {
 				_, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID, "")
-				return err
-			}(),
-			"TracksRepoSystem": func() error {
-				_, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, ids.TeamID, "", "acme", "api")
 				return err
 			}(),
 			"ListOrgReposWithTeamsSystem": func() error {
@@ -2600,4 +2597,24 @@ func registerRepo(t *testing.T, repos db.RepositoryStore, orgID, host, slug, git
 		t.Fatalf("register %s (%s) on %s: %v", slug, githubID, host, err)
 	}
 	return row
+}
+
+// tracksByName is the tracking question as a caller holding a name asks it:
+// resolve the name to its registry row on host, then ask the team's tracking
+// about that row's id. A name no row answers to is not tracked.
+func tracksByName(t *testing.T, stores SettingsStores, orgID, teamID, host, owner, repo string) bool {
+	t.Helper()
+	ctx := context.Background()
+	row, err := stores.Repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Host: host, Owner: owner, Repo: repo})
+	if err != nil {
+		t.Fatalf("resolve %s/%s on %s: %v", owner, repo, host, err)
+	}
+	if row == nil {
+		return false
+	}
+	tracked, err := stores.TeamGitHubRepos.TracksRepositorySystem(ctx, teamID, row.ID)
+	if err != nil {
+		t.Fatalf("TracksRepositorySystem(%s/%s on %s): %v", owner, repo, host, err)
+	}
+	return tracked
 }

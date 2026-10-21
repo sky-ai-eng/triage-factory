@@ -764,9 +764,10 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 }
 
 // reviewHost is the part of agenthost.Client reviewCommentTarget reads: the
-// review draft's recorded PR and the run's checkouts.
+// review draft's recorded PR, the run's checkouts and the registry row the
+// PR's repository resolves to.
 type reviewHost interface {
-	runCheckouts
+	prCheckouts
 	ReviewDraftTarget(ctx context.Context, reviewID string) (owner, repo string, number int, err error)
 }
 

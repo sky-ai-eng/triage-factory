@@ -26,7 +26,7 @@ import (
 //  1. LookupConversation — proves the relocated Server reports the run identity the
 //     orchestrator handed it (AgentHostInfo), served entirely in the sidecar
 //     half with no db.Stores.
-//  2. TeamTracksRepo — proves a DB-backed verb RELAYS across the supervision
+//  2. TeamTracksRepository — proves a DB-backed verb RELAYS across the supervision
 //     channel to the orchestrator's RelayServer, which serves it against the
 //     real stores under its OWN ConversationInfo, and the answer round-trips back
 //     through the socket.
@@ -123,11 +123,11 @@ func TestIntegration_RelocatedAgentHost_ExecVerbRoundTrip(t *testing.T) {
 		t.Fatalf("LookupConversation = %+v, want run %s / org %s", got, info.ConversationID, info.OrgID)
 	}
 
-	// (2) TeamTracksRepo — a DB verb relays to the orchestrator's RelayServer and
+	// (2) TeamTracksRepository — a DB verb relays to the orchestrator's RelayServer and
 	// the answer round-trips back (un-seeded repo → not tracked, no error).
-	tracks, err := client.TeamTracksRepo(ctx, "octo", "repo")
+	tracks, err := client.TeamTracksRepository(ctx, "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b")
 	if err != nil {
-		t.Fatalf("TeamTracksRepo relay over the relocated socket: %v", err)
+		t.Fatalf("TeamTracksRepository relay over the relocated socket: %v", err)
 	}
 	if tracks {
 		t.Fatal("expected the un-seeded repo to be untracked through the relocated relay path")

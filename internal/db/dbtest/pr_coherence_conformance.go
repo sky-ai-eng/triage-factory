@@ -44,6 +44,12 @@ type PRCoherenceSeeder struct {
 	// host if it isn't known yet.
 	Worktree func(t *testing.T, conversationID, host, slug, ref string)
 
+	// Repository returns the id of the registry row the "owner/repo" slug
+	// resolves to on a GitHub host, registering it if nothing answers to the
+	// name (RepositoryStore.FindOrCreateByRefSystem): the row the subscriber
+	// names a PR's repository by.
+	Repository func(t *testing.T, host, slug string) string
+
 	// RetireRepository retires the registry row of the "owner/repo" slug on
 	// a GitHub host (RetireRepo).
 	RetireRepository func(t *testing.T, host, slug string)
@@ -78,15 +84,17 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 	t.Helper()
 
 	// query builds the lookup the coherence subscriber issues for entityID,
-	// naming the same PR every way the schema can record it.
-	query := func(entityID, eventID string) db.PRCoherenceTargetQuery {
+	// naming the same PR every way the schema can record it: repositoryID is
+	// the registry row of the PR's repository, its base and its head branch's
+	// alike, and "" for a case that stages no checkout.
+	query := func(entityID, eventID, repositoryID string) db.PRCoherenceTargetQuery {
 		return db.PRCoherenceTargetQuery{
-			EntityID:  entityID,
-			EventID:   eventID,
-			BaseRepo:  coherenceRepo,
-			HeadRepo:  coherenceRepo,
-			PRRef:     coherencePRRef,
-			BranchRef: coherenceBranchRef,
+			EntityID:         entityID,
+			EventID:          eventID,
+			BaseRepositoryID: repositoryID,
+			HeadRepositoryID: repositoryID,
+			PRRef:            coherencePRRef,
+			BranchRef:        coherenceBranchRef,
 		}
 	}
 
@@ -102,7 +110,7 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		})
 
-		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
+		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID, ""))
 		if err != nil {
 			t.Fatalf("ListPRCoherenceTargetsSystem: %v", err)
 		}
@@ -137,7 +145,7 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 		})
 		extra.PendingReview(t, reviewerID, TestGitHubHost, coherenceRepo, coherencePRNumber, coherencePRNodeID)
 
-		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
+		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID, ""))
 		if err != nil {
 			t.Fatalf("ListPRCoherenceTargetsSystem: %v", err)
 		}
@@ -164,7 +172,7 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 		})
 		extra.PendingReview(t, reviewerID, TestGitHubHost, "Acme/old-widgets", coherencePRNumber, coherencePRNodeID)
 
-		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
+		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID, ""))
 		if err != nil {
 			t.Fatalf("ListPRCoherenceTargetsSystem: %v", err)
 		}
@@ -191,7 +199,7 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 		})
 		extra.PendingReview(t, reviewerID, TestGitHubHost, coherenceRepo, coherencePRNumber, "PR_kwDOdeleted7")
 
-		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
+		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID, ""))
 		if err != nil {
 			t.Fatalf("ListPRCoherenceTargetsSystem: %v", err)
 		}
@@ -220,7 +228,7 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 		})
 		extra.PendingReview(t, reviewerID, TestOtherGitHubHost, coherenceRepo, coherencePRNumber, coherencePRNodeID)
 
-		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
+		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID, ""))
 		if err != nil {
 			t.Fatalf("ListPRCoherenceTargetsSystem: %v", err)
 		}
@@ -253,7 +261,8 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 				})
 				extra.Worktree(t, workerID, TestGitHubHost, coherenceRepo, tc.ref)
 
-				targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
+				repositoryID := extra.Repository(t, TestGitHubHost, coherenceRepo)
+				targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID, repositoryID))
 				if err != nil {
 					t.Fatalf("ListPRCoherenceTargetsSystem: %v", err)
 				}
@@ -262,11 +271,10 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 		}
 	})
 
-	t.Run("WorktreeArmMatchesOnlyTheEntitysHost", func(t *testing.T) {
-		// The PR entity's scope is its GitHub host, and a slug names a
-		// repository only on one host. A checkout of the same owner/repo on
-		// another host is a different repository, so a conversation holding
-		// only that checkout is not told this PR moved.
+	t.Run("WorktreeArmMatchesOnlyTheRepositorysRow", func(t *testing.T) {
+		// A checkout matches by the registry row its ledger row references.
+		// The same owner/repo on another GitHub host is another row, so a
+		// conversation holding only that checkout is not told this PR moved.
 		store, orgID, seed, extra := factory(t)
 		ctx := context.Background()
 
@@ -282,7 +290,8 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 		})
 		extra.Worktree(t, elsewhereID, TestOtherGitHubHost, coherenceRepo, coherencePRRef)
 
-		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
+		repositoryID := extra.Repository(t, TestGitHubHost, coherenceRepo)
+		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID, repositoryID))
 		if err != nil {
 			t.Fatalf("ListPRCoherenceTargetsSystem: %v", err)
 		}
@@ -290,20 +299,21 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 			t.Fatalf("a checkout of %s on %s reached a PR on %s: %+v", coherenceRepo, TestOtherGitHubHost, TestGitHubHost, targets)
 		}
 
-		// The same slug checked out on the entity's own host is the PR's
+		// The same slug checked out on the PR's own host is the PR's
 		// repository, and does reach it.
 		extra.Worktree(t, elsewhereID, TestGitHubHost, coherenceRepo, coherencePRRef)
-		targets, err = store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
+		targets, err = store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID, repositoryID))
 		if err != nil {
 			t.Fatalf("ListPRCoherenceTargetsSystem after the same-host checkout: %v", err)
 		}
 		requireOneCoherenceTarget(t, targets, elsewhereID)
 	})
 
-	t.Run("WorktreeArmSkipsARetiredRepository", func(t *testing.T) {
+	t.Run("WorktreeArmMatchesTheRowNotTheName", func(t *testing.T) {
 		// A retired row keeps its name, and GitHub serves that name as another
-		// repository now. A checkout of the retired one is not a checkout of
-		// the PR's repository, so its conversation is not told this PR moved.
+		// repository now. A pull request in that repository references the
+		// row the name resolves to today, and a checkout of the retired row is
+		// not a checkout of it, so its conversation is not told the PR moved.
 		store, orgID, seed, extra := factory(t)
 		ctx := context.Background()
 
@@ -318,20 +328,72 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 			BlueprintRunID: seed.BlueprintRun(t, otherTaskID),
 		})
 		extra.Worktree(t, workerID, TestGitHubHost, coherenceRepo, coherencePRRef)
-		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
+		retiredID := extra.Repository(t, TestGitHubHost, coherenceRepo)
+		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID, retiredID))
 		if err != nil {
 			t.Fatalf("ListPRCoherenceTargetsSystem: %v", err)
 		}
 		requireOneCoherenceTarget(t, targets, workerID)
 
 		extra.RetireRepository(t, TestGitHubHost, coherenceRepo)
-		targets, err = store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
+		namesakeID := extra.Repository(t, TestGitHubHost, coherenceRepo)
+		if namesakeID == retiredID {
+			t.Fatalf("the name resolved to the retired row %s; want a row of its own", retiredID)
+		}
+		targets, err = store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID, namesakeID))
 		if err != nil {
 			t.Fatalf("ListPRCoherenceTargetsSystem after the retire: %v", err)
 		}
 		if len(targets) != 0 {
-			t.Fatalf("a checkout of the retired %s reached a PR under its name: %+v", coherenceRepo, targets)
+			t.Fatalf("a checkout of the retired %s reached a PR of the repository now under its name: %+v", coherenceRepo, targets)
 		}
+	})
+
+	t.Run("WorktreeArmMatchesAForksHeadBranchByItsRow", func(t *testing.T) {
+		// A head branch can live in a fork, which is its own registry row.
+		// The head branch's checkout of the fork reaches the PR when the
+		// query names the fork's row as the head's; the PR's own ref checked
+		// out of the fork does not, since a PR ref is the base repository's.
+		store, orgID, seed, extra := factory(t)
+		ctx := context.Background()
+
+		entityID := seed.Entity(t, "fork-subject")
+		eventID := seed.Event(t, entityID, domain.EventGitHubPRConflicts)
+
+		otherEntityID := seed.Entity(t, "fork-worker")
+		otherEventID := seed.Event(t, otherEntityID, domain.EventGitHubPRConflicts)
+		otherTaskID := seed.Task(t, otherEntityID, domain.EventGitHubPRConflicts, otherEventID)
+		workerID := seed.Conversation(t, domain.Conversation{
+			TaskID: otherTaskID, PromptID: conversationTestPromptID, Status: "open",
+			BlueprintRunID: seed.BlueprintRun(t, otherTaskID),
+		})
+		const fork = "contributor/widgets"
+		extra.Worktree(t, workerID, TestGitHubHost, fork, coherencePRRef)
+		baseID := extra.Repository(t, TestGitHubHost, coherenceRepo)
+		forkID := extra.Repository(t, TestGitHubHost, fork)
+
+		withHead := func(headID string) db.PRCoherenceTargetQuery {
+			q := query(entityID, eventID, baseID)
+			q.HeadRepositoryID = headID
+			return q
+		}
+		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, withHead(forkID))
+		if err != nil {
+			t.Fatalf("ListPRCoherenceTargetsSystem: %v", err)
+		}
+		if len(targets) != 0 {
+			t.Fatalf("the PR's ref checked out of the fork reached the PR: %+v", targets)
+		}
+
+		extra.Worktree(t, workerID, TestGitHubHost, fork, coherenceBranchRef)
+		if targets, err = store.ListPRCoherenceTargetsSystem(ctx, orgID, withHead("")); err != nil || len(targets) != 0 {
+			t.Fatalf("with no head row, the fork's head branch checkout = %+v, %v; want no target", targets, err)
+		}
+		targets, err = store.ListPRCoherenceTargetsSystem(ctx, orgID, withHead(forkID))
+		if err != nil {
+			t.Fatalf("ListPRCoherenceTargetsSystem with the fork as the head: %v", err)
+		}
+		requireOneCoherenceTarget(t, targets, workerID)
 	})
 
 	t.Run("InjectedEventFencesTheSameTaskConversation", func(t *testing.T) {
@@ -349,7 +411,7 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 		// Before the mark the conversation is a target; after it, the additive
 		// path has already delivered this event and the coherence feed must
 		// not deliver it a second time.
-		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
+		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID, ""))
 		if err != nil {
 			t.Fatalf("ListPRCoherenceTargetsSystem before mark: %v", err)
 		}
@@ -357,7 +419,7 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 
 		extra.MarkEventInjected(t, taskID, eventID)
 
-		targets, err = store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
+		targets, err = store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID, ""))
 		if err != nil {
 			t.Fatalf("ListPRCoherenceTargetsSystem after mark: %v", err)
 		}
@@ -368,7 +430,7 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 		// The fence is per event, not per task: a different event on the same
 		// task still reaches the conversation.
 		secondEventID := seed.Event(t, entityID, domain.EventGitHubPRCICheckFailed)
-		targets, err = store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, secondEventID))
+		targets, err = store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, secondEventID, ""))
 		if err != nil {
 			t.Fatalf("ListPRCoherenceTargetsSystem for second event: %v", err)
 		}
@@ -388,7 +450,7 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 		})
 		extra.ActiveClaim(t, conversationID)
 
-		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
+		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID, ""))
 		if err != nil {
 			t.Fatalf("ListPRCoherenceTargetsSystem: %v", err)
 		}
@@ -412,7 +474,7 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 			BlueprintRunID: seed.BlueprintRun(t, strangerTaskID),
 		})
 
-		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
+		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID, ""))
 		if err != nil {
 			t.Fatalf("ListPRCoherenceTargetsSystem: %v", err)
 		}

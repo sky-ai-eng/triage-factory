@@ -1552,6 +1552,14 @@ func (t txTeardownStores) RecordExternalAction(ctx context.Context, orgID string
 	return t.tx.ExternalActions.Record(ctx, orgID, act)
 }
 
+func (t txTeardownStores) Entity(ctx context.Context, orgID, id string) (*domain.Entity, error) {
+	return t.tx.Entities.Get(ctx, orgID, id)
+}
+
+func (t txTeardownStores) Repository(ctx context.Context, orgID, id string) (*domain.Repository, error) {
+	return t.tx.Repos.Get(ctx, orgID, id)
+}
+
 // revertJiraStateIfApplicable reverses a Jira-backed task's claim as the task
 // goes back to the queue, acting as the requesting user: /undo and /requeue
 // both reach it through finalizeRequeue. task is the row as it stood before

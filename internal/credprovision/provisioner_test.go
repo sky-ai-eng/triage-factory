@@ -90,10 +90,10 @@ type fakeTeamRepos struct {
 	db.TeamGitHubReposStore
 	host    string
 	tracked map[string]bool // key: lowercased "owner/repo"
-	// retired names tracked rows that are retired: listed, marked, and
-	// answering to no TracksRepoSystem name, as the store does.
+	// retired names tracked rows that are retired: listed and marked, as the
+	// store does.
 	retired map[string]bool
-	hosts   []string // the host of every TracksRepoSystem call
+	hosts   []string // the host of every tracking read
 }
 
 func (f *fakeTeamRepos) trackedHost() string {
@@ -103,13 +103,12 @@ func (f *fakeTeamRepos) trackedHost() string {
 	return dbtest.TestGitHubHost
 }
 
-func (f *fakeTeamRepos) TracksRepoSystem(_ context.Context, _, host, owner, repo string) (bool, error) {
+// TracksRepositorySystem answers for a fakeRepos row id, which spells the
+// row's host and name.
+func (f *fakeTeamRepos) TracksRepositorySystem(_ context.Context, _, repositoryID string) (bool, error) {
+	host, slug, _ := strings.Cut(repositoryID, "|")
 	f.hosts = append(f.hosts, host)
-	if host != f.trackedHost() {
-		return false, nil
-	}
-	slug := strings.ToLower(owner + "/" + repo)
-	return f.tracked[slug] && !f.retired[slug], nil
+	return host == f.trackedHost() && f.tracked[slug], nil
 }
 
 func (f *fakeTeamRepos) ListForTeamSystem(_ context.Context, _, host string) ([]domain.TeamGitHubRepo, error) {
