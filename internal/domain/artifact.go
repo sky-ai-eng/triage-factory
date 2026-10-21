@@ -41,14 +41,23 @@ type Artifact struct {
 	// every write.
 	Scope string `json:"scope"`
 
-	// Target is the resource key: 'owner/repo', 'owner/repo#123',
-	// or a Jira-style issue key (e.g. 'PROJ-123'). ExternalID is the provider-native id of the backing
-	// object (PR number / review id / Jira issue id / comment id / branch
-	// ref); empty until the object exists. URL links to it; empty until
-	// created.
+	// Target is the display key of what the artifact is about: its entity's
+	// key ('owner/repo#123', 'PROJ-123', a Linear identifier, a Slack thread
+	// key), or the repository's 'owner/repo' for a branch, which has no
+	// entity. ExternalID is the provider-native id of the backing object (PR
+	// number / review id / Jira issue id / comment id / branch ref); empty
+	// until the object exists. URL links to it; empty until created.
 	Target     string `json:"target"`
 	ExternalID string `json:"external_id,omitempty"`
 	URL        string `json:"url,omitempty"`
+
+	// EntityID is the entity the artifact is about: the pull request a pull
+	// request, review or comment artifact is on, the Jira or Linear issue,
+	// the Slack thread. A rename of the entity's key moves Target with it,
+	// selected by this column, whatever the provider. Empty for a branch, and
+	// for a row whose writer could not resolve its entity. Preserve-on-empty,
+	// like ExternalID; the FK is ON DELETE SET NULL.
+	EntityID string `json:"entity_id,omitempty"`
 
 	// NodeID is the backing object's GraphQL node id, where the object has one
 	// and a writer learned it. A GitHub comment carries it: a GraphQL delete
@@ -256,9 +265,11 @@ func ArtifactProviders() []string {
 //	ArtifactDedupKey("jira",   "comment",      JiraIssueResource(site, "10042"), "20311") => "jira:comment:https%3A%2F%2Facme.atlassian.net/10042:20311"
 //	ArtifactDedupKey("linear", "comment",      "<issue uuid>", "<comment id>")             => "linear:comment:<issue uuid>:<comment id>"
 //
-// Some stored pull request, review and branch rows carry a key that leads
-// with owner/repo instead: rows whose repository no registry row identified.
-// Nothing writes that shape.
+// Some stored rows carry a key that names an object by a name instead: a pull
+// request, review or branch row that leads with owner/repo, whose repository
+// no registry row identified, and a Jira row keyed on an issue key or a bare
+// comment id, whose issue no entity named the id of. Nothing writes those
+// shapes.
 func ArtifactDedupKey(provider, kind, resource, anchor string) string {
 	key := provider + ":" + kind + ":" + resource
 	if anchor != "" {
@@ -300,8 +311,7 @@ func ParseJiraIssueResource(resource string) (site, issueID string, ok bool) {
 // EntityArtifactResource is the dedup-key resource segment artifacts about the
 // entity carrying (source, scope, externalID) are keyed under: the issue's
 // site and id for Jira (JiraIssueResource), the provider id itself for every
-// other source. "" when there is no id. It is what an entity rename matches
-// artifacts by, inside the entity's scope, so it never names a display key.
+// other source. "" when there is no id.
 func EntityArtifactResource(source, scope, externalID string) string {
 	if externalID == "" {
 		return ""
@@ -359,22 +369,6 @@ func ArtifactPullRequestNodeID(a Artifact) (string, bool) {
 		return "", false
 	}
 	return nodeID, true
-}
-
-// ArtifactKeyHasResource reports whether key, as ArtifactDedupKey builds it,
-// is under provider and has resource as its resource segment, whole: the
-// resource "uuid-4" never matches "uuid-41".
-func ArtifactKeyHasResource(key, provider, resource string) bool {
-	p, rest, ok := strings.Cut(key, ":")
-	if !ok || p != provider || resource == "" {
-		return false
-	}
-	_, rest, ok = strings.Cut(rest, ":")
-	if !ok {
-		return false
-	}
-	got, _, _ := strings.Cut(rest, ":")
-	return got == resource
 }
 
 // reconcilableNonTerminal lists, per Kind, the states the reconciler

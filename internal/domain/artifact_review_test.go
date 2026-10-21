@@ -1,7 +1,6 @@
 package domain
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -29,9 +28,6 @@ func TestNewReviewArtifact_Shape(t *testing.T) {
 	// distinct rows.
 	if a.DedupKey != "github:review:PR_kwDOnode:conv_7" {
 		t.Errorf("DedupKey = %q, want github:review:PR_kwDOnode:conv_7", a.DedupKey)
-	}
-	if !strings.HasPrefix(a.DedupKey, ReviewDedupKeyPrefix("PR_kwDOnode")) {
-		t.Errorf("DedupKey %q does not begin with its pull request's prefix %q", a.DedupKey, ReviewDedupKeyPrefix("PR_kwDOnode"))
 	}
 
 	d, err := ParseReviewArtifactDetails(a.DetailsJSON)
@@ -67,9 +63,6 @@ func TestReviewDedupKey_ConversationScoped(t *testing.T) {
 	// No node id, no key: a draft keyed on nothing would be every PR's.
 	if got := ReviewDedupKey("", "conv_a"); got != "" {
 		t.Errorf("ReviewDedupKey with no node id = %q, want empty", got)
-	}
-	if got := ReviewDedupKeyPrefix(""); got != "" {
-		t.Errorf("ReviewDedupKeyPrefix with no node id = %q, want empty", got)
 	}
 }
 

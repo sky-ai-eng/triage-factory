@@ -115,9 +115,9 @@ func TestLocalClient_ReviewUnderOldName_FoundByCoherenceReads(t *testing.T) {
 		t.Errorf("coherence targets = %+v, want the reviewing conversation %s", targets, info.ConversationID)
 	}
 
-	reviews, err := stores.Artifacts.ListPendingReviewsByPullRequestSystem(ctx, info.OrgID, testScope("github"), testPRNodeID(5))
+	reviews, err := stores.Artifacts.ListPendingReviewsByEntitySystem(ctx, info.OrgID, pr.ID)
 	if err != nil {
-		t.Fatalf("ListPendingReviewsByPullRequestSystem: %v", err)
+		t.Fatalf("ListPendingReviewsByEntitySystem: %v", err)
 	}
 	if len(reviews) != 1 || !domain.ReviewAnchoredAtHead(reviews[0], "head5") {
 		t.Errorf("pending reviews of %s = %+v, want the draft anchored at head5", wantTarget, reviews)

@@ -349,7 +349,7 @@ func TestReconcile_Transitions(t *testing.T) {
 		branches: map[string]bool{"octo/repo/feature": false}, // gone
 	}
 	res := &fakeResolver{client: newStubClient(t, stub)}
-	rc := NewReconciler(res, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
+	rc := NewReconciler(res, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
 
 	if err := rc.ReconcileOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("ReconcileOrg: %v", err)
@@ -386,7 +386,7 @@ func TestReconcile_PRClosed(t *testing.T) {
 	stub := &stubGH{prs: map[string]string{
 		"PR_3": prNodeJSON("PR_3", 3, "CLOSED", false, false),
 	}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
 	if err := rc.ReconcileOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("ReconcileOrg: %v", err)
 	}
@@ -450,7 +450,7 @@ func TestReconcile_DraftMarkedReadyRunsTheResolvedHook(t *testing.T) {
 	seedArt(draft)
 
 	stub := &stubGH{prs: map[string]string{"PR_7": prNodeJSON("PR_7", 7, "OPEN", false, false)}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
 	var (
 		mu       sync.Mutex
 		resolved []string
@@ -489,7 +489,7 @@ func TestReconcile_OpenNeverReturnsToDraft(t *testing.T) {
 	seedArt(open)
 
 	stub := &stubGH{prs: map[string]string{"PR_8": prNodeJSON("PR_8", 8, "OPEN", true, false)}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
 	hookRan := false
 	rc.SetPullRequestResolvedHook(func(context.Context, string, string) { hookRan = true })
 
@@ -555,7 +555,7 @@ func TestReconcile_SingleConversationScope(t *testing.T) {
 		"PR_7": prNodeJSON("PR_7", 7, "MERGED", false, true),
 		"PR_8": prNodeJSON("PR_8", 8, "MERGED", false, true),
 	}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
 
 	convAArts, err := stores.Artifacts.ListByConversation(ctx, runmode.LocalDefaultOrgID, convA)
 	if err != nil {
@@ -587,7 +587,7 @@ func TestRunner_SuppressesCancelErrorOnShutdown(t *testing.T) {
 	t.Cleanup(func() { reconcileLog = prev })
 
 	stores, _, _ := reconcileTestStores(t)
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, &stubGH{})}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, &stubGH{})}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
 	r := NewRunner(rc, runmode.LocalDefaultOrgID)
 
 	// An already-cancelled ctx makes the cycle's first DB call (ListNonTerminalBySystem)
@@ -649,7 +649,7 @@ func TestReconcile_WriteBackSurvivesCallerCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	client := github.NewClientWithHTTPClient(srv.URL, "test-token",
 		&http.Client{Transport: &cancelAfterFetchRT{t: t, base: http.DefaultTransport, cancel: cancel}})
-	rc := NewReconciler(&fakeResolver{client: client}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: client}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
 
 	arts, err := stores.Artifacts.ListByConversationSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
@@ -672,7 +672,7 @@ func TestReconcile_WriteBackSurvivesCallerCancel(t *testing.T) {
 // test wants the count via the org-wide path.
 func reconcileSet(t *testing.T, stores db.Stores, res clientResolver, orgID string) ([]domain.Artifact, error) {
 	t.Helper()
-	rc := NewReconciler(res, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
+	rc := NewReconciler(res, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
 	arts, err := stores.Artifacts.ListNonTerminalBySystem(context.Background(), orgID)
 	if err != nil {
 		return nil, err
@@ -856,7 +856,7 @@ func prArtifactFor(t *testing.T, stores db.Stores, repoPath string, number int) 
 // runBackstop runs one backstop pass for the test org through client.
 func runBackstop(t *testing.T, stores db.Stores, client *github.Client) {
 	t.Helper()
-	rc := NewReconciler(&fakeResolver{client: client}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: client}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
 	if err := rc.BackfillPRArtifacts(context.Background(), runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("backstop: %v", err)
 	}
@@ -1134,7 +1134,7 @@ func TestReconcileOrg_BackfilledPRTakesGitHubState(t *testing.T) {
 		domain.ArtifactStatePRDraft, "https://github.com/octo/repo/pull/7")
 
 	stub := &stubGH{prs: map[string]string{"PR_7": prNodeJSON("PR_7", 7, "MERGED", true, true)}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
 	var resolved []string
 	rc.SetPullRequestResolvedHook(func(_ context.Context, _, id string) { resolved = append(resolved, id) })
 
@@ -1189,7 +1189,7 @@ func TestReconcile_SkipsArtifactsOnAnotherHost(t *testing.T) {
 			"octo/repo/own":       false,
 		},
 	}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
 	if err := rc.ReconcileOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("ReconcileOrg: %v", err)
 	}

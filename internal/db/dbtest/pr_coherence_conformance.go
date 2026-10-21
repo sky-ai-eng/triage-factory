@@ -29,8 +29,10 @@ type PRCoherenceTargetFactory func(t *testing.T) (
 type PRCoherenceSeeder struct {
 	// PendingReview attaches a pending review artifact for repo#prNumber,
 	// keyed on the pull request's node id prNodeID, on the GitHub host (the
-	// artifact's scope) to the conversation — the review arm's evidence that
-	// an agent is drafting against this PR.
+	// artifact's scope) to the conversation, linked to the entity carrying
+	// prNodeID on the host as the exec funnel links it (none, when no entity
+	// carries it) — the review arm's evidence that an agent is drafting
+	// against this PR.
 	PendingReview func(t *testing.T, conversationID, host, repo string, prNumber int, prNodeID string)
 
 	// PullRequestNodeID records nodeID as the external id of the PR entity
@@ -142,10 +144,10 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 		requireOneCoherenceTarget(t, targets, reviewerID)
 	})
 
-	t.Run("ReviewArmMatchesTheNodeIDWhateverNameTheTargetSpells", func(t *testing.T) {
+	t.Run("ReviewArmMatchesTheEntityWhateverNameTheTargetSpells", func(t *testing.T) {
 		// A draft written under a name the repository has since given up, or
 		// in another case, is still a draft of this pull request: the arm
-		// matches the node id the draft is keyed on, not its target.
+		// matches the entity the draft is about, not its target.
 		store, orgID, seed, extra := factory(t)
 		ctx := context.Background()
 
@@ -172,7 +174,7 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 	t.Run("ReviewArmSkipsAnotherPullRequestUnderTheSameName", func(t *testing.T) {
 		// A repository deleted and recreated under the same name has its own
 		// pull request #7. A draft of the old one shares the target but not
-		// the node id, so its conversation is not told the new one moved.
+		// the entity, so its conversation is not told the new one moved.
 		store, orgID, seed, extra := factory(t)
 		ctx := context.Background()
 

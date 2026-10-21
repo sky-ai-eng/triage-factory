@@ -549,7 +549,7 @@ func (s *entityStore) RenameSystem(ctx context.Context, orgID, source, scope, ex
 			}
 			return fmt.Errorf("rename entity %s -> %s: %w", row.key, newKey, err)
 		}
-		if err := rewriteEntityArtifacts(ctx, tx, source, scope, domain.EntityArtifactResource(source, scope, externalID), row.key, newKey); err != nil {
+		if err := moveEntityArtifactTargets(ctx, tx, row.id); err != nil {
 			return err
 		}
 		if err := rewriteEntityActionURLs(ctx, tx, source, scope, row.url, url); err != nil {
@@ -564,45 +564,18 @@ func (s *entityStore) RenameSystem(ctx context.Context, orgID, source, scope, ex
 	return out, nil
 }
 
-// rewriteEntityArtifacts moves the Target of the source's artifacts in the
-// entity's scope keyed on the entity's id off the old key. resource is the
-// dedup-key segment that id is written as (domain.EntityArtifactResource); the
-// key carries it, so it does not move. The SQL over-approximates and
-// domain.ArtifactKeyHasResource decides.
-func rewriteEntityArtifacts(ctx context.Context, q queryer, source, scope, resource, from, to string) error {
-	if resource == "" || from == to {
-		return nil
-	}
-	rows, err := q.QueryContext(ctx, `
-		SELECT id, dedup_key FROM artifacts
-		WHERE provider = ? AND scope = ? AND target = ? AND instr(dedup_key, ?) > 0`,
-		source, scope, from, resource)
-	if err != nil {
-		return err
-	}
-	var ids []string
-	for rows.Next() {
-		var id, key string
-		if err := rows.Scan(&id, &key); err != nil {
-			rows.Close()
-			return err
-		}
-		if domain.ArtifactKeyHasResource(key, source, resource) {
-			ids = append(ids, id)
-		}
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, id := range ids {
-		if _, err := q.ExecContext(ctx,
-			`UPDATE artifacts SET target = ?, updated_at = ? WHERE id = ?`,
-			to, time.Now().UTC(), id); err != nil {
-			return fmt.Errorf("rewrite artifact %s for %s -> %s: %w", id, from, to, err)
-		}
+// moveEntityArtifactTargets sets the target of every artifact about the
+// entity (artifacts.entity_id) to the entity's key, as the row stands: an
+// artifact's target is its entity's key, whichever provider recorded it, so
+// every write that moves a key (a rename, a merge, a fold, a repository's
+// move) ends with this. The dedup key names the object by an id and does not
+// move.
+func moveEntityArtifactTargets(ctx context.Context, q queryer, entityID string) error {
+	if _, err := q.ExecContext(ctx, `
+		UPDATE artifacts SET target = (SELECT e.source_id FROM entities e WHERE e.id = ?1), updated_at = ?2
+		 WHERE entity_id = ?1 AND target <> (SELECT e.source_id FROM entities e WHERE e.id = ?1)`,
+		entityID, time.Now().UTC()); err != nil {
+		return fmt.Errorf("move the targets of entity %s's artifacts: %w", entityID, err)
 	}
 	return nil
 }
@@ -874,11 +847,10 @@ func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, e
 				return fmt.Errorf("survivor takes live state: %w", err)
 			}
 		}
-		kept, dropped := db.DuplicateEntityMergedKeys(survivor, loser)
-		if err := rewriteEntityArtifacts(ctx, q, survivor.Source, survivor.Scope,
-			domain.EntityArtifactResource(survivor.Source, survivor.Scope, kept.ExternalID), dropped.SourceID, kept.SourceID); err != nil {
+		if err := moveEntityArtifactTargets(ctx, q, survivor.ID); err != nil {
 			return err
 		}
+		kept, dropped := db.DuplicateEntityMergedKeys(survivor, loser)
 		return rewriteEntityActionURLs(ctx, q, survivor.Source, survivor.Scope, dropped.URL, kept.URL)
 	})
 	if err != nil {
@@ -924,7 +896,7 @@ func (s *entityStore) FoldStubEntitySystem(ctx context.Context, orgID, stubID, i
 		if _, err := q.ExecContext(ctx, `DELETE FROM entities WHERE id = ?`, stub.ID); err != nil {
 			return fmt.Errorf("delete folded stub: %w", err)
 		}
-		return nil
+		return moveEntityArtifactTargets(ctx, q, into.ID)
 	})
 }
 
@@ -951,7 +923,7 @@ func moveEntityReferences(ctx context.Context, q queryer, loserID, survivorID st
 		loserID, db.DuplicateEntityMergedCloseReason); err != nil {
 		return fmt.Errorf("cancel duplicate tasks' runs: %w", err)
 	}
-	for _, table := range []string{"tasks", "events", "event_queue", "pending_firings"} {
+	for _, table := range []string{"tasks", "events", "event_queue", "pending_firings", "artifacts"} {
 		if _, err := q.ExecContext(ctx, `UPDATE `+table+` SET entity_id = ? WHERE entity_id = ?`, survivorID, loserID); err != nil {
 			return fmt.Errorf("move %s: %w", table, err)
 		}

@@ -148,18 +148,15 @@ type ArtifactStore interface {
 	// Backs the conversation detail surface (A·6).
 	ListByConversation(ctx context.Context, orgID, conversationID string) ([]domain.Artifact, error)
 
-	// ListPendingReviewsByPullRequestSystem returns every PENDING review
-	// artifact (Kind=review, State=pending) keyed on the pull request whose
-	// GraphQL node id is prNodeID (domain.ReviewDedupKeyPrefix) in scope (the
-	// PR's GitHub host), across every team in the org, newest first. The match
-	// is on the key, so a draft is found whatever name its target spells. An
-	// empty prNodeID matches nothing. It backs
-	// the PR coherence feed's freshness gate: on a head advance, the in-flight
-	// review drafts anchored to that PR say which conversations already recorded
-	// the new head and so are not behind it. "Pending" — not yet submitted or
-	// dismissed — is the
-	// only state with a live draft worth reconciling; a submitted/dismissed
-	// review is done.
+	// ListPendingReviewsByEntitySystem returns every PENDING review artifact
+	// (Kind=review, State=pending) about the pull request entity entityID
+	// (artifacts.entity_id), across every team in the org, newest first, so a
+	// draft is found whatever name its target spells. An empty entityID
+	// matches nothing. It backs the PR coherence feed's freshness gate: on a
+	// head advance, the in-flight review drafts anchored to that PR say which
+	// conversations already recorded the new head and so are not behind it.
+	// "Pending" — not yet submitted or dismissed — is the only state with a
+	// live draft worth reconciling; a submitted/dismissed review is done.
 	//
 	// Admin-pool / org-wide in Postgres — the same BYPASSRLS, org-scoped shape
 	// ListNonTerminalBySystem uses: the notifier runs in an eventbus subscriber
@@ -167,7 +164,7 @@ type ArtifactStore interface {
 	// the PR (the event is org-wide, not team-scoped). org_id stays bound in the
 	// WHERE clause as defense in depth. Identical to a plain org read in SQLite
 	// (single-tenant, no RLS).
-	ListPendingReviewsByPullRequestSystem(ctx context.Context, orgID, scope, prNodeID string) ([]domain.Artifact, error)
+	ListPendingReviewsByEntitySystem(ctx context.Context, orgID, entityID string) ([]domain.Artifact, error)
 
 	// PresentDedupKeysSystem returns the subset of dedupKeys under which an
 	// artifact exists in scope, as a set. The tracker reads it to tell a

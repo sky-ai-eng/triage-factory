@@ -50,17 +50,16 @@ import (
 // is keyed by the repository row id, so a rename does not move it either.
 //
 // The rewrite stays on the renamed repository's host. Entities are the
-// repository's own (repository_id), and so are the pull request, review and
-// branch artifacts, found by the ids their keys carry; the other artifacts and
-// the audit-ledger rows are matched by their scope column, placement pins by
-// their host, and a stored link is rewritten only when it is on the host
-// (domain.RewriteRepoURL). A repository on another host under the same name is
-// a different repository, and nothing of its is touched.
+// repository's own (repository_id), and so are the artifacts: those about its
+// entities by artifacts.entity_id, its branches by the registry row id their
+// keys carry. The audit-ledger rows are matched by their scope column,
+// placement pins by their host, and a stored link is rewritten only when it
+// is on the host (domain.RewriteRepoURL). A repository on another host under
+// the same name is a different repository, and nothing of its is touched.
 //
-// A retired row restored by a rename moves its own row, entities and the
-// artifacts keyed on its ids, and nothing keyed by the name alone: the name it
-// was retired under may belong to another repository by now, whose comments
-// and pins spell it too.
+// A retired row restored by a rename moves its own row, entities and
+// artifacts, and nothing keyed by the name alone: the name it was retired
+// under may belong to another repository by now, whose pins spell it too.
 
 func (s *repoStore) ListIdentitiesSystem(ctx context.Context, orgID, host string) ([]domain.RepoIdentity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
@@ -388,11 +387,10 @@ func renameRepositoryRow(ctx context.Context, q queryer, renamed identityRow, to
 // every row it selects carries the host as its scope (or, for a placement pin,
 // its host).
 //
-// The entities, and the artifacts keyed on the repository's ids, are
-// repositoryID's own. heldName is whether the row held from until now; a
-// restored row did not, and the records matched by the slug alone (placement
-// pins, comment artifacts, audit-ledger pointers) are left to whatever holds
-// it.
+// The entities and the artifacts are repositoryID's own, selected by id.
+// heldName is whether the row held from until now; a restored row did not, and
+// the records matched by the slug alone (placement pins, audit-ledger
+// pointers) are left to whatever holds it.
 func rewriteSlugDerivedKeys(ctx context.Context, q queryer, source, host, repositoryID, from, to string, heldName bool) error {
 	// entities.url first, while source_id still spells the old slug: the URL
 	// pass selects its rows by the same positional source_id predicate the
@@ -456,12 +454,6 @@ func rewriteSlugDerivedKeys(ctx context.Context, q queryer, source, host, reposi
 		 WHERE key_kind = 'repo' AND host = ? AND LOWER(key_value) = LOWER(?)
 	`, to, host, from); err != nil {
 		return fmt.Errorf("rewrite placement overrides %s -> %s: %w", from, to, err)
-	}
-
-	// artifacts the repository's ids do not find — comments — by the slug
-	// their target leads with.
-	if err := rewriteArtifactTargetsByName(ctx, q, host, from, to); err != nil {
-		return err
 	}
 
 	// external_actions — the audit ledger's pointer column, and only that.
@@ -555,18 +547,16 @@ func collectURLRewrites(rows *sql.Rows, host, from, to string) ([]urlRewrite, er
 	return out, rows.Err()
 }
 
-// moveRepositoryArtifactTargets moves the target of every pull request,
-// review and branch artifact recorded in repositoryID onto to. The rows are
-// selected by the ids their keys carry, never by the name their target spells:
-// a branch's key carries the registry row id (domain.BranchDedupKeyPrefix),
-// and a pull request's or review's the pull request's node id, which the
-// repository's own PR entities carry as their external id. So a retired
-// repository that held the name keeps its rows as they are, and a row written
-// under a spelling of the name this rename does not know moves too. A row
-// whose pull request no entity of the repository identifies is not found.
-// Only the target moves; the key names no repository. The key prefixes are
-// compared with SUBSTR rather than LIKE: a node id may hold '_', which LIKE
-// reads as a wildcard.
+// moveRepositoryArtifactTargets moves the targets of repositoryID's own
+// artifacts. Every artifact about one of its entities takes that entity's key,
+// which the source_id rewrite has just moved (artifacts.entity_id), and every
+// branch recorded in it takes to: a branch has no entity, and its key carries
+// the registry row id (domain.BranchDedupKeyPrefix). The rows are selected by
+// id, never by the name a target spells, so a retired repository that held
+// the name keeps its rows as they are, and a row written under a spelling of
+// the name this rename does not know moves too. Only the target moves; the
+// key names no repository. The key prefix is compared with SUBSTR rather than
+// LIKE: an id may hold '_', which LIKE reads as a wildcard.
 func moveRepositoryArtifactTargets(ctx context.Context, q queryer, source, host, repositoryID, to string) error {
 	prefix := domain.BranchDedupKeyPrefix(repositoryID)
 	if _, err := q.ExecContext(ctx, `
@@ -577,73 +567,13 @@ func moveRepositoryArtifactTargets(ctx context.Context, q queryer, source, host,
 	`, to, host, domain.ArtifactProviderGit, domain.ArtifactKindBranch, len(prefix), prefix, to); err != nil {
 		return fmt.Errorf("move branch artifact targets of %s onto %s: %w", repositoryID, to, err)
 	}
-	// target is owner/repo#N, and only the slug before the '#' moves. The
-	// entity join is the repository's own pull requests: its PR entities
-	// carry their node ids, and each artifact's key leads with one.
 	if _, err := q.ExecContext(ctx, `
-		UPDATE artifacts SET target = ? || SUBSTR(target, INSTR(target, '#')), updated_at = datetime('now')
-		 WHERE scope = ? AND provider = ?
-		   AND INSTR(target, '#') > 0
-		   AND target <> ? || SUBSTR(target, INSTR(target, '#'))
-		   AND EXISTS (
-		       SELECT 1 FROM entities e
-		        WHERE e.source = ? AND e.scope = artifacts.scope AND e.repository_id = ?
-		          AND e.external_id IS NOT NULL AND e.external_id <> ''
-		          AND ((artifacts.kind = ? AND artifacts.dedup_key = ? || e.external_id)
-		               OR (artifacts.kind = ? AND SUBSTR(artifacts.dedup_key, 1, LENGTH(?) + LENGTH(e.external_id) + 1) = ? || e.external_id || ':'))
-		   )
-	`, to, host, domain.ArtifactProviderGitHub, to, source, repositoryID,
-		domain.ArtifactKindPullRequest, domain.PullRequestDedupKeyHead,
-		domain.ArtifactKindReview, domain.ReviewDedupKeyHead, domain.ReviewDedupKeyHead); err != nil {
-		return fmt.Errorf("move pull request and review artifact targets of %s onto %s: %w", repositoryID, to, err)
-	}
-	return nil
-}
-
-// rewriteArtifactTargetsByName moves the target of the host's other GitHub
-// artifacts — the comments, whose key is the comment's own id — off from. Only
-// the host's GitHub artifacts are candidates: one recorded under another scope
-// is another host's object under the same name. Within those the SQL filter is
-// a cheap over-approximation — any row whose target so much as mentions the
-// old slug — and the precise decision is made in Go
-// (domain.RewriteRepoSlugPrefix), where the slug's boundary is expressible.
-// Pull request, review and branch rows are moveRepositoryArtifactTargets'.
-func rewriteArtifactTargetsByName(ctx context.Context, q queryer, host, from, to string) error {
-	rows, err := q.QueryContext(ctx, `
-		SELECT id, target FROM artifacts
-		 WHERE scope = ? AND provider IN (?, ?)
-		   AND kind NOT IN (?, ?, ?)
-		   AND INSTR(LOWER(target), LOWER(?)) > 0
-	`, host, domain.ArtifactProviderGitHub, domain.ArtifactProviderGit,
-		domain.ArtifactKindPullRequest, domain.ArtifactKindReview, domain.ArtifactKindBranch, from)
-	if err != nil {
-		return err
-	}
-	type pending struct{ id, target string }
-	var updates []pending
-	for rows.Next() {
-		var id, target string
-		if err := rows.Scan(&id, &target); err != nil {
-			rows.Close()
-			return err
-		}
-		if newTarget, changed := domain.RewriteRepoSlugPrefix(target, from, to); changed {
-			updates = append(updates, pending{id: id, target: newTarget})
-		}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-
-	for _, u := range updates {
-		if _, err := q.ExecContext(ctx, `
-			UPDATE artifacts SET target = ?, updated_at = datetime('now')
-			 WHERE id = ?
-		`, u.target, u.id); err != nil {
-			return fmt.Errorf("rewrite artifact %s for %s -> %s: %w", u.id, from, to, err)
-		}
+		UPDATE artifacts SET target = (SELECT e.source_id FROM entities e WHERE e.id = artifacts.entity_id),
+		                     updated_at = datetime('now')
+		 WHERE entity_id IN (SELECT e.id FROM entities e WHERE e.source = ? AND e.scope = ? AND e.repository_id = ?)
+		   AND target <> (SELECT e.source_id FROM entities e WHERE e.id = artifacts.entity_id)
+	`, source, host, repositoryID); err != nil {
+		return fmt.Errorf("move the targets of %s's entities' artifacts onto %s: %w", repositoryID, to, err)
 	}
 	return nil
 }

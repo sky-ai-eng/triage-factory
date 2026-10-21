@@ -515,9 +515,9 @@ type RepositoryStore interface {
 	// repository now under the name has pull requests of its own under).
 	// Nothing else moves: the row keeps its id, name and provider id, its
 	// tracking rows, worktree ledger rows, events, artifacts and tasks. Its
-	// pull request, review and branch artifacts are keyed on ids — a pull
-	// request's node id, the row's own id — so the repository now under the
-	// name records its own under keys of its own.
+	// artifacts are keyed on ids — a pull request's node id, a comment's id,
+	// the row's own id — and reference its entities by id, so the repository
+	// now under the name records its own under keys and entities of its own.
 	//
 	// The row is matched on (source, host, external_id) and re-checked under a
 	// lock to still be stored under held's slug and not retired, so a candidate
@@ -539,9 +539,10 @@ type RepositoryStore interface {
 	// Everything it rewrites belongs to that host: the repository row is
 	// matched on (source, host, external_id), entities are the row's own (by
 	// repository_id, so a retired row that shares the old slug keeps its
-	// history), and so are the pull request, review and branch artifacts,
-	// found by the ids their dedup keys carry, whose targets move and whose
-	// keys do not; comment artifacts and audit-ledger rows move only where
+	// history), and so are the artifacts: those about its entities
+	// (artifacts.entity_id), which take their entity's new key, and its
+	// branches, found by the registry row id their dedup keys carry. Their
+	// targets move and their keys do not. Audit-ledger rows move only where
 	// their scope is the host (with a link or without one), placement pins
 	// only on the host, and a stored link only when it is on the host
 	// (domain.RewriteRepoURL). A repository on another host with the same name
@@ -567,12 +568,11 @@ type RepositoryStore interface {
 	// A retired row carrying the id is restored: the provider has answered for
 	// it, so it takes the slug it was observed under and clears retired_at, in
 	// the same transaction, under the same occupant rules as a rename
-	// (Restored, and Renamed too when the slug moved). Only its own entities,
-	// and the artifacts keyed on its ids, move with it. The records matched by
-	// the slug alone — comment artifacts, placement pins, audit-ledger
-	// pointers — stay where they are, because the name it was retired under is
-	// no longer its own, and whatever answers to it now may be another
-	// repository's.
+	// (Restored, and Renamed too when the slug moved). Only its own entities
+	// and artifacts move with it. The records matched by the slug alone —
+	// placement pins, audit-ledger pointers — stay where they are, because the
+	// name it was retired under is no longer its own, and whatever answers to
+	// it now may be another repository's.
 	//
 	// The occupant of the target slug is a row that holds it: a retired row
 	// under the same slug is history, not an occupant. One occupant is

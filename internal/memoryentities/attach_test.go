@@ -191,12 +191,20 @@ func seedArtifact(t *testing.T, database *sql.DB, conversationID string, a domai
 	}
 }
 
-// seedProducedPR upserts a PR artifact attributed to conversationID so the
-// produced attach derives an entity from it.
+// seedProducedPR upserts a PR artifact attributed to conversationID, linked
+// to the pull request's entity the way the exec funnel records it: the entity
+// found by the PR's key, or a stub created for it.
 func seedProducedPR(t *testing.T, database *sql.DB, conversationID, repoPath string, number int, url string) {
 	t.Helper()
 	nodeID := fmt.Sprintf("PR_%s_%d", repoPath, number)
-	seedArtifact(t, database, conversationID, domain.NewPullRequestArtifact(repoPath, number, nodeID, "head", "main", url, "produced PR", "", false))
+	ent, _, err := sqlitestore.New(database).Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID,
+		"github", testScope("github"), domain.PullRequestTarget(repoPath, number), nodeID, "pr", "", url)
+	if err != nil {
+		t.Fatalf("resolve the produced PR's entity: %v", err)
+	}
+	pr := domain.NewPullRequestArtifact(repoPath, number, nodeID, "head", "main", url, "produced PR", "", false)
+	pr.EntityID = ent.ID
+	seedArtifact(t, database, conversationID, pr)
 }
 
 // attachAll calls Attach with the full store bundle — what both production
@@ -246,10 +254,10 @@ func TestAttach_PrimaryAlwaysWritten(t *testing.T) {
 	}
 }
 
-// TestAttach_ProducedStubForUnpolledPR: a produced-PR artifact whose entity
-// hasn't been polled yet is create-minimal'd as a snapshot-less stub (linked
-// out by the artifact URL) and attached with role=produced.
-func TestAttach_ProducedStubForUnpolledPR(t *testing.T) {
+// TestAttach_ProducedEntityIsTheArtifacts: a produced-PR artifact attaches
+// the entity it was recorded against with role=produced, which carries the
+// conversation's memory through the join.
+func TestAttach_ProducedEntityIsTheArtifacts(t *testing.T) {
 	database := newTestDB(t)
 	seedConversation(t, database, "r-prod")
 	ctx := context.Background()
@@ -258,23 +266,13 @@ func TestAttach_ProducedStubForUnpolledPR(t *testing.T) {
 	if _, err := sqlitestore.New(database).TaskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-prod", "", "narrative", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
-	// A PR the agent just opened — no entity exists for it yet.
 	seedProducedPR(t, database, "r-prod", "o/r", 4242, "https://github.com/o/r/pull/4242")
 
 	attachAll(t, database, runmode.LocalDefaultOrgID, "r-prod", entA.ID)
 
 	entB := entityBySource(t, database, "github", "o/r#4242")
 	if entB == nil {
-		t.Fatal("produced PR entity was not create-minimal'd")
-	}
-	if entB.SnapshotJSON != "" {
-		t.Errorf("expected a snapshot-less stub, got snapshot %q", entB.SnapshotJSON)
-	}
-	if entB.URL != "https://github.com/o/r/pull/4242" {
-		t.Errorf("stub URL = %q, want the artifact URL", entB.URL)
-	}
-	if entB.Kind != "pr" {
-		t.Errorf("stub kind = %q, want pr", entB.Kind)
+		t.Fatal("the produced PR's entity is missing")
 	}
 	if role := roleFor(t, database, "r-prod", entB.ID); role != domain.MemoryRoleProduced {
 		t.Errorf("produced role = %q, want %q", role, domain.MemoryRoleProduced)
@@ -285,8 +283,10 @@ func TestAttach_ProducedStubForUnpolledPR(t *testing.T) {
 }
 
 // TestAttach_ArtifactFromAnotherScopeAttachesNothing: a PR artifact recorded on
-// a GitHub host the org is no longer on names a pull request there, not the
-// same-numbered one on the current host, so it mints and attaches no entity.
+// a GitHub host the org is no longer on, linked to no entity, names a pull
+// request there, not the same-numbered one on the current host: the attach
+// reads the entity an artifact was recorded against and never resolves one
+// from its target, so it mints and attaches nothing.
 func TestAttach_ArtifactFromAnotherScopeAttachesNothing(t *testing.T) {
 	database := newTestDB(t)
 	seedConversation(t, database, "r-elsewhere")
@@ -360,24 +360,15 @@ func TestAttach_RepoLevelTargetsSkipped(t *testing.T) {
 	}
 }
 
-// TestAttach_JiraArtifactsResolveByIssueID: a Jira artifact resolves its
-// entity through the site and issue id its dedup key records. An artifact
-// whose target is a key the issue has since left attaches to the issue's
-// entity without moving it back; one keyed on the issue key, recorded on
-// another site, or about an issue no entity carries yet attaches nothing and
-// mints nothing — the artifact does not record the project an entity would be
-// created in. Only the last is a link the attach owed and could not write, so
-// it is the only one counted.
-func TestAttach_JiraArtifactsResolveByIssueID(t *testing.T) {
+// TestAttach_JiraArtifactAttachesItsEntity: a Jira artifact attaches the
+// issue's entity it was recorded against, whatever key its target spells, and
+// leaves the entity where it is. One linked to no entity — its issue did not
+// resolve when it was written — attaches and mints nothing, and is the one
+// link the attach owed and could not write, so it is counted.
+func TestAttach_JiraArtifactAttachesItsEntity(t *testing.T) {
 	skips := linkSkips(t)
 	database := newTestDB(t)
 	site := testScope("jira")
-	if _, err := database.Exec(`
-		INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, 'jira', ?)
-		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = excluded.base_url
-	`, runmode.LocalDefaultOrgID, site); err != nil {
-		t.Fatalf("record jira site: %v", err)
-	}
 	seedConversation(t, database, "r-jira")
 	ctx := context.Background()
 	entA := primaryEntity(t, database, "r-jira")
@@ -385,17 +376,17 @@ func TestAttach_JiraArtifactsResolveByIssueID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	jiraArtifact := func(resource, target string) domain.Artifact {
+	jiraArtifact := func(issueID, target, entityID string) domain.Artifact {
 		return domain.Artifact{
 			Provider: domain.ArtifactProviderJira, Kind: domain.ArtifactKindIssue, Target: target,
 			State:    domain.ArtifactStateIssueUpdated,
-			DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue, resource, ""),
+			Scope:    site,
+			DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue, domain.JiraIssueResource(site, issueID), ""),
+			EntityID: entityID,
 		}
 	}
-	seedArtifact(t, database, "r-jira", jiraArtifact(domain.JiraIssueResource(site, "10007"), "OLD-7"))
-	seedArtifact(t, database, "r-jira", jiraArtifact("SKY-1", "SKY-1"))
-	seedArtifact(t, database, "r-jira", jiraArtifact(domain.JiraIssueResource("https://other.example.com", "10008"), "SKY-2"))
-	seedArtifact(t, database, "r-jira", jiraArtifact(domain.JiraIssueResource(site, "10009"), "OPS-9"))
+	seedArtifact(t, database, "r-jira", jiraArtifact("10007", "OLD-7", moved.ID))
+	seedArtifact(t, database, "r-jira", jiraArtifact("10009", "OPS-9", ""))
 
 	attachAll(t, database, runmode.LocalDefaultOrgID, "r-jira", entA.ID)
 
@@ -405,7 +396,7 @@ func TestAttach_JiraArtifactsResolveByIssueID(t *testing.T) {
 	if got := entityBySource(t, database, "jira", "NEW-7"); got == nil || got.ID != moved.ID {
 		t.Errorf("NEW-7 = %+v, want the entity left under its current key", got)
 	}
-	for _, key := range []string{"OLD-7", "SKY-1", "SKY-2", "OPS-9"} {
+	for _, key := range []string{"OLD-7", "OPS-9"} {
 		if ent := entityBySource(t, database, "jira", key); ent != nil {
 			t.Errorf("%s minted an entity: %+v", key, ent)
 		}
@@ -420,37 +411,36 @@ func TestAttach_JiraArtifactsResolveByIssueID(t *testing.T) {
 	assertSkips(t, skips, map[skipKey]int64{{domain.MemoryRoleProduced, "jira", skipNoEntity}: 1})
 }
 
-// TestAttach_CountsAFailedResolve: a produced artifact whose entity resolve
-// fails is counted as an error, and the primary row still lands.
-func TestAttach_CountsAFailedResolve(t *testing.T) {
+// TestAttach_CountsAFailedWrite: a produced link whose join-row write fails is
+// counted as an error, and the primary row still lands.
+func TestAttach_CountsAFailedWrite(t *testing.T) {
 	skips := linkSkips(t)
 	database := newTestDB(t)
-	seedConversation(t, database, "r-resolve")
-	entA := primaryEntity(t, database, "r-resolve")
-	seedProducedPR(t, database, "r-resolve", "o/r", 77, "https://github.com/o/r/pull/77")
+	seedConversation(t, database, "r-write")
+	entA := primaryEntity(t, database, "r-write")
+	seedProducedPR(t, database, "r-write", "o/r", 77, "https://github.com/o/r/pull/77")
 
 	failing := sqlitestore.New(database)
-	failing.Entities = failingEntityStore{EntityStore: failing.Entities}
-	Attach(context.Background(), failing, runmode.LocalDefaultOrgID, "r-resolve", entA.ID)
+	failing.TaskMemory = producedWriteFails{TaskMemoryStore: failing.TaskMemory}
+	Attach(context.Background(), failing, runmode.LocalDefaultOrgID, "r-write", entA.ID)
 
-	if role := roleFor(t, database, "r-resolve", entA.ID); role != domain.MemoryRolePrimary {
-		t.Errorf("primary role = %q, want %q despite the resolve failure", role, domain.MemoryRolePrimary)
-	}
-	if ent := entityBySource(t, database, "github", "o/r#77"); ent != nil {
-		t.Errorf("failed resolve minted an entity: %+v", ent)
+	if role := roleFor(t, database, "r-write", entA.ID); role != domain.MemoryRolePrimary {
+		t.Errorf("primary role = %q, want %q despite the failed write", role, domain.MemoryRolePrimary)
 	}
 	assertSkips(t, skips, map[skipKey]int64{{domain.MemoryRoleProduced, "github", skipError}: 1})
 }
 
-// failingEntityStore fails GetByExternalIDSystem, the first read a produced
-// artifact carrying a provider id resolves through; every other method
-// delegates to the embedded real store.
-type failingEntityStore struct {
-	db.EntityStore
+// producedWriteFails fails the produced role's join-row write; every other
+// method delegates to the embedded real store.
+type producedWriteFails struct {
+	db.TaskMemoryStore
 }
 
-func (failingEntityStore) GetByExternalIDSystem(context.Context, string, string, string, string) (*domain.Entity, error) {
-	return nil, errors.New("entity read failed")
+func (f producedWriteFails) RecordEntityTouchSystem(ctx context.Context, orgID, conversationID, entityID, role string) error {
+	if role == domain.MemoryRoleProduced {
+		return errors.New("join row write failed")
+	}
+	return f.TaskMemoryStore.RecordEntityTouchSystem(ctx, orgID, conversationID, entityID, role)
 }
 
 // TestAttach_ListFailureLeavesPrimaryIntact: when the artifact listing fails,
@@ -489,55 +479,37 @@ func (failingArtifactStore) ListByConversationSystem(context.Context, string, st
 	return nil, errors.New("artifact listing failed")
 }
 
-// TestAttach_AbsentStoresSkipProducedPass: a caller holding no artifact or
-// entity store cannot resolve produced entities, and says so by passing nil.
-// The primary row still lands — it needs neither store — so the conversation's
-// memory stays reachable from its task's entity.
-func TestAttach_AbsentStoresSkipProducedPass(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		absent string
-	}{
-		{name: "nil artifacts", absent: "artifacts"},
-		{name: "nil entities", absent: "entities"},
-		{name: "both nil", absent: "both"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			database := newTestDB(t)
-			seedConversation(t, database, "r-nil")
-			ctx := context.Background()
-			stores := sqlitestore.New(database)
-			entA := primaryEntity(t, database, "r-nil")
+// TestAttach_AbsentArtifactsSkipProducedPass: a caller holding no artifact
+// store cannot read produced entities, and says so by passing nil. The
+// primary row still lands — it needs no artifact store — so the
+// conversation's memory stays reachable from its task's entity.
+func TestAttach_AbsentArtifactsSkipProducedPass(t *testing.T) {
+	database := newTestDB(t)
+	seedConversation(t, database, "r-nil")
+	ctx := context.Background()
+	stores := sqlitestore.New(database)
+	entA := primaryEntity(t, database, "r-nil")
 
-			if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-nil", "", "narrative", domain.MemorySourceAgent); err != nil {
-				t.Fatalf("upsert memory: %v", err)
-			}
-			// An artifact that WOULD mint a produced entity had both stores been present.
-			seedProducedPR(t, database, "r-nil", "o/r", 9, "https://github.com/o/r/pull/9")
+	if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-nil", "", "narrative", domain.MemorySourceAgent); err != nil {
+		t.Fatalf("upsert memory: %v", err)
+	}
+	// An artifact whose entity the produced pass WOULD attach had the store
+	// been present.
+	seedProducedPR(t, database, "r-nil", "o/r", 9, "https://github.com/o/r/pull/9")
 
-			partial := stores
-			if tc.absent == "artifacts" || tc.absent == "both" {
-				partial.Artifacts = nil
-			}
-			if tc.absent == "entities" || tc.absent == "both" {
-				partial.Entities = nil
-			}
-			Attach(ctx, partial, runmode.LocalDefaultOrgID, "r-nil", entA.ID)
+	partial := stores
+	partial.Artifacts = nil
+	Attach(ctx, partial, runmode.LocalDefaultOrgID, "r-nil", entA.ID)
 
-			if role := roleFor(t, database, "r-nil", entA.ID); role != domain.MemoryRolePrimary {
-				t.Errorf("primary role = %q, want %q", role, domain.MemoryRolePrimary)
-			}
-			if ent := entityBySource(t, database, "github", "o/r#9"); ent != nil {
-				t.Errorf("produced pass ran without its stores: minted %+v", ent)
-			}
-			var n int
-			if err := database.QueryRow(`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ?`, "r-nil").Scan(&n); err != nil {
-				t.Fatalf("count join rows: %v", err)
-			}
-			if n != 1 {
-				t.Errorf("join rows = %d, want 1 (primary only)", n)
-			}
-		})
+	if role := roleFor(t, database, "r-nil", entA.ID); role != domain.MemoryRolePrimary {
+		t.Errorf("primary role = %q, want %q", role, domain.MemoryRolePrimary)
+	}
+	var n int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ?`, "r-nil").Scan(&n); err != nil {
+		t.Fatalf("count join rows: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("join rows = %d, want 1 (primary only)", n)
 	}
 }
 
@@ -560,9 +532,6 @@ func TestAttach_NilTaskMemoryWritesNothing(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("join rows = %d, want 0", n)
-	}
-	if ent := entityBySource(t, database, "github", "o/r#11"); ent != nil {
-		t.Errorf("produced pass ran with no memory store to write to: minted %+v", ent)
 	}
 }
 

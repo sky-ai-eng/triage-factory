@@ -494,6 +494,7 @@ func seedRetireFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 		TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest, Scope: TestGitHubHost,
 		Target: domain.PullRequestTarget("octo/api", 12), ExternalID: "12", NodeID: retireOldPRNodeID,
 		State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey(retireOldPRNodeID),
+		EntityID: entity.ID,
 	})
 	if err != nil {
 		t.Fatalf("seed artifact: %v", err)

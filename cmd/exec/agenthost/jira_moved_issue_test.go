@@ -75,8 +75,11 @@ func TestLocalClient_JiraWriteOnAnOldKey_ResolvesTheExistingEntity(t *testing.T)
 		if a.Target != "NEW-7" {
 			t.Errorf("%s artifact target = %q, want the issue's current key", a.Kind, a.Target)
 		}
-		if !domain.ArtifactKeyHasResource(a.DedupKey, domain.ArtifactProviderJira, resource) {
+		if !strings.HasPrefix(a.DedupKey, domain.ArtifactDedupKey(domain.ArtifactProviderJira, a.Kind, resource, "")) {
 			t.Errorf("%s artifact dedup key = %q, want it keyed on %s", a.Kind, a.DedupKey, resource)
+		}
+		if a.EntityID != existing.ID {
+			t.Errorf("%s artifact entity = %q, want the existing entity %s", a.Kind, a.EntityID, existing.ID)
 		}
 	}
 	if role := touchRole(t, conn, info.ConversationID, existing.ID); role != domain.MemoryRoleTouched {

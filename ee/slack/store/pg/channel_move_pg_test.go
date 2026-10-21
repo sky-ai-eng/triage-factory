@@ -76,11 +76,13 @@ func seedThreadEntity(t *testing.T, stores db.Stores, orgID, channelID, threadTS
 	return *e
 }
 
-func seedMessageArtifact(t *testing.T, stores db.Stores, orgID, teamID, channel, rootTS, ts string) string {
+// seedMessageArtifact records a message in thread, the thread entity the
+// message is about, as the exec funnel links it.
+func seedMessageArtifact(t *testing.T, stores db.Stores, orgID, teamID string, thread domain.Entity, channel, rootTS, ts string) string {
 	t.Helper()
 	a, err := stores.Artifacts.UpsertSystem(context.Background(), orgID, domain.Artifact{
 		TeamID: teamID, Provider: domain.ArtifactProviderSlack, Scope: domain.SlackScope, Kind: domain.ArtifactKindMessage,
-		Target: domain.SlackSourceID(channel, rootTS), ExternalID: ts,
+		Target: domain.SlackSourceID(channel, rootTS), ExternalID: ts, EntityID: thread.ID,
 		URL:      moveReplyPermalink(channel, ts, rootTS),
 		State:    domain.ArtifactStateMessagePosted,
 		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderSlack, domain.ArtifactKindMessage, channel+"/"+ts, ""),
@@ -196,8 +198,8 @@ func TestChannelMove_Postgres_MovesTheChannel(t *testing.T) {
 	}
 	neighbour := seedThreadEntity(t, stores, orgID, moveNeighbour, "1700000000.000100", "thread", movePermalink(moveNeighbour, "1700000000000100"))
 
-	artifact := seedMessageArtifact(t, stores, orgID, teamA, moveOld, "1700000000.000100", "1700000000.000300")
-	neighbourArtifact := seedMessageArtifact(t, stores, orgID, teamA, moveNeighbour, "1700000000.000100", "1700000000.000300")
+	artifact := seedMessageArtifact(t, stores, orgID, teamA, open, moveOld, "1700000000.000100", "1700000000.000300")
+	neighbourArtifact := seedMessageArtifact(t, stores, orgID, teamA, neighbour, moveNeighbour, "1700000000.000100", "1700000000.000300")
 
 	oldLink := moveReplyPermalink(moveOld, "1700000000000300", "1700000000.000100")
 	seedSlackAction(t, stores, orgID, teamA, domain.SlackSourceID(moveOld, "1700000000.000100"), oldLink, "action-moved")
@@ -351,8 +353,8 @@ func TestChannelMove_Postgres_AbsorbsWhatTheNewIDGotFirst(t *testing.T) {
 	original := seedThreadEntity(t, stores, orgID, moveOld, "1700000000.000100", "thread", "")
 	newcomer := seedThreadEntity(t, stores, orgID, moveNew, "1700000000.000100", "message", "")
 
-	kept := seedMessageArtifact(t, stores, orgID, teamA, moveOld, "1700000000.000100", "1700000000.000500")
-	held := seedMessageArtifact(t, stores, orgID, teamA, moveNew, "1700000000.000100", "1700000000.000500")
+	kept := seedMessageArtifact(t, stores, orgID, teamA, original, moveOld, "1700000000.000100", "1700000000.000500")
+	held := seedMessageArtifact(t, stores, orgID, teamA, newcomer, moveNew, "1700000000.000100", "1700000000.000500")
 
 	onAbsorbed := seedSlackHandler(t, h, orgID, teamA, userID, "absorbed", `{"channel_in":["`+absorbed.ID+`","C0OTHER01"],"mentioned_only":true}`)
 	onBoth := seedSlackHandler(t, h, orgID, teamA, userID, "both", `{"channel_in":["`+channel.ID+`","`+absorbed.ID+`"]}`)

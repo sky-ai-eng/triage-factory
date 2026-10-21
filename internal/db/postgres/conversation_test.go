@@ -1292,6 +1292,13 @@ func TestConversationStore_Postgres_PRCoherenceTargets(t *testing.T) {
 				a := domain.NewReviewArtifact(repo, prNumber, prNodeID, "head-sha", conversationID)
 				a.ConversationID, a.Scope = conversationID, host
 				a.OrgID, a.TeamID = orgID, teamID
+				pr, err := stores.Entities.GetByExternalIDSystem(ctx, orgID, domain.ArtifactProviderGitHub, host, prNodeID)
+				if err != nil {
+					t.Fatalf("read the reviewed PR's entity: %v", err)
+				}
+				if pr != nil {
+					a.EntityID = pr.ID
+				}
 				if _, err := stores.Artifacts.UpsertSystem(ctx, orgID, a); err != nil {
 					t.Fatalf("seed pending review: %v", err)
 				}

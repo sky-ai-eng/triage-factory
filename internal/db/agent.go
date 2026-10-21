@@ -472,10 +472,9 @@ type ConversationStore interface {
 	// ListPRCoherenceTargetsSystem finds delegation conversations relevant to
 	// one PR event. Relevance is entity-, review-, or checkout-level; EventID
 	// excludes a conversation whose same-task additive path already recorded
-	// the event as injected. A pending review matches when its draft is keyed
-	// on the pull request's node id — the PR entity's external id — in the
-	// entity's scope, whatever name the draft's target spells; a PR entity with
-	// no node id yet matches no review. A checkout matches only when its
+	// the event as injected. A pending review matches when its draft is about
+	// the PR entity (artifacts.entity_id), whatever name the draft's target
+	// spells. A checkout matches only when its
 	// repository is on the PR entity's own GitHub host (its scope): the same
 	// slug on another host is another repository. A checkout of a retired repository
 	// never matches, because its name belongs to the repository GitHub serves

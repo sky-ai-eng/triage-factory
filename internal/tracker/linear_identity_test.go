@@ -78,6 +78,7 @@ func TestRefreshLinear_MoveBetweenArmedTeams(t *testing.T) {
 		TeamID: runmode.LocalDefaultTeamID, Provider: domain.ArtifactProviderLinear, Kind: domain.ArtifactKindIssue,
 		Scope: before.Scope, Target: "ENG-4", ExternalID: is.ID, State: domain.ArtifactStateIssueUpdated,
 		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindIssue, is.ID, ""),
+		EntityID: before.ID,
 	})
 	if err != nil {
 		t.Fatalf("seed artifact: %v", err)

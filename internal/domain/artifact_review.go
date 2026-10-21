@@ -131,21 +131,6 @@ func ReviewDedupKey(prNodeID, conversationID string) string {
 	return ArtifactDedupKey(ArtifactProviderGitHub, ArtifactKindReview, prNodeID, conversationID)
 }
 
-// ReviewDedupKeyHead is what every review draft's key begins with, ahead of
-// the pull request's node id. A read that joins drafts to a pull request in
-// SQL matches ReviewDedupKeyHead || node id || ':'.
-const ReviewDedupKeyHead = ArtifactProviderGitHub + ":" + ArtifactKindReview + ":"
-
-// ReviewDedupKeyPrefix is what every conversation's ReviewDedupKey for the
-// pull request whose node id is prNodeID begins with: a read for the review
-// drafts on one pull request matches it. "" for an empty node id.
-func ReviewDedupKeyPrefix(prNodeID string) string {
-	if prNodeID == "" {
-		return ""
-	}
-	return ReviewDedupKeyHead + prNodeID + ":"
-}
-
 // NewReviewArtifact builds the durable review-draft artifact start-review records
 // — a fully TF-side draft, with zero GitHub writes (TFAC-494). repoPath is
 // "owner/repo"; number is the PR number and prNodeID its GraphQL node id, which

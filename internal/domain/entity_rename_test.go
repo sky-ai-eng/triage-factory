@@ -102,27 +102,6 @@ func TestEntityScope(t *testing.T) {
 	}
 }
 
-func TestArtifactKeyHasResource(t *testing.T) {
-	cases := []struct {
-		key, provider, resource string
-		want                    bool
-	}{
-		{"linear:issue:uuid-4", "linear", "uuid-4", true},
-		{"linear:comment:uuid-4:c-1", "linear", "uuid-4", true},
-		{"linear:issue:uuid-41", "linear", "uuid-4", false},
-		{"linear:comment:uuid-41:uuid-4", "linear", "uuid-4", false},
-		{"jira:issue:uuid-4", "linear", "uuid-4", false},
-		{"linear:uuid-4", "linear", "uuid-4", false},
-		{"linear:issue:uuid-4", "linear", "", false},
-		{"", "linear", "uuid-4", false},
-	}
-	for _, c := range cases {
-		if got := ArtifactKeyHasResource(c.key, c.provider, c.resource); got != c.want {
-			t.Errorf("ArtifactKeyHasResource(%q, %q, %q) = %v, want %v", c.key, c.provider, c.resource, got, c.want)
-		}
-	}
-}
-
 func TestJiraIssueResource(t *testing.T) {
 	for _, site := range []string{
 		"https://acme.atlassian.net",
@@ -138,8 +117,8 @@ func TestJiraIssueResource(t *testing.T) {
 		if !ok || gotSite != site || gotID != "10042" {
 			t.Errorf("ArtifactEntityIdentity(%q) = (%q, %q, %v), want (%q, 10042)", key, gotSite, gotID, ok, site)
 		}
-		if !ArtifactKeyHasResource(key, ArtifactProviderJira, EntityArtifactResource("jira", site, "10042")) {
-			t.Errorf("%q does not name the entity's resource", key)
+		if want := ArtifactDedupKey(ArtifactProviderJira, ArtifactKindComment, EntityArtifactResource("jira", site, "10042"), "20001"); key != want {
+			t.Errorf("%q is not keyed on the entity's resource (%q)", key, want)
 		}
 	}
 	if r := JiraIssueResource("", "10042"); r != "" {

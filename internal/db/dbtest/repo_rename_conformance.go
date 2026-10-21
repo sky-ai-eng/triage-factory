@@ -236,25 +236,25 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if err != nil {
 			t.Fatalf("seed ghe entity: %v", err)
 		}
-		gheArtifact, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
+		gheArtifact, err := s.Artifacts.UpsertSystem(ctx, orgID, linkArtifactEntity(t, s, orgID, domain.Artifact{
 			TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
 			Scope:  TestOtherGitHubHost,
 			Target: domain.PullRequestTarget(renameOldSlug, 19), ExternalID: "19", NodeID: "PR_kwDOghe19",
 			URL:   TestOtherGitHubHost + "/" + renameOldSlug + "/pull/19",
 			State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey("PR_kwDOghe19"),
-		})
+		}, "PR_kwDOghe19"))
 		if err != nil {
 			t.Fatalf("seed ghe artifact: %v", err)
 		}
 		// The same pull request number as the github.com fixture's, with no
 		// link: only its scope says which host it is on, and it is the same
 		// dedup key in another scope, so a second row.
-		gheLinkless, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
+		gheLinkless, err := s.Artifacts.UpsertSystem(ctx, orgID, linkArtifactEntity(t, s, orgID, domain.Artifact{
 			TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
 			Scope:  TestOtherGitHubHost,
 			Target: domain.PullRequestTarget(renameOldSlug, 18), ExternalID: "18", NodeID: renamePRNodeID,
 			State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey(renamePRNodeID),
-		})
+		}, renamePRNodeID))
 		if err != nil {
 			t.Fatalf("seed linkless ghe artifact: %v", err)
 		}
@@ -397,15 +397,20 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			t.Fatalf("seed identity on %s: filled=%d err=%v", upper, filled, err)
 		}
 		nodeID := func(number int) string { return fmt.Sprintf("PR_kwDOctx%d", number) }
+		ownEntity, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", upper, renameOldSlug+"#22", nodeID(22), "pr", "A PR under a context path",
+			upper+"/"+renameOldSlug+"/pull/22")
+		if err != nil {
+			t.Fatalf("seed entity on %s: %v", upper, err)
+		}
 		artifactOn := func(host string, number int) domain.Artifact {
 			t.Helper()
-			a, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
+			a, err := s.Artifacts.UpsertSystem(ctx, orgID, linkArtifactEntity(t, s, orgID, domain.Artifact{
 				TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
 				Scope:  host,
 				Target: domain.PullRequestTarget(renameOldSlug, number), ExternalID: fmt.Sprint(number), NodeID: nodeID(number),
 				URL:   fmt.Sprintf("%s/%s/pull/%d", host, renameOldSlug, number),
 				State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey(nodeID(number)),
-			})
+			}, nodeID(number)))
 			if err != nil {
 				t.Fatalf("seed artifact on %s: %v", host, err)
 			}
@@ -428,11 +433,6 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 		otherAction := actionOn(lower, 21)
 		ownAction := actionOn(upper, 22)
-		ownEntity, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", upper, renameOldSlug+"#22", nodeID(22), "pr", "A PR under a context path",
-			upper+"/"+renameOldSlug+"/pull/22")
-		if err != nil {
-			t.Fatalf("seed entity on %s: %v", upper, err)
-		}
 
 		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
 			Host: upper, Owner: "octo", Repo: "platform-api", ExternalID: "ctx-path-1",
@@ -1027,7 +1027,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if err != nil {
 			t.Fatalf("seed the deleted repository: %v", err)
 		}
-		deadRows := recordRepoArtifacts(t, s, orgID, seed.TeamID, dead, 18, "PR_kwDOdead18", ref)
+		deadRows := recordRepoArtifacts(t, s, orgID, seed.TeamID, dead, 18, "PR_kwDOdead18", 501, ref)
 		if err := RetireRepo(ctx, s.Repos, orgID, TestGitHubHost, "octo/api"); err != nil {
 			t.Fatal(err)
 		}
@@ -1036,7 +1036,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if err != nil {
 			t.Fatalf("seed the renaming repository: %v", err)
 		}
-		liveRows := recordRepoArtifacts(t, s, orgID, seed.TeamID, live, 18, "PR_kwDOlive18", ref)
+		liveRows := recordRepoArtifacts(t, s, orgID, seed.TeamID, live, 18, "PR_kwDOlive18", 502, ref)
 
 		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "octo", Repo: "api", ExternalID: "2"})
 		if err != nil || !out.Renamed {
@@ -1044,17 +1044,20 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 		assertArtifactAt(t, s, orgID, liveRows.pr, "octo/api#18", domain.PullRequestDedupKey("PR_kwDOlive18"))
 		assertArtifactAt(t, s, orgID, liveRows.review, "octo/api#18", domain.ReviewDedupKey("PR_kwDOlive18", liveRows.conversationID))
+		assertArtifactAt(t, s, orgID, liveRows.comment, "octo/api#18", domain.GitHubCommentDedupKey(domain.GitHubIssueComment, 502))
 		assertArtifactAt(t, s, orgID, liveRows.branch, "octo/api", domain.BranchDedupKey(live.ID, ref))
 		assertArtifactAt(t, s, orgID, deadRows.pr, "octo/api#18", domain.PullRequestDedupKey("PR_kwDOdead18"))
 		assertArtifactAt(t, s, orgID, deadRows.review, "octo/api#18", domain.ReviewDedupKey("PR_kwDOdead18", deadRows.conversationID))
+		assertArtifactAt(t, s, orgID, deadRows.comment, "octo/api#18", domain.GitHubCommentDedupKey(domain.GitHubIssueComment, 501))
 		assertArtifactAt(t, s, orgID, deadRows.branch, "octo/api", domain.BranchDedupKey(dead.ID, ref))
 	})
 
 	t.Run("Renaming_the_live_holder_leaves_a_retired_namesakes_artifacts", func(t *testing.T) {
 		// A repository deleted and recreated under the same name: the retired
 		// row and the live one both held octo/api, and both recorded pull
-		// request #18 and the same branch. Renaming the live one moves its
-		// rows and leaves the retired one's under the name they were recorded
+		// request #18, a comment on it and the same branch. Renaming the live
+		// one moves its rows, selected by its entities and its registry id,
+		// and leaves the retired one's under the name they were recorded
 		// under — they are its history, not the live repository's.
 		s, orgID, seed := mk(t)
 		const ref = "refs/heads/fix"
@@ -1063,7 +1066,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if err != nil {
 			t.Fatalf("seed the deleted repository: %v", err)
 		}
-		deadRows := recordRepoArtifacts(t, s, orgID, seed.TeamID, dead, 18, "PR_kwDOdead18", ref)
+		deadRows := recordRepoArtifacts(t, s, orgID, seed.TeamID, dead, 18, "PR_kwDOdead18", 501, ref)
 		if err := RetireRepo(ctx, s.Repos, orgID, TestGitHubHost, "octo/api"); err != nil {
 			t.Fatal(err)
 		}
@@ -1074,8 +1077,8 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if live.ID == dead.ID {
 			t.Fatalf("the new repository landed on the retired row %s", dead.ID)
 		}
-		liveRows := recordRepoArtifacts(t, s, orgID, seed.TeamID, live, 18, "PR_kwDOlive18", ref)
-		if liveRows.pr == deadRows.pr || liveRows.review == deadRows.review || liveRows.branch == deadRows.branch {
+		liveRows := recordRepoArtifacts(t, s, orgID, seed.TeamID, live, 18, "PR_kwDOlive18", 502, ref)
+		if liveRows.pr == deadRows.pr || liveRows.review == deadRows.review || liveRows.comment == deadRows.comment || liveRows.branch == deadRows.branch {
 			t.Fatalf("the new repository's #18 or branch landed on the retired one's rows: live=%+v dead=%+v", liveRows, deadRows)
 		}
 
@@ -1085,9 +1088,11 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 		assertArtifactAt(t, s, orgID, liveRows.pr, "octo/api-v2#18", domain.PullRequestDedupKey("PR_kwDOlive18"))
 		assertArtifactAt(t, s, orgID, liveRows.review, "octo/api-v2#18", domain.ReviewDedupKey("PR_kwDOlive18", liveRows.conversationID))
+		assertArtifactAt(t, s, orgID, liveRows.comment, "octo/api-v2#18", domain.GitHubCommentDedupKey(domain.GitHubIssueComment, 502))
 		assertArtifactAt(t, s, orgID, liveRows.branch, "octo/api-v2", domain.BranchDedupKey(live.ID, ref))
 		assertArtifactAt(t, s, orgID, deadRows.pr, "octo/api#18", domain.PullRequestDedupKey("PR_kwDOdead18"))
 		assertArtifactAt(t, s, orgID, deadRows.review, "octo/api#18", domain.ReviewDedupKey("PR_kwDOdead18", deadRows.conversationID))
+		assertArtifactAt(t, s, orgID, deadRows.comment, "octo/api#18", domain.GitHubCommentDedupKey(domain.GitHubIssueComment, 501))
 		assertArtifactAt(t, s, orgID, deadRows.branch, "octo/api", domain.BranchDedupKey(dead.ID, ref))
 	})
 
@@ -1319,17 +1324,17 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 		t.Fatalf("seed neighbour action: %v", err)
 	}
 
-	prArtifact, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
+	prArtifact, err := s.Artifacts.UpsertSystem(ctx, orgID, linkArtifactEntity(t, s, orgID, domain.Artifact{
 		TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest, Scope: TestGitHubHost,
 		Target: domain.PullRequestTarget(renameOldSlug, 18), ExternalID: "18", NodeID: renamePRNodeID,
 		State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey(renamePRNodeID),
-	})
+	}, renamePRNodeID))
 	if err != nil {
 		t.Fatalf("seed pr artifact: %v", err)
 	}
 	review := domain.NewReviewArtifact(renameOldSlug, 18, renamePRNodeID, "head-sha", conversationID)
 	review.TeamID, review.Scope = seed.TeamID, TestGitHubHost
-	reviewArtifact, err := s.Artifacts.UpsertSystem(ctx, orgID, review)
+	reviewArtifact, err := s.Artifacts.UpsertSystem(ctx, orgID, linkArtifactEntity(t, s, orgID, review, renamePRNodeID))
 	if err != nil {
 		t.Fatalf("seed review artifact: %v", err)
 	}
@@ -1341,11 +1346,11 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	if err != nil {
 		t.Fatalf("seed branch artifact: %v", err)
 	}
-	neighbourArtifact, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
+	neighbourArtifact, err := s.Artifacts.UpsertSystem(ctx, orgID, linkArtifactEntity(t, s, orgID, domain.Artifact{
 		TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest, Scope: TestGitHubHost,
 		Target: domain.PullRequestTarget(renameNeighbourSlug, 4), ExternalID: "4", NodeID: renameNeighbourPRNodeID,
 		State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey(renameNeighbourPRNodeID),
-	})
+	}, renameNeighbourPRNodeID))
 	if err != nil {
 		t.Fatalf("seed neighbour artifact: %v", err)
 	}
@@ -1379,35 +1384,46 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	}
 }
 
-// repoArtifactRows names the pull request, review and branch artifacts
-// recordRepoArtifacts records, and the conversation the review belongs to.
+// repoArtifactRows names the pull request, review, comment and branch
+// artifacts recordRepoArtifacts records, and the conversation the review
+// belongs to.
 type repoArtifactRows struct {
-	pr, review, branch string
-	conversationID     string
+	pr, review, comment, branch string
+	conversationID              string
 }
 
 // recordRepoArtifacts records, in repo on TestGitHubHost, pull request #number
-// (node id nodeID) with its entity, a review draft of it and a pushed branch
-// ref, keyed the way their writers key them, and returns their ids.
-func recordRepoArtifacts(t *testing.T, s db.Stores, orgID, teamID string, repo domain.Repository, number int, nodeID, ref string) repoArtifactRows {
+// (node id nodeID) with its entity, a review draft of it, a comment on it
+// (commentID) and a pushed branch ref, keyed and linked to the entity the way
+// their writers record them, and returns their ids.
+func recordRepoArtifacts(t *testing.T, s db.Stores, orgID, teamID string, repo domain.Repository, number int, nodeID string, commentID int64, ref string) repoArtifactRows {
 	t.Helper()
 	ctx := context.Background()
 	slug := repo.Slug()
-	if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", TestGitHubHost, domain.PullRequestTarget(slug, number), nodeID, "pr", "PR "+nodeID, ""); err != nil {
+	entity, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", TestGitHubHost, domain.PullRequestTarget(slug, number), nodeID, "pr", "PR "+nodeID, "")
+	if err != nil {
 		t.Fatalf("seed entity for %s: %v", nodeID, err)
 	}
 	pr := domain.NewPullRequestArtifact(slug, number, nodeID, "fix", "main", "", "t", "b", true)
-	pr.TeamID, pr.Scope = teamID, TestGitHubHost
+	pr.TeamID, pr.Scope, pr.EntityID = teamID, TestGitHubHost, entity.ID
 	storedPR, err := s.Artifacts.UpsertSystem(ctx, orgID, pr)
 	if err != nil {
 		t.Fatalf("seed pr artifact %s: %v", nodeID, err)
 	}
 	conversationID := "conv-" + nodeID
 	review := domain.NewReviewArtifact(slug, number, nodeID, "head-sha", conversationID)
-	review.TeamID, review.Scope = teamID, TestGitHubHost
+	review.TeamID, review.Scope, review.EntityID = teamID, TestGitHubHost, entity.ID
 	storedReview, err := s.Artifacts.UpsertSystem(ctx, orgID, review)
 	if err != nil {
 		t.Fatalf("seed review artifact %s: %v", nodeID, err)
+	}
+	storedComment, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
+		TeamID: teamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindComment, Scope: TestGitHubHost,
+		Target: domain.PullRequestTarget(slug, number), State: domain.ArtifactStateCommentPosted,
+		DedupKey: domain.GitHubCommentDedupKey(domain.GitHubIssueComment, commentID), EntityID: entity.ID,
+	})
+	if err != nil {
+		t.Fatalf("seed comment artifact %d: %v", commentID, err)
 	}
 	branch, ok := domain.NewBranchArtifact(slug, ref, "abc123", true)
 	if !ok {
@@ -1419,7 +1435,22 @@ func recordRepoArtifacts(t *testing.T, s db.Stores, orgID, teamID string, repo d
 	if err != nil {
 		t.Fatalf("seed branch artifact %s: %v", slug, err)
 	}
-	return repoArtifactRows{pr: storedPR.ID, review: storedReview.ID, branch: storedBranch.ID, conversationID: conversationID}
+	return repoArtifactRows{pr: storedPR.ID, review: storedReview.ID, comment: storedComment.ID, branch: storedBranch.ID, conversationID: conversationID}
+}
+
+// linkArtifactEntity returns a linked to the entity of its provider carrying
+// externalID on its scope, as the exec funnel links an artifact, or unlinked
+// when no entity carries it.
+func linkArtifactEntity(t *testing.T, s db.Stores, orgID string, a domain.Artifact, externalID string) domain.Artifact {
+	t.Helper()
+	e, err := s.Entities.GetByExternalIDSystem(context.Background(), orgID, a.Provider, a.Scope, externalID)
+	if err != nil {
+		t.Fatalf("read the entity carrying %s on %s: %v", externalID, a.Scope, err)
+	}
+	if e != nil {
+		a.EntityID = e.ID
+	}
+	return a
 }
 
 // assertArtifactAt requires artifact id to hold target and dedupKey.

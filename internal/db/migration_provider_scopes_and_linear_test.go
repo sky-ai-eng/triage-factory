@@ -1053,6 +1053,75 @@ func TestMigrate_ProviderScopesKeyArtifactsOnIDs(t *testing.T) {
 	}
 }
 
+// Every artifact is linked to the entity it is about: the one carrying the
+// provider id its key names, else the one its target names, and its target
+// takes that entity's key. A branch has none. A Jira artifact keyed on an
+// issue key, or a Jira comment keyed on its comment id alone, is re-keyed on
+// the issue's site and id, and one issue recorded under both shapes keeps the
+// older row.
+func TestMigrate_ProviderScopesLinkArtifactsToEntities(t *testing.T) {
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	const site = "https://acme.atlassian.net"
+	setOrgBaseURL(t, database, runmode.LocalDefaultOrgID, "jira", site)
+	mustExec(t, database, `INSERT INTO entities (id, source, source_id, kind, snapshot_json)
+		VALUES ('e-pr-9', 'github', 'octo/api#9', 'pr', '{"node_id":"PR_9","number":9}')`)
+	jiraIssue := func(id, key, snapshot string) {
+		t.Helper()
+		mustExec(t, database, `
+			INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json)
+			VALUES (?, 'jira', ?, 'issue', 't', ?, NULLIF(?, ''))`,
+			id, key, site+"/browse/"+key, snapshot)
+	}
+	jiraIssue("e-sky-1", "SKY-1", `{"id":"10001","key":"SKY-1","project_id":"100"}`)
+	jiraIssue("e-sky-2", "SKY-2", `{"key":"SKY-2"}`)
+	jiraIssue("e-ops-1", "OPS-1", `{"id":"10007","key":"OPS-1","project_id":"200"}`)
+	artifact := func(id, provider, kind, target, key, details, createdAt string) {
+		t.Helper()
+		mustExec(t, database, `
+			INSERT INTO artifacts (id, team_id, provider, kind, target, state, dedup_key, details_json, created_at)
+			VALUES (?, 'team-1', ?, ?, ?, 'open', ?, NULLIF(?, ''), ?)`,
+			id, provider, kind, target, key, details, createdAt)
+	}
+	const day1, day2 = "2026-01-01 00:00:00", "2026-02-01 00:00:00"
+	resource := domain.JiraIssueResource(site, "10001")
+	artifact("pr-9", "github", "pull_request", "octo/api#9", "github:pull_request:octo/api#9", `{"node_id":"PR_9"}`, day1)
+	artifact("gh-comment", "github", "comment", "Octo/API#9", "github:comment:555", "", day1)
+	artifact("branch", "git", "branch", "octo/gone", "git:branch:octo/gone:refs/heads/fix", "", day1)
+	artifact("issue-legacy", "jira", "issue", "SKY-1", "jira:issue:SKY-1", "", day1)
+	artifact("issue-keyed", "jira", "issue", "SKY-1", domain.ArtifactDedupKey("jira", "issue", resource, ""), "", day2)
+	artifact("comment-legacy", "jira", "comment", "SKY-1", "jira:comment:20311", "", day1)
+	artifact("comment-no-id", "jira", "comment", "SKY-2", "jira:comment:20312", "", day1)
+	// Recorded under the key the issue had before it moved, keyed on its id.
+	artifact("issue-moved", "jira", "issue", "SKY-7",
+		domain.ArtifactDedupKey("jira", "issue", domain.JiraIssueResource(site, "10007"), ""), "", day1)
+
+	migrateProviderScopes(t, database)
+
+	for id, want := range map[string]struct{ entity, target, key string }{
+		"pr-9":           {"e-pr-9", "octo/api#9", domain.PullRequestDedupKey("PR_9")},
+		"gh-comment":     {"e-pr-9", "octo/api#9", "github:comment:555"},
+		"branch":         {"", "octo/gone", "git:branch:octo/gone:refs/heads/fix"},
+		"issue-legacy":   {"e-sky-1", "SKY-1", domain.ArtifactDedupKey("jira", "issue", resource, "")},
+		"comment-legacy": {"e-sky-1", "SKY-1", domain.ArtifactDedupKey("jira", "comment", resource, "20311")},
+		"comment-no-id":  {"e-sky-2", "SKY-2", "jira:comment:20312"},
+		"issue-moved":    {"e-ops-1", "OPS-1", domain.ArtifactDedupKey("jira", "issue", domain.JiraIssueResource(site, "10007"), "")},
+	} {
+		var entity, target, key string
+		if err := database.QueryRow(`SELECT COALESCE(entity_id, ''), target, dedup_key FROM artifacts WHERE id = ?`, id).
+			Scan(&entity, &target, &key); err != nil {
+			t.Fatalf("read %s: %v", id, err)
+		}
+		if entity != want.entity || target != want.target || key != want.key {
+			t.Errorf("%s = (entity %q, target %q, key %q), want (%q, %q, %q)", id, entity, target, key, want.entity, want.target, want.key)
+		}
+	}
+	if n := queryInt(t, database, `SELECT COUNT(*) FROM artifacts WHERE id = 'issue-keyed'`); n != 0 {
+		t.Error("issue-keyed survived; one issue recorded under its key and its id keeps the older row")
+	}
+	assertNoDanglingReferences(t, database)
+}
+
 func seedProviderScopesOrg(t *testing.T, database *sql.DB) {
 	t.Helper()
 	mustExec(t, database, `INSERT INTO orgs (id, slug, name) VALUES (?, 'local', 'Local')`, runmode.LocalDefaultOrgID)

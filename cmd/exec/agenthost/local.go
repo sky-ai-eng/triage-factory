@@ -2380,7 +2380,13 @@ func (c *LocalClient) recordGithubComment(ctx context.Context, owner, repo strin
 			"conversation", c.info.ConversationID, "repo", owner+"/"+repo, "pr", number)
 		return
 	}
+	a.Provider = domain.ArtifactProviderGitHub
 	a.Target = fmt.Sprintf("%s/%s#%d", owner, repo, number)
+	// Under the registry's name, as recordGithubPR records a pull request, so
+	// the comment resolves the pull request's entity whichever spelling of
+	// its repository's name the agent used. onRegistryRow refuses only a
+	// branch.
+	*a, _ = c.onRegistryRow(ctx, *a)
 	act := githubAction(*a, domain.ActionCommentPosted, "", "", c.githubCredential())
 	if inReplyTo > 0 {
 		detail, _ := json.Marshal(map[string]any{"in_reply_to": inReplyTo})

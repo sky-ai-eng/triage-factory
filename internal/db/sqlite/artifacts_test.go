@@ -798,47 +798,56 @@ func newSQLiteForArtifactTestTimed(t *testing.T) *sql.DB {
 	return conn
 }
 
-// TestArtifactStore_SQLite_ListPendingReviewsByPullRequest pins the new-commits
-// notifier's lookup (TFAC-501): only PENDING review artifacts keyed on the PR's
-// node id come back, whatever name their target spells; submitted/dismissed
-// reviews, other-PR drafts, and non-review kinds are excluded.
-func TestArtifactStore_SQLite_ListPendingReviewsByPullRequest(t *testing.T) {
+// TestArtifactStore_SQLite_ListPendingReviewsByEntity pins the new-commits
+// notifier's lookup (TFAC-501): only PENDING review artifacts about the PR's
+// entity come back, whatever name their target spells; resolved reviews,
+// other PRs' drafts and non-review kinds are excluded.
+func TestArtifactStore_SQLite_ListPendingReviewsByEntity(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 	conversationID := seedArtifactConversation(t, conn)
 	org := runmode.LocalDefaultOrgID
 
-	mk := func(kind, state, target, dedup string) {
+	entity := func(key, nodeID string) string {
+		t.Helper()
+		e, _, err := stores.Entities.FindOrCreateSystem(ctx, org, domain.ArtifactProviderGitHub, "https://github.com", key, nodeID, "pr", "t", "")
+		if err != nil {
+			t.Fatalf("seed entity %s: %v", key, err)
+		}
+		return e.ID
+	}
+	pr7, other7 := entity("octo/repo#7", "PR_kw7"), entity("octo/other#7", "PR_kwOTHER7")
+	mk := func(kind, state, target, dedup, entityID string) {
 		if _, err := stores.Artifacts.Upsert(ctx, org, domain.Artifact{
 			ConversationID: conversationID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
 			Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com", Kind: kind, State: state,
-			Target: target, DedupKey: dedup,
+			Target: target, DedupKey: dedup, EntityID: entityID,
 		}); err != nil {
 			t.Fatalf("seed artifact %s/%s: %v", kind, state, err)
 		}
 	}
 	// Two pending reviews of the PR (different conversations → different
 	// dedup keys), one under a name the repository has since given up, plus
-	// noise that must NOT match: resolved drafts, another PR #7 under the
-	// same name, a node id that merely starts the same, and a PR row.
-	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#7", domain.ReviewDedupKey("PR_kw7", "conv-a"))
-	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/old-repo#7", domain.ReviewDedupKey("PR_kw7", "conv-b"))
-	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewSubmitted, "octo/repo#7", domain.ReviewDedupKey("PR_kw7", "conv-s"))
-	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewDismissed, "octo/repo#7", domain.ReviewDedupKey("PR_kw7", "conv-d"))
-	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#7", domain.ReviewDedupKey("PR_kwOTHER7", "conv-a"))
-	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#77", domain.ReviewDedupKey("PR_kw77", "conv-a"))
-	mk(domain.ArtifactKindPullRequest, domain.ArtifactStatePROpen, "octo/repo#7", domain.PullRequestDedupKey("PR_kw7"))
+	// noise that must NOT match: resolved drafts, another PR's draft, a draft
+	// linked to no entity, and a PR row.
+	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#7", domain.ReviewDedupKey("PR_kw7", "conv-a"), pr7)
+	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/old-repo#7", domain.ReviewDedupKey("PR_kw7", "conv-b"), pr7)
+	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewSubmitted, "octo/repo#7", domain.ReviewDedupKey("PR_kw7", "conv-s"), pr7)
+	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewDismissed, "octo/repo#7", domain.ReviewDedupKey("PR_kw7", "conv-d"), pr7)
+	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#7", domain.ReviewDedupKey("PR_kwOTHER7", "conv-a"), other7)
+	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#77", domain.ReviewDedupKey("PR_kw77", "conv-a"), "")
+	mk(domain.ArtifactKindPullRequest, domain.ArtifactStatePROpen, "octo/repo#7", domain.PullRequestDedupKey("PR_kw7"), pr7)
 
-	got, err := stores.Artifacts.ListPendingReviewsByPullRequestSystem(ctx, org, "https://github.com", "PR_kw7")
+	got, err := stores.Artifacts.ListPendingReviewsByEntitySystem(ctx, org, pr7)
 	if err != nil {
-		t.Fatalf("ListPendingReviewsByPullRequestSystem: %v", err)
+		t.Fatalf("ListPendingReviewsByEntitySystem: %v", err)
 	}
 	if len(got) != 2 {
 		t.Fatalf("want 2 pending reviews of PR_kw7, got %d: %+v", len(got), got)
 	}
 	for _, a := range got {
-		if nodeID, _ := domain.ArtifactPullRequestNodeID(a); a.Kind != domain.ArtifactKindReview || a.State != domain.ArtifactStateReviewPending || nodeID != "PR_kw7" {
+		if a.Kind != domain.ArtifactKindReview || a.State != domain.ArtifactStateReviewPending || a.EntityID != pr7 {
 			t.Errorf("unexpected artifact in result: kind=%s state=%s target=%s", a.Kind, a.State, a.Target)
 		}
 	}

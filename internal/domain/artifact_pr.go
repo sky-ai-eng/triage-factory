@@ -104,13 +104,8 @@ func PullRequestDedupKey(nodeID string) string {
 	if nodeID == "" {
 		return ""
 	}
-	return PullRequestDedupKeyHead + nodeID
+	return ArtifactDedupKey(ArtifactProviderGitHub, ArtifactKindPullRequest, nodeID, "")
 }
-
-// PullRequestDedupKeyHead is what every pull request's key begins with, ahead
-// of its node id. A read that joins pull request rows to their entities in SQL
-// matches PullRequestDedupKeyHead || node id.
-const PullRequestDedupKeyHead = ArtifactProviderGitHub + ":" + ArtifactKindPullRequest + ":"
 
 // NewPullRequestArtifact builds the durable pull_request artifact for a PR the
 // agent just opened. repoPath is "owner/repo"; number / nodeID / htmlURL are the

@@ -974,7 +974,7 @@ func newRejectStub(t *testing.T, srv *Server, live map[string]any, node string, 
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 	stores := sqlitestore.New(srv.db)
-	srv.SetReconciler(reconcile.NewReconciler(srv.ghResolver, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil))
+	srv.SetReconciler(reconcile.NewReconciler(srv.ghResolver, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil))
 	return rs
 }
 

@@ -363,8 +363,10 @@ type ChannelRegistryStore interface {
 	//     to the older, the thread's original, which carries its tasks,
 	//     conversations, memory and kind and keeps the key. The newer is
 	//     closed (ChannelMove.Superseded) and keeps what it collected;
-	//   - the Slack artifacts naming the channel: target, dedup key and
-	//     permalink. A key the new id already has is left as it is;
+	//   - the Slack artifacts naming the channel: the target, which takes the
+	//     key of the thread entity the artifact is about (artifacts.entity_id),
+	//     the dedup key and the permalink. A key the new id already has is left
+	//     as it is;
 	//   - external_actions.current_url, the audit ledger's pointer, for
 	//     actions whose link points into the channel. The record of the act
 	//     is not touched.
