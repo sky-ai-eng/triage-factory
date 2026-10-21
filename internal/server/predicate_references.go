@@ -97,8 +97,9 @@ func writePredicateReferenceError(w http.ResponseWriter, err error) bool {
 // trackedIDFaults is the body of a check for predicate fields that name rows
 // the handler's team tracks by id, such as linear_team_id_in and
 // jira_project_id_in and their old_ siblings: every entry predicate adds over
-// prior to one of fields must be in the set tracked returns. tracked is read only when an
-// entry was added. Each fault is the field, the quoted entry, and hint.
+// prior to one of fields must be in the set tracked returns. tracked is read
+// only when an entry was added. Each fault is the field, the quoted entry,
+// and hint.
 func trackedIDFaults(predicate, prior *string, fields []string, hint string, tracked func() (map[string]bool, error)) ([]string, error) {
 	added := make([][]string, len(fields))
 	anyAdded := false

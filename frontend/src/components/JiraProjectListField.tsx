@@ -87,6 +87,8 @@ export default function JiraProjectListField({
                 onChange={() => toggle(p.id)}
                 className="accent-warm"
               />
+              {/* gap-2 spaces the spans on screen; the space keeps the
+                  checkbox's accessible name from running key and name together. */}
               <span className="font-mono text-ui">{p.key}</span>{' '}
               {p.name && <span className="text-ink-2">{p.name}</span>}
             </label>
