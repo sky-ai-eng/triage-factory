@@ -340,6 +340,17 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(repoResult{Repo: r})
 
+	case opRepoSlugByExternalID:
+		var a repoSlugByExternalIDArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, err
+		}
+		slug, err := s.rt.RepoSlugByExternalID(ctx, a.ExternalID)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(repoSlugResult{Slug: slug})
+
 	case opTeamTracksRepo:
 		var a teamTracksRepoArgs
 		if err := json.Unmarshal(args, &a); err != nil {

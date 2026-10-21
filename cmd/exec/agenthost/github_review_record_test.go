@@ -58,6 +58,7 @@ func TestLocalClient_GithubCreatePendingReview_RecordsLocalDraft(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 			stores, info, client := newGithubRecordingClient(t, srv.URL, eventTriggered)
+			registerRepo(t, stores, "octo", "repo", "1")
 
 			handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
 			if err != nil {
@@ -663,6 +664,7 @@ func TestLocalClient_GithubAddPendingReviewComment_RefusesOtherRepo(t *testing.T
 	}))
 	t.Cleanup(srv.Close)
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
+	registerRepo(t, stores, "octo", "repo", "1")
 
 	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
 	if err != nil {

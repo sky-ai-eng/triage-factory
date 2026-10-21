@@ -799,7 +799,13 @@ func (c *LocalClient) footer(kind string) string {
 // (TFAC-483). Routes through the runtime — directRuntime does the event-vs-manual
 // pool/tx branch in-process; relayRuntime relays it as one op so the tx stays
 // orchestrator-side. Returns the stored row. See TFAC-460.
+//
+// The artifact is recorded under the registry's name for its repository
+// (inRegistryName) before its branch link is anchored, so the link names the
+// repository the way the key does. A review draft and a pushed branch both
+// arrive here built under the name the agent's checkout spells.
 func (c *LocalClient) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
+	a = c.inRegistryName(ctx, a)
 	a = c.hostAnchorBranchURL(ctx, a)
 	return c.rt.UpsertArtifact(ctx, a)
 }
@@ -1627,6 +1633,9 @@ func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) err
 		return nil
 	}
 	repoID := owner + "/" + repo
+	// TODO(TFAC-1160): every read below matches the registry by name, so a
+	// checkout that spells a renamed repository's old name is refused as
+	// untracked, its own task repository included.
 	tracks, err := c.rt.TeamTracksRepo(ctx, owner, repo)
 	if err != nil {
 		c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
@@ -1880,10 +1889,6 @@ func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, bas
 // branch and ErrPendingReviewCollision. The comments param is unused (start-review
 // seeds no inline comments; the agent adds them via add-review-comment).
 func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, _ []ghclient.SubmitReviewComment) (string, error) {
-	// TODO(TFAC-1159): owner/repo is the name the verb used, which a checkout
-	// made before a repository rename spells as the old name. The draft is then
-	// keyed and targeted under a name the rename already moved past, so the PR
-	// coherence reads, which match artifacts.target on the current name, miss it.
 	a := domain.NewReviewArtifact(owner+"/"+repo, number, commitSHA, c.info.ConversationID)
 	stored, err := c.UpsertArtifact(ctx, a)
 	if err != nil {
@@ -2446,13 +2451,12 @@ func (c *LocalClient) recordGithubPR(ctx context.Context, owner, repo, head, bas
 			"conversation", c.info.ConversationID, "repo", owner+"/"+repo)
 		return
 	}
-	// TODO(TFAC-1159): owner/repo is the name the verb used, which can be a
-	// name a repository rename already moved past. The artifact is then keyed
-	// on it, and the same pull request recorded under its current name is a
-	// second row.
-	a := domain.NewPullRequestArtifact(
+	// Under the registry's name, before the action is built from it: the
+	// action's target is what the touched entity resolves through, and the
+	// touch takes the artifact's node id only when the two targets agree.
+	a := c.inRegistryName(ctx, domain.NewPullRequestArtifact(
 		owner+"/"+repo, number, nodeID, head, base, htmlURL, title, body, draft,
-	)
+	))
 	// to=the created state (draft/open) so the feed can read "created as draft".
 	act := githubAction(a, domain.ActionPRCreated, "", a.State, c.githubCredential())
 	// The node id is what the reconciler's backstop matches this row to the

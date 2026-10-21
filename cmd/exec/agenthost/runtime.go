@@ -48,6 +48,12 @@ type Runtime interface {
 	// surface speaks names throughout — this is where one stops being a name.
 	GetRepo(ctx context.Context, slug string) (*domain.Repository, error)
 
+	// RepoSlugByExternalID returns the "owner/repo" of the registry row that
+	// carries GitHub's repository id externalID on the org's current GitHub
+	// host, or "" when no row carries it. It is how a name the registry does
+	// not answer to finds the row GitHub says it means.
+	RepoSlugByExternalID(ctx context.Context, externalID string) (string, error)
+
 	TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error)
 
 	// TaskOwnRepo reports whether owner/repo is the run's own task repo — the
@@ -200,6 +206,7 @@ const (
 	opGetTask                          = "get_task"
 	opListRepos                        = "list_repos"
 	opGetRepo                          = "get_repo"
+	opRepoSlugByExternalID             = "repo_slug_by_external_id"
 	opTeamTracksRepo                   = "team_tracks_repo"
 	opTaskOwnRepo                      = "task_own_repo"
 	opGetConversationWorktreeByRepoRef = "get_conversation_worktree_by_repo_ref"
@@ -304,6 +311,17 @@ type listConversationArtifactsResult struct {
 
 type orgJiraBaseResult struct {
 	URL string `json:"url"`
+}
+
+// repoSlugByExternalIDArgs / repoSlugResult are the repo_slug_by_external_id
+// op's payloads — GitHub's repository id, and the registry name carrying it
+// ("" for none). The host is the org's, bound orchestrator-side.
+type repoSlugByExternalIDArgs struct {
+	ExternalID string `json:"external_id"`
+}
+
+type repoSlugResult struct {
+	Slug string `json:"slug,omitempty"`
 }
 
 type recordExternalWriteArgs struct {
@@ -420,6 +438,30 @@ func (r *directRuntime) GetRepo(ctx context.Context, slug string) (*domain.Repos
 		return nil, err
 	}
 	return r.stores.Repos.GetByRefSystem(ctx, r.info.OrgID, domain.RepoRefFromSlug(host, slug))
+}
+
+// RepoSlugByExternalID scans the host's identified rows rather than reading
+// one by id: it is asked only for a name the registry does not hold, and an
+// org's repositories are few enough that the scan costs nothing a dedicated
+// read would save.
+func (r *directRuntime) RepoSlugByExternalID(ctx context.Context, externalID string) (string, error) {
+	if externalID == "" {
+		return "", nil
+	}
+	host, err := r.githubHost(ctx)
+	if err != nil {
+		return "", err
+	}
+	refs, err := r.stores.Repos.ListIdentitiesSystem(ctx, r.info.OrgID, host)
+	if err != nil {
+		return "", err
+	}
+	for _, ref := range refs {
+		if ref.ExternalID == externalID && ref.Source == domain.RepoSourceGitHub {
+			return ref.Slug(), nil
+		}
+	}
+	return "", nil
 }
 
 func (r *directRuntime) TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error) {
@@ -863,6 +905,14 @@ func (r *relayRuntime) GetRepo(ctx context.Context, slug string) (*domain.Reposi
 		return nil, err
 	}
 	return res.Repo, nil
+}
+
+func (r *relayRuntime) RepoSlugByExternalID(ctx context.Context, externalID string) (string, error) {
+	var res repoSlugResult
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opRepoSlugByExternalID, repoSlugByExternalIDArgs{ExternalID: externalID}, &res); err != nil {
+		return "", err
+	}
+	return res.Slug, nil
 }
 
 func (r *relayRuntime) TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error) {
