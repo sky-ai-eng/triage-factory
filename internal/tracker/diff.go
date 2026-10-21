@@ -447,7 +447,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, usern
 // projects names the registry rows the events carry as jira_project_id and
 // old_jira_project_id (JiraEventProjects). The project key every event shows
 // is the one the read spelled (curr.ProjectKey, and prev.ProjectKey for
-// key_changed's old_project), never one parsed out of an issue key.
+// key_changed's old_project metadata), never one parsed out of an issue key.
 func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, projects JiraEventProjects, doneStatuses []domain.JiraStatusRef, comments []NewComment) []domain.Event {
 	terminal := func(snap domain.JiraSnapshot) bool {
 		return domain.ContainsStatus(doneStatuses, snap.StatusRef())

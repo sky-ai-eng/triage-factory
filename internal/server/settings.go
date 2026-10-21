@@ -250,11 +250,15 @@ type jiraStatusRuleJSON struct {
 	Canonical *jiraStatusRefJSON  `json:"canonical"`
 }
 
-// jiraProjectSettings is the per-project read shape: the key plus the four
-// rules. Armed is not a field — it is derivable from these rules by the SPA
-// and a headless caller alike.
+// jiraProjectSettings is the per-project read shape: the project's registry
+// row id, which a predicate's jira_project_id_in names it by, its key and name
+// as the registry holds them now, and the four rules. Armed is not a field —
+// it is derivable from these rules by the SPA and a headless caller alike.
+// The write shape names a project by key alone (jiraProjectWrite).
 type jiraProjectSettings struct {
+	ID         string             `json:"id"`
 	Key        string             `json:"key"`
+	Name       string             `json:"name"`
 	Pickup     jiraStatusRuleJSON `json:"pickup"`
 	InProgress jiraStatusRuleJSON `json:"in_progress"`
 	InReview   jiraStatusRuleJSON `json:"in_review"`
@@ -302,7 +306,9 @@ func toJiraProjectSettings(in []domain.JiraProjectStatusRules) []jiraProjectSett
 	out := make([]jiraProjectSettings, 0, len(in))
 	for _, p := range in {
 		out = append(out, jiraProjectSettings{
+			ID:         p.JiraProjectID,
 			Key:        p.ProjectKey,
+			Name:       p.ProjectName,
 			Pickup:     toJiraStatusRuleJSON(p.PickupMembers, domain.JiraStatusRef{}),
 			InProgress: toJiraStatusRuleJSON(p.InProgressMembers, p.InProgressCanonical),
 			InReview:   toJiraStatusRuleJSON(p.InReviewMembers, p.InReviewCanonical),

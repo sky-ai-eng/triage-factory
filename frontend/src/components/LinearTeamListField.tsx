@@ -109,6 +109,8 @@ export default function LinearTeamListField({
                 onChange={() => toggle(t.id)}
                 className="accent-warm"
               />
+              {/* gap-2 spaces the spans on screen; the space keeps the
+                  checkbox's accessible name from running key and name together. */}
               <span className="font-mono text-ui">{t.key}</span>{' '}
               <span className="text-ink-2">{t.name}</span>
             </label>

@@ -100,10 +100,10 @@ func TestRegistryFieldSchemaGeneration(t *testing.T) {
 // the identity kind of assignee_in from the event's source.
 func TestIssueLabelEventFields(t *testing.T) {
 	jira := map[string]string{
-		"assignee_in": "string_list",
-		"project":     "string",
-		"label_name":  "string",
-		"has_label":   "string",
+		"assignee_in":        "string_list",
+		"jira_project_id_in": "string_list",
+		"label_name":         "string",
+		"has_label":          "string",
 	}
 	linear := map[string]string{
 		"assignee_in":       "string_list",

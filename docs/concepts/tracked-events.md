@@ -351,7 +351,7 @@ still diffs every PR the batch read returned.
 for GitHub pull requests: one event per label added or removed since the last
 cycle. `label_name` names the label and `labels` is the issue's whole set after
 the change. Predicates can filter on `label_name`, `has_label`, `assignee_in`,
-and `project` (Jira) or `linear_team_id_in` (Linear).
+and `jira_project_id_in` (Jira) or `linear_team_id_in` (Linear).
 
 - **Jira** labels are plain strings with no id, and cannot be renamed, so they
   compare by name and the `dedup_key` is the name.
@@ -396,8 +396,20 @@ also references the project its issue sits in, by `jira_project_id`, the
 project's row in the `jira_projects` registry on the entity's site (see
 below). Every Jira event's metadata carries `issue_key`, `issue_id`,
 `project` — the project's key as the read that produced the event spelled it,
-which predicates match on — and `jira_project_id`, the project's registry row,
-which is what the router's team gate reads.
+for display — and `jira_project_id`, the project's registry row, which is
+what the router's team gate reads and what predicates match on.
+
+A handler predicate scopes to projects with `jira_project_id_in`, which names
+them by registry id (the `id` of an entry in `jira_projects` on
+`GET /api/teams/{team_id}/settings`), not by key, so a project key rename
+leaves the filter matching. A team's handlers only ever see events from
+projects the team tracks, so an empty `jira_project_id_in` matches every one
+of them, and each entry must be a project the handler's team tracks on the
+org's current Jira site. Creating, editing or promoting a handler refuses any
+other entry, a project key included, with `422 INVALID_FIELD` on
+`scope_predicate`. An edit is checked only for the entries it adds, so a
+project the team has since stopped tracking never blocks an edit that leaves
+it in place.
 
 When a tracked issue answers under a new key, the entity is renamed in the
 same cycle: its `source_id` and `url`, and the target of every artifact
@@ -414,9 +426,13 @@ to another project usually changes the issue's status too), in the same commit
 as the new snapshot. Its metadata carries the usual identity fields for the
 issue as it is now (`issue_key`, `issue_id`, `project`, `assignee`,
 `assignee_account_id`, `issue_type`, `summary`) plus `old_issue_key`,
-`old_project` and `old_jira_project_id`, and predicates can filter it on
-`project` and `old_project`. It
-is always the difference from the stored snapshot, so an entity with no
+`old_project` and `old_jira_project_id`. Predicates can filter it on
+`jira_project_id_in`, the project the issue is in now, and
+`old_jira_project_id_in`, the project it left (matching
+`old_jira_project_id`). Both are held to the handler's team's tracked
+projects, like `jira_project_id_in` on every other event, although this event
+reaches a team that tracks either of its two projects. It is always the
+difference from the stored snapshot, so an entity with no
 snapshot (one a source pause cleared) is renamed without it, the way it is
 seeded without every other event. It is the one Jira event the team gate
 passes for a team that tracks either the issue's current project or the one
