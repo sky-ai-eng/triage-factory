@@ -953,6 +953,11 @@ func (t *Tracker) learnPRNodeID(ctx context.Context, e domain.Entity, nodeID str
 	_, err := t.entities.StampExternalIDSystem(context.Background(), t.orgID, e.ID, nodeID)
 	switch {
 	case errors.Is(err, db.ErrEntityIdentityAmbiguous):
+		// TODO(TFAC-1157): fold a stub into the entity carrying its node id
+		// instead of leaving both. A stub a touch created under another name
+		// of a renamed repository is seeded and polled beside the real entity,
+		// so the pull request's events are emitted twice, and created before
+		// the rename is applied, it blocks the repository rename.
 		trackerLog.WarnContext(ctx, "another entity already carries this pull request's node id; leaving both",
 			"source_id", e.SourceID, "node_id", nodeID, "entity_id", e.ID)
 	case err != nil:
