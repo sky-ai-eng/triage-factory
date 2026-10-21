@@ -226,24 +226,31 @@ func (p LinearIssueBodyUpdatedPredicate) Matches(m LinearIssueBodyUpdatedMetadat
 // that changed with it would open a second task for the same parent. Never
 // emitted on first discovery: a parent that was already set when TF started
 // watching is not a change.
+//
+// The parents are named both ways: by UUID (old_parent_id / new_parent_id),
+// which is what new_parent_id matches, and by identifier (old_parent /
+// new_parent) for display. A filter on the identifier would stop matching
+// when the parent moves team or its team key is renamed.
 // -----------------------------------------------------------------------------
 
 type LinearIssueParentChangedMetadata struct {
 	LinearIssueIdentity
-	OldParent string `json:"old_parent"` // identifier, "" when there was none
-	NewParent string `json:"new_parent"` // identifier, "" when cleared
+	OldParentID string `json:"old_parent_id"` // UUID, "" when there was none
+	NewParentID string `json:"new_parent_id"` // UUID, "" when cleared; what new_parent_id matches
+	OldParent   string `json:"old_parent"`    // identifier, "" when there was none
+	NewParent   string `json:"new_parent"`    // identifier, "" when cleared
 }
 
 type LinearIssueParentChangedPredicate struct {
 	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
 	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
-	NewParent      *string  `json:"new_parent,omitempty" doc:"Match moves under a specific parent issue (identifier, e.g. 'ENG-12')."`
+	NewParentID    *string  `json:"new_parent_id,omitempty" doc:"Match moves under a specific parent issue, by Linear's id for it (a lowercase UUID, the new_parent_id a parent_changed event carries), not its identifier."`
 }
 
 func (p LinearIssueParentChangedPredicate) Matches(m LinearIssueParentChangedMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeUserID) &&
 		idIn(p.LinearTeamIDIn, m.LinearTeamID) &&
-		strEq(p.NewParent, m.NewParent)
+		strEq(p.NewParentID, m.NewParentID)
 }
 
 // -----------------------------------------------------------------------------

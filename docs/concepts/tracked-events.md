@@ -596,7 +596,8 @@ Every Linear event's metadata carries the issue's identity block —
 `assignee`, `assignee_user_id`, `creator`, `creator_user_id`, `title` — plus
 the fields its event adds
 (`old_status`/`new_status`, `old_priority`/`new_priority`,
-`previous_body_hash`/`body_hash`, `old_parent`/`new_parent`, `final_status`,
+`previous_body_hash`/`body_hash`, `old_parent_id`/`new_parent_id` and
+`old_parent`/`new_parent`, `final_status`,
 `last_status`, `reason`, `comment_id`/`commenter`/`commenter_user_id`/
 `commenter_user_ids`, `old_identifier`/`old_linear_team_id`/
 `old_linear_team_key`, `label_name`/`label_group`, and `labels` on
@@ -620,6 +621,14 @@ editing or promoting a handler refuses any other entry, a team key included,
 with `422 INVALID_FIELD` on `scope_predicate`. An edit is checked only for the
 entries it adds, so a Linear team the team has since stopped tracking never
 blocks an edit that leaves it in place.
+
+`parent_changed` names both parents twice: by UUID (`old_parent_id`,
+`new_parent_id`) and by identifier (`old_parent`, `new_parent`, for
+display). Its `new_parent_id` filter matches the new parent's UUID, so a
+parent that moves team or whose team key is renamed still matches; an empty
+value matches a cleared parent. A value that is not a Linear id, such as an
+identifier like `ENG-12`, is refused with `422 INVALID_FIELD` on
+`scope_predicate`.
 
 #### Identity
 

@@ -223,6 +223,48 @@ func TestLinearTeamInFaults_PlainMemberUnderRLS_Postgres(t *testing.T) {
 	}
 }
 
+// parent_changed's new_parent_id takes the parent's UUID: an identifier is
+// refused, alongside the team filter's own faults, and a UUID or an empty
+// value (a cleared parent) is stored.
+func TestEventHandlerLinearParent_RefusesAnIdentifier(t *testing.T) {
+	s := newLinearTeamInServer(t, linearTeamEng)
+	before := len(listEventHandlers(t, s, "rule"))
+
+	code, got := createLinearRule(t, s, domain.EventLinearIssueParentChanged, map[string]any{
+		"linear_team_id_in": []string{linearTeamOps},
+		"new_parent_id":     "ENG-12",
+	})
+	messages := repoInFaultMessages(t, code, got)
+	if len(messages) != 2 {
+		t.Fatalf("faults = %q, want one for the untracked team and one for the identifier", messages)
+	}
+	if !strings.HasPrefix(messages[1], "new_parent_id: ") || !strings.Contains(messages[1], `"ENG-12"`) {
+		t.Errorf("fault = %q, want it to name new_parent_id and the identifier", messages[1])
+	}
+	if after := len(listEventHandlers(t, s, "rule")); after != before {
+		t.Errorf("a refused create changed the rule count from %d to %d", before, after)
+	}
+
+	for _, parent := range []string{linearIssueUUID, ""} {
+		code, got = createLinearRule(t, s, domain.EventLinearIssueParentChanged, map[string]any{"new_parent_id": parent})
+		if code != http.StatusCreated {
+			t.Fatalf("new_parent_id %q: status = %d, want 201: %v", parent, code, got)
+		}
+		if want := fmt.Sprintf(`{"new_parent_id":%q}`, parent); got["scope_predicate_json"] != want {
+			t.Errorf("stored predicate = %v, want %s", got["scope_predicate_json"], want)
+		}
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
+		"event_type":      domain.EventLinearIssueParentChanged,
+		"name":            "scoped",
+		"scope_predicate": map[string]any{"new_parent": "ENG-12"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("new_parent: status = %d, want 400 for an unknown field: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // Every Linear event type registers the check, so none of them stores a
 // reference the team cannot match on.
 func TestLinearTeamInFaults_RegisteredForEveryLinearType(t *testing.T) {

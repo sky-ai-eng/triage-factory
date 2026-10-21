@@ -146,15 +146,17 @@ func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done
 	// Compared, and keyed, on the parent's UUID: its identifier changes when
 	// the parent moves team, which is not a change of parent, and a dedup key
 	// that changed with it would open a second task for the same one. The
-	// metadata names the parents by identifier, which is what a reader knows
-	// them by.
+	// metadata names the parents by UUID, which is what a predicate matches,
+	// and by identifier, which is what a reader knows them by.
 	if prev.ParentID != curr.ParentID {
 		key := curr.ParentID
 		if curr.ParentID == "" {
 			key = linearNoParent
 		}
 		emit(domain.EventLinearIssueParentChanged, key, events.LinearIssueParentChangedMetadata{
-			LinearIssueIdentity: id, OldParent: prev.ParentIdentifier, NewParent: curr.ParentIdentifier,
+			LinearIssueIdentity: id,
+			OldParentID:         prev.ParentID, NewParentID: curr.ParentID,
+			OldParent: prev.ParentIdentifier, NewParent: curr.ParentIdentifier,
 		})
 	}
 
