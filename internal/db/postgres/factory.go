@@ -271,6 +271,7 @@ const pgFactoryEntitySelectColumns = `
 	COALESCE(e.title, ''), COALESCE(e.url, ''),
 	COALESCE(e.snapshot_json::text, ''), COALESCE(e.description, ''),
 	e.state, e.created_at, e.last_polled_at, e.closed_at,
+	COALESCE(e.repository_id::text, ''), COALESCE(e.jira_project_id::text, ''), COALESCE(e.linear_team_id, ''),
 	(SELECT event_type FROM events WHERE org_id = e.org_id AND entity_id = e.id ORDER BY created_at DESC LIMIT 1),
 	(SELECT created_at FROM events WHERE org_id = e.org_id AND entity_id = e.id ORDER BY created_at DESC LIMIT 1)
 `
@@ -490,6 +491,7 @@ func queryFactoryEntities(ctx context.Context, q queryer, query string, args ...
 			&row.Entity.Title, &row.Entity.URL,
 			&row.Entity.SnapshotJSON, &row.Entity.Description,
 			&row.Entity.State, &row.Entity.CreatedAt, &lastPolledAt, &closedAt,
+			&row.Entity.RepositoryID, &row.Entity.JiraProjectID, &row.Entity.LinearTeamID,
 			&latestType, &latestAt,
 		); err != nil {
 			return nil, err

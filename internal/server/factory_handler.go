@@ -126,6 +126,14 @@ type factoryEntityJSON struct {
 	// latest. Bounded per-entity by factoryRecentEventsPerEntity.
 	RecentEvents []factoryRecentEventJSON `json:"recent_events,omitempty"`
 
+	// The registry row the entity belongs to: a pull request's repository,
+	// a Jira issue's project, a Linear issue's team. Only the one for the
+	// entity's source is set. The belt colors chips by it, so two chips
+	// share a hue when they share the row, whatever their keys spell.
+	RepositoryID  string `json:"repository_id,omitempty"`
+	JiraProjectID string `json:"jira_project_id,omitempty"`
+	LinearTeamID  string `json:"linear_team_id,omitempty"`
+
 	// GitHub PR fields.
 	Number    int    `json:"number,omitempty"`
 	Repo      string `json:"repo,omitempty"`
@@ -364,6 +372,9 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 			Kind:             row.Entity.Kind,
 			Title:            row.Entity.Title,
 			URL:              row.Entity.URL,
+			RepositoryID:     row.Entity.RepositoryID,
+			JiraProjectID:    row.Entity.JiraProjectID,
+			LinearTeamID:     row.Entity.LinearTeamID,
 			CurrentEventType: row.LatestEventType,
 		}
 		if row.LatestEventAt != nil {

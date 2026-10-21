@@ -102,7 +102,8 @@ const nullSentinel = "<NULL>"
 //     entity, ordered ascending; empty input is a fast path.
 //   - Entities returns the active set + closed-grace ride-along,
 //     respecting the closed-grace cutoff, and the active limit is
-//     isolated from closure pressure.
+//     isolated from closure pressure. Each GitHub row carries its
+//     repository's registry id.
 //
 // Cross-org leakage is Postgres-only (SQLite has no org_id column)
 // and lives in the backend test file directly.
@@ -427,6 +428,33 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		if closedFound != 10 {
 			t.Errorf("expected 10 closed-grace entities in snapshot, got %d", closedFound)
 		}
+	})
+
+	t.Run("Entities_CarryTheirRepositoryID", func(t *testing.T) {
+		// The belt groups a pull request's chip by its repository's
+		// registry row, so the read hands that id back with every GitHub
+		// row, and no Jira or Linear id beside it.
+		store, orgID, seed := mk(t)
+		ent := visible(t, seed, "grouped")
+
+		rows, err := store.Entities(context.Background(), orgID, 100, nil)
+		if err != nil {
+			t.Fatalf("Entities: %v", err)
+		}
+		for _, r := range rows {
+			if r.Entity.ID != ent {
+				continue
+			}
+			if r.Entity.RepositoryID == "" {
+				t.Errorf("GitHub entity %s came back without its repository id", ent)
+			}
+			if r.Entity.JiraProjectID != "" || r.Entity.LinearTeamID != "" {
+				t.Errorf("GitHub entity %s came back with a Jira project %q or Linear team %q",
+					ent, r.Entity.JiraProjectID, r.Entity.LinearTeamID)
+			}
+			return
+		}
+		t.Fatalf("entity %s missing from the belt", ent)
 	})
 
 	t.Run("Entities_ClosedGraceLimitCapsBurst", func(t *testing.T) {

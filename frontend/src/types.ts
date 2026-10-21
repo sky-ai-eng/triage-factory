@@ -1137,6 +1137,13 @@ export interface FactoryEntity {
    * events in sequence (new_commits → ci_passed) shows both transitions
    * rather than teleporting to the latest. */
   recent_events?: FactoryRecentEvent[]
+  /** The registry row the entity belongs to: a pull request's repository, a
+   *  Jira issue's project, a Linear issue's team. Only the one for the
+   *  entity's source is set. The belt groups chips by it rather than by a
+   *  name, so a renamed repository or project keeps its chips' hue. */
+  repository_id?: string
+  jira_project_id?: string
+  linear_team_id?: string
   // GitHub PR fields.
   number?: number
   repo?: string
