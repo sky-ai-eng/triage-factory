@@ -34,7 +34,7 @@ func TestProfiler_AppliesARenameTheMetaResponseRevealed(t *testing.T) {
 		case strings.HasPrefix(path, "octo/api"):
 			// The redirect GitHub serves for a renamed repository, as the Go
 			// client sees it: the body of the repository's current location.
-			_, _ = w.Write([]byte(`{"id":1296269,"full_name":"octo/platform-api","default_branch":"main","clone_url":"https://x/octo/platform-api.git"}`))
+			_, _ = w.Write([]byte(`{"id":1296269,"full_name":"octo/platform-api","owner":{"login":"octo","id":583231},"default_branch":"main","clone_url":"https://x/octo/platform-api.git"}`))
 		case strings.HasPrefix(path, "octo/web"):
 			_, _ = w.Write([]byte(`{"id":555,"full_name":"octo/web","default_branch":"main","clone_url":"https://x/octo/web.git"}`))
 		default:
@@ -56,6 +56,9 @@ func TestProfiler_AppliesARenameTheMetaResponseRevealed(t *testing.T) {
 	}
 	if got := repos.renames[0]; got.Slug() != "octo/platform-api" || got.ExternalID != "1296269" || got.Host != dbtest.TestGitHubHost {
 		t.Errorf("rename = %+v, want octo/platform-api keyed on 1296269 on %s", got, dbtest.TestGitHubHost)
+	}
+	if got := repos.renames[0].OwnerExternalID; got != "583231" {
+		t.Errorf("rename OwnerExternalID = %q, want 583231 — the owner the response named", got)
 	}
 
 	upserts := repos.upsertedByID()

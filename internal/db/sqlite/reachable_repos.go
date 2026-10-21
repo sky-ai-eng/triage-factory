@@ -44,6 +44,20 @@ func registryMatchesMirror(reg, m string) string {
 		    AND LOWER(%[1]s.owner) = LOWER(%[2]s.owner) AND LOWER(%[1]s.repo) = LOWER(%[2]s.repo)))`, reg, m)
 }
 
+// installationOnOwner is the predicate pairing an App installation row (alias
+// inst) with the account that owns a registry row (alias reg): by GitHub's
+// account id when both carry one, and by folded login only when either does
+// not, the rule registryMatchesMirror applies to the repository itself. An
+// account renamed since TF last wrote the row's owner keeps its id, so its
+// installation still pairs with the row; an installation whose account id
+// differs from the row's owner id is another account's under the same login,
+// because GitHub gives a login to one account at a time.
+func installationOnOwner(inst, reg string) string {
+	return fmt.Sprintf(`(%[1]s.account_id = %[2]s.owner_external_id
+		OR ((%[1]s.account_id IS NULL OR %[2]s.owner_external_id IS NULL)
+		    AND LOWER(%[1]s.account_login) = LOWER(%[2]s.owner)))`, inst, reg)
+}
+
 // reachableRegistryID resolves the live registry row of the entry aliased r
 // under registryMatchesMirror's rule, "" when there is none. It is two
 // subqueries rather than one OR so each is answered by a unique index
@@ -64,7 +78,7 @@ const reachableRegistryID = `COALESCE(
 // column added to the table lands in one place rather than in five SELECTs that
 // then disagree about what a reachable row is.
 const reachableColumns = `r.org_id, r.credential_class, COALESCE(r.installation_id, ''), r.host,
-	r.source, r.owner, r.repo, r.external_id, ` + reachableRegistryID + `,
+	r.source, r.owner, r.repo, r.external_id, r.owner_external_id, ` + reachableRegistryID + `,
 	r.description, r.language, r.html_url, r.pushed_at, r.private, r.observed_at`
 
 // ReplaceForInstallationSystem swaps one installation's entries for repos inside
@@ -233,10 +247,13 @@ func (s *reachableReposStore) ListReachWithoutPurposeSystem(ctx context.Context,
 // no live installation on the account at all, leaves a tracked repository
 // reportable.
 //
-// The owner account is matched to its installation by login, here and in the
-// LEFT JOIN that names the installation. The registry records no account id
-// for a repository's owner, and a drifted repository is by definition in no
-// grant the mirror holds, so no id TF stores leads from it to an account.
+// The owner account is matched to its installation through
+// installationOnOwner, here and in the LEFT JOIN that names the installation:
+// by the account id the registry row records for its owner, and by login only
+// while the row or the installation has no id. The id is what keeps a renamed
+// account's repositories classified correctly. A drifted repository is in no
+// grant listing, so nothing applies a rename of its owner account to the row's
+// owner login, while the installation's account_login follows the rename.
 func (s *reachableReposStore) ListScopeDriftSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, opts db.ListOpts) ([]domain.ScopeDriftRepository, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, 0, err
@@ -249,15 +266,15 @@ func (s *reachableReposStore) ListScopeDriftSystem(ctx context.Context, orgID, h
 	}
 	// One finding per registry row, however many teams track it: the tracking
 	// is an EXISTS rather than a join, so teams cannot multiply the rows, and
-	// the GROUP BY collapses the installations the LEFT JOIN finds for one owner
-	// login. After the rule below that can only be a selective one, and GitHub
-	// allows one installation of an App per account, so MIN over the group is
-	// the one id.
+	// the GROUP BY collapses the installations the LEFT JOIN finds for the
+	// owner account. After the rule below that can only be a selective one, and
+	// GitHub allows one installation of an App per account, so MIN over the
+	// group is the one id.
 	from := `
 		  FROM repositories reg
 		  LEFT JOIN org_github_app_installations cov
 		    ON cov.org_id = ? AND cov.removed_at IS NULL AND cov.github_host = ?
-		   AND LOWER(cov.account_login) = LOWER(reg.owner)
+		   AND ` + installationOnOwner("cov", "reg") + `
 		 WHERE reg.host = ? AND reg.retired_at IS NULL
 		   AND EXISTS (SELECT 1 FROM team_github_repos g WHERE g.repository_id = reg.id)
 		   AND EXISTS (
@@ -276,7 +293,7 @@ func (s *reachableReposStore) ListScopeDriftSystem(ctx context.Context, orgID, h
 		   AND NOT EXISTS (
 		       SELECT 1 FROM org_github_app_installations w
 		        WHERE w.org_id = ? AND w.removed_at IS NULL AND w.github_host = ?
-		          AND LOWER(w.account_login) = LOWER(reg.owner)
+		          AND ` + installationOnOwner("w", "reg") + `
 		          AND (w.repository_selection IS NULL OR w.repository_selection = ?))
 		 GROUP BY reg.id, reg.owner, reg.repo, reg.external_id`
 	args := []any{orgID, host, host, orgID, string(class), host, orgID, string(class), host, orgID, host, domain.RepositorySelectionAll}
@@ -593,11 +610,11 @@ func insertReachable(ctx context.Context, tx queryer, orgID string, rows []domai
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO reachable_repositories
 				(org_id, credential_class, installation_id, host, source, owner, repo,
-				 external_id, description, language, html_url, pushed_at, private, observed_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				 external_id, owner_external_id, description, language, html_url, pushed_at, private, observed_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT DO NOTHING
 		`, orgID, string(r.CredentialClass), nullStringValue(r.InstallationID), r.Host,
-			r.Source, r.Owner, r.Repo, nullStringValue(r.ExternalID),
+			r.Source, r.Owner, r.Repo, nullStringValue(r.ExternalID), nullStringValue(r.OwnerExternalID),
 			r.Description, r.Language, r.HTMLURL, r.PushedAt, r.Private, r.ObservedAt); err != nil {
 			return fmt.Errorf("insert reachable repository %s: %w", r.Slug(), err)
 		}
@@ -628,16 +645,17 @@ func scanReachableRepos(rows *sql.Rows, err error) ([]domain.ReachableRepository
 	out := []domain.ReachableRepository{}
 	for rows.Next() {
 		var (
-			r          domain.ReachableRepository
-			class      string
-			externalID sql.NullString
+			r                           domain.ReachableRepository
+			class                       string
+			externalID, ownerExternalID sql.NullString
 		)
 		if err := rows.Scan(&r.OrgID, &class, &r.InstallationID, &r.Host, &r.Source, &r.Owner, &r.Repo,
-			&externalID, &r.RepositoryID, &r.Description, &r.Language, &r.HTMLURL, &r.PushedAt, &r.Private, &r.ObservedAt); err != nil {
+			&externalID, &ownerExternalID, &r.RepositoryID, &r.Description, &r.Language, &r.HTMLURL, &r.PushedAt, &r.Private, &r.ObservedAt); err != nil {
 			return nil, fmt.Errorf("scan reachable_repositories: %w", err)
 		}
 		r.CredentialClass = domain.GitHubCredentialClass(class)
 		r.ExternalID = externalID.String
+		r.OwnerExternalID = ownerExternalID.String
 		out = append(out, r)
 	}
 	return out, rows.Err()

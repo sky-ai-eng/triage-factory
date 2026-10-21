@@ -29,10 +29,10 @@ func TestApplyRepoRenames_ReadsTheWholeGrant(t *testing.T) {
 	m := &Manager{repos: repos}
 
 	n, _ := m.applyRepoRenames(context.Background(), "org-1", dbtest.TestGitHubHost, []ghclient.UserRepo{
-		{ID: 1, FullName: "octo/platform-api"}, // renamed — TF still tracks octo/api
-		{ID: 2, FullName: "octo/web"},          // unchanged
-		{ID: 3, FullName: "octo/untracked"},    // granted, no row
-		{FullName: "octo/idless"},              // no id in the payload
+		{ID: 1, FullName: "octo/platform-api", Owner: ghclient.RepoOwner{ID: 583231}}, // renamed — TF still tracks octo/api
+		{ID: 2, FullName: "octo/web"},       // unchanged
+		{ID: 3, FullName: "octo/untracked"}, // granted, no row
+		{FullName: "octo/idless"},           // no id in the payload
 	})
 	if n != 1 {
 		t.Fatalf("applied = %d, want 1", n)
@@ -42,6 +42,9 @@ func TestApplyRepoRenames_ReadsTheWholeGrant(t *testing.T) {
 	}
 	if repos.renamed[0].ExternalID != "1" {
 		t.Errorf("external id = %q, want 1 — the identity a rename does not move", repos.renamed[0].ExternalID)
+	}
+	if repos.renamed[0].OwnerExternalID != "583231" {
+		t.Errorf("owner id = %q, want 583231 — the rename records the owner the grant names", repos.renamed[0].OwnerExternalID)
 	}
 	if repos.renamed[0].Source != domain.RepoSourceGitHub {
 		t.Errorf("source = %q, want %q", repos.renamed[0].Source, domain.RepoSourceGitHub)

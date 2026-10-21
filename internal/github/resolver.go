@@ -177,6 +177,31 @@ type OrgIdentityAccountResolver interface {
 	OrgIdentityAccountFor(ctx context.Context, orgID string) (OrgIdentity, bool)
 }
 
+// AccountClientResolver is the optional extension of Resolver, implemented by
+// the production resolver, for a caller that knows the account it acts on by
+// GitHub's numeric account id as well as by login: one holding a repository's
+// registry row, which records the id of the account that owns it
+// (domain.Repository.OwnerExternalID). ClientForAccount is ClientFor with the
+// account named by both halves, and tier 1 selects the installation the way
+// ClientForInstallation does: by the id whenever the installation row carries
+// one, so a client still resolves while the row's owner login lags a rename of
+// the account, and never resolves to another account's installation that took
+// the old login. An empty accountID resolves by the login alone, as ClientFor.
+type AccountClientResolver interface {
+	ClientForAccount(ctx context.Context, orgID, accountID, login string) (*Client, error)
+}
+
+// ClientForOwner is the client for the account that owns a repository whose
+// registry row the caller holds, named by the owner id the row records and its
+// owner login: through AccountClientResolver when resolver implements it, and
+// by the login through ClientFor when it does not.
+func ClientForOwner(ctx context.Context, resolver Resolver, orgID, ownerID, owner string) (*Client, error) {
+	if ar, ok := resolver.(AccountClientResolver); ok {
+		return ar.ClientForAccount(ctx, orgID, ownerID, owner)
+	}
+	return resolver.ClientFor(ctx, orgID, owner)
+}
+
 // TokenIdentityResolver is the optional extension of Resolver, implemented by
 // the production resolver, that reports the Identity of the credential TokenFor
 // would return, from the same resolution, so a caller labelling what a token
@@ -290,8 +315,10 @@ type Resolver interface {
 	// account's installation that took over the old login. Only a row with no
 	// account id falls back to the login. The tiers are ClientFor's.
 	//
-	// A caller acting on a repository keeps naming the repository's owner
-	// through ClientFor or ClientForRepo: TF knows an owner only by its login.
+	// A caller acting on a repository it knows by name names the repository's
+	// owner by login, through ClientFor or ClientForRepo. One holding the
+	// repository's registry row names the owner by the account id the row
+	// records as well (ClientForOwner).
 	ClientForInstallation(ctx context.Context, orgID string, inst domain.OrgGitHubAppInstallation) (*Client, error)
 
 	// ClientForRepo resolves a client for a repo-scoped operation on
@@ -445,18 +472,23 @@ var (
 	_ ScopedRepoResolver         = (*resolver)(nil)
 	_ RepoCoverageInvalidator    = (*resolver)(nil)
 	_ OrgIdentityAccountResolver = (*resolver)(nil)
+	_ AccountClientResolver      = (*resolver)(nil)
 )
 
 func (r *resolver) ClientFor(ctx context.Context, orgID, target string) (*Client, error) {
 	return r.clientForAccount(ctx, orgID, accountByLogin(target))
 }
 
+func (r *resolver) ClientForAccount(ctx context.Context, orgID, accountID, login string) (*Client, error) {
+	return r.clientForAccount(ctx, orgID, accountRef{ID: accountID, Login: login})
+}
+
 func (r *resolver) ClientForInstallation(ctx context.Context, orgID string, inst domain.OrgGitHubAppInstallation) (*Client, error) {
 	return r.clientForAccount(ctx, orgID, accountRef{ID: inst.AccountID, Login: inst.AccountLogin})
 }
 
-// clientForAccount is ClientFor and ClientForInstallation: the org's credential
-// for the account target names.
+// clientForAccount is ClientFor, ClientForAccount and ClientForInstallation:
+// the org's credential for the account target names.
 func (r *resolver) clientForAccount(ctx context.Context, orgID string, target accountRef) (*Client, error) {
 	oc, err := r.orgContextFor(ctx, orgID)
 	if err != nil {
@@ -1220,7 +1252,8 @@ func (r *resolver) OrgIdentityAccountFor(ctx context.Context, orgID string) (Org
 // differently: Login is the handle, which its owner can rename at any time,
 // and ID is GitHub's numeric account id, which they cannot. A caller that
 // holds only a repo owner supplies the login (accountByLogin); a caller that
-// holds the installation row supplies both (ClientForInstallation).
+// holds the installation row (ClientForInstallation) or a repository's
+// registry row with its owner's id (ClientForAccount) supplies both.
 type accountRef struct {
 	ID    string
 	Login string

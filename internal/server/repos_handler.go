@@ -838,7 +838,8 @@ func (s *Server) handleRepoRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	row, canEdit, err := s.registerRepository(r.Context(), orgID, userID, host, isAdmin, domain.RepoRef{
-		Source: entry.Source, Host: host, Owner: entry.Owner, Repo: entry.Repo, ExternalID: req.GitHubID,
+		Source: entry.Source, Host: host, Owner: entry.Owner, Repo: entry.Repo,
+		ExternalID: req.GitHubID, OwnerExternalID: entry.OwnerExternalID,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrRepoSlugOccupied) {
@@ -861,8 +862,10 @@ func (s *Server) handleRepoRegister(w http.ResponseWriter, r *http.Request) {
 // the caller may edit it.
 //
 // ref is what the reachable mirror says GitHub serves now: ref.ExternalID
-// under ref's name. Two stored states disagree with that, and each is settled
-// here by asking GitHub rather than refused for good:
+// under ref's name, owned by the account ref.OwnerExternalID names, which a
+// registration that writes the row and a restore record on it. Two stored
+// states disagree with that, and each is settled here by asking GitHub rather
+// than refused for good:
 //
 //   - Another row holds the name under a different id. The registration
 //     refuses with ErrRepoSlugOccupied, the holder is resolved by its own id

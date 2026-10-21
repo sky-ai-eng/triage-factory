@@ -1008,6 +1008,12 @@ CREATE TABLE public.prompts (
 -- name to another repository and the row's own id no longer answers (deleted,
 -- or no longer visible to the org's credential): the row keeps its id, name,
 -- provider id and everything referencing it, and stops holding the name.
+-- owner_external_id is GitHub's numeric id for the account that owns the
+-- repository, the half of the owner a rename of the account does not move; it
+-- matches the repository to the App installation on that account
+-- (org_github_app_installations.account_id). NULL until a response carrying
+-- the repository's owner object is read for a row that carries its
+-- external_id.
 CREATE TABLE public.repositories (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -1017,6 +1023,7 @@ CREATE TABLE public.repositories (
     host text NOT NULL
         CONSTRAINT repositories_host_check CHECK (host <> ''),
     external_id text,
+    owner_external_id text,
     description text,
     has_readme boolean DEFAULT false NOT NULL,
     has_claude_md boolean DEFAULT false NOT NULL,
@@ -4051,6 +4058,10 @@ CREATE TABLE public.reachable_repositories (
     -- repository when their ids agree, whatever either is called mid-rename;
     -- only when either has no id are they matched by slug.
     external_id text,
+    -- GitHub's numeric id for the account that owns the repository, read off
+    -- the same repository object; a registration from the mirror records it on
+    -- the registry row. NULL when the listing carried none.
+    owner_external_id text,
     -- The picker's display fields, mirrored because the picker is served from here
     -- rather than proxied. Empty string rather than NULL: display strings with no
     -- meaningful absent state.

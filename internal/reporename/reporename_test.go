@@ -3,6 +3,10 @@ package reporename
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -237,6 +241,51 @@ func TestApply_ResolverWithoutTheExtensionIsFine(t *testing.T) {
 		t.Errorf("applied = %d with a nil resolver, want 1", n)
 	}
 }
+
+// Resolve asks GitHub about a stored row through the credential on the account
+// that owns it, named by the owner id the row records as well as its login, and
+// the rename it applies records the owner GitHub answered with: here the
+// repository moved to another account.
+func TestResolve_AsksByTheOwnerIDAndRecordsTheNewOwner(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/repositories/1") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":1,"full_name":"globex/api","owner":{"login":"globex","id":950}}`))
+	}))
+	t.Cleanup(srv.Close)
+	resolver := &accountResolver{url: srv.URL}
+	store := &renameStore{outcomes: map[string]domain.RepoRenameOutcome{"1": {Renamed: true, From: "octo/api", To: "globex/api"}}}
+
+	held := domain.RepoRef{Source: "github", Host: testHost, Owner: "octo", Repo: "api", ExternalID: "1", OwnerExternalID: "900"}
+	res, err := Resolve(context.Background(), store, resolver, testLog, "org-1", held)
+	if err != nil || res != Renamed {
+		t.Fatalf("Resolve = %v, %v; want Renamed", res, err)
+	}
+	if want := []string{"900 octo"}; !slices.Equal(resolver.asked, want) {
+		t.Errorf("client asked for %v; want %v", resolver.asked, want)
+	}
+	if len(store.attempts) != 1 || store.attempts[0].Slug() != "globex/api" || store.attempts[0].OwnerExternalID != "950" {
+		t.Errorf("rename observations = %+v; want globex/api owned by 950", store.attempts)
+	}
+}
+
+// accountResolver is a Resolver fake implementing the account-id extension,
+// recording each account it was asked for as "<id> <login>" and handing back a
+// client for url.
+type accountResolver struct {
+	plainResolver
+	url   string
+	asked []string
+}
+
+func (r *accountResolver) ClientForAccount(_ context.Context, _, accountID, login string) (*ghclient.Client, error) {
+	r.asked = append(r.asked, accountID+" "+login)
+	return ghclient.NewClient(r.url, ""), nil
+}
+
+var _ ghclient.AccountClientResolver = (*accountResolver)(nil)
 
 // renameStore embeds the interface (nil) so any method this path does not use
 // panics loudly rather than silently returning a zero value.

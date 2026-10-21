@@ -62,6 +62,14 @@ func TestReachableRepos_SQLite(t *testing.T) {
 				}
 				return id
 			},
+			SetOwnerExternalID: func(t *testing.T, repositoryID, ownerExternalID string) {
+				t.Helper()
+				if _, err := conn.Exec(
+					`UPDATE repositories SET owner_external_id = ? WHERE id = ?`, ownerExternalID, repositoryID,
+				); err != nil {
+					t.Fatalf("set owner_external_id: %v", err)
+				}
+			},
 			TrackRepository: func(t *testing.T, repositoryID string) {
 				t.Helper()
 				if _, err := conn.Exec(

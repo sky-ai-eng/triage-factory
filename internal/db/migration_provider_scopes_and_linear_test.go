@@ -702,6 +702,44 @@ func TestMigrate_InstallationsKeyedByAccountID(t *testing.T) {
 	}
 }
 
+// The migration adds owner_external_id to repositories and to
+// reachable_repositories. Nothing stored names the account that owns a
+// repository by its id, so every existing row comes out NULL — the supported
+// "not learned yet" state, matched to its installation by login — and the
+// column takes the id the next grant listing, profile or mirror refresh
+// writes.
+func TestMigrate_ProviderScopesLeaveRepositoryOwnerIDsToBeLearned(t *testing.T) {
+	const (
+		org = runmode.LocalDefaultOrgID
+		dot = "https://github.com"
+	)
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	setOrgBaseURL(t, database, org, "github", dot)
+	mustExec(t, database, `INSERT INTO repositories (id, owner, repo, source, external_id)
+	         VALUES ('r-api', 'acme', 'api', 'github', '10')`)
+	mustExec(t, database, `INSERT INTO org_github_app_installations
+	             (installation_id, org_id, account_type, account_id, account_login, github_host)
+	         VALUES ('1', ?, 'Organization', '500', 'acme', ?)`, org, dot)
+	mustExec(t, database, `INSERT INTO reachable_repositories (org_id, credential_class, installation_id, owner, repo, external_id)
+	         VALUES (?, 'byo_app', '1', 'acme', 'api', '10')`, org)
+
+	migrateProviderScopes(t, database)
+
+	for _, table := range []string{"repositories", "reachable_repositories"} {
+		if n := queryInt(t, database, `SELECT COUNT(*) FROM `+table); n != 1 {
+			t.Fatalf("%s rows = %d; want the fixture's 1", table, n)
+		}
+		if n := queryInt(t, database, `SELECT COUNT(*) FROM `+table+` WHERE owner_external_id IS NOT NULL`); n != 0 {
+			t.Errorf("%s rows with an owner id = %d; want none — no stored value names the account by id", table, n)
+		}
+	}
+	mustExec(t, database, `UPDATE repositories SET owner_external_id = '500' WHERE id = 'r-api'`)
+	if got := queryString(t, database, `SELECT owner_external_id FROM repositories WHERE id = 'r-api'`); got != "500" {
+		t.Errorf("owner_external_id after a write = %q; want 500", got)
+	}
+}
+
 // The migration takes 'completed' out of conversations.status. A verdict parks
 // the row `open`, and completed_at is what makes an `open` row concluded, so
 // the stamp has to survive the rewrite — and a row the old terminal write left

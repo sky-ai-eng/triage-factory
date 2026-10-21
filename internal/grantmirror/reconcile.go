@@ -358,17 +358,20 @@ func (r *Reconciler) reconcileInstallation(ctx context.Context, orgID string, cl
 			Source:         domain.RepoSourceGitHub,
 			Owner:          owner,
 			Repo:           name,
-			// The listing returns whole repository objects, so the id and the
-			// display fields cost nothing here. The id is what lets a cache entry
-			// and a registry row be matched when their slugs momentarily disagree
-			// mid-rename; the rest is what the picker renders, which is why it is
+			// The listing returns whole repository objects, so the ids and the
+			// display fields cost nothing here. The repository id is what lets a
+			// cache entry and a registry row be matched when their slugs
+			// momentarily disagree mid-rename, and the owner's id is what a
+			// registration from the mirror records for the account that owns
+			// it; the rest is what the picker renders, which is why it is
 			// mirrored rather than re-fetched at read time.
-			ExternalID:  repo.ExternalID(),
-			Description: repo.Description,
-			Language:    repo.Language,
-			HTMLURL:     repo.HTMLURL,
-			PushedAt:    repo.PushedAt,
-			Private:     repo.Private,
+			ExternalID:      repo.ExternalID(),
+			OwnerExternalID: repo.OwnerExternalID(),
+			Description:     repo.Description,
+			Language:        repo.Language,
+			HTMLURL:         repo.HTMLURL,
+			PushedAt:        repo.PushedAt,
+			Private:         repo.Private,
 		})
 	}
 

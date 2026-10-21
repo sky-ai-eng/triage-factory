@@ -11,13 +11,15 @@
 -- issue key are keyed on the issue's id, one live App installation per account
 -- is keyed on the account's id rather than its login, a placement override
 -- references its repository's registry row rather than its name, an
--- audit-ledger row references the entity or repository it was about, Linear
--- becomes a tracked source, and nine smaller changes ride along: the org GitHub
--- App's unusable state, the claim's source manifest, the retirement of the
--- 'completed' conversation status, node ids on artifacts and audit-ledger rows,
--- the table of rate-limit readings, the principal a deployment-operator grant
--- is bound to, the removal of the unused poller_state table, and the GitHub
--- account id on a pending bind and on the org PAT's identity.
+-- audit-ledger row references the entity or repository it was about, a
+-- repository row and a reachable entry record GitHub's id for the account that
+-- owns the repository, Linear becomes a tracked source, and nine smaller
+-- changes ride along: the org GitHub App's unusable state, the claim's source
+-- manifest, the retirement of the 'completed' conversation status, node ids on
+-- artifacts and audit-ledger rows, the table of rate-limit readings, the
+-- principal a deployment-operator grant is bound to, the removal of the unused
+-- poller_state table, and the GitHub account id on a pending bind and on the
+-- org PAT's identity.
 --
 -- NO TRANSACTION because rebuilding a table other tables reference needs
 -- foreign keys off, and PRAGMA foreign_keys is a no-op inside a transaction:
@@ -1754,6 +1756,27 @@ UPDATE external_actions
                      THEN substr(external_actions.target, 1, instr(external_actions.target, '#') - 1)
                      ELSE external_actions.target END))
  WHERE provider = 'github' AND entity_id IS NULL;
+
+-- ===========================================================================
+-- 9. The account that owns a repository, by id
+-- ===========================================================================
+--
+-- owner_external_id is GitHub's numeric id for the account that owns the
+-- repository: the half of the owner a rename of the account does not move,
+-- where owner is the login. It is what matches a tracked repository to the App
+-- installation on its owner account (org_github_app_installations.account_id),
+-- which the scope-drift finding needs for a repository no grant lists, since
+-- no grant listing then applies a rename of the account to the row's owner.
+-- The login stands in only while either side has no id.
+--
+-- A registry row learns it with its external_id: from the poller's grant
+-- listing, the profiler's repository read, a rename, and a registration from
+-- the reachable mirror, whose entries carry it from the same listings. Nothing
+-- stored holds a GitHub account id for a repository, so no row is backfilled:
+-- every existing row and entry starts NULL, and the next grant listing,
+-- profile or mirror refresh fills it.
+ALTER TABLE repositories ADD COLUMN owner_external_id TEXT;
+ALTER TABLE reachable_repositories ADD COLUMN owner_external_id TEXT;
 
 DROP TABLE org_scope;
 DROP TABLE host_case;
