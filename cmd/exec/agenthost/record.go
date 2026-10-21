@@ -8,6 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entityscope"
+	"github.com/sky-ai-eng/triage-factory/internal/memoryentities"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -352,14 +353,14 @@ func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info Conver
 // (conversation_id, entity_id, role='touched') row. Shared by the write funnel
 // (recordTouchInfo) and the addressed-read path (Runtime.RecordReadTouch).
 //
-// Best-effort throughout: a resolve or record failure is logged and swallowed
-// so it never fails the agent's already-applied write or the read that
-// triggered it — the entity self-heals on a later touch or poll, and the touch
-// row on the next addressed hit. It MUST run outside any audit tx: local mode
-// holds the single SQLite connection for the life of a synthetic-claims tx, so
-// these ...System (admin-pool) writes inside that closure would deadlock. Every
-// funnel caller invokes it only after withWriteInfo returns; the read path
-// carries no tx.
+// Best-effort throughout: a resolve or record failure is logged, counted
+// (memoryentities.CountSkippedLink) and swallowed so it never fails the agent's
+// already-applied write or the read that triggered it — the entity self-heals
+// on a later touch or poll, and the touch row on the next addressed hit. It
+// MUST run outside any audit tx: local mode holds the single SQLite connection
+// for the life of a synthetic-claims tx, so these ...System (admin-pool)
+// writes inside that closure would deadlock. Every funnel caller invokes it
+// only after withWriteInfo returns; the read path carries no tx.
 // It returns the entity it resolved (empty for a skipped or failed resolve) so
 // a later consumer in the same funnel call can reuse it rather than resolving
 // the same key again; callers with no such consumer ignore the result.
@@ -368,6 +369,7 @@ func recordEntityTouch(ctx context.Context, stores db.Stores, info ConversationI
 	if err != nil {
 		agenthostLog.Warn("touched-entity resolve failed (will retry on next poll)",
 			"conversation", info.ConversationID, "target", c.target, "error", err)
+		memoryentities.CountSkippedLink(ctx, info.OrgID, domain.MemoryRoleTouched, c.provider, err)
 		return ""
 	}
 	if id == "" || stores.TaskMemory == nil {
@@ -375,6 +377,7 @@ func recordEntityTouch(ctx context.Context, stores db.Stores, info ConversationI
 	}
 	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, info.OrgID, info.ConversationID, id, domain.MemoryRoleTouched); err != nil {
 		agenthostLog.Warn("touched-entity record failed", "conversation", info.ConversationID, "entity", id, "error", err)
+		memoryentities.CountSkippedLink(ctx, info.OrgID, domain.MemoryRoleTouched, c.provider, err)
 	}
 	return id
 }
@@ -594,6 +597,7 @@ func loadEntityMemory(ctx context.Context, stores db.Stores, info ConversationIn
 		// next addressed hit, and on the sidecar a dropped relay costs one row.
 		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, info.OrgID, info.ConversationID, entity.ID, domain.MemoryRoleTouched); err != nil {
 			agenthostLog.Warn("memory-load touch record failed", "conversation", info.ConversationID, "entity", entity.ID, "error", err)
+			memoryentities.CountSkippedLink(ctx, info.OrgID, domain.MemoryRoleTouched, entity.Source, err)
 		}
 	}
 	return res, nil

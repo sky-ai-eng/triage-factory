@@ -30,7 +30,9 @@ var attachLog = logging.Component("memoryentities")
 //
 // Best-effort and non-fatal throughout: it runs after the conversation_memory
 // upsert has already landed, so a join-row failure is logged and skipped, never
-// aborts the caller.
+// aborts the caller. A produced link skipped that way, or because no entity
+// carries the artifact's object and none can be created, is also counted
+// (CountSkippedLink).
 //
 // The primary attach is unconditional even though the upsert is not — the join
 // row is what a later memory write on this conversation becomes reachable
@@ -54,7 +56,8 @@ var attachLog = logging.Component("memoryentities")
 // exists: the artifact does not record the Linear team or the Jira project its
 // issue sits in, and such an entity is created with one. The write's own touch
 // creates it from the response the verb read, so a Linear or Jira artifact
-// finds no entity here only when that touch failed, which is logged.
+// finds no entity here only when that touch failed, which is logged and
+// counted.
 //
 // A nil store is an absent capability, not an error, and the two cases are not
 // the same: a nil TaskMemory is nowhere to write, so nothing is attached at all
@@ -92,6 +95,7 @@ func Attach(ctx context.Context, stores db.Stores, orgID, conversationID, primar
 		if err != nil {
 			attachLog.Warn("resolve produced entity scope for conversation memory failed",
 				"conversation", conversationID, "provider", a.Provider, "target", a.Target, "error", err)
+			CountSkippedLink(ctx, orgID, domain.MemoryRoleProduced, ref.Source, err)
 			continue
 		}
 		if scope == "" || a.Scope != scope || (keyScope != "" && keyScope != scope) {
@@ -102,10 +106,12 @@ func Attach(ctx context.Context, stores db.Stores, orgID, conversationID, primar
 		if err != nil || ent == nil {
 			attachLog.Warn("resolve produced entity for conversation memory failed",
 				"conversation", conversationID, "provider", a.Provider, "target", a.Target, "error", err)
+			CountSkippedLink(ctx, orgID, domain.MemoryRoleProduced, ref.Source, err)
 			continue
 		}
 		if err := taskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, ent.ID, domain.MemoryRoleProduced); err != nil {
 			attachLog.Warn("attach produced entity to conversation memory failed", "conversation", conversationID, "entity", ent.ID, "error", err)
+			CountSkippedLink(ctx, orgID, domain.MemoryRoleProduced, ref.Source, err)
 		}
 	}
 }

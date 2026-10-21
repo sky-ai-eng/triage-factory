@@ -366,8 +366,10 @@ func TestAttach_RepoLevelTargetsSkipped(t *testing.T) {
 // entity without moving it back; one keyed on the issue key, recorded on
 // another site, or about an issue no entity carries yet attaches nothing and
 // mints nothing — the artifact does not record the project an entity would be
-// created in.
+// created in. Only the last is a link the attach owed and could not write, so
+// it is the only one counted.
 func TestAttach_JiraArtifactsResolveByIssueID(t *testing.T) {
+	skips := linkSkips(t)
 	database := newTestDB(t)
 	site := testScope("jira")
 	if _, err := database.Exec(`
@@ -415,6 +417,40 @@ func TestAttach_JiraArtifactsResolveByIssueID(t *testing.T) {
 	if n != 2 {
 		t.Errorf("join rows = %d, want 2 (primary and the moved issue)", n)
 	}
+	assertSkips(t, skips, map[skipKey]int64{{domain.MemoryRoleProduced, "jira", skipNoEntity}: 1})
+}
+
+// TestAttach_CountsAFailedResolve: a produced artifact whose entity resolve
+// fails is counted as an error, and the primary row still lands.
+func TestAttach_CountsAFailedResolve(t *testing.T) {
+	skips := linkSkips(t)
+	database := newTestDB(t)
+	seedConversation(t, database, "r-resolve")
+	entA := primaryEntity(t, database, "r-resolve")
+	seedProducedPR(t, database, "r-resolve", "o/r", 77, "https://github.com/o/r/pull/77")
+
+	failing := sqlitestore.New(database)
+	failing.Entities = failingEntityStore{EntityStore: failing.Entities}
+	Attach(context.Background(), failing, runmode.LocalDefaultOrgID, "r-resolve", entA.ID)
+
+	if role := roleFor(t, database, "r-resolve", entA.ID); role != domain.MemoryRolePrimary {
+		t.Errorf("primary role = %q, want %q despite the resolve failure", role, domain.MemoryRolePrimary)
+	}
+	if ent := entityBySource(t, database, "github", "o/r#77"); ent != nil {
+		t.Errorf("failed resolve minted an entity: %+v", ent)
+	}
+	assertSkips(t, skips, map[skipKey]int64{{domain.MemoryRoleProduced, "github", skipError}: 1})
+}
+
+// failingEntityStore fails GetByExternalIDSystem, the first read a produced
+// artifact carrying a provider id resolves through; every other method
+// delegates to the embedded real store.
+type failingEntityStore struct {
+	db.EntityStore
+}
+
+func (failingEntityStore) GetByExternalIDSystem(context.Context, string, string, string, string) (*domain.Entity, error) {
+	return nil, errors.New("entity read failed")
 }
 
 // TestAttach_ListFailureLeavesPrimaryIntact: when the artifact listing fails,
