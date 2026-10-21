@@ -535,6 +535,43 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 	})
 
+	t.Run("Rename_moves_the_clone_url", func(t *testing.T) {
+		// Cold restores, `workspace add` and the bare-clone bootstrap clone
+		// from the stored clone URL, so a rename that left it would put the
+		// old name back into every checkout made from it. Both forms GitHub
+		// reports move; one that does not spell the old slug on the host, or
+		// none at all, is left as it was.
+		s, orgID, _ := mk(t)
+		cases := []struct {
+			owner, from, to, externalID string
+			cloneURL, want              string
+		}{
+			{"octo", "https-repo", "https-repo-2", "201", "https://github.com/octo/https-repo.git", "https://github.com/octo/https-repo-2.git"},
+			{"octo", "ssh-repo", "ssh-repo-2", "202", "git@github.com:octo/ssh-repo.git", "git@github.com:octo/ssh-repo-2.git"},
+			{"octo", "mirrored", "mirrored-2", "203", "https://mirror.example/octo/mirrored.git", "https://mirror.example/octo/mirrored.git"},
+			{"octo", "unprofiled", "unprofiled-2", "204", "", ""},
+		}
+		for _, c := range cases {
+			if _, err := s.Repos.UpsertSystem(ctx, orgID, domain.Repository{
+				Host: TestGitHubHost, Owner: c.owner, Repo: c.from, ExternalID: c.externalID, CloneURL: c.cloneURL,
+			}); err != nil {
+				t.Fatalf("seed %s/%s: %v", c.owner, c.from, err)
+			}
+			if _, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+				Host: TestGitHubHost, Owner: c.owner, Repo: c.to, ExternalID: c.externalID,
+			}); err != nil {
+				t.Fatalf("RenameSystem %s/%s -> %s: %v", c.owner, c.from, c.to, err)
+			}
+			got, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef(c.owner+"/"+c.to))
+			if err != nil || got == nil {
+				t.Fatalf("read %s/%s after the rename: got=%v err=%v", c.owner, c.to, got, err)
+			}
+			if got.CloneURL != c.want {
+				t.Errorf("%s/%s clone url = %q, want %q", c.owner, c.to, got.CloneURL, c.want)
+			}
+		}
+	})
+
 	t.Run("Rename_is_idempotent", func(t *testing.T) {
 		// The second detection of the same rename — a retry, a second poller,
 		// the next cycle — finds the slug already current. That is a no-op and

@@ -138,7 +138,7 @@ func (s *repoStore) RenameSystem(ctx context.Context, orgID string, observed dom
 			}
 		}
 
-		if err := renameRepositoryRow(ctx, tx, source, from, observed); err != nil {
+		if err := renameRepositoryRow(ctx, tx, source, renamed, observed); err != nil {
 			return err
 		}
 		if err := rewriteSlugDerivedKeys(ctx, tx, source, observed.Host, from, to); err != nil {
@@ -154,8 +154,9 @@ func (s *repoStore) RenameSystem(ctx context.Context, orgID string, observed dom
 }
 
 // identityRow is one repository row carrying the provider identity a rename
-// keys on: its registry id and the slug it is stored under.
-type identityRow struct{ id, slug string }
+// keys on: its registry id, the slug it is stored under, and its clone URL
+// ("" for none), which spells the slug too.
+type identityRow struct{ id, slug, cloneURL string }
 
 // storedRowsForIdentity returns every repository row carrying one provider
 // identity. More than one is a corrupt state rather than a shape the caller
@@ -163,7 +164,7 @@ type identityRow struct{ id, slug string }
 // silently picking a row.
 func storedRowsForIdentity(ctx context.Context, q queryer, source, host, externalID string) ([]identityRow, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, owner, repo FROM repositories
+		SELECT id, owner, repo, COALESCE(clone_url, '') FROM repositories
 		 WHERE source = ? AND host = ? AND external_id = ?
 		 ORDER BY owner, repo
 	`, source, host, externalID)
@@ -173,11 +174,11 @@ func storedRowsForIdentity(ctx context.Context, q queryer, source, host, externa
 	defer rows.Close()
 	var out []identityRow
 	for rows.Next() {
-		var id, owner, repo string
-		if err := rows.Scan(&id, &owner, &repo); err != nil {
+		var id, owner, repo, cloneURL string
+		if err := rows.Scan(&id, &owner, &repo, &cloneURL); err != nil {
 			return nil, err
 		}
-		out = append(out, identityRow{id: id, slug: owner + "/" + repo})
+		out = append(out, identityRow{id: id, slug: owner + "/" + repo, cloneURL: cloneURL})
 	}
 	return out, rows.Err()
 }
@@ -279,14 +280,23 @@ func absorbBareRepository(ctx context.Context, q queryer, occupant slugOccupant,
 // reference elsewhere points at that id, this UPDATE is the entire rename as
 // far as the tracked set, the worktree ledger and the pinned lists are
 // concerned.
-func renameRepositoryRow(ctx context.Context, q queryer, source, from string, to domain.RepoRef) error {
-	fromOwner, fromRepo := splitRepoSlug(from)
+//
+// The clone URL moves with them. It spells the slug, and everything that
+// clones or restores a checkout clones from it, so left alone it would put the
+// old name back into every checkout made until profiling next rewrites it.
+// One it cannot read as the old slug's clone URL is left as it stands.
+func renameRepositoryRow(ctx context.Context, q queryer, source string, renamed identityRow, to domain.RepoRef) error {
+	fromOwner, fromRepo := splitRepoSlug(renamed.slug)
+	var cloneURL sql.NullString
+	if u, ok := domain.RewriteRepoCloneURL(renamed.cloneURL, to.Host, renamed.slug, to.Slug()); ok {
+		cloneURL = sql.NullString{String: u, Valid: true}
+	}
 	if _, err := q.ExecContext(ctx, `
 		UPDATE repositories
-		   SET owner = ?, repo = ?, updated_at = datetime('now')
+		   SET owner = ?, repo = ?, clone_url = COALESCE(?, clone_url), updated_at = datetime('now')
 		 WHERE source = ? AND host = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
-	`, to.Owner, to.Repo, source, to.Host, fromOwner, fromRepo); err != nil {
-		return fmt.Errorf("rename repositories %s -> %s: %w", from, to.Slug(), err)
+	`, to.Owner, to.Repo, cloneURL, source, to.Host, fromOwner, fromRepo); err != nil {
+		return fmt.Errorf("rename repositories %s -> %s: %w", renamed.slug, to.Slug(), err)
 	}
 	return nil
 }
