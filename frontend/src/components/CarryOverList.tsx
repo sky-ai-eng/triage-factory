@@ -9,6 +9,10 @@ type Action = 'queue' | 'claim' | 'done'
 type Bucket = 'assigned' | 'available'
 
 interface StockTicket {
+  /** The ticket's entity: what the action routes take, and what every piece
+   *  of per-row state here is keyed by. issue_key is for display; a ticket
+   *  whose issue moves keeps its entity_id and answers under a new key. */
+  entity_id: string
   issue_key: string
   summary: string
   status: string
@@ -28,10 +32,12 @@ interface StockResponse {
   available: StockTicket[]
 }
 
-/** One row of a carry-over batch's per-item accounting. Every submitted key
- *  comes back exactly once, ok either way, so applied + failed = submitted. */
+/** One row of a carry-over batch's per-item accounting. Every submitted
+ *  entity id comes back exactly once, ok either way, so applied + failed =
+ *  submitted. issue_key is absent when the id named no ticket. */
 interface StockItemResult {
-  issue_key: string
+  entity_id: string
+  issue_key?: string
   ok: boolean
   errors?: { reason: string; message: string; field?: string }[]
 }
@@ -56,6 +62,7 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
   const [polling, setPolling] = useState(true)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
+  // Selections and failures are keyed by entity_id.
   const [selections, setSelections] = useState<Record<string, Action>>({})
   // Per-row error messages from the last POST. Cleared when the user changes a
   // selection on that row so stale errors don't linger after a retry attempt.
@@ -124,8 +131,8 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
       setSelections((prev) => {
         const next = { ...prev }
         for (const t of [...assignedFetched, ...availableFetched]) {
-          if (t.prefilled_action && next[t.issue_key] === undefined) {
-            next[t.issue_key] = t.prefilled_action as Action
+          if (t.prefilled_action && next[t.entity_id] === undefined) {
+            next[t.entity_id] = t.prefilled_action as Action
           }
         }
         return next
@@ -161,21 +168,21 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
     [fetchStock],
   )
 
-  const toggle = (issueKey: string, action: Action) => {
+  const toggle = (entityId: string, action: Action) => {
     setSelections((prev) => {
       const next = { ...prev }
-      if (next[issueKey] === action) {
-        delete next[issueKey]
+      if (next[entityId] === action) {
+        delete next[entityId]
       } else {
-        next[issueKey] = action
+        next[entityId] = action
       }
       return next
     })
     // Changing a selection invalidates any prior failure message on this row.
     setFailures((prev) => {
-      if (!prev[issueKey]) return prev
+      if (!prev[entityId]) return prev
       const next = { ...prev }
-      delete next[issueKey]
+      delete next[entityId]
       return next
     })
   }
@@ -193,17 +200,17 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
       // writes, and a user who picked all three should not have three bursts
       // of upstream calls racing each other.
       const byAction = new Map<Action, string[]>()
-      for (const [issueKey, action] of Object.entries(selections)) {
-        byAction.set(action, [...(byAction.get(action) ?? []), issueKey])
+      for (const [entityId, action] of Object.entries(selections)) {
+        byAction.set(action, [...(byAction.get(action) ?? []), entityId])
       }
       let applied = 0
       const failures: StockItemResult[] = []
-      for (const [action, issueKeys] of byAction) {
+      for (const [action, entityIds] of byAction) {
         try {
           const body = await apiJSON<StockBatchResponse>(`/api/jira/stock/${action}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ issue_keys: issueKeys, team_id: team }),
+            body: JSON.stringify({ entity_ids: entityIds, team_id: team }),
           })
           applied += body.applied
           failures.push(...body.results.filter((row) => !row.ok))
@@ -215,8 +222,8 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
           // batch into per-row failures instead.
           const message = httpErrorMessage(err, `Could not ${action} these tickets.`)
           failures.push(
-            ...issueKeys.map((issue_key) => ({
-              issue_key,
+            ...entityIds.map((entity_id) => ({
+              entity_id,
               ok: false,
               errors: [{ reason: 'INTERNAL', message }],
             })),
@@ -236,20 +243,20 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
       toast.warning(
         `Applied ${applied} ticket${applied === 1 ? '' : 's'}; ${failures.length} failed — see inline errors`,
       )
-      const failedKeys = new Set(failures.map((f) => f.issue_key))
-      const appliedKeys = new Set(Object.keys(selections).filter((k) => !failedKeys.has(k)))
-      setAssigned((prev) => (prev ?? []).filter((t) => !appliedKeys.has(t.issue_key)))
-      setAvailable((prev) => (prev ?? []).filter((t) => !appliedKeys.has(t.issue_key)))
+      const failedIds = new Set(failures.map((f) => f.entity_id))
+      const appliedIds = new Set(Object.keys(selections).filter((id) => !failedIds.has(id)))
+      setAssigned((prev) => (prev ?? []).filter((t) => !appliedIds.has(t.entity_id)))
+      setAvailable((prev) => (prev ?? []).filter((t) => !appliedIds.has(t.entity_id)))
       setSelections((prev) => {
         const next: Record<string, Action> = {}
-        for (const [k, v] of Object.entries(prev)) {
-          if (!appliedKeys.has(k)) next[k] = v
+        for (const [id, v] of Object.entries(prev)) {
+          if (!appliedIds.has(id)) next[id] = v
         }
         return next
       })
       setFailures(
         failures.reduce<Record<string, string>>((acc, f) => {
-          acc[f.issue_key] = f.errors?.[0]?.message ?? 'Could not apply this ticket.'
+          acc[f.entity_id] = f.errors?.[0]?.message ?? 'Could not apply this ticket.'
           return acc
         }, {}),
       )
@@ -405,7 +412,7 @@ function Section({
   tickets: StockTicket[]
   selections: Record<string, Action>
   failures: Record<string, string>
-  onToggle: (issueKey: string, action: Action) => void
+  onToggle: (entityId: string, action: Action) => void
 }) {
   return (
     <div>
@@ -416,11 +423,11 @@ function Section({
       <div className="space-y-0.5">
         {tickets.map((t) => (
           <TicketRow
-            key={t.issue_key}
+            key={t.entity_id}
             ticket={t}
-            selection={selections[t.issue_key]}
-            failure={failures[t.issue_key]}
-            onToggle={(action) => onToggle(t.issue_key, action)}
+            selection={selections[t.entity_id]}
+            failure={failures[t.entity_id]}
+            onToggle={(action) => onToggle(t.entity_id, action)}
           />
         ))}
       </div>

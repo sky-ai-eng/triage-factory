@@ -222,7 +222,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 	// identity (fresh install, no GitHub configured) degrades to
 	// everyone-is-other rather than failing the whole endpoint — the
 	// factory should still render for a user who's only set up Jira.
-	var ghUsername string
+	var ghUsername, jiraAccountID string
 	var eventCounts, taskCounts, lifetimeCounts map[string]int
 	var activeConversations []domain.FactoryActiveConversation
 	var entityRows []domain.FactoryEntityRow
@@ -233,6 +233,9 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 	if err := fh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		orgSet, _ := tx.Orgs.GetSettings(r.Context(), orgID)
 		ghUsername, _ = tx.Users.GetGitHubLogin(r.Context(), userID, orgSet.GitHubBaseURL)
+		// The Jira identity is keyed by the org's Jira site, and degrades the
+		// same way: none stored means no Jira ticket is "mine".
+		jiraAccountID, _, _ = tx.Users.GetJiraIdentity(r.Context(), userID, orgSet.JiraBaseURL)
 
 		// --- Throughput counters --------------------------------------
 		var e error
@@ -409,10 +412,10 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 					ej.Assignee = snap.Assignee
 				}
 			}
-			// Jira "mine" = assigned to the session user. The session user's
-			// Jira display name lives in user_jira_identities (read via
-			// UsersStore.GetJiraIdentity for the org's host); keep this empty
-			// for v1 and let the UI fall back to the other tint.
+			// Jira "mine" = assigned to the session user, compared by the
+			// stable account id their identity on the org's site carries,
+			// never by display name.
+			ej.Mine = snap.AssignedTo(jiraAccountID)
 		case "linear":
 			var snap domain.LinearSnapshot
 			if row.Entity.SnapshotJSON != "" {

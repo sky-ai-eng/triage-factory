@@ -40,6 +40,7 @@ type JiraIssueBodyUpdatedMetadata struct {
 	Project           string   `json:"project"`
 	JiraProjectID     string   `json:"jira_project_id"`
 	IssueType         string   `json:"issue_type"`
+	IssueTypeID       string   `json:"issue_type_id"`
 	Summary           string   `json:"summary"`
 	Labels            []string `json:"labels"`
 	PreviousBodyHash  string   `json:"previous_body_hash"`

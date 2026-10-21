@@ -354,20 +354,29 @@ type JiraSnapshot struct {
 	// AssigneeAccountID is the Atlassian stable identifier — accountId
 	// on Cloud, legacy key on Server / DC. Captured alongside the
 	// display name in issueToState so the assignee_in matcher has a
-	// stable comparison target. Empty on snapshots that predate the field.
+	// stable comparison target, and set on every snapshot of an assigned
+	// issue a read produces. Empty on snapshots that predate the field.
 	AssigneeAccountID string `json:"assignee_account_id,omitempty"`
 	// Reporter and ReporterAccountID are the reporter's display name and
 	// stable identifier, derived the way the assignee's are. Empty when the
 	// issue has no reporter, and on snapshots that predate the field. A
 	// reporter change emits nothing: it does not change whether the issue
 	// needs attention.
-	Reporter          string   `json:"reporter,omitempty"`
-	ReporterAccountID string   `json:"reporter_account_id,omitempty"`
-	Priority          string   `json:"priority"`
-	Labels            []string `json:"labels"`
-	IssueType         string   `json:"issue_type"`
-	ParentKey         string   `json:"parent_key"`
-	CommentCount      int      `json:"comment_count"`
+	Reporter          string `json:"reporter,omitempty"`
+	ReporterAccountID string `json:"reporter_account_id,omitempty"`
+	Priority          string `json:"priority"`
+	// PriorityID is Jira's id for the priority Priority names. An admin can
+	// rename a priority, and the id is what tells that from the issue's
+	// priority changing. Empty on snapshots that predate the field, where the
+	// comparison falls back to the name.
+	PriorityID string   `json:"priority_id,omitempty"`
+	Labels     []string `json:"labels"`
+	IssueType  string   `json:"issue_type"`
+	// IssueTypeID is Jira's id for the issue type IssueType names. Empty on
+	// snapshots that predate the field.
+	IssueTypeID  string `json:"issue_type_id,omitempty"`
+	ParentKey    string `json:"parent_key"`
+	CommentCount int    `json:"comment_count"`
 	// LastCommentID and LastCommentAt are the newest comment's, the marker
 	// the next poll reads new comments from. Empty when the issue has no
 	// comments, on snapshots that predate the fields, and while the newest
@@ -401,6 +410,44 @@ type JiraSnapshot struct {
 // against a rule's members through JiraStatusRef.SameStatus.
 func (s JiraSnapshot) StatusRef() JiraStatusRef {
 	return JiraStatusRef{ID: s.StatusID, Name: s.Status}
+}
+
+// HasAssignee reports whether the issue is assigned. Either field counts, so a
+// snapshot that predates the account id still reads as assigned.
+func (s JiraSnapshot) HasAssignee() bool {
+	return s.AssigneeAccountID != "" || s.Assignee != ""
+}
+
+// SameAssignee reports whether two snapshots name the same assignee, or are
+// both unassigned. The account ids decide when both carry one, so a display
+// name change is not a reassignment and two people who share a display name
+// are not the same assignee. The display names decide only when a side
+// predates the account id.
+func (s JiraSnapshot) SameAssignee(other JiraSnapshot) bool {
+	if s.HasAssignee() != other.HasAssignee() {
+		return false
+	}
+	if s.AssigneeAccountID != "" && other.AssigneeAccountID != "" {
+		return s.AssigneeAccountID == other.AssigneeAccountID
+	}
+	return s.Assignee == other.Assignee
+}
+
+// AssignedTo reports whether the issue is assigned to the Jira user whose
+// stable id (jira.StableUserID) is accountID. An empty accountID matches
+// nothing, so an unassigned issue is never anybody's.
+func (s JiraSnapshot) AssignedTo(accountID string) bool {
+	return accountID != "" && s.AssigneeAccountID == accountID
+}
+
+// SamePriority reports whether two snapshots carry the same priority. The ids
+// decide when both carry one, so a priority renamed in Jira is not a change;
+// otherwise the names do.
+func (s JiraSnapshot) SamePriority(other JiraSnapshot) bool {
+	if s.PriorityID != "" && other.PriorityID != "" {
+		return s.PriorityID == other.PriorityID
+	}
+	return s.Priority == other.Priority
 }
 
 // LinearSnapshot is the extracted state of a Linear issue that each poll

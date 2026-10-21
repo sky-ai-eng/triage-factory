@@ -34,13 +34,15 @@ func SlackSourceID(channel, threadTS string) string {
 //
 // Jira resolves issue keys case-insensitively on every surface — the REST
 // issue endpoints and JQL alike — but always *answers* with the canonical
-// key. The poller matches a refresh back to its entity by exact source_id,
-// so an entity minted under a caller-supplied spelling that differs from
-// the canonical one can never match its own issue again: the refresh comes
-// back under the canonical key, the lookup misses, and the entity holds its
-// last snapshot forever. Nothing errors — the API call that minted it
-// succeeded, and so does every later one — which is what makes normalizing
-// at the boundary the fix rather than a validation check somewhere.
+// key. The poller matches a refresh back to its entity by issue id and renames
+// the entity to the key the read answers with, so a non-canonical source_id
+// would be rewritten by the next refresh. Until then it is a key Jira never
+// shows, and every lookup by key (GetBySource with the key an agent or a
+// request names) misses the row under its canonical spelling; an entity that
+// has not learned its issue id yet is read back by key as well, and the
+// answer, under the canonical key, matches nothing. Nothing errors, which is
+// what makes normalizing at the boundary the fix rather than a validation
+// check somewhere.
 func NormalizeJiraKey(key string) string {
 	return strings.ToUpper(strings.TrimSpace(key))
 }
@@ -203,6 +205,19 @@ type Entity struct {
 	// transition. Populated on every read; callers thread it straight back
 	// into their next CAS call.
 	PollSeq int64 `json:"poll_seq"`
+}
+
+// JiraIssueRef is what a Jira REST call names a Jira entity's issue by: its
+// issue id, which a move or a project key rename leaves alone, where the key
+// would name another issue once this one moved. A local entity carried over
+// from before issue ids were recorded has no id until a read reaches it, and
+// is named by its key until then. Logs, messages and audit rows still name the
+// issue by its key, the display value.
+func (e Entity) JiraIssueRef() string {
+	if e.ExternalID != "" {
+		return e.ExternalID
+	}
+	return e.SourceID
 }
 
 // EntityContainer is what a provider's response says an object sits in, which

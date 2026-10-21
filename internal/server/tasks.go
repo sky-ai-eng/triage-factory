@@ -1591,14 +1591,14 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 	// jira_rules_select RLS, matching the claim path. The user's Jira account
 	// id is what tells a ticket that was already theirs from one the claim
 	// assigned to them.
-	var rule *domain.JiraProjectStatusRules
+	var target jiraTaskTarget
 	var accountID string
 	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		orgSet, e := tx.Orgs.GetSettings(ctx, orgID)
 		if e != nil {
 			return fmt.Errorf("load org settings: %w", e)
 		}
-		rule = lookupJiraRuleForTask(ctx, tx, orgID, domain.EntityScope("jira", orgSet), task)
+		target = lookupJiraTaskTarget(ctx, tx, orgID, domain.EntityScope("jira", orgSet), task)
 		accountID, _, e = tx.Users.GetJiraIdentity(ctx, userID, orgSet.JiraBaseURL)
 		return e
 	}); err != nil {
@@ -1606,15 +1606,16 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 		return
 	}
 	var inProgressMembers []domain.JiraStatusRef
-	if rule != nil {
-		inProgressMembers = rule.InProgressMembers
+	if target.Rule != nil {
+		inProgressMembers = target.Rule.InProgressMembers
 	}
 	// Detached from the request (see syncJiraClaim): the revert outlives the
 	// response, so it uses a background context.
-	go applyJiraUnclaim(context.Background(), jiraUserClient, task.EntitySourceID, *task.SourceStatus, accountID, inProgressMembers)
+	go applyJiraUnclaim(context.Background(), jiraUserClient, target.IssueRef, task.EntitySourceID, *task.SourceStatus, accountID, inProgressMembers)
 }
 
-// applyJiraUnclaim is the write a requeue makes in Jira, as the client's user.
+// applyJiraUnclaim is the write a requeue makes in Jira, as the client's user,
+// on the issue issue names (its id; issueKey is the key, for the logs).
 // It reverses only what the claim changed, read against prior, the state the
 // claim recorded:
 //
@@ -1629,8 +1630,8 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 // reach back and undo that. Membership rather than the canonical status,
 // because a ticket moved from "In Progress" to "In Review" is still the
 // claimer's work in progress. Every failure is logged rather than returned.
-func applyJiraUnclaim(ctx context.Context, c *jira.Client, issueKey string, prior domain.SourceStatus, accountID string, ipMembers []domain.JiraStatusRef) {
-	state := c.GetClaimState(ctx, issueKey)
+func applyJiraUnclaim(ctx context.Context, c *jira.Client, issue, issueKey string, prior domain.SourceStatus, accountID string, ipMembers []domain.JiraStatusRef) {
+	state := c.GetClaimState(ctx, issue)
 	if state != nil && !state.AssignedToSelf && !state.Unassigned {
 		jiraLog.Warn("requeue guard: reassigned to someone else, skipping", "issue", issueKey)
 		return
@@ -1644,7 +1645,7 @@ func applyJiraUnclaim(ctx context.Context, c *jira.Client, issueKey string, prio
 
 	alreadyMine := prior.AssigneeID != "" && prior.AssigneeID == accountID
 	if (state == nil || state.AssignedToSelf) && !alreadyMine {
-		if err := c.Unassign(ctx, issueKey); err != nil {
+		if err := c.Unassign(ctx, issue); err != nil {
 			jiraLog.Error("failed to unassign on requeue", "issue", issueKey, "error", err)
 		}
 	}
@@ -1653,7 +1654,7 @@ func applyJiraUnclaim(ctx context.Context, c *jira.Client, issueKey string, prio
 		jiraLog.Info("requeue guard: the claim found the ticket already in progress, leaving its status", "issue", issueKey, "status", prior.StatusName)
 		return
 	}
-	if err := c.TransitionTo(ctx, issueKey, jira.Status{ID: prior.StatusID, Name: prior.StatusName}); err != nil {
+	if err := c.TransitionTo(ctx, issue, jira.Status{ID: prior.StatusID, Name: prior.StatusName}); err != nil {
 		jiraLog.Error("failed to transition back on requeue", "issue", issueKey, "status", prior.StatusName, "error", err)
 	}
 }

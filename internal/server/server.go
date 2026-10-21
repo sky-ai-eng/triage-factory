@@ -1236,9 +1236,9 @@ func (s *Server) routes() {
 	// total_count is null. Its GitHub sibling reads a mirror instead; see the
 	// handler file for why the two differ.
 	s.apiMutating("POST /api/orgs/{org_id}/jira/projects/list", s.handleJiraProjectsList)
-	s.api("GET /api/orgs/{org_id}/jira/projects/{project_key}", s.handleJiraProjectGet)
-	s.apiMutating("POST /api/orgs/{org_id}/jira/projects/{project_key}/statuses/list", s.handleJiraStatusesList)
-	s.api("GET /api/orgs/{org_id}/jira/projects/{project_key}/statuses/{status_id}", s.handleJiraStatusGet)
+	s.api("GET /api/orgs/{org_id}/jira/projects/{jira_id}", s.handleJiraProjectGet)
+	s.apiMutating("POST /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/list", s.handleJiraStatusesList)
+	s.api("GET /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/{status_id}", s.handleJiraStatusGet)
 	// The org's Linear catalog — its teams, and each team's workflow states —
 	// proxied live under the org's Linear service credential and addressed at
 	// the org, so a caller in several orgs reads each without moving their

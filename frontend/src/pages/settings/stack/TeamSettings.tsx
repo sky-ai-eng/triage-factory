@@ -139,9 +139,6 @@ const GRACE_MAX_FALLBACK = 149
 const clampToRange = (v: number, min: number, max: number): number =>
   Math.min(max, Math.max(min, v))
 
-const normProjects = (p: JiraProjectConfig[]): JiraProjectConfig[] =>
-  p.map((x) => ({ ...x, key: x.key.trim() })).filter((x) => x.key !== '')
-
 // Compared by selection key, not registry id: a repository picked from the
 // reachable list has no registry id until the save registers it.
 const sameRepos = (a: RepoRef[], b: RepoRef[]): boolean => {
@@ -360,8 +357,7 @@ export default function TeamSettings({
   }
 
   // ── Jira projects (their own replace-set PUT) ──
-  const projectsDirty =
-    JSON.stringify(normProjects(projects)) !== JSON.stringify(baseline.jira_projects ?? [])
+  const projectsDirty = JSON.stringify(projects) !== JSON.stringify(baseline.jira_projects ?? [])
   const projectsBlocked = teamProjectsBlocked(projects, jiraConnected)
   const saveProjects = async (): Promise<boolean> => {
     setSavingProjects(true)
@@ -373,7 +369,7 @@ export default function TeamSettings({
       }
       // Render what was STORED, not what was sent: the server resolved every
       // status display name from Jira on the way in.
-      const stored = normProjects(res.projects)
+      const stored = res.projects
       setBaseline((b) => ({ ...b, jira_projects: stored }))
       setProjects(stored)
       toast.success('Jira projects saved')

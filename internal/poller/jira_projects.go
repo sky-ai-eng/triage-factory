@@ -13,11 +13,12 @@ import (
 
 // syncJiraProjects brings the registry rows of every project the org's teams
 // track, armed or only watched, up to date with Jira, and reports whether it
-// wrote any. It runs before the tracker reads a single issue, so a project key
-// renamed since the last cycle is already the registry's key when the cycle's
-// rules are built, and every rule read by key — the tracker's terminal check,
-// the router gate, the deck — finds the rule under the key the issues now
-// carry.
+// wrote any. It runs before the tracker reads a single issue, so the cycle's
+// rules are built from rows that carry each project's current key and name,
+// and, for a row this read resolves, the Jira id discovery asks by. Every
+// reader matches an issue to its rule by the registry row the issue's entity
+// references, never by key, so a rename this read has not caught up with
+// changes what a project is shown as, not what matches it.
 //
 // A resolved row is read by Jira's project id, which answers with the key the
 // project has now; a row not yet resolved is read by its key, and the answer
@@ -26,10 +27,10 @@ import (
 //
 // One request per tracked project per cycle, however many teams track it. A
 // watched project is read too, though discovery never asks about it: its key
-// is what the team's settings show and what a client sends back, so it has to
-// follow a rename like an armed one. Best-effort like reporename.Apply: a
-// project Jira will not describe is left as stored, and the discovery that
-// follows reports whatever is actually wrong with it.
+// and name are what the team's settings show, and resolving it gives the
+// team's settings the Jira id its statuses are read by. Best-effort like
+// reporename.Apply: a project Jira will not describe is left as stored, and
+// the discovery that follows reports whatever is actually wrong with it.
 func (m *Manager) syncJiraProjects(ctx context.Context, client *jiraclient.Client, orgID string, rules []domain.JiraProjectStatusRules) bool {
 	if m.jiraProjects == nil {
 		return false

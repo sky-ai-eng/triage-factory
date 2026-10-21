@@ -241,7 +241,7 @@ func TestTaskClaim_GitHubTask_SkipsJiraResolver(t *testing.T) {
 // write at all, so it must NOT call ForUser — a pure queue can't be made to
 // depend on secret-store availability. The resolver is only reached by the
 // claim and done routes, so this holds even though no entity is seeded (the
-// queued key fails "ticket not found" per-row, which is irrelevant to whether
+// queued id names no ticket and fails per-row, which is irrelevant to whether
 // the resolver was consulted).
 func TestStockQueue_SkipsJiraResolver(t *testing.T) {
 	keyring.MockInit() // in-memory keychain — the sandbox has no dbus backend
@@ -255,7 +255,7 @@ func TestStockQueue_SkipsJiraResolver(t *testing.T) {
 	s.jiraResolver = res
 
 	rec := doJSON(t, s, http.MethodPost, "/api/jira/stock/queue", map[string]any{
-		"issue_keys": []string{"SKY-1"},
+		"entity_ids": []string{"e_stock_SKY-1"},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -367,7 +367,7 @@ func TestStockClaim_UserClientFailureAnsweredByWhoCanFixIt(t *testing.T) {
 			s.jiraResolver = &recordingJiraResolver{userErr: tc.err}
 
 			rec := doJSON(t, s, http.MethodPost, "/api/jira/stock/claim", map[string]any{
-				"issue_keys": []string{"SKY-1"},
+				"entity_ids": []string{"e_stock_SKY-1"},
 			})
 			assertJiraUserClientFailure(t, rec, tc.status, tc.reason, tc.bodySubstr)
 		})

@@ -18,9 +18,13 @@ import (
 // project's workflow statuses.
 //
 //   POST /api/orgs/{org_id}/jira/projects/list
-//   GET  /api/orgs/{org_id}/jira/projects/{project_key}
-//   POST /api/orgs/{org_id}/jira/projects/{project_key}/statuses/list
-//   GET  /api/orgs/{org_id}/jira/projects/{project_key}/statuses/{status_id}
+//   GET  /api/orgs/{org_id}/jira/projects/{jira_id}
+//   POST /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/list
+//   GET  /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/{status_id}
+//
+// A project is addressed by Jira's own project id (jira_id), which a key
+// rename leaves alone, and which the team write names a project being added
+// by. Its key is served for display.
 //
 // The GitHub sibling (POST /api/github/repos/list) reads a local mirror; these
 // proxy Jira live, and the difference is a property of the two estates rather
@@ -69,13 +73,15 @@ type jiraProjectListFilterKey struct {
 	Q     string `json:"q"`
 }
 
-// jiraProjectJSON is one project. Key and name and nothing else: a project
+// jiraProjectJSON is one project: Jira's id for it, which is what a client
+// names it by, and its key and name for display. Nothing else: a project
 // object from either deployment carries avatars, lead, category and a self
 // link, none of which the picker renders — and a proxy list that echoes
 // whatever the upstream sent is how a provider's shape becomes our contract.
 type jiraProjectJSON struct {
-	Key  string `json:"key"`
-	Name string `json:"name"`
+	JiraID string `json:"jira_id"`
+	Key    string `json:"key"`
+	Name   string `json:"name"`
 }
 
 // POST /api/orgs/{org_id}/jira/projects/list
@@ -110,7 +116,7 @@ func (s *Server) handleJiraProjectsList(w http.ResponseWriter, r *http.Request) 
 	}
 	items := make([]jiraProjectJSON, 0, len(upstream.Projects))
 	for _, p := range upstream.Projects {
-		items = append(items, jiraProjectJSON{Key: p.Key, Name: p.Name})
+		items = append(items, jiraProjectJSON{JiraID: p.ID, Key: p.Key, Name: p.Name})
 	}
 	next := ""
 	if upstream.NextStartAt > 0 {
@@ -119,13 +125,13 @@ func (s *Server) handleJiraProjectsList(w http.ResponseWriter, r *http.Request) 
 	httpx.WriteProxyList(w, page, items, next)
 }
 
-// GET /api/orgs/{org_id}/jira/projects/{project_key}
+// GET /api/orgs/{org_id}/jira/projects/{jira_id}
 func (s *Server) handleJiraProjectGet(w http.ResponseWriter, r *http.Request) {
 	orgID, _, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
 		return
 	}
-	key, ok := jiraPathProjectKey(w, r)
+	jiraID, ok := jiraPathProjectID(w, r)
 	if !ok {
 		return
 	}
@@ -133,16 +139,16 @@ func (s *Server) handleJiraProjectGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	project, err := client.GetProject(r.Context(), key)
+	project, err := client.GetProject(r.Context(), jiraID)
 	if jira.IsNotFound(err) {
 		httpx.NotFound(w, "jira project")
 		return
 	}
 	if err != nil {
-		writeJiraUpstream(w, orgID, "Jira project "+key, err)
+		writeJiraUpstream(w, orgID, "Jira project "+jiraID, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, jiraProjectJSON{Key: project.Key, Name: project.Name})
+	writeJSON(w, http.StatusOK, jiraProjectJSON{JiraID: project.ID, Key: project.Key, Name: project.Name})
 }
 
 // jiraStatusListRequest is the statuses list's body: the paging pair alone,
@@ -154,8 +160,8 @@ type jiraStatusListRequest struct {
 // jiraStatusListFilterKey fingerprints a statuses page token to the org and
 // the project, whose statuses the wrapped offset points into.
 type jiraStatusListFilterKey struct {
-	OrgID      string `json:"org_id"`
-	ProjectKey string `json:"project_key"`
+	OrgID  string `json:"org_id"`
+	JiraID string `json:"jira_id"`
 }
 
 // jiraStatusJSON is one workflow status. The id is what the team write takes
@@ -165,7 +171,7 @@ type jiraStatusJSON struct {
 	Name string `json:"name"`
 }
 
-// POST /api/orgs/{org_id}/jira/projects/{project_key}/statuses/list
+// POST /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/list
 //
 // Jira serves a project's statuses in one unpaged response, grouped by issue
 // type, which the client unions (jira.ProjectStatuses). The window is applied
@@ -176,7 +182,7 @@ func (s *Server) handleJiraStatusesList(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	key, ok := jiraPathProjectKey(w, r)
+	jiraID, ok := jiraPathProjectID(w, r)
 	if !ok {
 		return
 	}
@@ -187,7 +193,7 @@ func (s *Server) handleJiraStatusesList(w http.ResponseWriter, r *http.Request) 
 	}
 	var v httpx.Validation
 	page := httpx.ResolvePage(&v, req.PageRequest,
-		httpx.FilterFingerprint(jiraStatusListFilterKey{OrgID: orgID, ProjectKey: key}), 0)
+		httpx.FilterFingerprint(jiraStatusListFilterKey{OrgID: orgID, JiraID: jiraID}), 0)
 	startAt := jiraStartAtFromCursor(&v, page.Cursor)
 	refuseJiraCountOnly(&v, page)
 	if v.Flush(w, http.StatusBadRequest) {
@@ -198,13 +204,13 @@ func (s *Server) handleJiraStatusesList(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	statuses, err := client.ProjectStatuses(r.Context(), key)
+	statuses, err := client.ProjectStatuses(r.Context(), jiraID)
 	if jira.IsNotFound(err) {
 		httpx.NotFound(w, "jira project")
 		return
 	}
 	if err != nil {
-		writeJiraUpstream(w, orgID, "the workflow statuses of Jira project "+key, err)
+		writeJiraUpstream(w, orgID, "the workflow statuses of Jira project "+jiraID, err)
 		return
 	}
 	slices.SortFunc(statuses, func(a, b jira.Status) int {
@@ -223,7 +229,7 @@ func (s *Server) handleJiraStatusesList(w http.ResponseWriter, r *http.Request) 
 	httpx.WriteProxyList(w, page, items, next)
 }
 
-// GET /api/orgs/{org_id}/jira/projects/{project_key}/statuses/{status_id}
+// GET /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/{status_id}
 //
 // Jira has no read for one status of one project — /status/{id} answers
 // instance-wide and says nothing about which workflows use it — so this reads
@@ -237,7 +243,7 @@ func (s *Server) handleJiraStatusGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	key, ok := jiraPathProjectKey(w, r)
+	jiraID, ok := jiraPathProjectID(w, r)
 	if !ok {
 		return
 	}
@@ -250,13 +256,13 @@ func (s *Server) handleJiraStatusGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	statuses, err := client.ProjectStatuses(r.Context(), key)
+	statuses, err := client.ProjectStatuses(r.Context(), jiraID)
 	if jira.IsNotFound(err) {
 		httpx.NotFound(w, "jira project")
 		return
 	}
 	if err != nil {
-		writeJiraUpstream(w, orgID, "the workflow statuses of Jira project "+key, err)
+		writeJiraUpstream(w, orgID, "the workflow statuses of Jira project "+jiraID, err)
 		return
 	}
 	i := slices.IndexFunc(statuses, func(st jira.Status) bool { return st.ID == statusID })
@@ -300,17 +306,16 @@ func refuseJiraCountOnly(v *httpx.Validation, page httpx.Page) {
 	}
 }
 
-// jiraPathProjectKey reads a project key from the path. A key outside the
-// grammar the team write enforces is a 404 — no such project is addressable —
-// and is refused as sent rather than normalized, so one project has one
-// address.
-func jiraPathProjectKey(w http.ResponseWriter, r *http.Request) (string, bool) {
-	key := r.PathValue("project_key")
-	if !jiraProjectKeyRe.MatchString(key) {
+// jiraPathProjectID reads a Jira project id from the path. Anything that is
+// not one — a project key included — is a 404 rather than a lookup, so one
+// project has one address.
+func jiraPathProjectID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	jiraID := r.PathValue("jira_id")
+	if !jiraProjectIDRe.MatchString(jiraID) {
 		httpx.NotFound(w, "jira project")
 		return "", false
 	}
-	return key, true
+	return jiraID, true
 }
 
 // jiraSystemClient resolves the org's Jira service credential into a client.

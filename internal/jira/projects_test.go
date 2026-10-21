@@ -302,3 +302,25 @@ func TestGetProject_NotFound(t *testing.T) {
 		t.Fatalf("err = %v, want a 404 IsNotFound recognizes", err)
 	}
 }
+
+// A project's statuses are deduplicated across issue types by id. Two
+// statuses that share a name are two statuses, since a rule names a status by
+// its id, and one that carries no id is deduplicated by its name.
+func TestProjectStatuses_DeduplicatesByID(t *testing.T) {
+	srv, seen := projectServer(t, `[
+		{"statuses":[{"id":"1","name":"To Do"},{"id":"3","name":"Done"}]},
+		{"statuses":[{"id":"1","name":"To Do"},{"id":"10200","name":"Done"},{"name":"Legacy"}]},
+		{"statuses":[{"name":"Legacy"}]}
+	]`)
+	got, err := dcClient(srv.URL).ProjectStatuses(t.Context(), "10000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Status{{ID: "1", Name: "To Do"}, {ID: "3", Name: "Done"}, {ID: "10200", Name: "Done"}, {Name: "Legacy"}}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("statuses = %v, want %v", got, want)
+	}
+	if urls := seen(); len(urls) != 1 || !strings.HasSuffix(urls[0].Path, "/project/10000/statuses") {
+		t.Errorf("requests = %v, want one read of /project/10000/statuses", urls)
+	}
+}

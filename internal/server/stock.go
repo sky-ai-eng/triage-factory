@@ -24,6 +24,10 @@ import (
 // "Available to claim") and seed the tri-selector with a sensible default
 // based on the ticket's current Jira status.
 type stockTicket struct {
+	// EntityID is the ticket's entity, which the action routes take. The
+	// issue key beside it is the display value: an issue that moves between
+	// the read and the action answers under a new key and keeps its entity.
+	EntityID  string `json:"entity_id"`
 	IssueKey  string `json:"issue_key"`
 	Summary   string `json:"summary"`
 	Status    string `json:"status"`
@@ -79,19 +83,16 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 	// identity — runs through tx-bound stores under the user's
 	// claims so RLS (org_settings_select / team_settings_select /
 	// jira_rules_select / users_select) gates every read.
-	// Identity facts live on the users row, not the
-	// keychain. Account ID drives "is this assigned to me" (stable,
-	// predicate-grade); display name drives the optimistic post-
-	// claim snapshot update so the synthesized event metadata reads
-	// correctly. Both come from the same auth.ValidateJira response
-	// at PAT setup; missing either means the bootstrap hasn't run
-	// yet or Jira isn't connected.
+	// Identity facts live on the users row, not the keychain. The
+	// account ID decides "is this assigned to me"; it comes from the
+	// auth.ValidateJira response at PAT setup, and missing it means the
+	// bootstrap hasn't run yet or Jira isn't connected.
 	var (
-		creds                            auth.Credentials
-		orgSet                           domain.OrgSettings
-		teamID                           string
-		jiraRules                        []domain.JiraProjectStatusRules
-		localAccountID, localDisplayName string
+		creds          auth.Credentials
+		orgSet         domain.OrgSettings
+		teamID         string
+		jiraRules      []domain.JiraProjectStatusRules
+		localAccountID string
 	)
 	// The optional ?team_id= read filter narrows the deck to one team's
 	// Jira projects (the per-page selector). The deck is single-team by
@@ -126,7 +127,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		}
 		// Jira identity is host-scoped: look it up for the org's
 		// Jira host (org_settings already loaded above).
-		localAccountID, localDisplayName, e = tx.Users.GetJiraIdentity(r.Context(), userID, orgSet.JiraBaseURL)
+		localAccountID, _, e = tx.Users.GetJiraIdentity(r.Context(), userID, orgSet.JiraBaseURL)
 		return e
 	}); err != nil {
 		internalError(w, "stock", err)
@@ -137,11 +138,10 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 	// a stored identity so we can match the assignee field. Gate on the
 	// account ID alone, not the display name: StableID() is always populated
 	// when connected (it falls back to the Server/DC key), and assignee
-	// matching keys on account ID — display name is only the legacy
-	// no-accountID fallback and the post-claim snapshot label, both of which
-	// degrade gracefully when it's blank (valid on some Server/DC installs).
-	// Partial config would silently stall on "polling" forever because the
-	// poller never has anything to do.
+	// matching keys on account ID. The display name is only the post-claim
+	// snapshot label, which degrades gracefully when it's blank (valid on
+	// some Server/DC installs). Partial config would silently stall on
+	// "polling" forever because the poller never has anything to do.
 	// "Configured" reads the auth-method marker (via JiraSystemConfig), not key
 	// presence, so DC and Cloud orgs both gate correctly and consistently with
 	// the resolver.
@@ -223,6 +223,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		}
 
 		baseTicket := stockTicket{
+			EntityID:  e.ID,
 			IssueKey:  snap.Key,
 			Summary:   snap.Summary,
 			Status:    snap.Status,
@@ -241,22 +242,16 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		// assigned tickets.
 		projectRule := domain.RuleForJiraProject(jiraRules, e.JiraProjectID)
 
-		// "Is this assigned to me?" uses the Atlassian account ID
-		// — the stable identifier — rather than display name. Display name
-		// is a fallback for older snapshots that predate the account-id
-		// field (empty AssigneeAccountID); they degrade to today's behavior
-		// of comparing the display name string.
-		isSelf := (snap.AssigneeAccountID != "" && snap.AssigneeAccountID == localAccountID) ||
-			(snap.AssigneeAccountID == "" && snap.Assignee == localDisplayName)
-		isUnassigned := snap.Assignee == ""
-
+		// "Is this assigned to me?" compares the Atlassian account ID, the
+		// stable identifier, and never the display name: two people can share
+		// one, and the acting user's can be blank.
 		switch {
-		case isSelf:
+		case snap.AssignedTo(localAccountID):
 			baseTicket.Bucket = "assigned"
 			baseTicket.PrefilledAction = prefillForAssigned(projectRule, snap.StatusRef())
 			assigned = append(assigned, scored{baseTicket, snap.CreatedAt, e.CreatedAt.Format("2006-01-02T15:04:05Z07:00")})
 
-		case isUnassigned && projectRule != nil && projectRule.PickupContains(snap.StatusRef()):
+		case !snap.HasAssignee() && projectRule != nil && projectRule.PickupContains(snap.StatusRef()):
 			baseTicket.Bucket = "available"
 			baseTicket.PrefilledAction = "" // user decides
 			available = append(available, scored{baseTicket, snap.CreatedAt, e.CreatedAt.Format("2006-01-02T15:04:05Z07:00")})
@@ -322,7 +317,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 // overlapping rule membership). Pickup is checked last so the "new work"
 // case is the default for simply-assigned-to-you tickets.
 //
-// A nil project rule (the ticket's project_key has no configured rules)
+// A nil project rule (the ticket's project has no configured rules)
 // returns "" — user picks the action manually, matching the "no rules
 // configured" degrade-cleanly contract.
 func prefillForAssigned(rule *domain.JiraProjectStatusRules, status domain.JiraStatusRef) string {
@@ -342,12 +337,13 @@ func prefillForAssigned(rule *domain.JiraProjectStatusRules, status domain.JiraS
 }
 
 // The three carry-over action routes. Each is one operation on a list of
-// issue keys, because the arms have nothing in common past the eligibility
-// gate: queue mints a task off a synthesized event with no Jira write at all,
-// claim makes two external Jira writes before it touches a row, and done
-// transitions the ticket and closes the entity without minting anything. A
-// single route with a per-row action discriminator meant one request could ask
-// for all three and a caller could not tell which half of it had happened.
+// tickets, named by entity id, because the arms have nothing in common past
+// the eligibility gate: queue mints a task off a synthesized event with no
+// Jira write at all, claim makes two external Jira writes before it touches a
+// row, and done transitions the ticket and closes the entity without minting
+// anything. A single route with a per-row action discriminator would let one
+// request ask for all three, and a caller could not tell which half of it had
+// happened.
 
 // maxStockBatch caps one carry-over submission. The deck is dealt whole from
 // the team's tracked projects, so a legitimate batch is bounded by what a
@@ -357,7 +353,10 @@ const maxStockBatch = 500
 
 // stockActionRequest is the body every carry-over action route takes.
 type stockActionRequest struct {
-	IssueKeys []string `json:"issue_keys"`
+	// EntityIDs names the tickets by the entity_id the deck serves on each,
+	// never by issue key: a key the issue left between the read and the
+	// action names nothing, or another issue.
+	EntityIDs []string `json:"entity_ids"`
 	// TeamID is the acting team the write picker supplied — the team
 	// claimed/queued stock tasks are stamped under. Required in the UI
 	// when the caller belongs to ≥2 teams; empty (sole-team fallback)
@@ -367,12 +366,15 @@ type stockActionRequest struct {
 }
 
 // stockItemResult is one row of a batch's per-item accounting. Every
-// submitted key appears exactly once, ok either way, so applied + failed =
-// submitted holds by construction and no id is silently skipped. Errors
-// carries the envelope's item shape, so a per-row failure is as
-// machine-readable as a request-level one.
+// submitted entity id appears exactly once, ok either way, so applied +
+// failed = submitted holds by construction and no id is silently skipped.
+// IssueKey is the ticket's key as its entity answers to it now, for display;
+// it is absent when the id named no ticket. Errors carries the envelope's
+// item shape, so a per-row failure is as machine-readable as a request-level
+// one.
 type stockItemResult struct {
-	IssueKey string            `json:"issue_key"`
+	EntityID string            `json:"entity_id"`
+	IssueKey string            `json:"issue_key,omitempty"`
 	OK       bool              `json:"ok"`
 	Errors   []httpx.ErrorItem `json:"errors,omitempty"`
 }
@@ -436,7 +438,7 @@ func (s *Server) applyStockAction(w http.ResponseWriter, r *http.Request, action
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	issueKeys, ok := validateStockBatch(w, req.IssueKeys)
+	entityIDs, ok := validateStockBatch(w, req.EntityIDs)
 	if !ok {
 		return
 	}
@@ -495,7 +497,7 @@ func (s *Server) applyStockAction(w http.ResponseWriter, r *http.Request, action
 	// account (AssignToSelf assigns to the token's user). A user with no
 	// connected Jira can't perform either, and because the route is one
 	// action that's a whole-request refusal rather than the same per-row
-	// error repeated for every key. Queue makes no Jira write, so it must
+	// error repeated for every ticket. Queue makes no Jira write, so it must
 	// not depend on secret-store availability at all: a transient token
 	// lookup shouldn't 500 a pure queue.
 	var jiraUserClient *jira.Client
@@ -512,10 +514,11 @@ func (s *Server) applyStockAction(w http.ResponseWriter, r *http.Request, action
 	// entities that already have an active task, and (b) the team-scoped Jira
 	// set the viewer is allowed to act on — the *same* ListActiveJiraTeamScoped
 	// read the GET deck uses, so eligibility here can't diverge from what the
-	// deck surfaced. Fail the request if either read fails.
+	// deck surfaced, and every submitted id is looked up in it. Fail the
+	// request if either read fails.
 	var (
 		taskedEntityIDs map[string]struct{}
-		scopedJiraIDs   map[string]struct{}
+		scopedJira      map[string]domain.Entity
 	)
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -527,9 +530,9 @@ func (s *Server) applyStockAction(w http.ResponseWriter, r *http.Request, action
 		if e != nil {
 			return e
 		}
-		scopedJiraIDs = make(map[string]struct{}, len(scoped))
+		scopedJira = make(map[string]domain.Entity, len(scoped))
 		for _, ent := range scoped {
-			scopedJiraIDs[ent.ID] = struct{}{}
+			scopedJira[ent.ID] = ent
 		}
 		return nil
 	}); err != nil {
@@ -547,13 +550,14 @@ func (s *Server) applyStockAction(w http.ResponseWriter, r *http.Request, action
 		localDisplayName: localDisplayName,
 		jiraUserClient:   jiraUserClient,
 		taskedEntityIDs:  taskedEntityIDs,
-		scopedJiraIDs:    scopedJiraIDs,
+		scopedJira:       scopedJira,
+		jiraScope:        domain.EntityScope("jira", orgSet),
 	}
 
-	results := make([]stockItemResult, 0, len(issueKeys))
+	results := make([]stockItemResult, 0, len(entityIDs))
 	applied := 0
-	for _, issueKey := range issueKeys {
-		result := s.applyStockItem(r, batch, issueKey)
+	for _, entityID := range entityIDs {
+		result := s.applyStockItem(r, batch, entityID)
 		if result.OK {
 			applied++
 		}
@@ -598,52 +602,53 @@ func stockActionPastTense(action string) string {
 }
 
 // validateStockBatch enforces the request-level half of the batch policy: an
-// empty list, an over-cap list, a blank or whitespace-padded key and a
-// repeated key all fail the whole call, so the per-item accounting invariant
+// empty list, an over-cap list, a blank or whitespace-padded id and a
+// repeated id all fail the whole call, so the per-item accounting invariant
 // (applied + failed = submitted) holds for every batch that actually runs, on
-// the keys the caller actually sent. Dropping any of them mid-loop instead
-// would make a five-key submission answer "applied: 3" with no mention of the
-// other two.
+// the ids the caller actually sent. Dropping any of them mid-loop instead
+// would make a five-ticket submission answer "applied: 3" with no mention of
+// the other two. An id that names no ticket on the deck is not a malformed
+// batch: it fails its own row, with the field named.
 func validateStockBatch(w http.ResponseWriter, raw []string) ([]string, bool) {
 	var v httpx.Validation
 	if len(raw) == 0 {
-		v.Invalid("issue_keys", "issue_keys must contain at least one issue key")
+		v.Invalid("entity_ids", "entity_ids must contain at least one entity id")
 	}
 	if len(raw) > maxStockBatch {
-		v.OutOfRange("issue_keys", fmt.Sprintf("issue_keys accepts at most %d keys per request", maxStockBatch))
+		v.OutOfRange("entity_ids", fmt.Sprintf("entity_ids accepts at most %d ids per request", maxStockBatch))
 	}
 	seen := make(map[string]struct{}, len(raw))
-	keys := make([]string, 0, len(raw))
-	for _, key := range raw {
+	ids := make([]string, 0, len(raw))
+	for _, id := range raw {
 		switch {
-		case strings.TrimSpace(key) == "":
-			v.Invalid("issue_keys", "issue_keys contains a blank issue key")
+		case strings.TrimSpace(id) == "":
+			v.Invalid("entity_ids", "entity_ids contains a blank entity id")
 			continue
-		case key != strings.TrimSpace(key):
-			// Rejected rather than trimmed. Every result row echoes the key
+		case id != strings.TrimSpace(id):
+			// Rejected rather than trimmed. Every result row echoes the id
 			// as submitted, which is how a client matches results back to
-			// its request — silently rewriting one here would answer for a
-			// key the caller never sent.
-			v.Invalid("issue_keys", "issue_keys contains "+strings.TrimSpace(key)+" with surrounding whitespace")
+			// its request — silently rewriting one here would answer for an
+			// id the caller never sent.
+			v.Invalid("entity_ids", "entity_ids contains "+strings.TrimSpace(id)+" with surrounding whitespace")
 			continue
 		}
-		if _, dup := seen[key]; dup {
-			v.Invalid("issue_keys", "issue_keys contains "+key+" more than once")
+		if _, dup := seen[id]; dup {
+			v.Invalid("entity_ids", "entity_ids contains "+id+" more than once")
 			continue
 		}
-		seen[key] = struct{}{}
-		keys = append(keys, key)
+		seen[id] = struct{}{}
+		ids = append(ids, id)
 	}
 	if v.Flush(w, http.StatusBadRequest) {
 		return nil, false
 	}
-	return keys, true
+	return ids, true
 }
 
 // stockBatch is the per-request state every item in a carry-over batch reads:
 // the acting identity and team, the resolved Jira rules and client, and the
-// two eligibility index maps. Built once so a 500-key batch doesn't re-resolve
-// any of it per row.
+// two eligibility index maps. Built once so a 500-ticket batch doesn't
+// re-resolve any of it per row.
 type stockBatch struct {
 	orgID            string
 	userID           string
@@ -656,17 +661,21 @@ type stockBatch struct {
 	// (which makes no Jira write).
 	jiraUserClient  *jira.Client
 	taskedEntityIDs map[string]struct{}
-	scopedJiraIDs   map[string]struct{}
+	// scopedJira is the team-scoped Jira set the deck is dealt from, by
+	// entity id: the only tickets an action may name.
+	scopedJira map[string]domain.Entity
+	// jiraScope is the org's Jira site. The user's client writes to it, so a
+	// ticket tracked on another site is not actionable.
+	jiraScope string
 }
 
-// applyStockItem runs one issue key through the eligibility gate and then the
-// batch's action. Every return is a result row — nothing about one key ever
-// aborts the batch — and every row is keyed by the SUBMITTED key rather than
-// by whatever the entity or its snapshot calls the ticket, so a client can
-// always match results back to what it sent.
-func (s *Server) applyStockItem(r *http.Request, b *stockBatch, issueKey string) stockItemResult {
+// applyStockItem runs one submitted entity id through the eligibility gate
+// and then the batch's action. Every return is a result row — nothing about
+// one ticket ever aborts the batch — and every row is keyed by the SUBMITTED
+// id, so a client can always match results back to what it sent.
+func (s *Server) applyStockItem(r *http.Request, b *stockBatch, entityID string) stockItemResult {
 	result := func() stockItemResult {
-		entity, snap, rule, bucket, failure := s.resolveStockTicket(r, b, issueKey)
+		entity, snap, rule, bucket, failure := resolveStockTicket(b, entityID)
 		if failure != nil {
 			return *failure
 		}
@@ -679,15 +688,15 @@ func (s *Server) applyStockItem(r *http.Request, b *stockBatch, issueKey string)
 			return s.stockDoneTicket(r, b, entity, rule)
 		}
 	}()
-	result.IssueKey = issueKey
+	result.EntityID = entityID
 	return result
 }
 
 // currentJiraIdentity overlays a ticket's stored snapshot with its entity's
 // identity: the key, link and issue id. An entity is renamed the moment TF
 // learns its issue moved — by an agent's read, say — while the snapshot keeps
-// the old key until the next poll refresh, so the deck lists, and an action
-// looks a ticket up and calls Jira by, the key the entity answers to now.
+// the old key until the next poll refresh, so the deck lists the ticket, and
+// an action reports it, under the key the entity answers to now.
 func currentJiraIdentity(e domain.Entity, snap domain.JiraSnapshot) domain.JiraSnapshot {
 	snap.Key = e.SourceID
 	if e.URL != "" {
@@ -710,43 +719,37 @@ const (
 	bucketAvailable
 )
 
-// resolveStockTicket loads a submitted issue key and enforces every
-// eligibility rule the GET deck applies, plus the per-action ones. It returns
-// the entity, its snapshot, the project's status rules (nil when the project
-// has none configured) and the bucket the ticket is in — or a populated
-// failure row, in which case the rest is unusable.
-func (s *Server) resolveStockTicket(r *http.Request, b *stockBatch, issueKey string) (*domain.Entity, domain.JiraSnapshot, *domain.JiraProjectStatusRules, stockBucket, *stockItemResult) {
+// resolveStockTicket finds a submitted entity id on the deck and enforces
+// every eligibility rule the GET deck applies, plus the per-action ones. It
+// returns the entity, its snapshot, the project's status rules (nil when the
+// project has none configured) and the bucket the ticket is in — or a
+// populated failure row, in which case the rest is unusable.
+func resolveStockTicket(b *stockBatch, entityID string) (*domain.Entity, domain.JiraSnapshot, *domain.JiraProjectStatusRules, stockBucket, *stockItemResult) {
 	var snap domain.JiraSnapshot
+	issueKey := ""
 	fail := func(reason, msg string) (*domain.Entity, domain.JiraSnapshot, *domain.JiraProjectStatusRules, stockBucket, *stockItemResult) {
 		f := stockFailed(issueKey, reason, msg)
 		return nil, snap, nil, bucketAssigned, &f
 	}
 
-	var entity *domain.Entity
-	if err := s.tx.WithReadTx(r.Context(), b.orgID, b.userID, func(tx db.TxStores) error {
-		orgSet, e := tx.Orgs.GetSettings(r.Context(), b.orgID)
-		if e != nil {
-			return e
-		}
-		entity, e = tx.Entities.GetBySource(r.Context(), b.orgID, "jira", domain.EntityScope("jira", orgSet), issueKey)
-		return e
-	}); err != nil {
-		stockLog.Error("stock: entity lookup failed", "issue", issueKey, "error", err)
-		return fail(httpx.ReasonInternal, "failed to load ticket"+httpx.LocalDetail(err))
+	// Team-scope gate: the id must name a ticket in the set the GET deck is
+	// dealt from (ListActiveJiraTeamScoped), on the org's Jira site. A ticket
+	// whose project isn't tracked by the viewer's team(s) isn't on their deck
+	// and must not be actionable here — even if it's assigned to them — and
+	// it answers exactly as an id that names nothing, so the row discloses
+	// nothing about it. In local mode the scoped set is the full active Jira
+	// set, so the team half of this gate is a no-op there.
+	scoped, onDeck := b.scopedJira[entityID]
+	if !onDeck || scoped.Scope != b.jiraScope {
+		f := stockItemResult{Errors: []httpx.ErrorItem{{
+			Reason:  httpx.ReasonNotFound,
+			Message: "entity_ids contains " + entityID + ", which names no active Jira ticket your team tracks",
+			Field:   "entity_ids",
+		}}}
+		return nil, snap, nil, bucketAssigned, &f
 	}
-	if entity == nil {
-		return fail(httpx.ReasonNotFound, "ticket not found")
-	}
-
-	// Team-scope gate: mirror the GET deck (ListActiveJiraTeamScoped). A
-	// ticket whose project isn't tracked by the viewer's team(s) isn't on
-	// their deck and must not be actionable here — even if it's assigned to
-	// them — which closes the bypass where a user submits an off-team issue
-	// key. In local mode the scoped set is the full active Jira set, so this
-	// gate is a no-op there.
-	if _, inScope := b.scopedJiraIDs[entity.ID]; !inScope {
-		return fail(httpx.ReasonNotFound, "ticket is outside your team's tracked projects")
-	}
+	entity := &scoped
+	issueKey = entity.SourceID
 
 	// Enforce the same eligibility rules as the GET list. Prevents acting
 	// on tickets that shouldn't be in carry-over at all — stale frontend
@@ -767,9 +770,8 @@ func (s *Server) resolveStockTicket(r *http.Request, b *stockBatch, issueKey str
 	// synthesized event doesn't depend on status rules).
 	rule := domain.RuleForJiraProject(b.jiraRules, entity.JiraProjectID)
 
-	isSelf := (snap.AssigneeAccountID != "" && snap.AssigneeAccountID == b.localAccountID) ||
-		(snap.AssigneeAccountID == "" && snap.Assignee == b.localDisplayName)
-	isAvailable := snap.Assignee == "" && rule != nil && rule.PickupContains(snap.StatusRef())
+	isSelf := snap.AssignedTo(b.localAccountID)
+	isAvailable := !snap.HasAssignee() && rule != nil && rule.PickupContains(snap.StatusRef())
 	if !isSelf && !isAvailable {
 		return fail(httpx.ReasonConflict, "ticket is not assigned to you and not in the available pickup queue")
 	}
@@ -852,15 +854,17 @@ func (s *Server) stockClaimTicket(r *http.Request, b *stockBatch, entity *domain
 	// InProgress.Members so a ticket in any in-progress variant isn't
 	// transitioned back to canonical. For available tickets the state check is
 	// a no-op (they're unassigned by definition), but GetClaimState is cheap
-	// and keeps one code path for both buckets.
-	state := b.jiraUserClient.GetClaimState(r.Context(), snap.Key)
+	// and keeps one code path for both buckets. Jira is addressed by the
+	// issue id; the key names the ticket in the result.
+	issue := entity.JiraIssueRef()
+	state := b.jiraUserClient.GetClaimState(r.Context(), issue)
 	if state == nil || !state.AssignedToSelf {
-		if err := b.jiraUserClient.AssignToSelf(r.Context(), snap.Key); err != nil {
+		if err := b.jiraUserClient.AssignToSelf(r.Context(), issue); err != nil {
 			return stockFailed(snap.Key, httpx.ReasonUpstreamRejected, "assign: "+err.Error())
 		}
 	}
 	if state == nil || !rule.InProgressContains(claimStatusRef(state)) {
-		if err := b.jiraUserClient.TransitionTo(r.Context(), snap.Key,
+		if err := b.jiraUserClient.TransitionTo(r.Context(), issue,
 			jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name}); err != nil {
 			return stockFailed(snap.Key, httpx.ReasonUpstreamRejected, "transition: "+err.Error())
 		}
@@ -916,10 +920,11 @@ func (s *Server) stockDoneTicket(r *http.Request, b *stockBatch, entity *domain.
 	// just the canonical) — a ticket in "Verified" when
 	// Done.Members=[Resolved,Verified] is already done from TF's perspective;
 	// transitioning to Resolved would be a no-op at best and a workflow
-	// violation at worst.
-	state := b.jiraUserClient.GetClaimState(r.Context(), issueKey)
+	// violation at worst. Jira is addressed by the issue id.
+	issue := entity.JiraIssueRef()
+	state := b.jiraUserClient.GetClaimState(r.Context(), issue)
 	if state == nil || !rule.DoneContains(claimStatusRef(state)) {
-		if err := b.jiraUserClient.TransitionTo(r.Context(), issueKey,
+		if err := b.jiraUserClient.TransitionTo(r.Context(), issue,
 			jira.Status{ID: rule.DoneCanonical.ID, Name: rule.DoneCanonical.Name}); err != nil {
 			return stockFailed(issueKey, httpx.ReasonUpstreamRejected, "transition: "+err.Error())
 		}
@@ -961,7 +966,9 @@ func recordCarryOverAssignedEvent(ctx context.Context, events_ db.EventStore, or
 		Project:           snap.ProjectKey,
 		JiraProjectID:     entity.JiraProjectID,
 		IssueType:         snap.IssueType,
+		IssueTypeID:       snap.IssueTypeID,
 		Priority:          snap.Priority,
+		PriorityID:        snap.PriorityID,
 		Status:            snap.Status,
 		Summary:           snap.Summary,
 		Labels:            snap.Labels,
@@ -993,7 +1000,9 @@ func recordCarryOverAvailableEvent(ctx context.Context, events_ db.EventStore, o
 		Project:           snap.ProjectKey,
 		JiraProjectID:     entity.JiraProjectID,
 		IssueType:         snap.IssueType,
+		IssueTypeID:       snap.IssueTypeID,
 		Priority:          snap.Priority,
+		PriorityID:        snap.PriorityID,
 		Status:            snap.Status,
 		Summary:           snap.Summary,
 		Labels:            snap.Labels,

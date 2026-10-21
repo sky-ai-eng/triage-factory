@@ -6,12 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -599,16 +597,13 @@ func keepReviewRequestRemoved(evt domain.Event, _ closeContext, t domain.Task) b
 }
 
 // prepareJiraReassign resolves the new assignee's owning team(s) for the
-// member-aware skip and applies the Server/DC display-name fallback: when the
-// issue is still assigned to the local user (no accountId), skip the whole
-// close so a re-emit doesn't retire that user's own task.
+// member-aware skip. The assignee is the event's assignee_account_id, which
+// every assigned event carries: the snapshot a read produces always holds it
+// for an assigned issue.
 //
 // An unreadable assignee identity is an error rather than an empty team set:
 // empty means "the new assignee is on none of our teams," which retires every
-// owned task on the issue. So are the settings and identity reads behind the
-// display-name fallback — a failed identity read that silently proceeded
-// would retire the local user's own task, which is the exact harm the
-// fallback exists to prevent. Unparsable metadata declines instead: a retry
+// owned task on the issue. Unparsable metadata declines instead: a retry
 // does not fix the event's bytes.
 func prepareJiraReassign(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID string) (closeContext, bool, error) {
 	var meta events.JiraIssueAssignedMetadata
@@ -619,30 +614,12 @@ func prepareJiraReassign(ctx context.Context, r *Router, orgID string, evt domai
 	if err != nil {
 		return nil, false, err
 	}
-	if r.users != nil && meta.AssigneeAccountID == "" && meta.Assignee != "" {
-		var jiraHost string
-		if r.orgs != nil {
-			orgSet, err := r.orgs.GetSettingsSystem(ctx, orgID)
-			if err != nil {
-				return nil, false, fmt.Errorf("read org settings: %w", err)
-			}
-			jiraHost = orgSet.JiraBaseURL
-		}
-		_, localDisplayName, err := r.users.GetJiraIdentitySystem(ctx, runmode.LocalDefaultUserID, jiraHost)
-		if err != nil {
-			return nil, false, fmt.Errorf("read local jira identity: %w", err)
-		}
-		if localDisplayName != "" && strings.EqualFold(meta.Assignee, localDisplayName) {
-			return nil, false, nil // still assigned to the local user — don't retire
-		}
-	}
 	return newOwnerTeams, true, nil
 }
 
 // prepareLinearReassign is prepareJiraReassign for Linear: the new assignee's
 // owning team(s), for the member-aware skip, under the same error contract.
-// There is no display-name fallback to apply: a Linear assignee always arrives
-// with its user id.
+// The assignee is the event's assignee_user_id.
 func prepareLinearReassign(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID string) (closeContext, bool, error) {
 	var meta events.LinearIssueAssignedMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {

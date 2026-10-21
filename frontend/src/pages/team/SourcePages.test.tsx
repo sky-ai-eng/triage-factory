@@ -389,7 +389,6 @@ describe('Jira source page', () => {
   const SETTINGS = {
     '/api/teams/t1/settings': {
       team_settings: {
-        JiraProjects: ['PLAT', 'SKY'],
         AIReprioritizeThreshold: 0,
         AIPreferenceUpdateInterval: 0,
         DefaultModel: 'sonnet',
@@ -402,6 +401,8 @@ describe('Jira source page', () => {
       },
       jira_projects: [
         {
+          id: 'reg-PLAT',
+          jira_id: '10010',
           key: 'PLAT',
           pickup: { members: [{ id: '1', name: 'Ready' }] },
           in_progress: {
@@ -414,6 +415,8 @@ describe('Jira source page', () => {
         // Watched but never armed — a valid saved state since watch-then-arm,
         // and the strip's marker case.
         {
+          id: 'reg-SKY',
+          jira_id: '10020',
           key: 'SKY',
           pickup: { members: [] },
           in_progress: { members: [] },
@@ -428,12 +431,12 @@ describe('Jira source page', () => {
     // team could watch. Both watched projects' status reads answer the same
     // list — per-project routing is asserted on the fetch calls instead.
     [`${JIRA}/list`]: [
-      { key: 'PLAT', name: 'Platform Core' },
-      { key: 'SKY', name: 'Skyworks' },
-      { key: 'OPS', name: 'Operations' },
+      { jira_id: '10010', key: 'PLAT', name: 'Platform Core' },
+      { jira_id: '10020', key: 'SKY', name: 'Skyworks' },
+      { jira_id: '10030', key: 'OPS', name: 'Operations' },
     ],
-    [`${JIRA}/PLAT/statuses/list`]: STATUSES,
-    [`${JIRA}/SKY/statuses/list`]: STATUSES,
+    [`${JIRA}/10010/statuses/list`]: STATUSES,
+    [`${JIRA}/10020/statuses/list`]: STATUSES,
   }
 
   /** The fixture with a single watched project — the no-strip shape. */
@@ -473,7 +476,7 @@ describe('Jira source page', () => {
     // The vocabulary is the shown project's own, never an intersection
     // across the watched set — two workflows differ the moment they can.
     const statusReads = fetchMock.mock.calls.map((c) => String(c[0])).filter(isStatusRead)
-    expect(statusReads).toEqual([`${JIRA}/PLAT/statuses/list`])
+    expect(statusReads).toEqual([`${JIRA}/10010/statuses/list`])
   })
 
   it('names the project it shows when there is no strip to', async () => {
@@ -508,7 +511,7 @@ describe('Jira source page', () => {
     // resolves — which is the read the assertion below is about.
     await waitFor(() => expect(screen.getByText('Blocked')).toBeInTheDocument())
     const statusReads = fetchMock.mock.calls.map((c) => String(c[0])).filter(isStatusRead)
-    expect(statusReads).toEqual([`${JIRA}/PLAT/statuses/list`, `${JIRA}/SKY/statuses/list`])
+    expect(statusReads).toEqual([`${JIRA}/10010/statuses/list`, `${JIRA}/10020/statuses/list`])
   })
 
   it('lists the catalog with names, the watched projects first', async () => {
@@ -574,6 +577,8 @@ describe('Jira source page', () => {
       '/api/teams/t1/jira-projects': {
         jira_projects: [
           {
+            id: 'reg-PLAT',
+            jira_id: '10010',
             key: 'PLAT',
             pickup: { members: [{ id: '1', name: 'Ready' }] },
             in_progress: {
@@ -611,7 +616,9 @@ describe('Jira source page', () => {
       expect(put).toBeTruthy()
       const body = JSON.parse(String((put![1] as RequestInit).body))
       const plat = body.jira_projects[0]
-      expect(plat.key).toBe('PLAT')
+      // A tracked project goes on the wire by its registry id, never its key.
+      expect(plat.id).toBe('reg-PLAT')
+      expect(plat).not.toHaveProperty('key')
       expect(plat.in_review).toEqual({ member_ids: ['4', '5'], canonical_id: '4' })
       expect(plat.pickup).toEqual({ member_ids: ['1'] })
     })
@@ -622,6 +629,48 @@ describe('Jira source page', () => {
     )
     expect(review?.textContent).toContain('Blocked')
     expect(screen.queryByRole('button', { name: /^Blocked$/ })).not.toBeInTheDocument()
+  })
+
+  it('watches a catalog project by its Jira id, and keeps the tracked ones by registry id', async () => {
+    const fetchMock = stub({
+      ...SETTINGS,
+      '/api/teams/t1/jira-projects': {
+        jira_projects: SETTINGS['/api/teams/t1/settings'].jira_projects,
+      },
+    })
+    const puts = () =>
+      fetchMock.mock.calls
+        .filter(([path, init]) => path === '/api/teams/t1/jira-projects' && init?.method === 'PUT')
+        .map(([, init]) => JSON.parse(String(init!.body)).jira_projects)
+    render(<JiraSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('Operations')).toBeInTheDocument())
+
+    vi.useFakeTimers()
+    try {
+      const row = screen.getByText('Operations').closest('[role="row"]')!
+      fireEvent.click(within(row as HTMLElement).getByRole('checkbox'))
+      fireEvent.pointerDown(screen.getByRole('button', { name: 'Watch' }), {
+        button: 0,
+        clientX: 0,
+        clientY: 0,
+      })
+      act(() => {
+        vi.advanceTimersByTime(300)
+      })
+      act(() => {
+        vi.advanceTimersByTime(10_000)
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+    await waitFor(() => expect(puts()).toHaveLength(1))
+    const sent = puts()[0] as Array<Record<string, unknown>>
+    expect(sent.map((p) => p.id ?? `jira:${p.jira_id}`)).toEqual([
+      'reg-PLAT',
+      'reg-SKY',
+      'jira:10030',
+    ])
+    expect(sent.some((p) => 'key' in p)).toBe(false)
   })
 })
 

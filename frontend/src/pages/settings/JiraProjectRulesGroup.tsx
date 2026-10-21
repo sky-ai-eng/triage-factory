@@ -4,14 +4,16 @@ import { Section } from './primitives'
 import JiraStatusRule from '../../components/JiraStatusRule'
 import {
   dropStatus,
-  emptyProject,
   projectIsArmed,
   unresolvableStatuses,
+  watchedProject,
   type JiraProjectConfig,
 } from './teamConfig'
 import type { JiraStatusRef } from '../../components/JiraStatusRule'
 import { httpErrorMessage } from '../../lib/apiClient'
 import {
+  candidateRefs,
+  jiraProjectRef,
   listJiraProjects,
   listJiraStatuses,
   type JiraProjectCandidate,
@@ -22,20 +24,19 @@ import {
  *  a request per character would be both wasteful and out of order. */
 const SEARCH_DEBOUNCE_MS = 250
 
-/** normKey is the canonical form of a project key — the same uppercase-trim the
- *  server applies at the write boundary, so a key from the catalog and a key
- *  from the stored set compare as one value. */
-const normKey = (key: string): string => key.trim().toUpperCase()
-
 /** One row of the watch table: a project the team already watches, a candidate
- *  from the catalog, or both. `inCatalog` is false for a watched project the
- *  credential can no longer see — deleted upstream, or the credential's access
- *  narrowed — which is exactly the row that still needs to be unwatchable. */
+ *  from the catalog, or both. `ref` is its selection key (jiraProjectRef);
+ *  `key` and `name` are for display. `inCatalog` is false for a watched project
+ *  the credential can no longer see — deleted upstream, or the credential's
+ *  access narrowed — which is exactly the row that still needs to be
+ *  unwatchable. `candidate` is the catalog entry an unwatched row adds. */
 interface WatchRow {
+  ref: string
   key: string
   name: string
   watched: boolean
   inCatalog: boolean
+  candidate?: JiraProjectCandidate
 }
 
 /**
@@ -77,17 +78,17 @@ export default function JiraProjectRulesGroup({
   // Settings keeps the carded default.
   bare?: boolean
 }) {
-  // Statuses keyed by project key. Fetched per project, on demand, because a
-  // project's statuses come from ITS workflow scheme, so two watched projects
-  // can offer different ones — and watching is cheap now, so they will.
+  // Statuses keyed by the project's Jira id, which the read addresses it by.
+  // Fetched per project, on demand, because a project's statuses come from ITS
+  // workflow scheme, so two watched projects can offer different ones — and
+  // watching is cheap now, so they will.
   const [statusesByProject, setStatusesByProject] = useState<Record<string, JiraStatusRef[]>>({})
-  // The project keys whose status fetch is in flight. Per-key rather than a
+  // The Jira ids whose status fetch is in flight. Per-project rather than a
   // single boolean so fetching project A then B doesn't re-enable B's button
   // when A's request settles first.
-  const [loadingKeys, setLoadingKeys] = useState<Set<string>>(new Set())
-  // Per-project expand/collapse, keyed by the project key. Keys are chosen from
-  // the catalog rather than typed, so unlike the free-text field this replaced
-  // the key is stable for the row's lifetime and makes a safe map key.
+  const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set())
+  // Per-project expand/collapse, keyed by the project's selection key, which
+  // a key rename in Jira does not move and a save does not change.
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
 
   const [candidates, setCandidates] = useState<JiraProjectCandidate[]>([])
@@ -96,7 +97,7 @@ export default function JiraProjectRulesGroup({
   const [catalogTruncated, setCatalogTruncated] = useState(false)
   const [search, setSearch] = useState('')
 
-  const watchedKeys = useMemo(() => new Set(value.map((p) => normKey(p.key))), [value])
+  const watchedRefs = useMemo(() => new Set(value.map(jiraProjectRef)), [value])
 
   // Current in-flight catalog fetch. Each new one aborts the previous so
   // out-of-order resolution can't leave the table showing an older search's
@@ -152,87 +153,99 @@ export default function JiraProjectRulesGroup({
   // client-side filter applies only to them; the candidates below were already
   // narrowed by the server.
   const rows = useMemo<WatchRow[]>(() => {
-    const byKey = new Map(candidates.map((c) => [normKey(c.key), c]))
+    const byRef = new Map<string, JiraProjectCandidate>()
+    for (const c of candidates) {
+      for (const ref of candidateRefs(c)) {
+        if (!byRef.has(ref)) byRef.set(ref, c)
+      }
+    }
     const needle = search.trim().toLowerCase()
     const out: WatchRow[] = []
     for (const p of value) {
-      const key = normKey(p.key)
-      if (!key) continue
-      const candidate = byKey.get(key)
-      const name = candidate?.name ?? ''
+      const ref = jiraProjectRef(p)
+      const candidate = byRef.get(ref)
+      const name = candidate?.name ?? p.name ?? ''
       if (
         needle !== '' &&
-        !key.toLowerCase().includes(needle) &&
+        !p.key.toLowerCase().includes(needle) &&
         !name.toLowerCase().includes(needle)
       ) {
         continue
       }
-      out.push({ key, name, watched: true, inCatalog: !!candidate })
+      out.push({ ref, key: p.key, name, watched: true, inCatalog: !!candidate })
     }
     for (const c of candidates) {
-      const key = normKey(c.key)
-      if (watchedKeys.has(key)) continue
-      out.push({ key, name: c.name, watched: false, inCatalog: true })
+      if (candidateRefs(c).some((ref) => watchedRefs.has(ref))) continue
+      out.push({
+        ref: jiraProjectRef(c),
+        key: c.key,
+        name: c.name,
+        watched: false,
+        inCatalog: true,
+        candidate: c,
+      })
     }
     return out
-  }, [candidates, search, value, watchedKeys])
+  }, [candidates, search, value, watchedRefs])
 
-  // fetchJiraStatuses loads one project's statuses. Keys are normalized here
-  // regardless of source, so the results are stored under the same key the
-  // lookup uses.
-  const fetchJiraStatuses = async (projectKey: string) => {
-    const key = normKey(projectKey)
-    if (!key) return
-    setLoadingKeys((prev) => new Set([...prev, key]))
+  // fetchJiraStatuses loads one project's statuses, by its Jira id.
+  const fetchJiraStatuses = async (jiraId: string) => {
+    setLoadingIds((prev) => new Set([...prev, jiraId]))
     try {
-      const statuses = await listJiraStatuses(orgId, key)
-      setStatusesByProject((current) => ({ ...current, [key]: statuses }))
+      const statuses = await listJiraStatuses(orgId, jiraId)
+      setStatusesByProject((current) => ({ ...current, [jiraId]: statuses }))
     } catch {
       // Non-critical — the picker just shows no options until a retry.
     } finally {
-      setLoadingKeys((prev) => {
+      setLoadingIds((prev) => {
         const n = new Set(prev)
-        n.delete(key)
+        n.delete(jiraId)
         return n
       })
     }
   }
 
-  const updateProject = (key: string, patch: Partial<JiraProjectConfig>) => {
-    onChange(value.map((p) => (normKey(p.key) === key ? { ...p, ...patch } : p)))
+  const updateProject = (ref: string, patch: Partial<JiraProjectConfig>) => {
+    onChange(value.map((p) => (jiraProjectRef(p) === ref ? { ...p, ...patch } : p)))
   }
 
   // Removing a vanished status is an edit like any other — it lands in the
   // form and takes effect on save, so the team sees what changed before it is
   // written. Clearing a canonical this way leaves the rule incomplete on
   // purpose: the replacement write target is theirs to pick.
-  const dropUnresolvable = (key: string, status: JiraStatusRef) => {
-    onChange(value.map((p) => (normKey(p.key) === key ? dropStatus(p, status) : p)))
+  const dropUnresolvable = (ref: string, status: JiraStatusRef) => {
+    onChange(value.map((p) => (jiraProjectRef(p) === ref ? dropStatus(p, status) : p)))
   }
 
-  const watch = (key: string) => {
-    if (watchedKeys.has(key)) return
-    onChange([...value, emptyProject(key)])
+  const watch = (candidate: JiraProjectCandidate) => {
+    if (candidateRefs(candidate).some((ref) => watchedRefs.has(ref))) return
+    onChange([...value, watchedProject(candidate)])
   }
 
-  const unwatch = (key: string) => {
-    onChange(value.filter((p) => normKey(p.key) !== key))
+  const unwatch = (ref: string) => {
+    onChange(value.filter((p) => jiraProjectRef(p) !== ref))
     setExpanded((m) => {
       const next = { ...m }
-      delete next[key]
+      delete next[ref]
       return next
     })
   }
 
   // Expanding a project is what asks for its statuses — the arming step needs
-  // them, and nothing before it does.
-  const toggleExpanded = (key: string) => {
-    const opening = !expanded[key]
-    setExpanded((m) => ({ ...m, [key]: opening }))
-    if (opening && !statusesByProject[key] && !loadingKeys.has(key)) {
-      void fetchJiraStatuses(key)
+  // them, and nothing before it does. A project with no Jira id yet has none
+  // to ask for.
+  const toggleExpanded = (project: JiraProjectConfig) => {
+    const ref = jiraProjectRef(project)
+    const opening = !expanded[ref]
+    setExpanded((m) => ({ ...m, [ref]: opening }))
+    const jiraId = project.jira_id
+    if (opening && jiraId && !statusesByProject[jiraId] && !loadingIds.has(jiraId)) {
+      void fetchJiraStatuses(jiraId)
     }
   }
+
+  const statusesOf = (p: JiraProjectConfig): JiraStatusRef[] =>
+    (p.jira_id && statusesByProject[p.jira_id]) || []
 
   // Shared workflow schemes are common, so a project whose statuses are all
   // present in this one's is a mapping worth offering to copy wholesale.
@@ -242,11 +255,12 @@ export default function JiraProjectRulesGroup({
   // status entities with two distinct ids, so copying the source's ids across
   // would write a rule pointing at statuses this project's workflow does not
   // have — which the server would refuse, correctly.
-  const copySourcesFor = (key: string): JiraProjectConfig[] => {
-    const names = new Set((statusesByProject[key] ?? []).map((s) => s.name))
+  const copySourcesFor = (target: JiraProjectConfig): JiraProjectConfig[] => {
+    const names = new Set(statusesOf(target).map((s) => s.name))
     if (names.size === 0) return []
+    const ref = jiraProjectRef(target)
     return value.filter((p) => {
-      if (normKey(p.key) === key || !projectIsArmed(p)) return false
+      if (jiraProjectRef(p) === ref || !projectIsArmed(p)) return false
       return [
         ...p.pickup.members,
         ...p.in_progress.members,
@@ -256,13 +270,13 @@ export default function JiraProjectRulesGroup({
     })
   }
 
-  const copyMapping = (key: string, source: JiraProjectConfig) => {
-    const byName = new Map((statusesByProject[key] ?? []).map((s) => [s.name, s]))
+  const copyMapping = (target: JiraProjectConfig, source: JiraProjectConfig) => {
+    const byName = new Map(statusesOf(target).map((s) => [s.name, s]))
     const remap = (refs: JiraStatusRef[]): JiraStatusRef[] =>
       refs.map((r) => byName.get(r.name)).filter((r): r is JiraStatusRef => r !== undefined)
     const remapOne = (ref: JiraStatusRef | null | undefined): JiraStatusRef | null =>
       (ref && byName.get(ref.name)) ?? null
-    updateProject(key, {
+    updateProject(jiraProjectRef(target), {
       pickup: { members: remap(source.pickup.members) },
       in_progress: {
         members: remap(source.in_progress.members),
@@ -276,25 +290,26 @@ export default function JiraProjectRulesGroup({
     })
   }
 
-  const watchedProjects = value.filter((p) => normKey(p.key) !== '')
-
   const board = (
     <div className="space-y-2">
-      {watchedProjects.length === 0 && (
+      {value.length === 0 && (
         <p className="text-ui text-ink-3 italic">
           No Jira projects watched yet. Pick one below to start.
         </p>
       )}
-      {watchedProjects.map((project) => {
-        const key = normKey(project.key)
-        const statuses = statusesByProject[key] || []
+      {value.map((project) => {
+        const ref = jiraProjectRef(project)
+        const key = project.key
+        const jiraId = project.jira_id ?? ''
+        const statuses = statusesOf(project)
+        const loading = jiraId !== '' && loadingIds.has(jiraId)
         const missing = unresolvableStatuses(project, statuses)
         const armed = projectIsArmed(project)
-        const isOpen = expanded[key] === true
-        const sources = isOpen && !armed ? copySourcesFor(key) : []
+        const isOpen = expanded[ref] === true
+        const sources = isOpen && !armed ? copySourcesFor(project) : []
         return (
           <div
-            key={key}
+            key={ref}
             className={`rounded-xl border ${
               bare
                 ? 'border-[var(--color-line-1)] bg-[var(--color-raised)]/50'
@@ -304,7 +319,7 @@ export default function JiraProjectRulesGroup({
             <div className="flex items-center gap-2 px-3 py-2">
               <button
                 type="button"
-                onClick={() => toggleExpanded(key)}
+                onClick={() => toggleExpanded(project)}
                 className="text-ink-3 hover:text-ink-2"
                 aria-label={isOpen ? 'Collapse project' : 'Expand project'}
               >
@@ -315,7 +330,7 @@ export default function JiraProjectRulesGroup({
               </span>
               <button
                 type="button"
-                onClick={() => toggleExpanded(key)}
+                onClick={() => toggleExpanded(project)}
                 className={`text-label uppercase tracking-wide ${
                   missing.length > 0
                     ? 'text-alarm hover:text-alarm/80'
@@ -332,7 +347,7 @@ export default function JiraProjectRulesGroup({
               </button>
               <button
                 type="button"
-                onClick={() => unwatch(key)}
+                onClick={() => unwatch(ref)}
                 className="text-ink-3 hover:text-alarm"
                 aria-label={`Stop watching ${key}`}
               >
@@ -350,19 +365,21 @@ export default function JiraProjectRulesGroup({
                 )}
                 <div className="flex items-center justify-between">
                   <p className="text-reported text-ink-3">
-                    {loadingKeys.has(key)
-                      ? 'Loading statuses…'
-                      : statuses.length > 0
-                        ? `${statuses.length} statuses available`
-                        : 'No statuses loaded'}
+                    {jiraId === ''
+                      ? 'Not confirmed with Jira yet, so its statuses cannot be read. The next poll confirms it.'
+                      : loading
+                        ? 'Loading statuses…'
+                        : statuses.length > 0
+                          ? `${statuses.length} statuses available`
+                          : 'No statuses loaded'}
                   </p>
                   <button
                     type="button"
-                    onClick={() => void fetchJiraStatuses(key)}
-                    disabled={loadingKeys.has(key)}
+                    onClick={() => void fetchJiraStatuses(jiraId)}
+                    disabled={jiraId === '' || loading}
                     className="shrink-0 text-reported text-warm hover:text-warm/80 disabled:opacity-40 border border-warm/20 rounded-xl px-3 py-1 transition-colors"
                   >
-                    {loadingKeys.has(key) ? 'Loading...' : 'Reload statuses'}
+                    {loading ? 'Loading...' : 'Reload statuses'}
                   </button>
                 </div>
 
@@ -373,12 +390,12 @@ export default function JiraProjectRulesGroup({
                     </span>
                     {sources.map((source) => (
                       <button
-                        key={source.key}
+                        key={jiraProjectRef(source)}
                         type="button"
-                        onClick={() => copyMapping(key, source)}
+                        onClick={() => copyMapping(project, source)}
                         className="text-reported text-warm hover:text-warm/80 border border-warm/20 rounded-xl px-2.5 py-1 transition-colors"
                       >
-                        Copy {normKey(source.key)}&rsquo;s mapping
+                        Copy {source.key}&rsquo;s mapping
                       </button>
                     ))}
                   </div>
@@ -399,7 +416,7 @@ export default function JiraProjectRulesGroup({
                         <button
                           key={status.id || status.name}
                           type="button"
-                          onClick={() => dropUnresolvable(key, status)}
+                          onClick={() => dropUnresolvable(ref, status)}
                           className="group inline-flex items-center gap-1.5 rounded-xl border border-alarm/30 px-2 py-0.5 text-reported text-ink-2 transition-colors hover:border-alarm hover:text-alarm"
                           aria-label={`Remove ${status.name || status.id} from ${key}`}
                         >
@@ -418,7 +435,7 @@ export default function JiraProjectRulesGroup({
                       description="Poll for unassigned tickets in these states."
                       allStatuses={statuses}
                       value={project.pickup}
-                      onChange={(v) => updateProject(key, { pickup: v })}
+                      onChange={(v) => updateProject(ref, { pickup: v })}
                       requireCanonical={false}
                     />
                     <JiraStatusRule
@@ -426,7 +443,7 @@ export default function JiraProjectRulesGroup({
                       description="Count as actively being worked on."
                       allStatuses={statuses}
                       value={project.in_progress}
-                      onChange={(v) => updateProject(key, { in_progress: v })}
+                      onChange={(v) => updateProject(ref, { in_progress: v })}
                       requireCanonical={true}
                       canonicalPrompt="Claim →"
                     />
@@ -435,7 +452,7 @@ export default function JiraProjectRulesGroup({
                       description="Optional — the status that means work awaits human review."
                       allStatuses={statuses}
                       value={project.in_review}
-                      onChange={(v) => updateProject(key, { in_review: v })}
+                      onChange={(v) => updateProject(ref, { in_review: v })}
                       requireCanonical={true}
                       canonicalPrompt="Review →"
                     />
@@ -444,7 +461,7 @@ export default function JiraProjectRulesGroup({
                       description="Count as complete (add every variant — e.g. Resolved + Verified)."
                       allStatuses={statuses}
                       value={project.done}
-                      onChange={(v) => updateProject(key, { done: v })}
+                      onChange={(v) => updateProject(ref, { done: v })}
                       requireCanonical={true}
                       canonicalPrompt="Complete →"
                     />
@@ -486,7 +503,7 @@ export default function JiraProjectRulesGroup({
 
       <div className="divide-y divide-border-subtle rounded-xl border border-line-1 overflow-hidden">
         {rows.map((row) => (
-          <div key={row.key} className="flex items-center gap-3 bg-raised px-3 py-2">
+          <div key={row.ref} className="flex items-center gap-3 bg-raised px-3 py-2">
             <div className="min-w-0 flex-1">
               <span className="text-body font-medium text-ink-1">{row.key}</span>
               {row.name !== '' && (
@@ -500,7 +517,9 @@ export default function JiraProjectRulesGroup({
             </div>
             <button
               type="button"
-              onClick={() => (row.watched ? unwatch(row.key) : watch(row.key))}
+              onClick={() =>
+                row.watched ? unwatch(row.ref) : row.candidate && watch(row.candidate)
+              }
               className={`shrink-0 text-reported rounded-xl border px-3 py-1 transition-colors ${
                 row.watched
                   ? 'border-warm/25 bg-warm/[0.08] text-warm'
