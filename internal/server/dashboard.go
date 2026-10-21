@@ -194,42 +194,105 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 	httpx.WriteList(w, page, prs, total)
 }
 
-// dashboardPRRef strictly parses the {owner}/{repo}/{number} triple the live
-// per-PR routes address a pull request by, reporting every fault at once.
+// dashboardPR is the pull request a per-PR route addresses, resolved from the
+// entity id the list served. owner and repo are the repository's current name
+// in the registry, which is what a GitHub call has to use: the entity's key
+// spells whatever name the repository had when the key was last rewritten.
+// number comes from the key, which a rename never changes.
+type dashboardPR struct {
+	entity *domain.Entity
+	// host is the org's GitHub host, the one the resolved client is built
+	// for, and the entity's scope.
+	host        string
+	owner, repo string
+	number      int
+}
+
+// slug is the pull request's display name, owner/repo#N, under the
+// repository's current name.
+func (pr dashboardPR) slug() string {
+	return fmt.Sprintf("%s/%s#%d", pr.owner, pr.repo, pr.number)
+}
+
+// resolveDashboardPR resolves the {entity_id} the per-PR routes address. The
+// entity has to be in the viewer's own pull-request population, the one
+// POST /api/dashboard/prs/list pages, so a pull request the viewer's list
+// would not show is a 404 like one that does not exist, as is a malformed id.
 //
-// All three segments are path, not query. A pull request is identified by all
-// three — a bare number names nothing — so the address should carry all three,
-// and a caller that omits one should fail to route rather than reach a handler
-// that then has to invent the missing-parameter error itself. The ?repo= half
-// this replaced also let "owner/" and "/repo" through as a two-element split.
-func dashboardPRRef(w http.ResponseWriter, r *http.Request) (owner, repo string, number int, ok bool) {
-	var v httpx.Validation
-	owner, repo = r.PathValue("owner"), r.PathValue("repo")
-	if owner == "" || repo == "" {
-		// Unreachable through the mux (an empty segment doesn't match the
-		// pattern), but the handler is called directly in tests and the
-		// contract shouldn't depend on the router to hold.
-		v.Add(httpx.ErrorItem{Reason: httpx.ReasonInvalidID, Message: "owner and repo are required"})
+// Two states refuse with 409, because the pull request is in the viewer's list
+// but GitHub cannot be asked about it by name: an entity polled from another
+// GitHub host than the org's current one (the client is built for the current
+// host, where its repository's name means another repository or nothing), and
+// a repository TF retired because GitHub gave its name to another repository.
+// Every refusal is written here; ok is false after one.
+func (dh *dashboardHandler) resolveDashboardPR(w http.ResponseWriter, r *http.Request, orgID, userID string) (dashboardPR, bool) {
+	entityID, ok := uuidPathOr404(w, r, "entity_id", "pull request")
+	if !ok {
+		return dashboardPR{}, false
 	}
-	number, err := strconv.Atoi(r.PathValue("number"))
-	if err != nil || number <= 0 {
-		v.Add(httpx.ErrorItem{Reason: httpx.ReasonInvalidID, Message: "PR number must be a positive integer"})
+	var (
+		pr   dashboardPR
+		repo *domain.Repository
+	)
+	if err := dh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
+		if err != nil {
+			return err
+		}
+		pr.host = domain.EntityScope("github", orgSet)
+		// The viewer's login on the org's host, resolved as the list resolves
+		// it: an unresolvable host or an unbound identity leaves it empty,
+		// which drops the author leg and keeps the commissioned one.
+		viewer := db.PRViewer{UserID: userID}
+		if ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL); okHost {
+			if viewer.Login, err = tx.Users.GetGitHubLogin(r.Context(), userID, ghWeb); err != nil {
+				return err
+			}
+		}
+		if pr.entity, err = tx.Dashboard.PR(r.Context(), orgID, viewer, entityID); err != nil || pr.entity == nil {
+			return err
+		}
+		repo, err = tx.Repos.Get(r.Context(), orgID, pr.entity.RepositoryID)
+		return err
+	}); err != nil {
+		internalError(w, "dashboard", err)
+		return dashboardPR{}, false
 	}
-	if v.Flush(w, http.StatusBadRequest) {
-		return "", "", 0, false
+	if pr.entity == nil {
+		notFound(w, "pull request")
+		return dashboardPR{}, false
 	}
-	return owner, repo, number, true
+	if pr.host == "" {
+		writeNotConfigured(w, "GitHub not configured")
+		return dashboardPR{}, false
+	}
+	if pr.entity.Scope != pr.host {
+		conflict(w, fmt.Sprintf("this pull request was polled from %s, and the org's GitHub is %s", pr.entity.Scope, pr.host))
+		return dashboardPR{}, false
+	}
+	if repo.RetiredAt != nil {
+		conflict(w, fmt.Sprintf("GitHub has given the name %s/%s to another repository; this pull request's repository no longer answers to it", repo.Owner, repo.Repo))
+		return dashboardPR{}, false
+	}
+	pr.owner, pr.repo = repo.Owner, repo.Repo
+	pr.number = domain.GitHubPRNumber(pr.entity.SourceID)
+	if pr.number <= 0 {
+		internalError(w, "dashboard", fmt.Errorf("pull request entity %s has key %q with no number", pr.entity.ID, pr.entity.SourceID))
+		return dashboardPR{}, false
+	}
+	return pr, true
 }
 
 // handleDashboardPRStatus fetches live CI/review status for a single PR.
 // This stays as a live API call since it's on-demand detail, not aggregated data.
+//
+// GET /api/dashboard/prs/{entity_id}/status
 func (dh *dashboardHandler) handleDashboardPRStatus(w http.ResponseWriter, r *http.Request) {
-	owner, repo, number, ok := dashboardPRRef(w, r)
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
-
-	orgID, ok := requireOrg(w, r)
+	pr, ok := dh.resolveDashboardPR(w, r, orgID, ClaimsFrom(r.Context()).Subject)
 	if !ok {
 		return
 	}
@@ -239,7 +302,7 @@ func (dh *dashboardHandler) handleDashboardPRStatus(w http.ResponseWriter, r *ht
 	// for any repo under owner but 403s on repos outside the grant, so a
 	// bare-owner resolve would skip the PAT that would have worked. ClientForRepo
 	// falls through to the PAT when the App doesn't cover this repo.
-	client, err := dh.ghResolver.ClientForRepo(r.Context(), orgID, owner, repo)
+	client, err := dh.ghResolver.ClientForRepo(r.Context(), orgID, pr.owner, pr.repo)
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 			writeNotConfigured(w, "GitHub not configured")
@@ -249,7 +312,7 @@ func (dh *dashboardHandler) handleDashboardPRStatus(w http.ResponseWriter, r *ht
 		internalError(w, "dashboard", err)
 		return
 	}
-	status, err := client.GetPRStatus(r.Context(), owner, repo, number)
+	status, err := client.GetPRStatus(r.Context(), pr.owner, pr.repo, pr.number)
 	if err != nil {
 		internalError(w, "dashboard", err)
 		return
@@ -258,59 +321,52 @@ func (dh *dashboardHandler) handleDashboardPRStatus(w http.ResponseWriter, r *ht
 	writeJSON(w, http.StatusOK, status)
 }
 
-func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *http.Request) {
-	owner, repo, number, ok := dashboardPRRef(w, r)
-	if !ok {
-		return
-	}
-
-	// Draft is a pointer so an absent field is distinguishable from an
-	// explicit false: with a plain bool, {} would zero-value into "not a
+// handleDashboardPRUpdate writes the pull request's fields. draft is the one
+// writable field: true converts the pull request to a draft on GitHub, false
+// marks it ready for review. The answer is the pull request as the list
+// serves it.
+//
+// PATCH /api/dashboard/prs/{entity_id}
+func (dh *dashboardHandler) handleDashboardPRUpdate(w http.ResponseWriter, r *http.Request) {
+	// RawMessage so an absent field, an explicit null and a value are three
+	// different requests: with a plain bool, {} would zero-value into "not a
 	// draft" and silently mark the PR ready.
 	var body struct {
-		Draft *bool `json:"draft"`
+		Draft json.RawMessage `json:"draft"`
 	}
 	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 	if body.Draft == nil {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonMissingField, Message: "draft is required", Field: "draft",
+			Reason: httpx.ReasonMissingField, Message: "no fields to update: provide draft", Field: "draft",
 		})
 		return
 	}
-	draft := *body.Draft
+	var draft bool
+	if string(body.Draft) == "null" || json.Unmarshal(body.Draft, &draft) != nil {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: "draft must be true or false", Field: "draft",
+		})
+		return
+	}
 
-	// requireOrg must run BEFORE the GitHub mutation below — a 409 after
-	// the external draft flip would have already changed the PR on
-	// GitHub while reporting failure to the client, with the local
-	// snapshot patch never reached. Gate org access first; mutate
-	// external + local state only once the request is authorized.
+	// The org gate and the resolve run BEFORE the GitHub mutation below, so a
+	// refusal can never follow a draft flip GitHub has already made.
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-
-	// The PR is on the org's current GitHub host — the client below is built
-	// for it — so that host scopes both the audit row and the entity patched
-	// after the write. It is read before the mutation, so a failed read
-	// refuses the request before GitHub changes rather than after.
-	var orgSet domain.OrgSettings
-	if err := dh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		orgSet, e = tx.Orgs.GetSettings(r.Context(), orgID)
-		return e
-	}); err != nil {
-		internalError(w, "dashboard", err)
+	pr, ok := dh.resolveDashboardPR(w, r, orgID, userID)
+	if !ok {
 		return
 	}
-	host := domain.EntityScope("github", orgSet)
 
 	// Repo-scoped mutation: resolve on the whole owner/repo so a selective App
 	// install that doesn't cover this repo falls through to the PAT instead of
 	// minting a token that 403s on the draft toggle (see handleDashboardPRStatus).
-	client, err := dh.ghResolver.ClientForRepo(r.Context(), orgID, owner, repo)
+	client, err := dh.ghResolver.ClientForRepo(r.Context(), orgID, pr.owner, pr.repo)
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 			writeNotConfigured(w, "GitHub not configured")
@@ -321,9 +377,9 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 	}
 
 	if draft {
-		err = client.ConvertPRToDraft(r.Context(), owner, repo, number)
+		err = client.ConvertPRToDraft(r.Context(), pr.owner, pr.repo, pr.number)
 	} else {
-		err = client.MarkPRReady(r.Context(), owner, repo, number)
+		err = client.MarkPRReady(r.Context(), pr.owner, pr.repo, pr.number)
 	}
 	if err != nil {
 		internalError(w, "dashboard", err)
@@ -344,15 +400,15 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 	}
 	recordExternalActionBestEffort(r.Context(), dh.tx, orgID, userID, domain.ExternalAction{
 		Provider:    domain.ArtifactProviderGitHub,
-		Scope:       host,
+		Scope:       pr.host,
 		Action:      draftAction,
-		Target:      fmt.Sprintf("%s/%s#%d", owner, repo, number),
-		ExternalID:  strconv.Itoa(number),
-		URL:         domain.GitHubPullURLBase(host, owner+"/"+repo, number),
+		Target:      pr.slug(),
+		ExternalID:  strconv.Itoa(pr.number),
+		URL:         domain.GitHubPullURLBase(pr.host, pr.owner+"/"+pr.repo, pr.number),
 		FromState:   draftFrom,
 		ToState:     draftTo,
 		ActorUserID: userID,
-		Credential:  ghclient.CredentialForRepo(r.Context(), dh.ghResolver, orgID, owner, repo),
+		Credential:  ghclient.CredentialForRepo(r.Context(), dh.ghResolver, orgID, pr.owner, pr.repo),
 	})
 
 	// Patch the local entity snapshot to match the state we just pushed to
@@ -365,45 +421,44 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 	// signal and a second event would race the next poll's diff and confuse
 	// the audit trail. Revisit if a user reports "my trigger didn't fire
 	// when I dragged the card."
-	sourceID := fmt.Sprintf("%s/%s#%d", owner, repo, number)
-	if patchErr := dh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return patchPRSnapshotDraft(r.Context(), tx.Entities, orgID, host, sourceID, draft)
-	}); patchErr != nil {
-		dashboardLog.Warn("failed to patch snapshot after draft toggle", "source_id", sourceID, "error", patchErr)
+	var snap domain.PRSnapshot
+	if err := dh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		snap, e = patchPRSnapshotDraft(r.Context(), tx.Entities, orgID, pr.entity, draft)
+		return e
+	}); err != nil {
+		dashboardLog.Warn("failed to patch snapshot after draft toggle", "entity", pr.entity.ID, "pull_request", pr.slug(), "error", err)
+		// The answer still describes the pull request as GitHub now has it.
+		_ = json.Unmarshal([]byte(pr.entity.SnapshotJSON), &snap)
+		snap.IsDraft = draft
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"draft": draft})
+	row := domain.PRSummaryFromSnapshot(snap)
+	row.EntityID = pr.entity.ID
+	writeJSON(w, http.StatusOK, row)
 }
 
-// patchPRSnapshotDraft flips the is_draft field on an entity's PR snapshot
-// in place after a successful external mutation. Best-effort: returns nil
-// silently if the entity hasn't been discovered yet (e.g. user mutated
-// before the first poll) — the poller will populate it eventually.
-// Race window: a concurrent in-flight poll can overwrite our patch with
-// its pre-mutation snapshot. Acceptable for beta — the next poll corrects
-// it, and the window is small. PatchSnapshot intentionally does NOT bump
+// patchPRSnapshotDraft flips the is_draft field on a pull request entity's
+// snapshot in place after a successful external mutation, and returns the
+// snapshot it wrote. entity is the row the caller resolved: its snapshot is
+// the one patched, and the write is keyed by its id.
+//
+// Race window: a concurrent in-flight poll can overwrite our patch with its
+// pre-mutation snapshot. Acceptable for beta — the next poll corrects it, and
+// the window is small. PatchSnapshot intentionally does NOT bump
 // last_polled_at so the next poll still refreshes the row.
-func patchPRSnapshotDraft(ctx context.Context, entities db.EntityStore, orgID, scope, sourceID string, draft bool) error {
-	entity, err := entities.GetBySource(ctx, orgID, "github", scope, sourceID)
-	if err != nil {
-		return err
-	}
-	if entity == nil {
-		return nil
-	}
-	snapshotJSON := strings.TrimSpace(entity.SnapshotJSON)
-	if snapshotJSON == "" || snapshotJSON == "{}" {
-		return nil
-	}
+func patchPRSnapshotDraft(ctx context.Context, entities db.EntityStore, orgID string, entity *domain.Entity, draft bool) (domain.PRSnapshot, error) {
 	var snap domain.PRSnapshot
-	if err := json.Unmarshal([]byte(snapshotJSON), &snap); err != nil {
-		return err
+	if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil {
+		return domain.PRSnapshot{}, err
 	}
 	snap.IsDraft = draft
 	patched, err := json.Marshal(snap)
 	if err != nil {
-		return err
+		return domain.PRSnapshot{}, err
 	}
-	_, e := entities.PatchSnapshot(ctx, orgID, entity.ID, string(patched))
-	return e
+	if _, err := entities.PatchSnapshot(ctx, orgID, entity.ID, string(patched)); err != nil {
+		return domain.PRSnapshot{}, err
+	}
+	return snap, nil
 }

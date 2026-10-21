@@ -13,16 +13,17 @@ import (
 // snapshot_json blobs. Doesn't own any table — every method
 // aggregates data EntityStore would otherwise have to expose.
 // Carved out as its own interface so the dashboard handler depends
-// on a 2-method surface rather than pulling in the full
+// on a small surface rather than pulling in the full
 // EntityStore + JSON-snapshot reading.
 //
-// Both methods are viewer-relative: every aggregation attributes counts
+// Every method is viewer-relative: every aggregation attributes counts
 // to "the user", so the caller's identity is a parameter and without it
 // the totals are meaningless. Stats takes the GitHub username alone
-// (a count of reviews given is a count about a login); PRs takes the
-// PRViewer pair, because the list it answers is a union over both the
-// login rows were authored under and the TF user runs were commissioned
-// by. The handler resolves both from the auth context before calling.
+// (a count of reviews given is a count about a login); PRs and PR take
+// the PRViewer pair, because the population they answer for is a union
+// over both the login rows were authored under and the TF user runs
+// were commissioned by. The handler resolves both from the auth context
+// before calling.
 type DashboardStore interface {
 	// Stats returns aggregate PR counts (merged/closed/awaiting/
 	// draft) for the user since `since`, plus reviews-given /
@@ -49,4 +50,14 @@ type DashboardStore interface {
 	// f narrows within that population; an unknown state is
 	// ErrUnknownPRState.
 	PRs(ctx context.Context, orgID string, viewer PRViewer, f PRListFilter, opts ListOpts) ([]domain.PRSummaryRow, int, error)
+
+	// PR returns the pull request entity with this id when it is in the
+	// population PRs pages for viewer — a GitHub entity with a snapshot,
+	// authored by the viewer's login or commissioned by them — and nil
+	// otherwise, so a pull request the viewer's list would not show
+	// answers like one that does not exist. It is how the dashboard's
+	// per-PR routes resolve the entity_id a PRs row served; the caller
+	// reads the repository through the entity's RepositoryID and the
+	// number from its key.
+	PR(ctx context.Context, orgID string, viewer PRViewer, entityID string) (*domain.Entity, error)
 }

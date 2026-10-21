@@ -1184,8 +1184,8 @@ func (s *Server) routes() {
 	dh := &dashboardHandler{tx: s.tx, ghResolver: s.ghResolver, backfill: s.kickDashboardBackfill}
 	s.api("GET /api/dashboard/stats", dh.handleDashboardStats)
 	s.apiMutating("POST /api/dashboard/prs/list", dh.handleDashboardPRs)
-	s.api("GET /api/dashboard/prs/{owner}/{repo}/{number}/status", dh.handleDashboardPRStatus)
-	s.apiMutating("POST /api/dashboard/prs/{owner}/{repo}/{number}/draft", dh.handleDashboardPRDraft)
+	s.api("GET /api/dashboard/prs/{entity_id}/status", dh.handleDashboardPRStatus)
+	s.apiMutating("PATCH /api/dashboard/prs/{entity_id}", dh.handleDashboardPRUpdate)
 
 	// Prompt imports. Two routes rather than one with a source field: they
 	// take different bodies (a paste vs. nothing) and only one of them can
