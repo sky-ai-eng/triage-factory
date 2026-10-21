@@ -1633,9 +1633,6 @@ func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) err
 		return nil
 	}
 	repoID := owner + "/" + repo
-	// TODO(TFAC-1160): every read below matches the registry by name, so a
-	// checkout that spells a renamed repository's old name is refused as
-	// untracked, its own task repository included.
 	tracks, err := c.rt.TeamTracksRepo(ctx, owner, repo)
 	if err != nil {
 		c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")

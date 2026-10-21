@@ -234,6 +234,9 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	timings := s.resolvedActivityTimings()
 	tools := agentloop.NewToolHost(conn, timings.toolSocket())
 	defer func() { _ = tools.Close() }()
+	if handedOff {
+		s.repointRenamedRemotesInJail(ctx, orgID, task.ID, claudeCwd, tools)
+	}
 
 	s.updatePhase(ctx, orgID, conversationID, cfg.claimID, "")
 	delegateLog.Info("native agent loop starting", "conversation", conversationID, "cwd", claudeCwd, "model", model)
