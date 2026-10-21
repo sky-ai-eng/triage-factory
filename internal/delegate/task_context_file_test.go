@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -80,7 +80,7 @@ func TestWriteTaskContextFile_OverwritesThePriorStep(t *testing.T) {
 // assertion: rename the file or move the staging directory and the retention
 // still happens, silently, at a path nothing tells the agent about.
 func TestNativeMemoryBlock_NamesTheRetainedTaskContext(t *testing.T) {
-	want := agentproc.SandboxWorkRoot + "/" + worktree.ScratchDir + "/" + worktree.EntityMemoryDir + "/" + taskContextFileName
+	want := cell.WorkDir + "/" + worktree.ScratchDir + "/" + worktree.EntityMemoryDir + "/" + taskContextFileName
 	if composed := agentprompt.Build(nativeSpec()); !strings.Contains(composed, want) {
 		t.Errorf("the native prompt does not name the retained task context at %q; a compacted run has no way back to it", want)
 	}

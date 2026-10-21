@@ -174,8 +174,8 @@ func InteractiveSupported() bool {
 //
 // Local mode only, and enforced: refuses with errSDKLoopInMultiMode before
 // spawning anything if runmode is multi (the SDK loop only ever runs local —
-// multi mode's delegations are runtime='native', driven through
-// agentproc.LaunchToolHost's jail instead) rather than running the SDK
+// multi mode's delegations are runtime='native', driven by the native loop
+// against a cell's jail instead) rather than running the SDK
 // unsandboxed on the host — see refuseMultiModeSDKLoop. Otherwise always the
 // direct subprocess; the streaming-input flags are set on opts before the
 // command is built, so BuildArgs carries them.

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/cabundle"
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
@@ -21,7 +22,7 @@ import (
 // Live in-jail test of the egress interceptor: every toolchain
 // the rootfs ships fetches from a real registry through the run's egress
 // proxy, inside a real gVisor jail, trusting the interceptor through the
-// variables caBundleEnv sets and nothing else. A toolchain added to the
+// trust variables cell.JailEnv sets and nothing else. A toolchain added to the
 // rootfs that reads none of them fails here, which is what fixes the list.
 // It also checks the write path closed: `npm publish` from the jail is
 // refused by name.
@@ -148,9 +149,7 @@ func TestIntegration_EgressIntercept_ToolchainsInTheJail(t *testing.T) {
 		t.Fatalf("chown CA bundle to the jail identity: %v", err)
 	}
 
-	env := []string{"PATH=/opt/tf/bin:/usr/local/bin:/usr/bin:/bin", "HOME=/work"}
-	env = append(env, proxyEnv...)
-	env = append(env, caBundleEnv()...)
+	env := cell.JailEnv(cell.LaunchSpec{ProxyEnv: proxyEnv})
 
 	worktree := t.TempDir()
 	if err := os.Chown(worktree, net.JailUID(), sandbox.JailGID(net.Idx)); err != nil {
@@ -161,7 +160,7 @@ func TestIntegration_EgressIntercept_ToolchainsInTheJail(t *testing.T) {
 		Worktree:       worktree,
 		Argv:           []string{"/bin/bash", "-c", interceptToolchainScript},
 		Env:            env,
-		ExtraMounts:    []sandbox.Mount{{Source: bundlePath, Destination: sandboxCABundle, Options: []string{"ro"}}},
+		ExtraMounts:    []sandbox.Mount{{Source: bundlePath, Destination: cell.CABundlePath, Options: []string{"ro"}}},
 		Network:        net,
 	})
 	if err != nil {

@@ -20,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/apiproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/cabundle"
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -227,7 +228,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 		git = r.gitProxyConfig(gitUpstream)
 		git.ConversationID = conversationID
 		git.SharedOriginHost = sharedOriginHost
-		git.SharedOriginCAPath = agentproc.SandboxCABundlePath
+		git.SharedOriginCAPath = cell.CABundlePath
 	}
 
 	// The egress denial guidance reads the same two values every GitHub lane

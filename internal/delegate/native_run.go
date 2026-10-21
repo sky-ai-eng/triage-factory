@@ -32,7 +32,7 @@ import (
 // plus a connect — generous enough to absorb a loaded host, short enough that
 // a jail that never starts fails the claim rather than holding a concurrency
 // slot. A tool host that exits instead of connecting is reported immediately
-// and never waits this out (ToolHostJail.Accept).
+// and never waits this out (cell.Jail.Connect).
 const toolHostDialTimeout = 60 * time.Second
 
 // runNativeAgent drives one native engagement end to end.
@@ -201,6 +201,9 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	if runCell == nil {
 		return launchFailed(errors.New("launch tool host: no cell was provisioned for this engagement — multi mode is always per-run-isolated"))
 	}
+	// One resolution of the claim's memory ceiling for the jail and the bash
+	// budget derived from it, so the two cannot disagree.
+	memoryLimitMB := agentproc.ClaimMemoryLimitMB()
 	launched, err := runCell.Launch(ctx, cell.LaunchSpec{
 		WorkspaceKey:     namespace,
 		RunTree:          claudeCwd,
@@ -212,6 +215,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		GHChannel:        cellGHChannel(cfg.sidecar.ghChannel()),
 		SkillsSource:     cfg.skillsSourcePath,
 		MemorySource:     cfg.memorySourcePath,
+		MemoryLimitMB:    memoryLimitMB,
 		OrgID:            orgID,
 		ClaimID:          cfg.claimID,
 		RecordActuals:    s.recordSandboxActuals,
@@ -221,6 +225,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	}
 	jail = launched
 	defer func() { _ = jail.Close() }()
+	defer s.liveJails.add(cfg.claimID, jail)()
 
 	conn, err := jail.Connect(ctx, toolHostDialTimeout)
 	if err != nil {
@@ -289,7 +294,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		HasBlueprint:   true,
 		// Derived from the very ceiling this jail was launched under, not from
 		// a constant that could drift from it.
-		BashMemBudgetMB:     nativeBashMemBudgetMB(agentproc.ClaimMemoryLimitMB()),
+		BashMemBudgetMB:     nativeBashMemBudgetMB(memoryLimitMB),
 		UserID:              creatorUserID,
 		ColdCompactionModel: coldModel,
 		Workspace:           cfg.workspace,

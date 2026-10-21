@@ -7,10 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
 // fakeSandboxStatStore records what the sampler wrote so a test can assert on
@@ -38,19 +37,35 @@ func (f *fakeSandboxStatStore) Reap(_ context.Context, cutoff time.Time) (int64,
 
 var _ db.SandboxStatStore = (*fakeSandboxStatStore)(nil)
 
-// stubJails installs a fake live-jail registry and cgroup reader for the
-// duration of a test, returning a pointer to the read counter so the "idle
-// costs nothing" property is observable rather than assumed.
-func stubJails(t *testing.T, jails []agentproc.LiveJail, read func(containerID string) sandbox.RunSample) *int {
-	t.Helper()
-	origList, origSample := liveJailsFn, sampleJailFn
-	t.Cleanup(func() { liveJailsFn, sampleJailFn = origList, origSample })
+// stubJail names one live jail for stubJails: the claim it bills to and the
+// id its samples are looked up by.
+type stubJail struct {
+	ClaimID string
+	ID      string
+}
 
+// sampledJail is a cell.Jail whose only live member is Sample, which counts
+// the read and answers it from read.
+type sampledJail struct {
+	cell.Jail
+	id    string
+	read  func(id string) cell.Sample
+	reads *int
+}
+
+func (j *sampledJail) Sample() cell.Sample {
+	*j.reads++
+	return j.read(j.id)
+}
+
+// stubJails registers jails as live on s, each sampled through read, and
+// returns a pointer to the read counter so the "idle costs nothing" property
+// is observable rather than assumed.
+func stubJails(t *testing.T, s *Spawner, jails []stubJail, read func(id string) cell.Sample) *int {
+	t.Helper()
 	reads := 0
-	liveJailsFn = func() []agentproc.LiveJail { return jails }
-	sampleJailFn = func(containerID string) sandbox.RunSample {
-		reads++
-		return read(containerID)
+	for _, j := range jails {
+		t.Cleanup(s.liveJails.add(j.ClaimID, &sampledJail{id: j.ID, read: read, reads: &reads}))
 	}
 	return &reads
 }
@@ -64,19 +79,19 @@ func i64ptr(v int64) *int64 { return &v }
 func TestSampleSandboxStatsOnce_BatchesEveryLiveJail(t *testing.T) {
 	store := &fakeSandboxStatStore{}
 	s := &Spawner{sandboxStats: store}
-	samples := map[string]sandbox.RunSample{
+	samples := map[string]cell.Sample{
 		"tf-run-a-1": {MemCurrentMB: iptr(310), CPUUsecCum: i64ptr(1_200_000)},
 		"tf-run-b-2": {MemCurrentMB: iptr(188), CPUUsecCum: i64ptr(90_000)},
 	}
-	reads := stubJails(t, []agentproc.LiveJail{
-		{ClaimID: "claim-a", ContainerID: "tf-run-a-1"},
-		{ClaimID: "claim-b", ContainerID: "tf-run-b-2"},
-	}, func(id string) sandbox.RunSample { return samples[id] })
+	reads := stubJails(t, s, []stubJail{
+		{ClaimID: "claim-a", ID: "tf-run-a-1"},
+		{ClaimID: "claim-b", ID: "tf-run-b-2"},
+	}, func(id string) cell.Sample { return samples[id] })
 
 	s.sampleSandboxStatsOnce(context.Background())
 
 	if *reads != 2 {
-		t.Errorf("cgroup reads = %d, want 2 (one per live jail)", *reads)
+		t.Errorf("samples = %d, want 2 (one per live jail)", *reads)
 	}
 	if len(store.batches) != 1 {
 		t.Fatalf("writes = %d, want exactly 1 batched insert", len(store.batches))
@@ -101,48 +116,48 @@ func TestSampleSandboxStatsOnce_BatchesEveryLiveJail(t *testing.T) {
 }
 
 // TestSampleSandboxStatsOnce_IdleCostsNothing pins the acceptance property:
-// with no live jails there is no cgroup read and no row — an idle executor and
+// with no live jails there is no sample and no row — an idle executor and
 // every control pod pay nothing for this rider on their sampler tick.
 func TestSampleSandboxStatsOnce_IdleCostsNothing(t *testing.T) {
 	store := &fakeSandboxStatStore{}
 	s := &Spawner{sandboxStats: store}
-	reads := stubJails(t, nil, func(string) sandbox.RunSample {
-		t.Error("sampled a cgroup with no live jails")
-		return sandbox.RunSample{}
+	reads := stubJails(t, s, nil, func(string) cell.Sample {
+		t.Error("sampled a jail with none live")
+		return cell.Sample{}
 	})
 
 	s.sampleSandboxStatsOnce(context.Background())
 
 	if *reads != 0 {
-		t.Errorf("cgroup reads = %d with no live jails, want 0", *reads)
+		t.Errorf("samples = %d with no live jails, want 0", *reads)
 	}
 	if len(store.batches) != 0 {
 		t.Errorf("writes = %d with no live jails, want 0 (not even an empty insert)", len(store.batches))
 	}
 }
 
-// TestSampleSandboxStatsOnce_GrouplessJailProducesNoRow covers a registered
-// jail with no cgroup to read, at either end of a run's life: one registered
-// but not yet started (registration precedes the exec that creates the group)
-// and one torn down between the registry snapshot and the read. Both contribute
+// TestSampleSandboxStatsOnce_JailNotRunningProducesNoRow covers a registered
+// jail that is not running when it is read, at either end of a run's life:
+// one registered but not yet started, and one torn down between the registry
+// snapshot and the read. Both contribute
 // no row and no error while their live sibling records normally — a zeroed row
 // would report a run that has not started, or has already finished, as an idle
 // live one.
-func TestSampleSandboxStatsOnce_GrouplessJailProducesNoRow(t *testing.T) {
+func TestSampleSandboxStatsOnce_JailNotRunningProducesNoRow(t *testing.T) {
 	store := &fakeSandboxStatStore{}
 	s := &Spawner{sandboxStats: store}
-	stubJails(t, []agentproc.LiveJail{
-		{ClaimID: "claim-starting", ContainerID: "tf-run-starting-1"},
-		{ClaimID: "claim-gone", ContainerID: "tf-run-gone-2"},
-		{ClaimID: "claim-live", ContainerID: "tf-run-live-3"},
-	}, func(id string) sandbox.RunSample {
+	stubJails(t, s, []stubJail{
+		{ClaimID: "claim-starting", ID: "tf-run-starting-1"},
+		{ClaimID: "claim-gone", ID: "tf-run-gone-2"},
+		{ClaimID: "claim-live", ID: "tf-run-live-3"},
+	}, func(id string) cell.Sample {
 		switch id {
-		case "tf-run-starting-1": // cgroup not created yet (pre-Start)
-			return sandbox.RunSample{}
-		case "tf-run-gone-2": // cgroup removed mid-tick
-			return sandbox.RunSample{}
+		case "tf-run-starting-1": // not started yet
+			return cell.Sample{}
+		case "tf-run-gone-2": // ended mid-tick
+			return cell.Sample{}
 		}
-		return sandbox.RunSample{MemCurrentMB: iptr(256), CPUUsecCum: i64ptr(4242)}
+		return cell.Sample{MemCurrentMB: iptr(256), CPUUsecCum: i64ptr(4242)}
 	})
 
 	s.sampleSandboxStatsOnce(context.Background())
@@ -161,8 +176,8 @@ func TestSampleSandboxStatsOnce_GrouplessJailProducesNoRow(t *testing.T) {
 func TestSampleSandboxStatsOnce_EveryJailGoneWritesNothing(t *testing.T) {
 	store := &fakeSandboxStatStore{}
 	s := &Spawner{sandboxStats: store}
-	stubJails(t, []agentproc.LiveJail{{ClaimID: "claim-gone", ContainerID: "tf-run-gone-1"}},
-		func(string) sandbox.RunSample { return sandbox.RunSample{} })
+	stubJails(t, s, []stubJail{{ClaimID: "claim-gone", ID: "tf-run-gone-1"}},
+		func(string) cell.Sample { return cell.Sample{} })
 
 	s.sampleSandboxStatsOnce(context.Background())
 
@@ -178,8 +193,8 @@ func TestSampleSandboxStatsOnce_EveryJailGoneWritesNothing(t *testing.T) {
 func TestSampleSandboxStatsOnce_PartialObservationStillRecords(t *testing.T) {
 	store := &fakeSandboxStatStore{}
 	s := &Spawner{sandboxStats: store}
-	stubJails(t, []agentproc.LiveJail{{ClaimID: "claim-a", ContainerID: "tf-run-a-1"}},
-		func(string) sandbox.RunSample { return sandbox.RunSample{CPUUsecCum: i64ptr(77)} })
+	stubJails(t, s, []stubJail{{ClaimID: "claim-a", ID: "tf-run-a-1"}},
+		func(string) cell.Sample { return cell.Sample{CPUUsecCum: i64ptr(77)} })
 
 	s.sampleSandboxStatsOnce(context.Background())
 
@@ -196,17 +211,17 @@ func TestSampleSandboxStatsOnce_PartialObservationStillRecords(t *testing.T) {
 }
 
 // TestSampleSandboxStatsOnce_NoStoreIsSilent covers a partially-wired Spawner:
-// no store means no reads either, so the tick costs nothing rather than
-// sampling cgroups it has nowhere to put.
+// no store means no samples either, so the tick costs nothing rather than
+// reading jails it has nowhere to record.
 func TestSampleSandboxStatsOnce_NoStoreIsSilent(t *testing.T) {
 	s := &Spawner{}
-	reads := stubJails(t, []agentproc.LiveJail{{ClaimID: "claim-a", ContainerID: "tf-run-a-1"}},
-		func(string) sandbox.RunSample { return sandbox.RunSample{MemCurrentMB: iptr(1)} })
+	reads := stubJails(t, s, []stubJail{{ClaimID: "claim-a", ID: "tf-run-a-1"}},
+		func(string) cell.Sample { return cell.Sample{MemCurrentMB: iptr(1)} })
 
 	s.sampleSandboxStatsOnce(context.Background())
 
 	if *reads != 0 {
-		t.Errorf("cgroup reads = %d with no store wired, want 0", *reads)
+		t.Errorf("samples = %d with no store wired, want 0", *reads)
 	}
 }
 
@@ -216,8 +231,8 @@ func TestSampleSandboxStatsOnce_NoStoreIsSilent(t *testing.T) {
 func TestSampleSandboxStatsOnce_WriteFailureIsSwallowed(t *testing.T) {
 	store := &fakeSandboxStatStore{recordErr: errors.New("db down")}
 	s := &Spawner{sandboxStats: store}
-	stubJails(t, []agentproc.LiveJail{{ClaimID: "claim-a", ContainerID: "tf-run-a-1"}},
-		func(string) sandbox.RunSample { return sandbox.RunSample{MemCurrentMB: iptr(64)} })
+	stubJails(t, s, []stubJail{{ClaimID: "claim-a", ID: "tf-run-a-1"}},
+		func(string) cell.Sample { return cell.Sample{MemCurrentMB: iptr(64)} })
 
 	s.sampleSandboxStatsOnce(context.Background()) // must not panic or block
 
@@ -263,9 +278,9 @@ func TestRunInstanceStatSampler_TickAlsoSamplesSandboxes(t *testing.T) {
 	instances := &fakeInstanceStatStore{}
 	sandboxes := &safeSandboxStatStore{}
 	s := &Spawner{instanceStats: instances, sandboxStats: sandboxes, executorID: "exec-1"}
-	stubJails(t, []agentproc.LiveJail{{ClaimID: "claim-a", ContainerID: "tf-run-a-1"}},
-		func(string) sandbox.RunSample {
-			return sandbox.RunSample{MemCurrentMB: iptr(220), CPUUsecCum: i64ptr(31_337)}
+	stubJails(t, s, []stubJail{{ClaimID: "claim-a", ID: "tf-run-a-1"}},
+		func(string) cell.Sample {
+			return cell.Sample{MemCurrentMB: iptr(220), CPUUsecCum: i64ptr(31_337)}
 		})
 
 	// The instance sample blocks on its own 1s CPU window, so one tick is the

@@ -218,7 +218,7 @@ func TestServeSocket_EndToEnd(t *testing.T) {
 // the package timeout — ten minutes of nothing, for a child that had already
 // exited with a one-line reason on stderr. Watching the process is what turns
 // that into an immediate, self-explaining failure, and it is the same guard
-// ToolHostJail.Accept carries in production for the same reason.
+// the gVisor jail's Connect carries in production for the same reason.
 func startAndAccept(t *testing.T, listener net.Listener, cmd *exec.Cmd) net.Conn {
 	t.Helper()
 	var stderr bytes.Buffer

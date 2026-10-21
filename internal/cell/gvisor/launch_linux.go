@@ -8,7 +8,6 @@ import (
 	"net"
 	"strconv"
 
-	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
@@ -17,41 +16,27 @@ import (
 // jail on this cell's network, every input bind-mounted at its fixed in-jail
 // path. The broker validates each mount source against its own per-run
 // derivation, so the paths named here are requests, not grants.
-//
-// The gateway admits the jail to the sidecar's endpoints before the jail
-// starts, so its first connection already finds them open.
 func (c *gvisorCell) Launch(ctx context.Context, spec cell.LaunchSpec) (cell.Jail, error) {
-	ports, err := gatewayPorts(c.net.HostIP, spec.SidecarEndpoints)
+	return LaunchOnNetwork(ctx, c.net, c.conversationID, spec)
+}
+
+// LaunchOnNetwork launches a jail on a run network the caller built itself,
+// with no cell around it: the network, and anything the caller started on
+// it, are the caller's to close after the jail. It exists for measuring jails
+// apart from their sidecars (cmd/sandbox-bench); an engagement launches
+// through Cell.Launch, which is this on the cell's own network.
+//
+// The gateway admits the jail to spec's sidecar endpoints before the jail
+// starts, so its first connection already finds them open.
+func LaunchOnNetwork(ctx context.Context, rn *sandbox.RunNetwork, conversationID string, spec cell.LaunchSpec) (cell.Jail, error) {
+	ports, err := gatewayPorts(rn.HostIP, spec.SidecarEndpoints)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.net.AdmitJailPorts(ctx, ports); err != nil {
+	if err := rn.AdmitJailPorts(ctx, ports); err != nil {
 		return nil, fmt.Errorf("gvisor: admit jail to sidecar endpoints: %w", err)
 	}
-	jail, err := agentproc.LaunchToolHost(ctx, agentproc.ToolHostOptions{
-		ConversationID:   c.conversationID,
-		WorkspaceKey:     spec.WorkspaceKey,
-		Worktree:         spec.RunTree,
-		ExtraEnv:         spec.Env,
-		PrebuiltNetwork:  c.net,
-		PrebuiltProxyEnv: spec.ProxyEnv,
-		AgentHostSocket: sandbox.Mount{
-			Source:      spec.AgentHostSocket,
-			Destination: sandbox.TrustedAgentHostSocketDestination,
-		},
-		CABundle: sandbox.Mount{
-			Source:      spec.CABundle,
-			Destination: sandbox.TrustedCABundleDestination,
-			Options:     []string{"ro"},
-		},
-		GHChannel:            ghChannelParams(spec.GHChannel),
-		SkillsSourcePath:     spec.SkillsSource,
-		MemorySourcePath:     spec.MemorySource,
-		MemoryLimitMB:        spec.MemoryLimitMB,
-		OrgID:                spec.OrgID,
-		ClaimID:              spec.ClaimID,
-		RecordSandboxActuals: spec.RecordActuals,
-	})
+	jail, err := launchToolHost(ctx, rn, conversationID, spec)
 	if err != nil {
 		return nil, err
 	}
@@ -78,11 +63,4 @@ func gatewayPorts(gateway string, endpoints []string) ([]int, error) {
 		ports = append(ports, port)
 	}
 	return ports, nil
-}
-
-func ghChannelParams(gc *cell.GHChannel) *agentproc.GHChannelParams {
-	if gc == nil {
-		return nil
-	}
-	return &agentproc.GHChannelParams{Host: gc.Host, Token: gc.Token}
 }

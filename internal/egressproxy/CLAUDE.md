@@ -24,12 +24,12 @@ design of record, with every condition this package implements, is
   that dials it. Name the consumer in the comment. Entries without one
   are dead reach waiting to be abused, and get removed.
 - **Its toolchain must trust the run's CA.** Every admitted host is
-  intercepted, so a client that ignores the trust variables in
-  `agentproc.caBundleEnv` fails with certificate errors. Run
-  `TestIntegration_EgressIntercept` (`internal/agentproc`, root and runsc)
-  with the new toolchain added to its script; when it fails, add that
-  client's variable to `caBundleEnv` and to the broker's
-  `allowedSandboxEnvKeys`.
+  intercepted, so a client that ignores the trust variables the jail's
+  environment sets (`caBundleEnv` in `internal/cell/jailenv.go`) fails
+  with certificate errors. Run `TestIntegration_EgressIntercept`
+  (`internal/agentproc`, root and runsc) with the new toolchain added to
+  its script; when it fails, add that client's variable to `caBundleEnv`
+  and to the broker's `allowedSandboxEnvKeys`.
 - **A read POST path is probed like a host.** List one in
   `ReadPOSTPaths` only after capturing a real client sending it (the
   denial log names the method and path of every refused request) and

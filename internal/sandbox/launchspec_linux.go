@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
@@ -25,12 +26,9 @@ func TrustedGitHooksDir() string {
 	return paths.HooksDir()
 }
 
-// TrustedTFBinaryDestination mirrors agentproc's private sandboxTFBinary
-// constant — the fixed in-sandbox path the host TF binary is bind-mounted
-// at. Duplicated as a literal (not imported: agentproc imports this
-// package, so the reverse import would cycle); agentproc's own test suite
-// cross-checks the two literals stay equal.
-const TrustedTFBinaryDestination = "/usr/local/bin/triagefactory"
+// TrustedTFBinaryDestination is the fixed in-sandbox path the host TF binary
+// is bind-mounted at: the cell contract's path, which the jail's env names.
+const TrustedTFBinaryDestination = cell.TFBinaryPath
 
 // TrustedTFBinaryPath resolves the broker's own running binary. It is the
 // same file the orchestrator re-execs to spawn the broker (see
@@ -42,23 +40,20 @@ func TrustedTFBinaryPath() (string, error) {
 	return os.Executable()
 }
 
-// TrustedTFACBinaryDestination mirrors agentproc's private sandboxTFACBinary —
-// the second in-sandbox path the TF binary is bind-mounted at, under the
-// additive `tfac` applet name. Same trusted source as the canonical TF-binary
+// TrustedTFACBinaryDestination is the second in-sandbox path the TF binary is
+// bind-mounted at, under the additive `tfac` applet name. Same trusted source as the canonical TF-binary
 // mount (the broker's own re-exec target), just a different destination.
 const TrustedTFACBinaryDestination = "/opt/tf/bin/tfac"
 
-// TrustedGHBinaryDestination mirrors agentproc's private sandboxGHBinary — the
-// fixed in-sandbox path the TF-pinned real gh binary is bind-mounted at.
-// Duplicated as a literal for the same cycle reason as TrustedTFBinaryDestination;
-// agentproc's drift test cross-checks the two literals stay equal.
+// TrustedGHBinaryDestination is the fixed in-sandbox path the TF-pinned real
+// gh binary is bind-mounted at, on the directory the jail's PATH leads with.
 const TrustedGHBinaryDestination = "/opt/tf/bin/gh"
 
 // trustedGHBinaryPath is the executor-host path the pinned gh binary is baked at
 // (docker/Dockerfile). A var (not const) so this package's own tests can point
 // it at a stub the non-root `go test` user can create; production never
 // reassigns it, and the source it validates is the same fixed image path
-// agentproc mounts from.
+// the gVisor launch mounts from.
 var trustedGHBinaryPath = "/opt/tf/bin/gh"
 
 // TrustedGHBinaryPath returns the broker-trusted source path for the pinned gh
@@ -67,10 +62,10 @@ var trustedGHBinaryPath = "/opt/tf/bin/gh"
 // this literal.
 func TrustedGHBinaryPath() string { return trustedGHBinaryPath }
 
-// TrustedCABundleDestination mirrors agentproc's private sandboxCABundle —
-// the fixed in-sandbox path the run's CA bundle is bind-mounted at (the trust
-// variables in the jail's env point here).
-const TrustedCABundleDestination = "/run/tf-ca-bundle.crt"
+// TrustedCABundleDestination is the fixed in-sandbox path the run's CA bundle
+// is bind-mounted at: the cell contract's path, which the trust variables in
+// the jail's env name.
+const TrustedCABundleDestination = cell.CABundlePath
 
 // TrustedCABundlePath is the broker's own derivation of "this run's own CA
 // bundle" host-side path. Like the agenthost socket, the broker did not create
@@ -210,25 +205,21 @@ func catalogNames() string {
 // The sandbox env is an allowlist, not a passthrough: a key not on this
 // set fails the launch loudly. The set is the UNION of what the sandbox
 // legitimately needs — enumerated here explicitly with each group tied to
-// its producer. internal/agentproc's secret_keys drift test asserts every
-// key the proxy/git wiring emits is covered here, so a new producer key
-// can't silently slip past validation.
+// its producer. internal/agentproc's TestSandboxEnvAllowlistCoversEveryProducer
+// (sandbox_env_allowlist_drift_test.go) asserts every key the jail's own
+// environment (cell.JailEnv) and the proxy/git wiring emit is covered here,
+// so a new producer key can't silently slip past validation.
 //
 // Values are unrestricted (URLs, per-run placeholder tokens, git identity)
 // — Property B holds because the orchestrator only ever puts non-secret /
 // per-run-scoped values here; the real credentials live in the host-side
 // proxies and never cross into the sandbox env.
 var allowedSandboxEnvKeys = map[string]struct{}{
-	// Base runtime floor (agentproc.buildSandboxEnv + agentRuntimeEnv).
-	"PATH":           {},
-	"HOME":           {},
-	"TERM":           {},
-	"BUN_JSC_useJIT": {},
-	// Claude Code behavior toggle: suppress the SDK's non-essential traffic
-	// (telemetry / error reporting / auto-updater / feature gates) it can't
-	// reach through the fail-closed egress allowlist anyway. Non-credential.
-	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": {},
-	// The "I am inside the jail" marker (agentproc.SandboxMarkerEnvVar).
+	// Base runtime floor (cell.JailEnv).
+	"PATH": {},
+	"HOME": {},
+	"TERM": {},
+	// The "I am inside the jail" marker (runmode.SandboxMarkerEnvVar).
 	// Non-credential; in-jail code reads it to tell a missing exec-verb
 	// socket apart from a local-mode CLI invocation.
 	"TRIAGE_FACTORY_SANDBOXED": {},
@@ -249,7 +240,7 @@ var allowedSandboxEnvKeys = map[string]struct{}{
 	"NO_PROXY":    {},
 	"no_proxy":    {},
 
-	// Go toolchain policy + fetch-relay routing (agentproc.buildSandboxEnv;
+	// Go toolchain policy + fetch-relay routing (cell.JailEnv;
 	// GOPROXY comes from the egressrelay catalog's go-modules entry).
 	// Non-credential, and not paths the broker itself acts on — cmd/go
 	// inside the jail is the only reader. GOPROXY names this run's own
@@ -279,13 +270,13 @@ var allowedSandboxEnvKeys = map[string]struct{}{
 	"GIT_CONFIG_COUNT":    {},
 	"TF_GIT_PUSH_CAPTURE": {},
 
-	// The run's CA bundle (agentproc.caBundleEnv): each toolchain's trust
+	// The run's CA bundle (cell.JailEnv): each toolchain's trust
 	// variable, all pointing at the mounted bundle of public certificates.
 	"SSL_CERT_FILE":       {},
 	"NODE_EXTRA_CA_CERTS": {},
 	"PIP_CERT":            {},
 
-	// Real-gh channel (agentproc.ghChannelEnv). GH_HOST redirects gh at the
+	// Real-gh channel (cell.JailEnv). GH_HOST redirects gh at the
 	// per-run injector; GH_ENTERPRISE_TOKEN is the per-run PLACEHOLDER (never
 	// the real token — Property B); the two GH_* suppressors keep gh
 	// non-interactive and quiet.
@@ -304,9 +295,9 @@ var allowedSandboxEnvPrefixes = []string{
 }
 
 // EnvKeyAllowed reports whether an env key is on the sandbox allowlist —
-// exported so internal/agentproc (which produces the sandbox env and can
-// import this package without a cycle) can drift-test that every key its
-// proxy/git wiring emits is covered here. Without that guard a new producer
+// exported so internal/agentproc, which produces the proxy env and can import
+// this package without a cycle, can drift-test that every key the jail's
+// environment and its own proxy/git wiring emit is covered here. Without that guard a new producer
 // key would break every sandboxed run at launch — the broker's
 // ValidateLaunchParams rejects an unlisted key — instead of being caught at
 // test time by the drift test.

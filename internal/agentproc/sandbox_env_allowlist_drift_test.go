@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/egressrelay"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/llmproxy"
@@ -16,11 +17,12 @@ import (
 // broker's env allowlist (sandbox.allowedSandboxEnvKeys). Under privilege
 // separation the broker rejects the whole launch if any sandbox env key is
 // not on that allowlist, so a new key added to one of the producers here —
-// the base env, the egress proxy, the LLM proxy (every provider variant),
-// the git-config block, the push-capture hook, or the delegate/resume
-// run-metadata set — would silently break every privsep-on run. This test
-// exercises the real producers and asserts sandbox.EnvKeyAllowed accepts
-// every key they emit, so such a drift fails here instead of in production.
+// the jail's own environment (cell.JailEnv), the egress proxy, the LLM proxy
+// (every provider variant), the git-config block, the push-capture hook, or
+// the delegate/resume run-metadata set — would silently break every
+// privsep-on run. This test exercises the real producers and asserts
+// sandbox.EnvKeyAllowed accepts every key they emit, so such a drift fails
+// here instead of in production.
 func TestSandboxEnvAllowlistCoversEveryProducer(t *testing.T) {
 	var keys []string
 	add := func(env []string) {
@@ -33,10 +35,10 @@ func TestSandboxEnvAllowlistCoversEveryProducer(t *testing.T) {
 		}
 	}
 
-	// Base runtime floor (+ the run-metadata keys the base is appended with
-	// in LaunchToolHost). agentRuntimeEnv is folded in by buildSandboxEnv.
-	add(buildSandboxEnv(nil))
-	add([]string{githooks.BinEnvVar + "=/usr/local/bin/triagefactory"})
+	// The jail's own environment, with every optional input present: the
+	// floor, the git-hooks bin, the CA bundle's trust variables and the
+	// real-gh channel (GH_HOST / GH_ENTERPRISE_TOKEN and the two suppressors).
+	add(cell.JailEnv(cell.LaunchSpec{GHChannel: &cell.GHChannel{Host: "10.42.1.1:8443", Token: "run-token"}}))
 
 	// Egress proxy routing.
 	add(sandboxEgressProxyEnv("10.42.1.1:9000", "10.42.1.1", "run-token"))
@@ -70,12 +72,6 @@ func TestSandboxEnvAllowlistCoversEveryProducer(t *testing.T) {
 		{"url.http://p/.insteadOf", "https://github.com/"},
 	}))
 	add([]string{githooks.PushCaptureEnvVar + "=" + githooks.PushCaptureProxy})
-
-	// The CA bundle's trust variables, and the real-gh channel env (GH_HOST /
-	// GH_ENTERPRISE_TOKEN + the two suppressors). A new key here without an
-	// allowlist entry would break every launch at validation.
-	add(caBundleEnv())
-	add(ghChannelEnv(&GHChannelParams{Host: "10.42.1.1:8443", Token: "run-token"}))
 
 	// Run-scoped metadata set by delegate/run.go + delegate/resume.go as
 	// ExtraEnv. Those live in a package agentproc's tests can't import

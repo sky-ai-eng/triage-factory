@@ -57,7 +57,7 @@ tunnel terminates TLS for every host it admits, under the conditions in
   leaves the sidecar's memory. Its certificate reaches the jail in the
   run's CA bundle (`/run/tf-ca-bundle.crt`), after the system roots, and
   every toolchain in the rootfs reads that bundle through its own variable
-  (`agentproc.caBundleEnv`).
+  (`cell.JailEnv`).
 - **Verified upstream first.** The proxy dials the registry through the
   vetted gate, verifies its certificate for the CONNECT host against the
   system roots, and only then answers the CONNECT. A failure is a refusal,
@@ -103,7 +103,7 @@ Three rules ride along with the table. A tunnel entry also requires an
 **in-sandbox consumer** — a toolchain in the rootfs that actually dials it
 (so Hackage/Maven entries land together with their rootfs variants, not
 before). That toolchain must **trust the run's CA**, through a variable in
-`agentproc.caBundleEnv`, or every fetch fails verification. And probe with
+`cell.JailEnv`, or every fetch fails verification. And probe with
 a **large** artifact: the Go proxy's inline/redirect split is
 size-dependent, so a small-file smoke test passes while real builds fail —
 that false pass is how the gap shipped in the first place.

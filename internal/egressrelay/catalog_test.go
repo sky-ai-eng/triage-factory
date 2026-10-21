@@ -30,7 +30,7 @@ func TestCatalog_EveryEntryConstructsAndCarriesEnv(t *testing.T) {
 }
 
 // TestCatalog_EnvKeysMatchEnv pins each entry's declared EnvKeys to the
-// keys its Env actually emits. EnvKeys is the drop-list buildSandboxEnv
+// keys its Env actually emits. EnvKeys is the drop-list cell.JailEnv
 // uses to keep an inherited copy of a relay key from shadowing the relay's
 // own (first-wins duplicate resolution, relay copy appended last), so a
 // key emitted but not declared would be exactly the unprotected asymmetry
@@ -53,7 +53,7 @@ func TestCatalog_EnvKeysMatchEnv(t *testing.T) {
 		}
 		for k := range emitted {
 			if !declared[k] {
-				t.Errorf("catalog entry %q emits env key %q not declared in EnvKeys — buildSandboxEnv would not protect it from an inherited copy", e.Config.Name, k)
+				t.Errorf("catalog entry %q emits env key %q not declared in EnvKeys — cell.JailEnv would not protect it from an inherited copy", e.Config.Name, k)
 			}
 		}
 		for k := range declared {
