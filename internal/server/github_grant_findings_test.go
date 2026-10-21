@@ -87,6 +87,10 @@ func TestGitHubGrantFindings_ListWithTotals(t *testing.T) {
 		if item.Slug != "acme/secrets" || !item.Private || item.HTMLURL != "https://github.com/acme/secrets" {
 			t.Errorf("item=%+v, want acme/secrets (private) with its html_url", item)
 		}
+		// Named by GitHub's id, and by no registry row: nothing registered it.
+		if item.GitHubID != "11" || item.RepositoryID != "" {
+			t.Errorf("github_id=%q repository_id=%q, want 11 and none", item.GitHubID, item.RepositoryID)
+		}
 		// The verb travels with the row: the installation whose grant carries
 		// it, and the GitHub page where that grant is narrowed.
 		if item.InstallationID != "1" || item.AccountLogin != "acme" {
@@ -112,6 +116,16 @@ func TestGitHubGrantFindings_ListWithTotals(t *testing.T) {
 		item := got.Items[0]
 		if item.Slug != "acme/legacy" {
 			t.Errorf("slug=%q, want acme/legacy", item.Slug)
+		}
+		// Named by the tracked registry row it is about.
+		legacy, err := sqlitestore.New(s.db).Repos.GetByRefSystem(context.Background(), runmode.LocalDefaultOrgID, domain.RepoRef{
+			Source: domain.RepoSourceGitHub, Host: seedRepoHost(t, s), Owner: "acme", Repo: "legacy",
+		})
+		if err != nil || legacy == nil {
+			t.Fatalf("GetByRefSystem(acme/legacy) = %v, %v", legacy, err)
+		}
+		if item.RepositoryID != legacy.ID {
+			t.Errorf("repository_id=%q, want the registry row %q", item.RepositoryID, legacy.ID)
 		}
 		if item.InstallationID != "1" || item.AccountLogin != "acme" {
 			t.Errorf("installation=%q account=%q, want the selective installation on acme", item.InstallationID, item.AccountLogin)

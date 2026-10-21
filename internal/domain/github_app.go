@@ -208,6 +208,12 @@ type ReachableRepository struct {
 	// for every entry. "" when the source sent none, which is a supported state:
 	// the slug matches anyway.
 	ExternalID string
+	// RepositoryID is the live registry row TF holds for this repository, ""
+	// when it holds none. Reads resolve it and writers ignore it. The entry and
+	// the row are matched by GitHub id when both carry one, and by folded name
+	// only when either does not, so a row under this name with a different id
+	// is a different repository and is not this entry's.
+	RepositoryID string
 	// The display fields the repository picker renders, mirrored from the same
 	// repository objects the enumeration already returns.
 	Description string
@@ -239,8 +245,14 @@ func (r ReachableRepository) Slug() string { return r.Owner + "/" + r.Repo }
 // repository, or one whose width is not yet known — those cannot report drift
 // (see ReachableReposStore.ListScopeDriftSystem).
 type ScopeDriftRepository struct {
-	Owner          string
-	Repo           string
+	// RepositoryID is the tracked registry row the finding is about. It is what
+	// tells two findings apart; the name is for display.
+	RepositoryID string
+	Owner        string
+	Repo         string
+	// ExternalID is the row's GitHub repository id, "" while TF has not
+	// learned it.
+	ExternalID     string
 	InstallationID string
 }
 

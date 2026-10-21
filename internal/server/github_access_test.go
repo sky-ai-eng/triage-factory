@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -1043,6 +1044,35 @@ func TestGitHubAppCutoverPreflight_Diff(t *testing.T) {
 	}
 	if len(out.DarkRepos) != 1 || out.DarkRepos[0].Repo != "acme/api" {
 		t.Errorf("dark_repos=%+v, want [acme/api]", out.DarkRepos)
+	}
+}
+
+// TestBuildAccessDiff_MatchesTrackedReposByGitHubID pins the membership rule
+// both preflights share. A repository GitHub renamed before TF applied the
+// rename is reachable under its new name, because the ids agree. A tracked
+// name GitHub has given to another repository is dark, because the ids do
+// not. Only a tracked row with no GitHub id is matched by name, and each dark
+// entry names the registry row it is.
+func TestBuildAccessDiff_MatchesTrackedReposByGitHubID(t *testing.T) {
+	tracked := []domain.TrackedRepoTeams{
+		{RepositoryID: "row-renamed", ExternalID: "10", Owner: "acme", Repo: "old", Teams: []string{"core"}},
+		{RepositoryID: "row-reused", ExternalID: "20", Owner: "acme", Repo: "api", Teams: []string{"core"}},
+		{RepositoryID: "row-no-id", Owner: "Acme", Repo: "Web", Teams: []string{"core"}},
+	}
+	listing := []ghclient.UserRepo{
+		{ID: 10, FullName: "acme/new"},
+		{ID: 21, FullName: "acme/api"},
+		{ID: 30, FullName: "acme/web"},
+	}
+	diff := buildAccessDiff(tracked, reachableRepoSetOf(listing))
+	if diff.Tracked != 3 || diff.Reachable != 2 {
+		t.Errorf("tracked=%d reachable=%d, want 3/2", diff.Tracked, diff.Reachable)
+	}
+	if len(diff.DarkRepos) != 1 {
+		t.Fatalf("dark_repos = %+v, want the reused name's row alone", diff.DarkRepos)
+	}
+	if got := diff.DarkRepos[0]; got.RepositoryID != "row-reused" || got.GitHubID != "20" || got.Repo != "acme/api" {
+		t.Errorf("dark repo = %+v, want row-reused (github id 20, acme/api)", got)
 	}
 }
 

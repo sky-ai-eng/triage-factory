@@ -100,6 +100,14 @@ type Manager struct {
 	// rather than leaking an event.
 	EventSources db.OrgEventSourceStore
 
+	// GrantMirror is the App-installation grant mirror ReconcileGrant writes.
+	// A cycle reads it for one thing: when an installation's grant cannot be
+	// read from GitHub, which tracked repositories that grant held when it was
+	// last mirrored, so the cursor resumes at them. nil leaves the cursor to
+	// wrap as if every installation had resolved (tests, and any embedder
+	// that hasn't wired it).
+	GrantMirror db.ReachableReposStore
+
 	// OnError fires when a poll cycle returns an error. Source is "github",
 	// "jira" or "linear"; orgID identifies the tenant whose cycle errored (empty
 	// when the failure is upstream of the per-org loop, e.g. listing
@@ -810,13 +818,13 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// cycle — host is stable across the per-installation loop below.
 	resolver := m.reviewerResolver(ctx, orgID, "", nil)
 
-	// unresolvedOwners collects the account logins of installations whose
-	// client/grant couldn't be resolved this cycle (ClientFor or
-	// ListInstallationRepos failed) — TFAC-571 follow-up. Those repos were
-	// never reached at all, the same as a rate-limited repo that never got
-	// dispatched, so the cursor computed below must not treat this cycle as
-	// a full wrap just because a LATER installation happened to succeed.
-	unresolvedOwners := make(map[string]bool)
+	// unresolved collects the ids of installations whose client or grant
+	// couldn't be resolved this cycle (ClientForInstallation or
+	// ListInstallationRepos failed). Their repos were never reached at all,
+	// the same as a rate-limited repo that never got dispatched, so the cursor
+	// computed below must not treat this cycle as a full wrap just because a
+	// LATER installation happened to succeed.
+	var unresolved []string
 	var rateLimitResumeFrom string
 	var rateLimitErr *ghclient.ErrRateLimited
 	// installErr is the failure that cost an installation its client this
@@ -832,13 +840,13 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	covered := make(map[string]bool, len(repos))
 	anyFunctional := false
 	for _, inst := range installs {
-		client, cerr := m.resolver.ClientFor(ctx, orgID, inst.AccountLogin)
+		client, cerr := m.resolver.ClientForInstallation(ctx, orgID, inst)
 		if cerr != nil {
 			conn.note(cerr)
 			keepInstallErr(cerr)
 			githubLog.Log(ctx, upstream.LogLevel(cerr, slog.LevelError), "resolve client for installation failed", "org", orgID, "installation", inst.InstallationID, "account", inst.AccountLogin, "error", cerr)
 			m.reportError("github", orgID, cerr)
-			unresolvedOwners[strings.ToLower(inst.AccountLogin)] = true
+			unresolved = append(unresolved, inst.InstallationID)
 			continue
 		}
 		grant, gerr := client.ListInstallationRepos(ctx)
@@ -846,7 +854,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 			keepInstallErr(gerr)
 			githubLog.Log(ctx, upstream.LogLevel(gerr, slog.LevelError), "list installation repos failed", "org", orgID, "account", inst.AccountLogin, "error", gerr)
 			m.reportError("github", orgID, gerr)
-			unresolvedOwners[strings.ToLower(inst.AccountLogin)] = true
+			unresolved = append(unresolved, inst.InstallationID)
 			continue
 		}
 		anyFunctional = true
@@ -901,31 +909,21 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		}
 	}
 
-	// TFAC-571: decide the cycle's actual resume point once, after every
-	// installation this cycle could reach has run. A rate-limited fan-out
-	// wins (it's the more specific signal — RefreshGitHub already pinned it
-	// to the exact repo that needs a retry). Otherwise, if any installation
-	// couldn't even be resolved this cycle, the cursor must not reset to ""
-	// (implying a full wrap) just because a later installation succeeded —
-	// resume at the earliest currently-configured repo that installation
-	// would own (matched by account-login prefix, same as
-	// reconcileGitHubGroups) and isn't already covered by a DIFFERENT,
-	// successful installation. A repo genuinely outside every installation's
-	// grant (the "not in any app installation grant" warning below) is a
-	// permanent gap, not a transient one, so it's excluded here — only
-	// unresolved-owner repos get cursor priority.
+	// Decide the cycle's actual resume point once, after every installation
+	// this cycle could reach has run. A rate-limited fan-out wins (it's the
+	// more specific signal — RefreshGitHub already pinned it to the exact repo
+	// that needs a retry). Otherwise, if any installation couldn't even be
+	// resolved this cycle, the cursor must not reset to "" (implying a full
+	// wrap) just because a later installation succeeded — resume at the
+	// earliest currently-configured repo that installation's grant holds and
+	// that a DIFFERENT, successful installation didn't already cover. A repo
+	// genuinely outside every installation's grant (the "not in any app
+	// installation grant" warning below) is a permanent gap, not a transient
+	// one, so it's excluded here — only repos of unresolved installations get
+	// cursor priority.
 	resumeFrom := rateLimitResumeFrom
-	if resumeFrom == "" && len(unresolvedOwners) > 0 {
-		for _, r := range repos {
-			if covered[r] {
-				continue
-			}
-			owner, _, _ := strings.Cut(r, "/")
-			if unresolvedOwners[strings.ToLower(owner)] {
-				resumeFrom = r
-				break
-			}
-		}
+	if resumeFrom == "" && len(unresolved) > 0 {
+		resumeFrom = m.firstRepoInUnreadGrants(ctx, orgID, scope, repos, covered, unresolved)
 	}
 	m.advanceGitHubCursor(conn, orgID, resumeFrom, rateLimitErr)
 
@@ -1263,6 +1261,34 @@ func (m *Manager) reloadConfiguredRepos(ctx context.Context, orgID, host string,
 		return current
 	}
 	return rotateFromCursor(refreshed, m.githubCursor(orgID))
+}
+
+// firstRepoInUnreadGrants returns the first of repos, in poll order, that no
+// installation covered this cycle and that the grant of one of the unresolved
+// installations held when it was last mirrored, or "" when there is none or the
+// mirror cannot say. The mirror pairs a tracked repository with a grant entry
+// by GitHub id, so a repository renamed since the grant was mirrored is still
+// found in it. A cycle that cannot read the mirror resets the cursor as a full
+// wrap would, which only reorders the next cycle.
+func (m *Manager) firstRepoInUnreadGrants(ctx context.Context, orgID, host string, repos []string, covered map[string]bool, unresolved []string) string {
+	if m.GrantMirror == nil {
+		return ""
+	}
+	held, err := m.GrantMirror.ListTrackedInGrantsSystem(ctx, orgID, host, unresolved)
+	if err != nil {
+		githubLog.WarnContext(ctx, "read unresolved installations' mirrored grants failed", "org", orgID, "error", err)
+		return ""
+	}
+	inGrant := make(map[string]bool, len(held))
+	for _, name := range held {
+		inGrant[strings.ToLower(name)] = true
+	}
+	for _, r := range repos {
+		if !covered[r] && inGrant[strings.ToLower(r)] {
+			return r
+		}
+	}
+	return ""
 }
 
 // withoutSlugs returns repos less every slug in drop, compared folded.

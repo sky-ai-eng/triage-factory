@@ -47,11 +47,16 @@ type grantFindingListRequest struct {
 // tracks. installation_id and account_login name the installation whose grant
 // carries it, and settings_url is that installation's page on GitHub, where
 // the grant is narrowed — the finding's verb, carried on the row so a headless
-// caller has it without a second read.
+// caller has it without a second read. github_id is GitHub's id for the
+// repository ("" when the listing carried none), which with installation_id
+// tells one item from another; repository_id is the registry row TF holds for
+// it, "" when it holds none.
 type reachWithoutPurposeItem struct {
 	InstallationID string `json:"installation_id"`
 	AccountLogin   string `json:"account_login"`
 	SettingsURL    string `json:"settings_url"`
+	GitHubID       string `json:"github_id"`
+	RepositoryID   string `json:"repository_id"`
 	Owner          string `json:"owner"`
 	Repo           string `json:"repo"`
 	Slug           string `json:"slug"`
@@ -68,7 +73,11 @@ type reachWithoutPurposeItem struct {
 // drift and one of unknown width is not reported — and "" when no live
 // installation covers the account at all, where the way out is connecting the
 // account or untracking the repository rather than editing a grant.
+// repository_id is the tracked registry row the item is about, and github_id
+// its GitHub id ("" while TF has not learned it).
 type scopeDriftItem struct {
+	RepositoryID   string `json:"repository_id"`
+	GitHubID       string `json:"github_id"`
 	Owner          string `json:"owner"`
 	Repo           string `json:"repo"`
 	Slug           string `json:"slug"`
@@ -177,6 +186,8 @@ func (s *Server) handleGitHubGrantReachWithoutPurposeList(w http.ResponseWriter,
 			InstallationID: row.InstallationID,
 			AccountLogin:   inst.AccountLogin,
 			SettingsURL:    installationSettingsURL(inst),
+			GitHubID:       row.ExternalID,
+			RepositoryID:   row.RepositoryID,
 			Owner:          row.Owner,
 			Repo:           row.Repo,
 			Slug:           row.Slug(),
@@ -234,7 +245,10 @@ func (s *Server) handleGitHubGrantScopeDriftList(w http.ResponseWriter, r *http.
 		return
 	}
 	for _, row := range rows {
-		item := scopeDriftItem{Owner: row.Owner, Repo: row.Repo, Slug: row.Slug(), InstallationID: row.InstallationID}
+		item := scopeDriftItem{
+			RepositoryID: row.RepositoryID, GitHubID: row.ExternalID,
+			Owner: row.Owner, Repo: row.Repo, Slug: row.Slug(), InstallationID: row.InstallationID,
+		}
 		// An account no live installation covers names none: the row's id is
 		// "" and stays "", and there is no page to send anyone to.
 		if inst, covered := byID[row.InstallationID]; covered && row.InstallationID != "" {

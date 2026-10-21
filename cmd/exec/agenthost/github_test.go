@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -41,6 +42,10 @@ type fakeGitHubResolver struct {
 
 func (f fakeGitHubResolver) ClientFor(_ context.Context, _, _ string) (*ghclient.Client, error) {
 	panic("ClientFor is not used by the host-routed gh surface")
+}
+
+func (f fakeGitHubResolver) ClientForInstallation(context.Context, string, domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
+	panic("ClientForInstallation is not used by the host-routed gh surface")
 }
 
 func (f fakeGitHubResolver) ClientForRepo(_ context.Context, _, _, _ string) (*ghclient.Client, error) {
@@ -86,6 +91,10 @@ type baseOnlyResolver struct {
 
 func (r baseOnlyResolver) ClientFor(_ context.Context, _, _ string) (*ghclient.Client, error) {
 	panic("ClientFor is not used by the host-routed gh surface")
+}
+
+func (r baseOnlyResolver) ClientForInstallation(context.Context, string, domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
+	panic("ClientForInstallation is not used by the host-routed gh surface")
 }
 
 func (r baseOnlyResolver) ClientForRepo(_ context.Context, _, _, _ string) (*ghclient.Client, error) {

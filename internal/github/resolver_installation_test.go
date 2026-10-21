@@ -271,6 +271,43 @@ func TestResolver_MultiInstallationMintsPerAccount(t *testing.T) {
 	}
 }
 
+// TestResolver_ClientForInstallationMintsFromTheRowsAccount walks the entry
+// point a pass over the org's installations takes, in the state a rename
+// leaves: two live rows answer to "acme", one for the account that renamed
+// away (its row not caught up yet) and one for the account that took the
+// handle. Each row's client is minted from that row's own installation, which
+// the login cannot decide, and a row with no account id still resolves by its
+// login.
+func TestResolver_ClientForInstallationMintsFromTheRowsAccount(t *testing.T) {
+	ctx := context.Background()
+	stale := installOnAccount("456", "1234", "acme")
+	claimed := installOnAccount("789", "5678", "acme")
+	noID := installOnAccount("321", "", "initech")
+	gh := newGHTestServer(t)
+	r := newTestResolver(
+		&fakeSecrets{vals: map[string]string{"pem": testPEM(t)}},
+		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{stale, claimed, noID}},
+		&fakeOrgs{base: gh.srv.URL},
+		&fakeAgents{},
+		nil,
+	)
+
+	for _, inst := range []domain.OrgGitHubAppInstallation{claimed, stale, noID} {
+		if _, err := r.ClientForInstallation(ctx, "org-1", inst); err != nil {
+			t.Fatalf("ClientForInstallation(%s): %v", inst.InstallationID, err)
+		}
+	}
+	if got, want := gh.minted(), []string{"789", "456", "321"}; !slices.Equal(got, want) {
+		t.Errorf("minted for installations %v; want %v (each row served by its own installation)", got, want)
+	}
+
+	// The login alone names both rows, so a caller holding only it is refused
+	// rather than handed either one.
+	if _, err := r.ClientFor(ctx, "org-1", "acme"); !errors.Is(err, ErrAmbiguousInstallation) {
+		t.Errorf("ClientFor(acme) err = %v; want ErrAmbiguousInstallation", err)
+	}
+}
+
 // TestResolver_MintsForAnInstallationMirroredWithoutAnAccountID walks the
 // public entry point for an un-backfilled row: the org's App resolves and mints
 // off the login alone, so the column's arrival costs a row that predates it

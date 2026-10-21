@@ -3923,11 +3923,19 @@ ALTER TABLE ONLY public.org_github_app_installations
 
 -- At most one active install per account on each GitHub deployment, without
 -- overwriting history: an uninstall stamps removed_at, a reinstall inserts a
--- fresh installation_id. github_host is in the key because a login is unique
--- only within one deployment: the same login on two GitHubs names two accounts.
+-- fresh installation_id. The account is its numeric id, which a rename leaves
+-- alone. Held on the login, the key would make the install of an account that
+-- took a login another account gave up collide with the other account's row
+-- until that row caught up with the rename. A row whose id is not known yet is
+-- held to its login, the one name it has. github_host is in both keys because
+-- an account id or a login names one account only within one deployment.
 CREATE UNIQUE INDEX org_github_app_installations_active_account_key
+    ON public.org_github_app_installations (org_id, github_host, account_id)
+    WHERE (removed_at IS NULL AND account_id IS NOT NULL);
+
+CREATE UNIQUE INDEX org_github_app_installations_active_login_key
     ON public.org_github_app_installations (org_id, github_host, account_login)
-    WHERE (removed_at IS NULL);
+    WHERE (removed_at IS NULL AND account_id IS NULL);
 
 -- An installation belongs to exactly one workspace per GitHub deployment. The
 -- grant is not divisible, `installation.deleted` fires once, the rate budget is
@@ -4028,8 +4036,9 @@ CREATE TABLE public.reachable_repositories (
     source text DEFAULT 'github'::text NOT NULL,
     owner text NOT NULL,
     repo text NOT NULL,
-    -- The provider's own repository id, so a cache entry and a registry row match
-    -- by id when slugs disagree mid-rename. NULL rows are matched by slug.
+    -- The provider's own repository id. A cache entry and a registry row are one
+    -- repository when their ids agree, whatever either is called mid-rename;
+    -- only when either has no id are they matched by slug.
     external_id text,
     -- The picker's display fields, mirrored because the picker is served from here
     -- rather than proxied. Empty string rather than NULL: display strings with no
@@ -4076,10 +4085,17 @@ CREATE UNIQUE INDEX reachable_repositories_pat_identity
     ON public.reachable_repositories USING btree (org_id, host, lower(owner), lower(repo))
     WHERE credential_class = 'pat';
 
--- The registry join and the drift queries over it. Same shape as
--- repositories_identity, so either side can drive the join.
+-- The registry join and the drift queries over it. A cache entry and a registry
+-- row are one repository by GitHub id when both carry one and by folded slug
+-- only when either does not, so the join has an index for each half, shaped
+-- like repositories_external_identity and repositories_identity so either side
+-- can drive it.
 CREATE INDEX reachable_repositories_registry_join
     ON public.reachable_repositories USING btree (org_id, source, lower(owner), lower(repo));
+
+CREATE INDEX reachable_repositories_registry_external_join
+    ON public.reachable_repositories USING btree (org_id, source, host, external_id)
+    WHERE (external_id IS NOT NULL);
 
 -- The picker's own read: one org's current class, ordered by folded slug —
 -- offset paging over an unordered set drops and repeats rows.

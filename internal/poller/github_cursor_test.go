@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
@@ -77,6 +78,10 @@ type freshClientPerCallResolver struct {
 
 func (r *freshClientPerCallResolver) ClientFor(ctx context.Context, orgID, target string) (*ghclient.Client, error) {
 	return ghclient.NewClient(r.url, "pat"), nil
+}
+
+func (r *freshClientPerCallResolver) ClientForInstallation(ctx context.Context, orgID string, inst domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
+	return r.ClientFor(ctx, orgID, inst.AccountLogin)
 }
 
 func (r *freshClientPerCallResolver) ClientForRepo(ctx context.Context, orgID, owner, repo string) (*ghclient.Client, error) {
@@ -347,6 +352,10 @@ func (r *perAccountFailResolver) ClientFor(ctx context.Context, orgID, target st
 	return ghclient.NewClient(r.url, "pat"), nil
 }
 
+func (r *perAccountFailResolver) ClientForInstallation(ctx context.Context, orgID string, inst domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
+	return r.ClientFor(ctx, orgID, inst.AccountLogin)
+}
+
 func (r *perAccountFailResolver) ClientForRepo(ctx context.Context, orgID, owner, repo string) (*ghclient.Client, error) {
 	return r.ClientFor(ctx, orgID, owner)
 }
@@ -368,10 +377,16 @@ func (r *perAccountFailResolver) OrgIdentityFor(ctx context.Context, orgID strin
 // if one installation's credential can't even be resolved this cycle (not a
 // rate limit — its repos are simply never reached), the cycle must not be
 // treated as a full wrap just because a LATER installation happens to
-// succeed. Fixture: two installations, "acme" (broken credential) and "beta"
-// (healthy), each owning one configured repo. Cycle 1 must save the cursor at
-// acme's repo — not reset it to "" — so a later cycle (once acme's credential
-// is fixed) prioritizes retrying it instead of silently never catching up.
+// succeed. Fixture: two installations, "acme-corp" (broken credential) and
+// "beta" (healthy). Cycle 1 must save the cursor at the broken installation's
+// repo — not reset it to "" — so a later cycle (once its credential is fixed)
+// prioritizes retrying it instead of silently never catching up.
+//
+// Which repos are the broken installation's comes from its grant as last
+// mirrored, paired with the tracked rows by GitHub id. The account renamed from
+// acme to acme-corp and the registry still calls the repo acme/r1, so an owner
+// login would find nothing; acme/gap shares the old owner but is in no grant,
+// a permanent gap that gets no cursor priority.
 func TestRunGitHubCycleForOrg_UnresolvedInstallationDoesNotFalselyResetCursor(t *testing.T) {
 	t.Setenv("TF_POLL_REPO_CONCURRENCY", "1")
 	runmode.SetForTest(t, runmode.ModeMulti)
@@ -398,9 +413,30 @@ func TestRunGitHubCycleForOrg_UnresolvedInstallationDoesNotFalselyResetCursor(t 
 	database := newMigratedSQLiteForPoller(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	repos := []string{"acme/r1", "beta/r1"}
+	repos := []string{"acme/gap", "acme/r1", "beta/r1"}
 	trackRepos(t, stores, org, repos)
 	seedBYOAppCredentialClass(t, stores, org)
+	if _, err := stores.Repos.FillMissingExternalIDsSystem(ctx, org, []domain.RepoRef{{
+		Source: domain.RepoSourceGitHub, Host: dbtest.TestGitHubHost, Owner: "acme", Repo: "r1", ExternalID: "101",
+	}}); err != nil {
+		t.Fatalf("FillMissingExternalIDsSystem: %v", err)
+	}
+	installs := []domain.OrgGitHubAppInstallation{
+		{InstallationID: "1", AccountType: "Organization", AccountID: "11", AccountLogin: "acme-corp", GitHubHost: dbtest.TestGitHubHost, OrgID: org},
+		{InstallationID: "2", AccountType: "Organization", AccountID: "22", AccountLogin: "beta", GitHubHost: dbtest.TestGitHubHost, OrgID: org},
+	}
+	for _, inst := range installs {
+		if _, err := stores.GitHubApps.UpsertInstallation(ctx, inst); err != nil {
+			t.Fatalf("UpsertInstallation(%s): %v", inst.InstallationID, err)
+		}
+	}
+	// The broken installation's grant as the last reconcile mirrored it, under
+	// the repository's current name.
+	if err := stores.ReachableRepos.ReplaceForInstallationSystem(ctx, org, domain.GitHubCredentialClassBYOApp, dbtest.TestGitHubHost, "1", []domain.ReachableRepository{
+		{Owner: "acme-corp", Repo: "r1", ExternalID: "101"},
+	}); err != nil {
+		t.Fatalf("ReplaceForInstallationSystem: %v", err)
+	}
 
 	bus := eventbus.New()
 	t.Cleanup(bus.Close)
@@ -413,19 +449,17 @@ func TestRunGitHubCycleForOrg_UnresolvedInstallationDoesNotFalselyResetCursor(t 
 		repos: stores.Repos,
 		orgs:  stores.Orgs,
 		apps: &fakeInstallsStore{
-			app: &domain.OrgGitHubApp{OrgID: org, AppID: "1", Active: true},
-			installs: []domain.OrgGitHubAppInstallation{
-				{InstallationID: "1", AccountLogin: "acme"},
-				{InstallationID: "2", AccountLogin: "beta"},
-			},
+			app:      &domain.OrgGitHubApp{OrgID: org, AppID: "1", Active: true},
+			installs: installs,
 		},
-		resolver: &perAccountFailResolver{url: srv.URL, failAccounts: map[string]bool{"acme": true}},
+		resolver:    &perAccountFailResolver{url: srv.URL, failAccounts: map[string]bool{"acme-corp": true}},
+		GrantMirror: stores.ReachableRepos,
 	}
 
 	m.runGitHubCycleForOrg(ctx, org)
 
 	if got := m.githubCursor(org); got != "acme/r1" {
-		t.Fatalf("cursor after cycle 1 = %q; want acme/r1 (acme's installation never resolved, so its repo is still outstanding — the cursor must not reset to \"\" just because beta succeeded)", got)
+		t.Fatalf("cursor after cycle 1 = %q; want acme/r1 (the acme-corp installation never resolved and its mirrored grant holds acme/r1 by id, so that repo is still outstanding — the cursor must not reset to \"\" just because beta succeeded)", got)
 	}
 
 	// "acme's credential gets fixed" — now every installation resolves. The

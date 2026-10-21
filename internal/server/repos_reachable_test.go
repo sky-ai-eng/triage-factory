@@ -544,6 +544,37 @@ func TestPickerFiltersServerSide(t *testing.T) {
 	}
 }
 
+// TestPickerOptionsNameTheirRegistryRow pins the id a client tracks an option
+// by. acme/api's registry row carries the option's GitHub id; the row under
+// acme/web's name carries another, so it is another repository and that option
+// has no row of its own; acme/cli has no row at all, and a client registers it
+// by its GitHub id.
+func TestPickerOptionsNameTheirRegistryRow(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	gh := newCountingPATGitHub(t, "acme/api", "acme/web", "acme/cli")
+	seedPATOrg(t, srv, gh.URL)
+	api := seedUntrackedRepo(t, srv, "acme", "api")
+	web := seedUntrackedRepo(t, srv, "acme", "web")
+	for id, external := range map[string]string{api: "1", web: "99"} {
+		if _, err := srv.db.Exec(`UPDATE repositories SET external_id = ? WHERE id = ?`, external, id); err != nil {
+			t.Fatalf("set external_id: %v", err)
+		}
+	}
+	wireReachRefresh(t, srv).refresh(t, runmode.LocalDefaultOrgID, true)
+
+	page := fetchPickerPage(t, srv, map[string]any{})
+	want := map[string]string{"acme/api": api, "acme/web": "", "acme/cli": ""}
+	if len(page.Items) != len(want) {
+		t.Fatalf("items = %+v; want %d options", page.Items, len(want))
+	}
+	for _, item := range page.Items {
+		if item.RepositoryID != want[item.FullName] {
+			t.Errorf("%s repository_id = %q; want %q", item.FullName, item.RepositoryID, want[item.FullName])
+		}
+	}
+}
+
 // TestPickerRejectsATokenFromAnotherFilter pins the page-token contract on this
 // route: a token minted under one search cannot address a page of another, which
 // is what stops an offset from silently pointing into a different result set.

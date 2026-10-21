@@ -235,6 +235,21 @@ type ReachableReposStore interface {
 	// Bounded by the caller's selection, like ReachableSlugsSystem. An empty
 	// externalIDs argument returns an empty map without a query.
 	ReachableByExternalIDsSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, externalIDs []string) (map[string]domain.ReachableRepository, error)
+
+	// ListTrackedInGrantsSystem returns the names ("owner/repo", as the
+	// registry spells them) of the live registry rows on host that some team
+	// tracks and that the mirror places in the grant of one of installationIDs.
+	// A row and an entry are one repository by GitHub id when both carry one,
+	// and by folded name only when either does not, so a tracked row is found in
+	// the grant that reaches it whatever either side currently calls it.
+	//
+	// It answers which tracked repositories an installation reaches at a moment
+	// its grant cannot be read from GitHub: the mirror is that grant as last
+	// read. The installation ids are matched on host only, since an
+	// installation id names one installation per GitHub deployment. Ordered by
+	// folded name, then registry id. An empty installationIDs returns an empty
+	// list without a query.
+	ListTrackedInGrantsSystem(ctx context.Context, orgID, host string, installationIDs []string) ([]string, error)
 }
 
 // RequireGrantClass is the guard every App-tier read of the mirror runs first:

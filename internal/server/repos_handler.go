@@ -76,17 +76,21 @@ const (
 // columns the mirror carries for it — and deliberately not "whatever GitHub's
 // repository object has", which is what a proxy list leaks by default.
 //
-// GitHubID is what a client names the option by: it registers the repository
-// with it (POST /api/repos) and matches it against a team's tracked set.
-// FullName is for display, and a rename moves it.
+// RepositoryID is the registry row TF holds for the option, "" when it holds
+// none: matched by GitHub id when both sides carry one, and by folded name only
+// when either does not. A client matches the option against a team's tracked
+// set on it, and on GitHubID for an option with no row yet, which it registers
+// by that id (POST /api/repos) before tracking it. FullName is for display, and
+// a rename moves it.
 type githubRepoJSON struct {
-	GitHubID    string `json:"github_id"`
-	FullName    string `json:"full_name"`
-	HTMLURL     string `json:"html_url"`
-	Description string `json:"description"`
-	Language    string `json:"language"`
-	PushedAt    string `json:"pushed_at"`
-	Private     bool   `json:"private"`
+	RepositoryID string `json:"repository_id"`
+	GitHubID     string `json:"github_id"`
+	FullName     string `json:"full_name"`
+	HTMLURL      string `json:"html_url"`
+	Description  string `json:"description"`
+	Language     string `json:"language"`
+	PushedAt     string `json:"pushed_at"`
+	Private      bool   `json:"private"`
 }
 
 // githubRepoListResponse is the list envelope plus the readiness discriminator.
@@ -186,13 +190,14 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	items := make([]githubRepoJSON, 0, len(rows))
 	for _, row := range rows {
 		items = append(items, githubRepoJSON{
-			GitHubID:    row.ExternalID,
-			FullName:    row.Slug(),
-			HTMLURL:     row.HTMLURL,
-			Description: row.Description,
-			Language:    row.Language,
-			PushedAt:    row.PushedAt,
-			Private:     row.Private,
+			RepositoryID: row.RepositoryID,
+			GitHubID:     row.ExternalID,
+			FullName:     row.Slug(),
+			HTMLURL:      row.HTMLURL,
+			Description:  row.Description,
+			Language:     row.Language,
+			PushedAt:     row.PushedAt,
+			Private:      row.Private,
 		})
 	}
 	writeJSON(w, http.StatusOK, githubRepoListResponse{

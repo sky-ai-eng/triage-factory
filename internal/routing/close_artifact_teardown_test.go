@@ -35,6 +35,10 @@ func (r teardownResolver) ClientFor(context.Context, string, string) (*ghclient.
 	return r.client, nil
 }
 
+func (r teardownResolver) ClientForInstallation(context.Context, string, domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
+	return r.client, nil
+}
+
 func (r teardownResolver) ClientForRepo(context.Context, string, string, string) (*ghclient.Client, error) {
 	return r.client, nil
 }

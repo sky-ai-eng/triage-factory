@@ -38,6 +38,10 @@ func (f *fakeResolver) ClientFor(ctx context.Context, orgID, target string) (*gh
 	return f.client, nil
 }
 
+func (f *fakeResolver) ClientForInstallation(ctx context.Context, orgID string, inst domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
+	return f.ClientFor(ctx, orgID, inst.AccountLogin)
+}
+
 // ClientForRepo satisfies the ghclient.Resolver interface. The poller's
 // cycle resolves account-grain via ClientFor; this repo-aware door is unused
 // here, so it just delegates to keep the fake compiling against the interface.

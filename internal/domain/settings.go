@@ -1096,17 +1096,23 @@ type TeamGitHubRepo struct {
 // Slug returns the "owner/repo" display form.
 func (r TeamGitHubRepo) Slug() string { return r.Owner + "/" + r.Repo }
 
-// TrackedRepoTeams is one tracked (owner, repo) in an org together with the
+// TrackedRepoTeams is one tracked repository in an org together with the
 // display names of every team that tracks it. It backs the GitHub-access
-// switch reachability preflights (TFAC-328): when a switch would leave a
-// tracked repo unreachable by the new credential, the diff names which teams
-// own that now-dark repo so the admin knows who's affected. The team list is
+// switch reachability preflights: when a switch would leave a tracked repo
+// unreachable by the new credential, the diff names which teams own that
+// now-dark repo so the admin knows who's affected. The team list is
 // deterministic (ordered by team name); a repo with no teams never appears
 // (it wouldn't be tracked).
 type TrackedRepoTeams struct {
-	Owner string
-	Repo  string
-	Teams []string
+	// RepositoryID is the registry row the entry is.
+	RepositoryID string
+	// ExternalID is the row's GitHub repository id, "" while TF has not learned
+	// it. A preflight matches the target credential's listing on it, and on the
+	// name only for a row without one.
+	ExternalID string
+	Owner      string
+	Repo       string
+	Teams      []string
 }
 
 // Slug returns the canonical "owner/repo" form, matching TeamGitHubRepo.Slug.

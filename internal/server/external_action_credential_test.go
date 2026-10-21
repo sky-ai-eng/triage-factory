@@ -28,6 +28,10 @@ func (r identityResolver) ClientFor(context.Context, string, string) (*ghclient.
 	panic("ClientFor is not used by the credential classification")
 }
 
+func (r identityResolver) ClientForInstallation(context.Context, string, domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
+	panic("ClientForInstallation is not used by the credential classification")
+}
+
 func (r identityResolver) ClientForRepo(context.Context, string, string, string) (*ghclient.Client, error) {
 	panic("ClientForRepo is not used by the credential classification")
 }

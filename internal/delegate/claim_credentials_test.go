@@ -83,6 +83,10 @@ func (f *fakeResolver) ClientFor(ctx context.Context, orgID, target string) (*gh
 	return f.client, f.err
 }
 
+func (f *fakeResolver) ClientForInstallation(ctx context.Context, orgID string, inst domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
+	return f.ClientFor(ctx, orgID, inst.AccountLogin)
+}
+
 func (f *fakeResolver) ClientForRepo(ctx context.Context, orgID, owner, repo string) (*ghclient.Client, error) {
 	f.calls = append(f.calls, resolverCall{orgID: orgID, target: owner})
 	return f.client, f.err

@@ -139,6 +139,10 @@ func (r *benchResolver) ClientFor(ctx context.Context, orgID, target string) (*g
 	return r.client, nil
 }
 
+func (r *benchResolver) ClientForInstallation(ctx context.Context, orgID string, inst domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
+	return r.client, nil
+}
+
 func (r *benchResolver) ClientForRepo(ctx context.Context, orgID, owner, repo string) (*ghclient.Client, error) {
 	return r.client, nil
 }

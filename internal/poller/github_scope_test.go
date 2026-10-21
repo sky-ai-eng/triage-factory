@@ -223,6 +223,10 @@ func (r *targetRecordingResolver) ClientFor(ctx context.Context, orgID, target s
 	return r.freshClientPerCallResolver.ClientFor(ctx, orgID, target)
 }
 
+func (r *targetRecordingResolver) ClientForInstallation(ctx context.Context, orgID string, inst domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
+	return r.ClientFor(ctx, orgID, inst.AccountLogin)
+}
+
 // TestRunGitHubCycleForOrg_WalksOnlyTheCurrentHostsInstallations: an org that
 // moved to another GitHub and holds an installation for one account login on
 // both hosts polls through the current host's installation once, and never

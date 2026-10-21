@@ -53,6 +53,10 @@ func (r staticResolver) ClientFor(context.Context, string, string) (*ghclient.Cl
 	return r.client, nil
 }
 
+func (r staticResolver) ClientForInstallation(context.Context, string, domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
+	return r.client, nil
+}
+
 func (r staticResolver) ClientForRepo(context.Context, string, string, string) (*ghclient.Client, error) {
 	return r.client, nil
 }

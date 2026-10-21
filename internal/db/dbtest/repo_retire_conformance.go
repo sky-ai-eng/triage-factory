@@ -554,6 +554,10 @@ func (g githubAt) ClientFor(context.Context, string, string) (*ghclient.Client, 
 	return ghclient.NewClient(g.url, ""), nil
 }
 
+func (g githubAt) ClientForInstallation(context.Context, string, domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
+	return ghclient.NewClient(g.url, ""), nil
+}
+
 func (g githubAt) ClientForRepo(context.Context, string, string, string) (*ghclient.Client, error) {
 	return ghclient.NewClient(g.url, ""), nil
 }

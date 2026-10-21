@@ -41,6 +41,21 @@ func TestReachableRepos_Postgres(t *testing.T) {
 				// The registry row first: a tracking row references it.
 				pgtest.SeedTrackedRepoOnHost(t, h, orgID, teamID, dbtest.TestGitHubHost, repoOwner, repo)
 			},
+			RegisterRepo: func(t *testing.T, repoOwner, repo, externalID string) string {
+				t.Helper()
+				id := pgtest.SeedRepositoryOnHost(t, h, orgID, dbtest.TestGitHubHost, repoOwner, repo)
+				if externalID != "" {
+					pgtest.MustExec(t, h.AdminDB, `UPDATE repositories SET external_id = $1 WHERE id = $2`, externalID, id)
+				}
+				return id
+			},
+			TrackRepository: func(t *testing.T, repositoryID string) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB, `
+					INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)
+					ON CONFLICT DO NOTHING
+				`, teamID, repositoryID, orgID)
+			},
 		}
 	})
 }

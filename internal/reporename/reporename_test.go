@@ -316,6 +316,9 @@ type plainResolver struct{}
 func (plainResolver) ClientFor(context.Context, string, string) (*ghclient.Client, error) {
 	return nil, errors.New("not wired")
 }
+func (plainResolver) ClientForInstallation(context.Context, string, domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
+	return nil, errors.New("not wired")
+}
 func (plainResolver) ClientForRepo(context.Context, string, string, string) (*ghclient.Client, error) {
 	return nil, errors.New("not wired")
 }

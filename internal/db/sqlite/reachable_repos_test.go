@@ -47,6 +47,30 @@ func TestReachableRepos_SQLite(t *testing.T) {
 			Apps:   stores.GitHubApps,
 			Mirror: stores.ReachableRepos,
 			OrgID:  orgID,
+			RegisterRepo: func(t *testing.T, owner, repo, externalID string) string {
+				t.Helper()
+				id := uuid.NewString()
+				var ext any
+				if externalID != "" {
+					ext = externalID
+				}
+				if _, err := conn.Exec(
+					`INSERT INTO repositories (id, host, owner, repo, source, external_id) VALUES (?, ?, ?, ?, 'github', ?)`,
+					id, dbtest.TestGitHubHost, owner, repo, ext,
+				); err != nil {
+					t.Fatalf("seed repositories: %v", err)
+				}
+				return id
+			},
+			TrackRepository: func(t *testing.T, repositoryID string) {
+				t.Helper()
+				if _, err := conn.Exec(
+					`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
+					teamID, repositoryID, runmode.LocalDefaultOrgID,
+				); err != nil {
+					t.Fatalf("seed team_github_repos: %v", err)
+				}
+			},
 			TrackRepo: func(t *testing.T, owner, repo string) {
 				t.Helper()
 				if _, err := conn.Exec(
