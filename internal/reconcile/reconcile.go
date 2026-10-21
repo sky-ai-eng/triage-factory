@@ -151,9 +151,10 @@ const prBackstopWindow = 7 * 24 * time.Hour
 // match does not depend on the name the row recorded or on how its link spells
 // the host. A row written without a node id is never read, nor is one whose
 // conversation was purged, which leaves no one to own the artifact. It
-// fetches those pull requests by node id (RefreshPRs, batched per owner of the
-// row's target), which gives what the row does not carry: the repository's
-// current name, the number, link, refs, title and body. The artifact is keyed
+// fetches those pull requests by node id (RefreshPRs, batched per owner the
+// pull request is under now: pullRequestOwner), which gives what the row does
+// not carry: the repository's current name, the number, link, refs, title and
+// body. The artifact is keyed
 // on the node id (domain.PullRequestDedupKey), the key the create verb writes
 // under, so the two writers land on one row whatever name each spelled the
 // repository with; its target is the current name. When every pull request
@@ -177,7 +178,7 @@ func (rc *Reconciler) BackfillPRArtifacts(ctx context.Context, orgID string) err
 	byNodeID := map[string]domain.ExternalAction{}
 	nodeIDsByOwner := map[string]map[string]bool{}
 	for _, act := range missing {
-		owner, ok := prOwner(act.Target)
+		owner, ok := rc.pullRequestOwner(ctx, orgID, act)
 		if !ok {
 			continue
 		}
@@ -216,6 +217,27 @@ func (rc *Reconciler) BackfillPRArtifacts(ctx context.Context, orgID string) err
 		}
 	}
 	return nil
+}
+
+// pullRequestOwner is the owner the pr_created row act's pull request is under
+// now, which picks the credential it is fetched with: the owner the key of the
+// entity the row is about names (entity_id), which every rename of the
+// repository moves, and, for a row about no entity or whose entity cannot be
+// read, the owner its target recorded at the time of the act.
+func (rc *Reconciler) pullRequestOwner(ctx context.Context, orgID string, act domain.ExternalAction) (string, bool) {
+	if act.EntityID != "" && rc.entities != nil {
+		e, err := rc.entities.GetSystem(ctx, orgID, act.EntityID)
+		switch {
+		case err != nil:
+			reconcileLog.Warn("backstop: read the PR's entity failed; fetching under the owner the row recorded",
+				"org", orgID, "target", act.Target, "entity", act.EntityID, "error", err)
+		case e != nil:
+			if owner, ok := prOwner(e.SourceID); ok {
+				return owner, true
+			}
+		}
+	}
+	return prOwner(act.Target)
 }
 
 // recordBackfilledPR records the pull_request artifact for the pr_created row

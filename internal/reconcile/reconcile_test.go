@@ -1007,6 +1007,40 @@ func TestBackstop_BackfillsUnderTheRenamedRepositorysName(t *testing.T) {
 	}
 }
 
+// TestBackstop_FetchesUnderTheOwnerTheEntityHasNow pins the credential the
+// backstop fetches a pull request with: the owner of the entity the pr_created
+// row is about, under the key it has now, rather than the owner the row's
+// target recorded before the repository moved to another owner.
+func TestBackstop_FetchesUnderTheOwnerTheEntityHasNow(t *testing.T) {
+	stores, seedConversation, _ := reconcileTestStores(t)
+	seedConversation("octo/repo#5", "conv-1")
+	ctx := context.Background()
+	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, runmode.LocalDefaultOrgID, "github", reconcileTestHost, "acme/repo#5", "PR_5", "pr", "Moved", "")
+	if err != nil {
+		t.Fatalf("seed the PR's entity: %v", err)
+	}
+	if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalAction{
+		TeamID: runmode.LocalDefaultTeamID, Provider: domain.ArtifactProviderGitHub, Scope: reconcileTestHost,
+		Action: domain.ActionPRCreated, Target: "octo/repo#5", EntityID: entity.ID, ExternalID: "5",
+		ToState: domain.ArtifactStatePRDraft, ConversationID: "conv-1", Credential: domain.CredentialGitHubApp, NodeID: "PR_5",
+	}); err != nil {
+		t.Fatalf("record pr_created: %v", err)
+	}
+
+	_, client := newBackstopStub(t, map[string]string{"PR_5": backstopPRNode("acme/repo", 5, "feature-x", "My PR", "body", true)})
+	resolver := &fakeResolver{client: client}
+	rc := NewReconciler(resolver, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
+	if err := rc.BackfillPRArtifacts(ctx, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("backstop: %v", err)
+	}
+	if !resolver.owners["acme"] || resolver.owners["octo"] {
+		t.Errorf("clients resolved for %v, want acme's alone", resolver.owners)
+	}
+	if got := prArtifactFor(t, stores, "acme/repo", 5); got == nil || got.EntityID != entity.ID {
+		t.Errorf("PR artifact = %+v, want it recorded on the entity %s", got, entity.ID)
+	}
+}
+
 // TestBackstop_RenamedRepositoryWithArtifactIsLeftAlone pins that a PR whose
 // artifact was recorded under the repository's old name, and whose ledger row
 // still names it, does not read as a missing artifact after a rename: the
