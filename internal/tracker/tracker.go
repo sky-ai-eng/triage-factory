@@ -391,8 +391,11 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			unstored[snap.Repo] = true
 			continue
 		}
-		if !created {
-			t.learnPRNodeID(ctx, *entity, snap.NodeID)
+		if !created && t.learnPRNodeID(ctx, *entity, snap.NodeID) {
+			// The row is a stub of the pull request another entity carries
+			// the node id of, folded into it or left for the next cycle to
+			// fold. That cycle's lookup by node id finds the entity.
+			continue
 		}
 
 		if created {
@@ -594,7 +597,12 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			if !ok {
 				continue
 			}
-			t.learnPRNodeID(ctx, e, nodeID)
+			if t.learnPRNodeID(ctx, e, nodeID) {
+				// Another entity carries the node id: the stub was folded
+				// into it, or its fold is retried next cycle. Either way it
+				// is not seeded.
+				continue
+			}
 			seedItem := entityWithSnap{entity: e, nodeID: nodeID, seed: true}
 			if terminal {
 				terminalItems = append(terminalItems, seedItem)
@@ -911,9 +919,10 @@ func (t *Tracker) refreshPRBatch(ctx context.Context, client *ghclient.Client, n
 // Returns ok=false (with a logged reason) when the repository can't be read,
 // the key names no number, or the PR can't be read this cycle — the caller
 // skips it and retries next cycle.
-// One extra fetch per stub, only until it carries a node_id. Caveat: a PR that
-// is permanently unreadable (deleted, or org-private after the App loses access)
-// never gets a node_id, so ListActiveSystem keeps returning it and it costs one
+// One extra fetch per stub, only until it carries a node_id or is folded into
+// the entity that does (learnPRNodeID). Caveat: a PR that is permanently
+// unreadable (deleted, or org-private after the App loses access) never gets a
+// node_id, so ListActiveSystem keeps returning it and it costs one
 // GetPRBasic per cycle indefinitely. Acceptable bound until a stub-staleness /
 // dismiss affordance lands (separate ticket) — a 404 is deliberately NOT treated
 // as terminal here, since a transient permission blip must not close a live PR.
@@ -945,11 +954,16 @@ func (t *Tracker) resolveStubNodeID(ctx context.Context, client *ghclient.Client
 // logged, and the entity is still found by its key.
 //
 // When another entity already carries the id, the two rows are one pull
-// request, created under two names of its repository. Both stay as they are
-// and both go on being polled.
-func (t *Tracker) learnPRNodeID(ctx context.Context, e domain.Entity, nodeID string) {
+// request under two names of its repository: a touch took the name from a
+// checkout made before a rename, or used the new name before TF applied the
+// rename. A stub is folded into the entity carrying the id (foldPRStub). A row
+// with a snapshot is left as it is beside it.
+//
+// Returns true when the caller writes nothing more to e this cycle: it was
+// folded away, or it is a stub whose fold failed and is retried next cycle.
+func (t *Tracker) learnPRNodeID(ctx context.Context, e domain.Entity, nodeID string) (skip bool) {
 	if e.ExternalID != "" || nodeID == "" {
-		return
+		return false
 	}
 	// The write takes context.Background(), as every entity write in a cycle
 	// does (see RefreshGitHub): it is durable bookkeeping a cancelled cycle
@@ -957,17 +971,45 @@ func (t *Tracker) learnPRNodeID(ctx context.Context, e domain.Entity, nodeID str
 	_, err := t.entities.StampExternalIDSystem(context.Background(), t.orgID, e.ID, nodeID)
 	switch {
 	case errors.Is(err, db.ErrEntityIdentityAmbiguous):
-		// TODO(TFAC-1157): fold a stub into the entity carrying its node id
-		// instead of leaving both. A stub a touch created under another name
-		// of a renamed repository is seeded and polled beside the real entity,
-		// so the pull request's events are emitted twice, and created before
-		// the rename is applied, it blocks the repository rename.
-		trackerLog.WarnContext(ctx, "another entity already carries this pull request's node id; leaving both",
-			"source_id", e.SourceID, "node_id", nodeID, "entity_id", e.ID)
+		return t.foldPRStub(ctx, e, nodeID)
 	case err != nil:
 		trackerLog.ErrorContext(ctx, "recording a pull request's node id failed",
 			"source_id", e.SourceID, "node_id", nodeID, "entity_id", e.ID, "error", err)
 	}
+	return false
+}
+
+// foldPRStub folds e, a second entity for the pull request whose node id
+// another entity carries, into that entity (db.EntityStore.FoldStubEntitySystem):
+// e's memory links, tasks and attribution move onto it, and e is deleted. The
+// entity keeps its own key, snapshot and poll_seq, so nothing is emitted for e
+// and the entity's own refresh this cycle is unaffected.
+//
+// The store refuses e when it holds a snapshot, and then both rows are left.
+// Any other failure leaves e unfolded and reports skip: a stub seeded now would
+// hold a snapshot and could never be folded, so it is left for the next cycle,
+// which resolves its node id again and retries.
+func (t *Tracker) foldPRStub(ctx context.Context, e domain.Entity, nodeID string) (skip bool) {
+	holder, err := t.entities.GetByExternalIDSystem(context.Background(), t.orgID, "github", e.Scope, nodeID)
+	if err != nil || holder == nil {
+		trackerLog.ErrorContext(ctx, "the entity carrying this pull request's node id cannot be read; folding the stub next cycle",
+			"source_id", e.SourceID, "node_id", nodeID, "entity_id", e.ID, "error", err)
+		return true
+	}
+	err = t.entities.FoldStubEntitySystem(context.Background(), t.orgID, e.ID, holder.ID)
+	switch {
+	case errors.Is(err, db.ErrEntityNotStub):
+		trackerLog.WarnContext(ctx, "another entity already carries this pull request's node id; leaving both",
+			"source_id", e.SourceID, "node_id", nodeID, "entity_id", e.ID, "other_entity_id", holder.ID)
+		return false
+	case err != nil:
+		trackerLog.ErrorContext(ctx, "folding a pull request stub into the entity carrying its node id failed; retrying next cycle",
+			"source_id", e.SourceID, "node_id", nodeID, "entity_id", e.ID, "other_entity_id", holder.ID, "error", err)
+		return true
+	}
+	trackerLog.InfoContext(ctx, "pull request stub was another name of a known pull request; folded into its entity",
+		"stub_source_id", e.SourceID, "source_id", holder.SourceID, "node_id", nodeID, "entity_id", holder.ID)
+	return true
 }
 
 // maxSearchQueryLen is GitHub's limit for the q= search parameter.

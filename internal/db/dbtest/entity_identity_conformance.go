@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -149,6 +150,9 @@ type EntityIdentitySeeder struct {
 	// TeamID owns the artifacts and actions.
 	TeamID string
 
+	// UserID is a member of the org, for an entity's commissioning user.
+	UserID string
+
 	// Task inserts a task against entityID and returns its id.
 	Task func(t *testing.T, entityID, suffix string) string
 
@@ -194,8 +198,8 @@ type EntityReferents struct {
 }
 
 // RunEntityIdentityConformance covers the system-only identity writes:
-// GetByExternalIDSystem, StampExternalIDSystem, RenameSystem and
-// MergeDuplicateEntitiesSystem.
+// GetByExternalIDSystem, StampExternalIDSystem, RenameSystem,
+// MergeDuplicateEntitiesSystem and FoldStubEntitySystem.
 func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -615,6 +619,147 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		for _, e := range []*domain.Entity{a, b, elsewhere} {
 			if got, _ := s.Entities.GetSystem(ctx, orgID, e.ID); got == nil || got.SourceID != e.SourceID || got.ExternalID != e.ExternalID {
 				t.Errorf("a refused merge changed %s: %+v", e.ID, got)
+			}
+		}
+	})
+
+	// A touch under another name of a renamed repository creates a stub beside
+	// the pull request's entity. The stub's references move onto the entity,
+	// which is otherwise left exactly as it was.
+	t.Run("FoldStubEntitySystem_moves_the_stubs_references_and_keeps_the_entity", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		into, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", scope, "acme/new#5", "PR_5", "pr", "Real", "https://github.com/acme/new/pull/5")
+		if err != nil {
+			t.Fatalf("create entity: %v", err)
+		}
+		if ok, err := s.Entities.UpdateSnapshotCASSystem(ctx, orgID, into.ID, `{"node_id":"PR_5","number":5}`, into.PollSeq); err != nil || !ok {
+			t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
+		}
+		stub, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", scope, "acme/old#5", "", "pr", "", "")
+		if err != nil {
+			t.Fatalf("create stub: %v", err)
+		}
+		if ok, err := s.Entities.StampOwningTeamIfUnsetSystem(ctx, orgID, stub.ID, seed.TeamID); err != nil || !ok {
+			t.Fatalf("stamp the stub's owning team: ok=%v err=%v", ok, err)
+		}
+		if ok, err := s.Entities.StampCommissionedByIfUnsetSystem(ctx, orgID, stub.ID, seed.UserID); err != nil || !ok {
+			t.Fatalf("stamp the stub's commissioning user: ok=%v err=%v", ok, err)
+		}
+		intoTask := seed.Task(t, into.ID, "dup")
+		dupTask := seed.Task(t, stub.ID, "dup")
+		soloTask := seed.Task(t, stub.ID, "solo")
+		third, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", scope, "acme/third#1", "PR_third", "pr", "Third", "")
+		if err != nil {
+			t.Fatalf("create third: %v", err)
+		}
+		seed.Link(t, stub.ID, third.ID)
+		seed.Link(t, stub.ID, into.ID)
+		shared := seed.Conversation(t, "fold-shared")
+		onlyStub := seed.Conversation(t, "fold-stub")
+		for _, l := range []struct{ conv, entity, role string }{
+			{shared, into.ID, domain.MemoryRoleTouched},
+			{shared, stub.ID, domain.MemoryRoleProduced},
+			{onlyStub, stub.ID, domain.MemoryRoleTouched},
+		} {
+			if err := s.TaskMemory.RecordEntityTouchSystem(ctx, orgID, l.conv, l.entity, l.role); err != nil {
+				t.Fatalf("seed memory link: %v", err)
+			}
+		}
+		before, _ := s.Entities.GetSystem(ctx, orgID, into.ID)
+
+		if err := s.Entities.FoldStubEntitySystem(ctx, orgID, stub.ID, into.ID); err != nil {
+			t.Fatalf("FoldStubEntitySystem: %v", err)
+		}
+		if gone, _ := s.Entities.GetSystem(ctx, orgID, stub.ID); gone != nil {
+			t.Fatalf("the stub still exists: %+v", gone)
+		}
+		got, _ := s.Entities.GetSystem(ctx, orgID, into.ID)
+		if !reflect.DeepEqual(got, before) {
+			t.Errorf("entity after the fold = %+v\nwant it unchanged: %+v", got, before)
+		}
+		// The fold is not a new version of the entity: a cycle that read it
+		// before still commits its snapshot.
+		if ok, err := s.Entities.UpdateSnapshotCASSystem(ctx, orgID, into.ID, `{"node_id":"PR_5","number":5,"title":"x"}`, before.PollSeq); err != nil || !ok {
+			t.Errorf("a snapshot CAS on the version read before the fold = ok %v err %v, want it to land", ok, err)
+		}
+		if team, err := s.Entities.OwningTeamForEntitySystem(ctx, orgID, into.ID); err != nil || team != seed.TeamID {
+			t.Errorf("owning team = %q err=%v, want the stub's %q", team, err, seed.TeamID)
+		}
+		if again, err := s.Entities.StampCommissionedByIfUnsetSystem(ctx, orgID, into.ID, seed.UserID); err != nil || again {
+			t.Errorf("commissioning-user stamp after the fold = %v err=%v, want it already set from the stub", again, err)
+		}
+
+		for _, c := range []struct {
+			id, wantStatus, wantReason string
+		}{
+			{intoTask, "queued", ""},
+			{dupTask, "dismissed", db.DuplicateEntityMergedCloseReason},
+			{soloTask, "queued", ""},
+		} {
+			task, err := s.Tasks.GetSystem(ctx, orgID, c.id)
+			if err != nil || task == nil {
+				t.Fatalf("task %s: %v", c.id, err)
+			}
+			if task.EntityID != into.ID || task.Status != c.wantStatus || task.CloseReason != c.wantReason {
+				t.Errorf("task %s = entity %s status %q reason %q, want on the entity, %q, %q",
+					c.id, task.EntityID, task.Status, task.CloseReason, c.wantStatus, c.wantReason)
+			}
+		}
+		refs := seed.Referents(t, into.ID)
+		if refs.Rows["tasks"] != 3 || refs.Rows["events"] != 3 {
+			t.Errorf("entity referents = %v, want every task and event of both rows", refs.Rows)
+		}
+		if refs.Rows["entity_links"] != 1 {
+			t.Errorf("entity_links = %d, want the link to the third row only (the self-link dropped)", refs.Rows["entity_links"])
+		}
+		if refs.MemoryRoles[shared] != domain.MemoryRoleProduced || refs.MemoryRoles[onlyStub] != domain.MemoryRoleTouched {
+			t.Errorf("memory roles = %v, want the stronger role of each conversation", refs.MemoryRoles)
+		}
+		for table, n := range seed.Referents(t, stub.ID).Rows {
+			if n != 0 {
+				t.Errorf("%d %s rows still name the folded stub", n, table)
+			}
+		}
+	})
+
+	t.Run("FoldStubEntitySystem_refuses_a_row_that_is_not_a_stub", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		into, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", scope, "acme/fold#1", "PR_f1", "pr", "Real", "")
+		if err != nil {
+			t.Fatalf("create entity: %v", err)
+		}
+		seeded, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", scope, "acme/fold#2", "", "pr", "", "")
+		if err != nil {
+			t.Fatalf("create seeded: %v", err)
+		}
+		if ok, err := s.Entities.UpdateSnapshotCASSystem(ctx, orgID, seeded.ID, `{"number":2}`, seeded.PollSeq); err != nil || !ok {
+			t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
+		}
+		identified, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", scope, "acme/fold#3", "PR_f3", "pr", "", "")
+		if err != nil {
+			t.Fatalf("create identified: %v", err)
+		}
+		elsewhere, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", "ws-b", "acme/fold#4", "", "pr", "", "")
+		if err != nil {
+			t.Fatalf("create elsewhere: %v", err)
+		}
+		for name, id := range map[string]string{"a row with a snapshot": seeded.ID, "a row with a provider id": identified.ID} {
+			if err := s.Entities.FoldStubEntitySystem(ctx, orgID, id, into.ID); !errors.Is(err, db.ErrEntityNotStub) {
+				t.Errorf("fold of %s: err=%v, want ErrEntityNotStub", name, err)
+			}
+		}
+		if err := s.Entities.FoldStubEntitySystem(ctx, orgID, elsewhere.ID, into.ID); err == nil {
+			t.Errorf("fold across scopes succeeded")
+		}
+		if err := s.Entities.FoldStubEntitySystem(ctx, orgID, into.ID, into.ID); err == nil {
+			t.Errorf("fold of a row into itself succeeded")
+		}
+		if err := s.Entities.FoldStubEntitySystem(ctx, orgID, "00000000-0000-0000-0000-00000000dead", into.ID); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("fold of a missing row: err=%v, want sql.ErrNoRows", err)
+		}
+		for _, e := range []*domain.Entity{into, seeded, identified, elsewhere} {
+			if got, _ := s.Entities.GetSystem(ctx, orgID, e.ID); got == nil || got.SourceID != e.SourceID {
+				t.Errorf("a refused fold removed or moved %s: %+v", e.ID, got)
 			}
 		}
 	})

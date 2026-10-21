@@ -30,6 +30,7 @@ func TestEntityIdentity_SQLite(t *testing.T) {
 		conn := newSQLiteForEntityTest(t)
 		seed := dbtest.EntityIdentitySeeder{
 			TeamID: runmode.LocalDefaultTeamID,
+			UserID: runmode.LocalDefaultUserID,
 			Task: func(t *testing.T, entityID, suffix string) string {
 				t.Helper()
 				return seedSQLiteIdentityTask(t, conn, entityID, suffix)

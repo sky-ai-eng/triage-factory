@@ -1880,6 +1880,10 @@ func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, bas
 // branch and ErrPendingReviewCollision. The comments param is unused (start-review
 // seeds no inline comments; the agent adds them via add-review-comment).
 func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, _ []ghclient.SubmitReviewComment) (string, error) {
+	// TODO(TFAC-1159): owner/repo is the name the verb used, which a checkout
+	// made before a repository rename spells as the old name. The draft is then
+	// keyed and targeted under a name the rename already moved past, so the PR
+	// coherence reads, which match artifacts.target on the current name, miss it.
 	a := domain.NewReviewArtifact(owner+"/"+repo, number, commitSHA, c.info.ConversationID)
 	stored, err := c.UpsertArtifact(ctx, a)
 	if err != nil {
@@ -2442,6 +2446,10 @@ func (c *LocalClient) recordGithubPR(ctx context.Context, owner, repo, head, bas
 			"conversation", c.info.ConversationID, "repo", owner+"/"+repo)
 		return
 	}
+	// TODO(TFAC-1159): owner/repo is the name the verb used, which can be a
+	// name a repository rename already moved past. The artifact is then keyed
+	// on it, and the same pull request recorded under its current name is a
+	// second row.
 	a := domain.NewPullRequestArtifact(
 		owner+"/"+repo, number, nodeID, head, base, htmlURL, title, body, draft,
 	)
