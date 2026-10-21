@@ -100,6 +100,7 @@ fi
 
 func TestIntegration_EgressIntercept_ToolchainsInTheJail(t *testing.T) {
 	requireEgressInterceptLive(t)
+	installInProcessLauncher(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
