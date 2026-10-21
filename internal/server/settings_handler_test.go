@@ -332,8 +332,10 @@ func TestSettingsPatch_PerProjectRules_RoundTrip(t *testing.T) {
 		},
 	}
 	const site = "https://jira.example.com"
+	project := map[string]string{}
 	for i := range rules {
 		rules[i].JiraProjectID = dbseed.JiraProject(t, s.db, runmode.LocalDefaultOrgID, site, rules[i].ProjectKey)
+		project[rules[i].ProjectKey] = rules[i].JiraProjectID
 	}
 	if err := s.jiraRules.ReplaceForTeam(ctx, teamID, site, rules); err != nil {
 		t.Fatalf("ReplaceForTeam: %v", err)
@@ -342,10 +344,10 @@ func TestSettingsPatch_PerProjectRules_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListForTeamSystem: %v", err)
 	}
-	if r := domain.RuleForProject(got, "SKY"); r == nil || r.InProgressCanonical.Name != "In Progress" || !r.PickupContains(jiraRef("Backlog")) {
+	if r := domain.RuleForJiraProject(got, project["SKY"]); r == nil || r.InProgressCanonical.Name != "In Progress" || !r.PickupContains(jiraRef("Backlog")) {
 		t.Errorf("SKY rules round-trip: %+v", r)
 	}
-	if r := domain.RuleForProject(got, "OPS"); r == nil || r.DoneCanonical.Name != "Resolved" || !r.PickupContains(jiraRef("Triage")) {
+	if r := domain.RuleForJiraProject(got, project["OPS"]); r == nil || r.DoneCanonical.Name != "Resolved" || !r.PickupContains(jiraRef("Triage")) {
 		t.Errorf("OPS rules round-trip: %+v", r)
 	}
 
@@ -362,10 +364,10 @@ func TestSettingsPatch_PerProjectRules_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListForTeamSystem: %v", err)
 	}
-	if r := domain.RuleForProject(got, "SKY"); r == nil || !r.PickupContains(jiraRef("Ready")) || r.PickupContains(jiraRef("Backlog")) {
+	if r := domain.RuleForJiraProject(got, project["SKY"]); r == nil || !r.PickupContains(jiraRef("Ready")) || r.PickupContains(jiraRef("Backlog")) {
 		t.Errorf("SKY edit didn't apply: %+v", r)
 	}
-	if r := domain.RuleForProject(got, "OPS"); r == nil || !r.PickupContains(jiraRef("Triage")) || r.DoneCanonical.Name != "Resolved" {
+	if r := domain.RuleForJiraProject(got, project["OPS"]); r == nil || !r.PickupContains(jiraRef("Triage")) || r.DoneCanonical.Name != "Resolved" {
 		t.Errorf("OPS untouched check failed: %+v", r)
 	}
 
@@ -383,10 +385,10 @@ func TestSettingsPatch_PerProjectRules_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListForTeamSystem: %v", err)
 	}
-	if r := domain.RuleForProject(got, "SKY"); r != nil {
+	if r := domain.RuleForJiraProject(got, project["SKY"]); r != nil {
 		t.Errorf("SKY rules should be gone after drop, got: %+v", r)
 	}
-	if r := domain.RuleForProject(got, "OPS"); r == nil || r.DoneCanonical.Name != "Resolved" {
+	if r := domain.RuleForJiraProject(got, project["OPS"]); r == nil || r.DoneCanonical.Name != "Resolved" {
 		t.Errorf("OPS rules should persist after dropping SKY: %+v", r)
 	}
 }

@@ -475,7 +475,7 @@ func TestRefreshGitHub_CommentedEndToEnd(t *testing.T) {
 			entityID := seedReviewedPR(t, stores, tc.prev)
 
 			pub := &recordingPublisher{}
-			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 			client := ghclient.NewClient(srv.URL, "tok")
 			if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, "", nil, nil); err != nil {
 				t.Fatalf("RefreshGitHub: %v", err)
@@ -624,7 +624,7 @@ func TestRefreshGitHub_RateLimitStopsTheReads(t *testing.T) {
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, "", nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub under a rate limit: %v", err)

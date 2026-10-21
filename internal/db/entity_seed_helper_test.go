@@ -27,14 +27,17 @@ func createEntityForTest(t *testing.T, database *sql.DB, source, sourceID, kind,
 	t.Helper()
 	id := uuid.New().String()
 	now := time.Now()
-	var repositoryID any
-	if source == "github" {
+	var repositoryID, jiraProjectID any
+	switch source {
+	case "github":
 		repositoryID = dbseed.GitHubEntityRepository(t, database, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
+	case "jira":
+		jiraProjectID = dbseed.JiraIssueProjectID(t, database, runmode.LocalDefaultOrgID, "https://jira.example.com", sourceID)
 	}
 	_, err := database.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url, state, created_at, last_polled_at, scope, repository_id)
-		VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, CASE ? WHEN 'github' THEN 'https://github.com' WHEN 'jira' THEN 'https://jira.example.com' WHEN 'slack' THEN 'slack.com' WHEN 'linear' THEN 'ws-test' ELSE 'test-scope' END, ?)
-	`, id, source, sourceID, kind, title, url, now, now, source, repositoryID)
+		INSERT INTO entities (id, source, source_id, kind, title, url, state, created_at, last_polled_at, scope, repository_id, jira_project_id)
+		VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, CASE ? WHEN 'github' THEN 'https://github.com' WHEN 'jira' THEN 'https://jira.example.com' WHEN 'slack' THEN 'slack.com' WHEN 'linear' THEN 'ws-test' ELSE 'test-scope' END, ?, ?)
+	`, id, source, sourceID, kind, title, url, now, now, source, repositoryID, jiraProjectID)
 	if err != nil {
 		t.Fatalf("createEntityForTest: %v", err)
 	}

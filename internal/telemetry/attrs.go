@@ -81,8 +81,9 @@ func EventType(kind string) attribute.KeyValue { return keyEventType.String(kind
 
 // Closed enums, each fixed by its call sites:
 //
-//   - Source — the upstream a span talks to ("github", "jira"). The
-//     poller/tracker's own dimension, not a hostname.
+//   - Source — the upstream a span talks to, or an entity belongs to
+//     ("github", "jira"). The poller/tracker's own dimension, not a
+//     hostname.
 //   - Disposition — what a stage decided to do with its input (routed,
 //     deduped, filtered).
 //   - Runtime — which agent loop drove a run ("sdk", "native").
@@ -127,9 +128,10 @@ func Bucket(name string) attribute.KeyValue       { return keyBucket.String(name
 func Credential(id string) attribute.KeyValue     { return keyCredential.String(id) }
 
 // WorkKind names an adopting work table by its registered kind name, and
-// Reason says why a work item was parked. Both are closed vocabularies TF
-// declares itself: kind names are registry identifiers, reasons are the
-// typed outcomes and the package's own park constants.
+// Reason says why a work item was parked or why a conversation's memory link
+// to an entity went unwritten. Both are closed vocabularies TF declares
+// itself: kind names are registry identifiers, reasons are the typed outcomes
+// and each package's own constants.
 func WorkKind(name string) attribute.KeyValue { return keyWorkKind.String(name) }
 func Reason(value string) attribute.KeyValue  { return keyReason.String(value) }
 

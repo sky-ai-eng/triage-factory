@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -203,7 +204,7 @@ func TestRunJiraCycleForOrg_AnotherSitesRowsRetireWithNothingArmed(t *testing.T)
 	if _, err := stores.Orgs.SetSourceBaseURL(context.Background(), runmode.LocalDefaultOrgID, "jira", site); err != nil {
 		t.Fatal(err)
 	}
-	stale, _, err := stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://old.example.com", "ENG-1", "10001", "issue", "Old", "")
+	stale, _, err := stores.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://old.example.com", "ENG-1", "10001", dbseed.JiraIssueProject("ENG-1"), "Old", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,6 +214,7 @@ func TestRunJiraCycleForOrg_AnotherSitesRowsRetireWithNothingArmed(t *testing.T)
 		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
 		orgs: stores.Orgs, users: stores.Users, secrets: jiraSecrets{},
 		jiraRules:    stores.JiraStatusRules,
+		jiraProjects: stores.JiraProjects,
 		EventSources: stores.OrgEventSources,
 	}
 	m.runJiraCycleForOrg(context.Background(), nil, runmode.LocalDefaultOrgID, time.Now())

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -57,7 +58,13 @@ func seedStepFixture(t *testing.T, source, suffix string, steps int, sharedWT st
 		t.Fatalf("unknown task source %q", source)
 	}
 
-	entity, _, err := stores.Entities.FindOrCreate(ctx, org, source, testScope(source), sourceID, "", entityKind, "T", "https://example.com/"+suffix)
+	var entity *domain.Entity
+	var err error
+	if source == "jira" {
+		entity, _, err = stores.Entities.FindOrCreateJiraSystem(ctx, org, testScope(source), sourceID, "", dbseed.JiraIssueProject(sourceID), "T", "https://example.com/"+suffix)
+	} else {
+		entity, _, err = stores.Entities.FindOrCreate(ctx, org, source, testScope(source), sourceID, "", entityKind, "T", "https://example.com/"+suffix)
+	}
 	if err != nil {
 		t.Fatalf("create %s entity: %v", source, err)
 	}

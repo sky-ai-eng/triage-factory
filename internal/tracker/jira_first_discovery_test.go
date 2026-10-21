@@ -21,6 +21,7 @@ func TestRefreshJira_FirstDiscoveryAssignedToCurrentUserEmitsAssignment(t *testi
 	const searchResp = `{"issues":[
 		{"id":"10852","key":"SKY-852","fields":{
 			"summary":"Newly assigned issue","status":{"name":"In Progress"},
+			"project":{"id":"10000","key":"SKY","name":"Sky"},
 			"assignee":{"displayName":"Alice","accountId":"acc-1"},
 			"priority":{"name":"High"},"issuetype":{"name":"Task"},
 			"created":"2026-08-19T00:00:00.000+0000","updated":"2026-08-19T00:01:00.000+0000"
@@ -43,9 +44,9 @@ func TestRefreshJira_FirstDiscoveryAssignedToCurrentUserEmitsAssignment(t *testi
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
-	projects := JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
+	projects := registeredRules(t, stores.JiraProjects, "https://jira.example.com", JiraRules{{Key: "SKY", ProjectID: "10000", DoneMembers: jiraRefs("Done")}})
 
 	emitted, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects)
 	if err != nil {
@@ -85,7 +86,7 @@ func TestRefreshJira_FirstDiscoveryAssignedToCurrentUserEmitsAssignment(t *testi
 	// The persisted snapshot is the re-emit fence: rediscovery on the next
 	// cycle must not create a second assignment event.
 	secondPub := &recordingPublisher{}
-	second := New(database, secondPub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	second := New(database, secondPub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	emitted, err = second.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects)
 	if err != nil {
 		t.Fatalf("RefreshJira cycle 2: %v", err)

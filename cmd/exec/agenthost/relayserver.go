@@ -825,14 +825,14 @@ func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args js
 		if a.Action != nil {
 			a.Action.DedupKey = ""
 		}
-		s.rt.Record(ctx, a.Artifact, a.Action, a.LinearTeamID)
+		s.rt.Record(ctx, a.Artifact, a.Action, a.EntityContainer)
 
 	case opRecordReadTouch:
 		var a recordReadTouchArgs
 		if err := json.Unmarshal(args, &a); err != nil {
 			return fmt.Errorf("agenthost: decode relayed read touch: %w", err)
 		}
-		s.rt.RecordReadTouch(ctx, a.Provider, a.Target, a.ExternalID, a.LinearTeamID, a.URL)
+		s.rt.RecordReadTouch(ctx, a.Provider, a.Target, a.ExternalID, a.EntityContainer, a.URL)
 
 	default:
 		return fmt.Errorf("agenthost: unsupported core relay record op %q", op)

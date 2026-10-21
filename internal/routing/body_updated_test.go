@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -42,7 +43,13 @@ func TestBodyUpdated_PollToRule(t *testing.T) {
 				setJiraHost(t, database)
 				seedJiraUserOnTeam(t, database, team, "account-7", "Assignee")
 			}
-			entity, _, err := st.Entities.FindOrCreate(ctx, org, source, testScope(source), sourceID, "", kind, "", "")
+			var entity *domain.Entity
+			var err error
+			if source == "jira" {
+				entity, _, err = st.Entities.FindOrCreateJiraSystem(ctx, org, testScope(source), sourceID, "", dbseed.JiraIssueProject(sourceID), "", "")
+			} else {
+				entity, _, err = st.Entities.FindOrCreate(ctx, org, source, testScope(source), sourceID, "", kind, "", "")
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -77,7 +84,7 @@ func TestBodyUpdated_PollToRule(t *testing.T) {
 				}
 			}))
 			t.Cleanup(srv.Close)
-			tr := tracker.New(database, bodyTestPublisher{}, st.Tasks, st.Entities, st.Repos, st.Artifacts, st.EventQueue, org)
+			tr := tracker.New(database, bodyTestPublisher{}, st.Tasks, st.Entities, st.Repos, st.JiraProjects, st.Artifacts, st.EventQueue, org)
 			gh := ghclient.NewClient(srv.URL, "test-token")
 			jira := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "test-token"))
 			poll := func(next string) {
@@ -89,7 +96,7 @@ func TestBodyUpdated_PollToRule(t *testing.T) {
 				if source == "github" {
 					_, _, err = tr.RefreshGitHub(ctx, "https://github.com", gh, "", nil, nil)
 				} else {
-					_, err = tr.RefreshJira(ctx, "https://jira.example.com", jira, srv.URL, tracker.JiraRules{{Key: "PROJ"}})
+					_, err = tr.RefreshJira(ctx, testScope("jira"), jira, srv.URL, tracker.JiraRules{{Key: "PROJ"}})
 				}
 				if err != nil {
 					t.Fatal(err)

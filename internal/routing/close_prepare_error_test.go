@@ -11,6 +11,7 @@ import (
 	"time"
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -204,7 +205,7 @@ func TestClosePrepare_JiraReassignSettingsReadFails_RequeuesThenClosesOnce(t *te
 	r := newQueueWorkerRouter(t, database)
 	st := sqlitestore.New(database)
 	r.users = st.Users
-	entity, _, err := st.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "PROJ-77", "", "issue", "Issue", "https://jira.example.com/PROJ-77")
+	entity, _, err := st.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", "PROJ-77", "", dbseed.JiraIssueProject("PROJ-77"), "Issue", "https://jira.example.com/PROJ-77")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}

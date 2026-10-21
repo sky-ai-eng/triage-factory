@@ -8,6 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entityscope"
+	"github.com/sky-ai-eng/triage-factory/internal/memoryentities"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -166,14 +167,14 @@ func deletesUnrecordedComment(ctx context.Context, stores db.Stores, info Conver
 // written on its own (recordActionAlone), and each failure is counted against
 // what it lost.
 func RecordExternalWrite(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, act *domain.ExternalAction) {
-	recordExternalWrite(ctx, stores, info, a, act, "")
+	recordExternalWrite(ctx, stores, info, a, act, domain.EntityContainer{})
 }
 
-// recordExternalWrite is RecordExternalWrite carrying linearTeamID: the Linear
-// team of the issue a Linear write touched, read off the response the verb
-// acted on, which the touch needs to create that issue's entity. Empty for
-// every other write.
-func recordExternalWrite(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, act *domain.ExternalAction, linearTeamID string) {
+// recordExternalWrite is RecordExternalWrite carrying container: what the
+// response the verb acted on says the touched issue sits in (a Linear issue's
+// team, a Jira issue's project), which the touch needs to create that issue's
+// entity. Zero for every other write.
+func recordExternalWrite(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, act *domain.ExternalAction, container domain.EntityContainer) {
 	if a != nil {
 		if stores.Artifacts == nil {
 			return
@@ -267,7 +268,7 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 			"conversation", info.ConversationID, "kind", kind, "target", target, "error", err)
 	}
 	// Resolve the touched entity outside the audit write (TFAC-513 §2).
-	touched := recordTouchInfo(ctx, stores, info, a, act, linearTeamID)
+	touched := recordTouchInfo(ctx, stores, info, a, act, container)
 	// Same placement, same reason: an admin-pool write, so it must run after
 	// withWriteInfo's tx has settled. It takes the touch's resolution because
 	// on the common path the two want the same entity — githubAction copies the
@@ -294,10 +295,10 @@ type entityCoordinate struct {
 	// one: a Jira artifact's dedup key carries its site. "" means the org's
 	// current scope.
 	scope string
-	// linearTeamID is the Linear team the response named, for a Linear
-	// coordinate: a Linear entity is created carrying it, and none is created
-	// without it.
-	linearTeamID string
+	// container is what the response says the object sits in, for a Linear
+	// or Jira coordinate: a Linear entity is created carrying its team and a
+	// Jira entity its project, and neither is created without it.
+	container domain.EntityContainer
 }
 
 // resolveTouchedEntityInfo maps a coordinate to an entities row, returning an
@@ -340,7 +341,7 @@ func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info Conver
 	// The poll cycle (or, for Slack, the ingest pipeline) seeds the title from
 	// context; neither an ExternalAction nor an addressed read carries one.
 	// url rides through when present.
-	entity, err := entityscope.Resolve(ctx, stores, info.OrgID, ref, c.linearTeamID, kind, c.url, true)
+	entity, err := entityscope.Resolve(ctx, stores, info.OrgID, ref, c.container, kind, c.url, true)
 	if err != nil {
 		return "", err
 	}
@@ -352,14 +353,14 @@ func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info Conver
 // (conversation_id, entity_id, role='touched') row. Shared by the write funnel
 // (recordTouchInfo) and the addressed-read path (Runtime.RecordReadTouch).
 //
-// Best-effort throughout: a resolve or record failure is logged and swallowed
-// so it never fails the agent's already-applied write or the read that
-// triggered it — the entity self-heals on a later touch or poll, and the touch
-// row on the next addressed hit. It MUST run outside any audit tx: local mode
-// holds the single SQLite connection for the life of a synthetic-claims tx, so
-// these ...System (admin-pool) writes inside that closure would deadlock. Every
-// funnel caller invokes it only after withWriteInfo returns; the read path
-// carries no tx.
+// Best-effort throughout: a resolve or record failure is logged, counted
+// (memoryentities.CountSkippedLink) and swallowed so it never fails the agent's
+// already-applied write or the read that triggered it — the entity self-heals
+// on a later touch or poll, and the touch row on the next addressed hit. It
+// MUST run outside any audit tx: local mode holds the single SQLite connection
+// for the life of a synthetic-claims tx, so these ...System (admin-pool)
+// writes inside that closure would deadlock. Every funnel caller invokes it
+// only after withWriteInfo returns; the read path carries no tx.
 // It returns the entity it resolved (empty for a skipped or failed resolve) so
 // a later consumer in the same funnel call can reuse it rather than resolving
 // the same key again; callers with no such consumer ignore the result.
@@ -368,6 +369,7 @@ func recordEntityTouch(ctx context.Context, stores db.Stores, info ConversationI
 	if err != nil {
 		agenthostLog.Warn("touched-entity resolve failed (will retry on next poll)",
 			"conversation", info.ConversationID, "target", c.target, "error", err)
+		memoryentities.CountSkippedLink(ctx, info.OrgID, domain.MemoryRoleTouched, c.provider, err)
 		return ""
 	}
 	if id == "" || stores.TaskMemory == nil {
@@ -375,6 +377,7 @@ func recordEntityTouch(ctx context.Context, stores db.Stores, info ConversationI
 	}
 	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, info.OrgID, info.ConversationID, id, domain.MemoryRoleTouched); err != nil {
 		agenthostLog.Warn("touched-entity record failed", "conversation", info.ConversationID, "entity", id, "error", err)
+		memoryentities.CountSkippedLink(ctx, info.OrgID, domain.MemoryRoleTouched, c.provider, err)
 	}
 	return id
 }
@@ -406,11 +409,11 @@ func (r resolvedEntity) matches(provider, target string) bool {
 // + outside-the-tx contract.
 //
 // Returns what it resolved, for stampPRAttribution to reuse — see the funnel.
-func recordTouchInfo(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, act *domain.ExternalAction, linearTeamID string) resolvedEntity {
+func recordTouchInfo(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, act *domain.ExternalAction, container domain.EntityContainer) resolvedEntity {
 	if act == nil {
 		return resolvedEntity{}
 	}
-	c := entityCoordinate{provider: act.Provider, target: act.Target, url: act.URL, linearTeamID: linearTeamID}
+	c := entityCoordinate{provider: act.Provider, target: act.Target, url: act.URL, container: container}
 	// A Jira or Linear artifact's key names the issue every action beside it
 	// is about. A pull request artifact's node id names one pull request,
 	// which is the action's only when the two targets agree.
@@ -594,6 +597,7 @@ func loadEntityMemory(ctx context.Context, stores db.Stores, info ConversationIn
 		// next addressed hit, and on the sidecar a dropped relay costs one row.
 		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, info.OrgID, info.ConversationID, entity.ID, domain.MemoryRoleTouched); err != nil {
 			agenthostLog.Warn("memory-load touch record failed", "conversation", info.ConversationID, "entity", entity.ID, "error", err)
+			memoryentities.CountSkippedLink(ctx, info.OrgID, domain.MemoryRoleTouched, entity.Source, err)
 		}
 	}
 	return res, nil

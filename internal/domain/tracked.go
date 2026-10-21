@@ -336,8 +336,14 @@ type JiraSnapshot struct {
 	// changes the key's prefix and leaves this alone, so it is what tells a
 	// rename from a move. Empty on snapshots captured before it was recorded.
 	ProjectID string `json:"project_id,omitempty"`
-	Summary   string `json:"summary"`
-	Status    string `json:"status"`
+	// ProjectKey is that project's key as the same read spelled it: the
+	// display value an event or a deck shows the project by. Nothing looks a
+	// project up by it; the entity references the project by its registry row
+	// (Entity.JiraProjectID). Empty on snapshots captured before it was
+	// recorded.
+	ProjectKey string `json:"project_key,omitempty"`
+	Summary    string `json:"summary"`
+	Status     string `json:"status"`
 	// StatusID is Jira's identifier for the status Status names. It is the
 	// stable half of the pair: a workflow status can be renamed, and matching
 	// on the id is what keeps rule membership and change detection right when

@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -52,7 +53,13 @@ func seedAuthoringMemory(t *testing.T, conn *sql.DB, orgID, entityID, conversati
 // admin-pool path and returns its id.
 func seedEntity(t *testing.T, stores db.Stores, orgID, source, sourceID, title string) string {
 	t.Helper()
-	ent, _, err := stores.Entities.FindOrCreateSystem(context.Background(), orgID, source, testScope(source), sourceID, "", "pr", title, "")
+	var ent *domain.Entity
+	var err error
+	if source == "jira" {
+		ent, _, err = stores.Entities.FindOrCreateJiraSystem(context.Background(), orgID, testScope(source), sourceID, "", dbseed.JiraIssueProject(sourceID), title, "")
+	} else {
+		ent, _, err = stores.Entities.FindOrCreateSystem(context.Background(), orgID, source, testScope(source), sourceID, "", "pr", title, "")
+	}
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

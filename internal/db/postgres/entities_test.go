@@ -210,11 +210,11 @@ func seedPgJiraRule(t *testing.T, h *pgtest.Harness, teamID, projectKey string) 
 }
 
 // TestEntityStore_Postgres_ListActiveJiraTeamScoped_FollowsTheRegistry: the
-// deck matches an issue to its project through the registry's current key on
-// the issue's own site. After a project key rename — the registry row moved
-// to the new key and the issue renamed under it, as the poll does — the issue
-// is still on the deck, and an issue under the same key on another Jira site
-// never is.
+// deck matches an issue to its project through the registry row the issue
+// references, never through its key. After a project key rename the issue is
+// still on the deck: once it is renamed while the registry still holds the old
+// key (a cycle whose project read failed), and again once the registry row is
+// re-keyed too. An issue under the same key on another Jira site never is.
 func TestEntityStore_Postgres_ListActiveJiraTeamScoped_FollowsTheRegistry(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -224,36 +224,41 @@ func TestEntityStore_Postgres_ListActiveJiraTeamScoped_FollowsTheRegistry(t *tes
 	orgID, _ := seedPgEntityOrg(t, h)
 	team := firstTeamForOrg(t, h, orgID)
 	project := seedPgJiraRule(t, h, team, "OLD")
-	issue, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "jira", pgJiraSite, "OLD-1", "10001", "issue", "Renamed", "")
+	issue, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, orgID, pgJiraSite, "OLD-1", "10001", dbseed.JiraIssueProject("OLD-1"), "Renamed", "")
 	if err != nil {
 		t.Fatalf("FindOrCreateSystem: %v", err)
 	}
-	elsewhere, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "jira", "https://other.example.com", "NEW-1", "20001", "issue", "Elsewhere", "")
+	elsewhere, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://other.example.com", "NEW-1", "20001", dbseed.JiraIssueProject("NEW-1"), "Elsewhere", "")
 	if err != nil {
 		t.Fatalf("FindOrCreateSystem (other site): %v", err)
 	}
 
-	if _, err := stores.JiraProjects.RefreshSystem(ctx, orgID, project, "id-OLD", "NEW", ""); err != nil {
-		t.Fatalf("RefreshSystem: %v", err)
+	deck := func(stage string) {
+		t.Helper()
+		got, err := stores.Entities.ListActiveJiraTeamScoped(ctx, orgID, team)
+		if err != nil {
+			t.Fatalf("ListActiveJiraTeamScoped (%s): %v", stage, err)
+		}
+		ids := map[string]bool{}
+		for _, e := range got {
+			ids[e.ID] = true
+		}
+		if !ids[issue.ID] {
+			t.Errorf("%s: the renamed project's issue left the deck", stage)
+		}
+		if ids[elsewhere.ID] {
+			t.Errorf("%s: an issue under the project's key on another Jira site joined the deck", stage)
+		}
 	}
+
 	if _, err := stores.Entities.RenameSystem(ctx, orgID, "jira", pgJiraSite, "10001", "NEW-1", ""); err != nil {
 		t.Fatalf("RenameSystem: %v", err)
 	}
-
-	got, err := stores.Entities.ListActiveJiraTeamScoped(ctx, orgID, team)
-	if err != nil {
-		t.Fatalf("ListActiveJiraTeamScoped: %v", err)
+	deck("issue renamed, registry still on OLD")
+	if _, err := stores.JiraProjects.RefreshSystem(ctx, orgID, project, "id-OLD", "NEW", ""); err != nil {
+		t.Fatalf("RefreshSystem: %v", err)
 	}
-	ids := map[string]bool{}
-	for _, e := range got {
-		ids[e.ID] = true
-	}
-	if !ids[issue.ID] {
-		t.Error("the renamed project's issue left the deck")
-	}
-	if ids[elsewhere.ID] {
-		t.Error("an issue under the project's key on another Jira site joined the deck")
-	}
+	deck("registry re-keyed to NEW")
 }
 
 // TestEntityStore_Postgres_ListActiveJiraTeamScoped pins the multi-mode
@@ -285,15 +290,15 @@ func TestEntityStore_Postgres_ListActiveJiraTeamScoped(t *testing.T) {
 	_ = otherOwner
 	seedPgJiraRule(t, h, otherTeam, "CCC")
 
-	inA, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "jira", "https://jira.example.com", "AAA-1", "", "issue", "A", "")
+	inA, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "AAA-1", "", dbseed.JiraIssueProject("AAA-1"), "A", "")
 	if err != nil {
 		t.Fatalf("seed AAA-1: %v", err)
 	}
-	inB, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "jira", "https://jira.example.com", "BBB-2", "", "issue", "B", "")
+	inB, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "BBB-2", "", dbseed.JiraIssueProject("BBB-2"), "B", "")
 	if err != nil {
 		t.Fatalf("seed BBB-2: %v", err)
 	}
-	unattached, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "jira", "https://jira.example.com", "CCC-3", "", "issue", "C", "")
+	unattached, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "CCC-3", "", dbseed.JiraIssueProject("CCC-3"), "C", "")
 	if err != nil {
 		t.Fatalf("seed CCC-3: %v", err)
 	}
@@ -367,11 +372,11 @@ func TestEntityStore_Postgres_ListActiveJiraTeamScoped_RLS(t *testing.T) {
 	seedPgJiraRule(t, h, teamB, "BBB")
 
 	admin := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	entA, _, err := admin.Entities.FindOrCreateSystem(ctx, orgID, "jira", "https://jira.example.com", "AAA-1", "", "issue", "A", "")
+	entA, _, err := admin.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "AAA-1", "", dbseed.JiraIssueProject("AAA-1"), "A", "")
 	if err != nil {
 		t.Fatalf("seed AAA-1: %v", err)
 	}
-	entB, _, err := admin.Entities.FindOrCreateSystem(ctx, orgID, "jira", "https://jira.example.com", "BBB-2", "", "issue", "B", "")
+	entB, _, err := admin.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "BBB-2", "", dbseed.JiraIssueProject("BBB-2"), "B", "")
 	if err != nil {
 		t.Fatalf("seed BBB-2: %v", err)
 	}

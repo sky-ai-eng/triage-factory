@@ -839,8 +839,10 @@ func TestMigrate_ProviderScopesGiveGitHubEntitiesTheirRepository(t *testing.T) {
 
 	mustExec(t, database, `INSERT INTO entities (id, source, scope, source_id, kind, repository_id)
 		VALUES ('e-ok', 'github', 'https://github.com', 'octo/tracked#6', 'pr', 'repo-tracked')`)
-	mustExec(t, database, `INSERT INTO entities (id, source, scope, source_id, external_id, kind)
-		VALUES ('e-jira-2', 'jira', 'https://jira.example.com', 'OCTO-2', '10002', 'issue')`)
+	mustExec(t, database, `INSERT INTO jira_projects (id, org_id, site, external_id, project_key)
+		VALUES ('jp-octo', ?, 'https://jira.example.com', '10000', 'OCTO')`, runmode.LocalDefaultOrgID)
+	mustExec(t, database, `INSERT INTO entities (id, source, scope, source_id, external_id, kind, jira_project_id)
+		VALUES ('e-jira-2', 'jira', 'https://jira.example.com', 'OCTO-2', '10002', 'issue', 'jp-octo')`)
 	if _, err := database.Exec(`INSERT INTO entities (id, source, scope, source_id, kind, repository_id)
 		VALUES ('e-ghost', 'github', 'https://github.com', 'ghost/repo#1', 'pr', 'no-such-repository')`); err == nil {
 		t.Error("a github insert naming a repository row that does not exist succeeded; the foreign key should refuse it")

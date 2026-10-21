@@ -439,6 +439,54 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		}
 	})
 
+	t.Run("jira_entities_touched_resolution", func(t *testing.T) {
+		// An issue in a project with no registry row: the create registers
+		// the row its entity references, which takes the executor's
+		// column-scoped INSERT on jira_projects.
+		const site = "https://acme.atlassian.net"
+		ent, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, orgID, site, "EXEC-1", "40001",
+			domain.JiraProjectRef{ID: "40000", Key: "EXEC", Name: "Executor"}, "", "")
+		if err != nil {
+			t.Fatalf("Entities.FindOrCreateJiraSystem (new project): %v", err)
+		}
+		if ent.JiraProjectID == "" {
+			t.Errorf("Entities.FindOrCreateJiraSystem: entity references no project")
+		}
+		// The same project under its new key refreshes the row (the
+		// get-or-create's conflict arm), and an unresolved row under another
+		// issue's key is resolved in place: both take the column-scoped
+		// UPDATE.
+		if _, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, orgID, site, "EXEC2-2", "40002",
+			domain.JiraProjectRef{ID: "40000", Key: "EXEC2"}, "", ""); err != nil {
+			t.Errorf("Entities.FindOrCreateJiraSystem (renamed project): %v", err)
+		}
+		MustExec(t, h.AdminDB, `INSERT INTO jira_projects (org_id, site, project_key) VALUES ($1, $2, 'LEGACY')`, orgID, site)
+		legacy, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, orgID, site, "LEGACY-1", "41001",
+			domain.JiraProjectRef{ID: "41000", Key: "LEGACY"}, "", "")
+		if err != nil {
+			t.Fatalf("Entities.FindOrCreateJiraSystem (unresolved project): %v", err)
+		}
+		var externalID string
+		if err := h.AdminDB.QueryRowContext(ctx, `SELECT COALESCE(external_id, '') FROM jira_projects WHERE id = $1`, legacy.JiraProjectID).Scan(&externalID); err != nil || externalID != "41000" {
+			t.Errorf("unresolved LEGACY row after the executor's create: external id %q err=%v, want it resolved to 41000", externalID, err)
+		}
+		if _, err := stores.Entities.UpdateSnapshotCASSystem(ctx, orgID, ent.ID, `{"key":"EXEC-1","project_id":"40000"}`, ent.PollSeq); err != nil {
+			t.Errorf("Entities.UpdateSnapshotCASSystem (jira): %v", err)
+		}
+	})
+
+	t.Run("jira_projects_writes_are_identity_and_display_columns_only", func(t *testing.T) {
+		// The executor registers a project's identity and display values,
+		// never a row's site or timestamps.
+		_, err := h.SystemDB.ExecContext(ctx, `
+			INSERT INTO jira_projects (org_id, site, external_id, project_key, created_at)
+			VALUES ($1, 'https://acme.atlassian.net', '42000', 'SMUGGLE', now() - interval '1 year')
+		`, orgID)
+		assertPgCode(t, err, "42501", "executor INSERT naming created_at")
+		_, err = h.SystemDB.ExecContext(ctx, `UPDATE jira_projects SET site = 'https://attacker.example' WHERE org_id = $1`, orgID)
+		assertPgCode(t, err, "42501", "executor UPDATE of site")
+	})
+
 	t.Run("task_events_and_status", func(t *testing.T) {
 		evtID := seedEventForEntity(t, h, orgID, entityID, "github:pr:opened")
 		if err := stores.Tasks.RecordEventSystem(ctx, orgID, taskID, evtID, "injected"); err != nil {

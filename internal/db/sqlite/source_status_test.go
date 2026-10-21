@@ -44,14 +44,17 @@ func seedSQLiteSourceTask(t *testing.T, conn *sql.DB, source, snapshot string) s
 	entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
 	kind, scope, eventType := sourceStatusFixture(source)
 	sourceID := "src-" + entityID
-	var repositoryID any
-	if source == "github" {
+	var repositoryID, jiraProjectID any
+	switch source {
+	case "github":
 		sourceID = "octo/src#" + entityID
 		repositoryID = dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, scope, sourceID)
+	case "jira":
+		jiraProjectID = dbseed.JiraIssueProjectID(t, conn, runmode.LocalDefaultOrgID, scope, sourceID)
 	}
 	if _, err := conn.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, snapshot_json, scope, repository_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		entityID, source, sourceID, kind, snapshot, scope, repositoryID,
+		`INSERT INTO entities (id, source, source_id, kind, snapshot_json, scope, repository_id, jira_project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		entityID, source, sourceID, kind, snapshot, scope, repositoryID, jiraProjectID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

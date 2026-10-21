@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -42,11 +43,18 @@ type fakeJiraIssue struct {
 
 func (is *fakeJiraIssue) key() string { return is.Keys[len(is.Keys)-1] }
 
+// projectKey is the key of the project the issue is in now, which on this fake
+// is its current key's prefix: what real Jira answers in fields.project.
+func (is *fakeJiraIssue) projectKey() string {
+	key, _, _ := strings.Cut(is.key(), "-")
+	return key
+}
+
 func (is *fakeJiraIssue) json() map[string]any {
 	fields := map[string]any{
 		"summary": is.Summary,
 		"status":  map[string]string{"id": "st-" + is.Status, "name": is.Status},
-		"project": map[string]string{"id": is.ProjectID, "key": extractProject(is.key())},
+		"project": map[string]string{"id": is.ProjectID, "key": is.projectKey()},
 		"updated": is.Updated,
 	}
 	if is.Assignee != "" {
@@ -71,8 +79,9 @@ type fakeJira struct {
 }
 
 var (
-	jqlListRe    = regexp.MustCompile(`^(id|key) IN \((.*)\)$`)
-	jqlProjectRe = regexp.MustCompile(`^project = "([^"]+)"`)
+	jqlListRe      = regexp.MustCompile(`^(id|key) IN \((.*)\)$`)
+	jqlProjectRe   = regexp.MustCompile(`^project = "([^"]+)"`)
+	jqlProjectIDRe = regexp.MustCompile(`^project = (\d+)`)
 )
 
 func newFakeJira(t *testing.T, issues ...*fakeJiraIssue) *fakeJira {
@@ -133,8 +142,17 @@ func (f *fakeJira) matches(jql string, is *fakeJiraIssue) bool {
 		}
 		return false
 	}
-	if m := jqlProjectRe.FindStringSubmatch(jql); m != nil {
-		if extractProject(is.key()) != m[1] || is.Status == "Done" {
+	inProject := func() (bool, bool) {
+		if m := jqlProjectRe.FindStringSubmatch(jql); m != nil {
+			return is.projectKey() == m[1], true
+		}
+		if m := jqlProjectIDRe.FindStringSubmatch(jql); m != nil {
+			return is.ProjectID == m[1], true
+		}
+		return false, false
+	}
+	if in, discovery := inProject(); discovery {
+		if !in || is.Status == "Done" {
 			return false
 		}
 		if strings.Contains(jql, "currentUser()") {
@@ -185,7 +203,8 @@ func newJiraIdentityFixture(t *testing.T, issues ...*fakeJiraIssue) *jiraIdentit
 func (fx *jiraIdentityFixture) cycle(t *testing.T, site string, rules JiraRules) []domain.Event {
 	t.Helper()
 	pub := &recordingPublisher{}
-	tr := New(fx.db, pub, fx.stores.Tasks, fx.stores.Entities, fx.stores.Repos, fx.stores.Artifacts, fx.stores.EventQueue, runmode.LocalDefaultOrgID)
+	tr := New(fx.db, pub, fx.stores.Tasks, fx.stores.Entities, fx.stores.Repos, fx.stores.JiraProjects, fx.stores.Artifacts, fx.stores.EventQueue, runmode.LocalDefaultOrgID)
+	rules = registeredRules(t, fx.stores.JiraProjects, site, rules)
 	if _, err := tr.RefreshJira(context.Background(), site, fx.client, site, rules); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
@@ -226,14 +245,19 @@ func (fx *jiraIdentityFixture) countEntities(t *testing.T) int {
 	return n
 }
 
+// engAndOps is the rules for the fake's ENG and OPS projects, under the Jira
+// project ids its issues carry; cycle registers them before each pass.
 func engAndOps() JiraRules {
 	return JiraRules{
-		{Key: "ENG", PickupMembers: jiraRefs("To Do"), DoneMembers: jiraRefs("Done")},
-		{Key: "OPS", PickupMembers: jiraRefs("To Do"), DoneMembers: jiraRefs("Done")},
+		{Key: "ENG", ProjectID: "100", PickupMembers: jiraRefs("To Do"), DoneMembers: jiraRefs("Done")},
+		{Key: "OPS", ProjectID: "200", PickupMembers: jiraRefs("To Do"), DoneMembers: jiraRefs("Done")},
 	}
 }
 
 func engOnly() JiraRules { return engAndOps()[:1] }
+
+// fakeENG is the fake's ENG project as a Jira response names it.
+var fakeENG = domain.JiraProjectRef{ID: "100", Key: "ENG"}
 
 func decodeMeta[T any](t *testing.T, evt domain.Event) T {
 	t.Helper()
@@ -382,8 +406,12 @@ func TestRefreshJira_MoveIntoAnUnconfiguredProject(t *testing.T) {
 		t.Fatalf("events = %v, want key_changed then unreachable", got)
 	}
 	gone := decodeMeta[events.JiraIssueUnreachableMetadata](t, evts[1])
-	if gone.Reason != events.JiraUnreachableMoved || gone.Project != "ENG" || gone.IssueKey != "SEC-3" || gone.IssueID != "10002" {
-		t.Errorf("unreachable metadata = %+v, want moved, naming ENG", gone)
+	if gone.Reason != events.JiraUnreachableMoved || gone.Project != "ENG" || gone.JiraProjectID != before.JiraProjectID || gone.IssueKey != "SEC-3" || gone.IssueID != "10002" {
+		t.Errorf("unreachable metadata = %+v, want moved, naming ENG and its row %s", gone, before.JiraProjectID)
+	}
+	moved := decodeMeta[events.JiraIssueKeyChangedMetadata](t, evts[0])
+	if moved.OldJiraProjectID != before.JiraProjectID || moved.JiraProjectID == before.JiraProjectID || moved.JiraProjectID == "" {
+		t.Errorf("key_changed metadata = %+v, want it leaving row %s for SEC's own row", moved, before.JiraProjectID)
 	}
 	if e := fx.entity(t, jiraSite, "SEC-3"); e == nil || e.ID != before.ID {
 		t.Errorf("SEC-3 = %+v, want the entity renamed before it retires", e)
@@ -392,27 +420,48 @@ func TestRefreshJira_MoveIntoAnUnconfiguredProject(t *testing.T) {
 
 // TestRefreshJira_ProjectKeyRename: a project whose key is renamed keeps its
 // id, so every entity in it is renamed and kept — even when the rules still
-// name the old key — rather than read as a move.
+// name the old key — rather than read as a move. The issue that reaches Done
+// in the same cycle is judged by its project's rule, found by the registry row
+// the entity references rather than by its key, and every event names that
+// row, which the cycle re-keys to the project's new key.
 func TestRefreshJira_ProjectKeyRename(t *testing.T) {
 	a := &fakeJiraIssue{ID: "10011", Keys: []string{"ENG-11"}, ProjectID: "100", Status: "In Progress", Assignee: "Alice", Summary: "a", Updated: "2026-10-01T10:00:00.000+0000"}
 	b := &fakeJiraIssue{ID: "10012", Keys: []string{"ENG-12"}, ProjectID: "100", Status: "To Do", Summary: "b", Updated: "2026-10-01T10:00:00.000+0000"}
 	fx := newJiraIdentityFixture(t, a, b)
 	fx.cycle(t, jiraSite, engOnly())
+	row := fx.entity(t, jiraSite, "ENG-11").JiraProjectID
 
 	fx.jira.update(func() {
-		a.Keys, a.Updated = append(a.Keys, "CORE-11"), "2026-10-01T11:00:00.000+0000"
+		a.Keys, a.Status, a.Updated = append(a.Keys, "CORE-11"), "Done", "2026-10-01T11:00:00.000+0000"
 		b.Keys, b.Updated = append(b.Keys, "CORE-12"), "2026-10-01T11:00:00.000+0000"
 	})
 	evts := fx.cycle(t, jiraSite, engOnly())
-	if got := findEvents(evts, domain.EventJiraIssueKeyChanged); len(got) != 2 {
+	keyChanged := findEvents(evts, domain.EventJiraIssueKeyChanged)
+	if len(keyChanged) != 2 {
 		t.Fatalf("events = %v, want key_changed for both issues", eventTypes(evts))
+	}
+	for _, evt := range keyChanged {
+		meta := decodeMeta[events.JiraIssueKeyChangedMetadata](t, evt)
+		if meta.Project != "CORE" || meta.OldProject != "ENG" || meta.JiraProjectID != row || meta.OldJiraProjectID != row {
+			t.Errorf("key_changed metadata = %+v, want CORE after ENG, both on row %s", meta, row)
+		}
+	}
+	completed := findEvent(evts, domain.EventJiraIssueCompleted)
+	if completed == nil {
+		t.Fatalf("events = %v, want CORE-11's completion detected under its project's rule", eventTypes(evts))
+	}
+	if meta := decodeMeta[events.JiraIssueCompletedMetadata](t, *completed); meta.IssueKey != "CORE-11" || meta.Project != "CORE" || meta.JiraProjectID != row {
+		t.Errorf("completed metadata = %+v, want CORE-11 in CORE on row %s", meta, row)
+	}
+	if p, err := fx.stores.JiraProjects.GetSystem(context.Background(), runmode.LocalDefaultOrgID, row); err != nil || p == nil || p.Key != "CORE" {
+		t.Errorf("registry row after the cycle = %+v, %v; want it re-keyed to CORE from the issues' reads", p, err)
 	}
 	if slices.Contains(eventTypes(evts), domain.EventJiraIssueUnreachable) {
 		t.Fatalf("events = %v: a project key rename retired an entity", eventTypes(evts))
 	}
 	for _, key := range []string{"CORE-11", "CORE-12"} {
-		if e := fx.entity(t, jiraSite, key); e == nil || e.State != "active" {
-			t.Errorf("%s = %+v, want an active renamed entity", key, e)
+		if e := fx.entity(t, jiraSite, key); e == nil || e.State != "active" || e.JiraProjectID != row {
+			t.Errorf("%s = %+v, want an active renamed entity still on row %s", key, e, row)
 		}
 	}
 	if n := fx.countEntities(t); n != 2 {
@@ -464,7 +513,7 @@ func TestRefreshJira_SiteSwitch(t *testing.T) {
 	is := &fakeJiraIssue{ID: "10031", Keys: []string{"ENG-31"}, ProjectID: "100", Status: "In Progress", Assignee: "Alice", Summary: "New site", Updated: "2026-10-01T10:00:00.000+0000"}
 	fx := newJiraIdentityFixture(t, is)
 	const oldSite = "https://old.example.com"
-	old, _, err := fx.stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "jira", oldSite, "ENG-31", "10031", "issue", "Old site", oldSite+"/browse/ENG-31")
+	old, _, err := fx.stores.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, oldSite, "ENG-31", "10031", dbseed.JiraIssueProject("ENG-31"), "Old site", oldSite+"/browse/ENG-31")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -503,12 +552,15 @@ func TestRefreshJira_ProjectRecreatedUnderTheSameKey(t *testing.T) {
 	fx.cycle(t, jiraSite, engOnly())
 	old := fx.entity(t, jiraSite, "ENG-1")
 
+	// The team tracks the recreated project alongside the old one: a project
+	// is its Jira id, so the old rule does not cover the new project.
 	reborn := &fakeJiraIssue{ID: "20041", Keys: []string{"ENG-1"}, ProjectID: "900", Status: "In Progress", Assignee: "Alice", Summary: "New", Updated: "2026-10-02T10:00:00.000+0000"}
 	fx.jira.update(func() {
 		gone.Gone = true
 		fx.jira.issues = append(fx.jira.issues, reborn)
 	})
-	if evts := fx.cycle(t, jiraSite, engOnly()); slices.Contains(eventTypes(evts), domain.EventJiraIssueAssigned) {
+	both := append(engOnly(), JiraProjectRules{Key: "ENG", ProjectID: "900", PickupMembers: jiraRefs("To Do"), DoneMembers: jiraRefs("Done")})
+	if evts := fx.cycle(t, jiraSite, both); slices.Contains(eventTypes(evts), domain.EventJiraIssueAssigned) {
 		t.Fatalf("events = %v: the new issue took a key an active row still holds", eventTypes(evts))
 	}
 	if e := fx.entity(t, jiraSite, "ENG-1"); e == nil || e.ID != old.ID || e.ExternalID != "10041" {
@@ -519,7 +571,7 @@ func TestRefreshJira_ProjectRecreatedUnderTheSameKey(t *testing.T) {
 	if _, err := fx.db.Exec(`UPDATE entities SET last_polled_at = ? WHERE id = ?`, time.Now().Add(-2*jiraUnreachableGrace), old.ID); err != nil {
 		t.Fatal(err)
 	}
-	evts := fx.cycle(t, jiraSite, engOnly())
+	evts := fx.cycle(t, jiraSite, both)
 	unreachable := findEvent(evts, domain.EventJiraIssueUnreachable)
 	if unreachable == nil || decodeMeta[events.JiraIssueUnreachableMetadata](t, *unreachable).Reason != events.JiraUnreachableNotFound {
 		t.Fatalf("events = %v, want the old issue confirmed not_found", eventTypes(evts))
@@ -528,10 +580,10 @@ func TestRefreshJira_ProjectRecreatedUnderTheSameKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	evts = fx.cycle(t, jiraSite, engOnly())
+	evts = fx.cycle(t, jiraSite, both)
 	fresh := fx.entity(t, jiraSite, "ENG-1")
-	if fresh == nil || fresh.ID == old.ID || fresh.ExternalID != "20041" {
-		t.Fatalf("ENG-1 = %+v, want a new entity for the new issue", fresh)
+	if fresh == nil || fresh.ID == old.ID || fresh.ExternalID != "20041" || fresh.JiraProjectID == old.JiraProjectID {
+		t.Fatalf("ENG-1 = %+v, want a new entity for the new issue, in the recreated project", fresh)
 	}
 	if assigned := findEvent(evts, domain.EventJiraIssueAssigned); assigned == nil || *assigned.EntityID != fresh.ID {
 		t.Errorf("events = %v, want the new issue's assignment on its own entity", eventTypes(evts))
@@ -549,7 +601,7 @@ func TestRefreshJira_UpgradedRowsLearnTheirIDs(t *testing.T) {
 	// it, so only the refresh does.
 	is := &fakeJiraIssue{ID: "10051", Keys: []string{"ENG-51"}, ProjectID: "100", Status: "In Progress", Summary: "Legacy", Updated: "2026-10-01T10:00:00.000+0000"}
 	fx := newJiraIdentityFixture(t, is)
-	legacy, _, err := fx.stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "jira", jiraSite, "ENG-51", "", "issue", "Legacy", jiraSite+"/browse/ENG-51")
+	legacy, _, err := fx.stores.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, jiraSite, "ENG-51", "", fakeENG, "Legacy", jiraSite+"/browse/ENG-51")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -557,7 +609,7 @@ func TestRefreshJira_UpgradedRowsLearnTheirIDs(t *testing.T) {
 	if ok, err := fx.stores.Entities.UpdateSnapshotCASSystem(context.Background(), runmode.LocalDefaultOrgID, legacy.ID, string(snap), legacy.PollSeq); err != nil || !ok {
 		t.Fatalf("seed legacy snapshot: ok=%v err=%v", ok, err)
 	}
-	rules := JiraRules{{Key: "ENG", DoneMembers: jiraRefs("Done")}}
+	rules := JiraRules{{Key: "ENG", ProjectID: "100", DoneMembers: jiraRefs("Done")}}
 
 	if evts := fx.cycle(t, jiraSite, rules); len(evts) != 0 {
 		t.Fatalf("events = %v: a legacy snapshot was diffed as a first discovery", eventTypes(evts))
@@ -583,7 +635,7 @@ func TestRefreshJira_UpgradedRowsLearnTheirIDs(t *testing.T) {
 func TestRefreshJira_DiscoveryLearnsAClosedRowsID(t *testing.T) {
 	is := &fakeJiraIssue{ID: "10061", Keys: []string{"ENG-61"}, ProjectID: "100", Status: "To Do", Summary: "Back", Updated: "2026-10-01T10:00:00.000+0000"}
 	fx := newJiraIdentityFixture(t, is)
-	closed, _, err := fx.stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "jira", jiraSite, "ENG-61", "", "issue", "Back", "")
+	closed, _, err := fx.stores.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, jiraSite, "ENG-61", "", fakeENG, "Back", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -606,7 +658,7 @@ func TestRefreshJira_DiscoveryLearnsAClosedRowsID(t *testing.T) {
 func TestDiffJiraSnapshots_KeyChangedFirst(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "ENG-1", Status: "To Do", StatusID: "1"}
 	curr := domain.JiraSnapshot{ID: "10001", Key: "OPS-1", Status: "Done", StatusID: "3", Assignee: "Alice"}
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, jiraRefs("Done"), nil)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, JiraEventProjects{}, jiraRefs("Done"), nil)
 	got := eventTypes(evts)
 	if len(got) == 0 || got[0] != domain.EventJiraIssueKeyChanged {
 		t.Fatalf("events = %v, want key_changed first", got)
@@ -623,10 +675,56 @@ func TestDiffJiraSnapshots_KeyChangedFirst(t *testing.T) {
 			t.Errorf("%s metadata = %+v, want the current key and the issue id", evt.EventType, m)
 		}
 	}
-	if evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, nil, nil); len(evts) != 1 || evts[0].EventType != domain.EventJiraIssueAssigned {
+	if evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, JiraEventProjects{}, nil, nil); len(evts) != 1 || evts[0].EventType != domain.EventJiraIssueAssigned {
 		t.Errorf("zero prev = %v, want first discovery", eventTypes(evts))
 	}
-	if evts := DiffJiraSnapshots(domain.JiraSnapshot{Key: "OPS-1", Assignee: "Alice"}, curr, testEntityID, nil, nil); slices.Contains(eventTypes(evts), domain.EventJiraIssueAssigned) {
+	if evts := DiffJiraSnapshots(domain.JiraSnapshot{Key: "OPS-1", Assignee: "Alice"}, curr, testEntityID, JiraEventProjects{}, nil, nil); slices.Contains(eventTypes(evts), domain.EventJiraIssueAssigned) {
 		t.Errorf("legacy prev = %v, want it diffed rather than treated as first discovery", eventTypes(evts))
+	}
+}
+
+// TestRefreshJira_AnUnresolvedProjectRowIsNoMove: the SQLite migration puts an
+// issue whose snapshot named no project on a registry row guessed from its
+// key, unresolved against Jira. That row is no evidence of where the issue
+// was, so a read naming the issue's project is not a move: the tracker
+// resolves the row in place when no other row carries the project's id
+// (ENG-81, whose project no rule configures, is kept rather than retired as
+// moved), and otherwise moves the entity onto the row that does (OPS-82).
+func TestRefreshJira_AnUnresolvedProjectRowIsNoMove(t *testing.T) {
+	eng := &fakeJiraIssue{ID: "10081", Keys: []string{"ENG-81"}, ProjectID: "100", Status: "In Progress", Assignee: "Alice", Summary: "a", Updated: "2026-10-01T10:00:00.000+0000"}
+	ops := &fakeJiraIssue{ID: "10082", Keys: []string{"OPS-82"}, ProjectID: "200", Status: "In Progress", Assignee: "Alice", Summary: "b", Updated: "2026-10-01T10:00:00.000+0000"}
+	fx := newJiraIdentityFixture(t, eng, ops)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	unresolved := func(key string) *domain.Entity {
+		t.Helper()
+		e, _, err := fx.stores.Entities.FindOrCreateJiraSystem(ctx, org, jiraSite, key, "", domain.JiraProjectRef{ID: "unused-" + key, Key: "guess"}, "t", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fx.db.Exec(`UPDATE jira_projects SET external_id = NULL, project_key = ? WHERE id = ?`, strings.Split(key, "-")[0], e.JiraProjectID); err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+	engEntity := unresolved("ENG-81")
+	opsEntity := unresolved("OPS-82")
+	resolvedOPS := "jp-ops-resolved"
+	if _, err := fx.db.Exec(`INSERT INTO jira_projects (id, org_id, site, external_id, project_key) VALUES (?, ?, ?, '200', 'OPS')`, resolvedOPS, org, jiraSite); err != nil {
+		t.Fatal(err)
+	}
+
+	evts := fx.cycle(t, jiraSite, JiraRules{{Key: "OPS", ProjectID: "200", DoneMembers: jiraRefs("Done")}})
+	if slices.Contains(eventTypes(evts), domain.EventJiraIssueUnreachable) || slices.Contains(eventTypes(evts), domain.EventJiraIssueKeyChanged) {
+		t.Fatalf("events = %v: an unresolved project row was read as a move", eventTypes(evts))
+	}
+	if e := fx.entity(t, jiraSite, "ENG-81"); e == nil || e.State != "active" || e.JiraProjectID != engEntity.JiraProjectID {
+		t.Errorf("ENG-81 = %+v, want it active on its own row %s", e, engEntity.JiraProjectID)
+	}
+	if p, _ := fx.stores.JiraProjects.GetSystem(ctx, org, engEntity.JiraProjectID); p == nil || p.ExternalID != "100" || p.Key != "ENG" {
+		t.Errorf("ENG-81's row = %+v, want it resolved to project 100 in place", p)
+	}
+	if e := fx.entity(t, jiraSite, "OPS-82"); e == nil || e.State != "active" || e.JiraProjectID != resolvedOPS {
+		t.Errorf("OPS-82 = %+v (was on %s), want it moved onto the row carrying project 200", e, opsEntity.JiraProjectID)
 	}
 }

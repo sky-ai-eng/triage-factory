@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -109,7 +110,7 @@ func TestRefreshGitHub_EnrichesSnapshotlessStub(t *testing.T) {
 			}
 
 			pub := &recordingPublisher{}
-			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 			client := ghclient.NewClient(srv.URL, "tok")
 
 			// repos=nil → no discovery; the stub is reached only via Phase-2.
@@ -188,7 +189,7 @@ func TestRefreshJira_EnrichesSnapshotlessStub(t *testing.T) {
 			stores := sqlitestore.New(database)
 			org := runmode.LocalDefaultOrgID
 
-			stub, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "SKY-1", "", "issue", "", "")
+			stub, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "SKY-1", "", dbseed.JiraIssueProject("SKY-1"), "", "")
 			if err != nil {
 				t.Fatalf("seed stub: %v", err)
 			}
@@ -197,10 +198,10 @@ func TestRefreshJira_EnrichesSnapshotlessStub(t *testing.T) {
 			}
 
 			pub := &recordingPublisher{}
-			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 			client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 
-			if _, err := tr.RefreshJira(context.Background(), "https://jira.example.com", client, srv.URL, tc.projects); err != nil {
+			if _, err := tr.RefreshJira(context.Background(), "https://jira.example.com", client, srv.URL, registeredRules(t, stores.JiraProjects, "https://jira.example.com", tc.projects)); err != nil {
 				t.Fatalf("RefreshJira: %v", err)
 			}
 
@@ -277,7 +278,7 @@ func TestRefreshGitHub_StubExitsSeedModeAndDiffsNextCycle(t *testing.T) {
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	// Cycle 1: quiet seed — no events, and the snapshot now carries the node_id.

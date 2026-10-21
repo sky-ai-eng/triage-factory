@@ -74,13 +74,16 @@ func (s *jiraStatusRulesStore) ListForOrgSystem(ctx context.Context, orgID, site
 	return scanJiraStatusRules(rows, err)
 }
 
-func (s *jiraStatusRulesStore) TracksProjectSystem(ctx context.Context, teamID, site, projectKey string) (bool, error) {
+// TracksJiraProjectSystem compares the id as text, so an id that is not a uuid
+// (metadata is external input to this read) answers false rather than failing
+// the cast.
+func (s *jiraStatusRulesStore) TracksJiraProjectSystem(ctx context.Context, teamID, site, jiraProjectID string) (bool, error) {
 	var n int
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT 1 `+jiraRuleFrom+`
-		  AND r.team_id = $2 AND p.project_key = $3
+		  AND r.team_id = $2 AND r.jira_project_id::text = $3
 		LIMIT 1
-	`, site, teamID, projectKey).Scan(&n)
+	`, site, teamID, jiraProjectID).Scan(&n)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil

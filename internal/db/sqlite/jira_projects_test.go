@@ -28,6 +28,7 @@ func TestJiraProjectStore_SQLite(t *testing.T) {
 			Projects:    stores.JiraProjects,
 			Rules:       stores.JiraStatusRules,
 			Teams:       stores.Teams,
+			Entities:    stores.Entities,
 			OrgID:       runmode.LocalDefaultOrgID,
 			TeamID:      runmode.LocalDefaultTeamID,
 			OtherTeamID: otherTeamID,
@@ -39,6 +40,17 @@ func TestJiraProjectStore_SQLite(t *testing.T) {
 					id, runmode.LocalDefaultOrgID, site, key,
 				); err != nil {
 					t.Fatalf("seed unresolved jira project: %v", err)
+				}
+				return id
+			},
+			SeedIssue: func(t *testing.T, site, key, jiraProjectID string) string {
+				t.Helper()
+				id := uuid.NewString()
+				if _, err := conn.Exec(
+					`INSERT INTO entities (id, source, scope, source_id, kind, jira_project_id) VALUES (?, 'jira', ?, ?, 'issue', ?)`,
+					id, site, key, jiraProjectID,
+				); err != nil {
+					t.Fatalf("seed jira issue: %v", err)
 				}
 				return id
 			},

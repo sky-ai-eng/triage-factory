@@ -8,7 +8,9 @@ import (
 )
 
 // lookupJiraRuleForTask resolves the per-team Jira status rule that
-// governs the given task's source project on site (the org's Jira site).
+// governs the given task's source project on site (the org's Jira site): the
+// rule for the registry row the task's entity references
+// (entities.jira_project_id), which a project key rename does not move.
 // Reads task.TeamID directly — not the org's default team — so multi-team
 // orgs route each task to the right rule set. Returns nil when the task is
 // not Jira-backed, has no TeamID stamped, or the team has no rule
@@ -17,11 +19,16 @@ import (
 // Runs inside the caller's WithTx so the rule lookup goes through
 // the app-pool ListForTeam (jira_rules_select RLS gates by team
 // membership) — keeps request-handler reads RLS-consistent.
-//
-// TODO(TFAC-1130): resolve the rule by the entity's jira_project_id instead of
-// the issue key's prefix.
-func lookupJiraRuleForTask(ctx context.Context, tx db.TxStores, site string, task *domain.Task) *domain.JiraProjectStatusRules {
+func lookupJiraRuleForTask(ctx context.Context, tx db.TxStores, orgID, site string, task *domain.Task) *domain.JiraProjectStatusRules {
 	if task == nil || task.EntitySource != "jira" || task.TeamID == nil || *task.TeamID == "" {
+		return nil
+	}
+	entity, err := tx.Entities.Get(ctx, orgID, task.EntityID)
+	if err != nil {
+		jiraRuleLog.Warn("read entity for rule lookup failed", "entity", task.EntityID, "error", err)
+		return nil
+	}
+	if entity == nil || entity.JiraProjectID == "" {
 		return nil
 	}
 	rules, err := tx.JiraStatusRules.ListForTeam(ctx, *task.TeamID, site)
@@ -29,5 +36,5 @@ func lookupJiraRuleForTask(ctx context.Context, tx db.TxStores, site string, tas
 		jiraRuleLog.Warn("list rules for team failed", "team", *task.TeamID, "error", err)
 		return nil
 	}
-	return domain.RuleForProject(rules, projectFromKey(task.EntitySourceID))
+	return domain.RuleForJiraProject(rules, entity.JiraProjectID)
 }

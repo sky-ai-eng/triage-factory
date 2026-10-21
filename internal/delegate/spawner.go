@@ -155,6 +155,10 @@ type Spawner struct {
 	// like s.orgs; nil-safe (a partial test Stores yields no URL, and the
 	// rehydrate degrades to the bare-must-already-exist path).
 	repos db.RepositoryStore
+	// jiraProjects reads the Jira project registry under the admin pool
+	// (GetSystem), for a Jira task's project key (taskJiraProject). A plain
+	// store ref like s.repos; nil-safe.
+	jiraProjects db.JiraProjectStore
 	// teams reads per-team settings under the admin pool (GetSettingsSystem)
 	// at spawn time — currently the TFAC-392 presence-gated absent-auto-deny
 	// knobs (grace window + on/off toggle). Resolved once per run when the
@@ -612,6 +616,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		jiraRules:             stores.JiraStatusRules,
 		externalActions:       stores.ExternalActions,
 		repos:                 stores.Repos,
+		jiraProjects:          stores.JiraProjects,
 		teams:                 stores.Teams,
 		instances:             stores.Instances,
 		workspaceSnapshots:    stores.WorkspaceSnapshots,
@@ -1340,6 +1345,33 @@ func (s *Spawner) taskRepository(ctx context.Context, orgID string, task domain.
 		return nil, fmt.Errorf("resolve the task's repository: no repository row %s", entity.RepositoryID)
 	}
 	return row, nil
+}
+
+// taskJiraProject is a Jira task's project key: the key of the registry row
+// its entity references (entities.jira_project_id), which the poll keeps on
+// the key Jira spells the project with now. "" for a task of any other source,
+// and when the row cannot be read: the key is a line of the task context, and
+// a run without it still works, so a failed read is logged rather than
+// failing the run.
+func (s *Spawner) taskJiraProject(ctx context.Context, orgID string, task domain.Task) string {
+	if task.EntitySource != "jira" || s.entities == nil || s.jiraProjects == nil {
+		return ""
+	}
+	entity, err := s.entities.GetSystem(ctx, orgID, task.EntityID)
+	if err != nil || entity == nil || entity.JiraProjectID == "" {
+		if err != nil {
+			delegateLog.Warn("read the task's entity for its jira project failed", "entity", task.EntityID, "error", err)
+		}
+		return ""
+	}
+	project, err := s.jiraProjects.GetSystem(ctx, orgID, entity.JiraProjectID)
+	if err != nil || project == nil {
+		if err != nil {
+			delegateLog.Warn("read the task's jira project failed", "jira_project_id", entity.JiraProjectID, "error", err)
+		}
+		return ""
+	}
+	return project.Key
 }
 
 // taskOwnerRepo is taskRepository's owner/repo, the pair the credential

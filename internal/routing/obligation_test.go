@@ -9,6 +9,7 @@ import (
 	"time"
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -449,8 +450,7 @@ func TestFireMatchedTriggers_OneTriggerFails_SiblingsStillCommit(t *testing.T) {
 	seedImmediateTrigger(t, database, teamA, domain.EventJiraIssueAvailable, "oblig-a")
 	seedImmediateTrigger(t, database, teamB, domain.EventJiraIssueAvailable, "oblig-b")
 
-	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID,
-		"jira", "https://jira.example.com", "SKY-oblig", "", "issue", "Obligation", "https://example.com/oblig")
+	entity, _, err := stores.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", "SKY-oblig", "", dbseed.JiraIssueProject("SKY-oblig"), "Obligation", "https://example.com/oblig")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}

@@ -176,6 +176,13 @@ type Entity struct {
 	// does. The store resolves it from SourceID when it creates the row, and a
 	// repository rename leaves it alone while rewriting SourceID.
 	RepositoryID string `json:"repository_id,omitempty"`
+	// JiraProjectID is the registry row (JiraProject.ID) of the Jira project a
+	// Jira issue sits in, on the issue's own site. Every Jira row carries it
+	// and no other row does. It is set at creation from the response that
+	// found the issue and moved by every snapshot write to the row of the
+	// snapshot's project, so it follows a move; a project key rename moves
+	// nothing, and clearing the snapshot leaves it.
+	JiraProjectID string `json:"jira_project_id,omitempty"`
 	// Kind is "pr" | "issue" | "epic" for the poller-backed sources. For
 	// Slack, kind encodes thread engagement: "thread" when the bot is why
 	// the thread exists (its root message was a mention, or a conversation posted
@@ -200,4 +207,14 @@ type Entity struct {
 	// transition. Populated on every read; callers thread it straight back
 	// into their next CAS call.
 	PollSeq int64 `json:"poll_seq"`
+}
+
+// EntityContainer is what a provider's response says an object sits in, which
+// TF creates the object's entity with when it has none: the Linear team of a
+// Linear issue, the project of a Jira issue. The zero value is right for an
+// object of any other provider, and for a response that named neither: an
+// entity of a source that needs one is then found, never created.
+type EntityContainer struct {
+	LinearTeamID string         `json:"linear_team_id,omitempty"`
+	JiraProject  JiraProjectRef `json:"jira_project,omitzero"`
 }

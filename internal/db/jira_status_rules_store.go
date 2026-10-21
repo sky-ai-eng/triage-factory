@@ -19,8 +19,9 @@ import (
 // A row references its project by the jira_projects registry row's id, so a
 // project key rename changes nothing here. Every read joins the registry and
 // hands back the project's key as the registry holds it now
-// (domain.JiraProjectStatusRules.ProjectKey), which is how a reader that looks
-// a rule up by key still finds it after a rename.
+// (domain.JiraProjectStatusRules.ProjectKey), for display; a reader finds an
+// issue's rule by the row its entity references
+// (domain.RuleForJiraProject).
 //
 // # Site
 //
@@ -40,7 +41,7 @@ import (
 //     jira_rules_delete RLS policies gate reads by team membership
 //     and writes by team admin; the request-handler caller has set
 //     the JWT claims via the TxRunner.
-//   - ListForTeamSystem, ListForOrgSystem, TracksProjectSystem run on
+//   - ListForTeamSystem, ListForOrgSystem, TracksJiraProjectSystem run on
 //     the admin pool. The poller manager / scorer / router gate read
 //     rules at boot/poll-tick without a JWT-claims context.
 //
@@ -73,12 +74,13 @@ type JiraStatusRulesStore interface {
 	// Admin pool in Postgres: the union spans teams.
 	ListForOrgSystem(ctx context.Context, orgID, site string) ([]domain.JiraProjectStatusRules, error)
 
-	// TracksProjectSystem reports whether the team has a rule for the project
-	// whose key on site is projectKey, matched against the registry's current
-	// key. This is the router team↔project gate lookup. Admin pool in
-	// Postgres: the router goroutine has no JWT claims. Mirrors
-	// TeamGitHubReposStore.TracksRepoSystem.
-	TracksProjectSystem(ctx context.Context, teamID, site, projectKey string) (bool, error)
+	// TracksJiraProjectSystem reports whether the team has a rule for the
+	// jira_projects row jiraProjectID, and that row is on site. This is the
+	// router team↔project gate lookup, keyed by the row id an event's
+	// metadata carries, so a project key rename cannot make it miss. Admin
+	// pool in Postgres: the router goroutine has no JWT claims. Mirrors
+	// TeamGitHubReposStore.TracksRepositorySystem.
+	TracksJiraProjectSystem(ctx context.Context, teamID, site, jiraProjectID string) (bool, error)
 
 	// ReplaceForTeam makes rules the team's whole set on site in one
 	// transaction: each entry is upserted under its JiraProjectID, and the

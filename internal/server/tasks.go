@@ -1598,7 +1598,7 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 		if e != nil {
 			return fmt.Errorf("load org settings: %w", e)
 		}
-		rule = lookupJiraRuleForTask(ctx, tx, domain.EntityScope("jira", orgSet), task)
+		rule = lookupJiraRuleForTask(ctx, tx, orgID, domain.EntityScope("jira", orgSet), task)
 		accountID, _, e = tx.Users.GetJiraIdentity(ctx, userID, orgSet.JiraBaseURL)
 		return e
 	}); err != nil {

@@ -916,6 +916,17 @@ type JiraProject struct {
 	Name       string
 }
 
+// JiraProjectRef is a Jira project as one Jira response names it: Jira's
+// project id, and the key and name the project had in that response. A Jira
+// issue's entity is created with the project its issue sits in
+// (db.EntityStore.FindOrCreateJiraSystem), which registers the project when
+// the registry has no row for it on the issue's site.
+type JiraProjectRef struct {
+	ID   string `json:"id"`
+	Key  string `json:"key"`
+	Name string `json:"name,omitempty"`
+}
+
 // JiraProjectStatusRules is one row of jira_project_status_rules —
 // the team's status configuration for a single Jira project. Multiple
 // rows per team (keyed `(team_id, jira_project_id)`) so two projects on
@@ -932,12 +943,12 @@ type JiraProjectStatusRules struct {
 	// break canonical ties by lowest team_id) and the router's team↔project
 	// gate (to look up the handler's team).
 	TeamID string
-	// JiraProjectID is the jira_projects row the rule is about, and the only
-	// project field ReplaceForTeam stores. ProjectKey, ProjectName and
-	// ProjectExternalID are that row's display values and Jira project id as
-	// the List* methods read them through the registry, so a lookup by key
-	// finds the rule under the project's key as Jira spells it today.
-	// ProjectExternalID is empty while the row is unresolved.
+	// JiraProjectID is the jira_projects row the rule is about, the only
+	// project field ReplaceForTeam stores, and what an issue's rule is found
+	// by (RuleForJiraProject, against the entity's JiraProjectID).
+	// ProjectKey, ProjectName and ProjectExternalID are that row's display
+	// values and Jira project id as the List* methods read them through the
+	// registry. ProjectExternalID is empty while the row is unresolved.
 	JiraProjectID     string
 	ProjectKey        string
 	ProjectName       string
@@ -1225,13 +1236,17 @@ func ContainsStatus(refs []JiraStatusRef, status JiraStatusRef) bool {
 	return containsStatus(refs, status)
 }
 
-// RuleForProject returns the per-project rule for the given key, or
-// nil when no rule with that key is in the slice. Callers degrade
+// RuleForJiraProject returns the rule for the jira_projects registry row
+// jiraProjectID, or nil when no rule in the slice is about it. Callers degrade
 // gracefully on nil ("no rules configured" — no terminal check, no
-// transitions).
-func RuleForProject(rules []JiraProjectStatusRules, key string) *JiraProjectStatusRules {
+// transitions). An issue's row is its entity's JiraProjectID, so a project key
+// rename, which moves no reference, cannot make the lookup miss.
+func RuleForJiraProject(rules []JiraProjectStatusRules, jiraProjectID string) *JiraProjectStatusRules {
+	if jiraProjectID == "" {
+		return nil
+	}
 	for i := range rules {
-		if rules[i].ProjectKey == key {
+		if rules[i].JiraProjectID == jiraProjectID {
 			return &rules[i]
 		}
 	}

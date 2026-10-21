@@ -401,8 +401,7 @@ func TestRunJiraMirror_UsesTheEntitysCurrentKey(t *testing.T) {
 	if _, err := stores.Orgs.SetSourceBaseURL(context.Background(), runmode.LocalDefaultOrgID, "jira", site); err != nil {
 		t.Fatalf("set jira site: %v", err)
 	}
-	e, _, err := stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID,
-		"jira", site, "OPS-7", "10007", "issue", "Moved", site+"/browse/OPS-7")
+	e, _, err := stores.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, site, "OPS-7", "10007", dbseed.JiraIssueProject("OPS-7"), "Moved", site+"/browse/OPS-7")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -454,8 +453,7 @@ func TestRunJiraMirror_SkipsAnIssueOnAnotherSite(t *testing.T) {
 	if _, err := stores.Orgs.SetSourceBaseURL(ctx, runmode.LocalDefaultOrgID, "jira", "https://new.example.com"); err != nil {
 		t.Fatalf("set jira site: %v", err)
 	}
-	e, _, err := stores.Entities.FindOrCreateSystem(ctx, runmode.LocalDefaultOrgID,
-		"jira", "https://old.example.com", "OPS-7", "10007", "issue", "Old", "")
+	e, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, "https://old.example.com", "OPS-7", "10007", dbseed.JiraIssueProject("OPS-7"), "Old", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -579,24 +577,59 @@ func seedJiraMirrorRule(t *testing.T, database *sql.DB) {
 }
 
 // TestLookupJiraRuleForTaskSystem: a Jira task stamped with a team resolves
-// its project's rule; a task from another source, one with no team, and one
-// whose project has no rule resolve none.
+// the rule of the project its entity references, and still does after the
+// project's key is renamed; a task from another source, one with no team, and
+// one whose project has no rule resolve none.
 func TestLookupJiraRuleForTaskSystem(t *testing.T) {
+	ctx := context.Background()
 	database := newDelegateTestDB(t)
 	seedJiraMirrorRule(t, database) // only SKY configured
-	rules := sqlitestore.New(database).JiraStatusRules
+	stores := sqlitestore.New(database)
 	team := runmode.LocalDefaultTeamID
+	issue := func(key string) *domain.Task {
+		t.Helper()
+		e, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, jiraMirrorSite, key, "", dbseed.JiraIssueProject(key), "t", "")
+		if err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+		return &domain.Task{EntityID: e.ID, EntitySource: "jira", EntitySourceID: key, TeamID: &team}
+	}
+	lookup := func(task *domain.Task) *domain.JiraProjectStatusRules {
+		return lookupJiraRuleForTaskSystem(ctx, stores.Entities, stores.JiraStatusRules, runmode.LocalDefaultOrgID, jiraMirrorSite, task)
+	}
 
-	rule := lookupJiraRuleForTaskSystem(context.Background(), rules, jiraMirrorSite, &domain.Task{EntitySource: "jira", EntitySourceID: "SKY-123", TeamID: &team})
+	sky := issue("SKY-123")
+	rule := lookup(sky)
 	if rule == nil || rule.InProgressCanonical.Name != "In Progress" || rule.DoneCanonical.Name != "Done" {
 		t.Errorf("SKY task rule = %+v, want the SKY rule's InProgress/Done canonicals", rule)
 	}
+
+	// The project's key is renamed: the registry row is re-keyed and the
+	// issue renamed, and nothing about the issue spells SKY any more.
+	project, err := stores.Entities.GetSystem(ctx, runmode.LocalDefaultOrgID, sky.EntityID)
+	if err != nil || project == nil {
+		t.Fatalf("read SKY-123: %v", err)
+	}
+	if _, err := stores.JiraProjects.RefreshSystem(ctx, runmode.LocalDefaultOrgID, project.JiraProjectID, "id-SKY", "CORE", "Core"); err != nil {
+		t.Fatalf("rename the project: %v", err)
+	}
+	if _, err := stores.Entities.StampExternalIDSystem(ctx, runmode.LocalDefaultOrgID, sky.EntityID, "10123"); err != nil {
+		t.Fatalf("stamp the issue id: %v", err)
+	}
+	if _, err := stores.Entities.RenameSystem(ctx, runmode.LocalDefaultOrgID, "jira", jiraMirrorSite, "10123", "CORE-123", ""); err != nil {
+		t.Fatalf("rename the issue: %v", err)
+	}
+	sky.EntitySourceID = "CORE-123"
+	if rule := lookup(sky); rule == nil || rule.ProjectKey != "CORE" || rule.DoneCanonical.Name != "Done" {
+		t.Errorf("rule after the project's key rename = %+v, want the same rule under CORE", rule)
+	}
+
 	for name, task := range map[string]*domain.Task{
 		"github task":     {EntitySource: "github", EntitySourceID: "owner/repo#1", TeamID: &team},
-		"no team":         {EntitySource: "jira", EntitySourceID: "SKY-123"},
-		"unruled project": {EntitySource: "jira", EntitySourceID: "OTHER-9", TeamID: &team},
+		"no team":         {EntityID: sky.EntityID, EntitySource: "jira", EntitySourceID: "CORE-123"},
+		"unruled project": issue("OTHER-9"),
 	} {
-		if rule := lookupJiraRuleForTaskSystem(context.Background(), rules, jiraMirrorSite, task); rule != nil {
+		if rule := lookup(task); rule != nil {
 			t.Errorf("%s: rule = %+v, want nil", name, rule)
 		}
 	}
@@ -762,7 +795,7 @@ func delegatableJiraFixture(t *testing.T, database *sql.DB, suffix string) (doma
 	org := runmode.LocalDefaultOrgID
 	stores := sqlitestore.New(database)
 
-	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "SKY-"+suffix, "", "issue", "T", "https://x/"+suffix)
+	entity, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "SKY-"+suffix, "", dbseed.JiraIssueProject("SKY-"+suffix), "T", "https://x/"+suffix)
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}
@@ -966,5 +999,33 @@ func TestKeyedMutex_SerializesConcurrentHoldersOfOneKey(t *testing.T) {
 	wg.Wait()
 	if guarded < 16 {
 		t.Errorf("critical section entered %d times, want at least the 16 blocking acquisitions", guarded)
+	}
+}
+
+// TestTaskJiraProject_FollowsAProjectKeyRename: a Jira task's context names its
+// project by the key of the registry row its entity references, so after the
+// project's key is renamed it shows the new key, never one read off the issue
+// key.
+func TestTaskJiraProject_FollowsAProjectKeyRename(t *testing.T) {
+	ctx := context.Background()
+	database := newDelegateTestDB(t)
+	stores := sqlitestore.New(database)
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	e, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, jiraMirrorSite, "SKY-5", "10005", dbseed.JiraIssueProject("SKY-5"), "t", "")
+	if err != nil {
+		t.Fatalf("seed SKY-5: %v", err)
+	}
+	task := domain.Task{EntityID: e.ID, EntitySource: "jira", EntitySourceID: "SKY-5"}
+	if got := s.taskJiraProject(ctx, runmode.LocalDefaultOrgID, task); got != "SKY" {
+		t.Fatalf("project before the rename = %q, want SKY", got)
+	}
+	if _, err := stores.JiraProjects.RefreshSystem(ctx, runmode.LocalDefaultOrgID, e.JiraProjectID, "id-SKY", "CORE", "Core"); err != nil {
+		t.Fatalf("rename the project: %v", err)
+	}
+	if got := s.taskJiraProject(ctx, runmode.LocalDefaultOrgID, task); got != "CORE" {
+		t.Errorf("project after the rename = %q, want CORE", got)
+	}
+	if got := s.taskJiraProject(ctx, runmode.LocalDefaultOrgID, domain.Task{EntitySource: "github", EntitySourceID: "o/r#1"}); got != "" {
+		t.Errorf("project of a GitHub task = %q, want none", got)
 	}
 }

@@ -95,25 +95,25 @@ type Runtime interface {
 	TransitionReviewState(ctx context.Context, artifactID, from, to, externalID, url, detailsJSON string) (bool, error)
 	// Record is the void, best-effort external-write funnel (RecordExternalWrite):
 	// a recording failure is logged host-side and never fails the agent's
-	// already-applied action, so it needs no error return. linearTeamID is the
-	// Linear team of the issue a Linear write touched, read off the response
-	// the verb acted on, and "" for every other write: the write's touch
-	// creates the issue's entity when TF has none, and a Linear entity is
-	// created with its team.
-	Record(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction, linearTeamID string)
+	// already-applied action, so it needs no error return. container is what
+	// the response the verb acted on says the touched issue sits in — a Linear
+	// issue's team, a Jira issue's project — and zero for every other write:
+	// the write's touch creates the issue's entity when TF has none, and a
+	// Linear or Jira entity is created only with its container.
+	Record(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction, container domain.EntityContainer)
 
 	// RecordReadTouch persists a durable conversation→entity touch for an addressed read
 	// (a verb targeting one entity by id/key/ts): it resolves-or-creates the
 	// entity for (provider, target, url) and records a role='touched' row.
 	// externalID is the provider id the read's response named, for a provider
 	// whose entities are identified by one (a Jira issue's id), and "" for the
-	// rest; a Jira read with none touches nothing. linearTeamID is the Linear
-	// team the response named, for a Linear read, and "" for the rest, as on
-	// Record. Void and best-effort like Record — a read never fails on its
+	// rest; a Jira read with none touches nothing. container is what the
+	// response says the issue sits in, for a Linear or Jira read, and zero for
+	// the rest, as on Record. Void and best-effort like Record — a read never fails on its
 	// touch — and, like Record, relayed to the orchestrator on the sidecar so
 	// the write lands where the stores live. Set-returning reads never call it
 	// (the touched-entity rule: addressed → touch, returned-in-a-set → never).
-	RecordReadTouch(ctx context.Context, provider, target, externalID, linearTeamID, url string)
+	RecordReadTouch(ctx context.Context, provider, target, externalID string, container domain.EntityContainer, url string)
 
 	// MemoryLoad resolves the entity for (source, sourceID) — by externalID,
 	// the provider id the entity is identified by, when the caller resolved
@@ -187,8 +187,8 @@ type ExtensionRuntime interface {
 	Relay(ctx context.Context, namespace, op string, args, out any) error
 	RelayNotify(ctx context.Context, namespace, op string, args any)
 	ProviderCredential(ctx context.Context, namespace string) (json.RawMessage, error)
-	Record(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction, linearTeamID string)
-	RecordReadTouch(ctx context.Context, provider, target, externalID, linearTeamID, url string)
+	Record(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction, container domain.EntityContainer)
+	RecordReadTouch(ctx context.Context, provider, target, externalID string, container domain.EntityContainer, url string)
 }
 
 // Core DB op names — the verb-trace reads/writes served under the "core"
@@ -307,9 +307,9 @@ type orgJiraBaseResult struct {
 }
 
 type recordExternalWriteArgs struct {
-	Artifact     *domain.Artifact       `json:"artifact,omitempty"`
-	Action       *domain.ExternalAction `json:"action,omitempty"`
-	LinearTeamID string                 `json:"linear_team_id,omitempty"`
+	Artifact *domain.Artifact       `json:"artifact,omitempty"`
+	Action   *domain.ExternalAction `json:"action,omitempty"`
+	domain.EntityContainer
 }
 
 // recordReadTouchArgs is the record_read_touch op's payload — the addressed
@@ -319,11 +319,11 @@ type recordExternalWriteArgs struct {
 // read off a response by the daemon's own verbs, never named by the jailed
 // CLI.
 type recordReadTouchArgs struct {
-	Provider     string `json:"provider"`
-	Target       string `json:"target"`
-	ExternalID   string `json:"external_id,omitempty"`
-	LinearTeamID string `json:"linear_team_id,omitempty"`
-	URL          string `json:"url,omitempty"`
+	Provider   string `json:"provider"`
+	Target     string `json:"target"`
+	ExternalID string `json:"external_id,omitempty"`
+	URL        string `json:"url,omitempty"`
+	domain.EntityContainer
 }
 
 // --- directRuntime: the in-process impl over db.Stores ---
@@ -703,12 +703,12 @@ func (r *directRuntime) TransitionReviewState(ctx context.Context, artifactID, f
 	return moved, err
 }
 
-func (r *directRuntime) Record(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction, linearTeamID string) {
-	recordExternalWrite(ctx, r.stores, r.info, a, act, linearTeamID)
+func (r *directRuntime) Record(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction, container domain.EntityContainer) {
+	recordExternalWrite(ctx, r.stores, r.info, a, act, container)
 }
 
-func (r *directRuntime) RecordReadTouch(ctx context.Context, provider, target, externalID, linearTeamID, url string) {
-	recordEntityTouch(ctx, r.stores, r.info, entityCoordinate{provider: provider, target: target, externalID: externalID, linearTeamID: linearTeamID, url: url})
+func (r *directRuntime) RecordReadTouch(ctx context.Context, provider, target, externalID string, container domain.EntityContainer, url string) {
+	recordEntityTouch(ctx, r.stores, r.info, entityCoordinate{provider: provider, target: target, externalID: externalID, container: container, url: url})
 }
 
 func (r *directRuntime) MemoryLoad(ctx context.Context, source, sourceID, externalID string, limit int) (*MemoryLoadResult, error) {
@@ -951,18 +951,18 @@ func (r *relayRuntime) TransitionReviewState(ctx context.Context, artifactID, fr
 	return res.Moved, nil
 }
 
-func (r *relayRuntime) Record(_ context.Context, a *domain.Artifact, act *domain.ExternalAction, linearTeamID string) {
+func (r *relayRuntime) Record(_ context.Context, a *domain.Artifact, act *domain.ExternalAction, container domain.EntityContainer) {
 	// Queued, not awaited: the external write already landed upstream, so the
 	// audit record must never block the op that follows it (mirrors the void
 	// RecordExternalWrite). The run's record sender delivers it in order and
 	// resends it until the orchestrator has applied it.
-	r.conn.record(agentproc.RelayNamespaceCore, opRecordExternalWrite, recordExternalWriteArgs{Artifact: a, Action: act, LinearTeamID: linearTeamID})
+	r.conn.record(agentproc.RelayNamespaceCore, opRecordExternalWrite, recordExternalWriteArgs{Artifact: a, Action: act, EntityContainer: container})
 }
 
-func (r *relayRuntime) RecordReadTouch(_ context.Context, provider, target, externalID, linearTeamID, url string) {
+func (r *relayRuntime) RecordReadTouch(_ context.Context, provider, target, externalID string, container domain.EntityContainer, url string) {
 	// Queued, mirroring Record: the read already returned, so the touch must
 	// never block it.
-	r.conn.record(agentproc.RelayNamespaceCore, opRecordReadTouch, recordReadTouchArgs{Provider: provider, Target: target, ExternalID: externalID, LinearTeamID: linearTeamID, URL: url})
+	r.conn.record(agentproc.RelayNamespaceCore, opRecordReadTouch, recordReadTouchArgs{Provider: provider, Target: target, ExternalID: externalID, URL: url, EntityContainer: container})
 }
 
 // MemoryLoad relays as a call (not a record): unlike the queued touch, the

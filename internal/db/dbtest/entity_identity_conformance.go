@@ -27,7 +27,9 @@ type EntityKeyFactory func(t *testing.T) (store db.EntityStore, orgID string)
 //   - a create with no scope is refused, and a read with none matches nothing.
 //
 // Every subtest uses keys of its own, so a backend may hand the same store to
-// all of them (one claims transaction for the whole suite).
+// all of them (one claims transaction for the whole suite). The rows are
+// GitHub rows, the one source this door creates rows of without a container
+// the caller has to supply (a GitHub row's repository comes from its key).
 func RunEntityKeyConformance(t *testing.T, mk EntityKeyFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -35,25 +37,25 @@ func RunEntityKeyConformance(t *testing.T, mk EntityKeyFactory) {
 
 	t.Run("key_lookup_prefers_active_then_most_recently_closed", func(t *testing.T) {
 		s, orgID := mk(t)
-		first, _, err := s.FindOrCreate(ctx, orgID, "jira", scope, "KEY-1", "uuid-k1-a", "issue", "first", "")
+		first, _, err := s.FindOrCreate(ctx, orgID, "github", scope, "acme/key#1", "uuid-k1-a", "pr", "first", "")
 		if err != nil {
 			t.Fatalf("create first: %v", err)
 		}
 		if _, err := s.MarkClosed(ctx, orgID, first.ID); err != nil {
 			t.Fatalf("close first: %v", err)
 		}
-		second, created, err := s.FindOrCreate(ctx, orgID, "jira", scope, "KEY-1", "uuid-k1-b", "issue", "second", "")
+		second, created, err := s.FindOrCreate(ctx, orgID, "github", scope, "acme/key#1", "uuid-k1-b", "pr", "second", "")
 		if err != nil || !created {
 			t.Fatalf("create second under the closed key: created=%v err=%v, want a new row", created, err)
 		}
-		got, err := s.GetBySource(ctx, orgID, "jira", scope, "KEY-1")
+		got, err := s.GetBySource(ctx, orgID, "github", scope, "acme/key#1")
 		if err != nil || got == nil || got.ID != second.ID {
 			t.Fatalf("GetBySource = %+v err=%v, want the active row %s", got, err, second.ID)
 		}
 		if _, err := s.MarkClosed(ctx, orgID, second.ID); err != nil {
 			t.Fatalf("close second: %v", err)
 		}
-		got, err = s.GetBySource(ctx, orgID, "jira", scope, "KEY-1")
+		got, err = s.GetBySource(ctx, orgID, "github", scope, "acme/key#1")
 		if err != nil || got == nil || got.ID != second.ID {
 			t.Errorf("GetBySource with both closed = %+v err=%v, want the most recently closed %s", got, err, second.ID)
 		}
@@ -61,17 +63,17 @@ func RunEntityKeyConformance(t *testing.T, mk EntityKeyFactory) {
 
 	t.Run("an_active_key_refuses_a_different_object", func(t *testing.T) {
 		s, orgID := mk(t)
-		holder, _, err := s.FindOrCreate(ctx, orgID, "jira", scope, "KEY-2", "uuid-k2-a", "issue", "holder", "")
+		holder, _, err := s.FindOrCreate(ctx, orgID, "github", scope, "acme/key#2", "uuid-k2-a", "pr", "holder", "")
 		if err != nil {
 			t.Fatalf("create holder: %v", err)
 		}
-		got, created, err := s.FindOrCreate(ctx, orgID, "jira", scope, "KEY-2", "uuid-k2-b", "issue", "newcomer", "")
+		got, created, err := s.FindOrCreate(ctx, orgID, "github", scope, "acme/key#2", "uuid-k2-b", "pr", "newcomer", "")
 		if !errors.Is(err, db.ErrEntityKeyOccupied) || got != nil || created {
 			t.Fatalf("FindOrCreate under an occupied key = (%+v, %v, %v), want ErrEntityKeyOccupied", got, created, err)
 		}
 		// The refusal wrote nothing, and the caller's transaction is still
 		// usable: the next statement on the same store succeeds.
-		still, err := s.GetBySource(ctx, orgID, "jira", scope, "KEY-2")
+		still, err := s.GetBySource(ctx, orgID, "github", scope, "acme/key#2")
 		if err != nil || still == nil || still.ID != holder.ID || still.ExternalID != "uuid-k2-a" {
 			t.Errorf("GetBySource after the refusal = %+v err=%v, want the holder untouched", still, err)
 		}
@@ -79,11 +81,11 @@ func RunEntityKeyConformance(t *testing.T, mk EntityKeyFactory) {
 
 	t.Run("a_keyless_create_returns_the_row_under_the_key", func(t *testing.T) {
 		s, orgID := mk(t)
-		row, _, err := s.FindOrCreate(ctx, orgID, "jira", scope, "KEY-3", "uuid-k3", "issue", "t", "")
+		row, _, err := s.FindOrCreate(ctx, orgID, "github", scope, "acme/key#3", "uuid-k3", "pr", "t", "")
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		again, created, err := s.FindOrCreate(ctx, orgID, "jira", scope, "KEY-3", "", "issue", "t", "")
+		again, created, err := s.FindOrCreate(ctx, orgID, "github", scope, "acme/key#3", "", "pr", "t", "")
 		if err != nil || created || again.ID != row.ID {
 			t.Errorf("FindOrCreate with no id = (%+v, %v, %v), want the existing row", again, created, err)
 		}
@@ -91,45 +93,45 @@ func RunEntityKeyConformance(t *testing.T, mk EntityKeyFactory) {
 
 	t.Run("a_given_id_wins_over_the_key", func(t *testing.T) {
 		s, orgID := mk(t)
-		row, _, err := s.FindOrCreate(ctx, orgID, "jira", scope, "KEY-4", "uuid-k4", "issue", "t", "")
+		row, _, err := s.FindOrCreate(ctx, orgID, "github", scope, "acme/key#4", "uuid-k4", "pr", "t", "")
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
 		if row.ExternalID != "uuid-k4" || row.Scope != scope {
 			t.Errorf("created row = %+v, want external_id and scope written at insert", row)
 		}
-		got, created, err := s.FindOrCreate(ctx, orgID, "jira", scope, "MOVED-4", "uuid-k4", "issue", "t", "")
-		if err != nil || created || got.ID != row.ID || got.SourceID != "KEY-4" {
+		got, created, err := s.FindOrCreate(ctx, orgID, "github", scope, "acme/moved#4", "uuid-k4", "pr", "t", "")
+		if err != nil || created || got.ID != row.ID || got.SourceID != "acme/key#4" {
 			t.Errorf("FindOrCreate(new key, same id) = (%+v, %v, %v), want the existing row under its stored key", got, created, err)
 		}
 	})
 
 	t.Run("scope_separates_identical_keys_and_ids", func(t *testing.T) {
 		s, orgID := mk(t)
-		a, createdA, err := s.FindOrCreate(ctx, orgID, "jira", "ws-one", "KEY-5", "uuid-k5", "issue", "a", "")
+		a, createdA, err := s.FindOrCreate(ctx, orgID, "github", "ws-one", "acme/key#5", "uuid-k5", "pr", "a", "")
 		if err != nil || !createdA {
 			t.Fatalf("create in ws-one: created=%v err=%v", createdA, err)
 		}
-		b, createdB, err := s.FindOrCreate(ctx, orgID, "jira", "ws-two", "KEY-5", "uuid-k5", "issue", "b", "")
+		b, createdB, err := s.FindOrCreate(ctx, orgID, "github", "ws-two", "acme/key#5", "uuid-k5", "pr", "b", "")
 		if err != nil || !createdB || b.ID == a.ID {
 			t.Fatalf("create in ws-two = (%+v, %v, %v), want a second row", b, createdB, err)
 		}
-		gotA, _ := s.GetBySource(ctx, orgID, "jira", "ws-one", "KEY-5")
-		gotB, _ := s.GetBySource(ctx, orgID, "jira", "ws-two", "KEY-5")
+		gotA, _ := s.GetBySource(ctx, orgID, "github", "ws-one", "acme/key#5")
+		gotB, _ := s.GetBySource(ctx, orgID, "github", "ws-two", "acme/key#5")
 		if gotA == nil || gotB == nil || gotA.ID != a.ID || gotB.ID != b.ID {
 			t.Errorf("GetBySource per scope = %+v / %+v, want each scope's own row", gotA, gotB)
 		}
-		if miss, _ := s.GetBySource(ctx, orgID, "jira", "ws-three", "KEY-5"); miss != nil {
+		if miss, _ := s.GetBySource(ctx, orgID, "github", "ws-three", "acme/key#5"); miss != nil {
 			t.Errorf("GetBySource in a third scope = %+v, want nil", miss)
 		}
 	})
 
 	t.Run("no_scope_creates_nothing_and_matches_nothing", func(t *testing.T) {
 		s, orgID := mk(t)
-		if _, _, err := s.FindOrCreate(ctx, orgID, "jira", "", "KEY-6", "uuid-k6", "issue", "t", ""); !errors.Is(err, db.ErrEntityScopeRequired) {
+		if _, _, err := s.FindOrCreate(ctx, orgID, "github", "", "acme/key#6", "uuid-k6", "pr", "t", ""); !errors.Is(err, db.ErrEntityScopeRequired) {
 			t.Errorf("FindOrCreate with no scope: err=%v, want ErrEntityScopeRequired", err)
 		}
-		if got, err := s.GetBySource(ctx, orgID, "jira", "", "KEY-6"); err != nil || got != nil {
+		if got, err := s.GetBySource(ctx, orgID, "github", "", "acme/key#6"); err != nil || got != nil {
 			t.Errorf("GetBySource with no scope = %+v err=%v, want (nil, nil)", got, err)
 		}
 	})
@@ -211,7 +213,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 
 	t.Run("StampExternalIDSystem_fills_a_null_once", func(t *testing.T) {
 		s, orgID, _ := mk(t)
-		row, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", scope, "SKY-1", "", "issue", "t", "")
+		row, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, scope, "SKY-1", "", TestJiraProject, "t", "")
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
@@ -234,7 +236,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 			t.Errorf("after a declined stamp the row carries %+v, want 10001 kept", got)
 		}
 
-		other, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", scope, "SKY-2", "", "issue", "t", "")
+		other, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, scope, "SKY-2", "", TestJiraProject, "t", "")
 		if err != nil {
 			t.Fatalf("create other: %v", err)
 		}
@@ -372,12 +374,12 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		s, orgID, seed := mk(t)
 		const site = "https://acme.atlassian.net"
 		const otherSite = "https://other.atlassian.net"
-		row, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", site, "ENG-5", "10005", "issue", "t", site+"/browse/ENG-5")
+		row, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, site, "ENG-5", "10005", TestJiraProject, "t", site+"/browse/ENG-5")
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
 		// The same key and id on another site: a different issue.
-		if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", otherSite, "ENG-5", "10005", "issue", "t", otherSite+"/browse/ENG-5"); err != nil {
+		if _, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, otherSite, "ENG-5", "10005", TestJiraProject, "t", otherSite+"/browse/ENG-5"); err != nil {
 			t.Fatalf("create the other site's ENG-5: %v", err)
 		}
 		issueArt := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, site, "10005", "ENG-5", "")
@@ -418,7 +420,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		const jiraScope = "https://jira.example.com"
 		// The older row: the issue's first entity, closed under the key it
 		// had before an earlier move, with no id learned.
-		older, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", jiraScope, "OLD-1", "", "issue", "Old title", jiraScope+"/browse/OLD-1")
+		older, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, jiraScope, "OLD-1", "", TestJiraProject, "Old title", jiraScope+"/browse/OLD-1")
 		if err != nil {
 			t.Fatalf("create older: %v", err)
 		}
@@ -428,7 +430,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 		// The newer row: the same issue found again under its current key,
 		// active, carrying the id.
-		newer, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", jiraScope, "NEW-1", "10001", "issue", "New title", jiraScope+"/browse/NEW-1")
+		newer, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, jiraScope, "NEW-1", "10001", TestJiraProject, "New title", jiraScope+"/browse/NEW-1")
 		if err != nil {
 			t.Fatalf("create newer: %v", err)
 		}
@@ -439,7 +441,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		newer, _ = s.Entities.GetSystem(ctx, orgID, newer.ID)
 		dupTask := seed.Task(t, newer.ID, "dup")
 		soloTask := seed.Task(t, newer.ID, "solo")
-		third, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", jiraScope, "THIRD-1", "10003", "issue", "Third", "")
+		third, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, jiraScope, "THIRD-1", "10003", TestJiraProject, "Third", "")
 		if err != nil {
 			t.Fatalf("create third: %v", err)
 		}
@@ -529,11 +531,11 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 	t.Run("MergeDuplicateEntitiesSystem_keeps_an_active_survivor_when_the_newer_row_is_closed", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		const jiraScope = "https://jira.example.com"
-		older, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", jiraScope, "OLD-2", "", "issue", "Older", jiraScope+"/browse/OLD-2")
+		older, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, jiraScope, "OLD-2", "", TestJiraProject, "Older", jiraScope+"/browse/OLD-2")
 		if err != nil {
 			t.Fatalf("create older: %v", err)
 		}
-		newer, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", jiraScope, "NEW-2", "10002", "issue", "Newer", jiraScope+"/browse/NEW-2")
+		newer, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, jiraScope, "NEW-2", "10002", TestJiraProject, "Newer", jiraScope+"/browse/NEW-2")
 		if err != nil {
 			t.Fatalf("create newer: %v", err)
 		}
@@ -572,15 +574,15 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 	t.Run("MergeDuplicateEntitiesSystem_refuses_rows_that_are_not_one_object", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 		const jiraScope = "https://jira.example.com"
-		a, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", jiraScope, "A-1", "20001", "issue", "a", "")
+		a, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, jiraScope, "A-1", "20001", TestJiraProject, "a", "")
 		if err != nil {
 			t.Fatalf("create a: %v", err)
 		}
-		b, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", jiraScope, "B-1", "20002", "issue", "b", "")
+		b, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, jiraScope, "B-1", "20002", TestJiraProject, "b", "")
 		if err != nil {
 			t.Fatalf("create b: %v", err)
 		}
-		elsewhere, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", "https://other.example.com", "C-1", "", "issue", "c", "")
+		elsewhere, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://other.example.com", "C-1", "", TestJiraProject, "c", "")
 		if err != nil {
 			t.Fatalf("create elsewhere: %v", err)
 		}
@@ -718,7 +720,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 			t.Errorf("a refused create wrote %+v", got)
 		}
 
-		other, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", scope, "SKY-20", "20020", "issue", "t", "")
+		other, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, scope, "SKY-20", "20020", TestJiraProject, "t", "")
 		if err != nil || other.LinearTeamID != "" {
 			t.Errorf("a Jira row = %+v err=%v, want no Linear team", other, err)
 		}
@@ -799,7 +801,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 
 		// A snapshot write never gives another source's row a Linear team.
-		jira, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", scope, "SKY-22", "20022", "issue", "t", "")
+		jira, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, scope, "SKY-22", "20022", TestJiraProject, "t", "")
 		if err != nil {
 			t.Fatalf("create jira: %v", err)
 		}
@@ -808,6 +810,173 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 		if got := team(jira.ID); got != "" {
 			t.Errorf("a Jira row took the Linear team %q from its snapshot", got)
+		}
+	})
+
+	t.Run("a_jira_row_is_created_with_its_project_and_only_with_it", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		row, created, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, scope, "SKY-30", "20030", TestJiraProject, "t", "")
+		if err != nil || !created || row.JiraProjectID == "" {
+			t.Fatalf("FindOrCreateJiraSystem = (%+v, %v, %v), want a new row referencing its project", row, created, err)
+		}
+		if stored, err := s.Entities.GetSystem(ctx, orgID, row.ID); err != nil || stored == nil ||
+			stored.JiraProjectID != row.JiraProjectID || stored.ExternalID != "20030" || stored.Kind != "issue" {
+			t.Errorf("point read of the created row = %+v err=%v, want its project, 20030, kind issue", stored, err)
+		}
+		project, err := s.JiraProjects.GetSystem(ctx, orgID, row.JiraProjectID)
+		if err != nil || project == nil || project.Site != scope || project.ExternalID != TestJiraProject.ID || project.Key != TestJiraProject.Key {
+			t.Errorf("the referenced registry row = %+v err=%v, want %s under %s on the entity's scope", project, err, TestJiraProject.Key, TestJiraProject.ID)
+		}
+
+		// A second issue in the project references the same row; the same
+		// project id on another scope is another project.
+		sibling, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, scope, "SKY-31", "20031", TestJiraProject, "t", "")
+		if err != nil || sibling.JiraProjectID != row.JiraProjectID {
+			t.Errorf("a second issue in the project = %+v err=%v, want it on row %s", sibling, err, row.JiraProjectID)
+		}
+		elsewhere, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, "ws-b", "SKY-30", "20030", TestJiraProject, "t", "")
+		if err != nil || elsewhere.JiraProjectID == "" || elsewhere.JiraProjectID == row.JiraProjectID {
+			t.Errorf("the project's id on another scope = %+v err=%v, want a registry row of its own", elsewhere, err)
+		}
+
+		// A found row is returned as stored: the project is not rewritten from
+		// the call, which a later snapshot write would have to agree with.
+		again, created, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, scope, "SKY-30", "20030",
+			domain.JiraProjectRef{ID: "99999", Key: "OPS"}, "t", "")
+		if err != nil || created || again.ID != row.ID || again.JiraProjectID != row.JiraProjectID {
+			t.Errorf("second FindOrCreateJiraSystem = (%+v, %v, %v), want the row as stored", again, created, err)
+		}
+		// The generic doors find a Jira row like any other...
+		found, created, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", scope, "SKY-30", "20030", "issue", "t", "")
+		if err != nil || created || found.ID != row.ID {
+			t.Errorf("FindOrCreateSystem on a known Jira row = (%+v, %v, %v), want it found", found, created, err)
+		}
+		// ...and create none.
+		if got, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", scope, "SKY-32", "20032", "issue", "t", ""); !errors.Is(err, db.ErrEntityJiraProjectRequired) || got != nil {
+			t.Errorf("FindOrCreateSystem creating a Jira row = (%+v, %v), want ErrEntityJiraProjectRequired", got, err)
+		}
+		if _, _, err := s.Entities.FindOrCreate(ctx, orgID, "jira", scope, "SKY-32", "20032", "issue", "t", ""); !errors.Is(err, db.ErrEntityJiraProjectRequired) {
+			t.Errorf("FindOrCreate creating a Jira row: err=%v, want ErrEntityJiraProjectRequired", err)
+		}
+		for name, p := range map[string]domain.JiraProjectRef{"no id": {Key: "SKY"}, "no key": {ID: "10000"}} {
+			if _, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, scope, "SKY-32", "20032", p, "t", ""); !errors.Is(err, db.ErrEntityJiraProjectRequired) {
+				t.Errorf("FindOrCreateJiraSystem with a project with %s: err=%v, want ErrEntityJiraProjectRequired", name, err)
+			}
+		}
+		if got, _ := s.Entities.GetByExternalIDSystem(ctx, orgID, "jira", scope, "20032"); got != nil {
+			t.Errorf("a refused create wrote %+v", got)
+		}
+
+		other, _, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "ENG-30", "uuid-30", "team-eng", "t", "")
+		if err != nil || other.JiraProjectID != "" {
+			t.Errorf("a Linear row = %+v err=%v, want no Jira project", other, err)
+		}
+	})
+
+	t.Run("snapshot_writes_move_the_jira_project_and_clearing_keeps_it", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		projectOf := func(id string) string {
+			t.Helper()
+			got, err := s.Entities.GetSystem(ctx, orgID, id)
+			if err != nil || got == nil {
+				t.Fatalf("read %s: %+v err=%v", id, got, err)
+			}
+			return got.JiraProjectID
+		}
+		pollSeq := func(id string) int64 {
+			t.Helper()
+			got, _ := s.Entities.GetSystem(ctx, orgID, id)
+			return got.PollSeq
+		}
+		register := func(scope, externalID, key string) string {
+			t.Helper()
+			p, err := s.JiraProjects.FindOrCreateSystem(ctx, orgID, scope, externalID, key, "")
+			if err != nil {
+				t.Fatalf("register %s: %v", key, err)
+			}
+			return p.ID
+		}
+		row, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, scope, "SKY-33", "20033", TestJiraProject, "t", "")
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		sky := row.JiraProjectID
+		ops := register(scope, "21000", "OPS")
+		eng := register(scope, "22000", "ENG")
+		register("ws-b", "23000", "FAR")
+
+		snap := func(projectID string) string { return `{"id":"20033","project_id":"` + projectID + `"}` }
+		if ok, err := s.Entities.UpdateSnapshotCASSystem(ctx, orgID, row.ID, snap("21000"), pollSeq(row.ID)); err != nil || !ok {
+			t.Fatalf("snapshot write: ok=%v err=%v", ok, err)
+		}
+		if got := projectOf(row.ID); got != ops {
+			t.Errorf("after UpdateSnapshotCASSystem the project is %q, want OPS's row %q", got, ops)
+		}
+		// A CAS that misses writes neither half.
+		if ok, err := s.Entities.UpdateSnapshotCASSystem(ctx, orgID, row.ID, snap("22000"), pollSeq(row.ID)-1); err != nil || ok {
+			t.Fatalf("stale snapshot write: ok=%v err=%v, want a miss", ok, err)
+		}
+		if got := projectOf(row.ID); got != ops {
+			t.Errorf("a missed CAS moved the project to %q", got)
+		}
+		// A snapshot naming no project, one the registry has no row for, or
+		// one registered only on another site leaves the column where it was.
+		for name, body := range map[string]string{
+			"no project":   `{"id":"20033"}`,
+			"unregistered": snap("29999"),
+			"another site": snap("23000"),
+		} {
+			if ok, err := s.Entities.UpdateSnapshotCASSystem(ctx, orgID, row.ID, body, pollSeq(row.ID)); err != nil || !ok {
+				t.Fatalf("snapshot write (%s): ok=%v err=%v", name, ok, err)
+			}
+			if got := projectOf(row.ID); got != ops {
+				t.Errorf("a snapshot with %s moved the project to %q", name, got)
+			}
+		}
+
+		if ok, err := s.Entities.CloseWithSnapshotCASSystem(ctx, orgID, row.ID, snap("22000"), pollSeq(row.ID)); err != nil || !ok {
+			t.Fatalf("close with snapshot: ok=%v err=%v", ok, err)
+		}
+		if got := projectOf(row.ID); got != eng {
+			t.Errorf("after CloseWithSnapshotCASSystem the project is %q, want ENG's row", got)
+		}
+		if ok, err := s.Entities.ReactivateWithSnapshotCASSystem(ctx, orgID, row.ID, snap("10000"), pollSeq(row.ID)); err != nil || !ok {
+			t.Fatalf("reactivate with snapshot: ok=%v err=%v", ok, err)
+		}
+		if got := projectOf(row.ID); got != sky {
+			t.Errorf("after ReactivateWithSnapshotCASSystem the project is %q, want SKY's row", got)
+		}
+		patched, err := s.Entities.PatchSnapshot(ctx, orgID, row.ID, snap("21000"))
+		if err != nil || patched.JiraProjectID != ops {
+			t.Errorf("PatchSnapshot = %+v err=%v, want the row on OPS's row", patched, err)
+		}
+
+		// The event queue's snapshot commit is the same CAS statement.
+		if ok, _, err := s.EventQueue.EnqueueBatchWithSnapshotCAS(ctx, orgID, row.ID, snap("22000"), pollSeq(row.ID), nil, nil); err != nil || !ok {
+			t.Fatalf("EnqueueBatchWithSnapshotCAS: ok=%v err=%v", ok, err)
+		}
+		if got := projectOf(row.ID); got != eng {
+			t.Errorf("after EnqueueBatchWithSnapshotCAS the project is %q, want ENG's row", got)
+		}
+
+		if _, err := s.Entities.ClearSnapshotsForSourceSystem(ctx, orgID, "jira"); err != nil {
+			t.Fatalf("clear: %v", err)
+		}
+		got, _ := s.Entities.GetSystem(ctx, orgID, row.ID)
+		if got.SnapshotJSON != "" || got.JiraProjectID != eng {
+			t.Errorf("after the clear: snapshot %q, project %q; want no snapshot and ENG's row kept", got.SnapshotJSON, got.JiraProjectID)
+		}
+
+		// A snapshot write never gives another source's row a Jira project.
+		linear, _, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "ENG-33", "uuid-33", "team-eng", "t", "")
+		if err != nil {
+			t.Fatalf("create linear: %v", err)
+		}
+		if ok, err := s.Entities.UpdateSnapshotCASSystem(ctx, orgID, linear.ID, `{"id":"uuid-33","team_id":"team-eng","project_id":"21000"}`, linear.PollSeq); err != nil || !ok {
+			t.Fatalf("linear snapshot write: ok=%v err=%v", ok, err)
+		}
+		if got := projectOf(linear.ID); got != "" {
+			t.Errorf("a Linear row took the Jira project %q from its snapshot", got)
 		}
 	})
 }

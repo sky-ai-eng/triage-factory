@@ -208,7 +208,7 @@ func newLinearFixture(t *testing.T) *linearFixture {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, runmode.LocalDefaultOrgID)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, runmode.LocalDefaultOrgID)
 	return &linearFixture{tr: tr, pub: pub, stores: stores, client: newFakeLinear(), workspace: linWorkspace}
 }
 

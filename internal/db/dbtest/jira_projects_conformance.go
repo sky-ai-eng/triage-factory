@@ -18,6 +18,7 @@ type JiraProjectFixture struct {
 	Projects db.JiraProjectStore
 	Rules    db.JiraStatusRulesStore
 	Teams    db.TeamsStore
+	Entities db.EntityStore
 
 	OrgID       string
 	TeamID      string
@@ -27,6 +28,12 @@ type JiraProjectFixture struct {
 	// state only the SQLite migration leaves a row in, which no store method
 	// writes — and returns its id.
 	SeedUnresolved func(t *testing.T, site, key string) string
+
+	// SeedIssue inserts an active Jira issue entity keyed key on site that
+	// references the registry row jiraProjectID, and returns its id. Raw,
+	// because the only rows that reference an unresolved registry row are the
+	// ones the SQLite migration wrote.
+	SeedIssue func(t *testing.T, site, key, jiraProjectID string) string
 }
 
 // JiraProjectFactory builds a fresh fixture per subtest.
@@ -185,14 +192,8 @@ func RunJiraProjectConformance(t *testing.T, factory JiraProjectFactory) {
 				t.Errorf("%s after the rename = %+v, want the rule under NEW", name, got)
 			}
 		}
-		for key, want := range map[string]bool{"NEW": true, "OLD": false} {
-			got, err := f.Rules.TracksProjectSystem(ctx, f.TeamID, jiraSite, key)
-			if err != nil {
-				t.Fatalf("TracksProjectSystem(%s): %v", key, err)
-			}
-			if got != want {
-				t.Errorf("TracksProjectSystem(%s) after the rename = %v, want %v", key, got, want)
-			}
+		if got, err := f.Rules.TracksJiraProjectSystem(ctx, f.TeamID, jiraSite, p.ID); err != nil || !got {
+			t.Errorf("TracksJiraProjectSystem after the rename = %v, %v; want the row still tracked", got, err)
 		}
 	})
 
@@ -219,6 +220,7 @@ func RunJiraProjectConformance(t *testing.T, factory JiraProjectFactory) {
 			t.Fatalf("FindOrCreate: %v", err)
 		}
 		loser := f.SeedUnresolved(t, jiraSite, "OLD")
+		issue := f.SeedIssue(t, jiraSite, "OLD-1", loser)
 		other, err := f.Projects.FindOrCreate(ctx, f.OrgID, jiraSite, "60007", "ENG", "")
 		if err != nil {
 			t.Fatalf("FindOrCreate (other): %v", err)
@@ -262,6 +264,10 @@ func RunJiraProjectConformance(t *testing.T, factory JiraProjectFactory) {
 		if gone, err := f.Projects.GetSystem(ctx, f.OrgID, loser); err != nil || gone != nil {
 			t.Errorf("merged row after RefreshSystem = %+v, %v; want it deleted", gone, err)
 		}
+		// The issue that referenced the merged row references the survivor.
+		if e, err := f.Entities.GetSystem(ctx, f.OrgID, issue); err != nil || e == nil || e.JiraProjectID != winner.ID {
+			t.Errorf("issue after the merge = %+v, %v; want it on the surviving row %s", e, err, winner.ID)
+		}
 
 		// The team keeps the rule it already had on the surviving row.
 		team, err := f.Rules.ListForTeamSystem(ctx, f.TeamID, jiraSite)
@@ -296,6 +302,62 @@ func RunJiraProjectConformance(t *testing.T, factory JiraProjectFactory) {
 			if !reflect.DeepEqual(ts.JiraProjects, want) {
 				t.Errorf("team %s project order after the merge = %v, want %v", teamID, ts.JiraProjects, want)
 			}
+		}
+	})
+
+	t.Run("FindOrCreateSystem_WritesOnlyWhatChanged", func(t *testing.T) {
+		f := factory(t)
+		created, err := f.Projects.FindOrCreateSystem(ctx, f.OrgID, jiraSite, "11011", "SKY", "Skyline")
+		if err != nil {
+			t.Fatalf("FindOrCreateSystem (create): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "FindOrCreateSystem (create)", created, func() (*domain.JiraProject, error) {
+			return f.Projects.GetSystem(ctx, f.OrgID, created.ID)
+		})
+		// An empty name keeps the stored one; a new key renames the row.
+		same, err := f.Projects.FindOrCreateSystem(ctx, f.OrgID, jiraSite, "11011", "SKY", "")
+		if err != nil || same != created {
+			t.Errorf("FindOrCreateSystem with nothing new = %+v, %v; want %+v", same, err, created)
+		}
+		renamed, err := f.Projects.FindOrCreateSystem(ctx, f.OrgID, jiraSite, "11011", "SKYL", "")
+		if err != nil || renamed.ID != created.ID || renamed.Key != "SKYL" || renamed.Name != "Skyline" {
+			t.Errorf("FindOrCreateSystem under a new key = %+v, %v; want row %s renamed to SKYL with its name kept", renamed, err, created.ID)
+		}
+		AssertWriteReturnedStoredRow(t, "FindOrCreateSystem (rename)", renamed, func() (*domain.JiraProject, error) {
+			return f.Projects.GetSystem(ctx, f.OrgID, created.ID)
+		})
+	})
+
+	t.Run("AJiraIssueRegistersItsProjectThroughTheSameDoor", func(t *testing.T) {
+		f := factory(t)
+		// A project the registry has a row for under its key alone is resolved
+		// by the first issue read in it.
+		unresolved := f.SeedUnresolved(t, jiraSite, "OPS")
+		ops, _, err := f.Entities.FindOrCreateJiraSystem(ctx, f.OrgID, jiraSite, "OPS-1", "90001",
+			domain.JiraProjectRef{ID: "12012", Key: "OPS", Name: "Operations"}, "t", "")
+		if err != nil {
+			t.Fatalf("FindOrCreateJiraSystem (OPS): %v", err)
+		}
+		if ops.JiraProjectID != unresolved {
+			t.Errorf("OPS-1 references %q, want the unresolved OPS row %s", ops.JiraProjectID, unresolved)
+		}
+		if p, err := f.Projects.GetSystem(ctx, f.OrgID, unresolved); err != nil || p == nil || p.ExternalID != "12012" || p.Name != "Operations" {
+			t.Errorf("OPS row after its issue registered = %+v, %v; want it resolved to 12012", p, err)
+		}
+
+		// A project the registry has no row for gets one, which tracks
+		// nothing.
+		eng, _, err := f.Entities.FindOrCreateJiraSystem(ctx, f.OrgID, jiraSite, "ENG-1", "90002",
+			domain.JiraProjectRef{ID: "13013", Key: "ENG"}, "t", "")
+		if err != nil {
+			t.Fatalf("FindOrCreateJiraSystem (ENG): %v", err)
+		}
+		p, err := f.Projects.GetSystem(ctx, f.OrgID, eng.JiraProjectID)
+		if err != nil || p == nil || p.Site != jiraSite || p.ExternalID != "13013" || p.Key != "ENG" {
+			t.Errorf("ENG-1's registry row = %+v, %v; want ENG under 13013 on %s", p, err, jiraSite)
+		}
+		if tracks, err := f.Rules.TracksJiraProjectSystem(ctx, f.TeamID, jiraSite, eng.JiraProjectID); err != nil || tracks {
+			t.Errorf("TracksJiraProjectSystem on a registered project = %v, %v; want it untracked", tracks, err)
 		}
 	})
 

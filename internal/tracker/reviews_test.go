@@ -41,7 +41,7 @@ func newReviewTestTracker(t *testing.T) (*Tracker, db.Stores) {
 	t.Helper()
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
-	return New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, runmode.LocalDefaultOrgID), stores
+	return New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, runmode.LocalDefaultOrgID), stores
 }
 
 func review(id int64, author, state, submittedAt string, comments ...ghclient.PRReviewComment) ghclient.PRReview {
@@ -361,7 +361,7 @@ func TestRefreshGitHub_EmitsOneEventPerReview(t *testing.T) {
 	})
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, "", nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
@@ -421,7 +421,7 @@ func TestRefreshGitHub_SnapshotWithoutMarker(t *testing.T) {
 	})
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, ghclient.NewClient(srv.URL, "tok"), "", nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}

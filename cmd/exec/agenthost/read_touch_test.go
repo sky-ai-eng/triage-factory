@@ -154,7 +154,7 @@ func TestReadTouch_GithubGetPR_FailedRead_NoTouch(t *testing.T) {
 func TestReadTouch_JiraGetIssue_TouchesIssue(t *testing.T) {
 	jira := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"10123","key":"SKY-123","fields":{"summary":"hi"}}`)
+		_, _ = io.WriteString(w, `{"id":"10123","key":"SKY-123","fields":{"summary":"hi","project":{"id":"10000","key":"SKY","name":"Sky"}}}`)
 	}))
 	t.Cleanup(jira.Close)
 	conn, stores, info := newJiraRecordingStoresConn(t, jira.URL, true)
@@ -171,6 +171,9 @@ func TestReadTouch_JiraGetIssue_TouchesIssue(t *testing.T) {
 	}
 	if ent.Kind != "issue" || ent.ExternalID != "10123" {
 		t.Errorf("entity = %+v, want an issue carrying the id the response named", ent)
+	}
+	if p, err := stores.JiraProjects.GetSystem(ctx, runmode.LocalDefaultOrgID, ent.JiraProjectID); err != nil || p == nil || p.ExternalID != "10000" || p.Key != "SKY" || p.Name != "Sky" {
+		t.Errorf("entity's project = %+v err=%v, want the project the response named", p, err)
 	}
 	if role := touchRole(t, conn, info.ConversationID, ent.ID); role != domain.MemoryRoleTouched {
 		t.Errorf("touch role = %q, want %q", role, domain.MemoryRoleTouched)

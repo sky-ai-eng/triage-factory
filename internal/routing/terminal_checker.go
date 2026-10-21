@@ -3,7 +3,6 @@ package routing
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"sync"
 	"time"
 
@@ -225,8 +224,9 @@ func capIDs(ids []string) []string {
 // snapshotIsTerminal answers "does this entity's stored snapshot say the work
 // is over?" — the same question, and the same answer, the tracker asks at
 // discovery time. GitHub reads it straight off the snapshot; Jira asks whether
-// the status is in ITS OWN project's done set, which is why the per-project map
-// is threaded here rather than collapsed to a union; Linear asks the same of
+// the status is in ITS OWN project's done set (the project the entity
+// references, entities.jira_project_id), which is why the per-project map is
+// threaded here rather than collapsed to a union; Linear asks the same of
 // the entity's own Linear team (entities.linear_team_id). An entity whose
 // project or team has no configured rules is never terminal, matching the
 // tracker's behavior for one the user removed from settings while its
@@ -244,9 +244,7 @@ func snapshotIsTerminal(entity domain.Entity, doneByProject map[string][]domain.
 		if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil || snap.Status == "" {
 			return false
 		}
-		// TODO(TFAC-1130): key the done sets by the entity's jira_project_id
-		// instead of the issue key's prefix.
-		return domain.ContainsStatus(doneByProject[jiraProjectKey(entity.SourceID)], snap.StatusRef())
+		return domain.ContainsStatus(doneByProject[entity.JiraProjectID], snap.StatusRef())
 	case "linear":
 		var snap domain.LinearSnapshot
 		if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil || snap.State.IsZero() {
@@ -261,8 +259,10 @@ func snapshotIsTerminal(entity domain.Entity, doneByProject map[string][]domain.
 }
 
 // jiraDoneStatusesByProject reads the org's per-project done statuses on its
-// current Jira site, keyed by the project's key as the registry holds it and
-// merged across every team that tracks the project. The merge is set-union in
+// current Jira site, keyed by the project's jira_projects row — the one an
+// issue's entity references (entities.jira_project_id), which a project key
+// rename does not move — and merged across every team that tracks the
+// project. The merge is set-union in
 // first-seen order, matching the poller's toTrackerJiraRules exactly: entities
 // are org-shared (one row per issue no matter how many teams track its
 // project), so any team's notion of "done" is what the poll would have closed
@@ -288,14 +288,14 @@ func (r *Router) jiraDoneStatusesByProject(ctx context.Context, orgID string) ma
 	}
 	for _, rule := range rules {
 		seen := map[string]bool{}
-		for _, existing := range out[rule.ProjectKey] {
+		for _, existing := range out[rule.JiraProjectID] {
 			seen[domain.JiraStatusDedupKey(existing)] = true
 		}
 		for _, done := range rule.DoneMembers {
 			key := domain.JiraStatusDedupKey(done)
 			if key != "" && !seen[key] {
 				seen[key] = true
-				out[rule.ProjectKey] = append(out[rule.ProjectKey], done)
+				out[rule.JiraProjectID] = append(out[rule.JiraProjectID], done)
 			}
 		}
 	}
@@ -370,13 +370,4 @@ func unionValues(byKey map[string][]domain.JiraStatusRef) []domain.JiraStatusRef
 		}
 	}
 	return out
-}
-
-// jiraProjectKey extracts the project key from a Jira issue key ("PROJ-123" →
-// "PROJ"). Jira project keys contain no hyphen, so the first segment is the key.
-func jiraProjectKey(issueKey string) string {
-	if i := strings.IndexByte(issueKey, '-'); i >= 0 {
-		return issueKey[:i]
-	}
-	return issueKey
 }

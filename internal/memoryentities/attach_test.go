@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -121,7 +122,14 @@ func entityBySource(t *testing.T, database *sql.DB, source, sourceID string) *do
 
 func makeEntity(t *testing.T, database *sql.DB, source, sourceID, kind string) *domain.Entity {
 	t.Helper()
-	ent, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, source, testScope(source), sourceID, "", kind, "", "")
+	entities := sqlitestore.New(database).Entities
+	var ent *domain.Entity
+	var err error
+	if source == "jira" {
+		ent, _, err = entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, testScope(source), sourceID, "", dbseed.JiraIssueProject(sourceID), "", "")
+	} else {
+		ent, _, err = entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, source, testScope(source), sourceID, "", kind, "", "")
+	}
 	if err != nil {
 		t.Fatalf("FindOrCreate(%s,%s): %v", source, sourceID, err)
 	}
@@ -355,9 +363,13 @@ func TestAttach_RepoLevelTargetsSkipped(t *testing.T) {
 // TestAttach_JiraArtifactsResolveByIssueID: a Jira artifact resolves its
 // entity through the site and issue id its dedup key records. An artifact
 // whose target is a key the issue has since left attaches to the issue's
-// entity without moving it back; one keyed on the issue key, or recorded on
-// another site, attaches nothing and mints nothing.
+// entity without moving it back; one keyed on the issue key, recorded on
+// another site, or about an issue no entity carries yet attaches nothing and
+// mints nothing — the artifact does not record the project an entity would be
+// created in. Only the last is a link the attach owed and could not write, so
+// it is the only one counted.
 func TestAttach_JiraArtifactsResolveByIssueID(t *testing.T) {
+	skips := linkSkips(t)
 	database := newTestDB(t)
 	site := testScope("jira")
 	if _, err := database.Exec(`
@@ -369,7 +381,7 @@ func TestAttach_JiraArtifactsResolveByIssueID(t *testing.T) {
 	seedConversation(t, database, "r-jira")
 	ctx := context.Background()
 	entA := primaryEntity(t, database, "r-jira")
-	moved, _, err := sqlitestore.New(database).Entities.FindOrCreateSystem(ctx, runmode.LocalDefaultOrgID, "jira", site, "NEW-7", "10007", "issue", "Moved", "")
+	moved, _, err := sqlitestore.New(database).Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, site, "NEW-7", "10007", dbseed.JiraIssueProject("NEW-7"), "Moved", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,6 +395,7 @@ func TestAttach_JiraArtifactsResolveByIssueID(t *testing.T) {
 	seedArtifact(t, database, "r-jira", jiraArtifact(domain.JiraIssueResource(site, "10007"), "OLD-7"))
 	seedArtifact(t, database, "r-jira", jiraArtifact("SKY-1", "SKY-1"))
 	seedArtifact(t, database, "r-jira", jiraArtifact(domain.JiraIssueResource("https://other.example.com", "10008"), "SKY-2"))
+	seedArtifact(t, database, "r-jira", jiraArtifact(domain.JiraIssueResource(site, "10009"), "OPS-9"))
 
 	attachAll(t, database, runmode.LocalDefaultOrgID, "r-jira", entA.ID)
 
@@ -392,7 +405,7 @@ func TestAttach_JiraArtifactsResolveByIssueID(t *testing.T) {
 	if got := entityBySource(t, database, "jira", "NEW-7"); got == nil || got.ID != moved.ID {
 		t.Errorf("NEW-7 = %+v, want the entity left under its current key", got)
 	}
-	for _, key := range []string{"OLD-7", "SKY-1", "SKY-2"} {
+	for _, key := range []string{"OLD-7", "SKY-1", "SKY-2", "OPS-9"} {
 		if ent := entityBySource(t, database, "jira", key); ent != nil {
 			t.Errorf("%s minted an entity: %+v", key, ent)
 		}
@@ -404,6 +417,40 @@ func TestAttach_JiraArtifactsResolveByIssueID(t *testing.T) {
 	if n != 2 {
 		t.Errorf("join rows = %d, want 2 (primary and the moved issue)", n)
 	}
+	assertSkips(t, skips, map[skipKey]int64{{domain.MemoryRoleProduced, "jira", skipNoEntity}: 1})
+}
+
+// TestAttach_CountsAFailedResolve: a produced artifact whose entity resolve
+// fails is counted as an error, and the primary row still lands.
+func TestAttach_CountsAFailedResolve(t *testing.T) {
+	skips := linkSkips(t)
+	database := newTestDB(t)
+	seedConversation(t, database, "r-resolve")
+	entA := primaryEntity(t, database, "r-resolve")
+	seedProducedPR(t, database, "r-resolve", "o/r", 77, "https://github.com/o/r/pull/77")
+
+	failing := sqlitestore.New(database)
+	failing.Entities = failingEntityStore{EntityStore: failing.Entities}
+	Attach(context.Background(), failing, runmode.LocalDefaultOrgID, "r-resolve", entA.ID)
+
+	if role := roleFor(t, database, "r-resolve", entA.ID); role != domain.MemoryRolePrimary {
+		t.Errorf("primary role = %q, want %q despite the resolve failure", role, domain.MemoryRolePrimary)
+	}
+	if ent := entityBySource(t, database, "github", "o/r#77"); ent != nil {
+		t.Errorf("failed resolve minted an entity: %+v", ent)
+	}
+	assertSkips(t, skips, map[skipKey]int64{{domain.MemoryRoleProduced, "github", skipError}: 1})
+}
+
+// failingEntityStore fails GetByExternalIDSystem, the first read a produced
+// artifact carrying a provider id resolves through; every other method
+// delegates to the embedded real store.
+type failingEntityStore struct {
+	db.EntityStore
+}
+
+func (failingEntityStore) GetByExternalIDSystem(context.Context, string, string, string, string) (*domain.Entity, error) {
+	return nil, errors.New("entity read failed")
 }
 
 // TestAttach_ListFailureLeavesPrimaryIntact: when the artifact listing fails,

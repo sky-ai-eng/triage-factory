@@ -96,7 +96,8 @@ route `9464` externally**; scrape it from inside the compose network / cluster.
 
 Beyond the standard Go runtime and process collectors (`go_*`, `process_*`),
 the TF-specific set today covers dropped audit records, the entity
-terminal-state invariant, the work queues, claims, Slack message-event volume,
+terminal-state invariant, unwritten conversation memory links, the work
+queues, claims, Slack message-event volume,
 and the outcome of every request TF makes to GitHub, Jira, Slack, and the LLM
 providers.
 
@@ -188,6 +189,35 @@ Each pass also logs a `WARN` line per nonzero count naming up to twenty ids.
 ```
 max_over_time(tf_entity_terminal_active[30m]) > 0
 tf_tasks_open_on_closed_entity > 0
+```
+
+### Conversation memory links
+
+A conversation's memory is found from an entity through a link row naming the
+conversation, the entity and the role the entity played. A `touched` link is
+written when a run's exec verb reads or writes the entity, by the executor
+that drives the run. A `produced` link is written for each external object the
+run created or changed when the run ends, from the artifacts it recorded: by
+the executor, or by the control pod when it generates the memory of a run
+that ended without writing one.
+
+- `tf_memory_entity_links_skipped_total{role, source, reason, org_id}` —
+  links a writer owed and did not write. The run is unaffected, but a later run
+  on that entity does not see this conversation's memory through it. `source`
+  is the entity's source (`github`, `jira`, `linear`, `slack`). `reason` is:
+
+  | `reason` | What happened |
+  | --- | --- |
+  | `no_entity` | No entity carries the object, and the writer cannot create one. A Jira or Linear entity is created only with its project or team, which an artifact does not record and a touch has only when the response it read named it, so a `produced` skip here follows a `touched` one that failed for the same object. |
+  | `error` | Resolving the entity, or writing the link, failed. |
+
+  Links not owed are not counted: an object in a GitHub host or Jira site the
+  org has since left, a source the org has not configured, or a target that
+  names no entity (a branch push). Each skip is also a `WARN` line naming the
+  conversation. Counters are per process, so `sum` across pods.
+
+```
+sum by (role, source, reason) (increase(tf_memory_entity_links_skipped_total[1d]))   # not an alert: how many links a day go unwritten, and why
 ```
 
 ### Work queues

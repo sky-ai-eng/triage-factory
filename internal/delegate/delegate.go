@@ -57,6 +57,11 @@ type runConfig struct {
 	repo     string     // resolved GitHub repo (empty for runs with no PR)
 	prNumber int        // PR number (0 for non-PR runs)
 
+	// jiraProject is a Jira task's project key, its registry row's
+	// (taskJiraProject); empty for every other run, and when the row could
+	// not be read.
+	jiraProject string
+
 	// prCheckout is the host path of a GitHub PR run's checkout of its pull
 	// request, <root>/<owner>/<repo>/pr-<N>; empty for every other run.
 	prCheckout string
@@ -126,6 +131,16 @@ func (c runConfig) repoSlug() string {
 		return ""
 	}
 	return c.owner + "/" + c.repo
+}
+
+// container is what the task's entity references, by the name the task
+// context shows it under (BuildTaskContext): the repository's owner/repo, or
+// the Jira project's key.
+func (c runConfig) container() string {
+	if slug := c.repoSlug(); slug != "" {
+		return slug
+	}
+	return c.jiraProject
 }
 
 // ErrTaskBusy is returned by Delegate, on either path, when the insert loses

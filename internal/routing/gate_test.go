@@ -327,12 +327,12 @@ func TestJiraGate_DisjointProjects_DropsUntrackingTeam(t *testing.T) {
 	setJiraHost(t, dbh)
 	seedJiraUserOnTeam(t, dbh, teamA, "acct-aidan", "aidan")
 
-	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-1", "", "issue", "An issue", "https://example.com/SKY-1")
+	entity, _, err := st.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, jiraTestHost, "SKY-1", "", dbseed.JiraIssueProject("SKY-1"), "An issue", "https://example.com/SKY-1")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
 
-	gateRouter(dbh).HandleEvent(context.Background(), jiraAssignedEvent(t, entity.ID, "SKY"))
+	gateRouter(dbh).HandleEvent(context.Background(), jiraAssignedEvent(t, *entity, "SKY"))
 
 	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil {
@@ -373,15 +373,16 @@ func seedMatchAllJiraAssignedRule(t *testing.T, database *sql.DB, teamID string)
 	}
 }
 
-func jiraAssignedEvent(t *testing.T, entityID, project string) domain.Event {
+func jiraAssignedEvent(t *testing.T, entity domain.Entity, project string) domain.Event {
 	t.Helper()
 	meta := events.JiraIssueAssignedMetadata{
-		Assignee: "aidan", AssigneeAccountID: "acct-aidan", IssueKey: project + "-1", Project: project, Status: "To Do",
+		Assignee: "aidan", AssigneeAccountID: "acct-aidan", IssueKey: project + "-1", Project: project,
+		JiraProjectID: entity.JiraProjectID, Status: "To Do",
 	}
 	metaJSON, _ := json.Marshal(meta)
 	return domain.Event{
 		EventType:    domain.EventJiraIssueAssigned,
-		EntityID:     &entityID,
+		EntityID:     &entity.ID,
 		MetadataJSON: string(metaJSON),
 		CreatedAt:    time.Now(),
 		OrgID:        runmode.LocalDefaultOrgID,
@@ -540,7 +541,7 @@ func TestGate_LocalN1_NoOp(t *testing.T) {
 // TestJiraGate_KeyChangedReachesBothProjectsTeams: key_changed passes for a
 // team that tracks either the project the issue moved to or the one it left,
 // including when the destination is tracked by no team. No other Jira event
-// reads old_project.
+// reads old_jira_project_id.
 func TestJiraGate_KeyChangedReachesBothProjectsTeams(t *testing.T) {
 	dbh := newGateDB(t)
 	ctx := context.Background()
@@ -558,8 +559,8 @@ func TestJiraGate_KeyChangedReachesBothProjectsTeams(t *testing.T) {
 
 	moved := func(eventType, from, to string) domain.Event {
 		meta, _ := json.Marshal(events.JiraIssueKeyChangedMetadata{
-			IssueKey: to + "-7", IssueID: "10001", Project: to,
-			OldIssueKey: from + "-1", OldProject: from,
+			IssueKey: to + "-7", IssueID: "10001", Project: to, JiraProjectID: jiraProjectRow(t, dbh, to),
+			OldIssueKey: from + "-1", OldProject: from, OldJiraProjectID: jiraProjectRow(t, dbh, from),
 		})
 		return domain.Event{EventType: eventType, EntityID: new(string), MetadataJSON: string(meta), CreatedAt: time.Now(), OrgID: runmode.LocalDefaultOrgID}
 	}
@@ -582,4 +583,46 @@ func TestJiraGate_KeyChangedReachesBothProjectsTeams(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestJiraGate_FollowsTheProjectAcrossAKeyRename: the gate matches an event to
+// the teams tracking its project by the registry row its metadata names, so an
+// event spelling the project's new key passes for the team that tracked the
+// project under the old one, whether or not the registry row has been
+// re-keyed yet, and an event naming another project's row does not.
+func TestJiraGate_FollowsTheProjectAcrossAKeyRename(t *testing.T) {
+	dbh := newGateDB(t)
+	ctx := context.Background()
+	teamA := runmode.LocalDefaultTeamID
+	teamB := seedGateTeam(t, dbh, "team-b")
+	trackJiraProjects(t, dbh, teamA, domain.JiraProjectStatusRules{
+		ProjectKey: "ENG", PickupMembers: jiraRefs("To Do"),
+		InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
+		DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
+	})
+	eng := jiraProjectRow(t, dbh, "ENG")
+	r := gateRouter(dbh)
+	assigned := func(key, row string) domain.Event {
+		meta, _ := json.Marshal(events.JiraIssueAssignedMetadata{
+			IssueKey: key + "-1", Project: key, JiraProjectID: row, Status: "To Do",
+		})
+		return domain.Event{EventType: domain.EventJiraIssueAssigned, EntityID: new(string), MetadataJSON: string(meta), CreatedAt: time.Now(), OrgID: runmode.LocalDefaultOrgID}
+	}
+	check := func(when string, evt domain.Event, want map[string]bool) {
+		t.Helper()
+		for team, w := range want {
+			if got := r.handlerScopeMatchesEvent(ctx, evt, domain.EventHandler{TeamID: team}, map[string]bool{}); got != w {
+				t.Errorf("%s: gate for team %s = %v, want %v", when, team, got, w)
+			}
+		}
+	}
+
+	// The cycle that sees the rename: the issue's key is CORE-1 while the
+	// registry row still holds ENG.
+	check("before the registry row is re-keyed", assigned("CORE", eng), map[string]bool{teamA: true, teamB: false})
+	if _, err := sqlitestore.New(dbh).JiraProjects.RefreshSystem(ctx, runmode.LocalDefaultOrgID, eng, "id-ENG", "CORE", "Core"); err != nil {
+		t.Fatalf("re-key the registry row: %v", err)
+	}
+	check("after it is re-keyed", assigned("CORE", eng), map[string]bool{teamA: true, teamB: false})
+	check("another project's row under the tracked key", assigned("CORE", jiraProjectRow(t, dbh, "OPS")), map[string]bool{teamA: false, teamB: false})
 }

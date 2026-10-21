@@ -62,10 +62,11 @@ func (r *recordingJiraResolver) snapshot() (calls int, orgID, userID string) {
 // seedQueuedJiraTask installs the FK chain for an unclaimed, queued Jira task.
 func seedQueuedJiraTask(t *testing.T, db *sql.DB, entityID, sourceID, taskID string) {
 	t.Helper()
+	project := dbseed.JiraIssueProjectID(t, db, runmode.LocalDefaultOrgID, "https://jira.example.com", sourceID)
 	if _, err := db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope)
-		 VALUES (?, 'jira', ?, 'issue', 'active', 'https://jira.example.com')`,
-		entityID, sourceID,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, jira_project_id)
+		 VALUES (?, 'jira', ?, 'issue', 'active', 'https://jira.example.com', ?)`,
+		entityID, sourceID, project,
 	); err != nil {
 		t.Fatalf("seed jira entity: %v", err)
 	}

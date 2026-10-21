@@ -131,7 +131,7 @@ func TestRefreshGitHub_FailedCreateKeepsCursor(t *testing.T) {
 	trackRepos(t, stores, org, []string{"octo/repo"})
 
 	entities := &faultyEntityStore{EntityStore: stores.Entities, failCreate: "octo/repo#42"}
-	tr := New(database, &recordingPublisher{}, stores.Tasks, entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, &recordingPublisher{}, stores.Tasks, entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	refreshRepos(t, tr, client, "octo/repo")
@@ -184,7 +184,7 @@ func TestRefreshGitHub_FailedReactivateKeepsCursor(t *testing.T) {
 			}
 
 			entities := &faultyEntityStore{EntityStore: stores.Entities, failReactivate: true, reactivateLost: tc.lost}
-			tr := New(database, &recordingPublisher{}, stores.Tasks, entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+			tr := New(database, &recordingPublisher{}, stores.Tasks, entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 			client := ghclient.NewClient(srv.URL, "tok")
 
 			refreshRepos(t, tr, client, "octo/repo")
@@ -223,7 +223,7 @@ func TestRefreshGitHub_CursorWrittenAfterPRsStored(t *testing.T) {
 		etag, polledAt := pullsCursorOf(t, stores, "octo/repo")
 		seen = append(seen, cursor{etag, polledAt})
 	}
-	tr := New(database, &recordingPublisher{}, stores.Tasks, entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, &recordingPublisher{}, stores.Tasks, entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 
 	refreshRepos(t, tr, ghclient.NewClient(srv.URL, "tok"), "octo/repo")
 	if len(seen) == 0 {
@@ -247,7 +247,7 @@ func TestRefreshGitHub_CursorStampsListingStart(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 	trackRepos(t, stores, org, []string{"octo/repo"})
-	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 
 	refreshRepos(t, tr, ghclient.NewClient(srv.URL, "tok"), "octo/repo")
 	srv.mu.Lock()
@@ -287,7 +287,7 @@ func TestRefreshGitHub_ExpiredCycleContextKeepsFinishedCursor(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 	trackRepos(t, stores, org, repos)
-	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()

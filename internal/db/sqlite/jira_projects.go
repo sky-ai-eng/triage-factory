@@ -37,46 +37,71 @@ func (s *jiraProjectStore) GetSystem(ctx context.Context, orgID, id string) (*do
 }
 
 func (s *jiraProjectStore) FindOrCreate(ctx context.Context, orgID, site, externalID, key, name string) (domain.JiraProject, error) {
-	if orgID == "" || site == "" || externalID == "" || key == "" {
-		return domain.JiraProject{}, fmt.Errorf("find or create jira project: org, site, project id and key are required")
-	}
 	var out domain.JiraProject
 	err := inTx(ctx, s.q, func(tx queryer) error {
-		// An unresolved row under the key is this project, unless another row
-		// already carries the id; then that row is the project and the
-		// unresolved one is left for the poll to merge.
-		p, err := db.ScanJiraProject(tx.QueryRowContext(ctx, `
-			UPDATE jira_projects
-			   SET external_id = ?, project_name = ?, updated_at = CURRENT_TIMESTAMP
-			 WHERE org_id = ? AND site = ? AND project_key = ? AND external_id IS NULL
-			   AND NOT EXISTS (
-			       SELECT 1 FROM jira_projects o
-			        WHERE o.org_id = ? AND o.site = ? AND o.external_id = ?)
-			RETURNING `+db.JiraProjectColumns,
-			externalID, name, orgID, site, key, orgID, site, externalID))
-		if err == nil {
-			out = p
-			return nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("resolve jira project %s: %w", key, err)
-		}
-		out, err = db.ScanJiraProject(tx.QueryRowContext(ctx, `
-			INSERT INTO jira_projects (id, org_id, site, external_id, project_key, project_name)
-			VALUES (?, ?, ?, ?, ?, ?)
-			ON CONFLICT (org_id, site, external_id) WHERE external_id IS NOT NULL DO UPDATE SET
-				project_key = excluded.project_key,
-				project_name = excluded.project_name,
-				updated_at = CURRENT_TIMESTAMP
-			RETURNING `+db.JiraProjectColumns,
-			uuid.New().String(), orgID, site, externalID, key, name))
-		if err != nil {
-			return fmt.Errorf("upsert jira project %s: %w", key, err)
-		}
-		return nil
+		var err error
+		out, err = findOrCreateJiraProject(ctx, tx, orgID, site, externalID, key, name)
+		return err
 	})
 	if err != nil {
 		return domain.JiraProject{}, err
+	}
+	return out, nil
+}
+
+func (s *jiraProjectStore) FindOrCreateSystem(ctx context.Context, orgID, site, externalID, key, name string) (domain.JiraProject, error) {
+	return s.FindOrCreate(ctx, orgID, site, externalID, key, name)
+}
+
+// findOrCreateJiraProject is FindOrCreate inside the caller's transaction, the
+// one get-or-create both the registry's doors and the entity store's Jira
+// create run. An empty name keeps a found row's name.
+func findOrCreateJiraProject(ctx context.Context, tx queryer, orgID, site, externalID, key, name string) (domain.JiraProject, error) {
+	if orgID == "" || site == "" || externalID == "" || key == "" {
+		return domain.JiraProject{}, fmt.Errorf("find or create jira project: org, site, project id and key are required")
+	}
+	found, err := db.ScanJiraProject(tx.QueryRowContext(ctx,
+		`SELECT `+db.JiraProjectColumns+` FROM jira_projects WHERE org_id = ? AND site = ? AND external_id = ?`,
+		orgID, site, externalID))
+	switch {
+	case err == nil:
+		if found.Key == key && (name == "" || found.Name == name) {
+			return found, nil
+		}
+		out, err := db.ScanJiraProject(tx.QueryRowContext(ctx, `
+			UPDATE jira_projects
+			   SET project_key = ?, project_name = COALESCE(NULLIF(?, ''), project_name), updated_at = CURRENT_TIMESTAMP
+			 WHERE id = ?
+			RETURNING `+db.JiraProjectColumns,
+			key, name, found.ID))
+		if err != nil {
+			return domain.JiraProject{}, fmt.Errorf("refresh jira project %s: %w", key, err)
+		}
+		return out, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return domain.JiraProject{}, fmt.Errorf("find jira project %s: %w", externalID, err)
+	}
+	// No row carries the id, so an unresolved row under the key is this
+	// project, and is resolved in place.
+	out, err := db.ScanJiraProject(tx.QueryRowContext(ctx, `
+		UPDATE jira_projects
+		   SET external_id = ?, project_name = COALESCE(NULLIF(?, ''), project_name), updated_at = CURRENT_TIMESTAMP
+		 WHERE org_id = ? AND site = ? AND project_key = ? AND external_id IS NULL
+		RETURNING `+db.JiraProjectColumns,
+		externalID, name, orgID, site, key))
+	if err == nil {
+		return out, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return domain.JiraProject{}, fmt.Errorf("resolve jira project %s: %w", key, err)
+	}
+	out, err = db.ScanJiraProject(tx.QueryRowContext(ctx, `
+		INSERT INTO jira_projects (id, org_id, site, external_id, project_key, project_name)
+		VALUES (?, ?, ?, ?, ?, ?)
+		RETURNING `+db.JiraProjectColumns,
+		uuid.New().String(), orgID, site, externalID, key, name))
+	if err != nil {
+		return domain.JiraProject{}, fmt.Errorf("create jira project %s: %w", key, err)
 	}
 	return out, nil
 }
@@ -134,8 +159,13 @@ func (s *jiraProjectStore) RefreshSystem(ctx context.Context, orgID, id, externa
 
 // mergeJiraProject folds registry row from into row to: from's rules move to
 // to, except where the team already has a rule for to, which it keeps; every
-// team's display order names to where it named from; and from is deleted.
+// team's display order names to where it named from; every issue entity that
+// references from references to; and from is deleted.
 func mergeJiraProject(ctx context.Context, tx queryer, orgID, from, to string) error {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE entities SET jira_project_id = ? WHERE jira_project_id = ?`, to, from); err != nil {
+		return fmt.Errorf("move jira entities to %s: %w", to, err)
+	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE jira_project_status_rules SET jira_project_id = ?
 		 WHERE jira_project_id = ?

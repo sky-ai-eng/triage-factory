@@ -85,7 +85,7 @@ func TestJiraReporter_ReachesReporterIn(t *testing.T) {
 				if tc.curr != nil {
 					tc.curr(&curr)
 				}
-				evt := findEvent(DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil), tc.eventType)
+				evt := findEvent(DiffJiraSnapshots(prev, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil), tc.eventType)
 				if evt == nil {
 					t.Fatalf("no %s event", tc.eventType)
 				}
@@ -116,7 +116,7 @@ func TestJiraReporter_ChangeEmitsNothing(t *testing.T) {
 	prev := domain.JiraSnapshot{ID: "10001", Key: "SKY-1", Status: "To Do", Reporter: "Ada", ReporterAccountID: "ada-id"}
 	curr := prev
 	curr.Reporter, curr.ReporterAccountID = "Bob", "bob-id"
-	if evts := DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil); len(evts) != 0 {
+	if evts := DiffJiraSnapshots(prev, curr, testEntityID, JiraEventProjects{}, testDoneStatuses, nil); len(evts) != 0 {
 		t.Errorf("reporter change emitted %v, want nothing", eventTypes(evts))
 	}
 }

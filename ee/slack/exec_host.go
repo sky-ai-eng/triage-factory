@@ -360,7 +360,7 @@ func (h *slackExecHandler) react(ctx context.Context, rt agenthost.ExtensionRunt
 		ExternalID: a.TS,
 		Credential: domain.CredentialSlackBot,
 		DetailJSON: string(detail),
-	}, "")
+	}, domain.EntityContainer{})
 	return slackReactResult{}, nil
 }
 
@@ -444,7 +444,7 @@ func (h *slackExecHandler) recordMessage(ctx context.Context, rt agenthost.Exten
 		URL:        permalink,
 		Credential: domain.CredentialSlackBot,
 	}
-	rt.Record(ctx, a, act, "")
+	rt.Record(ctx, a, act, domain.EntityContainer{})
 }
 
 // permalinkBestEffort resolves ts's shareable link; "" on any failure — a
@@ -559,7 +559,7 @@ func (h *slackExecHandler) readThread(ctx context.Context, rt agenthost.Extensio
 	// read and a human mention resolve to the same entity. Best-effort via the
 	// runtime, relayed to the orchestrator on the sidecar. `read channel` is
 	// set-returning and never touches.
-	rt.RecordReadTouch(ctx, domain.ArtifactProviderSlack, domain.SlackSourceID(a.Channel, a.TS), "", "", "")
+	rt.RecordReadTouch(ctx, domain.ArtifactProviderSlack, domain.SlackSourceID(a.Channel, a.TS), "", domain.EntityContainer{}, "")
 	return h.viewMessages(ctx, caller, token, msgs), nil
 }
 

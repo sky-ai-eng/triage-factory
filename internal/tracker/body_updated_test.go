@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -37,7 +38,7 @@ func TestBodyUpdatedDiff(t *testing.T) {
 			jiraCurr := domain.JiraSnapshot{Key: "PROJ-1", BodyHash: tc.curr, UpdatedAt: updated}
 			for _, evt := range []*domain.Event{
 				findEvent(DiffPRSnapshots(ghPrev, ghCurr, testEntityID, testRepositoryID, testUser, nil, nil, nil), domain.EventGitHubPRBodyUpdated),
-				findEvent(DiffJiraSnapshots(jiraPrev, jiraCurr, testEntityID, nil, nil), domain.EventJiraIssueBodyUpdated),
+				findEvent(DiffJiraSnapshots(jiraPrev, jiraCurr, testEntityID, JiraEventProjects{}, nil, nil), domain.EventJiraIssueBodyUpdated),
 			} {
 				if (evt != nil) != tc.want {
 					t.Fatalf("body update = %v, want present=%v", evt, tc.want)
@@ -58,7 +59,7 @@ func TestBodyUpdatedDiff(t *testing.T) {
 	if evt := findEvent(DiffPRSnapshots(domain.PRSnapshot{}, domain.PRSnapshot{Number: 1, BodyHash: "first"}, testEntityID, testRepositoryID, testUser, nil, nil, nil), domain.EventGitHubPRBodyUpdated); evt != nil {
 		t.Fatal("first discovery emitted a body update")
 	}
-	if evt := findEvent(DiffJiraSnapshots(domain.JiraSnapshot{}, domain.JiraSnapshot{Key: "PROJ-1", BodyHash: "first"}, testEntityID, nil, nil), domain.EventJiraIssueBodyUpdated); evt != nil {
+	if evt := findEvent(DiffJiraSnapshots(domain.JiraSnapshot{}, domain.JiraSnapshot{Key: "PROJ-1", BodyHash: "first"}, testEntityID, JiraEventProjects{}, nil, nil), domain.EventJiraIssueBodyUpdated); evt != nil {
 		t.Fatal("first discovery emitted a body update")
 	}
 }
@@ -102,12 +103,12 @@ func TestRefreshJira_BatchDescriptionLifecycle(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "PROJ-1", "10001", "issue", "", "")
+	entity, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "PROJ-1", "10001", dbseed.JiraIssueProject("PROJ-1"), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	long := strings.Repeat("é", 2100)
 	quote := func(s string) string { b, _ := json.Marshal(s); return string(b) }

@@ -107,7 +107,7 @@ func TestBuildTaskContext_Jira(t *testing.T) {
 		EntitySourceID: "SKY-123",
 	}
 
-	got := BuildTaskContext(task, "", string(metaJSON), "", nil)
+	got := BuildTaskContext(task, "SKY", string(metaJSON), "", nil)
 
 	for _, want := range []string{
 		"- Issue: SKY-123",

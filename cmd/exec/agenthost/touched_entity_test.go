@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -32,8 +33,9 @@ func TestResolveTouchedEntity_MapsProviderAndTarget(t *testing.T) {
 			wantEntity: true, wantSource: "github", wantKind: "pr",
 		},
 		{
-			name:       "jira issue target with its id → issue entity",
-			coord:      entityCoordinate{provider: domain.ArtifactProviderJira, target: "SKY-123", externalID: "10123", url: "https://x/browse/SKY-123"},
+			name: "jira issue target with its id → issue entity",
+			coord: entityCoordinate{provider: domain.ArtifactProviderJira, target: "SKY-123", externalID: "10123", url: "https://x/browse/SKY-123",
+				container: domain.EntityContainer{JiraProject: domain.JiraProjectRef{ID: "10000", Key: "SKY"}}},
 			wantEntity: true, wantSource: "jira", wantKind: "issue",
 		},
 		{
@@ -161,7 +163,7 @@ func TestResolveTouchedEntity_FollowsAMovedJiraIssue(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	site := testScope("jira")
 
-	moved, _, err := stores.Entities.FindOrCreateSystem(ctx, org, "jira", site, "OLD-7", "10007", "issue", "Moved", site+"/browse/OLD-7")
+	moved, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, site, "OLD-7", "10007", dbseed.JiraIssueProject("OLD-7"), "Moved", site+"/browse/OLD-7")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +176,7 @@ func TestResolveTouchedEntity_FollowsAMovedJiraIssue(t *testing.T) {
 		t.Errorf("entity = %+v, want it renamed onto NEW-7", got)
 	}
 
-	legacy, _, err := stores.Entities.FindOrCreateSystem(ctx, org, "jira", site, "SKY-8", "", "issue", "Legacy", "")
+	legacy, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, site, "SKY-8", "", dbseed.JiraIssueProject("SKY-8"), "Legacy", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +230,7 @@ func TestResolveTouchedEntity_FindsAPullRequestByItsNodeID(t *testing.T) {
 
 	pr := domain.NewPullRequestArtifact("octo/new", 7, "PR_7", "feature", "main", "https://github.com/octo/new/pull/7", "Widget", "", false)
 	act := &domain.ExternalAction{Provider: domain.ArtifactProviderGitHub, Target: pr.Target, URL: pr.URL}
-	if got := recordTouchInfo(ctx, stores, info, &pr, act, ""); got.entityID != stored.ID {
+	if got := recordTouchInfo(ctx, stores, info, &pr, act, domain.EntityContainer{}); got.entityID != stored.ID {
 		t.Errorf("funnel touch resolved %q, want the entity carrying the artifact's node id %s", got.entityID, stored.ID)
 	}
 }
