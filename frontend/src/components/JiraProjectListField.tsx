@@ -14,9 +14,10 @@ import { fetchTeamTrackedJiraProjects, type TrackedJiraProject } from '../pages/
  *  back to the acting team, which is the sole team in that case.
  *
  *  A stored entry the team no longer tracks stays in the value and renders
- *  as a removable "not tracked" chip, so opening and saving a handler never
- *  drops it without the user seeing it. Nothing the editor can read names a
- *  registry row the team does not track, so the chip shows its id.
+ *  as a removable "Untracked Jira project" chip, so opening and saving a
+ *  handler never drops it without the user seeing it. Nothing the editor can
+ *  read names a registry row the team does not track, so the chip carries the
+ *  row's id only in its tooltip.
  *
  *  Wire shape: `string[] | undefined` — undefined when nothing is selected,
  *  which is no filter on the project. */
@@ -98,13 +99,13 @@ export default function JiraProjectListField({
             <span
               key={id}
               className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-reported border bg-tint-2 text-ink-2 border-line-2"
-              title="The team does not track this Jira project, so this filter never matches it."
+              title={`The team does not track this Jira project (registry id ${id}), so this filter never matches it.`}
             >
-              {id} · not tracked
+              Untracked Jira project
               <button
                 type="button"
                 onClick={() => set(selected.filter((p) => p !== id))}
-                aria-label={`Remove ${id}`}
+                aria-label="Remove untracked Jira project"
                 className="hover:text-ink-1"
               >
                 <X size={11} aria-hidden="true" />

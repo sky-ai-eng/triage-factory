@@ -665,9 +665,10 @@ describe('PredicateEditor jira_project_id_in', () => {
     )
 
     expect(await screen.findByRole('checkbox', { name: 'SKY Sky' })).toBeChecked()
-    expect(screen.getByText('jp-old · not tracked')).toBeInTheDocument()
+    const chip = screen.getByText('Untracked Jira project')
+    expect(chip).toHaveAttribute('title', expect.stringContaining('jp-old'))
 
-    fireEvent.click(screen.getByRole('button', { name: 'Remove jp-old' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove untracked Jira project' }))
     expect(onChange).toHaveBeenCalledWith({ jira_project_id_in: ['jp-sky'] })
   })
 
