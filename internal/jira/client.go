@@ -451,7 +451,10 @@ type Status struct {
 }
 
 // ProjectStatuses returns all unique statuses available in a project, named by
-// its id or its key, deduplicated across issue types.
+// its id or its key, deduplicated across issue types by status id. Two
+// statuses that share a name and have different ids are both returned, since
+// a rule names a status by its id; a status without an id is deduplicated by
+// its name.
 func (c *Client) ProjectStatuses(ctx context.Context, idOrKey string) ([]Status, error) {
 	url := c.apiURL("project/%s/statuses", idOrKey)
 	body, err := c.get(ctx, url)
@@ -467,12 +470,17 @@ func (c *Client) ProjectStatuses(ctx context.Context, idOrKey string) ([]Status,
 		return nil, fmt.Errorf("parse project statuses: %w", err)
 	}
 
-	seen := map[string]bool{}
+	type identity struct{ id, name string }
+	seen := map[identity]bool{}
 	var result []Status
 	for _, it := range issueTypes {
 		for _, s := range it.Statuses {
-			if !seen[s.Name] {
-				seen[s.Name] = true
+			key := identity{id: s.ID}
+			if s.ID == "" {
+				key = identity{name: s.Name}
+			}
+			if !seen[key] {
+				seen[key] = true
 				result = append(result, s)
 			}
 		}
@@ -629,11 +637,10 @@ type Issue struct {
 		Description json.RawMessage `json:"description"`
 		Status      *Status         `json:"status,omitempty"`
 		IssueType   *struct {
+			ID   string `json:"id"`
 			Name string `json:"name"`
 		} `json:"issuetype,omitempty"`
-		Priority *struct {
-			Name string `json:"name"`
-		} `json:"priority,omitempty"`
+		Priority *Priority  `json:"priority,omitempty"`
 		Assignee *IssueUser `json:"assignee,omitempty"`
 		Reporter *IssueUser `json:"reporter,omitempty"`
 		// Project is the project the issue is in now. Its ID survives a

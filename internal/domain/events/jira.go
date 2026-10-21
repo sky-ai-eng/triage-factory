@@ -46,7 +46,9 @@ type JiraIssueAssignedMetadata struct {
 	Project           string   `json:"project"`   // "SKY"
 	JiraProjectID     string   `json:"jira_project_id"`
 	IssueType         string   `json:"issue_type"`
+	IssueTypeID       string   `json:"issue_type_id"`
 	Priority          string   `json:"priority"`
+	PriorityID        string   `json:"priority_id"`
 	Status            string   `json:"status"`
 	Summary           string   `json:"summary"`
 	Labels            []string `json:"labels"`
@@ -84,7 +86,9 @@ type JiraIssueAvailableMetadata struct {
 	Project           string   `json:"project"`
 	JiraProjectID     string   `json:"jira_project_id"`
 	IssueType         string   `json:"issue_type"`
+	IssueTypeID       string   `json:"issue_type_id"`
 	Priority          string   `json:"priority"`
+	PriorityID        string   `json:"priority_id"`
 	Status            string   `json:"status"`
 	Summary           string   `json:"summary"`
 	Labels            []string `json:"labels"`
@@ -122,9 +126,11 @@ type JiraIssueStatusChangedMetadata struct {
 	Project           string `json:"project"`
 	JiraProjectID     string `json:"jira_project_id"`
 	IssueType         string `json:"issue_type"`
+	IssueTypeID       string `json:"issue_type_id"`
 	OldStatus         string `json:"old_status"`
 	NewStatus         string `json:"new_status"` // also the event's dedup_key
 	Priority          string `json:"priority"`
+	PriorityID        string `json:"priority_id"`
 }
 
 type JiraIssueStatusChangedPredicate struct {
@@ -155,7 +161,9 @@ type JiraIssuePriorityChangedMetadata struct {
 	Project           string `json:"project"`
 	JiraProjectID     string `json:"jira_project_id"`
 	OldPriority       string `json:"old_priority"`
+	OldPriorityID     string `json:"old_priority_id"`
 	NewPriority       string `json:"new_priority"` // also the event's dedup_key
+	NewPriorityID     string `json:"new_priority_id"`
 }
 
 type JiraIssuePriorityChangedPredicate struct {
@@ -219,6 +227,7 @@ type JiraIssueCompletedMetadata struct {
 	Project           string `json:"project"`
 	JiraProjectID     string `json:"jira_project_id"`
 	IssueType         string `json:"issue_type"`
+	IssueTypeID       string `json:"issue_type_id"`
 	FinalStatus       string `json:"final_status"`
 }
 
@@ -253,7 +262,9 @@ type JiraIssueBecameAtomicMetadata struct {
 	Project           string   `json:"project"`
 	JiraProjectID     string   `json:"jira_project_id"`
 	IssueType         string   `json:"issue_type"`
+	IssueTypeID       string   `json:"issue_type_id"`
 	Priority          string   `json:"priority"`
+	PriorityID        string   `json:"priority_id"`
 	Status            string   `json:"status"`
 	Summary           string   `json:"summary"`
 	Labels            []string `json:"labels"`
@@ -301,7 +312,9 @@ type JiraIssueLabelMetadata struct {
 	Project           string   `json:"project"`
 	JiraProjectID     string   `json:"jira_project_id"`
 	IssueType         string   `json:"issue_type"`
+	IssueTypeID       string   `json:"issue_type_id"`
 	Priority          string   `json:"priority"`
+	PriorityID        string   `json:"priority_id"`
 	Status            string   `json:"status"`
 	Summary           string   `json:"summary"`
 	LabelName         string   `json:"label_name"` // also the event's dedup_key
@@ -374,6 +387,7 @@ type JiraIssueUnreachableMetadata struct {
 	Project           string `json:"project"`
 	JiraProjectID     string `json:"jira_project_id"`
 	IssueType         string `json:"issue_type"`
+	IssueTypeID       string `json:"issue_type_id"`
 	LastStatus        string `json:"last_status"`
 	Summary           string `json:"summary"`
 	Reason            string `json:"reason"` // one of the JiraUnreachable* values
@@ -413,6 +427,7 @@ type JiraIssueKeyChangedMetadata struct {
 	Project           string `json:"project"`
 	JiraProjectID     string `json:"jira_project_id"`
 	IssueType         string `json:"issue_type"`
+	IssueTypeID       string `json:"issue_type_id"`
 	Summary           string `json:"summary"`
 	OldIssueKey       string `json:"old_issue_key"`
 	OldProject        string `json:"old_project"`

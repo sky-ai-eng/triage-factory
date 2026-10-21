@@ -230,9 +230,9 @@ untouched for a switch back.
 
 | Event | ID | Trigger |
 |-------|----|---------|
-| **Issue Assigned** | `jira:issue:assigned` | The `assignee` field changes to a non-empty value |
+| **Issue Assigned** | `jira:issue:assigned` | The assignee changes to someone (compared by account id) |
 | **Issue Available** | `jira:issue:available` | An unassigned issue appears in the pickup queue, or an assigned issue becomes unassigned |
-| **Priority Changed** | `jira:issue:priority_changed` | The `priority` field changes |
+| **Priority Changed** | `jira:issue:priority_changed` | The priority changes (compared by id). Metadata carries `old_priority_id` and `new_priority_id` beside the names |
 | **New Comment** | `jira:issue:commented` | Someone other than TF commented since the last cycle. One event per cycle however many comments landed, naming every commenter — see [Comments](#comments) |
 | **Label Added** | `jira:issue:label_added` | A label is added. `dedup_key` is the label name — see [Labels](#labels) |
 | **Label Removed** | `jira:issue:label_removed` | A label is removed. `dedup_key` is the label name |
@@ -397,7 +397,9 @@ project's row in the `jira_projects` registry on the entity's site (see
 below). Every Jira event's metadata carries `issue_key`, `issue_id`,
 `project` — the project's key as the read that produced the event spelled it,
 for display — and `jira_project_id`, the project's registry row, which is
-what the router's team gate reads and what predicates match on.
+what the router's team gate reads and what predicates match on. An event that
+names the issue's priority or issue type carries Jira's id for it beside the
+name (`priority_id`, `issue_type_id`); predicates match the names.
 
 A handler predicate scopes to projects with `jira_project_id_in`, which names
 them by registry id (the `id` of an entry in `jira_projects` on
@@ -831,10 +833,11 @@ which it is matched on), `scope` (the org's Jira site) and
 - `id` (issue id), `key` (the entity's `source_id`), `project_id`, `project_key` (the project's key as the read spelled it), `summary`, `url`
 - `body_hash` — fingerprint of the complete description; the description itself is mirrored onto the entity, capped at 2,000 codepoints
 - `status`, `status_id` — compared by id
-- `assignee` (display name), `assignee_account_id`, `priority`
+- `assignee` (display name), `assignee_account_id` — compared by account id, so a display name change is not a reassignment; by display name only against a snapshot stored before account ids were recorded
 - `reporter` (display name), `reporter_account_id` — the account id is derived as the assignee's is (Cloud `accountId`, else Data Center `key`, else `name`). Carried on `assigned`, `available` and `became_atomic`, where `reporter_in` matches it. A reporter change emits nothing
 - `labels[]` — compared by name for `label_added` / `label_removed`
-- `issue_type`, `parent_key`
+- `priority`, `priority_id` — compared by id, so a priority renamed in Jira emits nothing; by name against a snapshot without an id
+- `issue_type`, `issue_type_id`, `parent_key`
 - `comment_count`, `last_comment_id`, `last_comment_at` — the newest comment; empty while it is past the page the batch read returns and has not been read
 - `open_subtask_count` — subtasks not in a configured done status
 - `created_at`, `updated_at`

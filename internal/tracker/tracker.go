@@ -2574,6 +2574,7 @@ func (t *Tracker) emitJiraUnreachable(ctx context.Context, orgID string, e domai
 			Project:           project,
 			JiraProjectID:     e.JiraProjectID,
 			IssueType:         snap.IssueType,
+			IssueTypeID:       snap.IssueTypeID,
 			LastStatus:        snap.Status,
 			Summary:           snap.Summary,
 			Reason:            reason,
@@ -3049,11 +3050,11 @@ func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []domain.
 		snap.Reporter = r.DisplayName
 		snap.ReporterAccountID = jiraclient.StableUserID(r.AccountID, r.Key, r.Name)
 	}
-	if issue.Fields.Priority != nil {
-		snap.Priority = issue.Fields.Priority.Name
+	if p := issue.Fields.Priority; p != nil {
+		snap.Priority, snap.PriorityID = p.Name, p.ID
 	}
-	if issue.Fields.IssueType != nil {
-		snap.IssueType = issue.Fields.IssueType.Name
+	if it := issue.Fields.IssueType; it != nil {
+		snap.IssueType, snap.IssueTypeID = it.Name, it.ID
 	}
 	if issue.Fields.Parent != nil {
 		snap.ParentKey = issue.Fields.Parent.Key

@@ -1199,19 +1199,6 @@ func RuleForJiraProject(rules []JiraProjectStatusRules, jiraProjectID string) *J
 	return nil
 }
 
-// JiraProjectKeys returns the ordered list of project keys with empty
-// entries filtered out. Mirrors the helper the deleted config package
-// exposed for poller dispatch and JQL queries.
-func JiraProjectKeys(rules []JiraProjectStatusRules) []string {
-	keys := make([]string, 0, len(rules))
-	for _, p := range rules {
-		if p.ProjectKey != "" {
-			keys = append(keys, p.ProjectKey)
-		}
-	}
-	return keys
-}
-
 // JiraAllPickupMembers returns the union of every project's pickup
 // members, in first-seen order, each member deduped. Used by JQL
 // queries that span every project a team tracks.
