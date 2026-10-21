@@ -32,9 +32,11 @@ const authorityBackdate = time.Hour
 // sealed bundle, the run tree or a workspace snapshot can carry it. Only the
 // certificate leaves, through certPEM, into the jail's trust file.
 //
-// The certificate is name-constrained to exactly the hosts the tunnel admits
-// and excludes every IP address, so a leaf it signs for anything else fails
-// verification in every client, even one handed the key.
+// The certificate is name-constrained to the hosts the tunnel admits and
+// excludes every IP address, so a leaf it signs for anything else fails
+// verification in every client, even one handed the key. A DNS name
+// constraint also admits the subdomains of each host; the CA signs only the
+// admitted hosts themselves, one leaf each.
 type authority struct {
 	cert    *x509.Certificate
 	key     *ecdsa.PrivateKey

@@ -65,15 +65,19 @@ tunnel terminates TLS for every host it admits, under the conditions in
 - **One hostname, one request shape.** The client is shown a leaf for the
   CONNECT host only and is served HTTP/1.1 only. Every request's `Host`
   must be the CONNECT host; upgrades, nested CONNECTs, ambiguous framing, a
-  GET or HEAD with a body, and method-override headers are refused.
+  GET or HEAD with a body, and method overrides (the override headers, a
+  `_method` parameter) are refused.
 - **Registries are read-only.** GET and HEAD, plus POST to the paths a
   registry lists as reads (npm's audit endpoints). Every other method is
   refused with a reason the client prints, and recorded.
 - **Pure pass-through.** The response, compressed or not, is copied back
   as the registry sent it. Nothing is cached.
+- **Bounded.** A run holds at most 64 sessions at once (`maxSessions`); a
+  CONNECT past that is refused with a reason, so one agent cannot spend its
+  sidecar's descriptors or the executor's address on open connections.
 
 The accepted residual is in §6.1: for npm and pip, a new dependency's
-bytes now pass through TF with only TLS behind them, and the first install
+bytes pass through TF with only TLS behind them, and the first install
 outside TF re-checks the lockfile's hash.
 
 ## Which lane does an ecosystem need? Probe — never assume

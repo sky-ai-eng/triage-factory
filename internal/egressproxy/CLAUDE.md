@@ -61,7 +61,8 @@ design of record, with every condition this package implements, is
   client whose TLS server name or `Host` differs from the CONNECT host,
   and every refused request get an explicit error and a recorded denial.
 - Never intercept GitHub or the LLM provider. They are not on the
-  allowlist, and the CA's name constraints cover only the hosts that are.
+  allowlist, and the CA's name constraints cover only the hosts that are
+  (and their subdomains, which the CA never signs for).
 - The CA's private key never leaves this process's memory: not the sealed
   bundle, not the run tree, not a workspace snapshot. Only its certificate
   goes into the jail's CA bundle.

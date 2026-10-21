@@ -205,8 +205,15 @@ type Server struct {
 	// Intercepted sessions' client conns and the cancel for their upstream
 	// requests, tracked so Shutdown can end them: http.Server.Shutdown
 	// ignores hijacked connections, which would otherwise outlive the run.
+	// closed is set by Shutdown as it sweeps them, so a session that
+	// finishes its setup afterwards is refused rather than missed.
 	mu       sync.Mutex
 	sessions map[net.Conn]context.CancelFunc
+	closed   bool
+
+	// sessionSlots holds one token per session in flight, from the
+	// upstream dial until the session ends (maxSessions).
+	sessionSlots chan struct{}
 }
 
 // denialQueueCap bounds the denial audit queue. Sized for bursts (a
@@ -242,8 +249,9 @@ func New(cfg Config) (*Server, error) {
 		resolve: func(ctx context.Context, host string) ([]netip.Addr, error) {
 			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 		},
-		dial:     dialer.DialContext,
-		sessions: make(map[net.Conn]context.CancelFunc),
+		dial:         dialer.DialContext,
+		sessions:     make(map[net.Conn]context.CancelFunc),
+		sessionSlots: make(chan struct{}, maxSessions),
 	}
 	if cfg.RecordDenial != nil {
 		s.denials = make(chan DeniedConnect, denialQueueCap)
@@ -319,14 +327,17 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.drainStop != nil {
 		s.stopOnce.Do(func() { close(s.drainStop) })
 	}
-	err := s.httpSrv.Shutdown(ctx)
+	// Sessions first, under the flag that refuses any still being set up,
+	// so a handler midway through its upstream dial cannot register one
+	// after the sweep.
 	s.mu.Lock()
+	s.closed = true
 	for c, cancel := range s.sessions {
 		cancel()
 		_ = c.Close()
 	}
 	s.mu.Unlock()
-	return err
+	return s.httpSrv.Shutdown(ctx)
 }
 
 // drainDenials is the single consumer of the denial queue: it delivers
@@ -420,6 +431,15 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			reason += "; " + g
 		}
 		s.deny(w, r, reason)
+		return
+	}
+
+	select {
+	case s.sessionSlots <- struct{}{}:
+		defer func() { <-s.sessionSlots }()
+	default:
+		s.refuse(w, r, http.StatusServiceUnavailable, fmt.Sprintf(
+			"this run already has %d connections open through the egress proxy; close some before opening more", maxSessions))
 		return
 	}
 

@@ -101,6 +101,11 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 		t.Fatalf("GenerateCert: %v", err)
 	}
 	certPath := sandbox.TrustedCABundlePath(conversationID)
+	// Registered before the writes, so a failed one still removes what it left.
+	t.Cleanup(func() {
+		_ = os.Remove(certPath)
+		_ = os.Remove(filepath.Dir(certPath))
+	})
 	if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
 		t.Fatalf("mkdir cert root: %v", err)
 	}
@@ -110,10 +115,6 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 	if err := os.Chown(certPath, net.JailUID(), sandbox.JailGID(net.Idx)); err != nil {
 		t.Fatalf("chown cert to the jail identity: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = os.Remove(certPath)
-		_ = os.Remove(filepath.Dir(certPath))
-	})
 
 	// The injector holds the REAL token; the box will get only the placeholder.
 	const placeholder = "run-placeholder-token"
@@ -243,6 +244,11 @@ func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
 		t.Fatalf("GenerateCert: %v", err)
 	}
 	certPath := sandbox.TrustedCABundlePath(conversationID)
+	// Registered before the writes, so a failed one still removes what it left.
+	t.Cleanup(func() {
+		_ = os.Remove(certPath)
+		_ = os.Remove(filepath.Dir(certPath))
+	})
 	if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
 		t.Fatalf("mkdir cert root: %v", err)
 	}
@@ -252,10 +258,6 @@ func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
 	if err := os.Chown(certPath, net.JailUID(), sandbox.JailGID(net.Idx)); err != nil {
 		t.Fatalf("chown cert to the jail identity: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = os.Remove(certPath)
-		_ = os.Remove(filepath.Dir(certPath))
-	})
 
 	// The run's git proxy, mounted behind the injector exactly as the sidecar
 	// mounts it — same handler, same gate.

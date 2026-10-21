@@ -294,12 +294,13 @@ conditions:
    whatever channels the run has, outside the run tree and fresh at every
    engagement, so a resumed run trusts a fresh CA; a Firecracker guest
    restored from a snapshot is sent the new one before its first tool call
-   (§8). The CA is valid for a
-   week, and an engagement that outlives it gets certificate errors rather
-   than a fallback. The length is not what limits it: its key dies with the
-   sidecar and the next engagement mints another, so it is trusted for one
-   engagement however long it is valid. It is name-constrained to exactly the hosts the tunnel admits,
-   with every IP address excluded. GitHub and the LLM provider are never
+   (§8). The CA is valid for a week, and an engagement that outlives it gets
+   certificate errors rather than a fallback. The length is not what limits
+   it: its key dies with the sidecar and the next engagement mints another,
+   so it is trusted for one engagement however long it is valid. It is
+   name-constrained to the hosts the tunnel admits, with every IP address
+   excluded; a DNS constraint also admits their subdomains, but the CA signs
+   only the admitted hosts. GitHub and the LLM provider are never
    intercepted; they keep their explicit endpoints.
 2. **Every host the tunnel admits is intercepted.** A host left opaque keeps
    both gaps.
@@ -317,7 +318,8 @@ conditions:
 5. **One request shape.** Upgrade and a nested `CONNECT` are refused, and so
    are a request with ambiguous framing (both `Content-Length` and
    `Transfer-Encoding`, or conflicting lengths), a GET or HEAD with a body,
-   and method-override headers (`X-HTTP-Method-Override` and its variants).
+   and method overrides: the `X-HTTP-Method-Override` headers in any
+   spelling, and a `_method` query parameter.
    Read-only means nothing if a GET can be turned into something else.
 6. **One hostname end to end.** The leaf the jail sees is minted for the
    `CONNECT` host only, so a client whose SNI differs fails its handshake.

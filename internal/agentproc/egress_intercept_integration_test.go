@@ -18,7 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// Live in-jail test of the egress interceptor (TFAC-1117): every toolchain
+// Live in-jail test of the egress interceptor: every toolchain
 // the rootfs ships fetches from a real registry through the run's egress
 // proxy, inside a real gVisor jail, trusting the interceptor through the
 // variables caBundleEnv sets and nothing else. A toolchain added to the
@@ -133,6 +133,11 @@ func TestIntegration_EgressIntercept_ToolchainsInTheJail(t *testing.T) {
 	// at the path the broker validates the mount against. Inlined rather than
 	// agenthost.WriteCABundle, which this package cannot import.
 	bundlePath := sandbox.TrustedCABundlePath(conversationID)
+	// Registered before the writes, so a failed one still removes what it left.
+	t.Cleanup(func() {
+		_ = os.Remove(bundlePath)
+		_ = os.Remove(filepath.Dir(bundlePath))
+	})
 	if err := os.MkdirAll(filepath.Dir(bundlePath), 0o700); err != nil {
 		t.Fatalf("mkdir bundle dir: %v", err)
 	}
@@ -142,10 +147,6 @@ func TestIntegration_EgressIntercept_ToolchainsInTheJail(t *testing.T) {
 	if err := os.Chown(bundlePath, net.JailUID(), sandbox.JailGID(net.Idx)); err != nil {
 		t.Fatalf("chown CA bundle to the jail identity: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = os.Remove(bundlePath)
-		_ = os.Remove(filepath.Dir(bundlePath))
-	})
 
 	env := []string{"PATH=/opt/tf/bin:/usr/local/bin:/usr/bin:/bin", "HOME=/work"}
 	env = append(env, proxyEnv...)

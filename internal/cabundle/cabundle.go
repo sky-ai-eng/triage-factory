@@ -2,7 +2,13 @@
 // the host's system roots followed by the certificates a run adds of its own.
 package cabundle
 
-import "os"
+import (
+	"os"
+
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
+)
+
+var cabundleLog = logging.Component("cabundle")
 
 // systemCABundleFiles are the conventional single-file CA bundles on Linux, in
 // the same order Go's own crypto/x509 probes them (root_linux.go's certFiles).
@@ -38,7 +44,8 @@ var systemCABundleFiles = []string{
 // construction, so nothing secret is in it.
 //
 // A missing or unreadable system bundle degrades to certs alone rather than
-// failing the run.
+// failing the run, with a warning: a client pointed at the file then trusts
+// only the run's own certificates, and fails against every public host.
 func WithSystemRoots(certs ...[]byte) []byte {
 	var out []byte
 	for _, path := range systemCABundleFiles {
@@ -48,6 +55,10 @@ func WithSystemRoots(certs ...[]byte) []byte {
 		}
 		out = appendPEM(out, roots)
 		break
+	}
+	if out == nil {
+		cabundleLog.Warn("no system CA bundle found; the trust file carries only this run's own certificates",
+			"searched", systemCABundleFiles)
 	}
 	for _, c := range certs {
 		out = appendPEM(out, c)

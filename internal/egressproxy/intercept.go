@@ -35,15 +35,26 @@ const (
 	// tarball can take minutes.
 	upstreamResponseHeaderTimeout = 60 * time.Second
 
-	// maxRefusedPath caps how much of a refused request's path is repeated
-	// in the refusal and the denial record.
-	maxRefusedPath = 200
+	// maxQuotedValue caps how much of a client-supplied value (a path, a
+	// Host, a TLS server name) a refusal and its denial record repeat.
+	maxQuotedValue = 200
+
+	// maxSessions bounds the sessions one run's proxy holds at once. Every
+	// session costs a resolve, a dial and two TLS handshakes before it
+	// carries a byte, and the dials leave from the executor's address, so an
+	// agent opening sessions without limit would spend its own sidecar's
+	// file descriptors and the address every other run on the host shares. A
+	// package manager keeps far fewer: npm and pnpm cap their sockets at 16
+	// or less.
+	maxSessions = 64
 )
 
 // methodOverrideHeaders are headers some servers read as a request's real
-// method. A request carrying any of them is refused whatever its value:
-// read-only means nothing if a GET can be turned into a write.
-var methodOverrideHeaders = []string{"X-HTTP-Method-Override", "X-HTTP-Method", "X-Method-Override"}
+// method, matched ignoring case and with underscores read as dashes. A
+// request carrying any of them, or a `_method` query parameter, is refused
+// whatever its value: read-only means nothing if a GET can be turned into a
+// write.
+var methodOverrideHeaders = []string{"x-http-method-override", "x-http-method", "x-method-override"}
 
 // hopByHopHeaders describe one connection rather than the request or
 // response, so they are not carried across the interceptor (RFC 9110
@@ -159,6 +170,15 @@ func (s *Server) intercept(w http.ResponseWriter, host, target string, upstream 
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
+	if s.closed {
+		// Shutdown has already swept the sessions; one registered now
+		// would outlive it.
+		s.mu.Unlock()
+		cancel()
+		_ = client.Close()
+		_ = upstream.Close()
+		return
+	}
 	s.sessions[client] = cancel
 	s.mu.Unlock()
 	defer func() {
@@ -189,11 +209,14 @@ func (s *Server) intercept(w http.ResponseWriter, host, target string, upstream 
 	if err := jail.HandshakeContext(ctx); err != nil {
 		reason := fmt.Sprintf("TLS handshake with the sandbox client failed (usually a client that does not trust the run's CA bundle): %v", err)
 		if mismatched != nil {
-			reason = fmt.Sprintf("TLS server name %q is not the CONNECT host %q", *mismatched, host)
+			reason = fmt.Sprintf("TLS server name %q is not the CONNECT host %q", quotable(*mismatched), host)
 		}
 		s.recordDenial(target, reason)
 		return
 	}
+	// close_notify before the TCP close, so a body that ends with the
+	// connection reads as complete rather than truncated.
+	defer func() { _ = jail.Close() }()
 	_ = jail.SetDeadline(time.Time{})
 
 	s.serveSession(ctx, jail, host, target, transport)
@@ -309,18 +332,16 @@ func (s *Server) requestPolicy(host string, req *http.Request) *refusal {
 		return &refusal{http.StatusBadRequest, "the request target must be a path (origin form)"}
 	}
 	if !hostMatches(req.Host, host) {
-		return &refusal{http.StatusForbidden, fmt.Sprintf("Host %q is not the CONNECT host %q", req.Host, host)}
+		return &refusal{http.StatusForbidden, fmt.Sprintf("Host %q is not the CONNECT host %q", quotable(req.Host), host)}
 	}
 	if req.Header.Get("Upgrade") != "" || headerHasToken(req.Header, "Connection", "upgrade") {
 		return &refusal{http.StatusForbidden, "protocol upgrades are refused"}
 	}
-	for _, h := range methodOverrideHeaders {
-		if len(req.Header.Values(h)) > 0 {
-			return &refusal{http.StatusForbidden, fmt.Sprintf("the method-override header %s is refused", h)}
-		}
+	if name, ok := methodOverride(req); ok {
+		return &refusal{http.StatusForbidden, fmt.Sprintf("the method override %s is refused", name)}
 	}
 	if e := req.Header.Get("Expect"); e != "" && !strings.EqualFold(e, "100-continue") {
-		return &refusal{http.StatusExpectationFailed, fmt.Sprintf("Expect %q is not supported", e)}
+		return &refusal{http.StatusExpectationFailed, fmt.Sprintf("Expect %q is not supported", quotable(e))}
 	}
 	hasBody := req.ContentLength != 0 || len(req.TransferEncoding) > 0
 	switch req.Method {
@@ -383,11 +404,7 @@ func outboundRequest(ctx context.Context, host string, in *http.Request) *http.R
 func (s *Server) refuseRequest(bw *bufio.Writer, target string, req *http.Request, ref refusal) {
 	reason := ref.reason
 	if req != nil {
-		path := req.URL.Path
-		if len(path) > maxRefusedPath {
-			path = path[:maxRefusedPath] + "..."
-		}
-		reason = fmt.Sprintf("%s %q: %s", req.Method, path, ref.reason)
+		reason = fmt.Sprintf("%s %q: %s", quotable(req.Method), quotable(req.URL.Path), ref.reason)
 	}
 	s.recordDenial(target, reason)
 	writeRefusal(bw, ref.status, reason)
@@ -408,9 +425,14 @@ func writeRefusal(bw *bufio.Writer, status int, reason string) {
 // reads them next, from the same buffer. The raw head is what
 // ambiguousFraming needs, because ReadRequest drops Content-Length when
 // Transfer-Encoding is set.
+//
+// Lines end in LF with an optional CR before it, as net/textproto reads
+// them. Each byte is searched once however slowly the head arrives: searched
+// is how far the search for a line end has got, and lineStart where the line
+// being read began.
 func peekRequestHead(br *bufio.Reader) ([]byte, error) {
-	n := 1
-	for {
+	lineStart, searched := 0, 0
+	for n := 1; ; {
 		if _, err := br.Peek(n); err != nil {
 			if errors.Is(err, bufio.ErrBufferFull) {
 				return nil, errHeadTooLarge
@@ -418,30 +440,23 @@ func peekRequestHead(br *bufio.Reader) ([]byte, error) {
 			return nil, err
 		}
 		buf, _ := br.Peek(br.Buffered())
-		if end := headEnd(buf); end >= 0 {
-			return buf[:end], nil
+		for {
+			i := bytes.IndexByte(buf[searched:], '\n')
+			if i < 0 {
+				searched = len(buf)
+				break
+			}
+			end := searched + i
+			line := bytes.TrimSuffix(buf[lineStart:end], []byte("\r"))
+			lineStart, searched = end+1, end+1
+			if len(line) == 0 {
+				return buf[:lineStart], nil
+			}
 		}
 		if len(buf) >= br.Size() {
 			return nil, errHeadTooLarge
 		}
 		n = len(buf) + 1
-	}
-}
-
-// headEnd is the offset just past the first empty line in buf, or -1. Lines
-// end in LF with an optional CR before it, as net/textproto reads them.
-func headEnd(buf []byte) int {
-	start := 0
-	for {
-		i := bytes.IndexByte(buf[start:], '\n')
-		if i < 0 {
-			return -1
-		}
-		line := bytes.TrimSuffix(buf[start:start+i], []byte("\r"))
-		start += i + 1
-		if len(line) == 0 {
-			return start
-		}
 	}
 }
 
@@ -487,6 +502,34 @@ func hostMatches(hostHeader, host string) bool {
 		name = h
 	}
 	return normalizeHost(name) == host
+}
+
+// methodOverride reports the first method override on req: a header from
+// methodOverrideHeaders in any spelling, or a `_method` query parameter.
+func methodOverride(req *http.Request) (string, bool) {
+	for name := range req.Header {
+		normalized := strings.ToLower(strings.ReplaceAll(name, "_", "-"))
+		for _, h := range methodOverrideHeaders {
+			if normalized == h {
+				return "header " + quotable(name), true
+			}
+		}
+	}
+	for key := range req.URL.Query() {
+		if strings.EqualFold(key, "_method") {
+			return "parameter " + quotable(key), true
+		}
+	}
+	return "", false
+}
+
+// quotable is a client-supplied value cut to maxQuotedValue bytes for a
+// refusal, so one request cannot make its denial record arbitrarily large.
+func quotable(v string) string {
+	if len(v) <= maxQuotedValue {
+		return v
+	}
+	return strings.ToValidUTF8(v[:maxQuotedValue], "") + "..."
 }
 
 // headerHasToken reports whether any of name's comma-separated values is

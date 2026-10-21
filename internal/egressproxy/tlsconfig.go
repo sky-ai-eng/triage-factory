@@ -6,16 +6,16 @@ import (
 )
 
 // This file holds every tls.Config the package builds. scripts/lint.sh refuses
-// a tls.Config literal anywhere else in the package, and InsecureSkipVerify
-// anywhere at all, so a change to how the interceptor verifies a registry has
-// to be made here, where it is read as one.
+// a tls.Config literal anywhere else in the package, and a skipped
+// verification in any of its files, so a change to how the interceptor
+// verifies a registry has to be made here, where it is read as one.
 
 // upstreamTLSConfig is the one configuration the interceptor dials a registry
 // with: the system roots, Go's default versions and cipher suites, and the
 // CONNECT host as the name to verify. Nothing in it comes from Config, so no
-// per-run or per-profile setting can weaken it. Each client in the jail used
-// to verify its registry itself; now this dial verifies for all of them while
-// each one sees a valid certificate, so a mistake here would weaken every
+// per-run or per-profile setting can weaken it. This dial verifies the
+// registry for every client in the jail, and each of them sees only the
+// interceptor's valid certificate, so a mistake here would weaken every
 // toolchain at once without any of them noticing.
 func upstreamTLSConfig(host string) *tls.Config {
 	return &tls.Config{ServerName: host, RootCAs: upstreamRoots}

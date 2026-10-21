@@ -23,7 +23,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
+	"unicode/utf8"
 )
 
 // hostsOnly is registries for hosts with no read POST paths.
@@ -162,7 +164,9 @@ type interceptHarness struct {
 	dials   int
 }
 
-func newInterceptHarness(t *testing.T, registries []Registry, upstreamAddr string) *interceptHarness {
+// opts adjust the Server after the harness has set its seams and before it
+// starts, so a test can wrap them.
+func newInterceptHarness(t *testing.T, registries []Registry, upstreamAddr string, opts ...func(*Server)) *interceptHarness {
 	t.Helper()
 	h := &interceptHarness{
 		denials: make(chan DeniedConnect, 64),
@@ -186,6 +190,9 @@ func newInterceptHarness(t *testing.T, registries []Registry, upstreamAddr strin
 		h.mu.Unlock()
 		var d net.Dialer
 		return d.DialContext(ctx, network, upstreamAddr)
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	addr, err := s.Start("127.0.0.1:0")
 	if err != nil {
@@ -288,12 +295,12 @@ func (h *interceptHarness) expectDenial(t *testing.T, substr string) DeniedConne
 }
 
 // npmRegistry is a stub registry.npmjs.org under a test CA the proxy trusts.
-func npmRegistry(t *testing.T, h http.HandlerFunc) (*stubRegistry, *interceptHarness) {
+func npmRegistry(t *testing.T, h http.HandlerFunc, opts ...func(*Server)) (*stubRegistry, *interceptHarness) {
 	t.Helper()
 	pki := newTestPKI(t)
 	trustUpstream(t, pki.pool)
 	reg := newStubRegistry(t, pki.issue(t, time.Now().Add(time.Hour), "registry.npmjs.org"), h)
-	return reg, newInterceptHarness(t, npmAndPyPI, reg.srv.Listener.Addr().String())
+	return reg, newInterceptHarness(t, npmAndPyPI, reg.srv.Listener.Addr().String(), opts...)
 }
 
 // --- relaying -----------------------------------------------------------------
@@ -579,6 +586,8 @@ func TestIntercept_OneRequestShape(t *testing.T) {
 		"X-HTTP-Method-Override":    {"GET / HTTP/1.1\r\nHost: registry.npmjs.org\r\nX-HTTP-Method-Override: PUT\r\n\r\n", http.StatusForbidden},
 		"X-HTTP-Method":             {"GET / HTTP/1.1\r\nHost: registry.npmjs.org\r\nX-HTTP-Method: DELETE\r\n\r\n", http.StatusForbidden},
 		"X-Method-Override":         {"GET / HTTP/1.1\r\nHost: registry.npmjs.org\r\nx-method-override: PUT\r\n\r\n", http.StatusForbidden},
+		"underscored override":      {"GET / HTTP/1.1\r\nHost: registry.npmjs.org\r\nX_HTTP_Method_Override: PUT\r\n\r\n", http.StatusForbidden},
+		"_method parameter":         {"GET /left-pad?_method=PUT HTTP/1.1\r\nHost: registry.npmjs.org\r\n\r\n", http.StatusForbidden},
 		"override on a listed POST": {"POST " + bulk + " HTTP/1.1\r\nHost: registry.npmjs.org\r\nX-HTTP-Method-Override: PUT\r\nContent-Length: 2\r\n\r\n{}", http.StatusForbidden},
 		"unknown expectation":       {"GET / HTTP/1.1\r\nHost: registry.npmjs.org\r\nExpect: something\r\n\r\n", http.StatusExpectationFailed},
 		"HTTP/2 preface":            {"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", 0},
@@ -736,5 +745,197 @@ func TestNew_NoRegistriesNoAuthority(t *testing.T) {
 	}
 	if s.CACertPEM() != nil {
 		t.Error("CACertPEM is non-nil with no registries")
+	}
+}
+
+// TestIntercept_SessionCap pins the per-run bound on sessions: once a run
+// holds the cap, the next CONNECT is refused with a reason and recorded, and
+// the slot a session frees when it ends can be used again.
+func TestIntercept_SessionCap(t *testing.T) {
+	_, h := npmRegistry(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}, func(s *Server) { s.sessionSlots = make(chan struct{}, 1) })
+
+	first, err := h.session(t, "registry.npmjs.org:443", "registry.npmjs.org", nil)
+	if err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	resp := rawConnect(t, h.addr, "registry.npmjs.org:443", "")
+	if !strings.HasPrefix(resp, "HTTP/1.1 503") || !strings.Contains(resp, "connections open") {
+		t.Fatalf("CONNECT past the cap got:\n%s\nwant 503 naming the limit", resp)
+	}
+	h.expectDenial(t, "connections open")
+
+	_ = first.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if resp = rawConnect(t, h.addr, "registry.npmjs.org:443", ""); strings.HasPrefix(resp, "HTTP/1.1 200") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("CONNECT after the first session closed got:\n%s\nwant 200; its slot was not freed", resp)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestIntercept_ShutdownRefusesASessionStillDialing pins that a CONNECT still
+// dialing its registry when Shutdown sweeps the sessions is refused once the
+// dial returns, rather than becoming a session nothing ends.
+func TestIntercept_ShutdownRefusesASessionStillDialing(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	_, h := npmRegistry(t, func(w http.ResponseWriter, _ *http.Request) {}, func(s *Server) {
+		inner := s.dial
+		s.dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			once.Do(func() { close(entered) })
+			<-release
+			return inner(ctx, network, addr)
+		}
+	})
+
+	conn, err := net.DialTimeout("tcp", h.addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+	if _, err := io.WriteString(conn, "CONNECT registry.npmjs.org:443 HTTP/1.1\r\nHost: registry.npmjs.org:443\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+
+	done := make(chan struct{})
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = h.srv.Shutdown(ctx)
+		close(done)
+	}()
+	for {
+		h.srv.mu.Lock()
+		closed := h.srv.closed
+		h.srv.mu.Unlock()
+		if closed {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(release)
+
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 256)
+	n, err := conn.Read(buf)
+	if strings.Contains(string(buf[:n]), "200") {
+		t.Fatalf("a CONNECT that finished dialing after Shutdown was answered %q", buf[:n])
+	}
+	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		t.Fatal("the connection was left open after Shutdown")
+	}
+	<-done
+	h.srv.mu.Lock()
+	defer h.srv.mu.Unlock()
+	if len(h.srv.sessions) != 0 {
+		t.Errorf("%d sessions registered after Shutdown", len(h.srv.sessions))
+	}
+}
+
+// TestIntercept_SessionEndsWithCloseNotify pins how a session ends: with a TLS
+// close_notify before the TCP close. A response with neither a length nor
+// chunking is delimited by that close, and OpenSSL 3 clients such as curl
+// report a body ended without close_notify as an unexpected EOF. Go's client
+// does not, so the test reads the records on the wire instead, over TLS 1.2,
+// where a record's type is not encrypted.
+func TestIntercept_SessionEndsWithCloseNotify(t *testing.T) {
+	_, h := npmRegistry(t, func(w http.ResponseWriter, _ *http.Request) {
+		conn, brw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = io.WriteString(brw, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nuntil the connection closes")
+		_ = brw.Flush()
+	})
+	raw, err := net.DialTimeout("tcp", h.addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer raw.Close()
+	_ = raw.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.WriteString(raw, "CONNECT registry.npmjs.org:443 HTTP/1.1\r\nHost: registry.npmjs.org:443\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(raw)
+	if resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect}); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT: %v %v", resp, err)
+	}
+	wire := &recordingConn{Conn: raw, r: br}
+	tc := tls.Client(wire, &tls.Config{ServerName: "registry.npmjs.org", RootCAs: h.jailRoots(t), MaxVersion: tls.VersionTLS12})
+	if _, err := io.WriteString(tc, "GET /stream HTTP/1.1\r\nHost: registry.npmjs.org\r\n\r\n"); err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if _, err := io.ReadAll(tc); err != nil {
+		t.Fatalf("read the response: %v", err)
+	}
+
+	const alertRecord = 21
+	var types []byte
+	for rec := wire.seen.Bytes(); len(rec) >= 5; {
+		types = append(types, rec[0])
+		n := 5 + int(rec[3])<<8 + int(rec[4])
+		if n > len(rec) {
+			break
+		}
+		rec = rec[n:]
+	}
+	if len(types) == 0 || types[len(types)-1] != alertRecord {
+		t.Errorf("record types from the interceptor %v; the session did not end with close_notify", types)
+	}
+}
+
+// recordingConn keeps every byte read through it, reading first from r,
+// which may hold bytes already buffered from the connection.
+type recordingConn struct {
+	net.Conn
+	r    io.Reader
+	seen bytes.Buffer
+}
+
+func (c *recordingConn) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.seen.Write(p[:n])
+	return n, err
+}
+
+// TestPeekRequestHead_ByteAtATime pins the head scan against the slowest
+// delivery there is: the head comes back whole, through its blank line, with
+// nothing consumed, for CRLF and bare-LF lines alike.
+func TestPeekRequestHead_ByteAtATime(t *testing.T) {
+	for _, head := range []string{
+		"GET / HTTP/1.1\r\nHost: registry.npmjs.org\r\nAccept: */*\r\n\r\n",
+		"GET / HTTP/1.1\nHost: registry.npmjs.org\n\n",
+	} {
+		br := bufio.NewReaderSize(iotest.OneByteReader(strings.NewReader(head+"next")), maxRequestHead)
+		got, err := peekRequestHead(br)
+		if err != nil {
+			t.Fatalf("peekRequestHead(%q): %v", head, err)
+		}
+		if string(got) != head {
+			t.Errorf("peekRequestHead = %q, want %q", got, head)
+		}
+		if rest, _ := br.Peek(len(head)); string(rest) != head {
+			t.Errorf("peekRequestHead consumed input: buffer starts %q", rest)
+		}
+	}
+}
+
+// TestQuotable_BoundsClientValues pins the cap on client-supplied text in a
+// refusal, without splitting a UTF-8 sequence.
+func TestQuotable_BoundsClientValues(t *testing.T) {
+	q := quotable(strings.Repeat("é", maxQuotedValue))
+	if len(q) > maxQuotedValue+len("...") || !utf8.ValidString(q) {
+		t.Errorf("quotable gave %d bytes (valid UTF-8 %v), want at most %d", len(q), utf8.ValidString(q), maxQuotedValue+3)
+	}
+	if got := quotable("short"); got != "short" {
+		t.Errorf("quotable(short) = %q", got)
 	}
 }

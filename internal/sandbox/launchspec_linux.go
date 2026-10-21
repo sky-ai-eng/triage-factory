@@ -869,6 +869,12 @@ func validateWorktreeAndMounts(conversationID, workspaceKey, worktree string, mo
 				return fmt.Errorf("sandbox: mount %q source %q is not the broker-resolved gh binary path %q", m.Destination, m.Source, TrustedGHBinaryPath())
 			}
 		case TrustedCABundleDestination:
+			// Read-only, like the skills and memory staging: the jail reads a
+			// trust file the sidecar wrote, and a writable bind would let it
+			// rewrite what every one of its TLS clients trusts.
+			if err := requireReadOnlyMount(m); err != nil {
+				return err
+			}
 			trusted := TrustedCABundlePath(conversationID)
 			realTrusted, rErr := realPath(trusted)
 			if rErr != nil {
