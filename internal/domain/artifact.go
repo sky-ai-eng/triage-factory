@@ -232,8 +232,8 @@ func ArtifactProviders() []string {
 // The key is ':'-delimited, so no segment may itself contain a ':' —
 // ("a:b", "") and ("a", "b") would otherwise collapse to the same
 // "...:a:b". Today's resources (GitHub node ids, registry row ids, Linear
-// UUIDs, JiraIssueResource, refs/heads/x) carry no colons; a future provider
-// passing something URL-like must encode it first.
+// UUIDs, JiraIssueResource, SlackMessageResource, refs/heads/x) carry no
+// colons; a future provider passing something URL-like must encode it first.
 //
 // resource and anchor are the caller's choice of *stable* dedup
 // coordinates — they need NOT equal the row's Artifact.Target /
@@ -246,11 +246,13 @@ func ArtifactProviders() []string {
 //     about, or the registry row id where the object has none — the pull
 //     request's GraphQL node id for a PR and for a review of it, the
 //     repository's registry row id for a branch, JiraIssueResource (the site
-//     and the issue id) for anything on a Jira issue, and the issue's UUID for
-//     anything on a Linear issue. The key is unique only within the row's
-//     Scope, so two hosts', sites' or workspaces' artifacts never share a
-//     row; a Jira resource carries the site as well, which is the shape stored
-//     keys hold. A rename moves the row's Target without touching its key.
+//     and the issue id) for anything on a Jira issue, the issue's UUID for
+//     anything on a Linear issue, and SlackMessageResource (the channel's
+//     slack_channels row id and the message's ts) for a Slack message. The
+//     key is unique only within the row's Scope, so two hosts', sites' or
+//     workspaces' artifacts never share a row; a Jira resource carries the
+//     site as well, which is the shape stored keys hold. A rename moves the
+//     row's Target without touching its key.
 //   - anchor: an optional stable sub-discriminator appended when resource
 //     alone isn't unique — a branch's ref in its repository, a comment's id
 //     on its issue, the conversation that owns a review draft. Empty when
@@ -264,6 +266,7 @@ func ArtifactProviders() []string {
 //	ArtifactDedupKey("jira",   "issue",        JiraIssueResource(site, "10042"), "")      => "jira:issue:https%3A%2F%2Facme.atlassian.net/10042"
 //	ArtifactDedupKey("jira",   "comment",      JiraIssueResource(site, "10042"), "20311") => "jira:comment:https%3A%2F%2Facme.atlassian.net/10042:20311"
 //	ArtifactDedupKey("linear", "comment",      "<issue uuid>", "<comment id>")             => "linear:comment:<issue uuid>:<comment id>"
+//	ArtifactDedupKey("slack",  "message",      SlackMessageResource("<channel row id>", ts), "") => "slack:message:<channel row id>/<ts>"
 //
 // Some stored rows carry a key that names an object by a name instead: a pull
 // request, review or branch row that leads with owner/repo, whose repository
@@ -276,6 +279,19 @@ func ArtifactDedupKey(provider, kind, resource, anchor string) string {
 		key += ":" + anchor
 	}
 	return key
+}
+
+// SlackMessageResource is the dedup-key resource of a Slack message artifact:
+// the channel's slack_channels row id and the message's ts. A Slack message
+// has no id of its own beyond its ts within its channel, and the channel's
+// Slack id can change (Slack gives a private channel a new one when it is
+// shared through Slack Connect) while its registry row does not, so the key
+// names the row. Neither half carries a ':'. "" when either half is unknown.
+func SlackMessageResource(channelRow, ts string) string {
+	if channelRow == "" || ts == "" {
+		return ""
+	}
+	return channelRow + "/" + ts
 }
 
 // JiraIssueResource is the dedup-key resource every artifact about a Jira

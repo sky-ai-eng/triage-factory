@@ -516,6 +516,12 @@ CREATE TABLE public.entities (
     -- which can change; this does not. Required for source 'slack' (the
     -- foreign key is added after slack_channels below).
     slack_channel_id uuid,
+    -- The ts of the message a Slack thread is rooted at. With slack_channel_id
+    -- it is the thread's identity, which is what a thread is found by: neither
+    -- changes when Slack gives the channel a new id, while the key spells that
+    -- id and is rewritten for display when it changes. Required for source
+    -- 'slack', NULL for every other source.
+    slack_thread_ts text,
     -- The UUID of the Linear team a Linear issue sits in: the id
     -- linear_team_rules is keyed by. Set at creation from the response that
     -- found the issue, and moved by every snapshot write to the snapshot's
@@ -540,6 +546,10 @@ CREATE TABLE public.entities (
     -- added after jira_projects below).
     jira_project_id uuid,
     CONSTRAINT entities_slack_channel_required CHECK (source <> 'slack' OR slack_channel_id IS NOT NULL),
+    CONSTRAINT entities_slack_thread_ts_check CHECK (
+        CASE WHEN source = 'slack' THEN COALESCE(slack_thread_ts, '') <> ''
+             ELSE slack_thread_ts IS NULL END
+    ),
     CONSTRAINT entities_repository_required CHECK (source <> 'github' OR repository_id IS NOT NULL),
     CONSTRAINT entities_jira_project_required CHECK (source <> 'jira' OR jira_project_id IS NOT NULL),
     CONSTRAINT entities_external_id_required CHECK (source NOT IN ('jira', 'linear') OR COALESCE(external_id, '') <> ''),
@@ -5190,9 +5200,10 @@ REVOKE ALL ON public.slack_event_deliveries FROM anon, authenticated, service_ro
 -- caches display names, since Slack event payloads carry only the channel ID.
 -- id is the channel's identity in TF, and every reference to a channel holds
 -- it: a team's tracking row, a thread entity (entities.slack_channel_id), a
--- slack:message handler's channel_in filter. channel_id is the ID Slack gives
--- the channel now. It can change (slack_channel_id_changes below), and
--- following the change rewrites this one column. It is unique per org rather
+-- slack:message handler's channel_in filter, a Slack message artifact's dedup
+-- key. channel_id is the ID Slack gives the channel now. It can change
+-- (slack_channel_id_changes below), and following the change rewrites this one
+-- column here. It is unique per org rather
 -- than globally because a channel ID is the same in every workspace across
 -- Enterprise Grid / Slack Connect: two orgs each running their own app in a
 -- shared channel each get their own registry row. workspace_id is the
@@ -5219,8 +5230,13 @@ CREATE TABLE public.slack_channels (
 ALTER TABLE ONLY public.entities
     ADD CONSTRAINT entities_slack_channel_id_fkey FOREIGN KEY (slack_channel_id, org_id) REFERENCES public.slack_channels(id, org_id);
 
--- The channel move's selection of a channel's threads.
-CREATE INDEX idx_entities_slack_channel ON public.entities USING btree (slack_channel_id) WHERE (slack_channel_id IS NOT NULL);
+-- A Slack thread is its channel's row and its root ts: the lookup that finds
+-- one (the active entity, or else the most recently closed), and the channel
+-- move's selection of a channel's threads.
+CREATE INDEX idx_entities_slack_thread ON public.entities USING btree (slack_channel_id, slack_thread_ts) WHERE (slack_channel_id IS NOT NULL);
+
+-- At most one active entity per thread.
+CREATE UNIQUE INDEX entities_active_slack_thread ON public.entities USING btree (org_id, slack_channel_id, slack_thread_ts) WHERE ((state = 'active'::text) AND (source = 'slack'::text));
 
 ALTER TABLE public.slack_channels ENABLE ROW LEVEL SECURITY;
 

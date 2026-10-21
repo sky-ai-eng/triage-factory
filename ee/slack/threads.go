@@ -21,9 +21,10 @@ func init() {
 // threads through it. sourceID is the thread key an exec verb recorded as an
 // artifact's or action's target (domain.SlackSourceID) — the boundary where a
 // thread arrives as text — so it is split here into the channel id and the
-// thread ts. A channel id Slack has since replaced resolves to the channel's
-// row; a channel TF holds no row for is an error, since every verb that
-// records a thread authorized the channel first.
+// thread ts, and the thread is found by the channel's row and that ts. A
+// channel id Slack has since replaced resolves to the channel's row; a channel
+// TF holds no row for is an error, since every verb that records a thread
+// authorized the channel first.
 func resolveSlackThread(ctx context.Context, stores db.Stores, orgID, sourceID, kind, url string) (*domain.Entity, error) {
 	channelID, threadTS, ok := strings.Cut(sourceID, "/")
 	if !ok || channelID == "" || threadTS == "" {

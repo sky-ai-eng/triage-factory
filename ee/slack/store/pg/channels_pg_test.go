@@ -274,7 +274,7 @@ func TestChannelRegistry_Postgres_ListForOrg_MemberScopedTwoOrgsIndependent(t *t
 }
 
 // TestChannelRegistry_Postgres_FindOrCreateThread: a thread entity is created
-// once per key, referencing its channel's row; a second call finds it and
+// once per thread, referencing its channel's row; a second call finds it and
 // never rewrites its kind; the key names the id the channel has now, whichever
 // id the call names it by; a channel with no row is ErrChannelNotRegistered;
 // and the core entity store cannot create a Slack entity at all, since it has
@@ -341,6 +341,81 @@ func TestChannelRegistry_Postgres_FindOrCreateThread(t *testing.T) {
 	}
 }
 
+// TestChannelRegistry_Postgres_ThreadIdentityIsRowAndTS: a thread is found by
+// its channel's row and its root ts, never by the key it is displayed under:
+// with the key rewritten to spell something else, both lookups still answer
+// the thread, and the most recently closed entity answers once none is
+// active. One thread has at most one active entity, and every Slack entity
+// carries its root ts.
+func TestChannelRegistry_Postgres_ThreadIdentityIsRowAndTS(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "chan-thread-id")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	channels := slackstore.FromStores(stores).Channels
+	ctx := context.Background()
+
+	row, err := channels.EnsureSystem(ctx, orgID, "T0WS0001", "C0IDENT01", "")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	first, err := channels.FindOrCreateThreadSystem(ctx, orgID, "C0IDENT01", "1700000000.000100", "thread", "root", "")
+	if err != nil || !first.Created {
+		t.Fatalf("FindOrCreateThreadSystem = %+v, %v; want created", first, err)
+	}
+	if got := entityThreadTS(t, h, first.EntityID); got != "1700000000.000100" {
+		t.Errorf("slack_thread_ts = %q; want the root ts", got)
+	}
+
+	if _, err := h.AdminDB.Exec(`UPDATE entities SET source_id = 'C0ELSEWHERE/1' WHERE id = $1`, first.EntityID); err != nil {
+		t.Fatalf("rewrite key: %v", err)
+	}
+	if again, err := channels.FindOrCreateThreadSystem(ctx, orgID, "C0IDENT01", "1700000000.000100", "message", "", ""); err != nil || again.Created || again.EntityID != first.EntityID {
+		t.Errorf("FindOrCreateThreadSystem after the key changed = %+v, %v; want %s found", again, err, first.EntityID)
+	}
+	if got, err := channels.GetThreadSystem(ctx, orgID, row.ID, "1700000000.000100"); err != nil || got == nil ||
+		*got != (slackstore.ThreadEntity{ID: first.EntityID, Kind: "thread", State: "active"}) {
+		t.Errorf("GetThreadSystem = %+v, %v; want the active thread %s", got, err, first.EntityID)
+	}
+	if got, err := channels.GetThreadSystem(ctx, orgID, row.ID, "1700000000.000999"); err != nil || got != nil {
+		t.Errorf("GetThreadSystem (no such thread) = %+v, %v; want nil", got, err)
+	}
+
+	var keyOnly string
+	err = h.AdminDB.QueryRow(`
+		INSERT INTO entities (org_id, source, scope, source_id, kind, slack_channel_id, slack_thread_ts)
+		VALUES ($1, 'slack', $2, 'C0IDENT01/other', 'thread', $3, '1700000000.000100')
+		RETURNING id::text
+	`, orgID, domain.SlackScope, row.ID).Scan(&keyOnly)
+	if err == nil {
+		t.Error("a second active entity for one thread was accepted; want the index to refuse it")
+	}
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO entities (org_id, source, scope, source_id, kind, slack_channel_id)
+		VALUES ($1, 'slack', $2, 'C0IDENT01/2', 'thread', $3)
+	`, orgID, domain.SlackScope, row.ID); err == nil {
+		t.Error("a Slack entity with no root ts was accepted; want the CHECK to refuse it")
+	}
+
+	if _, err := stores.Entities.CloseSystem(ctx, orgID, first.EntityID); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if got, err := channels.GetThreadSystem(ctx, orgID, row.ID, "1700000000.000100"); err != nil || got == nil ||
+		*got != (slackstore.ThreadEntity{ID: first.EntityID, Kind: "thread", State: "closed"}) {
+		t.Errorf("GetThreadSystem (closed) = %+v, %v; want the closed thread %s", got, err, first.EntityID)
+	}
+}
+
+// entityThreadTS reads an entity's slack_thread_ts.
+func entityThreadTS(t *testing.T, h *pgtest.Harness, entityID string) string {
+	t.Helper()
+	var ts string
+	if err := h.AdminDB.QueryRow(`SELECT COALESCE(slack_thread_ts, '') FROM entities WHERE id = $1`, entityID).Scan(&ts); err != nil {
+		t.Fatalf("read slack_thread_ts of %s: %v", entityID, err)
+	}
+	return ts
+}
+
 // TestChannelRegistry_Postgres_ThreadChannelPinnedToOrg: a thread entity's
 // channel row must be its own org's — the composite foreign key refuses
 // another org's channel.
@@ -357,8 +432,8 @@ func TestChannelRegistry_Postgres_ThreadChannelPinnedToOrg(t *testing.T) {
 		t.Fatalf("ensure org B channel: %v", err)
 	}
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (org_id, source, scope, source_id, kind, slack_channel_id)
-		VALUES ($1, 'slack', $2, 'C0PIN0001/1.0', 'thread', $3)
+		INSERT INTO entities (org_id, source, scope, source_id, kind, slack_channel_id, slack_thread_ts)
+		VALUES ($1, 'slack', $2, 'C0PIN0001/1.0', 'thread', $3, '1.0')
 	`, orgA, domain.SlackScope, rowB.ID); err == nil {
 		t.Error("org A entity referencing org B's channel row was accepted; want the foreign key to refuse it")
 	}

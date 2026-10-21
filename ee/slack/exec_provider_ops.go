@@ -58,6 +58,9 @@ type (
 		// Channel is the id the channel has now: the requested id, or the
 		// one Slack moved the channel to after the requester learned it.
 		Channel string `json:"channel,omitempty"`
+		// ChannelRow is the channel's slack_channels row, which a Slack
+		// message artifact's dedup key names.
+		ChannelRow string `json:"channel_row,omitempty"`
 	}
 	slackWorkspaceIdentity struct {
 		WorkspaceID string `json:"workspace_id"`
@@ -79,7 +82,8 @@ type (
 // channel (mirrors exec workspace add's team-tracked-repo gate). The agent's
 // channel id resolves through the registry, so one Slack has since replaced
 // still names the channel; answers with the id the channel has now, for the
-// verb to act on.
+// verb to act on, and the channel's registry row, which the artifacts the
+// verb records are keyed on.
 func slackOpAuthorizeChannel(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, args json.RawMessage) (any, error) {
 	var a slackChannelArg
 	if err := json.Unmarshal(args, &a); err != nil {
@@ -103,7 +107,7 @@ func slackOpAuthorizeChannel(ctx context.Context, stores db.Stores, info agentho
 	if !tracks {
 		return nil, fmt.Errorf("slack: this team does not track channel %s", a.Channel)
 	}
-	return slackAuthorizedResult{Authorized: true, Channel: channel.ChannelID}, nil
+	return slackAuthorizedResult{Authorized: true, Channel: channel.ChannelID, ChannelRow: channel.ID}, nil
 }
 
 // slackOpResolveWorkspace resolves which (workspace, app) IDENTITY to act as for

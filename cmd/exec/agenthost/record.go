@@ -317,10 +317,11 @@ type entityCoordinate struct {
 // (entityscope.Resolve with follow): an agent touching a moved Jira issue by
 // its old key resolves the issue's existing entity, never a second one.
 //
-// The Slack case mints a "message" entity keyed on target — expected to already
-// be domain.SlackSourceID(channel, rootTS), the same key the ingest pipeline
-// uses (ee/slack/ingest.go), so a bot-authored write on a thread
-// resolves/creates the identical entity a human mention would.
+// The Slack case finds or mints a "message" entity for the thread target
+// names — domain.SlackSourceID(channel, rootTS), which the Slack resolver
+// splits into the channel, resolved to its registry row, and the root ts, the
+// pair a thread is identified by — so a bot-authored write on a thread
+// resolves the identical entity a human mention would.
 func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info ConversationInfo, c entityCoordinate) (string, error) {
 	entity, err := resolveEntityInfo(ctx, stores, info, c)
 	if err != nil || entity == nil {

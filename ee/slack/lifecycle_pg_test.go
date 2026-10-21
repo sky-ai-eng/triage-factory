@@ -199,9 +199,9 @@ func seedSlackMessageEvent(t *testing.T, h *pgtest.Harness, orgID, workspaceID, 
 	}
 	channelRow := seedSlackChannelRow(t, h, orgID, workspaceID, channel)
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, scope, slack_channel_id)
-		VALUES ($1, $2, 'slack', $3, 'message', 'test thread', 'slack.com', $4)
-	`, entityID, orgID, domain.SlackSourceID(channel, root), channelRow); err != nil {
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, scope, slack_channel_id, slack_thread_ts)
+		VALUES ($1, $2, 'slack', $3, 'message', 'test thread', 'slack.com', $4, $5)
+	`, entityID, orgID, domain.SlackSourceID(channel, root), channelRow, root); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 
@@ -1101,7 +1101,7 @@ func TestLifecycleAdapter_ConversationStatus_NonSlackConversation_CachedAfterFir
 		t.Fatalf("look up task's entity: %v", err)
 	}
 	channelRow := seedSlackChannelRow(t, h, orgID, "T1", "C1")
-	if _, err := h.AdminDB.Exec(`UPDATE entities SET source = 'slack', slack_channel_id = $2 WHERE id = $1`, entityID, channelRow); err != nil {
+	if _, err := h.AdminDB.Exec(`UPDATE entities SET source = 'slack', slack_channel_id = $2, slack_thread_ts = '1700000000.000100' WHERE id = $1`, entityID, channelRow); err != nil {
 		t.Fatalf("mutate entity source: %v", err)
 	}
 	if _, err := h.AdminDB.Exec(`UPDATE tasks SET event_type = $1 WHERE id = $2`, domain.EventSlackMessage, taskID); err != nil {

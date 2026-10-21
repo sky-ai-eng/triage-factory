@@ -194,7 +194,6 @@ func newWebhookRig(t *testing.T, signingSecretRef string, licensed bool) *webhoo
 	channels := newFakeChannelRegistryFor(entities)
 	stats, metrics := newTestStats()
 	pipeline := &ingestPipeline{
-		entities:   entities,
 		deliveries: deliveries,
 		channels:   channels,
 		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
@@ -575,7 +574,6 @@ func TestHandleWebhook_TwoAppsOneWorkspace_SignatureSelectionFollowsRow(t *testi
 	published := &[]domain.Event{}
 	entities := newFakeEntities()
 	pipeline := &ingestPipeline{
-		entities:   entities,
 		deliveries: newFakeDeliveries(),
 		channels:   newFakeChannelRegistryFor(entities),
 		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },

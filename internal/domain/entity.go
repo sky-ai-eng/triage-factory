@@ -6,29 +6,25 @@ import (
 )
 
 // SlackSourceID builds the entities.source_id for a Slack thread:
-// "<channel_id>/<thread_ts>". It is the Slack analogue of the tracker's
-// ghSourceID ("owner/repo#N") and Jira's raw issue key — the natural-key
-// vocabulary that maps a (source, scope, source_id) key onto exactly one
-// active entities row (source='slack', kind='thread' when the bot is the reason the thread
-// exists — its root was a mention or a run's own post — else 'message' for
-// a mid-thread summons into someone else's thread; see Entity.Kind).
+// "<channel_id>/<thread_ts>", the Slack analogue of "owner/repo#N" and a Jira
+// issue key. It is the thread's display key. The thread's identity is its
+// channel's slack_channels row and its root ts (entities.slack_channel_id and
+// entities.slack_thread_ts), which is what ee/slack finds a thread by: the
+// channel id can change (Slack gives a private channel a new one when it is
+// shared through Slack Connect), and ee/slack rewrites the key when it does.
+// The entity is source='slack', kind='thread' when the bot is the reason the
+// thread exists — its root was a mention or a run's own post — else 'message'
+// for a mid-thread summons into someone else's thread; see Entity.Kind.
 //
 // The thread root is the entity grain. Slack delivers most mentions inside a
 // thread (the webhook carries thread_ts); a mention on a *root* channel message
-// has no thread_ts, so the caller passes that message's own ts as threadTS —
-// "<channel>/<ts>" — making the root message the thread it anchors. Resolving
-// thread_ts-or-ts is the caller's job (it owns the webhook payload); this
-// helper just pins the format so the resolver (TFAC-513) and the Slack
-// thread-create caller (TFAC-510) can't drift on the separator or ordering.
-//
-// Exported and dependency-free (rather than living next to the unexported
-// tracker ghSourceID) precisely because the consumer lives outside the tracker
-// package — it sits beside the other entity-key builders the rest of the app
-// already shares. channel+ts names one thread across all of Slack: a shared
-// channel keeps its id in every workspace it is in, so the entity's scope is
-// SlackScope, never a workspace. The id itself can change (Slack gives a
-// private channel a new one when it is shared through Slack Connect), and
-// ee/slack follows that by rekeying the channel's threads.
+// has no thread_ts, so the caller passes that message's own ts as threadTS,
+// making the root message the thread it anchors. Resolving thread_ts-or-ts is
+// the caller's job (it owns the webhook payload); this helper pins the format
+// so every writer and the exec verbs' thread targets spell it the same way.
+// channel+ts names one thread across all of Slack: a shared channel keeps its
+// id in every workspace it is in, so the entity's scope is SlackScope, never a
+// workspace.
 func SlackSourceID(channel, threadTS string) string {
 	return channel + "/" + threadTS
 }

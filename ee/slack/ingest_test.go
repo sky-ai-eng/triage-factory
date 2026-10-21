@@ -17,60 +17,64 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// fakeEntities is a minimal entityFinder fake: one (org, source, scope,
-// sourceID) maps to one entity, created on first sight — mirrors
-// FindOrCreateSystem's real contract closely enough for the pipeline tests.
-// Thread entities are created through a fakeChannelRegistry linked to it
-// (newFakeChannelRegistryFor), the way the real ones are.
+// fakeEntities holds the thread entities a fakeChannelRegistry linked to it
+// (newFakeChannelRegistryFor) creates and finds. A thread is found by its
+// channel's registry row and its root ts, as the real store finds it; byKey
+// indexes the same entities by their display key (domain.SlackSourceID), for
+// tests that assert what a thread is displayed as.
 type fakeEntities struct {
-	byKey map[string]*domain.Entity
-	err   error
+	byKey    map[string]*domain.Entity
+	byThread map[string]*domain.Entity
+	err      error
 	// channels is the registry linked to this fake, which seedThread
 	// registers a seeded thread's channel in.
 	channels *fakeChannelRegistry
 }
 
-func newFakeEntities() *fakeEntities { return &fakeEntities{byKey: map[string]*domain.Entity{}} }
+func newFakeEntities() *fakeEntities {
+	return &fakeEntities{byKey: map[string]*domain.Entity{}, byThread: map[string]*domain.Entity{}}
+}
 
 func fakeEntityKey(orgID, source, scope, sourceID string) string {
 	return orgID + "/" + source + "/" + scope + "/" + sourceID
 }
 
-func (f *fakeEntities) findOrCreate(orgID, source, scope, sourceID, kind, title, url string) (*domain.Entity, bool, error) {
+// fakeThreadKey is a thread's identity: its org, its channel's registry row
+// and its root ts.
+func fakeThreadKey(orgID, channelRow, threadTS string) string {
+	return orgID + "|" + channelRow + "|" + threadTS
+}
+
+// findOrCreateThread returns the thread rooted at threadTS on channelRow,
+// creating it under the display key sourceID when there is none.
+func (f *fakeEntities) findOrCreateThread(orgID, channelRow, threadTS, sourceID, kind, title, url string) (*domain.Entity, bool, error) {
 	if f.err != nil {
 		return nil, false, f.err
 	}
-	key := fakeEntityKey(orgID, source, scope, sourceID)
-	if e, ok := f.byKey[key]; ok {
+	if e, ok := f.byThread[fakeThreadKey(orgID, channelRow, threadTS)]; ok {
 		return e, false, nil
 	}
-	e := &domain.Entity{ID: "entity-" + key, Source: source, Scope: scope, SourceID: sourceID, Kind: kind, Title: title, URL: url, State: "active"}
+	key := fakeEntityKey(orgID, "slack", domain.SlackScope, sourceID)
+	e := &domain.Entity{ID: "entity-" + key, Source: "slack", Scope: domain.SlackScope, SourceID: sourceID, Kind: kind, Title: title, URL: url, State: "active"}
 	f.byKey[key] = e
+	f.byThread[fakeThreadKey(orgID, channelRow, threadTS)] = e
 	return e, true, nil
 }
 
-// GetBySourceSystem resolves a previously-created entity by its natural key,
-// returning (nil, nil) on a miss — mirrors GetBySourceSystem's real contract,
-// which the engaged-thread branch's engagement gate reads.
-func (f *fakeEntities) GetBySourceSystem(_ context.Context, orgID, source, scope, sourceID string) (*domain.Entity, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	return f.byKey[fakeEntityKey(orgID, source, scope, sourceID)], nil
-}
-
-// seedThread inserts a pre-existing entity under (orgID, "slack",
-// domain.SlackScope, sourceID) with the given kind and state — the fixtures the
+// seedThread inserts a pre-existing thread entity displayed as sourceID
+// ("<channel>/<thread ts>") with the given kind and state — the fixtures the
 // engaged-thread tests use to stand up (or deliberately mis-configure) the
 // thread a follow-up lands in, without routing through a root-mention first.
-// Its channel is registered in the linked registry, as a real thread's is.
+// Its channel is registered in the linked registry, and the thread sits on
+// that row, as a real thread does.
 func (f *fakeEntities) seedThread(orgID, sourceID, kind, state string) {
-	scope := domain.SlackScope
-	key := fakeEntityKey(orgID, "slack", scope, sourceID)
-	f.byKey[key] = &domain.Entity{ID: "entity-" + key, Source: "slack", Scope: scope, SourceID: sourceID, Kind: kind, State: state}
+	channelID, threadTS, _ := strings.Cut(sourceID, "/")
+	key := fakeEntityKey(orgID, "slack", domain.SlackScope, sourceID)
+	e := &domain.Entity{ID: "entity-" + key, Source: "slack", Scope: domain.SlackScope, SourceID: sourceID, Kind: kind, State: state}
+	f.byKey[key] = e
 	if f.channels != nil {
-		channelID, _, _ := strings.Cut(sourceID, "/")
-		f.channels.register(orgID, "", channelID)
+		row := f.channels.register(orgID, "", channelID)
+		f.byThread[fakeThreadKey(orgID, row.ID, threadTS)] = e
 	}
 }
 
@@ -252,8 +256,8 @@ func (f *fakeChannelRegistry) ListForOrg(context.Context, string) ([]slackstore.
 	return nil, nil
 }
 
-// FindOrCreateThreadSystem creates the thread in the linked fakeEntities,
-// keyed under the id the channel's row carries.
+// FindOrCreateThreadSystem finds or creates the thread on the channel's row
+// in the linked fakeEntities, displayed under the id the row carries.
 func (f *fakeChannelRegistry) FindOrCreateThreadSystem(_ context.Context, orgID, channelID, threadTS, kind, title, url string) (slackstore.Thread, error) {
 	f.mu.Lock()
 	row := f.lookup(orgID, channelID)
@@ -265,11 +269,24 @@ func (f *fakeChannelRegistry) FindOrCreateThreadSystem(_ context.Context, orgID,
 	if row == nil {
 		return slackstore.Thread{}, fmt.Errorf("%w: %s", slackstore.ErrChannelNotRegistered, channelID)
 	}
-	e, created, err := f.entities.findOrCreate(orgID, "slack", domain.SlackScope, domain.SlackSourceID(channel.ChannelID, threadTS), kind, title, url)
+	e, created, err := f.entities.findOrCreateThread(orgID, channel.ID, threadTS, domain.SlackSourceID(channel.ChannelID, threadTS), kind, title, url)
 	if err != nil {
 		return slackstore.Thread{}, err
 	}
 	return slackstore.Thread{EntityID: e.ID, Created: created, Channel: channel}, nil
+}
+
+// GetThreadSystem finds the thread on the channel's row in the linked
+// fakeEntities, as the real store does.
+func (f *fakeChannelRegistry) GetThreadSystem(_ context.Context, orgID, channel, threadTS string) (*slackstore.ThreadEntity, error) {
+	if f.entities.err != nil {
+		return nil, f.entities.err
+	}
+	e, ok := f.entities.byThread[fakeThreadKey(orgID, channel, threadTS)]
+	if !ok {
+		return nil, nil
+	}
+	return &slackstore.ThreadEntity{ID: e.ID, Kind: e.Kind, State: e.State}, nil
 }
 
 // MoveSystem records the change so a retired id resolves to the channel's
@@ -311,7 +328,6 @@ func newTestPipeline() (*ingestPipeline, *fakeEntities, *fakeDeliveries, *[]doma
 	deliveries := newFakeDeliveries()
 	published := &[]domain.Event{}
 	p := &ingestPipeline{
-		entities:   entities,
 		deliveries: deliveries,
 		channels:   newFakeChannelRegistryFor(entities),
 		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
@@ -389,8 +405,8 @@ func TestHandleEventCallback_MentionSurvivesAMoveAfterDedup(t *testing.T) {
 	if meta.ChannelRowID != survivor.ID || meta.Channel != "C1" {
 		t.Errorf("metadata channel = %q (row %q); want C1 on the surviving row %s", meta.Channel, meta.ChannelRowID, survivor.ID)
 	}
-	if e, _ := entities.GetBySourceSystem(context.Background(), "org-1", "slack", domain.SlackScope, "C1/1600000000.000100"); e == nil {
-		t.Error("no thread entity under C1/1600000000.000100")
+	if e := entities.byThread[fakeThreadKey("org-1", survivor.ID, "1600000000.000100")]; e == nil || e.SourceID != "C1/1600000000.000100" {
+		t.Errorf("thread on the surviving row = %+v, want one displayed as C1/1600000000.000100", e)
 	}
 }
 
@@ -879,7 +895,6 @@ func TestHandleEventCallback_DispatchesIdentityResolution(t *testing.T) {
 	}
 	entities := newFakeEntities()
 	p := &ingestPipeline{
-		entities:   entities,
 		deliveries: newFakeDeliveries(),
 		channels:   newFakeChannelRegistryFor(entities),
 		publish:    func(context.Context, domain.Event) {},
@@ -935,7 +950,6 @@ func TestHandleEventCallback_FollowUpDispatchesIdentityResolution(t *testing.T) 
 	entities := newFakeEntities()
 	published := 0
 	p := &ingestPipeline{
-		entities:   entities,
 		deliveries: newFakeDeliveries(),
 		channels:   newFakeChannelRegistryFor(entities),
 		publish:    func(context.Context, domain.Event) { published++ },
@@ -1051,7 +1065,6 @@ func TestHandleEventCallback_DispatchesChannelNameResolutionOnCreated(t *testing
 	channels.done = make(chan struct{}, 1)
 	resolver := &ChannelResolver{secrets: &fakeSecrets{token: "xoxb-test"}, channels: channels, client: srv.Client()}
 	p := &ingestPipeline{
-		entities:    entities,
 		deliveries:  newFakeDeliveries(),
 		channels:    channels,
 		publish:     func(context.Context, domain.Event) {},
@@ -1106,7 +1119,6 @@ func TestHandleEventCallback_DispatchesPermalinkResolutionOnCreated(t *testing.T
 	entityURLs.done = make(chan struct{}, 1)
 	resolver := &PermalinkResolver{secrets: &fakeSecrets{token: "xoxb-test"}, entities: entityURLs, client: srv.Client()}
 	p := &ingestPipeline{
-		entities:   entities,
 		deliveries: newFakeDeliveries(),
 		channels:   newFakeChannelRegistryFor(entities),
 		publish:    func(context.Context, domain.Event) {},
@@ -1151,7 +1163,6 @@ func TestHandleEventCallback_DoesNotDispatchPermalinkResolutionOnReMention(t *te
 	entityURLs.done = make(chan struct{}, 1)
 	resolver := &PermalinkResolver{secrets: &fakeSecrets{token: "xoxb-test"}, entities: entityURLs, client: srv.Client()}
 	p := &ingestPipeline{
-		entities:   entities,
 		deliveries: newFakeDeliveries(),
 		channels:   newFakeChannelRegistryFor(entities),
 		publish:    func(context.Context, domain.Event) {},
