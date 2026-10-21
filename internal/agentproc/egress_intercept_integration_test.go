@@ -142,7 +142,10 @@ func TestIntegration_EgressIntercept_ToolchainsInTheJail(t *testing.T) {
 	if err := os.Chown(bundlePath, net.JailUID(), sandbox.JailGID(net.Idx)); err != nil {
 		t.Fatalf("chown CA bundle to the jail identity: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Remove(bundlePath) })
+	t.Cleanup(func() {
+		_ = os.Remove(bundlePath)
+		_ = os.Remove(filepath.Dir(bundlePath))
+	})
 
 	env := []string{"PATH=/opt/tf/bin:/usr/local/bin:/usr/bin:/bin", "HOME=/work"}
 	env = append(env, proxyEnv...)
