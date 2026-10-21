@@ -74,7 +74,12 @@ const (
 // githubRepoJSON is one picker option. The field set is the picker's own — the
 // columns the mirror carries for it — and deliberately not "whatever GitHub's
 // repository object has", which is what a proxy list leaks by default.
+//
+// GitHubID is what a client names the option by: it registers the repository
+// with it (POST /api/repos) and matches it against a team's tracked set.
+// FullName is for display, and a rename moves it.
 type githubRepoJSON struct {
+	GitHubID    string `json:"github_id"`
 	FullName    string `json:"full_name"`
 	HTMLURL     string `json:"html_url"`
 	Description string `json:"description"`
@@ -180,6 +185,7 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	items := make([]githubRepoJSON, 0, len(rows))
 	for _, row := range rows {
 		items = append(items, githubRepoJSON{
+			GitHubID:    row.ExternalID,
 			FullName:    row.Slug(),
 			HTMLURL:     row.HTMLURL,
 			Description: row.Description,
@@ -462,7 +468,10 @@ func repoMutationAccess(ctx context.Context, tx db.TxStores, orgID, host string,
 // and Slug rather than a client-side join keeps exactly one renderer per side,
 // domain.Repository.Slug() here and this field there.
 type repoJSON struct {
-	ID             string  `json:"id"`
+	ID string `json:"id"`
+	// GitHubID is GitHub's own id for the repository, "" while TF has not
+	// learned it.
+	GitHubID       string  `json:"github_id"`
 	Slug           string  `json:"slug"`
 	Owner          string  `json:"owner"`
 	Repo           string  `json:"repo"`
@@ -483,6 +492,7 @@ type repoJSON struct {
 func repoToJSON(row domain.Repository, canEdit bool) repoJSON {
 	out := repoJSON{
 		ID:             row.ID,
+		GitHubID:       row.ExternalID,
 		Slug:           row.Slug(),
 		Owner:          row.Owner,
 		Repo:           row.Repo,
@@ -714,6 +724,130 @@ func (s *Server) handleRepoGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, repoToJSON(*row, canEdit))
+}
+
+// repoRegisterRequest is the body of POST /api/repos: the repository to
+// register, named by GitHub's own id for it.
+type repoRegisterRequest struct {
+	GitHubID string `json:"github_id"`
+}
+
+// handleRepoRegister registers a repository by its GitHub id and returns its
+// registry row. Found or created, the answer is the row, so it is a 200 either
+// way.
+//
+// It is how a repository a team picks from the reachable list gets the registry
+// id the tracked-set PUT takes. The name comes from the reachable mirror, never
+// from the caller: an id the mirror does not list is one this org's credentials
+// cannot reach (or not yet — the picker's refresh is the affordance for that),
+// and it is refused with 422, as an unreachable addition to a tracked set is.
+// The mirror is trusted however old it is, because the picker serves from the
+// same rows: anything a client could have been offered, this can register.
+// The id is matched before the name (RepositoryStore.FindOrCreateByExternalID),
+// so a rename TF has not applied yet resolves to the row TF already holds.
+//
+// Gated to an org admin or the admin of any team in the org. A registry row is
+// org-wide and no team's yet, so the gate cannot be a team the caller
+// administers that tracks it; it is the right to track anything at all, which
+// registering is the first step of. The row it creates is tracked by nobody,
+// polled by nothing, and on no list until a team tracks it. A member who
+// administers no team has no tracking write the row could be for, so 403.
+//
+// POST /api/repos
+func (s *Server) handleRepoRegister(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+
+	var req repoRegisterRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	switch n, err := strconv.ParseUint(req.GitHubID, 10, 64); {
+	case req.GitHubID == "":
+		v.Missing("github_id")
+	case err != nil || n == 0 || strconv.FormatUint(n, 10) != req.GitHubID:
+		v.Invalid("github_id", req.GitHubID+" is not a GitHub repository id")
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	isAdmin, err := s.isOrgAdmin(r.Context(), orgID, userID)
+	if err != nil {
+		internalError(w, "repos", err)
+		return
+	}
+	if !isAdmin {
+		teamAdmin, err := s.az.UserAdministersATeam(r.Context(), userID, orgID)
+		if err != nil {
+			internalError(w, "repos", err)
+			return
+		}
+		if !teamAdmin {
+			forbidden(w, "registering a repository requires an org admin or the admin of a team")
+			return
+		}
+	}
+
+	host, ok := s.requireOrgGitHubHost(r.Context(), w, orgID, "repos")
+	if !ok {
+		return
+	}
+	class, err := s.reachableCredentialClass(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "repos", err)
+		return
+	}
+	reach, err := s.reachableRepos.ReachableByExternalIDsSystem(r.Context(), orgID, host, class, []string{req.GitHubID})
+	if err != nil {
+		internalError(w, "repos", err)
+		return
+	}
+	entry, ok := reach[req.GitHubID]
+	if !ok {
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: "GitHub repository " + req.GitHubID + " is not reachable by this organization's GitHub credentials — install the GitHub App on it or grant the PAT access first, then refresh the repository list",
+			Field:   "github_id",
+		})
+		return
+	}
+
+	var (
+		row     domain.Repository
+		canEdit bool
+	)
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		row, e = tx.Repos.FindOrCreateByExternalID(r.Context(), orgID, domain.RepoRef{
+			Source: entry.Source, Host: host, Owner: entry.Owner, Repo: entry.Repo, ExternalID: req.GitHubID,
+		})
+		if e != nil {
+			return e
+		}
+		canEdit, e = repoCanEdit(r.Context(), tx, orgID, host, isAdmin, row)
+		return e
+	}); err != nil {
+		if errors.Is(err, db.ErrRepoSlugOccupied) {
+			// TODO(TFAC-1161): a name GitHub gave to another repository stays
+			// held here for good when the holder was deleted, or renamed where
+			// TF never sees it; the holder's id has to be resolved and the row
+			// renamed or retired before this registration can succeed.
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+				Reason:  httpx.ReasonConflict,
+				Message: entry.Slug() + " is registered to a different GitHub repository; it frees up once TF observes that repository's rename",
+				Field:   "github_id",
+			})
+			return
+		}
+		internalError(w, "repos", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, repoToJSON(row, canEdit))
 }
 
 // handleRepoGetByName is the same read addressed by the provider's current

@@ -220,6 +220,17 @@ type ReachableReposStore interface {
 	// the slugs it holds instead of enumerating the org to intersect afterwards.
 	// An empty slugs argument returns an empty set without a query.
 	ReachableSlugsSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, slugs []string) (map[string]struct{}, error)
+
+	// ReachableByExternalIDsSystem returns the org's reachable entries under
+	// class whose GitHub repository id is in externalIDs, keyed by that id:
+	// ReachableSlugsSystem's membership question asked by the id a rename does
+	// not move, and the read a registration by GitHub id learns the
+	// repository's current name from. A repository two installations both
+	// reach is one entry, the most recently observed.
+	//
+	// Bounded by the caller's selection, like ReachableSlugsSystem. An empty
+	// externalIDs argument returns an empty map without a query.
+	ReachableByExternalIDsSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, externalIDs []string) (map[string]domain.ReachableRepository, error)
 }
 
 // RequireGrantClass is the guard every App-tier read of the mirror runs first:

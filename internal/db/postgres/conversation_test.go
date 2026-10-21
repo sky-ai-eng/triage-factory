@@ -1307,7 +1307,7 @@ func TestConversationStore_Postgres_PRCoherenceTargets(t *testing.T) {
 				}
 				r := domain.RepoRefFromSlug(host, slug)
 				tracked = append(tracked, domain.TeamGitHubRepo{Owner: r.Owner, Repo: r.Repo})
-				if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, host, tracked); err != nil {
+				if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, orgID, teamID, host, tracked); err != nil {
 					t.Fatalf("track repository %s on %s: %v", slug, host, err)
 				}
 				repo, err := stores.Repos.GetByRefSystem(ctx, orgID, r)

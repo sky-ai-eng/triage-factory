@@ -125,11 +125,106 @@ func (s *repoStore) FindOrCreateByRefSystem(ctx context.Context, orgID string, r
 	return out, err
 }
 
+// FindOrCreateByExternalID registers the repository the provider identifies as
+// ref.ExternalID; see the interface for the three outcomes. Each pass of
+// registerByExternalID either settles on a row or reports that a concurrent
+// writer moved first, and the next pass reads what that writer left.
+func (s *repoStore) FindOrCreateByExternalID(ctx context.Context, orgID string, ref domain.RepoRef) (domain.Repository, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return domain.Repository{}, err
+	}
+	source, err := domain.NormalizeRepoSource(ref.Source)
+	if err != nil {
+		return domain.Repository{}, err
+	}
+	if err := db.RequireRepoHost(ref.Host); err != nil {
+		return domain.Repository{}, err
+	}
+	if ref.ExternalID == "" {
+		return domain.Repository{}, errors.New("register repository: a provider id is required")
+	}
+	var out domain.Repository
+	err = inTx(ctx, s.q, func(tx queryer) error {
+		for range registerAttempts {
+			p, done, err := registerByExternalID(ctx, tx, source, ref)
+			if err != nil {
+				return err
+			}
+			if done {
+				out = p
+				return nil
+			}
+		}
+		return fmt.Errorf("register repository %s: concurrent writers kept moving it", ref.Slug())
+	})
+	return out, err
+}
+
+// registerAttempts bounds the passes FindOrCreateByExternalID makes. A pass
+// that does not settle lost to one concurrent writer, whose row the next pass
+// finds, so two would do; the third is margin, not a retry policy.
+const registerAttempts = 3
+
+// registerByExternalID is one pass of the registration: the row carrying the
+// id, else the id written onto a row holding the name without one, else a new
+// row. done is false when a write found its precondition gone (another writer
+// filled the id or inserted the row first).
+func registerByExternalID(ctx context.Context, q queryer, source string, ref domain.RepoRef) (domain.Repository, bool, error) {
+	p, err := scanRepositoryFull(q.QueryRowContext(ctx, `
+		SELECT `+repoProfileFullColumns+`
+		FROM repositories
+		WHERE source = ? AND host = ? AND external_id = ?
+	`, source, ref.Host, ref.ExternalID))
+	if err == nil {
+		return p, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return domain.Repository{}, false, err
+	}
+
+	named, err := findRepositoryByRef(ctx, q, source, ref)
+	if err != nil {
+		return domain.Repository{}, false, err
+	}
+	if named != nil {
+		if named.ExternalID != "" {
+			return domain.Repository{}, false, fmt.Errorf("%w: %s is registered under provider id %s, not %s",
+				db.ErrRepoSlugOccupied, named.Slug(), named.ExternalID, ref.ExternalID)
+		}
+		p, err := scanRepositoryFull(q.QueryRowContext(ctx, `
+			UPDATE repositories
+			   SET external_id = ?, updated_at = datetime('now')
+			 WHERE id = ? AND external_id IS NULL
+			RETURNING `+repoProfileFullColumns,
+			ref.ExternalID, named.ID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.Repository{}, false, nil
+		}
+		return p, err == nil, err
+	}
+
+	// DO NOTHING with no conflict target, as in insertRepositoryRow: either
+	// identity index refusing means a concurrent writer registered the
+	// repository first, and the next pass finds its row.
+	p, err = scanRepositoryFull(q.QueryRowContext(ctx, `
+		INSERT INTO repositories (id, owner, repo, source, host, external_id, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+		ON CONFLICT DO NOTHING
+		RETURNING `+repoProfileFullColumns,
+		uuid.New().String(), ref.Owner, ref.Repo, source, ref.Host, ref.ExternalID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Repository{}, false, nil
+	}
+	if err != nil {
+		return domain.Repository{}, false, fmt.Errorf("insert repositories[%s]: %w", ref.Slug(), err)
+	}
+	return p, true, nil
+}
+
 // getOrCreateRepositoryID returns the id of one repository's registry row,
-// minting the row if it does not exist yet. It is the registry's one
-// get-or-create, and it has three callers: the tracked-set reconcile in
-// team_github_repos.go (a tracking row references the row), the GitHub entity
-// create in entities.go (a GitHub entity references the row), and the door,
+// minting the row if it does not exist yet. It is the registry's by-name
+// get-or-create, and it has two callers: the GitHub entity create in
+// entities.go (a GitHub entity references the row) and the door,
 // FindOrCreateByRefSystem. It takes a queryer so it composes inside the
 // caller's transaction, and a row it mints commits or rolls back with that
 // transaction. The transaction can commit without referencing the row: an
@@ -207,12 +302,12 @@ func findRepositoryByRef(ctx context.Context, q queryer, source string, ref doma
 	return &p, nil
 }
 
-// insertRepositoryRow is the single INSERT that brings a repository into
-// repositories. Tracking is the only path that creates one, and it creates
-// through here, so a row cannot exist without the identity columns the create
-// sets. Tracking learns no provider id, so none is written: the poller and
-// the profiler record external_id once they have read it off a provider
-// payload.
+// insertRepositoryRow is the INSERT that brings a repository into
+// repositories by name, so a row cannot exist without the identity columns the
+// create sets. Its callers hold no provider id, so none is written: the
+// poller and the profiler record external_id once they have read it off a
+// provider payload. A registration by provider id inserts through
+// registerByExternalID instead, with the id.
 //
 // "Already exists" means the repositories_identity index: (org_id, source)
 // plus the case-FOLDED slug, because GitHub identifiers are case-insensitive

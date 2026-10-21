@@ -264,7 +264,7 @@ func trackForRunTeam(t *testing.T, database *db.DB, owner, repo string) {
 		t.Fatalf("list team repos: %v", err)
 	}
 	tracked = append(tracked, domain.TeamGitHubRepo{Owner: owner, Repo: repo})
-	if err := store.TeamGitHubRepos.ReplaceForTeam(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, tracked); err != nil {
+	if err := dbtest.TrackRepos(context.Background(), store.Repos, store.TeamGitHubRepos, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, tracked); err != nil {
 		t.Fatalf("track team repo: %v", err)
 	}
 }
@@ -688,7 +688,7 @@ func TestMaterializeWorkspace_LedgerRowIsTheOrgsHostRepository(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upsert repository on %s: %v", ghe, err)
 	}
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, ghe, []domain.TeamGitHubRepo{{Owner: "sky", Repo: "core"}}); err != nil {
+	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, ghe, []domain.TeamGitHubRepo{{Owner: "sky", Repo: "core"}}); err != nil {
 		t.Fatalf("track sky/core on %s: %v", ghe, err)
 	}
 	dbtest.SeedOrgSettings(t, stores.Orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ghe})

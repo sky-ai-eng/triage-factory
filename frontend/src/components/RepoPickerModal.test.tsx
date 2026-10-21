@@ -48,8 +48,9 @@ async function ping() {
 const listRepos = repos.listReachableRepos as unknown as ReturnType<typeof vi.fn>
 const refresh = repos.refreshReachableRepos as unknown as ReturnType<typeof vi.fn>
 
-function repo(fullName: string): GitHubRepo {
+function repo(fullName: string, githubId = `id-${fullName}`): GitHubRepo {
   return {
+    github_id: githubId,
     full_name: fullName,
     html_url: '',
     description: '',
@@ -276,5 +277,43 @@ describe('RepoPickerModal', () => {
 
     expect(await screen.findByText(/Discovering repositories/)).toBeInTheDocument()
     expect(screen.queryByText('No repositories found')).not.toBeInTheDocument()
+  })
+
+  it('matches the tracked set by GitHub id and reports new picks without a registry id', async () => {
+    // GitHub renamed acme/api to acme/platform-api after the team tracked it;
+    // the tracked entry still reads under its old name, and must still show
+    // checked. acme/legacy has no GitHub id on file, so its name is all there
+    // is to match it by.
+    listRepos.mockResolvedValue(
+      page([repo('acme/platform-api', '11'), repo('acme/legacy', '12'), repo('acme/web', '13')]),
+    )
+    const onSave = vi.fn()
+    render(
+      <RepoPickerModal
+        inline
+        selected={[
+          { id: 'r-api', github_id: '11', owner: 'acme', repo: 'api' },
+          { id: 'r-legacy', github_id: '', owner: 'acme', repo: 'legacy' },
+        ]}
+        onSave={onSave}
+        onClose={vi.fn()}
+      />,
+    )
+    await act(async () => {
+      vi.advanceTimersByTime(300)
+    })
+    const box = async (name: string) =>
+      (await screen.findByText(name)).closest('button') as HTMLButtonElement
+    expect((await box('acme/platform-api')).getAttribute('aria-checked')).toBe('true')
+    expect((await box('acme/legacy')).getAttribute('aria-checked')).toBe('true')
+    expect((await box('acme/web')).getAttribute('aria-checked')).toBe('false')
+
+    fireEvent.click(await box('acme/web'))
+    fireEvent.click(await box('acme/legacy'))
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    expect(onSave).toHaveBeenCalledWith([
+      { id: 'r-api', github_id: '11', owner: 'acme', repo: 'api' },
+      { id: '', github_id: '13', owner: 'acme', repo: 'web' },
+    ])
   })
 })

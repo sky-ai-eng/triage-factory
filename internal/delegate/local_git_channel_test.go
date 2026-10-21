@@ -243,7 +243,7 @@ func TestLocalGitChannel_AnUnresolvableCredentialIsARefusalNotAnOutage(t *testin
 			stores := sqlitestore.New(database)
 			ctx := context.Background()
 			seedConversation(t, database, "run-cred", "sess", "")
-			if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost,
+			if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost,
 				[]domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo"}}); err != nil {
 				t.Fatalf("track repo: %v", err)
 			}

@@ -126,6 +126,10 @@ func (f *fakeMirror) ReachableSlugsSystem(context.Context, string, string, domai
 	panic("grantmirror must not read the write gate's slug set")
 }
 
+func (f *fakeMirror) ReachableByExternalIDsSystem(context.Context, string, string, domain.GitHubCredentialClass, []string) (map[string]domain.ReachableRepository, error) {
+	panic("grantmirror must not read the write gate's id set")
+}
+
 // testHost is the GitHub host fakeGrants resolves for when a test names none.
 const testHost = "https://ghe.current.example.com"
 

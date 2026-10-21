@@ -227,6 +227,14 @@ func (az *Checker) UserIsTeamAdmin(ctx context.Context, userID, orgID, teamID st
 	return az.members().userIsTeamAdmin(ctx, orgID, userID, teamID)
 }
 
+// UserAdministersATeam returns true when the calling user holds the 'admin'
+// role in at least one non-archived team of the org: the gate for a write
+// that precedes any one team's — registering a repository, which a team admin
+// does before tracking it — and so cannot name the team it is for.
+func (az *Checker) UserAdministersATeam(ctx context.Context, userID, orgID string) (bool, error) {
+	return az.members().userAdministersATeam(ctx, orgID, userID)
+}
+
 // viewOnlyMessage is the 403 body the team-write gates return. The viewer role
 // is read-only by design (TFAC-447), so a write attempt isn't an error to fix —
 // it's a role boundary. Keep the copy non-hostile and actionable: name the

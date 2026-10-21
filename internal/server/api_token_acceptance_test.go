@@ -130,20 +130,33 @@ func TestBearerAuth_WizardWritesLandUnderToken(t *testing.T) {
 		t.Fatalf("point the org at the stub GitHub: %v", err)
 	}
 
+	// The set is written by registry id, so the two repositories get rows the
+	// way an entity create would give them one.
+	host, err := r.srv.orgGitHubHost(t.Context(), orgID.String())
+	if err != nil || host == "" {
+		t.Fatalf("org github host = %q, %v", host, err)
+	}
+	var ids []string
+	for _, slug := range []string{"acme/widgets", "acme/gadgets"} {
+		row, err := r.srv.allStores.Repos.FindOrCreateByRefSystem(t.Context(), orgID.String(), domain.RepoRefFromSlug(host, slug))
+		if err != nil {
+			t.Fatalf("register %s: %v", slug, err)
+		}
+		ids = append(ids, row.ID)
+	}
+
 	path := "/api/teams/" + teamID.String() + "/github-repos"
-	rec := r.tokensJSON("PUT", path, map[string]any{"repos": []string{"acme/widgets", "acme/gadgets"}}, "", tok.Token)
+	rec := r.tokensJSON("PUT", path, map[string]any{"repository_ids": ids}, "", tok.Token)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PUT tracked set under a token = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
-	var tracked struct {
-		Repos []string `json:"repos"`
-	}
+	var tracked teamReposResponse
 	rec = r.tokensJSON("GET", path, nil, "", tok.Token)
 	if err := json.Unmarshal(rec.Body.Bytes(), &tracked); err != nil {
 		t.Fatalf("decode tracked set: %v (body=%s)", err, rec.Body.String())
 	}
-	if strings.Join(tracked.Repos, ",") != "acme/gadgets,acme/widgets" {
-		t.Errorf("tracked set after the token's write = %v, want both repos", tracked.Repos)
+	if got := strings.Join(trackedNames(tracked.Repos), ","); got != "acme/gadgets,acme/widgets" {
+		t.Errorf("tracked set after the token's write = %v, want both repos", got)
 	}
 
 	bind := "/api/orgs/" + orgID.String() + "/github/identity/pat"

@@ -23,10 +23,11 @@ type RepoReferenceFactory func(t *testing.T) (stores db.Stores, orgID, teamID st
 //
 // The rule is asymmetric, and the asymmetry is the whole design:
 //
-//   - A repository is brought into the registry by tracking it, or by TF
-//     recording a GitHub entity in it, both through the registry's one
-//     get-or-create (RepositoryStore.FindOrCreateByRefSystem). A row is not
-//     tracking: one an entity brought in is in no tracked set. A worktree
+//   - A repository is brought into the registry by registering it by
+//     GitHub id (RepositoryStore.FindOrCreateByExternalID) or by TF
+//     recording a GitHub entity in it (RepositoryStore.FindOrCreateByRefSystem),
+//     and tracked by the registry id that returns. A row is not tracking: one
+//     an entity brought in is in no tracked set. A worktree
 //     reservation resolves the row and refuses if it is absent, because a
 //     checkout of a repository TF holds nothing for is a caller's mistake.
 //   - Untracking deletes the tracking row and NOTHING else. A registry row
@@ -47,36 +48,38 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 	)
 
 	t.Run("Tracking_refuses_a_team_from_another_org", func(t *testing.T) {
-		// orgID scopes the registry rows the save mints; teamID goes straight
-		// onto the tracking row. If the two name different tenants the row is
-		// invisible — a team in one org pointing at a repository in another,
-		// which no org-scoped read returns — so the save would look like it
-		// worked and nothing would be tracked or polled. Refused instead.
+		// orgID scopes the registry rows the ids must name; teamID goes
+		// straight onto the tracking row. If the two name different tenants
+		// the row is invisible — a team in one org pointing at a repository in
+		// another, which no org-scoped read returns — so the save would look
+		// like it worked and nothing would be tracked or polled. Refused
+		// instead.
 		s, orgID, _, _ := mk(t)
 		const foreignTeam = "00000000-0000-0000-0000-0000000000ff"
-		err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, foreignTeam, TestGitHubHost, []domain.TeamGitHubRepo{
-			{Owner: "octo", Repo: "kept"},
-		})
+		kept, err := s.Repos.FindOrCreateByRefSystem(ctx, orgID, repoRef(keptSlug))
+		if err != nil {
+			t.Fatalf("register %s: %v", keptSlug, err)
+		}
+		err = s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, foreignTeam, TestGitHubHost, []string{kept.ID})
 		if !errors.Is(err, db.ErrTeamNotInOrg) {
 			t.Fatalf("ReplaceForTeam with a team outside the org = %v, want db.ErrTeamNotInOrg", err)
 		}
-		// And it refused before writing: no registry row was minted for a
-		// save that could never have completed.
-		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef(keptSlug)); got != nil {
-			t.Error("the refused save still created a registry row; the guard must run before the mint")
+		if names, err := s.Repos.ListTrackedNamesSystem(ctx, orgID, TestGitHubHost); err != nil || len(names) != 0 {
+			t.Errorf("tracked names after the refusal = %v, %v; want none", names, err)
 		}
 	})
 
-	t.Run("Tracking_brings_the_repository_into_the_registry", func(t *testing.T) {
+	t.Run("Tracking_puts_the_registry_row_in_the_tracked_set", func(t *testing.T) {
 		s, orgID, teamID, _ := mk(t)
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{
-			{Owner: "octo", Repo: "kept"},
-		}); err != nil {
-			t.Fatalf("ReplaceForTeam: %v", err)
+		kept, err := s.Repos.FindOrCreateByRefSystem(ctx, orgID, repoRef(keptSlug))
+		if err != nil {
+			t.Fatalf("register %s: %v", keptSlug, err)
 		}
-		got, err := s.Repos.GetByRef(ctx, orgID, repoRef(keptSlug))
-		if err != nil || got == nil {
-			t.Fatalf("Get after tracking = %v, %v; want the row tracking minted", got, err)
+		if names, err := s.Repos.ListTrackedNamesSystem(ctx, orgID, TestGitHubHost); err != nil || len(names) != 0 {
+			t.Fatalf("tracked names before tracking = %v, %v; want none — a registry row is not tracking", names, err)
+		}
+		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, TestGitHubHost, []string{kept.ID}); err != nil {
+			t.Fatalf("ReplaceForTeam: %v", err)
 		}
 		names, err := s.Repos.ListTrackedNamesSystem(ctx, orgID, TestGitHubHost)
 		if err != nil {
@@ -89,7 +92,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 
 	t.Run("Untracking_keeps_the_registry_row_and_everything_referencing_it", func(t *testing.T) {
 		s, orgID, teamID, conversation := mk(t)
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{
+		if err := TrackRepos(ctx, s.Repos, s.TeamGitHubRepos, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "octo", Repo: "kept"},
 			{Owner: "octo", Repo: "dropped"},
 		}); err != nil {
@@ -110,7 +113,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		}
 
 		// The untrack.
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{
+		if err := TrackRepos(ctx, s.Repos, s.TeamGitHubRepos, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "octo", Repo: "kept"},
 		}); err != nil {
 			t.Fatalf("ReplaceForTeam (untrack): %v", err)
@@ -145,7 +148,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 
 	t.Run("Tracking_is_answered_by_the_registry_row_id", func(t *testing.T) {
 		s, orgID, teamID, _ := mk(t)
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{
+		if err := TrackRepos(ctx, s.Repos, s.TeamGitHubRepos, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "octo", Repo: "kept"},
 		}); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
@@ -247,7 +250,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 
 	t.Run("A_github_entity_references_its_repository_row", func(t *testing.T) {
 		s, orgID, teamID, _ := mk(t)
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{
+		if err := TrackRepos(ctx, s.Repos, s.TeamGitHubRepos, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "octo", Repo: "kept"},
 		}); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)

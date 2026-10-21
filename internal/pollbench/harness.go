@@ -190,16 +190,6 @@ func Run(cfg RunConfig) (*Result, error) {
 	}
 
 	stores := sqlitestore.New(database)
-	// Track the repos on the local default team: the poller enumerates the
-	// tracked set, and a registry row on its own is not tracking.
-	tracked := make([]domain.TeamGitHubRepo, 0, len(ds.RepoNames()))
-	for _, name := range ds.RepoNames() {
-		owner, repo, ok := strings.Cut(name, "/")
-		if !ok {
-			return nil, fmt.Errorf("bench repo %q is not an owner/repo slug", name)
-		}
-		tracked = append(tracked, domain.TeamGitHubRepo{Owner: owner, Repo: repo})
-	}
 	// The org's GitHub is the fake server: the poller reads the tracked set
 	// and stamps entity scopes on this host, and the resolver sends every
 	// request to it.
@@ -209,6 +199,21 @@ func Run(cfg RunConfig) (*Result, error) {
 	host, err := db.OrgGitHubHostSystem(ctx, stores.Orgs, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("read github host: %w", err)
+	}
+	// Track the repos on the local default team: the poller enumerates the
+	// tracked set, and a registry row on its own is not tracking. The tracked
+	// set is written by registry id, so each repo is registered first.
+	tracked := make([]string, 0, len(ds.RepoNames()))
+	for _, name := range ds.RepoNames() {
+		owner, repo, ok := strings.Cut(name, "/")
+		if !ok {
+			return nil, fmt.Errorf("bench repo %q is not an owner/repo slug", name)
+		}
+		row, err := stores.Repos.FindOrCreateByRefSystem(ctx, orgID, domain.RepoRef{Host: host, Owner: owner, Repo: repo})
+		if err != nil {
+			return nil, fmt.Errorf("register bench repo %s: %w", name, err)
+		}
+		tracked = append(tracked, row.ID)
 	}
 	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, runmode.LocalDefaultTeamID, host, tracked); err != nil {
 		return nil, fmt.Errorf("configure repos: %w", err)

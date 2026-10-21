@@ -26,7 +26,7 @@ func seedTaskRepoRegistry(t *testing.T, f stepFixture) {
 	t.Helper()
 	ctx := context.Background()
 	stores := sqlitestore.New(f.database)
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
+	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "owner", Repo: "repo"},
 	}); err != nil {
 		t.Fatalf("track the task repo: %v", err)
@@ -151,7 +151,7 @@ func TestBuildStepConfig_WarmStepRecordsTheCheckoutsAnEarlierStepAdded(t *testin
 	f := seedStepFixture(t, "github", "ledger-added", 2, wt)
 	seedTaskRepoRegistry(t, f)
 	stores := sqlitestore.New(f.database)
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
+	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "owner", Repo: "repo"}, {Owner: "owner", Repo: "orrery"},
 	}); err != nil {
 		t.Fatalf("track the second repo: %v", err)

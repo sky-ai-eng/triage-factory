@@ -19,10 +19,8 @@ import (
 // same transaction as the team-row write — no cross-pool visibility
 // concern like the Postgres impl has.
 //
-// A row points at a repository by the registry row's id. Most of the store's
-// surface is still (owner, repo): that is what a request body carries, so
-// those reads join the registry to project the slug and every write resolves
-// the slug to a row first.
+// A row points at a repository by the registry row's id, and the write takes
+// those ids. The (owner, repo) lookups join the registry to match a name.
 type teamGitHubReposStore struct{ q queryer }
 
 func newTeamGitHubReposStore(q, _ queryer) db.TeamGitHubReposStore {
@@ -44,11 +42,11 @@ func listTeamGitHubRepos(ctx context.Context, q queryer, teamID, host string) ([
 		return nil, err
 	}
 	rows, err := q.QueryContext(ctx, `
-		SELECT r.owner, r.repo
+		SELECT r.id, COALESCE(r.external_id, ''), r.owner, r.repo
 		FROM team_github_repos g
 		JOIN repositories r ON r.id = g.repository_id
 		WHERE g.team_id = ? AND r.host = ?
-		ORDER BY r.owner ASC, r.repo ASC
+		ORDER BY r.owner ASC, r.repo ASC, r.id ASC
 	`, teamID, host)
 	if err != nil {
 		return nil, fmt.Errorf("read team_github_repos: %w", err)
@@ -57,7 +55,7 @@ func listTeamGitHubRepos(ctx context.Context, q queryer, teamID, host string) ([
 	out := []domain.TeamGitHubRepo{}
 	for rows.Next() {
 		var r domain.TeamGitHubRepo
-		if err := rows.Scan(&r.Owner, &r.Repo); err != nil {
+		if err := rows.Scan(&r.RepositoryID, &r.ExternalID, &r.Owner, &r.Repo); err != nil {
 			return nil, fmt.Errorf("scan team_github_repos: %w", err)
 		}
 		out = append(out, r)
@@ -110,47 +108,38 @@ func scanTrackedRepoTeams(rows *sql.Rows) ([]domain.TrackedRepoTeams, error) {
 	return out, rows.Err()
 }
 
-func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID, host string, repos []domain.TeamGitHubRepo) error {
+func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID, host string, repositoryIDs []string) error {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
-	}
-	norm, err := domain.NormalizeTeamGitHubRepos(repos)
-	if err != nil {
 		return err
 	}
 	if err := db.RequireRepoHost(host); err != nil {
 		return err
 	}
+	ids := db.DedupPreserveOrder(repositoryIDs)
 	return inTx(ctx, s.q, func(tx queryer) error {
 		// The two arguments have to describe one tenant. The composite foreign
 		// keys on team_github_repos are what enforce that; this check is here
-		// to fail with a name instead of "FOREIGN KEY constraint failed", and
-		// to fail BEFORE the registry mint below, so a refused save leaves no
-		// bare repository row behind.
+		// to fail with a name instead of "FOREIGN KEY constraint failed".
 		if err := assertTeamInOrg(ctx, tx, orgID, teamID); err != nil {
 			return err
 		}
+		// Every id has to be a repository on host. The foreign key would catch
+		// an id that names nothing, but not one on another host, which the
+		// prune below could then never reach again from this host's saves.
+		if err := requireRepositoriesOnHost(ctx, tx, host, ids); err != nil {
+			return err
+		}
 
-		// The registry row comes first: a tracking row references it, so it has
-		// to exist before the insert that points at it. This is also the whole
-		// of what used to be a reconcile — the union recompute existed to keep
-		// a derived cache in step, and the FK has taken that job over.
 		// ON CONFLICT DO NOTHING preserves the original created_at for repos a
 		// team already tracked.
-		ids := make([]string, 0, len(norm))
-		for _, r := range norm {
-			id, err := getOrCreateRepositoryID(ctx, tx, domain.RepoRef{Host: host, Owner: r.Owner, Repo: r.Repo})
-			if err != nil {
-				return fmt.Errorf("resolve repository %s/%s: %w", r.Owner, r.Repo, err)
-			}
+		for _, id := range ids {
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO team_github_repos (team_id, repository_id, org_id)
 				VALUES (?, ?, ?)
 				ON CONFLICT(team_id, repository_id) DO NOTHING
 			`, teamID, id, orgID); err != nil {
-				return fmt.Errorf("insert team_github_repos[%s/%s]: %w", r.Owner, r.Repo, err)
+				return fmt.Errorf("insert team_github_repos[%s]: %w", id, err)
 			}
-			ids = append(ids, id)
 		}
 
 		// Prune rows no longer desired. SQLite has no array binding, so
@@ -171,22 +160,51 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 			}
 			return nil
 		}
-		placeholders := make([]string, len(ids))
 		args := make([]any, 0, len(ids)+2)
 		args = append(args, teamID, host)
-		for i, id := range ids {
-			placeholders[i] = "?"
+		for _, id := range ids {
 			args = append(args, id)
 		}
 		query := fmt.Sprintf(
 			`DELETE FROM team_github_repos WHERE team_id = ? AND `+onHost+` AND repository_id NOT IN (%s)`,
-			strings.Join(placeholders, ", "),
+			strings.TrimRight(strings.Repeat("?, ", len(ids)), ", "),
 		)
 		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 			return fmt.Errorf("prune team_github_repos: %w", err)
 		}
 		return nil
 	})
+}
+
+// requireRepositoriesOnHost refuses ids that do not all name a repository row
+// on host, naming every one that does not.
+func requireRepositoriesOnHost(ctx context.Context, q queryer, host string, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, host)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := q.QueryContext(ctx,
+		`SELECT id FROM repositories WHERE host = ? AND id IN (`+strings.TrimRight(strings.Repeat("?, ", len(ids)), ", ")+`)`, args...)
+	if err != nil {
+		return fmt.Errorf("resolve tracked repositories: %w", err)
+	}
+	defer rows.Close()
+	found := make(map[string]bool, len(ids))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("scan tracked repository: %w", err)
+		}
+		found[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return db.MissingRepositoriesError(ids, found, host)
 }
 
 func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, host, owner, repo string) (bool, error) {

@@ -15,7 +15,8 @@ import {
   sinceLabel,
 } from '../../hooks/useTeamActivity'
 import { fetchTeamRepos, saveTeamRepos } from '../settings/teamConfig'
-import type { GitHubRepo } from '../../lib/githubRepos'
+import { candidateKeys, refFromCandidate, repoRefKey, repoRefSlug } from '../../lib/githubRepos'
+import type { GitHubRepo, RepoRef } from '../../lib/githubRepos'
 
 // GitHub, as this team's event source.
 //
@@ -64,8 +65,8 @@ function runBar(row: TableRow, max: number) {
 }
 
 export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: SourceBodyProps) {
-  const [tracked, setTracked] = useState<string[] | null>(null)
-  const [visible, setVisible] = useState<string[] | null>(null)
+  const [tracked, setTracked] = useState<RepoRef[] | null>(null)
+  const [visible, setVisible] = useState<GitHubRepo[] | null>(null)
   const [error, setError] = useState('')
   const [filter, setFilter] = useState('')
 
@@ -80,7 +81,7 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
   // The authoritative tracked set, so a second verb inside one undo window
   // computes from what the last one wrote rather than from what the screen
   // happened to be showing.
-  const trackedRef = useRef<string[]>([])
+  const trackedRef = useRef<RepoRef[]>([])
 
   useEffect(() => {
     if (!teamId) return
@@ -104,7 +105,7 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
     // is tracked.
     void apiListAll<GitHubRepo>('/api/github/repos/list')
       .then((repos) => {
-        if (live) setVisible(repos.map((r) => r.full_name))
+        if (live) setVisible(repos)
       })
       .catch(() => {
         if (live) setVisible(null)
@@ -114,30 +115,44 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
     }
   }, [teamId])
 
-  const rows: TableRow[] = useMemo(() => {
-    if (!tracked) return []
-    const on = new Set(tracked)
-    const names: string[] = []
+  // refsByRow maps each row id to its repository, so a verb can name what it
+  // selected.
+  const { rows, refsByRow } = useMemo((): {
+    rows: TableRow[]
+    refsByRow: Map<string, RepoRef>
+  } => {
+    if (!tracked) return { rows: [], refsByRow: new Map() }
+    // A row is keyed by its repository's selection key, so a visible
+    // repository and the tracked entry that names it — by GitHub id, or by
+    // name for a tracked row TF has no GitHub id for — are one row.
+    const trackedByKey = new Map(tracked.map((r) => [repoRefKey(r), r]))
+    const entries: { key: string; name: string; ref: RepoRef; on: boolean }[] = []
     const seen = new Set<string>()
-    for (const name of visible ?? []) {
-      seen.add(name)
-      names.push(name)
+    for (const c of visible ?? []) {
+      const hit = candidateKeys(c).find((k) => trackedByKey.has(k))
+      const ref = hit ? trackedByKey.get(hit)! : refFromCandidate(c)
+      const key = hit ?? repoRefKey(ref)
+      if (seen.has(key)) continue
+      seen.add(key)
+      entries.push({ key, name: c.full_name, ref, on: !!hit })
     }
     // A tracked repository the picker cannot see is still tracked — an App
     // installation narrowed after the fact, or a credential that stopped
     // resolving. Dropping it would make the page lie about what it watches.
-    for (const name of tracked) if (!seen.has(name)) names.push(name)
-    names.sort((a, b) => {
-      const t = Number(on.has(b)) - Number(on.has(a))
-      return t || a.localeCompare(b)
-    })
-    return names.map((name) => ({
-      id: name,
-      name,
-      tracked: on.has(name),
-      runs: null,
-      last: null,
-    }))
+    for (const [key, ref] of trackedByKey) {
+      if (!seen.has(key)) entries.push({ key, name: repoRefSlug(ref), ref, on: true })
+    }
+    entries.sort((a, b) => Number(b.on) - Number(a.on) || a.name.localeCompare(b.name))
+    return {
+      rows: entries.map((e) => ({
+        id: e.key,
+        name: e.name,
+        tracked: e.on,
+        runs: null,
+        last: null,
+      })),
+      refsByRow: new Map(entries.map((e) => [e.key, e.ref])),
+    }
   }, [tracked, visible])
 
   const shown = useMemo(() => {
@@ -180,22 +195,42 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
     [maxRuns],
   )
 
+  // Saves go out one at a time, in the order their windows closed. A save that
+  // registers a repository first is two requests, so a later save sent beside
+  // it could land first and then be overwritten by the older set.
+  const saving = useRef<Promise<unknown>>(Promise.resolve())
+
   // The set-replace the two verbs resolve to. Sent once, when the undo window
   // closes — an undone change is never sent at all.
   const commit = useCallback(
     (actionId: string, ids: Array<string | number>) => {
       const picked = new Set(ids.map(String))
+      const current = trackedRef.current
+      const have = new Set(current.map(repoRefKey))
       const next =
         actionId === 'watch'
-          ? trackedRef.current.concat([...picked].filter((n) => !trackedRef.current.includes(n)))
-          : trackedRef.current.filter((n) => !picked.has(n))
+          ? current.concat(
+              [...picked].filter((k) => !have.has(k)).flatMap((k) => refsByRow.get(k) ?? []),
+            )
+          : current.filter((r) => !picked.has(repoRefKey(r)))
       trackedRef.current = next
       setTracked(next)
-      void saveTeamRepos(teamId, next).then((res) => {
-        if (!res.ok) setError(res.error)
+      const save = saving.current.then(() => saveTeamRepos(teamId, next))
+      saving.current = save
+      void save.then((res) => {
+        if (!res.ok) {
+          setError(res.error)
+          return
+        }
+        // Adopt the stored set — registry ids for what was just registered —
+        // unless a later verb has already moved past this one.
+        if (trackedRef.current === next) {
+          trackedRef.current = res.repos
+          setTracked(res.repos)
+        }
       })
     },
-    [teamId],
+    [teamId, refsByRow],
   )
 
   const trackedCount = tracked ? tracked.length : null

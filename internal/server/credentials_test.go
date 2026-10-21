@@ -11,6 +11,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -97,7 +98,7 @@ func TestIntegrationsStatus_SetupCountsTrackedRepos(t *testing.T) {
 	seedConfiguredRepo(t, s, "acme", "widgets")
 	check("one tracked repo beside the untracked row", 1, true, "done")
 
-	if err := s.allStores.TeamGitHubRepos.ReplaceForTeam(ctx, org, runmode.LocalDefaultTeamID, seedRepoHost(t, s), nil); err != nil {
+	if err := dbtest.TrackRepos(ctx, s.allStores.Repos, s.allStores.TeamGitHubRepos, org, runmode.LocalDefaultTeamID, seedRepoHost(t, s), nil); err != nil {
 		t.Fatalf("untrack every repo: %v", err)
 	}
 	check("every repo untracked", 0, false, "team")

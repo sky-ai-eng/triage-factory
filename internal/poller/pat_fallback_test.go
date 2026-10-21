@@ -289,7 +289,7 @@ func trackRepos(t *testing.T, stores db.Stores, orgID string, names []string) {
 		}
 		repos = append(repos, domain.TeamGitHubRepo{Owner: owner, Repo: repo})
 	}
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(context.Background(), orgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, repos); err != nil {
+	if err := dbtest.TrackRepos(context.Background(), stores.Repos, stores.TeamGitHubRepos, orgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, repos); err != nil {
 		t.Fatalf("track repos %v: %v", names, err)
 	}
 }

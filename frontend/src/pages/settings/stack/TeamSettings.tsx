@@ -31,6 +31,7 @@ import ArchiveTeamModal from '../../../components/ArchiveTeamModal'
 import { fetchArchivePreview, type ArchivePreview } from '../../../lib/teamLifecycle'
 import { useTeams } from '../../../hooks/useTeams'
 import RepoPickerModal from '../../../components/RepoPickerModal'
+import { repoRefKey, type RepoRef } from '../../../lib/githubRepos'
 import GitHubTeamGroup from '../GitHubTeamGroup'
 import JiraProjectRulesGroup from '../JiraProjectRulesGroup'
 import LinearTeamRulesGroup from '../LinearTeamRulesGroup'
@@ -141,10 +142,12 @@ const clampToRange = (v: number, min: number, max: number): number =>
 const normProjects = (p: JiraProjectConfig[]): JiraProjectConfig[] =>
   p.map((x) => ({ ...x, key: x.key.trim() })).filter((x) => x.key !== '')
 
-const sameRepos = (a: string[], b: string[]): boolean => {
+// Compared by selection key, not registry id: a repository picked from the
+// reachable list has no registry id until the save registers it.
+const sameRepos = (a: RepoRef[], b: RepoRef[]): boolean => {
   if (a.length !== b.length) return false
-  const sb = new Set(b)
-  return a.every((x) => sb.has(x))
+  const sb = new Set(b.map(repoRefKey))
+  return a.every((x) => sb.has(repoRefKey(x)))
 }
 
 const groupKeys = (g: GitHubGroup[]): string[] =>
@@ -201,7 +204,7 @@ export default function TeamSettings({
   const [jiraConnected, setJiraConnected] = useState(false)
 
   // Per-section drafts.
-  const [repos, setRepos] = useState<string[]>([])
+  const [repos, setRepos] = useState<RepoRef[]>([])
   const [groups, setGroups] = useState<GitHubGroup[]>([])
   const [groupsBaseline, setGroupsBaseline] = useState<GitHubGroup[]>([])
   const [projects, setProjects] = useState<JiraProjectConfig[]>([])
@@ -327,7 +330,8 @@ export default function TeamSettings({
         toast.error(res.error)
         return false
       }
-      setBaseline((b) => ({ ...b, repos }))
+      setBaseline((b) => ({ ...b, repos: res.repos }))
+      setRepos(res.repos)
       // Force the GitHub-teams candidates to refetch against the new owner set.
       setReposVersion((v) => v + 1)
       toast.success('Repositories saved')

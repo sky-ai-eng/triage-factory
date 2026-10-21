@@ -50,7 +50,7 @@ func repoInFaultMessages(t *testing.T, code int, body map[string]any) []string {
 // untrackAllBut leaves the local team tracking only the named repositories.
 func untrackAllBut(t *testing.T, s *Server, keep ...domain.TeamGitHubRepo) {
 	t.Helper()
-	if err := s.allStores.TeamGitHubRepos.ReplaceForTeam(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seedRepoHost(t, s), keep); err != nil {
+	if err := dbtest.TrackRepos(t.Context(), s.allStores.Repos, s.allStores.TeamGitHubRepos, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seedRepoHost(t, s), keep); err != nil {
 		t.Fatalf("replace tracked repos: %v", err)
 	}
 }

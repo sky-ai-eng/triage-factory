@@ -180,10 +180,10 @@ func TestGate_HostIsPartOfTheRepoMatch(t *testing.T) {
 			ctx := context.Background()
 			teams := map[string]string{"a": runmode.LocalDefaultTeamID, "b": seedGateTeam(t, database, "team-b")}
 			acmeAPI := []domain.TeamGitHubRepo{{Owner: "acme", Repo: "api"}}
-			if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teams["a"], dbtest.TestGitHubHost, acmeAPI); err != nil {
+			if err := dbtest.TrackRepos(ctx, st.Repos, st.TeamGitHubRepos, runmode.LocalDefaultOrgID, teams["a"], dbtest.TestGitHubHost, acmeAPI); err != nil {
 				t.Fatalf("team a track: %v", err)
 			}
-			if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teams["b"], otherGitHubHost, acmeAPI); err != nil {
+			if err := dbtest.TrackRepos(ctx, st.Repos, st.TeamGitHubRepos, runmode.LocalDefaultOrgID, teams["b"], otherGitHubHost, acmeAPI); err != nil {
 				t.Fatalf("team b track: %v", err)
 			}
 			seedMatchAllRule(t, database, teams["a"], tc.rule)

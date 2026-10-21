@@ -2,11 +2,14 @@ package server
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -20,27 +23,57 @@ import (
 // --------------------------------------------------------------------
 // /api/teams/{team_id}/github-repos — the per-team GitHub repo
 // *tracking* selection, and the source of truth for what TF polls and
-// profiles. GET (any team member) returns the team's tracked repo slugs; PUT
-// (team admin) replace-sets them, bringing any newly-tracked repository into
-// the registry the rows reference. Untracking removes the tracking row alone:
+// profiles. GET (any team member) returns the team's tracked repositories; PUT
+// (team admin) replace-sets them. Untracking removes the tracking row alone:
 // the registry row survives whatever still names it. The {team_id} segment
 // resolves through authz.ResolveTeamID — a UUID, plus the literal "default"
-// in local mode — same as the sibling team routes. The candidate list (the
-// repos the user's token can see) is fetched separately via
-// POST /api/github/repos/list, mirroring how the existing repo picker sources
-// its options.
+// in local mode — same as the sibling team routes.
+//
+// **The set is named by registry id, never by name.** The GET hands each
+// tracked repository back with its registry id, its GitHub id and its current
+// owner/repo, and the PUT takes the registry ids alone — so a rename on GitHub
+// between a client's read and its save cannot make the body name a repository
+// by a name it no longer has. A repository the registry holds no row for yet
+// is one the picker offers by GitHub id (POST /api/github/repos/list): the
+// client registers it by that id (POST /api/repos), and tracks the registry id
+// that returns.
 //
 // A child collection of the team, named github-repos rather than repos: it
 // sits beside jira-projects and github-groups, and the bare word would read
 // as the top-level /api/repos registry, which is a different resource.
 // --------------------------------------------------------------------
 
+// trackedRepoJSON is one tracked repository on the wire.
+type trackedRepoJSON struct {
+	// ID is the registry row id: the handle the PUT names it by.
+	ID string `json:"id"`
+	// GitHubID is GitHub's own repository id, "" while TF has not learned it
+	// for this row. A client matches picker candidates against it.
+	GitHubID string `json:"github_id"`
+	// Owner and Repo are the repository's current name as TF stores it, for
+	// display.
+	Owner string `json:"owner"`
+	Repo  string `json:"repo"`
+}
+
 type teamReposResponse struct {
-	// Repos are the team's tracked repos as "owner/repo" slugs.
-	Repos []string `json:"repos"`
+	Repos []trackedRepoJSON `json:"repos"`
 	// Role is the caller's role in this team ("admin"/"member"/""), so
 	// the picker can disable Save for non-admins without a second call.
 	Role string `json:"role"`
+}
+
+// teamReposPutRequest is the desired set. RepositoryIDs is a pointer because
+// an absent field is not an empty set: a body that forgot it must not clear
+// the team's tracking.
+type teamReposPutRequest struct {
+	RepositoryIDs *[]string `json:"repository_ids"`
+}
+
+// teamReposPutResponse echoes the set as stored, in the GET's shape, so a
+// client renders the current names rather than what it last read.
+type teamReposPutResponse struct {
+	Repos []trackedRepoJSON `json:"repos"`
 }
 
 func (s *Server) handleTeamReposGet(w http.ResponseWriter, r *http.Request) {
@@ -85,7 +118,7 @@ func (s *Server) handleTeamReposGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, teamReposResponse{
-		Repos: repoSlugs(repos),
+		Repos: trackedReposJSON(repos),
 		Role:  role,
 	})
 }
@@ -113,51 +146,90 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		Repos []string `json:"repos"`
-	}
+	var req teamReposPutRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-
-	// Split + validate up front so a malformed slug surfaces as a 400
-	// rather than an opaque 500 from inside the tx. ReplaceForTeam
-	// re-normalizes idempotently.
-	repos, err := domain.TeamGitHubReposFromSlugs(req.Repos)
-	if err != nil {
-		badRequest(w, err.Error())
+	ids, ok := parseRepositoryIDs(w, req.RepositoryIDs)
+	if !ok {
 		return
 	}
 
-	// Reachability is only checked for repos the team isn't already
-	// tracking. A repo that became unreachable *after* being tracked
-	// (creds revoked, App uninstalled) must stay removable — rejecting it
-	// here would wedge the picker: the stale repo isn't in the reachable
-	// option list to uncheck, yet every Save re-submits it, so the user
-	// could never save a corrected set. Only *newly added* unreachable
-	// repos are a user error worth blocking.
 	host, ok := s.requireOrgGitHubHost(r.Context(), w, orgID, "teams/github-repos")
 	if !ok {
 		return
 	}
-	var existing []domain.TeamGitHubRepo
+
+	// Every id the team does not track yet is resolved to its registry row,
+	// and the ones that resolve are gated on reachability. An id the team
+	// already tracks is neither: a repository that became unreachable *after*
+	// being tracked (creds revoked, App uninstalled) must stay in a save, or
+	// the picker wedges — every Save re-submits it, so the user could never
+	// save a corrected set. Only an *added* repository is a user error worth
+	// blocking.
+	var (
+		added    []domain.Repository
+		addedAt  []int
+		refusals httpx.Validation
+	)
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		existing, e = tx.TeamGitHubRepos.ListForTeam(r.Context(), teamID, host)
-		return e
+		existing, err := tx.TeamGitHubRepos.ListForTeam(r.Context(), teamID, host)
+		if err != nil {
+			return err
+		}
+		tracked := make(map[string]bool, len(existing))
+		for _, e := range existing {
+			tracked[e.RepositoryID] = true
+		}
+		for i, id := range ids {
+			if tracked[id] {
+				continue
+			}
+			row, err := tx.Repos.Get(r.Context(), orgID, id)
+			if errors.Is(err, db.ErrNoSuchRepository) || (err == nil && row.Host != host) {
+				refusals.Invalid(repositoryIDField(i), "repository "+id+" is not a repository on this organization's GitHub host")
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			added = append(added, *row)
+			addedAt = append(addedAt, i)
+		}
+		return nil
 	}); err != nil {
 		internalError(w, "teams/github-repos", err)
 		return
 	}
-	added := newlyAddedRepos(existing, repos)
-	if slug, reject := s.rejectUnreachableRepo(r.Context(), orgID, userID, host, added); reject {
-		badRequest(w, "repo "+slug+" is not reachable by this org's GitHub credentials — install the GitHub App on it or grant the PAT access first")
+	// A refusal names the repository by the id the caller sent, never by its
+	// name: an added repository may be in none of the caller's teams' tracked
+	// sets, and the registry read 404s such a row to anyone but an org admin.
+	for j, bad := range s.unreachableRepos(r.Context(), orgID, userID, host, added) {
+		if bad {
+			refusals.Invalid(repositoryIDField(addedAt[j]),
+				"repository "+added[j].ID+" is not reachable by this organization's GitHub credentials — install the GitHub App on it or grant the PAT access first")
+		}
+	}
+	if refusals.Flush(w, http.StatusUnprocessableEntity) {
 		return
 	}
 
+	var stored []domain.TeamGitHubRepo
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.TeamGitHubRepos.ReplaceForTeam(r.Context(), orgID, teamID, host, repos)
+		if err := tx.TeamGitHubRepos.ReplaceForTeam(r.Context(), orgID, teamID, host, ids); err != nil {
+			return err
+		}
+		var e error
+		stored, e = tx.TeamGitHubRepos.ListForTeam(r.Context(), teamID, host)
+		return e
 	}); err != nil {
+		// A repository deleted between the check above and the write.
+		if errors.Is(err, db.ErrNoSuchRepository) {
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+				Reason: httpx.ReasonInvalidField, Message: "a repository in the set no longer exists", Field: "repository_ids",
+			})
+			return
+		}
 		internalError(w, "teams/github-repos", err)
 		return
 	}
@@ -180,14 +252,55 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 		s.profilerTrigger(orgID, true)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "repos": len(repos)})
+	writeJSON(w, http.StatusOK, teamReposPutResponse{Repos: trackedReposJSON(stored)})
 }
 
-// repoSlugs renders tracked repos as "owner/repo" slugs for the wire.
-func repoSlugs(repos []domain.TeamGitHubRepo) []string {
-	out := make([]string, 0, len(repos))
+// parseRepositoryIDs validates the PUT body's shape: the field present, and
+// every entry a registry id in canonical form, named once. Every fault is
+// reported, and it writes the 400 on a false return. Whether an id names a
+// repository is the handler's next question, answered against the store.
+func parseRepositoryIDs(w http.ResponseWriter, raw *[]string) ([]string, bool) {
+	var v httpx.Validation
+	if raw == nil {
+		v.Missing("repository_ids")
+		v.Flush(w, http.StatusBadRequest)
+		return nil, false
+	}
+	ids := make([]string, 0, len(*raw))
+	first := make(map[string]int, len(*raw))
+	for i, id := range *raw {
+		field := repositoryIDField(i)
+		if id == "" {
+			v.Missing(field)
+			continue
+		}
+		// Canonical form only: a registry id is minted lowercase-hyphenated
+		// and stored as text in local mode, so any other spelling of the same
+		// uuid would name no row there.
+		if parsed, err := uuid.Parse(id); err != nil || parsed.String() != id {
+			v.Invalid(field, id+" is not a repository id")
+			continue
+		}
+		if j, dup := first[id]; dup {
+			v.Invalid(field, fmt.Sprintf("repository %s is already named at repository_ids[%d]", id, j))
+			continue
+		}
+		first[id] = i
+		ids = append(ids, id)
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return nil, false
+	}
+	return ids, true
+}
+
+func repositoryIDField(i int) string { return fmt.Sprintf("repository_ids[%d]", i) }
+
+// trackedReposJSON renders tracked repos for the wire.
+func trackedReposJSON(repos []domain.TeamGitHubRepo) []trackedRepoJSON {
+	out := make([]trackedRepoJSON, 0, len(repos))
 	for _, r := range repos {
-		out = append(out, r.Slug())
+		out = append(out, trackedRepoJSON{ID: r.RepositoryID, GitHubID: r.ExternalID, Owner: r.Owner, Repo: r.Repo})
 	}
 	return out
 }
@@ -201,7 +314,7 @@ func repoSlugs(repos []domain.TeamGitHubRepo) []string {
 // is the only place a selection comes from — so trusting the mirror exactly as
 // far as the picker does is what makes the two agree. A stricter gate would not
 // catch anything the picker let through; it would just re-prove, one GitHub call
-// per selected slug, a membership the picker had already asserted from these
+// per selected repository, a membership the picker had already asserted from these
 // same rows.
 //
 // What a stricter gate WOULD buy is catching a repository whose access was
@@ -214,29 +327,24 @@ func repoSlugs(repos []domain.TeamGitHubRepo) []string {
 // should then pin its own shorter window rather than follow.
 const reachableGateMaxAge = reachcache.TTL
 
-// rejectUnreachableRepo is the write-time guard that keeps a team from
-// tracking a repo this deployment's GitHub credentials can't reach (a
-// typo'd slug, a stale client, a hand-crafted curl). It validates the
-// input repos in two tiers, both bounded by *selection* size rather than
-// *org* size:
+// unreachableRepos is the write-time guard that keeps a team from tracking a
+// repository this deployment's GitHub credentials can't reach (a stale client,
+// a hand-crafted curl, a registry row TF minted for an entity in a repository
+// the credential never covered). It reports, index-aligned with repos, which
+// are conclusively unreachable, in two tiers, both bounded by *selection* size
+// rather than *org* size:
 //
 //   - Tier 1 (hot path): the durable reachable-repo mirror — the same rows the
 //     picker listed the options from. It is one indexed read of just the
-//     selected slugs, no GitHub call, and it is authoritative for membership, so
-//     firstUnreachableRepo decides directly.
+//     selected repositories, no GitHub call, and it is authoritative for
+//     membership, so unreachableIn decides directly.
 //   - Tier 2 (cold path): when the mirror is empty or older than
-//     reachableGateMaxAge, probe *only the selected slugs* via per-repo
+//     reachableGateMaxAge, probe *only the selected repositories* via per-repo
 //     GET /repos/{owner}/{repo}, concurrently, instead of re-enumerating the
-//     whole org. See fanOutUnreachableRepo.
+//     whole org. See fanOutUnreachableRepos.
 //
-// Tier 1 used to be an in-process, per-(org, user) map warmed as a side effect
-// of the picker read. Three things that cost, all of which the mirror removes:
-// it was per-PROCESS, so in multi mode a PUT that landed on a different pod than
-// the picker silently fell to the cold path and the gate's behavior depended on
-// which pod answered; it died on restart, so a deploy moved every subsequent
-// write to the cold path; and being warmed by a read meant the picker had to be
-// careful to cache only a COMPLETE enumeration, since a partial page would make
-// the gate reject repos the user genuinely just saw.
+// The mirror is authoritative because it is shared: every pod reads the same
+// rows, across restarts, whichever pod served the picker.
 //
 // Both tiers preserve the long-standing fail-OPEN posture: if we can't
 // reach a conclusive "this repo does not exist for us" answer (no
@@ -246,87 +354,97 @@ const reachableGateMaxAge = reachcache.TTL
 // avoid coupling our write availability to GitHub's uptime. The residual
 // (a write accepted while GitHub was unreachable) is caught by the poller,
 // which no-ops on a repo it can't reach.
-func (s *Server) rejectUnreachableRepo(ctx context.Context, orgID, userID, host string, repos []domain.TeamGitHubRepo) (string, bool) {
+func (s *Server) unreachableRepos(ctx context.Context, orgID, userID, host string, repos []domain.Repository) []bool {
 	if len(repos) == 0 {
-		return "", false
+		return nil
 	}
 	if set, ok := s.reachableMirrorSet(ctx, orgID, host, repos); ok {
-		return firstUnreachableRepo(set, true, repos)
+		return unreachableIn(set, true, repos)
 	}
-	// Tier 2: cold path. Probe only the selected slugs.
-	return s.fanOutUnreachableRepo(ctx, orgID, userID, repos)
+	// Tier 2: cold path. Probe only the selected repositories.
+	return s.fanOutUnreachableRepos(ctx, orgID, userID, repos)
 }
 
-// reachableMirrorSet reads which of the selected slugs the mirror says the org
-// can reach, or reports that the mirror is not fit to decide this write.
+// reachSet is what the mirror says the org can reach of one selection: the
+// GitHub ids it holds, and the lowercased slugs it holds.
+type reachSet struct {
+	ids   map[string]domain.ReachableRepository
+	slugs map[string]struct{}
+}
+
+// reaches matches a registry row against the set by the id a rename does not
+// move when the row carries one, and by folded name only when it does not —
+// a row TF never learned an id for. A row whose id the mirror does not hold is
+// not reached through its name: GitHub serves one repository per name, so a
+// mirror entry under that name with another id is another repository.
+func (s reachSet) reaches(r domain.Repository) bool {
+	if r.ExternalID != "" {
+		_, ok := s.ids[r.ExternalID]
+		return ok
+	}
+	_, ok := s.slugs[strings.ToLower(r.Slug())]
+	return ok
+}
+
+// reachableMirrorSet reads which of the selected repositories the mirror says
+// the org can reach, or reports that the mirror is not fit to decide this
+// write.
 //
 // Every failure arm falls through to the cold path rather than to a rejection:
 // an unreadable class, an unreadable mirror, an empty one, or one past
-// reachableGateMaxAge all mean "we don't know from here", and the per-slug probe
-// is the thing that knows. Rejecting on any of them would turn a store hiccup
-// into a user-facing "that repo doesn't exist".
-func (s *Server) reachableMirrorSet(ctx context.Context, orgID, host string, repos []domain.TeamGitHubRepo) (map[string]struct{}, bool) {
+// reachableGateMaxAge all mean "we don't know from here", and the per-repo
+// probe is the thing that knows. Rejecting on any of them would turn a store
+// hiccup into a user-facing "that repo doesn't exist".
+func (s *Server) reachableMirrorSet(ctx context.Context, orgID, host string, repos []domain.Repository) (reachSet, bool) {
 	class, err := s.reachableCredentialClass(ctx, orgID)
 	if err != nil {
 		reposLog.Warn("resolve reachable credential class failed; probing per repo instead", "org", orgID, "error", err)
-		return nil, false
+		return reachSet{}, false
 	}
 	state, err := s.reachableRepos.ReachableStateSystem(ctx, orgID, host, class)
 	if err != nil {
 		reposLog.Warn("read reachable cache state failed; probing per repo instead", "org", orgID, "error", err)
-		return nil, false
+		return reachSet{}, false
 	}
 	if state.StaleAt(time.Now(), reachableGateMaxAge) {
 		// Ask for a refresh on the way past. This write is decided by the probe
 		// either way, but the user is mid-flow and their next Save should not pay
 		// for the same staleness twice.
 		s.kickReachRefresh(orgID, false)
-		return nil, false
+		return reachSet{}, false
 	}
-	slugs := make([]string, 0, len(repos))
+	var ids, slugs []string
 	for _, r := range repos {
-		slugs = append(slugs, r.Slug())
+		if r.ExternalID != "" {
+			ids = append(ids, r.ExternalID)
+		} else {
+			slugs = append(slugs, r.Slug())
+		}
 	}
-	set, err := s.reachableRepos.ReachableSlugsSystem(ctx, orgID, host, class, slugs)
-	if err != nil {
+	var set reachSet
+	if set.ids, err = s.reachableRepos.ReachableByExternalIDsSystem(ctx, orgID, host, class, ids); err != nil {
+		reposLog.Warn("read reachable ids failed; probing per repo instead", "org", orgID, "error", err)
+		return reachSet{}, false
+	}
+	if set.slugs, err = s.reachableRepos.ReachableSlugsSystem(ctx, orgID, host, class, slugs); err != nil {
 		reposLog.Warn("read reachable slugs failed; probing per repo instead", "org", orgID, "error", err)
-		return nil, false
+		return reachSet{}, false
 	}
 	return set, true
 }
 
-// newlyAddedRepos returns the entries of desired that are not already in
-// existing, matched case-insensitively (GitHub owner/repo identifiers are
-// case-insensitive, matching the gate's lower() comparison). These are the
-// only repos the reachability guard validates — see handleTeamReposPut.
-func newlyAddedRepos(existing, desired []domain.TeamGitHubRepo) []domain.TeamGitHubRepo {
-	have := make(map[string]struct{}, len(existing))
-	for _, r := range existing {
-		have[strings.ToLower(r.Slug())] = struct{}{}
-	}
-	added := make([]domain.TeamGitHubRepo, 0, len(desired))
-	for _, r := range desired {
-		if _, ok := have[strings.ToLower(r.Slug())]; !ok {
-			added = append(added, r)
-		}
-	}
-	return added
-}
-
-// firstUnreachableRepo is the pure policy: given the reachable set and
-// whether it's authoritative (checked), return the first repo not in it.
-// checked=false → never reject (fail open). Matching is case-insensitive
-// because GitHub repo identifiers are; the set is keyed lowercase.
-func firstUnreachableRepo(reachable map[string]struct{}, checked bool, repos []domain.TeamGitHubRepo) (string, bool) {
+// unreachableIn is the pure policy: given the reachable set and whether it's
+// authoritative (checked), report which repos it does not reach.
+// checked=false → never reject (fail open).
+func unreachableIn(set reachSet, checked bool, repos []domain.Repository) []bool {
+	out := make([]bool, len(repos))
 	if !checked {
-		return "", false
+		return out
 	}
-	for _, r := range repos {
-		if _, ok := reachable[strings.ToLower(r.Slug())]; !ok {
-			return r.Slug(), true
-		}
+	for i, r := range repos {
+		out[i] = !set.reaches(r)
 	}
-	return "", false
+	return out
 }
 
 // reachabilityFanOutCap bounds how many per-repo reachability probes run
@@ -337,44 +455,44 @@ const reachabilityFanOutCap = 20
 
 // reachabilityCallTimeout caps each per-repo GET. A slow GHES instance must
 // not let one probe stall the whole write; a timed-out probe is treated as
-// indeterminate (fail open for that slug), same as a 5xx.
+// indeterminate (fail open for that repository), same as a 5xx.
 const reachabilityCallTimeout = 3 * time.Second
 
-// fanOutUnreachableRepo is the cold-path reachability check: on a cache miss
-// it probes only the *selected* slugs (not the whole org) by issuing per-repo
-// GET /repos/{owner}/{repo} across every credential tier the deployment has,
-// concurrently. It returns the first input-order slug that is *conclusively*
-// unreachable by all of them.
+// fanOutUnreachableRepos is the cold-path reachability check: on a cache miss
+// it probes only the *selected* repositories (not the whole org) by issuing
+// per-repo GET /repos/{owner}/{repo} across every credential tier the
+// deployment has, concurrently, and reports which are *conclusively*
+// unreachable by all of them. The probe asks by the name TF stores, which
+// still answers after a rename TF has not applied: GitHub redirects a
+// renamed repository's old name.
 //
-// "Conclusively" carries the fail-open posture down to the per-slug level: a
-// slug is rejected only when at least one credential returned a definitive
-// 404/403 and none returned 200; if every credential was indeterminate
-// (5xx/timeout) the slug fails open. With no credentials at all there are no
-// clients, so nothing is rejected — matching the old reachableRepoSet
-// checked=false behavior.
-func (s *Server) fanOutUnreachableRepo(ctx context.Context, orgID, userID string, repos []domain.TeamGitHubRepo) (string, bool) {
+// "Conclusively" carries the fail-open posture down to the per-repo level: a
+// repository is rejected only when at least one credential returned a
+// definitive 404/403 and none returned 200; if every credential was
+// indeterminate (5xx/timeout) it fails open. With no credentials at all there
+// are no clients, so nothing is rejected.
+func (s *Server) fanOutUnreachableRepos(ctx context.Context, orgID, userID string, repos []domain.Repository) []bool {
 	clients := s.reachabilityClients(ctx, orgID, userID)
 	if len(clients) == 0 {
-		// No credentials resolved → fail open (same as a checked=false
-		// enumeration). A user can't induce this, so it isn't an escape hatch.
-		return "", false
+		// No credentials resolved → fail open. A user can't induce this, so it
+		// isn't an escape hatch.
+		return make([]bool, len(repos))
 	}
-	check := func(ctx context.Context, repo domain.TeamGitHubRepo) (reachable, conclusive bool) {
+	check := func(ctx context.Context, repo domain.Repository) (reachable, conclusive bool) {
 		return repoReachableByAny(ctx, clients, repo)
 	}
-	return firstUnreachableViaFanOut(ctx, repos, reachabilityFanOutCap, check)
+	return unreachableViaFanOut(ctx, repos, reachabilityFanOutCap, check)
 }
 
-// repoReachableByAny probes one slug across every credential tier, mirroring
-// reachableRepoSet's old union semantics one repo at a time: reachable by the
-// PAT *or* any App installation counts as reachable. Returns:
+// repoReachableByAny probes one repository across every credential tier:
+// reachable by the PAT *or* any App installation counts as reachable. Returns:
 //
 //   - (true, true)  — some client got a 200.
 //   - (false, true) — no client got a 200 and at least one got a definitive
 //     404/403 (conclusively unreachable).
 //   - (false, false) — every client was indeterminate (5xx/timeout); the
-//     caller fails open for this slug.
-func repoReachableByAny(ctx context.Context, clients []*ghclient.Client, repo domain.TeamGitHubRepo) (reachable, conclusive bool) {
+//     caller fails open for this repository.
+func repoReachableByAny(ctx context.Context, clients []*ghclient.Client, repo domain.Repository) (reachable, conclusive bool) {
 	anyConclusive := false
 	for _, c := range clients {
 		callCtx, cancel := context.WithTimeout(ctx, reachabilityCallTimeout)
@@ -390,20 +508,18 @@ func repoReachableByAny(ctx context.Context, clients []*ghclient.Client, repo do
 	return false, anyConclusive
 }
 
-// reachabilityCheck reports, for a single slug, whether it is reachable and
-// whether that answer is conclusive — see CheckRepoAccess. Factored out so the
-// fan-out orchestration (firstUnreachableViaFanOut) is a pure function over an
+// reachabilityCheck reports, for a single repository, whether it is reachable
+// and whether that answer is conclusive — see CheckRepoAccess. Factored out so
+// the fan-out orchestration (unreachableViaFanOut) is a pure function over an
 // injectable check, testable without a live GitHub.
-type reachabilityCheck func(ctx context.Context, repo domain.TeamGitHubRepo) (reachable, conclusive bool)
+type reachabilityCheck func(ctx context.Context, repo domain.Repository) (reachable, conclusive bool)
 
-// firstUnreachableViaFanOut runs check over every repo concurrently (at most
-// cap in flight) and returns the first *input-order* slug that is
-// conclusively unreachable (reachable=false AND conclusive=true). Slugs whose
-// check is indeterminate (conclusive=false) are never rejected — that is the
-// per-slug fail-open posture. Input order is preserved for the returned slug
-// (results are indexed, then scanned in order) so the rejection message is
-// deterministic regardless of completion order.
-func firstUnreachableViaFanOut(ctx context.Context, repos []domain.TeamGitHubRepo, maxInFlight int, check reachabilityCheck) (string, bool) {
+// unreachableViaFanOut runs check over every repo concurrently (at most
+// maxInFlight in flight) and reports, index-aligned with repos, which are
+// conclusively unreachable (reachable=false AND conclusive=true). A repository
+// whose check is indeterminate (conclusive=false) is never rejected — that is
+// the per-repo fail-open posture.
+func unreachableViaFanOut(ctx context.Context, repos []domain.Repository, maxInFlight int, check reachabilityCheck) []bool {
 	if maxInFlight < 1 {
 		maxInFlight = 1
 	}
@@ -413,7 +529,7 @@ func firstUnreachableViaFanOut(ctx context.Context, repos []domain.TeamGitHubRep
 	for i, repo := range repos {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(i int, repo domain.TeamGitHubRepo) {
+		go func(i int, repo domain.Repository) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			r, conc := check(ctx, repo)
@@ -421,20 +537,15 @@ func firstUnreachableViaFanOut(ctx context.Context, repos []domain.TeamGitHubRep
 		}(i, repo)
 	}
 	wg.Wait()
-	for i, bad := range unreachable {
-		if bad {
-			return repos[i].Slug(), true
-		}
-	}
-	return "", false
+	return unreachable
 }
 
 // reachabilityClients builds the GitHub clients the cold-path fan-out probes
 // against, one per credential tier the org has — the org PAT plus each App
-// installation. It mirrors the credential sourcing the old reachableRepoSet
-// did (PAT from integrations.Load, installations via the resolver) but returns
-// *clients* rather than enumerating repos through them, because the fan-out
-// asks each client about specific slugs instead of listing the world.
+// installation (PAT from integrations.Load, installations via the resolver).
+// It returns *clients* rather than enumerating repos through them, because the
+// fan-out asks each client about specific repositories instead of listing the
+// world.
 //
 // Credentials + base URL are read inside WithTx so SecretStore decrypts under
 // the caller's claims. A read error or missing credential just yields fewer

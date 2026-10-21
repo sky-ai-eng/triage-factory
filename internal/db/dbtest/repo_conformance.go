@@ -18,10 +18,8 @@ import (
 type RepositoryStoreFactory func(t *testing.T) (store db.RepositoryStore, orgID string, seed RepositorySeeder)
 
 // RepositorySeeder is the bag of fixtures the suite cannot build through
-// RepositoryStore alone. A repository enters the registry by being tracked
-// and in no other way, so every case that needs a bare row stages it the way
-// production does — through TeamGitHubReposStore.ReplaceForTeam on a team of
-// the org — rather than through a write the store does not offer.
+// RepositoryStore alone: the tracked-set store and the teams to track with, for
+// the cases about which registry rows the tracked reads return.
 type RepositorySeeder struct {
 	// Tracking is the tracked-set store wired against the same backend.
 	Tracking db.TeamGitHubReposStore
@@ -58,10 +56,14 @@ type RepositorySeeder struct {
 //     and ListSystem keep.
 //   - UpdateBaseBranch + UpdateCloneStatusByRef mutate only the targeted
 //     fields, and every name-keyed method folds case on owner/repo.
-//   - Tracking mints one bare identity row per repository, however often
-//     and by however many teams it is tracked, matches an existing row
+//   - The by-name door mints one bare identity row per repository, however
+//     often and by however many teams it is tracked, matches an existing row
 //     case-insensitively with sticky casing, and never rewrites what the
 //     row already holds (profile, base branch, clone state, poll cursor).
+//   - A registration by provider id finds the row carrying the id before
+//     any row holding the name, writes the id onto a bare row holding the
+//     name, creates a row carrying it otherwise, and refuses a name held
+//     under another id.
 //   - Every single-row write returns the row it persisted, and that row is
 //     the one a point read finds.
 //   - The GitHub host is part of a repository's identity: the same slug on
@@ -218,7 +220,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// is made to handle it instead of being handed an empty row that reads
 		// exactly like "this repository was never configured".
 		s, orgID, seed := mk(t)
-		trackRepos(t, seed, orgID, seed.TeamID, "octo/widget")
+		trackRepos(t, s, seed, orgID, seed.TeamID, "octo/widget")
 		byRef, err := s.GetByRef(ctx, orgID, repoRef("octo/widget"))
 		if err != nil || byRef == nil {
 			t.Fatalf("GetByRef: got=%v err=%v", byRef, err)
@@ -374,9 +376,9 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		s, orgID, seed := mk(t)
 		teamB := seed.Team(t, "team-b")
 		idle := seed.Team(t, "team-idle")
-		trackRepos(t, seed, orgID, seed.TeamID, "a/one", "a/two", "z/gone")
-		trackRepos(t, seed, orgID, teamB, "a/two", "b/three")
-		trackRepos(t, seed, orgID, seed.TeamID, "a/one", "a/two")
+		trackRepos(t, s, seed, orgID, seed.TeamID, "a/one", "a/two", "z/gone")
+		trackRepos(t, s, seed, orgID, teamB, "a/two", "b/three")
+		trackRepos(t, s, seed, orgID, seed.TeamID, "a/one", "a/two")
 
 		slugs := func(rows []domain.Repository) []string {
 			out := make([]string, len(rows))
@@ -529,7 +531,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// The same repository, tracked lowercased, alongside a genuinely new
 		// one — so this exercises a save that mints as well as one that
 		// resolves.
-		trackRepos(t, seed, orgID, seed.TeamID, "acme/api", "octo/new")
+		trackRepos(t, s, seed, orgID, seed.TeamID, "acme/api", "octo/new")
 
 		if n := registryRows(t, s, orgID); n != 2 {
 			t.Fatalf("rows = %d, want 2 — a casing difference is not a second repository", n)
@@ -677,7 +679,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// team-tracking gate that WOULD have matched. The rest are pinned
 		// alongside it so the family cannot drift apart again.
 		s, orgID, seed := mk(t)
-		trackRepos(t, seed, orgID, seed.TeamID, "Acme/Api")
+		trackRepos(t, s, seed, orgID, seed.TeamID, "Acme/Api")
 
 		got, err := s.GetByRef(ctx, orgID, repoRef("acme/api"))
 		if err != nil || got == nil {
@@ -725,7 +727,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// against a repository nothing resolves. Pinned as a family so they
 		// cannot drift apart the way they already did once.
 		s, orgID, seed := mk(t)
-		trackRepos(t, seed, orgID, seed.TeamID, "octo/widget")
+		trackRepos(t, s, seed, orgID, seed.TeamID, "octo/widget")
 		bogus := domain.RepoRef{Source: "gitlob", Host: TestGitHubHost, Owner: "octo", Repo: "widget"}
 
 		if got, err := s.GetByRef(ctx, orgID, bogus); err == nil {
@@ -760,29 +762,30 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		}
 	})
 
-	t.Run("Tracking_mints_one_bare_row_and_every_repeat_is_a_read", func(t *testing.T) {
-		// The core of the create path: the first save mints the row, and
-		// every save after it — by the same team or another — resolves to
+	t.Run("The_by_name_door_mints_one_bare_row_and_every_repeat_is_a_read", func(t *testing.T) {
+		// The core of the by-name create path (FindOrCreateByRefSystem, which
+		// trackRepos stages through): the first call mints the row, and every
+		// call after it — for the same team's save or another's — resolves to
 		// the same one. "Same" is checked by id AND by row count, because the
 		// failure this guards is a second row for the same repository, which
-		// a per-save read would happily read past. The row tracking mints is
-		// a complete identity row from the moment it exists, and nothing
-		// more: tracking learns no provider id and no profile.
+		// a per-call read would happily read past. The row it mints is a
+		// complete identity row from the moment it exists, and nothing more:
+		// a name carries no provider id and no profile.
 		s, orgID, seed := mk(t)
 
-		trackRepos(t, seed, orgID, seed.TeamID, "octo/widget")
+		trackRepos(t, s, seed, orgID, seed.TeamID, "octo/widget")
 		first, err := s.GetByRef(ctx, orgID, repoRef("octo/widget"))
 		if err != nil || first == nil {
-			t.Fatalf("GetByRef after tracking: got=%v err=%v — tracking must create the row immediately", first, err)
+			t.Fatalf("GetByRef after tracking: got=%v err=%v — the by-name door must create the row immediately", first, err)
 		}
 		if first.Slug() != "octo/widget" || first.Owner != "octo" || first.Repo != "widget" {
 			t.Errorf("created row identity = %+v, want octo/widget", first)
 		}
 		if first.Source != domain.RepoSourceGitHub {
-			t.Errorf("created row source = %q, want %q — tracking is GitHub", first.Source, domain.RepoSourceGitHub)
+			t.Errorf("created row source = %q, want %q", first.Source, domain.RepoSourceGitHub)
 		}
 		if first.ExternalID != "" {
-			t.Errorf("created row external id = %q, want empty — tracking learns no id, and none is invented", first.ExternalID)
+			t.Errorf("created row external id = %q, want empty — a name carries no id, and none is invented", first.ExternalID)
 		}
 		if first.ProfileText != "" || first.ProfiledAt != nil {
 			t.Errorf("created row should be bare until the profiler runs, got %+v", first)
@@ -790,7 +793,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 
 		other := seed.Team(t, "other-team")
 		for i, teamID := range []string{seed.TeamID, seed.TeamID, other, seed.TeamID} {
-			trackRepos(t, seed, orgID, teamID, "octo/widget")
+			trackRepos(t, s, seed, orgID, teamID, "octo/widget")
 			again, err := s.GetByRef(ctx, orgID, repoRef("octo/widget"))
 			if err != nil || again == nil {
 				t.Fatalf("GetByRef (repeat %d): got=%v err=%v", i, again, err)
@@ -811,13 +814,13 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// the same repository. Stored casing is sticky: the first spelling
 		// wins and the second save reads it back.
 		s, orgID, seed := mk(t)
-		trackRepos(t, seed, orgID, seed.TeamID, "Acme/Api")
+		trackRepos(t, s, seed, orgID, seed.TeamID, "Acme/Api")
 		first, err := s.GetByRef(ctx, orgID, repoRef("Acme/Api"))
 		if err != nil || first == nil {
 			t.Fatalf("GetByRef after the first save: got=%v err=%v", first, err)
 		}
 
-		trackRepos(t, seed, orgID, seed.Team(t, "other-team"), "acme/API")
+		trackRepos(t, s, seed, orgID, seed.Team(t, "other-team"), "acme/API")
 		got, err := s.GetByRef(ctx, orgID, repoRef("acme/API"))
 		if err != nil || got == nil {
 			t.Fatalf("GetByRef (mismatched case): got=%v err=%v", got, err)
@@ -840,7 +843,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// on every cycle — it fills what is missing, touches nothing else, and
 		// reports how much it filled so the steady state is visibly zero.
 		s, orgID, seed := mk(t)
-		trackRepos(t, seed, orgID, seed.TeamID, "Acme/Api", "octo/known", "octo/bare")
+		trackRepos(t, s, seed, orgID, seed.TeamID, "Acme/Api", "octo/known", "octo/bare")
 		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "known",
@@ -1017,8 +1020,8 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// is two rows, and every ref-keyed and listing read answers only for
 		// the host it is asked about.
 		s, orgID, seed := mk(t)
-		trackReposOnHost(t, seed, orgID, seed.TeamID, TestGitHubHost, "octo/widget", "octo/only-dotcom")
-		trackReposOnHost(t, seed, orgID, seed.TeamID, TestOtherGitHubHost, "octo/widget", "octo/only-ghe")
+		trackReposOnHost(t, s, seed, orgID, seed.TeamID, TestGitHubHost, "octo/widget", "octo/only-dotcom")
+		trackReposOnHost(t, s, seed, orgID, seed.TeamID, TestOtherGitHubHost, "octo/widget", "octo/only-ghe")
 
 		dotcom, err := s.GetByRefSystem(ctx, orgID, domain.RepoRefFromSlug(TestGitHubHost, "octo/widget"))
 		if err != nil || dotcom == nil {
@@ -1103,7 +1106,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 
 		// Untracking everything on one host leaves the other host's tracked
 		// set exactly as it stands.
-		trackReposOnHost(t, seed, orgID, seed.TeamID, TestOtherGitHubHost)
+		trackReposOnHost(t, s, seed, orgID, seed.TeamID, TestOtherGitHubHost)
 		if names, err := s.ListTrackedNamesSystem(ctx, orgID, TestGitHubHost); err != nil || !equalStringSlice(names, []string{"octo/only-dotcom", "octo/widget"}) {
 			t.Errorf("github.com tracked names after clearing ghe = %v, %v; want both kept", names, err)
 		}
@@ -1135,7 +1138,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// a call without one names no repository. It is refused rather than
 		// answered as a miss, which would read as "not configured".
 		s, orgID, seed := mk(t)
-		trackRepos(t, seed, orgID, seed.TeamID, "octo/widget")
+		trackRepos(t, s, seed, orgID, seed.TeamID, "octo/widget")
 		noHost := domain.RepoRef{Owner: "octo", Repo: "widget", ExternalID: "1"}
 
 		check := func(name string, err error) {
@@ -1177,7 +1180,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		check("ListTrackedByTeam", err)
 		_, err = s.ListIdentitiesSystem(ctx, orgID, "")
 		check("ListIdentitiesSystem", err)
-		check("ReplaceForTeam", seed.Tracking.ReplaceForTeam(ctx, orgID, seed.TeamID, "", []domain.TeamGitHubRepo{{Owner: "octo", Repo: "other"}}))
+		check("ReplaceForTeam", seed.Tracking.ReplaceForTeam(ctx, orgID, seed.TeamID, "", nil))
 
 		// None of the refusals wrote anything.
 		got, err := s.GetByRef(ctx, orgID, repoRef("octo/widget"))
@@ -1275,12 +1278,128 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		}
 	})
 
+	t.Run("FindOrCreateByExternalID_creates_a_row_carrying_the_id", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		created, err := s.FindOrCreateByExternalID(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "Octo", Repo: "Widget", ExternalID: "7001"})
+		if err != nil {
+			t.Fatalf("FindOrCreateByExternalID: %v", err)
+		}
+		if created.ID == "" || created.ExternalID != "7001" || created.Slug() != "Octo/Widget" ||
+			created.Source != domain.RepoSourceGitHub || created.Host != TestGitHubHost || created.ProfiledAt != nil {
+			t.Errorf("created = %+v, want a bare Octo/Widget row carrying 7001", created)
+		}
+		AssertWriteReturnedStoredRow(t, "FindOrCreateByExternalID (create)", created, func() (*domain.Repository, error) {
+			return s.Get(ctx, orgID, created.ID)
+		})
+		// Registered is not tracked: nothing about the row puts it in what TF
+		// polls.
+		if names, err := s.ListTrackedNamesSystem(ctx, orgID, TestGitHubHost); err != nil || len(names) != 0 {
+			t.Errorf("tracked names after a registration = %v, %v; want none", names, err)
+		}
+
+		again, err := s.FindOrCreateByExternalID(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "octo", Repo: "widget", ExternalID: "7001"})
+		if err != nil {
+			t.Fatalf("second FindOrCreateByExternalID: %v", err)
+		}
+		if again.ID != created.ID || again.Slug() != "Octo/Widget" {
+			t.Errorf("second registration = %s %s, want the first row under its stored casing", again.ID, again.Slug())
+		}
+		if n := registryRows(t, s, orgID); n != 1 {
+			t.Errorf("registry rows = %d, want 1", n)
+		}
+	})
+
+	t.Run("FindOrCreateByExternalID_finds_the_id_before_the_name", func(t *testing.T) {
+		// GitHub renamed octo/widget to octo/gadget and TF has not applied it.
+		// A registration naming the repository by its id and its new name is
+		// the existing row, under the name TF stores, and no second row.
+		s, orgID, _ := mk(t)
+		old, err := s.FindOrCreateByExternalID(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "octo", Repo: "widget", ExternalID: "7101"})
+		if err != nil {
+			t.Fatalf("register octo/widget: %v", err)
+		}
+		got, err := s.FindOrCreateByExternalID(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "octo", Repo: "gadget", ExternalID: "7101"})
+		if err != nil {
+			t.Fatalf("register under the new name: %v", err)
+		}
+		if got.ID != old.ID || got.Slug() != "octo/widget" {
+			t.Errorf("registration under the new name = %s %s, want row %s as stored (octo/widget)", got.ID, got.Slug(), old.ID)
+		}
+		if n := registryRows(t, s, orgID); n != 1 {
+			t.Errorf("registry rows = %d, want 1 — an unapplied rename is not a second repository", n)
+		}
+	})
+
+	t.Run("FindOrCreateByExternalID_writes_the_id_onto_a_bare_row_holding_the_name", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		bare, err := s.FindOrCreateByRefSystem(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "Acme", Repo: "Api"})
+		if err != nil {
+			t.Fatalf("mint bare row: %v", err)
+		}
+		got, err := s.FindOrCreateByExternalID(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "acme", Repo: "api", ExternalID: "7201"})
+		if err != nil {
+			t.Fatalf("FindOrCreateByExternalID: %v", err)
+		}
+		if got.ID != bare.ID || got.ExternalID != "7201" || got.Slug() != "Acme/Api" {
+			t.Errorf("registration = %+v, want bare row %s carrying 7201 under its stored casing", got, bare.ID)
+		}
+		AssertWriteReturnedStoredRow(t, "FindOrCreateByExternalID (adopt)", got, func() (*domain.Repository, error) {
+			return s.Get(ctx, orgID, bare.ID)
+		})
+		if n := registryRows(t, s, orgID); n != 1 {
+			t.Errorf("registry rows = %d, want 1", n)
+		}
+	})
+
+	t.Run("FindOrCreateByExternalID_refuses_a_name_held_under_another_id", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		held, err := s.FindOrCreateByExternalID(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "acme", Repo: "api", ExternalID: "7301"})
+		if err != nil {
+			t.Fatalf("register acme/api: %v", err)
+		}
+		_, err = s.FindOrCreateByExternalID(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "Acme", Repo: "API", ExternalID: "7302"})
+		if !errors.Is(err, db.ErrRepoSlugOccupied) {
+			t.Fatalf("registration of another id under a held name = %v, want db.ErrRepoSlugOccupied", err)
+		}
+		after, err := s.Get(ctx, orgID, held.ID)
+		if err != nil || after.ExternalID != "7301" {
+			t.Errorf("held row after the refusal = %+v, %v; want it still carrying 7301", after, err)
+		}
+		if n := registryRows(t, s, orgID); n != 1 {
+			t.Errorf("registry rows = %d, want 1 — a refused registration writes nothing", n)
+		}
+	})
+
+	t.Run("FindOrCreateByExternalID_is_host_scoped_and_requires_its_inputs", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		here, err := s.FindOrCreateByExternalID(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "acme", Repo: "api", ExternalID: "7401"})
+		if err != nil {
+			t.Fatalf("register on %s: %v", TestGitHubHost, err)
+		}
+		there, err := s.FindOrCreateByExternalID(ctx, orgID, domain.RepoRef{Host: TestOtherGitHubHost, Owner: "acme", Repo: "api", ExternalID: "7401"})
+		if err != nil {
+			t.Fatalf("register on %s: %v", TestOtherGitHubHost, err)
+		}
+		if here.ID == there.ID || there.Host != TestOtherGitHubHost {
+			t.Errorf("one id on two hosts resolved to %s and %s (host %s); want two rows", here.ID, there.ID, there.Host)
+		}
+		if _, err := s.FindOrCreateByExternalID(ctx, orgID, domain.RepoRef{Owner: "acme", Repo: "api", ExternalID: "7401"}); !errors.Is(err, db.ErrRepoHostRequired) {
+			t.Errorf("no host = %v, want db.ErrRepoHostRequired", err)
+		}
+		if _, err := s.FindOrCreateByExternalID(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "acme", Repo: "web"}); err == nil {
+			t.Error("no provider id was accepted; a registration by id needs one")
+		}
+		if n := registryRows(t, s, orgID); n != 1 {
+			t.Errorf("registry rows on %s = %d, want 1", TestGitHubHost, n)
+		}
+	})
+
 	t.Run("PullsPollState_round_trips", func(t *testing.T) {
 		// The GitHub poller stores a per-repo ETag + last-poll time for
 		// conditional open-PR discovery. Unset reads as ("", nil);
 		// a Set persists both; a re-Set overwrites.
 		s, orgID, seed := mk(t)
-		trackRepos(t, seed, orgID, seed.TeamID, "octo/widget")
+		trackRepos(t, s, seed, orgID, seed.TeamID, "octo/widget")
 
 		etag, polledAt, err := s.GetPullsPollStateByRefSystem(ctx, orgID, repoRef("octo/widget"))
 		if err != nil {
@@ -1331,26 +1450,25 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 	})
 }
 
-// trackRepos stages slugs as the team's tracked set. Production brings a
-// repository into the registry through this door and no other, so a case that
-// needs a bare row takes the same path rather than a write the store does not
-// offer. The slugs are written in the "owner/repo" a person would type, the
-// form the cases are about.
-func trackRepos(t *testing.T, seed RepositorySeeder, orgID, teamID string, slugs ...string) {
+// trackRepos stages slugs as the team's tracked set: each is brought into the
+// registry by name through FindOrCreateByRefSystem, the door a bare row comes
+// through, and tracked by the id that returns. The slugs are written in the
+// "owner/repo" a person would type, the form the cases are about.
+func trackRepos(t *testing.T, s db.RepositoryStore, seed RepositorySeeder, orgID, teamID string, slugs ...string) {
 	t.Helper()
-	trackReposOnHost(t, seed, orgID, teamID, TestGitHubHost, slugs...)
+	trackReposOnHost(t, s, seed, orgID, teamID, TestGitHubHost, slugs...)
 }
 
 // trackReposOnHost is trackRepos on a named GitHub host. It replaces the
 // team's tracked set on that host only.
-func trackReposOnHost(t *testing.T, seed RepositorySeeder, orgID, teamID, host string, slugs ...string) {
+func trackReposOnHost(t *testing.T, s db.RepositoryStore, seed RepositorySeeder, orgID, teamID, host string, slugs ...string) {
 	t.Helper()
 	repos := make([]domain.TeamGitHubRepo, 0, len(slugs))
 	for _, slug := range slugs {
 		ref := domain.RepoRefFromSlug(host, slug)
 		repos = append(repos, domain.TeamGitHubRepo{Owner: ref.Owner, Repo: ref.Repo})
 	}
-	if err := seed.Tracking.ReplaceForTeam(context.Background(), orgID, teamID, host, repos); err != nil {
+	if err := TrackRepos(context.Background(), s, seed.Tracking, orgID, teamID, host, repos); err != nil {
 		t.Fatalf("track %v on %s for team %s: %v", slugs, host, teamID, err)
 	}
 }

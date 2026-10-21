@@ -19,6 +19,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
@@ -819,7 +820,7 @@ func renameRepo(t *testing.T, stores db.Stores, from, to string) {
 	t.Helper()
 	ctx := context.Background()
 	old := domain.RepoRefFromSlug(reconcileTestHost, from)
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, reconcileTestHost,
+	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, reconcileTestHost,
 		[]domain.TeamGitHubRepo{{Owner: old.Owner, Repo: old.Repo}}); err != nil {
 		t.Fatalf("track %s: %v", from, err)
 	}

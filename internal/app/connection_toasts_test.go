@@ -100,7 +100,7 @@ func TestPollFailure_NoToast(t *testing.T) {
 
 	stores, conn := openConnectionTestStores(t)
 	org := runmode.LocalDefaultOrgID
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(context.Background(), org, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost,
+	if err := dbtest.TrackRepos(context.Background(), stores.Repos, stores.TeamGitHubRepos, org, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost,
 		[]domain.TeamGitHubRepo{{Owner: "octo", Repo: "a"}}); err != nil {
 		t.Fatalf("track repo: %v", err)
 	}

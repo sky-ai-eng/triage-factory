@@ -85,7 +85,8 @@ type countingGitHub struct {
 	failEnumerator atomic.Bool
 }
 
-// newCountingPATGitHub serves GET /user/repos with the given slugs, one page.
+// newCountingPATGitHub serves GET /user/repos with the given slugs, one page,
+// each carrying its 1-based position as its GitHub id.
 func newCountingPATGitHub(t *testing.T, slugs ...string) *countingGitHub {
 	t.Helper()
 	c := &countingGitHub{}
@@ -99,8 +100,8 @@ func newCountingPATGitHub(t *testing.T, slugs ...string) *countingGitHub {
 		w.Header().Set("Content-Type", "application/json")
 		page := []map[string]any{}
 		if r.URL.Query().Get("page") == "1" {
-			for _, slug := range slugs {
-				page = append(page, map[string]any{"full_name": slug, "language": "Go"})
+			for i, slug := range slugs {
+				page = append(page, map[string]any{"full_name": slug, "language": "Go", "id": i + 1})
 			}
 		}
 		_ = json.NewEncoder(w).Encode(page)
@@ -271,6 +272,10 @@ func TestPickerSchemaIsIdenticalAcrossCredentialClasses(t *testing.T) {
 	if patPage.Status != githubRepoStatusReady || appPage.Status != githubRepoStatusReady {
 		t.Errorf("status pat=%q app=%q; want %q on both", patPage.Status, appPage.Status, githubRepoStatusReady)
 	}
+	// Each option carries the GitHub id a client registers it by.
+	if len(patPage.Items) != 2 || patPage.Items[0].GitHubID != "1" || patPage.Items[1].GitHubID != "2" {
+		t.Errorf("pat items = %+v; want acme/api and acme/web carrying GitHub ids 1 and 2", patPage.Items)
+	}
 }
 
 // TestPickerReadinessSchemaMatchesTheReadyOne pins the empty case: a first-ever
@@ -432,7 +437,7 @@ func TestReachRefreshFreshnessContractIsOneContract(t *testing.T) {
 //
 // The cold path is made to disagree on purpose — the stub answers 404 for every
 // per-repo probe — so a gate that quietly fell through would reject the
-// reachable slug and fail the test rather than passing by coincidence.
+// reachable repository and fail the test rather than passing by coincidence.
 func TestTeamReposPut_GateReadsTheMirrorFromAnotherPod(t *testing.T) {
 	keyring.MockInit()
 	picker := newTestServer(t)
@@ -452,27 +457,22 @@ func TestTeamReposPut_GateReadsTheMirrorFromAnotherPod(t *testing.T) {
 	// picker read and therefore never warmed anything of its own.
 	writer := New(picker.db, sqlitestore.New(picker.db))
 
-	if rec := doJSON(t, writer, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
-		"repos": []string{"owner/tracked"},
-	}); rec.Code != http.StatusOK {
+	// Registration reads the mirror too: owner/tracked is GitHub id 1 there.
+	tracked := registeredID(t, writer, "1")
+	if rec := putTracked(t, writer, tracked.ID); rec.Code != http.StatusOK {
 		t.Fatalf("reachable PUT on pod B = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	rec := doJSON(t, writer, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
-		"repos": []string{"owner/tracked", "owner/ghost"},
-	})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("unreachable PUT on pod B = %d, want 400; body=%s", rec.Code, rec.Body.String())
-	}
-	if body := rec.Body.String(); !strings.Contains(body, "owner/ghost") {
-		t.Errorf("rejection should name the offending repo; body=%s", body)
-	}
+	ghost := registerBare(t, writer, hostOf(t, writer), "owner/ghost")
+	msgs := assertRefusedFields(t, putTracked(t, writer, tracked.ID, ghost), http.StatusUnprocessableEntity, "repository_ids[1]")
+	assertNamesByID(t, msgs[0], ghost, "owner/ghost")
 }
 
 // TestTeamReposPut_StaleMirrorFallsToTheColdPath pins the gate's staleness
 // posture: past reachableGateMaxAge the mirror stops deciding writes and the
-// per-slug probe takes over. The stub answers 200 for every probe, so a gate
-// that kept trusting the stale mirror would reject a slug the probe accepts.
+// per-repo probe takes over. The stub answers 200 for every probe, so a gate
+// that kept trusting the stale mirror would refuse a repository the probe
+// accepts.
 func TestTeamReposPut_StaleMirrorFallsToTheColdPath(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -499,11 +499,10 @@ func TestTeamReposPut_StaleMirrorFallsToTheColdPath(t *testing.T) {
 	seedPATOrg(t, srv, ts.URL)
 	wireReachRefresh(t, srv).refresh(t, runmode.LocalDefaultOrgID, true)
 
-	// Fresh mirror: a slug it does not hold is rejected without any probe.
-	if rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
-		"repos": []string{"owner/absent"},
-	}); rec.Code != http.StatusBadRequest {
-		t.Fatalf("fresh-mirror PUT of an absent slug = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	// Fresh mirror: a repository it does not hold is refused without any probe.
+	absent := registerBare(t, srv, hostOf(t, srv), "owner/absent")
+	if rec := putTracked(t, srv, absent); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("fresh-mirror PUT of an absent repository = %d, want 422; body=%s", rec.Code, rec.Body.String())
 	}
 	if probed.Load() {
 		t.Error("the fresh mirror should have decided the write; nothing should have probed GitHub")
@@ -511,9 +510,7 @@ func TestTeamReposPut_StaleMirrorFallsToTheColdPath(t *testing.T) {
 
 	// Aged past what the gate trusts: the probe decides instead, and it says yes.
 	ageMirror(t, srv.db, reachableGateMaxAge+time.Hour)
-	if rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
-		"repos": []string{"owner/absent"},
-	}); rec.Code != http.StatusOK {
+	if rec := putTracked(t, srv, absent); rec.Code != http.StatusOK {
 		t.Fatalf("stale-mirror PUT = %d, want 200 (the probe decides); body=%s", rec.Code, rec.Body.String())
 	}
 	if !probed.Load() {

@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -1161,6 +1162,47 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("ReachableSlugsSystem(nil): %v", err)
 		} else if len(none) != 0 {
 			t.Errorf("empty selection returned %v; want nothing", none)
+		}
+	})
+
+	t.Run("ExternalIDSetAnswersByTheIDARenameDoesNotMove", func(t *testing.T) {
+		// The same membership question as the slug set, asked by GitHub's id:
+		// each held id maps to its entry, which carries the name the mirror
+		// observed it under, and an id the mirror does not hold is absent.
+		b := mk(t)
+		withID := func(e domain.ReachableRepository, id string) domain.ReachableRepository {
+			e.ExternalID = id
+			return e
+		}
+		if err := b.Mirror.ReplaceForPATSystem(ctx, b.OrgID, TestGitHubHost, []domain.ReachableRepository{
+			withID(patEntry(b, "Acme", "Platform-API", "Go", "renamed"), "501"),
+			withID(patEntry(b, "acme", "web", "", ""), "502"),
+		}); err != nil {
+			t.Fatalf("ReplaceForPATSystem: %v", err)
+		}
+		got, err := b.Mirror.ReachableByExternalIDsSystem(ctx, b.OrgID, TestGitHubHost, domain.GitHubCredentialClassPAT,
+			[]string{"501", "999"})
+		if err != nil {
+			t.Fatalf("ReachableByExternalIDsSystem: %v", err)
+		}
+		if len(got) != 1 || got["501"].Slug() != "Acme/Platform-API" || got["501"].ExternalID != "501" {
+			t.Errorf("reachable by id = %+v; want only 501 as Acme/Platform-API", got)
+		}
+
+		// Another class, or another host, answers for its own entries only.
+		if other, err := b.Mirror.ReachableByExternalIDsSystem(ctx, b.OrgID, TestGitHubHost, domain.GitHubCredentialClassBYOApp,
+			[]string{"501"}); err != nil || len(other) != 0 {
+			t.Errorf("byo_app by id = %v, %v; want empty", other, err)
+		}
+		if other, err := b.Mirror.ReachableByExternalIDsSystem(ctx, b.OrgID, TestOtherGitHubHost, domain.GitHubCredentialClassPAT,
+			[]string{"501"}); err != nil || len(other) != 0 {
+			t.Errorf("other host by id = %v, %v; want empty", other, err)
+		}
+		if none, err := b.Mirror.ReachableByExternalIDsSystem(ctx, b.OrgID, TestGitHubHost, domain.GitHubCredentialClassPAT, nil); err != nil || len(none) != 0 {
+			t.Errorf("empty selection = %v, %v; want nothing", none, err)
+		}
+		if _, err := b.Mirror.ReachableByExternalIDsSystem(ctx, b.OrgID, "", domain.GitHubCredentialClassPAT, []string{"501"}); !errors.Is(err, db.ErrRepoHostRequired) {
+			t.Errorf("no host = %v, want db.ErrRepoHostRequired", err)
 		}
 	})
 
