@@ -9,12 +9,12 @@ import (
 )
 
 // TestSandboxGHChannel_MatchesBrokerTrustedDestinations is the drift guard for
-// the gh-channel mount destinations. The broker validates the gh-binary and
-// injector-cert bind mounts against its own exported constants without
-// importing this package (a cycle), so the paired literals — this package's
-// private sandboxGHBinary / sandboxGHInjectorCert and the broker's exported
-// TrustedGHBinaryDestination / TrustedGHInjectorCertDestination — must stay
-// equal by hand. A drift would fail every gh-channel run's mount validation.
+// the TF-side mount destinations. The broker validates the gh-binary and CA
+// bundle bind mounts against its own exported constants without importing
+// this package (a cycle), so the paired literals — this package's private
+// sandboxGHBinary / sandboxCABundle and the broker's exported
+// TrustedGHBinaryDestination / TrustedCABundleDestination — must stay equal by
+// hand. A drift would fail every launch's mount validation.
 func TestSandboxGHChannel_MatchesBrokerTrustedDestinations(t *testing.T) {
 	if sandboxTFACBinary != sandbox.TrustedTFACBinaryDestination {
 		t.Errorf("sandboxTFACBinary = %q, want sandbox.TrustedTFACBinaryDestination %q", sandboxTFACBinary, sandbox.TrustedTFACBinaryDestination)
@@ -22,8 +22,8 @@ func TestSandboxGHChannel_MatchesBrokerTrustedDestinations(t *testing.T) {
 	if sandboxGHBinary != sandbox.TrustedGHBinaryDestination {
 		t.Errorf("sandboxGHBinary = %q, want sandbox.TrustedGHBinaryDestination %q", sandboxGHBinary, sandbox.TrustedGHBinaryDestination)
 	}
-	if sandboxGHInjectorCert != sandbox.TrustedGHInjectorCertDestination {
-		t.Errorf("sandboxGHInjectorCert = %q, want sandbox.TrustedGHInjectorCertDestination %q", sandboxGHInjectorCert, sandbox.TrustedGHInjectorCertDestination)
+	if sandboxCABundle != sandbox.TrustedCABundleDestination {
+		t.Errorf("sandboxCABundle = %q, want sandbox.TrustedCABundleDestination %q", sandboxCABundle, sandbox.TrustedCABundleDestination)
 	}
 	// The gh-binary mount SOURCE this package uses must equal the broker's
 	// trusted source, or the broker's realPath(source)==realPath(trusted) check

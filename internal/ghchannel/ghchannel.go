@@ -38,6 +38,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/cabundle"
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
@@ -154,8 +155,8 @@ func Start(cfg Config) (*Channel, error) {
 	certPath := filepath.Join(channelDir, "injector.crt")
 	// The system roots alongside this run's leaf: SSL_CERT_FILE is
 	// process-global, so a leaf-only file would narrow every other TLS client
-	// in the agent subprocess. See ghinjector.TrustBundlePEM.
-	if err := os.WriteFile(certPath, ghinjector.TrustBundlePEM(certPEM), 0o600); err != nil {
+	// in the agent subprocess. See cabundle.WithSystemRoots.
+	if err := os.WriteFile(certPath, cabundle.WithSystemRoots(certPEM), 0o600); err != nil {
 		return fail(fmt.Errorf("ghchannel: write trust file: %w", err))
 	}
 

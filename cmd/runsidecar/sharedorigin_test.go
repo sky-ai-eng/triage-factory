@@ -130,8 +130,8 @@ func TestRuntime_StartProxiesRoutesGitAtTheSharedOrigin(t *testing.T) {
 	if got := cfg["url."+base+".insteadOf"]; got != "https://github.com/" {
 		t.Errorf("insteadOf onto the shared origin = %q, want https://github.com/ (git config: %v)", got, cfg)
 	}
-	if got := cfg["http."+base+".sslCAInfo"]; got != agentproc.SandboxGHInjectorCertPath {
-		t.Errorf("sslCAInfo = %q, want the mounted injector trust file %q", got, agentproc.SandboxGHInjectorCertPath)
+	if got := cfg["http."+base+".sslCAInfo"]; got != agentproc.SandboxCABundlePath {
+		t.Errorf("sslCAInfo = %q, want the mounted CA bundle %q", got, agentproc.SandboxCABundlePath)
 	}
 	// The placeholder the git proxy authenticates — never the real token, on
 	// either half of the shared origin.
@@ -215,25 +215,25 @@ func TestGHChannelWanted(t *testing.T) {
 }
 
 // stubPrivilegedSideEffects redirects the two things startProxies does under the
-// root-only /run/tf socket root — publishing the injector's certificate and
-// binding the exec-verb socket — into a temp dir and a no-op.
+// root-only /run/tf socket root — writing the jail's CA bundle and binding the
+// exec-verb socket — into a temp dir and a no-op.
 //
-// Both are required together for any test that passes an AgentHost, which a gh
-// channel needs for the run identity behind its cert path. Neither is what such a
+// Both are required together for any test that passes an AgentHost, whose run
+// identity names the bundle's path. Neither is what such a
 // test is about, and a CI runner is unprivileged: without these the test does not
 // assert something weaker, it fails outright on a bind it was never exercising.
 func stubPrivilegedSideEffects(t *testing.T) {
 	t.Helper()
-	origWrite, origStart := writeInjectorCert, startAgentHostSocket
+	origWrite, origStart := writeCABundle, startAgentHostSocket
 	dir := t.TempDir()
-	writeInjectorCert = func(conversationID string, pem []byte) error {
+	writeCABundle = func(conversationID string, pem []byte) error {
 		return os.WriteFile(filepath.Join(dir, conversationID+".crt"), pem, 0o600)
 	}
 	startAgentHostSocket = func(*agenthost.Server, string) (*agenthost.HostDaemon, sandbox.Mount, error) {
 		return nil, sandbox.Mount{}, nil
 	}
 	t.Cleanup(func() {
-		writeInjectorCert, startAgentHostSocket = origWrite, origStart
+		writeCABundle, startAgentHostSocket = origWrite, origStart
 	})
 }
 

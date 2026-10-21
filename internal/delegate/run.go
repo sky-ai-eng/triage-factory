@@ -463,7 +463,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		RunURL:           publishedRunURL,
 	}, cfg.localGit.handler())
 	defer func() { _ = localGHCloser.Close() }()
-	ghChannel := cfg.sidecar.ghChannel(conversationID)
+	ghChannel := cfg.sidecar.ghChannel()
 	if ghChannel == nil {
 		ghChannel = localGH
 	}

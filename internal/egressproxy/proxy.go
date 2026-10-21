@@ -6,51 +6,54 @@
 //
 // The sandbox's L3 egress policy (internal/sandbox applyEgressPolicy)
 // pins all traffic to the run's own gateway IP — the only
-// listeners there are the per-run LLM and git credential proxies. That
-// wall is what keeps a compromised agent off cloud metadata, the
-// operator's private network, and sibling runs' proxies. But it also
-// means `pnpm install` / `go mod download` / `pip install` cannot fetch
-// dependencies: there is no route to any registry. Fresh worktrees have
-// no node_modules, so every real build/test task that needs deps fails.
+// listeners there are the per-run sidecar's. That wall is what keeps a
+// compromised agent off cloud metadata, the operator's private network,
+// and sibling runs' proxies. But it also means `pnpm install` / `pip
+// install` cannot fetch dependencies: there is no route to any registry.
 //
 // # The design (sandbox-fleet spec §3, docs/for-agents/specs/sandbox-fleet/README.md)
 //
-// A CONNECT-only forward proxy bound on the run's gateway IP — the same
-// place the LLM/git proxies live — becomes the single audited door to
-// the public internet. The L3 layer stays byte-for-byte unchanged: it
-// keeps funneling everything to the gateway; this proxy decides what
-// gets out. Per the spec, we do NOT punch raw CIDR holes in the L3
-// layer — hostname policy is inexpressible there (registries live on
-// shared CDNs), and the per-profile allowlists TFAC-408 adds later need
-// a hostname-aware enforcement point.
+// A CONNECT proxy bound on the run's gateway IP becomes the single audited
+// door to the public internet. The L3 layer stays unchanged: it keeps
+// funneling everything to the gateway; this proxy decides what gets out.
+// Hostname policy is inexpressible at L3 (registries live on shared CDNs),
+// and the per-profile allowlists TFAC-408 adds need a hostname-aware
+// enforcement point.
 //
-// Gating needs no TLS termination (§3.2): the proxy sees the
-// destination host:port in the CONNECT request, decides allow/deny,
-// resolves the hostname itself, and tunnels opaque bytes. The package
-// managers' own TLS and lockfile integrity checks (pnpm hashes, go.sum,
-// pip hashes) stay end-to-end — the proxy can't see or alter payloads.
+// # Policy
 //
-// # Policy: deny-internal, allow-configured-public
+// Checked in order, every refusal an explicit error to the client and a
+// recorded denial:
 //
-// Two layers, checked in order:
+//  1. The CONNECT target must be an allowlisted registry on port 443
+//     (Config.Registries — DefaultRegistries until TFAC-408). Exact
+//     hostname match; IP literals never match.
+//  2. The proxy resolves the hostname HOST-SIDE, checks every address
+//     against the operator-owned, compiled-in internal denylist
+//     (denylist.go), and dials the vetted IP literal, so there is no
+//     second resolution for DNS rebinding to race (§3.6). The sandbox
+//     never resolves anything on this path: its clients hand the hostname
+//     to the proxy, whose own address is an IP literal.
+//  3. It completes TLS to the registry under upstreamTLSConfig, which
+//     verifies the CONNECT host against the system roots, before it
+//     answers the CONNECT.
+//  4. It terminates the client's TLS with a leaf for the CONNECT host,
+//     signed by a CA minted for this engagement and name-constrained to the
+//     allowlist, and serves HTTP/1.1 only.
+//  5. Each request inside is held to one shape and one hostname: its Host
+//     must be the CONNECT host, and a registry takes reads only — GET and
+//     HEAD, and POST to the paths the registry lists as reads. Writes such
+//     as `npm publish` are refused.
+//  6. An admitted request is relayed to the same host and the response
+//     copied back verbatim: no rewriting, no decompression, no cache.
 //
-//  1. The CONNECT target hostname must be on the caller-supplied
-//     allowlist (Config.AllowedHosts — DefaultRegistryHosts in v0,
-//     per-profile data under TFAC-408). Exact match; IP-literal targets
-//     are implicitly denied because the allowlist holds hostnames.
-//  2. The proxy resolves the hostname HOST-SIDE and checks every
-//     resolved address against the operator-owned, compiled-in internal
-//     denylist (denylist.go): loopback, RFC1918 (incl. the 10.42.0.0/16
-//     sandbox pool and sibling gateways), link-local (cloud metadata),
-//     CGNAT, IPv6 ULA (Fly's fdaa::/16), multicast. It then dials the
-//     vetted IP literal — never the hostname — so there is no second
-//     resolution for DNS rebinding to race (§3.6). The sandbox never
-//     resolves anything on this path: proxy clients hand the hostname
-//     to the proxy, and the proxy address itself is an IP literal.
+// The interception design of record is
+// docs/for-agents/specs/sandbox-backends/ §6.1, with the conditions this
+// package implements.
 //
-// Redirects are structurally out of scope: a CONNECT proxy follows
-// nothing — the client follows redirects, and each new connection
-// arrives as a fresh CONNECT that is independently re-gated.
+// Redirects are out of scope: the proxy follows nothing. The client follows
+// a redirect, and each new host arrives as a fresh CONNECT that is gated
+// again.
 //
 // # Trust model on the local hop
 //
@@ -73,7 +76,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -95,7 +97,7 @@ var egressLog = logging.Component("egressproxy")
 // username. The token (password half) is the actual secret.
 const BasicUser = "x-run"
 
-// connectPort is the only CONNECT target port the proxy tunnels. Every
+// connectPort is the only CONNECT target port the proxy admits. Every
 // package registry speaks HTTPS on 443; anything else (25, 6379, ...)
 // is not a dependency fetch and is refused. Widening this is a
 // TFAC-408 per-profile decision, not a v0 knob.
@@ -106,22 +108,24 @@ const connectPort = "443"
 // gets its remaining addresses tried within a bounded total.
 const dialTimeout = 10 * time.Second
 
-// DeniedConnect describes one refused CONNECT for the audit hook.
+// DeniedConnect describes one refusal for the audit hook: a refused CONNECT,
+// or a refusal within an admitted one (a failed handshake, a refused
+// request).
 type DeniedConnect struct {
 	// Target is the CONNECT authority as the client sent it (host:port).
 	Target string
 	// Reason is the human-readable denial cause (also sent to the client).
+	// A refused request's reason starts with its method and path.
 	Reason string
 }
 
 // Config bundles the inputs a Server needs at construction.
 type Config struct {
-	// AllowedHosts is the set of hostnames the proxy will tunnel to
-	// (port 443 only). Matched exactly after case/trailing-dot
-	// normalization — no wildcards in v0. Empty means the proxy denies
-	// everything, which is valid (a fully-closed profile) but probably
-	// a caller bug; New does not reject it.
-	AllowedHosts []string
+	// Registries are the hosts the proxy admits (port 443 only) and the
+	// read paths each takes a POST on. Empty means the proxy denies
+	// everything, which is valid (a fully-closed profile) but probably a
+	// caller bug; New does not reject it.
+	Registries []Registry
 
 	// IncomingToken, when non-empty, is the per-run secret every
 	// CONNECT must present as the Basic password (user BasicUser) in
@@ -143,8 +147,9 @@ type Config struct {
 	// read the same upstream strings.
 	GitHub GitHubHosts
 
-	// RecordDenial, when non-nil, is invoked once per refused CONNECT
-	// for the audit log (TFAC-483 is the intended consumer; nil skips).
+	// RecordDenial, when non-nil, is invoked once per refusal — a refused
+	// CONNECT, a failed handshake, or a refused request inside one — for
+	// the audit log (TFAC-483 is the intended consumer; nil skips).
 	// Delivery is asynchronous through a bounded queue drained by one
 	// goroutine, with each sink call bounded by a timeout ctx — a slow
 	// sink (a DB write) never adds latency to the 403, and a sandbox
@@ -162,10 +167,15 @@ type Config struct {
 // Server is a single per-run gating proxy instance. Create one per run
 // via New, bind with Start, tear down with Shutdown.
 type Server struct {
-	cfg     Config
-	allowed map[string]struct{}
+	cfg Config
 
-	// The guidance sets from Config.GitHub, normalized once like allowed.
+	// registries maps each admitted host to the paths it takes a POST on.
+	registries map[string]map[string]struct{}
+
+	// ca signs the leaves the jail is shown. Nil when no host is admitted.
+	ca *authority
+
+	// The guidance sets from Config.GitHub, normalized once like registries.
 	// Read only by deniedHostGuidance.
 	ghAPIHosts map[string]struct{}
 	ghGitHosts map[string]struct{}
@@ -192,12 +202,18 @@ type Server struct {
 	stopOnce  sync.Once
 	dropped   atomic.Int64
 
-	// Hijacked tunnel conns, tracked so Shutdown can close them —
-	// http.Server.Shutdown deliberately ignores hijacked connections,
-	// which would otherwise leak the copy goroutines of any tunnel
-	// still open at run teardown.
-	mu      sync.Mutex
-	tunnels map[net.Conn]struct{}
+	// Intercepted sessions' client conns and the cancel for their upstream
+	// requests, tracked so Shutdown can end them: http.Server.Shutdown
+	// ignores hijacked connections, which would otherwise outlive the run.
+	// closed is set by Shutdown as it sweeps them, so a session that
+	// finishes its setup afterwards is refused rather than missed.
+	mu       sync.Mutex
+	sessions map[net.Conn]context.CancelFunc
+	closed   bool
+
+	// sessionSlots holds one token per session in flight, from the
+	// upstream dial until the session ends (maxSessions).
+	sessionSlots chan struct{}
 }
 
 // denialQueueCap bounds the denial audit queue. Sized for bursts (a
@@ -212,29 +228,46 @@ const denialQueueCap = 256
 // per-record timeout.
 const recordDenialTimeout = 5 * time.Second
 
-// New constructs a Server but does not listen. Call Start to bind.
+// New constructs a Server but does not listen. Call Start to bind. It mints
+// the engagement's interception CA, whose certificate CACertPEM returns.
 func New(cfg Config) (*Server, error) {
 	gh := cfg.GitHub
 	if len(gh.API) == 0 && len(gh.Git) == 0 {
 		gh = GitHubHostsForUpstreams("", "")
 	}
+	ca, err := newAuthority(registryHosts(cfg.Registries), time.Now())
+	if err != nil {
+		return nil, err
+	}
 	dialer := &net.Dialer{Timeout: dialTimeout}
 	s := &Server{
 		cfg:        cfg,
-		allowed:    newHostSet(cfg.AllowedHosts),
+		registries: newRegistrySet(cfg.Registries),
+		ca:         ca,
 		ghAPIHosts: newHostSet(gh.API),
 		ghGitHosts: newHostSet(gh.Git),
 		resolve: func(ctx context.Context, host string) ([]netip.Addr, error) {
 			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 		},
-		dial:    dialer.DialContext,
-		tunnels: make(map[net.Conn]struct{}),
+		dial:         dialer.DialContext,
+		sessions:     make(map[net.Conn]context.CancelFunc),
+		sessionSlots: make(chan struct{}, maxSessions),
 	}
 	if cfg.RecordDenial != nil {
 		s.denials = make(chan DeniedConnect, denialQueueCap)
 		s.drainStop = make(chan struct{})
 	}
 	return s, nil
+}
+
+// CACertPEM is the engagement's interception CA certificate. The jail's
+// trust file must carry it, or every admitted host fails verification in the
+// jail's clients. Nil when no host is admitted, since then there is no CA.
+func (s *Server) CACertPEM() []byte {
+	if s.ca == nil {
+		return nil
+	}
+	return s.ca.certPEM
 }
 
 // Start binds addr ("host:port"; port 0 lets the kernel pick) and
@@ -259,14 +292,15 @@ func (s *Server) Start(addr string) (string, error) {
 	s.serveErr = make(chan error, 1)
 	s.httpSrv = &http.Server{
 		Handler: http.HandlerFunc(s.handleRequest),
-		// Bounds header receipt only; tunnel lifetime is unbounded by
-		// design (a large module download can run for minutes).
+		// Bounds the CONNECT's header receipt only; a session's lifetime
+		// is unbounded by design (a large download can run for minutes).
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 	// No recover: net/http recovers a handler panic per connection, so nothing
 	// a request does reaches this frame; Serve itself only accepts, and the
-	// buffered send + close cannot panic (one sender, one close). The hijacked
-	// CONNECT tunnels are the exception to "handlers are covered" — see tunnel.
+	// buffered send + close cannot panic (one sender, one close). An
+	// intercepted session runs on its handler's goroutine, so the same
+	// recover covers it.
 	go func() {
 		err := s.httpSrv.Serve(ln)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -282,11 +316,10 @@ func (s *Server) Start(addr string) (string, error) {
 }
 
 // Shutdown stops the listener, the denial drain goroutine, and every
-// live tunnel. Hijacked conns are closed explicitly because
-// http.Server.Shutdown ignores them; without this a tunnel open at run
-// teardown would leak its copy goroutines past the run's lifetime.
-// Denials still queued at shutdown are dropped (best-effort audit,
-// same acceptance as gitproxy).
+// live session. Hijacked conns are closed explicitly because
+// http.Server.Shutdown ignores them; without this a session open at run
+// teardown would outlive the run. Denials still queued at shutdown are
+// dropped (best-effort audit, same acceptance as gitproxy).
 func (s *Server) Shutdown(ctx context.Context) error {
 	if s.httpSrv == nil {
 		return nil
@@ -294,13 +327,17 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.drainStop != nil {
 		s.stopOnce.Do(func() { close(s.drainStop) })
 	}
-	err := s.httpSrv.Shutdown(ctx)
+	// Sessions first, under the flag that refuses any still being set up,
+	// so a handler midway through its upstream dial cannot register one
+	// after the sweep.
 	s.mu.Lock()
-	for c := range s.tunnels {
+	s.closed = true
+	for c, cancel := range s.sessions {
+		cancel()
 		_ = c.Close()
 	}
 	s.mu.Unlock()
-	return err
+	return s.httpSrv.Shutdown(ctx)
 }
 
 // drainDenials is the single consumer of the denial queue: it delivers
@@ -348,10 +385,10 @@ func (s *Server) DroppedDenials() int64 { return s.dropped.Load() }
 // mirroring llmproxy.Server.Err. Closed on goroutine exit.
 func (s *Server) Err() <-chan error { return s.serveErr }
 
-// handleRequest is the top-level policy funnel: auth, then method and
-// target checks, then the resolve-and-vet dial. Every deny path goes
-// through s.deny so the audit hook and the client-visible reason stay
-// in lockstep.
+// handleRequest is the CONNECT funnel: auth, then method and target checks,
+// then the resolve-and-vet dial and the verified handshake with the registry,
+// all before the CONNECT is answered. Every refusal goes through s.refuse so
+// the audit hook and the client-visible reason stay in lockstep.
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if !s.callerAuthorized(r) {
 		// 407 (not 401): proxy-hop semantics — clients that carry
@@ -383,7 +420,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hostNorm := normalizeHost(host)
-	if _, ok := s.allowed[hostNorm]; !ok {
+	if _, ok := s.registries[hostNorm]; !ok {
 		// Covers IP-literal targets too: the allowlist holds hostnames,
 		// so a literal never matches — default-deny, as specified.
 		reason := fmt.Sprintf("host %q is not on the sandbox egress allowlist", host)
@@ -397,19 +434,34 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upstream, err := s.dialVetted(r.Context(), hostNorm)
-	if err != nil {
-		var pd policyDenial
-		if errors.As(err, &pd) {
-			s.deny(w, r, pd.reason)
-			return
-		}
-		egressLog.Warn("upstream dial failed", "target", r.Host, "error", err)
-		http.Error(w, "egress proxy: upstream dial failed", http.StatusBadGateway)
+	select {
+	case s.sessionSlots <- struct{}{}:
+		defer func() { <-s.sessionSlots }()
+	default:
+		s.refuse(w, r, http.StatusServiceUnavailable, fmt.Sprintf(
+			"this run already has %d connections open through the egress proxy; close some before opening more", maxSessions))
 		return
 	}
 
-	s.tunnel(w, r, upstream)
+	upstream, err := s.dialUpstream(r.Context(), hostNorm)
+	if err != nil {
+		var pd policyDenial
+		var tlsErr upstreamTLSError
+		switch {
+		case errors.As(err, &pd):
+			s.deny(w, r, pd.reason)
+		case errors.As(err, &tlsErr):
+			// Never a fallback to tunneling: a registry that fails
+			// verification is refused, loudly, like any other policy.
+			s.refuse(w, r, http.StatusBadGateway, tlsErr.Error())
+		default:
+			egressLog.Warn("upstream dial failed", "target", r.Host, "error", err)
+			http.Error(w, "egress proxy: upstream dial failed", http.StatusBadGateway)
+		}
+		return
+	}
+
+	s.intercept(w, hostNorm, r.Host, upstream)
 }
 
 // policyDenial marks a dialVetted failure that is a policy decision
@@ -428,91 +480,14 @@ func (s *Server) dialVetted(ctx context.Context, host string) (net.Conn, error) 
 	return vettedDial(ctx, s.resolve, s.dial, host, connectPort)
 }
 
-// tunnel completes the CONNECT: hijack the client conn, confirm with
-// 200, then pipe bytes both ways until either side closes.
-//
-// TODO(TFAC-1117): the bytes are opaque here, so the client can handshake for
-// any name the CDN edge behind an allowlisted host also serves, and reach that
-// site through the allowed one. Closing it needs the sidecar to terminate TLS
-// and hold the client's SNI and Host to the CONNECT host.
-func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, upstream net.Conn) {
-	hj, ok := w.(http.Hijacker)
-	if !ok {
-		_ = upstream.Close()
-		http.Error(w, "egress proxy: hijacking unsupported", http.StatusInternalServerError)
-		return
-	}
-	client, brw, err := hj.Hijack()
-	if err != nil {
-		_ = upstream.Close()
-		egressLog.Warn("hijack failed", "target", r.Host, "error", err)
-		return
-	}
-
-	s.mu.Lock()
-	s.tunnels[client] = struct{}{}
-	s.tunnels[upstream] = struct{}{}
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(s.tunnels, client)
-		delete(s.tunnels, upstream)
-		s.mu.Unlock()
-		_ = client.Close()
-		_ = upstream.Close()
-	}()
-
-	if _, err := client.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
-		return
-	}
-	// Drain any bytes the client optimistically pipelined behind the
-	// CONNECT before we hijacked — they're sitting in the buffered
-	// reader, not the raw conn, and would otherwise be lost.
-	// brw.Reader (not bare brw) on Buffered: ReadWriter embeds both
-	// halves and Writer has a Buffered too, so the selector must pick.
-	if n := brw.Reader.Buffered(); n > 0 {
-		pre, _ := brw.Peek(n)
-		if _, err := upstream.Write(pre); err != nil {
-			return
-		}
-	}
-
-	// No recover on either copier, and this is the one place in the package
-	// where that needs saying: the conn is hijacked, so these run OUTSIDE
-	// net/http's per-connection recover. They can skip a guard because they are
-	// structurally incapable of panicking — io.Copy over two net.Conns, a type
-	// assertion in comma-ok form, and a send on a buffered channel sized for
-	// both senders. Nothing here parses a byte of what it moves.
-	done := make(chan struct{}, 2)
-	go func() {
-		_, _ = io.Copy(upstream, client)
-		// Half-close toward the upstream so it sees EOF and can finish
-		// its side; full Close in the deferred cleanup unblocks the
-		// other copy if the peer never closes.
-		if tc, ok := upstream.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
-		}
-		done <- struct{}{}
-	}()
-	go func() {
-		_, _ = io.Copy(client, upstream)
-		if tc, ok := client.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
-		}
-		done <- struct{}{}
-	}()
-	<-done
-	<-done
+// deny refuses with 403. See refuse.
+func (s *Server) deny(w http.ResponseWriter, r *http.Request, reason string) {
+	s.refuse(w, r, http.StatusForbidden, reason)
 }
 
-// deny sends the 403 with a client-visible reason and enqueues the
+// refuse answers with status and a client-visible reason and enqueues the
 // audit record. One funnel so the agent-visible message and the audit
-// record can never drift apart. The enqueue is non-blocking: the 403
-// must never wait on the audit sink (a slow DB write behind a
-// synchronous hook would let a sandbox spamming denials hold handler
-// goroutines hostage — the DoS shape the bounded queue exists to
-// kill). A full queue drops the record and counts it; the slog line
-// above is the trace that survives drops.
+// record can never drift apart.
 //
 // For a CONNECT, the reason is also the status line's reason phrase.
 // A client tunneling through a proxy never reads the body of a refused
@@ -523,33 +498,43 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, upstream net.Con
 // The phrase is the one channel that survives, which means writing the
 // response by hand: ResponseWriter always emits the canonical phrase
 // for the code.
-func (s *Server) deny(w http.ResponseWriter, r *http.Request, reason string) {
-	target := r.Host
-	egressLog.Info("egress denied", "target", target, "reason", reason)
-	if s.denials != nil {
-		select {
-		case s.denials <- DeniedConnect{Target: target, Reason: reason}:
-		default:
-			if s.dropped.Add(1) == 1 {
-				// Warn once per Server, not per drop — a flood is
-				// exactly when per-drop logging would amplify.
-				egressLog.Warn("denial audit queue full; dropping records (see DroppedDenials)")
-			}
-		}
-	}
-	if r.Method == http.MethodConnect && refuseConnect(w, reason) {
+func (s *Server) refuse(w http.ResponseWriter, r *http.Request, status int, reason string) {
+	s.recordDenial(r.Host, reason)
+	if r.Method == http.MethodConnect && refuseConnect(w, status, reason) {
 		return
 	}
 	// Non-CONNECT denials (and the can't-hijack fallback) keep the plain
 	// response: those clients read the body, where the reason already is.
-	http.Error(w, "egress proxy: "+reason, http.StatusForbidden)
+	http.Error(w, "egress proxy: "+reason, status)
+}
+
+// recordDenial logs a refusal and enqueues its audit record. The enqueue is
+// non-blocking: a refusal must never wait on the audit sink (a slow DB write
+// behind a synchronous hook would let a sandbox spamming denials hold
+// handler goroutines hostage — the DoS shape the bounded queue exists to
+// kill). A full queue drops the record and counts it; the slog line is the
+// trace that survives drops.
+func (s *Server) recordDenial(target, reason string) {
+	egressLog.Info("egress denied", "target", target, "reason", reason)
+	if s.denials == nil {
+		return
+	}
+	select {
+	case s.denials <- DeniedConnect{Target: target, Reason: reason}:
+	default:
+		if s.dropped.Add(1) == 1 {
+			// Warn once per Server, not per drop — a flood is
+			// exactly when per-drop logging would amplify.
+			egressLog.Warn("denial audit queue full; dropping records (see DroppedDenials)")
+		}
+	}
 }
 
 // refuseConnect writes the CONNECT refusal by hand over the hijacked conn so
 // the status line carries reason as its phrase. Reports false — response
 // unwritten, caller falls back to http.Error — when the ResponseWriter can't
 // hijack or the hijack fails.
-func refuseConnect(w http.ResponseWriter, reason string) bool {
+func refuseConnect(w http.ResponseWriter, status int, reason string) bool {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		return false
@@ -560,8 +545,8 @@ func refuseConnect(w http.ResponseWriter, reason string) bool {
 	}
 	defer func() { _ = conn.Close() }()
 	body := "egress proxy: " + reason + "\n"
-	fmt.Fprintf(brw, "HTTP/1.1 403 %s\r\nContent-Type: text/plain; charset=utf-8\r\nX-Content-Type-Options: nosniff\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
-		reasonPhrase(reason), len(body), body)
+	fmt.Fprintf(brw, "HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nX-Content-Type-Options: nosniff\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		status, reasonPhrase(reason), len(body), body)
 	_ = brw.Flush()
 	return true
 }

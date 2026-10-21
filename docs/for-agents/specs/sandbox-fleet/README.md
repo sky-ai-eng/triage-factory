@@ -121,13 +121,15 @@ customer cannot widen it.
 
 - **Gating destinations is cheap.** Even for encrypted (HTTPS) traffic, the proxy
   sees the *destination* from the connection setup and can block denylisted
-  targets **without decrypting anything**. This is all v1 needs.
-- **Injecting credentials is expensive** (requires terminating TLS so the proxy
-  can modify the request, i.e. a trusted proxy cert inside the sandbox). This is
-  the deferred §7 work; v1 does not do it.
+  targets **without decrypting anything**.
+- **Seeing inside a connection needs TLS termination** (a per-engagement CA the
+  sandbox trusts). The proxy does terminate TLS for the registries it admits,
+  so that it can hold them read-only and pin each request to the host it was
+  admitted for (`docs/for-agents/specs/sandbox-backends/` §6.1). Injecting
+  credentials would ride on the same termination, and is the deferred §7 work.
 
-So v1's proxy is a **gating** proxy: it decides *whether* a connection is allowed,
-not *what's in it*.
+So the proxy decides *whether* a connection is allowed and which requests on it
+are reads, and it never changes *what's in* a response.
 
 ### 3.3 The public-vs-private split (and why VPC is not a prerequisite)
 
@@ -200,6 +202,19 @@ fonts + Playwright) is the first worked example; "base" is today's toolchain.
 Cost note from that doc: a browser variant adds ~400–700 MB; pre-bake variants
 into the published image (`docker/Dockerfile`) so an autoscaled Machine doesn't
 pay a cold extract on first use.
+
+**Tooling suites (a possible addition, not designed).** A profile could select
+pre-packaged tooling suites rather than one fixed toolchain set: "Python",
+"Node", "Go", each bundling the packages it installs, the egress its package
+manager needs (tunnel registries with their read paths, or relay catalog
+entries), and the trust variable its clients read for the run's CA bundle.
+Picking "Python" would bring `python3` with venv-installed pip, PyPI's two
+hosts and `PIP_CERT` together, and a profile without it would have neither the
+toolchain nor the egress. A recipe would then be a base plus the selected
+suites, still resolving to one hash under the keying below. Today the base
+rootfs ships every suite at once and `egressproxy.DefaultRegistries` admits
+every registry they use; the registry and relay entries a suite would carry
+are already data (`egressproxy.Registry`, `internal/egressrelay/catalog.go`).
 
 Keying (settled 2026-07-07, jointly with the TFAC-71 design): **two-layer,
 name → recipe → hash.** A profile binds a *named* catalog entry; the entry is
@@ -325,9 +340,10 @@ and they form a ladder:
    keep in the proxy and inject on a channel we control. This is the edge of the
    model, not a bug to fix.
 
-v1 decision: **gating proxy only (§3).** No credential injection, no TLS
-termination, no verbatim-env option. Revisit as a follow-up once the gating
-proxy + denylist are shipped and reviewed.
+v1 decision: **gating proxy only (§3).** No credential injection and no
+verbatim-env option. The proxy terminates TLS for the read-only interception in
+`docs/for-agents/specs/sandbox-backends/` §6.1, which option 1 would build on;
+revisit once that is in production and reviewed.
 
 ---
 

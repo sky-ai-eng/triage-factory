@@ -39,6 +39,11 @@ func (c *gvisorCell) Launch(ctx context.Context, spec cell.LaunchSpec) (cell.Jai
 			Source:      spec.AgentHostSocket,
 			Destination: sandbox.TrustedAgentHostSocketDestination,
 		},
+		CABundle: sandbox.Mount{
+			Source:      spec.CABundle,
+			Destination: sandbox.TrustedCABundleDestination,
+			Options:     []string{"ro"},
+		},
 		GHChannel:            ghChannelParams(spec.GHChannel),
 		SkillsSourcePath:     spec.SkillsSource,
 		MemorySourcePath:     spec.MemorySource,
@@ -79,5 +84,5 @@ func ghChannelParams(gc *cell.GHChannel) *agentproc.GHChannelParams {
 	if gc == nil {
 		return nil
 	}
-	return &agentproc.GHChannelParams{Host: gc.Host, Token: gc.Token, CertSourcePath: gc.CertSourcePath}
+	return &agentproc.GHChannelParams{Host: gc.Host, Token: gc.Token}
 }

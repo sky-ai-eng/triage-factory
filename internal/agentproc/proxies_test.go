@@ -1058,7 +1058,7 @@ func TestSandboxGitProxyPairs_Shape(t *testing.T) {
 // is named explicitly, because git resolves CA trust from its own config rather
 // than the process-global SSL_CERT_FILE gh reads.
 func TestSandboxGitProxyPairs_SharedOrigin(t *testing.T) {
-	pairs := sandboxGitProxyPairs("http://10.42.7.1:5123", "https://github.com", "per-run-secret", "10.42.7.1", "/run/tf-gh-injector.crt")
+	pairs := sandboxGitProxyPairs("http://10.42.7.1:5123", "https://github.com", "per-run-secret", "10.42.7.1", "/run/tf-ca-bundle.crt")
 	got := map[string]string{}
 	for _, p := range pairs {
 		got[p[0]] = p[1]
@@ -1074,7 +1074,7 @@ func TestSandboxGitProxyPairs_SharedOrigin(t *testing.T) {
 	if v := got["http.https://10.42.7.1/.extraHeader"]; v != wantHeader {
 		t.Errorf("extraHeader value = %q, want %q", v, wantHeader)
 	}
-	if v := got["http.https://10.42.7.1/.sslCAInfo"]; v != "/run/tf-gh-injector.crt" {
+	if v := got["http.https://10.42.7.1/.sslCAInfo"]; v != "/run/tf-ca-bundle.crt" {
 		t.Errorf("sslCAInfo value = %q, want the mounted trust file", v)
 	}
 	// The shared origin carries no port: gh drops it when matching a remote
@@ -1090,7 +1090,7 @@ func TestSandboxGitProxyPairs_SharedOrigin(t *testing.T) {
 	// at a TLS listener whose CA it was never told about.
 	for _, c := range []struct{ host, ca string }{
 		{"10.42.7.1", ""},
-		{"", "/run/tf-gh-injector.crt"},
+		{"", "/run/tf-ca-bundle.crt"},
 	} {
 		half := sandboxGitProxyPairs("http://10.42.7.1:5123", "https://github.com", "per-run-secret", c.host, c.ca)
 		if len(half) != 2 || half[0][0] != "url.http://10.42.7.1:5123/.insteadOf" {

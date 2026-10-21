@@ -2,13 +2,10 @@ package egressproxy
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"slices"
@@ -88,8 +85,8 @@ func TestIPDenied_NAT64EmbeddedV4(t *testing.T) {
 
 // --- allowlist matching -----------------------------------------------------
 
-func TestHostSet_NormalizesCaseAndTrailingDot(t *testing.T) {
-	set := newHostSet([]string{"Registry.NPMJS.org"})
+func TestRegistrySet_NormalizesCaseAndTrailingDot(t *testing.T) {
+	set := newRegistrySet(hostsOnly("Registry.NPMJS.org"))
 	for _, h := range []string{"registry.npmjs.org", "REGISTRY.NPMJS.ORG", "registry.npmjs.org."} {
 		if _, ok := set[normalizeHost(h)]; !ok {
 			t.Errorf("host %q should match the normalized allowlist", h)
@@ -104,18 +101,24 @@ func TestHostSet_NormalizesCaseAndTrailingDot(t *testing.T) {
 	}
 }
 
-// TestDefaultRegistryHosts_NoGitHubNoInternal pins two curation
+// TestDefaultRegistries_NoGitHubNoInternal pins two curation
 // invariants on the built-in list: no GitHub hosts (git egress must
 // stay on the authenticated git proxy — an entry here would bypass its
 // Authorize gate) and nothing that could resolve internally by
 // construction (all entries are public registry FQDNs).
-func TestDefaultRegistryHosts_NoGitHubNoInternal(t *testing.T) {
-	for _, h := range DefaultRegistryHosts() {
+func TestDefaultRegistries_NoGitHubNoInternal(t *testing.T) {
+	for _, r := range DefaultRegistries() {
+		h := r.Host
 		if strings.Contains(h, "github") {
-			t.Errorf("DefaultRegistryHosts contains %q — git egress must go through the git proxy, not the egress proxy", h)
+			t.Errorf("DefaultRegistries contains %q — git egress must go through the git proxy, not the egress proxy", h)
 		}
 		if !strings.Contains(h, ".") {
-			t.Errorf("DefaultRegistryHosts contains bare name %q", h)
+			t.Errorf("DefaultRegistries contains bare name %q", h)
+		}
+		for _, p := range r.ReadPOSTPaths {
+			if !strings.HasPrefix(p, "/") || strings.ContainsAny(p, "?#") {
+				t.Errorf("%s read path %q must be a bare absolute path", h, p)
+			}
 		}
 	}
 }
@@ -200,7 +203,7 @@ func TestProxy_DeniesOffAllowlistHost(t *testing.T) {
 	var dialed []string
 	denialCh := make(chan DeniedConnect, 16)
 	addr := newTestServer(t, Config{
-		AllowedHosts: []string{"registry.npmjs.org"},
+		Registries:   hostsOnly("registry.npmjs.org"),
 		RecordDenial: func(_ context.Context, d DeniedConnect) { denialCh <- d },
 	}, []netip.Addr{netip.MustParseAddr("104.16.0.35")}, &dialed, nil)
 
@@ -253,7 +256,7 @@ func TestProxy_DeniesTheGitHubAPIHosts(t *testing.T) {
 			var dialed []string
 			denialCh := make(chan DeniedConnect, 4)
 			addr := newTestServer(t, Config{
-				AllowedHosts: DefaultRegistryHosts(),
+				Registries:   DefaultRegistries(),
 				RecordDenial: func(_ context.Context, d DeniedConnect) { denialCh <- d },
 			}, []netip.Addr{netip.MustParseAddr("140.82.121.6")}, &dialed, nil)
 
@@ -285,9 +288,9 @@ func TestProxy_DeniesTheGitHubAPIHosts(t *testing.T) {
 // TestProxy_ConnectDenialStatusLineCarriesReason pins the denial's delivery
 // channel: the reason must ride the status LINE, not just the body, because a
 // client tunneling through a proxy discards the body of a refused CONNECT and
-// Go's transport surfaces only the text after the status code. This is
-// exactly how `gh run view` — which follows the run object's absolute
-// api.github.com jobs_url out of the injector channel — used to die with a
+// Go's transport surfaces only the text after the status code. `gh run view`
+// follows the run object's absolute api.github.com jobs_url out of the
+// injector channel, and without the reason on the status line it prints a
 // bare "Forbidden" and nothing to act on.
 //
 // It also pins which hosts carry a remedy: the GitHub API hosts point at the
@@ -313,7 +316,7 @@ func TestProxy_ConnectDenialStatusLineCarriesReason(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.host, func(t *testing.T) {
-			addr := newTestServer(t, Config{AllowedHosts: DefaultRegistryHosts()}, nil, nil, nil)
+			addr := newTestServer(t, Config{Registries: DefaultRegistries()}, nil, nil, nil)
 			resp := rawConnect(t, addr, tc.host+":443", "")
 			statusLine, _, _ := strings.Cut(resp, "\r\n")
 			for _, want := range tc.wantPhrase {
@@ -393,7 +396,7 @@ func TestGitHubHostsForUpstreams(t *testing.T) {
 // rather than a remedy pointing at channels that don't serve it.
 func TestProxy_GHESDenialCarriesGuidance(t *testing.T) {
 	addr := newTestServer(t, Config{
-		AllowedHosts: DefaultRegistryHosts(),
+		Registries: DefaultRegistries(),
 		GitHub: GitHubHostsForUpstreams(
 			"https://ghes.corp.example.com/api/v3", "https://ghes.corp.example.com"),
 	}, nil, nil, nil)
@@ -421,7 +424,7 @@ func TestProxy_GHESDenialCarriesGuidance(t *testing.T) {
 // instead — not the canonical "Forbidden" the transport reduces a normal 403
 // CONNECT response to.
 func TestProxy_GoClientSurfacesDenialReason(t *testing.T) {
-	addr := newTestServer(t, Config{AllowedHosts: DefaultRegistryHosts()}, nil, nil, nil)
+	addr := newTestServer(t, Config{Registries: DefaultRegistries()}, nil, nil, nil)
 	proxyURL, err := url.Parse("http://" + addr)
 	if err != nil {
 		t.Fatalf("parse proxy addr: %v", err)
@@ -466,7 +469,7 @@ func TestProxy_SlowDenialSinkDoesNotDelayResponse(t *testing.T) {
 	blocked := make(chan struct{})
 	t.Cleanup(func() { close(blocked) })
 	addr := newTestServer(t, Config{
-		AllowedHosts: []string{"registry.npmjs.org"},
+		Registries: hostsOnly("registry.npmjs.org"),
 		RecordDenial: func(ctx context.Context, _ DeniedConnect) {
 			select {
 			case <-blocked:
@@ -507,7 +510,7 @@ func TestProxy_DenialQueueOverflowDropsNotBlocks(t *testing.T) {
 	t.Cleanup(func() { close(blocked) })
 	sinkEntered := make(chan struct{}, 1)
 	s, err := New(Config{
-		AllowedHosts: []string{"registry.npmjs.org"},
+		Registries: hostsOnly("registry.npmjs.org"),
 		RecordDenial: func(ctx context.Context, _ DeniedConnect) {
 			select {
 			case sinkEntered <- struct{}{}:
@@ -572,7 +575,7 @@ func TestProxy_DeniesWhenResolvedIPInternal(t *testing.T) {
 		t.Run(ip, func(t *testing.T) {
 			var dialed []string
 			addr := newTestServer(t, Config{
-				AllowedHosts: []string{"registry.npmjs.org"},
+				Registries: hostsOnly("registry.npmjs.org"),
 			}, []netip.Addr{netip.MustParseAddr(ip)}, &dialed, nil)
 
 			resp := rawConnect(t, addr, "registry.npmjs.org:443", "")
@@ -595,7 +598,7 @@ func TestProxy_DeniesWhenResolvedIPInternal(t *testing.T) {
 func TestProxy_DialsVettedIPNotHostname(t *testing.T) {
 	var dialed []string
 	addr := newTestServer(t, Config{
-		AllowedHosts: []string{"registry.npmjs.org"},
+		Registries: hostsOnly("registry.npmjs.org"),
 	}, []netip.Addr{netip.MustParseAddr("104.16.0.35")}, &dialed, func() (net.Conn, error) {
 		return nil, fmt.Errorf("synthetic dial failure")
 	})
@@ -612,7 +615,7 @@ func TestProxy_DialsVettedIPNotHostname(t *testing.T) {
 // TestProxy_DeniesNonConnectAndBadPort pins the method/port funnel.
 func TestProxy_DeniesNonConnectAndBadPort(t *testing.T) {
 	addr := newTestServer(t, Config{
-		AllowedHosts: []string{"registry.npmjs.org"},
+		Registries: hostsOnly("registry.npmjs.org"),
 	}, []netip.Addr{netip.MustParseAddr("104.16.0.35")}, nil, nil)
 
 	// Non-CONNECT: absolute-form GET.
@@ -649,7 +652,7 @@ func TestProxy_DeniesNonConnectAndBadPort(t *testing.T) {
 func TestProxy_TokenAuth(t *testing.T) {
 	const token = "per-run-secret"
 	addr := newTestServer(t, Config{
-		AllowedHosts:  []string{"registry.npmjs.org"},
+		Registries:    hostsOnly("registry.npmjs.org"),
 		IncomingToken: token,
 	}, []netip.Addr{netip.MustParseAddr("104.16.0.35")}, nil, nil)
 
@@ -668,129 +671,10 @@ func TestProxy_TokenAuth(t *testing.T) {
 	}
 }
 
-// TestProxy_EndToEndTunnel drives a real HTTPS request through the
-// full stack — http.Client with the proxy URL (userinfo-carried
-// token), CONNECT, vetted dial, tunnel — against a local TLS server
-// standing in for a registry. The test resolver maps the allowed
-// hostname to the TLS server's loopback address; the denylist would
-// veto loopback, so this test swaps the dial seam to connect to the
-// listener directly after asserting the vetted address was the
-// resolver's answer. This is the closest a unit test can get to
-// `pnpm install` without live network.
-func TestProxy_EndToEndTunnel(t *testing.T) {
-	const token = "tunnel-token"
-
-	// The stand-in registry: TLS with a self-signed cert.
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"tarball":"ok"}`))
-	}))
-	defer upstream.Close()
-	upstreamAddr := upstream.Listener.Addr().String()
-
-	// Resolver says the registry lives at a public IP; the dial seam
-	// routes that vetted target to the local TLS server. This keeps
-	// the denylist logic honest (a loopback resolution would 403)
-	// while letting the tunnel carry real TLS bytes.
-	var dialed []string
-	addr := newTestServer(t, Config{
-		AllowedHosts:  []string{"registry.npmjs.org"},
-		IncomingToken: token,
-	}, []netip.Addr{netip.MustParseAddr("104.16.0.35")}, &dialed, func() (net.Conn, error) {
-		return net.Dial("tcp", upstreamAddr)
-	})
-
-	proxyURL, _ := url.Parse("http://" + BasicUser + ":" + token + "@" + addr)
-	client := &http.Client{
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(proxyURL),
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true, // self-signed stand-in cert
-			},
-		},
-		Timeout: 5 * time.Second,
-	}
-
-	resp, err := client.Get("https://registry.npmjs.org/react")
-	if err != nil {
-		t.Fatalf("HTTPS through proxy tunnel: %v", err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if resp.StatusCode != 200 || !strings.Contains(string(body), "tarball") {
-		t.Errorf("tunneled response = %d %q, want 200 with upstream body", resp.StatusCode, body)
-	}
-	if len(dialed) != 1 || dialed[0] != "104.16.0.35:443" {
-		t.Errorf("dialed %v, want the vetted IP literal", dialed)
-	}
-}
-
-// TestProxy_ShutdownClosesLiveTunnels pins the hijacked-conn cleanup:
-// a tunnel still open at Shutdown is force-closed rather than leaking
-// its copy goroutines past run teardown.
-func TestProxy_ShutdownClosesLiveTunnels(t *testing.T) {
-	// Upstream that accepts and holds the conn open silently.
-	upstreamLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer upstreamLn.Close()
-	go func() {
-		for {
-			c, aerr := upstreamLn.Accept()
-			if aerr != nil {
-				return
-			}
-			go func() { _, _ = io.Copy(io.Discard, c) }()
-		}
-	}()
-
-	s, err := New(Config{AllowedHosts: []string{"registry.npmjs.org"}})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	s.resolve = func(context.Context, string) ([]netip.Addr, error) {
-		return []netip.Addr{netip.MustParseAddr("104.16.0.35")}, nil
-	}
-	s.dial = func(context.Context, string, string) (net.Conn, error) {
-		return net.Dial("tcp", upstreamLn.Addr().String())
-	}
-	addr, err := s.Start("127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	defer conn.Close()
-	_, _ = conn.Write([]byte("CONNECT registry.npmjs.org:443 HTTP/1.1\r\nHost: registry.npmjs.org:443\r\n\r\n"))
-	buf := make([]byte, 256)
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	if n, rerr := conn.Read(buf); rerr != nil || !strings.Contains(string(buf[:n]), "200") {
-		t.Fatalf("CONNECT setup failed: %q err=%v", string(buf[:n]), rerr)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := s.Shutdown(ctx); err != nil && !strings.Contains(err.Error(), "context") {
-		t.Fatalf("Shutdown: %v", err)
-	}
-
-	// The client side of the tunnel must observe the close promptly.
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	if _, rerr := conn.Read(buf); rerr == nil {
-		// A second read must eventually error once the close propagates.
-		if _, rerr2 := conn.Read(buf); rerr2 == nil {
-			t.Error("tunnel conn still readable after Shutdown; hijacked conns must be closed")
-		}
-	}
-}
-
 // TestStart_LoopbackDefault pins the bind-safety default shared with
 // the sibling proxies: non-loopback binds require the explicit opt-in.
 func TestStart_LoopbackDefault(t *testing.T) {
-	s, err := New(Config{AllowedHosts: DefaultRegistryHosts()})
+	s, err := New(Config{Registries: DefaultRegistries()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

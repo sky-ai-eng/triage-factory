@@ -88,10 +88,10 @@
 // # TLS, but no interception
 //
 // gh forces https to any GH_HOST and rejects scheme prefixes, so the injector
-// serves TLS with a per-run self-signed certificate (GenerateCert), published to
-// the jail through a bind-mounted trust file SSL_CERT_FILE points at
-// (TrustBundlePEM — the system roots plus this run's leaf, since that env var is
-// process-global). There is no TLS interception of GitHub anywhere — the
+// serves TLS with a per-run self-signed certificate (GenerateCert), published
+// through the trust file SSL_CERT_FILE points at (cabundle.WithSystemRoots —
+// the system roots plus this run's leaf, since that env var is process-global).
+// There is no TLS interception of GitHub anywhere — the
 // injector terminates gh's connection with its own per-run cert and opens its
 // own TLS connection to the real upstream.
 //

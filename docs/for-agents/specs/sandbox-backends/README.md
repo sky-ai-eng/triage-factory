@@ -123,7 +123,7 @@ A backend owns only what differs between isolation technologies:
 | --- | --- | --- |
 | Starting and destroying the jail, and reaping orphans at boot | `runsc` at the jail uid, through the cap-broker | the VMM under `jailer` at the jail uid, through the cap-broker, with a tap device in the cell's netns for the guest's network card; orphans found by their jailer directories |
 | Putting the run tree in front of the jail | `ChownRunTree` / `ParkRunTree` hand-off of a host directory | a disk image built from the host tree at launch, copied back out at `Stop`, with host writes pushed in between (§12.3) |
-| Delivering TF's inputs (binaries, trust file, skills, memory) | bind mounts | read-only disk images built at launch |
+| Delivering TF's inputs (binaries, CA bundle, skills, memory, the jail's environment) | bind mounts and the OCI spec | the binaries in read-only disk images; the per-engagement inputs sent over vsock at the start of every engagement, after a cold boot or a restore, and written to tmpfs (§8, §12.4) |
 | Starting the tool host and returning a connection to it | runsc with a bind-mounted unix socket the in-jail host dials | the guest's init starts the tool host, which dials the executor over vsock; the exec verbs use a second vsock port to the sidecar |
 | Freezing and thawing the jail | `runsc pause` / `resume` | the VMM's pause and resume |
 | Keeping a parked jail's memory | not supported | a Firecracker snapshot on the executor's disk (§8) |
@@ -199,11 +199,16 @@ second implementation is most likely to get wrong:
 Env assembly is shared, so every backend presents the same paths inside the
 jail: the run tree at `/work`, TF's binaries at the fixed destinations in
 `internal/sandbox/spec.go` (`/opt/tf/bin/...`), the exec-verb socket at
-`agenthost.DefaultSocketPath`, staged skills and memory at
+`agenthost.DefaultSocketPath`, the run's CA bundle at
+`sandbox.TrustedCABundleDestination` with the trust variables
+(`agentproc.caBundleEnv`) pointing at it, staged skills and memory at
 `sandbox.TrustedSkillsDestination` / `TrustedMemoryDestination`. `LaunchSpec`
 names the inputs by their host source; the backend decides how they arrive.
-Firecracker has no shared-filesystem device, so its backend attaches them as
-read-only disk images mounted at the same paths (§12.3).
+Firecracker has no shared-filesystem device, so its backend attaches TF's
+binaries as read-only disk images mounted at the same paths (§12.3), and
+writes the inputs minted per engagement (the CA bundle, skills, memory) to
+tmpfs at those paths at the start of every engagement, because a restored
+guest would otherwise keep the parked engagement's (§8).
 
 ## 5. Invariants every backend holds
 
@@ -233,6 +238,10 @@ fails one does not meet the contract.
 9. **Teardown releases everything.** After a contract-order teardown, a new
    cell for the same conversation provisions and launches cleanly, and the
    boot-time reap runs without error.
+10. **The jail trusts the run's CA bundle.** Every trust variable the
+    rootfs's toolchains read names a file holding exactly the bundle the
+    sidecar wrote for this engagement, egress interception CA included, so
+    every registry the egress proxy admits verifies in the jail (§6.1).
 
 ## 6. Policy stays in TF on every backend
 
@@ -260,33 +269,39 @@ the egress policy is enforced once, in TF code:
 
 ### 6.1 TLS interception in the sidecar
 
-TFAC-1117. The tunnel lane passes TLS through opaquely, so it acts only on
-the hostname in the `CONNECT` line. That leaves two gaps:
+The tunnel lane (`internal/egressproxy`) terminates TLS for every host it
+admits. A tunnel that saw only the hostname in the `CONNECT` line would leave
+two gaps:
 
 - **Writes to allowlisted registries.** `npm publish` is a PUT to
   `registry.npmjs.org`, which is allowlisted. An agent given an attacker's npm
-  token in hostile PR text can publish the repository as a public package.
+  token in hostile PR text could publish the repository as a public package.
 - **Fronting through shared CDN edges.** An allowlisted name can resolve to an
-  edge that also serves other sites, and the client inside the tunnel can
+  edge that also serves other sites, and a client inside an opaque tunnel can
   handshake for one of them. The red team of Perplexity's SPACE project showed
   it against PyPI's Fastly edge.
 
-Closing either means terminating TLS, which reverses the rule in
-`internal/egressproxy/CLAUDE.md` and `internal/egressrelay/CLAUDE.md` that no
-lane terminates the agent's TLS. That rule kept TF out of the content trust
-chain: with TLS end to end, the proxy cannot change what a package manager
-downloads. Interception gives that up for the hosts it covers, so it is built
-only under these conditions:
+Terminating TLS puts TF in the content trust chain for the hosts it covers:
+with TLS end to end, a proxy cannot change what a package manager downloads,
+and through an interceptor it could. So interception holds to these
+conditions:
 
-1. **A per-engagement CA.** It is generated in the sidecar's memory for each
-   engagement and never written to the sealed bundle, the run tree or a
-   workspace snapshot. Only its certificate reaches the jail, appended to the
-   system roots in the trust file the gh channel already uses
-   (`internal/ghinjector/cert.go`), never substituted for them. That file sits
-   outside the run tree and is rewritten at every engagement, so a resumed run
-   trusts a fresh CA. The CA is valid for hours, not years, and is
-   name-constrained to exactly the hosts the tunnel admits. GitHub and the LLM
-   provider are never intercepted; they keep their explicit endpoints.
+1. **A per-engagement CA.** The egress proxy generates it in the sidecar's
+   memory for each engagement and never writes it to the sealed bundle, the
+   run tree or a workspace snapshot. Only its certificate reaches the jail,
+   after the system roots in the run's CA bundle (`/run/tf-ca-bundle.crt`),
+   never substituted for them. The sidecar writes that bundle for every run,
+   whatever channels the run has, outside the run tree and fresh at every
+   engagement, so a resumed run trusts a fresh CA; a Firecracker guest
+   restored from a snapshot is sent the new one before its first tool call
+   (§8). The CA is valid for a week, and an engagement that outlives it gets
+   certificate errors rather than a fallback. The length is not what limits
+   it: its key dies with the sidecar and the next engagement mints another,
+   so it is trusted for one engagement however long it is valid. It is
+   name-constrained to the hosts the tunnel admits, with every IP address
+   excluded; a DNS constraint also admits their subdomains, but the CA signs
+   only the admitted hosts. GitHub and the LLM provider are never
+   intercepted; they keep their explicit endpoints.
 2. **Every host the tunnel admits is intercepted.** A host left opaque keeps
    both gaps.
 3. **Pure pass-through.** After the policy decision the upstream body is
@@ -303,43 +318,51 @@ only under these conditions:
 5. **One request shape.** Upgrade and a nested `CONNECT` are refused, and so
    are a request with ambiguous framing (both `Content-Length` and
    `Transfer-Encoding`, or conflicting lengths), a GET or HEAD with a body,
-   and method-override headers (`X-HTTP-Method-Override` and its variants).
+   and method overrides: the `X-HTTP-Method-Override` headers in any
+   spelling, and a `_method` query parameter. A query containing `;`, or
+   one Go's parser rejects, is refused too, because a server that splits on
+   `;` would see a `_method` the check could not.
    Read-only means nothing if a GET can be turned into something else.
 6. **One hostname end to end.** The leaf the jail sees is minted for the
    `CONNECT` host only, so a client whose SNI differs fails its handshake.
-   Every request's `Host` (`:authority` on HTTP/2) must equal the `CONNECT`
-   host or the request is refused, because a CDN edge routes on that header
-   even when the SNI is right. The upstream `ServerName` is the same host.
-   This closes fronting at the TLS layer and the HTTP layer.
+   The jail is served HTTP/1.1 only: every client in the rootfs speaks it,
+   the ones that prefer HTTP/2 fall back, and it keeps HTTP/2's framing out
+   of what the sidecar parses. Every request's `Host` must equal the
+   `CONNECT` host or the request is refused, because a CDN edge routes on
+   that header even when the SNI is right. The upstream `ServerName` is the
+   same host. This closes fronting at the TLS layer and the HTTP layer.
 7. **Upstream dials go through the tunnel's gate:** `VettedDialContext`
    (resolve on the host, check every address against the internal denylist,
-   dial the vetted IP) and the `CONNECT` lane's port rule, 443 only. No second
-   resolver or dialer, so DNS rebinding behind an allowlisted name gets no
-   further than it does today.
+   dial the vetted IP) and the `CONNECT` lane's port rule, 443 only, for the
+   first connection and every redial. No second resolver or dialer, so DNS
+   rebinding behind an allowlisted name gets no further than the denylist.
 8. **Upstream TLS comes from one constructor with no settings:** system
-   roots, Go's default versions and ciphers, nothing read from config or the
-   environment. A guard in `scripts/lint.sh` refuses `InsecureSkipVerify` or a
-   hand-built `tls.Config` in the interceptor's package, and tests prove that
-   a self-signed, expired or wrong-host certificate, and a valid certificate
-   for a different allowlisted host, are all refused. Today each client
-   verifies its registry itself and a mistake fails loudly; afterwards one
-   dial verifies for every toolchain, and a mistake there would weaken all of
-   them while each client still saw a valid certificate.
+   roots, Go's default versions and ciphers, nothing read from config. A
+   guard in `scripts/lint.sh` refuses `InsecureSkipVerify` anywhere in the
+   interceptor's package and a `tls.Config` outside its `tlsconfig.go`, and
+   tests prove that a self-signed, expired or wrong-host certificate, and a
+   valid certificate for a different allowlisted host, are all refused.
+   Without interception each client verifies its registry itself and a
+   mistake fails loudly; with it one dial verifies for every toolchain, and
+   a mistake there would weaken all of them while each client still saw a
+   valid certificate.
 9. **Failures are loud.** An upstream verification failure, and every
    refusal above, is an explicit error to the jail and a recorded denial,
-   never a fallback to tunnelling.
+   never a fallback to tunneling.
 10. **Every toolchain the rootfs ships trusts the CA**, each through the
-    variable it reads (`SSL_CERT_FILE` for Go, `NODE_EXTRA_CA_CERTS` for Node
-    and npm, pip's own, and so on). The list is fixed by a rootfs integration
-    test that fetches through the interceptor with each toolchain in
-    `internal/sandbox` `apkPackages` (Go, Node and npm, Python and pip, curl),
-    so a toolchain added to the rootfs without its variable fails the test.
-    The guardrail prompt forbids disabling verification. A toolchain left out
-    fails with certificate errors, and an agent's fix for those
-    (`strict-ssl=false`, `--trusted-host`) ends up committed to the customer's
-    repository.
+    variable it reads (`agentproc.caBundleEnv`): `SSL_CERT_FILE` for Go, curl
+    and OpenSSL, `NODE_EXTRA_CA_CERTS` for Node and so npm and pnpm, and
+    `PIP_CERT` for pip, which the rootfs runs from a venv (`python3 -m venv`
+    installs it from the wheel CPython bundles). The list is fixed by an
+    integration test that fetches through the interceptor with each
+    toolchain inside a jail (`TestIntegration_EgressIntercept` in
+    `internal/agentproc`), so a toolchain added to the rootfs without its
+    variable fails the test. The guardrail prompt forbids disabling
+    verification. A toolchain left out fails with certificate errors, and an
+    agent's fix for those (`strict-ssl=false`, `--trusted-host`) ends up
+    committed to the customer's repository.
 
-**Accepted residual.** For npm and pip, a new dependency's bytes now pass
+**Accepted residual.** For npm and pip, a new dependency's bytes pass
 through TF with only TLS behind them. That stays contained. An install outside
 TF re-fetches from the real registry and checks the lockfile's hash (`npm ci`
 fails with `EINTEGRITY`, pip's hash-checking mode with a mismatch), so a forged
@@ -352,8 +375,7 @@ only a CI job rebuilding it would notice. That is accepted.
 GET paths and query strings still carry whatever the jail puts in them. With
 `Host` pinned they reach only the registry itself, and the one thing a
 registry publishes about reads, the download counts of a package an attacker
-owns, is a channel measured in bits per day. That is accepted too, as it is
-for the tunnel today.
+owns, is a channel measured in bits per day. That is accepted too.
 
 Two mitigations were considered and not taken. A second-opinion lockfile
 check from the control plane would only repeat what the first install outside
@@ -362,10 +384,6 @@ from the run's credentials, but the sidecar already terminates TLS from the
 jail (the gh injector) and parses the jail's HTTP in plaintext (the git proxy,
 the fetch relays) in that same process, so interception adds more of the
 parsing it already does rather than a new kind.
-
-The step that builds this rewrites the two package guides, the relay lane's
-integrity prerequisite and `docs/security/sandbox-egress.md` to match. Until
-then they describe the code as it is.
 
 ## 7. Capability differences are data
 
@@ -483,14 +501,45 @@ deleted otherwise:
   arise. A warm pool booted from one base snapshot would raise it, and none is
   planned.
 
-A restore starts the VMM under a fresh `jailer` directory holding the same
-images and snapshot files, and the guest resumes where it stopped, with two
-exceptions the backend handles. Firecracker resets every vsock connection on
-restore, so the tool host redials and the executor accepts on the new
-directory's socket. And the guest's clock did not move while the VM was down,
-so the init steps it from the host before the next tool call; otherwise TLS
-validity checks, git timestamps and token expiry in the guest are off by the
-downtime.
+A restore is a new engagement, and the guest is brought up to date as one.
+The broker starts the VMM under a fresh `jailer` directory holding the same
+images and snapshot files, and the guest resumes where it stopped, but in a
+new cell: a new sidecar, possibly another subnet, and fresh values for
+everything TF mints per engagement. Those are the sidecar's addresses and
+per-run tokens in the jail's environment, the CA bundle with the new
+engagement's interception CA (§6.1), and the inputs staged at launch. A
+guest left with the parked engagement's values could not reach its sidecar or
+verify a registry, even from a process started after the restore, because the
+tool host hands its environment to every process it starts. So before the
+first tool call the executor sends the engagement's inputs over vsock, as it
+does after a cold boot, and the init applies them:
+
+- it addresses the network card for the new cell;
+- it steps the clock from the host, which did not move while the VM was down,
+  so TLS validity checks, git timestamps and token expiry in the guest are
+  not off by the downtime;
+- it writes the CA bundle, skills and memory to tmpfs at their §4.1 paths,
+  and takes anything TF re-staged into the host run tree at the claim the
+  way §12.3 pushes a checkout;
+- it restarts the exec-verb relay and the tool host, the tool host with the
+  new environment. Firecracker resets every vsock connection on restore, so
+  both reconnect anyway, and the tool host keeps no state between calls; the
+  executor accepts on the new directory's socket.
+
+Processes the agent started before the park keep running with the parked
+engagement's values. One that reaches the network fails loudly, with a
+refused connection, a proxy-authentication failure or a certificate error,
+and one that does not, such as a database or a server the agent talks to on
+localhost, carries on: that state is what a warm resume exists to keep.
+Making the values stable across engagements instead would mean keeping the
+CA's key and the proxies' per-run tokens past the engagement they were minted
+for, which §6.1 forbids for the key and the proxies' trust model
+(`internal/egressproxy`) forbids for the tokens. The agent is told by an
+injected notice of its own, beside `injection:executor-changed`: the
+processes it started before the pause are still running, and any that reach
+the network have to be restarted before they work. Like every such notice it
+is an injection into the conversation, never a change to `<run_context>`
+(§7).
 
 Snapshots stay on the executor's disk, owned by the broker, and are never
 uploaded. They hold what the guest held: the run's code and its placeholders,
@@ -535,11 +584,16 @@ The cases, one per invariant except 8:
 | `JailIsNotRoot` | 6 |
 | `FreezeHoldsTheJailStill`, `StopLeavesNothingRunning` | 7 |
 | `TeardownReleasesTheCell` | 9 — two engagements of one conversation back to back, then a reap |
+| `TrustVariablesNameTheRunsBundle` | 10 — `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` and `PIP_CERT` each name a file whose hash is that of the bundle the sidecar wrote, which carries a name-constrained CA |
 
 Invariant 8 stays covered by `internal/sandbox`'s own integration tests for
 now: a memory case needs a host that grants a private cgroup namespace, and
 none of the hosts the suite has run on did. When §7 lands, the suite gains a
-case per capability, run on the backends that declare it.
+case per capability, run on the backends that declare it. The
+`memory_checkpoint` case parks a jail, restores it into a new cell, and runs
+`TrustVariablesNameTheRunsBundle` and `OnlyTheSidecarIsReachable` against
+the new engagement, so a restore that kept the parked engagement's inputs
+fails it.
 
 Two cases hold a VM backend to the hard parts of its design: `RunTreeAtWork`
 reads the jail's write back after `Stop`, which fails unless `Stop` copies the
@@ -568,7 +622,7 @@ suite.
 ## 10. Order of work
 
 1. **Extract the interface with gVisor behind it, and the suite.** *Done.*
-2. **TLS interception in the sidecar** (§6.1, TFAC-1117).
+2. **TLS interception in the sidecar** (§6.1, TFAC-1117). *Done.*
 3. **The Firecracker backend**, built against the suite. The spike items
    that could run without it pass (§12.6); the rest run against it. It
    isolates cells by network position as gVisor does, so it does not wait for
@@ -651,7 +705,7 @@ version and checksum.
 | `Provision` | `RunNetwork` as on gVisor (netns, veth, gateway rules, IPv6 off), plus a tap device in the netns bridged to the veth's inner end, so the guest's network card carries the jail IP. The broker launches the sidecar at its uid as today | Does the bridge pass the network conformance cases with the host rules unchanged? **Yes.** With `SetupRunNetwork` and `AdmitJailPorts` unchanged, the guest reaches only its admitted sidecar port, before and after it changes its own address and MAC as root, IPv6 included |
 | `ProxyHost` | The veth's host-side IP | — |
 | `HandOffRunTree` | Builds the run-tree image from the host tree (§12.3) | Cost on a large tree: **1.5 s** for `mkfs.ext4 -d` at the jail uid on 48,744 entries and 469 MB, 0.13 s on a fresh checkout, with owners, modes, symlinks and hard links kept |
-| `Launch` | The broker runs `jailer`, which chroots the VMM, gives it private mount and pid namespaces, joins it to the cell's netns, puts it in a cgroup and drops it to the jail uid and gid. The VM's configuration comes from a fixed template, as the OCI spec does on gVisor: the guest kernel, the read-only rootfs image, the read-only input images, the run-tree image, one network card on the tap, one vsock device, memory and vCPUs from the profile's class, and Firecracker's metadata service off | Bring-up latency against gVisor's: **the same.** `jailer` exec to the tool host's first answer p50 154 ms, p95 181 ms; with the cell built first, as gVisor's spawn counts it, p50 282 ms against gVisor's ~171–292 ms |
+| `Launch` | The broker runs `jailer`, which chroots the VMM, gives it private mount and pid namespaces, joins it to the cell's netns, puts it in a cgroup and drops it to the jail uid and gid. The VM's configuration comes from a fixed template, as the OCI spec does on gVisor: the guest kernel, the read-only rootfs image, the read-only image of TF's binaries, the run-tree image, one network card on the tap, one vsock device, memory and vCPUs from the profile's class, and Firecracker's metadata service off | Bring-up latency against gVisor's: **the same.** `jailer` exec to the tool host's first answer p50 154 ms, p95 181 ms; with the cell built first, as gVisor's spawn counts it, p50 282 ms against gVisor's ~171–292 ms |
 | `Connect` | The tool host dials the host over vsock. Firecracker hands a guest's connection to port N to the unix socket `<vsock path>_N`, on which the executor listens inside the jailer directory | Round trip per tool call against the unix socket: **0.04 ms p50, 0.06 ms p95** for a no-op call, the same as a unix socket on the host |
 | Exec verbs (`/run/tf.sock`) | A relay in the guest listens on `/run/tf.sock` and dials a second vsock port, whose host socket is the sidecar's agenthost socket | — |
 | `Freeze` / `Thaw` | `Freeze` asks the init to freeze `/work`, then pauses the VMM over its API socket, which only the broker uses; `Thaw` resumes the VMM, then unfreezes `/work`. If the init does not confirm, the VMM is paused anyway, so every process is still held still, and a capture reads what the guest last flushed; only that run's capture is affected | Measured: freezing `/work` takes 51–57 ms and the pause about 1 ms; a tool call sent while paused waits and is answered after `Thaw` |
@@ -729,13 +783,15 @@ points:
   scratch disk image for the runtime's images and volumes instead, since on
   tmpfs they would count against guest memory; it is discarded at `Stop` the
   same way (§8).
-- **Init.** A small TF-owned PID 1. It mounts the images at the §4.1 paths,
-  configures the network card from the kernel command line, sets a hostname
-  that `/etc/hosts` resolves, starts the exec-verb relay, starts the tool host
-  at the agent's uid and restarts its connection when vsock resets, freezes
-  `/work` on request, steps the clock from the host after a restore (§8), and
-  reports out-of-memory kills. Nothing else runs in the guest unless the agent
-  starts it. The hostname matters because a cell has no reachable resolver:
+- **Init.** A small TF-owned PID 1. It mounts the images at the §4.1 paths
+  and sets a hostname that `/etc/hosts` resolves. At the start of every
+  engagement, after a cold boot or a restore, it takes the engagement's inputs
+  from the executor over vsock: it addresses the network card, writes the CA
+  bundle, skills and memory to tmpfs at their §4.1 paths, and starts the
+  exec-verb relay and the tool host at the agent's uid with the engagement's
+  environment, restarting both after a restore (§8). It also steps the clock
+  after a restore, freezes `/work` on request, and reports out-of-memory
+  kills. Nothing else runs in the guest unless the agent starts it. The hostname matters because a cell has no reachable resolver:
   musl waits out its whole 5 s timeout on a name it cannot resolve locally,
   and git looks up the hostname to build a default identity.
 - **Root.** When the profile requires `root` (§7), the tool host runs as uid

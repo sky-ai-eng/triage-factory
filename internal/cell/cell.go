@@ -136,6 +136,12 @@ type LaunchSpec struct {
 	// stranded.
 	AgentHostSocket string
 
+	// CABundle is the host path of the CA bundle the sidecar wrote: the
+	// trust file every TLS client in the jail reads, carrying the egress
+	// interceptor's CA. Required: without it no registry the egress proxy
+	// admits verifies in the jail.
+	CABundle string
+
 	// GHChannel wires the real-gh credential injector when the sidecar bound
 	// one; nil otherwise.
 	GHChannel *GHChannel
@@ -162,15 +168,13 @@ type LaunchSpec struct {
 }
 
 // GHChannel is the real-gh injector the sidecar bound for this engagement.
+// The jail's gh verifies it through the CA bundle, which carries its leaf.
 type GHChannel struct {
 	// Host is the injector's "host:port" (no scheme), the agent's GH_HOST.
 	Host string
 	// Token is the per-run placeholder the agent's gh presents. The injector
 	// strips it and attaches the real token.
 	Token string
-	// CertSourcePath is the host path of the injector's trust file, which the
-	// jail's gh verifies the injector against.
-	CertSourcePath string
 }
 
 // Jail is a launched tool-host jail.

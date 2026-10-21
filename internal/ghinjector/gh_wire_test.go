@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/cabundle"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 )
@@ -195,7 +196,7 @@ func ghEnvWithGate(t testing.TB, upstream string,
 
 	home := t.TempDir()
 	trust := filepath.Join(home, "trust.pem")
-	if err := os.WriteFile(trust, TrustBundlePEM(certPEM), 0o600); err != nil {
+	if err := os.WriteFile(trust, cabundle.WithSystemRoots(certPEM), 0o600); err != nil {
 		t.Fatalf("write trust bundle: %v", err)
 	}
 	return []string{

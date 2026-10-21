@@ -34,22 +34,23 @@ const sandboxTFACBinary = "/opt/tf/bin/tfac"
 // sandbox.TrustedGHBinaryDestination; a drift test cross-checks the two.
 const sandboxGHBinary = "/opt/tf/bin/gh"
 
-// sandboxGHInjectorCert is the in-sandbox path the per-run gh-injector trust
-// file is bind-mounted at (read-only). SSL_CERT_FILE points gh here so it
-// trusts the injector's per-run self-signed leaf without any rootfs
-// trust-store edit. The file carries the host's system roots alongside that
-// leaf — SSL_CERT_FILE is process-global, so a leaf-only file would narrow
-// every other in-jail TLS client's file-sourced trust; see
-// ghinjector.TrustBundlePEM. Mirrored broker-side as
-// sandbox.TrustedGHInjectorCertDestination.
-const sandboxGHInjectorCert = "/run/tf-gh-injector.crt"
+// sandboxCABundle is the in-sandbox path the run's CA bundle is bind-mounted
+// at (read-only), and what every trust variable in caBundleEnv points at. The
+// sidecar writes it for every run: the host's system roots, then the egress
+// interceptor's per-engagement CA (so the registries it intercepts verify),
+// then the gh injector's leaf when that channel is on — no rootfs trust-store
+// edit. The roots come first because the variables are process-global and
+// replace a client's CA file rather than add to it; see
+// cabundle.WithSystemRoots. Mirrored broker-side as
+// sandbox.TrustedCABundleDestination.
+const sandboxCABundle = "/run/tf-ca-bundle.crt"
 
-// SandboxGHInjectorCertPath is sandboxGHInjectorCert's exported face, for the
-// sidecar: git needs the same trust file named in its own config
+// SandboxCABundlePath is sandboxCABundle's exported face, for the sidecar: git
+// needs the same trust file named in its own config
 // (GitProxyConfig.SharedOriginCAPath) because it resolves TLS trust from git
-// config, not from the process-global SSL_CERT_FILE gh reads. Same file, same
-// mount, two consumers that look for it in different places.
-const SandboxGHInjectorCertPath = sandboxGHInjectorCert
+// config, not from the process-global SSL_CERT_FILE. Same file, same mount,
+// two consumers that look for it in different places.
+const SandboxCABundlePath = sandboxCABundle
 
 // hostGHBinaryPath is the executor-host path the pinned gh binary is baked at
 // (docker/Dockerfile installs it here); it is both the mount source and the

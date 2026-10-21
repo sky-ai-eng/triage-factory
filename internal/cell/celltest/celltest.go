@@ -18,9 +18,12 @@ package celltest
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
@@ -66,6 +69,7 @@ func Run(t *testing.T, h Harness) {
 	}
 	t.Run("PropertyB", func(t *testing.T) { testPropertyB(t, h) })
 	t.Run("RunTreeAtWork", func(t *testing.T) { testRunTreeAtWork(t, h) })
+	t.Run("TrustVariablesNameTheRunsBundle", func(t *testing.T) { testTrustVariablesNameTheRunsBundle(t, h) })
 	t.Run("JailIsNotRoot", func(t *testing.T) { testJailIsNotRoot(t, h) })
 	t.Run("OnlyTheSidecarIsReachable", func(t *testing.T) { testOnlyTheSidecarIsReachable(t, h) })
 	t.Run("InternalDenylistUnreachable", func(t *testing.T) { testInternalDenylistUnreachable(t, h) })
@@ -122,6 +126,45 @@ func testRunTreeAtWork(t *testing.T, h Harness) {
 	}
 	if string(got) != marker {
 		t.Fatalf("run tree file = %q, want %q", got, marker)
+	}
+}
+
+// testTrustVariablesNameTheRunsBundle: every trust variable the rootfs's
+// toolchains read names a file in the jail holding exactly the CA bundle the
+// sidecar wrote for this run, and that bundle carries the egress
+// interceptor's CA. A backend that delivered the variables without the file,
+// or a stale copy of it, would leave every registry the egress proxy admits
+// failing certificate verification in the jail.
+func testTrustVariablesNameTheRunsBundle(t *testing.T, h Harness) {
+	conversationID := newConversationID(t)
+	l := start(t, h, conversationID)
+
+	written, err := os.ReadFile(agenthost.CABundlePathFor(conversationID))
+	if err != nil {
+		t.Fatalf("read the CA bundle the sidecar wrote: %v", err)
+	}
+	var interceptCA bool
+	for rest := written; ; {
+		var block *pem.Block
+		if block, rest = pem.Decode(rest); block == nil {
+			break
+		}
+		if c, err := x509.ParseCertificate(block.Bytes); err == nil && c.IsCA && len(c.PermittedDNSDomains) > 0 {
+			interceptCA = true
+		}
+	}
+	if !interceptCA {
+		t.Fatal("the sidecar's CA bundle carries no interception CA, so this check proves nothing")
+	}
+	sum := sha256.Sum256(written)
+	want := hex.EncodeToString(sum[:])
+
+	for _, v := range []string{"SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "PIP_CERT"} {
+		out := strings.TrimSpace(l.sh(t, fmt.Sprintf(`p="${%s:-}"; if [ -z "$p" ]; then echo UNSET; else sha256sum "$p"; fi`, v)))
+		got, _, _ := strings.Cut(out, " ")
+		if got != want {
+			t.Errorf("%s in the jail: %q, want a file with the run's CA bundle (sha256 %s)", v, out, want)
+		}
 	}
 }
 
@@ -419,7 +462,7 @@ func start(t *testing.T, h Harness, conversationID string) *liveCell {
 
 	var gh *cell.GHChannel
 	if res.GHChannelHost != "" {
-		gh = &cell.GHChannel{Host: res.GHChannelHost, Token: res.GHChannelToken, CertSourcePath: agenthost.CertPathFor(conversationID)}
+		gh = &cell.GHChannel{Host: res.GHChannelHost, Token: res.GHChannelToken}
 	}
 	jail, err := c.Launch(ctx, cell.LaunchSpec{
 		WorkspaceKey:     conversationID,
@@ -427,6 +470,7 @@ func start(t *testing.T, h Harness, conversationID string) *liveCell {
 		ProxyEnv:         res.Env,
 		SidecarEndpoints: res.JailEndpoints,
 		AgentHostSocket:  agenthost.SocketPathFor(conversationID),
+		CABundle:         agenthost.CABundlePathFor(conversationID),
 		GHChannel:        gh,
 	})
 	if err != nil {
