@@ -1080,11 +1080,18 @@ func (c *LocalClient) JiraCreateIssue(ctx context.Context, project, issueType, s
 	// costs only the entity: the artifact is keyed on the id the create
 	// answered with.
 	ref := created
-	if back, err := client.GetIssueRef(ctx, created.Key); err == nil && back.ID == created.ID {
-		ref = back
-	} else {
+	back, err := client.GetIssueRef(ctx, created.Key)
+	switch {
+	case err != nil:
 		agenthostLog.Warn("could not read back the jira issue a create made; recording it without its project",
 			"conversation", c.info.ConversationID, "issue", created.Key, "error", err)
+	case back.ID != created.ID:
+		// The key names another issue by the time it is read: the created one
+		// was moved and its key reused, so the project read is not its own.
+		agenthostLog.Warn("the jira issue a create made reads back as another issue; recording it without its project",
+			"conversation", c.info.ConversationID, "issue", created.Key, "created_id", created.ID, "read_id", back.ID)
+	default:
+		ref = back
 	}
 	c.recordJiraIssueRef(ctx, ref, created.Key, domain.ActionIssueCreated, domain.ArtifactStateIssueCreated, "", "")
 	return created.Key, nil
