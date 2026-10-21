@@ -27,6 +27,9 @@ type membership interface {
 	teamArchived(ctx context.Context, orgID, userID, teamID string) (bool, error)
 	// userIsTeamAdmin reports the 'admin' role on teamID.
 	userIsTeamAdmin(ctx context.Context, orgID, userID, teamID string) (bool, error)
+	// userAdministersATeam reports the 'admin' role on at least one
+	// non-archived team of orgID.
+	userAdministersATeam(ctx context.Context, orgID, userID string) (bool, error)
 	// userCanWriteTeam reports a non-viewer role on teamID.
 	userCanWriteTeam(ctx context.Context, orgID, userID, teamID string) (bool, error)
 	// userHasOrgAccess reports membership of orgID in any role.
@@ -63,6 +66,10 @@ func (localMembership) teamArchived(context.Context, string, string, string) (bo
 }
 
 func (localMembership) userIsTeamAdmin(context.Context, string, string, string) (bool, error) {
+	return true, nil
+}
+
+func (localMembership) userAdministersATeam(context.Context, string, string) (bool, error) {
 	return true, nil
 }
 
@@ -133,6 +140,17 @@ func (m pgMembership) teamArchived(ctx context.Context, orgID, userID, teamID st
 
 func (m pgMembership) userIsTeamAdmin(ctx context.Context, orgID, userID, teamID string) (bool, error) {
 	return m.probe(ctx, db.Claims{Sub: userID, OrgID: orgID}, `SELECT tf.user_is_team_admin($1::uuid)`, teamID)
+}
+
+// The archived filter is explicit because the question is "may this caller
+// act as a team admin", and an archived team admits no writes.
+func (m pgMembership) userAdministersATeam(ctx context.Context, orgID, userID string) (bool, error) {
+	return m.probe(ctx, db.Claims{Sub: userID, OrgID: orgID}, `
+		SELECT EXISTS (
+			SELECT 1 FROM memberships m
+			  JOIN teams t ON t.id = m.team_id
+			 WHERE m.user_id = tf.current_user_id() AND m.role = 'admin'
+			   AND t.org_id = $1::uuid AND t.deleted_at IS NULL)`, orgID)
 }
 
 func (m pgMembership) userCanWriteTeam(ctx context.Context, orgID, userID, teamID string) (bool, error) {

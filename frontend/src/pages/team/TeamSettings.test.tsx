@@ -193,7 +193,12 @@ beforeEach(() => {
     if (path.endsWith('/members/list'))
       return Promise.resolve({ items: MEMBERS.members, total_count: MEMBERS.members.length })
     if (path.endsWith('/github-repos'))
-      return Promise.resolve({ repos: ['sky/planner', 'sky/runner'] })
+      return Promise.resolve({
+        repos: [
+          { id: 'r1', github_id: '1', owner: 'sky', repo: 'planner' },
+          { id: 'r2', github_id: '2', owner: 'sky', repo: 'runner' },
+        ],
+      })
     if (path.includes('/activity?')) return Promise.resolve(ACTIVITY)
     // The fixture withholds by_user exactly where the server does.
     if (path.includes('/usage?'))

@@ -4,6 +4,10 @@ import { apiFetch, apiJSON } from './apiClient'
  *  mirrors for the picker specifically — not a passthrough of GitHub's
  *  repository object, which is what the old proxy list leaked. */
 export interface GitHubRepo {
+  /** GitHub's own id for the repository: what the option is registered by
+   *  (`registerRepository`) and matched against a team's tracked set. A rename
+   *  moves `full_name`, never this. */
+  github_id: string
   full_name: string
   html_url: string
   description: string
@@ -75,4 +79,57 @@ export async function listReachableRepos(q: string, pageToken = ''): Promise<Rep
  *  in the list": without it, the answer would be "wait". */
 export async function refreshReachableRepos(): Promise<void> {
   await apiFetch('/api/github/repos/refresh', { method: 'POST' })
+}
+
+/** A repository as a team's tracked set names it. GET and PUT
+ *  /api/teams/{id}/github-repos answer in this shape: `id` is the registry row
+ *  id the PUT takes, `github_id` is GitHub's id ('' while TF has not learned
+ *  it), and `owner`/`repo` are the current name, for display.
+ *
+ *  A picker holds its selection in the same shape, which is why `id` may be
+ *  '': a candidate picked from the reachable list has no registry row until
+ *  `saveTeamRepos` registers it by `github_id`. */
+export interface RepoRef {
+  id: string
+  github_id: string
+  owner: string
+  repo: string
+}
+
+export const repoRefSlug = (r: RepoRef): string => `${r.owner}/${r.repo}`
+
+/** The selection key for a ref: its GitHub id when it has one, its folded name
+ *  otherwise — a tracked row TF never learned an id for. Display matching only;
+ *  what a save sends is the registry id. */
+export const repoRefKey = (r: RepoRef): string =>
+  r.github_id ? `gh:${r.github_id}` : `name:${repoRefSlug(r).toLowerCase()}`
+
+/** The keys a candidate answers to: its GitHub id, and its folded name for a
+ *  selected ref that carries no GitHub id. */
+export const candidateKeys = (c: GitHubRepo): string[] => [
+  ...(c.github_id ? [`gh:${c.github_id}`] : []),
+  `name:${c.full_name.toLowerCase()}`,
+]
+
+/** refFromCandidate is the selection entry for a candidate not yet registered. */
+export function refFromCandidate(c: GitHubRepo): RepoRef {
+  const slash = c.full_name.indexOf('/')
+  return {
+    id: '',
+    github_id: c.github_id,
+    owner: c.full_name.slice(0, slash),
+    repo: c.full_name.slice(slash + 1),
+  }
+}
+
+/** registerRepository registers a candidate by its GitHub id (POST /api/repos)
+ *  and returns its registry row id — the row TF already holds for it, or a new
+ *  one. Refused (422) when the workspace's credentials cannot reach it. */
+export async function registerRepository(githubId: string): Promise<string> {
+  const row = await apiJSON<{ id: string }>('/api/repos', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ github_id: githubId }),
+  })
+  return row.id
 }

@@ -44,6 +44,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -322,7 +323,7 @@ func newPollRig(t *testing.T, ctx context.Context, w *orreryWorld, shape deploym
 		t.Fatal(err)
 	}
 	if err := stores.Tx.WithTx(ctx, d.orgID, d.adminID, func(tx db.TxStores) error {
-		if err := tx.TeamGitHubRepos.ReplaceForTeam(ctx, d.orgID, d.teamID, host,
+		if err := dbtest.TrackRepos(ctx, tx.Repos, tx.TeamGitHubRepos, d.orgID, d.teamID, host,
 			[]domain.TeamGitHubRepo{{Owner: "acme", Repo: "webapp"}}); err != nil {
 			return err
 		}

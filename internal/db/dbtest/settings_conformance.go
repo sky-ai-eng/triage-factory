@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,7 +38,10 @@ type SettingsStores struct {
 	JiraProjects     db.JiraProjectStore
 	TeamGitHubGroups db.TeamGitHubGroupsStore
 	TeamGitHubRepos  db.TeamGitHubReposStore
-	OrgEventSources  db.OrgEventSourceStore
+	// Repos is the registry a tracked set references; the tracking cases
+	// register repositories through it.
+	Repos           db.RepositoryStore
+	OrgEventSources db.OrgEventSourceStore
 }
 
 // SettingsIDs are the tenancy keys the factory pre-seeded.
@@ -2192,33 +2196,51 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 
 	t.Run("TeamGitHubRepos_ReplaceForTeam_RoundTripsAndPrunes", func(t *testing.T) {
 		stores, ids := factory(t)
-		input := []domain.TeamGitHubRepo{
-			{Owner: "acme", Repo: "api"},
-			{Owner: "acme", Repo: "web"},
+		api := registerRepo(t, stores.Repos, ids.OrgID, TestGitHubHost, "acme/api", "1001")
+		// A row TF minted by name and never learned an id for is tracked like
+		// any other, and reads back with an empty one.
+		web, err := stores.Repos.FindOrCreateByRefSystem(ctx, ids.OrgID, domain.RepoRefFromSlug(TestGitHubHost, "acme/web"))
+		if err != nil {
+			t.Fatalf("register acme/web by name: %v", err)
 		}
-		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, TestGitHubHost, input); err != nil {
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, TestGitHubHost, []string{api.ID, web.ID, api.ID}); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
 		}
 		got, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListForTeamSystem: %v", err)
 		}
-		sortRepos(got)
-		sortRepos(input)
-		if !reflect.DeepEqual(got, input) {
-			t.Errorf("after ReplaceForTeam, got=%+v; want %+v", got, input)
+		want := []domain.TeamGitHubRepo{
+			{RepositoryID: api.ID, ExternalID: "1001", Owner: "acme", Repo: "api"},
+			{RepositoryID: web.ID, ExternalID: "", Owner: "acme", Repo: "web"},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("after ReplaceForTeam, got=%+v; want %+v (a repeated id is one row)", got, want)
+		}
+
+		// Writing back what the read returned keeps every row, the one with no
+		// GitHub id included.
+		back := make([]string, 0, len(got))
+		for _, r := range got {
+			back = append(back, r.RepositoryID)
+		}
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, TestGitHubHost, back); err != nil {
+			t.Fatalf("write back: %v", err)
+		}
+		if again, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID, TestGitHubHost); err != nil || !reflect.DeepEqual(again, want) {
+			t.Errorf("after writing the read back, got=%+v, %v; want %+v", again, err, want)
 		}
 
 		// Replace-set prunes the missing one.
-		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, TestGitHubHost, input[:1]); err != nil {
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, TestGitHubHost, []string{api.ID}); err != nil {
 			t.Fatalf("replace ReplaceForTeam: %v", err)
 		}
 		got, err = stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListForTeamSystem: %v", err)
 		}
-		if len(got) != 1 || got[0].Repo != "api" {
-			t.Errorf("after replace-set, got=%+v; want one row repo=api", got)
+		if len(got) != 1 || got[0].RepositoryID != api.ID {
+			t.Errorf("after replace-set, got=%+v; want one row %s", got, api.ID)
 		}
 
 		// Empty clears all.
@@ -2234,9 +2256,63 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
+	t.Run("TeamGitHubRepos_ReplaceForTeam_RefusesAnIDThatIsNoRepositoryOnTheHost", func(t *testing.T) {
+		stores, ids := factory(t)
+		api := registerRepo(t, stores.Repos, ids.OrgID, TestGitHubHost, "acme/api", "1101")
+		elsewhere := registerRepo(t, stores.Repos, ids.OrgID, TestOtherGitHubHost, "acme/api", "1101")
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, TestGitHubHost, []string{api.ID}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		for name, id := range map[string]string{
+			"unknown id":       "00000000-0000-4000-8000-0000000000aa",
+			"another host's":   elsewhere.ID,
+			"not an id at all": "acme/api",
+		} {
+			err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, TestGitHubHost, []string{id})
+			if !errors.Is(err, db.ErrNoSuchRepository) || !strings.Contains(err.Error(), id) {
+				t.Errorf("%s: ReplaceForTeam = %v, want db.ErrNoSuchRepository naming %s", name, err, id)
+			}
+		}
+		got, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID, TestGitHubHost)
+		if err != nil || len(got) != 1 || got[0].RepositoryID != api.ID {
+			t.Errorf("tracked after the refusals = %+v, %v; want only %s", got, err, api.ID)
+		}
+	})
+
+	t.Run("TeamGitHubRepos_ReplaceForTeam_KeepsTheRowThroughARename", func(t *testing.T) {
+		// The set is written by registry id, so a client that read it before
+		// GitHub renamed a repository writes back the same row under its new
+		// name: nothing in the write depends on the name it read.
+		stores, ids := factory(t)
+		api := registerRepo(t, stores.Repos, ids.OrgID, TestGitHubHost, "acme/api", "1201")
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, TestGitHubHost, []string{api.ID}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		before, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID, TestGitHubHost)
+		if err != nil {
+			t.Fatalf("read before rename: %v", err)
+		}
+		if _, err := stores.Repos.RenameSystem(ctx, ids.OrgID, domain.RepoRef{
+			Host: TestGitHubHost, Owner: "acme", Repo: "platform-api", ExternalID: "1201",
+		}); err != nil {
+			t.Fatalf("RenameSystem: %v", err)
+		}
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, TestGitHubHost, []string{before[0].RepositoryID}); err != nil {
+			t.Fatalf("save after rename: %v", err)
+		}
+		got, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID, TestGitHubHost)
+		if err != nil {
+			t.Fatalf("read after save: %v", err)
+		}
+		want := []domain.TeamGitHubRepo{{RepositoryID: api.ID, ExternalID: "1201", Owner: "acme", Repo: "platform-api"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("after rename + save, got=%+v; want %+v", got, want)
+		}
+	})
+
 	t.Run("TeamGitHubRepos_TracksRepoSystem_OwnerCaseInsensitive", func(t *testing.T) {
 		stores, ids := factory(t)
-		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
+		if err := TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, ids.OrgID, ids.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "Acme", Repo: "api"},
 		}); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
@@ -2273,7 +2349,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		// drops or mis-joins the team-admin predicate and ends up matching
 		// rows the membership-scoped read doesn't.
 		stores, ids := factory(t)
-		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
+		if err := TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, ids.OrgID, ids.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "Acme", Repo: "api"},
 		}); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
@@ -2304,13 +2380,13 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		// answers for the host it is given: the same owner/repo tracked on
 		// another host is another repository.
 		stores, ids := factory(t)
-		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
+		if err := TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, ids.OrgID, ids.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "acme", Repo: "api"},
 			{Owner: "acme", Repo: "web"},
 		}); err != nil {
 			t.Fatalf("ReplaceForTeam(github.com): %v", err)
 		}
-		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, TestOtherGitHubHost, []domain.TeamGitHubRepo{
+		if err := TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, ids.OrgID, ids.TeamID, TestOtherGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "acme", Repo: "api"},
 			{Owner: "acme", Repo: "internal"},
 		}); err != nil {
@@ -2363,7 +2439,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 
 		// Untracking everything on github.com leaves the team's ghe tracking.
-		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, TestGitHubHost, nil); err != nil {
+		if err := TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, ids.OrgID, ids.TeamID, TestGitHubHost, nil); err != nil {
 			t.Fatalf("ReplaceForTeam(github.com, clear): %v", err)
 		}
 		if got := list(TestGitHubHost); len(got) != 0 {
@@ -2377,7 +2453,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 
 		for name, err := range map[string]error{
-			"ReplaceForTeam": stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, "", nil),
+			"ReplaceForTeam": TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, ids.OrgID, ids.TeamID, "", nil),
 			"ListForTeamSystem": func() error {
 				_, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID, "")
 				return err
@@ -2472,4 +2548,17 @@ func mustListJira(t *testing.T, fn func() ([]domain.JiraProjectStatusRules, erro
 		t.Fatalf("list jira rules: %v", err)
 	}
 	return got
+}
+
+// registerRepo registers slug on host by GitHub id through the registry's
+// id-keyed door, failing the test on error.
+func registerRepo(t *testing.T, repos db.RepositoryStore, orgID, host, slug, githubID string) domain.Repository {
+	t.Helper()
+	ref := domain.RepoRefFromSlug(host, slug)
+	ref.ExternalID = githubID
+	row, err := repos.FindOrCreateByExternalID(context.Background(), orgID, ref)
+	if err != nil {
+		t.Fatalf("register %s (%s) on %s: %v", slug, githubID, host, err)
+	}
+	return row
 }

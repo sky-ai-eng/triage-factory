@@ -94,7 +94,7 @@ func TestRepositoryStore_SQLite_ListTeamScoped_MirrorsTrackedSet(t *testing.T) {
 
 	track := func(repos ...domain.TeamGitHubRepo) {
 		t.Helper()
-		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, repos); err != nil {
+		if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, repos); err != nil {
 			t.Fatalf("track repos: %v", err)
 		}
 	}

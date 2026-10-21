@@ -261,7 +261,7 @@ func TestHandleRepositories_LocalModeLeavesOutUntrackedRows(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "acme", "api")
 	goneID := seedConfiguredRepo(t, s, "acme", "gone")
-	if err := s.allStores.TeamGitHubRepos.ReplaceForTeam(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seedRepoHost(t, s),
+	if err := dbtest.TrackRepos(t.Context(), s.allStores.Repos, s.allStores.TeamGitHubRepos, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seedRepoHost(t, s),
 		[]domain.TeamGitHubRepo{{Owner: "acme", Repo: "api"}}); err != nil {
 		t.Fatalf("untrack acme/gone: %v", err)
 	}
@@ -328,7 +328,8 @@ func TestRepoRoutes_NoGitHubURL(t *testing.T) {
 		body               any
 	}{
 		{"picker", http.MethodPost, "/api/github/repos/list", map[string]any{}},
-		{"tracked set PUT", http.MethodPut, "/api/teams/default/github-repos", map[string]any{"repos": []string{"acme/api"}}},
+		{"tracked set PUT", http.MethodPut, "/api/teams/default/github-repos", map[string]any{"repository_ids": []string{repoID}}},
+		{"registration", http.MethodPost, "/api/repos", map[string]any{"github_id": "41"}},
 		{"repo PATCH", http.MethodPatch, "/api/repos/" + repoID, map[string]string{"base_branch": "develop"}},
 		{"picker refresh", http.MethodPost, "/api/github/repos/refresh", map[string]any{}},
 	} {

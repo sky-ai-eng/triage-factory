@@ -412,6 +412,42 @@ func (s *reachableReposStore) ReachableSlugsSystem(ctx context.Context, orgID, h
 	return out, rows.Err()
 }
 
+func (s *reachableReposStore) ReachableByExternalIDsSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, externalIDs []string) (map[string]domain.ReachableRepository, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if !class.Known() {
+		return nil, fmt.Errorf("read reachable repositories by id: unknown credential class %q", class)
+	}
+	if err := db.RequireRepoHost(host); err != nil {
+		return nil, err
+	}
+	out := map[string]domain.ReachableRepository{}
+	if len(externalIDs) == 0 {
+		return out, nil
+	}
+	args := []any{orgID, string(class), host}
+	for _, id := range externalIDs {
+		args = append(args, id)
+	}
+	rows, err := scanReachableRepos(s.q.QueryContext(ctx, `
+		SELECT `+reachableColumns+`
+		  FROM reachable_repositories r
+		 WHERE r.org_id = ? AND r.credential_class = ? AND `+reachableOnHost("r")+`
+		   AND r.external_id IN (`+strings.TrimRight(strings.Repeat("?, ", len(externalIDs)), ", ")+`)
+		 ORDER BY r.observed_at DESC, LOWER(r.owner), LOWER(r.repo)
+	`, args...))
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		if _, seen := out[r.ExternalID]; !seen {
+			out[r.ExternalID] = r
+		}
+	}
+	return out, nil
+}
+
 // appTierClassArgs renders the App-shaped credential classes as a bound IN list:
 // the placeholders to interpolate, and the values to append to the query's
 // arguments. Built from the domain list rather than spelled in SQL so a class

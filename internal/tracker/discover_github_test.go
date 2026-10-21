@@ -12,6 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
@@ -164,7 +165,7 @@ func trackReposOn(t *testing.T, stores db.Stores, orgID, host string, names []st
 		}
 		repos = append(repos, domain.TeamGitHubRepo{Owner: owner, Repo: repo})
 	}
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(context.Background(), orgID, runmode.LocalDefaultTeamID, host, repos); err != nil {
+	if err := dbtest.TrackRepos(context.Background(), stores.Repos, stores.TeamGitHubRepos, orgID, runmode.LocalDefaultTeamID, host, repos); err != nil {
 		t.Fatalf("track repos %v: %v", names, err)
 	}
 }

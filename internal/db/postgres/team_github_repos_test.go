@@ -12,13 +12,13 @@ import (
 )
 
 // TestTeamGitHubRepos_ReplaceForTeam_AppPath exercises the production write
-// path on real Postgres: team admins saving repos through the claims-bound app
-// pool (RLS active), each save get-or-creating the registry rows its tracking
-// rows point at, in the same transaction. Proves the two-set contract
-// end-to-end under real RLS: tracking a repo brings it into the registry, the
-// tracked set is the union across teams, and untracking shrinks that union
-// while the registry row stays — a worktree ledger entry or a task may still
-// name it.
+// path on real Postgres: team admins registering repositories by GitHub id and
+// saving their tracked sets by registry id, each through the claims-bound app
+// pool (RLS active). Proves the two-set contract end-to-end under real RLS:
+// registering brings a repository into the registry carrying its GitHub id,
+// a second team registering it gets the same row, the tracked set is the
+// union across teams, untracking shrinks that union while the registry row
+// stays, and a team admin cannot write another team's set.
 func TestTeamGitHubRepos_ReplaceForTeam_AppPath(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -53,7 +53,7 @@ func TestTeamGitHubRepos_ReplaceForTeam_AppPath(t *testing.T) {
 	}
 	registry := func() []string {
 		t.Helper()
-		return slugs(`SELECT owner || '/' || repo FROM repositories WHERE org_id = $1 ORDER BY 1`)
+		return slugs(`SELECT owner || '/' || repo || '#' || external_id FROM repositories WHERE org_id = $1 ORDER BY 1`)
 	}
 	tracked := func() []string {
 		t.Helper()
@@ -65,40 +65,76 @@ func TestTeamGitHubRepos_ReplaceForTeam_AppPath(t *testing.T) {
 			ORDER BY 1`)
 	}
 
-	save := func(user, team string, repos ...domain.TeamGitHubRepo) {
+	// register runs the registration under user's claims and returns the row id.
+	register := func(user, slug, githubID string) string {
 		t.Helper()
+		var id string
 		if err := stores.Tx.WithTx(ctx, orgA, user, func(tx db.TxStores) error {
-			return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, team, dbtest.TestGitHubHost, repos)
+			ref := domain.RepoRefFromSlug(dbtest.TestGitHubHost, slug)
+			ref.ExternalID = githubID
+			row, err := tx.Repos.FindOrCreateByExternalID(ctx, orgA, ref)
+			id = row.ID
+			return err
 		}); err != nil {
-			t.Fatalf("ReplaceForTeam(%s): %v", team, err)
+			t.Fatalf("FindOrCreateByExternalID(%s, %s) as %s: %v", slug, githubID, user, err)
 		}
+		return id
+	}
+	save := func(user, team string, ids ...string) error {
+		t.Helper()
+		return stores.Tx.WithTx(ctx, orgA, user, func(tx db.TxStores) error {
+			return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, team, dbtest.TestGitHubHost, ids)
+		})
 	}
 
-	// alice (teamA admin) tracks two repos → both materialize.
-	save(alice, teamA, domain.TeamGitHubRepo{Owner: "acme", Repo: "api"}, domain.TeamGitHubRepo{Owner: "acme", Repo: "web"})
+	// alice (teamA admin) registers and tracks two repos.
+	api := register(alice, "acme/api", "101")
+	web := register(alice, "acme/web", "102")
+	if err := save(alice, teamA, api, web); err != nil {
+		t.Fatalf("alice saves teamA: %v", err)
+	}
 	if got := tracked(); !pgStrsEqual(got, []string{"acme/api", "acme/web"}) {
 		t.Fatalf("after alice: tracked = %v, want [acme/api acme/web]", got)
 	}
-	if got := registry(); !pgStrsEqual(got, []string{"acme/api", "acme/web"}) {
-		t.Fatalf("after alice: repositories = %v, want [acme/api acme/web] — tracking creates the row it points at", got)
+	if got := registry(); !pgStrsEqual(got, []string{"acme/api#101", "acme/web#102"}) {
+		t.Fatalf("after alice: repositories = %v, want both carrying their GitHub id", got)
 	}
 
-	// carol (teamB admin) tracks acme/web (shared) + acme/infra.
-	save(carol, teamB, domain.TeamGitHubRepo{Owner: "acme", Repo: "web"}, domain.TeamGitHubRepo{Owner: "acme", Repo: "infra"})
+	// carol (teamB admin) registers acme/web — under the name GitHub gives it
+	// now, which TF has not applied — and acme/infra. The shared repository is
+	// one row, found by its id.
+	if got := register(carol, "acme/website", "102"); got != web {
+		t.Fatalf("carol's registration of GitHub id 102 = row %s, want alice's row %s", got, web)
+	}
+	infra := register(carol, "acme/infra", "103")
+	if err := save(carol, teamB, web, infra); err != nil {
+		t.Fatalf("carol saves teamB: %v", err)
+	}
 	if got := tracked(); !pgStrsEqual(got, []string{"acme/api", "acme/infra", "acme/web"}) {
 		t.Fatalf("after carol: tracked = %v, want all three", got)
 	}
 
 	// alice drops acme/api. No other team tracks it, so it leaves the tracked
 	// set; acme/web stays because carol still tracks it.
-	save(alice, teamA, domain.TeamGitHubRepo{Owner: "acme", Repo: "web"})
+	if err := save(alice, teamA, web); err != nil {
+		t.Fatalf("alice shrinks teamA: %v", err)
+	}
 	if got := tracked(); !pgStrsEqual(got, []string{"acme/infra", "acme/web"}) {
 		t.Fatalf("after alice shrink: tracked = %v, want [acme/infra acme/web] (acme/api untracked, acme/web survives via teamB)", got)
 	}
 	// The registry does not shrink with it. Untracking is a statement about
 	// what this team works on, not a claim that the repository never existed.
-	if got := registry(); !pgStrsEqual(got, []string{"acme/api", "acme/infra", "acme/web"}) {
+	if got := registry(); !pgStrsEqual(got, []string{"acme/api#101", "acme/infra#103", "acme/web#102"}) {
 		t.Fatalf("after alice shrink: repositories = %v, want all three — an untracked repository keeps its registry row", got)
+	}
+
+	// alice administers teamA only, so RLS refuses her write to teamB's set,
+	// and the refusal rolls back whole.
+	if err := save(alice, teamB, api); err == nil {
+		t.Fatal("alice wrote teamB's tracked set; RLS should refuse a team admin writing another team")
+	}
+	if got := tracked(); !pgStrsEqual(got, []string{"acme/infra", "acme/web"}) {
+		t.Fatalf("after alice's refused write: tracked = %v, want it unchanged", got)
 	}
 }
 
@@ -120,7 +156,7 @@ func TestTeamGitHubRepos_Postgres_TracksRepoViewerScoped_RLS(t *testing.T) {
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	if err := stores.Tx.WithTx(ctx, orgA, alice, func(tx db.TxStores) error {
-		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "Acme", Repo: "api"}})
+		return dbtest.TrackRepos(ctx, tx.Repos, tx.TeamGitHubRepos, orgA, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "Acme", Repo: "api"}})
 	}); err != nil {
 		t.Fatalf("track acme/api for teamA: %v", err)
 	}
@@ -176,7 +212,7 @@ func TestTeamGitHubRepos_Postgres_TracksRepoViewerAdminScoped_RLS(t *testing.T) 
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	if err := stores.Tx.WithTx(ctx, orgA, alice, func(tx db.TxStores) error {
-		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "Acme", Repo: "api"}})
+		return dbtest.TrackRepos(ctx, tx.Repos, tx.TeamGitHubRepos, orgA, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "Acme", Repo: "api"}})
 	}); err != nil {
 		t.Fatalf("track acme/api for teamA: %v", err)
 	}
@@ -239,72 +275,53 @@ func pgStrsEqual(a, b []string) bool {
 	return true
 }
 
-// Tracking is what brings a repository into the repositories table — not
-// profiling — so the row tracking mints has to be a complete identity row from
-// the moment it exists, and a second team tracking the same repository has to
-// resolve to that row rather than mint another.
-func TestTeamGitHubRepos_TrackedRowCarriesIdentity(t *testing.T) {
+// A registration under a team admin's claims mints a complete identity row
+// carrying the GitHub id from the start, and a bare row TF minted by name for
+// the same repository is the row the registration adopts rather than a second.
+func TestRepositories_Postgres_FindOrCreateByExternalID_UnderClaims(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()
 
-	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
-	teamB := pgtest.SeedTeam(t, h, orgA, "team-b")
-	bob := pgtest.SeedUser(t, h, "bob")
-	pgtest.AddOrgMember(t, h, bob, orgA, teamB, "member", "admin")
+	orgA, alice, _ := pgtest.SeedOrgWithUser(t, h, "alice")
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
-	if err := stores.Tx.WithTx(ctx, orgA, alice, func(tx db.TxStores) error {
-		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamA, dbtest.TestGitHubHost,
-			[]domain.TeamGitHubRepo{{Owner: "acme", Repo: "api"}})
-	}); err != nil {
-		t.Fatalf("ReplaceForTeam: %v", err)
+	register := func(slug, githubID string) domain.Repository {
+		t.Helper()
+		var out domain.Repository
+		if err := stores.Tx.WithTx(ctx, orgA, alice, func(tx db.TxStores) error {
+			ref := domain.RepoRefFromSlug(dbtest.TestGitHubHost, slug)
+			ref.ExternalID = githubID
+			var err error
+			out, err = tx.Repos.FindOrCreateByExternalID(ctx, orgA, ref)
+			return err
+		}); err != nil {
+			t.Fatalf("FindOrCreateByExternalID(%s, %s): %v", slug, githubID, err)
+		}
+		return out
 	}
 
-	got, err := stores.Repos.GetByRefSystem(ctx, orgA, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "acme/api"))
-	if err != nil || got == nil {
-		t.Fatalf("GetSystem after tracking: got=%v err=%v — tracking must create the row immediately", got, err)
-	}
-	if got.Source != domain.RepoSourceGitHub {
-		t.Errorf("source = %q, want %q", got.Source, domain.RepoSourceGitHub)
-	}
-	if got.ExternalID != "" {
-		t.Errorf("external id = %q, want empty — tracking learns no id, and none is invented", got.ExternalID)
-	}
-	if got.ProfiledAt != nil {
-		t.Error("the freshly tracked row is already profiled; it should be bare until the profiler runs")
+	created := register("acme/api", "201")
+	if created.ExternalID != "201" || created.Source != domain.RepoSourceGitHub || created.ProfiledAt != nil {
+		t.Errorf("created row = %+v, want a bare github row carrying external id 201", created)
 	}
 
-	// A second team tracking the row the first just made — under different
-	// casing — is a read: same row, and the surrogate uuid PK is untouched.
-	var uuidBefore string
-	if err := h.AdminDB.QueryRow(
-		`SELECT id::text FROM repositories WHERE org_id = $1 AND owner = 'acme' AND repo = 'api'`, orgA,
-	).Scan(&uuidBefore); err != nil {
-		t.Fatalf("read surrogate id: %v", err)
+	// An entity create mints a bare row by name; registering the repository
+	// it names writes the id onto that row.
+	bare, err := stores.Repos.FindOrCreateByRefSystem(ctx, orgA, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "Acme/Web"))
+	if err != nil {
+		t.Fatalf("mint bare row: %v", err)
 	}
-	if err := stores.Tx.WithTx(ctx, orgA, bob, func(tx db.TxStores) error {
-		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamB, dbtest.TestGitHubHost,
-			[]domain.TeamGitHubRepo{{Owner: "Acme", Repo: "API"}})
-	}); err != nil {
-		t.Fatalf("teamB ReplaceForTeam: %v", err)
+	adopted := register("acme/web", "202")
+	if adopted.ID != bare.ID || adopted.ExternalID != "202" || adopted.Slug() != "Acme/Web" {
+		t.Errorf("adopted = %+v, want bare row %s carrying 202 under its stored casing", adopted, bare.ID)
 	}
-	var uuidAfter string
+
 	var rows int
-	if err := h.AdminDB.QueryRow(
-		`SELECT count(*) FROM repositories WHERE org_id = $1`, orgA,
-	).Scan(&rows); err != nil {
+	if err := h.AdminDB.QueryRow(`SELECT count(*) FROM repositories WHERE org_id = $1`, orgA).Scan(&rows); err != nil {
 		t.Fatalf("count rows: %v", err)
 	}
-	if rows != 1 {
-		t.Fatalf("repositories rows = %d, want 1 — a casing difference is not a second repository", rows)
-	}
-	if err := h.AdminDB.QueryRow(
-		`SELECT id::text FROM repositories WHERE org_id = $1`, orgA,
-	).Scan(&uuidAfter); err != nil {
-		t.Fatalf("re-read surrogate id: %v", err)
-	}
-	if uuidAfter != uuidBefore {
-		t.Errorf("surrogate id moved from %s to %s — a second team's save must not re-key an existing row", uuidBefore, uuidAfter)
+	if rows != 2 {
+		t.Fatalf("repositories rows = %d, want 2", rows)
 	}
 }

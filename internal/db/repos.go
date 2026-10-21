@@ -16,7 +16,9 @@ import (
 // same rename fails the same way until the conflicting row is gone.
 var (
 	// ErrRepoSlugOccupied means something already answers to the slug the
-	// rename would move onto. Two causes, one remedy:
+	// rename would move onto. FindOrCreateByExternalID refuses with it too,
+	// for the first cause: the name it would register a repository under is
+	// held by a row with a different provider id. Two causes, one remedy:
 	//
 	//   - A repository row the rename cannot prove is the same repository: one
 	//     with a different provider id (GitHub cannot serve two live
@@ -96,10 +98,11 @@ func RequireRepoHost(host string) error {
 // conditional-request cursor.
 //
 // The registry is not the tracked set. It holds every repository TF records
-// something in: a row is created when a repository is first tracked
-// (TeamGitHubReposStore.ReplaceForTeam) or when TF first records a GitHub
-// entity in it (EntityStore's create), both through one get-or-create, which
-// FindOrCreateByRefSystem exposes as the door. A row survives the last team
+// something in: a row is created when a caller registers a repository by its
+// GitHub id (FindOrCreateByExternalID — what a team picks from the reachable
+// list before it can track it) or when TF first records a GitHub entity in it
+// (EntityStore's create, through the get-or-create FindOrCreateByRefSystem
+// exposes as the door). A row survives the last team
 // untracking it, because team_github_repos, conversation_worktrees and
 // entities all reference it by id and a reference must not outlive what it
 // names. So a row says nothing about whether any team works with the
@@ -373,9 +376,8 @@ type RepositoryStore interface {
 	// ref.Owner/ref.Repo on ref.Host, creating it when nothing answers to the
 	// name: the registry's door, for a GitHub object TF records in a
 	// repository it may hold no row for yet. It is the same get-or-create
-	// TeamGitHubReposStore.ReplaceForTeam resolves each tracked repository
-	// through, and the one EntityStore's create resolves a GitHub entity's
-	// repository through inside its own transaction.
+	// EntityStore's create resolves a GitHub entity's repository through
+	// inside its own transaction.
 	//
 	// An existing row is returned exactly as it stands: the lookup folds case
 	// on owner/repo, so a ref spelling a registered repository differently
@@ -398,6 +400,45 @@ type RepositoryStore interface {
 	// role may insert a repository's identity columns and nothing else, which
 	// is what lets a run record a pull request in a repository no team tracks.
 	FindOrCreateByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef) (domain.Repository, error)
+
+	// FindOrCreateByExternalID registers the repository GitHub identifies as
+	// ref.ExternalID on ref.Host, and returns its row: the door a repository
+	// enters the registry through when a caller names it by GitHub id, which
+	// is how a team picks one from the reachable list before tracking it.
+	// ref.Owner/ref.Repo is the name the caller read alongside the id (the
+	// reachable mirror's), used only when no row carries the id yet.
+	//
+	// The id is looked up before the name, so a rename GitHub has made and TF
+	// has not applied yet resolves to the row that already carries the id,
+	// under the name it stores, rather than to a second row under the new
+	// name. Three outcomes:
+	//
+	//   - A row on the host carries the id: it is returned exactly as it
+	//     stands. Its stored name is not moved here; RenameSystem applies a
+	//     rename when the poller observes one.
+	//   - No row carries the id and a row without a provider id holds the
+	//     name (folded case): the id is written onto that row, which is
+	//     returned. The provider says the name belongs to the id now, so the
+	//     row is that repository — the same inference Upsert and
+	//     FillMissingExternalIDsSystem make.
+	//   - Nothing answers to either: a row is created carrying the id from
+	//     the start. Bare otherwise — no profile — and not tracked.
+	//
+	// A row holding the name under a different provider id is refused with
+	// ErrRepoSlugOccupied, and nothing is written: GitHub serves one live
+	// repository per name, so that row is a repository TF still holds under a
+	// name GitHub has given to another, and re-identifying it would move its
+	// tracking, entities and worktrees onto a repository they never named.
+	//
+	// Two concurrent registrations of one repository resolve to one row; the
+	// identity indexes refuse the second insert, and the loser returns the
+	// winner's row. ref.Host and ref.ExternalID are required; ref.Source
+	// normalizes like Upsert's.
+	//
+	// App pool in Postgres, under the caller's claims: it is a request
+	// handler's write. repositories carries no team, so RLS admits any member
+	// of the org; who may register is decided by the handler.
+	FindOrCreateByExternalID(ctx context.Context, orgID string, ref domain.RepoRef) (domain.Repository, error)
 
 	UpdateCloneStatusByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) (*domain.Repository, error)
 	GetByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error)

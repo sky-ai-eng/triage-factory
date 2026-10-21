@@ -108,7 +108,7 @@ func trackRepoOnHostForTest(t *testing.T, stores db.Stores, host, slug string) s
 	}
 	ref := domain.RepoRefFromSlug(host, slug)
 	tracked = append(tracked, domain.TeamGitHubRepo{Owner: ref.Owner, Repo: ref.Repo})
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, host, tracked); err != nil {
+	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, host, tracked); err != nil {
 		t.Fatalf("track repository %s on %s: %v", slug, host, err)
 	}
 	row, err := stores.Repos.GetByRefSystem(ctx, runmode.LocalDefaultOrgID, ref)

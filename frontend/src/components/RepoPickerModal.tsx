@@ -4,18 +4,25 @@ import { RotateCw, ExternalLink } from 'lucide-react'
 import { useOptionalAuth } from '../contexts/AuthContext'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { LOCAL_DEFAULT_ORG_ID, getGitHubAppStatus, getGitHubAppInstallURL } from '../lib/githubApp'
-import { listReachableRepos, refreshReachableRepos } from '../lib/githubRepos'
-import type { GitHubRepo, RepoListStatus } from '../lib/githubRepos'
+import {
+  candidateKeys,
+  listReachableRepos,
+  refFromCandidate,
+  refreshReachableRepos,
+  repoRefKey,
+} from '../lib/githubRepos'
+import type { GitHubRepo, RepoListStatus, RepoRef } from '../lib/githubRepos'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { useWebSocket } from '../hooks/useWebSocket'
 import SearchField from './SearchField'
 import { httpErrorMessage } from '../lib/apiClient'
 
 interface Props {
-  /** Initially selected repo full_names */
-  selected: string[]
-  /** Called with the new selection when user clicks Save */
-  onSave: (repos: string[]) => void
+  /** Initially selected repositories — a team's tracked set, as its GET returns it */
+  selected: RepoRef[]
+  /** Called with the new selection when user clicks Save. An entry picked here
+   *  that the team did not track carries no registry id yet (`id` is ''). */
+  onSave: (repos: RepoRef[]) => void
   /** Called when user dismisses without saving */
   onClose: () => void
   /** If true, renders as a full-page step instead of an overlay */
@@ -44,7 +51,7 @@ interface Props {
    * the seed is idempotent for the wizard (it patches the same value it passed
    * in), so the host stays in sync without a separate read.
    */
-  onSelectionChange?: (repos: string[]) => void
+  onSelectionChange?: (repos: RepoRef[]) => void
 }
 
 export type { GitHubRepo }
@@ -84,7 +91,12 @@ export default function RepoPickerModal({
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
-  const [checked, setChecked] = useState<Set<string>>(new Set(selected))
+  // Keyed by repoRefKey — the GitHub id, or the folded name for a tracked row
+  // TF never learned an id for — so a candidate whose name moved since the
+  // tracked set was read still shows checked.
+  const [checked, setChecked] = useState<Map<string, RepoRef>>(
+    () => new Map(selected.map((r) => [repoRefKey(r), r])),
+  )
 
   // Trap keyboard focus inside the dialog while it's the floating overlay
   // (never in `inline` mode, which is embedded page content, not a modal)
@@ -105,7 +117,7 @@ export default function RepoPickerModal({
   const onSelectionChangeRef = useRef(onSelectionChange)
   onSelectionChangeRef.current = onSelectionChange
   useEffect(() => {
-    onSelectionChangeRef.current?.(Array.from(checked))
+    onSelectionChangeRef.current?.(Array.from(checked.values()))
   }, [checked])
 
   // Under a GitHub App, the picker lists the repos the App is installed on
@@ -301,11 +313,18 @@ export default function RepoPickerModal({
     }
   }, [clearRefreshTimer])
 
-  const toggle = (name: string) => {
+  const isChecked = (repo: GitHubRepo) => candidateKeys(repo).some((k) => checked.has(k))
+
+  const toggle = (repo: GitHubRepo) => {
     setChecked((prev) => {
-      const next = new Set(prev)
-      if (next.has(name)) next.delete(name)
-      else next.add(name)
+      const next = new Map(prev)
+      const keys = candidateKeys(repo)
+      if (keys.some((k) => next.has(k))) {
+        for (const k of keys) next.delete(k)
+      } else {
+        const ref = refFromCandidate(repo)
+        next.set(repoRefKey(ref), ref)
+      }
       return next
     })
   }
@@ -443,24 +462,24 @@ export default function RepoPickerModal({
 
         {!error &&
           repos.map((repo) => {
-            const isChecked = checked.has(repo.full_name)
+            const on = isChecked(repo)
             return (
               <button
-                key={repo.full_name}
+                key={repo.github_id || repo.full_name}
                 type="button"
                 role="checkbox"
-                aria-checked={isChecked}
-                onClick={() => toggle(repo.full_name)}
+                aria-checked={on}
+                onClick={() => toggle(repo)}
                 className={`w-full flex items-start gap-3 px-3 py-2.5 text-left rounded-xl transition-colors hover:bg-tint-2 ${
-                  isChecked ? 'bg-warm/[0.04]' : ''
+                  on ? 'bg-warm/[0.04]' : ''
                 }`}
               >
                 <span
                   className={`mt-0.5 shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${
-                    isChecked ? 'bg-warm border-warm text-warm-ink' : 'border-line-1'
+                    on ? 'bg-warm border-warm text-warm-ink' : 'border-line-1'
                   }`}
                 >
-                  {isChecked && (
+                  {on && (
                     <svg
                       width="10"
                       height="10"
@@ -500,7 +519,7 @@ export default function RepoPickerModal({
         {/* The list pages now, so there is a "there is more" affordance rather
             than a walk that pulls the whole account into memory. Selections
             made on an earlier page survive it — the checked set is keyed by
-            slug, not by row position. */}
+            GitHub id, not by row position. */}
         {nextToken && !error && (
           <div className="flex justify-center py-3">
             <button
@@ -549,7 +568,7 @@ export default function RepoPickerModal({
             )}
             <button
               type="button"
-              onClick={() => onSave(Array.from(checked))}
+              onClick={() => onSave(Array.from(checked.values()))}
               disabled={checked.size === 0 || saving}
               className="flex items-center gap-1.5 bg-warm hover:bg-warm/90 disabled:opacity-40 text-warm-ink font-medium rounded-xl px-5 py-2 text-body transition-colors"
             >

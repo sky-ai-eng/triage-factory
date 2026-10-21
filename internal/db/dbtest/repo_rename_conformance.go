@@ -200,7 +200,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		fx := seedRenameFixture(t, s, orgID, seed, "host")
 		const gheURL = TestOtherGitHubHost + "/" + renameOldSlug + "/pull/18"
 
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, seed.TeamID, TestOtherGitHubHost, []domain.TeamGitHubRepo{
+		if err := TrackRepos(ctx, s.Repos, s.TeamGitHubRepos, orgID, seed.TeamID, TestOtherGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "octo", Repo: "api"},
 		}); err != nil {
 			t.Fatalf("track %s on %s: %v", renameOldSlug, TestOtherGitHubHost, err)
@@ -368,7 +368,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			upper = "https://example.com/GitHub"
 			lower = "https://example.com/github"
 		)
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, seed.TeamID, upper, []domain.TeamGitHubRepo{
+		if err := TrackRepos(ctx, s.Repos, s.TeamGitHubRepos, orgID, seed.TeamID, upper, []domain.TeamGitHubRepo{
 			{Owner: "octo", Repo: "api"},
 		}); err != nil {
 			t.Fatalf("track %s on %s: %v", renameOldSlug, upper, err)
@@ -621,9 +621,9 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 
 	t.Run("A_repository_with_no_external_id_is_never_renamed", func(t *testing.T) {
 		s, orgID, seed := mk(t)
-		// Tracking mints the row and learns no id, which is exactly the
-		// id-less state under test.
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, seed.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
+		// A row minted by name carries no id, which is exactly the id-less
+		// state under test.
+		if err := TrackRepos(ctx, s.Repos, s.TeamGitHubRepos, orgID, seed.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "octo", Repo: "unidentified"},
 		}); err != nil {
 			t.Fatalf("seed id-less repository: %v", err)
@@ -803,12 +803,12 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 	})
 
 	t.Run("Rename_refuses_a_bare_occupant_a_team_tracks", func(t *testing.T) {
-		// Tracking mints the same bare row an entity create does, but the
-		// row then carries a team's decision, and deleting it would cascade
-		// that tracking row away.
+		// The same bare row an entity create mints, tracked: the row then
+		// carries a team's decision, and deleting it would cascade that
+		// tracking row away.
 		s, orgID, seed := mk(t)
 		fx := seedRenameFixture(t, s, orgID, seed, "bare-tracked")
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, seed.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
+		if err := TrackRepos(ctx, s.Repos, s.TeamGitHubRepos, orgID, seed.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "octo", Repo: "api"},
 			{Owner: "octo", Repo: "api-gateway"},
 			{Owner: "octo", Repo: "platform-api"},
@@ -1125,7 +1125,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		s, orgID, seed := mk(t)
 		// Both tracked, so both are bare rows to begin with; the poller's
 		// grant enumeration then records an id for exactly one of them.
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, seed.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
+		if err := TrackRepos(ctx, s.Repos, s.TeamGitHubRepos, orgID, seed.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "octo", Repo: "identified"},
 			{Owner: "octo", Repo: "bare"},
 		}); err != nil {
@@ -1174,14 +1174,14 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	const externalID = "1296269"
 	branchRef := "refs/heads/octo/api-fix"
 
-	if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, seed.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
+	if err := TrackRepos(ctx, s.Repos, s.TeamGitHubRepos, orgID, seed.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "octo", Repo: "api"},
 		{Owner: "octo", Repo: "api-gateway"},
 	}); err != nil {
 		t.Fatalf("seed tracked set: %v", err)
 	}
-	// The identity arrives the way it does in production: tracking mints a
-	// bare row, and the poller's grant enumeration fills the id in.
+	// The identity arrives the way it does for a row minted by name: bare,
+	// and the poller's grant enumeration fills the id in.
 	if filled, err := s.Repos.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{
 		{Host: TestGitHubHost, Owner: "octo", Repo: "api", ExternalID: externalID},
 	}); err != nil || filled != 1 {

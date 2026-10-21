@@ -55,7 +55,7 @@ func seedWorkspaceRepoOnHost(t *testing.T, stores db.Stores, host, owner, repo, 
 		t.Fatalf("list team repos: %v", err)
 	}
 	tracked = append(tracked, domain.TeamGitHubRepo{Owner: owner, Repo: repo})
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, host, tracked); err != nil {
+	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, host, tracked); err != nil {
 		t.Fatalf("track team repo: %v", err)
 	}
 	return row
@@ -343,7 +343,7 @@ func TestLocalClient_CreateWorkspaceCheckout_ResolvesOnTheOrgsHost(t *testing.T)
 		t.Fatalf("list team repos: %v", err)
 	}
 	tracked = append(tracked, domain.TeamGitHubRepo{Owner: "sky", Repo: "tracked-elsewhere"})
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, tracked); err != nil {
+	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, tracked); err != nil {
 		t.Fatalf("track team repo: %v", err)
 	}
 

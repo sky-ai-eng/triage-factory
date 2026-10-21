@@ -85,7 +85,7 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	// only thing between orgB and orgA's tracked set — including when orgB
 	// names orgA's own team.
 	teamA := firstTeamForOrg(t, h, orgA)
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "octo", Repo: "widget"}}); err != nil {
+	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, orgA, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "octo", Repo: "widget"}}); err != nil {
 		t.Fatalf("track octo/widget in orgA: %v", err)
 	}
 	if got, total, err := stores.Repos.ListTrackedSystem(ctx, orgB, dbtest.TestGitHubHost, db.Unwindowed); err != nil || len(got) != 0 || total != 0 {
@@ -227,12 +227,12 @@ func TestRepositoryStore_Postgres_ListTeamScoped_RLS(t *testing.T) {
 
 	// teamA tracks acme/api; teamB tracks acme/web.
 	if err := stores.Tx.WithTx(ctx, orgA, alice, func(tx db.TxStores) error {
-		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "acme", Repo: "api"}})
+		return dbtest.TrackRepos(ctx, tx.Repos, tx.TeamGitHubRepos, orgA, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "acme", Repo: "api"}})
 	}); err != nil {
 		t.Fatalf("track acme/api for teamA: %v", err)
 	}
 	if err := stores.Tx.WithTx(ctx, orgA, bob, func(tx db.TxStores) error {
-		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamB, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "acme", Repo: "web"}})
+		return dbtest.TrackRepos(ctx, tx.Repos, tx.TeamGitHubRepos, orgA, teamB, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "acme", Repo: "web"}})
 	}); err != nil {
 		t.Fatalf("track acme/web for teamB: %v", err)
 	}

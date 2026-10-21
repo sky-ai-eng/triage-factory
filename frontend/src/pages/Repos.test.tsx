@@ -19,6 +19,8 @@ vi.mock('../hooks/useWebSocket', () => ({
 import Repos from './Repos'
 
 const REPO_ID = 'a2c1f0d4-0000-4000-8000-000000000001'
+// The pinned team's tracked set, as GET /api/teams/{id}/github-repos answers it.
+const TRACKED = { id: REPO_ID, github_id: '1296269', owner: 'acme', repo: 'api' }
 
 /** One registry row as POST /api/repos/list serves it: identity is the id,
  *  the name rides along as a display property. */
@@ -43,7 +45,7 @@ function stubFetch(rows: unknown[]) {
     const url = String(input)
     if (url.startsWith('/api/repos/list')) return { ok: true, ...listBody(rows) }
     if (url.includes('/github-repos') && url.startsWith('/api/teams/')) {
-      return { ok: true, ...jsonBody({ repos: ['acme/api'], role: 'admin' }) }
+      return { ok: true, ...jsonBody({ repos: [TRACKED], role: 'admin' }) }
     }
     if (/^\/api\/orgs\/[^/]+\/settings/.test(url)) {
       return { ok: true, ...jsonBody({ github_base_url: 'https://github.com' }) }
@@ -117,7 +119,7 @@ describe('Repos page addressing', () => {
         }
       }
       if (url.includes('/github-repos') && url.startsWith('/api/teams/')) {
-        return { ok: true, ...jsonBody({ repos: ['acme/api'], role: 'admin' }) }
+        return { ok: true, ...jsonBody({ repos: [TRACKED], role: 'admin' }) }
       }
       if (url.startsWith('/api/settings/org')) {
         return { ok: true, ...jsonBody({ github_base_url: 'https://github.com' }) }

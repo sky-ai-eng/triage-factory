@@ -9,11 +9,13 @@ import { useTeams } from '../hooks/useTeams'
 import { useOptionalAuth } from '../contexts/AuthContext'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { toast } from '../components/Toast/toastStore'
-import { apiFetch, apiJSON, apiList, httpErrorMessage } from '../lib/apiClient'
+import { apiJSON, apiList, httpErrorMessage } from '../lib/apiClient'
+import type { RepoRef } from '../lib/githubRepos'
+import { fetchTeamRepos, saveTeamRepos } from './settings/teamConfig'
 
-// Repo tracking is per-team; writes go to the team's repos
-// endpoint. This page is pre-team-context, so it pins one team — a
-// future change will thread the selected team here.
+// Repo tracking is per-team; writes go to the team's tracked-set
+// endpoint (fetchTeamRepos / saveTeamRepos). This page is pre-team-context,
+// so it pins one team — a future change will thread the selected team here.
 // That team's repo *tracking* set — read to seed the selection and
 // written on Save/Re-profile. This must NOT be sourced from GET /api/repos
 // (the org-wide repositories union): in a multi-team org that union
@@ -25,7 +27,6 @@ import { apiFetch, apiJSON, apiList, httpErrorMessage } from '../lib/apiClient'
 // tracked-set read runs. That is not always the org-wide oldest team the
 // local alias resolves — deliberately: a member-visible team is the only
 // kind this page's reads and writes are authorized against.
-const teamReposPath = (teamId: string) => `/api/teams/${encodeURIComponent(teamId)}/github-repos`
 
 interface Repository {
   /** The registry row id. Identity: the React key, the websocket merge
@@ -677,7 +678,7 @@ export default function Repos() {
   const apiOrgId = useApiOrgId()
   // useOptionalAuth is null in local mode (no AuthProvider) — the arm that
   // addresses the sole team through the "default" alias. Multi resolves the
-  // caller's oldest team membership from the teams list (see teamReposPath);
+  // caller's oldest team membership from the teams list (see the note above);
   // teamId is '' until it lands, and teamsSettled releases the first fetch
   // once the list has resolved either way — so an unresolved team renders as
   // the paused selection (writes disabled) rather than a wrong-team read.
@@ -688,7 +689,7 @@ export default function Repos() {
   const [profiles, setProfiles] = useState<Repository[]>([])
   const [loading, setLoading] = useState(true)
   const [pickerOpen, setPickerOpen] = useState(false)
-  const [selectedRepos, setSelectedRepos] = useState<string[]>([])
+  const [selectedRepos, setSelectedRepos] = useState<RepoRef[]>([])
   // True when the default team's tracked-set fetch failed. selectedRepos
   // stays [] on failure, which is indistinguishable from "genuinely tracks
   // nothing" — without this flag a transient failure would let Re-profile
@@ -706,7 +707,7 @@ export default function Repos() {
       // Two distinct lists: the cards show the org-wide repositories union
       // (the registry list), but the *selection* — what Save/Re-profile writes
       // back to the first team — must come from that team's own
-      // tracked set, never the union (see teamReposPath).
+      // tracked set, never the union (see the note above).
       // Each settles on its own: the cards are worth painting even when the
       // team read fails — or the team never resolved — and a failed team read
       // must not be mistaken for an empty tracked set (see setTeamLoadFailed
@@ -715,13 +716,11 @@ export default function Repos() {
         apiList<Repository>('/api/repos/list', { page_size: 200 })
           .then((page) => page.items)
           .catch(() => null),
-        teamId
-          ? apiJSON<{ repos?: string[] }>(teamReposPath(teamId)).catch(() => null)
-          : Promise.resolve(null),
+        teamId ? fetchTeamRepos(teamId) : Promise.resolve(null),
       ])
       if (profiles) setProfiles(profiles)
       if (team) {
-        setSelectedRepos(team.repos ?? [])
+        setSelectedRepos(team)
         setTeamLoadFailed(false)
       } else {
         // Don't leave a stale-or-empty selection that a write could
@@ -785,23 +784,21 @@ export default function Repos() {
     }
   })
 
-  const handleSaveRepos = async (repos: string[]) => {
+  const handleSaveRepos = async (repos: RepoRef[]) => {
     // The picker can't open while the selection is failed/unresolved (the
     // Edit button gates on teamLoadFailed); this is the defense-in-depth
     // guard against writing with no team to address.
     if (!teamId) return
     setSaving(true)
     try {
-      await apiFetch(teamReposPath(teamId), {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repos }),
-      })
+      const res = await saveTeamRepos(teamId, repos)
+      if (!res.ok) {
+        toast.error(res.error)
+        return
+      }
       toast.success('Repositories updated — profiling will run shortly')
-      setSelectedRepos(repos)
+      setSelectedRepos(res.repos)
       setTimeout(fetchData, 5000)
-    } catch (err) {
-      toast.error(httpErrorMessage(err, 'Could not save the repositories.'))
     } finally {
       setSaving(false)
       setPickerOpen(false)
@@ -818,15 +815,13 @@ export default function Repos() {
     }
     setSaving(true)
     try {
-      await apiFetch(teamReposPath(teamId), {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repos: selectedRepos }),
-      })
+      const res = await saveTeamRepos(teamId, selectedRepos)
+      if (!res.ok) {
+        toast.error(res.error)
+        return
+      }
       toast.success('Re-profiling started')
       setTimeout(fetchData, 8000)
-    } catch (err) {
-      toast.error(httpErrorMessage(err, 'Could not start the re-profile.'))
     } finally {
       setSaving(false)
     }

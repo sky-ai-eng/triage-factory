@@ -168,7 +168,7 @@ func TestSyntheticClaimsWithTx_Postgres_RollsBackOnError(t *testing.T) {
 	sentinel := errors.New("forced rollback")
 
 	err := stores.Tx.SyntheticClaimsWithTx(context.Background(), orgID, userID, func(tx db.TxStores) error {
-		if err := tx.TeamGitHubRepos.ReplaceForTeam(context.Background(), orgID, teamID, dbtest.TestGitHubHost,
+		if err := dbtest.TrackRepos(context.Background(), tx.Repos, tx.TeamGitHubRepos, orgID, teamID, dbtest.TestGitHubHost,
 			[]domain.TeamGitHubRepo{{Owner: "rolled", Repo: "back"}}); err != nil {
 			return err
 		}
@@ -241,7 +241,7 @@ func TestWithTx_Postgres_SurvivesCancelledOriginCtx(t *testing.T) {
 	// Inside WithTx, write a row + read it back. Both must succeed
 	// despite the parent ctx being done.
 	if err := stores.Tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-		if err := tx.TeamGitHubRepos.ReplaceForTeam(cleanupCtx, orgID, teamID, dbtest.TestGitHubHost,
+		if err := dbtest.TrackRepos(cleanupCtx, tx.Repos, tx.TeamGitHubRepos, orgID, teamID, dbtest.TestGitHubHost,
 			[]domain.TeamGitHubRepo{{Owner: "survives", Repo: "cancel"}}); err != nil {
 			return fmt.Errorf("ReplaceForTeam under detached ctx: %w", err)
 		}
@@ -274,7 +274,7 @@ func TestWithTx_Postgres_CanceledCtxSurfacesAsCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		if err := tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, dbtest.TestGitHubHost,
+		if err := dbtest.TrackRepos(ctx, tx.Repos, tx.TeamGitHubRepos, orgID, teamID, dbtest.TestGitHubHost,
 			[]domain.TeamGitHubRepo{{Owner: "gone", Repo: "client"}}); err != nil {
 			return err
 		}
@@ -350,7 +350,7 @@ func TestWithReadTx_Postgres_RefusesWriteAndReads(t *testing.T) {
 	for name, door := range doors {
 		t.Run(name, func(t *testing.T) {
 			err := door(ctx, orgID, userID, func(tx db.TxStores) error {
-				return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, dbtest.TestGitHubHost,
+				return dbtest.TrackRepos(ctx, tx.Repos, tx.TeamGitHubRepos, orgID, teamID, dbtest.TestGitHubHost,
 					[]domain.TeamGitHubRepo{{Owner: "read", Repo: "door"}})
 			})
 			if err == nil {

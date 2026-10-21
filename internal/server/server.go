@@ -1211,6 +1211,9 @@ func (s *Server) routes() {
 	// distinct from the creds stage (auth.ValidateGitHub / /api/jira/connect).
 	s.apiMutating("POST /api/github/reachability", handleGitHubReachability)
 	s.apiMutating("POST /api/repos/list", s.handleRepositories)
+	// Registration by GitHub id: how a repository the picker offers gets the
+	// registry id a team's tracked set is written with.
+	s.apiMutating("POST /api/repos", s.handleRepoRegister)
 	// Addressed by the registry row id, which is what every repo payload
 	// carries. by-name is the slug-accepting read the API rules give a
 	// resource with a unique name, and the only one: the writes take the id

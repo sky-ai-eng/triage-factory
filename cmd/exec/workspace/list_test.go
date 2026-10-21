@@ -211,12 +211,12 @@ func TestListWorkspaces_AvailableIsTheTeamsTrackedSet(t *testing.T) {
 	if _, err := database.Conn.Exec(`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, 'team-b', 'team-b')`, otherTeam, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("seed team-b: %v", err)
 	}
-	if err := store.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, otherTeam, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "theirs"}}); err != nil {
+	if err := dbtest.TrackRepos(ctx, store.Repos, store.TeamGitHubRepos, runmode.LocalDefaultOrgID, otherTeam, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "theirs"}}); err != nil {
 		t.Fatalf("track owner/theirs for team-b: %v", err)
 	}
 	trackForRunTeam(t, database, "owner", "dropped")
 	seedRepository(t, database, "owner", "mine", "https://x/mine", "main")
-	if err := store.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "mine"}}); err != nil {
+	if err := dbtest.TrackRepos(ctx, store.Repos, store.TeamGitHubRepos, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "mine"}}); err != nil {
 		t.Fatalf("untrack owner/dropped: %v", err)
 	}
 

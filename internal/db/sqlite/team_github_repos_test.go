@@ -5,7 +5,6 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -15,9 +14,9 @@ import (
 // TestTeamGitHubRepos_SQLite_TrackedSetIsTheUnion is the local-backend proof
 // that the tracked set — what the poller and the profiler work through — is
 // the union of every team's rows, and that untracking is a delete on THIS
-// table only. The registry row a repository got when it was first tracked
-// stays, because a worktree ledger entry, a pinned project or a task may still
-// name it; the tracked set is what shrinks.
+// table only. The repository's registry row stays, because a worktree ledger
+// entry, a pinned project or a task may still name it; the tracked set is what
+// shrinks.
 func TestTeamGitHubRepos_SQLite_TrackedSetIsTheUnion(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
@@ -50,8 +49,8 @@ func TestTeamGitHubRepos_SQLite_TrackedSetIsTheUnion(t *testing.T) {
 		return names
 	}
 
-	// Team A tracks two repos → both materialize in repositories.
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
+	// Team A tracks two repos.
+	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "acme", Repo: "api"},
 		{Owner: "acme", Repo: "web"},
 	}); err != nil {
@@ -62,7 +61,7 @@ func TestTeamGitHubRepos_SQLite_TrackedSetIsTheUnion(t *testing.T) {
 	}
 
 	// Team B also tracks acme/web (shared) plus acme/infra.
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamB, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
+	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, teamB, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "acme", Repo: "web"},
 		{Owner: "acme", Repo: "infra"},
 	}); err != nil {
@@ -74,7 +73,7 @@ func TestTeamGitHubRepos_SQLite_TrackedSetIsTheUnion(t *testing.T) {
 
 	// Team A drops acme/api. No other team tracks it, so it leaves the tracked
 	// set — and its registry row stays exactly where it was.
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
+	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "acme", Repo: "web"},
 	}); err != nil {
 		t.Fatalf("teamA shrink: %v", err)
@@ -87,7 +86,7 @@ func TestTeamGitHubRepos_SQLite_TrackedSetIsTheUnion(t *testing.T) {
 	}
 
 	// Team B clears everything → only acme/web (still on team A) is tracked.
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamB, dbtest.TestGitHubHost, nil); err != nil {
+	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, teamB, dbtest.TestGitHubHost, nil); err != nil {
 		t.Fatalf("teamB clear: %v", err)
 	}
 	if got, want := tracked(), []string{"acme/web"}; !equalSlugs(got, want) {
@@ -107,7 +106,7 @@ func TestTeamGitHubRepos_SQLite_CasingChangePreservesCache(t *testing.T) {
 	teamA := runmode.LocalDefaultTeamID
 
 	// Track acme/API, then populate cached columns on its repository row.
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost,
+	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost,
 		[]domain.TeamGitHubRepo{{Owner: "acme", Repo: "API"}}); err != nil {
 		t.Fatalf("initial track: %v", err)
 	}
@@ -117,7 +116,7 @@ func TestTeamGitHubRepos_SQLite_CasingChangePreservesCache(t *testing.T) {
 	}
 
 	// Re-track the same repo with different casing.
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost,
+	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost,
 		[]domain.TeamGitHubRepo{{Owner: "acme", Repo: "api"}}); err != nil {
 		t.Fatalf("recased track: %v", err)
 	}
@@ -154,7 +153,7 @@ func TestTeamGitHubRepos_SQLite_TracksRepo(t *testing.T) {
 	ctx := context.Background()
 	teamA := runmode.LocalDefaultTeamID
 
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
+	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "Acme", Repo: "api"},
 	}); err != nil {
 		t.Fatalf("replace: %v", err)
@@ -249,13 +248,13 @@ func TestTeamGitHubRepos_SQLite_ListOrgReposWithTeams(t *testing.T) {
 	seedExtraTeam(t, conn, teamB, "team-b")
 
 	// teamA tracks api + web; teamB also tracks web (shared) + infra.
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
+	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "acme", Repo: "api"},
 		{Owner: "acme", Repo: "web"},
 	}); err != nil {
 		t.Fatalf("teamA replace: %v", err)
 	}
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamB, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
+	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, teamB, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "acme", Repo: "web"},
 		{Owner: "acme", Repo: "infra"},
 	}); err != nil {
@@ -295,52 +294,4 @@ func equalSlugs(a, b []string) bool {
 		}
 	}
 	return true
-}
-
-// Tracking is what brings a repository into the repositories table — not
-// profiling — so the row tracking mints has to be a complete identity row from
-// the moment it exists, and a second team tracking the same repository has to
-// resolve to that row rather than mint another.
-func TestTeamGitHubRepos_SQLite_TrackedRowCarriesIdentity(t *testing.T) {
-	conn := openSQLiteForTest(t)
-	stores := sqlitestore.New(conn)
-	ctx := context.Background()
-
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost,
-		[]domain.TeamGitHubRepo{{Owner: "acme", Repo: "api"}}); err != nil {
-		t.Fatalf("ReplaceForTeam: %v", err)
-	}
-
-	got, err := stores.Repos.GetByRef(ctx, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "acme/api"))
-	if err != nil || got == nil {
-		t.Fatalf("GetByRef after tracking: got=%v err=%v — tracking must create the row immediately", got, err)
-	}
-	if got.Source != domain.RepoSourceGitHub {
-		t.Errorf("source = %q, want %q", got.Source, domain.RepoSourceGitHub)
-	}
-	if got.ExternalID != "" {
-		t.Errorf("external id = %q, want empty — tracking learns no id, and none is invented", got.ExternalID)
-	}
-	if got.ProfiledAt != nil {
-		t.Error("the freshly tracked row is already profiled; it should be bare until the profiler runs")
-	}
-
-	// A second team tracking the row the first just made — under different
-	// casing — is a read: same row, no second one.
-	teamB := "team-b-0000-0000-0000-000000000004"
-	seedExtraTeam(t, conn, teamB, "team-b")
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamB, dbtest.TestGitHubHost,
-		[]domain.TeamGitHubRepo{{Owner: "Acme", Repo: "API"}}); err != nil {
-		t.Fatalf("teamB ReplaceForTeam: %v", err)
-	}
-	again, err := stores.Repos.GetByRef(ctx, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "Acme/API"))
-	if err != nil || again == nil {
-		t.Fatalf("GetByRef after the second team's save: got=%v err=%v", again, err)
-	}
-	if again.ID != got.ID {
-		t.Errorf("second team's save resolved to id %q, want the tracked row's %q", again.ID, got.ID)
-	}
-	if _, n, err := stores.Repos.List(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, db.ListOpts{CountOnly: true}); err != nil || n != 1 {
-		t.Errorf("repositories rows = %d, %v; want 1", n, err)
-	}
 }

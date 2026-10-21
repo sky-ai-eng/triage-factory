@@ -10,6 +10,7 @@ import {
   projectRulesValid,
   ruleIsIdentified,
   saveTeamJiraProjects,
+  saveTeamRepos,
   teamProjectsBlocked,
   unresolvableStatuses,
   type JiraProjectConfig,
@@ -271,5 +272,54 @@ describe('dropStatus', () => {
     expect(next.in_review.members).toEqual([])
     expect(next.in_review.canonical).toBeNull()
     expect(projectRulesValid(next)).toBe(true)
+  })
+})
+
+// The tracked-repo write's half of the id contract: the PUT names repositories
+// by registry id, so a candidate picked from the reachable list is registered by
+// its GitHub id first, and nothing is ever sent as owner/name.
+describe('saveTeamRepos', () => {
+  it('registers what has no registry id, then sends registry ids alone', async () => {
+    const stored = [
+      { id: 'r-api', github_id: '11', owner: 'acme', repo: 'api' },
+      { id: 'r-web', github_id: '13', owner: 'acme', repo: 'web' },
+    ]
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) =>
+      String(input) === '/api/repos'
+        ? { ok: true, status: 200, ...jsonBody({ id: 'r-web' }) }
+        : { ok: true, status: 200, ...jsonBody({ repos: stored }) },
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const res = await saveTeamRepos('team-1', [
+      { id: 'r-api', github_id: '11', owner: 'acme', repo: 'api' },
+      { id: '', github_id: '13', owner: 'acme', repo: 'web' },
+    ])
+
+    const calls = fetchMock.mock.calls as unknown as [string, { method: string; body: string }][]
+    expect(calls.map(([url, init]) => [url, init.method, JSON.parse(init.body)])).toEqual([
+      ['/api/repos', 'POST', { github_id: '13' }],
+      ['/api/teams/team-1/github-repos', 'PUT', { repository_ids: ['r-api', 'r-web'] }],
+    ])
+    expect(res).toEqual({ ok: true, repos: stored })
+  })
+
+  it('sends a registry id once when a registration resolves to a tracked row', async () => {
+    // acme/legacy is tracked with no GitHub id on file; picking it again from
+    // the reachable list registers it, which resolves to that same row.
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) =>
+      String(input) === '/api/repos'
+        ? { ok: true, status: 200, ...jsonBody({ id: 'r-legacy' }) }
+        : { ok: true, status: 200, ...jsonBody({ repos: [] }) },
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await saveTeamRepos('team-1', [
+      { id: 'r-legacy', github_id: '', owner: 'acme', repo: 'legacy' },
+      { id: '', github_id: '12', owner: 'acme', repo: 'legacy' },
+    ])
+
+    const put = fetchMock.mock.calls[1] as unknown as [string, { body: string }]
+    expect(JSON.parse(put[1].body)).toEqual({ repository_ids: ['r-legacy'] })
   })
 })

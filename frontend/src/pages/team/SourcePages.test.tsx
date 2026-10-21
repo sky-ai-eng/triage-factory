@@ -142,11 +142,16 @@ beforeEach(() => {
 
 describe('GitHub source page', () => {
   const REPOS = {
-    '/api/teams/t1/github-repos': { repos: ['sky/agent-runner', 'sky/planner'] },
+    '/api/teams/t1/github-repos': {
+      repos: [
+        { id: 'r1', github_id: '1', owner: 'sky', repo: 'agent-runner' },
+        { id: 'r2', github_id: '2', owner: 'sky', repo: 'planner' },
+      ],
+    },
     '/api/github/repos/list': [
-      { full_name: 'sky/agent-runner' },
-      { full_name: 'sky/planner' },
-      { full_name: 'sky/docs-site' },
+      { github_id: '1', full_name: 'sky/agent-runner' },
+      { github_id: '2', full_name: 'sky/planner' },
+      { github_id: '3', full_name: 'sky/docs-site' },
     ],
   }
 
@@ -199,8 +204,10 @@ describe('GitHub source page', () => {
 
   it('lists a tracked repository the picker can no longer see', async () => {
     stub({
-      '/api/teams/t1/github-repos': { repos: ['sky/vanished'] },
-      '/api/github/repos/list': [{ full_name: 'sky/planner' }],
+      '/api/teams/t1/github-repos': {
+        repos: [{ id: 'r9', github_id: '9', owner: 'sky', repo: 'vanished' }],
+      },
+      '/api/github/repos/list': [{ github_id: '2', full_name: 'sky/planner' }],
     })
     render(<GitHubSource {...BODY} />)
 

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
@@ -78,7 +79,7 @@ func newRepoScopeRig(t *testing.T) *repoScopeRig {
 func (r *repoScopeRig) replaceTeamRepos(t *testing.T, actingUser, teamID string, repos ...domain.TeamGitHubRepo) {
 	t.Helper()
 	if err := r.s.tx.WithTx(t.Context(), r.orgID, actingUser, func(tx db.TxStores) error {
-		return tx.TeamGitHubRepos.ReplaceForTeam(t.Context(), r.orgID, teamID, dbtest.TestGitHubHost, repos)
+		return dbtest.TrackRepos(t.Context(), tx.Repos, tx.TeamGitHubRepos, r.orgID, teamID, dbtest.TestGitHubHost, repos)
 	}); err != nil {
 		t.Fatalf("ReplaceForTeam(%s): %v", teamID, err)
 	}
@@ -492,4 +493,82 @@ func equalSlugs(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestHandleRepoRegister_GateAndTrack_Postgres pins who may register a
+// repository by GitHub id under real RLS — an org admin or the admin of a team,
+// and nobody else — and that a team admin who is no org admin can register a
+// repository and write it into their own team's set by the registry id that
+// returns.
+func TestHandleRepoRegister_GateAndTrack_Postgres(t *testing.T) {
+	r := newRepoScopeRig(t)
+	if err := r.s.reachableRepos.ReplaceForPATSystem(t.Context(), r.orgID, dbtest.TestGitHubHost, []domain.ReachableRepository{
+		{OrgID: r.orgID, Owner: "acme", Repo: "infra", ExternalID: "501"},
+	}); err != nil {
+		t.Fatalf("seed the reachable mirror: %v", err)
+	}
+
+	register := func(caller string) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		r.s.handleRepoRegister(rec, r.req(http.MethodPost, "/api/repos", caller, map[string]any{"github_id": "501"}))
+		return rec
+	}
+	for name, caller := range map[string]string{"plain member": r.plainB, "teamless member": r.teamless} {
+		if rec := register(caller); rec.Code != http.StatusForbidden {
+			t.Errorf("%s registering = %d, want 403; body=%s", name, rec.Code, rec.Body.String())
+		}
+	}
+	if n := registryCount(t, r); n != 2 {
+		t.Fatalf("registry rows after the refusals = %d, want the rig's 2", n)
+	}
+
+	rec := register(r.memberB)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("team admin registering = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var infra repoJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &infra); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if infra.Slug != "acme/infra" || infra.GitHubID != "501" || infra.CanEdit {
+		t.Errorf("registered = %+v, want acme/infra carrying 501, not yet editable by a team admin whose team does not track it", infra)
+	}
+	if again := register(r.orgOwner); again.Code != http.StatusOK || !strings.Contains(again.Body.String(), infra.ID) {
+		t.Errorf("org admin registering the same id = %d %s, want 200 with row %s", again.Code, again.Body.String(), infra.ID)
+	}
+
+	put := func(caller string, ids ...string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := r.req(http.MethodPut, "/api/teams/"+r.teamB+"/github-repos", caller, map[string]any{"repository_ids": ids})
+		req.SetPathValue("team_id", r.teamB)
+		rec := httptest.NewRecorder()
+		r.s.handleTeamReposPut(rec, req)
+		return rec
+	}
+	web := r.repoID(t, "acme", "web")
+	if rec := put(r.plainB, web, infra.ID); rec.Code != http.StatusForbidden {
+		t.Errorf("plain member PUT = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	rec = put(r.memberB, web, infra.ID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("team admin PUT = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var saved teamReposPutResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &saved); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := trackedNames(saved.Repos); !equalSlugs(got, []string{"acme/infra", "acme/web"}) {
+		t.Errorf("teamB tracked = %v, want [acme/infra acme/web]", got)
+	}
+}
+
+// registryCount counts the rig org's registry rows off the admin pool.
+func registryCount(t *testing.T, r *repoScopeRig) int {
+	t.Helper()
+	var n int
+	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM repositories WHERE org_id = $1`, r.orgID).Scan(&n); err != nil {
+		t.Fatalf("count registry rows: %v", err)
+	}
+	return n
 }

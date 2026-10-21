@@ -15,6 +15,8 @@
 import { apiFetch, apiJSON, apiListAll, httpErrorMessage } from '../../lib/apiClient'
 import type { JiraStatusRef, JiraStatusRuleValue } from '../../components/JiraStatusRule'
 import type { GitHubTeamCandidate } from '../../lib/githubTeams'
+import { registerRepository } from '../../lib/githubRepos'
+import type { RepoRef } from '../../lib/githubRepos'
 import type { LinearStateOption, LinearStateRef } from '../../lib/linearTeams'
 import type { SlackChannelsResponse } from '../../types'
 
@@ -97,7 +99,7 @@ export interface TeamConfigForm {
   // empty set over data it never read, so a flaky load can't wipe a team's
   // repos or mappings. This makes the no-wipe invariant hold by construction
   // for every consumer instead of each one re-implementing a load guard.
-  repos?: string[]
+  repos?: RepoRef[]
   github_groups?: GitHubGroup[]
 }
 
@@ -136,7 +138,7 @@ export interface TeamSettingsData {
 
 // TeamReposData mirrors GET /api/teams/{id}/github-repos.
 export interface TeamReposData {
-  repos: string[]
+  repos: RepoRef[]
   role: string
 }
 
@@ -507,11 +509,11 @@ export async function fetchTeamSettings(teamId: string): Promise<TeamSettingsDat
   return apiJSON<TeamSettingsData>(`${teamPath(teamId)}/settings`).catch(() => null)
 }
 
-// fetchTeamRepos returns the team's tracked-repo slugs, or null on failure.
+// fetchTeamRepos returns the team's tracked repositories, or null on failure.
 // The null (vs. empty []) distinction matters: a caller that seeds a picker
 // from this must not treat a failed load as "tracks nothing" and then write
 // [] back, wiping the team's repos (the Repos page guards the same way).
-export async function fetchTeamRepos(teamId: string): Promise<string[] | null> {
+export async function fetchTeamRepos(teamId: string): Promise<RepoRef[] | null> {
   return apiJSON<TeamReposData>(`${teamPath(teamId)}/github-repos`)
     .then((data) => data.repos ?? [])
     .catch(() => null)
@@ -674,18 +676,31 @@ export async function saveTeamLinearTeams(
   }
 }
 
+// TeamReposSaveResult carries the stored set back: a repository registered on
+// the way in gains its registry id, and every entry reads under its current
+// name, so the caller should render what came back rather than what it sent.
+export type TeamReposSaveResult = { ok: true; repos: RepoRef[] } | { ok: false; error: string }
+
 // saveTeamRepos persists the tracked-repo set via
-// PUT /api/teams/{id}/github-repos. Re-PUTting the same set re-triggers
+// PUT /api/teams/{id}/github-repos, which names repositories by registry id.
+// A ref picked from the reachable list has none yet, so it is registered by
+// its GitHub id first (POST /api/repos). Re-PUTting the same set re-triggers
 // profiling, so callers that save unconditionally (vs. only-on-change) should
 // be aware.
-export async function saveTeamRepos(teamId: string, repos: string[]): Promise<SaveResult> {
+export async function saveTeamRepos(
+  teamId: string,
+  repos: RepoRef[],
+): Promise<TeamReposSaveResult> {
   try {
-    await apiFetch(`${teamPath(teamId)}/github-repos`, {
+    const ids = await Promise.all(repos.map((r) => (r.id ? r.id : registerRepository(r.github_id))))
+    const body = await apiJSON<{ repos?: RepoRef[] }>(`${teamPath(teamId)}/github-repos`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repos }),
+      // A registration can resolve to a row the set already names (a tracked
+      // repository TF had no GitHub id for), and the PUT refuses a repeat.
+      body: JSON.stringify({ repository_ids: [...new Set(ids)] }),
     })
-    return { ok: true }
+    return { ok: true, repos: body.repos ?? [] }
   } catch (e) {
     return { ok: false, error: httpErrorMessage(e, 'Could not save the repositories.') }
   }
