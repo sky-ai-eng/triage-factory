@@ -945,15 +945,6 @@ CREATE SEQUENCE public.pending_firings_id_seq
 ALTER SEQUENCE public.pending_firings_id_seq OWNED BY public.pending_firings.id;
 
 
-CREATE TABLE public.poller_state (
-    org_id uuid NOT NULL,
-    source text NOT NULL,
-    source_id text NOT NULL,
-    state_json jsonb NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
 CREATE TABLE public.prompts (
     id text DEFAULT (gen_random_uuid())::text NOT NULL,
     org_id uuid NOT NULL,
@@ -1702,10 +1693,6 @@ ALTER TABLE ONLY public.pending_firings
     ADD CONSTRAINT pending_firings_pkey PRIMARY KEY (id);
 
 
-ALTER TABLE ONLY public.poller_state
-    ADD CONSTRAINT poller_state_pkey PRIMARY KEY (org_id, source, source_id);
-
-
 ALTER TABLE ONLY public.prompts
     ADD CONSTRAINT prompts_id_org_id_key UNIQUE (id, org_id);
 
@@ -2333,10 +2320,6 @@ ALTER TABLE ONLY public.pending_firings
     ADD CONSTRAINT pending_firings_triggering_event_id_org_id_fkey FOREIGN KEY (triggering_event_id, org_id) REFERENCES public.events(id, org_id);
 
 
-ALTER TABLE ONLY public.poller_state
-    ADD CONSTRAINT poller_state_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
-
-
 ALTER TABLE ONLY public.prompts
     ADD CONSTRAINT prompts_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
@@ -2812,12 +2795,6 @@ CREATE POLICY pending_firings_all ON public.pending_firings USING ((EXISTS ( SEL
   WHERE (t.id = pending_firings.task_id))));
 
 
-ALTER TABLE public.poller_state ENABLE ROW LEVEL SECURITY;
-
-
-CREATE POLICY poller_state_all ON public.poller_state USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
-
-
 ALTER TABLE public.prompts ENABLE ROW LEVEL SECURITY;
 
 
@@ -3278,13 +3255,6 @@ GRANT ALL ON SEQUENCE public.pending_firings_id_seq TO anon;
 GRANT ALL ON SEQUENCE public.pending_firings_id_seq TO authenticated;
 GRANT ALL ON SEQUENCE public.pending_firings_id_seq TO service_role;
 GRANT SELECT,USAGE ON SEQUENCE public.pending_firings_id_seq TO tf_app;
-
-
-GRANT ALL ON TABLE public.poller_state TO postgres;
-GRANT ALL ON TABLE public.poller_state TO anon;
-GRANT ALL ON TABLE public.poller_state TO authenticated;
-GRANT ALL ON TABLE public.poller_state TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.poller_state TO tf_app;
 
 
 GRANT ALL ON TABLE public.prompts TO postgres;

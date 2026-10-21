@@ -41,13 +41,6 @@ type Event struct {
 	CreatedAt  time.Time `json:"created_at,omitempty"`
 }
 
-// PollerState stores the last-known snapshot for a source item, used to diff and detect transitions.
-type PollerState struct {
-	Source    string `json:"source"`
-	SourceID  string `json:"source_id"`
-	StateJSON string `json:"state_json"`
-}
-
 // --- Event Type Taxonomy ---
 // These are the canonical event types seeded into the DB on first run.
 

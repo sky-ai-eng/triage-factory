@@ -9,9 +9,10 @@
 -- artifacts are keyed on ids rather than their repository's name, every
 -- artifact references the entity it is about and Jira artifacts keyed on an
 -- issue key are keyed on the issue's id, Linear
--- becomes a tracked source, and five smaller changes ride along: the org GitHub App's unusable state, the claim's source
+-- becomes a tracked source, and six smaller changes ride along: the org GitHub App's unusable state, the claim's source
 -- manifest, the retirement of the 'completed' conversation status, node ids on
--- artifacts and audit-ledger rows, and the table of rate-limit readings.
+-- artifacts and audit-ledger rows, the table of rate-limit readings, and the
+-- removal of the unused poller_state table.
 --
 -- NO TRANSACTION because rebuilding a table other tables reference needs
 -- foreign keys off, and PRAGMA foreign_keys is a no-op inside a transaction:
@@ -108,6 +109,10 @@ CREATE TABLE rate_limit_readings (
     observed_at  DATETIME NOT NULL,
     PRIMARY KEY (org_id, upstream, credential, bucket)
 );
+
+-- poller_state has no reader or writer. The tracker's snapshot-diff baseline is
+-- entities.snapshot_json.
+DROP TABLE poller_state;
 
 -- ===========================================================================
 -- 2. Linear
