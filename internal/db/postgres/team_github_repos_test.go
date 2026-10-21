@@ -2,7 +2,9 @@ package postgres_test
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
@@ -323,5 +325,125 @@ func TestRepositories_Postgres_FindOrCreateByExternalID_UnderClaims(t *testing.T
 	}
 	if rows != 2 {
 		t.Fatalf("repositories rows = %d, want 2", rows)
+	}
+}
+
+// TestRepositories_Postgres_FindOrCreateByExternalID_AdoptionYieldsToAConcurrentID
+// covers the one registration race that surfaces as an error rather than an
+// empty result: the id is written onto a bare row while another transaction
+// holds the same id, uncommitted, on a row under a different name. The UPDATE
+// waits on that row's index entry and, once it commits, fails the unique
+// index. The registration has to answer with the committed row, which is the
+// repository that id names, and leave the bare row as it was.
+func TestRepositories_Postgres_FindOrCreateByExternalID_AdoptionYieldsToAConcurrentID(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	orgA, alice, _ := pgtest.SeedOrgWithUser(t, h, "alice")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+
+	bare, err := stores.Repos.FindOrCreateByRefSystem(ctx, orgA, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "acme/web"))
+	if err != nil {
+		t.Fatalf("mint bare row: %v", err)
+	}
+
+	other, err := h.AdminDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin the concurrent writer: %v", err)
+	}
+	defer func() { _ = other.Rollback() }()
+	var heldID string
+	if err := other.QueryRowContext(ctx, `
+		INSERT INTO repositories (org_id, source, host, owner, repo, external_id)
+		VALUES ($1, 'github', $2, 'acme', 'web-next', '301')
+		RETURNING id::text
+	`, orgA, dbtest.TestGitHubHost).Scan(&heldID); err != nil {
+		t.Fatalf("hold id 301 on another row: %v", err)
+	}
+
+	type result struct {
+		row domain.Repository
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		var row domain.Repository
+		err := stores.Tx.WithTx(ctx, orgA, alice, func(tx db.TxStores) error {
+			ref := domain.RepoRefFromSlug(dbtest.TestGitHubHost, "acme/web")
+			ref.ExternalID = "301"
+			var err error
+			row, err = tx.Repos.FindOrCreateByExternalID(ctx, orgA, ref)
+			return err
+		})
+		done <- result{row, err}
+	}()
+
+	// The registration is the only other session; wait until its UPDATE is
+	// blocked on the uncommitted index entry, or the race is not under test.
+	blocked := false
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		var waiting int
+		if err := h.AdminDB.QueryRowContext(ctx, `
+			SELECT count(*) FROM pg_stat_activity
+			WHERE wait_event_type = 'Lock' AND datname = current_database()
+		`).Scan(&waiting); err != nil {
+			t.Fatalf("read pg_stat_activity: %v", err)
+		}
+		if waiting > 0 {
+			blocked = true
+			break
+		}
+	}
+	if !blocked {
+		t.Fatal("the registration never waited on the concurrent writer's row")
+	}
+	if err := other.Commit(); err != nil {
+		t.Fatalf("commit the concurrent writer: %v", err)
+	}
+
+	select {
+	case res := <-done:
+		if res.err != nil {
+			t.Fatalf("FindOrCreateByExternalID after the concurrent commit: %v", res.err)
+		}
+		if res.row.ID != heldID || res.row.ExternalID != "301" {
+			t.Errorf("registered = %+v, want the committed row %s carrying 301", res.row, heldID)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the registration never returned after the concurrent commit")
+	}
+
+	got, err := stores.Repos.GetSystem(ctx, orgA, bare.ID)
+	if err != nil {
+		t.Fatalf("read the bare row: %v", err)
+	}
+	if got.ExternalID != "" {
+		t.Errorf("bare row after the registration carries %q, want no id", got.ExternalID)
+	}
+}
+
+// TestTeamGitHubRepos_Postgres_ReplaceForTeam_RefusesAnotherOrgsRepository
+// runs on the admin pool, where RLS hides nothing, so the store's own org
+// filter is the only thing that can refuse a registry row of another org.
+func TestTeamGitHubRepos_Postgres_ReplaceForTeam_RefusesAnotherOrgsRepository(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	orgA, _, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	orgB, _, _ := pgtest.SeedOrgWithUser(t, h, "bob")
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	foreign, err := stores.Repos.FindOrCreateByRefSystem(ctx, orgB, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "acme/api"))
+	if err != nil {
+		t.Fatalf("register org B's repository: %v", err)
+	}
+	err = stores.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamA, dbtest.TestGitHubHost, []string{foreign.ID})
+	if !errors.Is(err, db.ErrNoSuchRepository) {
+		t.Fatalf("ReplaceForTeam with org B's repository = %v, want db.ErrNoSuchRepository", err)
+	}
+	if got, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, teamA, dbtest.TestGitHubHost); err != nil || len(got) != 0 {
+		t.Errorf("org A's tracked set after the refusal = %+v, %v; want none", got, err)
 	}
 }

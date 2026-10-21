@@ -111,6 +111,16 @@ func assertRefusedFields(t *testing.T, rec *httptest.ResponseRecorder, status in
 	return msgs
 }
 
+// assertNamesByID checks that a reachability refusal names the repository by
+// the id the caller sent and never by its registry name, which the caller may
+// not be able to read.
+func assertNamesByID(t *testing.T, msg, id, slug string) {
+	t.Helper()
+	if !strings.Contains(msg, id) || strings.Contains(strings.ToLower(msg), slug) {
+		t.Errorf("refusal = %q, want it to name %s and not %s", msg, id, slug)
+	}
+}
+
 func TestUnreachableIn(t *testing.T) {
 	set := reachSet{
 		ids:   map[string]domain.ReachableRepository{"11": {Owner: "owner", Repo: "renamed", ExternalID: "11"}},
@@ -228,9 +238,7 @@ func TestTeamReposPut_MirrorIsAuthoritative(t *testing.T) {
 
 	// Mirrored, and owner/ghost is not in it → 422 on its entry.
 	msgs := assertRefusedFields(t, putTracked(t, srv, tracked.ID, ghost), http.StatusUnprocessableEntity, "repository_ids[1]")
-	if !strings.Contains(msgs[0], "owner/ghost") {
-		t.Errorf("refusal should name the offending repo; got %q", msgs[0])
-	}
+	assertNamesByID(t, msgs[0], ghost, "owner/ghost")
 
 	// And a repository that IS mirrored is accepted without a probe.
 	if rec := putTracked(t, srv, tracked.ID); rec.Code != http.StatusOK {
@@ -403,11 +411,11 @@ func TestTeamReposPut_RejectsUnreachableRepo(t *testing.T) {
 	}
 
 	// Unreachable repos → refused before any write, one error each.
-	msgs := assertRefusedFields(t, putTracked(t, srv, tracked, registerBare(t, srv, host, "owner/ghost"), registerBare(t, srv, host, "owner/gone")),
+	ghost, gone := registerBare(t, srv, host, "owner/ghost"), registerBare(t, srv, host, "owner/gone")
+	msgs := assertRefusedFields(t, putTracked(t, srv, tracked, ghost, gone),
 		http.StatusUnprocessableEntity, "repository_ids[1]", "repository_ids[2]")
-	if !strings.Contains(msgs[0], "owner/ghost") || !strings.Contains(msgs[1], "owner/gone") {
-		t.Errorf("refusals should name the offending repos; got %q", msgs)
-	}
+	assertNamesByID(t, msgs[0], ghost, "owner/ghost")
+	assertNamesByID(t, msgs[1], gone, "owner/gone")
 	if got := trackedNames(getTracked(t, srv)); !equalSlugs(got, []string{"owner/tracked"}) {
 		t.Errorf("tracked after the refusal = %v, want it unchanged", got)
 	}
@@ -466,11 +474,10 @@ func TestTeamReposPut_StaleTrackedRepoStaysRemovable(t *testing.T) {
 
 	// Control: a NEWLY-added unreachable repo is still refused — the guard
 	// didn't go slack, it just scopes to additions.
-	msgs := assertRefusedFields(t, putTracked(t, srv, other, registerBare(t, srv, host, "owner/ghost")),
+	ghost := registerBare(t, srv, host, "owner/ghost")
+	msgs := assertRefusedFields(t, putTracked(t, srv, other, ghost),
 		http.StatusUnprocessableEntity, "repository_ids[1]")
-	if !strings.Contains(msgs[0], "owner/ghost") {
-		t.Errorf("refusal should name the offending repo; got %q", msgs[0])
-	}
+	assertNamesByID(t, msgs[0], ghost, "owner/ghost")
 }
 
 // TestTeamReposPut_FailsOpenWithoutCredentials proves the guard never

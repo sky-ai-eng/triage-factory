@@ -195,6 +195,11 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
     [maxRuns],
   )
 
+  // Saves go out one at a time, in the order their windows closed. A save that
+  // registers a repository first is two requests, so a later save sent beside
+  // it could land first and then be overwritten by the older set.
+  const saving = useRef<Promise<unknown>>(Promise.resolve())
+
   // The set-replace the two verbs resolve to. Sent once, when the undo window
   // closes — an undone change is never sent at all.
   const commit = useCallback(
@@ -210,7 +215,9 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
           : current.filter((r) => !picked.has(repoRefKey(r)))
       trackedRef.current = next
       setTracked(next)
-      void saveTeamRepos(teamId, next).then((res) => {
+      const save = saving.current.then(() => saveTeamRepos(teamId, next))
+      saving.current = save
+      void save.then((res) => {
         if (!res.ok) {
           setError(res.error)
           return

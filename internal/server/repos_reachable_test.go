@@ -465,9 +465,7 @@ func TestTeamReposPut_GateReadsTheMirrorFromAnotherPod(t *testing.T) {
 
 	ghost := registerBare(t, writer, hostOf(t, writer), "owner/ghost")
 	msgs := assertRefusedFields(t, putTracked(t, writer, tracked.ID, ghost), http.StatusUnprocessableEntity, "repository_ids[1]")
-	if !strings.Contains(msgs[0], "owner/ghost") {
-		t.Errorf("refusal should name the offending repo; got %q", msgs[0])
-	}
+	assertNamesByID(t, msgs[0], ghost, "owner/ghost")
 }
 
 // TestTeamReposPut_StaleMirrorFallsToTheColdPath pins the gate's staleness

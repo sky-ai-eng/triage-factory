@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import GitHubSource from './GitHubSource'
 import JiraSource from './JiraSource'
 import SlackSource from './SlackSource'
@@ -233,6 +233,75 @@ describe('GitHub source page', () => {
     // Selection exists for the verbs, so it goes with them.
     expect(document.querySelector('.tb-check')).toBeNull()
     expect(screen.getByText('tracked of 3 visible')).toBeInTheDocument()
+  })
+
+  it('sends a later save only after one that registers a repository first', async () => {
+    const fetchMock = stub({
+      ...REPOS,
+      '/api/github/repos/list': [
+        ...REPOS['/api/github/repos/list'],
+        { github_id: '4', full_name: 'sky/web' },
+      ],
+    })
+    // The first registration is held open until the test answers it.
+    let answerRegister: () => void = () => {}
+    let registrations = 0
+    const answer = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation((input: unknown, init?: RequestInit) => {
+      if (String(input) !== '/api/repos') return answer(input, init)
+      const githubId = JSON.parse(String(init!.body)).github_id
+      const ok = {
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve(JSON.stringify({ id: 'r' + githubId, github_id: githubId })),
+      }
+      if (registrations++ > 0) return Promise.resolve(ok)
+      return new Promise((resolve) => {
+        answerRegister = () => resolve(ok)
+      })
+    })
+    const puts = () =>
+      fetchMock.mock.calls
+        .filter(([path, init]) => path === '/api/teams/t1/github-repos' && init?.method === 'PUT')
+        .map(([, init]) => JSON.parse(String(init!.body)).repository_ids)
+    const { unmount } = render(<GitHubSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('sky/docs-site')).toBeInTheDocument())
+    const watch = (name: string) => {
+      fireEvent.click(within(screen.getByText(name).closest('[role="row"]')!).getByRole('checkbox'))
+      fireEvent.pointerDown(screen.getByRole('button', { name: 'Watch' }), {
+        button: 0,
+        clientX: 0,
+        clientY: 0,
+      })
+      // A verb fires once the press rings settle.
+      act(() => {
+        vi.advanceTimersByTime(300)
+      })
+    }
+
+    // The first window runs out and its save goes out; the second verb's
+    // window is closed by leaving the page while that registration is open.
+    vi.useFakeTimers()
+    try {
+      watch('sky/docs-site')
+      act(() => {
+        vi.advanceTimersByTime(10_000)
+      })
+      watch('sky/web')
+      unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+    await act(() => new Promise((resolve) => setTimeout(resolve, 20)))
+    expect(registrations).toBe(1)
+    expect(puts()).toEqual([])
+
+    answerRegister()
+    await waitFor(() => expect(puts()).toHaveLength(2))
+    expect(puts()).toEqual([
+      ['r1', 'r2', 'r3'],
+      ['r1', 'r2', 'r3', 'r4'],
+    ])
   })
 })
 

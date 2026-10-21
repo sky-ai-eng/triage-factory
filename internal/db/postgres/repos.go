@@ -154,10 +154,9 @@ func (s *repoStore) FindOrCreateByRefSystem(ctx context.Context, orgID string, r
 // FindOrCreateByExternalID registers the repository the provider identifies as
 // ref.ExternalID on the app pool, under the caller's claims; see the interface
 // for the three outcomes. Each pass of registerByExternalID either settles on a
-// row or reports that a concurrent writer moved first — READ COMMITTED
-// re-checks a blocked UPDATE's predicate, and a DO NOTHING insert that waited
-// on another's uncommitted row returns nothing — and the next pass reads what
-// that writer committed.
+// row or reports that a concurrent writer moved first (see adoptBareRepository
+// for the UPDATE; a DO NOTHING insert that waited on another's uncommitted row
+// returns nothing), and the next pass reads what that writer committed.
 func (s *repoStore) FindOrCreateByExternalID(ctx context.Context, orgID string, ref domain.RepoRef) (domain.Repository, error) {
 	source, err := domain.NormalizeRepoSource(ref.Source)
 	if err != nil {
@@ -217,16 +216,7 @@ func registerByExternalID(ctx context.Context, q queryer, orgID, source string, 
 			return domain.Repository{}, false, fmt.Errorf("%w: %s is registered under provider id %s, not %s",
 				db.ErrRepoSlugOccupied, named.Slug(), named.ExternalID, ref.ExternalID)
 		}
-		p, err := pgScanRepositoryFull(q.QueryRowContext(ctx, `
-			UPDATE repositories
-			   SET external_id = $3, updated_at = now()
-			 WHERE org_id = $1 AND id = $2 AND external_id IS NULL
-			RETURNING `+repoProfileFullColumns,
-			orgID, named.ID, ref.ExternalID))
-		if errors.Is(err, sql.ErrNoRows) {
-			return domain.Repository{}, false, nil
-		}
-		return p, err == nil, err
+		return adoptBareRepository(ctx, q, orgID, named.ID, ref.ExternalID)
 	}
 
 	// DO NOTHING with no conflict target, as in insertRepositoryRow: either
@@ -245,6 +235,39 @@ func registerByExternalID(ctx context.Context, q queryer, orgID, source string, 
 		return domain.Repository{}, false, fmt.Errorf("insert repositories[%s]: %w", ref.Slug(), err)
 	}
 	return p, true, nil
+}
+
+// adoptBareRepository writes the provider id onto a row that holds the name
+// without one. done is false when another writer moved first, in either of two
+// ways: it filled this row's id (READ COMMITTED re-checks the predicate once
+// the row lock is free, and the UPDATE matches nothing), or it committed the id
+// on a different row while this UPDATE waited on that row's uncommitted entry
+// in repositories_external_identity. The second is a unique violation, and an
+// error aborts a Postgres transaction, so the UPDATE runs under a savepoint and
+// rolls back to it, leaving the next pass able to read the committed row.
+func adoptBareRepository(ctx context.Context, q queryer, orgID, id, externalID string) (domain.Repository, bool, error) {
+	if _, err := q.ExecContext(ctx, `SAVEPOINT register_adopt`); err != nil {
+		return domain.Repository{}, false, err
+	}
+	p, err := pgScanRepositoryFull(q.QueryRowContext(ctx, `
+		UPDATE repositories
+		   SET external_id = $3, updated_at = now()
+		 WHERE org_id = $1 AND id = $2 AND external_id IS NULL
+		RETURNING `+repoProfileFullColumns,
+		orgID, id, externalID))
+	done := err == nil
+	switch {
+	case isUniqueViolation(err):
+		if _, err := q.ExecContext(ctx, `ROLLBACK TO SAVEPOINT register_adopt`); err != nil {
+			return domain.Repository{}, false, err
+		}
+	case err != nil && !errors.Is(err, sql.ErrNoRows):
+		return domain.Repository{}, false, err
+	}
+	if _, err := q.ExecContext(ctx, `RELEASE SAVEPOINT register_adopt`); err != nil {
+		return domain.Repository{}, false, err
+	}
+	return p, done, nil
 }
 
 // getOrCreateRepositoryID returns the id of one repository's registry row,

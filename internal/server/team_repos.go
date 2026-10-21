@@ -201,10 +201,13 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "teams/github-repos", err)
 		return
 	}
+	// A refusal names the repository by the id the caller sent, never by its
+	// name: an added repository may be in none of the caller's teams' tracked
+	// sets, and the registry read 404s such a row to anyone but an org admin.
 	for j, bad := range s.unreachableRepos(r.Context(), orgID, userID, host, added) {
 		if bad {
 			refusals.Invalid(repositoryIDField(addedAt[j]),
-				added[j].Slug()+" is not reachable by this organization's GitHub credentials — install the GitHub App on it or grant the PAT access first")
+				"repository "+added[j].ID+" is not reachable by this organization's GitHub credentials — install the GitHub App on it or grant the PAT access first")
 		}
 	}
 	if refusals.Flush(w, http.StatusUnprocessableEntity) {
