@@ -833,6 +833,10 @@ func (s *Server) handleRepoRegister(w http.ResponseWriter, r *http.Request) {
 		return e
 	}); err != nil {
 		if errors.Is(err, db.ErrRepoSlugOccupied) {
+			// TODO(TFAC-1161): a name GitHub gave to another repository stays
+			// held here for good when the holder was deleted, or renamed where
+			// TF never sees it; the holder's id has to be resolved and the row
+			// renamed or retired before this registration can succeed.
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 				Reason:  httpx.ReasonConflict,
 				Message: entry.Slug() + " is registered to a different GitHub repository; it frees up once TF observes that repository's rename",
