@@ -427,7 +427,10 @@ func (r resolvedEntity) matches(provider, target string) bool {
 // rename moves by entity_id from then on. A branch, which has no entity, and
 // an artifact whose entity does not resolve are written unlinked, and the
 // failure is logged. Best-effort, like the rest of the funnel: the write
-// happened, and its row is recorded either way. The link is overwritten, never
+// happened, and its row is recorded either way. A failure another attempt can
+// get past is retried like the write after it (withRecordRetry); resolving
+// only finds, creates or renames toward what the provider answered, so a
+// second attempt lands on what a first one wrote. The link is overwritten, never
 // taken from the caller, like the scope stamped beside it: the side that holds
 // the stores decides it, so a relayed row cannot name an entity of its choosing.
 func resolveArtifactEntity(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, container domain.EntityContainer) resolvedEntity {
@@ -437,7 +440,12 @@ func resolveArtifactEntity(ctx context.Context, stores db.Stores, info Conversat
 		c.scope, c.externalID = scope, externalID
 	}
 	out := resolvedEntity{attempted: true, provider: a.Provider, target: a.Target}
-	entity, err := resolveEntityInfo(ctx, stores, info, c)
+	var entity *domain.Entity
+	err := withRecordRetry(ctx, func() error {
+		var e error
+		entity, e = resolveEntityInfo(ctx, stores, info, c)
+		return e
+	})
 	if err != nil {
 		out.err = err
 		agenthostLog.Warn("resolving the artifact's entity failed; recording the artifact unlinked",

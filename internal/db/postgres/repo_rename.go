@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -310,6 +311,8 @@ func repositoryHoldingSlug(ctx context.Context, q queryer, orgID, source string,
 // keys already spell the target slug, so the source_id rewrite after this
 // leaves them as they are, and a pull request with an entity under each name
 // still collides there and refuses the whole rename, this absorb included.
+// The branches recorded in it move too (moveAbsorbedBranches): their keys
+// carry the occupant's id, which the delete frees.
 //
 // A bare clone cached under the occupant's id (<StateRoot>/repos/<id>.git) is
 // left behind. The cache belongs to whichever process ran a checkout, often
@@ -337,6 +340,9 @@ func absorbBareRepository(ctx context.Context, q queryer, orgID string, occupant
 	`, renamedID, orgID, occupant.id); err != nil {
 		return fmt.Errorf("re-point entities of the bare %s row: %w", to, err)
 	}
+	if err := moveAbsorbedBranches(ctx, q, orgID, occupant.id, renamedID); err != nil {
+		return fmt.Errorf("re-key branches of the bare %s row: %w", to, err)
+	}
 	if _, err := q.ExecContext(ctx, `
 		DELETE FROM repositories WHERE id = $1 AND org_id = $2
 	`, occupant.id, orgID); err != nil {
@@ -344,6 +350,77 @@ func absorbBareRepository(ctx context.Context, q queryer, orgID string, occupant
 			return fmt.Errorf("%w: a worktree still references the bare %s row: %v", db.ErrRepoSlugOccupied, to, err)
 		}
 		return fmt.Errorf("delete the bare %s row: %w", to, err)
+	}
+	return nil
+}
+
+// moveAbsorbedBranches re-keys the branch artifacts recorded in the registry
+// row fromID onto toID, the row it is absorbed into. A branch is keyed on its
+// repository's row id and its ref (domain.BranchDedupKey), so a key naming
+// fromID would name a deleted row: no rename would find it again, and the next
+// push of the same ref, keyed on toID, would record the branch a second time.
+// A ref both rows recorded is one branch under two keys, and the older
+// artifact (created_at, then id) keeps it while the newer is deleted. No table
+// references an artifact row.
+func moveAbsorbedBranches(ctx context.Context, q queryer, orgID, fromID, toID string) error {
+	from := domain.BranchDedupKeyPrefix(fromID)
+	rows, err := q.QueryContext(ctx, `
+		SELECT id, scope, dedup_key, created_at FROM artifacts
+		 WHERE org_id = $1 AND provider = $2 AND kind = $3
+		   AND left(dedup_key, length($4::text)) = $4::text
+		 ORDER BY id
+	`, orgID, domain.ArtifactProviderGit, domain.ArtifactKindBranch, from)
+	if err != nil {
+		return err
+	}
+	type branch struct {
+		id, scope, key string
+		created        time.Time
+	}
+	var found []branch
+	for rows.Next() {
+		var b branch
+		if err := rows.Scan(&b.id, &b.scope, &b.key, &b.created); err != nil {
+			rows.Close()
+			return err
+		}
+		found = append(found, b)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, b := range found {
+		key := domain.BranchDedupKey(toID, strings.TrimPrefix(b.key, from))
+		if key == "" {
+			continue
+		}
+		var heldID string
+		var heldCreated time.Time
+		err := q.QueryRowContext(ctx, `
+			SELECT id, created_at FROM artifacts WHERE org_id = $1 AND scope = $2 AND dedup_key = $3
+		`, orgID, b.scope, key).Scan(&heldID, &heldCreated)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+		case err != nil:
+			return err
+		case heldCreated.Before(b.created) || (heldCreated.Equal(b.created) && heldID < b.id):
+			if _, err := q.ExecContext(ctx, `DELETE FROM artifacts WHERE org_id = $1 AND id = $2`, orgID, b.id); err != nil {
+				return fmt.Errorf("delete branch artifact %s, recorded again under %s: %w", b.id, key, err)
+			}
+			continue
+		default:
+			if _, err := q.ExecContext(ctx, `DELETE FROM artifacts WHERE org_id = $1 AND id = $2`, orgID, heldID); err != nil {
+				return fmt.Errorf("delete branch artifact %s, recorded first under %s: %w", heldID, b.key, err)
+			}
+		}
+		if _, err := q.ExecContext(ctx, `
+			UPDATE artifacts SET dedup_key = $1, updated_at = now() WHERE org_id = $2 AND id = $3
+		`, key, orgID, b.id); err != nil {
+			return fmt.Errorf("re-key branch artifact %s onto %s: %w", b.id, key, err)
+		}
 	}
 	return nil
 }

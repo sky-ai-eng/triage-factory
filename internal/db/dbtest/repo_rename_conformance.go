@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -796,7 +797,8 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		// keyed by the current name. Creating that entity minted a bare
 		// registry row under the new name. GitHub has now reported that the
 		// name belongs to the renamed row's id, so the rename folds the bare
-		// row in rather than refusing over it.
+		// row in rather than refusing over it, with the branches recorded in
+		// it.
 		s, orgID, seed := mk(t)
 		fx := seedRenameFixture(t, s, orgID, seed, "absorb")
 		renamed, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef(renameOldSlug))
@@ -816,6 +818,25 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if bare.ID == renamed.ID || bare.ExternalID != "" || early.RepositoryID != bare.ID {
 			t.Fatalf("premise: bare row = %+v, entity references %q; want a second, id-less row the entity references", bare, early.RepositoryID)
 		}
+		// Branches pushed while the bare row answered for the name are keyed
+		// on its id: one of a ref only it recorded, and one the renamed row
+		// recorded too.
+		bareBranch := func(ref string) string {
+			t.Helper()
+			branch, ok := domain.NewBranchArtifact(renameNewSlug, ref, "abc123", true)
+			if !ok {
+				t.Fatalf("NewBranchArtifact refused %s", ref)
+			}
+			branch.TeamID, branch.Scope, branch.DedupKey = seed.TeamID, TestGitHubHost, domain.BranchDedupKey(bare.ID, ref)
+			stored, err := s.Artifacts.UpsertSystem(ctx, orgID, branch)
+			if err != nil {
+				t.Fatalf("seed branch %s on the bare row: %v", ref, err)
+			}
+			return stored.ID
+		}
+		const earlyRef = "refs/heads/early"
+		earlyBranch := bareBranch(earlyRef)
+		twiceBranch := bareBranch(fx.branchRef)
 
 		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
 			Host:  TestGitHubHost,
@@ -850,6 +871,25 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 		if want := "https://github.com/" + renameNewSlug + "/pull/25"; got.URL != want {
 			t.Errorf("early entity url = %q, want %q unchanged", got.URL, want)
+		}
+		// Its branches are re-keyed onto the renamed row, and a ref both rows
+		// recorded is one row.
+		assertArtifactAt(t, s, orgID, earlyBranch, renameNewSlug, domain.BranchDedupKey(renamed.ID, earlyRef))
+		branches, _, err := s.Artifacts.ListByOrgSystem(ctx, orgID, db.ArtifactListOpts{})
+		if err != nil {
+			t.Fatalf("ListByOrgSystem: %v", err)
+		}
+		var twice []string
+		for _, a := range branches {
+			if strings.HasPrefix(a.DedupKey, domain.BranchDedupKeyPrefix(bare.ID)) {
+				t.Errorf("branch artifact %s still keyed on the deleted bare row: %q", a.ID, a.DedupKey)
+			}
+			if a.DedupKey == domain.BranchDedupKey(renamed.ID, fx.branchRef) {
+				twice = append(twice, a.ID)
+			}
+		}
+		if len(twice) != 1 || (twice[0] != fx.branchArtifactID && twice[0] != twiceBranch) {
+			t.Errorf("rows for %s = %v, want one: %s or %s", fx.branchRef, twice, fx.branchArtifactID, twiceBranch)
 		}
 		// The renamed repository's own entity moved as in any rename.
 		pr, err := s.Entities.GetBySourceSystem(ctx, orgID, "github", "https://github.com", renameNewSlug+"#18")

@@ -583,7 +583,9 @@ type RepositoryStore interface {
 	// request read off GraphQL, which keys by the current name). The provider
 	// has just reported that the name belongs to the renamed row's id, so the
 	// bare row is the same repository: its entities are re-pointed to the
-	// renamed row and it is deleted, in the rename's transaction.
+	// renamed row, the branches recorded in it are re-keyed onto the renamed
+	// row's id (domain.BranchDedupKey; a branch both rows recorded keeps the
+	// older artifact), and it is deleted, in the rename's transaction.
 	//
 	// Two states are refused instead, because writing through either would
 	// destroy a row rather than move one: ErrRepoSlugOccupied when anything

@@ -269,6 +269,72 @@ func TestRecordExternalWrite_PermanentFailureIsNotRetried(t *testing.T) {
 	}
 }
 
+// flakyEntities is an EntityStore whose identity lookups go through faults:
+// GetByExternalIDSystem is the first read an artifact carrying a provider id
+// resolves its entity through.
+type flakyEntities struct {
+	db.EntityStore
+	f *faults
+}
+
+func (s flakyEntities) GetByExternalIDSystem(ctx context.Context, orgID, source, scope, externalID string) (*domain.Entity, error) {
+	if skip, err := s.f.next(); skip {
+		return nil, err
+	}
+	return s.EntityStore.GetByExternalIDSystem(ctx, orgID, source, scope, externalID)
+}
+
+// TestRecordExternalWrite_TransientEntityFailureStillLinks: resolving the
+// entity an artifact is about is retried like the write after it, so a lost
+// connection on the first lookups still records the artifact linked to its
+// pull request's entity.
+func TestRecordExternalWrite_TransientEntityFailureStillLinks(t *testing.T) {
+	forEachTrigger(t, func(t *testing.T, eventTriggered bool) {
+		fastRecordRetry(t)
+		base, info := newCaptureStores(t, eventTriggered)
+		lookups := &faults{fail: 2}
+		stores := base
+		stores.Entities = flakyEntities{EntityStore: base.Entities, f: lookups}
+
+		pr := domain.NewPullRequestArtifact("acme/widgets", 7, "PR_kw7", "feat", "main", "https://github.com/acme/widgets/pull/7", "t", "b", true)
+		RecordExternalWrite(context.Background(), stores, info, &pr, nil)
+
+		arts := listConversationArtifacts(t, base, info.ConversationID)
+		entity, err := base.Entities.GetByExternalIDSystem(context.Background(), info.OrgID, domain.ArtifactProviderGitHub, testScope("github"), "PR_kw7")
+		if err != nil || entity == nil {
+			t.Fatalf("PR entity = %+v, %v; want one created for PR_kw7", entity, err)
+		}
+		if len(arts) != 1 || arts[0].EntityID != entity.ID {
+			t.Fatalf("artifacts = %+v; want one, linked to %s", arts, entity.ID)
+		}
+		if n := lookups.count(); n < 3 {
+			t.Errorf("entity lookups = %d; want the two failures retried", n)
+		}
+	})
+}
+
+// TestRecordExternalWrite_PermanentEntityFailureRecordsUnlinked: a resolve
+// failure another attempt cannot get past is tried once, and the artifact is
+// still recorded, unlinked.
+func TestRecordExternalWrite_PermanentEntityFailureRecordsUnlinked(t *testing.T) {
+	fastRecordRetry(t)
+	base, info := newCaptureStores(t, true)
+	lookups := &faults{fail: -1, err: errors.New("permission denied for table entities")}
+	stores := base
+	stores.Entities = flakyEntities{EntityStore: base.Entities, f: lookups}
+
+	pr := domain.NewPullRequestArtifact("acme/widgets", 7, "PR_kw7", "feat", "main", "https://github.com/acme/widgets/pull/7", "t", "b", true)
+	RecordExternalWrite(context.Background(), stores, info, &pr, nil)
+
+	if n := lookups.count(); n != 1 {
+		t.Errorf("entity lookups = %d; want 1: the failure is not retryable", n)
+	}
+	arts := listConversationArtifacts(t, base, info.ConversationID)
+	if len(arts) != 1 || arts[0].EntityID != "" {
+		t.Fatalf("artifacts = %+v; want one, unlinked", arts)
+	}
+}
+
 // TestRecordExternalWrite_OutlivesItsCaller: the funnel writes on a context of
 // its own, so a caller whose context is already cancelled — a run that ended
 // while the write was on its way — does not cost the row.
