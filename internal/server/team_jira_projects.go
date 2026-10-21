@@ -18,11 +18,10 @@ import (
 //
 // A replace-set write, exactly like the tracked repos and the GitHub-team
 // mappings: the body IS the desired set, and a project absent from it is
-// untracked. It used to be a key inside the team-settings save, which made a
-// child collection a field — so a settings save that touched the model also
-// rewrote the routing rules, and the two had one shared failure mode and one
-// shared poller restart. Its siblings already had their own routes; this is
-// the third.
+// untracked. It is a route of its own rather than a field of the team-settings
+// save, as its siblings are, so a settings save that touches the model does not
+// rewrite the routing rules, and the two share no failure mode and no poller
+// restart.
 //
 // Team admin, non-archived team — the same gate as the settings PATCH, because
 // this is the same blast radius: the rules decide which tickets become tasks.
