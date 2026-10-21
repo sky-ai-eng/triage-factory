@@ -40,8 +40,12 @@ func (f *fakeCommentReader) PRCommentsBefore(_ context.Context, _ string, before
 }
 
 func ghComment(id int64, login, createdAt string) ghclient.PRComment {
-	return ghclient.PRComment{ID: id, Author: login, CreatedAt: createdAt}
+	return ghclient.PRComment{ID: id, Author: login, AuthorID: testGitHubUserIDs[login], CreatedAt: createdAt}
 }
+
+// testGitHubUserIDs are the GitHub ids of the accounts the comment fixtures
+// are written by.
+var testGitHubUserIDs = map[string]string{"alice": "1001", "bob": "1002", "carol": "1003", "dependabot[bot]": "49699333"}
 
 // prevWithCommentMarker is a stored snapshot whose newest comment is id 100,
 // made at 09:00, among count comments.
@@ -108,7 +112,7 @@ func TestDiffPRSnapshots_Commented(t *testing.T) {
 			prev := basePRSnapshot()
 			curr := basePRSnapshot()
 			curr.IsDraft, curr.Labels = true, []string{"needs-reply"}
-			evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testUser, nil, nil, tc.comments)
+			evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testSelf, nil, nil, tc.comments)
 			evt := findEvent(evts, domain.EventGitHubPRCommented)
 			if tc.wantID == 0 {
 				if evt != nil {
@@ -150,7 +154,7 @@ func TestDiffPRSnapshots_Commented(t *testing.T) {
 // comments it carries.
 func TestDiffPRSnapshots_CommentedNotOnFirstDiscovery(t *testing.T) {
 	comments := []NewComment{{ID: "1", Author: "alice", AuthorID: "alice", CreatedAt: "2026-10-01T09:00:00Z"}}
-	if evt := findEvent(DiffPRSnapshots(domain.PRSnapshot{}, basePRSnapshot(), testEntityID, testRepositoryID, testUser, nil, nil, comments), domain.EventGitHubPRCommented); evt != nil {
+	if evt := findEvent(DiffPRSnapshots(domain.PRSnapshot{}, basePRSnapshot(), testEntityID, testRepositoryID, testSelf, nil, nil, comments), domain.EventGitHubPRCommented); evt != nil {
 		t.Errorf("first discovery emitted commented: %s", evt.MetadataJSON)
 	}
 }
@@ -215,7 +219,7 @@ func TestGitHubNewComments_NewCommentsAtTheEnd(t *testing.T) {
 	if ids := commentIDs(got); !slices.Equal(ids, []string{"101", "102"}) {
 		t.Fatalf("new comments = %v, want [101 102]", ids)
 	}
-	if got[0].Author != "alice" || got[0].AuthorID != "alice" || got[0].CreatedAt != "2026-10-01T10:00:00Z" {
+	if got[0].Author != "alice" || got[0].AuthorID != "1001" || got[0].CreatedAt != "2026-10-01T10:00:00Z" {
 		t.Errorf("comment 101 = %+v, want alice's at 10:00", got[0])
 	}
 	if !slices.Equal(reader.asked, []string{""}) {
@@ -477,7 +481,7 @@ func TestRefreshGitHub_CommentedEndToEnd(t *testing.T) {
 			pub := &recordingPublisher{}
 			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 			client := ghclient.NewClient(srv.URL, "tok")
-			if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, "", nil, nil); err != nil {
+			if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, nil); err != nil {
 				t.Fatalf("RefreshGitHub: %v", err)
 			}
 
@@ -510,7 +514,7 @@ func TestRefreshGitHub_CommentedEndToEnd(t *testing.T) {
 			// The same pull request on the next poll: nothing moved, so
 			// nothing is read and nothing emits.
 			before := len(pub.nonSystemEvents())
-			if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, "", nil, nil); err != nil {
+			if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, nil); err != nil {
 				t.Fatalf("second RefreshGitHub: %v", err)
 			}
 			if reads != tc.wantReads {
@@ -626,7 +630,7 @@ func TestRefreshGitHub_RateLimitStopsTheReads(t *testing.T) {
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
-	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, "", nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub under a rate limit: %v", err)
 	}
 	if got := reads.Load(); got != 1 {
@@ -646,7 +650,7 @@ func TestRefreshGitHub_RateLimitStopsTheReads(t *testing.T) {
 	}
 
 	limited.Store(false)
-	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, "", nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub after the limit: %v", err)
 	}
 	got := findEvents(pub.nonSystemEvents(), domain.EventGitHubPRCommented)

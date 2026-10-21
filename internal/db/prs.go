@@ -42,20 +42,25 @@ type PRListFilter struct {
 // fault the list contract cares about most.
 var ErrUnknownPRState = errors.New("db: unknown pull-request state filter")
 
-// PRViewer is the personal arm's identity pair. Two ids because "mine" is a
-// union of two different things: pull requests my GitHub login authored, and
-// pull requests a run I commissioned opened under the bot's login. A struct
-// rather than two string parameters because they are same-typed neighbours a
-// call site could silently swap, and swapping them yields an empty list rather
-// than an error.
+// PRViewer is the personal arm's identity. Two legs because "mine" is a union
+// of two different things: pull requests my GitHub account authored, and pull
+// requests a run I commissioned opened under the bot's login. A struct rather
+// than string parameters because they are same-typed neighbours a call site
+// could silently swap, and swapping them yields an empty list rather than an
+// error.
 //
-// Either may be empty and the arm still answers: an unbound GitHub identity
-// leaves Login empty (the personal list is then only what I commissioned), and
-// the leg it names is simply absent from the predicate.
+// Any may be empty and the arm still answers: an unbound GitHub identity
+// leaves Login and GitHubUserID empty (the personal list is then only what I
+// commissioned), and the leg they name is simply absent from the predicate.
 type PRViewer struct {
 	// Login is the caller's GitHub login on the org's host — the value
 	// snapshot_json ->> 'author' carries.
 	Login string
+	// GitHubUserID is GitHub's id for the caller's account, "" when their
+	// binding recorded none — the value snapshot_json ->> 'author_id'
+	// carries. The author leg matches it when both sides have one, and
+	// Login otherwise.
+	GitHubUserID string
 	// UserID is the caller's TF user id — the value
 	// entities.commissioned_by_user_id carries.
 	UserID string

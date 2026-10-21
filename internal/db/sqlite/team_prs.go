@@ -2,6 +2,8 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -33,22 +35,30 @@ func (s *teamPRStore) TeamPRs(ctx context.Context, orgID, teamID, githubBaseURL 
 		return nil, 0, err
 	}
 
-	// The member leg is a correlated IN rather than a resolved login list:
-	// one statement, and it reads as the join it is. Host resolution matches
-	// the Postgres twin (EffectiveGitHubHost); an unset github_base_url is no
-	// host, so no member's login matches.
+	// The member leg is correlated INs rather than a resolved account list:
+	// one statement, and it reads as the join it is. A member is matched as
+	// sqliteGitHubAuthoredBy matches an account: by GitHub's id when both the
+	// snapshot and the binding record one, by login otherwise. Host
+	// resolution matches the Postgres twin (EffectiveGitHubHost); an unset
+	// github_base_url is no host, so no member matches.
+	const members = `
+		          FROM user_github_identities gh
+		          JOIN memberships m ON m.user_id = gh.user_id
+		          WHERE m.team_id = ? AND gh.github_base_url = ? AND gh.login != ''`
 	where := `
 		WHERE e.source = 'github' AND ` + sqlitePRStateSnapshotGuard + `
 		  AND (
 		      e.owning_team_id = ?
+		      OR json_extract(e.snapshot_json, '$.author_id') IN (
+		          SELECT gh.github_user_id` + members + ` AND gh.github_user_id IS NOT NULL
+		      )
 		      OR json_extract(e.snapshot_json, '$.author') IN (
-		          SELECT gh.login
-		          FROM user_github_identities gh
-		          JOIN memberships m ON m.user_id = gh.user_id
-		          WHERE m.team_id = ? AND gh.github_base_url = ? AND gh.login != ''
+		          SELECT gh.login` + members + `
+		            AND (gh.github_user_id IS NULL OR json_extract(e.snapshot_json, '$.author_id') IS NULL)
 		      )
 		  )` + stateClause
-	args := []any{teamID, teamID, db.EffectiveGitHubHost(githubBaseURL)}
+	host := db.EffectiveGitHubHost(githubBaseURL)
+	args := []any{teamID, teamID, host, teamID, host}
 
 	var total int
 	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM entities e`+where, args...).Scan(&total); err != nil {
@@ -72,4 +82,44 @@ func (s *teamPRStore) TeamPRs(ctx context.Context, orgID, teamID, githubBaseURL 
 		return nil, 0, err
 	}
 	return prs, total, nil
+}
+
+// sqliteGitHubAuthoredBy is the predicate "the pull request entity e was
+// authored by one of accounts", appending its parameters to args — the twin of
+// the Postgres pgGitHubAuthoredBy, with the same three arms: the author's
+// GitHub id, the login when the snapshot records no id, and the login of an
+// account whose binding recorded none. idx_entities_github_author_id and
+// idx_entities_github_author serve the arms.
+func sqliteGitHubAuthoredBy(args []any, accounts []domain.GitHubAccount) (string, []any) {
+	var arms []string
+	in := func(expr string, vals []string) {
+		if len(vals) == 0 {
+			return
+		}
+		ph := make([]string, len(vals))
+		for i, v := range vals {
+			ph[i] = "?"
+			args = append(args, v)
+		}
+		arms = append(arms, fmt.Sprintf(expr, strings.Join(ph, ", ")))
+	}
+	var ids, loginsWithID, loginsWithoutID []string
+	for _, a := range accounts {
+		switch {
+		case a.ID != "":
+			ids = append(ids, a.ID)
+			if a.Login != "" {
+				loginsWithID = append(loginsWithID, a.Login)
+			}
+		case a.Login != "":
+			loginsWithoutID = append(loginsWithoutID, a.Login)
+		}
+	}
+	in(`json_extract(e.snapshot_json, '$.author_id') IN (%s)`, ids)
+	in(`(json_extract(e.snapshot_json, '$.author_id') IS NULL AND json_extract(e.snapshot_json, '$.author') IN (%s))`, loginsWithID)
+	in(`json_extract(e.snapshot_json, '$.author') IN (%s)`, loginsWithoutID)
+	if len(arms) == 0 {
+		return "0", args
+	}
+	return "(" + strings.Join(arms, " OR ") + ")", args
 }

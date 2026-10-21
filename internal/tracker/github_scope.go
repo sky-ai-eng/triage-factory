@@ -127,6 +127,7 @@ func (t *Tracker) emitGitHubUnreachable(ctx context.Context, e domain.Entity, re
 		EntityID:  &entityID,
 		MetadataJSON: mustJSON(events.GitHubPRUnreachableMetadata{
 			Author:       snap.Author,
+			AuthorID:     snap.AuthorID,
 			Repo:         snap.Repo,
 			RepositoryID: e.RepositoryID,
 			PRNumber:     snap.Number,

@@ -102,7 +102,7 @@ func TestRefreshGitHub_SeedCommitsItsReviewBackfill(t *testing.T) {
 	pub := &recordingPreEnqueuedPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", newSeedClient(t), "", []string{"octo/repo"}, knownLogins{"bob": true, "carol": true}); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", newSeedClient(t), domain.GitHubAccount{}, []string{"octo/repo"}, knownLogins{"bob": true, "carol": true}); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 
@@ -166,7 +166,7 @@ func TestRefreshGitHub_SeedCASMissCommitsNothing(t *testing.T) {
 	queue := &failingBatchQueue{EventQueueStore: stores.EventQueue}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, queue, org)
 
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", newSeedClient(t), "", []string{"octo/repo"}, knownLogins{"bob": true, "carol": true}); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", newSeedClient(t), domain.GitHubAccount{}, []string{"octo/repo"}, knownLogins{"bob": true, "carol": true}); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 
@@ -188,8 +188,8 @@ func TestRefreshGitHub_SeedCASMissCommitsNothing(t *testing.T) {
 // knownLogins is a ReviewerResolver that knows the listed logins and no teams.
 type knownLogins map[string]bool
 
-func (k knownLogins) KnownUser(login string) bool { return k[login] }
-func (k knownLogins) KnownTeam(_, _ string) bool  { return false }
+func (k knownLogins) KnownUser(_, login string) bool { return k[login] }
+func (k knownLogins) KnownTeam(_, _, _ string) bool  { return false }
 
 // newSeedClient points a GitHub client at seedBackfillServer.
 func newSeedClient(t *testing.T, reviewers ...string) *ghclient.Client {
@@ -218,7 +218,7 @@ func TestRefreshGitHub_SeedBackfillsOnlyTheKnownReviewers(t *testing.T) {
 	client := newSeedClient(t, "outsider", "bob", "dependabot", "carol", "dave", "nobody")
 	known := knownLogins{"bob": true, "carol": true, "dave": true}
 
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", []string{"octo/repo"}, known); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, []string{"octo/repo"}, known); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 
@@ -241,7 +241,7 @@ func TestRefreshGitHub_SeedBackfillsOnlyTheKnownReviewers(t *testing.T) {
 		}
 		got = append(got, key)
 	}
-	want := []string{reviewerDedupKey("bob"), reviewerDedupKey("carol"), reviewerDedupKey("dave")}
+	want := []string{reviewerDedupKey(handleReviewer("bob")), reviewerDedupKey(handleReviewer("carol")), reviewerDedupKey(handleReviewer("dave"))}
 	sort.Strings(want)
 	if len(got) != len(want) {
 		t.Fatalf("backfilled %d events (%v), want %d (%v)", len(got), got, len(want), want)

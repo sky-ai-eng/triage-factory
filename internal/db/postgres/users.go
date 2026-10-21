@@ -38,12 +38,20 @@ func (s *usersStore) GetGitHubLogin(ctx context.Context, userID, githubBaseURL s
 }
 
 func (s *usersStore) GetGitHubIdentity(ctx context.Context, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error) {
+	return getGitHubIdentity(ctx, s.q, userID, githubBaseURL)
+}
+
+func (s *usersStore) GetGitHubIdentitySystem(ctx context.Context, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error) {
+	return getGitHubIdentity(ctx, s.admin, userID, githubBaseURL)
+}
+
+func getGitHubIdentity(ctx context.Context, q queryer, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error) {
 	var (
 		id       domain.UserGitHubIdentity
 		ghUserID sql.NullString
 		verified sql.NullTime
 	)
-	err := s.q.QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`SELECT login, github_user_id, source, verified_at
 		   FROM user_github_identities
 		  WHERE user_id = $1 AND github_base_url = $2`,
@@ -129,6 +137,26 @@ func (s *usersStore) UserIDsForGitHubLoginSystem(ctx context.Context, githubBase
 	`, db.NormalizeGitHubHost(githubBaseURL), login)
 	if err != nil {
 		return nil, fmt.Errorf("read user_github_identities by login: %w", err)
+	}
+	return scanIDs(rows, "user_github_identities.user_id")
+}
+
+func (s *usersStore) UserIDsForGitHubUserIDSystem(ctx context.Context, githubBaseURL, githubUserID, login string) ([]string, error) {
+	if githubUserID == "" {
+		return []string{}, nil
+	}
+	// user_github_identities_user_id_lookup_idx serves the id arm and
+	// user_github_identities_login_lookup_idx the login arm.
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT user_id::text
+		FROM user_github_identities
+		WHERE github_base_url = $1
+		  AND (github_user_id = $2
+		       OR (github_user_id IS NULL AND $3 <> '' AND lower(login) = lower($3)))
+		ORDER BY user_id ASC
+	`, db.NormalizeGitHubHost(githubBaseURL), githubUserID, login)
+	if err != nil {
+		return nil, fmt.Errorf("read user_github_identities by github user id: %w", err)
 	}
 	return scanIDs(rows, "user_github_identities.user_id")
 }

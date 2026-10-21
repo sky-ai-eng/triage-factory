@@ -36,6 +36,10 @@ func (s *usersStore) GetGitHubLogin(ctx context.Context, userID, githubBaseURL s
 	return login, nil
 }
 
+func (s *usersStore) GetGitHubIdentitySystem(ctx context.Context, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error) {
+	return s.GetGitHubIdentity(ctx, userID, githubBaseURL)
+}
+
 func (s *usersStore) GetGitHubIdentity(ctx context.Context, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error) {
 	var (
 		id       domain.UserGitHubIdentity
@@ -239,6 +243,33 @@ func (s *usersStore) MarkDashboardBackfilledSystem(ctx context.Context, userID, 
 		return fmt.Errorf("mark user_github_identities.dashboard_backfilled_at: %w", err)
 	}
 	return nil
+}
+
+func (s *usersStore) UserIDsForGitHubUserIDSystem(ctx context.Context, githubBaseURL, githubUserID, login string) ([]string, error) {
+	if githubUserID == "" {
+		return []string{}, nil
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT user_id
+		FROM user_github_identities
+		WHERE github_base_url = ?
+		  AND (github_user_id = ?
+		       OR (github_user_id IS NULL AND ? <> '' AND lower(login) = lower(?)))
+		ORDER BY user_id ASC
+	`, db.NormalizeGitHubHost(githubBaseURL), githubUserID, login, login)
+	if err != nil {
+		return nil, fmt.Errorf("read user_github_identities by github user id: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan user_github_identities.user_id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 func (s *usersStore) UserIDsForGitHubLoginSystem(ctx context.Context, githubBaseURL, login string) ([]string, error) {

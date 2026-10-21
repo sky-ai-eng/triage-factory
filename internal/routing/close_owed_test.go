@@ -91,7 +91,7 @@ func pollGitHub(t *testing.T, database *sql.DB, gh *fakeGitHub) {
 	t.Helper()
 	st := sqlitestore.New(database)
 	tr := tracker.New(database, noopPublisher{}, st.Tasks, st.Entities, st.Repos, st.JiraProjects, st.Artifacts, st.EventQueue, runmode.LocalDefaultOrgID)
-	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", ghclient.NewClient(gh.srv.URL, "tok"), "", nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", ghclient.NewClient(gh.srv.URL, "tok"), domain.GitHubAccount{}, nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 }
@@ -544,7 +544,7 @@ func TestCloseOwed_SourcePause_ClearedSnapshotIsNotTerminal(t *testing.T) {
 	t.Cleanup(srv.Close)
 	st := sqlitestore.New(database)
 	tr := tracker.New(database, noopPublisher{}, st.Tasks, st.Entities, st.Repos, st.JiraProjects, st.Artifacts, st.EventQueue, runmode.LocalDefaultOrgID)
-	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", ghclient.NewClient(srv.URL, "tok"), "", nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 

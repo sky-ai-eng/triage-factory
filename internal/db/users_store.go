@@ -205,6 +205,14 @@ type UsersStore interface {
 	// SQLite collapses the two variants to one connection.
 	GetGitHubLoginSystem(ctx context.Context, userID, githubBaseURL string) (string, error)
 
+	// GetGitHubIdentitySystem mirrors GetGitHubIdentity on the admin pool in
+	// Postgres. The consumer is the local-mode poller, which reads the local
+	// user's login and GitHub account id together: the login to search and
+	// list teams by, and the id to tell the user's own pull requests by. It
+	// runs with no JWT-claims context. SQLite collapses the two variants to
+	// one connection.
+	GetGitHubIdentitySystem(ctx context.Context, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error)
+
 	// UserIDsForGitHubLoginSystem returns every TF user bound to login
 	// on githubBaseURL in user_github_identities — the reverse of
 	// GetGitHubLogin. Host-scoped, org-agnostic (identity is keyed on
@@ -237,6 +245,22 @@ type UsersStore interface {
 	// RLS story, and none is needed today. SQLite collapses to one
 	// connection.
 	UserIDsForGitHubLoginSystem(ctx context.Context, githubBaseURL, login string) ([]string, error)
+
+	// UserIDsForGitHubUserIDSystem returns every TF user bound on
+	// githubBaseURL to the GitHub account githubUserID (GitHub's numeric id,
+	// in text form): the rows whose github_user_id is githubUserID. A row
+	// that recorded no id, an identity captured before ids were, matches
+	// instead when its login equals login, case-insensitively; login "" skips
+	// that. It is the lookup for an event that names its actor by id (a
+	// pull request's author, a reviewer, a requested user), so a rename
+	// leaves the answer alone and a login GitHub has handed to another
+	// account does not resolve to the first account's user. An event with no
+	// id — one recorded before ids were, or a mention, which names a login
+	// only — goes through UserIDsForGitHubLoginSystem. githubUserID "" gives
+	// an empty slice. Host normalization, the set-valued answer and the
+	// admin-pool / claims-free stance are UserIDsForGitHubLoginSystem's, for
+	// the same reasons. user_github_identities_user_id_lookup_idx serves it.
+	UserIDsForGitHubUserIDSystem(ctx context.Context, githubBaseURL, githubUserID, login string) ([]string, error)
 
 	// DashboardBackfilledAtSystem returns when the one-shot dashboard-history
 	// backfill last completed for this (user, host) GitHub identity, or nil

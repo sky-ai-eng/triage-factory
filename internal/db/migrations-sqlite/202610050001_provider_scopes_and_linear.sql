@@ -10,9 +10,11 @@
 -- artifacts are keyed on ids rather than their repository's name, every
 -- artifact references the entity it is about and Jira artifacts keyed on an
 -- issue key are keyed on the issue's id, Linear
--- becomes a tracked source, and five smaller changes ride along: the org GitHub App's unusable state, the claim's source
+-- becomes a tracked source, and six smaller changes ride along: the org GitHub App's unusable state, the claim's source
 -- manifest, the retirement of the 'completed' conversation status, node ids on
--- artifacts and audit-ledger rows, and the table of rate-limit readings.
+-- artifacts and audit-ledger rows, the table of rate-limit readings, and the
+-- indexes that look a GitHub account up by GitHub's id (an identity binding,
+-- and a pull request's author).
 --
 -- NO TRANSACTION because rebuilding a table other tables reference needs
 -- foreign keys off, and PRAGMA foreign_keys is a no-op inside a transaction:
@@ -109,6 +111,14 @@ CREATE TABLE rate_limit_readings (
     observed_at  DATETIME NOT NULL,
     PRIMARY KEY (org_id, upstream, credential, bucket)
 );
+
+-- The reverse (host, GitHub account id) -> user lookup the routing
+-- subscribers run for an event that names its actor by GitHub's id rather
+-- than by login (UserIDsForGitHubUserIDSystem). The id-arm twin of
+-- user_github_identities_login_lookup_idx.
+CREATE INDEX user_github_identities_user_id_lookup_idx
+    ON user_github_identities (github_base_url, github_user_id)
+    WHERE github_user_id IS NOT NULL;
 
 -- ===========================================================================
 -- 2. Linear
@@ -1329,6 +1339,13 @@ CREATE INDEX        idx_entities_closed_at       ON entities(closed_at) WHERE cl
 CREATE UNIQUE INDEX entities_id_org_unique       ON entities (id, org_id);
 CREATE INDEX        idx_entities_github_author
     ON entities (json_extract(snapshot_json, '$.author'))
+    WHERE source = 'github' AND snapshot_json IS NOT NULL AND snapshot_json != ''
+      AND json_valid(snapshot_json);
+-- The author's GitHub account id, which a rename leaves alone: the dashboard
+-- and team pull-request lists match an author by it when the snapshot and the
+-- caller's binding both record one.
+CREATE INDEX        idx_entities_github_author_id
+    ON entities (json_extract(snapshot_json, '$.author_id'))
     WHERE source = 'github' AND snapshot_json IS NOT NULL AND snapshot_json != ''
       AND json_valid(snapshot_json);
 CREATE INDEX        idx_entities_commissioned_by

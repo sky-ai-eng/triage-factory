@@ -76,7 +76,7 @@ func TestPRCommentsBefore(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
-		if !strings.Contains(req.Query, "author { __typename login }") || !strings.Contains(req.Query, "fullDatabaseId") ||
+		if !strings.Contains(req.Query, "author { __typename login ... on User { databaseId } ... on Bot { databaseId } }") || !strings.Contains(req.Query, "fullDatabaseId") ||
 			!strings.Contains(req.Query, "body") {
 			t.Errorf("query does not read the author's type, the 64-bit id or the body:\n%s", req.Query)
 		}
@@ -90,7 +90,7 @@ func TestPRCommentsBefore(t *testing.T) {
 			  "pageInfo": {"hasPreviousPage": true, "startCursor": "CUR_2"},
 			  "nodes": [
 			    {"fullDatabaseId": "3300000002", "createdAt": "2026-10-02T10:00:00Z", "author": {"__typename": "Bot", "login": "dependabot"}},
-			    {"fullDatabaseId": "3300000003", "createdAt": "2026-10-02T11:00:00Z", "author": {"__typename": "User", "login": "alice"},
+			    {"fullDatabaseId": "3300000003", "createdAt": "2026-10-02T11:00:00Z", "author": {"__typename": "User", "login": "alice", "databaseId": 583231},
 			     "body": "cc @Bob and @acme/Backend, not ` + "`@carol`" + `"}
 			  ]}}}}`))
 			return
@@ -114,7 +114,7 @@ func TestPRCommentsBefore(t *testing.T) {
 	if got, want := last.Comments[0], (PRComment{ID: 3300000002, Author: "dependabot[bot]", CreatedAt: "2026-10-02T10:00:00Z", Mentions: []string{}}); !reflect.DeepEqual(got, want) {
 		t.Errorf("bot comment = %+v, want %+v", got, want)
 	}
-	want := PRComment{ID: 3300000003, Author: "alice", CreatedAt: "2026-10-02T11:00:00Z", Mentions: []string{"bob", "acme/backend"}}
+	want := PRComment{ID: 3300000003, Author: "alice", AuthorID: "583231", CreatedAt: "2026-10-02T11:00:00Z", Mentions: []string{"bob", "acme/backend"}}
 	if got := last.Comments[1]; !reflect.DeepEqual(got, want) {
 		t.Errorf("alice's comment = %+v, want %+v", got, want)
 	}

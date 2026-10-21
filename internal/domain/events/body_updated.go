@@ -7,6 +7,7 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // not the editor: snapshot polling does not establish who made the edit.
 type GitHubPRBodyUpdatedMetadata struct {
 	Author           string   `json:"author"`
+	AuthorID         string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Repo             string   `json:"repo"`
 	RepositoryID     string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber         int      `json:"pr_number"`

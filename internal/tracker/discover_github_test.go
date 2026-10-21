@@ -98,7 +98,7 @@ func TestRefreshGitHub_RESTDiscovery_SeedsEntityAndConditionalSkips(t *testing.T
 
 	// Cycle 1: REST 200 → the PR becomes an entity. username="" exercises
 	// the App-parity path (no user-perspective search, no dashboard backfill).
-	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", client, "", []string{"octo/repo"}, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", client, domain.GitHubAccount{}, []string{"octo/repo"}, nil); err != nil {
 		t.Fatalf("RefreshGitHub cycle 1: %v", err)
 	}
 
@@ -126,7 +126,7 @@ func TestRefreshGitHub_RESTDiscovery_SeedsEntityAndConditionalSkips(t *testing.T
 	}
 
 	// Cycle 2: REST replays If-None-Match → 304 → quiet repo, no new entity.
-	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", client, "", []string{"octo/repo"}, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", client, domain.GitHubAccount{}, []string{"octo/repo"}, nil); err != nil {
 		t.Fatalf("RefreshGitHub cycle 2: %v", err)
 	}
 	if got := atomic.LoadInt32(&conditionalHits); got != 1 {

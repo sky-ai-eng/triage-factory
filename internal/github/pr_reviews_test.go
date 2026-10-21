@@ -73,8 +73,10 @@ func TestPRBaseFields_ReadsSubmittedReviewsOnly(t *testing.T) {
 	if strings.Contains(prBaseFields, "PENDING") {
 		t.Error("prBaseFields reads pending reviews")
 	}
-	if strings.Contains(prBaseFields, " databaseId") {
-		t.Error("prBaseFields reads a review's 32-bit databaseId")
+	for _, sel := range []string{"nodes {\n\t\t\tdatabaseId", "nodes { databaseId", "id\n\t\t\tdatabaseId"} {
+		if strings.Contains(prBaseFields, sel) {
+			t.Errorf("prBaseFields reads a review's 32-bit databaseId (%q)", sel)
+		}
 	}
 }
 
@@ -93,8 +95,8 @@ func TestPRReviewsBefore(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
-		if !strings.Contains(req.Query, "author { __typename login }") {
-			t.Errorf("query reads an author without __typename:\n%s", req.Query)
+		if !strings.Contains(req.Query, "author { __typename login ... on User { databaseId } ... on Bot { databaseId } }") {
+			t.Errorf("query reads an author without __typename or its id:\n%s", req.Query)
 		}
 		if !strings.Contains(req.Query, "body\n") || !strings.Contains(req.Query, "nodes { fullDatabaseId path body }") {
 			t.Errorf("query does not read the review's and its comments' bodies:\n%s", req.Query)
@@ -109,7 +111,7 @@ func TestPRReviewsBefore(t *testing.T) {
 			  "pageInfo": {"hasPreviousPage": true, "startCursor": "CUR_2"},
 			  "nodes": [
 			    {"fullDatabaseId": "6000000002", "state": "COMMENTED", "submittedAt": "2026-10-02T10:00:00Z",
-			     "author": {"__typename": "Bot", "login": "copilot-pull-request-reviewer"},
+			     "author": {"__typename": "Bot", "login": "copilot-pull-request-reviewer", "databaseId": 175728472},
 			     "body": "Summary for @Alice",
 			     "comments": {"totalCount": 2, "nodes": [{"fullDatabaseId": "4300000001", "path": "a.go"}, {"fullDatabaseId": "4300000002", "path": "b.go", "body": "> @bob said\n@acme/infra please look"}]}},
 			    {"fullDatabaseId": "6000000003", "state": "COMMENTED", "submittedAt": "2026-10-02T11:00:00Z",
@@ -138,7 +140,7 @@ func TestPRReviewsBefore(t *testing.T) {
 		t.Fatalf("last page = %+v", last)
 	}
 	bot := last.Reviews[0]
-	if bot.ID != 6000000002 || bot.State != "COMMENTED" || bot.Author != "copilot-pull-request-reviewer[bot]" ||
+	if bot.ID != 6000000002 || bot.State != "COMMENTED" || bot.Author != "copilot-pull-request-reviewer[bot]" || bot.AuthorID != "175728472" ||
 		bot.SubmittedAt != "2026-10-02T10:00:00Z" || bot.CommentCount != 2 || !slices.Equal(bot.Mentions, []string{"alice"}) {
 		t.Errorf("bot review = %+v", bot)
 	}

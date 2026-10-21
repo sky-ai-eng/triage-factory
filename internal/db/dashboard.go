@@ -18,11 +18,13 @@ import (
 //
 // Both methods are viewer-relative: every aggregation attributes counts
 // to "the user", so the caller's identity is a parameter and without it
-// the totals are meaningless. Stats takes the GitHub username alone
-// (a count of reviews given is a count about a login); PRs takes the
-// PRViewer pair, because the list it answers is a union over both the
-// login rows were authored under and the TF user runs were commissioned
-// by. The handler resolves both from the auth context before calling.
+// the totals are meaningless. Stats takes the caller's GitHub account alone
+// (a count of reviews given is a count about an account); PRs takes the
+// PRViewer, because the list it answers is a union over both the account
+// rows were authored by and the TF user runs were commissioned by. The
+// handler resolves both from the auth context before calling. An account is
+// matched by GitHub's id when both the snapshot and the caller's binding
+// record one, and by login otherwise (domain.GitHubAccount.Is).
 type DashboardStore interface {
 	// Stats returns aggregate PR counts (merged/closed/awaiting/
 	// draft) for the user since `since`, plus reviews-given /
@@ -31,7 +33,7 @@ type DashboardStore interface {
 	// to hardcode 30 days behind a `sinceDays` int nobody could see,
 	// so the panel's label and the query it described could drift.
 	// A zero `since` means unbounded.
-	Stats(ctx context.Context, orgID, username string, since time.Time) (*domain.DashboardStats, error)
+	Stats(ctx context.Context, orgID string, viewer domain.GitHubAccount, since time.Time) (*domain.DashboardStats, error)
 
 	// PRs returns one page of the caller's PR summary rows, newest
 	// last_polled_at first, plus the filtered total. Org-wide across
@@ -39,8 +41,8 @@ type DashboardStore interface {
 	// because a pull request of mine in a repo no team of mine tracks
 	// is still mine.
 	//
-	// "Mine" is a union of two legs, and viewer carries one id for each:
-	// authored by my GitHub login, or commissioned by me (a run I asked
+	// "Mine" is a union of two legs, and viewer carries the ids for each:
+	// authored by my GitHub account, or commissioned by me (a run I asked
 	// for opened it under the bot's login). Both are applied in SQL:
 	// this read used to scan every GitHub entity in the org and drop
 	// the non-matches in Go, which is a whole-table read per dashboard

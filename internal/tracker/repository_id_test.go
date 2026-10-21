@@ -65,7 +65,7 @@ func TestDiff_EventsCarryTheEntitysRepositoryID(t *testing.T) {
 	curr.Labels = []string{"needs-review"}
 	curr.CheckRuns = []domain.CheckRun{{ID: 1, Name: "build", Conclusion: "failure"}}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testUser, nil, nil, nil)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testSelf, nil, nil, nil)
 	if len(evts) < 2 {
 		t.Fatalf("got %d events, want a label and a CI event", len(evts))
 	}

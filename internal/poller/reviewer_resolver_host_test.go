@@ -40,8 +40,8 @@ func TestReviewerResolver_SettingsReadFailureResolvesNobody(t *testing.T) {
 	users := &hostRecordingUsers{}
 	m := &Manager{orgs: erroringOrgs{}, users: users}
 
-	resolver := m.reviewerResolver(context.Background(), "org-1", "", nil)
-	if resolver.KnownUser("octocat") {
+	resolver := m.reviewerResolver(context.Background(), "org-1", domain.GitHubAccount{}, nil)
+	if resolver.KnownUser("", "octocat") {
 		t.Error("KnownUser = true with no GitHub host to look the login up on")
 	}
 	if len(users.hosts) != 0 {

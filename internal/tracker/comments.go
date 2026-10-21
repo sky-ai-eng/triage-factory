@@ -27,7 +27,8 @@ const jiraCommentPageSize = 50
 // snapshot a diff compares against. AuthorID is the identity a commenter_in
 // allowlist holds: the Jira author's stable id (jira.StableUserID, the rule
 // assignee_in's values follow), the Linear user id, which is empty for a
-// comment an integration posted, or the GitHub login.
+// comment an integration posted, or GitHub's id for the author's account,
+// which is empty for an author GitHub returns without one.
 type NewComment struct {
 	ID        string
 	Author    string // display name; on GitHub, the login
@@ -60,6 +61,20 @@ func commentedBy(comments []NewComment) (newest NewComment, authorIDs []string, 
 		}
 	}
 	return newest, authorIDs, ok
+}
+
+// commentedByLogins is commentedBy's author list by login rather than id: the
+// login of each comment TF did not post, once per login in the order they
+// commented. GitHub's commented event carries both, the ids for matching and
+// the logins for display.
+func commentedByLogins(comments []NewComment) []string {
+	logins := []string{}
+	for _, c := range comments {
+		if !c.ByTF && c.Author != "" && !slices.Contains(logins, c.Author) {
+			logins = append(logins, c.Author)
+		}
+	}
+	return logins
 }
 
 // commentedAt is the source time of a commented event: the newest comment's
@@ -512,7 +527,7 @@ func githubCommentsSince(prev domain.PRSnapshot, total int, read []ghclient.PRCo
 	fresh := []NewComment{}
 	for _, c := range read {
 		if prev.CommentMarker == nil || prev.CommentMarker.After(c.CreatedAt, c.ID) {
-			fresh = append(fresh, NewComment{ID: strconv.FormatInt(c.ID, 10), Author: c.Author, AuthorID: c.Author, CreatedAt: c.CreatedAt, Mentions: c.Mentions})
+			fresh = append(fresh, NewComment{ID: strconv.FormatInt(c.ID, 10), Author: c.Author, AuthorID: c.AuthorID, CreatedAt: c.CreatedAt, Mentions: c.Mentions})
 		}
 	}
 	return fresh

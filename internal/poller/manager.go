@@ -239,13 +239,13 @@ func (m *Manager) sourceDisabled(ctx context.Context, source, orgID string) (ski
 }
 
 // reviewerResolver builds the per-cycle TF-known reviewer resolver.
-// A non-empty username is the local/PAT "session user" signal → resolve
-// against that one login + their team memberships, preserving today's N=1
-// behavior. Every other path (multi mode, or local+App where there's no
+// A self account with a login is the local/PAT "session user" signal →
+// resolve against that one account + their team memberships, preserving the
+// N=1 behavior. Every other path (multi mode, or local+App where there's no
 // session login) resolves against the stores, host from org_settings.
-func (m *Manager) reviewerResolver(ctx context.Context, orgID, username string, userTeams []string) tracker.ReviewerResolver {
-	if username != "" {
-		return tracker.NewLocalReviewerResolver(username, userTeams)
+func (m *Manager) reviewerResolver(ctx context.Context, orgID string, self domain.GitHubAccount, userTeams []string) tracker.ReviewerResolver {
+	if self.Login != "" {
+		return tracker.NewLocalReviewerResolver(self, userTeams)
 	}
 	// Identities are keyed by the org's GitHub host. With no host — none set,
 	// or a settings read that failed — there is nothing to key a lookup on,
@@ -261,7 +261,7 @@ func (m *Manager) reviewerResolver(ctx context.Context, orgID, username string, 
 		}
 	}
 	if host == "" {
-		return tracker.NewLocalReviewerResolver("", nil)
+		return tracker.NewLocalReviewerResolver(domain.GitHubAccount{}, nil)
 	}
 	return tracker.NewStoreReviewerResolver(ctx, orgID, host, m.users, m.githubGroups)
 }
@@ -809,7 +809,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// a successful call proves we hold one. App tokens have no "me", so the
 	// resolver is store-backed (host from org_settings). Built once per org
 	// cycle — host is stable across the per-installation loop below.
-	resolver := m.reviewerResolver(ctx, orgID, "", nil)
+	resolver := m.reviewerResolver(ctx, orgID, domain.GitHubAccount{}, nil)
 
 	// unresolvedOwners collects the account logins of installations whose
 	// client/grant couldn't be resolved this cycle (ClientFor or
@@ -884,7 +884,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		m.recordRepoIDs(ctx, orgID, scope, scoped, grant)
 		// App tokens have no "me" — drop the username axis for discovery
 		// (Sharp edge 2). Predicates still match per-PR fields downstream.
-		_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, "", scoped, resolver)
+		_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, domain.GitHubAccount{}, scoped, resolver)
 		if rerr != nil {
 			githubLog.Log(ctx, upstream.LogLevel(rerr, slog.LevelError), "tracker error", "org", orgID, "installation", inst.AccountLogin, "error", rerr)
 			m.reportError("github", orgID, rerr)
@@ -1042,10 +1042,11 @@ func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID, host string,
 // means the org simply isn't configured for GitHub and is skipped silently.
 //
 // In local mode the poller acts as the lone local user, so it reads their
-// host-scoped GitHub login + team memberships to drive the user-perspective dashboard
-// backfill and team-based review-request detection. Multi-mode PAT fallback
-// has no local sentinel user, so it passes no username (org-wide REST
-// discovery doesn't need one; dashboard history is local/PAT-only).
+// host-scoped GitHub binding (login and account id) + team memberships to
+// drive the user-perspective dashboard backfill, team-based review-request
+// detection and the own-PR check. Multi-mode PAT fallback has no local
+// sentinel user, so it passes no account (org-wide REST discovery doesn't need
+// one; dashboard history is local/PAT-only).
 //
 // It reports whether the tracker's refresh completed without error.
 func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgID, scope string, repos []string, isLocal bool) bool {
@@ -1075,25 +1076,27 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 		return false
 	}
 
-	var username string
+	var self domain.GitHubAccount
 	var userTeams []string
 	if isLocal {
 		// Identity is host-scoped: resolve the org's GitHub host
-		// from org_settings, then read the local user's login for that
-		// (user, host) pair. Boot-time goroutine with no JWT claims → the
-		// `...System` admin-pool variants.
+		// from org_settings, then read the local user's binding for that
+		// (user, host) pair — the login the dashboard searches by, and the
+		// account id their own pull requests are told by. Boot-time
+		// goroutine with no JWT claims → the `...System` admin-pool variants.
 		orgSet, serr := m.orgs.GetSettingsSystem(ctx, orgID)
 		if serr != nil {
 			span.SetStatus(codes.Error, "read org settings")
 			githubLog.ErrorContext(ctx, "read org settings failed", "org", orgID, "error", serr)
 			return false
 		}
-		username, err = m.users.GetGitHubLoginSystem(ctx, runmode.LocalDefaultUserID, orgSet.GitHubBaseURL)
-		if err != nil {
+		identity, ierr := m.users.GetGitHubIdentitySystem(ctx, runmode.LocalDefaultUserID, orgSet.GitHubBaseURL)
+		if ierr != nil {
 			span.SetStatus(codes.Error, "read github identity")
-			githubLog.ErrorContext(ctx, "read github identity failed", "org", orgID, "error", err)
+			githubLog.ErrorContext(ctx, "read github identity failed", "org", orgID, "error", ierr)
 			return false
 		}
+		self = domain.GitHubAccountOf(identity)
 		if teams, terr := client.ListMyTeams(ctx); terr != nil {
 			githubLog.Log(ctx, upstream.LogLevel(terr, slog.LevelWarn), "list teams failed; team-based review requests will be missed this cycle", "org", orgID, "error", terr)
 		} else {
@@ -1101,8 +1104,8 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 		}
 	}
 
-	resolver := m.reviewerResolver(ctx, orgID, username, userTeams)
-	_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, username, repos, resolver)
+	resolver := m.reviewerResolver(ctx, orgID, self, userTeams)
+	_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, self, repos, resolver)
 	if rerr != nil {
 		span.SetStatus(codes.Error, "refresh")
 		githubLog.Log(ctx, upstream.LogLevel(rerr, slog.LevelError), "tracker error", "org", orgID, "error", rerr)

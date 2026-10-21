@@ -40,7 +40,7 @@ func TestRefreshGitHub_APullRequestReadUnderItsRepositorysNewNameKeepsItsEntity(
 	}
 
 	h.searchPR("octo/new", 7, "PR_7", "Widget")
-	if _, _, err := fx.tr.RefreshGitHub(ctx, ghOldHost, client, "alice", []string{"octo/old"}, nil); err != nil {
+	if _, _, err := fx.tr.RefreshGitHub(ctx, ghOldHost, client, domain.GitHubAccount{Login: "alice"}, []string{"octo/old"}, nil); err != nil {
 		t.Fatalf("RefreshGitHub with the dashboard search: %v", err)
 	}
 	if seeded, err := fx.tr.BackfillDashboardHistory(ctx, ghOldHost, client, "alice", []string{"octo/old"}); err != nil || seeded != 0 {

@@ -188,7 +188,10 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 	})
 
 	// Review requests and mentions. Only identities TF knows produce events:
-	// dave and the mapped acme/reviewers, never carol.
+	// dave and the mapped acme/reviewers, never carol. A request is keyed by
+	// GitHub's id for the requested user or team; a mention, which names a
+	// handle, by the handle.
+	daveID := githubIDOf(t, w.githubREST(alice, "GET", "/api/v3/users/"+knownLogin, nil, 200))
 	w.advance(60)
 	w.githubREST(alice, "POST", pulls+"/1/requested_reviewers", map[string]any{
 		"reviewers": []string{knownLogin, "carol"}, "team_reviewers": []string{"reviewers"},
@@ -197,11 +200,11 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 		"body": "@" + knownLogin + " and @acme/reviewers, can you look? cc @bob",
 	}, 201)
 	p.cycle(t, ctx, map[string]int{
-		"acme/webapp#1 " + domain.EventGitHubPRReviewRequested + " user:" + knownLogin:  1,
-		"acme/webapp#1 " + domain.EventGitHubPRReviewRequested + " team:acme/reviewers": 1,
-		"acme/webapp#4 " + domain.EventGitHubPRCommented:                                1,
-		"acme/webapp#4 " + domain.EventGitHubPRMentioned + " user:" + knownLogin:        1,
-		"acme/webapp#4 " + domain.EventGitHubPRMentioned + " team:acme/reviewers":       1,
+		"acme/webapp#1 " + domain.EventGitHubPRReviewRequested + " user_id:" + daveID:                 1,
+		"acme/webapp#1 " + domain.EventGitHubPRReviewRequested + " team_id:" + groups[0].GitHubTeamID: 1,
+		"acme/webapp#4 " + domain.EventGitHubPRCommented:                                              1,
+		"acme/webapp#4 " + domain.EventGitHubPRMentioned + " user:" + knownLogin:                      1,
+		"acme/webapp#4 " + domain.EventGitHubPRMentioned + " team:acme/reviewers":                     1,
 	})
 
 	// dave's review answers his request; the team's request stays. Deleting
@@ -211,8 +214,8 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 	w.githubREST(dave, "POST", pulls+"/1/reviews", map[string]any{"event": "COMMENT", "body": "looked"}, 200)
 	w.send(alice, "DELETE", orgs+"/teams/release", nil, http.StatusNoContent)
 	p.cycle(t, ctx, map[string]int{
-		"acme/webapp#1 " + domain.EventGitHubPRReviewCommented:                              1,
-		"acme/webapp#1 " + domain.EventGitHubPRReviewRequestRemoved + " user:" + knownLogin: 1,
+		"acme/webapp#1 " + domain.EventGitHubPRReviewCommented:                             1,
+		"acme/webapp#1 " + domain.EventGitHubPRReviewRequestRemoved + " user_id:" + daveID: 1,
 	})
 	p.assertMapped(t, ctx, groups[0], true)
 	p.assertMapped(t, ctx, groups[1], false)

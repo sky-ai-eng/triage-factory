@@ -267,7 +267,7 @@ func TestOwnerResolution_StoreFailure_RequeuesThenRoutesToTheRightTeam(t *testin
 			disrupt: func(r *Router, database *sql.DB, o *outage) {
 				r.users = outageIdentityStore{UsersStore: sqlitestore.New(database).Users, o: o}
 			},
-			wantErr: "resolve owner: reverse login lookup for aidan",
+			wantErr: "resolve owner: reverse identity lookup for aidan",
 		},
 		{
 			// Per-user read: the loop used to drop the user and carry on, so a
@@ -324,7 +324,7 @@ func TestOwnerResolution_StoreFailure_RequeuesThenRoutesToTheRightTeam(t *testin
 			disrupt: func(r *Router, database *sql.DB, o *outage) {
 				r.users = outageIdentityStore{UsersStore: sqlitestore.New(database).Users, o: o}
 			},
-			wantErr: "resolve owner: reverse login lookup for alice",
+			wantErr: "resolve owner: reverse identity lookup for alice",
 		},
 		{
 			name:          "review_requested teams-for-user",

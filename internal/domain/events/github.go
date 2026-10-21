@@ -6,8 +6,11 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 //
 // Every PR event carries:
 //
-//   - the actor's GitHub login (Author, Reviewer, Commenter) — predicates
-//     match against this directly via the `*_in` allowlist primitive;
+//   - the actor's GitHub login (Author, Reviewer, Commenter) and, beside it,
+//     GitHub's id for the actor's account (AuthorID, ReviewerID,
+//     CommenterID), which a rename leaves alone. The id is empty on an event
+//     recorded before ids were, and for an actor GitHub returned without one
+//     (a deleted account);
 //   - Labels []string — snapshot at emission time, so predicates can scope
 //     to labeled PRs (e.g. HasLabel "self-review"). This is the user opt-in
 //     surface for label-driven flows (see Scenario 5 in docs/data-model-
@@ -32,14 +35,18 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 //
 // The open-set discriminator for this event is the *requested reviewer* —
 // the tracker emits one event per newly-requested TF-known identity, with the
-// event's dedup_key namespacing it ("user:<login>" / "team:<org>/<slug>").
-// Exactly one of RequestedLogin / RequestedTeam is set per event; the router
-// routes the task's visibility to that identity's team(s). Author still
-// carries the PR author for predicate matching.
+// event's dedup_key namespacing it by GitHub's id ("user_id:<id>" /
+// "team_id:<id>"), or by handle ("user:<login>" / "team:<org>/<slug>") for a
+// request read without one (see ReviewerDedupKeyUserID). Exactly one of
+// RequestedLogin / RequestedTeam is set per event, with its id beside it when
+// known; the router routes the task's visibility to that identity's team(s),
+// by the id when there is one. Author still carries the PR author for
+// predicate matching.
 type GitHubPRReviewRequestedMetadata struct {
-	Author       string   `json:"author"`        // PR author login
-	Repo         string   `json:"repo"`          // "owner/name"
-	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
+	Author       string   `json:"author"`              // PR author login
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
+	Repo         string   `json:"repo"`                // "owner/name"
+	RepositoryID string   `json:"repository_id"`       // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
 	IsDraft      bool     `json:"is_draft"`
 	HeadSHA      string   `json:"head_sha"`
@@ -51,6 +58,11 @@ type GitHubPRReviewRequestedMetadata struct {
 	// RequestedTeam is the requested github team in "org/slug" form when
 	// the request named a team; empty for individual-user requests.
 	RequestedTeam string `json:"requested_team,omitempty"`
+	// RequestedUserID / RequestedTeamID are GitHub's ids for the requested
+	// user or team, beside the handle above. Empty on an event recorded
+	// before ids were, or for a request GitHub returned without one.
+	RequestedUserID string `json:"requested_user_id,omitempty"`
+	RequestedTeamID string `json:"requested_team_id,omitempty"`
 }
 
 type GitHubPRReviewRequestedPredicate struct {
@@ -83,6 +95,7 @@ func (p GitHubPRReviewRequestedPredicate) Matches(m GitHubPRReviewRequestedMetad
 // review_requested task on the entity.
 type GitHubPRReviewRequestRemovedMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Repo         string   `json:"repo"`
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
@@ -91,10 +104,14 @@ type GitHubPRReviewRequestRemovedMetadata struct {
 	Labels       []string `json:"labels"`
 	Title        string   `json:"title"`
 	// RequestedLogin / RequestedTeam identify which requested reviewer was
-	// dropped; exactly one is set, matching the review_requested event the
-	// removal reconciles against.
-	RequestedLogin string `json:"requested_login,omitempty"`
-	RequestedTeam  string `json:"requested_team,omitempty"`
+	// dropped, and RequestedUserID / RequestedTeamID carry GitHub's id for
+	// it. A removal names the reviewer the way the review_requested task it
+	// reconciles against was keyed: an id-keyed task's removal can carry
+	// the id alone.
+	RequestedLogin  string `json:"requested_login,omitempty"`
+	RequestedTeam   string `json:"requested_team,omitempty"`
+	RequestedUserID string `json:"requested_user_id,omitempty"`
+	RequestedTeamID string `json:"requested_team_id,omitempty"`
 }
 
 type GitHubPRReviewRequestRemovedPredicate struct {
@@ -117,16 +134,23 @@ func (p GitHubPRReviewRequestRemovedPredicate) Matches(m GitHubPRReviewRequestRe
 		strEqFold(p.RequestedTeam, m.RequestedTeam)
 }
 
-// ReviewerDedupKeyUser / ReviewerDedupKeyTeam namespace a requested reviewer
-// identity into the review_requested / review_request_removed event's
-// dedup_key. The open-set discriminator is the requested reviewer; namespacing
-// keeps an individual login and a github-team slug from colliding (e.g.
-// "user:foo" vs "team:org/foo") and lets the router close the one task keyed to
-// a given reviewer. Shared so the tracker (which emits the keyed events) and
-// the router (which closes by key on review submit / request removal) can't
-// drift on the format.
+// ReviewerDedupKeyUserID / ReviewerDedupKeyTeamID namespace a requested
+// reviewer's GitHub id into the review_requested / review_request_removed
+// event's dedup_key: the key for a reviewer GitHub returned with an id, which
+// a rename leaves alone. ReviewerDedupKeyUser / ReviewerDedupKeyTeam namespace
+// a handle instead (a login, an "org/slug"): the key for a reviewer read
+// without an id, and the one every mention event and every task created
+// before ids were recorded carries. The open-set discriminator is the
+// requested reviewer; namespacing keeps a login, a team handle and the two
+// kinds of id from colliding (a login may be all digits, so an id has a
+// prefix of its own) and lets the router close the one task keyed to a given
+// reviewer. Shared so the tracker (which emits the keyed events) and the
+// router (which closes by key on review submit / request removal) can't drift
+// on the format.
 func ReviewerDedupKeyUser(login string) string   { return "user:" + login }
 func ReviewerDedupKeyTeam(orgSlug string) string { return "team:" + orgSlug }
+func ReviewerDedupKeyUserID(id string) string    { return "user_id:" + id }
+func ReviewerDedupKeyTeamID(id string) string    { return "team_id:" + id }
 
 // -----------------------------------------------------------------------------
 // review_changes_requested / review_approved / review_commented / review_dismissed
@@ -144,7 +168,9 @@ func ReviewerDedupKeyTeam(orgSlug string) string { return "team:" + orgSlug }
 
 type GitHubPRReviewChangesRequestedMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Reviewer     string   `json:"reviewer"`
+	ReviewerID   string   `json:"reviewer_id,omitempty"` // GitHub's id for the reviewer's account
 	ReviewID     int64    `json:"review_id"`
 	CommentCount int      `json:"comment_count"`
 	Paths        []string `json:"paths"`
@@ -178,7 +204,9 @@ func (p GitHubPRReviewChangesRequestedPredicate) Matches(m GitHubPRReviewChanges
 
 type GitHubPRReviewApprovedMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Reviewer     string   `json:"reviewer"`
+	ReviewerID   string   `json:"reviewer_id,omitempty"` // GitHub's id for the reviewer's account
 	ReviewID     int64    `json:"review_id"`
 	CommentCount int      `json:"comment_count"`
 	Paths        []string `json:"paths"`
@@ -212,7 +240,9 @@ func (p GitHubPRReviewApprovedPredicate) Matches(m GitHubPRReviewApprovedMetadat
 
 type GitHubPRReviewCommentedMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Reviewer     string   `json:"reviewer"`
+	ReviewerID   string   `json:"reviewer_id,omitempty"` // GitHub's id for the reviewer's account
 	ReviewID     int64    `json:"review_id"`
 	CommentCount int      `json:"comment_count"`
 	Paths        []string `json:"paths"`
@@ -246,7 +276,9 @@ func (p GitHubPRReviewCommentedPredicate) Matches(m GitHubPRReviewCommentedMetad
 
 type GitHubPRReviewDismissedMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Reviewer     string   `json:"reviewer"`
+	ReviewerID   string   `json:"reviewer_id,omitempty"` // GitHub's id for the reviewer's account
 	ReviewID     int64    `json:"review_id"`
 	CommentCount int      `json:"comment_count"`
 	Paths        []string `json:"paths"`
@@ -285,6 +317,7 @@ func (p GitHubPRReviewDismissedPredicate) Matches(m GitHubPRReviewDismissedMetad
 
 type GitHubPRCICheckFailedMetadata struct {
 	Author     string `json:"author"`
+	AuthorID   string `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	CheckRunID int64  `json:"check_run_id"`
 	CheckName  string `json:"check_name"`
 	CheckURL   string `json:"check_url"`
@@ -322,6 +355,7 @@ func (p GitHubPRCICheckFailedPredicate) Matches(m GitHubPRCICheckFailedMetadata)
 
 type GitHubPRCICheckPassedMetadata struct {
 	Author        string   `json:"author"`
+	AuthorID      string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	CheckRunID    int64    `json:"check_run_id"`
 	CheckName     string   `json:"check_name"`
 	WorkflowRunID int64    `json:"workflow_run_id,omitempty"`
@@ -365,7 +399,8 @@ func (p GitHubPRCICheckPassedPredicate) Matches(m GitHubPRCICheckPassedMetadata)
 
 type GitHubPRLabelAddedMetadata struct {
 	Author       string   `json:"author"`
-	LabelName    string   `json:"label_name"` // the specific label added (also the event's dedup_key)
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
+	LabelName    string   `json:"label_name"`          // the specific label added (also the event's dedup_key)
 	Repo         string   `json:"repo"`
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
@@ -394,6 +429,7 @@ func (p GitHubPRLabelAddedPredicate) Matches(m GitHubPRLabelAddedMetadata) bool 
 
 type GitHubPRLabelRemovedMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	LabelName    string   `json:"label_name"`
 	Repo         string   `json:"repo"`
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
@@ -427,6 +463,7 @@ func (p GitHubPRLabelRemovedPredicate) Matches(m GitHubPRLabelRemovedMetadata) b
 
 type GitHubPRNewCommitsMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	IsDraft      bool     `json:"is_draft"`
 	CommitCount  int      `json:"commit_count"`
 	HeadSHA      string   `json:"head_sha"`
@@ -459,6 +496,7 @@ func (p GitHubPRNewCommitsPredicate) Matches(m GitHubPRNewCommitsMetadata) bool 
 
 type GitHubPRConflictsMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Repo         string   `json:"repo"`
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
@@ -489,6 +527,7 @@ func (p GitHubPRConflictsPredicate) Matches(m GitHubPRConflictsMetadata) bool {
 
 type GitHubPRReadyForReviewMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Repo         string   `json:"repo"`
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
@@ -516,6 +555,7 @@ func (p GitHubPRReadyForReviewPredicate) Matches(m GitHubPRReadyForReviewMetadat
 
 type GitHubPROpenedMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Repo         string   `json:"repo"`
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
@@ -549,6 +589,7 @@ func (p GitHubPROpenedPredicate) Matches(m GitHubPROpenedMetadata) bool {
 
 type GitHubPRMergedMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Repo         string   `json:"repo"`
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
@@ -573,6 +614,7 @@ func (p GitHubPRMergedPredicate) Matches(m GitHubPRMergedMetadata) bool {
 
 type GitHubPRClosedMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Repo         string   `json:"repo"`
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
@@ -612,6 +654,7 @@ const (
 // followed.
 type GitHubPRUnreachableMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Repo         string   `json:"repo"`
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
@@ -650,15 +693,22 @@ func (p GitHubPRUnreachablePredicate) Matches(m GitHubPRUnreachableMetadata) boo
 
 type GitHubPRCommentedMetadata struct {
 	Author          string   `json:"author"`
+	AuthorID        string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Commenter       string   `json:"commenter"`
 	CommenterLogins []string `json:"commenter_logins"`
-	CommentID       int64    `json:"comment_id"`
-	Repo            string   `json:"repo"`
-	RepositoryID    string   `json:"repository_id"` // the repository's registry row; what repo_in names
-	PRNumber        int      `json:"pr_number"`
-	IsDraft         bool     `json:"is_draft"`
-	HeadSHA         string   `json:"head_sha"`
-	Labels          []string `json:"labels"`
+	// CommenterID is GitHub's id for Commenter's account, and CommenterIDs
+	// the id of each comment's author, once per account in the order they
+	// commented. A comment whose author GitHub returned without an id adds
+	// nothing to CommenterIDs.
+	CommenterID  string   `json:"commenter_id,omitempty"`
+	CommenterIDs []string `json:"commenter_ids"`
+	CommentID    int64    `json:"comment_id"`
+	Repo         string   `json:"repo"`
+	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
+	PRNumber     int      `json:"pr_number"`
+	IsDraft      bool     `json:"is_draft"`
+	HeadSHA      string   `json:"head_sha"`
+	Labels       []string `json:"labels"`
 }
 
 type GitHubPRCommentedPredicate struct {
@@ -682,10 +732,10 @@ func (p GitHubPRCommentedPredicate) Matches(m GitHubPRCommentedMetadata) bool {
 //
 // The open-set discriminator is the mentioned identity, as review_requested's
 // is the requested reviewer: one event per newly mentioned TF-known identity,
-// with the same dedup_key namespacing ("user:<login>" / "team:<org>/<slug>")
-// and the same routing, to that identity's team(s). Exactly one of
-// MentionedLogin / MentionedTeam is set, lower-cased, since GitHub matches
-// logins and slugs without regard to case.
+// keyed by its handle ("user:<login>" / "team:<org>/<slug>"), since a mention
+// is text and names no id, and routed as review_requested is, to that
+// identity's team(s). Exactly one of MentionedLogin / MentionedTeam is set,
+// lower-cased, since GitHub matches logins and slugs without regard to case.
 //
 // MentionSource says where the mention was: a conversation comment, a
 // review's body, an inline comment in a review, or the PR body. Commenter and
@@ -702,8 +752,13 @@ const (
 )
 
 type GitHubPRMentionedMetadata struct {
-	Author         string   `json:"author"`
-	Commenter      string   `json:"commenter"`
+	Author    string `json:"author"`
+	AuthorID  string `json:"author_id,omitempty"` // GitHub's id for the PR author's account
+	Commenter string `json:"commenter"`
+	// CommenterID is GitHub's id for Commenter's account. A mention has no id
+	// of its own: MentionedLogin and MentionedTeam are the handle the text
+	// spelled.
+	CommenterID    string   `json:"commenter_id,omitempty"`
 	CommentID      int64    `json:"comment_id"`
 	MentionedLogin string   `json:"mentioned_login,omitempty"`
 	MentionedTeam  string   `json:"mentioned_team,omitempty"`

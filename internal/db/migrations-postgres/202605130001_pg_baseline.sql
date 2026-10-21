@@ -1885,6 +1885,12 @@ CREATE INDEX idx_entities_key ON public.entities USING btree (org_id, source, sc
 CREATE INDEX idx_entities_github_author ON public.entities USING btree (org_id, ((snapshot_json ->> 'author'::text)), last_polled_at DESC) WHERE ((source = 'github'::text) AND (snapshot_json IS NOT NULL));
 
 
+-- The same predicate's GitHub-account-id arm: the author's GitHub id, which a
+-- rename leaves alone, beside the login above.
+
+CREATE INDEX idx_entities_github_author_id ON public.entities USING btree (org_id, ((snapshot_json ->> 'author_id'::text)), last_polled_at DESC) WHERE ((source = 'github'::text) AND (snapshot_json IS NOT NULL));
+
+
 -- Serves the personal pull-request list's commissioned-by leg, OR-ed with the
 -- author predicate above; partial because only a bot-opened PR is ever stamped.
 
@@ -2138,6 +2144,11 @@ CREATE INDEX jira_project_status_rules_project_idx ON public.jira_project_status
 -- because GitHub logins are case-insensitive while writers store them as captured;
 -- github_base_url leads because identity is host-scoped.
 CREATE INDEX user_github_identities_login_lookup_idx ON public.user_github_identities USING btree (github_base_url, lower(login));
+
+
+-- Reverse (host, GitHub account id) -> user lookup, for an event that names its
+-- actor by GitHub's id rather than by login.
+CREATE INDEX user_github_identities_user_id_lookup_idx ON public.user_github_identities USING btree (github_base_url, github_user_id) WHERE (github_user_id IS NOT NULL);
 
 
 CREATE TRIGGER org_memberships_keep_owner_on_delete AFTER DELETE ON public.org_memberships REFERENCING OLD TABLE AS affected FOR EACH STATEMENT EXECUTE FUNCTION tf.guard_org_owners();

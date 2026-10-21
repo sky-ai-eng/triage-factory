@@ -69,9 +69,9 @@ func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	var (
-		host     string
-		username string
-		stats    *domain.DashboardStats
+		host  string
+		me    domain.GitHubAccount
+		stats *domain.DashboardStats
 	)
 	if err := dh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// The GitHub host comes from org_settings, not an integration
@@ -92,28 +92,29 @@ func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.
 		}
 		host = ghWeb
 		// Propagate a real lookup failure as a 5xx; only a missing row (->
-		// "", nil) degrades to the empty-dashboard response below. Swallowing
+		// nil, nil) degrades to the empty-dashboard response below. Swallowing
 		// the error would turn a DB fault into a misleading empty dashboard.
-		username, lerr = tx.Users.GetGitHubLogin(r.Context(), userID, ghWeb)
+		identity, lerr := tx.Users.GetGitHubIdentity(r.Context(), userID, ghWeb)
 		if lerr != nil {
 			return lerr
 		}
-		if username == "" {
+		me = domain.GitHubAccountOf(identity)
+		if me.Login == "" {
 			return nil
 		}
 		var e error
-		stats, e = tx.Dashboard.Stats(r.Context(), orgID, username, since)
+		stats, e = tx.Dashboard.Stats(r.Context(), orgID, me, since)
 		return e
 	}); err != nil {
 		internalError(w, "dashboard", err)
 		return
 	}
-	if username == "" {
+	if me.Login == "" {
 		writeJSON(w, http.StatusOK, map[string]any{})
 		return
 	}
 
-	dh.kickBackfill(orgID, userID, username, host)
+	dh.kickBackfill(orgID, userID, me.Login, host)
 	writeJSON(w, http.StatusOK, stats)
 }
 
@@ -154,10 +155,10 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	var (
-		host     string
-		username string
-		prs      []domain.PRSummaryRow
-		total    int
+		host  string
+		me    domain.GitHubAccount
+		prs   []domain.PRSummaryRow
+		total int
 	)
 	if err := dh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Host from org_settings, not a PAT credential — see handleDashboardStats
@@ -167,20 +168,21 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 		if lerr != nil {
 			return lerr
 		}
-		// An unresolvable host and an unbound identity both leave username
+		// An unresolvable host and an unbound identity both leave the account
 		// empty, which drops the author leg and leaves the commissioned one.
-		// Propagate a real lookup failure as a 5xx: only a missing row (-> "",
-		// nil) is an answer. See handleDashboardStats.
+		// Propagate a real lookup failure as a 5xx: only a missing row (->
+		// nil, nil) is an answer. See handleDashboardStats.
 		if ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL); okHost {
 			host = ghWeb
-			username, lerr = tx.Users.GetGitHubLogin(r.Context(), userID, ghWeb)
-			if lerr != nil {
-				return lerr
+			identity, ierr := tx.Users.GetGitHubIdentity(r.Context(), userID, ghWeb)
+			if ierr != nil {
+				return ierr
 			}
+			me = domain.GitHubAccountOf(identity)
 		}
 		var e error
 		prs, total, e = tx.Dashboard.PRs(r.Context(), orgID,
-			db.PRViewer{Login: username, UserID: userID},
+			db.PRViewer{Login: me.Login, GitHubUserID: me.ID, UserID: userID},
 			db.PRListFilter{States: states},
 			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
@@ -190,7 +192,7 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 	}
 	// The backfill is about a GitHub identity's history, so it still needs a
 	// bound one; the list above does not.
-	dh.kickBackfill(orgID, userID, username, host)
+	dh.kickBackfill(orgID, userID, me.Login, host)
 	httpx.WriteList(w, page, prs, total)
 }
 

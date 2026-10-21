@@ -61,7 +61,7 @@ func TestRefreshGitHub_MirrorsPRBodyIntoDescription(t *testing.T) {
 	tr := New(database, busPublisher{bus: bus}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", []string{"octo/repo"}, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, []string{"octo/repo"}, nil); err != nil {
 		t.Fatalf("RefreshGitHub cycle 1: %v", err)
 	}
 	ent, err := stores.Entities.GetBySource(ctx, org, "github", "https://github.com", "octo/repo#42")
@@ -82,7 +82,7 @@ func TestRefreshGitHub_MirrorsPRBodyIntoDescription(t *testing.T) {
 	mu.Lock()
 	body = "Now with a short body."
 	mu.Unlock()
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", []string{"octo/repo"}, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, []string{"octo/repo"}, nil); err != nil {
 		t.Fatalf("RefreshGitHub cycle 2: %v", err)
 	}
 	ent, err = stores.Entities.GetBySource(ctx, org, "github", "https://github.com", "octo/repo#42")
@@ -142,7 +142,7 @@ func TestRefreshGitHub_PhaseTwoMirrorsPRBodyIntoDescription(t *testing.T) {
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	// repos=nil → no discovery; the stub is reached only via Phase-2.
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub seed cycle: %v", err)
 	}
 	ent, err := stores.Entities.GetBySource(ctx, org, "github", "https://github.com", "octo/repo#7")
@@ -159,7 +159,7 @@ func TestRefreshGitHub_PhaseTwoMirrorsPRBodyIntoDescription(t *testing.T) {
 	mu.Lock()
 	body = "Edited after seed"
 	mu.Unlock()
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub diff cycle: %v", err)
 	}
 	ent, err = stores.Entities.GetBySource(ctx, org, "github", "https://github.com", "octo/repo#7")
@@ -181,14 +181,14 @@ func TestRefreshGitHub_PhaseTwoMirrorsPRBodyIntoDescription(t *testing.T) {
 	body = ""
 	mu.Unlock()
 	failed := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, &failingBatchQueue{EventQueueStore: stores.EventQueue}, org)
-	if _, _, err := failed.RefreshGitHub(ctx, "https://github.com", client, "", nil, nil); err != nil {
+	if _, _, err := failed.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if emitted := pub.nonSystemEvents(); len(emitted) != 1 {
 		t.Fatalf("lost CAS published a body event: %v", eventTypes(emitted))
 	}
 	for range 2 {
-		if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", nil, nil); err != nil {
+		if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
