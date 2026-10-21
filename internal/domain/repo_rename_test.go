@@ -189,7 +189,6 @@ func TestRewriteRepoSlugPrefix(t *testing.T) {
 		{in: "octo/api", want: "octo/platform-api", wantOK: true, because: "the bare slug"},
 		{in: "octo/api#18", want: "octo/platform-api#18", wantOK: true, because: "a PR composite"},
 		{in: "Octo/API#18", want: "octo/platform-api#18", wantOK: true, because: "matching is case-insensitive"},
-		{in: "octo/api:refs/heads/x", want: "octo/platform-api:refs/heads/x", wantOK: true, because: "a dedup resource with an anchor"},
 		{in: "octo/api-gateway#4", want: "octo/api-gateway#4", because: "a longer name that merely starts the same"},
 		{in: "octo/ap", want: "octo/ap", because: "shorter than the slug"},
 		{in: "acme/octo/api#1", want: "acme/octo/api#1", because: "the slug is not at the head"},
@@ -200,34 +199,6 @@ func TestRewriteRepoSlugPrefix(t *testing.T) {
 			got, ok := RewriteRepoSlugPrefix(tc.in, from, to)
 			if got != tc.want || ok != tc.wantOK {
 				t.Errorf("RewriteRepoSlugPrefix(%q) = (%q, %v), want (%q, %v)", tc.in, got, ok, tc.want, tc.wantOK)
-			}
-		})
-	}
-}
-
-func TestRewriteArtifactDedupKey(t *testing.T) {
-	const from, to = "octo/api", "octo/platform-api"
-	tests := []struct {
-		in     string
-		want   string
-		wantOK bool
-	}{
-		{in: "github:pull_request:octo/api#18", want: "github:pull_request:octo/platform-api#18", wantOK: true},
-		{in: "github:review:octo/api#18:conv-1", want: "github:review:octo/platform-api#18:conv-1", wantOK: true},
-		// The anchor repeats the repository's own name. A substring rewrite
-		// would move the branch too, renaming a ref that never moved.
-		{in: "git:branch:octo/api:refs/heads/octo/api-fix", want: "git:branch:octo/platform-api:refs/heads/octo/api-fix", wantOK: true},
-		{in: "github:pull_request:octo/api-gateway#4", want: "github:pull_request:octo/api-gateway#4"},
-		{in: "jira:issue:PROJ-123", want: "jira:issue:PROJ-123"},
-		{in: "github:comment:5551212", want: "github:comment:5551212"},
-		{in: "github:pull_request", want: "github:pull_request"},
-		{in: "malformed", want: "malformed"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.in, func(t *testing.T) {
-			got, ok := RewriteArtifactDedupKey(tc.in, from, to)
-			if got != tc.want || ok != tc.wantOK {
-				t.Errorf("RewriteArtifactDedupKey(%q) = (%q, %v), want (%q, %v)", tc.in, got, ok, tc.want, tc.wantOK)
 			}
 		})
 	}

@@ -618,13 +618,14 @@ func prReviewDismiss(ctx context.Context, client ghAPI, host agenthost.Client, a
 // runs on one PR never collide on GitHub's one-per-identity pending-review slot.
 // It reads the PR head SHA (a read, not a write) so the review pins to the
 // reviewed commit at submit. The durable run-scoped `review` artifact is recorded
-// at the host choke point (LocalClient.GithubCreatePendingReview); the returned
-// handle (the artifact id) is what add-review-comment / finalize-review speak.
+// at the host choke point (LocalClient.GithubCreatePendingReview), which reads
+// the PR's node id the draft is keyed on; the returned handle (the artifact id)
+// is what add-review-comment / finalize-review speak.
 //
 // --fresh resets an in-progress draft to a clean slate so the agent can restart
 // a review it has botched: it clears the run's staged comments + the body/event
 // ready sentinel in place, keeping the same handle and pinned head SHA. Post-494
-// this is a pure local artifact reset — zero GitHub calls, no identity / no
+// this is a local artifact reset — no GitHub write, no identity / no
 // anti-hijack logic (the GitHub pending-review model that needed those is gone).
 // On a clean slate (no prior start-review in this run) --fresh has nothing to
 // reset and falls through to a normal start.
@@ -633,8 +634,8 @@ func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, arg
 	_ = lookupConversation(host) // validates identity is present; routing happens inside host
 
 	if hasFlag(args, "--fresh") {
-		// Pure-local reset of this run's existing draft for the PR — no GitHub
-		// call. An empty handle means there was no draft to reset, so we fall
+		// Local reset of this run's existing draft for the PR — no GitHub
+		// write. An empty handle means there was no draft to reset, so we fall
 		// through to a normal start below (which reads the head SHA and creates
 		// one), keeping --fresh usable even as the first start-review. commit_sha
 		// is the draft's preserved head SHA, echoed so the reset output matches the

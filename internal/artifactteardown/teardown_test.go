@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -102,7 +103,7 @@ func draftPR(conversationID string) domain.Artifact {
 // need several — the credential classification is keyed per repo and the closes
 // are per artifact, so "once" only means something across more than one of each.
 func draftPRIn(conversationID, repoPath string, number int, id string) domain.Artifact {
-	a := domain.NewPullRequestArtifact(repoPath, number, "PR_node", "tf/fix", "main",
+	a := domain.NewPullRequestArtifact(repoPath, number, fmt.Sprintf("PR_%s_%d", repoPath, number), "tf/fix", "main",
 		"https://example.test/"+repoPath+"/pull/7", "Proposed title", "Proposed body", true)
 	a.ID = id
 	a.ConversationID = conversationID
@@ -111,7 +112,7 @@ func draftPRIn(conversationID, repoPath string, number int, id string) domain.Ar
 }
 
 func stagedReview(conversationID string) domain.Artifact {
-	a := domain.NewReviewArtifact("owner/repo", 7, "headsha", conversationID)
+	a := domain.NewReviewArtifact("owner/repo", 7, "PR_owner/repo_7", "headsha", conversationID)
 	a.ID = "art_review"
 	a.ConversationID = conversationID
 	a.TeamID = "team"

@@ -413,14 +413,9 @@ type EntityStore interface {
 	// key-derived value:
 	//
 	//   - entities.source_id, and entities.url when newURL is non-empty;
-	//   - the target of the source's artifacts keyed on the entity's id
-	//     (provider = source, dedup resource segment =
-	//     domain.EntityArtifactResource: the site and issue id for Jira, the
-	//     UUID for Linear; see domain.ArtifactDedupKey). Their dedup key
-	//     carries the id, so it stays. An artifact keyed on a display key — a
-	//     Jira artifact recorded before Jira artifacts were keyed on the issue
-	//     id — is left alone: the key repeats across scopes, and the org-wide
-	//     dedup key does not say which scope's object a row is about.
+	//   - the target of every artifact about the entity (artifacts.entity_id),
+	//     which takes the new key. Their dedup key names the object by an id,
+	//     so it stays.
 	//   - external_actions.current_url, the audit ledger's maintained pointer,
 	//     for actions whose link resolves to the entity's old url. The record
 	//     of the act itself (target, url, detail) is never touched. A url
@@ -725,10 +720,10 @@ type EntityStore interface {
 	//     answering for, under the key it has now;
 	//   - the survivor's poll_seq is bumped either way, so a cycle that read
 	//     either row before the merge misses its CAS;
-	//   - artifacts keyed on the pair's id that target the key the survivor
-	//     no longer answers to, and audit-ledger links under its url, move
-	//     onto the key and url it keeps (DuplicateEntityMergedKeys), as a
-	//     rename moves them.
+	//   - the newer row's artifacts move onto the survivor, and every
+	//     artifact of the survivor takes the key it keeps; audit-ledger links
+	//     under the url it no longer answers to move onto the one it keeps
+	//     (DuplicateEntityMergedKeys), as a rename moves them.
 	//
 	// Refused, writing nothing: the two ids are the same, either row is
 	// missing (sql.ErrNoRows), the rows differ in source or scope, or both
@@ -755,15 +750,15 @@ type EntityStore interface {
 	//     dedup_key), the stub's is dismissed with close_reason
 	//     duplicate_entity_merged, and a blueprint still running under one of
 	//     its unsettled conversations is marked cancel_requested;
-	//   - the stub's tasks, events, queue rows, pending firings, memory links
-	//     (at the stronger of the two roles) and entity links move onto into;
+	//   - the stub's tasks, events, queue rows, pending firings, artifacts,
+	//     memory links (at the stronger of the two roles) and entity links
+	//     move onto into, and the stub's artifacts take into's key;
 	//   - into takes the stub's owning team and commissioning user where it
 	//     has none;
 	//   - the stub is deleted.
 	//
-	// Artifacts and the audit ledger are not touched: they name a pull
-	// request by its key and url, not by an entity, and a stub has no provider
-	// id for them to be keyed on.
+	// The audit ledger is not touched: it names a pull request by its key and
+	// url, not by an entity.
 	//
 	// Refused, writing nothing: the two ids are the same, either row is
 	// missing (sql.ErrNoRows), the rows differ in source or scope, or the stub
@@ -940,8 +935,9 @@ func sameEntityNamespace(op string, a, b domain.Entity) error {
 // the row whose key and link the merged row keeps and the row whose key and
 // link it stops answering to: the newer row's are kept when it is active (the
 // survivor takes its live state), the survivor's own otherwise. kept carries
-// the pair's external id, whichever row held it. Both dialects move artifact
-// targets and audit-ledger links from dropped onto kept, as a rename does.
+// the pair's external id, whichever row held it. Both dialects move
+// audit-ledger links from dropped onto kept, as a rename does; the merged
+// row's artifacts take its key by entity_id.
 func DuplicateEntityMergedKeys(survivor, loser domain.Entity) (kept, dropped domain.Entity) {
 	kept, dropped = survivor, loser
 	if loser.State == "active" {

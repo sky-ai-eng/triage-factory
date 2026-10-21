@@ -41,7 +41,7 @@ func TestExternalObjectScope(t *testing.T) {
 // an artifact is recorded in the artifact's scope, and that the link it falls
 // back to for a linkless review is on that same host.
 func TestArtifactActionCarriesTheArtifactScope(t *testing.T) {
-	art := NewReviewArtifact("octo/api", 7, "abc", "conv-1")
+	art := NewReviewArtifact("octo/api", 7, "PR_kwDOnode", "abc", "conv-1")
 	art.Scope = "https://ghe.example.com"
 	act := ArtifactAction(&art, "user-1", ActionReviewSubmitted, ArtifactStateReviewPending, ArtifactStateReviewSubmitted, CredentialGitHubApp)
 	if act.Scope != art.Scope {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -28,10 +29,11 @@ import (
 // What is left cannot become a foreign key. A pull request's key is its
 // repository's name AND its number, so entities.source_id stays the composite
 // display key "owner/repo#18" beside the entity's repository_id, and moves
-// because it is what everything reads and shows; an artifact's dedup_key is a
-// contract between two writers that would re-mint every artifact if its shape
-// moved; placement_overrides' key_value is a slug that names a repository with
-// or without a registry row, so no FK can hold it.
+// because it is what everything reads and shows; an artifact's target is a
+// display value of the same shape; placement_overrides' key_value is a slug
+// that names a repository with or without a registry row, so no FK can hold
+// it. An artifact's dedup_key names no repository (a pull request's node id, a
+// registry row id, a comment's id), so it never moves.
 //
 // Stored links move with the keys. entities.url is rewritten alongside
 // source_id — a redirect stops the moment the freed name is re-claimed,
@@ -40,8 +42,7 @@ import (
 // touched (the record of the act, frozen with target and detail_json), but
 // current_url — the maintained pointer reads coalesce over — is filled here.
 // artifacts.url needs no help: its upsert's conflict arm refreshes it the next
-// time any writer lands on the row, which this rewrite guarantees by moving
-// dedup_key.
+// time any writer lands on the row, and every writer lands on it by its id.
 //
 // What stays put entirely: history (events.payload_json; external_actions'
 // target and detail_json record an act under the name in force at the time),
@@ -50,15 +51,16 @@ import (
 // is keyed by the repository row id, so a rename does not move it either.
 //
 // The rewrite stays on the renamed repository's host. Entities are the
-// repository's own (repository_id), artifacts and audit-ledger rows are
-// matched by their scope column, placement pins by their host, and a stored
-// link is rewritten only when it is on the host (domain.RewriteRepoURL). A
-// repository on another host under the same name is a different repository,
-// and nothing of its is touched.
+// repository's own (repository_id), and so are the artifacts: those about its
+// entities by artifacts.entity_id, its branches by the registry row id their
+// keys carry. The audit-ledger rows are matched by their scope column,
+// placement pins by their host, and a stored link is rewritten only when it
+// is on the host (domain.RewriteRepoURL). A repository on another host under
+// the same name is a different repository, and nothing of its is touched.
 //
-// A retired row restored by a rename moves its own row and entities and
-// nothing keyed by the name alone: the name it was retired under may belong to
-// another repository by now, whose artifacts and pins spell it too.
+// A retired row restored by a rename moves its own row, entities and
+// artifacts, and nothing keyed by the name alone: the name it was retired
+// under may belong to another repository by now, whose pins spell it too.
 //
 // Everything here runs on the ADMIN pool. The rewrite spans tables owned by
 // every team in the org — tracked sets, entities, artifacts — and no
@@ -309,6 +311,8 @@ func repositoryHoldingSlug(ctx context.Context, q queryer, orgID, source string,
 // keys already spell the target slug, so the source_id rewrite after this
 // leaves them as they are, and a pull request with an entity under each name
 // still collides there and refuses the whole rename, this absorb included.
+// The branches recorded in it move too (moveAbsorbedBranches): their keys
+// carry the occupant's id, which the delete frees.
 //
 // A bare clone cached under the occupant's id (<StateRoot>/repos/<id>.git) is
 // left behind. The cache belongs to whichever process ran a checkout, often
@@ -336,6 +340,9 @@ func absorbBareRepository(ctx context.Context, q queryer, orgID string, occupant
 	`, renamedID, orgID, occupant.id); err != nil {
 		return fmt.Errorf("re-point entities of the bare %s row: %w", to, err)
 	}
+	if err := moveAbsorbedBranches(ctx, q, orgID, occupant.id, renamedID); err != nil {
+		return fmt.Errorf("re-key branches of the bare %s row: %w", to, err)
+	}
 	if _, err := q.ExecContext(ctx, `
 		DELETE FROM repositories WHERE id = $1 AND org_id = $2
 	`, occupant.id, orgID); err != nil {
@@ -343,6 +350,77 @@ func absorbBareRepository(ctx context.Context, q queryer, orgID string, occupant
 			return fmt.Errorf("%w: a worktree still references the bare %s row: %v", db.ErrRepoSlugOccupied, to, err)
 		}
 		return fmt.Errorf("delete the bare %s row: %w", to, err)
+	}
+	return nil
+}
+
+// moveAbsorbedBranches re-keys the branch artifacts recorded in the registry
+// row fromID onto toID, the row it is absorbed into. A branch is keyed on its
+// repository's row id and its ref (domain.BranchDedupKey), so a key naming
+// fromID would name a deleted row: no rename would find it again, and the next
+// push of the same ref, keyed on toID, would record the branch a second time.
+// A ref both rows recorded is one branch under two keys, and the older
+// artifact (created_at, then id) keeps it while the newer is deleted. No table
+// references an artifact row.
+func moveAbsorbedBranches(ctx context.Context, q queryer, orgID, fromID, toID string) error {
+	from := domain.BranchDedupKeyPrefix(fromID)
+	rows, err := q.QueryContext(ctx, `
+		SELECT id, scope, dedup_key, created_at FROM artifacts
+		 WHERE org_id = $1 AND provider = $2 AND kind = $3
+		   AND left(dedup_key, length($4::text)) = $4::text
+		 ORDER BY id
+	`, orgID, domain.ArtifactProviderGit, domain.ArtifactKindBranch, from)
+	if err != nil {
+		return err
+	}
+	type branch struct {
+		id, scope, key string
+		created        time.Time
+	}
+	var found []branch
+	for rows.Next() {
+		var b branch
+		if err := rows.Scan(&b.id, &b.scope, &b.key, &b.created); err != nil {
+			rows.Close()
+			return err
+		}
+		found = append(found, b)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, b := range found {
+		key := domain.BranchDedupKey(toID, strings.TrimPrefix(b.key, from))
+		if key == "" {
+			continue
+		}
+		var heldID string
+		var heldCreated time.Time
+		err := q.QueryRowContext(ctx, `
+			SELECT id, created_at FROM artifacts WHERE org_id = $1 AND scope = $2 AND dedup_key = $3
+		`, orgID, b.scope, key).Scan(&heldID, &heldCreated)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+		case err != nil:
+			return err
+		case heldCreated.Before(b.created) || (heldCreated.Equal(b.created) && heldID < b.id):
+			if _, err := q.ExecContext(ctx, `DELETE FROM artifacts WHERE org_id = $1 AND id = $2`, orgID, b.id); err != nil {
+				return fmt.Errorf("delete branch artifact %s, recorded again under %s: %w", b.id, key, err)
+			}
+			continue
+		default:
+			if _, err := q.ExecContext(ctx, `DELETE FROM artifacts WHERE org_id = $1 AND id = $2`, orgID, heldID); err != nil {
+				return fmt.Errorf("delete branch artifact %s, recorded first under %s: %w", heldID, b.key, err)
+			}
+		}
+		if _, err := q.ExecContext(ctx, `
+			UPDATE artifacts SET dedup_key = $1, updated_at = now() WHERE org_id = $2 AND id = $3
+		`, key, orgID, b.id); err != nil {
+			return fmt.Errorf("re-key branch artifact %s onto %s: %w", b.id, key, err)
+		}
 	}
 	return nil
 }
@@ -393,10 +471,10 @@ func renameRepositoryRow(ctx context.Context, q queryer, orgID string, renamed i
 // every row it selects carries the host as its scope (or, for a placement pin,
 // its host).
 //
-// The entities are repositoryID's own. heldName is whether the row held from
-// until now; a restored row did not, and the records keyed by the slug alone
-// (placement pins, artifacts, audit-ledger pointers) are left to whatever holds
-// it.
+// The entities and the artifacts are repositoryID's own, selected by id.
+// heldName is whether the row held from until now; a restored row did not, and
+// the records matched by the slug alone (placement pins, audit-ledger
+// pointers) are left to whatever holds it.
 func rewriteSlugDerivedKeys(ctx context.Context, q queryer, orgID, source, host, repositoryID, from, to string, heldName bool) error {
 	// entities.url first, while source_id still spells the old slug: the URL
 	// pass selects its rows by the same positional source_id predicate the
@@ -438,6 +516,9 @@ func rewriteSlugDerivedKeys(ctx context.Context, q queryer, orgID, source, host,
 		}
 		return fmt.Errorf("rewrite entity source ids %s -> %s: %w", from, to, err)
 	}
+	if err := moveRepositoryArtifactTargets(ctx, q, orgID, source, host, repositoryID, to); err != nil {
+		return err
+	}
 	if !heldName {
 		return nil
 	}
@@ -458,14 +539,6 @@ func rewriteSlugDerivedKeys(ctx context.Context, q queryer, orgID, source, host,
 		 WHERE org_id = $2 AND key_kind = 'repo' AND host = $4 AND lower(key_value) = lower($3)
 	`, to, orgID, from, host); err != nil {
 		return fmt.Errorf("rewrite placement overrides %s -> %s: %w", from, to, err)
-	}
-
-	// artifacts — target and dedup_key both carry the slug, and dedup_key is
-	// the conflict target every capture writer upserts on. Leaving it behind
-	// is what turns one pull request into two rows the first time anything
-	// records it under the new name.
-	if err := rewriteArtifactSlugs(ctx, q, orgID, host, from, to); err != nil {
-		return err
 	}
 
 	// external_actions — the audit ledger's pointer column, and only that.
@@ -564,52 +637,32 @@ func collectURLRewrites(rows *sql.Rows, host, from, to string) ([]urlRewrite, er
 	return out, rows.Err()
 }
 
-func rewriteArtifactSlugs(ctx context.Context, q queryer, orgID, host, from, to string) error {
-	// Only the host's GitHub artifacts (a branch is a git artifact on the same
-	// host) are candidates: one recorded under another scope is another host's
-	// object under the same name. Within those the SQL filter is a cheap
-	// over-approximation — any row whose key or target so much as mentions the
-	// old slug — and the precise decision is made in Go, where the segment
-	// boundaries of a dedup key are expressible.
-	rows, err := q.QueryContext(ctx, `
-		SELECT id, target, dedup_key FROM artifacts
-		 WHERE org_id = $1 AND scope = $3 AND provider IN ($4, $5)
-		   AND (strpos(lower(dedup_key), lower($2)) > 0 OR strpos(lower(target), lower($2)) > 0)
-	`, orgID, from, host, domain.ArtifactProviderGitHub, domain.ArtifactProviderGit)
-	if err != nil {
-		return err
+// moveRepositoryArtifactTargets moves the targets of repositoryID's own
+// artifacts. Every artifact about one of its entities takes that entity's key,
+// which the source_id rewrite has just moved (artifacts.entity_id), and every
+// branch recorded in it takes to: a branch has no entity, and its key carries
+// the registry row id (domain.BranchDedupKeyPrefix). The rows are selected by
+// id, never by the name a target spells, so a retired repository that held
+// the name keeps its rows as they are, and a row written under a spelling of
+// the name this rename does not know moves too. Only the target moves; the
+// key names no repository.
+func moveRepositoryArtifactTargets(ctx context.Context, q queryer, orgID, source, host, repositoryID, to string) error {
+	if _, err := q.ExecContext(ctx, `
+		UPDATE artifacts SET target = $1, updated_at = now()
+		 WHERE org_id = $2 AND scope = $3 AND provider = $4 AND kind = $5
+		   AND left(dedup_key, length($6::text)) = $6::text
+		   AND target <> $1
+	`, to, orgID, host, domain.ArtifactProviderGit, domain.ArtifactKindBranch,
+		domain.BranchDedupKeyPrefix(repositoryID)); err != nil {
+		return fmt.Errorf("move branch artifact targets of %s onto %s: %w", repositoryID, to, err)
 	}
-	type pending struct{ id, target, dedupKey string }
-	var updates []pending
-	for rows.Next() {
-		var id, target, dedupKey string
-		if err := rows.Scan(&id, &target, &dedupKey); err != nil {
-			rows.Close()
-			return err
-		}
-		newTarget, targetChanged := domain.RewriteRepoSlugPrefix(target, from, to)
-		newKey, keyChanged := domain.RewriteArtifactDedupKey(dedupKey, from, to)
-		if !targetChanged && !keyChanged {
-			continue
-		}
-		updates = append(updates, pending{id: id, target: newTarget, dedupKey: newKey})
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-
-	for _, u := range updates {
-		if _, err := q.ExecContext(ctx, `
-			UPDATE artifacts SET target = $1, dedup_key = $2, updated_at = now()
-			 WHERE id = $3 AND org_id = $4
-		`, u.target, u.dedupKey, u.id, orgID); err != nil {
-			if isUniqueViolation(err) {
-				return fmt.Errorf("%w: an artifact already answers to %s: %v", db.ErrRepoSlugOccupied, to, err)
-			}
-			return fmt.Errorf("rewrite artifact %s for %s -> %s: %w", u.id, from, to, err)
-		}
+	if _, err := q.ExecContext(ctx, `
+		UPDATE artifacts a SET target = e.source_id, updated_at = now()
+		  FROM entities e
+		 WHERE e.org_id = $1 AND e.source = $2 AND e.scope = $3 AND e.repository_id = $4
+		   AND a.org_id = $1 AND a.entity_id = e.id AND a.target <> e.source_id
+	`, orgID, source, host, repositoryID); err != nil {
+		return fmt.Errorf("move the targets of %s's entities' artifacts onto %s: %w", repositoryID, to, err)
 	}
 	return nil
 }
@@ -619,15 +672,13 @@ func rewriteArtifactSlugs(ctx context.Context, q queryer, orgID, host, from, to 
 // side must — pgx surfaces a typed error, so there is no reason to read
 // strings here.
 //
-// It exists for the composite keys a rename can collide on: entities' active
-// key (org_id, source, scope, source_id) and artifacts' (org_id, scope,
-// dedup_key).
-// The entity rename and a stamp of an external id on an entity reach it too.
-// Both keys are reachable without any corruption: a record spells the name
-// itself, whatever registry row repositoryHoldingSlug finds, so a name can be
-// spoken for by records alone. Mapping the violation is what makes that a
-// documented terminal state rather than a raw driver string the caller
-// retries forever.
+// It exists for the composite key a rename can collide on: entities' active
+// key (org_id, source, scope, source_id). The entity rename and a stamp of an
+// external id on an entity reach it too. The key is reachable without any
+// corruption: an entity spells the name itself, whatever registry row
+// repositoryHoldingSlug finds, so a name can be spoken for by entities alone.
+// Mapping the violation is what makes that a documented terminal state rather
+// than a raw driver string the caller retries forever.
 //
 // Mapped at the write rather than pre-checked on purpose: a pre-check inside
 // this transaction still races a concurrent entity insert, so the index has to

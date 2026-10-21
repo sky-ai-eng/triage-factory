@@ -16,7 +16,8 @@ import (
 )
 
 // newRecorderStores opens an in-memory SQLite, migrates it, and seeds one
-// conversations row the artifacts FK (conversation_id) can point at —
+// conversations row the artifacts FK (conversation_id) can point at, and the
+// registry row of octo/repo, the repository every push here goes to —
 // mirroring the pre-push hook's own test fixture so the two writers are
 // exercised against the same store.
 func newRecorderStores(t *testing.T) (db.Stores, string) {
@@ -38,7 +39,27 @@ func newRecorderStores(t *testing.T) (db.Stores, string) {
 	if _, err := conn.Exec(`INSERT INTO conversations (id, trigger_type, creator_user_id, origin, status) VALUES ('run-1', 'event', NULL, 'interactive', 'running')`); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
-	return sqlitestore.New(conn), "run-1"
+	stores := sqlitestore.New(conn)
+	registerOctoRepo(t, stores)
+	return stores, "run-1"
+}
+
+// registerOctoRepo gives the registry a row for octo/repo on the org's GitHub
+// host, carrying GitHub's id for it, as the repository of a run's checkout has
+// one: the branch sink keys a branch on the row. Returns the row's id, the
+// same one on every call.
+func registerOctoRepo(t *testing.T, stores db.Stores) string {
+	t.Helper()
+	ctx := context.Background()
+	ref := domain.RepoRef{Source: domain.RepoSourceGitHub, Host: "https://github.com", Owner: "octo", Repo: "repo", ExternalID: "1"}
+	row, err := stores.Repos.FindOrCreateByRefSystem(ctx, runmode.LocalDefaultOrgID, ref)
+	if err != nil {
+		t.Fatalf("register octo/repo: %v", err)
+	}
+	if _, err := stores.Repos.FillMissingExternalIDsSystem(ctx, runmode.LocalDefaultOrgID, []domain.RepoRef{ref}); err != nil {
+		t.Fatalf("record octo/repo's id: %v", err)
+	}
+	return row.ID
 }
 
 // recorderInfo is the run identity a delegated run carries — event-triggered,
@@ -81,7 +102,7 @@ func TestGitPushRecorder_RecordsBranch(t *testing.T) {
 	if a.Target != "octo/repo" || a.ExternalID != "refs/heads/feature/x" {
 		t.Errorf("target/external_id = %q/%q, want octo/repo, refs/heads/feature/x", a.Target, a.ExternalID)
 	}
-	if want := "git:branch:octo/repo:refs/heads/feature/x"; a.DedupKey != want {
+	if want := domain.BranchDedupKey(registerOctoRepo(t, stores), "refs/heads/feature/x"); a.DedupKey != want {
 		t.Errorf("dedup_key = %q, want %q", a.DedupKey, want)
 	}
 	if a.ConversationID != conversationID || a.OrgID != runmode.LocalDefaultOrgID || a.TeamID != runmode.LocalDefaultTeamID {

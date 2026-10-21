@@ -13,7 +13,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/entityscope"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
 
@@ -21,8 +20,8 @@ var attachLog = logging.Component("memoryentities")
 
 // Attach makes a conversation's memory reachable from every entity the work
 // materially engaged: the primary (task) entity, plus every entity it produced
-// (derived from the conversation's artifacts). Touched entities are recorded
-// durably at verb time by the exec funnel; role precedence in
+// (the entities the conversation's artifacts are about). Touched entities are
+// recorded durably at verb time by the exec funnel; role precedence in
 // RecordEntityTouchSystem (primary > produced > touched) converges all three
 // sets, so this needs no ordering care against those mid-run writes — a
 // touched row upgrades to produced here, and the primary entity ends primary
@@ -30,42 +29,25 @@ var attachLog = logging.Component("memoryentities")
 //
 // Best-effort and non-fatal throughout: it runs after the conversation_memory
 // upsert has already landed, so a join-row failure is logged and skipped, never
-// aborts the caller. A produced link skipped that way, or because no entity
-// carries the artifact's object and none can be created, is also counted
-// (CountSkippedLink).
+// aborts the caller. A produced link skipped that way, or because the artifact
+// carries no entity, is also counted (CountSkippedLink).
 //
 // The primary attach is unconditional even though the upsert is not — the join
 // row is what a later memory write on this conversation becomes reachable
-// through, and writing it costs nothing when there is no memory yet. On the
-// produced side, resolve-or-create (not lookup-only) is deliberate: a PR the
-// agent just opened may not have been polled yet, so the attach mints the
-// create-minimal stub the poller/enrichment path later fills (the artifact URL
-// links it out). A repo-level artifact target (a branch push, or owner/repo
-// with no '#N') maps to no entity and is skipped.
-//
-// A produced entity is keyed under its source's current scope in the org
-// (entityscope.Of); an artifact recorded in another scope, or whose source has
-// no scope there because it is not configured, attaches nothing. A Jira
-// artifact resolves through the issue id its dedup key records
-// (domain.ArtifactEntityIdentity), and attaches nothing when the key names no
-// id — it was recorded before Jira artifacts were keyed on one — or names
-// another site than the org's current one. A pull request's artifact resolves
-// through the node id it carries, when a writer learned one. An artifact's
-// target can be older than the entity's key, so the entity is never renamed
-// from it. A Linear or Jira artifact attaches only an entity that already
-// exists: the artifact does not record the Linear team or the Jira project its
-// issue sits in, and such an entity is created with one. The write's own touch
-// creates it from the response the verb read, so a Linear or Jira artifact
-// finds no entity here only when that touch failed, which is logged and
-// counted.
+// through, and writing it costs nothing when there is no memory yet. A
+// produced entity is the one its artifact was recorded against
+// (domain.Artifact.EntityID): the exec funnel resolves, and creates where none
+// exists yet, the entity each artifact is about before it writes the row, so a
+// pull request the agent just opened has its stub already. A branch is about
+// no entity and is skipped; any other artifact without one is one whose
+// entity did not resolve when it was written, which was logged then.
 //
 // A nil store is an absent capability, not an error, and the two cases are not
 // the same: a nil TaskMemory is nowhere to write, so nothing is attached at all
-// — not even the primary row. A nil Artifacts or Entities store costs only the
-// produced pass, which cannot resolve anything without them; the primary row
-// still lands.
+// — not even the primary row. A nil Artifacts store costs only the produced
+// pass; the primary row still lands.
 func Attach(ctx context.Context, stores db.Stores, orgID, conversationID, primaryEntityID string) {
-	taskMemory, artifacts, entities := stores.TaskMemory, stores.Artifacts, stores.Entities
+	taskMemory, artifacts := stores.TaskMemory, stores.Artifacts
 	if taskMemory == nil {
 		return
 	}
@@ -74,44 +56,28 @@ func Attach(ctx context.Context, stores db.Stores, orgID, conversationID, primar
 		attachLog.Warn("attach primary entity to conversation memory failed", "conversation", conversationID, "entity", primaryEntityID, "error", err)
 	}
 
-	if artifacts == nil || entities == nil {
+	if artifacts == nil {
 		return
 	}
-	// produced — every external object the agent created/mutated, resolved from
-	// the conversation's artifacts. A listing failure leaves the upsert +
-	// primary row intact.
+	// produced — every external object the agent created/mutated, through
+	// the entities the conversation's artifacts are about. A listing failure
+	// leaves the upsert + primary row intact.
 	arts, err := artifacts.ListByConversationSystem(ctx, orgID, conversationID)
 	if err != nil {
 		attachLog.Warn("list artifacts for produced-entity attach failed", "conversation", conversationID, "error", err)
 		return
 	}
 	for _, a := range arts {
-		keyScope, externalID, _ := domain.ArtifactEntityIdentity(a)
-		ref, kind, ok := domain.EntityRefForExternal(a.Provider, a.Target, externalID)
-		if !ok {
+		if a.Provider == domain.ArtifactProviderGit {
 			continue
 		}
-		scope, err := entityscope.Of(ctx, stores, orgID, ref.Source)
-		if err != nil {
-			attachLog.Warn("resolve produced entity scope for conversation memory failed",
-				"conversation", conversationID, "provider", a.Provider, "target", a.Target, "error", err)
-			CountSkippedLink(ctx, orgID, domain.MemoryRoleProduced, ref.Source, err)
+		if a.EntityID == "" {
+			CountSkippedLink(ctx, orgID, domain.MemoryRoleProduced, a.Provider, nil)
 			continue
 		}
-		if scope == "" || a.Scope != scope || (keyScope != "" && keyScope != scope) {
-			continue
-		}
-		ref.Scope = scope
-		ent, err := entityscope.Resolve(ctx, stores, orgID, ref, domain.EntityContainer{}, kind, a.URL, false)
-		if err != nil || ent == nil {
-			attachLog.Warn("resolve produced entity for conversation memory failed",
-				"conversation", conversationID, "provider", a.Provider, "target", a.Target, "error", err)
-			CountSkippedLink(ctx, orgID, domain.MemoryRoleProduced, ref.Source, err)
-			continue
-		}
-		if err := taskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, ent.ID, domain.MemoryRoleProduced); err != nil {
-			attachLog.Warn("attach produced entity to conversation memory failed", "conversation", conversationID, "entity", ent.ID, "error", err)
-			CountSkippedLink(ctx, orgID, domain.MemoryRoleProduced, ref.Source, err)
+		if err := taskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, a.EntityID, domain.MemoryRoleProduced); err != nil {
+			attachLog.Warn("attach produced entity to conversation memory failed", "conversation", conversationID, "entity", a.EntityID, "error", err)
+			CountSkippedLink(ctx, orgID, domain.MemoryRoleProduced, a.Provider, err)
 		}
 	}
 }

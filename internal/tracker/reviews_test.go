@@ -176,7 +176,7 @@ func TestGitHubNewReviews_MarksTFReviewsAndReplies(t *testing.T) {
 	ctx := context.Background()
 	org, team := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
 
-	submitted := domain.NewReviewArtifact("octo/repo", 7, "sha", "conv-1")
+	submitted := domain.NewReviewArtifact("octo/repo", 7, "PR_kwDO7", "sha", "conv-1")
 	submitted.TeamID, submitted.Scope, submitted.State, submitted.ExternalID = team, reviewTestHost, domain.ArtifactStateReviewSubmitted, "101"
 	if _, err := stores.Artifacts.UpsertSystem(ctx, org, submitted); err != nil {
 		t.Fatalf("seed review artifact: %v", err)

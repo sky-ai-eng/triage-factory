@@ -104,10 +104,10 @@ func Apply(ctx context.Context, repos db.RepositoryStore, resolver ghclient.Reso
 		switch {
 		case errors.Is(err, db.ErrRepoSlugOccupied), errors.Is(err, db.ErrRepoIdentityAmbiguous):
 			// Terminal: stored state a rewrite cannot be applied over — a
-			// durable entity/artifact still answering to the target name, a
-			// bare row a team tracks, or a row holding the name under another
-			// id that the pass above could not resolve. Retrying changes
-			// nothing until that state does.
+			// durable entity still answering to the target name, a bare row a
+			// team tracks, or a row holding the name under another id that the
+			// pass above could not resolve. Retrying changes nothing until
+			// that state does.
 			//
 			// Error, not Warn, and it recurs on every detection. The repetition
 			// is the point: a rename this product cannot apply is exactly what

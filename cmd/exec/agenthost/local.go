@@ -652,37 +652,44 @@ func shortCommit(sha string) string {
 	return sha
 }
 
-// ResetReviewDraft is the host side of `gh pr start-review --fresh`: a pure local
-// reset of this conversation's review draft for owner/repo#number, with zero GitHub calls.
-// It clears the staged comments, the body/event ready sentinel, and the
-// write-once Proposed snapshot back to an empty pending draft, keeping the
-// artifact row, its handle, and its pinned head SHA. Returns the draft's handle
-// and that pinned head SHA, or ("", "") when the run has no draft for that PR (the
-// caller falls through to a normal start-review).
+// ResetReviewDraft is the host side of `gh pr start-review --fresh`: a local
+// reset of this conversation's review draft for owner/repo#number, with no
+// GitHub write. It clears the staged comments, the body/event ready sentinel,
+// and the write-once Proposed snapshot back to an empty pending draft, keeping
+// the artifact row, its handle, and its pinned head SHA. Returns the draft's
+// handle and that pinned head SHA, or ("", "") when the run has no draft for
+// that PR (the caller falls through to a normal start-review).
+//
+// The draft is found by its key (domain.ReviewDedupKey), the node id GitHub
+// answers for owner/repo#number (pullRequestNodeID) and this conversation's
+// id, so whatever name the agent spelled the repository with, the reset lands
+// on the one draft for that pull request.
 //
 // Post-494 the whole review lives in details_json, so the reset is a single
 // artifact rewrite — there is no GitHub pending review to delete and no identity
 // branch (the multi-tenant collision the GitHub-native model had is gone).
 //
-// NOTE: HeadSHA is deliberately PRESERVED, not refreshed — refreshing it would
-// require a GetPR read, and --fresh is contractually zero-GitHub-calls. This is
-// safe for the use case that motivates --fresh (you pulled new commits mid-review
-// and need to redo the inline comments): a review WITH comments pins the atomic
-// submit's commit_id to its comments' own CommitSHA anchors (set per comment at
+// NOTE: HeadSHA is deliberately PRESERVED, not refreshed. This is safe for the
+// use case that motivates --fresh (you pulled new commits mid-review and need
+// to redo the inline comments): a review WITH comments pins the atomic submit's
+// commit_id to its comments' own CommitSHA anchors (set per comment at
 // add-review-comment, so the re-added comments anchor to the new HEAD), not to
 // this HeadSHA, and a comment-LESS review (a pure approve / body-only
 // request-changes) sends no commit_id at all, so a stale HeadSHA can't reach
-// GitHub from either shape. If a future flow needs the head re-pinned, refresh
-// it on the normal (non-fresh) start-review path, which already reads the head.
+// GitHub from either shape.
 func (c *LocalClient) ResetReviewDraft(ctx context.Context, owner, repo string, number int) (reviewID, commitSHA string, err error) {
+	prNodeID, err := c.pullRequestNodeID(ctx, owner, repo, number)
+	if err != nil {
+		return "", "", err
+	}
+	key := domain.ReviewDedupKey(prNodeID, c.info.ConversationID)
 	arts, err := c.listArtifactsByConversation(ctx)
 	if err != nil {
 		return "", "", err
 	}
-	target := domain.ReviewTarget(owner+"/"+repo, number)
 	var art *domain.Artifact
 	for i := range arts {
-		if arts[i].Kind == domain.ArtifactKindReview && arts[i].State == domain.ArtifactStateReviewPending && arts[i].Target == target {
+		if arts[i].Kind == domain.ArtifactKindReview && arts[i].State == domain.ArtifactStateReviewPending && arts[i].DedupKey == key {
 			art = &arts[i]
 			break
 		}
@@ -800,13 +807,22 @@ func (c *LocalClient) footer(kind string) string {
 // pool/tx branch in-process; relayRuntime relays it as one op so the tx stays
 // orchestrator-side. Returns the stored row. See TFAC-460.
 //
-// The artifact is recorded under the registry's name for its repository
-// (inRegistryName) before its branch link is anchored, so the link names the
-// repository the way the key does. A review draft and a pushed branch both
-// arrive here built under the name the agent's checkout spells.
+// The artifact is recorded against its repository's registry row
+// (onRegistryRow) before its branch link is anchored, so the link names the
+// repository the way the target does. A review draft and a pushed branch both
+// arrive here built under the name the agent's checkout spells, and a branch
+// takes its dedup key here, from the row's id. A branch whose row is missing
+// or unreadable is not recorded, as the runtime handles an artifact write that
+// fails: the loss is the relayed record's when there is one, and the push
+// still leaves its ledger row.
 func (c *LocalClient) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
-	a = c.inRegistryName(ctx, a)
+	a, err := c.onRegistryRow(ctx, a)
 	a = c.hostAnchorBranchURL(ctx, a)
+	if err != nil {
+		dropRelayedArtifact(ctx, a, err)
+		c.recordBotAction(ctx, branchPushActionInfo(a, c.info, c.githubCredential()))
+		return domain.Artifact{}, err
+	}
 	return c.rt.UpsertArtifact(ctx, a)
 }
 
@@ -1876,7 +1892,8 @@ func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, bas
 // GithubCreatePendingReview records this conversation's review draft — a fully TF-side
 // artifact, with zero GitHub writes (TFAC-494). It mints a conversation-scoped `review`
 // artifact (state=pending, no ready sentinel, empty ExternalID; the reviewed
-// commitSHA pinned into details for the atomic submit at approval) and returns
+// commitSHA pinned into details for the atomic submit at approval), keyed on the
+// node id GitHub answers for owner/repo#number (pullRequestNodeID), and returns
 // the artifact id as the local review handle the agent passes to add/finalize.
 //
 // Because the dedup key is conversation-scoped, two conversations (different teams, a re-delegate,
@@ -1886,12 +1903,36 @@ func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, bas
 // branch and ErrPendingReviewCollision. The comments param is unused (start-review
 // seeds no inline comments; the agent adds them via add-review-comment).
 func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, _ []ghclient.SubmitReviewComment) (string, error) {
-	a := domain.NewReviewArtifact(owner+"/"+repo, number, commitSHA, c.info.ConversationID)
+	prNodeID, err := c.pullRequestNodeID(ctx, owner, repo, number)
+	if err != nil {
+		return "", err
+	}
+	a := domain.NewReviewArtifact(owner+"/"+repo, number, prNodeID, commitSHA, c.info.ConversationID)
 	stored, err := c.UpsertArtifact(ctx, a)
 	if err != nil {
 		return "", fmt.Errorf("record review draft artifact: %w", err)
 	}
 	return stored.ID, nil
+}
+
+// pullRequestNodeID is the node id GitHub answers for owner/repo#number, read
+// through the run's repository gate (githubClientForRepo). A review draft is
+// keyed on it and linked to the entity carrying it, so it is never one the
+// sandbox supplies: a node id beside another pull request's coordinates would
+// attach the draft to a pull request the gate never saw.
+func (c *LocalClient) pullRequestNodeID(ctx context.Context, owner, repo string, number int) (string, error) {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return "", err
+	}
+	pr, err := client.GetPRBasic(ctx, owner, repo, number)
+	if err != nil {
+		return "", fmt.Errorf("read PR #%d for its node id: %w", number, err)
+	}
+	if pr.NodeID == "" {
+		return "", fmt.Errorf("PR #%d came back without a node id; cannot key its review draft — retry", number)
+	}
+	return pr.NodeID, nil
 }
 
 // ReviewDraftTarget implements Client: the owner/repo#number recorded on this
@@ -1956,13 +1997,18 @@ func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, 
 	// The PR number comes from the artifact target (the handle the agent passes
 	// carries no coordinates). Needed for both the live-head fallback and to
 	// resolve the base ref the compare-validation diffs against. owner/repo
-	// must name the same repo: validating against another repo's PR of the
-	// same number would accept lines from the wrong diff.
+	// must name the reviewed pull request's repository: validating against
+	// another repo's PR of the same number would accept lines from the wrong
+	// diff. The PR GitHub answers for owner/repo#number is compared with the
+	// one the draft is keyed on, by node id, so an old name GitHub still
+	// follows passes and a name GitHub has given to another repository does
+	// not. A draft whose key names no node id is compared by name instead.
 	targetOwner, targetRepo, number, ok := domain.ParsePRTarget(art.Target)
 	if !ok {
 		return "", fmt.Errorf("review artifact has a malformed target %q", art.Target)
 	}
-	if !strings.EqualFold(owner+"/"+repo, targetOwner+"/"+targetRepo) {
+	prNodeID, keyed := domain.ArtifactPullRequestNodeID(*art)
+	if !keyed && !strings.EqualFold(owner+"/"+repo, targetOwner+"/"+targetRepo) {
 		return "", fmt.Errorf("review %s is for %s/%s#%d, not %s/%s", art.ID, targetOwner, targetRepo, number, owner, repo)
 	}
 	client, err := c.githubClientForRepo(ctx, owner, repo)
@@ -1972,6 +2018,9 @@ func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, 
 	pr, err := client.GetPRBasic(ctx, owner, repo, number)
 	if err != nil {
 		return "", fmt.Errorf("fetch PR for comment anchor: %w", err)
+	}
+	if keyed && pr.NodeID != prNodeID {
+		return "", fmt.Errorf("review %s is for %s/%s#%d, not %s/%s#%d", art.ID, targetOwner, targetRepo, number, owner, repo, number)
 	}
 
 	var hunks map[string][]ghclient.Hunk
@@ -2353,7 +2402,13 @@ func (c *LocalClient) recordGithubComment(ctx context.Context, owner, repo strin
 			"conversation", c.info.ConversationID, "repo", owner+"/"+repo, "pr", number)
 		return
 	}
+	a.Provider = domain.ArtifactProviderGitHub
 	a.Target = fmt.Sprintf("%s/%s#%d", owner, repo, number)
+	// Under the registry's name, as recordGithubPR records a pull request, so
+	// the comment resolves the pull request's entity whichever spelling of
+	// its repository's name the agent used. onRegistryRow refuses only a
+	// branch.
+	*a, _ = c.onRegistryRow(ctx, *a)
 	act := githubAction(*a, domain.ActionCommentPosted, "", "", c.githubCredential())
 	if inReplyTo > 0 {
 		detail, _ := json.Marshal(map[string]any{"in_reply_to": inReplyTo})
@@ -2426,8 +2481,7 @@ func newGithubCommentArtifact(ref ghclient.CommentRef, state string) *domain.Art
 // the sandbox (daemon) and the local-mode CLI. Best-effort and on-success-only:
 // the PR is already open on GitHub by the time we get here, so a store failure is
 // logged and swallowed, never able to fail the action. The artifact dedup key
-// (github:pull_request:owner/repo#<number>) is the new idempotency guard that
-// replaces the retired pending_prs one-per-run lock.
+// (github:pull_request:<node id>) is the idempotency guard.
 
 // recordGithubPR upserts the `pull_request` artifact for a freshly opened PR. The
 // proposed snapshot {title, body} is the body exactly as sent to GitHub, footer
@@ -2436,22 +2490,23 @@ func newGithubCommentArtifact(ref ghclient.CommentRef, state string) *domain.Art
 // node_id / head_branch / base ride details_json for reconciliation and the
 // server's edit/approve handlers, and the node id also lands on the artifact's
 // and the pr_created row's node_id columns, which the reconciler's backstop
-// matches the two on. A zero number (a 2xx whose body didn't parse) has no
-// stable key to dedup on, so recording is skipped with a debug breadcrumb —
-// the PR still opened. The `draft` flag selects the artifact's
-// initial state (draft vs open);
-// the new PR path always creates drafts, but recording the param keeps the row
-// honest if a standalone caller ever opens a non-draft.
+// matches the two on. The row is keyed on the node id, so a 2xx whose body
+// carried no node id (or no number) has no stable key to dedup on, and
+// recording is skipped with a warning — the PR still opened. The `draft` flag
+// selects the artifact's initial state (draft vs open); the new PR path always
+// creates drafts, but recording the param keeps the row honest if a standalone
+// caller ever opens a non-draft.
 func (c *LocalClient) recordGithubPR(ctx context.Context, owner, repo, head, base, title, body string, number int, nodeID, htmlURL string, draft bool) {
-	if number <= 0 {
-		agenthostLog.Debug("github PR recorded without a number; skipping artifact",
-			"conversation", c.info.ConversationID, "repo", owner+"/"+repo)
+	if number <= 0 || nodeID == "" {
+		agenthostLog.Warn("github PR opened without a number or node id; skipping artifact",
+			"conversation", c.info.ConversationID, "repo", owner+"/"+repo, "number", number)
 		return
 	}
 	// Under the registry's name, before the action is built from it: the
 	// action's target is what the touched entity resolves through, and the
 	// touch takes the artifact's node id only when the two targets agree.
-	a := c.inRegistryName(ctx, domain.NewPullRequestArtifact(
+	// onRegistryRow refuses only a branch, so a pull request always comes back.
+	a, _ := c.onRegistryRow(ctx, domain.NewPullRequestArtifact(
 		owner+"/"+repo, number, nodeID, head, base, htmlURL, title, body, draft,
 	))
 	// to=the created state (draft/open) so the feed can read "created as draft".

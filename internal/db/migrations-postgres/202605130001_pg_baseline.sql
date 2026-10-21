@@ -1026,12 +1026,20 @@ CREATE TABLE public.repositories (
 -- (org_id, scope, dedup_key). scope is the provider namespace the object lives
 -- in, the value an entity of that provider is scoped under
 -- (domain.ExternalObjectScope): the GitHub host, the Jira site, the Linear
--- workspace id; target and dedup_key are only unique inside it. team_id is
--- denormalized from the conversation so reads scope by team; conversation_id is
--- nullable so the row survives a purge. node_id is the object's GraphQL node
--- id, which a GitHub comment row carries so a GraphQL delete naming the comment
--- by node id alone finds its row. A comment row exists only for a comment TF
--- posted.
+-- workspace id; target and dedup_key are only unique inside it. dedup_key names
+-- the object by an id and never by a name (domain.ArtifactDedupKey): a pull
+-- request by its GraphQL node id, a review draft by its pull request's node id
+-- and its conversation, a branch by its repository's registry row id and its
+-- ref, so a repository given a freed name records its own rows. entity_id is
+-- the entity the artifact is about (the pull request a pull request, review or
+-- comment row is on, the Jira or Linear issue, the Slack thread; NULL for a
+-- branch, which has none), and target is that entity's key, a display value
+-- every rename moves by entity_id. team_id is denormalized from the conversation
+-- so reads scope by team; conversation_id is nullable so the row survives a
+-- purge. node_id is the object's GraphQL node id, which a GitHub comment row
+-- carries so a GraphQL delete naming the comment by node id alone finds its
+-- row, and a pull request row so the reconciler's backstop finds it from its
+-- pr_created audit row. A comment row exists only for a comment TF posted.
 CREATE TABLE public.artifacts (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     conversation_id uuid,
@@ -1048,6 +1056,7 @@ CREATE TABLE public.artifacts (
     dedup_key text NOT NULL,
     details_json text,
     node_id text,
+    entity_id uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
@@ -1994,6 +2003,11 @@ CREATE INDEX idx_artifacts_conversation ON public.artifacts USING btree (convers
 CREATE INDEX idx_artifacts_node_id ON public.artifacts USING btree (org_id, scope, node_id) WHERE (node_id IS NOT NULL);
 
 
+-- A rename moves the targets of an entity's artifacts, and the coherence feed
+-- finds a pull request's review drafts, by entity_id.
+CREATE INDEX idx_artifacts_entity ON public.artifacts USING btree (entity_id) WHERE (entity_id IS NOT NULL);
+
+
 -- The GitHub poll tells a review TF submitted from a person's by whether a
 -- review artifact carries the review's numeric id as its external_id.
 CREATE INDEX idx_artifacts_external_id ON public.artifacts USING btree (org_id, scope, kind, external_id) WHERE (external_id IS NOT NULL);
@@ -2371,6 +2385,12 @@ ALTER TABLE ONLY public.artifacts
 
 ALTER TABLE ONLY public.artifacts
     ADD CONSTRAINT artifacts_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE SET NULL;
+
+
+-- SET NULL (entity_id) keeps the artifact, unlinked, if its entity is deleted;
+-- a merge of duplicate entities re-points it first.
+ALTER TABLE ONLY public.artifacts
+    ADD CONSTRAINT artifacts_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE SET NULL (entity_id);
 
 
 ALTER TABLE ONLY public.conversation_memory

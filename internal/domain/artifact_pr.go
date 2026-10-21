@@ -96,11 +96,15 @@ func GitHubPullURLBase(base, repoPath string, number int) string {
 }
 
 // PullRequestDedupKey is the stable key every writer that touches a given PR
-// upserts on: github:pull_request:owner/repo#<number>. The draft PR is created
-// for real immediately (no branch-anchored pending phase in this path), so it
-// keys on the number from the start.
-func PullRequestDedupKey(repoPath string, number int) string {
-	return ArtifactDedupKey(ArtifactProviderGitHub, ArtifactKindPullRequest, PullRequestTarget(repoPath, number), "")
+// upserts on: github:pull_request:<node id>, the pull request's GraphQL node
+// id. A repository rename does not change it, and a pull request in another
+// repository under a reused name has its own. "" for an empty node id: there
+// is nothing stable to key the row on.
+func PullRequestDedupKey(nodeID string) string {
+	if nodeID == "" {
+		return ""
+	}
+	return ArtifactDedupKey(ArtifactProviderGitHub, ArtifactKindPullRequest, nodeID, "")
 }
 
 // NewPullRequestArtifact builds the durable pull_request artifact for a PR the
@@ -110,9 +114,10 @@ func PullRequestDedupKey(repoPath string, number int) string {
 // state (draft vs open). Both Proposed and Snapshot start equal to the agent's
 // draft.
 //
-// The node id goes on the artifact's node_id column as well as in its details:
-// the column is what the reconciler's backstop matches a pr_created ledger row
-// against.
+// The row is keyed on the node id (PullRequestDedupKey), which also goes on
+// the artifact's node_id column and in its details: the column is what the
+// reconciler's backstop matches a pr_created ledger row against. A caller
+// with no node id has no key to write under and records nothing.
 //
 // This is the single source of truth for the PR-artifact shape, so the create
 // writer (the exec choke point) and any later reconciliation land on the same
@@ -143,7 +148,7 @@ func NewPullRequestArtifact(repoPath string, number int, nodeID, head, base, htm
 		URL:         htmlURL,
 		NodeID:      nodeID,
 		State:       state,
-		DedupKey:    PullRequestDedupKey(repoPath, number),
+		DedupKey:    PullRequestDedupKey(nodeID),
 		DetailsJSON: string(details),
 	}
 }

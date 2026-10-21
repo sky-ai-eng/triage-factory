@@ -77,6 +77,7 @@ func TestBranchPush_ResolvesItsOwnTier(t *testing.T) {
 	gh := startFakeGitHubComments(t)
 	stores, _, client := newGithubRecordingClient(t, gh.URL, true)
 	client.SetGitHubResolver(fakeGitHubResolver{baseURL: gh.URL, token: "tok", identity: ghclient.IdentityPAT})
+	registerRepo(t, stores, "octo", "repo", "1")
 
 	branch, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feat", "abc123", true)
 	if !ok {
@@ -103,6 +104,7 @@ func TestSetGitHubCredential_ReachesTheBranchRow(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
 	client := NewLocal(stores, info)
 	client.SetGitHubCredential(domain.CredentialGitHubPAT)
+	registerRepo(t, stores, "octo", "repo", "1")
 
 	branch, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feat", "abc123", true)
 	if !ok {

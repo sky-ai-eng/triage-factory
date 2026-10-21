@@ -1030,23 +1030,35 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 }
 
 // retireBranchArtifact flips the conversation's `branch` artifact for headRef
-// (on repoPath, on the GitHub host scope) to deleted, returning its web URL
-// for the audit row. A conversation with no such artifact — a push the
-// capture writers missed, or no conversation at all — is not an error: the PR
-// artifact carries the rejection on its own, and the returned URL falls back
-// to the branch link on scope's host so the audit row still links somewhere.
+// in repoPath's repository, on the GitHub host scope, to deleted, returning its
+// web URL for the audit row. The repository is the registry row repoPath
+// resolves to on scope — the one the branch delete just went to — and the
+// artifact is the one keyed on that row and headRef (domain.BranchDedupKey),
+// whatever name its target spells. A conversation with no such artifact — a
+// push the capture writers missed, a repository with no registry row, or no
+// conversation at all — is not an error: the PR artifact carries the rejection
+// on its own, and the returned URL falls back to the branch link on scope's
+// host so the audit row still links somewhere.
 func retireBranchArtifact(ctx context.Context, tx db.TxStores, orgID, conversationID, scope, repoPath, headRef string) (string, error) {
 	fallbackURL, _ := domain.BranchArtifactWebURL(scope, repoPath, headRef)
 	if conversationID == "" {
 		return fallbackURL, nil
 	}
+	repo, err := tx.Repos.GetByRef(ctx, orgID, domain.RepoRefFromSlug(scope, repoPath))
+	if err != nil {
+		return "", err
+	}
+	if repo == nil {
+		return fallbackURL, nil
+	}
+	key := domain.BranchDedupKey(repo.ID, headRef)
 	arts, err := tx.Artifacts.ListByConversation(ctx, orgID, conversationID)
 	if err != nil {
 		return "", err
 	}
 	for i := range arts {
 		a := arts[i]
-		if a.Kind != domain.ArtifactKindBranch || a.Scope != scope || a.Target != repoPath || a.ExternalID != headRef {
+		if a.Kind != domain.ArtifactKindBranch || a.Scope != scope || a.DedupKey != key {
 			continue
 		}
 		if a.State != domain.ArtifactStateBranchDeleted {

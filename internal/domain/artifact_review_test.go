@@ -1,9 +1,11 @@
 package domain
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestNewReviewArtifact_Shape(t *testing.T) {
-	a := NewReviewArtifact("octo/repo", 42, "headsha42", "conv_7")
+	a := NewReviewArtifact("octo/repo", 42, "PR_kwDOnode", "headsha42", "conv_7")
 
 	if a.Provider != ArtifactProviderGitHub {
 		t.Errorf("Provider = %q, want %q", a.Provider, ArtifactProviderGitHub)
@@ -21,9 +23,11 @@ func TestNewReviewArtifact_Shape(t *testing.T) {
 	if a.State != ArtifactStateReviewPending {
 		t.Errorf("State = %q, want %q", a.State, ArtifactStateReviewPending)
 	}
-	// Conversation-scoped dedup key: two conversations reviewing the same PR get distinct rows.
-	if a.DedupKey != "github:review:octo/repo#42:conv_7" {
-		t.Errorf("DedupKey = %q, want github:review:octo/repo#42:conv_7", a.DedupKey)
+	// Keyed on the PR's node id, not its repository's name, and
+	// conversation-scoped: two conversations reviewing the same PR get
+	// distinct rows.
+	if a.DedupKey != "github:review:PR_kwDOnode:conv_7" {
+		t.Errorf("DedupKey = %q, want github:review:PR_kwDOnode:conv_7", a.DedupKey)
 	}
 
 	d, err := ParseReviewArtifactDetails(a.DetailsJSON)
@@ -51,10 +55,14 @@ func TestNewReviewArtifact_Shape(t *testing.T) {
 func TestReviewDedupKey_ConversationScoped(t *testing.T) {
 	// The same PR reviewed by two conversations yields two distinct dedup keys, so the
 	// upsert never collapses them onto one row.
-	a := ReviewDedupKey("octo/repo", 7, "conv_a")
-	b := ReviewDedupKey("octo/repo", 7, "conv_b")
+	a := ReviewDedupKey("PR_kwDO7", "conv_a")
+	b := ReviewDedupKey("PR_kwDO7", "conv_b")
 	if a == b {
 		t.Errorf("two conversations on one PR must have distinct dedup keys, both = %q", a)
+	}
+	// No node id, no key: a draft keyed on nothing would be every PR's.
+	if got := ReviewDedupKey("", "conv_a"); got != "" {
+		t.Errorf("ReviewDedupKey with no node id = %q, want empty", got)
 	}
 }
 
@@ -105,8 +113,8 @@ func TestParseReviewArtifactDetails_Empty(t *testing.T) {
 }
 
 func TestFirstReadyReview(t *testing.T) {
-	pending := NewReviewArtifact("o/r", 1, "n1", "run_1") // ReviewEvent unset
-	ready := NewReviewArtifact("o/r", 2, "n2", "run_2")
+	pending := NewReviewArtifact("o/r", 1, "PR_kwDOnode", "n1", "run_1") // ReviewEvent unset
+	ready := NewReviewArtifact("o/r", 2, "PR_kwDOnode", "n2", "run_2")
 	rd, _ := ParseReviewArtifactDetails(ready.DetailsJSON)
 	rd.ReviewEvent = "APPROVE"
 	ready.DetailsJSON = MarshalReviewArtifactDetails(rd)
@@ -129,7 +137,7 @@ func TestFirstReadyReview(t *testing.T) {
 }
 
 func TestFirstPendingReviewArtifact(t *testing.T) {
-	pending := NewReviewArtifact("o/r", 1, "n1", "run_1")
+	pending := NewReviewArtifact("o/r", 1, "PR_kwDOnode", "n1", "run_1")
 	if got := FirstPendingReviewArtifact([]Artifact{pending}); got == nil || got.Target != "o/r#1" {
 		t.Errorf("FirstPendingReviewArtifact should find the pending review, got %+v", got)
 	}

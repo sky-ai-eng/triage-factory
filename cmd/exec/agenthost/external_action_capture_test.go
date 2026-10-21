@@ -149,6 +149,7 @@ func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 			stores, info := newCaptureStores(t, eventTriggered)
 			client := NewLocal(stores, info)
 			ctx := context.Background()
+			registerRepo(t, stores, "octo", "repo", "1")
 
 			branch, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feat", "abc123", true)
 			if !ok {
@@ -198,6 +199,7 @@ func TestCapture_BranchPush_AnchorsURLToOrgHost(t *testing.T) {
 	stores, info := newCaptureStores(t, false)
 	client := NewLocal(stores, info)
 	client.SetGitHubResolver(fakeGitHubResolver{baseURL: "https://ghe.example.com", token: "org-pat"})
+	registerRepo(t, stores, "octo", "repo", "1")
 
 	branch, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feat/x", "abc123", true)
 	if !ok {

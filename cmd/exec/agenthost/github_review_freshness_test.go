@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -40,7 +41,7 @@ func reviewFreshnessServer(t *testing.T, headSHA string, diffs map[string]string
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"number":7,"base":{"ref":"main","sha":"base0"},"head":{"sha":"`+headSHA+`"}}`)
+		_, _ = io.WriteString(w, `{"number":7,"node_id":"`+fakePRNodeID(r.URL.Path)+`","base":{"ref":"main","sha":"base0"},"head":{"sha":"`+headSHA+`"}}`)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -280,7 +281,12 @@ func TestLocalClient_FinalizeReview_StampsFinalizedHead(t *testing.T) {
 	})
 
 	t.Run("comment-less falls back to the start head with no GitHub call", func(t *testing.T) {
+		// start-review reads the PR for its node id; finalize reads nothing.
+		var finalizing atomic.Bool
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !finalizing.Load() && answerPRRead(w, r) {
+				return
+			}
 			t.Errorf("comment-less finalize must make NO GitHub call; got %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusInternalServerError)
 		}))
@@ -292,6 +298,7 @@ func TestLocalClient_FinalizeReview_StampsFinalizedHead(t *testing.T) {
 		if err != nil {
 			t.Fatalf("start review: %v", err)
 		}
+		finalizing.Store(true)
 		// A pure approve carries no body and no inline comments — allowed, and it
 		// reconciles nothing, so finalize touches GitHub not at all.
 		if _, err := client.FinalizeReviewDraft(context.Background(), handle, "APPROVE", ""); err != nil {
@@ -333,7 +340,7 @@ func TestLocalClient_FinalizeReview_Freshness_HTTP406Fallback(t *testing.T) {
 			_, _ = io.WriteString(w, fallbackFilesJSON)
 		default:
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"number":7,"base":{"ref":"main"},"head":{"sha":"head2"}}`)
+			_, _ = io.WriteString(w, `{"number":7,"node_id":"`+fakePRNodeID(r.URL.Path)+`","base":{"ref":"main"},"head":{"sha":"head2"}}`)
 		}
 	}))
 	t.Cleanup(srv.Close)

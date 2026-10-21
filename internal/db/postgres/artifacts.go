@@ -44,6 +44,7 @@ var _ db.ArtifactStore = (*artifactStore)(nil)
 const pgArtifactColumns = `
 	id, COALESCE(conversation_id::text, ''), org_id, team_id, provider, kind, scope, target,
 	COALESCE(external_id, ''), COALESCE(url, ''), COALESCE(node_id, ''),
+	COALESCE(entity_id::text, ''),
 	state, dedup_key, COALESCE(details_json, ''), created_at, updated_at
 `
 
@@ -89,15 +90,15 @@ func (s *artifactStore) InsertArtifactIfAbsentSystem(ctx context.Context, orgID 
 		INSERT INTO artifacts
 			(id, conversation_id, org_id, team_id, provider, kind, target,
 			 external_id, url, state, dedup_key, details_json, updated_at, scope,
-			 node_id)
+			 node_id, entity_id)
 		VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()),
 		        NULLIF($2, '')::uuid, $3, $4, $5, $6, $7,
 		        NULLIF($8, ''), NULLIF($9, ''), $10, $11, NULLIF($12, ''), now(), $13,
-		        NULLIF($14, ''))
+		        NULLIF($14, ''), NULLIF($15, '')::uuid)
 		ON CONFLICT (org_id, scope, dedup_key) DO NOTHING`,
 		a.ID, a.ConversationID, orgID, a.TeamID, a.Provider, a.Kind, a.Target,
 		a.ExternalID, a.URL, a.State, a.DedupKey, a.DetailsJSON, a.Scope,
-		a.NodeID,
+		a.NodeID, a.EntityID,
 	)
 	if err != nil {
 		return false, err
@@ -135,8 +136,10 @@ func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a d
 	// NULLIF('','') folds an empty incoming target to NULL first. A non-empty
 	// incoming value still overwrites (the intentional-change / migration
 	// path). details_json is preserved-on-empty for the same reason: a comment
-	// delete cannot restate the thread a reply answers. state stays
-	// last-writer-wins by design (it tracks the latest action).
+	// delete cannot restate the thread a reply answers. So is entity_id: a
+	// writer that resolved no entity must not unlink a row another writer
+	// linked. state stays last-writer-wins by design (it tracks the latest
+	// action).
 	//
 	// conversation_id AND team_id are both preserved-on-conflict, NOT last-writer-wins:
 	// the artifact belongs to its CREATING conversation (domain.Artifact's doc),
@@ -151,11 +154,11 @@ func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a d
 		INSERT INTO artifacts
 			(id, conversation_id, org_id, team_id, provider, kind, target,
 			 external_id, url, state, dedup_key, details_json, updated_at, scope,
-			 node_id)
+			 node_id, entity_id)
 		VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()),
 		        NULLIF($2, '')::uuid, $3, $4, $5, $6, $7,
 		        NULLIF($8, ''), NULLIF($9, ''), $10, $11, NULLIF($12, ''), now(), $13,
-		        NULLIF($14, ''))
+		        NULLIF($14, ''), NULLIF($15, '')::uuid)
 		ON CONFLICT (org_id, scope, dedup_key) DO UPDATE SET
 			conversation_id       = artifacts.conversation_id,
 			team_id      = artifacts.team_id,
@@ -163,13 +166,14 @@ func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a d
 			external_id  = COALESCE(EXCLUDED.external_id, artifacts.external_id),
 			url          = COALESCE(EXCLUDED.url, artifacts.url),
 			node_id      = COALESCE(EXCLUDED.node_id, artifacts.node_id),
+			entity_id    = COALESCE(EXCLUDED.entity_id, artifacts.entity_id),
 			state        = EXCLUDED.state,
 			details_json = COALESCE(EXCLUDED.details_json, artifacts.details_json),
 			updated_at   = now()
 		RETURNING `+pgArtifactColumns,
 		a.ID, a.ConversationID, orgID, a.TeamID, a.Provider, a.Kind, a.Target,
 		a.ExternalID, a.URL, a.State, a.DedupKey, a.DetailsJSON, a.Scope,
-		a.NodeID,
+		a.NodeID, a.EntityID,
 	)
 	var out domain.Artifact
 	if err := scanArtifact(row, &out); err != nil {
@@ -296,22 +300,21 @@ func (s *artifactStore) ListByConversationSystem(ctx context.Context, orgID, con
 	return scanArtifactRows(rows)
 }
 
-// ListPendingReviewsByTargetSystem runs on the admin pool (BYPASSRLS) for the
-// PR coherence feed — a background eventbus subscriber with no JWT-claims
-// context that must see every team's pending review drafts anchored to the PR
-// (the head-SHA change is org-wide, not team-scoped). Filters to pending review
-// drafts on the given PR target on scope's host. org_id stays in the WHERE
+// ListPendingReviewsByEntitySystem runs on the admin pool (BYPASSRLS) for
+// the PR coherence feed — a background eventbus subscriber with no JWT-claims
+// context that must see every team's pending review drafts about the PR (the
+// head-SHA change is org-wide, not team-scoped). org_id stays in the WHERE
 // clause as defense in depth.
-func (s *artifactStore) ListPendingReviewsByTargetSystem(ctx context.Context, orgID, scope, target string) ([]domain.Artifact, error) {
-	if err := db.RequireExternalObjectScope(scope); err != nil {
-		return nil, err
+func (s *artifactStore) ListPendingReviewsByEntitySystem(ctx context.Context, orgID, entityID string) ([]domain.Artifact, error) {
+	if entityID == "" {
+		return nil, nil
 	}
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT `+pgArtifactColumns+`
 		FROM artifacts
-		WHERE org_id = $1 AND kind = $2 AND state = $3 AND scope = $4 AND target = $5
+		WHERE org_id = $1 AND entity_id = $2 AND provider = $3 AND kind = $4 AND state = $5
 		ORDER BY created_at DESC, id DESC
-	`, orgID, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, scope, target)
+	`, orgID, entityID, domain.ArtifactProviderGitHub, domain.ArtifactKindReview, domain.ArtifactStateReviewPending)
 	if err != nil {
 		return nil, err
 	}
@@ -601,7 +604,7 @@ type rowScanner interface {
 func scanArtifact(sc rowScanner, a *domain.Artifact) error {
 	return sc.Scan(
 		&a.ID, &a.ConversationID, &a.OrgID, &a.TeamID, &a.Provider, &a.Kind, &a.Scope, &a.Target,
-		&a.ExternalID, &a.URL, &a.NodeID,
+		&a.ExternalID, &a.URL, &a.NodeID, &a.EntityID,
 		&a.State, &a.DedupKey, &a.DetailsJSON, &a.CreatedAt, &a.UpdatedAt,
 	)
 }

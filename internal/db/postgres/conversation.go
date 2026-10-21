@@ -1746,9 +1746,8 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 		       t.entity_id = $2
 		       OR EXISTS (
 		           SELECT 1 FROM artifacts a
-		           WHERE a.org_id = $1 AND a.conversation_id = r.id
-		             AND a.kind = $6 AND a.state = $7 AND a.target = $8
-		             AND a.scope = (SELECT pe.scope FROM entities pe WHERE pe.org_id = $1 AND pe.id = $2)
+		           WHERE a.org_id = $1 AND a.conversation_id = r.id AND a.entity_id = $2
+		             AND a.kind = $6 AND a.state = $7
 		       )
 		       OR EXISTS (
 		           SELECT 1
@@ -1758,8 +1757,8 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 		             AND repo.retired_at IS NULL
 		             AND repo.host = (SELECT pe.scope FROM entities pe WHERE pe.org_id = $1 AND pe.id = $2)
 		             AND (
-		                  (LOWER(repo.owner || '/' || repo.repo) = LOWER($4) AND w.ref = $9)
-		                  OR (w.ref = $10 AND (
+		                  (LOWER(repo.owner || '/' || repo.repo) = LOWER($4) AND w.ref = $8)
+		                  OR (w.ref = $9 AND (
 		                       LOWER(repo.owner || '/' || repo.repo) = LOWER($4)
 		                       OR LOWER(repo.owner || '/' || repo.repo) = LOWER($5)
 		                  ))
@@ -1771,7 +1770,7 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 		      WHERE te.org_id = $1 AND te.task_id = r.task_id AND te.event_id = $3 AND te.kind = 'injected'
 		  )
 		ORDER BY r.started_at ASC, r.id ASC
-	`, orgID, query.EntityID, query.EventID, query.BaseRepo, query.HeadRepo, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, query.ReviewTarget, query.PRRef, query.BranchRef)
+	`, orgID, query.EntityID, query.EventID, query.BaseRepo, query.HeadRepo, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, query.PRRef, query.BranchRef)
 	if err != nil {
 		return nil, err
 	}

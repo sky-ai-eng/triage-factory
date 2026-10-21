@@ -288,6 +288,7 @@ func TestRefreshJira_MoveBetweenConfiguredProjects(t *testing.T) {
 		TeamID: runmode.LocalDefaultTeamID, Provider: domain.ArtifactProviderJira, Kind: domain.ArtifactKindIssue,
 		Scope: before.Scope, Target: "ENG-1", ExternalID: "10001", State: domain.ArtifactStateIssueUpdated,
 		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue, domain.JiraIssueResource(jiraSite, "10001"), ""),
+		EntityID: before.ID,
 	})
 	if err != nil {
 		t.Fatalf("seed artifact: %v", err)

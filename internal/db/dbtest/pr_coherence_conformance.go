@@ -27,10 +27,17 @@ type PRCoherenceTargetFactory func(t *testing.T) (
 // on but does not own. Each backend implements them against its own SQL or
 // sibling stores.
 type PRCoherenceSeeder struct {
-	// PendingReview attaches a pending review artifact for repo#prNumber on
-	// the GitHub host (the artifact's scope) to the conversation — the review
-	// arm's evidence that an agent is drafting against this PR.
-	PendingReview func(t *testing.T, conversationID, host, repo string, prNumber int)
+	// PendingReview attaches a pending review artifact for repo#prNumber,
+	// keyed on the pull request's node id prNodeID, on the GitHub host (the
+	// artifact's scope) to the conversation, linked to the entity carrying
+	// prNodeID on the host as the exec funnel links it (none, when no entity
+	// carries it) — the review arm's evidence that an agent is drafting
+	// against this PR.
+	PendingReview func(t *testing.T, conversationID, host, repo string, prNumber int, prNodeID string)
+
+	// PullRequestNodeID records nodeID as the external id of the PR entity
+	// entityID: the node id the poller learns from the pull request.
+	PullRequestNodeID func(t *testing.T, entityID, nodeID string)
 
 	// Worktree records that the conversation materialized ref of the
 	// "owner/repo" slug on a GitHub host, registering the repository on that
@@ -60,6 +67,7 @@ type PRCoherenceSeeder struct {
 const (
 	coherenceRepo      = "acme/widgets"
 	coherencePRNumber  = 7
+	coherencePRNodeID  = "PR_kwDOcoherence7"
 	coherencePRRef     = "pr-7"
 	coherenceBranchRef = "ref-feature~coherence"
 )
@@ -73,13 +81,12 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 	// naming the same PR every way the schema can record it.
 	query := func(entityID, eventID string) db.PRCoherenceTargetQuery {
 		return db.PRCoherenceTargetQuery{
-			EntityID:     entityID,
-			EventID:      eventID,
-			BaseRepo:     coherenceRepo,
-			HeadRepo:     coherenceRepo,
-			ReviewTarget: domain.ReviewTarget(coherenceRepo, coherencePRNumber),
-			PRRef:        coherencePRRef,
-			BranchRef:    coherenceBranchRef,
+			EntityID:  entityID,
+			EventID:   eventID,
+			BaseRepo:  coherenceRepo,
+			HeadRepo:  coherenceRepo,
+			PRRef:     coherencePRRef,
+			BranchRef: coherenceBranchRef,
 		}
 	}
 
@@ -116,6 +123,7 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 		ctx := context.Background()
 
 		entityID := seed.Entity(t, "review-subject")
+		extra.PullRequestNodeID(t, entityID, coherencePRNodeID)
 		eventID := seed.Event(t, entityID, domain.EventGitHubPRCICheckFailed)
 
 		// The reviewer's task hangs off a different entity entirely, so only
@@ -127,7 +135,7 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 			TaskID: otherTaskID, PromptID: conversationTestPromptID, Status: "open",
 			BlueprintRunID: seed.BlueprintRun(t, otherTaskID),
 		})
-		extra.PendingReview(t, reviewerID, TestGitHubHost, coherenceRepo, coherencePRNumber)
+		extra.PendingReview(t, reviewerID, TestGitHubHost, coherenceRepo, coherencePRNumber, coherencePRNodeID)
 
 		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
 		if err != nil {
@@ -136,14 +144,71 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 		requireOneCoherenceTarget(t, targets, reviewerID)
 	})
 
+	t.Run("ReviewArmMatchesTheEntityWhateverNameTheTargetSpells", func(t *testing.T) {
+		// A draft written under a name the repository has since given up, or
+		// in another case, is still a draft of this pull request: the arm
+		// matches the entity the draft is about, not its target.
+		store, orgID, seed, extra := factory(t)
+		ctx := context.Background()
+
+		entityID := seed.Entity(t, "review-name-subject")
+		extra.PullRequestNodeID(t, entityID, coherencePRNodeID)
+		eventID := seed.Event(t, entityID, domain.EventGitHubPRCICheckFailed)
+
+		otherEntityID := seed.Entity(t, "review-name-author")
+		otherEventID := seed.Event(t, otherEntityID, domain.EventGitHubPRCICheckFailed)
+		otherTaskID := seed.Task(t, otherEntityID, domain.EventGitHubPRCICheckFailed, otherEventID)
+		reviewerID := seed.Conversation(t, domain.Conversation{
+			TaskID: otherTaskID, PromptID: conversationTestPromptID, Status: "open",
+			BlueprintRunID: seed.BlueprintRun(t, otherTaskID),
+		})
+		extra.PendingReview(t, reviewerID, TestGitHubHost, "Acme/old-widgets", coherencePRNumber, coherencePRNodeID)
+
+		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
+		if err != nil {
+			t.Fatalf("ListPRCoherenceTargetsSystem: %v", err)
+		}
+		requireOneCoherenceTarget(t, targets, reviewerID)
+	})
+
+	t.Run("ReviewArmSkipsAnotherPullRequestUnderTheSameName", func(t *testing.T) {
+		// A repository deleted and recreated under the same name has its own
+		// pull request #7. A draft of the old one shares the target but not
+		// the entity, so its conversation is not told the new one moved.
+		store, orgID, seed, extra := factory(t)
+		ctx := context.Background()
+
+		entityID := seed.Entity(t, "review-reuse-subject")
+		extra.PullRequestNodeID(t, entityID, coherencePRNodeID)
+		eventID := seed.Event(t, entityID, domain.EventGitHubPRCICheckFailed)
+
+		otherEntityID := seed.Entity(t, "review-reuse-author")
+		otherEventID := seed.Event(t, otherEntityID, domain.EventGitHubPRCICheckFailed)
+		otherTaskID := seed.Task(t, otherEntityID, domain.EventGitHubPRCICheckFailed, otherEventID)
+		reviewerID := seed.Conversation(t, domain.Conversation{
+			TaskID: otherTaskID, PromptID: conversationTestPromptID, Status: "open",
+			BlueprintRunID: seed.BlueprintRun(t, otherTaskID),
+		})
+		extra.PendingReview(t, reviewerID, TestGitHubHost, coherenceRepo, coherencePRNumber, "PR_kwDOdeleted7")
+
+		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
+		if err != nil {
+			t.Fatalf("ListPRCoherenceTargetsSystem: %v", err)
+		}
+		if len(targets) != 0 {
+			t.Fatalf("a draft of another pull request under %s#%d reached this one: %+v", coherenceRepo, coherencePRNumber, targets)
+		}
+	})
+
 	t.Run("ReviewArmMatchesOnlyTheEntitysHost", func(t *testing.T) {
-		// A review target names a pull request only on one host. A pending
-		// review recorded on another host is a review of a different pull
-		// request, so its conversation is not told this one moved.
+		// A node id names a pull request only on one host. A pending review
+		// recorded on another host is a review of a different pull request,
+		// so its conversation is not told this one moved.
 		store, orgID, seed, extra := factory(t)
 		ctx := context.Background()
 
 		entityID := seed.Entity(t, "review-host-subject")
+		extra.PullRequestNodeID(t, entityID, coherencePRNodeID)
 		eventID := seed.Event(t, entityID, domain.EventGitHubPRCICheckFailed)
 
 		otherEntityID := seed.Entity(t, "review-host-author")
@@ -153,7 +218,7 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 			TaskID: otherTaskID, PromptID: conversationTestPromptID, Status: "open",
 			BlueprintRunID: seed.BlueprintRun(t, otherTaskID),
 		})
-		extra.PendingReview(t, reviewerID, TestOtherGitHubHost, coherenceRepo, coherencePRNumber)
+		extra.PendingReview(t, reviewerID, TestOtherGitHubHost, coherenceRepo, coherencePRNumber, coherencePRNodeID)
 
 		targets, err := store.ListPRCoherenceTargetsSystem(ctx, orgID, query(entityID, eventID))
 		if err != nil {

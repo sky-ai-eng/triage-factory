@@ -49,6 +49,7 @@ type Reconciler struct {
 	resolver  clientResolver
 	artifacts db.ArtifactStore
 	actions   db.ExternalActionStore // read for the pr_created rows the backstop works from
+	entities  db.EntityStore         // read for the pull request entity a backfilled artifact is about
 	orgs      db.OrgsStore           // read for the org's current GitHub host
 	ws        *websocket.Hub         // nil-safe: broadcasts are skipped when unset (tests)
 	// prResolved runs after a pull request's draft → open transition commits.
@@ -66,8 +67,8 @@ type PullRequestResolvedHook func(ctx context.Context, orgID, conversationID str
 
 // NewReconciler builds the shared reconciler. ws may be nil (broadcasts become
 // no-ops); the stores + resolver are required.
-func NewReconciler(resolver clientResolver, artifacts db.ArtifactStore, actions db.ExternalActionStore, orgs db.OrgsStore, ws *websocket.Hub) *Reconciler {
-	return &Reconciler{resolver: resolver, artifacts: artifacts, actions: actions, orgs: orgs, ws: ws}
+func NewReconciler(resolver clientResolver, artifacts db.ArtifactStore, actions db.ExternalActionStore, entities db.EntityStore, orgs db.OrgsStore, ws *websocket.Hub) *Reconciler {
+	return &Reconciler{resolver: resolver, artifacts: artifacts, actions: actions, entities: entities, orgs: orgs, ws: ws}
 }
 
 // onCurrentHost returns the org's current GitHub host and the artifacts of
@@ -152,11 +153,11 @@ const prBackstopWindow = 7 * 24 * time.Hour
 // conversation was purged, which leaves no one to own the artifact. It
 // fetches those pull requests by node id (RefreshPRs, batched per owner of the
 // row's target), which gives what the row does not carry: the repository's
-// current name, the number, link, refs, title and body. The artifact is
-// recorded under the current name, so a pull request in a repository renamed
-// since it was opened is backfilled where the rename's rewrite would have
-// moved it. When every pull request already has its artifact, the pass makes
-// no GitHub call.
+// current name, the number, link, refs, title and body. The artifact is keyed
+// on the node id (domain.PullRequestDedupKey), the key the create verb writes
+// under, so the two writers land on one row whatever name each spelled the
+// repository with; its target is the current name. When every pull request
+// already has its artifact, the pass makes no GitHub call.
 //
 // The artifact is recorded in the state the verb opened the pull request in,
 // and the reconcile that follows applies any transition since. The write is
@@ -218,9 +219,13 @@ func (rc *Reconciler) BackfillPRArtifacts(ctx context.Context, orgID string) err
 }
 
 // recordBackfilledPR records the pull_request artifact for the pr_created row
-// act from snap, GitHub's current copy of the pull request, under the
-// repository's current name. The proposed snapshot is what GitHub holds now:
-// the title and body the verb sent, unless someone has edited them since.
+// act from snap, GitHub's current copy of the pull request, keyed on the node
+// id act carries and linked to the entity carrying it: the create verb's own
+// recording resolved, or created, that entity before its artifact write
+// failed. The target is the entity's key, as every writer records it, and
+// GitHub's current name when no entity carries the node id. The proposed
+// snapshot is what GitHub holds now: the title and body the verb sent, unless
+// someone has edited them since.
 func (rc *Reconciler) recordBackfilledPR(ctx context.Context, orgID, host string, act domain.ExternalAction, snap domain.PRSnapshot) {
 	target := domain.PullRequestTarget(snap.Repo, snap.Number)
 	if _, _, _, ok := domain.ParsePRTarget(target); !ok {
@@ -234,6 +239,15 @@ func (rc *Reconciler) recordBackfilledPR(ctx context.Context, orgID, host string
 	art.OrgID = orgID
 	art.TeamID = act.TeamID
 	art.Scope = host
+	if rc.entities != nil {
+		entity, err := rc.entities.GetByExternalIDSystem(ctx, orgID, domain.ArtifactProviderGitHub, host, act.NodeID)
+		if err != nil {
+			reconcileLog.Warn("backstop: read the PR's entity failed; recording the artifact unlinked",
+				"org", orgID, "target", target, "error", err)
+		} else if entity != nil {
+			art.EntityID, art.Target = entity.ID, entity.SourceID
+		}
+	}
 	inserted, err := rc.artifacts.InsertArtifactIfAbsentSystem(ctx, orgID, art)
 	if err != nil {
 		reconcileLog.Warn("backstop: record PR artifact failed",

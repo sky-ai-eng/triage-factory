@@ -27,8 +27,9 @@ func TestNewBranchArtifact_Shape(t *testing.T) {
 	if a.URL != "" {
 		t.Errorf("url = %q, want none until the sink anchors it to the org's host", a.URL)
 	}
-	if want := "git:branch:octo/repo:refs/heads/feature/x"; a.DedupKey != want {
-		t.Errorf("dedup_key = %q, want %q", a.DedupKey, want)
+	// Nor the registry row: the sink keys it (BranchDedupKey).
+	if a.DedupKey != "" {
+		t.Errorf("dedup_key = %q, want none until the sink keys it on the registry row", a.DedupKey)
 	}
 	var d branchDetails
 	if err := json.Unmarshal([]byte(a.DetailsJSON), &d); err != nil {
@@ -36,6 +37,18 @@ func TestNewBranchArtifact_Shape(t *testing.T) {
 	}
 	if d.SHA != "abc123" || !d.New {
 		t.Errorf("details = %+v, want sha=abc123 new=true", d)
+	}
+}
+
+func TestBranchDedupKey(t *testing.T) {
+	if got, want := BranchDedupKey("repo-uuid", "refs/heads/feature/x"), "git:branch:repo-uuid:refs/heads/feature/x"; got != want {
+		t.Errorf("BranchDedupKey = %q, want %q", got, want)
+	}
+	if got := BranchDedupKey("", "refs/heads/x"); got != "" {
+		t.Errorf("BranchDedupKey with no repository = %q, want empty", got)
+	}
+	if got := BranchDedupKey("repo-uuid", ""); got != "" {
+		t.Errorf("BranchDedupKey with no ref = %q, want empty", got)
 	}
 }
 

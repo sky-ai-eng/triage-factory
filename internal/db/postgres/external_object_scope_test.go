@@ -77,8 +77,8 @@ func TestArtifactStore_Postgres_ReturnedRowUnderClaims(t *testing.T) {
 			ConversationID: conversationID, TeamID: teamID,
 			Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
 			Scope: dbtest.TestOtherGitHubHost, Target: domain.PullRequestTarget("octo/api", 3), ExternalID: "3",
-			URL:   dbtest.TestOtherGitHubHost + "/octo/api/pull/3",
-			State: domain.ArtifactStatePRDraft, DedupKey: domain.PullRequestDedupKey("octo/api", 3),
+			URL:    dbtest.TestOtherGitHubHost + "/octo/api/pull/3",
+			NodeID: "PR_kw3", State: domain.ArtifactStatePRDraft, DedupKey: domain.PullRequestDedupKey("PR_kw3"),
 		}
 		read := func(id string) func() (*domain.Artifact, error) {
 			return func() (*domain.Artifact, error) { return store.Get(ctx, orgID, id) }

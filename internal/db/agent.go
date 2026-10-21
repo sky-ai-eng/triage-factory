@@ -173,13 +173,12 @@ type MessageWindow struct {
 // materialized PR/head-branch checkout. EventID is the duplicate fence for
 // same-task additive delivery.
 type PRCoherenceTargetQuery struct {
-	EntityID     string
-	EventID      string
-	BaseRepo     string
-	HeadRepo     string
-	ReviewTarget string
-	PRRef        string
-	BranchRef    string
+	EntityID  string
+	EventID   string
+	BaseRepo  string
+	HeadRepo  string
+	PRRef     string
+	BranchRef string
 }
 
 // Returned-row shapes. The lifecycle writes below split by which
@@ -473,10 +472,11 @@ type ConversationStore interface {
 	// ListPRCoherenceTargetsSystem finds delegation conversations relevant to
 	// one PR event. Relevance is entity-, review-, or checkout-level; EventID
 	// excludes a conversation whose same-task additive path already recorded
-	// the event as injected. A checkout matches only when its repository is on
-	// the PR entity's own GitHub host (its scope), and a pending review only
-	// when the review artifact is recorded in that scope: the same slug on
-	// another host is another repository. A checkout of a retired repository
+	// the event as injected. A pending review matches when its draft is about
+	// the PR entity (artifacts.entity_id), whatever name the draft's target
+	// spells. A checkout matches only when its
+	// repository is on the PR entity's own GitHub host (its scope): the same
+	// slug on another host is another repository. A checkout of a retired repository
 	// never matches, because its name belongs to the repository GitHub serves
 	// under it now. Admin-pool only: the coherence subscriber
 	// has no viewer claims and must see every relevant team conversation in

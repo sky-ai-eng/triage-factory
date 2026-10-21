@@ -9,13 +9,13 @@ import (
 )
 
 // RunArtifactUpsertConformance covers the rules ArtifactStore's upsert applies
-// to every artifact kind on a conflict. Today that is details_json, which is
-// preserve-on-empty: a write that passes no details keeps the ones the row
-// holds, and a write that passes details replaces them. The rule is
-// store-wide, so it is checked for each kind a writer gives details to, built
-// by the constructors those writers use, through both Upsert and UpsertSystem.
-// The factory is ExternalObjectScopeFactory's: a fresh, empty org and a team
-// per call.
+// to every artifact kind on a conflict. details_json is preserve-on-empty: a
+// write that passes no details keeps the ones the row holds, and a write that
+// passes details replaces them. The rule is store-wide, so it is checked for
+// each kind a writer gives details to, built by the constructors those
+// writers use, through both Upsert and UpsertSystem. entity_id is
+// preserve-on-empty the same way. The factory is ExternalObjectScopeFactory's:
+// a fresh, empty org and a team per call.
 func RunArtifactUpsertConformance(t *testing.T, mk ExternalObjectScopeFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -24,6 +24,8 @@ func RunArtifactUpsertConformance(t *testing.T, mk ExternalObjectScopeFactory) {
 	if !ok {
 		t.Fatal("NewBranchArtifact refused the fixture branch")
 	}
+	// The host sink keys a branch on its repository's registry row.
+	branch.DedupKey = domain.BranchDedupKey("repo-octo-api", branch.ExternalID)
 	kinds := []struct {
 		name string
 		a    domain.Artifact
@@ -37,7 +39,7 @@ func RunArtifactUpsertConformance(t *testing.T, mk ExternalObjectScopeFactory) {
 		},
 		{
 			name:     "review",
-			a:        domain.NewReviewArtifact("octo/api", 7, "abc123", ""),
+			a:        domain.NewReviewArtifact("octo/api", 7, "PR_kw7", "abc123", ""),
 			replaced: `{"head_sha":"def456"}`,
 		},
 		{
@@ -78,6 +80,29 @@ func RunArtifactUpsertConformance(t *testing.T, mk ExternalObjectScopeFactory) {
 			return s.UpsertSystem(ctx, orgID, a)
 		}},
 	} {
+		t.Run("Entity_is_preserved_on_empty/"+door.name, func(t *testing.T) {
+			s, orgID, teamID := mk(t)
+			entity, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, domain.ArtifactProviderGitHub, TestGitHubHost, "octo/api#7", "PR_kw7", "pr", "t", "")
+			if err != nil {
+				t.Fatalf("seed entity: %v", err)
+			}
+			in := domain.NewPullRequestArtifact("octo/api", 7, "PR_kw7", "feat", "main", "", "Title", "Body", true)
+			in.TeamID, in.Scope, in.EntityID = teamID, TestGitHubHost, entity.ID
+			first, err := door.upsert(s.Artifacts, orgID, in)
+			if err != nil || first.EntityID != entity.ID {
+				t.Fatalf("%s (linked) = entity %q, %v; want %s", door.name, first.EntityID, err, entity.ID)
+			}
+			AssertWriteReturnedStoredRow(t, door.name+" (linked)", first, func() (*domain.Artifact, error) {
+				return s.Artifacts.Get(ctx, orgID, first.ID)
+			})
+			// A later writer that resolved no entity does not unlink the row.
+			bare := in
+			bare.EntityID = ""
+			kept, err := door.upsert(s.Artifacts, orgID, bare)
+			if err != nil || kept.ID != first.ID || kept.EntityID != entity.ID {
+				t.Errorf("%s (unlinked) = entity %q on %s, %v; want %s kept on %s", door.name, kept.EntityID, kept.ID, err, entity.ID, first.ID)
+			}
+		})
 		for _, k := range kinds {
 			t.Run("Details_are_preserved_on_empty/"+door.name+"/"+k.name, func(t *testing.T) {
 				s, orgID, teamID := mk(t)

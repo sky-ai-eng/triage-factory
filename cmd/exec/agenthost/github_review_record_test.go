@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -32,18 +33,60 @@ func reviewDiffServer(t *testing.T, headSHA *string) *httptest.Server {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"number":7,"base":{"ref":"main"},"head":{"sha":"`+*headSHA+`"}}`)
+		_, _ = io.WriteString(w, `{"number":7,"node_id":"`+fakePRNodeID(r.URL.Path)+`","base":{"ref":"main"},"head":{"sha":"`+*headSHA+`"}}`)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// testPRNodeID is the GraphQL node id the fake GitHub servers in this package
+// answer for pull request number: the id a start-review keys its draft on.
+func testPRNodeID(number int) string {
+	return "PR_kwDOtest" + strconv.Itoa(number)
+}
+
+// fakePRNodeID is testPRNodeID for the pull request a
+// /repos/{owner}/{repo}/pulls/{number} request path names, so a fake server's
+// PR object carries the node id start-review keyed the draft on. "" for a path
+// that names no pull request.
+func fakePRNodeID(path string) string {
+	_, rest, ok := strings.Cut(path, "/pulls/")
+	if !ok {
+		return ""
+	}
+	number, _, _ := strings.Cut(rest, "/")
+	n, err := strconv.Atoi(number)
+	if err != nil {
+		return ""
+	}
+	return testPRNodeID(n)
+}
+
+// answerPRRead answers r when it is the pull request read the host makes for
+// a review draft's node id (GET /repos/{owner}/{repo}/pulls/{number}), with
+// the PR object carrying testPRNodeID, and reports whether it did. A fake
+// GitHub that must see nothing else hands every other request to its own
+// failure.
+func answerPRRead(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet || strings.Contains(r.Header.Get("Accept"), "diff") {
+		return false
+	}
+	_, number, ok := strings.Cut(r.URL.Path, "/pulls/")
+	node := fakePRNodeID(r.URL.Path)
+	if !ok || node == "" || strings.Contains(number, "/") {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = io.WriteString(w, `{"number":`+number+`,"node_id":"`+node+`","base":{"ref":"main"},"head":{"sha":"pr-head"}}`)
+	return true
 }
 
 // TestLocalClient_GithubCreatePendingReview_RecordsLocalDraft pins that
 // start-review lands one conversation-scoped `review` artifact with ZERO GitHub writes:
 // state=pending (no ready sentinel), empty ExternalID (no GitHub review until
 // approval), the head SHA pinned into details, deduped on
-// github:review:owner/repo#<number>:<conversation_id> — across both write paths. The
-// returned handle is the artifact id.
+// github:review:<the node id GitHub answers for the PR>:<conversation_id> —
+// across both write paths. The returned handle is the artifact id.
 func TestLocalClient_GithubCreatePendingReview_RecordsLocalDraft(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
@@ -51,8 +94,12 @@ func TestLocalClient_GithubCreatePendingReview_RecordsLocalDraft(t *testing.T) {
 			name = "event-triggered"
 		}
 		t.Run(name, func(t *testing.T) {
-			// No GitHub call should happen during start-review; fail loudly if one does.
+			// start-review reads the PR for its node id and makes no other GitHub
+			// call; fail loudly if one happens.
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if answerPRRead(w, r) {
+					return
+				}
 				t.Errorf("unexpected GitHub call during start-review: %s %s", r.Method, r.URL.Path)
 				_, _ = io.WriteString(w, `{}`)
 			}))
@@ -76,7 +123,7 @@ func TestLocalClient_GithubCreatePendingReview_RecordsLocalDraft(t *testing.T) {
 			if a.ID != handle {
 				t.Errorf("handle = %q, want the artifact id %q", handle, a.ID)
 			}
-			wantDedup := "github:review:octo/repo#7:" + info.ConversationID
+			wantDedup := domain.ReviewDedupKey(testPRNodeID(7), info.ConversationID)
 			if a.Kind != domain.ArtifactKindReview || a.State != domain.ArtifactStateReviewPending ||
 				a.Target != "octo/repo#7" || a.ExternalID != "" || a.DedupKey != wantDedup {
 				t.Errorf("review artifact mismatch: %+v (want dedup %q)", a, wantDedup)
@@ -329,6 +376,9 @@ func TestLocalClient_ResetReviewDraft(t *testing.T) {
 // normal start-review.
 func TestLocalClient_ResetReviewDraft_NoDraft(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerPRRead(w, r) {
+			return
+		}
 		t.Errorf("unexpected GitHub call during reset-with-no-draft: %s %s", r.Method, r.URL.Path)
 	}))
 	t.Cleanup(srv.Close)
@@ -621,7 +671,14 @@ func TestLocalClient_PerCommentHeadSHA_CapturedAcrossCheckoutAdvance(t *testing.
 // jailed CLI dials. A handle that names no draft of this conversation is
 // refused rather than answered.
 func TestReviewDraftTarget_ReturnsRecordedPR(t *testing.T) {
-	stores, info, local := newGithubRecordingClient(t, "http://127.0.0.1:0", true)
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !answerPRRead(w, r) {
+			t.Errorf("unexpected GitHub call: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(gh.Close)
+	stores, info, local := newGithubRecordingClient(t, gh.URL, true)
+	registerRepo(t, stores, "octo", "repo", "1")
 	handle, err := local.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
 	if err != nil {
 		t.Fatalf("GithubCreatePendingReview: %v", err)
@@ -655,12 +712,20 @@ func TestReviewDraftTarget_ReturnsRecordedPR(t *testing.T) {
 // TestLocalClient_GithubAddPendingReviewComment_RefusesOtherRepo pins the
 // host's own check that a staged comment's repo is the review's. The PR number
 // always comes from the draft, so a different owner/repo would validate the
-// comment against another repo's PR of the same number. Refused before any
-// GitHub call, and nothing is staged.
+// comment against another repo's PR of the same number. The PR GitHub answers
+// for the comment's owner/repo#number carries another node id than the one the
+// draft is keyed on, so the comment is refused before any diff is read, and
+// nothing is staged.
 func TestLocalClient_GithubAddPendingReviewComment_RefusesOtherRepo(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("unexpected GitHub call for a mismatched repo: %s %s", r.Method, r.URL.Path)
-		_, _ = io.WriteString(w, `{}`)
+		if strings.HasSuffix(r.URL.Path, "/repos/octo/repo/pulls/7") && answerPRRead(w, r) {
+			return
+		}
+		if strings.Contains(r.Header.Get("Accept"), "diff") || !strings.HasSuffix(r.URL.Path, "/repos/octo/other/pulls/7") {
+			t.Errorf("unexpected GitHub call for a mismatched repo: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"number":7,"node_id":"PR_kwDOother7","base":{"ref":"main"},"head":{"sha":"h"}}`)
 	}))
 	t.Cleanup(srv.Close)
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
@@ -678,5 +743,29 @@ func TestLocalClient_GithubAddPendingReviewComment_RefusesOtherRepo(t *testing.T
 	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 0 {
 		t.Errorf("a refused comment must not be staged, got %+v", d.StagedComments)
+	}
+}
+
+// TestLocalClient_GithubAddPendingReviewComment_AcceptsAnotherSpelling pins the
+// other half of that check: an owner/repo GitHub resolves to the pull request
+// the draft is keyed on — the repository's old name, or another case — is the
+// review's repository, and the comment stages.
+func TestLocalClient_GithubAddPendingReviewComment_AcceptsAnotherSpelling(t *testing.T) {
+	head := "commit_v1"
+	srv := reviewDiffServer(t, &head)
+	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
+	registerRepo(t, stores, "octo", "repo", "1")
+
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
+	if err != nil {
+		t.Fatalf("GithubCreatePendingReview: %v", err)
+	}
+	if _, err := client.GithubAddPendingReviewComment(context.Background(), "Octo", "old-repo", handle, "a.go", "nit", 3, nil, "worktree_head"); err != nil {
+		t.Fatalf("GithubAddPendingReviewComment under another name of the repository: %v", err)
+	}
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
+	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	if len(d.StagedComments) != 1 {
+		t.Errorf("staged comments = %+v, want the one comment", d.StagedComments)
 	}
 }

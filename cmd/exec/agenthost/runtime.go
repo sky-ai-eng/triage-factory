@@ -579,8 +579,10 @@ func (r *directRuntime) DeleteConversationWorktree(ctx context.Context, reposito
 }
 
 // UpsertArtifact stamps the run identity and the org's current scope
-// (stampScopeInfo) onto a and upserts it, composing the branch-push external
-// action into the SAME write. Event-triggered runs route admin-pool; manual
+// (stampScopeInfo) onto a, links it to the entity it is about
+// (resolveArtifactEntity: a review draft's pull request; a branch has none)
+// and upserts it, composing the branch-push external action into the SAME
+// write. Event-triggered runs route admin-pool; manual
 // runs wrap in the kicking-off user's synthetic claims. Returns the stored
 // row. Each write is retried on a retryable error like the recording funnel's
 // (withRecordRetry) — the upsert is idempotent and the push row's dedup key is
@@ -598,6 +600,7 @@ func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (
 		r.dropBranchPush(ctx, a, act, err)
 		return domain.Artifact{}, err
 	}
+	resolveArtifactEntity(ctx, r.stores, r.info, &a, domain.EntityContainer{})
 	if r.info.IsEventTriggered {
 		var stored domain.Artifact
 		err := withRecordRetry(ctx, func() error {

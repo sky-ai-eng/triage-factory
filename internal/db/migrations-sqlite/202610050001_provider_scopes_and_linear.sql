@@ -5,9 +5,11 @@
 -- request's node id, a repository row can be retired to give up a name GitHub
 -- has handed to another repository, a team's Jira tracked set and every Jira
 -- issue entity reference a Jira project registry row, every Jira and Linear
--- issue entity is written with its issue id, Linear becomes a tracked source,
--- and five smaller
--- changes ride along: the org GitHub App's unusable state, the claim's source
+-- issue entity is written with its issue id, pull request, review and branch
+-- artifacts are keyed on ids rather than their repository's name, every
+-- artifact references the entity it is about and Jira artifacts keyed on an
+-- issue key are keyed on the issue's id, Linear
+-- becomes a tracked source, and five smaller changes ride along: the org GitHub App's unusable state, the claim's source
 -- manifest, the retirement of the 'completed' conversation status, node ids on
 -- artifacts and audit-ledger rows, and the table of rate-limit readings.
 --
@@ -1367,6 +1369,230 @@ DROP TABLE github_entity_repo;
 DROP TABLE github_entity_node;
 DROP TABLE entity_scope;
 
+-- ===========================================================================
+-- 6. Pull request, review and branch artifacts keyed on ids
+-- ===========================================================================
+--
+-- These artifacts are keyed on an id rather than their repository's name
+-- (domain.ArtifactDedupKey):
+--
+--   pull_request  github:pull_request:<the pull request's node id>
+--   review        github:review:<the pull request's node id>:<conversation id>
+--   branch        git:branch:<the repository's registry row id>:<ref>
+--
+-- A name is given to other repositories: one created under a deleted
+-- repository's name, or renamed onto it, would otherwise land its pull request
+-- #N and its branches on the old repository's rows. target keeps the name, as
+-- a display value.
+--
+-- Each existing row is re-keyed from what it records:
+--
+--   pull_request  the node id on the row, or else the one in its details,
+--                 where every create recorded it, or else the PR entity's its
+--                 target names in its scope (section 5 gave a polled pull
+--                 request its node id). The row's node_id takes it too, as
+--                 every create writes it now.
+--   review        the node id of the pull request its target names in its
+--                 scope: the oldest pull_request row's that names it (the one
+--                 re-keyed above), else the PR entity's (section 5 gave a
+--                 polled pull request its node id). The conversation id in
+--                 the key stays.
+--   branch        the live registry row its target names on its scope. The
+--                 ref in the key stays.
+--
+-- Names compare case-insensitively, as GitHub's do. A row that resolves to
+-- nothing keeps its key. Nothing writes that shape, so it is history no
+-- writer lands on again.
+--
+-- One object recorded under two spellings of its repository's name — before a
+-- rename was applied, or in another case — re-keys to one key. The older row
+-- (created_at, then id) takes it and the newer is deleted: both describe the
+-- one object, and the older is the one its first writer recorded. No table
+-- references an artifact row.
+CREATE TEMP TABLE pr_artifact_node AS
+SELECT id, org_id, scope, target, created_at, node_id
+  FROM (SELECT a.id, a.org_id, a.scope, a.target, a.created_at,
+               COALESCE(NULLIF(a.node_id, ''),
+                        CASE WHEN json_valid(a.details_json)
+                             THEN NULLIF(CAST(json_extract(a.details_json, '$.node_id') AS TEXT), '') END,
+                        (SELECT e.external_id FROM entities e
+                          WHERE e.org_id = a.org_id AND e.source = 'github' AND e.scope = a.scope
+                            AND LOWER(e.source_id) = LOWER(a.target) AND COALESCE(e.external_id, '') <> ''
+                          ORDER BY e.created_at, e.id LIMIT 1)) AS node_id
+          FROM artifacts a
+         WHERE a.provider = 'github' AND a.kind = 'pull_request')
+ WHERE node_id IS NOT NULL;
+
+CREATE TEMP TABLE artifact_rekey (
+    id         TEXT PRIMARY KEY,
+    org_id     TEXT NOT NULL,
+    scope      TEXT NOT NULL,
+    created_at DATETIME NOT NULL,
+    new_key    TEXT NOT NULL
+);
+
+INSERT INTO artifact_rekey (id, org_id, scope, created_at, new_key)
+SELECT id, org_id, scope, created_at, 'github:pull_request:' || node_id
+  FROM pr_artifact_node;
+
+-- rest is the key after 'github:review:' (14 characters): the target, then
+-- ':' and the conversation id when the key has one. Neither holds a ':'.
+INSERT INTO artifact_rekey (id, org_id, scope, created_at, new_key)
+SELECT id, org_id, scope, created_at,
+       'github:review:' || node_id ||
+       CASE WHEN instr(rest, ':') > 0 THEN substr(rest, instr(rest, ':')) ELSE '' END
+  FROM (SELECT r.id, r.org_id, r.scope, r.created_at,
+               substr(r.dedup_key, 15) AS rest,
+               COALESCE(
+                   (SELECT p.node_id FROM pr_artifact_node p
+                     WHERE p.org_id = r.org_id AND p.scope = r.scope AND LOWER(p.target) = LOWER(r.target)
+                     ORDER BY p.created_at, p.id LIMIT 1),
+                   (SELECT e.external_id FROM entities e
+                     WHERE e.org_id = r.org_id AND e.source = 'github' AND e.scope = r.scope
+                       AND LOWER(e.source_id) = LOWER(r.target) AND COALESCE(e.external_id, '') <> ''
+                     ORDER BY e.created_at, e.id LIMIT 1)) AS node_id
+          FROM artifacts r
+         WHERE r.provider = 'github' AND r.kind = 'review'
+           AND substr(r.dedup_key, 1, 14) = 'github:review:')
+ WHERE node_id IS NOT NULL;
+
+-- rest is the key after 'git:branch:' (11 characters): owner/repo, ':', the
+-- ref.
+INSERT INTO artifact_rekey (id, org_id, scope, created_at, new_key)
+SELECT b.id, b.org_id, b.scope, b.created_at,
+       'git:branch:' || repo.id || substr(b.rest, instr(b.rest, ':'))
+  FROM (SELECT a.id, a.org_id, a.scope, a.target, a.created_at, substr(a.dedup_key, 12) AS rest
+          FROM artifacts a
+         WHERE a.provider = 'git' AND a.kind = 'branch'
+           AND substr(a.dedup_key, 1, 11) = 'git:branch:') b
+  JOIN repositories repo
+    ON repo.org_id = b.org_id AND repo.source = 'github' AND repo.host = b.scope
+   AND repo.retired_at IS NULL
+   AND LOWER(repo.owner || '/' || repo.repo) = LOWER(b.target)
+ WHERE instr(b.rest, ':') > 0 AND instr(b.rest, ':') < length(b.rest);
+
+DELETE FROM artifacts
+ WHERE id IN (SELECT id
+                FROM (SELECT id, row_number() OVER (PARTITION BY org_id, scope, new_key
+                                                    ORDER BY created_at, id) AS n
+                        FROM artifact_rekey)
+               WHERE n > 1);
+
+UPDATE artifacts
+   SET dedup_key = (SELECT k.new_key FROM artifact_rekey k WHERE k.id = artifacts.id)
+ WHERE id IN (SELECT id FROM artifact_rekey);
+
+UPDATE artifacts
+   SET node_id = (SELECT p.node_id FROM pr_artifact_node p WHERE p.id = artifacts.id)
+ WHERE node_id IS NULL AND id IN (SELECT id FROM pr_artifact_node);
+
+DROP TABLE artifact_rekey;
+DROP TABLE pr_artifact_node;
+
+-- ===========================================================================
+-- 7. Artifacts reference the entity they are about
+-- ===========================================================================
+--
+-- artifacts.entity_id is the entity an artifact is about
+-- (domain.Artifact.EntityID): the pull request a pull request, review or
+-- comment row is on, the Jira or Linear issue. A branch has none. target is
+-- that entity's key, and every write that moves a key (an entity's rename, a
+-- repository's, the merge or fold of two entities) moves the targets of the
+-- entity's artifacts by it. SET NULL keeps an artifact, unlinked, if its
+-- entity is deleted; a merge re-points it first.
+ALTER TABLE artifacts ADD COLUMN entity_id TEXT REFERENCES entities(id) ON DELETE SET NULL;
+CREATE INDEX idx_artifacts_entity ON artifacts (entity_id) WHERE entity_id IS NOT NULL;
+
+-- Each existing row is linked to the entity carrying the provider id its key
+-- names in its scope (a pull request's or review's node id, a Jira issue's id,
+-- a Linear issue's UUID), or else to the entity its target names there,
+-- compared case-insensitively: an active one first, then the newest. resource
+-- is the key's segment after provider:kind:, up to the next ':'.
+CREATE TEMP TABLE artifact_subject AS
+SELECT id, org_id, provider, kind, scope, target,
+       CASE WHEN instr(rest, ':') > 0 THEN substr(rest, 1, instr(rest, ':') - 1) ELSE rest END AS resource
+  FROM (SELECT id, org_id, provider, kind, scope, target,
+               substr(dedup_key, length(provider) + length(kind) + 3) AS rest
+          FROM artifacts
+         WHERE provider IN ('github', 'jira', 'linear', 'slack')
+           AND substr(dedup_key, 1, length(provider) + length(kind) + 2) = provider || ':' || kind || ':');
+
+UPDATE artifacts
+   SET entity_id = (
+       SELECT COALESCE(
+                  (SELECT e.id FROM entities e
+                    WHERE e.org_id = s.org_id AND e.source = s.provider AND e.scope = s.scope
+                      AND e.external_id = CASE
+                          WHEN s.provider = 'github' AND s.kind IN ('pull_request', 'review')
+                               AND instr(s.resource, '#') = 0 THEN s.resource
+                          WHEN s.provider = 'jira' AND instr(s.resource, '/') > 0
+                               THEN substr(s.resource, instr(s.resource, '/') + 1)
+                          WHEN s.provider = 'linear' THEN s.resource
+                          END
+                    ORDER BY e.created_at, e.id LIMIT 1),
+                  (SELECT e.id FROM entities e
+                    WHERE e.org_id = s.org_id AND e.source = s.provider AND e.scope = s.scope
+                      AND LOWER(e.source_id) = LOWER(s.target)
+                    ORDER BY e.state = 'active' DESC, e.created_at DESC, e.id LIMIT 1))
+         FROM artifact_subject s
+        WHERE s.id = artifacts.id)
+ WHERE id IN (SELECT id FROM artifact_subject);
+
+UPDATE artifacts
+   SET target = (SELECT e.source_id FROM entities e WHERE e.id = artifacts.entity_id)
+ WHERE entity_id IS NOT NULL
+   AND target <> (SELECT e.source_id FROM entities e WHERE e.id = artifacts.entity_id);
+
+-- A Jira artifact is keyed on its issue's site and id (domain.JiraIssueResource:
+-- the query-escaped site, '/', the id). Rows recorded before that carry the
+-- issue key (jira:issue:<KEY>) or, for a comment, the comment id alone
+-- (jira:comment:<comment id>), and are re-keyed from the issue their entity
+-- names. The site is escaped by replacing '%', ':' and '/', which is
+-- url.QueryEscape for a site holding no other character it escapes; a row on
+-- a site that does, or with no entity carrying an issue id, keeps its key.
+-- One issue recorded under both shapes keeps the older row, as section 6 does.
+CREATE TEMP TABLE jira_rekey (
+    id         TEXT PRIMARY KEY,
+    org_id     TEXT NOT NULL,
+    scope      TEXT NOT NULL,
+    created_at DATETIME NOT NULL,
+    new_key    TEXT NOT NULL
+);
+
+INSERT INTO jira_rekey (id, org_id, scope, created_at, new_key)
+SELECT a.id, a.org_id, a.scope, a.created_at,
+       'jira:' || a.kind || ':' ||
+       replace(replace(replace(a.scope, '%', '%25'), ':', '%3A'), '/', '%2F') || '/' || e.external_id ||
+       CASE WHEN a.kind = 'comment' THEN ':' || s.resource ELSE '' END
+  FROM artifacts a
+  JOIN artifact_subject s ON s.id = a.id
+  JOIN entities e ON e.id = a.entity_id
+ WHERE a.provider = 'jira' AND a.kind IN ('issue', 'comment')
+   AND instr(s.resource, '/') = 0
+   AND a.dedup_key = 'jira:' || a.kind || ':' || s.resource
+   AND COALESCE(e.external_id, '') <> ''
+   AND a.scope <> '' AND a.scope NOT GLOB '*[^-A-Za-z0-9._~:/%]*';
+
+DELETE FROM artifacts
+ WHERE id IN (SELECT id
+                FROM (SELECT id, row_number() OVER (PARTITION BY org_id, scope, k
+                                                    ORDER BY created_at, id) AS n
+                        FROM (SELECT id, org_id, scope, created_at, new_key AS k FROM jira_rekey
+                              UNION ALL
+                              SELECT a.id, a.org_id, a.scope, a.created_at, a.dedup_key
+                                FROM artifacts a
+                               WHERE a.id NOT IN (SELECT id FROM jira_rekey)
+                                 AND EXISTS (SELECT 1 FROM jira_rekey r
+                                              WHERE r.org_id = a.org_id AND r.scope = a.scope
+                                                AND r.new_key = a.dedup_key)))
+               WHERE n > 1);
+
+UPDATE artifacts
+   SET dedup_key = (SELECT k.new_key FROM jira_rekey k WHERE k.id = artifacts.id)
+ WHERE id IN (SELECT id FROM jira_rekey);
+
+DROP TABLE jira_rekey;
+DROP TABLE artifact_subject;
 
 DROP TABLE org_scope;
 DROP TABLE host_case;

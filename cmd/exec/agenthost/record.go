@@ -138,11 +138,12 @@ func deletesUnrecordedComment(ctx context.Context, stores db.Stores, info Conver
 
 // RecordExternalWrite is the shared recording funnel behind every exec
 // choke-point write: it stamps the run's identity and the org's current scope
-// for each provider (stampScopeInfo) onto a and act (if present),
-// upserts a (if non-nil) and appends act (if non-nil) in the SAME write —
-// admin pool for event-triggered runs, a synthetic-claims tx for manual ones
-// — logs (never fails) a write error, and resolves the touched entity
-// strictly after the write settles (see recordTouchInfo's ordering doc).
+// for each provider (stampScopeInfo) onto a and act (if present), links a to
+// the entity it is about (resolveArtifactEntity), upserts a (if non-nil) and
+// appends act (if non-nil) in the SAME write — admin pool for event-triggered
+// runs, a synthetic-claims tx for manual ones — logs (never fails) a write
+// error, and records the touched entity once the write settles. Both entity
+// resolutions run outside the write's transaction (see recordEntityTouch).
 //
 // a is nil for an audit-only write that produces no artifact to compose
 // with (a Slack reaction, a review-thread reply) — mirrors the former
@@ -219,6 +220,10 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	if err == nil && deletesUnrecordedComment(ctx, stores, info, a) {
 		a, lost = nil, nil
 	}
+	var subject resolvedEntity
+	if err == nil && a != nil {
+		subject = resolveArtifactEntity(ctx, stores, info, a, container)
+	}
 	if err == nil {
 		var artifactErr error
 		err = withRecordRetry(ctx, func() error {
@@ -267,14 +272,11 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 		agenthostLog.Warn("external write recording failed (action already applied)",
 			"conversation", info.ConversationID, "kind", kind, "target", target, "error", err)
 	}
-	// Resolve the touched entity outside the audit write (TFAC-513 §2).
-	touched := recordTouchInfo(ctx, stores, info, a, act, container)
+	// Record the touched entity outside the audit write (TFAC-513 §2).
+	recordTouchInfo(ctx, stores, info, a, act, container, subject)
 	// Same placement, same reason: an admin-pool write, so it must run after
-	// withWriteInfo's tx has settled. It takes the touch's resolution because
-	// on the common path the two want the same entity — githubAction copies the
-	// artifact's target and url onto the action — and resolving is a
-	// FindOrCreate, not a read.
-	stampPRAttribution(ctx, stores, info, a, touched)
+	// withWriteInfo's tx has settled.
+	stampPRAttribution(ctx, stores, info, a)
 }
 
 // --- touched-entity resolution (TFAC-513 §2) ---
@@ -320,32 +322,38 @@ type entityCoordinate struct {
 // uses (ee/slack/ingest.go), so a bot-authored write on a thread
 // resolves/creates the identical entity a human mention would.
 func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info ConversationInfo, c entityCoordinate) (string, error) {
+	entity, err := resolveEntityInfo(ctx, stores, info, c)
+	if err != nil || entity == nil {
+		return "", err
+	}
+	return entity.ID, nil
+}
+
+// resolveEntityInfo is resolveTouchedEntityInfo returning the entity itself,
+// nil where that returns "".
+func resolveEntityInfo(ctx context.Context, stores db.Stores, info ConversationInfo, c entityCoordinate) (*domain.Entity, error) {
 	if stores.Entities == nil {
-		return "", nil
+		return nil, nil
 	}
 	ref, kind, ok := domain.EntityRefForExternal(c.provider, c.target, c.externalID)
 	if !ok {
-		return "", nil
+		return nil, nil
 	}
 	scope, err := entityscope.Of(ctx, stores, info.OrgID, ref.Source)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if scope == "" || (c.scope != "" && c.scope != scope) {
 		// The source has no scope in this org — it is not configured — or the
 		// object belongs to a namespace the org has since left, so the object
 		// has no address an entity could be keyed under.
-		return "", nil
+		return nil, nil
 	}
 	ref.Scope = scope
 	// The poll cycle (or, for Slack, the ingest pipeline) seeds the title from
 	// context; neither an ExternalAction nor an addressed read carries one.
 	// url rides through when present.
-	entity, err := entityscope.Resolve(ctx, stores, info.OrgID, ref, c.container, kind, c.url, true)
-	if err != nil {
-		return "", err
-	}
-	return entity.ID, nil
+	return entityscope.Resolve(ctx, stores, info.OrgID, ref, c.container, kind, c.url, true)
 }
 
 // recordEntityTouch resolves-or-creates the touched entity for a coordinate
@@ -361,9 +369,7 @@ func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info Conver
 // for the life of a synthetic-claims tx, so these ...System (admin-pool)
 // writes inside that closure would deadlock. Every funnel caller invokes it
 // only after withWriteInfo returns; the read path carries no tx.
-// It returns the entity it resolved (empty for a skipped or failed resolve) so
-// a later consumer in the same funnel call can reuse it rather than resolving
-// the same key again; callers with no such consumer ignore the result.
+// It returns the entity it resolved (empty for a skipped or failed resolve).
 func recordEntityTouch(ctx context.Context, stores db.Stores, info ConversationInfo, c entityCoordinate) string {
 	id, err := resolveTouchedEntityInfo(ctx, stores, info, c)
 	if err != nil {
@@ -372,61 +378,120 @@ func recordEntityTouch(ctx context.Context, stores db.Stores, info ConversationI
 		memoryentities.CountSkippedLink(ctx, info.OrgID, domain.MemoryRoleTouched, c.provider, err)
 		return ""
 	}
-	if id == "" || stores.TaskMemory == nil {
-		return id
-	}
-	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, info.OrgID, info.ConversationID, id, domain.MemoryRoleTouched); err != nil {
-		agenthostLog.Warn("touched-entity record failed", "conversation", info.ConversationID, "entity", id, "error", err)
-		memoryentities.CountSkippedLink(ctx, info.OrgID, domain.MemoryRoleTouched, c.provider, err)
-	}
+	recordTouchRow(ctx, stores, info, c.provider, id)
 	return id
 }
 
-// resolvedEntity is one (provider, target) → entity resolution, carried between
-// two consumers of the same funnel call. The coordinates ride along with the id
-// because reuse is only sound when the second consumer wants the same key, and
-// the two are not the same field: the touch resolves off the external action,
-// the attribution stamps off the artifact.
-type resolvedEntity struct {
-	entityID string
-	provider string
-	target   string
+// recordTouchRow writes the (conversation, entity, role='touched') row for an
+// entity a coordinate of provider resolved to; an empty id is a skipped
+// coordinate and writes nothing.
+func recordTouchRow(ctx context.Context, stores db.Stores, info ConversationInfo, provider, id string) {
+	if id == "" || stores.TaskMemory == nil {
+		return
+	}
+	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, info.OrgID, info.ConversationID, id, domain.MemoryRoleTouched); err != nil {
+		agenthostLog.Warn("touched-entity record failed", "conversation", info.ConversationID, "entity", id, "error", err)
+		memoryentities.CountSkippedLink(ctx, info.OrgID, domain.MemoryRoleTouched, provider, err)
+	}
 }
 
-// matches reports whether r resolved the same (provider, target) another
-// consumer is about to resolve. A zero r never matches.
+// resolvedEntity is the funnel's resolution of the entity its artifact is
+// about, carried to the touch so a write whose action names the same object
+// resolves it once. The coordinate rides along because reuse is only sound
+// when the touch wants the same key: the touch resolves off the external
+// action, the artifact's entity off the artifact.
+type resolvedEntity struct {
+	// attempted is whether a resolution of (provider, target) ran; entityID
+	// is what it answered, empty when it skipped the coordinate or failed,
+	// and err why it failed.
+	attempted bool
+	entityID  string
+	err       error
+	provider  string
+	target    string
+}
+
+// matches reports whether r resolved (or failed to resolve) the same
+// (provider, target) another consumer is about to resolve. A zero r never
+// matches.
 func (r resolvedEntity) matches(provider, target string) bool {
-	return r.entityID != "" && r.provider == provider && r.target == target
+	return r.attempted && r.provider == provider && r.target == target
+}
+
+// resolveArtifactEntity links a to the entity it is about: the pull request a
+// GitHub pull request, review or comment artifact is on, the Jira or Linear
+// issue, the Slack thread. It resolves (and creates, like the touch) the
+// entity for a's provider and target, identified by the provider id a's key
+// carries (domain.ArtifactEntityIdentity), and sets a.EntityID to it and
+// a.Target to its key: an artifact's target is its entity's key, which every
+// rename moves by entity_id from then on. A branch, which has no entity, and
+// an artifact whose entity does not resolve are written unlinked, and the
+// failure is logged. Best-effort, like the rest of the funnel: the write
+// happened, and its row is recorded either way. A failure another attempt can
+// get past is retried like the write after it (withRecordRetry); resolving
+// only finds, creates or renames toward what the provider answered, so a
+// second attempt lands on what a first one wrote. The link is overwritten, never
+// taken from the caller, like the scope stamped beside it: the side that holds
+// the stores decides it, so a relayed row cannot name an entity of its choosing.
+func resolveArtifactEntity(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, container domain.EntityContainer) resolvedEntity {
+	a.EntityID = ""
+	c := entityCoordinate{provider: a.Provider, target: a.Target, url: a.URL, container: container}
+	if scope, externalID, ok := domain.ArtifactEntityIdentity(*a); ok {
+		c.scope, c.externalID = scope, externalID
+	}
+	out := resolvedEntity{attempted: true, provider: a.Provider, target: a.Target}
+	var entity *domain.Entity
+	err := withRecordRetry(ctx, func() error {
+		var e error
+		entity, e = resolveEntityInfo(ctx, stores, info, c)
+		return e
+	})
+	if err != nil {
+		out.err = err
+		agenthostLog.Warn("resolving the artifact's entity failed; recording the artifact unlinked",
+			"conversation", info.ConversationID, "kind", a.Kind, "target", a.Target, "error", err)
+		return out
+	}
+	if entity != nil {
+		out.entityID = entity.ID
+		a.EntityID, a.Target = entity.ID, entity.SourceID
+	}
+	return out
 }
 
 // recordTouchInfo persists the write funnel's touched entity: it unwraps the
 // external action into its (provider, target, url) and records the
-// conversation→entity touch. The provider id the entity is identified by comes
+// conversation→entity touch. An action about the object the artifact is about
+// reuses subject, the artifact's entity, rather than resolving it again. Any
+// other action resolves its own coordinate, identified by the provider id
 // off the artifact when it is the same provider's (a Jira artifact's key names
 // its site and issue id, a pull request's artifact carries its node id; see
 // domain.ArtifactEntityIdentity). A nil action (an audit-only write with no
 // external action) touches nothing. See recordEntityTouch for the best-effort
 // + outside-the-tx contract.
-//
-// Returns what it resolved, for stampPRAttribution to reuse — see the funnel.
-func recordTouchInfo(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, act *domain.ExternalAction, container domain.EntityContainer) resolvedEntity {
+func recordTouchInfo(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, act *domain.ExternalAction, container domain.EntityContainer, subject resolvedEntity) {
 	if act == nil {
-		return resolvedEntity{}
+		return
+	}
+	if subject.matches(act.Provider, act.Target) {
+		if subject.err != nil {
+			memoryentities.CountSkippedLink(ctx, info.OrgID, domain.MemoryRoleTouched, act.Provider, subject.err)
+			return
+		}
+		recordTouchRow(ctx, stores, info, act.Provider, subject.entityID)
+		return
 	}
 	c := entityCoordinate{provider: act.Provider, target: act.Target, url: act.URL, container: container}
 	// A Jira or Linear artifact's key names the issue every action beside it
-	// is about. A pull request artifact's node id names one pull request,
-	// which is the action's only when the two targets agree.
-	if a != nil && a.Provider == act.Provider && (a.Provider != domain.ArtifactProviderGitHub || a.Target == act.Target) {
+	// is about. A pull request artifact's node id names one pull request, and
+	// an action about that one matched subject above, so a GitHub action
+	// here is about another object and takes nothing off the artifact.
+	if a != nil && a.Provider == act.Provider && a.Provider != domain.ArtifactProviderGitHub {
 		if scope, externalID, ok := domain.ArtifactEntityIdentity(*a); ok {
 			c.scope, c.externalID = scope, externalID
 		}
 	}
-	return resolvedEntity{
-		entityID: recordEntityTouch(ctx, stores, info, c),
-		provider: act.Provider,
-		target:   act.Target,
-	}
+	recordEntityTouch(ctx, stores, info, c)
 }
 
 // --- attribution stamps for a bot-opened PR ---
@@ -454,44 +519,31 @@ func recordTouchInfo(ctx context.Context, stores db.Stores, info ConversationInf
 // the owner/repo#N target shape, and reviewing someone else's PR is the clearest
 // case of touching an entity you must not come to own.
 //
-// Ordering against the poller does not matter. FindOrCreate resolves the same
-// natural key the tracker mints on (both go through domain.PullRequestTarget's
-// owner/repo#N), so this either back-fills the row the poller already created or
-// creates the stub the poller later enriches; the stamp itself is if-NULL, so
-// neither ordering can overwrite an owner set deliberately elsewhere.
+// Ordering against the poller does not matter. The entity is the one the
+// artifact was linked to (resolveArtifactEntity), which resolves the pull
+// request by its node id and its key as the tracker does, so it is either the
+// row the poller already created or the stub the poller later enriches; the
+// stamp itself is if-NULL, so neither ordering can overwrite an owner set
+// deliberately elsewhere.
 //
 // Best-effort, like everything else downstream of an already-applied write: the
 // PR is open on GitHub regardless, and a failure here costs routing precision on
 // that PR, never the run. It is not retried — the entity is durable and the
 // event that would need the owner has not arrived yet, but nothing re-derives
 // the stamp later either, so a failure means that PR's events fall through to
-// the router's remaining tiers for good.
-// touched is whatever the touch pass already resolved this call; it is reused
-// only when it names the same (provider, target) the artifact does, so the
-// artifact stays the authority for who owns the PR even if the action beside it
-// ever points somewhere else.
-func stampPRAttribution(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, touched resolvedEntity) {
+// the router's remaining tiers for good. A pull request artifact whose entity
+// did not resolve has nothing to stamp.
+func stampPRAttribution(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact) {
 	if a == nil || a.Provider != domain.ArtifactProviderGitHub || a.Kind != domain.ArtifactKindPullRequest {
 		return
 	}
 	// Defensive: auto-fire is gated on an owned task and artifacts.team_id is
 	// NOT NULL, so a conversation without a team should not reach here. A run
-	// with neither a team nor a creator has nothing to attribute, so there is
-	// nothing to resolve an entity for either.
+	// with neither a team nor a creator has nothing to attribute.
 	if (info.TeamID == "" && info.UserID == "") || stores.Entities == nil {
 		return
 	}
-	entityID := touched.entityID
-	if !touched.matches(a.Provider, a.Target) {
-		var err error
-		_, nodeID, _ := domain.ArtifactEntityIdentity(*a)
-		entityID, err = resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: a.Provider, target: a.Target, url: a.URL, externalID: nodeID})
-		if err != nil {
-			agenthostLog.Warn("PR attribution stamp skipped: entity resolve failed",
-				"conversation", info.ConversationID, "target", a.Target, "error", err)
-			return
-		}
-	}
+	entityID := a.EntityID
 	if entityID == "" {
 		return
 	}

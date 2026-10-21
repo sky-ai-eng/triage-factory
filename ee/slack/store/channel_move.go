@@ -34,9 +34,9 @@ type ChannelMove struct {
 }
 
 // MoveThreadKey moves a key of the form "<channel>/<rest>" — a thread
-// entity's source_id (domain.SlackSourceID), a Slack artifact's target or its
-// dedup resource — from oldID to newID. Reports false, with key unchanged,
-// for a key under any other channel.
+// entity's source_id (domain.SlackSourceID) or a Slack artifact's dedup
+// resource — from oldID to newID. Reports false, with key unchanged, for a key
+// under any other channel.
 func MoveThreadKey(key, oldID, newID string) (string, bool) {
 	if oldID == "" || newID == "" || oldID == newID || !strings.HasPrefix(key, oldID+"/") {
 		return key, false

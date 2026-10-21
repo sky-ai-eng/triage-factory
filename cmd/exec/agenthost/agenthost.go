@@ -231,9 +231,10 @@ type Client interface {
 	// anti-double-submit guard) — under every posture.
 	FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) (ReviewFinalizeResult, error)
 
-	// ResetReviewDraft is the host side of `gh pr start-review --fresh`: a pure
-	// local reset of this conversation's review draft for owner/repo#number, with zero
-	// GitHub calls. It clears the staged comments and the body/event ready
+	// ResetReviewDraft is the host side of `gh pr start-review --fresh`: a
+	// local reset of this conversation's review draft for owner/repo#number,
+	// with no GitHub write. The host reads the pull request's node id, which the
+	// draft is keyed on. It clears the staged comments and the body/event ready
 	// sentinel (and the write-once Proposed snapshot) back to an empty pending
 	// draft, keeping the artifact row, its handle, and its pinned head SHA so the
 	// agent can restart the review cleanly. Returns the draft's handle and that
@@ -296,14 +297,15 @@ type Client interface {
 
 	// --- artifacts (capture writers: pre-push hook, ...) ---
 	//
-	// UpsertArtifact records one durable run artifact (a pushed branch, a
-	// Jira write, a GitHub action) at the host-side choke point. The
+	// UpsertArtifact records one durable run artifact (a pushed branch, or a
+	// review draft the host composes) at the host-side choke point. The
 	// caller supplies the polymorphic fields (Provider/Kind/Target/State/
 	// DedupKey/...); the client stamps conversation_id/org_id/team_id off the conversation
 	// identity, so the agent never has to know them. Routed admin-pool for
 	// event-triggered runs and synthetic-claims for manual runs, exactly
 	// like the pending-PR writer. Returns the stored row; best-effort
-	// callers (the pre-push hook) ignore it. See TFAC-460.
+	// callers (the pre-push hook) ignore it. Over the sandbox's socket it
+	// records a branch and refuses every other kind (Server). See TFAC-460.
 	UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error)
 
 	// --- jira (exec jira ticket ...) ---
@@ -395,8 +397,10 @@ type Client interface {
 	// review never occupies GitHub's one-per-identity pending-review slot during
 	// the draft window; the atomic create+submit happens at approval. These bridge
 	// those writes host-side so the sandbox (no DB) routes them through the daemon,
-	// exactly like UpsertArtifact. owner/repo ride along to build the artifact
-	// target; reviewID is the local handle (the artifact id) start-review returns.
+	// exactly like UpsertArtifact. owner/repo#number name the pull request: the
+	// host reads its node id from GitHub, which the draft is keyed on, and builds
+	// the artifact target; reviewID is the local handle (the artifact id)
+	// start-review returns.
 	//
 	// GithubCreatePendingReview returns the local review handle; the comments param
 	// is unused (start-review seeds none). GithubAddPendingReviewComment returns a
@@ -404,8 +408,8 @@ type Client interface {
 	// dedup key is conversation-scoped — so there is no identity branch and no collision
 	// error.
 	//
-	// GithubAddPendingReviewComment's owner/repo must be the repo the review was
-	// started on; any other is refused. Its commitSHA is the HEAD of the run's
+	// GithubAddPendingReviewComment's owner/repo#number must resolve on GitHub to
+	// the pull request the review was started on; any other is refused. Its commitSHA is the HEAD of the run's
 	// checkout of the reviewed PR: the commit the host validates the comment's
 	// (path, line, start_line) against and the commit the submitted comment
 	// anchors to. The CLI passes it because the

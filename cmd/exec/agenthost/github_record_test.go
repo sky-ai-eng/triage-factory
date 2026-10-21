@@ -102,7 +102,8 @@ func newGithubRecordingClientConn(t *testing.T, ghURL string, eventTriggered boo
 // TestLocalClient_GithubAddComment_RecordsArtifact pins a standalone comment
 // landing one `comment` artifact with the full coordinates the add path knows —
 // target owner/repo#N, the comment id and node id, its html_url, state posted,
-// deduped on github:comment:<id> — across both write paths.
+// deduped on github:comment:<id>, linked to the pull request's entity —
+// across both write paths.
 func TestLocalClient_GithubAddComment_RecordsArtifact(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
@@ -134,6 +135,10 @@ func TestLocalClient_GithubAddComment_RecordsArtifact(t *testing.T) {
 			}
 			if a.ConversationID != info.ConversationID || a.TeamID != runmode.LocalDefaultTeamID {
 				t.Errorf("attribution mismatch: conversation=%q team=%q", a.ConversationID, a.TeamID)
+			}
+			pr, err := stores.Entities.GetBySourceSystem(context.Background(), info.OrgID, domain.ArtifactProviderGitHub, testScope("github"), "octo/repo#1")
+			if err != nil || pr == nil || a.EntityID != pr.ID {
+				t.Errorf("comment entity = %q, want the pull request's entity %+v (%v)", a.EntityID, pr, err)
 			}
 		})
 	}

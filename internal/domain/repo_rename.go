@@ -168,10 +168,9 @@ func identityKey(r RepoRef) (repoIdentityKey, bool) {
 // oldSlug at a boundary, in which case s is returned unchanged.
 //
 // The boundary is what keeps "octo/api" from matching "octo/api-gateway#3".
-// A slug ends at the end of the string or at the delimiter that introduces
-// what follows it — '#' for a PR number, ':' for a dedup key's anchor — and
-// never mid-token, so a prefix that happens to spell another repository's name
-// is not a match.
+// A slug ends at the end of the string or at the '#' that introduces a PR
+// number, and never mid-token, so a prefix that happens to spell another
+// repository's name is not a match.
 func RewriteRepoSlugPrefix(s, oldSlug, newSlug string) (string, bool) {
 	if oldSlug == "" || len(s) < len(oldSlug) {
 		return s, false
@@ -180,41 +179,10 @@ func RewriteRepoSlugPrefix(s, oldSlug, newSlug string) (string, bool) {
 		return s, false
 	}
 	rest := s[len(oldSlug):]
-	if rest != "" && rest[0] != '#' && rest[0] != ':' {
+	if rest != "" && rest[0] != '#' {
 		return s, false
 	}
 	return newSlug + rest, true
-}
-
-// RewriteArtifactDedupKey rewrites the repository slug inside an artifact
-// dedup key. The key is "provider:kind:resource[:anchor]" (ArtifactDedupKey),
-// and the slug — when the artifact has one — is the head of resource:
-//
-//	github:pull_request:owner/repo#123
-//	github:review:owner/repo#123:<conversation>
-//	git:branch:owner/repo:refs/heads/x
-//
-// So the rewrite is the resource's leading slug and nothing else. It has to be
-// positional rather than a substring replacement: a branch key's anchor may
-// repeat the repository's own name ("git:branch:octo/api:refs/heads/octo/api-fix"),
-// and rewriting that too would move a ref that never moved.
-//
-// Reports false for a key with no repository slug in it (jira:issue:PROJ-1,
-// github:comment:<id>) or too few segments to have a resource at all.
-func RewriteArtifactDedupKey(key, oldSlug, newSlug string) (string, bool) {
-	provider, rest, ok := strings.Cut(key, ":")
-	if !ok {
-		return key, false
-	}
-	kind, resource, ok := strings.Cut(rest, ":")
-	if !ok {
-		return key, false
-	}
-	rewritten, ok := RewriteRepoSlugPrefix(resource, oldSlug, newSlug)
-	if !ok {
-		return key, false
-	}
-	return provider + ":" + kind + ":" + rewritten, true
 }
 
 // RewriteRepoURL rewrites the repository slug inside a link on host, a

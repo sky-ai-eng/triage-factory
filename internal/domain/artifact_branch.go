@@ -28,16 +28,18 @@ type branchDetails struct {
 // It returns ok=false — the caller skips, no artifact — when ref is not a
 // branch (a tag or other namespace) or repoPath is not exactly owner/repo (a
 // malformed or multi-segment path we won't anchor a link to). The artifact
-// carries no URL: the constructor has no org context to know the host, and
-// the host-side sink that writes it sets the link (BranchArtifactWebURL).
+// carries no URL and no dedup key: both writers build it where neither the
+// org's host nor the repository's registry row is known, so the host-side sink
+// that writes it sets the link (BranchArtifactWebURL) and keys it on the
+// registry row (BranchDedupKey).
 //
 // This is the single source of truth for the branch-artifact shape. Both
 // capture writers build through it: the pre-push hook (TFAC-460) and the
-// git-proxy receive-pack backstop (TFAC-467). Sharing the constructor — rather
-// than each writer building a struct by hand — is what guarantees they land on
-// the same deduped row: identical DedupKey, URL, and DetailsJSON, so a normal
-// hook+push is never double-recorded and the proxy only adds rows the hook
-// missed (a `git push --no-verify`).
+// git-proxy receive-pack backstop (TFAC-467). Sharing the constructor and the
+// sink — rather than each writer building a struct by hand — is what
+// guarantees they land on the same deduped row: identical DedupKey, URL, and
+// DetailsJSON, so a normal hook+push is never double-recorded and the proxy
+// only adds rows the hook missed (a `git push --no-verify`).
 func NewBranchArtifact(repoPath, ref, sha string, created bool) (Artifact, bool) {
 	if !strings.HasPrefix(ref, branchRefPrefix) || !validOwnerRepo(repoPath) {
 		return Artifact{}, false
@@ -56,9 +58,31 @@ func NewBranchArtifact(repoPath, ref, sha string, created bool) (Artifact, bool)
 		Target:      repoPath,
 		ExternalID:  ref,
 		State:       ArtifactStateBranchPushed,
-		DedupKey:    ArtifactDedupKey(ArtifactProviderGit, ArtifactKindBranch, repoPath, ref),
 		DetailsJSON: string(details),
 	}, true
+}
+
+// BranchDedupKey is the key a branch artifact is recorded under:
+// git:branch:<repository id>:<ref>, where the repository id is the registry
+// row's. A branch has no provider id, and the registry row is what TF holds
+// for its repository: a rename moves the row's name and not its id, and a
+// repository created under a freed name gets a row of its own. "" when either
+// half is empty.
+func BranchDedupKey(repositoryID, ref string) string {
+	if repositoryID == "" || ref == "" {
+		return ""
+	}
+	return BranchDedupKeyPrefix(repositoryID) + ref
+}
+
+// BranchDedupKeyPrefix is what the key of every branch recorded in the
+// repository whose registry row id is repositoryID begins with: a read for one
+// repository's branches matches it. "" for an empty id.
+func BranchDedupKeyPrefix(repositoryID string) string {
+	if repositoryID == "" {
+		return ""
+	}
+	return ArtifactDedupKey(ArtifactProviderGit, ArtifactKindBranch, repositoryID, "") + ":"
 }
 
 // BranchArtifactWebURL builds the web link for a pushed branch ref on a specific

@@ -52,7 +52,7 @@ func newReviewPostureGitHub(t *testing.T, headSHA *string) *reviewPostureGitHub 
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"number":7,"base":{"ref":"main"},"head":{"sha":"`+*headSHA+`"}}`)
+		_, _ = io.WriteString(w, `{"number":7,"node_id":"`+fakePRNodeID(r.URL.Path)+`","base":{"ref":"main"},"head":{"sha":"`+*headSHA+`"}}`)
 	}))
 	t.Cleanup(g.Close)
 	return g
@@ -271,7 +271,7 @@ func TestFinalizeReviewDraft_AutoPost_SubmitFailureStaysStaged(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"number":7,"base":{"ref":"main"},"head":{"sha":"`+head+`"}}`)
+		_, _ = io.WriteString(w, `{"number":7,"node_id":"`+fakePRNodeID(r.URL.Path)+`","base":{"ref":"main"},"head":{"sha":"`+head+`"}}`)
 	}))
 	t.Cleanup(srv.Close)
 

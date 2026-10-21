@@ -32,8 +32,8 @@ func RunExternalObjectScopeConformance(t *testing.T, mk ExternalObjectScopeFacto
 		return domain.Artifact{
 			TeamID: teamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
 			Scope: scope, Target: domain.PullRequestTarget("octo/api", 7), ExternalID: "7",
-			URL:   scope + "/octo/api/pull/7",
-			State: state, DedupKey: domain.PullRequestDedupKey("octo/api", 7),
+			URL:    scope + "/octo/api/pull/7",
+			NodeID: "PR_kw7", State: state, DedupKey: domain.PullRequestDedupKey("PR_kw7"),
 		}
 	}
 
@@ -124,29 +124,45 @@ func RunExternalObjectScopeConformance(t *testing.T, mk ExternalObjectScopeFacto
 		}
 	})
 
-	t.Run("Pending_reviews_are_read_on_one_scope", func(t *testing.T) {
+	t.Run("Pending_reviews_are_read_by_entity", func(t *testing.T) {
 		s, orgID, teamID := mk(t)
-		review := func(scope string) domain.Artifact {
-			a := domain.NewReviewArtifact("octo/api", 7, "abc123", "")
-			a.TeamID, a.Scope = teamID, scope
-			return a
+		pr := func(key, nodeID string) string {
+			t.Helper()
+			e, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, domain.ArtifactProviderGitHub, hostA, key, nodeID, "pr", "t", "")
+			if err != nil {
+				t.Fatalf("seed entity %s: %v", key, err)
+			}
+			return e.ID
 		}
-		own, err := s.Artifacts.UpsertSystem(ctx, orgID, review(hostA))
+		entityID, otherID := pr("octo/api#7", "PR_kw7"), pr("octo/other#7", "PR_kw7_other")
+		review := func(repoPath, nodeID, entity, conversationID string) domain.Artifact {
+			t.Helper()
+			a := domain.NewReviewArtifact(repoPath, 7, nodeID, "abc123", conversationID)
+			a.TeamID, a.Scope, a.EntityID = teamID, hostA, entity
+			stored, err := s.Artifacts.UpsertSystem(ctx, orgID, a)
+			if err != nil {
+				t.Fatalf("seed review %s: %v", conversationID, err)
+			}
+			return stored
+		}
+		own := review("octo/api", "PR_kw7", entityID, "conv-a")
+		// The same pull request under another spelling of its repository's
+		// name is still its draft: the read matches the entity, not the target.
+		renamed := review("Octo/old-api", "PR_kw7", entityID, "conv-b")
+		review("octo/other", "PR_kw7_other", otherID, "conv-c")
+		got, err := s.Artifacts.ListPendingReviewsByEntitySystem(ctx, orgID, entityID)
 		if err != nil {
-			t.Fatalf("seed review on %s: %v", hostA, err)
+			t.Fatalf("ListPendingReviewsByEntitySystem: %v", err)
 		}
-		if _, err := s.Artifacts.UpsertSystem(ctx, orgID, review(hostB)); err != nil {
-			t.Fatalf("seed review on %s: %v", hostB, err)
+		ids := map[string]bool{}
+		for _, a := range got {
+			ids[a.ID] = true
 		}
-		got, err := s.Artifacts.ListPendingReviewsByTargetSystem(ctx, orgID, hostA, domain.ReviewTarget("octo/api", 7))
-		if err != nil {
-			t.Fatalf("ListPendingReviewsByTargetSystem: %v", err)
+		if len(got) != 2 || !ids[own.ID] || !ids[renamed.ID] {
+			t.Errorf("pending reviews of %s = %+v, want exactly rows %s and %s", entityID, got, own.ID, renamed.ID)
 		}
-		if len(got) != 1 || got[0].ID != own.ID {
-			t.Errorf("pending reviews on %s = %+v, want only row %s", hostA, got, own.ID)
-		}
-		if _, err := s.Artifacts.ListPendingReviewsByTargetSystem(ctx, orgID, "", domain.ReviewTarget("octo/api", 7)); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
-			t.Errorf("ListPendingReviewsByTargetSystem with no scope: err = %v, want ErrExternalObjectScopeRequired", err)
+		if got, err := s.Artifacts.ListPendingReviewsByEntitySystem(ctx, orgID, ""); err != nil || len(got) != 0 {
+			t.Errorf("ListPendingReviewsByEntitySystem with no entity = %+v, %v; want nothing", got, err)
 		}
 	})
 

@@ -44,7 +44,7 @@ var _ db.ArtifactStore = (*artifactStore)(nil)
 // scanArtifact. Same order the Postgres impl projects.
 const artifactColumns = `
 	id, conversation_id, org_id, team_id, provider, kind, scope, target,
-	external_id, url, node_id,
+	external_id, url, node_id, entity_id,
 	state, dedup_key, details_json, created_at, updated_at
 `
 
@@ -81,8 +81,10 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	// NULLIF('','') folds an empty incoming target to NULL first. A non-empty
 	// incoming value still overwrites (the intentional-change / migration
 	// path). details_json is preserved-on-empty for the same reason: a comment
-	// delete cannot restate the thread a reply answers. state stays
-	// last-writer-wins by design (it tracks the latest action).
+	// delete cannot restate the thread a reply answers. So is entity_id: a
+	// writer that resolved no entity must not unlink a row another writer
+	// linked. state stays last-writer-wins by design (it tracks the latest
+	// action).
 	//
 	// conversation_id AND team_id are both preserved-on-conflict, NOT last-writer-wins:
 	// the artifact belongs to its CREATING conversation (domain.Artifact's doc),
@@ -96,8 +98,8 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	row := s.q.QueryRowContext(ctx, `
 		INSERT INTO artifacts
 			(id, conversation_id, org_id, team_id, provider, kind, scope, target,
-			 external_id, url, node_id, state, dedup_key, details_json, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+			 external_id, url, node_id, entity_id, state, dedup_key, details_json, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(org_id, scope, dedup_key) DO UPDATE SET
 			conversation_id       = artifacts.conversation_id,
 			team_id      = artifacts.team_id,
@@ -105,12 +107,13 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 			external_id  = COALESCE(excluded.external_id, artifacts.external_id),
 			url          = COALESCE(excluded.url, artifacts.url),
 			node_id      = COALESCE(excluded.node_id, artifacts.node_id),
+			entity_id    = COALESCE(excluded.entity_id, artifacts.entity_id),
 			state        = excluded.state,
 			details_json = COALESCE(excluded.details_json, artifacts.details_json),
 			updated_at   = CURRENT_TIMESTAMP
 		RETURNING `+artifactColumns,
 		id, nullIfEmpty(a.ConversationID), orgID, a.TeamID, a.Provider, a.Kind, a.Scope, a.Target,
-		nullIfEmpty(a.ExternalID), nullIfEmpty(a.URL), nullIfEmpty(a.NodeID),
+		nullIfEmpty(a.ExternalID), nullIfEmpty(a.URL), nullIfEmpty(a.NodeID), nullIfEmpty(a.EntityID),
 		a.State, a.DedupKey, nullIfEmpty(a.DetailsJSON),
 	)
 	var out domain.Artifact
@@ -149,11 +152,11 @@ func (s *artifactStore) InsertArtifactIfAbsentSystem(ctx context.Context, orgID 
 	res, err := s.q.ExecContext(ctx, `
 		INSERT INTO artifacts
 			(id, conversation_id, org_id, team_id, provider, kind, scope, target,
-			 external_id, url, node_id, state, dedup_key, details_json, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+			 external_id, url, node_id, entity_id, state, dedup_key, details_json, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(org_id, scope, dedup_key) DO NOTHING`,
 		id, nullIfEmpty(a.ConversationID), orgID, a.TeamID, a.Provider, a.Kind, a.Scope, a.Target,
-		nullIfEmpty(a.ExternalID), nullIfEmpty(a.URL), nullIfEmpty(a.NodeID),
+		nullIfEmpty(a.ExternalID), nullIfEmpty(a.URL), nullIfEmpty(a.NodeID), nullIfEmpty(a.EntityID),
 		a.State, a.DedupKey, nullIfEmpty(a.DetailsJSON),
 	)
 	if err != nil {
@@ -274,23 +277,22 @@ func (s *artifactStore) ListByConversationSystem(ctx context.Context, orgID, con
 	return s.ListByConversation(ctx, orgID, conversationID)
 }
 
-// ListPendingReviewsByTargetSystem is identical to a plain org read in SQLite:
-// local mode is single-tenant (N=1) with no RLS, so there is no admin/app pool
-// split. Filters to pending review drafts anchored to the given PR target on
-// scope's host.
-func (s *artifactStore) ListPendingReviewsByTargetSystem(ctx context.Context, orgID, scope, target string) ([]domain.Artifact, error) {
+// ListPendingReviewsByEntitySystem is identical to a plain org read in
+// SQLite: local mode is single-tenant (N=1) with no RLS, so there is no
+// admin/app pool split.
+func (s *artifactStore) ListPendingReviewsByEntitySystem(ctx context.Context, orgID, entityID string) ([]domain.Artifact, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	if err := db.RequireExternalObjectScope(scope); err != nil {
-		return nil, err
+	if entityID == "" {
+		return nil, nil
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+artifactColumns+`
 		FROM artifacts
-		WHERE org_id = ? AND kind = ? AND state = ? AND scope = ? AND target = ?
+		WHERE org_id = ? AND entity_id = ? AND provider = ? AND kind = ? AND state = ?
 		ORDER BY created_at DESC, id DESC
-	`, orgID, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, scope, target)
+	`, orgID, entityID, domain.ArtifactProviderGitHub, domain.ArtifactKindReview, domain.ArtifactStateReviewPending)
 	if err != nil {
 		return nil, err
 	}
@@ -641,10 +643,10 @@ func scanArtifactRows(rows *sql.Rows) ([]domain.Artifact, error) {
 // unifies *sql.Row and *sql.Rows so this serves both the single-row Upsert
 // RETURNING and the list paths.
 func scanArtifact(sc rowScanner, a *domain.Artifact) error {
-	var conversationID, externalID, url, nodeID, detailsJSON sql.NullString
+	var conversationID, externalID, url, nodeID, entityID, detailsJSON sql.NullString
 	if err := sc.Scan(
 		&a.ID, &conversationID, &a.OrgID, &a.TeamID, &a.Provider, &a.Kind, &a.Scope, &a.Target,
-		&externalID, &url, &nodeID,
+		&externalID, &url, &nodeID, &entityID,
 		&a.State, &a.DedupKey, &detailsJSON, &a.CreatedAt, &a.UpdatedAt,
 	); err != nil {
 		return err
@@ -653,6 +655,7 @@ func scanArtifact(sc rowScanner, a *domain.Artifact) error {
 	a.ExternalID = externalID.String
 	a.URL = url.String
 	a.NodeID = nodeID.String
+	a.EntityID = entityID.String
 	a.DetailsJSON = detailsJSON.String
 	return nil
 }

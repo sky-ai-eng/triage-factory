@@ -383,7 +383,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 	})
 
-	t.Run("RenameSystem_moves_jira_artifacts_keyed_on_the_site_and_issue_id", func(t *testing.T) {
+	t.Run("RenameSystem_moves_the_renamed_jira_entitys_artifacts", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		const site = "https://acme.atlassian.net"
 		const otherSite = "https://other.atlassian.net"
@@ -398,7 +398,8 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		issueArt := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, site, "10005", "ENG-5", "")
 		commentArt := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindComment, site, "10005", "ENG-5", "20001")
 		otherArt := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, otherSite, "10005", "ENG-5", "")
-		// An artifact keyed on the issue key names no site; it is left alone.
+		// An artifact linked to no entity is left alone, whatever its target
+		// spells.
 		legacy, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
 			TeamID: seed.TeamID, Provider: domain.ArtifactProviderJira, Kind: domain.ArtifactKindIssue, Scope: site,
 			Target: "ENG-5", ExternalID: "ENG-5", State: domain.ArtifactStateIssueUpdated,
@@ -475,9 +476,8 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 			}
 		}
 		newerRefs := seed.Referents(t, newer.ID)
-		// The survivor stops answering to OLD-1. What targets it on the
-		// issue's id moves onto NEW-1; another issue's artifact under the same
-		// key stays.
+		// The newer row's artifact moves onto the survivor and takes the key
+		// it keeps, NEW-1; an artifact of no entity under the same key stays.
 		movedArt := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, jiraScope, "10001", "OLD-1", "")
 		otherArt := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, jiraScope, "10009", "OLD-1", "")
 		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderJira, jiraScope, "OLD-1", jiraScope+"/browse/OLD-1", "merge-moved")
@@ -501,9 +501,9 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if byKey, _ := s.Entities.GetBySourceSystem(ctx, orgID, "jira", jiraScope, "NEW-1"); byKey == nil || byKey.ID != older.ID {
 			t.Errorf("NEW-1 resolves to %+v, want the survivor", byKey)
 		}
-		for _, c := range []struct{ id, wantTarget string }{{movedArt, "NEW-1"}, {otherArt, "OLD-1"}} {
-			if a, err := s.Artifacts.Get(ctx, orgID, c.id); err != nil || a == nil || a.Target != c.wantTarget {
-				t.Errorf("artifact %s = %+v err=%v, want target %q", c.id, a, err, c.wantTarget)
+		for _, c := range []struct{ id, wantTarget, wantEntity string }{{movedArt, "NEW-1", older.ID}, {otherArt, "OLD-1", ""}} {
+			if a, err := s.Artifacts.Get(ctx, orgID, c.id); err != nil || a == nil || a.Target != c.wantTarget || a.EntityID != c.wantEntity {
+				t.Errorf("artifact %s = %+v err=%v, want target %q on entity %q", c.id, a, err, c.wantTarget, c.wantEntity)
 			}
 		}
 		if _, cur := seed.RawActionURL(t, "merge-moved"); cur != jiraScope+"/browse/NEW-1" {
@@ -560,8 +560,8 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if _, err := s.Entities.MarkClosed(ctx, orgID, newer.ID); err != nil {
 			t.Fatalf("close newer: %v", err)
 		}
-		// The survivor keeps OLD-2, so what targets the closed row's NEW-2
-		// moves onto it.
+		// The survivor keeps OLD-2, so the closed row's artifact, recorded
+		// under NEW-2, moves onto it.
 		art := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, jiraScope, "10002", "NEW-2", "")
 		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderJira, jiraScope, "NEW-2", jiraScope+"/browse/NEW-2", "merge-closed")
 
@@ -581,8 +581,8 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if ok, err := s.Entities.UpdateSnapshotCASSystem(ctx, orgID, older.ID, `{"key":"OLD-2"}`, older.PollSeq); err != nil || ok {
 			t.Errorf("a snapshot CAS on the version read before the merge = ok %v err %v, want a miss", ok, err)
 		}
-		if a, err := s.Artifacts.Get(ctx, orgID, art); err != nil || a == nil || a.Target != "OLD-2" {
-			t.Errorf("artifact = %+v err=%v, want target OLD-2", a, err)
+		if a, err := s.Artifacts.Get(ctx, orgID, art); err != nil || a == nil || a.Target != "OLD-2" || a.EntityID != older.ID {
+			t.Errorf("artifact = %+v err=%v, want target OLD-2 on the survivor %s", a, err, older.ID)
 		}
 		if _, cur := seed.RawActionURL(t, "merge-closed"); cur != jiraScope+"/browse/OLD-2" {
 			t.Errorf("action current_url = %q, want the survivor's link", cur)
@@ -665,6 +665,15 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 				t.Fatalf("seed memory link: %v", err)
 			}
 		}
+		// A comment the run recorded against the stub, under the old name.
+		comment, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
+			TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindComment, Scope: scope,
+			Target: "acme/old#5", State: domain.ArtifactStateCommentPosted,
+			DedupKey: domain.GitHubCommentDedupKey(domain.GitHubIssueComment, 9005), EntityID: stub.ID,
+		})
+		if err != nil {
+			t.Fatalf("seed the stub's comment artifact: %v", err)
+		}
 		before, _ := s.Entities.GetSystem(ctx, orgID, into.ID)
 
 		if err := s.Entities.FoldStubEntitySystem(ctx, orgID, stub.ID, into.ID); err != nil {
@@ -704,6 +713,9 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 				t.Errorf("task %s = entity %s status %q reason %q, want on the entity, %q, %q",
 					c.id, task.EntityID, task.Status, task.CloseReason, c.wantStatus, c.wantReason)
 			}
+		}
+		if a, err := s.Artifacts.Get(ctx, orgID, comment.ID); err != nil || a == nil || a.EntityID != into.ID || a.Target != "acme/new#5" {
+			t.Errorf("comment artifact = %+v err=%v, want it on the entity %s under its key acme/new#5", a, err, into.ID)
 		}
 		refs := seed.Referents(t, into.ID)
 		if refs.Rows["tasks"] != 3 || refs.Rows["events"] != 3 {
@@ -1145,13 +1157,15 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 
 // upsertIdentityArtifact records a Linear artifact in workspace scope the way
 // domain.ArtifactDedupKey says to key one: on the issue's UUID, with the
-// identifier as its target.
+// identifier as its target, linked to the entity carrying the UUID in the
+// scope (identityArtifactEntity).
 func upsertIdentityArtifact(t *testing.T, s db.Stores, orgID, teamID, scope, kind, issueID, key, anchor string) string {
 	t.Helper()
 	a, err := s.Artifacts.UpsertSystem(context.Background(), orgID, domain.Artifact{
 		TeamID: teamID, Provider: domain.ArtifactProviderLinear, Kind: kind, Scope: scope,
 		Target: key, ExternalID: issueID + anchor, State: identityArtifactState(kind),
 		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderLinear, kind, issueID, anchor),
+		EntityID: identityArtifactEntity(t, s, orgID, domain.ArtifactProviderLinear, scope, issueID),
 	})
 	if err != nil {
 		t.Fatalf("seed %s artifact on %s: %v", kind, key, err)
@@ -1161,18 +1175,35 @@ func upsertIdentityArtifact(t *testing.T, s db.Stores, orgID, teamID, scope, kin
 
 // upsertJiraIdentityArtifact records a Jira artifact the way
 // domain.ArtifactDedupKey says to key one: on the issue's site and id, with the
-// key as its target.
+// key as its target, linked to the entity carrying the id on the site
+// (identityArtifactEntity).
 func upsertJiraIdentityArtifact(t *testing.T, s db.Stores, orgID, teamID, kind, site, issueID, key, anchor string) string {
 	t.Helper()
 	a, err := s.Artifacts.UpsertSystem(context.Background(), orgID, domain.Artifact{
 		TeamID: teamID, Provider: domain.ArtifactProviderJira, Kind: kind, Scope: site,
 		Target: key, ExternalID: issueID + anchor, State: identityArtifactState(kind),
 		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderJira, kind, domain.JiraIssueResource(site, issueID), anchor),
+		EntityID: identityArtifactEntity(t, s, orgID, domain.ArtifactProviderJira, site, issueID),
 	})
 	if err != nil {
 		t.Fatalf("seed jira %s artifact on %s: %v", kind, key, err)
 	}
 	return a.ID
+}
+
+// identityArtifactEntity is the entity an artifact about the issue issueID is
+// linked to, as the exec funnel links it: the one carrying the id in scope, or
+// "" when none does.
+func identityArtifactEntity(t *testing.T, s db.Stores, orgID, source, scope, issueID string) string {
+	t.Helper()
+	e, err := s.Entities.GetByExternalIDSystem(context.Background(), orgID, source, scope, issueID)
+	if err != nil {
+		t.Fatalf("read the entity carrying %s in %s: %v", issueID, scope, err)
+	}
+	if e == nil {
+		return ""
+	}
+	return e.ID
 }
 
 func identityArtifactState(kind string) string {

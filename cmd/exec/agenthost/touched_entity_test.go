@@ -196,7 +196,8 @@ func TestResolveTouchedEntity_FollowsAMovedJiraIssue(t *testing.T) {
 // key it is stored under, and leaves the key alone — a pull request's key
 // moves with its repository's rename, and the touch may spell either name. A
 // touch by an id-less row's key learns the id. The write funnel takes the id
-// off a pull request artifact's node id.
+// off a pull request artifact's node id, and links the artifact to the entity
+// under that entity's key.
 func TestResolveTouchedEntity_FindsAPullRequestByItsNodeID(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
 	ctx := context.Background()
@@ -231,9 +232,11 @@ func TestResolveTouchedEntity_FindsAPullRequestByItsNodeID(t *testing.T) {
 	}
 
 	pr := domain.NewPullRequestArtifact("octo/new", 7, "PR_7", "feature", "main", "https://github.com/octo/new/pull/7", "Widget", "", false)
-	act := &domain.ExternalAction{Provider: domain.ArtifactProviderGitHub, Target: pr.Target, URL: pr.URL}
-	if got := recordTouchInfo(ctx, stores, info, &pr, act, domain.EntityContainer{}); got.entityID != stored.ID {
-		t.Errorf("funnel touch resolved %q, want the entity carrying the artifact's node id %s", got.entityID, stored.ID)
+	if got := resolveArtifactEntity(ctx, stores, info, &pr, domain.EntityContainer{}); got.entityID != stored.ID {
+		t.Errorf("funnel resolved %q, want the entity carrying the artifact's node id %s", got.entityID, stored.ID)
+	}
+	if pr.EntityID != stored.ID || pr.Target != "octo/old#7" {
+		t.Errorf("artifact = entity %q target %q, want linked to %s under its key octo/old#7", pr.EntityID, pr.Target, stored.ID)
 	}
 }
 

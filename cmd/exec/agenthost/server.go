@@ -16,6 +16,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	linearclient "github.com/sky-ai-eng/triage-factory/internal/linear"
 )
@@ -619,6 +620,15 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		var a upsertArtifactArgs
 		if err := dec(&a); err != nil {
 			return nil, err
+		}
+		// The sandbox records the branches its pre-push hook sees and nothing
+		// else: every other artifact is composed host-side from what the
+		// provider answered. An artifact is linked to the entity its key and
+		// target name, and that resolution follows the target onto the entity,
+		// so a row the sandbox composed could link to, and rename, any entity
+		// in the org.
+		if a.Artifact.Provider != domain.ArtifactProviderGit || a.Artifact.Kind != domain.ArtifactKindBranch {
+			return nil, fmt.Errorf("the sandbox records branch artifacts only, not %s %s", a.Artifact.Provider, a.Artifact.Kind)
 		}
 		stored, err := client.UpsertArtifact(ctx, a.Artifact)
 		if err != nil {
