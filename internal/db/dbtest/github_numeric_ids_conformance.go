@@ -60,8 +60,11 @@ type GitHubNumericIDFactory func(t *testing.T) (GitHubNumericIDStores, GitHubNum
 //     account_id, because the login is what the UI renders and a rename has to
 //     reach it;
 //   - user_github_identities.github_user_id round-trips through
-//     UpsertGitHubIdentity under the same fill-in-never-erase rule, and the
-//     reverse (host, login) → user lookup resolves regardless of the
+//     UpsertGitHubIdentity under the same fill-in-never-erase rule for the
+//     same account, and a capture naming a different account (by id when
+//     both sides carry one, by case-folded login otherwise) carries neither
+//     the old account's id nor its address;
+//   - the reverse (host, login) → user lookup resolves regardless of the
 //     capitalisation either side was captured with.
 func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 	t.Helper()
@@ -299,6 +302,81 @@ func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 		}
 		if got := seed.GitHubUserID(t, u, host); got != "999" {
 			t.Errorf("github_user_id = %q after re-binding to another account; want %q", got, "999")
+		}
+	})
+
+	t.Run("IdentityRenameOfTheSameAccountKeepsItsIDAndEmail", func(t *testing.T) {
+		// The same id under a new login is a rename, not another account: the
+		// login moves, and the id and address stay with the account even when
+		// the capture carries no address.
+		stores, seed := mk(t)
+		u := seed.User(t)
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "583231", "octocat@example.com", "pat"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity: %v", err)
+		}
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octo-renamed", "583231", "", "connect_oauth"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity (renamed): %v", err)
+		}
+		got, err := stores.Users.GetGitHubIdentity(ctx, u, host)
+		if err != nil || got == nil {
+			t.Fatalf("GetGitHubIdentity = %+v, %v", got, err)
+		}
+		if got.Login != "octo-renamed" || got.GitHubUserID != "583231" {
+			t.Errorf("identity = %s/%s after a rename; want octo-renamed/583231", got.Login, got.GitHubUserID)
+		}
+		if email := seed.GitHubEmail(t, u, host); email != "octocat@example.com" {
+			t.Errorf("email = %q after a rename of the same account; want the stored address", email)
+		}
+	})
+
+	t.Run("IdentityCaseChangeWithoutIDsIsTheSameAccount", func(t *testing.T) {
+		// With no id on either side the login decides, and GitHub logins are
+		// case-insensitive.
+		stores, seed := mk(t)
+		u := seed.User(t)
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "", "octocat@example.com", "pat"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity: %v", err)
+		}
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "OctoCat", "", "", "pat"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity (recased): %v", err)
+		}
+		if email := seed.GitHubEmail(t, u, host); email != "octocat@example.com" {
+			t.Errorf("email = %q after a change of capitalisation; want the stored address", email)
+		}
+	})
+
+	t.Run("IdentitySameLoginWithAnotherIDIsAnotherAccount", func(t *testing.T) {
+		// A login GitHub has given to a different account: the ids differ, so
+		// the stored address belongs to someone else.
+		stores, seed := mk(t)
+		u := seed.User(t)
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "583231", "octocat@example.com", "pat"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity: %v", err)
+		}
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "999", "", "pat"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity (other account): %v", err)
+		}
+		if got := seed.GitHubUserID(t, u, host); got != "999" {
+			t.Errorf("github_user_id = %q; want the new account's %q", got, "999")
+		}
+		if email := seed.GitHubEmail(t, u, host); email != "" {
+			t.Errorf("email = %q after binding another account under the same login; want empty", email)
+		}
+	})
+
+	t.Run("IdentityRebindToAnotherAccountWithoutAnIDDropsTheOldID", func(t *testing.T) {
+		// A capture that learned no id for a different login is a different
+		// account, so the stored id is not carried onto it.
+		stores, seed := mk(t)
+		u := seed.User(t)
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "583231", "", "pat"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity: %v", err)
+		}
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "hubber", "", "", "pat"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity (re-bind, no id): %v", err)
+		}
+		if got := seed.GitHubUserID(t, u, host); got != "" {
+			t.Errorf("github_user_id = %q after re-binding another login with no id; want \"\"", got)
 		}
 	})
 

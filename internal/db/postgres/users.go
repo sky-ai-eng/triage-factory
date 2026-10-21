@@ -185,32 +185,27 @@ func scanIDs(rows *sql.Rows, errContext string) ([]string, error) {
 
 func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBaseURL, login, githubUserID, email, source string) error {
 	// FK on user_id enforces the row-exists contract: a missing user
-	// surfaces as a foreign_key_violation, matching the old
-	// SetGitHubUsername "user not found" guard.
+	// surfaces as a foreign_key_violation.
 	//
-	// github_user_id is COALESCEd, unlike login: a capture that learned no id
-	// leaves a known one alone rather than erasing it, so the column fills in
-	// opportunistically. A re-bind to a different account carries that
-	// account's id, so the COALESCE never pins a stale one.
+	// The account test (see the interface doc) is repeated in each column it
+	// guards, since SET cannot name a shared expression.
 	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO user_github_identities
 			(user_id, github_base_url, login, github_user_id, email, source, verified_at, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, now(), now(), now())
 		ON CONFLICT (user_id, github_base_url) DO UPDATE SET
 			login          = EXCLUDED.login,
-			github_user_id = COALESCE(EXCLUDED.github_user_id, user_github_identities.github_user_id),
-			email           = CASE
-				WHEN user_github_identities.login IS DISTINCT FROM EXCLUDED.login THEN EXCLUDED.email
+			github_user_id = CASE
+				WHEN `+pgGitHubAccountChanged+` THEN EXCLUDED.github_user_id
+				ELSE COALESCE(EXCLUDED.github_user_id, user_github_identities.github_user_id) END,
+			email          = CASE
+				WHEN `+pgGitHubAccountChanged+` THEN EXCLUDED.email
 				ELSE COALESCE(EXCLUDED.email, user_github_identities.email) END,
 			source         = EXCLUDED.source,
 			verified_at    = EXCLUDED.verified_at,
 			updated_at     = now(),
-			-- A rename / re-bind to a different login invalidates the prior
-			-- login's dashboard backfill: clear the marker so the new login's
-			-- history is re-seeded (TFAC-396). A no-op re-bind (same login)
-			-- keeps the marker, so it never re-fires the search burst.
 			dashboard_backfilled_at = CASE
-				WHEN user_github_identities.login IS DISTINCT FROM EXCLUDED.login THEN NULL
+				WHEN `+pgGitHubAccountChanged+` OR user_github_identities.login IS DISTINCT FROM EXCLUDED.login THEN NULL
 				ELSE user_github_identities.dashboard_backfilled_at END
 	`, userID, db.NormalizeGitHubHost(githubBaseURL), login, nullString(githubUserID), nullString(email), source)
 	if err != nil {
@@ -218,6 +213,15 @@ func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBas
 	}
 	return nil
 }
+
+// pgGitHubAccountChanged is UpsertGitHubIdentity's account test inside its
+// ON CONFLICT arm: true when the capture names a different GitHub account
+// than the stored row. Ids decide when both sides carry one; otherwise the
+// logins do, compared case-insensitively as GitHub compares them.
+const pgGitHubAccountChanged = `(CASE
+				WHEN user_github_identities.github_user_id IS NOT NULL AND EXCLUDED.github_user_id IS NOT NULL
+					THEN user_github_identities.github_user_id <> EXCLUDED.github_user_id
+				ELSE lower(user_github_identities.login) <> lower(EXCLUDED.login) END)`
 
 func (s *usersStore) ClearGitHubIdentity(ctx context.Context, userID, githubBaseURL string) error {
 	if _, err := s.q.ExecContext(ctx,

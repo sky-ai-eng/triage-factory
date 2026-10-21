@@ -56,13 +56,27 @@ type UsersStore interface {
 	// githubUserID is the account's numeric GitHub id in text form
 	// (auth.GitHubUser.UserID). login records what the account is currently
 	// called and githubUserID records which account it is; the second is the
-	// half a rename doesn't touch. Passing "" (a host that reported no id, or
-	// a caller that never had one) leaves any stored id intact rather than
-	// blanking it, so the value fills in opportunistically on the next
-	// capture. email is the verified primary address captured from GitHub.
-	// Passing "" preserves an existing address when login is unchanged, for
-	// legacy sources that do not carry one; when login changes, an omitted
-	// email clears the prior account's address instead of carrying it across.
+	// half a rename doesn't touch. email is the verified primary address
+	// captured from GitHub.
+	//
+	// A write over an existing row first decides whether the capture names
+	// the same GitHub account the row does: by githubUserID when both the row
+	// and the capture carry one, and by login, compared case-insensitively,
+	// when either lacks it. Each column follows from that answer:
+	//
+	//   - login is always overwritten: it is what the account is called now,
+	//     so a rename or a change of capitalisation lands on it.
+	//   - github_user_id and email belong to the account. For the same
+	//     account, "" (a host that reported no id, a source that carries no
+	//     address) leaves the stored value intact, so each fills in on a
+	//     later capture. For a different account both take the capture's
+	//     values, "" included, so a re-bind never keeps the previous
+	//     account's id or address.
+	//   - dashboard_backfilled_at guards a search by login (author:<login>),
+	//     not an account, so it is cleared when the account changes and also
+	//     when the same account's login changes in any way: the history the
+	//     marker records was seeded under the old login. See
+	//     MarkDashboardBackfilledSystem.
 	//
 	// Exempt from the returned-row rule: this store exposes the identity
 	// tables as column projections, not rows — its reads answer "what login"
@@ -242,11 +256,13 @@ type UsersStore interface {
 	// and stamping unconditionally would mark the NEW login backfilled when its
 	// history was never seeded, stranding it forever. The login-guarded write
 	// no-ops in that case, leaving the marker NULL so the new login re-seeds on
-	// the next trigger (TFAC-396). No-op (nil error) when no row exists or the
-	// login no longer matches. Admin pool / claims-free, same caller and
-	// rationale as DashboardBackfilledAtSystem. UpsertGitHubIdentity also clears
-	// this marker when the bound login changes (the already-completed case);
-	// together they make a rename always re-backfill the new login.
+	// the next trigger. No-op (nil error) when no row exists or the login no
+	// longer matches. Admin pool / claims-free, same caller and rationale as
+	// DashboardBackfilledAtSystem. UpsertGitHubIdentity also clears this
+	// marker when the bound login changes, the same account renamed included
+	// (the already-completed case); together they make a rename always
+	// re-backfill the new login. The guard is a login rather than the
+	// account's GitHub id because the backfill is a search by login.
 	//
 	// Exempt from the returned-row rule: fire-and-forget bookkeeping. The
 	// stamp is a one-shot marker the next backfill trigger reads; the guarded
