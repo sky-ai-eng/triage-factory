@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/repoevent"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -56,9 +55,9 @@ func TestRunOrg_RecipientScopedFanOut(t *testing.T) {
 
 	repos := &batchRepositoryStore{names: []string{"own/withdocs"}}
 	p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil, hub)
-	var gotHost, gotOwner, gotRepo string
-	p.SetRecipients(func(_ context.Context, orgID, host, owner, repo string) ([]string, error) {
-		gotHost, gotOwner, gotRepo = host, owner, repo
+	var gotRepositoryIDs []string
+	p.SetRecipients(func(_ context.Context, orgID, repositoryID string) ([]string, error) {
+		gotRepositoryIDs = append(gotRepositoryIDs, repositoryID)
 		return []string{"user-tracking"}, nil
 	})
 	p.batchFn = func(context.Context, string, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
@@ -83,8 +82,10 @@ func TestRunOrg_RecipientScopedFanOut(t *testing.T) {
 	if second.Type != repoevent.EventType || second.Data.ProfileText == nil || *second.Data.ProfileText != "a profile" {
 		t.Errorf("second event = %+v; want profile_text diff", second)
 	}
-	if gotHost != dbtest.TestGitHubHost || gotOwner != "own" || gotRepo != "withdocs" {
-		t.Errorf("recipients resolved for (%q, %q, %q); want (%s, own, withdocs)", gotHost, gotOwner, gotRepo, dbtest.TestGitHubHost)
+	// Both emissions resolve their audience on the registry row's id, the
+	// row the tracked name was read to.
+	if len(gotRepositoryIDs) != 2 || gotRepositoryIDs[0] != "repo-id-withdocs" || gotRepositoryIDs[1] != "repo-id-withdocs" {
+		t.Errorf("recipients resolved for %q; want the registry row repo-id-withdocs, once per emission", gotRepositoryIDs)
 	}
 
 	// The same-org client outside the recipient set gets nothing at all.

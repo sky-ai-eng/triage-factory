@@ -54,7 +54,7 @@ type RepositorySeeder struct {
 //   - The tracked reads (ListTrackedSystem, ListTrackedByTeamSystem,
 //     ListTeamScoped) leave out a registry row no team tracks, which List
 //     and ListSystem keep.
-//   - UpdateBaseBranch + UpdateCloneStatusByRef mutate only the targeted
+//   - UpdateBaseBranch + UpdateCloneStatusSystem mutate only the targeted
 //     fields, and every name-keyed method folds case on owner/repo.
 //   - The by-name door mints one bare identity row per repository, however
 //     often and by however many teams it is tracked, matches an existing row
@@ -139,17 +139,28 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 				updated.ExternalID, updated.BaseBranch)
 		}
 
-		stamped, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "acme", Repo: "api"}, "failed", "boom", "ssh")
-		if err != nil || stamped == nil {
-			t.Fatalf("UpdateCloneStatusByRef: got=%v err=%v", stamped, err)
+		stamped, err := s.UpdateCloneStatusSystem(ctx, orgID, created.ID, "failed", "boom", "ssh")
+		if err != nil {
+			t.Fatalf("UpdateCloneStatusSystem: %v", err)
 		}
-		AssertWriteReturnedStoredRow(t, "UpdateCloneStatusByRef", *stamped, read(created.ID))
+		AssertWriteReturnedStoredRow(t, "UpdateCloneStatusSystem", stamped, read(created.ID))
 
-		stampedSys, err := s.UpdateCloneStatusByRefSystem(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "acme", Repo: "api"}, "ok", "", "")
-		if err != nil || stampedSys == nil {
-			t.Fatalf("UpdateCloneStatusByRefSystem: got=%v err=%v", stampedSys, err)
+		// The input names no repository and no external id, and says nothing
+		// about the base branch or the clone state; the returned row carries
+		// all of them as stored.
+		reprofiledAgain := reprofiled.Add(time.Hour)
+		profiledRow, err := s.UpdateProfileSystem(ctx, orgID, created.ID, domain.Repository{
+			Description: "v3", ProfileText: "v3", DefaultBranch: "trunk",
+			HasReadme: true, ProfiledAt: &reprofiledAgain,
+		})
+		if err != nil {
+			t.Fatalf("UpdateProfileSystem: %v", err)
 		}
-		AssertWriteReturnedStoredRow(t, "UpdateCloneStatusByRefSystem", *stampedSys, read(created.ID))
+		AssertWriteReturnedStoredRow(t, "UpdateProfileSystem", profiledRow, read(created.ID))
+		if profiledRow.Slug() != "Acme/Api" || profiledRow.ExternalID != "1296269" || profiledRow.BaseBranch != "develop" || profiledRow.CloneStatus != "failed" {
+			t.Errorf("UpdateProfileSystem returned %s ext=%q base=%q clone=%q; want the row's own name, id, base branch and clone state",
+				profiledRow.Slug(), profiledRow.ExternalID, profiledRow.BaseBranch, profiledRow.CloneStatus)
+		}
 	})
 
 	t.Run("Upsert_then_GetByRef_round_trips", func(t *testing.T) {
@@ -276,7 +287,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		if err := setBaseBranch(ctx, s, orgID, "o/r", "develop"); err != nil {
 			t.Fatalf("UpdateBaseBranch: %v", err)
 		}
-		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "o", Repo: "r"}, "ok", "", ""); err != nil {
+		if _, err := setCloneStatus(ctx, s, orgID, "o/r", "ok", "", ""); err != nil {
 			t.Fatalf("UpdateCloneStatus: %v", err)
 		}
 
@@ -515,12 +526,12 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		if err := setBaseBranch(ctx, s, orgID, "Acme/Api", "develop"); err != nil {
 			t.Fatalf("UpdateBaseBranch: %v", err)
 		}
-		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "Acme", Repo: "Api"}, "ok", "", ""); err != nil {
+		if _, err := setCloneStatus(ctx, s, orgID, "Acme/Api", "ok", "", ""); err != nil {
 			t.Fatalf("UpdateCloneStatus: %v", err)
 		}
 		etagAt := profiled.Add(time.Hour)
-		if err := s.SetPullsPollStateByRefSystem(ctx, orgID, repoRef("Acme/Api"), `"etag-v1"`, etagAt); err != nil {
-			t.Fatalf("SetPullsPollStateByRefSystem: %v", err)
+		if err := s.SetPullsPollStateSystem(ctx, orgID, repoRowID(t, ctx, s, orgID, "Acme/Api"), `"etag-v1"`, etagAt); err != nil {
+			t.Fatalf("SetPullsPollStateSystem: %v", err)
 		}
 
 		before, err := s.GetByRef(ctx, orgID, repoRef("Acme/Api"))
@@ -564,9 +575,9 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		if got.ProfiledAt == nil {
 			t.Error("ProfiledAt is nil — the repo would re-profile from scratch, ignoring the TTL")
 		}
-		etag, polledAt, err := s.GetPullsPollStateByRefSystem(ctx, orgID, repoRef("Acme/Api"))
+		etag, polledAt, err := s.GetPullsPollStateSystem(ctx, orgID, before.ID)
 		if err != nil {
-			t.Fatalf("GetPullsPollStateByRefSystem: %v", err)
+			t.Fatalf("GetPullsPollStateSystem: %v", err)
 		}
 		if etag != `"etag-v1"` || polledAt == nil {
 			t.Errorf("poll state = (%q, %v), want it kept — losing it re-lists every open PR", etag, polledAt)
@@ -637,7 +648,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			t.Fatalf("Upsert: %v", err)
 		}
 		// ok path: empty err fields collapse to NULL → empty string on read.
-		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "o", Repo: "r"}, "ok", "", ""); err != nil {
+		if _, err := setCloneStatus(ctx, s, orgID, "o/r", "ok", "", ""); err != nil {
 			t.Fatalf("UpdateCloneStatus ok: %v", err)
 		}
 		got, _ := s.GetByRef(ctx, orgID, repoRef("o/r"))
@@ -645,7 +656,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			t.Errorf("ok status mismatch: %+v", got)
 		}
 		// failed path: ssh-kind capture for SSH preflight confirms.
-		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "o", Repo: "r"}, "failed", "permission denied", "ssh"); err != nil {
+		if _, err := setCloneStatus(ctx, s, orgID, "o/r", "failed", "permission denied", "ssh"); err != nil {
 			t.Fatalf("UpdateCloneStatus failed: %v", err)
 		}
 		got, _ = s.GetByRef(ctx, orgID, repoRef("o/r"))
@@ -654,15 +665,93 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		}
 	})
 
-	t.Run("UpdateCloneStatus_no_op_when_repo_absent", func(t *testing.T) {
-		// Configured-repos invariant: clone hooks fire after repo
-		// selection, but if a repo gets dropped between the hook
-		// firing and the UPDATE landing, the row may be gone. The
-		// raw SQL UPDATE silently affects 0 rows — store contract
-		// mirrors that, no error.
+	t.Run("UpdateCloneStatus_refuses_an_id_no_row_carries", func(t *testing.T) {
+		// Id-keyed, so a miss is ErrNoSuchRepository rather than a silent
+		// no-op — including a handle that was never an id, which Postgres
+		// would otherwise refuse with a uuid parse failure SQLite has no
+		// equivalent of.
 		s, orgID, _ := mk(t)
-		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "ghost", Repo: "repo"}, "ok", "", ""); err != nil {
-			t.Errorf("UpdateCloneStatus on absent repo should be a no-op, got %v", err)
+		for _, id := range []string{unknownRepoID, "ghost/repo"} {
+			if _, err := s.UpdateCloneStatusSystem(ctx, orgID, id, "ok", "", ""); !errors.Is(err, db.ErrNoSuchRepository) {
+				t.Errorf("UpdateCloneStatusSystem(%q) = %v, want ErrNoSuchRepository", id, err)
+			}
+		}
+	})
+
+	t.Run("UpdateProfileSystem_writes_the_row_it_names", func(t *testing.T) {
+		// The profiler reads a row, fetches the repository's documents under
+		// its name, and writes by the id it read. A rename landing in
+		// between moves the name and nothing else, so the profile lands on
+		// that row and no second row appears under the old name; a retire
+		// landing in between refuses the write, because the name now serves
+		// another repository. An id another row carries is not taken.
+		s, orgID, _ := mk(t)
+		row, err := s.Upsert(ctx, orgID, domain.Repository{Host: TestGitHubHost, Owner: "acme", Repo: "api", ExternalID: "42"})
+		if err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+		other, err := s.Upsert(ctx, orgID, domain.Repository{Host: TestGitHubHost, Owner: "acme", Repo: "web", ExternalID: "43"})
+		if err != nil {
+			t.Fatalf("Upsert(other): %v", err)
+		}
+		if _, err := s.RenameSystem(ctx, orgID, domain.RepoRef{Source: domain.RepoSourceGitHub, Host: TestGitHubHost, Owner: "acme", Repo: "api-v2", ExternalID: "42"}); err != nil {
+			t.Fatalf("RenameSystem: %v", err)
+		}
+
+		profiled := time.Now().UTC().Truncate(time.Second)
+		got, err := s.UpdateProfileSystem(ctx, orgID, row.ID, domain.Repository{
+			ExternalID: "43", Description: "api", ProfileText: "profile", CloneURL: "git@x:acme/api.git",
+			DefaultBranch: "main", HasReadme: true, HasAgentsMd: true, ProfiledAt: &profiled,
+		})
+		if err != nil {
+			t.Fatalf("UpdateProfileSystem: %v", err)
+		}
+		if got.ID != row.ID || got.Slug() != "acme/api-v2" {
+			t.Errorf("wrote %s %s; want row %s under its current name", got.ID, got.Slug(), row.ID)
+		}
+		if got.ProfileText != "profile" || got.CloneURL != "git@x:acme/api.git" || !got.HasReadme || got.HasClaudeMd || !got.HasAgentsMd ||
+			got.ProfiledAt == nil || !got.ProfiledAt.UTC().Equal(profiled) {
+			t.Errorf("profile fields not written: %+v", got)
+		}
+		if got.ExternalID != "42" {
+			t.Errorf("ExternalID = %q, want 42 kept — 43 is another row's", got.ExternalID)
+		}
+		if n := registryRows(t, s, orgID); n != 2 {
+			t.Errorf("registry rows = %d, want 2 — the write must not create a row", n)
+		}
+		if again, _ := s.Get(ctx, orgID, other.ID); again == nil || again.ProfileText != "" {
+			t.Errorf("the other row moved: %+v", again)
+		}
+
+		if retired, err := s.RetireSystem(ctx, orgID, domain.RepoRef{Source: domain.RepoSourceGitHub, Host: TestGitHubHost, Owner: "acme", Repo: "api-v2", ExternalID: "42"}); err != nil || retired == nil {
+			t.Fatalf("RetireSystem: got=%v err=%v", retired, err)
+		}
+		if _, err := s.UpdateProfileSystem(ctx, orgID, row.ID, domain.Repository{ProfileText: "stranger's"}); !errors.Is(err, db.ErrNoSuchRepository) {
+			t.Errorf("UpdateProfileSystem on a retired row = %v, want ErrNoSuchRepository", err)
+		}
+		if _, err := s.UpdateProfileSystem(ctx, orgID, unknownRepoID, domain.Repository{}); !errors.Is(err, db.ErrNoSuchRepository) {
+			t.Errorf("UpdateProfileSystem on an absent row = %v, want ErrNoSuchRepository", err)
+		}
+	})
+
+	t.Run("UpdateCloneStatus_lands_on_the_row_whatever_it_is_called_now", func(t *testing.T) {
+		// The clone callback holds the id the bare is keyed by. A rename
+		// between the clone and the write moves the row's name only, so the
+		// outcome is recorded on the row the clone was of.
+		s, orgID, _ := mk(t)
+		row, err := s.Upsert(ctx, orgID, domain.Repository{Host: TestGitHubHost, Owner: "acme", Repo: "api", ExternalID: "42"})
+		if err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+		if _, err := s.RenameSystem(ctx, orgID, domain.RepoRef{Source: domain.RepoSourceGitHub, Host: TestGitHubHost, Owner: "acme", Repo: "api-v2", ExternalID: "42"}); err != nil {
+			t.Fatalf("RenameSystem: %v", err)
+		}
+		stamped, err := s.UpdateCloneStatusSystem(ctx, orgID, row.ID, "failed", "boom", "other")
+		if err != nil {
+			t.Fatalf("UpdateCloneStatusSystem: %v", err)
+		}
+		if stamped.ID != row.ID || stamped.Slug() != "acme/api-v2" || stamped.CloneStatus != "failed" {
+			t.Errorf("stamped %s %s %q; want row %s under its new name, failed", stamped.ID, stamped.Slug(), stamped.CloneStatus, row.ID)
 		}
 	})
 
@@ -691,7 +780,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			t.Errorf("GetSystem with different casing: got=%v err=%v", sys, err)
 		}
 
-		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "acme", Repo: "api"}, "failed", "boom", "ssh"); err != nil {
+		if _, err := setCloneStatus(ctx, s, orgID, "acme/api", "failed", "boom", "ssh"); err != nil {
 			t.Fatalf("UpdateCloneStatus: %v", err)
 		}
 		got, _ = s.GetByRef(ctx, orgID, repoRef("Acme/Api"))
@@ -699,17 +788,6 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			t.Errorf("clone status after a differently-cased update = %+v, want failed/ssh", got)
 		}
 
-		now := time.Now().UTC().Truncate(time.Second)
-		if err := s.SetPullsPollStateByRefSystem(ctx, orgID, repoRef("ACME/api"), `"etag-v1"`, now); err != nil {
-			t.Fatalf("SetPullsPollStateByRefSystem: %v", err)
-		}
-		etag, polledAt, err := s.GetPullsPollStateByRefSystem(ctx, orgID, repoRef("acme/API"))
-		if err != nil {
-			t.Fatalf("GetPullsPollStateByRefSystem: %v", err)
-		}
-		if etag != `"etag-v1"` || polledAt == nil {
-			t.Errorf("poll state through differently-cased slugs = (%q, %v), want the stored pair", etag, polledAt)
-		}
 	})
 
 	t.Run("every_ref_keyed_method_pins_the_source", func(t *testing.T) {
@@ -734,30 +812,6 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		}
 		if got, err := s.GetByRefSystem(ctx, orgID, bogus); err == nil {
 			t.Errorf("GetByRefSystem accepted an unknown source and returned %+v; want an error", got)
-		}
-		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, bogus, "failed", "boom", "ssh"); err == nil {
-			t.Error("UpdateCloneStatusByRef accepted an unknown source; want an error")
-		}
-		if _, err := s.UpdateCloneStatusByRefSystem(ctx, orgID, bogus, "failed", "boom", "ssh"); err == nil {
-			t.Error("UpdateCloneStatusByRefSystem accepted an unknown source; want an error")
-		}
-		if err := s.SetPullsPollStateByRefSystem(ctx, orgID, bogus, `"etag"`, time.Now()); err == nil {
-			t.Error("SetPullsPollStateByRefSystem accepted an unknown source; want an error")
-		}
-		if _, _, err := s.GetPullsPollStateByRefSystem(ctx, orgID, bogus); err == nil {
-			t.Error("GetPullsPollStateByRefSystem accepted an unknown source; want an error")
-		}
-
-		// And none of them touched the GitHub row on the way to refusing.
-		got, err := s.GetByRef(ctx, orgID, repoRef("octo/widget"))
-		if err != nil || got == nil {
-			t.Fatalf("GetByRef after the refusals: got=%v err=%v", got, err)
-		}
-		if got.CloneStatus == "failed" {
-			t.Errorf("clone status = %q — a refused source must not write", got.CloneStatus)
-		}
-		if etag, _, _ := s.GetPullsPollStateByRefSystem(ctx, orgID, repoRef("octo/widget")); etag != "" {
-			t.Errorf("poll state = %q — a refused source must not write", etag)
 		}
 	})
 
@@ -1040,9 +1094,9 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			t.Errorf("GetByRefSystem(ghe, octo/only-dotcom) = %+v, %v; want nil — it is tracked on github.com only", miss, err)
 		}
 
-		// A write through one host's ref lands on that host's row alone.
-		if _, err := s.UpdateCloneStatusByRefSystem(ctx, orgID, domain.RepoRefFromSlug(TestOtherGitHubHost, "octo/widget"), "failed", "boom", "ssh"); err != nil {
-			t.Fatalf("UpdateCloneStatusByRefSystem(ghe): %v", err)
+		// A write to one host's row lands on that row alone.
+		if _, err := s.UpdateCloneStatusSystem(ctx, orgID, ghe.ID, "failed", "boom", "ssh"); err != nil {
+			t.Fatalf("UpdateCloneStatusSystem(ghe): %v", err)
 		}
 		if got, _ := s.Get(ctx, orgID, dotcom.ID); got == nil || got.CloneStatus == "failed" {
 			t.Errorf("github.com row after a ghe clone-status write = %+v; want it untouched", got)
@@ -1154,13 +1208,6 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		check("Upsert", err)
 		_, err = s.UpsertSystem(ctx, orgID, domain.Repository{Owner: "octo", Repo: "widget", ProfileText: "v2"})
 		check("UpsertSystem", err)
-		_, err = s.UpdateCloneStatusByRef(ctx, orgID, noHost, "failed", "boom", "ssh")
-		check("UpdateCloneStatusByRef", err)
-		_, err = s.UpdateCloneStatusByRefSystem(ctx, orgID, noHost, "failed", "boom", "ssh")
-		check("UpdateCloneStatusByRefSystem", err)
-		check("SetPullsPollStateByRefSystem", s.SetPullsPollStateByRefSystem(ctx, orgID, noHost, `"etag"`, time.Now()))
-		_, _, err = s.GetPullsPollStateByRefSystem(ctx, orgID, noHost)
-		check("GetPullsPollStateByRefSystem", err)
 		_, err = s.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{noHost})
 		check("FillMissingExternalIDsSystem", err)
 		_, err = s.RenameSystem(ctx, orgID, domain.RepoRef{Owner: "octo", Repo: "renamed", ExternalID: "1"})
@@ -1399,22 +1446,23 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// a Set persists both; a re-Set overwrites.
 		s, orgID, seed := mk(t)
 		trackRepos(t, s, seed, orgID, seed.TeamID, "octo/widget")
+		id := repoRowID(t, ctx, s, orgID, "octo/widget")
 
-		etag, polledAt, err := s.GetPullsPollStateByRefSystem(ctx, orgID, repoRef("octo/widget"))
+		etag, polledAt, err := s.GetPullsPollStateSystem(ctx, orgID, id)
 		if err != nil {
-			t.Fatalf("GetPullsPollStateByRefSystem (unset): %v", err)
+			t.Fatalf("GetPullsPollStateSystem (unset): %v", err)
 		}
 		if etag != "" || polledAt != nil {
 			t.Errorf("unset poll state = (%q, %v); want (\"\", nil)", etag, polledAt)
 		}
 
 		now := time.Now().UTC().Truncate(time.Second)
-		if err := s.SetPullsPollStateByRefSystem(ctx, orgID, repoRef("octo/widget"), `"etag-v1"`, now); err != nil {
-			t.Fatalf("SetPullsPollStateByRefSystem: %v", err)
+		if err := s.SetPullsPollStateSystem(ctx, orgID, id, `"etag-v1"`, now); err != nil {
+			t.Fatalf("SetPullsPollStateSystem: %v", err)
 		}
-		etag, polledAt, err = s.GetPullsPollStateByRefSystem(ctx, orgID, repoRef("octo/widget"))
+		etag, polledAt, err = s.GetPullsPollStateSystem(ctx, orgID, id)
 		if err != nil {
-			t.Fatalf("GetPullsPollStateByRefSystem: %v", err)
+			t.Fatalf("GetPullsPollStateSystem: %v", err)
 		}
 		if etag != `"etag-v1"` {
 			t.Errorf("etag = %q; want %q", etag, `"etag-v1"`)
@@ -1424,27 +1472,64 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		}
 
 		later := now.Add(time.Hour)
-		if err := s.SetPullsPollStateByRefSystem(ctx, orgID, repoRef("octo/widget"), `"etag-v2"`, later); err != nil {
+		if err := s.SetPullsPollStateSystem(ctx, orgID, id, `"etag-v2"`, later); err != nil {
 			t.Fatalf("re-Set: %v", err)
 		}
-		etag, _, _ = s.GetPullsPollStateByRefSystem(ctx, orgID, repoRef("octo/widget"))
+		etag, _, _ = s.GetPullsPollStateSystem(ctx, orgID, id)
 		if etag != `"etag-v2"` {
 			t.Errorf("etag after re-Set = %q; want %q", etag, `"etag-v2"`)
 		}
 	})
 
-	t.Run("PullsPollState_no_op_when_repo_absent", func(t *testing.T) {
-		// Configured-repos-only invariant, same as UpdateCloneStatus.
+	t.Run("PullsPollState_absent_row", func(t *testing.T) {
+		// The read is id-keyed like Get and refuses an id no row carries,
+		// including a handle that was never an id; the write is cache
+		// bookkeeping and no-ops.
 		s, orgID, _ := mk(t)
-		if err := s.SetPullsPollStateByRefSystem(ctx, orgID, repoRef("ghost/repo"), `"x"`, time.Now()); err != nil {
-			t.Errorf("Set on absent repo should be a no-op, got %v", err)
+		for _, id := range []string{unknownRepoID, "ghost/repo"} {
+			if err := s.SetPullsPollStateSystem(ctx, orgID, id, `"x"`, time.Now()); err != nil {
+				t.Errorf("SetPullsPollStateSystem(%q) on an absent row should be a no-op, got %v", id, err)
+			}
+			if _, _, err := s.GetPullsPollStateSystem(ctx, orgID, id); !errors.Is(err, db.ErrNoSuchRepository) {
+				t.Errorf("GetPullsPollStateSystem(%q) = %v, want ErrNoSuchRepository", id, err)
+			}
 		}
-		etag, polledAt, err := s.GetPullsPollStateByRefSystem(ctx, orgID, repoRef("ghost/repo"))
+	})
+
+	t.Run("PullsPollState_is_the_rows_not_its_namesakes", func(t *testing.T) {
+		// A retired row keeps the name the repository GitHub now serves
+		// under it holds. Each row's listing state is its own: clearing the
+		// retired row's ETag leaves the live namesake's in place, and a
+		// rename moves no state.
+		s, orgID, seed := mk(t)
+		dead, err := s.Upsert(ctx, orgID, domain.Repository{Host: TestGitHubHost, Owner: "acme", Repo: "api", ExternalID: "1"})
 		if err != nil {
-			t.Errorf("Get on absent repo should be (\"\", nil, nil), got err %v", err)
+			t.Fatalf("Upsert: %v", err)
 		}
-		if etag != "" || polledAt != nil {
-			t.Errorf("absent repo poll state = (%q, %v); want empty", etag, polledAt)
+		now := time.Now().UTC().Truncate(time.Second)
+		if err := s.SetPullsPollStateSystem(ctx, orgID, dead.ID, `"etag-dead"`, now); err != nil {
+			t.Fatalf("SetPullsPollStateSystem(dead): %v", err)
+		}
+		if retired, err := s.RetireSystem(ctx, orgID, domain.RepoRef{Source: domain.RepoSourceGitHub, Host: TestGitHubHost, Owner: "acme", Repo: "api", ExternalID: "1"}); err != nil || retired == nil {
+			t.Fatalf("RetireSystem: got=%v err=%v", retired, err)
+		}
+		trackRepos(t, s, seed, orgID, seed.TeamID, "acme/api")
+		live := repoRowID(t, ctx, s, orgID, "acme/api")
+		if live == dead.ID {
+			t.Fatalf("the name resolved to the retired row %s; want a row of its own", live)
+		}
+		if err := s.SetPullsPollStateSystem(ctx, orgID, live, `"etag-live"`, now); err != nil {
+			t.Fatalf("SetPullsPollStateSystem(live): %v", err)
+		}
+
+		if err := s.SetPullsPollStateSystem(ctx, orgID, dead.ID, "", now); err != nil {
+			t.Fatalf("clear the retired row's etag: %v", err)
+		}
+		if etag, _, err := s.GetPullsPollStateSystem(ctx, orgID, dead.ID); err != nil || etag != "" {
+			t.Errorf("retired row's etag = %q, %v; want it cleared", etag, err)
+		}
+		if etag, _, err := s.GetPullsPollStateSystem(ctx, orgID, live); err != nil || etag != `"etag-live"` {
+			t.Errorf("live namesake's etag = %q, %v; want it untouched", etag, err)
 		}
 	})
 }
@@ -1511,6 +1596,32 @@ func setBaseBranch(ctx context.Context, s db.RepositoryStore, orgID, slug, branc
 	}
 	_, err = s.UpdateBaseBranch(ctx, orgID, row.ID, branch)
 	return err
+}
+
+// setCloneStatus is setBaseBranch's twin for the clone outcome: resolve the
+// name, then stamp the row by its id, as the clone callback does with the id
+// the bare is keyed by.
+func setCloneStatus(ctx context.Context, s db.RepositoryStore, orgID, slug, status, errMsg, errKind string) (domain.Repository, error) {
+	row, err := s.GetByRef(ctx, orgID, repoRef(slug))
+	if err != nil {
+		return domain.Repository{}, err
+	}
+	if row == nil {
+		return domain.Repository{}, fmt.Errorf("%w: %s", db.ErrNoSuchRepository, slug)
+	}
+	return s.UpdateCloneStatusSystem(ctx, orgID, row.ID, status, errMsg, errKind)
+}
+
+// repoRowID is the id of the row slug resolves to on TestGitHubHost, for the
+// cases that go on to call an id-keyed method. A slug that resolves to nothing
+// fails the test.
+func repoRowID(t *testing.T, ctx context.Context, s db.RepositoryStore, orgID, slug string) string {
+	t.Helper()
+	row, err := s.GetByRef(ctx, orgID, repoRef(slug))
+	if err != nil || row == nil {
+		t.Fatalf("resolve %s: got=%v err=%v", slug, row, err)
+	}
+	return row.ID
 }
 
 func equalStringSlice(a, b []string) bool {

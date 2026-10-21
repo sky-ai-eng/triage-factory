@@ -35,26 +35,24 @@ func TestPublish_LocalShape_SingleOrgScopedBroadcast(t *testing.T) {
 }
 
 // TestPublish_FanOut_OneEventPerRecipient pins the multi-mode shape: the
-// resolver is consulted with the org, the repository's host, and the split
-// (owner, repo) — read off the SLUG, since team tracking is the axis the
-// audience is resolved on and the id would split into nothing — and one
-// identically-bodied event goes out per returned user id. The host travels
-// because tracking is per host: a team tracking acme/api on one GitHub
-// deployment does not track the repository of that name on another. The hub's
-// per-connection UserID filter (pkg/websocket hub_test) is what turns that
-// into "a client whose teams don't track the repo receives nothing".
+// resolver is consulted with the org and the update's registry row id — the
+// row team tracking references, which a rename between the write and this
+// emission does not move — and one identically-bodied event goes out per
+// returned user id. The hub's per-connection UserID filter (pkg/websocket
+// hub_test) is what turns that into "a client whose teams don't track the
+// repo receives nothing".
 func TestPublish_FanOut_OneEventPerRecipient(t *testing.T) {
 	hub := &recordingHub{}
-	var gotOrg, gotHost, gotOwner, gotRepo string
-	n := NewNotifier(hub, func(_ context.Context, orgID, host, owner, repo string) ([]string, error) {
-		gotOrg, gotHost, gotOwner, gotRepo = orgID, host, owner, repo
+	var gotOrg, gotRepositoryID string
+	n := NewNotifier(hub, func(_ context.Context, orgID, repositoryID string) ([]string, error) {
+		gotOrg, gotRepositoryID = orgID, repositoryID
 		return []string{"user-a", "user-b"}, nil
 	})
-	upd := Update{ID: "repo-1", Slug: "acme/api", Host: "https://ghe.example.com", CloneStatus: Ptr("failed"), CloneError: Ptr("boom")}
+	upd := Update{ID: "repo-1", Slug: "acme/api", CloneStatus: Ptr("failed"), CloneError: Ptr("boom")}
 	n.Publish(context.Background(), "org-1", upd)
 
-	if gotOrg != "org-1" || gotHost != "https://ghe.example.com" || gotOwner != "acme" || gotRepo != "api" {
-		t.Errorf("resolver called with (%q, %q, %q, %q); want (org-1, https://ghe.example.com, acme, api)", gotOrg, gotHost, gotOwner, gotRepo)
+	if gotOrg != "org-1" || gotRepositoryID != "repo-1" {
+		t.Errorf("resolver called with (%q, %q); want (org-1, repo-1)", gotOrg, gotRepositoryID)
 	}
 	if len(hub.events) != 2 {
 		t.Fatalf("got %d events, want 2", len(hub.events))
@@ -72,30 +70,30 @@ func TestPublish_FanOut_OneEventPerRecipient(t *testing.T) {
 
 // TestPublish_FailsClosed pins that resolution problems DROP the event
 // rather than widening it: a resolver error, an empty recipient set, and
-// a malformed slug all produce zero broadcasts. Falling back to an
-// org-wide broadcast here would re-open the cross-team disclosure the
+// an update with no repository id all produce zero broadcasts. Falling back
+// to an org-wide broadcast here would re-open the cross-team disclosure the
 // fan-out exists to prevent.
 func TestPublish_FailsClosed(t *testing.T) {
 	cases := []struct {
 		name       string
-		slug       string
+		id         string
 		recipients RecipientsFunc
 	}{
-		{"resolver error", "acme/api", func(context.Context, string, string, string, string) ([]string, error) {
+		{"resolver error", "repo-1", func(context.Context, string, string) ([]string, error) {
 			return nil, errors.New("db down")
 		}},
-		{"no recipients", "acme/api", func(context.Context, string, string, string, string) ([]string, error) {
+		{"no recipients", "repo-1", func(context.Context, string, string) ([]string, error) {
 			return nil, nil
 		}},
-		{"malformed slug", "no-slash", func(context.Context, string, string, string, string) ([]string, error) {
-			t.Error("resolver must not be called for a malformed slug")
+		{"no repository id", "", func(context.Context, string, string) ([]string, error) {
+			t.Error("resolver must not be called for an update with no repository id")
 			return []string{"user-a"}, nil
 		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			hub := &recordingHub{}
-			NewNotifier(hub, tc.recipients).Publish(context.Background(), "org-1", Update{ID: "repo-1", Slug: tc.slug})
+			NewNotifier(hub, tc.recipients).Publish(context.Background(), "org-1", Update{ID: tc.id, Slug: "acme/api"})
 			if len(hub.events) != 0 {
 				t.Errorf("got %d events, want 0 (fail closed)", len(hub.events))
 			}
@@ -111,7 +109,7 @@ func TestPublish_FailsClosed(t *testing.T) {
 // receive theirs.
 func TestPublish_EmptyRecipientID_DroppedNotWidened(t *testing.T) {
 	hub := &recordingHub{}
-	n := NewNotifier(hub, func(context.Context, string, string, string, string) ([]string, error) {
+	n := NewNotifier(hub, func(context.Context, string, string) ([]string, error) {
 		return []string{"", "user-a"}, nil
 	})
 	n.Publish(context.Background(), "org-1", Update{ID: "repo-1", Slug: "acme/api", ProfileText: Ptr("p")})
@@ -142,9 +140,7 @@ func TestPublish_NilSafety(t *testing.T) {
 // their REST names, and the payload is exactly the allowlist — no extra
 // columns can ride along.
 func TestUpdate_WireShape_SparseAndAllowlisted(t *testing.T) {
-	// Host is set on both payloads and never serializes: it is how the
-	// audience is resolved, not a field the emitter wrote.
-	sparse, err := json.Marshal(Update{ID: "repo-1", Slug: "acme/api", Host: "https://github.com", CloneStatus: Ptr("ok")})
+	sparse, err := json.Marshal(Update{ID: "repo-1", Slug: "acme/api", CloneStatus: Ptr("ok")})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -155,7 +151,6 @@ func TestUpdate_WireShape_SparseAndAllowlisted(t *testing.T) {
 	full, err := json.Marshal(Update{
 		ID:          "repo-1",
 		Slug:        "acme/api",
-		Host:        "https://github.com",
 		HasReadme:   Ptr(true),
 		HasClaudeMd: Ptr(false),
 		HasAgentsMd: Ptr(false),

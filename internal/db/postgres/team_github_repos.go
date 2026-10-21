@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -256,9 +257,13 @@ func (s *teamGitHubReposStore) TracksRepositorySystem(ctx context.Context, teamI
 // backends pin to one result. Admin pool: the emitters (profiler) are
 // claims-free background jobs, and the union deliberately crosses team
 // boundaries the membership RLS policies would hide.
-func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, orgID, host, owner, repo string) ([]string, error) {
-	if err := db.RequireRepoHost(host); err != nil {
-		return nil, err
+func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, orgID, repositoryID string) ([]string, error) {
+	// A handle that was never a registry id names no repository, so no team
+	// tracks it; deciding that here keeps the driver's uuid parse failure from
+	// standing in for the answer SQLite gives.
+	trackedID := repositoryID
+	if _, err := uuid.Parse(repositoryID); err != nil {
+		trackedID = uuid.Nil.String()
 	}
 	// UNION (not UNION ALL) dedups a user who is both an org admin and a
 	// tracking-team member. The tracking arm mirrors
@@ -270,7 +275,8 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 	// must keep receiving its events. Excluding them here would be
 	// routing semantics (TeamIDsForUserInOrgSystem — no NEW work for an
 	// archived team) misapplied to a visibility read, leaving their
-	// Repos page silently stale.
+	// Repos page silently stale. A retired row is left out of the
+	// tracking arm because the REST read leaves it out.
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT user_id::text FROM (
 			SELECT om.user_id
@@ -283,12 +289,11 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 			JOIN repositories r ON r.id = g.repository_id
 			JOIN memberships m ON m.team_id = g.team_id
 			WHERE t.org_id = $1
-			  AND r.host = $4
-			  AND lower(r.owner) = lower($2) AND lower(r.repo) = lower($3)
+			  AND g.repository_id = $2
 			  AND r.retired_at IS NULL
 		) u
 		ORDER BY user_id ASC
-	`, orgID, owner, repo, host)
+	`, orgID, trackedID)
 	if err != nil {
 		return nil, fmt.Errorf("repo update recipients: %w", err)
 	}

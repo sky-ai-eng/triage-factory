@@ -103,11 +103,18 @@ func (s *faultyEntityStore) ReactivateWithSnapshotCASSystem(ctx context.Context,
 	return s.EntityStore.ReactivateWithSnapshotCASSystem(ctx, orgID, id, snapshotJSON, expectedPollSeq)
 }
 
+// pullsCursorOf reads the listing state stored on the registry row repo
+// resolves to on cursorTestHost.
 func pullsCursorOf(t *testing.T, stores db.Stores, repo string) (string, *time.Time) {
 	t.Helper()
-	etag, polledAt, err := stores.Repos.GetPullsPollStateByRefSystem(context.Background(), runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(cursorTestHost, repo))
+	ctx := context.Background()
+	row, err := stores.Repos.GetByRefSystem(ctx, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(cursorTestHost, repo))
+	if err != nil || row == nil {
+		t.Fatalf("resolve %s: got=%v err=%v", repo, row, err)
+	}
+	etag, polledAt, err := stores.Repos.GetPullsPollStateSystem(ctx, runmode.LocalDefaultOrgID, row.ID)
 	if err != nil {
-		t.Fatalf("GetPullsPollStateByRefSystem(%s): %v", repo, err)
+		t.Fatalf("GetPullsPollStateSystem(%s): %v", repo, err)
 	}
 	return etag, polledAt
 }

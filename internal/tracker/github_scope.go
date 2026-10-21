@@ -43,9 +43,8 @@ func (t *Tracker) RetireGitHubOutOfScope(ctx context.Context, scope string) int 
 		if e.Scope == scope {
 			continue
 		}
-		repo := t.entityRepository(ctx, e)
-		t.forgetPullsCursor(ctx, repo, forgotten)
-		t.emitGitHubUnreachable(ctx, e, repo, events.GitHubUnreachableScopeChanged)
+		t.forgetPullsCursor(ctx, e.RepositoryID, forgotten)
+		t.emitGitHubUnreachable(ctx, e, t.entityRepository(ctx, e), events.GitHubUnreachableScopeChanged)
 		retired++
 	}
 	return retired
@@ -67,30 +66,33 @@ func (t *Tracker) entityRepository(ctx context.Context, e domain.Entity) *domain
 	return repo
 }
 
-// forgetPullsCursor clears the stored ETag of the open-PR listing of repo —
-// the registry row of a retired pull request, on the host it was polled from —
-// keeping its poll time, so the next listing there is unconditional. Without
-// it, an org that returns to the host would replay the ETag stored before it
-// left; a listing nothing changed in since answers 304, discovery sees none of
-// its pull requests, and the ones retired in the meantime stay closed until
-// something in the repository changes. done holds the ids of the repositories
-// already handled this pass. Best-effort: a cursor left in place (repo nil, or
-// a failed write) costs that delay, never a wrong event.
-func (t *Tracker) forgetPullsCursor(ctx context.Context, repo *domain.Repository, done map[string]bool) {
-	if repo == nil || done[repo.ID] {
+// forgetPullsCursor clears the stored ETag of the open-PR listing of the
+// repository whose registry row is repositoryID — the row a retired pull
+// request's entity references, on the host it was polled from — keeping its
+// poll time, so the next listing there is unconditional. Without it, an org
+// that returns to the host would replay the ETag stored before it left; a
+// listing nothing changed in since answers 304, discovery sees none of its
+// pull requests, and the ones retired in the meantime stay closed until
+// something in the repository changes. The state is the row's own, so a
+// repository GitHub now serves under the same name keeps its cursor. done
+// holds the ids of the repositories already handled this pass. Best-effort: a
+// cursor left in place (no id, or a failed read or write) costs that delay,
+// never a wrong event.
+func (t *Tracker) forgetPullsCursor(ctx context.Context, repositoryID string, done map[string]bool) {
+	if t.repos == nil || repositoryID == "" || done[repositoryID] {
 		return
 	}
-	done[repo.ID] = true
-	etag, polledAt, err := t.repos.GetPullsPollStateByRefSystem(ctx, t.orgID, repo.Ref())
+	done[repositoryID] = true
+	etag, polledAt, err := t.repos.GetPullsPollStateSystem(ctx, t.orgID, repositoryID)
 	if err != nil {
-		trackerLog.WarnContext(ctx, "read pulls poll state of a retired pull request's repository failed", "host", repo.Host, "repo", repo.Slug(), "error", err)
+		trackerLog.WarnContext(ctx, "read pulls poll state of a retired pull request's repository failed", "repository_id", repositoryID, "error", err)
 		return
 	}
 	if etag == "" || polledAt == nil {
 		return
 	}
-	if err := t.repos.SetPullsPollStateByRefSystem(ctx, t.orgID, repo.Ref(), "", *polledAt); err != nil {
-		trackerLog.WarnContext(ctx, "clear pulls poll state of a retired pull request's repository failed", "host", repo.Host, "repo", repo.Slug(), "error", err)
+	if err := t.repos.SetPullsPollStateSystem(ctx, t.orgID, repositoryID, "", *polledAt); err != nil {
+		trackerLog.WarnContext(ctx, "clear pulls poll state of a retired pull request's repository failed", "repository_id", repositoryID, "error", err)
 	}
 }
 

@@ -114,10 +114,7 @@ func TestRefreshGitHub_RESTDiscovery_SeedsEntityAndConditionalSkips(t *testing.T
 	}
 
 	// ETag persisted for conditional re-poll next cycle.
-	etag, polledAt, err := stores.Repos.GetPullsPollStateByRefSystem(ctx, org, domain.RepoRefFromSlug("https://github.com", "octo/repo"))
-	if err != nil {
-		t.Fatalf("GetPullsPollStateByRefSystem: %v", err)
-	}
+	etag, polledAt := pullsCursorOf(t, stores, "octo/repo")
 	if etag != `"etag-1"` {
 		t.Errorf("persisted etag = %q; want %q", etag, `"etag-1"`)
 	}

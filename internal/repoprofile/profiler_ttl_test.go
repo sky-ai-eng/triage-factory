@@ -38,7 +38,7 @@ func TestRunOrg_TTLSkipsFreshUnlessForced(t *testing.T) {
 			t.Errorf("resolver.ClientFor called %d times for a TTL-skipped repo; want 0", n)
 		}
 		if n := repos.upserts.Load(); n != 0 {
-			t.Errorf("UpsertSystem called %d times for a TTL-skipped repo; want 0", n)
+			t.Errorf("UpdateProfileSystem called %d times for a TTL-skipped repo; want 0", n)
 		}
 	})
 
@@ -58,7 +58,7 @@ func TestRunOrg_TTLSkipsFreshUnlessForced(t *testing.T) {
 }
 
 // ttlRepositoryStore returns a single tracked repo whose GetByRefSystem reports a
-// recently-profiled row, so the TTL branch is exercised. UpsertSystem and
+// recently-profiled row, so the TTL branch is exercised. UpdateProfileSystem and
 // the GetByRefSystem consult are counted.
 type ttlRepositoryStore struct {
 	db.RepositoryStore
@@ -75,9 +75,9 @@ func (s *ttlRepositoryStore) GetByRefSystem(context.Context, string, domain.Repo
 	return s.profile, nil
 }
 
-func (s *ttlRepositoryStore) UpsertSystem(_ context.Context, _ string, p domain.Repository) (domain.Repository, error) {
+func (s *ttlRepositoryStore) UpdateProfileSystem(_ context.Context, _, id string, p domain.Repository) (domain.Repository, error) {
 	s.upserts.Add(1)
-	return storedRepoRow(p), nil
+	return storedRepoRow(id, p), nil
 }
 
 // countingResolver counts ClientFor calls and always errors, so a forced

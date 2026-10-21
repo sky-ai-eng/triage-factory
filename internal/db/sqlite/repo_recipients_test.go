@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 )
@@ -53,33 +54,30 @@ func TestRepoRecipients_SQLite(t *testing.T) {
 			OrgMembership: func(t *testing.T, userID, orgID, role string) {
 				exec(t, `INSERT INTO org_memberships (user_id, org_id, role) VALUES (?, ?, ?)`, userID, orgID, role)
 			},
-			TrackRepo: func(t *testing.T, teamID, host, owner, repo string) {
+			TrackRepo: func(t *testing.T, teamID, host, owner, repo string) string {
 				// A tracking row references the registry row, so the registry
 				// row has to exist first. The org is the team's — a tracking
 				// row whose repository lived in another org would be a
 				// cross-tenant row, which is the thing the FK plus
 				// ReplaceForTeam's team-in-org check exist to make
 				// unrepresentable.
-				exec(t, `
-					INSERT INTO repositories (id, org_id, host, owner, repo, source)
-					SELECT ?, t.org_id, ?, ?, ?, 'github'
-					  FROM teams t
-					 WHERE t.id = ?
-					   AND NOT EXISTS (
-					       SELECT 1 FROM repositories r
-					        WHERE r.org_id = t.org_id AND r.source = 'github' AND r.host = ?
-					          AND LOWER(r.owner) = LOWER(?) AND LOWER(r.repo) = LOWER(?))
-				`, uuid.NewString(), host, owner, repo, teamID, host, owner, repo)
+				var orgID string
+				if err := conn.QueryRow(`SELECT org_id FROM teams WHERE id = ?`, teamID).Scan(&orgID); err != nil {
+					t.Fatalf("read team %s org: %v", teamID, err)
+				}
+				repositoryID := dbseed.GitHubRepository(t, conn, orgID, host, owner, repo)
 				exec(t, `
 					INSERT INTO team_github_repos (team_id, repository_id, org_id)
-					SELECT t.id, r.id, t.org_id
-					  FROM teams t
-					  JOIN repositories r
-					    ON r.org_id = t.org_id AND r.source = 'github' AND r.host = ?
-					   AND LOWER(r.owner) = LOWER(?) AND LOWER(r.repo) = LOWER(?)
-					 WHERE t.id = ?
+					VALUES (?, ?, ?)
 					ON CONFLICT(team_id, repository_id) DO NOTHING
-				`, host, owner, repo, teamID)
+				`, teamID, repositoryID, orgID)
+				return repositoryID
+			},
+			RenameRepo: func(t *testing.T, repositoryID, owner, repo string) {
+				dbseed.RenameRepositoryOnly(t, conn, repositoryID, owner, repo)
+			},
+			RetireRepo: func(t *testing.T, repositoryID string) {
+				exec(t, `UPDATE repositories SET retired_at = CURRENT_TIMESTAMP WHERE id = ?`, repositoryID)
 			},
 			ArchiveTeam: func(t *testing.T, teamID string) {
 				exec(t, `UPDATE teams SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, teamID)

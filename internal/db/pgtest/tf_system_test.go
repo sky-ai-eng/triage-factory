@@ -660,11 +660,22 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	t.Run("repositories", func(t *testing.T) {
 		seedRepository(t, h, orgID)
 		ref := domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "octo", Repo: "conformance-repo"}
-		if got, err := stores.Repos.GetByRefSystem(ctx, orgID, ref); err != nil || got == nil {
-			t.Errorf("Repos.GetByRefSystem: got=%v err=%v", got, err)
+		got, err := stores.Repos.GetByRefSystem(ctx, orgID, ref)
+		if err != nil || got == nil {
+			t.Fatalf("Repos.GetByRefSystem: got=%v err=%v", got, err)
 		}
-		if _, err := stores.Repos.UpdateCloneStatusByRefSystem(ctx, orgID, ref, "ok", "", ""); err != nil {
-			t.Errorf("Repos.UpdateCloneStatusByRefSystem: %v", err)
+		if _, err := stores.Repos.UpdateCloneStatusSystem(ctx, orgID, got.ID, "ok", "", ""); err != nil {
+			t.Errorf("Repos.UpdateCloneStatusSystem: %v", err)
+		}
+		profiled := time.Now()
+		if _, err := stores.Repos.UpdateProfileSystem(ctx, orgID, got.ID, domain.Repository{ProfileText: "p", ProfiledAt: &profiled}); err != nil {
+			t.Errorf("Repos.UpdateProfileSystem: %v", err)
+		}
+		if err := stores.Repos.SetPullsPollStateSystem(ctx, orgID, got.ID, `"etag"`, time.Now()); err != nil {
+			t.Errorf("Repos.SetPullsPollStateSystem: %v", err)
+		}
+		if _, _, err := stores.Repos.GetPullsPollStateSystem(ctx, orgID, got.ID); err != nil {
+			t.Errorf("Repos.GetPullsPollStateSystem: %v", err)
 		}
 		if got, err := stores.Repos.FindOrCreateByRefSystem(ctx, orgID, domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "octo", Repo: "minted-by-executor"}); err != nil || got.ID == "" {
 			t.Errorf("Repos.FindOrCreateByRefSystem: got=%+v err=%v", got, err)

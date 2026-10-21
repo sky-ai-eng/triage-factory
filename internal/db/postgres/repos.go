@@ -601,39 +601,54 @@ func getRepositoryByRef(ctx context.Context, q queryer, orgID string, ref domain
 	return findRepositoryByRef(ctx, q, orgID, source, ref)
 }
 
-func (s *repoStore) UpdateCloneStatusByRef(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) (*domain.Repository, error) {
-	return updateRepoCloneStatus(ctx, s.q, orgID, ref, status, errMsg, errKind)
-}
-
-func (s *repoStore) UpdateCloneStatusByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) (*domain.Repository, error) {
-	return updateRepoCloneStatus(ctx, s.admin, orgID, ref, status, errMsg, errKind)
-}
-
-func updateRepoCloneStatus(ctx context.Context, q queryer, orgID string, ref domain.RepoRef, status, errMsg, errKind string) (*domain.Repository, error) {
-	source, err := domain.NormalizeRepoSource(ref.Source)
-	if err != nil {
-		return nil, err
+func (s *repoStore) UpdateCloneStatusSystem(ctx context.Context, orgID, id, status, errMsg, errKind string) (domain.Repository, error) {
+	if err := validRepoID(id); err != nil {
+		return domain.Repository{}, err
 	}
-	if err := db.RequireRepoHost(ref.Host); err != nil {
-		return nil, err
-	}
-	row := q.QueryRowContext(ctx, `
+	row := s.admin.QueryRowContext(ctx, `
 		UPDATE repositories
 		   SET clone_status = $1, clone_error = NULLIF($2, ''), clone_error_kind = NULLIF($3, '')
-		 WHERE org_id = $4 AND source = $5 AND host = $8
-		   AND lower(owner) = lower($6) AND lower(repo) = lower($7)
-		   AND retired_at IS NULL
+		 WHERE org_id = $4 AND id = $5
 		RETURNING `+repoProfileFullColumns,
-		status, errMsg, errKind, orgID, source, ref.Owner, ref.Repo, ref.Host)
-	p, err := pgScanRepositoryFull(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		// Nothing answers to the name — the documented no-op, not a fault.
-		return nil, nil
+		status, errMsg, errKind, orgID, id)
+	return scanUpdatedRepository(row, id)
+}
+
+func (s *repoStore) UpdateProfileSystem(ctx context.Context, orgID, id string, p domain.Repository) (domain.Repository, error) {
+	if err := validRepoID(id); err != nil {
+		return domain.Repository{}, err
 	}
-	if err != nil {
-		return nil, err
-	}
-	return &p, nil
+	// external_id follows Upsert's rule: written when the caller has one and
+	// no other row on the row's host carries it, else left as stored. The
+	// scalar subquery answers NULL in either case, and COALESCE keeps the
+	// stored value. A retired row is not written (see the interface doc), and
+	// owner/repo, base_branch, the clone state and the poll cursor are absent
+	// from the SET list.
+	row := s.admin.QueryRowContext(ctx, `
+		UPDATE repositories r
+		   SET external_id    = COALESCE((SELECT NULLIF($3::text, '') WHERE NOT EXISTS (
+		                            SELECT 1 FROM repositories o
+		                             WHERE o.org_id = r.org_id AND o.source = r.source AND o.host = r.host
+		                               AND o.external_id = $3::text AND o.id <> r.id)),
+		                            r.external_id),
+		       description    = NULLIF($4, ''),
+		       has_readme     = $5,
+		       has_claude_md  = $6,
+		       has_agents_md  = $7,
+		       profile_text   = NULLIF($8, ''),
+		       clone_url      = NULLIF($9, ''),
+		       default_branch = NULLIF($10, ''),
+		       profiled_at    = $11,
+		       updated_at     = now()
+		 WHERE r.org_id = $1 AND r.id = $2 AND r.retired_at IS NULL
+		RETURNING `+repoProfileFullColumns,
+		orgID, id, p.ExternalID,
+		p.Description,
+		p.HasReadme, p.HasClaudeMd, p.HasAgentsMd,
+		p.ProfileText, p.CloneURL, p.DefaultBranch,
+		p.ProfiledAt,
+	)
+	return scanUpdatedRepository(row, id)
 }
 
 // validRepoID rejects a handle that was never a registry id before it reaches
@@ -651,9 +666,8 @@ func validRepoID(id string) error {
 
 // scanUpdatedRepository reads the row an id-keyed UPDATE … RETURNING produced,
 // turning the empty result — the write matched nothing — into
-// db.ErrNoSuchRepository. It replaces the rows-affected probe these writes used
-// to run: RETURNING answers "did this land" and "what does the row say now" in
-// one statement, so there is nothing left to count.
+// db.ErrNoSuchRepository. RETURNING answers "did this land" and "what does the
+// row say now" in one statement, so there is nothing left to count.
 func scanUpdatedRepository(row pgRowScanner, id string) (domain.Repository, error) {
 	p, err := pgScanRepositoryFull(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -724,25 +738,19 @@ func (s *repoStore) FillMissingExternalIDsSystem(ctx context.Context, orgID stri
 	return filled, rows.Err()
 }
 
-func (s *repoStore) GetPullsPollStateByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef) (string, *time.Time, error) {
-	source, err := domain.NormalizeRepoSource(ref.Source)
-	if err != nil {
-		return "", nil, err
-	}
-	if err := db.RequireRepoHost(ref.Host); err != nil {
+func (s *repoStore) GetPullsPollStateSystem(ctx context.Context, orgID, id string) (string, *time.Time, error) {
+	if err := validRepoID(id); err != nil {
 		return "", nil, err
 	}
 	var etag sql.NullString
 	var polledAt sql.NullTime
-	err = s.admin.QueryRowContext(ctx, `
+	err := s.admin.QueryRowContext(ctx, `
 		SELECT pulls_etag, pulls_polled_at
 		  FROM repositories
-		 WHERE org_id = $1 AND source = $2 AND host = $5
-		   AND lower(owner) = lower($3) AND lower(repo) = lower($4)
-		   AND retired_at IS NULL
-	`, orgID, source, ref.Owner, ref.Repo, ref.Host).Scan(&etag, &polledAt)
+		 WHERE org_id = $1 AND id = $2
+	`, orgID, id).Scan(&etag, &polledAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil, nil
+		return "", nil, fmt.Errorf("%w: %s", db.ErrNoSuchRepository, id)
 	}
 	if err != nil {
 		return "", nil, err
@@ -754,21 +762,17 @@ func (s *repoStore) GetPullsPollStateByRefSystem(ctx context.Context, orgID stri
 	return etag.String, out, nil
 }
 
-func (s *repoStore) SetPullsPollStateByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef, etag string, polledAt time.Time) error {
-	source, err := domain.NormalizeRepoSource(ref.Source)
-	if err != nil {
-		return err
+func (s *repoStore) SetPullsPollStateSystem(ctx context.Context, orgID, id, etag string, polledAt time.Time) error {
+	// A handle that was never an id names no row, which is the documented
+	// no-op rather than the driver's uuid parse failure.
+	if validRepoID(id) != nil {
+		return nil
 	}
-	if err := db.RequireRepoHost(ref.Host); err != nil {
-		return err
-	}
-	_, err = s.admin.ExecContext(ctx, `
+	_, err := s.admin.ExecContext(ctx, `
 		UPDATE repositories
 		   SET pulls_etag = NULLIF($1, ''), pulls_polled_at = $2
-		 WHERE org_id = $3 AND source = $4 AND host = $7
-		   AND lower(owner) = lower($5) AND lower(repo) = lower($6)
-		   AND retired_at IS NULL
-	`, etag, polledAt, orgID, source, ref.Owner, ref.Repo, ref.Host)
+		 WHERE org_id = $3 AND id = $4
+	`, etag, polledAt, orgID, id)
 	return err
 }
 

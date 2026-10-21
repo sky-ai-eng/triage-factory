@@ -154,24 +154,26 @@ type TeamGitHubReposStore interface {
 	TracksRepositorySystem(ctx context.Context, teamID, repositoryID string) (bool, error)
 
 	// RepoUpdateRecipientsSystem returns the distinct, sorted ids of every
-	// user who may receive a repository_updated websocket event for
-	// (owner, repo) in orgID: the org's admins and owners, plus every
-	// member of a team that tracks the repo, matched case-insensitively
-	// on both fields. This deliberately mirrors the REST read's
-	// visibility (org admins get the org-wide union, members their teams'
-	// tracked sets — the repoTrackedByATeam semi-join behind
-	// ListTeamScoped), because the websocket hub scopes connections on
-	// (org, user) only and the repoevent.Notifier fans one event per
-	// returned id onto that axis. Mirroring includes the archived-team
-	// case: archive tombstones the team without touching memberships or
-	// tracking rows, so its members still see the repo on GET /api/repos
-	// and stay in this audience — visibility scoping, distinct from the
-	// routing reads (TeamIDsForUserInOrgSystem) that DO exclude archived
-	// teams to keep new work away from them. Admin pool in Postgres: the
-	// emitters are claims-free background jobs. Called fresh per emission
-	// so membership changes take effect immediately; local mode never
-	// calls it (N=1 broadcasts org-wide).
-	RepoUpdateRecipientsSystem(ctx context.Context, orgID, host, owner, repo string) ([]string, error)
+	// user who may receive a repository_updated websocket event for the
+	// repository whose registry row is repositoryID in orgID: the org's admins
+	// and owners, plus every member of a team that tracks the row. This
+	// deliberately mirrors the REST read's visibility (org admins get the
+	// org-wide union, members their teams' tracked sets — the
+	// repoTrackedByATeam semi-join behind ListTeamScoped), because the
+	// websocket hub scopes connections on (org, user) only and the
+	// repoevent.Notifier fans one event per returned id onto that axis.
+	// Keyed by the row id the event carries, so a rename between the write
+	// and this read changes nothing, and a retired row's tracking teams are
+	// left out the way the REST read leaves the row out. Mirroring includes
+	// the archived-team case: archive tombstones the team without touching
+	// memberships or tracking rows, so its members still see the repo on GET
+	// /api/repos and stay in this audience — visibility scoping, distinct
+	// from the routing reads (TeamIDsForUserInOrgSystem) that DO exclude
+	// archived teams to keep new work away from them. Admin pool in
+	// Postgres: the emitters are claims-free background jobs. Called fresh
+	// per emission so membership changes take effect immediately; local mode
+	// never calls it (N=1 broadcasts org-wide).
+	RepoUpdateRecipientsSystem(ctx context.Context, orgID, repositoryID string) ([]string, error)
 
 	// TracksRepositoryViewerScoped reports whether ANY team the calling user
 	// belongs to tracks the repository with this registry id (TFAC-559). The

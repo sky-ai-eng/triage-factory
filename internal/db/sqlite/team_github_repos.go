@@ -253,10 +253,7 @@ func (s *teamGitHubReposStore) TracksRepositorySystem(ctx context.Context, teamI
 // calls it — the repoevent.Notifier is built without a RecipientsFunc
 // there and broadcasts org-wide — but the shared conformance suite
 // exercises it, so N=1 must not be assumed here.
-func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, orgID, host, owner, repo string) ([]string, error) {
-	if err := db.RequireRepoHost(host); err != nil {
-		return nil, err
-	}
+func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, orgID, repositoryID string) ([]string, error) {
 	// UNION (not UNION ALL) dedups a user who is both an org admin and a
 	// tracking-team member. No teams.deleted_at filter, deliberately —
 	// see the Postgres impl's comment: the tracking arm mirrors the REST
@@ -272,12 +269,11 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 			JOIN teams t ON t.id = g.team_id
 			JOIN repositories r ON r.id = g.repository_id
 			JOIN memberships m ON m.team_id = g.team_id
-			WHERE t.org_id = ? AND r.host = ?
-			  AND LOWER(r.owner) = LOWER(?) AND LOWER(r.repo) = LOWER(?)
+			WHERE t.org_id = ? AND g.repository_id = ?
 			  AND r.retired_at IS NULL
 		)
 		ORDER BY user_id ASC
-	`, orgID, orgID, host, owner, repo)
+	`, orgID, orgID, repositoryID)
 	if err != nil {
 		return nil, fmt.Errorf("repo update recipients: %w", err)
 	}

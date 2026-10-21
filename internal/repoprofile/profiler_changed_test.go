@@ -66,8 +66,8 @@ func TestRunOrg_BatchFailure_NoToast(t *testing.T) {
 
 // TestRunOrg_ChangedTracksUpsertSuccess pins that the cycle's changed flag
 // reflects whether a row was *successfully persisted*, not merely attempted:
-// a genuine-404 repo whose UpsertSystem succeeds yields changed=true, while
-// the same repo with a failing UpsertSystem yields changed=false (so the
+// a genuine-404 repo whose UpdateProfileSystem succeeds yields changed=true,
+// while the same repo with a failing UpdateProfileSystem yields changed=false (so the
 // Runner skips the bare-clone bootstrap for a clone_url that never landed).
 func TestRunOrg_ChangedTracksUpsertSuccess(t *testing.T) {
 	// All docs 404 (genuine absence) but repo meta succeeds, so the repo
@@ -168,7 +168,7 @@ func TestRunOrg_ChangedTracksBatchUpserts(t *testing.T) {
 }
 
 // batchRepositoryStore serves a fixed configured-name list with a fresh
-// (never-profiled) row and fails UpsertSystem calls selected by failUpsert,
+// (never-profiled) row and fails UpdateProfileSystem calls selected by failUpsert,
 // so a test can fail the docs-flags write while letting a later batch-path
 // write through.
 type batchRepositoryStore struct {
@@ -195,7 +195,7 @@ func (s *batchRepositoryStore) GetByRefSystem(_ context.Context, _ string, ref d
 	return &domain.Repository{ID: "repo-id-" + ref.Repo, Host: ref.Host, Owner: ref.Owner, Repo: ref.Repo}, nil
 }
 
-func (s *batchRepositoryStore) UpsertSystem(_ context.Context, _ string, p domain.Repository) (domain.Repository, error) {
+func (s *batchRepositoryStore) UpdateProfileSystem(_ context.Context, _, id string, p domain.Repository) (domain.Repository, error) {
 	n := int(s.calls.Add(1))
 	if s.failUpsert != nil && s.failUpsert(n) {
 		return domain.Repository{}, errUpsertDown
@@ -206,17 +206,16 @@ func (s *batchRepositoryStore) UpsertSystem(_ context.Context, _ string, p domai
 	}
 	s.last[p.Slug()] = p
 	s.mu.Unlock()
-	return storedRepoRow(p), nil
+	return storedRepoRow(id, p), nil
 }
 
-// storedRepoRow is what these doubles hand back from UpsertSystem — the row the
-// real store persists, which differs from the input in the way the profiler
-// depends on: it carries the registry id, minted by the store rather than
-// supplied by the caller. It is the same id GetByRefSystem answers with, so a
-// double's write and its read agree about the repository the way the real
-// store's do.
-func storedRepoRow(p domain.Repository) domain.Repository {
-	p.ID = "repo-id-" + p.Repo
+// storedRepoRow is what these doubles hand back from UpdateProfileSystem: the
+// row the write named by id, as the real store returns it. The profiler names
+// the row its GetByRefSystem read answered with, which these doubles mint as
+// "repo-id-<repo>", so a double's write and its read agree about the
+// repository the way the real store's do.
+func storedRepoRow(id string, p domain.Repository) domain.Repository {
+	p.ID = id
 	return p
 }
 
@@ -259,7 +258,7 @@ func TestRunOrg_BatchFailLeavesProfiledAtUnset(t *testing.T) {
 }
 
 // changeRepositoryStore serves a fixed configured-name list and lets the test make
-// UpsertSystem fail, to exercise the changed/touched accounting.
+// UpdateProfileSystem fail, to exercise the changed/touched accounting.
 type changeRepositoryStore struct {
 	db.RepositoryStore
 	names     []string
@@ -276,12 +275,12 @@ func (s *changeRepositoryStore) GetByRefSystem(_ context.Context, _ string, ref 
 	return &domain.Repository{ID: "repo-id-" + ref.Repo, Host: ref.Host, Owner: ref.Owner, Repo: ref.Repo}, nil
 }
 
-func (s *changeRepositoryStore) UpsertSystem(_ context.Context, _ string, p domain.Repository) (domain.Repository, error) {
+func (s *changeRepositoryStore) UpdateProfileSystem(_ context.Context, _, id string, p domain.Repository) (domain.Repository, error) {
 	s.upserts.Add(1)
 	if s.upsertErr != nil {
 		return domain.Repository{}, s.upsertErr
 	}
-	return storedRepoRow(p), nil
+	return storedRepoRow(id, p), nil
 }
 
 // TestRunOrg_RowGoneMidPass_SkipsRepo pins what a missing registry row means
@@ -316,7 +315,7 @@ func TestRunOrg_RowGoneMidPass_SkipsRepo(t *testing.T) {
 				t.Errorf("resolver.ClientFor called %d times for a rowless repo; want 0 (skipped before any fetch)", n)
 			}
 			if n := repos.upserts.Load(); n != 0 {
-				t.Errorf("UpsertSystem called %d times for a rowless repo; want 0 (no resurrection)", n)
+				t.Errorf("UpdateProfileSystem called %d times for a rowless repo; want 0 (no resurrection)", n)
 			}
 		})
 	}
@@ -340,9 +339,9 @@ func (s *goneRepositoryStore) GetByRefSystem(context.Context, string, domain.Rep
 	return nil, s.getErr
 }
 
-func (s *goneRepositoryStore) UpsertSystem(_ context.Context, _ string, p domain.Repository) (domain.Repository, error) {
+func (s *goneRepositoryStore) UpdateProfileSystem(_ context.Context, _, id string, p domain.Repository) (domain.Repository, error) {
 	s.upserts.Add(1)
-	return storedRepoRow(p), nil
+	return storedRepoRow(id, p), nil
 }
 
 var (
