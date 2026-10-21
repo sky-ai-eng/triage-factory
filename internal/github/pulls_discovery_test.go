@@ -191,7 +191,7 @@ func TestListInstallationRepos_Parses(t *testing.T) {
 			t.Errorf("path = %q; want /installation/repositories", r.URL.Path)
 		}
 		_, _ = w.Write([]byte(`{"total_count": 2, "repositories": [
-			{"full_name": "octo/repo"},
+			{"id": 10, "full_name": "octo/repo", "owner": {"login": "octo", "id": 583231}},
 			{"full_name": "octo/other"}
 		]}`))
 	}))
@@ -204,6 +204,14 @@ func TestListInstallationRepos_Parses(t *testing.T) {
 	}
 	if len(repos) != 2 || repos[0].FullName != "octo/repo" || repos[1].FullName != "octo/other" {
 		t.Fatalf("repos = %+v; want octo/repo + octo/other", repos)
+	}
+	// Each repository object carries its owner; the poller records the
+	// owner's id beside the repository's.
+	if repos[0].ExternalID() != "10" || repos[0].OwnerExternalID() != "583231" {
+		t.Errorf("octo/repo ids = (%q, %q); want (10, 583231)", repos[0].ExternalID(), repos[0].OwnerExternalID())
+	}
+	if repos[1].OwnerExternalID() != "" {
+		t.Errorf("octo/other OwnerExternalID = %q; want empty for an object with no owner", repos[1].OwnerExternalID())
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Errorf("made %d calls; want 1 (total_count reached, no extra page)", got)

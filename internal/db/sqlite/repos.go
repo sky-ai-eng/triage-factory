@@ -69,28 +69,37 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.Repositor
 	// restored only through RenameSystem. The scalar subquery answers NULL
 	// then, and COALESCE keeps whatever this row had.
 	//
+	// p.OwnerExternalID goes with that id: the VALUES carry it only when the
+	// id is written, so the conflict arm's COALESCE writes it onto a row that
+	// carries p.ExternalID once the statement lands and keeps the stored one
+	// otherwise. An owner id read off a response about one repository is not
+	// written onto a row that is another, and an empty one clears nothing.
+	//
 	// RETURNING projects the point read's column list, so the row handed back
 	// carries the COALESCEd external_id, the stored casing and the base branch
 	// and clone state this statement left alone — none of which p can describe.
-	row := s.q.QueryRowContext(ctx, `
-		INSERT INTO repositories (id, owner, repo, source, host, external_id, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, profiled_at, updated_at)
-		VALUES (?1, ?2, ?3, ?4, ?5,
-		        (SELECT ?6 WHERE NOT EXISTS (
+	learnedID := `(SELECT ?6 WHERE NOT EXISTS (
 		            SELECT 1 FROM repositories o
 		             WHERE o.source = ?4 AND o.host = ?5 AND o.external_id = ?6
-		               AND NOT (o.retired_at IS NULL AND LOWER(o.owner) = LOWER(?2) AND LOWER(o.repo) = LOWER(?3)))),
+		               AND NOT (o.retired_at IS NULL AND LOWER(o.owner) = LOWER(?2) AND LOWER(o.repo) = LOWER(?3))))`
+	row := s.q.QueryRowContext(ctx, `
+		INSERT INTO repositories (id, owner, repo, source, host, external_id, owner_external_id, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, profiled_at, updated_at)
+		VALUES (?1, ?2, ?3, ?4, ?5,
+		        `+learnedID+`,
+		        CASE WHEN `+learnedID+` IS NOT NULL THEN ?15 END,
 		        ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'))
 		ON CONFLICT(org_id, source, host, LOWER(owner), LOWER(repo)) WHERE retired_at IS NULL DO UPDATE SET
-			external_id    = COALESCE(excluded.external_id, repositories.external_id),
-			description    = excluded.description,
-			has_readme     = excluded.has_readme,
-			has_claude_md  = excluded.has_claude_md,
-			has_agents_md  = excluded.has_agents_md,
-			profile_text   = excluded.profile_text,
-			clone_url      = excluded.clone_url,
-			default_branch = excluded.default_branch,
-			profiled_at    = excluded.profiled_at,
-			updated_at     = datetime('now')
+			external_id       = COALESCE(excluded.external_id, repositories.external_id),
+			owner_external_id = COALESCE(excluded.owner_external_id, repositories.owner_external_id),
+			description       = excluded.description,
+			has_readme        = excluded.has_readme,
+			has_claude_md     = excluded.has_claude_md,
+			has_agents_md     = excluded.has_agents_md,
+			profile_text      = excluded.profile_text,
+			clone_url         = excluded.clone_url,
+			default_branch    = excluded.default_branch,
+			profiled_at       = excluded.profiled_at,
+			updated_at        = datetime('now')
 		RETURNING `+repoProfileFullColumns,
 		uuid.New().String(), p.Owner, p.Repo, source, p.Host,
 		nullIfEmpty(p.ExternalID),
@@ -100,6 +109,7 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.Repositor
 		nullIfEmpty(p.CloneURL),
 		nullIfEmpty(p.DefaultBranch),
 		p.ProfiledAt,
+		nullIfEmpty(p.OwnerExternalID),
 	)
 	return scanRepositoryFull(row)
 }
@@ -197,10 +207,11 @@ func registerByExternalID(ctx context.Context, q queryer, source string, ref dom
 		}
 		p, err := scanRepositoryFull(q.QueryRowContext(ctx, `
 			UPDATE repositories
-			   SET external_id = ?, updated_at = datetime('now')
+			   SET external_id = ?, owner_external_id = COALESCE(?, owner_external_id),
+			       updated_at = datetime('now')
 			 WHERE id = ? AND external_id IS NULL
 			RETURNING `+repoProfileFullColumns,
-			ref.ExternalID, named.ID))
+			ref.ExternalID, nullIfEmpty(ref.OwnerExternalID), named.ID))
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Repository{}, false, nil
 		}
@@ -211,11 +222,11 @@ func registerByExternalID(ctx context.Context, q queryer, source string, ref dom
 	// identity index refusing means a concurrent writer registered the
 	// repository first, and the next pass finds its row.
 	p, err = scanRepositoryFull(q.QueryRowContext(ctx, `
-		INSERT INTO repositories (id, owner, repo, source, host, external_id, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+		INSERT INTO repositories (id, owner, repo, source, host, external_id, owner_external_id, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
 		ON CONFLICT DO NOTHING
 		RETURNING `+repoProfileFullColumns,
-		uuid.New().String(), ref.Owner, ref.Repo, source, ref.Host, ref.ExternalID))
+		uuid.New().String(), ref.Owner, ref.Repo, source, ref.Host, ref.ExternalID, nullIfEmpty(ref.OwnerExternalID)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Repository{}, false, nil
 	}
@@ -576,25 +587,30 @@ func (s *repoStore) UpdateProfileSystem(ctx context.Context, orgID, id string, p
 	// external_id follows Upsert's rule: written when the caller has one and
 	// no other row on the row's host carries it, else left as stored. The
 	// scalar subquery answers NULL in either case, and COALESCE keeps the
-	// stored value. A retired row is not written (see the interface doc), and
-	// owner/repo, base_branch, the clone state and the poll cursor are absent
-	// from the SET list.
-	row := s.q.QueryRowContext(ctx, `
-		UPDATE repositories
-		   SET external_id    = COALESCE((SELECT ?2 WHERE NOT EXISTS (
+	// stored value. owner_external_id takes p's when the row carries
+	// p.ExternalID once the write lands (that same COALESCE, compared with
+	// it) and keeps the stored one otherwise. A retired row is not written
+	// (see the interface doc), and owner/repo, base_branch, the clone state
+	// and the poll cursor are absent from the SET list.
+	externalID := `COALESCE((SELECT ?2 WHERE NOT EXISTS (
 		                            SELECT 1 FROM repositories o
 		                             WHERE o.source = repositories.source AND o.host = repositories.host
 		                               AND o.external_id = ?2 AND o.id <> repositories.id)),
-		                            external_id),
-		       description    = ?3,
-		       has_readme     = ?4,
-		       has_claude_md  = ?5,
-		       has_agents_md  = ?6,
-		       profile_text   = ?7,
-		       clone_url      = ?8,
-		       default_branch = ?9,
-		       profiled_at    = ?10,
-		       updated_at     = datetime('now')
+		                            external_id)`
+	row := s.q.QueryRowContext(ctx, `
+		UPDATE repositories
+		   SET external_id       = `+externalID+`,
+		       owner_external_id = CASE WHEN ?11 IS NOT NULL AND `+externalID+` = ?2
+		                                THEN ?11 ELSE owner_external_id END,
+		       description       = ?3,
+		       has_readme        = ?4,
+		       has_claude_md     = ?5,
+		       has_agents_md     = ?6,
+		       profile_text      = ?7,
+		       clone_url         = ?8,
+		       default_branch    = ?9,
+		       profiled_at       = ?10,
+		       updated_at        = datetime('now')
 		 WHERE id = ?1 AND retired_at IS NULL
 		RETURNING `+repoProfileFullColumns,
 		id,
@@ -605,6 +621,7 @@ func (s *repoStore) UpdateProfileSystem(ctx context.Context, orgID, id string, p
 		nullIfEmpty(p.CloneURL),
 		nullIfEmpty(p.DefaultBranch),
 		p.ProfiledAt,
+		nullIfEmpty(p.OwnerExternalID),
 	)
 	return scanUpdatedRepository(row, id)
 }
@@ -633,18 +650,24 @@ func (s *repoStore) FillMissingExternalIDsSystem(ctx context.Context, orgID stri
 			if err := db.RequireRepoHost(ref.Host); err != nil {
 				return err
 			}
-			// An id another row on the host already carries is left where it
-			// is: that row is the repository GitHub calls by it.
+			// One row at most takes a write: the row carrying the id, which
+			// gets the owner id when it has none, whatever it is called; else
+			// the row holding the name without an id, which gets both unless
+			// another row on the host already carries the id, because that row
+			// is the repository GitHub calls by it.
 			res, err := tx.ExecContext(ctx, `
 				UPDATE repositories
-				   SET external_id = ?1, updated_at = datetime('now')
-				 WHERE source = ?2 AND host = ?3
-				   AND LOWER(owner) = LOWER(?4) AND LOWER(repo) = LOWER(?5)
-				   AND external_id IS NULL AND retired_at IS NULL
-				   AND NOT EXISTS (
-				       SELECT 1 FROM repositories o
-				        WHERE o.source = ?2 AND o.host = ?3 AND o.external_id = ?1)
-			`, ref.ExternalID, source, ref.Host, ref.Owner, ref.Repo)
+				   SET external_id = COALESCE(external_id, ?1),
+				       owner_external_id = COALESCE(owner_external_id, ?6),
+				       updated_at = datetime('now')
+				 WHERE source = ?2 AND host = ?3 AND retired_at IS NULL
+				   AND ((external_id = ?1 AND owner_external_id IS NULL AND ?6 IS NOT NULL)
+				     OR (external_id IS NULL
+				         AND LOWER(owner) = LOWER(?4) AND LOWER(repo) = LOWER(?5)
+				         AND NOT EXISTS (
+				             SELECT 1 FROM repositories o
+				              WHERE o.source = ?2 AND o.host = ?3 AND o.external_id = ?1)))
+			`, ref.ExternalID, source, ref.Host, ref.Owner, ref.Repo, nullIfEmpty(ref.OwnerExternalID))
 			if err != nil {
 				return fmt.Errorf("fill external id for %s: %w", ref.Slug(), err)
 			}
@@ -705,18 +728,19 @@ type rowScanner interface {
 
 // repoProfileFullColumns is the projection scanRepositoryFull reads, named
 // once so the three queries that share it cannot drift out of column order.
-const repoProfileFullColumns = `id, owner, repo, source, host, external_id, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch, profiled_at, clone_status, clone_error, clone_error_kind, retired_at`
+const repoProfileFullColumns = `id, owner, repo, source, host, external_id, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch, profiled_at, clone_status, clone_error, clone_error_kind, retired_at, owner_external_id`
 
 // scanRepositoryFull reads the repositories row shape shared by Get, List,
 // and the ref lookup.
 func scanRepositoryFull(row rowScanner) (domain.Repository, error) {
 	var p domain.Repository
-	var externalID, description, profileText, cloneURL, defaultBranch, baseBranch, cloneError, cloneErrorKind sql.NullString
+	var externalID, description, profileText, cloneURL, defaultBranch, baseBranch, cloneError, cloneErrorKind, ownerExternalID sql.NullString
 	var profiledAt, retiredAt sql.NullTime
-	if err := row.Scan(&p.ID, &p.Owner, &p.Repo, &p.Source, &p.Host, &externalID, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch, &profiledAt, &p.CloneStatus, &cloneError, &cloneErrorKind, &retiredAt); err != nil {
+	if err := row.Scan(&p.ID, &p.Owner, &p.Repo, &p.Source, &p.Host, &externalID, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch, &profiledAt, &p.CloneStatus, &cloneError, &cloneErrorKind, &retiredAt, &ownerExternalID); err != nil {
 		return p, err
 	}
 	p.ExternalID = externalID.String
+	p.OwnerExternalID = ownerExternalID.String
 	p.Description = description.String
 	p.ProfileText = profileText.String
 	p.CloneURL = cloneURL.String

@@ -208,6 +208,10 @@ type ReachableRepository struct {
 	// for every entry. "" when the source sent none, which is a supported state:
 	// the slug matches anyway.
 	ExternalID string
+	// OwnerExternalID is GitHub's numeric id for the account that owns the
+	// repository, read off the same repository object. "" when the source sent
+	// none. A registration from the mirror records it on the registry row.
+	OwnerExternalID string
 	// RepositoryID is the live registry row TF holds for this repository, ""
 	// when it holds none. Reads resolve it and writers ignore it. The entry and
 	// the row are matched by GitHub id when both carry one, and by folded name

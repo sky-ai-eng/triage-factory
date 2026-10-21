@@ -196,9 +196,14 @@ type ReachableReposStore interface {
 	//
 	// A tracked row is in a grant when an entry is the same repository: by
 	// GitHub id when both carry one, by folded name only when either does not.
-	// The owner account's installation is found by the owner's login, because
-	// the registry records no account id for an owner. One finding per registry
-	// row, carrying its id and GitHub id, ordered by folded slug then row id.
+	// The owner account's installation is found by the same rule one level up:
+	// by GitHub's account id when the registry row records its owner's
+	// (repositories.owner_external_id) and the installation row carries one
+	// (account_id), by folded login only when either does not. A drifted
+	// repository is in no grant listing, so a rename of its owner account
+	// reaches the installation's login and never the row's owner, and the id
+	// is what still pairs the two. One finding per registry row, carrying its
+	// id and GitHub id, ordered by folded slug then row id.
 	ListScopeDriftSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, opts ListOpts) ([]domain.ScopeDriftRepository, int, error)
 
 	// ListReachableSystem is the picker's read: one page of the org's reachable

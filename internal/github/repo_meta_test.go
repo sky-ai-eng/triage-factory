@@ -8,11 +8,11 @@ import (
 	"testing"
 )
 
-// GetRepoMeta is the only place TF reads GitHub's numeric repository id, and
-// it reads it off a response it was already fetching for the clone URL and
-// default branch. If the field stops being parsed, nothing fails — repo rows
-// simply keep a NULL external_id forever, which is exactly the state the
-// column is meant to leave behind.
+// GetRepoMeta reads GitHub's numeric repository id, and the id of the account
+// that owns the repository, off a response it was already fetching for the
+// clone URL and default branch. If either field stops being parsed, nothing
+// fails — repo rows simply keep a NULL external_id or owner_external_id
+// forever, which is exactly the state the columns are meant to leave behind.
 func TestGetRepoMeta_ParsesRepositoryID(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Suffix, not equality: a non-github.com base URL is a GHES host, so
@@ -22,6 +22,7 @@ func TestGetRepoMeta_ParsesRepositoryID(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(`{
 			"id": 1296269,
+			"owner": {"login": "octo", "id": 583231},
 			"default_branch": "main",
 			"clone_url": "https://github.com/octo/widget.git",
 			"ssh_url": "git@github.com:octo/widget.git"
@@ -39,6 +40,9 @@ func TestGetRepoMeta_ParsesRepositoryID(t *testing.T) {
 	if got := meta.ExternalID(); got != "1296269" {
 		t.Errorf("ExternalID() = %q, want the decimal text repositories stores", got)
 	}
+	if got := meta.OwnerExternalID(); got != "583231" {
+		t.Errorf("OwnerExternalID() = %q, want the owner account's id as decimal text", got)
+	}
 	if meta.DefaultBranch != "main" || meta.CloneURL != "https://github.com/octo/widget.git" {
 		t.Errorf("the fields the id rides along with regressed: %+v", meta)
 	}
@@ -51,6 +55,9 @@ func TestRepoMetaExternalID_EmptyWhenAbsent(t *testing.T) {
 	if got := (RepoMeta{DefaultBranch: "main"}).ExternalID(); got != "" {
 		t.Errorf("ExternalID() with no id = %q, want empty", got)
 	}
+	if got := (RepoMeta{DefaultBranch: "main"}).OwnerExternalID(); got != "" {
+		t.Errorf("OwnerExternalID() with no owner = %q, want empty", got)
+	}
 }
 
 // GetRepoByID asks by the id a rename does not move, and answers under the
@@ -62,7 +69,7 @@ func TestGetRepoByID(t *testing.T) {
 		asked = append(asked, r.URL.Path)
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/repositories/1296269"):
-			_, _ = w.Write([]byte(`{"id":1296269,"full_name":"octo/widget-v2"}`))
+			_, _ = w.Write([]byte(`{"id":1296269,"full_name":"octo/widget-v2","owner":{"login":"octo","id":583231}}`))
 		case strings.HasSuffix(r.URL.Path, "/repositories/7"):
 			w.WriteHeader(http.StatusForbidden)
 		default:
@@ -73,8 +80,8 @@ func TestGetRepoByID(t *testing.T) {
 	c := NewClient(srv.URL, "")
 
 	meta, err := c.GetRepoByID(context.Background(), "1296269")
-	if err != nil || meta.FullName != "octo/widget-v2" || meta.ExternalID() != "1296269" {
-		t.Errorf("GetRepoByID = %+v, %v; want octo/widget-v2 carrying 1296269", meta, err)
+	if err != nil || meta.FullName != "octo/widget-v2" || meta.ExternalID() != "1296269" || meta.OwnerExternalID() != "583231" {
+		t.Errorf("GetRepoByID = %+v, %v; want octo/widget-v2 carrying 1296269, owned by 583231", meta, err)
 	}
 	if _, err := c.GetRepoByID(context.Background(), "5"); !IsHTTP404(err) {
 		t.Errorf("deleted repository: err = %v, want a 404", err)

@@ -33,10 +33,30 @@ func (o RepoRenameOutcome) Changed() bool { return o.Renamed || o.Restored }
 // compare it against what the provider reports: the slug the row is stored
 // under, the provider's id, and whether the row is retired. A retired row keeps
 // its slug for its history but no longer holds it, so it takes part in the id
-// half of a comparison and never in the name half.
+// half of a comparison and never in the name half. The ref also carries the
+// owner account's id the row stores, which the detections do not compare and a
+// resolution of the row (reporename.Resolve) selects its credential by.
 type RepoIdentity struct {
 	RepoRef
 	Retired bool
+}
+
+// RenamedOwnerExternalID is the owner account id a repository row carries once
+// a rename or a restore moves it from storedSlug to observed's slug, given the
+// id it stores now. The id observed carries is written. Without one, the stored
+// id stays while the owner login is unchanged (case-insensitively) and is
+// cleared when it moved: a transfer changes the owning account, so an id the
+// observation does not confirm may name the account the repository left, and
+// with no id the owner is matched by the login the rename writes.
+func RenamedOwnerExternalID(storedSlug, storedOwnerID string, observed RepoRef) string {
+	if observed.OwnerExternalID != "" {
+		return observed.OwnerExternalID
+	}
+	owner, _, _ := strings.Cut(storedSlug, "/")
+	if strings.EqualFold(owner, observed.Owner) {
+		return storedOwnerID
+	}
+	return ""
 }
 
 // SameRepoSlug reports whether two "owner/repo" slugs name the same

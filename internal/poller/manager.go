@@ -1163,18 +1163,17 @@ func (m *Manager) orgHasRegisteredApp(ctx context.Context, orgID string) bool {
 	}
 }
 
-// intersectConfigured returns the configured repos reachable through one
-// installation's grant, marking each in covered so the caller can report
-// configured repos that no installation grants. Matching is case-insensitive
-// on the "owner/repo" slug (GitHub logins are case-insensitive).
-// recordRepoIDs writes GitHub's repository id onto the tracked repos in
-// scoped, taking the ids from the grant listing this cycle already fetched.
+// recordRepoIDs writes GitHub's repository id, and the id of the account that
+// owns the repository, onto the tracked repos in scoped, taking both from the
+// grant listing this cycle already fetched.
 //
 // It is the poller's half of repository identity: a slug is what a repository
 // is called and the id is what it is, and rename detection can only key on the
 // half that a rename does not move. Filling ids only when a repository is
 // profiled would leave every repo undetectable for the length of the profile
-// TTL; filling them here closes that to one poll cycle at no request cost.
+// TTL; filling them here closes that to one poll cycle at no request cost. The
+// owner id is what matches a tracked repository to the installation on its
+// owner account once it leaves every grant, when no listing names it any more.
 //
 // Scoped to the intersection rather than the whole grant on purpose: a repo
 // nobody tracks has no row, so writing it would either no-op or (worse) invite
@@ -1184,16 +1183,16 @@ func (m *Manager) recordRepoIDs(ctx context.Context, orgID, host string, scoped 
 	if m.repos == nil {
 		return
 	}
-	byName := make(map[string]string, len(grant))
+	byName := make(map[string]ghclient.UserRepo, len(grant))
 	for _, g := range grant {
-		if id := g.ExternalID(); id != "" {
-			byName[strings.ToLower(g.FullName)] = id
+		if g.ExternalID() != "" {
+			byName[strings.ToLower(g.FullName)] = g
 		}
 	}
 	refs := make([]domain.RepoRef, 0, len(scoped))
 	for _, slug := range scoped {
-		id := byName[strings.ToLower(slug)]
-		if id == "" {
+		g, ok := byName[strings.ToLower(slug)]
+		if !ok {
 			continue
 		}
 		owner, repo, ok := strings.Cut(slug, "/")
@@ -1201,7 +1200,8 @@ func (m *Manager) recordRepoIDs(ctx context.Context, orgID, host string, scoped 
 			continue
 		}
 		refs = append(refs, domain.RepoRef{
-			Source: domain.RepoSourceGitHub, Host: host, Owner: owner, Repo: repo, ExternalID: id,
+			Source: domain.RepoSourceGitHub, Host: host, Owner: owner, Repo: repo,
+			ExternalID: g.ExternalID(), OwnerExternalID: g.OwnerExternalID(),
 		})
 	}
 	if len(refs) == 0 {
@@ -1243,7 +1243,8 @@ func (m *Manager) applyRepoRenames(ctx context.Context, orgID, host string, gran
 			continue
 		}
 		observed = append(observed, domain.RepoRef{
-			Source: domain.RepoSourceGitHub, Owner: owner, Repo: repo, ExternalID: id,
+			Source: domain.RepoSourceGitHub, Owner: owner, Repo: repo,
+			ExternalID: id, OwnerExternalID: g.OwnerExternalID(),
 		})
 	}
 	return reporename.Apply(ctx, m.repos, m.resolver, githubLog, orgID, host, observed)
@@ -1309,6 +1310,10 @@ func withoutSlugs(repos, drop []string) []string {
 	return out
 }
 
+// intersectConfigured returns the configured repos reachable through one
+// installation's grant, marking each in covered so the caller can report
+// configured repos that no installation grants. Matching is case-insensitive
+// on the "owner/repo" slug (GitHub logins are case-insensitive).
 func intersectConfigured(configured []string, grant []ghclient.UserRepo, covered map[string]bool) []string {
 	granted := make(map[string]bool, len(grant))
 	for _, g := range grant {

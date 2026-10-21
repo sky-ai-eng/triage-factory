@@ -25,7 +25,7 @@ func TestRecordRepoIDs_WritesTheIntersectionFromTheGrant(t *testing.T) {
 	m := &Manager{repos: repos}
 
 	grant := []ghclient.UserRepo{
-		{ID: 1296269, FullName: "Octo/Engineering"}, // grant's casing differs from tracked
+		{ID: 1296269, FullName: "Octo/Engineering", Owner: ghclient.RepoOwner{ID: 583231}}, // grant's casing differs from tracked
 		{ID: 555, FullName: "octo/marketing"},
 		{ID: 777, FullName: "octo/unconfigured"}, // granted, untracked — no row to write
 		{FullName: "octo/idless"},                // no id in the payload
@@ -58,6 +58,13 @@ func TestRecordRepoIDs_WritesTheIntersectionFromTheGrant(t *testing.T) {
 	}
 	if eng.ExternalID != "1296269" {
 		t.Errorf("engineering external id = %q, want 1296269 from the grant", eng.ExternalID)
+	}
+	// The owner's id rides the same grant entry; an entry with none sends none.
+	if eng.OwnerExternalID != "583231" {
+		t.Errorf("engineering owner id = %q, want 583231 from the grant", eng.OwnerExternalID)
+	}
+	if mkt := bySlug["octo/marketing"]; mkt.OwnerExternalID != "" {
+		t.Errorf("marketing owner id = %q, want empty — the grant entry named no owner id", mkt.OwnerExternalID)
 	}
 	if eng.Source != domain.RepoSourceGitHub {
 		t.Errorf("source = %q, want %q", eng.Source, domain.RepoSourceGitHub)

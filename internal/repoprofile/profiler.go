@@ -259,8 +259,11 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		}
 
 		// Resolve the per-(org, owner) GitHub client. Done after the TTL
-		// skip so we don't mint a token for a repo we're about to skip.
-		client, cerr := p.resolver.ClientFor(ctx, orgID, owner)
+		// skip so we don't mint a token for a repo we're about to skip. The
+		// owner is named by the account id the row records too, so a rename
+		// of the owner account that the row's name has not caught up with
+		// still resolves the installation on it.
+		client, cerr := github.ClientForOwner(ctx, p.resolver, orgID, existing.OwnerExternalID, owner)
 		if cerr != nil {
 			repoprofileLog.Warn("resolve github client failed, skipping", "repo", name, "error", cerr)
 			continue
@@ -345,12 +348,16 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			// without one behaves exactly as it always has — so a repo whose
 			// meta fetch failed (skipped above) or that is inside its profile
 			// TTL simply keeps whatever id it already had.
-			ExternalID:    meta.ExternalID(),
-			HasReadme:     readme != "",
-			HasClaudeMd:   claudeMd != "",
-			HasAgentsMd:   agentsMd != "",
-			CloneURL:      cloneURL,
-			DefaultBranch: defaultBranch,
+			ExternalID: meta.ExternalID(),
+			// The account that owns the repository, from the same response.
+			// UpdateProfileSystem records it only on a row that carries
+			// ExternalID once the write lands.
+			OwnerExternalID: meta.OwnerExternalID(),
+			HasReadme:       readme != "",
+			HasClaudeMd:     claudeMd != "",
+			HasAgentsMd:     agentsMd != "",
+			CloneURL:        cloneURL,
+			DefaultBranch:   defaultBranch,
 		}
 
 		// A repo with no docs is fully inspected by this fetch — there's
@@ -514,7 +521,8 @@ func (p *Profiler) applyRenameFromMeta(ctx context.Context, orgID, host, tracked
 		return "", false
 	}
 	applied, _ := reporename.Apply(ctx, p.repos, p.resolver, repoprofileLog, orgID, host, []domain.RepoRef{{
-		Source: domain.RepoSourceGitHub, Owner: owner, Repo: repo, ExternalID: id,
+		Source: domain.RepoSourceGitHub, Owner: owner, Repo: repo,
+		ExternalID: id, OwnerExternalID: meta.OwnerExternalID(),
 	}})
 	if applied == 0 {
 		return "", false

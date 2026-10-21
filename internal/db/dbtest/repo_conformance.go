@@ -64,6 +64,9 @@ type RepositorySeeder struct {
 //     any row holding the name, writes the id onto a bare row holding the
 //     name, creates a row carrying it otherwise, and refuses a name held
 //     under another id.
+//   - The owner account's id is written only with the repository id it was
+//     read with, onto the row carrying that id, and an empty one clears
+//     nothing.
 //   - Every single-row write returns the row it persisted, and that row is
 //     the one a point read finds.
 //   - The GitHub host is part of a repository's identity: the same slug on
@@ -1437,6 +1440,189 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		}
 		if n := registryRows(t, s, orgID); n != 1 {
 			t.Errorf("registry rows on %s = %d, want 1", TestGitHubHost, n)
+		}
+	})
+
+	t.Run("UpdateProfileSystem_records_the_owner_id_with_the_repository_id", func(t *testing.T) {
+		// The profiler reads the owner's id off the same response as the
+		// repository's. It describes that repository, so it lands only on a
+		// row that carries the repository's id once the write is done, and an
+		// empty one clears nothing.
+		s, orgID, _ := mk(t)
+		row, err := s.Upsert(ctx, orgID, domain.Repository{Host: TestGitHubHost, Owner: "acme", Repo: "api", ExternalID: "42"})
+		if err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{Host: TestGitHubHost, Owner: "acme", Repo: "web", ExternalID: "43"}); err != nil {
+			t.Fatalf("Upsert(other): %v", err)
+		}
+		read := func(id string) func() (*domain.Repository, error) {
+			return func() (*domain.Repository, error) { return s.Get(ctx, orgID, id) }
+		}
+
+		got, err := s.UpdateProfileSystem(ctx, orgID, row.ID, domain.Repository{ExternalID: "42", OwnerExternalID: "500", ProfileText: "p"})
+		if err != nil {
+			t.Fatalf("UpdateProfileSystem: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "UpdateProfileSystem (owner id)", got, read(row.ID))
+		if got.OwnerExternalID != "500" {
+			t.Errorf("OwnerExternalID = %q, want 500", got.OwnerExternalID)
+		}
+		if got, err = s.UpdateProfileSystem(ctx, orgID, row.ID, domain.Repository{ExternalID: "42"}); err != nil || got.OwnerExternalID != "500" {
+			t.Errorf("profile with no owner id = %q, %v; want 500 kept", got.OwnerExternalID, err)
+		}
+		// A transfer: GitHub answers for the same repository with another owner.
+		if got, err = s.UpdateProfileSystem(ctx, orgID, row.ID, domain.Repository{ExternalID: "42", OwnerExternalID: "501"}); err != nil || got.OwnerExternalID != "501" {
+			t.Errorf("profile with a new owner id = %q, %v; want 501", got.OwnerExternalID, err)
+		}
+
+		// GitHub serves under bare's name the repository acme/web's row
+		// carries. Neither of its ids is bare's.
+		bare, err := s.FindOrCreateByRefSystem(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "acme", Repo: "bare"})
+		if err != nil {
+			t.Fatalf("FindOrCreateByRefSystem: %v", err)
+		}
+		got, err = s.UpdateProfileSystem(ctx, orgID, bare.ID, domain.Repository{ExternalID: "43", OwnerExternalID: "600", ProfileText: "p"})
+		if err != nil {
+			t.Fatalf("UpdateProfileSystem(bare): %v", err)
+		}
+		if got.ExternalID != "" || got.OwnerExternalID != "" {
+			t.Errorf("bare row ids = (%q, %q), want neither — they describe acme/web's repository", got.ExternalID, got.OwnerExternalID)
+		}
+	})
+
+	t.Run("FillMissingExternalIDs_records_the_owner_id_on_the_row_carrying_the_id", func(t *testing.T) {
+		// The grant listing carries each repository's owner id beside its own.
+		// The row carrying a listed id gets the owner id when it has none,
+		// whatever name it is stored under; a row holding the name with no id
+		// gets both; a stored owner id is never overwritten.
+		s, orgID, seed := mk(t)
+		trackRepos(t, s, seed, orgID, seed.TeamID, "octo/bare", "octo/known", "octo/owned")
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{Host: TestGitHubHost, Owner: "octo", Repo: "known", ExternalID: "111"}); err != nil {
+			t.Fatalf("seed octo/known: %v", err)
+		}
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{Host: TestGitHubHost, Owner: "octo", Repo: "owned", ExternalID: "222", OwnerExternalID: "900"}); err != nil {
+			t.Fatalf("seed octo/owned: %v", err)
+		}
+
+		filled, err := s.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{
+			{Host: TestGitHubHost, Owner: "octo", Repo: "bare", ExternalID: "101", OwnerExternalID: "500"},
+			// Listed under a name the row has not caught up with.
+			{Host: TestGitHubHost, Owner: "octo", Repo: "known-renamed", ExternalID: "111", OwnerExternalID: "501"},
+			{Host: TestGitHubHost, Owner: "octo", Repo: "owned", ExternalID: "222", OwnerExternalID: "901"},
+		})
+		if err != nil {
+			t.Fatalf("FillMissingExternalIDsSystem: %v", err)
+		}
+		if filled != 2 {
+			t.Errorf("filled = %d, want 2", filled)
+		}
+		for slug, want := range map[string][2]string{
+			"octo/bare":  {"101", "500"},
+			"octo/known": {"111", "501"},
+			"octo/owned": {"222", "900"},
+		} {
+			got, err := s.GetByRef(ctx, orgID, repoRef(slug))
+			if err != nil || got == nil {
+				t.Fatalf("GetByRef(%s) = %v, %v", slug, got, err)
+			}
+			if got.ExternalID != want[0] || got.OwnerExternalID != want[1] {
+				t.Errorf("%s ids = (%q, %q), want (%q, %q)", slug, got.ExternalID, got.OwnerExternalID, want[0], want[1])
+			}
+		}
+
+		filled, err = s.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{
+			{Host: TestGitHubHost, Owner: "octo", Repo: "bare", ExternalID: "101", OwnerExternalID: "500"},
+			{Host: TestGitHubHost, Owner: "octo", Repo: "known", ExternalID: "111", OwnerExternalID: "501"},
+		})
+		if err != nil || filled != 0 {
+			t.Errorf("second run = (%d, %v), want (0, nil)", filled, err)
+		}
+	})
+
+	t.Run("FindOrCreateByExternalID_records_the_owner_id_on_a_row_it_writes", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		created, err := s.FindOrCreateByExternalID(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "octo", Repo: "widget", ExternalID: "7501", OwnerExternalID: "800"})
+		if err != nil {
+			t.Fatalf("FindOrCreateByExternalID (create): %v", err)
+		}
+		if created.OwnerExternalID != "800" {
+			t.Errorf("created OwnerExternalID = %q, want 800", created.OwnerExternalID)
+		}
+		AssertWriteReturnedStoredRow(t, "FindOrCreateByExternalID (create, owner id)", created, func() (*domain.Repository, error) {
+			return s.Get(ctx, orgID, created.ID)
+		})
+
+		bare, err := s.FindOrCreateByRefSystem(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "acme", Repo: "api"})
+		if err != nil {
+			t.Fatalf("mint bare row: %v", err)
+		}
+		adopted, err := s.FindOrCreateByExternalID(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "acme", Repo: "api", ExternalID: "7502", OwnerExternalID: "801"})
+		if err != nil {
+			t.Fatalf("FindOrCreateByExternalID (adopt): %v", err)
+		}
+		if adopted.ID != bare.ID || adopted.OwnerExternalID != "801" {
+			t.Errorf("adopted = %s with owner id %q, want %s with 801", adopted.ID, adopted.OwnerExternalID, bare.ID)
+		}
+		AssertWriteReturnedStoredRow(t, "FindOrCreateByExternalID (adopt, owner id)", adopted, func() (*domain.Repository, error) {
+			return s.Get(ctx, orgID, bare.ID)
+		})
+
+		// A row carrying the id is returned as it stands.
+		found, err := s.FindOrCreateByExternalID(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "octo", Repo: "widget", ExternalID: "7501", OwnerExternalID: "802"})
+		if err != nil {
+			t.Fatalf("FindOrCreateByExternalID (found): %v", err)
+		}
+		if found.ID != created.ID || found.OwnerExternalID != "800" {
+			t.Errorf("found = %s with owner id %q, want %s with 800", found.ID, found.OwnerExternalID, created.ID)
+		}
+	})
+
+	t.Run("Upsert_records_the_owner_id_only_with_the_repository_id", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		created, err := s.Upsert(ctx, orgID, domain.Repository{Host: TestGitHubHost, Owner: "acme", Repo: "api", ExternalID: "42", OwnerExternalID: "500"})
+		if err != nil {
+			t.Fatalf("Upsert (insert arm): %v", err)
+		}
+		if created.OwnerExternalID != "500" {
+			t.Errorf("insert arm OwnerExternalID = %q, want 500", created.OwnerExternalID)
+		}
+		kept, err := s.Upsert(ctx, orgID, domain.Repository{Host: TestGitHubHost, Owner: "acme", Repo: "api"})
+		if err != nil {
+			t.Fatalf("Upsert (no ids): %v", err)
+		}
+		if kept.OwnerExternalID != "500" {
+			t.Errorf("an upsert with no owner id left %q, want 500 kept", kept.OwnerExternalID)
+		}
+		moved, err := s.Upsert(ctx, orgID, domain.Repository{Host: TestGitHubHost, Owner: "acme", Repo: "api", ExternalID: "42", OwnerExternalID: "501"})
+		if err != nil {
+			t.Fatalf("Upsert (new owner): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Upsert (update arm, owner id)", moved, func() (*domain.Repository, error) {
+			return s.Get(ctx, orgID, created.ID)
+		})
+		if moved.OwnerExternalID != "501" {
+			t.Errorf("update arm OwnerExternalID = %q, want 501", moved.OwnerExternalID)
+		}
+
+		// acme/old carries 77. An upsert of 77 under another name, on either
+		// arm, writes neither id: the row it lands on is not that repository.
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{Host: TestGitHubHost, Owner: "acme", Repo: "old", ExternalID: "77", OwnerExternalID: "600"}); err != nil {
+			t.Fatalf("Upsert(acme/old): %v", err)
+		}
+		inserted, err := s.Upsert(ctx, orgID, domain.Repository{Host: TestGitHubHost, Owner: "acme", Repo: "new", ExternalID: "77", OwnerExternalID: "601"})
+		if err != nil {
+			t.Fatalf("Upsert(acme/new): %v", err)
+		}
+		if inserted.ExternalID != "" || inserted.OwnerExternalID != "" {
+			t.Errorf("insert arm under another row's id = (%q, %q), want neither", inserted.ExternalID, inserted.OwnerExternalID)
+		}
+		updated, err := s.Upsert(ctx, orgID, domain.Repository{Host: TestGitHubHost, Owner: "acme", Repo: "api", ExternalID: "77", OwnerExternalID: "602"})
+		if err != nil {
+			t.Fatalf("Upsert(acme/api as 77): %v", err)
+		}
+		if updated.ExternalID != "42" || updated.OwnerExternalID != "501" {
+			t.Errorf("update arm under another row's id = (%q, %q), want (42, 501) kept", updated.ExternalID, updated.OwnerExternalID)
 		}
 	})
 

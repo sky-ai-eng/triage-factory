@@ -584,6 +584,57 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 	})
 
+	t.Run("Rename_moves_the_owner_account_id", func(t *testing.T) {
+		// The owner id moves with the name: the observation's is written, and
+		// without one the stored id stays while the owner login does, and goes
+		// when a transfer moved the repository to another account. A restore
+		// writes it the same way.
+		s, orgID, _ := mk(t)
+		cases := []struct {
+			from, to, externalID, observedOwnerID, want string
+		}{
+			{"octo/same-owner", "octo/same-owner-2", "301", "", "900"},
+			{"octo/confirmed", "octo/confirmed-2", "302", "900", "900"},
+			{"octo/transferred", "globex/transferred", "303", "", ""},
+			{"octo/transferred-seen", "globex/transferred-seen", "304", "950", "950"},
+			{"octo/account-renamed", "octo-co/account-renamed", "305", "900", "900"},
+		}
+		for _, c := range cases {
+			from, to := repoRef(c.from), repoRef(c.to)
+			if _, err := s.Repos.UpsertSystem(ctx, orgID, domain.Repository{
+				Host: TestGitHubHost, Owner: from.Owner, Repo: from.Repo, ExternalID: c.externalID, OwnerExternalID: "900",
+			}); err != nil {
+				t.Fatalf("seed %s: %v", c.from, err)
+			}
+			to.ExternalID, to.OwnerExternalID = c.externalID, c.observedOwnerID
+			if out, err := s.Repos.RenameSystem(ctx, orgID, to); err != nil || !out.Renamed {
+				t.Fatalf("RenameSystem %s -> %s = %+v, %v; want a rename", c.from, c.to, out, err)
+			}
+			got, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef(c.to))
+			if err != nil || got == nil {
+				t.Fatalf("read %s: got=%v err=%v", c.to, got, err)
+			}
+			if got.OwnerExternalID != c.want {
+				t.Errorf("%s -> %s (observed owner %q): OwnerExternalID = %q, want %q", c.from, c.to, c.observedOwnerID, got.OwnerExternalID, c.want)
+			}
+		}
+
+		retired := domain.RepoRef{Host: TestGitHubHost, Owner: "octo", Repo: "gone", ExternalID: "306"}
+		if _, err := s.Repos.UpsertSystem(ctx, orgID, domain.Repository{Host: TestGitHubHost, Owner: "octo", Repo: "gone", ExternalID: "306", OwnerExternalID: "900"}); err != nil {
+			t.Fatalf("seed octo/gone: %v", err)
+		}
+		if row, err := s.Repos.RetireSystem(ctx, orgID, retired); err != nil || row == nil {
+			t.Fatalf("RetireSystem = %v, %v", row, err)
+		}
+		retired.OwnerExternalID = "960"
+		if out, err := s.Repos.RenameSystem(ctx, orgID, retired); err != nil || !out.Restored {
+			t.Fatalf("RenameSystem (restore) = %+v, %v; want a restore", out, err)
+		}
+		if got, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef("octo/gone")); err != nil || got == nil || got.OwnerExternalID != "960" {
+			t.Errorf("restored row = %+v, %v; want owner id 960", got, err)
+		}
+	})
+
 	t.Run("Rename_is_idempotent", func(t *testing.T) {
 		// The second detection of the same rename — a retry, a second poller,
 		// the next cycle — finds the slug already current. That is a no-op and
@@ -1284,7 +1335,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			t.Fatalf("seed tracked set: %v", err)
 		}
 		if filled, err := s.Repos.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{
-			{Host: TestGitHubHost, Owner: "octo", Repo: "identified", ExternalID: "1296269"},
+			{Host: TestGitHubHost, Owner: "octo", Repo: "identified", ExternalID: "1296269", OwnerExternalID: "583231"},
 		}); err != nil || filled != 1 {
 			t.Fatalf("seed identified: filled=%d err=%v", filled, err)
 		}
@@ -1298,6 +1349,10 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 		if got[0].Slug() != "octo/identified" || got[0].ExternalID != "1296269" || got[0].Source != domain.RepoSourceGitHub {
 			t.Errorf("identity = %+v, want octo/identified/github/1296269", got[0])
+		}
+		// The owner's id rides along: resolving the row asks for its client by it.
+		if got[0].OwnerExternalID != "583231" {
+			t.Errorf("identity OwnerExternalID = %q, want 583231", got[0].OwnerExternalID)
 		}
 	})
 }

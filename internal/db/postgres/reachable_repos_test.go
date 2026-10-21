@@ -49,6 +49,10 @@ func TestReachableRepos_Postgres(t *testing.T) {
 				}
 				return id
 			},
+			SetOwnerExternalID: func(t *testing.T, repositoryID, ownerExternalID string) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB, `UPDATE repositories SET owner_external_id = $1 WHERE id = $2`, ownerExternalID, repositoryID)
+			},
 			TrackRepository: func(t *testing.T, repositoryID string) {
 				t.Helper()
 				pgtest.MustExec(t, h.AdminDB, `

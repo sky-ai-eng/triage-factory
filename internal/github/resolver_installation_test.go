@@ -308,6 +308,60 @@ func TestResolver_ClientForInstallationMintsFromTheRowsAccount(t *testing.T) {
 	}
 }
 
+// TestResolver_ClientForOwnerMintsFromTheOwnersAccount walks the entry point a
+// caller holding a repository's registry row takes. The row still names its
+// owner "acme" after the account renamed to "acme-co", and another account
+// took "acme" and installed the App too. The owner id the row records picks the
+// renamed account's installation, which the stale login would have missed or
+// confused with the stranger's; a row with no owner id resolves by its login,
+// and a resolver without the extension is asked by the login alone.
+func TestResolver_ClientForOwnerMintsFromTheOwnersAccount(t *testing.T) {
+	ctx := context.Background()
+	gh := newGHTestServer(t)
+	r := newTestResolver(
+		&fakeSecrets{vals: map[string]string{"pem": testPEM(t)}},
+		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{
+			installOnAccount("456", "1234", "acme-co"),
+			installOnAccount("789", "5678", "acme"),
+			installOnAccount("321", "", "initech"),
+		}},
+		&fakeOrgs{base: gh.srv.URL},
+		&fakeAgents{},
+		nil,
+	)
+
+	if _, err := ClientForOwner(ctx, r, "org-1", "1234", "acme"); err != nil {
+		t.Fatalf("ClientForOwner(1234, acme): %v", err)
+	}
+	if _, err := ClientForOwner(ctx, r, "org-1", "", "initech"); err != nil {
+		t.Fatalf("ClientForOwner(no id, initech): %v", err)
+	}
+	if got, want := gh.minted(), []string{"456", "321"}; !slices.Equal(got, want) {
+		t.Errorf("minted for installations %v; want %v (the renamed owner's, then the login's)", got, want)
+	}
+
+	var asked []string
+	byLogin := loginOnlyResolver{Resolver: r, asked: &asked}
+	if _, err := ClientForOwner(ctx, byLogin, "org-1", "1234", "acme-co"); err != nil {
+		t.Fatalf("ClientForOwner through a resolver without the extension: %v", err)
+	}
+	if !slices.Equal(asked, []string{"acme-co"}) {
+		t.Errorf("ClientFor asked for %v; want the owner login", asked)
+	}
+}
+
+// loginOnlyResolver is a Resolver that does not implement
+// AccountClientResolver, recording the logins ClientFor is asked for.
+type loginOnlyResolver struct {
+	Resolver
+	asked *[]string
+}
+
+func (r loginOnlyResolver) ClientFor(ctx context.Context, orgID, target string) (*Client, error) {
+	*r.asked = append(*r.asked, target)
+	return r.Resolver.ClientFor(ctx, orgID, target)
+}
+
 // TestResolver_MintsForAnInstallationMirroredWithoutAnAccountID walks the
 // public entry point for an un-backfilled row: the org's App resolves and mints
 // off the login alone, so the column's arrival costs a row that predates it

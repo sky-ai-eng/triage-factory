@@ -75,7 +75,7 @@ func (s *repoStore) ListIdentitiesSystem(ctx context.Context, orgID, host string
 		return nil, err
 	}
 	rows, err := s.admin.QueryContext(ctx, `
-		SELECT source, host, owner, repo, external_id, retired_at IS NOT NULL
+		SELECT source, host, owner, repo, external_id, owner_external_id, retired_at IS NOT NULL
 		  FROM repositories
 		 WHERE org_id = $1 AND host = $2 AND external_id IS NOT NULL AND external_id <> ''
 		 ORDER BY owner, repo, id
@@ -88,9 +88,11 @@ func (s *repoStore) ListIdentitiesSystem(ctx context.Context, orgID, host string
 	out := []domain.RepoIdentity{}
 	for rows.Next() {
 		var id domain.RepoIdentity
-		if err := rows.Scan(&id.Source, &id.Host, &id.Owner, &id.Repo, &id.ExternalID, &id.Retired); err != nil {
+		var ownerExternalID sql.NullString
+		if err := rows.Scan(&id.Source, &id.Host, &id.Owner, &id.Repo, &id.ExternalID, &ownerExternalID, &id.Retired); err != nil {
 			return nil, err
 		}
+		id.OwnerExternalID = ownerExternalID.String
 		out = append(out, id)
 	}
 	return out, rows.Err()
@@ -218,10 +220,11 @@ func (s *repoStore) RenameSystem(ctx context.Context, orgID string, observed dom
 
 // identityRow is one repository row carrying the provider identity a rename
 // keys on: its registry id, the slug it is stored under, its clone URL ("" for
-// none), which spells the slug too, and whether it is retired.
+// none), which spells the slug too, the owner account id it stores ("" for
+// none), and whether it is retired.
 type identityRow struct {
-	id, slug, cloneURL string
-	retired            bool
+	id, slug, cloneURL, ownerExternalID string
+	retired                             bool
 }
 
 // storedRowsForIdentity returns every repository row carrying one provider
@@ -231,7 +234,8 @@ type identityRow struct {
 // to let the caller SAY that instead of silently picking a row.
 func storedRowsForIdentity(ctx context.Context, q queryer, orgID, source, host, externalID string) ([]identityRow, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, owner, repo, COALESCE(clone_url, ''), retired_at IS NOT NULL FROM repositories
+		SELECT id, owner, repo, COALESCE(clone_url, ''), COALESCE(owner_external_id, ''), retired_at IS NOT NULL
+		  FROM repositories
 		 WHERE org_id = $1 AND source = $2 AND host = $3 AND external_id = $4
 		 ORDER BY owner, repo
 		 FOR UPDATE
@@ -244,7 +248,7 @@ func storedRowsForIdentity(ctx context.Context, q queryer, orgID, source, host, 
 	for rows.Next() {
 		var r identityRow
 		var owner, repo string
-		if err := rows.Scan(&r.id, &owner, &repo, &r.cloneURL, &r.retired); err != nil {
+		if err := rows.Scan(&r.id, &owner, &repo, &r.cloneURL, &r.ownerExternalID, &r.retired); err != nil {
 			return nil, err
 		}
 		r.slug = owner + "/" + repo
@@ -457,14 +461,20 @@ func moveAbsorbedBranches(ctx context.Context, q queryer, orgID, fromID, toID st
 // old name back into every checkout made until profiling next rewrites it.
 // One it cannot read as the old slug's clone URL is left as it stands.
 //
+// The owner account id is written as domain.RenamedOwnerExternalID decides:
+// the one the observation carries, else the stored one while the owner login
+// is unchanged, else none, because a transfer moves the repository to another
+// account.
+//
 // The identity index refusing means a row took the slug after
 // repositoryHoldingSlug looked, which is the occupant refusal. The violation
 // aborts the transaction, which is what the refusal does anyway.
 func renameRepositoryRow(ctx context.Context, q queryer, orgID string, renamed identityRow, to domain.RepoRef, moved bool) error {
+	ownerID := domain.RenamedOwnerExternalID(renamed.slug, renamed.ownerExternalID, to)
 	query, args := `
 		UPDATE repositories
-		   SET retired_at = NULL, updated_at = now()
-		 WHERE org_id = $1 AND id = $2`, []any{orgID, renamed.id}
+		   SET owner_external_id = NULLIF($3, ''), retired_at = NULL, updated_at = now()
+		 WHERE org_id = $1 AND id = $2`, []any{orgID, renamed.id, ownerID}
 	if moved {
 		var cloneURL sql.NullString
 		if u, ok := domain.RewriteRepoCloneURL(renamed.cloneURL, to.Host, renamed.slug, to.Slug()); ok {
@@ -472,8 +482,9 @@ func renameRepositoryRow(ctx context.Context, q queryer, orgID string, renamed i
 		}
 		query, args = `
 		UPDATE repositories
-		   SET owner = $3, repo = $4, clone_url = COALESCE($5, clone_url), retired_at = NULL, updated_at = now()
-		 WHERE org_id = $1 AND id = $2`, []any{orgID, renamed.id, to.Owner, to.Repo, cloneURL}
+		   SET owner = $3, repo = $4, clone_url = COALESCE($5, clone_url), owner_external_id = NULLIF($6, ''),
+		       retired_at = NULL, updated_at = now()
+		 WHERE org_id = $1 AND id = $2`, []any{orgID, renamed.id, to.Owner, to.Repo, cloneURL, ownerID}
 	}
 	if _, err := q.ExecContext(ctx, query, args...); err != nil {
 		if isUniqueViolation(err) {
