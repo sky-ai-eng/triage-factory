@@ -88,15 +88,16 @@ func TestEntityIdentity_Postgres(t *testing.T) {
 				return u, cur
 			},
 			// The harness database is shared across tests, so the forced id is
-			// cleared and the index rebuilt when the subtest ends.
+			// replaced with one of the row's own and the index rebuilt when
+			// the subtest ends.
 			ForceExternalID: func(t *testing.T, entityID, externalID string) {
 				t.Helper()
 				if _, err := h.AdminDB.Exec(`DROP INDEX public.entities_identity`); err != nil {
 					t.Fatalf("drop identity index: %v", err)
 				}
 				t.Cleanup(func() {
-					if _, err := h.AdminDB.Exec(`UPDATE entities SET external_id = NULL WHERE id = $1`, entityID); err != nil {
-						t.Errorf("clear forced external id: %v", err)
+					if _, err := h.AdminDB.Exec(`UPDATE entities SET external_id = 'forced-' || id WHERE id = $1`, entityID); err != nil {
+						t.Errorf("replace forced external id: %v", err)
 					}
 					if _, err := h.AdminDB.Exec(`CREATE UNIQUE INDEX entities_identity ON public.entities USING btree (org_id, source, scope, external_id) WHERE (external_id IS NOT NULL)`); err != nil {
 						t.Errorf("restore identity index: %v", err)
@@ -104,6 +105,25 @@ func TestEntityIdentity_Postgres(t *testing.T) {
 				})
 				if _, err := h.AdminDB.Exec(`UPDATE entities SET external_id = $1 WHERE id = $2`, externalID, entityID); err != nil {
 					t.Fatalf("force external id: %v", err)
+				}
+			},
+			// The forgotten row is given an id again and the CHECK re-added
+			// when the subtest ends, for the same reason.
+			ForgetExternalID: func(t *testing.T, entityID string) {
+				t.Helper()
+				if _, err := h.AdminDB.Exec(`ALTER TABLE public.entities DROP CONSTRAINT entities_external_id_required`); err != nil {
+					t.Fatalf("drop external id requirement: %v", err)
+				}
+				t.Cleanup(func() {
+					if _, err := h.AdminDB.Exec(`UPDATE entities SET external_id = 'forgotten-' || id WHERE source IN ('jira', 'linear') AND external_id IS NULL`); err != nil {
+						t.Errorf("restore forgotten external ids: %v", err)
+					}
+					if _, err := h.AdminDB.Exec(`ALTER TABLE public.entities ADD CONSTRAINT entities_external_id_required CHECK (source NOT IN ('jira', 'linear') OR COALESCE(external_id, '') <> '')`); err != nil {
+						t.Errorf("restore external id requirement: %v", err)
+					}
+				})
+				if _, err := h.AdminDB.Exec(`UPDATE entities SET external_id = NULL WHERE id = $1`, entityID); err != nil {
+					t.Fatalf("forget external id: %v", err)
 				}
 			},
 			Conversation: func(t *testing.T, suffix string) string {

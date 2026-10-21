@@ -61,7 +61,7 @@ func seedStepFixture(t *testing.T, source, suffix string, steps int, sharedWT st
 	var entity *domain.Entity
 	var err error
 	if source == "jira" {
-		entity, _, err = stores.Entities.FindOrCreateJiraSystem(ctx, org, testScope(source), sourceID, "", dbseed.JiraIssueProject(sourceID), "T", "https://example.com/"+suffix)
+		entity, _, err = stores.Entities.FindOrCreateJiraSystem(ctx, org, testScope(source), sourceID, dbseed.JiraIssueID(sourceID), dbseed.JiraIssueProject(sourceID), "T", "https://example.com/"+suffix)
 	} else {
 		entity, _, err = stores.Entities.FindOrCreate(ctx, org, source, testScope(source), sourceID, "", entityKind, "T", "https://example.com/"+suffix)
 	}

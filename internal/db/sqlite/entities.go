@@ -216,7 +216,7 @@ func (s *entityStore) FindOrCreateLinearSystem(ctx context.Context, orgID, scope
 }
 
 func (s *entityStore) FindOrCreateJiraSystem(ctx context.Context, orgID, scope, key, issueID string, project domain.JiraProjectRef, title, url string) (*domain.Entity, bool, error) {
-	if err := db.ValidateJiraEntityCreate(key, project); err != nil {
+	if err := db.ValidateJiraEntityCreate(key, issueID, project); err != nil {
 		return nil, false, err
 	}
 	return s.findOrCreate(ctx, orgID, domain.ArtifactProviderJira, scope, key, issueID, domain.EntityContainer{JiraProject: project}, "issue", title, url)

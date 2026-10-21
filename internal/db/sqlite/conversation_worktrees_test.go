@@ -155,9 +155,9 @@ func seedSQLiteConversationForWorktree(t *testing.T, conn *sql.DB, suffix string
 	entityID := uuid.New().String()
 	sourceID := fmt.Sprintf("run-worktree-%s-%d", suffix, now.UnixNano())
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope, jira_project_id)
-		VALUES (?, 'jira', ?, 'issue', 'ConversationWorktree Conformance', 'https://example/x', '{}', ?, 'active', 'https://jira.example.com', ?)
-	`, entityID, sourceID, now, dbseed.JiraIssueProjectID(t, conn, runmode.LocalDefaultOrgID, "https://jira.example.com", sourceID)); err != nil {
+		INSERT INTO entities (id, source, source_id, external_id, kind, title, url, snapshot_json, created_at, state, scope, jira_project_id)
+		VALUES (?, 'jira', ?, ?, 'issue', 'ConversationWorktree Conformance', 'https://example/x', '{}', ?, 'active', 'https://jira.example.com', ?)
+	`, entityID, sourceID, dbseed.JiraIssueID(sourceID), now, dbseed.JiraIssueProjectID(t, conn, runmode.LocalDefaultOrgID, "https://jira.example.com", sourceID)); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	eventID := uuid.New().String()

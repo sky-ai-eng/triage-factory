@@ -167,7 +167,7 @@ func seedBlueprintRun(t *testing.T, conn *sql.DB, taskID string) string {
 // a run tree is built under and which the seeded worktree_path records.
 func seedJiraConversation(t *testing.T, database *db.DB, conversationID, issueKey string) string {
 	t.Helper()
-	entity, _, err := sqlitestore.New(database.Conn).Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", issueKey, "", dbseed.JiraIssueProject(issueKey), "T-"+issueKey, "https://x/"+issueKey)
+	entity, _, err := sqlitestore.New(database.Conn).Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", issueKey, dbseed.JiraIssueID(issueKey), dbseed.JiraIssueProject(issueKey), "T-"+issueKey, "https://x/"+issueKey)
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}
@@ -1150,7 +1150,7 @@ func TestRefForSpec(t *testing.T) {
 // than a stored value — the shape a run whose setup never recorded one takes.
 func seedEventTriggeredJiraConversation(t *testing.T, database *db.DB, conversationID, issueKey string) string {
 	t.Helper()
-	entity, _, err := sqlitestore.New(database.Conn).Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", issueKey, "", dbseed.JiraIssueProject(issueKey), "T-"+issueKey, "https://x/"+issueKey)
+	entity, _, err := sqlitestore.New(database.Conn).Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", issueKey, dbseed.JiraIssueID(issueKey), dbseed.JiraIssueProject(issueKey), "T-"+issueKey, "https://x/"+issueKey)
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}

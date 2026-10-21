@@ -3,11 +3,11 @@
 -- Every external object is keyed within the provider namespace it lives in, a
 -- GitHub entity references its repository's registry row and records its pull
 -- request's node id, a team's Jira tracked set and every Jira issue entity
--- reference a Jira project registry row, Linear becomes a tracked source, and
--- five smaller changes ride along: the org GitHub App's unusable state, the
--- claim's source manifest, the retirement of the 'completed' conversation
--- status, node ids on artifacts and audit-ledger rows, and the table of
--- rate-limit readings.
+-- reference a Jira project registry row, every Jira and Linear issue entity is
+-- written with its issue id, Linear becomes a tracked source, and five smaller
+-- changes ride along: the org GitHub App's unusable state, the claim's source
+-- manifest, the retirement of the 'completed' conversation status, node ids on
+-- artifacts and audit-ledger rows, and the table of rate-limit readings.
 --
 -- NO TRANSACTION because rebuilding a table other tables reference needs
 -- foreign keys off, and PRAGMA foreign_keys is a no-op inside a transaction:
@@ -623,6 +623,31 @@ SELECT entity_id, node_id
          WHERE COALESCE(CAST(node_id AS TEXT), '') <> '')
  WHERE n = 1;
 
+-- Every existing Jira row whose snapshot names its issue's id takes it, by the
+-- same rules: the older of two rows naming one id in a site keeps it, the
+-- partition being the scope entity_scope gave the row. A snapshot written
+-- before the poller recorded the id (every snapshot v1.15.0 and earlier
+-- wrote), a stub with no snapshot and a malformed snapshot leave the row NULL.
+-- Such a row learns its id from Jira the first time a read reaches it: the
+-- next poll for an active row on the org's site, which reads it by key, and
+-- the next read that finds it by key for a closed one
+-- (db.EntityStore.StampExternalIDSystem). Closing those rows instead would
+-- retire every issue such an install tracks. Section 5's triggers keep any
+-- later write from creating a Jira or Linear row without its id.
+CREATE TEMP TABLE jira_entity_issue AS
+SELECT entity_id, issue_id
+  FROM (SELECT entity_id, issue_id,
+               row_number() OVER (PARTITION BY org_id, scope, issue_id
+                                  ORDER BY created_at, entity_id) AS n
+          FROM (SELECT e.id AS entity_id, e.org_id, es.scope, e.created_at,
+                       CASE WHEN json_valid(e.snapshot_json)
+                            THEN json_extract(e.snapshot_json, '$.id') END AS issue_id
+                  FROM entities e
+                  JOIN entity_scope es ON es.entity_id = e.id
+                 WHERE e.source = 'jira')
+         WHERE COALESCE(CAST(issue_id AS TEXT), '') <> '')
+ WHERE n = 1;
+
 -- ---------------------------------------------------------------------------
 -- 3d. team_github_groups.host
 -- ---------------------------------------------------------------------------
@@ -1200,8 +1225,9 @@ DROP TABLE jira_site;
 --
 -- The rebuild 3c prepared: each row takes the scope entity_scope gave it, a
 -- GitHub row the repository github_entity_repo resolved and the node id
--- github_entity_node gave it, and a Jira row the project registry row
--- jira_entity_project resolved in section 4.
+-- github_entity_node gave it, and a Jira row the issue id jira_entity_issue
+-- gave it and the project registry row jira_entity_project resolved in
+-- section 4.
 --
 -- The CHECK lets a Jira row with no scope go without a project: a row whose
 -- url names no site, in an org with no Jira site configured, has no site a
@@ -1242,7 +1268,9 @@ INSERT INTO entities_new (
 SELECT
     e.id, e.source, es.scope,
     e.source_id,
-    (SELECT CAST(n.node_id AS TEXT) FROM github_entity_node n WHERE n.entity_id = e.id),
+    COALESCE(
+        (SELECT CAST(n.node_id AS TEXT) FROM github_entity_node n WHERE n.entity_id = e.id),
+        (SELECT CAST(j.issue_id AS TEXT) FROM jira_entity_issue j WHERE j.entity_id = e.id)),
     e.kind, e.title, e.url, e.snapshot_json,
     e.description, e.state, e.created_at, e.last_polled_at, e.closed_at, e.owning_team_id,
     e.org_id, e.poll_seq, e.commissioned_by_user_id,
@@ -1295,7 +1323,34 @@ CREATE INDEX        idx_entities_jira_project
     ON entities (jira_project_id)
     WHERE jira_project_id IS NOT NULL;
 
+-- A Jira or Linear row carries the provider's id for its issue, which is what
+-- follows the issue across a key change (GetByExternalIDSystem, then
+-- RenameSystem): every response that finds an issue names it, so no row is
+-- created without one and none loses the one it has. Triggers rather than a
+-- CHECK because they constrain writes and not the rows already here: a Jira
+-- row jira_entity_issue found no id for stays, and learns it from Jira (3c).
+-- Linear has no such rows, since nothing before this migration polled it.
+-- +goose StatementBegin
+CREATE TRIGGER entities_external_id_required
+BEFORE INSERT ON entities
+WHEN NEW.source IN ('jira', 'linear') AND COALESCE(NEW.external_id, '') = ''
+BEGIN
+    SELECT RAISE(ABORT, 'entities_external_id_required: a jira or linear entity is created with its issue id');
+END;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+CREATE TRIGGER entities_external_id_kept
+BEFORE UPDATE OF external_id ON entities
+WHEN NEW.source IN ('jira', 'linear') AND COALESCE(NEW.external_id, '') = ''
+     AND COALESCE(OLD.external_id, '') <> ''
+BEGIN
+    SELECT RAISE(ABORT, 'entities_external_id_required: a jira or linear entity keeps its issue id');
+END;
+-- +goose StatementEnd
+
 DROP TABLE jira_entity_project;
+DROP TABLE jira_entity_issue;
 DROP TABLE github_entity_repo;
 DROP TABLE github_entity_node;
 DROP TABLE entity_scope;

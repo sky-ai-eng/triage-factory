@@ -126,7 +126,7 @@ func makeEntity(t *testing.T, database *sql.DB, source, sourceID, kind string) *
 	var ent *domain.Entity
 	var err error
 	if source == "jira" {
-		ent, _, err = entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, testScope(source), sourceID, "", dbseed.JiraIssueProject(sourceID), "", "")
+		ent, _, err = entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, testScope(source), sourceID, dbseed.JiraIssueID(sourceID), dbseed.JiraIssueProject(sourceID), "", "")
 	} else {
 		ent, _, err = entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, source, testScope(source), sourceID, "", kind, "", "")
 	}

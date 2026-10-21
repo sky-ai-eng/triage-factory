@@ -65,7 +65,7 @@ func seedBlueprintRun(t *testing.T, conn *sql.DB, taskID string) string {
 func seedConversation(t *testing.T, stores db.Stores, conn *sql.DB, conversationID, triggerType string) {
 	t.Helper()
 	ctx := context.Background()
-	entity, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, "https://jira.example.com", "K-"+conversationID, "", dbseed.JiraIssueProject("K-"+conversationID), "T", "https://x/"+conversationID)
+	entity, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, "https://jira.example.com", "K-"+conversationID, dbseed.JiraIssueID("K-"+conversationID), dbseed.JiraIssueProject("K-"+conversationID), "T", "https://x/"+conversationID)
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}

@@ -588,7 +588,7 @@ func TestLookupJiraRuleForTaskSystem(t *testing.T) {
 	team := runmode.LocalDefaultTeamID
 	issue := func(key string) *domain.Task {
 		t.Helper()
-		e, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, jiraMirrorSite, key, "", dbseed.JiraIssueProject(key), "t", "")
+		e, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, jiraMirrorSite, key, dbseed.JiraIssueID(key), dbseed.JiraIssueProject(key), "t", "")
 		if err != nil {
 			t.Fatalf("seed %s: %v", key, err)
 		}
@@ -613,11 +613,8 @@ func TestLookupJiraRuleForTaskSystem(t *testing.T) {
 	if _, err := stores.JiraProjects.RefreshSystem(ctx, runmode.LocalDefaultOrgID, project.JiraProjectID, "id-SKY", "CORE", "Core"); err != nil {
 		t.Fatalf("rename the project: %v", err)
 	}
-	if _, err := stores.Entities.StampExternalIDSystem(ctx, runmode.LocalDefaultOrgID, sky.EntityID, "10123"); err != nil {
-		t.Fatalf("stamp the issue id: %v", err)
-	}
-	if _, err := stores.Entities.RenameSystem(ctx, runmode.LocalDefaultOrgID, "jira", jiraMirrorSite, "10123", "CORE-123", ""); err != nil {
-		t.Fatalf("rename the issue: %v", err)
+	if out, err := stores.Entities.RenameSystem(ctx, runmode.LocalDefaultOrgID, "jira", jiraMirrorSite, project.ExternalID, "CORE-123", ""); err != nil || !out.Renamed {
+		t.Fatalf("rename the issue: renamed=%v err=%v", out.Renamed, err)
 	}
 	sky.EntitySourceID = "CORE-123"
 	if rule := lookup(sky); rule == nil || rule.ProjectKey != "CORE" || rule.DoneCanonical.Name != "Done" {
@@ -795,7 +792,7 @@ func delegatableJiraFixture(t *testing.T, database *sql.DB, suffix string) (doma
 	org := runmode.LocalDefaultOrgID
 	stores := sqlitestore.New(database)
 
-	entity, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "SKY-"+suffix, "", dbseed.JiraIssueProject("SKY-"+suffix), "T", "https://x/"+suffix)
+	entity, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "SKY-"+suffix, dbseed.JiraIssueID("SKY-"+suffix), dbseed.JiraIssueProject("SKY-"+suffix), "T", "https://x/"+suffix)
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}

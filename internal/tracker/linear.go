@@ -157,16 +157,9 @@ func (t *Tracker) RefreshLinear(ctx context.Context, scope string, client Linear
 	}
 	entities := make([]domain.Entity, 0, len(listed))
 	for _, e := range listed {
-		switch {
-		case e.Scope != scope:
-			// Retired in phase 0; the router closes it.
-		case e.ExternalID == "":
-			// Every writer of a Linear entity sets the UUID, so this is a row
-			// nothing in TF produced. Without the UUID there is nothing to ask
-			// Linear about.
-			trackerLog.WarnContext(ctx, "linear entity has no issue UUID; it cannot be refreshed",
-				"source_id", e.SourceID, "entity_id", e.ID)
-		default:
+		// A row from another workspace was retired in phase 0; the router
+		// closes it.
+		if e.Scope == scope {
 			entities = append(entities, e)
 		}
 	}
@@ -271,14 +264,6 @@ func (t *Tracker) seedDiscoveredLinear(ctx context.Context, scope string, state 
 		}
 		if err != nil {
 			trackerLog.Error("create entity failed", "source_id", snap.Identifier, "error", err)
-			return 0
-		}
-		if !created && entity.ExternalID != snap.ID {
-			// A row under the identifier with no UUID. Nothing that writes a
-			// Linear entity leaves one, and taking it on the identifier alone
-			// could hand this issue another issue's history.
-			trackerLog.Warn("linear entity under this identifier carries no issue UUID; not adopting it",
-				"source_id", snap.Identifier, "entity_id", entity.ID, "issue_id", snap.ID)
 			return 0
 		}
 	}

@@ -162,6 +162,13 @@ type EntityIdentitySeeder struct {
 	// restores the index when the test ends.
 	ForceExternalID func(t *testing.T, entityID, externalID string)
 
+	// ForgetExternalID clears external_id on a Jira row with the schema's
+	// requirement out of the way: the shape of a local row the SQLite
+	// migration carried over from before the poller recorded issue ids, which
+	// the duplicate merge exists to fold. Raw SQL because no write may produce
+	// it; the backend restores the requirement when the test ends.
+	ForgetExternalID func(t *testing.T, entityID string)
+
 	// Conversation inserts a conversation, on a task and entity of its own,
 	// and returns its id, for memory links to name.
 	Conversation func(t *testing.T, suffix string) string
@@ -211,39 +218,41 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 	})
 
+	// A GitHub stub, created from a key alone, is the row with no id that
+	// either backend holds: a Jira or Linear row is created with its id.
 	t.Run("StampExternalIDSystem_fills_a_null_once", func(t *testing.T) {
 		s, orgID, _ := mk(t)
-		row, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, scope, "SKY-1", "", TestJiraProject, "t", "")
+		row, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", scope, "acme/stamp#1", "", "pr", "t", "")
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
 		read := func() (*domain.Entity, error) { return s.Entities.GetSystem(ctx, orgID, row.ID) }
-		stamped, err := s.Entities.StampExternalIDSystem(ctx, orgID, row.ID, "10001")
-		if err != nil || stamped == nil || stamped.ExternalID != "10001" {
-			t.Fatalf("stamp = %+v err=%v, want the row carrying 10001", stamped, err)
+		stamped, err := s.Entities.StampExternalIDSystem(ctx, orgID, row.ID, "PR_1")
+		if err != nil || stamped == nil || stamped.ExternalID != "PR_1" {
+			t.Fatalf("stamp = %+v err=%v, want the row carrying PR_1", stamped, err)
 		}
 		AssertWriteReturnedStoredRow(t, "StampExternalIDSystem", *stamped, read)
 
-		again, err := s.Entities.StampExternalIDSystem(ctx, orgID, row.ID, "10001")
+		again, err := s.Entities.StampExternalIDSystem(ctx, orgID, row.ID, "PR_1")
 		if err != nil || again == nil || again.ID != row.ID {
 			t.Errorf("repeat stamp = %+v err=%v, want the row back", again, err)
 		}
-		declined, err := s.Entities.StampExternalIDSystem(ctx, orgID, row.ID, "10002")
+		declined, err := s.Entities.StampExternalIDSystem(ctx, orgID, row.ID, "PR_2")
 		if err != nil || declined != nil {
 			t.Errorf("stamp of a different id = %+v err=%v, want (nil, nil)", declined, err)
 		}
-		if got, _ := read(); got == nil || got.ExternalID != "10001" {
-			t.Errorf("after a declined stamp the row carries %+v, want 10001 kept", got)
+		if got, _ := read(); got == nil || got.ExternalID != "PR_1" {
+			t.Errorf("after a declined stamp the row carries %+v, want PR_1 kept", got)
 		}
 
-		other, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, scope, "SKY-2", "", TestJiraProject, "t", "")
+		other, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", scope, "acme/stamp#2", "", "pr", "t", "")
 		if err != nil {
 			t.Fatalf("create other: %v", err)
 		}
-		if got, err := s.Entities.StampExternalIDSystem(ctx, orgID, other.ID, "10001"); !errors.Is(err, db.ErrEntityIdentityAmbiguous) || got != nil {
+		if got, err := s.Entities.StampExternalIDSystem(ctx, orgID, other.ID, "PR_1"); !errors.Is(err, db.ErrEntityIdentityAmbiguous) || got != nil {
 			t.Errorf("stamping an id another row carries = %+v err=%v, want ErrEntityIdentityAmbiguous", got, err)
 		}
-		if _, err := s.Entities.StampExternalIDSystem(ctx, orgID, "00000000-0000-0000-0000-00000000dead", "10003"); !errors.Is(err, sql.ErrNoRows) {
+		if _, err := s.Entities.StampExternalIDSystem(ctx, orgID, "00000000-0000-0000-0000-00000000dead", "PR_3"); !errors.Is(err, sql.ErrNoRows) {
 			t.Errorf("stamp on a missing id: err=%v, want sql.ErrNoRows", err)
 		}
 	})
@@ -419,11 +428,14 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		s, orgID, seed := mk(t)
 		const jiraScope = "https://jira.example.com"
 		// The older row: the issue's first entity, closed under the key it
-		// had before an earlier move, with no id learned.
-		older, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, jiraScope, "OLD-1", "", TestJiraProject, "Old title", jiraScope+"/browse/OLD-1")
+		// had before an earlier move, carried over from before ids were
+		// recorded.
+		older, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, jiraScope, "OLD-1", "10001", TestJiraProject, "Old title", jiraScope+"/browse/OLD-1")
 		if err != nil {
 			t.Fatalf("create older: %v", err)
 		}
+		seed.ForgetExternalID(t, older.ID)
+		older, _ = s.Entities.GetSystem(ctx, orgID, older.ID)
 		olderTask := seed.Task(t, older.ID, "dup")
 		if _, err := s.Entities.MarkClosed(ctx, orgID, older.ID); err != nil {
 			t.Fatalf("close older: %v", err)
@@ -531,10 +543,12 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 	t.Run("MergeDuplicateEntitiesSystem_keeps_an_active_survivor_when_the_newer_row_is_closed", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		const jiraScope = "https://jira.example.com"
-		older, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, jiraScope, "OLD-2", "", TestJiraProject, "Older", jiraScope+"/browse/OLD-2")
+		older, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, jiraScope, "OLD-2", "10002", TestJiraProject, "Older", jiraScope+"/browse/OLD-2")
 		if err != nil {
 			t.Fatalf("create older: %v", err)
 		}
+		seed.ForgetExternalID(t, older.ID)
+		older, _ = s.Entities.GetSystem(ctx, orgID, older.ID)
 		newer, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, jiraScope, "NEW-2", "10002", TestJiraProject, "Newer", jiraScope+"/browse/NEW-2")
 		if err != nil {
 			t.Fatalf("create newer: %v", err)
@@ -582,7 +596,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if err != nil {
 			t.Fatalf("create b: %v", err)
 		}
-		elsewhere, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://other.example.com", "C-1", "", TestJiraProject, "c", "")
+		elsewhere, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://other.example.com", "C-1", "20001", TestJiraProject, "c", "")
 		if err != nil {
 			t.Fatalf("create elsewhere: %v", err)
 		}
@@ -857,6 +871,9 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 		if _, _, err := s.Entities.FindOrCreate(ctx, orgID, "jira", scope, "SKY-32", "20032", "issue", "t", ""); !errors.Is(err, db.ErrEntityJiraProjectRequired) {
 			t.Errorf("FindOrCreate creating a Jira row: err=%v, want ErrEntityJiraProjectRequired", err)
+		}
+		if _, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, scope, "SKY-32", "", TestJiraProject, "t", ""); err == nil {
+			t.Error("FindOrCreateJiraSystem with no issue id: err=nil, want a refusal")
 		}
 		for name, p := range map[string]domain.JiraProjectRef{"no id": {Key: "SKY"}, "no key": {ID: "10000"}} {
 			if _, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, scope, "SKY-32", "20032", p, "t", ""); !errors.Is(err, db.ErrEntityJiraProjectRequired) {

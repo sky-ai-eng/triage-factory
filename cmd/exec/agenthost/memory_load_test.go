@@ -56,7 +56,7 @@ func seedEntity(t *testing.T, stores db.Stores, orgID, source, sourceID, title s
 	var ent *domain.Entity
 	var err error
 	if source == "jira" {
-		ent, _, err = stores.Entities.FindOrCreateJiraSystem(context.Background(), orgID, testScope(source), sourceID, "", dbseed.JiraIssueProject(sourceID), title, "")
+		ent, _, err = stores.Entities.FindOrCreateJiraSystem(context.Background(), orgID, testScope(source), sourceID, dbseed.JiraIssueID(sourceID), dbseed.JiraIssueProject(sourceID), title, "")
 	} else {
 		ent, _, err = stores.Entities.FindOrCreateSystem(context.Background(), orgID, source, testScope(source), sourceID, "", "pr", title, "")
 	}

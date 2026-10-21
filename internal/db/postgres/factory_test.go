@@ -307,9 +307,9 @@ func seedPgJiraEntityRaw(t *testing.T, h *pgtest.Harness, orgID, projectKey stri
 	sourceID := fmt.Sprintf("%s-%d", projectKey, number)
 	project := dbseed.JiraProject(t, h.AdminDB, orgID, pgJiraSite, projectKey)
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, jira_project_id)
-		VALUES ($1, $2, 'jira', $3, 'issue', $4, '', '{}'::jsonb, $5, $6, $7)
-	`, id, orgID, sourceID, "Issue "+sourceID, time.Now().UTC(), pgJiraSite, project); err != nil {
+		INSERT INTO entities (id, org_id, source, source_id, external_id, kind, title, url, snapshot_json, created_at, scope, jira_project_id)
+		VALUES ($1, $2, 'jira', $3, $4, 'issue', $5, '', '{}'::jsonb, $6, $7, $8)
+	`, id, orgID, sourceID, dbseed.JiraIssueID(sourceID), "Issue "+sourceID, time.Now().UTC(), pgJiraSite, project); err != nil {
 		t.Fatalf("seed jira entity %s: %v", sourceID, err)
 	}
 	return id
@@ -604,9 +604,9 @@ func TestFactoryReadStore_Postgres_LinearScopedToTrackedTeam(t *testing.T) {
 		t.Helper()
 		id := uuid.New().String()
 		if _, err := h.AdminDB.Exec(`
-			INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, linear_team_id)
-			VALUES ($1, $2, 'linear', $3, 'issue', $3, '', $4::jsonb, $5, 'ws-test', $6)
-		`, id, orgID, identifier, snapshot, time.Now().UTC(), linearTeamID); err != nil {
+			INSERT INTO entities (id, org_id, source, source_id, external_id, kind, title, url, snapshot_json, created_at, scope, linear_team_id)
+			VALUES ($1, $2, 'linear', $3, $4, 'issue', $3, '', $5::jsonb, $6, 'ws-test', $7)
+		`, id, orgID, identifier, "uuid-"+identifier, snapshot, time.Now().UTC(), linearTeamID); err != nil {
 			t.Fatalf("seed linear entity %s: %v", identifier, err)
 		}
 		return id

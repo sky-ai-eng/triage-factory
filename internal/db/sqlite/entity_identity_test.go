@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -53,6 +54,10 @@ func TestEntityIdentity_SQLite(t *testing.T) {
 				if _, err := conn.Exec(`UPDATE entities SET external_id = ? WHERE id = ?`, externalID, entityID); err != nil {
 					t.Fatalf("force external id: %v", err)
 				}
+			},
+			ForgetExternalID: func(t *testing.T, entityID string) {
+				t.Helper()
+				dbseed.ForgetIssueID(t, conn, entityID)
 			},
 			Conversation: func(t *testing.T, suffix string) string {
 				t.Helper()

@@ -157,7 +157,7 @@ func settleConversationBlueprint(t *testing.T, database *sql.DB, conversationID,
 // GitHub PR run.
 func seedJiraConversation(t *testing.T, database *sql.DB, conversationID, sessionID, worktreePath string) {
 	t.Helper()
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", "SKY-"+conversationID, "", dbseed.JiraIssueProject("SKY-"+conversationID), "T-"+conversationID, "https://x/"+conversationID)
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", "SKY-"+conversationID, dbseed.JiraIssueID("SKY-"+conversationID), dbseed.JiraIssueProject("SKY-"+conversationID), "T-"+conversationID, "https://x/"+conversationID)
 	if err != nil {
 		t.Fatalf("create jira entity: %v", err)
 	}

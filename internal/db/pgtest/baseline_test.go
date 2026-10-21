@@ -2037,8 +2037,8 @@ func seedEntity(t *testing.T, h *Harness, orgID, source, sourceID string) string
 	}
 	var id string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO entities (org_id, source, source_id, kind, title, scope, repository_id, jira_project_id)
-		VALUES ($1, $2, $3, 'pr', 'test pr', CASE $2 WHEN 'github' THEN 'https://github.com' WHEN 'jira' THEN 'https://jira.example.com' WHEN 'slack' THEN 'slack.com' WHEN 'linear' THEN 'ws-test' ELSE 'test-scope' END, $4, $5) RETURNING id
+		INSERT INTO entities (org_id, source, source_id, external_id, kind, title, scope, repository_id, jira_project_id)
+		VALUES ($1, $2, $3, CASE WHEN $2 IN ('jira', 'linear') THEN 'id-' || $3 END, 'pr', 'test pr', CASE $2 WHEN 'github' THEN 'https://github.com' WHEN 'jira' THEN 'https://jira.example.com' WHEN 'slack' THEN 'slack.com' WHEN 'linear' THEN 'ws-test' ELSE 'test-scope' END, $4, $5) RETURNING id
 	`, orgID, source, sourceID, repositoryID, jiraProjectID).Scan(&id); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -3305,8 +3305,9 @@ func TestBaseline_GitHubEntityReferencesItsRepository(t *testing.T) {
 
 	insert := func(orgID, source, key string, repositoryID any) error {
 		_, err := h.AdminDB.Exec(`
-			INSERT INTO entities (org_id, source, scope, source_id, kind, repository_id, linear_team_id)
-			VALUES ($1, $2, $3, $4, 'pr', $5, CASE WHEN $2 = 'linear' THEN 'team-1' END)
+			INSERT INTO entities (org_id, source, scope, source_id, external_id, kind, repository_id, linear_team_id)
+			VALUES ($1, $2, $3, $4, CASE WHEN $2 = 'linear' THEN 'uuid-' || $4 END, 'pr', $5,
+			        CASE WHEN $2 = 'linear' THEN 'team-1' END)
 		`, orgID, source, dbtest.TestGitHubHost, key, repositoryID)
 		return err
 	}
@@ -3347,8 +3348,8 @@ func TestBaseline_JiraEntityReferencesItsProject(t *testing.T) {
 
 	insert := func(orgID, source, key string, jiraProjectID, repositoryID any) error {
 		_, err := h.AdminDB.Exec(`
-			INSERT INTO entities (org_id, source, scope, source_id, kind, jira_project_id, repository_id)
-			VALUES ($1, $2, $3, $4, 'issue', $5, $6)
+			INSERT INTO entities (org_id, source, scope, source_id, external_id, kind, jira_project_id, repository_id)
+			VALUES ($1, $2, $3, $4, CASE WHEN $2 = 'jira' THEN 'id-' || $4 END, 'issue', $5, $6)
 		`, orgID, source, dbseed.JiraSite, key, jiraProjectID, repositoryID)
 		return err
 	}
@@ -3373,6 +3374,55 @@ func TestBaseline_JiraEntityReferencesItsProject(t *testing.T) {
 	if !errors.As(err, &pgErr) || pgErr.Code != "23514" || pgErr.ConstraintName != "entities_jira_project_required" {
 		t.Errorf("clearing a jira row's project = %v; want a 23514 violation of entities_jira_project_required", err)
 	}
+}
+
+// TestBaseline_JiraAndLinearEntitiesCarryTheirIssueID pins
+// entities_external_id_required: a Jira or Linear row is stored with the
+// provider's issue id, on insert and on update, and a GitHub or Slack row is
+// not asked for one.
+func TestBaseline_JiraAndLinearEntitiesCarryTheirIssueID(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+	orgID := SeedOrg(t, h, "entity-issue-id", SeedUser(t, h, "entity-issue-id-owner"))
+	project := dbseed.JiraProject(t, h.AdminDB, orgID, dbseed.JiraSite, "ACME")
+	repo := SeedRepositoryOnHost(t, h, orgID, dbtest.TestGitHubHost, "acme", "api")
+
+	insert := func(source, key string, externalID any) error {
+		_, err := h.AdminDB.Exec(`
+			INSERT INTO entities (org_id, source, scope, source_id, external_id, kind,
+			                      jira_project_id, linear_team_id, repository_id)
+			VALUES ($1, $2, $3, $4, $5, 'issue',
+			        CASE WHEN $2 = 'jira' THEN $6::uuid END,
+			        CASE WHEN $2 = 'linear' THEN 'team-1' END,
+			        CASE WHEN $2 = 'github' THEN $7::uuid END)
+		`, orgID, source, dbseed.JiraSite, key, externalID, project, repo)
+		return err
+	}
+	violates := func(what string, err error) {
+		t.Helper()
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23514" || pgErr.ConstraintName != "entities_external_id_required" {
+			t.Errorf("%s = %v; want a 23514 violation of entities_external_id_required", what, err)
+		}
+	}
+
+	violates("a jira row with no issue id", insert("jira", "ACME-1", nil))
+	violates("a jira row with an empty issue id", insert("jira", "ACME-2", ""))
+	violates("a linear row with no issue id", insert("linear", "ENG-1", nil))
+	if err := insert("jira", "ACME-3", "10003"); err != nil {
+		t.Errorf("a jira row with its issue id = %v; want it stored", err)
+	}
+	if err := insert("linear", "ENG-2", "uuid-2"); err != nil {
+		t.Errorf("a linear row with its issue id = %v; want it stored", err)
+	}
+	if err := insert("github", "acme/api#1", nil); err != nil {
+		t.Errorf("a github row with no id = %v; want it stored", err)
+	}
+
+	_, err := h.AdminDB.Exec(`UPDATE entities SET external_id = NULL WHERE org_id = $1 AND source_id = 'ACME-3'`, orgID)
+	violates("clearing a jira row's issue id", err)
+	_, err = h.AdminDB.Exec(`UPDATE entities SET external_id = NULL WHERE org_id = $1 AND source_id = 'ENG-2'`, orgID)
+	violates("clearing a linear row's issue id", err)
 }
 
 // TestBaseline_JiraRulesReferenceTheRegistry pins the jira_projects registry

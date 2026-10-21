@@ -1658,9 +1658,10 @@ func (t *Tracker) jiraProjectRow(ctx context.Context, c *jiraCycle, id string) *
 // issue's entity is matched on its numeric id (external_id) on that site,
 // never on its key once the id is known: the key is a display key a project
 // move or a project key rename changes, and when a fresh read answers under a
-// new one the entity is renamed to it in the same cycle. A row written before
-// ids were recorded learns its id from the first response that names it.
-// baseURL is what the issues' links are built from.
+// new one the entity is renamed to it in the same cycle. Every row is created
+// with its id; a local row the SQLite migration carried over from before ids
+// were recorded learns it from the first response that names it. baseURL is
+// what the issues' links are built from.
 //
 // All entity reads/writes are scoped to the Tracker's orgID (set at
 // construction). In multi mode the poller's per-org loop constructs

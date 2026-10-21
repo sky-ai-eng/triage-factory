@@ -568,7 +568,7 @@ func TestCloseOwed_Jira(t *testing.T) {
 		DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
 	})
 	const page = `{"issues":[
-		{"key":"SKY-1","fields":{
+		{"id":"10001","key":"SKY-1","fields":{
 			"summary":"Owed issue","status":{"name":"Done","id":"st-Done"},
 			"assignee":{"displayName":"Alice","accountId":"acc-1"},
 			"created":"2026-06-01T00:00:00.000+0000","updated":"2026-06-10T10:00:00.000+0000"
@@ -587,7 +587,7 @@ func TestCloseOwed_Jira(t *testing.T) {
 
 	ctx := context.Background()
 	st := sqlitestore.New(database)
-	entity, _, err := st.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, "https://jira.example.com", "SKY-1", "", dbseed.JiraIssueProject("SKY-1"), "Owed issue", "")
+	entity, _, err := st.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, "https://jira.example.com", "SKY-1", "10001", dbseed.JiraIssueProject("SKY-1"), "Owed issue", "")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
