@@ -46,7 +46,7 @@ func TestBodyUpdated_PollToRule(t *testing.T) {
 			var entity *domain.Entity
 			var err error
 			if source == "jira" {
-				entity, _, err = st.Entities.FindOrCreateJiraSystem(ctx, org, testScope(source), sourceID, "", dbseed.JiraIssueProject(sourceID), "", "")
+				entity, _, err = st.Entities.FindOrCreateJiraSystem(ctx, org, testScope(source), sourceID, "10007", dbseed.JiraIssueProject(sourceID), "", "")
 			} else {
 				entity, _, err = st.Entities.FindOrCreate(ctx, org, source, testScope(source), sourceID, "", kind, "", "")
 			}
@@ -73,11 +73,11 @@ func TestBodyUpdated_PollToRule(t *testing.T) {
 						w.WriteHeader(http.StatusBadRequest)
 						return
 					}
-					if !strings.Contains(query.JQL, "key IN") {
+					if !strings.Contains(query.JQL, "id IN") {
 						_, _ = w.Write([]byte(`{"issues":[],"total":0}`))
 						return
 					}
-					_, _ = fmt.Fprintf(w, `{"issues":[{"key":"PROJ-7","fields":{"summary":"Body routing","description":%s,"status":{"name":"Open"},"assignee":{"accountId":"account-7","displayName":"Assignee"},"labels":["attention"],"updated":"2026-09-15T12:00:00.000+0000"}}],"total":1}`, raw)
+					_, _ = fmt.Fprintf(w, `{"issues":[{"id":"10007","key":"PROJ-7","fields":{"summary":"Body routing","description":%s,"status":{"name":"Open"},"assignee":{"accountId":"account-7","displayName":"Assignee"},"labels":["attention"],"updated":"2026-09-15T12:00:00.000+0000"}}],"total":1}`, raw)
 				default:
 					t.Errorf("unexpected provider request: %s", req.URL.Path)
 					http.NotFound(w, req)

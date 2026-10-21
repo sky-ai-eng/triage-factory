@@ -853,7 +853,7 @@ func TestMigrate_ProviderScopesGiveGitHubEntitiesTheirRepository(t *testing.T) {
 // external id. A stub, a snapshot with no node id and a malformed snapshot
 // stay NULL. Two rows for one pull request, created under two names of its
 // repository, would break the identity index: the older keeps the id and the
-// newer stays NULL. Jira rows are left NULL.
+// newer stays NULL. A Jira row takes its issue id, never a node id.
 func TestMigrate_ProviderScopesRecordGitHubNodeIDs(t *testing.T) {
 	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
 	seedProviderScopesOrg(t, database)
@@ -888,7 +888,7 @@ func TestMigrate_ProviderScopesRecordGitHubNodeIDs(t *testing.T) {
 		"e-malformed": "",
 		"e-old-name":  "PR_7",
 		"e-new-name":  "",
-		"e-jira":      "",
+		"e-jira":      "10001",
 	} {
 		var got sql.NullString
 		if err := database.QueryRow(`SELECT external_id FROM entities WHERE id = ?`, entityID).Scan(&got); err != nil {
@@ -903,6 +903,86 @@ func TestMigrate_ProviderScopesRecordGitHubNodeIDs(t *testing.T) {
 	if _, err := database.Exec(`UPDATE entities SET external_id = 'PR_7' WHERE id = 'e-new-name'`); err == nil {
 		t.Error("a second row carrying PR_7 was accepted; the identity index should refuse it")
 	}
+}
+
+// Every Jira row whose snapshot names its issue's id takes it as its external
+// id. A snapshot written before the poller recorded one, a stub and a
+// malformed snapshot stay NULL. Two rows naming one id on one site would break
+// the identity index, so the older keeps it; one id on two sites is two
+// issues. From then on a Jira or Linear row is not written without its id and
+// does not lose the one it has, while a row the migration left without one is
+// still written to, and learns its id.
+func TestMigrate_ProviderScopesRecordJiraIssueIDs(t *testing.T) {
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	const site, otherSite = "https://acme.atlassian.net", "https://other.atlassian.net"
+	setOrgBaseURL(t, database, runmode.LocalDefaultOrgID, "jira", site)
+	issue := func(id, onSite, key, snapshot, createdAt string) {
+		t.Helper()
+		mustExec(t, database, `
+			INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at)
+			VALUES (?, 'jira', ?, 'issue', 't', ?, NULLIF(?, ''), ?)`,
+			id, key, onSite+"/browse/"+key, snapshot, createdAt)
+	}
+	issue("e-polled", site, "SKY-1", `{"id":"10001","key":"SKY-1","project_id":"100"}`, "2026-01-01 00:00:00")
+	issue("e-no-id", site, "SKY-2", `{"key":"SKY-2","status":"To Do"}`, "2026-01-01 00:00:00")
+	issue("e-stub", site, "SKY-3", "", "2026-01-01 00:00:00")
+	issue("e-malformed", site, "SKY-4", `{not json`, "2026-01-01 00:00:00")
+	// One issue under the key it had before a move and the key it has now.
+	issue("e-before-move", site, "SKY-7", `{"id":"10007","key":"SKY-7"}`, "2026-01-01 00:00:00")
+	issue("e-after-move", site, "OPS-1", `{"id":"10007","key":"OPS-1"}`, "2026-02-01 00:00:00")
+	issue("e-other-site", otherSite, "OTH-1", `{"id":"10001","key":"OTH-1"}`, "2026-01-01 00:00:00")
+
+	migrateProviderScopes(t, database)
+
+	for entityID, want := range map[string]string{
+		"e-polled":      "10001",
+		"e-no-id":       "",
+		"e-stub":        "",
+		"e-malformed":   "",
+		"e-before-move": "10007",
+		"e-after-move":  "",
+		"e-other-site":  "10001",
+	} {
+		var got sql.NullString
+		if err := database.QueryRow(`SELECT external_id FROM entities WHERE id = ?`, entityID).Scan(&got); err != nil {
+			t.Fatalf("read external_id of %s: %v", entityID, err)
+		}
+		if got.String != want {
+			t.Errorf("%s external_id = %q, want %q", entityID, got.String, want)
+		}
+	}
+
+	refused := func(what, stmt string) {
+		t.Helper()
+		_, err := database.Exec(stmt)
+		if err == nil || !strings.Contains(err.Error(), "entities_external_id_required") {
+			t.Errorf("%s = %v, want the entities_external_id_required trigger to refuse it", what, err)
+		}
+	}
+	project := queryString(t, database, `SELECT jira_project_id FROM entities WHERE id = 'e-polled'`)
+	refused("a jira insert with no issue id",
+		`INSERT INTO entities (id, source, scope, source_id, kind, jira_project_id)
+		 VALUES ('e-bare', 'jira', '`+site+`', 'SKY-9', 'issue', '`+project+`')`)
+	refused("a jira insert with an empty issue id",
+		`INSERT INTO entities (id, source, scope, source_id, external_id, kind, jira_project_id)
+		 VALUES ('e-empty', 'jira', '`+site+`', 'SKY-9', '', 'issue', '`+project+`')`)
+	refused("a linear insert with no issue id",
+		`INSERT INTO entities (id, source, scope, source_id, kind, linear_team_id)
+		 VALUES ('e-linear', 'linear', 'workspace-1', 'ENG-1', 'issue', 'team-1')`)
+	refused("clearing a jira row's issue id", `UPDATE entities SET external_id = NULL WHERE id = 'e-polled'`)
+	refused("emptying a jira row's issue id", `UPDATE entities SET external_id = '' WHERE id = 'e-polled'`)
+
+	mustExec(t, database, `INSERT INTO entities (id, source, scope, source_id, external_id, kind, jira_project_id)
+		VALUES ('e-new', 'jira', ?, 'SKY-9', '10009', 'issue', ?)`, site, project)
+	mustExec(t, database, `INSERT INTO entities (id, source, scope, source_id, external_id, kind, linear_team_id)
+		VALUES ('e-linear', 'linear', 'workspace-1', 'ENG-1', 'uuid-1', 'issue', 'team-1')`)
+	mustExec(t, database, `INSERT INTO entities (id, source, scope, source_id, kind) VALUES ('e-slack', 'slack', 'slack.com', 'C1/1.0', 'thread')`)
+
+	// A row left without an id is written to like any other, and learns it.
+	mustExec(t, database, `UPDATE entities SET external_id = COALESCE(external_id, NULL), poll_seq = poll_seq + 1 WHERE id = 'e-stub'`)
+	mustExec(t, database, `UPDATE entities SET state = 'closed', closed_at = CURRENT_TIMESTAMP WHERE id = 'e-stub'`)
+	mustExec(t, database, `UPDATE entities SET external_id = '10002' WHERE id = 'e-no-id'`)
 }
 
 func seedProviderScopesOrg(t *testing.T, database *sql.DB) {

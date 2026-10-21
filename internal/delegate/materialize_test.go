@@ -26,7 +26,7 @@ func TestMaterializeEntityMemories_CreatesDirsEvenWithNoPriors(t *testing.T) {
 	cwd := t.TempDir()
 
 	stores := sqlitestore.New(database)
-	entity, _, err := stores.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", "SKY-100", "", dbseed.JiraIssueProject("SKY-100"), "T", "https://x/100")
+	entity, _, err := stores.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", "SKY-100", dbseed.JiraIssueID("SKY-100"), dbseed.JiraIssueProject("SKY-100"), "T", "https://x/100")
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}

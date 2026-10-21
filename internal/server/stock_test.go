@@ -65,9 +65,9 @@ func seedStockTicket(t *testing.T, s *Server, issueKey string) {
 		issueKey, project.ID, project.Key, issueKey,
 	)
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, title, url, state, snapshot_json, scope, jira_project_id)
-		 VALUES (?, 'jira', ?, 'issue', 'Carry over me', ?, 'active', ?, 'https://jira.example.com', ?)`,
-		"e_stock_"+issueKey, issueKey, "https://jira.example.com/browse/"+issueKey, snapshot,
+		`INSERT INTO entities (id, source, source_id, external_id, kind, title, url, state, snapshot_json, scope, jira_project_id)
+		 VALUES (?, 'jira', ?, ?, 'issue', 'Carry over me', ?, 'active', ?, 'https://jira.example.com', ?)`,
+		"e_stock_"+issueKey, issueKey, dbseed.JiraIssueID(issueKey), "https://jira.example.com/browse/"+issueKey, snapshot,
 		dbseed.JiraIssueProjectID(t, s.db, runmode.LocalDefaultOrgID, "https://jira.example.com", issueKey),
 	); err != nil {
 		t.Fatalf("seed jira entity %s: %v", issueKey, err)
@@ -311,10 +311,10 @@ func TestJiraReaders_FollowAProjectKeyRename(t *testing.T) {
 	project := dbseed.JiraIssueProject("SKY-2")
 	row := dbseed.JiraIssueProjectID(t, s.db, org, site, "SKY-2")
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, title, url, state, snapshot_json, scope, jira_project_id)
-		 VALUES (?, 'jira', 'SKY-2', 'issue', 'Pick me up', ?, 'active', ?, ?, ?)`,
+		`INSERT INTO entities (id, source, source_id, external_id, kind, title, url, state, snapshot_json, scope, jira_project_id)
+		 VALUES (?, 'jira', 'SKY-2', '10002', 'issue', 'Pick me up', ?, 'active', ?, ?, ?)`,
 		entityID, site+"/browse/SKY-2",
-		`{"key":"SKY-2","project_id":"`+project.ID+`","project_key":"SKY","summary":"Pick me up","status":"To Do","assignee":""}`,
+		`{"id":"10002","key":"SKY-2","project_id":"`+project.ID+`","project_key":"SKY","summary":"Pick me up","status":"To Do","assignee":""}`,
 		site, row,
 	); err != nil {
 		t.Fatalf("seed jira entity: %v", err)
@@ -325,9 +325,6 @@ func TestJiraReaders_FollowAProjectKeyRename(t *testing.T) {
 
 	// The issue renamed by its id and its snapshot refreshed from a read
 	// that names the new key, as the tracker applies a rename.
-	if _, err := s.allStores.Entities.StampExternalIDSystem(ctx, org, entityID, "10002"); err != nil {
-		t.Fatalf("stamp the issue id: %v", err)
-	}
 	if _, err := s.allStores.Entities.RenameSystem(ctx, org, "jira", site, "10002", "CORE-2", site+"/browse/CORE-2"); err != nil {
 		t.Fatalf("rename the issue: %v", err)
 	}

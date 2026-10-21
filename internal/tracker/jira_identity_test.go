@@ -593,18 +593,19 @@ func TestRefreshJira_ProjectRecreatedUnderTheSameKey(t *testing.T) {
 	}
 }
 
-// TestRefreshJira_UpgradedRowsLearnTheirIDs: rows written before issue ids
-// were recorded are refreshed by key once, learn the id from the answer, and
-// are refreshed by id from then on.
+// TestRefreshJira_UpgradedRowsLearnTheirIDs: a local row the SQLite migration
+// carried over from before issue ids were recorded is refreshed by key once,
+// learns the id from the answer, and is refreshed by id from then on.
 func TestRefreshJira_UpgradedRowsLearnTheirIDs(t *testing.T) {
 	// Unassigned, under rules with no pickup set: no discovery query reaches
 	// it, so only the refresh does.
 	is := &fakeJiraIssue{ID: "10051", Keys: []string{"ENG-51"}, ProjectID: "100", Status: "In Progress", Summary: "Legacy", Updated: "2026-10-01T10:00:00.000+0000"}
 	fx := newJiraIdentityFixture(t, is)
-	legacy, _, err := fx.stores.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, jiraSite, "ENG-51", "", fakeENG, "Legacy", jiraSite+"/browse/ENG-51")
+	legacy, _, err := fx.stores.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, jiraSite, "ENG-51", "10051", fakeENG, "Legacy", jiraSite+"/browse/ENG-51")
 	if err != nil {
 		t.Fatal(err)
 	}
+	dbseed.ForgetIssueID(t, fx.db, legacy.ID)
 	snap, _ := json.Marshal(domain.JiraSnapshot{Key: "ENG-51", Summary: "Legacy", Status: "In Progress", StatusID: "st-In Progress", UpdatedAt: "2026-10-01T09:00:00.000+0000"})
 	if ok, err := fx.stores.Entities.UpdateSnapshotCASSystem(context.Background(), runmode.LocalDefaultOrgID, legacy.ID, string(snap), legacy.PollSeq); err != nil || !ok {
 		t.Fatalf("seed legacy snapshot: ok=%v err=%v", ok, err)
@@ -630,15 +631,16 @@ func TestRefreshJira_UpgradedRowsLearnTheirIDs(t *testing.T) {
 }
 
 // TestRefreshJira_DiscoveryLearnsAClosedRowsID: discovery reaching an issue
-// whose closed entity predates ids reopens that entity and stamps the id on it
-// rather than creating a second one.
+// whose closed entity the SQLite migration carried over without an id reopens
+// that entity and stamps the id on it rather than creating a second one.
 func TestRefreshJira_DiscoveryLearnsAClosedRowsID(t *testing.T) {
 	is := &fakeJiraIssue{ID: "10061", Keys: []string{"ENG-61"}, ProjectID: "100", Status: "To Do", Summary: "Back", Updated: "2026-10-01T10:00:00.000+0000"}
 	fx := newJiraIdentityFixture(t, is)
-	closed, _, err := fx.stores.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, jiraSite, "ENG-61", "", fakeENG, "Back", "")
+	closed, _, err := fx.stores.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, jiraSite, "ENG-61", "10061", fakeENG, "Back", "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	dbseed.ForgetIssueID(t, fx.db, closed.ID)
 	if _, err := fx.stores.Entities.MarkClosed(context.Background(), runmode.LocalDefaultOrgID, closed.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -696,9 +698,9 @@ func TestRefreshJira_AnUnresolvedProjectRowIsNoMove(t *testing.T) {
 	fx := newJiraIdentityFixture(t, eng, ops)
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
-	unresolved := func(key string) *domain.Entity {
+	unresolved := func(key, issueID string) *domain.Entity {
 		t.Helper()
-		e, _, err := fx.stores.Entities.FindOrCreateJiraSystem(ctx, org, jiraSite, key, "", domain.JiraProjectRef{ID: "unused-" + key, Key: "guess"}, "t", "")
+		e, _, err := fx.stores.Entities.FindOrCreateJiraSystem(ctx, org, jiraSite, key, issueID, domain.JiraProjectRef{ID: "unused-" + key, Key: "guess"}, "t", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -707,8 +709,8 @@ func TestRefreshJira_AnUnresolvedProjectRowIsNoMove(t *testing.T) {
 		}
 		return e
 	}
-	engEntity := unresolved("ENG-81")
-	opsEntity := unresolved("OPS-82")
+	engEntity := unresolved("ENG-81", "10081")
+	opsEntity := unresolved("OPS-82", "10082")
 	resolvedOPS := "jp-ops-resolved"
 	if _, err := fx.db.Exec(`INSERT INTO jira_projects (id, org_id, site, external_id, project_key) VALUES (?, ?, ?, '200', 'OPS')`, resolvedOPS, org, jiraSite); err != nil {
 		t.Fatal(err)

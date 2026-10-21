@@ -66,7 +66,7 @@ func TestMigrate_ProviderScopesGiveJiraEntitiesTheirProject(t *testing.T) {
 		}
 	}
 	refused("a jira insert with no project",
-		`INSERT INTO entities (id, source, scope, source_id, kind) VALUES ('e-bare', 'jira', '`+site+`', 'SKY-5', 'issue')`)
+		`INSERT INTO entities (id, source, scope, source_id, external_id, kind) VALUES ('e-bare', 'jira', '`+site+`', 'SKY-5', '10005', 'issue')`)
 	refused("clearing a jira row's project",
 		`UPDATE entities SET jira_project_id = NULL WHERE id = 'e-sky'`)
 	mustExec(t, database, `INSERT INTO entities (id, source, scope, source_id, kind) VALUES ('e-slack', 'slack', 'slack.com', 'C1/1.0', 'thread')`)
@@ -74,8 +74,8 @@ func TestMigrate_ProviderScopesGiveJiraEntitiesTheirProject(t *testing.T) {
 		`UPDATE entities SET source = 'jira', scope = '`+site+`' WHERE id = 'e-slack'`)
 
 	mustExec(t, database, `PRAGMA foreign_keys = on`)
-	if _, err := database.Exec(`INSERT INTO entities (id, source, scope, source_id, kind, jira_project_id)
-		VALUES ('e-ghost', 'jira', ?, 'SKY-6', 'issue', 'no-such-project')`, site); err == nil {
+	if _, err := database.Exec(`INSERT INTO entities (id, source, scope, source_id, external_id, kind, jira_project_id)
+		VALUES ('e-ghost', 'jira', ?, 'SKY-6', '10006', 'issue', 'no-such-project')`, site); err == nil {
 		t.Error("a jira insert naming a registry row that does not exist succeeded; the foreign key should refuse it")
 	}
 }

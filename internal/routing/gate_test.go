@@ -327,7 +327,7 @@ func TestJiraGate_DisjointProjects_DropsUntrackingTeam(t *testing.T) {
 	setJiraHost(t, dbh)
 	seedJiraUserOnTeam(t, dbh, teamA, "acct-aidan", "aidan")
 
-	entity, _, err := st.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, jiraTestHost, "SKY-1", "", dbseed.JiraIssueProject("SKY-1"), "An issue", "https://example.com/SKY-1")
+	entity, _, err := st.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, jiraTestHost, "SKY-1", dbseed.JiraIssueID("SKY-1"), dbseed.JiraIssueProject("SKY-1"), "An issue", "https://example.com/SKY-1")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}

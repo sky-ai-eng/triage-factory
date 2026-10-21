@@ -290,15 +290,15 @@ func TestEntityStore_Postgres_ListActiveJiraTeamScoped(t *testing.T) {
 	_ = otherOwner
 	seedPgJiraRule(t, h, otherTeam, "CCC")
 
-	inA, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "AAA-1", "", dbseed.JiraIssueProject("AAA-1"), "A", "")
+	inA, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "AAA-1", dbseed.JiraIssueID("AAA-1"), dbseed.JiraIssueProject("AAA-1"), "A", "")
 	if err != nil {
 		t.Fatalf("seed AAA-1: %v", err)
 	}
-	inB, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "BBB-2", "", dbseed.JiraIssueProject("BBB-2"), "B", "")
+	inB, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "BBB-2", dbseed.JiraIssueID("BBB-2"), dbseed.JiraIssueProject("BBB-2"), "B", "")
 	if err != nil {
 		t.Fatalf("seed BBB-2: %v", err)
 	}
-	unattached, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "CCC-3", "", dbseed.JiraIssueProject("CCC-3"), "C", "")
+	unattached, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "CCC-3", dbseed.JiraIssueID("CCC-3"), dbseed.JiraIssueProject("CCC-3"), "C", "")
 	if err != nil {
 		t.Fatalf("seed CCC-3: %v", err)
 	}
@@ -372,11 +372,11 @@ func TestEntityStore_Postgres_ListActiveJiraTeamScoped_RLS(t *testing.T) {
 	seedPgJiraRule(t, h, teamB, "BBB")
 
 	admin := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	entA, _, err := admin.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "AAA-1", "", dbseed.JiraIssueProject("AAA-1"), "A", "")
+	entA, _, err := admin.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "AAA-1", dbseed.JiraIssueID("AAA-1"), dbseed.JiraIssueProject("AAA-1"), "A", "")
 	if err != nil {
 		t.Fatalf("seed AAA-1: %v", err)
 	}
-	entB, _, err := admin.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "BBB-2", "", dbseed.JiraIssueProject("BBB-2"), "B", "")
+	entB, _, err := admin.Entities.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "BBB-2", dbseed.JiraIssueID("BBB-2"), dbseed.JiraIssueProject("BBB-2"), "B", "")
 	if err != nil {
 		t.Fatalf("seed BBB-2: %v", err)
 	}

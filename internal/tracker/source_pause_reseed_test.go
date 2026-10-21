@@ -174,7 +174,7 @@ func TestRefreshJira_ReEnableAfterPauseEmitsNothing(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 
-	ent, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "SKY-9", "", dbseed.JiraIssueProject("SKY-9"), "Paused issue", "")
+	ent, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "SKY-9", "10009", dbseed.JiraIssueProject("SKY-9"), "Paused issue", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

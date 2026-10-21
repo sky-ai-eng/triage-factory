@@ -434,7 +434,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("MarkPolledSystem_advances_last_polled_at_and_nothing_else", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		if _, _, err := s.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "SKY-POLLED", "", TestJiraProject, "T", ""); err != nil {
+		if _, _, err := s.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "SKY-POLLED", "id-SKY-POLLED", TestJiraProject, "T", ""); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
 		if ok, err := s.UpdateSnapshotCASSystem(ctx, orgID, mustEntity(t, s, ctx, orgID, "jira", "SKY-POLLED").ID, `{"status":"To Do"}`, 0); err != nil || !ok {
@@ -471,7 +471,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("UpdateTitle_and_UpdateDescription_round_trip", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		ent, _, err := s.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "SKY-100", "", TestJiraProject, "Old Title", "")
+		ent, _, err := s.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "SKY-100", "id-SKY-100", TestJiraProject, "Old Title", "")
 		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
@@ -890,7 +890,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		s, orgID, _ := mk(t)
 
 		gh, _, _ := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#la-gh", "", "pr", "GH", "")
-		ji, _, _ := s.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "SKY-la-1", "", TestJiraProject, "JI", "")
+		ji, _, _ := s.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "SKY-la-1", "id-SKY-la-1", TestJiraProject, "JI", "")
 		ghClosed, _, _ := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#la-closed", "", "pr", "GC", "")
 		if _, err := s.MarkClosed(ctx, orgID, ghClosed.ID); err != nil {
 			t.Fatalf("close: %v", err)
@@ -923,7 +923,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		s, orgID, _ := mk(t)
 
 		gh, _, _ := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#clr-gh", "", "pr", "GH", "")
-		ji, _, _ := s.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "SKY-clr-1", "", TestJiraProject, "JI", "")
+		ji, _, _ := s.FindOrCreateJiraSystem(ctx, orgID, "https://jira.example.com", "SKY-clr-1", "id-SKY-clr-1", TestJiraProject, "JI", "")
 		closed, _, _ := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#clr-closed", "", "pr", "GC", "")
 		for _, e := range []*domain.Entity{gh, ji, closed} {
 			if ok, err := s.UpdateSnapshotCASSystem(ctx, orgID, e.ID, `{"number":7}`, e.PollSeq); err != nil || !ok {
@@ -973,7 +973,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			case "linear":
 				e, _, err = s.FindOrCreateLinearSystem(ctx, orgID, TestScope(source), sourceID, "uuid-"+sourceID, "team-tc", sourceID, "")
 			case "jira":
-				e, _, err = s.FindOrCreateJiraSystem(ctx, orgID, TestScope(source), sourceID, "", TestJiraProject, sourceID, "")
+				e, _, err = s.FindOrCreateJiraSystem(ctx, orgID, TestScope(source), sourceID, "id-"+sourceID, TestJiraProject, sourceID, "")
 			default:
 				e, _, err = s.FindOrCreate(ctx, orgID, source, TestScope(source), sourceID, "", "pr", sourceID, "")
 			}

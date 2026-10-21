@@ -66,6 +66,14 @@ import (
 // Every key-based method takes the scope: no entity is created, found or
 // renamed without one.
 //
+// A Jira or Linear row is created with its issue id, and no write takes it
+// away: the schema refuses both (a CHECK in Postgres, triggers in SQLite). A
+// GitHub stub created from a key alone has none until the poll reads its pull
+// request, and a Slack thread has none at all. The one Jira row without an id
+// is a local row the SQLite migration carried over from before the poller
+// recorded issue ids, which learns it from the first read that reaches it
+// (StampExternalIDSystem).
+//
 // # A Linear issue's team
 //
 // linear_team_id is the UUID of the Linear team a Linear issue sits in, the id
@@ -378,10 +386,13 @@ type EntityStore interface {
 	GetByExternalIDSystem(ctx context.Context, orgID, source, scope, externalID string) (*domain.Entity, error)
 
 	// StampExternalIDSystem fills a row's external_id where it is still NULL:
-	// the learning path for a row created before its provider id was known.
-	// Returns the row carrying externalID afterwards — a second stamp of the
-	// same id is the idempotent no-op and returns it too. Returns nil when the
-	// row already carries a different id (the guard declined: that row is a
+	// the learning path for a row created before its provider id was known —
+	// a GitHub stub created from a key alone, or a local Jira row the SQLite
+	// migration carried over from before the poller recorded issue ids. Every
+	// other Jira row, and every Linear row, is created with its id. Returns
+	// the row carrying externalID afterwards — a second stamp of the same id
+	// is the idempotent no-op and returns it too. Returns nil when the row
+	// already carries a different id (the guard declined: that row is a
 	// different object), sql.ErrNoRows when no row has entityID, and
 	// ErrEntityIdentityAmbiguous when another row in the scope already carries
 	// externalID. Admin pool.
@@ -507,10 +518,9 @@ type EntityStore interface {
 	// way JiraProjectStore.FindOrCreate gets it: by Jira's project id, else an
 	// unresolved row holding the project's key, which it resolves; else a new
 	// row. So an issue in a project no team tracks has a row to reference. A
-	// call missing the key or the project's id or key is refused
-	// (ValidateJiraEntityCreate) before anything is read; issueID may be empty,
-	// as on FindOrCreateSystem. A row found is
-	// returned as stored: its project moves with its snapshot writes, never
+	// call missing the key, the issue id, or the project's id or key is
+	// refused (ValidateJiraEntityCreate) before anything is read. A row found
+	// is returned as stored: its project moves with its snapshot writes, never
 	// through here. Admin pool: the tracker and the exec recording funnel
 	// create Jira rows with no JWT claims.
 	FindOrCreateJiraSystem(ctx context.Context, orgID, scope, key, issueID string, project domain.JiraProjectRef, title, url string) (*domain.Entity, bool, error)
@@ -809,12 +819,15 @@ type EntityStore interface {
 const DuplicateEntityMergedCloseReason = "duplicate_entity_merged"
 
 // ValidateJiraEntityCreate is FindOrCreateJiraSystem's argument check, shared
-// by both dialects: a Jira row is created with its key and its project's id
-// and key, and a call missing any of them is refused before anything is read.
-func ValidateJiraEntityCreate(key string, project domain.JiraProjectRef) error {
+// by both dialects: a Jira row is created with its key, its issue id and its
+// project's id and key, and a call missing any of them is refused before
+// anything is read.
+func ValidateJiraEntityCreate(key, issueID string, project domain.JiraProjectRef) error {
 	switch {
 	case key == "":
 		return errors.New("create jira entity: empty key")
+	case issueID == "":
+		return fmt.Errorf("create jira entity %s: empty issue id", key)
 	case project.ID == "" || project.Key == "":
 		return fmt.Errorf("%w: %s", ErrEntityJiraProjectRequired, key)
 	}

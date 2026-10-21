@@ -128,7 +128,7 @@ func seedUserJiraRule(t *testing.T, database *sql.DB, teamID, eventType string) 
 
 func jiraEntity(t *testing.T, database *sql.DB, sourceID string) string {
 	t.Helper()
-	e, _, err := sqlitestore.New(database).Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", sourceID, "", dbseed.JiraIssueProject(sourceID), "Jira issue", "https://example.com/"+sourceID)
+	e, _, err := sqlitestore.New(database).Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", sourceID, dbseed.JiraIssueID(sourceID), dbseed.JiraIssueProject(sourceID), "Jira issue", "https://example.com/"+sourceID)
 	if err != nil {
 		t.Fatalf("create jira entity: %v", err)
 	}

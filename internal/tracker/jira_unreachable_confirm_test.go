@@ -149,8 +149,8 @@ func TestRefreshJira_MissingButResolvableIssueIsNotRetired(t *testing.T) {
 	}
 }
 
-// An entity created before issue ids were recorded, whose issue moved before
-// it learned its id: the refresh reads it by key, and a key the issue has left
+// A local entity the SQLite migration carried over from before issue ids were
+// recorded, whose issue moved before it learned its id: the refresh reads it by key, and a key the issue has left
 // answers under the new one, so the entity is asked about on its first miss —
 // no grace — and learns its id and its current key from the answer.
 func TestRefreshJira_IdlessMovedIssueLearnsItsIDAndIsRenamed(t *testing.T) {
@@ -163,10 +163,11 @@ func TestRefreshJira_IdlessMovedIssueLearnsItsIDAndIsRenamed(t *testing.T) {
 	const site = "https://jira.example.com"
 	// FindOrCreate stamps last_polled_at at creation: this is the entity's
 	// first miss.
-	old, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, site, "OLD-7", "", dbseed.JiraIssueProject("OLD-7"), "History stays here", site+"/browse/OLD-7")
+	old, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, site, "OLD-7", "10007", dbseed.JiraIssueProject("OLD-7"), "History stays here", site+"/browse/OLD-7")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
+	dbseed.ForgetIssueID(t, database, old.ID)
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
@@ -191,9 +192,10 @@ func TestRefreshJira_IdlessMovedIssueLearnsItsIDAndIsRenamed(t *testing.T) {
 	}
 }
 
-// One issue left under two rows by a move nothing followed: the older row,
-// under the key the issue left, and a newer one discovery created under its
-// current key, carrying the id. When the older row learns the id, the two are
+// One issue left under two rows by a move nothing followed: the older row, a
+// local row the SQLite migration carried over without an id, under the key the
+// issue left, and a newer one discovery created under its current key,
+// carrying the id. When the older row learns the id, the two are
 // merged, and the older row survives with the newer one's live state.
 func TestRefreshJira_LegacyDuplicatePairMergesIntoTheOlderRow(t *testing.T) {
 	srv, _ := jiraUnreachableFixture(t, http.StatusOK,
@@ -203,10 +205,11 @@ func TestRefreshJira_LegacyDuplicatePairMergesIntoTheOlderRow(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 	const site = "https://jira.example.com"
-	old, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, site, "OLD-9", "", dbseed.JiraIssueProject("OLD-9"), "old", "")
+	old, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, site, "OLD-9", "10009", dbseed.JiraIssueProject("OLD-9"), "old", "")
 	if err != nil {
 		t.Fatalf("seed old: %v", err)
 	}
+	dbseed.ForgetIssueID(t, database, old.ID)
 	current, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, site, "NEW-9", "10009", dbseed.JiraIssueProject("NEW-9"), "current", "")
 	if err != nil {
 		t.Fatalf("seed current: %v", err)

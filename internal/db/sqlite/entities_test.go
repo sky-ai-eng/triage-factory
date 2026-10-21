@@ -58,11 +58,11 @@ func TestEntityStore_SQLite_ListActiveJiraTeamScoped(t *testing.T) {
 
 	// Two Jira entities (no jira_project_status_rules rows configured at
 	// all) plus a GitHub entity that must never appear in a Jira read.
-	jira1, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "AAA-1", "", dbseed.JiraIssueProject("AAA-1"), "One", "")
+	jira1, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "AAA-1", dbseed.JiraIssueID("AAA-1"), dbseed.JiraIssueProject("AAA-1"), "One", "")
 	if err != nil {
 		t.Fatalf("seed jira1: %v", err)
 	}
-	jira2, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "BBB-2", "", dbseed.JiraIssueProject("BBB-2"), "Two", "")
+	jira2, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, "https://jira.example.com", "BBB-2", dbseed.JiraIssueID("BBB-2"), dbseed.JiraIssueProject("BBB-2"), "Two", "")
 	if err != nil {
 		t.Fatalf("seed jira2: %v", err)
 	}

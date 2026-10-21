@@ -485,7 +485,11 @@ CREATE TABLE public.entities (
     -- change upstream (a move, a key rename), which is a rename of this row.
     source_id text NOT NULL,
     -- The provider's own id for the object, which does not change when the key
-    -- does. NULL is "not learned yet".
+    -- does: a pull request's GraphQL node id, a Jira issue's numeric id, a
+    -- Linear issue's UUID. Required for sources 'jira' and 'linear', whose
+    -- every create reads the issue that names it. NULL on a GitHub row is "not
+    -- learned yet": a stub created from a key alone learns it from the poll. A
+    -- Slack thread has none.
     external_id text,
     kind text NOT NULL,
     title text,
@@ -538,6 +542,7 @@ CREATE TABLE public.entities (
     CONSTRAINT entities_slack_channel_required CHECK (source <> 'slack' OR slack_channel_id IS NOT NULL),
     CONSTRAINT entities_repository_required CHECK (source <> 'github' OR repository_id IS NOT NULL),
     CONSTRAINT entities_jira_project_required CHECK (source <> 'jira' OR jira_project_id IS NOT NULL),
+    CONSTRAINT entities_external_id_required CHECK (source NOT IN ('jira', 'linear') OR COALESCE(external_id, '') <> ''),
     CONSTRAINT entities_linear_team_id_check CHECK (
         CASE WHEN source = 'linear' THEN COALESCE(linear_team_id, '') <> ''
              ELSE linear_team_id IS NULL END
