@@ -56,6 +56,7 @@ func TestEntityIdentity_Postgres(t *testing.T) {
 		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "identity")
 		seed := dbtest.EntityIdentitySeeder{
 			TeamID: teamID,
+			UserID: userID,
 			Task: func(t *testing.T, entityID, suffix string) string {
 				t.Helper()
 				const eventType = "linear:issue:assigned"

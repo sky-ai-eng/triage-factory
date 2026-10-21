@@ -69,10 +69,11 @@ import (
 // A Jira or Linear row is created with its issue id, and no write takes it
 // away: the schema refuses both (a CHECK in Postgres, triggers in SQLite). A
 // GitHub stub created from a key alone has none until the poll reads its pull
-// request, and a Slack thread has none at all. The one Jira row without an id
-// is a local row the SQLite migration carried over from before the poller
-// recorded issue ids, which learns it from the first read that reaches it
-// (StampExternalIDSystem).
+// request; when another row already carries the node id the read returns, the
+// stub is folded into that row (FoldStubEntitySystem). A Slack thread has none
+// at all. The one Jira row without an id is a local row the SQLite migration
+// carried over from before the poller recorded issue ids, which learns it from
+// the first read that reaches it (StampExternalIDSystem).
 //
 // # A Linear issue's team
 //
@@ -134,11 +135,13 @@ import (
 // CloseWithSnapshotCASSystem and StampOwningTeamIfUnsetSystem (compare-and-
 // swap guards whose bool already answers whether the write landed),
 // CloseTerminalSystem (a composition across entities and tasks that answers
-// with what it closed), and MergeDuplicateEntitiesSystem (a composition across
-// tables that answers with the surviving id). FindOrCreate, FindOrCreateSystem
-// and FindOrCreateLinearSystem already return the row, StampExternalIDSystem
-// returns the row it stamped, and RenameSystem is a composition across
-// entities, artifacts and the audit ledger that answers with what it moved.
+// with what it closed), MergeDuplicateEntitiesSystem (a composition across
+// tables that answers with the surviving id), and FoldStubEntitySystem (a
+// composition across tables whose surviving row is the caller's).
+// FindOrCreate, FindOrCreateSystem and FindOrCreateLinearSystem already
+// return the row, StampExternalIDSystem returns the row it stamped, and
+// RenameSystem is a composition across entities, artifacts and the audit
+// ledger that answers with what it moved.
 
 // Errors the identity writes refuse with. Both describe stored state a write
 // cannot be applied over without making a key or an id name two objects, so
@@ -188,6 +191,11 @@ var (
 	// project's registry row (jira_project_id), which every reader that
 	// scopes, gates or classifies an issue by its project reads.
 	ErrEntityJiraProjectRequired = errors.New("a jira entity is created with its project")
+
+	// ErrEntityNotStub refuses FoldStubEntitySystem a row that is not a stub:
+	// one holding a snapshot or a provider id, which is the row's own record
+	// of its object and which a fold would delete with it.
+	ErrEntityNotStub = errors.New("entity is not a stub")
 )
 
 // GitHubEntityRepoRef is the repository a GitHub entity keyed sourceID in
@@ -731,6 +739,42 @@ type EntityStore interface {
 	// answer is which row survived.
 	MergeDuplicateEntitiesSystem(ctx context.Context, orgID, entityID, otherID string) (survivorID string, err error)
 
+	// FoldStubEntitySystem folds a stub into the row it turned out to be. Its
+	// one caller is the GitHub tracker: a pull request stub, created from a
+	// key alone, resolves to a node id another row already carries, because
+	// the key spells a name of a renamed repository other than the one that
+	// row is stored under. The two rows are one pull request, and the stub is
+	// the one that holds nothing of its own about it.
+	//
+	// into survives as it is: its key, url, state, snapshot, title,
+	// description, external_id and poll_seq are left alone, so a poll cycle
+	// that read it before the fold still lands its snapshot CAS. In one
+	// transaction:
+	//
+	//   - where both rows hold an active task with the same (event_type,
+	//     dedup_key), the stub's is dismissed with close_reason
+	//     duplicate_entity_merged, and a blueprint still running under one of
+	//     its unsettled conversations is marked cancel_requested;
+	//   - the stub's tasks, events, queue rows, pending firings, memory links
+	//     (at the stronger of the two roles) and entity links move onto into;
+	//   - into takes the stub's owning team and commissioning user where it
+	//     has none;
+	//   - the stub is deleted.
+	//
+	// Artifacts and the audit ledger are not touched: they name a pull
+	// request by its key and url, not by an entity, and a stub has no provider
+	// id for them to be keyed on.
+	//
+	// Refused, writing nothing: the two ids are the same, either row is
+	// missing (sql.ErrNoRows), the rows differ in source or scope, or the stub
+	// holds a snapshot or an external id (ErrEntityNotStub). The stub is
+	// judged under the transaction's lock, so a seed that lands after the
+	// caller read it refuses the fold rather than being deleted with the row.
+	//
+	// Exempt from the returned-row rule: a composition across tables, and the
+	// row that survives is the one the caller named.
+	FoldStubEntitySystem(ctx context.Context, orgID, stubID, intoID string) error
+
 	UpdateTitleSystem(ctx context.Context, orgID, id, title string) (domain.Entity, error)
 	UpdateDescriptionSystem(ctx context.Context, orgID, id, description string) (domain.Entity, error)
 
@@ -856,9 +900,8 @@ func ValidateLinearEntityCreate(identifier, issueID, linearTeamID string) error 
 // carrying different external ids (ErrEntityIdentityAmbiguous). Both dialects
 // decide through it, so they cannot disagree about which row survives.
 func DuplicateEntityPair(a, b domain.Entity) (survivor, loser domain.Entity, err error) {
-	if a.Source != b.Source || a.Scope != b.Scope {
-		return domain.Entity{}, domain.Entity{}, fmt.Errorf("merge entities: %s (%s in %q) and %s (%s in %q) are keyed in different namespaces",
-			a.ID, a.Source, a.Scope, b.ID, b.Source, b.Scope)
+	if err := sameEntityNamespace("merge", a, b); err != nil {
+		return domain.Entity{}, domain.Entity{}, err
 	}
 	if a.ExternalID != "" && b.ExternalID != "" && a.ExternalID != b.ExternalID {
 		return domain.Entity{}, domain.Entity{}, fmt.Errorf("%w: %s carries %s and %s carries %s",
@@ -868,6 +911,29 @@ func DuplicateEntityPair(a, b domain.Entity) (survivor, loser domain.Entity, err
 		return b, a, nil
 	}
 	return a, b, nil
+}
+
+// ValidateStubFold is FoldStubEntitySystem's check of the pair, shared by both
+// dialects: the two rows are keyed in one namespace, and the stub holds no
+// snapshot and no external id (ErrEntityNotStub).
+func ValidateStubFold(stub, into domain.Entity) error {
+	if err := sameEntityNamespace("fold", stub, into); err != nil {
+		return err
+	}
+	if stub.ExternalID != "" || (stub.SnapshotJSON != "" && stub.SnapshotJSON != "{}") {
+		return fmt.Errorf("%w: %s (%s) carries a snapshot or a provider id", ErrEntityNotStub, stub.ID, stub.SourceID)
+	}
+	return nil
+}
+
+// sameEntityNamespace refuses two rows keyed in different namespaces, which
+// cannot be one object whatever their keys spell.
+func sameEntityNamespace(op string, a, b domain.Entity) error {
+	if a.Source != b.Source || a.Scope != b.Scope {
+		return fmt.Errorf("%s entities: %s (%s in %q) and %s (%s in %q) are keyed in different namespaces",
+			op, a.ID, a.Source, a.Scope, b.ID, b.Source, b.Scope)
+	}
+	return nil
 }
 
 // DuplicateEntityMergedKeys names, for a pair DuplicateEntityPair returned,
