@@ -2444,6 +2444,38 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if !equalStringSlice(orgSlugs, []string{"acme/api", "acme/internal"}) {
 			t.Errorf("ListOrgReposWithTeamsSystem(ghe) = %v, want [acme/api acme/internal]", orgSlugs)
 		}
+		// Each entry is a registry row, named by its id and GitHub id: what a
+		// preflight matches a credential's listing on.
+		if _, err := stores.Repos.FillMissingExternalIDsSystem(ctx, ids.OrgID, []domain.RepoRef{{
+			Source: domain.RepoSourceGitHub, Host: TestOtherGitHubHost, Owner: "acme", Repo: "api", ExternalID: "77",
+		}}); err != nil {
+			t.Fatalf("FillMissingExternalIDsSystem: %v", err)
+		}
+		withTeams, err = stores.TeamGitHubRepos.ListOrgReposWithTeamsSystem(ctx, ids.OrgID, TestOtherGitHubHost)
+		if err != nil {
+			t.Fatalf("ListOrgReposWithTeamsSystem(ghe): %v", err)
+		}
+		for _, r := range withTeams {
+			row, err := stores.Repos.GetByRefSystem(ctx, ids.OrgID, domain.RepoRef{
+				Source: domain.RepoSourceGitHub, Host: TestOtherGitHubHost, Owner: r.Owner, Repo: r.Repo,
+			})
+			if err != nil || row == nil {
+				t.Fatalf("GetByRefSystem(%s/%s) = %v, %v", r.Owner, r.Repo, row, err)
+			}
+			if r.RepositoryID != row.ID {
+				t.Errorf("%s/%s RepositoryID = %q, want the registry row %q", r.Owner, r.Repo, r.RepositoryID, row.ID)
+			}
+			wantExternal := ""
+			if r.Repo == "api" {
+				wantExternal = "77"
+			}
+			if r.ExternalID != wantExternal {
+				t.Errorf("%s/%s ExternalID = %q, want %q", r.Owner, r.Repo, r.ExternalID, wantExternal)
+			}
+			if len(r.Teams) != 1 {
+				t.Errorf("%s/%s Teams = %v, want the one team tracking it", r.Owner, r.Repo, r.Teams)
+			}
+		}
 
 		// Untracking everything on github.com leaves the team's ghe tracking.
 		if err := TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, ids.OrgID, ids.TeamID, TestGitHubHost, nil); err != nil {

@@ -76,19 +76,25 @@ type githubAccessDiff struct {
 	DarkRepos []darkRepo `json:"dark_repos"`
 }
 
+// darkRepo is one tracked repository the target credential cannot reach.
+// repository_id is the registry row it is, and what tells two entries apart;
+// github_id is GitHub's id for it ("" while TF has not learned it), and repo is
+// its current name, for display.
 type darkRepo struct {
-	Repo  string   `json:"repo"`
-	Teams []string `json:"teams"`
+	RepositoryID string   `json:"repository_id"`
+	GitHubID     string   `json:"github_id"`
+	Repo         string   `json:"repo"`
+	Teams        []string `json:"teams"`
 }
 
-// buildAccessDiff partitions the org's tracked repos against the set of repos
-// the target credential can reach (lowercased "owner/repo" slugs). A tracked
-// repo present in the set is reachable; one absent is dark and carries its
-// owning teams so the admin knows who's affected.
-func buildAccessDiff(tracked []domain.TrackedRepoTeams, reachable map[string]bool) githubAccessDiff {
+// buildAccessDiff partitions the org's tracked repos against what the target
+// credential can reach. A tracked repo the set reaches is reachable; one it
+// does not is dark and carries its owning teams so the admin knows who's
+// affected.
+func buildAccessDiff(tracked []domain.TrackedRepoTeams, reachable reachableRepoSet) githubAccessDiff {
 	diff := githubAccessDiff{Tracked: len(tracked), DarkRepos: []darkRepo{}}
 	for _, t := range tracked {
-		if reachable[strings.ToLower(t.Slug())] {
+		if reachable.reaches(t) {
 			diff.Reachable++
 			continue
 		}
@@ -96,18 +102,46 @@ func buildAccessDiff(tracked []domain.TrackedRepoTeams, reachable map[string]boo
 		if teams == nil {
 			teams = []string{}
 		}
-		diff.DarkRepos = append(diff.DarkRepos, darkRepo{Repo: t.Slug(), Teams: teams})
+		diff.DarkRepos = append(diff.DarkRepos, darkRepo{
+			RepositoryID: t.RepositoryID, GitHubID: t.ExternalID, Repo: t.Slug(), Teams: teams,
+		})
 	}
 	return diff
 }
 
-// reachableSlugSet collapses a repo list into a set of lowercased "owner/repo"
-// slugs for the diff membership test.
-func reachableSlugSet(repos []ghclient.UserRepo) map[string]bool {
-	set := make(map[string]bool, len(repos))
+// reachableRepoSet is a target credential's repo listing as the diff's
+// membership test reads it: the GitHub ids the listing carries, the folded
+// names of every entry, and the folded names of the entries that carry no id.
+type reachableRepoSet struct {
+	ids         map[string]bool
+	names       map[string]bool
+	idlessNames map[string]bool
+}
+
+// reaches matches a tracked row against the listing by GitHub id when both
+// carry one, so a repository GitHub renamed before TF applied the rename is
+// still reachable and a repository GitHub gave a tracked name to does not stand
+// in for the tracked one. A side with no id is matched by folded name.
+func (s reachableRepoSet) reaches(t domain.TrackedRepoTeams) bool {
+	name := strings.ToLower(t.Slug())
+	if t.ExternalID == "" {
+		return s.names[name]
+	}
+	return s.ids[t.ExternalID] || s.idlessNames[name]
+}
+
+// reachableRepoSetOf collapses a repo listing into the diff's membership set.
+func reachableRepoSetOf(repos []ghclient.UserRepo) reachableRepoSet {
+	set := reachableRepoSet{ids: map[string]bool{}, names: map[string]bool{}, idlessNames: map[string]bool{}}
 	for _, r := range repos {
-		if r.FullName != "" {
-			set[strings.ToLower(r.FullName)] = true
+		name := strings.ToLower(r.FullName)
+		if id := r.ExternalID(); id != "" {
+			set.ids[id] = true
+		} else if name != "" {
+			set.idlessNames[name] = true
+		}
+		if name != "" {
+			set.names[name] = true
 		}
 	}
 	return set
@@ -451,7 +485,7 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 		}
 		// The PAT is now the org's GitHub identity (the App is torn down below) —
 		// persist its login so OrgIdentityFor resolves the PAT tier (TFAC-452).
-		if err := persistOrgGitHubIdentity(ctx, tx, orgID, ghUser.Login, ghUser.PrimaryEmail); err != nil {
+		if err := persistOrgGitHubIdentity(ctx, tx, orgID, ghUser.Login, ghUser.UserID(), ghUser.PrimaryEmail); err != nil {
 			return fmt.Errorf("persist org github identity: %w", err)
 		}
 		if err := tx.GitHubApps.DeleteForOrg(ctx, orgID); err != nil {
@@ -866,7 +900,7 @@ func (s *Server) handleGitHubAppCutoverPreflight(w http.ResponseWriter, r *http.
 		return
 	}
 
-	writeJSON(w, http.StatusOK, buildAccessDiff(tracked, reachableSlugSet(reachable)))
+	writeJSON(w, http.StatusOK, buildAccessDiff(tracked, reachableRepoSetOf(reachable)))
 }
 
 // appInstallationReposUnion returns the union of repos every installation of
@@ -884,7 +918,9 @@ func (s *Server) appInstallationReposUnion(ctx context.Context, orgID, base stri
 		return nil, err
 	}
 
-	byName := make(map[string]ghclient.UserRepo)
+	// Every installation's listing, concatenated. The diff reads it as a set,
+	// so a repository two listings both carry costs nothing.
+	out := []ghclient.UserRepo{}
 	for _, inst := range insts {
 		installID, perr := strconv.ParseInt(inst.InstallationID, 10, 64)
 		if perr != nil {
@@ -902,17 +938,7 @@ func (s *Server) appInstallationReposUnion(ctx context.Context, orgID, base stri
 			githubAppLog.Warn("cutover-preflight: list repos failed, skipping", "org", orgID, "account", inst.AccountLogin, "error", lerr)
 			continue
 		}
-		for _, repo := range repos {
-			if repo.FullName == "" {
-				continue
-			}
-			byName[strings.ToLower(repo.FullName)] = repo
-		}
-	}
-
-	out := make([]ghclient.UserRepo, 0, len(byName))
-	for _, repo := range byName {
-		out = append(out, repo)
+		out = append(out, repos...)
 	}
 	return out, nil
 }
@@ -981,7 +1007,7 @@ func (s *Server) handleGitHubAccessPATPreflight(w http.ResponseWriter, r *http.R
 	}
 
 	writeJSON(w, http.StatusOK, patPreflightResponse{
-		githubAccessDiff: buildAccessDiff(tracked, reachableSlugSet(repos)),
+		githubAccessDiff: buildAccessDiff(tracked, reachableRepoSetOf(repos)),
 		Login:            ghUser.Login,
 	})
 }

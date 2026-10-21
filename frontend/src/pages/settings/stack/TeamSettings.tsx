@@ -31,7 +31,7 @@ import ArchiveTeamModal from '../../../components/ArchiveTeamModal'
 import { fetchArchivePreview, type ArchivePreview } from '../../../lib/teamLifecycle'
 import { useTeams } from '../../../hooks/useTeams'
 import RepoPickerModal from '../../../components/RepoPickerModal'
-import { repoRefKey, type RepoRef } from '../../../lib/githubRepos'
+import { repoRefKeys, type RepoRef } from '../../../lib/githubRepos'
 import GitHubTeamGroup from '../GitHubTeamGroup'
 import JiraProjectRulesGroup from '../JiraProjectRulesGroup'
 import LinearTeamRulesGroup from '../LinearTeamRulesGroup'
@@ -139,12 +139,13 @@ const GRACE_MAX_FALLBACK = 149
 const clampToRange = (v: number, min: number, max: number): number =>
   Math.min(max, Math.max(min, v))
 
-// Compared by selection key, not registry id: a repository picked from the
-// reachable list has no registry id until the save registers it.
+// Compared on every id a ref carries (repoRefKeys), not the registry id alone:
+// a repository picked from the reachable list may have no registry id until the
+// save registers it.
 const sameRepos = (a: RepoRef[], b: RepoRef[]): boolean => {
   if (a.length !== b.length) return false
-  const sb = new Set(b.map(repoRefKey))
-  return a.every((x) => sb.has(repoRefKey(x)))
+  const sb = new Set(b.flatMap(repoRefKeys))
+  return a.every((x) => repoRefKeys(x).some((k) => sb.has(k)))
 }
 
 const groupKeys = (g: GitHubGroup[]): string[] =>

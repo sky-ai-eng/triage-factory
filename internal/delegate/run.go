@@ -27,6 +27,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
@@ -65,8 +66,8 @@ func errorResultSummary(result, subtype string) string {
 }
 
 // resolveCommitIdentity resolves the org's GitHub commit-author identity for
-// this run — and, on a manual run whose delegating human differs from the org
-// login, the Co-authored-by trailer crediting them (TFAC-452). This is the
+// this run — and, on a manual run whose delegating human is not the org's
+// GitHub account, the Co-authored-by trailer crediting them. This is the
 // single seam: one resolution feeds both run modes (local direct + sandbox) and
 // both the GitHub-PR and Jira-branch paths, via RunOptions.GitUserName/Email
 // (the author/committer) and the prepare-commit-msg hook env var (the trailer).
@@ -85,16 +86,30 @@ func (s *Spawner) resolveCommitIdentity(ctx context.Context, orgID, triggerType,
 	if s.ghResolver == nil {
 		return githooks.CommitIdentity{}
 	}
-	orgName, orgEmail, ok := s.ghResolver.OrgIdentityFor(ctx, orgID)
-	if !ok {
-		return githooks.CommitIdentity{}
+	// The org's account id rides with its identity where the resolver can say
+	// it; a resolver that can't leaves the comparison below to the login.
+	var org githooks.GitHubAccount
+	var orgEmail string
+	if ar, ok := s.ghResolver.(ghclient.OrgIdentityAccountResolver); ok {
+		identity, found := ar.OrgIdentityAccountFor(ctx, orgID)
+		if !found {
+			return githooks.CommitIdentity{}
+		}
+		org, orgEmail = githooks.GitHubAccount{Login: identity.Name, ID: identity.AccountID}, identity.Email
+	} else {
+		name, email, found := s.ghResolver.OrgIdentityFor(ctx, orgID)
+		if !found {
+			return githooks.CommitIdentity{}
+		}
+		org, orgEmail = githooks.GitHubAccount{Login: name}, email
 	}
 	// Co-author only on manual runs (creatorUserID is NULL for event runs).
-	// Resolve the delegating human's GitHub login on the org's current host;
-	// ResolveCommitIdentity then emits the trailer only when it differs from the
-	// org login (case-insensitive) — the N=1 same-PAT org gets none.
+	// Resolve the delegating human's GitHub identity on the org's current host;
+	// ResolveCommitIdentity then emits the trailer only when it is not the org's
+	// account — by numeric id when both are known, else by login — so the N=1
+	// same-PAT org gets none.
 	manual := triggerType == "manual"
-	var coLogin string
+	var coAuthor githooks.GitHubAccount
 	if manual && creatorUserID != "" {
 		if stores, set := s.getStores(); set {
 			// The login is host-scoped (user_github_identities is keyed by host), so
@@ -107,15 +122,15 @@ func (s *Spawner) resolveCommitIdentity(ctx context.Context, orgID, triggerType,
 			if host, herr := s.ghResolver.BaseURLFor(ctx, orgID); herr != nil {
 				delegateLog.Debug("resolve org github base for co-author lookup failed; manual conversation will omit the trailer",
 					"org", orgID, "error", herr)
-			} else if login, err := stores.Users.GetGitHubLoginSystem(ctx, creatorUserID, host); err != nil {
-				delegateLog.Debug("resolve co-author github login failed; manual conversation will omit the trailer",
+			} else if identity, err := stores.Users.GetGitHubIdentitySystem(ctx, creatorUserID, host); err != nil {
+				delegateLog.Debug("resolve co-author github identity failed; manual conversation will omit the trailer",
 					"creator", creatorUserID, "error", err)
-			} else {
-				coLogin = login
+			} else if identity != nil {
+				coAuthor = githooks.GitHubAccount{Login: identity.Login, ID: identity.GitHubUserID}
 			}
 		}
 	}
-	id, _ := githooks.ResolveCommitIdentity(orgName, orgEmail, manual, coLogin)
+	id, _ := githooks.ResolveCommitIdentity(org, orgEmail, manual, coAuthor)
 	return id
 }
 

@@ -26,6 +26,10 @@ func (c *countingResolver) ClientFor(ctx context.Context, orgID, target string) 
 	return c.fakeResolver.ClientFor(ctx, orgID, target)
 }
 
+func (c *countingResolver) ClientForInstallation(ctx context.Context, orgID string, inst domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
+	return c.ClientFor(ctx, orgID, inst.AccountLogin)
+}
+
 // unusableReconcile stands in for the grant reconcile on an App deleted on
 // GitHub: it records the reason on the registration, as the backfill does, and
 // returns the diagnosis.

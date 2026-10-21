@@ -470,6 +470,10 @@ func (r *orreryResolver) ClientFor(context.Context, string, string) (*ghclient.C
 	return r.client, nil
 }
 
+func (r *orreryResolver) ClientForInstallation(context.Context, string, domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
+	return r.client, nil
+}
+
 func (r *orreryResolver) ClientForRepo(context.Context, string, string, string) (*ghclient.Client, error) {
 	return r.client, nil
 }

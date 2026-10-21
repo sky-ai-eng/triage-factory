@@ -75,12 +75,12 @@ func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, 
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT r.owner, r.repo, t.name
+		SELECT r.id, COALESCE(r.external_id, ''), r.owner, r.repo, t.name
 		FROM team_github_repos g
 		JOIN teams t ON t.id = g.team_id
 		JOIN repositories r ON r.id = g.repository_id
 		WHERE r.host = ? AND r.retired_at IS NULL
-		ORDER BY r.owner ASC, r.repo ASC, t.name ASC
+		ORDER BY r.owner ASC, r.repo ASC, r.id ASC, t.name ASC
 	`, host)
 	if err != nil {
 		return nil, fmt.Errorf("read team_github_repos with teams: %w", err)
@@ -93,21 +93,23 @@ func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, 
 	return out, nil
 }
 
-// scanTrackedRepoTeams collapses (owner, repo, team_name) rows ordered by
-// (owner, repo, team_name) into one TrackedRepoTeams per repo with its team
-// list.
+// scanTrackedRepoTeams collapses (id, external_id, owner, repo, team_name) rows
+// ordered by registry row, then team name, into one TrackedRepoTeams per row
+// with its team list.
 func scanTrackedRepoTeams(rows *sql.Rows) ([]domain.TrackedRepoTeams, error) {
 	out := []domain.TrackedRepoTeams{}
 	for rows.Next() {
-		var owner, repo, team string
-		if err := rows.Scan(&owner, &repo, &team); err != nil {
+		var id, externalID, owner, repo, team string
+		if err := rows.Scan(&id, &externalID, &owner, &repo, &team); err != nil {
 			return nil, fmt.Errorf("scan team_github_repos with teams: %w", err)
 		}
-		if n := len(out); n > 0 && out[n-1].Owner == owner && out[n-1].Repo == repo {
+		if n := len(out); n > 0 && out[n-1].RepositoryID == id {
 			out[n-1].Teams = append(out[n-1].Teams, team)
 			continue
 		}
-		out = append(out, domain.TrackedRepoTeams{Owner: owner, Repo: repo, Teams: []string{team}})
+		out = append(out, domain.TrackedRepoTeams{
+			RepositoryID: id, ExternalID: externalID, Owner: owner, Repo: repo, Teams: []string{team},
+		})
 	}
 	return out, rows.Err()
 }

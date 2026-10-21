@@ -205,7 +205,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 		}
 		// The org credential's OWN login, so the resolver can stamp the org
 		// commit-author identity on delegated-agent commits.
-		if err := persistOrgGitHubIdentity(ctx, tx, orgID, ghUser.Login, ghUser.PrimaryEmail); err != nil {
+		if err := persistOrgGitHubIdentity(ctx, tx, orgID, ghUser.Login, ghUser.UserID(), ghUser.PrimaryEmail); err != nil {
 			return fmt.Errorf("persist org github identity: %w", err)
 		}
 		// The org is now in the PAT credential system. Written here, in the same

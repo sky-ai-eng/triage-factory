@@ -85,6 +85,10 @@ func (r *mintingResolver) ClientFor(ctx context.Context, orgID, target string) (
 	return ghclient.NewClient(r.url, tok.Value).WithOrg(orgID), nil
 }
 
+func (r *mintingResolver) ClientForInstallation(ctx context.Context, orgID string, inst domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
+	return r.ClientFor(ctx, orgID, inst.AccountLogin)
+}
+
 func (r *mintingResolver) ClientForRepo(ctx context.Context, orgID, owner, repo string) (*ghclient.Client, error) {
 	return r.ClientFor(ctx, orgID, owner)
 }

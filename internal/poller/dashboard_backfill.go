@@ -147,7 +147,7 @@ func (m *Manager) runDashboardBackfill(ctx context.Context, orgID, scope, login 
 	ran := false
 	var lastErr error
 	for _, inst := range installs {
-		client, cerr := m.resolver.ClientFor(ctx, orgID, inst.AccountLogin)
+		client, cerr := m.resolver.ClientForInstallation(ctx, orgID, inst)
 		if cerr != nil {
 			log.Printf("[dashboard-backfill] org %s: resolve client for installation %s: %v", orgID, inst.AccountLogin, cerr)
 			continue

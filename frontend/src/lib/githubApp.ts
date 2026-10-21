@@ -344,7 +344,12 @@ export function startGitHubAppRegistration(
 
 // A repo the target credential can't reach after a switch, with the teams that
 // track it — what the inform-only diff lists so an admin knows who's affected.
+// repository_id is the registry row it is, and what tells two entries apart;
+// github_id is GitHub's id for it ('' while TF has not learned it); repo is its
+// current name, for display.
 export interface DarkRepo {
+  repository_id: string
+  github_id: string
   repo: string
   teams: string[]
 }
@@ -559,11 +564,16 @@ export async function disconnectManagedInstallation(
 
 // A repository the App can reach that no team tracks: TF holds write access to
 // code nobody asked it to touch. The verb is on GitHub — narrow the grant on
-// the installation's settings page (settings_url), or uninstall.
+// the installation's settings page (settings_url), or uninstall. github_id is
+// GitHub's id for the repository ('' when the listing carried none), which with
+// installation_id tells one item from another; repository_id is the registry
+// row TF holds for it, '' when it holds none.
 export interface ReachWithoutPurposeItem {
   installation_id: string
   account_login: string
   settings_url: string
+  github_id: string
+  repository_id: string
   owner: string
   repo: string
   slug: string
@@ -576,8 +586,12 @@ export interface ReachWithoutPurposeItem {
 // silently unpolled. installation_id names the installation on the owner
 // account when there is one (by construction a 'selected' grant, since an
 // 'all' grant cannot drift and an unknown one is not reported), '' when no
-// bound installation covers that account at all.
+// bound installation covers that account at all. repository_id is the tracked
+// registry row the item is about; github_id is its GitHub id ('' while TF has
+// not learned it).
 export interface ScopeDriftItem {
+  repository_id: string
+  github_id: string
   owner: string
   repo: string
   slug: string

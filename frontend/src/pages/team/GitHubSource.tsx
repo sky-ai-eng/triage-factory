@@ -20,6 +20,7 @@ import {
   isRetired,
   refFromCandidate,
   repoRefKey,
+  repoRefKeys,
   repoRefSlug,
 } from '../../lib/githubRepos'
 import type { GitHubRepo, RepoRef } from '../../lib/githubRepos'
@@ -129,15 +130,15 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
   } => {
     if (!tracked) return { rows: [], refsByRow: new Map() }
     // A row is keyed by its repository's selection key, so a visible
-    // repository and the tracked entry that names it — by GitHub id, or by
-    // name for a tracked row TF has no GitHub id for — are one row.
-    const trackedByKey = new Map(tracked.map((r) => [repoRefKey(r), r]))
+    // repository and the tracked entry that names it — by registry id or
+    // GitHub id — are one row. A name alone pairs nothing a server id could.
+    const trackedByKey = new Map(tracked.flatMap((r) => repoRefKeys(r).map((k) => [k, r] as const)))
     const entries: { key: string; name: string; ref: RepoRef; on: boolean }[] = []
     const seen = new Set<string>()
     for (const c of visible ?? []) {
       const hit = candidateKeys(c).find((k) => trackedByKey.has(k))
       const ref = hit ? trackedByKey.get(hit)! : refFromCandidate(c)
-      const key = hit ?? repoRefKey(ref)
+      const key = repoRefKey(ref)
       if (seen.has(key)) continue
       seen.add(key)
       entries.push({ key, name: c.full_name, ref, on: !!hit })
@@ -147,8 +148,12 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
     // resolving, or a repository GitHub no longer serves at all (retired,
     // its name now another repository's). Dropping it would make the page lie
     // about what it watches.
-    for (const [key, ref] of trackedByKey) {
-      if (!seen.has(key)) entries.push({ key, name: repoRefSlug(ref), ref, on: true })
+    for (const ref of tracked) {
+      const key = repoRefKey(ref)
+      if (!seen.has(key)) {
+        seen.add(key)
+        entries.push({ key, name: repoRefSlug(ref), ref, on: true })
+      }
     }
     entries.sort((a, b) => Number(b.on) - Number(a.on) || a.name.localeCompare(b.name))
     return {

@@ -59,6 +59,9 @@ type GitHubNumericIDFactory func(t *testing.T) (GitHubNumericIDStores, GitHubNum
 //   - account_login is overwritten when GitHub reports a new one for a known
 //     account_id, because the login is what the UI renders and a rename has to
 //     reach it;
+//   - one live installation per account is held on account_id, so two accounts
+//     whose rows share a login both land, and on account_login only for a row
+//     with no id;
 //   - user_github_identities.github_user_id round-trips through
 //     UpsertGitHubIdentity under the same fill-in-never-erase rule, and the
 //     reverse (host, login) → user lookup resolves regardless of the
@@ -179,6 +182,49 @@ func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 		}
 	})
 
+	t.Run("OneLiveInstallationPerAccountIsKeyedOnTheID", func(t *testing.T) {
+		// The state a rename leaves: account 1234 renamed away from "acme" and
+		// its row has not caught up, and account 5678 took the handle and
+		// installed. Two accounts, so both installations land; a second live
+		// installation for one account id is refused whatever it is called.
+		stores, seed := mk(t)
+		org := seed.Org(t, seed.User(t))
+		if _, err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "456", "1234", "acme")); err != nil {
+			t.Fatalf("UpsertInstallation (renamed-away account): %v", err)
+		}
+		if _, err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "789", "5678", "acme")); err != nil {
+			t.Fatalf("UpsertInstallation (account that took the login): %v", err)
+		}
+		insts, err := stores.GitHubApps.ListInstallationsForOrgSystem(ctx, org)
+		if err != nil {
+			t.Fatalf("ListInstallationsForOrgSystem: %v", err)
+		}
+		if len(insts) != 2 {
+			t.Fatalf("ListInstallationsForOrgSystem = %d installations; want both accounts' 2", len(insts))
+		}
+		if _, err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "999", "1234", "acme-corp")); err == nil {
+			t.Error("a second live installation for account 1234 landed; want it refused")
+		}
+	})
+
+	t.Run("OneLiveInstallationPerLoginWhileTheIDIsUnknown", func(t *testing.T) {
+		// A row with no account id has only its login to be held to, so two
+		// id-less rows under one login are refused. A row that carries an id
+		// is held to the id instead, so it lands beside an id-less row under
+		// the same login.
+		stores, seed := mk(t)
+		org := seed.Org(t, seed.User(t))
+		if _, err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "456", "", "acme")); err != nil {
+			t.Fatalf("UpsertInstallation (no id): %v", err)
+		}
+		if _, err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "790", "", "acme")); err == nil {
+			t.Error("a second id-less live installation under login acme landed; want it refused")
+		}
+		if _, err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "791", "5678", "acme")); err != nil {
+			t.Errorf("UpsertInstallation (id-bearing row under an id-less row's login): %v", err)
+		}
+	})
+
 	t.Run("IdentityGitHubUserIDRoundTrips", func(t *testing.T) {
 		stores, seed := mk(t)
 		u := seed.User(t)
@@ -219,6 +265,14 @@ func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 		}
 		if got, err := stores.Users.GetGitHubIdentity(ctx, u, "https://elsewhere.example"); err != nil || got != nil {
 			t.Errorf("GetGitHubIdentity(other host) = %+v, %v; want nil — identity is host-scoped", got, err)
+		}
+		// The System twin answers the same, for the claims-free delegated run.
+		sys, err := stores.Users.GetGitHubIdentitySystem(ctx, u, host)
+		if err != nil || sys == nil || *sys != *got {
+			t.Errorf("GetGitHubIdentitySystem = %+v, %v; want %+v", sys, err, *got)
+		}
+		if sys, err := stores.Users.GetGitHubIdentitySystem(ctx, seed.User(t), host); err != nil || sys != nil {
+			t.Errorf("GetGitHubIdentitySystem(unlinked) = %+v, %v; want nil, nil", sys, err)
 		}
 	})
 

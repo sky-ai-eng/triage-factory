@@ -589,6 +589,70 @@ func TestMigrate_InstallationsKeyedByHost(t *testing.T) {
 	}
 }
 
+// One live installation per account is held on the account id after the
+// migration, and on the login only for a row with no id. The old login key let
+// one account hold two live rows under two logins (a rename between an unseen
+// uninstall and the reinstall); the migration keeps the later install and
+// removes the earlier one with its reach and refresh marker, as an uninstall
+// would. Afterwards an account that took a login another account's row still
+// carries can install beside it.
+func TestMigrate_InstallationsKeyedByAccountID(t *testing.T) {
+	const (
+		org = runmode.LocalDefaultOrgID
+		dot = "https://github.com"
+	)
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	mustExec(t, database, `INSERT INTO org_github_app_installations
+	             (installation_id, org_id, account_type, account_id, account_login, github_host, installed_at)
+	         VALUES ('10', ?, 'Organization', '1234', 'acme', ?, '2026-01-01 00:00:00'),
+	                ('11', ?, 'Organization', '1234', 'acme-corp', ?, '2026-02-01 00:00:00')`, org, dot, org, dot)
+	mustExec(t, database, `INSERT INTO reachable_repositories (org_id, credential_class, installation_id, owner, repo)
+	         VALUES (?, 'byo_app', '10', 'acme', 'api'), (?, 'byo_app', '11', 'acme-corp', 'api')`, org, org)
+	mustExec(t, database, `INSERT INTO reachable_scopes (org_id, credential_class, scope)
+	         VALUES (?, 'byo_app', '10'), (?, 'byo_app', '11')`, org, org)
+
+	migrateProviderScopes(t, database)
+
+	if got := queryString(t, database, `SELECT group_concat(installation_id) FROM org_github_app_installations
+	                                     WHERE org_id = ? AND removed_at IS NULL`, org); got != "11" {
+		t.Errorf("live installations = %q; want the later install 11 alone", got)
+	}
+	if n := queryInt(t, database, `SELECT COUNT(*) FROM reachable_repositories WHERE installation_id = '10'`); n != 0 {
+		t.Errorf("reach rows of the superseded installation = %d; want none", n)
+	}
+	if n := queryInt(t, database, `SELECT COUNT(*) FROM reachable_scopes WHERE scope = '10'`); n != 0 {
+		t.Errorf("refresh markers of the superseded installation = %d; want none", n)
+	}
+	if n := queryInt(t, database, `SELECT COUNT(*) FROM reachable_repositories WHERE installation_id = '11'`); n != 1 {
+		t.Errorf("reach rows of the kept installation = %d; want its 1", n)
+	}
+
+	install := func(installationID, accountID, login string) error {
+		var id any
+		if accountID != "" {
+			id = accountID
+		}
+		_, err := database.Exec(`
+			INSERT INTO org_github_app_installations (installation_id, org_id, account_type, account_id, account_login, github_host)
+			VALUES (?, ?, 'Organization', ?, ?, ?)
+		`, installationID, org, id, login, dot)
+		return err
+	}
+	if err := install("12", "1234", "acme-renamed"); err == nil || !strings.Contains(err.Error(), "UNIQUE") {
+		t.Errorf("a second live installation for account 1234: err=%v, want a UNIQUE violation", err)
+	}
+	if err := install("13", "5678", "acme-corp"); err != nil {
+		t.Errorf("another account under a login a live row carries: %v", err)
+	}
+	if err := install("14", "", "initech"); err != nil {
+		t.Fatalf("an installation with no account id: %v", err)
+	}
+	if err := install("15", "", "initech"); err == nil || !strings.Contains(err.Error(), "UNIQUE") {
+		t.Errorf("a second id-less installation under one login: err=%v, want a UNIQUE violation", err)
+	}
+}
+
 // The migration takes 'completed' out of conversations.status. A verdict parks
 // the row `open`, and completed_at is what makes an `open` row concluded, so
 // the stamp has to survive the rewrite — and a row the old terminal write left

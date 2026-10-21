@@ -162,45 +162,49 @@ func Associated(ctx context.Context, baseURL, token string, installationID int64
 // walk can only ever return something GitHub already shows this person.
 //
 // Same discipline as Associated: the listing is not a source. The walk
-// short-circuits on the first account match, returns one id, and the caller
-// reads the installation itself under the App to learn anything about it. A
-// listing that ends without a match is ErrNotAssociated — the same answer
-// whether the account has no installation or the user cannot see it, and the
-// caller must keep them indistinguishable. Logins compare case-insensitively
-// because GitHub's do.
-func AssociatedByAccount(ctx context.Context, baseURL, token, login string) (int64, error) {
+// short-circuits on the first account match and returns the installation's id
+// with the numeric id of the account the listing matched (0 when it names
+// none), and the caller reads the installation itself under the App to learn
+// anything about it — the account id is only what that read has to agree
+// with. A listing that ends without a match is ErrNotAssociated — the same
+// answer whether the account has no installation or the user cannot see it,
+// and the caller must keep them indistinguishable. Logins compare
+// case-insensitively because GitHub's do; the login is the admin's input, and
+// this walk is where it is resolved to ids.
+func AssociatedByAccount(ctx context.Context, baseURL, token, login string) (installationID, accountID int64, err error) {
 	apiBase := ghbase.APIBase(baseURL)
 	next := apiBase + "/user/installations?per_page=100"
 	for pages := 0; next != ""; pages++ {
 		if pages >= maxInstallationPages {
-			return 0, fmt.Errorf("%w: the installations listing did not end within %d pages",
+			return 0, 0, fmt.Errorf("%w: the installations listing did not end within %d pages",
 				ErrUndetermined, maxInstallationPages)
 		}
 		body, link, err := get(ctx, next, token)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		var page struct {
 			Installations []struct {
 				ID      int64 `json:"id"`
 				Account struct {
+					ID    int64  `json:"id"`
 					Login string `json:"login"`
 				} `json:"account"`
 			} `json:"installations"`
 		}
 		if err := json.Unmarshal(body, &page); err != nil {
-			return 0, fmt.Errorf("%w: parse user installations: %w", ErrUndetermined, err)
+			return 0, 0, fmt.Errorf("%w: parse user installations: %w", ErrUndetermined, err)
 		}
 		for _, inst := range page.Installations {
 			if inst.ID > 0 && strings.EqualFold(inst.Account.Login, login) {
-				return inst.ID, nil
+				return inst.ID, inst.Account.ID, nil
 			}
 		}
 		if next, err = nextPage(apiBase, link); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 	}
-	return 0, ErrNotAssociated
+	return 0, 0, ErrNotAssociated
 }
 
 // AccountByLogin resolves a login to the account GitHub says it is — its type

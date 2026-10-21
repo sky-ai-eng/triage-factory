@@ -32,7 +32,7 @@ func newAgentStore(q, _ queryer) db.AgentStore { return &agentStore{q: q} }
 var _ db.AgentStore = (*agentStore)(nil)
 
 const sqliteAgentColumns = `id, display_name, default_model, default_autonomy_suitability,
-       github_pat_user_id, github_org_login, github_org_email, jira_service_account_id,
+       github_pat_user_id, github_org_login, github_org_user_id, github_org_email, jira_service_account_id,
        created_at, updated_at`
 
 func (s *agentStore) GetForOrgSystem(ctx context.Context, orgID string) (*domain.Agent, error) {
@@ -108,22 +108,24 @@ func scanUpdatedAgent(row *sql.Row) (domain.Agent, error) {
 	return a, err
 }
 
-func (s *agentStore) SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, login, email string) (domain.Agent, error) {
+func (s *agentStore) SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, login, githubUserID, email string) (domain.Agent, error) {
 	// login is a free-form GitHub login (e.g. "octocat" or "acme-bot[bot]"),
 	// not a UUID — no shape validation. The pair is all-or-nothing: either
-	// empty input clears both columns so no caller can persist a partial commit
-	// identity.
+	// empty input clears every column so no caller can persist a partial commit
+	// identity. The id is written as given, since it describes the account this
+	// write's login names and no other.
 	if login == "" || email == "" {
-		login, email = "", ""
+		login, githubUserID, email = "", "", ""
 	}
 	return scanUpdatedAgent(s.q.QueryRowContext(ctx, `
 		UPDATE agents
 		SET github_org_login = ?,
+		    github_org_user_id = ?,
 		    github_org_email = ?,
 		    updated_at = ?
 		WHERE org_id = ? AND id = ?
 		RETURNING `+sqliteAgentColumns,
-		nullString(login), nullString(email), time.Now().UTC(), orgID, agentID))
+		nullString(login), nullString(githubUserID), nullString(email), time.Now().UTC(), orgID, agentID))
 }
 
 // nullString returns NULL when s is empty so the column scans back as
@@ -137,12 +139,13 @@ func nullString(s string) any {
 
 func scanAgentRow(row *sql.Row) (domain.Agent, error) {
 	var a domain.Agent
-	var defaultModel, ghPATUser, ghOrgLogin, ghOrgEmail, jiraSvc sql.NullString
+	var defaultModel, ghPATUser, ghOrgLogin, ghOrgUserID, ghOrgEmail, jiraSvc sql.NullString
 	var defAutonomy sql.NullFloat64
 	if err := row.Scan(&a.ID, &a.DisplayName, &defaultModel, &defAutonomy,
-		&ghPATUser, &ghOrgLogin, &ghOrgEmail, &jiraSvc, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		&ghPATUser, &ghOrgLogin, &ghOrgUserID, &ghOrgEmail, &jiraSvc, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return a, err
 	}
+	a.GitHubOrgUserID = ghOrgUserID.String
 	a.DefaultModel = defaultModel.String
 	if defAutonomy.Valid {
 		v := defAutonomy.Float64

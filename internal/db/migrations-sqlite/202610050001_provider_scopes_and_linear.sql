@@ -8,12 +8,14 @@
 -- issue entity is written with its issue id, pull request, review and branch
 -- artifacts are keyed on ids rather than their repository's name, every
 -- artifact references the entity it is about and Jira artifacts keyed on an
--- issue key are keyed on the issue's id, Linear
--- becomes a tracked source, and seven smaller changes ride along: the org GitHub App's unusable state, the claim's source
+-- issue key are keyed on the issue's id, one live App installation per account
+-- is keyed on the account's id rather than its login, Linear
+-- becomes a tracked source, and nine smaller changes ride along: the org GitHub App's unusable state, the claim's source
 -- manifest, the retirement of the 'completed' conversation status, node ids on
 -- artifacts and audit-ledger rows, the table of rate-limit readings, the
--- principal a deployment-operator grant is bound to, and the removal of the
--- unused poller_state table.
+-- principal a deployment-operator grant is bound to, the removal of the
+-- unused poller_state table, and the GitHub account id on a pending bind and
+-- on the org PAT's identity.
 --
 -- NO TRANSACTION because rebuilding a table other tables reference needs
 -- foreign keys off, and PRAGMA foreign_keys is a no-op inside a transaction:
@@ -126,6 +128,20 @@ ALTER TABLE operators ADD COLUMN user_id TEXT REFERENCES users(id) ON DELETE CAS
 -- poller_state has no reader or writer. The tracker's snapshot-diff baseline is
 -- entities.snapshot_json.
 DROP TABLE poller_state;
+
+-- github_pending_binds.account_id: GitHub's numeric id for the account an
+-- install-leg record was minted for, which the installation GitHub returns has
+-- to be on. NULL on an authorize-leg record, which names the account only as
+-- the admin typed it, and on every record already stored. A record lives
+-- fifteen minutes, so none is backfilled; one without an id is held to its
+-- login.
+ALTER TABLE github_pending_binds ADD COLUMN account_id TEXT;
+
+-- agents.github_org_user_id: GitHub's numeric id for the account the org's PAT
+-- authenticates as, written with github_org_login on every PAT save. A run
+-- tells that account apart from the person who delegated it by this id. The
+-- PAT's next save fills it in on a stored row; until then the login decides.
+ALTER TABLE agents ADD COLUMN github_org_user_id TEXT;
 
 -- ===========================================================================
 -- 2. Linear
@@ -718,7 +734,11 @@ ALTER TABLE team_github_groups_new RENAME TO team_github_groups;
 --
 --   org_github_app_installations  github_host joins the primary key and the
 --       one-live-install-per-account key. The column has no DEFAULT: a row
---       names the host it was listed on, and nothing stands in for one.
+--       names the host it was listed on, and nothing stands in for one. The
+--       account key holds the account's numeric id rather than its login, and
+--       the login only for a row whose id is not known yet: a login moves with
+--       a rename, so the install of the account that takes a login another
+--       account gave up would collide with a row not caught up yet.
 --   reachable_repositories        every row carries its host. An App row's is
 --       its installation's, and the foreign key to the installation runs over
 --       (org_id, host, installation_id), so a row can only ever hang off the
@@ -858,9 +878,52 @@ ALTER TABLE org_github_app_installations_new RENAME TO org_github_app_installati
 ALTER TABLE reachable_repositories_new RENAME TO reachable_repositories;
 ALTER TABLE reachable_scopes_new RENAME TO reachable_scopes;
 
+-- The account key below is the account id, and the login key only allowed one
+-- live row per login, so one account can hold two live rows under two logins:
+-- it renamed between an uninstall TF never saw and its reinstall. The later
+-- install is the installation GitHub has. The earlier row is removed the way an
+-- uninstall removes it, with the reach and the refresh marker mirrored for it.
+CREATE TEMP TABLE superseded_installation AS
+SELECT o.org_id, o.github_host, o.installation_id
+  FROM org_github_app_installations o
+ WHERE o.removed_at IS NULL AND o.account_id IS NOT NULL
+   AND EXISTS (
+       SELECT 1 FROM org_github_app_installations n
+        WHERE n.org_id = o.org_id AND n.github_host = o.github_host
+          AND n.account_id = o.account_id AND n.removed_at IS NULL
+          AND (n.installed_at, n.installation_id) > (o.installed_at, o.installation_id));
+
+DELETE FROM reachable_repositories
+ WHERE EXISTS (
+       SELECT 1 FROM superseded_installation s
+        WHERE s.org_id = reachable_repositories.org_id
+          AND s.github_host = reachable_repositories.host
+          AND s.installation_id = reachable_repositories.installation_id);
+
+DELETE FROM reachable_scopes
+ WHERE credential_class <> 'pat'
+   AND EXISTS (
+       SELECT 1 FROM superseded_installation s
+        WHERE s.org_id = reachable_scopes.org_id
+          AND s.github_host = reachable_scopes.host
+          AND s.installation_id = reachable_scopes.scope);
+
+UPDATE org_github_app_installations
+   SET removed_at = CURRENT_TIMESTAMP
+ WHERE EXISTS (
+       SELECT 1 FROM superseded_installation s
+        WHERE s.org_id = org_github_app_installations.org_id
+          AND s.github_host = org_github_app_installations.github_host
+          AND s.installation_id = org_github_app_installations.installation_id);
+
+DROP TABLE superseded_installation;
+
 CREATE UNIQUE INDEX org_github_app_installations_active_account_key
+    ON org_github_app_installations (org_id, github_host, account_id)
+    WHERE removed_at IS NULL AND account_id IS NOT NULL;
+CREATE UNIQUE INDEX org_github_app_installations_active_login_key
     ON org_github_app_installations (org_id, github_host, account_login)
-    WHERE removed_at IS NULL;
+    WHERE removed_at IS NULL AND account_id IS NULL;
 CREATE UNIQUE INDEX org_github_app_installations_active_host_installation_key
     ON org_github_app_installations (github_host, installation_id)
     WHERE removed_at IS NULL;
@@ -875,6 +938,9 @@ CREATE UNIQUE INDEX reachable_repositories_pat_identity
     WHERE credential_class = 'pat';
 CREATE INDEX reachable_repositories_registry_join
     ON reachable_repositories (org_id, source, LOWER(owner), LOWER(repo));
+CREATE INDEX reachable_repositories_registry_external_join
+    ON reachable_repositories (org_id, source, host, external_id)
+    WHERE external_id IS NOT NULL;
 CREATE INDEX reachable_repositories_picker
     ON reachable_repositories (org_id, credential_class, LOWER(owner), LOWER(repo));
 

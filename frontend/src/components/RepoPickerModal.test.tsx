@@ -48,8 +48,9 @@ async function ping() {
 const listRepos = repos.listReachableRepos as unknown as ReturnType<typeof vi.fn>
 const refresh = repos.refreshReachableRepos as unknown as ReturnType<typeof vi.fn>
 
-function repo(fullName: string, githubId = `id-${fullName}`): GitHubRepo {
+function repo(fullName: string, githubId = `id-${fullName}`, repositoryId = ''): GitHubRepo {
   return {
+    repository_id: repositoryId,
     github_id: githubId,
     full_name: fullName,
     html_url: '',
@@ -282,10 +283,14 @@ describe('RepoPickerModal', () => {
   it('matches the tracked set by GitHub id and reports new picks without a registry id', async () => {
     // GitHub renamed acme/api to acme/platform-api after the team tracked it;
     // the tracked entry still reads under its old name, and must still show
-    // checked. acme/legacy has no GitHub id on file, so its name is all there
-    // is to match it by.
+    // checked. acme/legacy has no GitHub id on file, so the server paired the
+    // option with its registry row by name and the option carries that row.
     listRepos.mockResolvedValue(
-      page([repo('acme/platform-api', '11'), repo('acme/legacy', '12'), repo('acme/web', '13')]),
+      page([
+        repo('acme/platform-api', '11'),
+        repo('acme/legacy', '12', 'r-legacy'),
+        repo('acme/web', '13'),
+      ]),
     )
     const onSave = vi.fn()
     render(
@@ -353,6 +358,51 @@ describe('RepoPickerModal', () => {
     fireEvent.click(current)
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
     expect(onSave).toHaveBeenCalledWith([{ id: '', github_id: '21', owner: 'acme', repo: 'api' }])
+  })
+
+  it('pairs an option with a tracked entry by id, never by a shared name alone', async () => {
+    // The team tracks acme/api (registry row r-api, GitHub id 11) and still
+    // tracks a retired row once called acme/api that TF never learned a GitHub
+    // id for. The option acme/api carries r-api: it is checked, and unchecking
+    // it drops r-api alone. acme/web shares no id with anything tracked, so it
+    // starts unchecked whatever the names say.
+    listRepos.mockResolvedValue(
+      page([repo('acme/api', '11', 'r-api'), repo('acme/web', '13', 'r-web')]),
+    )
+    const onSave = vi.fn()
+    const retired = {
+      id: 'r-old',
+      github_id: '',
+      owner: 'acme',
+      repo: 'api',
+      retired_at: '2026-10-20T12:00:00Z',
+    }
+    render(
+      <RepoPickerModal
+        inline
+        selected={[{ id: 'r-api', github_id: '11', owner: 'acme', repo: 'api' }, retired]}
+        onSave={onSave}
+        onClose={vi.fn()}
+      />,
+    )
+    await act(async () => {
+      vi.advanceTimersByTime(300)
+    })
+    const rows = (await screen.findAllByText('acme/api')).map(
+      (el) => el.closest('button') as HTMLButtonElement,
+    )
+    expect(rows).toHaveLength(2)
+    const [old, current] = rows
+    expect(old.getAttribute('aria-checked')).toBe('true')
+    expect(current.getAttribute('aria-checked')).toBe('true')
+    const web = (await screen.findByText('acme/web')).closest('button') as HTMLButtonElement
+    expect(web.getAttribute('aria-checked')).toBe('false')
+
+    fireEvent.click(current)
+    expect(current.getAttribute('aria-checked')).toBe('false')
+    expect(old.getAttribute('aria-checked')).toBe('true')
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    expect(onSave).toHaveBeenCalledWith([retired])
   })
 
   it('leaves a retired repository out of a search its name does not match', async () => {

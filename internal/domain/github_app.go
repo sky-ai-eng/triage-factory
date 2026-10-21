@@ -208,6 +208,12 @@ type ReachableRepository struct {
 	// for every entry. "" when the source sent none, which is a supported state:
 	// the slug matches anyway.
 	ExternalID string
+	// RepositoryID is the live registry row TF holds for this repository, ""
+	// when it holds none. Reads resolve it and writers ignore it. The entry and
+	// the row are matched by GitHub id when both carry one, and by folded name
+	// only when either does not, so a row under this name with a different id
+	// is a different repository and is not this entry's.
+	RepositoryID string
 	// The display fields the repository picker renders, mirrored from the same
 	// repository objects the enumeration already returns.
 	Description string
@@ -239,8 +245,14 @@ func (r ReachableRepository) Slug() string { return r.Owner + "/" + r.Repo }
 // repository, or one whose width is not yet known — those cannot report drift
 // (see ReachableReposStore.ListScopeDriftSystem).
 type ScopeDriftRepository struct {
-	Owner          string
-	Repo           string
+	// RepositoryID is the tracked registry row the finding is about. It is what
+	// tells two findings apart; the name is for display.
+	RepositoryID string
+	Owner        string
+	Repo         string
+	// ExternalID is the row's GitHub repository id, "" while TF has not
+	// learned it.
+	ExternalID     string
 	InstallationID string
 }
 
@@ -338,11 +350,16 @@ type GitHubPendingBind struct {
 	// that found the account without the App.
 	Leg string
 	// AccountLogin is the account the admin named, the only place it is
-	// carried — never a URL. On the install leg it is what the installation
-	// GitHub returns has to be on.
+	// carried — never a URL.
 	AccountLogin string
-	CreatedAt    time.Time
-	ExpiresAt    time.Time
+	// AccountID is GitHub's numeric id for that account in its text form, once
+	// the ceremony has resolved one: an install-leg record carries it, and the
+	// installation GitHub returns has to be on that id. "" on an authorize-leg
+	// record, which names the account only as the admin typed it; a record
+	// with no id is held to AccountLogin instead.
+	AccountID string
+	CreatedAt time.Time
+	ExpiresAt time.Time
 	// ConsumedAt is when the callback spent this record, zero while it is
 	// unspent. Consumption is a conditional update rather than a read then a
 	// write, so two concurrent callbacks cannot both find it unspent.

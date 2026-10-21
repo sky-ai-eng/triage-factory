@@ -218,6 +218,10 @@ func (r repositoriesByIDResolver) ClientFor(context.Context, string, string) (*g
 	return ghclient.NewClient(r.url, ""), nil
 }
 
+func (r repositoriesByIDResolver) ClientForInstallation(context.Context, string, domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
+	return ghclient.NewClient(r.url, ""), nil
+}
+
 func (r repositoriesByIDResolver) ClientForRepo(context.Context, string, string, string) (*ghclient.Client, error) {
 	return ghclient.NewClient(r.url, ""), nil
 }

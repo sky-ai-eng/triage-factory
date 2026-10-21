@@ -19,12 +19,11 @@ const repoCoverageTTL = 5 * time.Minute
 // (orgID, host, owner/repo). The host is the GitHubHost the probe ran against:
 // a slug names a different repository on another deployment, so an answer
 // about one host's repository never vouches for another's. Within one org and
-// one host an account login maps to at most one active installation — the
-// mirror's partial unique on (org_id, github_host, account_login) WHERE
-// removed_at IS NULL makes it so, and installationFor chooses only among the
-// installations on the host it resolves for — which is what lets the
-// (host, owner/repo) key serve without the installation id. Note what that
-// rests on: a login is a renameable handle, so the key is stable only for as
+// one host an owner login resolves to at most one active installation:
+// installationFor chooses only among the installations on the host it resolves
+// for, and refuses a login that more than one of them answers to. That is what
+// lets the (host, owner/repo) key serve without the installation id. Note what
+// it rests on: a login is a renameable handle, so the key is stable only for as
 // long as the handle keeps pointing at the same account (see below).
 //
 // It caches the POSITIVE answer only — "this repo is in the grant." That choice

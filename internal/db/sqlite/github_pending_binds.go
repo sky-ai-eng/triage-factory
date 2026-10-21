@@ -29,14 +29,16 @@ var _ db.GitHubPendingBindStore = (*gitHubPendingBindStore)(nil)
 
 // sqlitePendingBindColumns is the one projection both statements return — the
 // insert's RETURNING and the consume's — so the two shapes cannot drift.
-const sqlitePendingBindColumns = `nonce_hash, org_id, user_id, leg, account_login, created_at, expires_at, consumed_at`
+const sqlitePendingBindColumns = `nonce_hash, org_id, user_id, leg, account_login, account_id, created_at, expires_at, consumed_at`
 
 func scanPendingBind(row interface{ Scan(...any) error }) (domain.GitHubPendingBind, error) {
 	var b domain.GitHubPendingBind
 	var consumed sql.NullTime
-	if err := row.Scan(&b.NonceHash, &b.OrgID, &b.UserID, &b.Leg, &b.AccountLogin, &b.CreatedAt, &b.ExpiresAt, &consumed); err != nil {
+	var accountID sql.NullString
+	if err := row.Scan(&b.NonceHash, &b.OrgID, &b.UserID, &b.Leg, &b.AccountLogin, &accountID, &b.CreatedAt, &b.ExpiresAt, &consumed); err != nil {
 		return domain.GitHubPendingBind{}, err
 	}
+	b.AccountID = accountID.String
 	if consumed.Valid {
 		b.ConsumedAt = consumed.Time.UTC()
 	}
@@ -51,10 +53,11 @@ func (s *gitHubPendingBindStore) CreateSystem(ctx context.Context, bind domain.G
 	// compares expires_at against another bound time.Time. One writer, one
 	// format, one zone.
 	row := s.q.QueryRowContext(ctx, `
-		INSERT INTO github_pending_binds (nonce_hash, org_id, user_id, leg, account_login, created_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO github_pending_binds (nonce_hash, org_id, user_id, leg, account_login, account_id, created_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING `+sqlitePendingBindColumns,
-		bind.NonceHash, bind.OrgID, bind.UserID, bind.Leg, bind.AccountLogin, bind.CreatedAt.UTC(), bind.ExpiresAt.UTC())
+		bind.NonceHash, bind.OrgID, bind.UserID, bind.Leg, bind.AccountLogin, nullString(bind.AccountID),
+		bind.CreatedAt.UTC(), bind.ExpiresAt.UTC())
 	stored, err := scanPendingBind(row)
 	if err != nil {
 		return domain.GitHubPendingBind{}, fmt.Errorf("insert github_pending_binds: %w", err)

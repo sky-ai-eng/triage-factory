@@ -80,12 +80,12 @@ func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, 
 	// team-membership-scoped). Org scope rides the teams join + the org_id
 	// filter — team_github_repos carries no org_id of its own to filter on.
 	rows, err := s.admin.QueryContext(ctx, `
-		SELECT r.owner, r.repo, t.name
+		SELECT r.id::text, COALESCE(r.external_id, ''), r.owner, r.repo, t.name
 		FROM team_github_repos g
 		JOIN teams t ON t.id = g.team_id
 		JOIN repositories r ON r.id = g.repository_id
 		WHERE t.org_id = $1 AND r.host = $2 AND r.retired_at IS NULL
-		ORDER BY r.owner ASC, r.repo ASC, t.name ASC
+		ORDER BY r.owner ASC, r.repo ASC, r.id ASC, t.name ASC
 	`, orgID, host)
 	if err != nil {
 		return nil, fmt.Errorf("read team_github_repos with teams: %w", err)
@@ -93,15 +93,17 @@ func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, 
 	defer rows.Close()
 	out := []domain.TrackedRepoTeams{}
 	for rows.Next() {
-		var owner, repo, team string
-		if err := rows.Scan(&owner, &repo, &team); err != nil {
+		var id, externalID, owner, repo, team string
+		if err := rows.Scan(&id, &externalID, &owner, &repo, &team); err != nil {
 			return nil, fmt.Errorf("scan team_github_repos with teams: %w", err)
 		}
-		if n := len(out); n > 0 && out[n-1].Owner == owner && out[n-1].Repo == repo {
+		if n := len(out); n > 0 && out[n-1].RepositoryID == id {
 			out[n-1].Teams = append(out[n-1].Teams, team)
 			continue
 		}
-		out = append(out, domain.TrackedRepoTeams{Owner: owner, Repo: repo, Teams: []string{team}})
+		out = append(out, domain.TrackedRepoTeams{
+			RepositoryID: id, ExternalID: externalID, Owner: owner, Repo: repo, Teams: []string{team},
+		})
 	}
 	return out, rows.Err()
 }

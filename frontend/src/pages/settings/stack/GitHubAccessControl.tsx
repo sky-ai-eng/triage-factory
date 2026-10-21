@@ -1239,7 +1239,7 @@ function AccessDiffScreen({
           <ul className="space-y-1">
             {dark.map((d) => (
               <li
-                key={d.repo}
+                key={d.repository_id}
                 className="flex items-center justify-between gap-3 rounded-xl border border-line-1 bg-raised px-3 py-2"
               >
                 <span className="text-ui text-ink-1">{d.repo}</span>

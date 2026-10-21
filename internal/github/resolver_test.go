@@ -1020,6 +1020,38 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 		assertIdentity(t, name, email, ok, "octocat", "octocat@example.com")
 	})
 
+	t.Run("the account id rides with the identity on both tiers", func(t *testing.T) {
+		// A caller telling the org's account from a person's compares ids: the
+		// bot user id on the App tier, the PAT owner's stored id on the PAT tier.
+		for _, tc := range []struct {
+			name   string
+			apps   *fakeApps
+			agents *fakeAgents
+			want   OrgIdentity
+		}{
+			{
+				name:   "App",
+				apps:   &fakeApps{app: &domain.OrgGitHubApp{OrgID: "org-1", Active: true, Slug: "acme-bot", BotUserID: 41898282}},
+				agents: &fakeAgents{},
+				want:   OrgIdentity{Name: "acme-bot[bot]", Email: "41898282+acme-bot[bot]@users.noreply.github.com", AccountID: "41898282"},
+			},
+			{
+				name:   "PAT",
+				apps:   &fakeApps{app: nil},
+				agents: &fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat", GitHubOrgUserID: "583231", GitHubOrgEmail: "octocat@example.com"}},
+				want:   OrgIdentity{Name: "octocat", Email: "octocat@example.com", AccountID: "583231"},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				r := newTestResolver(withPAT(), tc.apps, &fakeOrgs{base: "https://github.com"}, tc.agents, nil)
+				got, ok := r.(OrgIdentityAccountResolver).OrgIdentityAccountFor(context.Background(), "org-1")
+				if !ok || got != tc.want {
+					t.Errorf("OrgIdentityAccountFor = (%+v, %v), want (%+v, true)", got, ok, tc.want)
+				}
+			})
+		}
+	})
+
 	t.Run("stored login but PAT cleared yields ok=false", func(t *testing.T) {
 		// The regression this gate closes: a login persisted while the org had a
 		// PAT must NOT resurface once the PAT is gone (no App, empty secrets), or

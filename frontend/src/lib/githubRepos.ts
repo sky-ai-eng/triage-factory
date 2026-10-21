@@ -4,9 +4,14 @@ import { apiFetch, apiJSON } from './apiClient'
  *  mirrors for the picker specifically — not a passthrough of GitHub's
  *  repository object, which is what the old proxy list leaked. */
 export interface GitHubRepo {
-  /** GitHub's own id for the repository: what the option is registered by
-   *  (`registerRepository`) and matched against a team's tracked set. A rename
-   *  moves `full_name`, never this. */
+  /** The registry row TF holds for the repository, '' when it holds none. The
+   *  server matches it by GitHub id, and by name only when either side has no
+   *  id, so an option and a tracked entry with the same name and different
+   *  ids carry different rows. */
+  repository_id: string
+  /** GitHub's own id for the repository: what an option with no registry row
+   *  is registered by (`registerRepository`). A rename moves `full_name`,
+   *  never this. */
   github_id: string
   full_name: string
   html_url: string
@@ -91,8 +96,8 @@ export async function refreshReachableRepos(): Promise<void> {
  *  different candidate, with an id of its own.
  *
  *  A picker holds its selection in the same shape, which is why `id` may be
- *  '': a candidate picked from the reachable list has no registry row until
- *  `saveTeamRepos` registers it by `github_id`. */
+ *  '': a candidate picked from the reachable list that has no registry row
+ *  gets one when `saveTeamRepos` registers it by `github_id`. */
 export interface RepoRef {
   id: string
   github_id: string
@@ -106,24 +111,35 @@ export const isRetired = (r: RepoRef): boolean => !!r.retired_at
 
 export const repoRefSlug = (r: RepoRef): string => `${r.owner}/${r.repo}`
 
-/** The selection key for a ref: its GitHub id when it has one, its folded name
- *  otherwise — a tracked row TF never learned an id for. Display matching only;
- *  what a save sends is the registry id. */
-export const repoRefKey = (r: RepoRef): string =>
-  r.github_id ? `gh:${r.github_id}` : `name:${repoRefSlug(r).toLowerCase()}`
+/** The keys a ref answers to: its registry id and its GitHub id, whichever it
+ *  carries, and its folded name only when it carries neither. Two refs name one
+ *  repository when they share a key, so a name matches only between two refs
+ *  that have no id at all; a name shared with a ref that has one is not a
+ *  match, because GitHub may have given that name to another repository. */
+export const repoRefKeys = (r: RepoRef): string[] => {
+  const keys = [...(r.id ? [`id:${r.id}`] : []), ...(r.github_id ? [`gh:${r.github_id}`] : [])]
+  return keys.length > 0 ? keys : [`name:${repoRefSlug(r).toLowerCase()}`]
+}
 
-/** The keys a candidate answers to: its GitHub id, and its folded name for a
- *  selected ref that carries no GitHub id. */
-export const candidateKeys = (c: GitHubRepo): string[] => [
-  ...(c.github_id ? [`gh:${c.github_id}`] : []),
-  `name:${c.full_name.toLowerCase()}`,
-]
+/** The selection key for a ref: the first of its `repoRefKeys`. A selection is
+ *  held under it; what a save sends is the registry id. */
+export const repoRefKey = (r: RepoRef): string => repoRefKeys(r)[0]
 
-/** refFromCandidate is the selection entry for a candidate not yet registered. */
+/** Whether two refs name one repository. */
+export const sameRepoRef = (a: RepoRef, b: RepoRef): boolean => {
+  const keys = new Set(repoRefKeys(a))
+  return repoRefKeys(b).some((k) => keys.has(k))
+}
+
+/** The keys a candidate answers to: those of its selection entry. */
+export const candidateKeys = (c: GitHubRepo): string[] => repoRefKeys(refFromCandidate(c))
+
+/** refFromCandidate is the selection entry for a candidate: its registry row
+ *  when TF holds one, else '' until a save registers it. */
 export function refFromCandidate(c: GitHubRepo): RepoRef {
   const slash = c.full_name.indexOf('/')
   return {
-    id: '',
+    id: c.repository_id ?? '',
     github_id: c.github_id,
     owner: c.full_name.slice(0, slash),
     repo: c.full_name.slice(slash + 1),
