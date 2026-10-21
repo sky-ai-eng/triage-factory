@@ -135,14 +135,14 @@ type renameProfileStore struct {
 	renames []domain.RepoRef
 }
 
-func (s *renameProfileStore) ListIdentitiesSystem(_ context.Context, _, host string) ([]domain.RepoRef, error) {
+func (s *renameProfileStore) ListIdentitiesSystem(_ context.Context, _, host string) ([]domain.RepoIdentity, error) {
 	// The stored identities the observation is compared against: TF tracks
 	// octo/api under id 1296269, which is what makes the meta response's
 	// different name a rename rather than a new repository. They are on the
 	// host asked about, as the real store's rows are.
-	return []domain.RepoRef{
-		{Source: domain.RepoSourceGitHub, Host: host, Owner: "octo", Repo: "api", ExternalID: "1296269"},
-		{Source: domain.RepoSourceGitHub, Host: host, Owner: "octo", Repo: "web", ExternalID: "555"},
+	return []domain.RepoIdentity{
+		{RepoRef: domain.RepoRef{Source: domain.RepoSourceGitHub, Host: host, Owner: "octo", Repo: "api", ExternalID: "1296269"}},
+		{RepoRef: domain.RepoRef{Source: domain.RepoSourceGitHub, Host: host, Owner: "octo", Repo: "web", ExternalID: "555"}},
 	}, nil
 }
 
@@ -162,3 +162,80 @@ func keysOf(m map[string]domain.Repository) []string {
 }
 
 var _ db.RepositoryStore = (*renameProfileStore)(nil)
+
+// The same meta response can say the opposite of a rename: GitHub serves a
+// different id under the name a tracked row holds, because the repository
+// was deleted, or renamed away and the name reused. Profiling it would write a
+// stranger's metadata and id onto the row. The row is resolved by its own id
+// instead, and nothing is profiled for it this pass.
+func TestProfiler_ResolvesARowWhoseNameGitHubServesUnderAnotherID(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		byID        string // what GET /repositories/1296269 answers; "" is a 404
+		wantRetire  bool
+		wantRenamed string
+	}{
+		{name: "deleted and recreated", wantRetire: true},
+		{name: "renamed away and the name reused", byID: "octo/api-v1", wantRenamed: "octo/api-v1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.Contains(r.URL.Path, "/contents/"):
+					w.WriteHeader(http.StatusNotFound)
+				case strings.HasSuffix(r.URL.Path, "/repositories/1296269"):
+					if tc.byID == "" {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
+					_, _ = w.Write([]byte(`{"id":1296269,"full_name":"` + tc.byID + `"}`))
+				case strings.HasSuffix(r.URL.Path, "/repos/octo/api"):
+					// Not a redirect: the name exists, under a new repository.
+					_, _ = w.Write([]byte(`{"id":777,"full_name":"octo/api","default_branch":"main","clone_url":"https://x/octo/api.git"}`))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+
+			repos := &reassignedProfileStore{renameProfileStore: renameProfileStore{
+				fetchRepositoryStore: fetchRepositoryStore{names: []string{"octo/api"}},
+			}}
+			p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil, nil)
+			if err := p.Run(context.Background(), true); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			if len(repos.upsertedByID()) != 0 {
+				t.Errorf("profiled %v; the repository under the name is not the tracked one", keysOf(repos.upsertedByID()))
+			}
+			if got := len(repos.retires) == 1 && repos.retires[0].ExternalID == "1296269"; got != tc.wantRetire {
+				t.Errorf("retires = %+v, want a retire of 1296269: %v", repos.retires, tc.wantRetire)
+			}
+			if tc.wantRenamed != "" && (len(repos.renames) != 1 || repos.renames[0].Slug() != tc.wantRenamed || repos.renames[0].ExternalID != "1296269") {
+				t.Errorf("renames = %+v, want 1296269 to %s", repos.renames, tc.wantRenamed)
+			}
+			if tc.wantRenamed == "" && len(repos.renames) != 0 {
+				t.Errorf("renames = %+v, want none for a deleted repository", repos.renames)
+			}
+		})
+	}
+}
+
+// reassignedProfileStore stores octo/api under GitHub id 1296269 and records
+// retires.
+type reassignedProfileStore struct {
+	renameProfileStore
+	retires []domain.RepoRef
+}
+
+func (s *reassignedProfileStore) GetByRefSystem(_ context.Context, _ string, ref domain.RepoRef) (*domain.Repository, error) {
+	return &domain.Repository{ID: "repo-id-" + ref.Repo, Source: domain.RepoSourceGitHub, Host: ref.Host, Owner: ref.Owner, Repo: ref.Repo, ExternalID: "1296269"}, nil
+}
+
+func (s *reassignedProfileStore) RetireSystem(_ context.Context, _ string, held domain.RepoRef) (*domain.Repository, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.retires = append(s.retires, held)
+	return &domain.Repository{ID: "repo-id-" + held.Repo, Host: held.Host, Owner: held.Owner, Repo: held.Repo, ExternalID: held.ExternalID}, nil
+}

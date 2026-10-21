@@ -50,8 +50,8 @@ type Runtime interface {
 
 	// RepoSlugByExternalID returns the "owner/repo" of the registry row that
 	// carries GitHub's repository id externalID on the org's current GitHub
-	// host, or "" when no row carries it. It is how a name the registry does
-	// not answer to finds the row GitHub says it means.
+	// host, or "" when no row that holds its name carries it. It is how a name
+	// the registry does not answer to finds the row GitHub says it means.
 	RepoSlugByExternalID(ctx context.Context, externalID string) (string, error)
 
 	TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error)
@@ -443,7 +443,8 @@ func (r *directRuntime) GetRepo(ctx context.Context, slug string) (*domain.Repos
 // RepoSlugByExternalID scans the host's identified rows rather than reading
 // one by id: it is asked only for a name the registry does not hold, and an
 // org's repositories are few enough that the scan costs nothing a dedicated
-// read would save.
+// read would save. A retired row answers nothing: the name it is stored under
+// is another repository's now.
 func (r *directRuntime) RepoSlugByExternalID(ctx context.Context, externalID string) (string, error) {
 	if externalID == "" {
 		return "", nil
@@ -457,7 +458,7 @@ func (r *directRuntime) RepoSlugByExternalID(ctx context.Context, externalID str
 		return "", err
 	}
 	for _, ref := range refs {
-		if ref.ExternalID == externalID && ref.Source == domain.RepoSourceGitHub {
+		if ref.ExternalID == externalID && ref.Source == domain.RepoSourceGitHub && !ref.Retired {
 			return ref.Slug(), nil
 		}
 	}

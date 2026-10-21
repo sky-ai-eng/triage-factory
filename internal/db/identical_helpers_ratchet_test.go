@@ -117,7 +117,6 @@ var identicalHelperRatchet = []string{
 	"scanTeamRow",
 	"scanTeamSettings",
 	"scanWrittenEntity",
-	"splitRepoSlug",
 	"taskLiveConversationSQL",
 	"taskMemoryAttemptSQL",
 	"taskMemoryOwedRowSQL",

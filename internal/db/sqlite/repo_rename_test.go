@@ -18,48 +18,56 @@ import (
 // SQLite backend. Each subtest gets a fresh in-memory DB so the rewrite's
 // all-tables-or-none assertions read a state only that subtest produced.
 func TestRepoRename_SQLite(t *testing.T) {
-	dbtest.RunRepoRenameConformance(t, func(t *testing.T) (db.Stores, string, dbtest.RepoRenameSeeder) {
-		t.Helper()
-		conn := openSQLiteForTest(t)
-		stores := sqlitestore.New(conn)
-		seed := dbtest.RepoRenameSeeder{
-			TeamID: runmode.LocalDefaultTeamID,
-			Conversation: func(t *testing.T, suffix string) string {
-				t.Helper()
-				id := uuid.New().String()
-				dbtest.SeedConversation(t, conn, domain.Conversation{ID: id, Model: "m"})
-				return id
-			},
-			Task: func(t *testing.T, entityID, suffix string) string {
-				t.Helper()
-				return seedSQLiteTaskForRename(t, conn, entityID, suffix)
-			},
-			CountTasks: func(t *testing.T) int {
-				t.Helper()
-				var n int
-				if err := conn.QueryRow(`SELECT COUNT(*) FROM tasks`).Scan(&n); err != nil {
-					t.Fatalf("count tasks: %v", err)
-				}
-				return n
-			},
-			ReferenceRows: func(t *testing.T) []string {
-				t.Helper()
-				return sqliteCategoryAReferences(t, conn)
-			},
-			RawActionURL: func(t *testing.T, dedupKey string) (string, string) {
-				t.Helper()
-				var u, cur string
-				if err := conn.QueryRow(
-					`SELECT COALESCE(url, ''), COALESCE(current_url, '') FROM external_actions WHERE dedup_key = ?`,
-					dedupKey,
-				).Scan(&u, &cur); err != nil {
-					t.Fatalf("read action row %q: %v", dedupKey, err)
-				}
-				return u, cur
-			},
-		}
-		return stores, runmode.LocalDefaultOrgID, seed
-	})
+	dbtest.RunRepoRenameConformance(t, sqliteRepoRenameFactory)
+}
+
+// TestRepoRetire_SQLite runs the retire conformance suite on the rename
+// suite's fixtures.
+func TestRepoRetire_SQLite(t *testing.T) {
+	dbtest.RunRepoRetireConformance(t, sqliteRepoRenameFactory)
+}
+
+func sqliteRepoRenameFactory(t *testing.T) (db.Stores, string, dbtest.RepoRenameSeeder) {
+	t.Helper()
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	seed := dbtest.RepoRenameSeeder{
+		TeamID: runmode.LocalDefaultTeamID,
+		Conversation: func(t *testing.T, suffix string) string {
+			t.Helper()
+			id := uuid.New().String()
+			dbtest.SeedConversation(t, conn, domain.Conversation{ID: id, Model: "m"})
+			return id
+		},
+		Task: func(t *testing.T, entityID, suffix string) string {
+			t.Helper()
+			return seedSQLiteTaskForRename(t, conn, entityID, suffix)
+		},
+		CountTasks: func(t *testing.T) int {
+			t.Helper()
+			var n int
+			if err := conn.QueryRow(`SELECT COUNT(*) FROM tasks`).Scan(&n); err != nil {
+				t.Fatalf("count tasks: %v", err)
+			}
+			return n
+		},
+		ReferenceRows: func(t *testing.T) []string {
+			t.Helper()
+			return sqliteCategoryAReferences(t, conn)
+		},
+		RawActionURL: func(t *testing.T, dedupKey string) (string, string) {
+			t.Helper()
+			var u, cur string
+			if err := conn.QueryRow(
+				`SELECT COALESCE(url, ''), COALESCE(current_url, '') FROM external_actions WHERE dedup_key = ?`,
+				dedupKey,
+			).Scan(&u, &cur); err != nil {
+				t.Fatalf("read action row %q: %v", dedupKey, err)
+			}
+			return u, cur
+		},
+	}
+	return stores, runmode.LocalDefaultOrgID, seed
 }
 
 // seedSQLiteTaskForRename attaches a task to an existing entity, minting the

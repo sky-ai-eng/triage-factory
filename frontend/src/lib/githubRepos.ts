@@ -84,7 +84,11 @@ export async function refreshReachableRepos(): Promise<void> {
 /** A repository as a team's tracked set names it. GET and PUT
  *  /api/teams/{id}/github-repos answer in this shape: `id` is the registry row
  *  id the PUT takes, `github_id` is GitHub's id ('' while TF has not learned
- *  it), and `owner`/`repo` are the current name, for display.
+ *  it), `owner`/`repo` are the current name, for display, and `retired_at` is
+ *  set when GitHub no longer serves the repository to the workspace and has
+ *  given its name to another one. A retired row stays in the set until a save
+ *  drops it, and nothing polls it; the repository now under the name is a
+ *  different candidate, with an id of its own.
  *
  *  A picker holds its selection in the same shape, which is why `id` may be
  *  '': a candidate picked from the reachable list has no registry row until
@@ -94,7 +98,11 @@ export interface RepoRef {
   github_id: string
   owner: string
   repo: string
+  retired_at?: string | null
 }
+
+/** Whether a tracked ref names a repository GitHub no longer serves. */
+export const isRetired = (r: RepoRef): boolean => !!r.retired_at
 
 export const repoRefSlug = (r: RepoRef): string => `${r.owner}/${r.repo}`
 

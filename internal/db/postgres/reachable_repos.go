@@ -160,7 +160,7 @@ func (s *reachableReposStore) ListReachWithoutPurposeSystem(ctx context.Context,
 		         JOIN teams t ON t.id = g.team_id
 		         JOIN repositories reg ON reg.id = g.repository_id
 		        WHERE t.org_id = r.org_id
-		          AND reg.host = i.github_host
+		          AND reg.host = i.github_host AND reg.retired_at IS NULL
 		          AND lower(reg.owner) = lower(r.owner)
 		          AND lower(reg.repo) = lower(r.repo))`
 	args := []any{orgID, string(class), host}
@@ -230,7 +230,7 @@ func (s *reachableReposStore) ListScopeDriftSystem(ctx context.Context, orgID, h
 		    ON cov.org_id = $1 AND cov.removed_at IS NULL AND cov.github_host = $4
 		   AND lower(cov.account_login) = lower(reg.owner)
 		 WHERE t.org_id = $1
-		   AND reg.host = $4
+		   AND reg.host = $4 AND reg.retired_at IS NULL
 		   AND EXISTS (
 		       SELECT 1 FROM reachable_scopes sc
 		        WHERE sc.org_id = $1 AND sc.credential_class = $2 AND sc.host = $4)

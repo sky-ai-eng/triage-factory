@@ -105,8 +105,12 @@ type renamePollStore struct {
 	configuredErr error
 }
 
-func (s *renamePollStore) ListIdentitiesSystem(context.Context, string, string) ([]domain.RepoRef, error) {
-	return s.stored, nil
+func (s *renamePollStore) ListIdentitiesSystem(context.Context, string, string) ([]domain.RepoIdentity, error) {
+	out := make([]domain.RepoIdentity, len(s.stored))
+	for i, ref := range s.stored {
+		out[i] = domain.RepoIdentity{RepoRef: ref}
+	}
+	return out, nil
 }
 
 func (s *renamePollStore) RenameSystem(_ context.Context, _ string, observed domain.RepoRef) (domain.RepoRenameOutcome, error) {

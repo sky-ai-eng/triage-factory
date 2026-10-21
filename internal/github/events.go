@@ -289,6 +289,27 @@ func (c *Client) GetRepoMeta(ctx context.Context, owner, repo string) (*RepoMeta
 	return &meta, nil
 }
 
+// GetRepoByID reads a repository by GitHub's id for it, GET
+// /repositories/{id}, which answers under the repository's current name
+// however it has been renamed or transferred since. It is the read that tells
+// what became of a repository whose name GitHub has given to another one. A
+// 404 means the repository is deleted or this credential cannot see it, and
+// comes back as the *HTTPError every non-2xx does (IsHTTP404).
+func (c *Client) GetRepoByID(ctx context.Context, id string) (*RepoMeta, error) {
+	if n, err := strconv.ParseUint(id, 10, 64); err != nil || n == 0 {
+		return nil, fmt.Errorf("get repository by id: %q is not a GitHub repository id", id)
+	}
+	data, err := c.Get(ctx, "/repositories/"+id)
+	if err != nil {
+		return nil, err
+	}
+	var meta RepoMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, fmt.Errorf("parse repository %s: %w", id, err)
+	}
+	return &meta, nil
+}
+
 // Branch is a branch returned by the GitHub branches API.
 type Branch struct {
 	Name string `json:"name"`

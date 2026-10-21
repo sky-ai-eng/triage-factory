@@ -611,11 +611,19 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 
 		// The same conclusion from the detection half, which is what the
-		// pollers actually run before they ever call the store.
-		stored := []domain.RepoRef{{Host: TestGitHubHost, Source: "github", Owner: "octo", Repo: "api", ExternalID: fx.externalID}}
+		// pollers actually run before they ever call the store. What the
+		// observation does report is that the stored row's name went to
+		// another id, which is resolved by the stored row's own id.
+		stored, err := s.Repos.ListIdentitiesSystem(ctx, orgID, TestGitHubHost)
+		if err != nil {
+			t.Fatalf("ListIdentitiesSystem: %v", err)
+		}
 		observed := []domain.RepoRef{{Host: TestGitHubHost, Source: "github", Owner: "octo", Repo: "api", ExternalID: "999000111"}}
 		if got := domain.DetectRepoRenames(stored, observed); len(got) != 0 {
 			t.Errorf("DetectRepoRenames = %+v, want none", got)
+		}
+		if got := domain.DetectReassignedRepoNames(stored, observed); len(got) != 1 || got[0].ExternalID != fx.externalID {
+			t.Errorf("DetectReassignedRepoNames = %+v, want the stored octo/api row", got)
 		}
 	})
 

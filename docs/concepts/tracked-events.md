@@ -793,6 +793,14 @@ repository as GitHub does now) lands on the existing entity, and `source_id`
 moves only with the repository rename. An entity an agent's touch created
 from a key alone learns its node id from the next poll.
 
+When GitHub gives a repository's name to a different repository (the old one
+was deleted, or renamed away and the name reused), TF asks GitHub for the old
+repository by its own id. An answer under another name is a rename. A 404
+retires the old registry row: its active entities close, and neither the row
+nor its entities answer to the name or the `owner/repo#N` keys any more. So
+the new repository's pull request #N gets an entity of its own rather than
+the old repository's #N, and the two never merge.
+
 The tracker stores these fields for each PR and diffs them between cycles:
 
 - `number`, `title`, `author`, `repo`, `head_repo`, `url`

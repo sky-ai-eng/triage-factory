@@ -254,6 +254,17 @@
   text-wrap: pretty;
 }
 
+/* The tag on a tracked repository GitHub no longer serves. */
+.sp-retired {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-ink-4);
+  border: 1px solid var(--color-line-1);
+  border-radius: 4px;
+  padding: 0 4px;
+  margin-left: 6px;
+}
+
 /* The chart is a ui component with its own stylesheet — see
    src/ui/sourcechart/. The page owns only where it sits. */
 .sp-left > .sc {

@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -369,6 +370,21 @@ func newMutablePATGitHub(t *testing.T, repos map[string]int64) *mutablePATGitHub
 		_ = json.NewEncoder(w).Encode(page)
 	})
 	mux.HandleFunc("/api/v3/repos/", func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
+	// A repository read by its id answers under its current name, and a
+	// deleted one — an id nothing is listed under any more — is a 404.
+	mux.HandleFunc("/api/v3/repositories/", func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/api/v3/repositories/"), 10, 64)
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		for slug, have := range g.repos {
+			if err == nil && have == id {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(ghclient.RepoMeta{ID: id, FullName: slug})
+				return
+			}
+		}
+		http.NotFound(w, r)
+	})
 	g.Server = httptest.NewServer(mux)
 	t.Cleanup(g.Close)
 	return g
@@ -601,7 +617,9 @@ func TestTeamRepos_ARowWithNoGitHubIDSurvivesARoundTrip(t *testing.T) {
 // TestRepoRegister pins POST /api/repos: the id is validated strictly, the
 // mirror supplies the name and refuses an id it does not list, and a
 // registration is idempotent — and resolves to the row TF holds when GitHub
-// has renamed the repository since.
+// has renamed the repository since. A name TF holds under another id is freed
+// by asking GitHub about that id: a deleted repository's row is retired, a
+// renamed one's is renamed, and the new repository gets a row of its own.
 func TestRepoRegister(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -641,13 +659,29 @@ func TestRepoRegister(t *testing.T) {
 		t.Errorf("registration after an unapplied rename = %s %s, want %s under its stored name", again.ID, again.Slug, web.ID)
 	}
 
-	// acme/api is deleted and a new repository takes the name: a name TF
-	// holds under another GitHub id is refused, not re-identified.
+	// acme/api is deleted and a new repository takes the name. The row TF
+	// holds for 41 is retired, never re-identified, and 43 is a row of its
+	// own.
 	gh.add("acme/api", 43)
 	refresh.refresh(t, runmode.LocalDefaultOrgID, true)
-	rec := registerByGitHubID(t, srv, "43")
-	if rec.Code != http.StatusConflict || firstErrorReason(t, rec) != httpx.ReasonConflict {
-		t.Errorf("registration of a name held by another id = %d %s, want 409 %s", rec.Code, rec.Body.String(), httpx.ReasonConflict)
+	recreated := registeredID(t, srv, "43")
+	if recreated.ID == api.ID || recreated.Slug != "acme/api" || recreated.GitHubID != "43" {
+		t.Errorf("registration of the recreated acme/api = %+v, want a new row carrying 43", recreated)
+	}
+	if old, err := srv.allStores.Repos.GetSystem(t.Context(), runmode.LocalDefaultOrgID, api.ID); err != nil || old.RetiredAt == nil || old.ExternalID != "41" {
+		t.Errorf("deleted acme/api's row = %+v, err=%v; want it retired with its id", old, err)
+	}
+
+	// acme/web (stored under its old name, 42) is joined by a new acme/web.
+	// GitHub answers for 42 under acme/website, so that row is renamed — not
+	// retired — and the new repository registers beside it.
+	gh.add("acme/web", 44)
+	refresh.refresh(t, runmode.LocalDefaultOrgID, true)
+	if fresh := registeredID(t, srv, "44"); fresh.ID == web.ID || fresh.Slug != "acme/web" {
+		t.Errorf("registration of the new acme/web = %+v, want a new row", fresh)
+	}
+	if moved, err := srv.allStores.Repos.GetSystem(t.Context(), runmode.LocalDefaultOrgID, web.ID); err != nil || moved.RetiredAt != nil || moved.Slug() != "acme/website" {
+		t.Errorf("acme/web's old row = %+v, err=%v; want it live under acme/website", moved, err)
 	}
 }
 

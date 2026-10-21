@@ -1,4 +1,4 @@
-import { useState, useEffect, useId, useCallback, useRef } from 'react'
+import { useState, useEffect, useId, useCallback, useMemo, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { RotateCw, ExternalLink } from 'lucide-react'
 import { useOptionalAuth } from '../contexts/AuthContext'
@@ -6,10 +6,12 @@ import { useActiveOrgId } from '../contexts/OrgContext'
 import { LOCAL_DEFAULT_ORG_ID, getGitHubAppStatus, getGitHubAppInstallURL } from '../lib/githubApp'
 import {
   candidateKeys,
+  isRetired,
   listReachableRepos,
   refFromCandidate,
   refreshReachableRepos,
   repoRefKey,
+  repoRefSlug,
 } from '../lib/githubRepos'
 import type { GitHubRepo, RepoListStatus, RepoRef } from '../lib/githubRepos'
 import { useFocusTrap } from '../hooks/useFocusTrap'
@@ -72,6 +74,32 @@ const REFRESH_SPINNER_TIMEOUT_MS = 30_000
  *  backstop for a first open whose websocket ping never lands, not a substitute
  *  for it. */
 const DISCOVERY_POLL_MS = 4_000
+
+/** The checkbox square every option row draws. */
+function CheckMark({ on }: { on: boolean }) {
+  return (
+    <span
+      className={`mt-0.5 shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${
+        on ? 'bg-warm border-warm text-warm-ink' : 'border-line-1'
+      }`}
+    >
+      {on && (
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 10 10"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <polyline points="2 5 4 7 8 3" />
+        </svg>
+      )}
+    </span>
+  )
+}
 
 export default function RepoPickerModal({
   selected,
@@ -329,6 +357,60 @@ export default function RepoPickerModal({
     })
   }
 
+  // Tracked rows GitHub no longer serves. None is a candidate — its id is in
+  // no reachable list — so each is drawn as its own row, beside the candidate
+  // that now has its name when that candidate is on the page, else at the
+  // top. Its checkbox is the only way to stop tracking it.
+  const retiredRefs = useMemo(() => selected.filter(isRetired), [selected])
+  const toggleRef = (ref: RepoRef) => {
+    setChecked((prev) => {
+      const next = new Map(prev)
+      const key = repoRefKey(ref)
+      if (next.has(key)) next.delete(key)
+      else next.set(key, ref)
+      return next
+    })
+  }
+  const query = search.trim().toLowerCase()
+  const shownRetired = retiredRefs.filter(
+    (r) => !query || repoRefSlug(r).toLowerCase().includes(query),
+  )
+  const namesOnPage = new Set(repos.map((c) => c.full_name.toLowerCase()))
+  const leadingRetired = shownRetired.filter((r) => !namesOnPage.has(repoRefSlug(r).toLowerCase()))
+  const retiredNamed = (fullName: string) =>
+    shownRetired.filter((r) => repoRefSlug(r).toLowerCase() === fullName.toLowerCase())
+
+  const retiredRow = (ref: RepoRef) => {
+    const on = checked.has(repoRefKey(ref))
+    return (
+      <button
+        key={`retired:${ref.id}`}
+        type="button"
+        role="checkbox"
+        aria-checked={on}
+        onClick={() => toggleRef(ref)}
+        className={`w-full flex items-start gap-3 px-3 py-2.5 text-left rounded-xl transition-colors hover:bg-tint-2 ${
+          on ? 'bg-warm/[0.04]' : ''
+        }`}
+      >
+        <CheckMark on={on} />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="text-card-title font-medium text-ink-3 truncate">
+              {repoRefSlug(ref)}
+            </span>
+            <span className="text-label-sm text-ink-3 border border-line-1 rounded px-1 py-0.5">
+              no longer on GitHub
+            </span>
+          </div>
+          <p className="text-reported text-ink-3 truncate mt-0.5">
+            GitHub gave this name to another repository. Uncheck to stop tracking this one.
+          </p>
+        </div>
+      </button>
+    )
+  }
+
   const content = (
     <div className={`flex flex-col ${inline ? '' : 'h-full max-h-[80vh]'}`}>
       {/* Header */}
@@ -460,10 +542,13 @@ export default function RepoPickerModal({
           </div>
         )}
 
+        {!error && leadingRetired.map(retiredRow)}
+
         {!error &&
-          repos.map((repo) => {
+          repos.flatMap((repo) => {
             const on = isChecked(repo)
-            return (
+            return [
+              ...retiredNamed(repo.full_name).map(retiredRow),
               <button
                 key={repo.github_id || repo.full_name}
                 type="button"
@@ -474,26 +559,7 @@ export default function RepoPickerModal({
                   on ? 'bg-warm/[0.04]' : ''
                 }`}
               >
-                <span
-                  className={`mt-0.5 shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${
-                    on ? 'bg-warm border-warm text-warm-ink' : 'border-line-1'
-                  }`}
-                >
-                  {on && (
-                    <svg
-                      width="10"
-                      height="10"
-                      viewBox="0 0 10 10"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    >
-                      <polyline points="2 5 4 7 8 3" />
-                    </svg>
-                  )}
-                </span>
+                <CheckMark on={on} />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <span className="text-card-title font-medium text-ink-1 truncate">
@@ -512,8 +578,8 @@ export default function RepoPickerModal({
                     <p className="text-reported text-ink-3 truncate mt-0.5">{repo.description}</p>
                   )}
                 </div>
-              </button>
-            )
+              </button>,
+            ]
           })}
 
         {/* The list pages now, so there is a "there is more" affordance rather

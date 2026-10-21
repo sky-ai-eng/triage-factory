@@ -300,6 +300,19 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		// listing sees the same fact within a cycle, but only for App orgs;
 		// here it costs one field on a response already in hand, bounded by
 		// the profile TTL.
+		//
+		// The same response can also say the opposite: GitHub serves a
+		// different id under the name this row holds. The repository the row
+		// was made for was deleted, or renamed away and the name reused, and
+		// profiling now would write the stranger's metadata and id onto it.
+		// The row is resolved by its own id instead — renamed or retired —
+		// and the next cycle profiles whatever it holds then.
+		if id := meta.ExternalID(); existing.ExternalID != "" && id != "" && id != existing.ExternalID {
+			if p.resolveReassignedName(ctx, orgID, *existing, meta) {
+				touched = true
+			}
+			continue
+		}
 		if moved, ok := p.applyRenameFromMeta(ctx, orgID, host, name, meta); ok {
 			name = moved
 			owner, repo, _ = strings.Cut(name, "/")
@@ -503,6 +516,20 @@ func (p *Profiler) applyRenameFromMeta(ctx context.Context, orgID, host, tracked
 		return "", false
 	}
 	return meta.FullName, true
+}
+
+// resolveReassignedName resolves stored, a row GitHub has just answered for
+// with another repository's id (meta), by the row's own id, and reports
+// whether the row was renamed or retired. A failure leaves the row as it is
+// for the next cycle to try again.
+func (p *Profiler) resolveReassignedName(ctx context.Context, orgID string, stored domain.Repository, meta *github.RepoMeta) bool {
+	res, err := reporename.Resolve(ctx, p.repos, p.resolver, repoprofileLog, orgID, stored.Ref())
+	if err != nil {
+		repoprofileLog.Warn("GitHub serves another repository under this name; resolving the stored one failed, leaving it for the next cycle",
+			"org", orgID, "repo", stored.Slug(), "external_id", stored.ExternalID, "served_id", meta.ExternalID(), "error", err)
+		return false
+	}
+	return res != reporename.Kept
 }
 
 // repoProfileInput is the per-repo JSON sent to the LLM.

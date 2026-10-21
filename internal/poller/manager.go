@@ -856,7 +856,10 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		// answers with the new one. The grant carries every repo's id
 		// alongside its current name, so the condition — same id, different
 		// name — is readable here with no request of its own, and over the
-		// WHOLE grant rather than the tracked subset.
+		// WHOLE grant rather than the tracked subset. So is its mirror image —
+		// same name, different id — which the intersection would otherwise
+		// match by name, polling the repository GitHub now serves under a
+		// tracked name as if it were the one TF tracks.
 		if renamed := m.applyRepoRenames(ctx, orgID, scope, grant); renamed > 0 {
 			repos = m.reloadConfiguredRepos(ctx, orgID, scope, repos)
 		}
@@ -1210,8 +1213,10 @@ func (m *Manager) recordRepoIDs(ctx context.Context, orgID, host string, scoped 
 	}
 }
 
-// applyRepoRenames reconciles the tracked repositories' slugs against the
-// names GitHub used in this grant listing, returning how many moved.
+// applyRepoRenames reconciles the stored repositories against the names and
+// ids GitHub used in this grant listing — renames, restores, and rows whose
+// name GitHub now serves under another id (reporename.Apply) — returning how
+// many rows changed.
 //
 // Scoped to the whole grant, unlike recordRepoIDs above: filling an id needs a
 // row to fill and so follows the tracked intersection, but detecting a rename
@@ -1241,9 +1246,10 @@ func (m *Manager) applyRepoRenames(ctx context.Context, orgID, host string, gran
 }
 
 // reloadConfiguredRepos re-reads the tracked set after a rename moved a slug
-// inside it, so this cycle's intersection matches the repository under its new
-// name instead of skipping it until the next one. Re-rotated to the same
-// cursor the first read was, so the round-robin position survives.
+// inside it or a retire took one out, so this cycle's intersection matches the
+// repository under its new name instead of skipping it until the next one, and
+// never matches a retired row's old name. Re-rotated to the same cursor the
+// first read was, so the round-robin position survives.
 func (m *Manager) reloadConfiguredRepos(ctx context.Context, orgID, host string, current []string) []string {
 	refreshed, err := m.repos.ListTrackedNamesSystem(ctx, orgID, host)
 	if err != nil {

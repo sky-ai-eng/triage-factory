@@ -16,6 +16,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
+	"github.com/sky-ai-eng/triage-factory/internal/reporename"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -375,7 +376,7 @@ func repoVisible(ctx context.Context, tx db.TxStores, orgID, host string, isAdmi
 	if isAdmin {
 		return true, nil
 	}
-	return tx.TeamGitHubRepos.TracksRepoViewerScoped(ctx, orgID, row.Host, row.Owner, row.Repo)
+	return tx.TeamGitHubRepos.TracksRepositoryViewerScoped(ctx, orgID, row.ID)
 }
 
 // repoCanEdit resolves the per-row can_edit annotation the read routes carry:
@@ -389,7 +390,7 @@ func repoCanEdit(ctx context.Context, tx db.TxStores, orgID, host string, isAdmi
 	if isAdmin {
 		return true, nil
 	}
-	return tx.TeamGitHubRepos.TracksRepoViewerAdminScoped(ctx, orgID, row.Host, row.Owner, row.Repo)
+	return tx.TeamGitHubRepos.TracksRepositoryViewerAdminScoped(ctx, orgID, row.ID)
 }
 
 // repoWriteAccess is the outcome of the repo-mutation gate. Three-valued
@@ -487,6 +488,9 @@ type repoJSON struct {
 	CloneError     string  `json:"clone_error,omitempty"`
 	CloneErrorKind string  `json:"clone_error_kind,omitempty"`
 	CanEdit        bool    `json:"can_edit"`
+	// RetiredAt is set on a retired row (domain.Repository.RetiredAt), which
+	// only a read by id returns.
+	RetiredAt *string `json:"retired_at,omitempty"`
 }
 
 func repoToJSON(row domain.Repository, canEdit bool) repoJSON {
@@ -508,11 +512,18 @@ func repoToJSON(row domain.Repository, canEdit bool) repoJSON {
 		CloneErrorKind: row.CloneErrorKind,
 		CanEdit:        canEdit,
 	}
-	if row.ProfiledAt != nil {
-		t := row.ProfiledAt.UTC().Format(time.RFC3339)
-		out.ProfiledAt = &t
-	}
+	out.ProfiledAt = optRFC3339(row.ProfiledAt)
+	out.RetiredAt = optRFC3339(row.RetiredAt)
 	return out
+}
+
+// optRFC3339 renders an optional timestamp for the wire, nil staying nil.
+func optRFC3339(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	s := rfc3339(*t)
+	return &s
 }
 
 // repoListRequest is the body of POST /api/repos/list. Which rows a caller may
@@ -744,7 +755,11 @@ type repoRegisterRequest struct {
 // The mirror is trusted however old it is, because the picker serves from the
 // same rows: anything a client could have been offered, this can register.
 // The id is matched before the name (RepositoryStore.FindOrCreateByExternalID),
-// so a rename TF has not applied yet resolves to the row TF already holds.
+// so a rename TF has not applied yet resolves to the row TF already holds. A
+// name another row holds under a different id, which GitHub has given to this
+// one, is freed by asking GitHub about that row's own id, and a retired row
+// the id names is restored (registerRepository). A 409 is the name still held
+// after that.
 //
 // Gated to an org admin or the admin of any team in the org. A registry row is
 // org-wide and no team's yet, so the gate cannot be a team the caller
@@ -817,30 +832,16 @@ func (s *Server) handleRepoRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var (
-		row     domain.Repository
-		canEdit bool
-	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		row, e = tx.Repos.FindOrCreateByExternalID(r.Context(), orgID, domain.RepoRef{
-			Source: entry.Source, Host: host, Owner: entry.Owner, Repo: entry.Repo, ExternalID: req.GitHubID,
-		})
-		if e != nil {
-			return e
-		}
-		canEdit, e = repoCanEdit(r.Context(), tx, orgID, host, isAdmin, row)
-		return e
-	}); err != nil {
+	row, canEdit, err := s.registerRepository(r.Context(), orgID, userID, host, isAdmin, domain.RepoRef{
+		Source: entry.Source, Host: host, Owner: entry.Owner, Repo: entry.Repo, ExternalID: req.GitHubID,
+	})
+	if err != nil {
 		if errors.Is(err, db.ErrRepoSlugOccupied) {
-			// TODO(TFAC-1161): a name GitHub gave to another repository stays
-			// held here for good when the holder was deleted, or renamed where
-			// TF never sees it; the holder's id has to be resolved and the row
-			// renamed or retired before this registration can succeed.
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
-				Reason:  httpx.ReasonConflict,
-				Message: entry.Slug() + " is registered to a different GitHub repository; it frees up once TF observes that repository's rename",
-				Field:   "github_id",
+				Reason: httpx.ReasonConflict,
+				Message: entry.Slug() + " is held by a different GitHub repository TF has a row for, and GitHub has not confirmed that repository moved " +
+					"or is gone; refresh the repository list and try again",
+				Field: "github_id",
 			})
 			return
 		}
@@ -848,6 +849,69 @@ func (s *Server) handleRepoRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, repoToJSON(row, canEdit))
+}
+
+// registerRepository registers ref by its GitHub id under the caller's claims
+// (RepositoryStore.FindOrCreateByExternalID) and returns the row with whether
+// the caller may edit it.
+//
+// ref is what the reachable mirror says GitHub serves now: ref.ExternalID
+// under ref's name. Two stored states disagree with that, and each is settled
+// here by asking GitHub rather than refused for good:
+//
+//   - Another row holds the name under a different id. The registration
+//     refuses with ErrRepoSlugOccupied, the holder is resolved by its own id
+//     (reporename.ReleaseName: renamed or retired), and the registration is
+//     tried once more.
+//   - The id names a retired row. GitHub answers for it again, so the row is
+//     restored under ref's name (RepositoryStore.RenameSystem), after the
+//     same release of the name if another row holds it.
+//
+// The resolution and the restore run on the admin pool, as every rename and
+// retire does: they span rows every team in the org may reference. What the
+// caller gets back is still read under their claims. ErrRepoSlugOccupied out
+// of here means the name is still held after all of that.
+func (s *Server) registerRepository(ctx context.Context, orgID, userID, host string, isAdmin bool, ref domain.RepoRef) (domain.Repository, bool, error) {
+	register := func() (row domain.Repository, canEdit bool, err error) {
+		err = s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+			var e error
+			if row, e = tx.Repos.FindOrCreateByExternalID(ctx, orgID, ref); e != nil {
+				return e
+			}
+			canEdit, e = repoCanEdit(ctx, tx, orgID, host, isAdmin, row)
+			return e
+		})
+		return row, canEdit, err
+	}
+
+	row, canEdit, err := register()
+	if errors.Is(err, db.ErrRepoSlugOccupied) {
+		s.releaseRepoName(ctx, orgID, ref)
+		row, canEdit, err = register()
+	}
+	if err != nil || row.RetiredAt == nil {
+		return row, canEdit, err
+	}
+
+	_, err = s.repos.RenameSystem(ctx, orgID, ref)
+	if errors.Is(err, db.ErrRepoSlugOccupied) {
+		s.releaseRepoName(ctx, orgID, ref)
+		_, err = s.repos.RenameSystem(ctx, orgID, ref)
+	}
+	if err != nil {
+		return domain.Repository{}, false, err
+	}
+	return register()
+}
+
+// releaseRepoName frees ref's name from a row holding it under another id, or
+// logs why it could not. A failure is not the caller's error: the retry after
+// it fails on the name still being held, and that is what the client is told.
+func (s *Server) releaseRepoName(ctx context.Context, orgID string, ref domain.RepoRef) {
+	if _, err := reporename.ReleaseName(ctx, s.repos, s.ghResolver, reposLog, orgID, ref); err != nil {
+		reposLog.Warn("freeing a repository name GitHub serves under another id failed",
+			"org", orgID, "repo", ref.Slug(), "github_id", ref.ExternalID, "error", err)
+	}
 }
 
 // handleRepoGetByName is the same read addressed by the provider's current

@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
@@ -16,9 +15,11 @@ import (
 var testLog = logging.Component("reporename-test")
 
 // testHost is the org's current GitHub host in these tests, and otherHost a
-// second deployment whose repository ids are a separate sequence.
+// second deployment whose repository ids are a separate sequence. testHost is
+// spelled out rather than taken from dbtest, whose conformance suite drives
+// this package against both stores.
 const (
-	testHost  = dbtest.TestGitHubHost
+	testHost  = "https://github.com"
 	otherHost = "https://ghe.example.com"
 )
 
@@ -241,7 +242,9 @@ func TestApply_ResolverWithoutTheExtensionIsFine(t *testing.T) {
 // panics loudly rather than silently returning a zero value.
 type renameStore struct {
 	db.RepositoryStore
-	stored    []domain.RepoRef
+	stored []domain.RepoRef
+	// retired marks stored rows retired, by external id.
+	retired   map[string]bool
 	outcomes  map[string]domain.RepoRenameOutcome
 	failure   error
 	listErr   error
@@ -251,23 +254,43 @@ type renameStore struct {
 	// comparison from the store's filter.
 	listedHosts []string
 	attempts    []domain.RepoRef
+	retires     []domain.RepoRef
+	// staleRetire makes RetireSystem find nothing to retire, as it does for a
+	// row renamed or retired since the caller read it.
+	staleRetire bool
+	// calls is every write in order: "rename <slug>" or "retire <slug>".
+	calls []string
 }
 
-func (s *renameStore) ListIdentitiesSystem(_ context.Context, _, host string) ([]domain.RepoRef, error) {
+func (s *renameStore) ListIdentitiesSystem(_ context.Context, _, host string) ([]domain.RepoIdentity, error) {
 	s.listCalls++
 	s.listedHosts = append(s.listedHosts, host)
 	if s.listErr != nil {
 		return nil, s.listErr
 	}
-	return s.stored, nil
+	out := make([]domain.RepoIdentity, len(s.stored))
+	for i, ref := range s.stored {
+		out[i] = domain.RepoIdentity{RepoRef: ref, Retired: s.retired[ref.ExternalID]}
+	}
+	return out, nil
 }
 
 func (s *renameStore) RenameSystem(_ context.Context, _ string, observed domain.RepoRef) (domain.RepoRenameOutcome, error) {
 	s.attempts = append(s.attempts, observed)
+	s.calls = append(s.calls, "rename "+observed.Slug())
 	if s.failure != nil {
 		return domain.RepoRenameOutcome{}, s.failure
 	}
 	return s.outcomes[observed.ExternalID], nil
+}
+
+func (s *renameStore) RetireSystem(_ context.Context, _ string, held domain.RepoRef) (*domain.Repository, error) {
+	s.retires = append(s.retires, held)
+	s.calls = append(s.calls, "retire "+held.Slug())
+	if s.staleRetire {
+		return nil, nil
+	}
+	return &domain.Repository{ID: "row-" + held.ExternalID, Owner: held.Owner, Repo: held.Repo, Host: held.Host, ExternalID: held.ExternalID}, nil
 }
 
 // coverageResolver is a Resolver fake that also implements the optional

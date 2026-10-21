@@ -2354,22 +2354,29 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
 		}
-		for _, c := range []struct{ owner, repo string }{
-			{"Acme", "api"},  // tracked, stored casing
-			{"acme", "API"},  // tracked, mismatched casing
-			{"acme", "web"},  // same owner, untracked repo
-			{"other", "api"}, // untracked owner
+		tracked, err := stores.Repos.GetByRefSystem(ctx, ids.OrgID, domain.RepoRef{Host: TestGitHubHost, Owner: "Acme", Repo: "api"})
+		if err != nil || tracked == nil {
+			t.Fatalf("resolve Acme/api: got=%v err=%v", tracked, err)
+		}
+		untracked, err := stores.Repos.FindOrCreateByRefSystem(ctx, ids.OrgID, domain.RepoRef{Host: TestGitHubHost, Owner: "acme", Repo: "web"})
+		if err != nil {
+			t.Fatalf("seed untracked acme/web: %v", err)
+		}
+		for _, c := range []struct{ name, id string }{
+			{"tracked", tracked.ID},
+			{"untracked", untracked.ID},
+			{"no such repository", "00000000-0000-0000-0000-00000000dead"},
 		} {
-			scoped, err := stores.TeamGitHubRepos.TracksRepoViewerScoped(ctx, ids.OrgID, TestGitHubHost, c.owner, c.repo)
+			scoped, err := stores.TeamGitHubRepos.TracksRepositoryViewerScoped(ctx, ids.OrgID, c.id)
 			if err != nil {
-				t.Fatalf("TracksRepoViewerScoped(%s/%s): %v", c.owner, c.repo, err)
+				t.Fatalf("TracksRepositoryViewerScoped(%s): %v", c.name, err)
 			}
-			adminScoped, err := stores.TeamGitHubRepos.TracksRepoViewerAdminScoped(ctx, ids.OrgID, TestGitHubHost, c.owner, c.repo)
+			adminScoped, err := stores.TeamGitHubRepos.TracksRepositoryViewerAdminScoped(ctx, ids.OrgID, c.id)
 			if err != nil {
-				t.Fatalf("TracksRepoViewerAdminScoped(%s/%s): %v", c.owner, c.repo, err)
+				t.Fatalf("TracksRepositoryViewerAdminScoped(%s): %v", c.name, err)
 			}
 			if adminScoped && !scoped {
-				t.Errorf("%s/%s: admin-scoped=true but viewer-scoped=false; the write gate must never be broader than the read gate", c.owner, c.repo)
+				t.Errorf("%s: admin-scoped=true but viewer-scoped=false; the write gate must never be broader than the read gate", c.name)
 			}
 		}
 	})

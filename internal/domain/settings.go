@@ -1087,6 +1087,10 @@ type TeamGitHubRepo struct {
 	ExternalID string
 	Owner      string
 	Repo       string
+	// RetiredAt is the registry row's Repository.RetiredAt. A team that
+	// tracked a repository keeps it in its set after the row is retired,
+	// under the forward-only tracking rule, and the set says so.
+	RetiredAt *time.Time
 }
 
 // Slug returns the "owner/repo" display form.

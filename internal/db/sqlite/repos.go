@@ -59,7 +59,9 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.Repositor
 	// from the SET list, so the stored casing stays sticky, and the id minted
 	// for a conflicting INSERT is discarded along with the rest of it. host is
 	// part of the target, so a same-named repository on another host is another
-	// row.
+	// row. The index is partial over rows that are not retired, and the target
+	// names its predicate, so a retired row under the name is never the one
+	// updated: the upsert lands on, or creates, the row that holds the name.
 	//
 	// The id written is p.ExternalID unless another row on the host already
 	// carries it — a rename not yet applied, or one refused. The scalar
@@ -76,7 +78,7 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.Repositor
 		             WHERE o.source = ?4 AND o.host = ?5 AND o.external_id = ?6
 		               AND NOT (LOWER(o.owner) = LOWER(?2) AND LOWER(o.repo) = LOWER(?3)))),
 		        ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'))
-		ON CONFLICT(org_id, source, host, LOWER(owner), LOWER(repo)) DO UPDATE SET
+		ON CONFLICT(org_id, source, host, LOWER(owner), LOWER(repo)) WHERE retired_at IS NULL DO UPDATE SET
 			external_id    = COALESCE(excluded.external_id, repositories.external_id),
 			description    = excluded.description,
 			has_readme     = excluded.has_readme,
@@ -267,12 +269,14 @@ func getOrCreateRepositoryID(ctx context.Context, q queryer, ref domain.RepoRef)
 }
 
 // findRepositoryID resolves a slug to the registry row's surrogate id, or "" if
-// no row holds that slug. Case-INSENSITIVE, like every other slug lookup here.
+// no row holds that slug. Case-INSENSITIVE, like every other slug lookup here,
+// and a retired row holds no slug.
 func findRepositoryID(ctx context.Context, q queryer, source, host, owner, repo string) (string, error) {
 	var id string
 	err := q.QueryRowContext(ctx, `
 		SELECT id FROM repositories
 		 WHERE source = ? AND host = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+		   AND retired_at IS NULL
 	`, source, host, owner, repo).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
@@ -284,13 +288,14 @@ func findRepositoryID(ctx context.Context, q queryer, source, host, owner, repo 
 }
 
 // findRepositoryByRef looks a repository up by provider identity, matching
-// owner/repo case-INSENSITIVELY (GitHub identifiers are). Returns nil when the
-// repository has no row.
+// owner/repo case-INSENSITIVELY (GitHub identifiers are). Returns nil when no
+// row holds the name; a retired row holds none.
 func findRepositoryByRef(ctx context.Context, q queryer, source string, ref domain.RepoRef) (*domain.Repository, error) {
 	row := q.QueryRowContext(ctx, `
 		SELECT `+repoProfileFullColumns+`
 		FROM repositories
 		WHERE source = ? AND host = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+		  AND retired_at IS NULL
 	`, source, ref.Host, ref.Owner, ref.Repo)
 	p, err := scanRepositoryFull(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -359,10 +364,10 @@ const repoTrackedByTeam = `EXISTS (
 	   AND g.repository_id = repositories.id
 )`
 
-// listRepositories is the one paged read of the registry on host. filter
-// narrows it — empty for the whole registry, else a predicate on the
-// repositories row — and filterArgs binds its placeholders. The count runs
-// under the same filter as the page.
+// listRepositories is the one paged read of the registry on host, retired rows
+// left out. filter narrows it — empty for the whole registry, else a predicate
+// on the repositories row — and filterArgs binds its placeholders. The count
+// runs under the same filter as the page.
 func (s *repoStore) listRepositories(ctx context.Context, orgID, host string, opts db.ListOpts, filter string, filterArgs ...any) ([]domain.Repository, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, 0, err
@@ -370,7 +375,7 @@ func (s *repoStore) listRepositories(ctx context.Context, orgID, host string, op
 	if err := db.RequireRepoHost(host); err != nil {
 		return nil, 0, err
 	}
-	where := `host = ?`
+	where := `host = ? AND retired_at IS NULL`
 	if filter != "" {
 		where += `
 		  AND ` + filter
@@ -488,6 +493,7 @@ func (s *repoStore) UpdateCloneStatusByRef(ctx context.Context, orgID string, re
 		UPDATE repositories
 		SET clone_status = ?, clone_error = ?, clone_error_kind = ?, updated_at = datetime('now')
 		WHERE source = ? AND host = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+		  AND retired_at IS NULL
 		RETURNING `+repoProfileFullColumns,
 		status, nullIfEmpty(errMsg), nullIfEmpty(errKind), source, ref.Host, ref.Owner, ref.Repo)
 	p, err := scanRepositoryFull(row)
@@ -551,7 +557,7 @@ func (s *repoStore) ListTrackedNamesSystem(ctx context.Context, orgID, host stri
 		SELECT DISTINCT r.owner || '/' || r.repo
 		  FROM repositories r
 		  JOIN team_github_repos g ON g.repository_id = r.id
-		 WHERE r.host = ?
+		 WHERE r.host = ? AND r.retired_at IS NULL
 		 ORDER BY r.owner, r.repo
 	`, host)
 	if err != nil {
@@ -613,7 +619,7 @@ func (s *repoStore) FillMissingExternalIDsSystem(ctx context.Context, orgID stri
 				   SET external_id = ?1, updated_at = datetime('now')
 				 WHERE source = ?2 AND host = ?3
 				   AND LOWER(owner) = LOWER(?4) AND LOWER(repo) = LOWER(?5)
-				   AND external_id IS NULL
+				   AND external_id IS NULL AND retired_at IS NULL
 				   AND NOT EXISTS (
 				       SELECT 1 FROM repositories o
 				        WHERE o.source = ?2 AND o.host = ?3 AND o.external_id = ?1)
@@ -650,6 +656,7 @@ func (s *repoStore) GetPullsPollStateByRefSystem(ctx context.Context, orgID stri
 		SELECT pulls_etag, pulls_polled_at
 		  FROM repositories
 		 WHERE source = ? AND host = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+		   AND retired_at IS NULL
 	`, source, ref.Host, ref.Owner, ref.Repo).Scan(&etag, &polledAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, nil
@@ -679,6 +686,7 @@ func (s *repoStore) SetPullsPollStateByRefSystem(ctx context.Context, orgID stri
 		UPDATE repositories
 		   SET pulls_etag = ?, pulls_polled_at = ?
 		 WHERE source = ? AND host = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+		   AND retired_at IS NULL
 	`, nullIfEmpty(etag), polledAt.UTC(), source, ref.Host, ref.Owner, ref.Repo)
 	return err
 }
@@ -692,15 +700,15 @@ type rowScanner interface {
 
 // repoProfileFullColumns is the projection scanRepositoryFull reads, named
 // once so the three queries that share it cannot drift out of column order.
-const repoProfileFullColumns = `id, owner, repo, source, host, external_id, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch, profiled_at, clone_status, clone_error, clone_error_kind`
+const repoProfileFullColumns = `id, owner, repo, source, host, external_id, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch, profiled_at, clone_status, clone_error, clone_error_kind, retired_at`
 
 // scanRepositoryFull reads the repositories row shape shared by Get, List,
 // and the ref lookup.
 func scanRepositoryFull(row rowScanner) (domain.Repository, error) {
 	var p domain.Repository
 	var externalID, description, profileText, cloneURL, defaultBranch, baseBranch, cloneError, cloneErrorKind sql.NullString
-	var profiledAt sql.NullTime
-	if err := row.Scan(&p.ID, &p.Owner, &p.Repo, &p.Source, &p.Host, &externalID, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch, &profiledAt, &p.CloneStatus, &cloneError, &cloneErrorKind); err != nil {
+	var profiledAt, retiredAt sql.NullTime
+	if err := row.Scan(&p.ID, &p.Owner, &p.Repo, &p.Source, &p.Host, &externalID, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch, &profiledAt, &p.CloneStatus, &cloneError, &cloneErrorKind, &retiredAt); err != nil {
 		return p, err
 	}
 	p.ExternalID = externalID.String
@@ -714,20 +722,8 @@ func scanRepositoryFull(row rowScanner) (domain.Repository, error) {
 	if profiledAt.Valid {
 		p.ProfiledAt = &profiledAt.Time
 	}
-	return p, nil
-}
-
-// splitRepoSlug splits "owner/repo" at the first slash. Returns an empty
-// repo half if the input has no slash; the callers — the worktree ledger's
-// slug resolution and the rename rewrite — treat that as a name nothing
-// answers to. Local to this file rather than shared because the Postgres
-// impl needs its own copy in a different package; the helper is too small
-// to be worth exporting.
-func splitRepoSlug(s string) (owner, repo string) {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '/' {
-			return s[:i], s[i+1:]
-		}
+	if retiredAt.Valid {
+		p.RetiredAt = &retiredAt.Time
 	}
-	return s, ""
+	return p, nil
 }

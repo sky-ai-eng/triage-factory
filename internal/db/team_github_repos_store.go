@@ -173,32 +173,33 @@ type TeamGitHubReposStore interface {
 	// calls it (N=1 broadcasts org-wide).
 	RepoUpdateRecipientsSystem(ctx context.Context, orgID, host, owner, repo string) ([]string, error)
 
-	// TracksRepoViewerScoped reports whether ANY team the calling user
-	// belongs to tracks (owner, repo), matched case-insensitively
-	// (TFAC-559). The app-pool, viewer-scoped sibling of TracksRepoSystem
-	// (which checks one named team via the admin pool): under RLS,
-	// team_github_repos_select auto-scopes the EXISTS to the caller's own
-	// memberships, so this is the per-repo gate for "does any of my teams
-	// track this repo" — used by the repo-settings base-branch PATCH and
-	// branches GET so a non-admin member can't touch a repo outside their
-	// team's tracked set. Org admins bypass this check entirely at the
-	// handler layer instead of calling it. Local mode (N=1) always
+	// TracksRepositoryViewerScoped reports whether ANY team the calling user
+	// belongs to tracks the repository with this registry id (TFAC-559). The
+	// app-pool, viewer-scoped sibling of TracksRepositorySystem (which checks
+	// one named team via the admin pool): under RLS, team_github_repos_select
+	// auto-scopes the EXISTS to the caller's own memberships, so this is the
+	// per-repo gate for "does any of my teams track this repo" — the read gate
+	// of the repo routes, so a non-admin member can't read or touch a repo
+	// outside their team's tracked set. Keyed by id rather than name because
+	// a name does not pick one row: a retired row keeps the name the
+	// repository now under it holds. Org admins bypass this check entirely at
+	// the handler layer instead of calling it. Local mode (N=1) always
 	// reports true — no team boundary to enforce.
-	TracksRepoViewerScoped(ctx context.Context, orgID, host, owner, repo string) (bool, error)
+	TracksRepositoryViewerScoped(ctx context.Context, orgID, repositoryID string) (bool, error)
 
-	// TracksRepoViewerAdminScoped narrows TracksRepoViewerScoped to teams
-	// the calling user *administers*: it reports whether ANY team the
-	// caller is a team admin of tracks (owner, repo), matched
-	// case-insensitively. Same app pool, same RLS-does-the-scoping trick,
-	// plus an explicit team-admin predicate on the matched row.
+	// TracksRepositoryViewerAdminScoped narrows TracksRepositoryViewerScoped to
+	// teams the calling user *administers*: it reports whether ANY team the
+	// caller is a team admin of tracks the repository with this registry id.
+	// Same app pool, same RLS-does-the-scoping trick, plus an explicit
+	// team-admin predicate on the matched row.
 	//
 	// This is the mutation gate for org-wide repo configuration
 	// (repositories carries no team_id, so a write by a member of one
 	// tracking team lands on every tracking team's runs). Membership alone
-	// is the *read* gate — TracksRepoViewerScoped — and the two are
+	// is the *read* gate — TracksRepositoryViewerScoped — and the two are
 	// deliberately separate: a caller who sees a repo in their list but
 	// administers none of the teams tracking it gets 403, not 404. Org
 	// admins bypass this at the handler layer instead of calling it. Local
 	// mode (N=1) always reports true — no team boundary to enforce.
-	TracksRepoViewerAdminScoped(ctx context.Context, orgID, host, owner, repo string) (bool, error)
+	TracksRepositoryViewerAdminScoped(ctx context.Context, orgID, repositoryID string) (bool, error)
 }

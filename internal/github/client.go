@@ -57,6 +57,12 @@ func IsHTTP406(err error) bool {
 	return errors.As(err, &he) && he.StatusCode == 406
 }
 
+// IsHTTP404 reports whether err is an HTTP 404 Not Found response.
+func IsHTTP404(err error) bool {
+	var he *HTTPError
+	return errors.As(err, &he) && he.StatusCode == http.StatusNotFound
+}
+
 // newStatusError builds the *HTTPError for a transport-level non-2xx, so
 // every builder (request, GetConditional, DownloadArtifact, PostGraphQL)
 // gets the same "<what> returned %d: <excerpt>" message and a class. what
