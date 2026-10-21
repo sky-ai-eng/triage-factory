@@ -65,8 +65,9 @@ tunnel terminates TLS for every host it admits, under the conditions in
 - **One hostname, one request shape.** The client is shown a leaf for the
   CONNECT host only and is served HTTP/1.1 only. Every request's `Host`
   must be the CONNECT host; upgrades, nested CONNECTs, ambiguous framing, a
-  GET or HEAD with a body, and method overrides (the override headers, a
-  `_method` parameter) are refused.
+  GET or HEAD with a body, a query containing `;` or one that does not
+  parse, and method overrides (the override headers, a `_method`
+  parameter) are refused.
 - **Registries are read-only.** GET and HEAD, plus POST to the paths a
   registry lists as reads (npm's audit endpoints). Every other method is
   refused with a reason the client prints, and recorded.

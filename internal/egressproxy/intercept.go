@@ -337,6 +337,16 @@ func (s *Server) requestPolicy(host string, req *http.Request) *refusal {
 	if req.Header.Get("Upgrade") != "" || headerHasToken(req.Header, "Connection", "upgrade") {
 		return &refusal{http.StatusForbidden, "protocol upgrades are refused"}
 	}
+	// The `_method` scan below sees the query as Go parses it, which drops a
+	// pair containing ';' or a bad escape. A server that splits on ';' (Rack
+	// does by default) or decodes leniently would still see what the scan
+	// missed, so a query Go cannot parse cleanly is refused outright.
+	if strings.Contains(req.URL.RawQuery, ";") {
+		return &refusal{http.StatusBadRequest, "a query containing ';' is refused, since servers disagree on whether it separates parameters"}
+	}
+	if _, err := url.ParseQuery(req.URL.RawQuery); err != nil {
+		return &refusal{http.StatusBadRequest, fmt.Sprintf("the query does not parse: %s", quotable(err.Error()))}
+	}
 	if name, ok := methodOverride(req); ok {
 		return &refusal{http.StatusForbidden, fmt.Sprintf("the method override %s is refused", name)}
 	}

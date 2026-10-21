@@ -319,7 +319,9 @@ conditions:
    are a request with ambiguous framing (both `Content-Length` and
    `Transfer-Encoding`, or conflicting lengths), a GET or HEAD with a body,
    and method overrides: the `X-HTTP-Method-Override` headers in any
-   spelling, and a `_method` query parameter.
+   spelling, and a `_method` query parameter. A query containing `;`, or
+   one Go's parser rejects, is refused too, because a server that splits on
+   `;` would see a `_method` the check could not.
    Read-only means nothing if a GET can be turned into something else.
 6. **One hostname end to end.** The leaf the jail sees is minted for the
    `CONNECT` host only, so a client whose SNI differs fails its handshake.

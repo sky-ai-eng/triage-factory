@@ -288,9 +288,9 @@ func TestProxy_DeniesTheGitHubAPIHosts(t *testing.T) {
 // TestProxy_ConnectDenialStatusLineCarriesReason pins the denial's delivery
 // channel: the reason must ride the status LINE, not just the body, because a
 // client tunneling through a proxy discards the body of a refused CONNECT and
-// Go's transport surfaces only the text after the status code. This is
-// exactly how `gh run view` — which follows the run object's absolute
-// api.github.com jobs_url out of the injector channel — used to die with a
+// Go's transport surfaces only the text after the status code. `gh run view`
+// follows the run object's absolute api.github.com jobs_url out of the
+// injector channel, and without the reason on the status line it prints a
 // bare "Forbidden" and nothing to act on.
 //
 // It also pins which hosts carry a remedy: the GitHub API hosts point at the
