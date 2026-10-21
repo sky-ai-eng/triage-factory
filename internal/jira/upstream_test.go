@@ -163,9 +163,9 @@ func TestErrorMessages_CarryAtMost200CharsOfBody(t *testing.T) {
 			c := testClient(srv.URL)
 
 			for _, err := range []error{
-				func() error { _, err := c.get(context.Background(), srv.URL+"/x"); return err }(),
-				c.put(context.Background(), srv.URL+"/x", map[string]any{}),
-				c.post(context.Background(), srv.URL+"/x", map[string]any{}),
+				func() error { _, err := c.get(context.Background(), at(srv.URL+"/x")); return err }(),
+				c.put(context.Background(), at(srv.URL+"/x"), map[string]any{}),
+				c.post(context.Background(), at(srv.URL+"/x"), map[string]any{}),
 			} {
 				var se *StatusError
 				if !errors.As(err, &se) {
@@ -195,7 +195,7 @@ func TestDoRequest_RecordsEveryAttempt(t *testing.T) {
 	c := NewClient(DataCenterPAT(srv.URL, "tok")).WithOrg("org-1")
 
 	ctx, tally := upstream.WithTally(context.Background())
-	if _, err := c.get(ctx, srv.URL); err != nil {
+	if _, err := c.get(ctx, at(srv.URL)); err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	if tally.Attempts() != 2 || tally.Count(upstream.Transient) != 1 || tally.Count(upstream.OK) != 1 {
@@ -231,7 +231,7 @@ func TestDoRequest_TruncatedBodyRetriedLikeATransportFailure(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	ctx, tally := upstream.WithTally(context.Background())
-	body, err := testClient(srv.URL).get(ctx, srv.URL)
+	body, err := testClient(srv.URL).get(ctx, at(srv.URL))
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestDoRequest_TruncatedBodyMutationNotRetried(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := testClient(srv.URL).put(context.Background(), srv.URL, map[string]string{"k": "v"})
+	err := testClient(srv.URL).put(context.Background(), at(srv.URL), map[string]string{"k": "v"})
 	var te *upstream.TransportError
 	if !errors.As(err, &te) {
 		t.Fatalf("err = %v, want a *upstream.TransportError", err)
@@ -279,7 +279,7 @@ func TestDoRequest_HTML403IsNotRetried(t *testing.T) {
 	defer srv.Close()
 
 	ctx, tally := upstream.WithTally(context.Background())
-	_, err := testClient(srv.URL).get(ctx, srv.URL)
+	_, err := testClient(srv.URL).get(ctx, at(srv.URL))
 	var se *StatusError
 	if !errors.As(err, &se) || se.Status != http.StatusForbidden || se.Class != upstream.Transient {
 		t.Fatalf("err = %v, want a transient 403 *StatusError", err)

@@ -57,10 +57,12 @@ func backoff(attempt int) time.Duration {
 // Jira Cloud meters two that a response describes. quota is the hourly points
 // quota Atlassian enforces on OAuth 2.0 (3LO), Forge and Connect apps; a
 // response states no count for it, only X-RateLimit-NearLimit: true once less
-// than 20% of it is left. burst is the per-second request allowance for the
-// endpoint, from X-RateLimit-Limit and X-RateLimit-Remaining, and is not the
-// hourly quota. Jira Data Center, when an admin turns rate limiting on, meters
-// each user with one token bucket, requests, which every response states.
+// than 20% of it is left. burst is the per-second request allowance, from
+// X-RateLimit-Limit and X-RateLimit-Remaining, and is not the hourly quota.
+// Atlassian sets it per endpoint, so each endpoint's is a bucket of its own,
+// named by burstBucket. Jira Data Center, when an admin turns rate limiting
+// on, meters each user with one token bucket, requests, which every response
+// states.
 const (
 	bucketQuota    = "quota"
 	bucketBurst    = "burst"
@@ -76,11 +78,17 @@ const (
 	burstWindow = time.Second
 )
 
+// burstBucket is the bucket of Jira Cloud's burst allowance for the endpoint
+// whose path template is template (endpoint): burst:issue/{}/transitions.
+func burstBucket(template string) string {
+	return bucketBurst + ":" + template
+}
+
 // The RateLimit-Reason values Jira Cloud documents for a 429, each naming the
 // limit that refused the request. A 429 is counted under its reason
 // (upstream.RecordRefused), or under reasonOther when it carries none or
 // another value: developers have reported values the documentation does not
-// list.
+// list. A burst refusal is counted under its endpoint's burst bucket instead.
 const (
 	reasonQuotaGlobal   = "jira-quota-global-based"
 	reasonQuotaTenant   = "jira-quota-tenant-based"
@@ -96,26 +104,27 @@ const maxLoggedReason = 64
 // recordBudgets reports the rate-limit readings a response states to the
 // process-wide recorder (upstream.RecordBudget), which the rate-limit gauges
 // and the low-budget WARN read, and counts a 429 under the limit that refused
-// it. Called on every response, successful or not; now is when it arrived.
+// it. Called on every response, successful or not; template is the request's
+// path template (endpoint), and now is when the response arrived.
 //
 // A client that names no org or no credential reports nothing: a credential
 // being validated before it is stored is no org's, a user's own API token or
 // personal access token is metered per user, which a metric label may not
 // name, and a run's credential-proxy client cannot say which credential the
 // proxy attached.
-func (c *Client) recordBudgets(status int, h http.Header, now time.Time) {
+func (c *Client) recordBudgets(template string, status int, h http.Header, now time.Time) {
 	if c.orgID == "" || c.credential == "" {
 		return
 	}
 	if c.cfg.Deployment == DeploymentCloud {
-		c.recordCloud(status, h, now)
+		c.recordCloud(template, status, h, now)
 		return
 	}
 	c.recordDataCenter(status, h, now)
 }
 
-// recordCloud records a Jira Cloud response's quota and burst readings, and a
-// 429's reason.
+// recordCloud records a Jira Cloud response's quota reading and the burst
+// reading of its endpoint, whose path template is template, and counts a 429.
 //
 // The quota is recorded when the response says whether it is near its limit,
 // and on every response for a Cloud OAuth credential, which the quota meters:
@@ -129,10 +138,11 @@ func (c *Client) recordBudgets(status int, h http.Header, now time.Time) {
 // response they describe only jira-burst-based, which X-RateLimit-Remaining
 // and X-RateLimit-Limit already give (and whose policy q disagrees with that
 // limit). They carry no entry for the hourly quota, so they are not read.
-func (c *Client) recordCloud(status int, h http.Header, now time.Time) {
+func (c *Client) recordCloud(template string, status int, h http.Header, now time.Time) {
+	burst := burstBucket(template)
 	var reason string
 	if status == http.StatusTooManyRequests {
-		reason = c.countRefusal(h)
+		reason = c.countRefusal(h, burst)
 	}
 	record := func(bucket string, b upstream.Budget) {
 		upstream.RecordBudget(upstream.Jira, c.orgID, string(c.credential), bucket, b)
@@ -152,15 +162,16 @@ func (c *Client) recordCloud(status int, h http.Header, now time.Time) {
 		if reason == reasonBurst {
 			b.Reset = refusalReset(h, now, burstWindow)
 		}
-		record(bucketBurst, b)
+		record(burst, b)
 	}
 }
 
-// countRefusal counts a Jira Cloud 429 under its RateLimit-Reason and returns
-// the reason it was counted under. A reason outside the documented set is
-// counted as reasonOther and logged, so a value Atlassian starts sending shows
-// up without becoming a label.
-func (c *Client) countRefusal(h http.Header) string {
+// countRefusal counts a Jira Cloud 429 and returns its RateLimit-Reason, or
+// reasonOther. A burst refusal is the endpoint's, so it is counted under
+// burst, the endpoint's burst bucket; any other is counted under its reason.
+// A reason outside the documented set is counted as reasonOther and logged, so
+// a value Atlassian starts sending shows up without becoming a label.
+func (c *Client) countRefusal(h http.Header, burst string) string {
 	raw := strings.TrimSpace(h.Get("RateLimit-Reason"))
 	reason := raw
 	switch raw {
@@ -175,7 +186,11 @@ func (c *Client) countRefusal(h http.Header) string {
 				"org", c.orgID, "credential", string(c.credential), "reason", raw)
 		}
 	}
-	upstream.RecordRefused(upstream.Jira, c.orgID, string(c.credential), reason)
+	bucket := reason
+	if reason == reasonBurst {
+		bucket = burst
+	}
+	upstream.RecordRefused(upstream.Jira, c.orgID, string(c.credential), bucket)
 	return reason
 }
 
