@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
 )
 
 // defaultRlimits is the fixed resource shape applied when a launch names
@@ -78,7 +79,7 @@ func buildSpec(cfg Config, netnsPath string, jailUID, jailGID int) (*specs.Spec,
 			// os.Environ read, no credential injection. Caller owns
 			// what the agent sees.
 			Env:             append([]string(nil), cfg.Env...),
-			Cwd:             "/work",
+			Cwd:             cell.WorkDir,
 			NoNewPrivileges: noNewPrivs,
 			// All four capability slices empty: bounding, effective,
 			// permitted, inheritable, ambient. The agent runs with
@@ -115,7 +116,7 @@ func buildSpec(cfg Config, netnsPath string, jailUID, jailGID int) (*specs.Spec,
 			// Agent's worktree — bind-mount RW so the agent can edit
 			// files. Caller must have handed it to this run's jail uid
 			// (ChownRunTree) before Wrap was called.
-			{Destination: "/work", Type: "bind", Source: cfg.Worktree,
+			{Destination: cell.WorkDir, Type: "bind", Source: cfg.Worktree,
 				Options: []string{"rbind", "rw"}},
 
 			// CA certificates from the host so outbound TLS (to the

@@ -362,8 +362,12 @@ type Client struct {
 	// WithCredential; empty for a client whose readings are not recorded
 	// (see recordBudgets).
 	credential AuthMethod
-	selfMu     sync.RWMutex
-	selfVal    *currentUserResponse
+	// oauthApp is the OAuth app that minted a Cloud OAuth client's access
+	// token, whose quota its quota readings are recorded under. Set by
+	// WithOAuthApp; SourceNone for any other client.
+	oauthApp OAuthAppSource
+	selfMu   sync.RWMutex
+	selfVal  *currentUserResponse
 }
 
 // NewClient builds a Client from a Config. Construct the Config with a named
@@ -392,10 +396,22 @@ func (c *Client) WithOrg(orgID string) *Client {
 // A credential is named by its AuthMethod. The org's service credential is a
 // cloud_api_token or a dc_pat, and an org has one at a time. cloud_oauth is a
 // user's Connect, whose hourly quota Atlassian documents as the OAuth app's
-// rather than the user's, so every user of an org connected through it spends
-// one budget.
+// rather than the user's, so its quota is recorded under the app
+// (WithOAuthApp).
 func (c *Client) WithCredential(method AuthMethod) *Client {
 	c.credential = method
+	return c
+}
+
+// WithOAuthApp sets the OAuth app that minted c's access token, and returns c.
+// Call it with WithCredential(AuthMethodCloudOAuth), before c's first request.
+//
+// Atlassian meters a Cloud OAuth token's hourly quota by the app that minted
+// it, so c's quota readings are recorded under whose app that is
+// (quotaCredential): the deployment's, which every org using it spends from,
+// or the org's own.
+func (c *Client) WithOAuthApp(app OAuthAppSource) *Client {
+	c.oauthApp = app
 	return c
 }
 

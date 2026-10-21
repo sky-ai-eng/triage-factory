@@ -24,6 +24,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/cabundle"
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
+	"github.com/sky-ai-eng/triage-factory/internal/cell/gvisor"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
@@ -40,10 +42,10 @@ const (
 	// to resolve a burst phase inside a jail's cycle.
 	sampleStep = 2 * time.Second
 	// oomPeakSlackMB is the containment check's allowance above a victim's
-	// ceiling: memory.current can read marginally over memory.max (per-CPU
-	// charge batching) and the sampler rounds bytes up to whole MiB. Kept
-	// well under the smallest ceiling the flag accepts, so a genuinely
-	// uncontained victim can never hide inside the slack.
+	// ceiling: memory.current and memory.peak can read marginally over
+	// memory.max (per-CPU charge batching) and both reads round bytes up to
+	// whole MiB. Kept well under the smallest ceiling the flag accepts, so a
+	// genuinely uncontained victim can never hide inside the slack.
 	oomPeakSlackMB = 64
 )
 
@@ -53,11 +55,10 @@ type handle struct {
 	id             int
 	conversationID string
 	claimID        string
-	containerID    string
 	worktree       string
 
 	net       *sandbox.RunNetwork
-	jail      *agentproc.ToolHostJail
+	jail      cell.Jail
 	tools     agentloop.ToolHost
 	agentSock net.Listener
 
@@ -66,39 +67,45 @@ type handle struct {
 
 	toolCalls atomic.Int64
 	toolErrs  atomic.Int64
+
+	teardownOnce sync.Once
 }
 
 // teardown reclaims one sandbox in dependency order: the driver first (its
 // in-flight call unblocks when the connection closes), then the jail, then
 // the network the jail ran in, then the host-side artifacts. Tolerates a
 // partially-constructed handle so failed bring-ups share the same path.
+// Runs once: oomtest reclaims its victims to judge them, and its deferred
+// teardownAll still holds them.
 func (h *handle) teardown() {
-	if h.stopDriver != nil {
-		h.stopDriver()
-	}
-	if h.tools != nil {
-		_ = h.tools.Close()
-	}
-	if h.driverDone != nil {
-		<-h.driverDone
-	}
-	if h.jail != nil {
-		_ = h.jail.Close()
-	}
-	if h.net != nil {
-		_ = h.net.Close()
-	}
-	if h.agentSock != nil {
-		_ = h.agentSock.Close()
-	}
-	if h.worktree != "" {
-		_ = os.RemoveAll(h.worktree)
-	}
+	h.teardownOnce.Do(func() {
+		if h.stopDriver != nil {
+			h.stopDriver()
+		}
+		if h.tools != nil {
+			_ = h.tools.Close()
+		}
+		if h.driverDone != nil {
+			<-h.driverDone
+		}
+		if h.jail != nil {
+			_ = h.jail.Close()
+		}
+		if h.net != nil {
+			_ = h.net.Close()
+		}
+		if h.agentSock != nil {
+			_ = h.agentSock.Close()
+		}
+		if h.worktree != "" {
+			_ = os.RemoveAll(h.worktree)
+		}
+	})
 }
 
 type levelResult struct {
 	level        int
-	spawnP50     time.Duration // SetupRunNetwork + LaunchToolHost, per sandbox added this level
+	spawnP50     time.Duration // SetupRunNetwork + LaunchOnNetwork, per sandbox added this level
 	spawnP95     time.Duration
 	readyP50     time.Duration // spawn start → tool host connected and answering
 	readyP95     time.Duration
@@ -127,18 +134,20 @@ type levelResult struct {
 // actualsLog accumulates each jail's teardown actuals — the same
 // billing-grade cgroup read production stamps on claims.
 var actualsLog = struct {
-	mu       sync.Mutex
-	peaksMB  []int
-	cpuUsec  []int64
-	recorded int
-}{}
+	mu          sync.Mutex
+	peaksMB     []int
+	peakByClaim map[string]int
+	cpuUsec     []int64
+	recorded    int
+}{peakByClaim: map[string]int{}}
 
-func recordActuals(_ context.Context, _, _ string, a sandbox.RunActuals) error {
+func recordActuals(_ context.Context, _, claimID string, a sandbox.RunActuals) error {
 	actualsLog.mu.Lock()
 	defer actualsLog.mu.Unlock()
 	actualsLog.recorded++
 	if a.PeakMemMB != nil {
 		actualsLog.peaksMB = append(actualsLog.peaksMB, *a.PeakMemMB)
+		actualsLog.peakByClaim[claimID] = *a.PeakMemMB
 	}
 	if a.CPUUsec != nil {
 		actualsLog.cpuUsec = append(actualsLog.cpuUsec, *a.CPUUsec)
@@ -376,9 +385,10 @@ type oomResult struct {
 }
 
 // oomVictimJSON is one victim's fate. mode is "oom-killed" (the jail died
-// under the kernel's killer), "alloc-failed" (gVisor surfaced the cgroup
-// limit as ENOMEM inside the jail and the run survived its own failure), or
-// "uncapped" (the allocation reached its target resident — the failure case).
+// under the kernel's killer), "jail-died" (the call's transport died with the
+// jail), "alloc-failed" (the allocating process failed inside the jail and
+// the run survived its own failure), or "reached-target" (the allocation
+// reached its target resident — the failure case).
 type oomVictimJSON struct {
 	Mode        string  `json:"mode"`
 	PeakMB      int     `json:"peak_mb"`
@@ -389,9 +399,9 @@ type oomVictimJSON struct {
 // their own cgroup ceiling while neighbors keep working. The contract under
 // test is containment, not a specific death: the ceiling must hold (the
 // victim's resident memory never exceeds it) and the failure must land
-// inside the offending run — as a kernel OOM kill of that jail, or as
-// gVisor surfacing ENOMEM to the allocating process — while no neighbor
-// takes an error and spawning stays flat.
+// inside the offending run — as a kernel OOM kill of that jail or of the
+// allocating process inside it, or as gVisor surfacing ENOMEM to that
+// process — while no neighbor takes an error and spawning stays flat.
 func runOOMTest(ctx context.Context, cfg benchConfig, getAbort func() string) error {
 	allocMB := cfg.oomVictimLimitMB * 2
 	fmt.Printf("oomtest: %d neighbors on the agent workload; %d victims with a %d MB ceiling allocating %d MB\n",
@@ -427,10 +437,12 @@ func runOOMTest(ctx context.Context, cfg benchConfig, getAbort func() string) er
 	}
 
 	killStart := time.Now()
-	// Track each victim's cgroup high-water mark while it grows: it is the
-	// arbiter between the possible outcomes. Peaking at the ceiling and
-	// dying is the kill; peaking at the ceiling and answering politely is
-	// in-jail allocation failure; sailing past it means no ceiling applied.
+	// Each victim's cgroup high-water is the arbiter between the possible
+	// outcomes. Peaking at the ceiling and dying is the kill; peaking at the
+	// ceiling and answering politely is a failure inside the jail; sailing
+	// past it means no ceiling applied. Its source is memory.peak, which
+	// teardown reads below. This poll of memory.current stands in for it on
+	// a kernel without memory.peak (< 5.19).
 	victimPeak := make([]int, len(victims))
 	sampleCtx, stopSampling := context.WithCancel(ctx)
 	var sampleWG sync.WaitGroup
@@ -439,7 +451,7 @@ func runOOMTest(ctx context.Context, cfg benchConfig, getAbort func() string) er
 		defer sampleWG.Done()
 		for sampleCtx.Err() == nil {
 			for i, v := range victims {
-				if s := sandbox.SampleRunCgroup(v.containerID); s.MemCurrentMB != nil && *s.MemCurrentMB > victimPeak[i] {
+				if s := v.jail.Sample(); s.MemCurrentMB != nil && *s.MemCurrentMB > victimPeak[i] {
 					victimPeak[i] = *s.MemCurrentMB
 				}
 			}
@@ -450,8 +462,10 @@ func runOOMTest(ctx context.Context, cfg benchConfig, getAbort func() string) er
 	// The wire outcome per victim: "jail-died" (transport error — the kill
 	// took the jail), "reached-target" (the grow printed its completion line
 	// — the ceiling never stopped it), or "alloc-failed" (any answered call
-	// that never reached target: gVisor surfaced the cgroup limit as ENOMEM
-	// and the allocating process failed inside the jail).
+	// that never reached target: the allocating process failed inside the
+	// jail, on ENOMEM from gVisor or under the kernel's OOM killer, which
+	// takes the host process running it and leaves the jail standing; a
+	// killed process answers with whatever it printed first).
 	wireOutcome := make([]string, len(victims))
 	var callWG sync.WaitGroup
 	for i, v := range victims {
@@ -494,22 +508,39 @@ func runOOMTest(ctx context.Context, cfg benchConfig, getAbort func() string) er
 	stopSampling()
 	sampleWG.Wait()
 
-	contained := 0
+	// Read each fate before reclaiming the victims: once teardown reaps a
+	// jail, OOMKilled reports any kill its cgroup recorded, including the
+	// kill of a process inside a jail that survived it.
 	outcomes := make([]oomVictimJSON, len(victims))
 	for i, v := range victims {
-		o := oomVictimJSON{PeakMB: victimPeak[i], Mode: wireOutcome[i]}
+		outcomes[i].Mode = wireOutcome[i]
 		if v.jail.OOMKilled() {
-			o.Mode = "oom-killed"
-			o.KillSeconds = time.Since(killStart).Seconds()
+			outcomes[i].Mode = "oom-killed"
+			outcomes[i].KillSeconds = time.Since(killStart).Seconds()
 		}
+	}
+
+	// Teardown stamps each victim's memory.peak. A victim can climb to its
+	// ceiling and be killed between two polls, so the poll is only a floor
+	// under it.
+	teardownAll(victims)
+	actualsLog.mu.Lock()
+	for i, v := range victims {
+		outcomes[i].PeakMB = victimPeak[i]
+		if p, ok := actualsLog.peakByClaim[v.claimID]; ok && p > outcomes[i].PeakMB {
+			outcomes[i].PeakMB = p
+		}
+	}
+	actualsLog.mu.Unlock()
+
+	contained := 0
+	for i, o := range outcomes {
 		// Containment = the breach was actually observed (a zero peak means
-		// the sampler never saw this victim — evidence of nothing), the
-		// ceiling held within the slack, AND the failure landed inside this
-		// run.
+		// no read saw this victim — evidence of nothing), the ceiling held
+		// within the slack, AND the failure landed inside this run.
 		if o.Mode != "reached-target" && o.PeakMB > 0 && o.PeakMB <= cfg.oomVictimLimitMB+oomPeakSlackMB {
 			contained++
 		}
-		outcomes[i] = o
 		fmt.Printf("  victim %d: %s · cgroup high-water %d MB (ceiling %d MB)\n", i, o.Mode, o.PeakMB, cfg.oomVictimLimitMB)
 	}
 
@@ -674,16 +705,21 @@ func startSandbox(ctx context.Context, cfg benchConfig, id int, driven bool) (*h
 		return fail(fmt.Errorf("write CA bundle: %w", err))
 	}
 
-	jail, err := agentproc.LaunchToolHost(ctx, agentproc.ToolHostOptions{
-		ConversationID:       conversationID,
-		Worktree:             worktree,
-		PrebuiltNetwork:      rn,
-		AgentHostSocket:      agentMount,
-		CABundle:             sandbox.Mount{Source: agenthost.CABundlePathFor(conversationID), Destination: sandbox.TrustedCABundleDestination, Options: []string{"ro"}},
-		MemoryLimitMB:        cfg.memLimitMB,
-		OrgID:                "bench",
-		ClaimID:              h.claimID,
-		RecordSandboxActuals: recordActuals,
+	memLimitMB := cfg.memLimitMB
+	if memLimitMB == 0 {
+		memLimitMB = agentproc.ClaimMemoryLimitMB()
+	}
+	// The workspace key is the conversation id the tree is rooted under: the
+	// broker accepts an ephemeral run tree only at the root its key names.
+	jail, err := gvisor.LaunchOnNetwork(ctx, rn, conversationID, cell.LaunchSpec{
+		WorkspaceKey:    conversationID,
+		RunTree:         worktree,
+		AgentHostSocket: agentMount.Source,
+		CABundle:        agenthost.CABundlePathFor(conversationID),
+		MemoryLimitMB:   memLimitMB,
+		OrgID:           "bench",
+		ClaimID:         h.claimID,
+		RecordActuals:   recordActuals,
 	})
 	if err != nil {
 		return fail(fmt.Errorf("launch tool host: %w", err))
@@ -705,15 +741,6 @@ func startSandbox(ctx context.Context, cfg benchConfig, id int, driven bool) (*h
 		return fail(fmt.Errorf("first tool call: %s", out.Protocol.Error()))
 	}
 	readyDur := time.Since(start)
-
-	// The registry entry is written before LaunchToolHost returns, so a miss
-	// here is a wiring bug — and a jail without a container id would silently
-	// vanish from cgroup sampling (skewed coefficients) and from the oomtest
-	// peak tracking (a hollow containment pass). Fail loudly instead.
-	h.containerID = containerIDFor(h.claimID)
-	if h.containerID == "" {
-		return fail(fmt.Errorf("no live-jail registry entry for claim %s", h.claimID))
-	}
 
 	if driven {
 		dctx, cancel := context.WithCancel(context.Background())
@@ -748,17 +775,6 @@ func runOneShot(ctx context.Context, cfg benchConfig, id int) error {
 		return fmt.Errorf("bash call failed: %s", out.ToolError)
 	}
 	return nil
-}
-
-// containerIDFor resolves the runsc container id for a claim through the
-// same registry the production resource sampler reads.
-func containerIDFor(claimID string) string {
-	for _, j := range agentproc.LiveJails() {
-		if j.ClaimID == claimID {
-			return j.ContainerID
-		}
-	}
-	return ""
 }
 
 // call dispatches one workload tool call, counts it, and reports whether the
@@ -1006,11 +1022,9 @@ func sampleSeries(ctx context.Context, live []*handle, total, step time.Duration
 	if total < step {
 		total = step
 	}
-	stats := make(map[string]*jailSeriesStat, len(live))
+	stats := make(map[*handle]*jailSeriesStat, len(live))
 	for _, h := range live {
-		if h.containerID != "" {
-			stats[h.containerID] = &jailSeriesStat{}
-		}
+		stats[h] = &jailSeriesStat{}
 	}
 
 	firstBusy, firstTotal, okFirst := readCPUStat()
@@ -1033,8 +1047,8 @@ func sampleSeries(ctx context.Context, live []*handle, total, step time.Duration
 		}
 
 		var tickMemSum, tickMemN int
-		for cid, st := range stats {
-			s := sandbox.SampleRunCgroup(cid)
+		for h, st := range stats {
+			s := h.jail.Sample()
 			if s.MemCurrentMB != nil {
 				tickMemSum += *s.MemCurrentMB
 				tickMemN++

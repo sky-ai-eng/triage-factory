@@ -60,6 +60,11 @@ const (
 	probeTimeout   = 2 // seconds, per in-jail connect attempt
 )
 
+// jailMemoryLimitMB caps every jail the suite launches, as production caps
+// every engagement's. A host that cannot set the ceiling runs the jail
+// without one, so no case depends on it.
+const jailMemoryLimitMB = 4096
+
 // Run runs every conformance case against h.Backend. Cases run one after
 // another and each tears down every cell it built before the next starts.
 func Run(t *testing.T, h Harness) {
@@ -472,6 +477,7 @@ func start(t *testing.T, h Harness, conversationID string) *liveCell {
 		AgentHostSocket:  agenthost.SocketPathFor(conversationID),
 		CABundle:         agenthost.CABundlePathFor(conversationID),
 		GHChannel:        gh,
+		MemoryLimitMB:    jailMemoryLimitMB,
 	})
 	if err != nil {
 		t.Fatalf("launch: %v", err)

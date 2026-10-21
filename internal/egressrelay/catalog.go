@@ -42,8 +42,8 @@ type CatalogEntry struct {
 	Config Config
 	// EnvKeys names every env KEY Env emits, without values. Declared
 	// separately because two consumers must reason about the keys before
-	// any relay has an address: buildSandboxEnv drops these keys from
-	// caller ExtraEnv (env duplicate resolution is first-wins on Linux
+	// any relay has an address: cell.JailEnv drops these keys from the
+	// caller's env (env duplicate resolution is first-wins on Linux
 	// and the relay's copy is appended last, so an inherited copy would
 	// win and point the tool at an unreachable host), and the broker env
 	// allowlist drift test checks each key is admitted. A catalog test
@@ -70,7 +70,7 @@ func Catalog() []CatalogEntry {
 // CatalogEnvKeys returns every env key any catalog entry emits — the
 // authoritative drop-list for env assemblers that must keep an inherited
 // copy of a relay key from shadowing the relay's own (see
-// agentproc.buildSandboxEnv).
+// cell.JailEnv).
 func CatalogEnvKeys() []string {
 	var keys []string
 	for _, e := range Catalog() {

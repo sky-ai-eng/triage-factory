@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/cabundle"
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
@@ -68,8 +69,8 @@ func requireGHInjectorLive(t *testing.T) (token, repo, denyRepo string) {
 	if repo == "" {
 		t.Skip("set TF_TEST_GH_REPO to an owner/repo the token can reach")
 	}
-	if _, err := os.Stat(hostGHBinaryPath); err != nil {
-		t.Skipf("pinned gh binary not present at %s: %v", hostGHBinaryPath, err)
+	if _, err := os.Stat(sandbox.TrustedGHBinaryPath()); err != nil {
+		t.Skipf("pinned gh binary not present at %s: %v", sandbox.TrustedGHBinaryPath(), err)
 	}
 	return token, repo, os.Getenv("TF_TEST_GH_DENY_REPO")
 }
@@ -144,7 +145,7 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 		"HOME=/work",
 		"GH_HOST=" + addr,
 		"GH_ENTERPRISE_TOKEN=" + placeholder,
-		"SSL_CERT_FILE=" + sandboxCABundle,
+		"SSL_CERT_FILE=" + cell.CABundlePath,
 		"GH_PROMPT_DISABLED=1",
 		"GH_NO_UPDATE_NOTIFIER=1",
 	}
@@ -157,8 +158,8 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 	}
 
 	mounts := []sandbox.Mount{
-		{Source: certPath, Destination: sandboxCABundle, Options: []string{"ro"}},
-		{Source: hostGHBinaryPath, Destination: sandboxGHBinary, Options: []string{"ro"}},
+		{Source: certPath, Destination: cell.CABundlePath, Options: []string{"ro"}},
+		{Source: sandbox.TrustedGHBinaryPath(), Destination: sandbox.TrustedGHBinaryDestination, Options: []string{"ro"}},
 	}
 
 	run := func(t *testing.T, args ...string) (string, error) {
@@ -169,7 +170,7 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 		lr, _, werr := sandbox.Wrap(ctx, sandbox.Config{
 			ConversationID: conversationID,
 			Worktree:       worktree,
-			Argv:           append([]string{sandboxGHBinary}, args...),
+			Argv:           append([]string{sandbox.TrustedGHBinaryDestination}, args...),
 			Env:            env,
 			ExtraMounts:    mounts,
 			Network:        net,
@@ -327,7 +328,7 @@ func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
 		// Portless: the whole point.
 		"GH_HOST=" + net.HostIP,
 		"GH_ENTERPRISE_TOKEN=" + placeholder,
-		"SSL_CERT_FILE=" + sandboxCABundle,
+		"SSL_CERT_FILE=" + cell.CABundlePath,
 		"GH_PROMPT_DISABLED=1",
 		"GH_NO_UPDATE_NOTIFIER=1",
 	}
@@ -341,11 +342,11 @@ func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
 		ConversationID: conversationID,
 		Worktree:       worktree,
 		// No -R: the repository has to come from the tree's own remote.
-		Argv: []string{sandboxGHBinary, "pr", "list", "--limit", "1"},
+		Argv: []string{sandbox.TrustedGHBinaryDestination, "pr", "list", "--limit", "1"},
 		Env:  env,
 		ExtraMounts: []sandbox.Mount{
-			{Source: certPath, Destination: sandboxCABundle, Options: []string{"ro"}},
-			{Source: hostGHBinaryPath, Destination: sandboxGHBinary, Options: []string{"ro"}},
+			{Source: certPath, Destination: cell.CABundlePath, Options: []string{"ro"}},
+			{Source: sandbox.TrustedGHBinaryPath(), Destination: sandbox.TrustedGHBinaryDestination, Options: []string{"ro"}},
 		},
 		Network: net,
 	})

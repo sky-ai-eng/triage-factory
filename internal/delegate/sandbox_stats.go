@@ -4,9 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
 // The per-sandbox resource series rides the instance-stat sampler's tick — the
@@ -15,19 +13,9 @@ import (
 // instance sampler, the series retunes with it, which is the only behavior
 // that can't drift into two policies for one family of telemetry.
 //
-// The two reads are silent, capability-free, and off the privsep hot path.
-// cgroup v2 stat files are world-readable, so the unprivileged orchestrator
-// reads them directly — the cap-broker's monopoly is on cgroup lifecycle and
-// mutation, never observation, so nothing here crosses the broker.
-
-// liveJailsFn and sampleJailFn are the sampler's two seams onto the live
-// sandboxes. Package vars so a test can inject a stand-in registry and count
-// how many cgroup reads a tick actually performs — the "idle costs nothing"
-// property is only meaningful if it's observable.
-var (
-	liveJailsFn  = agentproc.LiveJails
-	sampleJailFn = sandbox.SampleRunCgroup
-)
+// Each jail's Sample is silent, cheap and off the privsep hot path by
+// contract (cell.Jail), so a tick costs one read per live jail and nothing
+// when none is live.
 
 // sampleSandboxStatsOnce appends one row per live jail: what each sandbox is
 // holding right now (memory) and what it has spent in total (CPU). CPU is
@@ -39,12 +27,12 @@ var (
 //
 // Three ways this does nothing, all of them normal:
 //
-//   - No live jails — a control pod, or an idle executor. Zero cgroup reads,
-//     zero rows, no connection touched.
-//   - A jail that ended between the registry snapshot and its cgroup read. The
-//     files are gone with the group, so the sample carries nothing and no row
-//     is written for it. Silent: a warning here would fire once per finished
-//     run forever.
+//   - No live jails — a control pod, or an idle executor. Zero reads, zero
+//     rows, no connection touched.
+//   - A jail that is not running when it is read: one registered before it
+//     started, or one that ended between the snapshot and the read. Its
+//     sample carries nothing and no row is written for it. Silent: a warning
+//     here would fire once per finished run forever.
 //   - No store wired.
 //
 // Best-effort as a whole, and independent of the instance-stats write that
@@ -54,19 +42,19 @@ func (s *Spawner) sampleSandboxStatsOnce(ctx context.Context) {
 	if s.sandboxStats == nil {
 		return
 	}
-	jails := liveJailsFn()
+	jails := s.liveJails.snapshot()
 	if len(jails) == 0 {
 		return
 	}
 	at := time.Now().UTC()
 	batch := make([]domain.SandboxStat, 0, len(jails))
 	for _, j := range jails {
-		sample := sampleJailFn(j.ContainerID)
+		sample := j.jail.Sample()
 		if !sample.Observed() {
 			continue
 		}
 		batch = append(batch, domain.SandboxStat{
-			ClaimID:      j.ClaimID,
+			ClaimID:      j.claimID,
 			At:           at,
 			MemCurrentMB: sample.MemCurrentMB,
 			CPUUsecCum:   sample.CPUUsecCum,

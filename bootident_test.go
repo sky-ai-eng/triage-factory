@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
-	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // TestResolveBootIdentity pins the matrix. These three cells are the whole
@@ -64,15 +64,15 @@ func TestInRunSandbox_ExactMatch(t *testing.T) {
 		value string
 		want  bool
 	}{
-		{agentproc.SandboxMarkerEnvValue, true},
+		{runmode.SandboxMarkerEnvValue, true},
 		{"", false},
 		{"0", false},
 		{"true", false},
 		{"1 ", false},
 	} {
-		t.Setenv(agentproc.SandboxMarkerEnvVar, tc.value)
+		t.Setenv(runmode.SandboxMarkerEnvVar, tc.value)
 		if got := inRunSandbox(); got != tc.want {
-			t.Errorf("%s=%q: inRunSandbox() = %v, want %v", agentproc.SandboxMarkerEnvVar, tc.value, got, tc.want)
+			t.Errorf("%s=%q: inRunSandbox() = %v, want %v", runmode.SandboxMarkerEnvVar, tc.value, got, tc.want)
 		}
 	}
 }
@@ -150,7 +150,7 @@ func TestRunJailCLI_NoBootSpine(t *testing.T) {
 	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv(agentproc.SandboxMarkerEnvVar, agentproc.SandboxMarkerEnvValue)
+	t.Setenv(runmode.SandboxMarkerEnvVar, runmode.SandboxMarkerEnvValue)
 	t.Setenv("TF_MODE", "not-a-mode")
 	t.Setenv("TF_SECRET_ENCRYPTION_KEY_FILE", filepath.Join(home, "absent-secret"))
 
@@ -169,7 +169,7 @@ func TestRunJailCLI_NoBootSpine(t *testing.T) {
 func TestRunJailCLI_NoLocalStateForRefusedSubcommand(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv(agentproc.SandboxMarkerEnvVar, agentproc.SandboxMarkerEnvValue)
+	t.Setenv(runmode.SandboxMarkerEnvVar, runmode.SandboxMarkerEnvValue)
 	t.Setenv("TF_MODE", "not-a-mode")
 
 	err := run(context.Background(), []string{"/usr/local/bin/triagefactory", "migrate", "up"})

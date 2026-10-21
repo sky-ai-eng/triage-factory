@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
@@ -2073,7 +2072,11 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		}
 	}
 	if repoRow != nil && cfg.prNumber > 0 {
-		cfg.prCheckout = filepath.Join(root, cfg.owner, cfg.repo, worktree.PRRefSlug(cfg.prNumber))
+		// Found rather than built from the repository's name: a tree made
+		// before a rename holds the checkout under the name it was made under.
+		findCtx, cancelFind := context.WithTimeout(ctx, ledgerWriteTimeout)
+		cfg.prCheckout = s.taskCheckoutPath(findCtx, orgID, task.ID, root, repoRow.ID, cfg.owner, cfg.repo, worktree.PRRefSlug(cfg.prNumber))
+		cancelFind()
 		// This conversation gets its own conversation_worktrees row for the
 		// task's PR checkout. Push authority is per conversation: the gate reads
 		// the rows keyed to the one pushing and derives the ref from each

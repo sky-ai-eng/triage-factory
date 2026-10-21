@@ -94,7 +94,7 @@ func TestIntegration_StepSkillsMount_TwoStepBoundary(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = skills.RemoveStagedSkills(staging) })
 		// The staging dir is the orchestrator's own and closed to everyone
-		// else; the launch grants its group to this jail, as LaunchToolHost does.
+		// else; the launch grants its group to this jail, as the gVisor launch does.
 		if err := net.GrantStaging(ctx, staging); err != nil {
 			t.Fatalf("grant staging: %v", err)
 		}

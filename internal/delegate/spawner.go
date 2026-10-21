@@ -187,6 +187,9 @@ type Spawner struct {
 	// extension a silent no-op, and the instance sample on that tick is
 	// unaffected either way.
 	sandboxStats db.SandboxStatStore
+	// liveJails is every jail an engagement of this process is running,
+	// which the sandbox series samples on each tick.
+	liveJails liveJails
 	// pendingInput is the durable half of resume-by-enqueue (TFAC-585): the
 	// message recorded before a parked run's continuation is re-queued as
 	// ordinary claimable work. Wired unconditionally in NewSpawner — both
@@ -1045,9 +1048,6 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 	if err != nil {
 		return gitproxy.Decision{}, fmt.Errorf("github host read: %w", err)
 	}
-	// TODO(TFAC-1160): every read below matches the registry by name, so a
-	// fetch or push from a checkout that spells a renamed repository's old
-	// name is refused as untracked, its own task repository included.
 	tracks, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, info.TeamID, host, owner, repo)
 	if err != nil {
 		return gitproxy.Decision{}, fmt.Errorf("tracked-set read: %w", err)

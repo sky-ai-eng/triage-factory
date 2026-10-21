@@ -326,7 +326,7 @@ type GHChannelParams struct {
 	// CertSourcePath is the host path of the injector's trust file, which
 	// SSL_CERT_FILE points at as-is. Direct path only: a sandboxed run's gh
 	// trusts the injector through the run's CA bundle, which the jail gets
-	// whatever channels it has (ToolHostOptions.CABundle).
+	// whatever channels it has (cell.LaunchSpec.CABundle).
 	CertSourcePath string
 
 	// BinDir is the directory holding the TF-owned gh binary, prepended to the
@@ -673,7 +673,7 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// launched TF would otherwise hand the agent's `triagefactory exec`
 	// children a marker that makes them fail closed on an absent socket they
 	// were never supposed to have.
-	parentEnv := filterEnv(os.Environ(), []string{jscJITEnvKey, SandboxMarkerEnvVar})
+	parentEnv := filterEnv(os.Environ(), []string{jscJITEnvKey, runmode.SandboxMarkerEnvVar})
 	hookEnv = append(append([]string(nil), hookEnv...), agentRuntimeEnv()...)
 	if opts.LocalSandbox != nil {
 		// Re-add the marker the strip above removed, deliberately: this process
@@ -687,7 +687,7 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 		// The consequence the agent sees: every exec verb dials the run's
 		// agenthost socket instead of opening a database, no subcommand can
 		// reach the keychain, and every non-exec subcommand is refused by name.
-		hookEnv = append(hookEnv, SandboxMarkerEnvVar+"="+SandboxMarkerEnvValue)
+		hookEnv = append(hookEnv, runmode.SandboxMarkerEnvVar+"="+runmode.SandboxMarkerEnvValue)
 	}
 	// The real-gh channel rides the same lane. It is appended last of the
 	// run-scoped entries so its PATH — which must lead with the TF-owned gh

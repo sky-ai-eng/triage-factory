@@ -366,8 +366,8 @@ func TestRunNativeAgent_ToolHostLaunchFailureRecordsNothing(t *testing.T) {
 		t.Fatalf("GetSystem task: (%v, %v)", task, err)
 	}
 
-	// No prebuilt run network, which is what a broker that could not build
-	// one leaves behind — LaunchToolHost refuses on exactly that.
+	// No cell, which is what a broker that could not build one leaves
+	// behind — the native launch refuses on exactly that.
 	disp := f.s.runNativeAgent(context.Background(), f.conv.ID, *task, "do the thing", runConfig{
 		orgID:          runmode.LocalDefaultOrgID,
 		teamID:         runmode.LocalDefaultTeamID,

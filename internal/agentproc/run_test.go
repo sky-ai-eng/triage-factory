@@ -275,14 +275,14 @@ func TestConsumeStream_TrailingLineWithoutNewline(t *testing.T) {
 // supposed to have. Set in the parent env here, since inheritance is the
 // only way it could reach this path — nothing on the direct branch emits it.
 func TestNewDirectCommand_NeverCarriesSandboxMarker(t *testing.T) {
-	t.Setenv(SandboxMarkerEnvVar, SandboxMarkerEnvValue)
+	t.Setenv(runmode.SandboxMarkerEnvVar, runmode.SandboxMarkerEnvValue)
 
 	cmd, err := newDirectCommand(context.Background(), RunOptions{}, []string{"wrapper.mjs"})
 	if err != nil {
 		t.Fatalf("newDirectCommand: %v", err)
 	}
 	for _, kv := range cmd.Env {
-		if strings.HasPrefix(kv, SandboxMarkerEnvVar+"=") {
+		if strings.HasPrefix(kv, runmode.SandboxMarkerEnvVar+"=") {
 			t.Errorf("direct agent env carries %q; the marker means \"inside the jail\" and this path is not one", kv)
 		}
 	}

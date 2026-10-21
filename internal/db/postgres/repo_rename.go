@@ -194,7 +194,7 @@ func (s *repoStore) RenameSystem(ctx context.Context, orgID string, observed dom
 			}
 		}
 
-		if err := renameRepositoryRow(ctx, tx, orgID, renamed.id, observed, moved); err != nil {
+		if err := renameRepositoryRow(ctx, tx, orgID, renamed, observed, moved); err != nil {
 			return err
 		}
 		if moved {
@@ -212,11 +212,11 @@ func (s *repoStore) RenameSystem(ctx context.Context, orgID string, observed dom
 }
 
 // identityRow is one repository row carrying the provider identity a rename
-// keys on: its registry id, the slug it is stored under, and whether it is
-// retired.
+// keys on: its registry id, the slug it is stored under, its clone URL ("" for
+// none), which spells the slug too, and whether it is retired.
 type identityRow struct {
-	id, slug string
-	retired  bool
+	id, slug, cloneURL string
+	retired            bool
 }
 
 // storedRowsForIdentity returns every repository row carrying one provider
@@ -226,7 +226,7 @@ type identityRow struct {
 // to let the caller SAY that instead of silently picking a row.
 func storedRowsForIdentity(ctx context.Context, q queryer, orgID, source, host, externalID string) ([]identityRow, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, owner, repo, retired_at IS NOT NULL FROM repositories
+		SELECT id, owner, repo, COALESCE(clone_url, ''), retired_at IS NOT NULL FROM repositories
 		 WHERE org_id = $1 AND source = $2 AND host = $3 AND external_id = $4
 		 ORDER BY owner, repo
 		 FOR UPDATE
@@ -239,7 +239,7 @@ func storedRowsForIdentity(ctx context.Context, q queryer, orgID, source, host, 
 	for rows.Next() {
 		var r identityRow
 		var owner, repo string
-		if err := rows.Scan(&r.id, &owner, &repo, &r.retired); err != nil {
+		if err := rows.Scan(&r.id, &owner, &repo, &r.cloneURL, &r.retired); err != nil {
 			return nil, err
 		}
 		r.slug = owner + "/" + repo
@@ -353,27 +353,36 @@ func absorbBareRepository(ctx context.Context, q queryer, orgID string, occupant
 // points at that id, this UPDATE is the entire rename as far as the tracked
 // set, the worktree ledger and the pinned lists are concerned. It also clears
 // retired_at, which restores a retired row; moved=false is that restore alone,
-// and leaves the stored casing as it is.
+// and leaves the stored casing and clone URL as they are.
+//
+// The clone URL moves with the name. It spells the slug, and everything that
+// clones or restores a checkout clones from it, so left alone it would put the
+// old name back into every checkout made until profiling next rewrites it.
+// One it cannot read as the old slug's clone URL is left as it stands.
 //
 // The identity index refusing means a row took the slug after
 // repositoryHoldingSlug looked, which is the occupant refusal. The violation
 // aborts the transaction, which is what the refusal does anyway.
-func renameRepositoryRow(ctx context.Context, q queryer, orgID, id string, to domain.RepoRef, moved bool) error {
+func renameRepositoryRow(ctx context.Context, q queryer, orgID string, renamed identityRow, to domain.RepoRef, moved bool) error {
 	query, args := `
 		UPDATE repositories
 		   SET retired_at = NULL, updated_at = now()
-		 WHERE org_id = $1 AND id = $2`, []any{orgID, id}
+		 WHERE org_id = $1 AND id = $2`, []any{orgID, renamed.id}
 	if moved {
+		var cloneURL sql.NullString
+		if u, ok := domain.RewriteRepoCloneURL(renamed.cloneURL, to.Host, renamed.slug, to.Slug()); ok {
+			cloneURL = sql.NullString{String: u, Valid: true}
+		}
 		query, args = `
 		UPDATE repositories
-		   SET owner = $3, repo = $4, retired_at = NULL, updated_at = now()
-		 WHERE org_id = $1 AND id = $2`, []any{orgID, id, to.Owner, to.Repo}
+		   SET owner = $3, repo = $4, clone_url = COALESCE($5, clone_url), retired_at = NULL, updated_at = now()
+		 WHERE org_id = $1 AND id = $2`, []any{orgID, renamed.id, to.Owner, to.Repo, cloneURL}
 	}
 	if _, err := q.ExecContext(ctx, query, args...); err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: %s: %v", db.ErrRepoSlugOccupied, to.Slug(), err)
 		}
-		return fmt.Errorf("rename repositories[%s] -> %s: %w", id, to.Slug(), err)
+		return fmt.Errorf("rename repositories[%s] -> %s: %w", renamed.id, to.Slug(), err)
 	}
 	return nil
 }

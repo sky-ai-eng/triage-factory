@@ -163,9 +163,10 @@ type snapshotManifest struct {
 // RepositoryID is the repository's registry row id, which is what a restore
 // rebuilds against: the bare cache is keyed by it, and an owner/repo name can
 // belong to a different repository once the org's GitHub host changes. RepoID
-// is the owner/repo name the checkout sits under. Blobs written before the row
-// id was recorded carry RepoID alone; a restore resolves that name on the GitHub
-// host of the task's own entity.
+// is the owner/repo name the checkout sits under: the repository's name when
+// the checkout was made, which a rename since does not move. Blobs written
+// before the row id was recorded carry RepoID alone; a restore resolves that
+// name on the GitHub host of the task's own entity.
 type manifestCheckout struct {
 	RepositoryID string `json:"repository_id,omitempty"`
 	RepoID       string `json:"repo_id"`
@@ -267,6 +268,8 @@ type snapshotWrite struct {
 
 // snapshotCheckout is one checkout a snapshot captures.
 type snapshotCheckout struct {
+	// repoID is the owner/repo the checkout's directory is named by, as
+	// manifestCheckout.RepoID.
 	repositoryID, repoID, slug string
 	// rel is the checkout's path relative to the run root, slash-separated:
 	// <owner>/<repo>/<slug>.
@@ -277,11 +280,14 @@ type snapshotCheckout struct {
 
 // snapshotCheckouts resolves the checkouts a snapshot of root carries: the
 // conversation_worktrees rows of every conversation on the task, since a
-// blueprint's steps share one root. A row names a checkout by repo and slug;
-// the checkout is the one at <root>/<owner>/<repo>/<slug>, whatever path the
-// row recorded, because a row written on another host — or before a restore
-// rebuilt the root there — names the same checkout under a different root.
-// Deduplicated, keeping those that exist, in path order.
+// blueprint's steps share one root. A row names a checkout by the
+// <owner>/<repo>/<slug> its path ends in, looked for under root whatever root
+// the row recorded, because a row written on another host, or before a restore
+// rebuilt the root there, names the same checkout under a different root. The
+// owner/repo there is the name the checkout was made under, which a rename of
+// the repository since does not move, so a row whose path does not end in a
+// checkout under root is looked for under the repository's current name
+// instead. Deduplicated, keeping those that exist, in path order.
 //
 // A failed read is an error, not an empty set, and so is a checkout that cannot
 // be statted for any reason but its absence: a blob that silently lost a
@@ -297,28 +303,69 @@ func (s *Spawner) snapshotCheckouts(ctx context.Context, orgID, taskID, root str
 	seen := map[string]bool{}
 	var out []snapshotCheckout
 	for _, w := range rows {
-		owner, repo := parseOwnerRepo(w.RepoID)
-		rel := path.Join(owner, repo, w.Ref)
-		if owner == "" || repo == "" || !validCheckoutRel(rel, w.RepoID, w.Ref) || seen[rel] {
-			continue
+		var names []string
+		if recorded, ok := recordedCheckoutRepoID(w); ok {
+			names = append(names, recorded)
 		}
-		at := filepath.Join(root, filepath.FromSlash(rel))
-		fi, err := os.Lstat(at)
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
+		names = append(names, w.RepoID)
+		for _, repoID := range names {
+			owner, repo := parseOwnerRepo(repoID)
+			rel := path.Join(owner, repo, w.Ref)
+			if owner == "" || repo == "" || !validCheckoutRel(rel, repoID, w.Ref) {
+				continue
+			}
+			if seen[rel] {
+				break
+			}
+			at := filepath.Join(root, filepath.FromSlash(rel))
+			fi, err := os.Lstat(at)
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("stat checkout %s: %w", rel, err)
+			}
+			if !fi.IsDir() {
+				delegateLog.Warn("snapshot: a checkout's path is not a directory; it is not carried", "checkout", rel, "path", at)
+				continue
+			}
+			seen[rel] = true
+			out = append(out, snapshotCheckout{repositoryID: w.RepositoryID, repoID: repoID, slug: w.Ref, rel: rel, path: at})
+			break
 		}
-		if err != nil {
-			return nil, fmt.Errorf("stat checkout %s: %w", rel, err)
-		}
-		if !fi.IsDir() {
-			delegateLog.Warn("snapshot: a checkout's path is not a directory; it is not carried", "checkout", rel, "path", at)
-			continue
-		}
-		seen[rel] = true
-		out = append(out, snapshotCheckout{repositoryID: w.RepositoryID, repoID: w.RepoID, slug: w.Ref, rel: rel, path: at})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].rel < out[j].rel })
 	return out, nil
+}
+
+// recordedCheckoutRepoID is the owner/repo a ledger row's path names its
+// checkout's directory by: the two segments before the row's own slug at the
+// end of the path. ok is false for a path that does not end in the slug.
+func recordedCheckoutRepoID(w domain.ConversationWorktree) (string, bool) {
+	segs := strings.Split(filepath.ToSlash(filepath.Clean(w.Path)), "/")
+	if len(segs) < 3 || segs[len(segs)-1] != w.Ref {
+		return "", false
+	}
+	return segs[len(segs)-3] + "/" + segs[len(segs)-2], true
+}
+
+// taskCheckoutPath is where root holds the task's checkout of repositoryID at
+// slug, as snapshotCheckouts finds it, or <root>/<owner>/<repo>/<slug> under
+// the repository's current name when no row of the task names one there. A
+// checkout made before the repository was renamed stays under the name it was
+// made under.
+func (s *Spawner) taskCheckoutPath(ctx context.Context, orgID, taskID, root, repositoryID, owner, repo, slug string) string {
+	checkouts, err := s.snapshotCheckouts(ctx, orgID, taskID, root)
+	if err != nil {
+		delegateLog.Warn("find the task's checkout failed; assuming it sits under the repository's current name",
+			"task", taskID, "repository_id", repositoryID, "slug", slug, "error", err)
+	}
+	for _, c := range checkouts {
+		if c.repositoryID == repositoryID && c.slug == slug {
+			return c.path
+		}
+	}
+	return filepath.Join(root, owner, repo, slug)
 }
 
 // validCheckoutRel reports whether rel is exactly <owner>/<repo>/<slug> for
@@ -1082,9 +1129,10 @@ func writeCapturedMember(tw *tar.Writer, name string, data []byte, path string) 
 }
 
 // gitSeed is everything a cold rehydrate's git rebuild needs about one repo it
-// replays a checkout's delta onto: where the bare lives (owner/repo), the
-// upstream URL that seeds one when this executor has none, and the credential
-// that authenticates the network git the rebuild does.
+// replays a checkout's delta onto: the name GitHub knows the repository by
+// now (owner/repo), the upstream URL that seeds its bare when this executor
+// has none, and the credential that authenticates the network git the rebuild
+// does.
 //
 // auth covers more than one network hop — see worktree.RestoreCheckout. Seeding
 // a missing bare is the obvious one; the load-bearing one is that the shared
@@ -1099,8 +1147,12 @@ type gitSeed struct {
 }
 
 // gitSeedFor resolves the seed for one repository a rehydrate rebuilds a
-// checkout of, addressed by its registry row id. The clone URL comes from that
-// row (written in the org's configured protocol).
+// checkout of, addressed by its registry row id. The name and the clone URL
+// come from that row (the URL written in the org's configured protocol), not
+// from the owner/repo the manifest recorded: a repository renamed since the
+// capture is addressed by its new name, which is the one the engagement's
+// credentials are scoped to. owner/repo stand in only when the row cannot be
+// read.
 //
 // The auth is the engagement's own git-proxy routing, matching setupGitHub's
 // first clone. Multi resolves it from the credential sidecar; local resolves it
@@ -1120,7 +1172,7 @@ func (s *Spawner) gitSeedFor(ctx context.Context, orgID, repositoryID, owner, re
 		if profile, err := s.repos.GetSystem(ctx, orgID, repositoryID); err != nil {
 			delegateLog.Warn("load repository for workspace rehydrate failed; a missing bare cannot be seeded", "org", orgID, "repository_id", repositoryID, "repo", owner+"/"+repo, "error", err)
 		} else if profile != nil {
-			seed.cloneURL = profile.CloneURL
+			seed.owner, seed.repo, seed.cloneURL = profile.Owner, profile.Repo, profile.CloneURL
 		}
 	}
 	upstream := seed.cloneURL
@@ -1135,7 +1187,7 @@ func (s *Spawner) gitSeedFor(ctx context.Context, orgID, repositoryID, owner, re
 		// canonical form rather than hand it a URL it cannot route.
 		upstream = s.gitHostBaseFor(ctx, orgID)
 		if upstream != "" {
-			seed.cloneURL = strings.TrimRight(upstream, "/") + "/" + owner + "/" + repo + ".git"
+			seed.cloneURL = strings.TrimRight(upstream, "/") + "/" + seed.owner + "/" + seed.repo + ".git"
 		}
 		seed.auth = localChannels[0].cloneAuth(upstream)
 	}
@@ -1229,7 +1281,10 @@ type freshWorkspaceBuilder func(ctx context.Context) (string, error)
 // work:
 //
 //   - warm — the parked worktree survived on disk (the dormancy guards kept
-//     it). Returned as-is; nothing is rebuilt.
+//     it). Nothing is rebuilt; only the remotes of a checkout whose repository
+//     was renamed since are repointed: here, when this process can still write
+//     the tree (repointRenamedRemotes), and otherwise by the engagement from
+//     inside its jail before the loop starts (repointRenamedRemotesInJail).
 //   - rehydrated — it is gone (host loss, /tmp wipe, a startup sweep) but the
 //     durable snapshot is there, so the tree is rebuilt from it, every checkout
 //     it carries through restorer. A blob of an older layout is no snapshot:
@@ -1295,6 +1350,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 	if conv.WorktreePath != "" {
 		if _, err := os.Stat(conv.WorktreePath); err == nil {
 			if !worktree.IsGitWorktree(conv.WorktreePath) {
+				s.repointRenamedRemotes(ctx, orgID, conv.TaskID, conv.WorktreePath)
 				return conv.WorktreePath, domain.WorkspaceProvenanceWarm, nil, nil // warm: worktree still on disk
 			}
 			delegateLog.Warn("the warm run tree was laid out by an older binary; removing it and treating the workspace as gone",
@@ -1727,9 +1783,13 @@ func checkoutRepositories(ctx context.Context, restorer checkoutRestorer, checko
 // restoreOneCheckout rebuilds one manifest checkout through restoreCheckout,
 // resolving its seed and, for a pr-<N> checkout, its pull request. mc names
 // its repository row (checkoutRepositories).
+//
+// The checkout goes back where the manifest found it, under the owner/repo it
+// recorded, since that is the path the agent's transcript names. The pull
+// request is read under the seed's name, the repository's current one.
 func (s *Spawner) restoreOneCheckout(ctx context.Context, root, keyID, claimID string, restorer checkoutRestorer, mc manifestCheckout, staged map[string]string) (worktree.RestoredCheckout, error) {
 	owner, repo := parseOwnerRepo(mc.RepoID)
-	var seed gitSeed
+	seed := gitSeed{owner: owner, repo: repo}
 	if restorer.seed != nil {
 		seed = restorer.seed(ctx, mc.RepositoryID, owner, repo)
 	}
@@ -1743,7 +1803,7 @@ func (s *Spawner) restoreOneCheckout(ctx context.Context, root, keyID, claimID s
 		if restorer.pr == nil {
 			return worktree.RestoredCheckout{}, fmt.Errorf("restore %s: no GitHub client to read PR #%d with", mc.Path, prNumber)
 		}
-		pr, err := restorer.pr(ctx, owner, repo, prNumber)
+		pr, err := restorer.pr(ctx, seed.owner, seed.repo, prNumber)
 		switch {
 		case err == nil && pr != nil:
 			r.PR = &worktree.PRCheckout{HeadRef: pr.HeadRef, HeadCloneURL: prHeadCloneURL(seed.cloneURL, pr), BaseRef: pr.BaseRef}

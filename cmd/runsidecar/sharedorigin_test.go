@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
-	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
@@ -130,8 +130,8 @@ func TestRuntime_StartProxiesRoutesGitAtTheSharedOrigin(t *testing.T) {
 	if got := cfg["url."+base+".insteadOf"]; got != "https://github.com/" {
 		t.Errorf("insteadOf onto the shared origin = %q, want https://github.com/ (git config: %v)", got, cfg)
 	}
-	if got := cfg["http."+base+".sslCAInfo"]; got != agentproc.SandboxCABundlePath {
-		t.Errorf("sslCAInfo = %q, want the mounted CA bundle %q", got, agentproc.SandboxCABundlePath)
+	if got := cfg["http."+base+".sslCAInfo"]; got != cell.CABundlePath {
+		t.Errorf("sslCAInfo = %q, want the mounted CA bundle %q", got, cell.CABundlePath)
 	}
 	// The placeholder the git proxy authenticates — never the real token, on
 	// either half of the shared origin.

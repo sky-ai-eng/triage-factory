@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // bootIdentity names what this process IS, resolved once at the top of run()
@@ -87,5 +87,5 @@ func resolveBootIdentity(args []string, sandboxed bool) bootIdentity {
 // safe reading of that is "not sandboxed" — a truthy-looking stray export must
 // not take a host CLI down the jailed path.
 func inRunSandbox() bool {
-	return os.Getenv(agentproc.SandboxMarkerEnvVar) == agentproc.SandboxMarkerEnvValue
+	return os.Getenv(runmode.SandboxMarkerEnvVar) == runmode.SandboxMarkerEnvValue
 }

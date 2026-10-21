@@ -14,7 +14,8 @@ binary and installs the IPC client as `internal/sandbox`'s privileged ops),
 then per sandbox: seeds a worktree at `RunTreeRoot(rootKey)`, stands up the
 per-run network via `SetupRunNetwork`, binds an (unserved) agenthost socket
 at the broker's trusted per-run path, and launches the resident
-`tf-harness-tools serve` jail through `agentproc.LaunchToolHost`. Every
+`tf-harness-tools serve` jail through `gvisor.LaunchOnNetwork`, the gVisor
+cell's own launch on a network the bench built. Every
 launch therefore passes the broker's argv pin, env allowlist, worktree
 scope, and mount validation — the bench measures the launch users run, not
 a lookalike.
@@ -130,19 +131,28 @@ Victims get a small cgroup ceiling (`-oom-victim-limit-mb`, default 512)
 and grow past it in touched 32 MB chunks while neighbor jails keep running
 the agent workload; canaries bracket the breach. The contract under test is
 **containment**, not a specific death: the ceiling must hold and the
-failure must land inside the offending run — either a kernel OOM kill of
-that jail or gVisor surfacing ENOMEM to the allocator — with zero neighbor
-errors and a flat canary.
+failure must land inside the offending run — a kernel OOM kill of that
+jail or of the allocating process inside it, or gVisor surfacing ENOMEM
+to that process — with zero neighbor errors and a flat canary. Whether
+the ceiling held is judged on each victim cgroup's own `memory.peak`,
+which teardown reads: a victim can climb to its ceiling and be killed
+between two samples of `memory.current`.
 
-Measured outcome (2026-08-06, PASS 2/2): **gVisor turns the ceiling into
-in-jail allocation failure.** The sentry acquires application memory
-through fallible syscalls (memfd/charge) rather than page faults, so at
-`memory.max` the allocation fails inside the victim's own process — cgroup
-high-water pinned at 483 MB against the 512 MB ceiling with 1024 MB
-attempted, the jail **survived**, the tool returned an ordinary error the
-agent can react to, neighbors took zero errors, and the canary went
-491 → 447 ms across the breach. A leaking build costs its own run at worst
-— never a neighbor, never the host.
+Measured outcome (2026-10-21, kernel 7.0, PASS 2/2): **the kernel holds
+the ceiling by killing the allocating process, and the jail survives.**
+Each victim's cgroup peaked at exactly its 512 MB ceiling with 1024 MB
+attempted, within half a second of the allocation starting. The kernel's
+memory cgroup OOM killer then killed one host process in that cgroup: a
+systrap stub, the host process that runs the application's address space,
+not the sentry or the gofer. The growing `node` died of SIGKILL inside
+the jail (exit 137), the tool returned what it had printed, neighbors
+took zero errors, and the canary went 336 → 357 ms across the breach.
+
+On kernel 6.17 (2026-08-06) the same scenario ended in allocation failure
+instead: the allocation failed inside the victim's own process at a
+483 MB high-water, and the tool returned an ordinary error. Either way, a
+leaking build costs its own run at worst — never a neighbor, never the
+host.
 
 ## Caveats
 

@@ -60,10 +60,10 @@ func cloudTokenClient(base string) *Client {
 		WithOrg("org-1").WithCredential(AuthMethodCloudAPIToken)
 }
 
-func cloudOAuthClient(base string) *Client {
+func cloudOAuthClient(base string, app OAuthAppSource) *Client {
 	cfg := CloudOAuth("cloud-9", "acc")
 	cfg.BaseURL = base
-	return NewClient(cfg).WithOrg("org-1").WithCredential(AuthMethodCloudOAuth)
+	return NewClient(cfg).WithOrg("org-1").WithCredential(AuthMethodCloudOAuth).WithOAuthApp(app)
 }
 
 func dcPATClient(base string) *Client {
@@ -102,7 +102,7 @@ func meterForTest(t *testing.T) *sdkmetric.ManualReader {
 // refusals reads the refusal counter by bucket, failing t for a refusal
 // counted under any other upstream, org or credential than (jira, org-1,
 // credential).
-func refusals(t *testing.T, reader *sdkmetric.ManualReader, credential AuthMethod) map[string]int64 {
+func refusals(t *testing.T, reader *sdkmetric.ManualReader, credential string) map[string]int64 {
 	t.Helper()
 	out := map[string]int64{}
 	sum, ok := collectMetrics(t, reader)["upstream.rate_limit.refused"].(metricdata.Sum[int64])
@@ -113,7 +113,7 @@ func refusals(t *testing.T, reader *sdkmetric.ManualReader, credential AuthMetho
 		bucket, _ := dp.Attributes.Value(telemetry.Bucket("").Key)
 		want := attribute.NewSet(
 			telemetry.Upstream("jira"), telemetry.OrgID("org-1"),
-			telemetry.Credential(string(credential)), telemetry.Bucket(bucket.AsString()),
+			telemetry.Credential(credential), telemetry.Bucket(bucket.AsString()),
 		)
 		if !dp.Attributes.Equals(&want) {
 			t.Errorf("refusal counted under %v, want (jira, org-1, %s, <bucket>)",
@@ -225,11 +225,11 @@ func TestRecordBudgets_CloudQuotaNearLimit(t *testing.T) {
 	if err := myself(cloudTokenClient(srv.URL)); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if err := myself(cloudOAuthClient(srv.URL)); err != nil {
+	if err := myself(cloudOAuthClient(srv.URL, SourceDeployment)); err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	after := time.Now()
-	for _, credential := range []string{"cloud_api_token", "cloud_oauth"} {
+	for _, credential := range []string{"cloud_api_token", "cloud_oauth:deployment"} {
 		b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", credential, "quota")
 		near, known := b.NearLimit()
 		if !ok || !near || !known || !withinWindow(b.Reset, before, after, time.Hour) {
@@ -237,17 +237,70 @@ func TestRecordBudgets_CloudQuotaNearLimit(t *testing.T) {
 		}
 	}
 
-	if err := myself(cloudOAuthClient(srv.URL)); err != nil {
+	if err := myself(cloudOAuthClient(srv.URL, SourceDeployment)); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", "cloud_oauth", "quota")
+	b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", "cloud_oauth:deployment", "quota")
 	if near, known := b.NearLimit(); !ok || near || !known {
-		t.Errorf("cloud_oauth quota after a response without the header = (%+v, %v), want not near", b, ok)
+		t.Errorf("cloud_oauth:deployment quota after a response without the header = (%+v, %v), want not near", b, ok)
 	}
 }
 
+// TestRecordBudgets_CloudOAuthQuotaByApp: Atlassian meters a Cloud OAuth
+// token's quota by the OAuth app that minted it, so the quota is recorded
+// under whose app that is, the deployment's or the org's, and never under the
+// bare method, which cannot say whose quota it is. Both record the quota as
+// not near on a response without X-RateLimit-NearLimit. The burst reading is
+// the client's own credential's. A client that does not say which app minted
+// its token records no quota.
+func TestRecordBudgets_CloudOAuthQuotaByApp(t *testing.T) {
+	burst := map[string]string{"X-RateLimit-Limit": "350", "X-RateLimit-Remaining": "340"}
+	for _, tc := range []struct {
+		app        OAuthAppSource
+		credential string
+	}{
+		{SourceDeployment, "cloud_oauth:deployment"},
+		{SourceOrgOverride, "cloud_oauth:org"},
+	} {
+		t.Run(tc.credential, func(t *testing.T) {
+			upstream.ResetBudgetsForTest(t)
+			srv := scriptedServer(t, reply{header: burst})
+
+			if err := myself(cloudOAuthClient(srv.URL, tc.app)); err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", tc.credential, "quota")
+			if near, known := b.NearLimit(); !ok || near || !known {
+				t.Errorf("%s quota = (%+v, %v), want not near", tc.credential, b, ok)
+			}
+			if b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", "cloud_oauth", "quota"); ok {
+				t.Errorf("cloud_oauth quota = %+v, want none: the quota is the app's", b)
+			}
+			if b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", "cloud_oauth", "burst:myself"); !ok || b.Remaining != 340 || b.Limit != 350 {
+				t.Errorf("cloud_oauth burst:myself = (%+v, %v), want 340 of 350", b, ok)
+			}
+		})
+	}
+
+	t.Run("no app", func(t *testing.T) {
+		upstream.ResetBudgetsForTest(t)
+		srv := scriptedServer(t, reply{header: map[string]string{"X-RateLimit-NearLimit": "true"}})
+
+		if err := myself(cloudOAuthClient(srv.URL, SourceNone)); err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		readings, _ := upstream.ChangedReadings(0)
+		for _, r := range readings {
+			if r.Bucket == bucketQuota {
+				t.Errorf("recorded quota under %q for a client whose app is unknown", r.Credential)
+			}
+		}
+	})
+}
+
 // TestRecordBudgets_Cloud429Quota: a 429 for the quota records it as near,
-// with the reset X-RateLimit-Reset states, and is counted under its reason. A
+// with the reset X-RateLimit-Reset states, and is counted under its reason,
+// both under the credential of the OAuth app whose quota refused it. A
 // Retry-After past the inline cap is not waited on.
 func TestRecordBudgets_Cloud429Quota(t *testing.T) {
 	upstream.ResetBudgetsForTest(t)
@@ -259,14 +312,14 @@ func TestRecordBudgets_Cloud429Quota(t *testing.T) {
 		"Retry-After":       "2400",
 	}})
 
-	if err := myself(cloudOAuthClient(srv.URL)); err == nil {
+	if err := myself(cloudOAuthClient(srv.URL, SourceOrgOverride)); err == nil {
 		t.Fatal("get succeeded on a 429 past the wait cap")
 	}
-	b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", "cloud_oauth", "quota")
+	b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", "cloud_oauth:org", "quota")
 	if near, _ := b.NearLimit(); !ok || !near || !b.Reset.Equal(reset) {
 		t.Errorf("quota = (%+v, %v), want near, resetting at %v", b, ok, reset)
 	}
-	if got := refusals(t, reader, AuthMethodCloudOAuth); got[reasonQuotaTenant] != 1 || len(got) != 1 {
+	if got := refusals(t, reader, "cloud_oauth:org"); got[reasonQuotaTenant] != 1 || len(got) != 1 {
 		t.Errorf("refusals = %v, want one under %s", got, reasonQuotaTenant)
 	}
 }
@@ -296,7 +349,7 @@ func TestRecordBudgets_Cloud429Burst(t *testing.T) {
 	if !ok || b.Remaining != 0 || b.Limit != 350 || b.Reset.Before(before.Add(time.Second)) || !b.Reset.Before(before.Add(2*time.Second)) {
 		t.Errorf("%s = (%+v, %v), want 0 of 350 resetting a second after the refusal", bucket, b, ok)
 	}
-	if got := refusals(t, reader, AuthMethodCloudAPIToken); got[bucket] != 1 || len(got) != 1 {
+	if got := refusals(t, reader, string(AuthMethodCloudAPIToken)); got[bucket] != 1 || len(got) != 1 {
 		t.Errorf("refusals = %v, want one under %s", got, bucket)
 	}
 	sum, ok := collectMetrics(t, reader)["upstream.rate_limit.wait"].(metricdata.Sum[float64])
@@ -326,7 +379,7 @@ func TestRecordBudgets_UnrecognizedReasonsCountAsOther(t *testing.T) {
 			t.Fatal("get succeeded on a 429 past the wait cap")
 		}
 	}
-	if got := refusals(t, reader, AuthMethodCloudAPIToken); got[reasonOther] != 2 || got[reasonPerIssueWrite] != 1 || len(got) != 2 {
+	if got := refusals(t, reader, string(AuthMethodCloudAPIToken)); got[reasonOther] != 2 || got[reasonPerIssueWrite] != 1 || len(got) != 2 {
 		t.Errorf("refusals = %v, want 2 under other and 1 under %s", got, reasonPerIssueWrite)
 	}
 }
@@ -397,7 +450,7 @@ func TestRecordBudgets_DataCenterLimitingOff(t *testing.T) {
 	if err := myself(c); err == nil {
 		t.Fatal("get succeeded on a 429 past the wait cap")
 	}
-	if got := refusals(t, reader, AuthMethodDCPAT); got[bucketRequests] != 1 || len(got) != 1 {
+	if got := refusals(t, reader, string(AuthMethodDCPAT)); got[bucketRequests] != 1 || len(got) != 1 {
 		t.Errorf("refusals = %v, want one under requests", got)
 	}
 }

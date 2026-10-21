@@ -20,16 +20,15 @@ const jscJITEnvKey = "BUN_JSC_useJIT"
 // on JavaScriptCore, and with the JIT disabled its resident set shrinks
 // by roughly a fifth while startup time is unchanged — boot cost is
 // bundle parsing, not compilation, and agent workloads are I/O-bound
-// enough that interpreter-only execution is noise. Applied on both the
-// sandbox and direct paths (same engine either way); the node
-// supervisor passes its env through to the engine subprocess.
+// enough that interpreter-only execution is noise. The engine runs only
+// on the direct spawn path, never in a jail; the node supervisor passes
+// its env through to the engine subprocess.
 //
 // TF_AGENT_JSC_JIT=1 restores the JIT for operators whose workloads
 // regress under the interpreter.
 //
-// The engine runs on the same OS as this process (the sandbox path is
-// Linux-only by construction), so the host's GOOS decides whether the
-// tuning is safe to apply — see agentRuntimeEnvFor.
+// The engine runs on the same OS as this process, so the host's GOOS
+// decides whether the tuning is safe to apply — see agentRuntimeEnvFor.
 func agentRuntimeEnv() []string {
 	return agentRuntimeEnvFor(runtime.GOOS)
 }

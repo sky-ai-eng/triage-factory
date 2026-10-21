@@ -550,7 +550,7 @@ func parseOwnerRepo(s string) (string, string) {
 
 // agentVisibleCheckout translates a checkout's host path under hostRoot into
 // the path the agent sees, which differs under the sandbox: the run root is
-// mounted at agentproc.SandboxWorkRoot and the checkout sits at the same place
+// mounted at cell.WorkDir and the checkout sits at the same place
 // beneath it. "" for no checkout.
 func agentVisibleCheckout(hostRoot, checkout string) string {
 	if checkout == "" {

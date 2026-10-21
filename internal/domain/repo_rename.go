@@ -258,6 +258,86 @@ func RewriteRepoURL(rawURL, host, oldSlug, newSlug string) (string, bool) {
 	return u.String(), true
 }
 
+// RewriteRepoCloneURL rewrites the repository slug in a clone URL on host, a
+// GitHubHost value, in either form GitHub reports one: HTTPS
+// ("<host>/<owner>/<repo>.git") or SSH ("git@<hostname>:<owner>/<repo>.git",
+// or "ssh://git@<hostname>/<owner>/<repo>.git"). An SSH URL is on host when its
+// hostname is host's, since the two are served by the same deployment. The
+// path after the host must be the old slug, with or without ".git", which the
+// rewrite keeps.
+//
+// Reports false, with rawURL returned unchanged, for a URL on another host or
+// one whose path is not exactly the old slug: as with RewriteRepoURL, a value
+// TF never learned is left as it stands.
+func RewriteRepoCloneURL(rawURL, host, oldSlug, newSlug string) (string, bool) {
+	if oldSlug == "" || newSlug == "" {
+		return rawURL, false
+	}
+	h, err := url.Parse(host)
+	if err != nil || h.Hostname() == "" {
+		return rawURL, false
+	}
+	if GitHubURLOnHost(rawURL, host) {
+		u, err := url.Parse(rawURL)
+		if err != nil {
+			return rawURL, false
+		}
+		prefix := strings.TrimRight(h.Path, "/") + "/"
+		if !strings.HasPrefix(u.Path, prefix) {
+			return rawURL, false
+		}
+		p, ok := rewriteClonePath(u.Path[len(prefix):], oldSlug, newSlug)
+		if !ok {
+			return rawURL, false
+		}
+		u.Path = prefix + p
+		u.RawPath = ""
+		return u.String(), true
+	}
+	if strings.HasPrefix(rawURL, "ssh://") {
+		u, err := url.Parse(rawURL)
+		if err != nil || !strings.EqualFold(u.Hostname(), h.Hostname()) {
+			return rawURL, false
+		}
+		p, ok := rewriteClonePath(strings.TrimPrefix(u.Path, "/"), oldSlug, newSlug)
+		if !ok {
+			return rawURL, false
+		}
+		u.Path = "/" + p
+		u.RawPath = ""
+		return u.String(), true
+	}
+	if strings.Contains(rawURL, "://") {
+		return rawURL, false
+	}
+	authority, p, ok := strings.Cut(rawURL, ":")
+	if !ok {
+		return rawURL, false
+	}
+	hostname := authority
+	if at := strings.LastIndex(hostname, "@"); at >= 0 {
+		hostname = hostname[at+1:]
+	}
+	if !strings.EqualFold(hostname, h.Hostname()) {
+		return rawURL, false
+	}
+	p, ok = rewriteClonePath(p, oldSlug, newSlug)
+	if !ok {
+		return rawURL, false
+	}
+	return authority + ":" + p, true
+}
+
+// rewriteClonePath replaces a clone URL's path, the old slug with or without a
+// ".git" suffix, with the new slug carrying the same suffix.
+func rewriteClonePath(p, oldSlug, newSlug string) (string, bool) {
+	trimmed := strings.TrimSuffix(p, ".git")
+	if !strings.EqualFold(trimmed, oldSlug) {
+		return "", false
+	}
+	return newSlug + p[len(trimmed):], true
+}
+
 // GitHubURLOnHost reports whether rawURL is a link on host, a GitHubHost value
 // (scheme, authority and any context path, with no trailing slash). It is how a
 // stored link is placed on a GitHub deployment before anything in it is read
