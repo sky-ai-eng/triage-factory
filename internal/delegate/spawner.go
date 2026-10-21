@@ -1045,6 +1045,9 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 	if err != nil {
 		return gitproxy.Decision{}, fmt.Errorf("github host read: %w", err)
 	}
+	// TODO(TFAC-1160): every read below matches the registry by name, so a
+	// fetch or push from a checkout that spells a renamed repository's old
+	// name is refused as untracked, its own task repository included.
 	tracks, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, info.TeamID, host, owner, repo)
 	if err != nil {
 		return gitproxy.Decision{}, fmt.Errorf("tracked-set read: %w", err)
