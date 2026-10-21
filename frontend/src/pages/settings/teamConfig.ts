@@ -14,7 +14,7 @@
 
 import { apiFetch, apiJSON, apiListAll, httpErrorMessage } from '../../lib/apiClient'
 import type { JiraStatusRef, JiraStatusRuleValue } from '../../components/JiraStatusRule'
-import type { GitHubTeamCandidate } from '../../lib/githubTeams'
+import type { GitHubTeamCandidate, GitHubTeamRef } from '../../lib/githubTeams'
 import { registerRepository } from '../../lib/githubRepos'
 import type { RepoRef } from '../../lib/githubRepos'
 import type { LinearStateOption, LinearStateRef } from '../../lib/linearTeams'
@@ -52,12 +52,9 @@ export interface LinearTeamConfig {
   done: JiraStatusRuleValue<LinearStateRef>
 }
 
-// GitHubGroup is one stored GitHub-team → TF-team mapping row, the PUT
-// /github-groups wire shape.
-export interface GitHubGroup {
-  org_login: string
-  team_slug: string
-}
+// GitHubGroup is one stored GitHub-team → TF-team mapping row, the
+// GET /github-groups wire shape. The PUT names each by github_team_id.
+export type GitHubGroup = GitHubTeamRef
 
 // TeamConfigForm is the editable team-level field set the shared groups
 // drive. A container spreads each group's patch straight into this state.
@@ -528,8 +525,7 @@ export async function fetchTeamRepos(teamId: string): Promise<RepoRef[] | null> 
 // candidate list), or null on failure — for a container that needs the saved
 // set up front (e.g. a collapsed section's count + change-detection baseline)
 // without mounting the full GitHubTeamGroup checklist. Same null-vs-[] contract
-// as fetchTeamRepos: a failed load must not read as "maps nothing." (The GET
-// also re-triggers the server's deletion reconcile, same as the group's fetch.)
+// as fetchTeamRepos: a failed load must not read as "maps nothing."
 export async function fetchTeamGitHubGroups(teamId: string): Promise<GitHubGroup[] | null> {
   return apiJSON<TeamGitHubGroupsData>(`${teamPath(teamId)}/github-groups`)
     .then((data) => data.groups ?? [])
@@ -711,19 +707,29 @@ export async function saveTeamRepos(
   }
 }
 
+// TeamGitHubGroupsSaveResult carries the stored set back, with the names the
+// server holds for each team.
+export type TeamGitHubGroupsSaveResult =
+  | { ok: true; groups: GitHubGroup[] }
+  | { ok: false; error: string }
+
 // saveTeamGitHubGroups persists the GitHub-team → TF-team mappings via PUT
-// /api/teams/{id}/github-groups (a full replace-set).
+// /api/teams/{id}/github-groups (a full replace-set), naming each GitHub team
+// by GitHub's id. A mapping with no id (one the server has not identified, and
+// identifyGroups could not match to a candidate) cannot be named, so the save
+// drops it.
 export async function saveTeamGitHubGroups(
   teamId: string,
   groups: GitHubGroup[],
-): Promise<SaveResult> {
+): Promise<TeamGitHubGroupsSaveResult> {
   try {
-    await apiFetch(`${teamPath(teamId)}/github-groups`, {
+    const ids = [...new Set(groups.map((g) => g.github_team_id).filter((id) => id !== ''))]
+    const body = await apiJSON<{ groups?: GitHubGroup[] }>(`${teamPath(teamId)}/github-groups`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ groups }),
+      body: JSON.stringify({ github_team_ids: ids }),
     })
-    return { ok: true }
+    return { ok: true, groups: body.groups ?? [] }
   } catch (e) {
     return { ok: false, error: httpErrorMessage(e, 'Could not save the GitHub teams.') }
   }

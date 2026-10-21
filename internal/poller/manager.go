@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -957,27 +958,36 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	}
 }
 
-// reconcileGitHubGroups is the GitHub-team-deletion reconcile floor — the
-// "periodic refresh" trigger the reconcile lifecycle describes, run every
-// GitHub poll cycle so team_github_groups stays fresh for the routing layer
-// without depending on someone opening the settings page. For each distinct
-// GitHub org behind the configured repos it fetches the live team set and
-// prunes mapping rows pointing at teams that no longer exist.
+// reconcileGitHubGroups is the GitHub-team reconcile — the "periodic
+// refresh" trigger the reconcile lifecycle describes, run every GitHub poll
+// cycle so team_github_groups stays fresh for the routing layer without
+// depending on someone opening the settings page. For each distinct GitHub
+// org behind the configured repos it reads the organization and its live
+// team set, and hands both to ReconcileOrgTeamsSystem, which identifies a
+// local mapping stored before ids were recorded, refreshes the org login and
+// team slugs a rename moved, and deletes mappings of teams that no longer
+// exist — all by GitHub's ids. It runs before the cycle's diff, so the
+// mappings the cycle's events route by are already identified.
 //
 // Credentials resolve through the same per-owner resolver the poll dispatch
 // uses (App installation token → org PAT), so it's always the single
 // org-level identity — the editor can only create a mapping for a team that
 // identity can see, so a present team is never wrongly pruned. Non-destructive
 // on uncertainty: owners with no credential or an unreadable org are skipped,
-// a fetch error never prunes, and an empty team list is skipped (an empty
+// a read error never prunes, and an empty team list is skipped (an empty
 // result is ambiguous — a user account or zero visibility — where "delete
 // everything for this org" would be wrong). A non-empty list is the org
-// credential's authoritative view, so a missing slug is a real deletion.
+// credential's authoritative view, so a missing team id is a real deletion.
+//
+// An owner here is a repository owner's current login, the one boundary
+// where the organization is named by login: GitHub's endpoints take it. The
+// organization's id, which the mappings record, comes back from GET
+// /orgs/{org}, so a renamed organization's mappings are found under its id.
 //
 // host is the org's current GitHub host, which repos are on and which the
-// credential lists teams of; only the mappings saved for it are pruned against
-// that list, so another host's mappings are never compared with this one's
-// teams.
+// credential lists teams of; only the mappings saved for it are reconciled
+// against that list, so another host's mappings are never compared with this
+// one's teams.
 func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID, host string, repos []string) {
 	if m.githubGroups == nil {
 		return
@@ -1003,17 +1013,24 @@ func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID, host string,
 			githubGroupsLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "list teams for owner failed; skipping reconcile", "org", orgID, "owner", owner, "error", err)
 			continue
 		}
-		slugs := make([]string, 0, len(teams))
-		for _, t := range teams {
-			if t.Slug != "" {
-				slugs = append(slugs, t.Slug)
-			}
-		}
-		if len(slugs) == 0 {
+		if len(teams) == 0 {
 			continue
 		}
-		if n, err := m.githubGroups.PruneMissingSystem(ctx, orgID, host, owner, slugs); err != nil {
-			githubGroupsLog.Warn("reconcile prune failed", "org", orgID, "owner", owner, "error", err)
+		org, err := client.GetOrg(ctx, owner)
+		if err != nil {
+			githubGroupsLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "read organization for owner failed; skipping reconcile", "org", orgID, "owner", owner, "error", err)
+			continue
+		}
+		listing := domain.GitHubOrgTeams{
+			OrgID:    strconv.FormatInt(org.ID, 10),
+			OrgLogin: org.Login,
+			Teams:    make([]domain.GitHubTeam, 0, len(teams)),
+		}
+		for _, t := range teams {
+			listing.Teams = append(listing.Teams, domain.GitHubTeam{ID: strconv.FormatInt(t.ID, 10), Slug: t.Slug})
+		}
+		if n, err := m.githubGroups.ReconcileOrgTeamsSystem(ctx, orgID, host, listing); err != nil {
+			githubGroupsLog.Warn("reconcile failed", "org", orgID, "owner", owner, "error", err)
 		} else if n > 0 {
 			githubGroupsLog.Info("pruned stale mappings for deleted github teams", "org", orgID, "owner", owner, "pruned", n)
 		}

@@ -102,6 +102,10 @@ func TestMigrate_ProviderScopesMatchGo(t *testing.T) {
 				`SELECT repository_id FROM entities WHERE id = 'e-github'`:          "r1",
 				`SELECT host FROM team_github_groups WHERE team_id = 'team-1'`:      githubHost,
 				`SELECT host FROM placement_overrides WHERE key_value = 'octo/api'`: githubHost,
+				// A mapping keeps its handle and carries no GitHub ids until the
+				// poll's team reconcile identifies it.
+				`SELECT COALESCE(github_team_id, 'none') || ' ' || COALESCE(github_org_id, 'none') || ' ' || github_org_login || '/' || github_team_slug
+				   FROM team_github_groups WHERE team_id = 'team-1'`: "none none octo/core",
 			}
 			if siteOK {
 				want[`SELECT scope FROM entities WHERE id = 'e-jira'`] = site

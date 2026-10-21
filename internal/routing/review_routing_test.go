@@ -234,7 +234,7 @@ func TestReviewRequested_TeamRoutesToMappedTFTeams(t *testing.T) {
 	teamA := runmode.LocalDefaultTeamID
 	teamBackend := seedTeam(t, database, "backend-tf")
 	if err := sqlitestore.New(database).TeamGitHubGroups.SetForTeam(context.Background(), teamBackend, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
-		{OrgLogin: "acme", TeamSlug: "backend"},
+		{GitHubTeamID: "11", GitHubOrgID: "9", OrgLogin: "acme", TeamSlug: "backend"},
 	}); err != nil {
 		t.Fatalf("map github team: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestReviewRequested_PerReviewerDistinctTasks(t *testing.T) {
 	seedUserOnTeam(t, database, teamAlice, "alice")
 	seedUserOnTeam(t, database, teamBob, "bob")
 	if err := sqlitestore.New(database).TeamGitHubGroups.SetForTeam(context.Background(), teamBackend, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
-		{OrgLogin: "acme", TeamSlug: "backend"},
+		{GitHubTeamID: "11", GitHubOrgID: "9", OrgLogin: "acme", TeamSlug: "backend"},
 	}); err != nil {
 		t.Fatalf("map github team: %v", err)
 	}

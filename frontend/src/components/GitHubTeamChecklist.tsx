@@ -1,6 +1,11 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { RotateCw } from 'lucide-react'
-import { keyOf, type GitHubTeamCandidate } from '../lib/githubTeams'
+import {
+  groupKey,
+  handleOf,
+  type GitHubTeamCandidate,
+  type GitHubTeamRef,
+} from '../lib/githubTeams'
 import SearchField from './SearchField'
 
 // Teams larger than this get a "broad team — noisy queue" hint. Fixed, not
@@ -22,10 +27,10 @@ interface Row extends GitHubTeamCandidate {
 interface Props {
   /** Live org-wide GitHub teams from the github-groups GET. */
   candidates: GitHubTeamCandidate[]
-  /** Currently-checked mappings, keyed `keyOf(org, slug)`. */
-  selected: Set<string>
+  /** Currently-checked mappings. */
+  selected: GitHubTeamRef[]
   /** Toggle one team's membership in the selection. */
-  onToggle: (org: string, slug: string) => void
+  onToggle: (team: GitHubTeamRef) => void
   /** Fetch in flight — renders skeleton rows in place of the list. */
   loading?: boolean
   /** Fetch error — renders the message plus a Retry that calls onRetry. */
@@ -49,20 +54,18 @@ interface Props {
   bare?: boolean
 }
 
-// GitHubTeamChecklist is the shared body for BOTH GitHub-team → TF-team
-// mapping surfaces: the onboarding wizard (GitHubTeamSelector) and the
-// controlled team-config group (GitHubTeamGroup, used in the Settings team
-// tab + the setup wizard's team steps). It owns every behavior common to the
-// two — search, a selected/unselected/all filter, a bounded scrollable list,
-// the badges (your team / member count / noisy / stale), and the loading / error /
-// empty states — so the wrappers differ only in chrome (header copy, footer
-// vs. controlled value) and how they seed the selection.
+// GitHubTeamChecklist is the body of the GitHub-team → TF-team mapping group
+// (GitHubTeamGroup, used in the Settings team tab + the setup wizard's team
+// step). It owns search, a selected/unselected/all filter, a bounded
+// scrollable list, the badges (your team / member count / noisy / stale), and
+// the loading / error / empty states.
 //
-// Rows are always alphabetical by `org/slug`. A selected mapping GitHub no
-// longer returns (a team deleted since the last poll, or a repo whose org
-// the token can't read) still renders, flagged "not on GitHub" — so an
-// admin can always un-assign a stale mapping. Both surfaces get this for
-// free; before unification only Settings did.
+// A row is a GitHub team, identified by GitHub's team id (groupKey); the
+// org/slug it shows is the team's current handle. Rows are always
+// alphabetical by that handle. A selected mapping GitHub no longer returns (a
+// team deleted since the last poll, or a repo whose org the token can't read)
+// still renders, flagged "not on GitHub" — so an admin can always un-assign a
+// stale mapping.
 export default function GitHubTeamChecklist({
   candidates,
   selected,
@@ -79,21 +82,25 @@ export default function GitHubTeamChecklist({
   const [search, setSearch] = useState('')
   const [mode, setMode] = useState<FilterMode>('all')
 
+  const selectedKeys = useMemo(() => new Set(selected.map(groupKey)), [selected])
+
   // Merge live candidates with any selected mapping GitHub didn't return,
-  // then sort A–Z. Keyed dedup so a candidate that's also selected appears
-  // once (as a non-orphan candidate, not a stale row).
+  // then sort A–Z by handle. Keyed dedup so a candidate that's also selected
+  // appears once (as a non-orphan candidate, not a stale row).
   const rows = useMemo<Row[]>(() => {
     const byKey = new Map<string, Row>()
     for (const c of candidates) {
-      byKey.set(keyOf(c.org_login, c.team_slug), { ...c, orphan: false })
+      byKey.set(groupKey(c), { ...c, orphan: false })
     }
-    for (const k of selected) {
+    for (const g of selected) {
+      const k = groupKey(g)
       if (byKey.has(k)) continue
-      const [org_login, team_slug] = k.split('/')
-      byKey.set(k, { org_login, team_slug, name: '', orphan: true })
+      byKey.set(k, { ...g, name: '', orphan: true })
     }
-    return Array.from(byKey.values()).sort((a, b) =>
-      keyOf(a.org_login, a.team_slug).localeCompare(keyOf(b.org_login, b.team_slug)),
+    return Array.from(byKey.values()).sort(
+      (a, b) =>
+        handleOf(a).toLowerCase().localeCompare(handleOf(b).toLowerCase()) ||
+        groupKey(a).localeCompare(groupKey(b)),
     )
   }, [candidates, selected])
 
@@ -102,13 +109,13 @@ export default function GitHubTeamChecklist({
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase()
     return rows.filter((r) => {
-      const k = keyOf(r.org_login, r.team_slug)
-      if (mode === 'selected' && !selected.has(k)) return false
-      if (mode === 'unselected' && selected.has(k)) return false
+      const k = groupKey(r)
+      if (mode === 'selected' && !selectedKeys.has(k)) return false
+      if (mode === 'unselected' && selectedKeys.has(k)) return false
       if (!q) return true
-      return k.includes(q) || (r.name || '').toLowerCase().includes(q)
+      return handleOf(r).toLowerCase().includes(q) || (r.name || '').toLowerCase().includes(q)
     })
-  }, [rows, search, mode, selected])
+  }, [rows, search, mode, selectedKeys])
 
   // Loading / error / empty pre-empt the controls — there's nothing to
   // search or filter yet. Rendered inside the same flex root so the
@@ -163,8 +170,8 @@ export default function GitHubTeamChecklist({
 
   const segments: { mode: FilterMode; label: string; count?: number }[] = [
     { mode: 'all', label: 'All', count: rows.length },
-    { mode: 'selected', label: 'Selected', count: selected.size },
-    { mode: 'unselected', label: 'Unselected', count: rows.length - selected.size },
+    { mode: 'selected', label: 'Selected', count: selectedKeys.size },
+    { mode: 'unselected', label: 'Unselected', count: rows.length - selectedKeys.size },
   ]
 
   return (
@@ -255,8 +262,8 @@ export default function GitHubTeamChecklist({
           </p>
         ) : (
           visible.map((team) => {
-            const k = keyOf(team.org_login, team.team_slug)
-            const isChecked = selected.has(k)
+            const k = groupKey(team)
+            const isChecked = selectedKeys.has(k)
             const noisy = (team.member_count ?? 0) > NOISY_TEAM_THRESHOLD
             return (
               <button
@@ -265,7 +272,7 @@ export default function GitHubTeamChecklist({
                 role="checkbox"
                 aria-checked={isChecked}
                 disabled={disabled}
-                onClick={() => onToggle(team.org_login, team.team_slug)}
+                onClick={() => onToggle(team)}
                 className={`w-full flex items-start gap-3 px-3 py-2.5 text-left rounded-xl transition-colors hover:bg-tint-2 disabled:cursor-not-allowed disabled:opacity-60 ${
                   isChecked ? 'bg-warm/[0.04]' : ''
                 }`}

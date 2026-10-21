@@ -3,8 +3,9 @@
 -- Every external object is keyed within the provider namespace it lives in, a
 -- GitHub entity references its repository's registry row and records its pull
 -- request's node id, a repository row can be retired to give up a name GitHub
--- has handed to another repository, a team's Jira tracked set and every Jira
--- issue entity reference a Jira project registry row, every Jira and Linear
+-- has handed to another repository, a GitHub team mapping records GitHub's
+-- ids for the team and its organization, a team's Jira tracked set and every
+-- Jira issue entity reference a Jira project registry row, every Jira and Linear
 -- issue entity is written with its issue id, pull request, review and branch
 -- artifacts are keyed on ids rather than their repository's name, every
 -- artifact references the entity it is about and Jira artifacts keyed on an
@@ -290,7 +291,8 @@ CREATE UNIQUE INDEX org_linear_installs_workspace_live
 --                                 section 5, once the Jira project registry
 --                                 a Jira row references exists.
 --   repositories                  host
---   team_github_groups            host
+--   team_github_groups            host, and GitHub's ids for the team and
+--                                 its organization (section 3d)
 --   org_github_app_installations  github_host joins the primary key
 --   reachable_repositories,       host on every row
 --     reachable_scopes
@@ -663,19 +665,35 @@ SELECT entity_id, issue_id
  WHERE n = 1;
 
 -- ---------------------------------------------------------------------------
--- 3d. team_github_groups.host
+-- 3d. team_github_groups: host, and GitHub's ids for the team
 -- ---------------------------------------------------------------------------
 --
 -- A mapping names a GitHub organization by login, which another host can
--- reuse. Rebuilt because host joins the primary key.
+-- reuse, and a team by a slug GitHub changes when the team is renamed. So a
+-- row records its host, and GitHub's ids for the team (github_team_id) and
+-- for its organization (github_org_id), which routing and the deletion
+-- reconcile match on; the login and slug are display values. Rebuilt because
+-- the key changes.
+--
+-- The rows copied here carry no ids, since only GitHub can say which team a
+-- slug names. The GitHub poll's team reconcile fills them in once, matching
+-- the row's org login and slug against the organization's team listing, and
+-- never deletes a row it has not identified. Until then routing matches the
+-- row by its login and slug. The store refuses a new row without its ids, so
+-- a NULL is always a row copied here.
 CREATE TABLE team_github_groups_new (
     team_id          TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
     host             TEXT NOT NULL,
+    github_team_id   TEXT,
+    github_org_id    TEXT,
     github_org_login TEXT NOT NULL,
     github_team_slug TEXT NOT NULL,
     created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (team_id, host, github_org_login, github_team_slug),
+    UNIQUE (team_id, host, github_team_id),
     CONSTRAINT tgg_host_populated CHECK (host <> ''),
+    CONSTRAINT tgg_ids_together CHECK ((github_team_id IS NULL) = (github_org_id IS NULL)),
+    CONSTRAINT tgg_team_id_populated CHECK (github_team_id <> ''),
+    CONSTRAINT tgg_org_id_populated CHECK (github_org_id <> ''),
     CONSTRAINT tgg_org_login_populated CHECK (github_org_login <> ''),
     CONSTRAINT tgg_team_slug_populated CHECK (github_team_slug <> '')
 );
@@ -688,6 +706,10 @@ SELECT g.team_id, s.scope, g.github_org_login, g.github_team_slug, g.created_at
 
 DROP TABLE team_github_groups;
 ALTER TABLE team_github_groups_new RENAME TO team_github_groups;
+
+-- Routing's lookup: which teams a GitHub team's review requests route to. The
+-- unique key leads with team_id and cannot serve it.
+CREATE INDEX team_github_groups_github_team_idx ON team_github_groups (host, github_team_id);
 
 -- ---------------------------------------------------------------------------
 -- 3e. GitHub App installations and the reachable-repo cache

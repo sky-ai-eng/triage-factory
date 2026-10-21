@@ -139,7 +139,10 @@ func (s *Server) userTeamsMulti(ctx context.Context, orgID, userID string) ([]gh
 			continue
 		}
 		for _, t := range teams {
-			key := strings.ToLower(t.OrgSlug + "/" + t.TeamSlug)
+			key := t.ID
+			if key == "" {
+				key = strings.ToLower(t.OrgSlug + "/" + t.TeamSlug)
+			}
 			if _, dup := seen[key]; dup {
 				continue
 			}

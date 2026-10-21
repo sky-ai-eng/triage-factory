@@ -394,7 +394,7 @@ func (r *Router) requestedPartyTeams(ctx context.Context, orgID string, evt doma
 			routerLog.Error("requested party: resolve github host failed", "event_type", evt.EventType, "team", team, "error", err)
 			return nil, false, fmt.Errorf("github host for %s: %w", team, err)
 		}
-		tids, err := r.githubGroups.TeamsForGroupSystem(ctx, orgID, host, orgLogin, slug)
+		tids, err := r.githubGroups.TeamsForGitHubTeamSystem(ctx, orgID, host, "", orgLogin, slug)
 		if err != nil {
 			routerLog.Error("requested party: github-team mapping lookup failed", "event_type", evt.EventType, "team", team, "error", err)
 			return nil, false, fmt.Errorf("github-team mapping for %s: %w", team, err)

@@ -101,7 +101,7 @@ func (r *storeReviewerResolver) KnownTeam(orgLogin, slug string) bool {
 	if r.groups == nil {
 		return false
 	}
-	teams, err := r.groups.TeamsForGroupSystem(r.ctx, r.orgID, r.host, orgLogin, slug)
+	teams, err := r.groups.TeamsForGitHubTeamSystem(r.ctx, r.orgID, r.host, "", orgLogin, slug)
 	if err != nil {
 		trackerLog.Warn("reviewer resolve: team lookup failed", "org_login", orgLogin, "slug", slug, "org", r.orgID, "error", err)
 		return false

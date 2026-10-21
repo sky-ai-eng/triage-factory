@@ -254,7 +254,7 @@ func TestTeamGitHubGroupsStore_Postgres_SetForTeam_TeamAdminGated(t *testing.T) 
 	pgtest.AddOrgMember(t, h, member, orgID, teamID, "member", "member")
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	seed := []domain.TeamGitHubGroup{{OrgLogin: "acme", TeamSlug: "backend"}}
+	seed := []domain.TeamGitHubGroup{{GitHubTeamID: "11", GitHubOrgID: "9", OrgLogin: "acme", TeamSlug: "backend"}}
 	if err := stores.TeamGitHubGroups.SetForTeam(context.Background(), teamID, dbtest.TestGitHubHost, seed); err != nil {
 		t.Fatalf("owner seed SetForTeam: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestTeamGitHubGroupsStore_Postgres_SetForTeam_TeamAdminGated(t *testing.T) 
 	err := h.WithUser(t, member, orgID, func(tx *sql.Tx) error {
 		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
 		return stores.TeamGitHubGroups.SetForTeam(context.Background(), teamID, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
-			{OrgLogin: "acme", TeamSlug: "frontend"},
+			{GitHubTeamID: "12", GitHubOrgID: "9", OrgLogin: "acme", TeamSlug: "frontend"},
 		})
 	})
 	if err == nil {
@@ -289,7 +289,7 @@ func TestTeamGitHubGroupsStore_Postgres_SetForTeam_TeamAdminGated(t *testing.T) 
 	err = h.WithUser(t, owner, orgID, func(tx *sql.Tx) error {
 		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
 		return stores.TeamGitHubGroups.SetForTeam(context.Background(), teamID, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
-			{OrgLogin: "acme", TeamSlug: "frontend"},
+			{GitHubTeamID: "12", GitHubOrgID: "9", OrgLogin: "acme", TeamSlug: "frontend"},
 		})
 	})
 	if err != nil {
@@ -310,12 +310,12 @@ func TestTeamGitHubGroupsStore_Postgres_SelectIsTeamScoped(t *testing.T) {
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	if err := stores.TeamGitHubGroups.SetForTeam(context.Background(), teamA, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
-		{OrgLogin: "acme", TeamSlug: "backend"},
+		{GitHubTeamID: "11", GitHubOrgID: "9", OrgLogin: "acme", TeamSlug: "backend"},
 	}); err != nil {
 		t.Fatalf("seed teamA: %v", err)
 	}
 	if err := stores.TeamGitHubGroups.SetForTeam(context.Background(), teamB, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
-		{OrgLogin: "acme", TeamSlug: "frontend"},
+		{GitHubTeamID: "12", GitHubOrgID: "9", OrgLogin: "acme", TeamSlug: "frontend"},
 	}); err != nil {
 		t.Fatalf("seed teamB: %v", err)
 	}
@@ -358,45 +358,45 @@ func TestTeamGitHubGroupsStore_Postgres_ManyToOneRouting(t *testing.T) {
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	if err := stores.TeamGitHubGroups.SetForTeam(context.Background(), teamA, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
-		{OrgLogin: "acme", TeamSlug: "backend"},
-		{OrgLogin: "acme", TeamSlug: "frontend"},
-		{OrgLogin: "acme", TeamSlug: "platform"},
+		{GitHubTeamID: "11", GitHubOrgID: "9", OrgLogin: "acme", TeamSlug: "backend"},
+		{GitHubTeamID: "12", GitHubOrgID: "9", OrgLogin: "acme", TeamSlug: "frontend"},
+		{GitHubTeamID: "13", GitHubOrgID: "9", OrgLogin: "acme", TeamSlug: "platform"},
 	}); err != nil {
 		t.Fatalf("seed teamA: %v", err)
 	}
 	// Shared backlog: platform also funnels into teamB.
 	if err := stores.TeamGitHubGroups.SetForTeam(context.Background(), teamB, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
-		{OrgLogin: "acme", TeamSlug: "platform"},
+		{GitHubTeamID: "13", GitHubOrgID: "9", OrgLogin: "acme", TeamSlug: "platform"},
 	}); err != nil {
 		t.Fatalf("seed teamB: %v", err)
 	}
 
 	ctx := context.Background()
-	for _, slug := range []string{"backend", "frontend", "platform"} {
-		teams, err := stores.TeamGitHubGroups.TeamsForGroupSystem(ctx, orgID, dbtest.TestGitHubHost, "acme", slug)
+	for _, id := range []string{"11", "12", "13"} {
+		teams, err := stores.TeamGitHubGroups.TeamsForGitHubTeamSystem(ctx, orgID, dbtest.TestGitHubHost, id, "", "")
 		if err != nil {
-			t.Fatalf("TeamsForGroupSystem(%s): %v", slug, err)
+			t.Fatalf("TeamsForGitHubTeamSystem(%s): %v", id, err)
 		}
 		if !contains(teams, teamA) {
-			t.Errorf("TeamsForGroupSystem(acme/%s) = %v; want it to include teamA %s", slug, teams, teamA)
+			t.Errorf("TeamsForGitHubTeamSystem(%s) = %v; want it to include teamA %s", id, teams, teamA)
 		}
 	}
 	// platform resolves to BOTH teams (shared).
-	teams, err := stores.TeamGitHubGroups.TeamsForGroupSystem(ctx, orgID, dbtest.TestGitHubHost, "acme", "platform")
+	teams, err := stores.TeamGitHubGroups.TeamsForGitHubTeamSystem(ctx, orgID, dbtest.TestGitHubHost, "13", "acme", "platform")
 	if err != nil {
-		t.Fatalf("TeamsForGroupSystem(platform): %v", err)
+		t.Fatalf("TeamsForGitHubTeamSystem(platform): %v", err)
 	}
 	if len(teams) != 2 || !contains(teams, teamA) || !contains(teams, teamB) {
-		t.Errorf("TeamsForGroupSystem(acme/platform) = %v; want both teamA %s and teamB %s", teams, teamA, teamB)
+		t.Errorf("TeamsForGitHubTeamSystem(13) = %v; want both teamA %s and teamB %s", teams, teamA, teamB)
 	}
 }
 
-// TestTeamGitHubGroupsStore_Postgres_PruneMissingSystem_DeletionLifecycle
-// pins the GitHub-team-deletion reconcile floor across teams: when a
-// GitHub team disappears from the live set, its mapping rows are removed
+// TestTeamGitHubGroupsStore_Postgres_ReconcileOrgTeamsSystem_DeletionLifecycle
+// pins the GitHub-team-deletion reconcile across teams: when a GitHub team
+// disappears from the live set, its mapping rows are removed
 // from every TF team that referenced it, while the TF teams themselves
 // and their other mappings survive.
-func TestTeamGitHubGroupsStore_Postgres_PruneMissingSystem_DeletionLifecycle(t *testing.T) {
+func TestTeamGitHubGroupsStore_Postgres_ReconcileOrgTeamsSystem_DeletionLifecycle(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
@@ -408,37 +408,40 @@ func TestTeamGitHubGroupsStore_Postgres_PruneMissingSystem_DeletionLifecycle(t *
 	// Both teams map acme/legacy (the soon-deleted team); each also keeps
 	// a distinct survivor mapping.
 	if err := stores.TeamGitHubGroups.SetForTeam(ctx, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
-		{OrgLogin: "acme", TeamSlug: "legacy"},
-		{OrgLogin: "acme", TeamSlug: "backend"},
+		{GitHubTeamID: "14", GitHubOrgID: "9", OrgLogin: "acme", TeamSlug: "legacy"},
+		{GitHubTeamID: "11", GitHubOrgID: "9", OrgLogin: "acme", TeamSlug: "backend"},
 	}); err != nil {
 		t.Fatalf("seed teamA: %v", err)
 	}
 	if err := stores.TeamGitHubGroups.SetForTeam(ctx, teamB, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
-		{OrgLogin: "acme", TeamSlug: "legacy"},
-		{OrgLogin: "acme", TeamSlug: "frontend"},
+		{GitHubTeamID: "14", GitHubOrgID: "9", OrgLogin: "acme", TeamSlug: "legacy"},
+		{GitHubTeamID: "12", GitHubOrgID: "9", OrgLogin: "acme", TeamSlug: "frontend"},
 	}); err != nil {
 		t.Fatalf("seed teamB: %v", err)
 	}
 
 	// GitHub now reports only backend + frontend (legacy was deleted).
-	n, err := stores.TeamGitHubGroups.PruneMissingSystem(ctx, orgID, dbtest.TestGitHubHost, "acme", []string{"backend", "frontend"})
+	n, err := stores.TeamGitHubGroups.ReconcileOrgTeamsSystem(ctx, orgID, dbtest.TestGitHubHost, domain.GitHubOrgTeams{
+		OrgID: "9", OrgLogin: "acme",
+		Teams: []domain.GitHubTeam{{ID: "11", Slug: "backend"}, {ID: "12", Slug: "frontend"}},
+	})
 	if err != nil {
-		t.Fatalf("PruneMissingSystem: %v", err)
+		t.Fatalf("ReconcileOrgTeamsSystem: %v", err)
 	}
 	if n != 2 {
-		t.Errorf("PruneMissingSystem removed %d rows; want 2 (legacy from both teams)", n)
+		t.Errorf("ReconcileOrgTeamsSystem deleted %d rows; want 2 (legacy from both teams)", n)
 	}
 
 	a, err := stores.TeamGitHubGroups.ListForTeam(ctx, teamA, dbtest.TestGitHubHost)
 	if err != nil {
-		t.Fatalf("ListForTeamSystem(teamA): %v", err)
+		t.Fatalf("ListForTeam(teamA): %v", err)
 	}
 	if len(a) != 1 || a[0].TeamSlug != "backend" {
 		t.Errorf("teamA after prune = %+v; want only backend", a)
 	}
 	b, err := stores.TeamGitHubGroups.ListForTeam(ctx, teamB, dbtest.TestGitHubHost)
 	if err != nil {
-		t.Fatalf("ListForTeamSystem(teamB): %v", err)
+		t.Fatalf("ListForTeam(teamB): %v", err)
 	}
 	if len(b) != 1 || b[0].TeamSlug != "frontend" {
 		t.Errorf("teamB after prune = %+v; want only frontend", b)

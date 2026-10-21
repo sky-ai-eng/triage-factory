@@ -32,6 +32,7 @@ import { fetchArchivePreview, type ArchivePreview } from '../../../lib/teamLifec
 import { useTeams } from '../../../hooks/useTeams'
 import RepoPickerModal from '../../../components/RepoPickerModal'
 import { repoRefKey, type RepoRef } from '../../../lib/githubRepos'
+import { groupKey } from '../../../lib/githubTeams'
 import GitHubTeamGroup from '../GitHubTeamGroup'
 import JiraProjectRulesGroup from '../JiraProjectRulesGroup'
 import LinearTeamRulesGroup from '../LinearTeamRulesGroup'
@@ -150,8 +151,9 @@ const sameRepos = (a: RepoRef[], b: RepoRef[]): boolean => {
   return a.every((x) => sb.has(repoRefKey(x)))
 }
 
-const groupKeys = (g: GitHubGroup[]): string[] =>
-  g.map((x) => `${x.org_login.toLowerCase()}/${x.team_slug.toLowerCase()}`).sort()
+// Compared by GitHub's team id (groupKey), so a rename of a team between the
+// load and a save is not a change.
+const groupKeys = (g: GitHubGroup[]): string[] => g.map(groupKey).sort()
 const sameGroups = (a: GitHubGroup[], b: GitHubGroup[]): boolean => {
   const ka = groupKeys(a)
   const kb = groupKeys(b)
@@ -351,7 +353,8 @@ export default function TeamSettings({
         toast.error(res.error)
         return false
       }
-      setGroupsBaseline(groups)
+      setGroups(res.groups)
+      setGroupsBaseline(res.groups)
       toast.success('GitHub teams saved')
       return true
     } finally {

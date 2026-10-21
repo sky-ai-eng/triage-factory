@@ -734,19 +734,28 @@ CREATE TABLE public.linear_team_rules (
 );
 
 
--- One row per (team, host, github_org_login, github_team_slug): a team routing
--- a GitHub team's review requests to itself. Dumb string labels, no membership
--- resolution. Pure key tuples — edits are replace-sets, so no UPDATE policy.
--- host is the GitHub host (domain.GitHubHost) the GitHub team lives on: an org
--- login names a different organization on another host, so every read and the
--- deletion reconcile see only the org's current host's rows.
+-- One row per (team, host, github_team_id): a team routing a GitHub team's
+-- review requests to itself. No membership resolution. github_team_id is
+-- GitHub's id for the team and github_org_id its id for the organization the
+-- team is in; routing and the deletion reconcile match on them.
+-- github_org_login and github_team_slug are display values, refreshed by the
+-- reconcile when GitHub renames the organization or the team, and matched only
+-- for a mention, which names a team by its handle. A request handler writes a
+-- replace-set, so tf_app has no UPDATE; the refresh runs on the admin pool.
+-- host is the GitHub host (domain.GitHubHost) the GitHub team lives on: an id
+-- is unique only on its host, so every read and the deletion reconcile see
+-- only the org's current host's rows.
 CREATE TABLE public.team_github_groups (
     team_id uuid NOT NULL,
     host text NOT NULL,
+    github_team_id text NOT NULL,
+    github_org_id text NOT NULL,
     github_org_login text NOT NULL,
     github_team_slug text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT tgg_host_populated CHECK (host <> ''),
+    CONSTRAINT tgg_team_id_populated CHECK (github_team_id <> ''),
+    CONSTRAINT tgg_org_id_populated CHECK (github_org_id <> ''),
     CONSTRAINT tgg_org_login_populated CHECK (github_org_login <> ''),
     CONSTRAINT tgg_team_slug_populated CHECK (github_team_slug <> '')
 );
@@ -1671,7 +1680,7 @@ ALTER TABLE ONLY public.linear_team_rules
 
 
 ALTER TABLE ONLY public.team_github_groups
-    ADD CONSTRAINT team_github_groups_pkey PRIMARY KEY (team_id, host, github_org_login, github_team_slug);
+    ADD CONSTRAINT team_github_groups_pkey PRIMARY KEY (team_id, host, github_team_id);
 
 
 ALTER TABLE ONLY public.team_github_repos
@@ -2101,6 +2110,11 @@ CREATE INDEX team_agents_agent_idx ON public.team_agents USING btree (agent_id);
 
 
 CREATE INDEX team_agents_team_idx ON public.team_agents USING btree (team_id);
+
+
+-- Routing's lookup: which teams a GitHub team's review requests route to. The
+-- primary key leads with team_id and cannot serve it.
+CREATE INDEX team_github_groups_github_team_idx ON public.team_github_groups USING btree (host, github_team_id);
 
 
 -- Reverse lookup: which teams track this repository. The primary key leads with
