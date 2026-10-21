@@ -269,7 +269,9 @@ export function GitHubGrantFindings({ findings }: { findings: GrantFindings }) {
         lead="Repositories the App can reach that no team tracks. Triage Factory holds access to code nobody asked it to touch — narrow the grant on GitHub, or track them."
         list={findings.reach}
         nothing="Nothing to address — every repository the App reaches is tracked by a team."
-        keyOf={(item) => item.slug}
+        keyOf={(item) =>
+          `${item.installation_id}:${item.github_id ? `gh:${item.github_id}` : `name:${item.slug.toLowerCase()}`}`
+        }
         row={(item) => (
           <>
             <span className="text-ui text-ink-1">
@@ -290,7 +292,7 @@ export function GitHubGrantFindings({ findings }: { findings: GrantFindings }) {
         lead="Repositories a team tracks that the App cannot reach. They are silently not polled — add them to the grant on GitHub, or untrack them."
         list={findings.drift}
         nothing="Nothing to address — every tracked repository is inside the grant."
-        keyOf={(item) => item.slug}
+        keyOf={(item) => item.repository_id}
         row={(item) => (
           <>
             <span className="text-ui text-ink-1">{item.slug}</span>

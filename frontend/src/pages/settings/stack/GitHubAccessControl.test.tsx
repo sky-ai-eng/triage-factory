@@ -205,7 +205,9 @@ describe('GitHubAccessControl · PAT rotation', () => {
       login: 'acme-bot-2',
       tracked: 2,
       reachable: 1,
-      dark_repos: [{ repo: 'acme/api', teams: ['Platform'] }],
+      dark_repos: [
+        { repository_id: 'r-api', github_id: '10', repo: 'acme/api', teams: ['Platform'] },
+      ],
     })
     renderControl()
 
@@ -743,6 +745,8 @@ describe('GitHubAccessControl · grant findings', () => {
           installation_id: '4242',
           account_login: 'acme',
           settings_url: 'https://github.com/organizations/acme/settings/installations/4242',
+          github_id: '11',
+          repository_id: '',
           owner: 'acme',
           repo: 'secrets',
           slug: 'acme/secrets',
@@ -756,6 +760,8 @@ describe('GitHubAccessControl · grant findings', () => {
       total_count: 2,
       items: [
         {
+          repository_id: 'r-legacy',
+          github_id: '',
           owner: 'acme',
           repo: 'legacy',
           slug: 'acme/legacy',
@@ -764,6 +770,8 @@ describe('GitHubAccessControl · grant findings', () => {
           settings_url: 'https://github.com/organizations/acme/settings/installations/4242',
         },
         {
+          repository_id: 'r-tool',
+          github_id: '30',
           owner: 'stranger',
           repo: 'tool',
           slug: 'stranger/tool',
@@ -845,6 +853,8 @@ describe('GitHubAccessControl · grant findings', () => {
       total_count: 1,
       items: [
         {
+          repository_id: 'r-some-legacy',
+          github_id: '',
           owner: 'some',
           repo: 'legacy',
           slug: 'some/legacy',
@@ -891,6 +901,8 @@ describe('GitHubAccessControl · grant findings', () => {
       next_page_token: 'more',
       items: [
         {
+          repository_id: 'r-some-legacy',
+          github_id: '',
           owner: 'some',
           repo: 'legacy',
           slug: 'some/legacy',

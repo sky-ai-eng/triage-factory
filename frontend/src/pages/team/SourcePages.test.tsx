@@ -238,6 +238,44 @@ describe('GitHub source page', () => {
     expect(screen.getAllByText('no longer on GitHub')).toHaveLength(1)
   })
 
+  it('keeps a retired row TF never learned an id for apart from its namesake', async () => {
+    // The retired row carries no GitHub id, so only a name links it to the
+    // repository now listed under that name, and the server's answer — no
+    // registry row for the option — says they are two repositories.
+    stub({
+      '/api/teams/t1/github-repos': {
+        repos: [
+          {
+            id: 'r9',
+            github_id: '',
+            owner: 'sky',
+            repo: 'planner',
+            retired_at: '2026-10-20T12:00:00Z',
+          },
+        ],
+      },
+      '/api/github/repos/list': [{ repository_id: '', github_id: '2', full_name: 'sky/planner' }],
+    })
+    render(<GitHubSource {...BODY} />)
+
+    await waitFor(() => expect(screen.getAllByText(/sky\/planner/)).toHaveLength(2))
+    expect(screen.getAllByText('no longer on GitHub')).toHaveLength(1)
+  })
+
+  it('pairs a tracked row and an option through the registry id the server resolved', async () => {
+    // The tracked row has no GitHub id; the option carries its registry row,
+    // so they are one repository and one row.
+    stub({
+      '/api/teams/t1/github-repos': {
+        repos: [{ id: 'r5', github_id: '', owner: 'sky', repo: 'legacy' }],
+      },
+      '/api/github/repos/list': [{ repository_id: 'r5', github_id: '5', full_name: 'sky/legacy' }],
+    })
+    render(<GitHubSource {...BODY} />)
+
+    await waitFor(() => expect(screen.getAllByText('sky/legacy')).toHaveLength(1))
+  })
+
   it('stops watching a retired repository and nothing else', async () => {
     const fetchMock = stub({
       '/api/teams/t1/github-repos': {
