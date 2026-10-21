@@ -2538,11 +2538,11 @@ func (t *Tracker) emitJiraUnreachable(ctx context.Context, orgID string, e domai
 		}
 	}
 	if fresh != nil {
-		if snap.Assignee == "" && snap.AssigneeAccountID == "" {
+		if !snap.HasAssignee() {
 			snap.Assignee, snap.AssigneeAccountID = fresh.Assignee, fresh.AssigneeAccountID
 		}
 		if snap.IssueType == "" {
-			snap.IssueType = fresh.IssueType
+			snap.IssueType, snap.IssueTypeID = fresh.IssueType, fresh.IssueTypeID
 		}
 		if snap.Status == "" {
 			snap.Status = fresh.Status
