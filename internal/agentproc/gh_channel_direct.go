@@ -8,7 +8,7 @@ import (
 
 // directGHChannelEnv builds the env entries that point the real gh binary at a
 // per-run injector on the DIRECT (local, non-sandbox) spawn path — the sibling
-// of ghChannelEnv, which serves the jail.
+// of the jail's channel env, which cell.JailEnv assembles.
 //
 // The five channel variables are identical in both modes, so the agent-facing
 // surface is one surface: GH_HOST names the injector (gh forces https to it and

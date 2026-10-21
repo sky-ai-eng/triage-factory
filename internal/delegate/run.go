@@ -335,13 +335,12 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	metadataJSON := s.taskEventMetadata(context.WithoutCancel(ctx), orgID, task)
 
 	// Resolve the paths the agent will actually observe, which differ from the
-	// host paths under the sandbox: the run-root is bind-mounted at "/work" and
-	// the TF binary at sandboxTFBinary. The prompt states both concretely, which
-	// is what makes the agent's file tools (no shell expansion) and its
+	// host paths under the sandbox: the run-root is presented at cell.WorkDir
+	// and the TF binary at cell.TFBinaryPath. The prompt states both concretely,
+	// which is what makes the agent's file tools (no shell expansion) and its
 	// `triagefactory exec ...` invocations resolve regardless of sandbox mode.
-	// selfBin itself stays the host path below for BuildAllowedToolsWithExtras —
-	// agentproc.Run rewrites the allowlist's binary path for the sandbox on its
-	// own (rewriteAllowedToolsForSandbox).
+	// selfBin itself stays the host path below for BuildAllowedToolsWithExtras,
+	// whose only reader is the SDK loop, which never runs in a jail.
 	agentRunRoot := agentproc.AgentVisibleRoot(cfg.runRoot)
 	agentPRCheckout := agentVisibleCheckout(cfg.runRoot, cfg.prCheckout)
 	agentBin := agentproc.AgentVisibleBinary(selfBin)
@@ -406,8 +405,8 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		"TRIAGE_FACTORY_CONVERSATION_ID=" + conversationID,
 		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cfg.runRoot, // So the completion-gate retry message can reference the absolute _tfac/memory.md path that resolves regardless of which checkout the agent has cd'd into.
 		agenthost.RunURLEnvVar + "=" + publishedRunURL,
-		// The key of the workspace this run works in. Non-absolute, so it
-		// passes through translateEnvForSandbox unchanged. Prompts that share a
+		// The key of the workspace this run works in. Non-absolute, so the
+		// jail env's path translation passes it through unchanged. Prompts that share a
 		// drop point across the conversations working in one tree (the parallel
 		// review passes) name their directory through this.
 		"TRIAGE_FACTORY_WORKSPACE_KEY=" + namespace,
@@ -421,7 +420,8 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// ambient — no fabricated identity. One resolution feeds both modes and both
 	// the GitHub-PR and Jira-branch paths; it carries across blueprint steps via
 	// the copied creator/trigger. The env var is namespaced (not GIT_*) so it's
-	// never ambient git identity and passes translateEnvForSandbox unchanged.
+	// never ambient git identity and the jail env's path translation passes it
+	// through unchanged.
 	commitIdentity := s.resolveCommitIdentity(ctx, orgID, triggerType, creatorUserID)
 	if commitIdentity.CoAuthorTrailer != "" {
 		extraEnv = append(extraEnv, "TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER="+commitIdentity.CoAuthorTrailer)

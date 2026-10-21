@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
 )
 
 // claudeProjectsDir is where Claude Code auto-creates per-cwd session history.
@@ -44,7 +45,7 @@ func claudeHome() (string, error) {
 // every sandboxed transcript.
 func ClaudeProjectDir(resolvedCwd string) (string, error) {
 	if agentproc.WillSandbox() {
-		return filepath.Join(resolvedCwd, claudeProjectsDir, encodeClaudeProjectDir(agentproc.SandboxWorkRoot)), nil
+		return filepath.Join(resolvedCwd, claudeProjectsDir, encodeClaudeProjectDir(cell.WorkDir)), nil
 	}
 	home, err := claudeHome()
 	if err != nil {

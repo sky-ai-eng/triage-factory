@@ -75,9 +75,9 @@ type Cell interface {
 	HandOffRunTree(ctx context.Context, root string) error
 
 	// Launch starts the engagement's jail with the resident tool host as its
-	// main process. The jail sees the run tree at /work and TF's inputs at
-	// the fixed in-jail paths env assembly assumes, however the backend
-	// delivers them.
+	// main process, running with JailEnv(spec). The jail sees the run tree at
+	// WorkDir and TF's inputs at the fixed in-jail paths that environment
+	// names, however the backend delivers them.
 	//
 	// The jail lives no longer than ctx: cancelling it kills the jail. A
 	// caller passes the engagement's context, so a stopped engagement takes
@@ -113,12 +113,11 @@ type LaunchSpec struct {
 	WorkspaceKey string
 
 	// RunTree is the host path of the run tree, presented in the jail at
-	// /work and handed off to the jail before it starts.
+	// WorkDir and handed off to the jail before it starts.
 	RunTree string
 
-	// Env is the engagement's host-path-bearing env. The backend translates
-	// its host paths to in-jail paths, the same translation every launch
-	// gets.
+	// Env is the engagement's run-scoped, non-credential env. JailEnv
+	// translates host paths under RunTree in it to their in-jail paths.
 	Env []string
 
 	// ProxyEnv is the non-secret env the sidecar's bring-up produced: proxy
@@ -153,12 +152,14 @@ type LaunchSpec struct {
 	SkillsSource string
 	MemorySource string
 
-	// MemoryLimitMB caps the jail. Zero uses the executor's default.
+	// MemoryLimitMB caps the jail, in MiB. Zero leaves it uncapped. The
+	// caller resolves the ceiling, so the same number can bound anything else
+	// it budgets against the jail's memory.
 	MemoryLimitMB int
 
-	// OrgID and ClaimID name the engagement the jail belongs to, for
-	// resource sampling and the actuals stamp. Empty leaves both
-	// unattributed, which is the test-harness shape.
+	// OrgID and ClaimID name the engagement the jail belongs to, for the
+	// actuals stamp. Empty ClaimID leaves the stamp unwritten, which is the
+	// test-harness shape.
 	OrgID   string
 	ClaimID string
 
@@ -206,6 +207,11 @@ type Jail interface {
 	// Meaningful only once the jail has exited.
 	OOMKilled() bool
 
+	// Sample reads what the jail is using right now. It is called on a timer
+	// while the jail runs, so it is cheap, silent and never fails: a jail
+	// that is not running yet, or no longer, yields an unobserved sample.
+	Sample() Sample
+
 	// Close kills the jail if it is still running, stamps its actuals and
 	// reclaims what the launch created. It does not promise the jail's
 	// processes are gone when it returns; Stop does. The cell outlives it.
@@ -224,4 +230,26 @@ type Actuals struct {
 	// CPUUsec is cumulative CPU time in microseconds across the whole jail.
 	// nil when unmeasured.
 	CPUUsec *int64
+}
+
+// Sample is one in-flight observation of a jail's resource use, read while it
+// runs. Actuals is the end-state record taken once at exit; a series of
+// samples gives the shape between. A periodic read misses short spikes, so a
+// series reads slightly under the recorded peak. Both fields are pointers so
+// "not observed" stays distinguishable from a measured value, zero included.
+type Sample struct {
+	// MemCurrentMB is the jail's resident memory in MiB, rounded up. nil when
+	// unobserved.
+	MemCurrentMB *int
+	// CPUUsecCum is cumulative CPU time in microseconds across the whole jail,
+	// the counter Actuals.CPUUsec reads at exit, so consecutive samples never
+	// decrease. nil when unobserved.
+	CPUUsecCum *int64
+}
+
+// Observed reports whether the sample carries any measurement. A sample with
+// neither field is a jail that was not running when it was read, not a jail
+// that used nothing.
+func (s Sample) Observed() bool {
+	return s.MemCurrentMB != nil || s.CPUUsecCum != nil
 }

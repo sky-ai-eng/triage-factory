@@ -187,6 +187,9 @@ type Spawner struct {
 	// extension a silent no-op, and the instance sample on that tick is
 	// unaffected either way.
 	sandboxStats db.SandboxStatStore
+	// liveJails is every jail an engagement of this process is running,
+	// which the sandbox series samples on each tick.
+	liveJails liveJails
 	// pendingInput is the durable half of resume-by-enqueue (TFAC-585): the
 	// message recorded before a parked run's continuation is re-queued as
 	// ordinary claimable work. Wired unconditionally in NewSpawner — both

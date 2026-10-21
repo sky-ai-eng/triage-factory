@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc/localsandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // stubBwrap puts an always-succeeding `bwrap` on PATH and returns its path.
@@ -81,7 +82,7 @@ func TestNewDirectCommand_NilSandboxIsUnchanged(t *testing.T) {
 	// env: no marker (the child is not in a jail) and no fabricated identity
 	// (an unset org identity still means "inherit ambient" out here).
 	for _, kv := range cmd.Env {
-		if strings.HasPrefix(kv, SandboxMarkerEnvVar+"=") {
+		if strings.HasPrefix(kv, runmode.SandboxMarkerEnvVar+"=") {
 			t.Errorf("unsandboxed env carries the jail marker: %q", kv)
 		}
 	}
@@ -132,7 +133,7 @@ func TestNewDirectCommand_SandboxPrefixesBwrapAndMarks(t *testing.T) {
 	if got, want := cmd.Args[sep+1:], []string{nodePath, "wrapper.mjs"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("sandboxed command = %v, want %v", got, want)
 	}
-	if !slices.Contains(cmd.Env, SandboxMarkerEnvVar+"="+SandboxMarkerEnvValue) {
+	if !slices.Contains(cmd.Env, runmode.SandboxMarkerEnvVar+"="+runmode.SandboxMarkerEnvValue) {
 		t.Error("sandboxed child env is missing the jail marker; its exec verbs would open a database instead of the socket")
 	}
 }
@@ -145,7 +146,7 @@ func TestNewDirectCommand_SandboxStripsInheritedMarkerFirst(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skipf("node not installed: %v", err)
 	}
-	t.Setenv(SandboxMarkerEnvVar, "inherited-junk")
+	t.Setenv(runmode.SandboxMarkerEnvVar, "inherited-junk")
 	root := t.TempDir()
 	paths.SetForTest(t, root)
 	stubBwrap(t)
@@ -163,11 +164,11 @@ func TestNewDirectCommand_SandboxStripsInheritedMarkerFirst(t *testing.T) {
 	}
 	var markers []string
 	for _, kv := range cmd.Env {
-		if strings.HasPrefix(kv, SandboxMarkerEnvVar+"=") {
+		if strings.HasPrefix(kv, runmode.SandboxMarkerEnvVar+"=") {
 			markers = append(markers, kv)
 		}
 	}
-	if want := []string{SandboxMarkerEnvVar + "=" + SandboxMarkerEnvValue}; !reflect.DeepEqual(markers, want) {
+	if want := []string{runmode.SandboxMarkerEnvVar + "=" + runmode.SandboxMarkerEnvValue}; !reflect.DeepEqual(markers, want) {
 		t.Errorf("marker entries = %v, want %v", markers, want)
 	}
 }

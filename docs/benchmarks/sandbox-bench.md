@@ -14,7 +14,8 @@ binary and installs the IPC client as `internal/sandbox`'s privileged ops),
 then per sandbox: seeds a worktree at `RunTreeRoot(rootKey)`, stands up the
 per-run network via `SetupRunNetwork`, binds an (unserved) agenthost socket
 at the broker's trusted per-run path, and launches the resident
-`tf-harness-tools serve` jail through `agentproc.LaunchToolHost`. Every
+`tf-harness-tools serve` jail through `gvisor.LaunchOnNetwork`, the gVisor
+cell's own launch on a network the bench built. Every
 launch therefore passes the broker's argv pin, env allowlist, worktree
 scope, and mount validation — the bench measures the launch users run, not
 a lookalike.

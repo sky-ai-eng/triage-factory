@@ -24,6 +24,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/cabundle"
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
+	"github.com/sky-ai-eng/triage-factory/internal/cell/gvisor"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
@@ -53,11 +55,10 @@ type handle struct {
 	id             int
 	conversationID string
 	claimID        string
-	containerID    string
 	worktree       string
 
 	net       *sandbox.RunNetwork
-	jail      *agentproc.ToolHostJail
+	jail      cell.Jail
 	tools     agentloop.ToolHost
 	agentSock net.Listener
 
@@ -98,7 +99,7 @@ func (h *handle) teardown() {
 
 type levelResult struct {
 	level        int
-	spawnP50     time.Duration // SetupRunNetwork + LaunchToolHost, per sandbox added this level
+	spawnP50     time.Duration // SetupRunNetwork + LaunchOnNetwork, per sandbox added this level
 	spawnP95     time.Duration
 	readyP50     time.Duration // spawn start → tool host connected and answering
 	readyP95     time.Duration
@@ -439,7 +440,7 @@ func runOOMTest(ctx context.Context, cfg benchConfig, getAbort func() string) er
 		defer sampleWG.Done()
 		for sampleCtx.Err() == nil {
 			for i, v := range victims {
-				if s := sandbox.SampleRunCgroup(v.containerID); s.MemCurrentMB != nil && *s.MemCurrentMB > victimPeak[i] {
+				if s := v.jail.Sample(); s.MemCurrentMB != nil && *s.MemCurrentMB > victimPeak[i] {
 					victimPeak[i] = *s.MemCurrentMB
 				}
 			}
@@ -674,16 +675,21 @@ func startSandbox(ctx context.Context, cfg benchConfig, id int, driven bool) (*h
 		return fail(fmt.Errorf("write CA bundle: %w", err))
 	}
 
-	jail, err := agentproc.LaunchToolHost(ctx, agentproc.ToolHostOptions{
-		ConversationID:       conversationID,
-		Worktree:             worktree,
-		PrebuiltNetwork:      rn,
-		AgentHostSocket:      agentMount,
-		CABundle:             sandbox.Mount{Source: agenthost.CABundlePathFor(conversationID), Destination: sandbox.TrustedCABundleDestination, Options: []string{"ro"}},
-		MemoryLimitMB:        cfg.memLimitMB,
-		OrgID:                "bench",
-		ClaimID:              h.claimID,
-		RecordSandboxActuals: recordActuals,
+	memLimitMB := cfg.memLimitMB
+	if memLimitMB == 0 {
+		memLimitMB = agentproc.ClaimMemoryLimitMB()
+	}
+	// The workspace key is the conversation id the tree is rooted under: the
+	// broker accepts an ephemeral run tree only at the root its key names.
+	jail, err := gvisor.LaunchOnNetwork(ctx, rn, conversationID, cell.LaunchSpec{
+		WorkspaceKey:    conversationID,
+		RunTree:         worktree,
+		AgentHostSocket: agentMount.Source,
+		CABundle:        agenthost.CABundlePathFor(conversationID),
+		MemoryLimitMB:   memLimitMB,
+		OrgID:           "bench",
+		ClaimID:         h.claimID,
+		RecordActuals:   recordActuals,
 	})
 	if err != nil {
 		return fail(fmt.Errorf("launch tool host: %w", err))
@@ -705,15 +711,6 @@ func startSandbox(ctx context.Context, cfg benchConfig, id int, driven bool) (*h
 		return fail(fmt.Errorf("first tool call: %s", out.Protocol.Error()))
 	}
 	readyDur := time.Since(start)
-
-	// The registry entry is written before LaunchToolHost returns, so a miss
-	// here is a wiring bug — and a jail without a container id would silently
-	// vanish from cgroup sampling (skewed coefficients) and from the oomtest
-	// peak tracking (a hollow containment pass). Fail loudly instead.
-	h.containerID = containerIDFor(h.claimID)
-	if h.containerID == "" {
-		return fail(fmt.Errorf("no live-jail registry entry for claim %s", h.claimID))
-	}
 
 	if driven {
 		dctx, cancel := context.WithCancel(context.Background())
@@ -748,17 +745,6 @@ func runOneShot(ctx context.Context, cfg benchConfig, id int) error {
 		return fmt.Errorf("bash call failed: %s", out.ToolError)
 	}
 	return nil
-}
-
-// containerIDFor resolves the runsc container id for a claim through the
-// same registry the production resource sampler reads.
-func containerIDFor(claimID string) string {
-	for _, j := range agentproc.LiveJails() {
-		if j.ClaimID == claimID {
-			return j.ContainerID
-		}
-	}
-	return ""
 }
 
 // call dispatches one workload tool call, counts it, and reports whether the
@@ -1006,11 +992,9 @@ func sampleSeries(ctx context.Context, live []*handle, total, step time.Duration
 	if total < step {
 		total = step
 	}
-	stats := make(map[string]*jailSeriesStat, len(live))
+	stats := make(map[*handle]*jailSeriesStat, len(live))
 	for _, h := range live {
-		if h.containerID != "" {
-			stats[h.containerID] = &jailSeriesStat{}
-		}
+		stats[h] = &jailSeriesStat{}
 	}
 
 	firstBusy, firstTotal, okFirst := readCPUStat()
@@ -1033,8 +1017,8 @@ func sampleSeries(ctx context.Context, live []*handle, total, step time.Duration
 		}
 
 		var tickMemSum, tickMemN int
-		for cid, st := range stats {
-			s := sandbox.SampleRunCgroup(cid)
+		for h, st := range stats {
+			s := h.jail.Sample()
 			if s.MemCurrentMB != nil {
 				tickMemSum += *s.MemCurrentMB
 				tickMemN++

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -244,7 +244,7 @@ func TestBuild_NativeSectionOrder(t *testing.T) {
 // `_tfac/` resolves against whatever repo the agent last changed into, which
 // is the wrong tree and a file nobody finds again.
 func TestNativeBlocks_NameTheRealPaths(t *testing.T) {
-	root := agentproc.SandboxWorkRoot + "/" + worktree.ScratchDir
+	root := cell.WorkDir + "/" + worktree.ScratchDir
 	spec := Spec{Surface: SurfaceMachinist, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeMulti}
 	paths, err := manifest(spec)
 	if err != nil {
@@ -286,7 +286,7 @@ func TestKnowledgeBlock_IsInBothRuntimes(t *testing.T) {
 		{"sdk", Spec{Surface: SurfaceMachinist, Runtime: RuntimeSDK, Family: FamilyClaude, Mode: ModeMulti},
 			blockVerbTeamKnowledge, "_tfac/knowledge/"},
 		{"native", Spec{Surface: SurfaceMachinist, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeMulti},
-			blockVerbTeamKnowledgeNv, agentproc.SandboxWorkRoot + "/" + worktree.ScratchDir + "/knowledge/"},
+			blockVerbTeamKnowledgeNv, cell.WorkDir + "/" + worktree.ScratchDir + "/knowledge/"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			composed := Build(tc.spec)

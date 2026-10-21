@@ -155,6 +155,7 @@ type Jail interface {
 	Freeze(ctx context.Context) error
 	Thaw(ctx context.Context) error
 	OOMKilled() bool
+	Sample() Sample
 	Close() error
 }
 ```
@@ -188,6 +189,9 @@ second implementation is most likely to get wrong:
   short bring-up timeout kills the jail when the timeout's cancel runs.
 - **`Freeze` that cannot freeze is an error.** A checkpoint that went ahead on
   a jail it believed frozen would read a moving tree.
+- **`Sample` of a jail that is not running is unobserved, never zero.** The
+  delegate's sampler reads every live jail on a timer and skips an unobserved
+  sample; a zero would record a finished jail as an idle live one.
 - **`LaunchSpec.SidecarEndpoints` are the only host addresses the jail can
   reach.** They are the sidecar's jail-facing listeners as the sidecar
   reported them after `StartProxies`. A backend opens exactly these before the
@@ -196,12 +200,13 @@ second implementation is most likely to get wrong:
 
 ### 4.1 The jail filesystem contract
 
-Env assembly is shared, so every backend presents the same paths inside the
-jail: the run tree at `/work`, TF's binaries at the fixed destinations in
-`internal/sandbox/spec.go` (`/opt/tf/bin/...`), the exec-verb socket at
-`agenthost.DefaultSocketPath`, the run's CA bundle at
-`sandbox.TrustedCABundleDestination` with the trust variables
-(`agentproc.caBundleEnv`) pointing at it, staged skills and memory at
+Env assembly is shared (`cell.JailEnv`), so every backend presents the same
+paths inside the jail: the run tree at `cell.WorkDir` (`/work`), TF's binaries
+at the fixed destinations in `internal/sandbox/launchspec_linux.go`
+(`/opt/tf/bin/...`, and the TF binary at `cell.TFBinaryPath`), the exec-verb
+socket at `agenthost.DefaultSocketPath`, the run's CA bundle at
+`cell.CABundlePath` with the trust variables pointing at it, staged skills and
+memory at
 `sandbox.TrustedSkillsDestination` / `TrustedMemoryDestination`. `LaunchSpec`
 names the inputs by their host source; the backend decides how they arrive.
 Firecracker has no shared-filesystem device, so its backend attaches TF's
@@ -350,7 +355,7 @@ conditions:
    refusal above, is an explicit error to the jail and a recorded denial,
    never a fallback to tunneling.
 10. **Every toolchain the rootfs ships trusts the CA**, each through the
-    variable it reads (`agentproc.caBundleEnv`): `SSL_CERT_FILE` for Go, curl
+    variable it reads (`cell.JailEnv`): `SSL_CERT_FILE` for Go, curl
     and OpenSSL, `NODE_EXTRA_CA_CERTS` for Node and so npm and pnpm, and
     `PIP_CERT` for pip, which the rootfs runs from a venv (`python3 -m venv`
     installs it from the wheel CPython bundles). The list is fixed by an
@@ -588,7 +593,9 @@ The cases, one per invariant except 8:
 
 Invariant 8 stays covered by `internal/sandbox`'s own integration tests for
 now: a memory case needs a host that grants a private cgroup namespace, and
-none of the hosts the suite has run on did. When §7 lands, the suite gains a
+none of the hosts the suite has run on did. `Jail.Sample` waits on the same
+host for its case, since on gVisor a jail without a ceiling has no cgroup to
+read. When §7 lands, the suite gains a
 case per capability, run on the backends that declare it. The
 `memory_checkpoint` case parks a jail, restores it into a new cell, and runs
 `TrustVariablesNameTheRunsBundle` and `OnlyTheSidecarIsReachable` against
@@ -654,15 +661,6 @@ member when the Firecracker backend needs it:
 - **Staging grants.** Skills and memory staging directories are granted to
   the jail identity (`RunNetwork.GrantStaging`) inside the gVisor launch. On
   Firecracker they become read-only input images.
-- **Resource sampling.** The sandbox-stats sampler reads each live jail's
-  cgroup by container id (`agentproc.LiveJails`, `sandbox.SampleRunCgroup`).
-  This becomes `Jail.Sample`. `jailer` puts the VMM in a cgroup too, so the
-  cgroup read carries over.
-- **The tool-host launch code** (TFAC-1119). `agentproc.LaunchToolHost` stays
-  in `internal/agentproc` and is reached only through the gVisor backend. It
-  shares env assembly and mount helpers with the rest of that package, so
-  moving it into `internal/cell/gvisor` is a later cleanup with no
-  behavioral content.
 - **Sidecar identity.** The sidecar's uid derives from the cell's subnet
   index (`sandbox.SidecarUID`). The Firecracker backend builds its network
   through `RunNetwork` and so has a subnet index, and its uid bands derive as
@@ -711,7 +709,7 @@ version and checksum.
 | `Freeze` / `Thaw` | `Freeze` asks the init to freeze `/work`, then pauses the VMM over its API socket, which only the broker uses; `Thaw` resumes the VMM, then unfreezes `/work`. If the init does not confirm, the VMM is paused anyway, so every process is still held still, and a capture reads what the guest last flushed; only that run's capture is affected | Measured: freezing `/work` takes 51–57 ms and the pause about 1 ms; a tool call sent while paused waits and is answered after `Thaw` |
 | `Stop` | Stop the VM, wait for the VMM to exit, then copy the run tree out (§12.3) | Cost of the copy-out: **2.2 s** for the large tree whole and 0.33–0.40 s for changed paths only, after a capture-VM boot of about 0.15 s; 0.23–0.31 s and 22 ms on a fresh checkout |
 | `Close` | Delete the jailer directory and the images; network teardown as on gVisor | — |
-| `OOMKilled`, actuals | The actuals come from the VMM's cgroup: CPU, and a `memory.peak` that is the most guest memory the VM touched, which is what it held on the host. The cgroup's limit sits above guest memory plus VMM overhead, so the guest's own OOM killer acts first and the cgroup records nothing. The init reports the guest's `/proc/vmstat` `oom_kill` count over vsock; `OOMKilled` is that count, or the cgroup's own `oom_kill`, which means the host killed the VMM and the cell is gone | Answered: an OOM inside the guest leaves the cgroup's events at zero |
+| `OOMKilled`, actuals, `Sample` | `Sample` reads the VMM's cgroup as gVisor's reads the jail's, and the actuals come from it too: CPU, and a `memory.peak` that is the most guest memory the VM touched, which is what it held on the host. The cgroup's limit sits above guest memory plus VMM overhead, so the guest's own OOM killer acts first and the cgroup records nothing. The init reports the guest's `/proc/vmstat` `oom_kill` count over vsock; `OOMKilled` is that count, or the cgroup's own `oom_kill`, which means the host killed the VMM and the cell is gone | Answered: an OOM inside the guest leaves the cgroup's events at zero |
 | `ReapOrphans` | Kill VMMs and delete jailer directories the broker's ledger does not hold; reap netns as on gVisor | — |
 
 A guest reaches the host over vsock only at sockets that exist under its own
