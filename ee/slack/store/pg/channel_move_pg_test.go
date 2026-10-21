@@ -200,6 +200,9 @@ func TestChannelMove_Postgres_MovesTheChannel(t *testing.T) {
 
 	artifact := seedMessageArtifact(t, stores, orgID, teamA, open, moveOld, "1700000000.000100", "1700000000.000300")
 	neighbourArtifact := seedMessageArtifact(t, stores, orgID, teamA, neighbour, moveNeighbour, "1700000000.000100", "1700000000.000300")
+	// A message whose thread did not resolve when it was written is linked to
+	// no entity.
+	unlinkedArtifact := seedMessageArtifact(t, stores, orgID, teamA, domain.Entity{}, moveOld, "1700000000.000100", "1700000000.000400")
 
 	oldLink := moveReplyPermalink(moveOld, "1700000000000300", "1700000000.000100")
 	seedSlackAction(t, stores, orgID, teamA, domain.SlackSourceID(moveOld, "1700000000.000100"), oldLink, "action-moved")
@@ -213,7 +216,7 @@ func TestChannelMove_Postgres_MovesTheChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MoveSystem: %v", err)
 	}
-	want := slackstore.ChannelMove{To: moveNew, Entities: 2, Artifacts: 1, Actions: 1}
+	want := slackstore.ChannelMove{To: moveNew, Entities: 2, Artifacts: 2, Actions: 1}
 	if !reflect.DeepEqual(move, want) {
 		t.Errorf("MoveSystem = %+v, want %+v", move, want)
 	}
@@ -269,6 +272,15 @@ func TestChannelMove_Postgres_MovesTheChannel(t *testing.T) {
 		url:    moveReplyPermalink(moveNew, "1700000000.000300", "1700000000.000100"),
 	}) {
 		t.Errorf("moved artifact = %+v", got)
+	}
+	// An artifact linked to no entity moves its target by the channel id it
+	// spells, as its key does.
+	if got := readArtifact(t, h, unlinkedArtifact); got != (artifactRow{
+		target: domain.SlackSourceID(moveNew, "1700000000.000100"),
+		key:    domain.ArtifactDedupKey(domain.ArtifactProviderSlack, domain.ArtifactKindMessage, moveNew+"/1700000000.000400", ""),
+		url:    moveReplyPermalink(moveNew, "1700000000.000400", "1700000000.000100"),
+	}) {
+		t.Errorf("moved unlinked artifact = %+v", got)
 	}
 	if got := readArtifact(t, h, neighbourArtifact); got.target != domain.SlackSourceID(moveNeighbour, "1700000000.000100") ||
 		got.key != domain.ArtifactDedupKey(domain.ArtifactProviderSlack, domain.ArtifactKindMessage, moveNeighbour+"/1700000000.000300", "") {

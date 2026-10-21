@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -62,7 +63,7 @@ func TestLocalClient_FinalizeReview_Freshness_CleanAnchorAtHead(t *testing.T) {
 	})
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 
-	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, testPRNodeID(7), "head1", nil)
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "head1", nil)
 	if err != nil {
 		t.Fatalf("start review: %v", err)
 	}
@@ -102,7 +103,7 @@ func TestLocalClient_FinalizeReview_Freshness_ShiftAutoRemaps(t *testing.T) {
 	})
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 
-	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, testPRNodeID(7), "head1", nil)
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "head1", nil)
 	if err != nil {
 		t.Fatalf("start review: %v", err)
 	}
@@ -143,7 +144,7 @@ func TestLocalClient_FinalizeReview_Freshness_OutdatedFails(t *testing.T) {
 	})
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 
-	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, testPRNodeID(7), "head1", nil)
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "head1", nil)
 	if err != nil {
 		t.Fatalf("start review: %v", err)
 	}
@@ -201,7 +202,7 @@ func TestLocalClient_FinalizeReview_Freshness_MixedMultiComment(t *testing.T) {
 	})
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 
-	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, testPRNodeID(7), "head1", nil)
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "head1", nil)
 	if err != nil {
 		t.Fatalf("start review: %v", err)
 	}
@@ -259,7 +260,7 @@ func TestLocalClient_FinalizeReview_StampsFinalizedHead(t *testing.T) {
 		})
 		stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 
-		handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, testPRNodeID(7), "head1", nil)
+		handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "head1", nil)
 		if err != nil {
 			t.Fatalf("start review: %v", err)
 		}
@@ -280,7 +281,12 @@ func TestLocalClient_FinalizeReview_StampsFinalizedHead(t *testing.T) {
 	})
 
 	t.Run("comment-less falls back to the start head with no GitHub call", func(t *testing.T) {
+		// start-review reads the PR for its node id; finalize reads nothing.
+		var finalizing atomic.Bool
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !finalizing.Load() && answerPRRead(w, r) {
+				return
+			}
 			t.Errorf("comment-less finalize must make NO GitHub call; got %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusInternalServerError)
 		}))
@@ -288,10 +294,11 @@ func TestLocalClient_FinalizeReview_StampsFinalizedHead(t *testing.T) {
 		stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 		registerRepo(t, stores, "octo", "repo", "1")
 
-		handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, testPRNodeID(7), "head1", nil)
+		handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "head1", nil)
 		if err != nil {
 			t.Fatalf("start review: %v", err)
 		}
+		finalizing.Store(true)
 		// A pure approve carries no body and no inline comments — allowed, and it
 		// reconciles nothing, so finalize touches GitHub not at all.
 		if _, err := client.FinalizeReviewDraft(context.Background(), handle, "APPROVE", ""); err != nil {
@@ -339,7 +346,7 @@ func TestLocalClient_FinalizeReview_Freshness_HTTP406Fallback(t *testing.T) {
 	t.Cleanup(srv.Close)
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 
-	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, testPRNodeID(7), "head1", nil)
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "head1", nil)
 	if err != nil {
 		t.Fatalf("start review: %v", err)
 	}

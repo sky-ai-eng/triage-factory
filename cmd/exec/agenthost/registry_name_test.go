@@ -55,6 +55,9 @@ func renameRepo(t *testing.T, stores db.Stores) {
 func startRenamedRepoGitHub(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerPRRead(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		path := strings.TrimPrefix(r.URL.Path, "/api/v3")
 		switch {
@@ -84,7 +87,7 @@ func TestLocalClient_ReviewUnderOldName_FoundByCoherenceReads(t *testing.T) {
 	renameRepo(t, stores)
 	ctx := context.Background()
 
-	handle, err := client.GithubCreatePendingReview(ctx, "octo", "old-name", 5, testPRNodeID(5), "head5", nil)
+	handle, err := client.GithubCreatePendingReview(ctx, "octo", "old-name", 5, "head5", nil)
 	if err != nil {
 		t.Fatalf("GithubCreatePendingReview: %v", err)
 	}
@@ -145,11 +148,11 @@ func TestLocalClient_OldNameAfterRename_JoinsTheRow(t *testing.T) {
 					t.Fatalf("GithubCreatePR via %s: %v", repo, err)
 				}
 			}
-			first, err := client.GithubCreatePendingReview(ctx, "octo", "new-name", 5, testPRNodeID(5), "head5", nil)
+			first, err := client.GithubCreatePendingReview(ctx, "octo", "new-name", 5, "head5", nil)
 			if err != nil {
 				t.Fatalf("GithubCreatePendingReview via new-name: %v", err)
 			}
-			second, err := client.GithubCreatePendingReview(ctx, "octo", "old-name", 5, testPRNodeID(5), "head5", nil)
+			second, err := client.GithubCreatePendingReview(ctx, "octo", "old-name", 5, "head5", nil)
 			if err != nil {
 				t.Fatalf("GithubCreatePendingReview via old-name: %v", err)
 			}
@@ -195,7 +198,7 @@ func TestLocalClient_NewNameBeforeRename_DoesNotBlockIt(t *testing.T) {
 	}
 
 	for _, repo := range []string{"old-name", "new-name"} {
-		if _, err := client.GithubCreatePendingReview(ctx, "octo", repo, 5, testPRNodeID(5), "head5", nil); err != nil {
+		if _, err := client.GithubCreatePendingReview(ctx, "octo", repo, 5, "head5", nil); err != nil {
 			t.Fatalf("GithubCreatePendingReview via %s: %v", repo, err)
 		}
 		if _, _, _, err := client.GithubCreatePR(ctx, "octo", repo, "feature/x", "main", "t", "b", true); err != nil {
@@ -281,12 +284,16 @@ func TestLocalClient_BranchWithNoRegistryRow_RecordsOnlyThePush(t *testing.T) {
 	}
 }
 
-// TestLocalClient_RegistryHeldName_AsksNoGitHub pins that a name the registry holds
-// under an id is answered from the registry alone, in the registry's spelling:
-// GitHub names are case-insensitive, and the readers compare the stored target
-// exactly.
-func TestLocalClient_RegistryHeldName_AsksNoGitHub(t *testing.T) {
+// TestLocalClient_RegistryHeldName_ResolvedFromTheRegistry pins that a name
+// the registry holds under an id is answered from the registry alone, in the
+// registry's spelling: GitHub names are case-insensitive, and the readers
+// compare the stored target exactly. The one GitHub read is the pull
+// request's, for its node id.
+func TestLocalClient_RegistryHeldName_ResolvedFromTheRegistry(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerPRRead(w, r) {
+			return
+		}
 		t.Errorf("unexpected GitHub call for a name the registry holds: %s %s", r.Method, r.URL.Path)
 		http.NotFound(w, r)
 	}))
@@ -294,7 +301,7 @@ func TestLocalClient_RegistryHeldName_AsksNoGitHub(t *testing.T) {
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 	registerRepo(t, stores, "octo", "repo", "1")
 
-	if _, err := client.GithubCreatePendingReview(context.Background(), "Octo", "Repo", 7, testPRNodeID(7), "head7", nil); err != nil {
+	if _, err := client.GithubCreatePendingReview(context.Background(), "Octo", "Repo", 7, "head7", nil); err != nil {
 		t.Fatalf("GithubCreatePendingReview: %v", err)
 	}
 	arts := listConversationArtifacts(t, stores, info.ConversationID)

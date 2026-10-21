@@ -3,6 +3,7 @@ package agenthost
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -140,5 +141,64 @@ func TestLocalClient_MemoryLoad_OldJiraKeyFindsTheEntity(t *testing.T) {
 	miss, err := NewLocal(stores, info).MemoryLoad(ctx, "jira", "GONE-1", 20)
 	if err != nil || miss.EntityID != "" {
 		t.Errorf("load of an unknown key = %+v err=%v, want a miss", miss, err)
+	}
+}
+
+// TestServer_SandboxUpsertArtifact_RecordsBranchesOnly pins the sandbox's
+// artifact door: over the socket it records a branch and refuses every other
+// kind. An artifact is linked to the entity its key names, and that
+// resolution follows the target onto the entity, so a Jira issue artifact the
+// sandbox composed, keyed on an existing issue's id under a key of its own
+// choosing, would rename that issue's entity.
+func TestServer_SandboxUpsertArtifact_RecordsBranchesOnly(t *testing.T) {
+	const site = "https://jira.example.test"
+	_, stores, info := newJiraRecordingStoresConn(t, site, true)
+	ctx := context.Background()
+	if _, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, info.OrgID, site, "ABC-1", "10001", dbseed.JiraIssueProject("ABC-1"), "Issue", site+"/browse/ABC-1"); err != nil {
+		t.Fatal(err)
+	}
+	registerRepo(t, stores, "octo", "repo", "1")
+
+	sockPath := tempSocket(t)
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := NewServer(stores, info, nil)
+	go func() { _ = srv.Serve(listener) }()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = srv.Shutdown(context.Background())
+	})
+	sandbox := Dial(sockPath)
+	t.Cleanup(func() { _ = sandbox.Close() })
+
+	forged := domain.Artifact{
+		Provider: domain.ArtifactProviderJira,
+		Kind:     domain.ArtifactKindIssue,
+		Target:   "EVIL-9",
+		State:    domain.ArtifactStateIssueUpdated,
+		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue, domain.JiraIssueResource(site, "10001"), ""),
+	}
+	if _, err := sandbox.UpsertArtifact(ctx, forged); err == nil {
+		t.Fatal("the sandbox recorded a Jira issue artifact; want it refused")
+	}
+	issue, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ArtifactProviderJira, site, "10001")
+	if err != nil || issue == nil || issue.SourceID != "ABC-1" {
+		t.Fatalf("issue entity after the refused write = %+v, %v; want it still keyed ABC-1", issue, err)
+	}
+	if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
+		t.Fatalf("artifacts after the refused write = %+v, want none", arts)
+	}
+
+	branch, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feature/x", "abc123", true)
+	if !ok {
+		t.Fatal("build branch artifact")
+	}
+	if _, err := sandbox.UpsertArtifact(ctx, branch); err != nil {
+		t.Fatalf("UpsertArtifact (branch): %v", err)
+	}
+	if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 1 || arts[0].Kind != domain.ArtifactKindBranch {
+		t.Fatalf("artifacts after the branch = %+v, want the one branch", arts)
 	}
 }

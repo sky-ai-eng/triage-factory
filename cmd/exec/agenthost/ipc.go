@@ -183,9 +183,9 @@ func (c *IPCClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, bo
 	return ReviewFinalizeResult(res), nil
 }
 
-func (c *IPCClient) ResetReviewDraft(ctx context.Context, prNodeID string) (string, string, error) {
+func (c *IPCClient) ResetReviewDraft(ctx context.Context, owner, repo string, number int) (string, string, error) {
 	var res resetReviewDraftResult
-	if err := c.call(ctx, methodResetReviewDraft, resetReviewDraftArgs{PRNodeID: prNodeID}, &res); err != nil {
+	if err := c.call(ctx, methodResetReviewDraft, resetReviewDraftArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number}, &res); err != nil {
 		return "", "", err
 	}
 	return res.ReviewID, res.CommitSHA, nil
@@ -594,9 +594,9 @@ func (c *IPCClient) GithubCreatePR(ctx context.Context, owner, repo, head, base,
 	return res.Number, res.HTMLURL, res.NodeID, nil
 }
 
-func (c *IPCClient) GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, prNodeID, commitSHA string, comments []ghclient.SubmitReviewComment) (string, error) {
+func (c *IPCClient) GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment) (string, error) {
 	var res githubReviewIDResult
-	if err := c.call(ctx, methodGithubCreatePendingReview, githubCreatePendingReviewArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number, PRNodeID: prNodeID, CommitSHA: commitSHA, Comments: comments}, &res); err != nil {
+	if err := c.call(ctx, methodGithubCreatePendingReview, githubCreatePendingReviewArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number, CommitSHA: commitSHA, Comments: comments}, &res); err != nil {
 		return "", err
 	}
 	return res.ReviewID, nil

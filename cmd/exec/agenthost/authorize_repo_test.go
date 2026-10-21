@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // gateRuntime is a minimal Runtime for exercising authorizeRepo in isolation:
@@ -169,4 +170,22 @@ func TestAuthorizeRepo(t *testing.T) {
 			t.Fatalf("authorizeRepo = %v, want nil when the gate is unwired", err)
 		}
 	})
+}
+
+// TestReviewDraft_ReadsThePullRequestThroughTheGate pins that a review draft's
+// pull request is read through the repository gate: the draft is keyed on the
+// node id GitHub answers for owner/repo#number and linked to the entity
+// carrying it, so start-review and its reset on a repository the run may not
+// reach are refused before the draft is found or written.
+func TestReviewDraft_ReadsThePullRequestThroughTheGate(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	ctx := context.Background()
+
+	c := newGateClient(&gateRuntime{tracks: false})
+	if _, err := c.GithubCreatePendingReview(ctx, "acme", "widgets", 7, "head7", nil); err == nil || !strings.Contains(err.Error(), "not tracked by this team") {
+		t.Errorf("GithubCreatePendingReview on an untracked repo = %v, want the not-tracked refusal", err)
+	}
+	if _, _, err := c.ResetReviewDraft(ctx, "acme", "widgets", 7); err == nil || !strings.Contains(err.Error(), "not tracked by this team") {
+		t.Errorf("ResetReviewDraft on an untracked repo = %v, want the not-tracked refusal", err)
+	}
 }

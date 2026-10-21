@@ -616,16 +616,16 @@ func prReviewDismiss(ctx context.Context, client ghAPI, host agenthost.Client, a
 // Zero GitHub writes (TFAC-494): the review is staged entirely in the artifact's
 // details_json and created+submitted atomically only at approval, so concurrent
 // runs on one PR never collide on GitHub's one-per-identity pending-review slot.
-// It reads the PR (a read, not a write) for its node id, which the draft is
-// keyed on, and its head SHA, which the review pins to at submit. The durable
-// run-scoped `review` artifact is recorded at the host choke point
-// (LocalClient.GithubCreatePendingReview); the returned handle (the artifact
-// id) is what add-review-comment / finalize-review speak.
+// It reads the PR head SHA (a read, not a write) so the review pins to the
+// reviewed commit at submit. The durable run-scoped `review` artifact is recorded
+// at the host choke point (LocalClient.GithubCreatePendingReview), which reads
+// the PR's node id the draft is keyed on; the returned handle (the artifact id)
+// is what add-review-comment / finalize-review speak.
 //
 // --fresh resets an in-progress draft to a clean slate so the agent can restart
 // a review it has botched: it clears the run's staged comments + the body/event
 // ready sentinel in place, keeping the same handle and pinned head SHA. Post-494
-// this is a pure local artifact reset — no GitHub write, no identity / no
+// this is a local artifact reset — no GitHub write, no identity / no
 // anti-hijack logic (the GitHub pending-review model that needed those is gone).
 // On a clean slate (no prior start-review in this run) --fresh has nothing to
 // reset and falls through to a normal start.
@@ -633,22 +633,14 @@ func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, arg
 	owner, repo, number := parseRepoAndNumber(ctx, host, args)
 	_ = lookupConversation(host) // validates identity is present; routing happens inside host
 
-	pr, err := client.GetPR(ctx, owner, repo, number, false)
-	exitOnErr(err)
-	// The draft is keyed on the PR's node id, so a PR read that carried none
-	// leaves nothing to find or record the draft under.
-	if pr.NodeID == "" {
-		exitErr(fmt.Sprintf("PR #%d came back without a node id — cannot start a review; retry", number))
-	}
-
 	if hasFlag(args, "--fresh") {
-		// Pure-local reset of this run's existing draft for the PR — no GitHub
+		// Local reset of this run's existing draft for the PR — no GitHub
 		// write. An empty handle means there was no draft to reset, so we fall
-		// through to a normal start below (which creates one), keeping --fresh
-		// usable even as the first start-review. commit_sha is the draft's
-		// preserved head SHA, echoed so the reset output matches the shape a
-		// normal start-review prints.
-		handle, commitSHA, err := host.ResetReviewDraft(ctx, pr.NodeID)
+		// through to a normal start below (which reads the head SHA and creates
+		// one), keeping --fresh usable even as the first start-review. commit_sha
+		// is the draft's preserved head SHA, echoed so the reset output matches the
+		// shape a normal start-review prints.
+		handle, commitSHA, err := host.ResetReviewDraft(ctx, owner, repo, number)
 		exitOnErr(err)
 		if handle != "" {
 			printJSON(map[string]any{
@@ -662,6 +654,9 @@ func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, arg
 		}
 	}
 
+	// Read the head SHA so the review pins to the reviewed commit at submit.
+	pr, err := client.GetPR(ctx, owner, repo, number, false)
+	exitOnErr(err)
 	// Fail early on a missing head SHA: it's the commit the atomic submit pins to,
 	// so staging it empty just defers an opaque GitHub 422 (surfaced as a 502) to
 	// approval time. Bail here with an actionable message instead.
@@ -673,7 +668,7 @@ func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, arg
 	// no collision check — the draft is run-scoped, so two runs reviewing the same
 	// PR never share a row. Seed no inline comments (the agent adds them via
 	// add-review-comment).
-	reviewID, err := host.GithubCreatePendingReview(ctx, owner, repo, number, pr.NodeID, pr.HeadSHA, nil)
+	reviewID, err := host.GithubCreatePendingReview(ctx, owner, repo, number, pr.HeadSHA, nil)
 	exitOnErr(err)
 
 	printJSON(map[string]any{

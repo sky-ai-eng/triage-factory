@@ -336,17 +336,20 @@ func moveThreadKeys(ctx context.Context, q db.Execer, orgID, channel, oldID, new
 // which is the key of the thread entity the artifact is about
 // (artifacts.entity_id) and takes the key moveThreadKeys gave it, the dedup
 // key (the message's key, which spells the channel id: Slack gives a message
-// no id of its own) and the permalink. A dedup key the new id already has —
+// no id of its own) and the permalink. An artifact linked to no entity has no
+// key to take; its target spells the channel id as its dedup key does, and
+// moves with it. A dedup key the new id already has —
 // the same message recorded again under the new id before the change arrived
 // — stays where it is rather than colliding; its target and link still move.
 // channel is the channel's registry row, "" when it has none.
 func moveArtifacts(ctx context.Context, q db.Execer, orgID, channel, oldID, newID string) (int, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT a.id, a.dedup_key, a.target, COALESCE(a.url, ''), COALESCE(e.source_id, a.target)
+		SELECT a.id, a.dedup_key, a.target, COALESCE(a.url, ''), COALESCE(e.source_id, '')
 		  FROM artifacts a
 		  LEFT JOIN entities e ON e.org_id = a.org_id AND e.id = a.entity_id
 		 WHERE a.org_id = $1 AND a.provider = $2 AND a.scope = $4
 		   AND (strpos(a.dedup_key, ':' || $3) > 0
+		        OR (a.entity_id IS NULL AND starts_with(a.target, $3))
 		        OR (e.slack_channel_id = NULLIF($5, '')::uuid AND a.target <> e.source_id))
 		 ORDER BY a.id
 		 FOR UPDATE OF a
@@ -374,6 +377,9 @@ func moveArtifacts(ctx context.Context, q db.Execer, orgID, channel, oldID, newI
 	moved := 0
 	for _, h := range found {
 		target, targetMoved := h.entityKey, h.entityKey != h.target
+		if h.entityKey == "" {
+			target, targetMoved = slackstore.MoveThreadKey(h.target, oldID, newID)
+		}
 		key, keyMoved := slackstore.MoveArtifactKey(h.key, oldID, newID)
 		url, urlMoved := slackstore.MovePermalink(h.url, oldID, newID)
 		if keyMoved {

@@ -652,18 +652,18 @@ func shortCommit(sha string) string {
 	return sha
 }
 
-// ResetReviewDraft is the host side of `gh pr start-review --fresh`: a pure local
-// reset of this conversation's review draft for the pull request whose node id
-// is prNodeID, with zero GitHub calls. It clears the staged comments, the
-// body/event ready sentinel, and the write-once Proposed snapshot back to an
-// empty pending draft, keeping the artifact row, its handle, and its pinned head
-// SHA. Returns the draft's handle and that pinned head SHA, or ("", "") when the
-// run has no draft for that PR (the caller falls through to a normal
-// start-review).
+// ResetReviewDraft is the host side of `gh pr start-review --fresh`: a local
+// reset of this conversation's review draft for owner/repo#number, with no
+// GitHub write. It clears the staged comments, the body/event ready sentinel,
+// and the write-once Proposed snapshot back to an empty pending draft, keeping
+// the artifact row, its handle, and its pinned head SHA. Returns the draft's
+// handle and that pinned head SHA, or ("", "") when the run has no draft for
+// that PR (the caller falls through to a normal start-review).
 //
-// The draft is found by its key (domain.ReviewDedupKey), the pull request's
-// node id and this conversation's id, so whatever name the agent spelled the
-// repository with, the reset lands on the one draft for that pull request.
+// The draft is found by its key (domain.ReviewDedupKey), the node id GitHub
+// answers for owner/repo#number (pullRequestNodeID) and this conversation's
+// id, so whatever name the agent spelled the repository with, the reset lands
+// on the one draft for that pull request.
 //
 // Post-494 the whole review lives in details_json, so the reset is a single
 // artifact rewrite — there is no GitHub pending review to delete and no identity
@@ -677,11 +677,12 @@ func shortCommit(sha string) string {
 // this HeadSHA, and a comment-LESS review (a pure approve / body-only
 // request-changes) sends no commit_id at all, so a stale HeadSHA can't reach
 // GitHub from either shape.
-func (c *LocalClient) ResetReviewDraft(ctx context.Context, prNodeID string) (reviewID, commitSHA string, err error) {
-	key := domain.ReviewDedupKey(prNodeID, c.info.ConversationID)
-	if key == "" {
-		return "", "", fmt.Errorf("the pull request has no node id; cannot find its review draft")
+func (c *LocalClient) ResetReviewDraft(ctx context.Context, owner, repo string, number int) (reviewID, commitSHA string, err error) {
+	prNodeID, err := c.pullRequestNodeID(ctx, owner, repo, number)
+	if err != nil {
+		return "", "", err
 	}
+	key := domain.ReviewDedupKey(prNodeID, c.info.ConversationID)
 	arts, err := c.listArtifactsByConversation(ctx)
 	if err != nil {
 		return "", "", err
@@ -1892,8 +1893,8 @@ func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, bas
 // artifact, with zero GitHub writes (TFAC-494). It mints a conversation-scoped `review`
 // artifact (state=pending, no ready sentinel, empty ExternalID; the reviewed
 // commitSHA pinned into details for the atomic submit at approval), keyed on the
-// pull request's node id, and returns the artifact id as the local review handle
-// the agent passes to add/finalize.
+// node id GitHub answers for owner/repo#number (pullRequestNodeID), and returns
+// the artifact id as the local review handle the agent passes to add/finalize.
 //
 // Because the dedup key is conversation-scoped, two conversations (different teams, a re-delegate,
 // interactive steering) reviewing the same PR each get their own draft row and
@@ -1901,9 +1902,10 @@ func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, bas
 // GitHub-native model (TFAC-463) introduced is gone, along with the identity
 // branch and ErrPendingReviewCollision. The comments param is unused (start-review
 // seeds no inline comments; the agent adds them via add-review-comment).
-func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, prNodeID, commitSHA string, _ []ghclient.SubmitReviewComment) (string, error) {
-	if prNodeID == "" {
-		return "", fmt.Errorf("PR #%d has no node id; cannot record its review draft", number)
+func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, _ []ghclient.SubmitReviewComment) (string, error) {
+	prNodeID, err := c.pullRequestNodeID(ctx, owner, repo, number)
+	if err != nil {
+		return "", err
 	}
 	a := domain.NewReviewArtifact(owner+"/"+repo, number, prNodeID, commitSHA, c.info.ConversationID)
 	stored, err := c.UpsertArtifact(ctx, a)
@@ -1911,6 +1913,26 @@ func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo
 		return "", fmt.Errorf("record review draft artifact: %w", err)
 	}
 	return stored.ID, nil
+}
+
+// pullRequestNodeID is the node id GitHub answers for owner/repo#number, read
+// through the run's repository gate (githubClientForRepo). A review draft is
+// keyed on it and linked to the entity carrying it, so it is never one the
+// sandbox supplies: a node id beside another pull request's coordinates would
+// attach the draft to a pull request the gate never saw.
+func (c *LocalClient) pullRequestNodeID(ctx context.Context, owner, repo string, number int) (string, error) {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return "", err
+	}
+	pr, err := client.GetPRBasic(ctx, owner, repo, number)
+	if err != nil {
+		return "", fmt.Errorf("read PR #%d for its node id: %w", number, err)
+	}
+	if pr.NodeID == "" {
+		return "", fmt.Errorf("PR #%d came back without a node id; cannot key its review draft — retry", number)
+	}
+	return pr.NodeID, nil
 }
 
 // ReviewDraftTarget implements Client: the owner/repo#number recorded on this
