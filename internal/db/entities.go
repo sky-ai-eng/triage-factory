@@ -477,18 +477,21 @@ type EntityStore interface {
 	//     and this is only a narrowing read. An empty jiraDone excludes Jira
 	//     entirely.
 	//
-	//     A ref matches on EITHER half: its id against the snapshot's
-	//     status_id, or its name against the snapshot's status. Both arms are
-	//     required because either side may be missing one — a stored rule can
-	//     carry names without ids until its team next saves the rules, and a
-	//     snapshot captured before status ids were recorded carries none until
-	//     its next poll refresh.
+	//     A ref matches the way JiraStatusRef.SameStatus compares, which is
+	//     the caller's recheck: a ref with an id matches a snapshot whose
+	//     status_id is that id, and matches by name only a snapshot that
+	//     carries no status_id; a ref with no id matches any snapshot whose
+	//     status has its name. Names are needed because either side may lack
+	//     an id — a stored rule can carry names without ids until its team
+	//     next saves the rules, and a snapshot captured before status ids were
+	//     recorded carries none until its next poll refresh — but a name never
+	//     reaches a snapshot whose id says it is another status.
 	//   - linear: a superset, the Jira way. Terminality is per Linear team —
 	//     linear_team_rules' done states — so this filters on linearDone, the
-	//     caller's flat union across teams, matching a ref's id against the
-	//     snapshot's state.id or its name against state.name, and the caller
-	//     re-checks each row against its own team's set. An empty linearDone
-	//     excludes Linear entirely.
+	//     caller's flat union across teams, matching state.id and state.name
+	//     the way LinearStateRef.SameState compares (as for Jira above), and
+	//     the caller re-checks each row against its own team's set. An empty
+	//     linearDone excludes Linear entirely.
 	//
 	// Rows with no stored snapshot never match — an unseeded stub has said
 	// nothing about whether its subject is finished, and a snapshot an

@@ -521,6 +521,24 @@ func LinearStateIDs(refs []LinearStateRef) []string {
 	return out
 }
 
+// LinearStateMatchSets splits refs for a query that compares the way
+// SameState does.
+func LinearStateMatchSets(refs []LinearStateRef) StatusMatchSets {
+	var out StatusMatchSets
+	for _, r := range refs {
+		switch {
+		case r.ID != "":
+			out.IDs = append(out.IDs, r.ID)
+			if r.Name != "" {
+				out.IDNames = append(out.IDNames, r.Name)
+			}
+		case r.Name != "":
+			out.Names = append(out.Names, r.Name)
+		}
+	}
+	return out
+}
+
 // LinearStateNames renders refs as their display names, skipping any that
 // carry none.
 func LinearStateNames(refs []LinearStateRef) []string {

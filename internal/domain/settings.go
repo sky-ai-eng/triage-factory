@@ -784,14 +784,30 @@ func JiraStatusNames(refs []JiraStatusRef) []string {
 	return out
 }
 
-// JiraStatusIDs renders refs as their identifiers, skipping the ones that
-// carry none — for the surfaces that can match on an id but must not treat a
-// name-only ref as having an empty one.
-func JiraStatusIDs(refs []JiraStatusRef) []string {
-	out := make([]string, 0, len(refs))
+// StatusMatchSets is a set of status refs split into the three lists a query
+// matching the way SameStatus and SameState compare has to test: IDs against
+// a value's id; IDNames, the names of the refs that carry an id, against the
+// name of a value that carries no id; and Names, the names of the refs that
+// carry no id, against any value's name. A value with an id is never matched
+// by the name of a ref that has one, so a status renamed to the name another
+// project's done status had stays apart from it.
+type StatusMatchSets struct {
+	IDs, IDNames, Names []string
+}
+
+// JiraStatusMatchSets splits refs for a query that compares the way
+// SameStatus does.
+func JiraStatusMatchSets(refs []JiraStatusRef) StatusMatchSets {
+	var out StatusMatchSets
 	for _, r := range refs {
-		if r.ID != "" {
-			out = append(out, r.ID)
+		switch {
+		case r.ID != "":
+			out.IDs = append(out.IDs, r.ID)
+			if r.Name != "" {
+				out.IDNames = append(out.IDNames, r.Name)
+			}
+		case r.Name != "":
+			out.Names = append(out.Names, r.Name)
 		}
 	}
 	return out

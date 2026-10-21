@@ -999,12 +999,25 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		jiraDone := seedSnap("PROJ-tc-done", "jira", `{"key":"PROJ-tc-done","status":"Done"}`)
 		jiraRenamed := seedSnap("PROJ-tc-renamed", "jira", `{"key":"PROJ-tc-renamed","status":"Complete","status_id":"10001"}`)
 		jiraLive := seedSnap("PROJ-tc-live", "jira", `{"key":"PROJ-tc-live","status":"In Progress","status_id":"10003"}`)
+		// The name halves follow SameStatus. jiraOtherDone sits in another
+		// project's live status that happens to be called "Done": the done
+		// ref named "Done" carries an id, so its name reaches only a snapshot
+		// with no id, and this one's id says it is a different status.
+		// jiraWontDo carries an id, and the ref naming its status carries
+		// none, so the name decides.
+		jiraOtherDone := seedSnap("PROJ-tc-other-done", "jira", `{"key":"PROJ-tc-other-done","status":"Done","status_id":"10099"}`)
+		jiraWontDo := seedSnap("PROJ-tc-wontdo", "jira", `{"key":"PROJ-tc-wontdo","status":"Won't Do","status_id":"10077"}`)
 		// The Linear arm, one shape per half: a done state reached by its id
 		// (renamed since the rule captured it), one reached by its name (the
 		// rule's ref carries no id), and a live state that matches neither.
 		linearByID := seedSnap("ENG-tc-id", "linear", `{"identifier":"ENG-tc-id","state":{"id":"ls-done","name":"Shipped","type":"completed"}}`)
 		linearByName := seedSnap("ENG-tc-name", "linear", `{"identifier":"ENG-tc-name","state":{"id":"ls-wontfix","name":"Won't Fix","type":"canceled"}}`)
 		linearLive := seedSnap("ENG-tc-live", "linear", `{"identifier":"ENG-tc-live","state":{"id":"ls-live","name":"In Progress","type":"started"}}`)
+		// The same two name rules on the Linear side: another team's state
+		// called "Done" is not the done ref's state, and a snapshot with no
+		// state id is reached by the ref's name.
+		linearOtherDone := seedSnap("ENG-tc-other-done", "linear", `{"identifier":"ENG-tc-other-done","state":{"id":"ls-other","name":"Done","type":"started"}}`)
+		linearNoID := seedSnap("ENG-tc-no-id", "linear", `{"identifier":"ENG-tc-no-id","state":{"name":"Done","type":"completed"}}`)
 		alreadyClosed := seedSnap("owner/repo#tc-gone", "github", `{"state":"MERGED","merged":true}`)
 		if _, err := s.MarkClosed(ctx, orgID, alreadyClosed); err != nil {
 			t.Fatalf("close: %v", err)
@@ -1031,7 +1044,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 
 		// Every row but the freshly polled one was last polled an hour ago,
 		// well past a fifteen-minute grace.
-		for _, id := range []string{merged, closedState, open, noSnapshot, jiraDone, jiraRenamed, jiraLive, linearByID, linearByName, linearLive, alreadyClosed, closeReady, owedLeased, closeParked, closeDone, closeCancelled} {
+		for _, id := range []string{merged, closedState, open, noSnapshot, jiraDone, jiraRenamed, jiraLive, jiraOtherDone, jiraWontDo, linearByID, linearByName, linearLive, linearOtherDone, linearNoID, alreadyClosed, closeReady, owedLeased, closeParked, closeDone, closeCancelled} {
 			seed.BackdatePoll(t, id, time.Hour)
 		}
 		const grace = 15 * time.Minute
@@ -1055,6 +1068,8 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			{jiraRenamed, "a Jira issue whose done status was renamed, matched by id"},
 			{linearByID, "a Linear issue whose done state was renamed, matched by id"},
 			{linearByName, "a Linear issue in a done state named by a ref with no id, matched by name"},
+			{jiraWontDo, "a Jira issue in a status a ref with no id names, matched by name though the snapshot has an id"},
+			{linearNoID, "a Linear issue whose snapshot state has no id, matched by the done ref's name"},
 			{closeDone, "an entity whose close row is done — the close it carried did not land"},
 			{closeCancelled, "an entity whose only close row is cancelled — it holds no key"},
 		} {
@@ -1069,6 +1084,8 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			{noSnapshot, "an entity with no stored snapshot"},
 			{jiraLive, "a Jira issue in a live status"},
 			{linearLive, "a Linear issue in a live state"},
+			{jiraOtherDone, "a Jira issue in another status that shares a done ref's name; its id says it is not that status"},
+			{linearOtherDone, "a Linear issue in another state that shares a done ref's name; its id says it is not that state"},
 			{alreadyClosed, "an entity already closed"},
 			{closeReady, "an entity with a terminating transition ready"},
 			{owedLeased, "an entity with a close obligation leased"},

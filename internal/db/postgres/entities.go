@@ -309,13 +309,10 @@ func (s *entityStore) ListActiveSystem(ctx context.Context, orgID, source string
 // is subtracted from the server clock, the one that stamped last_polled_at.
 func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDone []domain.JiraStatusRef, linearDone []domain.LinearStateRef, unpolledFor time.Duration, limit int) ([]domain.Entity, error) {
 	args := []any{orgID, unpolledFor.Seconds(), domain.EntityCloseSettlingEventTypes()}
-	// Each arm is omitted rather than emitted empty: `IN ()` is a syntax
-	// error, and a ref set with no ids (or no names) genuinely has nothing to
-	// match on that side. With neither, no Jira (or Linear) entity can be
-	// terminal. Both halves are user-configured text, so they bind as
-	// placeholders rather than riding an array literal. path is a jsonb
-	// accessor chain ending in ->>.
-	arm := func(path string, values []string) string {
+	// The values are user-configured text, so they bind as placeholders
+	// rather than riding an array literal. path is a jsonb accessor chain
+	// ending in ->>.
+	in := func(path string, values []string) string {
 		placeholders := make([]string, len(values))
 		for i, v := range values {
 			args = append(args, v)
@@ -323,28 +320,30 @@ func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, or
 		}
 		return `snapshot_json` + path + ` IN (` + strings.Join(placeholders, ", ") + `)`
 	}
-	var matches []string
-	if ids := domain.JiraStatusIDs(jiraDone); len(ids) > 0 {
-		matches = append(matches, arm("->>'status_id'", ids))
+	// sourceArm matches the way SameStatus / SameState compare (see
+	// domain.StatusMatchSets): an id against the snapshot's id, the name of
+	// a ref with an id only against a snapshot that carries none, and the
+	// name of a ref with no id against any snapshot. Each test is omitted
+	// rather than emitted empty, since `IN ()` is a syntax error; with none,
+	// no entity of the source can be terminal and the arm is "".
+	sourceArm := func(source, idPath, namePath string, sets domain.StatusMatchSets) string {
+		var matches []string
+		if len(sets.IDs) > 0 {
+			matches = append(matches, in(idPath, sets.IDs))
+		}
+		if len(sets.IDNames) > 0 {
+			matches = append(matches, `(COALESCE(snapshot_json`+idPath+`, '') = '' AND `+in(namePath, sets.IDNames)+`)`)
+		}
+		if len(sets.Names) > 0 {
+			matches = append(matches, in(namePath, sets.Names))
+		}
+		if len(matches) == 0 {
+			return ""
+		}
+		return ` OR (source = '` + source + `' AND (` + strings.Join(matches, " OR ") + `))`
 	}
-	if names := domain.JiraStatusNames(jiraDone); len(names) > 0 {
-		matches = append(matches, arm("->>'status'", names))
-	}
-	jiraArm := ""
-	if len(matches) > 0 {
-		jiraArm = ` OR (source = 'jira' AND (` + strings.Join(matches, " OR ") + `))`
-	}
-	var linearMatches []string
-	if ids := domain.LinearStateIDs(linearDone); len(ids) > 0 {
-		linearMatches = append(linearMatches, arm("->'state'->>'id'", ids))
-	}
-	if names := domain.LinearStateNames(linearDone); len(names) > 0 {
-		linearMatches = append(linearMatches, arm("->'state'->>'name'", names))
-	}
-	linearArm := ""
-	if len(linearMatches) > 0 {
-		linearArm = ` OR (source = 'linear' AND (` + strings.Join(linearMatches, " OR ") + `))`
-	}
+	jiraArm := sourceArm("jira", "->>'status_id'", "->>'status'", domain.JiraStatusMatchSets(jiraDone))
+	linearArm := sourceArm("linear", "->'state'->>'id'", "->'state'->>'name'", domain.LinearStateMatchSets(linearDone))
 	limitClause := ""
 	if limit > 0 {
 		args = append(args, limit)
