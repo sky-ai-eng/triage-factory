@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -168,5 +169,88 @@ func TestEnsureWorkspace_ColdRehydrate_ReadsThePRUnderTheRenamedName(t *testing.
 	}
 	if remotes := strings.Fields(gitOut(t, pr, "remote")); len(remotes) < 2 {
 		t.Errorf("remotes = %v, want a push remote beside origin, rebuilt from the pull request", remotes)
+	}
+}
+
+// renamedRemoteCheckout builds a PR checkout of acme/app whose remotes name
+// the repository by GitHub's clone URL, https://github.com/acme/app.git, as a
+// checkout made from it does, then renames the repository to acme/app-renamed
+// in the registry and the ledger. It returns the checkout's path.
+func renamedRemoteCheckout(t *testing.T, f *snapshotFixture) string {
+	t.Helper()
+	ctx := context.Background()
+	runmode.SetLocalSandboxForTest(t, true)
+	_, rows := f.taskRegistry(t, dbtest.TestGitHubHost, dbtest.TestGitHubHost)
+	row := rows[dbtest.TestGitHubHost]
+	pr := f.addCheckoutOf(t, worktree.Repo{ID: row.ID, Owner: "acme", Name: "app"}, "pr-7")
+	remotes := strings.Fields(gitOut(t, pr, "remote"))
+	if len(remotes) < 2 {
+		t.Fatalf("remotes = %v, want origin and the PR's push remote", remotes)
+	}
+	for _, remote := range remotes {
+		gitT(t, pr, "remote", "set-url", remote, "https://github.com/acme/app.git")
+	}
+	if _, err := f.s.repos.FillMissingExternalIDsSystem(ctx, runmode.LocalDefaultOrgID, []domain.RepoRef{
+		{Host: dbtest.TestGitHubHost, Owner: "acme", Repo: "app", ExternalID: "4242"},
+	}); err != nil {
+		t.Fatalf("seed the repository's id: %v", err)
+	}
+	if out, err := f.s.repos.RenameSystem(ctx, runmode.LocalDefaultOrgID, domain.RepoRef{
+		Host: dbtest.TestGitHubHost, Owner: "acme", Repo: "app-renamed", ExternalID: "4242",
+	}); err != nil || !out.Renamed {
+		t.Fatalf("RenameSystem = %+v, %v", out, err)
+	}
+	f.ledger.renameInLedger(row.ID, "acme/app-renamed")
+	return pr
+}
+
+// assertRemotesName asserts every remote of the checkout at dir has url.
+func assertRemotesName(t *testing.T, dir, url string) {
+	t.Helper()
+	for _, remote := range strings.Fields(gitOut(t, dir, "remote")) {
+		if got := strings.TrimSpace(gitOut(t, dir, "remote", "get-url", remote)); got != url {
+			t.Errorf("remote %s = %s, want %s", remote, got, url)
+		}
+	}
+}
+
+// TestEnsureWorkspace_WarmTreeRepointsRemotesOfARenamedRepository: a warm tree
+// whose checkout was made before its repository was renamed comes back with
+// its origin and its push remote naming the repository's new name, which is
+// what the gh verbs, the repo gates and the credential lookup read.
+func TestEnsureWorkspace_WarmTreeRepointsRemotesOfARenamedRepository(t *testing.T) {
+	f := newSnapshotFixture(t, "task-renamed-warm-remotes")
+	pr := renamedRemoteCheckout(t, f)
+
+	_, prov, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), checkoutRestorer{}, failingFreshBuilder(t))
+	if err != nil || prov != domain.WorkspaceProvenanceWarm {
+		t.Fatalf("ensureWorkspace = (%q, %v), want warm", prov, err)
+	}
+	assertRemotesName(t, pr, "https://github.com/acme/app-renamed.git")
+}
+
+// TestRepointRenamedRemotesInJail_RunsTheRewriteThroughTheToolHost: a tree the
+// sandbox identity owns is rewritten by the engagement's tool host, in one
+// script that does what the host-side rewrite does, and a tree with nothing
+// to move costs no call at all.
+func TestRepointRenamedRemotesInJail_RunsTheRewriteThroughTheToolHost(t *testing.T) {
+	f := newSnapshotFixture(t, "task-renamed-jail-remotes")
+	pr := renamedRemoteCheckout(t, f)
+
+	host := &recordingToolHost{}
+	f.s.repointRenamedRemotesInJail(context.Background(), runmode.LocalDefaultOrgID, f.key, f.root, host)
+	cmds := host.commands()
+	if len(cmds) != 1 {
+		t.Fatalf("tool host calls = %d, want 1", len(cmds))
+	}
+	assertRemotesName(t, pr, "https://github.com/acme/app.git")
+	if out, err := exec.Command("bash", "-c", cmds[0]).CombinedOutput(); err != nil {
+		t.Fatalf("run the jail script: %v: %s\n%s", err, out, cmds[0])
+	}
+	assertRemotesName(t, pr, "https://github.com/acme/app-renamed.git")
+
+	f.s.repointRenamedRemotesInJail(context.Background(), runmode.LocalDefaultOrgID, f.key, f.root, host)
+	if n := len(host.commands()); n != 1 {
+		t.Errorf("tool host calls after the rewrite = %d, want none beyond the first", n-1)
 	}
 }
