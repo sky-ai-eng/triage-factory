@@ -53,7 +53,7 @@ tunnel terminates TLS for every host it admits, under the conditions in
 `docs/for-agents/specs/sandbox-backends/` §6.1:
 
 - **Per-engagement CA.** The egress proxy mints a CA for each engagement,
-  name-constrained to the allowlist and valid for a day, whose key never
+  name-constrained to the allowlist and valid for a week, whose key never
   leaves the sidecar's memory. Its certificate reaches the jail in the
   run's CA bundle (`/run/tf-ca-bundle.crt`), after the system roots, and
   every toolchain in the rootfs reads that bundle through its own variable

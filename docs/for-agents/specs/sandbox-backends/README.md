@@ -290,8 +290,10 @@ conditions:
    never substituted for them. The sidecar writes that bundle for every run,
    whatever channels the run has, outside the run tree and fresh at every
    engagement, so a resumed run trusts a fresh CA. The CA is valid for a
-   day, and an engagement that outlives it gets certificate errors rather than
-   a fallback. It is name-constrained to exactly the hosts the tunnel admits,
+   week, and an engagement that outlives it gets certificate errors rather
+   than a fallback. The length is not what limits it: its key dies with the
+   sidecar and the next engagement mints another, so it is trusted for one
+   engagement however long it is valid. It is name-constrained to exactly the hosts the tunnel admits,
    with every IP address excluded. GitHub and the LLM provider are never
    intercepted; they keep their explicit endpoints.
 2. **Every host the tunnel admits is intercepted.** A host left opaque keeps

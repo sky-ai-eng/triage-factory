@@ -18,8 +18,11 @@ import (
 // authorityValidity is how long a per-engagement CA, and every leaf it signs,
 // stays valid. The jail reads the CA's certificate once, at launch, so this
 // has to outlast the engagement; a run that outlasts it gets certificate
-// errors on every intercepted host, never a fallback.
-const authorityValidity = 24 * time.Hour
+// errors on every intercepted host, never a fallback. The length guards
+// nothing: the key dies with the sidecar and the next engagement mints a new
+// CA, so the certificate is trusted for one engagement however long it is
+// valid. A week only keeps a long engagement from running into it.
+const authorityValidity = 7 * 24 * time.Hour
 
 // authorityBackdate allows for a jail clock slightly behind the host's.
 const authorityBackdate = time.Hour
