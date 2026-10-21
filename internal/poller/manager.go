@@ -1629,8 +1629,9 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 // PickupMembers / DoneMembers are Jira *workflow statuses* ("To Do",
 // "Backlog", "Done" — each an id plus the name captured with it), NOT people
 // or teams: they drive the discovery JQL, which asks by id so a rename in Jira
-// cannot silently stop matching. When several teams track the same project_key
-// with divergent status sets, those sets are MERGED (set-union, first-seen order preserved): the most-permissive
+// cannot silently stop matching. When several teams track the same project
+// (one registry row) with divergent status sets, those sets are MERGED
+// (set-union, first-seen order preserved): the most-permissive
 // interpretation for discovery + terminal detection, so no team's
 // pickup-able issue is missed and any team's notion of "done" closes the
 // shared entity. Team-specific scoping lives downstream in the router

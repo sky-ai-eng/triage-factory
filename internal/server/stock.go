@@ -317,7 +317,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 // overlapping rule membership). Pickup is checked last so the "new work"
 // case is the default for simply-assigned-to-you tickets.
 //
-// A nil project rule (the ticket's project_key has no configured rules)
+// A nil project rule (the ticket's project has no configured rules)
 // returns "" — user picks the action manually, matching the "no rules
 // configured" degrade-cleanly contract.
 func prefillForAssigned(rule *domain.JiraProjectStatusRules, status domain.JiraStatusRef) string {
