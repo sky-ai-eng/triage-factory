@@ -205,9 +205,10 @@ func catalogNames() string {
 // The sandbox env is an allowlist, not a passthrough: a key not on this
 // set fails the launch loudly. The set is the UNION of what the sandbox
 // legitimately needs — enumerated here explicitly with each group tied to
-// its producer. internal/agentproc's secret_keys drift test asserts every
-// key the proxy/git wiring emits is covered here, so a new producer key
-// can't silently slip past validation.
+// its producer. internal/agentproc's TestSandboxEnvAllowlistCoversEveryProducer
+// (sandbox_env_allowlist_drift_test.go) asserts every key the jail's own
+// environment (cell.JailEnv) and the proxy/git wiring emit is covered here,
+// so a new producer key can't silently slip past validation.
 //
 // Values are unrestricted (URLs, per-run placeholder tokens, git identity)
 // — Property B holds because the orchestrator only ever puts non-secret /
@@ -294,9 +295,9 @@ var allowedSandboxEnvPrefixes = []string{
 }
 
 // EnvKeyAllowed reports whether an env key is on the sandbox allowlist —
-// exported so internal/agentproc (which produces the sandbox env and can
-// import this package without a cycle) can drift-test that every key its
-// proxy/git wiring emits is covered here. Without that guard a new producer
+// exported so internal/agentproc, which produces the proxy env and can import
+// this package without a cycle, can drift-test that every key the jail's
+// environment and its own proxy/git wiring emit is covered here. Without that guard a new producer
 // key would break every sandboxed run at launch — the broker's
 // ValidateLaunchParams rejects an unlisted key — instead of being caught at
 // test time by the drift test.
