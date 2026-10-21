@@ -1701,6 +1701,10 @@ func (s *Server) revertLinearStateIfApplicable(ctx context.Context, orgID, userI
 		linearLog.Warn("requeue revert: no Linear identity stored for user, skipping", "issue", target.identifier, "user", userID)
 		return
 	}
+	if target.issueID == "" {
+		linearLog.Warn("requeue revert: the task's entity names no Linear issue id, skipping", "issue", target.identifier)
+		return
+	}
 	linearUserClient, err := s.linearResolver.ForUser(ctx, orgID, userID)
 	if err != nil {
 		if errors.Is(err, linear.ErrNoLinearUserCredential) {
@@ -1711,7 +1715,7 @@ func (s *Server) revertLinearStateIfApplicable(ctx context.Context, orgID, userI
 		return
 	}
 	// Detached from the request, like the Jira reversal.
-	go applyLinearUnclaim(context.Background(), linearUserClient, target.identifier, target.linearUserID,
+	go applyLinearUnclaim(context.Background(), linearUserClient, target.issueID, target.identifier, target.linearUserID,
 		*task.SourceStatus, target.rule.InProgressMembers)
 }
 

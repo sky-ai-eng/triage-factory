@@ -863,9 +863,15 @@ func (s *Server) syncLinearClaim(r *http.Request, orgID, userID, id string, line
 		linearLog.Warn("claim guard: no Linear identity stored for the acting user, skipping", "issue", target.identifier, "user", userID)
 		return
 	}
+	// Every Linear entity carries its issue's UUID, so this is a row that
+	// vanished between the claim and this read.
+	if target.issueID == "" {
+		linearLog.Warn("claim guard: the task's entity names no Linear issue id, skipping", "issue", target.identifier, "task", id)
+		return
+	}
 	// Detached from the request: the sync outlives the response, so it uses a
 	// background context.
-	go applyLinearClaim(context.Background(), linearUserClient, target.identifier, target.linearUserID, *target.rule)
+	go applyLinearClaim(context.Background(), linearUserClient, target.issueID, target.identifier, target.linearUserID, *target.rule)
 }
 
 // triggerDelegation fires the delegation run and records the conversation_id on

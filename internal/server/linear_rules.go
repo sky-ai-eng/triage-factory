@@ -11,27 +11,19 @@ import (
 
 // lookupLinearRuleForTask resolves the per-team Linear rule that governs the
 // given task's issue: the task's team's linear_team_rules row, in workspaceID,
-// for the Linear team the entity sits in (entities.linear_team_id). The Linear
-// sibling of lookupJiraRuleForTask. The Linear team comes from that column
-// rather than from the identifier's prefix, because a team key can be renamed
-// and the team id cannot, and rather than from the snapshot, which turning
-// the source off clears. Returns nil when the task is not Linear-backed, has
-// no TeamID stamped, its entity names no Linear team, or the team has no rule
+// for linearTeamID, the Linear team the issue's entity sits in
+// (entities.linear_team_id). The Linear sibling of lookupJiraRuleForTask. The
+// Linear team comes from that column rather than from the identifier's prefix,
+// because a team key can be renamed and the team id cannot, and rather than
+// from the snapshot, which turning the source off clears. Returns nil when the
+// task has no TeamID stamped, linearTeamID is empty, or the team has no rule
 // for that Linear team in workspaceID.
 //
 // Runs inside the caller's transaction so the rule read goes through the
 // app-pool ListForTeam, where the linear_rules_* RLS policies gate it by team
 // membership.
-func lookupLinearRuleForTask(ctx context.Context, tx db.TxStores, orgID, workspaceID string, task *domain.Task) *domain.LinearTeamRules {
-	if task == nil || task.EntitySource != "linear" || task.TeamID == nil || *task.TeamID == "" || workspaceID == "" {
-		return nil
-	}
-	entity, err := tx.Entities.Get(ctx, orgID, task.EntityID)
-	if err != nil {
-		linearRuleLog.Warn("read entity for rule lookup failed", "entity", task.EntityID, "error", err)
-		return nil
-	}
-	if entity == nil || entity.LinearTeamID == "" {
+func lookupLinearRuleForTask(ctx context.Context, tx db.TxStores, workspaceID, linearTeamID string, task *domain.Task) *domain.LinearTeamRules {
+	if task == nil || task.TeamID == nil || *task.TeamID == "" || workspaceID == "" || linearTeamID == "" {
 		return nil
 	}
 	rules, err := tx.LinearTeamRules.ListForTeam(ctx, *task.TeamID, workspaceID)
@@ -40,7 +32,7 @@ func lookupLinearRuleForTask(ctx context.Context, tx db.TxStores, orgID, workspa
 		return nil
 	}
 	for i := range rules {
-		if rules[i].LinearTeamID == entity.LinearTeamID {
+		if rules[i].LinearTeamID == linearTeamID {
 			return &rules[i]
 		}
 	}
@@ -50,8 +42,12 @@ func lookupLinearRuleForTask(ctx context.Context, tx db.TxStores, orgID, workspa
 // linearSyncTarget is what moving a Linear issue to match a TF claim needs,
 // read under the acting user's claims: the issue, the rule of the Linear team
 // it sits in (nil when there is none), and the acting user's Linear user id in
-// the org's workspace ("" when no identity is stored).
+// the org's workspace ("" when no identity is stored). issueID is Linear's
+// UUID for the issue (the entity's external_id), the address every read and
+// write uses; identifier is its display key, for log lines, and can be one a
+// team move or key rename has replaced since the last poll.
 type linearSyncTarget struct {
+	issueID      string
 	identifier   string
 	rule         *domain.LinearTeamRules
 	linearUserID string
@@ -61,22 +57,32 @@ type linearSyncTarget struct {
 // transaction. The workspace is the org's current one, which is the workspace
 // the acting user's credential and identity belong to; a task whose issue is
 // in a workspace the org no longer has bound finds no rule there, since a
-// Linear team id belongs to one workspace only.
+// Linear team id belongs to one workspace only. A task that is not
+// Linear-backed, or whose entity is gone, gets a target with no issue id and
+// no rule.
 func readLinearSyncTarget(ctx context.Context, tx db.TxStores, orgID, userID string, task *domain.Task) (linearSyncTarget, error) {
+	target := linearSyncTarget{identifier: task.EntitySourceID}
+	if task.EntitySource != "linear" {
+		return target, nil
+	}
+	entity, err := tx.Entities.Get(ctx, orgID, task.EntityID)
+	if err != nil {
+		return linearSyncTarget{}, fmt.Errorf("load linear entity: %w", err)
+	}
+	if entity == nil {
+		return target, nil
+	}
+	target.issueID = entity.ExternalID
 	orgSet, err := tx.Orgs.GetSettings(ctx, orgID)
 	if err != nil {
 		return linearSyncTarget{}, fmt.Errorf("load org settings: %w", err)
 	}
 	workspaceID := domain.EntityScope("linear", orgSet)
-	linearUserID, _, err := tx.Users.GetLinearIdentity(ctx, userID, workspaceID)
-	if err != nil {
+	if target.linearUserID, _, err = tx.Users.GetLinearIdentity(ctx, userID, workspaceID); err != nil {
 		return linearSyncTarget{}, fmt.Errorf("load linear identity: %w", err)
 	}
-	return linearSyncTarget{
-		identifier:   task.EntitySourceID,
-		rule:         lookupLinearRuleForTask(ctx, tx, orgID, workspaceID, task),
-		linearUserID: linearUserID,
-	}, nil
+	target.rule = lookupLinearRuleForTask(ctx, tx, workspaceID, entity.LinearTeamID, task)
+	return target, nil
 }
 
 // linearState is a workflow state as a rule's members name one.
@@ -89,9 +95,10 @@ func linearState(s linear.WorkflowState) domain.LinearStateRef {
 // the rule's in-progress canonical unless it already sits in an in-progress
 // state. A failed assign stops before the transition, as the Jira claim does.
 // Every failure is logged rather than returned: the claim has landed in TF by
-// the time this runs.
-func applyLinearClaim(ctx context.Context, c *linear.Client, identifier, linearUserID string, rule domain.LinearTeamRules) {
-	issue, err := c.GetIssue(ctx, identifier)
+// the time this runs. The issue is read by issueID, its UUID; identifier
+// only labels the log lines.
+func applyLinearClaim(ctx context.Context, c *linear.Client, issueID, identifier, linearUserID string, rule domain.LinearTeamRules) {
+	issue, err := c.GetIssue(ctx, issueID)
 	if err != nil {
 		linearLog.Error("claim guard: read issue failed", "issue", identifier, "error", err)
 		return
@@ -136,12 +143,15 @@ func applyLinearClaim(ctx context.Context, c *linear.Client, identifier, linearU
 // Linear transitions only by id, so the issue could be unassigned but never
 // moved back. The claim always records the snapshot's state id, so only a
 // malformed row reaches this.
-func applyLinearUnclaim(ctx context.Context, c *linear.Client, identifier, linearUserID string, prior domain.SourceStatus, inProgress []domain.LinearStateRef) {
+//
+// The issue is read by issueID, its UUID; identifier only labels the log
+// lines.
+func applyLinearUnclaim(ctx context.Context, c *linear.Client, issueID, identifier, linearUserID string, prior domain.SourceStatus, inProgress []domain.LinearStateRef) {
 	if prior.StatusID == "" {
 		linearLog.Warn("requeue guard: recorded state has no id, skipping", "issue", identifier, "state", prior.StatusName)
 		return
 	}
-	issue, err := c.GetIssue(ctx, identifier)
+	issue, err := c.GetIssue(ctx, issueID)
 	if err != nil {
 		linearLog.Error("requeue guard: read issue failed", "issue", identifier, "error", err)
 		return
