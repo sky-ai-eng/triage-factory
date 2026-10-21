@@ -391,10 +391,11 @@ func TestRunJiraMirror_ConcurrentMirrorsUnderOldAndNewKeysEndInDone(t *testing.T
 	}
 }
 
-// The mirror addresses the ticket by the key its entity carries when the
-// mirror runs, not the one the caller read off the task: an issue that moved in
-// between is transitioned and audited under its new key and its issue id.
-func TestRunJiraMirror_UsesTheEntitysCurrentKey(t *testing.T) {
+// The mirror reads the ticket's entity when it runs: every Jira call names
+// the issue by its id, and the audit row records the key the entity carries
+// then, not the one the caller read off the task. An issue that moved in
+// between is transitioned by its id and audited under its new key.
+func TestRunJiraMirror_AddressesTheIssueByIDAndRecordsItsCurrentKey(t *testing.T) {
 	database := newDelegateTestDB(t)
 	stores := testSpawnerStores(database)
 	const site = "https://jira.example.com"
@@ -414,10 +415,19 @@ func TestRunJiraMirror_UsesTheEntitysCurrentKey(t *testing.T) {
 	fake.mu.Lock()
 	paths := append([]string(nil), fake.paths...)
 	fake.mu.Unlock()
+	issueRequests := 0
 	for _, p := range paths {
-		if strings.Contains(p, "SKY-1") {
-			t.Errorf("request %s addresses the key the caller read, want OPS-7", p)
+		_, rest, ok := strings.Cut(p, "/issue/")
+		if !ok {
+			continue
 		}
+		issueRequests++
+		if issue, _, _ := strings.Cut(rest, "/"); issue != "10007" {
+			t.Errorf("request %s addresses the issue as %q, want its id 10007", p, issue)
+		}
+	}
+	if issueRequests == 0 {
+		t.Fatalf("the mirror made no issue requests: %v", paths)
 	}
 	rows, err := database.Query(`SELECT target, external_id FROM external_actions WHERE provider = 'jira'`)
 	if err != nil {

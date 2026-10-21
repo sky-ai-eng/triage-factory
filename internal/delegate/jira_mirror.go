@@ -207,14 +207,16 @@ func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule d
 	ctx, cancel := context.WithTimeout(context.Background(), jiraMirrorTimeout)
 	defer cancel()
 
-	// The key is read again under the lock: the issue may have moved since the
-	// caller read its task, and the Jira calls and the audit row name the key
-	// it answers to now. A failed read keeps the caller's key, which Jira
-	// still resolves. The entity's scope — its Jira site — is the audit row's.
-	issueID, scope := "", ""
+	// The entity is read again under the lock: the issue may have moved since
+	// the caller read its task. The Jira calls name the issue by its id, which
+	// a move leaves alone; the logs and the audit row name it by the key it
+	// answers to now. A failed read keeps the caller's key, which Jira still
+	// resolves. The entity's scope — its Jira site — is the audit row's.
+	issue, issueID, scope := issueKey, "", ""
 	if s.entities != nil {
 		if e, err := s.entities.GetSystem(ctx, orgID, entityID); err == nil && e != nil && e.SourceID != "" {
 			issueKey, issueID, scope = e.SourceID, e.ExternalID, e.Scope
+			issue = e.JiraIssueRef()
 		}
 	}
 
@@ -241,7 +243,7 @@ func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule d
 		return
 	}
 
-	state := client.GetClaimState(ctx, issueKey)
+	state := client.GetClaimState(ctx, issue)
 
 	if done {
 		// Idempotency skip when the ticket is already in the Done bucket. Unlike
@@ -254,7 +256,7 @@ func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule d
 			jiraLog.Debug("mirror: already in done bucket, skipping", "issue", issueKey, "status", state.StatusName)
 			return
 		}
-		if err := client.TransitionTo(ctx, issueKey, jira.Status{ID: rule.DoneCanonical.ID, Name: rule.DoneCanonical.Name}); err != nil {
+		if err := client.TransitionTo(ctx, issue, jira.Status{ID: rule.DoneCanonical.ID, Name: rule.DoneCanonical.Name}); err != nil {
 			jiraLog.Warn("mirror: transition to done failed", "issue", issueKey, "target", rule.DoneCanonical.Name, "error", err)
 			return
 		}
@@ -285,7 +287,7 @@ func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule d
 		return
 	}
 	if !state.AssignedToSelf {
-		if err := client.AssignToSelf(ctx, issueKey); err != nil {
+		if err := client.AssignToSelf(ctx, issue); err != nil {
 			// Skip the transition too: assign + transition move together (same as
 			// the user-path claim guard), so a failed assign leaves the ticket
 			// untouched — To Do + unassigned — rather than "In Progress but
@@ -296,7 +298,7 @@ func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule d
 		s.recordMirrorAction(ctx, orgID, scope, issueKey, issueID, teamID, domain.ActionIssueAssigned, "", "")
 	}
 	if !rule.InProgressContains(claimStatusRef(state)) {
-		if err := client.TransitionTo(ctx, issueKey, jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name}); err != nil {
+		if err := client.TransitionTo(ctx, issue, jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name}); err != nil {
 			jiraLog.Warn("mirror: transition to in-progress failed", "issue", issueKey, "target", rule.InProgressCanonical.Name, "error", err)
 			return
 		}

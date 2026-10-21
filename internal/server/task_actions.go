@@ -770,12 +770,13 @@ func (s *Server) endTaskConversations(ctx context.Context, orgID, userID, taskID
 // transition when the ticket is already assigned-to-self and already in any
 // in-progress member, so a second claim on the same issue doesn't
 // re-assign/re-transition redundantly. jiraUserClient is the acting user's own
-// client, so the assignment attributes to the claimer.
+// client, so the assignment attributes to the claimer. Jira is addressed by the
+// issue id; the key names the ticket in the logs.
 func (s *Server) syncJiraClaim(r *http.Request, orgID, userID, id string, jiraUserClient *jira.Client) {
 	// Fetch the task and its team's status rules in one WithTx so the rule read
 	// goes through the app-pool ListForTeam under jira_rules_select RLS.
 	var task *domain.Task
-	var rule *domain.JiraProjectStatusRules
+	var target jiraTaskTarget
 	err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		task, e = tx.Tasks.Get(r.Context(), orgID, id)
@@ -786,21 +787,22 @@ func (s *Server) syncJiraClaim(r *http.Request, orgID, userID, id string, jiraUs
 		if e != nil {
 			return e
 		}
-		rule = lookupJiraRuleForTask(r.Context(), tx, orgID, domain.EntityScope("jira", orgSet), task)
+		target = lookupJiraTaskTarget(r.Context(), tx, orgID, domain.EntityScope("jira", orgSet), task)
 		return nil
 	})
 	if err != nil || task == nil || task.EntitySource != "jira" {
 		return
 	}
+	rule := target.Rule
 	if rule == nil || rule.InProgressCanonical.IsZero() {
 		jiraLog.Warn("claim guard: no in_progress rule configured for project, skipping transition", "ticket", task.EntitySourceID)
 		return
 	}
-	go func(issueKey string, ipMembers []domain.JiraStatusRef, ipCanonical jira.Status) {
+	go func(issue, issueKey string, ipMembers []domain.JiraStatusRef, ipCanonical jira.Status) {
 		// Detached from the request: this claim guard outlives the response,
 		// so it uses a background context.
 		bgCtx := context.Background()
-		state := jiraUserClient.GetClaimState(bgCtx, issueKey)
+		state := jiraUserClient.GetClaimState(bgCtx, issue)
 
 		needAssign := state == nil || !state.AssignedToSelf
 		needTransition := state == nil || !domain.ContainsStatus(ipMembers, claimStatusRef(state))
@@ -811,17 +813,17 @@ func (s *Server) syncJiraClaim(r *http.Request, orgID, userID, id string, jiraUs
 		}
 
 		if needAssign {
-			if err := jiraUserClient.AssignToSelf(bgCtx, issueKey); err != nil {
+			if err := jiraUserClient.AssignToSelf(bgCtx, issue); err != nil {
 				jiraLog.Error("failed to assign", "issue", issueKey, "error", err)
 				return
 			}
 		}
 		if needTransition {
-			if err := jiraUserClient.TransitionTo(bgCtx, issueKey, ipCanonical); err != nil {
+			if err := jiraUserClient.TransitionTo(bgCtx, issue, ipCanonical); err != nil {
 				jiraLog.Error("failed to transition", "issue", issueKey, "status", ipCanonical.Name, "error", err)
 			}
 		}
-	}(task.EntitySourceID, rule.InProgressMembers,
+	}(target.IssueRef, task.EntitySourceID, rule.InProgressMembers,
 		jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name})
 }
 
