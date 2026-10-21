@@ -51,21 +51,12 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blue
 	now := time.Now().UTC()
 	var inserted int64
 
-	// Shipped GitHub rules ship `author_in: []` (match-all) verbatim — the
-	// host-dependent seed-time rewrite that scoped them to the local user's
-	// login is GONE. Author-centric owner routing scopes these at event time
-	// instead (resolving the PR author's team via the owning-team ladder),
-	// which also fixes the "connected GitHub after the seed" gap the
-	// seed-once rewrite had. The author_in field + matcher stay, as an
-	// optional per-member filter for user-authored rules.
-	//
-	// Shipped Jira rules now ship `assignee_in: []` (match-all) verbatim too —
-	// the seed-time rewrite that scoped jira-assigned / jira-became-atomic to
-	// the local user's Atlassian account id is GONE, along with the org-host
-	// read it needed. Assignee-centric owner routing scopes these at event time
-	// instead (resolving the issue assignee's team via the owning-team ladder),
-	// matching the GitHub fix. The assignee_in field + matcher stay, as an
-	// optional per-member filter for user-authored rules.
+	// Shipped predicates are inserted as written. The GitHub rules' empty
+	// `author_in` and the Jira and Linear rules' empty `assignee_in` match
+	// everyone; owner routing scopes them at event time, resolving the PR
+	// author's (or the issue assignee's) team through the owning-team ladder,
+	// so a user who connects a source after the seed is scoped the same way.
+	// Both fields stay available as per-member filters on user-authored rules.
 	for _, h := range db.ShippedEventHandlers {
 		var pred any
 		if h.Predicate != "" {

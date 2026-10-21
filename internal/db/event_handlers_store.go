@@ -305,10 +305,9 @@ type ShippedEventHandler struct {
 	MinAutonomySuitability float64
 }
 
-// ShippedEventHandlers is the v1 default set, combining the formerly
-// separate ShippedTaskRules + ShippedPromptTriggers lists. Rules ship
-// with Enabled=true (the post-Seed default in the Create path);
-// triggers ship with Enabled=false per project convention.
+// ShippedEventHandlers is the v1 default set of task rules and prompt
+// triggers. Rules ship with Enabled=true (the post-Seed default in the
+// Create path); triggers ship with Enabled=false per project convention.
 //
 // BlueprintID values on trigger entries reference shipped blueprints seeded
 // by ShippedDefaultsStore.SeedShippedIntoTeam. Its phase order is prompts →
@@ -318,13 +317,12 @@ type ShippedEventHandler struct {
 var ShippedEventHandlers = []ShippedEventHandler{
 	// ----- rules ------------------------------------------------------------
 	//
-	// Rules that scope to "my PR" carry `author_in: []` as a placeholder.
-	// The SQLite Seed implementation substitutes the local user's
-	// users.github_username into the empty allowlist at insert time.
-	// Postgres Seed leaves the empty allowlist alone — multi
-	// mode doesn't have a single "self" to substitute; team visibility
-	// is the scoping mechanism there. Either way, users can edit the
-	// allowlist via the Settings UI to add or remove handles.
+	// Rules about "my PR" carry `author_in: []` and rules about "my issue"
+	// carry `assignee_in: []`. An empty list matches everyone, and both
+	// dialects' Seed insert the predicate as written. Owner routing scopes
+	// these at event time instead: it resolves the PR author's (or the issue
+	// assignee's) team through the owning-team ladder. Users can fill either
+	// list in the Settings UI to narrow a rule to particular people.
 	{
 		ID:              "system-rule-ci-check-failed",
 		Kind:            domain.EventHandlerKindRule,
