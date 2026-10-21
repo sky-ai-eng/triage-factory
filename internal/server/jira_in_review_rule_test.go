@@ -32,7 +32,7 @@ func armedBodyWithReview(key string) map[string]any {
 func TestTeamJiraProjectsPut_InReviewStoredAndEchoed(t *testing.T) {
 	s, _ := newServerWithJiraCatalog(t, "SKY")
 
-	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), armedBodyWithReview("SKY"))
+	rec := putTeamJiraProjects(t, s, armedBodyWithReview("SKY"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PUT with an in-review rule = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -54,7 +54,7 @@ func TestTeamJiraProjectsPut_InReviewOptional(t *testing.T) {
 	s, _ := newServerWithJiraCatalog(t, "SKY")
 
 	body := teamProjectsBodyWith("SKY", validPickup(), validInProgress(), validDone())
-	if rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body); rec.Code != http.StatusOK {
+	if rec := putTeamJiraProjects(t, s, body); rec.Code != http.StatusOK {
 		t.Fatalf("PUT without an in-review rule = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	got := storedJiraProject(t, s, "SKY")
@@ -72,7 +72,7 @@ func TestTeamJiraProjectsPut_InReviewMembersWithoutCanonicalRejected(t *testing.
 		teamProjectsBodyWith("SKY", validPickup(), validInProgress(), validDone()),
 		map[string]any{"member_ids": []string{statusInReviewID}, "canonical_id": ""},
 	)
-	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body)
+	rec := putTeamJiraProjects(t, s, body)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("in-review members with no canonical = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
@@ -94,7 +94,7 @@ func TestTeamJiraProjectsPut_InReviewCanonicalNotInMembersRejected(t *testing.T)
 		teamProjectsBodyWith("SKY", validPickup(), validInProgress(), validDone()),
 		map[string]any{"member_ids": []string{statusInReviewID}, "canonical_id": statusDoneID},
 	)
-	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body)
+	rec := putTeamJiraProjects(t, s, body)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("in-review canonical outside its members = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
@@ -112,7 +112,7 @@ func TestTeamJiraProjectsPut_InReviewUnknownStatusRejected(t *testing.T) {
 		teamProjectsBodyWith("SKY", validPickup(), validInProgress(), validDone()),
 		map[string]any{"member_ids": []string{statusUnknownID}, "canonical_id": statusUnknownID},
 	)
-	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body)
+	rec := putTeamJiraProjects(t, s, body)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("unknown in-review status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
@@ -134,12 +134,12 @@ func TestTeamJiraProjectsPut_InReviewUpstreamFailureStoresNothing(t *testing.T) 
 	s, fake := newServerWithJiraCatalog(t, "SKY")
 
 	armed := teamProjectsBodyWith("SKY", validPickup(), validInProgress(), validDone())
-	if rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), armed); rec.Code != http.StatusOK {
+	if rec := putTeamJiraProjects(t, s, armed); rec.Code != http.StatusOK {
 		t.Fatalf("seeding PUT = %d, body=%s", rec.Code, rec.Body.String())
 	}
 
 	fake.SetFailing(true)
-	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), armedBodyWithReview("SKY"))
+	rec := putTeamJiraProjects(t, s, armedBodyWithReview("SKY"))
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("PUT with Jira down = %d, want 502; body=%s", rec.Code, rec.Body.String())
 	}
@@ -155,12 +155,12 @@ func TestTeamJiraProjectsPut_InReviewUpstreamFailureStoresNothing(t *testing.T) 
 func TestTeamJiraProjectsPut_ResendingAStoredInReviewRuleAsksJiraNothing(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY")
 
-	if rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), armedBodyWithReview("SKY")); rec.Code != http.StatusOK {
+	if rec := putTeamJiraProjects(t, s, armedBodyWithReview("SKY")); rec.Code != http.StatusOK {
 		t.Fatalf("seeding PUT = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	before := fake.Calls()
 
-	if rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), armedBodyWithReview("SKY")); rec.Code != http.StatusOK {
+	if rec := putTeamJiraProjects(t, s, armedBodyWithReview("SKY")); rec.Code != http.StatusOK {
 		t.Fatalf("re-PUT of the stored set = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	if after := fake.Calls(); after != before {
@@ -176,14 +176,14 @@ func TestTeamJiraProjectsPut_InReviewOnlyChangeDoesNotRestartPolling(t *testing.
 	kicked := jiraKicks(t, s)
 
 	armed := teamProjectsBodyWith("SKY", validPickup(), validInProgress(), validDone())
-	if rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), armed); rec.Code != http.StatusOK {
+	if rec := putTeamJiraProjects(t, s, armed); rec.Code != http.StatusOK {
 		t.Fatalf("arming PUT = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	if !kicked() {
 		t.Fatal("arming a project did not re-due Jira polling")
 	}
 
-	if rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), armedBodyWithReview("SKY")); rec.Code != http.StatusOK {
+	if rec := putTeamJiraProjects(t, s, armedBodyWithReview("SKY")); rec.Code != http.StatusOK {
 		t.Fatalf("in-review PUT = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	if kicked() {
@@ -196,7 +196,7 @@ func TestTeamJiraProjectsPut_InReviewOnlyChangeDoesNotRestartPolling(t *testing.
 			validInProgress(), validDone()),
 		validInReview(),
 	)
-	if rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), widened); rec.Code != http.StatusOK {
+	if rec := putTeamJiraProjects(t, s, widened); rec.Code != http.StatusOK {
 		t.Fatalf("pickup PUT = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	if !kicked() {

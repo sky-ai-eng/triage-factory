@@ -16,8 +16,14 @@ func jiraOrgPath(orgID string) string { return "/api/orgs/" + orgID + "/jira" }
 
 var jiraProjectsListPath = jiraOrgPath(runmode.LocalDefaultOrgID) + "/projects/list"
 
-func jiraProjectPath(key string) string {
-	return jiraOrgPath(runmode.LocalDefaultOrgID) + "/projects/" + key
+// jiraProjectPath addresses the fake catalog's project key by its Jira id
+// (fakeJiraProjectID), which is how the routes address a project.
+func jiraProjectPath(key string) string { return jiraProjectSegmentPath(fakeJiraProjectID(key)) }
+
+// jiraProjectSegmentPath puts segment in the path as it is, for the tests of
+// what is not a project id.
+func jiraProjectSegmentPath(segment string) string {
+	return jiraOrgPath(runmode.LocalDefaultOrgID) + "/projects/" + segment
 }
 
 func jiraStatusesListPath(key string) string { return jiraProjectPath(key) + "/statuses/list" }
@@ -150,6 +156,23 @@ func projectKeysOf(items []jiraProjectJSON) string {
 	return strings.Join(keys, ",")
 }
 
+// TestJiraProjectsList_ServesJiraIDs: every candidate carries Jira's id for
+// the project, which is what the team write and the project routes name it
+// by; the key beside it is for display.
+func TestJiraProjectsList_ServesJiraIDs(t *testing.T) {
+	s, _ := newServerWithJiraCatalog(t, "SKY", "OPS")
+
+	page := decodeList[jiraProjectJSON](t, doJSON(t, s, http.MethodPost, jiraProjectsListPath, map[string]any{}))
+	if len(page.Items) != 2 {
+		t.Fatalf("items = %+v, want SKY and OPS", page.Items)
+	}
+	for _, p := range page.Items {
+		if p.JiraID != fakeJiraProjectID(p.Key) {
+			t.Errorf("%s jira_id = %q, want %q", p.Key, p.JiraID, fakeJiraProjectID(p.Key))
+		}
+	}
+}
+
 // TestJiraProjectsList_FilterCaseFoldsForTheToken: the match is
 // case-insensitive on both deployments, so two spellings of one search are one
 // search — and a token minted under either continues the same page rather than
@@ -177,9 +200,9 @@ func TestJiraCatalog_MalformedOrgIsNotFound(t *testing.T) {
 	org := jiraOrgPath("not-an-org")
 	for name, rec := range map[string]*httptest.ResponseRecorder{
 		"projects list": doJSON(t, s, http.MethodPost, org+"/projects/list", map[string]any{}),
-		"project":       doJSON(t, s, http.MethodGet, org+"/projects/SKY", nil),
-		"statuses list": doJSON(t, s, http.MethodPost, org+"/projects/SKY/statuses/list", map[string]any{}),
-		"status":        doJSON(t, s, http.MethodGet, org+"/projects/SKY/statuses/"+statusDoneID, nil),
+		"project":       doJSON(t, s, http.MethodGet, org+"/projects/"+fakeJiraProjectID("SKY"), nil),
+		"statuses list": doJSON(t, s, http.MethodPost, org+"/projects/"+fakeJiraProjectID("SKY")+"/statuses/list", map[string]any{}),
+		"status":        doJSON(t, s, http.MethodGet, org+"/projects/"+fakeJiraProjectID("SKY")+"/statuses/"+statusDoneID, nil),
 	} {
 		t.Run(name, func(t *testing.T) {
 			assertOneFault(t, rec, http.StatusNotFound, "NOT_FOUND", "")
@@ -226,10 +249,11 @@ func TestJiraCatalog_UpstreamFailure(t *testing.T) {
 	}
 }
 
-// TestJiraProjectGet: one project by key, carrying the key and name and none of
-// the rest of Jira's project object. A project Jira cannot show is a 404, and
-// so is a key outside the grammar, which never reaches Jira — including a
-// lowercase spelling, since one project has one address.
+// TestJiraProjectGet: one project by its Jira id, carrying that id, the key
+// and the name and none of the rest of Jira's project object. A project Jira
+// cannot show is a 404, and so is a segment that is not a project id, which
+// never reaches Jira — the project's key included, since one project has one
+// address.
 func TestJiraProjectGet(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY", "OPS")
 
@@ -241,8 +265,8 @@ func TestJiraProjectGet(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(got) != 2 || got["key"] != "OPS" || got["name"] != "OPS Project" {
-		t.Errorf("project = %v, want exactly key OPS and name OPS Project", got)
+	if len(got) != 3 || got["jira_id"] != fakeJiraProjectID("OPS") || got["key"] != "OPS" || got["name"] != "OPS Project" {
+		t.Errorf("project = %v, want exactly OPS's jira_id, key OPS and name OPS Project", got)
 	}
 
 	assertOneFault(t, doJSON(t, s, http.MethodGet, jiraProjectPath("GONE"), nil),
@@ -252,12 +276,12 @@ func TestJiraProjectGet(t *testing.T) {
 		http.StatusNotFound, "NOT_FOUND", "")
 
 	before := fake.Calls()
-	for _, key := range []string{"ops", "1OPS", "OPS-1"} {
-		assertOneFault(t, doJSON(t, s, http.MethodGet, jiraProjectPath(key), nil),
+	for _, segment := range []string{"OPS", "ops", "-1", "1e3"} {
+		assertOneFault(t, doJSON(t, s, http.MethodGet, jiraProjectSegmentPath(segment), nil),
 			http.StatusNotFound, "NOT_FOUND", "")
 	}
 	if fake.Calls() != before {
-		t.Errorf("a key outside the grammar reached Jira %d times", fake.Calls()-before)
+		t.Errorf("a segment that is not a project id reached Jira %d times", fake.Calls()-before)
 	}
 }
 
@@ -315,8 +339,8 @@ func TestJiraStatusesList_TokenIsBoundToTheProject(t *testing.T) {
 }
 
 // TestJiraStatusesList_Refusals: a project Jira cannot show is a 404, as is a
-// key outside the grammar; the body is strict and count-only has no answer.
-// Only the first of these reaches Jira.
+// segment that is not a project id; the body is strict and count-only has no
+// answer. Only the first of these reaches Jira.
 func TestJiraStatusesList_Refusals(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY")
 	fake.Hide("GONE")
@@ -325,7 +349,7 @@ func TestJiraStatusesList_Refusals(t *testing.T) {
 		http.StatusNotFound, "NOT_FOUND", "")
 
 	before := fake.Calls()
-	assertOneFault(t, doJSON(t, s, http.MethodPost, jiraStatusesListPath("sky"), map[string]any{}),
+	assertOneFault(t, doJSON(t, s, http.MethodPost, jiraProjectSegmentPath("SKY")+"/statuses/list", map[string]any{}),
 		http.StatusNotFound, "NOT_FOUND", "")
 	assertOneFault(t, doJSON(t, s, http.MethodPost, jiraStatusesListPath("SKY"), map[string]any{"page_size": 0}),
 		http.StatusBadRequest, "OUT_OF_RANGE", "page_size")
@@ -339,8 +363,8 @@ func TestJiraStatusesList_Refusals(t *testing.T) {
 // TestJiraStatusGet: one status through the project whose workflow uses it,
 // with the same id and name the list serves. A status of another project's
 // workflow is a 404 at this project's address, as are an id Jira does not know
-// and a project Jira cannot show; an id or key outside the grammar is a 404
-// that never reaches Jira.
+// and a project Jira cannot show; a status id outside the grammar, or a
+// project segment that is not a project id, is a 404 that never reaches Jira.
 func TestJiraStatusGet(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY", "OPS")
 	opsOnly := fakeJiraStatus{ID: "20000", Name: "Queued"}
@@ -373,7 +397,7 @@ func TestJiraStatusGet(t *testing.T) {
 	for _, path := range []string{
 		jiraStatusPath("SKY", "Done"),
 		jiraStatusPath("SKY", "-1"),
-		jiraStatusPath("sky", statusDoneID),
+		jiraProjectSegmentPath("SKY") + "/statuses/" + statusDoneID,
 	} {
 		assertOneFault(t, doJSON(t, s, http.MethodGet, path, nil), http.StatusNotFound, "NOT_FOUND", "")
 	}

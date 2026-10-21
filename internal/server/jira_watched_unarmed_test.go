@@ -43,7 +43,7 @@ func TestTeamJiraProjectsPut_WatchedWithoutRules(t *testing.T) {
 	s, _ := newServerWithJiraCatalog(t, "SKY")
 
 	body := map[string]any{"jira_projects": []map[string]any{{"key": "SKY"}}}
-	if rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body); rec.Code != http.StatusOK {
+	if rec := putTeamJiraProjects(t, s, body); rec.Code != http.StatusOK {
 		t.Fatalf("watching an unmapped project = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	got := storedJiraProject(t, s, "SKY")
@@ -64,7 +64,7 @@ func TestTeamJiraProjectsPut_PartiallyArmedStored(t *testing.T) {
 	body := map[string]any{"jira_projects": []map[string]any{
 		{"key": "SKY", "pickup": validPickup()},
 	}}
-	if rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body); rec.Code != http.StatusOK {
+	if rec := putTeamJiraProjects(t, s, body); rec.Code != http.StatusOK {
 		t.Fatalf("pickup-only project = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	got := storedJiraProject(t, s, "SKY")
@@ -91,7 +91,7 @@ func TestTeamJiraProjectsPut_CanonicalWithoutMembersRejected(t *testing.T) {
 		map[string]any{"member_ids": []string{}, "canonical_id": statusInProgressID},
 		map[string]any{"member_ids": []string{}},
 	)
-	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body)
+	rec := putTeamJiraProjects(t, s, body)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("canonical with no members = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
@@ -106,7 +106,7 @@ func TestTeamJiraProjectsPut_CompleteRulesStillStored(t *testing.T) {
 	s, _ := newServerWithJiraCatalog(t, "SKY")
 
 	body := teamProjectsBodyWith("SKY", validPickup(), validInProgress(), validDone())
-	if rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body); rec.Code != http.StatusOK {
+	if rec := putTeamJiraProjects(t, s, body); rec.Code != http.StatusOK {
 		t.Fatalf("fully armed project = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	got := storedJiraProject(t, s, "SKY")
@@ -142,7 +142,7 @@ func TestTeamJiraProjectsPut_UnarmedChangeDoesNotRestartPolling(t *testing.T) {
 	kicked := jiraKicks(t, s)
 
 	body := map[string]any{"jira_projects": []map[string]any{{"key": "SKY"}}}
-	if rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body); rec.Code != http.StatusOK {
+	if rec := putTeamJiraProjects(t, s, body); rec.Code != http.StatusOK {
 		t.Fatalf("watch PUT = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	if kicked() {
@@ -151,7 +151,7 @@ func TestTeamJiraProjectsPut_UnarmedChangeDoesNotRestartPolling(t *testing.T) {
 
 	// A second unarmed project is still no change the poller can act on.
 	two := map[string]any{"jira_projects": []map[string]any{{"key": "SKY"}, {"key": "OPS"}}}
-	if rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), two); rec.Code != http.StatusOK {
+	if rec := putTeamJiraProjects(t, s, two); rec.Code != http.StatusOK {
 		t.Fatalf("second watch PUT = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	if kicked() {
@@ -166,7 +166,7 @@ func TestTeamJiraProjectsPut_ArmingRestartsPolling(t *testing.T) {
 	kicked := jiraKicks(t, s)
 
 	watch := map[string]any{"jira_projects": []map[string]any{{"key": "SKY"}}}
-	if rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), watch); rec.Code != http.StatusOK {
+	if rec := putTeamJiraProjects(t, s, watch); rec.Code != http.StatusOK {
 		t.Fatalf("watch PUT = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	if kicked() {
@@ -174,7 +174,7 @@ func TestTeamJiraProjectsPut_ArmingRestartsPolling(t *testing.T) {
 	}
 
 	armed := teamProjectsBodyWith("SKY", validPickup(), validInProgress(), validDone())
-	if rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), armed); rec.Code != http.StatusOK {
+	if rec := putTeamJiraProjects(t, s, armed); rec.Code != http.StatusOK {
 		t.Fatalf("arming PUT = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	if !kicked() {

@@ -12,12 +12,14 @@ import { sourceUnavailableReason } from '../../lib/eventSources'
 import {
   fetchTeamSettings,
   saveTeamJiraProjects,
-  emptyProject,
+  watchedProject,
   projectIsArmed,
 } from '../settings/teamConfig'
 import type { JiraProjectConfig } from '../settings/teamConfig'
 import type { JiraStatusRef, JiraStatusRuleValue } from '../../components/JiraStatusRule'
 import {
+  candidateRefs,
+  jiraProjectRef,
   listJiraProjects,
   listJiraStatuses,
   type JiraProjectCandidate,
@@ -37,10 +39,15 @@ import {
 // contributes nothing to the poller's discovery query.
 //
 // EVERY PROJECT CARRIES ITS OWN MAP, so the board shows one project at a time
-// and the key strip above it is the selector. The prototype pinned the board
-// to the first project with a note; per-project rules make that a page that
-// hides every other project's mapping, which is why the strip is this page's
-// own device rather than the mock's.
+// and the strip of project keys above it is the selector. The prototype
+// pinned the board to the first project with a note; per-project rules make
+// that a page that hides every other project's mapping, which is why the strip
+// is this page's own device rather than the mock's.
+//
+// A PROJECT IS ITS IDS. Every piece of per-project state here — the shown
+// project, the table's rows, the fetched statuses — is keyed by the project's
+// selection key (jiraProjectRef) or, for statuses, its Jira id. A key is only
+// what a row and a tab display: Jira can rename it.
 //
 // FOR A TEAM ADMIN, THE BOARD IS THE EDITOR. Every gesture — a chip landing
 // in a column, a ★ moving, a suggested mapping — reports the next map, which
@@ -61,11 +68,6 @@ const PROSE =
 /** How long after the last keystroke before asking Jira for the narrowed
  *  catalog. The filter is a round trip, not an array scan. */
 const SEARCH_DEBOUNCE_MS = 250
-
-/** The canonical form of a project key — the same uppercase-trim the server
- *  applies at the write boundary, so a stored key and a catalog key compare
- *  as one value. */
-const normKey = (key: string): string => key.trim().toUpperCase()
 
 /** A stored ref as a board item. A legacy name-only ref — stored before
  *  statuses were identified — falls back to its name as the identity: stable
@@ -109,13 +111,14 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   // only the Watch direction has nothing to offer.
   const [candidates, setCandidates] = useState<JiraProjectCandidate[] | null>(null)
   const [truncated, setTruncated] = useState(false)
-  // Each watched project's own status vocabulary, fetched when its board is
-  // first shown. Per project because statuses come from a project's workflow
-  // scheme, so two watched projects can offer different ones.
-  const [statusesByKey, setStatusesByKey] = useState<Record<string, JiraStatusRef[]>>({})
+  // Each watched project's own status vocabulary, keyed by its Jira id and
+  // fetched when its board is first shown. Per project because statuses come
+  // from a project's workflow scheme, so two watched projects can offer
+  // different ones.
+  const [statusesByJiraId, setStatusesByJiraId] = useState<Record<string, JiraStatusRef[]>>({})
   const [error, setError] = useState('')
   const [filter, setFilter] = useState('')
-  const [shownKey, setShownKey] = useState('')
+  const [shownRef, setShownRef] = useState('')
 
   // The frame's three figures, from the team activity node at the window
   // their labels name.
@@ -186,67 +189,73 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   const catalogTruncated = offReason ? false : truncated
 
   const watched = useMemo(() => projects ?? [], [projects])
-  const watchedKeys = useMemo(() => new Set(watched.map((p) => normKey(p.key))), [watched])
+  const watchedRefs = useMemo(() => new Set(watched.map(jiraProjectRef)), [watched])
 
-  // The board's project: the picked key while it is still watched, else the
+  // The board's project: the picked one while it is still watched, else the
   // first watched project — so unwatching what is shown falls back rather
   // than pinning a board to a project the team no longer watches.
   const shown = useMemo(
-    () => watched.find((p) => normKey(p.key) === shownKey) ?? watched[0] ?? null,
-    [watched, shownKey],
+    () => watched.find((p) => jiraProjectRef(p) === shownRef) ?? watched[0] ?? null,
+    [watched, shownRef],
   )
-  const shownK = shown ? normKey(shown.key) : ''
+  const shownR = shown ? jiraProjectRef(shown) : ''
+  // A watched project the poll has not confirmed with Jira has no Jira id yet,
+  // and so no statuses to read.
+  const shownJiraId = shown?.jira_id ?? ''
 
   useEffect(() => {
-    if (!shownK || offReason || !orgId || statusesByKey[shownK]) return
+    if (!shownJiraId || offReason || !orgId || statusesByJiraId[shownJiraId]) return
     let live = true
-    void listJiraStatuses(orgId, shownK)
+    void listJiraStatuses(orgId, shownJiraId)
       .then((list) => {
-        if (live) setStatusesByKey((m) => ({ ...m, [shownK]: list }))
+        if (live) setStatusesByJiraId((m) => ({ ...m, [shownJiraId]: list }))
       })
       .catch(() => {
         // The board still draws what is mapped; only the tray goes empty.
-        if (live) setStatusesByKey((m) => ({ ...m, [shownK]: [] }))
+        if (live) setStatusesByJiraId((m) => ({ ...m, [shownJiraId]: [] }))
       })
     return () => {
       live = false
     }
-  }, [shownK, offReason, orgId, statusesByKey])
+  }, [shownJiraId, offReason, orgId, statusesByJiraId])
 
   const board = useMemo(() => mapFor(shown ?? undefined), [shown])
   // Never null into the board: StatusRules falls back to a demo status list
   // for null, and a demo vocabulary on a real team's page would be a claim.
   const boardStatuses: StatusItem[] = shown
-    ? (statusesByKey[shownK] ?? []).map((st) => ({ id: st.id, label: st.name }))
+    ? (statusesByJiraId[shownJiraId] ?? []).map((st) => ({ id: st.id, label: st.name }))
     : []
 
   const rows: TableRow[] = useMemo(() => {
-    const byKey = new Map((catalog ?? []).map((c) => [normKey(c.key), c]))
+    const byRef = new Map<string, JiraProjectCandidate>()
+    for (const c of catalog ?? []) {
+      for (const ref of candidateRefs(c)) {
+        if (!byRef.has(ref)) byRef.set(ref, c)
+      }
+    }
     const needle = filter.trim().toLowerCase()
     const out: TableRow[] = []
     for (const p of watched) {
-      const key = normKey(p.key)
-      if (!key) continue
+      const ref = jiraProjectRef(p)
       // A watched project the catalog cannot see is still watched — deleted
       // upstream, or the credential's access narrowed. Dropping it would make
       // the page lie about what it watches (and make it unremovable).
-      const name = byKey.get(key)?.name ?? null
+      const name = byRef.get(ref)?.name ?? p.name ?? null
       if (
         needle !== '' &&
-        !key.toLowerCase().includes(needle) &&
+        !p.key.toLowerCase().includes(needle) &&
         !(name ?? '').toLowerCase().includes(needle)
       ) {
         continue
       }
-      out.push({ id: key, key, name, issues: null, watched: true })
+      out.push({ id: ref, key: p.key, name, issues: null, watched: true })
     }
     for (const c of catalog ?? []) {
-      const key = normKey(c.key)
-      if (watchedKeys.has(key)) continue
-      out.push({ id: key, key, name: c.name, issues: null, watched: false })
+      if (candidateRefs(c).some((ref) => watchedRefs.has(ref))) continue
+      out.push({ id: jiraProjectRef(c), key: c.key, name: c.name, issues: null, watched: false })
     }
     return out
-  }, [catalog, filter, watched, watchedKeys])
+  }, [catalog, filter, watched, watchedRefs])
 
   const columns: TableColumn[] = useMemo(
     () => [
@@ -312,15 +321,20 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
       // we may rewrite: committing against `null` would PUT [] and untrack
       // every project the team has.
       if (projects === null) return
-      const picked = new Set(ids.map((v) => normKey(String(v))))
-      const have = new Set(projects.map((p) => normKey(p.key)))
+      const picked = new Set(ids.map(String))
+      const have = new Set(projects.map(jiraProjectRef))
       const next =
         actionId === 'watch'
-          ? projects.concat([...picked].filter((k) => !have.has(k)).map((k) => emptyProject(k)))
-          : projects.filter((p) => !picked.has(normKey(p.key)))
+          ? projects.concat(
+              (catalog ?? [])
+                .filter((c) => picked.has(jiraProjectRef(c)))
+                .filter((c) => !candidateRefs(c).some((ref) => have.has(ref)))
+                .map(watchedProject),
+            )
+          : projects.filter((p) => !picked.has(jiraProjectRef(p)))
       persist(next, projects)
     },
-    [projects, persist],
+    [projects, catalog, persist],
   )
 
   // A board gesture, mapped back onto the four stored rules and saved. The
@@ -330,7 +344,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   const applyBoard = useCallback(
     (next: StatusMap) => {
       if (!shown || projects === null) return
-      const vocab = statusesByKey[shownK] ?? []
+      const vocab = statusesByJiraId[shownJiraId] ?? []
       const prior = [
         ...(shown.pickup?.members ?? []),
         ...(shown.in_progress?.members ?? []),
@@ -359,11 +373,11 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
         done: rule(next.done, true),
       }
       persist(
-        projects.map((p) => (normKey(p.key) === shownK ? edited : p)),
+        projects.map((p) => (jiraProjectRef(p) === shownR ? edited : p)),
         projects,
       )
     },
-    [shown, shownK, projects, statusesByKey, persist],
+    [shown, shownR, shownJiraId, projects, statusesByJiraId, persist],
   )
 
   // The note under the board: the strip names the shown project when there is
@@ -372,7 +386,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   const note = (() => {
     if (!shown) return ''
     const parts: string[] = []
-    if (watched.length <= 1) parts.push(`showing ${shownK}`)
+    if (watched.length <= 1) parts.push(`showing ${shown.key}`)
     if (isAdmin && !offReason) {
       parts.push(
         projectIsArmed(shown)
@@ -412,20 +426,20 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
           {watched.length > 1 ? (
             <div className="sp-projstrip" role="tablist" aria-label="Watched projects">
               {watched.map((p) => {
-                const key = normKey(p.key)
+                const ref = jiraProjectRef(p)
                 return (
                   <button
-                    key={key}
+                    key={ref}
                     type="button"
                     role="tab"
-                    aria-selected={key === shownK}
+                    aria-selected={ref === shownR}
                     className="sp-projkey"
-                    data-on={key === shownK ? '' : undefined}
+                    data-on={ref === shownR ? '' : undefined}
                     data-unarmed={projectIsArmed(p) ? undefined : ''}
                     title={projectIsArmed(p) ? undefined : 'statuses not mapped'}
-                    onClick={() => setShownKey(key)}
+                    onClick={() => setShownRef(ref)}
                   >
-                    {key}
+                    {p.key}
                   </button>
                 )
               })}
@@ -434,7 +448,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
           <div className="sp-board">
             {board ? (
               <StatusRules
-                key={shownK}
+                key={shownR}
                 value={board}
                 onChange={isAdmin && !offReason ? applyBoard : undefined}
                 statuses={boardStatuses}

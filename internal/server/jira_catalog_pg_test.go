@@ -77,7 +77,7 @@ func TestJiraCatalog_Postgres_AddressedAndGatedByOrg(t *testing.T) {
 
 	for name, paths := range map[string][2]string{
 		"projects list": {base + "/list", otherBase + "/list"},
-		"statuses list": {base + "/SKY/statuses/list", otherBase + "/SKY/statuses/list"},
+		"statuses list": {base + "/" + fakeJiraProjectID("SKY") + "/statuses/list", otherBase + "/" + fakeJiraProjectID("SKY") + "/statuses/list"},
 	} {
 		first := decodeJiraPage[json.RawMessage](t, rig.postJSONWithSid(http.MethodPost, paths[0], sid, map[string]any{"page_size": 1}))
 		if first.NextPageToken == "" {
@@ -105,9 +105,9 @@ func TestJiraCatalog_Postgres_AddressedAndGatedByOrg(t *testing.T) {
 	before := fake.Calls()
 	for name, resp := range map[string]*http.Response{
 		"projects list": rig.postJSONWithSid(http.MethodPost, base+"/list", bobSid, map[string]any{}),
-		"project":       rig.requestWithSid(http.MethodGet, base+"/SKY", bobSid),
-		"statuses list": rig.postJSONWithSid(http.MethodPost, base+"/SKY/statuses/list", bobSid, map[string]any{}),
-		"status":        rig.requestWithSid(http.MethodGet, base+"/SKY/statuses/"+statusDoneID, bobSid),
+		"project":       rig.requestWithSid(http.MethodGet, base+"/"+fakeJiraProjectID("SKY"), bobSid),
+		"statuses list": rig.postJSONWithSid(http.MethodPost, base+"/"+fakeJiraProjectID("SKY")+"/statuses/list", bobSid, map[string]any{}),
+		"status":        rig.requestWithSid(http.MethodGet, base+"/"+fakeJiraProjectID("SKY")+"/statuses/"+statusDoneID, bobSid),
 	} {
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusNotFound {

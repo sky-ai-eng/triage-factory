@@ -11,8 +11,10 @@ import (
 	"github.com/zalando/go-keyring"
 )
 
-// jiraProjectsBody builds a replace-set body from keys, each fully armed — the
-// gate is about the key, so the rules are held constant and valid.
+// jiraProjectsBody builds a replace-set body naming each project by key, the
+// spelling putTeamJiraProjects rewrites to the route's identifiers, each fully
+// armed — the gate is about the project, so the rules are held constant and
+// valid.
 func jiraProjectsBody(keys ...string) map[string]any {
 	projects := make([]map[string]any, len(keys))
 	for i, k := range keys {
@@ -26,12 +28,12 @@ func jiraProjectsBody(keys ...string) map[string]any {
 // putJiraProjects sends the replace-set write and hands back the recorder.
 func putJiraProjects(t *testing.T, s *Server, keys ...string) *httptest.ResponseRecorder {
 	t.Helper()
-	return doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), jiraProjectsBody(keys...))
+	return putTeamJiraProjects(t, s, jiraProjectsBody(keys...))
 }
 
-// TestJiraProjectsPut_AddsAKeyTheCatalogKnows is the happy path the gate must
-// not get in the way of.
-func TestJiraProjectsPut_AddsAKeyTheCatalogKnows(t *testing.T) {
+// TestJiraProjectsPut_AddsAProjectTheCatalogKnows is the happy path the gate
+// must not get in the way of.
+func TestJiraProjectsPut_AddsAProjectTheCatalogKnows(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY", "OPS")
 
 	if rec := putJiraProjects(t, s, "SKY"); rec.Code != http.StatusOK {
@@ -41,19 +43,19 @@ func TestJiraProjectsPut_AddsAKeyTheCatalogKnows(t *testing.T) {
 		t.Errorf("stored keys = %v, want [SKY]", got)
 	}
 	if fake.Calls() == 0 {
-		t.Error("an added key was stored without asking Jira whether it exists")
+		t.Error("an added project was stored without asking Jira whether it exists")
 	}
 }
 
-// TestJiraProjectsPut_UnknownKeyRejected: the picker offers only what the org
-// credential can see, so the handler enforces the same set — and it names the
-// element the bad key arrived in rather than faulting the collection.
-func TestJiraProjectsPut_UnknownKeyRejected(t *testing.T) {
+// TestJiraProjectsPut_UnknownProjectRejected: the picker offers only what the
+// org credential can see, so the handler enforces the same set — and it names
+// the element the bad id arrived in rather than faulting the collection.
+func TestJiraProjectsPut_UnknownProjectRejected(t *testing.T) {
 	s, _ := newServerWithJiraCatalog(t, "SKY", "OPS")
 
 	rec := putJiraProjects(t, s, "SKY", "GHOST")
 	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("PUT with an unknown key = %d, want 400; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("PUT with an unknown project = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
 	items := decodeErrorItems(t, rec)
 	if len(items) != 1 {
@@ -62,20 +64,21 @@ func TestJiraProjectsPut_UnknownKeyRejected(t *testing.T) {
 	if items[0].Reason != "INVALID_FIELD" {
 		t.Errorf("reason = %q, want INVALID_FIELD", items[0].Reason)
 	}
-	if items[0].Field != "jira_projects[1].key" {
-		t.Errorf("field = %q, want jira_projects[1].key", items[0].Field)
+	if items[0].Field != "jira_projects[1].jira_id" {
+		t.Errorf("field = %q, want jira_projects[1].jira_id", items[0].Field)
 	}
-	if !strings.Contains(items[0].Message, "GHOST") {
-		t.Errorf("message %q does not name the offending key", items[0].Message)
+	if !strings.Contains(items[0].Message, fakeJiraProjectID("GHOST")) {
+		t.Errorf("message %q does not name the offending id", items[0].Message)
 	}
 	if got := teamJiraProjectKeys(t, s); len(got) != 0 {
 		t.Errorf("stored keys = %v, want nothing — a rejected write stores none of it", got)
 	}
 }
 
-// TestJiraProjectsPut_EveryUnknownKeyNamed — validation reports every failing
-// field, not the first, so a caller fixing three typos learns about three.
-func TestJiraProjectsPut_EveryUnknownKeyNamed(t *testing.T) {
+// TestJiraProjectsPut_EveryUnknownProjectNamed — validation reports every
+// failing field, not the first, so a caller fixing three typos learns about
+// three.
+func TestJiraProjectsPut_EveryUnknownProjectNamed(t *testing.T) {
 	s, _ := newServerWithJiraCatalog(t, "SKY")
 
 	rec := putJiraProjects(t, s, "GHOST", "SKY", "PHANTOM")
@@ -84,20 +87,20 @@ func TestJiraProjectsPut_EveryUnknownKeyNamed(t *testing.T) {
 	}
 	items := decodeErrorItems(t, rec)
 	if len(items) != 2 {
-		t.Fatalf("errors = %d, want one per unknown key; body=%s", len(items), rec.Body.String())
+		t.Fatalf("errors = %d, want one per unknown project; body=%s", len(items), rec.Body.String())
 	}
 	named := items[0].Message + " " + items[1].Message
-	if !strings.Contains(named, "GHOST") || !strings.Contains(named, "PHANTOM") {
-		t.Errorf("errors %q do not name both unknown keys", named)
+	if !strings.Contains(named, fakeJiraProjectID("GHOST")) || !strings.Contains(named, fakeJiraProjectID("PHANTOM")) {
+		t.Errorf("errors %q do not name both unknown ids", named)
 	}
 }
 
-// TestJiraProjectsPut_StoredKeyGrandfathered is the reason the gate is scoped
-// to added keys. This route is a replace-set — every write resends the whole
-// set — so gating a stored key would mean a project deleted in Jira locks the
-// team out of its own configuration door, including the write that would remove
-// the offending row.
-func TestJiraProjectsPut_StoredKeyGrandfathered(t *testing.T) {
+// TestJiraProjectsPut_StoredProjectGrandfathered is the reason the gate is
+// scoped to added projects. This route is a replace-set — every write resends
+// the whole set — so gating a stored project would mean a project deleted in
+// Jira locks the team out of its own configuration door, including the write
+// that would remove the offending row.
+func TestJiraProjectsPut_StoredProjectGrandfathered(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY", "OPS")
 
 	if rec := putJiraProjects(t, s, "SKY", "OPS"); rec.Code != http.StatusOK {
@@ -119,8 +122,8 @@ func TestJiraProjectsPut_StoredKeyGrandfathered(t *testing.T) {
 	}
 }
 
-// TestJiraProjectsPut_RemovalOnlyAsksJiraNothing: no key is being claimed, so
-// there is nothing to verify — and the door stays open while Jira is down.
+// TestJiraProjectsPut_RemovalOnlyAsksJiraNothing: no project is being added,
+// so there is nothing to verify — and the door stays open while Jira is down.
 func TestJiraProjectsPut_RemovalOnlyAsksJiraNothing(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY", "OPS")
 
@@ -141,19 +144,19 @@ func TestJiraProjectsPut_RemovalOnlyAsksJiraNothing(t *testing.T) {
 	}
 }
 
-// TestJiraProjectsPut_ArmingAStoredProjectSkipsTheKeyCheck: mapping a watched
-// project's statuses adds no key, so the catalog is not consulted — but the
-// status ids are new, so that project's workflow is, and the names it comes
-// back with are what get stored.
-func TestJiraProjectsPut_ArmingAStoredProjectSkipsTheKeyCheck(t *testing.T) {
+// TestJiraProjectsPut_ArmingAStoredProjectSkipsTheProjectCheck: mapping a
+// watched project's statuses adds no project, so its existence is not
+// re-checked — but the status ids are new, so that project's workflow is
+// read, and the names it comes back with are what get stored.
+func TestJiraProjectsPut_ArmingAStoredProjectSkipsTheProjectCheck(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY")
 
 	watch := map[string]any{"jira_projects": []map[string]any{{"key": "SKY"}}}
-	if rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), watch); rec.Code != http.StatusOK {
+	if rec := putTeamJiraProjects(t, s, watch); rec.Code != http.StatusOK {
 		t.Fatalf("watch PUT = %d, body=%s", rec.Code, rec.Body.String())
 	}
-	// SKY disappears from the catalog. Arming it must still work: the key is
-	// already stored, so nothing re-checks it.
+	// SKY disappears from the catalog. Arming it must still work: the project
+	// is already stored, so nothing re-checks it.
 	fake.SetKeys()
 
 	if rec := putJiraProjects(t, s, "SKY"); rec.Code != http.StatusOK {
@@ -204,7 +207,7 @@ func TestJiraProjectsPut_UnknownStatusIDRejected(t *testing.T) {
 		map[string]any{"member_ids": []string{statusUnknownID}, "canonical_id": statusUnknownID},
 		validDone(),
 	)
-	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body)
+	rec := putTeamJiraProjects(t, s, body)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("PUT with an unknown status id = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
@@ -280,19 +283,23 @@ func TestJiraProjectsPut_UnconnectedWorkspaceCannotAdd(t *testing.T) {
 	}
 }
 
-// TestJiraProjectsPut_ShapeFaultsPrecedeTheGate: a malformed key never reaches
-// Jira. The gate is an existence check, not a grammar one, and asking about
-// "sk y" would spend a round trip to learn what the regex already knows.
+// TestJiraProjectsPut_ShapeFaultsPrecedeTheGate: a malformed project id never
+// reaches Jira. The gate is an existence check, not a grammar one, and asking
+// about "SKY" (a key, where an id belongs) would spend a round trip to learn
+// what the pattern already knows.
 func TestJiraProjectsPut_ShapeFaultsPrecedeTheGate(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY")
 
 	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"),
-		map[string]any{"jira_projects": []map[string]any{{"key": "not a key"}}})
+		map[string]any{"jira_projects": []map[string]any{{"jira_id": "SKY"}}})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("PUT = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
+	if items := decodeErrorItems(t, rec); len(items) != 1 || items[0].Field != "jira_projects[0].jira_id" {
+		t.Errorf("errors = %+v, want one on jira_projects[0].jira_id", items)
+	}
 	if fake.Calls() != 0 {
-		t.Errorf("a malformed key still reached Jira (%d calls)", fake.Calls())
+		t.Errorf("a malformed id still reached Jira (%d calls)", fake.Calls())
 	}
 }
 
@@ -337,8 +344,8 @@ func TestJiraProjectsPut_FieldFaultSurvivesALaterUpstreamFailure(t *testing.T) {
 		t.Fatalf("PUT = %d, want 400 naming GHOST; body=%s", rec.Code, rec.Body.String())
 	}
 	items := decodeErrorItems(t, rec)
-	if len(items) != 1 || !strings.Contains(items[0].Message, "GHOST") {
-		t.Fatalf("errors = %+v, want the unknown key named; body=%s", items, rec.Body.String())
+	if len(items) != 1 || !strings.Contains(items[0].Message, fakeJiraProjectID("GHOST")) {
+		t.Fatalf("errors = %+v, want the unknown project named; body=%s", items, rec.Body.String())
 	}
 	if items[0].Field == "" {
 		t.Error("the field fault lost its field on the way out")

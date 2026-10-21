@@ -312,22 +312,22 @@ func TestTeamSettingsPatch_RejectsJiraProjects(t *testing.T) {
 }
 
 // TestTeamJiraProjectsPut_ReplaceSetRoundTrip pins the new resource's own
-// contract: the body IS the desired set, the GET echoes it, and a key absent
-// from a later PUT is untracked.
+// contract: the body IS the desired set, the GET echoes it, and a project
+// absent from a later PUT is untracked.
 func TestTeamJiraProjectsPut_ReplaceSetRoundTrip(t *testing.T) {
-	// Adding a key is gated against the org's live catalog, so the workspace is
-	// connected to one holding both projects.
+	// Adding a project is gated against the org's live catalog, so the
+	// workspace is connected to one holding both projects.
 	s, _ := newServerWithJiraCatalog(t, "SKY", "OPS")
 
 	two := map[string]any{"jira_projects": []map[string]any{
-		{"key": "sky", "pickup": validPickup(), "in_progress": validInProgress(), "done": validDone()},
+		{"key": "SKY", "pickup": validPickup(), "in_progress": validInProgress(), "done": validDone()},
 		{"key": "OPS", "pickup": validPickup(), "in_progress": validInProgress(), "done": validDone()},
 	}}
-	if rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), two); rec.Code != http.StatusOK {
+	if rec := putTeamJiraProjects(t, s, two); rec.Code != http.StatusOK {
 		t.Fatalf("PUT = %d, body=%s", rec.Code, rec.Body.String())
 	}
-	// Keys are canonicalized on the way in, and the response echoes the stored
-	// form rather than what the caller happened to send.
+	// Each project is stored under the key Jira answers with, in the order
+	// the caller sent them.
 	if got := teamJiraProjectKeys(t, s); len(got) != 2 || got[0] != "SKY" || got[1] != "OPS" {
 		t.Errorf("keys after the first PUT = %v, want [SKY OPS] in order", got)
 	}
@@ -335,7 +335,7 @@ func TestTeamJiraProjectsPut_ReplaceSetRoundTrip(t *testing.T) {
 	one := map[string]any{"jira_projects": []map[string]any{
 		{"key": "OPS", "pickup": validPickup(), "in_progress": validInProgress(), "done": validDone()},
 	}}
-	if rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), one); rec.Code != http.StatusOK {
+	if rec := putTeamJiraProjects(t, s, one); rec.Code != http.StatusOK {
 		t.Fatalf("replace PUT = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	if got := teamJiraProjectKeys(t, s); len(got) != 1 || got[0] != "OPS" {
