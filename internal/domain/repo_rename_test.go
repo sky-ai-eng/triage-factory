@@ -187,3 +187,40 @@ func TestRewriteRepoURL(t *testing.T) {
 		})
 	}
 }
+
+func TestRewriteRepoCloneURL(t *testing.T) {
+	const from, to = "octo/api", "octo/platform-api"
+	const dotcom, ghe = "https://github.com", "https://ghe.acme.dev:8443"
+	const ctxHost = "https://example.com/github"
+	tests := []struct {
+		in      string
+		host    string
+		want    string
+		wantOK  bool
+		because string
+	}{
+		{in: "https://github.com/octo/api.git", host: dotcom, want: "https://github.com/octo/platform-api.git", wantOK: true, because: "an HTTPS clone URL"},
+		{in: "https://github.com/Octo/API", host: dotcom, want: "https://github.com/octo/platform-api", wantOK: true, because: "an HTTPS clone URL without .git, matched case-insensitively"},
+		{in: "https://example.com/github/octo/api.git", host: ctxHost, want: "https://example.com/github/octo/platform-api.git", wantOK: true, because: "an HTTPS clone URL under a context path"},
+		{in: "git@github.com:octo/api.git", host: dotcom, want: "git@github.com:octo/platform-api.git", wantOK: true, because: "an SSH clone URL"},
+		{in: "git@GitHub.com:octo/api", host: dotcom, want: "git@GitHub.com:octo/platform-api", wantOK: true, because: "an SSH clone URL without .git, its hostname matched case-insensitively"},
+		{in: "git@ghe.acme.dev:octo/api.git", host: ghe, want: "git@ghe.acme.dev:octo/platform-api.git", wantOK: true, because: "an SSH clone URL on an enterprise host with a web port"},
+		{in: "ssh://git@ghe.acme.dev:2222/octo/api.git", host: ghe, want: "ssh://git@ghe.acme.dev:2222/octo/platform-api.git", wantOK: true, because: "an ssh:// clone URL with its own port"},
+		{in: "https://github.com/octo/api-gateway.git", host: dotcom, want: "https://github.com/octo/api-gateway.git", because: "a longer name that merely starts the same"},
+		{in: "https://github.com/octo/api/tree/main", host: dotcom, want: "https://github.com/octo/api/tree/main", because: "a path past the slug is not a clone URL"},
+		{in: "git@github.com:octo/api-gateway.git", host: dotcom, want: "git@github.com:octo/api-gateway.git", because: "an SSH URL for another repository"},
+		{in: "https://ghe.acme.dev/octo/api.git", host: dotcom, want: "https://ghe.acme.dev/octo/api.git", because: "an HTTPS URL on another host"},
+		{in: "git@ghe.acme.dev:octo/api.git", host: dotcom, want: "git@ghe.acme.dev:octo/api.git", because: "an SSH URL on another host"},
+		{in: "http://github.com/octo/api.git", host: dotcom, want: "http://github.com/octo/api.git", because: "another scheme is another host"},
+		{in: "https://github.com/octo/api.git", host: "", want: "https://github.com/octo/api.git", because: "no host is no match"},
+		{in: "", host: dotcom, want: "", because: "a URL TF never learned stays empty"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.because, func(t *testing.T) {
+			got, ok := RewriteRepoCloneURL(tc.in, tc.host, from, to)
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("RewriteRepoCloneURL(%q, %q) = (%q, %v), want (%q, %v)", tc.in, tc.host, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
