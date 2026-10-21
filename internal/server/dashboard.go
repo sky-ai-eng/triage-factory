@@ -342,7 +342,7 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 		draftAction = domain.ActionPRConvertedToDraft
 		draftFrom, draftTo = domain.ArtifactStatePROpen, domain.ArtifactStatePRDraft
 	}
-	recordExternalActionBestEffort(r.Context(), dh.tx, orgID, userID, domain.ExternalAction{
+	draftRecord := domain.ExternalAction{
 		Provider:    domain.ArtifactProviderGitHub,
 		Scope:       host,
 		Action:      draftAction,
@@ -353,7 +353,9 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 		ToState:     draftTo,
 		ActorUserID: userID,
 		Credential:  ghclient.CredentialForRepo(r.Context(), dh.ghResolver, orgID, owner, repo),
-	})
+	}
+	linkPullRequestAction(r.Context(), dh.tx, orgID, userID, host, owner, repo, number, &draftRecord)
+	recordExternalActionBestEffort(r.Context(), dh.tx, orgID, userID, draftRecord)
 
 	// Patch the local entity snapshot to match the state we just pushed to
 	// GitHub. Without this, the frontend's subsequent fetchAll() reads the

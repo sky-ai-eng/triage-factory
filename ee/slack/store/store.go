@@ -369,8 +369,9 @@ type ChannelRegistryStore interface {
 	//     spells, the dedup key and the permalink. A key the new id already
 	//     has is left as it is;
 	//   - external_actions.current_url, the audit ledger's pointer, for
-	//     actions whose link points into the channel. The record of the act
-	//     is not touched.
+	//     actions whose link points into the channel: those about one of its
+	//     thread entities (external_actions.entity_id) and those linked to no
+	//     entity. The record of the act is not touched.
 	//
 	// It also records the change, so oldID — and any id that earlier moved to
 	// oldID — resolves to the channel's row from then on. Slack changes a

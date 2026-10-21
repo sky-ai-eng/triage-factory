@@ -9,7 +9,8 @@
 -- artifacts are keyed on ids rather than their repository's name, every
 -- artifact references the entity it is about and Jira artifacts keyed on an
 -- issue key are keyed on the issue's id, a placement override references its
--- repository's registry row rather than its name, Linear becomes a tracked
+-- repository's registry row rather than its name, an audit-ledger row
+-- references the entity or repository it was about, Linear becomes a tracked
 -- source, and five smaller changes ride along: the org GitHub App's unusable
 -- state, the claim's source manifest, the retirement of the 'completed'
 -- conversation status, node ids on artifacts and audit-ledger rows, and the
@@ -1612,6 +1613,64 @@ UPDATE artifacts
 
 DROP TABLE jira_rekey;
 DROP TABLE artifact_subject;
+
+-- ===========================================================================
+-- 8. Audit-ledger rows reference what they were about
+-- ===========================================================================
+--
+-- external_actions.entity_id is the entity an act was about
+-- (domain.ExternalAction.EntityID): the pull request or issue a GitHub action
+-- names, the Jira or Linear issue, the Slack thread. repository_id is the
+-- registry row of the repository a GitHub act with no entity was about: a
+-- branch push, a branch delete, a repository-level write. target stays the
+-- display value the act was recorded under. Both are written with the row, and
+-- a rename of the entity or the repository selects the rows whose current_url
+-- it moves by them, never by the name a link spells. SET NULL keeps a row,
+-- unlinked, if what it references is deleted; a merge of two entities and a
+-- rename absorbing a bare registry row re-point it first.
+ALTER TABLE external_actions ADD COLUMN entity_id TEXT REFERENCES entities(id) ON DELETE SET NULL;
+ALTER TABLE external_actions ADD COLUMN repository_id TEXT REFERENCES repositories(id) ON DELETE SET NULL;
+CREATE INDEX idx_external_actions_entity ON external_actions (entity_id) WHERE entity_id IS NOT NULL;
+CREATE INDEX idx_external_actions_repository ON external_actions (repository_id) WHERE repository_id IS NOT NULL;
+
+-- Existing rows are linked once, best-effort, by what selected them for a
+-- rename before they had these columns, inside the row's scope and provider:
+-- the entity whose key the target names, compared case-insensitively; else
+-- the entity whose url the row's link continues (domain.RewriteEntityURL: the
+-- url, then the end or one of '#', '?', '/'), which is how a row recorded
+-- under a key the entity has since moved off finds it, since that move
+-- pointed the row's link at the entity's current url. An active entity is
+-- preferred, then the newest. A GitHub row that links to no entity is linked
+-- to the live registry row on its host that the target's owner/repo names,
+-- compared case-insensitively. A row nothing answers to stays unlinked, and no
+-- later rename moves its pointer.
+UPDATE external_actions
+   SET entity_id = COALESCE(
+       (SELECT e.id FROM entities e
+         WHERE e.org_id = external_actions.org_id AND e.source = external_actions.provider
+           AND e.scope = external_actions.scope
+           AND LOWER(e.source_id) = LOWER(external_actions.target)
+         ORDER BY e.state = 'active' DESC, e.created_at DESC, e.id LIMIT 1),
+       (SELECT e.id FROM entities e
+         WHERE e.org_id = external_actions.org_id AND e.source = external_actions.provider
+           AND e.scope = external_actions.scope
+           AND COALESCE(e.url, '') <> ''
+           AND substr(COALESCE(external_actions.current_url, external_actions.url, ''), 1, length(e.url)) = e.url
+           AND (length(COALESCE(external_actions.current_url, external_actions.url)) = length(e.url)
+                OR substr(COALESCE(external_actions.current_url, external_actions.url), length(e.url) + 1, 1) IN ('#', '?', '/'))
+         ORDER BY e.state = 'active' DESC, e.created_at DESC, e.id LIMIT 1))
+ WHERE provider IN ('github', 'jira', 'linear', 'slack');
+
+UPDATE external_actions
+   SET repository_id = (
+       SELECT r.id FROM repositories r
+        WHERE r.org_id = external_actions.org_id AND r.source = 'github'
+          AND r.host = external_actions.scope AND r.retired_at IS NULL
+          AND LOWER(r.owner || '/' || r.repo) = LOWER(
+                CASE WHEN instr(external_actions.target, '#') > 0
+                     THEN substr(external_actions.target, 1, instr(external_actions.target, '#') - 1)
+                     ELSE external_actions.target END))
+ WHERE provider = 'github' AND entity_id IS NULL;
 
 DROP TABLE org_scope;
 DROP TABLE host_case;

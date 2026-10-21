@@ -1000,7 +1000,7 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 		if _, e := tx.Artifacts.Upsert(cleanupCtx, orgID, closed); e != nil {
 			return e
 		}
-		branchURL, e := retireBranchArtifact(cleanupCtx, tx, orgID, art.ConversationID, art.Scope, repoPath, headRef)
+		branchURL, repositoryID, e := retireBranchArtifact(cleanupCtx, tx, orgID, art.ConversationID, art.Scope, repoPath, headRef)
 		if e != nil {
 			return e
 		}
@@ -1009,7 +1009,7 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 			return e
 		}
 		return tx.ExternalActions.Record(cleanupCtx, orgID,
-			branchDeletedAction(art, userID, repoPath, headRef, details.HeadBranch, branchURL, credential))
+			branchDeletedAction(art, userID, repositoryID, repoPath, headRef, details.HeadBranch, branchURL, credential))
 	}); err != nil {
 		internalError(w, "artifacts", err)
 		return
@@ -1031,30 +1031,32 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 
 // retireBranchArtifact flips the conversation's `branch` artifact for headRef
 // in repoPath's repository, on the GitHub host scope, to deleted, returning its
-// web URL for the audit row. The repository is the registry row repoPath
-// resolves to on scope — the one the branch delete just went to — and the
-// artifact is the one keyed on that row and headRef (domain.BranchDedupKey),
-// whatever name its target spells. A conversation with no such artifact — a
-// push the capture writers missed, a repository with no registry row, or no
-// conversation at all — is not an error: the PR artifact carries the rejection
-// on its own, and the returned URL falls back to the branch link on scope's
-// host so the audit row still links somewhere.
-func retireBranchArtifact(ctx context.Context, tx db.TxStores, orgID, conversationID, scope, repoPath, headRef string) (string, error) {
+// web URL and the repository's registry row id for the audit row. The
+// repository is the registry row repoPath resolves to on scope — the one the
+// branch delete just went to — and the artifact is the one keyed on that row
+// and headRef (domain.BranchDedupKey), whatever name its target spells. A
+// conversation with no such artifact — a push the capture writers missed, a
+// repository with no registry row, or no conversation at all — is not an
+// error: the PR artifact carries the rejection on its own, and the returned
+// URL falls back to the branch link on scope's host so the audit row still
+// links somewhere. The returned id is empty only when no registry row answers
+// to repoPath.
+func retireBranchArtifact(ctx context.Context, tx db.TxStores, orgID, conversationID, scope, repoPath, headRef string) (string, string, error) {
 	fallbackURL, _ := domain.BranchArtifactWebURL(scope, repoPath, headRef)
-	if conversationID == "" {
-		return fallbackURL, nil
-	}
 	repo, err := tx.Repos.GetByRef(ctx, orgID, domain.RepoRefFromSlug(scope, repoPath))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if repo == nil {
-		return fallbackURL, nil
+		return fallbackURL, "", nil
+	}
+	if conversationID == "" {
+		return fallbackURL, repo.ID, nil
 	}
 	key := domain.BranchDedupKey(repo.ID, headRef)
 	arts, err := tx.Artifacts.ListByConversation(ctx, orgID, conversationID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	for i := range arts {
 		a := arts[i]
@@ -1064,23 +1066,24 @@ func retireBranchArtifact(ctx context.Context, tx db.TxStores, orgID, conversati
 		if a.State != domain.ArtifactStateBranchDeleted {
 			a.State = domain.ArtifactStateBranchDeleted
 			if _, err := tx.Artifacts.Upsert(ctx, orgID, a); err != nil {
-				return "", err
+				return "", "", err
 			}
 		}
 		if a.URL != "" {
-			return a.URL, nil
+			return a.URL, repo.ID, nil
 		}
-		return fallbackURL, nil
+		return fallbackURL, repo.ID, nil
 	}
-	return fallbackURL, nil
+	return fallbackURL, repo.ID, nil
 }
 
 // branchDeletedAction builds the external_actions row for a rejection's branch
 // delete: a human-authorized, org-executed GitHub write against the PR's repo,
 // keyed on the ref the way branch_pushed is so the two read as one branch's
-// history. ConversationID is the drafting conversation, the actor the rejecting
-// human, the team the artifact's.
-func branchDeletedAction(art *domain.Artifact, userID, repoPath, headRef, branch, url, credential string) domain.ExternalAction {
+// history, and about the repository's registry row (repositoryID, empty when
+// none answers to repoPath). ConversationID is the drafting conversation, the
+// actor the rejecting human, the team the artifact's.
+func branchDeletedAction(art *domain.Artifact, userID, repositoryID, repoPath, headRef, branch, url, credential string) domain.ExternalAction {
 	detail, _ := json.Marshal(map[string]string{"branch": branch})
 	return domain.ExternalAction{
 		TeamID:         art.TeamID,
@@ -1088,6 +1091,7 @@ func branchDeletedAction(art *domain.Artifact, userID, repoPath, headRef, branch
 		Scope:          art.Scope,
 		Action:         domain.ActionBranchDeleted,
 		Target:         repoPath,
+		RepositoryID:   repositoryID,
 		ExternalID:     headRef,
 		URL:            url,
 		FromState:      domain.ArtifactStateBranchPushed,

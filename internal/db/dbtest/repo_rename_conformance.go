@@ -260,7 +260,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		gheActionKey := "rename-ghe-" + fx.movedActionKey
 		if err := s.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
 			TeamID: seed.TeamID, Provider: "github", Scope: TestOtherGitHubHost, Action: domain.ActionPRCreated,
-			Target: renameOldSlug + "#19", ExternalID: "19",
+			Target: renameOldSlug + "#19", RepositoryID: gheRepo.ID, ExternalID: "19",
 			URL:        TestOtherGitHubHost + "/" + renameOldSlug + "/pull/19",
 			Credential: domain.CredentialGitHubApp, DedupKey: gheActionKey,
 		}); err != nil {
@@ -411,12 +411,12 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 		other := artifactOn(lower, 21)
 		own := artifactOn(upper, 22)
-		actionOn := func(host string, number int) string {
+		actionOn := func(host, entityID string, number int) string {
 			t.Helper()
 			key := fmt.Sprintf("ctx-path-%d", number)
 			if err := s.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
 				TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Scope: host, Action: domain.ActionPRCreated,
-				Target: domain.PullRequestTarget(renameOldSlug, number), ExternalID: fmt.Sprint(number),
+				Target: domain.PullRequestTarget(renameOldSlug, number), EntityID: entityID, ExternalID: fmt.Sprint(number),
 				URL:        fmt.Sprintf("%s/%s/pull/%d", host, renameOldSlug, number),
 				Credential: domain.CredentialGitHubApp, DedupKey: key,
 			}); err != nil {
@@ -424,8 +424,8 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			}
 			return key
 		}
-		otherAction := actionOn(lower, 21)
-		ownAction := actionOn(upper, 22)
+		otherAction := actionOn(lower, "", 21)
+		ownAction := actionOn(upper, ownEntity.ID, 22)
 
 		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
 			Host: upper, Owner: "octo", Repo: "platform-api", ExternalID: "ctx-path-1",
@@ -829,6 +829,16 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		const earlyRef = "refs/heads/early"
 		earlyBranch := bareBranch(earlyRef)
 		twiceBranch := bareBranch(fx.branchRef)
+		// The push of the early branch, recorded about the bare row.
+		const earlyPushKey = "rename-absorb-early-push"
+		if err := s.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
+			TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Scope: TestGitHubHost, Action: domain.ActionBranchPushed,
+			Target: renameNewSlug, RepositoryID: bare.ID, ExternalID: earlyRef,
+			URL:        "https://github.com/" + renameNewSlug + "/tree/early",
+			Credential: domain.CredentialGitHubApp, DedupKey: earlyPushKey,
+		}); err != nil {
+			t.Fatalf("seed the early push's ledger row: %v", err)
+		}
 
 		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
 			Host:  TestGitHubHost,
@@ -867,6 +877,11 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		// Its branches are re-keyed onto the renamed row, and a ref both rows
 		// recorded is one row.
 		assertArtifactAt(t, s, orgID, earlyBranch, renameNewSlug, domain.BranchDedupKey(renamed.ID, earlyRef))
+		// Its audit-ledger rows move onto the renamed row rather than being
+		// unlinked by the delete.
+		if a := findActionByKey(t, s, orgID, earlyPushKey); a.RepositoryID != renamed.ID {
+			t.Errorf("early push's ledger row references %q, want the renamed row %s", a.RepositoryID, renamed.ID)
+		}
 		branches, _, err := s.Artifacts.ListByOrgSystem(ctx, orgID, db.ArtifactListOpts{})
 		if err != nil {
 			t.Fatalf("ListByOrgSystem: %v", err)
@@ -1126,6 +1141,19 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		assertArtifactAt(t, s, orgID, deadRows.review, "octo/api#18", domain.ReviewDedupKey("PR_kwDOdead18", deadRows.conversationID))
 		assertArtifactAt(t, s, orgID, deadRows.comment, "octo/api#18", domain.GitHubCommentDedupKey(domain.GitHubIssueComment, 501))
 		assertArtifactAt(t, s, orgID, deadRows.branch, "octo/api", domain.BranchDedupKey(dead.ID, ref))
+		// The audit ledger the same way: the live repository's rows, about its
+		// pull request and about the repository, follow it; the retired one's,
+		// whose links spell the same name, keep theirs.
+		for key, want := range map[string]string{
+			liveRows.prAction:     "https://github.com/octo/api-v2/pull/18",
+			liveRows.branchAction: "https://github.com/octo/api-v2/tree/fix",
+			deadRows.prAction:     "",
+			deadRows.branchAction: "",
+		} {
+			if _, cur := seed.RawActionURL(t, key); cur != want {
+				t.Errorf("action %s current_url = %q, want %q", key, cur, want)
+			}
+		}
 	})
 
 	t.Run("Rename_moves_an_absorbed_bare_rows_placement_override", func(t *testing.T) {
@@ -1335,19 +1363,21 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
-	if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", "https://github.com", renameNeighbourSlug+"#4", renameNeighbourPRNodeID, "pr", "Neighbour PR",
-		"https://github.com/"+renameNeighbourSlug+"/pull/4"); err != nil {
+	neighbourEntity, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", "https://github.com", renameNeighbourSlug+"#4", renameNeighbourPRNodeID, "pr", "Neighbour PR",
+		"https://github.com/"+renameNeighbourSlug+"/pull/4")
+	if err != nil {
 		t.Fatalf("seed neighbour entity: %v", err)
 	}
 
 	// Two ledger rows: one whose object the rename moves, one for the
-	// neighbour as the boundary control. Deterministic dedup keys so the
-	// assertions (and the raw column reads) can find them again.
+	// neighbour as the boundary control, each about its pull request's entity
+	// as its writer records it. Deterministic dedup keys so the assertions
+	// (and the raw column reads) can find them again.
 	movedActionKey := "rename-moved-" + suffix
 	neighbourActionKey := "rename-neighbour-" + suffix
 	if err := s.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
 		TeamID: seed.TeamID, Provider: "github", Scope: TestGitHubHost, Action: domain.ActionPRCreated,
-		Target: renameOldSlug + "#18", ExternalID: "18",
+		Target: renameOldSlug + "#18", EntityID: entity.ID, ExternalID: "18",
 		URL:        "https://github.com/" + renameOldSlug + "/pull/18",
 		Credential: domain.CredentialGitHubApp, DedupKey: movedActionKey,
 		DetailJSON: `{"method":"POST","path":"/repos/` + renameOldSlug + `/pulls"}`,
@@ -1356,7 +1386,7 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	}
 	if err := s.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
 		TeamID: seed.TeamID, Provider: "github", Scope: TestGitHubHost, Action: domain.ActionPRCreated,
-		Target: renameNeighbourSlug + "#4", ExternalID: "4",
+		Target: renameNeighbourSlug + "#4", EntityID: neighbourEntity.ID, ExternalID: "4",
 		URL:        "https://github.com/" + renameNeighbourSlug + "/pull/4",
 		Credential: domain.CredentialGitHubApp, DedupKey: neighbourActionKey,
 	}); err != nil {
@@ -1418,17 +1448,21 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 }
 
 // repoArtifactRows names the pull request, review, comment and branch
-// artifacts recordRepoArtifacts records, and the conversation the review
-// belongs to.
+// artifacts recordRepoArtifacts records, the conversation the review belongs
+// to, and the dedup keys of the audit-ledger rows of the pull request's
+// creation and the branch's push.
 type repoArtifactRows struct {
 	pr, review, comment, branch string
 	conversationID              string
+	prAction, branchAction      string
 }
 
 // recordRepoArtifacts records, in repo on TestGitHubHost, pull request #number
 // (node id nodeID) with its entity, a review draft of it, a comment on it
 // (commentID) and a pushed branch ref, keyed and linked to the entity the way
-// their writers record them, and returns their ids.
+// their writers record them, with the audit-ledger rows of the pull request's
+// creation (about its entity) and the branch's push (about the repository's
+// registry row), and returns their ids and keys.
 func recordRepoArtifacts(t *testing.T, s db.Stores, orgID, teamID string, repo domain.Repository, number int, nodeID string, commentID int64, ref string) repoArtifactRows {
 	t.Helper()
 	ctx := context.Background()
@@ -1468,7 +1502,26 @@ func recordRepoArtifacts(t *testing.T, s db.Stores, orgID, teamID string, repo d
 	if err != nil {
 		t.Fatalf("seed branch artifact %s: %v", slug, err)
 	}
-	return repoArtifactRows{pr: storedPR.ID, review: storedReview.ID, comment: storedComment.ID, branch: storedBranch.ID, conversationID: conversationID}
+	prAction, branchAction := "created-"+nodeID, "pushed-"+nodeID
+	for _, act := range []domain.ExternalAction{
+		{
+			Action: domain.ActionPRCreated, Target: domain.PullRequestTarget(slug, number), EntityID: entity.ID,
+			URL: fmt.Sprintf("%s/%s/pull/%d", TestGitHubHost, slug, number), DedupKey: prAction,
+		},
+		{
+			Action: domain.ActionBranchPushed, Target: slug, RepositoryID: repo.ID, ExternalID: ref,
+			URL: TestGitHubHost + "/" + slug + "/tree/" + strings.TrimPrefix(ref, "refs/heads/"), DedupKey: branchAction,
+		},
+	} {
+		act.TeamID, act.Provider, act.Scope, act.Credential = teamID, domain.ArtifactProviderGitHub, TestGitHubHost, domain.CredentialGitHubApp
+		if err := s.ExternalActions.RecordSystem(ctx, orgID, act); err != nil {
+			t.Fatalf("seed ledger row %s: %v", act.DedupKey, err)
+		}
+	}
+	return repoArtifactRows{
+		pr: storedPR.ID, review: storedReview.ID, comment: storedComment.ID, branch: storedBranch.ID, conversationID: conversationID,
+		prAction: prAction, branchAction: branchAction,
+	}
 }
 
 // linkArtifactEntity returns a linked to the entity of its provider carrying

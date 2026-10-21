@@ -18,16 +18,23 @@ import (
 // org-scoped credential is in, an individual user's own credential is out (the
 // Jira claim/swipe/done/requeue flows, already attributed natively in Jira).
 //
-// One amendment to "immutable", and exactly one: the record of the act —
-// Target, Action, DetailJSON, NodeID, Credential, OccurredAt, and the url
-// column as captured — is frozen, while the POINTER to where the object now
-// lives is maintained. A repository rename fills the row's current_url column
-// (in the same transaction as the rest of its rewrite), and reads serve
-// COALESCE(current_url, url) through the URL field below, so the feed's link
-// keeps resolving after the freed name is re-claimed by a different
-// repository. current_url is the only column an UPDATE may touch; rewriting
-// Target on the same reasoning would make the log assert TF acted on a name
-// that did not exist at the time.
+// The record of the act — Target, Action, DetailJSON, NodeID, Credential,
+// OccurredAt, and the url column as captured — is frozen. What the act was
+// about is referenced by id (EntityID, RepositoryID), written with the row,
+// and the POINTER to where the object now lives is maintained: a rename of the
+// entity or the repository the row references, or a Slack channel's move,
+// fills the row's current_url column (in the same transaction as the rest of
+// its rewrite), and reads serve COALESCE(current_url, url) through the URL
+// field below, so the feed's link keeps resolving after a freed name is
+// re-claimed by a different object. The rename selects the rows it moves by
+// those ids, never by the name a link spells, so another object that once held
+// the name keeps its history as recorded. current_url is the only column a
+// rename touches; rewriting Target on the same reasoning would make the log
+// assert TF acted on a name that did not exist at the time. The references
+// move only where the object they name is folded into another row of the same
+// object: a merge or a stub fold of two entities re-points EntityID onto the
+// row that survives, and a rename absorbing a bare registry row re-points
+// RepositoryID onto the renamed row.
 //
 // Wherever the action carries a DB state change (the server approval flips), the
 // row is written in the SAME transaction as that change, so the log can't diverge
@@ -56,7 +63,24 @@ type ExternalAction struct {
 	// (extensible — no CHECK constraint on the column).
 	Action string `json:"action"`
 	// Target is the resource key: owner/repo#123, owner/repo, or a Jira issue key.
+	// A display value, recorded as the act named it; what the act was about is
+	// EntityID or RepositoryID.
 	Target string `json:"target"`
+	// EntityID is the entity the act was about: the pull request or issue a
+	// GitHub action names (owner/repo#123), the Jira or Linear issue, the
+	// Slack thread. Resolved when the row is recorded, from the object the
+	// write reached (the agent's recording funnel resolves, or creates, the
+	// entity the way the touched-entity record does). Empty → SQL NULL when
+	// the act was about no entity (a branch, a repository's settings, an
+	// egress denial) or its entity did not resolve; ON DELETE SET NULL.
+	EntityID string `json:"entity_id,omitempty"`
+	// RepositoryID is the registry row of the repository a GitHub act with no
+	// entity was about: a branch push, a branch delete, a git or gh-channel
+	// denial naming a repository, a repository-level write. Set only when
+	// EntityID is empty — an entity carries its own repository — and only
+	// when a registry row answers for the repository; a lookup never registers
+	// one. Empty → SQL NULL; ON DELETE SET NULL.
+	RepositoryID string `json:"repository_id,omitempty"`
 	// ExternalID is the provider-native id of the backing object (PR number /
 	// review node id / comment id / Jira issue id — the issue key on a board
 	// mirror row for an entity that has not learned its id / branch ref).
@@ -416,16 +440,26 @@ func ExternalActionTypes() []string {
 }
 
 // BranchPushDedupKey builds the deterministic dedup key for a branch push:
-// "branch:<conversationID>:<ref>:<sha>". The git pre-push hook and the git-proxy
-// receive-pack backstop both observe the SAME push (same conversation, ref, sha), so they
-// produce an identical key and the twin collapses under ON CONFLICT(org_id,
-// scope, dedup_key) DO NOTHING — while a genuinely new push (a force-push to the same
-// ref, or new commits) carries a different sha and is recorded as its own row.
+// "branch:<conversationID>:<repository>:<ref>:<sha>". The git pre-push hook and
+// the git-proxy receive-pack backstop both observe the SAME push (same
+// conversation, repository, ref, sha), so they produce an identical key and the
+// twin collapses under ON CONFLICT(org_id, scope, dedup_key) DO NOTHING — while
+// a genuinely new push (a force-push to the same ref, or new commits) carries a
+// different sha and is recorded as its own row, and a push of the same ref and
+// sha to another repository in the same conversation is another repository's
+// row.
+//
+// repository is the pushed repository's registry row id, which both observers
+// key the branch artifact on (BranchArtifactRepositoryID), or, for a push to a
+// repository with no registry row, the name its artifact was recorded under:
+// with no row there is no id, and a name keeps two such repositories apart.
+// An id holds no '/', so the two never collide.
+//
 // This is one of the two actions with a deterministic natural key (the other is
 // EgressDenialDedupKey); every other action's key names that one act (see
 // ExternalAction.DedupKey), so it can never be deduped against another.
-func BranchPushDedupKey(conversationID, ref, sha string) string {
-	return strings.Join([]string{"branch", conversationID, ref, sha}, ":")
+func BranchPushDedupKey(conversationID, repository, ref, sha string) string {
+	return strings.Join([]string{"branch", conversationID, repository, ref, sha}, ":")
 }
 
 // EgressDenialDedupKey builds the deterministic dedup key for a refused sandbox
@@ -489,10 +523,11 @@ type ExternalActionListOpts struct {
 // write. ConversationID is the drafting conversation (art.ConversationID),
 // actorUserID is the human who authorized it (empty for an autonomous one),
 // team_id is the artifact's team, and the object coordinates come from the
-// artifact. from/to carry the lifecycle transition (draft→open,
-// pending→submitted, …). credential is the org credential the write is made
-// under, classified by the caller before it opens whatever transaction this row
-// lands in.
+// artifact: the entity it is about (art.EntityID), or, for a branch, the
+// registry row its key names. from/to carry the lifecycle transition
+// (draft→open, pending→submitted, …). credential is the org credential the
+// write is made under, classified by the caller before it opens whatever
+// transaction this row lands in.
 func ArtifactAction(art *Artifact, actorUserID, action, from, to, credential string) ExternalAction {
 	// A PR artifact carries its html_url; a review artifact carries none (its
 	// target is the PR), so fall back to the PR web URL from the target on the
@@ -504,12 +539,13 @@ func ArtifactAction(art *Artifact, actorUserID, action, from, to, credential str
 			url = GitHubPullURLBase(art.Scope, owner+"/"+repo, number)
 		}
 	}
-	return ExternalAction{
+	act := ExternalAction{
 		TeamID:         art.TeamID,
 		Provider:       ArtifactProviderGitHub,
 		Scope:          art.Scope,
 		Action:         action,
 		Target:         art.Target,
+		EntityID:       art.EntityID,
 		ExternalID:     art.ExternalID,
 		URL:            url,
 		FromState:      from,
@@ -518,4 +554,8 @@ func ArtifactAction(art *Artifact, actorUserID, action, from, to, credential str
 		ActorUserID:    actorUserID,
 		Credential:     credential,
 	}
+	if act.EntityID == "" {
+		act.RepositoryID = BranchArtifactRepositoryID(*art)
+	}
+	return act
 }

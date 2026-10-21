@@ -50,7 +50,8 @@ const pgExternalActionColumns = `
 	COALESCE(external_id, ''), COALESCE(current_url, url, ''), COALESCE(from_state, ''),
 	COALESCE(to_state, ''), COALESCE(conversation_id::text, ''),
 	COALESCE(actor_user_id::text, ''), credential, dedup_key,
-	COALESCE(detail_json, ''), COALESCE(node_id, ''), occurred_at
+	COALESCE(detail_json, ''), COALESCE(node_id, ''), COALESCE(entity_id::text, ''),
+	COALESCE(repository_id::text, ''), occurred_at
 `
 
 func (s *externalActionStore) Record(ctx context.Context, orgID string, e domain.ExternalAction) error {
@@ -71,7 +72,9 @@ func (s *externalActionStore) RecordSystem(ctx context.Context, orgID string, e 
 // db.ExternalActionStore.
 // occurred_at is left to the column DEFAULT now(). Empty nullable columns (”) →
 // NULL via NULLIF; the uuid columns cast after the NULLIF so an empty string
-// never reaches ::uuid. ON CONFLICT DO NOTHING keeps it append-only.
+// never reaches ::uuid. entity_id and repository_id are written as the caller
+// resolved them, and their foreign keys hold them to rows of this org. ON
+// CONFLICT DO NOTHING keeps it append-only.
 func (s *externalActionStore) record(ctx context.Context, q queryer, orgID string, e domain.ExternalAction) error {
 	if err := db.RequireExternalObjectScope(e.Scope); err != nil {
 		return err
@@ -80,19 +83,19 @@ func (s *externalActionStore) record(ctx context.Context, q queryer, orgID strin
 		INSERT INTO external_actions
 			(id, org_id, team_id, provider, action, target, external_id, url,
 			 from_state, to_state, conversation_id, actor_user_id, credential, dedup_key, detail_json, scope,
-			 node_id)
+			 node_id, entity_id, repository_id)
 		VALUES (
 			COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), $2, NULLIF($3, '')::uuid,
 			$4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''),
 			NULLIF($11, '')::uuid, NULLIF($12, '')::uuid, $13,
 			COALESCE(NULLIF($14, ''), gen_random_uuid()::text), NULLIF($15, ''), $16,
-			NULLIF($17, '')
+			NULLIF($17, ''), NULLIF($18, '')::uuid, NULLIF($19, '')::uuid
 		)
 		ON CONFLICT (org_id, scope, dedup_key) DO NOTHING
 	`,
 		e.ID, orgID, e.TeamID, e.Provider, e.Action, e.Target, e.ExternalID, e.URL,
 		e.FromState, e.ToState, e.ConversationID, e.ActorUserID, e.Credential, e.DedupKey, e.DetailJSON, e.Scope,
-		e.NodeID,
+		e.NodeID, e.EntityID, e.RepositoryID,
 	)
 	return err
 }
@@ -253,6 +256,7 @@ func scanExternalAction(sc rowScanner, e *domain.ExternalAction) error {
 	return sc.Scan(
 		&e.ID, &e.OrgID, &e.TeamID, &e.Provider, &e.Scope, &e.Action, &e.Target,
 		&e.ExternalID, &e.URL, &e.FromState, &e.ToState, &e.ConversationID,
-		&e.ActorUserID, &e.Credential, &e.DedupKey, &e.DetailJSON, &e.NodeID, &e.OccurredAt,
+		&e.ActorUserID, &e.Credential, &e.DedupKey, &e.DetailJSON, &e.NodeID, &e.EntityID,
+		&e.RepositoryID, &e.OccurredAt,
 	)
 }

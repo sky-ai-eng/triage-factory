@@ -40,6 +40,39 @@ func githubCredentialForArtifact(ctx context.Context, resolver ghclient.Resolver
 	return ghclient.CredentialForRepo(ctx, resolver, orgID, owner, repo)
 }
 
+// linkPullRequestAction stamps act, an audit row about pull request
+// owner/repo#number on the GitHub host, with what it is about, by id: the
+// pull request's entity, or, when TF holds none for it, its repository's
+// registry row. The caller named the pull request by name (a request path),
+// and the name is resolved here, once: to the live registry row that answers
+// to owner/repo, and then to the entity under the key that row's own pull
+// request carries, so a closed entity of a retired repository that held the
+// name is never taken for it. A failed read is logged and leaves the row
+// unlinked, since it must never fail a write GitHub already applied.
+func linkPullRequestAction(ctx context.Context, tx db.TxRunner, orgID, userID, host, owner, repo string, number int, act *domain.ExternalAction) {
+	err := tx.WithReadTx(ctx, orgID, userID, func(t db.TxStores) error {
+		row, err := t.Repos.GetByRef(ctx, orgID, domain.RepoRef{Host: host, Owner: owner, Repo: repo})
+		if err != nil || row == nil {
+			return err
+		}
+		e, err := t.Entities.GetBySource(ctx, orgID, domain.ArtifactProviderGitHub, host, domain.PullRequestTarget(row.Slug(), number))
+		if err != nil {
+			return err
+		}
+		if e != nil && e.RepositoryID == row.ID {
+			act.EntityID = e.ID
+			return nil
+		}
+		act.RepositoryID = row.ID
+		return nil
+	})
+	if err != nil {
+		act.EntityID, act.RepositoryID = "", ""
+		externalActionLog.Warn("resolving the pull request an audit row is about failed; recording it unlinked",
+			"action", act.Action, "target", act.Target, "error", err)
+	}
+}
+
 // recordExternalActionBestEffort records act in its own claims-set tx (app pool),
 // logging-and-swallowing any failure. For the approval/board sites whose action
 // is a pure GitHub mutation that already landed pessimistically — the audit row

@@ -1171,6 +1171,62 @@ func TestMigrate_ProviderScopesLinkArtifactsToEntities(t *testing.T) {
 	assertNoDanglingReferences(t, database)
 }
 
+// TestMigrate_ProviderScopesLinkAuditLedgerRows pins section 8: each existing
+// audit-ledger row is linked to the entity its target names, case-insensitively,
+// or else to the one whose url its link continues (the link a rename of a moved
+// issue left it with); a GitHub row about no entity is linked to the registry
+// row its owner/repo names; and a row nothing answers to stays unlinked. A url
+// match needs a boundary after the entity's url, so SKY-12's link is not
+// SKY-1's.
+func TestMigrate_ProviderScopesLinkAuditLedgerRows(t *testing.T) {
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	const site = "https://acme.atlassian.net"
+	setOrgBaseURL(t, database, runmode.LocalDefaultOrgID, "jira", site)
+	mustExec(t, database, `INSERT INTO entities (id, source, source_id, kind, url, snapshot_json) VALUES
+		('e-pr-9', 'github', 'octo/api#9', 'pr', 'https://github.com/octo/api/pull/9', '{"node_id":"PR_9","number":9}'),
+		('e-sky-1', 'jira', 'SKY-1', 'issue', ?, '{"id":"10001","key":"SKY-1","project_id":"100"}')`, site+"/browse/SKY-1")
+	mustExec(t, database, `INSERT INTO repositories (id, owner, repo, source) VALUES ('r-web', 'octo', 'web', 'github')`)
+	action := func(id, provider, target, url, currentURL string) {
+		t.Helper()
+		mustExec(t, database, `
+			INSERT INTO external_actions (id, provider, action, target, url, current_url, credential, dedup_key)
+			VALUES (?, ?, 'comment_posted', ?, NULLIF(?, ''), NULLIF(?, ''), 'github_app', ?)`,
+			id, provider, target, url, currentURL, "k-"+id)
+	}
+	action("x-pr", "github", "Octo/API#9", "https://github.com/octo/api/pull/9#issuecomment-1", "")
+	action("x-key", "jira", "SKY-1", site+"/browse/SKY-1", "")
+	action("x-moved", "jira", "OLD-1", site+"/browse/OLD-1", site+"/browse/SKY-1?focusedCommentId=5")
+	action("x-prefix", "jira", "SKY-12", site+"/browse/SKY-12", "")
+	action("x-branch", "github", "octo/web", "https://github.com/octo/web/tree/fix", "")
+	action("x-pr-unrecorded", "github", "Octo/Web#3", "https://github.com/octo/web/pull/3", "")
+	action("x-gone", "github", "octo/gone", "", "")
+	action("x-egress", "network", "evil.example:443", "", "")
+
+	migrateProviderScopes(t, database)
+
+	for id, want := range map[string][2]string{
+		"x-pr":            {"e-pr-9", ""},
+		"x-key":           {"e-sky-1", ""},
+		"x-moved":         {"e-sky-1", ""},
+		"x-prefix":        {"", ""},
+		"x-branch":        {"", "r-web"},
+		"x-pr-unrecorded": {"", "r-web"},
+		"x-gone":          {"", ""},
+		"x-egress":        {"", ""},
+	} {
+		var entity, repo string
+		if err := database.QueryRow(`SELECT COALESCE(entity_id, ''), COALESCE(repository_id, '') FROM external_actions WHERE id = ?`, id).
+			Scan(&entity, &repo); err != nil {
+			t.Fatalf("read %s: %v", id, err)
+		}
+		if [2]string{entity, repo} != want {
+			t.Errorf("%s references (entity %q, repository %q), want %q", id, entity, repo, want)
+		}
+	}
+	assertNoDanglingReferences(t, database)
+}
+
 func seedProviderScopesOrg(t *testing.T, database *sql.DB) {
 	t.Helper()
 	mustExec(t, database, `INSERT INTO orgs (id, slug, name) VALUES (?, 'local', 'Local')`, runmode.LocalDefaultOrgID)

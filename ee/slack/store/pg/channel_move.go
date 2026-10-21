@@ -74,7 +74,7 @@ func (s *channelRegistryStore) MoveSystem(ctx context.Context, orgID, oldID, new
 		if out.Artifacts, err = moveArtifacts(ctx, q, orgID, channel, oldID, to); err != nil {
 			return err
 		}
-		if out.Actions, err = moveActionPointers(ctx, q, orgID, oldID, to); err != nil {
+		if out.Actions, err = moveActionPointers(ctx, q, orgID, channel, oldID, to); err != nil {
 			return err
 		}
 		return nil
@@ -407,16 +407,23 @@ func moveArtifacts(ctx context.Context, q db.Execer, orgID, channel, oldID, newI
 	return moved, nil
 }
 
-// moveActionPointers moves the audit ledger's pointer for Slack actions whose
-// link points into the channel's archive. Only current_url is written; the
-// pointer's current value is the rewrite base, so successive moves chain.
-func moveActionPointers(ctx context.Context, q db.Execer, orgID, oldID, newID string) (int, error) {
+// moveActionPointers moves the audit ledger's pointer for the Slack actions
+// about the channel whose link points into its archive under oldID: those about
+// one of the channel's thread entities (external_actions.entity_id, the entity
+// referencing the channel's registry row), and those linked to no entity, whose
+// link names the channel by the id it moves off, as an unlinked artifact's
+// target does. Only current_url is written; the pointer's current value is the
+// rewrite base, so successive moves chain. channel is the channel's registry
+// row, "" when it has none.
+func moveActionPointers(ctx context.Context, q db.Execer, orgID, channel, oldID, newID string) (int, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, COALESCE(current_url, url) FROM external_actions
-		WHERE org_id = $1 AND provider = $2 AND scope = $4
-		  AND strpos(COALESCE(current_url, url, ''), '/archives/' || $3) > 0
-		ORDER BY id
-	`, orgID, domain.ArtifactProviderSlack, oldID, domain.SlackScope)
+		SELECT x.id, COALESCE(x.current_url, x.url) FROM external_actions x
+		  LEFT JOIN entities e ON e.org_id = x.org_id AND e.id = x.entity_id
+		WHERE x.org_id = $1 AND x.provider = $2 AND x.scope = $4
+		  AND strpos(COALESCE(x.current_url, x.url, ''), '/archives/' || $3) > 0
+		  AND (e.slack_channel_id = NULLIF($5, '')::uuid OR x.entity_id IS NULL)
+		ORDER BY x.id
+	`, orgID, domain.ArtifactProviderSlack, oldID, domain.SlackScope, channel)
 	if err != nil {
 		return 0, fmt.Errorf("list slack external actions to move: %w", err)
 	}

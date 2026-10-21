@@ -112,9 +112,22 @@ func TestArtifactStore_Postgres_ReturnedRowUnderClaims(t *testing.T) {
 // suite against the Postgres backend, both pools wired against AdminDB like the
 // scope suite above.
 func TestExternalActionNodeID_Postgres(t *testing.T) {
-	h := pgtest.Shared(t)
+	dbtest.RunExternalActionNodeIDConformance(t, pgExternalActionFixture(pgtest.Shared(t)))
+}
+
+// TestExternalActionReferences_Postgres runs the shared ledger reference
+// conformance suite against the Postgres backend, on the node-id suite's
+// fixture. The foreign keys that refuse a dangling reference are composite
+// with org_id, so they are what holds a reference to the org's own rows.
+func TestExternalActionReferences_Postgres(t *testing.T) {
+	dbtest.RunExternalActionReferenceConformance(t, pgExternalActionFixture(pgtest.Shared(t)))
+}
+
+// pgExternalActionFixture builds a fresh org per subtest with a team and a
+// conversation in it, both pools wired against AdminDB.
+func pgExternalActionFixture(h *pgtest.Harness) dbtest.ExternalActionNodeIDFactory {
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	dbtest.RunExternalActionNodeIDConformance(t, func(t *testing.T) dbtest.ExternalActionNodeIDFixture {
+	return func(t *testing.T) dbtest.ExternalActionNodeIDFixture {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "nodeid")
@@ -132,5 +145,5 @@ func TestExternalActionNodeID_Postgres(t *testing.T) {
 				}
 			},
 		}
-	})
+	}
 }

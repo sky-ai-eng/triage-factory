@@ -34,7 +34,8 @@ const externalActionColumns = `
 	id, org_id, COALESCE(team_id, ''), provider, scope, action, target,
 	COALESCE(external_id, ''), COALESCE(current_url, url, ''), COALESCE(from_state, ''),
 	COALESCE(to_state, ''), COALESCE(conversation_id, ''), COALESCE(actor_user_id, ''),
-	credential, dedup_key, COALESCE(detail_json, ''), COALESCE(node_id, ''), occurred_at
+	credential, dedup_key, COALESCE(detail_json, ''), COALESCE(node_id, ''),
+	COALESCE(entity_id, ''), COALESCE(repository_id, ''), occurred_at
 `
 
 func (s *externalActionStore) Record(ctx context.Context, orgID string, e domain.ExternalAction) error {
@@ -59,14 +60,16 @@ func (s *externalActionStore) Record(ctx context.Context, orgID string, e domain
 	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO external_actions
 			(id, org_id, team_id, provider, scope, action, target, external_id, url,
-			 from_state, to_state, conversation_id, actor_user_id, credential, dedup_key, detail_json, node_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 from_state, to_state, conversation_id, actor_user_id, credential, dedup_key, detail_json, node_id,
+			 entity_id, repository_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(org_id, scope, dedup_key) DO NOTHING
 	`,
 		id, orgID, nullIfEmpty(e.TeamID), e.Provider, e.Scope, e.Action, e.Target,
 		nullIfEmpty(e.ExternalID), nullIfEmpty(e.URL), nullIfEmpty(e.FromState),
 		nullIfEmpty(e.ToState), nullIfEmpty(e.ConversationID), nullIfEmpty(e.ActorUserID),
 		e.Credential, dedupKey, nullIfEmpty(e.DetailJSON), nullIfEmpty(e.NodeID),
+		nullIfEmpty(e.EntityID), nullIfEmpty(e.RepositoryID),
 	)
 	return err
 }
@@ -261,6 +264,7 @@ func scanExternalAction(sc rowScanner, e *domain.ExternalAction) error {
 	return sc.Scan(
 		&e.ID, &e.OrgID, &e.TeamID, &e.Provider, &e.Scope, &e.Action, &e.Target,
 		&e.ExternalID, &e.URL, &e.FromState, &e.ToState, &e.ConversationID,
-		&e.ActorUserID, &e.Credential, &e.DedupKey, &e.DetailJSON, &e.NodeID, &e.OccurredAt,
+		&e.ActorUserID, &e.Credential, &e.DedupKey, &e.DetailJSON, &e.NodeID, &e.EntityID,
+		&e.RepositoryID, &e.OccurredAt,
 	)
 }
