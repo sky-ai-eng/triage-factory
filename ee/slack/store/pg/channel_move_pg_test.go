@@ -112,11 +112,13 @@ func readArtifact(t *testing.T, h *pgtest.Harness, id string) artifactRow {
 	return r
 }
 
-func seedSlackAction(t *testing.T, stores db.Stores, orgID, teamID, target, url, dedupKey string) {
+// seedSlackAction records a message action about the thread entity entityID
+// ("" for one recorded about no entity), as the exec funnel records one.
+func seedSlackAction(t *testing.T, stores db.Stores, orgID, teamID, entityID, target, url, dedupKey string) {
 	t.Helper()
 	if err := stores.ExternalActions.RecordSystem(context.Background(), orgID, domain.ExternalAction{
 		TeamID: teamID, Provider: domain.ArtifactProviderSlack, Scope: domain.SlackScope, Action: domain.ActionSlackMessagePosted,
-		Target: target, URL: url, Credential: domain.CredentialSlackBot, DedupKey: dedupKey,
+		Target: target, EntityID: entityID, URL: url, Credential: domain.CredentialSlackBot, DedupKey: dedupKey,
 	}); err != nil {
 		t.Fatalf("seed action %s: %v", dedupKey, err)
 	}
@@ -214,9 +216,13 @@ func TestChannelMove_Postgres_MovesTheChannel(t *testing.T) {
 	unlinkedArtifact := seedMessageArtifact(t, stores, orgID, teamA, domain.Entity{}, row, moveOld, "1700000000.000100", "1700000000.000400")
 
 	oldLink := moveReplyPermalink(moveOld, "1700000000000300", "1700000000.000100")
-	seedSlackAction(t, stores, orgID, teamA, domain.SlackSourceID(moveOld, "1700000000.000100"), oldLink, "action-moved")
-	seedSlackAction(t, stores, orgID, teamA, domain.SlackSourceID(moveNeighbour, "1700000000.000100"),
+	seedSlackAction(t, stores, orgID, teamA, open.ID, domain.SlackSourceID(moveOld, "1700000000.000100"), oldLink, "action-moved")
+	seedSlackAction(t, stores, orgID, teamA, neighbour.ID, domain.SlackSourceID(moveNeighbour, "1700000000.000100"),
 		moveReplyPermalink(moveNeighbour, "1700000000000300", "1700000000.000100"), "action-neighbour")
+	// An act whose thread did not resolve when it was recorded: its link names
+	// the channel by the id it moves off, and moves with it.
+	unlinkedLink := moveReplyPermalink(moveOld, "1700000000000400", "1700000000.000100")
+	seedSlackAction(t, stores, orgID, teamA, "", domain.SlackSourceID(moveOld, "1700000000.000100"), unlinkedLink, "action-unlinked")
 
 	predicate := `{"channel_in":["` + row + `"],"mentioned_only":true}`
 	handler := seedSlackHandler(t, h, orgID, teamA, userID, "launch", predicate)
@@ -225,7 +231,7 @@ func TestChannelMove_Postgres_MovesTheChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MoveSystem: %v", err)
 	}
-	want := slackstore.ChannelMove{To: moveNew, Entities: 2, Artifacts: 2, Actions: 1}
+	want := slackstore.ChannelMove{To: moveNew, Entities: 2, Artifacts: 2, Actions: 2}
 	if !reflect.DeepEqual(move, want) {
 		t.Errorf("MoveSystem = %+v, want %+v", move, want)
 	}
@@ -311,6 +317,13 @@ func TestChannelMove_Postgres_MovesTheChannel(t *testing.T) {
 		currentURL: moveReplyPermalink(moveNew, "1700000000000300", "1700000000.000100"),
 	}) {
 		t.Errorf("moved action = %+v", got)
+	}
+	if got := readAction(t, h, orgID, "action-unlinked"); got != (actionRow{
+		target:     domain.SlackSourceID(moveOld, "1700000000.000100"),
+		url:        unlinkedLink,
+		currentURL: moveReplyPermalink(moveNew, "1700000000000400", "1700000000.000100"),
+	}) {
+		t.Errorf("moved unlinked action = %+v", got)
 	}
 	if got := readAction(t, h, orgID, "action-neighbour"); got.currentURL != "" {
 		t.Errorf("neighbour action current_url = %q, want untouched", got.currentURL)

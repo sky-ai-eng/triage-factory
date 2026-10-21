@@ -208,7 +208,7 @@ func RunExternalObjectScopeConformance(t *testing.T, mk ExternalObjectScopeFacto
 				TeamID: teamID, Provider: domain.ArtifactProviderGitHub, Scope: scope,
 				Action: domain.ActionBranchPushed, Target: "octo/api", ExternalID: "refs/heads/fix",
 				Credential: domain.CredentialGitHubApp,
-				DedupKey:   domain.BranchPushDedupKey("conv-1", "refs/heads/fix", "abc123"),
+				DedupKey:   domain.BranchPushDedupKey("conv-1", "repo-1", "refs/heads/fix", "abc123"),
 			}
 		}
 		for _, scope := range []string{hostA, hostB, hostA} {

@@ -1081,12 +1081,22 @@ func TestArtifactReject_PR(t *testing.T) {
 	if len(acts) != 1 || acts[0].Target != "acme/api" || acts[0].ExternalID != "refs/heads/feature/x" || acts[0].ConversationID != conversationID {
 		t.Errorf("branch_deleted audit rows = %+v, want one on acme/api refs/heads/feature/x for the drafting conversation", acts)
 	}
+	// The branch delete is about the repository, by its registry row.
+	repo, err := sqlitestore.New(srv.db).Repos.GetByRefSystem(context.Background(), runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(pr.Scope, "acme/api"))
+	if err != nil || repo == nil {
+		t.Fatalf("read acme/api's registry row: %v, %v", repo, err)
+	}
+	if len(acts) == 1 && (acts[0].RepositoryID != repo.ID || acts[0].EntityID != "") {
+		t.Errorf("branch_deleted references (entity %q, repository %q), want repository %s", acts[0].EntityID, acts[0].RepositoryID, repo.ID)
+	}
 	closedActs, _, err := sqlitestore.New(srv.db).ExternalActions.ListByOrgSystem(context.Background(), runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionPRClosed})
 	if err != nil {
 		t.Fatalf("list actions: %v", err)
 	}
 	if len(closedActs) != 1 {
 		t.Errorf("pr_closed audit rows = %d, want 1", len(closedActs))
+	} else if closedActs[0].EntityID != pr.EntityID {
+		t.Errorf("pr_closed references entity %q, want the PR artifact's %q", closedActs[0].EntityID, pr.EntityID)
 	}
 
 	assertAgentMemoryUntouched(t, srv, conversationID)

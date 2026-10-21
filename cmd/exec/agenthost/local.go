@@ -2934,29 +2934,41 @@ func jiraAction(a domain.Artifact, action, from, to string) *domain.ExternalActi
 }
 
 // branchPushActionInfo builds the ActionBranchPushed row for a branch artifact,
-// or nil for any other kind. The dedup key is deterministic —
-// branch:<conversationID>:<ref>:<sha> — so the git pre-push hook and the
-// git-proxy backstop, which both observe the same push, collapse to one row; a
-// force-push (new sha) is recorded distinctly. The push lands on GitHub under
-// whichever org credential the conversation's git path carries, which is why
-// the caller supplies it. Free-function form (the counterpart of the
-// LocalClient method) so the direct runtime — which owns UpsertArtifact but
-// holds no LocalClient — can build it from a ConversationInfo directly.
+// or nil for any other kind. The row is about the repository the artifact's key
+// names (domain.BranchArtifactRepositoryID): the host's sink keys a branch on
+// its registry row before this is built (onRegistryRow), so both observers of
+// one push name the same row. The dedup key is deterministic —
+// branch:<conversationID>:<repository>:<ref>:<sha> (domain.BranchPushDedupKey) —
+// so the git pre-push hook and the git-proxy backstop, which both observe the
+// same push, collapse to one row; a force-push (new sha) is recorded
+// distinctly, and so is the same ref and sha pushed to another repository. A
+// branch with no registry row is keyed on the name it was recorded under. The
+// push lands on GitHub under whichever org credential the conversation's git
+// path carries, which is why the caller supplies it. Free-function form (the
+// counterpart of the LocalClient method) so the direct runtime — which owns
+// UpsertArtifact but holds no LocalClient — can build it from a
+// ConversationInfo directly.
 func branchPushActionInfo(a domain.Artifact, info ConversationInfo, credential string) *domain.ExternalAction {
 	if a.Kind != domain.ArtifactKindBranch {
 		return nil
 	}
 	sha := domain.ParseBranchArtifactSHA(a.DetailsJSON)
+	repositoryID, _ := domain.BranchArtifactRepositoryID(a)
+	repository := repositoryID
+	if repository == "" {
+		repository = a.Target
+	}
 	act := &domain.ExternalAction{
-		Provider:   domain.ArtifactProviderGitHub,
-		Action:     domain.ActionBranchPushed,
-		Target:     a.Target,
-		ExternalID: a.ExternalID, // the ref (refs/heads/...)
-		URL:        a.URL,
-		ToState:    domain.ArtifactStateBranchPushed,
-		Credential: credential,
-		DedupKey:   domain.BranchPushDedupKey(info.ConversationID, a.ExternalID, sha),
-		DetailJSON: a.DetailsJSON, // {"sha":...,"new":...}
+		Provider:     domain.ArtifactProviderGitHub,
+		Action:       domain.ActionBranchPushed,
+		Target:       a.Target,
+		RepositoryID: repositoryID,
+		ExternalID:   a.ExternalID, // the ref (refs/heads/...)
+		URL:          a.URL,
+		ToState:      domain.ArtifactStateBranchPushed,
+		Credential:   credential,
+		DedupKey:     domain.BranchPushDedupKey(info.ConversationID, repository, a.ExternalID, sha),
+		DetailJSON:   a.DetailsJSON, // {"sha":...,"new":...}
 	}
 	stampActionIdentityInfo(act, info)
 	return act

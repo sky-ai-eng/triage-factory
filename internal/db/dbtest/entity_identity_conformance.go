@@ -299,10 +299,19 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if foreignArt == issueArt {
 			t.Fatalf("the ws-b artifact landed on the ws-a row: the same dedup key in two scopes is two rows")
 		}
-		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, scope, "ENG-4", oldURL+"#comment-c1", "rename-moved")
-		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, scope, "ENG-41", "https://linear.app/acme/issue/ENG-41/neighbour", "rename-neighbour")
-		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, "ws-b", "ENG-4", otherURL, "rename-other")
-		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, "ws-b", "ENG-4", oldURL+"#comment-c1", "rename-foreign")
+		otherRow, err := s.Entities.GetBySourceSystem(ctx, orgID, "linear", "ws-b", "ENG-4")
+		if err != nil || otherRow == nil {
+			t.Fatalf("read the other workspace's ENG-4: %v, %v", otherRow, err)
+		}
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, scope, row.ID, "ENG-4", oldURL+"#comment-c1", "rename-moved")
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, scope, neighbour.ID, "ENG-41", "https://linear.app/acme/issue/ENG-41/neighbour", "rename-neighbour")
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, "ws-b", otherRow.ID, "ENG-4", otherURL, "rename-other")
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, "ws-b", "", "ENG-4", oldURL+"#comment-c1", "rename-foreign")
+		// The rows are selected by entity, never by link: an act on the
+		// renamed issue's key recorded about no entity, and an act about the
+		// neighbour whose link spells the renamed issue's, both keep theirs.
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, scope, "", "ENG-4", oldURL+"#comment-c2", "rename-unlinked")
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, scope, neighbour.ID, "ENG-41", oldURL+"#comment-c3", "rename-elsewhere")
 
 		out, err := s.Entities.RenameSystem(ctx, orgID, "linear", scope, "uuid-4", "OPS-77", newURL)
 		if err != nil {
@@ -357,7 +366,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if u, cur := seed.RawActionURL(t, "rename-moved"); u != oldURL+"#comment-c1" || cur != newURL+"#comment-c1" {
 			t.Errorf("moved action url=%q current_url=%q, want the record kept and the pointer moved", u, cur)
 		}
-		for _, key := range []string{"rename-neighbour", "rename-other", "rename-foreign"} {
+		for _, key := range []string{"rename-neighbour", "rename-other", "rename-foreign", "rename-unlinked", "rename-elsewhere"} {
 			if _, cur := seed.RawActionURL(t, key); cur != "" {
 				t.Errorf("%s current_url = %q, want untouched", key, cur)
 			}
@@ -371,10 +380,11 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		s, orgID, seed := mk(t)
 		const oldURL = "https://linear.app/acme/issue/ENG-9/café-menu"
 		const newURL = "https://linear.app/acme/issue/OPS-9/café-menu"
-		if _, _, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "ENG-9", "uuid-9", "team-eng", "Café", oldURL); err != nil {
+		row, _, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "ENG-9", "uuid-9", "team-eng", "Café", oldURL)
+		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, scope, "ENG-9", oldURL+"#comment-c9", "rename-non-ascii")
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, scope, row.ID, "ENG-9", oldURL+"#comment-c9", "rename-non-ascii")
 		if out, err := s.Entities.RenameSystem(ctx, orgID, "linear", scope, "uuid-9", "OPS-9", newURL); err != nil || !out.Renamed {
 			t.Fatalf("rename = %+v err=%v", out, err)
 		}
@@ -480,7 +490,11 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		// it keeps, NEW-1; an artifact of no entity under the same key stays.
 		movedArt := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, jiraScope, "10001", "OLD-1", "")
 		otherArt := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, jiraScope, "10009", "OLD-1", "")
-		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderJira, jiraScope, "OLD-1", jiraScope+"/browse/OLD-1", "merge-moved")
+		// The survivor's own act under the key it stops answering to moves its
+		// link onto the key it keeps; the newer row's act moves onto the
+		// survivor with its link, which already is that key's.
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderJira, jiraScope, older.ID, "OLD-1", jiraScope+"/browse/OLD-1", "merge-moved")
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderJira, jiraScope, newer.ID, "NEW-1", jiraScope+"/browse/NEW-1", "merge-repointed")
 
 		survivor, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, newer.ID, older.ID)
 		if err != nil || survivor != older.ID {
@@ -508,6 +522,12 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 		if _, cur := seed.RawActionURL(t, "merge-moved"); cur != jiraScope+"/browse/NEW-1" {
 			t.Errorf("action current_url = %q, want the survivor's link", cur)
+		}
+		for key, wantCurrent := range map[string]string{"merge-moved": jiraScope + "/browse/NEW-1", "merge-repointed": ""} {
+			a := findActionByKey(t, s, orgID, key)
+			if _, cur := seed.RawActionURL(t, key); a.EntityID != older.ID || cur != wantCurrent {
+				t.Errorf("action %s = entity %q current_url %q, want it on the survivor %s with current_url %q", key, a.EntityID, cur, older.ID, wantCurrent)
+			}
 		}
 
 		for _, c := range []struct {
@@ -563,7 +583,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		// The survivor keeps OLD-2, so the closed row's artifact, recorded
 		// under NEW-2, moves onto it.
 		art := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, jiraScope, "10002", "NEW-2", "")
-		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderJira, jiraScope, "NEW-2", jiraScope+"/browse/NEW-2", "merge-closed")
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderJira, jiraScope, newer.ID, "NEW-2", jiraScope+"/browse/NEW-2", "merge-closed")
 
 		survivor, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, older.ID, newer.ID)
 		if err != nil || survivor != older.ID {
@@ -586,6 +606,9 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 		if _, cur := seed.RawActionURL(t, "merge-closed"); cur != jiraScope+"/browse/OLD-2" {
 			t.Errorf("action current_url = %q, want the survivor's link", cur)
+		}
+		if a := findActionByKey(t, s, orgID, "merge-closed"); a.EntityID != older.ID {
+			t.Errorf("action entity = %q, want the survivor %s", a.EntityID, older.ID)
 		}
 	})
 
@@ -635,7 +658,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if ok, err := s.Entities.UpdateSnapshotCASSystem(ctx, orgID, into.ID, `{"node_id":"PR_5","number":5}`, into.PollSeq); err != nil || !ok {
 			t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
 		}
-		stub, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", scope, "acme/old#5", "", "pr", "", "")
+		stub, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", scope, "acme/old#5", "", "pr", "", "https://github.com/acme/old/pull/5")
 		if err != nil {
 			t.Fatalf("create stub: %v", err)
 		}
@@ -674,6 +697,10 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if err != nil {
 			t.Fatalf("seed the stub's comment artifact: %v", err)
 		}
+		// The audit row of that comment, about the stub, linked under the old
+		// name.
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderGitHub, scope, stub.ID, "acme/old#5",
+			"https://github.com/acme/old/pull/5#issuecomment-9005", "fold-comment")
 		before, _ := s.Entities.GetSystem(ctx, orgID, into.ID)
 
 		if err := s.Entities.FoldStubEntitySystem(ctx, orgID, stub.ID, into.ID); err != nil {
@@ -716,6 +743,13 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 		if a, err := s.Artifacts.Get(ctx, orgID, comment.ID); err != nil || a == nil || a.EntityID != into.ID || a.Target != "acme/new#5" {
 			t.Errorf("comment artifact = %+v err=%v, want it on the entity %s under its key acme/new#5", a, err, into.ID)
+		}
+		// Its audit row moves onto the entity, and its link onto the entity's;
+		// the record of the act keeps the old name.
+		action := findActionByKey(t, s, orgID, "fold-comment")
+		if action.EntityID != into.ID || action.Target != "acme/old#5" || action.URL != "https://github.com/acme/new/pull/5#issuecomment-9005" {
+			t.Errorf("comment action = entity %q target %q url %q, want it on %s, recorded under acme/old#5, linked under acme/new",
+				action.EntityID, action.Target, action.URL, into.ID)
 		}
 		refs := seed.Referents(t, into.ID)
 		if refs.Rows["tasks"] != 3 || refs.Rows["events"] != 3 {
@@ -1213,11 +1247,11 @@ func identityArtifactState(kind string) string {
 	return domain.ArtifactStateIssueUpdated
 }
 
-func recordIdentityAction(t *testing.T, s db.Stores, orgID, teamID, provider, scope, key, url, dedupKey string) {
+func recordIdentityAction(t *testing.T, s db.Stores, orgID, teamID, provider, scope, entityID, key, url, dedupKey string) {
 	t.Helper()
 	if err := s.ExternalActions.RecordSystem(context.Background(), orgID, domain.ExternalAction{
 		TeamID: teamID, Provider: provider, Scope: scope, Action: domain.ActionIssueCommentPosted,
-		Target: key, URL: url, Credential: domain.CredentialNone, DedupKey: dedupKey,
+		Target: key, EntityID: entityID, URL: url, Credential: domain.CredentialNone, DedupKey: dedupKey,
 	}); err != nil {
 		t.Fatalf("seed action %s: %v", dedupKey, err)
 	}

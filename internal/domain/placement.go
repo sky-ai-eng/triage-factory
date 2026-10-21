@@ -2,22 +2,22 @@ package domain
 
 import "time"
 
-// PlacementKindRepo is the namespace of a rendezvous key for a delegation
-// key ((org, "owner/repo")). This string value is the placement_overrides.
-// key_kind column and the GET /api/fleet/placement `kind` param.
+// PlacementKindRepo is the namespace of a delegation's rendezvous key, the
+// repository's registry row id. This string value is folded into the key the
+// rendezvous hash ranks on, and is the GET /api/fleet/placement `kind` param.
 const (
 	PlacementKindRepo = "repo"
 )
 
 // PlacementOverride is one row in placement_overrides — human intent that
-// wins over the computed rendezvous order for a single key (spec §6.1).
+// wins over the computed rendezvous order for one repository (spec §6.1).
 // Deliberately narrow: a manual pin, a hot-key replica count, and
 // nothing else (drain lives on the executor's own registry row, not here).
 // The table is expected to stay nearly empty; the rendezvous hash is the
 // default map and needs no rows at all.
 //
 // A row carries at most one intent that actually changes placement:
-//   - PinnedInstanceID set  → the key is pinned to that one instance,
+//   - PinnedInstanceID set  → the repository is pinned to that one instance,
 //     regardless of the hash or the instance's liveness (the claim's aging
 //     tier still spills a pinned-but-dead owner's conversations, so a pin never
 //     wedges work — it only steers the warm path).
@@ -27,17 +27,17 @@ const (
 //
 // A pin takes precedence over a replica count when both are somehow set.
 type PlacementOverride struct {
-	OrgID   string
-	KeyKind string // PlacementKindRepo
-	// Host is the GitHub host (GitHubHost) the repository named by KeyValue
-	// lives on. An owner/repo is only unique within one host, so a pin is for
-	// one host's repository and a rename moves only that host's pins.
-	Host     string
-	KeyValue string // "owner/repo" for repo keys
+	OrgID string
+	// RepositoryID is the registry row of the repository the override is for,
+	// which is also the value of the rendezvous key it overrides. A rename
+	// moves the row's name and not its id, so it never moves an override, and
+	// a repository created under a freed name has a row, and overrides, of its
+	// own. Its name is read off that row, never stored here.
+	RepositoryID string
 
-	// PinnedInstanceID names the instance this key is pinned to, or "" for
-	// no pin. Not validated against the live registry at write time — a pin
-	// to a not-yet-registered (or already-retired) instance is a legal,
+	// PinnedInstanceID names the instance this repository is pinned to, or ""
+	// for no pin. Not validated against the live registry at write time — a
+	// pin to a not-yet-registered (or already-retired) instance is a legal,
 	// self-healing statement of intent, exactly like the rendezvous stamp.
 	PinnedInstanceID string
 

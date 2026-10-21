@@ -440,7 +440,7 @@ CREATE TABLE public.access_change_log (
 -- a purge; actor_user_id is the human authorizer, NULL for an autonomous write.
 -- dedup_key is the natural per-action key - a branch push is observed twice (pre-push
 -- hook and git-proxy backstop) and carries a deterministic key so the twin collapses
--- under ON CONFLICT DO NOTHING. current_url is the only column an UPDATE may touch:
+-- under ON CONFLICT DO NOTHING. current_url is the only column a rename may touch:
 -- where the object lives now (reads serve COALESCE(current_url, url)).
 -- scope is the provider namespace the acted-on object lives in, the value an
 -- entity of that provider is scoped under (domain.ExternalObjectScope): the
@@ -449,6 +449,16 @@ CREATE TABLE public.access_change_log (
 -- action created, which only the create verb's pr_created row carries: the
 -- reconciler's PR backstop matches the row to its artifact by it, since a
 -- rename never changes it. Written once, like the rest of the record.
+-- entity_id is the entity the act was about (the pull request or issue, the
+-- Jira or Linear issue, the Slack thread), and repository_id the registry row of
+-- the repository a GitHub act with no entity was about (a branch push, a
+-- repository-level write); target is a display value recorded as the act named
+-- it. Both are written with the row, and a rename of the entity or the
+-- repository selects the rows whose current_url it moves by them, never by the
+-- name a link spells. They move only where the object they name is folded into
+-- another row of the same object: a merge or stub fold of two entities
+-- re-points entity_id onto the survivor, and a rename absorbing a bare registry
+-- row re-points repository_id onto the renamed row.
 CREATE TABLE public.external_actions (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -469,6 +479,8 @@ CREATE TABLE public.external_actions (
     dedup_key text NOT NULL,
     detail_json text,
     node_id text,
+    entity_id uuid,
+    repository_id uuid,
     occurred_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
@@ -1987,6 +1999,12 @@ CREATE INDEX idx_external_actions_team_occurred ON public.external_actions USING
 CREATE INDEX idx_external_actions_conversation ON public.external_actions USING btree (conversation_id);
 
 
+-- An entity's rename, merge and fold, and a Slack channel's move, select the
+-- ledger rows they move by entity_id; a repository's rename by repository_id.
+CREATE INDEX idx_external_actions_entity ON public.external_actions USING btree (entity_id) WHERE (entity_id IS NOT NULL);
+CREATE INDEX idx_external_actions_repository ON public.external_actions USING btree (repository_id) WHERE (repository_id IS NOT NULL);
+
+
 CREATE UNIQUE INDEX idx_artifacts_dedup ON public.artifacts USING btree (org_id, scope, dedup_key);
 
 
@@ -2366,6 +2384,17 @@ ALTER TABLE ONLY public.external_actions
 
 ALTER TABLE ONLY public.external_actions
     ADD CONSTRAINT external_actions_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id) ON DELETE SET NULL;
+
+
+-- SET NULL (entity_id) and SET NULL (repository_id) keep the audit row,
+-- unlinked, if what it references is deleted; a merge of duplicate entities and
+-- a rename absorbing a bare registry row re-point it first. Both pin the org.
+ALTER TABLE ONLY public.external_actions
+    ADD CONSTRAINT external_actions_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE SET NULL (entity_id);
+
+
+ALTER TABLE ONLY public.external_actions
+    ADD CONSTRAINT external_actions_repository_id_org_id_fkey FOREIGN KEY (repository_id, org_id) REFERENCES public.repositories(id, org_id) ON DELETE SET NULL (repository_id);
 
 
 ALTER TABLE ONLY public.artifacts
@@ -5830,29 +5859,33 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.model_availability TO tf_ap
 
 
 -- placement_overrides: human intent that wins over the computed
--- capacity-weighted rendezvous order for one placement key — a manual pin or a
+-- capacity-weighted rendezvous order for one repository — a manual pin or a
 -- hot-key replica count, nothing else (drain lives on the instances row).
--- Checked before the hash and expected to stay nearly empty. key_kind is
--- 'repo', key_value "owner/repo", and host the GitHub host (domain.GitHubHost)
--- that repository lives on: a slug names a repository only within one host,
--- so a pin is one host's and a rename moves only that host's pins. org_id is
--- plain text, matching the rendezvous key's own org fold. A pin wins when both
--- intents are set. Neither is FK-validated — a pin to a retired instance
+-- Checked before the hash and expected to stay nearly empty. A row is one
+-- repository's, referenced by its registry row (repository_id): the rendezvous
+-- key it overrides is the same row id, so a rename, which moves the row's name
+-- and not its id, leaves both where they are, and a repository created under a
+-- freed name has a row, a key and overrides of its own. The foreign key pins
+-- the org, and ON DELETE CASCADE drops a deleted row's override; the one
+-- delete a repository row sees, a rename absorbing a bare row minted under its
+-- new name, moves that row's override first. A pin wins when both intents are
+-- set. The pinned instance is not FK-validated — a pin to a retired instance
 -- self-heals via the claim's aging tier. Admin-pool-only system table, same
 -- posture as instances: RLS with NO policy plus REVOKE ALL, org_id bound by
 -- argument.
 CREATE TABLE public.placement_overrides (
-    org_id             text NOT NULL,
-    key_kind           text NOT NULL,
-    host               text NOT NULL,
-    key_value          text NOT NULL,
+    org_id             uuid NOT NULL,
+    repository_id      uuid NOT NULL,
     pinned_instance_id text,
     replicas           integer NOT NULL DEFAULT 0,
     updated_at         timestamp with time zone NOT NULL DEFAULT now()
 );
 
 ALTER TABLE ONLY public.placement_overrides
-    ADD CONSTRAINT placement_overrides_pkey PRIMARY KEY (org_id, key_kind, host, key_value);
+    ADD CONSTRAINT placement_overrides_pkey PRIMARY KEY (org_id, repository_id);
+
+ALTER TABLE ONLY public.placement_overrides
+    ADD CONSTRAINT placement_overrides_repository_id_fkey FOREIGN KEY (repository_id, org_id) REFERENCES public.repositories(id, org_id) ON DELETE CASCADE;
 
 ALTER TABLE public.placement_overrides ENABLE ROW LEVEL SECURITY;
 
@@ -6478,6 +6511,11 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.conversation_memory TO tf_system;
 -- UPDATE backs the role-precedence upgrade (touched -> produced -> primary).
 GRANT SELECT, INSERT, UPDATE ON TABLE public.conversation_memory_entities TO tf_system;
 GRANT SELECT, INSERT ON TABLE public.external_actions TO tf_system;
+-- current_url alone: an entity rename the agent's recording funnel applies on
+-- the executor (a moved Jira or Linear issue touched under its new key) moves
+-- the ledger pointers of the entity's actions in its transaction. The record
+-- of the act stays insert-only.
+GRANT UPDATE (current_url) ON TABLE public.external_actions TO tf_system;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.entities TO tf_system;
 GRANT SELECT ON TABLE public.entity_links TO tf_system;
 GRANT SELECT, INSERT ON TABLE public.task_events TO tf_system;

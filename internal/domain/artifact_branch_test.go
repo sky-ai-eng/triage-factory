@@ -69,6 +69,62 @@ func TestBranchArtifactRepositoryID(t *testing.T) {
 	}
 }
 
+// TestBranchArtifactRepositoryID_ReadsBackWhatTheSinkKeyed pins the read of a
+// branch's registry row out of its key: the id is what both observers of a
+// push key the push's ledger row on, so it must come back exactly as
+// BranchDedupKey wrote it, and nothing that is not a keyed branch names one.
+func TestBranchArtifactRepositoryID_ReadsBackWhatTheSinkKeyed(t *testing.T) {
+	keyed, _ := NewBranchArtifact("octo/api", "refs/heads/feature/x", "abc", true)
+	keyed.DedupKey = BranchDedupKey("repo-uuid", keyed.ExternalID)
+	unkeyed, _ := NewBranchArtifact("octo/api", "refs/heads/feature/x", "abc", true)
+	pr := NewPullRequestArtifact("octo/api", 3, "PR_3", "fix", "main", "", "t", "b", true)
+	for name, c := range map[string]struct {
+		a    Artifact
+		want string
+	}{
+		"keyed branch":   {keyed, "repo-uuid"},
+		"unkeyed branch": {unkeyed, ""},
+		"pull request":   {pr, ""},
+	} {
+		if got, ok := BranchArtifactRepositoryID(c.a); got != c.want || ok != (c.want != "") {
+			t.Errorf("%s: BranchArtifactRepositoryID = (%q, %v), want %q", name, got, ok, c.want)
+		}
+	}
+}
+
+// TestBranchPushDedupKey_NamesTheRepository pins that two repositories'
+// pushes of one ref and sha in one conversation are two keys, while the same
+// push observed twice is one.
+func TestBranchPushDedupKey_NamesTheRepository(t *testing.T) {
+	a := BranchPushDedupKey("conv", "repo-a", "refs/heads/x", "sha")
+	if want := "branch:conv:repo-a:refs/heads/x:sha"; a != want {
+		t.Errorf("BranchPushDedupKey = %q, want %q", a, want)
+	}
+	if b := BranchPushDedupKey("conv", "repo-b", "refs/heads/x", "sha"); a == b {
+		t.Errorf("two repositories' pushes share the key %q", a)
+	}
+	if again := BranchPushDedupKey("conv", "repo-a", "refs/heads/x", "sha"); again != a {
+		t.Errorf("one push keyed twice = %q and %q", a, again)
+	}
+}
+
+// TestArtifactAction_ReferencesWhatTheArtifactIsAbout pins the references an
+// approval-lifecycle audit row takes from its artifact: the entity a pull
+// request or review artifact is linked to, and the registry row a branch's key
+// names.
+func TestArtifactAction_ReferencesWhatTheArtifactIsAbout(t *testing.T) {
+	pr := NewPullRequestArtifact("octo/api", 3, "PR_3", "fix", "main", "", "t", "b", true)
+	pr.EntityID = "entity-3"
+	if act := ArtifactAction(&pr, "u", ActionPRClosed, "", "", CredentialGitHubApp); act.EntityID != "entity-3" || act.RepositoryID != "" {
+		t.Errorf("pull request action references (%q, %q), want the entity alone", act.EntityID, act.RepositoryID)
+	}
+	branch, _ := NewBranchArtifact("octo/api", "refs/heads/fix", "abc", false)
+	branch.DedupKey = BranchDedupKey("repo-uuid", branch.ExternalID)
+	if act := ArtifactAction(&branch, "u", ActionBranchDeleted, "", "", CredentialGitHubApp); act.EntityID != "" || act.RepositoryID != "repo-uuid" {
+		t.Errorf("branch action references (%q, %q), want the registry row alone", act.EntityID, act.RepositoryID)
+	}
+}
+
 // TestNewBranchArtifact_NotCreatedOmitsNew pins that created=false drops the
 // "new" key entirely (omitempty), so the hook and the proxy backstop produce
 // byte-identical details_json for the same push and never flap the row.

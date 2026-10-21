@@ -265,7 +265,7 @@ func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule d
 		if state != nil {
 			from = state.StatusName
 		}
-		s.recordMirrorAction(ctx, orgID, scope, issueKey, issueID, teamID, domain.ActionIssueTransitioned, from, rule.DoneCanonical.Name)
+		s.recordMirrorAction(ctx, orgID, entityID, scope, issueKey, issueID, teamID, domain.ActionIssueTransitioned, from, rule.DoneCanonical.Name)
 		return
 	}
 
@@ -295,14 +295,14 @@ func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule d
 			jiraLog.Warn("mirror: assign to service account failed", "issue", issueKey, "error", err)
 			return
 		}
-		s.recordMirrorAction(ctx, orgID, scope, issueKey, issueID, teamID, domain.ActionIssueAssigned, "", "")
+		s.recordMirrorAction(ctx, orgID, entityID, scope, issueKey, issueID, teamID, domain.ActionIssueAssigned, "", "")
 	}
 	if !rule.InProgressContains(claimStatusRef(state)) {
 		if err := client.TransitionTo(ctx, issue, jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name}); err != nil {
 			jiraLog.Warn("mirror: transition to in-progress failed", "issue", issueKey, "target", rule.InProgressCanonical.Name, "error", err)
 			return
 		}
-		s.recordMirrorAction(ctx, orgID, scope, issueKey, issueID, teamID, domain.ActionIssueTransitioned, state.StatusName, rule.InProgressCanonical.Name)
+		s.recordMirrorAction(ctx, orgID, entityID, scope, issueKey, issueID, teamID, domain.ActionIssueTransitioned, state.StatusName, rule.InProgressCanonical.Name)
 	}
 }
 
@@ -310,14 +310,16 @@ func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule d
 // write (TFAC-483): a system/bot action under the org Jira service-account
 // credential, with no human actor (actor_user_id NULL). team_id scopes it to the
 // bot-owned task's team. The detached mirror holds no conversation handle, so conversation_id is
-// left NULL. The issue key is the target and the issue id the external id, as
-// on an agent's Jira write; an entity that has not learned its id yet records
-// the key there instead. scope is the entity's Jira site; when the entity could
-// not be read it is "", and the row takes the org's current site, which the
-// mirror's system client wrote to. Admin pool (RecordSystem — no JWT claims).
+// left NULL. The row is about the task's entity (entityID), the issue the
+// mirror moved, which a rename of the issue moves the row's link with. The
+// issue key is the target and the issue id the external id, as on an agent's
+// Jira write; an entity that has not learned its id yet records the key there
+// instead. scope is the entity's Jira site; when the entity could not be read
+// it is "", and the row takes the org's current site, which the mirror's
+// system client wrote to. Admin pool (RecordSystem — no JWT claims).
 // Best-effort: a recording failure is logged and swallowed so it never unwinds
 // the Jira move it observed, and nil-safe for a partial test Stores.
-func (s *Spawner) recordMirrorAction(ctx context.Context, orgID, scope, issueKey, issueID, teamID, action, from, to string) {
+func (s *Spawner) recordMirrorAction(ctx context.Context, orgID, entityID, scope, issueKey, issueID, teamID, action, from, to string) {
 	if s.externalActions == nil {
 		return
 	}
@@ -336,6 +338,7 @@ func (s *Spawner) recordMirrorAction(ctx context.Context, orgID, scope, issueKey
 		Scope:      scope,
 		Action:     action,
 		Target:     issueKey,
+		EntityID:   entityID,
 		ExternalID: externalID,
 		URL:        s.jiraBrowseURL(ctx, orgID, issueKey),
 		FromState:  from,

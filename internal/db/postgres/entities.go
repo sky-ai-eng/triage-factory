@@ -666,7 +666,7 @@ func (s *entityStore) RenameSystem(ctx context.Context, orgID, source, scope, ex
 		if err := moveEntityArtifactTargets(ctx, tx, orgID, row.id); err != nil {
 			return err
 		}
-		if err := rewriteEntityActionURLs(ctx, tx, orgID, source, scope, row.url, url); err != nil {
+		if err := rewriteEntityActionURLs(ctx, tx, orgID, row.id, row.url, url); err != nil {
 			return err
 		}
 		out = domain.EntityRenameOutcome{Renamed: true, EntityID: row.id, From: row.key, To: newKey, PollSeq: pollSeq}
@@ -696,18 +696,21 @@ func moveEntityArtifactTargets(ctx context.Context, q queryer, orgID, entityID s
 	return nil
 }
 
-// rewriteEntityActionURLs moves the audit ledger's pointer for actions in the
-// entity's scope whose link resolves to the entity's old url. Only current_url
-// is written; the record of the act is not. The pointer's current value is the
-// rewrite base, so consecutive renames chain.
-func rewriteEntityActionURLs(ctx context.Context, q queryer, orgID, source, scope, from, to string) error {
+// rewriteEntityActionURLs moves the audit ledger's pointer for the actions
+// about the entity (external_actions.entity_id) whose link resolves to its old
+// url. The rows are selected by the entity's id, never by a link, so another
+// object's actions under a link that once spelled the same key keep theirs.
+// Only current_url is written; the record of the act is not. The pointer's
+// current value is the rewrite base, so consecutive renames chain.
+func rewriteEntityActionURLs(ctx context.Context, q queryer, orgID, entityID, from, to string) error {
 	if from == "" || to == "" || from == to {
 		return nil
 	}
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, COALESCE(current_url, url) FROM external_actions
-		WHERE org_id = $1 AND provider = $2 AND scope = $4 AND starts_with(COALESCE(current_url, url, ''), $3)`,
-		orgID, source, from, scope)
+		WHERE org_id = $1 AND entity_id = $2 AND starts_with(COALESCE(current_url, url, ''), $3)
+		ORDER BY id`,
+		orgID, entityID, from)
 	if err != nil {
 		return err
 	}
@@ -889,7 +892,7 @@ func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, e
 			return err
 		}
 		kept, dropped := db.DuplicateEntityMergedKeys(survivor, loser)
-		return rewriteEntityActionURLs(ctx, q, orgID, survivor.Source, survivor.Scope, dropped.URL, kept.URL)
+		return rewriteEntityActionURLs(ctx, q, orgID, survivor.ID, dropped.URL, kept.URL)
 	})
 	if err != nil {
 		return "", err
@@ -941,7 +944,10 @@ func (s *entityStore) FoldStubEntitySystem(ctx context.Context, orgID, stubID, i
 		if _, err := q.ExecContext(ctx, `DELETE FROM entities WHERE org_id = $1 AND id = $2`, orgID, stub.ID); err != nil {
 			return fmt.Errorf("delete folded stub: %w", err)
 		}
-		return moveEntityArtifactTargets(ctx, q, orgID, into.ID)
+		if err := moveEntityArtifactTargets(ctx, q, orgID, into.ID); err != nil {
+			return err
+		}
+		return rewriteEntityActionURLs(ctx, q, orgID, into.ID, stub.URL, into.URL)
 	})
 }
 
@@ -969,7 +975,7 @@ func moveEntityReferences(ctx context.Context, q queryer, orgID, loserID, surviv
 		orgID, loserID, db.DuplicateEntityMergedCloseReason); err != nil {
 		return fmt.Errorf("cancel duplicate tasks' runs: %w", err)
 	}
-	for _, table := range []string{"tasks", "events", "event_queue", "pending_firings", "artifacts"} {
+	for _, table := range []string{"tasks", "events", "event_queue", "pending_firings", "artifacts", "external_actions"} {
 		if _, err := q.ExecContext(ctx,
 			`UPDATE `+table+` SET entity_id = $1 WHERE org_id = $2 AND entity_id = $3`,
 			survivorID, orgID, loserID); err != nil {

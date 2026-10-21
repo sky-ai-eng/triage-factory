@@ -9,13 +9,15 @@
 -- artifacts are keyed on ids rather than their repository's name, every
 -- artifact references the entity it is about and Jira artifacts keyed on an
 -- issue key are keyed on the issue's id, one live App installation per account
--- is keyed on the account's id rather than its login, Linear
--- becomes a tracked source, and nine smaller changes ride along: the org GitHub App's unusable state, the claim's source
--- manifest, the retirement of the 'completed' conversation status, node ids on
--- artifacts and audit-ledger rows, the table of rate-limit readings, the
--- principal a deployment-operator grant is bound to, the removal of the
--- unused poller_state table, and the GitHub account id on a pending bind and
--- on the org PAT's identity.
+-- is keyed on the account's id rather than its login, a placement override
+-- references its repository's registry row rather than its name, an
+-- audit-ledger row references the entity or repository it was about, Linear
+-- becomes a tracked source, and nine smaller changes ride along: the org GitHub
+-- App's unusable state, the claim's source manifest, the retirement of the
+-- 'completed' conversation status, node ids on artifacts and audit-ledger rows,
+-- the table of rate-limit readings, the principal a deployment-operator grant
+-- is bound to, the removal of the unused poller_state table, and the GitHub
+-- account id on a pending bind and on the org PAT's identity.
 --
 -- NO TRANSACTION because rebuilding a table other tables reference needs
 -- foreign keys off, and PRAGMA foreign_keys is a no-op inside a transaction:
@@ -329,10 +331,10 @@ CREATE UNIQUE INDEX org_linear_installs_workspace_live
 --   reachable_repositories,       host on every row
 --     reachable_scopes
 --   artifacts, external_actions   scope joins the dedup key
---   placement_overrides           host joins the primary key
 --
 -- team_github_repos and conversation_worktrees reference a repository by row
--- id, so they take the scope from the row and get no column.
+-- id, so they take the scope from the row and get no column, and so does
+-- placement_overrides once 3g moves each pin onto its repository's row.
 --
 -- A host or site is compared by exact string wherever it is a key, so every
 -- one is also stored in one spelling: the ghbase.CanonicalBaseURL form, which
@@ -1013,28 +1015,45 @@ CREATE INDEX idx_artifacts_external_id ON artifacts (org_id, scope, kind, extern
 CREATE INDEX idx_external_actions_org_action_occurred ON external_actions (org_id, action, occurred_at);
 
 -- ---------------------------------------------------------------------------
--- 3g. placement_overrides.host
+-- 3g. placement_overrides: keyed by the repository's registry row
 -- ---------------------------------------------------------------------------
 --
--- A repo pin is keyed on its owner/repo, which is unique only within one GitHub
--- host; repo is the only key kind TF writes, so every pin takes the org's
--- GitHub host. Rebuilt because host joins the primary key.
+-- A pin or replica count is one repository's, and the rendezvous key it
+-- overrides is the repository's registry row id, so the row references the
+-- repository by that id (domain.PlacementOverride.RepositoryID): a rename
+-- moves the registry row's name and leaves the override where it is, and a
+-- repository created under a freed name gets overrides of its own. The
+-- override of a row deleted because a rename absorbed it is moved onto the
+-- renamed row first; ON DELETE CASCADE drops whatever is left.
+--
+-- Each existing pin named its repository by owner/repo on the org's GitHub
+-- host, and repo is the only key kind TF writes. It moves onto the live
+-- registry row that answers to that name there, compared
+-- case-insensitively; of two pins that answer to one row, the most recently
+-- updated is kept. A pin no row answers to is dropped, as is a pin of any
+-- other kind: nothing resolves a repository for it, and nothing reads it,
+-- since placement is off in local mode (the hash always returns this
+-- process) and a pin here changes no run's placement.
 CREATE TABLE placement_overrides_new (
     org_id             TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
-    key_kind           TEXT NOT NULL,
-    host               TEXT NOT NULL,
-    key_value          TEXT NOT NULL,
+    repository_id      TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
     pinned_instance_id TEXT,
     replicas           INTEGER NOT NULL DEFAULT 0,
     updated_at         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (org_id, key_kind, host, key_value)
+    PRIMARY KEY (org_id, repository_id)
 );
 
-INSERT INTO placement_overrides_new
-    (org_id, key_kind, host, key_value, pinned_instance_id, replicas, updated_at)
-SELECT p.org_id, p.key_kind, s.scope, p.key_value, p.pinned_instance_id, p.replicas, p.updated_at
+INSERT OR IGNORE INTO placement_overrides_new
+    (org_id, repository_id, pinned_instance_id, replicas, updated_at)
+SELECT p.org_id, r.id, p.pinned_instance_id, p.replicas, p.updated_at
   FROM placement_overrides p
-  JOIN org_scope s ON s.org_id = p.org_id AND s.provider = 'github';
+  JOIN org_scope s ON s.org_id = p.org_id AND s.provider = 'github'
+  JOIN repositories r
+    ON r.org_id = p.org_id AND r.source = 'github' AND r.host = s.scope
+   AND LOWER(r.owner || '/' || r.repo) = LOWER(p.key_value)
+   AND r.retired_at IS NULL
+ WHERE p.key_kind = 'repo'
+ ORDER BY p.updated_at DESC, p.key_value;
 
 DROP TABLE placement_overrides;
 ALTER TABLE placement_overrides_new RENAME TO placement_overrides;
@@ -1677,6 +1696,64 @@ UPDATE artifacts
 
 DROP TABLE jira_rekey;
 DROP TABLE artifact_subject;
+
+-- ===========================================================================
+-- 8. Audit-ledger rows reference what they were about
+-- ===========================================================================
+--
+-- external_actions.entity_id is the entity an act was about
+-- (domain.ExternalAction.EntityID): the pull request or issue a GitHub action
+-- names, the Jira or Linear issue, the Slack thread. repository_id is the
+-- registry row of the repository a GitHub act with no entity was about: a
+-- branch push, a branch delete, a repository-level write. target stays the
+-- display value the act was recorded under. Both are written with the row, and
+-- a rename of the entity or the repository selects the rows whose current_url
+-- it moves by them, never by the name a link spells. SET NULL keeps a row,
+-- unlinked, if what it references is deleted; a merge of two entities and a
+-- rename absorbing a bare registry row re-point it first.
+ALTER TABLE external_actions ADD COLUMN entity_id TEXT REFERENCES entities(id) ON DELETE SET NULL;
+ALTER TABLE external_actions ADD COLUMN repository_id TEXT REFERENCES repositories(id) ON DELETE SET NULL;
+CREATE INDEX idx_external_actions_entity ON external_actions (entity_id) WHERE entity_id IS NOT NULL;
+CREATE INDEX idx_external_actions_repository ON external_actions (repository_id) WHERE repository_id IS NOT NULL;
+
+-- Existing rows are linked once, best-effort, by what selected them for a
+-- rename before they had these columns, inside the row's scope and provider:
+-- the entity whose key the target names, compared case-insensitively; else
+-- the entity whose url the row's link continues (domain.RewriteEntityURL: the
+-- url, then the end or one of '#', '?', '/'), which is how a row recorded
+-- under a key the entity has since moved off finds it, since that move
+-- pointed the row's link at the entity's current url. An active entity is
+-- preferred, then the newest. A GitHub row that links to no entity is linked
+-- to the live registry row on its host that the target's owner/repo names,
+-- compared case-insensitively. A row nothing answers to stays unlinked, and no
+-- later rename moves its pointer.
+UPDATE external_actions
+   SET entity_id = COALESCE(
+       (SELECT e.id FROM entities e
+         WHERE e.org_id = external_actions.org_id AND e.source = external_actions.provider
+           AND e.scope = external_actions.scope
+           AND LOWER(e.source_id) = LOWER(external_actions.target)
+         ORDER BY e.state = 'active' DESC, e.created_at DESC, e.id LIMIT 1),
+       (SELECT e.id FROM entities e
+         WHERE e.org_id = external_actions.org_id AND e.source = external_actions.provider
+           AND e.scope = external_actions.scope
+           AND COALESCE(e.url, '') <> ''
+           AND substr(COALESCE(external_actions.current_url, external_actions.url, ''), 1, length(e.url)) = e.url
+           AND (length(COALESCE(external_actions.current_url, external_actions.url)) = length(e.url)
+                OR substr(COALESCE(external_actions.current_url, external_actions.url), length(e.url) + 1, 1) IN ('#', '?', '/'))
+         ORDER BY e.state = 'active' DESC, e.created_at DESC, e.id LIMIT 1))
+ WHERE provider IN ('github', 'jira', 'linear', 'slack');
+
+UPDATE external_actions
+   SET repository_id = (
+       SELECT r.id FROM repositories r
+        WHERE r.org_id = external_actions.org_id AND r.source = 'github'
+          AND r.host = external_actions.scope AND r.retired_at IS NULL
+          AND LOWER(r.owner || '/' || r.repo) = LOWER(
+                CASE WHEN instr(external_actions.target, '#') > 0
+                     THEN substr(external_actions.target, 1, instr(external_actions.target, '#') - 1)
+                     ELSE external_actions.target END))
+ WHERE provider = 'github' AND entity_id IS NULL;
 
 DROP TABLE org_scope;
 DROP TABLE host_case;

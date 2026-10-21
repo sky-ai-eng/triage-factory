@@ -429,20 +429,20 @@ func TestRunJiraMirror_AddressesTheIssueByIDAndRecordsItsCurrentKey(t *testing.T
 	if issueRequests == 0 {
 		t.Fatalf("the mirror made no issue requests: %v", paths)
 	}
-	rows, err := database.Query(`SELECT target, external_id FROM external_actions WHERE provider = 'jira'`)
+	rows, err := database.Query(`SELECT target, external_id, COALESCE(entity_id, '') FROM external_actions WHERE provider = 'jira'`)
 	if err != nil {
 		t.Fatalf("read actions: %v", err)
 	}
 	defer rows.Close()
 	n := 0
 	for rows.Next() {
-		var target, externalID string
-		if err := rows.Scan(&target, &externalID); err != nil {
+		var target, externalID, entityID string
+		if err := rows.Scan(&target, &externalID, &entityID); err != nil {
 			t.Fatalf("scan action: %v", err)
 		}
 		n++
-		if target != "OPS-7" || externalID != "10007" {
-			t.Errorf("action target=%q external_id=%q, want OPS-7 / 10007", target, externalID)
+		if target != "OPS-7" || externalID != "10007" || entityID != e.ID {
+			t.Errorf("action target=%q external_id=%q entity=%q, want OPS-7 / 10007 about %s", target, externalID, entityID, e.ID)
 		}
 	}
 	if err := rows.Err(); err != nil {

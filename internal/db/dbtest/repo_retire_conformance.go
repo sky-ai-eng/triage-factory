@@ -301,6 +301,16 @@ func RunRepoRetireConformance(t *testing.T, mk RepoRenameFactory) {
 		if a, _ := s.Artifacts.Get(ctx, orgID, fx.artifactID); a == nil || a.Target != "octo/api-legacy#12" {
 			t.Errorf("artifact = %+v, want it moved to octo/api-legacy#12 with the restored row", a)
 		}
+		// And so do its audit-ledger links, which reference its entity and its
+		// registry row, while every record keeps the name it was made under.
+		for key, want := range map[string]string{
+			fx.prAction:   "https://github.com/octo/api-legacy/pull/12",
+			fx.pushAction: "https://github.com/octo/api-legacy/tree/fix",
+		} {
+			if u, cur := seed.RawActionURL(t, key); cur != want || !strings.Contains(u, "/octo/api/") {
+				t.Errorf("action %s = url %q current_url %q, want the record kept and the pointer at %q", key, u, cur, want)
+			}
+		}
 	})
 
 	t.Run("Renaming_the_holder_leaves_a_retired_namesake_alone", func(t *testing.T) {
@@ -327,6 +337,13 @@ func RunRepoRetireConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 		if ent, _ := s.Entities.GetSystem(ctx, orgID, fx.entityID); ent == nil || ent.SourceID != "octo/api#12" {
 			t.Errorf("retired row's entity = %+v, want octo/api#12; it is not the renamed repository's", ent)
+		}
+		// The retired row's audit-ledger links spell the renamed repository's
+		// old name too, and stay: they are about the retired row.
+		for _, key := range []string{fx.prAction, fx.pushAction} {
+			if _, cur := seed.RawActionURL(t, key); cur != "" {
+				t.Errorf("retired row's action %s current_url = %q, want it untouched", key, cur)
+			}
 		}
 		if old, _ := s.Repos.GetSystem(ctx, orgID, fx.repo.ID); old == nil || old.Slug() != "octo/api" || old.RetiredAt == nil {
 			t.Errorf("retired row = %+v, want it where it was", old)
@@ -459,6 +476,10 @@ type retireFixture struct {
 	entityID       string
 	conversationID string
 	artifactID     string
+	// prAction and pushAction are the dedup keys of the audit-ledger rows of
+	// the pull request's creation (about its entity) and a branch push (about
+	// the repository's registry row).
+	prAction, pushAction string
 }
 
 func seedRetireFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameSeeder, suffix string) retireFixture {
@@ -499,7 +520,17 @@ func seedRetireFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	if err != nil {
 		t.Fatalf("seed artifact: %v", err)
 	}
-	return retireFixture{repo: *repo, entityID: entity.ID, conversationID: conversationID, artifactID: artifact.ID}
+	prAction, pushAction := "retire-created-"+suffix, "retire-pushed-"+suffix
+	for _, act := range []domain.ExternalAction{
+		{Action: domain.ActionPRCreated, Target: "octo/api#12", EntityID: entity.ID, URL: "https://github.com/octo/api/pull/12", DedupKey: prAction},
+		{Action: domain.ActionBranchPushed, Target: "octo/api", RepositoryID: repo.ID, URL: "https://github.com/octo/api/tree/fix", DedupKey: pushAction},
+	} {
+		act.TeamID, act.Provider, act.Scope, act.Credential = seed.TeamID, domain.ArtifactProviderGitHub, TestGitHubHost, domain.CredentialGitHubApp
+		if err := s.ExternalActions.RecordSystem(ctx, orgID, act); err != nil {
+			t.Fatalf("seed ledger row %s: %v", act.DedupKey, err)
+		}
+	}
+	return retireFixture{repo: *repo, entityID: entity.ID, conversationID: conversationID, artifactID: artifact.ID, prAction: prAction, pushAction: pushAction}
 }
 
 // reassignedObservation is GitHub reporting octo/api under retireNewID.

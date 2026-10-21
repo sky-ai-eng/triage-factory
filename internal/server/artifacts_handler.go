@@ -1061,7 +1061,7 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 			return e
 		}
 		return tx.ExternalActions.Record(cleanupCtx, orgID,
-			branchDeletedAction(art, userID, repoPath, headRef, details.HeadBranch, branchURL, credential))
+			branchDeletedAction(art, userID, prRef.RepositoryID, repoPath, headRef, details.HeadBranch, branchURL, credential))
 	}); err != nil {
 		internalError(w, "artifacts", err)
 		return
@@ -1124,9 +1124,10 @@ func retireBranchArtifact(ctx context.Context, tx db.TxStores, orgID, conversati
 // branchDeletedAction builds the external_actions row for a rejection's branch
 // delete: a human-authorized, org-executed GitHub write against the PR's repo,
 // keyed on the ref the way branch_pushed is so the two read as one branch's
-// history. ConversationID is the drafting conversation, the actor the rejecting
-// human, the team the artifact's.
-func branchDeletedAction(art *domain.Artifact, userID, repoPath, headRef, branch, url, credential string) domain.ExternalAction {
+// history, and about the repository's registry row (repositoryID, empty for a
+// pull request recorded unlinked). ConversationID is the drafting conversation, the
+// actor the rejecting human, the team the artifact's.
+func branchDeletedAction(art *domain.Artifact, userID, repositoryID, repoPath, headRef, branch, url, credential string) domain.ExternalAction {
 	detail, _ := json.Marshal(map[string]string{"branch": branch})
 	return domain.ExternalAction{
 		TeamID:         art.TeamID,
@@ -1134,6 +1135,7 @@ func branchDeletedAction(art *domain.Artifact, userID, repoPath, headRef, branch
 		Scope:          art.Scope,
 		Action:         domain.ActionBranchDeleted,
 		Target:         repoPath,
+		RepositoryID:   repositoryID,
 		ExternalID:     headRef,
 		URL:            url,
 		FromState:      domain.ArtifactStateBranchPushed,
