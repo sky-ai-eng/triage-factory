@@ -24,9 +24,10 @@
 //	               jail's burst for the worst case. The CI/build profile.
 //	oomtest      — not a ramp: the blast-radius scenario. Victim jails get
 //	               a small cgroup ceiling and allocate past it while
-//	               neighbor jails keep working; passes when every victim is
-//	               OOM-killed alone, neighbors take zero errors, and
-//	               spawning stays flat. Writes a scenario JSON, no CSV.
+//	               neighbor jails keep working; passes when every victim's
+//	               cgroup peaks within its ceiling and its failure stays
+//	               inside it, neighbors take zero errors, and spawning
+//	               stays flat. Writes a scenario JSON, no CSV.
 //
 // The bench ramps live sandboxes through ascending plateaus and records per
 // level: spawn/ready latency, a canary (one more full network+jail+tool
