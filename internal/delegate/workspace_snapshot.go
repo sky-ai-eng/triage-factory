@@ -1282,7 +1282,9 @@ type freshWorkspaceBuilder func(ctx context.Context) (string, error)
 //
 //   - warm — the parked worktree survived on disk (the dormancy guards kept
 //     it). Nothing is rebuilt; only the remotes of a checkout whose repository
-//     was renamed since are repointed (repointRenamedRemotes).
+//     was renamed since are repointed: here, when this process can still write
+//     the tree (repointRenamedRemotes), and otherwise by the engagement from
+//     inside its jail before the loop starts (repointRenamedRemotesInJail).
 //   - rehydrated — it is gone (host loss, /tmp wipe, a startup sweep) but the
 //     durable snapshot is there, so the tree is rebuilt from it, every checkout
 //     it carries through restorer. A blob of an older layout is no snapshot:
