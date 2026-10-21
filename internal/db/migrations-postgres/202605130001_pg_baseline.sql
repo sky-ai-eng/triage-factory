@@ -5822,29 +5822,33 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.model_availability TO tf_ap
 
 
 -- placement_overrides: human intent that wins over the computed
--- capacity-weighted rendezvous order for one placement key — a manual pin or a
+-- capacity-weighted rendezvous order for one repository — a manual pin or a
 -- hot-key replica count, nothing else (drain lives on the instances row).
--- Checked before the hash and expected to stay nearly empty. key_kind is
--- 'repo', key_value "owner/repo", and host the GitHub host (domain.GitHubHost)
--- that repository lives on: a slug names a repository only within one host,
--- so a pin is one host's and a rename moves only that host's pins. org_id is
--- plain text, matching the rendezvous key's own org fold. A pin wins when both
--- intents are set. Neither is FK-validated — a pin to a retired instance
+-- Checked before the hash and expected to stay nearly empty. A row is one
+-- repository's, referenced by its registry row (repository_id): the rendezvous
+-- key it overrides is the same row id, so a rename, which moves the row's name
+-- and not its id, leaves both where they are, and a repository created under a
+-- freed name has a row, a key and overrides of its own. The foreign key pins
+-- the org, and ON DELETE CASCADE drops a deleted row's override; the one
+-- delete a repository row sees, a rename absorbing a bare row minted under its
+-- new name, moves that row's override first. A pin wins when both intents are
+-- set. The pinned instance is not FK-validated — a pin to a retired instance
 -- self-heals via the claim's aging tier. Admin-pool-only system table, same
 -- posture as instances: RLS with NO policy plus REVOKE ALL, org_id bound by
 -- argument.
 CREATE TABLE public.placement_overrides (
-    org_id             text NOT NULL,
-    key_kind           text NOT NULL,
-    host               text NOT NULL,
-    key_value          text NOT NULL,
+    org_id             uuid NOT NULL,
+    repository_id      uuid NOT NULL,
     pinned_instance_id text,
     replicas           integer NOT NULL DEFAULT 0,
     updated_at         timestamp with time zone NOT NULL DEFAULT now()
 );
 
 ALTER TABLE ONLY public.placement_overrides
-    ADD CONSTRAINT placement_overrides_pkey PRIMARY KEY (org_id, key_kind, host, key_value);
+    ADD CONSTRAINT placement_overrides_pkey PRIMARY KEY (org_id, repository_id);
+
+ALTER TABLE ONLY public.placement_overrides
+    ADD CONSTRAINT placement_overrides_repository_id_fkey FOREIGN KEY (repository_id, org_id) REFERENCES public.repositories(id, org_id) ON DELETE CASCADE;
 
 ALTER TABLE public.placement_overrides ENABLE ROW LEVEL SECURITY;
 

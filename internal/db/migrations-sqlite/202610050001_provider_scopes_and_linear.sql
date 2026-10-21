@@ -8,10 +8,12 @@
 -- issue entity is written with its issue id, pull request, review and branch
 -- artifacts are keyed on ids rather than their repository's name, every
 -- artifact references the entity it is about and Jira artifacts keyed on an
--- issue key are keyed on the issue's id, Linear
--- becomes a tracked source, and five smaller changes ride along: the org GitHub App's unusable state, the claim's source
--- manifest, the retirement of the 'completed' conversation status, node ids on
--- artifacts and audit-ledger rows, and the table of rate-limit readings.
+-- issue key are keyed on the issue's id, a placement override references its
+-- repository's registry row rather than its name, Linear becomes a tracked
+-- source, and five smaller changes ride along: the org GitHub App's unusable
+-- state, the claim's source manifest, the retirement of the 'completed'
+-- conversation status, node ids on artifacts and audit-ledger rows, and the
+-- table of rate-limit readings.
 --
 -- NO TRANSACTION because rebuilding a table other tables reference needs
 -- foreign keys off, and PRAGMA foreign_keys is a no-op inside a transaction:
@@ -295,10 +297,10 @@ CREATE UNIQUE INDEX org_linear_installs_workspace_live
 --   reachable_repositories,       host on every row
 --     reachable_scopes
 --   artifacts, external_actions   scope joins the dedup key
---   placement_overrides           host joins the primary key
 --
 -- team_github_repos and conversation_worktrees reference a repository by row
--- id, so they take the scope from the row and get no column.
+-- id, so they take the scope from the row and get no column, and so does
+-- placement_overrides once 3g moves each pin onto its repository's row.
 --
 -- A host or site is compared by exact string wherever it is a key, so every
 -- one is also stored in one spelling: the ghbase.CanonicalBaseURL form, which
@@ -929,28 +931,45 @@ CREATE INDEX idx_artifacts_external_id ON artifacts (org_id, scope, kind, extern
 CREATE INDEX idx_external_actions_org_action_occurred ON external_actions (org_id, action, occurred_at);
 
 -- ---------------------------------------------------------------------------
--- 3g. placement_overrides.host
+-- 3g. placement_overrides: keyed by the repository's registry row
 -- ---------------------------------------------------------------------------
 --
--- A repo pin is keyed on its owner/repo, which is unique only within one GitHub
--- host; repo is the only key kind TF writes, so every pin takes the org's
--- GitHub host. Rebuilt because host joins the primary key.
+-- A pin or replica count is one repository's, and the rendezvous key it
+-- overrides is the repository's registry row id, so the row references the
+-- repository by that id (domain.PlacementOverride.RepositoryID): a rename
+-- moves the registry row's name and leaves the override where it is, and a
+-- repository created under a freed name gets overrides of its own. The
+-- override of a row deleted because a rename absorbed it is moved onto the
+-- renamed row first; ON DELETE CASCADE drops whatever is left.
+--
+-- Each existing pin named its repository by owner/repo on the org's GitHub
+-- host, and repo is the only key kind TF writes. It moves onto the live
+-- registry row that answers to that name there, compared
+-- case-insensitively; of two pins that answer to one row, the most recently
+-- updated is kept. A pin no row answers to is dropped, as is a pin of any
+-- other kind: nothing resolves a repository for it, and nothing reads it,
+-- since placement is off in local mode (the hash always returns this
+-- process) and a pin here changes no run's placement.
 CREATE TABLE placement_overrides_new (
     org_id             TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
-    key_kind           TEXT NOT NULL,
-    host               TEXT NOT NULL,
-    key_value          TEXT NOT NULL,
+    repository_id      TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
     pinned_instance_id TEXT,
     replicas           INTEGER NOT NULL DEFAULT 0,
     updated_at         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (org_id, key_kind, host, key_value)
+    PRIMARY KEY (org_id, repository_id)
 );
 
-INSERT INTO placement_overrides_new
-    (org_id, key_kind, host, key_value, pinned_instance_id, replicas, updated_at)
-SELECT p.org_id, p.key_kind, s.scope, p.key_value, p.pinned_instance_id, p.replicas, p.updated_at
+INSERT OR IGNORE INTO placement_overrides_new
+    (org_id, repository_id, pinned_instance_id, replicas, updated_at)
+SELECT p.org_id, r.id, p.pinned_instance_id, p.replicas, p.updated_at
   FROM placement_overrides p
-  JOIN org_scope s ON s.org_id = p.org_id AND s.provider = 'github';
+  JOIN org_scope s ON s.org_id = p.org_id AND s.provider = 'github'
+  JOIN repositories r
+    ON r.org_id = p.org_id AND r.source = 'github' AND r.host = s.scope
+   AND LOWER(r.owner || '/' || r.repo) = LOWER(p.key_value)
+   AND r.retired_at IS NULL
+ WHERE p.key_kind = 'repo'
+ ORDER BY p.updated_at DESC, p.key_value;
 
 DROP TABLE placement_overrides;
 ALTER TABLE placement_overrides_new RENAME TO placement_overrides;

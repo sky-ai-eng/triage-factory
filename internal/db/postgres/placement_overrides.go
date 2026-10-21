@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -35,23 +36,25 @@ var _ db.PlacementOverrideStore = (*placementOverrideStore)(nil)
 // reads SELECT it and Upsert RETURNs it, so the write shape cannot drift from
 // the read shape. COALESCE keeps a NULL pin scanning as the empty string the
 // domain type carries.
-const pgPlacementOverrideColumns = `org_id, key_kind, host, key_value, COALESCE(pinned_instance_id, ''), replicas, updated_at`
+const pgPlacementOverrideColumns = `org_id::text, repository_id::text, COALESCE(pinned_instance_id, ''), replicas, updated_at`
 
 func scanPlacementOverride(scan func(...any) error) (domain.PlacementOverride, error) {
 	var ov domain.PlacementOverride
-	err := scan(&ov.OrgID, &ov.KeyKind, &ov.Host, &ov.KeyValue, &ov.PinnedInstanceID, &ov.Replicas, &ov.UpdatedAt)
+	err := scan(&ov.OrgID, &ov.RepositoryID, &ov.PinnedInstanceID, &ov.Replicas, &ov.UpdatedAt)
 	return ov, err
 }
 
-func (s *placementOverrideStore) Get(ctx context.Context, orgID, keyKind, host, keyValue string) (*domain.PlacementOverride, error) {
-	if err := db.RequireRepoHost(host); err != nil {
-		return nil, err
+// Get answers a non-uuid org or repository id with no override, the read
+// convention in uuid.go: no row can carry one.
+func (s *placementOverrideStore) Get(ctx context.Context, orgID, repositoryID string) (*domain.PlacementOverride, error) {
+	if !isValidUUID(orgID) || !isValidUUID(repositoryID) {
+		return nil, nil
 	}
 	ov, err := scanPlacementOverride(s.admin.QueryRowContext(ctx, `
 		SELECT `+pgPlacementOverrideColumns+`
 		FROM placement_overrides
-		WHERE org_id = $1 AND key_kind = $2 AND host = $3 AND key_value = $4
-	`, orgID, keyKind, host, keyValue).Scan)
+		WHERE org_id = $1 AND repository_id = $2
+	`, orgID, repositoryID).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -61,12 +64,19 @@ func (s *placementOverrideStore) Get(ctx context.Context, orgID, keyKind, host, 
 	return &ov, nil
 }
 
+// List orders by the repository's name, which the override does not store:
+// the join reads it off the registry row for the ORDER BY alone, so the rows
+// keep Get's projection.
 func (s *placementOverrideStore) List(ctx context.Context, orgID string) ([]domain.PlacementOverride, error) {
+	if !isValidUUID(orgID) {
+		return nil, nil
+	}
 	rows, err := s.admin.QueryContext(ctx, `
-		SELECT `+pgPlacementOverrideColumns+`
-		FROM placement_overrides
-		WHERE org_id = $1
-		ORDER BY key_kind, host, key_value
+		SELECT `+qualifiedPlacementOverrideColumns+`
+		FROM placement_overrides p
+		JOIN repositories r ON r.id = p.repository_id AND r.org_id = p.org_id
+		WHERE p.org_id = $1
+		ORDER BY r.host, lower(r.owner), lower(r.repo), p.repository_id
 	`, orgID)
 	if err != nil {
 		return nil, wrapAdminPoolPermErr(err, "placement_overrides.List")
@@ -83,32 +93,41 @@ func (s *placementOverrideStore) List(ctx context.Context, orgID string) ([]doma
 	return out, rows.Err()
 }
 
+// qualifiedPlacementOverrideColumns is pgPlacementOverrideColumns qualified by
+// List's alias, where repositories shares the org_id and updated_at names.
+const qualifiedPlacementOverrideColumns = `p.org_id::text, p.repository_id::text, COALESCE(p.pinned_instance_id, ''), p.replicas, p.updated_at`
+
+// Upsert maps a repository id no registry row in the org carries — not a
+// uuid, or refused by the foreign key — to db.ErrNoSuchRepository.
 func (s *placementOverrideStore) Upsert(ctx context.Context, ov domain.PlacementOverride) (domain.PlacementOverride, error) {
-	if err := db.RequireRepoHost(ov.Host); err != nil {
+	if err := validRepoID(ov.RepositoryID); err != nil {
 		return domain.PlacementOverride{}, err
 	}
 	stored, err := scanPlacementOverride(s.admin.QueryRowContext(ctx, `
-		INSERT INTO placement_overrides (org_id, key_kind, host, key_value, pinned_instance_id, replicas, updated_at)
-		VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, now())
-		ON CONFLICT (org_id, key_kind, host, key_value) DO UPDATE SET
+		INSERT INTO placement_overrides (org_id, repository_id, pinned_instance_id, replicas, updated_at)
+		VALUES ($1, $2, NULLIF($3, ''), $4, now())
+		ON CONFLICT (org_id, repository_id) DO UPDATE SET
 			pinned_instance_id = EXCLUDED.pinned_instance_id,
 			replicas           = EXCLUDED.replicas,
 			updated_at         = now()
 		RETURNING `+pgPlacementOverrideColumns,
-		ov.OrgID, ov.KeyKind, ov.Host, ov.KeyValue, ov.PinnedInstanceID, ov.Replicas).Scan)
+		ov.OrgID, ov.RepositoryID, ov.PinnedInstanceID, ov.Replicas).Scan)
+	if isForeignKeyViolation(err) {
+		return domain.PlacementOverride{}, fmt.Errorf("%w: %s", db.ErrNoSuchRepository, ov.RepositoryID)
+	}
 	if err != nil {
 		return domain.PlacementOverride{}, wrapAdminPoolPermErr(err, "placement_overrides.Upsert")
 	}
 	return stored, nil
 }
 
-func (s *placementOverrideStore) Delete(ctx context.Context, orgID, keyKind, host, keyValue string) (bool, error) {
-	if err := db.RequireRepoHost(host); err != nil {
-		return false, err
+func (s *placementOverrideStore) Delete(ctx context.Context, orgID, repositoryID string) (bool, error) {
+	if !isValidUUID(orgID) || !isValidUUID(repositoryID) {
+		return false, nil
 	}
 	res, err := s.admin.ExecContext(ctx, `
-		DELETE FROM placement_overrides WHERE org_id = $1 AND key_kind = $2 AND host = $3 AND key_value = $4
-	`, orgID, keyKind, host, keyValue)
+		DELETE FROM placement_overrides WHERE org_id = $1 AND repository_id = $2
+	`, orgID, repositoryID)
 	if err != nil {
 		return false, wrapAdminPoolPermErr(err, "placement_overrides.Delete")
 	}

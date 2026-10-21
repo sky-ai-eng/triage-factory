@@ -14,11 +14,11 @@ import (
 // nil resolver reads cleanly as "placement off".
 type placementResolver interface {
 	Enabled() bool
-	Resolve(ctx context.Context, orgID, keyKind, host, keyValue string) (placement.Plan, error)
+	Resolve(ctx context.Context, orgID, repositoryID string) (placement.Plan, error)
 }
 
 // SetPlacement wires the placement affinity layer: the resolver
-// that computes the (org, repo) rendezvous stamp at enqueue, and the claim
+// that computes the (org, repository) rendezvous stamp at enqueue, and the claim
 // config the dispatcher passes to ClaimNextConversation. Called once at startup
 // (internal/app) before RunDispatcher starts. A nil resolver or a disabled
 // claim leaves the whole layer off — enqueue stamps nothing and the claim
@@ -40,12 +40,13 @@ func (s *Spawner) claimPlacement() db.ClaimPlacement {
 }
 
 // preferredExecutorFor computes the placement stamp for a run about to be
-// enqueued: the rendezvous winner for the run's (org, repo) key, spread
+// enqueued: the rendezvous winner for the run's (org, repository) key, spread
 // across the top-K when a hot-key replica override is in effect. The
-// repository is the task's registry row (taskRepository), and the override
-// that applies is the one on that row's GitHub host, since a slug names a
-// repository only within one host. Empty (no affinity) whenever placement is
-// off, the task has no GitHub repository (Jira/Slack tasks), its repository
+// repository is the task's registry row (taskRepository), and both the key
+// and the override that applies are that row's id, the id its bare-clone
+// cache is keyed by, so a rename leaves the run where its cache is. Empty (no
+// affinity) whenever placement is off, the task has no GitHub repository
+// (Jira/Slack tasks), its repository
 // cannot be read, or the placement read fails — a failed or absent stamp only
 // costs a cold clone, never a claim, so this never blocks minting work.
 // conversationID is the id of the row being enqueued; it selects which
@@ -66,10 +67,10 @@ func (s *Spawner) preferredExecutorFor(ctx context.Context, orgID string, task d
 	if repo == nil {
 		return ""
 	}
-	plan, err := resolver.Resolve(ctx, orgID, domain.PlacementKindRepo, repo.Host, repo.Slug())
+	plan, err := resolver.Resolve(ctx, orgID, repo.ID)
 	if err != nil {
 		delegateLog.Warn("placement resolve failed; enqueuing with no affinity",
-			"org", orgID, "repo", repo.Slug(), "error", err)
+			"org", orgID, "repository", repo.ID, "repo", repo.Slug(), "error", err)
 		return ""
 	}
 	return plan.PreferredForConversation(conversationID)
