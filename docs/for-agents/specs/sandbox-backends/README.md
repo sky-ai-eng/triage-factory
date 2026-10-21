@@ -123,7 +123,7 @@ A backend owns only what differs between isolation technologies:
 | --- | --- | --- |
 | Starting and destroying the jail, and reaping orphans at boot | `runsc` at the jail uid, through the cap-broker | the VMM under `jailer` at the jail uid, through the cap-broker, with a tap device in the cell's netns for the guest's network card; orphans found by their jailer directories |
 | Putting the run tree in front of the jail | `ChownRunTree` / `ParkRunTree` hand-off of a host directory | a disk image built from the host tree at launch, copied back out at `Stop`, with host writes pushed in between (§12.3) |
-| Delivering TF's inputs (binaries, trust file, skills, memory) | bind mounts | read-only disk images built at launch |
+| Delivering TF's inputs (binaries, CA bundle, skills, memory, the jail's environment) | bind mounts and the OCI spec | the binaries in read-only disk images; the per-engagement inputs sent over vsock at the start of every engagement, after a cold boot or a restore, and written to tmpfs (§8, §12.4) |
 | Starting the tool host and returning a connection to it | runsc with a bind-mounted unix socket the in-jail host dials | the guest's init starts the tool host, which dials the executor over vsock; the exec verbs use a second vsock port to the sidecar |
 | Freezing and thawing the jail | `runsc pause` / `resume` | the VMM's pause and resume |
 | Keeping a parked jail's memory | not supported | a Firecracker snapshot on the executor's disk (§8) |
@@ -204,8 +204,11 @@ jail: the run tree at `/work`, TF's binaries at the fixed destinations in
 (`agentproc.caBundleEnv`) pointing at it, staged skills and memory at
 `sandbox.TrustedSkillsDestination` / `TrustedMemoryDestination`. `LaunchSpec`
 names the inputs by their host source; the backend decides how they arrive.
-Firecracker has no shared-filesystem device, so its backend attaches them as
-read-only disk images mounted at the same paths (§12.3).
+Firecracker has no shared-filesystem device, so its backend attaches TF's
+binaries as read-only disk images mounted at the same paths (§12.3), and
+writes the inputs minted per engagement (the CA bundle, skills, memory) to
+tmpfs at those paths at the start of every engagement, because a restored
+guest would otherwise keep the parked engagement's (§8).
 
 ## 5. Invariants every backend holds
 
@@ -289,7 +292,9 @@ conditions:
    after the system roots in the run's CA bundle (`/run/tf-ca-bundle.crt`),
    never substituted for them. The sidecar writes that bundle for every run,
    whatever channels the run has, outside the run tree and fresh at every
-   engagement, so a resumed run trusts a fresh CA. The CA is valid for a
+   engagement, so a resumed run trusts a fresh CA; a Firecracker guest
+   restored from a snapshot is sent the new one before its first tool call
+   (§8). The CA is valid for a
    week, and an engagement that outlives it gets certificate errors rather
    than a fallback. The length is not what limits it: its key dies with the
    sidecar and the next engagement mints another, so it is trusted for one
@@ -492,14 +497,45 @@ deleted otherwise:
   arise. A warm pool booted from one base snapshot would raise it, and none is
   planned.
 
-A restore starts the VMM under a fresh `jailer` directory holding the same
-images and snapshot files, and the guest resumes where it stopped, with two
-exceptions the backend handles. Firecracker resets every vsock connection on
-restore, so the tool host redials and the executor accepts on the new
-directory's socket. And the guest's clock did not move while the VM was down,
-so the init steps it from the host before the next tool call; otherwise TLS
-validity checks, git timestamps and token expiry in the guest are off by the
-downtime.
+A restore is a new engagement, and the guest is brought up to date as one.
+The broker starts the VMM under a fresh `jailer` directory holding the same
+images and snapshot files, and the guest resumes where it stopped, but in a
+new cell: a new sidecar, possibly another subnet, and fresh values for
+everything TF mints per engagement. Those are the sidecar's addresses and
+per-run tokens in the jail's environment, the CA bundle with the new
+engagement's interception CA (§6.1), and the inputs staged at launch. A
+guest left with the parked engagement's values could not reach its sidecar or
+verify a registry, even from a process started after the restore, because the
+tool host hands its environment to every process it starts. So before the
+first tool call the executor sends the engagement's inputs over vsock, as it
+does after a cold boot, and the init applies them:
+
+- it addresses the network card for the new cell;
+- it steps the clock from the host, which did not move while the VM was down,
+  so TLS validity checks, git timestamps and token expiry in the guest are
+  not off by the downtime;
+- it writes the CA bundle, skills and memory to tmpfs at their §4.1 paths,
+  and takes anything TF re-staged into the host run tree at the claim the
+  way §12.3 pushes a checkout;
+- it restarts the exec-verb relay and the tool host, the tool host with the
+  new environment. Firecracker resets every vsock connection on restore, so
+  both reconnect anyway, and the tool host keeps no state between calls; the
+  executor accepts on the new directory's socket.
+
+Processes the agent started before the park keep running with the parked
+engagement's values. One that reaches the network fails loudly, with a
+refused connection, a proxy-authentication failure or a certificate error,
+and one that does not, such as a database or a server the agent talks to on
+localhost, carries on: that state is what a warm resume exists to keep.
+Making the values stable across engagements instead would mean keeping the
+CA's key and the proxies' per-run tokens past the engagement they were minted
+for, which §6.1 forbids for the key and the proxies' trust model
+(`internal/egressproxy`) forbids for the tokens. The agent is told by an
+injected notice of its own, beside `injection:executor-changed`: the
+processes it started before the pause are still running, and any that reach
+the network have to be restarted before they work. Like every such notice it
+is an injection into the conversation, never a change to `<run_context>`
+(§7).
 
 Snapshots stay on the executor's disk, owned by the broker, and are never
 uploaded. They hold what the guest held: the run's code and its placeholders,
@@ -549,7 +585,11 @@ The cases, one per invariant except 8:
 Invariant 8 stays covered by `internal/sandbox`'s own integration tests for
 now: a memory case needs a host that grants a private cgroup namespace, and
 none of the hosts the suite has run on did. When §7 lands, the suite gains a
-case per capability, run on the backends that declare it.
+case per capability, run on the backends that declare it. The
+`memory_checkpoint` case parks a jail, restores it into a new cell, and runs
+`TrustVariablesNameTheRunsBundle` and `OnlyTheSidecarIsReachable` against
+the new engagement, so a restore that kept the parked engagement's inputs
+fails it.
 
 Two cases hold a VM backend to the hard parts of its design: `RunTreeAtWork`
 reads the jail's write back after `Stop`, which fails unless `Stop` copies the
@@ -661,7 +701,7 @@ version and checksum.
 | `Provision` | `RunNetwork` as on gVisor (netns, veth, gateway rules, IPv6 off), plus a tap device in the netns bridged to the veth's inner end, so the guest's network card carries the jail IP. The broker launches the sidecar at its uid as today | Does the bridge pass the network conformance cases with the host rules unchanged? **Yes.** With `SetupRunNetwork` and `AdmitJailPorts` unchanged, the guest reaches only its admitted sidecar port, before and after it changes its own address and MAC as root, IPv6 included |
 | `ProxyHost` | The veth's host-side IP | — |
 | `HandOffRunTree` | Builds the run-tree image from the host tree (§12.3) | Cost on a large tree: **1.5 s** for `mkfs.ext4 -d` at the jail uid on 48,744 entries and 469 MB, 0.13 s on a fresh checkout, with owners, modes, symlinks and hard links kept |
-| `Launch` | The broker runs `jailer`, which chroots the VMM, gives it private mount and pid namespaces, joins it to the cell's netns, puts it in a cgroup and drops it to the jail uid and gid. The VM's configuration comes from a fixed template, as the OCI spec does on gVisor: the guest kernel, the read-only rootfs image, the read-only input images, the run-tree image, one network card on the tap, one vsock device, memory and vCPUs from the profile's class, and Firecracker's metadata service off | Bring-up latency against gVisor's: **the same.** `jailer` exec to the tool host's first answer p50 154 ms, p95 181 ms; with the cell built first, as gVisor's spawn counts it, p50 282 ms against gVisor's ~171–292 ms |
+| `Launch` | The broker runs `jailer`, which chroots the VMM, gives it private mount and pid namespaces, joins it to the cell's netns, puts it in a cgroup and drops it to the jail uid and gid. The VM's configuration comes from a fixed template, as the OCI spec does on gVisor: the guest kernel, the read-only rootfs image, the read-only image of TF's binaries, the run-tree image, one network card on the tap, one vsock device, memory and vCPUs from the profile's class, and Firecracker's metadata service off | Bring-up latency against gVisor's: **the same.** `jailer` exec to the tool host's first answer p50 154 ms, p95 181 ms; with the cell built first, as gVisor's spawn counts it, p50 282 ms against gVisor's ~171–292 ms |
 | `Connect` | The tool host dials the host over vsock. Firecracker hands a guest's connection to port N to the unix socket `<vsock path>_N`, on which the executor listens inside the jailer directory | Round trip per tool call against the unix socket: **0.04 ms p50, 0.06 ms p95** for a no-op call, the same as a unix socket on the host |
 | Exec verbs (`/run/tf.sock`) | A relay in the guest listens on `/run/tf.sock` and dials a second vsock port, whose host socket is the sidecar's agenthost socket | — |
 | `Freeze` / `Thaw` | `Freeze` asks the init to freeze `/work`, then pauses the VMM over its API socket, which only the broker uses; `Thaw` resumes the VMM, then unfreezes `/work`. If the init does not confirm, the VMM is paused anyway, so every process is still held still, and a capture reads what the guest last flushed; only that run's capture is affected | Measured: freezing `/work` takes 51–57 ms and the pause about 1 ms; a tool call sent while paused waits and is answered after `Thaw` |
@@ -739,13 +779,15 @@ points:
   scratch disk image for the runtime's images and volumes instead, since on
   tmpfs they would count against guest memory; it is discarded at `Stop` the
   same way (§8).
-- **Init.** A small TF-owned PID 1. It mounts the images at the §4.1 paths,
-  configures the network card from the kernel command line, sets a hostname
-  that `/etc/hosts` resolves, starts the exec-verb relay, starts the tool host
-  at the agent's uid and restarts its connection when vsock resets, freezes
-  `/work` on request, steps the clock from the host after a restore (§8), and
-  reports out-of-memory kills. Nothing else runs in the guest unless the agent
-  starts it. The hostname matters because a cell has no reachable resolver:
+- **Init.** A small TF-owned PID 1. It mounts the images at the §4.1 paths
+  and sets a hostname that `/etc/hosts` resolves. At the start of every
+  engagement, after a cold boot or a restore, it takes the engagement's inputs
+  from the executor over vsock: it addresses the network card, writes the CA
+  bundle, skills and memory to tmpfs at their §4.1 paths, and starts the
+  exec-verb relay and the tool host at the agent's uid with the engagement's
+  environment, restarting both after a restore (§8). It also steps the clock
+  after a restore, freezes `/work` on request, and reports out-of-memory
+  kills. Nothing else runs in the guest unless the agent starts it. The hostname matters because a cell has no reachable resolver:
   musl waits out its whole 5 s timeout on a name it cannot resolve locally,
   and git looks up the hostname to build a default identity.
 - **Root.** When the profile requires `root` (§7), the tool host runs as uid
