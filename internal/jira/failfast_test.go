@@ -31,21 +31,21 @@ func TestFailFastScope_StopsRetryingAHostThatFailed(t *testing.T) {
 	c := testClient(srv.URL)
 	ctx := upstream.WithFailFast(context.Background())
 
-	if _, err := c.get(ctx, srv.URL+"/rest/api/2/myself"); err == nil {
+	if _, err := c.get(ctx, at(srv.URL+"/rest/api/2/myself")); err == nil {
 		t.Fatal("a 503 answered")
 	}
 	if got := served.Load(); got != 1+maxRateLimitRetries {
 		t.Fatalf("the first request made %d attempts, want the full ladder of %d", got, 1+maxRateLimitRetries)
 	}
 	for range 3 {
-		_, _ = c.get(ctx, srv.URL+"/rest/api/2/myself")
+		_, _ = c.get(ctx, at(srv.URL+"/rest/api/2/myself"))
 	}
 	if got := served.Load() - (1 + maxRateLimitRetries); got != 3 {
 		t.Errorf("three later requests made %d attempts, want one each", got)
 	}
 
 	before := served.Load()
-	_, _ = c.get(context.Background(), srv.URL+"/rest/api/2/myself")
+	_, _ = c.get(context.Background(), at(srv.URL+"/rest/api/2/myself"))
 	if got := served.Load() - before; got != 1+maxRateLimitRetries {
 		t.Errorf("a request outside the scope made %d attempts, want %d", got, 1+maxRateLimitRetries)
 	}
@@ -66,7 +66,7 @@ func TestFailFastScope_TruncatedBodyMarksUnreachable(t *testing.T) {
 	c := testClient(srv.URL)
 	ctx := upstream.WithFailFast(context.Background())
 
-	if err := c.put(ctx, srv.URL+"/rest/api/2/issue/SKY-1", map[string]string{"k": "v"}); err == nil {
+	if err := c.put(ctx, at(srv.URL+"/rest/api/2/issue/SKY-1"), map[string]string{"k": "v"}); err == nil {
 		t.Fatal("a truncated response answered")
 	}
 	u, _ := url.Parse(srv.URL)
@@ -74,7 +74,7 @@ func TestFailFastScope_TruncatedBodyMarksUnreachable(t *testing.T) {
 		t.Fatal("a truncated response did not mark the host unreachable")
 	}
 	before := served.Load()
-	if _, err := c.get(ctx, srv.URL+"/rest/api/2/myself"); err == nil {
+	if _, err := c.get(ctx, at(srv.URL+"/rest/api/2/myself")); err == nil {
 		t.Fatal("a truncated response answered")
 	}
 	if got := served.Load() - before; got != 1 {
@@ -82,7 +82,7 @@ func TestFailFastScope_TruncatedBodyMarksUnreachable(t *testing.T) {
 	}
 
 	before = served.Load()
-	_, _ = c.get(context.Background(), srv.URL+"/rest/api/2/myself")
+	_, _ = c.get(context.Background(), at(srv.URL+"/rest/api/2/myself"))
 	if got := served.Load() - before; got != 1+maxRateLimitRetries {
 		t.Errorf("a GET outside the scope made %d attempts, want %d", got, 1+maxRateLimitRetries)
 	}
@@ -104,7 +104,7 @@ func TestFailFastScope_NoRetryAfterWait(t *testing.T) {
 	upstream.MarkUnreachable(ctx, u.Host)
 
 	start := time.Now()
-	if _, err := testClient(srv.URL).get(ctx, srv.URL+"/rest/api/2/myself"); err == nil {
+	if _, err := testClient(srv.URL).get(ctx, at(srv.URL+"/rest/api/2/myself")); err == nil {
 		t.Fatal("a 429 answered")
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
@@ -175,13 +175,13 @@ func TestFailFastScope_StopsSendingToAHostThatTimedOutTwice(t *testing.T) {
 	c.http = &http.Client{Timeout: timeout, Transport: rt}
 	ctx := upstream.WithFailFast(context.Background())
 
-	if _, err := c.get(ctx, base+"/rest/api/2/myself"); err == nil {
+	if _, err := c.get(ctx, at(base+"/rest/api/2/myself")); err == nil {
 		t.Fatal("a host that never answers answered")
 	}
 	if got := rt.n.Load(); got != 1 {
 		t.Fatalf("the request that timed out made %d attempts, want 1", got)
 	}
-	if _, err := c.get(ctx, base+"/rest/api/2/serverInfo"); err == nil {
+	if _, err := c.get(ctx, at(base+"/rest/api/2/serverInfo")); err == nil {
 		t.Fatal("a host that never answers answered")
 	}
 	if got := rt.n.Load(); got != 2 {
@@ -190,7 +190,7 @@ func TestFailFastScope_StopsSendingToAHostThatTimedOutTwice(t *testing.T) {
 
 	start := time.Now()
 	for range 3 {
-		_, err := c.get(ctx, base+"/rest/api/2/search")
+		_, err := c.get(ctx, at(base+"/rest/api/2/search"))
 		if class, ok := upstream.ClassOf(err); !ok || class != upstream.Transient {
 			t.Errorf("a request not sent to a silent host returned %v (class %q), want a transient failure", err, class)
 		}
@@ -203,7 +203,7 @@ func TestFailFastScope_StopsSendingToAHostThatTimedOutTwice(t *testing.T) {
 	}
 
 	before := rt.n.Load()
-	_, _ = c.get(context.Background(), base+"/rest/api/2/myself")
+	_, _ = c.get(context.Background(), at(base+"/rest/api/2/myself"))
 	if got := rt.n.Load() - before; got != 1 {
 		t.Errorf("a request outside the scope made %d attempts, want 1", got)
 	}
@@ -229,12 +229,12 @@ func TestFailFastScope_OneSlowRequestDoesNotStopTheRest(t *testing.T) {
 	c.http = &http.Client{Timeout: timeout, Transport: rt}
 	ctx := upstream.WithFailFast(context.Background())
 
-	if _, err := c.get(ctx, srv.URL+"/rest/api/2/search"); err == nil {
+	if _, err := c.get(ctx, at(srv.URL+"/rest/api/2/search")); err == nil {
 		t.Fatal("the heavy search answered inside the timeout")
 	}
 	before := rt.n.Load()
 	for range 3 {
-		if _, err := c.get(ctx, srv.URL+"/rest/api/2/myself"); err != nil {
+		if _, err := c.get(ctx, at(srv.URL+"/rest/api/2/myself")); err != nil {
 			t.Errorf("a request after one slow search failed: %v", err)
 		}
 	}

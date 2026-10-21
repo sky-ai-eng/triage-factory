@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -398,10 +399,33 @@ func (c *Client) WithCredential(method AuthMethod) *Client {
 	return c
 }
 
+// endpoint is a request's URL and the template of its path: the path under
+// /rest/api/{version}/, without its query string, with each identifier as {}
+// (issue/{}/transitions). Jira Cloud sets its burst allowance per endpoint, so
+// a reading of it is recorded under the template (recordCloud), never the
+// path, whose issue and project keys would multiply the metric's series and
+// name customer data in a label.
+type endpoint struct {
+	url      string
+	template string
+}
+
 // apiURL builds a versioned REST URL for this client's backend, e.g.
-// c.apiURL("issue/%s", key) → {BaseURL}/rest/api/{version}/issue/{key}.
-func (c *Client) apiURL(format string, args ...any) string {
-	return c.cfg.apiURL(format, args...)
+// c.apiURL("issue/%s", key) → {BaseURL}/rest/api/{version}/issue/{key}, with
+// the template the format string gives (pathTemplate).
+func (c *Client) apiURL(format string, args ...any) endpoint {
+	return endpoint{url: c.cfg.apiURL(format, args...), template: pathTemplate(format)}
+}
+
+// formatVerb matches a verb in an apiURL format string.
+var formatVerb = regexp.MustCompile(`%[a-z]`)
+
+// pathTemplate is an apiURL format string's path template: the format
+// without its query string, each verb replaced by {}. It is built from the
+// format alone, so no argument reaches it.
+func pathTemplate(format string) string {
+	path, _, _ := strings.Cut(format, "?")
+	return formatVerb.ReplaceAllString(path, "{}")
 }
 
 // Status represents a Jira workflow status.
@@ -741,7 +765,7 @@ func (c *Client) listProjectsCloud(ctx context.Context, query string, startAt, m
 	if q := strings.TrimSpace(query); q != "" {
 		params.Set("query", q)
 	}
-	body, err := c.get(ctx, c.apiURL("project/search")+"?"+params.Encode())
+	body, err := c.get(ctx, c.apiURL("project/search?%s", params.Encode()))
 	if err != nil {
 		return ProjectPage{}, err
 	}
@@ -1038,7 +1062,7 @@ func (c *Client) searchPaged(ctx context.Context, jql string, maxResults int, fe
 // searchCloud runs the JQL through the enhanced endpoint, walking
 // nextPageToken until the caller's cap is met.
 func (c *Client) searchCloud(ctx context.Context, jql string, fields []string, maxResults int) ([]Issue, error) {
-	url := c.cfg.cloudSearchURL()
+	url := endpoint{url: c.cfg.cloudSearchURL(), template: "search/jql"}
 	var token string
 	return c.searchPaged(ctx, jql, maxResults, func(collected int) ([]Issue, bool, error) {
 		payload := map[string]any{
@@ -1465,7 +1489,7 @@ func (c *Client) doTransition(ctx context.Context, idOrKey, transitionID string)
 	return c.post(ctx, url, payload)
 }
 
-// doRequest issues method+url (with an optional JSON body) and returns the
+// doRequest issues method to ep (with an optional JSON body) and returns the
 // final response's status and body after any retries. It is the shared core
 // behind get/put/postJSON/post, each of which turns a failure status into a
 // *StatusError. A success body is read whole; an error body is read capped at
@@ -1493,13 +1517,13 @@ func (c *Client) doTransition(ctx context.Context, idOrKey, transitionID string)
 // that host gets one attempt, with no retry and no wait. A request that timed
 // out counts toward its host's silence, and a later request to a silent host
 // is not sent (upstream.Silent).
-func (c *Client) doRequest(ctx context.Context, method, url string, body []byte, idempotent bool) (int, []byte, error) {
+func (c *Client) doRequest(ctx context.Context, method string, ep endpoint, body []byte, idempotent bool) (int, []byte, error) {
 	for attempt := 1; ; attempt++ {
 		var reader io.Reader
 		if body != nil {
 			reader = bytes.NewReader(body)
 		}
-		req, err := http.NewRequestWithContext(ctx, method, url, reader)
+		req, err := http.NewRequestWithContext(ctx, method, ep.url, reader)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -1530,7 +1554,7 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 			continue
 		}
 		upstream.MarkAnswered(ctx, host)
-		c.recordBudgets(resp.StatusCode, resp.Header, time.Now())
+		c.recordBudgets(ep.template, resp.StatusCode, resp.Header, time.Now())
 
 		var data []byte
 		var rerr error
@@ -1657,28 +1681,28 @@ func IsNotFound(err error) bool {
 	return errors.As(err, &se) && se.Status == http.StatusNotFound
 }
 
-func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
-	status, body, err := c.doRequest(ctx, "GET", url, nil, true)
+func (c *Client) get(ctx context.Context, ep endpoint) ([]byte, error) {
+	status, body, err := c.doRequest(ctx, "GET", ep, nil, true)
 	if err != nil {
-		return nil, fmt.Errorf("request %s: %w", url, err)
+		return nil, fmt.Errorf("request %s: %w", ep.url, err)
 	}
 	if status != http.StatusOK {
-		return nil, newStatusError("GET", url, status, body)
+		return nil, newStatusError("GET", ep.url, status, body)
 	}
 	return body, nil
 }
 
-func (c *Client) put(ctx context.Context, url string, payload any) error {
+func (c *Client) put(ctx context.Context, ep endpoint, payload any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	status, body, err := c.doRequest(ctx, "PUT", url, data, false)
+	status, body, err := c.doRequest(ctx, "PUT", ep, data, false)
 	if err != nil {
-		return fmt.Errorf("PUT %s: %w", url, err)
+		return fmt.Errorf("PUT %s: %w", ep.url, err)
 	}
 	if status >= 300 {
-		return newStatusError("PUT", url, status, body)
+		return newStatusError("PUT", ep.url, status, body)
 	}
 	return nil
 }
@@ -1688,32 +1712,32 @@ func (c *Client) put(ctx context.Context, url string, payload any) error {
 // passes true so a transient 5xx is retried; a state-changing POST (add
 // comment, create issue) passes false so only a 429 — provably not processed —
 // is retried, never a 5xx that might have applied.
-func (c *Client) postJSON(ctx context.Context, url string, payload any, idempotent bool) ([]byte, error) {
+func (c *Client) postJSON(ctx context.Context, ep endpoint, payload any, idempotent bool) ([]byte, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
-	status, body, err := c.doRequest(ctx, "POST", url, data, idempotent)
+	status, body, err := c.doRequest(ctx, "POST", ep, data, idempotent)
 	if err != nil {
-		return nil, fmt.Errorf("POST %s: %w", url, err)
+		return nil, fmt.Errorf("POST %s: %w", ep.url, err)
 	}
 	if status >= 300 {
-		return nil, newStatusError("POST", url, status, body)
+		return nil, newStatusError("POST", ep.url, status, body)
 	}
 	return body, nil
 }
 
-func (c *Client) post(ctx context.Context, url string, payload any) error {
+func (c *Client) post(ctx context.Context, ep endpoint, payload any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	status, body, err := c.doRequest(ctx, "POST", url, data, false)
+	status, body, err := c.doRequest(ctx, "POST", ep, data, false)
 	if err != nil {
-		return fmt.Errorf("POST %s: %w", url, err)
+		return fmt.Errorf("POST %s: %w", ep.url, err)
 	}
 	if status >= 300 {
-		return newStatusError("POST", url, status, body)
+		return newStatusError("POST", ep.url, status, body)
 	}
 	return nil
 }

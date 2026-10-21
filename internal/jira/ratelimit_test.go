@@ -46,12 +46,18 @@ func testClient(url string) *Client {
 	return NewClient(DataCenterPAT(url, "tok"))
 }
 
+// at is a request to rawURL, for a test whose server answers every path the
+// same way.
+func at(rawURL string) endpoint {
+	return endpoint{url: rawURL, template: "test"}
+}
+
 func TestDoRequest_RetriesGetOn429ThenSucceeds(t *testing.T) {
 	shortBackoff(t)
 	srv, n := retryServer(t, nil, 429, 429)
 	c := testClient(srv.URL)
 
-	body, err := c.get(context.Background(), srv.URL)
+	body, err := c.get(context.Background(), at(srv.URL))
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -68,7 +74,7 @@ func TestDoRequest_RetriesGetOn5xxThenSucceeds(t *testing.T) {
 	srv, n := retryServer(t, nil, 503, 500)
 	c := testClient(srv.URL)
 
-	if _, err := c.get(context.Background(), srv.URL); err != nil {
+	if _, err := c.get(context.Background(), at(srv.URL)); err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	if got := atomic.LoadInt32(n); got != 3 {
@@ -82,7 +88,7 @@ func TestDoRequest_MutationNotRetriedOn5xx(t *testing.T) {
 	c := testClient(srv.URL)
 
 	// post is a mutation: a 5xx must NOT be replayed (it might have applied).
-	err := c.post(context.Background(), srv.URL, map[string]string{"k": "v"})
+	err := c.post(context.Background(), at(srv.URL), map[string]string{"k": "v"})
 	if err == nil {
 		t.Fatal("post: want error on 500, got nil")
 	}
@@ -98,7 +104,7 @@ func TestDoRequest_MutationRetriedOn429(t *testing.T) {
 
 	// A 429 is safe to replay even for a mutation: the request was throttled,
 	// not processed, so retrying can't double the side effect.
-	if err := c.post(context.Background(), srv.URL, map[string]string{"k": "v"}); err != nil {
+	if err := c.post(context.Background(), at(srv.URL), map[string]string{"k": "v"}); err != nil {
 		t.Fatalf("post: %v", err)
 	}
 	if got := atomic.LoadInt32(n); got != 2 {
@@ -112,7 +118,7 @@ func TestDoRequest_ExhaustsRetriesAndSurfacesError(t *testing.T) {
 	srv, n := retryServer(t, nil, 429, 429, 429, 429, 429, 429)
 	c := testClient(srv.URL)
 
-	_, err := c.get(context.Background(), srv.URL)
+	_, err := c.get(context.Background(), at(srv.URL))
 	if err == nil {
 		t.Fatal("get: want error after exhausting retries")
 	}
@@ -129,7 +135,7 @@ func TestDoRequest_HonorsRetryAfterOverCapSurfacesImmediately(t *testing.T) {
 	c := testClient(srv.URL)
 
 	start := time.Now()
-	_, err := c.get(context.Background(), srv.URL)
+	_, err := c.get(context.Background(), at(srv.URL))
 	if err == nil {
 		t.Fatal("get: want error, got nil")
 	}
@@ -153,7 +159,7 @@ func TestDoRequest_ContextCancelDuringBackoff(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 
-	_, err := c.get(ctx, srv.URL)
+	_, err := c.get(ctx, at(srv.URL))
 	if err == nil {
 		t.Fatal("get: want ctx error, got nil")
 	}

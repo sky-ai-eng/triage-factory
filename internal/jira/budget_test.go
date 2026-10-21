@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,14 +17,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
-// reply is one scripted response: a status (200 when zero) and its headers.
+// reply is one scripted response: a status (200 when zero), its headers, and
+// its body ({} when empty).
 type reply struct {
 	status int
 	header map[string]string
+	body   string
 }
 
-// scriptedServer answers each request with the next reply, and a bare 200
-// once they run out.
+// scriptedServer answers each request, whatever its path, with the next
+// reply, and a bare 200 once they run out.
 func scriptedServer(t *testing.T, replies ...reply) *httptest.Server {
 	t.Helper()
 	var n int32
@@ -40,25 +43,37 @@ func scriptedServer(t *testing.T, replies ...reply) *httptest.Server {
 		if replies[i].status != 0 {
 			w.WriteHeader(replies[i].status)
 		}
-		_, _ = w.Write([]byte(`{}`))
+		body := replies[i].body
+		if body == "" {
+			body = `{}`
+		}
+		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(srv.Close)
 	return srv
 }
 
 // The three credentials whose readings are recorded, as ForSystem and
-// ForUser build them. Each client's requests go to whatever URL a test passes.
-func cloudTokenClient() *Client {
-	return NewClient(CloudAPIToken("https://acme.atlassian.net", "bot@acme.com", "tok")).
+// ForUser build them, each against base.
+func cloudTokenClient(base string) *Client {
+	return NewClient(CloudAPIToken(base, "bot@acme.com", "tok")).
 		WithOrg("org-1").WithCredential(AuthMethodCloudAPIToken)
 }
 
-func cloudOAuthClient() *Client {
-	return NewClient(CloudOAuth("cloud-9", "acc")).WithOrg("org-1").WithCredential(AuthMethodCloudOAuth)
+func cloudOAuthClient(base string) *Client {
+	cfg := CloudOAuth("cloud-9", "acc")
+	cfg.BaseURL = base
+	return NewClient(cfg).WithOrg("org-1").WithCredential(AuthMethodCloudOAuth)
 }
 
-func dcPATClient() *Client {
-	return NewClient(DataCenterPAT("https://jira.example.com", "pat")).WithOrg("org-1").WithCredential(AuthMethodDCPAT)
+func dcPATClient(base string) *Client {
+	return NewClient(DataCenterPAT(base, "pat")).WithOrg("org-1").WithCredential(AuthMethodDCPAT)
+}
+
+// myself is a GET of the myself endpoint through c.
+func myself(c *Client) error {
+	_, err := c.get(context.Background(), c.apiURL("myself"))
+	return err
 }
 
 // collectMetrics reads every metric the provider holds, by instrument name.
@@ -116,9 +131,10 @@ func withinWindow(reset, before, after time.Time, window time.Duration) bool {
 }
 
 // TestRecordBudgets_CloudBurst: X-RateLimit-Limit and -Remaining on a Cloud
-// response are the endpoint's per-second allowance, recorded as burst and
-// kept for one second. An API token is not subject to the hourly quota, so a
-// response that says nothing of it records no quota reading.
+// response are the endpoint's per-second allowance, recorded under the
+// endpoint's burst bucket and kept for one second. An API token is not
+// subject to the hourly quota, so a response that says nothing of it records
+// no quota reading.
 func TestRecordBudgets_CloudBurst(t *testing.T) {
 	upstream.ResetBudgetsForTest(t)
 	srv := scriptedServer(t, reply{header: map[string]string{
@@ -127,17 +143,68 @@ func TestRecordBudgets_CloudBurst(t *testing.T) {
 	}})
 
 	before := time.Now()
-	if _, err := cloudTokenClient().get(context.Background(), srv.URL); err != nil {
+	if err := myself(cloudTokenClient(srv.URL)); err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	after := time.Now()
 
-	b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", "cloud_api_token", "burst")
+	b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", "cloud_api_token", "burst:myself")
 	if !ok || b.Remaining != 90 || b.Limit != 100 || !withinWindow(b.Reset, before, after, time.Second) || !b.Quiet {
-		t.Errorf("burst = (%+v, %v), want 90 of 100 resetting a second after the response, quiet", b, ok)
+		t.Errorf("burst:myself = (%+v, %v), want 90 of 100 resetting a second after the response, quiet", b, ok)
 	}
 	if b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", "cloud_api_token", "quota"); ok {
 		t.Errorf("recorded a quota reading %+v from a response that states none", b)
+	}
+}
+
+// TestRecordBudgets_CloudBurstPerEndpoint: Atlassian sets the burst
+// allowance per endpoint, so one credential's responses from two endpoints
+// record two buckets, each with its own limit, and neither overwrites the
+// other. The limits are a probe's, for one API token.
+func TestRecordBudgets_CloudBurstPerEndpoint(t *testing.T) {
+	upstream.ResetBudgetsForTest(t)
+	srv := scriptedServer(t,
+		reply{header: map[string]string{"X-RateLimit-Limit": "350", "X-RateLimit-Remaining": "349"}, body: `[]`},
+		reply{header: map[string]string{"X-RateLimit-Limit": "200", "X-RateLimit-Remaining": "199"}},
+	)
+	c := cloudTokenClient(srv.URL)
+	ctx := context.Background()
+
+	if _, err := c.ListPriorities(ctx); err != nil {
+		t.Fatalf("list priorities: %v", err)
+	}
+	if _, err := c.SearchIssues(ctx, "project = SKY", nil, 10); err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	for bucket, limit := range map[string]int{"burst:priority": 350, "burst:search/jql": 200} {
+		b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", "cloud_api_token", bucket)
+		if !ok || b.Limit != limit || b.Remaining != limit-1 {
+			t.Errorf("%s = (%+v, %v), want %d of %d", bucket, b, ok, limit-1, limit)
+		}
+	}
+	if readings, _ := upstream.ChangedReadings(0); len(readings) != 2 {
+		t.Errorf("readings = %+v, want the two endpoints' burst buckets alone", readings)
+	}
+}
+
+// TestRecordBudgets_CloudBurstUnderTheTemplate: a request naming an issue
+// records its endpoint's burst under the path template, never the issue key.
+func TestRecordBudgets_CloudBurstUnderTheTemplate(t *testing.T) {
+	upstream.ResetBudgetsForTest(t)
+	srv := scriptedServer(t, reply{header: map[string]string{"X-RateLimit-Limit": "350", "X-RateLimit-Remaining": "340"}})
+
+	if _, err := cloudTokenClient(srv.URL).GetTransitions(context.Background(), "ABC-123"); err != nil {
+		t.Fatalf("get transitions: %v", err)
+	}
+	b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", "cloud_api_token", "burst:issue/{}/transitions")
+	if !ok || b.Remaining != 340 || b.Limit != 350 {
+		t.Errorf("burst:issue/{}/transitions = (%+v, %v), want 340 of 350", b, ok)
+	}
+	readings, _ := upstream.ChangedReadings(0)
+	for _, r := range readings {
+		if strings.Contains(r.Bucket, "ABC-123") {
+			t.Errorf("recorded a bucket naming the issue key: %q", r.Bucket)
+		}
 	}
 }
 
@@ -153,13 +220,12 @@ func TestRecordBudgets_CloudQuotaNearLimit(t *testing.T) {
 		reply{header: map[string]string{"X-RateLimit-NearLimit": "true"}},
 		reply{},
 	)
-	ctx := context.Background()
 
 	before := time.Now()
-	if _, err := cloudTokenClient().get(ctx, srv.URL); err != nil {
+	if err := myself(cloudTokenClient(srv.URL)); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if _, err := cloudOAuthClient().get(ctx, srv.URL); err != nil {
+	if err := myself(cloudOAuthClient(srv.URL)); err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	after := time.Now()
@@ -171,7 +237,7 @@ func TestRecordBudgets_CloudQuotaNearLimit(t *testing.T) {
 		}
 	}
 
-	if _, err := cloudOAuthClient().get(ctx, srv.URL); err != nil {
+	if err := myself(cloudOAuthClient(srv.URL)); err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", "cloud_oauth", "quota")
@@ -193,7 +259,7 @@ func TestRecordBudgets_Cloud429Quota(t *testing.T) {
 		"Retry-After":       "2400",
 	}})
 
-	if _, err := cloudOAuthClient().get(context.Background(), srv.URL); err == nil {
+	if err := myself(cloudOAuthClient(srv.URL)); err == nil {
 		t.Fatal("get succeeded on a 429 past the wait cap")
 	}
 	b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", "cloud_oauth", "quota")
@@ -205,30 +271,33 @@ func TestRecordBudgets_Cloud429Quota(t *testing.T) {
 	}
 }
 
-// TestRecordBudgets_Cloud429Burst: a 429 for burst takes its burst reading's
-// reset from X-RateLimit-Reset, is counted under its reason, and its wait is
-// a wait on a limit.
+// TestRecordBudgets_Cloud429Burst: a 429 for burst is the endpoint's, so it
+// records the endpoint's burst reading with the reset the refusal states and
+// is counted under that bucket, and its wait is a wait on a limit. The headers
+// are a probe's. Its X-RateLimit-Reset has minute precision and had already
+// passed when the refusal arrived, so the reset is the Retry-After's.
 func TestRecordBudgets_Cloud429Burst(t *testing.T) {
-	shortBackoff(t)
 	upstream.ResetBudgetsForTest(t)
 	reader := meterForTest(t)
-	reset := time.Now().Add(5 * time.Second).UTC().Truncate(time.Second)
 	srv := scriptedServer(t, reply{status: http.StatusTooManyRequests, header: map[string]string{
 		"RateLimit-Reason":      reasonBurst,
-		"X-RateLimit-Limit":     "100",
+		"Retry-After":           "1",
+		"X-RateLimit-Reset":     "2026-10-19T23:07Z",
 		"X-RateLimit-Remaining": "0",
-		"X-RateLimit-Reset":     reset.Format(time.RFC3339),
+		"X-RateLimit-Limit":     "350",
 	}})
 
-	if _, err := cloudTokenClient().get(context.Background(), srv.URL); err != nil {
-		t.Fatalf("get: %v", err)
+	before := time.Now()
+	if _, err := cloudTokenClient(srv.URL).GetTransitions(context.Background(), "ABC-123"); err != nil {
+		t.Fatalf("get transitions: %v", err)
 	}
-	b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", "cloud_api_token", "burst")
-	if !ok || b.Remaining != 0 || b.Limit != 100 || !b.Reset.Equal(reset) {
-		t.Errorf("burst = (%+v, %v), want 0 of 100 resetting at %v", b, ok, reset)
+	const bucket = "burst:issue/{}/transitions"
+	b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", "cloud_api_token", bucket)
+	if !ok || b.Remaining != 0 || b.Limit != 350 || b.Reset.Before(before.Add(time.Second)) || !b.Reset.Before(before.Add(2*time.Second)) {
+		t.Errorf("%s = (%+v, %v), want 0 of 350 resetting a second after the refusal", bucket, b, ok)
 	}
-	if got := refusals(t, reader, AuthMethodCloudAPIToken); got[reasonBurst] != 1 || len(got) != 1 {
-		t.Errorf("refusals = %v, want one under %s", got, reasonBurst)
+	if got := refusals(t, reader, AuthMethodCloudAPIToken); got[bucket] != 1 || len(got) != 1 {
+		t.Errorf("refusals = %v, want one under %s", got, bucket)
 	}
 	sum, ok := collectMetrics(t, reader)["upstream.rate_limit.wait"].(metricdata.Sum[float64])
 	if !ok || len(sum.DataPoints) != 1 {
@@ -251,8 +320,9 @@ func TestRecordBudgets_UnrecognizedReasonsCountAsOther(t *testing.T) {
 		reply{status: http.StatusTooManyRequests, header: map[string]string{"Retry-After": "3600"}},
 		reply{status: http.StatusTooManyRequests, header: map[string]string{"RateLimit-Reason": reasonPerIssueWrite, "Retry-After": "3600"}},
 	)
+	c := cloudTokenClient(srv.URL)
 	for range 3 {
-		if _, err := cloudTokenClient().get(context.Background(), srv.URL); err == nil {
+		if err := myself(c); err == nil {
 			t.Fatal("get succeeded on a 429 past the wait cap")
 		}
 	}
@@ -290,7 +360,7 @@ func TestRecordBudgets_DataCenterTokenBucket(t *testing.T) {
 			upstream.ResetBudgetsForTest(t)
 			srv := scriptedServer(t, c.reply)
 			before := time.Now()
-			if _, err := dcPATClient().get(context.Background(), srv.URL); err != nil {
+			if err := myself(dcPATClient(srv.URL)); err != nil {
 				t.Fatalf("get: %v", err)
 			}
 			after := time.Now()
@@ -317,13 +387,14 @@ func TestRecordBudgets_DataCenterLimitingOff(t *testing.T) {
 	reader := meterForTest(t)
 	srv := scriptedServer(t, reply{}, reply{status: http.StatusTooManyRequests, header: map[string]string{"Retry-After": "3600"}})
 
-	if _, err := dcPATClient().get(context.Background(), srv.URL); err != nil {
+	c := dcPATClient(srv.URL)
+	if err := myself(c); err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	if b, ok := upstream.BudgetForTest(upstream.Jira, "org-1", "dc_pat", "requests"); ok {
 		t.Errorf("recorded %+v from a response without headers", b)
 	}
-	if _, err := dcPATClient().get(context.Background(), srv.URL); err == nil {
+	if err := myself(c); err == nil {
 		t.Fatal("get succeeded on a 429 past the wait cap")
 	}
 	if got := refusals(t, reader, AuthMethodDCPAT); got[bucketRequests] != 1 || len(got) != 1 {
@@ -346,25 +417,33 @@ func TestRecordBudgets_UnnamedClientsRecordNothing(t *testing.T) {
 	}}
 	srv := scriptedServer(t, limited, limited, limited)
 	for name, c := range map[string]*Client{
-		"user token": NewClient(CloudAPIToken("https://acme.atlassian.net", "u@acme.com", "tok")).WithOrg("org-1"),
-		"no org":     NewClient(CloudAPIToken("https://acme.atlassian.net", "u@acme.com", "tok")).WithCredential(AuthMethodCloudAPIToken),
-		"proxy":      NewClient(ProxyPlaceholder("http://127.0.0.1:1", "placeholder", DeploymentCloud)).WithOrg("org-1"),
+		"user token": NewClient(CloudAPIToken(srv.URL, "u@acme.com", "tok")).WithOrg("org-1"),
+		"no org":     NewClient(CloudAPIToken(srv.URL, "u@acme.com", "tok")).WithCredential(AuthMethodCloudAPIToken),
+		"proxy":      NewClient(ProxyPlaceholder(srv.URL, "placeholder", DeploymentCloud)).WithOrg("org-1"),
 	} {
-		if _, err := c.get(context.Background(), srv.URL); err == nil {
+		if err := myself(c); err == nil {
 			t.Fatalf("%s: get succeeded on a 429 past the wait cap", name)
 		}
 	}
-	for _, org := range []string{"org-1", ""} {
-		for _, credential := range []string{"", "cloud_api_token"} {
-			for _, bucket := range []string{"quota", "burst"} {
-				if b, ok := upstream.BudgetForTest(upstream.Jira, org, credential, bucket); ok {
-					t.Errorf("recorded %+v under org %q, credential %q, bucket %s", b, org, credential, bucket)
-				}
-			}
-		}
+	if readings, _ := upstream.ChangedReadings(0); len(readings) > 0 {
+		t.Errorf("recorded %+v for unnamed clients", readings)
 	}
 	if sum, ok := collectMetrics(t, reader)["upstream.rate_limit.refused"].(metricdata.Sum[int64]); ok && len(sum.DataPoints) > 0 {
 		t.Errorf("counted refusals %+v for unnamed clients", sum.DataPoints)
+	}
+}
+
+func TestPathTemplate(t *testing.T) {
+	for format, want := range map[string]string{
+		"priority":                                  "priority",
+		"issue/%s/transitions":                      "issue/{}/transitions",
+		"issue/%s?fields=assignee,status":           "issue/{}",
+		"issue/%s/comment?startAt=%d&maxResults=%d": "issue/{}/comment",
+		"project/search?%s":                         "project/search",
+	} {
+		if got := pathTemplate(format); got != want {
+			t.Errorf("pathTemplate(%q) = %q, want %q", format, got, want)
+		}
 	}
 }
 
