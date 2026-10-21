@@ -718,6 +718,43 @@ describe('Slack source page', () => {
     // watch.
     expect(tones).toEqual(['ours', 'none'])
   })
+
+  it('reads another team as theirs whatever that team is called', async () => {
+    const watchedOwnedBy = (channelId: string, name: string, teamName: string) => ({
+      channel_id: channelId,
+      name,
+      workspace_id: 'W',
+      is_private: false,
+      bot_is_member: true,
+      tracked: true,
+      is_primary: false,
+      tracked_by: [
+        { team_id: 't1', team_name: 'platform', is_primary: false },
+        { team_id: 't2', team_name: teamName, is_primary: true },
+      ],
+      source: 'tracked',
+    })
+    stub({
+      '/api/slack/teams/t1/channels': {
+        role: 'admin',
+        warnings: [],
+        // Team names that spell the words the table prints for this team and
+        // for nobody: each channel is still another team's.
+        channels: [
+          watchedOwnedBy('C4', 'named-no-one', 'no one'),
+          watchedOwnedBy('C5', 'named-this-team', 'this team'),
+        ],
+      },
+    })
+    render(<SlackSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('#named-no-one')).toBeInTheDocument())
+
+    const tones = Array.from(document.querySelectorAll('.sp-star')).map((s) =>
+      s.getAttribute('data-tone'),
+    )
+    expect(tones).toEqual(['theirs', 'theirs'])
+    expect(reading(row('with no primary team'))).toBe('0')
+  })
 })
 
 describe('LinearSource', () => {
