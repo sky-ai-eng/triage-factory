@@ -35,7 +35,7 @@ func TestOrgRateLimits_ServesCurrentReadingsWithNames(t *testing.T) {
 	if err := s.allStores.RateLimitReadings.UpsertSystem(context.Background(), []domain.RateLimitReading{
 		{OrgID: org, Upstream: "github", Credential: "installation:7", Bucket: "core",
 			Remaining: intp(3100), Limit: intp(5000), ResetAt: timep(now.Add(time.Hour)), ObservedAt: now},
-		{OrgID: org, Upstream: "jira", Credential: "cloud_oauth", Bucket: "quota",
+		{OrgID: org, Upstream: "jira", Credential: "cloud_oauth:org", Bucket: "quota",
 			NearLimit: &near, ResetAt: timep(now.Add(time.Hour)), ObservedAt: now},
 		{OrgID: org, Upstream: "linear", Credential: "api_key", Bucket: "requests",
 			Remaining: intp(0), Limit: intp(1500), ResetAt: timep(now.Add(-time.Second)), ObservedAt: now.Add(-time.Minute)},
@@ -63,8 +63,8 @@ func TestOrgRateLimits_ServesCurrentReadingsWithNames(t *testing.T) {
 	if v, ok := gh["near_limit"]; !ok || v != nil {
 		t.Errorf("github near_limit = %v (present %v), want null: the reading states a count instead", v, ok)
 	}
-	if jira["credential"] != "cloud_oauth" || jira["credential_name"] != nil || jira["near_limit"] != false {
-		t.Errorf("jira reading = %v, want cloud_oauth unnamed with near_limit false", jira)
+	if jira["credential"] != "cloud_oauth:org" || jira["credential_name"] != nil || jira["near_limit"] != false {
+		t.Errorf("jira reading = %v, want cloud_oauth:org unnamed with near_limit false", jira)
 	}
 	if v, ok := jira["remaining"]; !ok || v != nil {
 		t.Errorf("jira remaining = %v (present %v), want null, not 0: the quota states no count", v, ok)

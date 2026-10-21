@@ -559,19 +559,19 @@ func TestCanonicalHostAndKey(t *testing.T) {
 }
 
 // fakeOAuthSource records the args ForUser hands it and returns a canned
-// (cloudID, accessToken). It's the seam the AuthMethodCloudOAuth branch
-// delegates the mint + rotation write-back to (internal/jiraoauth in prod).
+// token. It's the seam the AuthMethodCloudOAuth branch delegates the mint +
+// rotation write-back to (internal/jiraoauth in prod).
 type fakeOAuthSource struct {
-	cloudID, access          string
+	tok                      UserAccessToken
 	err                      error
 	gotOrg, gotUser, gotHost string
 	calls                    int
 }
 
-func (f *fakeOAuthSource) AccessTokenForUser(_ context.Context, orgID, userID, host string) (string, string, error) {
+func (f *fakeOAuthSource) AccessTokenForUser(_ context.Context, orgID, userID, host string) (UserAccessToken, error) {
 	f.calls++
 	f.gotOrg, f.gotUser, f.gotHost = orgID, userID, host
-	return f.cloudID, f.access, f.err
+	return f.tok, f.err
 }
 
 // TestForUser_CloudOAuthEnvelope pins the Cloud OAuth path: a stored cloud_oauth
@@ -590,7 +590,7 @@ func TestForUser_CloudOAuthEnvelope(t *testing.T) {
 		sys:  map[string]string{keyJiraAuthMethod: string(AuthMethodCloudOAuth)},
 		user: map[string]string{UserTokenKey(base): env},
 	}
-	src := &fakeOAuthSource{cloudID: "cloud-9", access: "acc-tok"}
+	src := &fakeOAuthSource{tok: UserAccessToken{CloudID: "cloud-9", AccessToken: "acc-tok", App: SourceDeployment}}
 	r := NewResolverWithOAuth(secrets, &fakeOrgs{jiraBase: base}, src)
 
 	c, err := r.ForUser(context.Background(), testOrgID, testUserID)
@@ -616,9 +616,11 @@ func TestForUser_CloudOAuthEnvelope(t *testing.T) {
 		t.Errorf("Authorization = %q, want Bearer acc-tok", got)
 	}
 	// The hourly quota is the OAuth app's, not the user's, so its readings
-	// are recorded, under the method rather than the user.
-	if c.orgID != testOrgID || c.credential != AuthMethodCloudOAuth {
-		t.Errorf("readings recorded under (%q, %q), want (%q, cloud_oauth)", c.orgID, c.credential, testOrgID)
+	// are recorded under the method rather than the user, and the quota under
+	// the app that minted the token.
+	if c.orgID != testOrgID || c.credential != AuthMethodCloudOAuth || c.oauthApp != SourceDeployment {
+		t.Errorf("readings recorded under (%q, %q, app %d), want (%q, cloud_oauth, the deployment app)",
+			c.orgID, c.credential, c.oauthApp, testOrgID)
 	}
 }
 
@@ -655,7 +657,7 @@ func TestForUser_CloudOAuthIncomplete(t *testing.T) {
 		sys:  map[string]string{keyJiraAuthMethod: string(AuthMethodCloudOAuth)},
 		user: map[string]string{UserTokenKey(base): env},
 	}
-	src := &fakeOAuthSource{cloudID: "cloud-9", access: "acc-tok"}
+	src := &fakeOAuthSource{tok: UserAccessToken{CloudID: "cloud-9", AccessToken: "acc-tok", App: SourceDeployment}}
 	r := NewResolverWithOAuth(secrets, &fakeOrgs{jiraBase: base}, src)
 	if _, err := r.ForUser(context.Background(), testOrgID, testUserID); !errors.Is(err, ErrNoJiraUserCredential) {
 		t.Fatalf("ForUser err = %v, want ErrNoJiraUserCredential", err)

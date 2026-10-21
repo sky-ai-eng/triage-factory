@@ -57,9 +57,8 @@ type TokenCache struct {
 }
 
 type cachedToken struct {
-	cloudID     string
-	accessToken string
-	expiresAt   time.Time
+	token     jira.UserAccessToken
+	expiresAt time.Time
 }
 
 // NewTokenCache builds a TokenCache over a minter, the org's OAuth-app
@@ -94,14 +93,19 @@ func cacheKey(orgID, userID, host string) string {
 // AccessTokenForUser returns a live Cloud OAuth access token for the user,
 // minting (and caching) one from the stored refresh token when the cache is
 // empty or stale. Implements jira.UserAccessTokenSource.
-func (c *TokenCache) AccessTokenForUser(ctx context.Context, orgID, userID, host string) (string, string, error) {
+//
+// The token reports the OAuth app that minted it, not the one the org
+// resolves now: Atlassian meters a token's requests against the app that
+// minted it, so after an admin changes the org's app, a cached token minted
+// under the previous one is still that app's until it expires.
+func (c *TokenCache) AccessTokenForUser(ctx context.Context, orgID, userID, host string) (jira.UserAccessToken, error) {
 	key := cacheKey(orgID, userID, host)
 
 	// Fast path: a cached token with comfortable headroom.
 	c.mu.Lock()
 	if ct, ok := c.cache[key]; ok && c.timeNow().Add(refreshSkew).Before(ct.expiresAt) {
 		c.mu.Unlock()
-		return ct.cloudID, ct.accessToken, nil
+		return ct.token, nil
 	}
 	c.mu.Unlock()
 
@@ -124,10 +128,9 @@ func (c *TokenCache) AccessTokenForUser(ctx context.Context, orgID, userID, host
 		return c.refresh(ctx, orgID, userID, host, key)
 	})
 	if err != nil {
-		return "", "", err
+		return jira.UserAccessToken{}, err
 	}
-	ct := res.(cachedToken)
-	return ct.cloudID, ct.accessToken, nil
+	return res.(cachedToken).token, nil
 }
 
 // refresh mints a fresh access token off the stored refresh token (refreshOnce)
@@ -177,9 +180,9 @@ func refusedGrant(err error) bool {
 }
 
 // refreshOnce reads the stored envelope, mints a fresh access token off its
-// refresh token, persists the rotated refresh token back, and caches the
-// result. raw is the envelope it read, for refresh to remove when the token in
-// it was refused.
+// refresh token with the org's OAuth app, persists the rotated refresh token
+// back, and caches the result with the app that minted it. raw is the envelope
+// it read, for refresh to remove when the token in it was refused.
 func (c *TokenCache) refreshOnce(ctx context.Context, orgID, userID, host, key string) (_ cachedToken, raw string, _ error) {
 	raw, err := c.secrets.GetUserSystem(ctx, orgID, userID, jira.UserTokenKey(host))
 	if err != nil {
@@ -196,7 +199,7 @@ func (c *TokenCache) refreshOnce(ctx context.Context, orgID, userID, host, key s
 		return cachedToken{}, raw, fmt.Errorf("jiraoauth: stored credential is not a usable cloud oauth credential (method=%q)", cred.Method)
 	}
 
-	app, _, err := c.apps.Resolve(ctx, orgID)
+	app, source, err := c.apps.Resolve(ctx, orgID)
 	if err != nil {
 		return cachedToken{}, raw, fmt.Errorf("jiraoauth: resolve oauth app: %w", err)
 	}
@@ -221,7 +224,10 @@ func (c *TokenCache) refreshOnce(ctx context.Context, orgID, userID, host, key s
 		return cachedToken{}, raw, fmt.Errorf("jiraoauth: persist rotated refresh token: %w", err)
 	}
 
-	ct := cachedToken{cloudID: cred.CloudID, accessToken: tok.AccessToken, expiresAt: tok.ExpiresAt}
+	ct := cachedToken{
+		token:     jira.UserAccessToken{CloudID: cred.CloudID, AccessToken: tok.AccessToken, App: source},
+		expiresAt: tok.ExpiresAt,
+	}
 	c.mu.Lock()
 	c.cache[key] = ct
 	c.mu.Unlock()

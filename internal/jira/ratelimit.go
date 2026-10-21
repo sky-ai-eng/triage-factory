@@ -78,6 +78,34 @@ const (
 	burstWindow = time.Second
 )
 
+// The credentials a Cloud OAuth client's quota is recorded under, named by
+// whose OAuth app minted its access token: the deployment's app, whose one
+// quota every org using it spends, or the org's own (quotaCredential).
+const (
+	credentialCloudOAuthDeploymentApp = string(AuthMethodCloudOAuth) + ":deployment"
+	credentialCloudOAuthOrgApp        = string(AuthMethodCloudOAuth) + ":org"
+)
+
+// quotaCredential is the credential c's quota readings, and the 429s of the
+// quota, are recorded under. A Cloud OAuth client's is its OAuth app's
+// (WithOAuthApp); any other credential's quota is its own. It is empty for a
+// Cloud OAuth client that does not say which app minted its token, whose
+// quota is then not recorded, since a reading of it could not say whose quota
+// it is.
+func (c *Client) quotaCredential() string {
+	if c.credential != AuthMethodCloudOAuth {
+		return string(c.credential)
+	}
+	switch c.oauthApp {
+	case SourceDeployment:
+		return credentialCloudOAuthDeploymentApp
+	case SourceOrgOverride:
+		return credentialCloudOAuthOrgApp
+	default:
+		return ""
+	}
+}
+
 // burstBucket is the bucket of Jira Cloud's burst allowance for the endpoint
 // whose path template is template (endpoint): burst:issue/{}/transitions.
 func burstBucket(template string) string {
@@ -134,26 +162,34 @@ func (c *Client) recordBudgets(template string, status int, h http.Header, now t
 // from the refusal (refusalReset). Burst readings are Quiet: a busy endpoint
 // can stay below 20% of its per-second allowance for many seconds in a row.
 //
+// A Cloud OAuth client's quota is recorded under its OAuth app
+// (quotaCredential), and its burst readings under the client's own
+// credential: Atlassian documents the quota as the app's, and does not say
+// whose the burst allowance is.
+//
 // Cloud also sends RateLimit and RateLimit-Policy, but on a Cloud OAuth
 // response they describe only jira-burst-based, which X-RateLimit-Remaining
 // and X-RateLimit-Limit already give (and whose policy q disagrees with that
 // limit). They carry no entry for the hourly quota, so they are not read.
 func (c *Client) recordCloud(template string, status int, h http.Header, now time.Time) {
 	burst := burstBucket(template)
+	quota := c.quotaCredential()
 	var reason string
 	if status == http.StatusTooManyRequests {
-		reason = c.countRefusal(h, burst)
+		reason = c.countRefusal(h, burst, quota)
 	}
-	record := func(bucket string, b upstream.Budget) {
-		upstream.RecordBudget(upstream.Jira, c.orgID, string(c.credential), bucket, b)
+	record := func(credential, bucket string, b upstream.Budget) {
+		upstream.RecordBudget(upstream.Jira, c.orgID, credential, bucket, b)
 	}
 
 	nearHeader := strings.TrimSpace(h.Get("X-RateLimit-NearLimit"))
-	switch {
-	case reason == reasonQuotaGlobal || reason == reasonQuotaTenant:
-		record(bucketQuota, upstream.NearLimitReading(true, refusalReset(h, now, quotaWindow)))
-	case nearHeader != "" || c.credential == AuthMethodCloudOAuth:
-		record(bucketQuota, upstream.NearLimitReading(strings.EqualFold(nearHeader, "true"), now.Add(quotaWindow)))
+	if quota != "" {
+		switch {
+		case reason == reasonQuotaGlobal || reason == reasonQuotaTenant:
+			record(quota, bucketQuota, upstream.NearLimitReading(true, refusalReset(h, now, quotaWindow)))
+		case nearHeader != "" || c.credential == AuthMethodCloudOAuth:
+			record(quota, bucketQuota, upstream.NearLimitReading(strings.EqualFold(nearHeader, "true"), now.Add(quotaWindow)))
+		}
 	}
 
 	if b, ok := readCount(h); ok {
@@ -162,16 +198,19 @@ func (c *Client) recordCloud(template string, status int, h http.Header, now tim
 		if reason == reasonBurst {
 			b.Reset = refusalReset(h, now, burstWindow)
 		}
-		record(burst, b)
+		record(string(c.credential), burst, b)
 	}
 }
 
 // countRefusal counts a Jira Cloud 429 and returns its RateLimit-Reason, or
 // reasonOther. A burst refusal is the endpoint's, so it is counted under
 // burst, the endpoint's burst bucket; any other is counted under its reason.
-// A reason outside the documented set is counted as reasonOther and logged, so
-// a value Atlassian starts sending shows up without becoming a label.
-func (c *Client) countRefusal(h http.Header, burst string) string {
+// A refusal by the quota is counted under quota, the credential the quota is
+// recorded under, and not at all when that is empty; any other under the
+// client's credential. A reason outside the documented set is counted as
+// reasonOther and logged, so a value Atlassian starts sending shows up
+// without becoming a label.
+func (c *Client) countRefusal(h http.Header, burst, quota string) string {
 	raw := strings.TrimSpace(h.Get("RateLimit-Reason"))
 	reason := raw
 	switch raw {
@@ -186,11 +225,16 @@ func (c *Client) countRefusal(h http.Header, burst string) string {
 				"org", c.orgID, "credential", string(c.credential), "reason", raw)
 		}
 	}
-	bucket := reason
-	if reason == reasonBurst {
+	credential, bucket := string(c.credential), reason
+	switch reason {
+	case reasonBurst:
 		bucket = burst
+	case reasonQuotaGlobal, reasonQuotaTenant:
+		credential = quota
 	}
-	upstream.RecordRefused(upstream.Jira, c.orgID, string(c.credential), bucket)
+	if credential != "" {
+		upstream.RecordRefused(upstream.Jira, c.orgID, credential, bucket)
+	}
 	return reason
 }
 
