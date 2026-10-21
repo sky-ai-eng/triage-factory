@@ -858,11 +858,27 @@ func seedDraftPRArtifactWithConversation(t *testing.T, s *Server, suffix, owner,
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
-	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(s.db).Orgs, runmode.LocalDefaultOrgID, a))
+	a = linkPullRequestEntity(t, s, dbtest.InOrgScope(t, sqlitestore.New(s.db).Orgs, runmode.LocalDefaultOrgID, a))
+	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
 	if err != nil {
 		t.Fatalf("seed draft PR artifact: %v", err)
 	}
 	return stored.ID, conversationID, taskID
+}
+
+// linkPullRequestEntity links a pull request or review artifact to the entity
+// of the pull request its target names — created, as the poller would, when
+// none exists — the way every writer links one. The handlers resolve the pull
+// request through that entity.
+func linkPullRequestEntity(t *testing.T, s *Server, a domain.Artifact) domain.Artifact {
+	t.Helper()
+	nodeID, _ := domain.ArtifactPullRequestNodeID(a)
+	e, _, err := sqlitestore.New(s.db).Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "github", a.Scope, a.Target, nodeID, "pr", "Proposed title", a.URL)
+	if err != nil {
+		t.Fatalf("seed the pull request entity for %s: %v", a.Target, err)
+	}
+	a.EntityID = e.ID
+	return a
 }
 
 // assertAgentMemoryUntouched checks that the conversation still holds exactly
@@ -974,7 +990,7 @@ func newRejectStub(t *testing.T, srv *Server, live map[string]any, node string, 
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 	stores := sqlitestore.New(srv.db)
-	srv.SetReconciler(reconcile.NewReconciler(srv.ghResolver, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil))
+	srv.SetReconciler(reconcile.NewReconciler(srv.ghResolver, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil))
 	return rs
 }
 

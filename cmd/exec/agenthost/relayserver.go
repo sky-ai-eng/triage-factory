@@ -478,6 +478,26 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(res)
 
+	case opArtifactPullRequest:
+		var a artifactPullRequestArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, err
+		}
+		// The entity and registry rows live behind the stores the sidecar does
+		// not hold; the artifact is looked up among the run's own, from the
+		// orchestrator's ConversationInfo.
+		pr, err := s.rt.ArtifactPullRequest(ctx, a.ArtifactID)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(artifactPullRequestResult{
+			RepositoryID: pr.RepositoryID,
+			Owner:        pr.Owner,
+			Repo:         pr.Repo,
+			Number:       pr.Number,
+			Retired:      pr.Retired,
+		})
+
 	case opCheckEntitlement:
 		var a checkEntitlementArgs
 		if err := json.Unmarshal(args, &a); err != nil {

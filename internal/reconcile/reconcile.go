@@ -16,6 +16,7 @@ package reconcile
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -49,7 +50,8 @@ type Reconciler struct {
 	resolver  clientResolver
 	artifacts db.ArtifactStore
 	actions   db.ExternalActionStore // read for the pr_created rows the backstop works from
-	entities  db.EntityStore         // read for the pull request entity a backfilled artifact is about
+	entities  db.EntityStore         // read for the pull request entity an artifact is about
+	repos     db.RepositoryStore     // read for the registry row an artifact's repository is
 	orgs      db.OrgsStore           // read for the org's current GitHub host
 	ws        *websocket.Hub         // nil-safe: broadcasts are skipped when unset (tests)
 	// prResolved runs after a pull request's draft → open transition commits.
@@ -67,8 +69,8 @@ type PullRequestResolvedHook func(ctx context.Context, orgID, conversationID str
 
 // NewReconciler builds the shared reconciler. ws may be nil (broadcasts become
 // no-ops); the stores + resolver are required.
-func NewReconciler(resolver clientResolver, artifacts db.ArtifactStore, actions db.ExternalActionStore, entities db.EntityStore, orgs db.OrgsStore, ws *websocket.Hub) *Reconciler {
-	return &Reconciler{resolver: resolver, artifacts: artifacts, actions: actions, entities: entities, orgs: orgs, ws: ws}
+func NewReconciler(resolver clientResolver, artifacts db.ArtifactStore, actions db.ExternalActionStore, entities db.EntityStore, repos db.RepositoryStore, orgs db.OrgsStore, ws *websocket.Hub) *Reconciler {
+	return &Reconciler{resolver: resolver, artifacts: artifacts, actions: actions, entities: entities, repos: repos, orgs: orgs, ws: ws}
 }
 
 // onCurrentHost returns the org's current GitHub host and the artifacts of
@@ -285,26 +287,44 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 
 	// Pass 1 — group the GitHub fetches by owner. PR and review artifacts both
 	// refresh from a PR node id (stored in details); branch artifacts probe a
-	// ref. An artifact missing its handle (no node id, malformed target) can't
-	// be refreshed and is left for a later cycle once a writer fills it in.
+	// ref. The owner is the registry row's current one, read by id: through
+	// the pull request's entity for a pull request or review, through the key
+	// for a branch. A retired row's name is another repository's now, so its
+	// artifacts are left as they stand. An artifact missing its handle (no
+	// node id, no repository) can't be refreshed and is left for a later cycle
+	// once a writer fills it in.
+	reads := newRegistryReads(rc)
 	prNodeIDsByOwner := map[string]map[string]bool{}
 	branchRefsByOwner := map[string][]github.BranchRef{}
+	branchRefs := map[string]github.BranchRef{} // artifact id → the ref probed for it
 	for _, a := range arts {
 		switch a.Kind {
-		case domain.ArtifactKindPullRequest:
-			if owner, ok := prOwner(a.Target); ok {
-				if d, _ := domain.ParsePRArtifactDetails(a.DetailsJSON); d.NodeID != "" {
-					addNodeID(prNodeIDsByOwner, owner, d.NodeID)
-				}
+		case domain.ArtifactKindPullRequest, domain.ArtifactKindReview:
+			nodeID := artifactPRNodeID(a)
+			if nodeID == "" {
+				continue
 			}
-		case domain.ArtifactKindReview:
-			if owner, ok := prOwner(a.Target); ok {
-				if d, _ := domain.ParseReviewArtifactDetails(a.DetailsJSON); d.NodeID != "" {
-					addNodeID(prNodeIDsByOwner, owner, d.NodeID)
+			pr, err := db.ResolveArtifactPullRequest(ctx, orgID, a, reads.entity, reads.repository)
+			if err != nil {
+				if !errors.Is(err, db.ErrArtifactNamesNoPullRequest) {
+					reconcileLog.Warn("resolve artifact's pull request failed; skipping it this cycle",
+						"org", orgID, "artifact", a.ID, "error", err)
 				}
+				continue
 			}
+			if pr.Retired {
+				continue
+			}
+			addNodeID(prNodeIDsByOwner, pr.Owner, nodeID)
 		case domain.ArtifactKindBranch:
-			if ref, ok := branchRefOf(a); ok {
+			ref, ok, err := branchProbe(ctx, orgID, a, reads.repository)
+			if err != nil {
+				reconcileLog.Warn("resolve branch artifact's repository failed; skipping it this cycle",
+					"org", orgID, "artifact", a.ID, "error", err)
+				continue
+			}
+			if ok {
+				branchRefs[a.ID] = ref
 				branchRefsByOwner[ref.Owner] = append(branchRefsByOwner[ref.Owner], ref)
 			}
 		}
@@ -363,7 +383,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 	var transitioned []domain.Artifact
 	resolvedConversations := map[string]bool{}
 	for _, a := range arts {
-		newState, ok := nextState(a, snapshots, branchExists)
+		newState, ok := nextState(a, snapshots, branchRefs, branchExists)
 		if !ok || newState == a.State {
 			continue
 		}
@@ -450,9 +470,11 @@ func (rc *Reconciler) broadcast(orgID string, a domain.Artifact) {
 
 // nextState computes the artifact's reconciled state from the fetched GitHub
 // data, returning ok=false when there's no confident answer (snapshot missing,
-// review not yet surfaced, branch existence unknown) so the caller leaves the
-// row untouched. A returned state equal to the current one is a no-op.
-func nextState(a domain.Artifact, snapshots map[string]domain.PRSnapshot, branchExists map[github.BranchRef]bool) (string, bool) {
+// review not yet surfaced, branch not probed or existence unknown) so the
+// caller leaves the row untouched. branchRefs is the ref probed for each
+// branch artifact, by artifact id. A returned state equal to the current one
+// is a no-op.
+func nextState(a domain.Artifact, snapshots map[string]domain.PRSnapshot, branchRefs map[string]github.BranchRef, branchExists map[github.BranchRef]bool) (string, bool) {
 	switch a.Kind {
 	case domain.ArtifactKindPullRequest:
 		d, _ := domain.ParsePRArtifactDetails(a.DetailsJSON)
@@ -471,7 +493,7 @@ func nextState(a domain.Artifact, snapshots map[string]domain.PRSnapshot, branch
 		return reviewState(snap, a.ExternalID)
 
 	case domain.ArtifactKindBranch:
-		ref, ok := branchRefOf(a)
+		ref, ok := branchRefs[a.ID]
 		if !ok {
 			return "", false
 		}
@@ -547,9 +569,83 @@ func prOwner(target string) (string, bool) {
 	return owner, ok
 }
 
+// artifactPRNodeID is the node id of the pull request a pull request or review
+// artifact is about, from its details; "" when the row carries none.
+func artifactPRNodeID(a domain.Artifact) string {
+	if a.Kind == domain.ArtifactKindReview {
+		d, _ := domain.ParseReviewArtifactDetails(a.DetailsJSON)
+		return d.NodeID
+	}
+	d, _ := domain.ParsePRArtifactDetails(a.DetailsJSON)
+	return d.NodeID
+}
+
+// registryReads are the entity and registry-row point reads one reconcile
+// pass makes, each row read once however many artifacts reference it.
+type registryReads struct {
+	rc       *Reconciler
+	entities map[string]*domain.Entity
+	repos    map[string]*domain.Repository
+}
+
+func newRegistryReads(rc *Reconciler) *registryReads {
+	return &registryReads{rc: rc, entities: map[string]*domain.Entity{}, repos: map[string]*domain.Repository{}}
+}
+
+func (r *registryReads) entity(ctx context.Context, orgID, id string) (*domain.Entity, error) {
+	if e, ok := r.entities[id]; ok {
+		return e, nil
+	}
+	e, err := r.rc.entities.GetSystem(ctx, orgID, id)
+	if err != nil {
+		return nil, err
+	}
+	r.entities[id] = e
+	return e, nil
+}
+
+func (r *registryReads) repository(ctx context.Context, orgID, id string) (*domain.Repository, error) {
+	if row, ok := r.repos[id]; ok {
+		return row, nil
+	}
+	row, err := r.rc.repos.GetSystem(ctx, orgID, id)
+	if err != nil {
+		return nil, err
+	}
+	r.repos[id] = row
+	return row, nil
+}
+
+// branchProbe returns the ref a branch artifact's existence is probed at: its
+// branch, in the repository its key's registry row (domain.BranchDedupKey) is
+// named now. A stored key that names its repository by owner/repo carries no
+// row and is probed at its target. ok=false when there is nothing to probe: a
+// retired row, whose name is another repository's now; a row that no longer
+// exists; or a malformed artifact.
+func branchProbe(ctx context.Context, orgID string, a domain.Artifact, repository func(ctx context.Context, orgID, id string) (*domain.Repository, error)) (github.BranchRef, bool, error) {
+	repositoryID, keyed := domain.BranchArtifactRepositoryID(a)
+	if !keyed {
+		ref, ok := branchRefOf(a)
+		return ref, ok, nil
+	}
+	branch, ok := strings.CutPrefix(a.ExternalID, "refs/heads/")
+	if !ok || branch == "" {
+		return github.BranchRef{}, false, nil
+	}
+	row, err := repository(ctx, orgID, repositoryID)
+	if err != nil {
+		return github.BranchRef{}, false, err
+	}
+	if row == nil || row.RetiredAt != nil {
+		return github.BranchRef{}, false, nil
+	}
+	return github.BranchRef{Owner: row.Owner, Repo: row.Repo, Branch: branch}, true, nil
+}
+
 // branchRefOf derives the GitHub coordinates of a branch artifact from its
-// Target (owner/repo) and ExternalID (refs/heads/<branch>). ok=false when either
-// is malformed — the row is skipped rather than probed against a guessed ref.
+// Target (owner/repo) and ExternalID (refs/heads/<branch>), for a row whose
+// key carries no registry row (branchProbe). ok=false when either is
+// malformed — the row is skipped rather than probed against a guessed ref.
 func branchRefOf(a domain.Artifact) (github.BranchRef, bool) {
 	parts := strings.SplitN(a.Target, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {

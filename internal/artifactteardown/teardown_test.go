@@ -7,22 +7,29 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 )
 
 // fakeStores is an in-memory teardown surface: one task, its conversations, and
-// the artifacts hanging off each. Writes land where a caller can read them back.
+// the artifacts hanging off each, plus the entities and registry rows a linked
+// artifact's pull request resolves through. Writes land where a caller can read
+// them back.
 type fakeStores struct {
-	convs     []domain.Conversation
-	artifacts map[string][]domain.Artifact // conversation id → artifacts
-	upserted  []domain.Artifact
-	recorded  []domain.ExternalAction
-	listErr   error
-	upsertErr error
+	convs        []domain.Conversation
+	artifacts    map[string][]domain.Artifact // conversation id → artifacts
+	entities     map[string]domain.Entity     // entity id → entity
+	repositories map[string]domain.Repository // registry row id → row
+	upserted     []domain.Artifact
+	recorded     []domain.ExternalAction
+	listErr      error
+	upsertErr    error
 }
 
 func (f *fakeStores) ConversationsForTask(context.Context, string, string) ([]domain.Conversation, error) {
@@ -47,6 +54,20 @@ func (f *fakeStores) UpsertArtifact(_ context.Context, _ string, a domain.Artifa
 func (f *fakeStores) RecordExternalAction(_ context.Context, _ string, act domain.ExternalAction) error {
 	f.recorded = append(f.recorded, act)
 	return nil
+}
+
+func (f *fakeStores) Entity(_ context.Context, _, id string) (*domain.Entity, error) {
+	if e, ok := f.entities[id]; ok {
+		return &e, nil
+	}
+	return nil, nil
+}
+
+func (f *fakeStores) Repository(_ context.Context, _, id string) (*domain.Repository, error) {
+	if r, ok := f.repositories[id]; ok {
+		return &r, nil
+	}
+	return nil, fmt.Errorf("%w: %s", db.ErrNoSuchRepository, id)
 }
 
 // fakeDeps runs every batch against one fakeStores and hands out one resolver.
@@ -301,17 +322,58 @@ func TestTeardown_ReadsTheResolverOnce(t *testing.T) {
 	}
 }
 
-// TestCredentialForTarget pins the map lookup, including the miss a draft PR
-// opened between the pre-pass and the write batch would produce.
-func TestCredentialForTarget(t *testing.T) {
-	credentials := map[string]string{"octo/repo": domain.CredentialGitHubPAT}
-	if got := credentialForTarget(credentials, "octo/repo#3"); got != domain.CredentialGitHubPAT {
+// TestCredentialFor pins the map lookup, including the miss a draft PR opened
+// between the pre-pass and the write batch would produce.
+func TestCredentialFor(t *testing.T) {
+	credentials := map[string]string{"art_1": domain.CredentialGitHubPAT}
+	if got := credentialFor(credentials, "art_1"); got != domain.CredentialGitHubPAT {
 		t.Errorf("hit = %q, want github_pat", got)
 	}
-	if got := credentialForTarget(credentials, "other/repo#3"); got != domain.CredentialGitHubApp {
+	if got := credentialFor(credentials, "art_2"); got != domain.CredentialGitHubApp {
 		t.Errorf("miss = %q, want the app fallback", got)
 	}
-	if got := credentialForTarget(credentials, "garbage"); got != domain.CredentialGitHubApp {
-		t.Errorf("unparseable target = %q, want the app fallback", got)
+}
+
+// TestTeardown_ClosesThePullRequestItsEntityNames: a draft PR's pull request is
+// the one its entity is about, in the repository that entity's registry row
+// names now. A row renamed since the draft was written is closed under its new
+// name, whatever the artifact's target still spells; a retired row's pull
+// request is not closed at all, since GitHub serves the name as another
+// repository now. Both are still flipped and audited.
+func TestTeardown_ClosesThePullRequestItsEntityNames(t *testing.T) {
+	var paths []string
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 7, "state": "closed"})
+	}))
+	t.Cleanup(stub.Close)
+
+	renamed := draftPRIn("conv", "owner/old-name", 7, "art_renamed")
+	renamed.EntityID = "ent-renamed"
+	retired := draftPRIn("conv", "owner/gone", 9, "art_retired")
+	retired.EntityID = "ent-retired"
+	retiredAt := time.Now()
+	stores := &fakeStores{
+		convs:     []domain.Conversation{{ID: "conv"}},
+		artifacts: map[string][]domain.Artifact{"conv": {renamed, retired}},
+		entities: map[string]domain.Entity{
+			"ent-renamed": {ID: "ent-renamed", SourceID: "owner/old-name#7", RepositoryID: "repo-renamed"},
+			"ent-retired": {ID: "ent-retired", SourceID: "owner/gone#9", RepositoryID: "repo-retired"},
+		},
+		repositories: map[string]domain.Repository{
+			"repo-renamed": {ID: "repo-renamed", Owner: "owner", Repo: "new-name"},
+			"repo-retired": {ID: "repo-retired", Owner: "owner", Repo: "gone", RetiredAt: &retiredAt},
+		},
+	}
+	deps := &fakeDeps{stores: stores, resolver: oneClientResolver{client: ghclient.NewClient(stub.URL, "pat")}}
+
+	if err := Teardown(context.Background(), deps, "org", "task", "user-1"); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if len(paths) != 1 || !strings.HasSuffix(paths[0], "/repos/owner/new-name/pulls/7") {
+		t.Errorf("GitHub requests = %v, want the one close of owner/new-name#7", paths)
+	}
+	if len(stores.upserted) != 2 || len(stores.recorded) != 2 {
+		t.Errorf("upserts=%d audit=%d, want both drafts flipped and audited", len(stores.upserted), len(stores.recorded))
 	}
 }

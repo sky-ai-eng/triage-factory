@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
@@ -39,6 +40,11 @@ type Stores interface {
 	// RecordExternalAction appends the audit row for a GitHub write this
 	// teardown is about to make.
 	RecordExternalAction(ctx context.Context, orgID string, act domain.ExternalAction) error
+	// Entity and Repository are the point reads (db.EntityStore.Get,
+	// db.RepositoryStore.Get) a draft PR's pull request is resolved through:
+	// the entity it is about, and the registry row that entity references.
+	Entity(ctx context.Context, orgID, id string) (*domain.Entity, error)
+	Repository(ctx context.Context, orgID, id string) (*domain.Repository, error)
 }
 
 // Deps is what Teardown needs from the process running it.
@@ -96,10 +102,10 @@ func Teardown(ctx context.Context, deps Deps, orgID, taskID, actorUserID string)
 	// classification can reach GitHub.
 	credentials := credentialsForTask(ctx, deps, resolver, orgID, taskID)
 
-	// Draft PRs captured inside the batch (state already flipped) and closed on
-	// GitHub after it lands — a network call must not hold a write transaction
-	// open.
-	var prArtifacts []domain.Artifact
+	// Draft PRs captured inside the batch (state already flipped), each with
+	// the pull request it is about, and closed on GitHub after it lands — a
+	// network call must not hold a write transaction open.
+	var closes []draftClose
 	if err := deps.Batch(ctx, orgID, func(st Stores) error {
 		convs, err := st.ConversationsForTask(ctx, orgID, taskID)
 		if err != nil {
@@ -142,11 +148,20 @@ func Teardown(ctx context.Context, deps Deps, orgID, taskID, actorUserID string)
 				}
 				act := domain.ArtifactAction(&pr, actorUserID, domain.ActionPRClosed,
 					domain.ArtifactStatePRDraft, domain.ArtifactStatePRClosed,
-					credentialForTarget(credentials, pr.Target))
+					credentialFor(credentials, pr.ID))
 				if err := st.RecordExternalAction(ctx, orgID, act); err != nil {
 					return fmt.Errorf("record external action for closed draft pr: %w", err)
 				}
-				prArtifacts = append(prArtifacts, pr)
+				// The flip is the resolution; a pull request that cannot be
+				// resolved is closed TF-side only, and reconciliation retires
+				// the GitHub object later.
+				resolved, err := db.ResolveArtifactPullRequest(ctx, orgID, pr, st.Entity, st.Repository)
+				if err != nil {
+					teardownLog.Warn("resolve draft PR for its GitHub close failed; skipping the close (artifact already marked closed)",
+						"artifact", pr.ID, "error", err)
+					continue
+				}
+				closes = append(closes, draftClose{art: pr, pr: resolved})
 			}
 		}
 		return nil
@@ -158,28 +173,38 @@ func Teardown(ctx context.Context, deps Deps, orgID, taskID, actorUserID string)
 	// already marked closed; a GitHub failure leaves the object for
 	// reconciliation to retire later and must never fail the close that
 	// triggered this. Branches stay.
-	for i := range prArtifacts {
-		CloseDraftPR(ctx, resolver, orgID, &prArtifacts[i])
+	for i := range closes {
+		CloseDraftPR(ctx, resolver, orgID, &closes[i].art, closes[i].pr)
 	}
 	return nil
 }
 
-// credentialsForTask classifies the acting GitHub credential for every repo the
-// task's unresolved draft PRs live in, keyed by "owner/repo". It exists so the
-// teardown's audit rows can name that credential without probing GitHub from
-// inside the write batch those rows are composed into — the read pass and the
-// classification both finish before that batch opens.
+// draftClose is one draft PR the teardown flipped, with the pull request on
+// GitHub it closes afterwards.
+type draftClose struct {
+	art domain.Artifact
+	pr  db.ArtifactPullRequest
+}
+
+// credentialsForTask classifies the acting GitHub credential for every draft PR
+// the task's unresolved artifacts hold, keyed by artifact id: the credential
+// for the repository the pull request is in (db.ResolveArtifactPullRequest),
+// under the name GitHub serves it now. It exists so the teardown's audit rows
+// can name that credential without probing GitHub from inside the write batch
+// those rows are composed into — the read pass and the classification both
+// finish before that batch opens.
 //
 // Best-effort: a read failure yields an empty map and every row falls back to
-// the App, exactly as an unclassifiable repo does. The teardown itself is
-// unaffected — it re-reads the artifacts under its own batch and is the
-// authority on which ones it resolves.
+// the App, exactly as an unclassifiable repo does; so does a pull request that
+// cannot be resolved, or whose repository's registry row is retired. The
+// teardown itself is unaffected — it re-reads the artifacts under its own
+// batch and is the authority on which ones it resolves.
 //
 // resolver is passed in rather than read from deps: it must be the same one the
 // closes these rows describe are made through (see Teardown).
 func credentialsForTask(ctx context.Context, deps Deps, resolver ghclient.Resolver, orgID, taskID string) map[string]string {
 	type ownerRepo struct{ owner, repo string }
-	repos := map[string]ownerRepo{}
+	repoOf := map[string]ownerRepo{} // artifact id → repository
 	if err := deps.Batch(ctx, orgID, func(st Stores) error {
 		convs, err := st.ConversationsForTask(ctx, orgID, taskID)
 		if err != nil {
@@ -191,9 +216,11 @@ func credentialsForTask(ctx context.Context, deps Deps, resolver ghclient.Resolv
 				return artErr
 			}
 			for _, pr := range domain.AllDraftPullRequests(arts) {
-				if owner, repo, _, ok := domain.ParsePRTarget(pr.Target); ok {
-					repos[owner+"/"+repo] = ownerRepo{owner: owner, repo: repo}
+				resolved, err := db.ResolveArtifactPullRequest(ctx, orgID, pr, st.Entity, st.Repository)
+				if err != nil || resolved.Retired {
+					continue
 				}
+				repoOf[pr.ID] = ownerRepo{owner: resolved.Owner, repo: resolved.Repo}
 			}
 		}
 		return nil
@@ -202,23 +229,26 @@ func credentialsForTask(ctx context.Context, deps Deps, resolver ghclient.Resolv
 			"task", taskID, "error", err)
 		return nil
 	}
-	out := make(map[string]string, len(repos))
-	for repoID, or := range repos {
-		out[repoID] = ghclient.CredentialForRepo(ctx, resolver, orgID, or.owner, or.repo)
+	// One classification per repository, however many draft PRs it holds.
+	byRepo := map[ownerRepo]string{}
+	out := make(map[string]string, len(repoOf))
+	for artifactID, or := range repoOf {
+		cred, seen := byRepo[or]
+		if !seen {
+			cred = ghclient.CredentialForRepo(ctx, resolver, orgID, or.owner, or.repo)
+			byRepo[or] = cred
+		}
+		out[artifactID] = cred
 	}
 	return out
 }
 
-// credentialForTarget looks a PR target's repo up in the map credentialsForTask
-// built. A miss — an unparseable target, or a draft PR that appeared between the
-// pre-pass and the batch — reports the App, the same answer an unclassifiable
-// repo gets.
-func credentialForTarget(credentials map[string]string, target string) string {
-	owner, repo, _, ok := domain.ParsePRTarget(target)
-	if !ok {
-		return domain.CredentialGitHubApp
-	}
-	if cred, hit := credentials[owner+"/"+repo]; hit {
+// credentialFor looks a draft PR up in the map credentialsForTask built. A miss
+// — a pull request that could not be resolved, or a draft PR that appeared
+// between the pre-pass and the batch — reports the App, the same answer an
+// unclassifiable repo gets.
+func credentialFor(credentials map[string]string, artifactID string) string {
+	if cred, hit := credentials[artifactID]; hit {
 		return cred
 	}
 	return domain.CredentialGitHubApp
@@ -227,21 +257,24 @@ func credentialForTarget(credentials map[string]string, target string) string {
 // CloseDraftPR closes an abandoned draft PR on GitHub. Best-effort: every
 // failure is logged, never returned — the artifact is already marked closed and
 // the task or conversation already resolved, so a GitHub hiccup mustn't unwind
-// that. owner/repo/number come from the artifact's target; the per-repo client
-// resolves App-installation-token → PAT like every other PR mutation. A free
-// function taking the resolver so the task-level teardown and the per-artifact
-// dismiss endpoint share one GitHub-resolution path. The pushed branch is never
-// touched (retention is a separate concern).
-func CloseDraftPR(ctx context.Context, resolver ghclient.Resolver, orgID string, art *domain.Artifact) {
+// that. pr is the pull request the artifact is about, resolved by the caller
+// (db.ResolveArtifactPullRequest): its repository's current name and its
+// number. One whose repository's registry row is retired is not closed — GitHub
+// serves the name as another repository now. The per-repo client resolves
+// App-installation-token → PAT like every other PR mutation. A free function
+// taking the resolver so the task-level teardown and the per-artifact dismiss
+// endpoint share one GitHub-resolution path. The pushed branch is never touched
+// (retention is a separate concern).
+func CloseDraftPR(ctx context.Context, resolver ghclient.Resolver, orgID string, art *domain.Artifact, pr db.ArtifactPullRequest) {
 	if resolver == nil {
 		teardownLog.Warn("no github resolver; skipping draft PR close (artifact already marked closed)", "artifact", art.ID)
 		return
 	}
-	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
-	if !ok {
-		teardownLog.Warn("draft PR artifact has a malformed target; skipping GitHub close", "artifact", art.ID, "target", art.Target)
+	if pr.Retired {
+		teardownLog.Warn("draft PR's repository is retired; skipping GitHub close (artifact already marked closed)", "artifact", art.ID, "repository_id", pr.RepositoryID)
 		return
 	}
+	owner, repo, number := pr.Owner, pr.Repo, pr.Number
 	gh, err := resolver.ClientForRepo(ctx, orgID, owner, repo)
 	if err != nil {
 		teardownLog.Warn("resolve github client for draft PR close failed", "artifact", art.ID, "owner", owner, "repo", repo, "error", err)

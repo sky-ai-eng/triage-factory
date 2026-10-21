@@ -1717,3 +1717,17 @@ func (d systemTeardown) UpsertArtifact(ctx context.Context, orgID string, a doma
 func (d systemTeardown) RecordExternalAction(ctx context.Context, orgID string, act domain.ExternalAction) error {
 	return d.s.externalActions.RecordSystem(ctx, orgID, act)
 }
+
+func (d systemTeardown) Entity(ctx context.Context, orgID, id string) (*domain.Entity, error) {
+	if d.s.entities == nil {
+		return nil, nil
+	}
+	return d.s.entities.GetSystem(ctx, orgID, id)
+}
+
+func (d systemTeardown) Repository(ctx context.Context, orgID, id string) (*domain.Repository, error) {
+	if d.s.repos == nil {
+		return nil, fmt.Errorf("%w: %s (no repository store)", db.ErrNoSuchRepository, id)
+	}
+	return d.s.repos.GetSystem(ctx, orgID, id)
+}

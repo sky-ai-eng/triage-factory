@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
@@ -73,16 +74,21 @@ func TestCredentialForRepo(t *testing.T) {
 	}
 }
 
-// TestGithubCredentialForArtifact pins the artifact-keyed wrapper: it reads the
-// repo off the target, and a target it cannot parse names no repo to classify.
-func TestGithubCredentialForArtifact(t *testing.T) {
+// TestGithubCredentialForPullRequest pins the pull-request-keyed wrapper: it
+// classifies the resolved repository, and a pull request that did not resolve,
+// or whose repository's row is retired, names no repository to classify.
+func TestGithubCredentialForPullRequest(t *testing.T) {
 	pat := identityResolver{identity: ghclient.IdentityPAT}
-	art := &domain.Artifact{Target: "octo/repo#7"}
-	if got := githubCredentialForArtifact(t.Context(), pat, "org", art); got != domain.CredentialGitHubPAT {
+	pr := &db.ArtifactPullRequest{RepositoryID: "repo-1", Owner: "octo", Repo: "repo", Number: 7}
+	if got := githubCredentialForPullRequest(t.Context(), pat, "org", pr); got != domain.CredentialGitHubPAT {
 		t.Errorf("credential = %q, want github_pat", got)
 	}
-	malformed := &domain.Artifact{Target: "not-a-pr-target"}
-	if got := githubCredentialForArtifact(t.Context(), pat, "org", malformed); got != domain.CredentialGitHubApp {
-		t.Errorf("credential for an unparseable target = %q, want the app fallback", got)
+	if got := githubCredentialForPullRequest(t.Context(), pat, "org", nil); got != domain.CredentialGitHubApp {
+		t.Errorf("credential for an unresolved pull request = %q, want the app fallback", got)
+	}
+	retired := *pr
+	retired.Retired = true
+	if got := githubCredentialForPullRequest(t.Context(), pat, "org", &retired); got != domain.CredentialGitHubApp {
+		t.Errorf("credential for a retired repository = %q, want the app fallback", got)
 	}
 }

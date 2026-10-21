@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/zalando/go-keyring"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -96,6 +97,68 @@ func seedDraftPRArtifact(t *testing.T, s *Server, owner, repo string) string {
 }
 
 // --- PR artifact read (resolver tier coverage for the GitHub-native PR path) ---
+
+// TestArtifactPR_AddressedByItsEntitysRepositoryRow: the pull request an
+// artifact is about is the one its entity names, in the repository that
+// entity's registry row names now. After a rename that rewrote nothing else,
+// the live read goes out under the new name; once the row is retired — GitHub
+// serving its name as another repository — the read serves the stored snapshot
+// and a write is refused, rather than reaching that repository's #42.
+func TestArtifactPR_AddressedByItsEntitysRepositoryRow(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var paths []string
+	mux := newAppAPIMux()
+	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "title": "Live title", "body": "Live body"})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, _, _ := seedDraftPRArtifactWithConversation(t, srv, "renamed-pr", "acme", "api", 42)
+	art := getArtifact(t, srv, artID)
+	entity, err := sqlitestore.New(srv.db).Entities.GetSystem(context.Background(), runmode.LocalDefaultOrgID, art.EntityID)
+	if err != nil || entity == nil {
+		t.Fatalf("read the artifact's entity: got=%v err=%v", entity, err)
+	}
+	dbseed.RenameRepositoryOnly(t, srv.db, entity.RepositoryID, "acme", "renamed")
+
+	rec := doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Details map[string]any `json:"details"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(paths) != 1 || paths[0] != "/api/v3/repos/acme/renamed/pulls/42" {
+		t.Errorf("live reads = %v, want the one under acme/renamed", paths)
+	}
+	if out.Details["repo"] != "renamed" || out.Details["title"] != "Live title" {
+		t.Errorf("details = %v, want the live PR under its repository's current name", out.Details)
+	}
+
+	execSQL(t, srv.db, `UPDATE repositories SET retired_at = CURRENT_TIMESTAMP WHERE id = ?`, entity.RepositoryID)
+	paths = nil
+	rec = doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get after retire = %d, want 200 (the snapshot); body=%s", rec.Code, rec.Body.String())
+	}
+	if len(paths) != 0 {
+		t.Errorf("live reads after retire = %v, want none", paths)
+	}
+	rec = doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("approve after retire = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(paths) != 0 {
+		t.Errorf("GitHub requests after retire = %v, want none", paths)
+	}
+}
 
 func TestArtifactGet_AppOnlyOrg_Success(t *testing.T) {
 	keyring.MockInit()

@@ -84,6 +84,14 @@ type Runtime interface {
 	// descriptive only, never the real App-vs-PAT tier.
 	ReviewPosture(ctx context.Context, owner, repo string) (ReviewPostureResolution, error)
 
+	// ArtifactPullRequest returns the pull request the run's own artifact
+	// artifactID is about, as GitHub addresses it now
+	// (db.ResolveArtifactPullRequest): its repository is read by id, through
+	// the artifact's entity, so a rename since the artifact was recorded is
+	// followed and a retired repository is reported as retired. An artifact
+	// that is not the conversation's is refused.
+	ArtifactPullRequest(ctx context.Context, artifactID string) (db.ArtifactPullRequest, error)
+
 	// Writes.
 	InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (inserted bool, winningPath string, err error)
 	DeleteConversationWorktree(ctx context.Context, repositoryID, ref string) error
@@ -229,6 +237,7 @@ const (
 	opCheckEntitlement                 = "check_entitlement"
 	opSourceDisabled                   = "source_disabled"
 	opReviewPosture                    = "review_posture"
+	opArtifactPullRequest              = "artifact_pull_request"
 	// opCreateWorkspaceCheckout materializes a `workspace add` checkout. Unlike
 	// the other core ops it is FS-bearing: the sidecar relays it because it owns
 	// neither the shared bare cache nor the run-root; the orchestrator serves it.
@@ -306,6 +315,23 @@ type ReviewPostureResolution struct {
 type reviewPostureArgs struct {
 	Owner string `json:"owner"`
 	Repo  string `json:"repo"`
+}
+
+// artifactPullRequestArgs / artifactPullRequestResult are the
+// artifact_pull_request op's payloads: one of the run's artifacts, and the
+// pull request it is about (db.ArtifactPullRequest). The conversation the
+// artifact must belong to is bound orchestrator-side, so the wire carries only
+// the id.
+type artifactPullRequestArgs struct {
+	ArtifactID string `json:"artifact_id"`
+}
+
+type artifactPullRequestResult struct {
+	RepositoryID string `json:"repository_id"`
+	Owner        string `json:"owner"`
+	Repo         string `json:"repo"`
+	Number       int    `json:"number"`
+	Retired      bool   `json:"retired"`
 }
 
 // listConversationArtifactsResult / orgJiraBaseResult / recordExternalWriteArgs are the
@@ -544,6 +570,22 @@ func (r *directRuntime) ReviewPosture(ctx context.Context, owner, repo string) (
 	}
 	out.Identity = identity
 	return out, nil
+}
+
+// ArtifactPullRequest finds the artifact among the conversation's own, through
+// the same read ListConversationArtifacts serves, so the id names nothing
+// outside this run.
+func (r *directRuntime) ArtifactPullRequest(ctx context.Context, artifactID string) (db.ArtifactPullRequest, error) {
+	arts, err := r.ListConversationArtifacts(ctx)
+	if err != nil {
+		return db.ArtifactPullRequest{}, err
+	}
+	for _, a := range arts {
+		if a.ID == artifactID {
+			return db.ResolveArtifactPullRequest(ctx, r.info.OrgID, a, r.stores.Entities.GetSystem, r.stores.Repos.GetSystem)
+		}
+	}
+	return db.ArtifactPullRequest{}, fmt.Errorf("artifact %s is not one of this conversation's", artifactID)
 }
 
 func (r *directRuntime) InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (bool, string, error) {
@@ -965,6 +1007,20 @@ func (r *relayRuntime) ReviewPosture(ctx context.Context, owner, repo string) (R
 		return ReviewPostureResolution{}, err
 	}
 	return res, nil
+}
+
+func (r *relayRuntime) ArtifactPullRequest(ctx context.Context, artifactID string) (db.ArtifactPullRequest, error) {
+	var res artifactPullRequestResult
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opArtifactPullRequest, artifactPullRequestArgs{ArtifactID: artifactID}, &res); err != nil {
+		return db.ArtifactPullRequest{}, err
+	}
+	return db.ArtifactPullRequest{
+		RepositoryID: res.RepositoryID,
+		Owner:        res.Owner,
+		Repo:         res.Repo,
+		Number:       res.Number,
+		Retired:      res.Retired,
+	}, nil
 }
 
 func (r *relayRuntime) InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (bool, string, error) {
