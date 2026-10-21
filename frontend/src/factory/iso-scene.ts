@@ -2916,21 +2916,22 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
 }
 
 // Compute chip decoration (hue + short label) from a snapshot entity.
-// GitHub: hue from the repo, label is the PR number. Jira and Linear: hue
-// from the project / team key prefix of source_id, label is the full
-// source_id. Same hue for every chip belonging to the same repo/project/team
-// keeps them visually grouped without any user config.
+// The hue comes from the registry row the entity belongs to — its
+// repository, Jira project or Linear team id — so every chip of one
+// repository/project/team shares a hue without any user config, and a
+// rename does not recolor them. The label is display text: the PR number
+// for GitHub, the issue key for Jira and Linear.
 function chipDecorFor(entity: FactoryEntity): { hue?: number; label?: string } {
   if (entity.source === 'github') {
     return {
-      hue: entity.repo ? hashHue(entity.repo) : undefined,
+      hue: entity.repository_id ? hashHue(entity.repository_id) : undefined,
       label: entity.number != null ? `#${entity.number}` : undefined,
     }
   }
   if (entity.source === 'jira' || entity.source === 'linear') {
-    const projectKey = entity.source_id?.split('-')[0]
+    const group = entity.source === 'jira' ? entity.jira_project_id : entity.linear_team_id
     return {
-      hue: projectKey ? hashHue(projectKey) : undefined,
+      hue: group ? hashHue(group) : undefined,
       label: entity.source_id || undefined,
     }
   }
@@ -2938,6 +2939,6 @@ function chipDecorFor(entity: FactoryEntity): { hue?: number; label?: string } {
 }
 
 // hashHue is re-exported from iso-items so callers (the React-layer
-// spawn pipeline) can derive a chip hue from a repo / project string
-// without reaching into the simulator module directly.
+// spawn pipeline) can derive a chip hue from a grouping id without
+// reaching into the simulator module directly.
 export { hashHue }

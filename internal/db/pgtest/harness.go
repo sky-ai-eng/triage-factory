@@ -495,7 +495,7 @@ var orgScopedTables = []string{
 	"task_events", "tasks",
 	"event_handlers",
 	"events", "entity_links", "entities",
-	"repositories", "poller_state",
+	"repositories",
 	"prompts",
 	// marketplace_listings cascades into its version/event/vote/install
 	// children via their own org_id-CASCADE FKs — only the parent needs

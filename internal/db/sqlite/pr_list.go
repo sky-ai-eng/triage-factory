@@ -61,7 +61,12 @@ func sqlitePRStateClause(states []string) (string, error) {
 const sqlitePRSummaryOrder = `
 	ORDER BY e.last_polled_at DESC, e.id`
 
-// sqliteScanPRSummaries drains a snapshot_json-only result set into rows.
+// sqlitePRSummaryColumns is the select list sqliteScanPRSummaries reads: the
+// entity id the row is addressed by, and the snapshot the rest of the row
+// projects.
+const sqlitePRSummaryColumns = `e.id, e.snapshot_json`
+
+// sqliteScanPRSummaries drains a sqlitePRSummaryColumns result set into rows.
 //
 // The two failure modes are deliberately not the same. A malformed snapshot is
 // one bad stored row, skipped for the same reason the guard above exists. A
@@ -73,15 +78,17 @@ func sqliteScanPRSummaries(rows *sql.Rows) ([]domain.PRSummaryRow, error) {
 	defer rows.Close()
 	prs := []domain.PRSummaryRow{}
 	for rows.Next() {
-		var snapJSON string
-		if err := rows.Scan(&snapJSON); err != nil {
+		var entityID, snapJSON string
+		if err := rows.Scan(&entityID, &snapJSON); err != nil {
 			return nil, fmt.Errorf("scan pull request snapshot: %w", err)
 		}
 		var snap domain.PRSnapshot
 		if err := json.Unmarshal([]byte(snapJSON), &snap); err != nil {
 			continue
 		}
-		prs = append(prs, domain.PRSummaryFromSnapshot(snap))
+		row := domain.PRSummaryFromSnapshot(snap)
+		row.EntityID = entityID
+		prs = append(prs, row)
 	}
 	return prs, rows.Err()
 }

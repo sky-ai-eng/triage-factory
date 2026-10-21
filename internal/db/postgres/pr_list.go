@@ -59,7 +59,11 @@ func pgPRStateClause(states []string) (string, error) {
 const pgPRSummaryOrder = `
 	ORDER BY e.last_polled_at DESC NULLS LAST, e.id`
 
-// pgScanPRSummaries drains a snapshot_json-only result set into rows.
+// pgPRSummaryColumns is the select list pgScanPRSummaries reads: the entity
+// id the row is addressed by, and the snapshot the rest of the row projects.
+const pgPRSummaryColumns = `e.id, e.snapshot_json`
+
+// pgScanPRSummaries drains a pgPRSummaryColumns result set into rows.
 //
 // The two failure modes are deliberately not the same. A malformed or empty
 // snapshot is one bad stored row, skipped so it cannot blank a whole list. A
@@ -71,8 +75,9 @@ func pgScanPRSummaries(rows *sql.Rows) ([]domain.PRSummaryRow, error) {
 	defer rows.Close()
 	prs := []domain.PRSummaryRow{}
 	for rows.Next() {
+		var entityID string
 		var snapJSON []byte
-		if err := rows.Scan(&snapJSON); err != nil {
+		if err := rows.Scan(&entityID, &snapJSON); err != nil {
 			return nil, fmt.Errorf("scan pull request snapshot: %w", err)
 		}
 		if len(snapJSON) == 0 {
@@ -82,7 +87,9 @@ func pgScanPRSummaries(rows *sql.Rows) ([]domain.PRSummaryRow, error) {
 		if err := json.Unmarshal(snapJSON, &snap); err != nil {
 			continue
 		}
-		prs = append(prs, domain.PRSummaryFromSnapshot(snap))
+		row := domain.PRSummaryFromSnapshot(snap)
+		row.EntityID = entityID
+		prs = append(prs, row)
 	}
 	return prs, rows.Err()
 }

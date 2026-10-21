@@ -74,10 +74,11 @@ func (h *handler) gate(w http.ResponseWriter, r *http.Request) *verify.Claims {
 // isOperator resolves the deployment-operator flag for the request identity.
 // Local mode is a single implicit operator (matching /api/me), though the
 // entitlement gate above already darkens the console there (no license). Multi
-// mode asks whether any of the principal's login identities holds an operator
-// address verified. claims.Subject is the principal for a session and a token
-// alike; claims.Email is never consulted, because an SSO sign-in's token
-// carries whatever address its identity provider asserted, verified or not.
+// mode asks whether a grant is bound to the principal, or one of its login
+// identities holds a pending grant's address verified (db.OperatorStore).
+// claims.Subject is the principal for a session and a token alike;
+// claims.Email is never consulted, because an SSO sign-in's token carries
+// whatever address its identity provider asserted, verified or not.
 func (h *handler) isOperator(ctx context.Context, claims *verify.Claims) (bool, error) {
 	if runmode.Current() == runmode.ModeLocal {
 		return true, nil

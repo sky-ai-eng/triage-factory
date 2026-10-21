@@ -109,26 +109,14 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID string, viewer db.PRView
 	if err != nil {
 		return nil, 0, err
 	}
-	// Each leg binds only when the viewer carries that id, so an unbound
-	// GitHub identity narrows the list to what they commissioned instead of
-	// matching every row whose author is the empty string.
-	args := []any{orgID}
-	legs := make([]string, 0, 2)
-	if viewer.Login != "" {
-		args = append(args, viewer.Login)
-		legs = append(legs, fmt.Sprintf("e.snapshot_json ->> 'author' = $%d", len(args)))
-	}
-	if viewer.UserID != "" {
-		args = append(args, viewer.UserID)
-		legs = append(legs, fmt.Sprintf("e.commissioned_by_user_id = $%d", len(args)))
-	}
-	if len(legs) == 0 {
+	mine, args, ok := pgPRViewerLegs(viewer, []any{orgID})
+	if !ok {
 		return []domain.PRSummaryRow{}, 0, nil
 	}
 
 	where := `
 		WHERE e.org_id = $1 AND e.source = 'github' AND e.snapshot_json IS NOT NULL
-		  AND (` + strings.Join(legs, " OR ") + `)` + stateClause
+		  AND ` + mine + stateClause
 
 	var total int
 	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM entities e`+where, args...).Scan(&total); err != nil {
@@ -138,7 +126,7 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID string, viewer db.PRView
 		return []domain.PRSummaryRow{}, total, nil
 	}
 
-	query := `SELECT e.snapshot_json FROM entities e` + where + pgPRSummaryOrder
+	query := `SELECT ` + pgPRSummaryColumns + ` FROM entities e` + where + pgPRSummaryOrder
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(` LIMIT $%d OFFSET $%d`, len(args)+1, len(args)+2)
 		args = append(args, opts.Limit, opts.Offset)
@@ -152,6 +140,43 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID string, viewer db.PRView
 		return nil, 0, err
 	}
 	return prs, total, nil
+}
+
+// PR reads one entity under the predicate PRs pages by, so a pull request
+// outside the viewer's list is a miss here too.
+func (s *dashboardStore) PR(ctx context.Context, orgID string, viewer db.PRViewer, entityID string) (*domain.Entity, error) {
+	mine, args, ok := pgPRViewerLegs(viewer, []any{orgID, entityID})
+	if !ok {
+		return nil, nil
+	}
+	return scanEntityRow(s.q.QueryRowContext(ctx, `
+		SELECT `+pgEntitySelectCols+`
+		  FROM entities e
+		 WHERE e.org_id = $1 AND e.id = $2 AND e.source = 'github' AND e.snapshot_json IS NOT NULL
+		   AND `+mine, args...))
+}
+
+// pgPRViewerLegs renders the viewer's population as a parenthesized OR of the
+// identity legs the viewer carries, appending each leg's bind to args. Each
+// leg binds only when the viewer carries that id, so an unbound GitHub
+// identity narrows the population to what they commissioned instead of
+// matching every row whose author is the empty string. ok is false when the
+// viewer carries neither: there is no population to answer for, and the
+// caller answers empty rather than for the whole org.
+func pgPRViewerLegs(viewer db.PRViewer, args []any) (clause string, out []any, ok bool) {
+	legs := make([]string, 0, 2)
+	if viewer.Login != "" {
+		args = append(args, viewer.Login)
+		legs = append(legs, fmt.Sprintf("e.snapshot_json ->> 'author' = $%d", len(args)))
+	}
+	if viewer.UserID != "" {
+		args = append(args, viewer.UserID)
+		legs = append(legs, fmt.Sprintf("e.commissioned_by_user_id = $%d", len(args)))
+	}
+	if len(legs) == 0 {
+		return "", args, false
+	}
+	return "(" + strings.Join(legs, " OR ") + ")", args, true
 }
 
 // buildDashboardTimeline reshapes the per-day count map into a

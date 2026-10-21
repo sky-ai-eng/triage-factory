@@ -22,6 +22,10 @@ type DashboardPoint struct {
 // PRSummaryRow is a PR as displayed on the dashboard list. Returned
 // by db.DashboardStore.PRs and rendered as JSON by the dashboard PR list.
 type PRSummaryRow struct {
+	// EntityID is the pull request's entity, the id a client addresses
+	// the PR by when it calls back about it (the dashboard's per-PR
+	// routes). Repo and Number are display values.
+	EntityID  string   `json:"entity_id"`
 	Number    int      `json:"number"`
 	Title     string   `json:"title"`
 	Repo      string   `json:"repo"`

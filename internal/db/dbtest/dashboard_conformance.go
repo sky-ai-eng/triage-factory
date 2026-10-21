@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -67,6 +69,8 @@ func (s DashboardSeeder) Snapshot(t *testing.T, snap domain.PRSnapshot) {
 //     leg answers for exactly one viewer.
 //   - PRs honors the states filter, refuses an unknown state, and answers a
 //     count-only read with the same total as the paged one.
+//   - Every PRs row carries its entity id, and PR resolves an id only
+//     within the population PRs pages for the same viewer.
 //   - Empty stats path (no snapshots) returns zeroed counts but
 //     a populated 14-bucket timeline (skeleton always present).
 func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
@@ -406,6 +410,77 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 				t.Errorf("states=%v count-only total=%d, paged total=%d — the figure and the list disagree",
 					tc.states, countTotal, total)
 			}
+		}
+	})
+
+	t.Run("PRs_RowsCarryTheirEntityID", func(t *testing.T) {
+		// The per-PR routes address a pull request by the id its row served,
+		// so every row carries its own entity's.
+		store, orgID, viewerID, seed := factory(t)
+		want := map[int]string{
+			80: seed.PR(t, DashboardPRFixture{Snapshot: domain.PRSnapshot{Number: 80, Author: username, State: "OPEN", Repo: "owner/repo"}}),
+			81: seed.PR(t, DashboardPRFixture{Snapshot: domain.PRSnapshot{Number: 81, Author: username, State: "OPEN", Repo: "owner/repo"}}),
+		}
+
+		prs, _, err := store.PRs(context.Background(), orgID, viewerOf(username, viewerID), db.PRListFilter{}, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("PRs: %v", err)
+		}
+		if len(prs) != len(want) {
+			t.Fatalf("len(prs)=%d, want %d", len(prs), len(want))
+		}
+		for _, p := range prs {
+			if p.EntityID != want[p.Number] {
+				t.Errorf("PR #%d carried entity id %q, want %q", p.Number, p.EntityID, want[p.Number])
+			}
+		}
+	})
+
+	t.Run("PR_ResolvesOnlyWithinTheViewersPopulation", func(t *testing.T) {
+		// The point read answers for exactly the rows PRs would page for the
+		// same viewer, so an id a client did not get from its own list
+		// resolves to nothing.
+		store, orgID, viewerID, seed := factory(t)
+		other := seed.User(t, "someone else")
+		authored := seed.PR(t, DashboardPRFixture{Snapshot: domain.PRSnapshot{Number: 90, Author: username, State: "OPEN", Repo: "owner/repo"}})
+		commissioned := seed.PR(t, DashboardPRFixture{
+			Snapshot:       domain.PRSnapshot{Number: 91, Author: "tf-bot", State: "OPEN", Repo: "owner/repo"},
+			CommissionedBy: viewerID,
+		})
+		strangers := seed.PR(t, DashboardPRFixture{Snapshot: domain.PRSnapshot{Number: 92, Author: "stranger", State: "OPEN", Repo: "owner/repo"}})
+		othersCommission := seed.PR(t, DashboardPRFixture{
+			Snapshot:       domain.PRSnapshot{Number: 93, Author: "tf-bot", State: "OPEN", Repo: "owner/repo"},
+			CommissionedBy: other,
+		})
+
+		resolve := func(t *testing.T, viewer db.PRViewer, id string) *domain.Entity {
+			t.Helper()
+			e, err := store.PR(context.Background(), orgID, viewer, id)
+			if err != nil {
+				t.Fatalf("PR(%s): %v", id, err)
+			}
+			return e
+		}
+		mine := viewerOf(username, viewerID)
+		for _, id := range []string{authored, commissioned} {
+			e := resolve(t, mine, id)
+			if e == nil {
+				t.Fatalf("PR(%s) = nil, want the viewer's own pull request", id)
+			}
+			if e.ID != id || e.Source != "github" || e.RepositoryID == "" || e.SnapshotJSON == "" {
+				t.Errorf("PR(%s) = %+v, want the entity with its repository and snapshot", id, e)
+			}
+		}
+		for _, id := range []string{strangers, othersCommission, uuid.NewString()} {
+			if e := resolve(t, mine, id); e != nil {
+				t.Errorf("PR(%s) = %+v, want nil: not in the viewer's list", id, e)
+			}
+		}
+		if e := resolve(t, viewerOf("", ""), authored); e != nil {
+			t.Errorf("a viewer naming neither identity resolved %+v, want nil", e)
+		}
+		if e := resolve(t, viewerOf("", other), othersCommission); e == nil {
+			t.Error("the other viewer's own commission did not resolve for them")
 		}
 	})
 

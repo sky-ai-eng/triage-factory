@@ -31,7 +31,7 @@ export default function PRCard({ pr }: { pr: PRSummary }) {
   useEffect(() => {
     if (!expanded) return
     let cancelled = false
-    apiJSON<PRStatusData>(`/api/dashboard/prs/${pr.repo}/${pr.number}/status`)
+    apiJSON<PRStatusData>(`/api/dashboard/prs/${encodeURIComponent(pr.entity_id)}/status`)
       .then((d) => {
         if (!cancelled) {
           setStatus(d)
@@ -44,7 +44,7 @@ export default function PRCard({ pr }: { pr: PRSummary }) {
     return () => {
       cancelled = true
     }
-  }, [expanded, pr.number, pr.repo])
+  }, [expanded, pr.entity_id])
 
   const age = formatAge(pr.updated_at)
   // mergeable_state "clean" means GitHub says it's good to merge

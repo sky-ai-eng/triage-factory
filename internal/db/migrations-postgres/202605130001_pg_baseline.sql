@@ -955,15 +955,6 @@ CREATE SEQUENCE public.pending_firings_id_seq
 ALTER SEQUENCE public.pending_firings_id_seq OWNED BY public.pending_firings.id;
 
 
-CREATE TABLE public.poller_state (
-    org_id uuid NOT NULL,
-    source text NOT NULL,
-    source_id text NOT NULL,
-    state_json jsonb NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
 CREATE TABLE public.prompts (
     id text DEFAULT (gen_random_uuid())::text NOT NULL,
     org_id uuid NOT NULL,
@@ -1712,10 +1703,6 @@ ALTER TABLE ONLY public.pending_firings
     ADD CONSTRAINT pending_firings_pkey PRIMARY KEY (id);
 
 
-ALTER TABLE ONLY public.poller_state
-    ADD CONSTRAINT poller_state_pkey PRIMARY KEY (org_id, source, source_id);
-
-
 ALTER TABLE ONLY public.prompts
     ADD CONSTRAINT prompts_id_org_id_key UNIQUE (id, org_id);
 
@@ -2343,10 +2330,6 @@ ALTER TABLE ONLY public.pending_firings
     ADD CONSTRAINT pending_firings_triggering_event_id_org_id_fkey FOREIGN KEY (triggering_event_id, org_id) REFERENCES public.events(id, org_id);
 
 
-ALTER TABLE ONLY public.poller_state
-    ADD CONSTRAINT poller_state_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
-
-
 ALTER TABLE ONLY public.prompts
     ADD CONSTRAINT prompts_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
@@ -2822,12 +2805,6 @@ CREATE POLICY pending_firings_all ON public.pending_firings USING ((EXISTS ( SEL
   WHERE (t.id = pending_firings.task_id))));
 
 
-ALTER TABLE public.poller_state ENABLE ROW LEVEL SECURITY;
-
-
-CREATE POLICY poller_state_all ON public.poller_state USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
-
-
 ALTER TABLE public.prompts ENABLE ROW LEVEL SECURITY;
 
 
@@ -3288,13 +3265,6 @@ GRANT ALL ON SEQUENCE public.pending_firings_id_seq TO anon;
 GRANT ALL ON SEQUENCE public.pending_firings_id_seq TO authenticated;
 GRANT ALL ON SEQUENCE public.pending_firings_id_seq TO service_role;
 GRANT SELECT,USAGE ON SEQUENCE public.pending_firings_id_seq TO tf_app;
-
-
-GRANT ALL ON TABLE public.poller_state TO postgres;
-GRANT ALL ON TABLE public.poller_state TO anon;
-GRANT ALL ON TABLE public.poller_state TO authenticated;
-GRANT ALL ON TABLE public.poller_state TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.poller_state TO tf_app;
 
 
 GRANT ALL ON TABLE public.prompts TO postgres;
@@ -5935,12 +5905,30 @@ REVOKE ALL ON public.sandbox_stats FROM anon, authenticated, service_role;
 -- operators: the deployment-operator flag gating the fleet console. Deployment
 -- scoped, so an operator is org-less rather than a member role, and is managed
 -- only through `triagefactory operator add|remove|list`; the trust boundary is
--- shell access. Keyed on the lower-cased email, not a user id: it is what the
--- CLI names and what every verified session carries, so an operator can be
--- authorized before their first login. Admin-pool-only system table: no
--- org_id, RLS with NO policy plus REVOKE ALL.
+-- shell access to a control container.
+--
+-- The CLI names an operator by email, the lower-cased primary key, because an
+-- address is what a person can be named by before they have signed in. The
+-- grant itself rests on user_id, the principal the address resolved to:
+-- `operator add` sets it when a login identity already holds the address
+-- verified, and a sign-in that verifies the address sets it on a row that has
+-- none. A row with a user_id matches that principal and nobody else. Only a
+-- pending row (user_id NULL) is matched by address, through a verified login
+-- identity. An address does not name one person for good: a login identity's
+-- address is refreshed at every sign-in, and a directory can give an address
+-- to someone new. A grant that kept matching by address would move to
+-- whichever principal holds the address verified next.
+--
+-- ON DELETE CASCADE rather than SET NULL: a row set back to pending would grant
+-- the console again to whoever next signs in holding the address.
+--
+-- Admin-pool-only system table: no org_id, RLS with NO policy plus REVOKE ALL.
+-- tf_system holds no grant on it: a role that can write it can grant the fleet
+-- console, and binding a grant reads user_identities, which the executor role
+-- cannot read.
 CREATE TABLE public.operators (
     email     text NOT NULL,
+    user_id   uuid REFERENCES public.users(id) ON DELETE CASCADE,
     added_at  timestamp with time zone NOT NULL DEFAULT now(),
     -- The OS user that ran the CLI; provenance only, not an authz input.
     added_by  text
@@ -6494,8 +6482,6 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.instances TO tf_system;
 GRANT SELECT, INSERT, DELETE ON TABLE public.instance_stats TO tf_system;
 -- Same sampler and reaper, one row per live jail; SELECT serves usage reads.
 GRANT SELECT, INSERT, DELETE ON TABLE public.sandbox_stats TO tf_system;
--- Granted here so the operator CLI works whichever admin role its pool binds.
-GRANT SELECT, INSERT, DELETE ON TABLE public.operators TO tf_system;
 -- SELECT-only: the post-step reactor reads an override for the conversation's
 -- placement key. Writes are an operator action on a control pod.
 GRANT SELECT ON TABLE public.placement_overrides TO tf_system;

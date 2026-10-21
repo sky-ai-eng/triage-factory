@@ -9,9 +9,11 @@
 -- artifacts are keyed on ids rather than their repository's name, every
 -- artifact references the entity it is about and Jira artifacts keyed on an
 -- issue key are keyed on the issue's id, Linear
--- becomes a tracked source, and five smaller changes ride along: the org GitHub App's unusable state, the claim's source
+-- becomes a tracked source, and seven smaller changes ride along: the org GitHub App's unusable state, the claim's source
 -- manifest, the retirement of the 'completed' conversation status, node ids on
--- artifacts and audit-ledger rows, and the table of rate-limit readings.
+-- artifacts and audit-ledger rows, the table of rate-limit readings, the
+-- principal a deployment-operator grant is bound to, and the removal of the
+-- unused poller_state table.
 --
 -- NO TRANSACTION because rebuilding a table other tables reference needs
 -- foreign keys off, and PRAGMA foreign_keys is a no-op inside a transaction:
@@ -108,6 +110,22 @@ CREATE TABLE rate_limit_readings (
     observed_at  DATETIME NOT NULL,
     PRIMARY KEY (org_id, upstream, credential, bucket)
 );
+
+-- operators.user_id: the principal a deployment-operator grant rests on. The
+-- CLI names an operator by email, which stays the key it adds and removes by;
+-- the grant is bound to the principal holding that address verified, either
+-- when `operator add` runs or at that principal's first verified sign-in, and a
+-- bound row matches its principal and nobody else. An address can pass to
+-- another person, and a grant matched by address would pass with it. Local mode
+-- has no login identities, so nothing binds a row here; the column keeps the
+-- operators projection both dialects read one shape. ON DELETE CASCADE, as in
+-- Postgres: a row set back to pending would grant the console to the next
+-- holder of the address.
+ALTER TABLE operators ADD COLUMN user_id TEXT REFERENCES users(id) ON DELETE CASCADE;
+
+-- poller_state has no reader or writer. The tracker's snapshot-diff baseline is
+-- entities.snapshot_json.
+DROP TABLE poller_state;
 
 -- ===========================================================================
 -- 2. Linear

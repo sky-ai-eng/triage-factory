@@ -17,4 +17,10 @@ type LoginIdentitySeeder struct {
 	// Identity attaches a fresh login identity to principalID carrying email
 	// with the given email_verified flag.
 	Identity func(t *testing.T, principalID, email string, verified bool)
+
+	// Readdress moves every login identity of principalID that carries the
+	// address from to the address to, keeping each identity's email_verified,
+	// as a sign-in does when the identity provider now asserts another
+	// address. It frees from for another principal to verify.
+	Readdress func(t *testing.T, principalID, from, to string)
 }

@@ -73,7 +73,7 @@ func (s *teamPRStore) TeamPRs(ctx context.Context, orgID, teamID, githubBaseURL 
 		return []domain.PRSummaryRow{}, total, nil
 	}
 
-	query := `SELECT e.snapshot_json FROM entities e` + where + pgPRSummaryOrder
+	query := `SELECT ` + pgPRSummaryColumns + ` FROM entities e` + where + pgPRSummaryOrder
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(` LIMIT $%d OFFSET $%d`, len(args)+1, len(args)+2)
 		args = append(args, opts.Limit, opts.Offset)

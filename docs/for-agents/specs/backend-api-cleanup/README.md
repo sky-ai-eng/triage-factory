@@ -707,7 +707,9 @@ first failure.
 - POST-as-update throughout: `POST /api/me/active-org`,
   `POST …/identity/pat` (both providers, upsert),
   `POST /api/integrations/setup` (documented rotation path),
-  `POST /api/dashboard/prs/{number}/draft` (boolean field write).
+  `POST /api/dashboard/prs/{number}/draft` (boolean field write; now
+  `PATCH /api/dashboard/prs/{entity_id}` with `{"draft": bool}`, answering
+  the pull request's list row).
 - Verb routes that are pure field writes: the review-kind `/dismiss`
   is a CAS `state` flip with zero side effects — while the PR arm of
   the *same route* closes a PR on GitHub

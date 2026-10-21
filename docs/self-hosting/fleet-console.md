@@ -37,31 +37,41 @@ operator access below.
 
 Use the `triagefactory operator` CLI. It opens its own admin-pool DB handle
 (independent of the running server), so run it inside the control container,
-which already has the database env:
+which already has the database env. It refuses to run on an executor: the
+executor's database role (`tf_system`) has no access to operator grants.
 
 ```sh
-# Grant — use the exact email your session authenticates as
+# Grant — use a verified email of one of your sign-in methods
 docker compose exec triagefactory triagefactory operator add you@example.com
 
-# List every operator
+# List every operator, with the account each grant is bound to
 docker compose exec triagefactory triagefactory operator list
 
 # Revoke
 docker compose exec triagefactory triagefactory operator remove you@example.com
 ```
 
-- **Use a verified email from one of your sign-in methods.** The console gate
-  matches the operator set against the verified addresses of every sign-in
-  method (GitHub, SSO) on the account you are signed in to — not the email of
-  the session in front of it. A GitHub sign-in's address counts when GitHub
-  reports it verified. An SSO sign-in's address counts only when its domain is
-  verified for the org whose connection it came through; an identity provider
-  can assert any address, so an unverified domain proves nothing. For a
-  bootstrap-floor deployment that's your verified GitHub OAuth email. Emails are
-  lower-cased and trimmed at the store boundary, so case and surrounding
-  whitespace don't matter.
-- **`add` is idempotent** — re-granting an existing operator is a no-op that
-  succeeds.
+- **Use a verified email from one of your sign-in methods.** The email is how
+  you name the person; the grant itself belongs to their account. A GitHub
+  sign-in's address counts when GitHub reports it verified. An SSO sign-in's
+  address counts only when its domain is verified for the org whose connection
+  it came through; an identity provider can assert any address, so an
+  unverified domain proves nothing. For a bootstrap-floor deployment that's your
+  verified GitHub OAuth email. Emails are lower-cased and trimmed at the store
+  boundary, so case and surrounding whitespace don't matter.
+- **The grant binds to an account.** If an account already holds the address
+  verified, `add` binds the grant to it and prints the account's user id.
+  Otherwise the grant is pending, and the first sign-in that verifies the
+  address binds it. A pending grant admits whoever holds its address verified;
+  a bound one admits its account only, even after the address changes on that
+  account or is later verified by someone else. `operator list` shows each
+  grant's account, or `(pending)`.
+- **`add` is idempotent** — re-granting an existing operator keeps its original
+  provenance and succeeds. It binds a pending grant whose address now has a
+  verified holder, and never moves a bound one: to give a grant to a different
+  account, `remove` it and `add` it again.
+- **Deleting the account deletes the grant.** The grant does not go back to
+  pending.
 - Each grant/revoke appends a best-effort `auth_events` audit row (org-less, so
   it lives in the deployment-wide auth log rather than any org's
   `access_change_log`).
@@ -85,11 +95,14 @@ It's a DB-backed live view (10-second poll, no Prometheus dependency) over:
 
 - **Licensed `fleet` but no Fleet tab.** You're almost certainly not an operator
   yet — run `operator add` above and reload. Confirm with `operator list`.
-- **Granted operator but still no tab.** Check the email matches a verified
-  address on one of your sign-in methods exactly (it's normalized, but a
-  *different* address won't match). If it's your SSO address, its domain must be
-  verified for your org — otherwise grant the address of a sign-in method that
-  is verified, such as your GitHub email. Also check that the license actually
+- **Granted operator but still no tab.** Run `operator list`. If the grant is
+  bound to a user id that isn't your account, someone else held the address
+  verified when it was bound: `remove` it and `add` it again once your account
+  holds the address. If it is `(pending)`, the email doesn't match a verified
+  address on one of your sign-in methods (it's normalized, but a *different*
+  address won't match). If it's your SSO address, its domain must be verified
+  for your org — otherwise grant the address of a sign-in method that is
+  verified, such as your GitHub email. Also check that the license actually
   includes `fleet` (a community build ignores the license entirely — see
   [self-host setup](install.md)).
 - **`operator` CLI errors on the DB.** It needs the same database env the server

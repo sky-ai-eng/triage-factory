@@ -35,7 +35,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		// was owed" from "one was owed and generation failed".
 		"conversation_memory_attempts",
 		"pending_firings", "conversation_worktrees",
-		"swipe_events", "poller_state", "repositories",
+		"swipe_events", "repositories",
 		// org_secrets replaces the Supabase Vault secret path (TFAC-402):
 		// app-encrypted ciphertext in a normal RLS table.
 		"org_secrets",
