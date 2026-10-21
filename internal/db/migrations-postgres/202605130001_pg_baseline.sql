@@ -5889,12 +5889,30 @@ REVOKE ALL ON public.sandbox_stats FROM anon, authenticated, service_role;
 -- operators: the deployment-operator flag gating the fleet console. Deployment
 -- scoped, so an operator is org-less rather than a member role, and is managed
 -- only through `triagefactory operator add|remove|list`; the trust boundary is
--- shell access. Keyed on the lower-cased email, not a user id: it is what the
--- CLI names and what every verified session carries, so an operator can be
--- authorized before their first login. Admin-pool-only system table: no
--- org_id, RLS with NO policy plus REVOKE ALL.
+-- shell access to a control container.
+--
+-- The CLI names an operator by email, the lower-cased primary key, because an
+-- address is what a person can be named by before they have signed in. The
+-- grant itself rests on user_id, the principal the address resolved to:
+-- `operator add` sets it when a login identity already holds the address
+-- verified, and a sign-in that verifies the address sets it on a row that has
+-- none. A row with a user_id matches that principal and nobody else. Only a
+-- pending row (user_id NULL) is matched by address, through a verified login
+-- identity. An address does not name one person for good: a login identity's
+-- address is refreshed at every sign-in, and a directory can give an address
+-- to someone new. A grant that kept matching by address would move to
+-- whichever principal holds the address verified next.
+--
+-- ON DELETE CASCADE rather than SET NULL: a row set back to pending would grant
+-- the console again to whoever next signs in holding the address.
+--
+-- Admin-pool-only system table: no org_id, RLS with NO policy plus REVOKE ALL.
+-- tf_system holds no grant on it: a role that can write it can grant the fleet
+-- console, and binding a grant reads user_identities, which the executor role
+-- cannot read.
 CREATE TABLE public.operators (
     email     text NOT NULL,
+    user_id   uuid REFERENCES public.users(id) ON DELETE CASCADE,
     added_at  timestamp with time zone NOT NULL DEFAULT now(),
     -- The OS user that ran the CLI; provenance only, not an authz input.
     added_by  text
@@ -6448,8 +6466,6 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.instances TO tf_system;
 GRANT SELECT, INSERT, DELETE ON TABLE public.instance_stats TO tf_system;
 -- Same sampler and reaper, one row per live jail; SELECT serves usage reads.
 GRANT SELECT, INSERT, DELETE ON TABLE public.sandbox_stats TO tf_system;
--- Granted here so the operator CLI works whichever admin role its pool binds.
-GRANT SELECT, INSERT, DELETE ON TABLE public.operators TO tf_system;
 -- SELECT-only: the post-step reactor reads an override for the conversation's
 -- placement key. Writes are an operator action on a control pod.
 GRANT SELECT ON TABLE public.placement_overrides TO tf_system;

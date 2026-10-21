@@ -972,9 +972,10 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	resp.Teams = []teamRow{}
 	resp.Email = claims.Email
 	resp.OrgCreationEnabled = runmode.OrgCreationEnabled()
-	// Deployment-operator flag: whether any of the principal's login identities
-	// holds an operator address verified — the same read the fleet gate makes,
-	// so the flag and the console agree. Never claims.Email: an SSO token
+	// Deployment-operator flag: whether a grant is bound to the principal, or
+	// one of its login identities holds a pending grant's address verified —
+	// the same read the fleet gate makes, so the flag and the console agree.
+	// Never claims.Email: an SSO token
 	// carries whatever address its identity provider asserted. Admin-pool read
 	// (operators has no RLS policy); best-effort — a lookup error leaves it
 	// false (fail closed, the console 404s), never fails the identity read.
@@ -1403,6 +1404,9 @@ func distinctNonEmpty(vs []string) []string {
 // another principal already holds, the row stores the address unverified and
 // the sign-in proceeds: the address stays with its first holder.
 //
+// A sign-in that leaves the address verified also binds a pending
+// deployment-operator grant for it to the principal, in the same transaction.
+//
 // Runs on the admin pool (the actor has no membership/claims yet, so RLS can't
 // express these reads/writes — same rationale as org provisioning).
 //
@@ -1586,6 +1590,22 @@ func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid
 			 WHERE auth_user_id = $1
 		`, authUserID, email, verified, ssoProviderID, loginHandle); err != nil {
 			return fmt.Errorf("refresh identity: %w", err)
+		}
+
+		// A pending deployment-operator grant for this address binds to the
+		// principal that now holds it verified, and from then on admits that
+		// principal and nobody else (see the operators table). This runs under
+		// the email lock above, so no other login can verify the address
+		// between the refresh and the bind. A bound grant is left alone: an
+		// address that has passed to another principal does not take the
+		// grant with it.
+		if email != "" && verified {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE public.operators SET user_id = $1
+				 WHERE user_id IS NULL AND lower(email) = lower($2)
+			`, principalID, email); err != nil {
+				return fmt.Errorf("bind pending operator grant: %w", err)
+			}
 		}
 
 		// GitHub-INTEGRATION binding (which github account the agent acts as) — a

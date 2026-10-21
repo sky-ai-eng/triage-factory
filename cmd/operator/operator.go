@@ -32,6 +32,7 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // Handle dispatches the operator subcommand.
@@ -59,7 +60,15 @@ func Handle(args []string) {
 // openStores opens the DB the running server would use for the current runmode
 // and wraps it in the narrow operator + auth-event constructors — no full
 // db.Stores bundle needed to reach two admin-pool tables. Callers close conn.
+//
+// An executor is refused before it connects: its database role (tf_system)
+// holds no grant on operators, because a role that can write the table can
+// grant the fleet console, and binding a grant reads login identities, which
+// that role cannot read either.
 func openStores() (ops db.OperatorStore, audit db.AuthEventStore, closeFn func() error) {
+	if runmode.Current() == runmode.ModeMulti && runmode.Role() == runmode.RoleExecutor {
+		fail("operator grants are managed from a control container (TF_ROLE=control); an executor's database role has no access to them")
+	}
 	conn, dialect, err := db.OpenForCLI()
 	if err != nil {
 		fail("%v", err)
@@ -78,11 +87,21 @@ func runAdd(args []string) {
 	defer func() { _ = closeFn() }()
 
 	actor := osActor()
-	if err := ops.Add(context.Background(), email, actor); err != nil {
+	op, err := ops.Add(context.Background(), email, actor)
+	if err != nil {
 		fail("add operator %q: %v", email, err)
 	}
 	recordAudit(audit, domain.AuthEventOperatorGranted, email, actor)
-	fmt.Printf("%s is now a deployment operator. They can reach the fleet console once the deployment is licensed for fleet administration (FeatureFleet); operability (drain, `instance list`) needs no license.\n", email)
+	switch {
+	case runmode.Current() == runmode.ModeLocal:
+		// No sign-ins in local mode, so nothing binds and pending says nothing.
+		fmt.Printf("%s is now a deployment operator.\n", op.Email)
+	case op.Pending():
+		fmt.Printf("%s is now a deployment operator, pending: no sign-in holds that address verified yet, so the grant binds to the first person who signs in with it verified.\n", op.Email)
+	default:
+		fmt.Printf("%s is now a deployment operator, bound to user %s, the account that holds that address verified. The grant stays with that account if its address changes later.\n", op.Email, op.UserID)
+	}
+	fmt.Println("They can reach the fleet console once the deployment is licensed for fleet administration (FeatureFleet); operability (drain, `instance list`) needs no license.")
 }
 
 func runRemove(args []string) {
@@ -114,13 +133,17 @@ func runList() {
 		return
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "EMAIL\tADDED\tADDED BY")
+	fmt.Fprintln(w, "EMAIL\tUSER\tADDED\tADDED BY")
 	for _, r := range rows {
 		by := r.AddedBy
 		if by == "" {
 			by = "-"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\n", r.Email, r.AddedAt.Format(time.DateOnly), by)
+		user := r.UserID
+		if r.Pending() {
+			user = "(pending)"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", r.Email, user, r.AddedAt.Format(time.DateOnly), by)
 	}
 	_ = w.Flush()
 }
@@ -131,8 +154,8 @@ func requireEmail(args []string, verb string) string {
 		os.Exit(2)
 	}
 	email := strings.TrimSpace(args[0])
-	// A minimal sanity check — the store lower-cases and the gate compares
-	// against a verified GoTrue email, so anything without an @ is a typo.
+	// A minimal sanity check — the store lower-cases and resolves the address
+	// against verified login identities, so anything without an @ is a typo.
 	if !strings.Contains(email, "@") {
 		fail("%q does not look like an email address", email)
 	}
@@ -181,12 +204,17 @@ NOTES
   operability (the capacity read-out, drain via "instance drain", this CLI)
   needs no license.
 
-  The email is matched case-insensitively against the operator's verified
-  session email, so add the address they log in with. Adding an operator before
-  their first login is fine — the flag keys on the email, not a user row.
+  The email names the person: add a verified address of one of their sign-in
+  methods (case does not matter). The grant binds to the account that holds
+  that address verified, at once if one does, otherwise at the first sign-in
+  that verifies it, and from then on admits that account only, even if the
+  address later belongs to someone else. "operator list" shows each grant's
+  account, or "(pending)". To move a grant to another account, remove it and
+  add it again.
 
-  Shell access is the trust boundary (same as jwk-init). Each add/remove is
-  recorded in the auth_events audit log.`)
+  Run it on a control container: an executor's database role has no access to
+  operator grants. Shell access is the trust boundary (same as jwk-init). Each
+  add/remove is recorded in the auth_events audit log.`)
 }
 
 func fail(format string, args ...any) {

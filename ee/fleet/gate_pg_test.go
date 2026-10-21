@@ -28,7 +28,7 @@ func TestGate_Postgres_OperatorFromVerifiedIdentity(t *testing.T) {
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	const opEmail = "ops@corp.example"
-	if err := stores.Operators.Add(context.Background(), opEmail, "test"); err != nil {
+	if _, err := stores.Operators.Add(context.Background(), opEmail, "test"); err != nil {
 		t.Fatalf("add operator: %v", err)
 	}
 
