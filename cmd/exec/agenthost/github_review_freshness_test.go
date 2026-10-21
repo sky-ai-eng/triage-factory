@@ -286,6 +286,7 @@ func TestLocalClient_FinalizeReview_StampsFinalizedHead(t *testing.T) {
 		}))
 		t.Cleanup(srv.Close)
 		stores, info, client := newGithubRecordingClient(t, srv.URL, true)
+		registerRepo(t, stores, "octo", "repo", "1")
 
 		handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "head1", nil)
 		if err != nil {
