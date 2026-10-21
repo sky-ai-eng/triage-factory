@@ -6,7 +6,7 @@ changing an entry here.
 
 | Lane | Mechanism | Lives in | Extend by |
 | --- | --- | --- | --- |
-| Tunnel | CONNECT + hostname allowlist, no TLS termination | `internal/egressproxy` | allowlist entry (data) |
+| Tunnel | CONNECT + hostname allowlist, intercepted read-only | `internal/egressproxy` | allowlist entry (data) |
 | Fetch relay | host-side HTTP relay; redirects resolved on the host | **here** | catalog entry (data + tests) |
 | Credential | per-run credential-injecting proxies | `internal/gitproxy`, `internal/llmproxy`, `internal/ghinjector` | its own design review |
 
@@ -21,15 +21,15 @@ curl -sI --max-redirs 0 <artifact URL> | grep -iE "^HTTP|^location"
 
 - **200, or 3xx to a DEDICATED hostname** (`files.pythonhosted.org`,
   `release-assets.githubusercontent.com`, `static.crates.io`): **tunnel
-  lane.** Add the hostname(s) to `egressproxy.DefaultRegistryHosts` — do
+  lane.** Add the hostname(s) to `egressproxy.DefaultRegistries` — do
   NOT build a relay. Most ecosystems land here (npm, PyPI, Hackage, Maven
   Central all measured this way).
 - **3xx into a SHARED multi-tenant storage namespace**
   (`storage.googleapis.com`, presigned S3, …): **this lane.** Such a
-  hostname must never be allowlisted: the tunnel matches hostnames, not
-  paths, so the entry would admit every tenant's bucket — a writable,
-  credential-free, unattributable exfiltration channel for an agent whose
-  job is reading hostile PR text.
+  hostname must never be allowlisted: the allowlist matches hostnames, not
+  paths, so the entry would admit every tenant's bucket — a credential-free,
+  unattributable exfiltration channel for an agent whose job is reading
+  hostile PR text.
 - **The tool needs a credential injected**: credential lane. Stop here and
   read `docs/security/privilege-separation.md`.
 
@@ -41,13 +41,19 @@ artifact tells the truth.
 
 ## The integrity prerequisite (read before writing any code)
 
-The relay is untrusted infrastructure ONLY because each ecosystem's client
-verifies content itself — for Go, `go.sum` plus the checksum database,
-which the relay carries but cannot forge. If the ecosystem's client does
-**not** verify downloads against pinned hashes, a relay makes Triage
-Factory a trusted supply-chain component — a strictly worse posture than
-no support at all. Stop and open a design discussion instead of adding the
-entry.
+Both lanes that move package bytes sit in the content path: the relay
+fetches on the client's behalf, and the tunnel terminates the client's TLS.
+Neither may change what it carries. Each verifies the upstream over TLS,
+copies the body through verbatim and caches nothing. What keeps a bug or a
+compromise here from becoming a supply-chain attack is that an ecosystem's
+bytes are checked again by something TF does not control: for Go, `go.sum`
+plus the checksum database, whose key ships with the toolchain, so even a
+fetch inside the run is checked; for npm and pip, the lockfile's hashes,
+checked at the first install outside TF (`docs/for-agents/specs/sandbox-backends/`
+§6.1 accepts that residual). An ecosystem whose installs record no hash
+that a later install checks would make Triage Factory a trusted
+supply-chain component — a strictly worse posture than no support at all.
+Stop and open a design discussion instead of adding the entry.
 
 ## Adding a catalog entry — contributor checklist
 
@@ -98,10 +104,10 @@ entry.
 
 ## Never
 
-- TLS termination / MITM of agent traffic, in any lane, outside the
-  interception design in `docs/for-agents/specs/sandbox-backends/` §6.1
-  (TFAC-1117) and its conditions. That design is not built yet; nothing
-  terminates the agent's TLS today.
+- TLS termination / MITM of agent traffic outside the tunnel lane's
+  interceptor (`internal/egressproxy`), which implements the design in
+  `docs/for-agents/specs/sandbox-backends/` §6.1 and its conditions. A
+  second interceptor, or one in this lane, is a design conversation.
 - Allowlisting a shared storage namespace as the "simpler" alternative.
 - Env that disables the client's own verification.
 - A per-ecosystem fork of the engine — if `relay.go` can't express what

@@ -409,7 +409,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		RunURL:           runURL,
 	}, opts.localGit.handler())
 	defer func() { _ = localGHCloser.Close() }()
-	ghChannel := opts.sidecar.ghChannel(conversationID)
+	ghChannel := opts.sidecar.ghChannel()
 	if ghChannel == nil {
 		ghChannel = localGH
 	}

@@ -36,6 +36,31 @@ func testAgentHostMount() sandbox.Mount {
 	return sandbox.Mount{Source: "/run/tf/run-1.sock", Destination: "/run/tf.sock"}
 }
 
+// testCABundleMount is the mount the gVisor cell builds for the run's CA
+// bundle, built literally for the same reason.
+func testCABundleMount() sandbox.Mount {
+	return sandbox.Mount{Source: "/run/tf/run-1/ca-bundle.crt", Destination: "/run/tf-ca-bundle.crt", Options: []string{"ro"}}
+}
+
+// TestToolHostMounts_CarryTheCABundle pins the trust-file mount: every launch
+// carries it, a gh channel or not, because every registry the egress proxy
+// admits is signed by the CA in it.
+func TestToolHostMounts_CarryTheCABundle(t *testing.T) {
+	stubToolHostBinary(t)
+
+	mounts, err := toolHostMounts(t.TempDir(), testAgentHostMount(), testCABundleMount(), nil, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := destinations(mounts)["/run/tf-ca-bundle.crt"]
+	if !ok {
+		t.Fatal("no mount at /run/tf-ca-bundle.crt; no registry the egress proxy admits would verify in this jail")
+	}
+	if got.Source != "/run/tf/run-1/ca-bundle.crt" || len(got.Options) != 1 || got.Options[0] != "ro" {
+		t.Errorf("CA bundle mount = %+v, want the per-run bundle, read-only", got)
+	}
+}
+
 // TestToolHostMounts_CarryTheAgentHostSocket pins the exec-verb socket mount.
 // This is the third instance of the bug class this file exists for — the
 // runtimes build their mount sets independently — and the one a live dogfood
@@ -45,7 +70,7 @@ func testAgentHostMount() sandbox.Mount {
 func TestToolHostMounts_CarryTheAgentHostSocket(t *testing.T) {
 	stubToolHostBinary(t)
 
-	mounts, err := toolHostMounts(t.TempDir(), testAgentHostMount(), nil, "", "")
+	mounts, err := toolHostMounts(t.TempDir(), testAgentHostMount(), testCABundleMount(), nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +94,7 @@ func TestToolHostMounts_CarryTheStagedStepSkill(t *testing.T) {
 	stubToolHostBinary(t)
 	staged := t.TempDir()
 
-	mounts, err := toolHostMounts(t.TempDir(), testAgentHostMount(), nil, staged, "")
+	mounts, err := toolHostMounts(t.TempDir(), testAgentHostMount(), testCABundleMount(), nil, staged, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +125,7 @@ func TestToolHostMounts_SkillsAreOptional(t *testing.T) {
 		{"staging dir swept", filepath.Join(t.TempDir(), "gone")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			mounts, err := toolHostMounts(t.TempDir(), testAgentHostMount(), nil, tc.source, "")
+			mounts, err := toolHostMounts(t.TempDir(), testAgentHostMount(), testCABundleMount(), nil, tc.source, "")
 			if err != nil {
 				t.Fatalf("a missing skill must not fail the launch: %v", err)
 			}
@@ -120,7 +145,7 @@ func TestToolHostMounts_CarryTheStagedEntityMemory(t *testing.T) {
 	stubToolHostBinary(t)
 	staged := t.TempDir()
 
-	mounts, err := toolHostMounts(t.TempDir(), testAgentHostMount(), nil, "", staged)
+	mounts, err := toolHostMounts(t.TempDir(), testAgentHostMount(), testCABundleMount(), nil, "", staged)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +174,7 @@ func TestToolHostMounts_EntityMemoryIsOptional(t *testing.T) {
 		{"staging dir swept", filepath.Join(t.TempDir(), "gone")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			mounts, err := toolHostMounts(t.TempDir(), testAgentHostMount(), nil, "", tc.source)
+			mounts, err := toolHostMounts(t.TempDir(), testAgentHostMount(), testCABundleMount(), nil, "", tc.source)
 			if err != nil {
 				t.Fatalf("missing prior memory must not fail the launch: %v", err)
 			}

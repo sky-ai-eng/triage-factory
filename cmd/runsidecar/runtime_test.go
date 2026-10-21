@@ -367,9 +367,7 @@ func TestRuntime_EgressDenialRelaysToOrchestrator(t *testing.T) {
 // the only one that ever sees a response body, so what it declines to carry is
 // unrecoverable downstream.
 //
-// It drives the injector built from the production config (ghInjectorConfig)
-// rather than through startGHInjector, whose cert write lands under the
-// privileged per-run socket root — unreachable to an unprivileged test runner.
+// It drives the injector built from the production config (ghInjectorConfig).
 // The wiring under test is the config's, so this is the whole of it: a missing
 // ObserveWrite fails here.
 func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {

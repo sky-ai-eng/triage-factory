@@ -19,6 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/apiproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/cabundle"
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -226,7 +227,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 		git = r.gitProxyConfig(gitUpstream)
 		git.ConversationID = conversationID
 		git.SharedOriginHost = sharedOriginHost
-		git.SharedOriginCAPath = agentproc.SandboxGHInjectorCertPath
+		git.SharedOriginCAPath = agentproc.SandboxCABundlePath
 	}
 
 	// The egress denial guidance reads the same two values every GitHub lane
@@ -304,8 +305,9 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	// reaches via GH_HOST, injecting the team-set-scoped token upstream while the
 	// jail holds only a placeholder — and, when the broker handed one down, the
 	// shared origin the sandbox's git was just routed at (see ghChannelWanted).
+	var ghLeafPEM []byte
 	if ghChannelWanted(req) {
-		host, token, gerr := r.startGHInjector(req.HostVethIP, apiUpstream, req.AgentHost.ConversationID, handle.GitHandler())
+		host, token, leafPEM, gerr := r.startGHInjector(req.HostVethIP, apiUpstream, req.AgentHost.ConversationID, handle.GitHandler())
 		if gerr != nil {
 			_ = handle.Shutdown(ctx)
 			if r.githubAPI != nil {
@@ -321,6 +323,33 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 		}
 		result.GHChannelHost, result.GHChannelToken = host, token
 		result.JailEndpoints = append(result.JailEndpoints, r.ghInjectorEndpoint(host))
+		ghLeafPEM = leafPEM
+	}
+
+	// The jail's CA bundle, a step of its own rather than part of any channel:
+	// every TLS client in the jail reads it, so every run with a jail gets one,
+	// whatever channels it has. It carries the egress interceptor's CA, which
+	// every registry the proxy admits is signed by, and the gh injector's leaf
+	// when that channel is on. It has to exist before the launch, which mounts
+	// it; the bundle is public certificates only, and the CA's key stays in
+	// the egress proxy.
+	if conversationID != "" {
+		if werr := writeCABundle(conversationID, cabundle.WithSystemRoots(handle.EgressCACertPEM(), ghLeafPEM)); werr != nil {
+			_ = handle.Shutdown(ctx)
+			if r.githubAPI != nil {
+				_ = r.githubAPI.Shutdown(ctx)
+			}
+			if r.jiraAPI != nil {
+				_ = r.jiraAPI.Shutdown(ctx)
+			}
+			if r.linearAPI != nil {
+				_ = r.linearAPI.Shutdown(ctx)
+			}
+			if r.ghInjector != nil {
+				_ = r.ghInjector.Shutdown(ctx)
+			}
+			return nil, fmt.Errorf("runsidecar: write the jail's CA bundle: %w", werr)
+		}
 	}
 
 	// Host the exec-verb socket server in THIS capless process rather than the
@@ -402,8 +431,8 @@ func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sid
 
 // The two privileged filesystem effects startProxies has, behind vars so a test
 // can drive the wiring around them. Both land under the root-only per-run socket
-// root (/run/tf) — one writes the injector's certificate there, the other binds
-// the exec-verb socket — so an unprivileged test process cannot take either path,
+// root (/run/tf) — one writes the jail's CA bundle there, the other binds the
+// exec-verb socket — so an unprivileged test process cannot take either path,
 // and a test that needs the surrounding logic has to stand in for them.
 //
 // The seams live here, in the consumer, deliberately: cmd/exec/agenthost resolves
@@ -415,12 +444,12 @@ func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sid
 // from its own uid (ownJailGID) — so a test standing in for them stands in for
 // that derivation too, and never needs to run at a sidecar uid.
 var (
-	writeInjectorCert = func(conversationID string, certPEM []byte) error {
+	writeCABundle = func(conversationID string, bundlePEM []byte) error {
 		gid, err := ownJailGID()
 		if err != nil {
 			return err
 		}
-		return agenthost.WriteInjectorCert(conversationID, certPEM, gid)
+		return agenthost.WriteCABundle(conversationID, bundlePEM, gid)
 	}
 	startAgentHostSocket = func(srv *agenthost.Server, conversationID string) (*agenthost.HostDaemon, sandbox.Mount, error) {
 		gid, err := ownJailGID()
@@ -506,12 +535,12 @@ func (r *credRuntime) heldGitHub() (gh *credbundle.GitHubCreds, ok bool) {
 }
 
 // startGHInjector stands up the real-gh credential-injector proxy: generates the
-// per-run self-signed TLS cert (private key stays here), writes the public cert
-// to the per-run path the orchestrator bind-mounts into the jail
-// (agenthost.WriteInjectorCert), and serves TLS. The injector's TokenSource
-// reads the held bundle's single team-set-scoped CLIToken live, so a mid-run
-// re-seal is picked up; the write-audit callback relays every forwarded write
-// to the orchestrator (which writes the audit row).
+// per-run self-signed TLS cert (private key stays here), serves TLS, and returns
+// the public cert for the jail's CA bundle, which startProxies writes once every
+// channel is up. The injector's TokenSource reads the held bundle's single
+// team-set-scoped CLIToken live, so a mid-run re-seal is picked up; the
+// write-audit callback relays every forwarded write to the orchestrator (which
+// writes the audit row).
 //
 // gitHandler is the run's git proxy handler, mounted behind the same listener so
 // one address serves the API and git smart-HTTP the way a real GHE host does.
@@ -523,41 +552,33 @@ func (r *credRuntime) heldGitHub() (gh *credbundle.GitHubCreds, ok bool) {
 // shared origin it binds an ephemeral port of its own and reports host:port —
 // the channel still works for `gh api` and explicitly-scoped commands, and
 // inference stays broken exactly as it was.
-func (r *credRuntime) startGHInjector(hostVethIP, upstream, conversationID string, gitHandler http.Handler) (string, string, error) {
+func (r *credRuntime) startGHInjector(hostVethIP, upstream, conversationID string, gitHandler http.Handler) (string, string, []byte, error) {
 	cert, certPEM, err := ghinjector.GenerateCert(hostVethIP)
 	if err != nil {
-		return "", "", fmt.Errorf("runsidecar: generate gh-injector cert: %w", err)
-	}
-	// The trust file must exist at the per-run path before the sandbox launches
-	// (the OCI spec references the mount source); the sidecar bring-up runs
-	// before that launch, so writing here is early enough. It carries the host's
-	// system roots plus this run's leaf, because SSL_CERT_FILE is process-global
-	// in the jail — see ghinjector.TrustBundlePEM for why that widens nothing.
-	if err := writeInjectorCert(conversationID, ghinjector.TrustBundlePEM(certPEM)); err != nil {
-		return "", "", fmt.Errorf("runsidecar: write gh-injector cert: %w", err)
+		return "", "", nil, fmt.Errorf("runsidecar: generate gh-injector cert: %w", err)
 	}
 	token, err := randomToken()
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	srv, err := ghinjector.New(r.ghInjectorConfig(upstream, cert, token, conversationID, gitHandler))
 	if err != nil {
-		return "", "", fmt.Errorf("runsidecar: construct gh injector: %w", err)
+		return "", "", nil, fmt.Errorf("runsidecar: construct gh injector: %w", err)
 	}
 	if ln := r.sharedOrigin; ln != nil {
 		if _, err := srv.Serve(ln); err != nil {
-			return "", "", fmt.Errorf("runsidecar: serve gh injector on the shared origin: %w", err)
+			return "", "", nil, fmt.Errorf("runsidecar: serve gh injector on the shared origin: %w", err)
 		}
 		r.ghInjector = srv
 		// The bare host, no port — see sharedOriginHost.
-		return r.sharedOriginHost(), token, nil
+		return r.sharedOriginHost(), token, certPEM, nil
 	}
 	addr, err := srv.Start(net.JoinHostPort(hostVethIP, "0"))
 	if err != nil {
-		return "", "", fmt.Errorf("runsidecar: start gh injector: %w", err)
+		return "", "", nil, fmt.Errorf("runsidecar: start gh injector: %w", err)
 	}
 	r.ghInjector = srv
-	return addr, token, nil
+	return addr, token, certPEM, nil
 }
 
 // ghInjectorEndpoint is the gh injector's "host:port" as the jail dials it.

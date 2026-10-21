@@ -67,19 +67,19 @@ var trustedGHBinaryPath = "/opt/tf/bin/gh"
 // this literal.
 func TrustedGHBinaryPath() string { return trustedGHBinaryPath }
 
-// TrustedGHInjectorCertDestination mirrors agentproc's private
-// sandboxGHInjectorCert — the fixed in-sandbox path the per-run gh-injector cert
-// is bind-mounted at (SSL_CERT_FILE points here).
-const TrustedGHInjectorCertDestination = "/run/tf-gh-injector.crt"
+// TrustedCABundleDestination mirrors agentproc's private sandboxCABundle —
+// the fixed in-sandbox path the run's CA bundle is bind-mounted at (the trust
+// variables in the jail's env point here).
+const TrustedCABundleDestination = "/run/tf-ca-bundle.crt"
 
-// TrustedGHInjectorCertPath is the broker's own derivation of "this run's own
-// gh-injector cert" host-side path. Like the agenthost socket, the broker did
-// not create this file — the sidecar writes it during bring-up (agenthost.
-// WriteInjectorCert → CertPathFor) before the launch RPC — so the broker
-// VALIDATES a launch's mount source against this derivation. A drift test
-// cross-checks it agrees with agenthost.CertPathFor.
-func TrustedGHInjectorCertPath(conversationID string) string {
-	return filepath.Join(RunSocketDir(conversationID), ghInjectorCertName)
+// TrustedCABundlePath is the broker's own derivation of "this run's own CA
+// bundle" host-side path. Like the agenthost socket, the broker did not create
+// this file — the sidecar writes it during bring-up (agenthost.WriteCABundle →
+// CABundlePathFor) before the launch RPC — so the broker VALIDATES a launch's
+// mount source against this derivation. A drift test cross-checks it agrees
+// with agenthost.CABundlePathFor.
+func TrustedCABundlePath(conversationID string) string {
+	return filepath.Join(RunSocketDir(conversationID), caBundleName)
 }
 
 // TrustedToolHostBinaryDestination is the fixed in-sandbox path the
@@ -279,13 +279,18 @@ var allowedSandboxEnvKeys = map[string]struct{}{
 	"GIT_CONFIG_COUNT":    {},
 	"TF_GIT_PUSH_CAPTURE": {},
 
+	// The run's CA bundle (agentproc.caBundleEnv): each toolchain's trust
+	// variable, all pointing at the mounted bundle of public certificates.
+	"SSL_CERT_FILE":       {},
+	"NODE_EXTRA_CA_CERTS": {},
+	"PIP_CERT":            {},
+
 	// Real-gh channel (agentproc.ghChannelEnv). GH_HOST redirects gh at the
 	// per-run injector; GH_ENTERPRISE_TOKEN is the per-run PLACEHOLDER (never
-	// the real token — Property B); SSL_CERT_FILE points at the mounted per-run
-	// injector cert; the two GH_* suppressors keep gh non-interactive and quiet.
+	// the real token — Property B); the two GH_* suppressors keep gh
+	// non-interactive and quiet.
 	"GH_HOST":               {},
 	"GH_ENTERPRISE_TOKEN":   {},
-	"SSL_CERT_FILE":         {},
 	"GH_PROMPT_DISABLED":    {},
 	"GH_NO_UPDATE_NOTIFIER": {},
 }
@@ -863,14 +868,14 @@ func validateWorktreeAndMounts(conversationID, workspaceKey, worktree string, mo
 			if realSource != realTrusted {
 				return fmt.Errorf("sandbox: mount %q source %q is not the broker-resolved gh binary path %q", m.Destination, m.Source, TrustedGHBinaryPath())
 			}
-		case TrustedGHInjectorCertDestination:
-			trusted := TrustedGHInjectorCertPath(conversationID)
+		case TrustedCABundleDestination:
+			trusted := TrustedCABundlePath(conversationID)
 			realTrusted, rErr := realPath(trusted)
 			if rErr != nil {
-				return fmt.Errorf("sandbox: resolve this run's gh-injector cert: %w", rErr)
+				return fmt.Errorf("sandbox: resolve this run's CA bundle: %w", rErr)
 			}
 			if realSource != realTrusted {
-				return fmt.Errorf("sandbox: mount %q source %q is not this run's own gh-injector cert (want %q)", m.Destination, m.Source, trusted)
+				return fmt.Errorf("sandbox: mount %q source %q is not this run's own CA bundle (want %q)", m.Destination, m.Source, trusted)
 			}
 		case TrustedSkillsDestination:
 			// This run's own step-skill staging dir (optional — present only on a

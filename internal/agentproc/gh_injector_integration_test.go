@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/cabundle"
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
@@ -92,17 +93,17 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 	// Per-run self-signed cert with the veth IP as SAN, written to the same
 	// per-run path the sidecar writes in production (the broker's own
 	// derivation, so the mount source matches if validation runs). We inline the
-	// write+grant here rather than call agenthost.WriteInjectorCert to avoid the
+	// write+grant here rather than call agenthost.WriteCABundle to avoid the
 	// agenthost→agentproc import cycle a test in this package would create.
 	cert, certPEM, err := ghinjector.GenerateCert(net.HostIP)
 	if err != nil {
 		t.Fatalf("GenerateCert: %v", err)
 	}
-	certPath := sandbox.TrustedGHInjectorCertPath(conversationID)
+	certPath := sandbox.TrustedCABundlePath(conversationID)
 	if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
 		t.Fatalf("mkdir cert root: %v", err)
 	}
-	if err := os.WriteFile(certPath, ghinjector.TrustBundlePEM(certPEM), 0o640); err != nil {
+	if err := os.WriteFile(certPath, cabundle.WithSystemRoots(certPEM), 0o640); err != nil {
 		t.Fatalf("write cert: %v", err)
 	}
 	if err := os.Chown(certPath, net.JailUID(), sandbox.JailGID(net.Idx)); err != nil {
@@ -138,7 +139,7 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 		"HOME=/work",
 		"GH_HOST=" + addr,
 		"GH_ENTERPRISE_TOKEN=" + placeholder,
-		"SSL_CERT_FILE=" + sandboxGHInjectorCert,
+		"SSL_CERT_FILE=" + sandboxCABundle,
 		"GH_PROMPT_DISABLED=1",
 		"GH_NO_UPDATE_NOTIFIER=1",
 	}
@@ -151,7 +152,7 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 	}
 
 	mounts := []sandbox.Mount{
-		{Source: certPath, Destination: sandboxGHInjectorCert, Options: []string{"ro"}},
+		{Source: certPath, Destination: sandboxCABundle, Options: []string{"ro"}},
 		{Source: hostGHBinaryPath, Destination: sandboxGHBinary, Options: []string{"ro"}},
 	}
 
@@ -236,11 +237,11 @@ func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateCert: %v", err)
 	}
-	certPath := sandbox.TrustedGHInjectorCertPath(conversationID)
+	certPath := sandbox.TrustedCABundlePath(conversationID)
 	if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
 		t.Fatalf("mkdir cert root: %v", err)
 	}
-	if err := os.WriteFile(certPath, ghinjector.TrustBundlePEM(certPEM), 0o640); err != nil {
+	if err := os.WriteFile(certPath, cabundle.WithSystemRoots(certPEM), 0o640); err != nil {
 		t.Fatalf("write cert: %v", err)
 	}
 	if err := os.Chown(certPath, net.JailUID(), sandbox.JailGID(net.Idx)); err != nil {
@@ -316,7 +317,7 @@ func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
 		// Portless: the whole point.
 		"GH_HOST=" + net.HostIP,
 		"GH_ENTERPRISE_TOKEN=" + placeholder,
-		"SSL_CERT_FILE=" + sandboxGHInjectorCert,
+		"SSL_CERT_FILE=" + sandboxCABundle,
 		"GH_PROMPT_DISABLED=1",
 		"GH_NO_UPDATE_NOTIFIER=1",
 	}
@@ -333,7 +334,7 @@ func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
 		Argv: []string{sandboxGHBinary, "pr", "list", "--limit", "1"},
 		Env:  env,
 		ExtraMounts: []sandbox.Mount{
-			{Source: certPath, Destination: sandboxGHInjectorCert, Options: []string{"ro"}},
+			{Source: certPath, Destination: sandboxCABundle, Options: []string{"ro"}},
 			{Source: hostGHBinaryPath, Destination: sandboxGHBinary, Options: []string{"ro"}},
 		},
 		Network: net,

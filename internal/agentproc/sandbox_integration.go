@@ -185,12 +185,13 @@ func buildSandboxEnv(extraEnv []string) []string {
 		// carries no vendor download host. Restoring the upstream default
 		// makes the version floor self-healing: cmd/go fetches the toolchain
 		// as an ordinary module (golang.org/toolchain) from the module proxy,
-		// which is already an allowlisted registry and is checksum-verified
-		// like any other module. No new host, no new capability — the same
-		// fetch-and-run reach `go build` has for every dependency.
+		// through the run's fetch relay like every other module, and
+		// checksum-verified like any other module. No new host, no new
+		// capability — the same fetch-and-run reach `go build` has for every
+		// dependency.
 		goToolchainEnvKey + "=" + goToolchainEnvValue,
 		// The sandbox's egress is a fail-closed allowlist of package registries
-		// (egressproxy.DefaultRegistryHosts); the SDK's non-essential hosts —
+		// (egressproxy.DefaultRegistries); the SDK's non-essential hosts —
 		// telemetry, error reporting, the auto-updater, Statsig feature gates —
 		// are deliberately absent, since inference rides the per-run LLM proxy
 		// rather than direct egress. Left on, that traffic can only produce
@@ -250,16 +251,30 @@ func buildSandboxEnv(extraEnv []string) []string {
 	return out
 }
 
+// caBundleEnv points every toolchain in the rootfs at the run's CA bundle,
+// each through the variable it reads: SSL_CERT_FILE for Go, curl, OpenSSL and
+// pip's system-store default, NODE_EXTRA_CA_CERTS for Node and so npm and
+// pnpm, and PIP_CERT so pip reads it whichever store its version defaults
+// to. The bundle is the system roots plus this run's own certificates, so
+// none of these narrows what a client trusted before. A toolchain added to
+// the rootfs that reads none of them fails the interception integration test
+// until its variable is here.
+func caBundleEnv() []string {
+	return []string{
+		"SSL_CERT_FILE=" + sandboxCABundle,
+		"NODE_EXTRA_CA_CERTS=" + sandboxCABundle,
+		"PIP_CERT=" + sandboxCABundle,
+	}
+}
+
 // ghChannelEnv builds the sandbox env entries that point the real gh binary at
 // the per-run injector: GH_HOST (the injector's host:port — gh forces https and
-// verifies against the mounted cert), GH_ENTERPRISE_TOKEN (the per-run
-// placeholder gh sends; the injector strips it and injects the real token),
-// SSL_CERT_FILE (the mounted trust file — the system roots plus this run's
-// injector leaf, so no rootfs edit and no narrowing of other in-jail TLS
-// clients), and the prompt/update-notifier suppressors so gh runs
-// non-interactively and never phones home for release checks. Property B-safe:
-// the only credential-shaped value is the placeholder, never a real token.
-// Empty when the channel is off.
+// verifies against the CA bundle, which carries the injector's leaf),
+// GH_ENTERPRISE_TOKEN (the per-run placeholder gh sends; the injector strips
+// it and injects the real token), and the prompt/update-notifier suppressors
+// so gh runs non-interactively and never phones home for release checks.
+// Property B-safe: the only credential-shaped value is the placeholder, never
+// a real token. Empty when the channel is off.
 func ghChannelEnv(gc *GHChannelParams) []string {
 	if gc == nil || gc.Host == "" {
 		return nil
@@ -267,7 +282,6 @@ func ghChannelEnv(gc *GHChannelParams) []string {
 	return []string{
 		"GH_HOST=" + gc.Host,
 		"GH_ENTERPRISE_TOKEN=" + gc.Token,
-		"SSL_CERT_FILE=" + sandboxGHInjectorCert,
 		"GH_PROMPT_DISABLED=1",
 		"GH_NO_UPDATE_NOTIFIER=1",
 	}

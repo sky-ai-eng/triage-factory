@@ -85,10 +85,12 @@ func currentArchRootfs() (url, sha string, err error) {
 //     on large repos.
 //   - bash — alpine ships ash by default; many shell scripts and
 //     agent invocations assume bash.
-//   - ca-certificates — outbound TLS from in-sandbox tools (git over
-//     HTTPS, npm registry, the in-host proxy a follow-up ticket
-//     wires in).
-//   - python3 — common in build scripts and tooling glue.
+//   - ca-certificates — the default trust store for in-sandbox TLS
+//     clients. The trust variables a launch sets point them at the run's
+//     CA bundle instead, which carries the egress interceptor's CA.
+//   - python3 — common in build scripts and tooling glue. There is no
+//     system pip: `python3 -m venv` installs pip from the wheel CPython
+//     bundles, and the egress allowlist carries PyPI for it.
 //   - go — Go projects need go build/test/mod tidy to verify changes.
 //   - make — ubiquitous in build flows.
 //   - curl — ubiquitous, tiny, expected.

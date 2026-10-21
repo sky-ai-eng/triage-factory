@@ -39,10 +39,10 @@ func SocketPathFor(_ string) string { return "" }
 // SocketMountFor returns a zero mount on non-Linux.
 func SocketMountFor(_ string) sandbox.Mount { return sandbox.Mount{} }
 
-// CertPathFor returns "" on non-Linux (the gh channel is sandbox-only).
-func CertPathFor(_ string) string { return "" }
+// CABundlePathFor returns "" on non-Linux (the sandbox path is Linux-only).
+func CABundlePathFor(_ string) string { return "" }
 
-// WriteInjectorCert is unsupported off Linux.
-func WriteInjectorCert(_ string, _ []byte, _ int) error {
-	return errors.New("agenthost: gh-injector cert not supported on this platform")
+// WriteCABundle is unsupported off Linux.
+func WriteCABundle(_ string, _ []byte, _ int) error {
+	return errors.New("agenthost: the jail's CA bundle is not supported on this platform")
 }

@@ -216,17 +216,16 @@ func (rs *runSidecar) treeHandOff() treeHandOff {
 
 // ghChannel is the real-gh channel params threaded into agentproc.RunOptions.
 // GHChannel when the sidecar bound the injector: its host:port + per-run
-// placeholder, plus the per-run cert source path the orchestrator bind-mounts
-// (the sidecar wrote it to the same deterministic path). nil when no injector
-// was bound (the run then keeps no gh binary/env). conversationID resolves the cert path.
-func (rs *runSidecar) ghChannel(conversationID string) *agentproc.GHChannelParams {
+// placeholder. gh trusts the injector through the run's CA bundle, which the
+// launch mounts whatever channels the run has. nil when no injector was bound
+// (the run then keeps no gh binary/env).
+func (rs *runSidecar) ghChannel() *agentproc.GHChannelParams {
 	if rs == nil || rs.res == nil || rs.res.GHChannelHost == "" {
 		return nil
 	}
 	return &agentproc.GHChannelParams{
-		Host:           rs.res.GHChannelHost,
-		Token:          rs.res.GHChannelToken,
-		CertSourcePath: agenthost.CertPathFor(conversationID),
+		Host:  rs.res.GHChannelHost,
+		Token: rs.res.GHChannelToken,
 	}
 }
 
@@ -235,7 +234,7 @@ func cellGHChannel(gc *agentproc.GHChannelParams) *cell.GHChannel {
 	if gc == nil {
 		return nil
 	}
-	return &cell.GHChannel{Host: gc.Host, Token: gc.Token, CertSourcePath: gc.CertSourcePath}
+	return &cell.GHChannel{Host: gc.Host, Token: gc.Token}
 }
 
 // GitCloneAuth builds the CloneAuth that routes a host-side fetch of cloneURL

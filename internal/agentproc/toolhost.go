@@ -63,6 +63,12 @@ type ToolHostOptions struct {
 	// client reading a fresh in-jail database and reports the run as
 	// nonexistent — a wiring bug wearing a data-corruption costume.
 	AgentHostSocket sandbox.Mount
+	// CABundle bind-mounts the run's CA bundle (the sidecar writes it) at its
+	// fixed in-jail path, where caBundleEnv points every toolchain. Required:
+	// without it every registry the egress proxy admits fails certificate
+	// verification in the jail, and the agent's fix for that ends up
+	// committed to someone's repository.
+	CABundle sandbox.Mount
 	// GHChannel wires the real-gh credential injector, when the sidecar
 	// bound one.
 	GHChannel *GHChannelParams
@@ -335,6 +341,9 @@ func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (_ *ToolHostJail,
 	if opts.AgentHostSocket.Source == "" || opts.AgentHostSocket.Destination == "" {
 		return nil, fmt.Errorf("agentproc: tool host launch requires the agenthost socket mount — without it every exec verb inside the jail is stranded")
 	}
+	if opts.CABundle.Source == "" || opts.CABundle.Destination == "" {
+		return nil, fmt.Errorf("agentproc: tool host launch requires the CA bundle mount — without it no registry the egress proxy admits verifies in the jail")
+	}
 
 	sockDir, listener, err := prepareToolHostSocket(opts.ConversationID)
 	if err != nil {
@@ -357,7 +366,7 @@ func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (_ *ToolHostJail,
 		return nil, fmt.Errorf("agentproc: hand worktree to the tool host's jail: %w", err)
 	}
 
-	mounts, err := toolHostMounts(sockDir, opts.AgentHostSocket, opts.GHChannel, opts.SkillsSourcePath, opts.MemorySourcePath)
+	mounts, err := toolHostMounts(sockDir, opts.AgentHostSocket, opts.CABundle, opts.GHChannel, opts.SkillsSourcePath, opts.MemorySourcePath)
 	if err != nil {
 		_ = jail.Close()
 		return nil, err
@@ -378,6 +387,7 @@ func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (_ *ToolHostJail,
 	env := buildSandboxEnv(translateEnvForSandbox(opts.ExtraEnv, opts.Worktree))
 	env = append(env, githooks.BinEnvVar+"="+sandboxTFBinary)
 	env = append(env, opts.PrebuiltProxyEnv...)
+	env = append(env, caBundleEnv()...)
 	env = append(env, ghChannelEnv(opts.GHChannel)...)
 
 	// --connect, not --bind: the jail runs with gVisor's --host-uds=open,
@@ -481,9 +491,9 @@ func prepareToolHostSocket(conversationID string) (string, net.Listener, error) 
 // toolHostMounts assembles the jail's bind mounts: the tool host binary and
 // the socket directory it needs, plus the same TF-side mounts an SDK jail
 // gets (the TF binary under both names, the agenthost exec-verb socket, the
-// git-hooks dir, the gh channel's cert + pinned binary, and this step's
-// staged skill).
-func toolHostMounts(sockDir string, agentHost sandbox.Mount, gh *GHChannelParams, skillsSource, memorySource string) ([]sandbox.Mount, error) {
+// run's CA bundle, the git-hooks dir, the gh channel's pinned binary, and
+// this step's staged skill).
+func toolHostMounts(sockDir string, agentHost, caBundle sandbox.Mount, gh *GHChannelParams, skillsSource, memorySource string) ([]sandbox.Mount, error) {
 	if _, err := os.Stat(hostToolHostBinaryPath); err != nil {
 		return nil, fmt.Errorf("agentproc: tool host binary is not present at %s: %w", hostToolHostBinaryPath, err)
 	}
@@ -497,6 +507,9 @@ func toolHostMounts(sockDir string, agentHost sandbox.Mount, gh *GHChannelParams
 		// file host-side fails the launch loudly there rather than launching
 		// a jail whose exec verbs would consult a fresh local database.
 		agentHost,
+		// Mounted unconditionally for the same reason: the sidecar wrote it
+		// during bring-up, and the broker validates the source.
+		caBundle,
 	}
 	if selfBin, err := os.Executable(); err == nil && selfBin != "" {
 		mounts = append(mounts,
@@ -509,9 +522,6 @@ func toolHostMounts(sockDir string, agentHost sandbox.Mount, gh *GHChannelParams
 		mounts = append(mounts, sandbox.Mount{Source: hooksDir, Destination: githooks.SandboxDir, Options: []string{"ro"}})
 	}
 	if gh != nil {
-		if gh.CertSourcePath != "" {
-			mounts = append(mounts, sandbox.Mount{Source: gh.CertSourcePath, Destination: sandboxGHInjectorCert, Options: []string{"ro"}})
-		}
 		if _, err := os.Stat(hostGHBinaryPath); err == nil {
 			mounts = append(mounts, sandbox.Mount{Source: hostGHBinaryPath, Destination: sandboxGHBinary, Options: []string{"ro"}})
 		}

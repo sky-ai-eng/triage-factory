@@ -5,20 +5,30 @@ import (
 	"strings"
 )
 
-// DefaultRegistryHosts is the built-in v0 egress allowlist (TFAC-567):
-// the public package registries for the toolchains actually installed
-// in the sandbox rootfs (internal/sandbox rootfs.go apkPackages —
-// nodejs/npm, go, python3). Least-privilege: every entry must be
-// justified by an in-sandbox consumer, so ecosystems the rootfs
-// doesn't ship (cargo, rubygems, ...) stay off the list until a
-// rootfs variant adds their toolchain.
-//
-// One exception to the consumer rule: an entry whose traffic has moved
-// to the fetch-relay lane (internal/egressrelay) may stay here, marked
-// VESTIGIAL in its comment, as a deliberate one-release degraded path
-// before removal — the Go entries below are the current case. Don't
-// delete a vestigial entry under the consumer rule; its comment names
-// when it goes.
+// Registry is one host the tunnel admits, and the requests it may carry
+// there. Every request is read-only: GET and HEAD to any path, and POST only
+// to the paths in ReadPOSTPaths, where the registry answers a read that
+// needs a request body.
+type Registry struct {
+	// Host is the exact hostname, matched after case and trailing-dot
+	// normalization. No wildcards.
+	Host string
+
+	// ReadPOSTPaths are the paths on Host where a POST is a read, matched
+	// exactly against the request's path with no query. Each entry is
+	// probed like a host is (CLAUDE.md): it names a client in the rootfs
+	// that sends it and what the registry answers there.
+	ReadPOSTPaths []string
+}
+
+// DefaultRegistries is the built-in egress allowlist: the public package
+// registries for the toolchains installed in the sandbox rootfs
+// (internal/sandbox rootfs.go apkPackages). Every entry needs an in-sandbox
+// consumer, so ecosystems the rootfs doesn't ship (cargo, rubygems, ...) stay
+// off the list until a rootfs variant adds their toolchain. Go modules are not
+// here: cmd/go fetches through the per-run fetch relay (internal/egressrelay),
+// because the module proxy redirects into a shared storage namespace this list
+// must never carry.
 //
 // Deliberately absent:
 //   - github.com / codeload.github.com — git egress goes through the
@@ -29,36 +39,57 @@ import (
 //
 // TFAC-408 replaces this constant with per-profile data resolved by
 // the spawner; the proxy's shape doesn't change.
-func DefaultRegistryHosts() []string {
-	return []string{
-		// npm / pnpm
-		//
-		// TODO(TFAC-1117): the tunnel sees only this hostname, so it also
-		// admits `npm publish`, a PUT to the same host: an agent holding an
-		// attacker's token can publish the repository. Closing it needs the
-		// sidecar to terminate TLS and allow registries only reads: GET, HEAD
-		// and POST to their listed read paths (npm's audit endpoints).
-		"registry.npmjs.org",
-		// Go modules + checksum database. Both are now VESTIGIAL for a
-		// sandboxed run: GOPROXY points cmd/go at the per-run fetch relay
-		// (internal/egressrelay, go-modules catalog entry), which serves
-		// the module protocol and the /sumdb/ arm from the host, so the
-		// jail no longer dials either host. They stay for one release as
-		// the degraded path if that env plumbing is ever absent — small
-		// modules still resolve inline, where a jail with neither entry
-		// nor relay would fail at the first fetch with nothing to point
-		// at. Remove once the relay has production miles.
-		//
-		// Note the allowlist alone was never sufficient here: the public
-		// proxy 302s large zips (and every toolchain) to
-		// storage.googleapis.com, a shared storage namespace this list
-		// must never carry — which is why the relay lane exists.
-		"proxy.golang.org",
-		"sum.golang.org",
-		// PyPI
-		"pypi.org",
-		"files.pythonhosted.org",
+func DefaultRegistries() []Registry {
+	return []Registry{
+		// npm and pnpm. `npm install` posts the lockfile's package list to the
+		// bulk advisory endpoint by default and falls back to the quick audit
+		// endpoint; `pnpm audit` posts to the bulk one. Both answer with
+		// advisories and store nothing.
+		{
+			Host: "registry.npmjs.org",
+			ReadPOSTPaths: []string{
+				"/-/npm/v1/security/advisories/bulk",
+				"/-/npm/v1/security/audits/quick",
+			},
+		},
+		// PyPI, for pip in a venv: `python3 -m venv` installs pip from the
+		// wheel CPython bundles, and the rootfs ships no system pip.
+		{Host: "pypi.org"},
+		{Host: "files.pythonhosted.org"},
 	}
+}
+
+// registryHosts is the hostname half of registries, the set the CA is
+// name-constrained to.
+func registryHosts(registries []Registry) []string {
+	hosts := make([]string, 0, len(registries))
+	for _, r := range registries {
+		if n := normalizeHost(r.Host); n != "" {
+			hosts = append(hosts, n)
+		}
+	}
+	return hosts
+}
+
+// newRegistrySet indexes registries by normalized host, merging the read
+// paths of an entry listed twice.
+func newRegistrySet(registries []Registry) map[string]map[string]struct{} {
+	set := make(map[string]map[string]struct{}, len(registries))
+	for _, r := range registries {
+		h := normalizeHost(r.Host)
+		if h == "" {
+			continue
+		}
+		paths := set[h]
+		if paths == nil {
+			paths = make(map[string]struct{}, len(r.ReadPOSTPaths))
+			set[h] = paths
+		}
+		for _, p := range r.ReadPOSTPaths {
+			paths[p] = struct{}{}
+		}
+	}
+	return set
 }
 
 // GitHubHosts names the hostnames that make up one run's configured GitHub
@@ -189,10 +220,8 @@ func normalizeHost(host string) string {
 	return strings.TrimSuffix(strings.ToLower(host), ".")
 }
 
-// newHostSet builds the case/dot-normalized lookup set the Server
-// matches CONNECT targets against. Exact hostname matching only — no
-// wildcards in v0 (pattern support arrives with the per-profile
-// allowlists, where it can be designed against real customer input).
+// newHostSet builds a case/dot-normalized hostname lookup set. Exact
+// matching only, like the registry set.
 func newHostSet(hosts []string) map[string]struct{} {
 	set := make(map[string]struct{}, len(hosts))
 	for _, h := range hosts {

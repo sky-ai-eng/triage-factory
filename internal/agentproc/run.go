@@ -264,12 +264,12 @@ type RunOptions struct {
 
 	// GHChannel, when non-nil, wires the real-gh credential channel into the
 	// agent subprocess. On the sandbox path that means the pinned gh binary
-	// (bind-mounted RO from the host image), the per-run injector cert
-	// (bind-mounted RO from the sidecar-written source path), and the gh env;
-	// on the direct path it means the same env pointed at host paths, with the
-	// channel's own bin dir leading PATH. Either way the env is GH_HOST → the
-	// injector, GH_ENTERPRISE_TOKEN → the per-run placeholder, SSL_CERT_FILE →
-	// the trust file, plus the prompt / update-notifier suppressors. nil on
+	// (bind-mounted RO from the host image) and the gh env, with gh trusting
+	// the injector through the run's CA bundle; on the direct path it means
+	// the same env pointed at host paths plus SSL_CERT_FILE → the injector's
+	// trust file, with the channel's own bin dir leading PATH. Either way the
+	// env is GH_HOST → the injector, GH_ENTERPRISE_TOKEN → the per-run
+	// placeholder, plus the prompt / update-notifier suppressors. nil on
 	// runs that don't touch GitHub, and whenever the channel could not be
 	// provisioned (which degrades the run to the scoped exec verbs, never
 	// fails it). See GHChannelParams.
@@ -311,8 +311,8 @@ type RunOptions struct {
 
 // GHChannelParams carries the per-run coordinates needed to wire the real-gh
 // credential channel: the injector's bound host:port (GH_HOST), the per-run
-// placeholder token (GH_ENTERPRISE_TOKEN), and the host path of the injector's
-// trust file. The real GitHub credential is NEVER here — it lives only in the
+// placeholder token (GH_ENTERPRISE_TOKEN), and, on the direct path, the host
+// path of the injector's trust file. The real GitHub credential is NEVER here — it lives only in the
 // process running the injector (the sidecar in multi, the TF process in local)
 // and is injected on the upstream hop; the placeholder is all the agent's
 // environment ever holds, in either mode.
@@ -323,11 +323,10 @@ type GHChannelParams struct {
 	// Token is the per-run placeholder the agent's gh presents
 	// (GH_ENTERPRISE_TOKEN). The injector strips it and injects the real token.
 	Token string
-	// CertSourcePath is the host path of the injector's trust file. On the
-	// sandbox path it is what the sidecar wrote (agenthost.CertPathFor(conversationID)),
-	// bind-mounted RO at sandboxGHInjectorCert with the broker validating the
-	// source against its own derivation; on the direct path SSL_CERT_FILE
-	// points at it as-is.
+	// CertSourcePath is the host path of the injector's trust file, which
+	// SSL_CERT_FILE points at as-is. Direct path only: a sandboxed run's gh
+	// trusts the injector through the run's CA bundle, which the jail gets
+	// whatever channels it has (ToolHostOptions.CABundle).
 	CertSourcePath string
 
 	// BinDir is the directory holding the TF-owned gh binary, prepended to the

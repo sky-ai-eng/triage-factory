@@ -23,6 +23,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/cabundle"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
@@ -666,11 +667,19 @@ func startSandbox(ctx context.Context, cfg benchConfig, id int, driven bool) (*h
 	}
 	h.agentSock = ln
 
+	// The CA bundle, likewise: the sidecar writes it in production, and the
+	// broker validates its source. With no egress proxy the bench's bundle is
+	// the system roots alone, which is what its jail trusts anyway.
+	if err := agenthost.WriteCABundle(conversationID, cabundle.WithSystemRoots(), sandbox.JailGID(rn.Idx)); err != nil {
+		return fail(fmt.Errorf("write CA bundle: %w", err))
+	}
+
 	jail, err := agentproc.LaunchToolHost(ctx, agentproc.ToolHostOptions{
 		ConversationID:       conversationID,
 		Worktree:             worktree,
 		PrebuiltNetwork:      rn,
 		AgentHostSocket:      agentMount,
+		CABundle:             sandbox.Mount{Source: agenthost.CABundlePathFor(conversationID), Destination: sandbox.TrustedCABundleDestination, Options: []string{"ro"}},
 		MemoryLimitMB:        cfg.memLimitMB,
 		OrgID:                "bench",
 		ClaimID:              h.claimID,

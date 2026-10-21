@@ -23,7 +23,7 @@ sandbox pool, sibling gateways. No lane, entry, or profile can widen it.
 
 | Lane | Mechanism | For | Add support by |
 | --- | --- | --- | --- |
-| **Tunnel** | CONNECT proxy + hostname allowlist; no TLS termination | Registries serving artifacts from their own or a dedicated hostname | Allowlist entry — `egressproxy.DefaultRegistryHosts` (per-profile data under TFAC-408) |
+| **Tunnel** | CONNECT proxy + hostname allowlist; TLS intercepted, registries read-only | Registries serving artifacts from their own or a dedicated hostname | Allowlist entry — `egressproxy.DefaultRegistries` (per-profile data under TFAC-408) |
 | **Fetch relay** | Host-side HTTP relay; redirects resolved on the host, every hop denylist-vetted | Registries that redirect artifacts into shared multi-tenant storage hostnames | Catalog entry — `internal/egressrelay/catalog.go` |
 | **Credential** | Per-run credential-injecting proxies (git, `gh`) | Authenticated egress | Its own design; see `privilege-separation.md` |
 
@@ -33,22 +33,48 @@ rides the agenthost socket to the run's sidecar, whose daemon calls the proxy
 that sidecar owns. Supporting a new verb-backed provider such as Linear adds no
 allowlist entry.
 
-Two constraints shape the whole design. The tunnel does not terminate TLS
-today, so it can act only on hostnames — content integrity belongs to the package
-managers' own verification (lockfile hashes, go.sum), never to us. And a
-shared storage namespace (`storage.googleapis.com`, presigned S3) can
-never be allowlisted: a hostname match admits every tenant's bucket, which
-hands an agent that reads attacker-authored PR text a writable,
-credential-free exfiltration channel. The fetch relay exists for exactly
-the registries those two constraints would otherwise strand.
+Two constraints shape the whole design. A shared storage namespace
+(`storage.googleapis.com`, presigned S3) can never be allowlisted: the
+allowlist matches hostnames, so an entry admits every tenant's bucket,
+which hands an agent that reads attacker-authored PR text a credential-free
+exfiltration channel. And no lane may change the bytes it carries: content
+integrity rests on the package managers' own verification (lockfile hashes,
+go.sum and the checksum database), which a lane must pass through untouched.
+The fetch relay exists for exactly the registries the first constraint
+would otherwise strand.
 
-Acting only on hostnames leaves the tunnel two gaps it cannot close. It
-cannot tell a read from a write on an allowlisted host, so `npm publish` to
-`registry.npmjs.org` gets through. And it cannot see which name a client
-asks a shared CDN edge for once the tunnel is open, so an allowlisted name
-can front for another site on the same edge. TLS interception in the
-sidecar closes both, under conditions designed in
-`docs/for-agents/specs/sandbox-backends/` §6.1 (TFAC-1117).
+### How the tunnel intercepts
+
+A hostname alone could not tell a read from a write on an allowlisted host,
+so `npm publish` to `registry.npmjs.org` would get through, and it could not
+see which name a client asked a shared CDN edge for once a tunnel was open,
+so an allowlisted name could front for another site on the same edge. So the
+tunnel terminates TLS for every host it admits, under the conditions in
+`docs/for-agents/specs/sandbox-backends/` §6.1:
+
+- **Per-engagement CA.** The egress proxy mints a CA for each engagement,
+  name-constrained to the allowlist and valid for a day, whose key never
+  leaves the sidecar's memory. Its certificate reaches the jail in the
+  run's CA bundle (`/run/tf-ca-bundle.crt`), after the system roots, and
+  every toolchain in the rootfs reads that bundle through its own variable
+  (`agentproc.caBundleEnv`).
+- **Verified upstream first.** The proxy dials the registry through the
+  vetted gate, verifies its certificate for the CONNECT host against the
+  system roots, and only then answers the CONNECT. A failure is a refusal,
+  never a fallback to an opaque tunnel.
+- **One hostname, one request shape.** The client is shown a leaf for the
+  CONNECT host only and is served HTTP/1.1 only. Every request's `Host`
+  must be the CONNECT host; upgrades, nested CONNECTs, ambiguous framing, a
+  GET or HEAD with a body, and method-override headers are refused.
+- **Registries are read-only.** GET and HEAD, plus POST to the paths a
+  registry lists as reads (npm's audit endpoints). Every other method is
+  refused with a reason the client prints, and recorded.
+- **Pure pass-through.** The response, compressed or not, is copied back
+  as the registry sent it. Nothing is cached.
+
+The accepted residual is in §6.1: for npm and pip, a new dependency's
+bytes now pass through TF with only TLS behind them, and the first install
+outside TF re-checks the lockfile's hash.
 
 ## Which lane does an ecosystem need? Probe — never assume
 
@@ -60,20 +86,22 @@ Measured behavior of the majors (2026-08):
 
 | Ecosystem | Serving behavior | Lane |
 | --- | --- | --- |
-| npm | `registry.npmjs.org`, direct 200 | Tunnel (shipped) |
-| PyPI | 302 → `files.pythonhosted.org` (dedicated) | Tunnel (shipped) |
+| npm | `registry.npmjs.org`, direct 200 | Tunnel (shipped; audit POSTs listed as reads) |
+| PyPI | 302 → `files.pythonhosted.org` (dedicated) | Tunnel (shipped; pip runs from a venv) |
 | Go modules + toolchains | 302 → `storage.googleapis.com` for large zips; small zips inline | **Fetch relay (shipped: `go-modules`)** |
 | Hackage | direct 200 | Tunnel, when a rootfs variant ships GHC |
 | Maven Central | direct 200 | Tunnel, when a rootfs variant ships a JDK |
 | GitHub release assets | 302 → `release-assets.githubusercontent.com` (dedicated) | Tunnel, if ever needed |
 | crates.io, Hugging Face | unverified — probe before deciding | TBD (HF's presigned-storage redirects likely mean relay) |
 
-Two rules ride along with the table. A tunnel entry also requires an
+Three rules ride along with the table. A tunnel entry also requires an
 **in-sandbox consumer** — a toolchain in the rootfs that actually dials it
 (so Hackage/Maven entries land together with their rootfs variants, not
-before). And probe with a **large** artifact: the Go proxy's inline/redirect
-split is size-dependent, so a small-file smoke test passes while real
-builds fail — that false pass is how the gap shipped in the first place.
+before). That toolchain must **trust the run's CA**, through a variable in
+`agentproc.caBundleEnv`, or every fetch fails verification. And probe with
+a **large** artifact: the Go proxy's inline/redirect split is
+size-dependent, so a small-file smoke test passes while real builds fail —
+that false pass is how the gap shipped in the first place.
 
 ## The fetch relay in one paragraph
 
@@ -86,10 +114,11 @@ bodies streamed. Ecosystem knowledge is catalog data
 (`catalog.go`): the Go entry is four routes (a synthesized sumdb
 capability probe, the sumdb relay, a fence, the module-protocol
 catch-all) plus one env entry (`GOPROXY=http://<relay>,direct`). The
-relay holds no credentials and no cache, and it is safe as *untrusted*
-infrastructure only because each relayed ecosystem's client verifies
-content itself — an ecosystem whose client doesn't verify downloads needs
-a design discussion, not a catalog entry.
+relay holds no credentials and no cache, and it is tolerable in the content
+path only because each relayed ecosystem's bytes are verified again by
+something TF does not control — an ecosystem without that needs a design
+discussion, not a catalog entry (`internal/egressrelay/CLAUDE.md`, the
+integrity prerequisite).
 
 TFAC-408's sandbox profiles are expected to serialize both tunnel entries
 and relay catalog entries as per-profile egress rules; keeping them as
@@ -107,6 +136,8 @@ rewrite.
    review rather than a checklist.
 
 Any change in this area is security-sensitive. The invariants (vetted dial
-on every hop, no header forwarding, no shared-storage allowlisting, no TLS
-termination, no verification-weakening env) are enforced by tests where
-possible — read the lane CLAUDE.md before assuming one is optional.
+on every hop, no header forwarding in the relay, no shared-storage
+allowlisting, bodies passed through verbatim with no cache, upstream TLS
+built in one place and never skipped, no verification-weakening env) are
+enforced by tests and `scripts/lint.sh` where possible — read the lane
+CLAUDE.md before assuming one is optional.

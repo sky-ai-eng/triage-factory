@@ -407,6 +407,16 @@ func (h *RunProxyHandle) JailEndpoints() []string {
 	return append([]string(nil), h.p.jailEndpoints...)
 }
 
+// EgressCACertPEM returns the egress interceptor's per-engagement CA
+// certificate, which the jail's CA bundle has to carry for any registry the
+// proxy admits to verify in the jail. Nil when no proxy or no admitted host.
+func (h *RunProxyHandle) EgressCACertPEM() []byte {
+	if h == nil || h.p == nil || h.p.egress == nil {
+		return nil
+	}
+	return h.p.egress.CACertPEM()
+}
+
 // LLMEnv returns the LLM proxy's address and per-run placeholder in the
 // provider vocabulary, for a caller whose model calls originate outside the
 // jail. Non-secret: the placeholder authenticates the caller to this run's own
@@ -595,10 +605,10 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 	var env []string
 
 	// Gating egress proxy (TFAC-567): the CONNECT-only door to public
-	// package registries, so `pnpm install` / `go mod download` /
-	// `pip install` work inside the L3-locked sandbox. Started for
-	// every sandbox run — prompt-only runs never dial it, and one idle
-	// listener is cheaper than a second wiring path.
+	// package registries, so `pnpm install` / `pip install` work inside
+	// the L3-locked sandbox. Started for every sandbox run — prompt-only
+	// runs never dial it, and one idle listener is cheaper than a second
+	// wiring path.
 	egressEnv, egressSrv, egressAddr, err := startEgressProxyForSandbox(hostVethIP, gh, recordEgressDenial)
 	if err != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -712,10 +722,11 @@ func startGitProxyForSandbox(ctx context.Context, hostVethIP string, git *GitPro
 // startEgressProxyForSandbox mints a per-run secret, starts the gating
 // package-registry egress proxy (TFAC-567) on a free port of
 // hostVethIP, and returns the proxy env entries plus the server for
-// the shutdown bundle.
+// the shutdown bundle. The server holds the engagement's interception CA,
+// whose certificate the sidecar writes into the jail's CA bundle.
 //
 // The allowlist is the compiled-in registry set (egressproxy.
-// DefaultRegistryHosts); TFAC-408's sandbox profiles replace this
+// DefaultRegistries); TFAC-408's sandbox profiles replace this
 // constant with per-profile data resolved by the spawner — the wiring
 // here doesn't change shape. The proxy enforces the operator denylist
 // (metadata / private ranges / sandbox pool) against resolved IPs
@@ -735,7 +746,7 @@ func startEgressProxyForSandbox(hostVethIP string, gh egressproxy.GitHubHosts, r
 		return nil, nil, "", err
 	}
 	srv, err := egressproxy.New(egressproxy.Config{
-		AllowedHosts:     egressproxy.DefaultRegistryHosts(),
+		Registries:       egressproxy.DefaultRegistries(),
 		IncomingToken:    incoming,
 		AllowNonLoopback: true,
 		GitHub:           gh,

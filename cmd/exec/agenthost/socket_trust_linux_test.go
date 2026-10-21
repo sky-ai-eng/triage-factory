@@ -47,21 +47,21 @@ func TestDefaultSocketPath_MatchesBrokerTrustedDestination(t *testing.T) {
 	}
 }
 
-// TestCertPath_MatchesBrokerTrustedDerivation is the same drift guard for the
-// per-run gh-injector cert: the sidecar writes it (WriteInjectorCert →
-// CertPathFor) and the orchestrator mounts it by that path, while the broker
-// independently re-derives and validates the source via
-// sandbox.TrustedGHInjectorCertPath. The two derivations must agree byte-for-
-// byte or every gh-channel run's cert mount is rejected.
-func TestCertPath_MatchesBrokerTrustedDerivation(t *testing.T) {
+// TestCABundlePath_MatchesBrokerTrustedDerivation is the same drift guard for
+// the run's CA bundle: the sidecar writes it (WriteCABundle → CABundlePathFor)
+// and the orchestrator mounts it by that path, while the broker independently
+// re-derives and validates the source via sandbox.TrustedCABundlePath. The two
+// derivations must agree byte-for-byte or every launch's bundle mount is
+// rejected.
+func TestCABundlePath_MatchesBrokerTrustedDerivation(t *testing.T) {
 	for _, conversationID := range []string{
 		"conv-1", "itestSomeTestName", "00000000-0000-0000-0000-0000000000aa",
 		"weird/../chars\x00 here!", "",
 	} {
-		got := CertPathFor(conversationID)
-		want := sandbox.TrustedGHInjectorCertPath(conversationID)
+		got := CABundlePathFor(conversationID)
+		want := sandbox.TrustedCABundlePath(conversationID)
 		if got != want {
-			t.Errorf("CertPathFor(%q) = %q, want %q (broker's trusted derivation)", conversationID, got, want)
+			t.Errorf("CABundlePathFor(%q) = %q, want %q (broker's trusted derivation)", conversationID, got, want)
 		}
 	}
 }

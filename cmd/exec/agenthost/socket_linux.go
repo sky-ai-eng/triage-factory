@@ -21,17 +21,17 @@ import (
 // owner alone (cmd/capbroker's listen), and creates each run's directory
 // inside it for each engagement (sandbox.PrepareRunSockets): owned by the
 // run's sidecar uid, with the run's jail gid as its group and no access for
-// anyone else. A sidecar therefore creates its socket and cert in the one
+// anyone else. A sidecar therefore creates its socket and CA bundle in the one
 // directory that is its own, and in nothing shared.
 const hostSocketRoot = "/run/tf"
 
-// agentHostSocketName and ghInjectorCertName are the files a run's sidecar
-// creates in its socket directory. internal/sandbox derives the same paths
-// (TrustedAgentHostSocketPath, TrustedGHInjectorCertPath) to validate the
-// launch's mounts; a drift test cross-checks the two derivations.
+// agentHostSocketName and caBundleName are the files a run's sidecar creates
+// in its socket directory. internal/sandbox derives the same paths
+// (TrustedAgentHostSocketPath, TrustedCABundlePath) to validate the launch's
+// mounts; a drift test cross-checks the two derivations.
 const (
 	agentHostSocketName = "agenthost.sock"
-	ghInjectorCertName  = "gh-injector.crt"
+	caBundleName        = "ca-bundle.crt"
 )
 
 // HostDaemon is the per-run socket + server lifecycle. StartWithServer
@@ -326,44 +326,43 @@ func SocketMountFor(conversationID string) sandbox.Mount {
 	return sandbox.Mount{Source: SocketPathFor(conversationID), Destination: DefaultSocketPath}
 }
 
-// CertPathFor returns the host-side path of conversationID's gh-injector TLS
-// certificate, beside the run's socket in its socket directory. Deterministic
-// so the sidecar (which writes + serves the injector) and the orchestrator
-// (which bind-mounts the cert into the jail) agree without a round trip — the
-// same contract as SocketPathFor. The cap-broker independently re-derives this
-// as TrustedGHInjectorCertPath and validates a launch's mount source against it;
-// a drift test cross-checks the two derivations agree.
-func CertPathFor(conversationID string) string {
-	return filepath.Join(runSocketDir(conversationID), ghInjectorCertName)
+// CABundlePathFor returns the host-side path of conversationID's CA bundle,
+// beside the run's socket in its socket directory: the trust file every TLS
+// client in the jail reads. Deterministic so the sidecar (which writes it) and
+// the orchestrator (which bind-mounts it into the jail) agree without a round
+// trip — the same contract as SocketPathFor. The cap-broker independently
+// re-derives this as TrustedCABundlePath and validates a launch's mount source
+// against it; a drift test cross-checks the two derivations agree.
+func CABundlePathFor(conversationID string) string {
+	return filepath.Join(runSocketDir(conversationID), caBundleName)
 }
 
-// WriteInjectorCert writes conversationID's per-run gh-injector certificate
-// (PEM, the PUBLIC half only — the private key never leaves the sidecar) to
-// CertPathFor(conversationID) and grants the run's jail gid read access, the
-// same grant the socket gets. Called by the sidecar during
-// bring-up when the gh channel is enabled, before the sandbox launches (the OCI
-// spec references the source path, which must exist).
-func WriteInjectorCert(conversationID string, certPEM []byte, jailGID int) error {
-	path := CertPathFor(conversationID)
+// WriteCABundle writes conversationID's CA bundle (public certificates only;
+// no private key leaves the sidecar) to CABundlePathFor(conversationID) and
+// grants the run's jail gid read access, the same grant the socket gets.
+// Called by the sidecar during bring-up of every run, before the sandbox
+// launches (the OCI spec references the source path, which must exist).
+func WriteCABundle(conversationID string, bundlePEM []byte, jailGID int) error {
+	path := CABundlePathFor(conversationID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("agenthost: mkdir %s: %w", filepath.Dir(path), err)
 	}
-	if err := writeFreshInjectorCert(path, certPEM); err != nil {
+	if err := writeFreshCABundle(path, bundlePEM); err != nil {
 		return err
 	}
 	return grantToJail(path, jailGID, 0o640)
 }
 
-// writeFreshInjectorCert creates the cert as a NEW file, removing whatever is
+// writeFreshCABundle creates the bundle as a NEW file, removing whatever is
 // already at the path first — the same remove-before-create rule
 // listenAndServe applies to the socket. The run's socket directory is made
 // fresh for each engagement, so in a jail's cell this normally finds nothing;
 // creating the file new rather than truncating in place makes it belong to
 // whoever is serving it either way.
-func writeFreshInjectorCert(path string, certPEM []byte) error {
+func writeFreshCABundle(path string, bundlePEM []byte) error {
 	_ = os.Remove(path)
-	if err := os.WriteFile(path, certPEM, 0o640); err != nil {
-		return fmt.Errorf("agenthost: write injector cert %s: %w", path, err)
+	if err := os.WriteFile(path, bundlePEM, 0o640); err != nil {
+		return fmt.Errorf("agenthost: write CA bundle %s: %w", path, err)
 	}
 	return nil
 }

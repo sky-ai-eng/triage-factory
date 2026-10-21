@@ -145,7 +145,7 @@ run holds it:
   process runs as, so a later run drawing the same index cannot reach it.
 - **The sockets** live in two per-run directories the broker creates for each
   engagement under `/run/tf`: the sidecar's (owned by its uid), where it creates
-  and serves the agenthost socket and writes the gh-injector cert, and the tool
+  and serves the agenthost socket and writes the jail's CA bundle, and the tool
   host's (owned by the orchestrator), where the orchestrator binds the tool-host
   socket. Both are setgid to the jail's gid at `0750`, so each socket is born in
   the run's jail gid and is then opened `0660`. Neither creator carries that

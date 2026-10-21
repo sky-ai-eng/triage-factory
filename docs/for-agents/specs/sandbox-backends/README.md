@@ -199,7 +199,9 @@ second implementation is most likely to get wrong:
 Env assembly is shared, so every backend presents the same paths inside the
 jail: the run tree at `/work`, TF's binaries at the fixed destinations in
 `internal/sandbox/spec.go` (`/opt/tf/bin/...`), the exec-verb socket at
-`agenthost.DefaultSocketPath`, staged skills and memory at
+`agenthost.DefaultSocketPath`, the run's CA bundle at
+`sandbox.TrustedCABundleDestination` with the trust variables
+(`agentproc.caBundleEnv`) pointing at it, staged skills and memory at
 `sandbox.TrustedSkillsDestination` / `TrustedMemoryDestination`. `LaunchSpec`
 names the inputs by their host source; the backend decides how they arrive.
 Firecracker has no shared-filesystem device, so its backend attaches them as
@@ -233,6 +235,10 @@ fails one does not meet the contract.
 9. **Teardown releases everything.** After a contract-order teardown, a new
    cell for the same conversation provisions and launches cleanly, and the
    boot-time reap runs without error.
+10. **The jail trusts the run's CA bundle.** Every trust variable the
+    rootfs's toolchains read names a file holding exactly the bundle the
+    sidecar wrote for this engagement, egress interception CA included, so
+    every registry the egress proxy admits verifies in the jail (§6.1).
 
 ## 6. Policy stays in TF on every backend
 
@@ -260,33 +266,34 @@ the egress policy is enforced once, in TF code:
 
 ### 6.1 TLS interception in the sidecar
 
-TFAC-1117. The tunnel lane passes TLS through opaquely, so it acts only on
-the hostname in the `CONNECT` line. That leaves two gaps:
+The tunnel lane (`internal/egressproxy`) terminates TLS for every host it
+admits. A tunnel that saw only the hostname in the `CONNECT` line would leave
+two gaps:
 
 - **Writes to allowlisted registries.** `npm publish` is a PUT to
   `registry.npmjs.org`, which is allowlisted. An agent given an attacker's npm
-  token in hostile PR text can publish the repository as a public package.
+  token in hostile PR text could publish the repository as a public package.
 - **Fronting through shared CDN edges.** An allowlisted name can resolve to an
-  edge that also serves other sites, and the client inside the tunnel can
+  edge that also serves other sites, and a client inside an opaque tunnel can
   handshake for one of them. The red team of Perplexity's SPACE project showed
   it against PyPI's Fastly edge.
 
-Closing either means terminating TLS, which reverses the rule in
-`internal/egressproxy/CLAUDE.md` and `internal/egressrelay/CLAUDE.md` that no
-lane terminates the agent's TLS. That rule kept TF out of the content trust
-chain: with TLS end to end, the proxy cannot change what a package manager
-downloads. Interception gives that up for the hosts it covers, so it is built
-only under these conditions:
+Terminating TLS puts TF in the content trust chain for the hosts it covers:
+with TLS end to end, a proxy cannot change what a package manager downloads,
+and through an interceptor it could. So interception holds to these
+conditions:
 
-1. **A per-engagement CA.** It is generated in the sidecar's memory for each
-   engagement and never written to the sealed bundle, the run tree or a
-   workspace snapshot. Only its certificate reaches the jail, appended to the
-   system roots in the trust file the gh channel already uses
-   (`internal/ghinjector/cert.go`), never substituted for them. That file sits
-   outside the run tree and is rewritten at every engagement, so a resumed run
-   trusts a fresh CA. The CA is valid for hours, not years, and is
-   name-constrained to exactly the hosts the tunnel admits. GitHub and the LLM
-   provider are never intercepted; they keep their explicit endpoints.
+1. **A per-engagement CA.** The egress proxy generates it in the sidecar's
+   memory for each engagement and never writes it to the sealed bundle, the
+   run tree or a workspace snapshot. Only its certificate reaches the jail,
+   after the system roots in the run's CA bundle (`/run/tf-ca-bundle.crt`),
+   never substituted for them. The sidecar writes that bundle for every run,
+   whatever channels the run has, outside the run tree and fresh at every
+   engagement, so a resumed run trusts a fresh CA. The CA is valid for a
+   day, and an engagement that outlives it gets certificate errors rather than
+   a fallback. It is name-constrained to exactly the hosts the tunnel admits,
+   with every IP address excluded. GitHub and the LLM provider are never
+   intercepted; they keep their explicit endpoints.
 2. **Every host the tunnel admits is intercepted.** A host left opaque keeps
    both gaps.
 3. **Pure pass-through.** After the policy decision the upstream body is
@@ -307,39 +314,44 @@ only under these conditions:
    Read-only means nothing if a GET can be turned into something else.
 6. **One hostname end to end.** The leaf the jail sees is minted for the
    `CONNECT` host only, so a client whose SNI differs fails its handshake.
-   Every request's `Host` (`:authority` on HTTP/2) must equal the `CONNECT`
-   host or the request is refused, because a CDN edge routes on that header
-   even when the SNI is right. The upstream `ServerName` is the same host.
-   This closes fronting at the TLS layer and the HTTP layer.
+   The jail is served HTTP/1.1 only: every client in the rootfs speaks it,
+   the ones that prefer HTTP/2 fall back, and it keeps HTTP/2's framing out
+   of what the sidecar parses. Every request's `Host` must equal the
+   `CONNECT` host or the request is refused, because a CDN edge routes on
+   that header even when the SNI is right. The upstream `ServerName` is the
+   same host. This closes fronting at the TLS layer and the HTTP layer.
 7. **Upstream dials go through the tunnel's gate:** `VettedDialContext`
    (resolve on the host, check every address against the internal denylist,
-   dial the vetted IP) and the `CONNECT` lane's port rule, 443 only. No second
-   resolver or dialer, so DNS rebinding behind an allowlisted name gets no
-   further than it does today.
+   dial the vetted IP) and the `CONNECT` lane's port rule, 443 only, for the
+   first connection and every redial. No second resolver or dialer, so DNS
+   rebinding behind an allowlisted name gets no further than the denylist.
 8. **Upstream TLS comes from one constructor with no settings:** system
-   roots, Go's default versions and ciphers, nothing read from config or the
-   environment. A guard in `scripts/lint.sh` refuses `InsecureSkipVerify` or a
-   hand-built `tls.Config` in the interceptor's package, and tests prove that
-   a self-signed, expired or wrong-host certificate, and a valid certificate
-   for a different allowlisted host, are all refused. Today each client
-   verifies its registry itself and a mistake fails loudly; afterwards one
-   dial verifies for every toolchain, and a mistake there would weaken all of
-   them while each client still saw a valid certificate.
+   roots, Go's default versions and ciphers, nothing read from config. A
+   guard in `scripts/lint.sh` refuses `InsecureSkipVerify` anywhere in the
+   interceptor's package and a `tls.Config` outside its `tlsconfig.go`, and
+   tests prove that a self-signed, expired or wrong-host certificate, and a
+   valid certificate for a different allowlisted host, are all refused.
+   Without interception each client verifies its registry itself and a
+   mistake fails loudly; with it one dial verifies for every toolchain, and
+   a mistake there would weaken all of them while each client still saw a
+   valid certificate.
 9. **Failures are loud.** An upstream verification failure, and every
    refusal above, is an explicit error to the jail and a recorded denial,
-   never a fallback to tunnelling.
+   never a fallback to tunneling.
 10. **Every toolchain the rootfs ships trusts the CA**, each through the
-    variable it reads (`SSL_CERT_FILE` for Go, `NODE_EXTRA_CA_CERTS` for Node
-    and npm, pip's own, and so on). The list is fixed by a rootfs integration
-    test that fetches through the interceptor with each toolchain in
-    `internal/sandbox` `apkPackages` (Go, Node and npm, Python and pip, curl),
-    so a toolchain added to the rootfs without its variable fails the test.
-    The guardrail prompt forbids disabling verification. A toolchain left out
-    fails with certificate errors, and an agent's fix for those
-    (`strict-ssl=false`, `--trusted-host`) ends up committed to the customer's
-    repository.
+    variable it reads (`agentproc.caBundleEnv`): `SSL_CERT_FILE` for Go, curl
+    and OpenSSL, `NODE_EXTRA_CA_CERTS` for Node and so npm and pnpm, and
+    `PIP_CERT` for pip, which the rootfs runs from a venv (`python3 -m venv`
+    installs it from the wheel CPython bundles). The list is fixed by an
+    integration test that fetches through the interceptor with each
+    toolchain inside a jail (`TestIntegration_EgressIntercept` in
+    `internal/agentproc`), so a toolchain added to the rootfs without its
+    variable fails the test. The guardrail prompt forbids disabling
+    verification. A toolchain left out fails with certificate errors, and an
+    agent's fix for those (`strict-ssl=false`, `--trusted-host`) ends up
+    committed to the customer's repository.
 
-**Accepted residual.** For npm and pip, a new dependency's bytes now pass
+**Accepted residual.** For npm and pip, a new dependency's bytes pass
 through TF with only TLS behind them. That stays contained. An install outside
 TF re-fetches from the real registry and checks the lockfile's hash (`npm ci`
 fails with `EINTEGRITY`, pip's hash-checking mode with a mismatch), so a forged
@@ -352,8 +364,7 @@ only a CI job rebuilding it would notice. That is accepted.
 GET paths and query strings still carry whatever the jail puts in them. With
 `Host` pinned they reach only the registry itself, and the one thing a
 registry publishes about reads, the download counts of a package an attacker
-owns, is a channel measured in bits per day. That is accepted too, as it is
-for the tunnel today.
+owns, is a channel measured in bits per day. That is accepted too.
 
 Two mitigations were considered and not taken. A second-opinion lockfile
 check from the control plane would only repeat what the first install outside
@@ -362,10 +373,6 @@ from the run's credentials, but the sidecar already terminates TLS from the
 jail (the gh injector) and parses the jail's HTTP in plaintext (the git proxy,
 the fetch relays) in that same process, so interception adds more of the
 parsing it already does rather than a new kind.
-
-The step that builds this rewrites the two package guides, the relay lane's
-integrity prerequisite and `docs/security/sandbox-egress.md` to match. Until
-then they describe the code as it is.
 
 ## 7. Capability differences are data
 
@@ -535,6 +542,7 @@ The cases, one per invariant except 8:
 | `JailIsNotRoot` | 6 |
 | `FreezeHoldsTheJailStill`, `StopLeavesNothingRunning` | 7 |
 | `TeardownReleasesTheCell` | 9 — two engagements of one conversation back to back, then a reap |
+| `TrustVariablesNameTheRunsBundle` | 10 — `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` and `PIP_CERT` each name a file whose hash is that of the bundle the sidecar wrote, which carries a name-constrained CA |
 
 Invariant 8 stays covered by `internal/sandbox`'s own integration tests for
 now: a memory case needs a host that grants a private cgroup namespace, and
@@ -568,7 +576,7 @@ suite.
 ## 10. Order of work
 
 1. **Extract the interface with gVisor behind it, and the suite.** *Done.*
-2. **TLS interception in the sidecar** (§6.1, TFAC-1117).
+2. **TLS interception in the sidecar** (§6.1, TFAC-1117). *Done.*
 3. **The Firecracker backend**, built against the suite. The spike items
    that could run without it pass (§12.6); the rest run against it. It
    isolates cells by network position as gVisor does, so it does not wait for
