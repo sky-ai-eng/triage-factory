@@ -32,14 +32,16 @@ const (
 // fakeGitHubHost is one GitHub deployment. It lists each repo's open pull
 // requests with a conditional request keyed on an ETag that changes only when
 // the listing does, answers a single-PR read for the numbers in basics, answers
-// every GraphQL node with null (so the refresh writes nothing), and records
-// every request so a test can tell what was asked of this host.
+// every GraphQL search with the pull requests in search, answers every GraphQL
+// node with null (so the refresh writes nothing), and records every request so
+// a test can tell what was asked of this host.
 type fakeGitHubHost struct {
 	t *testing.T
 
 	mu       sync.Mutex
 	listings map[string][]map[string]any // "owner/repo" → open PRs
 	basics   map[string]map[string]any   // "owner/repo#N" → single-PR body
+	search   []map[string]any            // every search's result nodes
 	nodeIDs  []string                    // every node id a GraphQL refresh asked for
 	paths    []string                    // every REST path requested
 	notMod   int                         // listings answered 304
@@ -81,6 +83,20 @@ func (h *fakeGitHubHost) basicPR(sourceID, nodeID string) {
 	}
 }
 
+// searchPR makes every GraphQL search answer an open pull request in repo,
+// named as GitHub names the repository now.
+func (h *fakeGitHubHost) searchPR(repo string, number int, nodeID, title string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.search = append(h.search, map[string]any{
+		"id": nodeID, "number": number, "title": title, "state": "OPEN",
+		"author":     map[string]any{"login": "alice"},
+		"url":        "https://example.invalid/" + repo + "/pull/" + fmt.Sprint(number),
+		"repository": map[string]any{"nameWithOwner": repo},
+		"createdAt":  "2026-09-01T10:00:00Z", "updatedAt": "2026-09-02T10:00:00Z",
+	})
+}
+
 func (h *fakeGitHubHost) serve(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -89,10 +105,16 @@ func (h *fakeGitHubHost) serve(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Variables struct {
 				IDs []string `json:"ids"`
+				Q   string   `json:"q"`
 			} `json:"variables"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			h.t.Errorf("decode graphql body: %v", err)
+		}
+		if body.Variables.Q != "" {
+			nodes := append([]map[string]any{}, h.search...)
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"search": map[string]any{"nodes": nodes}}})
+			return
 		}
 		h.nodeIDs = append(h.nodeIDs, body.Variables.IDs...)
 		nodes := make([]any, len(body.Variables.IDs))

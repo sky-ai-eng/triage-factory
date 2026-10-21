@@ -363,7 +363,7 @@ func TestRefreshGitHub_RateLimitSeedsAlreadyDiscoveredReposBeforeStopping(t *tes
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("ETag", `"etag-1"`)
-		_, _ = w.Write([]byte(openPRBody))
+		_, _ = w.Write([]byte(openPRBodyFor(r.URL.Path)))
 	}))
 	t.Cleanup(srv.Close)
 
