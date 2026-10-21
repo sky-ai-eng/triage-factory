@@ -564,3 +564,156 @@ describe('PredicateEditor linear_team_id_in', () => {
     )
   })
 })
+
+const trackedJiraProjects = [
+  { id: 'jp-sky', key: 'SKY', name: 'Sky' },
+  { id: 'jp-ops', key: 'OPS', name: 'Operations' },
+]
+
+// stubJiraProjectField answers the schema read with the named Jira project
+// fields and the team-settings read with projects as its jira_projects (a 500
+// when null). Each project carries the rules the read renders beside it.
+function stubJiraProjectField(
+  projects: { id: string; key: string; name: string }[] | null,
+  fields: string[] = ['jira_project_id_in'],
+) {
+  const rule = { members: [], canonical: null }
+  const fetchMock = vi.fn((url: string) => {
+    if (url.startsWith('/api/event-schemas/')) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        ...jsonBody({ fields: fields.map((name) => ({ name, type: 'string_list' })) }),
+      })
+    }
+    if (projects === null) {
+      return Promise.resolve({ ok: false, status: 500, ...jsonBody({ errors: [] }) })
+    }
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      ...jsonBody({
+        jira_projects: projects.map((p) => ({
+          ...p,
+          pickup: rule,
+          in_progress: rule,
+          in_review: rule,
+          done: rule,
+        })),
+        linear_teams: [],
+      }),
+    })
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+describe('PredicateEditor jira_project_id_in', () => {
+  it("offers the handler team's tracked Jira projects and writes their registry ids", async () => {
+    const fetchMock = stubJiraProjectField(trackedJiraProjects)
+    const onChange = vi.fn()
+    render(
+      <PredicateEditor
+        eventType="jira:issue:assigned"
+        teamId="team-b"
+        value={{}}
+        onChange={onChange}
+      />,
+    )
+
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'OPS Operations' }))
+
+    expect(onChange).toHaveBeenCalledWith({ jira_project_id_in: ['jp-ops'] })
+    expect(screen.getAllByRole('checkbox')).toHaveLength(2)
+    expect(fetchMock).toHaveBeenCalledWith('/api/teams/team-b/settings', expect.anything())
+  })
+
+  it('falls back to the acting team when the handler team is not known yet', async () => {
+    const fetchMock = stubJiraProjectField(trackedJiraProjects)
+    render(<PredicateEditor eventType="jira:issue:assigned" value={{}} onChange={vi.fn()} />)
+
+    await screen.findByRole('checkbox', { name: 'SKY Sky' })
+    expect(fetchMock).toHaveBeenCalledWith('/api/teams/team-acting/settings', expect.anything())
+  })
+
+  it('offers the same projects for the project an issue left', async () => {
+    const onChange = vi.fn()
+    stubJiraProjectField(trackedJiraProjects, ['old_jira_project_id_in'])
+    render(
+      <PredicateEditor
+        eventType="jira:issue:key_changed"
+        teamId="team-b"
+        value={{}}
+        onChange={onChange}
+      />,
+    )
+
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'SKY Sky' }))
+    expect(onChange).toHaveBeenCalledWith({ old_jira_project_id_in: ['jp-sky'] })
+  })
+
+  it('keeps a stored project the team no longer tracks, removable', async () => {
+    stubJiraProjectField(trackedJiraProjects)
+    const onChange = vi.fn()
+    render(
+      <PredicateEditor
+        eventType="jira:issue:assigned"
+        teamId="team-b"
+        value={{ jira_project_id_in: ['jp-sky', 'jp-old'] }}
+        onChange={onChange}
+      />,
+    )
+
+    expect(await screen.findByRole('checkbox', { name: 'SKY Sky' })).toBeChecked()
+    expect(screen.getByText('jp-old · not tracked')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove jp-old' }))
+    expect(onChange).toHaveBeenCalledWith({ jira_project_id_in: ['jp-sky'] })
+  })
+
+  it('clears the field when the last project is deselected', async () => {
+    stubJiraProjectField(trackedJiraProjects)
+    const onChange = vi.fn()
+    render(
+      <PredicateEditor
+        eventType="jira:issue:assigned"
+        teamId="team-b"
+        value={{ jira_project_id_in: ['jp-sky'] }}
+        onChange={onChange}
+      />,
+    )
+
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'SKY Sky' }))
+    expect(onChange).toHaveBeenCalledWith({})
+  })
+
+  it('says so when the team tracks no Jira projects', async () => {
+    stubJiraProjectField([])
+    render(
+      <PredicateEditor
+        eventType="jira:issue:assigned"
+        teamId="team-b"
+        value={{}}
+        onChange={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText('This team tracks no Jira projects.')).toBeInTheDocument()
+  })
+
+  it('says so when the Jira projects cannot be read', async () => {
+    stubJiraProjectField(null)
+    render(
+      <PredicateEditor
+        eventType="jira:issue:assigned"
+        teamId="team-b"
+        value={{}}
+        onChange={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Could not load this team’s Jira projects.',
+    )
+  })
+})

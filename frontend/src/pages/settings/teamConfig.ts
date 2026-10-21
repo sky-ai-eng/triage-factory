@@ -22,7 +22,12 @@ import type { SlackChannelsResponse } from '../../types'
 // the four status rules). One project's tracking config; a team can carry
 // several with independent workflows.
 export interface JiraProjectConfig {
+  // The project's registry row id and name as the server read them. Absent on
+  // a project added in the form and not saved yet; the save names projects by
+  // key alone.
+  id?: string
   key: string
+  name?: string
   pickup: JiraStatusRuleValue
   in_progress: JiraStatusRuleValue
   // Optional: the status naming work that awaits human review. It has no
@@ -736,6 +741,28 @@ export async function fetchRepositorySlug(id: string): Promise<string | null> {
   return apiJSON<TrackedRepository>(`/api/repos/${encodeURIComponent(id)}`)
     .then((row) => row.slug)
     .catch(() => null)
+}
+
+// TrackedJiraProject is a Jira project as the jira_project_id_in picker reads
+// it: the registry row id a filter stores, and the key and name it is shown as.
+export interface TrackedJiraProject {
+  id: string
+  key: string
+  name: string
+}
+
+// fetchTeamTrackedJiraProjects returns the Jira projects teamId tracks on the
+// org's current Jira site, off the team-settings read, or null on failure.
+// Same null-vs-empty contract as fetchTeamRepos: a failed load is not "tracks
+// nothing."
+export async function fetchTeamTrackedJiraProjects(
+  teamId: string,
+): Promise<TrackedJiraProject[] | null> {
+  const data = await fetchTeamSettings(teamId)
+  if (data === null) return null
+  return (data.jira_projects ?? []).flatMap(({ id, key, name }) =>
+    id ? [{ id, key, name: name ?? '' }] : [],
+  )
 }
 
 // TrackedLinearTeam is a Linear team as the linear_team_id_in picker reads it:

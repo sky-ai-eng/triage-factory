@@ -112,8 +112,9 @@ func TestDiffJira_LabelMetadataAndPredicates(t *testing.T) {
 		{`{"label_name":"backend"}`, false},
 		{`{"has_label":"backend"}`, true},
 		{`{"has_label":"frontend"}`, false},
-		{`{"project":"SKY"}`, true},
-		{`{"project":"OPS"}`, false},
+		{`{"jira_project_id_in":["jp-sky"]}`, true},
+		{`{"jira_project_id_in":["jp-ops"]}`, false},
+		{`{"jira_project_id_in":["SKY"]}`, false},
 		{allowlist(t, "assignee_in", testUserAccountID), true},
 		{allowlist(t, "assignee_in", "someone-else"), false},
 	} {

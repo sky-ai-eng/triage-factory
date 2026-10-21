@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -91,4 +92,81 @@ func writePredicateReferenceError(w http.ResponseWriter, err error) bool {
 	}
 	httpx.WriteErrors(w, http.StatusUnprocessableEntity, pe.faults...)
 	return true
+}
+
+// trackedIDFaults is the body of a check for predicate fields that name rows
+// the handler's team tracks by id, such as linear_team_id_in and
+// jira_project_id_in and their old_ siblings: every entry predicate adds over
+// prior to one of fields must be in the set tracked returns. tracked is read only when an
+// entry was added. Each fault is the field, the quoted entry, and hint.
+func trackedIDFaults(predicate, prior *string, fields []string, hint string, tracked func() (map[string]bool, error)) ([]string, error) {
+	added := make([][]string, len(fields))
+	anyAdded := false
+	for i, field := range fields {
+		priorIn, err := predicateIDList(prior, field)
+		if err != nil {
+			return nil, err
+		}
+		nextIn, err := predicateIDList(predicate, field)
+		if err != nil {
+			return nil, err
+		}
+		added[i] = addedEntries(priorIn, nextIn)
+		anyAdded = anyAdded || len(added[i]) > 0
+	}
+	if !anyAdded {
+		return nil, nil
+	}
+	set, err := tracked()
+	if err != nil {
+		return nil, err
+	}
+	var faults []string
+	for i, field := range fields {
+		for _, id := range added[i] {
+			if !set[id] {
+				faults = append(faults, fmt.Sprintf("%s: %q %s", field, id, hint))
+			}
+		}
+	}
+	return faults, nil
+}
+
+// predicateIDList reads one list field from a predicate; nil for match-all or
+// a predicate without the field.
+func predicateIDList(predicate *string, field string) ([]string, error) {
+	if predicate == nil {
+		return nil, nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(*predicate), &fields); err != nil {
+		return nil, fmt.Errorf("decode predicate: %w", err)
+	}
+	raw, ok := fields[field]
+	if !ok {
+		return nil, nil
+	}
+	var ids []string
+	if err := json.Unmarshal(raw, &ids); err != nil {
+		return nil, fmt.Errorf("decode predicate %s: %w", field, err)
+	}
+	return ids, nil
+}
+
+// addedEntries returns the entries of next that prior does not hold, each
+// once, in next's order. The stored entries are not re-checked, so a reference
+// that went stale after it was stored never blocks an edit that keeps it.
+func addedEntries(prior, next []string) []string {
+	seen := make(map[string]bool, len(prior))
+	for _, id := range prior {
+		seen[id] = true
+	}
+	var added []string
+	for _, id := range next {
+		if !seen[id] {
+			seen[id] = true
+			added = append(added, id)
+		}
+	}
+	return added
 }

@@ -6,12 +6,14 @@ import IdentityListField, { type IdentityKind } from './IdentityListField'
 import SlackChannelListField from './SlackChannelListField'
 import RepoListField from './RepoListField'
 import LinearTeamListField from './LinearTeamListField'
+import JiraProjectListField from './JiraProjectListField'
 import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 interface PredicateEditorProps {
   eventType: string
-  /** The handler's team, whose tracked Slack channels, repositories and
-   *  Linear teams `channel_in`, `repo_in` and `linear_team_id_in` offer.
+  /** The handler's team, whose tracked Slack channels, repositories, Linear
+   *  teams and Jira projects `channel_in`, `repo_in`, `linear_team_id_in` and
+   *  `jira_project_id_in` offer.
    *  '' when the server resolves the team (the sole team). */
   teamId?: string
   value: Record<string, unknown>
@@ -167,6 +169,13 @@ function FieldRow({ field, eventType, teamId, value, onChange }: FieldRowProps) 
           onChange={(v) => onChange(v)}
         />
       )}
+      {field.type === 'string_list' && JIRA_PROJECT_FIELDS.has(field.name) && (
+        <JiraProjectListField
+          teamId={teamId}
+          value={Array.isArray(value) ? (value as string[]) : undefined}
+          onChange={(v) => onChange(v)}
+        />
+      )}
       {/* Every other string_list field is an identity allowlist:
           GitHub → author_in / reviewer_in / commenter_in;
           Jira → assignee_in / reporter_in / commenter_in;
@@ -190,9 +199,18 @@ function FieldRow({ field, eventType, teamId, value, onChange }: FieldRowProps) 
 // Linear event, and identifier_changed's old_linear_team_id_in.
 const LINEAR_TEAM_FIELDS = new Set(['linear_team_id_in', 'old_linear_team_id_in'])
 
+// JIRA_PROJECT_FIELDS are the Jira project filters: jira_project_id_in on
+// every Jira event, and key_changed's old_jira_project_id_in.
+const JIRA_PROJECT_FIELDS = new Set(['jira_project_id_in', 'old_jira_project_id_in'])
+
 // REFERENCE_LIST_FIELDS are the string_list fields that name rows the team
 // tracks, each with its own picker, rather than people.
-const REFERENCE_LIST_FIELDS = new Set(['channel_in', 'repo_in', ...LINEAR_TEAM_FIELDS])
+const REFERENCE_LIST_FIELDS = new Set([
+  'channel_in',
+  'repo_in',
+  ...LINEAR_TEAM_FIELDS,
+  ...JIRA_PROJECT_FIELDS,
+])
 
 // identityKindFor picks the identity an allowlist holds from the event's
 // source prefix: a Linear assignee is a Linear user id, never a GitHub

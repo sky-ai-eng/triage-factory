@@ -169,7 +169,8 @@ func (r *Router) githubEventHost(ctx context.Context, evt domain.Event) (string,
 // now and the one it left (old_jira_project_id), and it passes for a team that
 // tracks either. A team whose issue moved to a project it does not track keeps
 // its tasks on the entity, and this event is the only thing that tells it the
-// issue left; a handler filtered on old_project could never fire otherwise.
+// issue left; a handler filtered on old_jira_project_id_in could never fire
+// otherwise.
 // Every other Jira event routes on its project alone.
 func (r *Router) teamTracksEventProject(ctx context.Context, evt domain.Event, teamID string) bool {
 	var m struct {
@@ -214,7 +215,7 @@ func (r *Router) teamTracksEventProject(ctx context.Context, evt domain.Event, t
 // issue is in now and the one it left (old_linear_team_id), and it passes for a
 // team that tracks either. A team whose issue moved to a Linear team it does
 // not track keeps its tasks on the entity, and this event is the only thing
-// that tells it the issue left; a handler filtered on old_linear_team_key
+// that tells it the issue left; a handler filtered on old_linear_team_id_in
 // could never fire otherwise.
 //
 // Metadata that parses but names no team is refused rather than allowed. The
