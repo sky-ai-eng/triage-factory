@@ -29,7 +29,7 @@ func coherenceFixture(t *testing.T, eventType string, metadata any) (*Spawner, s
 		t.Fatalf("load fixture task/entity: %v", err)
 	}
 	snapshot, _ := json.Marshal(domain.PRSnapshot{Repo: "o/r", Number: 7, HeadRepo: "o/r", HeadRef: "feature/coherence", HeadSHA: "new-head"})
-	if _, err := database.Exec(`UPDATE entities SET source_id = 'o/r#7', snapshot_json = ? WHERE id = ?`, string(snapshot), entityID); err != nil {
+	if _, err := database.Exec(`UPDATE entities SET source_id = 'o/r#7', external_id = ?, snapshot_json = ? WHERE id = ?`, coherencePRNodeID, string(snapshot), entityID); err != nil {
 		t.Fatalf("update PR snapshot: %v", err)
 	}
 	raw, _ := json.Marshal(metadata)
@@ -44,12 +44,15 @@ func coherenceFixture(t *testing.T, eventType string, metadata any) (*Spawner, s
 	return s, conversationID, taskID, domain.Event{ID: eventID, OrgID: runmode.LocalDefaultOrgID, EventType: eventType, EntityID: &entityID, MetadataJSON: string(raw)}
 }
 
-// seedPendingReview upserts a pending review artifact anchored to repo#pr for
-// conversationID, with the given start-review head and (optional) reconciled
-// comment SHAs.
-func seedPendingReview(t *testing.T, s *Spawner, conversationID, repo string, pr int, headSHA string, commentSHAs ...string) {
+// coherencePRNodeID is the node id of the fixture's pull request, o/r#7.
+const coherencePRNodeID = "PR_kwDOcoherence7"
+
+// seedPendingReview upserts a pending review artifact of the pull request
+// whose node id is prNodeID, its target spelled repo#pr, for conversationID,
+// with the given start-review head and (optional) reconciled comment SHAs.
+func seedPendingReview(t *testing.T, s *Spawner, conversationID, repo string, pr int, prNodeID, headSHA string, commentSHAs ...string) {
 	t.Helper()
-	a := domain.NewReviewArtifact(repo, pr, headSHA, conversationID)
+	a := domain.NewReviewArtifact(repo, pr, prNodeID, headSHA, conversationID)
 	if len(commentSHAs) > 0 {
 		d, _ := domain.ParseReviewArtifactDetails(a.DetailsJSON)
 		for _, sha := range commentSHAs {
@@ -178,7 +181,7 @@ func TestHandlePRCoherence_PendingReviewAndPRCheckoutTargetOtherEntities(t *test
 
 	seedConversation(t, database, "review-worker", "sess", "/tmp/review-worker")
 	setConversationStatus(t, database, "review-worker", "open")
-	seedPendingReview(t, s, "review-worker", "o/r", 7, "old-head")
+	seedPendingReview(t, s, "review-worker", "o/r", 7, coherencePRNodeID, "old-head")
 
 	seedConversation(t, database, "pr-worker", "sess", "/tmp/pr-worker")
 	setConversationStatus(t, database, "pr-worker", "open")
@@ -259,11 +262,48 @@ func TestHandlePRCoherence_AnchoredReviewSkipsNewCommits(t *testing.T) {
 	database := s.database
 	seedConversation(t, database, "anchored-review", "sess", "/tmp/anchored-review")
 	setConversationStatus(t, database, "anchored-review", "open")
-	seedPendingReview(t, s, "anchored-review", "o/r", 7, "new-head")
+	seedPendingReview(t, s, "anchored-review", "o/r", 7, coherencePRNodeID, "new-head")
 
 	s.HandlePRCoherence(coherenceDisposition(t, source, ""))
 	if got := flushOne(t, s, "anchored-review"); len(got) != 0 {
 		t.Fatalf("review already at the new head still received a note: %+v", got)
+	}
+}
+
+// TestHandlePRCoherence_AnchoredReviewUnderAnotherNameSkipsNewCommits: a draft
+// is found by the node id it is keyed on, so one whose target spells a name
+// the repository no longer has is still recognized as already at the new head.
+func TestHandlePRCoherence_AnchoredReviewUnderAnotherNameSkipsNewCommits(t *testing.T) {
+	s, _, _, source := coherenceFixture(t, domain.EventGitHubPRNewCommits, events.GitHubPRNewCommitsMetadata{
+		Repo: "o/r", PRNumber: 7, PrevHeadSHA: "old-head", HeadSHA: "new-head",
+	})
+	database := s.database
+	seedConversation(t, database, "anchored-renamed", "sess", "/tmp/anchored-renamed")
+	setConversationStatus(t, database, "anchored-renamed", "open")
+	seedPendingReview(t, s, "anchored-renamed", "O/old-r", 7, coherencePRNodeID, "new-head")
+
+	s.HandlePRCoherence(coherenceDisposition(t, source, ""))
+	if got := flushOne(t, s, "anchored-renamed"); len(got) != 0 {
+		t.Fatalf("review already at the new head, under another name, still received a note: %+v", got)
+	}
+}
+
+// TestHandlePRCoherence_ReviewOfAnotherPullRequestUnderTheNameIsNotATarget: a
+// repository deleted and recreated under o/r has its own #7. A draft of the
+// old one shares the target but not the node id, so it is not told the new
+// one moved.
+func TestHandlePRCoherence_ReviewOfAnotherPullRequestUnderTheNameIsNotATarget(t *testing.T) {
+	s, _, _, source := coherenceFixture(t, domain.EventGitHubPRNewCommits, events.GitHubPRNewCommitsMetadata{
+		Repo: "o/r", PRNumber: 7, PrevHeadSHA: "old-head", HeadSHA: "new-head",
+	})
+	database := s.database
+	seedConversation(t, database, "deleted-pr-review", "sess", "/tmp/deleted-pr-review")
+	setConversationStatus(t, database, "deleted-pr-review", "open")
+	seedPendingReview(t, s, "deleted-pr-review", "o/r", 7, "PR_kwDOdeleted7", "old-head")
+
+	s.HandlePRCoherence(coherenceDisposition(t, source, ""))
+	if got := flushOne(t, s, "deleted-pr-review"); len(got) != 0 {
+		t.Fatalf("a draft of another pull request #7 under o/r received a note: %+v", got)
 	}
 }
 
@@ -276,7 +316,7 @@ func TestHandlePRCoherence_BehindReviewReceivesNewCommits(t *testing.T) {
 	database := s.database
 	seedConversation(t, database, "behind-review", "sess", "/tmp/behind-review")
 	setConversationStatus(t, database, "behind-review", "open")
-	seedPendingReview(t, s, "behind-review", "o/r", 7, "old-head")
+	seedPendingReview(t, s, "behind-review", "o/r", 7, coherencePRNodeID, "old-head")
 
 	s.HandlePRCoherence(coherenceDisposition(t, source, ""))
 	if got := flushOne(t, s, "behind-review"); len(got) != 1 || !strings.Contains(got[0].Body, "advanced") {
@@ -294,7 +334,7 @@ func TestHandlePRCoherence_AnchoredReviewStillReceivesCIFailure(t *testing.T) {
 	database := s.database
 	seedConversation(t, database, "anchored-ci", "sess", "/tmp/anchored-ci")
 	setConversationStatus(t, database, "anchored-ci", "open")
-	seedPendingReview(t, s, "anchored-ci", "o/r", 7, "new-head")
+	seedPendingReview(t, s, "anchored-ci", "o/r", 7, coherencePRNodeID, "new-head")
 
 	s.HandlePRCoherence(coherenceDisposition(t, source, ""))
 	if got := flushOne(t, s, "anchored-ci"); len(got) != 1 || !strings.Contains(got[0].Body, "CI check") {

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,7 +36,7 @@ func seedReviewArtifactWithConversation(t *testing.T, s *Server, suffix, owner, 
 		t.Fatalf("seed agent memory: %v", err)
 	}
 	line := 3
-	a := domain.NewReviewArtifact(owner+"/"+repo, number, "headsha"+suffix, conversationID)
+	a := domain.NewReviewArtifact(owner+"/"+repo, number, fmt.Sprintf("PR_%s_%s_%d", owner, repo, number), "headsha"+suffix, conversationID)
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID

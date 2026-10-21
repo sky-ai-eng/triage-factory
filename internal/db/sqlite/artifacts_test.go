@@ -798,11 +798,11 @@ func newSQLiteForArtifactTestTimed(t *testing.T) *sql.DB {
 	return conn
 }
 
-// TestArtifactStore_SQLite_ListPendingReviewsByTarget pins the new-commits
-// notifier's lookup (TFAC-501): only PENDING review artifacts on the exact PR
-// target come back; submitted/dismissed reviews, other-PR drafts, and non-review
-// kinds are excluded.
-func TestArtifactStore_SQLite_ListPendingReviewsByTarget(t *testing.T) {
+// TestArtifactStore_SQLite_ListPendingReviewsByPullRequest pins the new-commits
+// notifier's lookup (TFAC-501): only PENDING review artifacts keyed on the PR's
+// node id come back, whatever name their target spells; submitted/dismissed
+// reviews, other-PR drafts, and non-review kinds are excluded.
+func TestArtifactStore_SQLite_ListPendingReviewsByPullRequest(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -818,24 +818,27 @@ func TestArtifactStore_SQLite_ListPendingReviewsByTarget(t *testing.T) {
 			t.Fatalf("seed artifact %s/%s: %v", kind, state, err)
 		}
 	}
-	// Two pending reviews on the target PR (different conversations in reality →
-	// different dedup keys), plus noise that must NOT match.
-	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#7", "rev-7-a")
-	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#7", "rev-7-b")
-	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewSubmitted, "octo/repo#7", "rev-7-submitted")
-	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewDismissed, "octo/repo#7", "rev-7-dismissed")
-	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#8", "rev-8")
-	mk(domain.ArtifactKindPullRequest, domain.ArtifactStatePROpen, "octo/repo#7", "pr-7")
+	// Two pending reviews of the PR (different conversations → different
+	// dedup keys), one under a name the repository has since given up, plus
+	// noise that must NOT match: resolved drafts, another PR #7 under the
+	// same name, a node id that merely starts the same, and a PR row.
+	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#7", domain.ReviewDedupKey("PR_kw7", "conv-a"))
+	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/old-repo#7", domain.ReviewDedupKey("PR_kw7", "conv-b"))
+	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewSubmitted, "octo/repo#7", domain.ReviewDedupKey("PR_kw7", "conv-s"))
+	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewDismissed, "octo/repo#7", domain.ReviewDedupKey("PR_kw7", "conv-d"))
+	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#7", domain.ReviewDedupKey("PR_kwOTHER7", "conv-a"))
+	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#77", domain.ReviewDedupKey("PR_kw77", "conv-a"))
+	mk(domain.ArtifactKindPullRequest, domain.ArtifactStatePROpen, "octo/repo#7", domain.PullRequestDedupKey("PR_kw7"))
 
-	got, err := stores.Artifacts.ListPendingReviewsByTargetSystem(ctx, org, "https://github.com", "octo/repo#7")
+	got, err := stores.Artifacts.ListPendingReviewsByPullRequestSystem(ctx, org, "https://github.com", "PR_kw7")
 	if err != nil {
-		t.Fatalf("ListPendingReviewsByTargetSystem: %v", err)
+		t.Fatalf("ListPendingReviewsByPullRequestSystem: %v", err)
 	}
 	if len(got) != 2 {
-		t.Fatalf("want 2 pending reviews on octo/repo#7, got %d: %+v", len(got), got)
+		t.Fatalf("want 2 pending reviews of PR_kw7, got %d: %+v", len(got), got)
 	}
 	for _, a := range got {
-		if a.Kind != domain.ArtifactKindReview || a.State != domain.ArtifactStateReviewPending || a.Target != "octo/repo#7" {
+		if nodeID, _ := domain.ArtifactPullRequestNodeID(a); a.Kind != domain.ArtifactKindReview || a.State != domain.ArtifactStateReviewPending || nodeID != "PR_kw7" {
 			t.Errorf("unexpected artifact in result: kind=%s state=%s target=%s", a.Kind, a.State, a.Target)
 		}
 	}
@@ -1023,7 +1026,7 @@ func TestArtifactStore_SQLite_TransitionReviewStateSystem(t *testing.T) {
 		Kind:           domain.ArtifactKindReview,
 		Target:         "octo/repo#7",
 		State:          domain.ArtifactStateReviewPending,
-		DedupKey:       domain.ReviewDedupKey("octo/repo", 7, conversationID),
+		DedupKey:       domain.ReviewDedupKey("PR_kw7", conversationID),
 		DetailsJSON:    `{"review_event":"COMMENT"}`,
 	})
 	if err != nil {

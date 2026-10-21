@@ -143,13 +143,14 @@ func (s *Spawner) HandlePRCoherence(evt domain.Event) {
 		return
 	}
 
-	headRepo, headRef, scope := parsed.repo, "", ""
+	headRepo, headRef, scope, prNodeID := parsed.repo, "", "", ""
 	if s.entities != nil {
 		entity, loadErr := s.entities.GetSystem(ctx, evt.OrgID, entityID)
 		if loadErr != nil {
 			delegateLog.Warn("PR coherence injection: load entity snapshot failed", "entity", entityID, "error", loadErr)
 		} else if entity != nil {
 			scope = entity.Scope
+			prNodeID = entity.ExternalID
 			var snapshot domain.PRSnapshot
 			if json.Unmarshal([]byte(entity.SnapshotJSON), &snapshot) == nil {
 				headRef = snapshot.HeadRef
@@ -164,13 +165,12 @@ func (s *Spawner) HandlePRCoherence(evt domain.Event) {
 		branchRef = worktree.CheckoutRefSlug(headRef)
 	}
 	targets, err := s.conversations.ListPRCoherenceTargetsSystem(ctx, evt.OrgID, db.PRCoherenceTargetQuery{
-		EntityID:     entityID,
-		EventID:      original.ID,
-		BaseRepo:     parsed.repo,
-		HeadRepo:     headRepo,
-		ReviewTarget: domain.ReviewTarget(parsed.repo, parsed.prNumber),
-		PRRef:        worktree.PRRefSlug(parsed.prNumber),
-		BranchRef:    branchRef,
+		EntityID:  entityID,
+		EventID:   original.ID,
+		BaseRepo:  parsed.repo,
+		HeadRepo:  headRepo,
+		PRRef:     worktree.PRRefSlug(parsed.prNumber),
+		BranchRef: branchRef,
 	})
 	if err != nil {
 		delegateLog.Warn("PR coherence injection: list conversations failed", "entity", entityID, "error", err)
@@ -181,7 +181,7 @@ func (s *Spawner) HandlePRCoherence(evt domain.Event) {
 	// whatever the checkout is anchored at.
 	var anchored map[string]bool
 	if original.EventType == domain.EventGitHubPRNewCommits {
-		anchored = s.reviewsAnchoredAtHead(ctx, evt.OrgID, scope, domain.ReviewTarget(parsed.repo, parsed.prNumber), parsed.headSHA)
+		anchored = s.reviewsAnchoredAtHead(ctx, evt.OrgID, scope, prNodeID, parsed.headSHA)
 	}
 
 	body := parsed.injectionBody(original.EventType)
@@ -208,20 +208,21 @@ func (s *Spawner) HandlePRCoherence(evt domain.Event) {
 // worktree HEAD, which TF does not track as a column and which may live on
 // another executor.
 //
-// The reviews are read on scope, the PR entity's GitHub host: the same target
-// on another host is another pull request.
+// The reviews are the drafts keyed on prNodeID, the PR entity's node id, read
+// on scope, the PR entity's GitHub host, so a draft is found whatever name its
+// target spells.
 //
-// Best-effort: a lookup failure, or an entity whose scope could not be read,
-// returns no suppressions, so every target gets the note. A spurious
+// Best-effort: a lookup failure, or an entity whose scope or node id could not
+// be read, returns no suppressions, so every target gets the note. A spurious
 // "re-pull" is harmless; a missed advance leaves the agent working against a
 // diff that moved.
-func (s *Spawner) reviewsAnchoredAtHead(ctx context.Context, orgID, scope, target, headSHA string) map[string]bool {
-	if s.artifacts == nil || headSHA == "" || scope == "" {
+func (s *Spawner) reviewsAnchoredAtHead(ctx context.Context, orgID, scope, prNodeID, headSHA string) map[string]bool {
+	if s.artifacts == nil || headSHA == "" || scope == "" || prNodeID == "" {
 		return nil
 	}
-	reviews, err := s.artifacts.ListPendingReviewsByTargetSystem(ctx, orgID, scope, target)
+	reviews, err := s.artifacts.ListPendingReviewsByPullRequestSystem(ctx, orgID, scope, prNodeID)
 	if err != nil {
-		delegateLog.Warn("PR coherence injection: lookup pending reviews failed", "target", target, "error", err)
+		delegateLog.Warn("PR coherence injection: lookup pending reviews failed", "node_id", prNodeID, "error", err)
 		return nil
 	}
 	anchored := map[string]bool{}

@@ -137,14 +137,14 @@ func RunCommentArtifactConformance(t *testing.T, mk ExternalObjectScopeFactory) 
 				t.Fatalf("seed %s %q on %s: %v", a.Kind, externalID, scope, err)
 			}
 		}
-		submitted := domain.NewReviewArtifact("octo/api", 3, "sha", "conv-a")
+		submitted := domain.NewReviewArtifact("octo/api", 3, "PR_kw3", "sha", "conv-a")
 		submitted.State = domain.ArtifactStateReviewSubmitted
 		seed(submitted, hostA, "6000000001")
-		seed(domain.NewReviewArtifact("octo/api", 3, "sha", "conv-b"), hostA, "")
-		seed(domain.NewReviewArtifact("octo/api", 3, "sha", "conv-c"), hostB, "6000000003")
+		seed(domain.NewReviewArtifact("octo/api", 3, "PR_kw3", "sha", "conv-b"), hostA, "")
+		seed(domain.NewReviewArtifact("octo/api", 3, "PR_kw3", "sha", "conv-c"), hostB, "6000000003")
 		pr := domain.Artifact{
 			Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
-			Target: "octo/api#4", State: domain.ArtifactStatePROpen, DedupKey: "github:pull_request:octo/api#4",
+			Target: "octo/api#4", State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey("PR_kw4"),
 		}
 		seed(pr, hostA, "6000000002")
 

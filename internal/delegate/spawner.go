@@ -1156,8 +1156,9 @@ func gitDenyNotMaterialized(repoID string) gitproxy.Decision {
 //     agenthost.NewLocal → UpsertArtifact — so the write routes to the right
 //     pool (admin for an event-triggered run, the kicking-off user's synthetic
 //     claims for a manual one) and lands the ActionBranchPushed audit row in
-//     the same write. Same domain.NewBranchArtifact dedup_key as the hook, so
-//     an (out-of-mode) hook twin still converges on one row.
+//     the same write. The same constructor and sink as the hook, which keys
+//     the row on the repository's registry row, so an (out-of-mode) hook twin
+//     still converges on one row.
 //   - non-2xx (the upstream refused it — nothing landed): record ONLY the
 //     branch_push_failed audit row. The audit log never omits an attempt;
 //     the artifact ledger never gains a branch that doesn't exist.

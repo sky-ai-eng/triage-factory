@@ -40,7 +40,7 @@ func reviewFreshnessServer(t *testing.T, headSHA string, diffs map[string]string
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"number":7,"base":{"ref":"main","sha":"base0"},"head":{"sha":"`+headSHA+`"}}`)
+		_, _ = io.WriteString(w, `{"number":7,"node_id":"`+fakePRNodeID(r.URL.Path)+`","base":{"ref":"main","sha":"base0"},"head":{"sha":"`+headSHA+`"}}`)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -62,7 +62,7 @@ func TestLocalClient_FinalizeReview_Freshness_CleanAnchorAtHead(t *testing.T) {
 	})
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 
-	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "head1", nil)
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, testPRNodeID(7), "head1", nil)
 	if err != nil {
 		t.Fatalf("start review: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestLocalClient_FinalizeReview_Freshness_ShiftAutoRemaps(t *testing.T) {
 	})
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 
-	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "head1", nil)
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, testPRNodeID(7), "head1", nil)
 	if err != nil {
 		t.Fatalf("start review: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestLocalClient_FinalizeReview_Freshness_OutdatedFails(t *testing.T) {
 	})
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 
-	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "head1", nil)
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, testPRNodeID(7), "head1", nil)
 	if err != nil {
 		t.Fatalf("start review: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestLocalClient_FinalizeReview_Freshness_MixedMultiComment(t *testing.T) {
 	})
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 
-	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "head1", nil)
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, testPRNodeID(7), "head1", nil)
 	if err != nil {
 		t.Fatalf("start review: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestLocalClient_FinalizeReview_StampsFinalizedHead(t *testing.T) {
 		})
 		stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 
-		handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "head1", nil)
+		handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, testPRNodeID(7), "head1", nil)
 		if err != nil {
 			t.Fatalf("start review: %v", err)
 		}
@@ -288,7 +288,7 @@ func TestLocalClient_FinalizeReview_StampsFinalizedHead(t *testing.T) {
 		stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 		registerRepo(t, stores, "octo", "repo", "1")
 
-		handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "head1", nil)
+		handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, testPRNodeID(7), "head1", nil)
 		if err != nil {
 			t.Fatalf("start review: %v", err)
 		}
@@ -333,13 +333,13 @@ func TestLocalClient_FinalizeReview_Freshness_HTTP406Fallback(t *testing.T) {
 			_, _ = io.WriteString(w, fallbackFilesJSON)
 		default:
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"number":7,"base":{"ref":"main"},"head":{"sha":"head2"}}`)
+			_, _ = io.WriteString(w, `{"number":7,"node_id":"`+fakePRNodeID(r.URL.Path)+`","base":{"ref":"main"},"head":{"sha":"head2"}}`)
 		}
 	}))
 	t.Cleanup(srv.Close)
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 
-	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "head1", nil)
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, testPRNodeID(7), "head1", nil)
 	if err != nil {
 		t.Fatalf("start review: %v", err)
 	}

@@ -2,6 +2,7 @@ package agenthost
 
 import (
 	"context"
+	"errors"
 	"io"
 	"maps"
 	"net/http"
@@ -72,9 +73,10 @@ func startRenamedRepoGitHub(t *testing.T) *httptest.Server {
 
 // TestLocalClient_ReviewUnderOldName_FoundByCoherenceReads pins that a review draft
 // started through a checkout that still spells the old name is recorded under
-// the name the rename moved the repository to, so the PR-coherence reads,
-// which ask for the PR under its current name, find it: the conversation is a
-// coherence target, and its review counts as anchored at the head it pinned.
+// the name the rename moved the repository to, and keyed on the pull
+// request's node id, so the PR-coherence reads, which ask for the PR by its
+// node id, find it: the conversation is a coherence target, and its review
+// counts as anchored at the head it pinned.
 func TestLocalClient_ReviewUnderOldName_FoundByCoherenceReads(t *testing.T) {
 	gh := startRenamedRepoGitHub(t)
 	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
@@ -82,7 +84,7 @@ func TestLocalClient_ReviewUnderOldName_FoundByCoherenceReads(t *testing.T) {
 	renameRepo(t, stores)
 	ctx := context.Background()
 
-	handle, err := client.GithubCreatePendingReview(ctx, "octo", "old-name", 5, "head5", nil)
+	handle, err := client.GithubCreatePendingReview(ctx, "octo", "old-name", 5, testPRNodeID(5), "head5", nil)
 	if err != nil {
 		t.Fatalf("GithubCreatePendingReview: %v", err)
 	}
@@ -91,21 +93,20 @@ func TestLocalClient_ReviewUnderOldName_FoundByCoherenceReads(t *testing.T) {
 		t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
 	}
 	wantTarget := domain.ReviewTarget("octo/new-name", 5)
-	if a := arts[0]; a.ID != handle || a.Target != wantTarget || a.DedupKey != domain.ReviewDedupKey("octo/new-name", 5, info.ConversationID) {
+	if a := arts[0]; a.ID != handle || a.Target != wantTarget || a.DedupKey != domain.ReviewDedupKey(testPRNodeID(5), info.ConversationID) {
 		t.Fatalf("review draft = id %q target %q key %q, want %q under octo/new-name", a.ID, a.Target, a.DedupKey, handle)
 	}
 
-	pr, _, err := stores.Entities.FindOrCreateSystem(ctx, info.OrgID, "github", testScope("github"), "octo/new-name#5", "", "pr", "Renamed PR", "")
+	pr, _, err := stores.Entities.FindOrCreateSystem(ctx, info.OrgID, "github", testScope("github"), "octo/new-name#5", testPRNodeID(5), "pr", "Renamed PR", "")
 	if err != nil {
 		t.Fatalf("seed the PR entity: %v", err)
 	}
 	targets, err := stores.Conversations.ListPRCoherenceTargetsSystem(ctx, info.OrgID, db.PRCoherenceTargetQuery{
-		EntityID:     pr.ID,
-		EventID:      "event-new-commits",
-		BaseRepo:     "octo/new-name",
-		HeadRepo:     "octo/new-name",
-		ReviewTarget: wantTarget,
-		PRRef:        "pr-5",
+		EntityID: pr.ID,
+		EventID:  "event-new-commits",
+		BaseRepo: "octo/new-name",
+		HeadRepo: "octo/new-name",
+		PRRef:    "pr-5",
 	})
 	if err != nil {
 		t.Fatalf("ListPRCoherenceTargetsSystem: %v", err)
@@ -114,12 +115,12 @@ func TestLocalClient_ReviewUnderOldName_FoundByCoherenceReads(t *testing.T) {
 		t.Errorf("coherence targets = %+v, want the reviewing conversation %s", targets, info.ConversationID)
 	}
 
-	reviews, err := stores.Artifacts.ListPendingReviewsByTargetSystem(ctx, info.OrgID, testScope("github"), wantTarget)
+	reviews, err := stores.Artifacts.ListPendingReviewsByPullRequestSystem(ctx, info.OrgID, testScope("github"), testPRNodeID(5))
 	if err != nil {
-		t.Fatalf("ListPendingReviewsByTargetSystem: %v", err)
+		t.Fatalf("ListPendingReviewsByPullRequestSystem: %v", err)
 	}
 	if len(reviews) != 1 || !domain.ReviewAnchoredAtHead(reviews[0], "head5") {
-		t.Errorf("pending reviews on %s = %+v, want the draft anchored at head5", wantTarget, reviews)
+		t.Errorf("pending reviews of %s = %+v, want the draft anchored at head5", wantTarget, reviews)
 	}
 }
 
@@ -144,11 +145,11 @@ func TestLocalClient_OldNameAfterRename_JoinsTheRow(t *testing.T) {
 					t.Fatalf("GithubCreatePR via %s: %v", repo, err)
 				}
 			}
-			first, err := client.GithubCreatePendingReview(ctx, "octo", "new-name", 5, "head5", nil)
+			first, err := client.GithubCreatePendingReview(ctx, "octo", "new-name", 5, testPRNodeID(5), "head5", nil)
 			if err != nil {
 				t.Fatalf("GithubCreatePendingReview via new-name: %v", err)
 			}
-			second, err := client.GithubCreatePendingReview(ctx, "octo", "old-name", 5, "head5", nil)
+			second, err := client.GithubCreatePendingReview(ctx, "octo", "old-name", 5, testPRNodeID(5), "head5", nil)
 			if err != nil {
 				t.Fatalf("GithubCreatePendingReview via old-name: %v", err)
 			}
@@ -161,8 +162,8 @@ func TestLocalClient_OldNameAfterRename_JoinsTheRow(t *testing.T) {
 				byKey[a.DedupKey]++
 			}
 			want := map[string]int{
-				"github:pull_request:octo/new-name#42":                         1,
-				domain.ReviewDedupKey("octo/new-name", 5, info.ConversationID): 1,
+				domain.PullRequestDedupKey("PR_renamed"):                    1,
+				domain.ReviewDedupKey(testPRNodeID(5), info.ConversationID): 1,
 			}
 			if !maps.Equal(byKey, want) {
 				t.Errorf("artifact keys = %v, want %v", byKey, want)
@@ -173,10 +174,10 @@ func TestLocalClient_OldNameAfterRename_JoinsTheRow(t *testing.T) {
 
 // TestLocalClient_NewNameBeforeRename_DoesNotBlockIt pins the other direction:
 // before TF applies the rename, an object recorded under both the old name and
-// the new one GitHub already answers to is one row under the registry's old
-// name, so the rename's rewrite has no second row to collide with and moves it.
-// The new name already has a bare registry row, as an entity created through
-// it mints one, and that row carries no id to answer with.
+// the new one GitHub already answers to is one row, under the registry's old
+// name, and the rename moves its target. The new name already has a bare
+// registry row, as an entity created through it mints one, and that row
+// carries no id to answer with.
 func TestLocalClient_NewNameBeforeRename_DoesNotBlockIt(t *testing.T) {
 	gh := startRenamedRepoGitHub(t)
 	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
@@ -187,9 +188,14 @@ func TestLocalClient_NewNameBeforeRename_DoesNotBlockIt(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("mint the bare octo/new-name row: %v", err)
 	}
+	// The reviewed pull request's entity carries its node id, as start-review's
+	// read of the pull request records it; the rename finds the draft by it.
+	if _, _, err := stores.Entities.FindOrCreateSystem(ctx, info.OrgID, "github", testScope("github"), "octo/old-name#5", testPRNodeID(5), "pr", "Reviewed PR", ""); err != nil {
+		t.Fatalf("seed the reviewed PR's entity: %v", err)
+	}
 
 	for _, repo := range []string{"old-name", "new-name"} {
-		if _, err := client.GithubCreatePendingReview(ctx, "octo", repo, 5, "head5", nil); err != nil {
+		if _, err := client.GithubCreatePendingReview(ctx, "octo", repo, 5, testPRNodeID(5), "head5", nil); err != nil {
 			t.Fatalf("GithubCreatePendingReview via %s: %v", repo, err)
 		}
 		if _, _, _, err := client.GithubCreatePR(ctx, "octo", repo, "feature/x", "main", "t", "b", true); err != nil {
@@ -235,9 +241,43 @@ func TestLocalClient_BranchPushedUnderOldName_RecordedUnderCurrent(t *testing.T)
 		t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
 	}
 	a := arts[0]
+	row, err := stores.Repos.GetByRefSystem(context.Background(), info.OrgID, domain.RepoRefFromSlug(testScope("github"), "octo/new-name"))
+	if err != nil || row == nil {
+		t.Fatalf("resolve octo/new-name: %v, %v", row, err)
+	}
 	wantURL, _ := domain.BranchArtifactWebURL(gh.URL, "octo/new-name", "refs/heads/feature/x")
-	if a.Target != "octo/new-name" || a.DedupKey != "git:branch:octo/new-name:refs/heads/feature/x" || a.URL != wantURL {
-		t.Errorf("branch artifact = target %q key %q url %q, want it under octo/new-name linked at %q", a.Target, a.DedupKey, a.URL, wantURL)
+	if a.Target != "octo/new-name" || a.DedupKey != domain.BranchDedupKey(row.ID, "refs/heads/feature/x") || a.URL != wantURL {
+		t.Errorf("branch artifact = target %q key %q url %q, want it under octo/new-name, keyed on row %s, linked at %q", a.Target, a.DedupKey, a.URL, row.ID, wantURL)
+	}
+}
+
+// TestLocalClient_BranchWithNoRegistryRow_RecordsOnlyThePush pins that a branch
+// pushed to a repository no registry row answers for is refused as an
+// artifact, since its key is the row's id, and that its push still leaves its
+// ledger row.
+func TestLocalClient_BranchWithNoRegistryRow_RecordsOnlyThePush(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
+
+	branch, ok := domain.NewBranchArtifact("octo/unregistered", "refs/heads/feature/x", "abc123", true)
+	if !ok {
+		t.Fatal("NewBranchArtifact refused the fixture branch")
+	}
+	if _, err := client.UpsertArtifact(context.Background(), branch); !errors.Is(err, errNoRegistryRow) {
+		t.Fatalf("UpsertArtifact err = %v, want errNoRegistryRow", err)
+	}
+	if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
+		t.Errorf("artifacts = %+v, want none for a branch with no registry row", arts)
+	}
+	acts, _, err := stores.ExternalActions.ListByOrgSystem(context.Background(), info.OrgID, domain.ExternalActionListOpts{})
+	if err != nil {
+		t.Fatalf("list external actions: %v", err)
+	}
+	if len(acts) != 1 || acts[0].Action != domain.ActionBranchPushed || acts[0].ExternalID != "refs/heads/feature/x" {
+		t.Errorf("external actions = %+v, want the one branch_pushed row", acts)
 	}
 }
 
@@ -254,7 +294,7 @@ func TestLocalClient_RegistryHeldName_AsksNoGitHub(t *testing.T) {
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 	registerRepo(t, stores, "octo", "repo", "1")
 
-	if _, err := client.GithubCreatePendingReview(context.Background(), "Octo", "Repo", 7, "head7", nil); err != nil {
+	if _, err := client.GithubCreatePendingReview(context.Background(), "Octo", "Repo", 7, testPRNodeID(7), "head7", nil); err != nil {
 		t.Fatalf("GithubCreatePendingReview: %v", err)
 	}
 	arts := listConversationArtifacts(t, stores, info.ConversationID)

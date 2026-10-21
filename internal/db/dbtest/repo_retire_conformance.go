@@ -18,10 +18,12 @@ import (
 
 // The ids the retire suite's repositories carry on GitHub: retireOldID is the
 // repository TF holds octo/api for, retireNewID the one GitHub now serves
-// under that name.
+// under that name. retireOldPRNodeID is the node id of the held repository's
+// pull request #12.
 const (
-	retireOldID = "4100"
-	retireNewID = "4200"
+	retireOldID       = "4100"
+	retireNewID       = "4200"
+	retireOldPRNodeID = "PR_kwDOretire12"
 )
 
 var retireLog = logging.Component("dbtest-retire")
@@ -294,9 +296,10 @@ func RunRepoRetireConformance(t *testing.T, mk RepoRenameFactory) {
 		if ent, _ := s.Entities.GetSystem(ctx, orgID, newEntity.ID); ent == nil || ent.SourceID != "octo/api#12" {
 			t.Errorf("new repository's entity = %+v, want octo/api#12 untouched", ent)
 		}
-		// The records keyed by the name alone stay with the name.
-		if a, _ := s.Artifacts.Get(ctx, orgID, fx.artifactID); a == nil || a.Target != "octo/api#12" {
-			t.Errorf("artifact = %+v, want it left under octo/api", a)
+		// Its own artifact, keyed on its pull request's node id, moves with
+		// it too.
+		if a, _ := s.Artifacts.Get(ctx, orgID, fx.artifactID); a == nil || a.Target != "octo/api-legacy#12" {
+			t.Errorf("artifact = %+v, want it moved to octo/api-legacy#12 with the restored row", a)
 		}
 	})
 
@@ -475,7 +478,7 @@ func seedRetireFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	if err != nil || repo == nil {
 		t.Fatalf("resolve octo/api: got=%v err=%v", repo, err)
 	}
-	entity, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", TestGitHubHost, "octo/api#12", "", "pr", "Old #12",
+	entity, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", TestGitHubHost, "octo/api#12", retireOldPRNodeID, "pr", "Old #12",
 		"https://github.com/octo/api/pull/12")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
@@ -489,8 +492,8 @@ func seedRetireFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	}
 	artifact, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
 		TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest, Scope: TestGitHubHost,
-		Target: domain.PullRequestTarget("octo/api", 12), ExternalID: "12",
-		State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey("octo/api", 12),
+		Target: domain.PullRequestTarget("octo/api", 12), ExternalID: "12", NodeID: retireOldPRNodeID,
+		State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey(retireOldPRNodeID),
 	})
 	if err != nil {
 		t.Fatalf("seed artifact: %v", err)

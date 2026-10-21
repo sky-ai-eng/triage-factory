@@ -18,8 +18,8 @@ func TestNewPullRequestArtifact_DraftShape(t *testing.T) {
 	if a.State != ArtifactStatePRDraft {
 		t.Errorf("state = %q, want draft", a.State)
 	}
-	if a.DedupKey != "github:pull_request:octo/repo#42" {
-		t.Errorf("dedup_key = %q", a.DedupKey)
+	if a.DedupKey != "github:pull_request:PR_node" {
+		t.Errorf("dedup_key = %q, want the node id's key", a.DedupKey)
 	}
 
 	d, err := ParsePRArtifactDetails(a.DetailsJSON)

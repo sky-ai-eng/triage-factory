@@ -1287,13 +1287,19 @@ func TestConversationStore_Postgres_PRCoherenceTargets(t *testing.T) {
 		teamID := firstTeamForOrg(t, h, orgID)
 		ctx := context.Background()
 		extra := dbtest.PRCoherenceSeeder{
-			PendingReview: func(t *testing.T, conversationID, host, repo string, prNumber int) {
+			PendingReview: func(t *testing.T, conversationID, host, repo string, prNumber int, prNodeID string) {
 				t.Helper()
-				a := domain.NewReviewArtifact(repo, prNumber, "head-sha", conversationID)
+				a := domain.NewReviewArtifact(repo, prNumber, prNodeID, "head-sha", conversationID)
 				a.ConversationID, a.Scope = conversationID, host
 				a.OrgID, a.TeamID = orgID, teamID
 				if _, err := stores.Artifacts.UpsertSystem(ctx, orgID, a); err != nil {
 					t.Fatalf("seed pending review: %v", err)
+				}
+			},
+			PullRequestNodeID: func(t *testing.T, entityID, nodeID string) {
+				t.Helper()
+				if _, err := stores.Entities.StampExternalIDSystem(ctx, orgID, entityID, nodeID); err != nil {
+					t.Fatalf("stamp pull request node id: %v", err)
 				}
 			},
 			Worktree: func(t *testing.T, conversationID, host, slug, ref string) {

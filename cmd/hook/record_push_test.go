@@ -53,6 +53,23 @@ func newTestStores(t *testing.T) (db.Stores, string) {
 	return sqlitestore.New(conn), "r1"
 }
 
+// registerOctoRepo gives the registry a row for octo/repo on host, carrying
+// GitHub's id for it, as the repository of a run's checkout has one: the
+// branch sink keys a branch on the row. Returns the row's id.
+func registerOctoRepo(t *testing.T, stores db.Stores, host string) string {
+	t.Helper()
+	ctx := context.Background()
+	ref := domain.RepoRef{Source: domain.RepoSourceGitHub, Host: host, Owner: "octo", Repo: "repo", ExternalID: "1"}
+	row, err := stores.Repos.FindOrCreateByRefSystem(ctx, runmode.LocalDefaultOrgID, ref)
+	if err != nil {
+		t.Fatalf("register octo/repo on %s: %v", host, err)
+	}
+	if _, err := stores.Repos.FillMissingExternalIDsSystem(ctx, runmode.LocalDefaultOrgID, []domain.RepoRef{ref}); err != nil {
+		t.Fatalf("record octo/repo's id on %s: %v", host, err)
+	}
+	return row.ID
+}
+
 func hostFor(stores db.Stores, conversationID string, eventTriggered bool) agenthost.Client {
 	return agenthost.NewLocal(stores, agenthost.ConversationInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
@@ -65,6 +82,7 @@ func hostFor(stores db.Stores, conversationID string, eventTriggered bool) agent
 
 func TestRecordPush_UpsertsBranchArtifact(t *testing.T) {
 	stores, conversationID := newTestStores(t)
+	repoID := registerOctoRepo(t, stores, "https://github.com")
 	host := hostFor(stores, conversationID, false)
 
 	runRecordPush(host, []string{
@@ -97,7 +115,7 @@ func TestRecordPush_UpsertsBranchArtifact(t *testing.T) {
 	if a.State != domain.ArtifactStateBranchPushed {
 		t.Errorf("state = %q, want pushed", a.State)
 	}
-	if want := "git:branch:octo/repo:refs/heads/feature/x"; a.DedupKey != want {
+	if want := domain.BranchDedupKey(repoID, "refs/heads/feature/x"); a.DedupKey != want {
 		t.Errorf("dedup_key = %q, want %q", a.DedupKey, want)
 	}
 	if a.ConversationID != conversationID || a.OrgID != runmode.LocalDefaultOrgID || a.TeamID != runmode.LocalDefaultTeamID {
@@ -117,6 +135,7 @@ func TestRecordPush_UpsertsBranchArtifact(t *testing.T) {
 // rather than minting a second artifact.
 func TestRecordPush_RepushUpsertsOneRow(t *testing.T) {
 	stores, conversationID := newTestStores(t)
+	registerOctoRepo(t, stores, "https://github.com")
 	host := hostFor(stores, conversationID, false)
 
 	runRecordPush(host, []string{"--remote", "git@github.com:octo/repo.git", "--ref", "refs/heads/main", "--sha", "aaa", "--new=true"})
@@ -142,6 +161,7 @@ func TestRecordPush_RepushUpsertsOneRow(t *testing.T) {
 // branch writes a row rather than erroring.
 func TestRecordPush_EventTriggeredUsesSystemPool(t *testing.T) {
 	stores, conversationID := newTestStores(t)
+	registerOctoRepo(t, stores, "https://github.com")
 	host := hostFor(stores, conversationID, true)
 
 	runRecordPush(host, []string{"--remote", "https://github.com/octo/repo", "--ref", "refs/heads/main", "--sha", "ccc", "--new=true"})
@@ -181,6 +201,7 @@ func TestRecordPush_GHESHostRecordsAndAnchorsURL(t *testing.T) {
 	stores, conversationID := newTestStores(t)
 	dbtest.SeedOrgSettings(t, stores.Orgs, runmode.LocalDefaultOrgID,
 		domain.OrgSettings{GitHubBaseURL: "https://github.corp.example.com"})
+	registerOctoRepo(t, stores, "https://github.corp.example.com")
 	host := hostFor(stores, conversationID, false)
 
 	runRecordPush(host, []string{

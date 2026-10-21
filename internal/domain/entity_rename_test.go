@@ -152,19 +152,28 @@ func TestJiraIssueResource(t *testing.T) {
 	if _, _, ok := ArtifactEntityIdentity(Artifact{Provider: ArtifactProviderJira, DedupKey: "jira:issue:SKY-1"}); ok {
 		t.Error("a key-shaped Jira dedup key read as an identity")
 	}
-	// A GitHub pull request's identity is its node id, never its dedup key,
-	// and no other GitHub artifact names one.
-	pr := Artifact{Provider: ArtifactProviderGitHub, Kind: ArtifactKindPullRequest, DedupKey: "github:pull_request:o/r#1"}
+	// A GitHub pull request's identity is the node id its key names, and a
+	// review's is its pull request's. A key that still spells the repository's
+	// name names none, whatever the row's node_id column holds.
+	pr := Artifact{Provider: ArtifactProviderGitHub, Kind: ArtifactKindPullRequest, DedupKey: "github:pull_request:o/r#1", NodeID: "PR_kwDO1"}
 	if _, _, ok := ArtifactEntityIdentity(pr); ok {
-		t.Error("a GitHub pull request with no node id read as an identity")
+		t.Error("a GitHub pull request keyed on its repository's name read as an identity")
 	}
-	pr.NodeID = "PR_kwDO1"
+	pr.DedupKey = PullRequestDedupKey("PR_kwDO1")
 	if scope, id, ok := ArtifactEntityIdentity(pr); !ok || scope != "" || id != "PR_kwDO1" {
 		t.Errorf("github pull request identity = (%q, %q, %v), want its node id", scope, id, ok)
 	}
-	review := Artifact{Provider: ArtifactProviderGitHub, Kind: ArtifactKindReview, DedupKey: "github:review:o/r#1:9", NodeID: "PRR_kwDO9"}
+	review := Artifact{Provider: ArtifactProviderGitHub, Kind: ArtifactKindReview, DedupKey: ReviewDedupKey("PR_kwDO1", "conv-9"), NodeID: "PRR_kwDO9"}
+	if _, id, ok := ArtifactEntityIdentity(review); !ok || id != "PR_kwDO1" {
+		t.Errorf("github review identity = (%q, %v), want its pull request's node id", id, ok)
+	}
+	review.DedupKey = "github:review:o/r#1:conv-9"
 	if _, _, ok := ArtifactEntityIdentity(review); ok {
-		t.Error("a GitHub review's node id read as its pull request's identity")
+		t.Error("a GitHub review keyed on its repository's name read as an identity")
+	}
+	branch := Artifact{Provider: ArtifactProviderGit, Kind: ArtifactKindBranch, DedupKey: BranchDedupKey("repo-uuid", "refs/heads/x")}
+	if _, _, ok := ArtifactEntityIdentity(branch); ok {
+		t.Error("a branch read as an entity identity")
 	}
 	if _, id, ok := ArtifactEntityIdentity(Artifact{Provider: ArtifactProviderLinear, DedupKey: "linear:comment:uuid-1:c-1"}); !ok || id != "uuid-1" {
 		t.Errorf("linear identity = (%q, %v), want uuid-1", id, ok)

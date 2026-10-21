@@ -52,7 +52,7 @@ func newReviewPostureGitHub(t *testing.T, headSHA *string) *reviewPostureGitHub 
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"number":7,"base":{"ref":"main"},"head":{"sha":"`+*headSHA+`"}}`)
+		_, _ = io.WriteString(w, `{"number":7,"node_id":"`+fakePRNodeID(r.URL.Path)+`","base":{"ref":"main"},"head":{"sha":"`+*headSHA+`"}}`)
 	}))
 	t.Cleanup(g.Close)
 	return g
@@ -157,7 +157,7 @@ func TestFinalizeReviewDraft_PostureDecidesPosting(t *testing.T) {
 			setTeamReviewPosture(t, stores, info.TeamID, tc.posture)
 
 			ctx := context.Background()
-			handle, err := client.GithubCreatePendingReview(ctx, "octo", "repo", 7, "headsha7", nil)
+			handle, err := client.GithubCreatePendingReview(ctx, "octo", "repo", 7, testPRNodeID(7), "headsha7", nil)
 			if err != nil {
 				t.Fatalf("GithubCreatePendingReview: %v", err)
 			}
@@ -271,7 +271,7 @@ func TestFinalizeReviewDraft_AutoPost_SubmitFailureStaysStaged(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"number":7,"base":{"ref":"main"},"head":{"sha":"`+head+`"}}`)
+		_, _ = io.WriteString(w, `{"number":7,"node_id":"`+fakePRNodeID(r.URL.Path)+`","base":{"ref":"main"},"head":{"sha":"`+head+`"}}`)
 	}))
 	t.Cleanup(srv.Close)
 
@@ -280,7 +280,7 @@ func TestFinalizeReviewDraft_AutoPost_SubmitFailureStaysStaged(t *testing.T) {
 	setTeamReviewPosture(t, stores, info.TeamID, domain.ReviewPostureAuto)
 
 	ctx := context.Background()
-	handle, err := client.GithubCreatePendingReview(ctx, "octo", "repo", 7, "headsha7", nil)
+	handle, err := client.GithubCreatePendingReview(ctx, "octo", "repo", 7, testPRNodeID(7), "headsha7", nil)
 	if err != nil {
 		t.Fatalf("GithubCreatePendingReview: %v", err)
 	}
@@ -329,7 +329,7 @@ func TestPostFinalizedReview_LosesClaimToConcurrentApprove(t *testing.T) {
 	setTeamReviewPosture(t, stores, info.TeamID, domain.ReviewPostureDraft)
 
 	ctx := context.Background()
-	handle, err := client.GithubCreatePendingReview(ctx, "octo", "repo", 7, "headsha7", nil)
+	handle, err := client.GithubCreatePendingReview(ctx, "octo", "repo", 7, testPRNodeID(7), "headsha7", nil)
 	if err != nil {
 		t.Fatalf("GithubCreatePendingReview: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestPostFinalizedReview_ClaimsBeforePosting(t *testing.T) {
 	setTeamReviewPosture(t, stores, info.TeamID, domain.ReviewPostureAuto)
 
 	ctx := context.Background()
-	handle, err := client.GithubCreatePendingReview(ctx, "octo", "repo", 7, "headsha7", nil)
+	handle, err := client.GithubCreatePendingReview(ctx, "octo", "repo", 7, testPRNodeID(7), "headsha7", nil)
 	if err != nil {
 		t.Fatalf("GithubCreatePendingReview: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestPostFinalizedReview_PostsThePostClaimContent(t *testing.T) {
 	setTeamReviewPosture(t, stores, info.TeamID, domain.ReviewPostureDraft)
 
 	ctx := context.Background()
-	handle, err := client.GithubCreatePendingReview(ctx, "octo", "repo", 7, "headsha7", nil)
+	handle, err := client.GithubCreatePendingReview(ctx, "octo", "repo", 7, testPRNodeID(7), "headsha7", nil)
 	if err != nil {
 		t.Fatalf("GithubCreatePendingReview: %v", err)
 	}
@@ -475,7 +475,7 @@ func TestPostFinalizedReview_ReEvaluatesPostureAgainstPostClaimContent(t *testin
 	setTeamReviewPosture(t, stores, info.TeamID, domain.ReviewPostureDraft)
 
 	ctx := context.Background()
-	handle, err := client.GithubCreatePendingReview(ctx, "octo", "repo", 7, "headsha7", nil)
+	handle, err := client.GithubCreatePendingReview(ctx, "octo", "repo", 7, testPRNodeID(7), "headsha7", nil)
 	if err != nil {
 		t.Fatalf("GithubCreatePendingReview: %v", err)
 	}

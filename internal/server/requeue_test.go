@@ -96,7 +96,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversatio
 	// flips it to dismissed (no GitHub call — the draft is local). Returns
 	// the artifact id.
 	line := 1
-	reviewArt := domain.NewReviewArtifact("owner/repo", 7, "headsha_pa", "r_pa")
+	reviewArt := domain.NewReviewArtifact("owner/repo", 7, "PR_node_pa", "headsha_pa", "r_pa")
 	reviewArt.ConversationID = "r_pa"
 	reviewArt.OrgID = runmode.LocalDefaultOrgID
 	reviewArt.TeamID = runmode.LocalDefaultTeamID

@@ -72,7 +72,7 @@ func TestLocalClient_GithubCreatePR_RecordsArtifact(t *testing.T) {
 			if a.Provider != domain.ArtifactProviderGitHub || a.Kind != domain.ArtifactKindPullRequest ||
 				a.Target != "octo/repo#42" || a.ExternalID != "42" ||
 				a.URL != "https://github.com/octo/repo/pull/42" ||
-				a.State != domain.ArtifactStatePRDraft || a.DedupKey != "github:pull_request:octo/repo#42" {
+				a.State != domain.ArtifactStatePRDraft || a.DedupKey != domain.PullRequestDedupKey("PR_kwDOABCD") {
 				t.Errorf("PR artifact mismatch: %+v", a)
 			}
 			if a.ConversationID != info.ConversationID || a.TeamID != runmode.LocalDefaultTeamID {

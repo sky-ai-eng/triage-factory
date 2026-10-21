@@ -420,7 +420,7 @@ func TestArtifactTeardown_ResolvesAllArtifacts(t *testing.T) {
 	// r_ab; add a finalized review draft on the same conversation so the
 	// task holds two unresolved artifacts of different kinds.
 	taskID, conversationID, prArtID := seedClaimedPRApprovalFixture(t, srv, "acme", "api", 7)
-	rv := domain.NewReviewArtifact("acme/api", 7, "headsha7", conversationID)
+	rv := domain.NewReviewArtifact("acme/api", 7, "PR_acme_api_7", "headsha7", conversationID)
 	rv.ConversationID = conversationID
 	rv.OrgID = runmode.LocalDefaultOrgID
 	rv.TeamID = runmode.LocalDefaultTeamID
@@ -853,7 +853,7 @@ func seedDraftPRArtifactWithConversation(t *testing.T, s *Server, suffix, owner,
 	if _, err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, conversationID, "", "agent self-report", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
 	}
-	a := domain.NewPullRequestArtifact(owner+"/"+repo, number, "PR_node", "feature/x", "main",
+	a := domain.NewPullRequestArtifact(owner+"/"+repo, number, fmt.Sprintf("PR_%s_%s_%d", owner, repo, number), "feature/x", "main",
 		fmt.Sprintf("https://example.test/%s/%s/pull/%d", owner, repo, number), "Proposed title", "Proposed body", true)
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
@@ -900,7 +900,7 @@ func seedClaimedPRApprovalFixture(t *testing.T, s *Server, owner, repo string, n
 	if _, err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_ab", "", "agent self-report", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
 	}
-	a := domain.NewPullRequestArtifact(owner+"/"+repo, number, "PR_node", "feature/x", "main",
+	a := domain.NewPullRequestArtifact(owner+"/"+repo, number, fmt.Sprintf("PR_%s_%s_%d", owner, repo, number), "feature/x", "main",
 		fmt.Sprintf("https://example.test/%s/%s/pull/%d", owner, repo, number), "Proposed title", "Proposed body", true)
 	a.ConversationID = "r_ab"
 	a.OrgID = runmode.LocalDefaultOrgID
@@ -979,9 +979,12 @@ func newRejectStub(t *testing.T, srv *Server, live map[string]any, node string, 
 }
 
 // seedBranchArtifact records the pushed-branch artifact the run's push would
-// have captured for the draft PR's head, so a reject has a sibling to retire.
+// have captured for the draft PR's head, so a reject has a sibling to retire:
+// keyed, as the push's sink keys it, on the registry row of repoPath's
+// repository.
 func seedBranchArtifact(t *testing.T, s *Server, conversationID, repoPath, ref string) string {
 	t.Helper()
+	stores := sqlitestore.New(s.db)
 	a, ok := domain.NewBranchArtifact(repoPath, ref, "abc123", true)
 	if !ok {
 		t.Fatalf("NewBranchArtifact(%q, %q) refused", repoPath, ref)
@@ -989,7 +992,13 @@ func seedBranchArtifact(t *testing.T, s *Server, conversationID, repoPath, ref s
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
-	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(s.db).Orgs, runmode.LocalDefaultOrgID, a))
+	a = dbtest.InOrgScope(t, stores.Orgs, runmode.LocalDefaultOrgID, a)
+	repo, err := stores.Repos.FindOrCreateByRefSystem(context.Background(), runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(a.Scope, repoPath))
+	if err != nil {
+		t.Fatalf("register %s: %v", repoPath, err)
+	}
+	a.DedupKey = domain.BranchDedupKey(repo.ID, ref)
+	stored, err := stores.Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
 	if err != nil {
 		t.Fatalf("seed branch artifact: %v", err)
 	}

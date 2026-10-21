@@ -274,23 +274,29 @@ func (s *artifactStore) ListByConversationSystem(ctx context.Context, orgID, con
 	return s.ListByConversation(ctx, orgID, conversationID)
 }
 
-// ListPendingReviewsByTargetSystem is identical to a plain org read in SQLite:
-// local mode is single-tenant (N=1) with no RLS, so there is no admin/app pool
-// split. Filters to pending review drafts anchored to the given PR target on
-// scope's host.
-func (s *artifactStore) ListPendingReviewsByTargetSystem(ctx context.Context, orgID, scope, target string) ([]domain.Artifact, error) {
+// ListPendingReviewsByPullRequestSystem is identical to a plain org read in
+// SQLite: local mode is single-tenant (N=1) with no RLS, so there is no
+// admin/app pool split. Filters to pending review drafts keyed on the given
+// PR's node id on scope's host. The key prefix is compared with substr rather
+// than LIKE: a node id may hold '_', which LIKE reads as a wildcard.
+func (s *artifactStore) ListPendingReviewsByPullRequestSystem(ctx context.Context, orgID, scope, prNodeID string) ([]domain.Artifact, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	if err := db.RequireExternalObjectScope(scope); err != nil {
 		return nil, err
 	}
+	prefix := domain.ReviewDedupKeyPrefix(prNodeID)
+	if prefix == "" {
+		return nil, nil
+	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+artifactColumns+`
 		FROM artifacts
-		WHERE org_id = ? AND kind = ? AND state = ? AND scope = ? AND target = ?
+		WHERE org_id = ? AND provider = ? AND kind = ? AND state = ? AND scope = ?
+		  AND substr(dedup_key, 1, ?) = ?
 		ORDER BY created_at DESC, id DESC
-	`, orgID, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, scope, target)
+	`, orgID, domain.ArtifactProviderGitHub, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, scope, len(prefix), prefix)
 	if err != nil {
 		return nil, err
 	}

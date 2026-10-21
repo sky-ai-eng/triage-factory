@@ -83,7 +83,7 @@ func seedDraftPRArtifact(t *testing.T, s *Server, owner, repo string) string {
 	// artifact off it. The owner/repo the resolver keys on are encoded in the
 	// artifact's target (owner/repo#number), independent of the entity's source.
 	conversationID := seedSteerConversation(t, s.db, "ppr-"+uuid.New().String()[:8], dbtest.SeedConcluded)
-	a := domain.NewPullRequestArtifact(owner+"/"+repo, 42, "PR_node", "feature/x", "main",
+	a := domain.NewPullRequestArtifact(owner+"/"+repo, 42, "PR_"+owner+"_"+repo+"_42", "feature/x", "main",
 		"https://example.test/"+owner+"/"+repo+"/pull/42", "Add thing", "Body.", true)
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID

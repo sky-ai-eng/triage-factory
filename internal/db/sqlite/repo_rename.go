@@ -28,10 +28,11 @@ import (
 // What is left cannot become a foreign key. A pull request's key is its
 // repository's name AND its number, so entities.source_id stays the composite
 // display key "owner/repo#18" beside the entity's repository_id, and moves
-// because it is what everything reads and shows; an artifact's dedup_key is a
-// contract between two writers that would re-mint every artifact if its shape
-// moved; placement_overrides' key_value is a slug that names a repository with
-// or without a registry row, so no FK can hold it.
+// because it is what everything reads and shows; an artifact's target is a
+// display value of the same shape; placement_overrides' key_value is a slug
+// that names a repository with or without a registry row, so no FK can hold
+// it. An artifact's dedup_key names no repository (a pull request's node id, a
+// registry row id, a comment's id), so it never moves.
 //
 // Stored links move with the keys. entities.url is rewritten alongside
 // source_id — a redirect stops the moment the freed name is re-claimed,
@@ -40,8 +41,7 @@ import (
 // touched (the record of the act, frozen with target and detail_json), but
 // current_url — the maintained pointer reads coalesce over — is filled here.
 // artifacts.url needs no help: its upsert's conflict arm refreshes it the next
-// time any writer lands on the row, which this rewrite guarantees by moving
-// dedup_key.
+// time any writer lands on the row, and every writer lands on it by its id.
 //
 // What stays put entirely: history (events.payload_json; external_actions'
 // target and detail_json record an act under the name in force at the time),
@@ -50,15 +50,17 @@ import (
 // is keyed by the repository row id, so a rename does not move it either.
 //
 // The rewrite stays on the renamed repository's host. Entities are the
-// repository's own (repository_id), artifacts and audit-ledger rows are
-// matched by their scope column, placement pins by their host, and a stored
-// link is rewritten only when it is on the host (domain.RewriteRepoURL). A
-// repository on another host under the same name is a different repository,
-// and nothing of its is touched.
+// repository's own (repository_id), and so are the pull request, review and
+// branch artifacts, found by the ids their keys carry; the other artifacts and
+// the audit-ledger rows are matched by their scope column, placement pins by
+// their host, and a stored link is rewritten only when it is on the host
+// (domain.RewriteRepoURL). A repository on another host under the same name is
+// a different repository, and nothing of its is touched.
 //
-// A retired row restored by a rename moves its own row and entities and
-// nothing keyed by the name alone: the name it was retired under may belong to
-// another repository by now, whose artifacts and pins spell it too.
+// A retired row restored by a rename moves its own row, entities and the
+// artifacts keyed on its ids, and nothing keyed by the name alone: the name it
+// was retired under may belong to another repository by now, whose comments
+// and pins spell it too.
 
 func (s *repoStore) ListIdentitiesSystem(ctx context.Context, orgID, host string) ([]domain.RepoIdentity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
@@ -386,9 +388,10 @@ func renameRepositoryRow(ctx context.Context, q queryer, renamed identityRow, to
 // every row it selects carries the host as its scope (or, for a placement pin,
 // its host).
 //
-// The entities are repositoryID's own. heldName is whether the row held from
-// until now; a restored row did not, and the records keyed by the slug alone
-// (placement pins, artifacts, audit-ledger pointers) are left to whatever holds
+// The entities, and the artifacts keyed on the repository's ids, are
+// repositoryID's own. heldName is whether the row held from until now; a
+// restored row did not, and the records matched by the slug alone (placement
+// pins, comment artifacts, audit-ledger pointers) are left to whatever holds
 // it.
 func rewriteSlugDerivedKeys(ctx context.Context, q queryer, source, host, repositoryID, from, to string, heldName bool) error {
 	// entities.url first, while source_id still spells the old slug: the URL
@@ -430,6 +433,9 @@ func rewriteSlugDerivedKeys(ctx context.Context, q queryer, source, host, reposi
 		}
 		return fmt.Errorf("rewrite entity source ids %s -> %s: %w", from, to, err)
 	}
+	if err := moveRepositoryArtifactTargets(ctx, q, source, host, repositoryID, to); err != nil {
+		return err
+	}
 	if !heldName {
 		return nil
 	}
@@ -452,11 +458,9 @@ func rewriteSlugDerivedKeys(ctx context.Context, q queryer, source, host, reposi
 		return fmt.Errorf("rewrite placement overrides %s -> %s: %w", from, to, err)
 	}
 
-	// artifacts — target and dedup_key both carry the slug, and dedup_key is
-	// the conflict target every capture writer upserts on. Leaving it behind
-	// is what turns one pull request into two rows the first time anything
-	// records it under the new name.
-	if err := rewriteArtifactSlugs(ctx, q, host, from, to); err != nil {
+	// artifacts the repository's ids do not find — comments — by the slug
+	// their target leads with.
+	if err := rewriteArtifactTargetsByName(ctx, q, host, from, to); err != nil {
 		return err
 	}
 
@@ -551,35 +555,81 @@ func collectURLRewrites(rows *sql.Rows, host, from, to string) ([]urlRewrite, er
 	return out, rows.Err()
 }
 
-func rewriteArtifactSlugs(ctx context.Context, q queryer, host, from, to string) error {
-	// Only the host's GitHub artifacts (a branch is a git artifact on the same
-	// host) are candidates: one recorded under another scope is another host's
-	// object under the same name. Within those the SQL filter is a cheap
-	// over-approximation — any row whose key or target so much as mentions the
-	// old slug — and the precise decision is made in Go, where the segment
-	// boundaries of a dedup key are expressible.
+// moveRepositoryArtifactTargets moves the target of every pull request,
+// review and branch artifact recorded in repositoryID onto to. The rows are
+// selected by the ids their keys carry, never by the name their target spells:
+// a branch's key carries the registry row id (domain.BranchDedupKeyPrefix),
+// and a pull request's or review's the pull request's node id, which the
+// repository's own PR entities carry as their external id. So a retired
+// repository that held the name keeps its rows as they are, and a row written
+// under a spelling of the name this rename does not know moves too. A row
+// whose pull request no entity of the repository identifies is not found.
+// Only the target moves; the key names no repository. The key prefixes are
+// compared with SUBSTR rather than LIKE: a node id may hold '_', which LIKE
+// reads as a wildcard.
+func moveRepositoryArtifactTargets(ctx context.Context, q queryer, source, host, repositoryID, to string) error {
+	prefix := domain.BranchDedupKeyPrefix(repositoryID)
+	if _, err := q.ExecContext(ctx, `
+		UPDATE artifacts SET target = ?, updated_at = datetime('now')
+		 WHERE scope = ? AND provider = ? AND kind = ?
+		   AND SUBSTR(dedup_key, 1, ?) = ?
+		   AND target <> ?
+	`, to, host, domain.ArtifactProviderGit, domain.ArtifactKindBranch, len(prefix), prefix, to); err != nil {
+		return fmt.Errorf("move branch artifact targets of %s onto %s: %w", repositoryID, to, err)
+	}
+	// target is owner/repo#N, and only the slug before the '#' moves. The
+	// entity join is the repository's own pull requests: its PR entities
+	// carry their node ids, and each artifact's key leads with one.
+	if _, err := q.ExecContext(ctx, `
+		UPDATE artifacts SET target = ? || SUBSTR(target, INSTR(target, '#')), updated_at = datetime('now')
+		 WHERE scope = ? AND provider = ?
+		   AND INSTR(target, '#') > 0
+		   AND target <> ? || SUBSTR(target, INSTR(target, '#'))
+		   AND EXISTS (
+		       SELECT 1 FROM entities e
+		        WHERE e.source = ? AND e.scope = artifacts.scope AND e.repository_id = ?
+		          AND e.external_id IS NOT NULL AND e.external_id <> ''
+		          AND ((artifacts.kind = ? AND artifacts.dedup_key = ? || e.external_id)
+		               OR (artifacts.kind = ? AND SUBSTR(artifacts.dedup_key, 1, LENGTH(?) + LENGTH(e.external_id) + 1) = ? || e.external_id || ':'))
+		   )
+	`, to, host, domain.ArtifactProviderGitHub, to, source, repositoryID,
+		domain.ArtifactKindPullRequest, domain.PullRequestDedupKeyHead,
+		domain.ArtifactKindReview, domain.ReviewDedupKeyHead, domain.ReviewDedupKeyHead); err != nil {
+		return fmt.Errorf("move pull request and review artifact targets of %s onto %s: %w", repositoryID, to, err)
+	}
+	return nil
+}
+
+// rewriteArtifactTargetsByName moves the target of the host's other GitHub
+// artifacts — the comments, whose key is the comment's own id — off from. Only
+// the host's GitHub artifacts are candidates: one recorded under another scope
+// is another host's object under the same name. Within those the SQL filter is
+// a cheap over-approximation — any row whose target so much as mentions the
+// old slug — and the precise decision is made in Go
+// (domain.RewriteRepoSlugPrefix), where the slug's boundary is expressible.
+// Pull request, review and branch rows are moveRepositoryArtifactTargets'.
+func rewriteArtifactTargetsByName(ctx context.Context, q queryer, host, from, to string) error {
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, target, dedup_key FROM artifacts
+		SELECT id, target FROM artifacts
 		 WHERE scope = ? AND provider IN (?, ?)
-		   AND (INSTR(LOWER(dedup_key), LOWER(?)) > 0 OR INSTR(LOWER(target), LOWER(?)) > 0)
-	`, host, domain.ArtifactProviderGitHub, domain.ArtifactProviderGit, from, from)
+		   AND kind NOT IN (?, ?, ?)
+		   AND INSTR(LOWER(target), LOWER(?)) > 0
+	`, host, domain.ArtifactProviderGitHub, domain.ArtifactProviderGit,
+		domain.ArtifactKindPullRequest, domain.ArtifactKindReview, domain.ArtifactKindBranch, from)
 	if err != nil {
 		return err
 	}
-	type pending struct{ id, target, dedupKey string }
+	type pending struct{ id, target string }
 	var updates []pending
 	for rows.Next() {
-		var id, target, dedupKey string
-		if err := rows.Scan(&id, &target, &dedupKey); err != nil {
+		var id, target string
+		if err := rows.Scan(&id, &target); err != nil {
 			rows.Close()
 			return err
 		}
-		newTarget, targetChanged := domain.RewriteRepoSlugPrefix(target, from, to)
-		newKey, keyChanged := domain.RewriteArtifactDedupKey(dedupKey, from, to)
-		if !targetChanged && !keyChanged {
-			continue
+		if newTarget, changed := domain.RewriteRepoSlugPrefix(target, from, to); changed {
+			updates = append(updates, pending{id: id, target: newTarget})
 		}
-		updates = append(updates, pending{id: id, target: newTarget, dedupKey: newKey})
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -589,12 +639,9 @@ func rewriteArtifactSlugs(ctx context.Context, q queryer, host, from, to string)
 
 	for _, u := range updates {
 		if _, err := q.ExecContext(ctx, `
-			UPDATE artifacts SET target = ?, dedup_key = ?, updated_at = datetime('now')
+			UPDATE artifacts SET target = ?, updated_at = datetime('now')
 			 WHERE id = ?
-		`, u.target, u.dedupKey, u.id); err != nil {
-			if isUniqueViolation(err) {
-				return fmt.Errorf("%w: an artifact already answers to %s: %v", db.ErrRepoSlugOccupied, to, err)
-			}
+		`, u.target, u.id); err != nil {
 			return fmt.Errorf("rewrite artifact %s for %s -> %s: %w", u.id, from, to, err)
 		}
 	}
@@ -606,15 +653,13 @@ func rewriteArtifactSlugs(ctx context.Context, q queryer, host, from, to string)
 // the only signal — the same string httpx.IsUniqueViolation matches, repeated
 // here rather than imported because internal/db must not depend on the server.
 //
-// It exists for the composite keys a rename can collide on: entities' active
-// key (org_id, source, scope, source_id) and artifacts' (org_id, scope,
-// dedup_key).
-// The entity rename and a stamp of an external id on an entity reach it too.
-// Both keys are reachable without any corruption: a record spells the name
-// itself, whatever registry row repositoryHoldingSlug finds, so a name can be
-// spoken for by records alone.
-// Mapping the violation is what makes that a documented
-// terminal state rather than a raw driver string the caller retries forever.
+// It exists for the composite key a rename can collide on: entities' active
+// key (org_id, source, scope, source_id). The entity rename and a stamp of an
+// external id on an entity reach it too. The key is reachable without any
+// corruption: an entity spells the name itself, whatever registry row
+// repositoryHoldingSlug finds, so a name can be spoken for by entities alone.
+// Mapping the violation is what makes that a documented terminal state rather
+// than a raw driver string the caller retries forever.
 //
 // Mapped at the write rather than pre-checked on purpose: a pre-check inside
 // this transaction still races a concurrent entity insert, so the index has to

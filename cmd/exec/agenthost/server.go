@@ -452,7 +452,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		reviewID, commitSHA, err := client.ResetReviewDraft(ctx, a.Owner, a.Repo, a.Number)
+		reviewID, commitSHA, err := client.ResetReviewDraft(ctx, a.PRNodeID)
 		if err != nil {
 			return nil, err
 		}
@@ -962,7 +962,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		reviewID, err := client.GithubCreatePendingReview(ctx, a.Owner, a.Repo, a.Number, a.CommitSHA, a.Comments)
+		reviewID, err := client.GithubCreatePendingReview(ctx, a.Owner, a.Repo, a.Number, a.PRNodeID, a.CommitSHA, a.Comments)
 		if err != nil {
 			return nil, err
 		}

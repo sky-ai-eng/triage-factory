@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -55,7 +56,7 @@ func (r teardownResolver) OrgIdentityFor(context.Context, string) (string, strin
 func seedUnresolvedArtifacts(t *testing.T, database *sql.DB, conversationID, repoPath string, number int) (prID, reviewID string) {
 	t.Helper()
 	store := sqlitestore.New(database)
-	pr := domain.NewPullRequestArtifact(repoPath, number, "PR_node", "tf/fix", "main",
+	pr := domain.NewPullRequestArtifact(repoPath, number, fmt.Sprintf("PR_%s_%d", repoPath, number), "tf/fix", "main",
 		"https://example.test/"+repoPath+"/pull/7", "Proposed title", "Proposed body", true)
 	pr.ConversationID = conversationID
 	pr.OrgID = runmode.LocalDefaultOrgID
@@ -65,7 +66,7 @@ func seedUnresolvedArtifacts(t *testing.T, database *sql.DB, conversationID, rep
 		t.Fatalf("seed draft PR artifact: %v", err)
 	}
 
-	rv := domain.NewReviewArtifact(repoPath, number, "headsha", conversationID)
+	rv := domain.NewReviewArtifact(repoPath, number, fmt.Sprintf("PR_%s_%d", repoPath, number), "headsha", conversationID)
 	rv.ConversationID = conversationID
 	rv.OrgID = runmode.LocalDefaultOrgID
 	rv.TeamID = runmode.LocalDefaultTeamID

@@ -232,17 +232,18 @@ type Client interface {
 	FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) (ReviewFinalizeResult, error)
 
 	// ResetReviewDraft is the host side of `gh pr start-review --fresh`: a pure
-	// local reset of this conversation's review draft for owner/repo#number, with zero
-	// GitHub calls. It clears the staged comments and the body/event ready
-	// sentinel (and the write-once Proposed snapshot) back to an empty pending
-	// draft, keeping the artifact row, its handle, and its pinned head SHA so the
-	// agent can restart the review cleanly. Returns the draft's handle and that
-	// preserved head SHA (so the CLI can echo the same commit_sha a normal
-	// start-review prints), or ("", "") when the conversation has no draft for that PR (the
-	// caller falls through to a normal start-review). Post-494 there is no GitHub
-	// pending review to delete and no identity / anti-hijack logic — the draft
-	// lives entirely in the artifact.
-	ResetReviewDraft(ctx context.Context, owner, repo string, number int) (reviewID, commitSHA string, err error)
+	// local reset of this conversation's review draft for the pull request whose
+	// GraphQL node id is prNodeID, with zero GitHub calls. It clears the staged
+	// comments and the body/event ready sentinel (and the write-once Proposed
+	// snapshot) back to an empty pending draft, keeping the artifact row, its
+	// handle, and its pinned head SHA so the agent can restart the review
+	// cleanly. Returns the draft's handle and that preserved head SHA (so the
+	// CLI can echo the same commit_sha a normal start-review prints), or
+	// ("", "") when the conversation has no draft for that PR (the caller falls
+	// through to a normal start-review). Post-494 there is no GitHub pending
+	// review to delete and no identity / anti-hijack logic — the draft lives
+	// entirely in the artifact.
+	ResetReviewDraft(ctx context.Context, prNodeID string) (reviewID, commitSHA string, err error)
 
 	// ReviewDraftTarget returns the pull request this conversation's review
 	// draft reviewID was started on — the coordinates start-review recorded on
@@ -396,7 +397,9 @@ type Client interface {
 	// the draft window; the atomic create+submit happens at approval. These bridge
 	// those writes host-side so the sandbox (no DB) routes them through the daemon,
 	// exactly like UpsertArtifact. owner/repo ride along to build the artifact
-	// target; reviewID is the local handle (the artifact id) start-review returns.
+	// target; prNodeID is the pull request's GraphQL node id, which the draft is
+	// keyed on; reviewID is the local handle (the artifact id) start-review
+	// returns.
 	//
 	// GithubCreatePendingReview returns the local review handle; the comments param
 	// is unused (start-review seeds none). GithubAddPendingReviewComment returns a
@@ -404,8 +407,8 @@ type Client interface {
 	// dedup key is conversation-scoped — so there is no identity branch and no collision
 	// error.
 	//
-	// GithubAddPendingReviewComment's owner/repo must be the repo the review was
-	// started on; any other is refused. Its commitSHA is the HEAD of the run's
+	// GithubAddPendingReviewComment's owner/repo#number must resolve on GitHub to
+	// the pull request the review was started on; any other is refused. Its commitSHA is the HEAD of the run's
 	// checkout of the reviewed PR: the commit the host validates the comment's
 	// (path, line, start_line) against and the commit the submitted comment
 	// anchors to. The CLI passes it because the
@@ -414,7 +417,7 @@ type Client interface {
 	// mapped to the line GitHub anchors to. Empty when the CLI had no checkout, in
 	// which case the host anchors to the live head and validates against the API
 	// diff (internally consistent on its own).
-	GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, comments []ghclient.SubmitReviewComment) (reviewID string, err error)
+	GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, prNodeID, commitSHA string, comments []ghclient.SubmitReviewComment) (reviewID string, err error)
 	GithubAddPendingReviewComment(ctx context.Context, owner, repo, reviewID, path, body string, line int, startLine *int, commitSHA string) (commentID string, err error)
 
 	// UpdateStagedReviewComment / DeleteStagedReviewComment mutate one inline

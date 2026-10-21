@@ -152,11 +152,11 @@ const prBackstopWindow = 7 * 24 * time.Hour
 // conversation was purged, which leaves no one to own the artifact. It
 // fetches those pull requests by node id (RefreshPRs, batched per owner of the
 // row's target), which gives what the row does not carry: the repository's
-// current name, the number, link, refs, title and body. The artifact is
-// recorded under the current name, so a pull request in a repository renamed
-// since it was opened is backfilled where the rename's rewrite would have
-// moved it. When every pull request already has its artifact, the pass makes
-// no GitHub call.
+// current name, the number, link, refs, title and body. The artifact is keyed
+// on the node id (domain.PullRequestDedupKey), the key the create verb writes
+// under, so the two writers land on one row whatever name each spelled the
+// repository with; its target is the current name. When every pull request
+// already has its artifact, the pass makes no GitHub call.
 //
 // The artifact is recorded in the state the verb opened the pull request in,
 // and the reconcile that follows applies any transition since. The write is
@@ -218,8 +218,8 @@ func (rc *Reconciler) BackfillPRArtifacts(ctx context.Context, orgID string) err
 }
 
 // recordBackfilledPR records the pull_request artifact for the pr_created row
-// act from snap, GitHub's current copy of the pull request, under the
-// repository's current name. The proposed snapshot is what GitHub holds now:
+// act from snap, GitHub's current copy of the pull request, keyed on the node
+// id act carries. The proposed snapshot is what GitHub holds now:
 // the title and body the verb sent, unless someone has edited them since.
 func (rc *Reconciler) recordBackfilledPR(ctx context.Context, orgID, host string, act domain.ExternalAction, snap domain.PRSnapshot) {
 	target := domain.PullRequestTarget(snap.Repo, snap.Number)

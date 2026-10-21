@@ -55,7 +55,7 @@ func TestArtifactLedgerForResume_DerivesResolvedSinceWatermark(t *testing.T) {
 		"https://github.com/o/r/pull/1", "PR one", "", false) // draft=false → state=open
 	seedResolvedArtifact(t, s, "r-led", approvedPR)
 
-	dismissedReview := domain.NewReviewArtifact("o/r", 3, "headsha", "r-led")
+	dismissedReview := domain.NewReviewArtifact("o/r", 3, "node3", "headsha", "r-led")
 	dismissedReview.State = domain.ArtifactStateReviewDismissed
 	seedResolvedArtifact(t, s, "r-led", dismissedReview)
 

@@ -550,6 +550,7 @@ type githubCreatePRResult struct {
 type githubCreatePendingReviewArgs struct {
 	githubRepoRef
 	Number    int                            `json:"number"`
+	PRNodeID  string                         `json:"pr_node_id"`
 	CommitSHA string                         `json:"commit_sha"`
 	Comments  []ghclient.SubmitReviewComment `json:"comments"`
 }
@@ -558,11 +559,10 @@ type githubReviewIDResult struct {
 	ReviewID string `json:"review_id"`
 }
 
-// resetReviewDraftArgs carries the PR coordinates `start-review --fresh` resets
-// the conversation's local draft for.
+// resetReviewDraftArgs carries the node id of the PR `start-review --fresh`
+// resets the conversation's local draft for.
 type resetReviewDraftArgs struct {
-	githubRepoRef
-	Number int `json:"number"`
+	PRNodeID string `json:"pr_node_id"`
 }
 
 // resetReviewDraftResult is the reset draft's handle plus its preserved head SHA

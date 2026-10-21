@@ -125,9 +125,9 @@ func TestStampPRCommission_ReviewArtifactRecordsNothing(t *testing.T) {
 		t.Fatalf("seed entity: %v", err)
 	}
 
-	a := domain.NewSubmittedReviewArtifact(
-		"octo/repo", 42, 9001, "APPROVE",
-		"https://github.com/octo/repo/pull/42#pullrequestreview-9001", info.ConversationID)
+	a := domain.NewReviewArtifact("octo/repo", 42, "PR_kwDO42", "headsha", info.ConversationID)
+	a.State, a.ExternalID = domain.ArtifactStateReviewSubmitted, "9001"
+	a.URL = "https://github.com/octo/repo/pull/42#pullrequestreview-9001"
 	RecordExternalWrite(ctx, stores, info, &a, nil)
 
 	if got := commissionerOf(t, conn, ent.ID); got != "" {

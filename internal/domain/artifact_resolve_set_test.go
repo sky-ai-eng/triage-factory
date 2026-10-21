@@ -7,7 +7,7 @@ import "testing"
 // (TFAC-494) has no GitHub review id, so the tests key on Target/ID, not
 // ExternalID.
 func readyReview(number int, conversationID string) Artifact {
-	a := NewReviewArtifact("o/r", number, "headsha", conversationID)
+	a := NewReviewArtifact("o/r", number, "PR_kwDOnode", "headsha", conversationID)
 	rd, _ := ParseReviewArtifactDetails(a.DetailsJSON)
 	rd.ReviewEvent = "APPROVE"
 	a.DetailsJSON = MarshalReviewArtifactDetails(rd)
@@ -42,7 +42,7 @@ func TestAllDraftPullRequests(t *testing.T) {
 
 func TestAllReadyReviews(t *testing.T) {
 	ready1 := readyReview(1, "run_1")
-	pendingUnfinalized := NewReviewArtifact("o/r", 2, "headsha", "run_2") // no sentinel
+	pendingUnfinalized := NewReviewArtifact("o/r", 2, "PR_kwDOnode", "headsha", "run_2") // no sentinel
 	ready2 := readyReview(3, "run_3")
 
 	got := AllReadyReviews([]Artifact{ready1, pendingUnfinalized, ready2})
@@ -56,7 +56,7 @@ func TestAllReadyReviews(t *testing.T) {
 
 func TestAllPendingReviewArtifacts(t *testing.T) {
 	finalized := readyReview(1, "run_1")
-	unfinalized := NewReviewArtifact("o/r", 2, "headsha", "run_2")
+	unfinalized := NewReviewArtifact("o/r", 2, "PR_kwDOnode", "headsha", "run_2")
 	submitted := readyReview(3, "run_3")
 	submitted.State = ArtifactStateReviewSubmitted // resolved
 
@@ -77,7 +77,7 @@ func TestUnresolvedArtifactIDs(t *testing.T) {
 	openPR.State = ArtifactStatePROpen
 	ready := readyReview(3, "PRR_1")
 	ready.ID = "rv1"
-	unfinalized := NewReviewArtifact("o/r", 4, "n", "PRR_2") // not ready → not approvable
+	unfinalized := NewReviewArtifact("o/r", 4, "PR_kwDOnode", "n", "PRR_2") // not ready → not approvable
 	unfinalized.ID = "rv2"
 
 	ids := UnresolvedArtifactIDs([]Artifact{d, openPR, ready, unfinalized})

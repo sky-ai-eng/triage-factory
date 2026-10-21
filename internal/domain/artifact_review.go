@@ -3,7 +3,6 @@ package domain
 import (
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 )
 
@@ -110,34 +109,55 @@ type ReviewArtifactDetails struct {
 }
 
 // ReviewTarget is the artifact Target for a review: owner/repo#<number> — the PR
-// the review is attached to. A pending review has no stable resource key of its
-// own (its node id moves to ExternalID), so it anchors to its PR. Parse it back
-// with ParsePRTarget, which is shape-generic over owner/repo#<number>.
+// the review is attached to, as a display value. Parse it back with
+// ParsePRTarget, which is shape-generic over owner/repo#<number>.
 func ReviewTarget(repoPath string, number int) string {
 	return fmt.Sprintf("%s#%d", repoPath, number)
 }
 
 // ReviewDedupKey is the stable key a conversation's review-draft upserts on:
-// github:review:owner/repo#<number>:<conversation_id>. It is **conversation-scoped** (TFAC-494):
-// the review is staged entirely TF-side, so two conversations (different teams,
-// a re-delegate, interactive steering) reviewing the same PR each own an
-// independent draft row instead of colliding on one org+PR-scoped row. A
-// conversation reviews a PR at most once, so (PR, conversation) is unique.
-func ReviewDedupKey(repoPath string, number int, conversationID string) string {
-	return ArtifactDedupKey(ArtifactProviderGitHub, ArtifactKindReview, ReviewTarget(repoPath, number), conversationID)
+// github:review:<PR node id>:<conversation_id>. A pending review has no GitHub
+// object of its own, so it is keyed on the pull request it reviews, by the
+// pull request's node id, which a repository rename does not change. It is
+// **conversation-scoped** (TFAC-494): the review is staged entirely TF-side, so
+// two conversations (different teams, a re-delegate, interactive steering)
+// reviewing the same PR each own an independent draft row instead of
+// colliding on one org+PR-scoped row. A conversation reviews a PR at most
+// once, so (PR, conversation) is unique. "" for an empty node id.
+func ReviewDedupKey(prNodeID, conversationID string) string {
+	if prNodeID == "" {
+		return ""
+	}
+	return ArtifactDedupKey(ArtifactProviderGitHub, ArtifactKindReview, prNodeID, conversationID)
+}
+
+// ReviewDedupKeyHead is what every review draft's key begins with, ahead of
+// the pull request's node id. A read that joins drafts to a pull request in
+// SQL matches ReviewDedupKeyHead || node id || ':'.
+const ReviewDedupKeyHead = ArtifactProviderGitHub + ":" + ArtifactKindReview + ":"
+
+// ReviewDedupKeyPrefix is what every conversation's ReviewDedupKey for the
+// pull request whose node id is prNodeID begins with: a read for the review
+// drafts on one pull request matches it. "" for an empty node id.
+func ReviewDedupKeyPrefix(prNodeID string) string {
+	if prNodeID == "" {
+		return ""
+	}
+	return ReviewDedupKeyHead + prNodeID + ":"
 }
 
 // NewReviewArtifact builds the durable review-draft artifact start-review records
 // — a fully TF-side draft, with zero GitHub writes (TFAC-494). repoPath is
-// "owner/repo"; number is the PR number; headSHA is the reviewed commit (pinned
-// into details and passed as commit_id at the atomic submit on approval); conversationID
-// scopes the dedup key so concurrent conversations on one PR never collide.
+// "owner/repo"; number is the PR number and prNodeID its GraphQL node id, which
+// the draft is keyed on; headSHA is the reviewed commit (pinned into details and
+// passed as commit_id at the atomic submit on approval); conversationID scopes
+// the dedup key so concurrent conversations on one PR never collide.
 //
 // The artifact starts state=pending with an empty ReviewEvent and an empty
 // ExternalID: nothing exists on GitHub yet (the submitted review's id + URL are
 // stamped on at approval), and ReviewEvent stays empty until finalize-review sets
 // the ready sentinel. ConversationID/OrgID/TeamID are stamped by the recording client.
-func NewReviewArtifact(repoPath string, number int, headSHA, conversationID string) Artifact {
+func NewReviewArtifact(repoPath string, number int, prNodeID, headSHA, conversationID string) Artifact {
 	details, err := json.Marshal(ReviewArtifactDetails{
 		Number:  number,
 		HeadSHA: headSHA,
@@ -152,33 +172,7 @@ func NewReviewArtifact(repoPath string, number int, headSHA, conversationID stri
 		Kind:        ArtifactKindReview,
 		Target:      ReviewTarget(repoPath, number),
 		State:       ArtifactStateReviewPending,
-		DedupKey:    ReviewDedupKey(repoPath, number, conversationID),
-		DetailsJSON: string(details),
-	}
-}
-
-// NewSubmittedReviewArtifact builds a review artifact for a review posted
-// directly to GitHub via the real-gh channel — a single POST .../reviews with
-// no TF-side draft phase, so the review is already live: it carries the GitHub
-// review id (ExternalID), its web URL, and state=submitted. It shares
-// NewReviewArtifact's conversation-scoped dedup key, so if the same
-// conversation had also staged a TF-side draft for this PR the gh submit
-// upserts onto that one row (draft → submitted) instead of minting a second.
-// conversationID scopes the key; reviewID / state / htmlURL come from the POST
-// response, number from its path.
-func NewSubmittedReviewArtifact(repoPath string, number, reviewID int, state, htmlURL, conversationID string) Artifact {
-	details, err := json.Marshal(ReviewArtifactDetails{Number: number, ReviewEvent: state})
-	if err != nil {
-		details = nil
-	}
-	return Artifact{
-		Provider:    ArtifactProviderGitHub,
-		Kind:        ArtifactKindReview,
-		Target:      ReviewTarget(repoPath, number),
-		ExternalID:  strconv.Itoa(reviewID),
-		URL:         htmlURL,
-		State:       ArtifactStateReviewSubmitted,
-		DedupKey:    ReviewDedupKey(repoPath, number, conversationID),
+		DedupKey:    ReviewDedupKey(prNodeID, conversationID),
 		DetailsJSON: string(details),
 	}
 }

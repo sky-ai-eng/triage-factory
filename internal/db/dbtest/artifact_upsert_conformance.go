@@ -24,6 +24,8 @@ func RunArtifactUpsertConformance(t *testing.T, mk ExternalObjectScopeFactory) {
 	if !ok {
 		t.Fatal("NewBranchArtifact refused the fixture branch")
 	}
+	// The host sink keys a branch on its repository's registry row.
+	branch.DedupKey = domain.BranchDedupKey("repo-octo-api", branch.ExternalID)
 	kinds := []struct {
 		name string
 		a    domain.Artifact
@@ -37,7 +39,7 @@ func RunArtifactUpsertConformance(t *testing.T, mk ExternalObjectScopeFactory) {
 		},
 		{
 			name:     "review",
-			a:        domain.NewReviewArtifact("octo/api", 7, "abc123", ""),
+			a:        domain.NewReviewArtifact("octo/api", 7, "PR_kw7", "abc123", ""),
 			replaced: `{"head_sha":"def456"}`,
 		},
 		{

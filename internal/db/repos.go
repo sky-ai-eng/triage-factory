@@ -29,16 +29,15 @@ var (
 	//     answers for the id under another name, retired (RetireSystem) when it
 	//     does not answer at all, and either one frees the name.
 	//   - A durable record keyed on that name: an active entity
-	//     ("owner/repo#18") or an artifact dedup key. Entity keys and artifact
-	//     dedup keys spell the slug themselves, so a name can be spoken for by
-	//     records alone. A retired row's entities are closed, and a closed
-	//     entity holds no key, but its artifacts keep their dedup keys.
+	//     ("owner/repo#18"). Entity keys spell the slug themselves, so a name
+	//     can be spoken for by records alone. A retired row's entities are
+	//     closed, and a closed entity holds no key. An artifact's dedup key
+	//     names no repository, so no artifact speaks for a name.
 	//
 	// Neither is resolved by deleting the occupant. The first would drop a
 	// repository row that holds a provider id, a team's tracking decision or a
 	// run's record of a checkout; the second would destroy durable work — an
-	// entity carries tasks, conversations and memory, and an artifact is the
-	// audit record of a real external object.
+	// entity carries tasks, conversations and memory.
 	//
 	// The one occupant a rename does absorb is a bare row (no provider id, no
 	// tracking, no ledger row) that a GitHub entity create minted under the
@@ -515,12 +514,10 @@ type RepositoryStore interface {
 	// rows) and the keys the entities spell ("owner/repo#18", which the
 	// repository now under the name has pull requests of its own under).
 	// Nothing else moves: the row keeps its id, name and provider id, its
-	// tracking rows, worktree ledger rows, events, artifacts and tasks.
-	//
-	// TODO(TFAC-1163): the retired row's pull request, review and branch
-	// artifacts keep dedup keys that spell the name, so the repository now
-	// under it upserts its own PR #N or branch onto them, and a rename onto the
-	// name can collide with them. Keying those artifacts on ids frees them too.
+	// tracking rows, worktree ledger rows, events, artifacts and tasks. Its
+	// pull request, review and branch artifacts are keyed on ids — a pull
+	// request's node id, the row's own id — so the repository now under the
+	// name records its own under keys of its own.
 	//
 	// The row is matched on (source, host, external_id) and re-checked under a
 	// lock to still be stored under held's slug and not retired, so a candidate
@@ -542,10 +539,13 @@ type RepositoryStore interface {
 	// Everything it rewrites belongs to that host: the repository row is
 	// matched on (source, host, external_id), entities are the row's own (by
 	// repository_id, so a retired row that shares the old slug keeps its
-	// history), artifacts and audit-ledger rows only where their scope is
-	// the host (with a link or without one), placement pins only on the host,
-	// and a stored link only when it is on the host (domain.RewriteRepoURL).
-	// A repository on another host with the same name or id is never touched.
+	// history), and so are the pull request, review and branch artifacts,
+	// found by the ids their dedup keys carry, whose targets move and whose
+	// keys do not; comment artifacts and audit-ledger rows move only where
+	// their scope is the host (with a link or without one), placement pins
+	// only on the host, and a stored link only when it is on the host
+	// (domain.RewriteRepoURL). A repository on another host with the same name
+	// or id is never touched.
 	//
 	// Detection happens here, not in the caller: the method re-reads the
 	// repository row under a lock (SELECT … FOR UPDATE in Postgres; SQLite's
@@ -567,11 +567,12 @@ type RepositoryStore interface {
 	// A retired row carrying the id is restored: the provider has answered for
 	// it, so it takes the slug it was observed under and clears retired_at, in
 	// the same transaction, under the same occupant rules as a rename
-	// (Restored, and Renamed too when the slug moved). Only its own entities
-	// move with it. The records keyed by the slug alone — artifacts, placement
-	// pins, audit-ledger pointers — stay where they are, because the name it
-	// was retired under is no longer its own, and whatever answers to it now
-	// may be another repository's.
+	// (Restored, and Renamed too when the slug moved). Only its own entities,
+	// and the artifacts keyed on its ids, move with it. The records matched by
+	// the slug alone — comment artifacts, placement pins, audit-ledger
+	// pointers — stay where they are, because the name it was retired under is
+	// no longer its own, and whatever answers to it now may be another
+	// repository's.
 	//
 	// The occupant of the target slug is a row that holds it: a retired row
 	// under the same slug is history, not an occupant. One occupant is
@@ -587,7 +588,7 @@ type RepositoryStore interface {
 	// Two states are refused instead, because writing through either would
 	// destroy a row rather than move one: ErrRepoSlugOccupied when anything
 	// else already answers to the target slug — another repository row, or a
-	// durable entity/artifact keyed on that name — and ErrRepoIdentityAmbiguous
+	// durable entity keyed on that name — and ErrRepoIdentityAmbiguous
 	// when more than one row claims the id. Both are terminal for the attempt,
 	// and a caller that retries them will fail identically until whatever
 	// holds the name is gone: renamed or retired once it is resolved by its own

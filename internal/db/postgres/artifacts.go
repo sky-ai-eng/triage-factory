@@ -296,22 +296,28 @@ func (s *artifactStore) ListByConversationSystem(ctx context.Context, orgID, con
 	return scanArtifactRows(rows)
 }
 
-// ListPendingReviewsByTargetSystem runs on the admin pool (BYPASSRLS) for the
-// PR coherence feed — a background eventbus subscriber with no JWT-claims
+// ListPendingReviewsByPullRequestSystem runs on the admin pool (BYPASSRLS) for
+// the PR coherence feed — a background eventbus subscriber with no JWT-claims
 // context that must see every team's pending review drafts anchored to the PR
 // (the head-SHA change is org-wide, not team-scoped). Filters to pending review
-// drafts on the given PR target on scope's host. org_id stays in the WHERE
-// clause as defense in depth.
-func (s *artifactStore) ListPendingReviewsByTargetSystem(ctx context.Context, orgID, scope, target string) ([]domain.Artifact, error) {
+// drafts keyed on the given PR's node id on scope's host. The key prefix is
+// compared with left() rather than LIKE: a node id may hold '_', which LIKE
+// reads as a wildcard. org_id stays in the WHERE clause as defense in depth.
+func (s *artifactStore) ListPendingReviewsByPullRequestSystem(ctx context.Context, orgID, scope, prNodeID string) ([]domain.Artifact, error) {
 	if err := db.RequireExternalObjectScope(scope); err != nil {
 		return nil, err
+	}
+	prefix := domain.ReviewDedupKeyPrefix(prNodeID)
+	if prefix == "" {
+		return nil, nil
 	}
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT `+pgArtifactColumns+`
 		FROM artifacts
-		WHERE org_id = $1 AND kind = $2 AND state = $3 AND scope = $4 AND target = $5
+		WHERE org_id = $1 AND provider = $2 AND kind = $3 AND state = $4 AND scope = $5
+		  AND left(dedup_key, length($6::text)) = $6::text
 		ORDER BY created_at DESC, id DESC
-	`, orgID, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, scope, target)
+	`, orgID, domain.ArtifactProviderGitHub, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, scope, prefix)
 	if err != nil {
 		return nil, err
 	}

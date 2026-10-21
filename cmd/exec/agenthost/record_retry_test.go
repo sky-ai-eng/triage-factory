@@ -422,8 +422,11 @@ func TestRelayedRecords_RetriedRecordStaysAheadOfLaterOnes(t *testing.T) {
 
 // pushRelayServer is a RelayServer whose git gate records a relayed push the
 // way the executor's does: through UpsertArtifact, as a branch artifact with
-// its ledger row composed in.
-func pushRelayServer(stores db.Stores, info ConversationInfo) *RelayServer {
+// its ledger row composed in. The pushed repository, octo/repo, has its
+// registry row, as a run's checkout does.
+func pushRelayServer(t *testing.T, stores db.Stores, info ConversationInfo) *RelayServer {
+	t.Helper()
+	registerRepo(t, stores, "octo", "repo", "1")
 	host := NewLocal(stores, info)
 	git := &agentproc.GitProxyConfig{
 		RecordPush: func(ctx context.Context, push gitproxy.PushedRef) {
@@ -459,7 +462,7 @@ func TestRelayedPush_TransientArtifactFailureDefersTheRecord(t *testing.T) {
 	artifactFaults := &faults{fail: -1}
 	stores := base
 	stores.Artifacts = flakyArtifacts{ArtifactStore: base.Artifacts, f: artifactFaults}
-	s := pushRelayServer(stores, info)
+	s := pushRelayServer(t, stores, info)
 
 	key := uuid.NewString()
 	if err := s.DispatchRecord(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordPush, key, pushArgs(t)); !errors.Is(err, errRecordDeferred) {
@@ -496,7 +499,7 @@ func TestRelayedPush_RefusedArtifactIsCountedOnce(t *testing.T) {
 	reader := installTestAuditDrops(t)
 	conn, stores, info := newCaptureStoresConn(t, true)
 	refuseArtifactWrites(t, conn)
-	s := pushRelayServer(stores, info)
+	s := pushRelayServer(t, stores, info)
 
 	if err := relayRecord(t, s, agentproc.RelayNamespaceCore, agentproc.OpRecordPush, pushArgs(t)); err != nil {
 		t.Fatalf("push with a refused artifact = %v; want it acknowledged", err)

@@ -985,6 +985,74 @@ func TestMigrate_ProviderScopesRecordJiraIssueIDs(t *testing.T) {
 	mustExec(t, database, `UPDATE entities SET external_id = '10002' WHERE id = 'e-no-id'`)
 }
 
+// Pull request, review and branch artifacts are re-keyed on ids: a pull
+// request on the node id its row's details carry, a review on its pull
+// request's node id, read off the pull request's artifact or its entity, and a
+// branch on its repository's registry row, names compared case-insensitively.
+// A row with nothing to resolve keeps its key, and one pull request recorded
+// under two names of its repository merges onto the older row.
+func TestMigrate_ProviderScopesKeyArtifactsOnIDs(t *testing.T) {
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	mustExec(t, database, `INSERT INTO repositories (id, owner, repo, source) VALUES ('repo-api', 'octo', 'api', 'github')`)
+	// A polled pull request, whose entity takes its node id from its snapshot.
+	mustExec(t, database, `INSERT INTO entities (id, source, source_id, kind, snapshot_json)
+		VALUES ('e-pr-9', 'github', 'octo/api#9', 'pr', '{"node_id":"PR_9","number":9}')`)
+	artifact := func(id, provider, kind, target, externalID, key, details, createdAt string) {
+		t.Helper()
+		mustExec(t, database, `
+			INSERT INTO artifacts (id, team_id, provider, kind, target, external_id, state, dedup_key, details_json, created_at)
+			VALUES (?, 'team-1', ?, ?, ?, NULLIF(?, ''), 'open', ?, NULLIF(?, ''), ?)`,
+			id, provider, kind, target, externalID, key, details, createdAt)
+	}
+	const day1, day2 = "2026-01-01 00:00:00", "2026-02-01 00:00:00"
+	artifact("pr-3", "github", "pull_request", "octo/api#3", "3", "github:pull_request:octo/api#3", `{"node_id":"PR_3"}`, day1)
+	// One pull request recorded under its repository's old name and its new.
+	artifact("pr-7-old", "github", "pull_request", "octo/old-api#7", "7", "github:pull_request:octo/old-api#7", `{"node_id":"PR_7"}`, day1)
+	artifact("pr-7-new", "github", "pull_request", "octo/api#7", "7", "github:pull_request:octo/api#7", `{"node_id":"PR_7"}`, day2)
+	artifact("pr-5", "github", "pull_request", "octo/api#5", "5", "github:pull_request:octo/api#5", `{"head_branch":"x"}`, day1)
+	artifact("rv-3", "github", "review", "Octo/API#3", "", "github:review:Octo/API#3:conv-a", `{"number":3}`, day1)
+	artifact("rv-9", "github", "review", "octo/api#9", "", "github:review:octo/api#9:conv-b", `{"number":9}`, day1)
+	artifact("rv-11", "github", "review", "octo/api#11", "", "github:review:octo/api#11:conv-c", `{"number":11}`, day1)
+	artifact("br-api", "git", "branch", "Octo/API", "refs/heads/octo/api-fix", "git:branch:Octo/API:refs/heads/octo/api-fix", `{"sha":"a"}`, day1)
+	artifact("br-gone", "git", "branch", "octo/gone", "refs/heads/fix", "git:branch:octo/gone:refs/heads/fix", `{"sha":"b"}`, day1)
+
+	migrateProviderScopes(t, database)
+
+	for id, want := range map[string]string{
+		"pr-3":     "github:pull_request:PR_3",
+		"pr-7-old": "github:pull_request:PR_7",
+		"pr-5":     "github:pull_request:octo/api#5",
+		"rv-3":     "github:review:PR_3:conv-a",
+		"rv-9":     "github:review:PR_9:conv-b",
+		"rv-11":    "github:review:octo/api#11:conv-c",
+		"br-api":   "git:branch:repo-api:refs/heads/octo/api-fix",
+		"br-gone":  "git:branch:octo/gone:refs/heads/fix",
+	} {
+		if got := queryString(t, database, `SELECT dedup_key FROM artifacts WHERE id = ?`, id); got != want {
+			t.Errorf("%s dedup_key = %q, want %q", id, got, want)
+		}
+	}
+	if n := queryInt(t, database, `SELECT COUNT(*) FROM artifacts WHERE id = 'pr-7-new'`); n != 0 {
+		t.Error("pr-7-new survived; one pull request recorded under two names merges onto the older row")
+	}
+	for id, want := range map[string]string{"pr-3": "PR_3", "pr-7-old": "PR_7"} {
+		if got := queryString(t, database, `SELECT COALESCE(node_id, '') FROM artifacts WHERE id = ?`, id); got != want {
+			t.Errorf("%s node_id = %q, want %q", id, got, want)
+		}
+	}
+	// The keys are the ones the Go side builds.
+	for id, want := range map[string]string{
+		"pr-3":   domain.PullRequestDedupKey("PR_3"),
+		"rv-3":   domain.ReviewDedupKey("PR_3", "conv-a"),
+		"br-api": domain.BranchDedupKey("repo-api", "refs/heads/octo/api-fix"),
+	} {
+		if got := queryString(t, database, `SELECT dedup_key FROM artifacts WHERE id = ?`, id); got != want {
+			t.Errorf("%s dedup_key = %q, want the Go key %q", id, got, want)
+		}
+	}
+}
+
 func seedProviderScopesOrg(t *testing.T, database *sql.DB) {
 	t.Helper()
 	mustExec(t, database, `INSERT INTO orgs (id, slug, name) VALUES (?, 'local', 'Local')`, runmode.LocalDefaultOrgID)

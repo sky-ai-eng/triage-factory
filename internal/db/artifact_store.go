@@ -148,10 +148,12 @@ type ArtifactStore interface {
 	// Backs the conversation detail surface (A·6).
 	ListByConversation(ctx context.Context, orgID, conversationID string) ([]domain.Artifact, error)
 
-	// ListPendingReviewsByTargetSystem returns every PENDING review artifact
-	// (Kind=review, State=pending) whose Target is the given PR resource key
-	// (owner/repo#number) in scope (the PR's GitHub host), across every team
-	// in the org, newest first. It backs
+	// ListPendingReviewsByPullRequestSystem returns every PENDING review
+	// artifact (Kind=review, State=pending) keyed on the pull request whose
+	// GraphQL node id is prNodeID (domain.ReviewDedupKeyPrefix) in scope (the
+	// PR's GitHub host), across every team in the org, newest first. The match
+	// is on the key, so a draft is found whatever name its target spells. An
+	// empty prNodeID matches nothing. It backs
 	// the PR coherence feed's freshness gate: on a head advance, the in-flight
 	// review drafts anchored to that PR say which conversations already recorded
 	// the new head and so are not behind it. "Pending" — not yet submitted or
@@ -165,7 +167,7 @@ type ArtifactStore interface {
 	// the PR (the event is org-wide, not team-scoped). org_id stays bound in the
 	// WHERE clause as defense in depth. Identical to a plain org read in SQLite
 	// (single-tenant, no RLS).
-	ListPendingReviewsByTargetSystem(ctx context.Context, orgID, scope, target string) ([]domain.Artifact, error)
+	ListPendingReviewsByPullRequestSystem(ctx context.Context, orgID, scope, prNodeID string) ([]domain.Artifact, error)
 
 	// PresentDedupKeysSystem returns the subset of dedupKeys under which an
 	// artifact exists in scope, as a set. The tracker reads it to tell a

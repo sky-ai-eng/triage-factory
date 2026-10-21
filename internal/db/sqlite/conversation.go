@@ -1169,8 +1169,10 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 		       t.entity_id = ?
 		       OR EXISTS (
 		           SELECT 1 FROM artifacts a
-		           WHERE a.conversation_id = r.id AND a.kind = ? AND a.state = ? AND a.target = ?
-		             AND a.scope = (SELECT pe.scope FROM entities pe WHERE pe.id = ?)
+		           JOIN entities pe ON pe.id = ?
+		           WHERE a.conversation_id = r.id AND a.kind = ? AND a.state = ? AND a.scope = pe.scope
+		             AND pe.external_id IS NOT NULL AND pe.external_id <> ''
+		             AND substr(a.dedup_key, 1, length(?) + length(pe.external_id) + 1) = ? || pe.external_id || ':'
 		       )
 		       OR EXISTS (
 		           SELECT 1
@@ -1193,7 +1195,7 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 		      WHERE te.task_id = r.task_id AND te.event_id = ? AND te.kind = 'injected'
 		  )
 		ORDER BY r.started_at ASC, r.id ASC
-	`, query.EntityID, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, query.ReviewTarget, query.EntityID, query.EntityID, query.BaseRepo, query.PRRef, query.BranchRef, query.BaseRepo, query.HeadRepo, query.EventID)
+	`, query.EntityID, query.EntityID, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, domain.ReviewDedupKeyHead, domain.ReviewDedupKeyHead, query.EntityID, query.BaseRepo, query.PRRef, query.BranchRef, query.BaseRepo, query.HeadRepo, query.EventID)
 	if err != nil {
 		return nil, err
 	}

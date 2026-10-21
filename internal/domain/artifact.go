@@ -120,9 +120,8 @@ const (
 	ArtifactStateBranchPushed  = "pushed"
 	ArtifactStateBranchDeleted = "deleted"
 
-	// pull_request: 'pending' is intent-only (not yet on GitHub — the
-	// branch-anchored PR before approval); the rest mirror GitHub's PR
-	// lifecycle.
+	// pull_request: 'pending' is intent-only (not yet on GitHub); the rest
+	// mirror GitHub's PR lifecycle.
 	ArtifactStatePRPending = "pending"
 	ArtifactStatePRDraft   = "draft"
 	ArtifactStatePROpen    = "open"
@@ -223,47 +222,43 @@ func ArtifactProviders() []string {
 //
 // The key is ':'-delimited, so no segment may itself contain a ':' —
 // ("a:b", "") and ("a", "b") would otherwise collapse to the same
-// "...:a:b". Today's providers and GitHub/Jira identifiers (owner/repo,
-// refs/heads/x, a Jira issue key) carry no colons, so no current writer is at risk;
-// a future provider passing something URL-like must encode it first.
+// "...:a:b". Today's resources (GitHub node ids, registry row ids, Linear
+// UUIDs, JiraIssueResource, refs/heads/x) carry no colons; a future provider
+// passing something URL-like must encode it first.
 //
 // resource and anchor are the caller's choice of *stable* dedup
 // coordinates — they need NOT equal the row's Artifact.Target /
-// Artifact.ExternalID, which may evolve over the artifact's life. Pick
-// values that don't change across the transitions the artifact undergoes:
+// Artifact.ExternalID, which may evolve over the artifact's life. A resource
+// is an id, never a name: a name changes with a rename, and a name GitHub or
+// Jira has freed can be given to another object, whose artifacts would then
+// land on the old one's rows.
 //
-//   - resource: the stable resource key — 'owner/repo' for a branch or a
-//     branch-anchored PR, 'owner/repo#123' for a PR keyed on its number,
-//     JiraIssueResource (the site and the issue id) for anything on a Jira
-//     issue, and the issue's UUID for anything on a Linear issue. Never a
-//     Jira key or a Linear identifier: a move or a key rename changes it, and
-//     another site or workspace in the same org can have an issue under the
-//     same one. The key is unique only within the row's Scope, so two
-//     sites' or workspaces' artifacts never share a row; a Jira resource
-//     carries the site as well, which is the shape stored keys hold. An
-//     entity rename moves the row's Target without touching its key
-//     (EntityArtifactResource).
+//   - resource: the provider's stable id for the object the artifact is
+//     about, or the registry row id where the object has none — the pull
+//     request's GraphQL node id for a PR and for a review of it, the
+//     repository's registry row id for a branch, JiraIssueResource (the site
+//     and the issue id) for anything on a Jira issue, and the issue's UUID for
+//     anything on a Linear issue. The key is unique only within the row's
+//     Scope, so two hosts', sites' or workspaces' artifacts never share a
+//     row; a Jira resource carries the site as well, which is the shape stored
+//     keys hold. A rename moves the row's Target without touching its key.
 //   - anchor: an optional stable sub-discriminator appended when resource
-//     alone isn't unique — a branch ref for a branch, a PR whose number
-//     isn't known yet (see below), or a comment's id on its issue. Empty when
+//     alone isn't unique — a branch's ref in its repository, a comment's id
+//     on its issue, the conversation that owns a review draft. Empty when
 //     resource is already unique (an issue itself).
 //
 // Examples:
 //
-//	ArtifactDedupKey("github", "pull_request", "owner/repo#123", "")          => "github:pull_request:owner/repo#123"
-//	ArtifactDedupKey("git",    "branch",       "owner/repo", "refs/heads/x")  => "git:branch:owner/repo:refs/heads/x"
-//	ArtifactDedupKey("jira",   "issue",        JiraIssueResource(site, "10042"), "")         => "jira:issue:https%3A%2F%2Facme.atlassian.net/10042"
-//	ArtifactDedupKey("jira",   "comment",      JiraIssueResource(site, "10042"), "20311")    => "jira:comment:https%3A%2F%2Facme.atlassian.net/10042:20311"
-//	ArtifactDedupKey("linear", "comment",      "<issue uuid>", "<comment id>") => "linear:comment:<issue uuid>:<comment id>"
+//	ArtifactDedupKey("github", "pull_request", "<PR node id>", "")                         => "github:pull_request:<PR node id>"
+//	ArtifactDedupKey("github", "review",       "<PR node id>", "<conversation id>")        => "github:review:<PR node id>:<conversation id>"
+//	ArtifactDedupKey("git",    "branch",       "<repository id>", "refs/heads/x")          => "git:branch:<repository id>:refs/heads/x"
+//	ArtifactDedupKey("jira",   "issue",        JiraIssueResource(site, "10042"), "")      => "jira:issue:https%3A%2F%2Facme.atlassian.net/10042"
+//	ArtifactDedupKey("jira",   "comment",      JiraIssueResource(site, "10042"), "20311") => "jira:comment:https%3A%2F%2Facme.atlassian.net/10042:20311"
+//	ArtifactDedupKey("linear", "comment",      "<issue uuid>", "<comment id>")             => "linear:comment:<issue uuid>:<comment id>"
 //
-// Pending→real PR — why resource/anchor are NOT the struct fields: a
-// 'pending' PR has no number yet, so the writer keys it on the branch ref
-// it will open from: ArtifactDedupKey("github", "pull_request",
-// "owner/repo", "refs/heads/x"). When the real PR is created the writer
-// keys on the same repo+ref, so the row upserts in place — Artifact.Target
-// migrates owner/repo → owner/repo#123 and Artifact.ExternalID fills in,
-// but the dedup key stays put. Keying the real PR on its number instead
-// would mint a second row.
+// Some stored pull request, review and branch rows carry a key that leads
+// with owner/repo instead: rows whose repository no registry row identified.
+// Nothing writes that shape.
 func ArtifactDedupKey(provider, kind, resource, anchor string) string {
 	key := provider + ":" + kind + ":" + resource
 	if anchor != "" {
@@ -317,19 +312,16 @@ func EntityArtifactResource(source, scope, externalID string) string {
 	return externalID
 }
 
-// ArtifactEntityIdentity reads the identity of the entity an artifact is about:
-// the scope (when the artifact names one) and the provider id. A Jira or Linear
-// artifact carries it in its dedup key. A GitHub pull request's artifact is
-// keyed on its display key and carries the pull request's node id in NodeID.
-// ok=false for an artifact that names none — any other GitHub artifact, a
-// pull request whose node id no writer learned, a Slack artifact, or a Jira
-// artifact keyed on an issue key.
+// ArtifactEntityIdentity reads the identity of the entity an artifact is about
+// from its dedup key: the scope (when the key names one) and the provider id.
+// A Jira or Linear artifact's key names its issue; a GitHub pull request's or
+// review's names the pull request's node id. ok=false for an artifact that
+// names none — a branch, a GitHub comment, a Slack artifact, or a stored row
+// whose key still spells a name (a Jira issue key, a repository's owner/repo).
 func ArtifactEntityIdentity(a Artifact) (scope, externalID string, ok bool) {
 	if a.Provider == ArtifactProviderGitHub {
-		if a.Kind != ArtifactKindPullRequest {
-			return "", "", false
-		}
-		return "", a.NodeID, a.NodeID != ""
+		nodeID, ok := ArtifactPullRequestNodeID(a)
+		return "", nodeID, ok
 	}
 	p, rest, found := strings.Cut(a.DedupKey, ":")
 	if !found || p != a.Provider {
@@ -347,6 +339,26 @@ func ArtifactEntityIdentity(a Artifact) (scope, externalID string, ok bool) {
 		return "", resource, resource != ""
 	}
 	return "", "", false
+}
+
+// ArtifactPullRequestNodeID returns the GraphQL node id of the pull request a
+// GitHub pull_request or review artifact is keyed on (PullRequestDedupKey,
+// ReviewDedupKey). ok=false for any other artifact, and for a stored row whose
+// key still leads with owner/repo#N: a node id is base64, which never holds a
+// '#'.
+func ArtifactPullRequestNodeID(a Artifact) (string, bool) {
+	if a.Provider != ArtifactProviderGitHub || (a.Kind != ArtifactKindPullRequest && a.Kind != ArtifactKindReview) {
+		return "", false
+	}
+	rest, found := strings.CutPrefix(a.DedupKey, ArtifactProviderGitHub+":"+a.Kind+":")
+	if !found {
+		return "", false
+	}
+	nodeID, _, _ := strings.Cut(rest, ":")
+	if nodeID == "" || strings.Contains(nodeID, "#") {
+		return "", false
+	}
+	return nodeID, true
 }
 
 // ArtifactKeyHasResource reports whether key, as ArtifactDedupKey builds it,
