@@ -59,6 +59,14 @@ func (fakeAppResolver) Resolve(_ context.Context, _ string) (jira.OAuthApp, jira
 	return jira.OAuthApp{ClientID: "c", ClientSecret: "s"}, jira.SourceOrgOverride, nil
 }
 
+// tierAppResolver resolves an app from the tier source names, which a test
+// changes to stand for an admin changing the org's app.
+type tierAppResolver struct{ source jira.OAuthAppSource }
+
+func (r *tierAppResolver) Resolve(_ context.Context, _ string) (jira.OAuthApp, jira.OAuthAppSource, error) {
+	return jira.OAuthApp{ClientID: "c", ClientSecret: "s"}, r.source, nil
+}
+
 // fakeSecrets is an in-memory per-user secret bag exercising GetUserSystem +
 // PutUserSystem (the system doors the cache uses). Embeds the interface so the
 // unexercised methods compile-satisfy.
@@ -148,15 +156,15 @@ func TestTokenCache_RotationWriteBack(t *testing.T) {
 	cache.now = now
 
 	// First mint: refreshes ref-0 → access acc-1 / rotate ref-1, stored back.
-	cloudID, access, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
+	tok, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
 	if err != nil {
 		t.Fatalf("first mint: %v", err)
 	}
-	if cloudID != "cloud-1" {
-		t.Errorf("cloudID = %q, want cloud-1", cloudID)
+	if tok.CloudID != "cloud-1" {
+		t.Errorf("cloudID = %q, want cloud-1", tok.CloudID)
 	}
-	if access != "acc-1" {
-		t.Errorf("access = %q, want acc-1", access)
+	if tok.AccessToken != "acc-1" {
+		t.Errorf("access = %q, want acc-1", tok.AccessToken)
 	}
 	if got := storedRefresh(t, secrets); got != "ref-1" {
 		t.Fatalf("stored refresh after first mint = %q, want ref-1 (write-back failed)", got)
@@ -165,12 +173,12 @@ func TestTokenCache_RotationWriteBack(t *testing.T) {
 	// Advance the clock past the first token's expiry, then mint again. The
 	// cache must read the ROTATED token (ref-1) and refresh with it.
 	clock = clock.Add(2 * time.Hour)
-	_, access2, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
+	tok2, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
 	if err != nil {
 		t.Fatalf("second mint: %v", err)
 	}
-	if access2 != "acc-2" {
-		t.Errorf("second access = %q, want acc-2", access2)
+	if tok2.AccessToken != "acc-2" {
+		t.Errorf("second access = %q, want acc-2", tok2.AccessToken)
 	}
 	if got := storedRefresh(t, secrets); got != "ref-2" {
 		t.Errorf("stored refresh after second mint = %q, want ref-2", got)
@@ -195,16 +203,51 @@ func TestTokenCache_CachesWithinExpiry(t *testing.T) {
 	cache := newTokenCache(ref, fakeAppResolver{}, secrets)
 	cache.now = now
 
-	if _, _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err != nil {
+	if _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err != nil {
 		t.Fatalf("first: %v", err)
 	}
 	// Advance only a little — still well within the hour.
 	clock = clock.Add(5 * time.Minute)
-	if _, access, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err != nil || access != "acc-1" {
-		t.Fatalf("second (cached) = %q, %v; want acc-1, nil", access, err)
+	if tok, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err != nil || tok.AccessToken != "acc-1" {
+		t.Fatalf("second (cached) = %q, %v; want acc-1, nil", tok.AccessToken, err)
 	}
 	if ref.n != 1 {
 		t.Errorf("refresh called %d times, want 1 (second read should be cached)", ref.n)
+	}
+}
+
+// TestTokenCache_ReportsTheAppTheTokenWasMintedUnder: a token reports the app
+// that minted it, whose quota its requests spend. After the org's app changes,
+// the cached token still reports the app it was minted under, and the token
+// minted once it expires reports the new one.
+func TestTokenCache_ReportsTheAppTheTokenWasMintedUnder(t *testing.T) {
+	secrets := newFakeSecrets()
+	seedOAuthEnvelope(t, secrets, "ref-0")
+
+	clock := time.Date(2026, 6, 16, 0, 0, 0, 0, time.UTC)
+	now := func() time.Time { return clock }
+	apps := &tierAppResolver{source: jira.SourceDeployment}
+	cache := newTokenCache(&fakeRefresher{expires: time.Hour, now: now}, apps, secrets)
+	cache.now = now
+
+	tok, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
+	if err != nil || tok.App != jira.SourceDeployment {
+		t.Fatalf("first mint = (app %d, %v), want the deployment app", tok.App, err)
+	}
+
+	apps.source = jira.SourceOrgOverride
+	clock = clock.Add(5 * time.Minute)
+	tok, err = cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
+	if err != nil || tok.AccessToken != "acc-1" || tok.App != jira.SourceDeployment {
+		t.Fatalf("cached read after the app changed = (%q, app %d, %v), want acc-1 minted under the deployment app",
+			tok.AccessToken, tok.App, err)
+	}
+
+	clock = clock.Add(2 * time.Hour)
+	tok, err = cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
+	if err != nil || tok.AccessToken != "acc-2" || tok.App != jira.SourceOrgOverride {
+		t.Fatalf("mint after expiry = (%q, app %d, %v), want acc-2 minted under the org's app",
+			tok.AccessToken, tok.App, err)
 	}
 }
 
@@ -221,15 +264,15 @@ func TestTokenCache_Invalidate(t *testing.T) {
 	cache := newTokenCache(ref, fakeAppResolver{}, secrets)
 	cache.now = now
 
-	if _, _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err != nil {
+	if _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err != nil {
 		t.Fatalf("first: %v", err)
 	}
 	cache.Invalidate(cOrg, cUser, cHost)
 
 	// Still within the hour, but the cache was invalidated — must refresh again.
 	clock = clock.Add(time.Minute)
-	if _, access, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err != nil || access != "acc-2" {
-		t.Fatalf("post-invalidate read = %q, %v; want acc-2, nil", access, err)
+	if tok, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err != nil || tok.AccessToken != "acc-2" {
+		t.Fatalf("post-invalidate read = %q, %v; want acc-2, nil", tok.AccessToken, err)
 	}
 	if ref.n != 2 {
 		t.Errorf("refresh called %d times, want 2 (invalidate should force a fresh mint)", ref.n)
@@ -240,7 +283,7 @@ func TestTokenCache_Invalidate(t *testing.T) {
 func TestTokenCache_NoCredential(t *testing.T) {
 	secrets := newFakeSecrets()
 	cache := newTokenCache(&fakeRefresher{}, fakeAppResolver{}, secrets)
-	if _, _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err == nil {
+	if _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err == nil {
 		t.Fatal("want error for missing credential, got nil")
 	}
 }
@@ -253,7 +296,7 @@ func TestTokenCache_WrongMethod(t *testing.T) {
 	_ = secrets.PutUserSystem(context.Background(), cOrg, cUser, jira.UserTokenKey(cHost), env, "")
 
 	cache := newTokenCache(&fakeRefresher{}, fakeAppResolver{}, secrets)
-	if _, _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err == nil {
+	if _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err == nil {
 		t.Fatal("want error for non-oauth credential, got nil")
 	}
 }
@@ -318,7 +361,7 @@ func TestTokenCache_RefusedGrantRemovesTheCredential(t *testing.T) {
 	}}
 	cache := newTokenCache(endpoint.minter(t), fakeAppResolver{}, secrets)
 
-	_, _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
+	_, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
 	if !errors.Is(err, jira.ErrJiraUserCredentialRefused) || !errors.Is(err, jira.ErrNoJiraUserCredential) {
 		t.Fatalf("err = %v, want ErrJiraUserCredentialRefused, which is ErrNoJiraUserCredential", err)
 	}
@@ -348,12 +391,12 @@ func TestTokenCache_RefusedGrantOfATokenAnotherProcessRotatedRetries(t *testing.
 	}
 	cache := newTokenCache(endpoint.minter(t), fakeAppResolver{}, secrets)
 
-	_, access, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
+	tok, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
 	if err != nil {
 		t.Fatalf("AccessTokenForUser = %v, want the retry with the rotated token to succeed", err)
 	}
-	if access != "acc-2" {
-		t.Errorf("access token = %q, want the retry's acc-2", access)
+	if tok.AccessToken != "acc-2" {
+		t.Errorf("access token = %q, want the retry's acc-2", tok.AccessToken)
 	}
 	if got := endpoint.tokens(); len(got) != 2 || got[1] != "ref-other" {
 		t.Errorf("token requests = %v, want ref-0 then the rotated ref-other", got)
@@ -383,7 +426,7 @@ func TestTokenCache_RefusedAgainAfterASecondRotationAsksToConnectAgain(t *testin
 	}
 	cache := newTokenCache(endpoint.minter(t), fakeAppResolver{}, secrets)
 
-	_, _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
+	_, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
 	if !errors.Is(err, jira.ErrJiraUserCredentialRefused) {
 		t.Fatalf("err = %v, want ErrJiraUserCredentialRefused", err)
 	}
@@ -413,7 +456,7 @@ func TestTokenCache_OtherFailuresKeepTheCredential(t *testing.T) {
 			endpoint := &fakeTokenEndpoint{answer: func(string) (int, string) { return tc.status, tc.body }}
 			cache := newTokenCache(endpoint.minter(t), fakeAppResolver{}, secrets)
 
-			_, _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
+			_, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
 			if err == nil || errors.Is(err, jira.ErrNoJiraUserCredential) {
 				t.Fatalf("err = %v, want a failure that is not a missing credential", err)
 			}

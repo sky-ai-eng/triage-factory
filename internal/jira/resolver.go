@@ -190,9 +190,21 @@ type Resolver interface {
 // host is the canonical org Jira host the credential is keyed under (the same
 // value ForUser already resolved); the implementation reads the stored
 // envelope, mints/refreshes, persists the rotated refresh token, and returns
-// the cloud_id + access token to build a CloudOAuth client.
+// the token to build a CloudOAuth client from.
 type UserAccessTokenSource interface {
-	AccessTokenForUser(ctx context.Context, orgID, userID, host string) (cloudID, accessToken string, err error)
+	AccessTokenForUser(ctx context.Context, orgID, userID, host string) (UserAccessToken, error)
+}
+
+// UserAccessToken is a minted Cloud OAuth access token and what a client is
+// built from it with.
+type UserAccessToken struct {
+	CloudID     string
+	AccessToken string
+	// App is the tier of the Atlassian OAuth app that minted the token.
+	// Atlassian meters the token's hourly quota by that app, so it is the app
+	// the client's quota readings are recorded under (Client.WithOAuthApp),
+	// even when the org's app has changed since the mint.
+	App OAuthAppSource
 }
 
 type resolver struct {
@@ -372,8 +384,9 @@ func (r *resolver) systemSite(ctx context.Context, orgID string) (string, error)
 // likewise propagates rather than silently degrading to the bot.
 //
 // Only a Cloud OAuth client records rate-limit readings (WithCredential): its
-// hourly quota is the OAuth app's, not the user's. An API token or a PAT is
-// metered by the user it belongs to, and a user may not be a metric label.
+// hourly quota is the OAuth app's, not the user's, so it is recorded under the
+// app that minted the token (WithOAuthApp). An API token or a PAT is metered
+// by the user it belongs to, and a user may not be a metric label.
 func (r *resolver) ForUser(ctx context.Context, orgID, userID string) (*Client, error) {
 	orgSet, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
@@ -434,11 +447,12 @@ func (r *resolver) ForUser(ctx context.Context, orgID, userID string) (*Client, 
 		if r.oauth == nil {
 			return nil, fmt.Errorf("resolve jira user credential for org %s user %s: cloud oauth minting not configured", orgID, userID)
 		}
-		cloudID, accessToken, err := r.oauth.AccessTokenForUser(ctx, orgID, userID, host)
+		tok, err := r.oauth.AccessTokenForUser(ctx, orgID, userID, host)
 		if err != nil {
 			return nil, fmt.Errorf("mint jira oauth access token for org %s user %s: %w", orgID, userID, err)
 		}
-		return NewClient(CloudOAuth(cloudID, accessToken)).WithOrg(orgID).WithCredential(AuthMethodCloudOAuth), nil
+		return NewClient(CloudOAuth(tok.CloudID, tok.AccessToken)).WithOrg(orgID).
+			WithCredential(AuthMethodCloudOAuth).WithOAuthApp(tok.App), nil
 	default:
 		// An unknown/empty method is corruption or a forward-version credential
 		// (e.g. a future OAuth method this build predates). Surface it rather than
