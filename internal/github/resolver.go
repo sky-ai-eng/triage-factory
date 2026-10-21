@@ -24,8 +24,8 @@ var ErrNoGitHubCredentials = errors.New("github: no credentials resolved for org
 // ErrAmbiguousInstallation is returned when resolution reaches an App with
 // more than one installation and the call named no account to choose between
 // them, or named one only by a login that more than one live installation
-// answers to. It deliberately does NOT wrap ErrNoGitHubCredentials: the workspace's
-// credential is present and working, and telling a user their GitHub is
+// answers to. It deliberately does NOT wrap ErrNoGitHubCredentials: the
+// workspace's credential is present and working, and telling a user their GitHub is
 // disconnected when the real fault is a caller that didn't say which account it
 // meant sends them to re-authorize something that was never broken.
 //

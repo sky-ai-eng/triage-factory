@@ -276,10 +276,10 @@ func (r *Reconciler) RunOrg(ctx context.Context, orgID string) error {
 	// The installations on the host the resolver mints against, and no others.
 	// grantListerFor resolves the installation's account on that host, by
 	// account id or login, and each names an account within one GitHub
-	// deployment only, so an
-	// installation left on a host the org has moved off would be read through
-	// whichever installation on the current host answers to the same id or
-	// login — and its grant written under the wrong installation id.
+	// deployment only, so an installation left on a host the org has moved off
+	// would be read through whichever installation on the current host answers
+	// to the same id or login — and its grant written under the wrong
+	// installation id.
 	host, err := r.clients.githubHostFor(ctx, orgID)
 	if err != nil {
 		return fmt.Errorf("resolve github host: %w", err)

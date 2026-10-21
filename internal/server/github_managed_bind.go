@@ -727,8 +727,8 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 		// changed underneath it.
 		refusal, account, err = s.completeManagedBind(r, orgID, userID, namedAccount{})
 	case record.Leg == domain.GitHubBindLegInstall:
-		// Records minted before account_id existed carry no id and are held
-		// to the login; they live fifteen minutes.
+		// Stored records can carry no account id; such a record is held to
+		// its login.
 		refusal, account, err = s.completeManagedBind(r, orgID, userID, namedAccountOf(*record))
 	case record.Leg == domain.GitHubBindLegAuthorize:
 		refusal, account, hop, err = s.completeNamedAccountBind(r, orgID, userID, nonce, record.AccountLogin)

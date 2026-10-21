@@ -407,12 +407,17 @@ func listInstallations(ctx context.Context, minter *githubapp.Minter, orgID, bas
 }
 
 // ReconcileInstallations applies a freshly-listed set of installations to
-// the mirror: upsert every listed row, then soft-remove any previously-
-// active installation GitHub no longer reports. activeIDs is the org's
-// pre-backfill active installation_id set; markRemoved is called for each
-// active ID absent from insts. Shared by both store backends so the
-// set-diff lives in one place; each backend supplies its own pool-bound
-// upsert / mark-removed / active-read.
+// the mirror: soft-remove any previously-active installation GitHub no longer
+// reports, then upsert every listed row. activeIDs is the org's pre-backfill
+// active installation_id set; markRemoved is called for each active ID absent
+// from insts. Shared by both store backends so the set-diff lives in one
+// place; each backend supplies its own pool-bound upsert / mark-removed /
+// active-read.
+//
+// The removals go first because a live row holds its account's place in the
+// one-live-installation-per-account key: an account that uninstalled and
+// reinstalled without TF seeing the uninstall is listed under a new
+// installation id, and that row can land only once the old one is removed.
 //
 // It takes insts as given and applies them whole. Whether a listed
 // installation may become a row of this org's is settled before the call —
@@ -427,9 +432,6 @@ func ReconcileInstallations(
 ) error {
 	keep := make(map[string]bool, len(insts))
 	for _, inst := range insts {
-		if err := upsert(inst); err != nil {
-			return err
-		}
 		keep[inst.InstallationID] = true
 	}
 	for _, id := range activeIDs {
@@ -437,6 +439,11 @@ func ReconcileInstallations(
 			if err := markRemoved(id); err != nil {
 				return err
 			}
+		}
+	}
+	for _, inst := range insts {
+		if err := upsert(inst); err != nil {
+			return err
 		}
 	}
 	return nil

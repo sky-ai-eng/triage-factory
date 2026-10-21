@@ -363,8 +363,9 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 	})
 
 	t.Run("SameLoginTwiceOnOneHostIsRefused", func(t *testing.T) {
-		// The host joined the key; it did not loosen it. On one deployment a
-		// login names one account, which holds at most one live installation.
+		// The host joined the key; it did not loosen it. On one deployment an
+		// account holds at most one live installation, and a row that has no
+		// account id yet, as these do, is held to its login.
 		store, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
 		if _, err := store.UpsertInstallation(ctx, install(org, "456", ghes, "acme")); err != nil {
