@@ -17,14 +17,14 @@
 -- owns the repository, an active task on a Jira status or priority change is
 -- keyed on the status's or priority's id rather than its name, GitHub
 -- event-handler predicates name people and teams by GitHub's id, Linear
--- becomes a tracked source, and ten smaller changes ride along: the org GitHub
--- App's unusable state, the claim's source manifest, the retirement of the
--- 'completed' conversation status, node ids on artifacts and audit-ledger rows,
--- the table of rate-limit readings, the principal a deployment-operator grant
--- is bound to, the removal of the unused poller_state table, the GitHub account
--- id on a pending bind and on the org PAT's identity, and the indexes that look
--- a GitHub account up by GitHub's id (an identity binding, and a pull
--- request's author).
+-- becomes a tracked source, and eleven smaller changes ride along: the org
+-- GitHub App's unusable state, the claim's source manifest, the retirement of
+-- the 'completed' conversation status, node ids on artifacts and audit-ledger
+-- rows, the table of rate-limit readings, the principal a deployment-operator
+-- grant is bound to, the removal of the unused poller_state table, the removal
+-- of an event type nothing emits, the GitHub account id on a pending bind and
+-- on the org PAT's identity, and the indexes that look a GitHub account up by
+-- GitHub's id (an identity binding, and a pull request's author).
 --
 -- NO TRANSACTION because rebuilding a table other tables reference needs
 -- foreign keys off, and PRAGMA foreign_keys is a no-op inside a transaction:
@@ -137,6 +137,16 @@ ALTER TABLE operators ADD COLUMN user_id TEXT REFERENCES users(id) ON DELETE CAS
 -- poller_state has no reader or writer. The tracker's snapshot-diff baseline is
 -- entities.snapshot_json.
 DROP TABLE poller_state;
+
+-- Stored databases carry a catalog row for
+-- system:task:delegation_blocked_by_subtasks, which this build does not
+-- declare and nothing emits: a Jira parent with open subtasks gets no task, so
+-- there is no delegation for the event to report blocked. db.SeedEventTypes
+-- only upserts, so the row is deleted here, after the handlers on it. A handler
+-- on it never fired, so no conversation, blueprint run or pending firing
+-- references one, and no event or task carries the type.
+DELETE FROM event_handlers WHERE event_type = 'system:task:delegation_blocked_by_subtasks';
+DELETE FROM events_catalog WHERE id = 'system:task:delegation_blocked_by_subtasks';
 
 -- github_pending_binds.account_id: GitHub's numeric id for the account an
 -- install-leg record was minted for, which the installation GitHub returns has

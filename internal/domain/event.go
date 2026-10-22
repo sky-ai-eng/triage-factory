@@ -167,13 +167,12 @@ const (
 
 // System events
 const (
-	EventSystemPollCompleted                 = "system:poll:completed"
-	EventSystemScoringCompleted              = "system:scoring:completed"
-	EventSystemDelegationCompleted           = "system:delegation:completed"
-	EventSystemDelegationFailed              = "system:delegation:failed"
-	EventSystemTaskAutoSuspended             = "system:task:auto_suspended"   // deprecated, per-task
-	EventSystemPromptAutoSuspended           = "system:prompt:auto_suspended" // per-(entity, prompt) breaker trip
-	EventSystemTaskDelegationBlockedSubtasks = "system:task:delegation_blocked_by_subtasks"
+	EventSystemPollCompleted       = "system:poll:completed"
+	EventSystemScoringCompleted    = "system:scoring:completed"
+	EventSystemDelegationCompleted = "system:delegation:completed"
+	EventSystemDelegationFailed    = "system:delegation:failed"
+	EventSystemTaskAutoSuspended   = "system:task:auto_suspended"   // deprecated, per-task
+	EventSystemPromptAutoSuspended = "system:prompt:auto_suspended" // per-(entity, prompt) breaker trip
 
 	// EventSystemConversationStatus / EventSystemConversationActivity are
 	// EE-observable conversation lifecycle sentinels: bus mirrors of the two
@@ -344,7 +343,6 @@ func AllEventTypes() []EventType {
 		{ID: EventSystemDelegationCompleted, Source: "system", Category: "delegation", Label: "Delegation Complete", Description: "Agent delegation run completed"},
 		{ID: EventSystemDelegationFailed, Source: "system", Category: "delegation", Label: "Delegation Failed", Description: "Agent delegation run failed"},
 		{ID: EventSystemPromptAutoSuspended, Source: "system", Category: "delegation", Label: "Prompt Auto-suspended", Description: "Per-(entity, prompt) breaker tripped after repeated failures"},
-		{ID: EventSystemTaskDelegationBlockedSubtasks, Source: "system", Category: "delegation", Label: "Delegation Blocked: Subtasks", Description: "Auto-delegation skipped because parent has open subtasks"},
 		{ID: EventSystemConversationStatus, Source: "system", Category: "delegation", Label: "Conversation Status", Description: "A delegated conversation's status changed"},
 		{ID: EventSystemConversationActivity, Source: "system", Category: "delegation", Label: "Conversation Activity", Description: "A delegated conversation invoked a tool"},
 		{ID: EventSystemConversationResumed, Source: "system", Category: "delegation", Label: "Conversation Resumed", Description: "A user sent a follow-up to a parked or concluded conversation"},
