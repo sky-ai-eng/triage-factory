@@ -37,7 +37,8 @@ import type { MeResponse, TeamMember } from '../types'
  *
  *  A Linear field stores Linear's user id. A typed name or email is searched
  *  for in the org's Linear workspace when it is added (POST /api/orgs/{org_id}/
- *  linear/users/list) and the people it matches are offered to pick from; a
+ *  linear/users/list) and the people it matches are offered to pick from, an
+ *  integration's app user marked as one and left out of an assignee filter; a
  *  typed id is read directly. A member is offered by the display name their
  *  binding recorded, and a stored id no member holds by the display name
  *  Linear gives it now.
@@ -59,7 +60,13 @@ export default function IdentityListField({
   const { me, loading: meLoading, error: meError } = useMe()
   const { members, loading: membersLoading, error: membersError } = useTeamMembers()
   const labels = labelsForField(fieldName, identityKind)
-  const resolver = useIdentityResolver(identityKind, !meLoading && !membersLoading, value, members)
+  const resolver = useIdentityResolver(
+    identityKind,
+    fieldName,
+    !meLoading && !membersLoading,
+    value,
+    members,
+  )
 
   if (meLoading || membersLoading) {
     return <div className="h-10 rounded-lg bg-tint-2 animate-pulse" />
@@ -186,11 +193,15 @@ interface IdentityResolver {
 
 function useIdentityResolver(
   kind: IdentityKind,
+  fieldName: string,
   ready: boolean,
   value: string[] | undefined,
   members: TeamMember[],
 ): IdentityResolver {
   const orgId = useApiOrgId()
+  // An integration's app user creates issues and comments but is not who an
+  // issue is assigned to, so an assignee filter is offered people only.
+  const offersApps = fieldName !== 'assignee_in'
   // Names by stored id, the GitHub login or the Linear display name: the ones
   // learned in this session, and the ones read for stored ids no member holds.
   // null marks an id the provider did not name, so it is not asked for again.
@@ -216,23 +227,30 @@ function useIdentityResolver(
       }
       const found = await searchLinearUsers(orgId, typed)
       if (!found.ok) return { kind: 'error', error: found.error }
-      if (found.users.length === 0) {
-        return { kind: 'error', error: `No Linear user matches “${typed}”.` }
+      const users = offersApps ? found.users : found.users.filter((u) => !u.app)
+      if (users.length === 0) {
+        return {
+          kind: 'error',
+          error:
+            found.users.length > 0
+              ? `Only Linear apps match “${typed}”, and this filter takes people.`
+              : `No Linear user matches “${typed}”.`,
+        }
       }
       setNames((prev) => ({
         ...prev,
-        ...Object.fromEntries(found.users.map((u) => [u.id, linearUserHandle(u)])),
+        ...Object.fromEntries(users.map((u) => [u.id, linearUserHandle(u)])),
       }))
       return {
         kind: 'choices',
-        choices: found.users.map((u) => ({
+        choices: users.map((u) => ({
           value: u.id,
           label: u.name || u.display_name,
-          detail: u.display_name,
+          detail: u.app ? `${u.display_name} · app` : u.display_name,
         })),
       }
     },
-    [kind, orgId],
+    [kind, orgId, offersApps],
   )
 
   const memberIDs = new Set(members.map((m) => SOURCES[kind].fromMember(m)).filter(Boolean))

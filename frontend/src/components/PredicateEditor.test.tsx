@@ -321,8 +321,15 @@ const linearPeople = [
     display_name: 'grace',
     active: true,
   },
-]
-const [linAda, linAdam, linGrace] = linearPeople.map((u) => u.id)
+  {
+    id: '44444444-4444-4444-8444-444444444444',
+    name: 'Adabot',
+    display_name: 'adabot',
+    active: true,
+    app: true,
+  },
+].map((u) => ({ app: false, ...u }))
+const [linAda, linAdam, linGrace, linBot] = linearPeople.map((u) => u.id)
 const linearTeam = [
   member({
     user_id: 'user-1',
@@ -339,13 +346,17 @@ const linearTeam = [
   }),
 ]
 
-function renderAssigneeField(value: Record<string, string[]> = {}) {
+function renderLinearField(
+  value: Record<string, string[]> = {},
+  field = 'assignee_in',
+  eventType = 'linear:issue:assigned',
+) {
   roster.members = linearTeam
   const fetchMock = vi.fn((url: string, init?: { body?: string }) => {
     const answer = (status: number, body: unknown) =>
       Promise.resolve({ ok: status < 400, status, ...jsonBody(body) })
     if (url.startsWith('/api/event-schemas/')) {
-      return answer(200, { fields: [{ name: 'assignee_in', type: 'string_list' }] })
+      return answer(200, { fields: [{ name: field, type: 'string_list' }] })
     }
     if (url === `${linearUsers}list`) {
       const q = (JSON.parse(init?.body ?? '{}').q as string).toLowerCase()
@@ -359,13 +370,13 @@ function renderAssigneeField(value: Record<string, string[]> = {}) {
   })
   vi.stubGlobal('fetch', fetchMock)
   const onChange = vi.fn()
-  render(<PredicateEditor eventType="linear:issue:assigned" value={value} onChange={onChange} />)
+  render(<PredicateEditor eventType={eventType} value={value} onChange={onChange} />)
   return { fetchMock, onChange }
 }
 
 describe('PredicateEditor Linear identities', () => {
   it('finds a typed name in Linear and writes the id of the person picked', async () => {
-    const { fetchMock, onChange } = renderAssigneeField()
+    const { fetchMock, onChange } = renderLinearField()
 
     const input = await screen.findByRole('combobox')
     fireEvent.change(input, { target: { value: 'ada' } })
@@ -375,6 +386,8 @@ describe('PredicateEditor Linear identities', () => {
     expect(await screen.findByText('Adam Smith')).toBeInTheDocument()
     expect(screen.getByText('Ada Lovelace')).toBeInTheDocument()
     expect(screen.queryByText('Bob')).not.toBeInTheDocument()
+    // An integration's app user is no assignee.
+    expect(screen.queryByText('Adabot')).not.toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledWith(
       `${linearUsers}list`,
       expect.objectContaining({ body: JSON.stringify({ q: 'ada', page_size: 10 }) }),
@@ -386,7 +399,7 @@ describe('PredicateEditor Linear identities', () => {
   })
 
   it('refuses a name no Linear user matches, beside the field', async () => {
-    const { onChange } = renderAssigneeField()
+    const { onChange } = renderLinearField()
 
     const input = await screen.findByRole('combobox')
     fireEvent.change(input, { target: { value: 'zed' } })
@@ -395,8 +408,31 @@ describe('PredicateEditor Linear identities', () => {
     expect(onChange).not.toHaveBeenCalled()
   })
 
+  it('offers an app user, marked, where the field can name one', async () => {
+    const { onChange } = renderLinearField({}, 'creator_in', 'linear:issue:available')
+
+    const input = await screen.findByRole('combobox')
+    fireEvent.change(input, { target: { value: 'adabot' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(await screen.findByText('adabot · app')).toBeInTheDocument()
+    fireEvent.mouseDown(screen.getByText('Adabot'))
+    expect(onChange).toHaveBeenCalledWith({ creator_in: [linBot] })
+  })
+
+  it('says an assignee filter takes people when only apps match', async () => {
+    const { onChange } = renderLinearField()
+
+    const input = await screen.findByRole('combobox')
+    fireEvent.change(input, { target: { value: 'adabot' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Only Linear apps match “adabot”, and this filter takes people.',
+    )
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
   it('reads a typed Linear user id and writes it', async () => {
-    const { onChange } = renderAssigneeField()
+    const { onChange } = renderLinearField()
 
     const input = await screen.findByRole('combobox')
     fireEvent.change(input, { target: { value: linGrace } })
@@ -405,7 +441,7 @@ describe('PredicateEditor Linear identities', () => {
   })
 
   it('names a stored id by member, else by Linear, else by the id', async () => {
-    renderAssigneeField({ assignee_in: ['lin-bob', linAdam, 'alice'] })
+    renderLinearField({ assignee_in: ['lin-bob', linAdam, 'alice'] })
 
     expect(await screen.findByText('Bob · bob')).toBeInTheDocument()
     expect(await screen.findByText('asmith')).toBeInTheDocument()

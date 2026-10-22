@@ -3,12 +3,15 @@ import { apiJSON, apiList, HttpError, httpErrorMessage } from './apiClient'
 /** A person in the org's Linear workspace: Linear's user id, which a Linear
  *  predicate's people filters (assignee_in, creator_in, commenter_in) store,
  *  the full name, and the display name, which Linear keeps unique within a
- *  workspace. */
+ *  workspace. app is true for an integration's app user rather than a person:
+ *  one can create issues and comment, but it is not who an issue is assigned
+ *  to. */
 export interface LinearUser {
   id: string
   name: string
   display_name: string
   active: boolean
+  app: boolean
 }
 
 /** How many people one search offers to pick from. */

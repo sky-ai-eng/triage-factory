@@ -16,6 +16,7 @@ var (
 	linearUserAda   = fixtureUUID("linear-user-ada")
 	linearUserAdam  = fixtureUUID("linear-user-adam")
 	linearUserGrace = fixtureUUID("linear-user-grace")
+	linearUserBot   = fixtureUUID("linear-user-adabot")
 	linearUserGhost = fixtureUUID("linear-user-ghost")
 )
 
@@ -24,7 +25,7 @@ func linearUserPath(id string) string {
 }
 
 // newServerWithLinearUsers is a connected Linear catalog whose workspace has
-// Ada and Adam, and Grace, who is deactivated.
+// Ada and Adam, Grace, who is deactivated, and an integration's app user.
 func newServerWithLinearUsers(t *testing.T) (*Server, *linearCatalogFake) {
 	t.Helper()
 	s, fake := newServerWithLinearCatalog(t, linearFixtureEng)
@@ -32,6 +33,7 @@ func newServerWithLinearUsers(t *testing.T) (*Server, *linearCatalogFake) {
 		linear.User{ID: linearUserAda, Name: "Ada Lovelace", DisplayName: "ada", Email: "ada@example.com", Active: true},
 		linear.User{ID: linearUserAdam, Name: "Adam Smith", DisplayName: "asmith", Email: "adam@example.com", Active: true},
 		linear.User{ID: linearUserGrace, Name: "Grace Hopper", DisplayName: "grace", Email: "grace@example.com"},
+		linear.User{ID: linearUserBot, Name: "Adabot", DisplayName: "adabot", Active: true, App: true},
 	)
 	return s, fake
 }
@@ -45,18 +47,18 @@ func linearUserIDsOf(items []linearUserJSON) string {
 }
 
 // The list matches the typed text against the name, the display name and the
-// email, offers only active users, pages through Linear's cursor, and never
-// returns an email.
+// email, offers only active users, app users among them and marked so, pages
+// through Linear's cursor, and never returns an email.
 func TestLinearUsersList_FindsActiveUsersByNameDisplayNameOrEmail(t *testing.T) {
 	s, _ := newServerWithLinearUsers(t)
 
 	for q, want := range map[string]string{
-		"ADA":              linearUserAda + "," + linearUserAdam,
+		"ADA":              linearUserAda + "," + linearUserAdam + "," + linearUserBot,
 		"asmith":           linearUserAdam,
 		"ada@example":      linearUserAda,
 		"grace":            "",
 		"nobody-like-that": "",
-		"":                 linearUserAda + "," + linearUserAdam,
+		"":                 linearUserAda + "," + linearUserAdam + "," + linearUserBot,
 		"  adam@example  ": linearUserAdam,
 	} {
 		page := decodeList[linearUserJSON](t, doJSON(t, s, http.MethodPost, linearUsersListPath, map[string]any{"q": q}))
@@ -78,8 +80,13 @@ func TestLinearUsersList_FindsActiveUsersByNameDisplayNameOrEmail(t *testing.T) 
 	}
 	second := decodeList[linearUserJSON](t, doJSON(t, s, http.MethodPost, linearUsersListPath,
 		map[string]any{"q": "ada", "page_size": 1, "page_token": first.NextPageToken}))
-	if got := linearUserIDsOf(second.Items); got != linearUserAdam || second.NextPageToken != "" {
-		t.Errorf("page 2 = %s (next %q), want Adam and no token", got, second.NextPageToken)
+	if got := linearUserIDsOf(second.Items); got != linearUserAdam || second.NextPageToken == "" {
+		t.Fatalf("page 2 = %s (next %q), want Adam and a token", got, second.NextPageToken)
+	}
+	third := decodeList[linearUserJSON](t, doJSON(t, s, http.MethodPost, linearUsersListPath,
+		map[string]any{"q": "ada", "page_size": 1, "page_token": second.NextPageToken}))
+	if want := (linearUserJSON{ID: linearUserBot, Name: "Adabot", DisplayName: "adabot", Active: true, App: true}); len(third.Items) != 1 || third.Items[0] != want || third.NextPageToken != "" {
+		t.Errorf("page 3 = %+v (next %q), want [%+v] and no token", third.Items, third.NextPageToken, want)
 	}
 
 	assertOneFault(t, doJSON(t, s, http.MethodPost, linearUsersListPath,

@@ -46,16 +46,20 @@ type linearUserListFilterKey struct {
 // linearUserJSON is one Linear user: the id the people filters store, the full
 // name, and the display name, which Linear keeps unique within a workspace
 // and so tells two people of one name apart. Active is false for a
-// deactivated user, whom only the point read returns.
+// deactivated user, whom only the point read returns. App is true for an
+// integration's app user rather than a person: one can create issues and
+// comment, so creator_in and commenter_in may name it, but it is not who an
+// issue is assigned to.
 type linearUserJSON struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	DisplayName string `json:"display_name"`
 	Active      bool   `json:"active"`
+	App         bool   `json:"app"`
 }
 
 func toLinearUserJSON(u linear.User) linearUserJSON {
-	return linearUserJSON{ID: u.ID, Name: u.Name, DisplayName: u.DisplayName, Active: u.Active}
+	return linearUserJSON{ID: u.ID, Name: u.Name, DisplayName: u.DisplayName, Active: u.Active, App: u.App}
 }
 
 // POST /api/orgs/{org_id}/linear/users/list
