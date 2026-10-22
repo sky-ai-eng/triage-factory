@@ -104,21 +104,56 @@ const rebuiltNoticeCheck = "Check the working tree and git log before building o
 // a move that did not happen is the thing this whole notice must not do.
 const executorChangedSentence = "This run resumed on a different executor. "
 
+// sandboxResumeFacts is what a new sandbox costs the agent: every process it
+// started and everything it wrote to /tmp were in the previous one. It names
+// nothing under /work, because what happened there is the workspace's half
+// of a notice, and only a rebuild has anything to say about it.
+const sandboxResumeFacts = "no process from before is running and /tmp is empty."
+
+// sandboxResumeSentence says the sandbox is new and nothing else.
+const sandboxResumeSentence = "This run resumed in a new sandbox: " + sandboxResumeFacts
+
+// sandboxResumeNotice is the claim-time notice for a resume into the tree the
+// previous engagement left. It says nothing about that tree, so it stays true
+// when a claim that queued it dies unread and a successor that rebuilt the
+// tree delivers it.
+const sandboxResumeNotice = "<system-note>\n" + sandboxResumeSentence + "\n</system-note>"
+
+// resumeFacts are what a rebuilt-workspace notice says about where this
+// engagement runs, as opposed to what its tree holds. Each is said only when
+// it holds: executorChanged when a predecessor demonstrably ran elsewhere,
+// newSandbox when the driver launched this engagement's sandbox and no notice
+// still waiting to be read already says so.
+type resumeFacts struct {
+	executorChanged bool
+	newSandbox      bool
+}
+
+// lead is the sentence a notice opens with: a move is its own fact, stated
+// first, and a new sandbox shares the sentence when both hold.
+func (f resumeFacts) lead() string {
+	switch {
+	case f.executorChanged && f.newSandbox:
+		return "This run resumed on a different executor, in a new sandbox: " + sandboxResumeFacts + " "
+	case f.newSandbox:
+		return sandboxResumeSentence + " "
+	case f.executorChanged:
+		return executorChangedSentence
+	}
+	return ""
+}
+
 // workspaceRebuiltNotice composes the claim-time notice for an engagement
 // entering a tree built where its predecessor's workspace used to be, saying
 // which rebuild it was — the two lose different things, and a notice that
 // blurred them would overstate what survived exactly when the agent has least
 // to work from.
-func workspaceRebuiltNotice(prov domain.WorkspaceProvenance, executorChanged bool) string {
-	notice := "<system-note>\n"
-	if executorChanged {
-		notice += executorChangedSentence
-	}
+func workspaceRebuiltNotice(prov domain.WorkspaceProvenance, facts resumeFacts) string {
 	body := builtFreshBody
 	if prov == domain.WorkspaceProvenanceRehydrated {
 		body = snapshotRestoredBody
 	}
-	return notice + body + "\n</system-note>"
+	return "<system-note>\n" + facts.lead() + body + "\n</system-note>"
 }
 
 // checkpointRestoredNotice is the claim-time notice for a tree restored from
@@ -127,7 +162,7 @@ func workspaceRebuiltNotice(prov domain.WorkspaceProvenance, executorChanged boo
 // assembles from — so what the agent is told is missing is what it can see it
 // did. Flow-control calls are left out: they resolve in the loop and never
 // touch the workspace.
-func checkpointRestoredNotice(rows []domain.Message, asOf float64, executorChanged, hasBlueprint bool) string {
+func checkpointRestoredNotice(rows []domain.Message, asOf float64, facts resumeFacts, hasBlueprint bool) string {
 	var after []domain.ToolCall
 	summarizedSince := false
 	for _, r := range rows {
@@ -150,9 +185,7 @@ func checkpointRestoredNotice(rows []domain.Message, asOf float64, executorChang
 
 	var b strings.Builder
 	b.WriteString("<system-note>\n")
-	if executorChanged {
-		b.WriteString(executorChangedSentence)
-	}
+	b.WriteString(facts.lead())
 	b.WriteString(checkpointRestoredLead)
 	switch len(after) {
 	case 0:
@@ -223,7 +256,7 @@ func (e *Engine) repairTranscript(ctx context.Context, params Params) error {
 	if err := e.repairDanglingToolCalls(ctx, params, rows); err != nil {
 		return err
 	}
-	return e.noticeWorkspaceRebuilt(ctx, params, rows)
+	return e.noticeResume(ctx, params, rows)
 }
 
 // repairDanglingToolCalls answers every tool call that has no persisted
@@ -359,26 +392,31 @@ func placeAfterAnswers(rows []domain.Message, owner int, missing []domain.ToolCa
 	return out
 }
 
-// noticeWorkspaceRebuilt queues the workspace notice when this engagement
-// entered a rebuilt tree and the conversation has already done work under an
-// earlier claim.
+// noticeResume queues the claim-time notice for an engagement resuming a
+// conversation that has already done work under an earlier claim: the
+// workspace notice when the tree it entered was rebuilt, and otherwise the
+// sandbox notice when the driver says its sandbox is new.
 //
-// Both gates say the same thing from opposite ends — there is work the model
-// remembers doing, and the tree it did that work in is gone. Drop either and
-// the notice is false. A warm resume keeps it silent because nothing was lost:
+// Both notices need prior work. Without it there is nothing the model
+// remembers doing, in the tree or in the sandbox, so a credential-parking
+// retry or a requeue-before-start stays silent.
+//
+// A warm resume says nothing about its tree because nothing was lost there:
 // the interrupted engagement's changes are right there, and the only genuine
 // unknown, an interrupted call's effects, is already answered in-band by the
-// dangling-call repair above. The prior-work gate keeps a credential-parking
-// retry or a requeue-before-start silent for the same reason — there is
-// nothing the model remembers to be wrong about.
+// dangling-call repair above. Telling an agent its intact workspace was
+// restored costs a verification pass it did not need, and teaches it that
+// system notes are worth second-guessing. That is the more expensive of the
+// two errors, by far. Its sandbox did not survive, though: the processes the
+// agent started and its /tmp were in the previous engagement's.
 //
-// Telling an agent its intact workspace was restored costs a verification
-// pass it did not need, and teaches it that system notes are worth
-// second-guessing. That is the more expensive of the two errors, by far.
-func (e *Engine) noticeWorkspaceRebuilt(ctx context.Context, params Params, rows []domain.Message) error {
-	if !params.Workspace.Rebuilt() {
-		return nil
-	}
+// A notice whose claim died before the model read it is still pending, and
+// the next claim's model reads it first, so no claim stacks a second notice of
+// its kind on it. A pending workspace notice also stands in for a sandbox
+// notice, since it carries the sandbox sentence whenever its claim's sandbox
+// was new. A pending sandbox notice stands in for nothing but the sentence: a
+// rebuild still queues its own notice behind it, and leaves the sentence out.
+func (e *Engine) noticeResume(ctx context.Context, params Params, rows []domain.Message) error {
 	priorWork := false
 	for _, r := range rows {
 		if r.Role == "assistant" {
@@ -389,16 +427,31 @@ func (e *Engine) noticeWorkspaceRebuilt(ctx context.Context, params Params, rows
 	if !priorWork {
 		return nil
 	}
-	// Idempotence: a claim that already queued the notice and then died
-	// before consuming it must not queue a second one.
+	workspacePending, sandboxPending := false, false
 	for _, r := range rows {
-		if r.Subtype == domain.MessageSubtypeInjectionExecutorChanged && !isDelivered(r) {
-			return nil
+		if isDelivered(r) {
+			continue
+		}
+		switch r.Subtype {
+		case domain.MessageSubtypeInjectionExecutorChanged:
+			workspacePending = true
+		case domain.MessageSubtypeInjectionNewSandbox:
+			sandboxPending = true
 		}
 	}
-	notice := workspaceRebuiltNotice(params.Workspace, params.ExecutorChanged)
+	if !params.Workspace.Rebuilt() {
+		if !params.NewSandbox || workspacePending || sandboxPending {
+			return nil
+		}
+		return e.insertPending(ctx, params, sandboxResumeNotice, domain.MessageSubtypeInjectionNewSandbox)
+	}
+	if workspacePending {
+		return nil
+	}
+	facts := resumeFacts{executorChanged: params.ExecutorChanged, newSandbox: params.NewSandbox && !sandboxPending}
+	notice := workspaceRebuiltNotice(params.Workspace, facts)
 	if params.Workspace == domain.WorkspaceProvenanceRehydrated && params.WorkspaceAsOf != nil {
-		notice = checkpointRestoredNotice(rows, *params.WorkspaceAsOf, params.ExecutorChanged, params.HasBlueprint)
+		notice = checkpointRestoredNotice(rows, *params.WorkspaceAsOf, facts, params.HasBlueprint)
 	}
 	return e.insertPending(ctx, params, notice, domain.MessageSubtypeInjectionExecutorChanged)
 }

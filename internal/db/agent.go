@@ -627,7 +627,8 @@ type ConversationStore interface {
 	// machine-authored rows around it; subtype discriminates the latter, and
 	// blank is a person's own message. Neither dialect CHECKs the column, so
 	// the vocabulary lives in Go: domain's MessageSubtype* constants —
-	// "injection:steer", "injection:executor-changed", "injection:nudge",
+	// "injection:steer", "injection:executor-changed",
+	// "injection:new-sandbox", "injection:nudge",
 	// "injection:output-limit", "injection:compaction-request",
 	// "injection:compaction-result", "injection:memory",
 	// "injection:task-context" and "stop-note" — plus two values owned where

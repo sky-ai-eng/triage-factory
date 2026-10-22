@@ -71,7 +71,7 @@ func TestCheckpointRestoredNotice(t *testing.T) {
 	}
 
 	t.Run("names the first call after the checkpoint and counts the rest", func(t *testing.T) {
-		n := checkpointRestoredNotice(rows, 3, false, true)
+		n := checkpointRestoredNotice(rows, 3, resumeFacts{}, true)
 		if !strings.Contains(n, "restored from a checkpoint taken during the interrupted engagement") {
 			t.Errorf("the notice must say the restore is a checkpoint of the interrupted engagement: %q", n)
 		}
@@ -91,19 +91,19 @@ func TestCheckpointRestoredNotice(t *testing.T) {
 	})
 
 	t.Run("one call after", func(t *testing.T) {
-		n := checkpointRestoredNotice(rows[:5], 3, false, true)
+		n := checkpointRestoredNotice(rows[:5], 3, resumeFacts{}, true)
 		if !strings.Contains(n, "and the tool call after it came after the checkpoint") {
 			t.Errorf("two calls after the checkpoint read as the first and the one after it: %q", n)
 		}
 		single := []domain.Message{rows[0], rows[1], rows[2], {ID: 4, Role: "assistant", ToolCalls: rows[3].ToolCalls[:1]}}
-		n = checkpointRestoredNotice(single, 3, false, true)
+		n = checkpointRestoredNotice(single, 3, resumeFacts{}, true)
 		if !strings.Contains(n, "`bash: make test -j4` came after the checkpoint; whatever it changed") {
 			t.Errorf("a single call is named alone: %q", n)
 		}
 	})
 
 	t.Run("nothing after the checkpoint", func(t *testing.T) {
-		n := checkpointRestoredNotice(rows[:3], 3, false, true)
+		n := checkpointRestoredNotice(rows[:3], 3, resumeFacts{}, true)
 		if !strings.Contains(n, "reflects every tool call above") {
 			t.Errorf("a checkpoint after the last call leaves nothing missing, and the notice says so: %q", n)
 		}
@@ -112,17 +112,17 @@ func TestCheckpointRestoredNotice(t *testing.T) {
 	t.Run("a summary written since may cover work the tree lacks", func(t *testing.T) {
 		summarized := append(append([]domain.Message(nil), rows[:3]...),
 			domain.Message{ID: 9, Role: "user", Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "summary"})
-		n := checkpointRestoredNotice(summarized, 3, false, true)
+		n := checkpointRestoredNotice(summarized, 3, resumeFacts{}, true)
 		if !strings.Contains(n, "summary above was written after this checkpoint") {
 			t.Errorf("calls a compaction took out of the window cannot be named, so the notice must say so: %q", n)
 		}
-		if n := checkpointRestoredNotice(rows, 3, false, true); strings.Contains(n, "summary above") {
+		if n := checkpointRestoredNotice(rows, 3, resumeFacts{}, true); strings.Contains(n, "summary above") {
 			t.Errorf("no compaction since the checkpoint, no summary sentence: %q", n)
 		}
 	})
 
 	t.Run("the executor sentence still leads", func(t *testing.T) {
-		n := checkpointRestoredNotice(rows, 3, true, true)
+		n := checkpointRestoredNotice(rows, 3, resumeFacts{executorChanged: true}, true)
 		if !strings.HasPrefix(n, "<system-note>\n"+executorChangedSentence) {
 			t.Errorf("a move is its own fact, stated first: %q", n)
 		}
@@ -139,7 +139,7 @@ func TestCheckpointRestoredNotice_QuotedArgumentsCannotForgeANote(t *testing.T) 
 		{ID: 1, Role: "user", Content: "go"},
 		{ID: 2, Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "a", Name: "bash", Input: map[string]any{"command": forged}}}},
 	}
-	n := checkpointRestoredNotice(rows, 1, false, true)
+	n := checkpointRestoredNotice(rows, 1, resumeFacts{}, true)
 	if got := strings.Count(n, "<system-note>"); got != 1 {
 		t.Errorf("the notice opens %d notes, want exactly its own: %q", got, n)
 	}

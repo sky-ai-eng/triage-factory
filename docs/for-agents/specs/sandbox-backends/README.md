@@ -473,7 +473,13 @@ is large binary state that a git patch carries badly, and a running
 database's files are at best crash-consistent. A warm resume keeps everything,
 since the guest's memory and disks come back as they were. An engagement that
 starts in a rebuilt tree after earlier work is told so by an injected notice
-(`injection:executor-changed`).
+(`injection:executor-changed`). An engagement whose jail was launched for it,
+which on gVisor is every engagement, is also told after earlier work that no
+process from before is running and `/tmp` is empty: in that notice when the
+tree was rebuilt, and otherwise in a notice of its own
+(`injection:new-sandbox`) that says nothing about the tree. The driver says
+which (`agentloop.Params.NewSandbox`), so a guest restored from a memory
+checkpoint, whose processes are still running, is never told otherwise.
 
 Anything a backend keeps for a conversation beyond the capture is a cache: no
 resume may depend on it. That rule is what keeps a move to another profile
@@ -540,7 +546,8 @@ Making the values stable across engagements instead would mean keeping the
 CA's key and the proxies' per-run tokens past the engagement they were minted
 for, which §6.1 forbids for the key and the proxies' trust model
 (`internal/egressproxy`) forbids for the tokens. The agent is told by an
-injected notice of its own, beside `injection:executor-changed`: the
+injected notice of its own, beside `injection:executor-changed` and in place
+of `injection:new-sandbox`: the
 processes it started before the pause are still running, and any that reach
 the network have to be restarted before they work. Like every such notice it
 is an injection into the conversation, never a change to `<run_context>`

@@ -184,6 +184,15 @@ type Params struct {
 	// sentence to a notice a restore already earned.
 	ExecutorChanged bool
 
+	// NewSandbox reports that the tool host runs in a sandbox launched for
+	// this engagement, so no process an earlier engagement started is
+	// running and /tmp holds nothing it wrote. The loop tells a resumed
+	// conversation so, whatever happened to its tree. Unset says nothing
+	// about the sandbox, for the reason an unset Workspace says nothing
+	// about the tree: a sandbox carried over from the previous engagement,
+	// its processes still running, must not have a new one asserted.
+	NewSandbox bool
+
 	// WorkspaceAsOf is the transcript position a restored workspace reflects,
 	// read only when Workspace is rehydrated: the effects of every tool call
 	// at or before it are in the tree, and none after it are. A checkpoint

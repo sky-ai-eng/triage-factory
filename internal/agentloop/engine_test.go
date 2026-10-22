@@ -145,7 +145,7 @@ func TestRun_RepairAnswersUnansweredToolCallsWithoutRedispatch(t *testing.T) {
 // be said when a loss actually happened, it must describe the loss that
 // actually occurred, and its executor sentence may only appear when an
 // executor actually changed. A resume onto the warm tree, on the executor that
-// parked it, is the common case and must be silent.
+// parked it, is the common case and must say nothing about the tree.
 func TestRun_WorkspaceRebuiltNoticeIsProvenanceDriven(t *testing.T) {
 	priorWork := func() *memTranscript {
 		return newMemTranscript(
@@ -166,9 +166,11 @@ func TestRun_WorkspaceRebuiltNoticeIsProvenanceDriven(t *testing.T) {
 		}
 	}
 
-	t.Run("a warm resume says nothing at all", func(t *testing.T) {
+	t.Run("a warm resume says nothing about its tree", func(t *testing.T) {
 		tr := priorWork()
-		run(t, tr, workspaceParams(domain.WorkspaceProvenanceWarm, false))
+		params := workspaceParams(domain.WorkspaceProvenanceWarm, false)
+		params.NewSandbox = true
+		run(t, tr, params)
 		if n := findNotice(tr); n != nil {
 			t.Fatalf("the interrupted engagement's work is right there; a warm resume must not claim otherwise: %+v", n)
 		}
@@ -257,7 +259,7 @@ func TestRun_WorkspaceRebuiltNoticeDoesNotStack(t *testing.T) {
 		domain.Message{
 			ConversationID: "conv", Role: "user",
 			Subtype:   domain.MessageSubtypeInjectionExecutorChanged,
-			Content:   workspaceRebuiltNotice(domain.WorkspaceProvenanceRehydrated, false),
+			Content:   workspaceRebuiltNotice(domain.WorkspaceProvenanceRehydrated, resumeFacts{}),
 			Delivered: &pending,
 		},
 	)
@@ -275,6 +277,204 @@ func TestRun_WorkspaceRebuiltNoticeDoesNotStack(t *testing.T) {
 	if notices != 1 {
 		t.Fatalf("workspace-rebuilt notices = %d, want the undelivered one already queued and no second", notices)
 	}
+}
+
+// TestRun_ResumeSaysTheSandboxIsNew pins the other half of what a resumed
+// engagement is told. Its tree may be the one it left, but its sandbox never
+// is: the processes the agent started and its /tmp went with the previous
+// engagement's. So every resume of a conversation that has done work says so,
+// once, and only when the driver says the sandbox is new.
+func TestRun_ResumeSaysTheSandboxIsNew(t *testing.T) {
+	priorWork := func() *memTranscript {
+		return newMemTranscript(
+			domain.Message{ConversationID: "conv", Role: "user", Content: "go"},
+			domain.Message{ConversationID: "conv", Role: "assistant", Content: "started the dev server"},
+		)
+	}
+	params := func(prov domain.WorkspaceProvenance, executorChanged bool) Params {
+		p := workspaceParams(prov, executorChanged)
+		p.NewSandbox = true
+		return p
+	}
+	run := func(t *testing.T, tr *memTranscript, params Params) *scriptedProvider {
+		t.Helper()
+		p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
+		if got := newTestEngine(tr, p, newScriptedToolHost()).Run(context.Background(), params); got.Kind != ResultConcluded {
+			t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
+		}
+		return p
+	}
+	rowsOf := func(tr *memTranscript, subtype string) []domain.Message {
+		var out []domain.Message
+		for _, r := range tr.snapshot() {
+			if r.Subtype == subtype {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+
+	t.Run("a warm resume is told its sandbox is new and nothing else", func(t *testing.T) {
+		tr := priorWork()
+		p := run(t, tr, params(domain.WorkspaceProvenanceWarm, false))
+		notes := rowsOf(tr, domain.MessageSubtypeInjectionNewSandbox)
+		if len(notes) != 1 {
+			t.Fatalf("sandbox notices = %d, want 1", len(notes))
+		}
+		want := "<system-note>\nThis run resumed in a new sandbox: no process from before is running and /tmp is empty.\n</system-note>"
+		if notes[0].Content != want {
+			t.Errorf("notice = %q, want %q", notes[0].Content, want)
+		}
+		if n := rowsOf(tr, domain.MessageSubtypeInjectionExecutorChanged); len(n) != 0 {
+			t.Errorf("the tree is the one the agent left; a warm resume must not describe a rebuild: %+v", n)
+		}
+		var sent bool
+		for _, r := range p.requests[0].Rows {
+			if r.Subtype == domain.MessageSubtypeInjectionNewSandbox {
+				sent = true
+			}
+		}
+		if !sent {
+			t.Error("the first request must carry the sandbox notice")
+		}
+	})
+
+	t.Run("a resume before any work says nothing", func(t *testing.T) {
+		tr := newMemTranscript(pendingUser("go"))
+		run(t, tr, params(domain.WorkspaceProvenanceWarm, false))
+		if n := rowsOf(tr, domain.MessageSubtypeInjectionNewSandbox); len(n) != 0 {
+			t.Fatalf("nothing was started in a sandbox before this claim: %+v", n)
+		}
+	})
+
+	t.Run("a driver that does not say the sandbox is new has nothing said about it", func(t *testing.T) {
+		tr := priorWork()
+		run(t, tr, workspaceParams(domain.WorkspaceProvenanceWarm, false))
+		if n := rowsOf(tr, domain.MessageSubtypeInjectionNewSandbox); len(n) != 0 {
+			t.Fatalf("a sandbox that may have been carried over must not be called new: %+v", n)
+		}
+		tr = priorWork()
+		run(t, tr, workspaceParams(domain.WorkspaceProvenanceRehydrated, true))
+		notes := rowsOf(tr, domain.MessageSubtypeInjectionExecutorChanged)
+		if len(notes) != 1 || strings.Contains(notes[0].Content, "new sandbox") {
+			t.Fatalf("a rebuild under such a driver describes the tree alone: %+v", notes)
+		}
+	})
+
+	asOf := 1.0
+	rebuilds := []struct {
+		name            string
+		prov            domain.WorkspaceProvenance
+		asOf            *float64
+		executorChanged bool
+	}{
+		{"a snapshot restore", domain.WorkspaceProvenanceRehydrated, nil, false},
+		{"a snapshot restore on another executor", domain.WorkspaceProvenanceRehydrated, nil, true},
+		{"a checkpoint restore", domain.WorkspaceProvenanceRehydrated, &asOf, false},
+		{"a checkpoint restore on another executor", domain.WorkspaceProvenanceRehydrated, &asOf, true},
+		{"a from-scratch build", domain.WorkspaceProvenanceFresh, nil, false},
+		{"a from-scratch build on another executor", domain.WorkspaceProvenanceFresh, nil, true},
+	}
+	for _, rb := range rebuilds {
+		t.Run(rb.name+" carries the sandbox sentence once, in its one notice", func(t *testing.T) {
+			tr := priorWork()
+			p := params(rb.prov, rb.executorChanged)
+			p.WorkspaceAsOf = rb.asOf
+			run(t, tr, p)
+			if n := rowsOf(tr, domain.MessageSubtypeInjectionNewSandbox); len(n) != 0 {
+				t.Errorf("a rebuild says it in its own notice, not a second one: %+v", n)
+			}
+			notes := rowsOf(tr, domain.MessageSubtypeInjectionExecutorChanged)
+			if len(notes) != 1 {
+				t.Fatalf("workspace notices = %d, want 1", len(notes))
+			}
+			content := notes[0].Content
+			if got := strings.Count(content, sandboxResumeFacts); got != 1 {
+				t.Errorf("sandbox sentence appears %d times, want 1: %q", got, content)
+			}
+			if got := strings.Count(content, "different executor"); got != boolToInt(rb.executorChanged) {
+				t.Errorf("executor sentence appears %d times, want %d: %q", got, boolToInt(rb.executorChanged), content)
+			}
+			if !strings.HasPrefix(content, "<system-note>\nThis run resumed ") {
+				t.Errorf("where the run resumed is stated first: %q", content)
+			}
+		})
+	}
+}
+
+// TestRun_ResumeNoticesDoNotStack: a claim that queued its notice and died
+// before the model read it leaves that notice pending, and the next claim's
+// model reads it first. A second copy of what it says must not pile up behind
+// it, and nothing a pending notice says may be contradicted by the next one.
+func TestRun_ResumeNoticesDoNotStack(t *testing.T) {
+	pending := false
+	withPending := func(subtype, content string) *memTranscript {
+		return newMemTranscript(
+			domain.Message{ConversationID: "conv", Role: "user", Content: "go"},
+			domain.Message{ConversationID: "conv", Role: "assistant", Content: "working"},
+			domain.Message{ConversationID: "conv", Role: "user", Subtype: subtype, Content: content, Delivered: &pending},
+		)
+	}
+	run := func(t *testing.T, tr *memTranscript, prov domain.WorkspaceProvenance) {
+		t.Helper()
+		params := workspaceParams(prov, false)
+		params.NewSandbox = true
+		p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
+		if got := newTestEngine(tr, p, newScriptedToolHost()).Run(context.Background(), params); got.Kind != ResultConcluded {
+			t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
+		}
+	}
+	rowsOf := func(tr *memTranscript, subtype string) []domain.Message {
+		var out []domain.Message
+		for _, r := range tr.snapshot() {
+			if r.Subtype == subtype {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+
+	t.Run("a pending sandbox notice is not repeated by a warm claim", func(t *testing.T) {
+		tr := withPending(domain.MessageSubtypeInjectionNewSandbox, sandboxResumeNotice)
+		run(t, tr, domain.WorkspaceProvenanceWarm)
+		if n := rowsOf(tr, domain.MessageSubtypeInjectionNewSandbox); len(n) != 1 {
+			t.Fatalf("sandbox notices = %d, want the pending one and no second", len(n))
+		}
+	})
+
+	t.Run("a pending workspace notice already says the sandbox is new", func(t *testing.T) {
+		tr := withPending(domain.MessageSubtypeInjectionExecutorChanged,
+			workspaceRebuiltNotice(domain.WorkspaceProvenanceRehydrated, resumeFacts{newSandbox: true}))
+		run(t, tr, domain.WorkspaceProvenanceWarm)
+		if n := rowsOf(tr, domain.MessageSubtypeInjectionNewSandbox); len(n) != 0 {
+			t.Fatalf("the pending notice carries the sandbox sentence; a second note would repeat it: %+v", n)
+		}
+	})
+
+	t.Run("a rebuild still describes its tree behind a pending sandbox notice, without repeating it", func(t *testing.T) {
+		tr := withPending(domain.MessageSubtypeInjectionNewSandbox, sandboxResumeNotice)
+		run(t, tr, domain.WorkspaceProvenanceRehydrated)
+		notes := rowsOf(tr, domain.MessageSubtypeInjectionExecutorChanged)
+		if len(notes) != 1 {
+			t.Fatalf("workspace notices = %d, want 1: the pending notice says nothing about the tree", len(notes))
+		}
+		if strings.Contains(notes[0].Content, sandboxResumeFacts) {
+			t.Errorf("the pending notice already says the sandbox is new: %q", notes[0].Content)
+		}
+		if !strings.Contains(notes[0].Content, "restored from its last snapshot") {
+			t.Errorf("the rebuild must still be described: %q", notes[0].Content)
+		}
+		if n := rowsOf(tr, domain.MessageSubtypeInjectionNewSandbox); len(n) != 1 {
+			t.Errorf("sandbox notices = %d, want the pending one", len(n))
+		}
+	})
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func TestRun_RepairIsIdempotentAcrossClaims(t *testing.T) {

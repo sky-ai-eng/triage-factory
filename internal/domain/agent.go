@@ -214,9 +214,17 @@ const (
 	// that the workspace was restored from its last snapshot, so work done
 	// during an interrupted engagement may be absent. The restore is what
 	// the row means and what a re-claim dedupes on; whether the notice also
-	// says the executor changed depends on the claims, and the name is the
-	// stored value rather than a summary of the text.
+	// says the executor changed or the sandbox is new depends on the claims
+	// and the driver, and the name is the stored value rather than a summary
+	// of the text.
 	MessageSubtypeInjectionExecutorChanged = "injection:executor-changed"
+	// MessageSubtypeInjectionNewSandbox marks the claim-time notice for a
+	// resume into the tree the previous engagement left, in a sandbox
+	// launched for this one: the processes the agent started and its /tmp
+	// went with the previous sandbox. It is a row of its own because the
+	// workspace notice above means a rebuild, and a re-claim dedupes on
+	// that meaning.
+	MessageSubtypeInjectionNewSandbox = "injection:new-sandbox"
 	// MessageSubtypeInjectionNudge marks a row the machinery wrote to keep a
 	// conversation moving rather than to tell it something it did not know:
 	// the would-stop note a hook asks for (the artifact contract), and the
