@@ -89,6 +89,16 @@ type PRSnapshot struct {
 	UpdatedAt     string         `json:"updated_at"`
 	MergedAt      string         `json:"merged_at,omitempty"`
 	ClosedAt      string         `json:"closed_at,omitempty"`
+	// MergedBy is who merged the pull request and ClosedBy who closed it
+	// without merging, each REST-spelled like Author, with GitHub's id for the
+	// account beside it. ClosedBy is empty unless State is CLOSED, so a pull
+	// request closed and reopened carries none. All four are empty on a
+	// snapshot stored before they were recorded, and an id is empty for an
+	// actor GitHub returns without one (a deleted account).
+	MergedBy   string `json:"merged_by,omitempty"`
+	MergedByID string `json:"merged_by_id,omitempty"`
+	ClosedBy   string `json:"closed_by,omitempty"`
+	ClosedByID string `json:"closed_by_id,omitempty"`
 
 	// Timeline carries a tail of PR-side events (label add/remove, review
 	// request, ready-for-review) with their per-action createdAt
