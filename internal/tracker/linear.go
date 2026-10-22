@@ -619,10 +619,11 @@ type linearLabelGroups struct {
 	read   map[string]linearTeamLabelGroups // by Linear team id
 }
 
-// linearTeamLabelGroups is one team's read: each label's group by label id,
-// holding only labels that sit in one, or the error the read failed with.
+// linearTeamLabelGroups is one team's read: each label's group, its id and
+// name, by label id, holding only labels that sit in one, or the error the
+// read failed with.
 type linearTeamLabelGroups struct {
-	groups map[string]string
+	groups map[string]domain.LinearLabelRef
 	err    error
 }
 
@@ -634,8 +635,8 @@ func newLinearLabelGroups(client LinearClient) *linearLabelGroups {
 // from prev's, and nil when they do not. A rate limit is returned and ends the
 // cycle. Any other failure puts prev's labels back on snap, so the change is
 // diffed, with its groups, on a later cycle rather than reported now without
-// them, where a label_group predicate would silently miss it.
-func (g *linearLabelGroups) forChange(ctx context.Context, prev domain.LinearSnapshot, snap *domain.LinearSnapshot) (map[string]string, error) {
+// them, where a label_group_id_in predicate would silently miss it.
+func (g *linearLabelGroups) forChange(ctx context.Context, prev domain.LinearSnapshot, snap *domain.LinearSnapshot) (map[string]domain.LinearLabelRef, error) {
 	if added, removed := linearLabelChanges(prev, *snap); len(added) == 0 && len(removed) == 0 {
 		return nil, nil
 	}
@@ -658,7 +659,7 @@ func (g *linearLabelGroups) forChange(ctx context.Context, prev domain.LinearSna
 // succeed. A read that fails every cycle, such as one the credential is not
 // allowed to make, holds back every label event on the team indefinitely, and
 // the span is where that shows.
-func (g *linearLabelGroups) forTeam(ctx context.Context, teamID string) (map[string]string, error) {
+func (g *linearLabelGroups) forTeam(ctx context.Context, teamID string) (map[string]domain.LinearLabelRef, error) {
 	if r, ok := g.read[teamID]; ok {
 		return r.groups, r.err
 	}
@@ -677,10 +678,10 @@ func (g *linearLabelGroups) forTeam(ctx context.Context, teamID string) (map[str
 			"linear_team_id", teamID, "error", err)
 	} else {
 		span.SetAttributes(telemetry.Count(len(labels)))
-		r.groups = make(map[string]string, len(labels))
+		r.groups = make(map[string]domain.LinearLabelRef, len(labels))
 		for _, l := range labels {
-			if l.Group != "" {
-				r.groups[l.ID] = l.Group
+			if l.GroupID != "" {
+				r.groups[l.ID] = domain.LinearLabelRef{ID: l.GroupID, Name: l.Group}
 			}
 		}
 	}
@@ -787,6 +788,7 @@ func (t *Tracker) emitLinearUnreachable(ctx context.Context, orgID string, e dom
 		MetadataJSON: mustJSON(events.LinearIssueUnreachableMetadata{
 			LinearIssueIdentity: linearIdentity(snap),
 			LastStatus:          snap.State.Name,
+			LastStatusID:        snap.State.ID,
 			Reason:              reason,
 		}),
 		// No source time: Linear does not say when an issue stopped being

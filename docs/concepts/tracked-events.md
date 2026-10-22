@@ -29,7 +29,7 @@ most one active task exists per entity, event type and `dedup_key`.
 | **CI Check Failed** | `github:pr:ci_check_failed` | A check run on the head commit completes with `failure`, `timed_out`, `cancelled` or `action_required`. One event per check run; a check run already failing last cycle, by id, does not emit again, and a re-run is a new check run | — |
 | **Merge Conflicts** | `github:pr:conflicts` | `mergeable` changes to `CONFLICTING` | — |
 | **Ready for Review** | `github:pr:ready_for_review` | `isDraft` changes from `true` to `false` | — |
-| **Label Added** | `github:pr:label_added` | A label is added | label name |
+| **Label Added** | `github:pr:label_added` | A label is added. Labels are names here — see [Labels](#labels) | label name |
 | **Label Removed** | `github:pr:label_removed` | A label is removed | label name |
 | **New Comment** | `github:pr:commented` | Someone other than TF commented in the PR's conversation since the last cycle. One event per cycle however many comments landed, naming every commenter — see [Comments](#comments). Comments in review threads arrive as reviews | — |
 | **Mentioned** | `github:pr:mentioned` | A user or team TF knows is @-mentioned in a new comment or review, or by an edit that adds the mention to the PR body. One event per identity, routed to that identity's team(s) as `review_requested` is — see [Mentions](#mentions) | `user:<login>` / `team:<org>/<slug>` |
@@ -232,7 +232,7 @@ untouched for a switch back.
 |-------|----|---------|
 | **Issue Assigned** | `jira:issue:assigned` | The assignee changes to someone (compared by account id) |
 | **Issue Available** | `jira:issue:available` | An unassigned issue appears in the pickup queue, or an assigned issue becomes unassigned |
-| **Priority Changed** | `jira:issue:priority_changed` | The priority changes (compared by id). Metadata carries `old_priority_id` and `new_priority_id` beside the names |
+| **Priority Changed** | `jira:issue:priority_changed` | The priority changes (compared by id). Metadata carries `old_priority_id` and `new_priority_id` beside the names, and the `dedup_key` is the new priority's id — see [Statuses, priorities and issue types](#statuses-priorities-and-issue-types) |
 | **New Comment** | `jira:issue:commented` | Someone other than TF commented since the last cycle. One event per cycle however many comments landed, naming every commenter — see [Comments](#comments) |
 | **Label Added** | `jira:issue:label_added` | A label is added. `dedup_key` is the label name — see [Labels](#labels) |
 | **Label Removed** | `jira:issue:label_removed` | A label is removed. `dedup_key` is the label name |
@@ -241,7 +241,7 @@ untouched for a switch back.
 
 | Event | ID | Trigger |
 |-------|----|---------|
-| **Status Changed** | `jira:issue:status_changed` | The `status` field changes (e.g. To Do → In Progress) |
+| **Status Changed** | `jira:issue:status_changed` | The `status` field changes (e.g. To Do → In Progress), compared by id. Metadata carries `old_status_id` and `new_status_id` beside the names, and the `dedup_key` is the new status's id |
 | **Issue Completed** | `jira:issue:completed` | The `status` changes to Done, Closed, or Resolved |
 | **Issue Unreachable** | `jira:issue:unreachable` | TF will no longer follow a tracked issue — see below |
 | **Issue Body Updated** | `jira:issue:body_updated` | The complete issue description changes, including clearing it |
@@ -350,22 +350,33 @@ still diffs every PR the batch read returned.
 `label_added` and `label_removed` exist for Jira and Linear issues as they do
 for GitHub pull requests: one event per label added or removed since the last
 cycle. `label_name` names the label and `labels` is the issue's whole set after
-the change. Predicates can filter on `label_name`, `has_label`, `assignee_in`,
-and `jira_project_id_in` (Jira) or `linear_team_id_in` (Linear).
+the change. Predicates can filter on `assignee_in` and `jira_project_id_in`
+(Jira) or `linear_team_id_in` (Linear), and on the label as below.
 
 - **Jira** labels are plain strings with no id, and cannot be renamed, so they
-  compare by name and the `dedup_key` is the name.
+  compare by name, the `dedup_key` is the name, and predicates filter on
+  `label_name` and `has_label`, both names. So do GitHub's: a GitHub label's id
+  belongs to one repository, while a filter on a label means the label of that
+  name in every repository the team tracks.
 - **Linear** labels have ids and can be renamed, so they compare by id, the way
   workflow states do: a renamed label emits nothing, and the snapshot stores the
   new name. The `dedup_key` is the label's id, so a label renamed after it was
   added and then added again does not open a second task. A snapshot stored
   before label ids were recorded compares by name for its first refresh; a label
-  it lost in that refresh is keyed by its name.
+  it lost in that refresh is keyed by its name. The label events carry
+  `label_id` beside `label_name`, and every event that carries `labels` carries
+  `label_ids` beside it. Predicates filter on ids, so a label renamed in Linear
+  leaves them matching: `label_id_in` (the label added or removed) and
+  `has_label_id_in` (the issue bears at least one of them), each a label an
+  issue in one of the handler's team's tracked Linear teams can carry, from
+  `POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/labels/list`.
 - A Linear label can sit in a group (a "Difficulty" group holding Easy, Medium
   and Hard), and its name is only its own, so two groups can each hold a
-  "Medium". `label_group` names the group, empty for a label in none, and
-  predicates can filter on it. Switching a single-select group from one value
-  to another emits a `label_removed` and a `label_added` in the same cycle.
+  "Medium". A group is itself a label: `label_group_id` is its id and
+  `label_group` its name, both empty for a label in none, and predicates filter
+  on `label_group_id_in`, the ids of groups (labels the labels list marks
+  `is_group`). Switching a single-select group from one value to another emits
+  a `label_removed` and a `label_added` in the same cycle.
   The group is read from the team's label list, once per cycle and only when one
   of the team's issues has a label change, because selecting it on every issue
   would add to the batch read's complexity. When that read fails, the snapshot
@@ -376,11 +387,50 @@ and `jira_project_id_in` (Jira) or `linear_team_id_in` (Linear).
 
 The labels an issue already has when TF first sees it are its baseline, like
 every other field, and emit nothing. `assigned`, `available` and
-`became_atomic` carry `labels` and take `has_label`, so a rule such as
-"`available`, `has_label: tf-agent`" matches an issue that was labelled before
-discovery. Label events are not suppressed on an issue with open subtasks or
-sub-issues, as `assigned` and `available` are: someone added the label on
-purpose. Removing a label does not close a `label_added` task.
+`became_atomic` carry `labels` and take `has_label` (`label_ids` and
+`has_label_id_in` on Linear), so a rule such as "`available`, `has_label:
+tf-agent`" matches an issue that was labelled before discovery. Label events
+are not suppressed on an issue with open subtasks or sub-issues, as `assigned`
+and `available` are: someone added the label on purpose. Removing a label does
+not close a `label_added` task.
+
+#### Statuses, priorities and issue types
+
+A Jira admin can rename a workflow status, a priority or an issue type, so TF
+identifies each by Jira's id and keeps the name for display. Every Jira event
+that names one carries the id beside it: `status_id` (`assigned`, `available`,
+`became_atomic` and the label events), `old_status_id` and `new_status_id`
+(`status_changed`), `final_status_id` (`completed`), `last_status_id`
+(`unreachable`), `priority_id` and `issue_type_id`, and `old_priority_id` and
+`new_priority_id` (`priority_changed`). `status_changed` and
+`priority_changed` are keyed on the new value's id, so a status renamed while a
+task waits on it does not open a second task the next time the issue enters
+it. A read that carries no id is keyed on the name.
+
+Predicates filter on the ids: `status_id_in`, `new_status_id_in`,
+`old_status_id_in`, `priority_id_in`, `new_priority_id_in`,
+`old_priority_id_in` and `issue_type_id_in`. Each entry must be a status in the
+workflow of a project the handler's team tracks
+(`POST /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/list`), an issue type
+of one (`POST /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/list`,
+read per project because a team-managed project on Cloud has issue types of its
+own), or one of the instance's priorities
+(`POST /api/orgs/{org_id}/jira/priorities/list`). Saving a handler asks Jira,
+under the org's credential, about each id the write adds: a name or an id Jira
+does not offer the team is refused with `422 INVALID_FIELD` on
+`scope_predicate`, Jira not answering refuses the write with `502
+UPSTREAM_UNAVAILABLE`, and a Jira the org has not connected with `409
+NOT_CONFIGURED`. A write that adds no id asks Jira nothing. Events recorded
+before the ids were carried have none, so an id filter never matches them.
+
+Linear's workflow states work the same way: `status_id`, `old_status_id`,
+`new_status_id`, `final_status_id` and `last_status_id` beside the names,
+`status_changed` keyed on the new state's id, and `status_id_in`,
+`new_status_id_in` and `old_status_id_in` checked against the states of the
+Linear teams the handler's team tracks
+(`POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/list`). Linear's
+priority is matched by its label (`priority`, `new_priority`, `old_priority`),
+because its five priorities are a fixed set no workspace can rename.
 
 #### Identity
 
@@ -398,8 +448,8 @@ below). Every Jira event's metadata carries `issue_key`, `issue_id`,
 `project` — the project's key as the read that produced the event spelled it,
 for display — and `jira_project_id`, the project's registry row, which is
 what the router's team gate reads and what predicates match on. An event that
-names the issue's priority or issue type carries Jira's id for it beside the
-name (`priority_id`, `issue_type_id`); predicates match the names.
+names the issue's status, priority or issue type carries Jira's id for it beside
+the name (see [Statuses, priorities and issue types](#statuses-priorities-and-issue-types)).
 
 A handler predicate scopes to projects with `jira_project_id_in`, which names
 them by registry id (the `id` of an entry in `jira_projects` on
@@ -573,7 +623,7 @@ nothing is assigned to, so the second query returns nothing.
 
 | Event | ID | Trigger | `dedup_key` |
 |-------|----|---------|-------------|
-| **Status Changed** | `linear:issue:status_changed` | The workflow state changes. A state renamed in Linear is not a change: states compare by id | new state name |
+| **Status Changed** | `linear:issue:status_changed` | The workflow state changes. A state renamed in Linear is not a change: states compare by id — see [Statuses, priorities and issue types](#statuses-priorities-and-issue-types) | new state id |
 | **Issue Completed** | `linear:issue:completed` | The state enters one of the team's done states (fires beside `status_changed`) | — |
 | **Issue Body Updated** | `linear:issue:body_updated` | The description changes, including clearing it | — |
 | **Parent Changed** | `linear:issue:parent_changed` | The issue moves under another parent, or loses its parent | new parent's UUID, or `none` |
@@ -597,14 +647,15 @@ Every Linear event's metadata carries the issue's identity block —
 `issue_identifier`, `issue_id`, `linear_team_id`, `linear_team_key`,
 `assignee`, `assignee_user_id`, `creator`, `creator_user_id`, `title` — plus
 the fields its event adds
-(`old_status`/`new_status`, `old_priority`/`new_priority`,
+(`status`/`status_id`, `old_status`/`old_status_id` and
+`new_status`/`new_status_id`, `old_priority`/`new_priority`,
 `previous_body_hash`/`body_hash`, `old_parent_id`/`new_parent_id` and
-`old_parent`/`new_parent`, `final_status`,
-`last_status`, `reason`, `comment_id`/`commenter`/`commenter_user_id`/
-`commenter_user_ids`, `old_identifier`/`old_linear_team_id`/
-`old_linear_team_key`, `label_name`/`label_group`, and `labels` on
-`assigned`, `available`, `became_atomic`, `body_updated` and the label
-events). `linear_team_id` is what the router's team gate reads
+`old_parent`/`new_parent`, `final_status`/`final_status_id`,
+`last_status`/`last_status_id`, `reason`, `comment_id`/`commenter`/
+`commenter_user_id`/`commenter_user_ids`, `old_identifier`/
+`old_linear_team_id`/`old_linear_team_key`, `label_id`/`label_name` and
+`label_group_id`/`label_group`, and `labels`/`label_ids` on `assigned`,
+`available`, `became_atomic`, `body_updated` and the label events). `linear_team_id` is what the router's team gate reads
 (with `old_linear_team_id` on `identifier_changed`, see below), and
 `assignee_user_id` is what assignee-centric routing joins against a
 member's bound Linear identity. `creator_user_id` is what `creator_in` matches

@@ -86,8 +86,9 @@ func TestDiffJira_RenamedPriorityIsNotAChange(t *testing.T) {
 }
 
 // A real priority change carries both priorities' ids beside their names, and
-// the dedup key stays the new name. The id arriving on a snapshot that predates
-// it is not a change.
+// the dedup key is the new priority's id, so a priority renamed while a task
+// waits on it does not open a second one. The id arriving on a snapshot that
+// predates it is not a change.
 func TestDiffJira_PriorityChangeCarriesIDs(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", Priority: "Low", PriorityID: "4"}
 	curr := domain.JiraSnapshot{Key: "SKY-1", Priority: "High", PriorityID: "2"}
@@ -97,8 +98,8 @@ func TestDiffJira_PriorityChangeCarriesIDs(t *testing.T) {
 	if evt == nil {
 		t.Fatal("no priority_changed event")
 	}
-	if evt.DedupKey != "High" {
-		t.Errorf("dedup_key = %q, want the new priority's name", evt.DedupKey)
+	if evt.DedupKey != "2" {
+		t.Errorf("dedup_key = %q, want the new priority's id", evt.DedupKey)
 	}
 	meta := decodeMetadata[events.JiraIssuePriorityChangedMetadata](t, *evt)
 	if meta.OldPriorityID != "4" || meta.NewPriorityID != "2" {

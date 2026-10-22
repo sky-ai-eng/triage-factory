@@ -95,8 +95,9 @@ func TestRegistryFieldSchemaGeneration(t *testing.T) {
 }
 
 // TestIssueLabelEventFields pins the predicate fields of the Jira and Linear
-// label events. Every one is a string or an identity list, so the predicate
-// editor renders them with the field types it already has; the editor picks
+// label events. A Jira label has no id, so its filters are names; a Linear
+// label and its group have ids, so its filters are id lists the editor picks
+// from the labels the team's tracked Linear teams can use. The editor picks
 // the identity kind of assignee_in from the event's source.
 func TestIssueLabelEventFields(t *testing.T) {
 	jira := map[string]string{
@@ -108,9 +109,9 @@ func TestIssueLabelEventFields(t *testing.T) {
 	linear := map[string]string{
 		"assignee_in":       "string_list",
 		"linear_team_id_in": "string_list",
-		"label_name":        "string",
-		"label_group":       "string",
-		"has_label":         "string",
+		"label_id_in":       "string_list",
+		"label_group_id_in": "string_list",
+		"has_label_id_in":   "string_list",
 	}
 	for eventType, want := range map[string]map[string]string{
 		domain.EventJiraIssueLabelAdded:     jira,

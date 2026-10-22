@@ -94,9 +94,12 @@ type ChildIssue struct {
 type Label struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
-	// Group is the name of the label group the label sits in, "" when it is
-	// in none. Only ListLabels reads it; an issue's labels leave it empty.
-	Group string `json:"group,omitempty"`
+	// GroupID and Group are the id and name of the label group the label sits
+	// in, "" when it is in none. A group is itself a label, the parent of the
+	// labels in it. Only the team label reads fill them; an issue's labels
+	// leave them empty.
+	GroupID string `json:"group_id,omitempty"`
+	Group   string `json:"group,omitempty"`
 }
 
 // Issue is a Linear issue as the IssueFields fragment selects it. Its JSON
@@ -189,6 +192,7 @@ type labelNode struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
 	Parent *struct {
+		ID   string `json:"id"`
 		Name string `json:"name"`
 	} `json:"parent"`
 }
@@ -196,7 +200,7 @@ type labelNode struct {
 func (n labelNode) toLabel() Label {
 	l := Label{ID: n.ID, Name: n.Name}
 	if n.Parent != nil {
-		l.Group = n.Parent.Name
+		l.GroupID, l.Group = n.Parent.ID, n.Parent.Name
 	}
 	return l
 }

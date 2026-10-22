@@ -13,8 +13,10 @@
 -- references its repository's registry row rather than its name, an
 -- audit-ledger row references the entity or repository it was about, a
 -- repository row and a reachable entry record GitHub's id for the account that
--- owns the repository, Linear becomes a tracked source, and nine smaller
--- changes ride along: the org GitHub App's unusable state, the claim's source
+-- owns the repository, an active task on a Jira status or priority change is
+-- keyed on the status's or priority's id rather than its name, Linear becomes a
+-- tracked source, and nine smaller changes ride along: the org GitHub App's
+-- unusable state, the claim's source
 -- manifest, the retirement of the 'completed' conversation status, node ids on
 -- artifacts and audit-ledger rows, the table of rate-limit readings, the
 -- principal a deployment-operator grant is bound to, the removal of the unused
@@ -1777,6 +1779,54 @@ UPDATE external_actions
 -- profile or mirror refresh fills it.
 ALTER TABLE repositories ADD COLUMN owner_external_id TEXT;
 ALTER TABLE reachable_repositories ADD COLUMN owner_external_id TEXT;
+
+-- ===========================================================================
+-- 10. Jira status and priority changes keyed on ids
+-- ===========================================================================
+--
+-- jira:issue:status_changed and jira:issue:priority_changed are deduplicated
+-- on the new status's or priority's Jira id, which a rename in Jira does not
+-- move, and on its name only for a read that carried no id. An active task
+-- opened under a name is re-keyed to the id when its entity's snapshot still
+-- shows that status or priority under that name and carries its id, so the
+-- next event into the same status or priority bumps the task rather than
+-- opening a second one beside it.
+--
+-- A task whose issue has moved on to another status or priority since, or
+-- whose snapshot carries no id, keeps its name: nothing stored says which id
+-- the name meant. If such an issue enters the named status or priority again,
+-- the event opens a second task beside the first. So does an event recorded
+-- under the name before this migration and routed after it. Linear's
+-- status_changed tasks need nothing here: Linear arrives in this migration, so
+-- none predates it.
+CREATE TEMP TABLE task_rekey AS
+SELECT id, entity_id, event_type, CAST(new_key AS TEXT) AS new_key
+  FROM (SELECT t.id, t.entity_id, t.event_type, t.dedup_key,
+               CASE WHEN json_valid(e.snapshot_json)
+                    THEN json_extract(e.snapshot_json,
+                                      CASE t.event_type WHEN 'jira:issue:status_changed' THEN '$.status'
+                                                        ELSE '$.priority' END) END AS name,
+               CASE WHEN json_valid(e.snapshot_json)
+                    THEN json_extract(e.snapshot_json,
+                                      CASE t.event_type WHEN 'jira:issue:status_changed' THEN '$.status_id'
+                                                        ELSE '$.priority_id' END) END AS new_key
+          FROM tasks t
+          JOIN entities e ON e.id = t.entity_id
+         WHERE e.source = 'jira'
+           AND t.event_type IN ('jira:issue:status_changed', 'jira:issue:priority_changed')
+           AND t.status NOT IN ('done', 'dismissed'))
+ WHERE name = dedup_key
+   AND COALESCE(CAST(new_key AS TEXT), '') NOT IN ('', dedup_key);
+
+UPDATE tasks
+   SET dedup_key = (SELECT r.new_key FROM task_rekey r WHERE r.id = tasks.id)
+ WHERE id IN (SELECT r.id
+                FROM task_rekey r
+               WHERE NOT EXISTS (SELECT 1 FROM tasks o
+                                  WHERE o.entity_id = r.entity_id AND o.event_type = r.event_type
+                                    AND o.dedup_key = r.new_key AND o.status NOT IN ('done', 'dismissed')));
+
+DROP TABLE task_rekey;
 
 DROP TABLE org_scope;
 DROP TABLE host_case;

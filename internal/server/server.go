@@ -1239,6 +1239,13 @@ func (s *Server) routes() {
 	s.api("GET /api/orgs/{org_id}/jira/projects/{jira_id}", s.handleJiraProjectGet)
 	s.apiMutating("POST /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/list", s.handleJiraStatusesList)
 	s.api("GET /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/{status_id}", s.handleJiraStatusGet)
+	// The instance's priorities and each project's issue types, which Jira
+	// event predicates name by id. Proxied and member-gated like the routes
+	// above; see jira_issue_fields_handler.go.
+	s.apiMutating("POST /api/orgs/{org_id}/jira/priorities/list", s.handleJiraPrioritiesList)
+	s.api("GET /api/orgs/{org_id}/jira/priorities/{priority_id}", s.handleJiraPriorityGet)
+	s.apiMutating("POST /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/list", s.handleJiraIssueTypesList)
+	s.api("GET /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/{issue_type_id}", s.handleJiraIssueTypeGet)
 	// The org's Linear catalog — its teams, and each team's workflow states —
 	// proxied live under the org's Linear service credential and addressed at
 	// the org, so a caller in several orgs reads each without moving their
@@ -1247,6 +1254,10 @@ func (s *Server) routes() {
 	s.api("GET /api/orgs/{org_id}/linear/teams/{linear_team_id}", s.handleLinearTeamGet)
 	s.apiMutating("POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/list", s.handleLinearStatesList)
 	s.api("GET /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/{state_id}", s.handleLinearStateGet)
+	// The labels an issue in a Linear team can carry, which Linear event
+	// predicates name by id; see linear_labels_handler.go.
+	s.apiMutating("POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/labels/list", s.handleLinearLabelsList)
+	s.api("GET /api/orgs/{org_id}/linear/teams/{linear_team_id}/labels/{label_id}", s.handleLinearLabelGet)
 	// **Declared exception** to the list-envelope rule. The stock deck is a
 	// composite the discovery UI deals from — a readiness status plus two
 	// partitions of the same set — not a row list a client walks. It reads the
@@ -1319,7 +1330,7 @@ func (s *Server) routes() {
 	// with `kind` as the row discriminator on every read. The writes are split
 	// per kind, because a rule and a trigger require different fields and
 	// default `enabled` in opposite directions.
-	eh := &eventHandlersHandler{tx: s.tx, az: s.az}
+	eh := &eventHandlersHandler{tx: s.tx, az: s.az, catalogs: s}
 	s.apiMutating("POST /api/event-handlers/list", eh.handleEventHandlersList)
 	// The canonical single read. The mutation routes load this row internally;
 	// this is the only address that hands it back.

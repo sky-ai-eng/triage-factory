@@ -192,9 +192,12 @@ var (
 	labelHard   = linLabel("l-hard", "Hard")
 )
 
-// difficulty is the team's label list read for groups: Medium and Hard sit in
-// the Difficulty group.
-var difficulty = map[string]string{labelMedium.ID: "Difficulty", labelHard.ID: "Difficulty"}
+// groupDifficulty is the label group Medium and Hard sit in, and difficulty is
+// the team's label list read for groups.
+var (
+	groupDifficulty = linLabel("l-difficulty", "Difficulty")
+	difficulty      = map[string]domain.LinearLabelRef{labelMedium.ID: groupDifficulty, labelHard.ID: groupDifficulty}
+)
 
 func TestDiffLinear_Labels(t *testing.T) {
 	added, removed := domain.EventLinearIssueLabelAdded, domain.EventLinearIssueLabelRemoved
@@ -259,8 +262,9 @@ func TestDiffLinear_Labels(t *testing.T) {
 }
 
 // TestDiffLinear_GroupSwitchCarriesTheGroup: switching a single-select group
-// is a removal and an addition, each naming the group, so a rule can tell the
-// Difficulty group's Medium from another group's.
+// is a removal and an addition, each naming the label and the group by id and
+// by name, so a rule can tell the Difficulty group's Medium from another
+// group's, and the rule matches the ids.
 func TestDiffLinear_GroupSwitchCarriesTheGroup(t *testing.T) {
 	prev, curr := linSnap(), linSnap()
 	withLabels(&prev, labelBug, labelMedium)
@@ -275,14 +279,16 @@ func TestDiffLinear_GroupSwitchCarriesTheGroup(t *testing.T) {
 	gotAdded := decodeMetadata[events.LinearIssueLabelMetadata](t, *addedEvt)
 	wantAdded := events.LinearIssueLabelMetadata{
 		LinearIssueIdentity: linearIdentity(curr),
-		Priority:            "Medium", Status: "Todo",
-		LabelName: "Hard", LabelGroup: "Difficulty", Labels: []string{"Bug", "Hard"},
+		Priority:            "Medium", Status: "Todo", StatusID: linTodo.ID,
+		LabelID: labelHard.ID, LabelName: "Hard", LabelGroupID: groupDifficulty.ID, LabelGroup: "Difficulty",
+		Labels: []string{"Bug", "Hard"}, LabelIDs: []string{labelBug.ID, labelHard.ID},
 	}
 	if !reflect.DeepEqual(gotAdded, wantAdded) {
 		t.Errorf("label_added metadata = %+v, want %+v", gotAdded, wantAdded)
 	}
 	gotRemoved := decodeMetadata[events.LinearIssueLabelMetadata](t, *removedEvt)
-	if gotRemoved.LabelName != "Medium" || gotRemoved.LabelGroup != "Difficulty" || !slices.Equal(gotRemoved.Labels, []string{"Bug", "Hard"}) {
+	if gotRemoved.LabelID != labelMedium.ID || gotRemoved.LabelGroupID != groupDifficulty.ID || gotRemoved.LabelGroup != "Difficulty" ||
+		!slices.Equal(gotRemoved.LabelIDs, []string{labelBug.ID, labelHard.ID}) {
 		t.Errorf("label_removed metadata = %+v, want Medium in Difficulty with the labels after the change", gotRemoved)
 	}
 
@@ -290,11 +296,13 @@ func TestDiffLinear_GroupSwitchCarriesTheGroup(t *testing.T) {
 		pred string
 		want bool
 	}{
-		{`{"label_group":"Difficulty","label_name":"Hard"}`, true},
-		{`{"label_group":"Size","label_name":"Hard"}`, false},
-		{`{"label_name":"Medium"}`, false},
-		{`{"has_label":"Bug"}`, true},
-		{`{"has_label":"Medium"}`, false},
+		{`{"label_group_id_in":["l-difficulty"],"label_id_in":["l-hard"]}`, true},
+		{`{"label_group_id_in":["l-size"],"label_id_in":["l-hard"]}`, false},
+		{`{"label_group_id_in":["Difficulty"]}`, false},
+		{`{"label_id_in":["l-medium"]}`, false},
+		{`{"label_id_in":["Hard"]}`, false},
+		{`{"has_label_id_in":["l-bug"]}`, true},
+		{`{"has_label_id_in":["l-medium"]}`, false},
 		{`{"linear_team_id_in":["team-eng"]}`, true},
 		{`{"linear_team_id_in":["ENG"]}`, false},
 		{allowlist(t, "assignee_in", "u-alice"), true},
@@ -307,8 +315,8 @@ func TestDiffLinear_GroupSwitchCarriesTheGroup(t *testing.T) {
 
 	ungrouped := DiffLinearSnapshots(linSnap(), func() domain.LinearSnapshot { s := linSnap(); withLabels(&s, labelAgent); return s }(),
 		"ent-1", linDoneSet, nil, difficulty)
-	if m := decodeMetadata[events.LinearIssueLabelMetadata](t, ungrouped[0]); m.LabelGroup != "" {
-		t.Errorf("label in no group reported in group %q", m.LabelGroup)
+	if m := decodeMetadata[events.LinearIssueLabelMetadata](t, ungrouped[0]); m.LabelGroup != "" || m.LabelGroupID != "" {
+		t.Errorf("label in no group reported in group %q (%q)", m.LabelGroup, m.LabelGroupID)
 	}
 }
 
@@ -339,11 +347,11 @@ func TestDiffLinear_LabelledAtDiscoveryMatchesHasLabel(t *testing.T) {
 			if evt == nil {
 				t.Fatalf("no %s in %v", tc.eventType, eventTypes(evts))
 			}
-			if !matchesPredicate(t, *evt, `{"has_label":"tf-agent"}`) {
-				t.Errorf("has_label tf-agent did not match %s", evt.MetadataJSON)
+			if !matchesPredicate(t, *evt, `{"has_label_id_in":["l-agent"]}`) {
+				t.Errorf("has_label_id_in l-agent did not match %s", evt.MetadataJSON)
 			}
-			if matchesPredicate(t, *evt, `{"has_label":"other"}`) {
-				t.Errorf("has_label other matched %s", evt.MetadataJSON)
+			if matchesPredicate(t, *evt, `{"has_label_id_in":["l-other"]}`) {
+				t.Errorf("has_label_id_in l-other matched %s", evt.MetadataJSON)
 			}
 		})
 	}
@@ -403,8 +411,8 @@ func teamLabels() []linear.Label {
 	return []linear.Label{
 		{ID: labelAgent.ID, Name: labelAgent.Name},
 		{ID: labelBug.ID, Name: labelBug.Name},
-		{ID: labelHard.ID, Name: labelHard.Name, Group: "Difficulty"},
-		{ID: labelMedium.ID, Name: labelMedium.Name, Group: "Difficulty"},
+		{ID: labelHard.ID, Name: labelHard.Name, GroupID: groupDifficulty.ID, Group: "Difficulty"},
+		{ID: labelMedium.ID, Name: labelMedium.Name, GroupID: groupDifficulty.ID, Group: "Difficulty"},
 	}
 }
 
@@ -457,8 +465,8 @@ func TestRefreshLinear_LabelChanges(t *testing.T) {
 	for _, e := range evts {
 		m := decodeMetadata[events.LinearIssueLabelMetadata](t, e)
 		wantGroup := difficulty[e.DedupKey]
-		if m.LabelGroup != wantGroup {
-			t.Errorf("%s %s: label_group = %q, want %q", e.EventType, m.LabelName, m.LabelGroup, wantGroup)
+		if m.LabelGroup != wantGroup.Name || m.LabelGroupID != wantGroup.ID {
+			t.Errorf("%s %s: label group = %q (%q), want %q (%q)", e.EventType, m.LabelName, m.LabelGroup, m.LabelGroupID, wantGroup.Name, wantGroup.ID)
 		}
 	}
 	if n := labelListReads(fx.client); n != 1 {
@@ -587,8 +595,8 @@ func TestRefreshLinear_LabelListReadFails(t *testing.T) {
 		t.Fatalf("label events = %v, want both deferred label_added events", got)
 	}
 	for _, e := range evts {
-		if m := decodeMetadata[events.LinearIssueLabelMetadata](t, e); m.LabelGroup != difficulty[e.DedupKey] {
-			t.Errorf("deferred %s group = %q, want %q", m.LabelName, m.LabelGroup, difficulty[e.DedupKey])
+		if m := decodeMetadata[events.LinearIssueLabelMetadata](t, e); m.LabelGroupID != difficulty[e.DedupKey].ID {
+			t.Errorf("deferred %s group = %q, want %q", m.LabelName, m.LabelGroupID, difficulty[e.DedupKey].ID)
 		}
 	}
 }

@@ -7,13 +7,16 @@ import SlackChannelListField from './SlackChannelListField'
 import RepoListField from './RepoListField'
 import LinearTeamListField from './LinearTeamListField'
 import JiraProjectListField from './JiraProjectListField'
+import CatalogListField from './CatalogListField'
+import { catalogKindFor } from './predicateCatalog'
 import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 interface PredicateEditorProps {
   eventType: string
   /** The handler's team, whose tracked Slack channels, repositories, Linear
    *  teams and Jira projects `channel_in`, `repo_in`, `linear_team_id_in` and
-   *  `jira_project_id_in` offer.
+   *  `jira_project_id_in` offer, and whose tracked Jira projects and Linear
+   *  teams the status, priority, issue type and label fields offer values of.
    *  '' when the server resolves the team (the sole team). */
   teamId?: string
   value: Record<string, unknown>
@@ -123,6 +126,9 @@ interface FieldRowProps {
 }
 
 function FieldRow({ field, eventType, teamId, value, onChange }: FieldRowProps) {
+  // A Jira status, priority or issue type, or a Linear state, label or label
+  // group, named by id and picked from what the team's tracked sources offer.
+  const catalog = field.type === 'string_list' ? catalogKindFor(eventType, field.name) : null
   return (
     <div>
       <div className="flex items-center gap-1.5 mb-1.5">
@@ -176,6 +182,14 @@ function FieldRow({ field, eventType, teamId, value, onChange }: FieldRowProps) 
           onChange={(v) => onChange(v)}
         />
       )}
+      {catalog && (
+        <CatalogListField
+          kind={catalog}
+          teamId={teamId}
+          value={Array.isArray(value) ? (value as string[]) : undefined}
+          onChange={(v) => onChange(v)}
+        />
+      )}
       {/* Every other string_list field is an identity allowlist:
           GitHub → author_in / reviewer_in / commenter_in;
           Jira → assignee_in / reporter_in / commenter_in;
@@ -183,7 +197,7 @@ function FieldRow({ field, eventType, teamId, value, onChange }: FieldRowProps) 
           IdentityListField branches on identityKind to read the right
           column (github_username, jira_account_id or linear_user_id)
           from /api/me and the team roster. */}
-      {field.type === 'string_list' && !REFERENCE_LIST_FIELDS.has(field.name) && (
+      {field.type === 'string_list' && !REFERENCE_LIST_FIELDS.has(field.name) && !catalog && (
         <IdentityListField
           fieldName={field.name}
           identityKind={identityKindFor(eventType)}

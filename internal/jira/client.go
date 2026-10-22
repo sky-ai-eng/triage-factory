@@ -1211,9 +1211,12 @@ func (c *Client) GetTransitions(ctx context.Context, idOrKey string) ([]Transiti
 	return c.getTransitions(ctx, idOrKey)
 }
 
-// ListIssueTypes returns the issue types available in a project.
-func (c *Client) ListIssueTypes(ctx context.Context, projectKey string) ([]IssueType, error) {
-	url := c.apiURL("project/%s", projectKey)
+// ListIssueTypes returns the issue types available in a project, named by its
+// id or its key. Both deployments serve them on /project/{idOrKey}, and a
+// team-managed project on Cloud answers with its own issue types, whose ids no
+// other project shares.
+func (c *Client) ListIssueTypes(ctx context.Context, idOrKey string) ([]IssueType, error) {
+	url := c.apiURL("project/%s", idOrKey)
 	body, err := c.get(ctx, url)
 	if err != nil {
 		return nil, err

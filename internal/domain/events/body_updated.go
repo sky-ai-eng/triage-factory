@@ -50,13 +50,13 @@ type JiraIssueBodyUpdatedMetadata struct {
 type JiraIssueBodyUpdatedPredicate struct {
 	AssigneeIn      []string `json:"assignee_in,omitempty" doc:"Match assignees by Atlassian account ID."`
 	JiraProjectIDIn []string `json:"jira_project_id_in,omitempty" doc:"Match only issues in these Jira projects, each one the team tracks, by registry id (the id of an entry in jira_projects on GET /api/teams/{team_id}/settings, not the project key). Empty matches every project the team tracks."`
-	IssueType       *string  `json:"issue_type,omitempty"`
+	IssueTypeIDIn   []string `json:"issue_type_id_in,omitempty" doc:"Match only issues of these issue types, by Jira issue type id (an issue type of a project the team tracks, as POST /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/list serves it), not its name. Empty matches every issue type."`
 	HasLabel        *string  `json:"has_label,omitempty"`
 }
 
 func (p JiraIssueBodyUpdatedPredicate) Matches(m JiraIssueBodyUpdatedMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
-		idIn(p.JiraProjectIDIn, m.JiraProjectID) && strEq(p.IssueType, m.IssueType) &&
+		idIn(p.JiraProjectIDIn, m.JiraProjectID) && idIn(p.IssueTypeIDIn, m.IssueTypeID) &&
 		hasLabel(p.HasLabel, m.Labels)
 }
 

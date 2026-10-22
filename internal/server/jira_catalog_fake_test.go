@@ -44,11 +44,18 @@ type fakeJiraStatus struct {
 	Name string `json:"name"`
 }
 
-// jiraCatalogFake stands in for a Data Center instance's three read endpoints:
+// The instance's priorities and every fixture project's issue types, as the
+// fake serves them unless a test replaces them.
+var (
+	jiraFixturePriorities = []fakeJiraStatus{{ID: "1", Name: "Highest"}, {ID: "2", Name: "High"}, {ID: "3", Name: "Medium"}}
+	jiraFixtureIssueTypes = []fakeJiraStatus{{ID: "10001", Name: "Task"}, {ID: "10004", Name: "Bug"}}
+)
+
+// jiraCatalogFake stands in for a Data Center instance's four read endpoints:
 // /project, which serves the whole project catalog in one unpaged, unfiltered
-// response; /project/{idOrKey}, which serves one project of it; and
-// /project/{idOrKey}/statuses, which serves one project's workflow statuses
-// grouped by issue type. Every project's id is fakeJiraProjectID of its key,
+// response; /project/{idOrKey}, which serves one project of it with its issue
+// types; /project/{idOrKey}/statuses, which serves one project's workflow
+// statuses grouped by issue type; and /priority, the instance's priorities. Every project's id is fakeJiraProjectID of its key,
 // and the two reads addressed at one project answer the same whichever names it.
 //
 // It is the right fixture for every reader under test — the catalog routes and
@@ -59,21 +66,26 @@ type fakeJiraStatus struct {
 type jiraCatalogFake struct {
 	URL string
 
-	mu       sync.Mutex
-	keys     []string
-	statuses map[string][]fakeJiraStatus
-	failing  bool
-	failFor  map[string]bool
-	hidden   map[string]bool
-	calls    int
-	onCall   func()
+	mu         sync.Mutex
+	keys       []string
+	statuses   map[string][]fakeJiraStatus
+	issueTypes map[string][]fakeJiraStatus
+	priorities []fakeJiraStatus
+	failing    bool
+	failFor    map[string]bool
+	hidden     map[string]bool
+	calls      int
+	onCall     func()
 }
 
 // newJiraCatalogFake starts a fake serving the given project keys, each with
 // the fixture workflow.
 func newJiraCatalogFake(t *testing.T, keys ...string) *jiraCatalogFake {
 	t.Helper()
-	f := &jiraCatalogFake{keys: keys, statuses: map[string][]fakeJiraStatus{}, failFor: map[string]bool{}, hidden: map[string]bool{}}
+	f := &jiraCatalogFake{
+		keys: keys, statuses: map[string][]fakeJiraStatus{}, issueTypes: map[string][]fakeJiraStatus{},
+		priorities: jiraFixturePriorities, failFor: map[string]bool{}, hidden: map[string]bool{},
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.calls++
@@ -82,7 +94,10 @@ func newJiraCatalogFake(t *testing.T, keys ...string) *jiraCatalogFake {
 		single, isProject := projectFromProjectPath(r.URL.Path)
 		project, single = fakeJiraProjectKey(project), fakeJiraProjectKey(single)
 		statuses, custom := f.statuses[project]
-		failing = failing || (isStatuses && f.failFor[project])
+		issueTypes, customTypes := f.issueTypes[single]
+		priorities := f.priorities
+		isPriorities := strings.HasSuffix(strings.TrimRight(r.URL.Path, "/"), "/priority")
+		failing = failing || (isStatuses && f.failFor[project]) || (isPriorities && f.failFor["priority"])
 		hidden := (isStatuses && f.hidden[project]) ||
 			(isProject && (f.hidden[single] || !slices.Contains(keys, single)))
 		onCall := f.onCall
@@ -107,7 +122,16 @@ func newJiraCatalogFake(t *testing.T, keys ...string) *jiraCatalogFake {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if isProject {
-			_, _ = io.WriteString(w, `{"id": "`+fakeJiraProjectID(single)+`", "key": "`+single+`", "name": "`+single+` Project", "lead": {"name": "admin"}}`)
+			if !customTypes {
+				issueTypes = jiraFixtureIssueTypes
+			}
+			types, _ := json.Marshal(issueTypes)
+			_, _ = io.WriteString(w, `{"id": "`+fakeJiraProjectID(single)+`", "key": "`+single+`", "name": "`+single+` Project", "lead": {"name": "admin"}, "issueTypes": `+string(types)+`}`)
+			return
+		}
+		if isPriorities {
+			body, _ := json.Marshal(priorities)
+			_, _ = w.Write(body)
 			return
 		}
 		if isStatuses {
@@ -208,6 +232,21 @@ func (f *jiraCatalogFake) SetStatuses(project string, statuses ...fakeJiraStatus
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.statuses[project] = statuses
+}
+
+// SetIssueTypes replaces one project's issue types.
+func (f *jiraCatalogFake) SetIssueTypes(project string, types ...fakeJiraStatus) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.issueTypes[project] = types
+}
+
+// SetPrioritiesFailing makes the priorities read fail while the rest of the
+// instance keeps answering.
+func (f *jiraCatalogFake) SetPrioritiesFailing() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failFor["priority"] = true
 }
 
 // SetStatusesFailing makes one project's workflow read fail while the rest of
