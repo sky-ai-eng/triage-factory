@@ -11,9 +11,10 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 //     (AuthorID, ReviewerID, CommenterID, MergedByID, ClosedByID), which a
 //     rename leaves alone. The predicates' identity filters (author_id_in,
 //     reviewer_id_in, commenter_id_in, requested_user_id_in,
-//     requested_team_id_in) match the ids; the login is for display. The id is empty on an event recorded before ids were, and
-//     for an actor GitHub returned without one (a deleted account), so an
-//     identity filter never matches such an event;
+//     requested_team_id_in) match the ids; the login is for display. The id
+//     is empty on an event recorded before ids were, and for an actor GitHub
+//     returned without one (a deleted account), so an identity filter never
+//     matches such an event;
 //   - Labels []string — snapshot at emission time, so predicates can scope
 //     to labeled PRs (e.g. HasLabel "self-review"). This is the user opt-in
 //     surface for label-driven flows (see Scenario 5 in docs/data-model-
