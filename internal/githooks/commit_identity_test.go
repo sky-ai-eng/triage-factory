@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -98,7 +99,7 @@ func TestResolveCommitIdentity(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			id, stamp := ResolveCommitIdentity(GitHubAccount{Login: tc.orgName, ID: tc.orgID}, tc.orgEmail, tc.manual, GitHubAccount{Login: tc.userLogin, ID: tc.userID})
+			id, stamp := ResolveCommitIdentity(domain.GitHubAccount{Login: tc.orgName, ID: tc.orgID}, tc.orgEmail, tc.manual, domain.GitHubAccount{Login: tc.userLogin, ID: tc.userID})
 			if stamp != tc.wantStamp {
 				t.Fatalf("stamp = %v, want %v", stamp, tc.wantStamp)
 			}

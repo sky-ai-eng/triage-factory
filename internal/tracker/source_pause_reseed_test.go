@@ -96,7 +96,7 @@ func TestRefreshGitHub_ReEnableAfterPauseEmitsNothing(t *testing.T) {
 
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), "", nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 
@@ -144,7 +144,7 @@ func TestRefreshGitHub_PauseWithoutClearWouldEmit(t *testing.T) {
 
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), "", nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 	if evts := pub.nonSystemEvents(); len(evts) == 0 {
@@ -313,7 +313,7 @@ func TestRefreshGitHub_ReEnable_KnownEntitySilentNewEntityDiscovered(t *testing.
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	resolver := fakeReviewerResolver{users: map[string]bool{"carol": true}}
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), "", []string{"octo/repo"}, resolver); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, []string{"octo/repo"}, resolver); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 

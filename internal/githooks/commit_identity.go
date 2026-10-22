@@ -1,6 +1,6 @@
 package githooks
 
-import "strings"
+import "github.com/sky-ai-eng/triage-factory/internal/domain"
 
 // CommitIdentity is the git author/committer identity stamped onto a
 // delegated-agent run's commits, plus the optional Co-authored-by trailer the
@@ -17,23 +17,6 @@ type CommitIdentity struct {
 	Name            string
 	Email           string
 	CoAuthorTrailer string
-}
-
-// GitHubAccount names a GitHub account by its login and, when known, GitHub's
-// numeric id for it in text form ("" when unknown).
-type GitHubAccount struct {
-	Login string
-	ID    string
-}
-
-// Same reports whether a and b are one account: by numeric id when both carry
-// one, since a login is a handle its owner can rename and another account can
-// then take, and by case-insensitive login only when either has no id.
-func (a GitHubAccount) Same(b GitHubAccount) bool {
-	if a.ID != "" && b.ID != "" {
-		return a.ID == b.ID
-	}
-	return strings.EqualFold(a.Login, b.Login)
 }
 
 // ResolveCommitIdentity computes the org commit identity (and, on a manual run
@@ -55,19 +38,19 @@ func (a GitHubAccount) Same(b GitHubAccount) bool {
 //     verbatim.
 //   - The Co-authored-by trailer is emitted iff the run is MANUAL, the
 //     delegating user's login is known, AND the user is not the org's account
-//     (GitHubAccount.Same: by id when both are known, else by login). The N=1
+//     (domain.GitHubAccount.Is: by id when both are known, else by login). The N=1
 //     same-PAT case gets no trailer — a self co-author GitHub would dedupe
 //     anyway; a human never is the "<slug>[bot]" account, so manual App runs
 //     always co-attribute. The trailer's own email is always the plain
 //     "<login>@users.noreply.github.com" form (the human is a user account — the
 //     plain form links; the numeric form is never applied here).
 //     Autonomous/event runs (manual=false) get the org identity only.
-func ResolveCommitIdentity(org GitHubAccount, orgEmail string, manual bool, user GitHubAccount) (CommitIdentity, bool) {
+func ResolveCommitIdentity(org domain.GitHubAccount, orgEmail string, manual bool, user domain.GitHubAccount) (CommitIdentity, bool) {
 	if org.Login == "" {
 		return CommitIdentity{}, false // nothing to stamp
 	}
 	id := CommitIdentity{Name: org.Login, Email: orgEmail}
-	if manual && user.Login != "" && !user.Same(org) {
+	if manual && user.Login != "" && !org.Is(user.Login, user.ID) {
 		id.CoAuthorTrailer = "Co-authored-by: " + user.Login + " <" + user.Login + "@users.noreply.github.com>"
 	}
 	return id, true

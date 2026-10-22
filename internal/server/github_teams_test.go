@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -36,16 +37,18 @@ func TestGitHubGroupCandidates_MembershipAndCounts(t *testing.T) {
 		case strings.HasSuffix(r.URL.Path, "/graphql"):
 			// Candidates: organization.teams (no userLogins filter) — the
 			// org's full team list with member counts.
-			_, _ = w.Write([]byte(`{"data":{"organization":{"teams":{
+			_, _ = w.Write([]byte(`{"data":{"organization":{"databaseId":9,"teams":{
 				"pageInfo":{"hasNextPage":false,"endCursor":""},
 				"nodes":[
-					{"slug":"platform","name":"Platform","members":{"totalCount":8}},
-					{"slug":"security","name":"Security","members":{"totalCount":40}}
+					{"databaseId":11,"slug":"platform","name":"Platform","members":{"totalCount":8}},
+					{"databaseId":12,"slug":"security","name":"Security","members":{"totalCount":40}}
 				]}}}}`))
 		case strings.HasSuffix(r.URL.Path, "/user/teams"):
-			// Membership: the caller is on platform only.
+			// Membership: the caller is on platform only, which GitHub lists
+			// under a slug the candidate list no longer uses — membership is
+			// matched by the team's id.
 			if r.URL.Query().Get("page") == "1" {
-				_, _ = w.Write([]byte(`[{"slug":"platform","name":"Platform","members_count":8,"organization":{"login":"acme"}}]`))
+				_, _ = w.Write([]byte(`[{"id":11,"slug":"platform-old","name":"Platform","members_count":8,"organization":{"id":9,"login":"acme"}}]`))
 				return
 			}
 			_, _ = w.Write([]byte(`[]`))
@@ -79,11 +82,11 @@ func TestGitHubGroupCandidates_MembershipAndCounts(t *testing.T) {
 	if len(byKey) != 2 {
 		t.Fatalf("got %d candidates, want 2: %+v", len(byKey), resp.Candidates)
 	}
-	if p := byKey["acme/platform"]; !p.Mine || p.MemberCount != 8 {
-		t.Errorf("platform = %+v; want Mine=true, MemberCount=8", p)
+	if p := byKey["acme/platform"]; !p.Mine || p.MemberCount != 8 || p.GitHubTeamID != "11" || p.GitHubOrgID != "9" {
+		t.Errorf("platform = %+v; want ids 11/9, Mine=true, MemberCount=8", p)
 	}
-	if s := byKey["acme/security"]; s.Mine || s.MemberCount != 40 {
-		t.Errorf("security = %+v; want Mine=false, MemberCount=40", s)
+	if s := byKey["acme/security"]; s.Mine || s.MemberCount != 40 || s.GitHubTeamID != "12" {
+		t.Errorf("security = %+v; want id 12, Mine=false, MemberCount=40", s)
 	}
 }
 
@@ -189,9 +192,9 @@ func TestGitHubGroupCandidates_OwnersFromTrackedReposOnly(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		askedOrgs = append(askedOrgs, req.Variables.Org)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"organization":{"teams":{
+		_, _ = w.Write([]byte(`{"data":{"organization":{"databaseId":9,"teams":{
 			"pageInfo":{"hasNextPage":false,"endCursor":""},
-			"nodes":[{"slug":"platform","name":"Platform","members":{"totalCount":8}}]}}}}`))
+			"nodes":[{"databaseId":11,"slug":"platform","name":"Platform","members":{"totalCount":8}}]}}}}`))
 	}))
 	t.Cleanup(ts.Close)
 
@@ -276,11 +279,11 @@ func TestUserTeamsMulti_ReconstructsViaGraphQL(t *testing.T) {
 		gotLogin = req.Variables.Login
 		gotOrgs = append(gotOrgs, req.Variables.Org)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"organization":{"teams":{
+		_, _ = w.Write([]byte(`{"data":{"organization":{"databaseId":9,"teams":{
 			"pageInfo":{"hasNextPage":false,"endCursor":""},
 			"nodes":[
-				{"slug":"platform","name":"Platform","members":{"totalCount":8}},
-				{"slug":"security","name":"Security","members":{"totalCount":40}}
+				{"databaseId":11,"slug":"platform","name":"Platform","members":{"totalCount":8}},
+				{"databaseId":12,"slug":"security","name":"Security","members":{"totalCount":40}}
 			]}}}}`))
 	}))
 	t.Cleanup(ts.Close)
@@ -318,8 +321,8 @@ func TestUserTeamsMulti_ReconstructsViaGraphQL(t *testing.T) {
 	if len(teams) != 2 {
 		t.Fatalf("got %d teams, want 2: %+v", len(teams), teams)
 	}
-	if teams[0].OrgSlug != "acme" || teams[0].TeamSlug != "platform" || teams[0].MemberCount != 8 {
-		t.Errorf("teams[0] = %+v; want acme/platform 8", teams[0])
+	if teams[0].OrgSlug != "acme" || teams[0].TeamSlug != "platform" || teams[0].MemberCount != 8 || teams[0].ID != "11" || teams[0].OrgID != "9" {
+		t.Errorf("teams[0] = %+v; want acme/platform 8, ids 11/9", teams[0])
 	}
 	if teams[1].TeamSlug != "security" || teams[1].MemberCount != 40 {
 		t.Errorf("teams[1] = %+v; want security 40", teams[1])
@@ -345,24 +348,62 @@ func TestUserTeamsMulti_NoLoginIsEmpty(t *testing.T) {
 	}
 }
 
+// groupsCandidateServer answers the candidate list GET .../github-groups and
+// the PUT resolve added teams from: organization acme (9) with teams platform
+// (11) and security (12). calls counts the GraphQL reads.
+func groupsCandidateServer(t *testing.T, srv *Server, calls *int) {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/graphql") {
+			http.NotFound(w, r)
+			return
+		}
+		*calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"organization":{"databaseId":9,"teams":{
+			"pageInfo":{"hasNextPage":false,"endCursor":""},
+			"nodes":[
+				{"databaseId":11,"slug":"platform","name":"Platform","members":{"totalCount":8}},
+				{"databaseId":12,"slug":"security","name":"Security","members":{"totalCount":40}}
+			]}}}}`))
+	}))
+	t.Cleanup(ts.Close)
+	dbtest.SeedOrgSettings(t, srv.orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL})
+	seedSourceHost(t, srv, eventsource.KindGitHub, ts.URL)
+	if err := integrations.Save(context.Background(), srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
+		GitHubPAT: "ghp-test",
+	}); err != nil {
+		t.Fatalf("seed creds: %v", err)
+	}
+	seedConfiguredRepo(t, srv, "acme", "api")
+}
+
 // TestUserTeams_WizardWriteReadBack is the integration-shaped check the test
-// plan calls for: the wizard's Continue writes the checked teams to the
-// existing per-team github-groups replace-set endpoint, and a read-back
-// returns exactly that set — proving the wizard reuses the one canonical
-// bulk write rather than a parallel path.
+// plan calls for: the wizard's Continue writes the checked teams, by GitHub's
+// ids, to the per-team github-groups replace-set endpoint, and a read-back
+// returns exactly that set with the names the candidates gave them.
 func TestUserTeams_WizardWriteReadBack(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
+	var calls int
+	groupsCandidateServer(t, srv, &calls)
 
-	// The wizard sends the checked teams as github-groups via PUT (replace-set).
 	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-groups", map[string]any{
-		"groups": []map[string]string{
-			{"org_login": "acme", "team_slug": "platform"},
-			{"org_login": "acme", "team_slug": "security"},
-		},
+		"github_team_ids": []string{"11", "12"},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("github-groups PUT = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var put teamGitHubGroupsPutResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &put); err != nil {
+		t.Fatalf("decode PUT: %v; raw=%s", err, rec.Body.String())
+	}
+	want := []gitHubGroupJSON{
+		{GitHubTeamID: "11", GitHubOrgID: "9", OrgLogin: "acme", TeamSlug: "platform"},
+		{GitHubTeamID: "12", GitHubOrgID: "9", OrgLogin: "acme", TeamSlug: "security"},
+	}
+	if !reflect.DeepEqual(put.Groups, want) {
+		t.Errorf("PUT echoed %+v; want %+v", put.Groups, want)
 	}
 
 	// Read-back: the stored mappings round-trip.
@@ -376,23 +417,92 @@ func TestUserTeams_WizardWriteReadBack(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode groups: %v; raw=%s", err, rec.Body.String())
 	}
-	if len(resp.Groups) != 2 {
-		t.Fatalf("got %d stored groups, want 2: %+v", len(resp.Groups), resp.Groups)
+	if !reflect.DeepEqual(resp.Groups, want) {
+		t.Fatalf("stored groups = %+v, want %+v", resp.Groups, want)
 	}
 
 	// Idempotent re-run with a subset replaces the set (replace-within-team
-	// semantics), proving Skip-then-configure-later and re-onboarding are safe.
+	// semantics), proving Skip-then-configure-later and re-onboarding are
+	// safe. Every id it names is already held, so GitHub is not read.
+	before := calls
 	rec = doJSON(t, srv, http.MethodPut, "/api/teams/default/github-groups", map[string]any{
-		"groups": []map[string]string{{"org_login": "acme", "team_slug": "platform"}},
+		"github_team_ids": []string{"11"},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("github-groups replace PUT = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if calls != before {
+		t.Errorf("a PUT naming only held teams read GitHub %d time(s); want none", calls-before)
 	}
 	rec = doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups", nil)
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode groups after replace: %v", err)
 	}
-	if len(resp.Groups) != 1 || resp.Groups[0].TeamSlug != "platform" {
+	if len(resp.Groups) != 1 || resp.Groups[0].GitHubTeamID != "11" {
 		t.Errorf("after replace got %+v; want only acme/platform", resp.Groups)
+	}
+}
+
+// The PUT names each GitHub team by GitHub's id. A body of the wrong shape is
+// a 400 naming every bad entry; an id no candidate carries is a 422 naming
+// its entry; and nothing is written either way.
+func TestTeamGitHubGroupsPut_RefusesWhatItCannotResolve(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var calls int
+	groupsCandidateServer(t, srv, &calls)
+
+	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-groups", map[string]any{
+		"github_team_ids": []string{"11"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("seed PUT = %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	for _, tc := range []struct {
+		name   string
+		body   map[string]any
+		status int
+		fields []string
+	}{
+		{"no field", map[string]any{}, http.StatusBadRequest, []string{"github_team_ids"}},
+		{"the handle shape", map[string]any{"groups": []map[string]string{{"org_login": "acme", "team_slug": "platform"}}}, http.StatusBadRequest, nil},
+		{"malformed ids", map[string]any{"github_team_ids": []string{"", "acme/platform", "011", "11", "11"}}, http.StatusBadRequest,
+			[]string{"github_team_ids[0]", "github_team_ids[1]", "github_team_ids[2]", "github_team_ids[4]"}},
+		{"a team no candidate carries", map[string]any{"github_team_ids": []string{"11", "99"}}, http.StatusUnprocessableEntity, []string{"github_team_ids[1]"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-groups", tc.body)
+			if rec.Code != tc.status {
+				t.Fatalf("PUT = %d, want %d; body=%s", rec.Code, tc.status, rec.Body.String())
+			}
+			var errs struct {
+				Errors []struct {
+					Field string `json:"field"`
+				} `json:"errors"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &errs); err != nil {
+				t.Fatalf("decode errors: %v; raw=%s", err, rec.Body.String())
+			}
+			if tc.fields != nil {
+				var got []string
+				for _, e := range errs.Errors {
+					got = append(got, e.Field)
+				}
+				if !reflect.DeepEqual(got, tc.fields) {
+					t.Errorf("error fields = %v, want %v", got, tc.fields)
+				}
+			}
+			rec = doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups", nil)
+			var resp struct {
+				Groups []gitHubGroupJSON `json:"groups"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode groups: %v", err)
+			}
+			if len(resp.Groups) != 1 || resp.Groups[0].GitHubTeamID != "11" {
+				t.Errorf("groups after a refused PUT = %+v; want acme/platform untouched", resp.Groups)
+			}
+		})
 	}
 }

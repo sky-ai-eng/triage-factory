@@ -75,7 +75,7 @@ func mentionKeys(evts []domain.Event) []string {
 }
 
 func mentionComment(id, login, at string, mentions ...string) NewComment {
-	return NewComment{ID: id, Author: login, AuthorID: login, CreatedAt: at, Mentions: mentions}
+	return NewComment{ID: id, Author: login, AuthorID: testGitHubUserIDs[login], CreatedAt: at, Mentions: mentions}
 }
 
 // TestDiffPRSnapshots_Mentioned covers which mentions in new comments and
@@ -136,7 +136,7 @@ func TestDiffPRSnapshots_Mentioned(t *testing.T) {
 			prev.ReviewMarker = &domain.ReviewMarker{}
 			curr := basePRSnapshot()
 			curr.ReviewMarker = &domain.ReviewMarker{}
-			evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testUser, mentionResolver, tc.reviews, tc.comments)
+			evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testSelf, mentionResolver, tc.reviews, tc.comments)
 			assertMentions(t, evts, testEntityID, curr, tc.want)
 		})
 	}
@@ -178,7 +178,7 @@ func TestDiffPRSnapshots_MentionedInBody(t *testing.T) {
 			prev.BodyMentions = tc.prev
 			curr := basePRSnapshot()
 			curr.BodyMentions, curr.UpdatedAt = tc.curr, updatedAt
-			evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testUser, mentionResolver, nil, tc.comments)
+			evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testSelf, mentionResolver, nil, tc.comments)
 			assertMentions(t, evts, testEntityID, curr, tc.want)
 		})
 	}
@@ -189,7 +189,7 @@ func TestDiffPRSnapshots_MentionedInBody(t *testing.T) {
 func TestDiffPRSnapshots_MentionedNotOnFirstDiscovery(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.BodyMentions = []string{"bob", "acme/backend"}
-	if evts := DiffPRSnapshots(domain.PRSnapshot{}, curr, testEntityID, testRepositoryID, testUser, mentionResolver, nil, nil); len(evts) != 0 {
+	if evts := DiffPRSnapshots(domain.PRSnapshot{}, curr, testEntityID, testRepositoryID, testSelf, mentionResolver, nil, nil); len(evts) != 0 {
 		t.Errorf("first discovery emitted %v, want nothing", eventTypes(evts))
 	}
 }
@@ -198,20 +198,22 @@ func TestDiffPRSnapshots_MentionedNotOnFirstDiscovery(t *testing.T) {
 // mention by the identity mentioned, its source and its commenter.
 func TestDiffPRSnapshots_MentionedPredicate(t *testing.T) {
 	prev, curr := basePRSnapshot(), basePRSnapshot()
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testUser, mentionResolver, nil,
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testSelf, mentionResolver, nil,
 		[]NewComment{mentionComment("11", "carol", "2026-10-01T09:00:00Z", "bob")})
 	evt := findEvent(evts, domain.EventGitHubPRMentioned)
 	if evt == nil {
 		t.Fatal("no mentioned event")
 	}
 	for pred, want := range map[string]bool{
-		`{"mentioned_login":"BOB"}`:                    true,
-		`{"mentioned_login":"erin"}`:                   false,
-		`{"mentioned_team":"acme/backend"}`:            false,
-		`{"mention_source":"comment"}`:                 true,
-		`{"mention_source":"body"}`:                    false,
-		allowlist(t, "commenter_in", "Carol"):          true,
-		`{"mentioned_login":"bob","author":"someone"}`: false,
+		`{"mentioned_login":"BOB"}`:                      true,
+		`{"mentioned_login":"erin"}`:                     false,
+		`{"mentioned_team":"acme/backend"}`:              false,
+		`{"mention_source":"comment"}`:                   true,
+		`{"mention_source":"body"}`:                      false,
+		allowlist(t, "commenter_id_in", "1003"):          true,
+		allowlist(t, "commenter_id_in", "1001"):          false,
+		allowlist(t, "commenter_id_in", "carol"):         false,
+		`{"mentioned_login":"bob","author_id_in":["1"]}`: false,
 	} {
 		if got := matchesPredicate(t, *evt, pred); got != want {
 			t.Errorf("%s matched = %v, want %v", pred, got, want)
@@ -222,11 +224,11 @@ func TestDiffPRSnapshots_MentionedPredicate(t *testing.T) {
 // TestLocalReviewerResolver_FoldsCase pins that the local resolver knows the
 // user and their teams however a mention spells them.
 func TestLocalReviewerResolver_FoldsCase(t *testing.T) {
-	r := NewLocalReviewerResolver("AidanAllchin", []string{"Sky-AI-Eng/Backend"})
-	if !r.KnownUser("aidanallchin") || !r.KnownUser("AidanAllchin") || r.KnownUser("someone") {
+	r := NewLocalReviewerResolver(domain.GitHubAccount{Login: "AidanAllchin"}, []string{"Sky-AI-Eng/Backend"})
+	if !r.KnownUser("", "aidanallchin") || !r.KnownUser("", "AidanAllchin") || r.KnownUser("", "someone") {
 		t.Error("KnownUser does not fold case")
 	}
-	if !r.KnownTeam("sky-ai-eng", "backend") || r.KnownTeam("sky-ai-eng", "frontend") {
+	if !r.KnownTeam("", "sky-ai-eng", "backend") || r.KnownTeam("", "sky-ai-eng", "frontend") {
 		t.Error("KnownTeam does not fold case")
 	}
 }
@@ -361,7 +363,7 @@ func TestRefreshGitHub_MentionedEndToEnd(t *testing.T) {
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
-	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, "", nil, mentionResolver); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, mentionResolver); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 
@@ -377,7 +379,7 @@ func TestRefreshGitHub_MentionedEndToEnd(t *testing.T) {
 	}
 
 	before := len(pub.nonSystemEvents())
-	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, "", nil, mentionResolver); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, mentionResolver); err != nil {
 		t.Fatalf("second RefreshGitHub: %v", err)
 	}
 	if after := pub.nonSystemEvents(); len(after) != before {
@@ -397,7 +399,7 @@ func TestRefreshGitHub_KeepsBodyMentionsWithoutTheBody(t *testing.T) {
 	srv := commentRefreshServer(t, `{"totalCount":0,"nodes":[]}`, `{}`, &reads)
 
 	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, runmode.LocalDefaultOrgID)
-	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, ghclient.NewClient(srv.URL, "tok"), "", nil, mentionResolver); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, mentionResolver); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 	if snap := storedPRSnapshot(t, stores, entityID); len(snap.BodyMentions) != 1 || snap.BodyMentions[0] != "bob" || snap.BodyHash != "h" {
@@ -490,14 +492,14 @@ func TestRefreshGitHub_OpenedPRBodyMentions(t *testing.T) {
 	tr := New(database, &recordingPreEnqueuedPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	resolver := knownLogins{"bob": true, "carol": true, "erin": true}
 
-	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, "", []string{"octo/repo"}, resolver); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, []string{"octo/repo"}, resolver); err != nil {
 		t.Fatalf("first RefreshGitHub: %v", err)
 	}
 	if got := storedMentions(t, tr, stores, 1); len(got) != 0 {
 		t.Fatalf("a pull request from the repository's first listing emitted %v", mentionKeys(got))
 	}
 
-	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, "", []string{"octo/repo"}, resolver); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, []string{"octo/repo"}, resolver); err != nil {
 		t.Fatalf("second RefreshGitHub: %v", err)
 	}
 	if got := storedMentions(t, tr, stores, 1); len(got) != 0 {

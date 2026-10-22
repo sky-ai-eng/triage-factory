@@ -13,6 +13,7 @@ import (
 	"time"
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -311,7 +312,7 @@ func TestRefreshGitHub_RateLimitStopsFanOutAndPropagatesDistinctly(t *testing.T)
 	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
-	_, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", repos, nil)
+	_, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, repos, nil)
 
 	var rl *ghclient.ErrRateLimited
 	if !errors.As(err, &rl) {
@@ -375,7 +376,7 @@ func TestRefreshGitHub_RateLimitSeedsAlreadyDiscoveredReposBeforeStopping(t *tes
 	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
-	_, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", repos, nil)
+	_, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, repos, nil)
 
 	var rl *ghclient.ErrRateLimited
 	if !errors.As(err, &rl) {

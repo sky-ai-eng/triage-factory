@@ -1,25 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Section } from './primitives'
 import GitHubTeamChecklist from '../../components/GitHubTeamChecklist'
 import { apiJSON } from '../../lib/apiClient'
-import { keyOf, type GitHubTeamCandidate } from '../../lib/githubTeams'
+import {
+  groupKey,
+  identifyGroups,
+  teamRef,
+  type GitHubTeamCandidate,
+  type GitHubTeamRef,
+} from '../../lib/githubTeams'
 import type { GitHubGroup, TeamGitHubGroupsData } from './teamConfig'
-
-// keyToGroup rebuilds a stored mapping from its case-folded Set key,
-// preferring a live candidate's canonical casing, then an existing selection
-// entry, then a raw split — so a toggle never corrupts org/slug casing.
-function keyToGroup(
-  k: string,
-  candidates: GitHubTeamCandidate[],
-  current: GitHubGroup[],
-): GitHubGroup {
-  const cand = candidates.find((c) => keyOf(c.org_login, c.team_slug) === k)
-  if (cand) return { org_login: cand.org_login, team_slug: cand.team_slug }
-  const cur = current.find((g) => keyOf(g.org_login, g.team_slug) === k)
-  if (cur) return cur
-  const [org_login, team_slug] = k.split('/')
-  return { org_login, team_slug }
-}
 
 /**
  * GitHubTeamGroup is the team-scope GitHub-team → TF-team mapping field
@@ -29,11 +19,11 @@ function keyToGroup(
  * groups — so the same group serves the team Settings tab and the setup
  * wizard's team steps.
  *
- * It self-fetches the org-wide candidate list (the GET also re-triggers the
- * server's deletion reconcile) and renders the shared GitHubTeamChecklist
- * body — the same search / filter / bounded list / badges both prior mapping
- * surfaces used. On first load it seeds the selection up via onLoaded: a
- * prior saved set wins; otherwise, when includeMembership is set (the
+ * It self-fetches the org-wide candidate list and renders the shared
+ * GitHubTeamChecklist body. On first load it seeds the selection up via
+ * onLoaded: a prior saved set wins, with any mapping the server has not
+ * identified by GitHub's id yet matched to its candidate (identifyGroups) so
+ * a save can name it; otherwise, when includeMembership is set (the
  * onboarding default), the acting admin's own teams (`mine`) start checked.
  */
 export default function GitHubTeamGroup({
@@ -95,11 +85,9 @@ export default function GitHubTeamGroup({
         const saved = data.groups ?? []
         const seed =
           saved.length > 0
-            ? saved
+            ? identifyGroups(saved, cands)
             : includeMembership
-              ? cands
-                  .filter((c) => c.mine)
-                  .map((c) => ({ org_login: c.org_login, team_slug: c.team_slug }))
+              ? cands.filter((c) => c.mine).map(teamRef)
               : []
         onLoadedRef.current?.(seed)
       }
@@ -128,17 +116,13 @@ export default function GitHubTeamGroup({
     void load()
   }, [refreshSignal, load])
 
-  const selected = useMemo(
-    () => new Set(value.map((g) => keyOf(g.org_login, g.team_slug))),
-    [value],
-  )
-
-  const toggle = (org: string, slug: string) => {
-    const k = keyOf(org, slug)
-    const next = new Set(selected)
-    if (next.has(k)) next.delete(k)
-    else next.add(k)
-    onChange(Array.from(next).map((key) => keyToGroup(key, candidates, value)))
+  const toggle = (team: GitHubTeamRef) => {
+    const k = groupKey(team)
+    onChange(
+      value.some((g) => groupKey(g) === k)
+        ? value.filter((g) => groupKey(g) !== k)
+        : [...value, teamRef(team)],
+    )
   }
 
   const inner = (
@@ -162,13 +146,14 @@ export default function GitHubTeamGroup({
         >
           Assign GitHub teams to this Triage Factory team. When a pull request requests review from
           one of these GitHub teams (via CODEOWNERS), the work routes to this team&rsquo;s board.
-          Names only — no membership or nesting is read.
+          Teams are matched by GitHub&rsquo;s id, so renaming one keeps its mapping. No membership
+          or nesting is read.
         </p>
       </div>
 
       <GitHubTeamChecklist
         candidates={candidates}
-        selected={selected}
+        selected={value}
         onToggle={toggle}
         loading={loading}
         error={loadError}

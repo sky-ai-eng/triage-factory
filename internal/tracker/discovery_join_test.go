@@ -124,7 +124,7 @@ func TestRefreshGitHub_GatesAnEntityWhoseKeySpellsAnotherName(t *testing.T) {
 				t.Fatalf("ListTrackedNamesSystem: %v", err)
 			}
 			tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
-			if _, _, err := tr.RefreshGitHub(ctx, cursorTestHost, ghclient.NewClient(srv.URL, "tok"), "", names, nil); err != nil {
+			if _, _, err := tr.RefreshGitHub(ctx, cursorTestHost, ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, names, nil); err != nil {
 				t.Fatalf("RefreshGitHub: %v", err)
 			}
 

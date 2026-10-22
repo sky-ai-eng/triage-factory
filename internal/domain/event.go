@@ -63,9 +63,10 @@ const (
 	EventGitHubPRReviewDismissed        = "github:pr:review_dismissed"
 
 	// "A reviewer was requested on a PR" — emitted once per newly-requested
-	// TF-known identity, dedup_key namespacing the requested reviewer
-	// ("user:<login>" / "team:<org>/<slug>"). The task routes to that
-	// identity's team(s).
+	// TF-known identity, dedup_key namespacing the requested reviewer by
+	// GitHub's id ("user_id:<id>" / "team_id:<id>"), or by handle ("user:<login>"
+	// / "team:<org>/<slug>") for a request read without one. The task routes
+	// to that identity's team(s).
 	EventGitHubPRReviewRequested = "github:pr:review_requested"
 
 	// "A requested reviewer was removed" — emitted per-identity when a

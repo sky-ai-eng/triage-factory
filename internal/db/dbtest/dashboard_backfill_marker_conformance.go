@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
@@ -14,7 +15,7 @@ import (
 type DashboardBackfillMarkerFactory func(t *testing.T) (users db.UsersStore, seedUser func(t *testing.T) string)
 
 // RunDashboardBackfillMarkerConformance is the shared assertion suite for the
-// TFAC-396 dashboard-backfill marker. It pins, identically across SQLite and
+// dashboard-backfill marker. It pins, identically across SQLite and
 // Postgres:
 //
 //   - the marker starts unset on a fresh identity binding;
@@ -22,10 +23,11 @@ type DashboardBackfillMarkerFactory func(t *testing.T) (users db.UsersStore, see
 //   - the stamp is login-guarded: marking with a login that no longer matches
 //     the row no-ops, so an in-flight backfill for a since-replaced login can't
 //     strand the new login as "already backfilled";
-//   - a no-op re-bind (same login) preserves it, so an unchanged login never
-//     re-fires the search burst;
-//   - a re-bind to a DIFFERENT login clears it, so the new login's history is
-//     re-seeded.
+//   - a no-op re-bind (same login, same account) preserves it, so an
+//     unchanged login never re-fires the search burst;
+//   - a re-bind to a DIFFERENT login clears it, the same account renamed
+//     included, so the new login's history is re-seeded, and so does a
+//     different account under the same login.
 func RunDashboardBackfillMarkerConformance(t *testing.T, mk DashboardBackfillMarkerFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -106,6 +108,48 @@ func RunDashboardBackfillMarkerConformance(t *testing.T, mk DashboardBackfillMar
 		}
 		if at != nil {
 			t.Errorf("marker = %v after login change; want nil (reset)", at)
+		}
+	})
+
+	// marked binds u to (login, id), stamps the marker, and re-binds to
+	// (newLogin, newID), returning the marker the re-bind leaves.
+	marked := func(t *testing.T, login, id, newLogin, newID string) *time.Time {
+		t.Helper()
+		users, seedUser := mk(t)
+		u := seedUser(t)
+		if err := users.UpsertGitHubIdentity(ctx, u, host, login, id, "", "pat"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity: %v", err)
+		}
+		if err := users.MarkDashboardBackfilledSystem(ctx, u, host, login); err != nil {
+			t.Fatalf("MarkDashboardBackfilledSystem: %v", err)
+		}
+		if err := users.UpsertGitHubIdentity(ctx, u, host, newLogin, newID, "", "connect_oauth"); err != nil {
+			t.Fatalf("re-bind: %v", err)
+		}
+		at, err := users.DashboardBackfilledAtSystem(ctx, u, host)
+		if err != nil {
+			t.Fatalf("DashboardBackfilledAtSystem: %v", err)
+		}
+		return at
+	}
+
+	t.Run("RenameOfTheSameAccountResetsMarker", func(t *testing.T) {
+		// The backfill searched author:<login>, so the same account under a
+		// new login still owes the search its new login answers.
+		if at := marked(t, "octocat", "583231", "octonew", "583231"); at != nil {
+			t.Errorf("marker = %v after the same account's rename; want nil (reset)", at)
+		}
+	})
+
+	t.Run("AnotherAccountUnderTheSameLoginResetsMarker", func(t *testing.T) {
+		if at := marked(t, "octocat", "583231", "octocat", "999"); at != nil {
+			t.Errorf("marker = %v after binding another account under the same login; want nil (reset)", at)
+		}
+	})
+
+	t.Run("SameAccountCaptureWithoutAnIDPreservesMarker", func(t *testing.T) {
+		if at := marked(t, "octocat", "583231", "octocat", ""); at == nil {
+			t.Error("marker cleared by a same-login capture that carried no id; want preserved")
 		}
 	})
 

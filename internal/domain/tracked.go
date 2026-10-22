@@ -16,10 +16,15 @@ const GitHubBotLoginSuffix = "[bot]"
 // Every field here can trigger events when it changes between poll cycles.
 type PRSnapshot struct {
 	// Identity
-	NodeID   string `json:"node_id"` // GitHub GraphQL node ID — stored in snapshot for entity-based refresh
-	Number   int    `json:"number"`
-	Title    string `json:"title"`
-	Author   string `json:"author"`    // login of the PR author, REST-spelled ("<slug>[bot]" for a bot)
+	NodeID string `json:"node_id"` // GitHub GraphQL node ID — stored in snapshot for entity-based refresh
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Author string `json:"author"` // login of the PR author, REST-spelled ("<slug>[bot]" for a bot)
+	// AuthorID is GitHub's id for the author's account, which a rename leaves
+	// alone; Author is what the account is called now. Empty on a snapshot
+	// stored before ids were recorded, and for an author GitHub returns
+	// without one (a deleted account).
+	AuthorID string `json:"author_id,omitempty"`
 	Repo     string `json:"repo"`      // "owner/repo"
 	HeadRepo string `json:"head_repo"` // fork repo if different
 	URL      string `json:"url"`
@@ -54,9 +59,14 @@ type PRSnapshot struct {
 	CheckRuns []CheckRun `json:"check_runs"`
 
 	// Reviews
-	ReviewRequests []string      `json:"review_requests"` // logins of users/teams with pending requests
-	Reviews        []ReviewState `json:"reviews"`         // latest review per reviewer
-	ReviewCount    int           `json:"review_count"`    // total reviews submitted
+	ReviewRequests []string `json:"review_requests"` // logins of users/teams with pending requests
+	// ReviewRequestIDs maps an entry of ReviewRequests to GitHub's id for
+	// the requested user or team. An entry GitHub returned without an id has
+	// none here, and a snapshot stored before ids were recorded has no map.
+	// RequestedReviewers reads the two together.
+	ReviewRequestIDs map[string]string `json:"review_request_ids,omitempty"`
+	Reviews          []ReviewState     `json:"reviews"`      // latest review per reviewer
+	ReviewCount      int               `json:"review_count"` // total reviews submitted
 	// ReviewMarker is the newest submitted review, the point the next poll
 	// reads new reviews from. nil on a snapshot stored before the marker
 	// existed and on one seeded from the REST listing of open pull requests,
@@ -107,6 +117,55 @@ type PRSnapshot struct {
 	Body string `json:"-"`
 }
 
+// RequestedReviewer is one pending review request on a pull request: the
+// requested user (Handle is the login) or team (Handle is "org/slug"), and
+// GitHub's id for it when known.
+type RequestedReviewer struct {
+	Handle string
+	ID     string
+	Team   bool
+}
+
+// Same reports whether r and o name the same requested reviewer: by GitHub's
+// id when both carry one, so a renamed user or team is still the same
+// reviewer and a handle GitHub has given to another account is not; by
+// handle when either lacks it, as a snapshot stored before ids were recorded
+// does.
+func (r RequestedReviewer) Same(o RequestedReviewer) bool {
+	if r.Team != o.Team {
+		return false
+	}
+	if r.ID != "" && o.ID != "" {
+		return r.ID == o.ID
+	}
+	return r.Handle == o.Handle
+}
+
+// RequestedReviewers returns the snapshot's pending review requests in
+// ReviewRequests order, each with its id from ReviewRequestIDs. A team entry
+// is the one whose handle has a slash, which a login cannot contain.
+func (s PRSnapshot) RequestedReviewers() []RequestedReviewer {
+	out := make([]RequestedReviewer, 0, len(s.ReviewRequests))
+	for _, h := range s.ReviewRequests {
+		if h == "" {
+			continue
+		}
+		out = append(out, RequestedReviewer{Handle: h, ID: s.ReviewRequestIDs[h], Team: strings.Contains(h, "/")})
+	}
+	return out
+}
+
+// HasRequestedReviewer reports whether one of the snapshot's pending review
+// requests is the same reviewer as r (RequestedReviewer.Same).
+func (s PRSnapshot) HasRequestedReviewer(r RequestedReviewer) bool {
+	for _, o := range s.RequestedReviewers() {
+		if o.Same(r) {
+			return true
+		}
+	}
+	return false
+}
+
 // TimelineEvent is one entry from GitHub's PullRequest.timelineItems.
 // Kind discriminates which fields are populated. Only the event types we
 // actually use for source-time enrichment are modeled here — adding a new
@@ -134,9 +193,12 @@ type ReviewState struct {
 	ID string `json:"id,omitempty"`
 	// DatabaseID is the review's numeric id, the one REST and the review
 	// events carry. Zero on snapshots from before the field existed.
-	DatabaseID  int64  `json:"database_id,omitempty"`
-	Author      string `json:"author"` // reviewer login, REST-spelled ("<slug>[bot]" for a bot)
-	State       string `json:"state"`  // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
+	DatabaseID int64  `json:"database_id,omitempty"`
+	Author     string `json:"author"` // reviewer login, REST-spelled ("<slug>[bot]" for a bot)
+	// AuthorID is GitHub's id for the reviewer's account. Empty on snapshots
+	// from before the field existed.
+	AuthorID    string `json:"author_id,omitempty"`
+	State       string `json:"state"` // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
 	SubmittedAt string `json:"submitted_at"`
 	// CommentCount is how many inline comments the review holds.
 	CommentCount int `json:"comment_count,omitempty"`

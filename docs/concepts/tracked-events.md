@@ -23,7 +23,7 @@ most one active task exists per entity, event type and `dedup_key`.
 
 | Event | ID | Trigger | `dedup_key` |
 |-------|----|---------|-------------|
-| **Review Requested** | `github:pr:review_requested` | A user or team appears in the PR's review requests, and it is an identity TF knows: a user's login, or a team (`org/slug`) a user belongs to. One event per such reviewer. In local mode, not emitted on a PR the local user authored, where only a team they are on can be requested. A PR seen for the first time emits it for every request already on it | `user:<login>` / `team:<org>/<slug>` |
+| **Review Requested** | `github:pr:review_requested` | A user or team appears in the PR's review requests, and it is an identity TF knows: a user bound to a TF user, or a team (`org/slug`) mapped to a TF team. One event per such reviewer. In local mode, not emitted on a PR the local user authored, where only a team they are on can be requested. A PR seen for the first time emits it for every request already on it. See [Review requests](#review-requests) | `user_id:<id>` / `team_id:<id>`, or `user:<login>` / `team:<org>/<slug>` for a request read without GitHub's id |
 | **Changes Requested** | `github:pr:review_changes_requested` | A review requesting changes was submitted — see [Reviews](#reviews) | — |
 | **Review: Commented** | `github:pr:review_commented` | A review with comments only was submitted, a reply in a review thread included — see [Reviews](#reviews) | — |
 | **CI Check Failed** | `github:pr:ci_check_failed` | A check run on the head commit completes with `failure`, `timed_out`, `cancelled` or `action_required`. One event per check run; a check run already failing last cycle, by id, does not emit again, and a re-run is a new check run | — |
@@ -40,7 +40,7 @@ most one active task exists per entity, event type and `dedup_key`.
 |-------|----|---------|-------------|
 | **Review: Approved** | `github:pr:review_approved` | An approving review was submitted — see [Reviews](#reviews) | — |
 | **Review: Dismissed** | `github:pr:review_dismissed` | A reviewer's latest review was dismissed — see [Reviews](#reviews) | — |
-| **Review Request Removed** | `github:pr:review_request_removed` | A reviewer TF knows drops off the review requests, because they reviewed or the request was withdrawn. Closes that reviewer's `review_requested` task | `user:<login>` / `team:<org>/<slug>` |
+| **Review Request Removed** | `github:pr:review_request_removed` | A reviewer TF knows drops off the review requests, because they reviewed or the request was withdrawn. Closes that reviewer's `review_requested` task, keyed by id or by handle | keyed as `review_requested` |
 | **CI Check Passed** | `github:pr:ci_check_passed` | A check run completes with any other conclusion (`success`, `neutral`, `skipped`, `stale`) and was not already passing | — |
 | **New Commits** | `github:pr:new_commits` | The head commit changes | — |
 | **PR Body Updated** | `github:pr:body_updated` | The complete PR body changes, including clearing it | — |
@@ -114,6 +114,33 @@ How the new reviews are found:
   move for up to ten minutes. A review that did not advance `updatedAt` waits
   for that floor.
 
+#### Review requests
+
+A pending review request is recorded in the snapshot by the requested user's
+login or team's `org/slug`, and by GitHub's id for that user or team
+(`review_request_ids`). Each cycle compares the requests by id when both
+snapshots carry one, so a user or team renamed between cycles is neither added
+nor removed, and a login GitHub has handed to another account is a different
+reviewer. Against a snapshot stored before ids were recorded the comparison is
+by handle, so the first cycle after ids arrive emits nothing.
+
+The event's `dedup_key` is `user_id:<id>` or `team_id:<id>`, and the metadata
+carries `requested_user_id` or `requested_team_id` beside `requested_login` or
+`requested_team`. A request GitHub returned without an id is keyed and
+carried by its handle alone (`user:<login>` / `team:<org>/<slug>`), as is
+every task created before ids were recorded. A removal
+(`github:pr:review_request_removed`) closes the reviewer's task keyed either
+way: it is keyed like the request and names the handle beside the id. A
+submitted review closes its reviewer's task by `reviewer_id` or by
+`reviewer`.
+
+A requested user resolves to a TF user by GitHub's id when the event carries
+one (a binding that recorded no id is matched by its login), and a requested
+team to the TF team(s) whose mapping holds that GitHub team id. In local mode
+the PR is the local user's own when its `author_id` is the local binding's
+GitHub id, or, when either is missing, when its `author` is the binding's
+login.
+
 #### Mentions
 
 `github:pr:mentioned` reports a user or team TF knows being @-mentioned on a
@@ -162,9 +189,12 @@ inline comment in a review) or `body`. `commenter` and `comment_id` name the
 comment or review: a review's id for `review`, and both empty for `body`. The
 event also carries the PR's `author`, `repo`, `pr_number`, `is_draft`,
 `head_sha` and `labels`. Predicates can filter on `mentioned_login`,
-`mentioned_team`, `mention_source`, `commenter_in`, `commenter`, `author_in`,
-`author`, `repo_in`, `is_draft` and `has_label`; a body mention has no commenter,
-so no `commenter_in` list matches it. The event's time is the comment's
+`mentioned_team`, `mention_source`, `commenter_id_in`, `author_id_in`,
+`repo_in`, `is_draft` and `has_label`; a body mention has no commenter, so no
+`commenter_id_in` list matches it. `mentioned_login` and `mentioned_team` take
+the handle, compared without regard to case, because a mention is text and
+names no id; `commenter_id_in` and `author_id_in` take GitHub account ids (see
+[Identity filters](#identity-filters)). The event's time is the comment's
 creation or the review's submission. The body records no time for an edit, so a
 body mention takes the PR's `updatedAt`.
 
@@ -288,10 +318,13 @@ rule (Cloud `accountId`, else Data Center `key`, else `name`), so a
 `commenter_in` list holds the same values as an `assignee_in` list. A Linear
 comment an integration posted names the integration as `commenter` and has no
 user id, so no `commenter_in` list matches it. On GitHub the commenter is a
-login, `<slug>[bot]` for a bot, whose comments emit like anyone's; the GitHub
-event also carries the PR's `author`, `repo`, `pr_number`, `is_draft`,
-`head_sha` and `labels`, and predicates can filter it on `author_in`, `repo_in`,
-`is_draft` and `has_label`. The event's time is the newest comment's.
+login, `<slug>[bot]` for a bot, whose comments emit like anyone's, and the
+metadata carries GitHub's id for each author (`commenter_id`,
+`commenter_ids`); the GitHub predicate's `commenter_id_in` matches when anyone
+it lists, by account id, wrote one of them. The GitHub event also carries the
+PR's `author`, `repo`, `pr_number`, `is_draft`, `head_sha` and `labels`, and
+predicates can filter it on `author_id_in`, `repo_in`, `is_draft` and
+`has_label`. The event's time is the newest comment's.
 
 GitHub's event covers the PR's conversation only. A comment in a review thread
 belongs to a review and emits as one (see [Reviews](#reviews)). Edits to a
@@ -865,13 +898,14 @@ the old repository's #N, and the two never merge.
 
 The tracker stores these fields for each PR and diffs them between cycles:
 
-- `number`, `title`, `author`, `repo`, `head_repo`, `url`
+- `number`, `title`, `author`, `author_id` (GitHub's id for the author's account), `repo`, `head_repo`, `url`
 - `state` (OPEN, CLOSED, MERGED), `is_draft`, `merged`, `mergeable` (MERGEABLE, CONFLICTING, UNKNOWN)
 - `head_ref`, `base_ref`, `head_sha`
 - `additions`, `deletions`, `changed_files`
 - `check_runs[]` — structured per-check-run data for the current head SHA, deduped by name (latest execution wins). Each entry: `id`, `name`, `status`, `conclusion`, `completed_at`, `details_url`, `workflow_run_id`. `details_url` is GitHub's `details_url` — the CI provider's "more info" link (for Actions: `/actions/runs/N/job/M`; for third-party CI: provider-defined), not GitHub's narrower check-run page URL.
 - `review_requests[]` — pending reviewer identifiers: user logins for direct requests, `org/slug` for team requests
-- `reviews[]` — latest review per reviewer: `id` (node id), `database_id`, `author`, `state`, `submitted_at`, `comment_count`
+- `review_request_ids` — GitHub's id for each entry of `review_requests` that GitHub returned one for, keyed by the entry; see [Review requests](#review-requests)
+- `reviews[]` — latest review per reviewer: `id` (node id), `database_id`, `author`, `author_id`, `state`, `submitted_at`, `comment_count`
 - `review_count` — the number of submitted reviews
 - `review_marker` — the newest submitted review TF has read, `{id, submitted_at}`; see [Reviews](#reviews)
 - `labels[]`, `updated_at`
@@ -880,7 +914,18 @@ The tracker stores these fields for each PR and diffs them between cycles:
 - `comment_count` — the number of conversation comments
 - `comment_marker` — the newest conversation comment TF has read, `{id, created_at}`; see [Comments](#comments)
 
-`author` and each review's `author` are logins as GitHub's REST API spells them: a bot is `<slug>[bot]` (`dependabot[bot]`), the form event metadata carries as `author` and `reviewer` and the form a handler predicate such as `author_in` must use. GraphQL returns a bot's login without the suffix; the snapshot builder adds it.
+`author` and each review's `author` are logins as GitHub's REST API spells them: a bot is `<slug>[bot]` (`dependabot[bot]`), the form event metadata carries as `author` and `reviewer`. GraphQL returns a bot's login without the suffix; the snapshot builder adds it. Beside every login the snapshot records GitHub's id for the account (`author_id`), which a rename does not change. A snapshot stored before ids were recorded has none, and neither does an actor GitHub returns without one (a deleted account).
+
+Every GitHub event's metadata carries the ids beside the logins it names: `author_id` for the PR author, `reviewer_id` on the review events, `commenter_id` (and `commenter_ids`, beside `commenter_logins`) on `commented`, `commenter_id` on `mentioned`, and `requested_user_id` / `requested_team_id` on the review-request events. A mention has no id of its own: `mentioned_login` and `mentioned_team` are the handle the text spelled, and a mention is resolved and keyed by it. An event recorded before ids were carries none.
+
+#### Identity filters
+
+A GitHub handler predicate names people and teams by GitHub's id, which a rename does not change, never by login:
+
+- `author_id_in` (every GitHub event), `reviewer_id_in` (the review events), `commenter_id_in` (`commented` and `mentioned`) and `requested_user_id_in` (`review_requested`, `review_request_removed`) take GitHub account ids, matched exactly against `author_id`, `reviewer_id`, `commenter_ids` / `commenter_id` and `requested_user_id`. A team member's id is the `github_user_id` of `GET /api/me` and of the team roster (`POST /api/teams/{team_id}/members/list`). Any other account, a bot included, is resolved from its login through the org's GitHub credential with `GET /api/orgs/{org_id}/github/users/by-name/{login}`, which answers `404` for a login no account holds; `GET /api/orgs/{org_id}/github/users/{github_user_id}` names an id by its current login. Creating, editing or promoting a handler refuses an entry that is not an account id, a login included, with `422 INVALID_FIELD` on `scope_predicate`.
+- `requested_team_id_in` (`review_requested`, `review_request_removed`) takes GitHub team ids, matched against `requested_team_id`. Each entry must be the `github_team_id` of one of the handler's team's GitHub-team mappings (`GET /api/teams/{team_id}/github-groups`), the teams whose review requests route to it, and any other entry, an `org/slug` included, is refused with `422 INVALID_FIELD` on `scope_predicate`.
+
+As with `repo_in`, an edit is checked only for the entries it adds. An empty list filters nothing. An event recorded before ids were carries none, so an identity filter never matches it: re-evaluating such an event (a deferred trigger re-scored on an old task, an injected follow-up) finds no match. A GitHub predicate has no login-valued identity field: `author_in`, `author`, `reviewer_in`, `reviewer`, `commenter_in`, `commenter`, `requested_login` and `requested_team` are unknown fields, refused with `400`. A local install's stored predicates are migrated to the id fields, each login replaced by the id of the identity binding holding it on the org's GitHub host. An entry the migration could not resolve, a login no binding with an id holds or a team's `org/slug`, stays as written and matches nothing until the handler is edited.
 
 Every GitHub event's metadata names its repository twice: `repo`, the `owner/name` it had when the event fired, and `repository_id`, the repository's registry row, which a rename does not move. A handler predicate scopes to repositories with `repo_in`, which names them by registry id (the `id` field of `POST /api/repos/list` with `team_id`), not by `owner/name`. A team's handlers only ever see events from repositories the team tracks — the router's team gate asks about the registry row the event's pull request references, never the name in its key — so an empty `repo_in` matches every one of them, and each entry must be a repository the handler's team tracks. Creating, editing or promoting a handler refuses any other entry, an `owner/name` included, with `422 INVALID_FIELD` on `scope_predicate`. An edit is checked only for the entries it adds, so a repository the team has since stopped tracking never blocks an edit that leaves it in place.
 

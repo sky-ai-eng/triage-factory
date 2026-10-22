@@ -758,19 +758,28 @@ CREATE TABLE public.linear_team_rules (
 );
 
 
--- One row per (team, host, github_org_login, github_team_slug): a team routing
--- a GitHub team's review requests to itself. Dumb string labels, no membership
--- resolution. Pure key tuples — edits are replace-sets, so no UPDATE policy.
--- host is the GitHub host (domain.GitHubHost) the GitHub team lives on: an org
--- login names a different organization on another host, so every read and the
--- deletion reconcile see only the org's current host's rows.
+-- One row per (team, host, github_team_id): a team routing a GitHub team's
+-- review requests to itself. No membership resolution. github_team_id is
+-- GitHub's id for the team and github_org_id its id for the organization the
+-- team is in; routing and the deletion reconcile match on them.
+-- github_org_login and github_team_slug are display values, refreshed by the
+-- reconcile when GitHub renames the organization or the team, and matched only
+-- for a mention, which names a team by its handle. A request handler writes a
+-- replace-set, so tf_app has no UPDATE; the refresh runs on the admin pool.
+-- host is the GitHub host (domain.GitHubHost) the GitHub team lives on: an id
+-- is unique only on its host, so every read and the deletion reconcile see
+-- only the org's current host's rows.
 CREATE TABLE public.team_github_groups (
     team_id uuid NOT NULL,
     host text NOT NULL,
+    github_team_id text NOT NULL,
+    github_org_id text NOT NULL,
     github_org_login text NOT NULL,
     github_team_slug text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT tgg_host_populated CHECK (host <> ''),
+    CONSTRAINT tgg_team_id_populated CHECK (github_team_id <> ''),
+    CONSTRAINT tgg_org_id_populated CHECK (github_org_id <> ''),
     CONSTRAINT tgg_org_login_populated CHECK (github_org_login <> ''),
     CONSTRAINT tgg_team_slug_populated CHECK (github_team_slug <> '')
 );
@@ -1693,7 +1702,7 @@ ALTER TABLE ONLY public.linear_team_rules
 
 
 ALTER TABLE ONLY public.team_github_groups
-    ADD CONSTRAINT team_github_groups_pkey PRIMARY KEY (team_id, host, github_org_login, github_team_slug);
+    ADD CONSTRAINT team_github_groups_pkey PRIMARY KEY (team_id, host, github_team_id);
 
 
 ALTER TABLE ONLY public.team_github_repos
@@ -1892,6 +1901,12 @@ CREATE INDEX idx_entities_key ON public.entities USING btree (org_id, source, sc
 -- Serves the dashboard PR list's author predicate; expression and partial predicate match it.
 
 CREATE INDEX idx_entities_github_author ON public.entities USING btree (org_id, ((snapshot_json ->> 'author'::text)), last_polled_at DESC) WHERE ((source = 'github'::text) AND (snapshot_json IS NOT NULL));
+
+
+-- The same predicate's GitHub-account-id arm: the author's GitHub id, which a
+-- rename leaves alone, beside the login above.
+
+CREATE INDEX idx_entities_github_author_id ON public.entities USING btree (org_id, ((snapshot_json ->> 'author_id'::text)), last_polled_at DESC) WHERE ((source = 'github'::text) AND (snapshot_json IS NOT NULL));
 
 
 -- Serves the personal pull-request list's commissioned-by leg, OR-ed with the
@@ -2127,6 +2142,11 @@ CREATE INDEX team_agents_agent_idx ON public.team_agents USING btree (agent_id);
 CREATE INDEX team_agents_team_idx ON public.team_agents USING btree (team_id);
 
 
+-- Routing's lookup: which teams a GitHub team's review requests route to. The
+-- primary key leads with team_id and cannot serve it.
+CREATE INDEX team_github_groups_github_team_idx ON public.team_github_groups USING btree (host, github_team_id);
+
+
 -- Reverse lookup: which teams track this repository. The primary key leads with
 -- team_id and cannot serve it; the tracked-set semi-joins never pin a team.
 CREATE INDEX team_github_repos_repository_idx ON public.team_github_repos USING btree (repository_id, team_id);
@@ -2148,6 +2168,11 @@ CREATE INDEX jira_project_status_rules_project_idx ON public.jira_project_status
 -- because GitHub logins are case-insensitive while writers store them as captured;
 -- github_base_url leads because identity is host-scoped.
 CREATE INDEX user_github_identities_login_lookup_idx ON public.user_github_identities USING btree (github_base_url, lower(login));
+
+
+-- Reverse (host, GitHub account id) -> user lookup, for an event that names its
+-- actor by GitHub's id rather than by login.
+CREATE INDEX user_github_identities_user_id_lookup_idx ON public.user_github_identities USING btree (github_base_url, github_user_id) WHERE (github_user_id IS NOT NULL);
 
 
 CREATE TRIGGER org_memberships_keep_owner_on_delete AFTER DELETE ON public.org_memberships REFERENCING OLD TABLE AS affected FOR EACH STATEMENT EXECUTE FUNCTION tf.guard_org_owners();

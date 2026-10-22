@@ -81,6 +81,12 @@ type Task struct {
 	// card surfaces this count to say how much of the conversation is
 	// waiting — it rises as follow-ups land while a conversation is in flight.
 	SlackMessageCount int `json:"slack_message_count,omitempty"`
+	// RequestedReviewer is, on a github:pr:review_requested task, the
+	// requested user's login or team's "org/slug" as the event that last
+	// bumped the task named it; empty on every other task. Display only: the
+	// task's dedup_key is what identifies the reviewer, by GitHub's id when
+	// the request carried one, and an id says nothing a person can read.
+	RequestedReviewer string `json:"requested_reviewer,omitempty"`
 
 	// MemoryPending says a conversation on this task ended without leaving a
 	// memory behind, and nothing has filed one for it yet. Derived on every

@@ -1619,6 +1619,11 @@ func (s *Server) routes() {
 	// always-available fallback to Connect (and the only path when no App is
 	// registered). Never stores the token.
 	s.apiMutating("POST /api/orgs/{org_id}/github/identity/pat", s.handleGitHubIdentityPAT)
+	// GitHub accounts on the org's GitHub, read through the org's credential:
+	// a login resolved to the account id a GitHub predicate's identity filters
+	// take, and an id named by its current login.
+	s.api("GET /api/orgs/{org_id}/github/users/by-name/{login}", s.handleGitHubAccountByName)
+	s.api("GET /api/orgs/{org_id}/github/users/{github_user_id}", s.handleGitHubAccountByID)
 
 	// The org's Jira credential — the Jira half of the addressable-resource
 	// pair whose rationale sits with the GitHub PAT routes above.

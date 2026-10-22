@@ -36,6 +36,10 @@ func (s *usersStore) GetGitHubLogin(ctx context.Context, userID, githubBaseURL s
 	return login, nil
 }
 
+func (s *usersStore) GetGitHubIdentitySystem(ctx context.Context, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error) {
+	return s.GetGitHubIdentity(ctx, userID, githubBaseURL)
+}
+
 func (s *usersStore) GetGitHubIdentity(ctx context.Context, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error) {
 	var (
 		id       domain.UserGitHubIdentity
@@ -79,30 +83,27 @@ func (s *usersStore) HoldsVerifiedEmailSystem(context.Context, string, string) (
 
 func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBaseURL, login, githubUserID, email, source string) error {
 	// FK on user_id enforces the row-exists contract: a missing user
-	// surfaces as a FOREIGN KEY constraint error, matching the old
-	// SetGitHubUsername "user not found" guard.
+	// surfaces as a FOREIGN KEY constraint error.
 	//
-	// github_user_id is COALESCEd, unlike login: a capture that learned no id
-	// leaves a known one alone rather than erasing it — see the interface doc.
+	// The account test (see the interface doc) is repeated in each column it
+	// guards, since SET cannot name a shared expression.
 	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO user_github_identities
 			(user_id, github_base_url, login, github_user_id, email, source, verified_at, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		ON CONFLICT(user_id, github_base_url) DO UPDATE SET
 			login          = excluded.login,
-			github_user_id = COALESCE(excluded.github_user_id, user_github_identities.github_user_id),
-			email           = CASE
-				WHEN user_github_identities.login <> excluded.login THEN excluded.email
+			github_user_id = CASE
+				WHEN `+sqliteGitHubAccountChanged+` THEN excluded.github_user_id
+				ELSE COALESCE(excluded.github_user_id, user_github_identities.github_user_id) END,
+			email          = CASE
+				WHEN `+sqliteGitHubAccountChanged+` THEN excluded.email
 				ELSE COALESCE(excluded.email, user_github_identities.email) END,
 			source         = excluded.source,
 			verified_at    = excluded.verified_at,
 			updated_at     = CURRENT_TIMESTAMP,
-			-- A rename / re-bind to a different login invalidates the prior
-			-- login's dashboard backfill: clear the marker so the new login's
-			-- history is re-seeded (TFAC-396). A no-op re-bind (same login)
-			-- keeps the marker, so it never re-fires the search burst.
 			dashboard_backfilled_at = CASE
-				WHEN user_github_identities.login <> excluded.login THEN NULL
+				WHEN `+sqliteGitHubAccountChanged+` OR user_github_identities.login IS NOT excluded.login THEN NULL
 				ELSE user_github_identities.dashboard_backfilled_at END
 	`, userID, db.NormalizeGitHubHost(githubBaseURL), login, nullString(githubUserID), nullString(email), source)
 	if err != nil {
@@ -110,6 +111,16 @@ func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBas
 	}
 	return nil
 }
+
+// sqliteGitHubAccountChanged is UpsertGitHubIdentity's account test inside
+// its ON CONFLICT arm: true when the capture names a different GitHub account
+// than the stored row. Ids decide when both sides carry one; otherwise the
+// logins do, compared case-insensitively as GitHub compares them (logins are
+// ASCII, which is all SQLite's lower() folds).
+const sqliteGitHubAccountChanged = `(CASE
+				WHEN user_github_identities.github_user_id IS NOT NULL AND excluded.github_user_id IS NOT NULL
+					THEN user_github_identities.github_user_id <> excluded.github_user_id
+				ELSE lower(user_github_identities.login) <> lower(excluded.login) END)`
 
 func (s *usersStore) ClearGitHubIdentity(ctx context.Context, userID, githubBaseURL string) error {
 	if _, err := s.q.ExecContext(ctx,
@@ -202,10 +213,6 @@ func (s *usersStore) GetGitHubLoginSystem(ctx context.Context, userID, githubBas
 	return s.GetGitHubLogin(ctx, userID, githubBaseURL)
 }
 
-func (s *usersStore) GetGitHubIdentitySystem(ctx context.Context, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error) {
-	return s.GetGitHubIdentity(ctx, userID, githubBaseURL)
-}
-
 func (s *usersStore) DashboardBackfilledAtSystem(ctx context.Context, userID, githubBaseURL string) (*time.Time, error) {
 	var at sql.NullTime
 	err := s.q.QueryRowContext(ctx,
@@ -236,6 +243,33 @@ func (s *usersStore) MarkDashboardBackfilledSystem(ctx context.Context, userID, 
 		return fmt.Errorf("mark user_github_identities.dashboard_backfilled_at: %w", err)
 	}
 	return nil
+}
+
+func (s *usersStore) UserIDsForGitHubUserIDSystem(ctx context.Context, githubBaseURL, githubUserID, login string) ([]string, error) {
+	if githubUserID == "" {
+		return []string{}, nil
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT user_id
+		FROM user_github_identities
+		WHERE github_base_url = ?
+		  AND (github_user_id = ?
+		       OR (github_user_id IS NULL AND ? <> '' AND lower(login) = lower(?)))
+		ORDER BY user_id ASC
+	`, db.NormalizeGitHubHost(githubBaseURL), githubUserID, login, login)
+	if err != nil {
+		return nil, fmt.Errorf("read user_github_identities by github user id: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan user_github_identities.user_id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 func (s *usersStore) UserIDsForGitHubLoginSystem(ctx context.Context, githubBaseURL, login string) ([]string, error) {

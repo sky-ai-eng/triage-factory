@@ -709,3 +709,46 @@ func TestTaskStore_Postgres_MemoryPendingConformance(t *testing.T) {
 		}
 	})
 }
+
+// TestTaskRequestedReviewer_Postgres runs the requested-reviewer projection
+// suite against the Postgres TaskStore, both pools on the admin connection as
+// TestTaskStore_Postgres wires them.
+func TestTaskRequestedReviewer_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	dbtest.RunTaskRequestedReviewerConformance(t, func(t *testing.T) (db.TaskStore, string, dbtest.TaskWithEventSeeder) {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID, _ := seedPgOrgUserAgent(t, h)
+		seed := func(t *testing.T, eventType, dedupKey, metadataJSON string) string {
+			t.Helper()
+			now := time.Now().UTC()
+			entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
+			sourceID := fmt.Sprintf("octo/reviewer#%d", now.UnixNano())
+			repositoryID := dbseed.GitHubEntityRepository(t, h.AdminDB, orgID, "https://github.com", sourceID)
+			if _, err := h.AdminDB.Exec(`
+				INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
+				VALUES ($1, $2, 'github', $3, 'pr', 'Reviewer', $4, '{}'::jsonb, $5, 'https://github.com', $6)
+			`, entityID, orgID, sourceID, "https://example/"+sourceID, now, repositoryID); err != nil {
+				t.Fatalf("seed entity: %v", err)
+			}
+			if _, err := h.AdminDB.Exec(`
+				INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
+				VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+			`, eventID, orgID, entityID, eventType, dedupKey, metadataJSON, now); err != nil {
+				t.Fatalf("seed event: %v", err)
+			}
+			if _, err := h.AdminDB.Exec(`
+				INSERT INTO tasks (id, org_id, creator_user_id, team_id, visibility, entity_id, event_type, dedup_key, primary_event_id,
+				                   status, scoring_status, priority_score, created_at)
+				VALUES ($1, $2, $3,
+				        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
+				        'team', $4, $5, $6, $7, 'queued', 'pending', 0.5, $8)
+			`, taskID, orgID, userID, entityID, eventType, dedupKey, eventID, now); err != nil {
+				t.Fatalf("seed task: %v", err)
+			}
+			return taskID
+		}
+		return stores.Tasks, orgID, seed
+	})
+}

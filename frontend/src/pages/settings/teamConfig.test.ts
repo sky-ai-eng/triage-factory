@@ -8,6 +8,7 @@ import {
   projectIsArmed,
   projectRulesValid,
   ruleIsIdentified,
+  saveTeamGitHubGroups,
   saveTeamJiraProjects,
   saveTeamRepos,
   teamProjectsBlocked,
@@ -326,5 +327,32 @@ describe('saveTeamRepos', () => {
 
     const put = fetchMock.mock.calls[1] as unknown as [string, { body: string }]
     expect(JSON.parse(put[1].body)).toEqual({ repository_ids: ['r-legacy'] })
+  })
+})
+
+describe('saveTeamGitHubGroups', () => {
+  it('names each GitHub team by its id, once, and returns the stored set', async () => {
+    const stored = [
+      { github_team_id: '11', github_org_id: '9', org_login: 'acme', team_slug: 'server' },
+    ]
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      ...jsonBody({ groups: stored }),
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const res = await saveTeamGitHubGroups('team-1', [
+      { github_team_id: '11', github_org_id: '9', org_login: 'acme', team_slug: 'backend' },
+      { github_team_id: '11', github_org_id: '9', org_login: 'acme', team_slug: 'backend' },
+      // Not identified by the server and matched to no candidate: no id to name it by.
+      { github_team_id: '', github_org_id: '', org_login: 'acme', team_slug: 'gone' },
+    ])
+
+    expect(res).toEqual({ ok: true, groups: stored })
+    const put = fetchMock.mock.calls[0] as unknown as [string, { method: string; body: string }]
+    expect(put[0]).toBe('/api/teams/team-1/github-groups')
+    expect(put[1].method).toBe('PUT')
+    expect(JSON.parse(put[1].body)).toEqual({ github_team_ids: ['11'] })
   })
 })

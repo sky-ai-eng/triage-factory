@@ -32,16 +32,20 @@ import (
 // repositoryID is the entity's repository registry row, which every event's
 // metadata carries for repo_in filters to match.
 //
+// self is the GitHub account a local-mode poll acts as, the zero account in
+// multi mode; it decides whether the PR is the user's own (see the review
+// request scan).
+//
 // The mentions in reviews and comments, and the ones curr's body has that
 // prev's did not, emit github:pr:mentioned for each identity the resolver
 // knows (prMentions).
 //
 // Not a pure function for the review-request and mention branches: the
 // resolver may consult stores (multi-mode). Every other branch is pure.
-func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, username string, resolver ReviewerResolver, reviews []NewReview, comments []NewComment) []domain.Event {
+func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID string, self domain.GitHubAccount, resolver ReviewerResolver, reviews []NewReview, comments []NewComment) []domain.Event {
 	now := time.Now()
 	eid := &entityID
-	authorIsSelf := curr.Author == username
+	authorIsSelf := self.Is(curr.Author, curr.AuthorID)
 	var evts []domain.Event
 
 	// emit records an event with no specific source timestamp. Falls back
@@ -103,14 +107,14 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, usern
 	if prev.Number == 0 {
 		if curr.Merged {
 			emitAt(domain.EventGitHubPRMerged, "", curr.MergedAt, events.GitHubPRMergedMetadata{
-				Author: curr.Author,
-				Repo:   curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
+				Author: curr.Author, AuthorID: curr.AuthorID,
+				Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				MergedBy: "", HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		} else if curr.State == "CLOSED" {
 			emitAt(domain.EventGitHubPRClosed, "", curr.ClosedAt, events.GitHubPRClosedMetadata{
-				Author: curr.Author,
-				Repo:   curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
+				Author: curr.Author, AuthorID: curr.AuthorID,
+				Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				ClosedBy: "", Labels: curr.Labels,
 			})
 		}
@@ -123,7 +127,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, usern
 	// A missing fingerprint is an unknown baseline, never a body deletion.
 	if prev.BodyHash != "" && curr.BodyHash != "" && prev.BodyHash != curr.BodyHash {
 		emitAt(domain.EventGitHubPRBodyUpdated, "", curr.UpdatedAt, events.GitHubPRBodyUpdatedMetadata{
-			Author: curr.Author, Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
+			Author: curr.Author, AuthorID: curr.AuthorID, Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 			IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			Title: curr.Title, PreviousBodyHash: prev.BodyHash, BodyHash: curr.BodyHash,
 		})
@@ -133,16 +137,16 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, usern
 
 	if !prev.Merged && curr.Merged {
 		emitAt(domain.EventGitHubPRMerged, "", curr.MergedAt, events.GitHubPRMergedMetadata{
-			Author: curr.Author,
-			Repo:   curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
+			Author: curr.Author, AuthorID: curr.AuthorID,
+			Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 			MergedBy: "", HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 		})
 	}
 
 	if prev.State != "CLOSED" && curr.State == "CLOSED" && !curr.Merged {
 		emitAt(domain.EventGitHubPRClosed, "", curr.ClosedAt, events.GitHubPRClosedMetadata{
-			Author: curr.Author,
-			Repo:   curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
+			Author: curr.Author, AuthorID: curr.AuthorID,
+			Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 			ClosedBy: "", Labels: curr.Labels,
 		})
 	}
@@ -154,8 +158,8 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, usern
 
 	if prev.IsDraft && !curr.IsDraft {
 		emitAt(domain.EventGitHubPRReadyForReview, "", lookupReadyForReviewTime(curr.Timeline), events.GitHubPRReadyForReviewMetadata{
-			Author: curr.Author,
-			Repo:   curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
+			Author: curr.Author, AuthorID: curr.AuthorID,
+			Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 			HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 		})
 	}
@@ -182,7 +186,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, usern
 					continue // already failing, old signal
 				}
 				emitAt(domain.EventGitHubPRCICheckFailed, "", cr.CompletedAt, events.GitHubPRCICheckFailedMetadata{
-					Author:     curr.Author,
+					Author: curr.Author, AuthorID: curr.AuthorID,
 					CheckRunID: cr.ID, CheckName: cr.Name, CheckURL: cr.DetailsURL,
 					WorkflowRunID: cr.WorkflowRunID,
 					HeadSHA:       curr.HeadSHA, Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
@@ -198,7 +202,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, usern
 					continue // already non-failing, old signal
 				}
 				emitAt(domain.EventGitHubPRCICheckPassed, "", cr.CompletedAt, events.GitHubPRCICheckPassedMetadata{
-					Author:     curr.Author,
+					Author: curr.Author, AuthorID: curr.AuthorID,
 					CheckRunID: cr.ID, CheckName: cr.Name, Conclusion: cr.Conclusion,
 					WorkflowRunID: cr.WorkflowRunID,
 					HeadSHA:       curr.HeadSHA, Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
@@ -212,7 +216,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, usern
 
 	if prev.HeadSHA != "" && curr.HeadSHA != "" && prev.HeadSHA != curr.HeadSHA {
 		emitAt(domain.EventGitHubPRNewCommits, "", curr.HeadCommittedAt, events.GitHubPRNewCommitsMetadata{
-			Author:  curr.Author,
+			Author: curr.Author, AuthorID: curr.AuthorID,
 			IsDraft: curr.IsDraft, CommitCount: 0, // count not available in snapshot
 			HeadSHA: curr.HeadSHA, PrevHeadSHA: prev.HeadSHA,
 			Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number, Labels: curr.Labels,
@@ -227,8 +231,8 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, usern
 		// updatedAt would be a misleading proxy because base-branch
 		// advances that flip mergeable don't always bump it.
 		emitNoSource(domain.EventGitHubPRConflicts, "", events.GitHubPRConflictsMetadata{
-			Author: curr.Author,
-			Repo:   curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
+			Author: curr.Author, AuthorID: curr.AuthorID,
+			Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 			IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 		})
 	}
@@ -236,10 +240,15 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, usern
 	// --- Review requests (per-reviewer) ------------------------------------
 	// The open-set discriminator is the *requested reviewer*. Scan each
 	// reviewer that transitioned in/out of the request list and emit a
-	// per-identity event (dedup_key = "user:<login>" / "team:<org>/<slug>")
-	// for every TF-known identity. The snapshot diff is the sole re-emit
-	// guard: a reviewer present last cycle and this cycle is neither added
-	// nor removed, so it doesn't re-fire.
+	// per-identity event for every TF-known identity, keyed by the
+	// reviewer's GitHub id ("user_id:<id>" / "team_id:<id>") or, read
+	// without one, its handle ("user:<login>" / "team:<org>/<slug>"). The
+	// snapshot diff is the sole re-emit guard: a reviewer present last cycle
+	// and this cycle is neither added nor removed, so it doesn't re-fire.
+	// Presence is RequestedReviewer.Same: by id when both snapshots carry
+	// one, so a renamed user or team is neither added nor removed, and by
+	// handle against a snapshot stored before ids were recorded, so the
+	// first poll after them finds no change.
 	//
 	// Suppress entirely when the PR is self-authored: GitHub forbids
 	// requesting yourself directly, so the only way this fires on your own
@@ -248,43 +257,42 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, usern
 	// and surfacing it pollutes the queue. (In multi mode username is empty,
 	// so authorIsSelf is false and the scan always runs.)
 	if !authorIsSelf {
-		prevReq := toSet(prev.ReviewRequests)
-		currReq := toSet(curr.ReviewRequests)
-
-		for _, reviewer := range curr.ReviewRequests {
-			if prevReq[reviewer] {
+		for _, reviewer := range curr.RequestedReviewers() {
+			if prev.HasRequestedReviewer(reviewer) {
 				continue // not newly added
 			}
-			login, team, known := resolveReviewer(resolver, reviewer)
-			if !known {
+			if _, _, known := resolveReviewer(resolver, reviewer); !known {
 				continue
 			}
+			login, team, userID, teamID := requestedIdentityFields(reviewer)
 			// Source time: this reviewer's ReviewRequestedEvent.createdAt.
 			// Falls back through updatedAt → detection time.
-			sourceAt := lookupReviewRequestedTimeFor(curr.Timeline, reviewer)
+			sourceAt := lookupReviewRequestedTimeFor(curr.Timeline, reviewer.Handle)
 			emitAt(domain.EventGitHubPRReviewRequested, reviewerDedupKey(reviewer), sourceAt, events.GitHubPRReviewRequestedMetadata{
-				Author: curr.Author,
-				Repo:   curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
+				Author: curr.Author, AuthorID: curr.AuthorID,
+				Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA,
 				Labels: curr.Labels, Title: curr.Title,
 				RequestedLogin: login, RequestedTeam: team,
+				RequestedUserID: userID, RequestedTeamID: teamID,
 			})
 		}
 
-		for _, reviewer := range prev.ReviewRequests {
-			if currReq[reviewer] {
+		for _, reviewer := range prev.RequestedReviewers() {
+			if curr.HasRequestedReviewer(reviewer) {
 				continue // still requested
 			}
-			login, team, known := resolveReviewer(resolver, reviewer)
-			if !known {
+			if _, _, known := resolveReviewer(resolver, reviewer); !known {
 				continue
 			}
+			login, team, userID, teamID := requestedIdentityFields(reviewer)
 			emit(domain.EventGitHubPRReviewRequestRemoved, reviewerDedupKey(reviewer), events.GitHubPRReviewRequestRemovedMetadata{
-				Author: curr.Author,
-				Repo:   curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
+				Author: curr.Author, AuthorID: curr.AuthorID,
+				Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA,
 				Labels: curr.Labels, Title: curr.Title,
 				RequestedLogin: login, RequestedTeam: team,
+				RequestedUserID: userID, RequestedTeamID: teamID,
 			})
 		}
 	}
@@ -292,53 +300,53 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, usern
 	// --- Review events -----------------------------------------------------
 	// emitReview emits the event for one review by its state. paths is nil
 	// for a review whose comments were not read.
-	emitReview := func(state, reviewer string, reviewID int64, commentCount int, paths []string, submittedAt string) {
+	emitReview := func(state, reviewer, reviewerID string, reviewID int64, commentCount int, paths []string, submittedAt string) {
 		if paths == nil {
 			paths = []string{}
 		}
 		switch state {
 		case "CHANGES_REQUESTED":
 			emitAt(domain.EventGitHubPRReviewChangesRequested, "", submittedAt, events.GitHubPRReviewChangesRequestedMetadata{
-				Author: curr.Author, Reviewer: reviewer,
+				Author: curr.Author, AuthorID: curr.AuthorID, Reviewer: reviewer, ReviewerID: reviewerID,
 				ReviewID: reviewID, CommentCount: commentCount, Paths: paths,
 				Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		case "APPROVED":
 			emitAt(domain.EventGitHubPRReviewApproved, "", submittedAt, events.GitHubPRReviewApprovedMetadata{
-				Author: curr.Author, Reviewer: reviewer,
+				Author: curr.Author, AuthorID: curr.AuthorID, Reviewer: reviewer, ReviewerID: reviewerID,
 				ReviewID: reviewID, CommentCount: commentCount, Paths: paths,
 				Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		case "COMMENTED":
 			emitAt(domain.EventGitHubPRReviewCommented, "", submittedAt, events.GitHubPRReviewCommentedMetadata{
-				Author: curr.Author, Reviewer: reviewer,
+				Author: curr.Author, AuthorID: curr.AuthorID, Reviewer: reviewer, ReviewerID: reviewerID,
 				ReviewID: reviewID, CommentCount: commentCount, Paths: paths,
 				Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		case "DISMISSED":
 			emitAt(domain.EventGitHubPRReviewDismissed, "", submittedAt, events.GitHubPRReviewDismissedMetadata{
-				Author: curr.Author, Reviewer: reviewer,
+				Author: curr.Author, AuthorID: curr.AuthorID, Reviewer: reviewer, ReviewerID: reviewerID,
 				ReviewID: reviewID, CommentCount: commentCount, Paths: paths,
 				Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		}
 	}
-	prevReviews := reviewMap(prev.Reviews)
-	currReviews := reviewMap(curr.Reviews)
+	prevReviews := newReviewIndex(prev.Reviews)
+	currReviews := newReviewIndex(curr.Reviews)
 
 	if prev.ReviewMarker == nil {
 		// A snapshot without the review marker: one event per reviewer whose
 		// latest review changed state, by that state.
-		for reviewer, currState := range currReviews {
-			prevState := prevReview(prevReviews, currReviews, reviewer)
+		for _, currState := range curr.Reviews {
+			prevState := prevReviews.prevOf(currReviews, currState)
 			if currState.State == prevState.State {
 				continue
 			}
-			emitReview(currState.State, reviewer, currState.DatabaseID, currState.CommentCount, nil, currState.SubmittedAt)
+			emitReview(currState.State, currState.Author, currState.AuthorID, currState.DatabaseID, currState.CommentCount, nil, currState.SubmittedAt)
 		}
 	} else {
 		// One event per review submitted since prev, by its state. TF's own
@@ -349,25 +357,26 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, usern
 			if r.ByTF || r.Author == "" || r.State == "DISMISSED" {
 				continue
 			}
-			emitReview(r.State, r.Author, r.ID, r.CommentCount, r.Paths, r.SubmittedAt)
+			emitReview(r.State, r.Author, r.AuthorID, r.ID, r.CommentCount, r.Paths, r.SubmittedAt)
 		}
 		// A dismissal changes a review already submitted rather than adding
 		// one: a reviewer's latest review turned DISMISSED.
 		for _, currState := range curr.Reviews {
-			if currState.State != "DISMISSED" || prevReview(prevReviews, currReviews, currState.Author).State == "DISMISSED" {
+			if currState.State != "DISMISSED" || prevReviews.prevOf(currReviews, currState).State == "DISMISSED" {
 				continue
 			}
-			emitReview(currState.State, currState.Author, currState.DatabaseID, currState.CommentCount, nil, currState.SubmittedAt)
+			emitReview(currState.State, currState.Author, currState.AuthorID, currState.DatabaseID, currState.CommentCount, nil, currState.SubmittedAt)
 		}
 	}
 
 	// --- Conversation comments ---------------------------------------------
 	// One event for the comments TF did not post, however many, attributed to
 	// the newest of them and timed at its creation. A bot's comment counts.
-	if newest, logins, ok := commentedBy(comments); ok {
+	if newest, ids, ok := commentedBy(comments); ok {
 		commentID, _ := strconv.ParseInt(newest.ID, 10, 64)
 		emitWithFallback(domain.EventGitHubPRCommented, "", commentedAt(newest, curr.UpdatedAt), events.GitHubPRCommentedMetadata{
-			Author: curr.Author, Commenter: newest.Author, CommenterLogins: logins, CommentID: commentID,
+			Author: curr.Author, AuthorID: curr.AuthorID, Commenter: newest.Author, CommenterLogins: commentedByLogins(comments),
+			CommenterID: newest.AuthorID, CommenterIDs: ids, CommentID: commentID,
 			Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 			IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 		}, eid, now, &evts)
@@ -375,9 +384,10 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, usern
 
 	// --- Mentions ----------------------------------------------------------
 	// One event per user or team TF knows that was newly mentioned in a
-	// comment, a review or the body, keyed and resolved as a review request
-	// is and timed at the mention's comment or review. A body mention has no
-	// time of its own and takes the PR's updatedAt.
+	// comment, a review or the body, keyed and resolved by the handle the
+	// text spelled (a mention carries no id) and timed at the mention's
+	// comment or review. A body mention has no time of its own and takes the
+	// PR's updatedAt.
 	for _, m := range prMentions(prev, curr, reviews, comments) {
 		appendMentioned(&evts, eid, repositoryID, now, curr, m, resolver)
 	}
@@ -391,7 +401,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, usern
 	for label := range currLabels {
 		if !prevLabels[label] {
 			emitAt(domain.EventGitHubPRLabelAdded, label, lookupLabelTime(curr.Timeline, "labeled", label), events.GitHubPRLabelAddedMetadata{
-				Author:    curr.Author,
+				Author: curr.Author, AuthorID: curr.AuthorID,
 				LabelName: label, Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
@@ -400,7 +410,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, usern
 	for label := range prevLabels {
 		if !currLabels[label] {
 			emitAt(domain.EventGitHubPRLabelRemoved, label, lookupLabelTime(curr.Timeline, "unlabeled", label), events.GitHubPRLabelRemovedMetadata{
-				Author:    curr.Author,
+				Author: curr.Author, AuthorID: curr.AuthorID,
 				LabelName: label, Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
@@ -768,31 +778,59 @@ func toSet(items []string) map[string]bool {
 	return m
 }
 
-func reviewMap(reviews []domain.ReviewState) map[string]domain.ReviewState {
-	m := make(map[string]domain.ReviewState, len(reviews))
-	for _, r := range reviews {
-		m[r.Author] = r
-	}
-	return m
+// reviewIndex is a snapshot's latest review per reviewer, looked up by
+// GitHub's id for the reviewer's account and by login.
+type reviewIndex struct {
+	byLogin map[string]domain.ReviewState
+	byID    map[string]domain.ReviewState
 }
 
-// prevReview is prev's review by reviewer. A stored snapshot can key a bot's
-// review under its bare slug (GraphQL's spelling), so a bot reviewer prev holds
-// no review for falls back to that slug and diffs as the same reviewer rather
-// than a new one. It does not fall back when curr also holds a review under the
-// bare slug: that reviewer is a person whose login matches the bot's slug (an
-// App may be named after its owner's account), and the stored review may be
-// theirs.
-func prevReview(prev, curr map[string]domain.ReviewState, reviewer string) domain.ReviewState {
-	if r, ok := prev[reviewer]; ok {
-		return r
+func newReviewIndex(reviews []domain.ReviewState) reviewIndex {
+	ix := reviewIndex{byLogin: make(map[string]domain.ReviewState, len(reviews)), byID: map[string]domain.ReviewState{}}
+	for _, r := range reviews {
+		ix.byLogin[r.Author] = r
+		if r.AuthorID != "" {
+			ix.byID[r.AuthorID] = r
+		}
 	}
-	slug, isBot := strings.CutSuffix(reviewer, domain.GitHubBotLoginSuffix)
+	return ix
+}
+
+// prevOf is the snapshot's review by the reviewer of r, a review from the
+// snapshot curr indexes. The reviewer is found by GitHub's id when r carries
+// one and this snapshot holds a review under it, so a renamed reviewer is the
+// same reviewer; otherwise by login, unless both reviews carry ids that
+// differ, which makes the login another account's. A stored snapshot can key
+// a bot's review under its bare slug (GraphQL's spelling), so a bot reviewer
+// the snapshot holds no review for falls back to that slug and diffs as the
+// same reviewer rather than a new one. It does not fall back when curr also
+// holds a review under the bare slug: that reviewer is a person whose login
+// matches the bot's slug (an App may be named after its owner's account), and
+// the stored review may be theirs.
+func (ix reviewIndex) prevOf(curr reviewIndex, r domain.ReviewState) domain.ReviewState {
+	if r.AuthorID != "" {
+		if p, ok := ix.byID[r.AuthorID]; ok {
+			return p
+		}
+	}
+	sameAccount := func(p domain.ReviewState) bool {
+		return r.AuthorID == "" || p.AuthorID == "" || p.AuthorID == r.AuthorID
+	}
+	if p, ok := ix.byLogin[r.Author]; ok {
+		if sameAccount(p) {
+			return p
+		}
+		return domain.ReviewState{}
+	}
+	slug, isBot := strings.CutSuffix(r.Author, domain.GitHubBotLoginSuffix)
 	if !isBot {
 		return domain.ReviewState{}
 	}
-	if _, person := curr[slug]; person {
+	if _, person := curr.byLogin[slug]; person {
 		return domain.ReviewState{}
 	}
-	return prev[slug]
+	if p, ok := ix.byLogin[slug]; ok && sameAccount(p) {
+		return p
+	}
+	return domain.ReviewState{}
 }

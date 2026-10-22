@@ -12,32 +12,45 @@ export type RequestedReviewer =
   | { kind: 'user'; login: string }
   | { kind: 'team'; org: string; slug: string }
 
-// parseRequestedReviewer reads the requested reviewer out of a task's
-// dedup_key. The key format is owned by the events package
-// (internal/domain/events/github.go: ReviewerDedupKeyUser/Team):
-//   user:<login>           e.g. "user:aidanallchin"
-//   team:<org>/<slug>      e.g. "team:eng/platform"
-// Returns null for any non-conforming key — non-review_requested events,
-// and legacy tasks whose dedup_key is empty — so the
-// badge simply never renders where it doesn't apply.
+// parseRequestedReviewer reads the requested reviewer off a task. The
+// dedup_key says whether the request named a user or a team; its format is
+// owned by the events package (internal/domain/events/github.go:
+// ReviewerDedupKey*):
+//   user_id:<id>           a user, by GitHub's id
+//   team_id:<id>           a team, by GitHub's id
+//   user:<login>           a user read without an id, e.g. "user:aidanallchin"
+//   team:<org>/<slug>      a team read without an id, e.g. "team:eng/platform"
+// The handle shown is the task's requested_reviewer, the login or org/slug the
+// request named, and for a key by handle the key's own when the server sent
+// none. Returns null for any non-conforming key — non-review_requested events,
+// and legacy tasks whose dedup_key is empty — so the badge simply never
+// renders where it doesn't apply.
 export function parseRequestedReviewer(task: Task): RequestedReviewer | null {
   if (task.event_type !== 'github:pr:review_requested') return null
   if (!task.dedup_key) return null
-  if (task.dedup_key.startsWith('user:')) {
-    const login = task.dedup_key.slice('user:'.length)
-    if (!login) return null
-    return { kind: 'user', login }
+  const key = task.dedup_key
+  let kind: RequestedReviewer['kind']
+  let handle = task.requested_reviewer ?? ''
+  if (key.startsWith('user_id:')) {
+    kind = 'user'
+  } else if (key.startsWith('team_id:')) {
+    kind = 'team'
+  } else if (key.startsWith('user:')) {
+    kind = 'user'
+    handle ||= key.slice('user:'.length)
+  } else if (key.startsWith('team:')) {
+    kind = 'team'
+    handle ||= key.slice('team:'.length)
+  } else {
+    return null
   }
-  if (task.dedup_key.startsWith('team:')) {
-    const rest = task.dedup_key.slice('team:'.length)
-    const slashAt = rest.indexOf('/')
-    if (slashAt === -1) return null
-    const org = rest.slice(0, slashAt)
-    const slug = rest.slice(slashAt + 1)
-    if (!org || !slug) return null
-    return { kind: 'team', org, slug }
-  }
-  return null
+  if (kind === 'user') return handle ? { kind, login: handle } : null
+  const slashAt = handle.indexOf('/')
+  if (slashAt === -1) return null
+  const org = handle.slice(0, slashAt)
+  const slug = handle.slice(slashAt + 1)
+  if (!org || !slug) return null
+  return { kind, org, slug }
 }
 
 // reviewerProfileURL derives the GitHub link from the task's own

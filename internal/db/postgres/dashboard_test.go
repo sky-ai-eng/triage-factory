@@ -73,7 +73,7 @@ func TestDashboardStore_Postgres_OnlyCountsRequestingUser(t *testing.T) {
 	seedPgPRSnapshot(t, h.AdminDB, orgID, domain.PRSnapshot{Number: 4, Author: "other-user", State: "OPEN", Repo: "owner/repo"})
 	seedPgPRSnapshot(t, h.AdminDB, orgID, domain.PRSnapshot{Number: 5, Author: "third-user", State: "MERGED", Merged: true, MergedAt: now, Repo: "owner/repo"})
 
-	stats, err := stores.Dashboard.Stats(ctx, orgID, me, time.Now().AddDate(0, 0, -30))
+	stats, err := stores.Dashboard.Stats(ctx, orgID, domain.GitHubAccount{Login: me}, time.Now().AddDate(0, 0, -30))
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
 	}

@@ -10,6 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -104,6 +105,10 @@ func TestMigrate_ProviderScopesMatchGo(t *testing.T) {
 				`SELECT host FROM team_github_groups WHERE team_id = 'team-1'`: githubHost,
 				// The pin named octo/api on the org's GitHub host, which is r1.
 				`SELECT repository_id FROM placement_overrides`: "r1",
+				// A mapping keeps its handle and carries no GitHub ids until the
+				// poll's team reconcile identifies it.
+				`SELECT COALESCE(github_team_id, 'none') || ' ' || COALESCE(github_org_id, 'none') || ' ' || github_org_login || '/' || github_team_slug
+				   FROM team_github_groups WHERE team_id = 'team-1'`: "none none octo/core",
 			}
 			if siteOK {
 				want[`SELECT scope FROM entities WHERE id = 'e-jira'`] = site
@@ -1327,6 +1332,83 @@ func TestMigrate_ProviderScopesLinkAuditLedgerRows(t *testing.T) {
 		}
 	}
 	assertNoDanglingReferences(t, database)
+}
+
+// A GitHub predicate's login-valued identity filters become the id-valued
+// ones the matcher reads: each login replaced by the id of the identity
+// binding that holds it on the org's GitHub, a login no binding with an id
+// holds kept as written (it matches nothing, as a filter must not widen), a
+// singular login folded into its list, and a team's org/slug kept, since the
+// copied mappings have no ids yet. Every rewritten predicate decodes under the
+// strict schema; a predicate with nothing to rewrite, and a Jira one, are left
+// as they were.
+func TestMigrate_GitHubPredicatesNameIDs(t *testing.T) {
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	setOrgBaseURL(t, database, runmode.LocalDefaultOrgID, "github", "https://github.com")
+	mustExec(t, database, `INSERT INTO users (id) VALUES ('u2'), ('u3')`)
+	for _, identity := range [][]any{
+		{"u1", "https://github.com", "Aidan", "583231"},
+		{"u2", "https://github.com", "hubot", nil},
+		{"u3", "https://ghe.corp.example", "alice", "77"},
+	} {
+		mustExec(t, database, `
+			INSERT INTO user_github_identities (user_id, github_base_url, login, github_user_id, source, verified_at)
+			VALUES (?, ?, ?, ?, 'pat', CURRENT_TIMESTAMP)`, identity...)
+	}
+
+	rule := func(id, eventType, predicate string) {
+		t.Helper()
+		mustExec(t, database, `INSERT OR IGNORE INTO events_catalog (id, source, category, label, description)
+			VALUES (?, 'test', 'test', ?, '')`, eventType, eventType)
+		mustExec(t, database, `
+			INSERT INTO event_handlers (id, team_id, creator_user_id, kind, event_type, scope_predicate_json,
+			                            source, name, default_priority, sort_order)
+			VALUES (?, 'team-1', 'u1', 'rule', ?, NULLIF(?, ''), 'user', ?, 0.5, 0)`,
+			id, eventType, predicate, id)
+	}
+	cases := []struct {
+		id, eventType, before, after string
+	}{
+		{"list", domain.EventGitHubPRCICheckFailed, `{"author_in":["aidan","hubot","alice"],"repo_in":["r1"]}`,
+			`{"repo_in":["r1"],"author_id_in":["583231","hubot","alice"]}`},
+		{"empty-list", domain.EventGitHubPRCICheckFailed, `{"author_in":[]}`, `{"author_id_in":[]}`},
+		{"singular", domain.EventGitHubPRReviewApproved, `{"reviewer":"AIDAN"}`, `{"reviewer_id_in":["583231"]}`},
+		{"singular-narrows", domain.EventGitHubPRReviewApproved, `{"reviewer_in":["aidan","bob"],"reviewer":"aidan"}`,
+			`{"reviewer_id_in":["583231"]}`},
+		{"singular-outside-its-list", domain.EventGitHubPRNewCommits, `{"author_in":["bob"],"author":"aidan"}`,
+			`{"author_id_in":["0"]}`},
+		{"requested", domain.EventGitHubPRReviewRequested, `{"requested_login":"Aidan","requested_team":"acme/backend"}`,
+			`{"requested_user_id_in":["583231"],"requested_team_id_in":["acme/backend"]}`},
+		{"commented", domain.EventGitHubPRCommented, `{"commenter_in":["aidan"]}`, `{"commenter_id_in":["583231"]}`},
+		{"mentioned", domain.EventGitHubPRMentioned, `{"commenter":"aidan","mentioned_login":"bob","author":null}`,
+			`{"mentioned_login":"bob","commenter_id_in":["583231"]}`},
+		{"untouched", domain.EventGitHubPROpened, `{"repo_in":["r1"]}`, `{"repo_in":["r1"]}`},
+		{"jira", domain.EventJiraIssueCommented, `{"commenter_in":["557058:ada"]}`, `{"commenter_in":["557058:ada"]}`},
+		{"match-all", domain.EventGitHubPRCICheckFailed, "", ""},
+	}
+	for _, c := range cases {
+		rule(c.id, c.eventType, c.before)
+	}
+
+	migrateProviderScopes(t, database)
+
+	for _, c := range cases {
+		var got sql.NullString
+		if err := database.QueryRow(`SELECT scope_predicate_json FROM event_handlers WHERE id = ?`, c.id).Scan(&got); err != nil {
+			t.Fatalf("read %s: %v", c.id, err)
+		}
+		if got.String != c.after {
+			t.Errorf("%s = %s, want %s", c.id, got.String, c.after)
+			continue
+		}
+		if c.after == "" {
+			continue
+		}
+		if _, err := events.ValidatePredicateJSON(c.eventType, c.after); err != nil {
+			t.Errorf("%s: the rewritten predicate does not decode: %v", c.id, err)
+		}
+	}
 }
 
 func seedProviderScopesOrg(t *testing.T, database *sql.DB) {

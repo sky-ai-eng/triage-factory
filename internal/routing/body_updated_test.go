@@ -94,7 +94,7 @@ func TestBodyUpdated_PollToRule(t *testing.T) {
 				mu.Unlock()
 				var err error
 				if source == "github" {
-					_, _, err = tr.RefreshGitHub(ctx, "https://github.com", gh, "", nil, nil)
+					_, _, err = tr.RefreshGitHub(ctx, "https://github.com", gh, domain.GitHubAccount{}, nil, nil)
 				} else {
 					_, err = tr.RefreshJira(ctx, testScope("jira"), jira, srv.URL, tracker.JiraRules{{Key: "PROJ"}})
 				}

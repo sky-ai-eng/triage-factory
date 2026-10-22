@@ -23,7 +23,7 @@ func newDashboardStore(q queryer) db.DashboardStore { return &dashboardStore{q: 
 
 var _ db.DashboardStore = (*dashboardStore)(nil)
 
-func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, since time.Time) (*domain.DashboardStats, error) {
+func (s *dashboardStore) Stats(ctx context.Context, orgID string, viewer domain.GitHubAccount, since time.Time) (*domain.DashboardStats, error) {
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT snapshot_json FROM entities
 		WHERE org_id = $1 AND source = 'github' AND snapshot_json IS NOT NULL
@@ -53,7 +53,7 @@ func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinc
 			continue
 		}
 
-		if snap.Author == username {
+		if viewer.Is(snap.Author, snap.AuthorID) {
 			switch {
 			case snap.Merged:
 				mergedAt, err := time.Parse(time.RFC3339, snap.MergedAt)
@@ -72,13 +72,13 @@ func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinc
 				stats.Awaiting++
 			}
 			for _, review := range snap.Reviews {
-				if review.Author != username {
+				if !viewer.Is(review.Author, review.AuthorID) {
 					stats.ReviewsReceived++
 				}
 			}
 		} else {
 			for _, review := range snap.Reviews {
-				if review.Author == username {
+				if viewer.Is(review.Author, review.AuthorID) {
 					stats.ReviewsGiven++
 				}
 			}
@@ -93,10 +93,11 @@ func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinc
 	return stats, nil
 }
 
-// PRs pages the caller's own pull requests: authored under their GitHub login,
+// PRs pages the caller's own pull requests: authored by their GitHub account,
 // or commissioned by them (a run they asked for opened it under the bot's
 // login). Both legs are SQL predicates matching their indexes —
-// idx_entities_github_author and idx_entities_commissioned_by — because the
+// idx_entities_github_author_id / idx_entities_github_author and
+// idx_entities_commissioned_by — because the
 // Go-side filter this replaced read every GitHub entity in the org on every
 // dashboard load, and a window over that scan would have paged the wrong set
 // (LIMIT applies before the filter, so page 2 could be empty while page 3 has
@@ -157,17 +158,20 @@ func (s *dashboardStore) PR(ctx context.Context, orgID string, viewer db.PRViewe
 }
 
 // pgPRViewerLegs renders the viewer's population as a parenthesized OR of the
-// identity legs the viewer carries, appending each leg's bind to args. Each
-// leg binds only when the viewer carries that id, so an unbound GitHub
-// identity narrows the population to what they commissioned instead of
-// matching every row whose author is the empty string. ok is false when the
-// viewer carries neither: there is no population to answer for, and the
-// caller answers empty rather than for the whole org.
+// identity legs the viewer carries, appending each leg's bind to args: the
+// pull requests authored by their GitHub account (by GitHub's id when both the
+// snapshot and the viewer carry one, by login otherwise — pgGitHubAuthoredBy),
+// and the ones they commissioned. Each leg binds only when the viewer carries
+// that identity, so an unbound GitHub identity narrows the population to what
+// they commissioned instead of matching every row whose author is the empty
+// string. ok is false when the viewer carries neither: there is no population
+// to answer for, and the caller answers empty rather than for the whole org.
 func pgPRViewerLegs(viewer db.PRViewer, args []any) (clause string, out []any, ok bool) {
 	legs := make([]string, 0, 2)
-	if viewer.Login != "" {
-		args = append(args, viewer.Login)
-		legs = append(legs, fmt.Sprintf("e.snapshot_json ->> 'author' = $%d", len(args)))
+	if viewer.Login != "" || viewer.GitHubUserID != "" {
+		var leg string
+		leg, args = pgGitHubAuthoredBy(args, []domain.GitHubAccount{{Login: viewer.Login, ID: viewer.GitHubUserID}})
+		legs = append(legs, leg)
 	}
 	if viewer.UserID != "" {
 		args = append(args, viewer.UserID)

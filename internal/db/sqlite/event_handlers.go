@@ -52,7 +52,7 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blue
 	var inserted int64
 
 	// Shipped predicates are inserted as written. The GitHub rules' empty
-	// `author_in` and the Jira and Linear rules' empty `assignee_in` match
+	// `author_id_in` and the Jira and Linear rules' empty `assignee_in` match
 	// everyone; owner routing scopes them at event time, resolving the PR
 	// author's (or the issue assignee's) team through the owning-team ladder,
 	// so a user who connects a source after the seed is scoped the same way.

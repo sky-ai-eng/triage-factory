@@ -13,10 +13,10 @@ layer; it is not login.
   service-scoped: a GitHub **App installation token**, a Jira **service-account
   OAuth** (SKY-347), a Linear **`actor=app` install** token or org API key.
   Carries no person.
-- **Identity** = "this TF user is `@login` / `accountId` / `viewer.id` on this
-  host." A per-user *whoami*, captured once and stored. Powers per-user
-  predicates (`author_in: [me]`), the personal dashboard, and routing a task to
-  the right person.
+- **Identity** = "this TF user is GitHub account `github_user_id` (now called
+  `@login`) / `accountId` / `viewer.id` on this host." A per-user *whoami*,
+  captured once and stored. Powers per-user predicates (`author_id_in: [me]`),
+  the personal dashboard, and routing a task to the right person.
 
 Identity falls out of access for free **iff** the access credential is
 user-scoped (a PAT, a user-to-server OAuth token — both answer "who am I"). An
@@ -28,7 +28,7 @@ needs its own per-user identity binding regardless of how access is granted.
 | Layer | GitHub | Jira | Linear |
 | -- | -- | -- | -- |
 | **Access** (impersonal) | App installation token | service-account OAuth (SKY-347) | `actor=app` install, or an org API key |
-| **Identity** (per-user whoami) | `login` + verified primary email | `accountId` | `viewer.id` |
+| **Identity** (per-user whoami) | account id + `login` + verified primary email | `accountId` | `viewer.id` |
 
 Distinct from **GoTrue's `auth.identities`**, which records *login* identities
 (who you authenticated as to get a TF session). The tables here record
@@ -60,7 +60,7 @@ earlier SKY-396 draft proposed one. **Linear is the tiebreak against it:**
 
 | | scope dimension | identity payload |
 | -- | -- | -- |
-| GitHub | **host** (github.com / GHEC / GHES) | `login` — id ≈ name (one value) |
+| GitHub | **host** (github.com / GHEC / GHES) | `github_user_id` + a renameable `login` + email |
 | Jira | **host** (Cloud site / Server-DC) | `accountId` + separate `displayName` |
 | Linear | **workspace** (cloud-only, no host) | `viewer.id` + separate `displayName` |
 
@@ -71,8 +71,9 @@ earlier SKY-396 draft proposed one. **Linear is the tiebreak against it:**
   third is a provider-defined-meaning column — and `external_id` (login vs
   accountId vs viewer.id) already is one. Two leaky columns is most of the way
   to a JSONB blob, and it pushes the provider switch into every consumer.
-- **Payload isn't uniform.** GitHub's `login` is both id and display name; Jira
-  and Linear split an opaque id from a human name.
+- **Payload isn't uniform.** GitHub records a numeric account id, the
+  renameable `login` it goes by, and the account's verified email; Jira and
+  Linear an opaque id and a human name.
 - **No migration debt forces a merge.** The one real pull toward generic was
   "avoid owing a second pre-1.11 migration." But a net-new sibling is an
   additive `CREATE TABLE` with **no data backfill** (captures are fresh) — a
@@ -105,7 +106,7 @@ per user — the old column's behaviour, with a future-proof key.
 An absent identity row is a **durable, supported state** (carried over from
 SKY-264). Reads resolve the org's scope (e.g. the org's configured GitHub base
 URL), look up `(user, scope)`, and treat a missing row exactly as the old NULL column:
-self-features (`author_in:[me]`, personal dashboard, routing-to-you) go inert;
+self-features (`author_id_in:[me]`, personal dashboard, routing-to-you) go inert;
 team reads are unaffected. Drift (rename, left-the-org) reintroduces the absent
 state post-onboarding — runtime stays tolerant regardless of the onboarding gate.
 

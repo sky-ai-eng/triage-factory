@@ -73,6 +73,12 @@ type taskJSON struct {
 	// frontend only surfaces it when the viewer belongs to ≥2 teams.
 	// TODO: board row color-coding consumes this.
 	TeamID string `json:"team_id,omitempty"`
+	// RequestedReviewer is, on a github:pr:review_requested task, the
+	// requested user's login or team's org/slug as the event that last bumped
+	// the task named it, for display. dedup_key identifies the reviewer, by
+	// GitHub's id ("user_id:<id>" / "team_id:<id>") when the request carried
+	// one. Omitted on every other task.
+	RequestedReviewer string `json:"requested_reviewer,omitempty"`
 	// MemoryPending says a conversation on this task ended without leaving
 	// the memory its successor is owed, and the dispatcher will not claim the
 	// task's next delegation until one exists. Not omitempty: false is a real
@@ -139,6 +145,7 @@ func taskToJSON(t domain.Task) taskJSON {
 		CloseReason:         t.CloseReason,
 		SnoozeUntil:         snoozeUntil,
 		OpenSubtaskCount:    t.OpenSubtaskCount,
+		RequestedReviewer:   t.RequestedReviewer,
 		ClaimedByAgentID:    t.ClaimedByAgentID,
 		ClaimedByUserID:     t.ClaimedByUserID,
 		TeamID:              teamIDString(t.TeamID),

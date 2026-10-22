@@ -121,11 +121,11 @@ type outageGitHubGroupsStore struct {
 	o *outage
 }
 
-func (s outageGitHubGroupsStore) TeamsForGroupSystem(ctx context.Context, orgID, host, orgLogin, teamSlug string) ([]string, error) {
+func (s outageGitHubGroupsStore) TeamsForGitHubTeamSystem(ctx context.Context, orgID, host, githubTeamID, orgLogin, teamSlug string) ([]string, error) {
 	if s.o.down() {
 		return nil, errOutage
 	}
-	return s.TeamGitHubGroupsStore.TeamsForGroupSystem(ctx, orgID, host, orgLogin, teamSlug)
+	return s.TeamGitHubGroupsStore.TeamsForGitHubTeamSystem(ctx, orgID, host, githubTeamID, orgLogin, teamSlug)
 }
 
 // identityQueueRouter wires every store the owning-team ladder reads (Users,
@@ -267,7 +267,7 @@ func TestOwnerResolution_StoreFailure_RequeuesThenRoutesToTheRightTeam(t *testin
 			disrupt: func(r *Router, database *sql.DB, o *outage) {
 				r.users = outageIdentityStore{UsersStore: sqlitestore.New(database).Users, o: o}
 			},
-			wantErr: "resolve owner: reverse login lookup for aidan",
+			wantErr: "resolve owner: reverse identity lookup for aidan",
 		},
 		{
 			// Per-user read: the loop used to drop the user and carry on, so a
@@ -291,7 +291,7 @@ func TestOwnerResolution_StoreFailure_RequeuesThenRoutesToTheRightTeam(t *testin
 				setReviewHost(t, database)
 				backend := seedTeam(t, database, "backend-tf")
 				if err := sqlitestore.New(database).TeamGitHubGroups.SetForTeam(t.Context(), backend, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
-					{OrgLogin: "acme", TeamSlug: "backend"},
+					{GitHubTeamID: "11", GitHubOrgID: "9", OrgLogin: "acme", TeamSlug: "backend"},
 				}); err != nil {
 					t.Fatalf("map github team: %v", err)
 				}
@@ -324,7 +324,7 @@ func TestOwnerResolution_StoreFailure_RequeuesThenRoutesToTheRightTeam(t *testin
 			disrupt: func(r *Router, database *sql.DB, o *outage) {
 				r.users = outageIdentityStore{UsersStore: sqlitestore.New(database).Users, o: o}
 			},
-			wantErr: "resolve owner: reverse login lookup for alice",
+			wantErr: "resolve owner: reverse identity lookup for alice",
 		},
 		{
 			name:          "review_requested teams-for-user",

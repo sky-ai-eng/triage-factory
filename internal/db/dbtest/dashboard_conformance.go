@@ -73,6 +73,10 @@ func (s DashboardSeeder) Snapshot(t *testing.T, snap domain.PRSnapshot) {
 //     within the population PRs pages for the same viewer.
 //   - Empty stats path (no snapshots) returns zeroed counts but
 //     a populated 14-bucket timeline (skeleton always present).
+//   - Stats and PRs match the viewer by GitHub's id for the account when
+//     both the snapshot and the viewer carry one, so a renamed viewer's pull
+//     requests and reviews are still theirs and another account under their
+//     login is not; by login when either lacks it.
 func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 	t.Helper()
 
@@ -84,7 +88,7 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 
 	t.Run("Stats_NoSnapshots_ReturnsZerosWithTimelineSkeleton", func(t *testing.T) {
 		store, orgID, _, _ := factory(t)
-		stats, err := store.Stats(context.Background(), orgID, username, statsSince)
+		stats, err := store.Stats(context.Background(), orgID, domain.GitHubAccount{Login: username}, statsSince)
 		if err != nil {
 			t.Fatalf("Stats: %v", err)
 		}
@@ -113,7 +117,7 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 		// Someone else's open PR — should NOT count toward the user's totals.
 		seed.Snapshot(t, domain.PRSnapshot{Number: 5, Author: "someone-else", State: "OPEN"})
 
-		stats, err := store.Stats(context.Background(), orgID, username, statsSince)
+		stats, err := store.Stats(context.Background(), orgID, domain.GitHubAccount{Login: username}, statsSince)
 		if err != nil {
 			t.Fatalf("Stats: %v", err)
 		}
@@ -177,7 +181,7 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 			MergedAt: justAfterUTCMidnight.Format(time.RFC3339),
 		})
 
-		stats, err := store.Stats(context.Background(), orgID, username, statsSince)
+		stats, err := store.Stats(context.Background(), orgID, domain.GitHubAccount{Login: username}, statsSince)
 		if err != nil {
 			t.Fatalf("Stats: %v", err)
 		}
@@ -226,7 +230,7 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 				{Author: "another-reviewer"},
 			},
 		})
-		stats, err := store.Stats(context.Background(), orgID, username, statsSince)
+		stats, err := store.Stats(context.Background(), orgID, domain.GitHubAccount{Login: username}, statsSince)
 		if err != nil {
 			t.Fatalf("Stats: %v", err)
 		}
@@ -235,6 +239,57 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 		}
 		if stats.ReviewsGiven != 1 {
 			t.Fatalf("reviews_given=%d want 1", stats.ReviewsGiven)
+		}
+	})
+
+	// The viewer is the account 583231, called "aidan" when the older
+	// snapshots were stored and "aidan-renamed" now; "aidan" has since been
+	// taken by the account 999.
+	me := domain.GitHubAccount{Login: "aidan-renamed", ID: "583231"}
+	seedRenamed := func(t *testing.T, seed DashboardSeeder) {
+		t.Helper()
+		seed.Snapshot(t, domain.PRSnapshot{Number: 30, Author: username, AuthorID: "583231", State: "OPEN", Repo: "owner/repo"})
+		seed.Snapshot(t, domain.PRSnapshot{Number: 31, Author: "aidan-renamed", State: "OPEN", Repo: "owner/repo"})
+		seed.Snapshot(t, domain.PRSnapshot{Number: 32, Author: username, AuthorID: "999", State: "OPEN", Repo: "owner/repo",
+			Reviews: []domain.ReviewState{
+				{Author: username, AuthorID: "583231"},
+				{Author: "aidan-renamed", AuthorID: "999"},
+			}})
+	}
+
+	t.Run("Stats_MatchesTheViewerByGitHubID", func(t *testing.T) {
+		store, orgID, _, seed := factory(t)
+		seedRenamed(t, seed)
+		stats, err := store.Stats(context.Background(), orgID, me, statsSince)
+		if err != nil {
+			t.Fatalf("Stats: %v", err)
+		}
+		// #30 by id under the old login, #31 by login (stored with no id);
+		// #32 is the other account's, though its login was the viewer's.
+		if stats.Awaiting != 2 {
+			t.Errorf("awaiting=%d, want 2 (#30 by id, #31 by login)", stats.Awaiting)
+		}
+		// On #32 the viewer gave the review stored under their old login,
+		// and not the one under their new login by another account.
+		if stats.ReviewsGiven != 1 {
+			t.Errorf("reviews_given=%d, want 1", stats.ReviewsGiven)
+		}
+	})
+
+	t.Run("PRs_MatchesTheViewerByGitHubID", func(t *testing.T) {
+		store, orgID, viewerID, seed := factory(t)
+		seedRenamed(t, seed)
+		prs, total, err := store.PRs(context.Background(), orgID,
+			db.PRViewer{Login: me.Login, GitHubUserID: me.ID, UserID: viewerID}, db.PRListFilter{}, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("PRs: %v", err)
+		}
+		got := map[int]bool{}
+		for _, p := range prs {
+			got[p.Number] = true
+		}
+		if total != 2 || !got[30] || !got[31] || got[32] {
+			t.Errorf("PRs = %v (total %d), want #30 and #31", got, total)
 		}
 	})
 

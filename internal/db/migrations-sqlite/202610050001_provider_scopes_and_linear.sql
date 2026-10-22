@@ -3,8 +3,9 @@
 -- Every external object is keyed within the provider namespace it lives in, a
 -- GitHub entity references its repository's registry row and records its pull
 -- request's node id, a repository row can be retired to give up a name GitHub
--- has handed to another repository, a team's Jira tracked set and every Jira
--- issue entity reference a Jira project registry row, every Jira and Linear
+-- has handed to another repository, a GitHub team mapping records GitHub's
+-- ids for the team and its organization, a team's Jira tracked set and every
+-- Jira issue entity reference a Jira project registry row, every Jira and Linear
 -- issue entity is written with its issue id, pull request, review and branch
 -- artifacts are keyed on ids rather than their repository's name, every
 -- artifact references the entity it is about and Jira artifacts keyed on an
@@ -14,14 +15,16 @@
 -- audit-ledger row references the entity or repository it was about, a
 -- repository row and a reachable entry record GitHub's id for the account that
 -- owns the repository, an active task on a Jira status or priority change is
--- keyed on the status's or priority's id rather than its name, Linear becomes a
--- tracked source, and nine smaller changes ride along: the org GitHub App's
--- unusable state, the claim's source
--- manifest, the retirement of the 'completed' conversation status, node ids on
--- artifacts and audit-ledger rows, the table of rate-limit readings, the
--- principal a deployment-operator grant is bound to, the removal of the unused
--- poller_state table, and the GitHub account id on a pending bind and on the
--- org PAT's identity.
+-- keyed on the status's or priority's id rather than its name, GitHub
+-- event-handler predicates name people and teams by GitHub's id, Linear
+-- becomes a tracked source, and ten smaller changes ride along: the org GitHub
+-- App's unusable state, the claim's source manifest, the retirement of the
+-- 'completed' conversation status, node ids on artifacts and audit-ledger rows,
+-- the table of rate-limit readings, the principal a deployment-operator grant
+-- is bound to, the removal of the unused poller_state table, the GitHub account
+-- id on a pending bind and on the org PAT's identity, and the indexes that look
+-- a GitHub account up by GitHub's id (an identity binding, and a pull
+-- request's author).
 --
 -- NO TRANSACTION because rebuilding a table other tables reference needs
 -- foreign keys off, and PRAGMA foreign_keys is a no-op inside a transaction:
@@ -148,6 +151,14 @@ ALTER TABLE github_pending_binds ADD COLUMN account_id TEXT;
 -- tells that account apart from the person who delegated it by this id. The
 -- PAT's next save fills it in on a stored row; until then the login decides.
 ALTER TABLE agents ADD COLUMN github_org_user_id TEXT;
+
+-- The reverse (host, GitHub account id) -> user lookup the routing
+-- subscribers run for an event that names its actor by GitHub's id rather
+-- than by login (UserIDsForGitHubUserIDSystem). The id-arm twin of
+-- user_github_identities_login_lookup_idx.
+CREATE INDEX user_github_identities_user_id_lookup_idx
+    ON user_github_identities (github_base_url, github_user_id)
+    WHERE github_user_id IS NOT NULL;
 
 -- ===========================================================================
 -- 2. Linear
@@ -330,7 +341,8 @@ CREATE UNIQUE INDEX org_linear_installs_workspace_live
 --                                 section 5, once the Jira project registry
 --                                 a Jira row references exists.
 --   repositories                  host
---   team_github_groups            host
+--   team_github_groups            host, and GitHub's ids for the team and
+--                                 its organization (section 3d)
 --   org_github_app_installations  github_host joins the primary key
 --   reachable_repositories,       host on every row
 --     reachable_scopes
@@ -703,19 +715,35 @@ SELECT entity_id, issue_id
  WHERE n = 1;
 
 -- ---------------------------------------------------------------------------
--- 3d. team_github_groups.host
+-- 3d. team_github_groups: host, and GitHub's ids for the team
 -- ---------------------------------------------------------------------------
 --
 -- A mapping names a GitHub organization by login, which another host can
--- reuse. Rebuilt because host joins the primary key.
+-- reuse, and a team by a slug GitHub changes when the team is renamed. So a
+-- row records its host, and GitHub's ids for the team (github_team_id) and
+-- for its organization (github_org_id), which routing and the deletion
+-- reconcile match on; the login and slug are display values. Rebuilt because
+-- the key changes.
+--
+-- The rows copied here carry no ids, since only GitHub can say which team a
+-- slug names. The GitHub poll's team reconcile fills them in once, matching
+-- the row's org login and slug against the organization's team listing, and
+-- never deletes a row it has not identified. Until then routing matches the
+-- row by its login and slug. The store refuses a new row without its ids, so
+-- a NULL is always a row copied here.
 CREATE TABLE team_github_groups_new (
     team_id          TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
     host             TEXT NOT NULL,
+    github_team_id   TEXT,
+    github_org_id    TEXT,
     github_org_login TEXT NOT NULL,
     github_team_slug TEXT NOT NULL,
     created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (team_id, host, github_org_login, github_team_slug),
+    UNIQUE (team_id, host, github_team_id),
     CONSTRAINT tgg_host_populated CHECK (host <> ''),
+    CONSTRAINT tgg_ids_together CHECK ((github_team_id IS NULL) = (github_org_id IS NULL)),
+    CONSTRAINT tgg_team_id_populated CHECK (github_team_id <> ''),
+    CONSTRAINT tgg_org_id_populated CHECK (github_org_id <> ''),
     CONSTRAINT tgg_org_login_populated CHECK (github_org_login <> ''),
     CONSTRAINT tgg_team_slug_populated CHECK (github_team_slug <> '')
 );
@@ -728,6 +756,10 @@ SELECT g.team_id, s.scope, g.github_org_login, g.github_team_slug, g.created_at
 
 DROP TABLE team_github_groups;
 ALTER TABLE team_github_groups_new RENAME TO team_github_groups;
+
+-- Routing's lookup: which teams a GitHub team's review requests route to. The
+-- unique key leads with team_id and cannot serve it.
+CREATE INDEX team_github_groups_github_team_idx ON team_github_groups (host, github_team_id);
 
 -- ---------------------------------------------------------------------------
 -- 3e. GitHub App installations and the reachable-repo cache
@@ -1416,6 +1448,13 @@ CREATE INDEX        idx_entities_github_author
     ON entities (json_extract(snapshot_json, '$.author'))
     WHERE source = 'github' AND snapshot_json IS NOT NULL AND snapshot_json != ''
       AND json_valid(snapshot_json);
+-- The author's GitHub account id, which a rename leaves alone: the dashboard
+-- and team pull-request lists match an author by it when the snapshot and the
+-- caller's binding both record one.
+CREATE INDEX        idx_entities_github_author_id
+    ON entities (json_extract(snapshot_json, '$.author_id'))
+    WHERE source = 'github' AND snapshot_json IS NOT NULL AND snapshot_json != ''
+      AND json_valid(snapshot_json);
 CREATE INDEX        idx_entities_commissioned_by
     ON entities (commissioned_by_user_id)
     WHERE commissioned_by_user_id IS NOT NULL;
@@ -1827,6 +1866,188 @@ UPDATE tasks
                                     AND o.dedup_key = r.new_key AND o.status NOT IN ('done', 'dismissed')));
 
 DROP TABLE task_rekey;
+
+-- ===========================================================================
+-- 11. GitHub event-handler predicates name people and teams by GitHub's id
+-- ===========================================================================
+--
+-- A GitHub predicate's identity filters take GitHub's ids, which a rename
+-- leaves alone: author_id_in, reviewer_id_in and commenter_id_in for accounts,
+-- requested_user_id_in and requested_team_id_in for a requested reviewer. The
+-- login-valued filters they replace are unknown fields now, and a predicate
+-- carrying one would refuse to match, so every stored GitHub predicate is
+-- rewritten to the id fields:
+--
+--   author_in, reviewer_in, commenter_in   become author_id_in, reviewer_id_in
+--                                          and commenter_id_in, each login
+--                                          replaced by its account's id;
+--   author, reviewer, commenter            a single login, folded into the
+--                                          list above as its one entry, or,
+--                                          beside a list of its own, narrowing
+--                                          the list to it;
+--   requested_login                        requested_user_id_in, one entry;
+--   requested_team                         requested_team_id_in, one entry.
+--
+-- A login's id is the github_user_id of the identity binding that holds the
+-- login on the org's GitHub host, the most recently verified one when several
+-- do. A login no binding with an id holds is kept as written, and a team's
+-- org/slug is always kept as written (the mappings 3d copied record no ids
+-- yet): neither is an id, so the filter matches nothing until the handler is
+-- edited, rather than matching everyone. For the same reason a singular login
+-- that narrows its list to nothing leaves the list ["0"], which no account has
+-- (GitHub numbers them from 1), where the pair before matched nothing too.
+-- mentioned_login and mentioned_team name the handle a mention spelled and are
+-- unchanged.
+CREATE TEMP TABLE gh_login_id (
+    host           TEXT NOT NULL,
+    login          TEXT NOT NULL,
+    github_user_id TEXT NOT NULL,
+    PRIMARY KEY (host, login)
+);
+
+INSERT INTO gh_login_id (host, login, github_user_id)
+SELECT github_base_url, lower(login), github_user_id
+  FROM (SELECT github_base_url, login, github_user_id,
+               row_number() OVER (PARTITION BY github_base_url, lower(login)
+                                  ORDER BY verified_at DESC, user_id) AS n
+          FROM user_github_identities
+         WHERE github_user_id IS NOT NULL)
+ WHERE n = 1;
+
+CREATE TEMP TABLE gh_predicate (
+    id   TEXT PRIMARY KEY,
+    host TEXT NOT NULL,
+    p    TEXT NOT NULL
+);
+
+INSERT INTO gh_predicate (id, host, p)
+SELECT h.id, s.scope, h.scope_predicate_json
+  FROM event_handlers h
+  JOIN org_scope s ON s.org_id = h.org_id AND s.provider = 'github'
+ WHERE h.event_type LIKE 'github:%'
+   AND json_valid(h.scope_predicate_json)
+   AND json_type(h.scope_predicate_json) = 'object';
+
+-- The lists, renamed, each entry resolved.
+UPDATE gh_predicate
+   SET p = json_remove(json_set(p, '$.author_id_in', json(
+             (SELECT json_group_array(COALESCE(
+                       (SELECT m.github_user_id FROM gh_login_id m
+                         WHERE m.host = gh_predicate.host AND m.login = lower(e.value)),
+                       e.value))
+                FROM json_each(gh_predicate.p, '$.author_in') e))), '$.author_in')
+ WHERE json_type(p, '$.author_in') = 'array';
+
+UPDATE gh_predicate
+   SET p = json_remove(json_set(p, '$.reviewer_id_in', json(
+             (SELECT json_group_array(COALESCE(
+                       (SELECT m.github_user_id FROM gh_login_id m
+                         WHERE m.host = gh_predicate.host AND m.login = lower(e.value)),
+                       e.value))
+                FROM json_each(gh_predicate.p, '$.reviewer_in') e))), '$.reviewer_in')
+ WHERE json_type(p, '$.reviewer_in') = 'array';
+
+UPDATE gh_predicate
+   SET p = json_remove(json_set(p, '$.commenter_id_in', json(
+             (SELECT json_group_array(COALESCE(
+                       (SELECT m.github_user_id FROM gh_login_id m
+                         WHERE m.host = gh_predicate.host AND m.login = lower(e.value)),
+                       e.value))
+                FROM json_each(gh_predicate.p, '$.commenter_in') e))), '$.commenter_in')
+ WHERE json_type(p, '$.commenter_in') = 'array';
+
+-- The singular logins, resolved the same way, and folded into their lists. An
+-- entry the singular is compared with is resolved already, so the two compare
+-- as ids, or as logins when neither resolved.
+UPDATE gh_predicate
+   SET p = json_remove(json_set(p, '$.author_id_in', json(
+             CASE WHEN json_array_length(p, '$.author_id_in') > 0
+                  THEN COALESCE(NULLIF(
+                         (SELECT json_group_array(e.value) FROM json_each(gh_predicate.p, '$.author_id_in') e
+                           WHERE lower(e.value) = lower(COALESCE(
+                                   (SELECT m.github_user_id FROM gh_login_id m
+                                     WHERE m.host = gh_predicate.host
+                                       AND m.login = lower(json_extract(gh_predicate.p, '$.author'))),
+                                   json_extract(gh_predicate.p, '$.author')))),
+                         '[]'), '["0"]')
+                  ELSE json_array(COALESCE(
+                         (SELECT m.github_user_id FROM gh_login_id m
+                           WHERE m.host = gh_predicate.host
+                             AND m.login = lower(json_extract(gh_predicate.p, '$.author'))),
+                         json_extract(gh_predicate.p, '$.author')))
+             END)), '$.author')
+ WHERE json_type(p, '$.author') = 'text';
+
+UPDATE gh_predicate
+   SET p = json_remove(json_set(p, '$.reviewer_id_in', json(
+             CASE WHEN json_array_length(p, '$.reviewer_id_in') > 0
+                  THEN COALESCE(NULLIF(
+                         (SELECT json_group_array(e.value) FROM json_each(gh_predicate.p, '$.reviewer_id_in') e
+                           WHERE lower(e.value) = lower(COALESCE(
+                                   (SELECT m.github_user_id FROM gh_login_id m
+                                     WHERE m.host = gh_predicate.host
+                                       AND m.login = lower(json_extract(gh_predicate.p, '$.reviewer'))),
+                                   json_extract(gh_predicate.p, '$.reviewer')))),
+                         '[]'), '["0"]')
+                  ELSE json_array(COALESCE(
+                         (SELECT m.github_user_id FROM gh_login_id m
+                           WHERE m.host = gh_predicate.host
+                             AND m.login = lower(json_extract(gh_predicate.p, '$.reviewer'))),
+                         json_extract(gh_predicate.p, '$.reviewer')))
+             END)), '$.reviewer')
+ WHERE json_type(p, '$.reviewer') = 'text';
+
+UPDATE gh_predicate
+   SET p = json_remove(json_set(p, '$.commenter_id_in', json(
+             CASE WHEN json_array_length(p, '$.commenter_id_in') > 0
+                  THEN COALESCE(NULLIF(
+                         (SELECT json_group_array(e.value) FROM json_each(gh_predicate.p, '$.commenter_id_in') e
+                           WHERE lower(e.value) = lower(COALESCE(
+                                   (SELECT m.github_user_id FROM gh_login_id m
+                                     WHERE m.host = gh_predicate.host
+                                       AND m.login = lower(json_extract(gh_predicate.p, '$.commenter'))),
+                                   json_extract(gh_predicate.p, '$.commenter')))),
+                         '[]'), '["0"]')
+                  ELSE json_array(COALESCE(
+                         (SELECT m.github_user_id FROM gh_login_id m
+                           WHERE m.host = gh_predicate.host
+                             AND m.login = lower(json_extract(gh_predicate.p, '$.commenter'))),
+                         json_extract(gh_predicate.p, '$.commenter')))
+             END)), '$.commenter')
+ WHERE json_type(p, '$.commenter') = 'text';
+
+UPDATE gh_predicate
+   SET p = json_remove(json_set(p, '$.requested_user_id_in', json(json_array(COALESCE(
+             (SELECT m.github_user_id FROM gh_login_id m
+               WHERE m.host = gh_predicate.host
+                 AND m.login = lower(json_extract(gh_predicate.p, '$.requested_login'))),
+             json_extract(p, '$.requested_login'))))), '$.requested_login')
+ WHERE json_type(p, '$.requested_login') = 'text';
+
+UPDATE gh_predicate
+   SET p = json_remove(json_set(p, '$.requested_team_id_in', json(json_array(json_extract(p, '$.requested_team')))),
+                       '$.requested_team')
+ WHERE json_type(p, '$.requested_team') = 'text';
+
+-- A null filter is no filter, as an absent one is, so a null old field is
+-- dropped.
+UPDATE gh_predicate SET p = json_remove(p, '$.author_in') WHERE json_type(p, '$.author_in') = 'null';
+UPDATE gh_predicate SET p = json_remove(p, '$.reviewer_in') WHERE json_type(p, '$.reviewer_in') = 'null';
+UPDATE gh_predicate SET p = json_remove(p, '$.commenter_in') WHERE json_type(p, '$.commenter_in') = 'null';
+UPDATE gh_predicate SET p = json_remove(p, '$.author') WHERE json_type(p, '$.author') = 'null';
+UPDATE gh_predicate SET p = json_remove(p, '$.reviewer') WHERE json_type(p, '$.reviewer') = 'null';
+UPDATE gh_predicate SET p = json_remove(p, '$.commenter') WHERE json_type(p, '$.commenter') = 'null';
+UPDATE gh_predicate SET p = json_remove(p, '$.requested_login') WHERE json_type(p, '$.requested_login') = 'null';
+UPDATE gh_predicate SET p = json_remove(p, '$.requested_team') WHERE json_type(p, '$.requested_team') = 'null';
+
+UPDATE event_handlers
+   SET scope_predicate_json = (SELECT g.p FROM gh_predicate g WHERE g.id = event_handlers.id)
+ WHERE id IN (SELECT g.id FROM gh_predicate g
+                JOIN event_handlers h ON h.id = g.id
+               WHERE g.p <> h.scope_predicate_json);
+
+DROP TABLE gh_predicate;
+DROP TABLE gh_login_id;
 
 DROP TABLE org_scope;
 DROP TABLE host_case;

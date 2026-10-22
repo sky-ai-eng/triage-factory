@@ -329,29 +329,37 @@ func maxRuleDefaultPriority(rules []domain.EventHandler) float64 {
 
 // requestedParty reads the identity a requested-party event names: the
 // requested reviewer of a review_requested, the mentioned user or team of a
-// mentioned. At most one of login and team is set, team in "org/slug" form.
-// Metadata that does not decode names nobody.
-func requestedParty(evt domain.Event) (login, team string) {
+// mentioned. At most one of login and team is set, team in "org/slug" form,
+// and id is GitHub's id for that user or team — empty for a mention, which
+// names a handle only, and for a request recorded before ids were. Metadata
+// that does not decode names nobody.
+func requestedParty(evt domain.Event) (login, team, id string) {
 	if evt.EventType == domain.EventGitHubPRMentioned {
 		var meta events.GitHubPRMentionedMetadata
 		if json.Unmarshal([]byte(evt.MetadataJSON), &meta) != nil {
-			return "", ""
+			return "", "", ""
 		}
-		return meta.MentionedLogin, meta.MentionedTeam
+		return meta.MentionedLogin, meta.MentionedTeam, ""
 	}
 	var meta events.GitHubPRReviewRequestedMetadata
 	if json.Unmarshal([]byte(evt.MetadataJSON), &meta) != nil {
-		return "", ""
+		return "", "", ""
 	}
-	return meta.RequestedLogin, meta.RequestedTeam
+	if meta.RequestedTeam != "" {
+		return "", meta.RequestedTeam, meta.RequestedTeamID
+	}
+	return meta.RequestedLogin, "", meta.RequestedUserID
 }
 
 // requestedPartyTeams resolves the team(s) a requested-party task
 // (review_requested, mentioned) is visible to from the identity on the event
 // metadata — not from which teams' rules matched. A user routes to the union
-// of teams over every TF user the login resolves to (the set-valued reverse
-// lookup, the regression guard for a login bound to two users); a github team
-// routes to the TF team(s) the github-team→TF-team mapping returns.
+// of teams over every TF user the identity resolves to (the set-valued reverse
+// lookup, the regression guard for an account bound to two users); a github
+// team routes to the TF team(s) the github-team→TF-team mapping returns. Both
+// resolve by GitHub's id when the event carries one, so a renamed user or team
+// still routes, and by handle when it does not (a mention, or an event
+// recorded before ids were).
 //
 // scoped=true means "route via the requested-identity path"; the caller uses
 // the returned teams (an empty set → drop the task: a TF-known identity that
@@ -368,7 +376,7 @@ func requestedParty(evt domain.Event) (login, team string) {
 // degraded read would silently spend the event on a task that was never
 // created. The caller propagates so the queue row is retried instead.
 func (r *Router) requestedPartyTeams(ctx context.Context, orgID string, evt domain.Event) (teams []string, scoped bool, err error) {
-	login, team := requestedParty(evt)
+	login, team, ghID := requestedParty(evt)
 	if login == "" && team == "" {
 		return nil, false, nil // legacy event, no identity captured
 	}
@@ -384,8 +392,8 @@ func (r *Router) requestedPartyTeams(ctx context.Context, orgID string, evt doma
 			return nil, false, nil
 		}
 		orgLogin, slug, ok := strings.Cut(team, "/")
-		if !ok || orgLogin == "" || slug == "" {
-			return nil, true, nil // malformed handle → no team
+		if ghID == "" && (!ok || orgLogin == "" || slug == "") {
+			return nil, true, nil // malformed handle and no id → no team
 		}
 		// The GitHub team lives on the pull request's host; a mapping saved
 		// for the same org login on another host names another organization.
@@ -394,7 +402,7 @@ func (r *Router) requestedPartyTeams(ctx context.Context, orgID string, evt doma
 			routerLog.Error("requested party: resolve github host failed", "event_type", evt.EventType, "team", team, "error", err)
 			return nil, false, fmt.Errorf("github host for %s: %w", team, err)
 		}
-		tids, err := r.githubGroups.TeamsForGroupSystem(ctx, orgID, host, orgLogin, slug)
+		tids, err := r.githubGroups.TeamsForGitHubTeamSystem(ctx, orgID, host, ghID, orgLogin, slug)
 		if err != nil {
 			routerLog.Error("requested party: github-team mapping lookup failed", "event_type", evt.EventType, "team", team, "error", err)
 			return nil, false, fmt.Errorf("github-team mapping for %s: %w", team, err)
@@ -414,10 +422,10 @@ func (r *Router) requestedPartyTeams(ctx context.Context, orgID string, evt doma
 		// The canonical host, the one identities are captured under. An org
 		// with no GitHub URL has no host and resolves nobody.
 		host := dbpkg.EffectiveGitHubHost(orgSet.GitHubBaseURL)
-		userIDs, err := r.users.UserIDsForGitHubLoginSystem(ctx, host, login)
+		userIDs, err := r.usersForGitHubAccount(ctx, host, ghID, login)
 		if err != nil {
-			routerLog.Error("requested party: reverse login lookup failed", "event_type", evt.EventType, "login", login, "error", err)
-			return nil, false, fmt.Errorf("reverse login lookup for %s: %w", login, err)
+			routerLog.Error("requested party: reverse identity lookup failed", "event_type", evt.EventType, "login", login, "github_user_id", ghID, "error", err)
+			return nil, false, fmt.Errorf("reverse identity lookup for %s: %w", login, err)
 		}
 		// Collect rather than bail on the first failure, the fireMatchedTriggers
 		// pattern: one unreadable user must not decide the shape of the answer,
@@ -532,10 +540,12 @@ func (r *Router) authorCentricOwner(ctx context.Context, orgID string, evt domai
 	}
 }
 
-// authorTeams resolves a github event's PR author login to the union of teams
-// over every TF user the login maps to, on the org's effective github host.
-// Mirrors requestedPartyTeams' user-identity branch (the set-valued
-// reverse lookup is the regression guard for a login bound to two users).
+// authorTeams resolves a github event's PR author to the union of teams over
+// every TF user the author maps to, on the org's effective github host: by the
+// author's GitHub id when the event carries one, by login when it does not (an
+// event recorded before ids were). Mirrors requestedPartyTeams' user-identity
+// branch (the set-valued reverse lookup is the regression guard for an account
+// bound to two users).
 // Returns an empty slice when the author isn't a TF user (dependabot /
 // external) or the identity stores are unwired — both resolved data states,
 // not failures.
@@ -550,9 +560,10 @@ func (r *Router) authorTeams(ctx context.Context, orgID string, evt domain.Event
 		return nil, nil
 	}
 	var m struct {
-		Author string `json:"author"`
+		Author   string `json:"author"`
+		AuthorID string `json:"author_id"`
 	}
-	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil || m.Author == "" {
+	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil || (m.Author == "" && m.AuthorID == "") {
 		return nil, nil
 	}
 	orgSet, err := r.orgs.GetSettingsSystem(ctx, orgID)
@@ -563,10 +574,10 @@ func (r *Router) authorTeams(ctx context.Context, orgID string, evt domain.Event
 	// The canonical host, the one identities are captured under. An org with
 	// no GitHub URL has no host and resolves nobody.
 	host := dbpkg.EffectiveGitHubHost(orgSet.GitHubBaseURL)
-	userIDs, err := r.users.UserIDsForGitHubLoginSystem(ctx, host, m.Author)
+	userIDs, err := r.usersForGitHubAccount(ctx, host, m.AuthorID, m.Author)
 	if err != nil {
-		routerLog.Error("author-centric owner: reverse login lookup failed", "author", m.Author, "error", err)
-		return nil, fmt.Errorf("reverse login lookup for %s: %w", m.Author, err)
+		routerLog.Error("author-centric owner: reverse identity lookup failed", "author", m.Author, "author_id", m.AuthorID, "error", err)
+		return nil, fmt.Errorf("reverse identity lookup for %s: %w", m.Author, err)
 	}
 	// Collect rather than drop the user and carry on: a partial team set is a
 	// wrong answer that looks like a right one (one team instead of two reads
@@ -1024,4 +1035,15 @@ func effectiveActingTeam(actingTeamID, taskTeamID string) string {
 		return taskTeamID
 	}
 	return actingTeamID
+}
+
+// usersForGitHubAccount is the reverse identity lookup for a GitHub actor an
+// event names: the TF users bound to GitHub's id for the account when the event
+// carries one (UserIDsForGitHubUserIDSystem, which also takes a binding that
+// recorded no id by its login), and to its login when it does not.
+func (r *Router) usersForGitHubAccount(ctx context.Context, host, githubUserID, login string) ([]string, error) {
+	if githubUserID != "" {
+		return r.users.UserIDsForGitHubUserIDSystem(ctx, host, githubUserID, login)
+	}
+	return r.users.UserIDsForGitHubLoginSystem(ctx, host, login)
 }

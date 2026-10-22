@@ -317,7 +317,7 @@ type ShippedEventHandler struct {
 var ShippedEventHandlers = []ShippedEventHandler{
 	// ----- rules ------------------------------------------------------------
 	//
-	// Rules about "my PR" carry `author_in: []` and rules about "my issue"
+	// Rules about "my PR" carry `author_id_in: []` and rules about "my issue"
 	// carry `assignee_in: []`. An empty list matches everyone, and both
 	// dialects' Seed insert the predicate as written. Owner routing scopes
 	// these at event time instead: it resolves the PR author's (or the issue
@@ -327,7 +327,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		ID:              "system-rule-ci-check-failed",
 		Kind:            domain.EventHandlerKindRule,
 		EventType:       domain.EventGitHubPRCICheckFailed,
-		Predicate:       `{"author_in":[]}`,
+		Predicate:       `{"author_id_in":[]}`,
 		Name:            "CI check failed on my PR",
 		DefaultPriority: 0.75,
 		SortOrder:       0,
@@ -336,7 +336,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		ID:              "system-rule-review-changes-requested",
 		Kind:            domain.EventHandlerKindRule,
 		EventType:       domain.EventGitHubPRReviewChangesRequested,
-		Predicate:       `{"author_in":[]}`,
+		Predicate:       `{"author_id_in":[]}`,
 		Name:            "Changes requested on my PR",
 		DefaultPriority: 0.85,
 		SortOrder:       1,
@@ -345,7 +345,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		ID:              "system-rule-review-commented",
 		Kind:            domain.EventHandlerKindRule,
 		EventType:       domain.EventGitHubPRReviewCommented,
-		Predicate:       `{"author_in":[]}`,
+		Predicate:       `{"author_id_in":[]}`,
 		Name:            "Reviewer commented on my PR",
 		DefaultPriority: 0.65,
 		SortOrder:       2,
@@ -410,7 +410,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		Kind:                   domain.EventHandlerKindTrigger,
 		BlueprintID:            "system-ci-fix",
 		EventType:              domain.EventGitHubPRCICheckFailed,
-		Predicate:              `{"author_in":[]}`,
+		Predicate:              `{"author_id_in":[]}`,
 		BreakerThreshold:       3,
 		MinAutonomySuitability: 0.0,
 	},
@@ -419,7 +419,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		Kind:                   domain.EventHandlerKindTrigger,
 		BlueprintID:            "system-conflict-resolution",
 		EventType:              domain.EventGitHubPRConflicts,
-		Predicate:              `{"author_in":[]}`,
+		Predicate:              `{"author_id_in":[]}`,
 		BreakerThreshold:       2,
 		MinAutonomySuitability: 0.0,
 	},
@@ -465,7 +465,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		Kind:                   domain.EventHandlerKindTrigger,
 		BlueprintID:            "system-fix-review-feedback",
 		EventType:              domain.EventGitHubPRReviewChangesRequested,
-		Predicate:              `{"author_in":[]}`,
+		Predicate:              `{"author_id_in":[]}`,
 		BreakerThreshold:       3,
 		MinAutonomySuitability: 0.0,
 	},

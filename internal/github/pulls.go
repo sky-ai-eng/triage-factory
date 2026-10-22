@@ -914,6 +914,7 @@ type restPR struct {
 	CreatedAt string          `json:"created_at"`
 	UpdatedAt string          `json:"updated_at"`
 	User      struct {
+		ID    int64  `json:"id"`
 		Login string `json:"login"`
 	} `json:"user"`
 	Head struct {
@@ -930,9 +931,11 @@ type restPR struct {
 		} `json:"repo"`
 	} `json:"base"`
 	RequestedReviewers []struct {
+		ID    int64  `json:"id"`
 		Login string `json:"login"`
 	} `json:"requested_reviewers"`
 	RequestedTeams []struct {
+		ID   int64  `json:"id"`
 		Slug string `json:"slug"`
 	} `json:"requested_teams"`
 	Labels []struct {
@@ -1037,6 +1040,7 @@ func (pr restPR) toDiscoverySnapshot(owner, repo string) domain.PRSnapshot {
 		BodyHash:     bodyHash,
 		BodyMentions: bodyMentions,
 		Author:       pr.User.Login,
+		AuthorID:     githubID(pr.User.ID),
 		Repo:         owner + "/" + repo,
 		URL:          pr.HTMLURL,
 		State:        strings.ToUpper(pr.State), // REST "open" → "OPEN" (GraphQL form)
@@ -1052,12 +1056,12 @@ func (pr restPR) toDiscoverySnapshot(owner, repo string) domain.PRSnapshot {
 	}
 	for _, rr := range pr.RequestedReviewers {
 		if rr.Login != "" {
-			snap.ReviewRequests = append(snap.ReviewRequests, rr.Login)
+			addReviewRequest(&snap, rr.Login, rr.ID)
 		}
 	}
 	for _, tm := range pr.RequestedTeams {
 		if tm.Slug != "" {
-			snap.ReviewRequests = append(snap.ReviewRequests, owner+"/"+tm.Slug)
+			addReviewRequest(&snap, owner+"/"+tm.Slug, tm.ID)
 		}
 	}
 	for _, l := range pr.Labels {

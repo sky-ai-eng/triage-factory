@@ -196,7 +196,7 @@ func (fx *githubScopeFixture) cycle(t *testing.T, host string, client *ghclient.
 	fx.pub.events = nil
 	fx.pub.mu.Unlock()
 	fx.tr.RetireGitHubOutOfScope(context.Background(), host)
-	if _, _, err := fx.tr.RefreshGitHub(context.Background(), host, client, "", repos, nil); err != nil {
+	if _, _, err := fx.tr.RefreshGitHub(context.Background(), host, client, domain.GitHubAccount{}, repos, nil); err != nil {
 		t.Fatalf("RefreshGitHub on %s: %v", host, err)
 	}
 	return fx.pub.nonSystemEvents()

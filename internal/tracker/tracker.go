@@ -285,9 +285,10 @@ func (t *Tracker) commitRefresh(ctx context.Context, orgID, entityID string, pre
 // RefreshGitHub runs the full tracking cycle for GitHub PRs. resolver
 // answers "is this requested reviewer a TF-known identity?" per cycle —
 // local mode passes a resolver built from the lone user's login + teams,
-// multi mode a store-backed one keyed on the org's GitHub host. username
-// remains the user-perspective axis for the merged/closed dashboard
-// backfill and the self-authored-PR guard (empty in multi mode).
+// multi mode a store-backed one keyed on the org's GitHub host. self is the
+// user-perspective account: its login seeds the merged/closed dashboard
+// backfill, and the self-authored-PR guard matches it by GitHub's id when the
+// snapshot carries one, by login otherwise (zero in multi mode).
 //
 // All entity/task reads and writes are scoped to the Tracker's
 // orgID (set at construction). In multi mode the poller's per-org
@@ -320,14 +321,14 @@ func (t *Tracker) commitRefresh(ctx context.Context, orgID, entityID string, pre
 //
 // scope is the org's GitHub host, domain.EntityScope("github", settings): the
 // namespace every pull request this cycle discovers is keyed under.
-func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghclient.Client, username string, repos []string, resolver ReviewerResolver) (int, string, error) {
+func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghclient.Client, self domain.GitHubAccount, repos []string, resolver ReviewerResolver) (int, string, error) {
 	orgID := t.orgID
 	startedAt := time.Now()
 	// Phase 1: Discovery — find new PRs and register as entities.
 	// quietRepos is the set of registry row ids whose open-PR listing
 	// returned 304 (unchanged) this cycle; their tracked entities can keep
 	// their stored snapshot through the Phase-2 gate without a refresh.
-	discovery, discoveryErr := t.discoverGitHub(ctx, scope, client, username, repos)
+	discovery, discoveryErr := t.discoverGitHub(ctx, scope, client, self.Login, repos)
 	discovered, quietRepos, lastListed := discovery.prs, discovery.quiet, discovery.lastListed
 	var rateLimited *ghclient.ErrRateLimited
 	if discoveryErr != nil {
@@ -425,15 +426,14 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			if !terminal && openedSince(snap, lastListed[d.repositoryID]) {
 				backfilled = append(backfilled, openedPRMentions(entity.ID, entity.RepositoryID, snap, resolver)...)
 			}
-			if !terminal && snap.Author != username {
-				for _, reviewer := range snap.ReviewRequests {
-					login, team, known := resolveReviewer(resolver, reviewer)
-					if !known {
+			if !terminal && !self.Is(snap.Author, snap.AuthorID) {
+				for _, reviewer := range snap.RequestedReviewers() {
+					if _, _, known := resolveReviewer(resolver, reviewer); !known {
 						continue
 					}
-					evt, err := backfillReviewRequestedEvent(entity.ID, entity.RepositoryID, snap, login, team)
+					evt, err := backfillReviewRequestedEvent(entity.ID, entity.RepositoryID, snap, reviewer)
 					if err != nil {
-						trackerLog.Error("build backfill review_requested failed", "source_id", sid, "reviewer", reviewer, "error", err)
+						trackerLog.Error("build backfill review_requested failed", "source_id", sid, "reviewer", reviewer.Handle, "error", err)
 						continue
 					}
 					backfilled = append(backfilled, evt)
@@ -662,24 +662,30 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			// (quiet) snapshot's request list, emit a per-identity
 			// review_request_removed so the router can close that one task.
 			// Entities proceeding to DiffPRSnapshots emit their own removals.
+			// A task keyed by GitHub's id is matched by id; one keyed by a
+			// handle (created before ids were recorded) by that handle, so
+			// such a task whose reviewer was renamed since reads as removed.
 			if stale, err := t.tasks.FindActiveByEntityAndTypeSystem(context.Background(), orgID, e.ID, domain.EventGitHubPRReviewRequested); err == nil && len(stale) > 0 {
-				currReq := toSet(snap.ReviewRequests)
 				for _, task := range stale {
 					reviewer, ok := reviewerFromDedupKey(task.DedupKey)
-					if !ok || currReq[reviewer] {
+					if !ok || snap.HasRequestedReviewer(reviewer) {
 						continue // legacy/unkeyed task, or reviewer still requested
 					}
-					login, team := requestedIdentityFields(reviewer)
+					login, team, userID, teamID := requestedIdentityFields(reviewer)
 					meta, _ := json.Marshal(events.GitHubPRReviewRequestRemovedMetadata{
-						Author:         snap.Author,
-						Repo:           snap.Repo,
-						RepositoryID:   e.RepositoryID,
-						PRNumber:       snap.Number,
-						IsDraft:        snap.IsDraft,
-						HeadSHA:        snap.HeadSHA,
-						Labels:         snap.Labels,
-						Title:          snap.Title,
-						RequestedLogin: login, RequestedTeam: team,
+						Author:          snap.Author,
+						AuthorID:        snap.AuthorID,
+						Repo:            snap.Repo,
+						RepositoryID:    e.RepositoryID,
+						PRNumber:        snap.Number,
+						IsDraft:         snap.IsDraft,
+						HeadSHA:         snap.HeadSHA,
+						Labels:          snap.Labels,
+						Title:           snap.Title,
+						RequestedLogin:  login,
+						RequestedTeam:   team,
+						RequestedUserID: userID,
+						RequestedTeamID: teamID,
 					})
 					eid := e.ID
 					t.publish(ctx, domain.Event{
@@ -840,7 +846,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		}
 
 		// Diff against previous snapshot.
-		events := DiffPRSnapshots(item.snap, newSnap, item.entity.ID, item.entity.RepositoryID, username, resolver, newReviews[item.nodeID], newComments[item.nodeID])
+		events := DiffPRSnapshots(item.snap, newSnap, item.entity.ID, item.entity.RepositoryID, self, resolver, newReviews[item.nodeID], newComments[item.nodeID])
 
 		// The close obligation: this entity is active (Phase 2 lists only
 		// active rows) and its snapshot was ALREADY terminal last cycle, so
@@ -1516,24 +1522,26 @@ func splitOwnerRepo(s string) (owner, repo string) {
 //
 // The "is this reviewer TF-known" decision happens upstream at the
 // caller's resolveReviewer check, not here; this function just records the
-// requested identity (login or "org/slug" team) plus the PR author on the
-// metadata, and keys the event by that identity, so the router routes the
-// per-reviewer task and the predicate matcher can do its work.
-func backfillReviewRequestedEvent(entityID, repositoryID string, snap domain.PRSnapshot, requestedLogin, requestedTeam string) (domain.Event, error) {
-	reviewer := requestedLogin
-	if reviewer == "" {
-		reviewer = requestedTeam
-	}
+// requested identity (login or "org/slug" team, and GitHub's id for it) plus
+// the PR author on the metadata, and keys the event by that identity, so the
+// router routes the per-reviewer task and the predicate matcher can do its
+// work.
+func backfillReviewRequestedEvent(entityID, repositoryID string, snap domain.PRSnapshot, reviewer domain.RequestedReviewer) (domain.Event, error) {
+	login, team, userID, teamID := requestedIdentityFields(reviewer)
 	meta := events.GitHubPRReviewRequestedMetadata{
-		Author:         snap.Author,
-		Repo:           snap.Repo,
-		RepositoryID:   repositoryID,
-		PRNumber:       snap.Number,
-		IsDraft:        snap.IsDraft,
-		HeadSHA:        snap.HeadSHA,
-		Labels:         snap.Labels,
-		Title:          snap.Title,
-		RequestedLogin: requestedLogin, RequestedTeam: requestedTeam,
+		Author:          snap.Author,
+		AuthorID:        snap.AuthorID,
+		Repo:            snap.Repo,
+		RepositoryID:    repositoryID,
+		PRNumber:        snap.Number,
+		IsDraft:         snap.IsDraft,
+		HeadSHA:         snap.HeadSHA,
+		Labels:          snap.Labels,
+		Title:           snap.Title,
+		RequestedLogin:  login,
+		RequestedTeam:   team,
+		RequestedUserID: userID,
+		RequestedTeamID: teamID,
 	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
