@@ -42,6 +42,7 @@ function member(over: Partial<TeamMember>): TeamMember {
     github_user_id: null,
     jira_account_id: null,
     linear_user_id: null,
+    linear_display_name: null,
     role: 'member',
     is_current_user: false,
     ...over,
@@ -87,7 +88,7 @@ describe('PredicateEditor identity allowlists', () => {
     },
   )
 
-  it('lists team members by their Linear user id on a Linear event', async () => {
+  it('lists team members by their Linear name and writes their Linear user id', async () => {
     stubSchema('assignee_in')
     roster.members = [
       member({
@@ -102,6 +103,7 @@ describe('PredicateEditor identity allowlists', () => {
         display_name: 'Ada',
         github_username: 'ada-gh',
         linear_user_id: 'lin-ada',
+        linear_display_name: 'ada.l',
       }),
       member({ user_id: 'user-3', display_name: 'Bob', github_username: 'bob-gh' }),
     ]
@@ -110,11 +112,12 @@ describe('PredicateEditor identity allowlists', () => {
 
     fireEvent.focus(await screen.findByRole('combobox'))
 
-    expect(screen.getByText('lin-ada')).toBeInTheDocument()
+    expect(screen.getByText('ada.l')).toBeInTheDocument()
+    expect(screen.getByText('lin-me')).toBeInTheDocument()
     expect(screen.queryByText('ada-gh')).not.toBeInTheDocument()
     expect(screen.getByText('— no Linear identity')).toBeInTheDocument()
 
-    fireEvent.mouseDown(screen.getByText('lin-ada'))
+    fireEvent.mouseDown(screen.getByText('ada.l'))
     expect(onChange).toHaveBeenCalledWith({ assignee_in: ['lin-ada'] })
   })
 })
@@ -296,6 +299,119 @@ const teamGroups = [
   { github_team_id: '11', github_org_id: '7', org_login: 'acme', team_slug: 'backend' },
   { github_team_id: '', github_org_id: '', org_login: 'acme', team_slug: 'legacy' },
 ]
+
+const linearUsers = `/api/orgs/${LOCAL_DEFAULT_ORG_ID}/linear/users/`
+// The people of the org's Linear workspace, as the users reads answer them.
+const linearPeople = [
+  {
+    id: '11111111-1111-4111-8111-111111111111',
+    name: 'Ada Lovelace',
+    display_name: 'ada',
+    active: true,
+  },
+  {
+    id: '22222222-2222-4222-8222-222222222222',
+    name: 'Adam Smith',
+    display_name: 'asmith',
+    active: true,
+  },
+  {
+    id: '33333333-3333-4333-8333-333333333333',
+    name: 'Grace Hopper',
+    display_name: 'grace',
+    active: true,
+  },
+]
+const [linAda, linAdam, linGrace] = linearPeople.map((u) => u.id)
+const linearTeam = [
+  member({
+    user_id: 'user-1',
+    display_name: 'Me',
+    linear_user_id: 'lin-me',
+    linear_display_name: 'me',
+    is_current_user: true,
+  }),
+  member({
+    user_id: 'user-2',
+    display_name: 'Bob',
+    linear_user_id: 'lin-bob',
+    linear_display_name: 'bob',
+  }),
+]
+
+function renderAssigneeField(value: Record<string, string[]> = {}) {
+  roster.members = linearTeam
+  const fetchMock = vi.fn((url: string, init?: { body?: string }) => {
+    const answer = (status: number, body: unknown) =>
+      Promise.resolve({ ok: status < 400, status, ...jsonBody(body) })
+    if (url.startsWith('/api/event-schemas/')) {
+      return answer(200, { fields: [{ name: 'assignee_in', type: 'string_list' }] })
+    }
+    if (url === `${linearUsers}list`) {
+      const q = (JSON.parse(init?.body ?? '{}').q as string).toLowerCase()
+      const items = linearPeople.filter(
+        (u) => u.name.toLowerCase().includes(q) || u.display_name.includes(q),
+      )
+      return answer(200, { items, next_page_token: '', total_count: null })
+    }
+    const user = linearPeople.find((u) => url === `${linearUsers}${u.id}`)
+    return user ? answer(200, user) : answer(404, { errors: [] })
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  const onChange = vi.fn()
+  render(<PredicateEditor eventType="linear:issue:assigned" value={value} onChange={onChange} />)
+  return { fetchMock, onChange }
+}
+
+describe('PredicateEditor Linear identities', () => {
+  it('finds a typed name in Linear and writes the id of the person picked', async () => {
+    const { fetchMock, onChange } = renderAssigneeField()
+
+    const input = await screen.findByRole('combobox')
+    fireEvent.change(input, { target: { value: 'ada' } })
+    expect(screen.getByText(/Find “ada” in Linear/)).toBeInTheDocument()
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    expect(await screen.findByText('Adam Smith')).toBeInTheDocument()
+    expect(screen.getByText('Ada Lovelace')).toBeInTheDocument()
+    expect(screen.queryByText('Bob')).not.toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${linearUsers}list`,
+      expect.objectContaining({ body: JSON.stringify({ q: 'ada', page_size: 10 }) }),
+    )
+    expect(onChange).not.toHaveBeenCalled()
+
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onChange).toHaveBeenCalledWith({ assignee_in: [linAda] })
+  })
+
+  it('refuses a name no Linear user matches, beside the field', async () => {
+    const { onChange } = renderAssigneeField()
+
+    const input = await screen.findByRole('combobox')
+    fireEvent.change(input, { target: { value: 'zed' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(await screen.findByRole('alert')).toHaveTextContent('No Linear user matches “zed”.')
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('reads a typed Linear user id and writes it', async () => {
+    const { onChange } = renderAssigneeField()
+
+    const input = await screen.findByRole('combobox')
+    fireEvent.change(input, { target: { value: linGrace } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await vi.waitFor(() => expect(onChange).toHaveBeenCalledWith({ assignee_in: [linGrace] }))
+  })
+
+  it('names a stored id by member, else by Linear, else by the id', async () => {
+    renderAssigneeField({ assignee_in: ['lin-bob', linAdam, 'alice'] })
+
+    expect(await screen.findByText('Bob · bob')).toBeInTheDocument()
+    expect(await screen.findByText('asmith')).toBeInTheDocument()
+    expect(screen.getByText('alice')).toBeInTheDocument()
+  })
+})
 
 describe('PredicateEditor requested_team_id_in', () => {
   it("offers the handler team's GitHub-team mappings and writes their GitHub team ids", async () => {

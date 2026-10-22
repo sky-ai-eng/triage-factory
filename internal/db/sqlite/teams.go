@@ -753,6 +753,15 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 	if err != nil {
 		return nil, 0, fmt.Errorf("list team member linear identities: %w", err)
 	}
+	linearNameMap, err := queryIdentityMap(ctx, s.q, `
+		SELECT l.user_id, l.display_name
+		FROM user_linear_identities l
+		JOIN memberships m ON m.user_id = l.user_id AND m.team_id = ?
+		WHERE l.workspace_id = ? AND l.display_name IS NOT NULL
+	`, teamID, linearWorkspaceID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list team member linear names: %w", err)
+	}
 	// An absent (or empty) binding leaves the pointer nil — the "Not
 	// connected" state.
 	for i := range out {
@@ -767,6 +776,9 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 		}
 		if id, ok := linearMap[out[i].UserID]; ok {
 			out[i].LinearUserID = &id
+		}
+		if name, ok := linearNameMap[out[i].UserID]; ok {
+			out[i].LinearDisplayName = &name
 		}
 	}
 	return out, total, nil

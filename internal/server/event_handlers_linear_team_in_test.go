@@ -283,3 +283,40 @@ func TestLinearTeamInFaults_RegisteredForEveryLinearType(t *testing.T) {
 		t.Errorf("no check registered for %s", domain.EventLinearIssueIdentifierChanged)
 	}
 }
+
+// A Linear people filter takes Linear user ids. A name, which never equals
+// one, is refused with every such entry reported, and nothing is written; ids
+// are stored.
+func TestEventHandlerLinearPeople_RefusesAName(t *testing.T) {
+	s := newLinearTeamInServer(t, linearTeamEng)
+	before := len(listEventHandlers(t, s, "rule"))
+
+	code, got := createLinearRule(t, s, domain.EventLinearIssueAssigned, map[string]any{
+		"assignee_in": []string{linearUserAda, "alice"},
+		"creator_in":  []string{strings.ToUpper(linearUserAdam)},
+	})
+	messages := repoInFaultMessages(t, code, got)
+	if len(messages) != 2 {
+		t.Fatalf("faults = %q, want one for the name and one for the upper-case id", messages)
+	}
+	for i, want := range []string{`assignee_in: "alice"`, `creator_in: "` + strings.ToUpper(linearUserAdam) + `"`} {
+		if !strings.HasPrefix(messages[i], want) {
+			t.Errorf("fault %d = %q, want it to start %s", i, messages[i], want)
+		}
+	}
+	code, got = createLinearRule(t, s, domain.EventLinearIssueCommented, map[string]any{"commenter_in": []string{"Ada Lovelace"}})
+	if messages := repoInFaultMessages(t, code, got); len(messages) != 1 || !strings.HasPrefix(messages[0], "commenter_in: ") {
+		t.Errorf("commenter_in faults = %q, want one naming commenter_in", messages)
+	}
+	if after := len(listEventHandlers(t, s, "rule")); after != before {
+		t.Errorf("refused creates changed the rule count from %d to %d", before, after)
+	}
+
+	code, got = createLinearRule(t, s, domain.EventLinearIssueAssigned, map[string]any{
+		"assignee_in": []string{linearUserAda},
+		"creator_in":  []string{linearUserAdam},
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %v", code, got)
+	}
+}

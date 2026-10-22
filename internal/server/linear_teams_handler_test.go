@@ -148,6 +148,8 @@ func TestLinearCatalog_NotConnected(t *testing.T) {
 		"team":        doJSON(t, s, http.MethodGet, linearTeamPath(linearTeamEng), nil),
 		"states list": doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng), map[string]any{}),
 		"state":       doJSON(t, s, http.MethodGet, linearStatePath(linearTeamEng, linearStateDone), nil),
+		"users list":  doJSON(t, s, http.MethodPost, linearUsersListPath, map[string]any{}),
+		"user":        doJSON(t, s, http.MethodGet, linearUserPath(linearUserAda), nil),
 	} {
 		t.Run(name, func(t *testing.T) {
 			assertOneFault(t, rec, http.StatusConflict, "NOT_CONFIGURED", "")
@@ -165,6 +167,8 @@ func TestLinearCatalog_UpstreamFailure(t *testing.T) {
 		"team":        doJSON(t, s, http.MethodGet, linearTeamPath(linearTeamEng), nil),
 		"states list": doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng), map[string]any{}),
 		"state":       doJSON(t, s, http.MethodGet, linearStatePath(linearTeamEng, linearStateDone), nil),
+		"users list":  doJSON(t, s, http.MethodPost, linearUsersListPath, map[string]any{}),
+		"user":        doJSON(t, s, http.MethodGet, linearUserPath(linearUserAda), nil),
 	} {
 		t.Run(name, func(t *testing.T) {
 			assertOneFault(t, rec, http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "")
@@ -183,6 +187,8 @@ func TestLinearCatalog_MalformedOrgIsNotFound(t *testing.T) {
 		"team":        doJSON(t, s, http.MethodGet, org+"/teams/"+linearTeamEng, nil),
 		"states list": doJSON(t, s, http.MethodPost, org+"/teams/"+linearTeamEng+"/states/list", map[string]any{}),
 		"state":       doJSON(t, s, http.MethodGet, org+"/teams/"+linearTeamEng+"/states/"+linearStateDone, nil),
+		"users list":  doJSON(t, s, http.MethodPost, org+"/users/list", map[string]any{}),
+		"user":        doJSON(t, s, http.MethodGet, org+"/users/"+linearUserAda, nil),
 	} {
 		t.Run(name, func(t *testing.T) {
 			assertOneFault(t, rec, http.StatusNotFound, "NOT_FOUND", "")

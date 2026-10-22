@@ -47,17 +47,20 @@ var teamRoles = map[string]bool{"admin": true, "member": true, "viewer": true}
 // frontend renders that as a "Not connected" readiness badge).
 // github_user_id is GitHub's id for the bound account, the value a GitHub
 // predicate's identity filters (author_id_in and its siblings) take; null also
-// when the binding recorded none. is_current_user lets the frontend swap the
-// Remove control for Leave on the caller's own row.
+// when the binding recorded none. linear_display_name is what Linear called the
+// member when they bound, null also when the binding recorded no name.
+// is_current_user lets the frontend swap the Remove control for Leave on the
+// caller's own row.
 type teamRosterRow struct {
-	UserID         string  `json:"user_id"`
-	DisplayName    string  `json:"display_name"`
-	GitHubUsername *string `json:"github_username"`
-	GitHubUserID   *string `json:"github_user_id"`
-	JiraAccountID  *string `json:"jira_account_id"`
-	LinearUserID   *string `json:"linear_user_id"`
-	Role           string  `json:"role"`
-	IsCurrentUser  bool    `json:"is_current_user"`
+	UserID            string  `json:"user_id"`
+	DisplayName       string  `json:"display_name"`
+	GitHubUsername    *string `json:"github_username"`
+	GitHubUserID      *string `json:"github_user_id"`
+	JiraAccountID     *string `json:"jira_account_id"`
+	LinearUserID      *string `json:"linear_user_id"`
+	LinearDisplayName *string `json:"linear_display_name"`
+	Role              string  `json:"role"`
+	IsCurrentUser     bool    `json:"is_current_user"`
 }
 
 // teamRosterBotRow is the team's agent (team_agents) surfaced as an extra
@@ -168,14 +171,15 @@ func (h *teamMembersHandler) handleTeamRosterList(w http.ResponseWriter, r *http
 	items := make([]teamRosterRow, 0, len(members))
 	for _, m := range members {
 		items = append(items, teamRosterRow{
-			UserID:         m.UserID,
-			DisplayName:    m.DisplayName,
-			GitHubUsername: m.GitHubUsername,
-			GitHubUserID:   m.GitHubUserID,
-			JiraAccountID:  m.JiraAccountID,
-			LinearUserID:   m.LinearUserID,
-			Role:           m.Role,
-			IsCurrentUser:  m.UserID == userID,
+			UserID:            m.UserID,
+			DisplayName:       m.DisplayName,
+			GitHubUsername:    m.GitHubUsername,
+			GitHubUserID:      m.GitHubUserID,
+			JiraAccountID:     m.JiraAccountID,
+			LinearUserID:      m.LinearUserID,
+			LinearDisplayName: m.LinearDisplayName,
+			Role:              m.Role,
+			IsCurrentUser:     m.UserID == userID,
 		})
 	}
 

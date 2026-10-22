@@ -1258,6 +1258,10 @@ func (s *Server) routes() {
 	// predicates name by id; see linear_labels_handler.go.
 	s.apiMutating("POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/labels/list", s.handleLinearLabelsList)
 	s.api("GET /api/orgs/{org_id}/linear/teams/{linear_team_id}/labels/{label_id}", s.handleLinearLabelGet)
+	// The workspace's people, whom Linear event predicates name by user id;
+	// see linear_users_handler.go.
+	s.apiMutating("POST /api/orgs/{org_id}/linear/users/list", s.handleLinearUsersList)
+	s.api("GET /api/orgs/{org_id}/linear/users/{linear_user_id}", s.handleLinearUserGet)
 	// **Declared exception** to the list-envelope rule. The stock deck is a
 	// composite the discovery UI deals from — a readiness status plus two
 	// partitions of the same set — not a row list a client walks. It reads the

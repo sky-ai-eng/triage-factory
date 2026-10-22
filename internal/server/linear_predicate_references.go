@@ -11,7 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 )
 
-// init registers linearTeamInFaults for every Linear event type whose
+// init registers linearPredicateFaults for every Linear event type whose
 // predicate has a linear_team_id_in field, and linearParentChangedFaults,
 // which adds new_parent_id to it, for parent_changed. The events package
 // registers its schemas in its own init, which runs before this one because
@@ -28,14 +28,14 @@ func init() {
 			if eventType == domain.EventLinearIssueParentChanged {
 				RegisterPredicateReferenceCheck(eventType, linearParentChangedFaults)
 			} else {
-				RegisterPredicateReferenceCheck(eventType, linearTeamInFaults)
+				RegisterPredicateReferenceCheck(eventType, linearPredicateFaults)
 			}
 			break
 		}
 	}
 }
 
-// linearParentChangedFaults is parent_changed's check: linearTeamInFaults,
+// linearParentChangedFaults is parent_changed's check: linearPredicateFaults,
 // and new_parent_id when the predicate gives it a value the stored one does
 // not hold. That value must be a Linear issue id (a lowercase UUID), since the
 // matcher compares it with the event's new_parent_id, the parent's UUID. An
@@ -43,7 +43,7 @@ func init() {
 // is refused rather than stored as a filter that never fires. An empty value
 // is allowed: it matches a parent being cleared.
 func linearParentChangedFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, predicate, prior *string) ([]string, error) {
-	faults, err := linearTeamInFaults(ctx, tx, orgID, teamID, predicate, prior)
+	faults, err := linearPredicateFaults(ctx, tx, orgID, teamID, predicate, prior)
 	if err != nil {
 		return nil, err
 	}
@@ -83,10 +83,38 @@ func predicateString(predicate *string, field string) (string, error) {
 	return v, nil
 }
 
-// linearTeamInFaults is the PredicateReferenceCheck for Linear event types:
-// every linear_team_id_in entry the predicate adds, and every
-// old_linear_team_id_in entry on identifier_changed, must be the id of a
-// Linear team the handler's team tracks in the org's current Linear
+// linearPeopleFields are the Linear predicate fields that name people by
+// Linear's user id. Each event type has the ones its metadata carries.
+var linearPeopleFields = []string{"assignee_in", "creator_in", "commenter_in"}
+
+// linearPredicateFaults is the PredicateReferenceCheck for Linear event
+// types: linearTeamInFaults, and every people entry the predicate adds that is
+// not a Linear user id. A name, the value a caller would naturally reach for,
+// never equals one, so it is refused rather than stored as a filter that never
+// fires.
+func linearPredicateFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, predicate, prior *string) ([]string, error) {
+	faults, err := linearTeamInFaults(ctx, tx, orgID, teamID, predicate, prior)
+	if err != nil {
+		return nil, err
+	}
+	for _, field := range linearPeopleFields {
+		added, err := addedPredicateEntries(predicate, prior, field)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range added {
+			if !isLinearID(id) {
+				faults = append(faults, fmt.Sprintf("%s: %q is not a Linear user id (%s takes the user's UUID, "+
+					"the id of POST /api/orgs/{org_id}/linear/users/list, not a name)", field, id, field))
+			}
+		}
+	}
+	return faults, nil
+}
+
+// linearTeamInFaults requires every linear_team_id_in entry the predicate
+// adds, and every old_linear_team_id_in entry on identifier_changed, to be the
+// id of a Linear team the handler's team tracks in the org's current Linear
 // workspace. That is the set the predicate editor offers, and for every event
 // but identifier_changed the only set that can match, because the router
 // delivers a team's handlers only events from Linear teams it tracks. A team
