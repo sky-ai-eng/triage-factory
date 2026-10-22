@@ -633,14 +633,29 @@ func (r *directRuntime) DeleteConversationWorktree(ctx context.Context, reposito
 // (recordActionAlone) before the artifact's error is returned, so a push whose
 // artifact could not be recorded still leaves its ledger row. Inside a relayed
 // record the artifact's failure is also the record's (dropRelayedArtifact).
+//
+// A branch is keyed here, on the registry row its target names (keyBranch),
+// and its push row takes its repository from that key. The key a branch
+// arrives with is discarded: on an executor it was built by the sidecar,
+// which must not be able to file a push under a repository of its choosing,
+// as resolveActionReferences keeps every other act from naming one.
 func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
 	a.OrgID = r.info.OrgID
 	a.TeamID = r.info.TeamID
 	a.ConversationID = r.info.ConversationID
-	act := branchPushActionInfo(a, r.info, r.githubCredential(ctx, a))
-	if err := withRecordRetry(ctx, func() error { return stampScopeInfo(ctx, r.stores, r.info.OrgID, &a, act) }); err != nil {
-		r.dropBranchPush(ctx, a, act, err)
+	if a.Kind == domain.ArtifactKindBranch {
+		a.DedupKey = ""
+	}
+	if err := withRecordRetry(ctx, func() error { return stampScopeInfo(ctx, r.stores, r.info.OrgID, &a, nil) }); err != nil {
+		r.dropBranchPush(ctx, a, r.branchPushAction(ctx, a), err)
 		return domain.Artifact{}, err
+	}
+	keyErr := r.keyBranch(ctx, &a)
+	act := r.branchPushAction(ctx, a)
+	if keyErr != nil {
+		dropRelayedArtifact(ctx, a, keyErr)
+		r.recordBranchPushAlone(ctx, a, act)
+		return domain.Artifact{}, keyErr
 	}
 	resolveArtifactEntity(ctx, r.stores, r.info, &a, domain.EntityContainer{})
 	if r.info.IsEventTriggered {
@@ -681,6 +696,46 @@ func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (
 		r.dropBranchPush(ctx, a, act, err)
 	}
 	return out, err
+}
+
+// keyBranch keys branch artifact a on the registry row its target, an
+// owner/repo, names on a's scope, the org's current GitHub host. It returns
+// errNoRegistryRow when no live row has that name, and the read's error when
+// the registry could not be read; either way a is left with no key. Any other
+// artifact is left as it is.
+func (r *directRuntime) keyBranch(ctx context.Context, a *domain.Artifact) error {
+	if a.Kind != domain.ArtifactKindBranch {
+		return nil
+	}
+	a.DedupKey = ""
+	owner, repo, ok := targetRepository(a.Target)
+	if !ok || a.Scope == "" || r.stores.Repos == nil {
+		return fmt.Errorf("%w: %s", errNoRegistryRow, a.Target)
+	}
+	var row *domain.Repository
+	if err := withRecordRetry(ctx, func() error {
+		var e error
+		row, e = r.stores.Repos.GetByRefSystem(ctx, r.info.OrgID, domain.RepoRef{Host: a.Scope, Owner: owner, Repo: repo})
+		return e
+	}); err != nil {
+		return fmt.Errorf("read the registry row for %s: %w", a.Target, err)
+	}
+	if row == nil {
+		return fmt.Errorf("%w: %s", errNoRegistryRow, a.Target)
+	}
+	a.DedupKey = domain.BranchDedupKey(row.ID, a.ExternalID)
+	return nil
+}
+
+// branchPushAction builds the branch-push row of a, nil for an artifact that
+// is not a branch, on a's scope: a branch's scope is the org's GitHub host,
+// which is the push's too.
+func (r *directRuntime) branchPushAction(ctx context.Context, a domain.Artifact) *domain.ExternalAction {
+	act := branchPushActionInfo(a, r.info, r.githubCredential(ctx, a))
+	if act != nil {
+		act.Scope = a.Scope
+	}
+	return act
 }
 
 // recordBranchPushAlone writes the branch-push row of an artifact whose own

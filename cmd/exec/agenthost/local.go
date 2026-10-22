@@ -822,6 +822,11 @@ func (c *LocalClient) footer(kind string) string {
 // fails: the loss is the relayed record's when there is one, and the push
 // still leaves its ledger row.
 func (c *LocalClient) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
+	if a.Kind == domain.ArtifactKindBranch {
+		// Keyed by onRegistryRow, never by its caller: in a sandbox the
+		// caller is the jail's pre-push hook.
+		a.DedupKey = ""
+	}
 	a, err := c.onRegistryRow(ctx, a)
 	a = c.hostAnchorBranchURL(ctx, a)
 	if err != nil {
@@ -2935,9 +2940,10 @@ func jiraAction(a domain.Artifact, action, from, to string) *domain.ExternalActi
 
 // branchPushActionInfo builds the ActionBranchPushed row for a branch artifact,
 // or nil for any other kind. The row is about the repository the artifact's key
-// names (domain.BranchArtifactRepositoryID): the host's sink keys a branch on
-// its registry row before this is built (onRegistryRow), so both observers of
-// one push name the same row. The dedup key is deterministic —
+// names (domain.BranchArtifactRepositoryID), so the key must be one the writer
+// built: directRuntime.UpsertArtifact keys a branch on its registry row
+// (keyBranch) before building this, discarding the key it arrived with, and
+// both observers of one push name the same row. The dedup key is deterministic —
 // branch:<conversationID>:<repository>:<ref>:<sha> (domain.BranchPushDedupKey) —
 // so the git pre-push hook and the git-proxy backstop, which both observe the
 // same push, collapse to one row; a force-push (new sha) is recorded
