@@ -242,14 +242,14 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 		seed.Membership(t, withID, teamID, "admin")
 		seed.Membership(t, withoutID, teamID, "member")
 		seed.Membership(t, elsewhere, teamID, "member")
-		if err := stores.Users.UpsertGitHubIdentity(ctx, withID, ghHost, "octocat", "583231", "", "pat"); err != nil {
-			t.Fatalf("UpsertGitHubIdentity: %v", err)
-		}
-		if err := stores.Users.UpsertGitHubIdentity(ctx, withoutID, ghHost, "hubot", "", "", "pat"); err != nil {
-			t.Fatalf("UpsertGitHubIdentity: %v", err)
-		}
-		if err := stores.Users.UpsertGitHubIdentity(ctx, elsewhere, "https://ghe.corp.example", "corp-login", "77", "", "pat"); err != nil {
-			t.Fatalf("UpsertGitHubIdentity: %v", err)
+		for _, b := range []struct{ user, host, login, id string }{
+			{withID, ghHost, "octocat", "583231"},
+			{withoutID, ghHost, "hubot", ""},
+			{elsewhere, "https://ghe.corp.example", "corp-login", "77"},
+		} {
+			if err := stores.Users.UpsertGitHubIdentity(ctx, b.user, b.host, b.login, b.id, "", "pat"); err != nil {
+				t.Fatalf("UpsertGitHubIdentity(%s): %v", b.login, err)
+			}
 		}
 
 		members, _, err := stores.Teams.ListMembers(ctx, teamID, ghHost, jiraHost, linearWorkspace, db.Unwindowed)

@@ -133,25 +133,22 @@ func RunDashboardBackfillMarkerConformance(t *testing.T, mk DashboardBackfillMar
 		return at
 	}
 
-	t.Run("RenameOfTheSameAccountResetsMarker", func(t *testing.T) {
+	for _, c := range []struct {
+		name, newLogin, newID string
+		kept                  bool
+	}{
 		// The backfill searched author:<login>, so the same account under a
 		// new login still owes the search its new login answers.
-		if at := marked(t, "octocat", "583231", "octonew", "583231"); at != nil {
-			t.Errorf("marker = %v after the same account's rename; want nil (reset)", at)
-		}
-	})
-
-	t.Run("AnotherAccountUnderTheSameLoginResetsMarker", func(t *testing.T) {
-		if at := marked(t, "octocat", "583231", "octocat", "999"); at != nil {
-			t.Errorf("marker = %v after binding another account under the same login; want nil (reset)", at)
-		}
-	})
-
-	t.Run("SameAccountCaptureWithoutAnIDPreservesMarker", func(t *testing.T) {
-		if at := marked(t, "octocat", "583231", "octocat", ""); at == nil {
-			t.Error("marker cleared by a same-login capture that carried no id; want preserved")
-		}
-	})
+		{"RenameOfTheSameAccountResetsMarker", "octonew", "583231", false},
+		{"AnotherAccountUnderTheSameLoginResetsMarker", "octocat", "999", false},
+		{"SameAccountCaptureWithoutAnIDPreservesMarker", "octocat", "", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if at := marked(t, "octocat", "583231", c.newLogin, c.newID); (at != nil) != c.kept {
+				t.Errorf("marker = %v after re-binding octocat/583231 to %s/%q; want kept=%v", at, c.newLogin, c.newID, c.kept)
+			}
+		})
+	}
 
 	t.Run("MarkWithMismatchedLoginNoOps", func(t *testing.T) {
 		users, seedUser := mk(t)

@@ -18,7 +18,7 @@ func TestOperatorStore_SQLite_Conformance(t *testing.T) {
 	})
 }
 
-// TestOperatorStore_SQLite_BoundGrantMatchesItsPrincipal: nothing in local mode
+// Nothing in local mode
 // binds a grant, but a bound row reads the way it does in Postgres, matching
 // its principal by id and nobody else.
 func TestOperatorStore_SQLite_BoundGrantMatchesItsPrincipal(t *testing.T) {
@@ -30,26 +30,12 @@ func TestOperatorStore_SQLite_BoundGrantMatchesItsPrincipal(t *testing.T) {
 		`INSERT INTO operators (email, user_id) VALUES ('ops@example.com', ?)`, runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("seed bound grant: %v", err)
 	}
-	ok, err := store.IsOperatorUserSystem(ctx, runmode.LocalDefaultUserID)
-	if err != nil {
-		t.Fatalf("IsOperatorUserSystem: %v", err)
+	for userID, want := range map[string]bool{runmode.LocalDefaultUserID: true, "44444444-4444-4444-4444-444444444444": false} {
+		if ok, err := store.IsOperatorUserSystem(ctx, userID); err != nil || ok != want {
+			t.Errorf("IsOperatorUserSystem(%s) = %v, %v; want %v", userID, ok, err, want)
+		}
 	}
-	if !ok {
-		t.Error("the principal a grant is bound to must be an operator")
-	}
-	ok, err = store.IsOperatorUserSystem(ctx, "44444444-4444-4444-4444-444444444444")
-	if err != nil {
-		t.Fatalf("IsOperatorUserSystem: %v", err)
-	}
-	if ok {
-		t.Error("a principal no grant is bound to must not be an operator")
-	}
-
-	list, err := store.List(ctx)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(list) != 1 || list[0].UserID != runmode.LocalDefaultUserID {
-		t.Fatalf("list = %+v, want the one grant bound to %s", list, runmode.LocalDefaultUserID)
+	if list, err := store.List(ctx); err != nil || len(list) != 1 || list[0].UserID != runmode.LocalDefaultUserID {
+		t.Fatalf("list = %+v, %v; want the one grant bound to %s", list, err, runmode.LocalDefaultUserID)
 	}
 }

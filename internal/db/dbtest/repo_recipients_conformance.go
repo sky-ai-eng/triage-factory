@@ -215,27 +215,11 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 		assertSameSet(t, "recipients(ghe)", recipients(t, s, org, ghe), []string{founder, gheUser})
 	})
 
-	t.Run("RepoRecipients_RenamedRowKeepsItsAudience", func(t *testing.T) {
-		// The event names the row by id. A rename between the write that
-		// emitted it and this read moves the row's name and nothing else,
-		// so the audience is the same one.
-		s, seed := mk(t)
-		founder := seed.User(t)
-		org := seed.Org(t, founder)
-		team := seed.Team(t, org)
-		member := seed.User(t)
-		seed.OrgMembership(t, member, org, "member")
-		seed.TeamMembership(t, member, team)
-		api := seed.TrackRepo(t, team, TestGitHubHost, "acme", "api")
-
-		seed.RenameRepo(t, api, "acme", "api-v2")
-		assertSameSet(t, "recipients(renamed row)", recipients(t, s, org, api), []string{member})
-	})
-
-	t.Run("RepoRecipients_RetiredRowReachesOnlyAdmins", func(t *testing.T) {
-		// GET /api/repos leaves a retired row out, so its tracking teams'
-		// members are not its audience; org admins stay in, as they are
-		// for every row.
+	t.Run("RepoRecipients_FollowTheRowThroughARenameAndARetire", func(t *testing.T) {
+		// The event names the row by id, so a rename between the write that
+		// emitted it and this read keeps its audience. GET /api/repos leaves a
+		// retired row out, so its tracking teams' members are not its
+		// audience; org admins stay in, as they are for every row.
 		s, seed := mk(t)
 		founder := seed.User(t)
 		org := seed.Org(t, founder)
@@ -246,6 +230,8 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 		seed.TeamMembership(t, member, team)
 		api := seed.TrackRepo(t, team, TestGitHubHost, "acme", "api")
 
+		seed.RenameRepo(t, api, "acme", "api-v2")
+		assertSameSet(t, "recipients(renamed row)", recipients(t, s, org, api), []string{founder, member})
 		seed.RetireRepo(t, api)
 		assertSameSet(t, "recipients(retired row)", recipients(t, s, org, api), []string{founder})
 	})

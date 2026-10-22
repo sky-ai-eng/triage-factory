@@ -489,37 +489,8 @@ func TestTaskStore_SQLite_MemoryPendingConformance(t *testing.T) {
 // TestTaskRequestedReviewer_SQLite runs the requested-reviewer projection
 // suite against the SQLite TaskStore.
 func TestTaskRequestedReviewer_SQLite(t *testing.T) {
-	dbtest.RunTaskRequestedReviewerConformance(t, func(t *testing.T) (db.TaskStore, string, dbtest.TaskWithEventSeeder) {
+	dbtest.RunTaskRequestedReviewerConformance(t, func(t *testing.T) (db.Stores, string, string) {
 		t.Helper()
-		conn := openSQLiteForTest(t)
-		seed := func(t *testing.T, eventType, dedupKey, metadataJSON string) string {
-			t.Helper()
-			now := time.Now().UTC()
-			entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
-			sourceID := fmt.Sprintf("octo/reviewer#%d", now.UnixNano())
-			repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
-			if _, err := conn.Exec(`
-				INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
-				VALUES (?, 'github', ?, 'pr', 'Reviewer', ?, '{}', ?, 'https://github.com', ?)
-			`, entityID, sourceID, "https://example/"+sourceID, now, repoID); err != nil {
-				t.Fatalf("seed entity: %v", err)
-			}
-			if _, err := conn.Exec(`
-				INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json, created_at)
-				VALUES (?, ?, ?, ?, ?, ?)
-			`, eventID, entityID, eventType, dedupKey, metadataJSON, now); err != nil {
-				t.Fatalf("seed event: %v", err)
-			}
-			if _, err := conn.Exec(`
-				INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id,
-				                   status, priority_score, scoring_status, created_at,
-				                   team_id, visibility)
-				VALUES (?, ?, ?, ?, ?, 'queued', 0.5, 'pending', ?, ?, 'team')
-			`, taskID, entityID, eventType, dedupKey, eventID, now, runmode.LocalDefaultTeamID); err != nil {
-				t.Fatalf("seed task: %v", err)
-			}
-			return taskID
-		}
-		return sqlitestore.New(conn).Tasks, runmode.LocalDefaultOrgID, seed
+		return sqlitestore.New(openSQLiteForTest(t)), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
 	})
 }

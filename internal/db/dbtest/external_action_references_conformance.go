@@ -62,53 +62,39 @@ func RunExternalActionReferenceConformance(t *testing.T, mk ExternalActionNodeID
 			aboutNothing.ID: {"", ""},
 		}
 
-		check := func(read string, got []domain.ExternalAction) {
-			t.Helper()
-			if len(got) != len(want) {
-				t.Fatalf("%s returned %d rows, want %d", read, len(got), len(want))
+		ea, opts := f.Stores.ExternalActions, domain.ExternalActionListOpts{}
+		byOrg, _, errOrg := ea.ListByOrgSystem(ctx, f.OrgID, opts)
+		byTeam, _, errTeam := ea.ListByTeam(ctx, f.OrgID, f.TeamID, opts)
+		byConversation, _, errConversation := ea.ListByConversation(ctx, f.OrgID, f.ConversationID, opts)
+		for _, read := range []struct {
+			name string
+			got  []domain.ExternalAction
+			err  error
+		}{{"ListByOrgSystem", byOrg, errOrg}, {"ListByTeam", byTeam, errTeam}, {"ListByConversation", byConversation, errConversation}} {
+			if read.err != nil || len(read.got) != len(want) {
+				t.Fatalf("%s = %d rows, %v; want %d", read.name, len(read.got), read.err, len(want))
 			}
-			for _, a := range got {
+			for _, a := range read.got {
 				if refs, ok := want[a.ID]; !ok || a.EntityID != refs[0] || a.RepositoryID != refs[1] {
-					t.Errorf("%s row %s = (entity %q, repository %q), want %q", read, a.ID, a.EntityID, a.RepositoryID, refs)
+					t.Errorf("%s row %s = (entity %q, repository %q), want %q", read.name, a.ID, a.EntityID, a.RepositoryID, refs)
 				}
 			}
 		}
-		byOrg, _, err := f.Stores.ExternalActions.ListByOrgSystem(ctx, f.OrgID, domain.ExternalActionListOpts{})
-		if err != nil {
-			t.Fatalf("ListByOrgSystem: %v", err)
-		}
-		check("ListByOrgSystem", byOrg)
-		byTeam, _, err := f.Stores.ExternalActions.ListByTeam(ctx, f.OrgID, f.TeamID, domain.ExternalActionListOpts{})
-		if err != nil {
-			t.Fatalf("ListByTeam: %v", err)
-		}
-		check("ListByTeam", byTeam)
-		byConversation, _, err := f.Stores.ExternalActions.ListByConversation(ctx, f.OrgID, f.ConversationID, domain.ExternalActionListOpts{})
-		if err != nil {
-			t.Fatalf("ListByConversation: %v", err)
-		}
-		check("ListByConversation", byConversation)
 	})
 
 	t.Run("A_reference_to_a_row_the_org_does_not_hold_is_refused", func(t *testing.T) {
 		f := mk(t)
-		dangling := uuid.NewString()
 		ghostEntity := action(f, domain.ActionCommentPosted, "octo/api#8")
-		ghostEntity.EntityID = dangling
-		if err := f.Stores.ExternalActions.RecordSystem(ctx, f.OrgID, ghostEntity); err == nil {
-			t.Errorf("a row about entity %s, which does not exist, was recorded", dangling)
-		}
+		ghostEntity.EntityID = uuid.NewString()
 		ghostRepo := action(f, domain.ActionBranchPushed, "octo/gone")
-		ghostRepo.RepositoryID = dangling
-		if err := f.Stores.ExternalActions.RecordSystem(ctx, f.OrgID, ghostRepo); err == nil {
-			t.Errorf("a row about repository %s, which does not exist, was recorded", dangling)
+		ghostRepo.RepositoryID = uuid.NewString()
+		for _, a := range []domain.ExternalAction{ghostEntity, ghostRepo} {
+			if err := f.Stores.ExternalActions.RecordSystem(ctx, f.OrgID, a); err == nil {
+				t.Errorf("a row about (entity %q, repository %q), neither of which exists, was recorded", a.EntityID, a.RepositoryID)
+			}
 		}
-		rows, _, err := f.Stores.ExternalActions.ListByOrgSystem(ctx, f.OrgID, domain.ExternalActionListOpts{})
-		if err != nil {
-			t.Fatalf("ListByOrgSystem: %v", err)
-		}
-		if len(rows) != 0 {
-			t.Errorf("refused writes left rows: %+v", rows)
+		if rows, _, err := f.Stores.ExternalActions.ListByOrgSystem(ctx, f.OrgID, domain.ExternalActionListOpts{}); err != nil || len(rows) != 0 {
+			t.Errorf("refused writes left rows: %+v, %v", rows, err)
 		}
 	})
 }

@@ -62,10 +62,9 @@ func loginIdentitySeeder(h *pgtest.Harness) *dbtest.LoginIdentitySeeder {
 	}
 }
 
-// TestOperatorStore_Postgres_DeletingThePrincipalDeletesTheGrant pins the
-// operators.user_id FK's ON DELETE CASCADE. Setting the column back to NULL
-// instead would make the row pending again, and the next principal to verify
-// the address would hold the grant.
+// The operators.user_id FK cascades: setting the column back to NULL instead
+// would make the row pending again, and the next principal to verify the
+// address would hold the grant.
 func TestOperatorStore_Postgres_DeletingThePrincipalDeletesTheGrant(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -74,21 +73,13 @@ func TestOperatorStore_Postgres_DeletingThePrincipalDeletesTheGrant(t *testing.T
 
 	principal := pgtest.SeedUser(t, h, "deleted-operator")
 	pgtest.SeedIdentity(t, h, principal, "ops@example.com", true)
-	op, err := store.Add(ctx, "ops@example.com", "root")
-	if err != nil {
-		t.Fatalf("add: %v", err)
-	}
-	if op.UserID != principal {
-		t.Fatalf("Add bound %q, want %s", op.UserID, principal)
+	if op, err := store.Add(ctx, "ops@example.com", "root"); err != nil || op.UserID != principal {
+		t.Fatalf("Add = %+v, %v; want it bound to %s", op, err, principal)
 	}
 
 	pgtest.MustExec(t, h.AdminDB, `DELETE FROM users WHERE id = $1`, principal)
 
-	list, err := store.List(ctx)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(list) != 0 {
-		t.Fatalf("operators after deleting the bound principal = %+v, want none", list)
+	if list, err := store.List(ctx); err != nil || len(list) != 0 {
+		t.Fatalf("operators after deleting the bound principal = %+v, %v; want none", list, err)
 	}
 }

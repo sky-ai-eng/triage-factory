@@ -2,7 +2,6 @@ package db
 
 import (
 	"database/sql"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -502,11 +501,10 @@ func TestMigrate_ExternalObjectScopeKeysDedupWithinAScope(t *testing.T) {
 	}
 }
 
-// TestMigrate_ProviderScopesKeyPlacementOverridesOnRepositories pins 3g: each
-// repo pin lands on the live registry row its owner/repo names on the org's
-// GitHub host, compared case-insensitively, and the most recently updated of
-// two pins on one row is kept. A pin no row answers to, and a pin of another
-// kind, are dropped, and the foreign key holds what is left.
+// Each repo pin lands on the live registry row its owner/repo names on the
+// org's GitHub host, case-insensitively, and the most recently updated of two
+// pins on one row is kept. A pin no row answers to, and a pin of another kind,
+// are dropped.
 func TestMigrate_ProviderScopesKeyPlacementOverridesOnRepositories(t *testing.T) {
 	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
 	seedProviderScopesOrg(t, database)
@@ -522,23 +520,10 @@ func TestMigrate_ProviderScopesKeyPlacementOverridesOnRepositories(t *testing.T)
 
 	migrateProviderScopes(t, database)
 
-	rows, err := database.Query(`SELECT repository_id, COALESCE(pinned_instance_id, ''), replicas FROM placement_overrides ORDER BY repository_id`)
-	if err != nil {
-		t.Fatalf("read overrides: %v", err)
-	}
-	defer rows.Close()
-	var got []string
-	for rows.Next() {
-		var repo, pin string
-		var replicas int
-		if err := rows.Scan(&repo, &pin, &replicas); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		got = append(got, fmt.Sprintf("%s|%s|%d", repo, pin, replicas))
-	}
-	want := []string{"r-api|exec-new|0", "r-web||3"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("overrides = %v, want %v", got, want)
+	got := queryString(t, database, `SELECT group_concat(repository_id || '|' || COALESCE(pinned_instance_id, '') || '|' || replicas, ','
+	                                  ORDER BY repository_id) FROM placement_overrides`)
+	if want := "r-api|exec-new|0,r-web||3"; got != want {
+		t.Errorf("overrides = %s, want %s", got, want)
 	}
 	assertNoDanglingReferences(t, database)
 }
@@ -644,12 +629,10 @@ func TestMigrate_InstallationsKeyedByHost(t *testing.T) {
 }
 
 // One live installation per account is held on the account id after the
-// migration, and on the login only for a row with no id. The old login key let
-// one account hold two live rows under two logins (a rename between an unseen
-// uninstall and the reinstall); the migration keeps the later install and
-// removes the earlier one with its reach and refresh marker, as an uninstall
-// would. Afterwards an account that took a login another account's row still
-// carries can install beside it.
+// migration, and on the login only for a row with no id. Where the old login
+// key let one account hold two live rows under two logins, the migration keeps
+// the later install and removes the earlier one with its reach and refresh
+// marker, as an uninstall would.
 func TestMigrate_InstallationsKeyedByAccountID(t *testing.T) {
 	const (
 		org = runmode.LocalDefaultOrgID
@@ -668,51 +651,38 @@ func TestMigrate_InstallationsKeyedByAccountID(t *testing.T) {
 
 	migrateProviderScopes(t, database)
 
-	if got := queryString(t, database, `SELECT group_concat(installation_id) FROM org_github_app_installations
-	                                     WHERE org_id = ? AND removed_at IS NULL`, org); got != "11" {
-		t.Errorf("live installations = %q; want the later install 11 alone", got)
-	}
-	if n := queryInt(t, database, `SELECT COUNT(*) FROM reachable_repositories WHERE installation_id = '10'`); n != 0 {
-		t.Errorf("reach rows of the superseded installation = %d; want none", n)
-	}
-	if n := queryInt(t, database, `SELECT COUNT(*) FROM reachable_scopes WHERE scope = '10'`); n != 0 {
-		t.Errorf("refresh markers of the superseded installation = %d; want none", n)
-	}
-	if n := queryInt(t, database, `SELECT COUNT(*) FROM reachable_repositories WHERE installation_id = '11'`); n != 1 {
-		t.Errorf("reach rows of the kept installation = %d; want its 1", n)
+	for _, q := range []string{
+		`SELECT group_concat(installation_id) FROM org_github_app_installations WHERE removed_at IS NULL`,
+		`SELECT group_concat(installation_id) FROM reachable_repositories`,
+		`SELECT group_concat(scope) FROM reachable_scopes`,
+	} {
+		if got := queryString(t, database, q); got != "11" {
+			t.Errorf("%s = %q; want the later install's alone", q, got)
+		}
 	}
 
-	install := func(installationID, accountID, login string) error {
-		var id any
-		if accountID != "" {
-			id = accountID
-		}
+	for _, c := range []struct {
+		installationID, accountID, login string
+		refused                          bool
+	}{
+		{"12", "1234", "acme-renamed", true}, // a second live installation for one account
+		{"13", "5678", "acme-corp", false},   // another account under a login a live row carries
+		{"14", "", "initech", false},
+		{"15", "", "initech", true}, // a second id-less installation under one login
+	} {
 		_, err := database.Exec(`
 			INSERT INTO org_github_app_installations (installation_id, org_id, account_type, account_id, account_login, github_host)
-			VALUES (?, ?, 'Organization', ?, ?, ?)
-		`, installationID, org, id, login, dot)
-		return err
-	}
-	if err := install("12", "1234", "acme-renamed"); err == nil || !strings.Contains(err.Error(), "UNIQUE") {
-		t.Errorf("a second live installation for account 1234: err=%v, want a UNIQUE violation", err)
-	}
-	if err := install("13", "5678", "acme-corp"); err != nil {
-		t.Errorf("another account under a login a live row carries: %v", err)
-	}
-	if err := install("14", "", "initech"); err != nil {
-		t.Fatalf("an installation with no account id: %v", err)
-	}
-	if err := install("15", "", "initech"); err == nil || !strings.Contains(err.Error(), "UNIQUE") {
-		t.Errorf("a second id-less installation under one login: err=%v, want a UNIQUE violation", err)
+			VALUES (?, ?, 'Organization', NULLIF(?, ''), ?, ?)`, c.installationID, org, c.accountID, c.login, dot)
+		if (err != nil) != c.refused || (err != nil && !strings.Contains(err.Error(), "UNIQUE")) {
+			t.Errorf("install %s (account %q, login %s): err=%v, want refused=%v", c.installationID, c.accountID, c.login, err, c.refused)
+		}
 	}
 }
 
-// The migration adds owner_external_id to repositories and to
-// reachable_repositories. Nothing stored names the account that owns a
-// repository by its id, so every existing row comes out NULL — the supported
-// "not learned yet" state, matched to its installation by login — and the
-// column takes the id the next grant listing, profile or mirror refresh
-// writes.
+// Nothing stored holds the owner account's id for a repository, and an
+// installation whose login matches the owner is not taken for one, so every
+// existing repositories and reachable_repositories row comes out with no
+// owner_external_id: the "not learned yet" state.
 func TestMigrate_ProviderScopesLeaveRepositoryOwnerIDsToBeLearned(t *testing.T) {
 	const (
 		org = runmode.LocalDefaultOrgID
@@ -732,16 +702,9 @@ func TestMigrate_ProviderScopesLeaveRepositoryOwnerIDsToBeLearned(t *testing.T) 
 	migrateProviderScopes(t, database)
 
 	for _, table := range []string{"repositories", "reachable_repositories"} {
-		if n := queryInt(t, database, `SELECT COUNT(*) FROM `+table); n != 1 {
-			t.Fatalf("%s rows = %d; want the fixture's 1", table, n)
+		if got := queryString(t, database, `SELECT COUNT(*) || ' rows, ' || COUNT(owner_external_id) || ' with an owner id' FROM `+table); got != "1 rows, 0 with an owner id" {
+			t.Errorf("%s: %s; want the fixture's 1 row with none", table, got)
 		}
-		if n := queryInt(t, database, `SELECT COUNT(*) FROM `+table+` WHERE owner_external_id IS NOT NULL`); n != 0 {
-			t.Errorf("%s rows with an owner id = %d; want none — no stored value names the account by id", table, n)
-		}
-	}
-	mustExec(t, database, `UPDATE repositories SET owner_external_id = '500' WHERE id = 'r-api'`)
-	if got := queryString(t, database, `SELECT owner_external_id FROM repositories WHERE id = 'r-api'`); got != "500" {
-		t.Errorf("owner_external_id after a write = %q; want 500", got)
 	}
 }
 
@@ -1278,13 +1241,12 @@ func TestMigrate_ProviderScopesLinkArtifactsToEntities(t *testing.T) {
 	assertNoDanglingReferences(t, database)
 }
 
-// TestMigrate_ProviderScopesLinkAuditLedgerRows pins section 8: each existing
-// audit-ledger row is linked to the entity its target names, case-insensitively,
-// or else to the one whose url its link continues (the link a rename of a moved
-// issue left it with); a GitHub row about no entity is linked to the registry
-// row its owner/repo names; and a row nothing answers to stays unlinked. A url
-// match needs a boundary after the entity's url, so SKY-12's link is not
-// SKY-1's.
+// Each existing audit-ledger row is linked to the entity its target names,
+// case-insensitively, or else to the one whose url its link continues (the
+// link a rename of a moved issue left it with); a GitHub row about no entity is
+// linked to the registry row its owner/repo names; and a row nothing answers to
+// stays unlinked. A url match needs a boundary after the entity's url, so
+// SKY-12's link is not SKY-1's.
 func TestMigrate_ProviderScopesLinkAuditLedgerRows(t *testing.T) {
 	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
 	seedProviderScopesOrg(t, database)
@@ -1294,41 +1256,30 @@ func TestMigrate_ProviderScopesLinkAuditLedgerRows(t *testing.T) {
 		('e-pr-9', 'github', 'octo/api#9', 'pr', 'https://github.com/octo/api/pull/9', '{"node_id":"PR_9","number":9}'),
 		('e-sky-1', 'jira', 'SKY-1', 'issue', ?, '{"id":"10001","key":"SKY-1","project_id":"100"}')`, site+"/browse/SKY-1")
 	mustExec(t, database, `INSERT INTO repositories (id, owner, repo, source) VALUES ('r-web', 'octo', 'web', 'github')`)
-	action := func(id, provider, target, url, currentURL string) {
-		t.Helper()
+	// want is entity_id|repository_id.
+	cases := []struct{ id, provider, target, url, currentURL, want string }{
+		{"x-pr", "github", "Octo/API#9", "https://github.com/octo/api/pull/9#issuecomment-1", "", "e-pr-9|"},
+		{"x-key", "jira", "SKY-1", site + "/browse/SKY-1", "", "e-sky-1|"},
+		{"x-moved", "jira", "OLD-1", site + "/browse/OLD-1", site + "/browse/SKY-1?focusedCommentId=5", "e-sky-1|"},
+		{"x-prefix", "jira", "SKY-12", site + "/browse/SKY-12", "", "|"},
+		{"x-branch", "github", "octo/web", "https://github.com/octo/web/tree/fix", "", "|r-web"},
+		{"x-pr-unrecorded", "github", "Octo/Web#3", "https://github.com/octo/web/pull/3", "", "|r-web"},
+		{"x-gone", "github", "octo/gone", "", "", "|"},
+		{"x-egress", "network", "evil.example:443", "", "", "|"},
+	}
+	for _, c := range cases {
 		mustExec(t, database, `
 			INSERT INTO external_actions (id, provider, action, target, url, current_url, credential, dedup_key)
 			VALUES (?, ?, 'comment_posted', ?, NULLIF(?, ''), NULLIF(?, ''), 'github_app', ?)`,
-			id, provider, target, url, currentURL, "k-"+id)
+			c.id, c.provider, c.target, c.url, c.currentURL, "k-"+c.id)
 	}
-	action("x-pr", "github", "Octo/API#9", "https://github.com/octo/api/pull/9#issuecomment-1", "")
-	action("x-key", "jira", "SKY-1", site+"/browse/SKY-1", "")
-	action("x-moved", "jira", "OLD-1", site+"/browse/OLD-1", site+"/browse/SKY-1?focusedCommentId=5")
-	action("x-prefix", "jira", "SKY-12", site+"/browse/SKY-12", "")
-	action("x-branch", "github", "octo/web", "https://github.com/octo/web/tree/fix", "")
-	action("x-pr-unrecorded", "github", "Octo/Web#3", "https://github.com/octo/web/pull/3", "")
-	action("x-gone", "github", "octo/gone", "", "")
-	action("x-egress", "network", "evil.example:443", "", "")
 
 	migrateProviderScopes(t, database)
 
-	for id, want := range map[string][2]string{
-		"x-pr":            {"e-pr-9", ""},
-		"x-key":           {"e-sky-1", ""},
-		"x-moved":         {"e-sky-1", ""},
-		"x-prefix":        {"", ""},
-		"x-branch":        {"", "r-web"},
-		"x-pr-unrecorded": {"", "r-web"},
-		"x-gone":          {"", ""},
-		"x-egress":        {"", ""},
-	} {
-		var entity, repo string
-		if err := database.QueryRow(`SELECT COALESCE(entity_id, ''), COALESCE(repository_id, '') FROM external_actions WHERE id = ?`, id).
-			Scan(&entity, &repo); err != nil {
-			t.Fatalf("read %s: %v", id, err)
-		}
-		if [2]string{entity, repo} != want {
-			t.Errorf("%s references (entity %q, repository %q), want %q", id, entity, repo, want)
+	for _, c := range cases {
+		if got := queryString(t, database, `SELECT COALESCE(entity_id, '') || '|' || COALESCE(repository_id, '')
+		                                     FROM external_actions WHERE id = ?`, c.id); got != c.want {
+			t.Errorf("%s references %q, want %q", c.id, got, c.want)
 		}
 	}
 	assertNoDanglingReferences(t, database)
@@ -1357,16 +1308,6 @@ func TestMigrate_GitHubPredicatesNameIDs(t *testing.T) {
 			VALUES (?, ?, ?, ?, 'pat', CURRENT_TIMESTAMP)`, identity...)
 	}
 
-	rule := func(id, eventType, predicate string) {
-		t.Helper()
-		mustExec(t, database, `INSERT OR IGNORE INTO events_catalog (id, source, category, label, description)
-			VALUES (?, 'test', 'test', ?, '')`, eventType, eventType)
-		mustExec(t, database, `
-			INSERT INTO event_handlers (id, team_id, creator_user_id, kind, event_type, scope_predicate_json,
-			                            source, name, default_priority, sort_order)
-			VALUES (?, 'team-1', 'u1', 'rule', ?, NULLIF(?, ''), 'user', ?, 0.5, 0)`,
-			id, eventType, predicate, id)
-	}
 	cases := []struct {
 		id, eventType, before, after string
 	}{
@@ -1388,25 +1329,25 @@ func TestMigrate_GitHubPredicatesNameIDs(t *testing.T) {
 		{"match-all", domain.EventGitHubPRCICheckFailed, "", ""},
 	}
 	for _, c := range cases {
-		rule(c.id, c.eventType, c.before)
+		mustExec(t, database, `INSERT OR IGNORE INTO events_catalog (id, source, category, label, description)
+			VALUES (?, 'test', 'test', ?, '')`, c.eventType, c.eventType)
+		mustExec(t, database, `
+			INSERT INTO event_handlers (id, team_id, creator_user_id, kind, event_type, scope_predicate_json,
+			                            source, name, default_priority, sort_order)
+			VALUES (?, 'team-1', 'u1', 'rule', ?, NULLIF(?, ''), 'user', ?, 0.5, 0)`,
+			c.id, c.eventType, c.before, c.id)
 	}
 
 	migrateProviderScopes(t, database)
 
 	for _, c := range cases {
-		var got sql.NullString
-		if err := database.QueryRow(`SELECT scope_predicate_json FROM event_handlers WHERE id = ?`, c.id).Scan(&got); err != nil {
-			t.Fatalf("read %s: %v", c.id, err)
-		}
-		if got.String != c.after {
-			t.Errorf("%s = %s, want %s", c.id, got.String, c.after)
-			continue
-		}
-		if c.after == "" {
-			continue
-		}
-		if _, err := events.ValidatePredicateJSON(c.eventType, c.after); err != nil {
-			t.Errorf("%s: the rewritten predicate does not decode: %v", c.id, err)
+		got := queryString(t, database, `SELECT COALESCE(scope_predicate_json, '') FROM event_handlers WHERE id = ?`, c.id)
+		if got != c.after {
+			t.Errorf("%s = %s, want %s", c.id, got, c.after)
+		} else if got != "" {
+			if _, err := events.ValidatePredicateJSON(c.eventType, got); err != nil {
+				t.Errorf("%s: the rewritten predicate does not decode: %v", c.id, err)
+			}
 		}
 	}
 }

@@ -33,37 +33,28 @@ func TestMigrate_ProviderScopesKeyJiraChangeTasksOnIDs(t *testing.T) {
 	issue("e-no-ids", "SKY-3", `{"id":"10005","key":"SKY-3","project_id":"100","status":"In Review","priority":"High"}`)
 	issue("e-malformed", "SKY-4", `{not json`)
 
-	task := func(id, entityID, eventType, dedupKey, status string) {
-		t.Helper()
-		mustExec(t, database, `INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id, status)
-			VALUES (?, ?, ?, ?, ?, ?)`, id, entityID, eventType, dedupKey, "ev-"+entityID, status)
-	}
 	const statusChanged, priorityChanged = "jira:issue:status_changed", "jira:issue:priority_changed"
-	task("t-status", "e-review", statusChanged, "In Review", "queued")
-	task("t-priority", "e-review", priorityChanged, "High", "in_progress")
-	task("t-earlier-status", "e-review", statusChanged, "To Do", "snoozed")
-	task("t-closed", "e-review", statusChanged, "In Review", "done")
-	task("t-moved-on", "e-moved-on", statusChanged, "In Review", "queued")
-	task("t-no-ids", "e-no-ids", statusChanged, "In Review", "queued")
-	task("t-no-priority-id", "e-no-ids", priorityChanged, "High", "queued")
-	task("t-malformed", "e-malformed", statusChanged, "In Review", "queued")
-	task("t-other-type", "e-review", "jira:issue:label_added", "In Review", "queued")
+	cases := []struct{ id, entityID, eventType, dedupKey, status, want string }{
+		{"t-status", "e-review", statusChanged, "In Review", "queued", "10003"},
+		{"t-priority", "e-review", priorityChanged, "High", "in_progress", "2"},
+		{"t-earlier-status", "e-review", statusChanged, "To Do", "snoozed", "To Do"},
+		{"t-closed", "e-review", statusChanged, "In Review", "done", "In Review"},
+		{"t-moved-on", "e-moved-on", statusChanged, "In Review", "queued", "In Review"},
+		{"t-no-ids", "e-no-ids", statusChanged, "In Review", "queued", "In Review"},
+		{"t-no-priority-id", "e-no-ids", priorityChanged, "High", "queued", "High"},
+		{"t-malformed", "e-malformed", statusChanged, "In Review", "queued", "In Review"},
+		{"t-other-type", "e-review", "jira:issue:label_added", "In Review", "queued", "In Review"},
+	}
+	for _, c := range cases {
+		mustExec(t, database, `INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id, status)
+			VALUES (?, ?, ?, ?, ?, ?)`, c.id, c.entityID, c.eventType, c.dedupKey, "ev-"+c.entityID, c.status)
+	}
 
 	migrateProviderScopes(t, database)
 
-	for taskID, want := range map[string]string{
-		"t-status":         "10003",
-		"t-priority":       "2",
-		"t-earlier-status": "To Do",
-		"t-closed":         "In Review",
-		"t-moved-on":       "In Review",
-		"t-no-ids":         "In Review",
-		"t-no-priority-id": "High",
-		"t-malformed":      "In Review",
-		"t-other-type":     "In Review",
-	} {
-		if got := queryString(t, database, `SELECT dedup_key FROM tasks WHERE id = ?`, taskID); got != want {
-			t.Errorf("%s dedup_key = %q, want %q", taskID, got, want)
+	for _, c := range cases {
+		if got := queryString(t, database, `SELECT dedup_key FROM tasks WHERE id = ?`, c.id); got != c.want {
+			t.Errorf("%s dedup_key = %q, want %q", c.id, got, c.want)
 		}
 	}
 }

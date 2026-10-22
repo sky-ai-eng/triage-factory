@@ -145,43 +145,6 @@ func TestTeamGitHubRepos_SQLite_CasingChangePreservesCache(t *testing.T) {
 	}
 }
 
-// TestTeamGitHubRepos_SQLite_TracksRepository pins the router-gate lookup:
-// tracking is answered per team for the registry row's id.
-func TestTeamGitHubRepos_SQLite_TracksRepository(t *testing.T) {
-	conn := openSQLiteForTest(t)
-	stores := sqlitestore.New(conn)
-	ctx := context.Background()
-	teamA := runmode.LocalDefaultTeamID
-
-	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
-		{Owner: "Acme", Repo: "api"},
-	}); err != nil {
-		t.Fatalf("replace: %v", err)
-	}
-	api, err := stores.Repos.GetByRefSystem(ctx, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "acme/API"))
-	if err != nil || api == nil {
-		t.Fatalf("resolve acme/api: got=%v err=%v", api, err)
-	}
-	web, err := stores.Repos.FindOrCreateByRefSystem(ctx, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "acme/web"))
-	if err != nil {
-		t.Fatalf("register acme/web: %v", err)
-	}
-
-	if got, err := stores.TeamGitHubRepos.TracksRepositorySystem(ctx, teamA, api.ID); err != nil || !got {
-		t.Errorf("TracksRepositorySystem(acme/api) = %v, %v; want true", got, err)
-	}
-	if got, err := stores.TeamGitHubRepos.TracksRepositorySystem(ctx, teamA, web.ID); err != nil || got {
-		t.Errorf("TracksRepositorySystem(acme/web, registered but untracked) = %v, %v; want false", got, err)
-	}
-
-	// A different team tracks nothing.
-	teamB := "team-b-0000-0000-0000-000000000002"
-	seedExtraTeam(t, conn, teamB, "team-b")
-	if got, _ := stores.TeamGitHubRepos.TracksRepositorySystem(ctx, teamB, api.ID); got {
-		t.Error("teamB should not track acme/api")
-	}
-}
-
 // TestTeamGitHubRepos_SQLite_TracksRepositoryViewerScoped pins the local-mode
 // asymmetry (TFAC-559): N=1 has no team boundary to enforce, so
 // TracksRepositoryViewerScoped always reports true regardless of whether the

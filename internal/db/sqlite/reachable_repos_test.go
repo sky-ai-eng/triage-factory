@@ -18,7 +18,6 @@ import (
 // this package's `...System` methods hold. Tracked repositories are inserted by
 // raw SQL rather than through ReplaceForTeam, which is a full-set replace and
 // would drop the previous repository each time the suite tracks another one.
-// The registry row is minted first because the tracking row references it.
 func TestReachableRepos_SQLite(t *testing.T) {
 	dbtest.RunReachableReposConformance(t, func(t *testing.T) dbtest.ReachableReposBackend {
 		t.Helper()
@@ -46,54 +45,10 @@ func TestReachableRepos_SQLite(t *testing.T) {
 		return dbtest.ReachableReposBackend{
 			Apps:   stores.GitHubApps,
 			Mirror: stores.ReachableRepos,
+			Repos:  stores.Repos,
 			OrgID:  orgID,
-			RegisterRepo: func(t *testing.T, owner, repo, externalID string) string {
-				t.Helper()
-				id := uuid.NewString()
-				var ext any
-				if externalID != "" {
-					ext = externalID
-				}
-				if _, err := conn.Exec(
-					`INSERT INTO repositories (id, host, owner, repo, source, external_id) VALUES (?, ?, ?, ?, 'github', ?)`,
-					id, dbtest.TestGitHubHost, owner, repo, ext,
-				); err != nil {
-					t.Fatalf("seed repositories: %v", err)
-				}
-				return id
-			},
-			SetOwnerExternalID: func(t *testing.T, repositoryID, ownerExternalID string) {
-				t.Helper()
-				if _, err := conn.Exec(
-					`UPDATE repositories SET owner_external_id = ? WHERE id = ?`, ownerExternalID, repositoryID,
-				); err != nil {
-					t.Fatalf("set owner_external_id: %v", err)
-				}
-			},
 			TrackRepository: func(t *testing.T, repositoryID string) {
 				t.Helper()
-				if _, err := conn.Exec(
-					`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
-					teamID, repositoryID, runmode.LocalDefaultOrgID,
-				); err != nil {
-					t.Fatalf("seed team_github_repos: %v", err)
-				}
-			},
-			TrackRepo: func(t *testing.T, owner, repo string) {
-				t.Helper()
-				if _, err := conn.Exec(
-					`INSERT INTO repositories (id, host, owner, repo, source) VALUES (?, ?, ?, ?, 'github') ON CONFLICT DO NOTHING`,
-					uuid.NewString(), dbtest.TestGitHubHost, owner, repo,
-				); err != nil {
-					t.Fatalf("seed repositories: %v", err)
-				}
-				var repositoryID string
-				if err := conn.QueryRow(
-					`SELECT id FROM repositories WHERE host = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)`,
-					dbtest.TestGitHubHost, owner, repo,
-				).Scan(&repositoryID); err != nil {
-					t.Fatalf("resolve repository id: %v", err)
-				}
 				if _, err := conn.Exec(
 					`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
 					teamID, repositoryID, runmode.LocalDefaultOrgID,

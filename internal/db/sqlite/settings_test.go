@@ -3,6 +3,7 @@ package sqlite_test
 import (
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -42,6 +43,11 @@ func TestSettingsStores_SQLite(t *testing.T) {
 				TeamGitHubRepos:  stores.TeamGitHubRepos,
 				Repos:            stores.Repos,
 				OrgEventSources:  stores.OrgEventSources,
+				SeedTeam: func(t *testing.T, slug string) string {
+					id := uuid.NewString()
+					seedExtraTeam(t, conn, id, slug)
+					return id
+				},
 			}, dbtest.SettingsIDs{
 				OrgID:  runmode.LocalDefaultOrgID,
 				TeamID: runmode.LocalDefaultTeamID,

@@ -520,9 +520,6 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 				t.Errorf("artifact %s = %+v err=%v, want target %q on entity %q", c.id, a, err, c.wantTarget, c.wantEntity)
 			}
 		}
-		if _, cur := seed.RawActionURL(t, "merge-moved"); cur != jiraScope+"/browse/NEW-1" {
-			t.Errorf("action current_url = %q, want the survivor's link", cur)
-		}
 		for key, wantCurrent := range map[string]string{"merge-moved": jiraScope + "/browse/NEW-1", "merge-repointed": ""} {
 			a := findActionByKey(t, s, orgID, key)
 			if _, cur := seed.RawActionURL(t, key); a.EntityID != older.ID || cur != wantCurrent {
@@ -604,11 +601,8 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if a, err := s.Artifacts.Get(ctx, orgID, art); err != nil || a == nil || a.Target != "OLD-2" || a.EntityID != older.ID {
 			t.Errorf("artifact = %+v err=%v, want target OLD-2 on the survivor %s", a, err, older.ID)
 		}
-		if _, cur := seed.RawActionURL(t, "merge-closed"); cur != jiraScope+"/browse/OLD-2" {
-			t.Errorf("action current_url = %q, want the survivor's link", cur)
-		}
-		if a := findActionByKey(t, s, orgID, "merge-closed"); a.EntityID != older.ID {
-			t.Errorf("action entity = %q, want the survivor %s", a.EntityID, older.ID)
+		if _, cur := seed.RawActionURL(t, "merge-closed"); cur != jiraScope+"/browse/OLD-2" || findActionByKey(t, s, orgID, "merge-closed").EntityID != older.ID {
+			t.Errorf("action current_url = %q, want it on the survivor %s under the survivor's link", cur, older.ID)
 		}
 	})
 

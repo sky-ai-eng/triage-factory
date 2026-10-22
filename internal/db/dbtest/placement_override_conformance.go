@@ -37,32 +37,28 @@ func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStor
 		return row.ID
 	}
 
-	t.Run("Upsert_returns_the_stored_row", func(t *testing.T) {
+	t.Run("Upsert_replaces_wholesale_and_returns_the_stored_row", func(t *testing.T) {
 		// The returned-row standard: what the write handed back is what a point
-		// read finds. ov carries no updated_at, and the empty pin it is handed
-		// is stored as NULL — the row and the argument disagree by design.
+		// read finds. ov carries no updated_at, and an empty pin is stored as
+		// NULL — the row and the argument disagree by design. Each write
+		// replaces the override, so a pin the next one leaves out is cleared.
 		store, repos, orgID := mk(t)
 		repo := register(t, repos, orgID, TestGitHubHost, "acme", "ret")
 		read := func() (*domain.PlacementOverride, error) { return store.Get(ctx, orgID, repo) }
-
-		first, err := store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, RepositoryID: repo, Replicas: 2})
-		if err != nil {
-			t.Fatalf("Upsert (insert): %v", err)
-		}
-		AssertWriteReturnedStoredRow(t, "Upsert (insert)", first, read)
-		if first.UpdatedAt.IsZero() || first.PinnedInstanceID != "" || first.RepositoryID != repo {
-			t.Errorf("Upsert returned %+v, want repository %s, a stamped updated_at and no pin", first, repo)
-		}
-
-		replaced, err := store.Upsert(ctx, domain.PlacementOverride{
-			OrgID: orgID, RepositoryID: repo, PinnedInstanceID: "exec-9", Replicas: 5,
-		})
-		if err != nil {
-			t.Fatalf("Upsert (replace): %v", err)
-		}
-		AssertWriteReturnedStoredRow(t, "Upsert (replace)", replaced, read)
-		if replaced.PinnedInstanceID != "exec-9" || replaced.Replicas != 5 {
-			t.Errorf("Upsert (replace) returned %+v, want the replaced pin and replica count", replaced)
+		for _, ov := range []domain.PlacementOverride{
+			{OrgID: orgID, RepositoryID: repo, PinnedInstanceID: "exec-7"},
+			{OrgID: orgID, RepositoryID: repo, Replicas: 3},
+			{OrgID: orgID, RepositoryID: repo, PinnedInstanceID: "exec-9", Replicas: 5},
+		} {
+			got, err := store.Upsert(ctx, ov)
+			if err != nil {
+				t.Fatalf("Upsert(%+v): %v", ov, err)
+			}
+			AssertWriteReturnedStoredRow(t, "Upsert", got, read)
+			if got.OrgID != orgID || got.RepositoryID != repo || got.PinnedInstanceID != ov.PinnedInstanceID ||
+				got.Replicas != ov.Replicas || got.UpdatedAt.IsZero() {
+				t.Errorf("Upsert(%+v) returned %+v, want exactly its pin and replica count, stamped", ov, got)
+			}
 		}
 	})
 
@@ -77,47 +73,6 @@ func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStor
 			if ov != nil {
 				t.Fatalf("absent override for %q must be nil, got %+v", id, ov)
 			}
-		}
-	})
-
-	t.Run("upsert_pin_roundtrips", func(t *testing.T) {
-		store, repos, orgID := mk(t)
-		repo := register(t, repos, orgID, TestGitHubHost, "acme", "web")
-		if _, err := store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, RepositoryID: repo, PinnedInstanceID: "exec-7"}); err != nil {
-			t.Fatalf("upsert: %v", err)
-		}
-		got, err := store.Get(ctx, orgID, repo)
-		if err != nil || got == nil {
-			t.Fatalf("get: %v (got %+v)", err, got)
-		}
-		if got.PinnedInstanceID != "exec-7" || got.Replicas != 0 || got.OrgID != orgID || got.RepositoryID != repo {
-			t.Fatalf("roundtrip mismatch: %+v", got)
-		}
-		if got.UpdatedAt.IsZero() {
-			t.Fatalf("updated_at not stamped")
-		}
-	})
-
-	t.Run("upsert_replaces_wholesale", func(t *testing.T) {
-		store, repos, orgID := mk(t)
-		repo := register(t, repos, orgID, TestGitHubHost, "acme", "mono")
-		if _, err := store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, RepositoryID: repo, PinnedInstanceID: "exec-1"}); err != nil {
-			t.Fatalf("upsert pin: %v", err)
-		}
-		// Re-upsert the same repository with a replica count and no pin — must
-		// replace, not merge (pin cleared, replicas set).
-		if _, err := store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, RepositoryID: repo, Replicas: 3}); err != nil {
-			t.Fatalf("upsert replicas: %v", err)
-		}
-		got, err := store.Get(ctx, orgID, repo)
-		if err != nil || got == nil {
-			t.Fatalf("get: %v (%+v)", err, got)
-		}
-		if got.PinnedInstanceID != "" {
-			t.Fatalf("pin should have been replaced away, got %q", got.PinnedInstanceID)
-		}
-		if got.Replicas != 3 {
-			t.Fatalf("replicas = %d, want 3", got.Replicas)
 		}
 	})
 
@@ -164,16 +119,11 @@ func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStor
 			t.Fatalf("upsert: %v", err)
 		}
 
-		matched, err := store.Delete(ctx, orgID, repo)
-		if err != nil || !matched {
+		if matched, err := store.Delete(ctx, orgID, repo); err != nil || !matched {
 			t.Fatalf("first delete: matched=%v err=%v", matched, err)
 		}
-		matched, err = store.Delete(ctx, orgID, repo)
-		if err != nil {
-			t.Fatalf("second delete err: %v", err)
-		}
-		if matched {
-			t.Fatalf("second delete should report matched=false")
+		if matched, err := store.Delete(ctx, orgID, repo); err != nil || matched {
+			t.Fatalf("second delete: matched=%v err=%v, want no match", matched, err)
 		}
 		if got, _ := store.Get(ctx, orgID, repo); got != nil {
 			t.Fatalf("row should be gone after delete, got %+v", got)

@@ -610,12 +610,8 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			if out, err := s.Repos.RenameSystem(ctx, orgID, to); err != nil || !out.Renamed {
 				t.Fatalf("RenameSystem %s -> %s = %+v, %v; want a rename", c.from, c.to, out, err)
 			}
-			got, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef(c.to))
-			if err != nil || got == nil {
-				t.Fatalf("read %s: got=%v err=%v", c.to, got, err)
-			}
-			if got.OwnerExternalID != c.want {
-				t.Errorf("%s -> %s (observed owner %q): OwnerExternalID = %q, want %q", c.from, c.to, c.observedOwnerID, got.OwnerExternalID, c.want)
+			if got, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef(c.to)); err != nil || got == nil || got.OwnerExternalID != c.want {
+				t.Errorf("%s -> %s (observed owner %q) = %+v, %v; want OwnerExternalID %q", c.from, c.to, c.observedOwnerID, got, err, c.want)
 			}
 		}
 
@@ -1244,22 +1240,15 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 					t.Fatalf("RenameSystem = %+v, %v; want the rename applied", out, err)
 				}
 
-				ov, err := s.PlacementOverrides.Get(ctx, orgID, fx.repositoryID)
-				if err != nil || ov == nil {
-					t.Fatalf("PlacementOverrides.Get(renamed) = %v, %v; want an override", ov, err)
-				}
-				if renamedHasOne && (ov.Replicas != 3 || ov.PinnedInstanceID != "") {
-					t.Errorf("renamed row's override = %+v, want its own (replicas 3) to win over the bare row's", ov)
-				}
-				if !renamedHasOne && (ov.Replicas != 9 || ov.PinnedInstanceID != "exec-bare") {
-					t.Errorf("renamed row's override = %+v, want the bare row's moved onto it", ov)
+				wantReplicas, wantPin := 9, "exec-bare"
+				if renamedHasOne {
+					wantReplicas, wantPin = 3, ""
 				}
 				list, err := s.PlacementOverrides.List(ctx, orgID)
-				if err != nil {
-					t.Fatalf("PlacementOverrides.List: %v", err)
-				}
-				if len(list) != 1 || list[0].RepositoryID != fx.repositoryID {
-					t.Errorf("overrides after the absorb = %+v, want the renamed row's alone", list)
+				if err != nil || len(list) != 1 || list[0].RepositoryID != fx.repositoryID ||
+					list[0].Replicas != wantReplicas || list[0].PinnedInstanceID != wantPin {
+					t.Errorf("overrides after the absorb = %+v, %v; want the renamed row's alone, replicas %d pinned %q",
+						list, err, wantReplicas, wantPin)
 				}
 			})
 		}

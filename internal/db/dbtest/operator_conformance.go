@@ -189,20 +189,12 @@ func RunOperatorStoreConformance(t *testing.T, mk OperatorStoreFactory) {
 		AssertWriteReturnedStoredRow(t, "Add (bound)", op, stored(store, "ops@example.com"))
 	})
 
-	t.Run("add_without_a_verified_holder_is_pending", func(t *testing.T) {
+	t.Run("re_add_binds_a_pending_grant_and_never_rebinds", func(t *testing.T) {
 		store, seed := withIdentities(t)
 		unverified := seed.Principal(t)
 		seed.Identity(t, unverified, "ops@example.com", false)
-
 		if op := add(t, store, "ops@example.com"); !op.Pending() {
-			t.Fatalf("Add bound %+v to a principal whose identity holds the address unverified", op)
-		}
-	})
-
-	t.Run("re_add_binds_a_pending_grant_and_never_rebinds", func(t *testing.T) {
-		store, seed := withIdentities(t)
-		if op := add(t, store, "ops@example.com"); !op.Pending() {
-			t.Fatalf("first add bound %+v with no identity holding the address", op)
+			t.Fatalf("first add bound %+v with no identity holding the address verified", op)
 		}
 		first := seed.Principal(t)
 		seed.Identity(t, first, "ops@example.com", true)

@@ -47,6 +47,32 @@ func TestFactoryReadStore_SQLite(t *testing.T) {
 		}
 
 		seed := newSQLiteFactorySeeder(conn)
+		seed.GroupedEntity = func(t *testing.T, source string) (string, string) {
+			t.Helper()
+			id, grouping := uuid.New().String(), "lt-eng"
+			var err error
+			switch source {
+			case "github":
+				id = seed.Entity(t, "grouped")
+				err = conn.QueryRow(`SELECT repository_id FROM entities WHERE id = ?`, id).Scan(&grouping)
+			case "jira":
+				const site = "https://jira.example.com"
+				grouping = dbseed.JiraProject(t, conn, runmode.LocalDefaultOrgID, site, "SKY")
+				_, err = conn.Exec(`
+					INSERT INTO entities (id, source, source_id, external_id, kind, title, url, snapshot_json, created_at, scope, jira_project_id)
+					VALUES (?, 'jira', 'SKY-3', ?, 'issue', 'SKY-3', '', '{}', ?, ?, ?)`,
+					id, dbseed.JiraIssueID("SKY-3"), time.Now().UTC(), site, grouping)
+			default:
+				_, err = conn.Exec(`
+					INSERT INTO entities (id, source, source_id, external_id, kind, title, url, snapshot_json, created_at, scope, linear_team_id)
+					VALUES (?, 'linear', 'ENG-1', 'uuid-ENG-1', 'issue', 'ENG-1', '', '{}', ?, 'ws-test', ?)`,
+					id, time.Now().UTC(), grouping)
+			}
+			if err != nil {
+				t.Fatalf("seed %s entity: %v", source, err)
+			}
+			return id, grouping
+		}
 		stores := sqlitestore.New(conn)
 		return stores.Factory, runmode.LocalDefaultOrgID, seed
 	})

@@ -1,9 +1,6 @@
 package db
 
-import (
-	"database/sql"
-	"testing"
-)
+import "testing"
 
 // An operator row written before the migration keeps its email and
 // provenance and comes out pending: local mode has no login identities to
@@ -18,17 +15,9 @@ func TestMigrate_OperatorGrantsGainAPrincipalAndPollerStateIsDropped(t *testing.
 		t.Fatalf("Migrate: %v", err)
 	}
 
-	var addedBy string
-	var userID sql.NullString
-	if err := database.QueryRow(
-		`SELECT added_by, user_id FROM operators WHERE email = 'ops@example.com'`,
-	).Scan(&addedBy, &userID); err != nil {
-		t.Fatalf("read operator: %v", err)
+	if got := queryString(t, database, `SELECT added_by || ' ' || COALESCE(user_id, 'pending') FROM operators WHERE email = 'ops@example.com'`); got != "root pending" {
+		t.Errorf("operator = %q, want its provenance kept and no principal", got)
 	}
-	if addedBy != "root" || userID.Valid {
-		t.Errorf("operator = (added_by %q, user_id %v), want its provenance kept and no principal", addedBy, userID)
-	}
-
 	if n := queryInt(t, database, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'poller_state'`); n != 0 {
 		t.Error("poller_state still exists after the migration")
 	}

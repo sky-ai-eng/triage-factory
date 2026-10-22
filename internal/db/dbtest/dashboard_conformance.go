@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"maps"
 	"testing"
 	"time"
 
@@ -257,8 +258,8 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 			}})
 	}
 
-	t.Run("Stats_MatchesTheViewerByGitHubID", func(t *testing.T) {
-		store, orgID, _, seed := factory(t)
+	t.Run("Stats_and_PRs_MatchTheViewerByGitHubID", func(t *testing.T) {
+		store, orgID, viewerID, seed := factory(t)
 		seedRenamed(t, seed)
 		stats, err := store.Stats(context.Background(), orgID, me, statsSince)
 		if err != nil {
@@ -274,11 +275,7 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 		if stats.ReviewsGiven != 1 {
 			t.Errorf("reviews_given=%d, want 1", stats.ReviewsGiven)
 		}
-	})
 
-	t.Run("PRs_MatchesTheViewerByGitHubID", func(t *testing.T) {
-		store, orgID, viewerID, seed := factory(t)
-		seedRenamed(t, seed)
 		prs, total, err := store.PRs(context.Background(), orgID,
 			db.PRViewer{Login: me.Login, GitHubUserID: me.ID, UserID: viewerID}, db.PRListFilter{}, db.Unwindowed)
 		if err != nil {
@@ -468,33 +465,11 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 		}
 	})
 
-	t.Run("PRs_RowsCarryTheirEntityID", func(t *testing.T) {
-		// The per-PR routes address a pull request by the id its row served,
-		// so every row carries its own entity's.
-		store, orgID, viewerID, seed := factory(t)
-		want := map[int]string{
-			80: seed.PR(t, DashboardPRFixture{Snapshot: domain.PRSnapshot{Number: 80, Author: username, State: "OPEN", Repo: "owner/repo"}}),
-			81: seed.PR(t, DashboardPRFixture{Snapshot: domain.PRSnapshot{Number: 81, Author: username, State: "OPEN", Repo: "owner/repo"}}),
-		}
-
-		prs, _, err := store.PRs(context.Background(), orgID, viewerOf(username, viewerID), db.PRListFilter{}, db.Unwindowed)
-		if err != nil {
-			t.Fatalf("PRs: %v", err)
-		}
-		if len(prs) != len(want) {
-			t.Fatalf("len(prs)=%d, want %d", len(prs), len(want))
-		}
-		for _, p := range prs {
-			if p.EntityID != want[p.Number] {
-				t.Errorf("PR #%d carried entity id %q, want %q", p.Number, p.EntityID, want[p.Number])
-			}
-		}
-	})
-
 	t.Run("PR_ResolvesOnlyWithinTheViewersPopulation", func(t *testing.T) {
-		// The point read answers for exactly the rows PRs would page for the
-		// same viewer, so an id a client did not get from its own list
-		// resolves to nothing.
+		// The per-PR routes address a pull request by the entity id its PRs
+		// row served, and the point read answers for exactly the rows PRs
+		// pages for the same viewer, so an id a client did not get from its
+		// own list resolves to nothing.
 		store, orgID, viewerID, seed := factory(t)
 		other := seed.User(t, "someone else")
 		authored := seed.PR(t, DashboardPRFixture{Snapshot: domain.PRSnapshot{Number: 90, Author: username, State: "OPEN", Repo: "owner/repo"}})
@@ -517,6 +492,17 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 			return e
 		}
 		mine := viewerOf(username, viewerID)
+		prs, _, err := store.PRs(context.Background(), orgID, mine, db.PRListFilter{}, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("PRs: %v", err)
+		}
+		served := map[int]string{}
+		for _, p := range prs {
+			served[p.Number] = p.EntityID
+		}
+		if want := map[int]string{90: authored, 91: commissioned}; !maps.Equal(served, want) {
+			t.Errorf("PRs served entity ids %v, want %v", served, want)
+		}
 		for _, id := range []string{authored, commissioned} {
 			e := resolve(t, mine, id)
 			if e == nil {
