@@ -359,7 +359,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 	// a steer so assembly can wrap it in the keep-working envelope.
 	bareDrain := true
 	turn := 0
-	var restarts toolHostRestarts
+	var deaths toolHostDeaths
 	lastText := ""
 
 	// emptyLengthStops counts CONSECUTIVE turns the provider cut at the
@@ -665,7 +665,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		// 8. Dispatch. Flow-control calls resolve loop-side; everything
 		// else goes into the jail, serially, in call order.
 		if len(calls) > 0 {
-			outcome, terminated, position, err := e.dispatchBatch(ctx, params, assistantRow.ID, calls, &restarts)
+			outcome, terminated, position, err := e.dispatchBatch(ctx, params, assistantRow.ID, calls, &deaths)
 			if lost, ok := lostToolHost(err); ok && ctx.Err() == nil {
 				return e.toolHostLost(started, turn, lost)
 			}

@@ -512,9 +512,8 @@ func (s *Spawner) handBackOnUpstream(ctx context.Context, park liveParkContext, 
 // a snapshot of the tree as the jail left it included, except that the claim
 // is released 'requeued_jail_lost'. It is claimable at once: the next claim
 // builds a new cell, and the model reads what ended the old jail on the call
-// that was running. reason is kept
-// on the row so a person looking at the queued run sees why it is starting
-// over.
+// that was running. reason is kept on the row so a person looking at the
+// queued run sees why it is starting over.
 //
 // Nothing is written to the transcript here: the loop already answered every
 // call the jail took with it.

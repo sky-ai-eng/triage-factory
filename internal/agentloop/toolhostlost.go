@@ -52,11 +52,12 @@ type RestartableToolHost interface {
 	Restart(ctx context.Context) error
 }
 
-// maxConsecutiveRestarts bounds how many times in a row the engine restarts a
-// tool host with no call completing in between. A jail that keeps dying
-// before anything finishes is not being ended by one command, and the
-// engagement ends so the next claim builds a new cell for the conversation.
-const maxConsecutiveRestarts = 3
+// maxConsecutiveDeaths bounds how many times in a row a tool host may die
+// with no call completing in between. A jail that keeps dying before anything
+// finishes is not being ended by one command, so the death that reaches this
+// count ends the engagement, and the next claim builds a new cell for the
+// conversation.
+const maxConsecutiveDeaths = 3
 
 // restartedSentence is what the calls a dead tool host took with it are told
 // once the engine has restarted it. The run tree is bind-mounted into every
@@ -108,25 +109,26 @@ func toolHostLostFor(dispatchErr error, proto *ProtocolError) *ToolHostLostError
 	return &ToolHostLostError{Notice: notice, Reason: lostSandboxReason, Err: dispatchErr}
 }
 
-// toolHostRestarts is one engagement's count of restarts since a call last
-// completed, kept in Run's frame like the rest of an engagement's state.
-type toolHostRestarts struct {
+// toolHostDeaths is one engagement's count of tool host deaths since a call
+// last completed, kept in Run's frame like the rest of an engagement's state.
+type toolHostDeaths struct {
 	sinceCompleted int
 }
 
 // restartToolHost replaces a tool host that died during call, and reports
 // whether the engagement can go on. It cannot when the tool host is not
-// restartable, when it has died maxConsecutiveRestarts times with no call
+// restartable, when this is its maxConsecutiveDeaths-th death with no call
 // completing between, or when the restart fails. A restarted tool host is
 // configured again, since the policy the engagement set lived in the old one.
-func (e *Engine) restartToolHost(ctx context.Context, params Params, call domain.ToolCall, restarts *toolHostRestarts) bool {
+func (e *Engine) restartToolHost(ctx context.Context, params Params, call domain.ToolCall, deaths *toolHostDeaths) bool {
 	host, ok := e.Tools.(RestartableToolHost)
 	if !ok {
 		return false
 	}
-	if restarts.sinceCompleted >= maxConsecutiveRestarts {
+	deaths.sinceCompleted++
+	if deaths.sinceCompleted >= maxConsecutiveDeaths {
 		e.warn("the tool host died again with no call completing since its last restart; ending the engagement",
-			"conversation", params.ConversationID, "restarts", restarts.sinceCompleted)
+			"conversation", params.ConversationID, "deaths", deaths.sinceCompleted)
 		return false
 	}
 	// The restart is part of answering the call, so the watchdog sees the
@@ -139,9 +141,8 @@ func (e *Engine) restartToolHost(ctx context.Context, params Params, call domain
 			"conversation", params.ConversationID, "error", err)
 		return false
 	}
-	restarts.sinceCompleted++
 	e.info("restarted the tool host after it died during a call",
-		"conversation", params.ConversationID, "tool", call.Name, "restarts", restarts.sinceCompleted)
+		"conversation", params.ConversationID, "tool", call.Name, "deaths", deaths.sinceCompleted)
 	e.configureToolHost(params)
 	return true
 }

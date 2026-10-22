@@ -376,12 +376,19 @@ func testStopLeavesNothingRunning(t *testing.T, h Harness) {
 // dies. The new jail has the run tree as the old one left it and reaches the
 // cell's sidecar, and nothing else of the old jail survives: no process it
 // was running, and nothing in /tmp.
+//
+// The old jail's process writes a heartbeat into the run tree, which the new
+// jail shares. A new jail can see no process of the old one in its own
+// process table whether or not the stop killed it, so the heartbeat is what
+// shows nothing of the old jail is still running anywhere.
 func testRelaunchAfterTheJailDies(t *testing.T, h Harness) {
 	l := start(t, h, newConversationID(t))
 	marker := "kept-" + randomHex(t, 8)
-	l.sh(t, fmt.Sprintf("printf %%s %s > /work/kept.txt; echo gone > /tmp/gone.txt; (sleep 600 >/dev/null 2>&1 &); sync; echo ok", shellQuote(marker)))
-	if out := l.sh(t, "grep -lx sleep /proc/[0-9]*/comm 2>/dev/null | head -1; echo probed"); !strings.Contains(out, "/comm") {
-		t.Fatalf("the background process never started, so its absence below proves nothing: %s", out)
+	const heartbeat = "(i=0; while :; do i=$((i+1)); echo $i > /work/beat; sleep 0.2; done) >/dev/null 2>&1 &"
+	l.sh(t, fmt.Sprintf("printf %%s %s > /work/kept.txt; echo gone > /tmp/gone.txt; %s sync; echo ok", shellQuote(marker), heartbeat))
+	const beatMoves = `a=$(cat /work/beat); sleep 1; b=$(cat /work/beat); if [ "$a" != "$b" ]; then echo MOVING; else echo STILL; fi`
+	if out := l.sh(t, beatMoves); !strings.Contains(out, "MOVING") {
+		t.Fatalf("the background process never started, so its stopping below proves nothing: %s", out)
 	}
 
 	_ = l.tools.Close()
@@ -397,8 +404,8 @@ func testRelaunchAfterTheJailDies(t *testing.T, h Harness) {
 	if out := l.sh(t, "if [ -e /tmp/gone.txt ]; then echo PRESENT; else echo ABSENT; fi"); !strings.Contains(out, "ABSENT") {
 		t.Errorf("the old jail's /tmp survived into the new one: %s", out)
 	}
-	if out := l.sh(t, "grep -lx sleep /proc/[0-9]*/comm 2>/dev/null | head -1; echo probed"); strings.Contains(out, "/comm") {
-		t.Errorf("a process the old jail was running is still running in the new one: %s", out)
+	if out := l.sh(t, beatMoves); !strings.Contains(out, "STILL") {
+		t.Errorf("a process the old jail was running is still writing /work/beat: %s", out)
 	}
 	for _, ep := range l.res.JailEndpoints {
 		host, port := splitEndpoint(t, ep)

@@ -192,9 +192,17 @@ func (h *socketToolHost) Call(name string, args map[string]any) (ToolOutcome, er
 		// explicitly so the frame is always well-shaped.
 		args = map[string]any{}
 	}
+	// A request this side cannot encode or frame never reaches the tool host,
+	// which is alive and in step, so it is the call's own failure. Returned as
+	// an error it would read as a dead tool host and cost the sandbox.
 	body, err := json.Marshal(serveRequest{ID: id, Tool: name, Args: args})
 	if err != nil {
-		return ToolOutcome{}, fmt.Errorf("agentloop: marshal tool request: %w", err)
+		return ToolOutcome{ToolError: fmt.Sprintf("This tool call was not executed: its arguments could not be encoded (%v).", err)}, nil
+	}
+	if len(body) > maxFrameBytes {
+		return ToolOutcome{ToolError: fmt.Sprintf(
+			"This tool call was not executed: its request is %d bytes, over the %d bytes one call can carry. Split the work across smaller calls.",
+			len(body), maxFrameBytes)}, nil
 	}
 
 	deadline := time.Now().Add(h.timeout)

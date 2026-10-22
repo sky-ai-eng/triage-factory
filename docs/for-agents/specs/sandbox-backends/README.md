@@ -596,7 +596,7 @@ The cases, one per invariant except 8:
 | `FreezeHoldsTheJailStill`, `StopLeavesNothingRunning` | 7 |
 | `TeardownReleasesTheCell` | 9 — two engagements of one conversation back to back, then a reap |
 | `TrustVariablesNameTheRunsBundle` | 10 — `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` and `PIP_CERT` each name a file whose hash is that of the bundle the sidecar wrote, which carries a name-constrained CA |
-| `RelaunchAfterTheJailDies` | 11 — a file written to `/work` is there in the second jail, a file in `/tmp` and a background process are not, and the second jail reaches every sidecar endpoint |
+| `RelaunchAfterTheJailDies` | 11 — a file written to `/work` is there in the second jail, a file in `/tmp` is not, a heartbeat a background process of the first jail writes into `/work` stops, and the second jail reaches every sidecar endpoint |
 
 Invariant 8 stays covered by `internal/sandbox`'s own integration tests for
 now: a memory case needs a host that grants a private cgroup namespace, and

@@ -33,7 +33,7 @@ const fatalToolHostNotice = "This tool call was not executed: the tool host beca
 // position is the assembly key of the last result the batch wrote. Every call
 // is answered before this returns without an error, so it is the point in the
 // transcript by which everything the batch did to the workspace is done.
-func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, calls []domain.ToolCall, restarts *toolHostRestarts) (result Result, terminated bool, position float64, err error) {
+func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, calls []domain.ToolCall, deaths *toolHostDeaths) (result Result, terminated bool, position float64, err error) {
 	var terminal *Result
 	allTerminate := true
 	at := toolResultPositions(ownerID, len(calls))
@@ -104,7 +104,7 @@ func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, 
 			// The restart comes before the answers, so each answer can say
 			// where the conversation goes on.
 			lost := toolHostLostFor(dispatchErr, out.Protocol)
-			restarted := e.restartToolHost(ctx, params, call, restarts)
+			restarted := e.restartToolHost(ctx, params, call, deaths)
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return Result{}, false, 0, ctxErr
 			}
@@ -117,7 +117,7 @@ func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, 
 			}
 			return Result{}, false, key, nil
 		}
-		restarts.sinceCompleted = 0
+		deaths.sinceCompleted = 0
 
 		var key float64
 		var insertErr error

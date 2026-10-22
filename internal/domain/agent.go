@@ -949,7 +949,8 @@ type Claim struct {
 	ReleasedAt *time.Time `json:"released_at,omitempty"`
 	// Outcome is how the engagement ended: "completed" | "failed" |
 	// "cancelled" | "parked" | "requeued" | "requeued_credentials" |
-	// "reaped" | "requeued_shutdown" | "requeued_upstream". Empty while live.
+	// "reaped" | "requeued_shutdown" | "requeued_upstream" |
+	// "requeued_jail_lost". Empty while live.
 	Outcome string `json:"outcome,omitempty"`
 	Error   string `json:"error,omitempty"`
 	// Engagement telemetry the runtime reports per invocation — not
@@ -991,7 +992,8 @@ type ExecutorClaim struct {
 	LeaseExpiresAt *time.Time
 	// Outcome is how the engagement ended ("completed" | "failed" |
 	// "cancelled" | "parked" | "requeued" | "requeued_credentials" |
-	// "reaped" | "requeued_shutdown" | "requeued_upstream"); empty while live.
+	// "reaped" | "requeued_shutdown" | "requeued_upstream" |
+	// "requeued_jail_lost"); empty while live.
 	Outcome string
 	// LastActivityAt / CurrentOp are what the holder's last renewal stamped:
 	// when the engagement last did anything the stall watchdog counts as

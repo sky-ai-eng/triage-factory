@@ -18,13 +18,15 @@ import (
 // restartableHost is a tool host whose jail a test kills: a call to a tool in
 // dies fails as a dead tool host's would, until a Restart clears the set, and
 // with alwaysDies every tool call fails. restartErr fails the restarts
-// instead. onCall runs at the start of every call.
+// instead. onCall runs at the start of every call and onRestart at the start
+// of every restart, which fails, as a jail's launch does, once ctx is done.
 type restartableHost struct {
 	mu         sync.Mutex
 	dies       map[string]bool
 	alwaysDies bool
 	restartErr error
 	onCall     func()
+	onRestart  func()
 	restarts   int
 	observed   []string
 }
@@ -42,7 +44,13 @@ func (h *restartableHost) Call(name string, _ map[string]any) (ToolOutcome, erro
 	return ToolOutcome{Content: "ok:" + name}, nil
 }
 
-func (h *restartableHost) Restart(context.Context) error {
+func (h *restartableHost) Restart(ctx context.Context) error {
+	if h.onRestart != nil {
+		h.onRestart()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.restartErr != nil {
@@ -117,6 +125,36 @@ func TestSocketToolHost_MarksARequestThatNeverLeft(t *testing.T) {
 			t.Fatalf("err = %v, want a failure that does not claim the call never ran", err)
 		}
 	})
+}
+
+// A request too large for one frame is never sent: the call is answered as
+// its own failure, and the tool host, alive and in step, takes the next one.
+func TestSocketToolHost_ARequestTooLargeIsTheCallsOwnFailure(t *testing.T) {
+	a, b := net.Pipe()
+	received := make(chan []byte, 1)
+	go func() {
+		body, _ := readFrame(b)
+		received <- body
+		_ = writeFrame(b, []byte(`{"id":2,"ok":true,"result":{"content":[{"type":"text","text":"ran"}]}}`))
+	}()
+	host := NewToolHost(a, time.Second)
+	defer host.Close()
+	out, err := host.Call("write", map[string]any{"content": strings.Repeat("x", maxFrameBytes)})
+	if err != nil {
+		t.Fatalf("err = %v, want the call's own failure, not a dead tool host", err)
+	}
+	if !strings.Contains(out.ToolError, "Split the work across smaller calls") {
+		t.Errorf("ToolError = %q, want it to say the request was too large", out.ToolError)
+	}
+	// Nothing reached the host, and the connection still carries the
+	// next call.
+	out, err = host.Call("bash", nil)
+	if err != nil || out.Content != "ran" {
+		t.Fatalf("the next call = %+v, %v; want it answered", out, err)
+	}
+	if body := <-received; !strings.Contains(string(body), `"tool":"bash"`) {
+		t.Errorf("the first frame the host read = %.80q, want the bash call", body)
+	}
 }
 
 // A tool host that died and is restarted costs the engagement nothing but the
@@ -240,23 +278,26 @@ func TestRun_ADeadToolHostThatCannotRestartIsLost(t *testing.T) {
 }
 
 // The restarts are bounded by calls completing, not counted over the
-// engagement: a tool host that dies again before any call finishes is given
-// maxConsecutiveRestarts new jails and no more, while one that does work
+// engagement: a tool host that dies maxConsecutiveDeaths times before any call
+// finishes ends the engagement on the last of them, while one that does work
 // between deaths is restarted every time.
 func TestRun_ToolHostRestartsAreBoundedByCallsCompleting(t *testing.T) {
 	t.Run("dying with nothing completing", func(t *testing.T) {
 		tr := newMemTranscript(pendingUser("go"))
 		host := &restartableHost{alwaysDies: true}
 		var turns []scriptedTurn
-		for i := 0; i <= maxConsecutiveRestarts; i++ {
+		for i := 0; i < maxConsecutiveDeaths; i++ {
 			turns = append(turns, scriptedTurn{calls: []domain.ToolCall{{ID: fmt.Sprintf("c%d", i), Name: "bash"}}})
 		}
 		got := newTestEngine(tr, &scriptedProvider{turns: turns}, host).Run(context.Background(), testParams())
 		if got.Kind != ResultToolHostLost {
 			t.Fatalf("disposition = %v, want tool host lost (err: %v)", got.Kind, got.Err)
 		}
-		if host.restarts != maxConsecutiveRestarts {
-			t.Errorf("restarts = %d, want %d", host.restarts, maxConsecutiveRestarts)
+		if want := maxConsecutiveDeaths - 1; host.restarts != want {
+			t.Errorf("restarts = %d, want %d", host.restarts, want)
+		}
+		if results := tr.toolResults(); len(results) != maxConsecutiveDeaths {
+			t.Errorf("results = %d, want one per death (%d)", len(results), maxConsecutiveDeaths)
 		}
 		results := tr.toolResults()
 		if last := results[len(results)-1]; !strings.HasSuffix(last.Content, newSandboxSentence) {
@@ -267,7 +308,7 @@ func TestRun_ToolHostRestartsAreBoundedByCallsCompleting(t *testing.T) {
 		tr := newMemTranscript(pendingUser("go"))
 		host := &restartableHost{}
 		var turns []scriptedTurn
-		for i := 0; i <= maxConsecutiveRestarts; i++ {
+		for i := 0; i <= maxConsecutiveDeaths; i++ {
 			turns = append(turns,
 				scriptedTurn{calls: []domain.ToolCall{{ID: fmt.Sprintf("dies%d", i), Name: "bash"}}, onCall: func() { host.kill("bash") }},
 				scriptedTurn{calls: []domain.ToolCall{{ID: fmt.Sprintf("works%d", i), Name: "read"}}},
@@ -278,7 +319,7 @@ func TestRun_ToolHostRestartsAreBoundedByCallsCompleting(t *testing.T) {
 		if got.Kind != ResultConcluded {
 			t.Fatalf("disposition = %v, want concluded (err: %v)", got.Kind, got.Err)
 		}
-		if want := maxConsecutiveRestarts + 1; host.restarts != want {
+		if want := maxConsecutiveDeaths + 1; host.restarts != want {
 			t.Errorf("restarts = %d, want %d", host.restarts, want)
 		}
 	})
@@ -300,6 +341,25 @@ func TestRun_AToolHostKilledByAStopIsTheStops(t *testing.T) {
 	}
 	if host.restarts != 0 {
 		t.Errorf("restarts = %d, want none under a stop", host.restarts)
+	}
+	if results := tr.toolResults(); len(results) != 0 {
+		t.Errorf("results written under a stop = %+v, want none", results)
+	}
+}
+
+// A stop that lands while a dead tool host is being restarted is the stop's
+// too: the restart it cuts short is not a lost sandbox, so the engagement is
+// cancelled rather than handed back, and its calls are left for the repair
+// pass.
+func TestRun_AStopDuringARestartIsTheStops(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr := newMemTranscript(pendingUser("go"))
+	host := &restartableHost{dies: map[string]bool{"bash": true}, onRestart: cancel}
+	p := &scriptedProvider{turns: []scriptedTurn{{calls: []domain.ToolCall{{ID: "c1", Name: "bash"}}}}}
+	got := newTestEngine(tr, p, host).Run(ctx, testParams())
+	if got.Kind != ResultCancelled {
+		t.Fatalf("disposition = %v, want cancelled (err: %v)", got.Kind, got.Err)
 	}
 	if results := tr.toolResults(); len(results) != 0 {
 		t.Errorf("results written under a stop = %+v, want none", results)

@@ -98,9 +98,8 @@ func (s *Spawner) leaveOnUpstream(ctx context.Context, park liveParkContext, ses
 
 // jailLostNote is the transcript's account of a conversation parked because
 // it lost its jail, past restarting in place, as many times as the jail
-// budget allows. reason is what
-// ended the last one. The model reads it on the next claim and a person reads
-// it in place.
+// budget allows. reason is what ended the last one. The model reads it on the
+// next claim and a person reads it in place.
 func jailLostNote(losses int, reason string) string {
 	return fmt.Sprintf("Paused after the sandbox was lost %d times in a row; the last time, %s. Send a message to continue in a new sandbox.", losses, reason)
 }

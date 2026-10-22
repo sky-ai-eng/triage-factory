@@ -3304,7 +3304,7 @@
         "type": "prometheus",
         "uid": "tf-prometheus"
       },
-      "description": "Claims given back with the conversation still mid-flight, so the next claim continues it, by why (tf_conversations_handed_back_total, summed across executors). requeued: the engagement failed before its agent ran, and counts toward the setup budget. requeued_credentials: the credential bundle never arrived. requeued_shutdown: the executor stopped or drained. requeued_upstream: the model provider stayed unavailable through the engagement's retries or went silent, or GitHub could not be reached during workspace setup, and the conversation waits on a backoff before its next claim. A lease takeover (reaped) is not counted here; see tf_claims_expired.",
+      "description": "Claims given back with the conversation still mid-flight, so the next claim continues it, by why (tf_conversations_handed_back_total, summed across executors). requeued: the engagement failed before its agent ran, and counts toward the setup budget. requeued_credentials: the credential bundle never arrived. requeued_shutdown: the executor stopped or drained. requeued_upstream: the model provider stayed unavailable through the engagement's retries or went silent, or GitHub could not be reached during workspace setup, and the conversation waits on a backoff before its next claim. requeued_jail_lost: the sandbox a native run's tools ran in died and could not be restarted in place, and counts toward the jail budget. A lease takeover (reaped) is not counted here; see tf_claims_expired.",
       "fieldConfig": {
         "defaults": {
           "color": {
