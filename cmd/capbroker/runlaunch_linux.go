@@ -67,6 +67,12 @@ var launchRuntime = func(ctx context.Context, bundleDir, containerID string, mem
 // socket-passthrough wiring.
 var prepareBundle = sandbox.PrepareBundle
 
+// armJailNetwork is the seam the broker readies a run network's jail side
+// through before every launch: sandbox.ArmJailNetwork, which a relaunch into
+// the same network needs because the jail before it took the addressing with
+// it. A var so tests that stub the runtime need no real network.
+var armJailNetwork = sandbox.ArmJailNetwork
+
 // runEntry is one in-flight supervised run. done is closed once the
 // supervising goroutine has reaped the child; oom/actuals/waitErr are
 // written before that close and read only after it, so no further lock is
@@ -130,6 +136,13 @@ func (s *Server) launchRun(ctx context.Context, a launchRunArgs) (any, error) {
 			releaseSlot()
 		}
 	}()
+
+	// The jail's network as SetupNetwork left it, which a jail that already
+	// ran in it does not: an engagement that relaunches its jail does so into
+	// the same network.
+	if err := armJailNetwork(ctx, p.ConversationID, p.NetnsPath); err != nil {
+		return nil, fmt.Errorf("capbroker: %w", err)
+	}
 
 	// Build the bundle the broker owns (rootfs by catalog name → hash,
 	// fixed-template spec). The bundle's lifetime is now the broker's: the

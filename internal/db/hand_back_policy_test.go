@@ -12,16 +12,18 @@ import (
 
 // TestHandBackPolicies_RenderTheVocabularyTheSQLUsed pins the rendered
 // fragments: the four outcomes the dialects spelled by hand before the table,
-// in the order they spelled them, plus requeued_upstream. A reordered or
-// renamed row changes SQL every claim runs, so it has to change here too.
+// in the order they spelled them, plus requeued_upstream and
+// requeued_jail_lost. A reordered or renamed row changes SQL every claim runs,
+// so it has to change here too.
 func TestHandBackPolicies_RenderTheVocabularyTheSQLUsed(t *testing.T) {
-	if got, want := HandBackOutcomesSQL(), `'requeued','requeued_credentials','reaped','requeued_shutdown','requeued_upstream'`; got != want {
+	if got, want := HandBackOutcomesSQL(), `'requeued','requeued_credentials','reaped','requeued_shutdown','requeued_upstream','requeued_jail_lost'`; got != want {
 		t.Errorf("HandBackOutcomesSQL() = %s, want %s", got, want)
 	}
 	for budget, want := range map[HandBackBudget]string{
 		BudgetSetup:    `'requeued'`,
 		BudgetLoss:     `'reaped'`,
 		BudgetUpstream: `'requeued_upstream'`,
+		BudgetJail:     `'requeued_jail_lost'`,
 		BudgetNone:     `'requeued_credentials','requeued_shutdown'`,
 	} {
 		if got := HandBackBudgetOutcomesSQL(budget); got != want {

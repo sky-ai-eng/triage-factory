@@ -10,11 +10,13 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -88,18 +90,62 @@ func (s *Spawner) leaveOnUpstream(ctx context.Context, park liveParkContext, ses
 	}
 	delegateLog.Warn("model provider unavailable through every retry the upstream budget allows; parking the conversation for a person",
 		"conversation", park.conversationID, "claim", park.claimID, "upstream_hand_backs", prior, "error", lastErr)
-	if s.insertUpstreamStopNote(ctx, park.orgID, park.conversationID, park.claimID, creatorUserID) {
+	if s.insertClaimStopNote(ctx, park.orgID, park.conversationID, park.claimID, creatorUserID, upstreamExhaustedNote) {
 		return engagementDisposition{fenced: true}
 	}
 	return engagementDisposition{fenced: s.parkConversationOpen(ctx, park, sessionID)}
 }
 
-// insertUpstreamStopNote writes upstreamExhaustedNote as a stop note, through
-// the claim fence like every other write of this engagement. fenced is true
-// when the fence refused it: a successor owns the conversation, and neither
-// the note nor the park that follows is this engagement's to write. Any other
-// failure is logged and the park still lands.
-func (s *Spawner) insertUpstreamStopNote(ctx context.Context, orgID, conversationID, claimID, creatorUserID string) (fenced bool) {
+// jailLostNote is the transcript's account of a conversation parked because
+// it lost its jail, past restarting in place, as many times as the jail
+// budget allows. reason is what ended the last one. The model reads it on the
+// next claim and a person reads it in place.
+func jailLostNote(losses int, reason string) string {
+	return fmt.Sprintf("Paused after the sandbox was lost %d times in a row; the last time, %s. Send a message to continue in a new sandbox.", losses, reason)
+}
+
+// leaveOnLostJail ends a native engagement whose jail died under it and could
+// not be restarted in place: the restart failed, or the jail kept dying with
+// no call completing between restarts. lost is the engine's account of the
+// last death, and prior is the claim's Conversation.JailLosses. The loop
+// answered every call it had in flight, so the transcript is whole and nothing
+// about the conversation failed. While the jail budget lasts the claim goes
+// back 'requeued_jail_lost', claimable at once, and the next claim continues
+// the transcript in a new cell, on the tree this one left. Once it is spent
+// the conversation parks for a person, sandbox_lost with jailLostNote on the
+// transcript. Never a terminal: the jail took nothing down but itself, and a
+// failure would discard the workspace.
+//
+// park is the engagement's ending context; its reason is set here. The caller
+// has already established the engagement still holds its claim
+// (leaseFenced).
+func (s *Spawner) leaveOnLostJail(ctx context.Context, park liveParkContext, prior int, lost *agentloop.ToolHostLostError, creatorUserID string) engagementDisposition {
+	losses := prior + 1
+	if losses < s.budgetLimit(db.BudgetJail) {
+		delegateLog.Warn("the engagement's jail was lost; handing the conversation back to continue in a new one",
+			"conversation", park.conversationID, "claim", park.claimID, "jail_losses", losses, "error", lost)
+		return engagementDisposition{fenced: s.handBackOnLostJail(ctx, park, lost.Reason), handedBack: true}
+	}
+	delegateLog.Error("the engagement's jail was lost as many times as the jail budget allows; parking the conversation for a person",
+		"conversation", park.conversationID, "claim", park.claimID, "jail_losses", losses, "error", lost)
+	park.reason = db.ParkStopped(domain.ParkReasonSandboxLost, "")
+	if s.insertClaimStopNote(ctx, park.orgID, park.conversationID, park.claimID, creatorUserID, jailLostNote(losses, lost.Reason)) {
+		return engagementDisposition{fenced: true}
+	}
+	if s.parkConversationOpen(ctx, park, "") {
+		return engagementDisposition{fenced: true}
+	}
+	toast.Warning(s.wsHub, park.orgID, fmt.Sprintf("Run %s is paused: its sandbox was lost %d times in a row. Send a message to continue.",
+		shortConversationID(park.conversationID), losses))
+	return engagementDisposition{}
+}
+
+// insertClaimStopNote writes note as a stop note, through the claim fence like
+// every other write of this engagement. fenced is true when the fence refused
+// it: a successor owns the conversation, and neither the note nor the park
+// that follows is this engagement's to write. Any other failure is logged and
+// the park still lands.
+func (s *Spawner) insertClaimStopNote(ctx context.Context, orgID, conversationID, claimID, creatorUserID, note string) (fenced bool) {
 	if s.conversations == nil {
 		return false // test fixture with no DB wired
 	}
@@ -108,7 +154,7 @@ func (s *Spawner) insertUpstreamStopNote(ctx context.Context, orgID, conversatio
 		UserID:         creatorUserID,
 		Role:           "user",
 		Subtype:        domain.MessageSubtypeStopNote,
-		Content:        upstreamExhaustedNote,
+		Content:        note,
 	}
 	id, err := s.conversations.InsertMessageForClaimSystem(context.WithoutCancel(ctx), orgID, claimID, msg)
 	if errors.Is(err, db.ErrClaimReleased) {

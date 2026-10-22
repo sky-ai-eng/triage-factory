@@ -170,3 +170,26 @@ func TestTeardownTarget_RefusesStatesSetupDidNotBuild(t *testing.T) {
 		}
 	}
 }
+
+// TestArmJailNetwork_RefusesUnknownNetworks: the jail side is re-armed only
+// on a namespace shaped and named for the conversation asking, and only on a
+// network this process built for it. Every refusal comes before any ip call,
+// so this runs without root.
+func TestArmJailNetwork_RefusesUnknownNetworks(t *testing.T) {
+	ctx := context.Background()
+	const idx = 214
+
+	if err := ArmJailNetwork(ctx, "conv-owner", "/tmp/not-a-netns"); err == nil {
+		t.Error("armed a namespace outside /var/run/netns")
+	}
+	if err := ArmJailNetwork(ctx, "conv-never-built", "/var/run/netns/"+NetnsNameForRun("conv-never-built", idx)); err == nil {
+		t.Error("armed a network this process never built")
+	}
+
+	name := NetnsNameForRun("conv-owner", idx)
+	markNetnsLive(name, "conv-owner")
+	t.Cleanup(func() { forgetNetns(name) })
+	if err := ArmJailNetwork(ctx, "conv-someone-else", "/var/run/netns/"+name); err == nil {
+		t.Error("armed another conversation's network")
+	}
+}

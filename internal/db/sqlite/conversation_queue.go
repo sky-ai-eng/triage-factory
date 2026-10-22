@@ -207,6 +207,12 @@ func EpisodeUpstreamHandBacksSQL(convAlias string) string {
 	return episodeHandBacksSQL(convAlias, db.HandBackBudgetOutcomesSQL(db.BudgetUpstream))
 }
 
+// EpisodeJailLossesSQL is the jail budget's unit: the current episode's
+// db.BudgetJail hand-backs, against the conversation alias convAlias.
+func EpisodeJailLossesSQL(convAlias string) string {
+	return episodeHandBacksSQL(convAlias, db.HandBackBudgetOutcomesSQL(db.BudgetJail))
+}
+
 // conversationQueueClaimCols is the column list ClaimNextConversation returns, shared with the
 // scan helper. visibility is left at its row default by the mint; team_id is
 // surfaced so the construction-path ConversationInfo built off a claimed
@@ -311,12 +317,13 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			       `+EpisodeSetupFailuresSQL("r")+`,
 			       `+EpisodeLostEngagementsSQL("r")+`,
 			       `+EpisodeUpstreamHandBacksSQL("r")+`,
+			       `+EpisodeJailLossesSQL("r")+`,
 			       COALESCE((SELECT prior.outcome FROM claims prior
 			                 WHERE prior.conversation_id = r.id AND prior.released_at IS NOT NULL
 			                 ORDER BY prior.released_at DESC, prior.claimed_at DESC, prior.rowid DESC
 			                 LIMIT 1), '')
 			FROM conversations r WHERE r.id = ?
-		`, claimed.ID).Scan(&handBacks, &claimed.SetupFailures, &claimed.LostEngagements, &claimed.UpstreamHandBacks, &claimed.LastHandBackOutcome); err != nil {
+		`, claimed.ID).Scan(&handBacks, &claimed.SetupFailures, &claimed.LostEngagements, &claimed.UpstreamHandBacks, &claimed.JailLosses, &claimed.LastHandBackOutcome); err != nil {
 			return err
 		}
 		// The claim id is minted here and handed back on the claimed conversation: the

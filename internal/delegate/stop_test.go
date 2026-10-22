@@ -632,7 +632,7 @@ func TestRecordNativeResult_GenuineFailureIsStillAFailure(t *testing.T) {
 		agentloop.Result{
 			Kind:        agentloop.ResultFailed,
 			FailureKind: domain.ConversationFailureAgentError,
-			Err:         errors.New("tool host is unusable: broken pipe"),
+			Err:         errors.New("persist assistant message: database disk image is malformed"),
 		}, nil).fenced; fenced {
 		t.Fatal("recordNativeResult reported a fence trip on an unfenced store")
 	}
@@ -646,7 +646,7 @@ func TestRecordNativeResult_GenuineFailureIsStillAFailure(t *testing.T) {
 	).Scan(&content); err != nil {
 		t.Fatalf("read the failure row: %v", err)
 	}
-	if !strings.Contains(content, "broken pipe") {
+	if !strings.Contains(content, "database disk image is malformed") {
 		t.Errorf("failure row = %q, want the underlying cause", content)
 	}
 	if ok, err := s.Storage().Exists(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, namespace)); err != nil {

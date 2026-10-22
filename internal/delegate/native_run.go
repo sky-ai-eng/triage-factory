@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -204,7 +205,10 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// One resolution of the claim's memory ceiling for the jail and the bash
 	// budget derived from it, so the two cannot disagree.
 	memoryLimitMB := agentproc.ClaimMemoryLimitMB()
-	launched, err := runCell.Launch(ctx, cell.LaunchSpec{
+	timings := s.resolvedActivityTimings()
+	// Restartable, so a jail that dies under the loop is replaced in this
+	// cell and the loop goes on.
+	launched, err := launchRestartableJail(ctx, runCell, cell.LaunchSpec{
 		WorkspaceKey:     namespace,
 		RunTree:          claudeCwd,
 		Env:              s.nativeAgentEnv(ctx, orgID, conversationID, namespace, cfg, triggerType, creatorUserID),
@@ -219,20 +223,16 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		OrgID:            orgID,
 		ClaimID:          cfg.claimID,
 		RecordActuals:    s.recordSandboxActuals,
+	}, func(_ cell.Jail, conn net.Conn) agentloop.ToolHost {
+		return agentloop.NewToolHost(conn, timings.toolSocket())
 	})
 	if err != nil {
-		return launchFailed(fmt.Errorf("launch tool host: %w", err))
+		return launchFailed(err)
 	}
 	jail = launched
 	defer func() { _ = jail.Close() }()
 	defer s.liveJails.add(cfg.claimID, jail)()
-
-	conn, err := jail.Connect(ctx, toolHostDialTimeout)
-	if err != nil {
-		return launchFailed(fmt.Errorf("connect to tool host: %w", err))
-	}
-	timings := s.resolvedActivityTimings()
-	tools := agentloop.NewToolHost(conn, timings.toolSocket())
+	tools := launched.toolHost()
 	defer func() { _ = tools.Close() }()
 	if handedOff {
 		s.repointRenamedRemotesInJail(ctx, orgID, task.ID, claudeCwd, tools)
@@ -744,8 +744,9 @@ func nativeBashMemBudgetMB(ceilingMB int) int {
 // its claim is released: nothing further is recorded and nothing is reacted
 // to — a successor owns the conversation's disposition now. It is handedBack
 // when the claim went back to the queue with the conversation mid-flight: the
-// dispatcher's shutdown cancelled the loop, or the model provider stayed
-// unavailable through the loop's retries.
+// dispatcher's shutdown cancelled the loop, the model provider stayed
+// unavailable through the loop's retries, or the jail died under the loop and
+// could not be restarted in place.
 func (s *Spawner) recordNativeResult(
 	ctx context.Context,
 	orgID, conversationID string,
@@ -862,6 +863,30 @@ func (s *Spawner) recordNativeResult(
 			mirror:         mirror,
 			cell:           cfg.sidecar.treeHandOff(),
 		}, "", cfg.upstreamHandBacks, lastErr, creatorUserID)
+
+	case agentloop.ResultToolHostLost:
+		// The jail died under the engagement and the loop could not restart
+		// it in this cell. The loop answered every call the jail took with
+		// it, so nothing about the conversation failed, and the tree is still
+		// on this host. The conversation goes on in a new cell while the jail
+		// budget lasts.
+		if leaseFenced(ctx) {
+			return engagementDisposition{fenced: true}
+		}
+		var lost *agentloop.ToolHostLostError
+		if !errors.As(result.Err, &lost) {
+			lost = &agentloop.ToolHostLostError{Reason: "the sandbox stopped unexpectedly", Err: result.Err}
+		}
+		return s.leaveOnLostJail(ctx, liveParkContext{
+			orgID:          orgID,
+			conversationID: conversationID,
+			namespace:      namespace,
+			claudeCwd:      claudeCwd,
+			claimID:        cfg.claimID,
+			runtime:        domain.ConversationRuntimeNative,
+			mirror:         mirror,
+			cell:           cfg.sidecar.treeHandOff(),
+		}, cfg.jailLosses, lost, creatorUserID)
 
 	case agentloop.ResultParked:
 		// The engagement stopped without concluding — a guard before a call,

@@ -227,6 +227,7 @@ const (
 	snapshotReasonConclusion = "conclusion"
 	snapshotReasonShutdown   = "shutdown"
 	snapshotReasonUpstream   = "upstream"
+	snapshotReasonJailLost   = "jail_lost"
 	snapshotReasonCheckpoint = "checkpoint"
 )
 

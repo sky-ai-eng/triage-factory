@@ -57,6 +57,14 @@ const maxClaimAttempts = 5
 // database time, which a suspended machine advances while nobody retries.
 const maxUpstreamHandBacks = 27
 
+// maxJailLosses is the jail budget: how many engagements of one queue episode
+// may lose the jail their tools ran in past restarting it in place
+// (Conversation.JailLosses, plus the one ending now) before the conversation
+// parks for a person instead of going on in a new cell. Each of those
+// engagements already restarted its jail as often as the loop allows, so a
+// conversation that loses this many is not being ended by one command.
+const maxJailLosses = 3
+
 // budgetLimit is how many hand-backs of budget b one queue episode may hold
 // before the dispatcher stops handing the conversation back, and 0 for a
 // budget with no limit. It is the one place each db.HandBackBudget's limit is
@@ -69,6 +77,8 @@ func (s *Spawner) budgetLimit(b db.HandBackBudget) int {
 		return s.maxClaimLossesOrDefault()
 	case db.BudgetUpstream:
 		return maxUpstreamHandBacks
+	case db.BudgetJail:
+		return maxJailLosses
 	default:
 		return 0
 	}
@@ -1029,6 +1039,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	cfg.teamID = conv.TeamID
 	cfg.claimID = conv.ClaimID
 	cfg.upstreamHandBacks = conv.UpstreamHandBacks
+	cfg.jailLosses = conv.JailLosses
 	cfg.lastHandBackOutcome = conv.LastHandBackOutcome
 	cfg.isBlueprintStep = true
 	cfg.blueprintRunID = br.ID

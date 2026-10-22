@@ -3,6 +3,7 @@ package agentloop
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -174,6 +175,11 @@ type serveResponse struct {
 	Error  json.RawMessage `json:"error,omitempty"`
 }
 
+// errRequestNotSent marks a call whose request never reached the tool host,
+// so the call cannot have run. A write to a socket whose peer is gone fails;
+// a failure after the write succeeded leaves the call's fate unknown.
+var errRequestNotSent = errors.New("agentloop: the request was not sent")
+
 func (h *socketToolHost) Call(name string, args map[string]any) (ToolOutcome, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -186,17 +192,25 @@ func (h *socketToolHost) Call(name string, args map[string]any) (ToolOutcome, er
 		// explicitly so the frame is always well-shaped.
 		args = map[string]any{}
 	}
+	// A request this side cannot encode or frame never reaches the tool host,
+	// which is alive and in step, so it is the call's own failure. Returned as
+	// an error it would read as a dead tool host and cost the sandbox.
 	body, err := json.Marshal(serveRequest{ID: id, Tool: name, Args: args})
 	if err != nil {
-		return ToolOutcome{}, fmt.Errorf("agentloop: marshal tool request: %w", err)
+		return ToolOutcome{ToolError: fmt.Sprintf("This tool call was not executed: its arguments could not be encoded (%v).", err)}, nil
+	}
+	if len(body) > maxFrameBytes {
+		return ToolOutcome{ToolError: fmt.Sprintf(
+			"This tool call was not executed: its request is %d bytes, over the %d bytes one call can carry. Split the work across smaller calls.",
+			len(body), maxFrameBytes)}, nil
 	}
 
 	deadline := time.Now().Add(h.timeout)
 	if err := h.conn.SetWriteDeadline(deadline); err != nil {
-		return ToolOutcome{}, fmt.Errorf("agentloop: set write deadline: %w", err)
+		return ToolOutcome{}, fmt.Errorf("agentloop: set write deadline: %w: %w", errRequestNotSent, err)
 	}
 	if err := writeFrame(h.conn, body); err != nil {
-		return ToolOutcome{}, fmt.Errorf("agentloop: write tool request: %w", err)
+		return ToolOutcome{}, fmt.Errorf("agentloop: write tool request: %w: %w", errRequestNotSent, err)
 	}
 	if err := h.conn.SetReadDeadline(deadline); err != nil {
 		return ToolOutcome{}, fmt.Errorf("agentloop: set read deadline: %w", err)

@@ -580,9 +580,15 @@ type Conversation struct {
 	// unavailable through their own retries. It picks the next wait off the
 	// upstream schedule and bounds how many times the conversation is retried
 	// before it parks for a person.
+	//
+	// JailLosses counts the episode's 'requeued_jail_lost' hand-backs —
+	// engagements whose jail died under them, so the conversation went on in
+	// a new one. It bounds how many new jails the conversation is given
+	// before it parks for a person.
 	SetupFailures     int `json:"-"`
 	LostEngagements   int `json:"-"`
 	UpstreamHandBacks int `json:"-"`
+	JailLosses        int `json:"-"`
 
 	// LastHandBackOutcome is the outcome of the conversation's most recent
 	// released claim, "" when it has none. Filled only by
@@ -951,7 +957,8 @@ type Claim struct {
 	ReleasedAt *time.Time `json:"released_at,omitempty"`
 	// Outcome is how the engagement ended: "completed" | "failed" |
 	// "cancelled" | "parked" | "requeued" | "requeued_credentials" |
-	// "reaped" | "requeued_shutdown" | "requeued_upstream". Empty while live.
+	// "reaped" | "requeued_shutdown" | "requeued_upstream" |
+	// "requeued_jail_lost". Empty while live.
 	Outcome string `json:"outcome,omitempty"`
 	Error   string `json:"error,omitempty"`
 	// Engagement telemetry the runtime reports per invocation — not
@@ -993,7 +1000,8 @@ type ExecutorClaim struct {
 	LeaseExpiresAt *time.Time
 	// Outcome is how the engagement ended ("completed" | "failed" |
 	// "cancelled" | "parked" | "requeued" | "requeued_credentials" |
-	// "reaped" | "requeued_shutdown" | "requeued_upstream"); empty while live.
+	// "reaped" | "requeued_shutdown" | "requeued_upstream" |
+	// "requeued_jail_lost"); empty while live.
 	Outcome string
 	// LastActivityAt / CurrentOp are what the holder's last renewal stamped:
 	// when the engagement last did anything the stall watchdog counts as

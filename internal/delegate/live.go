@@ -507,7 +507,23 @@ func (s *Spawner) handBackOnUpstream(ctx context.Context, park liveParkContext, 
 	})
 }
 
-// leaveConversation is the ordered ending both of the above share, and
+// handBackOnLostJail is the shutdown hand-back for an engagement whose jail
+// died under it and could not be restarted in place: the same ordered ending,
+// a snapshot of the tree as the jail left it included, except that the claim
+// is released 'requeued_jail_lost'. It is claimable at once: the next claim
+// builds a new cell, and the model reads what ended the old jail on the call
+// that was running. reason is kept on the row so a person looking at the
+// queued run sees why it is starting over.
+//
+// Nothing is written to the transcript here: the loop already answered every
+// call the jail took with it.
+func (s *Spawner) handBackOnLostJail(ctx context.Context, park liveParkContext, reason string) (fenced bool) {
+	return s.leaveConversation(ctx, park, "", snapshotReasonJailLost, func(ctx context.Context, park liveParkContext) bool {
+		return s.handBackClaim(ctx, park, db.HandBackJailLost, 0, reason)
+	})
+}
+
+// leaveConversation is the ordered ending every one of the above shares, and
 // release is the one step where they differ: the write that lets go of the
 // claim. It returns release's answer — fenced when the engagement no longer
 // held the claim, so nothing was written and the caller must not act on the

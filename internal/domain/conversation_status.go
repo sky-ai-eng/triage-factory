@@ -228,6 +228,12 @@ const (
 	// the upstream hand-back budget allows (about four hours of them). Nothing
 	// retries it further; a message resumes it.
 	ParkReasonUpstreamUnavailable ParkReason = "upstream_unavailable"
+	// ParkReasonSandboxLost — the jail the conversation's tools ran in died
+	// under it as many times in one episode as the jail hand-back budget
+	// allows. Each loss before that continued the conversation in a new jail;
+	// this one waits for a person, because a run whose jail keeps dying is
+	// most likely repeating what killed it. A message resumes it.
+	ParkReasonSandboxLost ParkReason = "sandbox_lost"
 	// ParkReasonInvalidEnvelope — the agent's completion envelope was still
 	// invalid after every re-prompt the driver allows. The transcript is
 	// whole, so nothing failed; the agent broke the workflow's contract, and
@@ -256,6 +262,7 @@ func AllParkReasons() []ParkReason {
 		ParkReasonModelNotEnabled,
 		ParkReasonStalled,
 		ParkReasonUpstreamUnavailable,
+		ParkReasonSandboxLost,
 		ParkReasonInvalidEnvelope,
 	}
 }
@@ -269,7 +276,7 @@ func IsParkReason(reason string) bool {
 	case ParkReasonIdle, ParkReasonUserCancelled, ParkReasonSystemCancelled,
 		ParkReasonBlueprintCancelled, ParkReasonBlueprintTerminal,
 		ParkReasonLaunchFailed, ParkReasonModelNotEnabled, ParkReasonStalled,
-		ParkReasonUpstreamUnavailable, ParkReasonInvalidEnvelope:
+		ParkReasonUpstreamUnavailable, ParkReasonSandboxLost, ParkReasonInvalidEnvelope:
 		return true
 	}
 	return false

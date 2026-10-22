@@ -81,6 +81,7 @@ func Run(t *testing.T, h Harness) {
 	t.Run("CellsAreIsolated", func(t *testing.T) { testCellsAreIsolated(t, h) })
 	t.Run("FreezeHoldsTheJailStill", func(t *testing.T) { testFreezeHoldsTheJailStill(t, h) })
 	t.Run("StopLeavesNothingRunning", func(t *testing.T) { testStopLeavesNothingRunning(t, h) })
+	t.Run("RelaunchAfterTheJailDies", func(t *testing.T) { testRelaunchAfterTheJailDies(t, h) })
 	t.Run("TeardownReleasesTheCell", func(t *testing.T) { testTeardownReleasesTheCell(t, h) })
 }
 
@@ -370,6 +371,50 @@ func testStopLeavesNothingRunning(t *testing.T, h Harness) {
 	}
 }
 
+// testRelaunchAfterTheJailDies: a cell launches a new jail once its last one
+// is stopped and closed, which is how an engagement goes on when its jail
+// dies. The new jail has the run tree as the old one left it and reaches the
+// cell's sidecar, and nothing else of the old jail survives: no process it
+// was running, and nothing in /tmp.
+//
+// The old jail's process writes a heartbeat into the run tree, which the new
+// jail shares. A new jail can see no process of the old one in its own
+// process table whether or not the stop killed it, so the heartbeat is what
+// shows nothing of the old jail is still running anywhere.
+func testRelaunchAfterTheJailDies(t *testing.T, h Harness) {
+	l := start(t, h, newConversationID(t))
+	marker := "kept-" + randomHex(t, 8)
+	const heartbeat = "(i=0; while :; do i=$((i+1)); echo $i > /work/beat; sleep 0.2; done) >/dev/null 2>&1 &"
+	l.sh(t, fmt.Sprintf("printf %%s %s > /work/kept.txt; echo gone > /tmp/gone.txt; %s sync; echo ok", shellQuote(marker), heartbeat))
+	const beatMoves = `a=$(cat /work/beat); sleep 1; b=$(cat /work/beat); if [ "$a" != "$b" ]; then echo MOVING; else echo STILL; fi`
+	if out := l.sh(t, beatMoves); !strings.Contains(out, "MOVING") {
+		t.Fatalf("the background process never started, so its stopping below proves nothing: %s", out)
+	}
+
+	_ = l.tools.Close()
+	if err := l.jail.Stop(); err != nil {
+		t.Fatalf("stop the first jail: %v", err)
+	}
+	_ = l.jail.Close()
+	l.launch(t)
+
+	if got := strings.TrimSpace(l.sh(t, "cat /work/kept.txt")); got != marker {
+		t.Errorf("/work/kept.txt in the new jail = %q, want %q", got, marker)
+	}
+	if out := l.sh(t, "if [ -e /tmp/gone.txt ]; then echo PRESENT; else echo ABSENT; fi"); !strings.Contains(out, "ABSENT") {
+		t.Errorf("the old jail's /tmp survived into the new one: %s", out)
+	}
+	if out := l.sh(t, beatMoves); !strings.Contains(out, "STILL") {
+		t.Errorf("a process the old jail was running is still writing /work/beat: %s", out)
+	}
+	for _, ep := range l.res.JailEndpoints {
+		host, port := splitEndpoint(t, ep)
+		if !l.reaches(t, host, port) {
+			t.Errorf("the new jail cannot reach its sidecar endpoint %s", ep)
+		}
+	}
+}
+
 // testTeardownReleasesTheCell: a cell closed in contract order leaves nothing
 // that stops the same conversation's next engagement from provisioning and
 // launching, and the boot-time reap still runs cleanly afterwards.
@@ -405,9 +450,11 @@ type liveCell struct {
 	cell  cell.Cell
 	conn  *sidecarproto.Conn
 	res   *sidecarproto.StartProxiesResult
+	spec  cell.LaunchSpec
 	jail  cell.Jail
 	tools agentloop.ToolHost
 
+	ctx      context.Context
 	cancel   context.CancelFunc
 	tornDown bool
 }
@@ -469,7 +516,8 @@ func start(t *testing.T, h Harness, conversationID string) *liveCell {
 	if res.GHChannelHost != "" {
 		gh = &cell.GHChannel{Host: res.GHChannelHost, Token: res.GHChannelToken}
 	}
-	jail, err := c.Launch(ctx, cell.LaunchSpec{
+	l.ctx = ctx
+	l.spec = cell.LaunchSpec{
 		WorkspaceKey:     conversationID,
 		RunTree:          runTree,
 		ProxyEnv:         res.Env,
@@ -478,18 +526,25 @@ func start(t *testing.T, h Harness, conversationID string) *liveCell {
 		CABundle:         agenthost.CABundlePathFor(conversationID),
 		GHChannel:        gh,
 		MemoryLimitMB:    jailMemoryLimitMB,
-	})
+	}
+	l.launch(t)
+	return l
+}
+
+// launch starts a jail in the cell from its spec and connects to its tool
+// host.
+func (l *liveCell) launch(t *testing.T) {
+	t.Helper()
+	jail, err := l.cell.Launch(l.ctx, l.spec)
 	if err != nil {
 		t.Fatalf("launch: %v", err)
 	}
 	l.jail = jail
-
-	toolConn, err := jail.Connect(ctx, bringUpTimeout)
+	toolConn, err := jail.Connect(l.ctx, bringUpTimeout)
 	if err != nil {
 		t.Fatalf("connect to the tool host: %v", err)
 	}
 	l.tools = agentloop.NewToolHost(toolConn, toolTimeout)
-	return l
 }
 
 // teardown closes the cell in contract order: tool host connection, jail

@@ -82,6 +82,12 @@ type Cell interface {
 	// The jail lives no longer than ctx: cancelling it kills the jail. A
 	// caller passes the engagement's context, so a stopped engagement takes
 	// its jail with it.
+	//
+	// Launch may be called again once the jail it returned has been stopped
+	// and closed: an engagement whose jail dies goes on in a new one, from
+	// the same spec. The new jail sees the run tree as the old one left it.
+	// Nothing else of the old jail carries over, neither a process it was
+	// running nor anything in its /tmp.
 	Launch(ctx context.Context, spec LaunchSpec) (Jail, error)
 
 	// Close reclaims the cell: it kills the sidecar process and only then

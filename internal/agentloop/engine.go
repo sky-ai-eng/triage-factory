@@ -214,9 +214,9 @@ const (
 	// will not act on and only a person can resolve. The conversation is
 	// `open` with a notice row; the next claim continues it.
 	ResultParked
-	// ResultFailed — the engagement could not continue (retry
-	// exhaustion, a fatal tool-host error) with its context still live.
-	// The conversation fails.
+	// ResultFailed — the engagement could not continue (a provider refusal
+	// no retry changes, a transcript write that failed) with its context
+	// still live. The conversation fails.
 	ResultFailed
 	// ResultCancelled — the context was cancelled. Every exit under a
 	// killed context reports this, however the kill was observed: a write
@@ -232,6 +232,15 @@ const (
 	// the call, and the caller hands the claim back to be retried later. Err
 	// carries the last failure.
 	ResultUpstreamUnavailable
+	// ResultToolHostLost — the tool host died during a call and could not
+	// be restarted in place (see RestartableToolHost): the restart failed,
+	// or the tool host kept dying with no call completing between restarts.
+	// Every call of the batch is answered, the one that was running with what
+	// is known about it and the ones after it as never run, so the
+	// transcript is whole and nothing about the conversation failed. The
+	// caller continues it in a new cell. Err is the *ToolHostLostError, whose
+	// Reason says what ended the tool host.
+	ResultToolHostLost
 )
 
 // Result is the engagement's terminal report, returned to the in-process
@@ -249,8 +258,8 @@ type Result struct {
 	DurationMs    int
 	// ParkNotice is the user-visible reason a guard parked the engagement.
 	ParkNotice string
-	// Err carries the underlying cause on ResultFailed and
-	// ResultUpstreamUnavailable.
+	// Err carries the underlying cause on ResultFailed,
+	// ResultUpstreamUnavailable and ResultToolHostLost.
 	Err error
 }
 
@@ -359,6 +368,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 	// a steer so assembly can wrap it in the keep-working envelope.
 	bareDrain := true
 	turn := 0
+	var deaths toolHostDeaths
 	lastText := ""
 
 	// emptyLengthStops counts CONSECUTIVE turns the provider cut at the
@@ -664,7 +674,10 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		// 8. Dispatch. Flow-control calls resolve loop-side; everything
 		// else goes into the jail, serially, in call order.
 		if len(calls) > 0 {
-			outcome, terminated, position, err := e.dispatchBatch(ctx, params, assistantRow.ID, calls)
+			outcome, terminated, position, err := e.dispatchBatch(ctx, params, assistantRow.ID, calls, &deaths)
+			if lost, ok := lostToolHost(err); ok && ctx.Err() == nil {
+				return e.toolHostLost(started, turn, lost)
+			}
 			if err != nil {
 				return e.failed(ctx, started, turn, err)
 			}
@@ -960,6 +973,19 @@ func (e *Engine) unavailable(started time.Time, turn int, err error) Result {
 		NumTurns:   turn,
 		DurationMs: msSince(started),
 		Err:        err,
+	}
+}
+
+// toolHostLost ends the engagement on a tool host that died during a call and
+// could not be restarted, which is not the conversation failing:
+// dispatchBatch has already answered every call of the batch, so the
+// transcript is whole, and the caller continues it in a new cell.
+func (e *Engine) toolHostLost(started time.Time, turn int, lost *ToolHostLostError) Result {
+	return Result{
+		Kind:       ResultToolHostLost,
+		NumTurns:   turn,
+		DurationMs: msSince(started),
+		Err:        lost,
 	}
 }
 

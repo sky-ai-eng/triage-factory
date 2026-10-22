@@ -214,6 +214,42 @@ func setupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (
 	return state, nil
 }
 
+// ArmJailNetwork puts the jail side of a run network back the way
+// setupNetwork left it: the netns veth's address, its link up, and the default
+// route through the gateway. runsc's sandbox networking moves the address and
+// route off the netns into the jail's own stack when a jail starts, and does
+// not put them back when it exits, so a second jail launched into the same
+// network would find nothing to configure and reach nothing. The broker runs
+// it before every jail launch; it changes nothing for the first.
+//
+// netnsPath is validated as a launch's is, and the network must be one this
+// process built for conversationID and has not torn down: every name and
+// address is derived from the pair, none taken from the caller.
+func ArmJailNetwork(ctx context.Context, conversationID, netnsPath string) error {
+	idx, err := validateNetnsPath(conversationID, netnsPath)
+	if err != nil {
+		return err
+	}
+	names := runNetNames(netnsIDFrag(conversationID), idx)
+	if owner, live := netnsLiveRun(names.netnsName); !live || owner != conversationID {
+		return fmt.Errorf("sandbox: arm jail network: no live run network for this conversation at subnet index %d", idx)
+	}
+	steps := []struct {
+		name string
+		argv []string
+	}{
+		{"sandbox addr", []string{"-n", names.netnsName, "addr", "replace", sandboxIP(idx) + "/24", "dev", names.vethSandbox}},
+		{"sandbox up", []string{"-n", names.netnsName, "link", "set", names.vethSandbox, "up"}},
+		{"sandbox default route", []string{"-n", names.netnsName, "route", "replace", "default", "via", hostIP(idx)}},
+	}
+	for _, step := range steps {
+		if err := runIP(ctx, step.argv...); err != nil {
+			return fmt.Errorf("sandbox: arm jail network: %s: %w", step.name, err)
+		}
+	}
+	return nil
+}
+
 // teardownNetwork is the reverse of setupNetwork. Idempotent — each
 // step swallows "does not exist" errors so it's safe to call against
 // a partial-init state.
