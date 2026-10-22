@@ -116,8 +116,8 @@ import (
 //
 // # Every single-row write returns the row it persisted
 //
-// PatchSnapshot, UpdateTitle, UpdateDescription, UpdateURL, MarkClosed and
-// Close — and each one's ...System twin — hand back the stored
+// SetPullRequestDraft, UpdateTitle, UpdateDescription, UpdateURL, MarkClosed
+// and Close — and each one's ...System twin — hand back the stored
 // row, read off RETURNING on the write statement itself rather than from a
 // follow-up SELECT, projecting the point read's column list and scanner so
 // the write shape cannot drift from the read shape. Several of these stamp a
@@ -313,19 +313,24 @@ type EntityStore interface {
 	// (ErrEntityJiraProjectRequired), through FindOrCreateJiraSystem.
 	FindOrCreate(ctx context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error)
 
-	// PatchSnapshot writes the new snapshot_json **without** touching
-	// last_polled_at — deliberately distinct from the tracker's
-	// UpdateSnapshotCASSystem, which stamps it. Used
-	// by handlers that mutate an entity via an external API and want
-	// the local copy to match the just-pushed state, but still expect
-	// the next poll cycle to reconcile (so last_polled_at must stay
-	// stale enough for the poll gate to refresh the row). Race
-	// window: a concurrent in-flight poll can overwrite our patch
-	// with its pre-mutation snapshot. Caller accepts that as the cost
-	// of in-place patching.
+	// SetPullRequestDraft sets is_draft in a GitHub pull request's
+	// snapshot and changes nothing else in it, for a handler that has just
+	// changed the draft state on GitHub and wants the local copy to match
+	// before the next poll. It writes that one key inside the stored
+	// document rather than a document the caller read, so a poll that
+	// commits a newer snapshot while the caller waits on GitHub keeps
+	// everything it wrote: overwriting the snapshot from an older read
+	// would undo the poll's transitions, and the snapshot diff, the only
+	// guard against re-emitting them, would emit them again.
 	//
-	// Returns the patched row, or sql.ErrNoRows.
-	PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON string) (domain.Entity, error)
+	// It leaves last_polled_at and poll_seq alone, so the next poll still
+	// refreshes the row and a poll already in flight still commits. That
+	// poll may write back the draft state it read from GitHub before the
+	// change; the poll after it reads the new state.
+	//
+	// Returns the row it wrote, or nil when no GitHub row carrying a
+	// snapshot has id: a row with no snapshot has no draft state to set.
+	SetPullRequestDraft(ctx context.Context, orgID, id string, draft bool) (*domain.Entity, error)
 
 	// UpdateTitle writes a new entity title (e.g. a PR title was
 	// edited upstream). No snapshot or last_polled_at change.
@@ -544,11 +549,13 @@ type EntityStore interface {
 	// CAS miss; the caller drops the write AND suppresses the transitions
 	// it diffed (the snapshot-diff is the sole re-emit prevention — see
 	// the tracker) and lets the next poll cycle reconcile. There is no
-	// blind-write variant: every snapshot write goes through the CAS.
+	// blind-write variant: every write of a whole snapshot goes through
+	// the CAS. SetPullRequestDraft is the one snapshot write outside it,
+	// and it sets a single key.
 	//
 	// On a Linear row the same statement moves linear_team_id to the snapshot's
 	// team_id, and leaves it where it is when the snapshot names none; the
-	// reactivate and close twins below do the same, as does PatchSnapshot. On
+	// reactivate and close twins below do the same. On
 	// a Jira row it moves jira_project_id the same way, to the registry row on
 	// the entity's site carrying the snapshot's project_id, and leaves it where
 	// it is when the snapshot names no project or the registry has no row for
@@ -673,8 +680,9 @@ type EntityStore interface {
 	// MarkPolledSystem stamps last_polled_at without touching the
 	// snapshot or poll_seq — the row was read from the source, but
 	// nothing about it was diffed. Distinct from UpdateSnapshotCASSystem
-	// (which carries a snapshot) and from PatchSnapshot (which deliberately
-	// leaves last_polled_at stale so the next cycle still refreshes).
+	// (which carries a snapshot) and from SetPullRequestDraft (which
+	// deliberately leaves last_polled_at stale so the next cycle still
+	// refreshes).
 	//
 	// It exists for reads that confirm an entity's state outside the
 	// snapshot-diff, where the column's age is itself an input: the

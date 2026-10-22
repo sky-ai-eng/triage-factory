@@ -23,11 +23,13 @@ import (
 
 // fakePRGitHub answers the status reads and the draft mutation for one pull
 // request and 404s every other path, recording each request as
-// "METHOD path" without the API prefix.
+// "METHOD path" without the API prefix. duringMutation, when set, runs
+// while the draft mutation is in flight.
 type fakePRGitHub struct {
-	url   string
-	mu    sync.Mutex
-	paths []string
+	url            string
+	mu             sync.Mutex
+	paths          []string
+	duringMutation func()
 }
 
 func newFakePRGitHub(t *testing.T, owner, repo, number string) *fakePRGitHub {
@@ -40,6 +42,7 @@ func newFakePRGitHub(t *testing.T, owner, repo, number string) *fakePRGitHub {
 		req := r.Method + " " + strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/api/v3"), "/api")
 		f.mu.Lock()
 		f.paths = append(f.paths, req)
+		during := f.duringMutation
 		f.mu.Unlock()
 		switch req {
 		case "GET " + pull:
@@ -47,6 +50,9 @@ func newFakePRGitHub(t *testing.T, owner, repo, number string) *fakePRGitHub {
 		case "GET " + pull + "/reviews":
 			_, _ = w.Write([]byte(`[]`))
 		case "POST /graphql":
+			if during != nil {
+				during()
+			}
 			_, _ = w.Write([]byte(`{"data":{"convertPullRequestToDraft":{"pullRequest":{"isDraft":true}}}}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -129,6 +135,44 @@ func TestDashboardPRRoutes_ReachGitHubUnderTheRegistryName(t *testing.T) {
 	}
 	if got := readPRSnapshot(t, s, pr.ID); !got.IsDraft {
 		t.Error("the entity's snapshot was not patched to draft")
+	}
+}
+
+// The handler resolves the entity before the GitHub round trip, and a poll
+// can commit a newer snapshot during it. Setting is_draft must keep that
+// snapshot: putting the older copy back would undo the poll's transitions,
+// and the next poll would emit them again.
+func TestDashboardPRUpdate_KeepsASnapshotAPollCommitsDuringTheMutation(t *testing.T) {
+	s := newTestServer(t)
+	pr := dashboardPRFixture(t, s)
+	gh := newFakePRGitHub(t, "acme", "new", "7")
+	ctx, org := context.Background(), runmode.LocalDefaultOrgID
+	gh.mu.Lock()
+	gh.duringMutation = func() {
+		cur, err := s.allStores.Entities.Get(ctx, org, pr.ID)
+		if err != nil || cur == nil {
+			t.Errorf("read during the mutation: %v", err)
+			return
+		}
+		snap := readPRSnapshot(t, s, pr.ID)
+		snap.HeadSHA, snap.Title = "newsha", "Mine v2"
+		data, _ := json.Marshal(snap)
+		if ok, err := s.allStores.Entities.UpdateSnapshotCASSystem(ctx, org, pr.ID, string(data), cur.PollSeq); err != nil || !ok {
+			t.Errorf("poll write during the mutation: ok=%v err=%v", ok, err)
+		}
+	}
+	gh.mu.Unlock()
+
+	rec := servePR(t, prRoutes(s, gh), http.MethodPatch, "/api/dashboard/prs/"+pr.ID, `{"draft":true}`)
+	var row domain.PRSummaryRow
+	if err := json.Unmarshal(rec.Body.Bytes(), &row); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("PATCH = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	if got := readPRSnapshot(t, s, pr.ID); !got.IsDraft || got.HeadSHA != "newsha" || got.Title != "Mine v2" {
+		t.Errorf("stored snapshot = %+v, want the poll's snapshot with is_draft set", got)
+	}
+	if !row.Draft || row.Title != "Mine v2" {
+		t.Errorf("answered %+v, want the stored row with draft set", row)
 	}
 }
 

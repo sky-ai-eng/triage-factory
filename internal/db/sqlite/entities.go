@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -359,13 +360,22 @@ func scanWrittenEntity(row *sql.Row) (domain.Entity, error) {
 	return *e, nil
 }
 
-func (s *entityStore) PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON string) (domain.Entity, error) {
+// SetPullRequestDraft — see the interface doc. json_set writes the key
+// inside the stored document, so nothing a concurrent writer committed to
+// the rest of it is read here or written back. json_type is guarded by
+// json_valid because it raises on text that is not JSON.
+func (s *entityStore) SetPullRequestDraft(ctx context.Context, orgID, id string, draft bool) (*domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return domain.Entity{}, err
+		return nil, err
 	}
-	return scanWrittenEntity(s.q.QueryRowContext(ctx,
-		`UPDATE entities SET snapshot_json = ?, `+containersFromSnapshot+` WHERE id = ? RETURNING `+entitySelectCols,
-		snapshotJSON, snapshotJSON, snapshotJSON, snapshotJSON, snapshotJSON, id))
+	return scanEntityRow(s.q.QueryRowContext(ctx,
+		`UPDATE entities SET snapshot_json = json_set(snapshot_json, '$.is_draft', json(?))
+		 WHERE id = ? AND source = 'github'
+		   AND CASE WHEN json_valid(snapshot_json)
+		            THEN json_type(snapshot_json) = 'object' AND json(snapshot_json) <> '{}'
+		            ELSE 0 END
+		 RETURNING `+entitySelectCols,
+		strconv.FormatBool(draft), id))
 }
 
 func (s *entityStore) UpdateTitle(ctx context.Context, orgID, id, title string) (domain.Entity, error) {

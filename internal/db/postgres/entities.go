@@ -790,12 +790,16 @@ func updateSnapshotCAS(ctx context.Context, q queryer, orgID, id, snapshotJSON s
 	return n > 0, nil
 }
 
-func (s *entityStore) PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON string) (domain.Entity, error) {
-	return scanWrittenEntity(s.q.QueryRowContext(ctx,
-		`UPDATE entities SET snapshot_json = $1::jsonb, `+pgContainersFromSnapshot("$1")+`
-		 WHERE org_id = $2 AND id = $3
+// SetPullRequestDraft — see the interface doc. jsonb_set writes the key
+// inside the stored document, so nothing a concurrent writer committed to
+// the rest of it is read here or written back.
+func (s *entityStore) SetPullRequestDraft(ctx context.Context, orgID, id string, draft bool) (*domain.Entity, error) {
+	return scanEntityRow(s.q.QueryRowContext(ctx,
+		`UPDATE entities SET snapshot_json = jsonb_set(snapshot_json, '{is_draft}', to_jsonb($1::boolean))
+		 WHERE org_id = $2 AND id = $3 AND source = 'github'
+		   AND jsonb_typeof(snapshot_json) = 'object' AND snapshot_json <> '{}'::jsonb
 		 RETURNING `+pgEntitySelectCols,
-		snapshotJSON, orgID, id))
+		draft, orgID, id))
 }
 
 // MarkPolledSystem stamps last_polled_at alone — no snapshot, no poll_seq

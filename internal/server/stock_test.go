@@ -343,10 +343,15 @@ func TestJiraReaders_FollowAProjectKeyRename(t *testing.T) {
 	if _, err := s.allStores.Entities.RenameSystem(ctx, org, "jira", site, "10002", "CORE-2", site+"/browse/CORE-2"); err != nil {
 		t.Fatalf("rename the issue: %v", err)
 	}
-	if _, err := s.allStores.Entities.PatchSnapshot(ctx, org, entityID,
+	renamed, err := s.allStores.Entities.Get(ctx, org, entityID)
+	if err != nil || renamed == nil {
+		t.Fatalf("read the renamed issue: %v", err)
+	}
+	if ok, err := s.allStores.Entities.UpdateSnapshotCASSystem(ctx, org, entityID,
 		`{"id":"10002","key":"CORE-2","project_id":"`+project.ID+`","project_key":"CORE","summary":"Pick me up","status":"To Do","assignee":""}`,
-	); err != nil {
-		t.Fatalf("refresh the snapshot: %v", err)
+		renamed.PollSeq,
+	); err != nil || !ok {
+		t.Fatalf("refresh the snapshot: ok=%v err=%v", ok, err)
 	}
 
 	team := runmode.LocalDefaultTeamID

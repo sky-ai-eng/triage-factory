@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -421,51 +420,32 @@ func (dh *dashboardHandler) handleDashboardPRUpdate(w http.ResponseWriter, r *ht
 	// Patch the local entity snapshot to match the state we just pushed to
 	// GitHub. Without this, the frontend's subsequent fetchAll() reads the
 	// stale pre-mutation snapshot and the card snaps back to its old column
-	// until the next poll cycle (up to several minutes later).
+	// until the next poll cycle (up to several minutes later). The write sets
+	// is_draft alone (SetPullRequestDraft): pr.entity was read before the
+	// GitHub round trip, and a poll may have committed a newer snapshot since.
 	//
 	// TODO: we deliberately don't fire a synthetic pr:ready_for_review
 	// / pr:converted_to_draft event here — the user's UI click is its own
 	// signal and a second event would race the next poll's diff and confuse
 	// the audit trail. Revisit if a user reports "my trigger didn't fire
 	// when I dragged the card."
-	var snap domain.PRSnapshot
+	stored := pr.entity
 	if err := dh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		snap, e = patchPRSnapshotDraft(r.Context(), tx.Entities, orgID, pr.entity, draft)
+		written, e := tx.Entities.SetPullRequestDraft(r.Context(), orgID, pr.entity.ID, draft)
+		if written != nil {
+			stored = written
+		}
 		return e
 	}); err != nil {
 		dashboardLog.Warn("failed to patch snapshot after draft toggle", "entity", pr.entity.ID, "pull_request", pr.slug(), "error", err)
-		// The answer still describes the pull request as GitHub now has it.
-		_ = json.Unmarshal([]byte(pr.entity.SnapshotJSON), &snap)
-		snap.IsDraft = draft
 	}
+	var snap domain.PRSnapshot
+	_ = json.Unmarshal([]byte(stored.SnapshotJSON), &snap)
+	// The answer describes the pull request as GitHub now has it, whether or
+	// not the local copy could be updated.
+	snap.IsDraft = draft
 
 	row := domain.PRSummaryFromSnapshot(snap)
 	row.EntityID = pr.entity.ID
 	writeJSON(w, http.StatusOK, row)
-}
-
-// patchPRSnapshotDraft flips the is_draft field on a pull request entity's
-// snapshot in place after a successful external mutation, and returns the
-// snapshot it wrote. entity is the row the caller resolved: its snapshot is
-// the one patched, and the write is keyed by its id.
-//
-// Race window: a concurrent in-flight poll can overwrite our patch with its
-// pre-mutation snapshot. Acceptable for beta — the next poll corrects it, and
-// the window is small. PatchSnapshot intentionally does NOT bump
-// last_polled_at so the next poll still refreshes the row.
-func patchPRSnapshotDraft(ctx context.Context, entities db.EntityStore, orgID string, entity *domain.Entity, draft bool) (domain.PRSnapshot, error) {
-	var snap domain.PRSnapshot
-	if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil {
-		return domain.PRSnapshot{}, err
-	}
-	snap.IsDraft = draft
-	patched, err := json.Marshal(snap)
-	if err != nil {
-		return domain.PRSnapshot{}, err
-	}
-	if _, err := entities.PatchSnapshot(ctx, orgID, entity.ID, string(patched)); err != nil {
-		return domain.PRSnapshot{}, err
-	}
-	return snap, nil
 }

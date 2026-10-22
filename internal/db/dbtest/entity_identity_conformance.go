@@ -978,10 +978,6 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if got := team(row.ID); got != "team-reopen" {
 			t.Errorf("after ReactivateWithSnapshotCASSystem the team is %q, want team-reopen", got)
 		}
-		patched, err := s.Entities.PatchSnapshot(ctx, orgID, row.ID, `{"id":"uuid-22","team_id":"team-patch"}`)
-		if err != nil || patched.LinearTeamID != "team-patch" {
-			t.Errorf("PatchSnapshot = %+v err=%v, want the row carrying team-patch", patched, err)
-		}
 
 		// The event queue's snapshot commit is the same CAS statement.
 		if ok, _, err := s.EventQueue.EnqueueBatchWithSnapshotCAS(ctx, orgID, row.ID, `{"id":"uuid-22","team_id":"team-queue"}`, pollSeq(row.ID), nil, nil); err != nil || !ok {
@@ -1147,10 +1143,6 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 		if got := projectOf(row.ID); got != sky {
 			t.Errorf("after ReactivateWithSnapshotCASSystem the project is %q, want SKY's row", got)
-		}
-		patched, err := s.Entities.PatchSnapshot(ctx, orgID, row.ID, snap("21000"))
-		if err != nil || patched.JiraProjectID != ops {
-			t.Errorf("PatchSnapshot = %+v err=%v, want the row on OPS's row", patched, err)
 		}
 
 		// The event queue's snapshot commit is the same CAS statement.

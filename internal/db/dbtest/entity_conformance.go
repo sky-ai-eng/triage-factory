@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -68,7 +69,7 @@ type EntitySeeder struct {
 //     mirrors GetBySource.
 //   - Update* mutations land on the right column, with
 //     UpdateSnapshotCASSystem also stamping last_polled_at and
-//     PatchSnapshot deliberately leaving it alone.
+//     SetPullRequestDraft deliberately leaving it alone.
 //   - MarkClosed is unconditional; Close only fires when state='active';
 //     ReactivateWithSnapshotCASSystem and CloseWithSnapshotCASSystem write
 //     state and snapshot in one guarded statement.
@@ -116,11 +117,14 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 		read := func() (*domain.Entity, error) { return s.Get(ctx, orgID, created.ID) }
 
-		patched, err := s.PatchSnapshot(ctx, orgID, created.ID, `{"state":"draft"}`)
-		if err != nil {
-			t.Fatalf("PatchSnapshot: %v", err)
+		if ok, err := s.UpdateSnapshotCASSystem(ctx, orgID, created.ID, `{"number":900,"state":"OPEN"}`, created.PollSeq); err != nil || !ok {
+			t.Fatalf("seed the snapshot: ok=%v err=%v", ok, err)
 		}
-		AssertWriteReturnedStoredRow(t, "PatchSnapshot", patched, read)
+		drafted, err := s.SetPullRequestDraft(ctx, orgID, created.ID, true)
+		if err != nil || drafted == nil {
+			t.Fatalf("SetPullRequestDraft: got=%v err=%v", drafted, err)
+		}
+		AssertWriteReturnedStoredRow(t, "SetPullRequestDraft", *drafted, read)
 
 		titled, err := s.UpdateTitle(ctx, orgID, created.ID, "Returned v2")
 		if err != nil {
@@ -168,7 +172,6 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			name string
 			run  func() error
 		}{
-			{"PatchSnapshot", func() error { _, e := s.PatchSnapshot(ctx, orgID, missing, "{}"); return e }},
 			{"UpdateTitle", func() error { _, e := s.UpdateTitle(ctx, orgID, missing, "x"); return e }},
 			{"UpdateDescription", func() error { _, e := s.UpdateDescription(ctx, orgID, missing, "x"); return e }},
 			{"UpdateURLSystem", func() error { _, e := s.UpdateURLSystem(ctx, orgID, missing, "x"); return e }},
@@ -396,38 +399,60 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 	})
 
-	t.Run("PatchSnapshot_does_not_touch_last_polled_at", func(t *testing.T) {
+	t.Run("SetPullRequestDraft_sets_is_draft_and_nothing_else", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		if _, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#3", "", "pr", "T", ""); err != nil {
+		created, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#3", "", "pr", "T", "")
+		if err != nil {
 			t.Fatalf("seed: %v", err)
+		}
+		// A row with no snapshot has no draft state to set.
+		if got, err := s.SetPullRequestDraft(ctx, orgID, created.ID, true); err != nil || got != nil {
+			t.Errorf("on a row with no snapshot: got=%v err=%v, want (nil, nil)", got, err)
+		}
+		if got, err := s.SetPullRequestDraft(ctx, orgID, uuid.New().String(), true); err != nil || got != nil {
+			t.Errorf("on a missing id: got=%v err=%v, want (nil, nil)", got, err)
+		}
+
+		// The poll's write, and the keys it carries, are what a caller that
+		// read the row earlier must not undo.
+		if ok, err := s.UpdateSnapshotCASSystem(ctx, orgID, created.ID, `{"number":3,"is_draft":false,"head_sha":"abc","check_runs":[{"id":1}]}`, created.PollSeq); err != nil || !ok {
+			t.Fatalf("poll write: ok=%v err=%v", ok, err)
 		}
 		// Re-read for a DB-precision baseline — see the
 		// UpdateSnapshotCASSystem_stamps_last_polled_at subtest above for
 		// the timestamptz-truncation rationale.
-		baseline, err := s.GetBySource(ctx, orgID, "github", "https://github.com", "owner/repo#3")
+		baseline, err := s.Get(ctx, orgID, created.ID)
 		if err != nil || baseline == nil || baseline.LastPolledAt == nil {
 			t.Fatalf("baseline re-read: %v", err)
 		}
-		initialPolled := baseline.LastPolledAt
 
-		if _, err := s.PatchSnapshot(ctx, orgID, baseline.ID, `{"patched":true}`); err != nil {
-			t.Fatalf("PatchSnapshot: %v", err)
+		if _, err := s.SetPullRequestDraft(ctx, orgID, created.ID, true); err != nil {
+			t.Fatalf("SetPullRequestDraft: %v", err)
 		}
-
-		got, err := s.Get(ctx, orgID, baseline.ID)
+		got, err := s.Get(ctx, orgID, created.ID)
 		if err != nil || got == nil {
 			t.Fatalf("re-read: %v", err)
 		}
-		if !strings.Contains(got.SnapshotJSON, `"patched"`) {
-			t.Errorf("snapshot_json missing patched payload: %q", got.SnapshotJSON)
+		var snap map[string]any
+		if err := json.Unmarshal([]byte(got.SnapshotJSON), &snap); err != nil {
+			t.Fatalf("decode snapshot: %v", err)
 		}
-		// last_polled_at must remain at the baseline timestamp — the
-		// helper exists precisely so the poll gate still considers
-		// the row stale enough to re-fetch.
-		if got.LastPolledAt == nil || !got.LastPolledAt.Equal(*initialPolled) {
-			t.Errorf("PatchSnapshot must not advance last_polled_at — initial=%v after=%v",
-				initialPolled, got.LastPolledAt)
+		if runs, _ := snap["check_runs"].([]any); snap["is_draft"] != true || snap["head_sha"] != "abc" || snap["number"] != float64(3) || len(runs) != 1 {
+			t.Errorf("snapshot = %s, want the poll's snapshot with is_draft set", got.SnapshotJSON)
+		}
+		back, err := s.SetPullRequestDraft(ctx, orgID, created.ID, false)
+		if err != nil || back == nil {
+			t.Fatalf("setting it back: got=%v err=%v", back, err)
+		}
+		if err := json.Unmarshal([]byte(back.SnapshotJSON), &snap); err != nil || snap["is_draft"] != false {
+			t.Errorf("setting it back: snapshot = %s, want is_draft false", back.SnapshotJSON)
+		}
+		// last_polled_at and poll_seq stay put, so the next poll still
+		// refreshes the row and one already in flight still commits.
+		if got.LastPolledAt == nil || !got.LastPolledAt.Equal(*baseline.LastPolledAt) || got.PollSeq != baseline.PollSeq {
+			t.Errorf("last_polled_at %v -> %v, poll_seq %d -> %d; want both unchanged",
+				baseline.LastPolledAt, got.LastPolledAt, baseline.PollSeq, got.PollSeq)
 		}
 	})
 
