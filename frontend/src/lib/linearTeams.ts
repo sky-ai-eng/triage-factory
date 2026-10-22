@@ -81,3 +81,28 @@ export async function listLinearStates(
   )
   return states.sort((a, b) => a.position - b.position)
 }
+
+/** One label an issue in a Linear team can carry, as the labels read serves
+ *  it: its id, which a predicate names it by, its name, the group it sits in
+ *  (null for none), and whether it is itself a group, which an issue cannot
+ *  carry and a group filter names. */
+export interface LinearLabelOption {
+  id: string
+  name: string
+  group: { id: string; name: string } | null
+  is_group: boolean
+}
+
+/** listLinearLabels reads every label an issue in one team can carry — the
+ *  team's own and the workspace's — ordered by name. */
+export async function listLinearLabels(
+  orgId: string,
+  teamId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<LinearLabelOption[]> {
+  return apiListAll<LinearLabelOption>(
+    `/api/orgs/${encodeURIComponent(orgId)}/linear/teams/${encodeURIComponent(teamId)}/labels/list`,
+    {},
+    options,
+  )
+}

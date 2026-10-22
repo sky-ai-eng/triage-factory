@@ -77,3 +77,37 @@ export async function listJiraStatuses(
     options,
   )
 }
+
+/** One of the Jira instance's priorities, or one issue type of a project: the
+ *  id a predicate names it by and the name it is shown as. */
+export interface JiraCatalogValue {
+  id: string
+  name: string
+}
+
+/** listJiraPriorities reads the Jira instance's priorities, in Jira's order
+ *  (highest first). The list is short and a picker offers all of it. */
+export async function listJiraPriorities(
+  orgId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<JiraCatalogValue[]> {
+  return apiListAll<JiraCatalogValue>(
+    `/api/orgs/${encodeURIComponent(orgId)}/jira/priorities/list`,
+    {},
+    options,
+  )
+}
+
+/** listJiraIssueTypes reads the issue types of the project Jira's id `jiraId`
+ *  names, ordered by name. */
+export async function listJiraIssueTypes(
+  orgId: string,
+  jiraId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<JiraCatalogValue[]> {
+  return apiListAll<JiraCatalogValue>(
+    `/api/orgs/${encodeURIComponent(orgId)}/jira/projects/${encodeURIComponent(jiraId)}/issue-types/list`,
+    {},
+    options,
+  )
+}

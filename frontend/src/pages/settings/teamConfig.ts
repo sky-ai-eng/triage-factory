@@ -766,8 +766,11 @@ export async function fetchRepositorySlug(id: string): Promise<string | null> {
 
 // TrackedJiraProject is a Jira project as the jira_project_id_in picker reads
 // it: the registry row id a filter stores, and the key and name it is shown as.
+// jira_id is Jira's id for it, which the status and issue type pickers read
+// its catalog by; empty while the poll has not resolved the project.
 export interface TrackedJiraProject {
   id: string
+  jira_id: string
   key: string
   name: string
 }
@@ -781,8 +784,8 @@ export async function fetchTeamTrackedJiraProjects(
 ): Promise<TrackedJiraProject[] | null> {
   const data = await fetchTeamSettings(teamId)
   if (data === null) return null
-  return (data.jira_projects ?? []).flatMap(({ id, key, name }) =>
-    id ? [{ id, key, name: name ?? '' }] : [],
+  return (data.jira_projects ?? []).flatMap(({ id, jira_id, key, name }) =>
+    id ? [{ id, jira_id: jira_id ?? '', key, name: name ?? '' }] : [],
   )
 }
 
