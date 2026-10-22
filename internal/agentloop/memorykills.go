@@ -54,6 +54,8 @@ type memoryKillWatch struct {
 	limitMB  int
 	exitWait time.Duration
 
+	// mu spans a whole call, both count reads included, so the kills read on
+	// either side of a call happened during that call and no other.
 	mu sync.Mutex
 	// told is the count every notice so far accounts for: kills at or
 	// below it have been reported, or happened before the engagement began.
