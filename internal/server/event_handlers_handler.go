@@ -25,6 +25,9 @@ import (
 type eventHandlersHandler struct {
 	tx db.TxRunner
 	az *authz.Checker
+	// catalogs is what a scope predicate's Jira and Linear ids are checked
+	// through (checkPredicateCatalog).
+	catalogs predicateCatalogs
 }
 
 // gateHandlerWrite rejects a viewer before a write against an existing event
@@ -414,19 +417,20 @@ func sourceUnavailableMessage(kind string, state eventsource.State) string {
 // insertEventHandler resolves the acting team and writes the composed row,
 // answering 201 with the row the INSERT returned. Shared by both create
 // routes: everything above it differs per kind, everything from here down does
-// not.
+// not. pickedTeam is the team the caller was gated on, and catalogFaults are
+// what checkPredicateCatalog found in the predicate for that team.
 //
 // The answer is the stored row, not the composed one: the write decides
 // team_id, source, user_modified and both timestamps, so the struct handed in
 // here is not a picture of what landed.
-func (eh *eventHandlersHandler) insertEventHandler(w http.ResponseWriter, r *http.Request, orgID, userID, pickedTeam string, h domain.EventHandler) {
+func (eh *eventHandlersHandler) insertEventHandler(w http.ResponseWriter, r *http.Request, orgID, userID, pickedTeam string, h domain.EventHandler, catalogFaults []string) {
 	var stored domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, pickedTeam)
 		if e != nil {
 			return e
 		}
-		if e := checkPredicateReferences(r.Context(), tx, orgID, teamID, h.EventType, h.ScopePredicateJSON, nil); e != nil {
+		if e := checkPredicateReferences(r.Context(), tx, orgID, teamID, h.EventType, h.ScopePredicateJSON, nil, catalogFaults); e != nil {
 			return e
 		}
 		stored, e = tx.EventHandlers.Create(r.Context(), orgID, teamID, h)
@@ -507,7 +511,12 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateRule(w http.ResponseWrit
 	// Reject viewers before authoring a rule: resolve the acting team read-only
 	// and gate, so a viewer gets a clean 403 rather than the
 	// event_handlers_insert RLS WITH CHECK surfacing as a 500.
-	if !gateActingTeamWrite(w, r, eh.tx, eh.az, orgID, userID, req.TeamID, "event_handlers") {
+	teamID, ok := actingTeamForWrite(w, r, eh.tx, eh.az, orgID, userID, req.TeamID, "event_handlers")
+	if !ok {
+		return
+	}
+	catalogFaults, ok := eh.checkPredicateCatalog(w, r, orgID, userID, teamID, req.EventType, predicate, nil)
+	if !ok {
 		return
 	}
 
@@ -532,7 +541,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateRule(w http.ResponseWrit
 	if req.AppliesToUnowned != nil {
 		h.AppliesToUnowned = *req.AppliesToUnowned
 	}
-	eh.insertEventHandler(w, r, orgID, userID, req.TeamID, h)
+	eh.insertEventHandler(w, r, orgID, userID, teamID, h, catalogFaults)
 }
 
 // handleEventHandlerCreateTrigger authors a kind='trigger' handler.
@@ -575,7 +584,8 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateTrigger(w http.ResponseW
 		return
 	}
 
-	if !gateActingTeamWrite(w, r, eh.tx, eh.az, orgID, userID, req.TeamID, "event_handlers") {
+	teamID, ok := actingTeamForWrite(w, r, eh.tx, eh.az, orgID, userID, req.TeamID, "event_handlers")
+	if !ok {
 		return
 	}
 
@@ -597,11 +607,11 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateTrigger(w http.ResponseW
 		if e != nil || blueprint == nil {
 			return e
 		}
-		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+		actingTeam, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, teamID)
 		if e != nil {
 			return e
 		}
-		if blueprint.TeamID != "" && blueprint.TeamID != teamID {
+		if blueprint.TeamID != "" && blueprint.TeamID != actingTeam {
 			crossTeamBlueprint = true
 		}
 		// A blueprint is fired by exactly one event: pre-check for a clean
@@ -652,7 +662,11 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateTrigger(w http.ResponseW
 	if req.AppliesToUnowned != nil {
 		h.AppliesToUnowned = *req.AppliesToUnowned
 	}
-	eh.insertEventHandler(w, r, orgID, userID, req.TeamID, h)
+	catalogFaults, ok := eh.checkPredicateCatalog(w, r, orgID, userID, teamID, req.EventType, predicate, nil)
+	if !ok {
+		return
+	}
+	eh.insertEventHandler(w, r, orgID, userID, teamID, h, catalogFaults)
 }
 
 // triggerTuningFields resolves the two trigger knobs both paths into
@@ -825,9 +839,13 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		return
 	}
 
+	catalogFaults, ok := eh.checkPredicateCatalog(w, r, orgID, userID, existing.TeamID, existing.EventType, updated.ScopePredicateJSON, existing.ScopePredicateJSON)
+	if !ok {
+		return
+	}
 	var stored domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if e := checkPredicateReferences(r.Context(), tx, orgID, existing.TeamID, existing.EventType, updated.ScopePredicateJSON, existing.ScopePredicateJSON); e != nil {
+		if e := checkPredicateReferences(r.Context(), tx, orgID, existing.TeamID, existing.EventType, updated.ScopePredicateJSON, existing.ScopePredicateJSON, catalogFaults); e != nil {
 			return e
 		}
 		var e error
@@ -1021,9 +1039,13 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 		MinAutonomySuitability: &minAutonomy,
 		ScopePredicateJSON:     predicate,
 	}
+	catalogFaults, ok := eh.checkPredicateCatalog(w, r, orgID, userID, existing.TeamID, existing.EventType, predicate, existing.ScopePredicateJSON)
+	if !ok {
+		return
+	}
 	var promoted domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if e := checkPredicateReferences(r.Context(), tx, orgID, existing.TeamID, existing.EventType, predicate, existing.ScopePredicateJSON); e != nil {
+		if e := checkPredicateReferences(r.Context(), tx, orgID, existing.TeamID, existing.EventType, predicate, existing.ScopePredicateJSON, catalogFaults); e != nil {
 			return e
 		}
 		var e error

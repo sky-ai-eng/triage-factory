@@ -443,13 +443,38 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 	// picking the latest event by type alone and rejecting a mismatch would 422
 	// every time a sibling discriminator (label_added "help wanted") fired more
 	// recently than the requested one (label_added "bug").
-	var primaryEvent *domain.Event
+	//
+	// An active task can stand at a station no event names: a Jira status or
+	// priority change task keyed on the status's or priority's id, opened by
+	// events that carry its name as their dedup_key. That task already has its
+	// anchor, so it is the answer, as the find branch below would give it.
+	var (
+		primaryEvent *domain.Event
+		standing     *domain.Task
+	)
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		primaryEvent, e = tx.Events.LatestForEntityTypeAndDedupKey(r.Context(), orgID, req.EntityID, req.EventType, req.DedupKey)
-		return e
+		if e != nil || primaryEvent != nil {
+			return e
+		}
+		active, e := tx.Tasks.FindActiveByEntityAndType(r.Context(), orgID, req.EntityID, req.EventType)
+		if e != nil {
+			return e
+		}
+		for i := range active {
+			if active[i].DedupKey == req.DedupKey {
+				standing = &active[i]
+				break
+			}
+		}
+		return nil
 	}); err != nil {
 		internalError(w, "tasks", err)
+		return
+	}
+	if standing != nil {
+		writeJSON(w, http.StatusOK, taskToJSON(*standing))
 		return
 	}
 	if primaryEvent == nil {

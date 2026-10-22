@@ -361,6 +361,10 @@ func (p GitHubPRCICheckPassedPredicate) Matches(m GitHubPRCICheckPassedMetadata)
 // collide). `HasLabel` on these events is usually redundant (the label name
 // itself is the primary filter), but it's exposed for consistency with other
 // PR predicates.
+//
+// label_name and has_label, here and on every PR event, are names, not ids: a
+// GitHub label's id belongs to one repository, while a filter on a label means
+// the label of that name in every repository the team tracks.
 // -----------------------------------------------------------------------------
 
 type GitHubPRLabelAddedMetadata struct {

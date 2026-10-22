@@ -59,19 +59,23 @@ func (e *predicateReferenceError) Error() string {
 }
 
 // checkPredicateReferences runs eventType's registered check, if it has one,
-// for a transaction body. Faults come back as a *predicateReferenceError,
+// for a transaction body. catalogFaults are the faults the provider catalog
+// check found before the transaction (checkPredicateCatalog), reported after
+// the registered check's. Faults come back as a *predicateReferenceError,
 // which writePredicateReferenceError answers.
-func checkPredicateReferences(ctx context.Context, tx db.TxStores, orgID, teamID, eventType string, predicate, prior *string) error {
+func checkPredicateReferences(ctx context.Context, tx db.TxStores, orgID, teamID, eventType string, predicate, prior *string, catalogFaults []string) error {
 	predicateReferenceMu.RLock()
 	check, ok := predicateReferenceChecks[eventType]
 	predicateReferenceMu.RUnlock()
-	if !ok {
-		return nil
+	var messages []string
+	if ok {
+		var err error
+		messages, err = check(ctx, tx, orgID, teamID, predicate, prior)
+		if err != nil {
+			return fmt.Errorf("check %s predicate references: %w", eventType, err)
+		}
 	}
-	messages, err := check(ctx, tx, orgID, teamID, predicate, prior)
-	if err != nil {
-		return fmt.Errorf("check %s predicate references: %w", eventType, err)
-	}
+	messages = append(messages, catalogFaults...)
 	if len(messages) == 0 {
 		return nil
 	}

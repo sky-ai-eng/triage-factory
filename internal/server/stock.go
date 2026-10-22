@@ -970,6 +970,7 @@ func recordCarryOverAssignedEvent(ctx context.Context, events_ db.EventStore, or
 		Priority:          snap.Priority,
 		PriorityID:        snap.PriorityID,
 		Status:            snap.Status,
+		StatusID:          snap.StatusID,
 		Summary:           snap.Summary,
 		Labels:            snap.Labels,
 	}
@@ -1004,6 +1005,7 @@ func recordCarryOverAvailableEvent(ctx context.Context, events_ db.EventStore, o
 		Priority:          snap.Priority,
 		PriorityID:        snap.PriorityID,
 		Status:            snap.Status,
+		StatusID:          snap.StatusID,
 		Summary:           snap.Summary,
 		Labels:            snap.Labels,
 	}

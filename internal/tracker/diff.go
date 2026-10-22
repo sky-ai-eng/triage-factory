@@ -424,15 +424,18 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID, usern
 //
 // Status comparisons go through JiraStatusRef.SameStatus, so a status renamed
 // in Jira is not a transition: the id is unchanged, no status-change event is
-// emitted, and the snapshot simply stores the new spelling. Metadata and the
-// dedup_key stay names — they are the vocabulary a user writes predicates in,
-// and the name is what a reader of the event sees.
+// emitted, and the snapshot simply stores the new spelling. status_changed's
+// dedup_key is the new status's id (jiraValueDedupKey), so a status renamed
+// while a task waits on it does not open a second task the next time the
+// issue enters it.
 //
 // The assignee and the priority are compared the same way, by id with the name
 // as the fallback for a snapshot that predates the id (JiraSnapshot.SameAssignee,
 // SamePriority). A display name change or a priority renamed in Jira is not a
-// transition, and two people who share a display name are two assignees. The
-// metadata carries the priority and issue type ids beside their names.
+// transition, and two people who share a display name are two assignees.
+// priority_changed's dedup_key is the new priority's id. The metadata carries
+// the status, priority and issue type ids beside their names: the ids are what
+// predicates match, and the names are what a reader of the event sees.
 //
 // Labels are compared by name, which is a Jira label's identity: it has no id
 // and cannot be renamed. label_added / label_removed are keyed on the name, as
@@ -477,7 +480,7 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, projects
 			emit(domain.EventJiraIssueCompleted, "", events.JiraIssueCompletedMetadata{
 				Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 				IssueKey: curr.Key, IssueID: curr.ID, Project: curr.ProjectKey, JiraProjectID: projects.Current,
-				IssueType: curr.IssueType, IssueTypeID: curr.IssueTypeID, FinalStatus: curr.Status,
+				IssueType: curr.IssueType, IssueTypeID: curr.IssueTypeID, FinalStatus: curr.Status, FinalStatusID: curr.StatusID,
 			})
 		} else if curr.OpenSubtaskCount > 0 {
 			// Parent-of-subtasks: suppress assigned/available on first
@@ -493,14 +496,14 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, projects
 				Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
 				IssueKey: curr.Key, IssueID: curr.ID, Project: curr.ProjectKey, JiraProjectID: projects.Current,
 				IssueType: curr.IssueType, IssueTypeID: curr.IssueTypeID, Priority: curr.Priority, PriorityID: curr.PriorityID,
-				Status: curr.Status, Summary: curr.Summary, Labels: curr.Labels,
+				Status: curr.Status, StatusID: curr.StatusID, Summary: curr.Summary, Labels: curr.Labels,
 			})
 		} else {
 			emit(domain.EventJiraIssueAvailable, "", events.JiraIssueAvailableMetadata{
 				Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
 				IssueKey: curr.Key, IssueID: curr.ID, Project: curr.ProjectKey, JiraProjectID: projects.Current,
 				IssueType: curr.IssueType, IssueTypeID: curr.IssueTypeID, Priority: curr.Priority, PriorityID: curr.PriorityID,
-				Status: curr.Status, Summary: curr.Summary, Labels: curr.Labels,
+				Status: curr.Status, StatusID: curr.StatusID, Summary: curr.Summary, Labels: curr.Labels,
 			})
 		}
 		return evts
@@ -518,18 +521,19 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, projects
 		})
 	}
 
-	// Status change — dedup_key = new status name.
+	// Status change — dedup_key = the new status's id.
 	if !prev.StatusRef().SameStatus(curr.StatusRef()) && curr.Status != "" {
-		emit(domain.EventJiraIssueStatusChanged, curr.Status, events.JiraIssueStatusChangedMetadata{
+		emit(domain.EventJiraIssueStatusChanged, jiraValueDedupKey(curr.StatusID, curr.Status), events.JiraIssueStatusChangedMetadata{
 			Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 			IssueKey: curr.Key, IssueID: curr.ID, Project: project, JiraProjectID: projects.Current, IssueType: curr.IssueType, IssueTypeID: curr.IssueTypeID,
-			OldStatus: prev.Status, NewStatus: curr.Status, Priority: curr.Priority, PriorityID: curr.PriorityID,
+			OldStatus: prev.Status, OldStatusID: prev.StatusID, NewStatus: curr.Status, NewStatusID: curr.StatusID,
+			Priority: curr.Priority, PriorityID: curr.PriorityID,
 		})
 		if terminal(curr) {
 			emit(domain.EventJiraIssueCompleted, "", events.JiraIssueCompletedMetadata{
 				Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 				IssueKey: curr.Key, IssueID: curr.ID, Project: project, JiraProjectID: projects.Current,
-				IssueType: curr.IssueType, IssueTypeID: curr.IssueTypeID, FinalStatus: curr.Status,
+				IssueType: curr.IssueType, IssueTypeID: curr.IssueTypeID, FinalStatus: curr.Status, FinalStatusID: curr.StatusID,
 			})
 		}
 	}
@@ -548,21 +552,21 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, projects
 				Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
 				IssueKey: curr.Key, IssueID: curr.ID, Project: project, JiraProjectID: projects.Current,
 				IssueType: curr.IssueType, IssueTypeID: curr.IssueTypeID, Priority: curr.Priority, PriorityID: curr.PriorityID,
-				Status: curr.Status, Summary: curr.Summary, Labels: curr.Labels,
+				Status: curr.Status, StatusID: curr.StatusID, Summary: curr.Summary, Labels: curr.Labels,
 			})
 		} else {
 			emit(domain.EventJiraIssueAvailable, "", events.JiraIssueAvailableMetadata{
 				Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
 				IssueKey: curr.Key, IssueID: curr.ID, Project: project, JiraProjectID: projects.Current,
 				IssueType: curr.IssueType, IssueTypeID: curr.IssueTypeID, Priority: curr.Priority, PriorityID: curr.PriorityID,
-				Status: curr.Status, Summary: curr.Summary, Labels: curr.Labels,
+				Status: curr.Status, StatusID: curr.StatusID, Summary: curr.Summary, Labels: curr.Labels,
 			})
 		}
 	}
 
-	// Priority change — dedup_key = new priority value.
+	// Priority change — dedup_key = the new priority's id.
 	if !prev.SamePriority(curr) && curr.Priority != "" {
-		emit(domain.EventJiraIssuePriorityChanged, curr.Priority, events.JiraIssuePriorityChangedMetadata{
+		emit(domain.EventJiraIssuePriorityChanged, jiraValueDedupKey(curr.PriorityID, curr.Priority), events.JiraIssuePriorityChangedMetadata{
 			Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 			IssueKey: curr.Key, IssueID: curr.ID, Project: project, JiraProjectID: projects.Current,
 			OldPriority: prev.Priority, OldPriorityID: prev.PriorityID, NewPriority: curr.Priority, NewPriorityID: curr.PriorityID,
@@ -599,7 +603,7 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, projects
 			Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
 			IssueKey: curr.Key, IssueID: curr.ID, Project: project, JiraProjectID: projects.Current,
 			IssueType: curr.IssueType, IssueTypeID: curr.IssueTypeID, Priority: curr.Priority, PriorityID: curr.PriorityID,
-			Status: curr.Status, Summary: curr.Summary, Labels: curr.Labels,
+			Status: curr.Status, StatusID: curr.StatusID, Summary: curr.Summary, Labels: curr.Labels,
 		})
 	}
 
@@ -624,9 +628,19 @@ func jiraLabelMetadata(curr domain.JiraSnapshot, jiraProjectID, label string) ev
 		Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
 		IssueKey: curr.Key, IssueID: curr.ID, Project: curr.ProjectKey, JiraProjectID: jiraProjectID,
 		IssueType: curr.IssueType, IssueTypeID: curr.IssueTypeID, Priority: curr.Priority, PriorityID: curr.PriorityID,
-		Status: curr.Status, Summary: curr.Summary,
+		Status: curr.Status, StatusID: curr.StatusID, Summary: curr.Summary,
 		LabelName: label, Labels: curr.Labels,
 	}
+}
+
+// jiraValueDedupKey is the dedup_key of a status or priority change: the new
+// value's id, which a rename in Jira does not move, or its name when the read
+// carried no id.
+func jiraValueDedupKey(id, name string) string {
+	if id != "" {
+		return id
+	}
+	return name
 }
 
 // jiraKeyChangedEvents is key_changed for an issue whose key went from prev's

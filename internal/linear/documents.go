@@ -145,7 +145,7 @@ query Labels($teamID: ID!, $first: Int!, $after: String) {
     first: $first
     after: $after
   ) {
-    nodes { id name parent { name } }
+    nodes { id name parent { id name } }
     ` + pageInfoFields + `
   }
 }`

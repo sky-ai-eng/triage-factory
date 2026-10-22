@@ -20,6 +20,16 @@ import (
 // create paths so the two-phase "gate read-only, then stamp in the main tx"
 // shape lives in one place.
 func gateActingTeamWrite(w http.ResponseWriter, r *http.Request, tx db.TxRunner, az *authz.Checker, orgID, userID, picked, scope string) bool {
+	_, ok := actingTeamForWrite(w, r, tx, az, orgID, userID, picked, scope)
+	return ok
+}
+
+// actingTeamForWrite is gateActingTeamWrite for a write that needs the team it
+// gated before its transaction, such as an event handler create, whose scope
+// predicate is checked against the team's tracked sources first. Passing the
+// team it returns to ResolveActing as the pick inside the write's transaction
+// re-checks the caller's membership and resolves the same team.
+func actingTeamForWrite(w http.ResponseWriter, r *http.Request, tx db.TxRunner, az *authz.Checker, orgID, userID, picked, scope string) (string, bool) {
 	var actingTeam string
 	if err := tx.WithReadTx(r.Context(), orgID, userID, func(s db.TxStores) error {
 		var e error
@@ -27,10 +37,10 @@ func gateActingTeamWrite(w http.ResponseWriter, r *http.Request, tx db.TxRunner,
 		return e
 	}); err != nil {
 		if teamscope.WriteIfSelectionError(w, err) {
-			return false
+			return "", false
 		}
 		internalError(w, scope, err)
-		return false
+		return "", false
 	}
-	return az.RequireTeamWrite(w, r, orgID, userID, actingTeam)
+	return actingTeam, az.RequireTeamWrite(w, r, orgID, userID, actingTeam)
 }

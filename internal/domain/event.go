@@ -308,8 +308,8 @@ func AllEventTypes() []EventType {
 		// --- Jira ---
 		{ID: EventJiraIssueAssigned, Source: "jira", Category: "issue", Label: "Issue Assigned", Description: "Issue was assigned to you"},
 		{ID: EventJiraIssueAvailable, Source: "jira", Category: "issue", Label: "Issue Available", Description: "New unassigned issue in pickup queue"},
-		{ID: EventJiraIssueStatusChanged, Source: "jira", Category: "issue", Label: "Status Changed", Description: "Issue status changed (uses dedup_key=new_status)"},
-		{ID: EventJiraIssuePriorityChanged, Source: "jira", Category: "issue", Label: "Priority Changed", Description: "Issue priority was changed (uses dedup_key=new_priority)"},
+		{ID: EventJiraIssueStatusChanged, Source: "jira", Category: "issue", Label: "Status Changed", Description: "Issue status changed (uses dedup_key=new status id)"},
+		{ID: EventJiraIssuePriorityChanged, Source: "jira", Category: "issue", Label: "Priority Changed", Description: "Issue priority was changed (uses dedup_key=new priority id)"},
 		{ID: EventJiraIssueCommented, Source: "jira", Category: "issue", Label: "New Comment", Description: "Someone other than Triage Factory commented on an issue (one event per poll, naming every commenter)"},
 		{ID: EventJiraIssueBodyUpdated, Source: "jira", Category: "issue", Label: "Issue Body Updated", Description: "The description of a tracked issue was edited or cleared"},
 		{ID: EventJiraIssueLabelAdded, Source: "jira", Category: "issue", Label: "Label Added", Description: "A label was added to an issue (uses dedup_key=label name)"},
@@ -322,7 +322,7 @@ func AllEventTypes() []EventType {
 		// --- Linear ---
 		{ID: EventLinearIssueAssigned, Source: "linear", Category: "issue", Label: "Issue Assigned", Description: "Issue was assigned, or first seen already assigned"},
 		{ID: EventLinearIssueAvailable, Source: "linear", Category: "issue", Label: "Issue Available", Description: "Unassigned issue in a pickup state"},
-		{ID: EventLinearIssueStatusChanged, Source: "linear", Category: "issue", Label: "Status Changed", Description: "Issue workflow state changed (uses dedup_key=new state name)"},
+		{ID: EventLinearIssueStatusChanged, Source: "linear", Category: "issue", Label: "Status Changed", Description: "Issue workflow state changed (uses dedup_key=new state id)"},
 		{ID: EventLinearIssuePriorityChanged, Source: "linear", Category: "issue", Label: "Priority Changed", Description: "Issue priority was changed (uses dedup_key=new priority label)"},
 		{ID: EventLinearIssueCommented, Source: "linear", Category: "issue", Label: "New Comment", Description: "Someone other than Triage Factory commented on an issue (one event per poll, naming every commenter)"},
 		{ID: EventLinearIssueBodyUpdated, Source: "linear", Category: "issue", Label: "Issue Body Updated", Description: "The description of a tracked issue was edited or cleared"},

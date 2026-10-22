@@ -2618,7 +2618,7 @@ func (t *Tracker) emitJiraUnreachable(ctx context.Context, orgID string, e domai
 			snap.IssueType, snap.IssueTypeID = fresh.IssueType, fresh.IssueTypeID
 		}
 		if snap.Status == "" {
-			snap.Status = fresh.Status
+			snap.Status, snap.StatusID = fresh.Status, fresh.StatusID
 		}
 		if snap.Summary == "" {
 			snap.Summary = fresh.Summary
@@ -2649,6 +2649,7 @@ func (t *Tracker) emitJiraUnreachable(ctx context.Context, orgID string, e domai
 			IssueType:         snap.IssueType,
 			IssueTypeID:       snap.IssueTypeID,
 			LastStatus:        snap.Status,
+			LastStatusID:      snap.StatusID,
 			Summary:           snap.Summary,
 			Reason:            reason,
 		}),
