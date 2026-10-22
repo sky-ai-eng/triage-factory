@@ -27,7 +27,7 @@ type eventHandlersHandler struct {
 	az *authz.Checker
 	// catalogs is what a scope predicate's Jira and Linear ids are checked
 	// through (checkPredicateCatalog).
-	catalogs predicateCatalogs
+	catalogs predicateCatalogClients
 }
 
 // gateHandlerWrite rejects a viewer before a write against an existing event

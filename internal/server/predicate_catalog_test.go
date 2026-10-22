@@ -20,15 +20,12 @@ func TestPredicateCatalog_EveryIDListIsChecked(t *testing.T) {
 		if !strings.HasPrefix(eventType, "jira:") && !strings.HasPrefix(eventType, "linear:") {
 			continue
 		}
-		checked := map[string]bool{}
-		for _, f := range predicateCatalogFields[eventType] {
-			checked[f.name] = true
-		}
+		source, _, _ := strings.Cut(eventType, ":")
 		for _, f := range schema.Fields {
 			if !strings.HasSuffix(f.Name, "_id_in") || trackedSet[f.Name] {
 				continue
 			}
-			if !checked[f.Name] {
+			if catalogFor(source, f.Name) == nil {
 				t.Errorf("%s.%s is an id list no catalog check covers", eventType, f.Name)
 			}
 		}

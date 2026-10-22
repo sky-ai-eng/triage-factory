@@ -3,7 +3,6 @@ package server
 import (
 	"fmt"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -49,28 +48,17 @@ func TestEventHandlerLinearCatalog_RefusesNamesAndUntrackedIDs(t *testing.T) {
 		"status_id_in":    []string{linearStateTodo, "Todo", opsOnly},
 		"has_label_id_in": []string{"Bug", linearLabelDifficulty},
 	})
-	messages := repoInFaultMessages(t, code, got)
-	want := []struct{ field, value string }{
-		{"status_id_in", "Todo"},
-		{"status_id_in", opsOnly},
-		{"has_label_id_in", "Bug"},
-		{"has_label_id_in", linearLabelDifficulty},
-	}
-	if len(messages) != len(want) {
-		t.Fatalf("faults = %q, want %d", messages, len(want))
-	}
-	for i, w := range want {
-		if !strings.HasPrefix(messages[i], w.field+": ") || !strings.Contains(messages[i], fmt.Sprintf("%q", w.value)) {
-			t.Errorf("fault %d = %q, want it to name %s and %q", i, messages[i], w.field, w.value)
-		}
-	}
+	wantFieldFaults(t, code, got,
+		fieldFault{"status_id_in", "Todo"},
+		fieldFault{"status_id_in", opsOnly},
+		fieldFault{"has_label_id_in", "Bug"},
+		fieldFault{"has_label_id_in", linearLabelDifficulty},
+	)
 
 	code, got = createLinearRule(t, s, domain.EventLinearIssueLabelRemoved, map[string]any{
 		"label_group_id_in": []string{linearLabelHard, "Difficulty"},
 	})
-	if messages := repoInFaultMessages(t, code, got); len(messages) != 2 {
-		t.Errorf("faults = %q, want one each for a label given as a group and a group name", messages)
-	}
+	wantFieldFaults(t, code, got, fieldFault{"label_group_id_in", linearLabelHard}, fieldFault{"label_group_id_in", "Difficulty"})
 	if after := len(listEventHandlers(t, s, "rule")); after != before {
 		t.Errorf("a refused create changed the rule count from %d to %d", before, after)
 	}
@@ -108,9 +96,7 @@ func TestEventHandlerLinearCatalog_AsksLinearOnlyAboutAddedIDs(t *testing.T) {
 func TestEventHandlerLinearCatalog_NoTrackedTeam(t *testing.T) {
 	s, fake := newServerWithLinearCatalog(t, linearFixtureEng)
 	code, got := createLinearRule(t, s, domain.EventLinearIssueBodyUpdated, map[string]any{"has_label_id_in": []string{linearLabelBug}})
-	if messages := repoInFaultMessages(t, code, got); len(messages) != 1 {
-		t.Errorf("faults = %q, want one", messages)
-	}
+	wantFieldFaults(t, code, got, fieldFault{"has_label_id_in", linearLabelBug})
 	if fake.Calls() != 0 {
 		t.Errorf("reached Linear %d times, want none", fake.Calls())
 	}

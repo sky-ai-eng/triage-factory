@@ -58,31 +58,41 @@ func (r *jiraCatalogRig) track(t *testing.T, ids ...string) {
 	}
 }
 
-func (r *jiraCatalogRig) createRule(t *testing.T, eventType string, predicate map[string]any) (int, map[string]any) {
+func (r *jiraCatalogRig) do(t *testing.T, method, path string, body any) (int, map[string]any) {
 	t.Helper()
-	rec := doJSON(t, r.s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
-		"event_type":      eventType,
-		"name":            "scoped",
-		"scope_predicate": predicate,
-	})
+	rec := doJSON(t, r.s, method, path, body)
 	var got map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &got)
 	return rec.Code, got
+}
+
+func (r *jiraCatalogRig) createRule(t *testing.T, eventType string, predicate map[string]any) (int, map[string]any) {
+	t.Helper()
+	return r.do(t, http.MethodPost, "/api/event-handlers/rules", map[string]any{
+		"event_type": eventType, "name": "scoped", "scope_predicate": predicate,
+	})
 }
 
 func (r *jiraCatalogRig) patch(t *testing.T, id string, body map[string]any) (int, map[string]any) {
 	t.Helper()
-	rec := doJSON(t, r.s, http.MethodPatch, "/api/event-handlers/"+id, body)
-	var got map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	return rec.Code, got
+	return r.do(t, http.MethodPatch, "/api/event-handlers/"+id, body)
 }
 
-func (r *jiraCatalogRig) storedPredicate(t *testing.T, id string) any {
+type fieldFault struct{ field, value string }
+
+// wantFieldFaults asserts a 422 whose faults name each field and value, in
+// order.
+func wantFieldFaults(t *testing.T, code int, got map[string]any, want ...fieldFault) {
 	t.Helper()
-	var row map[string]any
-	_ = json.Unmarshal(doJSON(t, r.s, http.MethodGet, "/api/event-handlers/"+id, nil).Body.Bytes(), &row)
-	return row["scope_predicate_json"]
+	messages := repoInFaultMessages(t, code, got)
+	if len(messages) != len(want) {
+		t.Fatalf("faults = %q, want %d", messages, len(want))
+	}
+	for i, w := range want {
+		if !strings.HasPrefix(messages[i], w.field+": ") || !strings.Contains(messages[i], fmt.Sprintf("%q", w.value)) {
+			t.Errorf("fault %d = %q, want it to name %s and %q", i, messages[i], w.field, w.value)
+		}
+	}
 }
 
 // A status of a tracked project's workflow, an issue type of a tracked
@@ -117,46 +127,31 @@ func TestEventHandlerJiraCatalog_RefusesNamesAndUntrackedIDs(t *testing.T) {
 		"priority_id_in":     []string{"High", "99"},
 		"issue_type_id_in":   []string{"Bug"},
 	})
-	messages := repoInFaultMessages(t, code, got)
-	want := []struct{ field, value string }{
-		{"jira_project_id_in", r.ops},
-		{"status_id_in", "In Progress"},
-		{"status_id_in", opsOnlyStatusID},
-		{"issue_type_id_in", "Bug"},
-		{"priority_id_in", "High"},
-		{"priority_id_in", "99"},
-	}
-	if len(messages) != len(want) {
-		t.Fatalf("faults = %q, want %d", messages, len(want))
-	}
-	for i, w := range want {
-		if !strings.HasPrefix(messages[i], w.field+": ") || !strings.Contains(messages[i], fmt.Sprintf("%q", w.value)) {
-			t.Errorf("fault %d = %q, want it to name %s and %q", i, messages[i], w.field, w.value)
-		}
-	}
+	wantFieldFaults(t, code, got,
+		fieldFault{"jira_project_id_in", r.ops},
+		fieldFault{"status_id_in", "In Progress"},
+		fieldFault{"status_id_in", opsOnlyStatusID},
+		fieldFault{"issue_type_id_in", "Bug"},
+		fieldFault{"priority_id_in", "High"},
+		fieldFault{"priority_id_in", "99"},
+	)
 	if after := len(listEventHandlers(t, r.s, "rule")); after != before {
 		t.Errorf("a refused create changed the rule count from %d to %d", before, after)
 	}
 }
 
-// status_changed's transition filters and priority_changed's are checked, and
-// each fault names its field.
 func TestEventHandlerJiraCatalog_TransitionFiltersAreChecked(t *testing.T) {
 	r := newJiraCatalogRig(t)
 	code, got := r.createRule(t, domain.EventJiraIssueStatusChanged, map[string]any{
 		"new_status_id_in": []string{statusInReviewID},
 		"old_status_id_in": []string{"To Do"},
 	})
-	if messages := repoInFaultMessages(t, code, got); len(messages) != 1 || !strings.HasPrefix(messages[0], "old_status_id_in: ") {
-		t.Errorf("faults = %q, want one naming old_status_id_in", messages)
-	}
+	wantFieldFaults(t, code, got, fieldFault{"old_status_id_in", "To Do"})
 	code, got = r.createRule(t, domain.EventJiraIssuePriorityChanged, map[string]any{
 		"new_priority_id_in": []string{"1"},
 		"old_priority_id_in": []string{"Low"},
 	})
-	if messages := repoInFaultMessages(t, code, got); len(messages) != 1 || !strings.HasPrefix(messages[0], "old_priority_id_in: ") {
-		t.Errorf("faults = %q, want one naming old_priority_id_in", messages)
-	}
+	wantFieldFaults(t, code, got, fieldFault{"old_priority_id_in", "Low"})
 }
 
 // A write asks Jira only about the ids it adds: an edit that adds none
@@ -188,8 +183,8 @@ func TestEventHandlerJiraCatalog_AsksJiraOnlyAboutAddedIDs(t *testing.T) {
 	if code != http.StatusBadGateway {
 		t.Fatalf("PATCH adding an id while Jira is down = %d, want 502: %v", code, got)
 	}
-	if p := r.storedPredicate(t, id); p != kept {
-		t.Errorf("a refused PATCH changed the predicate to %v", p)
+	if _, row := r.do(t, http.MethodGet, "/api/event-handlers/"+id, nil); row["scope_predicate_json"] != kept {
+		t.Errorf("a refused PATCH changed the predicate to %v", row["scope_predicate_json"])
 	}
 
 	r.fake.SetFailing(false)
@@ -209,9 +204,7 @@ func TestEventHandlerJiraCatalog_NoTrackedProject(t *testing.T) {
 		"status_id_in":     []string{statusToDoID},
 		"issue_type_id_in": []string{"10004"},
 	})
-	if messages := repoInFaultMessages(t, code, got); len(messages) != 2 {
-		t.Errorf("faults = %q, want two", messages)
-	}
+	wantFieldFaults(t, code, got, fieldFault{"status_id_in", statusToDoID}, fieldFault{"issue_type_id_in", "10004"})
 	if n := r.fake.Calls(); n != calls {
 		t.Errorf("reached Jira %d times, want none", n-calls)
 	}
@@ -227,9 +220,7 @@ func TestEventHandlerJiraCatalog_FaultsFoundFirstWinOverAnUpstreamFailure(t *tes
 		"status_id_in":   []string{"In Progress"},
 		"priority_id_in": []string{"2"},
 	})
-	if messages := repoInFaultMessages(t, code, got); len(messages) != 1 || !strings.HasPrefix(messages[0], "status_id_in: ") {
-		t.Errorf("faults = %q, want the status fault found before the priorities read failed", messages)
-	}
+	wantFieldFaults(t, code, got, fieldFault{"status_id_in", "In Progress"})
 
 	code, got = r.createRule(t, domain.EventJiraIssueAssigned, map[string]any{
 		"status_id_in":   []string{statusToDoID},
@@ -259,14 +250,10 @@ func TestEventHandlerJiraCatalog_UnconnectedJira(t *testing.T) {
 func TestEventHandlerJiraCatalog_TriggerCreateIsChecked(t *testing.T) {
 	r := newJiraCatalogRig(t)
 	seedBlueprintForTrigger(t, r.s, "bp-jira-catalog")
-	rec := doJSON(t, r.s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
+	code, got := r.do(t, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 		"event_type":      domain.EventJiraIssueAssigned,
 		"blueprint_id":    "bp-jira-catalog",
 		"scope_predicate": map[string]any{"status_id_in": []string{"In Progress"}},
 	})
-	var got map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	if messages := repoInFaultMessages(t, rec.Code, got); len(messages) != 1 {
-		t.Errorf("faults = %q, want one", messages)
-	}
+	wantFieldFaults(t, code, got, fieldFault{"status_id_in", "In Progress"})
 }

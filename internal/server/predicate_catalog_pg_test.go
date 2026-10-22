@@ -52,7 +52,7 @@ func TestPredicateCatalog_ReadsTrackedProjectsUnderRLS_Postgres(t *testing.T) {
 	if err := rig.s.tx.WithReadTx(t.Context(), rig.orgID, rig.plainB, c.readTracked); err != nil {
 		t.Fatalf("readTracked: %v", err)
 	}
-	if len(c.jiraProjects) != 1 || c.jiraProjects[0].JiraProjectID != ops || c.jiraProjects[0].ProjectExternalID != "10001" {
-		t.Errorf("tracked projects = %+v, want teamB's OPS with its Jira id", c.jiraProjects)
+	if len(c.jiraRefs) != 1 || c.jiraRefs[0] != "10001" {
+		t.Errorf("tracked projects = %v, want teamB's OPS by its Jira id", c.jiraRefs)
 	}
 }
