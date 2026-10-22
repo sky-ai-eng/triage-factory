@@ -30,6 +30,7 @@ func TestStartCapBrokerIfSandboxing_RefusesOrchestratorUIDInSidecarBand(t *testi
 	t.Cleanup(func() { currentUID = origUID })
 	currentUID = func() int { return sandbox.SidecarUIDBase + 5 }
 
+	stateRootOnDisk(t)
 	origBroker := startCapBrokerFn
 	t.Cleanup(func() { startCapBrokerFn = origBroker })
 	called := false
@@ -64,6 +65,7 @@ func TestStartCapBrokerIfSandboxing_AllowsOrchestratorUIDOutsideSidecarBand(t *t
 	t.Cleanup(func() { currentUID = origUID })
 	currentUID = func() int { return 10001 }
 
+	stateRootOnDisk(t)
 	origBroker := startCapBrokerFn
 	t.Cleanup(func() { startCapBrokerFn = origBroker })
 	called := false
@@ -94,6 +96,7 @@ func TestStartCapBrokerIfSandboxing_SkipsAtControlRole(t *testing.T) {
 	if !agentproc.WillSandbox() {
 		t.Skip("host does not sandbox (non-Linux); the control-skip only matters where a broker would otherwise start")
 	}
+	stateRootOnDisk(t)
 	origBroker := startCapBrokerFn
 	t.Cleanup(func() { startCapBrokerFn = origBroker })
 	called := false
@@ -124,6 +127,7 @@ func TestStartCapBrokerIfSandboxing_FailClosed(t *testing.T) {
 	if !agentproc.WillSandbox() {
 		t.Skip("host does not sandbox (non-Linux); the fail-closed path is Linux-only")
 	}
+	stateRootOnDisk(t)
 	orig := startCapBrokerFn
 	t.Cleanup(func() { startCapBrokerFn = orig })
 	wantErr := errors.New("broker refused to start")
@@ -166,5 +170,48 @@ func TestStartCapBrokerIfSandboxing_NoOpWhenNotSandboxing(t *testing.T) {
 	}
 	if a.capBroker != nil {
 		t.Error("capBroker set in local mode")
+	}
+}
+
+// stateRootOnDisk stands in for a host whose state root is on disk, which
+// the tests that exercise the broker start do not otherwise have.
+func stateRootOnDisk(t *testing.T) {
+	t.Helper()
+	orig := checkStateRootOnDisk
+	t.Cleanup(func() { checkStateRootOnDisk = orig })
+	checkStateRootOnDisk = func() error { return nil }
+}
+
+// TestStartCapBrokerIfSandboxing_RefusesAStateRootInMemory: a state root on
+// tmpfs would hold every jail's /tmp in memory, where a full /tmp ends its
+// jail, so boot stops before the broker starts and says why.
+func TestStartCapBrokerIfSandboxing_RefusesAStateRootInMemory(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	if !agentproc.WillSandbox() {
+		t.Skip("host does not sandbox (non-Linux); the fail-closed path is Linux-only")
+	}
+	origUID := currentUID
+	t.Cleanup(func() { currentUID = origUID })
+	currentUID = func() int { return 10001 }
+
+	refusal := errors.New("the state root /data is on tmpfs")
+	orig := checkStateRootOnDisk
+	t.Cleanup(func() { checkStateRootOnDisk = orig })
+	checkStateRootOnDisk = func() error { return refusal }
+
+	origBroker := startCapBrokerFn
+	t.Cleanup(func() { startCapBrokerFn = origBroker })
+	called := false
+	startCapBrokerFn = func(context.Context) (capBrokerHandle, func(context.Context) error, error) {
+		called = true
+		return nil, nil, nil
+	}
+
+	a := &App{plan: planForRole(runmode.RoleExecutor)}
+	if err := a.startCapBrokerIfSandboxing(context.Background()); !errors.Is(err, refusal) {
+		t.Fatalf("err = %v, want the state-root refusal", err)
+	}
+	if called {
+		t.Error("the broker started on a state root held in memory")
 	}
 }

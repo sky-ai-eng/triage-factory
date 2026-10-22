@@ -38,6 +38,9 @@ func TestMain(m *testing.M) {
 				break
 			}
 		}
+		// The protocol tests run the broker as an unprivileged user, which
+		// holds no capability to check for.
+		requireBrokerCapabilities = func() error { return nil }
 		if err := runBroker(args); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)

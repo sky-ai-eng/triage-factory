@@ -59,20 +59,61 @@ pub fn format_size(bytes: usize) -> String {
     }
 }
 
+/// What `truncate_head` reads of the content it truncates, for a caller that
+/// cannot hold that content whole: the read tool, scanning a file larger than
+/// memory.
+pub struct HeadSource<'a> {
+    /// The content's leading lines as `content.split('\n')` yields them. Every
+    /// one of them when the content fits both limits; otherwise at least every
+    /// line the head keeps, so that a line counted but not here is one the byte
+    /// limit refuses.
+    pub lines: &'a [&'a str],
+    /// How many lines `content.split('\n')` yields in all.
+    pub split_count: usize,
+    /// Whether the content ends with a newline.
+    pub ends_with_newline: bool,
+    /// The content's length in bytes.
+    pub total_bytes: usize,
+    /// The length in bytes of the content's first line, held or not.
+    pub first_line_bytes: usize,
+}
+
 /// Keep the first N lines/bytes. Never returns partial lines; if the first
 /// line alone exceeds the byte limit, returns empty content with
 /// `first_line_exceeds_limit`.
 pub fn truncate_head(content: &str, options: TruncationOptions) -> TruncationResult {
+    let lines: Vec<&str> = content.split('\n').collect();
+    truncate_head_source(
+        &HeadSource {
+            lines: &lines,
+            split_count: lines.len(),
+            ends_with_newline: content.ends_with('\n'),
+            total_bytes: content.len(),
+            first_line_bytes: lines[0].len(),
+        },
+        options,
+    )
+}
+
+/// `truncate_head` over a `HeadSource`.
+pub fn truncate_head_source(source: &HeadSource, options: TruncationOptions) -> TruncationResult {
     let max_lines = options.max_lines.unwrap_or(DEFAULT_MAX_LINES);
     let max_bytes = options.max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
 
-    let total_bytes = content.len();
-    let lines = split_lines_for_counting(content);
-    let total_lines = lines.len();
+    let total_bytes = source.total_bytes;
+    // split_lines_for_counting's count: a trailing newline ends the last line
+    // rather than starting one, and empty content has none.
+    let total_lines = if total_bytes == 0 {
+        0
+    } else if source.ends_with_newline {
+        source.split_count - 1
+    } else {
+        source.split_count
+    };
 
     if total_lines <= max_lines && total_bytes <= max_bytes {
         return TruncationResult {
-            content: content.to_string(),
+            content: source.lines.join("\n"),
             truncated: false,
             truncated_by: None,
             total_lines,
@@ -86,7 +127,11 @@ pub fn truncate_head(content: &str, options: TruncationOptions) -> TruncationRes
         };
     }
 
-    let first_line_bytes = lines.first().map_or(0, |l| l.len());
+    let first_line_bytes = if total_lines == 0 {
+        0
+    } else {
+        source.first_line_bytes
+    };
     if first_line_bytes > max_bytes {
         return TruncationResult {
             content: String::new(),
@@ -107,10 +152,16 @@ pub fn truncate_head(content: &str, options: TruncationOptions) -> TruncationRes
     let mut output_bytes_count = 0usize;
     let mut truncated_by = "lines";
 
-    for (i, line) in lines.iter().enumerate() {
+    for i in 0..total_lines {
         if i >= max_lines {
             break;
         }
+        let Some(line) = source.lines.get(i) else {
+            // Counted but not held: by HeadSource's contract, the byte limit
+            // refuses it.
+            truncated_by = "bytes";
+            break;
+        };
         let line_bytes = line.len() + usize::from(i > 0);
         if output_bytes_count + line_bytes > max_bytes {
             truncated_by = "bytes";

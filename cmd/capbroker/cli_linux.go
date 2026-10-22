@@ -51,6 +51,9 @@ func runBroker(args []string) error {
 	if err := validateOrchestratorGIDFlag(*orchestratorGID); err != nil {
 		return err
 	}
+	if err := requireBrokerCapabilities(); err != nil {
+		return err
+	}
 
 	procname.SetTitle("tf-cap-broker")
 	logging.SetProcess("cap-broker")
@@ -181,6 +184,31 @@ func validateOrchestratorGIDFlag(gid int) error {
 		return fmt.Errorf("capbroker: --orchestrator-gid %d falls inside the reserved sidecar band [%d, %d); repoint TF_ORCHESTRATOR_GID outside that range", gid, sandbox.SidecarUIDBase, sandbox.SidecarUIDBase+sandbox.MaxSandboxes)
 	}
 	return nil
+}
+
+// requireBrokerCapabilities is the capability check runBroker refuses to serve
+// without. A var so the protocol tests, which run the broker as an
+// unprivileged user, can stand in for a privileged one.
+var requireBrokerCapabilities = func() error {
+	names, err := capinfo.Effective()
+	if err != nil {
+		return fmt.Errorf("capbroker: read own capabilities: %w", err)
+	}
+	return requireSysResource(names)
+}
+
+// requireSysResource refuses a broker whose effective capabilities, names,
+// lack CAP_SYS_RESOURCE. The spec asks runsc to lower the jail runtime's OOM
+// score below the guest's, which only a process holding the capability may
+// do, and runsc refuses to start a jail it cannot do it for. Checked at boot,
+// the missing capability is named once instead of in every launch's failure.
+func requireSysResource(names []string) error {
+	for _, n := range names {
+		if n == "cap_sys_resource" {
+			return nil
+		}
+	}
+	return fmt.Errorf("capbroker: CAP_SYS_RESOURCE is required: every jail's spec lowers the runtime's OOM score, and runsc refuses to start a jail without it. Add SYS_RESOURCE to the executor's capabilities (cap_add in docker-compose.yml)")
 }
 
 // logBootLine emits one legibility boot line: this process's uid and

@@ -58,6 +58,11 @@ type capBrokerHandle interface {
 // executor healthz's broker_ok check round-trips against the socket.
 var startCapBrokerFn = startCapBroker
 
+// checkStateRootOnDisk is the seam the state-root filesystem check runs
+// through, so a test can stand in for a host whose state root is or is not
+// in memory without one.
+var checkStateRootOnDisk = sandbox.CheckStateRootOnDisk
+
 // startCapBrokerIfSandboxing starts the cap-broker subprocess and routes
 // internal/sandbox's privileged-ops and launch implementation through it
 // whenever this host will actually run the native runtime's resident
@@ -102,6 +107,12 @@ func (a *App) startCapBrokerIfSandboxing(ctx context.Context) error {
 	if orchestratorUIDCollidesWithJailRange() {
 		return fmt.Errorf("orchestrator uid %d falls inside the reserved jail uid range [%d, %d) — repoint TF_ORCHESTRATOR_UID outside that range",
 			currentUID(), sandbox.ParkedRunTreeUID, sandbox.JailUIDBase+sandbox.MaxSandboxes)
+	}
+	// Every jail's /tmp lives under the state root, so a state root held in
+	// memory would turn a full /tmp back into the end of its jail. Refusing
+	// here names the fix before the first jail runs.
+	if err := checkStateRootOnDisk(); err != nil {
+		return err
 	}
 	handle, ping, err := startCapBrokerFn(ctx)
 	if err != nil {

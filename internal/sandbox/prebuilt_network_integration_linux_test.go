@@ -41,6 +41,9 @@ func TestIntegration_PrebuiltNetwork_LaunchAndOwnership(t *testing.T) {
 	netnsPath := net.NetnsPath
 
 	cfg := minimalConfig(t)
+	// The network's own conversation: a launch into a network built for
+	// another is refused, the jail's /tmp being derived from it.
+	cfg.ConversationID = "itest-prebuilt"
 	cfg.Network = net
 	cfg.Argv = []string{"/bin/echo", "prebuilt-ok"}
 

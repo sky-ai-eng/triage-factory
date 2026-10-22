@@ -84,6 +84,7 @@ func Run(t *testing.T, h Harness) {
 	t.Run("CellsAreIsolated", func(t *testing.T) { testCellsAreIsolated(t, h) })
 	t.Run("FreezeHoldsTheJailStill", func(t *testing.T) { testFreezeHoldsTheJailStill(t, h) })
 	t.Run("MemoryCeilingKillsAreCounted", func(t *testing.T) { testMemoryCeilingKillsAreCounted(t, h) })
+	t.Run("AFullTmpEndsNoJail", func(t *testing.T) { testAFullTmpEndsNoJail(t, h) })
 	t.Run("StopLeavesNothingRunning", func(t *testing.T) { testStopLeavesNothingRunning(t, h) })
 	t.Run("RelaunchAfterTheJailDies", func(t *testing.T) { testRelaunchAfterTheJailDies(t, h) })
 	t.Run("TeardownReleasesTheCell", func(t *testing.T) { testTeardownReleasesTheCell(t, h) })
@@ -400,6 +401,49 @@ func testMemoryCeilingKillsAreCounted(t *testing.T, h Harness) {
 	}
 	if got := strings.TrimSpace(l.sh(t, "echo alive")); got != "alive" {
 		t.Fatalf("the tool host answered %q after the kill", got)
+	}
+}
+
+// testAFullTmpEndsNoJail: a jail that writes twice its memory ceiling into
+// /tmp, then grows a process past the ceiling, loses that process and nothing
+// else. /tmp must not hold its files where the ceiling counts them and the
+// kernel cannot reclaim them, and at the ceiling the kernel must kill the
+// guest's process before the runtime the jail is made of.
+func testAFullTmpEndsNoJail(t *testing.T, h Harness) {
+	l := startWithCeiling(t, h, newConversationID(t), oomCeilingMB)
+
+	// A /tmp with a limit of its own may stop the write early; what it must
+	// not do is take the jail with it.
+	t.Log(l.sh(t, fmt.Sprintf("dd if=/dev/zero of=/tmp/fill bs=1M count=%d 2>&1 | tail -1; ls -l /tmp/fill", 2*oomCeilingMB)))
+	if l.jail.Exited() {
+		t.Fatal("the jail exited while /tmp filled")
+	}
+	if got := strings.TrimSpace(l.sh(t, "echo alive")); got != "alive" {
+		t.Fatalf("the tool host answered %q after /tmp filled", got)
+	}
+
+	before, ok := l.jail.OOMKills()
+	if !ok {
+		t.Fatal("OOMKills has no count to read for a running jail")
+	}
+	grow := fmt.Sprintf(`node -e 'const a=[];for(let i=0;i<%d;i++){a.push(Buffer.alloc(32<<20,1))}console.log("target reached")'`,
+		2*oomCeilingMB/32)
+	out, err := l.tools.Call("bash", map[string]any{"command": grow, "timeout": int(toolTimeout / time.Second)})
+	if err != nil {
+		t.Fatalf("the tool host died with the command: the kill took the jail, not the process: %v", err)
+	}
+	if strings.Contains(out.Content+out.ToolError, "target reached") {
+		t.Fatalf("the command allocated %d MB under a %d MB ceiling: %+v", 2*oomCeilingMB, oomCeilingMB, out)
+	}
+	after, ok := l.jail.OOMKills()
+	if !ok || after <= before {
+		t.Fatalf("OOMKills = %d (readable %v) after the command was killed, want more than %d", after, ok, before)
+	}
+	if l.jail.Exited() {
+		t.Fatal("the jail exited; the ceiling must cost the process, not the jail")
+	}
+	if got := l.sh(t, "if [ -e /tmp/fill ]; then echo PRESENT; else echo ABSENT; fi"); !strings.Contains(got, "PRESENT") {
+		t.Errorf("/tmp lost its file to the kill: %s", got)
 	}
 }
 

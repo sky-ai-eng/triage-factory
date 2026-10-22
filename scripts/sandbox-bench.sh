@@ -3,7 +3,7 @@
 # TF runtime container image.
 #
 # The bench must run where production sandboxes run: an environment
-# with runsc + iptables + iproute2, the SYS_ADMIN/NET_ADMIN caps, the
+# with runsc + iptables + iproute2, the SYS_ADMIN/NET_ADMIN/SYS_RESOURCE caps, the
 # tool-host binary at /opt/tf/bin/tf-harness-tools, and the SDK at the
 # baked toolchain root — i.e. the runtime image. Running it in a
 # container also keeps all netns/iptables/bundle churn off the host —
@@ -52,7 +52,7 @@ echo "==> running bench (results: bench-results/$CSV + $JSON)"
 docker run --rm --init \
     --name tf-sandbox-bench \
     --cgroupns=private \
-    --cap-add SYS_ADMIN --cap-add NET_ADMIN \
+    --cap-add SYS_ADMIN --cap-add NET_ADMIN --cap-add SYS_RESOURCE \
     --security-opt apparmor=unconfined --security-opt seccomp=unconfined \
     -v "$ROOTFS_VOL":/opt/triagefactory/sandbox \
     -v "$OUT_DIR/sandbox-bench":/usr/local/bin/sandbox-bench:ro \

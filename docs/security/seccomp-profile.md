@@ -106,8 +106,8 @@ to validate.
 Harness: `go test -tags integration ./internal/sandbox/...` (the same suite
 `scripts/test-sandbox-linux.sh` runs) built as a static binary and run inside a
 container mirroring the compose service's exact privilege shape (`--cap-add
-SYS_ADMIN --cap-add NET_ADMIN --security-opt apparmor=unconfined
---cgroupns=private`, no `--privileged`), with `--security-opt
+SYS_ADMIN --cap-add NET_ADMIN --cap-add SYS_RESOURCE --security-opt
+apparmor=unconfined --cgroupns=private`, no `--privileged`), with `--security-opt
 seccomp=docker/seccomp-profile.json` in place of `unconfined`. Run repeatedly (5+
 iterations per candidate) to rule out flakiness before treating a pass as signal.
 
@@ -125,7 +125,7 @@ against it — don't guess, and don't trust `strace` here (see the gotcha below)
 # From the repo root, with runsc on PATH and a container runtime available:
 go test -tags integration -c -o /tmp/sandboxtest ./internal/sandbox/
 docker run --rm \
-  --cap-add SYS_ADMIN --cap-add NET_ADMIN \
+  --cap-add SYS_ADMIN --cap-add NET_ADMIN --cap-add SYS_RESOURCE \
   --security-opt apparmor=unconfined --security-opt seccomp=docker/seccomp-profile.json \
   --cgroupns=private \
   -v /tmp/sandboxtest:/work/sandboxtest:ro \
