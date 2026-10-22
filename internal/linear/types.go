@@ -35,6 +35,14 @@ type Team struct {
 	Private bool   `json:"private"`
 }
 
+// UserPage is one page of users. EndCursor resumes the listing while
+// HasNextPage is true.
+type UserPage struct {
+	Items       []User
+	EndCursor   string
+	HasNextPage bool
+}
+
 // TeamPage is one page of teams. EndCursor resumes the listing while
 // HasNextPage is true.
 type TeamPage struct {

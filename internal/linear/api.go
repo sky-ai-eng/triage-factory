@@ -57,6 +57,59 @@ func (c *Client) Whoami(ctx context.Context) (User, Organization, error) {
 	return data.Viewer, data.Organization, nil
 }
 
+// ListUsers returns one page of the workspace's active users, at most first of
+// them, narrowed by q: a case-insensitive substring of the name, the display
+// name or the email. An empty q lists every active user; after is the previous
+// page's EndCursor, or "" for the first page.
+func (c *Client) ListUsers(ctx context.Context, q, after string, first int) (UserPage, error) {
+	if first < 1 || first > maxPageSize {
+		return UserPage{}, fmt.Errorf("linear: user page size %d out of range 1-%d", first, maxPageSize)
+	}
+	vars := map[string]any{"first": first, "after": nullable(after)}
+	if q = strings.TrimSpace(q); q != "" {
+		vars["filter"] = map[string]any{"or": []any{
+			map[string]any{"name": map[string]any{"containsIgnoreCase": q}},
+			map[string]any{"displayName": map[string]any{"containsIgnoreCase": q}},
+			map[string]any{"email": map[string]any{"containsIgnoreCase": q}},
+		}}
+	}
+	var data struct {
+		Users struct {
+			Nodes    []User   `json:"nodes"`
+			PageInfo pageInfo `json:"pageInfo"`
+		} `json:"users"`
+	}
+	if err := c.query(ctx, usersQuery, vars, &data); err != nil {
+		return UserPage{}, err
+	}
+	return UserPage{
+		Items:       data.Users.Nodes,
+		EndCursor:   data.Users.PageInfo.EndCursor,
+		HasNextPage: data.Users.PageInfo.HasNextPage,
+	}, nil
+}
+
+// GetUser returns one user of the workspace by its UUID, deactivated or not.
+// A user that does not exist is an error matching ErrNotFound.
+func (c *Client) GetUser(ctx context.Context, id string) (User, error) {
+	if err := requireID("user id", id); err != nil {
+		return User{}, err
+	}
+	var data struct {
+		User *User `json:"user"`
+	}
+	if err := c.query(ctx, userQuery, map[string]any{"id": id}, &data); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return User{}, fmt.Errorf("linear: user %s: %w", id, err)
+		}
+		return User{}, err
+	}
+	if data.User == nil {
+		return User{}, fmt.Errorf("%w: user %s", ErrNotFound, id)
+	}
+	return *data.User, nil
+}
+
 // ListTeams returns one page of the teams the credential can see, at most
 // first of them, narrowed by q: a case-insensitive substring of the key or
 // the name. An empty q lists every team; after is the previous page's

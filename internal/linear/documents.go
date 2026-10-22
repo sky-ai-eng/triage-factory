@@ -52,6 +52,25 @@ query Whoami {
   organization { id name urlKey }
 }`
 
+// userFields is the selection of a user that decodes into User.
+const userFields = `id name displayName email active admin guest isMe app`
+
+// usersQuery lists the workspace's users. Linear leaves deactivated users out
+// unless includeDisabled is set, so a picker offers only people who can still
+// be assigned work.
+const usersQuery = `
+query Users($filter: UserFilter, $first: Int!, $after: String) {
+  users(filter: $filter, first: $first, after: $after) {
+    nodes { ` + userFields + ` }
+    ` + pageInfoFields + `
+  }
+}`
+
+const userQuery = `
+query User($id: String!) {
+  user(id: $id) { ` + userFields + ` }
+}`
+
 const teamsQuery = `
 query Teams($filter: TeamFilter, $first: Int!, $after: String) {
   teams(filter: $filter, first: $first, after: $after) {

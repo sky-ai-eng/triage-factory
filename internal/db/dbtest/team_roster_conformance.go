@@ -225,9 +225,13 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 		if got := rows[bound].LinearUserID; got == nil || *got != "lin-user-1" {
 			t.Errorf("bound linear_user_id = %v, want lin-user-1", got)
 		}
-		if rows[unbound].GitHubUsername != nil || rows[unbound].JiraAccountID != nil || rows[unbound].LinearUserID != nil {
-			t.Errorf("unbound member reads %v / %v / %v, want nil / nil / nil (Not connected)",
-				rows[unbound].GitHubUsername, rows[unbound].JiraAccountID, rows[unbound].LinearUserID)
+		if got := rows[bound].LinearDisplayName; got == nil || *got != "Bound" {
+			t.Errorf("bound linear_display_name = %v, want Bound", got)
+		}
+		if rows[unbound].GitHubUsername != nil || rows[unbound].JiraAccountID != nil || rows[unbound].LinearUserID != nil ||
+			rows[unbound].LinearDisplayName != nil {
+			t.Errorf("unbound member reads %v / %v / %v / %v, want nil / nil / nil / nil (Not connected)",
+				rows[unbound].GitHubUsername, rows[unbound].JiraAccountID, rows[unbound].LinearUserID, rows[unbound].LinearDisplayName)
 		}
 	})
 

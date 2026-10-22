@@ -1050,6 +1050,9 @@ export interface TeamMember {
   /** Linear user id in the org's Linear workspace. Null when this member
    *  hasn't connected Linear. */
   linear_user_id: string | null
+  /** What Linear called this member when they connected it. Null when they
+   *  haven't, or Linear gave no name. */
+  linear_display_name: string | null
   /** Team role: 'admin' | 'member' | 'viewer'. */
   role: string
   is_current_user: boolean

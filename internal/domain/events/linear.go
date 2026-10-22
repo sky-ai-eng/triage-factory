@@ -68,8 +68,8 @@ type LinearIssueAssignedMetadata struct {
 }
 
 type LinearIssueAssignedPredicate struct {
-	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
-	CreatorIn      []string `json:"creator_in,omitempty" doc:"Match issues created by anyone in this list (Linear user IDs)."`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (each by Linear's user id, as POST /api/orgs/{org_id}/linear/users/list serves it, not a name)."`
+	CreatorIn      []string `json:"creator_in,omitempty" doc:"Match issues created by anyone in this list (each by Linear's user id, as POST /api/orgs/{org_id}/linear/users/list serves it, not a name)."`
 	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
 	Priority       *string  `json:"priority,omitempty" doc:"Exact-match on the priority label (Urgent, High, Medium, Low, No priority)."`
 	StatusIDIn     []string `json:"status_id_in,omitempty" doc:"Match only issues whose current workflow state is one of these, by Linear state id (a state of a Linear team the team tracks, as POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/list serves it), not its name. Empty matches every state."`
@@ -99,7 +99,7 @@ type LinearIssueAvailableMetadata struct {
 }
 
 type LinearIssueAvailablePredicate struct {
-	CreatorIn      []string `json:"creator_in,omitempty" doc:"Match issues created by anyone in this list (Linear user IDs)."`
+	CreatorIn      []string `json:"creator_in,omitempty" doc:"Match issues created by anyone in this list (each by Linear's user id, as POST /api/orgs/{org_id}/linear/users/list serves it, not a name)."`
 	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
 	Priority       *string  `json:"priority,omitempty" doc:"Exact-match on the priority label (Urgent, High, Medium, Low, No priority)."`
 	StatusIDIn     []string `json:"status_id_in,omitempty" doc:"Match only issues whose current workflow state is one of these, by Linear state id (a state of a Linear team the team tracks, as POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/list serves it), not its name. Empty matches every state."`
@@ -128,7 +128,7 @@ type LinearIssueStatusChangedMetadata struct {
 }
 
 type LinearIssueStatusChangedPredicate struct {
-	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (each by Linear's user id, as POST /api/orgs/{org_id}/linear/users/list serves it, not a name)."`
 	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
 	NewStatusIDIn  []string `json:"new_status_id_in,omitempty" doc:"Match only transitions into one of these workflow states, by Linear state id (a state of a Linear team the team tracks), not its name. Empty matches every state."`
 	OldStatusIDIn  []string `json:"old_status_id_in,omitempty" doc:"Match only transitions out of one of these workflow states, by Linear state id (a state of a Linear team the team tracks), not its name. Empty matches every state."`
@@ -152,7 +152,7 @@ type LinearIssuePriorityChangedMetadata struct {
 }
 
 type LinearIssuePriorityChangedPredicate struct {
-	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (each by Linear's user id, as POST /api/orgs/{org_id}/linear/users/list serves it, not a name)."`
 	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
 	NewPriority    *string  `json:"new_priority,omitempty" doc:"Match only changes to this priority label (Urgent, High, Medium, Low, No priority)."`
 	OldPriority    *string  `json:"old_priority,omitempty" doc:"Match only changes from this priority label."`
@@ -183,8 +183,8 @@ type LinearIssueCommentedMetadata struct {
 }
 
 type LinearIssueCommentedPredicate struct {
-	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
-	CommenterIn    []string `json:"commenter_in,omitempty" doc:"Match when anyone in this list wrote one of the new comments (Linear user IDs)."`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (each by Linear's user id, as POST /api/orgs/{org_id}/linear/users/list serves it, not a name)."`
+	CommenterIn    []string `json:"commenter_in,omitempty" doc:"Match when anyone in this list wrote one of the new comments (each by Linear's user id, as POST /api/orgs/{org_id}/linear/users/list serves it, not a name)."`
 	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
 }
 
@@ -206,7 +206,7 @@ type LinearIssueCompletedMetadata struct {
 }
 
 type LinearIssueCompletedPredicate struct {
-	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (each by Linear's user id, as POST /api/orgs/{org_id}/linear/users/list serves it, not a name)."`
 	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
 }
 
@@ -229,7 +229,7 @@ type LinearIssueBodyUpdatedMetadata struct {
 }
 
 type LinearIssueBodyUpdatedPredicate struct {
-	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match assignees by Linear user ID."`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match assignees by Linear's user id, as POST /api/orgs/{org_id}/linear/users/list serves it, not a name."`
 	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
 	HasLabelIDIn   []string `json:"has_label_id_in,omitempty" doc:"Require the issue to currently bear at least one of these labels, by Linear label id (a label the team's tracked Linear teams can use, as POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/labels/list serves it), not its name. Empty matches any labels."`
 }
@@ -263,7 +263,7 @@ type LinearIssueParentChangedMetadata struct {
 }
 
 type LinearIssueParentChangedPredicate struct {
-	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (each by Linear's user id, as POST /api/orgs/{org_id}/linear/users/list serves it, not a name)."`
 	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
 	NewParentID    *string  `json:"new_parent_id,omitempty" doc:"Match moves under a specific parent issue, by Linear's id for it (a lowercase UUID, the new_parent_id a parent_changed event carries), not its identifier."`
 }
@@ -307,7 +307,7 @@ type LinearIssueLabelMetadata struct {
 }
 
 type LinearIssueLabelPredicate struct {
-	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (each by Linear's user id, as POST /api/orgs/{org_id}/linear/users/list serves it, not a name)."`
 	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
 	LabelIDIn      []string `json:"label_id_in,omitempty" doc:"Match only these labels, by Linear label id (a label the team's tracked Linear teams can use, as POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/labels/list serves it), not its name. Empty matches every label."`
 	LabelGroupIDIn []string `json:"label_group_id_in,omitempty" doc:"Match only labels in these label groups, by the group's Linear label id (the group of a label the team's tracked Linear teams can use), not its name. Empty matches labels in any group or none."`
@@ -339,8 +339,8 @@ type LinearIssueBecameAtomicMetadata struct {
 }
 
 type LinearIssueBecameAtomicPredicate struct {
-	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
-	CreatorIn      []string `json:"creator_in,omitempty" doc:"Match issues created by anyone in this list (Linear user IDs)."`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (each by Linear's user id, as POST /api/orgs/{org_id}/linear/users/list serves it, not a name)."`
+	CreatorIn      []string `json:"creator_in,omitempty" doc:"Match issues created by anyone in this list (each by Linear's user id, as POST /api/orgs/{org_id}/linear/users/list serves it, not a name)."`
 	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
 	Priority       *string  `json:"priority,omitempty" doc:"Exact-match on the priority label (Urgent, High, Medium, Low, No priority)."`
 	StatusIDIn     []string `json:"status_id_in,omitempty" doc:"Match only issues whose current workflow state is one of these, by Linear state id (a state of a Linear team the team tracks, as POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/list serves it), not its name. Empty matches every state."`
@@ -391,7 +391,7 @@ type LinearIssueUnreachableMetadata struct {
 }
 
 type LinearIssueUnreachablePredicate struct {
-	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
+	AssigneeIn     []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (each by Linear's user id, as POST /api/orgs/{org_id}/linear/users/list serves it, not a name)."`
 	LinearTeamIDIn []string `json:"linear_team_id_in,omitempty" doc:"Match only issues in these Linear teams, each one the team tracks, by Linear team id (the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the key). Empty matches every Linear team the team tracks."`
 }
 

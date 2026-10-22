@@ -55,19 +55,21 @@ type TeamCap struct {
 // a type whose Role semantics differ (membership_role vs org_role).
 // GitHubUsername / JiraAccountID are nil when the member holds no host-scoped
 // binding for the org's GitHub / Jira host, GitHubUserID is GitHub's id for the
-// bound account and nil also when the binding recorded none, and LinearUserID
-// is nil when they
-// hold no binding in the org's Linear workspace — the NULL-degrades-gracefully
+// bound account and nil also when the binding recorded none, LinearUserID is
+// nil when they hold no binding in the org's Linear workspace, and
+// LinearDisplayName is what Linear called them when they bound, nil also when
+// the binding recorded no name — the NULL-degrades-gracefully
 // contract the frontend renders as a "Not connected" readiness badge. Role is
 // the membership_role enum value: "admin" | "member" | "viewer". IsCurrentUser
 // is not carried here — the handler stamps it by comparing UserID to the
 // caller, since the store has no request identity.
 type TeamMember struct {
-	UserID         string
-	DisplayName    string
-	GitHubUsername *string
-	GitHubUserID   *string
-	JiraAccountID  *string
-	LinearUserID   *string
-	Role           string
+	UserID            string
+	DisplayName       string
+	GitHubUsername    *string
+	GitHubUserID      *string
+	JiraAccountID     *string
+	LinearUserID      *string
+	LinearDisplayName *string
+	Role              string
 }

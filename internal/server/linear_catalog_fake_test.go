@@ -61,8 +61,9 @@ var linearFixtureStates = []linear.WorkflowState{
 
 // linearCatalogFake stands in for Linear's GraphQL endpoint, answering the
 // documents the catalog routes and the write gate send — Teams (filtered and
-// cursor-paged), Team, TeamStates (cursor-paged), WorkflowState and Labels
-// (cursor-paged) — from one in-memory workspace, so a paging, filtering or
+// cursor-paged), Team, TeamStates (cursor-paged), WorkflowState, Labels
+// (cursor-paged), Users (filtered and cursor-paged, active users only) and
+// User — from one in-memory workspace, so a paging, filtering or
 // resolution bug shows up as wrong rows rather than as a stub running out of
 // scripted replies. A team with no states of its own set has
 // linearFixtureStates, and one with no labels of its own set has
@@ -74,6 +75,7 @@ type linearCatalogFake struct {
 	teams   []linear.Team
 	states  map[string][]linear.WorkflowState
 	labels  map[string][]linear.Label
+	users   []linear.User
 	failing bool
 	// teamFailing fails the Team read of these ids only, so one request can
 	// carry a field fault and an upstream failure together.
@@ -103,6 +105,7 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 	f.calls++
 	failing := f.failing || (op == "Team" && f.teamFailing[stringVar(body.Variables, "id")])
 	teams := append([]linear.Team(nil), f.teams...)
+	users := append([]linear.User(nil), f.users...)
 	statesOf := func(teamID string) []linear.WorkflowState {
 		if st, custom := f.states[teamID]; custom {
 			return st
@@ -184,6 +187,29 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 			nodes = append(nodes, node)
 		}
 		writeGraphQLData(w, map[string]any{"issueLabels": fakeConnection(nodes, body.Variables)})
+	case "Users":
+		q := usersFilterQuery(body.Variables)
+		matched := []linear.User{}
+		for _, u := range users {
+			if !u.Active {
+				continue
+			}
+			if q == "" || strings.Contains(strings.ToLower(u.Name), q) ||
+				strings.Contains(strings.ToLower(u.DisplayName), q) || strings.Contains(strings.ToLower(u.Email), q) {
+				matched = append(matched, u)
+			}
+		}
+		writeGraphQLData(w, map[string]any{"users": fakeConnection(matched, body.Variables)})
+	case "User":
+		id := stringVar(body.Variables, "id")
+		for _, u := range users {
+			if u.ID == id {
+				writeGraphQLData(w, map[string]any{"user": u})
+				return
+			}
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"errors":[{"message":"Entity not found: User","extensions":{"code":"INVALID_INPUT"}}]}`)
 	default:
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"errors":[{"message":"unexpected document `+op+`"}]}`)
@@ -236,6 +262,19 @@ func teamsFilterQuery(vars map[string]any) string {
 	return strings.ToLower(q)
 }
 
+// usersFilterQuery recovers the search text from the UserFilter the client
+// builds: an or of containsIgnoreCase on name, display name and email.
+func usersFilterQuery(vars map[string]any) string {
+	filter, _ := vars["filter"].(map[string]any)
+	or, _ := filter["or"].([]any)
+	if len(or) == 0 {
+		return ""
+	}
+	name, _ := or[0].(map[string]any)["name"].(map[string]any)
+	q, _ := name["containsIgnoreCase"].(string)
+	return strings.ToLower(q)
+}
+
 func writeGraphQLData(w http.ResponseWriter, data any) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
 }
@@ -268,6 +307,13 @@ func (f *linearCatalogFake) SetLabels(teamID string, labels ...linear.Label) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.labels[teamID] = labels
+}
+
+// SetUsers replaces the workspace's users.
+func (f *linearCatalogFake) SetUsers(users ...linear.User) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.users = users
 }
 
 // SetTeamFailing makes the Team read of one id fail while everything else

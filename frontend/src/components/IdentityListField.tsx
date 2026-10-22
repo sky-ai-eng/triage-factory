@@ -3,6 +3,7 @@ import { X } from 'lucide-react'
 import { useMe, useTeamMembers } from '../hooks/useDeploymentConfig'
 import { useApiOrgId } from '../hooks/useApiOrgId'
 import { findGitHubAccountByLogin, getGitHubAccount } from '../lib/githubAccounts'
+import { findLinearUser, isLinearID, linearUserHandle, searchLinearUsers } from '../lib/linearUsers'
 import type { MeResponse, TeamMember } from '../types'
 
 /** IdentityListField is the editor for `author_id_in` / `reviewer_id_in` /
@@ -34,6 +35,14 @@ import type { MeResponse, TeamMember } from '../types'
  *  {login}), refused beside the field when no account holds it. A stored id
  *  no member holds is named by the login GitHub gives it now.
  *
+ *  A Linear field stores Linear's user id. A typed name or email is searched
+ *  for in the org's Linear workspace when it is added (POST /api/orgs/{org_id}/
+ *  linear/users/list) and the people it matches are offered to pick from, an
+ *  integration's app user marked as one and left out of an assignee filter; a
+ *  typed id is read directly. A member is offered by the display name their
+ *  binding recorded, and a stored id no member holds by the display name
+ *  Linear gives it now.
+ *
  *  Both variants serialize to the same wire shape: `string[] | undefined`. */
 export type IdentityKind = 'github' | 'jira' | 'linear'
 
@@ -51,7 +60,13 @@ export default function IdentityListField({
   const { me, loading: meLoading, error: meError } = useMe()
   const { members, loading: membersLoading, error: membersError } = useTeamMembers()
   const labels = labelsForField(fieldName, identityKind)
-  const resolver = useIdentityResolver(identityKind, !meLoading && !membersLoading, value, members)
+  const resolver = useIdentityResolver(
+    identityKind,
+    fieldName,
+    !meLoading && !membersLoading,
+    value,
+    members,
+  )
 
   if (meLoading || membersLoading) {
     return <div className="h-10 rounded-lg bg-tint-2 animate-pulse" />
@@ -140,22 +155,36 @@ const SOURCES: Record<IdentityKind, SourceIdentity> = {
   },
   linear: {
     label: 'Linear',
-    idNoun: 'user ID',
+    idNoun: 'name',
     fromMe: (me) => me.linear_user_id,
     displayFromMe: (me) => me.linear_display_name,
     fromMember: (m) => m.linear_user_id,
-    handleFromMember: (m) => m.linear_user_id,
+    handleFromMember: (m) => m.linear_display_name || m.linear_user_id,
   },
 }
 
 // --- Resolving what a person types into what the field stores ---------------
 
-type Resolution = { ok: true; value: string } | { ok: false; error: string }
+/** A person a typed name could mean, offered to pick from: the value the
+ *  field would store, and the name and handle they are shown by. */
+interface Choice {
+  value: string
+  label: string
+  detail: string
+}
+
+/** What a typed name resolves to: the value to store, the people to pick from
+ *  when it could mean several, or why there is nothing to store. */
+type Resolution =
+  | { kind: 'value'; value: string }
+  | { kind: 'choices'; choices: Choice[] }
+  | { kind: 'error'; error: string }
 
 /** IdentityResolver turns what a person names an identity by into the value
- *  the field stores, and names a stored value back. Jira and Linear store what
- *  was typed; GitHub stores the account id of the login typed, and names a
- *  stored id by the login GitHub gives it now. */
+ *  the field stores, and names a stored value back. Jira stores what was
+ *  typed. GitHub stores the account id of the login typed. Linear offers the
+ *  users a typed name matches, or reads a typed id. Both name a stored id by
+ *  what the provider calls it now. */
 interface IdentityResolver {
   resolve: (text: string) => Promise<Resolution>
   /** The handle a stored value is shown by when no roster row holds it. */
@@ -164,51 +193,92 @@ interface IdentityResolver {
 
 function useIdentityResolver(
   kind: IdentityKind,
+  fieldName: string,
   ready: boolean,
   value: string[] | undefined,
   members: TeamMember[],
 ): IdentityResolver {
   const orgId = useApiOrgId()
-  // GitHub logins by account id: the ones added in this session, and the
-  // ones read for stored ids no member holds. null marks an id GitHub did not
-  // name, so it is not asked for again.
-  const [logins, setLogins] = useState<Record<string, string | null>>({})
+  // An integration's app user creates issues and comments but is not who an
+  // issue is assigned to, so an assignee filter is offered people only.
+  const offersApps = fieldName !== 'assignee_in'
+  // Names by stored id, the GitHub login or the Linear display name: the ones
+  // learned in this session, and the ones read for stored ids no member holds.
+  // null marks an id the provider did not name, so it is not asked for again.
+  const [names, setNames] = useState<Record<string, string | null>>({})
 
   const resolve = useCallback(
     async (text: string): Promise<Resolution> => {
       const typed = text.trim()
-      if (kind !== 'github') return { ok: true, value: typed }
-      if (!orgId) return { ok: false, error: 'The workspace is still loading; try again.' }
-      const found = await findGitHubAccountByLogin(orgId, typed)
-      if (!found.ok) return found
-      const { github_user_id: id, login } = found.account
-      setLogins((prev) => ({ ...prev, [id]: login }))
-      return { ok: true, value: id }
+      if (kind === 'jira') return { kind: 'value', value: typed }
+      if (!orgId) return { kind: 'error', error: 'The workspace is still loading; try again.' }
+      if (kind === 'github') {
+        const found = await findGitHubAccountByLogin(orgId, typed)
+        if (!found.ok) return { kind: 'error', error: found.error }
+        const { github_user_id: id, login } = found.account
+        setNames((prev) => ({ ...prev, [id]: login }))
+        return { kind: 'value', value: id }
+      }
+      if (isLinearID(typed)) {
+        const found = await findLinearUser(orgId, typed)
+        if (!found.ok) return { kind: 'error', error: found.error }
+        setNames((prev) => ({ ...prev, [found.user.id]: linearUserHandle(found.user) }))
+        return { kind: 'value', value: found.user.id }
+      }
+      const found = await searchLinearUsers(orgId, typed)
+      if (!found.ok) return { kind: 'error', error: found.error }
+      const users = offersApps ? found.users : found.users.filter((u) => !u.app)
+      if (users.length === 0) {
+        return {
+          kind: 'error',
+          error:
+            found.users.length > 0
+              ? `Only Linear apps match “${typed}”, and this filter takes people.`
+              : `No Linear user matches “${typed}”.`,
+        }
+      }
+      setNames((prev) => ({
+        ...prev,
+        ...Object.fromEntries(users.map((u) => [u.id, linearUserHandle(u)])),
+      }))
+      return {
+        kind: 'choices',
+        choices: users.map((u) => ({
+          value: u.id,
+          label: u.name || u.display_name,
+          detail: u.app ? `${u.display_name} · app` : u.display_name,
+        })),
+      }
     },
-    [kind, orgId],
+    [kind, orgId, offersApps],
   )
 
   const memberIDs = new Set(members.map((m) => SOURCES[kind].fromMember(m)).filter(Boolean))
   const unnamed =
-    kind === 'github' && ready
-      ? (value ?? []).filter((id) => !memberIDs.has(id) && !(id in logins)).join(',')
+    kind !== 'jira' && ready
+      ? (value ?? []).filter((id) => !memberIDs.has(id) && !(id in names)).join(',')
       : ''
 
   useEffect(() => {
     if (!unnamed || !orgId) return
     let cancelled = false
-    const ids = unnamed.split(',')
-    Promise.all(
-      ids.map((id) => getGitHubAccount(orgId, id).then((a) => [id, a?.login ?? null] as const)),
-    ).then((pairs) => {
-      if (!cancelled) setLogins((prev) => ({ ...prev, ...Object.fromEntries(pairs) }))
-    })
+    const nameOf = async (id: string): Promise<string | null> => {
+      if (kind === 'github') return (await getGitHubAccount(orgId, id))?.login ?? null
+      if (!isLinearID(id)) return null
+      const found = await findLinearUser(orgId, id)
+      return found.ok ? linearUserHandle(found.user) : null
+    }
+    Promise.all(unnamed.split(',').map(async (id) => [id, await nameOf(id)] as const)).then(
+      (pairs) => {
+        if (!cancelled) setNames((prev) => ({ ...prev, ...Object.fromEntries(pairs) }))
+      },
+    )
     return () => {
       cancelled = true
     }
-  }, [unnamed, orgId])
+  }, [unnamed, orgId, kind])
 
-  return { resolve, handleOf: (v) => logins[v] ?? v }
+  return { resolve, handleOf: (v) => names[v] ?? v }
 }
 
 // --- Actor-specific copy ----------------------------------------------------
@@ -245,13 +315,13 @@ function labelsForField(fieldName: string, kind: IdentityKind): ActorLabels {
   const teamOrManualHint = {
     github: `Empty = match any ${actor}. A login is looked up on GitHub and kept by account, so a rename doesn’t break the filter.`,
     jira: `Empty = match any ${actor}. Atlassian account IDs are opaque — paste from Jira's user profile URL.`,
-    linear: `Empty = match any ${actor}. Linear user IDs are opaque UUIDs, not names.`,
+    linear: `Empty = match any ${actor}. Type a name or email and press Enter to find the person in Linear.`,
   }[kind]
   // The account and ID wording for assignee_in, which both Jira and
   // Linear offer.
   const account = kind === 'linear' ? 'Linear account' : 'Atlassian account'
-  const pastePlaceholder =
-    kind === 'linear' ? 'search team or paste a Linear user ID…' : 'paste an Atlassian account ID…'
+  const typedPlaceholder =
+    kind === 'linear' ? 'search team or type a Linear name…' : 'paste an Atlassian account ID…'
 
   switch (actor) {
     case 'author':
@@ -301,7 +371,7 @@ function labelsForField(fieldName: string, kind: IdentityKind): ActorLabels {
         toggleOffLabel: 'Match any assignee',
         scopedHint: (id) => `Scoped to issues assigned to your ${account} (${id}).`,
         unscopedHint: 'Fires on every assignee.',
-        searchPlaceholder: pastePlaceholder,
+        searchPlaceholder: typedPlaceholder,
         emptyHint: teamOrManualHint,
       }
     case 'reporter':
@@ -321,7 +391,7 @@ function labelsForField(fieldName: string, kind: IdentityKind): ActorLabels {
         toggleOffLabel: 'Match any creator',
         scopedHint: (id) => `Scoped to issues created by ${id}.`,
         unscopedHint: 'Fires on every creator.',
-        searchPlaceholder: pastePlaceholder,
+        searchPlaceholder: typedPlaceholder,
         emptyHint: teamOrManualHint,
       }
     default:
@@ -372,7 +442,7 @@ function VariantA({
     }
   }, [lookupLogin, resolve])
   const lookup = looked?.login === lookupLogin ? looked.result : null
-  const myID = storedID ?? (lookup?.ok ? lookup.value : null)
+  const myID = storedID ?? (lookup?.kind === 'value' ? lookup.value : null)
   const lookingUp = !!lookupLogin && lookup === null
   const hasIdentity = !!myID
   // The toggle is ON whenever the allowlist contains the current user's
@@ -417,7 +487,7 @@ function VariantA({
         </p>
       ) : lookingUp ? (
         <p className="mt-1.5 text-reported text-ink-3">Looking {lookupLogin} up on GitHub…</p>
-      ) : lookup && !lookup.ok ? (
+      ) : lookup?.kind === 'error' ? (
         <p role="alert" className="mt-1.5 text-reported text-alarm">
           {lookup.error}
         </p>
@@ -454,7 +524,10 @@ function VariantA({
 /** A flat "interactive item" projected from the dropdown's contents.
  *  Combines team suggestions with the "add an external identity" affordance
  *  so the active-descendant index can address them with one shape. */
-type DropdownItem = { kind: 'team'; member: TeamMember } | { kind: 'external'; handle: string }
+type DropdownItem =
+  | { kind: 'team'; member: TeamMember }
+  | { kind: 'external'; handle: string }
+  | { kind: 'choice'; choice: Choice }
 
 function VariantB({
   value,
@@ -475,6 +548,9 @@ function VariantB({
   const [open, setOpen] = useState(false)
   const [activeIndex, setActiveIndex] = useState(0)
   const [pending, setPending] = useState(false)
+  // The people a typed name matched, offered in place of the team while the
+  // field still holds that name.
+  const [choices, setChoices] = useState<{ query: string; items: Choice[] } | null>(null)
   const [lookupError, setLookupError] = useState('')
   const containerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -527,6 +603,11 @@ function VariantB({
   // affordance combine into one indexable sequence so keyboard nav has
   // a single source of truth.
   const dropdownItems = useMemo<DropdownItem[]>(() => {
+    if (choices && choices.query === search.trim()) {
+      return choices.items
+        .filter((c) => !selected.some((h) => h.toLowerCase() === c.value.toLowerCase()))
+        .map((choice) => ({ kind: 'choice', choice }))
+    }
     const q = search.trim().toLowerCase()
     const teamMatches = members.filter((m) => {
       const handle = memberHandle(m)
@@ -548,10 +629,11 @@ function VariantB({
       items.push({ kind: 'external', handle: search.trim() })
     }
     return items
-    // identityKind and the resolver's names are the only mutable inputs
-    // besides search/selected. members is identity-stable per fetch.
+    // identityKind, the resolver's names and the choices a lookup offered are
+    // the only mutable inputs besides search/selected. members is
+    // identity-stable per fetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [members, search, selected, identityKind, resolver])
+  }, [members, search, selected, identityKind, resolver, choices])
 
   // Clamp the active-index during render rather than via an effect:
   // storing the raw setState value and reading a clamped derivation
@@ -566,6 +648,7 @@ function VariantB({
     setLookupError('')
     setSearch('')
     setActiveIndex(0)
+    setChoices(null)
     if (isSelected(v)) return
     onChange([...latest.current, v])
   }
@@ -578,8 +661,12 @@ function VariantB({
     setPending(true)
     const result = await resolver.resolve(trimmed)
     setPending(false)
-    if (result.ok) {
+    if (result.kind === 'value') {
       addValue(result.value)
+    } else if (result.kind === 'choices') {
+      setChoices({ query: trimmed, items: result.choices })
+      setActiveIndex(0)
+      setOpen(true)
     } else {
       setLookupError(result.error)
     }
@@ -611,6 +698,8 @@ function VariantB({
     if (!item) return
     if (item.kind === 'team') {
       addMember(item.member)
+    } else if (item.kind === 'choice') {
+      addValue(item.choice.value)
     } else if (item.kind === 'external') {
       void addTyped(item.handle)
     }
@@ -652,7 +741,12 @@ function VariantB({
   // we never render with a loading/error roster — drop those branches.
   const showDropdown = open && dropdownItems.length > 0
   const ariaExpanded = showDropdown
-  const externalNoun = identityKind === 'github' ? 'GitHub account' : `external ${source.idNoun}`
+  const externalNoun =
+    identityKind === 'github'
+      ? 'GitHub account'
+      : identityKind === 'linear'
+        ? 'Linear user'
+        : `external ${source.idNoun}`
 
   return (
     <div className="relative" ref={containerRef}>
@@ -751,6 +845,26 @@ function VariantB({
                 </li>
               )
             }
+            if (item.kind === 'choice') {
+              const c = item.choice
+              return (
+                <li
+                  id={optionIdFor(i)}
+                  key={`choice-${c.value}`}
+                  role="option"
+                  aria-selected={isActive}
+                  onMouseDown={(e) => {
+                    e.preventDefault()
+                    addValue(c.value)
+                  }}
+                  onMouseEnter={() => setActiveIndex(i)}
+                  className={baseCls}
+                >
+                  <span className="text-body text-ink-1">{c.label}</span>
+                  <span className="text-reported font-mono text-ink-3">{c.detail}</span>
+                </li>
+              )
+            }
             return (
               <li
                 id={optionIdFor(i)}
@@ -765,7 +879,13 @@ function VariantB({
                 className={`${baseCls} text-ink-3 border-t border-line-1`}
               >
                 <span className="text-ui">
-                  + Add &ldquo;{item.handle}&rdquo; as {externalNoun}
+                  {identityKind === 'linear' ? (
+                    <>+ Find &ldquo;{item.handle}&rdquo; in Linear</>
+                  ) : (
+                    <>
+                      + Add &ldquo;{item.handle}&rdquo; as {externalNoun}
+                    </>
+                  )}
                 </span>
               </li>
             )
@@ -792,6 +912,9 @@ function VariantB({
 
       {pending && identityKind === 'github' && (
         <p className="mt-1.5 text-reported text-ink-3">Looking the login up on GitHub…</p>
+      )}
+      {pending && identityKind === 'linear' && (
+        <p className="mt-1.5 text-reported text-ink-3">Looking the name up in Linear…</p>
       )}
       {lookupError && (
         <p role="alert" className="mt-1.5 text-reported text-alarm">
