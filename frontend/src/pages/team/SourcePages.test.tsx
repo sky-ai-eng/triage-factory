@@ -127,6 +127,29 @@ function row(label: string): HTMLElement {
   return found as HTMLElement
 }
 
+/** commitVerb selects the table row reading `rowText`, presses `verb` for
+ *  `holdMs` until it fires, and runs out the window that holds its save back. */
+function commitVerb(rowText: string, verb: string | RegExp, holdMs: number) {
+  vi.useFakeTimers()
+  try {
+    const target = screen.getByText(rowText).closest<HTMLElement>('[role="row"]')!
+    fireEvent.click(within(target).getByRole('checkbox'))
+    fireEvent.pointerDown(screen.getByRole('button', { name: verb }), {
+      button: 0,
+      clientX: 0,
+      clientY: 0,
+    })
+    act(() => {
+      vi.advanceTimersByTime(holdMs)
+    })
+    act(() => {
+      vi.advanceTimersByTime(10_000)
+    })
+  } finally {
+    vi.useRealTimers()
+  }
+}
+
 beforeEach(() => {
   sources.state = {}
   vi.stubGlobal(
@@ -238,42 +261,23 @@ describe('GitHub source page', () => {
     expect(screen.getAllByText('no longer on GitHub')).toHaveLength(1)
   })
 
-  it('keeps a retired row TF never learned an id for apart from its namesake', async () => {
-    // The retired row carries no GitHub id, so only a name links it to the
-    // repository now listed under that name, and the server's answer — no
-    // registry row for the option — says they are two repositories.
+  // A tracked row with no GitHub id pairs with an option only through the
+  // registry id the server resolved for it, never through the shared name.
+  it.each([
+    ['keeps a retired row apart from its namesake', '2026-10-20T12:00:00Z', '', 2],
+    ['pairs a row with the option that carries its registry id', null, 'r9', 1],
+  ])('%s', async (_, retiredAt, repositoryId, rows) => {
     stub({
       '/api/teams/t1/github-repos': {
-        repos: [
-          {
-            id: 'r9',
-            github_id: '',
-            owner: 'sky',
-            repo: 'planner',
-            retired_at: '2026-10-20T12:00:00Z',
-          },
-        ],
+        repos: [{ id: 'r9', github_id: '', owner: 'sky', repo: 'planner', retired_at: retiredAt }],
       },
-      '/api/github/repos/list': [{ repository_id: '', github_id: '2', full_name: 'sky/planner' }],
+      '/api/github/repos/list': [
+        { repository_id: repositoryId, github_id: '2', full_name: 'sky/planner' },
+      ],
     })
     render(<GitHubSource {...BODY} />)
 
-    await waitFor(() => expect(screen.getAllByText(/sky\/planner/)).toHaveLength(2))
-    expect(screen.getAllByText('no longer on GitHub')).toHaveLength(1)
-  })
-
-  it('pairs a tracked row and an option through the registry id the server resolved', async () => {
-    // The tracked row has no GitHub id; the option carries its registry row,
-    // so they are one repository and one row.
-    stub({
-      '/api/teams/t1/github-repos': {
-        repos: [{ id: 'r5', github_id: '', owner: 'sky', repo: 'legacy' }],
-      },
-      '/api/github/repos/list': [{ repository_id: 'r5', github_id: '5', full_name: 'sky/legacy' }],
-    })
-    render(<GitHubSource {...BODY} />)
-
-    await waitFor(() => expect(screen.getAllByText('sky/legacy')).toHaveLength(1))
+    await waitFor(() => expect(screen.getAllByText(/sky\/planner/)).toHaveLength(rows))
   })
 
   it('stops watching a retired repository and nothing else', async () => {
@@ -302,25 +306,8 @@ describe('GitHub source page', () => {
     render(<GitHubSource {...BODY} />)
     await waitFor(() => expect(screen.getByText('no longer on GitHub')).toBeInTheDocument())
 
-    vi.useFakeTimers()
-    try {
-      const row = screen.getByText('no longer on GitHub').closest('[role="row"]')!
-      fireEvent.click(within(row as HTMLElement).getByRole('checkbox'))
-      // A destructive verb is held, not pressed.
-      fireEvent.pointerDown(screen.getByRole('button', { name: /^Stop watching/ }), {
-        button: 0,
-        clientX: 0,
-        clientY: 0,
-      })
-      act(() => {
-        vi.advanceTimersByTime(1_200)
-      })
-      act(() => {
-        vi.advanceTimersByTime(10_000)
-      })
-    } finally {
-      vi.useRealTimers()
-    }
+    // A destructive verb is held, not pressed.
+    commitVerb('no longer on GitHub', /^Stop watching/, 1_200)
     await waitFor(() => expect(puts()).toEqual([['r1']]))
   })
 
@@ -654,7 +641,6 @@ describe('Jira source page', () => {
       expect(put).toBeTruthy()
       const body = JSON.parse(String((put![1] as RequestInit).body))
       const plat = body.jira_projects[0]
-      // A tracked project goes on the wire by its registry id, never its key.
       expect(plat.id).toBe('reg-PLAT')
       expect(plat).not.toHaveProperty('key')
       expect(plat.in_review).toEqual({ member_ids: ['4', '5'], canonical_id: '4' })
@@ -670,39 +656,17 @@ describe('Jira source page', () => {
   })
 
   it('watches a catalog project by its Jira id, and keeps the tracked ones by registry id', async () => {
-    const fetchMock = stub({
-      ...SETTINGS,
-      '/api/teams/t1/jira-projects': {
-        jira_projects: SETTINGS['/api/teams/t1/settings'].jira_projects,
-      },
-    })
-    const puts = () =>
+    const fetchMock = stub(SETTINGS)
+    const puts = (): Record<string, unknown>[][] =>
       fetchMock.mock.calls
         .filter(([path, init]) => path === '/api/teams/t1/jira-projects' && init?.method === 'PUT')
         .map(([, init]) => JSON.parse(String(init!.body)).jira_projects)
     render(<JiraSource {...BODY} />)
     await waitFor(() => expect(screen.getByText('Operations')).toBeInTheDocument())
 
-    vi.useFakeTimers()
-    try {
-      const row = screen.getByText('Operations').closest('[role="row"]')!
-      fireEvent.click(within(row as HTMLElement).getByRole('checkbox'))
-      fireEvent.pointerDown(screen.getByRole('button', { name: 'Watch' }), {
-        button: 0,
-        clientX: 0,
-        clientY: 0,
-      })
-      act(() => {
-        vi.advanceTimersByTime(300)
-      })
-      act(() => {
-        vi.advanceTimersByTime(10_000)
-      })
-    } finally {
-      vi.useRealTimers()
-    }
+    commitVerb('Operations', 'Watch', 300)
     await waitFor(() => expect(puts()).toHaveLength(1))
-    const sent = puts()[0] as Array<Record<string, unknown>>
+    const [sent] = puts()
     expect(sent.map((p) => p.id ?? `jira:${p.jira_id}`)).toEqual([
       'reg-PLAT',
       'reg-SKY',
@@ -807,30 +771,22 @@ describe('Slack source page', () => {
   })
 
   it('reads another team as theirs whatever that team is called', async () => {
-    const watchedOwnedBy = (channelId: string, name: string, teamName: string) => ({
-      channel_id: channelId,
+    const read = CHANNELS['/api/slack/teams/t1/channels']
+    // Watched here, primary on a team whose name spells what the table prints
+    // for this team or for nobody.
+    const ownedBy = (name: string, teamName: string) => ({
+      ...read.channels[1],
+      channel_id: name,
       name,
-      workspace_id: 'W',
-      is_private: false,
-      bot_is_member: true,
-      tracked: true,
-      is_primary: false,
       tracked_by: [
-        { team_id: 't1', team_name: 'platform', is_primary: false },
+        ...read.channels[1].tracked_by,
         { team_id: 't2', team_name: teamName, is_primary: true },
       ],
-      source: 'tracked',
     })
     stub({
       '/api/slack/teams/t1/channels': {
-        role: 'admin',
-        warnings: [],
-        // Team names that spell the words the table prints for this team and
-        // for nobody: each channel is still another team's.
-        channels: [
-          watchedOwnedBy('C4', 'named-no-one', 'no one'),
-          watchedOwnedBy('C5', 'named-this-team', 'this team'),
-        ],
+        ...read,
+        channels: [ownedBy('named-no-one', 'no one'), ownedBy('named-this-team', 'this team')],
       },
     })
     render(<SlackSource {...BODY} />)

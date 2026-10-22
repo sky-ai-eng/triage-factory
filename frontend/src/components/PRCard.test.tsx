@@ -19,28 +19,14 @@ const PR: PRSummary = {
 }
 
 describe('PRCard', () => {
-  // The status route takes the entity id the list row served; the repo and
-  // number on the row are display values, and the repository may have been
-  // renamed since its key was written.
+  // The repo and number on the row are display values, and the repository may
+  // have been renamed since its key was written.
   it('asks for live status by the pull request entity id', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      ...jsonBody({
-        mergeable: true,
-        auto_merge: false,
-        mergeable_state: 'clean',
-        reviews: [],
-        checks_status: { total: 0, passing: 0, failing: 0, pending: 0, skipped: 0 },
-        conflicts: false,
-        review_decision: '',
-      }),
-    })
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, ...jsonBody({}) })
     vi.stubGlobal('fetch', fetchMock)
     render(<PRCard pr={PR} />)
 
     fireEvent.click(screen.getByRole('button', { name: /Mine/ }))
-
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         `/api/dashboard/prs/${PR.entity_id}/status`,

@@ -361,11 +361,8 @@ describe('RepoPickerModal', () => {
   })
 
   it('pairs an option with a tracked entry by id, never by a shared name alone', async () => {
-    // The team tracks acme/api (registry row r-api, GitHub id 11) and still
-    // tracks a retired row once called acme/api that TF never learned a GitHub
-    // id for. The option acme/api carries r-api: it is checked, and unchecking
-    // it drops r-api alone. acme/web shares no id with anything tracked, so it
-    // starts unchecked whatever the names say.
+    // The retired row once called acme/api has no GitHub id, and the option
+    // under that name carries r-api, so the shared name pairs nothing.
     listRepos.mockResolvedValue(
       page([repo('acme/api', '11', 'r-api'), repo('acme/web', '13', 'r-web')]),
     )
@@ -388,19 +385,16 @@ describe('RepoPickerModal', () => {
     await act(async () => {
       vi.advanceTimersByTime(300)
     })
-    const rows = (await screen.findAllByText('acme/api')).map(
-      (el) => el.closest('button') as HTMLButtonElement,
-    )
-    expect(rows).toHaveLength(2)
-    const [old, current] = rows
-    expect(old.getAttribute('aria-checked')).toBe('true')
-    expect(current.getAttribute('aria-checked')).toBe('true')
-    const web = (await screen.findByText('acme/web')).closest('button') as HTMLButtonElement
-    expect(web.getAttribute('aria-checked')).toBe('false')
+    const row = (el: HTMLElement) => el.closest('button')!
+    const apis = (await screen.findAllByText('acme/api')).map(row)
+    expect(apis).toHaveLength(2)
+    const [old, current] = apis
+    const web = row(await screen.findByText('acme/web'))
+    const checked = () => [old, current, web].map((b) => b.getAttribute('aria-checked'))
+    expect(checked()).toEqual(['true', 'true', 'false'])
 
     fireEvent.click(current)
-    expect(current.getAttribute('aria-checked')).toBe('false')
-    expect(old.getAttribute('aria-checked')).toBe('true')
+    expect(checked()).toEqual(['true', 'false', 'false'])
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
     expect(onSave).toHaveBeenCalledWith([retired])
   })

@@ -43,11 +43,11 @@ const STATUSES = [
 
 // stubFetch answers the two reads this surface makes, both proxy lists (so no
 // total_count): the org's project catalog and one project's statuses.
-function stubFetch() {
+function stubFetch(catalog = CATALOG) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)
     if (url === PROJECTS_LIST) {
-      return { ok: true, status: 200, ...jsonBody({ items: CATALOG, next_page_token: '' }) }
+      return { ok: true, status: 200, ...jsonBody({ items: catalog, next_page_token: '' }) }
     }
     if (url.startsWith(`/api/orgs/${ORG}/jira/projects/`) && url.endsWith('/statuses/list')) {
       return { ok: true, status: 200, ...jsonBody({ items: STATUSES, next_page_token: '' }) }
@@ -122,19 +122,8 @@ describe('JiraProjectRulesGroup · watching', () => {
   })
 
   it('matches a tracked project to the catalog by its Jira id, across a key rename', async () => {
-    // Jira renamed SKY to SKYL; the tracked row still reads SKY. It is the
-    // same project, so it is not offered again as a new one.
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => ({
-        ok: true,
-        status: 200,
-        ...jsonBody({
-          items: [{ jira_id: SKY_ID, key: 'SKYL', name: 'Sky Platform' }],
-          next_page_token: '',
-        }),
-      })),
-    )
+    // Jira renamed SKY to SKYL; the tracked row still reads SKY.
+    stubFetch([{ ...CATALOG[0], key: 'SKYL' }])
     render(<Harness seed={[tracked('SKY', SKY_ID)]} />)
 
     expect(await screen.findByText('Sky Platform')).toBeInTheDocument()
@@ -144,8 +133,7 @@ describe('JiraProjectRulesGroup · watching', () => {
 
   it('does not offer the catalog entry of a tracked project not yet confirmed with Jira', async () => {
     const user = userEvent.setup()
-    const unresolved: JiraProjectConfig = { ...tracked('SKY', ''), jira_id: '' }
-    render(<Harness seed={[unresolved]} />)
+    render(<Harness seed={[tracked('SKY', '')]} />)
 
     expect(await screen.findByText('Sky Platform')).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: 'Watch' })).toHaveLength(1)

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, within } from '@testing-library/react'
 import PredicateEditor from './PredicateEditor'
-import { jsonBody } from '../test/apiResponse'
+import { jsonBody, listBody } from '../test/apiResponse'
 import { LOCAL_DEFAULT_ORG_ID } from '../lib/githubApp'
 
 // The acting team the field falls back to when no teamId is passed.
@@ -18,7 +18,7 @@ const org = `/api/orgs/${LOCAL_DEFAULT_ORG_ID}`
 const rule = { members: [], canonical: null }
 
 // The team tracks SKY and OPS on Jira, whose workflows share To Do, and ENG on
-// Linear. OPS-old has not been resolved against Jira, so it has no Jira id.
+// Linear. OLD has not been resolved against Jira, so it has no Jira id.
 const settings = {
   jira_projects: [
     { id: 'jp-sky', jira_id: '100', key: 'SKY', name: 'Sky' },
@@ -54,175 +54,91 @@ const lists: Record<string, unknown[]> = {
   ],
 }
 
-// stubCatalog answers the schema read with one string_list field, the team
-// settings read with settings, and each catalog list with its rows; failing
-// names a list that answers 500.
-function stubCatalog(field: string, failing = '') {
+// renderField mounts the editor on one string_list field, with every catalog
+// list answering its rows except failing, which answers 500.
+function renderField(
+  field: string,
+  eventType: string,
+  opts: { teamId?: string; value?: Record<string, string[]>; failing?: string } = {},
+) {
   const fetchMock = vi.fn((url: string) => {
-    if (url.startsWith('/api/event-schemas/')) {
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        ...jsonBody({ fields: [{ name: field, type: 'string_list' }] }),
-      })
-    }
-    if (url.startsWith('/api/teams/')) {
-      return Promise.resolve({ ok: true, status: 200, ...jsonBody(settings) })
-    }
-    if (url in lists && url !== failing) {
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        ...jsonBody({ items: lists[url], next_page_token: '', total_count: null }),
-      })
-    }
+    const body = url.startsWith('/api/event-schemas/')
+      ? jsonBody({ fields: [{ name: field, type: 'string_list' }] })
+      : url.startsWith('/api/teams/')
+        ? jsonBody(settings)
+        : url in lists && url !== opts.failing
+          ? listBody(lists[url])
+          : null
+    if (body) return Promise.resolve({ ok: true, status: 200, ...body })
     return Promise.resolve({ ok: false, status: 500, ...jsonBody({ errors: [] }) })
   })
   vi.stubGlobal('fetch', fetchMock)
-  return fetchMock
+  const onChange = vi.fn()
+  render(
+    <PredicateEditor
+      eventType={eventType}
+      teamId={opts.teamId}
+      value={opts.value ?? {}}
+      onChange={onChange}
+    />,
+  )
+  return { fetchMock, onChange }
 }
 
-describe('PredicateEditor catalog fields', () => {
-  it("offers the statuses of the team's tracked Jira projects, grouped by project, and writes ids", async () => {
-    const fetchMock = stubCatalog('status_id_in')
-    const onChange = vi.fn()
-    render(
-      <PredicateEditor
-        eventType="jira:issue:assigned"
-        teamId="team-b"
-        value={{}}
-        onChange={onChange}
-      />,
-    )
+const offered = () =>
+  screen.getAllByRole('checkbox').map((box) => box.closest('label')?.textContent)
 
-    const ops = await screen.findByRole('group', { name: 'OPS · Operations' })
-    fireEvent.click(within(ops).getByRole('checkbox', { name: 'Triage' }))
-    expect(onChange).toHaveBeenCalledWith({ status_id_in: ['20000'] })
-    expect(
-      within(screen.getByRole('group', { name: 'SKY · Sky' })).getAllByRole('checkbox'),
-    ).toHaveLength(2)
-    expect(screen.queryByRole('group', { name: /OLD/ })).not.toBeInTheDocument()
+describe('PredicateEditor catalog fields', () => {
+  it.each([
+    ['status_id_in', 'jira:issue:assigned', ['To Do', 'In Review', 'To Do', 'Triage'], '20000'],
+    ['priority_id_in', 'jira:issue:available', ['Highest', 'High'], '2'],
+    ['issue_type_id_in', 'jira:issue:available', ['Bug', 'Incident'], '10100'],
+    ['status_id_in', 'linear:issue:assigned', ['Todo', 'In Review'], 'st-review'],
+    ['label_id_in', 'linear:issue:label_added', ['Bug', 'Difficulty / Hard'], 'lb-hard'],
+    ['label_group_id_in', 'linear:issue:label_added', ['Difficulty'], 'lb-diff'],
+  ])(
+    '%s on %s offers its catalog and writes the last option by id',
+    async (field, eventType, names, id) => {
+      const { onChange } = renderField(field, eventType)
+
+      fireEvent.click(await screen.findByRole('checkbox', { name: names[names.length - 1] }))
+      expect(onChange).toHaveBeenCalledWith({ [field]: [id] })
+      expect(offered()).toEqual(names)
+    },
+  )
+
+  it('groups statuses by tracked project and treats a shared one as one id', async () => {
+    const { fetchMock, onChange } = renderField('new_status_id_in', 'jira:issue:status_changed', {
+      teamId: 'team-b',
+      value: { new_status_id_in: ['10000'] },
+    })
+
+    for (const project of ['SKY · Sky', 'OPS · Operations']) {
+      const group = await screen.findByRole('group', { name: project })
+      expect(within(group).getByRole('checkbox', { name: 'To Do' })).toBeChecked()
+    }
+    fireEvent.click(screen.getAllByRole('checkbox', { name: 'To Do' })[1])
+    expect(onChange).toHaveBeenCalledWith({})
     expect(fetchMock).toHaveBeenCalledWith('/api/teams/team-b/settings', expect.anything())
   })
 
-  it('checks a status every project shares wherever it appears', async () => {
-    stubCatalog('new_status_id_in')
-    render(
-      <PredicateEditor
-        eventType="jira:issue:status_changed"
-        teamId="team-b"
-        value={{ new_status_id_in: ['10000'] }}
-        onChange={vi.fn()}
-      />,
-    )
+  it('keeps a stored id nothing offers any more, removable', async () => {
+    const { onChange } = renderField('status_id_in', 'jira:issue:assigned', {
+      value: { status_id_in: ['10003', '99999'] },
+    })
 
-    const boxes = await screen.findAllByRole('checkbox', { name: 'To Do' })
-    expect(boxes).toHaveLength(2)
-    boxes.forEach((box) => expect(box).toBeChecked())
-  })
-
-  it("offers the Jira instance's priorities and issue types of the tracked projects", async () => {
-    stubCatalog('priority_id_in')
-    const onChange = vi.fn()
-    const { unmount } = render(
-      <PredicateEditor
-        eventType="jira:issue:available"
-        teamId="team-b"
-        value={{}}
-        onChange={onChange}
-      />,
-    )
-    fireEvent.click(await screen.findByRole('checkbox', { name: 'High' }))
-    expect(onChange).toHaveBeenCalledWith({ priority_id_in: ['2'] })
-    unmount()
-
-    stubCatalog('issue_type_id_in')
-    render(
-      <PredicateEditor
-        eventType="jira:issue:available"
-        teamId="team-b"
-        value={{}}
-        onChange={onChange}
-      />,
-    )
-    fireEvent.click(await screen.findByRole('checkbox', { name: 'Incident' }))
-    expect(onChange).toHaveBeenCalledWith({ issue_type_id_in: ['10100'] })
-  })
-
-  it("offers the states of the team's tracked Linear teams on a Linear event", async () => {
-    stubCatalog('status_id_in')
-    const onChange = vi.fn()
-    render(<PredicateEditor eventType="linear:issue:assigned" value={{}} onChange={onChange} />)
-
-    const eng = await screen.findByRole('group', { name: 'ENG · Engineering' })
-    fireEvent.click(within(eng).getByRole('checkbox', { name: 'In Review' }))
-    expect(onChange).toHaveBeenCalledWith({ status_id_in: ['st-review'] })
-  })
-
-  it('offers labels and label groups apart, a grouped label under its group', async () => {
-    stubCatalog('label_id_in')
-    const onChange = vi.fn()
-    const { unmount } = render(
-      <PredicateEditor
-        eventType="linear:issue:label_added"
-        teamId="team-b"
-        value={{}}
-        onChange={onChange}
-      />,
-    )
-    fireEvent.click(await screen.findByRole('checkbox', { name: 'Difficulty / Hard' }))
-    expect(onChange).toHaveBeenCalledWith({ label_id_in: ['lb-hard'] })
-    expect(screen.queryByRole('checkbox', { name: 'Difficulty' })).not.toBeInTheDocument()
-    unmount()
-
-    stubCatalog('label_group_id_in')
-    render(
-      <PredicateEditor
-        eventType="linear:issue:label_added"
-        teamId="team-b"
-        value={{}}
-        onChange={onChange}
-      />,
-    )
-    fireEvent.click(await screen.findByRole('checkbox', { name: 'Difficulty' }))
-    expect(onChange).toHaveBeenCalledWith({ label_group_id_in: ['lb-diff'] })
-    expect(screen.queryByRole('checkbox', { name: 'Bug' })).not.toBeInTheDocument()
-  })
-
-  it('keeps a stored id nothing offers any more, removable, and clears the field when emptied', async () => {
-    stubCatalog('status_id_in')
-    const onChange = vi.fn()
-    render(
-      <PredicateEditor
-        eventType="jira:issue:assigned"
-        teamId="team-b"
-        value={{ status_id_in: ['10003', '99999'] }}
-        onChange={onChange}
-      />,
-    )
-
-    expect(await screen.findByRole('checkbox', { name: 'In Review' })).toBeChecked()
-    expect(screen.getByText('Unknown status')).toHaveAttribute(
-      'title',
-      expect.stringContaining('99999'),
-    )
-    fireEvent.click(screen.getByRole('button', { name: 'Remove unknown status' }))
-    expect(onChange).toHaveBeenCalledWith({ status_id_in: ['10003'] })
-
+    const chip = await screen.findByText('Unknown status')
+    expect(chip).toHaveAttribute('title', expect.stringContaining('99999'))
     fireEvent.click(screen.getByRole('checkbox', { name: 'In Review' }))
     expect(onChange).toHaveBeenCalledWith({ status_id_in: ['99999'] })
+    fireEvent.click(screen.getByRole('button', { name: 'Remove unknown status' }))
+    expect(onChange).toHaveBeenCalledWith({ status_id_in: ['10003'] })
   })
 
   it('says so when a catalog cannot be read', async () => {
-    stubCatalog('status_id_in', `${org}/jira/projects/200/statuses/list`)
-    render(
-      <PredicateEditor
-        eventType="jira:issue:assigned"
-        teamId="team-b"
-        value={{}}
-        onChange={vi.fn()}
-      />,
-    )
+    renderField('status_id_in', 'jira:issue:assigned', {
+      failing: `${org}/jira/projects/200/statuses/list`,
+    })
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Could not load the statuses this team can filter on.',
@@ -230,15 +146,7 @@ describe('PredicateEditor catalog fields', () => {
   })
 
   it('leaves a Jira field that names no catalog to its own editor', async () => {
-    stubCatalog('assignee_in')
-    render(
-      <PredicateEditor
-        eventType="jira:issue:assigned"
-        teamId="team-b"
-        value={{}}
-        onChange={vi.fn()}
-      />,
-    )
+    renderField('assignee_in', 'jira:issue:assigned')
 
     // The identity editor, which has no identity to offer here.
     expect(await screen.findByText(/load your identity/)).toBeInTheDocument()
