@@ -247,6 +247,12 @@ fails one does not meet the contract.
     rootfs's toolchains read names a file holding exactly the bundle the
     sidecar wrote for this engagement, egress interception CA included, so
     every registry the egress proxy admits verifies in the jail (§6.1).
+11. **A cell relaunches after its jail dies.** Once a jail is stopped and
+    closed, the same cell launches a new one from the same spec. The new jail
+    has the run tree as the old one left it and reaches the cell's sidecar.
+    No process of the old jail survives into it, and neither does anything in
+    its `/tmp`. This is how a native engagement whose jail dies goes on
+    without ending its agent loop.
 
 ## 6. Policy stays in TF on every backend
 
@@ -590,6 +596,7 @@ The cases, one per invariant except 8:
 | `FreezeHoldsTheJailStill`, `StopLeavesNothingRunning` | 7 |
 | `TeardownReleasesTheCell` | 9 — two engagements of one conversation back to back, then a reap |
 | `TrustVariablesNameTheRunsBundle` | 10 — `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` and `PIP_CERT` each name a file whose hash is that of the bundle the sidecar wrote, which carries a name-constrained CA |
+| `RelaunchAfterTheJailDies` | 11 — a file written to `/work` is there in the second jail, a file in `/tmp` and a background process are not, and the second jail reaches every sidecar endpoint |
 
 Invariant 8 stays covered by `internal/sandbox`'s own integration tests for
 now: a memory case needs a host that grants a private cgroup namespace, and

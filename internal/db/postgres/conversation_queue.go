@@ -422,6 +422,14 @@ func EpisodeUpstreamHandBacksSQL(convAlias string) string {
 	return episodeHandBacksSQL(convAlias, db.HandBackBudgetOutcomesSQL(db.BudgetUpstream))
 }
 
+// EpisodeJailLossesSQL renders the jail budget's unit: how many of the current
+// queue episode's engagements handed the conversation back because the jail
+// their tools ran in died under them (db.BudgetJail). It bounds how many new
+// jails the conversation is given before it parks for a person.
+func EpisodeJailLossesSQL(convAlias string) string {
+	return episodeHandBacksSQL(convAlias, db.HandBackBudgetOutcomesSQL(db.BudgetJail))
+}
+
 // conversationQueueClaimReturning is the outer-SELECT projection of ClaimNextConversation. The
 // claim identity (executor/claim id/claimed_at) and the episode counts ride
 // the same statement: the id + claimed_at come from the freshly inserted
@@ -443,6 +451,7 @@ var conversationQueueClaimReturning = `candidate.id::text, candidate.org_id::tex
 	` + EpisodeSetupFailuresSQL("candidate") + ` AS setup_failures,
 	` + EpisodeLostEngagementsSQL("candidate") + ` AS lost_engagements,
 	` + EpisodeUpstreamHandBacksSQL("candidate") + ` AS upstream_hand_backs,
+	` + EpisodeJailLossesSQL("candidate") + ` AS jail_losses,
 	COALESCE((SELECT prior.outcome FROM claims prior
 	          WHERE prior.conversation_id = candidate.id AND prior.released_at IS NOT NULL
 	          ORDER BY prior.released_at DESC, prior.claimed_at DESC, prior.id DESC
@@ -1990,7 +1999,7 @@ func scanPgClaimedConversation(row *sql.Row) (*domain.Conversation, error) {
 		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
 		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx,
 		&r.ClaimID, &claimedAt, &r.Attempts, &r.SetupFailures, &r.LostEngagements, &r.UpstreamHandBacks,
-		&r.LastHandBackOutcome)
+		&r.JailLosses, &r.LastHandBackOutcome)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

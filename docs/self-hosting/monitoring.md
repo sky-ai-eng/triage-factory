@@ -326,10 +326,13 @@ some wait before the next claim:
 | `requeued_credentials` | The credential bundle never arrived. | None. | At once. |
 | `requeued_shutdown` | The executor stopped or drained. | None. | At once. |
 | `requeued_upstream` | The run's model provider was unavailable (a 5xx, a rate limit, a connection that failed) through the engagement's own retries: a native engagement's 5 attempts, or the SDK's, which reports the provider's status, or names the failure when the connection was refused or reset. Also a native engagement whose provider sent nothing for 150 seconds (an SDK engagement whose provider holds a request open without answering parks `stalled` at the 10-minute idle limit instead), and an engagement that could not reach GitHub while it set up its workspace (the clone, a fetch, the pull-request read). | Upstream: 27 in a row. Setup failures of this kind do not spend the setup budget. | After 30s, 1m, 2m, 5m, then every 10m: about 4 hours of retrying in all. |
+| `requeued_jail_lost` | The sandbox a native run's tools ran in died, and the engagement could not start a new one in place. A sandbox that dies is normally restarted in the same engagement and the run goes on, with the agent told what happened to the call that was running. The engagement hands back only when that restart fails, or when the sandbox dies 3 times in a row with no tool call completing between. | Jail: 3 in a row. | At once, in a new cell. |
 
 A run that spends its upstream budget parks `open` with park reason
 `upstream_unavailable` (shown in the UI as "Paused: provider unavailable"),
-and a message resumes it. A message to a run that is waiting to retry, or one
+and a message resumes it. A run that spends its jail budget parks `open` with
+park reason `sandbox_lost`, with a note on its transcript saying what ended
+the last sandbox, and a message resumes it too. A message to a run that is waiting to retry, or one
 sent while its engagement is failing, tries it at once. A run waiting to retry displays as `queued`
 but is not counted in the queue's depth, age or positions, which measure
 waiting for capacity. The wait is measured on database time, so a machine that
@@ -356,7 +359,7 @@ executor pods:
 | `tf_engagements_stalled_total{op}` | Engagements the stall watchdog stopped. `op` is the operation in flight cut at its first colon (`provider`, `tool`, `clone`, `rehydrate`, `permission`, `sidecar_network`, `sidecar_launch`, `sidecar_bringup`, `awaiting_credentials`, `fetch_pr`, `snapshot_wait`, `checkpoint`), or `idle` when nothing was in flight. |
 | `tf_claims_suspend_recoveries_total{outcome}` | Claims an engagement tried to take back after a system suspend (laptop sleep, `systemctl suspend`, hibernate) let its lease lapse. `reacquired`: the claim was taken back and the run carried on. `taken`: the claim was released while the machine slept, so the engagement stopped and the conversation went to whoever took it over. `failed`: the re-acquire errored, or the engagement's own watchdog stopped it while the call was out; the run stopped as it would without the recovery. An engagement tries at most once per suspend. A suspend shorter than the lease's remaining time lapses nothing and is not counted. |
 | `tf_workspace_checkpoints_total{outcome}` | Workspace checkpoints that came due in a live engagement. `written`: stored. `skipped_unchanged`: the tree matched the last one stored, so nothing was uploaded. `skipped_busy`: the engagement's previous checkpoint was still uploading, or the executor already had two checkpoints capturing; the next tool-batch boundary tries again. `failed`: the capture or the upload failed, and the last checkpoint written still stands. |
-| `tf_conversations_handed_back_total{outcome, org_id}` | Claims handed back with the conversation still mid-flight, by the hand-back outcome in the table above: `requeued`, `requeued_credentials`, `requeued_shutdown`, `requeued_upstream`. A lease takeover (`reaped`) is not counted here. |
+| `tf_conversations_handed_back_total{outcome, org_id}` | Claims handed back with the conversation still mid-flight, by the hand-back outcome in the table above: `requeued`, `requeued_credentials`, `requeued_shutdown`, `requeued_upstream`, `requeued_jail_lost`. A lease takeover (`reaped`) is not counted here. |
 
 The expired-claim alert is on the age rather than the count, because the count
 is expected to flicker and the age is not. Every stall but a provider's is a

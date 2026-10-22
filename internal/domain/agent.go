@@ -572,9 +572,15 @@ type Conversation struct {
 	// unavailable through their own retries. It picks the next wait off the
 	// upstream schedule and bounds how many times the conversation is retried
 	// before it parks for a person.
+	//
+	// JailLosses counts the episode's 'requeued_jail_lost' hand-backs —
+	// engagements whose jail died under them, so the conversation went on in
+	// a new one. It bounds how many new jails the conversation is given
+	// before it parks for a person.
 	SetupFailures     int `json:"-"`
 	LostEngagements   int `json:"-"`
 	UpstreamHandBacks int `json:"-"`
+	JailLosses        int `json:"-"`
 
 	// LastHandBackOutcome is the outcome of the conversation's most recent
 	// released claim, "" when it has none. Filled only by

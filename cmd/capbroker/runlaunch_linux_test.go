@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -82,8 +83,9 @@ func withStubRuntimeActuals(t *testing.T, mkCmd func(ctx context.Context) *exec.
 }
 
 // withStubPrepareBundle replaces the broker's real spec/bundle construction
-// with a throwaway temp dir, so tests exercise the launch RPC path without a
-// baked rootfs or root.
+// with a throwaway temp dir, and its jail-network arming with a no-op, so
+// tests exercise the launch RPC path without a baked rootfs, a run network
+// or root.
 func withStubPrepareBundle(t *testing.T) {
 	t.Helper()
 	orig := prepareBundle
@@ -91,6 +93,9 @@ func withStubPrepareBundle(t *testing.T) {
 		return t.TempDir(), nil
 	}
 	t.Cleanup(func() { prepareBundle = orig })
+	origArm := armJailNetwork
+	armJailNetwork = func(context.Context, string, string) error { return nil }
+	t.Cleanup(func() { armJailNetwork = origArm })
 }
 
 // validLaunchParams returns params that pass sandbox.ValidateLaunchParams,
@@ -680,5 +685,40 @@ func TestBrokerServer_WaitLeavesSuccessorRegistered(t *testing.T) {
 	}
 	if _, ok := s.runs[id]; ok {
 		t.Error("the successor's wait left its entry registered")
+	}
+}
+
+// TestBrokerRun_ArmsTheJailNetworkBeforeTheRuntime: every launch readies the
+// run network's jail side for the launch's own conversation and namespace,
+// and one whose network cannot be readied starts no runtime, since a jail
+// launched into it would reach nothing.
+func TestBrokerRun_ArmsTheJailNetworkBeforeTheRuntime(t *testing.T) {
+	var started bool
+	withStubRuntime(t, func(ctx context.Context) *exec.Cmd {
+		started = true
+		return exec.CommandContext(ctx, "cat")
+	})
+	withTempStdioSocketDir(t)
+	client := serveTestBroker(t, &fakeOps{})
+
+	p := validLaunchParams("arm-refused")
+	var armedFor, armedNetns string
+	armJailNetwork = func(_ context.Context, conversationID, netnsPath string) error {
+		armedFor, armedNetns = conversationID, netnsPath
+		return errors.New("no live run network")
+	}
+	run, err := client.LaunchRun(context.Background(), p)
+	if err != nil {
+		t.Fatalf("LaunchRun: %v", err)
+	}
+	defer run.Close()
+	if err := run.Start(); err == nil {
+		t.Fatal("Start succeeded on a network that could not be armed")
+	}
+	if armedFor != p.ConversationID || armedNetns != p.NetnsPath {
+		t.Errorf("armed (%q, %q), want the launch's own (%q, %q)", armedFor, armedNetns, p.ConversationID, p.NetnsPath)
+	}
+	if started {
+		t.Error("the runtime started on a network that could not be armed")
 	}
 }

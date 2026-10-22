@@ -444,6 +444,41 @@ func RunHandBackConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 	})
 
+	t.Run("JailLosses_CountsTheEpisodeAndSpendsNoOtherBudget", func(t *testing.T) {
+		f := mk(t)
+		c := stageClaimed(t, f)
+		if c.JailLosses != 0 {
+			t.Fatalf("first claim JailLosses = %d, want 0", c.JailLosses)
+		}
+		for want := 1; want <= 2; want++ {
+			handBack(t, f, c, db.HandBackJailLost, 0)
+			c = mustClaim(t, f, c.ID)
+			if c.JailLosses != want || c.UpstreamHandBacks != 0 || c.SetupFailures != 0 || c.LostEngagements != 0 || c.Attempts != want+1 {
+				t.Errorf("claim after %d lost jails = (jail %d, upstream %d, setup %d, lost %d, attempts %d), want (%d, 0, 0, 0, %d)",
+					want, c.JailLosses, c.UpstreamHandBacks, c.SetupFailures, c.LostEngagements, c.Attempts, want, want+1)
+			}
+		}
+
+		// Another budget's hand-back is not a lost jail.
+		handBack(t, f, c, db.HandBackUpstream, 0)
+		c = mustClaim(t, f, c.ID)
+		if c.JailLosses != 2 || c.UpstreamHandBacks != 1 {
+			t.Errorf("claim after an upstream hand-back = (jail %d, upstream %d), want (2, 1)", c.JailLosses, c.UpstreamHandBacks)
+		}
+
+		// A park, then a resume, starts the next claim at zero.
+		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID, db.ParkIdle()); err != nil || !ok {
+			t.Fatalf("ParkOpenForClaimSystem = (%v, %v)", ok, err)
+		}
+		if ok, err := f.Stores.Conversations.MarkQueuedForResume(ctx, f.OrgID, c.ID); err != nil || !ok {
+			t.Fatalf("MarkQueuedForResume = (%v, %v)", ok, err)
+		}
+		c = mustClaim(t, f, c.ID)
+		if c.JailLosses != 0 {
+			t.Errorf("claim after a park and a resume: JailLosses = %d, want 0", c.JailLosses)
+		}
+	})
+
 	t.Run("Requeue_UpstreamSpendsTheUpstreamBudgetOnItsWait", func(t *testing.T) {
 		f := mk(t)
 		c := stageClaimed(t, f)

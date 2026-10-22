@@ -44,6 +44,10 @@ type runConfig struct {
 	// back because the model provider stayed unavailable. It picks the next
 	// wait off the upstream schedule and decides when retrying stops.
 	upstreamHandBacks int
+	// jailLosses is the claim's Conversation.JailLosses: how many
+	// engagements of this queue episode already lost the jail their tools
+	// ran in. It decides when the conversation stops going on in a new jail.
+	jailLosses int
 	// lastHandBackOutcome is the claim's Conversation.LastHandBackOutcome: how
 	// the conversation's previous engagement let go of it. A launch that
 	// resumes an SDK session picks its continuation note by it.

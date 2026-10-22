@@ -653,6 +653,7 @@ outcome spends and the wait before the next claim, and both dialects render thei
 | `reaped` | The lease lapsed: own release, takeover, or boot release | loss | `TF_MAX_CLAIM_ATTEMPTS`, default 2 | none |
 | `requeued_shutdown` | The executor shut down or drained cleanly | none | none | none |
 | `requeued_upstream` | An upstream stayed unavailable through the engagement's retries | upstream | 27 | 30s, 1m, 2m, 5m, then 10m |
+| `requeued_jail_lost` | The jail a native engagement's tools ran in died and could not be restarted in place | jail | 3 | none |
 
 The wait is `conversations.next_attempt_at`, on database time. The claim query skips the
 conversation until the wait passes, and a person's new message clears it. The upstream budget
@@ -665,6 +666,8 @@ When a budget runs out:
 - **Setup:** a first engagement fails with the setup error; a conversation with a transcript
   parks `open` with a note instead, so its work is not discarded.
 - **Upstream:** the conversation parks `upstream_unavailable` until a person writes.
+- **Jail:** the conversation parks `sandbox_lost` until a person writes, with a note naming what
+  ended the last jail.
 
 A new reason to hand a conversation back is one row in the table plus the writer that releases
 with it.

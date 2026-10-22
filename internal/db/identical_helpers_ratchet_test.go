@@ -47,13 +47,14 @@ import (
 // members of one family matching while the third cannot is the shape this rule
 // describes, not a coincidence to hoist.
 //
-// EpisodeSetupFailuresSQL, EpisodeLostEngagementsSQL and
-// EpisodeUpstreamHandBacksSQL are ratcheted on the same rule: each is a
-// one-line selection over its dialect's episodeHandBacksSQL, which already
-// differs (Postgres casts its count), so the three are identical only because
-// the outcomes each selects need no dialect spelling. Their meaning is pinned
-// by the claim-predicate and hand-back conformance suites, which read the
-// counts off a claim in both backends.
+// EpisodeSetupFailuresSQL, EpisodeLostEngagementsSQL,
+// EpisodeUpstreamHandBacksSQL and EpisodeJailLossesSQL are ratcheted on the
+// same rule: each is a one-line selection over its dialect's
+// episodeHandBacksSQL, which already differs (Postgres casts its count), so
+// the four are identical only because the outcomes each selects need no
+// dialect spelling. Their meaning is pinned by the claim-predicate and
+// hand-back conformance suites, which read the counts off a claim in both
+// backends.
 //
 // liveTopLevelConversationSQL is ratcheted for the same reason and one more of
 // its own: it is a base other fragment builders in its dialect compose over
@@ -70,6 +71,7 @@ import (
 // acquired dialect content; merely deleting the entry to make this test pass
 // defeats the ratchet.
 var identicalHelperRatchet = []string{
+	"EpisodeJailLossesSQL",
 	"EpisodeLostEngagementsSQL",
 	"EpisodeSetupFailuresSQL",
 	"EpisodeUpstreamHandBacksSQL",

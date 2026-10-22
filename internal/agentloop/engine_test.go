@@ -743,7 +743,7 @@ func TestRun_ToolDispatchIsSerialAndInCallOrder(t *testing.T) {
 	}
 }
 
-func TestRun_SurvivableProtocolErrorContinuesAndFatalOneFailsTheClaim(t *testing.T) {
+func TestRun_SurvivableProtocolErrorContinuesAndFatalOneLosesTheToolHost(t *testing.T) {
 	t.Run("survivable", func(t *testing.T) {
 		tr := newMemTranscript(pendingUser("go"))
 		host := newScriptedToolHost()
@@ -772,12 +772,12 @@ func TestRun_SurvivableProtocolErrorContinuesAndFatalOneFailsTheClaim(t *testing
 		}}
 		e := newTestEngine(tr, p, host)
 		got := e.Run(context.Background(), testParams())
-		if got.Kind != ResultFailed {
-			t.Fatalf("a fatal protocol error must fail the claim: %v", got.Kind)
+		if got.Kind != ResultToolHostLost {
+			t.Fatalf("a fatal protocol error must end the engagement with its tool host lost: %v", got.Kind)
 		}
 		results := tr.toolResults()
 		if len(results) != 2 {
-			t.Fatalf("the failed call and every remaining one need results, got %d: %+v", len(results), results)
+			t.Fatalf("the refused call and every remaining one need results, got %d: %+v", len(results), results)
 		}
 		for _, r := range results {
 			if !r.IsError {

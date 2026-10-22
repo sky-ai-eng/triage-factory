@@ -140,6 +140,10 @@ const (
 	// HandBackUpstream is a claim handed back because an upstream the
 	// engagement depends on stayed unavailable through its own retries.
 	HandBackUpstream = "requeued_upstream"
+	// HandBackJailLost is a claim handed back because the jail the
+	// engagement's tools ran in died under it and could not be restarted in
+	// place.
+	HandBackJailLost = "requeued_jail_lost"
 )
 
 // HandBackBudget names the budget a hand-back outcome spends.
@@ -150,6 +154,7 @@ const (
 	BudgetSetup    HandBackBudget = "setup"
 	BudgetLoss     HandBackBudget = "loss"
 	BudgetUpstream HandBackBudget = "upstream"
+	BudgetJail     HandBackBudget = "jail"
 )
 
 // HandBackPolicy is one hand-back outcome: a claim released with an outcome
@@ -182,6 +187,11 @@ type HandBackPolicy struct {
 //     engagement's own retries, or could not be reached while the engagement
 //     set up its workspace. The cause outlives the engagement, so the next
 //     claim waits on the schedule rather than failing the same way at once.
+//   - requeued_jail_lost: the jail the engagement's tools ran in died under
+//     it and could not be restarted in place, because the restart failed or
+//     the jail kept dying with no call completing between restarts. Every
+//     call the engagement had in flight was answered, so the next claim
+//     continues the transcript at once, in a new cell.
 //
 // The upstream budget counts attempts, not time: next_attempt_at is database
 // time, and a machine that sleeps advances it while nobody retries, so a time
@@ -193,6 +203,7 @@ var HandBackPolicies = []HandBackPolicy{
 	{Outcome: HandBackShutdown, Budget: BudgetNone},
 	{Outcome: HandBackUpstream, Budget: BudgetUpstream,
 		Schedule: []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 5 * time.Minute, 10 * time.Minute}},
+	{Outcome: HandBackJailLost, Budget: BudgetJail},
 }
 
 // HandBackPolicyFor returns outcome's policy, and false for an outcome that is
@@ -472,15 +483,15 @@ type ConversationQueueStore interface {
 	// deliberately never claimed — the sequence-level cancel is honored here
 	// (decision: a queued-not-started step cancels with zero work).
 	//
-	// The returned Attempts, SetupFailures, LostEngagements and
-	// UpstreamHandBacks are scoped to the conversation's current queue episode
+	// The returned Attempts, SetupFailures, LostEngagements, UpstreamHandBacks
+	// and JailLosses are scoped to the conversation's current queue episode
 	// rather than its lifetime — see the dialects' episodeHandBacksSQL for the
 	// model, which the SQL is the definition of. An episode ends at an
 	// engagement that recorded an outcome of its own, and also where the
 	// conversation last entered the queue: its mint, a wake, or this claim
 	// itself when it takes the conversation straight off a park. A person's
 	// message therefore starts every budget afresh, including after a stop the
-	// dispatcher settled, which writes no claim. The last three are the
+	// dispatcher settled, which writes no claim. The last four are the
 	// budgets HandBackPolicies names. LastHandBackOutcome is the outcome of
 	// the conversation's most recent released claim, read in the same claim.
 	//
