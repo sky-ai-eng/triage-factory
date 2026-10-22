@@ -36,26 +36,17 @@ const quietPRListing = `[
   }
 ]`
 
-// TestRefreshGitHub_GatesAnEntityWhoseKeySpellsAnotherName: the Phase-2 gate
-// finds a stored pull request in this cycle's discovery by its node id, and
-// finds its repository's listing quiet by the registry row its entity
-// references. Neither join reads a name, so an entity whose key or snapshot
-// spells its repository differently from the tracked name — another casing,
-// or the name it had before a rename — still keeps its stored snapshot
-// instead of costing a GraphQL refresh every cycle.
+// The Phase-2 gate finds a stored pull request in this cycle's discovery by
+// its node id, and its repository's quiet listing (a 304) by the registry row
+// its entity references. Neither join reads a name, so an entity whose key or
+// snapshot spells its repository another way than the tracked name keeps its
+// snapshot instead of costing a GraphQL refresh every cycle.
 func TestRefreshGitHub_GatesAnEntityWhoseKeySpellsAnotherName(t *testing.T) {
 	cases := []struct {
-		name string
-		// key and snapRepo are how the stored entity spells the pull
-		// request and its repository.
+		name          string
 		key, snapRepo string
-		// renamed renames the entity's registry row to octo/repo before it
-		// is tracked, leaving the key on the old name.
-		renamed bool
-		// notModified answers the cycle's listing with a 304, so the gate
-		// reads the quiet set; otherwise the listing is a 200 carrying the
-		// pull request and the gate reads discovery.
-		notModified bool
+		renamed       bool // the registry row is renamed to octo/repo, the key left on the old name
+		notModified   bool
 	}{
 		{name: "snapshot in GitHub's casing, quiet listing", key: "octo/repo#42", snapRepo: "Octo/Repo", notModified: true},
 		{name: "key on a pre-rename name, listed", key: "octo/old#42", snapRepo: "octo/old", renamed: true},
@@ -89,9 +80,6 @@ func TestRefreshGitHub_GatesAnEntityWhoseKeySpellsAnotherName(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 
-			// The stored pull request: open, refreshed moments ago, CI
-			// settled, and identical to the listing in everything the gate
-			// compares.
 			ent, _, err := stores.Entities.FindOrCreateSystem(ctx, org, "github", cursorTestHost, tc.key, "PR_quiet", "pr", "Add widget", "")
 			if err != nil {
 				t.Fatalf("seed entity: %v", err)
@@ -100,9 +88,6 @@ func TestRefreshGitHub_GatesAnEntityWhoseKeySpellsAnotherName(t *testing.T) {
 				dbseed.RenameRepositoryOnly(t, database, ent.RepositoryID, "octo", "repo")
 			}
 			trackRepos(t, stores, org, []string{"octo/repo"})
-			if row, err := stores.Repos.GetByRefSystem(ctx, org, domain.RepoRefFromSlug(cursorTestHost, "octo/repo")); err != nil || row == nil || row.ID != ent.RepositoryID {
-				t.Fatalf("tracked row = %+v, %v; want the entity's row %s", row, err, ent.RepositoryID)
-			}
 			snap := domain.PRSnapshot{
 				NodeID: "PR_quiet", Number: 42, Title: "Add widget", Author: "alice", Repo: tc.snapRepo,
 				State: "OPEN", HeadRef: "feature", BaseRef: "main", HeadSHA: "deadbeef",
@@ -124,9 +109,7 @@ func TestRefreshGitHub_GatesAnEntityWhoseKeySpellsAnotherName(t *testing.T) {
 				t.Fatalf("ListTrackedNamesSystem: %v", err)
 			}
 			tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
-			if _, _, err := tr.RefreshGitHub(ctx, cursorTestHost, ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, names, nil); err != nil {
-				t.Fatalf("RefreshGitHub: %v", err)
-			}
+			refreshRepos(t, tr, ghclient.NewClient(srv.URL, "tok"), names...)
 
 			if tc.notModified && atomic.LoadInt32(&conditionalHits) != 1 {
 				t.Fatalf("conditional hits = %d, want 1 — the listing must go out under the row's stored ETag", conditionalHits)

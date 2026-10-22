@@ -340,11 +340,18 @@ func TestGitHubScope_ReadsTheRepositoryByTheEntitysID(t *testing.T) {
 	fx := newGitHubScopeFixture(t)
 
 	// A stub retired off the old host carries its repository's new name, and
-	// that repository's listing cursor is the one dropped.
+	// that repository's listing cursor is the one dropped, not the cursor of
+	// the repository that took the old name.
 	retiredStub := fx.seedPR(t, ghOldHost, "octo/tools#7", nil)
 	dbseed.RenameRepositoryOnly(t, fx.database, retiredStub.RepositoryID, "octo", "gadgets")
-	if err := fx.stores.Repos.SetPullsPollStateSystem(ctx, org, retiredStub.RepositoryID, `"etag-before"`, time.Now()); err != nil {
-		t.Fatalf("seed pulls cursor: %v", err)
+	namesake, err := fx.stores.Repos.FindOrCreateByRefSystem(ctx, org, domain.RepoRef{Host: ghOldHost, Owner: "octo", Repo: "tools"})
+	if err != nil || namesake.ID == retiredStub.RepositoryID {
+		t.Fatalf("register the namesake: row=%+v err=%v; want a row of its own", namesake, err)
+	}
+	for id, etag := range map[string]string{retiredStub.RepositoryID: `"etag-before"`, namesake.ID: `"etag-live"`} {
+		if err := fx.stores.Repos.SetPullsPollStateSystem(ctx, org, id, etag, time.Now()); err != nil {
+			t.Fatalf("seed pulls cursor: %v", err)
+		}
 	}
 	fx.tr.RetireGitHubOutOfScope(ctx, ghNewHost)
 	m, ok := unreachableByEntity(t, fx.pub.nonSystemEvents())[retiredStub.ID]
@@ -353,6 +360,9 @@ func TestGitHubScope_ReadsTheRepositoryByTheEntitysID(t *testing.T) {
 	}
 	if etag, _, err := fx.stores.Repos.GetPullsPollStateSystem(ctx, org, retiredStub.RepositoryID); err != nil || etag != "" {
 		t.Errorf("pulls cursor after retirement = %q, %v; want it cleared", etag, err)
+	}
+	if etag, _, err := fx.stores.Repos.GetPullsPollStateSystem(ctx, org, namesake.ID); err != nil || etag != `"etag-live"` {
+		t.Errorf("namesake's cursor = %q, %v; want it untouched", etag, err)
 	}
 
 	// A stub on the current host is resolved by asking GitHub for the pull
@@ -365,42 +375,6 @@ func TestGitHubScope_ReadsTheRepositoryByTheEntitysID(t *testing.T) {
 	fx.cycle(t, ghNewHost, client, nil)
 	if paths := host.askedPaths(); !slices.Contains(paths, "/repos/octo/renamed/pulls/5") {
 		t.Errorf("requests = %v, want the stub resolved under octo/renamed", paths)
-	}
-}
-
-// TestRetireGitHubOutOfScope_ForgetsTheRetiredRowsCursorNotItsNamesakes: the
-// listing cursor dropped for a retired pull request is the one stored on the
-// registry row its entity references. When that row is itself retired and the
-// repository GitHub now serves under its name has a row of its own, the
-// namesake's cursor is another repository's and stays where it is.
-func TestRetireGitHubOutOfScope_ForgetsTheRetiredRowsCursorNotItsNamesakes(t *testing.T) {
-	ctx := context.Background()
-	org := runmode.LocalDefaultOrgID
-	fx := newGitHubScopeFixture(t)
-
-	pr := fx.seedPR(t, ghOldHost, "octo/tools#7", nil)
-	now := time.Now().UTC().Truncate(time.Second)
-	if err := fx.stores.Repos.SetPullsPollStateSystem(ctx, org, pr.RepositoryID, `"etag-dead"`, now); err != nil {
-		t.Fatalf("seed the retired row's cursor: %v", err)
-	}
-	if _, err := fx.database.Exec(`UPDATE repositories SET retired_at = CURRENT_TIMESTAMP WHERE id = ?`, pr.RepositoryID); err != nil {
-		t.Fatalf("retire the row: %v", err)
-	}
-	namesake, err := fx.stores.Repos.FindOrCreateByRefSystem(ctx, org, domain.RepoRef{Host: ghOldHost, Owner: "octo", Repo: "tools"})
-	if err != nil || namesake.ID == pr.RepositoryID {
-		t.Fatalf("register the namesake: row=%+v err=%v; want a row of its own", namesake, err)
-	}
-	if err := fx.stores.Repos.SetPullsPollStateSystem(ctx, org, namesake.ID, `"etag-live"`, now); err != nil {
-		t.Fatalf("seed the namesake's cursor: %v", err)
-	}
-
-	fx.tr.RetireGitHubOutOfScope(ctx, ghNewHost)
-
-	if etag, _, err := fx.stores.Repos.GetPullsPollStateSystem(ctx, org, pr.RepositoryID); err != nil || etag != "" {
-		t.Errorf("retired row's cursor = %q, %v; want it cleared", etag, err)
-	}
-	if etag, _, err := fx.stores.Repos.GetPullsPollStateSystem(ctx, org, namesake.ID); err != nil || etag != `"etag-live"` {
-		t.Errorf("namesake's cursor = %q, %v; want it untouched", etag, err)
 	}
 }
 

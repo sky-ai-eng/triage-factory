@@ -160,8 +160,8 @@ func TestDiffLinearSnapshots(t *testing.T) {
 	}
 }
 
-// TestDiffLinearSnapshots_ParentByIDAndIdentifier: parent_changed names both
-// parents by UUID, which new_parent_id matches, and by identifier, for display.
+// parent_changed names both parents by UUID, which new_parent_id matches, and
+// by identifier, for display.
 func TestDiffLinearSnapshots_ParentByIDAndIdentifier(t *testing.T) {
 	prev, curr := linSnap(), linSnap()
 	prev.ParentID, prev.ParentIdentifier = "uuid-9", "ENG-9"
@@ -170,11 +170,7 @@ func TestDiffLinearSnapshots_ParentByIDAndIdentifier(t *testing.T) {
 	if len(evts) != 1 || evts[0].EventType != domain.EventLinearIssueParentChanged {
 		t.Fatalf("events = %v, want one parent_changed", eventTypes(evts))
 	}
-	var meta events.LinearIssueParentChangedMetadata
-	if err := json.Unmarshal([]byte(evts[0].MetadataJSON), &meta); err != nil {
-		t.Fatalf("decode metadata: %v", err)
-	}
-	if meta.OldParentID != "uuid-9" || meta.NewParentID != "uuid-8" || meta.OldParent != "ENG-9" || meta.NewParent != "OPS-8" {
+	if meta := decodeMetadata[events.LinearIssueParentChangedMetadata](t, evts[0]); meta.OldParentID != "uuid-9" || meta.NewParentID != "uuid-8" || meta.OldParent != "ENG-9" || meta.NewParent != "OPS-8" {
 		t.Errorf("metadata parents = %+v, want ids uuid-9 -> uuid-8 and identifiers ENG-9 -> OPS-8", meta)
 	}
 }

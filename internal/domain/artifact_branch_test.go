@@ -52,39 +52,24 @@ func TestBranchDedupKey(t *testing.T) {
 	}
 }
 
+// A branch's registry row comes back out of its key exactly as BranchDedupKey
+// wrote it, since both observers of a push key its ledger row on it; nothing
+// that is not a branch keyed on a registry row names one.
 func TestBranchArtifactRepositoryID(t *testing.T) {
-	branch := func(key string) Artifact {
-		return Artifact{Provider: ArtifactProviderGit, Kind: ArtifactKindBranch, DedupKey: key}
-	}
-	if id, ok := BranchArtifactRepositoryID(branch(BranchDedupKey("repo-uuid", "refs/heads/feature/x"))); !ok || id != "repo-uuid" {
-		t.Errorf("BranchArtifactRepositoryID = (%q, %v), want (repo-uuid, true)", id, ok)
-	}
-	// A stored row keyed on owner/repo carries no registry id.
-	if id, ok := BranchArtifactRepositoryID(branch("git:branch:octo/repo:refs/heads/x")); ok {
-		t.Errorf("BranchArtifactRepositoryID(owner/repo key) = %q, want none", id)
-	}
-	pr := Artifact{Provider: ArtifactProviderGitHub, Kind: ArtifactKindPullRequest, DedupKey: "github:pull_request:PR_x"}
-	if id, ok := BranchArtifactRepositoryID(pr); ok {
-		t.Errorf("BranchArtifactRepositoryID(pull request) = %q, want none", id)
-	}
-}
-
-// TestBranchArtifactRepositoryID_ReadsBackWhatTheSinkKeyed pins the read of a
-// branch's registry row out of its key: the id is what both observers of a
-// push key the push's ledger row on, so it must come back exactly as
-// BranchDedupKey wrote it, and nothing that is not a keyed branch names one.
-func TestBranchArtifactRepositoryID_ReadsBackWhatTheSinkKeyed(t *testing.T) {
 	keyed, _ := NewBranchArtifact("octo/api", "refs/heads/feature/x", "abc", true)
 	keyed.DedupKey = BranchDedupKey("repo-uuid", keyed.ExternalID)
 	unkeyed, _ := NewBranchArtifact("octo/api", "refs/heads/feature/x", "abc", true)
+	byName := unkeyed
+	byName.DedupKey = "git:branch:octo/api:refs/heads/feature/x"
 	pr := NewPullRequestArtifact("octo/api", 3, "PR_3", "fix", "main", "", "t", "b", true)
 	for name, c := range map[string]struct {
 		a    Artifact
 		want string
 	}{
-		"keyed branch":   {keyed, "repo-uuid"},
-		"unkeyed branch": {unkeyed, ""},
-		"pull request":   {pr, ""},
+		"keyed branch":               {keyed, "repo-uuid"},
+		"unkeyed branch":             {unkeyed, ""},
+		"branch keyed on owner/repo": {byName, ""},
+		"pull request":               {pr, ""},
 	} {
 		if got, ok := BranchArtifactRepositoryID(c.a); got != c.want || ok != (c.want != "") {
 			t.Errorf("%s: BranchArtifactRepositoryID = (%q, %v), want %q", name, got, ok, c.want)

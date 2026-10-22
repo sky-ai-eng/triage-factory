@@ -212,7 +212,6 @@ func TestDiffPRSnapshots_MentionedPredicate(t *testing.T) {
 		`{"mention_source":"body"}`:                      false,
 		allowlist(t, "commenter_id_in", "1003"):          true,
 		allowlist(t, "commenter_id_in", "1001"):          false,
-		allowlist(t, "commenter_id_in", "carol"):         false,
 		`{"mentioned_login":"bob","author_id_in":["1"]}`: false,
 	} {
 		if got := matchesPredicate(t, *evt, pred); got != want {

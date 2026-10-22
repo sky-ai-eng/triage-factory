@@ -3,8 +3,6 @@ package credprovision
 import (
 	"context"
 	"database/sql"
-	"sort"
-	"strings"
 	"testing"
 	"time"
 
@@ -17,18 +15,14 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestManager_resolveGitHub_LedgerRowsAreCheckedByRegistryID: a checkout
-// authorizes the repository its ledger row's registry id names, and tracking
-// is checked on that row. Against the real store:
-//
-//   - A row renamed with nothing else moved still authorizes its checkout, and
-//     the token is minted under the name the row carries now.
-//   - A retired row authorizes nothing, even though the repository GitHub now
-//     serves under its name has a row the team tracks: that repository is
-//     not the one the conversation checked out.
+// A checkout authorizes the repository its ledger row's registry id names,
+// and tracking is checked on that row: a renamed row authorizes its checkout
+// under the name it carries now, and a retired row authorizes nothing, even
+// though the repository GitHub now serves under its name has a row the team
+// tracks.
 func TestManager_resolveGitHub_LedgerRowsAreCheckedByRegistryID(t *testing.T) {
 	ctx := context.Background()
-	org, team := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
+	org, team, host := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost
 	database, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
@@ -40,20 +34,11 @@ func TestManager_resolveGitHub_LedgerRowsAreCheckedByRegistryID(t *testing.T) {
 	}
 	stores := sqlitestore.New(database)
 
-	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, org, team, dbtest.TestGitHubHost,
-		[]domain.TeamGitHubRepo{{Owner: "acme", Repo: "widgets"}, {Owner: "acme", Repo: "gears"}}); err != nil {
+	widgets := dbseed.GitHubRepository(t, database, org, host, "acme", "widgets")
+	gears := dbseed.GitHubRepository(t, database, org, host, "acme", "gears")
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, org, team, host, []string{widgets, gears}); err != nil {
 		t.Fatalf("track repos: %v", err)
 	}
-	rowOf := func(slug string) string {
-		t.Helper()
-		row, err := stores.Repos.GetByRefSystem(ctx, org, domain.RepoRefFromSlug(dbtest.TestGitHubHost, slug))
-		if err != nil || row == nil {
-			t.Fatalf("resolve %s: got=%v err=%v", slug, row, err)
-		}
-		return row.ID
-	}
-	widgets, gears := rowOf("acme/widgets"), rowOf("acme/gears")
-
 	const conversationID = "3c9d6e0a-8f1b-4c2d-9e7f-5a6b7c8d9e0f"
 	dbtest.SeedConversation(t, database, domain.Conversation{ID: conversationID})
 	for _, id := range []string{widgets, gears} {
@@ -68,7 +53,7 @@ func TestManager_resolveGitHub_LedgerRowsAreCheckedByRegistryID(t *testing.T) {
 	if _, err := database.Exec(`UPDATE repositories SET retired_at = CURRENT_TIMESTAMP WHERE id = ?`, gears); err != nil {
 		t.Fatalf("retire acme/gears: %v", err)
 	}
-	namesake, err := stores.Repos.FindOrCreateByRefSystem(ctx, org, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "acme/gears"))
+	namesake, err := stores.Repos.FindOrCreateByRefSystem(ctx, org, domain.RepoRefFromSlug(host, "acme/gears"))
 	if err != nil || namesake.ID == gears {
 		t.Fatalf("register the namesake: row=%+v err=%v; want a row of its own", namesake, err)
 	}
@@ -84,23 +69,16 @@ func TestManager_resolveGitHub_LedgerRowsAreCheckedByRegistryID(t *testing.T) {
 			ConversationWorktrees: stores.ConversationWorktrees,
 		},
 		ghResolver: &fakeScopedResolver{
-			base:    dbtest.TestGitHubHost,
+			base:    host,
 			hasCred: true,
 			token:   githubapp.Token{Value: "ghs_scoped", ExpiresAt: time.Now().Add(time.Hour)},
 		},
 	}
 	gh, err := m.resolveGitHub(ctx, org, team, "", conversationID)
-	if err != nil {
-		t.Fatalf("resolveGitHub: %v", err)
+	if err != nil || gh == nil {
+		t.Fatalf("resolveGitHub = %v, %v", gh, err)
 	}
-	var minted []string
-	if gh != nil {
-		for repoID := range gh.RepoTokens {
-			minted = append(minted, repoID)
-		}
-	}
-	sort.Strings(minted)
-	if strings.Join(minted, ",") != "acme/renamed" {
-		t.Errorf("RepoTokens minted for %v, want [acme/renamed]", minted)
+	if _, ok := gh.RepoTokens["acme/renamed"]; !ok || len(gh.RepoTokens) != 1 {
+		t.Errorf("RepoTokens = %v, want acme/renamed alone", gh.RepoTokens)
 	}
 }

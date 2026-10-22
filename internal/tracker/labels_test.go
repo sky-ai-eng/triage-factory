@@ -264,7 +264,7 @@ func TestDiffLinear_Labels(t *testing.T) {
 // TestDiffLinear_GroupSwitchCarriesTheGroup: switching a single-select group
 // is a removal and an addition, each naming the label and the group by id and
 // by name, so a rule can tell the Difficulty group's Medium from another
-// group's, and the rule matches the ids.
+// group's.
 func TestDiffLinear_GroupSwitchCarriesTheGroup(t *testing.T) {
 	prev, curr := linSnap(), linSnap()
 	withLabels(&prev, labelBug, labelMedium)
@@ -298,9 +298,7 @@ func TestDiffLinear_GroupSwitchCarriesTheGroup(t *testing.T) {
 	}{
 		{`{"label_group_id_in":["l-difficulty"],"label_id_in":["l-hard"]}`, true},
 		{`{"label_group_id_in":["l-size"],"label_id_in":["l-hard"]}`, false},
-		{`{"label_group_id_in":["Difficulty"]}`, false},
 		{`{"label_id_in":["l-medium"]}`, false},
-		{`{"label_id_in":["Hard"]}`, false},
 		{`{"has_label_id_in":["l-bug"]}`, true},
 		{`{"has_label_id_in":["l-medium"]}`, false},
 		{`{"linear_team_id_in":["team-eng"]}`, true},

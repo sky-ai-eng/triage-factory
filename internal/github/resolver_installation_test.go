@@ -271,26 +271,17 @@ func TestResolver_MultiInstallationMintsPerAccount(t *testing.T) {
 	}
 }
 
-// TestResolver_ClientForInstallationMintsFromTheRowsAccount walks the entry
-// point a pass over the org's installations takes, in the state a rename
-// leaves: two live rows answer to "acme", one for the account that renamed
-// away (its row not caught up yet) and one for the account that took the
-// handle. Each row's client is minted from that row's own installation, which
-// the login cannot decide, and a row with no account id still resolves by its
-// login.
+// A pass over the org's installations, in the state a rename leaves: two live
+// rows answer to "acme", one for the account that renamed away (its row not
+// caught up yet) and one for the account that took the handle. Each row's
+// client is minted from that row's own installation, and a row with no
+// account id still resolves by its login.
 func TestResolver_ClientForInstallationMintsFromTheRowsAccount(t *testing.T) {
 	ctx := context.Background()
 	stale := installOnAccount("456", "1234", "acme")
 	claimed := installOnAccount("789", "5678", "acme")
 	noID := installOnAccount("321", "", "initech")
-	gh := newGHTestServer(t)
-	r := newTestResolver(
-		&fakeSecrets{vals: map[string]string{"pem": testPEM(t)}},
-		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{stale, claimed, noID}},
-		&fakeOrgs{base: gh.srv.URL},
-		&fakeAgents{},
-		nil,
-	)
+	r, gh := installResolver(t, stale, claimed, noID)
 
 	for _, inst := range []domain.OrgGitHubAppInstallation{claimed, stale, noID} {
 		if _, err := r.ClientForInstallation(ctx, "org-1", inst); err != nil {
@@ -308,26 +299,17 @@ func TestResolver_ClientForInstallationMintsFromTheRowsAccount(t *testing.T) {
 	}
 }
 
-// TestResolver_ClientForOwnerMintsFromTheOwnersAccount walks the entry point a
-// caller holding a repository's registry row takes. The row still names its
-// owner "acme" after the account renamed to "acme-co", and another account
-// took "acme" and installed the App too. The owner id the row records picks the
-// renamed account's installation, which the stale login would have missed or
-// confused with the stranger's; a row with no owner id resolves by its login,
-// and a resolver without the extension is asked by the login alone.
+// A repository's registry row still names its owner "acme" after the account
+// renamed to "acme-co", and another account took "acme" and installed the App
+// too. The owner id the row records picks the renamed account's installation;
+// a row with no owner id resolves by its login, and a resolver without the
+// extension is asked by the login alone.
 func TestResolver_ClientForOwnerMintsFromTheOwnersAccount(t *testing.T) {
 	ctx := context.Background()
-	gh := newGHTestServer(t)
-	r := newTestResolver(
-		&fakeSecrets{vals: map[string]string{"pem": testPEM(t)}},
-		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{
-			installOnAccount("456", "1234", "acme-co"),
-			installOnAccount("789", "5678", "acme"),
-			installOnAccount("321", "", "initech"),
-		}},
-		&fakeOrgs{base: gh.srv.URL},
-		&fakeAgents{},
-		nil,
+	r, gh := installResolver(t,
+		installOnAccount("456", "1234", "acme-co"),
+		installOnAccount("789", "5678", "acme"),
+		installOnAccount("321", "", "initech"),
 	)
 
 	if _, err := ClientForOwner(ctx, r, "org-1", "1234", "acme"); err != nil {

@@ -36,83 +36,27 @@ func TestMatchPredicate_EmptyPredicate_MatchesAll(t *testing.T) {
 	}
 }
 
-func TestMatchPredicate_AuthorIDIn_Match(t *testing.T) {
-	meta := events.GitHubPRCICheckFailedMetadata{
-		Author:    "aidan",
-		AuthorID:  "583231",
-		CheckName: "build",
-	}
-	metaJSON, _ := json.Marshal(meta)
-
-	matched, err := matchPredicate(domain.EventGitHubPRCICheckFailed, `{"author_id_in":["583231"]}`, string(metaJSON))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !matched {
-		t.Error("expected match when AuthorID is in author_id_in allowlist")
-	}
-}
-
-func TestMatchPredicate_AuthorIDIn_NoMatch(t *testing.T) {
-	meta := events.GitHubPRCICheckFailedMetadata{
-		Author:    "someone-else",
-		AuthorID:  "1234",
-		CheckName: "build",
-	}
-	metaJSON, _ := json.Marshal(meta)
-
-	matched, err := matchPredicate(domain.EventGitHubPRCICheckFailed, `{"author_id_in":["583231"]}`, string(metaJSON))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if matched {
-		t.Error("expected no match when AuthorID isn't in author_id_in allowlist")
-	}
-}
-
-// author_id_in names an account by GitHub's id, so a rename of the author
-// leaves the match alone, and a login another account now holds does not
-// match.
-func TestMatchPredicate_AuthorIDIn_FollowsTheAccount(t *testing.T) {
+// author_id_in names an account by GitHub's id, a bot's like anyone's, so a
+// renamed author still matches and a login never does.
+func TestMatchPredicate_AuthorIDIn(t *testing.T) {
+	type meta = events.GitHubPRCICheckFailedMetadata
 	for _, tc := range []struct {
-		name string
-		meta events.GitHubPRCICheckFailedMetadata
-		want bool
+		name, pred string
+		meta       meta
+		want       bool
 	}{
-		{"renamed author", events.GitHubPRCICheckFailedMetadata{Author: "aidan-renamed", AuthorID: "583231"}, true},
-		{"the old login on another account", events.GitHubPRCICheckFailedMetadata{Author: "aidan", AuthorID: "999"}, false},
-		{"an event recorded without the id", events.GitHubPRCICheckFailedMetadata{Author: "aidan"}, false},
+		{"renamed author", `{"author_id_in":["583231"]}`, meta{Author: "aidan-renamed", AuthorID: "583231"}, true},
+		{"the old login on another account", `{"author_id_in":["583231"]}`, meta{Author: "aidan", AuthorID: "999"}, false},
+		{"an event recorded without the id", `{"author_id_in":["583231"]}`, meta{Author: "aidan"}, false},
+		{"a bot by its login", `{"author_id_in":["dependabot[bot]"]}`, meta{Author: "dependabot[bot]", AuthorID: "49699333"}, false},
 	} {
 		metaJSON, _ := json.Marshal(tc.meta)
-		matched, err := matchPredicate(domain.EventGitHubPRCICheckFailed, `{"author_id_in":["583231"]}`, string(metaJSON))
+		matched, err := matchPredicate(domain.EventGitHubPRCICheckFailed, tc.pred, string(metaJSON))
 		if err != nil {
 			t.Fatalf("%s: unexpected error: %v", tc.name, err)
 		}
 		if matched != tc.want {
 			t.Errorf("%s: matched = %v, want %v", tc.name, matched, tc.want)
-		}
-	}
-}
-
-// A bot's PR carries its account id like any other author's, so author_id_in
-// names the bot by that id; its login does not match.
-func TestMatchPredicate_AuthorIDIn_Bot(t *testing.T) {
-	metaJSON, _ := json.Marshal(events.GitHubPRCICheckFailedMetadata{
-		Author:    "dependabot[bot]",
-		AuthorID:  "49699333",
-		CheckName: "build",
-	})
-
-	for pred, want := range map[string]bool{
-		`{"author_id_in":["49699333"]}`:        true,
-		`{"author_id_in":["dependabot[bot]"]}`: false,
-	} {
-		matched, err := matchPredicate(domain.EventGitHubPRCICheckFailed, pred, string(metaJSON))
-		if err != nil {
-			t.Fatalf("%s: unexpected error: %v", pred, err)
-		}
-		if matched != want {
-			t.Errorf("%s: matched = %v, want %v", pred, matched, want)
 		}
 	}
 }

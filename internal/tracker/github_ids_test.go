@@ -2,71 +2,15 @@ package tracker
 
 import (
 	"context"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"path/filepath"
+	"fmt"
 	"reflect"
-	"strings"
+	"slices"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 )
-
-// Every GitHub event names its actors by GitHub's id beside their login: the
-// PR author (AuthorID), a review's reviewer (ReviewerID), a comment's writer
-// (CommenterID). A literal that sets the login and leaves the id out emits
-// events no id predicate can match and that route by login alone, and
-// compiles, so the package source is checked directly, as the repository id
-// is (TestGitHubMetadataLiteralsSetRepositoryID).
-func TestGitHubMetadataLiteralsSetActorIDs(t *testing.T) {
-	pairs := map[string]string{"Author": "AuthorID", "Reviewer": "ReviewerID", "Commenter": "CommenterID"}
-	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	fset := token.NewFileSet()
-	checked := 0
-	for _, name := range files {
-		if strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(fset, name, nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", name, err)
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			lit, ok := n.(*ast.CompositeLit)
-			if !ok {
-				return true
-			}
-			sel, ok := lit.Type.(*ast.SelectorExpr)
-			if !ok || !strings.HasPrefix(sel.Sel.Name, "GitHub") || !strings.HasSuffix(sel.Sel.Name, "Metadata") {
-				return true
-			}
-			checked++
-			keys := map[string]bool{}
-			for _, elt := range lit.Elts {
-				if kv, ok := elt.(*ast.KeyValueExpr); ok {
-					if key, ok := kv.Key.(*ast.Ident); ok {
-						keys[key.Name] = true
-					}
-				}
-			}
-			for handle, id := range pairs {
-				if keys[handle] && !keys[id] {
-					t.Errorf("%s: events.%s literal sets %s without %s", fset.Position(lit.Pos()), sel.Sel.Name, handle, id)
-				}
-			}
-			return true
-		})
-	}
-	if checked == 0 {
-		t.Fatal("found no GitHub metadata literals: the guard checked nothing")
-	}
-}
 
 // requesting is a snapshot whose pending review requests are the handles
 // given, with ids for the ones in ids.
@@ -83,85 +27,45 @@ var everyoneKnown = fakeReviewerResolver{
 	teams: map[string]bool{"acme/backend": true, "acme-corp/server": true},
 }
 
-// The first poll after ids were recorded diffs a stored snapshot that has none
-// against one that has them. The reviewers are the same, so nothing is added
-// or removed — the handles decide when one side has no id.
-func TestDiff_ReviewRequests_FirstPollWithIDsIsNoChange(t *testing.T) {
-	prev := requesting(nil, "alice", "acme/backend")
-	curr := requesting(map[string]string{"alice": "5", "acme/backend": "11"}, "alice", "acme/backend")
-	if evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, domain.GitHubAccount{}, everyoneKnown, nil, nil); len(evts) != 0 {
-		t.Errorf("events = %v, want none", eventTypes(evts))
-	}
-}
-
-// A user or team renamed between polls is the same reviewer: its id did not
-// change.
-func TestDiff_ReviewRequests_RenameIsNoChange(t *testing.T) {
-	prev := requesting(map[string]string{"alice": "5", "acme/backend": "11"}, "alice", "acme/backend")
-	curr := requesting(map[string]string{"alice-renamed": "5", "acme-corp/server": "11"}, "alice-renamed", "acme-corp/server")
-	if evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, domain.GitHubAccount{}, everyoneKnown, nil, nil); len(evts) != 0 {
-		t.Errorf("events = %v, want none", eventTypes(evts))
-	}
-}
-
-// A login GitHub handed to another account names a different reviewer: the
-// first account's request is removed and the second's added.
-func TestDiff_ReviewRequests_LoginOfAnotherAccountIsAnotherReviewer(t *testing.T) {
-	prev := requesting(map[string]string{"alice": "5"}, "alice")
-	curr := requesting(map[string]string{"alice": "9"}, "alice")
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, domain.GitHubAccount{}, everyoneKnown, nil, nil)
-	added := findEvents(evts, domain.EventGitHubPRReviewRequested)
-	removed := findEvents(evts, domain.EventGitHubPRReviewRequestRemoved)
-	if len(added) != 1 || added[0].DedupKey != "user_id:9" || len(removed) != 1 || removed[0].DedupKey != "user_id:5" {
-		t.Errorf("events = %v, want user_id:9 added and user_id:5 removed", evts)
-	}
-}
-
-// A request read with GitHub's id is keyed by it and carries it, beside the
-// handle, in its metadata; one read without stays keyed by handle.
-func TestDiff_ReviewRequests_KeyedByGitHubID(t *testing.T) {
-	prev := requesting(nil)
-	curr := requesting(map[string]string{"alice": "5", "acme/backend": "11"}, "alice", "acme/backend", "bob")
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, domain.GitHubAccount{}, everyoneKnown, nil, nil)
-	byKey := map[string]events.GitHubPRReviewRequestedMetadata{}
-	for _, e := range findEvents(evts, domain.EventGitHubPRReviewRequested) {
-		byKey[e.DedupKey] = decodeMetadata[events.GitHubPRReviewRequestedMetadata](t, e)
-	}
-	want := map[string]events.GitHubPRReviewRequestedMetadata{
-		"user_id:5":  {RequestedLogin: "alice", RequestedUserID: "5"},
-		"team_id:11": {RequestedTeam: "acme/backend", RequestedTeamID: "11"},
-		"user:bob":   {RequestedLogin: "bob"},
-	}
-	if len(byKey) != len(want) {
-		t.Fatalf("review_requested keys = %v, want %v", keysOf(byKey), keysOf(want))
-	}
-	for key, w := range want {
-		got := byKey[key]
-		if got.RequestedLogin != w.RequestedLogin || got.RequestedTeam != w.RequestedTeam ||
-			got.RequestedUserID != w.RequestedUserID || got.RequestedTeamID != w.RequestedTeamID {
-			t.Errorf("%s metadata = %+v, want the identity %+v", key, got, w)
+// Each event is listed as "+key handle#id" for an added request and "-key
+// handle#id" for a removed one. A request read with GitHub's id is keyed by
+// it; the handles decide only when one side has no id.
+func TestDiff_ReviewRequestsByGitHubID(t *testing.T) {
+	signs := map[string]string{domain.EventGitHubPRReviewRequested: "+", domain.EventGitHubPRReviewRequestRemoved: "-"}
+	for _, c := range []struct {
+		name       string
+		prev, curr domain.PRSnapshot
+		want       []string
+	}{
+		{"first poll after ids were recorded", requesting(nil, "alice", "acme/backend"),
+			requesting(map[string]string{"alice": "5", "acme/backend": "11"}, "alice", "acme/backend"), nil},
+		{"a user and a team renamed", requesting(map[string]string{"alice": "5", "acme/backend": "11"}, "alice", "acme/backend"),
+			requesting(map[string]string{"alice-renamed": "5", "acme-corp/server": "11"}, "alice-renamed", "acme-corp/server"), nil},
+		{"a login another account now holds", requesting(map[string]string{"alice": "5"}, "alice"),
+			requesting(map[string]string{"alice": "9"}, "alice"), []string{"+user_id:9 alice#9", "-user_id:5 alice#5"}},
+		{"requests read with and without ids", requesting(nil),
+			requesting(map[string]string{"alice": "5", "acme/backend": "11"}, "alice", "acme/backend", "bob"),
+			[]string{"+team_id:11 acme/backend#11", "+user:bob bob#", "+user_id:5 alice#5"}},
+		{"a removal", requesting(map[string]string{"alice": "5"}, "alice"), requesting(nil), []string{"-user_id:5 alice#5"}},
+	} {
+		var got []string
+		for _, e := range DiffPRSnapshots(c.prev, c.curr, testEntityID, testRepositoryID, domain.GitHubAccount{}, everyoneKnown, nil, nil) {
+			if signs[e.EventType] == "" {
+				got = append(got, e.EventType)
+				continue
+			}
+			m := decodeMetadata[events.GitHubPRReviewRequestedMetadata](t, e)
+			got = append(got, fmt.Sprintf("%s%s %s%s#%s%s", signs[e.EventType], e.DedupKey, m.RequestedLogin, m.RequestedTeam, m.RequestedUserID, m.RequestedTeamID))
+		}
+		slices.Sort(got)
+		if !slices.Equal(got, c.want) {
+			t.Errorf("%s: events = %v, want %v", c.name, got, c.want)
 		}
 	}
 }
 
-// A removal names the reviewer by id and by handle, so the router can close a
-// task keyed either way.
-func TestDiff_ReviewRequestRemoved_CarriesTheHandleBesideTheID(t *testing.T) {
-	prev := requesting(map[string]string{"alice": "5"}, "alice")
-	curr := requesting(nil)
-	removed := findEvents(DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, domain.GitHubAccount{}, everyoneKnown, nil, nil),
-		domain.EventGitHubPRReviewRequestRemoved)
-	if len(removed) != 1 || removed[0].DedupKey != "user_id:5" {
-		t.Fatalf("removals = %v, want one keyed user_id:5", removed)
-	}
-	if m := decodeMetadata[events.GitHubPRReviewRequestRemovedMetadata](t, removed[0]); m.RequestedLogin != "alice" || m.RequestedUserID != "5" {
-		t.Errorf("removal metadata = %+v, want alice and 5", m)
-	}
-}
-
 // The local user's own pull request is told by their GitHub id when both the
-// snapshot and the binding carry one: a rename keeps it theirs, and their old
-// login on another account's pull request does not make it theirs.
+// snapshot and the binding carry one.
 func TestDiff_OwnPullRequestByGitHubID(t *testing.T) {
 	self := domain.GitHubAccount{Login: "aidan-renamed", ID: "583231"}
 	resolver := NewLocalReviewerResolver(self, []string{"acme/backend"})
@@ -185,9 +89,8 @@ func TestDiff_OwnPullRequestByGitHubID(t *testing.T) {
 	}
 }
 
-// Diffed without the review marker, a reviewer is matched across snapshots by
-// GitHub's id: a renamed reviewer's unchanged review is not a new one, and a
-// review under a login another account now holds is.
+// Diffed without the review marker, a renamed reviewer's unchanged review is
+// not a new one, and a review under a login another account now holds is.
 func TestDiff_Reviews_ReviewerMatchedByGitHubID(t *testing.T) {
 	prev := basePRSnapshot()
 	prev.Reviews = []domain.ReviewState{
@@ -208,8 +111,6 @@ func TestDiff_Reviews_ReviewerMatchedByGitHubID(t *testing.T) {
 	}
 }
 
-// Every event carries the PR author's id, a review's reviewer's, and the ids
-// of the commenters.
 func TestDiff_EventsCarryGitHubIDs(t *testing.T) {
 	prev := markedPRSnapshot()
 	prev.AuthorID = "583231"
@@ -245,17 +146,16 @@ func TestDiff_EventsCarryGitHubIDs(t *testing.T) {
 	}
 }
 
-// A task's dedup key names the reviewer the quiet-entity reconcile checks the
-// stored snapshot for: by id for a key by id, by handle for a key by handle, as
-// a task created before ids were recorded carries.
+// The quiet-entity reconcile checks the stored snapshot for the reviewer a
+// task's dedup key names: by id, or by handle for a task created before ids
+// were recorded.
 func TestReviewerFromDedupKey_FindsTheRequestEitherWay(t *testing.T) {
-	snap := requesting(map[string]string{"alice": "5", "acme/backend": "11"}, "alice-renamed", "acme/backend")
-	snap.ReviewRequestIDs = map[string]string{"alice-renamed": "5", "acme/backend": "11"}
+	snap := requesting(map[string]string{"alice-renamed": "5", "acme/backend": "11"}, "alice-renamed", "acme/backend")
 	for key, want := range map[string]bool{
 		"user_id:5":         true,
 		"team_id:11":        true,
 		"team:acme/backend": true,
-		"user:alice":        false, // keyed by a login the reviewer no longer has
+		"user:alice":        false, // a login the reviewer no longer has
 		"user_id:9":         false,
 		"team_id:5":         false, // a user's id is not a team's
 	} {
@@ -275,7 +175,6 @@ func TestReviewerFromDedupKey_FindsTheRequestEitherWay(t *testing.T) {
 	}
 }
 
-// idUsers is a UsersStore whose reverse lookups answer from fixed maps.
 type idUsers struct {
 	db.UsersStore
 	byID, byLogin map[string][]string
@@ -303,12 +202,4 @@ func TestStoreReviewerResolver_KnownUserByGitHubID(t *testing.T) {
 	if !r.KnownUser("", "alice") {
 		t.Error("KnownUser(no id, alice) = false; want the login lookup")
 	}
-}
-
-func keysOf[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
 }

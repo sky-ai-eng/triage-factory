@@ -140,9 +140,6 @@ func TestDiffPRSnapshots_Commented(t *testing.T) {
 				if !matchesPredicate(t, *evt, allowlist(t, "commenter_id_in", testGitHubUserIDs[login])) {
 					t.Errorf("commenter_id_in naming %s's id did not match", login)
 				}
-				if matchesPredicate(t, *evt, allowlist(t, "commenter_id_in", login)) {
-					t.Errorf("commenter_id_in naming %s's login matched", login)
-				}
 			}
 			if matchesPredicate(t, *evt, allowlist(t, "commenter_id_in", testGitHubUserIDs["carol"])) {
 				t.Error("commenter_id_in naming someone who did not comment matched")

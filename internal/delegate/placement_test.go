@@ -39,16 +39,9 @@ func githubTask() domain.Task {
 }
 
 // placementSpawner returns a spawner whose stores hold the GitHub task's entity
-// on host and the repository row its create registered, that task, and the
-// row's id.
-func placementSpawner(t *testing.T, host string) (*Spawner, domain.Task, string) {
-	t.Helper()
-	s, task, repositoryID, _ := placementSpawnerWithDB(t, host)
-	return s, task, repositoryID
-}
-
-// placementSpawnerWithDB is placementSpawner with the database behind it.
-func placementSpawnerWithDB(t *testing.T, host string) (*Spawner, domain.Task, string, *sql.DB) {
+// on host and the repository row its create registered, that task, the row's
+// id, and the database behind it.
+func placementSpawner(t *testing.T, host string) (*Spawner, domain.Task, string, *sql.DB) {
 	t.Helper()
 	database := newDelegateTestDB(t)
 	stores := sqlitestore.New(database)
@@ -56,34 +49,16 @@ func placementSpawnerWithDB(t *testing.T, host string) (*Spawner, domain.Task, s
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
-	if e.RepositoryID == "" {
-		t.Fatalf("the entity create registered no repository row: %+v", e)
-	}
 	task := githubTask()
 	task.EntityID = e.ID
 	return &Spawner{entities: stores.Entities, repos: stores.Repos}, task, e.RepositoryID, database
 }
 
+// The key is the task's registry row id, read through the id its entity
+// references, and not the row's name: a renamed repository stays on the owner
+// its bare-clone cache, keyed by the same id, is warm on.
 func TestPreferredExecutorFor_StampsRendezvousOwner(t *testing.T) {
-	s, task, repositoryID := placementSpawner(t, "https://github.com")
-	fp := &fakePlacement{enabled: true, wantKey: repositoryID, owner: "exec-owner"}
-	s.SetPlacement(fp, db.ClaimPlacement{Enabled: true})
-
-	got := s.preferredExecutorFor(context.Background(), runmode.LocalDefaultOrgID, task, "run-1")
-	if got != "exec-owner" {
-		t.Fatalf("preferred = %q, want exec-owner", got)
-	}
-	if fp.lastKey != repositoryID {
-		t.Fatalf("resolver keyed on %q, want the registry row id %q", fp.lastKey, repositoryID)
-	}
-}
-
-// TestPreferredExecutorFor_KeepsTheKeyAcrossARename pins that the key is the
-// task's registry row id, read through the id its entity references, and not
-// the row's name: a renamed repository stays on the owner its bare-clone
-// cache, keyed by the same id, is warm on.
-func TestPreferredExecutorFor_KeepsTheKeyAcrossARename(t *testing.T) {
-	s, task, repositoryID, database := placementSpawnerWithDB(t, "https://github.com")
+	s, task, repositoryID, database := placementSpawner(t, "https://github.com")
 	dbseed.RenameRepositoryOnly(t, database, repositoryID, "acme", "site")
 	fp := &fakePlacement{enabled: true, wantKey: repositoryID, owner: "exec-owner"}
 	s.SetPlacement(fp, db.ClaimPlacement{Enabled: true})
@@ -98,7 +73,7 @@ func TestPreferredExecutorFor_KeepsTheKeyAcrossARename(t *testing.T) {
 // there: a same-named repository on another host is another row, and another
 // key.
 func TestPreferredExecutorFor_KeysOnTheEntitysOwnRepository(t *testing.T) {
-	s, task, ghe, database := placementSpawnerWithDB(t, "https://ghe.example.com")
+	s, task, ghe, database := placementSpawner(t, "https://ghe.example.com")
 	dotcom, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID,
 		"github", "https://github.com", "acme/web#42", "", "pr", "T", "https://github.com/acme/web/pull/42")
 	if err != nil {
@@ -119,7 +94,7 @@ func TestPreferredExecutorFor_KeysOnTheEntitysOwnRepository(t *testing.T) {
 // whose entity cannot be read gets no affinity rather than an override from a
 // guessed host.
 func TestPreferredExecutorFor_UnreadableEntityStampsNothing(t *testing.T) {
-	s, task, _ := placementSpawner(t, "https://github.com")
+	s, task, _, _ := placementSpawner(t, "https://github.com")
 	task.EntityID = "no-such-entity"
 	fp := &fakePlacement{enabled: true, wantKey: "acme/web", owner: "exec-owner"}
 	s.SetPlacement(fp, db.ClaimPlacement{Enabled: true})

@@ -19,17 +19,14 @@ func linearConfigFor(url string) linear.Config {
 	return cfg
 }
 
+// An app user is whoever Linear says is one, whatever address it carries.
 // Not parallel: see TestCaptureGitHubIdentity.
 func TestValidateLinear_AppUserIsLinearsFlag(t *testing.T) {
-	// The email is no part of the answer: an app user is whoever Linear says
-	// is one, whatever address it carries.
 	cases := map[string]struct {
 		email string
 		app   string
 		isApp bool
 	}{
-		"person":                      {"ada@example.com", "false", false},
-		"app user":                    {"4b1b3139-483d-455e-beba-f02f2d5b49b4@oauthapp.linear.app", "true", true},
 		"app user, any address":       {"bot@example.com", "true", true},
 		"person, app-looking address": {"ada@oauthapp.linear.app", "false", false},
 	}

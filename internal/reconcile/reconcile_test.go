@@ -323,13 +323,11 @@ func reconcileTestDB(t *testing.T) (*sql.DB, db.Stores, func(entityID, conversat
 	return conn, stores, seedConversation, seedArt
 }
 
-// TestReconcile_AddressesRepositoriesByTheirRegistryRows pins that the
-// reconciler reaches GitHub under the name a registry row holds now, read by
-// id, whatever name the artifact's target or its entity's key still spells: a
-// branch through the row its key carries, a pull request through its entity's
-// row (the owner the client is resolved for). A retired row's name is another
-// repository's, so its artifacts are neither probed nor refreshed, and stay
-// as they stand.
+// The reconciler reaches GitHub under the name a registry row holds now,
+// whatever the artifact's target or its entity's key still spells: a branch
+// through the row its key carries, a pull request through its entity's row
+// (the owner the client is resolved for). A retired row's name is another
+// repository's, so its artifacts are neither probed nor refreshed.
 func TestReconcile_AddressesRepositoriesByTheirRegistryRows(t *testing.T) {
 	conn, stores, seedConversation, seedArt := reconcileTestDB(t)
 	ctx := context.Background()
@@ -337,36 +335,31 @@ func TestReconcile_AddressesRepositoriesByTheirRegistryRows(t *testing.T) {
 	seedConversation("ent-6", conversationID)
 	orgID := runmode.LocalDefaultOrgID
 
-	moved := dbseed.GitHubRepository(t, conn, orgID, reconcileTestHost, "octo", "old")
-	retired := dbseed.GitHubRepository(t, conn, orgID, reconcileTestHost, "octo", "gone")
-	seedPR := func(entityID, repositoryID, repoPath string, number int, nodeID string) domain.Artifact {
+	// seed records a pull request with its entity, and a pushed feature branch,
+	// in the repository registered as repositoryID.
+	seed := func(entityID, repositoryID, repoPath string, number int) (pr, branch domain.Artifact) {
 		t.Helper()
-		sourceID := domain.PullRequestTarget(repoPath, number)
+		nodeID, sourceID := fmt.Sprintf("PR_%d", number), domain.PullRequestTarget(repoPath, number)
 		if _, err := conn.Exec(`INSERT INTO entities (id, source, source_id, kind, scope, repository_id, external_id) VALUES (?, 'github', ?, 'pull_request', ?, ?, ?)`,
 			entityID, sourceID, reconcileTestHost, repositoryID, nodeID); err != nil {
 			t.Fatalf("seed entity %s: %v", sourceID, err)
 		}
-		a := domain.NewPullRequestArtifact(repoPath, number, nodeID, "feat", "main", "u", "t", "b", false)
-		a.ConversationID, a.EntityID = conversationID, entityID
-		seedArt(a)
-		return a
+		pr = domain.NewPullRequestArtifact(repoPath, number, nodeID, "feat", "main", "u", "t", "b", false)
+		pr.ConversationID, pr.EntityID = conversationID, entityID
+		seedArt(pr)
+		branch, _ = domain.NewBranchArtifact(repoPath, "refs/heads/feature", "sha", true)
+		branch.DedupKey = domain.BranchDedupKey(repositoryID, branch.ExternalID)
+		branch.ConversationID = conversationID
+		seedArt(branch)
+		return pr, branch
 	}
-	seedBranch := func(repositoryID, repoPath, ref string) domain.Artifact {
-		t.Helper()
-		a, _ := domain.NewBranchArtifact(repoPath, ref, "sha", true)
-		a.DedupKey = domain.BranchDedupKey(repositoryID, ref)
-		a.ConversationID = conversationID
-		seedArt(a)
-		return a
-	}
-	movedPR := seedPR("ent-moved", moved, "octo/old", 7, "PR_7")
-	movedBranch := seedBranch(moved, "octo/old", "refs/heads/feature")
-	retiredPR := seedPR("ent-retired", retired, "octo/gone", 8, "PR_8")
-	retiredBranch := seedBranch(retired, "octo/gone", "refs/heads/feature")
+	moved := dbseed.GitHubRepository(t, conn, orgID, reconcileTestHost, "octo", "old")
+	retired := dbseed.GitHubRepository(t, conn, orgID, reconcileTestHost, "octo", "gone")
+	movedPR, movedBranch := seed("ent-moved", moved, "octo/old", 7)
+	retiredPR, retiredBranch := seed("ent-retired", retired, "octo/gone", 8)
 
-	// The repository moved to another owner and a new name; only its row
-	// knows. The other row was retired: GitHub serves its name as another
-	// repository, whose own feature branch is gone.
+	// GitHub serves the retired row's name as another repository, whose own
+	// feature branch is gone.
 	dbseed.RenameRepositoryOnly(t, conn, moved, "acme", "new")
 	if _, err := conn.Exec(`UPDATE repositories SET retired_at = CURRENT_TIMESTAMP WHERE id = ?`, retired); err != nil {
 		t.Fatalf("retire repository: %v", err)
@@ -946,13 +939,16 @@ func prArtifactFor(t *testing.T, stores db.Stores, repoPath string, number int) 
 	return nil
 }
 
-// runBackstop runs one backstop pass for the test org through client.
-func runBackstop(t *testing.T, stores db.Stores, client *github.Client) {
+// runBackstop runs one backstop pass for the test org through client, and
+// returns the resolver it asked for that client.
+func runBackstop(t *testing.T, stores db.Stores, client *github.Client) *fakeResolver {
 	t.Helper()
-	rc := NewReconciler(&fakeResolver{client: client}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
+	res := &fakeResolver{client: client}
+	rc := NewReconciler(res, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
 	if err := rc.BackfillPRArtifacts(context.Background(), runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("backstop: %v", err)
 	}
+	return res
 }
 
 // TestBackstop_RecordsPRFromItsLedgerRow is the gap the backstop closes: the
@@ -1100,10 +1096,9 @@ func TestBackstop_BackfillsUnderTheRenamedRepositorysName(t *testing.T) {
 	}
 }
 
-// TestBackstop_FetchesUnderTheOwnerTheEntityHasNow pins the credential the
-// backstop fetches a pull request with: the owner of the entity the pr_created
-// row is about, under the key it has now, rather than the owner the row's
-// target recorded before the repository moved to another owner.
+// The backstop fetches a pull request under the owner of the entity its
+// pr_created row is about, by the key that entity has now, not the owner the
+// row's target recorded before the repository moved to another owner.
 func TestBackstop_FetchesUnderTheOwnerTheEntityHasNow(t *testing.T) {
 	stores, seedConversation, _ := reconcileTestStores(t)
 	seedConversation("octo/repo#5", "conv-1")
@@ -1121,12 +1116,7 @@ func TestBackstop_FetchesUnderTheOwnerTheEntityHasNow(t *testing.T) {
 	}
 
 	_, client := newBackstopStub(t, map[string]string{"PR_5": backstopPRNode("acme/repo", 5, "feature-x", "My PR", "body", true)})
-	resolver := &fakeResolver{client: client}
-	rc := NewReconciler(resolver, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
-	if err := rc.BackfillPRArtifacts(ctx, runmode.LocalDefaultOrgID); err != nil {
-		t.Fatalf("backstop: %v", err)
-	}
-	if !resolver.owners["acme"] || resolver.owners["octo"] {
+	if resolver := runBackstop(t, stores, client); !resolver.owners["acme"] || resolver.owners["octo"] {
 		t.Errorf("clients resolved for %v, want acme's alone", resolver.owners)
 	}
 	if got := prArtifactFor(t, stores, "acme/repo", 5); got == nil || got.EntityID != entity.ID {

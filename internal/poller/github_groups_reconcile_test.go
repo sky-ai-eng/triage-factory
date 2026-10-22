@@ -17,75 +17,72 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// reconcileManager is a Manager wired for reconcileGitHubGroups alone: the
-// mapping store, and every GitHub call answered by srv.
-func reconcileManager(t *testing.T, database *sql.DB, srv *httptest.Server) *Manager {
+var octoBackend = domain.TeamGitHubGroup{GitHubTeamID: "11", GitHubOrgID: "9", OrgLogin: "octo", TeamSlug: "backend"}
+
+func seedGroups(t *testing.T, database *sql.DB, host string, groups ...domain.TeamGitHubGroup) {
 	t.Helper()
-	bus := eventbus.New()
-	t.Cleanup(bus.Close)
-	return &Manager{
-		database:     database,
-		pub:          busPublisher{bus: bus},
-		githubGroups: sqlitestore.New(database).TeamGitHubGroups,
-		resolver:     &fakeResolver{client: ghclient.NewClient(srv.URL, "pat")},
+	if err := sqlitestore.New(database).TeamGitHubGroups.SetForTeam(context.Background(), runmode.LocalDefaultTeamID, host, groups); err != nil {
+		t.Fatalf("seed mappings on %s: %v", host, err)
 	}
 }
 
-// TestReconcileGitHubGroups_PrunesDeletedTeams pins the deletion reconcile
-// running on the GitHub poll cycle: a mapping whose GitHub team id is no
-// longer returned by GET /orgs/{org}/teams is pruned, while a still-present
-// team's mapping survives and takes the names GitHub gives it now.
-func TestReconcileGitHubGroups_PrunesDeletedTeams(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-
+// reconcileGroups runs reconcileGitHubGroups against a GitHub that lists teams
+// at GET /orgs/octo/teams and answers GET /orgs/octo with org (a 403 when org
+// is empty), and returns the team's mappings on the test host afterwards.
+func reconcileGroups(t *testing.T, database *sql.DB, teams, org string) []domain.TeamGitHubGroup {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/orgs/octo/teams"):
-			// "legacy" (12) was deleted on GitHub, and backend (11) renamed.
-			_, _ = w.Write([]byte(`[{"id":11,"slug":"server","name":"Server"}]`))
+			_, _ = w.Write([]byte(teams))
+		case strings.HasSuffix(r.URL.Path, "/orgs/octo") && org != "":
+			_, _ = w.Write([]byte(org))
 		case strings.HasSuffix(r.URL.Path, "/orgs/octo"):
-			// The organization renamed itself too: the owner the repositories
-			// still show is its old login, which GitHub redirects.
-			_, _ = w.Write([]byte(`{"id":9,"login":"octo-corp"}`))
+			http.Error(w, "nope", http.StatusForbidden)
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusNotFound)
 		}
 	}))
 	t.Cleanup(srv.Close)
-
-	ctx := context.Background()
-	database := newMigratedSQLiteForPoller(t)
-	stores := sqlitestore.New(database)
-	org := runmode.LocalDefaultOrgID
-	team := runmode.LocalDefaultTeamID
-
-	if err := stores.TeamGitHubGroups.SetForTeam(ctx, team, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
-		{GitHubTeamID: "11", GitHubOrgID: "9", OrgLogin: "octo", TeamSlug: "backend"},
-		{GitHubTeamID: "12", GitHubOrgID: "9", OrgLogin: "octo", TeamSlug: "legacy"},
-	}); err != nil {
-		t.Fatalf("seed mappings: %v", err)
+	bus := eventbus.New()
+	t.Cleanup(bus.Close)
+	groups := sqlitestore.New(database).TeamGitHubGroups
+	m := &Manager{
+		database:     database,
+		pub:          busPublisher{bus: bus},
+		githubGroups: groups,
+		resolver:     &fakeResolver{client: ghclient.NewClient(srv.URL, "pat")},
 	}
-	// The same ids on another host name other teams: the teams listed on
-	// this host say nothing about them, so the mapping survives.
-	const otherHost = "https://ghe.example.com"
-	if err := stores.TeamGitHubGroups.SetForTeam(ctx, team, otherHost, []domain.TeamGitHubGroup{
-		{GitHubTeamID: "12", GitHubOrgID: "9", OrgLogin: "octo", TeamSlug: "legacy"},
-	}); err != nil {
-		t.Fatalf("seed other host's mapping: %v", err)
-	}
-
-	reconcileManager(t, database, srv).reconcileGitHubGroups(ctx, org, dbtest.TestGitHubHost, []string{"octo/repo"})
-
-	got, err := stores.TeamGitHubGroups.ListForTeam(ctx, team, dbtest.TestGitHubHost)
+	m.reconcileGitHubGroups(context.Background(), runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, []string{"octo/repo"})
+	got, err := groups.ListForTeam(context.Background(), runmode.LocalDefaultTeamID, dbtest.TestGitHubHost)
 	if err != nil {
 		t.Fatalf("ListForTeam: %v", err)
 	}
+	return got
+}
+
+// A mapping whose GitHub team id GET /orgs/{org}/teams no longer returns is
+// pruned, while a still-present team's mapping survives and takes the names
+// GitHub gives it now. The same ids on another host name other teams, so that
+// host's mapping survives.
+func TestReconcileGitHubGroups_PrunesDeletedTeams(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	database := newMigratedSQLiteForPoller(t)
+	legacy := domain.TeamGitHubGroup{GitHubTeamID: "12", GitHubOrgID: "9", OrgLogin: "octo", TeamSlug: "legacy"}
+	seedGroups(t, database, dbtest.TestGitHubHost, octoBackend, legacy)
+	const otherHost = "https://ghe.example.com"
+	seedGroups(t, database, otherHost, legacy)
+
+	// Legacy was deleted, backend renamed, and the organization renamed itself:
+	// the owner the repositories still show is its old login, which GitHub
+	// redirects.
+	got := reconcileGroups(t, database, `[{"id":11,"slug":"server","name":"Server"}]`, `{"id":9,"login":"octo-corp"}`)
 	want := []domain.TeamGitHubGroup{{GitHubTeamID: "11", GitHubOrgID: "9", OrgLogin: "octo-corp", TeamSlug: "server"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("after reconcile, mappings = %+v; want %+v (legacy pruned, backend renamed)", got, want)
 	}
-	other, err := stores.TeamGitHubGroups.ListForTeam(ctx, team, otherHost)
+	other, err := sqlitestore.New(database).TeamGitHubGroups.ListForTeam(context.Background(), runmode.LocalDefaultTeamID, otherHost)
 	if err != nil {
 		t.Fatalf("ListForTeam on the other host: %v", err)
 	}
@@ -94,124 +91,39 @@ func TestReconcileGitHubGroups_PrunesDeletedTeams(t *testing.T) {
 	}
 }
 
-// TestReconcileGitHubGroups_IdentifiesARowStoredWithoutIDs pins the one place
-// a mapping is identified by its handle: a local row stored before GitHub's
-// ids were recorded takes them from the organization's listing, and is not
-// pruned while it has none.
+// The one place a mapping is identified by its handle: a local row stored
+// before GitHub's ids were recorded takes them from the organization's
+// listing, and is not pruned while it has none.
 func TestReconcileGitHubGroups_IdentifiesARowStoredWithoutIDs(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/orgs/octo/teams"):
-			_, _ = w.Write([]byte(`[{"id":11,"slug":"backend","name":"Backend"}]`))
-		case strings.HasSuffix(r.URL.Path, "/orgs/octo"):
-			_, _ = w.Write([]byte(`{"id":9,"login":"octo"}`))
-		default:
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-			http.Error(w, "unexpected", http.StatusNotFound)
-		}
-	}))
-	t.Cleanup(srv.Close)
-
-	ctx := context.Background()
 	database := newMigratedSQLiteForPoller(t)
-	stores := sqlitestore.New(database)
-	team := runmode.LocalDefaultTeamID
 	for _, slug := range []string{"backend", "unknown"} {
 		if _, err := database.Exec(
 			`INSERT INTO team_github_groups (team_id, host, github_org_login, github_team_slug) VALUES (?, ?, 'octo', ?)`,
-			team, dbtest.TestGitHubHost, slug,
+			runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, slug,
 		); err != nil {
 			t.Fatalf("seed row without ids: %v", err)
 		}
 	}
 
-	reconcileManager(t, database, srv).reconcileGitHubGroups(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, []string{"octo/repo"})
-
-	got, err := stores.TeamGitHubGroups.ListForTeam(ctx, team, dbtest.TestGitHubHost)
-	if err != nil {
-		t.Fatalf("ListForTeam: %v", err)
-	}
-	want := []domain.TeamGitHubGroup{
-		{GitHubTeamID: "11", GitHubOrgID: "9", OrgLogin: "octo", TeamSlug: "backend"},
-		{OrgLogin: "octo", TeamSlug: "unknown"},
-	}
-	if !reflect.DeepEqual(got, want) {
+	got := reconcileGroups(t, database, `[{"id":11,"slug":"backend","name":"Backend"}]`, `{"id":9,"login":"octo"}`)
+	if want := []domain.TeamGitHubGroup{octoBackend, {OrgLogin: "octo", TeamSlug: "unknown"}}; !reflect.DeepEqual(got, want) {
 		t.Errorf("after reconcile, mappings = %+v; want %+v", got, want)
 	}
 }
 
-// TestReconcileGitHubGroups_EmptyFetchDoesNotPrune pins the safety guard: an
-// empty team list (a user account, or a credential that can see no teams) is
-// ambiguous, so the reconcile must NOT wipe the org's mappings.
-func TestReconcileGitHubGroups_EmptyFetchDoesNotPrune(t *testing.T) {
+// An empty team list (a user account, or a credential that can see no teams)
+// is ambiguous, and a team list for an organization whose own read failed has
+// no organization id to match the mappings by: neither prunes anything.
+func TestReconcileGitHubGroups_AmbiguousFetchDoesNotPrune(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/orgs/octo") {
-			_, _ = w.Write([]byte(`{"id":9,"login":"octo"}`))
-			return
+	for name, c := range map[string]struct{ teams, org string }{
+		"empty team list":         {`[]`, `{"id":9,"login":"octo"}`},
+		"unreadable organization": {`[{"id":13,"slug":"other","name":"Other"}]`, ""},
+	} {
+		database := newMigratedSQLiteForPoller(t)
+		seedGroups(t, database, dbtest.TestGitHubHost, octoBackend)
+		if got := reconcileGroups(t, database, c.teams, c.org); len(got) != 1 {
+			t.Errorf("%s: mappings = %+v; want octo/backend preserved", name, got)
 		}
-		// Every page of the team list comes back empty.
-		_, _ = w.Write([]byte(`[]`))
-	}))
-	t.Cleanup(srv.Close)
-
-	ctx := context.Background()
-	database := newMigratedSQLiteForPoller(t)
-	stores := sqlitestore.New(database)
-	org := runmode.LocalDefaultOrgID
-	team := runmode.LocalDefaultTeamID
-
-	if err := stores.TeamGitHubGroups.SetForTeam(ctx, team, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
-		{GitHubTeamID: "11", GitHubOrgID: "9", OrgLogin: "octo", TeamSlug: "backend"},
-	}); err != nil {
-		t.Fatalf("seed mappings: %v", err)
-	}
-
-	reconcileManager(t, database, srv).reconcileGitHubGroups(ctx, org, dbtest.TestGitHubHost, []string{"octo/repo"})
-
-	got, err := stores.TeamGitHubGroups.ListForTeam(ctx, team, dbtest.TestGitHubHost)
-	if err != nil {
-		t.Fatalf("ListForTeam: %v", err)
-	}
-	if len(got) != 1 {
-		t.Errorf("after empty-fetch reconcile, mappings = %+v; want octo/backend preserved (empty fetch must not prune)", got)
-	}
-}
-
-// TestReconcileGitHubGroups_UnreadableOrgDoesNotPrune: a team list GitHub
-// returned, for an organization whose own read then failed, prunes nothing —
-// the mappings are matched by the organization's id, which the failed read
-// never produced.
-func TestReconcileGitHubGroups_UnreadableOrgDoesNotPrune(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/orgs/octo/teams") {
-			_, _ = w.Write([]byte(`[{"id":13,"slug":"other","name":"Other"}]`))
-			return
-		}
-		http.Error(w, "nope", http.StatusForbidden)
-	}))
-	t.Cleanup(srv.Close)
-
-	ctx := context.Background()
-	database := newMigratedSQLiteForPoller(t)
-	stores := sqlitestore.New(database)
-	team := runmode.LocalDefaultTeamID
-	if err := stores.TeamGitHubGroups.SetForTeam(ctx, team, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
-		{GitHubTeamID: "11", GitHubOrgID: "9", OrgLogin: "octo", TeamSlug: "backend"},
-	}); err != nil {
-		t.Fatalf("seed mappings: %v", err)
-	}
-
-	reconcileManager(t, database, srv).reconcileGitHubGroups(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, []string{"octo/repo"})
-
-	got, err := stores.TeamGitHubGroups.ListForTeam(ctx, team, dbtest.TestGitHubHost)
-	if err != nil {
-		t.Fatalf("ListForTeam: %v", err)
-	}
-	if len(got) != 1 {
-		t.Errorf("after an unreadable organization, mappings = %+v; want octo/backend preserved", got)
 	}
 }
