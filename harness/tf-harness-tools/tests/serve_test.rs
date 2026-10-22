@@ -330,9 +330,12 @@ fn a_configured_budget_kills_a_hog_without_ending_the_engagement() {
     );
     assert_eq!(configured["result"], json!({ "content": [] }));
 
+    // `| sleep` pins the hog over budget, as bash_budget.rs's HOG is. Unpinned,
+    // `tail` can write its whole buffer out before the kill, and the truncated
+    // output then keeps only NULs and loses the marker.
     let breach = call(
         &mut stream,
-        &json!({ "id": 2, "tool": "bash", "args": { "command": "echo starting; head -c 400M /dev/zero | tail" } }),
+        &json!({ "id": 2, "tool": "bash", "args": { "command": "echo starting; head -c 400M /dev/zero | tail | sleep 30" } }),
     );
     // An ordinary tool error — a string, not a kinded protocol object — so the
     // loop hands it to the model as an is_error result and carries on.
