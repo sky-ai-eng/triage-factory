@@ -67,7 +67,8 @@ func TestBuildSnapshot_UserLoginUnchanged(t *testing.T) {
 
 // TestPRBaseFields_SelectActorTypename pins that every actor the snapshot
 // records a login from selects __typename, without which a bot decodes as a
-// person and keeps GraphQL's bare slug, and the account's id.
+// person and keeps GraphQL's bare slug, and the account's id: the PR author,
+// each latest review's author, the merger and the closer.
 func TestPRBaseFields_SelectActorTypename(t *testing.T) {
 	const sel = "author { __typename login ... on User { databaseId } ... on Bot { databaseId } }"
 	if n := strings.Count(prBaseFields, sel); n != 2 {
@@ -75,5 +76,14 @@ func TestPRBaseFields_SelectActorTypename(t *testing.T) {
 	}
 	if n := strings.Count(prBaseFields, "author { login }"); n != 0 {
 		t.Errorf("prBaseFields has %d author selections without __typename", n)
+	}
+	for _, sel := range []string{
+		"mergedBy { " + actorFields + " }",
+		"closedEvents: timelineItems(last: 1, itemTypes: [CLOSED_EVENT])",
+		"... on ClosedEvent { actor { " + actorFields + " } }",
+	} {
+		if !strings.Contains(prBaseFields, sel) {
+			t.Errorf("prBaseFields does not select %q", sel)
+		}
 	}
 }

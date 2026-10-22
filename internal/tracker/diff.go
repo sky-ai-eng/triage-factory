@@ -109,13 +109,13 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID string
 			emitAt(domain.EventGitHubPRMerged, "", curr.MergedAt, events.GitHubPRMergedMetadata{
 				Author: curr.Author, AuthorID: curr.AuthorID,
 				Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
-				MergedBy: "", HeadSHA: curr.HeadSHA, Labels: curr.Labels,
+				MergedBy: curr.MergedBy, MergedByID: curr.MergedByID, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		} else if curr.State == "CLOSED" {
 			emitAt(domain.EventGitHubPRClosed, "", curr.ClosedAt, events.GitHubPRClosedMetadata{
 				Author: curr.Author, AuthorID: curr.AuthorID,
 				Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
-				ClosedBy: "", Labels: curr.Labels,
+				ClosedBy: curr.ClosedBy, ClosedByID: curr.ClosedByID, Labels: curr.Labels,
 			})
 		}
 		// For open PRs: no initial event. The next poll will diff against
@@ -139,7 +139,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID string
 		emitAt(domain.EventGitHubPRMerged, "", curr.MergedAt, events.GitHubPRMergedMetadata{
 			Author: curr.Author, AuthorID: curr.AuthorID,
 			Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
-			MergedBy: "", HeadSHA: curr.HeadSHA, Labels: curr.Labels,
+			MergedBy: curr.MergedBy, MergedByID: curr.MergedByID, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 		})
 	}
 
@@ -147,7 +147,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID string
 		emitAt(domain.EventGitHubPRClosed, "", curr.ClosedAt, events.GitHubPRClosedMetadata{
 			Author: curr.Author, AuthorID: curr.AuthorID,
 			Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
-			ClosedBy: "", Labels: curr.Labels,
+			ClosedBy: curr.ClosedBy, ClosedByID: curr.ClosedByID, Labels: curr.Labels,
 		})
 	}
 

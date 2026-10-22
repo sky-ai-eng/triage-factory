@@ -13,6 +13,13 @@ import (
 // prBaseFields are the common GraphQL fields shared between the discovery
 // and full fragments. Kept as a const so the two fragments stay in sync on
 // everything except the CI check-run block.
+//
+// PullRequest has no closedBy field; who closed a pull request is the actor
+// of its ClosedEvent. closedEvents reads only the newest of them, so it costs
+// one connection and at most one node per pull request, and it is here rather
+// than in the full fragment's timeline so every read records the same closer:
+// a terminal refresh, on the discovery fragment, would otherwise blank the one
+// the open refresh stored.
 const prBaseFields = `
 	id
 	number
@@ -22,6 +29,7 @@ const prBaseFields = `
 	state
 	isDraft
 	merged
+	mergedBy { ` + actorFields + ` }
 	mergeable
 	headRefName
 	baseRefName
@@ -53,6 +61,11 @@ const prBaseFields = `
 	reviews(last: 1, states: [` + submittedReviewStates + `]) {
 		totalCount
 		nodes { fullDatabaseId submittedAt }
+	}
+	closedEvents: timelineItems(last: 1, itemTypes: [CLOSED_EVENT]) {
+		nodes {
+			... on ClosedEvent { actor { ` + actorFields + ` } }
+		}
 	}
 `
 
@@ -366,6 +379,7 @@ type gqlPR struct {
 	State          string           `json:"state"`
 	IsDraft        bool             `json:"isDraft"`
 	Merged         bool             `json:"merged"`
+	MergedBy       gqlAuthor        `json:"mergedBy"`
 	Mergeable      string           `json:"mergeable"`
 	HeadRefName    string           `json:"headRefName"`
 	BaseRefName    string           `json:"baseRefName"`
@@ -378,6 +392,7 @@ type gqlPR struct {
 	ReviewRequests gqlRRNodes       `json:"reviewRequests"`
 	LatestReviews  gqlRevNodes      `json:"latestReviews"`
 	Reviews        gqlNewestReview  `json:"reviews"`
+	ClosedEvents   gqlClosedEvents  `json:"closedEvents"`
 	Commits        gqlCommits       `json:"commits"`
 	Labels         gqlLabelNodes    `json:"labels"`
 	Comments       gqlNewestComment `json:"comments"`
@@ -470,6 +485,14 @@ type gqlNewestReview struct {
 	Nodes      []struct {
 		DatabaseID  gqlBigInt `json:"fullDatabaseId"`
 		SubmittedAt string    `json:"submittedAt"`
+	} `json:"nodes"`
+}
+
+// gqlClosedEvents is the closedEvents alias of PullRequest.timelineItems: the
+// pull request's newest ClosedEvent, whose actor closed it.
+type gqlClosedEvents struct {
+	Nodes []struct {
+		Actor gqlAuthor `json:"actor"`
 	} `json:"nodes"`
 }
 
@@ -674,6 +697,16 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 		UpdatedAt:    pr.UpdatedAt,
 		MergedAt:     pr.MergedAt,
 		ClosedAt:     pr.ClosedAt,
+		MergedBy:     pr.MergedBy.restLogin(),
+		MergedByID:   pr.MergedBy.id(),
+	}
+
+	// The newest ClosedEvent names the closer only while the pull request
+	// stands closed without merging: a reopened pull request keeps the event,
+	// and a merged one is MERGED, its actor in MergedBy instead.
+	if n := len(pr.ClosedEvents.Nodes); n > 0 && pr.State == "CLOSED" {
+		closer := pr.ClosedEvents.Nodes[n-1].Actor
+		snap.ClosedBy, snap.ClosedByID = closer.restLogin(), closer.id()
 	}
 
 	if pr.HeadRepository != nil {

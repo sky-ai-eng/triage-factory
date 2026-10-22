@@ -50,6 +50,7 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
@@ -175,7 +176,7 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 	w.githubGraphQL(alice, `mutation($id: ID!) {
 		markPullRequestReadyForReview(input: {pullRequestId: $id}) { pullRequest { isDraft } }
 	}`, map[string]any{"id": draftPR["node_id"]})
-	p.cycle(t, ctx, map[string]int{
+	evts := p.cycle(t, ctx, map[string]int{
 		"acme/webapp#1 " + domain.EventGitHubPRNewCommits:                   1,
 		"acme/webapp#1 " + domain.EventGitHubPRLabelAdded + " needs-review": 1,
 		"acme/webapp#1 " + domain.EventGitHubPRLabelRemoved + " bug":        1,
@@ -186,6 +187,10 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 		"acme/webapp#3 " + domain.EventGitHubPRBodyUpdated:                  1,
 		"acme/webapp#4 " + domain.EventGitHubPRReadyForReview:               1,
 	})
+	aliceID := githubIDOf(t, w.githubREST(alice, "GET", "/api/v3/users/alice", nil, 200))
+	if m, ok := metadataOf[events.GitHubPRClosedMetadata](t, evts, domain.EventGitHubPRClosed); ok && (m.ClosedBy != "alice" || m.ClosedByID != aliceID) {
+		t.Errorf("acme/webapp#2 closed by %s/%s, want alice/%s", m.ClosedBy, m.ClosedByID, aliceID)
+	}
 
 	// Review requests and mentions. Only identities TF knows produce events:
 	// dave and the mapped acme/reviewers, never carol. A request is keyed by
@@ -222,9 +227,12 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 
 	w.advance(60)
 	w.githubREST(alice, "PUT", pulls+"/3/merge", map[string]any{}, 200)
-	p.cycle(t, ctx, map[string]int{
+	evts = p.cycle(t, ctx, map[string]int{
 		"acme/webapp#3 " + domain.EventGitHubPRMerged: 1,
 	})
+	if m, ok := metadataOf[events.GitHubPRMergedMetadata](t, evts, domain.EventGitHubPRMerged); ok && (m.MergedBy != "alice" || m.MergedByID != aliceID) {
+		t.Errorf("acme/webapp#3 merged by %s/%s, want alice/%s", m.MergedBy, m.MergedByID, aliceID)
+	}
 
 	if n := len(p.tr.notMocked()); n > 0 {
 		t.Errorf("%d request(s) reached surface Orrery does not mock: %v", n, p.tr.notMocked())
@@ -368,8 +376,8 @@ func newPollRig(t *testing.T, ctx context.Context, w *orreryWorld, shape deploym
 
 // cycle runs one GitHub poll cycle and compares the github:* events it
 // emitted, keyed "<source id> <event type>" plus " <dedup key>" when the event
-// has one, with want.
-func (r *pollRig) cycle(t *testing.T, ctx context.Context, want map[string]int) {
+// has one, with want, and returns them.
+func (r *pollRig) cycle(t *testing.T, ctx context.Context, want map[string]int) []domain.Event {
 	t.Helper()
 	r.pub.take()
 	r.mgr.PollGitHubOnce(ctx, r.orgID)
@@ -381,8 +389,9 @@ func (r *pollRig) cycle(t *testing.T, ctx context.Context, want map[string]int) 
 		t.Errorf("poll cycle error: %s", e)
 	}
 
+	evts := r.pub.take()
 	got := map[string]int{}
-	for _, evt := range r.pub.take() {
+	for _, evt := range evts {
 		key := evt.EventType
 		if evt.EntityID != nil {
 			e, err := r.stores.Entities.GetSystem(ctx, r.orgID, *evt.EntityID)
@@ -398,6 +407,24 @@ func (r *pollRig) cycle(t *testing.T, ctx context.Context, want map[string]int) 
 	if !equalCounts(got, want) {
 		t.Errorf("events:\n got  %s\n want %s", describe(got), describe(want))
 	}
+	return evts
+}
+
+// metadataOf decodes the metadata of the event of eventType among evts, and
+// reports false when there is none: the cycle's counts already fail the test
+// for a missing event.
+func metadataOf[T any](t *testing.T, evts []domain.Event, eventType string) (T, bool) {
+	t.Helper()
+	var m T
+	for _, evt := range evts {
+		if evt.EventType == eventType {
+			if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil {
+				t.Fatalf("%s metadata: %v", eventType, err)
+			}
+			return m, true
+		}
+	}
+	return m, false
 }
 
 // assertMapped checks whether the GitHub team g names is still mapped to the

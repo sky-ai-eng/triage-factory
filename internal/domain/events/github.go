@@ -6,12 +6,12 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 //
 // Every PR event carries:
 //
-//   - the actor's GitHub login (Author, Reviewer, Commenter) and, beside it,
-//     GitHub's id for the actor's account (AuthorID, ReviewerID,
-//     CommenterID), which a rename leaves alone. The predicates' identity
-//     filters (author_id_in, reviewer_id_in, commenter_id_in,
-//     requested_user_id_in, requested_team_id_in) match the ids; the login is
-//     for display. The id is empty on an event recorded before ids were, and
+//   - the actor's GitHub login (Author, Reviewer, Commenter, MergedBy,
+//     ClosedBy) and, beside it, GitHub's id for the actor's account
+//     (AuthorID, ReviewerID, CommenterID, MergedByID, ClosedByID), which a
+//     rename leaves alone. The predicates' identity filters (author_id_in,
+//     reviewer_id_in, commenter_id_in, requested_user_id_in,
+//     requested_team_id_in) match the ids; the login is for display. The id is empty on an event recorded before ids were, and
 //     for an actor GitHub returned without one (a deleted account), so an
 //     identity filter never matches such an event;
 //   - Labels []string — snapshot at emission time, so predicates can scope
@@ -565,6 +565,7 @@ type GitHubPRMergedMetadata struct {
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
 	MergedBy     string   `json:"merged_by"`
+	MergedByID   string   `json:"merged_by_id,omitempty"` // GitHub's id for the merging account
 	HeadSHA      string   `json:"head_sha"`
 	Labels       []string `json:"labels"`
 }
@@ -588,6 +589,7 @@ type GitHubPRClosedMetadata struct {
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
 	ClosedBy     string   `json:"closed_by"`
+	ClosedByID   string   `json:"closed_by_id,omitempty"` // GitHub's id for the closing account
 	Labels       []string `json:"labels"`
 }
 

@@ -203,3 +203,30 @@ func TestStoreReviewerResolver_KnownUserByGitHubID(t *testing.T) {
 		t.Error("KnownUser(no id, alice) = false; want the login lookup")
 	}
 }
+
+// merged and closed name who merged or closed the pull request, login and
+// GitHub's id, from the snapshot, on the transition and on first discovery.
+func TestDiff_MergedAndClosedNameTheActor(t *testing.T) {
+	merged := basePRSnapshot()
+	merged.State, merged.Merged = "MERGED", true
+	merged.MergedBy, merged.MergedByID = "github-merge-queue[bot]", "9919"
+	closed := basePRSnapshot()
+	closed.State = "CLOSED"
+	closed.ClosedBy, closed.ClosedByID = "stale[bot]", "2740"
+
+	for _, prev := range []domain.PRSnapshot{basePRSnapshot(), {}} {
+		evts := DiffPRSnapshots(prev, merged, testEntityID, testRepositoryID, testSelf, nil, nil, nil)
+		if e := findEvent(evts, domain.EventGitHubPRMerged); e == nil {
+			t.Errorf("prev #%d: no merged event in %v", prev.Number, eventTypes(evts))
+		} else if m := decodeMetadata[events.GitHubPRMergedMetadata](t, *e); m.MergedBy != "github-merge-queue[bot]" || m.MergedByID != "9919" {
+			t.Errorf("prev #%d: merged by %s/%s, want github-merge-queue[bot]/9919", prev.Number, m.MergedBy, m.MergedByID)
+		}
+
+		evts = DiffPRSnapshots(prev, closed, testEntityID, testRepositoryID, testSelf, nil, nil, nil)
+		if e := findEvent(evts, domain.EventGitHubPRClosed); e == nil {
+			t.Errorf("prev #%d: no closed event in %v", prev.Number, eventTypes(evts))
+		} else if m := decodeMetadata[events.GitHubPRClosedMetadata](t, *e); m.ClosedBy != "stale[bot]" || m.ClosedByID != "2740" {
+			t.Errorf("prev #%d: closed by %s/%s, want stale[bot]/2740", prev.Number, m.ClosedBy, m.ClosedByID)
+		}
+	}
+}
