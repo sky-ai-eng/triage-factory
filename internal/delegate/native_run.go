@@ -303,6 +303,9 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		Workspace:           cfg.workspace,
 		WorkspaceAsOf:       cfg.workspaceAsOf,
 		ExecutorChanged:     s.executorChangedSince(ctx, orgID, conversationID, cfg.claimID, cfg.workspace),
+		// The jail was launched above for this engagement, so no process an
+		// earlier one started runs in it, and its /tmp starts empty.
+		NewSandbox: true,
 	})
 
 	// The loop is over, and every ending below may read the run's tree. The
@@ -321,7 +324,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 // transcript nor the tree on disk can establish.
 //
 // Asked only of a workspace that was rebuilt, because that is the only case
-// where anything is said at all: a warm tree is by construction the one this
+// whose notice names an executor: a warm tree is by construction the one this
 // executor already held, and skipping the read there keeps the common resume
 // free of a query whose answer could not change the outcome.
 //

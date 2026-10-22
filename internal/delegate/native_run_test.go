@@ -27,6 +27,7 @@ func TestAskedAboutArtifactAlready(t *testing.T) {
 	human := domain.Message{Role: "user", Content: "actually, open the PR"}
 	steered := domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionSteer, Content: "also check the tests"}
 	crashNotice := domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionExecutorChanged, Content: "your executor changed"}
+	sandboxNotice := domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionNewSandbox, Content: "your sandbox is new"}
 	stopNote := domain.Message{Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "This run reached its spend cap and has been paused."}
 	stagedNote := domain.Message{Role: "user", Subtype: "injection:system-note", Content: "<system-note>PR gained commits</system-note>"}
 
@@ -60,6 +61,11 @@ func TestAskedAboutArtifactAlready(t *testing.T) {
 			// buy the run a second nudge.
 			name: "an executor-changed notice does not re-arm",
 			rows: []domain.Message{human, assistant, nudge, crashNotice, assistant},
+			want: true,
+		},
+		{
+			name: "a new-sandbox notice does not re-arm",
+			rows: []domain.Message{human, assistant, nudge, sandboxNotice, assistant},
 			want: true,
 		},
 		{
