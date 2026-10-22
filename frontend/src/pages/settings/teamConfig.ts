@@ -14,20 +14,25 @@
 
 import { apiFetch, apiJSON, apiListAll, httpErrorMessage } from '../../lib/apiClient'
 import type { JiraStatusRef, JiraStatusRuleValue } from '../../components/JiraStatusRule'
-import type { GitHubTeamCandidate } from '../../lib/githubTeams'
+import type { GitHubTeamCandidate, GitHubTeamRef } from '../../lib/githubTeams'
+import type { JiraProjectCandidate } from '../../lib/jiraProjects'
 import { registerRepository } from '../../lib/githubRepos'
 import type { RepoRef } from '../../lib/githubRepos'
 import type { LinearStateOption, LinearStateRef } from '../../lib/linearTeams'
 import type { SlackChannelsResponse } from '../../types'
 
-// JiraProjectConfig mirrors the backend per-project rule wire shape (key +
-// the four status rules). One project's tracking config; a team can carry
-// several with independent workflows.
+// JiraProjectConfig mirrors the backend per-project read shape: the project's
+// identifiers, its key and name for display, and the four status rules. One
+// project's tracking config; a team can carry several with independent
+// workflows.
 export interface JiraProjectConfig {
-  // The project's registry row id and name as the server read them. Absent on
-  // a project added in the form and not saved yet; the save names projects by
-  // key alone.
+  // The project's registry row id, which the save names a tracked project by.
+  // Absent on a project added in the form and not saved yet.
   id?: string
+  // Jira's id for the project, which the save names a project being added by
+  // and the statuses read addresses it by. Empty on a tracked project the poll
+  // has not resolved against Jira yet.
+  jira_id?: string
   key: string
   name?: string
   pickup: JiraStatusRuleValue
@@ -52,12 +57,9 @@ export interface LinearTeamConfig {
   done: JiraStatusRuleValue<LinearStateRef>
 }
 
-// GitHubGroup is one stored GitHub-team → TF-team mapping row, the PUT
-// /github-groups wire shape.
-export interface GitHubGroup {
-  org_login: string
-  team_slug: string
-}
+// GitHubGroup is one stored GitHub-team → TF-team mapping row, the
+// GET /github-groups wire shape. The PUT names each by github_team_id.
+export type GitHubGroup = GitHubTeamRef
 
 // TeamConfigForm is the editable team-level field set the shared groups
 // drive. A container spreads each group's patch straight into this state.
@@ -114,7 +116,6 @@ export interface TeamConfigForm {
 // without a second round trip.
 export interface TeamSettingsData {
   team_settings: {
-    JiraProjects: string[]
     AIReprioritizeThreshold: number
     AIPreferenceUpdateInterval: number
     DefaultModel: string
@@ -162,8 +163,12 @@ export interface TeamGitHubGroupsData {
   credentials_missing?: boolean
 }
 
-export const emptyProject = (key = ''): JiraProjectConfig => ({
-  key,
+/** watchedProject is a catalog candidate just added to the tracked set: named
+ *  by its Jira id until a save registers it, and carrying no rules. */
+export const watchedProject = (c: JiraProjectCandidate): JiraProjectConfig => ({
+  jira_id: c.jira_id,
+  key: c.key,
+  name: c.name,
   pickup: { members: [] },
   in_progress: { members: [] },
   in_review: { members: [] },
@@ -180,10 +185,9 @@ export const emptyProject = (key = ''): JiraProjectConfig => ({
 export const ruleIsIdentified = (r: JiraStatusRuleValue): boolean =>
   r.members.every((m) => !!m.id) && (!r.canonical || !!r.canonical.id)
 
-// projectIsArmed reports whether TF can actually poll this project: a
-// non-empty key and fully-populated pickup/in-progress/done rules (in-progress
-// and done also need a canonical write target). Mirrors the backend's
-// JiraProjectStatusRules.Armed.
+// projectIsArmed reports whether TF can actually poll this project: fully
+// populated pickup/in-progress/done rules (in-progress and done also need a
+// canonical write target). Mirrors the backend's JiraProjectStatusRules.Armed.
 //
 // Armed is NOT the same question as valid. A project is WATCHED the moment it
 // is in the tracked set, and mapping its workflow's statuses is the step after
@@ -193,7 +197,6 @@ export const ruleIsIdentified = (r: JiraStatusRuleValue): boolean =>
 // in_review is deliberately not part of armed: it is optional, and it gates
 // nothing the poller asks.
 export const projectIsArmed = (p: JiraProjectConfig): boolean =>
-  p.key.trim() !== '' &&
   p.pickup.members.length > 0 &&
   p.in_progress.members.length > 0 &&
   !!p.in_progress.canonical &&
@@ -454,7 +457,7 @@ export function dropLinearState(t: LinearTeamConfig, state: LinearStateRef): Lin
 // not one of them. Disconnected Jira never blocks (no rules).
 export function teamProjectsBlocked(projects: JiraProjectConfig[], connected: boolean): boolean {
   if (!connected) return false
-  return projects.some((p) => p.key.trim() !== '' && !projectRulesValid(p))
+  return projects.some((p) => !projectRulesValid(p))
 }
 
 // emptyTeamConfig leaves repos/github_groups undefined (unloaded) — a save
@@ -528,8 +531,7 @@ export async function fetchTeamRepos(teamId: string): Promise<RepoRef[] | null> 
 // candidate list), or null on failure — for a container that needs the saved
 // set up front (e.g. a collapsed section's count + change-detection baseline)
 // without mounting the full GitHubTeamGroup checklist. Same null-vs-[] contract
-// as fetchTeamRepos: a failed load must not read as "maps nothing." (The GET
-// also re-triggers the server's deletion reconcile, same as the group's fetch.)
+// as fetchTeamRepos: a failed load must not read as "maps nothing."
 export async function fetchTeamGitHubGroups(teamId: string): Promise<GitHubGroup[] | null> {
   return apiJSON<TeamGitHubGroupsData>(`${teamPath(teamId)}/github-groups`)
     .then((data) => data.groups ?? [])
@@ -599,20 +601,20 @@ function jiraRuleWrite(
 
 // saveTeamJiraProjects persists the tracked Jira projects + their status rules
 // via PUT /api/teams/{id}/jira-projects — a full replace-set, like the repos
-// and github-groups siblings. Empty-keyed projects are dropped first (a blank
-// row the user added but never filled).
+// and github-groups siblings. A tracked project is named by its registry id
+// and a project being added by its Jira id; a key names neither, because a
+// project renamed in Jira would then read as a new one.
 export async function saveTeamJiraProjects(
   teamId: string,
   projects: JiraProjectConfig[],
 ): Promise<JiraProjectsSaveResult> {
   const jira_projects = projects
-    .map((p) => ({ ...p, key: p.key.trim() }))
-    .filter((p) => p.key !== '')
+    .filter((p) => p.id || p.jira_id)
     .map((p) => {
       // A rule that cannot be expressed in ids is OMITTED, never sent empty:
       // absent means "keep the stored one" and empty means "clear it", and only
       // the first is right for a rule this client never touched.
-      const body: Record<string, unknown> = { key: p.key }
+      const body: Record<string, unknown> = p.id ? { id: p.id } : { jira_id: p.jira_id }
       const pickup = jiraRuleWrite(p.pickup, false)
       if (pickup) body.pickup = pickup
       const inProgress = jiraRuleWrite(p.in_progress, true)
@@ -711,19 +713,29 @@ export async function saveTeamRepos(
   }
 }
 
+// TeamGitHubGroupsSaveResult carries the stored set back, with the names the
+// server holds for each team.
+export type TeamGitHubGroupsSaveResult =
+  | { ok: true; groups: GitHubGroup[] }
+  | { ok: false; error: string }
+
 // saveTeamGitHubGroups persists the GitHub-team → TF-team mappings via PUT
-// /api/teams/{id}/github-groups (a full replace-set).
+// /api/teams/{id}/github-groups (a full replace-set), naming each GitHub team
+// by GitHub's id. A mapping with no id (one the server has not identified, and
+// identifyGroups could not match to a candidate) cannot be named, so the save
+// drops it.
 export async function saveTeamGitHubGroups(
   teamId: string,
   groups: GitHubGroup[],
-): Promise<SaveResult> {
+): Promise<TeamGitHubGroupsSaveResult> {
   try {
-    await apiFetch(`${teamPath(teamId)}/github-groups`, {
+    const ids = [...new Set(groups.map((g) => g.github_team_id).filter((id) => id !== ''))]
+    const body = await apiJSON<{ groups?: GitHubGroup[] }>(`${teamPath(teamId)}/github-groups`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ groups }),
+      body: JSON.stringify({ github_team_ids: ids }),
     })
-    return { ok: true }
+    return { ok: true, groups: body.groups ?? [] }
   } catch (e) {
     return { ok: false, error: httpErrorMessage(e, 'Could not save the GitHub teams.') }
   }
@@ -760,8 +772,11 @@ export async function fetchRepositorySlug(id: string): Promise<string | null> {
 
 // TrackedJiraProject is a Jira project as the jira_project_id_in picker reads
 // it: the registry row id a filter stores, and the key and name it is shown as.
+// jira_id is Jira's id for it, which the status and issue type pickers read
+// its catalog by; empty while the poll has not resolved the project.
 export interface TrackedJiraProject {
   id: string
+  jira_id: string
   key: string
   name: string
 }
@@ -775,8 +790,8 @@ export async function fetchTeamTrackedJiraProjects(
 ): Promise<TrackedJiraProject[] | null> {
   const data = await fetchTeamSettings(teamId)
   if (data === null) return null
-  return (data.jira_projects ?? []).flatMap(({ id, key, name }) =>
-    id ? [{ id, key, name: name ?? '' }] : [],
+  return (data.jira_projects ?? []).flatMap(({ id, jira_id, key, name }) =>
+    id ? [{ id, jira_id: jira_id ?? '', key, name: name ?? '' }] : [],
   )
 }
 

@@ -233,7 +233,6 @@ func newSocketTestRig(t *testing.T, rows ...*slackstore.Workspace) *socketTestRi
 	entities := newFakeEntities()
 	channels := newFakeChannelRegistryFor(entities)
 	pipeline := &ingestPipeline{
-		entities:   entities,
 		deliveries: newFakeDeliveries(),
 		channels:   channels,
 		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },

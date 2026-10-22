@@ -305,10 +305,9 @@ type ShippedEventHandler struct {
 	MinAutonomySuitability float64
 }
 
-// ShippedEventHandlers is the v1 default set, combining the formerly
-// separate ShippedTaskRules + ShippedPromptTriggers lists. Rules ship
-// with Enabled=true (the post-Seed default in the Create path);
-// triggers ship with Enabled=false per project convention.
+// ShippedEventHandlers is the v1 default set of task rules and prompt
+// triggers. Rules ship with Enabled=true (the post-Seed default in the
+// Create path); triggers ship with Enabled=false per project convention.
 //
 // BlueprintID values on trigger entries reference shipped blueprints seeded
 // by ShippedDefaultsStore.SeedShippedIntoTeam. Its phase order is prompts →
@@ -318,18 +317,17 @@ type ShippedEventHandler struct {
 var ShippedEventHandlers = []ShippedEventHandler{
 	// ----- rules ------------------------------------------------------------
 	//
-	// Rules that scope to "my PR" carry `author_in: []` as a placeholder.
-	// The SQLite Seed implementation substitutes the local user's
-	// users.github_username into the empty allowlist at insert time.
-	// Postgres Seed leaves the empty allowlist alone — multi
-	// mode doesn't have a single "self" to substitute; team visibility
-	// is the scoping mechanism there. Either way, users can edit the
-	// allowlist via the Settings UI to add or remove handles.
+	// Rules about "my PR" carry `author_id_in: []` and rules about "my issue"
+	// carry `assignee_in: []`. An empty list matches everyone, and both
+	// dialects' Seed insert the predicate as written. Owner routing scopes
+	// these at event time instead: it resolves the PR author's (or the issue
+	// assignee's) team through the owning-team ladder. Users can fill either
+	// list in the Settings UI to narrow a rule to particular people.
 	{
 		ID:              "system-rule-ci-check-failed",
 		Kind:            domain.EventHandlerKindRule,
 		EventType:       domain.EventGitHubPRCICheckFailed,
-		Predicate:       `{"author_in":[]}`,
+		Predicate:       `{"author_id_in":[]}`,
 		Name:            "CI check failed on my PR",
 		DefaultPriority: 0.75,
 		SortOrder:       0,
@@ -338,7 +336,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		ID:              "system-rule-review-changes-requested",
 		Kind:            domain.EventHandlerKindRule,
 		EventType:       domain.EventGitHubPRReviewChangesRequested,
-		Predicate:       `{"author_in":[]}`,
+		Predicate:       `{"author_id_in":[]}`,
 		Name:            "Changes requested on my PR",
 		DefaultPriority: 0.85,
 		SortOrder:       1,
@@ -347,7 +345,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		ID:              "system-rule-review-commented",
 		Kind:            domain.EventHandlerKindRule,
 		EventType:       domain.EventGitHubPRReviewCommented,
-		Predicate:       `{"author_in":[]}`,
+		Predicate:       `{"author_id_in":[]}`,
 		Name:            "Reviewer commented on my PR",
 		DefaultPriority: 0.65,
 		SortOrder:       2,
@@ -412,7 +410,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		Kind:                   domain.EventHandlerKindTrigger,
 		BlueprintID:            "system-ci-fix",
 		EventType:              domain.EventGitHubPRCICheckFailed,
-		Predicate:              `{"author_in":[]}`,
+		Predicate:              `{"author_id_in":[]}`,
 		BreakerThreshold:       3,
 		MinAutonomySuitability: 0.0,
 	},
@@ -421,7 +419,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		Kind:                   domain.EventHandlerKindTrigger,
 		BlueprintID:            "system-conflict-resolution",
 		EventType:              domain.EventGitHubPRConflicts,
-		Predicate:              `{"author_in":[]}`,
+		Predicate:              `{"author_id_in":[]}`,
 		BreakerThreshold:       2,
 		MinAutonomySuitability: 0.0,
 	},
@@ -467,7 +465,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		Kind:                   domain.EventHandlerKindTrigger,
 		BlueprintID:            "system-fix-review-feedback",
 		EventType:              domain.EventGitHubPRReviewChangesRequested,
-		Predicate:              `{"author_in":[]}`,
+		Predicate:              `{"author_id_in":[]}`,
 		BreakerThreshold:       3,
 		MinAutonomySuitability: 0.0,
 	},

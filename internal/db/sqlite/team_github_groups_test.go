@@ -3,6 +3,7 @@ package sqlite_test
 import (
 	"context"
 	"database/sql"
+	"reflect"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
@@ -24,122 +25,87 @@ func seedExtraTeam(t *testing.T, conn *sql.DB, id, slug string) {
 	}
 }
 
-// TestTeamGitHubGroups_SQLite_ManyToOneRouting pins the "many GitHub
-// teams → one TF team" funnel plus the M:N reverse on the SQLite
-// backend (so the routing acceptance holds in local mode without
-// Docker).
-func TestTeamGitHubGroups_SQLite_ManyToOneRouting(t *testing.T) {
-	conn := openSQLiteForTest(t)
-	stores := sqlitestore.New(conn)
-	ctx := context.Background()
-
-	teamA := runmode.LocalDefaultTeamID
-	teamB := "team-b-0000-0000-0000-000000000001"
-	seedExtraTeam(t, conn, teamB, "team-b")
-
-	if err := stores.TeamGitHubGroups.SetForTeam(ctx, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
-		{OrgLogin: "acme", TeamSlug: "backend"},
-		{OrgLogin: "acme", TeamSlug: "frontend"},
-		{OrgLogin: "acme", TeamSlug: "platform"},
-	}); err != nil {
-		t.Fatalf("seed teamA: %v", err)
-	}
-	if err := stores.TeamGitHubGroups.SetForTeam(ctx, teamB, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
-		{OrgLogin: "acme", TeamSlug: "platform"},
-	}); err != nil {
-		t.Fatalf("seed teamB: %v", err)
-	}
-
-	for _, slug := range []string{"backend", "frontend", "platform"} {
-		teams, err := stores.TeamGitHubGroups.TeamsForGroupSystem(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, "acme", slug)
-		if err != nil {
-			t.Fatalf("TeamsForGroupSystem(%s): %v", slug, err)
-		}
-		found := false
-		for _, id := range teams {
-			if id == teamA {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("TeamsForGroupSystem(acme/%s) = %v; want it to include teamA", slug, teams)
-		}
-	}
-
-	// platform is shared → resolves to both teams.
-	teams, err := stores.TeamGitHubGroups.TeamsForGroupSystem(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, "acme", "platform")
-	if err != nil {
-		t.Fatalf("TeamsForGroupSystem(platform): %v", err)
-	}
-	if len(teams) != 2 {
-		t.Errorf("TeamsForGroupSystem(acme/platform) = %v; want both teams", teams)
-	}
-
-	// A login/slug nobody mapped resolves to nothing.
-	none, err := stores.TeamGitHubGroups.TeamsForGroupSystem(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, "acme", "ghost")
-	if err != nil {
-		t.Fatalf("TeamsForGroupSystem(ghost): %v", err)
-	}
-	if len(none) != 0 {
-		t.Errorf("TeamsForGroupSystem(acme/ghost) = %v; want empty", none)
+// seedGroup inserts a mapping by raw SQL, which unlike SetForTeam takes one
+// with no ids: the way the migration copies one stored before GitHub's ids
+// were recorded.
+func seedGroup(t *testing.T, conn *sql.DB, teamID string, g domain.TeamGitHubGroup) {
+	t.Helper()
+	if _, err := conn.Exec(`
+		INSERT INTO team_github_groups (team_id, host, github_team_id, github_org_id, github_org_login, github_team_slug)
+		VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?)`,
+		teamID, dbtest.TestGitHubHost, g.GitHubTeamID, g.GitHubOrgID, g.OrgLogin, g.TeamSlug,
+	); err != nil {
+		t.Fatalf("seed group %+v: %v", g, err)
 	}
 }
 
-// TestTeamGitHubGroups_SQLite_PruneDeletionLifecycle pins the
-// GitHub-team-deletion reconcile floor on SQLite: a deleted GitHub team
-// drops out of every TF team that referenced it, survivors and the TF
-// teams stay.
-func TestTeamGitHubGroups_SQLite_PruneDeletionLifecycle(t *testing.T) {
+func group(teamID, orgID, login, slug string) domain.TeamGitHubGroup {
+	return domain.TeamGitHubGroup{GitHubTeamID: teamID, GitHubOrgID: orgID, OrgLogin: login, TeamSlug: slug}
+}
+
+// A mapping stored before GitHub's ids were recorded routes by its handle
+// until the reconcile identifies it, which it does once from the
+// organization's listing. It is never pruned for its absence from a listing
+// while unidentified; one whose team the same TF team already maps by id is a
+// duplicate, which the identifying drops rather than give two rows one id.
+func TestTeamGitHubGroups_SQLite_RowsWithoutIDs(t *testing.T) {
 	conn := openSQLiteForTest(t)
-	stores := sqlitestore.New(conn)
-	ctx := context.Background()
+	groups := sqlitestore.New(conn).TeamGitHubGroups
+	ctx, org, team := context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
+	teamsForGitHubTeam := func(id, login, slug string) []string {
+		t.Helper()
+		got, err := groups.TeamsForGitHubTeamSystem(ctx, org, dbtest.TestGitHubHost, id, login, slug)
+		if err != nil {
+			t.Fatalf("TeamsForGitHubTeamSystem(%q, %s/%s): %v", id, login, slug, err)
+		}
+		return got
+	}
+	for _, g := range []domain.TeamGitHubGroup{
+		group("", "", "acme", "backend"),
+		group("", "", "acme", "gone"),
+		group("", "", "beta", "platform"),
+		group("12", "9", "acme", "frontend"),
+		group("", "", "acme", "frontend"),
+	} {
+		seedGroup(t, conn, team, g)
+	}
 
-	teamA := runmode.LocalDefaultTeamID
-	teamB := "team-b-0000-0000-0000-000000000002"
-	seedExtraTeam(t, conn, teamB, "team-b")
+	// Before the reconcile: a review request carrying the team's id and its
+	// handle routes through the handle, as a mention does.
+	if got := teamsForGitHubTeam("11", "Acme", "Backend"); !reflect.DeepEqual(got, []string{team}) {
+		t.Errorf("an unidentified row by id + handle = %v; want [%s]", got, team)
+	}
+	if got := teamsForGitHubTeam("", "acme", "backend"); !reflect.DeepEqual(got, []string{team}) {
+		t.Errorf("an unidentified row by handle = %v; want [%s]", got, team)
+	}
 
-	if err := stores.TeamGitHubGroups.SetForTeam(ctx, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
-		{OrgLogin: "acme", TeamSlug: "legacy"},
-		{OrgLogin: "acme", TeamSlug: "backend"},
+	// The listing identifies backend; "gone" is not in it but has no id to
+	// be absent by, so it stays; beta's row is another organization's.
+	if n, err := groups.ReconcileOrgTeamsSystem(ctx, org, dbtest.TestGitHubHost, domain.GitHubOrgTeams{
+		OrgID: "9", OrgLogin: "acme", Teams: []domain.GitHubTeam{{ID: "11", Slug: "backend"}, {ID: "12", Slug: "frontend"}},
+	}); err != nil || n != 0 {
+		t.Errorf("ReconcileOrgTeamsSystem = (%d, %v); want nothing pruned — an unidentified row never is", n, err)
+	}
+	want := []domain.TeamGitHubGroup{
+		group("11", "9", "acme", "backend"),
+		group("12", "9", "acme", "frontend"),
+		group("", "", "acme", "gone"),
+		group("", "", "beta", "platform"),
+	}
+	if got, err := groups.ListForTeam(ctx, team, dbtest.TestGitHubHost); err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("after identifying, groups = %+v, %v; want %+v", got, err, want)
+	}
+
+	// Identified, the row follows GitHub's renames and its id alone routes it.
+	if _, err := groups.ReconcileOrgTeamsSystem(ctx, org, dbtest.TestGitHubHost, domain.GitHubOrgTeams{
+		OrgID: "9", OrgLogin: "acme-corp", Teams: []domain.GitHubTeam{{ID: "11", Slug: "server"}},
 	}); err != nil {
-		t.Fatalf("seed teamA: %v", err)
+		t.Fatalf("ReconcileOrgTeamsSystem (renamed): %v", err)
 	}
-	if err := stores.TeamGitHubGroups.SetForTeam(ctx, teamB, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
-		{OrgLogin: "acme", TeamSlug: "legacy"},
-	}); err != nil {
-		t.Fatalf("seed teamB: %v", err)
+	if got := teamsForGitHubTeam("11", "", ""); !reflect.DeepEqual(got, []string{team}) {
+		t.Errorf("an identified row by id = %v; want [%s]", got, team)
 	}
-
-	// GitHub now reports only "backend" — "legacy" was deleted.
-	n, err := stores.TeamGitHubGroups.PruneMissingSystem(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, "acme", []string{"backend"})
-	if err != nil {
-		t.Fatalf("PruneMissingSystem: %v", err)
-	}
-	if n != 2 {
-		t.Errorf("PruneMissingSystem removed %d rows; want 2 (legacy from both teams)", n)
-	}
-
-	a, err := stores.TeamGitHubGroups.ListForTeam(ctx, teamA, dbtest.TestGitHubHost)
-	if err != nil {
-		t.Fatalf("ListForTeamSystem(teamA): %v", err)
-	}
-	if len(a) != 1 || a[0].TeamSlug != "backend" {
-		t.Errorf("teamA after prune = %+v; want only backend", a)
-	}
-	b, err := stores.TeamGitHubGroups.ListForTeam(ctx, teamB, dbtest.TestGitHubHost)
-	if err != nil {
-		t.Fatalf("ListForTeamSystem(teamB): %v", err)
-	}
-	if len(b) != 0 {
-		t.Errorf("teamB after prune = %+v; want empty (legacy was its only mapping)", b)
-	}
-
-	// Both TF teams survive the prune.
-	var teamCount int
-	if err := conn.QueryRow(`SELECT COUNT(*) FROM teams WHERE org_id = ?`, runmode.LocalDefaultOrgID).Scan(&teamCount); err != nil {
-		t.Fatalf("count teams: %v", err)
-	}
-	if teamCount != 2 {
-		t.Errorf("team count = %d; want 2 (prune must never delete TF teams)", teamCount)
+	if got := teamsForGitHubTeam("", "acme-corp", "server"); !reflect.DeepEqual(got, []string{team}) {
+		t.Errorf("an identified row by its refreshed handle = %v; want [%s]", got, team)
 	}
 }

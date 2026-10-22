@@ -29,7 +29,7 @@ The V1 demo story: _"A CI check fails on your PR. Triage Factory sees it, auto-d
 
 ### 1. Transition-based events, identity-based re-firing
 
-Events fire on state changes, not on raw polls. The poller compares the current snapshot (`poller_state.state_json`) against the previous one and emits when something meaningful changed.
+Events fire on state changes, not on raw polls. The tracker compares the freshly polled snapshot against the previous one stored on the entity (`entities.snapshot_json`) and emits when something meaningful changed.
 
 For CI failures specifically, after SKY-144 the "identity" is the per-check-run `id`, not the scalar `CIState` aggregate. This fixes two real bugs where the aggregate stayed `FAILURE` across retries and different-check failures, suppressing events we needed to fire. If you're touching CI event logic, **do not revert to scalar state transitions** — you'll re-introduce these bugs.
 

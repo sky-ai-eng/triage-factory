@@ -32,7 +32,7 @@ func TestBackfillReviewRequestedEvent_Shape(t *testing.T) {
 		CreatedAt: prCreatedAt,
 	}
 
-	got, err := backfillReviewRequestedEvent("entity-xyz", testRepositoryID, snap, "bob", "")
+	got, err := backfillReviewRequestedEvent("entity-xyz", testRepositoryID, snap, handleReviewer("bob"))
 	if err != nil {
 		t.Fatalf("backfillReviewRequestedEvent: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestBackfillReviewRequestedEvent_Shape(t *testing.T) {
 	if got.EntityID == nil || *got.EntityID != "entity-xyz" {
 		t.Errorf("entity_id mismatch: got %v, want entity-xyz", got.EntityID)
 	}
-	if want := reviewerDedupKey("bob"); got.DedupKey != want {
+	if want := reviewerDedupKey(handleReviewer("bob")); got.DedupKey != want {
 		t.Errorf("dedup_key = %q, want %q (one task per reviewer)", got.DedupKey, want)
 	}
 	if !got.OccurredAt.Equal(wantOccurred) {
@@ -67,11 +67,11 @@ func TestBackfillReviewRequestedEvent_Shape(t *testing.T) {
 // identity shape: a requested TEAM keys the event by the team, so a team
 // request and a personal one on the same PR are two tasks rather than one.
 func TestBackfillReviewRequestedEvent_TeamReviewerKeysOnTheTeam(t *testing.T) {
-	got, err := backfillReviewRequestedEvent("entity-team", testRepositoryID, domain.PRSnapshot{Repo: "owner/repo", Number: 7, Author: "alice"}, "", "org/reviewers")
+	got, err := backfillReviewRequestedEvent("entity-team", testRepositoryID, domain.PRSnapshot{Repo: "owner/repo", Number: 7, Author: "alice"}, handleReviewer("org/reviewers"))
 	if err != nil {
 		t.Fatalf("backfillReviewRequestedEvent: %v", err)
 	}
-	if want := reviewerDedupKey("org/reviewers"); got.DedupKey != want {
+	if want := reviewerDedupKey(handleReviewer("org/reviewers")); got.DedupKey != want {
 		t.Errorf("dedup_key = %q, want %q", got.DedupKey, want)
 	}
 	var meta events.GitHubPRReviewRequestedMetadata
@@ -94,7 +94,7 @@ func TestBackfillReviewRequestedEvent_MissingCreatedAt_LeavesOccurredAtZero(t *t
 		Number: 99,
 		Author: "alice",
 		// CreatedAt deliberately empty.
-	}, "bob", "")
+	}, handleReviewer("bob"))
 	if err != nil {
 		t.Fatalf("backfillReviewRequestedEvent: %v", err)
 	}

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -359,13 +360,22 @@ func scanWrittenEntity(row *sql.Row) (domain.Entity, error) {
 	return *e, nil
 }
 
-func (s *entityStore) PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON string) (domain.Entity, error) {
+// SetPullRequestDraft — see the interface doc. json_set writes the key
+// inside the stored document, so nothing a concurrent writer committed to
+// the rest of it is read here or written back. json_type is guarded by
+// json_valid because it raises on text that is not JSON.
+func (s *entityStore) SetPullRequestDraft(ctx context.Context, orgID, id string, draft bool) (*domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return domain.Entity{}, err
+		return nil, err
 	}
-	return scanWrittenEntity(s.q.QueryRowContext(ctx,
-		`UPDATE entities SET snapshot_json = ?, `+containersFromSnapshot+` WHERE id = ? RETURNING `+entitySelectCols,
-		snapshotJSON, snapshotJSON, snapshotJSON, snapshotJSON, snapshotJSON, id))
+	return scanEntityRow(s.q.QueryRowContext(ctx,
+		`UPDATE entities SET snapshot_json = json_set(snapshot_json, '$.is_draft', json(?))
+		 WHERE id = ? AND source = 'github'
+		   AND CASE WHEN json_valid(snapshot_json)
+		            THEN json_type(snapshot_json) = 'object' AND json(snapshot_json) <> '{}'
+		            ELSE 0 END
+		 RETURNING `+entitySelectCols,
+		strconv.FormatBool(draft), id))
 }
 
 func (s *entityStore) UpdateTitle(ctx context.Context, orgID, id, title string) (domain.Entity, error) {
@@ -552,7 +562,7 @@ func (s *entityStore) RenameSystem(ctx context.Context, orgID, source, scope, ex
 		if err := moveEntityArtifactTargets(ctx, tx, row.id); err != nil {
 			return err
 		}
-		if err := rewriteEntityActionURLs(ctx, tx, source, scope, row.url, url); err != nil {
+		if err := rewriteEntityActionURLs(ctx, tx, row.id, row.url, url); err != nil {
 			return err
 		}
 		out = domain.EntityRenameOutcome{Renamed: true, EntityID: row.id, From: row.key, To: newKey, PollSeq: pollSeq}
@@ -580,18 +590,21 @@ func moveEntityArtifactTargets(ctx context.Context, q queryer, entityID string) 
 	return nil
 }
 
-// rewriteEntityActionURLs moves the audit ledger's pointer for actions in the
-// entity's scope whose link resolves to the entity's old url. Only current_url
-// is written; the record of the act is not. The pointer's current value is the
-// rewrite base, so consecutive renames chain.
-func rewriteEntityActionURLs(ctx context.Context, q queryer, source, scope, from, to string) error {
+// rewriteEntityActionURLs moves the audit ledger's pointer for the actions
+// about the entity (external_actions.entity_id) whose link resolves to its old
+// url. The rows are selected by the entity's id, never by a link, so another
+// object's actions under a link that once spelled the same key keep theirs.
+// Only current_url is written; the record of the act is not. The pointer's
+// current value is the rewrite base, so consecutive renames chain.
+func rewriteEntityActionURLs(ctx context.Context, q queryer, entityID, from, to string) error {
 	if from == "" || to == "" || from == to {
 		return nil
 	}
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, COALESCE(current_url, url) FROM external_actions
-		WHERE provider = ? AND scope = ? AND substr(COALESCE(current_url, url, ''), 1, length(?)) = ?`,
-		source, scope, from, from)
+		WHERE entity_id = ?1 AND substr(COALESCE(current_url, url, ''), 1, length(?2)) = ?2
+		ORDER BY id`,
+		entityID, from)
 	if err != nil {
 		return err
 	}
@@ -652,11 +665,7 @@ func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, or
 		      AND q.status IN ('ready', 'leased', 'parked')
 		      AND q.event_type IN (` + strings.Join(settling, ", ") + `)
 		  )`
-	// Each arm is omitted rather than emitted empty: `IN ()` is a syntax
-	// error, and a ref set with no ids (or no names) genuinely has nothing to
-	// match on that side. With neither, no Jira (or Linear) entity can be
-	// terminal.
-	arm := func(path string, values []string) string {
+	in := func(path string, values []string) string {
 		placeholders := make([]string, len(values))
 		for i, v := range values {
 			placeholders[i] = "?"
@@ -664,28 +673,30 @@ func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, or
 		}
 		return `json_extract(snapshot_json, '` + path + `') IN (` + strings.Join(placeholders, ", ") + `)`
 	}
-	var matches []string
-	if ids := domain.JiraStatusIDs(jiraDone); len(ids) > 0 {
-		matches = append(matches, arm("$.status_id", ids))
+	// sourceArm matches the way SameStatus / SameState compare (see
+	// domain.StatusMatchSets): an id against the snapshot's id, the name of
+	// a ref with an id only against a snapshot that carries none, and the
+	// name of a ref with no id against any snapshot. Each test is omitted
+	// rather than emitted empty, since `IN ()` is a syntax error; with none,
+	// no entity of the source can be terminal and the arm is "".
+	sourceArm := func(source, idPath, namePath string, sets domain.StatusMatchSets) string {
+		var matches []string
+		if len(sets.IDs) > 0 {
+			matches = append(matches, in(idPath, sets.IDs))
+		}
+		if len(sets.IDNames) > 0 {
+			matches = append(matches, `(COALESCE(json_extract(snapshot_json, '`+idPath+`'), '') = '' AND `+in(namePath, sets.IDNames)+`)`)
+		}
+		if len(sets.Names) > 0 {
+			matches = append(matches, in(namePath, sets.Names))
+		}
+		if len(matches) == 0 {
+			return ""
+		}
+		return ` OR (source = '` + source + `' AND (` + strings.Join(matches, " OR ") + `))`
 	}
-	if names := domain.JiraStatusNames(jiraDone); len(names) > 0 {
-		matches = append(matches, arm("$.status", names))
-	}
-	jiraArm := ""
-	if len(matches) > 0 {
-		jiraArm = ` OR (source = 'jira' AND (` + strings.Join(matches, " OR ") + `))`
-	}
-	var linearMatches []string
-	if ids := domain.LinearStateIDs(linearDone); len(ids) > 0 {
-		linearMatches = append(linearMatches, arm("$.state.id", ids))
-	}
-	if names := domain.LinearStateNames(linearDone); len(names) > 0 {
-		linearMatches = append(linearMatches, arm("$.state.name", names))
-	}
-	linearArm := ""
-	if len(linearMatches) > 0 {
-		linearArm = ` OR (source = 'linear' AND (` + strings.Join(linearMatches, " OR ") + `))`
-	}
+	jiraArm := sourceArm("jira", "$.status_id", "$.status", domain.JiraStatusMatchSets(jiraDone))
+	linearArm := sourceArm("linear", "$.state.id", "$.state.name", domain.LinearStateMatchSets(linearDone))
 	limitClause := ""
 	if limit > 0 {
 		limitClause = " LIMIT ?"
@@ -851,7 +862,7 @@ func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, e
 			return err
 		}
 		kept, dropped := db.DuplicateEntityMergedKeys(survivor, loser)
-		return rewriteEntityActionURLs(ctx, q, survivor.Source, survivor.Scope, dropped.URL, kept.URL)
+		return rewriteEntityActionURLs(ctx, q, survivor.ID, dropped.URL, kept.URL)
 	})
 	if err != nil {
 		return "", err
@@ -896,7 +907,10 @@ func (s *entityStore) FoldStubEntitySystem(ctx context.Context, orgID, stubID, i
 		if _, err := q.ExecContext(ctx, `DELETE FROM entities WHERE id = ?`, stub.ID); err != nil {
 			return fmt.Errorf("delete folded stub: %w", err)
 		}
-		return moveEntityArtifactTargets(ctx, q, into.ID)
+		if err := moveEntityArtifactTargets(ctx, q, into.ID); err != nil {
+			return err
+		}
+		return rewriteEntityActionURLs(ctx, q, into.ID, stub.URL, into.URL)
 	})
 }
 
@@ -923,7 +937,7 @@ func moveEntityReferences(ctx context.Context, q queryer, loserID, survivorID st
 		loserID, db.DuplicateEntityMergedCloseReason); err != nil {
 		return fmt.Errorf("cancel duplicate tasks' runs: %w", err)
 	}
-	for _, table := range []string{"tasks", "events", "event_queue", "pending_firings", "artifacts"} {
+	for _, table := range []string{"tasks", "events", "event_queue", "pending_firings", "artifacts", "external_actions"} {
 		if _, err := q.ExecContext(ctx, `UPDATE `+table+` SET entity_id = ? WHERE entity_id = ?`, survivorID, loserID); err != nil {
 			return fmt.Errorf("move %s: %w", table, err)
 		}

@@ -9,22 +9,31 @@ import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 
 import JiraProjectRulesGroup from './JiraProjectRulesGroup'
-import {
-  emptyProject,
-  projectIsArmed,
-  ruleIsIdentified,
-  type JiraProjectConfig,
-} from './teamConfig'
+import { projectIsArmed, ruleIsIdentified, type JiraProjectConfig } from './teamConfig'
 import { jsonBody } from '../../test/apiResponse'
 
 const ORG = 'org-1'
 const PROJECTS_LIST = `/api/orgs/${ORG}/jira/projects/list`
-const statusesList = (key: string) => `/api/orgs/${ORG}/jira/projects/${key}/statuses/list`
+const statusesList = (jiraId: string) => `/api/orgs/${ORG}/jira/projects/${jiraId}/statuses/list`
+
+const SKY_ID = '10100'
 
 const CATALOG = [
-  { key: 'SKY', name: 'Sky Platform' },
-  { key: 'OPS', name: 'Operations' },
+  { jira_id: SKY_ID, key: 'SKY', name: 'Sky Platform' },
+  { jira_id: '10200', key: 'OPS', name: 'Operations' },
 ]
+
+/** tracked is a project the team already tracks, as the settings read serves
+ *  it: under its registry id and Jira's id, with no rules mapped. */
+const tracked = (key: string, jiraId: string): JiraProjectConfig => ({
+  id: `reg-${key}`,
+  jira_id: jiraId,
+  key,
+  pickup: { members: [] },
+  in_progress: { members: [] },
+  in_review: { members: [] },
+  done: { members: [] },
+})
 
 const STATUSES = [
   { id: '10000', name: 'To Do' },
@@ -34,11 +43,11 @@ const STATUSES = [
 
 // stubFetch answers the two reads this surface makes, both proxy lists (so no
 // total_count): the org's project catalog and one project's statuses.
-function stubFetch() {
+function stubFetch(catalog = CATALOG) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)
     if (url === PROJECTS_LIST) {
-      return { ok: true, status: 200, ...jsonBody({ items: CATALOG, next_page_token: '' }) }
+      return { ok: true, status: 200, ...jsonBody({ items: catalog, next_page_token: '' }) }
     }
     if (url.startsWith(`/api/orgs/${ORG}/jira/projects/`) && url.endsWith('/statuses/list')) {
       return { ok: true, status: 200, ...jsonBody({ items: STATUSES, next_page_token: '' }) }
@@ -65,6 +74,10 @@ function Harness({ seed = [] as JiraProjectConfig[] }) {
           .join(',')}
       </output>
       <output data-testid="watched">{value.map((p) => p.key).join(',')}</output>
+      {/* How the save would name each project: a registry id, or a Jira id. */}
+      <output data-testid="watched-ids">
+        {value.map((p) => (p.id ? `id:${p.id}` : `jira:${p.jira_id}`)).join(',')}
+      </output>
       {/* What the write path sees: the ids it would send, and whether the rule
           is sendable at all — a rule with any name-only member is omitted. */}
       <output data-testid="pickup-ids">
@@ -101,14 +114,38 @@ describe('JiraProjectRulesGroup · watching', () => {
     await user.click(within(row).getByRole('button', { name: 'Watch' }))
 
     expect(screen.getByTestId('watched')).toHaveTextContent('SKY')
+    // A project being added is named by its Jira id until a save registers it.
+    expect(screen.getByTestId('watched-ids')).toHaveTextContent(`jira:${SKY_ID}`)
     // Watched, and deliberately not armed — mapping is the next step, not a
     // precondition of this one.
     expect(screen.getByTestId('armed')).toHaveTextContent('')
   })
 
+  it('matches a tracked project to the catalog by its Jira id, across a key rename', async () => {
+    // Jira renamed SKY to SKYL; the tracked row still reads SKY.
+    stubFetch([{ ...CATALOG[0], key: 'SKYL' }])
+    render(<Harness seed={[tracked('SKY', SKY_ID)]} />)
+
+    expect(await screen.findByText('Sky Platform')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Watch' })).not.toBeInTheDocument()
+    expect(screen.queryByText('not visible to this credential')).not.toBeInTheDocument()
+  })
+
+  it('does not offer the catalog entry of a tracked project not yet confirmed with Jira', async () => {
+    const user = userEvent.setup()
+    render(<Harness seed={[tracked('SKY', '')]} />)
+
+    expect(await screen.findByText('Sky Platform')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Watch' })).toHaveLength(1)
+    // It has no Jira id to read its statuses by.
+    await user.click(screen.getByRole('button', { name: 'Expand project' }))
+    expect(await screen.findByText(/Not confirmed with Jira yet/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Reload statuses' })).toBeDisabled()
+  })
+
   it('says an unmapped project is unmapped, and prompts for the arming step', async () => {
     const user = userEvent.setup()
-    render(<Harness seed={[emptyProject('SKY')]} />)
+    render(<Harness seed={[tracked('SKY', SKY_ID)]} />)
 
     expect(screen.getByText('Statuses not mapped')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Expand project' }))
@@ -116,7 +153,7 @@ describe('JiraProjectRulesGroup · watching', () => {
   })
 
   it('keeps a watched project the catalog no longer offers, so it can be dropped', async () => {
-    render(<Harness seed={[emptyProject('GONE')]} />)
+    render(<Harness seed={[tracked('GONE', '10900')]} />)
     await screen.findByText('Sky Platform')
 
     expect(screen.getByText('not visible to this credential')).toBeInTheDocument()
@@ -125,7 +162,7 @@ describe('JiraProjectRulesGroup · watching', () => {
 
   it('stops watching from the board', async () => {
     const user = userEvent.setup()
-    render(<Harness seed={[emptyProject('SKY')]} />)
+    render(<Harness seed={[tracked('SKY', SKY_ID)]} />)
 
     await user.click(screen.getByRole('button', { name: 'Stop watching SKY' }))
     expect(screen.getByTestId('watched')).toHaveTextContent('')
@@ -149,15 +186,15 @@ function ruleBlock(label: string): HTMLElement {
 }
 
 describe('JiraProjectRulesGroup · arming', () => {
-  it('fetches the project’s own statuses when its row is opened', async () => {
+  it('fetches the project’s own statuses, by its Jira id, when its row is opened', async () => {
     const user = userEvent.setup()
     const fetchMock = stubFetch()
-    render(<Harness seed={[emptyProject('SKY')]} />)
+    render(<Harness seed={[tracked('SKY', SKY_ID)]} />)
 
     await user.click(screen.getByRole('button', { name: 'Expand project' }))
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
-        statusesList('SKY'),
+        statusesList(SKY_ID),
         expect.objectContaining({ method: 'POST' }),
       ),
     )
@@ -166,7 +203,7 @@ describe('JiraProjectRulesGroup · arming', () => {
 
   it('arms the project by mapping pickup, in progress and done — in review is optional', async () => {
     const user = userEvent.setup()
-    render(<Harness seed={[emptyProject('SKY')]} />)
+    render(<Harness seed={[tracked('SKY', SKY_ID)]} />)
     await user.click(screen.getByRole('button', { name: 'Expand project' }))
     await screen.findByText('3 statuses available')
 
@@ -191,7 +228,7 @@ describe('JiraProjectRulesGroup · arming', () => {
 
   it('maps the optional in-review rule, whose first member becomes its write target', async () => {
     const user = userEvent.setup()
-    render(<Harness seed={[emptyProject('SKY')]} />)
+    render(<Harness seed={[tracked('SKY', SKY_ID)]} />)
     await user.click(screen.getByRole('button', { name: 'Expand project' }))
     await screen.findByText('3 statuses available')
 
@@ -206,7 +243,7 @@ describe('JiraProjectRulesGroup · statuses that vanished upstream', () => {
   // downstream degrades quietly — polling skips the term, transitions to a
   // dead canonical fail — so this board is the only place a human is told.
   const withRetiredStatus = (): JiraProjectConfig => ({
-    ...emptyProject('SKY'),
+    ...tracked('SKY', SKY_ID),
     pickup: {
       members: [
         { id: '10000', name: 'To Do' },
@@ -279,7 +316,7 @@ describe('JiraProjectRulesGroup · editing a rule written before statuses had id
   // correct only for as long as it stays untouched. Editing it has to make it
   // sendable, or the edit reverts on the next load with no error shown.
   const legacyRule = (): JiraProjectConfig => ({
-    ...emptyProject('SKY'),
+    ...tracked('SKY', SKY_ID),
     pickup: { members: [{ id: '', name: 'To Do' }] },
     in_progress: {
       members: [{ id: '', name: 'In Progress' }],

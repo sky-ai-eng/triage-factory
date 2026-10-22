@@ -591,7 +591,7 @@ func (s *Server) reachabilityClients(ctx context.Context, orgID, userID string) 
 		insts, err := s.installationsOnOrgHost(ctx, orgID)
 		if err == nil {
 			for _, inst := range insts {
-				client, err := s.ghResolver.ClientFor(ctx, orgID, inst.AccountLogin)
+				client, err := s.ghResolver.ClientForInstallation(ctx, orgID, inst)
 				if err != nil {
 					continue
 				}

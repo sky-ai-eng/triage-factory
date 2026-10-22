@@ -38,6 +38,9 @@ type TeamPRSeeder struct {
 	// GitHub host, returning the user id. A member seeded this way is one
 	// whose authored pull requests must appear.
 	Member func(t *testing.T, login string) string
+	// MemberWithGitHubID is Member for a binding that recorded GitHub's id for
+	// the account beside the login.
+	MemberWithGitHubID func(t *testing.T, login, githubUserID string) string
 	// MemberWithoutIdentity adds a user to the subject team and binds
 	// nothing, returning the user id — the accepted caveat that an unbound
 	// member contributes no rows.
@@ -63,7 +66,9 @@ type TeamPRSeeder struct {
 //   - another team's owned pull request is not this team's;
 //   - the states filter maps as specified, refuses an unknown value, and the
 //     count-only read equals the paged total under the same filters;
-//   - paging applies to the team's set rather than to the entity table.
+//   - paging applies to the team's set rather than to the entity table;
+//   - a member is matched by GitHub's id for the account when both the
+//     snapshot and the binding record one, by login otherwise.
 //
 // What it deliberately does NOT pin is the tracked-set outer filter: local
 // mode is N=1 and has no untracked repo to exclude, so that assertion lives in
@@ -115,6 +120,30 @@ func RunTeamPRStoreConformance(t *testing.T, mk TeamPRStoreFactory) {
 		}
 		if got[6] {
 			t.Error("returned #6 — a member with no bound identity contributes nothing")
+		}
+	})
+
+	t.Run("members_match_by_github_id", func(t *testing.T) {
+		s, orgID, teamID, host, seed := mk(t)
+		// The member is the account 583231, bound as "member-new"; GitHub
+		// gave their old login to the account 999.
+		seed.MemberWithGitHubID(t, "member-new", "583231")
+
+		renamed := prSnap(1, "member-old")
+		renamed.AuthorID = "583231"
+		seed.PR(t, TeamPRFixture{Snapshot: renamed})
+		seed.PR(t, TeamPRFixture{Snapshot: prSnap(2, "member-new")}) // stored before ids were
+		taken := prSnap(3, "member-new")
+		taken.AuthorID = "999"
+		seed.PR(t, TeamPRFixture{Snapshot: taken})
+
+		prs, total, err := s.TeamPRs(ctx, orgID, teamID, host, db.PRListFilter{}, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("TeamPRs: %v", err)
+		}
+		got := numbersOf(prs)
+		if total != 2 || !got[1] || !got[2] || got[3] {
+			t.Errorf("TeamPRs = %v (total %d), want #1 by id and #2 by login", got, total)
 		}
 	})
 

@@ -767,7 +767,8 @@ func TestGitHubWebhook_RateLimited(t *testing.T) {
 	retuneSignedWebhookLimiter(t, s, signedWebhookRatePerSec, 3, &clk)
 
 	// One account per installation: the mirror holds at most one live row per
-	// (org, account_login), so reusing a login across ids would fail the
+	// (org, account_login) among rows with no account id, which is every row
+	// these deliveries write, so reusing a login across ids would fail the
 	// upsert for reasons that have nothing to do with rate limiting.
 	delivery := func(id int) []byte {
 		return []byte(`{"action":"created","installation":{"id":` + strconv.Itoa(id) +

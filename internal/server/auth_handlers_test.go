@@ -1799,6 +1799,69 @@ func TestAuthFlow_Me_NoActiveOrg_StillCarriesTeams(t *testing.T) {
 	}
 }
 
+// TestAuthFlow_LoginClaim_DecidesTheAccountByGitHubID: the sign-in mirror
+// hands UsersStore.UpsertGitHubIdentity the GitHub id the login claim carries,
+// so a renamed login under the same id keeps the email it recorded, while a
+// login another id now signs in with takes the sign-in's email (none, here).
+func TestAuthFlow_LoginClaim_DecidesTheAccountByGitHubID(t *testing.T) {
+	r := newAuthRig(t)
+	userID := r.seedUser()
+
+	signIn := func(login, githubID string, emailVerified bool) *http.Response {
+		t.Helper()
+		claims := validClaimsFor(userID)
+		meta := claims["user_metadata"].(map[string]any)
+		meta["user_name"] = login
+		meta["provider_id"] = githubID
+		claims["email_verified"] = emailVerified
+		resp, _ := r.driveCallbackClaims(claims)
+		if resp.StatusCode != http.StatusFound {
+			t.Fatalf("callback as %s (%s) status=%d, want 302", login, githubID, resp.StatusCode)
+		}
+		return resp
+	}
+	read := func() [3]string {
+		t.Helper()
+		var got [3]string
+		if err := r.h.AdminDB.QueryRow(`
+			SELECT login, COALESCE(github_user_id, ''), COALESCE(email, '')
+			  FROM user_github_identities
+			 WHERE user_id = $1 AND source = 'login_claim'
+		`, userID).Scan(&got[0], &got[1], &got[2]); err != nil {
+			t.Fatalf("read identity: %v", err)
+		}
+		return got
+	}
+
+	signIn("octo-old", "583231", true)
+	signIn("octo-new", "583231", false)
+	if got, want := read(), [3]string{"octo-new", "583231", userID.String() + "@test"}; got != want {
+		t.Errorf("(login, id, email) after a rename = %q, want %q", got, want)
+	}
+
+	resp := signIn("octo-new", "999", false)
+	if got, want := read(), [3]string{"octo-new", "999", ""}; got != want {
+		t.Errorf("(login, id, email) after another account took the login = %q, want %q", got, want)
+	}
+
+	// /api/me serves the account's id beside its login: the value the
+	// predicate editor's "match me" writes.
+	meResp := r.requestWithSid("GET", "/api/me", r.sidFromResp(resp))
+	if meResp.StatusCode != http.StatusOK {
+		t.Fatalf("/api/me status=%d, want 200", meResp.StatusCode)
+	}
+	var me struct {
+		GitHubUsername string `json:"github_username"`
+		GitHubUserID   string `json:"github_user_id"`
+	}
+	if err := json.NewDecoder(meResp.Body).Decode(&me); err != nil {
+		t.Fatalf("decode /api/me: %v", err)
+	}
+	if me.GitHubUsername != "octo-new" || me.GitHubUserID != "999" {
+		t.Errorf("/api/me github = (%q, %q), want (octo-new, 999)", me.GitHubUsername, me.GitHubUserID)
+	}
+}
+
 // TestAuthFlow_LoginClaim_KeysUnderGitHubComWhateverTheDefault pins the one
 // host-keyed row that does NOT follow the deployment's default GitHub. The
 // GoTrue GitHub OAuth login provider is github.com whatever

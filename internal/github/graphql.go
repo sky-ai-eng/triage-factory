@@ -18,7 +18,7 @@ const prBaseFields = `
 	number
 	title
 	body
-	author { __typename login }
+	author { ` + actorFields + ` }
 	state
 	isDraft
 	merged
@@ -35,8 +35,8 @@ const prBaseFields = `
 		pageInfo { hasNextPage }
 		nodes {
 			requestedReviewer {
-				... on User { login }
-				... on Team { slug organization { login } }
+				... on User { login databaseId }
+				... on Team { databaseId slug organization { login } }
 			}
 		}
 	}
@@ -44,7 +44,7 @@ const prBaseFields = `
 		nodes {
 			id
 			fullDatabaseId
-			author { __typename login }
+			author { ` + actorFields + ` }
 			state
 			submittedAt
 			comments { totalCount }
@@ -55,6 +55,13 @@ const prBaseFields = `
 		nodes { fullDatabaseId submittedAt }
 	}
 `
+
+// actorFields are the fields every GraphQL Actor (a pull request's, a
+// review's or a comment's author) is read with: its login, and GitHub's id
+// for the account, which a rename leaves alone. Actor has no databaseId of
+// its own, so the id is asked of the two kinds of account that author pull
+// requests and comments; any other kind reads without one.
+const actorFields = `__typename login ... on User { databaseId } ... on Bot { databaseId }`
 
 // submittedReviewStates are the review states a pull request's reviews are
 // read in. PENDING is left out: the connection would return the viewer's own
@@ -420,13 +427,15 @@ type gqlRRNodes struct {
 
 // gqlReviewer unions GraphQL's User/Team reviewer node. Login is populated
 // for User reviewers; Slug + Organization.Login are populated for Team
-// reviewers. We emit team identifiers as "org/slug" (matching what
-// GET /user/teams returns) so team-based review requests can be matched
-// against the user's team memberships. The older Name field is no longer
-// requested — display names aren't a stable identifier.
+// reviewers, and DatabaseID is GitHub's id for either. Team handles are
+// emitted as "org/slug" (matching what GET /user/teams returns) so team-based
+// review requests can be matched against the user's team memberships. The
+// older Name field is no longer requested — display names aren't a stable
+// identifier.
 type gqlReviewer struct {
-	Login        string `json:"login"` // User
-	Slug         string `json:"slug"`  // Team slug
+	Login        string    `json:"login"` // User
+	Slug         string    `json:"slug"`  // Team slug
+	DatabaseID   gqlBigInt `json:"databaseId"`
 	Organization struct {
 		Login string `json:"login"`
 	} `json:"organization"` // Team's org, for building "org/slug"
@@ -488,14 +497,20 @@ func (n *gqlBigInt) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// gqlAuthor is a GraphQL Actor. Typename is selected beside Login because
-// GraphQL spells a bot's login as its bare App slug ("dependabot"), while REST,
-// TF's own App identity and handler predicates spell it "dependabot[bot]".
-// Every login read off an Actor goes through restLogin.
+// gqlAuthor is a GraphQL Actor, read with actorFields. Typename is selected
+// beside Login because GraphQL spells a bot's login as its bare App slug
+// ("dependabot"), while REST, TF's own App identity and handler predicates
+// spell it "dependabot[bot]". Every login read off an Actor goes through
+// restLogin, and its id through id.
 type gqlAuthor struct {
-	Typename string `json:"__typename"`
-	Login    string `json:"login"`
+	Typename   string    `json:"__typename"`
+	Login      string    `json:"login"`
+	DatabaseID gqlBigInt `json:"databaseId"`
 }
+
+// id is GitHub's id for the actor's account as TF stores it, "" when GitHub
+// returned none.
+func (a gqlAuthor) id() string { return githubID(int64(a.DatabaseID)) }
 
 // restLogin is the actor's login as REST spells it. A Bot login that already
 // carries the suffix is left alone, so a server that returns the REST form
@@ -641,6 +656,7 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 		BodyHash:     bodyHash,
 		BodyMentions: bodyMentions,
 		Author:       pr.Author.restLogin(),
+		AuthorID:     pr.Author.id(),
 		Repo:         pr.Repository.NameWithOwner,
 		URL:          pr.URL,
 		State:        pr.State,
@@ -728,7 +744,7 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 	}
 	for _, rr := range pr.ReviewRequests.Nodes {
 		if login := rr.RequestedReviewer.Login; login != "" {
-			snap.ReviewRequests = append(snap.ReviewRequests, login)
+			addReviewRequest(&snap, login, int64(rr.RequestedReviewer.DatabaseID))
 			continue
 		}
 		// Team reviewer: emit "org/slug" so it matches the format returned
@@ -737,9 +753,9 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 		if slug := rr.RequestedReviewer.Slug; slug != "" {
 			org := rr.RequestedReviewer.Organization.Login
 			if org != "" {
-				snap.ReviewRequests = append(snap.ReviewRequests, org+"/"+slug)
+				addReviewRequest(&snap, org+"/"+slug, int64(rr.RequestedReviewer.DatabaseID))
 			} else {
-				snap.ReviewRequests = append(snap.ReviewRequests, slug)
+				addReviewRequest(&snap, slug, int64(rr.RequestedReviewer.DatabaseID))
 			}
 		}
 	}
@@ -755,6 +771,7 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 				ID:           rev.ID,
 				DatabaseID:   int64(rev.DatabaseID),
 				Author:       login,
+				AuthorID:     rev.Author.id(),
 				State:        rev.State,
 				SubmittedAt:  rev.SubmittedAt,
 				CommentCount: rev.Comments.TotalCount,
@@ -805,4 +822,17 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 	}
 
 	return snap
+}
+
+// addReviewRequest appends one pending review request to snap: its handle to
+// ReviewRequests, and GitHub's id for the requested user or team, when there
+// is one, to ReviewRequestIDs.
+func addReviewRequest(snap *domain.PRSnapshot, handle string, id int64) {
+	snap.ReviewRequests = append(snap.ReviewRequests, handle)
+	if id := githubID(id); id != "" {
+		if snap.ReviewRequestIDs == nil {
+			snap.ReviewRequestIDs = map[string]string{}
+		}
+		snap.ReviewRequestIDs[handle] = id
+	}
 }

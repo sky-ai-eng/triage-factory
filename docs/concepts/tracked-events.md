@@ -23,13 +23,13 @@ most one active task exists per entity, event type and `dedup_key`.
 
 | Event | ID | Trigger | `dedup_key` |
 |-------|----|---------|-------------|
-| **Review Requested** | `github:pr:review_requested` | A user or team appears in the PR's review requests, and it is an identity TF knows: a user's login, or a team (`org/slug`) a user belongs to. One event per such reviewer. In local mode, not emitted on a PR the local user authored, where only a team they are on can be requested. A PR seen for the first time emits it for every request already on it | `user:<login>` / `team:<org>/<slug>` |
+| **Review Requested** | `github:pr:review_requested` | A user or team appears in the PR's review requests, and it is an identity TF knows: a user bound to a TF user, or a team (`org/slug`) mapped to a TF team. One event per such reviewer. In local mode, not emitted on a PR the local user authored, where only a team they are on can be requested. A PR seen for the first time emits it for every request already on it. See [Review requests](#review-requests) | `user_id:<id>` / `team_id:<id>`, or `user:<login>` / `team:<org>/<slug>` for a request read without GitHub's id |
 | **Changes Requested** | `github:pr:review_changes_requested` | A review requesting changes was submitted — see [Reviews](#reviews) | — |
 | **Review: Commented** | `github:pr:review_commented` | A review with comments only was submitted, a reply in a review thread included — see [Reviews](#reviews) | — |
 | **CI Check Failed** | `github:pr:ci_check_failed` | A check run on the head commit completes with `failure`, `timed_out`, `cancelled` or `action_required`. One event per check run; a check run already failing last cycle, by id, does not emit again, and a re-run is a new check run | — |
 | **Merge Conflicts** | `github:pr:conflicts` | `mergeable` changes to `CONFLICTING` | — |
 | **Ready for Review** | `github:pr:ready_for_review` | `isDraft` changes from `true` to `false` | — |
-| **Label Added** | `github:pr:label_added` | A label is added | label name |
+| **Label Added** | `github:pr:label_added` | A label is added. Labels are names here — see [Labels](#labels) | label name |
 | **Label Removed** | `github:pr:label_removed` | A label is removed | label name |
 | **New Comment** | `github:pr:commented` | Someone other than TF commented in the PR's conversation since the last cycle. One event per cycle however many comments landed, naming every commenter — see [Comments](#comments). Comments in review threads arrive as reviews | — |
 | **Mentioned** | `github:pr:mentioned` | A user or team TF knows is @-mentioned in a new comment or review, or by an edit that adds the mention to the PR body. One event per identity, routed to that identity's team(s) as `review_requested` is — see [Mentions](#mentions) | `user:<login>` / `team:<org>/<slug>` |
@@ -40,7 +40,7 @@ most one active task exists per entity, event type and `dedup_key`.
 |-------|----|---------|-------------|
 | **Review: Approved** | `github:pr:review_approved` | An approving review was submitted — see [Reviews](#reviews) | — |
 | **Review: Dismissed** | `github:pr:review_dismissed` | A reviewer's latest review was dismissed — see [Reviews](#reviews) | — |
-| **Review Request Removed** | `github:pr:review_request_removed` | A reviewer TF knows drops off the review requests, because they reviewed or the request was withdrawn. Closes that reviewer's `review_requested` task | `user:<login>` / `team:<org>/<slug>` |
+| **Review Request Removed** | `github:pr:review_request_removed` | A reviewer TF knows drops off the review requests, because they reviewed or the request was withdrawn. Closes that reviewer's `review_requested` task, keyed by id or by handle | keyed as `review_requested` |
 | **CI Check Passed** | `github:pr:ci_check_passed` | A check run completes with any other conclusion (`success`, `neutral`, `skipped`, `stale`) and was not already passing | — |
 | **New Commits** | `github:pr:new_commits` | The head commit changes | — |
 | **PR Body Updated** | `github:pr:body_updated` | The complete PR body changes, including clearing it | — |
@@ -114,6 +114,33 @@ How the new reviews are found:
   move for up to ten minutes. A review that did not advance `updatedAt` waits
   for that floor.
 
+#### Review requests
+
+A pending review request is recorded in the snapshot by the requested user's
+login or team's `org/slug`, and by GitHub's id for that user or team
+(`review_request_ids`). Each cycle compares the requests by id when both
+snapshots carry one, so a user or team renamed between cycles is neither added
+nor removed, and a login GitHub has handed to another account is a different
+reviewer. Against a snapshot stored before ids were recorded the comparison is
+by handle, so the first cycle after ids arrive emits nothing.
+
+The event's `dedup_key` is `user_id:<id>` or `team_id:<id>`, and the metadata
+carries `requested_user_id` or `requested_team_id` beside `requested_login` or
+`requested_team`. A request GitHub returned without an id is keyed and
+carried by its handle alone (`user:<login>` / `team:<org>/<slug>`), as is
+every task created before ids were recorded. A removal
+(`github:pr:review_request_removed`) closes the reviewer's task keyed either
+way: it is keyed like the request and names the handle beside the id. A
+submitted review closes its reviewer's task by `reviewer_id` or by
+`reviewer`.
+
+A requested user resolves to a TF user by GitHub's id when the event carries
+one (a binding that recorded no id is matched by its login), and a requested
+team to the TF team(s) whose mapping holds that GitHub team id. In local mode
+the PR is the local user's own when its `author_id` is the local binding's
+GitHub id, or, when either is missing, when its `author` is the binding's
+login.
+
 #### Mentions
 
 `github:pr:mentioned` reports a user or team TF knows being @-mentioned on a
@@ -162,9 +189,12 @@ inline comment in a review) or `body`. `commenter` and `comment_id` name the
 comment or review: a review's id for `review`, and both empty for `body`. The
 event also carries the PR's `author`, `repo`, `pr_number`, `is_draft`,
 `head_sha` and `labels`. Predicates can filter on `mentioned_login`,
-`mentioned_team`, `mention_source`, `commenter_in`, `commenter`, `author_in`,
-`author`, `repo_in`, `is_draft` and `has_label`; a body mention has no commenter,
-so no `commenter_in` list matches it. The event's time is the comment's
+`mentioned_team`, `mention_source`, `commenter_id_in`, `author_id_in`,
+`repo_in`, `is_draft` and `has_label`; a body mention has no commenter, so no
+`commenter_id_in` list matches it. `mentioned_login` and `mentioned_team` take
+the handle, compared without regard to case, because a mention is text and
+names no id; `commenter_id_in` and `author_id_in` take GitHub account ids (see
+[Identity filters](#identity-filters)). The event's time is the comment's
 creation or the review's submission. The body records no time for an edit, so a
 body mention takes the PR's `updatedAt`.
 
@@ -230,9 +260,9 @@ untouched for a switch back.
 
 | Event | ID | Trigger |
 |-------|----|---------|
-| **Issue Assigned** | `jira:issue:assigned` | The `assignee` field changes to a non-empty value |
+| **Issue Assigned** | `jira:issue:assigned` | The assignee changes to someone (compared by account id) |
 | **Issue Available** | `jira:issue:available` | An unassigned issue appears in the pickup queue, or an assigned issue becomes unassigned |
-| **Priority Changed** | `jira:issue:priority_changed` | The `priority` field changes |
+| **Priority Changed** | `jira:issue:priority_changed` | The priority changes (compared by id). Metadata carries `old_priority_id` and `new_priority_id` beside the names, and the `dedup_key` is the new priority's id — see [Statuses, priorities and issue types](#statuses-priorities-and-issue-types) |
 | **New Comment** | `jira:issue:commented` | Someone other than TF commented since the last cycle. One event per cycle however many comments landed, naming every commenter — see [Comments](#comments) |
 | **Label Added** | `jira:issue:label_added` | A label is added. `dedup_key` is the label name — see [Labels](#labels) |
 | **Label Removed** | `jira:issue:label_removed` | A label is removed. `dedup_key` is the label name |
@@ -241,7 +271,7 @@ untouched for a switch back.
 
 | Event | ID | Trigger |
 |-------|----|---------|
-| **Status Changed** | `jira:issue:status_changed` | The `status` field changes (e.g. To Do → In Progress) |
+| **Status Changed** | `jira:issue:status_changed` | The `status` field changes (e.g. To Do → In Progress), compared by id. Metadata carries `old_status_id` and `new_status_id` beside the names, and the `dedup_key` is the new status's id |
 | **Issue Completed** | `jira:issue:completed` | The `status` changes to Done, Closed, or Resolved |
 | **Issue Unreachable** | `jira:issue:unreachable` | TF will no longer follow a tracked issue — see below |
 | **Issue Body Updated** | `jira:issue:body_updated` | The complete issue description changes, including clearing it |
@@ -288,10 +318,13 @@ rule (Cloud `accountId`, else Data Center `key`, else `name`), so a
 `commenter_in` list holds the same values as an `assignee_in` list. A Linear
 comment an integration posted names the integration as `commenter` and has no
 user id, so no `commenter_in` list matches it. On GitHub the commenter is a
-login, `<slug>[bot]` for a bot, whose comments emit like anyone's; the GitHub
-event also carries the PR's `author`, `repo`, `pr_number`, `is_draft`,
-`head_sha` and `labels`, and predicates can filter it on `author_in`, `repo_in`,
-`is_draft` and `has_label`. The event's time is the newest comment's.
+login, `<slug>[bot]` for a bot, whose comments emit like anyone's, and the
+metadata carries GitHub's id for each author (`commenter_id`,
+`commenter_ids`); the GitHub predicate's `commenter_id_in` matches when anyone
+it lists, by account id, wrote one of them. The GitHub event also carries the
+PR's `author`, `repo`, `pr_number`, `is_draft`, `head_sha` and `labels`, and
+predicates can filter it on `author_id_in`, `repo_in`, `is_draft` and
+`has_label`. The event's time is the newest comment's.
 
 GitHub's event covers the PR's conversation only. A comment in a review thread
 belongs to a review and emits as one (see [Reviews](#reviews)). Edits to a
@@ -350,22 +383,33 @@ still diffs every PR the batch read returned.
 `label_added` and `label_removed` exist for Jira and Linear issues as they do
 for GitHub pull requests: one event per label added or removed since the last
 cycle. `label_name` names the label and `labels` is the issue's whole set after
-the change. Predicates can filter on `label_name`, `has_label`, `assignee_in`,
-and `jira_project_id_in` (Jira) or `linear_team_id_in` (Linear).
+the change. Predicates can filter on `assignee_in` and `jira_project_id_in`
+(Jira) or `linear_team_id_in` (Linear), and on the label as below.
 
 - **Jira** labels are plain strings with no id, and cannot be renamed, so they
-  compare by name and the `dedup_key` is the name.
+  compare by name, the `dedup_key` is the name, and predicates filter on
+  `label_name` and `has_label`, both names. So do GitHub's: a GitHub label's id
+  belongs to one repository, while a filter on a label means the label of that
+  name in every repository the team tracks.
 - **Linear** labels have ids and can be renamed, so they compare by id, the way
   workflow states do: a renamed label emits nothing, and the snapshot stores the
   new name. The `dedup_key` is the label's id, so a label renamed after it was
   added and then added again does not open a second task. A snapshot stored
   before label ids were recorded compares by name for its first refresh; a label
-  it lost in that refresh is keyed by its name.
+  it lost in that refresh is keyed by its name. The label events carry
+  `label_id` beside `label_name`, and every event that carries `labels` carries
+  `label_ids` beside it. Predicates filter on ids, so a label renamed in Linear
+  leaves them matching: `label_id_in` (the label added or removed) and
+  `has_label_id_in` (the issue bears at least one of them), each a label an
+  issue in one of the handler's team's tracked Linear teams can carry, from
+  `POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/labels/list`.
 - A Linear label can sit in a group (a "Difficulty" group holding Easy, Medium
   and Hard), and its name is only its own, so two groups can each hold a
-  "Medium". `label_group` names the group, empty for a label in none, and
-  predicates can filter on it. Switching a single-select group from one value
-  to another emits a `label_removed` and a `label_added` in the same cycle.
+  "Medium". A group is itself a label: `label_group_id` is its id and
+  `label_group` its name, both empty for a label in none, and predicates filter
+  on `label_group_id_in`, the ids of groups (labels the labels list marks
+  `is_group`). Switching a single-select group from one value to another emits
+  a `label_removed` and a `label_added` in the same cycle.
   The group is read from the team's label list, once per cycle and only when one
   of the team's issues has a label change, because selecting it on every issue
   would add to the batch read's complexity. When that read fails, the snapshot
@@ -376,11 +420,50 @@ and `jira_project_id_in` (Jira) or `linear_team_id_in` (Linear).
 
 The labels an issue already has when TF first sees it are its baseline, like
 every other field, and emit nothing. `assigned`, `available` and
-`became_atomic` carry `labels` and take `has_label`, so a rule such as
-"`available`, `has_label: tf-agent`" matches an issue that was labelled before
-discovery. Label events are not suppressed on an issue with open subtasks or
-sub-issues, as `assigned` and `available` are: someone added the label on
-purpose. Removing a label does not close a `label_added` task.
+`became_atomic` carry `labels` and take `has_label` (`label_ids` and
+`has_label_id_in` on Linear), so a rule such as "`available`, `has_label:
+tf-agent`" matches an issue that was labelled before discovery. Label events
+are not suppressed on an issue with open subtasks or sub-issues, as `assigned`
+and `available` are: someone added the label on purpose. Removing a label does
+not close a `label_added` task.
+
+#### Statuses, priorities and issue types
+
+A Jira admin can rename a workflow status, a priority or an issue type, so TF
+identifies each by Jira's id and keeps the name for display. Every Jira event
+that names one carries the id beside it: `status_id` (`assigned`, `available`,
+`became_atomic` and the label events), `old_status_id` and `new_status_id`
+(`status_changed`), `final_status_id` (`completed`), `last_status_id`
+(`unreachable`), `priority_id` and `issue_type_id`, and `old_priority_id` and
+`new_priority_id` (`priority_changed`). `status_changed` and
+`priority_changed` are keyed on the new value's id, so a status renamed while a
+task waits on it does not open a second task the next time the issue enters
+it. A read that carries no id is keyed on the name.
+
+Predicates filter on the ids: `status_id_in`, `new_status_id_in`,
+`old_status_id_in`, `priority_id_in`, `new_priority_id_in`,
+`old_priority_id_in` and `issue_type_id_in`. Each entry must be a status in the
+workflow of a project the handler's team tracks
+(`POST /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/list`), an issue type
+of one (`POST /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/list`,
+read per project because a team-managed project on Cloud has issue types of its
+own), or one of the instance's priorities
+(`POST /api/orgs/{org_id}/jira/priorities/list`). Saving a handler asks Jira,
+under the org's credential, about each id the write adds: a name or an id Jira
+does not offer the team is refused with `422 INVALID_FIELD` on
+`scope_predicate`, Jira not answering refuses the write with `502
+UPSTREAM_UNAVAILABLE`, and a Jira the org has not connected with `409
+NOT_CONFIGURED`. A write that adds no id asks Jira nothing. Events recorded
+before the ids were carried have none, so an id filter never matches them.
+
+Linear's workflow states work the same way: `status_id`, `old_status_id`,
+`new_status_id`, `final_status_id` and `last_status_id` beside the names,
+`status_changed` keyed on the new state's id, and `status_id_in`,
+`new_status_id_in` and `old_status_id_in` checked against the states of the
+Linear teams the handler's team tracks
+(`POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/list`). Linear's
+priority is matched by its label (`priority`, `new_priority`, `old_priority`),
+because its five priorities are a fixed set no workspace can rename.
 
 #### Identity
 
@@ -397,7 +480,9 @@ project's row in the `jira_projects` registry on the entity's site (see
 below). Every Jira event's metadata carries `issue_key`, `issue_id`,
 `project` — the project's key as the read that produced the event spelled it,
 for display — and `jira_project_id`, the project's registry row, which is
-what the router's team gate reads and what predicates match on.
+what the router's team gate reads and what predicates match on. An event that
+names the issue's status, priority or issue type carries Jira's id for it beside
+the name (see [Statuses, priorities and issue types](#statuses-priorities-and-issue-types)).
 
 A handler predicate scopes to projects with `jira_project_id_in`, which names
 them by registry id (the `id` of an entry in `jira_projects` on
@@ -571,7 +656,7 @@ nothing is assigned to, so the second query returns nothing.
 
 | Event | ID | Trigger | `dedup_key` |
 |-------|----|---------|-------------|
-| **Status Changed** | `linear:issue:status_changed` | The workflow state changes. A state renamed in Linear is not a change: states compare by id | new state name |
+| **Status Changed** | `linear:issue:status_changed` | The workflow state changes. A state renamed in Linear is not a change: states compare by id — see [Statuses, priorities and issue types](#statuses-priorities-and-issue-types) | new state id |
 | **Issue Completed** | `linear:issue:completed` | The state enters one of the team's done states (fires beside `status_changed`) | — |
 | **Issue Body Updated** | `linear:issue:body_updated` | The description changes, including clearing it | — |
 | **Parent Changed** | `linear:issue:parent_changed` | The issue moves under another parent, or loses its parent | new parent's UUID, or `none` |
@@ -595,13 +680,15 @@ Every Linear event's metadata carries the issue's identity block —
 `issue_identifier`, `issue_id`, `linear_team_id`, `linear_team_key`,
 `assignee`, `assignee_user_id`, `creator`, `creator_user_id`, `title` — plus
 the fields its event adds
-(`old_status`/`new_status`, `old_priority`/`new_priority`,
-`previous_body_hash`/`body_hash`, `old_parent`/`new_parent`, `final_status`,
-`last_status`, `reason`, `comment_id`/`commenter`/`commenter_user_id`/
-`commenter_user_ids`, `old_identifier`/`old_linear_team_id`/
-`old_linear_team_key`, `label_name`/`label_group`, and `labels` on
-`assigned`, `available`, `became_atomic`, `body_updated` and the label
-events). `linear_team_id` is what the router's team gate reads
+(`status`/`status_id`, `old_status`/`old_status_id` and
+`new_status`/`new_status_id`, `old_priority`/`new_priority`,
+`previous_body_hash`/`body_hash`, `old_parent_id`/`new_parent_id` and
+`old_parent`/`new_parent`, `final_status`/`final_status_id`,
+`last_status`/`last_status_id`, `reason`, `comment_id`/`commenter`/
+`commenter_user_id`/`commenter_user_ids`, `old_identifier`/
+`old_linear_team_id`/`old_linear_team_key`, `label_id`/`label_name` and
+`label_group_id`/`label_group`, and `labels`/`label_ids` on `assigned`,
+`available`, `became_atomic`, `body_updated` and the label events). `linear_team_id` is what the router's team gate reads
 (with `old_linear_team_id` on `identifier_changed`, see below), and
 `assignee_user_id` is what assignee-centric routing joins against a
 member's bound Linear identity. `creator_user_id` is what `creator_in` matches
@@ -620,6 +707,14 @@ editing or promoting a handler refuses any other entry, a team key included,
 with `422 INVALID_FIELD` on `scope_predicate`. An edit is checked only for the
 entries it adds, so a Linear team the team has since stopped tracking never
 blocks an edit that leaves it in place.
+
+`parent_changed` names both parents twice: by UUID (`old_parent_id`,
+`new_parent_id`) and by identifier (`old_parent`, `new_parent`, for
+display). Its `new_parent_id` filter matches the new parent's UUID, so a
+parent that moves team or whose team key is renamed still matches; an empty
+value matches a cleared parent. A value that is not a Linear id, such as an
+identifier like `ENG-12`, is refused with `422 INVALID_FIELD` on
+`scope_predicate`.
 
 #### Identity
 
@@ -754,11 +849,11 @@ Follow-up ingestion (the un-mentioned `message.channels` / `message.groups` deli
 
 ### Channel ID changes
 
-TF registers every channel it sees or a team tracks, and everything that refers to a channel holds that registry row: each team's tracking of it, each thread's entity, and the `channel_in` filter of every `slack:message` handler. A thread's entity is keyed by its channel's ID and its root message's timestamp. Slack gives a private channel a new ID when it's shared with another organization through Slack Connect (`G…` becomes `C…`), announces it with `channel_id_changed`, and uses the new ID for everything after. TF follows the change in one transaction: the registry row takes the new ID, and so do the values that spell it — the thread entities' keys and permalinks, and the Slack artifacts and audit-log links that name it. Tracking and handler filters need nothing. It emits no event.
+TF registers every channel it sees or a team tracks, and everything that refers to a channel holds that registry row: each team's tracking of it, each thread's entity, and the `channel_in` filter of every `slack:message` handler. A thread is identified by its channel's registry row and its root message's timestamp, and found by those; its entity's key (`<channel ID>/<root ts>`) is what it's displayed as. A message the bot posts is recorded as an artifact keyed the same way, by the channel's registry row and the message's timestamp. Slack gives a private channel a new ID when it's shared with another organization through Slack Connect (`G…` becomes `C…`), announces it with `channel_id_changed`, and uses the new ID for everything after. TF follows the change in one transaction: the registry row takes the new ID, and so do the values that display it — the thread entities' keys and permalinks, the targets and permalinks of the Slack artifacts, and the audit-log links that name it. Tracking, handler filters, how a thread is found and how an artifact is keyed need nothing. It emits no event.
 
 TF also records the change, because event metadata is immutable: a message recorded before the share names the old ID for good. Everything that acts on a recorded message reads its channel as the current ID — handler filters, the team gate and owner resolution, a run's task context and injected follow-ups, the exec verbs, and the bot's own reactions, replies and working indicator — and so does ingest, for a message Slack generated before the change but delivered after it.
 
-Slack doesn't order the change against other deliveries. A message made under the new ID that arrives before the change has no thread to land in yet: an un-mentioned follow-up is dropped, and a mention registers the new ID as a channel of its own and starts a new thread entity. When the change arrives, that registry row is merged into the channel's — its tracking, threads and handler filters move onto the channel — the thread's original entity takes the key, and the one the mention started is closed beside it, keeping its own task and conversation. A change Slack delivers again, or delivers after a later change to the same channel, leaves the channel on its latest ID.
+Slack doesn't order the change against other deliveries. A message made under the new ID that arrives before the change has no thread to land in yet: an un-mentioned follow-up is dropped, and a mention registers the new ID as a channel of its own and starts a new thread entity. When the change arrives, that registry row is merged into the channel's — its tracking, threads, handler filters and the artifacts keyed on it move onto the channel — the thread's original entity stays the thread's, and the one the mention started is closed beside it, keeping its own task and conversation. A change Slack delivers again, or delivers after a later change to the same channel, leaves the channel on its latest ID.
 
 ## System Events
 
@@ -803,13 +898,14 @@ the old repository's #N, and the two never merge.
 
 The tracker stores these fields for each PR and diffs them between cycles:
 
-- `number`, `title`, `author`, `repo`, `head_repo`, `url`
+- `number`, `title`, `author`, `author_id` (GitHub's id for the author's account), `repo`, `head_repo`, `url`
 - `state` (OPEN, CLOSED, MERGED), `is_draft`, `merged`, `mergeable` (MERGEABLE, CONFLICTING, UNKNOWN)
 - `head_ref`, `base_ref`, `head_sha`
 - `additions`, `deletions`, `changed_files`
 - `check_runs[]` — structured per-check-run data for the current head SHA, deduped by name (latest execution wins). Each entry: `id`, `name`, `status`, `conclusion`, `completed_at`, `details_url`, `workflow_run_id`. `details_url` is GitHub's `details_url` — the CI provider's "more info" link (for Actions: `/actions/runs/N/job/M`; for third-party CI: provider-defined), not GitHub's narrower check-run page URL.
 - `review_requests[]` — pending reviewer identifiers: user logins for direct requests, `org/slug` for team requests
-- `reviews[]` — latest review per reviewer: `id` (node id), `database_id`, `author`, `state`, `submitted_at`, `comment_count`
+- `review_request_ids` — GitHub's id for each entry of `review_requests` that GitHub returned one for, keyed by the entry; see [Review requests](#review-requests)
+- `reviews[]` — latest review per reviewer: `id` (node id), `database_id`, `author`, `author_id`, `state`, `submitted_at`, `comment_count`
 - `review_count` — the number of submitted reviews
 - `review_marker` — the newest submitted review TF has read, `{id, submitted_at}`; see [Reviews](#reviews)
 - `labels[]`, `updated_at`
@@ -818,7 +914,18 @@ The tracker stores these fields for each PR and diffs them between cycles:
 - `comment_count` — the number of conversation comments
 - `comment_marker` — the newest conversation comment TF has read, `{id, created_at}`; see [Comments](#comments)
 
-`author` and each review's `author` are logins as GitHub's REST API spells them: a bot is `<slug>[bot]` (`dependabot[bot]`), the form event metadata carries as `author` and `reviewer` and the form a handler predicate such as `author_in` must use. GraphQL returns a bot's login without the suffix; the snapshot builder adds it.
+`author` and each review's `author` are logins as GitHub's REST API spells them: a bot is `<slug>[bot]` (`dependabot[bot]`), the form event metadata carries as `author` and `reviewer`. GraphQL returns a bot's login without the suffix; the snapshot builder adds it. Beside every login the snapshot records GitHub's id for the account (`author_id`), which a rename does not change. A snapshot stored before ids were recorded has none, and neither does an actor GitHub returns without one (a deleted account).
+
+Every GitHub event's metadata carries the ids beside the logins it names: `author_id` for the PR author, `reviewer_id` on the review events, `commenter_id` (and `commenter_ids`, beside `commenter_logins`) on `commented`, `commenter_id` on `mentioned`, and `requested_user_id` / `requested_team_id` on the review-request events. A mention has no id of its own: `mentioned_login` and `mentioned_team` are the handle the text spelled, and a mention is resolved and keyed by it. An event recorded before ids were carries none.
+
+#### Identity filters
+
+A GitHub handler predicate names people and teams by GitHub's id, which a rename does not change, never by login:
+
+- `author_id_in` (every GitHub event), `reviewer_id_in` (the review events), `commenter_id_in` (`commented` and `mentioned`) and `requested_user_id_in` (`review_requested`, `review_request_removed`) take GitHub account ids, matched exactly against `author_id`, `reviewer_id`, `commenter_ids` / `commenter_id` and `requested_user_id`. A team member's id is the `github_user_id` of `GET /api/me` and of the team roster (`POST /api/teams/{team_id}/members/list`). Any other account, a bot included, is resolved from its login through the org's GitHub credential with `GET /api/orgs/{org_id}/github/users/by-name/{login}`, which answers `404` for a login no account holds; `GET /api/orgs/{org_id}/github/users/{github_user_id}` names an id by its current login. Creating, editing or promoting a handler refuses an entry that is not an account id, a login included, with `422 INVALID_FIELD` on `scope_predicate`.
+- `requested_team_id_in` (`review_requested`, `review_request_removed`) takes GitHub team ids, matched against `requested_team_id`. Each entry must be the `github_team_id` of one of the handler's team's GitHub-team mappings (`GET /api/teams/{team_id}/github-groups`), the teams whose review requests route to it, and any other entry, an `org/slug` included, is refused with `422 INVALID_FIELD` on `scope_predicate`.
+
+As with `repo_in`, an edit is checked only for the entries it adds. An empty list filters nothing. An event recorded before ids were carries none, so an identity filter never matches it: re-evaluating such an event (a deferred trigger re-scored on an old task, an injected follow-up) finds no match. A GitHub predicate has no login-valued identity field: `author_in`, `author`, `reviewer_in`, `reviewer`, `commenter_in`, `commenter`, `requested_login` and `requested_team` are unknown fields, refused with `400`. A local install's stored predicates are migrated to the id fields, each login replaced by the id of the identity binding holding it on the org's GitHub host. An entry the migration could not resolve, a login no binding with an id holds or a team's `org/slug`, stays as written and matches nothing until the handler is edited.
 
 Every GitHub event's metadata names its repository twice: `repo`, the `owner/name` it had when the event fired, and `repository_id`, the repository's registry row, which a rename does not move. A handler predicate scopes to repositories with `repo_in`, which names them by registry id (the `id` field of `POST /api/repos/list` with `team_id`), not by `owner/name`. A team's handlers only ever see events from repositories the team tracks — the router's team gate asks about the registry row the event's pull request references, never the name in its key — so an empty `repo_in` matches every one of them, and each entry must be a repository the handler's team tracks. Creating, editing or promoting a handler refuses any other entry, an `owner/name` included, with `422 INVALID_FIELD` on `scope_predicate`. An edit is checked only for the entries it adds, so a repository the team has since stopped tracking never blocks an edit that leaves it in place.
 
@@ -831,10 +938,11 @@ which it is matched on), `scope` (the org's Jira site) and
 - `id` (issue id), `key` (the entity's `source_id`), `project_id`, `project_key` (the project's key as the read spelled it), `summary`, `url`
 - `body_hash` — fingerprint of the complete description; the description itself is mirrored onto the entity, capped at 2,000 codepoints
 - `status`, `status_id` — compared by id
-- `assignee` (display name), `assignee_account_id`, `priority`
+- `assignee` (display name), `assignee_account_id` — compared by account id, so a display name change is not a reassignment; by display name only against a snapshot stored before account ids were recorded
 - `reporter` (display name), `reporter_account_id` — the account id is derived as the assignee's is (Cloud `accountId`, else Data Center `key`, else `name`). Carried on `assigned`, `available` and `became_atomic`, where `reporter_in` matches it. A reporter change emits nothing
 - `labels[]` — compared by name for `label_added` / `label_removed`
-- `issue_type`, `parent_key`
+- `priority`, `priority_id` — compared by id, so a priority renamed in Jira emits nothing; by name against a snapshot without an id
+- `issue_type`, `issue_type_id`, `parent_key`
 - `comment_count`, `last_comment_id`, `last_comment_at` — the newest comment; empty while it is past the page the batch read returns and has not been read
 - `open_subtask_count` — subtasks not in a configured done status
 - `created_at`, `updated_at`

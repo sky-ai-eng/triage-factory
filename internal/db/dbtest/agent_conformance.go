@@ -51,28 +51,31 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 
 		// The all-or-nothing identity pair: one half empty clears both, and
 		// only the row says so.
-		half, err := store.SetGitHubOrgIdentity(ctx, orgID, id, "octocat", "")
+		half, err := store.SetGitHubOrgIdentity(ctx, orgID, id, "octocat", "583231", "")
 		if err != nil {
 			t.Fatalf("SetGitHubOrgIdentity (half): %v", err)
 		}
 		AssertWriteReturnedStoredRow(t, "SetGitHubOrgIdentity (half)", half, read)
-		if half.GitHubOrgLogin != "" || half.GitHubOrgEmail != "" {
-			t.Errorf("SetGitHubOrgIdentity returned %+v, want both identity columns cleared", half)
+		if half.GitHubOrgLogin != "" || half.GitHubOrgUserID != "" || half.GitHubOrgEmail != "" {
+			t.Errorf("SetGitHubOrgIdentity returned %+v, want every identity column cleared", half)
 		}
 		// The row carries what the write's arguments say nothing about, which
 		// is why an input struct cannot stand in for it.
 		if half.DisplayName != "Returned Bot" {
 			t.Errorf("SetGitHubOrgIdentity returned display name %q, want the row's", half.DisplayName)
 		}
-		whole, err := store.SetGitHubOrgIdentity(ctx, orgID, id, "octocat", "octo@example.com")
+		whole, err := store.SetGitHubOrgIdentity(ctx, orgID, id, "octocat", "583231", "octo@example.com")
 		if err != nil {
 			t.Fatalf("SetGitHubOrgIdentity: %v", err)
 		}
 		AssertWriteReturnedStoredRow(t, "SetGitHubOrgIdentity", whole, read)
+		if whole.GitHubOrgUserID != "583231" {
+			t.Errorf("SetGitHubOrgIdentity returned GitHubOrgUserID %q, want 583231", whole.GitHubOrgUserID)
+		}
 
 		// A miss is an error rather than a silent no-op.
 		missing := uuid.New().String()
-		if _, err := store.SetGitHubOrgIdentity(ctx, orgID, missing, "o", "o@e.test"); !errors.Is(err, db.ErrNoSuchAgent) {
+		if _, err := store.SetGitHubOrgIdentity(ctx, orgID, missing, "o", "", "o@e.test"); !errors.Is(err, db.ErrNoSuchAgent) {
 			t.Errorf("SetGitHubOrgIdentity on a missing id: got %v, want db.ErrNoSuchAgent", err)
 		}
 	})
@@ -215,22 +218,22 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 		if got == nil || got.GitHubOrgLogin != "" {
 			t.Fatalf("fresh agent GitHubOrgLogin=%v, want empty", got)
 		}
-		if _, err := store.SetGitHubOrgIdentity(ctx, orgID, id, "acme-bot[bot]", "bot@example.com"); err != nil {
+		if _, err := store.SetGitHubOrgIdentity(ctx, orgID, id, "acme-bot[bot]", "41898282", "bot@example.com"); err != nil {
 			t.Fatalf("SetGitHubOrgIdentity: %v", err)
 		}
 		got, _ = store.GetForOrg(ctx, orgID)
-		if got == nil || got.GitHubOrgLogin != "acme-bot[bot]" || got.GitHubOrgEmail != "bot@example.com" {
-			t.Errorf("GitHub org identity=%v want acme-bot[bot] <bot@example.com>", got)
+		if got == nil || got.GitHubOrgLogin != "acme-bot[bot]" || got.GitHubOrgUserID != "41898282" || got.GitHubOrgEmail != "bot@example.com" {
+			t.Errorf("GitHub org identity=%v want acme-bot[bot] (41898282) <bot@example.com>", got)
 		}
 		// Setting the org login must NOT disturb the PAT-user FK or other fields.
 		if got.DisplayName != "Test" {
 			t.Errorf("DisplayName=%q corrupted by SetGitHubOrgIdentity", got.DisplayName)
 		}
-		if _, err := store.SetGitHubOrgIdentity(ctx, orgID, id, "", ""); err != nil {
+		if _, err := store.SetGitHubOrgIdentity(ctx, orgID, id, "", "", ""); err != nil {
 			t.Fatalf("SetGitHubOrgIdentity clear: %v", err)
 		}
 		got, _ = store.GetForOrg(ctx, orgID)
-		if got == nil || got.GitHubOrgLogin != "" || got.GitHubOrgEmail != "" {
+		if got == nil || got.GitHubOrgLogin != "" || got.GitHubOrgUserID != "" || got.GitHubOrgEmail != "" {
 			t.Errorf("GitHub org identity=%v after clear, want empty", got)
 		}
 
@@ -244,18 +247,18 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 		}
 		for _, partial := range partials {
 			t.Run(partial.name, func(t *testing.T) {
-				if _, err := store.SetGitHubOrgIdentity(ctx, orgID, id, "acme-bot[bot]", "bot@example.com"); err != nil {
+				if _, err := store.SetGitHubOrgIdentity(ctx, orgID, id, "acme-bot[bot]", "41898282", "bot@example.com"); err != nil {
 					t.Fatalf("seed full identity: %v", err)
 				}
-				if _, err := store.SetGitHubOrgIdentity(ctx, orgID, id, partial.login, partial.email); err != nil {
+				if _, err := store.SetGitHubOrgIdentity(ctx, orgID, id, partial.login, "41898282", partial.email); err != nil {
 					t.Fatalf("SetGitHubOrgIdentity partial: %v", err)
 				}
 				got, err := store.GetForOrg(ctx, orgID)
 				if err != nil {
 					t.Fatalf("GetForOrg: %v", err)
 				}
-				if got == nil || got.GitHubOrgLogin != "" || got.GitHubOrgEmail != "" {
-					t.Errorf("GitHub org identity=%v after partial write, want both fields empty", got)
+				if got == nil || got.GitHubOrgLogin != "" || got.GitHubOrgUserID != "" || got.GitHubOrgEmail != "" {
+					t.Errorf("GitHub org identity=%v after partial write, want every field empty", got)
 				}
 			})
 		}
@@ -263,7 +266,7 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 
 	t.Run("SetGitHubOrgIdentity_OnInvalidAgentUUID_RefusesTheID", func(t *testing.T) {
 		store, orgID := factory(t)
-		if _, err := store.SetGitHubOrgIdentity(context.Background(), orgID, "not-a-uuid", "octocat", "octocat@example.com"); !errors.Is(err, db.ErrNoSuchAgent) {
+		if _, err := store.SetGitHubOrgIdentity(context.Background(), orgID, "not-a-uuid", "octocat", "", "octocat@example.com"); !errors.Is(err, db.ErrNoSuchAgent) {
 			t.Errorf("SetGitHubOrgIdentity invalid agent UUID: want db.ErrNoSuchAgent, got %v", err)
 		}
 	})

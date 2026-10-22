@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -29,7 +30,8 @@ func coherenceFixture(t *testing.T, eventType string, metadata any) (*Spawner, s
 		t.Fatalf("load fixture task/entity: %v", err)
 	}
 	snapshot, _ := json.Marshal(domain.PRSnapshot{Repo: "o/r", Number: 7, HeadRepo: "o/r", HeadRef: "feature/coherence", HeadSHA: "new-head"})
-	if _, err := database.Exec(`UPDATE entities SET source_id = 'o/r#7', external_id = ?, snapshot_json = ? WHERE id = ?`, coherencePRNodeID, string(snapshot), entityID); err != nil {
+	repositoryID := dbseed.GitHubRepository(t, database, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, "o", "r")
+	if _, err := database.Exec(`UPDATE entities SET source_id = 'o/r#7', external_id = ?, snapshot_json = ?, repository_id = ? WHERE id = ?`, coherencePRNodeID, string(snapshot), repositoryID, entityID); err != nil {
 		t.Fatalf("update PR snapshot: %v", err)
 	}
 	raw, _ := json.Marshal(metadata)
@@ -204,6 +206,9 @@ func TestHandlePRCoherence_PendingReviewAndPRCheckoutTargetOtherEntities(t *test
 	}); err != nil {
 		t.Fatalf("seed PR worktree: %v", err)
 	}
+	// The event spells the repository's name from before a rename; the
+	// checkout is reached through the registry row the PR's entity references.
+	dbseed.RenameRepositoryOnly(t, database, prRepo.ID, "o", "renamed")
 
 	s.HandlePRCoherence(coherenceDisposition(t, source, ""))
 	for _, conversationID := range []string{"review-worker", "pr-worker"} {

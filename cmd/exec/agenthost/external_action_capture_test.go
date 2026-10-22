@@ -136,9 +136,11 @@ func TestCapture_JiraActions_RecordExternalActions(t *testing.T) {
 }
 
 // TestCapture_BranchPush_RecordsActionAndDedupsTwin pins the branch capture: a
-// push records ActionBranchPushed under the github credential with the
-// deterministic conversation:ref:sha dedup key, and a second observation of
-// the SAME push (the git hook+proxy twin) collapses to one action row.
+// push records ActionBranchPushed under the github credential, about the
+// repository's registry row, with the deterministic
+// conversation:repository:ref:sha dedup key. A second observation of the SAME
+// push (the git hook+proxy twin) collapses to one action row; the same ref and
+// sha pushed to another repository is that repository's own row.
 func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
@@ -149,7 +151,7 @@ func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 			stores, info := newCaptureStores(t, eventTriggered)
 			client := NewLocal(stores, info)
 			ctx := context.Background()
-			registerRepo(t, stores, "octo", "repo", "1")
+			repoID := registerRepo(t, stores, "octo", "repo", "1")
 
 			branch, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feat", "abc123", true)
 			if !ok {
@@ -173,7 +175,10 @@ func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 				a.ExternalID != "refs/heads/feat" {
 				t.Errorf("branch action mismatch: %+v", a)
 			}
-			if want := domain.BranchPushDedupKey(info.ConversationID, "refs/heads/feat", "abc123"); a.DedupKey != want {
+			if a.RepositoryID != repoID || a.EntityID != "" {
+				t.Errorf("branch action references (entity %q, repository %q), want repository %s", a.EntityID, a.RepositoryID, repoID)
+			}
+			if want := domain.BranchPushDedupKey(info.ConversationID, repoID, "refs/heads/feat", "abc123"); a.DedupKey != want {
 				t.Errorf("branch dedup_key = %q, want %q", a.DedupKey, want)
 			}
 			// A genuinely new push (new sha) is recorded distinctly.
@@ -183,6 +188,14 @@ func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 			}
 			if got := len(listExternalActions(t, stores)); got != 2 {
 				t.Errorf("a new push (new sha) should append: want 2 actions, got %d", got)
+			}
+			registerRepo(t, stores, "octo", "other", "2")
+			other, _ := domain.NewBranchArtifact("octo/other", "refs/heads/feat", "abc123", true)
+			if _, err := client.UpsertArtifact(ctx, other); err != nil {
+				t.Fatalf("other-repository UpsertArtifact: %v", err)
+			}
+			if got := len(listExternalActions(t, stores)); got != 3 {
+				t.Errorf("the same ref and sha in another repository should append: want 3 actions, got %d", got)
 			}
 		})
 	}

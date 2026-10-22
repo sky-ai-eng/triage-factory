@@ -241,12 +241,14 @@ func (r *slackExecRig) seedWorkspace(orgID, userID, workspaceID, apiAppID, botTo
 
 // seedChannel registers channelID in the org's channel registry, pointed at
 // workspaceID.
-func (r *slackExecRig) seedChannel(orgID, workspaceID, channelID string) {
+func (r *slackExecRig) seedChannel(orgID, workspaceID, channelID string) string {
 	r.t.Helper()
 	admin := slackstore.FromStores(r.stor)
-	if _, err := admin.Channels.EnsureSystem(r.t.Context(), orgID, workspaceID, channelID, "general"); err != nil {
+	channel, err := admin.Channels.EnsureSystem(r.t.Context(), orgID, workspaceID, channelID, "general")
+	if err != nil {
 		r.t.Fatalf("ensure channel: %v", err)
 	}
+	return channel.ID
 }
 
 // trackChannel makes teamID a tracker of channelID — registering the channel
@@ -409,7 +411,7 @@ func TestSlackExecHandler_Send_RecordsArtifactAndAction(t *testing.T) {
 			r := newSlackExecRig(t)
 			orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-send-"+name)
 			r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
-			r.seedChannel(orgID, "T1", "C1")
+			row := r.seedChannel(orgID, "T1", "C1")
 			r.trackChannel(orgID, owner, teamID, "C1")
 			conversationID := r.seedConversation(orgID, teamID, owner, eventTriggered)
 
@@ -433,7 +435,7 @@ func TestSlackExecHandler_Send_RecordsArtifactAndAction(t *testing.T) {
 			wantTarget := domain.SlackSourceID("C1", out.TS)
 			if a.Provider != domain.ArtifactProviderSlack || a.Kind != domain.ArtifactKindMessage ||
 				a.Target != wantTarget || a.ExternalID != out.TS || a.State != domain.ArtifactStateMessagePosted ||
-				a.DedupKey != domain.ArtifactDedupKey(domain.ArtifactProviderSlack, domain.ArtifactKindMessage, "C1/"+out.TS, "") {
+				a.DedupKey != domain.ArtifactDedupKey(domain.ArtifactProviderSlack, domain.ArtifactKindMessage, domain.SlackMessageResource(row, out.TS), "") {
 				t.Errorf("artifact mismatch: %+v (want target=%q)", a, wantTarget)
 			}
 			if a.ConversationID != conversationID || a.TeamID != teamID {
@@ -1034,6 +1036,44 @@ func TestSlackExecHandler_Send_ChannelMovedToANewID(t *testing.T) {
 	arts := r.artifactsForConversation(orgID, conversationID)
 	if len(arts) != 1 || arts[0].Target != domain.SlackSourceID("C0EXEC001", "1700000000.000100") {
 		t.Errorf("artifacts = %+v, want one targeting the thread under C0EXEC001", arts)
+	}
+}
+
+// TestSlackExecHandler_Edit_AfterAChannelMove: a message artifact is keyed on
+// the channel's registry row, so an edit after Slack moved the channel to a
+// new id upserts the send's row, whichever id the agent names, and the move
+// itself rewrote only the row's target.
+func TestSlackExecHandler_Edit_AfterAChannelMove(t *testing.T) {
+	for _, editAs := range []string{"G0EXEC002", "C0EXEC002"} {
+		t.Run("edit as "+editAs, func(t *testing.T) {
+			r := newSlackExecRig(t)
+			orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-edit-moved-"+editAs)
+			r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+			row := r.seedChannel(orgID, "T1", "G0EXEC002")
+			r.trackChannel(orgID, owner, teamID, "G0EXEC002")
+			conversationID := r.seedConversation(orgID, teamID, owner, true)
+			info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
+
+			sendOut, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{Channel: "G0EXEC002", Body: "first take"})
+			if err != nil {
+				t.Fatalf("send: %v", err)
+			}
+			wantKey := domain.ArtifactDedupKey(domain.ArtifactProviderSlack, domain.ArtifactKindMessage, domain.SlackMessageResource(row, sendOut.TS), "")
+			if _, err := slackstore.FromStores(r.stor).Channels.MoveSystem(r.t.Context(), orgID, "G0EXEC002", "C0EXEC002"); err != nil {
+				t.Fatalf("MoveSystem: %v", err)
+			}
+			if _, err := r.hdl.edit(context.Background(), r.rt(info), slackEditArgs{Channel: editAs, TS: sendOut.TS, Body: "edited take"}); err != nil {
+				t.Fatalf("edit: %v", err)
+			}
+
+			arts := r.artifactsForConversation(orgID, conversationID)
+			if len(arts) != 1 {
+				t.Fatalf("edit after the move should upsert the send's row, got %d artifacts: %+v", len(arts), arts)
+			}
+			if arts[0].DedupKey != wantKey || arts[0].Target != domain.SlackSourceID("C0EXEC002", sendOut.TS) {
+				t.Errorf("artifact = %+v, want key %s and the thread under C0EXEC002 as its target", arts[0], wantKey)
+			}
+		})
 	}
 }
 

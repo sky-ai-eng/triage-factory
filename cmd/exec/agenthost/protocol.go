@@ -210,18 +210,14 @@ type repoResult struct {
 	Repo *domain.Repository `json:"repo,omitempty"`
 }
 
-type teamTracksRepoArgs struct {
-	Owner string `json:"owner"`
-	Repo  string `json:"repo"`
+// repositoryIDArgs names a repository by its registry row id, the handle a
+// caller holds once GetRepo has resolved the agent's name.
+type repositoryIDArgs struct {
+	RepositoryID string `json:"repository_id"`
 }
 
-type teamTracksRepoResult struct {
+type teamTracksRepositoryResult struct {
 	Tracks bool `json:"tracks"`
-}
-
-type taskOwnRepoArgs struct {
-	Owner string `json:"owner"`
-	Repo  string `json:"repo"`
 }
 
 type taskOwnRepoResult struct {
@@ -730,7 +726,7 @@ const (
 	methodGetTask                             = "GetTask"
 	methodListRepos                           = "ListRepos"
 	methodGetRepo                             = "GetRepo"
-	methodTeamTracksRepo                      = "TeamTracksRepo"
+	methodTeamTracksRepository                = "TeamTracksRepository"
 	methodGetConversationWorktreeByRepoRef    = "GetConversationWorktreeByRepoRef"
 	methodListConversationWorktrees           = "ListConversationWorktrees"
 	methodInsertConversationWorktree          = "InsertConversationWorktree"

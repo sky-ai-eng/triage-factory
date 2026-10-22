@@ -178,6 +178,26 @@ func TestDetectReassignedRepoNames(t *testing.T) {
 	}
 }
 
+func TestRenamedOwnerExternalID(t *testing.T) {
+	tests := []struct {
+		stored, storedOwnerID string
+		observed              RepoRef
+		want                  string
+		because               string
+	}{
+		{"octo/api", "900", RepoRef{Owner: "globex", Repo: "api", OwnerExternalID: "950"}, "950", "a transfer the observation names"},
+		{"octo/api", "900", RepoRef{Owner: "Octo", Repo: "platform-api"}, "900", "the owner login did not move, case-insensitively"},
+		{"octo/api", "900", RepoRef{Owner: "globex", Repo: "api"}, "", "the owner moved and the observation names no account"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.because, func(t *testing.T) {
+			if got := RenamedOwnerExternalID(tc.stored, tc.storedOwnerID, tc.observed); got != tc.want {
+				t.Errorf("RenamedOwnerExternalID(%q, %q, %s) = %q, want %q", tc.stored, tc.storedOwnerID, tc.observed.Slug(), got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRewriteRepoSlugPrefix(t *testing.T) {
 	const from, to = "octo/api", "octo/platform-api"
 	tests := []struct {

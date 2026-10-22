@@ -112,9 +112,12 @@ func RunGitHubPendingBindConformance(t *testing.T, mk GitHubPendingBindFactory) 
 		// the consume has to hand both back exactly.
 		be := mk(t)
 		now := time.Now().UTC()
+		// The install leg's record also carries the account's GitHub id, which
+		// the installation GitHub returns is held to; the authorize leg's
+		// names the account only as typed, and reads back with no id.
 		for _, rec := range []domain.GitHubPendingBind{
 			{NonceHash: "hash-authorize", Leg: domain.GitHubBindLegAuthorize, AccountLogin: "Acme-Corp"},
-			{NonceHash: "hash-install", Leg: domain.GitHubBindLegInstall, AccountLogin: "acme-corp"},
+			{NonceHash: "hash-install", Leg: domain.GitHubBindLegInstall, AccountLogin: "acme-corp", AccountID: "1234"},
 		} {
 			rec.OrgID, rec.UserID = be.OrgID, be.UserID
 			rec.CreatedAt, rec.ExpiresAt = now, now.Add(db.GitHubPendingBindTTL)
@@ -125,9 +128,9 @@ func RunGitHubPendingBindConformance(t *testing.T, mk GitHubPendingBindFactory) 
 			if err != nil || got == nil {
 				t.Fatalf("ConsumeSystem(%s) = %v, %v", rec.NonceHash, got, err)
 			}
-			if got.Leg != rec.Leg || got.AccountLogin != rec.AccountLogin {
-				t.Errorf("consumed %s = (leg %q, account %q), want (%q, %q) back verbatim",
-					rec.NonceHash, got.Leg, got.AccountLogin, rec.Leg, rec.AccountLogin)
+			if got.Leg != rec.Leg || got.AccountLogin != rec.AccountLogin || got.AccountID != rec.AccountID {
+				t.Errorf("consumed %s = (leg %q, account %q, id %q), want (%q, %q, %q) back verbatim",
+					rec.NonceHash, got.Leg, got.AccountLogin, got.AccountID, rec.Leg, rec.AccountLogin, rec.AccountID)
 			}
 		}
 	})

@@ -102,10 +102,12 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 		return listOutput{}, fmt.Errorf("workspace list: resolve run root: %w", err)
 	}
 
+	// Keyed by registry row id: a ledger row and a tracked row are the same
+	// repository when they reference the same row, whatever each spells it.
 	materializedSet := make(map[string]struct{}, len(rows))
 	materialized := make([]listMaterialized, 0, len(rows))
 	for _, r := range rows {
-		materializedSet[r.RepoID] = struct{}{}
+		materializedSet[r.RepositoryID] = struct{}{}
 		materialized = append(materialized, listMaterialized{
 			Repo: r.RepoID,
 			Path: agenthost.AgentViewPath(hostRoot, agentRoot, r.Path),
@@ -126,7 +128,7 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 		if p.CloneURL == "" {
 			continue
 		}
-		if _, alreadyAdded := materializedSet[p.Slug()]; alreadyAdded {
+		if _, alreadyAdded := materializedSet[p.ID]; alreadyAdded {
 			continue
 		}
 		available = append(available, listAvailable{

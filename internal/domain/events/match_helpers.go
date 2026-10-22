@@ -21,9 +21,9 @@ func strEq(pred *string, meta string) bool {
 }
 
 // strEqFold is the case-insensitive sibling of strEq, for singular exact-match
-// filters on GitHub case-insensitive identifiers — a requested reviewer login
-// or "org/slug" team handle, where a rule's `requested_login: "Alice"` must
-// match an event carrying "alice". Nil predicate means "no filter."
+// filters on GitHub case-insensitive handles — a mentioned login or "org/slug"
+// team handle, where a rule's `mentioned_login: "Alice"` must match an event
+// carrying "alice". Nil predicate means "no filter."
 func strEqFold(pred *string, meta string) bool {
 	if pred == nil {
 		return true
@@ -45,13 +45,13 @@ func hasLabel(pred *string, labels []string) bool {
 	return false
 }
 
-// stringInSliceFold is the matcher primitive for `author_in` /
-// `reviewer_in` allowlists. An empty (or nil) slice means "no filter,"
-// matching the nil-pointer convention above — if the rule didn't say who
-// it cared about, it doesn't filter on identity. A non-empty slice
-// requires meta to match at least one entry under case-insensitive
-// comparison using Unicode case folding (GitHub logins and Jira account
-// IDs are case-insensitive in practice).
+// stringInSliceFold is the matcher primitive for the Jira and Linear identity
+// allowlists, such as `assignee_in`. An empty (or nil) slice means "no
+// filter," matching the nil-pointer convention above — if the rule didn't say
+// who it cared about, it doesn't filter on identity. A non-empty slice
+// requires meta to match at least one entry under case-insensitive comparison
+// using Unicode case folding (Jira account IDs are case-insensitive in
+// practice).
 func stringInSliceFold(pred []string, meta string) bool {
 	if len(pred) == 0 {
 		return true
@@ -64,15 +64,33 @@ func stringInSliceFold(pred []string, meta string) bool {
 	return false
 }
 
-// idIn is the matcher primitive for `_in` lists of row ids, such as
-// `repo_in`: an empty list means no filter, and a non-empty one requires meta
-// to be one of its entries exactly. Ids are not names, so nothing is folded.
+// idIn is the matcher primitive for `_in` lists of ids, such as `repo_in`'s
+// registry ids and `author_id_in`'s GitHub account ids: an empty list means no
+// filter, and a non-empty one requires meta to be one of its entries exactly.
+// Ids are not names, so nothing is folded. An empty meta (an event recorded
+// without the id) matches only an empty list.
 func idIn(pred []string, meta string) bool {
 	if len(pred) == 0 {
 		return true
 	}
 	for _, v := range pred {
 		if v == meta {
+			return true
+		}
+	}
+	return false
+}
+
+// anyIDIn is idIn for metadata that names several ids, such as the ids of the
+// labels an issue bears or the GitHub account id of everyone who wrote one of
+// a poll's new comments: an empty predicate matches, and a non-empty one
+// matches when any of metas is in it.
+func anyIDIn(pred, metas []string) bool {
+	if len(pred) == 0 {
+		return true
+	}
+	for _, m := range metas {
+		if m != "" && idIn(pred, m) {
 			return true
 		}
 	}

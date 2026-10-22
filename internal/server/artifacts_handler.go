@@ -161,48 +161,73 @@ func (ah *artifactsHandler) loadArtifact(w http.ResponseWriter, r *http.Request,
 	return art, true
 }
 
-// ghForArtifact parses an artifact's owner/repo/number coordinates (PR and review
-// artifacts both target owner/repo#<number>) and resolves a per-repo GitHub
-// client. Writes the error response and returns ok=false on any failure.
+// artifactPullRequest resolves the pull request a PR or review artifact is
+// about under the caller's claims: the repository registry row its entity
+// references, read by id, and the number the entity's key carries
+// (db.ResolveArtifactPullRequest).
+func (ah *artifactsHandler) artifactPullRequest(ctx context.Context, orgID string, art *domain.Artifact) (db.ArtifactPullRequest, error) {
+	var pr db.ArtifactPullRequest
+	err := ah.tx.WithReadTx(ctx, orgID, ClaimsFrom(ctx).Subject, func(tx db.TxStores) error {
+		var e error
+		pr, e = db.ResolveArtifactPullRequest(ctx, orgID, *art, tx.Entities.Get, tx.Repos.Get)
+		return e
+	})
+	return pr, err
+}
+
+// retiredRepositoryMessage is the refusal for acting on a pull request whose
+// repository's registry row is retired.
+const retiredRepositoryMessage = "this pull request's repository is no longer on GitHub under the name Triage Factory holds for it; it can only be acted on from GitHub"
+
+// ghForArtifact resolves the pull request a PR or review artifact is about
+// (artifactPullRequest) and a per-repo GitHub client for its repository's
+// current name. Writes the error response and returns ok=false on any failure.
 //
 // The client talks to the org's GitHub host now, where the same owner/repo#N
 // is a different pull request than one recorded on another host, so an
-// artifact from another host is refused with a 409 (artifactOnCurrentHost).
-func (ah *artifactsHandler) ghForArtifact(w http.ResponseWriter, r *http.Request, orgID string, art *domain.Artifact) (gh *ghclient.Client, owner, repo string, number int, ok bool) {
-	o, rp, n, parseOK := domain.ParsePRTarget(art.Target)
-	if !parseOK {
-		// A PR/review artifact whose target isn't owner/repo#N can't be acted on
-		// (no PR to address). Treat as a server-side data error rather than
-		// guessing — the create writer always stamps a well-formed target.
-		internalError(w, "artifacts", fmt.Errorf("malformed artifact target %q (artifact %s)", art.Target, art.ID))
-		return nil, "", "", 0, false
+// artifact from another host is refused with a 409 (artifactOnCurrentHost). So
+// is one whose repository's registry row is retired: GitHub serves its name as
+// another repository now, and a request under it would reach that one's pull
+// request of the same number.
+func (ah *artifactsHandler) ghForArtifact(w http.ResponseWriter, r *http.Request, orgID string, art *domain.Artifact) (gh *ghclient.Client, pr db.ArtifactPullRequest, ok bool) {
+	pr, err := ah.artifactPullRequest(r.Context(), orgID, art)
+	if err != nil {
+		// An artifact that names no pull request can't be acted on. Treat it
+		// as a server-side data error rather than guessing — the writers always
+		// link a pull request's artifact to its entity.
+		internalError(w, "artifacts", err)
+		return nil, db.ArtifactPullRequest{}, false
 	}
 	onHost, host, err := ah.artifactOnCurrentHost(r.Context(), orgID, art)
 	if err != nil {
 		internalError(w, "artifacts", err)
-		return nil, "", "", 0, false
+		return nil, db.ArtifactPullRequest{}, false
 	}
 	if !onHost {
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason:  httpx.ReasonConflict,
 			Message: fmt.Sprintf("this pull request is on %s, and the workspace's GitHub is %s; it can only be acted on from a workspace on its own GitHub", art.Scope, hostOrNotConfigured(host)),
 		})
-		return nil, "", "", 0, false
+		return nil, db.ArtifactPullRequest{}, false
+	}
+	if pr.Retired {
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: retiredRepositoryMessage})
+		return nil, db.ArtifactPullRequest{}, false
 	}
 
 	// Resolve per-repo (org App installation token → PAT): App-only orgs (no PAT)
 	// resolve a client here instead of 503-ing on a nil global client.
-	client, err := ah.ghResolver.ClientForRepo(r.Context(), orgID, o, rp)
+	client, err := ah.ghResolver.ClientForRepo(r.Context(), orgID, pr.Owner, pr.Repo)
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-			artifactsLog.Warn("github not configured", "org", orgID, "owner", o, "repo", rp, "error", err)
+			artifactsLog.Warn("github not configured", "org", orgID, "owner", pr.Owner, "repo", pr.Repo, "error", err)
 			writeNotConfigured(w, "GitHub is not connected for this workspace")
-			return nil, "", "", 0, false
+			return nil, db.ArtifactPullRequest{}, false
 		}
 		internalError(w, "artifacts", err)
-		return nil, "", "", 0, false
+		return nil, db.ArtifactPullRequest{}, false
 	}
-	return client, o, rp, n, true
+	return client, pr, true
 }
 
 // handleArtifactGet serves one artifact of ANY kind, in the same shape the
@@ -264,15 +289,20 @@ func (ah *artifactsHandler) handleArtifactGet(w http.ResponseWriter, r *http.Req
 // snapshot in details_json so the overlay still renders — a closed/merged PR or
 // a transient GitHub blip shouldn't blank the editor.
 //
+// The coordinates are the pull request's repository as its registry row names
+// it now, and the number its entity's key carries (artifactPullRequest).
+//
 // An artifact recorded on another GitHub host serves its snapshot with no live
 // fetch: the org's client would read a different pull request under the same
-// coordinates.
+// coordinates. So does one whose repository's registry row is retired, whose
+// name GitHub now serves as another repository.
 func (ah *artifactsHandler) prArtifactDetails(w http.ResponseWriter, r *http.Request, orgID string, art *domain.Artifact) (prArtifactDetailsJSON, bool) {
-	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
-	if !ok {
-		internalError(w, "artifacts", fmt.Errorf("malformed artifact target %q (artifact %s)", art.Target, art.ID))
+	resolved, err := ah.artifactPullRequest(r.Context(), orgID, art)
+	if err != nil {
+		internalError(w, "artifacts", err)
 		return prArtifactDetailsJSON{}, false
 	}
+	owner, repo, number := resolved.Owner, resolved.Repo, resolved.Number
 	onHost, _, err := ah.artifactOnCurrentHost(r.Context(), orgID, art)
 	if err != nil {
 		internalError(w, "artifacts", err)
@@ -286,14 +316,14 @@ func (ah *artifactsHandler) prArtifactDetails(w http.ResponseWriter, r *http.Req
 	details, _ := domain.ParsePRArtifactDetails(art.DetailsJSON)
 	title := details.Snapshot.Title
 	body := details.Snapshot.Body
-	if !onHost {
+	if !onHost || resolved.Retired {
 		return prArtifactDetailsJSON{
 			Owner: owner, Repo: repo, Number: number,
 			HeadBranch: details.HeadBranch, BaseBranch: details.Base,
 			Title: title, Body: body,
 		}, true
 	}
-	gh, _, _, _, ok := ah.ghForArtifact(w, r, orgID, art)
+	gh, _, ok := ah.ghForArtifact(w, r, orgID, art)
 	if !ok {
 		return prArtifactDetailsJSON{}, false
 	}
@@ -363,10 +393,11 @@ func (ah *artifactsHandler) handleArtifactPRUpdate(w http.ResponseWriter, r *htt
 		return
 	}
 
-	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
+	gh, prRef, ok := ah.ghForArtifact(w, r, orgID, art)
 	if !ok {
 		return
 	}
+	owner, repo, number := prRef.Owner, prRef.Repo, prRef.Number
 
 	// Whole-field replace: UpdatePR rewrites both title and body, so a PATCH that
 	// touches only one field must fill the other with the PR's CURRENT live value,
@@ -467,10 +498,11 @@ func (ah *artifactsHandler) handleArtifactDiff(w http.ResponseWriter, r *http.Re
 		notFound(w, "artifact")
 		return
 	}
-	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
+	gh, prRef, ok := ah.ghForArtifact(w, r, orgID, art)
 	if !ok {
 		return
 	}
+	owner, repo, number := prRef.Owner, prRef.Repo, prRef.Number
 
 	file := r.URL.Query().Get("file")
 	finBase, finHead := reviewFinalizeFrame(art)
@@ -691,10 +723,11 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 		conflict(w, "artifacts of kind "+art.Kind+" cannot be approved")
 		return
 	}
-	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
+	gh, prRef, ok := ah.ghForArtifact(w, r, orgID, art)
 	if !ok {
 		return
 	}
+	owner, repo, number := prRef.Owner, prRef.Repo, prRef.Number
 
 	// Approval only makes sense on a draft awaiting it. A stale/double "Open PR"
 	// click on an already-open or closed artifact would otherwise re-run a
@@ -850,7 +883,21 @@ func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http
 	// The credential is classified before the tx: the GitHub close runs after it,
 	// but the row records the credential that close is made under, and a probe
 	// inside the tx would hold it open across a round trip.
-	credential := githubCredentialForArtifact(r.Context(), ah.ghResolver, orgID, art)
+	//
+	// The pull request is resolved first, by the registry row its entity
+	// references. One that names no pull request is still dismissed: the flip
+	// is the resolution, and there is simply nothing on GitHub to close.
+	var prRef *db.ArtifactPullRequest
+	switch resolved, err := ah.artifactPullRequest(r.Context(), orgID, art); {
+	case err == nil:
+		prRef = &resolved
+	case errors.Is(err, db.ErrArtifactNamesNoPullRequest):
+		artifactsLog.Warn("dismiss: artifact names no pull request; dismissing without a GitHub close", "artifact", art.ID, "error", err)
+	default:
+		internalError(w, "artifacts", err)
+		return
+	}
+	credential := githubCredentialForPullRequest(r.Context(), ah.ghResolver, orgID, prRef)
 	closed := *art
 	closed.State = domain.ArtifactStatePRClosed
 	closed.DetailsJSON = domain.StampPRResolution(art.DetailsJSON, domain.PRResolutionDismissed)
@@ -868,14 +915,18 @@ func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http
 	cleanupCtx := context.WithoutCancel(r.Context())
 	// Close the draft PR on GitHub (best-effort). The artifact is already closed; a
 	// GitHub hiccup leaves the PR for reconciliation to retire later. Branch kept.
-	artifactteardown.CloseDraftPR(cleanupCtx, ah.ghResolver, orgID, art)
+	number := 0
+	if prRef != nil {
+		artifactteardown.CloseDraftPR(cleanupCtx, ah.ghResolver, orgID, art, *prRef)
+		number = prRef.Number
+	}
 	ah.pingConversationsResolved(orgID)
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.ConversationID)
 	// Tell the drafting agent its draft PR was dismissed (live or via the ledger).
 	ah.injectArtifactNote(orgID, closed)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"number":   artifactPRNumber(art),
+		"number":   number,
 		"html_url": art.URL,
 		"state":    domain.ArtifactStatePRClosed,
 	})
@@ -947,10 +998,11 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 		return
 	}
 
-	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
+	gh, prRef, ok := ah.ghForArtifact(w, r, orgID, art)
 	if !ok {
 		return
 	}
+	owner, repo, number := prRef.Owner, prRef.Repo, prRef.Number
 	if _, ok := ah.liveDraftOr409(w, r, gh, orgID, userID, art, owner, repo, number); !ok {
 		return
 	}
@@ -1000,7 +1052,7 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 		if _, e := tx.Artifacts.Upsert(cleanupCtx, orgID, closed); e != nil {
 			return e
 		}
-		branchURL, e := retireBranchArtifact(cleanupCtx, tx, orgID, art.ConversationID, art.Scope, repoPath, headRef)
+		branchURL, e := retireBranchArtifact(cleanupCtx, tx, orgID, art.ConversationID, art.Scope, prRef.RepositoryID, repoPath, headRef)
 		if e != nil {
 			return e
 		}
@@ -1009,7 +1061,7 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 			return e
 		}
 		return tx.ExternalActions.Record(cleanupCtx, orgID,
-			branchDeletedAction(art, userID, repoPath, headRef, details.HeadBranch, branchURL, credential))
+			branchDeletedAction(art, userID, prRef.RepositoryID, repoPath, headRef, details.HeadBranch, branchURL, credential))
 	}); err != nil {
 		internalError(w, "artifacts", err)
 		return
@@ -1030,28 +1082,22 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 }
 
 // retireBranchArtifact flips the conversation's `branch` artifact for headRef
-// in repoPath's repository, on the GitHub host scope, to deleted, returning its
-// web URL for the audit row. The repository is the registry row repoPath
-// resolves to on scope — the one the branch delete just went to — and the
-// artifact is the one keyed on that row and headRef (domain.BranchDedupKey),
-// whatever name its target spells. A conversation with no such artifact — a
-// push the capture writers missed, a repository with no registry row, or no
+// in the repository whose registry row is repositoryID, on the GitHub host
+// scope, to deleted, returning its web URL for the audit row. The repository is
+// the pull request's (artifactPullRequest) — the one the branch delete just
+// went to under its current name, repoPath — and the artifact is the one keyed
+// on that row and headRef (domain.BranchDedupKey), whatever name its target
+// spells. A conversation with no such artifact — a push the capture writers
+// missed, a pull request recorded unlinked (no repositoryID), or no
 // conversation at all — is not an error: the PR artifact carries the rejection
 // on its own, and the returned URL falls back to the branch link on scope's
 // host so the audit row still links somewhere.
-func retireBranchArtifact(ctx context.Context, tx db.TxStores, orgID, conversationID, scope, repoPath, headRef string) (string, error) {
+func retireBranchArtifact(ctx context.Context, tx db.TxStores, orgID, conversationID, scope, repositoryID, repoPath, headRef string) (string, error) {
 	fallbackURL, _ := domain.BranchArtifactWebURL(scope, repoPath, headRef)
-	if conversationID == "" {
+	if conversationID == "" || repositoryID == "" {
 		return fallbackURL, nil
 	}
-	repo, err := tx.Repos.GetByRef(ctx, orgID, domain.RepoRefFromSlug(scope, repoPath))
-	if err != nil {
-		return "", err
-	}
-	if repo == nil {
-		return fallbackURL, nil
-	}
-	key := domain.BranchDedupKey(repo.ID, headRef)
+	key := domain.BranchDedupKey(repositoryID, headRef)
 	arts, err := tx.Artifacts.ListByConversation(ctx, orgID, conversationID)
 	if err != nil {
 		return "", err
@@ -1078,9 +1124,10 @@ func retireBranchArtifact(ctx context.Context, tx db.TxStores, orgID, conversati
 // branchDeletedAction builds the external_actions row for a rejection's branch
 // delete: a human-authorized, org-executed GitHub write against the PR's repo,
 // keyed on the ref the way branch_pushed is so the two read as one branch's
-// history. ConversationID is the drafting conversation, the actor the rejecting
-// human, the team the artifact's.
-func branchDeletedAction(art *domain.Artifact, userID, repoPath, headRef, branch, url, credential string) domain.ExternalAction {
+// history, and about the repository's registry row (repositoryID, empty for a
+// pull request recorded unlinked). ConversationID is the drafting conversation, the
+// actor the rejecting human, the team the artifact's.
+func branchDeletedAction(art *domain.Artifact, userID, repositoryID, repoPath, headRef, branch, url, credential string) domain.ExternalAction {
 	detail, _ := json.Marshal(map[string]string{"branch": branch})
 	return domain.ExternalAction{
 		TeamID:         art.TeamID,
@@ -1088,6 +1135,7 @@ func branchDeletedAction(art *domain.Artifact, userID, repoPath, headRef, branch
 		Scope:          art.Scope,
 		Action:         domain.ActionBranchDeleted,
 		Target:         repoPath,
+		RepositoryID:   repositoryID,
 		ExternalID:     headRef,
 		URL:            url,
 		FromState:      domain.ArtifactStateBranchPushed,
@@ -1097,14 +1145,6 @@ func branchDeletedAction(art *domain.Artifact, userID, repoPath, headRef, branch
 		Credential:     credential,
 		DetailJSON:     string(detail),
 	}
-}
-
-// artifactPRNumber parses the PR number from an artifact's target for the dismiss
-// response. Returns 0 on a malformed target — the field is informational (the
-// artifact is already resolved), so it never blocks the success response.
-func artifactPRNumber(art *domain.Artifact) int {
-	_, _, n, _ := domain.ParsePRTarget(art.Target)
-	return n
 }
 
 // pingConversationsResolved announces that an artifact resolution changed the

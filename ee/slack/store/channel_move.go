@@ -14,10 +14,10 @@ type ChannelMove struct {
 	// Absorbed is the registry row the new id already had, merged into the
 	// channel's row and deleted; "" when there was none.
 	Absorbed string
-	// Entities is how many thread entities' keys moved.
+	// Entities is how many thread entities' keys and permalinks moved.
 	Entities int
 	// Superseded are the ids of the entities closed because an older entity
-	// for the same thread kept the key; see MoveSystem.
+	// for the same thread stayed active; see MoveSystem.
 	Superseded []string
 	// Artifacts and Actions count the artifacts and external action pointers
 	// rewritten.
@@ -33,10 +33,11 @@ type ChannelMove struct {
 	SkippedHandlers []string
 }
 
-// MoveThreadKey moves a key of the form "<channel>/<rest>" — a thread
-// entity's source_id (domain.SlackSourceID) or a Slack artifact's dedup
-// resource — from oldID to newID. Reports false, with key unchanged, for a key
-// under any other channel.
+// MoveThreadKey moves a key of the form "<channel>/<rest>" from oldID to
+// newID: an artifact's target, a thread key (domain.SlackSourceID) spelling
+// the channel's Slack id, or a Slack artifact's dedup resource, which names
+// the channel's registry row instead. Reports false, with key unchanged, for
+// a key under any other channel.
 func MoveThreadKey(key, oldID, newID string) (string, bool) {
 	if oldID == "" || newID == "" || oldID == newID || !strings.HasPrefix(key, oldID+"/") {
 		return key, false
@@ -45,9 +46,10 @@ func MoveThreadKey(key, oldID, newID string) (string, bool) {
 }
 
 // MoveArtifactKey moves a Slack artifact's dedup key
-// ("slack:<kind>:<channel>/<ts>[:anchor]", see domain.ArtifactDedupKey) whose
-// resource names oldID. Reports false for a key of another provider or
-// another channel.
+// ("slack:<kind>:<channel row>/<ts>[:anchor]", see domain.ArtifactDedupKey)
+// whose resource names the registry row oldID to name newID: the absorb of one
+// registry row into another is the one change that moves it. Reports false
+// for a key of another provider or another row.
 func MoveArtifactKey(key, oldID, newID string) (string, bool) {
 	provider, rest, ok := strings.Cut(key, ":")
 	if !ok || provider != "slack" {

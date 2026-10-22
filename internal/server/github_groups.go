@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -18,25 +19,39 @@ import (
 // Jira project rules. GET (any team member) returns the team's current
 // GitHub-team mappings plus the org's live GitHub teams as
 // import-and-choose candidates; PUT (team admin) replace-sets the
-// mappings. The {team_id} segment accepts a UUID or the literal
-// "default", same as the sibling team routes.
+// mappings, naming each GitHub team by GitHub's id. The {team_id} segment
+// accepts a UUID or the literal "default", same as the sibling team
+// routes.
 // --------------------------------------------------------------------
 
 // gitHubGroupJSON is the wire shape for one stored mapping row.
 type gitHubGroupJSON struct {
+	// GitHubTeamID is GitHub's id for the team: what the PUT names the
+	// mapping by. GitHubOrgID is GitHub's id for the team's organization.
+	// Both are "" on a local mapping stored before ids were recorded, until
+	// the GitHub poll identifies it from the organization's team listing;
+	// the PUT cannot name such a mapping, so a client keeps it by picking
+	// its team from the candidates, which carry the ids.
+	GitHubTeamID string `json:"github_team_id"`
+	GitHubOrgID  string `json:"github_org_id"`
+	// OrgLogin and TeamSlug are what GitHub called the organization and the
+	// team when the mapping was saved or last reconciled, for display.
 	OrgLogin string `json:"org_login"`
 	TeamSlug string `json:"team_slug"`
 }
 
 // gitHubGroupCandidateJSON is one live GitHub team the admin can assign
-// to this TF team. Name + MemberCount ride along for display only — TF
-// stores slugs, never names or membership. MemberCount drives the
-// "broad team — noisy queue" hint and is best-effort (0/omitted = unknown).
+// to this TF team, named by GitHub's ids. Name + MemberCount ride along for
+// display only — TF stores ids and the current handle, never names or
+// membership. MemberCount drives the "broad team — noisy queue" hint and is
+// best-effort (0/omitted = unknown).
 type gitHubGroupCandidateJSON struct {
-	OrgLogin    string `json:"org_login"`
-	TeamSlug    string `json:"team_slug"`
-	Name        string `json:"name"`
-	MemberCount int    `json:"member_count,omitempty"`
+	GitHubTeamID string `json:"github_team_id"`
+	GitHubOrgID  string `json:"github_org_id"`
+	OrgLogin     string `json:"org_login"`
+	TeamSlug     string `json:"team_slug"`
+	Name         string `json:"name"`
+	MemberCount  int    `json:"member_count,omitempty"`
 	// Mine is true when the requesting user personally belongs to this
 	// GitHub team. Populated only when the caller asks via
 	// ?include_membership=true (the onboarding wizard, to pre-check the
@@ -161,22 +176,12 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var req struct {
-		Groups []gitHubGroupJSON `json:"groups"`
-	}
+	var req teamGitHubGroupsPutRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-
-	groups := make([]domain.TeamGitHubGroup, 0, len(req.Groups))
-	for _, g := range req.Groups {
-		groups = append(groups, domain.TeamGitHubGroup{OrgLogin: g.OrgLogin, TeamSlug: g.TeamSlug})
-	}
-	// Validate up front so a half-specified group surfaces as a 400 rather
-	// than an opaque 500 from inside the tx. SetForTeam re-normalizes
-	// idempotently.
-	if _, err := domain.NormalizeTeamGitHubGroups(groups); err != nil {
-		badRequest(w, err.Error())
+	ids, ok := parseGitHubTeamIDs(w, req.GitHubTeamIDs)
+	if !ok {
 		return
 	}
 
@@ -186,15 +191,122 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+
+	// A team the mapping set already holds keeps its stored names and needs no
+	// GitHub read: a team the credential can no longer list (App uninstalled,
+	// the owner's repositories untracked) must stay in a save, or the editor
+	// wedges on it. Only an added team is resolved, against the candidates the
+	// editor offers, which carry GitHub's ids and current names.
+	var existing []domain.TeamGitHubGroup
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		existing, e = tx.TeamGitHubGroups.ListForTeam(r.Context(), teamID, host)
+		return e
+	}); err != nil {
+		internalError(w, "teams/github-groups", err)
+		return
+	}
+	held := make(map[string]domain.TeamGitHubGroup, len(existing))
+	for _, g := range existing {
+		if g.GitHubTeamID != "" {
+			held[g.GitHubTeamID] = g
+		}
+	}
+	var listed map[string]gitHubGroupCandidateJSON
+	groups := make([]domain.TeamGitHubGroup, 0, len(ids))
+	var refusals httpx.Validation
+	for i, id := range ids {
+		if g, ok := held[id]; ok {
+			groups = append(groups, g)
+			continue
+		}
+		if listed == nil {
+			candidates, _ := s.gitHubGroupCandidates(r.Context(), orgID)
+			listed = make(map[string]gitHubGroupCandidateJSON, len(candidates))
+			for _, c := range candidates {
+				listed[c.GitHubTeamID] = c
+			}
+		}
+		c, ok := listed[id]
+		if !ok {
+			refusals.Invalid(gitHubTeamIDField(i),
+				"GitHub team "+id+" is not a team of an organization this team's tracked repositories belong to, as this organization's GitHub credentials list them")
+			continue
+		}
+		groups = append(groups, domain.TeamGitHubGroup{
+			GitHubTeamID: c.GitHubTeamID, GitHubOrgID: c.GitHubOrgID, OrgLogin: c.OrgLogin, TeamSlug: c.TeamSlug,
+		})
+	}
+	if refusals.Flush(w, http.StatusUnprocessableEntity) {
+		return
+	}
+
+	var stored []domain.TeamGitHubGroup
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.TeamGitHubGroups.SetForTeam(r.Context(), teamID, host, groups)
+		if err := tx.TeamGitHubGroups.SetForTeam(r.Context(), teamID, host, groups); err != nil {
+			return err
+		}
+		var e error
+		stored, e = tx.TeamGitHubGroups.ListForTeam(r.Context(), teamID, host)
+		return e
 	}); err != nil {
 		internalError(w, "teams/github-groups", err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+	writeJSON(w, http.StatusOK, teamGitHubGroupsPutResponse{Groups: toGitHubGroupJSON(stored)})
 }
+
+// teamGitHubGroupsPutRequest is the desired set. GitHubTeamIDs is a pointer
+// because an absent field is not an empty set: a body that forgot it must not
+// clear the team's mappings.
+type teamGitHubGroupsPutRequest struct {
+	GitHubTeamIDs *[]string `json:"github_team_ids"`
+}
+
+// teamGitHubGroupsPutResponse echoes the set as stored, in the GET's shape.
+type teamGitHubGroupsPutResponse struct {
+	Groups []gitHubGroupJSON `json:"groups"`
+}
+
+// parseGitHubTeamIDs validates the PUT body's shape: the field present, and
+// every entry one of GitHub's numeric ids in canonical form
+// (domain.IsGitHubID), named once. Every fault is reported, and it writes the
+// 400 on a false return. Whether an id names a team the org can map is the
+// handler's next question.
+func parseGitHubTeamIDs(w http.ResponseWriter, raw *[]string) ([]string, bool) {
+	var v httpx.Validation
+	if raw == nil {
+		v.Missing("github_team_ids")
+		v.Flush(w, http.StatusBadRequest)
+		return nil, false
+	}
+	ids := make([]string, 0, len(*raw))
+	first := make(map[string]int, len(*raw))
+	for i, id := range *raw {
+		field := gitHubTeamIDField(i)
+		switch {
+		case id == "":
+			v.Missing(field)
+			continue
+		case !domain.IsGitHubID(id):
+			v.Invalid(field, id+" is not a GitHub team id")
+			continue
+		}
+		if j, dup := first[id]; dup {
+			v.Invalid(field, fmt.Sprintf("GitHub team %s is already named at github_team_ids[%d]", id, j))
+			continue
+		}
+		first[id] = i
+		ids = append(ids, id)
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return nil, false
+	}
+	return ids, true
+}
+
+func gitHubTeamIDField(i int) string { return fmt.Sprintf("github_team_ids[%d]", i) }
 
 // gitHubGroupCandidates fetches the org's live GitHub teams (one
 // GET /orgs/{org}/teams per distinct tracked-repo owner) and returns
@@ -277,14 +389,18 @@ func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID string) ([]git
 		}
 		login := strings.ToLower(owner)
 		for _, t := range teams {
-			if t.TeamSlug == "" {
+			// A mapping is stored by GitHub's ids, so a team listed without
+			// them cannot be offered.
+			if t.TeamSlug == "" || t.ID == "" || t.OrgID == "" {
 				continue
 			}
 			out = append(out, gitHubGroupCandidateJSON{
-				OrgLogin:    login,
-				TeamSlug:    strings.ToLower(t.TeamSlug),
-				Name:        t.Name,
-				MemberCount: t.MemberCount,
+				GitHubTeamID: t.ID,
+				GitHubOrgID:  t.OrgID,
+				OrgLogin:     login,
+				TeamSlug:     strings.ToLower(t.TeamSlug),
+				Name:         t.Name,
+				MemberCount:  t.MemberCount,
 			})
 		}
 	}
@@ -309,10 +425,10 @@ func (s *Server) annotateGitHubGroupMembership(ctx context.Context, orgID, userI
 	}
 	mine := make(map[string]bool, len(teams))
 	for _, t := range teams {
-		mine[strings.ToLower(t.OrgSlug+"/"+t.TeamSlug)] = true
+		mine[t.ID] = t.ID != ""
 	}
 	for i := range candidates {
-		if mine[strings.ToLower(candidates[i].OrgLogin+"/"+candidates[i].TeamSlug)] {
+		if mine[candidates[i].GitHubTeamID] {
 			candidates[i].Mine = true
 		}
 	}
@@ -338,7 +454,9 @@ func distinctRepoOwners(repos []domain.Repository) []string {
 func toGitHubGroupJSON(groups []domain.TeamGitHubGroup) []gitHubGroupJSON {
 	out := make([]gitHubGroupJSON, 0, len(groups))
 	for _, g := range groups {
-		out = append(out, gitHubGroupJSON{OrgLogin: g.OrgLogin, TeamSlug: g.TeamSlug})
+		out = append(out, gitHubGroupJSON{
+			GitHubTeamID: g.GitHubTeamID, GitHubOrgID: g.GitHubOrgID, OrgLogin: g.OrgLogin, TeamSlug: g.TeamSlug,
+		})
 	}
 	return out
 }

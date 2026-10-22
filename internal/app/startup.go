@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"time"
@@ -297,23 +298,19 @@ func (a *App) wireCloneStatusCallback() {
 	// Org-scoped notifier (no RecipientsFunc): this hook is local-only,
 	// and at N=1 the org-wide broadcast IS the REST-parity scope.
 	notify := repoevent.NewNotifier(a.wsHub, nil)
-	// The clone hook is handed the bare's registry row id. The row is read once
-	// to learn its address, and the stamp publishes the row that write returned.
-	// A missing row — or a nil one from the write — is the documented no-op: the
-	// repository was removed while it cloned, so there is nothing to update and
-	// nothing for a client to merge into.
+	// The clone hook is handed the bare's registry row id, and the outcome is
+	// written by that id: a rename while it cloned moves the row's name and
+	// nothing else. A row no longer there (ErrNoSuchRepository) has nothing to
+	// record against and nothing for a client to merge into, so it is skipped
+	// quietly. The stamp publishes the row the write returned.
 	//
 	// All three clone columns go on the wire because the write sets all three,
 	// and off the row rather than restated from the arguments — so a success
 	// after a failure clears the stored error instead of leaving a client
 	// rendering it under a green status.
-	publish := func(row *domain.Repository) {
-		if row == nil {
-			return
-		}
+	publish := func(row domain.Repository) {
 		notify.Publish(context.Background(), runmode.LocalDefaultOrgID, repoevent.Update{
 			ID:             row.ID,
-			Host:           row.Host,
 			Slug:           row.Slug(),
 			CloneStatus:    repoevent.Ptr(row.CloneStatus),
 			CloneError:     repoevent.Ptr(row.CloneError),
@@ -322,22 +319,19 @@ func (a *App) wireCloneStatusCallback() {
 	}
 	worktree.SetOnCloneResult(func(bare worktree.Repo, cloneErr error) {
 		owner, repo := bare.Owner, bare.Name
-		stored, err := a.stores.Repos.GetSystem(context.Background(), runmode.LocalDefaultOrgID, bare.ID)
-		if err != nil {
-			cloneStatusLog.Error("read repository for clone status failed", "repository_id", bare.ID, "error", err)
-			return
-		}
-		if stored == nil {
-			return
-		}
-		ref := stored.Ref()
-		if cloneErr == nil {
-			row, err := a.stores.Repos.UpdateCloneStatusByRefSystem(context.Background(), runmode.LocalDefaultOrgID, ref, "ok", "", "")
+		record := func(status, errMsg, errKind string) {
+			row, err := a.stores.Repos.UpdateCloneStatusSystem(context.Background(), runmode.LocalDefaultOrgID, bare.ID, status, errMsg, errKind)
+			if errors.Is(err, db.ErrNoSuchRepository) {
+				return
+			}
 			if err != nil {
-				cloneStatusLog.Error("update ok status failed", "owner", owner, "repo", repo, "error", err)
+				cloneStatusLog.Error("update clone status failed", "repository_id", bare.ID, "owner", owner, "repo", repo, "status", status, "error", err)
 				return
 			}
 			publish(row)
+		}
+		if cloneErr == nil {
+			record("ok", "", "")
 			return
 		}
 
@@ -366,12 +360,7 @@ func (a *App) wireCloneStatusCallback() {
 			}
 		}
 
-		row, err := a.stores.Repos.UpdateCloneStatusByRefSystem(context.Background(), runmode.LocalDefaultOrgID, ref, "failed", cloneErr.Error(), kind)
-		if err != nil {
-			cloneStatusLog.Error("update failed status failed", "owner", owner, "repo", repo, "error", err)
-			return
-		}
-		publish(row)
+		record("failed", cloneErr.Error(), kind)
 	})
 }
 

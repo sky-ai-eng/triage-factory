@@ -88,16 +88,16 @@ func TestGitAuthorizeDecision_ErrorNamesTheFailingRead(t *testing.T) {
 	}
 }
 
-// failingTracksStore answers TracksRepoSystem and nothing else — every other
-// method panics on the embedded nil, which is what keeps the test honest about
-// which reads the gate actually makes.
+// failingTracksStore answers TracksRepositorySystem and nothing else — every
+// other method panics on the embedded nil, which is what keeps the test honest
+// about which reads the gate actually makes.
 type failingTracksStore struct {
 	db.TeamGitHubReposStore
 	tracks bool
 	err    error
 }
 
-func (s failingTracksStore) TracksRepoSystem(context.Context, string, string, string, string) (bool, error) {
+func (s failingTracksStore) TracksRepositorySystem(context.Context, string, string) (bool, error) {
 	return s.tracks, s.err
 }
 
@@ -122,12 +122,15 @@ func (s stubWorktreesStore) ListSystem(context.Context, string, string) ([]domai
 }
 
 // stubReposStore answers the gate's read of the repository on the org's host
-// with err; any other read panics on the embedded nil.
+// with a row, or with err; any other read panics on the embedded nil.
 type stubReposStore struct {
 	db.RepositoryStore
 	err error
 }
 
-func (s stubReposStore) GetByRefSystem(context.Context, string, domain.RepoRef) (*domain.Repository, error) {
-	return nil, s.err
+func (s stubReposStore) GetByRefSystem(_ context.Context, _ string, ref domain.RepoRef) (*domain.Repository, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &domain.Repository{ID: "repo-1", Host: ref.Host, Owner: ref.Owner, Repo: ref.Repo}, nil
 }

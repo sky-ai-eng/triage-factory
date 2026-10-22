@@ -505,7 +505,7 @@ var orgScopedTables = []string{
 	"task_events", "tasks",
 	"event_handlers",
 	"events", "entity_links", "entities",
-	"repositories", "poller_state",
+	"repositories", "placement_overrides",
 	"prompts",
 	// marketplace_listings cascades into its version/event/vote/install
 	// children via their own org_id-CASCADE FKs — only the parent needs
@@ -541,15 +541,11 @@ var orgScopedTables = []string{
 	// instances) — following foreign keys from orgs would never reach it, so it
 	// must be listed explicitly too.
 	"poll_readiness",
-	// placement_overrides (TFAC-587): org_id column but no FK to orgs
-	// (admin-pool-only system state, same posture as poll_readiness) — not
-	// reached through a foreign key, so listed explicitly.
-	"placement_overrides",
 	// instance_stats + operators (TFAC-589): admin-pool-only system tables
 	// with no FK to orgs (fleet telemetry samples / the deployment-operator
-	// identity) — same posture as instances / placement_overrides, so they
-	// must be listed explicitly or Reset would leak sample and operator rows
-	// across tests sharing this container (the exact cross-subtest bleed the
+	// identity) — same posture as instances, so they must be listed
+	// explicitly or Reset would leak sample and operator rows across tests
+	// sharing this container (the exact cross-subtest bleed the
 	// instance_stat/operator conformance suites hit otherwise).
 	"instance_stats", "operators",
 	// sandbox_stats: same posture again — the per-sandbox resource series is

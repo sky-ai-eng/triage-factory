@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -88,8 +89,13 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 	// Two GitHub teams, both mapped to the TF team, with dave on one of them.
 	orgs := "/api/v3/orgs/acme"
 	w.githubREST(alice, "PUT", orgs+"/memberships/"+knownLogin, map[string]any{"role": "member"}, 200)
-	w.githubREST(alice, "POST", orgs+"/teams", map[string]any{"name": "Reviewers"}, 201)
-	w.githubREST(alice, "POST", orgs+"/teams", map[string]any{"name": "Release"}, 201)
+	org := w.githubREST(alice, "GET", orgs, nil, 200)
+	reviewers := w.githubREST(alice, "POST", orgs+"/teams", map[string]any{"name": "Reviewers"}, 201)
+	release := w.githubREST(alice, "POST", orgs+"/teams", map[string]any{"name": "Release"}, 201)
+	groups := []domain.TeamGitHubGroup{
+		{GitHubTeamID: githubIDOf(t, reviewers), GitHubOrgID: githubIDOf(t, org), OrgLogin: "acme", TeamSlug: "reviewers"},
+		{GitHubTeamID: githubIDOf(t, release), GitHubOrgID: githubIDOf(t, org), OrgLogin: "acme", TeamSlug: "release"},
+	}
 	w.githubREST(alice, "PUT", orgs+"/teams/reviewers/memberships/"+knownLogin, map[string]any{"role": "member"}, 200)
 
 	// main, then three branches off it: one for checks, one that will
@@ -130,7 +136,7 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 	w.githubREST(bob, "POST", pulls+"/2/reviews", map[string]any{"event": "COMMENT", "body": "this one conflicts"}, 200)
 	w.githubREST(carol, "POST", pulls+"/3/reviews", map[string]any{"event": "REQUEST_CHANGES", "body": "needs a test"}, 200)
 
-	p := newPollRig(t, ctx, w, shape)
+	p := newPollRig(t, ctx, w, shape, groups)
 
 	// The first sight of each pull request reports what is already on it: its
 	// checks, reviews and conflicts, though not its labels or its draft state.
@@ -182,7 +188,10 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 	})
 
 	// Review requests and mentions. Only identities TF knows produce events:
-	// dave and the mapped acme/reviewers, never carol.
+	// dave and the mapped acme/reviewers, never carol. A request is keyed by
+	// GitHub's id for the requested user or team; a mention, which names a
+	// handle, by the handle.
+	daveID := githubIDOf(t, w.githubREST(alice, "GET", "/api/v3/users/"+knownLogin, nil, 200))
 	w.advance(60)
 	w.githubREST(alice, "POST", pulls+"/1/requested_reviewers", map[string]any{
 		"reviewers": []string{knownLogin, "carol"}, "team_reviewers": []string{"reviewers"},
@@ -191,11 +200,11 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 		"body": "@" + knownLogin + " and @acme/reviewers, can you look? cc @bob",
 	}, 201)
 	p.cycle(t, ctx, map[string]int{
-		"acme/webapp#1 " + domain.EventGitHubPRReviewRequested + " user:" + knownLogin:  1,
-		"acme/webapp#1 " + domain.EventGitHubPRReviewRequested + " team:acme/reviewers": 1,
-		"acme/webapp#4 " + domain.EventGitHubPRCommented:                                1,
-		"acme/webapp#4 " + domain.EventGitHubPRMentioned + " user:" + knownLogin:        1,
-		"acme/webapp#4 " + domain.EventGitHubPRMentioned + " team:acme/reviewers":       1,
+		"acme/webapp#1 " + domain.EventGitHubPRReviewRequested + " user_id:" + daveID:                 1,
+		"acme/webapp#1 " + domain.EventGitHubPRReviewRequested + " team_id:" + groups[0].GitHubTeamID: 1,
+		"acme/webapp#4 " + domain.EventGitHubPRCommented:                                              1,
+		"acme/webapp#4 " + domain.EventGitHubPRMentioned + " user:" + knownLogin:                      1,
+		"acme/webapp#4 " + domain.EventGitHubPRMentioned + " team:acme/reviewers":                     1,
 	})
 
 	// dave's review answers his request; the team's request stays. Deleting
@@ -205,11 +214,11 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 	w.githubREST(dave, "POST", pulls+"/1/reviews", map[string]any{"event": "COMMENT", "body": "looked"}, 200)
 	w.send(alice, "DELETE", orgs+"/teams/release", nil, http.StatusNoContent)
 	p.cycle(t, ctx, map[string]int{
-		"acme/webapp#1 " + domain.EventGitHubPRReviewCommented:                              1,
-		"acme/webapp#1 " + domain.EventGitHubPRReviewRequestRemoved + " user:" + knownLogin: 1,
+		"acme/webapp#1 " + domain.EventGitHubPRReviewCommented:                             1,
+		"acme/webapp#1 " + domain.EventGitHubPRReviewRequestRemoved + " user_id:" + daveID: 1,
 	})
-	p.assertMapped(t, ctx, "reviewers", true)
-	p.assertMapped(t, ctx, "release", false)
+	p.assertMapped(t, ctx, groups[0], true)
+	p.assertMapped(t, ctx, groups[1], false)
 
 	w.advance(60)
 	w.githubREST(alice, "PUT", pulls+"/3/merge", map[string]any{}, 200)
@@ -304,9 +313,9 @@ func localOnSQLite(t *testing.T, ctx context.Context) deployment {
 
 // newPollRig wires a poller over the shape's stores, tracking acme/webapp on
 // the org whose GitHub is the Orrery world. The admin's GitHub identity is
-// knownLogin, and the team is mapped to the GitHub teams acme/reviewers and
-// acme/release.
-func newPollRig(t *testing.T, ctx context.Context, w *orreryWorld, shape deploymentShape) *pollRig {
+// knownLogin, and the team is mapped to groups, the GitHub teams
+// acme/reviewers and acme/release.
+func newPollRig(t *testing.T, ctx context.Context, w *orreryWorld, shape deploymentShape, groups []domain.TeamGitHubGroup) *pollRig {
 	t.Helper()
 	d := shape(t, ctx)
 	stores := d.stores
@@ -330,10 +339,7 @@ func newPollRig(t *testing.T, ctx context.Context, w *orreryWorld, shape deploym
 		if err := tx.Users.UpsertGitHubIdentity(ctx, d.adminID, host, knownLogin, "", "", d.identitySource); err != nil {
 			return err
 		}
-		return tx.TeamGitHubGroups.SetForTeam(ctx, d.teamID, host, []domain.TeamGitHubGroup{
-			{OrgLogin: "acme", TeamSlug: "reviewers"},
-			{OrgLogin: "acme", TeamSlug: "release"},
-		})
+		return tx.TeamGitHubGroups.SetForTeam(ctx, d.teamID, host, groups)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -394,17 +400,28 @@ func (r *pollRig) cycle(t *testing.T, ctx context.Context, want map[string]int) 
 	}
 }
 
-// assertMapped checks whether the GitHub team acme/<slug> is still mapped to
-// the rig's TF team.
-func (r *pollRig) assertMapped(t *testing.T, ctx context.Context, slug string, want bool) {
+// assertMapped checks whether the GitHub team g names is still mapped to the
+// rig's TF team.
+func (r *pollRig) assertMapped(t *testing.T, ctx context.Context, g domain.TeamGitHubGroup, want bool) {
 	t.Helper()
-	teams, err := r.stores.TeamGitHubGroups.TeamsForGroupSystem(ctx, r.orgID, r.host, "acme", slug)
+	teams, err := r.stores.TeamGitHubGroups.TeamsForGitHubTeamSystem(ctx, r.orgID, r.host, g.GitHubTeamID, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := slices.Contains(teams, r.teamID); got != want {
-		t.Errorf("acme/%s mapped to the team: %v, want %v", slug, got, want)
+		t.Errorf("acme/%s mapped to the team: %v, want %v", g.TeamSlug, got, want)
 	}
+}
+
+// githubIDOf is the id GitHub gave the object a REST call answered with, in
+// the form TF stores GitHub's ids.
+func githubIDOf(t *testing.T, obj map[string]any) string {
+	t.Helper()
+	id, ok := obj["id"].(float64)
+	if !ok || id <= 0 {
+		t.Fatalf("no numeric id in %v", obj)
+	}
+	return strconv.FormatFloat(id, 'f', -1, 64)
 }
 
 func equalCounts(a, b map[string]int) bool {
@@ -467,6 +484,10 @@ type orreryResolver struct {
 }
 
 func (r *orreryResolver) ClientFor(context.Context, string, string) (*ghclient.Client, error) {
+	return r.client, nil
+}
+
+func (r *orreryResolver) ClientForInstallation(context.Context, string, domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
 	return r.client, nil
 }
 

@@ -98,7 +98,7 @@ func TestRefreshGitHub_RESTDiscovery_SeedsEntityAndConditionalSkips(t *testing.T
 
 	// Cycle 1: REST 200 → the PR becomes an entity. username="" exercises
 	// the App-parity path (no user-perspective search, no dashboard backfill).
-	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", client, "", []string{"octo/repo"}, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", client, domain.GitHubAccount{}, []string{"octo/repo"}, nil); err != nil {
 		t.Fatalf("RefreshGitHub cycle 1: %v", err)
 	}
 
@@ -114,10 +114,7 @@ func TestRefreshGitHub_RESTDiscovery_SeedsEntityAndConditionalSkips(t *testing.T
 	}
 
 	// ETag persisted for conditional re-poll next cycle.
-	etag, polledAt, err := stores.Repos.GetPullsPollStateByRefSystem(ctx, org, domain.RepoRefFromSlug("https://github.com", "octo/repo"))
-	if err != nil {
-		t.Fatalf("GetPullsPollStateByRefSystem: %v", err)
-	}
+	etag, polledAt := pullsCursorOf(t, stores, "octo/repo")
 	if etag != `"etag-1"` {
 		t.Errorf("persisted etag = %q; want %q", etag, `"etag-1"`)
 	}
@@ -126,7 +123,7 @@ func TestRefreshGitHub_RESTDiscovery_SeedsEntityAndConditionalSkips(t *testing.T
 	}
 
 	// Cycle 2: REST replays If-None-Match → 304 → quiet repo, no new entity.
-	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", client, "", []string{"octo/repo"}, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", client, domain.GitHubAccount{}, []string{"octo/repo"}, nil); err != nil {
 		t.Fatalf("RefreshGitHub cycle 2: %v", err)
 	}
 	if got := atomic.LoadInt32(&conditionalHits); got != 1 {

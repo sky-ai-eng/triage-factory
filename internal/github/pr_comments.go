@@ -14,13 +14,13 @@ var prCommentsQuery = fmt.Sprintf(`
 	query PRComments($id: ID!, $before: String) {
 		node(id: $id) {
 			... on PullRequest {
-				comments(last: %d, before: $before) {
+				comments(last: %[1]d, before: $before) {
 					totalCount
 					pageInfo { hasPreviousPage startCursor }
 					nodes {
 						fullDatabaseId
 						createdAt
-						author { __typename login }
+						author { %[2]s }
 						body
 					}
 				}
@@ -28,7 +28,7 @@ var prCommentsQuery = fmt.Sprintf(`
 		}
 		rateLimit { cost }
 	}
-`, commentPageSize)
+`, commentPageSize, actorFields)
 
 // PRComment is a comment in a pull request's conversation: its numeric id, in
 // the numbering /issues/comments/{id} addresses, its author, when it was made
@@ -37,6 +37,7 @@ var prCommentsQuery = fmt.Sprintf(`
 type PRComment struct {
 	ID        int64
 	Author    string // REST-spelled login; empty when GitHub names no author
+	AuthorID  string // GitHub's id for the author's account; empty when GitHub returns none
 	CreatedAt string
 	// Mentions are the users and teams the body @-mentions (Mentions).
 	Mentions []string
@@ -104,6 +105,7 @@ func (c *Client) PRCommentsBefore(ctx context.Context, prNodeID, before string) 
 		page.Comments = append(page.Comments, PRComment{
 			ID:        int64(n.DatabaseID),
 			Author:    n.Author.restLogin(),
+			AuthorID:  n.Author.id(),
 			CreatedAt: n.CreatedAt,
 			Mentions:  Mentions(n.Body),
 		})

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -706,6 +707,53 @@ func TestReviewDraftTarget_ReturnsRecordedPR(t *testing.T) {
 		if _, _, _, err := c.ReviewDraftTarget(context.Background(), "not-a-review"); err == nil {
 			t.Errorf("%s: an unknown handle should be refused", name)
 		}
+	}
+}
+
+// TestReviewDraftTarget_FollowsTheRegistryRow: the reviewed pull request is
+// read by the registry row the draft's entity references, not parsed from the
+// draft's target. A rename that rewrites no key is followed, in process and
+// relayed; a retired row is reported and refused; an id naming none of the
+// conversation's artifacts resolves nothing.
+func TestReviewDraftTarget_FollowsTheRegistryRow(t *testing.T) {
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !answerPRRead(w, r) {
+			t.Errorf("unexpected GitHub call: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(gh.Close)
+	conn, stores, info, local := newGithubRecordingClientConn(t, gh.URL, true)
+	repoID := registerRepo(t, stores, "octo", "repo", "1")
+	ctx := context.Background()
+	handle, err := local.GithubCreatePendingReview(ctx, "octo", "repo", 7, "headsha7", nil)
+	if err != nil {
+		t.Fatalf("GithubCreatePendingReview: %v", err)
+	}
+	if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 1 || arts[0].EntityID == "" {
+		t.Fatalf("review draft = %+v, want one linked to its pull request's entity", arts)
+	}
+	dbseed.RenameRepositoryOnly(t, conn, repoID, "acme", "renamed")
+
+	relayed := newRelayRuntime(directDispatchConn{srv: NewRelayServer(stores, info, nil)}, info, nil)
+	pr, err := relayed.ArtifactPullRequest(ctx, handle)
+	if err != nil || pr.RepositoryID != repoID || pr.Slug() != "acme/renamed" || pr.Number != 7 || pr.Retired {
+		t.Errorf("relayed ArtifactPullRequest = (%+v, %v), want acme/renamed#7 on row %s", pr, err, repoID)
+	}
+	if _, err := relayed.ArtifactPullRequest(ctx, "not-an-artifact"); err == nil {
+		t.Error("an id naming none of the conversation's artifacts resolved a pull request")
+	}
+	if owner, repo, number, err := local.ReviewDraftTarget(ctx, handle); err != nil || owner != "acme" || repo != "renamed" || number != 7 {
+		t.Errorf("ReviewDraftTarget = (%s/%s#%d, %v), want acme/renamed#7", owner, repo, number, err)
+	}
+
+	if _, err := conn.Exec(`UPDATE repositories SET retired_at = CURRENT_TIMESTAMP WHERE id = ?`, repoID); err != nil {
+		t.Fatalf("retire repository: %v", err)
+	}
+	if pr, err := relayed.ArtifactPullRequest(ctx, handle); err != nil || !pr.Retired {
+		t.Errorf("relayed ArtifactPullRequest after retire = (%+v, %v), want it reported retired", pr, err)
+	}
+	if _, _, _, err := local.ReviewDraftTarget(ctx, handle); err == nil {
+		t.Error("ReviewDraftTarget answered for a draft whose repository's row is retired")
 	}
 }
 

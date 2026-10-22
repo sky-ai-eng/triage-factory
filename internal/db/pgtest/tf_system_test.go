@@ -475,6 +475,35 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		}
 	})
 
+	t.Run("entity_rename_moves_its_ledger_pointers", func(t *testing.T) {
+		// The recording funnel follows a moved issue onto its new key on the
+		// executor, and the rename moves the link of each audit row about the
+		// issue, which takes the column-scoped UPDATE on current_url.
+		const site = "https://acme.atlassian.net"
+		ent, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, orgID, site, "MOVE-1", "43001",
+			domain.JiraProjectRef{ID: "43000", Key: "MOVE", Name: "Move"}, "", site+"/browse/MOVE-1")
+		if err != nil {
+			t.Fatalf("Entities.FindOrCreateJiraSystem: %v", err)
+		}
+		if err := stores.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
+			TeamID: teamID, Provider: domain.ArtifactProviderJira, Scope: site, Action: domain.ActionIssueCommentPosted,
+			Target: "MOVE-1", EntityID: ent.ID, URL: site + "/browse/MOVE-1", Credential: domain.CredentialJiraOrg,
+			DedupKey: "executor-rename",
+		}); err != nil {
+			t.Fatalf("ExternalActions.RecordSystem: %v", err)
+		}
+		out, err := stores.Entities.RenameSystem(ctx, orgID, "jira", site, "43001", "MOVED-1", site+"/browse/MOVED-1")
+		if err != nil || !out.Renamed {
+			t.Fatalf("Entities.RenameSystem = %+v, %v", out, err)
+		}
+		var current string
+		if err := h.AdminDB.QueryRowContext(ctx, `SELECT COALESCE(current_url, '') FROM external_actions WHERE org_id = $1 AND dedup_key = 'executor-rename'`, orgID).Scan(&current); err != nil || current != site+"/browse/MOVED-1" {
+			t.Errorf("ledger pointer after the executor's rename = %q err=%v, want %s/browse/MOVED-1", current, err, site)
+		}
+		_, err = h.SystemDB.ExecContext(ctx, `UPDATE external_actions SET target = 'SMUGGLE' WHERE org_id = $1`, orgID)
+		assertPgCode(t, err, "42501", "executor UPDATE of an audit row's record")
+	})
+
 	t.Run("jira_projects_writes_are_identity_and_display_columns_only", func(t *testing.T) {
 		// The executor registers a project's identity and display values,
 		// never a row's site or timestamps.
@@ -636,8 +665,8 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if _, err := stores.Users.GetGitHubLoginSystem(ctx, userID, "github.com"); err != nil {
 			t.Errorf("Users.GetGitHubLoginSystem: %v", err)
 		}
-		if _, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, teamID, dbtest.TestGitHubHost, "octo", "repo"); err != nil {
-			t.Errorf("TeamGitHubRepos.TracksRepoSystem: %v", err)
+		if _, err := stores.TeamGitHubRepos.TracksRepositorySystem(ctx, teamID, uuid.NewString()); err != nil {
+			t.Errorf("TeamGitHubRepos.TracksRepositorySystem: %v", err)
 		}
 		if _, err := stores.GitHubApps.GetForOrgSystem(ctx, orgID); err != nil {
 			t.Errorf("GitHubApps.GetForOrgSystem: %v", err)
@@ -660,11 +689,22 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	t.Run("repositories", func(t *testing.T) {
 		seedRepository(t, h, orgID)
 		ref := domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "octo", Repo: "conformance-repo"}
-		if got, err := stores.Repos.GetByRefSystem(ctx, orgID, ref); err != nil || got == nil {
-			t.Errorf("Repos.GetByRefSystem: got=%v err=%v", got, err)
+		got, err := stores.Repos.GetByRefSystem(ctx, orgID, ref)
+		if err != nil || got == nil {
+			t.Fatalf("Repos.GetByRefSystem: got=%v err=%v", got, err)
 		}
-		if _, err := stores.Repos.UpdateCloneStatusByRefSystem(ctx, orgID, ref, "ok", "", ""); err != nil {
-			t.Errorf("Repos.UpdateCloneStatusByRefSystem: %v", err)
+		if _, err := stores.Repos.UpdateCloneStatusSystem(ctx, orgID, got.ID, "ok", "", ""); err != nil {
+			t.Errorf("Repos.UpdateCloneStatusSystem: %v", err)
+		}
+		profiled := time.Now()
+		if _, err := stores.Repos.UpdateProfileSystem(ctx, orgID, got.ID, domain.Repository{ProfileText: "p", ProfiledAt: &profiled}); err != nil {
+			t.Errorf("Repos.UpdateProfileSystem: %v", err)
+		}
+		if err := stores.Repos.SetPullsPollStateSystem(ctx, orgID, got.ID, `"etag"`, time.Now()); err != nil {
+			t.Errorf("Repos.SetPullsPollStateSystem: %v", err)
+		}
+		if _, _, err := stores.Repos.GetPullsPollStateSystem(ctx, orgID, got.ID); err != nil {
+			t.Errorf("Repos.GetPullsPollStateSystem: %v", err)
 		}
 		if got, err := stores.Repos.FindOrCreateByRefSystem(ctx, orgID, domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "octo", Repo: "minted-by-executor"}); err != nil || got.ID == "" {
 			t.Errorf("Repos.FindOrCreateByRefSystem: got=%+v err=%v", got, err)

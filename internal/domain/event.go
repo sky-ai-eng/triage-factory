@@ -41,13 +41,6 @@ type Event struct {
 	CreatedAt  time.Time `json:"created_at,omitempty"`
 }
 
-// PollerState stores the last-known snapshot for a source item, used to diff and detect transitions.
-type PollerState struct {
-	Source    string `json:"source"`
-	SourceID  string `json:"source_id"`
-	StateJSON string `json:"state_json"`
-}
-
 // --- Event Type Taxonomy ---
 // These are the canonical event types seeded into the DB on first run.
 
@@ -70,9 +63,10 @@ const (
 	EventGitHubPRReviewDismissed        = "github:pr:review_dismissed"
 
 	// "A reviewer was requested on a PR" — emitted once per newly-requested
-	// TF-known identity, dedup_key namespacing the requested reviewer
-	// ("user:<login>" / "team:<org>/<slug>"). The task routes to that
-	// identity's team(s).
+	// TF-known identity, dedup_key namespacing the requested reviewer by
+	// GitHub's id ("user_id:<id>" / "team_id:<id>"), or by handle ("user:<login>"
+	// / "team:<org>/<slug>") for a request read without one. The task routes
+	// to that identity's team(s).
 	EventGitHubPRReviewRequested = "github:pr:review_requested"
 
 	// "A requested reviewer was removed" — emitted per-identity when a
@@ -315,8 +309,8 @@ func AllEventTypes() []EventType {
 		// --- Jira ---
 		{ID: EventJiraIssueAssigned, Source: "jira", Category: "issue", Label: "Issue Assigned", Description: "Issue was assigned to you"},
 		{ID: EventJiraIssueAvailable, Source: "jira", Category: "issue", Label: "Issue Available", Description: "New unassigned issue in pickup queue"},
-		{ID: EventJiraIssueStatusChanged, Source: "jira", Category: "issue", Label: "Status Changed", Description: "Issue status changed (uses dedup_key=new_status)"},
-		{ID: EventJiraIssuePriorityChanged, Source: "jira", Category: "issue", Label: "Priority Changed", Description: "Issue priority was changed (uses dedup_key=new_priority)"},
+		{ID: EventJiraIssueStatusChanged, Source: "jira", Category: "issue", Label: "Status Changed", Description: "Issue status changed (uses dedup_key=new status id)"},
+		{ID: EventJiraIssuePriorityChanged, Source: "jira", Category: "issue", Label: "Priority Changed", Description: "Issue priority was changed (uses dedup_key=new priority id)"},
 		{ID: EventJiraIssueCommented, Source: "jira", Category: "issue", Label: "New Comment", Description: "Someone other than Triage Factory commented on an issue (one event per poll, naming every commenter)"},
 		{ID: EventJiraIssueBodyUpdated, Source: "jira", Category: "issue", Label: "Issue Body Updated", Description: "The description of a tracked issue was edited or cleared"},
 		{ID: EventJiraIssueLabelAdded, Source: "jira", Category: "issue", Label: "Label Added", Description: "A label was added to an issue (uses dedup_key=label name)"},
@@ -329,7 +323,7 @@ func AllEventTypes() []EventType {
 		// --- Linear ---
 		{ID: EventLinearIssueAssigned, Source: "linear", Category: "issue", Label: "Issue Assigned", Description: "Issue was assigned, or first seen already assigned"},
 		{ID: EventLinearIssueAvailable, Source: "linear", Category: "issue", Label: "Issue Available", Description: "Unassigned issue in a pickup state"},
-		{ID: EventLinearIssueStatusChanged, Source: "linear", Category: "issue", Label: "Status Changed", Description: "Issue workflow state changed (uses dedup_key=new state name)"},
+		{ID: EventLinearIssueStatusChanged, Source: "linear", Category: "issue", Label: "Status Changed", Description: "Issue workflow state changed (uses dedup_key=new state id)"},
 		{ID: EventLinearIssuePriorityChanged, Source: "linear", Category: "issue", Label: "Priority Changed", Description: "Issue priority was changed (uses dedup_key=new priority label)"},
 		{ID: EventLinearIssueCommented, Source: "linear", Category: "issue", Label: "New Comment", Description: "Someone other than Triage Factory commented on an issue (one event per poll, naming every commenter)"},
 		{ID: EventLinearIssueBodyUpdated, Source: "linear", Category: "issue", Label: "Issue Body Updated", Description: "The description of a tracked issue was edited or cleared"},

@@ -31,7 +31,8 @@ import ArchiveTeamModal from '../../../components/ArchiveTeamModal'
 import { fetchArchivePreview, type ArchivePreview } from '../../../lib/teamLifecycle'
 import { useTeams } from '../../../hooks/useTeams'
 import RepoPickerModal from '../../../components/RepoPickerModal'
-import { repoRefKey, type RepoRef } from '../../../lib/githubRepos'
+import { repoRefKeys, type RepoRef } from '../../../lib/githubRepos'
+import { groupKey } from '../../../lib/githubTeams'
 import GitHubTeamGroup from '../GitHubTeamGroup'
 import JiraProjectRulesGroup from '../JiraProjectRulesGroup'
 import LinearTeamRulesGroup from '../LinearTeamRulesGroup'
@@ -139,19 +140,18 @@ const GRACE_MAX_FALLBACK = 149
 const clampToRange = (v: number, min: number, max: number): number =>
   Math.min(max, Math.max(min, v))
 
-const normProjects = (p: JiraProjectConfig[]): JiraProjectConfig[] =>
-  p.map((x) => ({ ...x, key: x.key.trim() })).filter((x) => x.key !== '')
-
-// Compared by selection key, not registry id: a repository picked from the
-// reachable list has no registry id until the save registers it.
+// Compared on every id a ref carries (repoRefKeys), not the registry id alone:
+// a repository picked from the reachable list may have no registry id until the
+// save registers it.
 const sameRepos = (a: RepoRef[], b: RepoRef[]): boolean => {
   if (a.length !== b.length) return false
-  const sb = new Set(b.map(repoRefKey))
-  return a.every((x) => sb.has(repoRefKey(x)))
+  const sb = new Set(b.flatMap(repoRefKeys))
+  return a.every((x) => repoRefKeys(x).some((k) => sb.has(k)))
 }
 
-const groupKeys = (g: GitHubGroup[]): string[] =>
-  g.map((x) => `${x.org_login.toLowerCase()}/${x.team_slug.toLowerCase()}`).sort()
+// Compared by GitHub's team id (groupKey), so a rename of a team between the
+// load and a save is not a change.
+const groupKeys = (g: GitHubGroup[]): string[] => g.map(groupKey).sort()
 const sameGroups = (a: GitHubGroup[], b: GitHubGroup[]): boolean => {
   const ka = groupKeys(a)
   const kb = groupKeys(b)
@@ -351,7 +351,8 @@ export default function TeamSettings({
         toast.error(res.error)
         return false
       }
-      setGroupsBaseline(groups)
+      setGroups(res.groups)
+      setGroupsBaseline(res.groups)
       toast.success('GitHub teams saved')
       return true
     } finally {
@@ -360,8 +361,7 @@ export default function TeamSettings({
   }
 
   // ── Jira projects (their own replace-set PUT) ──
-  const projectsDirty =
-    JSON.stringify(normProjects(projects)) !== JSON.stringify(baseline.jira_projects ?? [])
+  const projectsDirty = JSON.stringify(projects) !== JSON.stringify(baseline.jira_projects ?? [])
   const projectsBlocked = teamProjectsBlocked(projects, jiraConnected)
   const saveProjects = async (): Promise<boolean> => {
     setSavingProjects(true)
@@ -373,7 +373,7 @@ export default function TeamSettings({
       }
       // Render what was STORED, not what was sent: the server resolved every
       // status display name from Jira on the way in.
-      const stored = normProjects(res.projects)
+      const stored = res.projects
       setBaseline((b) => ({ ...b, jira_projects: stored }))
       setProjects(stored)
       toast.success('Jira projects saved')

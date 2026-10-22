@@ -9,6 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -23,8 +24,8 @@ const (
 
 // The migration computes every scope it writes in SQL from the org's stored
 // base URLs, and every later read and write computes the same value in Go:
-// domain.EntityScope for an entity, EffectiveGitHubHost for a repository, a
-// team mapping and a placement pin, domain.ExternalObjectScope for an artifact
+// domain.EntityScope for an entity, EffectiveGitHubHost for a repository and a
+// team mapping, domain.ExternalObjectScope for an artifact
 // and an audit-ledger row. If the two disagreed, every pre-existing row would
 // sit under a scope no read asks for: the poller would mint a second entity
 // beside each one, the tracked set would read empty, and the next capture of
@@ -95,13 +96,18 @@ func TestMigrate_ProviderScopesMatchGo(t *testing.T) {
 			settings := domain.OrgSettings{GitHubBaseURL: migratedGitHubBase(githubBase), JiraBaseURL: jiraBase}
 			githubHost := EffectiveGitHubHost(settings.GitHubBaseURL)
 			want := map[string]string{
-				`SELECT scope FROM entities WHERE id = 'e-github'`:                  domain.EntityScope("github", settings),
-				`SELECT scope FROM entities WHERE id = 'e-jira-stub'`:               domain.EntityScope("jira", settings),
-				`SELECT scope FROM entities WHERE id = 'e-jira-elsewhere'`:          "https://other.example.com/Ctx",
-				`SELECT host FROM repositories WHERE id = 'r1'`:                     githubHost,
-				`SELECT repository_id FROM entities WHERE id = 'e-github'`:          "r1",
-				`SELECT host FROM team_github_groups WHERE team_id = 'team-1'`:      githubHost,
-				`SELECT host FROM placement_overrides WHERE key_value = 'octo/api'`: githubHost,
+				`SELECT scope FROM entities WHERE id = 'e-github'`:             domain.EntityScope("github", settings),
+				`SELECT scope FROM entities WHERE id = 'e-jira-stub'`:          domain.EntityScope("jira", settings),
+				`SELECT scope FROM entities WHERE id = 'e-jira-elsewhere'`:     "https://other.example.com/Ctx",
+				`SELECT host FROM repositories WHERE id = 'r1'`:                githubHost,
+				`SELECT repository_id FROM entities WHERE id = 'e-github'`:     "r1",
+				`SELECT host FROM team_github_groups WHERE team_id = 'team-1'`: githubHost,
+				// The pin named octo/api on the org's GitHub host, which is r1.
+				`SELECT repository_id FROM placement_overrides`: "r1",
+				// A mapping keeps its handle and carries no GitHub ids until the
+				// poll's team reconcile identifies it.
+				`SELECT COALESCE(github_team_id, 'none') || ' ' || COALESCE(github_org_id, 'none') || ' ' || github_org_login || '/' || github_team_slug
+				   FROM team_github_groups WHERE team_id = 'team-1'`: "none none octo/core",
 			}
 			if siteOK {
 				want[`SELECT scope FROM entities WHERE id = 'e-jira'`] = site
@@ -159,7 +165,6 @@ func TestMigrate_ProviderScopesStoreHostsCanonically(t *testing.T) {
 		`SELECT host FROM team_github_groups WHERE team_id = 'team-1'`,
 		`SELECT scope FROM entities WHERE id = 'e-github'`,
 		`SELECT scope FROM artifacts WHERE id = 'a1'`,
-		`SELECT host FROM placement_overrides WHERE key_value = 'octo/api'`,
 	}
 	inputs := []string{
 		"https://GHE.Acme.com",
@@ -219,6 +224,11 @@ func TestMigrate_ProviderScopesStoreHostsCanonically(t *testing.T) {
 			}
 			if site, ok := domain.JiraHost(in); ok && site != want {
 				t.Errorf("domain.JiraHost(%q) = %q, want the migrated scope %q", in, site, want)
+			}
+			// The pin named octo/api on that host, so it lands on the row that
+			// answers to the name there.
+			if got := queryString(t, database, `SELECT repository_id FROM placement_overrides`); got != "r1" {
+				t.Errorf("placement override references %q, want r1", got)
 			}
 		})
 	}
@@ -434,7 +444,7 @@ func TestMigrate_GitHubHostKeepsReferencesAndSettlesDuplicateIDs(t *testing.T) {
 
 // TestMigrate_ExternalObjectScopeKeysDedupWithinAScope pins the rebuilt keys:
 // every row survives the migration, a dedup key is unique only within a scope,
-// and a pin is keyed per host.
+// and a pin is keyed per registry row.
 func TestMigrate_ExternalObjectScopeKeysDedupWithinAScope(t *testing.T) {
 	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
 	seedProviderScopesOrg(t, database)
@@ -445,16 +455,18 @@ func TestMigrate_ExternalObjectScopeKeysDedupWithinAScope(t *testing.T) {
 	mustExec(t, database, `
 		INSERT INTO external_actions (id, provider, action, target, credential, dedup_key)
 		VALUES ('x1', 'github', 'branch_pushed', 'octo/api', 'github_app', 'branch:c:refs/heads/x:sha')`)
+	mustExec(t, database, `INSERT INTO repositories (id, owner, repo, source) VALUES ('r1', 'octo', 'api', 'github')`)
 	mustExec(t, database, `INSERT INTO placement_overrides (key_kind, key_value, pinned_instance_id) VALUES ('repo', 'octo/api', 'exec-1')`)
 
 	migrateProviderScopes(t, database)
+	mustExec(t, database, `INSERT INTO repositories (id, host, owner, repo, source) VALUES ('r2', 'https://ghe.example.com', 'octo', 'api', 'github')`)
 
 	for table, want := range map[string]int{"artifacts": 2, "external_actions": 1, "placement_overrides": 1} {
 		if n := queryInt(t, database, `SELECT COUNT(*) FROM `+table); n != want {
 			t.Errorf("%s rows = %d after the migration, want %d", table, n, want)
 		}
 	}
-	if got := queryString(t, database, `SELECT pinned_instance_id FROM placement_overrides WHERE key_value = 'octo/api'`); got != "exec-1" {
+	if got := queryString(t, database, `SELECT pinned_instance_id FROM placement_overrides WHERE repository_id = 'r1'`); got != "exec-1" {
 		t.Errorf("pinned instance = %q after the rebuild, want exec-1", got)
 	}
 
@@ -474,10 +486,10 @@ func TestMigrate_ExternalObjectScopeKeysDedupWithinAScope(t *testing.T) {
 		{"an action under the same key in the same scope", `
 			INSERT INTO external_actions (id, provider, scope, action, target, credential, dedup_key)
 			VALUES ('x3', 'github', 'https://github.com', 'branch_pushed', 'octo/api', 'github_app', 'branch:c:refs/heads/x:sha')`, true},
-		{"a pin on the same repository on another host", `
-			INSERT INTO placement_overrides (key_kind, host, key_value, replicas) VALUES ('repo', 'https://ghe.example.com', 'octo/api', 3)`, false},
-		{"a second pin on the same repository and host", `
-			INSERT INTO placement_overrides (key_kind, host, key_value, replicas) VALUES ('repo', 'https://github.com', 'octo/api', 3)`, true},
+		{"a pin on the repository under the same name on another host", `
+			INSERT INTO placement_overrides (repository_id, replicas) VALUES ('r2', 3)`, false},
+		{"a second pin on the same repository", `
+			INSERT INTO placement_overrides (repository_id, replicas) VALUES ('r1', 3)`, true},
 	} {
 		_, err := database.Exec(stmt.sql)
 		switch {
@@ -487,6 +499,33 @@ func TestMigrate_ExternalObjectScopeKeysDedupWithinAScope(t *testing.T) {
 			t.Errorf("%s was refused: %v", stmt.name, err)
 		}
 	}
+}
+
+// Each repo pin lands on the live registry row its owner/repo names on the
+// org's GitHub host, case-insensitively, and the most recently updated of two
+// pins on one row is kept. A pin no row answers to, and a pin of another kind,
+// are dropped.
+func TestMigrate_ProviderScopesKeyPlacementOverridesOnRepositories(t *testing.T) {
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	setOrgBaseURL(t, database, runmode.LocalDefaultOrgID, "github", "https://ghe.example.com")
+	mustExec(t, database, `INSERT INTO repositories (id, owner, repo, source) VALUES
+		('r-api', 'octo', 'api', 'github'), ('r-web', 'octo', 'Web', 'github')`)
+	mustExec(t, database, `INSERT INTO placement_overrides (key_kind, key_value, pinned_instance_id, replicas, updated_at) VALUES
+		('repo', 'octo/api', 'exec-old', 0, '2026-01-01 00:00:00'),
+		('repo', 'Octo/API', 'exec-new', 0, '2026-02-01 00:00:00'),
+		('repo', 'octo/web', NULL, 3, '2026-01-01 00:00:00'),
+		('repo', 'octo/gone', 'exec-1', 0, '2026-01-01 00:00:00'),
+		('project', 'octo/api', 'exec-2', 0, '2026-03-01 00:00:00')`)
+
+	migrateProviderScopes(t, database)
+
+	got := queryString(t, database, `SELECT group_concat(repository_id || '|' || COALESCE(pinned_instance_id, '') || '|' || replicas, ','
+	                                  ORDER BY repository_id) FROM placement_overrides`)
+	if want := "r-api|exec-new|0,r-web||3"; got != want {
+		t.Errorf("overrides = %s, want %s", got, want)
+	}
+	assertNoDanglingReferences(t, database)
 }
 
 // TestMigrate_InstallationsKeyedByHost covers the installation keys. The
@@ -586,6 +625,86 @@ func TestMigrate_InstallationsKeyedByHost(t *testing.T) {
 	reach = hosts(t, `SELECT credential_class || ':' || repo, host FROM reachable_repositories WHERE org_id = ?`)
 	if len(reach) != 2 || reach["byo_app:web"] != dot || reach["pat:personal"] != dot {
 		t.Errorf("reach rows after deleting the GHES installation = %v; want the github.com App row and the PAT row", reach)
+	}
+}
+
+// One live installation per account is held on the account id after the
+// migration, and on the login only for a row with no id. Where the old login
+// key let one account hold two live rows under two logins, the migration keeps
+// the later install and removes the earlier one with its reach and refresh
+// marker, as an uninstall would.
+func TestMigrate_InstallationsKeyedByAccountID(t *testing.T) {
+	const (
+		org = runmode.LocalDefaultOrgID
+		dot = "https://github.com"
+	)
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	mustExec(t, database, `INSERT INTO org_github_app_installations
+	             (installation_id, org_id, account_type, account_id, account_login, github_host, installed_at)
+	         VALUES ('10', ?, 'Organization', '1234', 'acme', ?, '2026-01-01 00:00:00'),
+	                ('11', ?, 'Organization', '1234', 'acme-corp', ?, '2026-02-01 00:00:00')`, org, dot, org, dot)
+	mustExec(t, database, `INSERT INTO reachable_repositories (org_id, credential_class, installation_id, owner, repo)
+	         VALUES (?, 'byo_app', '10', 'acme', 'api'), (?, 'byo_app', '11', 'acme-corp', 'api')`, org, org)
+	mustExec(t, database, `INSERT INTO reachable_scopes (org_id, credential_class, scope)
+	         VALUES (?, 'byo_app', '10'), (?, 'byo_app', '11')`, org, org)
+
+	migrateProviderScopes(t, database)
+
+	for _, q := range []string{
+		`SELECT group_concat(installation_id) FROM org_github_app_installations WHERE removed_at IS NULL`,
+		`SELECT group_concat(installation_id) FROM reachable_repositories`,
+		`SELECT group_concat(scope) FROM reachable_scopes`,
+	} {
+		if got := queryString(t, database, q); got != "11" {
+			t.Errorf("%s = %q; want the later install's alone", q, got)
+		}
+	}
+
+	for _, c := range []struct {
+		installationID, accountID, login string
+		refused                          bool
+	}{
+		{"12", "1234", "acme-renamed", true}, // a second live installation for one account
+		{"13", "5678", "acme-corp", false},   // another account under a login a live row carries
+		{"14", "", "initech", false},
+		{"15", "", "initech", true}, // a second id-less installation under one login
+	} {
+		_, err := database.Exec(`
+			INSERT INTO org_github_app_installations (installation_id, org_id, account_type, account_id, account_login, github_host)
+			VALUES (?, ?, 'Organization', NULLIF(?, ''), ?, ?)`, c.installationID, org, c.accountID, c.login, dot)
+		if (err != nil) != c.refused || (err != nil && !strings.Contains(err.Error(), "UNIQUE")) {
+			t.Errorf("install %s (account %q, login %s): err=%v, want refused=%v", c.installationID, c.accountID, c.login, err, c.refused)
+		}
+	}
+}
+
+// Nothing stored holds the owner account's id for a repository, and an
+// installation whose login matches the owner is not taken for one, so every
+// existing repositories and reachable_repositories row comes out with no
+// owner_external_id: the "not learned yet" state.
+func TestMigrate_ProviderScopesLeaveRepositoryOwnerIDsToBeLearned(t *testing.T) {
+	const (
+		org = runmode.LocalDefaultOrgID
+		dot = "https://github.com"
+	)
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	setOrgBaseURL(t, database, org, "github", dot)
+	mustExec(t, database, `INSERT INTO repositories (id, owner, repo, source, external_id)
+	         VALUES ('r-api', 'acme', 'api', 'github', '10')`)
+	mustExec(t, database, `INSERT INTO org_github_app_installations
+	             (installation_id, org_id, account_type, account_id, account_login, github_host)
+	         VALUES ('1', ?, 'Organization', '500', 'acme', ?)`, org, dot)
+	mustExec(t, database, `INSERT INTO reachable_repositories (org_id, credential_class, installation_id, owner, repo, external_id)
+	         VALUES (?, 'byo_app', '1', 'acme', 'api', '10')`, org)
+
+	migrateProviderScopes(t, database)
+
+	for _, table := range []string{"repositories", "reachable_repositories"} {
+		if got := queryString(t, database, `SELECT COUNT(*) || ' rows, ' || COUNT(owner_external_id) || ' with an owner id' FROM `+table); got != "1 rows, 0 with an owner id" {
+			t.Errorf("%s: %s; want the fixture's 1 row with none", table, got)
+		}
 	}
 }
 
@@ -1120,6 +1239,117 @@ func TestMigrate_ProviderScopesLinkArtifactsToEntities(t *testing.T) {
 		t.Error("issue-keyed survived; one issue recorded under its key and its id keeps the older row")
 	}
 	assertNoDanglingReferences(t, database)
+}
+
+// Each existing audit-ledger row is linked to the entity its target names,
+// case-insensitively, or else to the one whose url its link continues (the
+// link a rename of a moved issue left it with); a GitHub row about no entity is
+// linked to the registry row its owner/repo names; and a row nothing answers to
+// stays unlinked. A url match needs a boundary after the entity's url, so
+// SKY-12's link is not SKY-1's.
+func TestMigrate_ProviderScopesLinkAuditLedgerRows(t *testing.T) {
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	const site = "https://acme.atlassian.net"
+	setOrgBaseURL(t, database, runmode.LocalDefaultOrgID, "jira", site)
+	mustExec(t, database, `INSERT INTO entities (id, source, source_id, kind, url, snapshot_json) VALUES
+		('e-pr-9', 'github', 'octo/api#9', 'pr', 'https://github.com/octo/api/pull/9', '{"node_id":"PR_9","number":9}'),
+		('e-sky-1', 'jira', 'SKY-1', 'issue', ?, '{"id":"10001","key":"SKY-1","project_id":"100"}')`, site+"/browse/SKY-1")
+	mustExec(t, database, `INSERT INTO repositories (id, owner, repo, source) VALUES ('r-web', 'octo', 'web', 'github')`)
+	// want is entity_id|repository_id.
+	cases := []struct{ id, provider, target, url, currentURL, want string }{
+		{"x-pr", "github", "Octo/API#9", "https://github.com/octo/api/pull/9#issuecomment-1", "", "e-pr-9|"},
+		{"x-key", "jira", "SKY-1", site + "/browse/SKY-1", "", "e-sky-1|"},
+		{"x-moved", "jira", "OLD-1", site + "/browse/OLD-1", site + "/browse/SKY-1?focusedCommentId=5", "e-sky-1|"},
+		{"x-prefix", "jira", "SKY-12", site + "/browse/SKY-12", "", "|"},
+		{"x-branch", "github", "octo/web", "https://github.com/octo/web/tree/fix", "", "|r-web"},
+		{"x-pr-unrecorded", "github", "Octo/Web#3", "https://github.com/octo/web/pull/3", "", "|r-web"},
+		{"x-gone", "github", "octo/gone", "", "", "|"},
+		{"x-egress", "network", "evil.example:443", "", "", "|"},
+	}
+	for _, c := range cases {
+		mustExec(t, database, `
+			INSERT INTO external_actions (id, provider, action, target, url, current_url, credential, dedup_key)
+			VALUES (?, ?, 'comment_posted', ?, NULLIF(?, ''), NULLIF(?, ''), 'github_app', ?)`,
+			c.id, c.provider, c.target, c.url, c.currentURL, "k-"+c.id)
+	}
+
+	migrateProviderScopes(t, database)
+
+	for _, c := range cases {
+		if got := queryString(t, database, `SELECT COALESCE(entity_id, '') || '|' || COALESCE(repository_id, '')
+		                                     FROM external_actions WHERE id = ?`, c.id); got != c.want {
+			t.Errorf("%s references %q, want %q", c.id, got, c.want)
+		}
+	}
+	assertNoDanglingReferences(t, database)
+}
+
+// A GitHub predicate's login-valued identity filters become the id-valued
+// ones the matcher reads: each login replaced by the id of the identity
+// binding that holds it on the org's GitHub, a login no binding with an id
+// holds kept as written (it matches nothing, as a filter must not widen), a
+// singular login folded into its list, and a team's org/slug kept, since the
+// copied mappings have no ids yet. Every rewritten predicate decodes under the
+// strict schema; a predicate with nothing to rewrite, and a Jira one, are left
+// as they were.
+func TestMigrate_GitHubPredicatesNameIDs(t *testing.T) {
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	setOrgBaseURL(t, database, runmode.LocalDefaultOrgID, "github", "https://github.com")
+	mustExec(t, database, `INSERT INTO users (id) VALUES ('u2'), ('u3')`)
+	for _, identity := range [][]any{
+		{"u1", "https://github.com", "Aidan", "583231"},
+		{"u2", "https://github.com", "hubot", nil},
+		{"u3", "https://ghe.corp.example", "alice", "77"},
+	} {
+		mustExec(t, database, `
+			INSERT INTO user_github_identities (user_id, github_base_url, login, github_user_id, source, verified_at)
+			VALUES (?, ?, ?, ?, 'pat', CURRENT_TIMESTAMP)`, identity...)
+	}
+
+	cases := []struct {
+		id, eventType, before, after string
+	}{
+		{"list", domain.EventGitHubPRCICheckFailed, `{"author_in":["aidan","hubot","alice"],"repo_in":["r1"]}`,
+			`{"repo_in":["r1"],"author_id_in":["583231","hubot","alice"]}`},
+		{"empty-list", domain.EventGitHubPRCICheckFailed, `{"author_in":[]}`, `{"author_id_in":[]}`},
+		{"singular", domain.EventGitHubPRReviewApproved, `{"reviewer":"AIDAN"}`, `{"reviewer_id_in":["583231"]}`},
+		{"singular-narrows", domain.EventGitHubPRReviewApproved, `{"reviewer_in":["aidan","bob"],"reviewer":"aidan"}`,
+			`{"reviewer_id_in":["583231"]}`},
+		{"singular-outside-its-list", domain.EventGitHubPRNewCommits, `{"author_in":["bob"],"author":"aidan"}`,
+			`{"author_id_in":["0"]}`},
+		{"requested", domain.EventGitHubPRReviewRequested, `{"requested_login":"Aidan","requested_team":"acme/backend"}`,
+			`{"requested_user_id_in":["583231"],"requested_team_id_in":["acme/backend"]}`},
+		{"commented", domain.EventGitHubPRCommented, `{"commenter_in":["aidan"]}`, `{"commenter_id_in":["583231"]}`},
+		{"mentioned", domain.EventGitHubPRMentioned, `{"commenter":"aidan","mentioned_login":"bob","author":null}`,
+			`{"mentioned_login":"bob","commenter_id_in":["583231"]}`},
+		{"untouched", domain.EventGitHubPROpened, `{"repo_in":["r1"]}`, `{"repo_in":["r1"]}`},
+		{"jira", domain.EventJiraIssueCommented, `{"commenter_in":["557058:ada"]}`, `{"commenter_in":["557058:ada"]}`},
+		{"match-all", domain.EventGitHubPRCICheckFailed, "", ""},
+	}
+	for _, c := range cases {
+		mustExec(t, database, `INSERT OR IGNORE INTO events_catalog (id, source, category, label, description)
+			VALUES (?, 'test', 'test', ?, '')`, c.eventType, c.eventType)
+		mustExec(t, database, `
+			INSERT INTO event_handlers (id, team_id, creator_user_id, kind, event_type, scope_predicate_json,
+			                            source, name, default_priority, sort_order)
+			VALUES (?, 'team-1', 'u1', 'rule', ?, NULLIF(?, ''), 'user', ?, 0.5, 0)`,
+			c.id, c.eventType, c.before, c.id)
+	}
+
+	migrateProviderScopes(t, database)
+
+	for _, c := range cases {
+		got := queryString(t, database, `SELECT COALESCE(scope_predicate_json, '') FROM event_handlers WHERE id = ?`, c.id)
+		if got != c.after {
+			t.Errorf("%s = %s, want %s", c.id, got, c.after)
+		} else if got != "" {
+			if _, err := events.ValidatePredicateJSON(c.eventType, got); err != nil {
+				t.Errorf("%s: the rewritten predicate does not decode: %v", c.id, err)
+			}
+		}
+	}
 }
 
 func seedProviderScopesOrg(t *testing.T, database *sql.DB) {

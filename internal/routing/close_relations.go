@@ -6,12 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -100,9 +98,9 @@ var closeRelations = []closeRelation{
 	},
 	// A reviewer submitted a review (any verdict, including changes_requested)
 	// → their review_requested obligation is satisfied. Close only that
-	// reviewer's per-reviewer task (keyed by user dedup_key). A reviewer who
-	// submitted several reviews since the last poll closes it on the first;
-	// the rest find nothing to close.
+	// reviewer's per-reviewer task (keyed by the user's dedup_key, by GitHub
+	// id or by login). A reviewer who submitted several reviews since the
+	// last poll closes it on the first; the rest find nothing to close.
 	{
 		onEvents: []string{
 			domain.EventGitHubPRReviewApproved,
@@ -131,6 +129,7 @@ var closeRelations = []closeRelation{
 	{
 		onEvents: []string{domain.EventGitHubPRReviewRequestRemoved},
 		closes:   []string{domain.EventGitHubPRReviewRequested},
+		prepare:  prepareRemovedReviewerKeys,
 		keep:     keepReviewRequestRemoved,
 	},
 	// A Jira or Linear issue was (re)assigned → retire the stale
@@ -542,31 +541,49 @@ func prepareCIPassed(ctx context.Context, r *Router, orgID string, _ domain.Even
 	return nil, true, nil
 }
 
-// reviewerFromMeta pulls the top-level "reviewer" field every typed review
-// event carries.
-func reviewerFromMeta(evt domain.Event) string {
+// reviewerFromMeta pulls the reviewer every typed review event carries: the
+// top-level "reviewer" login and "reviewer_id", GitHub's id for the account
+// (empty on an event recorded before ids were).
+func reviewerFromMeta(evt domain.Event) (login, id string) {
 	var m struct {
-		Reviewer string `json:"reviewer"`
+		Reviewer   string `json:"reviewer"`
+		ReviewerID string `json:"reviewer_id"`
 	}
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil {
-		return ""
+		return "", ""
 	}
-	return m.Reviewer
+	return m.Reviewer, m.ReviewerID
 }
 
-// prepareReviewerKey yields the submitting reviewer's per-user dedup key so
-// keepDedupKey closes only that reviewer's review_requested task.
+// userReviewerKeys is every dedup key a review_requested task for the user
+// can carry: by GitHub's id, the key the tracker gives a request it read with
+// one, and by login, the key a request read without one carries, as does
+// every task created before ids were recorded.
+func userReviewerKeys(login, id string) []string {
+	var keys []string
+	if id != "" {
+		keys = append(keys, events.ReviewerDedupKeyUserID(id))
+	}
+	if login != "" {
+		keys = append(keys, events.ReviewerDedupKeyUser(login))
+	}
+	return keys
+}
+
+// prepareReviewerKey yields the submitting reviewer's per-user dedup keys
+// (userReviewerKeys) so keepDedupKey closes only that reviewer's
+// review_requested task.
 func prepareReviewerKey(_ context.Context, _ *Router, _ string, evt domain.Event, _ string) (closeContext, bool, error) {
-	reviewer := reviewerFromMeta(evt)
-	if reviewer == "" {
+	keys := userReviewerKeys(reviewerFromMeta(evt))
+	if len(keys) == 0 {
 		return nil, false, nil
 	}
-	return events.ReviewerDedupKeyUser(reviewer), true, nil
+	return keys, true, nil
 }
 
 func keepDedupKey(_ domain.Event, ctx closeContext, t domain.Task) bool {
-	key, _ := ctx.(string)
-	return t.DedupKey == key
+	keys, _ := ctx.([]string)
+	return slices.Contains(keys, t.DedupKey)
 }
 
 // prepareReviewResolved gates review_changes_requested closes: the reviewer
@@ -576,7 +593,7 @@ func keepDedupKey(_ domain.Event, ctx closeContext, t domain.Task) bool {
 // requested changes since the last poll emits both, and the snapshot, which
 // is never older than the events committed with it, shows the request.
 func prepareReviewResolved(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID string) (closeContext, bool, error) {
-	if reviewerFromMeta(evt) == "" {
+	if login, id := reviewerFromMeta(evt); login == "" && id == "" {
 		return nil, false, nil
 	}
 	snap, ok, err := r.prSnapshotForEntity(ctx, orgID, entityID)
@@ -591,24 +608,47 @@ func prepareReviewResolved(ctx context.Context, r *Router, orgID string, evt dom
 	return nil, true, nil
 }
 
-// keepReviewRequestRemoved closes the review_requested task matching the
-// removal event's reviewer dedup_key; a legacy removal with no dedup_key closes
-// every review_requested task (pre-ticket behavior).
-func keepReviewRequestRemoved(evt domain.Event, _ closeContext, t domain.Task) bool {
-	return evt.DedupKey == "" || t.DedupKey == evt.DedupKey
+// prepareRemovedReviewerKeys yields the dedup keys the removed reviewer's
+// review_requested task can carry: the removal's own key, and, beside a key by
+// GitHub's id, the key by the handle its metadata names, which a task created
+// before ids were recorded carries. A removal with no dedup_key yields none,
+// which keepReviewRequestRemoved reads as "close every request".
+func prepareRemovedReviewerKeys(_ context.Context, _ *Router, _ string, evt domain.Event, _ string) (closeContext, bool, error) {
+	if evt.DedupKey == "" {
+		return nil, true, nil
+	}
+	keys := []string{evt.DedupKey}
+	var m events.GitHubPRReviewRequestRemovedMetadata
+	if json.Unmarshal([]byte(evt.MetadataJSON), &m) == nil {
+		switch {
+		case m.RequestedLogin != "":
+			keys = append(keys, events.ReviewerDedupKeyUser(m.RequestedLogin))
+		case m.RequestedTeam != "":
+			keys = append(keys, events.ReviewerDedupKeyTeam(m.RequestedTeam))
+		}
+	}
+	return keys, true, nil
+}
+
+// keepReviewRequestRemoved closes the review_requested task keyed to the
+// removed reviewer (prepareRemovedReviewerKeys); a legacy removal with no
+// dedup_key closes every review_requested task (pre-ticket behavior).
+func keepReviewRequestRemoved(evt domain.Event, ctx closeContext, t domain.Task) bool {
+	if evt.DedupKey == "" {
+		return true
+	}
+	keys, _ := ctx.([]string)
+	return slices.Contains(keys, t.DedupKey)
 }
 
 // prepareJiraReassign resolves the new assignee's owning team(s) for the
-// member-aware skip and applies the Server/DC display-name fallback: when the
-// issue is still assigned to the local user (no accountId), skip the whole
-// close so a re-emit doesn't retire that user's own task.
+// member-aware skip. The assignee is the event's assignee_account_id, which
+// every assigned event carries: the snapshot a read produces always holds it
+// for an assigned issue.
 //
 // An unreadable assignee identity is an error rather than an empty team set:
 // empty means "the new assignee is on none of our teams," which retires every
-// owned task on the issue. So are the settings and identity reads behind the
-// display-name fallback — a failed identity read that silently proceeded
-// would retire the local user's own task, which is the exact harm the
-// fallback exists to prevent. Unparsable metadata declines instead: a retry
+// owned task on the issue. Unparsable metadata declines instead: a retry
 // does not fix the event's bytes.
 func prepareJiraReassign(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID string) (closeContext, bool, error) {
 	var meta events.JiraIssueAssignedMetadata
@@ -619,30 +659,12 @@ func prepareJiraReassign(ctx context.Context, r *Router, orgID string, evt domai
 	if err != nil {
 		return nil, false, err
 	}
-	if r.users != nil && meta.AssigneeAccountID == "" && meta.Assignee != "" {
-		var jiraHost string
-		if r.orgs != nil {
-			orgSet, err := r.orgs.GetSettingsSystem(ctx, orgID)
-			if err != nil {
-				return nil, false, fmt.Errorf("read org settings: %w", err)
-			}
-			jiraHost = orgSet.JiraBaseURL
-		}
-		_, localDisplayName, err := r.users.GetJiraIdentitySystem(ctx, runmode.LocalDefaultUserID, jiraHost)
-		if err != nil {
-			return nil, false, fmt.Errorf("read local jira identity: %w", err)
-		}
-		if localDisplayName != "" && strings.EqualFold(meta.Assignee, localDisplayName) {
-			return nil, false, nil // still assigned to the local user — don't retire
-		}
-	}
 	return newOwnerTeams, true, nil
 }
 
 // prepareLinearReassign is prepareJiraReassign for Linear: the new assignee's
 // owning team(s), for the member-aware skip, under the same error contract.
-// There is no display-name fallback to apply: a Linear assignee always arrives
-// with its user id.
+// The assignee is the event's assignee_user_id.
 func prepareLinearReassign(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID string) (closeContext, bool, error) {
 	var meta events.LinearIssueAssignedMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {

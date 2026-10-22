@@ -152,18 +152,23 @@ func newPgTeamPRSeeder(h *pgtest.Harness, orgID, teamID string) dbtest.TeamPRSee
 		}
 		return id
 	}
+	bound := func(t *testing.T, login, githubUserID string) string {
+		t.Helper()
+		id := member(t, login)
+		if _, err := h.AdminDB.Exec(`
+			INSERT INTO user_github_identities (user_id, github_base_url, login, github_user_id, source)
+			VALUES ($1, $2, $3, NULLIF($4, ''), 'connect_oauth')
+		`, id, dbtest.TestGitHubHost, login, githubUserID); err != nil {
+			t.Fatalf("bind identity for %s: %v", login, err)
+		}
+		return id
+	}
 	return dbtest.TeamPRSeeder{
 		Member: func(t *testing.T, login string) string {
 			t.Helper()
-			id := member(t, login)
-			if _, err := h.AdminDB.Exec(`
-				INSERT INTO user_github_identities (user_id, github_base_url, login, source)
-				VALUES ($1, $2, $3, 'connect_oauth')
-			`, id, dbtest.TestGitHubHost, login); err != nil {
-				t.Fatalf("bind identity for %s: %v", login, err)
-			}
-			return id
+			return bound(t, login, "")
 		},
+		MemberWithGitHubID:    bound,
 		MemberWithoutIdentity: member,
 		OtherTeam: func(t *testing.T, name string) string {
 			t.Helper()

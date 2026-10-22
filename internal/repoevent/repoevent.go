@@ -22,7 +22,6 @@ package repoevent
 
 import (
 	"context"
-	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -45,15 +44,13 @@ const EventType = "repository_updated"
 // between two frames keeps it, so the merge goes on matching instead of
 // silently stranding the card. Slug is display — the toast that names the
 // repository a clone failed for has no row to join against — and is never
-// keyed on. Both are always set; neither is a diffed field.
-//
-// Host is the GitHub host the repository lives on, which the audience is
-// resolved on (tracking is per host). It is never on the wire: the client
-// merges by id, and the host is not one of the fields the emitter wrote.
+// keyed on. Both are always set; neither is a diffed field. The audience is
+// resolved on ID too: team tracking references the registry row, and the id
+// is the one value a rename between the write and the resolution cannot
+// move.
 type Update struct {
 	ID             string  `json:"id"`
 	Slug           string  `json:"slug"`
-	Host           string  `json:"-"`
 	HasReadme      *bool   `json:"has_readme,omitempty"`
 	HasClaudeMd    *bool   `json:"has_claude_md,omitempty"`
 	HasAgentsMd    *bool   `json:"has_agents_md,omitempty"`
@@ -66,12 +63,12 @@ type Update struct {
 // Ptr adapts a literal to Update's optional-field pointers at emit sites.
 func Ptr[T any](v T) *T { return &v }
 
-// RecipientsFunc resolves the user ids that may receive an Update for
-// (owner, repo) on host in orgID — the WS mirror of the REST read's
-// visibility.
+// RecipientsFunc resolves the user ids that may receive an Update for the
+// repository whose registry row is repositoryID in orgID — the WS mirror of
+// the REST read's visibility.
 // db.TeamGitHubReposStore.RepoUpdateRecipientsSystem is the production
 // implementation.
-type RecipientsFunc func(ctx context.Context, orgID, host, owner, repo string) ([]string, error)
+type RecipientsFunc func(ctx context.Context, orgID, repositoryID string) ([]string, error)
 
 // Broadcaster is the minimal hub surface Publish needs; *websocket.Hub
 // satisfies it (and is nil-receiver-safe, so a typed-nil hub no-ops).
@@ -109,18 +106,13 @@ func (n *Notifier) Publish(ctx context.Context, orgID string, upd Update) {
 		n.hub.Broadcast(websocket.Event{Type: EventType, OrgID: orgID, Data: upd})
 		return
 	}
-	// The audience is resolved by name, because team tracking is what decides
-	// it and that is the axis team_github_repos answers on. So it reads the
-	// slug, not the id — the id is the client's merge key, and cutting it
-	// would produce nothing to resolve against.
-	owner, repo, ok := strings.Cut(upd.Slug, "/")
-	if !ok {
-		repoeventLog.Error("dropping event with malformed repo slug", "id", upd.ID, "slug", upd.Slug)
+	if upd.ID == "" {
+		repoeventLog.Error("dropping event with no repository id", "repo", upd.Slug)
 		return
 	}
-	userIDs, err := n.recipients(ctx, orgID, upd.Host, owner, repo)
+	userIDs, err := n.recipients(ctx, orgID, upd.ID)
 	if err != nil {
-		repoeventLog.Error("resolve recipients failed; dropping event", "repo", upd.Slug, "error", err)
+		repoeventLog.Error("resolve recipients failed; dropping event", "id", upd.ID, "repo", upd.Slug, "error", err)
 		return
 	}
 	for _, uid := range userIDs {

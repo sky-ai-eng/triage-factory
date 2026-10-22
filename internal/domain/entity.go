@@ -6,29 +6,25 @@ import (
 )
 
 // SlackSourceID builds the entities.source_id for a Slack thread:
-// "<channel_id>/<thread_ts>". It is the Slack analogue of the tracker's
-// ghSourceID ("owner/repo#N") and Jira's raw issue key — the natural-key
-// vocabulary that maps a (source, scope, source_id) key onto exactly one
-// active entities row (source='slack', kind='thread' when the bot is the reason the thread
-// exists — its root was a mention or a run's own post — else 'message' for
-// a mid-thread summons into someone else's thread; see Entity.Kind).
+// "<channel_id>/<thread_ts>", the Slack analogue of "owner/repo#N" and a Jira
+// issue key. It is the thread's display key. The thread's identity is its
+// channel's slack_channels row and its root ts (entities.slack_channel_id and
+// entities.slack_thread_ts), which is what ee/slack finds a thread by: the
+// channel id can change (Slack gives a private channel a new one when it is
+// shared through Slack Connect), and ee/slack rewrites the key when it does.
+// The entity is source='slack', kind='thread' when the bot is the reason the
+// thread exists — its root was a mention or a run's own post — else 'message'
+// for a mid-thread summons into someone else's thread; see Entity.Kind.
 //
 // The thread root is the entity grain. Slack delivers most mentions inside a
 // thread (the webhook carries thread_ts); a mention on a *root* channel message
-// has no thread_ts, so the caller passes that message's own ts as threadTS —
-// "<channel>/<ts>" — making the root message the thread it anchors. Resolving
-// thread_ts-or-ts is the caller's job (it owns the webhook payload); this
-// helper just pins the format so the resolver (TFAC-513) and the Slack
-// thread-create caller (TFAC-510) can't drift on the separator or ordering.
-//
-// Exported and dependency-free (rather than living next to the unexported
-// tracker ghSourceID) precisely because the consumer lives outside the tracker
-// package — it sits beside the other entity-key builders the rest of the app
-// already shares. channel+ts names one thread across all of Slack: a shared
-// channel keeps its id in every workspace it is in, so the entity's scope is
-// SlackScope, never a workspace. The id itself can change (Slack gives a
-// private channel a new one when it is shared through Slack Connect), and
-// ee/slack follows that by rekeying the channel's threads.
+// has no thread_ts, so the caller passes that message's own ts as threadTS,
+// making the root message the thread it anchors. Resolving thread_ts-or-ts is
+// the caller's job (it owns the webhook payload); this helper pins the format
+// so every writer and the exec verbs' thread targets spell it the same way.
+// channel+ts names one thread across all of Slack: a shared channel keeps its
+// id in every workspace it is in, so the entity's scope is SlackScope, never a
+// workspace.
 func SlackSourceID(channel, threadTS string) string {
 	return channel + "/" + threadTS
 }
@@ -38,13 +34,15 @@ func SlackSourceID(channel, threadTS string) string {
 //
 // Jira resolves issue keys case-insensitively on every surface — the REST
 // issue endpoints and JQL alike — but always *answers* with the canonical
-// key. The poller matches a refresh back to its entity by exact source_id,
-// so an entity minted under a caller-supplied spelling that differs from
-// the canonical one can never match its own issue again: the refresh comes
-// back under the canonical key, the lookup misses, and the entity holds its
-// last snapshot forever. Nothing errors — the API call that minted it
-// succeeded, and so does every later one — which is what makes normalizing
-// at the boundary the fix rather than a validation check somewhere.
+// key. The poller matches a refresh back to its entity by issue id and renames
+// the entity to the key the read answers with, so a non-canonical source_id
+// would be rewritten by the next refresh. Until then it is a key Jira never
+// shows, and every lookup by key (GetBySource with the key an agent or a
+// request names) misses the row under its canonical spelling; an entity that
+// has not learned its issue id yet is read back by key as well, and the
+// answer, under the canonical key, matches nothing. Nothing errors, which is
+// what makes normalizing at the boundary the fix rather than a validation
+// check somewhere.
 func NormalizeJiraKey(key string) string {
 	return strings.ToUpper(strings.TrimSpace(key))
 }
@@ -207,6 +205,19 @@ type Entity struct {
 	// transition. Populated on every read; callers thread it straight back
 	// into their next CAS call.
 	PollSeq int64 `json:"poll_seq"`
+}
+
+// JiraIssueRef is what a Jira REST call names a Jira entity's issue by: its
+// issue id, which a move or a project key rename leaves alone, where the key
+// would name another issue once this one moved. A local entity carried over
+// from before issue ids were recorded has no id until a read reaches it, and
+// is named by its key until then. Logs, messages and audit rows still name the
+// issue by its key, the display value.
+func (e Entity) JiraIssueRef() string {
+	if e.ExternalID != "" {
+		return e.ExternalID
+	}
+	return e.SourceID
 }
 
 // EntityContainer is what a provider's response says an object sits in, which

@@ -709,3 +709,17 @@ func TestTaskStore_Postgres_MemoryPendingConformance(t *testing.T) {
 		}
 	})
 }
+
+// TestTaskRequestedReviewer_Postgres runs the requested-reviewer projection
+// suite against the Postgres TaskStore, both pools on the admin connection as
+// TestTaskStore_Postgres wires them.
+func TestTaskRequestedReviewer_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	dbtest.RunTaskRequestedReviewerConformance(t, func(t *testing.T) (db.Stores, string, string) {
+		t.Helper()
+		h.Reset(t)
+		orgID, _, _ := seedPgOrgUserAgent(t, h)
+		return stores, orgID, firstTeamForOrg(t, h, orgID)
+	})
+}

@@ -23,8 +23,9 @@ var ErrNoGitHubCredentials = errors.New("github: no credentials resolved for org
 
 // ErrAmbiguousInstallation is returned when resolution reaches an App with
 // more than one installation and the call named no account to choose between
-// them. It deliberately does NOT wrap ErrNoGitHubCredentials: the workspace's
-// credential is present and working, and telling a user their GitHub is
+// them, or named one only by a login that more than one live installation
+// answers to. It deliberately does NOT wrap ErrNoGitHubCredentials: the
+// workspace's credential is present and working, and telling a user their GitHub is
 // disconnected when the real fault is a caller that didn't say which account it
 // meant sends them to re-authorize something that was never broken.
 //
@@ -157,6 +158,50 @@ type RepoIdentityResolver interface {
 	ClientForRepoWithIdentity(ctx context.Context, orgID, owner, repo string) (*Client, Identity, error)
 }
 
+// OrgIdentity is the org's GitHub commit identity, the name and email
+// OrgIdentityFor resolves, together with GitHub's numeric id for the account
+// it is, in text form, "" when that id is not stored.
+type OrgIdentity struct {
+	Name      string
+	Email     string
+	AccountID string
+}
+
+// OrgIdentityAccountResolver is the optional extension of Resolver,
+// implemented by the production resolver, that reports OrgIdentityFor's
+// identity together with the account id it belongs to, from the same
+// resolution. A caller that has to tell the org's account apart from a
+// person's compares the ids; a Resolver that doesn't implement it leaves the
+// caller with OrgIdentityFor and the login alone.
+type OrgIdentityAccountResolver interface {
+	OrgIdentityAccountFor(ctx context.Context, orgID string) (OrgIdentity, bool)
+}
+
+// AccountClientResolver is the optional extension of Resolver, implemented by
+// the production resolver, for a caller that knows the account it acts on by
+// GitHub's numeric account id as well as by login: one holding a repository's
+// registry row, which records the id of the account that owns it
+// (domain.Repository.OwnerExternalID). ClientForAccount is ClientFor with the
+// account named by both halves, and tier 1 selects the installation the way
+// ClientForInstallation does: by the id whenever the installation row carries
+// one, so a client still resolves while the row's owner login lags a rename of
+// the account, and never resolves to another account's installation that took
+// the old login. An empty accountID resolves by the login alone, as ClientFor.
+type AccountClientResolver interface {
+	ClientForAccount(ctx context.Context, orgID, accountID, login string) (*Client, error)
+}
+
+// ClientForOwner is the client for the account that owns a repository whose
+// registry row the caller holds, named by the owner id the row records and its
+// owner login: through AccountClientResolver when resolver implements it, and
+// by the login through ClientFor when it does not.
+func ClientForOwner(ctx context.Context, resolver Resolver, orgID, ownerID, owner string) (*Client, error) {
+	if ar, ok := resolver.(AccountClientResolver); ok {
+		return ar.ClientForAccount(ctx, orgID, ownerID, owner)
+	}
+	return resolver.ClientFor(ctx, orgID, owner)
+}
+
 // TokenIdentityResolver is the optional extension of Resolver, implemented by
 // the production resolver, that reports the Identity of the credential TokenFor
 // would return, from the same resolution, so a caller labelling what a token
@@ -261,6 +306,21 @@ type ScopedRepoResolver interface {
 type Resolver interface {
 	ClientFor(ctx context.Context, orgID, githubTarget string) (*Client, error)
 
+	// ClientForInstallation is ClientFor for a caller that holds the App
+	// installation row it wants a client for, such as a pass that walks the
+	// org's installations. The row names its account by GitHub's numeric
+	// account id as well as by login, and tier 1 selects the installation by the
+	// id whenever the row carries one, so a client for the row still resolves
+	// while its account_login lags a rename, and never resolves to another
+	// account's installation that took over the old login. Only a row with no
+	// account id falls back to the login. The tiers are ClientFor's.
+	//
+	// A caller acting on a repository it knows by name names the repository's
+	// owner by login, through ClientFor or ClientForRepo. One holding the
+	// repository's registry row names the owner by the account id the row
+	// records as well (ClientForOwner).
+	ClientForInstallation(ctx context.Context, orgID string, inst domain.OrgGitHubAppInstallation) (*Client, error)
+
 	// ClientForRepo resolves a client for a repo-scoped operation on
 	// owner/repo. It differs from ClientFor in that tier 1 (the org's App
 	// installation for owner) is chosen only when that installation's grant
@@ -325,6 +385,9 @@ type Resolver interface {
 	// login (an org bound before TFAC-452, or a read error). The caller then
 	// leaves git identity unset and the agent inherits ambient config, never a
 	// fabricated identity; it self-heals on the next PAT re-save / App re-register.
+	//
+	// OrgIdentityAccountResolver reports the same identity together with the
+	// GitHub account id it belongs to.
 	OrgIdentityFor(ctx context.Context, orgID string) (name, email string, ok bool)
 }
 
@@ -405,12 +468,28 @@ func NewResolver(secrets db.SecretStore, apps db.GitHubAppsStore, orgs db.OrgsSt
 // dropped method is a compile error rather than a silent runtime fall-through
 // to the unscoped path.
 var (
-	_ ScopedResolver          = (*resolver)(nil)
-	_ ScopedRepoResolver      = (*resolver)(nil)
-	_ RepoCoverageInvalidator = (*resolver)(nil)
+	_ ScopedResolver             = (*resolver)(nil)
+	_ ScopedRepoResolver         = (*resolver)(nil)
+	_ RepoCoverageInvalidator    = (*resolver)(nil)
+	_ OrgIdentityAccountResolver = (*resolver)(nil)
+	_ AccountClientResolver      = (*resolver)(nil)
 )
 
 func (r *resolver) ClientFor(ctx context.Context, orgID, target string) (*Client, error) {
+	return r.clientForAccount(ctx, orgID, accountByLogin(target))
+}
+
+func (r *resolver) ClientForAccount(ctx context.Context, orgID, accountID, login string) (*Client, error) {
+	return r.clientForAccount(ctx, orgID, accountRef{ID: accountID, Login: login})
+}
+
+func (r *resolver) ClientForInstallation(ctx context.Context, orgID string, inst domain.OrgGitHubAppInstallation) (*Client, error) {
+	return r.clientForAccount(ctx, orgID, accountRef{ID: inst.AccountID, Login: inst.AccountLogin})
+}
+
+// clientForAccount is ClientFor, ClientForAccount and ClientForInstallation:
+// the org's credential for the account target names.
+func (r *resolver) clientForAccount(ctx context.Context, orgID string, target accountRef) (*Client, error) {
 	oc, err := r.orgContextFor(ctx, orgID)
 	if err != nil {
 		return nil, err
@@ -732,8 +811,8 @@ func (r *resolver) activeApp(ctx context.Context, orgID string, class domain.Git
 // error — NO PAT fallback (the caller determined via activeApp that the org's
 // credential is the App). Shares the installation TokenCache with ClientFor so
 // the API client and the host-side git clone resolve identically.
-func (r *resolver) appToken(ctx context.Context, orgID string, app resolvedApp, target, base string) (githubapp.Token, string, error) {
-	inst, err := r.installationFor(ctx, orgID, installationHost(base), accountByLogin(target))
+func (r *resolver) appToken(ctx context.Context, orgID string, app resolvedApp, target accountRef, base string) (githubapp.Token, string, error) {
+	inst, err := r.installationFor(ctx, orgID, installationHost(base), target)
 	if err != nil {
 		return githubapp.Token{}, "", err
 	}
@@ -766,7 +845,7 @@ func installationClient(base, orgID string, tok githubapp.Token, installationID 
 // a negative is not cached, so a repo newly added to the grant is picked up on
 // the next call.
 func (r *resolver) appClientForRepo(ctx context.Context, orgID string, app resolvedApp, owner, repo, base string) (*Client, Identity, error) {
-	tok, installationID, err := r.appToken(ctx, orgID, app, owner, base)
+	tok, installationID, err := r.appToken(ctx, orgID, app, accountByLogin(owner), base)
 	if err != nil {
 		return nil, IdentityUnknown, err
 	}
@@ -842,7 +921,7 @@ func (r *resolver) TokenForWithIdentity(ctx context.Context, orgID, target strin
 		return githubapp.Token{}, IdentityUnknown, err
 	}
 	if app.present() {
-		tok, _, err := r.appToken(ctx, orgID, app, target, base)
+		tok, _, err := r.appToken(ctx, orgID, app, accountByLogin(target), base)
 		if err != nil {
 			return githubapp.Token{}, IdentityUnknown, err
 		}
@@ -1093,11 +1172,20 @@ func (r *resolver) BaseURLFor(ctx context.Context, orgID string) (string, error)
 // the whole posture of this function is to refuse a fabricated identity, and
 // under an unrecognised class the PAT login would be exactly that.
 func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, email string, ok bool) {
+	id, ok := r.OrgIdentityAccountFor(ctx, orgID)
+	return id.Name, id.Email, ok
+}
+
+// OrgIdentityAccountFor is OrgIdentityFor with the account id of the identity
+// it resolves: the App's bot user id (org_github_apps.bot_user_id, or the
+// deployment App's) on the App tier, and agents.github_org_user_id on the PAT
+// tier, "" where it is not stored.
+func (r *resolver) OrgIdentityAccountFor(ctx context.Context, orgID string) (OrgIdentity, bool) {
 	class, host, err := r.credentialClassFor(ctx, orgID)
 	if err != nil || !class.Known() {
 		ghResolverLog.Warn("resolve credential class failed or unknown; stamping no org identity",
 			"org", orgID, "class", class, "error", err)
-		return "", "", false
+		return OrgIdentity{}, false
 	}
 
 	// App tier: the org's registered App acts as "<slug>[bot]". The slug comes
@@ -1107,19 +1195,19 @@ func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, emai
 	// PAT rather than claiming an identity the org isn't acting as — during a
 	// PAT→App switch the org is in the App system but still committing as its PAT.
 	if app, err := r.appForIdentity(ctx, orgID, class, host); err == nil && app.commitIdentityReady() {
-		name = app.slug() + "[bot]"
+		out := OrgIdentity{Name: app.slug() + "[bot]"}
 		// The numeric-id noreply form links a bot's commits to its account on
 		// github.com (contribution graph + Verified co-author badge); the plain
 		// "<slug>[bot]@..." form does NOT reliably link for bot accounts. Use the
 		// numeric form when the bot user id is known (org_github_apps.bot_user_id,
-		// fetched best-effort at registration), else fall back to the plain form —
-		// today's behavior, never a worse state (TFAC-474).
+		// fetched best-effort at registration), else fall back to the plain form.
 		if id := app.botUserID(); id != 0 {
-			email = strconv.FormatInt(id, 10) + "+" + name + "@users.noreply.github.com"
+			out.AccountID = strconv.FormatInt(id, 10)
+			out.Email = out.AccountID + "+" + out.Name + "@users.noreply.github.com"
 		} else {
-			email = name + "@users.noreply.github.com"
+			out.Email = out.Name + "@users.noreply.github.com"
 		}
-		return name, email, true
+		return out, true
 	}
 	// A managed org has no PAT tier to fall to. Its credential is the deployment
 	// App — activeApp refuses rather than borrowing a PAT — so the cached PAT
@@ -1128,7 +1216,7 @@ func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, emai
 	// looking at commit authorship. Stamp nothing instead, exactly as an
 	// unrecognised class does, and let the agent inherit ambient git config.
 	if class == domain.GitHubCredentialClassManagedApp {
-		return "", "", false
+		return OrgIdentity{}, false
 	}
 
 	// PAT tier: the identity the org PAT authenticates as. The agents columns
@@ -1146,17 +1234,17 @@ func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, emai
 	// A PAT with no GitHub URL to send it to authenticates as nobody, so it
 	// lends no identity.
 	if _, err := host(); err != nil {
-		return "", "", false
+		return OrgIdentity{}, false
 	}
 	if pat, err := r.orgPAT(ctx, orgID); err != nil || pat == "" {
-		return "", "", false
+		return OrgIdentity{}, false
 	}
 	// PAT present: trust the captured pair. A partial identity cannot stamp a
 	// commit; it self-heals on the next PAT save.
 	if agent, err := r.agents.GetForOrgSystem(ctx, orgID); err == nil && agent != nil && agent.GitHubOrgLogin != "" && agent.GitHubOrgEmail != "" {
-		return agent.GitHubOrgLogin, agent.GitHubOrgEmail, true
+		return OrgIdentity{Name: agent.GitHubOrgLogin, Email: agent.GitHubOrgEmail, AccountID: agent.GitHubOrgUserID}, true
 	}
-	return "", "", false
+	return OrgIdentity{}, false
 }
 
 // accountRef names the GitHub account whose installation a caller needs. The
@@ -1164,16 +1252,16 @@ func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, emai
 // differently: Login is the handle, which its owner can rename at any time,
 // and ID is GitHub's numeric account id, which they cannot. A caller that
 // holds only a repo owner supplies the login (accountByLogin); a caller that
-// knows the account's id supplies both.
+// holds the installation row (ClientForInstallation) or a repository's
+// registry row with its owner's id (ClientForAccount) supplies both.
 type accountRef struct {
 	ID    string
 	Login string
 }
 
 // accountByLogin is the ref for a caller that knows an account only by its
-// handle — every public resolver entry point today, since ClientFor and
-// friends take a GitHub target login. Such a ref matches exactly as the
-// resolver always has.
+// handle: ClientFor, TokenFor and the repository-scoped entry points, whose
+// target is a GitHub login or a repository's owner.
 func accountByLogin(login string) accountRef { return accountRef{Login: login} }
 
 // String names the account a resolution error is about, in whichever halves the
@@ -1202,7 +1290,8 @@ func (a accountRef) String() string {
 // mirrored before ids were captured, or a caller that knows only a handle —
 // the match falls back to the case-insensitive login compare (GitHub logins
 // are case-insensitive, so the compare is too), which is the whole of the
-// behaviour for a ref with no id.
+// behaviour for a ref with no id. A login more than one live row answers to is
+// ErrAmbiguousInstallation rather than a pick between them.
 //
 // Only installations on host are candidates — the GitHub the token is minted
 // against (installationHost of the resolution's base). A row on another host is
@@ -1246,6 +1335,10 @@ func (r *resolver) installationFor(ctx context.Context, orgID, host string, targ
 			}
 		}
 	}
+	var (
+		match   domain.OrgGitHubAppInstallation
+		matches int
+	)
 	for _, in := range insts {
 		// A row whose id is known and differs is a different account, whatever
 		// it is currently called — skip it rather than let a colliding login
@@ -1256,8 +1349,19 @@ func (r *resolver) installationFor(ctx context.Context, orgID, host string, targ
 			continue
 		}
 		if target.Login != "" && strings.EqualFold(in.AccountLogin, target.Login) {
-			return in, nil
+			match = in
+			matches++
 		}
+	}
+	switch {
+	case matches == 1:
+		return match, nil
+	case matches > 1:
+		// Live rows are unique per account id, not per login, so two of them
+		// answer to one login when an account renamed away from it and another
+		// took it before the first row caught up. The login cannot say which
+		// account the caller means.
+		return domain.OrgGitHubAppInstallation{}, fmt.Errorf("%w: org=%s: %d installations on %s answer to %s", ErrAmbiguousInstallation, orgID, matches, host, target)
 	}
 	return domain.OrgGitHubAppInstallation{}, fmt.Errorf("%w: org=%s: app has no installation for %s on %q", ErrNoGitHubCredentials, orgID, target, host)
 }

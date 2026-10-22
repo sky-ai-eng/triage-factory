@@ -49,7 +49,7 @@ func newTxAgentStore(tx queryer) db.AgentStore {
 var _ db.AgentStore = (*agentStore)(nil)
 
 const pgAgentColumns = `id, display_name, default_model, default_autonomy_suitability,
-       github_pat_user_id, github_org_login, github_org_email, jira_service_account_id,
+       github_pat_user_id, github_org_login, github_org_user_id, github_org_email, jira_service_account_id,
        created_at, updated_at`
 
 func (s *agentStore) GetForOrg(ctx context.Context, orgID string) (*domain.Agent, error) {
@@ -146,24 +146,27 @@ func scanUpdatedAgent(row *sql.Row) (domain.Agent, error) {
 	return a, err
 }
 
-func (s *agentStore) SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, login, email string) (domain.Agent, error) {
+func (s *agentStore) SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, login, githubUserID, email string) (domain.Agent, error) {
 	if !isValidUUID(agentID) {
 		return domain.Agent{}, db.ErrNoSuchAgent
 	}
 	// login is a free-form GitHub login (e.g. "octocat" or "acme-bot[bot]"),
 	// stored in the text column github_org_login — no UUID shape check, unlike
 	// the github_pat_user_id FK. The pair is all-or-nothing: either empty input
-	// clears both columns so no caller can persist a partial commit identity.
+	// clears every column so no caller can persist a partial commit identity.
+	// The id is written as given, since it describes the account this write's
+	// login names and no other.
 	if login == "" || email == "" {
-		login, email = "", ""
+		login, githubUserID, email = "", "", ""
 	}
 	return scanUpdatedAgent(s.app.QueryRowContext(ctx, `
 		UPDATE agents
 		SET github_org_login = $1,
-		    github_org_email = $2
-		WHERE org_id = $3 AND id = $4
+		    github_org_user_id = $2,
+		    github_org_email = $3
+		WHERE org_id = $4 AND id = $5
 		RETURNING `+pgAgentColumns,
-		nullString(login), nullString(email), orgID, agentID))
+		nullString(login), nullString(githubUserID), nullString(email), orgID, agentID))
 }
 
 // nullString returns nil when s is empty so the column ends up SQL NULL.
@@ -209,12 +212,13 @@ func nullUUID(s string) any {
 func scanAgentRowPG(row *sql.Row) (domain.Agent, error) {
 	var a domain.Agent
 	var defaultModel, jiraSvc sql.NullString
-	var ghPATUser, ghOrgLogin, ghOrgEmail sql.NullString
+	var ghPATUser, ghOrgLogin, ghOrgUserID, ghOrgEmail sql.NullString
 	var defAutonomy sql.NullFloat64
 	if err := row.Scan(&a.ID, &a.DisplayName, &defaultModel, &defAutonomy,
-		&ghPATUser, &ghOrgLogin, &ghOrgEmail, &jiraSvc, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		&ghPATUser, &ghOrgLogin, &ghOrgUserID, &ghOrgEmail, &jiraSvc, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return a, err
 	}
+	a.GitHubOrgUserID = ghOrgUserID.String
 	a.DefaultModel = defaultModel.String
 	if defAutonomy.Valid {
 		v := defAutonomy.Float64

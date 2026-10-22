@@ -6,8 +6,14 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 //
 // Every PR event carries:
 //
-//   - the actor's GitHub login (Author, Reviewer, Commenter) — predicates
-//     match against this directly via the `*_in` allowlist primitive;
+//   - the actor's GitHub login (Author, Reviewer, Commenter) and, beside it,
+//     GitHub's id for the actor's account (AuthorID, ReviewerID,
+//     CommenterID), which a rename leaves alone. The predicates' identity
+//     filters (author_id_in, reviewer_id_in, commenter_id_in,
+//     requested_user_id_in, requested_team_id_in) match the ids; the login is
+//     for display. The id is empty on an event recorded before ids were, and
+//     for an actor GitHub returned without one (a deleted account), so an
+//     identity filter never matches such an event;
 //   - Labels []string — snapshot at emission time, so predicates can scope
 //     to labeled PRs (e.g. HasLabel "self-review"). This is the user opt-in
 //     surface for label-driven flows (see Scenario 5 in docs/data-model-
@@ -32,14 +38,18 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 //
 // The open-set discriminator for this event is the *requested reviewer* —
 // the tracker emits one event per newly-requested TF-known identity, with the
-// event's dedup_key namespacing it ("user:<login>" / "team:<org>/<slug>").
-// Exactly one of RequestedLogin / RequestedTeam is set per event; the router
-// routes the task's visibility to that identity's team(s). Author still
-// carries the PR author for predicate matching.
+// event's dedup_key namespacing it by GitHub's id ("user_id:<id>" /
+// "team_id:<id>"), or by handle ("user:<login>" / "team:<org>/<slug>") for a
+// request read without one (see ReviewerDedupKeyUserID). Exactly one of
+// RequestedLogin / RequestedTeam is set per event, with its id beside it when
+// known; the router routes the task's visibility to that identity's team(s),
+// by the id when there is one. AuthorID still carries the PR author for
+// predicate matching.
 type GitHubPRReviewRequestedMetadata struct {
-	Author       string   `json:"author"`        // PR author login
-	Repo         string   `json:"repo"`          // "owner/name"
-	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
+	Author       string   `json:"author"`              // PR author login
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
+	Repo         string   `json:"repo"`                // "owner/name"
+	RepositoryID string   `json:"repository_id"`       // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
 	IsDraft      bool     `json:"is_draft"`
 	HeadSHA      string   `json:"head_sha"`
@@ -51,26 +61,29 @@ type GitHubPRReviewRequestedMetadata struct {
 	// RequestedTeam is the requested github team in "org/slug" form when
 	// the request named a team; empty for individual-user requests.
 	RequestedTeam string `json:"requested_team,omitempty"`
+	// RequestedUserID / RequestedTeamID are GitHub's ids for the requested
+	// user or team, beside the handle above. Empty on an event recorded
+	// before ids were, or for a request GitHub returned without one.
+	RequestedUserID string `json:"requested_user_id,omitempty"`
+	RequestedTeamID string `json:"requested_team_id,omitempty"`
 }
 
 type GitHubPRReviewRequestedPredicate struct {
-	AuthorIn       []string `json:"author_in,omitempty" doc:"Match PRs authored by anyone in this list (GitHub logins, case-insensitive)."`
-	Author         *string  `json:"author,omitempty" doc:"Exact-match on PR author login (e.g. 'dependabot[bot]')."`
-	RepoIn         []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
-	IsDraft        *bool    `json:"is_draft,omitempty" doc:"Match draft vs. ready-for-review PRs."`
-	HasLabel       *string  `json:"has_label,omitempty" doc:"Require the PR to currently bear this label."`
-	RequestedLogin *string  `json:"requested_login,omitempty" doc:"Match only when this user login was the requested reviewer (e.g. predicate a team's bot auto-review on the requested identity)."`
-	RequestedTeam  *string  `json:"requested_team,omitempty" doc:"Match only when this github team ('org/slug') was the requested reviewer."`
+	AuthorIDIn        []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	RepoIn            []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	IsDraft           *bool    `json:"is_draft,omitempty" doc:"Match draft vs. ready-for-review PRs."`
+	HasLabel          *string  `json:"has_label,omitempty" doc:"Require the PR to currently bear this label."`
+	RequestedUserIDIn []string `json:"requested_user_id_in,omitempty" doc:"Match only when one of these GitHub accounts was the requested reviewer, each by GitHub's account id as author_id_in takes it, not its login."`
+	RequestedTeamIDIn []string `json:"requested_team_id_in,omitempty" doc:"Match only when one of these GitHub teams was the requested reviewer, each by GitHub's team id (the github_team_id of one of the team's GET /api/teams/{team_id}/github-groups mappings), not org/slug."`
 }
 
 func (p GitHubPRReviewRequestedPredicate) Matches(m GitHubPRReviewRequestedMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
 		idIn(p.RepoIn, m.RepositoryID) &&
 		boolEq(p.IsDraft, m.IsDraft) &&
 		hasLabel(p.HasLabel, m.Labels) &&
-		strEqFold(p.RequestedLogin, m.RequestedLogin) &&
-		strEqFold(p.RequestedTeam, m.RequestedTeam)
+		idIn(p.RequestedUserIDIn, m.RequestedUserID) &&
+		idIn(p.RequestedTeamIDIn, m.RequestedTeamID)
 }
 
 // -----------------------------------------------------------------------------
@@ -83,6 +96,7 @@ func (p GitHubPRReviewRequestedPredicate) Matches(m GitHubPRReviewRequestedMetad
 // review_requested task on the entity.
 type GitHubPRReviewRequestRemovedMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Repo         string   `json:"repo"`
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
@@ -91,42 +105,51 @@ type GitHubPRReviewRequestRemovedMetadata struct {
 	Labels       []string `json:"labels"`
 	Title        string   `json:"title"`
 	// RequestedLogin / RequestedTeam identify which requested reviewer was
-	// dropped; exactly one is set, matching the review_requested event the
-	// removal reconciles against.
-	RequestedLogin string `json:"requested_login,omitempty"`
-	RequestedTeam  string `json:"requested_team,omitempty"`
+	// dropped, and RequestedUserID / RequestedTeamID carry GitHub's id for
+	// it. A removal names the reviewer the way the review_requested task it
+	// reconciles against was keyed: an id-keyed task's removal can carry
+	// the id alone.
+	RequestedLogin  string `json:"requested_login,omitempty"`
+	RequestedTeam   string `json:"requested_team,omitempty"`
+	RequestedUserID string `json:"requested_user_id,omitempty"`
+	RequestedTeamID string `json:"requested_team_id,omitempty"`
 }
 
 type GitHubPRReviewRequestRemovedPredicate struct {
-	AuthorIn       []string `json:"author_in,omitempty" doc:"Match PRs authored by anyone in this list."`
-	Author         *string  `json:"author,omitempty" doc:"Exact-match on PR author login."`
-	RepoIn         []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
-	IsDraft        *bool    `json:"is_draft,omitempty" doc:"Match draft vs. ready-for-review PRs."`
-	HasLabel       *string  `json:"has_label,omitempty" doc:"Require the PR to currently bear this label."`
-	RequestedLogin *string  `json:"requested_login,omitempty" doc:"Match only when this user login's request was removed."`
-	RequestedTeam  *string  `json:"requested_team,omitempty" doc:"Match only when this github team's ('org/slug') request was removed."`
+	AuthorIDIn        []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	RepoIn            []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	IsDraft           *bool    `json:"is_draft,omitempty" doc:"Match draft vs. ready-for-review PRs."`
+	HasLabel          *string  `json:"has_label,omitempty" doc:"Require the PR to currently bear this label."`
+	RequestedUserIDIn []string `json:"requested_user_id_in,omitempty" doc:"Match only when the removed request named one of these GitHub accounts, each by GitHub's account id as author_id_in takes it, not its login."`
+	RequestedTeamIDIn []string `json:"requested_team_id_in,omitempty" doc:"Match only when the removed request named one of these GitHub teams, each by GitHub's team id (the github_team_id of one of the team's GET /api/teams/{team_id}/github-groups mappings), not org/slug."`
 }
 
 func (p GitHubPRReviewRequestRemovedPredicate) Matches(m GitHubPRReviewRequestRemovedMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
 		idIn(p.RepoIn, m.RepositoryID) &&
 		boolEq(p.IsDraft, m.IsDraft) &&
 		hasLabel(p.HasLabel, m.Labels) &&
-		strEqFold(p.RequestedLogin, m.RequestedLogin) &&
-		strEqFold(p.RequestedTeam, m.RequestedTeam)
+		idIn(p.RequestedUserIDIn, m.RequestedUserID) &&
+		idIn(p.RequestedTeamIDIn, m.RequestedTeamID)
 }
 
-// ReviewerDedupKeyUser / ReviewerDedupKeyTeam namespace a requested reviewer
-// identity into the review_requested / review_request_removed event's
-// dedup_key. The open-set discriminator is the requested reviewer; namespacing
-// keeps an individual login and a github-team slug from colliding (e.g.
-// "user:foo" vs "team:org/foo") and lets the router close the one task keyed to
-// a given reviewer. Shared so the tracker (which emits the keyed events) and
-// the router (which closes by key on review submit / request removal) can't
-// drift on the format.
+// ReviewerDedupKeyUserID / ReviewerDedupKeyTeamID namespace a requested
+// reviewer's GitHub id into the review_requested / review_request_removed
+// event's dedup_key: the key for a reviewer GitHub returned with an id, which
+// a rename leaves alone. ReviewerDedupKeyUser / ReviewerDedupKeyTeam namespace
+// a handle instead (a login, an "org/slug"): the key for a reviewer read
+// without an id, and the one every mention event and every task created
+// before ids were recorded carries. The open-set discriminator is the
+// requested reviewer; namespacing keeps a login, a team handle and the two
+// kinds of id from colliding (a login may be all digits, so an id has a
+// prefix of its own) and lets the router close the one task keyed to a given
+// reviewer. Shared so the tracker (which emits the keyed events) and the
+// router (which closes by key on review submit / request removal) can't drift
+// on the format.
 func ReviewerDedupKeyUser(login string) string   { return "user:" + login }
 func ReviewerDedupKeyTeam(orgSlug string) string { return "team:" + orgSlug }
+func ReviewerDedupKeyUserID(id string) string    { return "user_id:" + id }
+func ReviewerDedupKeyTeamID(id string) string    { return "team_id:" + id }
 
 // -----------------------------------------------------------------------------
 // review_changes_requested / review_approved / review_commented / review_dismissed
@@ -144,7 +167,9 @@ func ReviewerDedupKeyTeam(orgSlug string) string { return "team:" + orgSlug }
 
 type GitHubPRReviewChangesRequestedMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Reviewer     string   `json:"reviewer"`
+	ReviewerID   string   `json:"reviewer_id,omitempty"` // GitHub's id for the reviewer's account
 	ReviewID     int64    `json:"review_id"`
 	CommentCount int      `json:"comment_count"`
 	Paths        []string `json:"paths"`
@@ -157,20 +182,16 @@ type GitHubPRReviewChangesRequestedMetadata struct {
 }
 
 type GitHubPRReviewChangesRequestedPredicate struct {
-	AuthorIn   []string `json:"author_in,omitempty"`
-	Author     *string  `json:"author,omitempty"`
-	ReviewerIn []string `json:"reviewer_in,omitempty" doc:"Match reviews submitted by anyone in this list (e.g. for self-review flows: combine with author_in + has_label)."`
-	Reviewer   *string  `json:"reviewer,omitempty" doc:"Exact-match on reviewer login."`
-	RepoIn     []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
-	IsDraft    *bool    `json:"is_draft,omitempty"`
-	HasLabel   *string  `json:"has_label,omitempty"`
+	AuthorIDIn   []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	ReviewerIDIn []string `json:"reviewer_id_in,omitempty" doc:"Match reviews submitted by any of these GitHub accounts, each by GitHub's account id as author_id_in takes it, not its login. Empty matches every reviewer."`
+	RepoIn       []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	IsDraft      *bool    `json:"is_draft,omitempty"`
+	HasLabel     *string  `json:"has_label,omitempty"`
 }
 
 func (p GitHubPRReviewChangesRequestedPredicate) Matches(m GitHubPRReviewChangesRequestedMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) &&
-		stringInSliceFold(p.ReviewerIn, m.Reviewer) &&
-		strEq(p.Reviewer, m.Reviewer) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
+		idIn(p.ReviewerIDIn, m.ReviewerID) &&
 		idIn(p.RepoIn, m.RepositoryID) &&
 		boolEq(p.IsDraft, m.IsDraft) &&
 		hasLabel(p.HasLabel, m.Labels)
@@ -178,7 +199,9 @@ func (p GitHubPRReviewChangesRequestedPredicate) Matches(m GitHubPRReviewChanges
 
 type GitHubPRReviewApprovedMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Reviewer     string   `json:"reviewer"`
+	ReviewerID   string   `json:"reviewer_id,omitempty"` // GitHub's id for the reviewer's account
 	ReviewID     int64    `json:"review_id"`
 	CommentCount int      `json:"comment_count"`
 	Paths        []string `json:"paths"`
@@ -191,20 +214,16 @@ type GitHubPRReviewApprovedMetadata struct {
 }
 
 type GitHubPRReviewApprovedPredicate struct {
-	AuthorIn   []string `json:"author_in,omitempty"`
-	Author     *string  `json:"author,omitempty"`
-	ReviewerIn []string `json:"reviewer_in,omitempty"`
-	Reviewer   *string  `json:"reviewer,omitempty"`
-	RepoIn     []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
-	IsDraft    *bool    `json:"is_draft,omitempty"`
-	HasLabel   *string  `json:"has_label,omitempty"`
+	AuthorIDIn   []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	ReviewerIDIn []string `json:"reviewer_id_in,omitempty" doc:"Match reviews submitted by any of these GitHub accounts, each by GitHub's account id as author_id_in takes it, not its login. Empty matches every reviewer."`
+	RepoIn       []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	IsDraft      *bool    `json:"is_draft,omitempty"`
+	HasLabel     *string  `json:"has_label,omitempty"`
 }
 
 func (p GitHubPRReviewApprovedPredicate) Matches(m GitHubPRReviewApprovedMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) &&
-		stringInSliceFold(p.ReviewerIn, m.Reviewer) &&
-		strEq(p.Reviewer, m.Reviewer) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
+		idIn(p.ReviewerIDIn, m.ReviewerID) &&
 		idIn(p.RepoIn, m.RepositoryID) &&
 		boolEq(p.IsDraft, m.IsDraft) &&
 		hasLabel(p.HasLabel, m.Labels)
@@ -212,7 +231,9 @@ func (p GitHubPRReviewApprovedPredicate) Matches(m GitHubPRReviewApprovedMetadat
 
 type GitHubPRReviewCommentedMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Reviewer     string   `json:"reviewer"`
+	ReviewerID   string   `json:"reviewer_id,omitempty"` // GitHub's id for the reviewer's account
 	ReviewID     int64    `json:"review_id"`
 	CommentCount int      `json:"comment_count"`
 	Paths        []string `json:"paths"`
@@ -225,20 +246,16 @@ type GitHubPRReviewCommentedMetadata struct {
 }
 
 type GitHubPRReviewCommentedPredicate struct {
-	AuthorIn   []string `json:"author_in,omitempty"`
-	Author     *string  `json:"author,omitempty"`
-	ReviewerIn []string `json:"reviewer_in,omitempty"`
-	Reviewer   *string  `json:"reviewer,omitempty"`
-	RepoIn     []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
-	IsDraft    *bool    `json:"is_draft,omitempty"`
-	HasLabel   *string  `json:"has_label,omitempty"`
+	AuthorIDIn   []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	ReviewerIDIn []string `json:"reviewer_id_in,omitempty" doc:"Match reviews submitted by any of these GitHub accounts, each by GitHub's account id as author_id_in takes it, not its login. Empty matches every reviewer."`
+	RepoIn       []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	IsDraft      *bool    `json:"is_draft,omitempty"`
+	HasLabel     *string  `json:"has_label,omitempty"`
 }
 
 func (p GitHubPRReviewCommentedPredicate) Matches(m GitHubPRReviewCommentedMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) &&
-		stringInSliceFold(p.ReviewerIn, m.Reviewer) &&
-		strEq(p.Reviewer, m.Reviewer) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
+		idIn(p.ReviewerIDIn, m.ReviewerID) &&
 		idIn(p.RepoIn, m.RepositoryID) &&
 		boolEq(p.IsDraft, m.IsDraft) &&
 		hasLabel(p.HasLabel, m.Labels)
@@ -246,7 +263,9 @@ func (p GitHubPRReviewCommentedPredicate) Matches(m GitHubPRReviewCommentedMetad
 
 type GitHubPRReviewDismissedMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Reviewer     string   `json:"reviewer"`
+	ReviewerID   string   `json:"reviewer_id,omitempty"` // GitHub's id for the reviewer's account
 	ReviewID     int64    `json:"review_id"`
 	CommentCount int      `json:"comment_count"`
 	Paths        []string `json:"paths"`
@@ -259,20 +278,16 @@ type GitHubPRReviewDismissedMetadata struct {
 }
 
 type GitHubPRReviewDismissedPredicate struct {
-	AuthorIn   []string `json:"author_in,omitempty"`
-	Author     *string  `json:"author,omitempty"`
-	ReviewerIn []string `json:"reviewer_in,omitempty"`
-	Reviewer   *string  `json:"reviewer,omitempty"`
-	RepoIn     []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
-	IsDraft    *bool    `json:"is_draft,omitempty"`
-	HasLabel   *string  `json:"has_label,omitempty"`
+	AuthorIDIn   []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	ReviewerIDIn []string `json:"reviewer_id_in,omitempty" doc:"Match reviews submitted by any of these GitHub accounts, each by GitHub's account id as author_id_in takes it, not its login. Empty matches every reviewer."`
+	RepoIn       []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	IsDraft      *bool    `json:"is_draft,omitempty"`
+	HasLabel     *string  `json:"has_label,omitempty"`
 }
 
 func (p GitHubPRReviewDismissedPredicate) Matches(m GitHubPRReviewDismissedMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) &&
-		stringInSliceFold(p.ReviewerIn, m.Reviewer) &&
-		strEq(p.Reviewer, m.Reviewer) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
+		idIn(p.ReviewerIDIn, m.ReviewerID) &&
 		idIn(p.RepoIn, m.RepositoryID) &&
 		boolEq(p.IsDraft, m.IsDraft) &&
 		hasLabel(p.HasLabel, m.Labels)
@@ -285,6 +300,7 @@ func (p GitHubPRReviewDismissedPredicate) Matches(m GitHubPRReviewDismissedMetad
 
 type GitHubPRCICheckFailedMetadata struct {
 	Author     string `json:"author"`
+	AuthorID   string `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	CheckRunID int64  `json:"check_run_id"`
 	CheckName  string `json:"check_name"`
 	CheckURL   string `json:"check_url"`
@@ -303,17 +319,15 @@ type GitHubPRCICheckFailedMetadata struct {
 }
 
 type GitHubPRCICheckFailedPredicate struct {
-	AuthorIn  []string `json:"author_in,omitempty"`
-	Author    *string  `json:"author,omitempty"`
-	CheckName *string  `json:"check_name,omitempty" doc:"Exact-match on the failing check name (e.g. 'test', 'build')."`
-	RepoIn    []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
-	IsDraft   *bool    `json:"is_draft,omitempty"`
-	HasLabel  *string  `json:"has_label,omitempty"`
+	AuthorIDIn []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	CheckName  *string  `json:"check_name,omitempty" doc:"Exact-match on the failing check name (e.g. 'test', 'build')."`
+	RepoIn     []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	IsDraft    *bool    `json:"is_draft,omitempty"`
+	HasLabel   *string  `json:"has_label,omitempty"`
 }
 
 func (p GitHubPRCICheckFailedPredicate) Matches(m GitHubPRCICheckFailedMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
 		strEq(p.CheckName, m.CheckName) &&
 		idIn(p.RepoIn, m.RepositoryID) &&
 		boolEq(p.IsDraft, m.IsDraft) &&
@@ -322,6 +336,7 @@ func (p GitHubPRCICheckFailedPredicate) Matches(m GitHubPRCICheckFailedMetadata)
 
 type GitHubPRCICheckPassedMetadata struct {
 	Author        string   `json:"author"`
+	AuthorID      string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	CheckRunID    int64    `json:"check_run_id"`
 	CheckName     string   `json:"check_name"`
 	WorkflowRunID int64    `json:"workflow_run_id,omitempty"`
@@ -335,8 +350,7 @@ type GitHubPRCICheckPassedMetadata struct {
 }
 
 type GitHubPRCICheckPassedPredicate struct {
-	AuthorIn   []string `json:"author_in,omitempty"`
-	Author     *string  `json:"author,omitempty"`
+	AuthorIDIn []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
 	CheckName  *string  `json:"check_name,omitempty"`
 	Conclusion *string  `json:"conclusion,omitempty" doc:"Filter by specific non-failing conclusion (success, neutral, skipped, stale)."`
 	RepoIn     []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
@@ -345,8 +359,7 @@ type GitHubPRCICheckPassedPredicate struct {
 }
 
 func (p GitHubPRCICheckPassedPredicate) Matches(m GitHubPRCICheckPassedMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
 		strEq(p.CheckName, m.CheckName) &&
 		strEq(p.Conclusion, m.Conclusion) &&
 		idIn(p.RepoIn, m.RepositoryID) &&
@@ -361,11 +374,16 @@ func (p GitHubPRCICheckPassedPredicate) Matches(m GitHubPRCICheckPassedMetadata)
 // collide). `HasLabel` on these events is usually redundant (the label name
 // itself is the primary filter), but it's exposed for consistency with other
 // PR predicates.
+//
+// label_name and has_label, here and on every PR event, are names, not ids: a
+// GitHub label's id belongs to one repository, while a filter on a label means
+// the label of that name in every repository the team tracks.
 // -----------------------------------------------------------------------------
 
 type GitHubPRLabelAddedMetadata struct {
 	Author       string   `json:"author"`
-	LabelName    string   `json:"label_name"` // the specific label added (also the event's dedup_key)
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
+	LabelName    string   `json:"label_name"`          // the specific label added (also the event's dedup_key)
 	Repo         string   `json:"repo"`
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
@@ -375,17 +393,15 @@ type GitHubPRLabelAddedMetadata struct {
 }
 
 type GitHubPRLabelAddedPredicate struct {
-	AuthorIn  []string `json:"author_in,omitempty"`
-	Author    *string  `json:"author,omitempty"`
-	LabelName *string  `json:"label_name,omitempty" doc:"Match only this specific label (e.g. 'self-review', 'urgent')."`
-	RepoIn    []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
-	IsDraft   *bool    `json:"is_draft,omitempty"`
-	HasLabel  *string  `json:"has_label,omitempty" doc:"Require another label to also be present on the PR."`
+	AuthorIDIn []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	LabelName  *string  `json:"label_name,omitempty" doc:"Match only this specific label (e.g. 'self-review', 'urgent')."`
+	RepoIn     []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	IsDraft    *bool    `json:"is_draft,omitempty"`
+	HasLabel   *string  `json:"has_label,omitempty" doc:"Require another label to also be present on the PR."`
 }
 
 func (p GitHubPRLabelAddedPredicate) Matches(m GitHubPRLabelAddedMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
 		strEq(p.LabelName, m.LabelName) &&
 		idIn(p.RepoIn, m.RepositoryID) &&
 		boolEq(p.IsDraft, m.IsDraft) &&
@@ -394,6 +410,7 @@ func (p GitHubPRLabelAddedPredicate) Matches(m GitHubPRLabelAddedMetadata) bool 
 
 type GitHubPRLabelRemovedMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	LabelName    string   `json:"label_name"`
 	Repo         string   `json:"repo"`
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
@@ -404,17 +421,15 @@ type GitHubPRLabelRemovedMetadata struct {
 }
 
 type GitHubPRLabelRemovedPredicate struct {
-	AuthorIn  []string `json:"author_in,omitempty"`
-	Author    *string  `json:"author,omitempty"`
-	LabelName *string  `json:"label_name,omitempty"`
-	RepoIn    []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
-	IsDraft   *bool    `json:"is_draft,omitempty"`
-	HasLabel  *string  `json:"has_label,omitempty"`
+	AuthorIDIn []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	LabelName  *string  `json:"label_name,omitempty"`
+	RepoIn     []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	IsDraft    *bool    `json:"is_draft,omitempty"`
+	HasLabel   *string  `json:"has_label,omitempty"`
 }
 
 func (p GitHubPRLabelRemovedPredicate) Matches(m GitHubPRLabelRemovedMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
 		strEq(p.LabelName, m.LabelName) &&
 		idIn(p.RepoIn, m.RepositoryID) &&
 		boolEq(p.IsDraft, m.IsDraft) &&
@@ -427,6 +442,7 @@ func (p GitHubPRLabelRemovedPredicate) Matches(m GitHubPRLabelRemovedMetadata) b
 
 type GitHubPRNewCommitsMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	IsDraft      bool     `json:"is_draft"`
 	CommitCount  int      `json:"commit_count"`
 	HeadSHA      string   `json:"head_sha"`
@@ -438,16 +454,14 @@ type GitHubPRNewCommitsMetadata struct {
 }
 
 type GitHubPRNewCommitsPredicate struct {
-	AuthorIn []string `json:"author_in,omitempty"`
-	Author   *string  `json:"author,omitempty"`
-	IsDraft  *bool    `json:"is_draft,omitempty"`
-	RepoIn   []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
-	HasLabel *string  `json:"has_label,omitempty"`
+	AuthorIDIn []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	IsDraft    *bool    `json:"is_draft,omitempty"`
+	RepoIn     []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	HasLabel   *string  `json:"has_label,omitempty"`
 }
 
 func (p GitHubPRNewCommitsPredicate) Matches(m GitHubPRNewCommitsMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
 		boolEq(p.IsDraft, m.IsDraft) &&
 		idIn(p.RepoIn, m.RepositoryID) &&
 		hasLabel(p.HasLabel, m.Labels)
@@ -459,6 +473,7 @@ func (p GitHubPRNewCommitsPredicate) Matches(m GitHubPRNewCommitsMetadata) bool 
 
 type GitHubPRConflictsMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Repo         string   `json:"repo"`
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
@@ -468,16 +483,14 @@ type GitHubPRConflictsMetadata struct {
 }
 
 type GitHubPRConflictsPredicate struct {
-	AuthorIn []string `json:"author_in,omitempty"`
-	Author   *string  `json:"author,omitempty"`
-	RepoIn   []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
-	IsDraft  *bool    `json:"is_draft,omitempty"`
-	HasLabel *string  `json:"has_label,omitempty"`
+	AuthorIDIn []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	RepoIn     []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	IsDraft    *bool    `json:"is_draft,omitempty"`
+	HasLabel   *string  `json:"has_label,omitempty"`
 }
 
 func (p GitHubPRConflictsPredicate) Matches(m GitHubPRConflictsMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
 		idIn(p.RepoIn, m.RepositoryID) &&
 		boolEq(p.IsDraft, m.IsDraft) &&
 		hasLabel(p.HasLabel, m.Labels)
@@ -489,6 +502,7 @@ func (p GitHubPRConflictsPredicate) Matches(m GitHubPRConflictsMetadata) bool {
 
 type GitHubPRReadyForReviewMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Repo         string   `json:"repo"`
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
@@ -497,15 +511,13 @@ type GitHubPRReadyForReviewMetadata struct {
 }
 
 type GitHubPRReadyForReviewPredicate struct {
-	AuthorIn []string `json:"author_in,omitempty"`
-	Author   *string  `json:"author,omitempty"`
-	RepoIn   []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
-	HasLabel *string  `json:"has_label,omitempty"`
+	AuthorIDIn []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	RepoIn     []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	HasLabel   *string  `json:"has_label,omitempty"`
 }
 
 func (p GitHubPRReadyForReviewPredicate) Matches(m GitHubPRReadyForReviewMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
 		idIn(p.RepoIn, m.RepositoryID) &&
 		hasLabel(p.HasLabel, m.Labels)
 }
@@ -516,6 +528,7 @@ func (p GitHubPRReadyForReviewPredicate) Matches(m GitHubPRReadyForReviewMetadat
 
 type GitHubPROpenedMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Repo         string   `json:"repo"`
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
@@ -526,16 +539,14 @@ type GitHubPROpenedMetadata struct {
 }
 
 type GitHubPROpenedPredicate struct {
-	AuthorIn []string `json:"author_in,omitempty"`
-	Author   *string  `json:"author,omitempty"`
-	RepoIn   []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
-	IsDraft  *bool    `json:"is_draft,omitempty"`
-	HasLabel *string  `json:"has_label,omitempty"`
+	AuthorIDIn []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	RepoIn     []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	IsDraft    *bool    `json:"is_draft,omitempty"`
+	HasLabel   *string  `json:"has_label,omitempty"`
 }
 
 func (p GitHubPROpenedPredicate) Matches(m GitHubPROpenedMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
 		idIn(p.RepoIn, m.RepositoryID) &&
 		boolEq(p.IsDraft, m.IsDraft) &&
 		hasLabel(p.HasLabel, m.Labels)
@@ -549,6 +560,7 @@ func (p GitHubPROpenedPredicate) Matches(m GitHubPROpenedMetadata) bool {
 
 type GitHubPRMergedMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Repo         string   `json:"repo"`
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
@@ -558,21 +570,20 @@ type GitHubPRMergedMetadata struct {
 }
 
 type GitHubPRMergedPredicate struct {
-	AuthorIn []string `json:"author_in,omitempty"`
-	Author   *string  `json:"author,omitempty"`
-	RepoIn   []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
-	HasLabel *string  `json:"has_label,omitempty"`
+	AuthorIDIn []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	RepoIn     []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	HasLabel   *string  `json:"has_label,omitempty"`
 }
 
 func (p GitHubPRMergedPredicate) Matches(m GitHubPRMergedMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
 		idIn(p.RepoIn, m.RepositoryID) &&
 		hasLabel(p.HasLabel, m.Labels)
 }
 
 type GitHubPRClosedMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Repo         string   `json:"repo"`
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
@@ -581,15 +592,13 @@ type GitHubPRClosedMetadata struct {
 }
 
 type GitHubPRClosedPredicate struct {
-	AuthorIn []string `json:"author_in,omitempty"`
-	Author   *string  `json:"author,omitempty"`
-	RepoIn   []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
-	HasLabel *string  `json:"has_label,omitempty"`
+	AuthorIDIn []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	RepoIn     []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	HasLabel   *string  `json:"has_label,omitempty"`
 }
 
 func (p GitHubPRClosedPredicate) Matches(m GitHubPRClosedMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
 		idIn(p.RepoIn, m.RepositoryID) &&
 		hasLabel(p.HasLabel, m.Labels)
 }
@@ -612,6 +621,7 @@ const (
 // followed.
 type GitHubPRUnreachableMetadata struct {
 	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Repo         string   `json:"repo"`
 	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber     int      `json:"pr_number"`
@@ -624,15 +634,13 @@ type GitHubPRUnreachableMetadata struct {
 }
 
 type GitHubPRUnreachablePredicate struct {
-	AuthorIn []string `json:"author_in,omitempty"`
-	Author   *string  `json:"author,omitempty"`
-	RepoIn   []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
-	HasLabel *string  `json:"has_label,omitempty"`
+	AuthorIDIn []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	RepoIn     []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	HasLabel   *string  `json:"has_label,omitempty"`
 }
 
 func (p GitHubPRUnreachablePredicate) Matches(m GitHubPRUnreachableMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
 		idIn(p.RepoIn, m.RepositoryID) &&
 		hasLabel(p.HasLabel, m.Labels)
 }
@@ -641,37 +649,44 @@ func (p GitHubPRUnreachablePredicate) Matches(m GitHubPRUnreachableMetadata) boo
 // commented — someone other than TF commented in the PR's conversation, the
 // sibling of the Jira and Linear commented events. One event per poll however
 // many comments landed: CommentID and Commenter are the newest of them, and
-// CommenterLogins holds the author of each, so commenter_in matches when any
-// of them wrote one. Logins are spelled as REST spells them, a bot's as
-// "<slug>[bot]". A comment TF posted is not one of them, and a poll that found
-// only TF's comments emits nothing. Comments in review threads arrive as
-// reviews (review_commented), not here.
+// CommenterLogins and CommenterIDs hold the author of each, so commenter_id_in
+// matches when any of them wrote one. Logins are spelled as REST spells them,
+// a bot's as "<slug>[bot]". A comment TF posted is not one of them, and a poll
+// that found only TF's comments emits nothing. Comments in review threads
+// arrive as reviews (review_commented), not here.
 // -----------------------------------------------------------------------------
 
 type GitHubPRCommentedMetadata struct {
 	Author          string   `json:"author"`
+	AuthorID        string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Commenter       string   `json:"commenter"`
 	CommenterLogins []string `json:"commenter_logins"`
-	CommentID       int64    `json:"comment_id"`
-	Repo            string   `json:"repo"`
-	RepositoryID    string   `json:"repository_id"` // the repository's registry row; what repo_in names
-	PRNumber        int      `json:"pr_number"`
-	IsDraft         bool     `json:"is_draft"`
-	HeadSHA         string   `json:"head_sha"`
-	Labels          []string `json:"labels"`
+	// CommenterID is GitHub's id for Commenter's account, and CommenterIDs
+	// the id of each comment's author, once per account in the order they
+	// commented. A comment whose author GitHub returned without an id adds
+	// nothing to CommenterIDs.
+	CommenterID  string   `json:"commenter_id,omitempty"`
+	CommenterIDs []string `json:"commenter_ids"`
+	CommentID    int64    `json:"comment_id"`
+	Repo         string   `json:"repo"`
+	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
+	PRNumber     int      `json:"pr_number"`
+	IsDraft      bool     `json:"is_draft"`
+	HeadSHA      string   `json:"head_sha"`
+	Labels       []string `json:"labels"`
 }
 
 type GitHubPRCommentedPredicate struct {
-	AuthorIn    []string `json:"author_in,omitempty" doc:"Match PRs authored by anyone in this list (GitHub logins, case-insensitive)."`
-	CommenterIn []string `json:"commenter_in,omitempty" doc:"Match when anyone in this list wrote one of the new comments (GitHub logins, case-insensitive; a bot as '<slug>[bot]')."`
-	RepoIn      []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
-	IsDraft     *bool    `json:"is_draft,omitempty" doc:"Match draft vs. ready-for-review PRs."`
-	HasLabel    *string  `json:"has_label,omitempty" doc:"Require the PR to currently bear this label."`
+	AuthorIDIn    []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	CommenterIDIn []string `json:"commenter_id_in,omitempty" doc:"Match when any of these GitHub accounts wrote one of the new comments, each by GitHub's account id as author_id_in takes it, not its login (a bot is an account too)."`
+	RepoIn        []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	IsDraft       *bool    `json:"is_draft,omitempty" doc:"Match draft vs. ready-for-review PRs."`
+	HasLabel      *string  `json:"has_label,omitempty" doc:"Require the PR to currently bear this label."`
 }
 
 func (p GitHubPRCommentedPredicate) Matches(m GitHubPRCommentedMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		anyInSliceFold(p.CommenterIn, m.CommenterLogins) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
+		anyIDIn(p.CommenterIDIn, m.CommenterIDs) &&
 		idIn(p.RepoIn, m.RepositoryID) &&
 		boolEq(p.IsDraft, m.IsDraft) &&
 		hasLabel(p.HasLabel, m.Labels)
@@ -682,10 +697,10 @@ func (p GitHubPRCommentedPredicate) Matches(m GitHubPRCommentedMetadata) bool {
 //
 // The open-set discriminator is the mentioned identity, as review_requested's
 // is the requested reviewer: one event per newly mentioned TF-known identity,
-// with the same dedup_key namespacing ("user:<login>" / "team:<org>/<slug>")
-// and the same routing, to that identity's team(s). Exactly one of
-// MentionedLogin / MentionedTeam is set, lower-cased, since GitHub matches
-// logins and slugs without regard to case.
+// keyed by its handle ("user:<login>" / "team:<org>/<slug>"), since a mention
+// is text and names no id, and routed as review_requested is, to that
+// identity's team(s). Exactly one of MentionedLogin / MentionedTeam is set,
+// lower-cased, since GitHub matches logins and slugs without regard to case.
 //
 // MentionSource says where the mention was: a conversation comment, a
 // review's body, an inline comment in a review, or the PR body. Commenter and
@@ -702,8 +717,13 @@ const (
 )
 
 type GitHubPRMentionedMetadata struct {
-	Author         string   `json:"author"`
-	Commenter      string   `json:"commenter"`
+	Author    string `json:"author"`
+	AuthorID  string `json:"author_id,omitempty"` // GitHub's id for the PR author's account
+	Commenter string `json:"commenter"`
+	// CommenterID is GitHub's id for Commenter's account. A mention has no id
+	// of its own: MentionedLogin and MentionedTeam are the handle the text
+	// spelled.
+	CommenterID    string   `json:"commenter_id,omitempty"`
 	CommentID      int64    `json:"comment_id"`
 	MentionedLogin string   `json:"mentioned_login,omitempty"`
 	MentionedTeam  string   `json:"mentioned_team,omitempty"`
@@ -717,11 +737,9 @@ type GitHubPRMentionedMetadata struct {
 }
 
 type GitHubPRMentionedPredicate struct {
-	AuthorIn       []string `json:"author_in,omitempty" doc:"Match PRs authored by anyone in this list (GitHub logins, case-insensitive)."`
-	Author         *string  `json:"author,omitempty" doc:"Exact-match on PR author login."`
-	CommenterIn    []string `json:"commenter_in,omitempty" doc:"Match @mentions left by anyone in this list (GitHub logins, case-insensitive; a bot as '<slug>[bot]'). A mention in the PR body has no commenter."`
-	Commenter      *string  `json:"commenter,omitempty" doc:"Exact-match on the login that left the mention."`
-	MentionedLogin *string  `json:"mentioned_login,omitempty" doc:"Match only when this user login was mentioned."`
+	AuthorIDIn     []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	CommenterIDIn  []string `json:"commenter_id_in,omitempty" doc:"Match @mentions left by any of these GitHub accounts, each by GitHub's account id as author_id_in takes it, not its login. A mention in the PR body has no commenter."`
+	MentionedLogin *string  `json:"mentioned_login,omitempty" doc:"Match only when this user login was mentioned, case-insensitively. A mention is text and names no account id, so mentions are matched by the handle they spell."`
 	MentionedTeam  *string  `json:"mentioned_team,omitempty" doc:"Match only when this github team ('org/slug') was mentioned."`
 	MentionSource  *string  `json:"mention_source,omitempty" enum:"comment,review,review_comment,body" doc:"Match only mentions from this source."`
 	RepoIn         []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
@@ -730,10 +748,8 @@ type GitHubPRMentionedPredicate struct {
 }
 
 func (p GitHubPRMentionedPredicate) Matches(m GitHubPRMentionedMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) &&
-		stringInSliceFold(p.CommenterIn, m.Commenter) &&
-		strEq(p.Commenter, m.Commenter) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
+		idIn(p.CommenterIDIn, m.CommenterID) &&
 		strEqFold(p.MentionedLogin, m.MentionedLogin) &&
 		strEqFold(p.MentionedTeam, m.MentionedTeam) &&
 		strEq(p.MentionSource, m.MentionSource) &&

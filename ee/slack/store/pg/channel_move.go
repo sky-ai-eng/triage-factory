@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
+	"sort"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -22,14 +22,14 @@ const channelMoveLockSalt int64 = 0x43484944
 // receives its own), and holds off the writes that spell a channel id
 // (lockChannelWrites) until the move commits.
 //
-// References to the channel hold its registry row and need nothing. What
-// moves is the row's channel_id and the display values that spell it, which
-// live in tables core owns as well as in the Slack ones; they move in the same
-// transaction because a thread whose key still spells the old id is one a
-// message under the new id does not find. The rules for the core rows are
-// Slack's own — a thread key is a channel id and a timestamp, a Slack
-// artifact's key is the message's key — so they are written here rather than
-// as a source-agnostic method on the entity store.
+// References to the channel hold its registry row and need nothing: a thread
+// is found by its channel's row and root ts, and a Slack artifact's dedup key
+// names the row and the message's ts. What moves is the row's channel_id and
+// the display values that spell it, which live in tables core owns as well as
+// in the Slack ones; they move in the same transaction, so no display value
+// spells an id the channel no longer has. The rules for the core rows
+// are Slack's own — a thread key is a channel id and a timestamp — so they are
+// written here rather than as a source-agnostic method on the entity store.
 func (s *channelRegistryStore) MoveSystem(ctx context.Context, orgID, oldID, newID string) (slackstore.ChannelMove, error) {
 	if oldID == "" || newID == "" {
 		return slackstore.ChannelMove{}, errors.New("move slack channel: empty channel id")
@@ -38,6 +38,9 @@ func (s *channelRegistryStore) MoveSystem(ctx context.Context, orgID, oldID, new
 		return slackstore.ChannelMove{To: newID}, nil
 	}
 	var out slackstore.ChannelMove
+	// The artifacts rewritten, by id: the absorb rekeys some, and the target
+	// and permalink move can reach the same ones.
+	artifacts := map[string]bool{}
 	err := inTx(ctx, s.admin, func(q db.Execer) error {
 		if _, err := q.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`, orgID, channelMoveLockSalt); err != nil {
 			return fmt.Errorf("lock channel move: %w", err)
@@ -58,7 +61,7 @@ func (s *channelRegistryStore) MoveSystem(ctx context.Context, orgID, oldID, new
 			}
 			if absorbed != "" {
 				out.Absorbed = absorbed
-				if out.Trackers, out.Handlers, out.SkippedHandlers, err = absorbRegistryRow(ctx, q, orgID, channel, absorbed); err != nil {
+				if err := absorbRegistryRow(ctx, q, orgID, channel, absorbed, &out, artifacts); err != nil {
 					return err
 				}
 			}
@@ -67,14 +70,15 @@ func (s *channelRegistryStore) MoveSystem(ctx context.Context, orgID, oldID, new
 			`, orgID, channel, to); err != nil {
 				return fmt.Errorf("move slack_channels row: %w", err)
 			}
-			if out.Entities, out.Superseded, err = moveThreadKeys(ctx, q, orgID, channel, oldID, to); err != nil {
+			if out.Entities, err = moveThreadKeys(ctx, q, orgID, channel, oldID, to); err != nil {
 				return err
 			}
 		}
-		if out.Artifacts, err = moveArtifacts(ctx, q, orgID, channel, oldID, to); err != nil {
+		if err := moveArtifacts(ctx, q, orgID, channel, oldID, to, artifacts); err != nil {
 			return err
 		}
-		if out.Actions, err = moveActionPointers(ctx, q, orgID, oldID, to); err != nil {
+		out.Artifacts = len(artifacts)
+		if out.Actions, err = moveActionPointers(ctx, q, orgID, channel, oldID, to); err != nil {
 			return err
 		}
 		return nil
@@ -160,8 +164,9 @@ func registryRowFor(ctx context.Context, q db.Execer, orgID, channelID string) (
 // the new id was sighted, or a team tracked it, before the change arrived)
 // into the channel's row, moves every reference to it onto the channel's row,
 // and deletes it. The absorbed row's workspace is the more recent sighting and
-// is kept when it has one; so is its name.
-func absorbRegistryRow(ctx context.Context, q db.Execer, orgID, channel, absorbed string) (int, int, []string, error) {
+// is kept when it has one; so is its name. It records what it moved on out,
+// and the artifacts it rekeyed in artifacts.
+func absorbRegistryRow(ctx context.Context, q db.Execer, orgID, channel, absorbed string, out *slackstore.ChannelMove, artifacts map[string]bool) error {
 	if _, err := q.ExecContext(ctx, `
 		UPDATE slack_channels c SET
 			first_seen_at    = LEAST(c.first_seen_at, a.first_seen_at),
@@ -172,27 +177,124 @@ func absorbRegistryRow(ctx context.Context, q db.Execer, orgID, channel, absorbe
 		FROM slack_channels a
 		WHERE c.org_id = $1 AND c.id = $2 AND a.org_id = $1 AND a.id = $3
 	`, orgID, channel, absorbed); err != nil {
-		return 0, 0, nil, fmt.Errorf("merge absorbed slack_channels row: %w", err)
+		return fmt.Errorf("merge absorbed slack_channels row: %w", err)
 	}
-	trackers, err := absorbTrackingRows(ctx, q, orgID, channel, absorbed)
-	if err != nil {
-		return 0, 0, nil, err
+	var err error
+	if out.Trackers, err = absorbTrackingRows(ctx, q, orgID, channel, absorbed); err != nil {
+		return err
+	}
+	if out.Superseded, err = supersedeDuplicateThreads(ctx, q, orgID, channel, absorbed); err != nil {
+		return err
 	}
 	if _, err := q.ExecContext(ctx, `
 		UPDATE entities SET slack_channel_id = $2 WHERE org_id = $1 AND slack_channel_id = $3
 	`, orgID, channel, absorbed); err != nil {
-		return 0, 0, nil, fmt.Errorf("move absorbed slack channel's entities: %w", err)
+		return fmt.Errorf("move absorbed slack channel's entities: %w", err)
 	}
-	handlers, skipped, err := moveHandlerFilters(ctx, q, orgID, absorbed, channel)
-	if err != nil {
-		return 0, 0, nil, err
+	if err := rekeyAbsorbedArtifacts(ctx, q, orgID, channel, absorbed, artifacts); err != nil {
+		return err
+	}
+	if out.Handlers, out.SkippedHandlers, err = moveHandlerFilters(ctx, q, orgID, absorbed, channel); err != nil {
+		return err
 	}
 	if _, err := q.ExecContext(ctx, `
 		DELETE FROM slack_channels WHERE org_id = $1 AND id = $2
 	`, orgID, absorbed); err != nil {
-		return 0, 0, nil, fmt.Errorf("drop absorbed slack_channels row: %w", err)
+		return fmt.Errorf("drop absorbed slack_channels row: %w", err)
 	}
-	return trackers, handlers, skipped, nil
+	return nil
+}
+
+// supersedeDuplicateThreads closes, for each thread that both the channel's
+// row and the absorbed row have an active entity for, the newer of the two:
+// the older is the thread's original. A tie keeps the channel's. It runs
+// before the absorbed row's entities move onto the channel's, so a thread
+// never has two active entities. Returns the ids it closed, sorted.
+func supersedeDuplicateThreads(ctx context.Context, q db.Execer, orgID, channel, absorbed string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `
+		UPDATE entities e SET state = 'closed', closed_at = now()
+		FROM entities c, entities a
+		WHERE c.org_id = $1 AND c.slack_channel_id = $2 AND c.state = 'active'
+		  AND a.org_id = $1 AND a.slack_channel_id = $3 AND a.state = 'active'
+		  AND a.slack_thread_ts = c.slack_thread_ts
+		  AND e.org_id = $1
+		  AND e.id = CASE WHEN a.created_at < c.created_at THEN c.id ELSE a.id END
+		RETURNING e.id::text
+	`, orgID, channel, absorbed)
+	if err != nil {
+		return nil, fmt.Errorf("close superseded slack thread entities: %w", err)
+	}
+	defer rows.Close()
+	var closed []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		closed = append(closed, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Strings(closed)
+	return closed, nil
+}
+
+// rekeyAbsorbedArtifacts rewrites the dedup keys of the Slack artifacts that
+// name the absorbed registry row to name the channel's row, whose messages
+// they are from now on: a later write about the same message resolves to the
+// channel's row and keys on it. A key the channel's row already holds — the
+// same message recorded under both rows before the change arrived — is left
+// as it is, since the two rows were two before the move.
+func rekeyAbsorbedArtifacts(ctx context.Context, q db.Execer, orgID, channel, absorbed string, artifacts map[string]bool) error {
+	rows, err := q.QueryContext(ctx, `
+		SELECT id, dedup_key FROM artifacts
+		WHERE org_id = $1 AND provider = $2 AND scope = $3
+		  AND strpos(dedup_key, ':' || $4 || '/') > 0
+		ORDER BY id
+		FOR UPDATE
+	`, orgID, domain.ArtifactProviderSlack, domain.SlackScope, absorbed)
+	if err != nil {
+		return fmt.Errorf("list slack artifacts keyed on the absorbed channel row: %w", err)
+	}
+	type held struct{ id, key string }
+	var found []held
+	for rows.Next() {
+		var h held
+		if err := rows.Scan(&h.id, &h.key); err != nil {
+			rows.Close()
+			return err
+		}
+		found = append(found, h)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, h := range found {
+		key, ok := slackstore.MoveArtifactKey(h.key, absorbed, channel)
+		if !ok {
+			continue
+		}
+		var taken bool
+		if err := q.QueryRowContext(ctx, `
+			SELECT EXISTS (SELECT 1 FROM artifacts WHERE org_id = $1 AND scope = $3 AND dedup_key = $2)
+		`, orgID, key, domain.SlackScope).Scan(&taken); err != nil {
+			return fmt.Errorf("check rekeyed artifact key %s: %w", key, err)
+		}
+		if taken {
+			continue
+		}
+		if _, err := q.ExecContext(ctx, `
+			UPDATE artifacts SET dedup_key = $1, updated_at = now() WHERE org_id = $2 AND id = $3
+		`, key, orgID, h.id); err != nil {
+			return fmt.Errorf("rekey slack artifact %s: %w", h.id, err)
+		}
+		artifacts[h.id] = true
+	}
+	return nil
 }
 
 // absorbTrackingRows moves the absorbed row's team_slack_channels onto the
@@ -250,118 +352,26 @@ func absorbTrackingRows(ctx context.Context, q db.Execer, orgID, channel, absorb
 	return trackers, nil
 }
 
-// moveThreadKeys rekeys every thread entity of the channel keyed under oldID,
-// in any state. Only an active row can collide (keys are unique among active
-// rows), and only with another active row for the same thread: one the new id
-// minted before the change arrived. The older is the thread's original and
-// keeps the key; the newer is closed, and moves with it. A tie keeps the
-// entity under the old key, the original.
-func moveThreadKeys(ctx context.Context, q db.Execer, orgID, channel, oldID, newID string) (int, []string, error) {
+// moveThreadKeys rewrites the display values of the channel's thread
+// entities, in any state, whose key does not spell newID: the key becomes
+// "<newID>/<thread ts>" and a permalink into oldID's archive moves into
+// newID's. A thread is found by its channel's row and root ts, which the move
+// leaves alone, so nothing here is an identity. Returns how many it rewrote.
+func moveThreadKeys(ctx context.Context, q db.Execer, orgID, channel, oldID, newID string) (int, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, source_id, COALESCE(url, ''), state, created_at FROM entities
-		WHERE org_id = $1 AND source = 'slack' AND scope = $2 AND slack_channel_id = $3
-		  AND starts_with(source_id, $4)
+		SELECT id, slack_thread_ts, COALESCE(url, '') FROM entities
+		WHERE org_id = $1 AND slack_channel_id = $2 AND source_id <> $3 || '/' || slack_thread_ts
 		ORDER BY id
 		FOR UPDATE
-	`, orgID, domain.SlackScope, channel, oldID+"/")
+	`, orgID, channel, newID)
 	if err != nil {
-		return 0, nil, fmt.Errorf("list slack entities to move: %w", err)
+		return 0, fmt.Errorf("list slack entities to move: %w", err)
 	}
-	type held struct {
-		id, key, url, state string
-		created             time.Time
-	}
+	type held struct{ id, ts, url string }
 	var found []held
 	for rows.Next() {
 		var h held
-		if err := rows.Scan(&h.id, &h.key, &h.url, &h.state, &h.created); err != nil {
-			rows.Close()
-			return 0, nil, err
-		}
-		found = append(found, h)
-	}
-	if err := rows.Close(); err != nil {
-		return 0, nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return 0, nil, err
-	}
-
-	var superseded []string
-	for _, h := range found {
-		newKey, ok := slackstore.MoveThreadKey(h.key, oldID, newID)
-		if !ok {
-			continue
-		}
-		if h.state == "active" {
-			var holder string
-			var holderCreated time.Time
-			err := q.QueryRowContext(ctx, `
-				SELECT id, created_at FROM entities
-				WHERE org_id = $1 AND source = 'slack' AND scope = $2 AND source_id = $3
-				  AND state = 'active' AND id <> $4
-				FOR UPDATE
-			`, orgID, domain.SlackScope, newKey, h.id).Scan(&holder, &holderCreated)
-			switch {
-			case errors.Is(err, sql.ErrNoRows):
-			case err != nil:
-				return 0, nil, fmt.Errorf("find slack entity holding %s: %w", newKey, err)
-			default:
-				closed := holder
-				if holderCreated.Before(h.created) {
-					closed = h.id
-				}
-				if _, err := q.ExecContext(ctx, `
-					UPDATE entities SET state = 'closed', closed_at = now() WHERE org_id = $1 AND id = $2
-				`, orgID, closed); err != nil {
-					return 0, nil, fmt.Errorf("close superseded slack entity %s: %w", closed, err)
-				}
-				superseded = append(superseded, closed)
-			}
-		}
-		url := h.url
-		if moved, ok := slackstore.MovePermalink(h.url, oldID, newID); ok {
-			url = moved
-		}
-		if _, err := q.ExecContext(ctx, `
-			UPDATE entities SET source_id = $1, url = $2 WHERE org_id = $3 AND id = $4
-		`, newKey, url, orgID, h.id); err != nil {
-			return 0, nil, fmt.Errorf("move slack entity %s -> %s: %w", h.key, newKey, err)
-		}
-	}
-	return len(found), superseded, nil
-}
-
-// moveArtifacts rewrites the Slack artifacts naming the channel: the target,
-// which is the key of the thread entity the artifact is about
-// (artifacts.entity_id) and takes the key moveThreadKeys gave it, the dedup
-// key (the message's key, which spells the channel id: Slack gives a message
-// no id of its own) and the permalink. An artifact linked to no entity has no
-// key to take; its target spells the channel id as its dedup key does, and
-// moves with it. A dedup key the new id already has —
-// the same message recorded again under the new id before the change arrived
-// — stays where it is rather than colliding; its target and link still move.
-// channel is the channel's registry row, "" when it has none.
-func moveArtifacts(ctx context.Context, q db.Execer, orgID, channel, oldID, newID string) (int, error) {
-	rows, err := q.QueryContext(ctx, `
-		SELECT a.id, a.dedup_key, a.target, COALESCE(a.url, ''), COALESCE(e.source_id, '')
-		  FROM artifacts a
-		  LEFT JOIN entities e ON e.org_id = a.org_id AND e.id = a.entity_id
-		 WHERE a.org_id = $1 AND a.provider = $2 AND a.scope = $4
-		   AND (strpos(a.dedup_key, ':' || $3) > 0
-		        OR (a.entity_id IS NULL AND starts_with(a.target, $3))
-		        OR (e.slack_channel_id = NULLIF($5, '')::uuid AND a.target <> e.source_id))
-		 ORDER BY a.id
-		 FOR UPDATE OF a
-	`, orgID, domain.ArtifactProviderSlack, oldID+"/", domain.SlackScope, channel)
-	if err != nil {
-		return 0, fmt.Errorf("list slack artifacts to move: %w", err)
-	}
-	type held struct{ id, key, target, url, entityKey string }
-	var found []held
-	for rows.Next() {
-		var h held
-		if err := rows.Scan(&h.id, &h.key, &h.target, &h.url, &h.entityKey); err != nil {
+		if err := rows.Scan(&h.id, &h.ts, &h.url); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -373,50 +383,97 @@ func moveArtifacts(ctx context.Context, q db.Execer, orgID, channel, oldID, newI
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
-
-	moved := 0
 	for _, h := range found {
-		target, targetMoved := h.entityKey, h.entityKey != h.target
+		url := h.url
+		if moved, ok := slackstore.MovePermalink(h.url, oldID, newID); ok {
+			url = moved
+		}
+		if _, err := q.ExecContext(ctx, `
+			UPDATE entities SET source_id = $1, url = $2 WHERE org_id = $3 AND id = $4
+		`, domain.SlackSourceID(newID, h.ts), url, orgID, h.id); err != nil {
+			return 0, fmt.Errorf("move slack entity %s: %w", h.id, err)
+		}
+	}
+	return len(found), nil
+}
+
+// moveArtifacts rewrites the display values of the Slack artifacts naming the
+// channel: the target, which is the key of the thread entity the artifact is
+// about (artifacts.entity_id) and takes the key moveThreadKeys gave it, and
+// the permalink. An artifact linked to no entity has no key to take; its
+// target spells the channel id, and moves with it. The dedup key names the
+// channel's registry row and the message's ts, so it does not move. channel
+// is the channel's registry row, "" when it has none. Each artifact rewritten
+// is added to artifacts.
+func moveArtifacts(ctx context.Context, q db.Execer, orgID, channel, oldID, newID string, artifacts map[string]bool) error {
+	rows, err := q.QueryContext(ctx, `
+		SELECT a.id, a.target, COALESCE(a.url, ''), COALESCE(e.source_id, '')
+		  FROM artifacts a
+		  LEFT JOIN entities e ON e.org_id = a.org_id AND e.id = a.entity_id
+		 WHERE a.org_id = $1 AND a.provider = $2 AND a.scope = $4
+		   AND ((a.entity_id IS NULL AND starts_with(a.target, $3 || '/'))
+		        OR (e.slack_channel_id = NULLIF($5, '')::uuid AND a.target <> e.source_id)
+		        OR strpos(COALESCE(a.url, ''), '/archives/' || $3) > 0)
+		 ORDER BY a.id
+		 FOR UPDATE OF a
+	`, orgID, domain.ArtifactProviderSlack, oldID, domain.SlackScope, channel)
+	if err != nil {
+		return fmt.Errorf("list slack artifacts to move: %w", err)
+	}
+	type held struct{ id, target, url, entityKey string }
+	var found []held
+	for rows.Next() {
+		var h held
+		if err := rows.Scan(&h.id, &h.target, &h.url, &h.entityKey); err != nil {
+			rows.Close()
+			return err
+		}
+		found = append(found, h)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, h := range found {
+		target, targetMoved := h.entityKey, h.entityKey != "" && h.entityKey != h.target
 		if h.entityKey == "" {
 			target, targetMoved = slackstore.MoveThreadKey(h.target, oldID, newID)
 		}
-		key, keyMoved := slackstore.MoveArtifactKey(h.key, oldID, newID)
 		url, urlMoved := slackstore.MovePermalink(h.url, oldID, newID)
-		if keyMoved {
-			var taken bool
-			if err := q.QueryRowContext(ctx, `
-				SELECT EXISTS (SELECT 1 FROM artifacts WHERE org_id = $1 AND scope = $3 AND dedup_key = $2)
-			`, orgID, key, domain.SlackScope).Scan(&taken); err != nil {
-				return 0, fmt.Errorf("check moved artifact key %s: %w", key, err)
-			}
-			if taken {
-				key, keyMoved = h.key, false
-			}
-		}
-		if !targetMoved && !keyMoved && !urlMoved {
+		if !targetMoved && !urlMoved {
 			continue
 		}
 		if _, err := q.ExecContext(ctx, `
-			UPDATE artifacts SET target = $1, dedup_key = $2, url = NULLIF($3, ''), updated_at = now()
-			WHERE org_id = $4 AND id = $5
-		`, target, key, url, orgID, h.id); err != nil {
-			return 0, fmt.Errorf("move slack artifact %s: %w", h.id, err)
+			UPDATE artifacts SET target = $1, url = NULLIF($2, ''), updated_at = now()
+			WHERE org_id = $3 AND id = $4
+		`, target, url, orgID, h.id); err != nil {
+			return fmt.Errorf("move slack artifact %s: %w", h.id, err)
 		}
-		moved++
+		artifacts[h.id] = true
 	}
-	return moved, nil
+	return nil
 }
 
-// moveActionPointers moves the audit ledger's pointer for Slack actions whose
-// link points into the channel's archive. Only current_url is written; the
-// pointer's current value is the rewrite base, so successive moves chain.
-func moveActionPointers(ctx context.Context, q db.Execer, orgID, oldID, newID string) (int, error) {
+// moveActionPointers moves the audit ledger's pointer for the Slack actions
+// about the channel whose link points into its archive under oldID: those about
+// one of the channel's thread entities (external_actions.entity_id, the entity
+// referencing the channel's registry row), and those linked to no entity, whose
+// link names the channel by the id it moves off, as an unlinked artifact's
+// target does. Only current_url is written; the pointer's current value is the
+// rewrite base, so successive moves chain. channel is the channel's registry
+// row, "" when it has none.
+func moveActionPointers(ctx context.Context, q db.Execer, orgID, channel, oldID, newID string) (int, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, COALESCE(current_url, url) FROM external_actions
-		WHERE org_id = $1 AND provider = $2 AND scope = $4
-		  AND strpos(COALESCE(current_url, url, ''), '/archives/' || $3) > 0
-		ORDER BY id
-	`, orgID, domain.ArtifactProviderSlack, oldID, domain.SlackScope)
+		SELECT x.id, COALESCE(x.current_url, x.url) FROM external_actions x
+		  LEFT JOIN entities e ON e.org_id = x.org_id AND e.id = x.entity_id
+		WHERE x.org_id = $1 AND x.provider = $2 AND x.scope = $4
+		  AND strpos(COALESCE(x.current_url, x.url, ''), '/archives/' || $3) > 0
+		  AND (e.slack_channel_id = NULLIF($5, '')::uuid OR x.entity_id IS NULL)
+		ORDER BY x.id
+	`, orgID, domain.ArtifactProviderSlack, oldID, domain.SlackScope, channel)
 	if err != nil {
 		return 0, fmt.Errorf("list slack external actions to move: %w", err)
 	}

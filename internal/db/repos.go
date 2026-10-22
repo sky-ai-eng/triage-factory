@@ -123,7 +123,8 @@ func RequireRepoHost(host string) error {
 // method takes the host it asks about, so those rows are invisible to the new
 // host's reads, polls and renames, and come back if the org moves back. A
 // same-named repository on the new host is another row. The id-keyed methods
-// (Get, UpdateBaseBranch) take none: a row id names one repository on one host
+// (Get, UpdateBaseBranch, UpdateCloneStatusSystem, UpdateProfileSystem and the
+// pulls poll state) take none: a row id names one repository on one host
 // already. A missing host is ErrRepoHostRequired.
 //
 // All methods take orgID; local mode passes runmode.LocalDefaultOrgID.
@@ -142,9 +143,11 @@ func RequireRepoHost(host string) error {
 // So every method here is keyed one of two ways, and which one it is, is in
 // its name:
 //
-//   - id-keyed (Get, UpdateBaseBranch) takes the registry
-//     id. A miss is ErrNoSuchRepository, never a silent no-op — see that
-//     error's doc for why the two halves differ.
+//   - id-keyed (Get, UpdateBaseBranch, UpdateCloneStatusSystem,
+//     UpdateProfileSystem, the pulls poll state) takes the registry id. A miss
+//     is ErrNoSuchRepository, never a silent no-op — see that error's doc for
+//     why the two halves differ. SetPullsPollStateSystem is the one exception,
+//     and says so.
 //   - ref-keyed (…ByRef) takes a domain.RepoRef, the provider's own name
 //     for the repository. Matching folds case on owner/repo (GitHub
 //     identifiers are case-insensitive) and pins ref.Source and ref.Host, so
@@ -171,15 +174,29 @@ func RequireRepoHost(host string) error {
 // (TeamGitHubReposStore.ListForTeam): untracking is a team's decision, and a
 // retire is not one.
 //
+// # The owner account is recorded with the repository id
+//
+// owner_external_id (domain.Repository.OwnerExternalID) is GitHub's id for the
+// account that owns the repository, which matches the repository to the App
+// installation on that account. It is read off the same responses the
+// repository id is (a grant listing, the profiler's repository read, a
+// reachable-mirror entry, a GET /repositories/{id}) and written only onto the
+// row that carries that response's repository id once the write lands: an
+// owner id describes one repository, and a row holding the name under another
+// id is another repository. An empty owner id never clears a stored one,
+// except in RenameSystem, where the owner moved with the name.
+//
 // # Every single-row write returns the row it persisted
 //
-// Upsert, UpdateBaseBranch and UpdateCloneStatusByRef all hand
-// back the stored row, read off RETURNING on the write statement itself rather
-// than from a follow-up SELECT. This store is the reason the rule exists:
+// Upsert, UpdateBaseBranch, UpdateCloneStatusSystem and UpdateProfileSystem
+// all hand back the stored row, read off RETURNING on the write statement
+// itself rather than from a follow-up SELECT. This store is the reason the
+// rule exists:
 //
 //   - The writes deliberately do not persist what the caller passed. Upsert
-//     COALESCEs external_id, preserves the user's base_branch and the clone
-//     status, and keeps the stored casing of owner/repo. A caller's input
+//     and UpdateProfileSystem COALESCE external_id and owner_external_id and
+//     preserve the user's base_branch and the clone status, and Upsert keeps
+//     the stored casing of owner/repo. A caller's input
 //     struct is designed to be wrong as a picture of the row, so anything
 //     that renders, publishes or caches it after the write is holding a lie.
 //   - RETURNING is atomic where a read-back races. The row that comes back is
@@ -195,8 +212,7 @@ func RequireRepoHost(host string) error {
 // what the write already returned.
 //
 // Exempt, each said so at the method: FillMissingExternalIDsSystem (bulk) and
-// SetPullsPollStateByRefSystem (per-repo-per-cycle bookkeeping nobody reads
-// back).
+// SetPullsPollStateSystem (per-repo-per-cycle bookkeeping nobody reads back).
 type RepositoryStore interface {
 	// Upsert inserts or updates a repository row. On conflict it
 	// refreshes profiling metadata (description, has_readme,
@@ -210,12 +226,18 @@ type RepositoryStore interface {
 	// the conflict target is (source, host, folded owner/repo), so a
 	// same-named repository on another host is another row and never this
 	// one. p.ExternalID refreshes the stored id when non-empty and leaves it
-	// alone when empty — the profiler reads the id off the same
-	// /repos/{owner}/{repo} response it takes default_branch and clone_url
-	// from, and a caller with no id has learned nothing to write. An id
-	// another row on the host already carries is not written either: that is
-	// a rename the poller has not applied yet (or one it refused), and moving
-	// the id onto this row would leave two rows claiming one repository.
+	// alone when empty: a caller with no id has learned nothing to write. An
+	// id another row on the host already carries is not written either: that
+	// is a rename the poller has not applied yet (or one it refused), and
+	// moving the id onto this row would leave two rows claiming one
+	// repository. p.OwnerExternalID is written, under the same COALESCE, only
+	// when the row carries p.ExternalID once the write lands.
+	//
+	// Keyed by name, so it is for a caller that holds no row yet. A caller
+	// that read the row first writes its profile through UpdateProfileSystem,
+	// by the id it read: a rename or a retire landing between that read and
+	// this write would otherwise send the write to whatever answers to the
+	// name by then, or create a row under the name the repository just left.
 	//
 	// Returns the persisted row, which is the only way to see any of the
 	// above: p is an input, and every rule in this doc is a rule about how
@@ -283,27 +305,6 @@ type RepositoryStore interface {
 	// this asks what a name resolves to now, not what an identity was called.
 	GetByRef(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error)
 
-	// UpdateCloneStatusByRef records the outcome of an EnsureBareClone
-	// attempt for the named repo. status is "ok" | "failed" |
-	// "pending"; errMsg and errKind are stored as TEXT (empty
-	// string serializes to NULL) — kind is "ssh" when our SSH
-	// preflight has confirmed the SSH side is the cause, "other"
-	// when the failure is on the git/transport side, and empty for
-	// status="ok".
-	//
-	// Ref-keyed because the caller is a clone callback that knows which
-	// checkout it just attempted, not which row it belongs to. No-ops
-	// silently when nothing answers to the name: clone hooks fire after repo
-	// selection, so the row is normally there, and a repo dropped between the
-	// hook firing and this UPDATE landing is a race whose loser has nothing
-	// left to record against.
-	//
-	// Returns the stamped row, or nil for that no-op — the ref-keyed miss
-	// shape, same as GetByRef. The caller is a websocket emit site keyed on
-	// the registry id, and the row is where the id comes from; nil is exactly
-	// the case with nothing for a client to merge into.
-	UpdateCloneStatusByRef(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) (*domain.Repository, error)
-
 	// --- Admin-pool variants (`...System`) ---
 	//
 	// Same pattern as EntityStore: routed through the admin
@@ -333,19 +334,22 @@ type RepositoryStore interface {
 	// repository.
 	//
 	// It reads through team_github_repos rather than listing the registry,
-	// because the two are no longer the same set. A registry row is durable: it
+	// because the two are not the same set. A registry row is durable: it
 	// outlives the tracking decision that created it, so a worktree ledger
 	// entry or a task can go on naming the repository after a team untracks it.
 	// "Which repositories does TF work on" is a question about tracking, and
 	// this is the read that asks tracking.
 	//
-	// Names, not ids, and deliberately so: every consumer spends the result at
-	// an edge. The poller turns each into a /repos/{owner}/{repo} path and
-	// case-folds it against the installation grant's own FullName strings; the
-	// profiler fetches GitHub metadata under it; the dashboard backfill builds
-	// a `repo:` search qualifier from it; the round-robin resume cursor stores
-	// one. Handing back ids would make all four resolve straight back to the
-	// name, and the ids would be dead weight in the poll loop's hot path.
+	// Names, not ids, because every consumer spends the result at GitHub. The
+	// poller turns each into a /repos/{owner}/{repo} path and case-folds it
+	// against the installation grant's own FullName strings; the profiler
+	// fetches GitHub metadata under it; the dashboard backfill builds a
+	// `repo:` search qualifier from it; the round-robin resume cursor stores
+	// the name the next cycle starts its rotation at. What a consumer stores
+	// about one repository it keys by row id instead, read once per pass: the
+	// tracker reads the tracked rows (ListTrackedSystem) to key each listing's
+	// conditional-request state, and the profiler reads each row before it
+	// writes the profile by that row's id.
 	ListTrackedNamesSystem(ctx context.Context, orgID, host string) ([]string, error)
 
 	// ListTrackedSystem returns one page of the repository rows on host that
@@ -355,8 +359,9 @@ type RepositoryStore interface {
 	//
 	// Its consumers mean "the repositories TF works with": the startup clone
 	// warm reads each row's clone URL, the org admin's repository list renders
-	// the rows, the setup gate counts them (ListOpts.CountOnly), and the
-	// GitHub team lookups take their owners. A row every team has stopped
+	// the rows, the setup gate counts them (ListOpts.CountOnly), the GitHub
+	// team lookups take their owners, and the GitHub tracker keys each
+	// listing's conditional-request state by their ids. A row every team has stopped
 	// tracking is left out; it stays in the registry for the references that
 	// still name it.
 	//
@@ -371,7 +376,7 @@ type RepositoryStore interface {
 
 	// ListTrackedByTeamSystem returns one page of the repository rows on host
 	// that teamID tracks, ordered by (owner, repo, id), plus the unpaged total.
-	// It is the listing half of the gate TeamGitHubReposStore.TracksRepoSystem
+	// It is the listing half of the gate TeamGitHubReposStore.TracksRepositorySystem
 	// applies: a delegated run is offered the repositories its team tracks,
 	// which are the ones `workspace add` will materialize and the git proxy
 	// will push to. Admin pool in Postgres, for callers with no JWT claims (a
@@ -429,15 +434,18 @@ type RepositoryStore interface {
 	// name. Three outcomes:
 	//
 	//   - A row on the host carries the id: it is returned exactly as it
-	//     stands. Its stored name is not moved here; RenameSystem applies a
-	//     rename when the poller observes one.
+	//     stands. Its stored name and owner id are not moved here;
+	//     RenameSystem applies a rename when the poller observes one, and
+	//     FillMissingExternalIDsSystem records a missing owner id once the row
+	//     is tracked.
 	//   - No row carries the id and a row without a provider id holds the
-	//     name (folded case): the id is written onto that row, which is
-	//     returned. The provider says the name belongs to the id now, so the
-	//     row is that repository — the same inference Upsert and
-	//     FillMissingExternalIDsSystem make.
-	//   - Nothing answers to either: a row is created carrying the id from
-	//     the start. Bare otherwise — no profile — and not tracked.
+	//     name (folded case): the id, and ref.OwnerExternalID when it is not
+	//     empty, are written onto that row, which is returned. The provider
+	//     says the name belongs to the id now, so the row is that repository —
+	//     the same inference Upsert and FillMissingExternalIDsSystem make.
+	//   - Nothing answers to either: a row is created carrying the id and
+	//     ref.OwnerExternalID from the start. Bare otherwise — no profile —
+	//     and not tracked.
 	//
 	// A row holding the name under a different provider id is refused with
 	// ErrRepoSlugOccupied, and nothing is written: GitHub serves one live
@@ -455,14 +463,55 @@ type RepositoryStore interface {
 	// of the org; who may register is decided by the handler.
 	FindOrCreateByExternalID(ctx context.Context, orgID string, ref domain.RepoRef) (domain.Repository, error)
 
-	UpdateCloneStatusByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) (*domain.Repository, error)
+	// UpdateCloneStatusSystem records the outcome of an EnsureBareClone
+	// attempt for the repository whose registry row is id, and returns the
+	// stamped row. status is "ok" | "failed" | "pending"; errMsg and errKind
+	// are stored as TEXT (empty string serializes to NULL) — kind is "ssh"
+	// when our SSH preflight has confirmed the SSH side is the cause, "other"
+	// when the failure is on the git/transport side, and empty for
+	// status="ok".
+	//
+	// Id-keyed because the bare clone is the row's: it lives at a path keyed
+	// by the row id, and the clone callback is handed that id. A rename
+	// between the clone and this write moves the row's name and nothing else,
+	// so the outcome lands on the row it is about. ErrNoSuchRepository when no
+	// row carries the id, which leaves nothing to record against.
+	//
+	// The returned row is what the caller publishes: the websocket event is
+	// keyed on its id, and all three clone columns go out as stored, so a
+	// success after a failure clears the error a client renders.
+	UpdateCloneStatusSystem(ctx context.Context, orgID, id, status, errMsg, errKind string) (domain.Repository, error)
+
 	GetByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error)
 	UpsertSystem(ctx context.Context, orgID string, p domain.Repository) (domain.Repository, error)
 
-	// FillMissingExternalIDsSystem records the provider's repository id for
-	// tracked repos that do not have one yet, and returns how many rows it
-	// filled. Refs whose repository has no row, or whose row already carries
-	// an id, are skipped — this only ever turns a NULL into a value.
+	// UpdateProfileSystem writes what a profiling pass learned about the
+	// repository whose registry row is id, and returns the row as stored:
+	// description, the three doc flags, profile_text, clone_url,
+	// default_branch and profiled_at take p's values, and p.ExternalID is
+	// written when non-empty and no other row on the row's host carries it
+	// (Upsert's rule, for Upsert's reason). p.OwnerExternalID is written when
+	// non-empty and the row carries p.ExternalID once the write lands, so the
+	// owner id GitHub sent with one repository is never recorded on another.
+	// Nothing else moves: owner/repo, source and host are the row's, and the
+	// base branch, clone state and poll cursor are not a profile's to write.
+	//
+	// It is the profiler's write. The profiler reads each tracked row before
+	// it fetches the repository's documents, and the write lands on that row
+	// whatever has happened to its name in between. A retired row is not
+	// written: GitHub serves another repository under the name the profile
+	// was fetched by, so what the pass read describes that one. A miss, retired
+	// or absent, is ErrNoSuchRepository.
+	UpdateProfileSystem(ctx context.Context, orgID, id string, p domain.Repository) (domain.Repository, error)
+
+	// FillMissingExternalIDsSystem records the provider's repository id, and
+	// the owner account's id, for tracked repos that do not have them yet, and
+	// returns how many rows it filled. A ref writes one row at most: the row
+	// carrying ref.ExternalID gets ref.OwnerExternalID when it has no owner id,
+	// whatever name it is stored under; else the row holding ref's name with
+	// no provider id gets both. Refs whose repository has no row, or whose row
+	// already carries what the ref would write, are skipped — this only ever
+	// turns a NULL into a value.
 	//
 	// It exists because an id nobody records is an id nobody has: rename
 	// detection keys on (source, external_id) and treats a NULL as "not
@@ -472,9 +521,10 @@ type RepositoryStore interface {
 	//
 	// The caller is the poller, which already enumerates each installation's
 	// repo grant every cycle to compute the tracked∩granted intersection —
-	// that response carries the ids, so this costs no GitHub request. Matching
-	// is case-insensitive, like every other slug lookup here. A ref with an
-	// empty ExternalID is ignored rather than written: absent is not an id.
+	// that response carries both ids, so this costs no GitHub request.
+	// Matching by name is case-insensitive, like every other slug lookup here.
+	// A ref with an empty ExternalID is ignored rather than written: absent is
+	// not an id, and an owner id with no repository id has no row to describe.
 	//
 	// Exempt from the returned-row rule: it writes a batch, and the count is
 	// what its caller reports. Returning the rows would hand a poll cycle every
@@ -487,12 +537,13 @@ type RepositoryStore interface {
 	FillMissingExternalIDsSystem(ctx context.Context, orgID string, refs []domain.RepoRef) (int, error)
 
 	// ListIdentitiesSystem returns the provider identity — source, host, slug,
-	// and the provider's own id — of every repository row on host that carries
-	// an id, retired rows included and marked. Rows without an id are omitted
-	// rather than returned with an empty ExternalID: a repository TF has not
-	// learned an id for is not renamable in either direction, so it is not
-	// part of the comparison at all. A retired row is: GitHub answering for its
-	// id again is what restores it.
+	// and the provider's own id, with the owner account's id where the row has
+	// one — of every repository row on host that carries an id, retired rows
+	// included and marked. Rows without an id are omitted rather than returned
+	// with an empty ExternalID: a repository TF has not learned an id for is
+	// not renamable in either direction, so it is not part of the comparison at
+	// all. A retired row is: GitHub answering for its id again is what restores
+	// it.
 	//
 	// The read half of rename and reassignment detection. It is the small side
 	// of the join: TF holds tens of repositories per org where a grant listing
@@ -542,11 +593,19 @@ type RepositoryStore interface {
 	// history), and so are the artifacts: those about its entities
 	// (artifacts.entity_id), which take their entity's new key, and its
 	// branches, found by the registry row id their dedup keys carry. Their
-	// targets move and their keys do not. Audit-ledger rows move only where
-	// their scope is the host (with a link or without one), placement pins
-	// only on the host, and a stored link only when it is on the host
+	// targets move and their keys do not. The audit-ledger rows are its own
+	// too: those about its entities (external_actions.entity_id) and those
+	// about the repository with no entity (external_actions.repository_id).
+	// Their current_url moves, and only when the link is on the host
 	// (domain.RewriteRepoURL). A repository on another host with the same name
-	// or id is never touched.
+	// or id is never touched, nor is a retired row that held the name. Placement
+	// overrides reference the row by its id, so a rename leaves them alone.
+	//
+	// The row's owner account id moves with its name
+	// (domain.RenamedOwnerExternalID): observed.OwnerExternalID is written when
+	// it is not empty, and without one the stored id is kept while the owner
+	// login is unchanged and cleared when it moved, since a transfer moves the
+	// repository to another account. A restore writes it the same way.
 	//
 	// Detection happens here, not in the caller: the method re-reads the
 	// repository row under a lock (SELECT … FOR UPDATE in Postgres; SQLite's
@@ -568,11 +627,10 @@ type RepositoryStore interface {
 	// A retired row carrying the id is restored: the provider has answered for
 	// it, so it takes the slug it was observed under and clears retired_at, in
 	// the same transaction, under the same occupant rules as a rename
-	// (Restored, and Renamed too when the slug moved). Only its own entities
-	// and artifacts move with it. The records matched by the slug alone —
-	// placement pins, audit-ledger pointers — stay where they are, because the
-	// name it was retired under is no longer its own, and whatever answers to
-	// it now may be another repository's.
+	// (Restored, and Renamed too when the slug moved). Its own entities,
+	// artifacts and audit-ledger pointers move with it, selected by id as in
+	// any rename; whatever answers to the name it was retired under now keeps
+	// its own.
 	//
 	// The occupant of the target slug is a row that holds it: a retired row
 	// under the same slug is history, not an occupant. One occupant is
@@ -585,7 +643,9 @@ type RepositoryStore interface {
 	// bare row is the same repository: its entities are re-pointed to the
 	// renamed row, the branches recorded in it are re-keyed onto the renamed
 	// row's id (domain.BranchDedupKey; a branch both rows recorded keeps the
-	// older artifact), and it is deleted, in the rename's transaction.
+	// older artifact), its audit-ledger rows are re-pointed to the renamed row,
+	// its placement override moves onto the renamed row unless that row has
+	// one of its own, and it is deleted, in the rename's transaction.
 	//
 	// Two states are refused instead, because writing through either would
 	// destroy a row rather than move one: ErrRepoSlugOccupied when anything
@@ -603,31 +663,37 @@ type RepositoryStore interface {
 	// see all of, and its callers are the poller and the profiler.
 	RenameSystem(ctx context.Context, orgID string, observed domain.RepoRef) (domain.RepoRenameOutcome, error)
 
-	// GetPullsPollStateByRefSystem returns the stored conditional-request
-	// state for a repo's open-PR listing: the last ETag and the last
-	// successful poll time. Both are zero values ("" / nil) when the repo has
-	// never been listed, and likewise when nothing answers to the name.
+	// GetPullsPollStateSystem returns the stored conditional-request state for
+	// the open-PR listing of the repository whose registry row is id: the last
+	// ETag and the last successful poll time. Both are zero values ("" / nil)
+	// when the repository has never been listed. ErrNoSuchRepository when no
+	// row carries the id.
 	//
-	// Ref-keyed, and the pair below with it, because the caller is the GitHub
-	// tracker iterating ListTrackedNamesSystem: it holds the same name it is
-	// about to put in the request path, and resolving each one to an id per
-	// repo per cycle would buy nothing — the state is a cache of one HTTP
-	// conditional request, and a name that stopped resolving mid-cycle costs
-	// exactly one unconditional re-list.
+	// Id-keyed, and the pair below with it, because the state belongs to one
+	// repository and a name does not pick one: a retired row keeps the name the
+	// repository GitHub now serves under it holds, and each has a listing of
+	// its own. A retired row's state is read and written like any other's —
+	// the tracker clears it when it stops following the row's pull requests —
+	// and nothing polls it.
 	//
 	// System (claims-free) variant — the poller goroutine has no JWT claims,
 	// same convention as ListTrackedNamesSystem.
-	GetPullsPollStateByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef) (etag string, polledAt *time.Time, err error)
+	GetPullsPollStateSystem(ctx context.Context, orgID, id string) (etag string, polledAt *time.Time, err error)
 
-	// SetPullsPollStateByRefSystem records the conditional-request state after
-	// a successful open-PR list. On a 304 the caller passes the stored
-	// etag back unchanged (only polledAt advances); on a 200 it passes
-	// the fresh etag. No-ops silently when nothing answers to the name.
+	// SetPullsPollStateSystem records the conditional-request state after a
+	// successful open-PR list of the repository whose registry row is id. On a
+	// 304 the caller passes the stored etag back unchanged (only polledAt
+	// advances); on a 200 it passes the fresh etag.
+	//
+	// No-ops silently when no row carries the id, unlike the other id-keyed
+	// methods: the state is a cache of one HTTP conditional request, so a row
+	// gone between the listing and this write has nothing left to cache for,
+	// and the caller would only log the error it was handed.
 	//
 	// Exempt from the returned-row rule: this fires once per tracked repo per
 	// poll cycle to stamp a cache cursor the poller reads back through
-	// GetPullsPollStateByRefSystem on the next cycle and nowhere else. Handing
+	// GetPullsPollStateSystem on the next cycle and nowhere else. Handing
 	// a whole row to a write nobody reads the answer of is cost without a
 	// reader.
-	SetPullsPollStateByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef, etag string, polledAt time.Time) error
+	SetPullsPollStateSystem(ctx context.Context, orgID, id, etag string, polledAt time.Time) error
 }

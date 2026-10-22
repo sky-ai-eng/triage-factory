@@ -45,6 +45,7 @@ type jiraIssueFake struct {
 	status   fakeJiraStatus
 	assignee string // user key, "" when unassigned
 	writes   []jiraWrite
+	issues   []string // what each /issue/ request named, id or key
 }
 
 func newJiraIssueFake(t *testing.T, statusID, assignee string) *jiraIssueFake {
@@ -77,6 +78,10 @@ func (f *jiraIssueFake) serve(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	path := r.URL.Path
+	if _, rest, ok := strings.Cut(path, "/issue/"); ok {
+		issue, _, _ := strings.Cut(rest, "/")
+		f.issues = append(f.issues, issue)
+	}
 	switch {
 	case strings.HasSuffix(path, "/myself"):
 		_ = json.NewEncoder(w).Encode(map[string]string{"key": jiraMeKey, "name": jiraMeName})
@@ -133,6 +138,17 @@ func (f *jiraIssueFake) Writes() []jiraWrite {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return slices.Clone(f.writes)
+}
+
+// assertIssuesNamed fails unless the fake received /issue/ requests and every
+// one named one of ids.
+func (f *jiraIssueFake) assertIssuesNamed(t *testing.T, ids ...string) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.issues) == 0 || slices.ContainsFunc(f.issues, func(issue string) bool { return !slices.Contains(ids, issue) }) {
+		t.Errorf("Jira requests named issues %v, want only %v", f.issues, ids)
+	}
 }
 
 // waitForWrites blocks until the fake has received n writes, for a sync the
@@ -212,7 +228,7 @@ func TestApplyJiraUnclaim(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := newJiraIssueFake(t, tc.status, tc.assignee)
-			applyJiraUnclaim(t.Context(), fake.client(), "SKY-5", tc.prior, jiraMeKey, jiraUnclaimInProgress)
+			applyJiraUnclaim(t.Context(), fake.client(), "10005", "SKY-5", tc.prior, jiraMeKey, jiraUnclaimInProgress)
 			if got := fake.Writes(); !slices.Equal(got, tc.want) {
 				t.Errorf("writes = %v, want %v", got, tc.want)
 			}
@@ -222,7 +238,8 @@ func TestApplyJiraUnclaim(t *testing.T) {
 
 // TestTaskRequeue_JiraTask_PutsTheTicketBack: claiming a Jira task records
 // the ticket's state in the claim, and returning it to the queue puts the
-// ticket back in that status, unassigned, as the user who claimed it.
+// ticket back in that status, unassigned, as the user who claimed it,
+// addressing the issue by its id.
 func TestTaskRequeue_JiraTask_PutsTheTicketBack(t *testing.T) {
 	fake := newJiraIssueFake(t, statusToDoID, "")
 	s := newTestServer(t)
@@ -281,4 +298,5 @@ func TestTaskRequeue_JiraTask_PutsTheTicketBack(t *testing.T) {
 	if got := fake.waitForWrites(t, len(want)); !slices.Equal(got, want) {
 		t.Errorf("Jira writes = %v, want %v", got, want)
 	}
+	fake.assertIssuesNamed(t, "id-SKY-5")
 }

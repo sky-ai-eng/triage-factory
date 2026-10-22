@@ -7,9 +7,21 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // Actor identity on Jira is primarily Assignee + Reporter; Commenter appears
 // on `commented`. Status and Priority are open-set discriminators (Jira
 // projects configure their own workflows), so transitions carry the *new*
-// value in both metadata and the event's dedup_key — multiple concurrent
-// status-changed tasks can exist on the same issue when it transitions
-// through several states before being addressed.
+// value in the event's dedup_key — multiple concurrent status-changed tasks
+// can exist on the same issue when it transitions through several states
+// before being addressed. The dedup_key is the value's id, which a rename in
+// Jira does not move, and its name only when the read carried no id.
+//
+// Statuses, priorities and issue types are named both ways in metadata: by
+// Jira's id (status_id, priority_id, issue_type_id and their old_, new_,
+// final_ and last_ siblings), which is what the *_id_in predicates match, and
+// by name for display. A Jira admin can rename any of the three, and a filter
+// on the name would then match nothing. A predicate's ids are checked when it
+// is saved: each must be a status or an issue type of a project the handler's
+// team tracks, or one of the instance's priorities.
+//
+// Labels are matched by name (has_label, label_name): a Jira label is a plain
+// string with no id, and it cannot be renamed.
 //
 // Actor predicates moved from `*_is_self` booleans to `*_in`
 // allowlists of Atlassian account IDs. "Self" relative to a team is
@@ -24,12 +36,11 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // the project keeps receiving its events under the new key, and a predicate
 // on the project keeps matching them.
 //
-// TODO(TFAC-878): status predicates are free-text names the user types, matched
-// against the name on the event. Nothing validates them against the project's
-// live workflow, so a status renamed in Jira leaves a predicate that matches
-// nothing and a trigger that silently stops firing. They cannot simply become
-// ids: the name is also the dedup_key on stored events. Reporting the drift
-// needs the durable notification channel.
+// TODO(TFAC-878): a status, priority or issue type deleted in Jira after a
+// predicate names it, or a status a project's workflow drops, leaves a filter
+// that matches nothing and a trigger that silently stops firing. Only the ids
+// a save adds are checked, so nothing notices. Reporting the drift needs the
+// durable notification channel.
 
 // -----------------------------------------------------------------------------
 // issue:assigned — issue was assigned (possibly to someone else; predicates
@@ -46,8 +57,11 @@ type JiraIssueAssignedMetadata struct {
 	Project           string   `json:"project"`   // "SKY"
 	JiraProjectID     string   `json:"jira_project_id"`
 	IssueType         string   `json:"issue_type"`
+	IssueTypeID       string   `json:"issue_type_id"`
 	Priority          string   `json:"priority"`
+	PriorityID        string   `json:"priority_id"`
 	Status            string   `json:"status"`
+	StatusID          string   `json:"status_id"`
 	Summary           string   `json:"summary"`
 	Labels            []string `json:"labels"`
 }
@@ -56,9 +70,9 @@ type JiraIssueAssignedPredicate struct {
 	AssigneeIn      []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Atlassian account IDs, case-insensitive)."`
 	ReporterIn      []string `json:"reporter_in,omitempty" doc:"Match issues whose reporter is in this list (Atlassian account IDs)."`
 	JiraProjectIDIn []string `json:"jira_project_id_in,omitempty" doc:"Match only issues in these Jira projects, each one the team tracks, by registry id (the id of an entry in jira_projects on GET /api/teams/{team_id}/settings, not the project key). Empty matches every project the team tracks."`
-	IssueType       *string  `json:"issue_type,omitempty" doc:"Filter by issue type (Story, Bug, Task, ...)."`
-	Priority        *string  `json:"priority,omitempty" doc:"Exact-match on priority name."`
-	Status          *string  `json:"status,omitempty" doc:"Filter by the issue's current status (e.g. 'To Do', 'In Progress')."`
+	IssueTypeIDIn   []string `json:"issue_type_id_in,omitempty" doc:"Match only issues of these issue types, by Jira issue type id (an issue type of a project the team tracks, as POST /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/list serves it), not its name. Empty matches every issue type."`
+	PriorityIDIn    []string `json:"priority_id_in,omitempty" doc:"Match only issues whose priority is one of these, by Jira priority id (as POST /api/orgs/{org_id}/jira/priorities/list serves it), not its name. Empty matches every priority."`
+	StatusIDIn      []string `json:"status_id_in,omitempty" doc:"Match only issues whose current status is one of these, by Jira status id (the id of a status in the workflow of a project the team tracks, as POST /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/list serves it), not its name. Empty matches every status."`
 	HasLabel        *string  `json:"has_label,omitempty" doc:"Require the issue to currently bear this label."`
 }
 
@@ -66,9 +80,9 @@ func (p JiraIssueAssignedPredicate) Matches(m JiraIssueAssignedMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
 		stringInSliceFold(p.ReporterIn, m.ReporterAccountID) &&
 		idIn(p.JiraProjectIDIn, m.JiraProjectID) &&
-		strEq(p.IssueType, m.IssueType) &&
-		strEq(p.Priority, m.Priority) &&
-		strEq(p.Status, m.Status) &&
+		idIn(p.IssueTypeIDIn, m.IssueTypeID) &&
+		idIn(p.PriorityIDIn, m.PriorityID) &&
+		idIn(p.StatusIDIn, m.StatusID) &&
 		hasLabel(p.HasLabel, m.Labels)
 }
 
@@ -84,8 +98,11 @@ type JiraIssueAvailableMetadata struct {
 	Project           string   `json:"project"`
 	JiraProjectID     string   `json:"jira_project_id"`
 	IssueType         string   `json:"issue_type"`
+	IssueTypeID       string   `json:"issue_type_id"`
 	Priority          string   `json:"priority"`
+	PriorityID        string   `json:"priority_id"`
 	Status            string   `json:"status"`
+	StatusID          string   `json:"status_id"`
 	Summary           string   `json:"summary"`
 	Labels            []string `json:"labels"`
 }
@@ -93,25 +110,25 @@ type JiraIssueAvailableMetadata struct {
 type JiraIssueAvailablePredicate struct {
 	ReporterIn      []string `json:"reporter_in,omitempty" doc:"Match issues whose reporter is in this list (Atlassian account IDs)."`
 	JiraProjectIDIn []string `json:"jira_project_id_in,omitempty" doc:"Match only issues in these Jira projects, each one the team tracks, by registry id (the id of an entry in jira_projects on GET /api/teams/{team_id}/settings, not the project key). Empty matches every project the team tracks."`
-	IssueType       *string  `json:"issue_type,omitempty"`
-	Priority        *string  `json:"priority,omitempty"`
-	Status          *string  `json:"status,omitempty" doc:"Filter by the issue's current status (e.g. 'To Do', 'Backlog')."`
+	IssueTypeIDIn   []string `json:"issue_type_id_in,omitempty" doc:"Match only issues of these issue types, by Jira issue type id (an issue type of a project the team tracks, as POST /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/list serves it), not its name. Empty matches every issue type."`
+	PriorityIDIn    []string `json:"priority_id_in,omitempty" doc:"Match only issues whose priority is one of these, by Jira priority id (as POST /api/orgs/{org_id}/jira/priorities/list serves it), not its name. Empty matches every priority."`
+	StatusIDIn      []string `json:"status_id_in,omitempty" doc:"Match only issues whose current status is one of these, by Jira status id (the id of a status in the workflow of a project the team tracks, as POST /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/list serves it), not its name. Empty matches every status."`
 	HasLabel        *string  `json:"has_label,omitempty" doc:"Require the issue to currently bear this label."`
 }
 
 func (p JiraIssueAvailablePredicate) Matches(m JiraIssueAvailableMetadata) bool {
 	return stringInSliceFold(p.ReporterIn, m.ReporterAccountID) &&
 		idIn(p.JiraProjectIDIn, m.JiraProjectID) &&
-		strEq(p.IssueType, m.IssueType) &&
-		strEq(p.Priority, m.Priority) &&
-		strEq(p.Status, m.Status) &&
+		idIn(p.IssueTypeIDIn, m.IssueTypeID) &&
+		idIn(p.PriorityIDIn, m.PriorityID) &&
+		idIn(p.StatusIDIn, m.StatusID) &&
 		hasLabel(p.HasLabel, m.Labels)
 }
 
 // -----------------------------------------------------------------------------
-// issue:status_changed — open-set discriminator (the new status value is the
-// dedup_key). Multiple concurrent status-changed tasks can exist on one
-// issue.
+// issue:status_changed — open-set discriminator (the new status's id is the
+// dedup_key, its name when the read carried no id). Multiple concurrent
+// status-changed tasks can exist on one issue.
 // -----------------------------------------------------------------------------
 
 type JiraIssueStatusChangedMetadata struct {
@@ -122,29 +139,34 @@ type JiraIssueStatusChangedMetadata struct {
 	Project           string `json:"project"`
 	JiraProjectID     string `json:"jira_project_id"`
 	IssueType         string `json:"issue_type"`
+	IssueTypeID       string `json:"issue_type_id"`
 	OldStatus         string `json:"old_status"`
-	NewStatus         string `json:"new_status"` // also the event's dedup_key
+	OldStatusID       string `json:"old_status_id"`
+	NewStatus         string `json:"new_status"`
+	NewStatusID       string `json:"new_status_id"` // the event's dedup_key, or new_status when this is empty
 	Priority          string `json:"priority"`
+	PriorityID        string `json:"priority_id"`
 }
 
 type JiraIssueStatusChangedPredicate struct {
 	AssigneeIn      []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Atlassian account IDs)."`
 	JiraProjectIDIn []string `json:"jira_project_id_in,omitempty" doc:"Match only issues in these Jira projects, each one the team tracks, by registry id (the id of an entry in jira_projects on GET /api/teams/{team_id}/settings, not the project key). Empty matches every project the team tracks."`
-	IssueType       *string  `json:"issue_type,omitempty"`
-	NewStatus       *string  `json:"new_status,omitempty" doc:"Match transitions into a specific status (e.g. 'In Review')."`
-	OldStatus       *string  `json:"old_status,omitempty" doc:"Match transitions out of a specific status."`
+	IssueTypeIDIn   []string `json:"issue_type_id_in,omitempty" doc:"Match only issues of these issue types, by Jira issue type id (an issue type of a project the team tracks, as POST /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/list serves it), not its name. Empty matches every issue type."`
+	NewStatusIDIn   []string `json:"new_status_id_in,omitempty" doc:"Match only transitions into one of these statuses, by Jira status id (a status in the workflow of a project the team tracks), not its name. Empty matches every status."`
+	OldStatusIDIn   []string `json:"old_status_id_in,omitempty" doc:"Match only transitions out of one of these statuses, by Jira status id (a status in the workflow of a project the team tracks), not its name. Empty matches every status."`
 }
 
 func (p JiraIssueStatusChangedPredicate) Matches(m JiraIssueStatusChangedMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
 		idIn(p.JiraProjectIDIn, m.JiraProjectID) &&
-		strEq(p.IssueType, m.IssueType) &&
-		strEq(p.NewStatus, m.NewStatus) &&
-		strEq(p.OldStatus, m.OldStatus)
+		idIn(p.IssueTypeIDIn, m.IssueTypeID) &&
+		idIn(p.NewStatusIDIn, m.NewStatusID) &&
+		idIn(p.OldStatusIDIn, m.OldStatusID)
 }
 
 // -----------------------------------------------------------------------------
-// issue:priority_changed — open-set discriminator on new priority.
+// issue:priority_changed — open-set discriminator on the new priority's id
+// (its name when the read carried no id).
 // -----------------------------------------------------------------------------
 
 type JiraIssuePriorityChangedMetadata struct {
@@ -155,21 +177,23 @@ type JiraIssuePriorityChangedMetadata struct {
 	Project           string `json:"project"`
 	JiraProjectID     string `json:"jira_project_id"`
 	OldPriority       string `json:"old_priority"`
-	NewPriority       string `json:"new_priority"` // also the event's dedup_key
+	OldPriorityID     string `json:"old_priority_id"`
+	NewPriority       string `json:"new_priority"`
+	NewPriorityID     string `json:"new_priority_id"` // the event's dedup_key, or new_priority when this is empty
 }
 
 type JiraIssuePriorityChangedPredicate struct {
 	AssigneeIn      []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Atlassian account IDs)."`
 	JiraProjectIDIn []string `json:"jira_project_id_in,omitempty" doc:"Match only issues in these Jira projects, each one the team tracks, by registry id (the id of an entry in jira_projects on GET /api/teams/{team_id}/settings, not the project key). Empty matches every project the team tracks."`
-	NewPriority     *string  `json:"new_priority,omitempty"`
-	OldPriority     *string  `json:"old_priority,omitempty"`
+	NewPriorityIDIn []string `json:"new_priority_id_in,omitempty" doc:"Match only changes to one of these priorities, by Jira priority id (as POST /api/orgs/{org_id}/jira/priorities/list serves it), not its name. Empty matches every priority."`
+	OldPriorityIDIn []string `json:"old_priority_id_in,omitempty" doc:"Match only changes from one of these priorities, by Jira priority id, not its name. Empty matches every priority."`
 }
 
 func (p JiraIssuePriorityChangedPredicate) Matches(m JiraIssuePriorityChangedMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
 		idIn(p.JiraProjectIDIn, m.JiraProjectID) &&
-		strEq(p.NewPriority, m.NewPriority) &&
-		strEq(p.OldPriority, m.OldPriority)
+		idIn(p.NewPriorityIDIn, m.NewPriorityID) &&
+		idIn(p.OldPriorityIDIn, m.OldPriorityID)
 }
 
 // -----------------------------------------------------------------------------
@@ -219,19 +243,21 @@ type JiraIssueCompletedMetadata struct {
 	Project           string `json:"project"`
 	JiraProjectID     string `json:"jira_project_id"`
 	IssueType         string `json:"issue_type"`
+	IssueTypeID       string `json:"issue_type_id"`
 	FinalStatus       string `json:"final_status"`
+	FinalStatusID     string `json:"final_status_id"`
 }
 
 type JiraIssueCompletedPredicate struct {
 	AssigneeIn      []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Atlassian account IDs)."`
 	JiraProjectIDIn []string `json:"jira_project_id_in,omitempty" doc:"Match only issues in these Jira projects, each one the team tracks, by registry id (the id of an entry in jira_projects on GET /api/teams/{team_id}/settings, not the project key). Empty matches every project the team tracks."`
-	IssueType       *string  `json:"issue_type,omitempty"`
+	IssueTypeIDIn   []string `json:"issue_type_id_in,omitempty" doc:"Match only issues of these issue types, by Jira issue type id (an issue type of a project the team tracks, as POST /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/list serves it), not its name. Empty matches every issue type."`
 }
 
 func (p JiraIssueCompletedPredicate) Matches(m JiraIssueCompletedMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
 		idIn(p.JiraProjectIDIn, m.JiraProjectID) &&
-		strEq(p.IssueType, m.IssueType)
+		idIn(p.IssueTypeIDIn, m.IssueTypeID)
 }
 
 // -----------------------------------------------------------------------------
@@ -253,8 +279,11 @@ type JiraIssueBecameAtomicMetadata struct {
 	Project           string   `json:"project"`
 	JiraProjectID     string   `json:"jira_project_id"`
 	IssueType         string   `json:"issue_type"`
+	IssueTypeID       string   `json:"issue_type_id"`
 	Priority          string   `json:"priority"`
+	PriorityID        string   `json:"priority_id"`
 	Status            string   `json:"status"`
+	StatusID          string   `json:"status_id"`
 	Summary           string   `json:"summary"`
 	Labels            []string `json:"labels"`
 }
@@ -263,9 +292,9 @@ type JiraIssueBecameAtomicPredicate struct {
 	AssigneeIn      []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Atlassian account IDs)."`
 	ReporterIn      []string `json:"reporter_in,omitempty" doc:"Match issues whose reporter is in this list (Atlassian account IDs)."`
 	JiraProjectIDIn []string `json:"jira_project_id_in,omitempty" doc:"Match only issues in these Jira projects, each one the team tracks, by registry id (the id of an entry in jira_projects on GET /api/teams/{team_id}/settings, not the project key). Empty matches every project the team tracks."`
-	IssueType       *string  `json:"issue_type,omitempty"`
-	Priority        *string  `json:"priority,omitempty"`
-	Status          *string  `json:"status,omitempty"`
+	IssueTypeIDIn   []string `json:"issue_type_id_in,omitempty" doc:"Match only issues of these issue types, by Jira issue type id (an issue type of a project the team tracks, as POST /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/list serves it), not its name. Empty matches every issue type."`
+	PriorityIDIn    []string `json:"priority_id_in,omitempty" doc:"Match only issues whose priority is one of these, by Jira priority id (as POST /api/orgs/{org_id}/jira/priorities/list serves it), not its name. Empty matches every priority."`
+	StatusIDIn      []string `json:"status_id_in,omitempty" doc:"Match only issues whose current status is one of these, by Jira status id (the id of a status in the workflow of a project the team tracks, as POST /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/list serves it), not its name. Empty matches every status."`
 	HasLabel        *string  `json:"has_label,omitempty" doc:"Require the issue to currently bear this label."`
 }
 
@@ -273,9 +302,9 @@ func (p JiraIssueBecameAtomicPredicate) Matches(m JiraIssueBecameAtomicMetadata)
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
 		stringInSliceFold(p.ReporterIn, m.ReporterAccountID) &&
 		idIn(p.JiraProjectIDIn, m.JiraProjectID) &&
-		strEq(p.IssueType, m.IssueType) &&
-		strEq(p.Priority, m.Priority) &&
-		strEq(p.Status, m.Status) &&
+		idIn(p.IssueTypeIDIn, m.IssueTypeID) &&
+		idIn(p.PriorityIDIn, m.PriorityID) &&
+		idIn(p.StatusIDIn, m.StatusID) &&
 		hasLabel(p.HasLabel, m.Labels)
 }
 
@@ -301,8 +330,11 @@ type JiraIssueLabelMetadata struct {
 	Project           string   `json:"project"`
 	JiraProjectID     string   `json:"jira_project_id"`
 	IssueType         string   `json:"issue_type"`
+	IssueTypeID       string   `json:"issue_type_id"`
 	Priority          string   `json:"priority"`
+	PriorityID        string   `json:"priority_id"`
 	Status            string   `json:"status"`
+	StatusID          string   `json:"status_id"`
 	Summary           string   `json:"summary"`
 	LabelName         string   `json:"label_name"` // also the event's dedup_key
 	Labels            []string `json:"labels"`     // the issue's labels after the change
@@ -374,7 +406,9 @@ type JiraIssueUnreachableMetadata struct {
 	Project           string `json:"project"`
 	JiraProjectID     string `json:"jira_project_id"`
 	IssueType         string `json:"issue_type"`
+	IssueTypeID       string `json:"issue_type_id"`
 	LastStatus        string `json:"last_status"`
+	LastStatusID      string `json:"last_status_id"`
 	Summary           string `json:"summary"`
 	Reason            string `json:"reason"` // one of the JiraUnreachable* values
 }
@@ -382,13 +416,13 @@ type JiraIssueUnreachableMetadata struct {
 type JiraIssueUnreachablePredicate struct {
 	AssigneeIn      []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Atlassian account IDs)."`
 	JiraProjectIDIn []string `json:"jira_project_id_in,omitempty" doc:"Match only issues in these Jira projects, each one the team tracks, by registry id (the id of an entry in jira_projects on GET /api/teams/{team_id}/settings, not the project key). Empty matches every project the team tracks."`
-	IssueType       *string  `json:"issue_type,omitempty"`
+	IssueTypeIDIn   []string `json:"issue_type_id_in,omitempty" doc:"Match only issues of these issue types, by Jira issue type id (an issue type of a project the team tracks, as POST /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/list serves it), not its name. Empty matches every issue type."`
 }
 
 func (p JiraIssueUnreachablePredicate) Matches(m JiraIssueUnreachableMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
 		idIn(p.JiraProjectIDIn, m.JiraProjectID) &&
-		strEq(p.IssueType, m.IssueType)
+		idIn(p.IssueTypeIDIn, m.IssueTypeID)
 }
 
 // -----------------------------------------------------------------------------
@@ -413,6 +447,7 @@ type JiraIssueKeyChangedMetadata struct {
 	Project           string `json:"project"`
 	JiraProjectID     string `json:"jira_project_id"`
 	IssueType         string `json:"issue_type"`
+	IssueTypeID       string `json:"issue_type_id"`
 	Summary           string `json:"summary"`
 	OldIssueKey       string `json:"old_issue_key"`
 	OldProject        string `json:"old_project"`

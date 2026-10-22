@@ -7,6 +7,7 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // not the editor: snapshot polling does not establish who made the edit.
 type GitHubPRBodyUpdatedMetadata struct {
 	Author           string   `json:"author"`
+	AuthorID         string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
 	Repo             string   `json:"repo"`
 	RepositoryID     string   `json:"repository_id"` // the repository's registry row; what repo_in names
 	PRNumber         int      `json:"pr_number"`
@@ -19,16 +20,14 @@ type GitHubPRBodyUpdatedMetadata struct {
 }
 
 type GitHubPRBodyUpdatedPredicate struct {
-	AuthorIn []string `json:"author_in,omitempty" doc:"Match PR authors by GitHub login."`
-	Author   *string  `json:"author,omitempty"`
-	RepoIn   []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
-	IsDraft  *bool    `json:"is_draft,omitempty"`
-	HasLabel *string  `json:"has_label,omitempty"`
+	AuthorIDIn []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	RepoIn     []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	IsDraft    *bool    `json:"is_draft,omitempty"`
+	HasLabel   *string  `json:"has_label,omitempty"`
 }
 
 func (p GitHubPRBodyUpdatedPredicate) Matches(m GitHubPRBodyUpdatedMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) && idIn(p.RepoIn, m.RepositoryID) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) && idIn(p.RepoIn, m.RepositoryID) &&
 		boolEq(p.IsDraft, m.IsDraft) && hasLabel(p.HasLabel, m.Labels)
 }
 
@@ -40,6 +39,7 @@ type JiraIssueBodyUpdatedMetadata struct {
 	Project           string   `json:"project"`
 	JiraProjectID     string   `json:"jira_project_id"`
 	IssueType         string   `json:"issue_type"`
+	IssueTypeID       string   `json:"issue_type_id"`
 	Summary           string   `json:"summary"`
 	Labels            []string `json:"labels"`
 	PreviousBodyHash  string   `json:"previous_body_hash"`
@@ -49,13 +49,13 @@ type JiraIssueBodyUpdatedMetadata struct {
 type JiraIssueBodyUpdatedPredicate struct {
 	AssigneeIn      []string `json:"assignee_in,omitempty" doc:"Match assignees by Atlassian account ID."`
 	JiraProjectIDIn []string `json:"jira_project_id_in,omitempty" doc:"Match only issues in these Jira projects, each one the team tracks, by registry id (the id of an entry in jira_projects on GET /api/teams/{team_id}/settings, not the project key). Empty matches every project the team tracks."`
-	IssueType       *string  `json:"issue_type,omitempty"`
+	IssueTypeIDIn   []string `json:"issue_type_id_in,omitempty" doc:"Match only issues of these issue types, by Jira issue type id (an issue type of a project the team tracks, as POST /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/list serves it), not its name. Empty matches every issue type."`
 	HasLabel        *string  `json:"has_label,omitempty"`
 }
 
 func (p JiraIssueBodyUpdatedPredicate) Matches(m JiraIssueBodyUpdatedMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
-		idIn(p.JiraProjectIDIn, m.JiraProjectID) && strEq(p.IssueType, m.IssueType) &&
+		idIn(p.JiraProjectIDIn, m.JiraProjectID) && idIn(p.IssueTypeIDIn, m.IssueTypeID) &&
 		hasLabel(p.HasLabel, m.Labels)
 }
 

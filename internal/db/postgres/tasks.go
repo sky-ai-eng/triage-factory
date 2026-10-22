@@ -1588,6 +1588,18 @@ var pgTaskColumnsWithEntity = `
 		)
 		ELSE 0
 	END,
+	-- The requested reviewer's handle, from the event that last bumped a
+	-- review_requested task (domain.Task.RequestedReviewer). A primary-key
+	-- seek, gated on the event type.
+	CASE
+		WHEN t.event_type = 'github:pr:review_requested' THEN COALESCE((
+			SELECT COALESCE(NULLIF(ev.metadata_json ->> 'requested_login', ''),
+			                ev.metadata_json ->> 'requested_team')
+			FROM events ev
+			WHERE ev.id = t.primary_event_id
+		), '')
+		ELSE ''
+	END,
 	-- The memory the task is still waiting on, and the newest try at
 	-- producing it. The attempt columns are NULL whenever memory_pending is
 	-- false, by construction rather than by a guard: they read the same owing
@@ -1651,7 +1663,7 @@ func (s *taskScanState) bareTargets(t *domain.Task) []any {
 func (s *taskScanState) targets(t *domain.Task) []any {
 	return append(s.bareTargets(t),
 		&t.Title, &t.SourceURL, &t.EntitySourceID, &t.EntitySource, &t.EntityKind,
-		&t.OpenSubtaskCount, &t.SlackMessageCount,
+		&t.OpenSubtaskCount, &t.SlackMessageCount, &t.RequestedReviewer,
 		&t.MemoryPending,
 		&s.memoryAttemptOutcome, &s.memoryAttemptErrorKind,
 		&s.memoryAttemptErrorMessage, &s.memoryAttemptStartedAt,

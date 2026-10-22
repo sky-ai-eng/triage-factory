@@ -1,6 +1,6 @@
 package githooks
 
-import "strings"
+import "github.com/sky-ai-eng/triage-factory/internal/domain"
 
 // CommitIdentity is the git author/committer identity stamped onto a
 // delegated-agent run's commits, plus the optional Co-authored-by trailer the
@@ -20,37 +20,38 @@ type CommitIdentity struct {
 }
 
 // ResolveCommitIdentity computes the org commit identity (and, on a manual run
-// whose delegating human differs from the org name, the co-author trailer) from
-// the resolved name + email. Pure — no I/O — so it's the single, unit-testable
-// seam the delegate threads both run modes through.
+// whose delegating human is not the org's account, the co-author trailer) from
+// the resolved account + email. Pure — no I/O — so it's the single,
+// unit-testable seam the delegate threads both run modes through.
 //
-//   - orgName is the org's GitHub identity name: "<login>" for a PAT org,
-//     "<slug>[bot]" for an App org. Empty → (zero, false): nothing to stamp, and
-//     the caller must leave git identity unset (inherit ambient — never a
-//     fabricated identity).
+//   - org is the org's GitHub identity: login "<login>" for a PAT org,
+//     "<slug>[bot]" for an App org, with the PAT owner's or the bot's numeric id
+//     when stored. An empty login → (zero, false): nothing to stamp, and the
+//     caller must leave git identity unset (inherit ambient — never a
+//     fabricated identity). The login is the commit author name.
 //   - orgEmail is the author/committer email, already in its final form. The
 //     App-vs-PAT decision lives in the resolver (which has the data): a PAT org
 //     gets the credential owner's verified primary email; an App org gets the numeric-id
 //     noreply form "<bot_user_id>+<slug>[bot]@users.noreply.github.com" when the
 //     bot user id is known (the form that links a bot's commits on github.com),
-//     else the plain "<slug>[bot]@..." form (TFAC-474). This function passes it
-//     through verbatim.
-//   - The Co-authored-by trailer is emitted iff the run is MANUAL, a delegating
-//     userLogin is known, AND it differs from orgName case-insensitively. The
-//     N=1 same-PAT case (orgName == userLogin) gets no trailer — a self
-//     co-author GitHub would dedupe anyway; a human userLogin never equals a
-//     "<slug>[bot]" name, so manual App runs always co-attribute. The trailer's
-//     own email is always the plain "<userLogin>@users.noreply.github.com" form
-//     (the human is a user account — the plain form links; the numeric form is
-//     never applied here). Autonomous/event runs (manual=false) get the org
-//     identity only.
-func ResolveCommitIdentity(orgName, orgEmail string, manual bool, userLogin string) (CommitIdentity, bool) {
-	if orgName == "" {
+//     else the plain "<slug>[bot]@..." form. This function passes it through
+//     verbatim.
+//   - The Co-authored-by trailer is emitted iff the run is MANUAL, the
+//     delegating user's login is known, AND the user is not the org's account
+//     (domain.GitHubAccount.Is: by id when both are known, else by login). The N=1
+//     same-PAT case gets no trailer — a self co-author GitHub would dedupe
+//     anyway; a human never is the "<slug>[bot]" account, so manual App runs
+//     always co-attribute. The trailer's own email is always the plain
+//     "<login>@users.noreply.github.com" form (the human is a user account — the
+//     plain form links; the numeric form is never applied here).
+//     Autonomous/event runs (manual=false) get the org identity only.
+func ResolveCommitIdentity(org domain.GitHubAccount, orgEmail string, manual bool, user domain.GitHubAccount) (CommitIdentity, bool) {
+	if org.Login == "" {
 		return CommitIdentity{}, false // nothing to stamp
 	}
-	id := CommitIdentity{Name: orgName, Email: orgEmail}
-	if manual && userLogin != "" && !strings.EqualFold(userLogin, orgName) {
-		id.CoAuthorTrailer = "Co-authored-by: " + userLogin + " <" + userLogin + "@users.noreply.github.com>"
+	id := CommitIdentity{Name: org.Login, Email: orgEmail}
+	if manual && user.Login != "" && !org.Is(user.Login, user.ID) {
+		id.CoAuthorTrailer = "Co-authored-by: " + user.Login + " <" + user.Login + "@users.noreply.github.com>"
 	}
 	return id, true
 }

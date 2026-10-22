@@ -179,12 +179,10 @@ func (s *Server) handleLinearCredentialPut(w http.ResponseWriter, r *http.Reques
 		if err := tx.Secrets.Put(ctx, orgID, integrations.KeyLinearBoundAs, string(binding), ""); err != nil {
 			return fmt.Errorf("store %s: %w", integrations.KeyLinearBoundAs, err)
 		}
-		// TODO(TFAC-1060): a key from a different workspace is accepted here.
-		// The tracker then matches the new workspace's issues to the old rows
-		// by identifier alone, overwriting their text and giving them the old
-		// rows' tasks and history, and every team's Linear team rules keep
-		// naming the old workspace's teams and states. Scoping entities and
-		// team rules by workspace closes both.
+		// A key from a different workspace is accepted. Entities and team
+		// rules are keyed by workspace id, so the old workspace's issues stay
+		// on their own rows (the next cycle retires them, RetireLinearOutOfScope)
+		// and its rules stop applying; binding it again brings both back.
 		if _, err := tx.Orgs.SetLinearWorkspace(ctx, orgID, org.ID, org.URLKey); err != nil {
 			return fmt.Errorf("save linear workspace: %w", err)
 		}

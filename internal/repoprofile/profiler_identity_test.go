@@ -27,7 +27,7 @@ func TestProfiler_CarriesRepositoryIdentityOntoTheRow(t *testing.T) {
 		}
 		switch {
 		case strings.HasPrefix(path, "octo/with-id"):
-			_, _ = w.Write([]byte(`{"id":1296269,"default_branch":"main","clone_url":"https://x/octo/with-id.git"}`))
+			_, _ = w.Write([]byte(`{"id":1296269,"owner":{"login":"octo","id":583231},"default_branch":"main","clone_url":"https://x/octo/with-id.git"}`))
 		case strings.HasPrefix(path, "octo/no-id"):
 			_, _ = w.Write([]byte(`{"default_branch":"main","clone_url":"https://x/octo/no-id.git"}`))
 		default:
@@ -54,6 +54,9 @@ func TestProfiler_CarriesRepositoryIdentityOntoTheRow(t *testing.T) {
 	if withID.ExternalID != "1296269" {
 		t.Errorf("ExternalID = %q, want 1296269 — the id GitHub sent on the meta response", withID.ExternalID)
 	}
+	if withID.OwnerExternalID != "583231" {
+		t.Errorf("OwnerExternalID = %q, want 583231 — the owner id GitHub sent on the same response", withID.OwnerExternalID)
+	}
 	if withID.Source != domain.RepoSourceGitHub {
 		t.Errorf("Source = %q, want %q", withID.Source, domain.RepoSourceGitHub)
 	}
@@ -62,7 +65,56 @@ func TestProfiler_CarriesRepositoryIdentityOntoTheRow(t *testing.T) {
 	if !ok {
 		t.Fatal("octo/no-id was not upserted")
 	}
-	if noID.ExternalID != "" {
-		t.Errorf("ExternalID = %q, want empty — an absent id is not the id 0", noID.ExternalID)
+	if noID.ExternalID != "" || noID.OwnerExternalID != "" {
+		t.Errorf("ids = (%q, %q), want both empty — an absent id is not the id 0", noID.ExternalID, noID.OwnerExternalID)
 	}
 }
+
+// The profiler holds the repository's registry row when it resolves the
+// GitHub client, so it names the owner account by the id the row records as
+// well as by the login: a rename of the owner account that the row's name has
+// not caught up with still finds the installation on that account.
+func TestProfiler_ResolvesTheClientByTheRowsOwnerID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/contents/") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":1296269,"full_name":"octo/api","owner":{"login":"octo-co","id":583231},"default_branch":"main"}`))
+	}))
+	defer srv.Close()
+
+	repos := &ownedRepositoryStore{fetchRepositoryStore: fetchRepositoryStore{names: []string{"octo/api"}}}
+	resolver := &accountRecordingResolver{fixedResolver: fixedResolver{client: github.NewClient(srv.URL, "tok")}}
+	p := NewProfiler(resolver, nil, nil, repos, oneOrgStore{}, nil, nil, nil)
+	if err := p.Run(context.Background(), true /* force: skip the TTL read */); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if want := []string{"583231 octo"}; len(resolver.asked) != 1 || resolver.asked[0] != want[0] {
+		t.Errorf("client asked for %v; want %v", resolver.asked, want)
+	}
+}
+
+// ownedRepositoryStore is fetchRepositoryStore with rows that record their
+// owner's account id.
+type ownedRepositoryStore struct {
+	fetchRepositoryStore
+}
+
+func (s *ownedRepositoryStore) GetByRefSystem(_ context.Context, _ string, ref domain.RepoRef) (*domain.Repository, error) {
+	return &domain.Repository{ID: "repo-id-" + ref.Repo, Host: ref.Host, Owner: ref.Owner, Repo: ref.Repo, ExternalID: "1296269", OwnerExternalID: "583231"}, nil
+}
+
+// accountRecordingResolver is fixedResolver with the account-id extension,
+// recording each account it was asked for as "<id> <login>".
+type accountRecordingResolver struct {
+	fixedResolver
+	asked []string
+}
+
+func (r *accountRecordingResolver) ClientForAccount(_ context.Context, _, accountID, login string) (*github.Client, error) {
+	r.asked = append(r.asked, accountID+" "+login)
+	return r.client, nil
+}
+
+var _ github.AccountClientResolver = (*accountRecordingResolver)(nil)

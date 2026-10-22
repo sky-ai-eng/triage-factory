@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -99,6 +100,14 @@ type Manager struct {
 	// producer crosses, so a poller that forgets to skip wastes a request
 	// rather than leaking an event.
 	EventSources db.OrgEventSourceStore
+
+	// GrantMirror is the App-installation grant mirror ReconcileGrant writes.
+	// A cycle reads it for one thing: when an installation's grant cannot be
+	// read from GitHub, which tracked repositories that grant held when it was
+	// last mirrored, so the cursor resumes at them. nil leaves the cursor to
+	// wrap as if every installation had resolved (tests, and any embedder
+	// that hasn't wired it).
+	GrantMirror db.ReachableReposStore
 
 	// OnError fires when a poll cycle returns an error. Source is "github",
 	// "jira" or "linear"; orgID identifies the tenant whose cycle errored (empty
@@ -238,13 +247,13 @@ func (m *Manager) sourceDisabled(ctx context.Context, source, orgID string) (ski
 }
 
 // reviewerResolver builds the per-cycle TF-known reviewer resolver.
-// A non-empty username is the local/PAT "session user" signal → resolve
-// against that one login + their team memberships, preserving today's N=1
-// behavior. Every other path (multi mode, or local+App where there's no
+// A self account with a login is the local/PAT "session user" signal →
+// resolve against that one account + their team memberships, preserving the
+// N=1 behavior. Every other path (multi mode, or local+App where there's no
 // session login) resolves against the stores, host from org_settings.
-func (m *Manager) reviewerResolver(ctx context.Context, orgID, username string, userTeams []string) tracker.ReviewerResolver {
-	if username != "" {
-		return tracker.NewLocalReviewerResolver(username, userTeams)
+func (m *Manager) reviewerResolver(ctx context.Context, orgID string, self domain.GitHubAccount, userTeams []string) tracker.ReviewerResolver {
+	if self.Login != "" {
+		return tracker.NewLocalReviewerResolver(self, userTeams)
 	}
 	// Identities are keyed by the org's GitHub host. With no host — none set,
 	// or a settings read that failed — there is nothing to key a lookup on,
@@ -260,7 +269,7 @@ func (m *Manager) reviewerResolver(ctx context.Context, orgID, username string, 
 		}
 	}
 	if host == "" {
-		return tracker.NewLocalReviewerResolver("", nil)
+		return tracker.NewLocalReviewerResolver(domain.GitHubAccount{}, nil)
 	}
 	return tracker.NewStoreReviewerResolver(ctx, orgID, host, m.users, m.githubGroups)
 }
@@ -808,15 +817,15 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// a successful call proves we hold one. App tokens have no "me", so the
 	// resolver is store-backed (host from org_settings). Built once per org
 	// cycle — host is stable across the per-installation loop below.
-	resolver := m.reviewerResolver(ctx, orgID, "", nil)
+	resolver := m.reviewerResolver(ctx, orgID, domain.GitHubAccount{}, nil)
 
-	// unresolvedOwners collects the account logins of installations whose
-	// client/grant couldn't be resolved this cycle (ClientFor or
-	// ListInstallationRepos failed) — TFAC-571 follow-up. Those repos were
-	// never reached at all, the same as a rate-limited repo that never got
-	// dispatched, so the cursor computed below must not treat this cycle as
-	// a full wrap just because a LATER installation happened to succeed.
-	unresolvedOwners := make(map[string]bool)
+	// unresolved collects the ids of installations whose client or grant
+	// couldn't be resolved this cycle (ClientForInstallation or
+	// ListInstallationRepos failed). Their repos were never reached at all,
+	// the same as a rate-limited repo that never got dispatched, so the cursor
+	// computed below must not treat this cycle as a full wrap just because a
+	// LATER installation happened to succeed.
+	var unresolved []string
 	var rateLimitResumeFrom string
 	var rateLimitErr *ghclient.ErrRateLimited
 	// installErr is the failure that cost an installation its client this
@@ -832,13 +841,13 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	covered := make(map[string]bool, len(repos))
 	anyFunctional := false
 	for _, inst := range installs {
-		client, cerr := m.resolver.ClientFor(ctx, orgID, inst.AccountLogin)
+		client, cerr := m.resolver.ClientForInstallation(ctx, orgID, inst)
 		if cerr != nil {
 			conn.note(cerr)
 			keepInstallErr(cerr)
 			githubLog.Log(ctx, upstream.LogLevel(cerr, slog.LevelError), "resolve client for installation failed", "org", orgID, "installation", inst.InstallationID, "account", inst.AccountLogin, "error", cerr)
 			m.reportError("github", orgID, cerr)
-			unresolvedOwners[strings.ToLower(inst.AccountLogin)] = true
+			unresolved = append(unresolved, inst.InstallationID)
 			continue
 		}
 		grant, gerr := client.ListInstallationRepos(ctx)
@@ -846,7 +855,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 			keepInstallErr(gerr)
 			githubLog.Log(ctx, upstream.LogLevel(gerr, slog.LevelError), "list installation repos failed", "org", orgID, "account", inst.AccountLogin, "error", gerr)
 			m.reportError("github", orgID, gerr)
-			unresolvedOwners[strings.ToLower(inst.AccountLogin)] = true
+			unresolved = append(unresolved, inst.InstallationID)
 			continue
 		}
 		anyFunctional = true
@@ -883,7 +892,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		m.recordRepoIDs(ctx, orgID, scope, scoped, grant)
 		// App tokens have no "me" — drop the username axis for discovery
 		// (Sharp edge 2). Predicates still match per-PR fields downstream.
-		_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, "", scoped, resolver)
+		_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, domain.GitHubAccount{}, scoped, resolver)
 		if rerr != nil {
 			githubLog.Log(ctx, upstream.LogLevel(rerr, slog.LevelError), "tracker error", "org", orgID, "installation", inst.AccountLogin, "error", rerr)
 			m.reportError("github", orgID, rerr)
@@ -901,31 +910,21 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		}
 	}
 
-	// TFAC-571: decide the cycle's actual resume point once, after every
-	// installation this cycle could reach has run. A rate-limited fan-out
-	// wins (it's the more specific signal — RefreshGitHub already pinned it
-	// to the exact repo that needs a retry). Otherwise, if any installation
-	// couldn't even be resolved this cycle, the cursor must not reset to ""
-	// (implying a full wrap) just because a later installation succeeded —
-	// resume at the earliest currently-configured repo that installation
-	// would own (matched by account-login prefix, same as
-	// reconcileGitHubGroups) and isn't already covered by a DIFFERENT,
-	// successful installation. A repo genuinely outside every installation's
-	// grant (the "not in any app installation grant" warning below) is a
-	// permanent gap, not a transient one, so it's excluded here — only
-	// unresolved-owner repos get cursor priority.
+	// Decide the cycle's actual resume point once, after every installation
+	// this cycle could reach has run. A rate-limited fan-out wins (it's the
+	// more specific signal — RefreshGitHub already pinned it to the exact repo
+	// that needs a retry). Otherwise, if any installation couldn't even be
+	// resolved this cycle, the cursor must not reset to "" (implying a full
+	// wrap) just because a later installation succeeded — resume at the
+	// earliest currently-configured repo that installation's grant holds and
+	// that a DIFFERENT, successful installation didn't already cover. A repo
+	// genuinely outside every installation's grant (the "not in any app
+	// installation grant" warning below) is a permanent gap, not a transient
+	// one, so it's excluded here — only repos of unresolved installations get
+	// cursor priority.
 	resumeFrom := rateLimitResumeFrom
-	if resumeFrom == "" && len(unresolvedOwners) > 0 {
-		for _, r := range repos {
-			if covered[r] {
-				continue
-			}
-			owner, _, _ := strings.Cut(r, "/")
-			if unresolvedOwners[strings.ToLower(owner)] {
-				resumeFrom = r
-				break
-			}
-		}
+	if resumeFrom == "" && len(unresolved) > 0 {
+		resumeFrom = m.firstRepoInUnreadGrants(ctx, orgID, scope, repos, covered, unresolved)
 	}
 	m.advanceGitHubCursor(conn, orgID, resumeFrom, rateLimitErr)
 
@@ -957,27 +956,36 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	}
 }
 
-// reconcileGitHubGroups is the GitHub-team-deletion reconcile floor — the
-// "periodic refresh" trigger the reconcile lifecycle describes, run every
-// GitHub poll cycle so team_github_groups stays fresh for the routing layer
-// without depending on someone opening the settings page. For each distinct
-// GitHub org behind the configured repos it fetches the live team set and
-// prunes mapping rows pointing at teams that no longer exist.
+// reconcileGitHubGroups is the GitHub-team reconcile — the "periodic
+// refresh" trigger the reconcile lifecycle describes, run every GitHub poll
+// cycle so team_github_groups stays fresh for the routing layer without
+// depending on someone opening the settings page. For each distinct GitHub
+// org behind the configured repos it reads the organization and its live
+// team set, and hands both to ReconcileOrgTeamsSystem, which identifies a
+// local mapping stored before ids were recorded, refreshes the org login and
+// team slugs a rename moved, and deletes mappings of teams that no longer
+// exist — all by GitHub's ids. It runs before the cycle's diff, so the
+// mappings the cycle's events route by are already identified.
 //
 // Credentials resolve through the same per-owner resolver the poll dispatch
 // uses (App installation token → org PAT), so it's always the single
 // org-level identity — the editor can only create a mapping for a team that
 // identity can see, so a present team is never wrongly pruned. Non-destructive
 // on uncertainty: owners with no credential or an unreadable org are skipped,
-// a fetch error never prunes, and an empty team list is skipped (an empty
+// a read error never prunes, and an empty team list is skipped (an empty
 // result is ambiguous — a user account or zero visibility — where "delete
 // everything for this org" would be wrong). A non-empty list is the org
-// credential's authoritative view, so a missing slug is a real deletion.
+// credential's authoritative view, so a missing team id is a real deletion.
+//
+// An owner here is a repository owner's current login, the one boundary
+// where the organization is named by login: GitHub's endpoints take it. The
+// organization's id, which the mappings record, comes back from GET
+// /orgs/{org}, so a renamed organization's mappings are found under its id.
 //
 // host is the org's current GitHub host, which repos are on and which the
-// credential lists teams of; only the mappings saved for it are pruned against
-// that list, so another host's mappings are never compared with this one's
-// teams.
+// credential lists teams of; only the mappings saved for it are reconciled
+// against that list, so another host's mappings are never compared with this
+// one's teams.
 func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID, host string, repos []string) {
 	if m.githubGroups == nil {
 		return
@@ -1003,17 +1011,24 @@ func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID, host string,
 			githubGroupsLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "list teams for owner failed; skipping reconcile", "org", orgID, "owner", owner, "error", err)
 			continue
 		}
-		slugs := make([]string, 0, len(teams))
-		for _, t := range teams {
-			if t.Slug != "" {
-				slugs = append(slugs, t.Slug)
-			}
-		}
-		if len(slugs) == 0 {
+		if len(teams) == 0 {
 			continue
 		}
-		if n, err := m.githubGroups.PruneMissingSystem(ctx, orgID, host, owner, slugs); err != nil {
-			githubGroupsLog.Warn("reconcile prune failed", "org", orgID, "owner", owner, "error", err)
+		org, err := client.GetOrg(ctx, owner)
+		if err != nil {
+			githubGroupsLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "read organization for owner failed; skipping reconcile", "org", orgID, "owner", owner, "error", err)
+			continue
+		}
+		listing := domain.GitHubOrgTeams{
+			OrgID:    strconv.FormatInt(org.ID, 10),
+			OrgLogin: org.Login,
+			Teams:    make([]domain.GitHubTeam, 0, len(teams)),
+		}
+		for _, t := range teams {
+			listing.Teams = append(listing.Teams, domain.GitHubTeam{ID: strconv.FormatInt(t.ID, 10), Slug: t.Slug})
+		}
+		if n, err := m.githubGroups.ReconcileOrgTeamsSystem(ctx, orgID, host, listing); err != nil {
+			githubGroupsLog.Warn("reconcile failed", "org", orgID, "owner", owner, "error", err)
 		} else if n > 0 {
 			githubGroupsLog.Info("pruned stale mappings for deleted github teams", "org", orgID, "owner", owner, "pruned", n)
 		}
@@ -1025,10 +1040,11 @@ func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID, host string,
 // means the org simply isn't configured for GitHub and is skipped silently.
 //
 // In local mode the poller acts as the lone local user, so it reads their
-// host-scoped GitHub login + team memberships to drive the user-perspective dashboard
-// backfill and team-based review-request detection. Multi-mode PAT fallback
-// has no local sentinel user, so it passes no username (org-wide REST
-// discovery doesn't need one; dashboard history is local/PAT-only).
+// host-scoped GitHub binding (login and account id) + team memberships to
+// drive the user-perspective dashboard backfill, team-based review-request
+// detection and the own-PR check. Multi-mode PAT fallback has no local
+// sentinel user, so it passes no account (org-wide REST discovery doesn't need
+// one; dashboard history is local/PAT-only).
 //
 // It reports whether the tracker's refresh completed without error.
 func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgID, scope string, repos []string, isLocal bool) bool {
@@ -1058,25 +1074,27 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 		return false
 	}
 
-	var username string
+	var self domain.GitHubAccount
 	var userTeams []string
 	if isLocal {
 		// Identity is host-scoped: resolve the org's GitHub host
-		// from org_settings, then read the local user's login for that
-		// (user, host) pair. Boot-time goroutine with no JWT claims → the
-		// `...System` admin-pool variants.
+		// from org_settings, then read the local user's binding for that
+		// (user, host) pair — the login the dashboard searches by, and the
+		// account id their own pull requests are told by. Boot-time
+		// goroutine with no JWT claims → the `...System` admin-pool variants.
 		orgSet, serr := m.orgs.GetSettingsSystem(ctx, orgID)
 		if serr != nil {
 			span.SetStatus(codes.Error, "read org settings")
 			githubLog.ErrorContext(ctx, "read org settings failed", "org", orgID, "error", serr)
 			return false
 		}
-		username, err = m.users.GetGitHubLoginSystem(ctx, runmode.LocalDefaultUserID, orgSet.GitHubBaseURL)
-		if err != nil {
+		identity, ierr := m.users.GetGitHubIdentitySystem(ctx, runmode.LocalDefaultUserID, orgSet.GitHubBaseURL)
+		if ierr != nil {
 			span.SetStatus(codes.Error, "read github identity")
-			githubLog.ErrorContext(ctx, "read github identity failed", "org", orgID, "error", err)
+			githubLog.ErrorContext(ctx, "read github identity failed", "org", orgID, "error", ierr)
 			return false
 		}
+		self = domain.GitHubAccountOf(identity)
 		if teams, terr := client.ListMyTeams(ctx); terr != nil {
 			githubLog.Log(ctx, upstream.LogLevel(terr, slog.LevelWarn), "list teams failed; team-based review requests will be missed this cycle", "org", orgID, "error", terr)
 		} else {
@@ -1084,8 +1102,8 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 		}
 	}
 
-	resolver := m.reviewerResolver(ctx, orgID, username, userTeams)
-	_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, username, repos, resolver)
+	resolver := m.reviewerResolver(ctx, orgID, self, userTeams)
+	_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, self, repos, resolver)
 	if rerr != nil {
 		span.SetStatus(codes.Error, "refresh")
 		githubLog.Log(ctx, upstream.LogLevel(rerr, slog.LevelError), "tracker error", "org", orgID, "error", rerr)
@@ -1165,18 +1183,17 @@ func (m *Manager) orgHasRegisteredApp(ctx context.Context, orgID string) bool {
 	}
 }
 
-// intersectConfigured returns the configured repos reachable through one
-// installation's grant, marking each in covered so the caller can report
-// configured repos that no installation grants. Matching is case-insensitive
-// on the "owner/repo" slug (GitHub logins are case-insensitive).
-// recordRepoIDs writes GitHub's repository id onto the tracked repos in
-// scoped, taking the ids from the grant listing this cycle already fetched.
+// recordRepoIDs writes GitHub's repository id, and the id of the account that
+// owns the repository, onto the tracked repos in scoped, taking both from the
+// grant listing this cycle already fetched.
 //
 // It is the poller's half of repository identity: a slug is what a repository
 // is called and the id is what it is, and rename detection can only key on the
 // half that a rename does not move. Filling ids only when a repository is
 // profiled would leave every repo undetectable for the length of the profile
-// TTL; filling them here closes that to one poll cycle at no request cost.
+// TTL; filling them here closes that to one poll cycle at no request cost. The
+// owner id is what matches a tracked repository to the installation on its
+// owner account once it leaves every grant, when no listing names it any more.
 //
 // Scoped to the intersection rather than the whole grant on purpose: a repo
 // nobody tracks has no row, so writing it would either no-op or (worse) invite
@@ -1186,16 +1203,16 @@ func (m *Manager) recordRepoIDs(ctx context.Context, orgID, host string, scoped 
 	if m.repos == nil {
 		return
 	}
-	byName := make(map[string]string, len(grant))
+	byName := make(map[string]ghclient.UserRepo, len(grant))
 	for _, g := range grant {
-		if id := g.ExternalID(); id != "" {
-			byName[strings.ToLower(g.FullName)] = id
+		if g.ExternalID() != "" {
+			byName[strings.ToLower(g.FullName)] = g
 		}
 	}
 	refs := make([]domain.RepoRef, 0, len(scoped))
 	for _, slug := range scoped {
-		id := byName[strings.ToLower(slug)]
-		if id == "" {
+		g, ok := byName[strings.ToLower(slug)]
+		if !ok {
 			continue
 		}
 		owner, repo, ok := strings.Cut(slug, "/")
@@ -1203,7 +1220,8 @@ func (m *Manager) recordRepoIDs(ctx context.Context, orgID, host string, scoped 
 			continue
 		}
 		refs = append(refs, domain.RepoRef{
-			Source: domain.RepoSourceGitHub, Host: host, Owner: owner, Repo: repo, ExternalID: id,
+			Source: domain.RepoSourceGitHub, Host: host, Owner: owner, Repo: repo,
+			ExternalID: g.ExternalID(), OwnerExternalID: g.OwnerExternalID(),
 		})
 	}
 	if len(refs) == 0 {
@@ -1245,7 +1263,8 @@ func (m *Manager) applyRepoRenames(ctx context.Context, orgID, host string, gran
 			continue
 		}
 		observed = append(observed, domain.RepoRef{
-			Source: domain.RepoSourceGitHub, Owner: owner, Repo: repo, ExternalID: id,
+			Source: domain.RepoSourceGitHub, Owner: owner, Repo: repo,
+			ExternalID: id, OwnerExternalID: g.OwnerExternalID(),
 		})
 	}
 	return reporename.Apply(ctx, m.repos, m.resolver, githubLog, orgID, host, observed)
@@ -1263,6 +1282,34 @@ func (m *Manager) reloadConfiguredRepos(ctx context.Context, orgID, host string,
 		return current
 	}
 	return rotateFromCursor(refreshed, m.githubCursor(orgID))
+}
+
+// firstRepoInUnreadGrants returns the first of repos, in poll order, that no
+// installation covered this cycle and that the grant of one of the unresolved
+// installations held when it was last mirrored, or "" when there is none or the
+// mirror cannot say. The mirror pairs a tracked repository with a grant entry
+// by GitHub id, so a repository renamed since the grant was mirrored is still
+// found in it. A cycle that cannot read the mirror resets the cursor as a full
+// wrap would, which only reorders the next cycle.
+func (m *Manager) firstRepoInUnreadGrants(ctx context.Context, orgID, host string, repos []string, covered map[string]bool, unresolved []string) string {
+	if m.GrantMirror == nil {
+		return ""
+	}
+	held, err := m.GrantMirror.ListTrackedInGrantsSystem(ctx, orgID, host, unresolved)
+	if err != nil {
+		githubLog.WarnContext(ctx, "read unresolved installations' mirrored grants failed", "org", orgID, "error", err)
+		return ""
+	}
+	inGrant := make(map[string]bool, len(held))
+	for _, name := range held {
+		inGrant[strings.ToLower(name)] = true
+	}
+	for _, r := range repos {
+		if !covered[r] && inGrant[strings.ToLower(r)] {
+			return r
+		}
+	}
+	return ""
 }
 
 // withoutSlugs returns repos less every slug in drop, compared folded.
@@ -1283,6 +1330,10 @@ func withoutSlugs(repos, drop []string) []string {
 	return out
 }
 
+// intersectConfigured returns the configured repos reachable through one
+// installation's grant, marking each in covered so the caller can report
+// configured repos that no installation grants. Matching is case-insensitive
+// on the "owner/repo" slug (GitHub logins are case-insensitive).
 func intersectConfigured(configured []string, grant []ghclient.UserRepo, covered map[string]bool) []string {
 	granted := make(map[string]bool, len(grant))
 	for _, g := range grant {
@@ -1629,8 +1680,9 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 // PickupMembers / DoneMembers are Jira *workflow statuses* ("To Do",
 // "Backlog", "Done" — each an id plus the name captured with it), NOT people
 // or teams: they drive the discovery JQL, which asks by id so a rename in Jira
-// cannot silently stop matching. When several teams track the same project_key
-// with divergent status sets, those sets are MERGED (set-union, first-seen order preserved): the most-permissive
+// cannot silently stop matching. When several teams track the same project
+// (one registry row) with divergent status sets, those sets are MERGED
+// (set-union, first-seen order preserved): the most-permissive
 // interpretation for discovery + terminal detection, so no team's
 // pickup-able issue is missed and any team's notion of "done" closes the
 // shared entity. Team-specific scoping lives downstream in the router

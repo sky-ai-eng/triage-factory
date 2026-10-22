@@ -33,7 +33,19 @@ var (
 	linearStateDone     = fixtureUUID("linear-state-done")
 	linearStateCanceled = fixtureUUID("linear-state-canceled")
 	linearStateUnknown  = fixtureUUID("linear-state-unknown")
+
+	linearLabelBug        = fixtureUUID("linear-label-bug")
+	linearLabelDifficulty = fixtureUUID("linear-label-difficulty")
+	linearLabelHard       = fixtureUUID("linear-label-hard")
 )
+
+// linearFixtureLabels is the labels an issue in every fixture team can carry:
+// Bug, and Hard in the Difficulty group, which is a label of its own.
+var linearFixtureLabels = []linear.Label{
+	{ID: linearLabelBug, Name: "Bug"},
+	{ID: linearLabelDifficulty, Name: "Difficulty"},
+	{ID: linearLabelHard, Name: "Hard", GroupID: linearLabelDifficulty, Group: "Difficulty"},
+}
 
 // linearFixtureStates is every fixture team's workflow, deliberately out of
 // position order so a read that forgets to sort shows it.
@@ -49,16 +61,19 @@ var linearFixtureStates = []linear.WorkflowState{
 
 // linearCatalogFake stands in for Linear's GraphQL endpoint, answering the
 // documents the catalog routes and the write gate send — Teams (filtered and
-// cursor-paged), Team, TeamStates (cursor-paged) and WorkflowState — from one
-// in-memory workspace, so a paging, filtering or resolution bug shows up as
-// wrong rows rather than as a stub running out of scripted replies. A team
-// with no states of its own set has linearFixtureStates.
+// cursor-paged), Team, TeamStates (cursor-paged), WorkflowState and Labels
+// (cursor-paged) — from one in-memory workspace, so a paging, filtering or
+// resolution bug shows up as wrong rows rather than as a stub running out of
+// scripted replies. A team with no states of its own set has
+// linearFixtureStates, and one with no labels of its own set has
+// linearFixtureLabels.
 type linearCatalogFake struct {
 	URL string
 
 	mu      sync.Mutex
 	teams   []linear.Team
 	states  map[string][]linear.WorkflowState
+	labels  map[string][]linear.Label
 	failing bool
 	// teamFailing fails the Team read of these ids only, so one request can
 	// carry a field fault and an upstream failure together.
@@ -68,7 +83,7 @@ type linearCatalogFake struct {
 
 func newLinearCatalogFake(t *testing.T, teams ...linear.Team) *linearCatalogFake {
 	t.Helper()
-	f := &linearCatalogFake{teams: teams, states: map[string][]linear.WorkflowState{}, teamFailing: map[string]bool{}}
+	f := &linearCatalogFake{teams: teams, states: map[string][]linear.WorkflowState{}, labels: map[string][]linear.Label{}, teamFailing: map[string]bool{}}
 	srv := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(srv.Close)
 	f.URL = srv.URL
@@ -95,8 +110,13 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 		return linearFixtureStates
 	}
 	workflows := make(map[string][]linear.WorkflowState, len(teams))
+	labels := make(map[string][]linear.Label, len(teams))
 	for _, t := range teams {
 		workflows[t.ID] = statesOf(t.ID)
+		labels[t.ID] = linearFixtureLabels
+		if l, custom := f.labels[t.ID]; custom {
+			labels[t.ID] = l
+		}
 	}
 	f.mu.Unlock()
 
@@ -152,6 +172,18 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"errors":[{"message":"Entity not found: WorkflowState","extensions":{"code":"INVALID_INPUT"}}]}`)
+	case "Labels":
+		// The labels query filters on the team rather than reading it, so a
+		// team that does not exist answers with no team labels, not an error.
+		nodes := []map[string]any{}
+		for _, l := range labels[stringVar(body.Variables, "teamID")] {
+			node := map[string]any{"id": l.ID, "name": l.Name, "parent": nil}
+			if l.GroupID != "" {
+				node["parent"] = map[string]any{"id": l.GroupID, "name": l.Group}
+			}
+			nodes = append(nodes, node)
+		}
+		writeGraphQLData(w, map[string]any{"issueLabels": fakeConnection(nodes, body.Variables)})
 	default:
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"errors":[{"message":"unexpected document `+op+`"}]}`)
@@ -229,6 +261,13 @@ func (f *linearCatalogFake) SetStates(teamID string, states ...linear.WorkflowSt
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.states[teamID] = states
+}
+
+// SetLabels replaces the labels an issue in one team can carry.
+func (f *linearCatalogFake) SetLabels(teamID string, labels ...linear.Label) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.labels[teamID] = labels
 }
 
 // SetTeamFailing makes the Team read of one id fail while everything else

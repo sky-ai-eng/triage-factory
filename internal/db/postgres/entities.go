@@ -309,13 +309,10 @@ func (s *entityStore) ListActiveSystem(ctx context.Context, orgID, source string
 // is subtracted from the server clock, the one that stamped last_polled_at.
 func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDone []domain.JiraStatusRef, linearDone []domain.LinearStateRef, unpolledFor time.Duration, limit int) ([]domain.Entity, error) {
 	args := []any{orgID, unpolledFor.Seconds(), domain.EntityCloseSettlingEventTypes()}
-	// Each arm is omitted rather than emitted empty: `IN ()` is a syntax
-	// error, and a ref set with no ids (or no names) genuinely has nothing to
-	// match on that side. With neither, no Jira (or Linear) entity can be
-	// terminal. Both halves are user-configured text, so they bind as
-	// placeholders rather than riding an array literal. path is a jsonb
-	// accessor chain ending in ->>.
-	arm := func(path string, values []string) string {
+	// The values are user-configured text, so they bind as placeholders
+	// rather than riding an array literal. path is a jsonb accessor chain
+	// ending in ->>.
+	in := func(path string, values []string) string {
 		placeholders := make([]string, len(values))
 		for i, v := range values {
 			args = append(args, v)
@@ -323,28 +320,30 @@ func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, or
 		}
 		return `snapshot_json` + path + ` IN (` + strings.Join(placeholders, ", ") + `)`
 	}
-	var matches []string
-	if ids := domain.JiraStatusIDs(jiraDone); len(ids) > 0 {
-		matches = append(matches, arm("->>'status_id'", ids))
+	// sourceArm matches the way SameStatus / SameState compare (see
+	// domain.StatusMatchSets): an id against the snapshot's id, the name of
+	// a ref with an id only against a snapshot that carries none, and the
+	// name of a ref with no id against any snapshot. Each test is omitted
+	// rather than emitted empty, since `IN ()` is a syntax error; with none,
+	// no entity of the source can be terminal and the arm is "".
+	sourceArm := func(source, idPath, namePath string, sets domain.StatusMatchSets) string {
+		var matches []string
+		if len(sets.IDs) > 0 {
+			matches = append(matches, in(idPath, sets.IDs))
+		}
+		if len(sets.IDNames) > 0 {
+			matches = append(matches, `(COALESCE(snapshot_json`+idPath+`, '') = '' AND `+in(namePath, sets.IDNames)+`)`)
+		}
+		if len(sets.Names) > 0 {
+			matches = append(matches, in(namePath, sets.Names))
+		}
+		if len(matches) == 0 {
+			return ""
+		}
+		return ` OR (source = '` + source + `' AND (` + strings.Join(matches, " OR ") + `))`
 	}
-	if names := domain.JiraStatusNames(jiraDone); len(names) > 0 {
-		matches = append(matches, arm("->>'status'", names))
-	}
-	jiraArm := ""
-	if len(matches) > 0 {
-		jiraArm = ` OR (source = 'jira' AND (` + strings.Join(matches, " OR ") + `))`
-	}
-	var linearMatches []string
-	if ids := domain.LinearStateIDs(linearDone); len(ids) > 0 {
-		linearMatches = append(linearMatches, arm("->'state'->>'id'", ids))
-	}
-	if names := domain.LinearStateNames(linearDone); len(names) > 0 {
-		linearMatches = append(linearMatches, arm("->'state'->>'name'", names))
-	}
-	linearArm := ""
-	if len(linearMatches) > 0 {
-		linearArm = ` OR (source = 'linear' AND (` + strings.Join(linearMatches, " OR ") + `))`
-	}
+	jiraArm := sourceArm("jira", "->>'status_id'", "->>'status'", domain.JiraStatusMatchSets(jiraDone))
+	linearArm := sourceArm("linear", "->'state'->>'id'", "->'state'->>'name'", domain.LinearStateMatchSets(linearDone))
 	limitClause := ""
 	if limit > 0 {
 		args = append(args, limit)
@@ -667,7 +666,7 @@ func (s *entityStore) RenameSystem(ctx context.Context, orgID, source, scope, ex
 		if err := moveEntityArtifactTargets(ctx, tx, orgID, row.id); err != nil {
 			return err
 		}
-		if err := rewriteEntityActionURLs(ctx, tx, orgID, source, scope, row.url, url); err != nil {
+		if err := rewriteEntityActionURLs(ctx, tx, orgID, row.id, row.url, url); err != nil {
 			return err
 		}
 		out = domain.EntityRenameOutcome{Renamed: true, EntityID: row.id, From: row.key, To: newKey, PollSeq: pollSeq}
@@ -697,18 +696,21 @@ func moveEntityArtifactTargets(ctx context.Context, q queryer, orgID, entityID s
 	return nil
 }
 
-// rewriteEntityActionURLs moves the audit ledger's pointer for actions in the
-// entity's scope whose link resolves to the entity's old url. Only current_url
-// is written; the record of the act is not. The pointer's current value is the
-// rewrite base, so consecutive renames chain.
-func rewriteEntityActionURLs(ctx context.Context, q queryer, orgID, source, scope, from, to string) error {
+// rewriteEntityActionURLs moves the audit ledger's pointer for the actions
+// about the entity (external_actions.entity_id) whose link resolves to its old
+// url. The rows are selected by the entity's id, never by a link, so another
+// object's actions under a link that once spelled the same key keep theirs.
+// Only current_url is written; the record of the act is not. The pointer's
+// current value is the rewrite base, so consecutive renames chain.
+func rewriteEntityActionURLs(ctx context.Context, q queryer, orgID, entityID, from, to string) error {
 	if from == "" || to == "" || from == to {
 		return nil
 	}
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, COALESCE(current_url, url) FROM external_actions
-		WHERE org_id = $1 AND provider = $2 AND scope = $4 AND starts_with(COALESCE(current_url, url, ''), $3)`,
-		orgID, source, from, scope)
+		WHERE org_id = $1 AND entity_id = $2 AND starts_with(COALESCE(current_url, url, ''), $3)
+		ORDER BY id`,
+		orgID, entityID, from)
 	if err != nil {
 		return err
 	}
@@ -788,12 +790,16 @@ func updateSnapshotCAS(ctx context.Context, q queryer, orgID, id, snapshotJSON s
 	return n > 0, nil
 }
 
-func (s *entityStore) PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON string) (domain.Entity, error) {
-	return scanWrittenEntity(s.q.QueryRowContext(ctx,
-		`UPDATE entities SET snapshot_json = $1::jsonb, `+pgContainersFromSnapshot("$1")+`
-		 WHERE org_id = $2 AND id = $3
+// SetPullRequestDraft — see the interface doc. jsonb_set writes the key
+// inside the stored document, so nothing a concurrent writer committed to
+// the rest of it is read here or written back.
+func (s *entityStore) SetPullRequestDraft(ctx context.Context, orgID, id string, draft bool) (*domain.Entity, error) {
+	return scanEntityRow(s.q.QueryRowContext(ctx,
+		`UPDATE entities SET snapshot_json = jsonb_set(snapshot_json, '{is_draft}', to_jsonb($1::boolean))
+		 WHERE org_id = $2 AND id = $3 AND source = 'github'
+		   AND jsonb_typeof(snapshot_json) = 'object' AND snapshot_json <> '{}'::jsonb
 		 RETURNING `+pgEntitySelectCols,
-		snapshotJSON, orgID, id))
+		draft, orgID, id))
 }
 
 // MarkPolledSystem stamps last_polled_at alone — no snapshot, no poll_seq
@@ -890,7 +896,7 @@ func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, e
 			return err
 		}
 		kept, dropped := db.DuplicateEntityMergedKeys(survivor, loser)
-		return rewriteEntityActionURLs(ctx, q, orgID, survivor.Source, survivor.Scope, dropped.URL, kept.URL)
+		return rewriteEntityActionURLs(ctx, q, orgID, survivor.ID, dropped.URL, kept.URL)
 	})
 	if err != nil {
 		return "", err
@@ -942,7 +948,10 @@ func (s *entityStore) FoldStubEntitySystem(ctx context.Context, orgID, stubID, i
 		if _, err := q.ExecContext(ctx, `DELETE FROM entities WHERE org_id = $1 AND id = $2`, orgID, stub.ID); err != nil {
 			return fmt.Errorf("delete folded stub: %w", err)
 		}
-		return moveEntityArtifactTargets(ctx, q, orgID, into.ID)
+		if err := moveEntityArtifactTargets(ctx, q, orgID, into.ID); err != nil {
+			return err
+		}
+		return rewriteEntityActionURLs(ctx, q, orgID, into.ID, stub.URL, into.URL)
 	})
 }
 
@@ -970,7 +979,7 @@ func moveEntityReferences(ctx context.Context, q queryer, orgID, loserID, surviv
 		orgID, loserID, db.DuplicateEntityMergedCloseReason); err != nil {
 		return fmt.Errorf("cancel duplicate tasks' runs: %w", err)
 	}
-	for _, table := range []string{"tasks", "events", "event_queue", "pending_firings", "artifacts"} {
+	for _, table := range []string{"tasks", "events", "event_queue", "pending_firings", "artifacts", "external_actions"} {
 		if _, err := q.ExecContext(ctx,
 			`UPDATE `+table+` SET entity_id = $1 WHERE org_id = $2 AND entity_id = $3`,
 			survivorID, orgID, loserID); err != nil {

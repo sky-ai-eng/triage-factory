@@ -18,16 +18,16 @@ var prReviewsQuery = fmt.Sprintf(`
 	query PRReviews($id: ID!, $before: String) {
 		node(id: $id) {
 			... on PullRequest {
-				reviews(last: %d, before: $before, states: [%s]) {
+				reviews(last: %[1]d, before: $before, states: [%[2]s]) {
 					totalCount
 					pageInfo { hasPreviousPage startCursor }
 					nodes {
 						fullDatabaseId
 						state
 						submittedAt
-						author { __typename login }
+						author { %[4]s }
 						body
-						comments(first: %d) {
+						comments(first: %[3]d) {
 							totalCount
 							nodes { fullDatabaseId path body }
 						}
@@ -37,7 +37,7 @@ var prReviewsQuery = fmt.Sprintf(`
 		}
 		rateLimit { cost }
 	}
-`, reviewPageSize, submittedReviewStates, reviewCommentCap)
+`, reviewPageSize, submittedReviewStates, reviewCommentCap, actorFields)
 
 // PRReview is a submitted review on a pull request. Its body and its
 // comments' bodies are read for their mentions and not kept: anyone who can
@@ -46,6 +46,7 @@ type PRReview struct {
 	ID          int64
 	State       string // APPROVED, CHANGES_REQUESTED, COMMENTED or DISMISSED
 	Author      string // REST-spelled login; empty when GitHub names no author
+	AuthorID    string // GitHub's id for the author's account; empty when GitHub returns none
 	SubmittedAt string
 	// Mentions are the users and teams the review's body @-mentions
 	// (Mentions).
@@ -141,6 +142,7 @@ func (c *Client) PRReviewsBefore(ctx context.Context, prNodeID, before string) (
 			ID:           int64(n.DatabaseID),
 			State:        n.State,
 			Author:       n.Author.restLogin(),
+			AuthorID:     n.Author.id(),
 			SubmittedAt:  n.SubmittedAt,
 			Mentions:     Mentions(n.Body),
 			CommentCount: n.Comments.TotalCount,

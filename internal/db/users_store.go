@@ -29,19 +29,19 @@ import (
 type UsersStore interface {
 	// GetGitHubLogin returns the user's GitHub login on a specific host
 	// (user_github_identities, keyed on (user_id, github_base_url)), or
-	// "" when no row exists for that (user, host) pair. Used by the
-	// predicate matcher (author_in / reviewer_in / commenter_in
-	// allowlists) and several display surfaces. Callers resolve the host
-	// from the org's org_settings.github_base_url so the lookup matches
-	// the host the binding was captured against. An absent row degrades
-	// exactly as the old NULL github_username column did.
+	// "" when no row exists for that (user, host) pair. Used by display
+	// surfaces and by readers that name the user to GitHub by login, such
+	// as a search by author. Callers resolve the host from the org's
+	// org_settings.github_base_url so the lookup matches the host the
+	// binding was captured against.
 	GetGitHubLogin(ctx context.Context, userID, githubBaseURL string) (string, error)
 	// GetGitHubIdentity returns the user's whole GitHub identity row for a
 	// host — login, numeric account id, source, verification time — or nil
-	// when there is none. It exists for the one reader that must compare
-	// identities rather than display a login: the deployment-App bind
-	// ceremony, which requires the GitHub account that authorized to be the
-	// account linked to the TF user completing it, by id.
+	// when there is none. It is for readers that compare accounts rather than
+	// display a login, by GitHub's id when both sides have one: the
+	// deployment-App bind ceremony (the account that authorized must be the
+	// one linked to the TF user completing it), and the dashboard's and the
+	// factory's "mine".
 	GetGitHubIdentity(ctx context.Context, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error)
 
 	// UpsertGitHubIdentity writes (or refreshes) the user's GitHub login
@@ -56,13 +56,27 @@ type UsersStore interface {
 	// githubUserID is the account's numeric GitHub id in text form
 	// (auth.GitHubUser.UserID). login records what the account is currently
 	// called and githubUserID records which account it is; the second is the
-	// half a rename doesn't touch. Passing "" (a host that reported no id, or
-	// a caller that never had one) leaves any stored id intact rather than
-	// blanking it, so the value fills in opportunistically on the next
-	// capture. email is the verified primary address captured from GitHub.
-	// Passing "" preserves an existing address when login is unchanged, for
-	// legacy sources that do not carry one; when login changes, an omitted
-	// email clears the prior account's address instead of carrying it across.
+	// half a rename doesn't touch. email is the verified primary address
+	// captured from GitHub.
+	//
+	// A write over an existing row first decides whether the capture names
+	// the same GitHub account the row does: by githubUserID when both the row
+	// and the capture carry one, and by login, compared case-insensitively,
+	// when either lacks it. Each column follows from that answer:
+	//
+	//   - login is always overwritten: it is what the account is called now,
+	//     so a rename or a change of capitalisation lands on it.
+	//   - github_user_id and email belong to the account. For the same
+	//     account, "" (a host that reported no id, a source that carries no
+	//     address) leaves the stored value intact, so each fills in on a
+	//     later capture. For a different account both take the capture's
+	//     values, "" included, so a re-bind never keeps the previous
+	//     account's id or address.
+	//   - dashboard_backfilled_at guards a search by login (author:<login>),
+	//     not an account, so it is cleared when the account changes and also
+	//     when the same account's login changes in any way: the history the
+	//     marker records was seeded under the old login. See
+	//     MarkDashboardBackfilledSystem.
 	//
 	// Exempt from the returned-row rule: this store exposes the identity
 	// tables as column projections, not rows — its reads answer "what login"
@@ -191,6 +205,15 @@ type UsersStore interface {
 	// SQLite collapses the two variants to one connection.
 	GetGitHubLoginSystem(ctx context.Context, userID, githubBaseURL string) (string, error)
 
+	// GetGitHubIdentitySystem mirrors GetGitHubIdentity on the admin pool in
+	// Postgres, for consumers that carry no JWT claims: a delegated run, which
+	// tells the GitHub account of the person who delegated it apart from the org
+	// credential's account by numeric id, and the local-mode poller, which reads
+	// the local user's login and GitHub account id together (the login to search
+	// and list teams by, the id to tell the user's own pull requests by). SQLite
+	// collapses the two variants to one connection.
+	GetGitHubIdentitySystem(ctx context.Context, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error)
+
 	// UserIDsForGitHubLoginSystem returns every TF user bound to login
 	// on githubBaseURL in user_github_identities — the reverse of
 	// GetGitHubLogin. Host-scoped, org-agnostic (identity is keyed on
@@ -224,6 +247,22 @@ type UsersStore interface {
 	// connection.
 	UserIDsForGitHubLoginSystem(ctx context.Context, githubBaseURL, login string) ([]string, error)
 
+	// UserIDsForGitHubUserIDSystem returns every TF user bound on
+	// githubBaseURL to the GitHub account githubUserID (GitHub's numeric id,
+	// in text form): the rows whose github_user_id is githubUserID. A row
+	// that recorded no id, an identity captured before ids were, matches
+	// instead when its login equals login, case-insensitively; login "" skips
+	// that. It is the lookup for an event that names its actor by id (a
+	// pull request's author, a reviewer, a requested user), so a rename
+	// leaves the answer alone and a login GitHub has handed to another
+	// account does not resolve to the first account's user. An event with no
+	// id — one recorded before ids were, or a mention, which names a login
+	// only — goes through UserIDsForGitHubLoginSystem. githubUserID "" gives
+	// an empty slice. Host normalization, the set-valued answer and the
+	// admin-pool / claims-free stance are UserIDsForGitHubLoginSystem's, for
+	// the same reasons. user_github_identities_user_id_lookup_idx serves it.
+	UserIDsForGitHubUserIDSystem(ctx context.Context, githubBaseURL, githubUserID, login string) ([]string, error)
+
 	// DashboardBackfilledAtSystem returns when the one-shot dashboard-history
 	// backfill last completed for this (user, host) GitHub identity, or nil
 	// when it hasn't run (NULL marker) or no identity row exists. It gates the
@@ -242,11 +281,13 @@ type UsersStore interface {
 	// and stamping unconditionally would mark the NEW login backfilled when its
 	// history was never seeded, stranding it forever. The login-guarded write
 	// no-ops in that case, leaving the marker NULL so the new login re-seeds on
-	// the next trigger (TFAC-396). No-op (nil error) when no row exists or the
-	// login no longer matches. Admin pool / claims-free, same caller and
-	// rationale as DashboardBackfilledAtSystem. UpsertGitHubIdentity also clears
-	// this marker when the bound login changes (the already-completed case);
-	// together they make a rename always re-backfill the new login.
+	// the next trigger. No-op (nil error) when no row exists or the login no
+	// longer matches. Admin pool / claims-free, same caller and rationale as
+	// DashboardBackfilledAtSystem. UpsertGitHubIdentity also clears this
+	// marker when the bound login changes, the same account renamed included
+	// (the already-completed case); together they make a rename always
+	// re-backfill the new login. The guard is a login rather than the
+	// account's GitHub id because the backfill is a search by login.
 	//
 	// Exempt from the returned-row rule: fire-and-forget bookkeeping. The
 	// stamp is a one-shot marker the next backfill trigger reads; the guarded

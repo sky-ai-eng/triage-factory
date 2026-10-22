@@ -174,9 +174,13 @@ const (
 // re-check; the store re-checks under a lock that the row is still held's.
 //
 // The request goes through the credential for held's owner, the account the
-// name lives under, which is the one that sees what is under it now. A row
-// retired because that credential cannot see the repository any more is
-// restored when one that can reports its id (RenameSystem).
+// name lives under, which is the one that sees what is under it now. The
+// owner is named by the account id the row records as well as by its login
+// (ghclient.ClientForOwner), so a rename of the account TF has not applied to
+// the row still finds the installation on it. A row retired because that
+// credential cannot see the repository any more is restored when one that can
+// reports its id (RenameSystem), and the rename records the owner GitHub
+// answered with.
 func Resolve(ctx context.Context, repos db.RepositoryStore, resolver ghclient.Resolver, log *slog.Logger, orgID string, held domain.RepoRef) (Resolution, error) {
 	if held.ExternalID == "" {
 		return Kept, fmt.Errorf("resolve %s: the row carries no provider id to ask GitHub about", held.Slug())
@@ -184,7 +188,7 @@ func Resolve(ctx context.Context, repos db.RepositoryStore, resolver ghclient.Re
 	if resolver == nil {
 		return Kept, fmt.Errorf("resolve %s: no GitHub credential resolver", held.Slug())
 	}
-	client, err := resolver.ClientFor(ctx, orgID, held.Owner)
+	client, err := ghclient.ClientForOwner(ctx, resolver, orgID, held.OwnerExternalID, held.Owner)
 	if err != nil {
 		return Kept, fmt.Errorf("resolve %s: GitHub client: %w", held.Slug(), err)
 	}
@@ -213,7 +217,8 @@ func Resolve(ctx context.Context, repos db.RepositoryStore, resolver ghclient.Re
 		return Kept, fmt.Errorf("resolve %s: GitHub named repository %s %q, which is not an owner/repo", held.Slug(), held.ExternalID, meta.FullName)
 	}
 	out, err := repos.RenameSystem(ctx, orgID, domain.RepoRef{
-		Source: held.Source, Host: held.Host, Owner: owner, Repo: repo, ExternalID: held.ExternalID,
+		Source: held.Source, Host: held.Host, Owner: owner, Repo: repo,
+		ExternalID: held.ExternalID, OwnerExternalID: meta.OwnerExternalID(),
 	})
 	if err != nil {
 		return Kept, fmt.Errorf("rename %s to %s: %w", held.Slug(), meta.FullName, err)

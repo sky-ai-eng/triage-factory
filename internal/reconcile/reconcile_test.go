@@ -276,6 +276,14 @@ func (f *fakeResolver) ClientFor(_ context.Context, _, target string) (*github.C
 
 func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, conversationID string), func(a domain.Artifact)) {
 	t.Helper()
+	_, stores, seedConversation, seedArt := reconcileTestDB(t)
+	return stores, seedConversation, seedArt
+}
+
+// reconcileTestDB is reconcileTestStores with the connection under the
+// stores, for a fixture that seeds rows the stores do not write.
+func reconcileTestDB(t *testing.T) (*sql.DB, db.Stores, func(entityID, conversationID string), func(a domain.Artifact)) {
+	t.Helper()
 	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -312,7 +320,85 @@ func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, conversationID
 			t.Fatalf("seed artifact %s: %v", a.DedupKey, err)
 		}
 	}
-	return stores, seedConversation, seedArt
+	return conn, stores, seedConversation, seedArt
+}
+
+// The reconciler reaches GitHub under the name a registry row holds now,
+// whatever the artifact's target or its entity's key still spells: a branch
+// through the row its key carries, a pull request through its entity's row
+// (the owner the client is resolved for). A retired row's name is another
+// repository's, so its artifacts are neither probed nor refreshed.
+func TestReconcile_AddressesRepositoriesByTheirRegistryRows(t *testing.T) {
+	conn, stores, seedConversation, seedArt := reconcileTestDB(t)
+	ctx := context.Background()
+	const conversationID = "66666666-6666-6666-6666-666666666666"
+	seedConversation("ent-6", conversationID)
+	orgID := runmode.LocalDefaultOrgID
+
+	// seed records a pull request with its entity, and a pushed feature branch,
+	// in the repository registered as repositoryID.
+	seed := func(entityID, repositoryID, repoPath string, number int) (pr, branch domain.Artifact) {
+		t.Helper()
+		nodeID, sourceID := fmt.Sprintf("PR_%d", number), domain.PullRequestTarget(repoPath, number)
+		if _, err := conn.Exec(`INSERT INTO entities (id, source, source_id, kind, scope, repository_id, external_id) VALUES (?, 'github', ?, 'pull_request', ?, ?, ?)`,
+			entityID, sourceID, reconcileTestHost, repositoryID, nodeID); err != nil {
+			t.Fatalf("seed entity %s: %v", sourceID, err)
+		}
+		pr = domain.NewPullRequestArtifact(repoPath, number, nodeID, "feat", "main", "u", "t", "b", false)
+		pr.ConversationID, pr.EntityID = conversationID, entityID
+		seedArt(pr)
+		branch, _ = domain.NewBranchArtifact(repoPath, "refs/heads/feature", "sha", true)
+		branch.DedupKey = domain.BranchDedupKey(repositoryID, branch.ExternalID)
+		branch.ConversationID = conversationID
+		seedArt(branch)
+		return pr, branch
+	}
+	moved := dbseed.GitHubRepository(t, conn, orgID, reconcileTestHost, "octo", "old")
+	retired := dbseed.GitHubRepository(t, conn, orgID, reconcileTestHost, "octo", "gone")
+	movedPR, movedBranch := seed("ent-moved", moved, "octo/old", 7)
+	retiredPR, retiredBranch := seed("ent-retired", retired, "octo/gone", 8)
+
+	// GitHub serves the retired row's name as another repository, whose own
+	// feature branch is gone.
+	dbseed.RenameRepositoryOnly(t, conn, moved, "acme", "new")
+	if _, err := conn.Exec(`UPDATE repositories SET retired_at = CURRENT_TIMESTAMP WHERE id = ?`, retired); err != nil {
+		t.Fatalf("retire repository: %v", err)
+	}
+
+	stub := &stubGH{
+		prs: map[string]string{
+			"PR_7": prNodeJSON("PR_7", 7, "MERGED", false, true),
+			"PR_8": prNodeJSON("PR_8", 8, "MERGED", false, true),
+		},
+		branches: map[string]bool{
+			"acme/new/feature":  false,
+			"octo/old/feature":  true,
+			"octo/gone/feature": false,
+		},
+	}
+	res := &fakeResolver{client: newStubClient(t, stub)}
+	rc := NewReconciler(res, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
+	if err := rc.ReconcileOrg(ctx, orgID); err != nil {
+		t.Fatalf("ReconcileOrg: %v", err)
+	}
+
+	assertState(t, stores, orgID, movedPR.DedupKey, domain.ArtifactStatePRMerged)
+	assertState(t, stores, orgID, movedBranch.DedupKey, domain.ArtifactStateBranchDeleted)
+	if !stub.refCalls["acme/new/feature"] || stub.refCalls["octo/old/feature"] {
+		t.Errorf("branch probes = %v, want acme/new/feature alone: the row's current name", stub.refCalls)
+	}
+	if !res.owners["acme"] {
+		t.Errorf("client owners = %v, want acme: the moved pull request's row is owned there now", res.owners)
+	}
+
+	assertState(t, stores, orgID, retiredPR.DedupKey, domain.ArtifactStatePROpen)
+	assertState(t, stores, orgID, retiredBranch.DedupKey, domain.ArtifactStateBranchPushed)
+	if stub.prCalls["PR_8"] || stub.refCalls["octo/gone/feature"] {
+		t.Errorf("a retired row's artifacts reached GitHub: prs %v, branches %v", stub.prCalls, stub.refCalls)
+	}
+	if res.owners["octo"] {
+		t.Errorf("client owners = %v: nothing on this pass is owned by octo any more", res.owners)
+	}
 }
 
 // TestReconcile_Transitions is the headline end-to-end: a draft PR that merged
@@ -349,7 +435,7 @@ func TestReconcile_Transitions(t *testing.T) {
 		branches: map[string]bool{"octo/repo/feature": false}, // gone
 	}
 	res := &fakeResolver{client: newStubClient(t, stub)}
-	rc := NewReconciler(res, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
+	rc := NewReconciler(res, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
 
 	if err := rc.ReconcileOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("ReconcileOrg: %v", err)
@@ -386,7 +472,7 @@ func TestReconcile_PRClosed(t *testing.T) {
 	stub := &stubGH{prs: map[string]string{
 		"PR_3": prNodeJSON("PR_3", 3, "CLOSED", false, false),
 	}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
 	if err := rc.ReconcileOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("ReconcileOrg: %v", err)
 	}
@@ -450,7 +536,7 @@ func TestReconcile_DraftMarkedReadyRunsTheResolvedHook(t *testing.T) {
 	seedArt(draft)
 
 	stub := &stubGH{prs: map[string]string{"PR_7": prNodeJSON("PR_7", 7, "OPEN", false, false)}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
 	var (
 		mu       sync.Mutex
 		resolved []string
@@ -489,7 +575,7 @@ func TestReconcile_OpenNeverReturnsToDraft(t *testing.T) {
 	seedArt(open)
 
 	stub := &stubGH{prs: map[string]string{"PR_8": prNodeJSON("PR_8", 8, "OPEN", true, false)}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
 	hookRan := false
 	rc.SetPullRequestResolvedHook(func(context.Context, string, string) { hookRan = true })
 
@@ -555,7 +641,7 @@ func TestReconcile_SingleConversationScope(t *testing.T) {
 		"PR_7": prNodeJSON("PR_7", 7, "MERGED", false, true),
 		"PR_8": prNodeJSON("PR_8", 8, "MERGED", false, true),
 	}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
 
 	convAArts, err := stores.Artifacts.ListByConversation(ctx, runmode.LocalDefaultOrgID, convA)
 	if err != nil {
@@ -587,7 +673,7 @@ func TestRunner_SuppressesCancelErrorOnShutdown(t *testing.T) {
 	t.Cleanup(func() { reconcileLog = prev })
 
 	stores, _, _ := reconcileTestStores(t)
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, &stubGH{})}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, &stubGH{})}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
 	r := NewRunner(rc, runmode.LocalDefaultOrgID)
 
 	// An already-cancelled ctx makes the cycle's first DB call (ListNonTerminalBySystem)
@@ -649,7 +735,7 @@ func TestReconcile_WriteBackSurvivesCallerCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	client := github.NewClientWithHTTPClient(srv.URL, "test-token",
 		&http.Client{Transport: &cancelAfterFetchRT{t: t, base: http.DefaultTransport, cancel: cancel}})
-	rc := NewReconciler(&fakeResolver{client: client}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: client}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
 
 	arts, err := stores.Artifacts.ListByConversationSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
@@ -672,7 +758,7 @@ func TestReconcile_WriteBackSurvivesCallerCancel(t *testing.T) {
 // test wants the count via the org-wide path.
 func reconcileSet(t *testing.T, stores db.Stores, res clientResolver, orgID string) ([]domain.Artifact, error) {
 	t.Helper()
-	rc := NewReconciler(res, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
+	rc := NewReconciler(res, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
 	arts, err := stores.Artifacts.ListNonTerminalBySystem(context.Background(), orgID)
 	if err != nil {
 		return nil, err
@@ -853,13 +939,16 @@ func prArtifactFor(t *testing.T, stores db.Stores, repoPath string, number int) 
 	return nil
 }
 
-// runBackstop runs one backstop pass for the test org through client.
-func runBackstop(t *testing.T, stores db.Stores, client *github.Client) {
+// runBackstop runs one backstop pass for the test org through client, and
+// returns the resolver it asked for that client.
+func runBackstop(t *testing.T, stores db.Stores, client *github.Client) *fakeResolver {
 	t.Helper()
-	rc := NewReconciler(&fakeResolver{client: client}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
+	res := &fakeResolver{client: client}
+	rc := NewReconciler(res, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
 	if err := rc.BackfillPRArtifacts(context.Background(), runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("backstop: %v", err)
 	}
+	return res
 }
 
 // TestBackstop_RecordsPRFromItsLedgerRow is the gap the backstop closes: the
@@ -1007,6 +1096,34 @@ func TestBackstop_BackfillsUnderTheRenamedRepositorysName(t *testing.T) {
 	}
 }
 
+// The backstop fetches a pull request under the owner of the entity its
+// pr_created row is about, by the key that entity has now, not the owner the
+// row's target recorded before the repository moved to another owner.
+func TestBackstop_FetchesUnderTheOwnerTheEntityHasNow(t *testing.T) {
+	stores, seedConversation, _ := reconcileTestStores(t)
+	seedConversation("octo/repo#5", "conv-1")
+	ctx := context.Background()
+	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, runmode.LocalDefaultOrgID, "github", reconcileTestHost, "acme/repo#5", "PR_5", "pr", "Moved", "")
+	if err != nil {
+		t.Fatalf("seed the PR's entity: %v", err)
+	}
+	if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalAction{
+		TeamID: runmode.LocalDefaultTeamID, Provider: domain.ArtifactProviderGitHub, Scope: reconcileTestHost,
+		Action: domain.ActionPRCreated, Target: "octo/repo#5", EntityID: entity.ID, ExternalID: "5",
+		ToState: domain.ArtifactStatePRDraft, ConversationID: "conv-1", Credential: domain.CredentialGitHubApp, NodeID: "PR_5",
+	}); err != nil {
+		t.Fatalf("record pr_created: %v", err)
+	}
+
+	_, client := newBackstopStub(t, map[string]string{"PR_5": backstopPRNode("acme/repo", 5, "feature-x", "My PR", "body", true)})
+	if resolver := runBackstop(t, stores, client); !resolver.owners["acme"] || resolver.owners["octo"] {
+		t.Errorf("clients resolved for %v, want acme's alone", resolver.owners)
+	}
+	if got := prArtifactFor(t, stores, "acme/repo", 5); got == nil || got.EntityID != entity.ID {
+		t.Errorf("PR artifact = %+v, want it recorded on the entity %s", got, entity.ID)
+	}
+}
+
 // TestBackstop_RenamedRepositoryWithArtifactIsLeftAlone pins that a PR whose
 // artifact was recorded under the repository's old name, and whose ledger row
 // still names it, does not read as a missing artifact after a rename: the
@@ -1134,7 +1251,7 @@ func TestReconcileOrg_BackfilledPRTakesGitHubState(t *testing.T) {
 		domain.ArtifactStatePRDraft, "https://github.com/octo/repo/pull/7")
 
 	stub := &stubGH{prs: map[string]string{"PR_7": prNodeJSON("PR_7", 7, "MERGED", true, true)}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
 	var resolved []string
 	rc.SetPullRequestResolvedHook(func(_ context.Context, _, id string) { resolved = append(resolved, id) })
 
@@ -1189,7 +1306,7 @@ func TestReconcile_SkipsArtifactsOnAnotherHost(t *testing.T) {
 			"octo/repo/own":       false,
 		},
 	}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
 	if err := rc.ReconcileOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("ReconcileOrg: %v", err)
 	}

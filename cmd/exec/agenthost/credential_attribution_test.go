@@ -210,6 +210,7 @@ func TestRelayServer_CredentialReachesBothRecorders(t *testing.T) {
 	srv := NewRelayServer(stores, info, nil)
 	srv.SetGitHubCredential(domain.CredentialGitHubPAT)
 	ctx := context.Background()
+	registerRepo(t, stores, "octo", "repo", "1")
 
 	branch, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feat", "abc123", true)
 	if !ok {

@@ -12,18 +12,20 @@ import (
 )
 
 // ReachableReposBackend is one wired backend for the grant-mirror suite.
-// Installations are staged through the store rather than raw SQL (both dialects
-// expose UpsertInstallation), so the only fixture a backend has to supply by
-// hand is a tracked repository — team_github_repos has no store method that
-// works claims-free on both pools.
+// Installations and registry rows are staged through the stores rather than
+// raw SQL, so the only fixture a backend has to supply by hand is a tracking
+// row — team_github_repos has no store method that works claims-free on both
+// pools.
 type ReachableReposBackend struct {
 	Apps   db.GitHubAppsStore
 	Mirror db.ReachableReposStore
+	Repos  db.RepositoryStore
 	// OrgID every call in the suite passes. SQLite pins the local sentinel;
 	// Postgres mints a real org.
 	OrgID string
-	// TrackRepo records that some team in the org tracks owner/repo.
-	TrackRepo func(t *testing.T, owner, repo string)
+	// TrackRepository records that some team in the org tracks the registry row
+	// repositoryID.
+	TrackRepository func(t *testing.T, repositoryID string)
 }
 
 // ReachableReposFactory returns a fresh, isolated backend per subtest.
@@ -51,7 +53,8 @@ type ReachableReposFactory func(t *testing.T) ReachableReposBackend
 //   - Both derived states — reach without purpose and scope drift — including
 //     the case-folding both comparisons need, the gate that keeps an
 //     un-mirrored org from reporting its entire tracked set as drift, the
-//     three-way rule on a grant's width, and the paging both are served
+//     three-way rule on a grant's width, the owner account matched to its
+//     installation by account id before login, and the paging both are served
 //     through.
 func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 	t.Helper()
@@ -62,19 +65,58 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 	// whole set.
 	const byoApp = domain.GitHubCredentialClassBYOApp
 
-	// install stages a live installation row — the FK parent every mirror row
-	// hangs off, and the thing the reads join through.
-	install := func(t *testing.T, b ReachableReposBackend, installationID, login, selection string) {
+	// installAccount stages a live installation row — the FK parent every
+	// mirror row hangs off, and the thing the reads join through — on the
+	// account accountID ("" for one not learned yet).
+	installAccount := func(t *testing.T, b ReachableReposBackend, installationID, accountID, login, selection string) {
 		t.Helper()
 		if _, err := b.Apps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
 			GitHubHost:          TestGitHubHost,
 			InstallationID:      installationID,
 			OrgID:               b.OrgID,
 			AccountType:         "Organization",
+			AccountID:           accountID,
 			AccountLogin:        login,
 			RepositorySelection: selection,
 		}); err != nil {
 			t.Fatalf("UpsertInstallation(%s): %v", installationID, err)
+		}
+	}
+	install := func(t *testing.T, b ReachableReposBackend, installationID, login, selection string) {
+		t.Helper()
+		installAccount(t, b, installationID, "", login, selection)
+	}
+
+	// register mints or finds the registry row for owner/repo, writing the
+	// repository's and its owner's GitHub ids ("" for none), and track adds a
+	// row to some team's tracked set. Both return the row's id.
+	register := func(t *testing.T, b ReachableReposBackend, owner, repo, externalID, ownerID string) string {
+		t.Helper()
+		row, err := b.Repos.UpsertSystem(ctx, b.OrgID, domain.Repository{
+			Host: TestGitHubHost, Owner: owner, Repo: repo, ExternalID: externalID, OwnerExternalID: ownerID,
+		})
+		if err != nil {
+			t.Fatalf("register %s/%s: %v", owner, repo, err)
+		}
+		return row.ID
+	}
+	track := func(t *testing.T, b ReachableReposBackend, repositoryID string) string {
+		t.Helper()
+		b.TrackRepository(t, repositoryID)
+		return repositoryID
+	}
+	trackRepo := func(t *testing.T, b ReachableReposBackend, owner, repo string) {
+		t.Helper()
+		row, err := b.Repos.FindOrCreateByRefSystem(ctx, b.OrgID, domain.RepoRef{Host: TestGitHubHost, Owner: owner, Repo: repo})
+		if err != nil {
+			t.Fatalf("FindOrCreateByRefSystem(%s/%s): %v", owner, repo, err)
+		}
+		track(t, b, row.ID)
+	}
+	replace := func(t *testing.T, b ReachableReposBackend, installationID string, entries ...domain.ReachableRepository) {
+		t.Helper()
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, installationID, entries); err != nil {
+			t.Fatalf("ReplaceForInstallationSystem(%s): %v", installationID, err)
 		}
 	}
 
@@ -160,8 +202,10 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// comparison a rename cannot break.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
+		api := entry(b, "1", "acme", "api", "424242")
+		api.OwnerExternalID = "9001"
 		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
-			entry(b, "1", "acme", "api", "424242"),
+			api,
 			entry(b, "1", "acme", "web", ""), // an entry GitHub sent no id for
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
@@ -173,8 +217,13 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		if got[0].ExternalID != "424242" {
 			t.Errorf("acme/api ExternalID = %q; want %q", got[0].ExternalID, "424242")
 		}
-		if got[1].ExternalID != "" {
-			t.Errorf("acme/web ExternalID = %q; want \"\" — an absent id is not the string zero", got[1].ExternalID)
+		// The owner's id rides the same entry, and a registration from the
+		// mirror records it on the registry row.
+		if got[0].OwnerExternalID != "9001" {
+			t.Errorf("acme/api OwnerExternalID = %q; want %q", got[0].OwnerExternalID, "9001")
+		}
+		if got[1].ExternalID != "" || got[1].OwnerExternalID != "" {
+			t.Errorf("acme/web ids = (%q, %q); want both \"\" — an absent id is not the string zero", got[1].ExternalID, got[1].OwnerExternalID)
 		}
 		if got[0].Source != domain.RepoSourceGitHub {
 			t.Errorf("Source = %q; want %q — the join to the registry is keyed on it", got[0].Source, domain.RepoSourceGitHub)
@@ -366,7 +415,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// The finding: TF holds write access to code nobody asked it to touch.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
-		b.TrackRepo(t, "acme", "api")
+		trackRepo(t, b, "acme", "api")
 		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 			entry(b, "1", "acme", "secrets", "11"),
@@ -388,7 +437,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// which is worse than a missed one.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
-		b.TrackRepo(t, "Acme", "API")
+		trackRepo(t, b, "Acme", "API")
 		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
@@ -432,9 +481,9 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// it is silently unpolled.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
-		b.TrackRepo(t, "acme", "api")
-		b.TrackRepo(t, "acme", "legacy")
-		b.TrackRepo(t, "Acme", "Web") // folds onto the granted acme/web
+		trackRepo(t, b, "acme", "api")
+		trackRepo(t, b, "acme", "legacy")
+		trackRepo(t, b, "Acme", "Web") // folds onto the granted acme/web
 		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 			entry(b, "1", "acme", "web", "11"),
@@ -455,8 +504,8 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// is how a two-repo drift reads as four.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
-		b.TrackRepo(t, "acme", "legacy")
-		b.TrackRepo(t, "Acme", "Legacy")
+		trackRepo(t, b, "acme", "legacy")
+		trackRepo(t, b, "Acme", "Legacy")
 		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
@@ -479,8 +528,8 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// into "your tracking is broken".
 		b := mk(t)
 		install(t, b, "1", "acme", "")
-		b.TrackRepo(t, "acme", "api")
-		b.TrackRepo(t, "acme", "web")
+		trackRepo(t, b, "acme", "api")
+		trackRepo(t, b, "acme", "web")
 
 		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
 		if err != nil {
@@ -497,8 +546,8 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// nothing, so the answer is empty rather than "everything drifts".
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
-		b.TrackRepo(t, "acme", "api")
-		b.TrackRepo(t, "acme", "legacy")
+		trackRepo(t, b, "acme", "api")
+		trackRepo(t, b, "acme", "legacy")
 		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
@@ -536,8 +585,8 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		install(t, b, "2", "some", domain.RepositorySelectionSelected)
 		install(t, b, "3", "unknown", "")
 		for id, login := range map[string]string{"1": "every", "2": "some", "3": "unknown"} {
-			b.TrackRepo(t, login, "api")
-			b.TrackRepo(t, login, "legacy")
+			trackRepo(t, b, login, "api")
+			trackRepo(t, b, login, "legacy")
 			if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, id, []domain.ReachableRepository{
 				entry(b, id, login, "api", "1"+id),
 			}); err != nil {
@@ -566,7 +615,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// installation to point at, which the finding says by naming none.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
-		b.TrackRepo(t, "stranger", "tool")
+		trackRepo(t, b, "stranger", "tool")
 		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
@@ -590,7 +639,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// org would report a false all-clear forever.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
-		b.TrackRepo(t, "acme", "api")
+		trackRepo(t, b, "acme", "api")
 		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", nil); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
@@ -601,6 +650,113 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		equal(t, "scope drift", trackedSlugs(got), []string{"acme/api"})
 	})
 
+	t.Run("MirrorAndRegistryPairByGitHubID", func(t *testing.T) {
+		// GitHub renamed acme/old to acme/renamed and the registry has not
+		// caught up: the ids pair them. GitHub gave the name acme/api to another
+		// repository (21) while the tracked row holds it with 20: the names
+		// agree and the ids do not, so neither pairs. A side with no id pairs by
+		// name. Every read pairs the same way.
+		b := mk(t)
+		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
+		install(t, b, "2", "globex", domain.RepositorySelectionSelected)
+		renamed := track(t, b, register(t, b, "acme", "old", "10", ""))
+		byName := track(t, b, register(t, b, "Acme", "Web", "", ""))
+		reused := track(t, b, register(t, b, "acme", "api", "20", ""))
+		tool := track(t, b, register(t, b, "globex", "tool", "50", ""))
+		untracked := register(t, b, "acme", "untracked", "60", "")
+		replace(t, b, "1",
+			entry(b, "1", "acme", "renamed", "10"),
+			entry(b, "1", "acme", "web", "30"),
+			entry(b, "1", "acme", "api", "21"),
+			entry(b, "1", "acme", "untracked", "60"),
+			entry(b, "1", "acme", "fresh", "40"))
+		replace(t, b, "2", entry(b, "2", "globex", "tool", "50"))
+
+		// Each entry names the live registry row a client registers and
+		// tracks by, and an entry no row pairs with names none.
+		want := map[string]string{"acme/renamed": renamed, "acme/web": byName, "acme/api": "", "acme/untracked": untracked, "acme/fresh": "", "globex/tool": tool}
+		for _, r := range grant(t, b, byoApp) {
+			if r.RepositoryID != want[r.Slug()] {
+				t.Errorf("%s RepositoryID = %q; want %q", r.Slug(), r.RepositoryID, want[r.Slug()])
+			}
+		}
+		byExternal, err := b.Mirror.ReachableByExternalIDsSystem(ctx, b.OrgID, TestGitHubHost, byoApp, []string{"10"})
+		if err != nil || byExternal["10"].RepositoryID != renamed {
+			t.Errorf("ReachableByExternalIDsSystem(10) = %+v, %v; want RepositoryID %q", byExternal["10"], err, renamed)
+		}
+
+		reach, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("ListReachWithoutPurposeSystem: %v", err)
+		}
+		equal(t, "reach without purpose", slugs(t, reach), []string{"acme/api", "acme/fresh", "acme/untracked"})
+		if reach[0].ExternalID != "21" {
+			t.Errorf("reach without purpose ExternalID = %q; want the granted repository's 21", reach[0].ExternalID)
+		}
+
+		drift, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("ListScopeDriftSystem: %v", err)
+		}
+		equal(t, "scope drift", trackedSlugs(drift), []string{"acme/api"})
+		if d := drift[0]; d.RepositoryID != reused || d.ExternalID != "20" || d.InstallationID != "1" {
+			t.Errorf("scope drift = (%q, %q, installation %q); want the tracked row (%q, 20) under the selective grant 1", d.RepositoryID, d.ExternalID, d.InstallationID, reused)
+		}
+
+		// What a poll cycle asks when an installation's grant cannot be read:
+		// which tracked repositories that grant held when it was last mirrored.
+		for _, c := range []struct {
+			installations []string
+			want          []string
+		}{
+			{[]string{"1"}, []string{"acme/old", "Acme/Web"}},
+			{[]string{"1", "2"}, []string{"acme/old", "Acme/Web", "globex/tool"}},
+			{nil, []string{}},
+		} {
+			got, err := b.Mirror.ListTrackedInGrantsSystem(ctx, b.OrgID, TestGitHubHost, c.installations)
+			if err != nil {
+				t.Fatalf("ListTrackedInGrantsSystem(%v): %v", c.installations, err)
+			}
+			equal(t, fmt.Sprintf("tracked in grants %v", c.installations), got, c.want)
+		}
+	})
+
+	t.Run("ScopeDriftMatchesTheOwnerAccountByIDBeforeLogin", func(t *testing.T) {
+		// The registry names a tracked repository's owner by a login that can
+		// be stale. GitHub renamed the accounts 500 and 600 to acme-co and
+		// globex-co, and account 800 took the login initech from the account
+		// 700 that owns initech/legacy. Where both ids are known they decide:
+		// acme/legacy is under 500's grant of everything and is not drift,
+		// globex/legacy is drift naming 600's selective grant, and
+		// initech/legacy is drift on an account no installation covers. A row
+		// whose owner id is not known yet is matched by login.
+		b := mk(t)
+		installAccount(t, b, "1", "500", "acme-co", domain.RepositorySelectionAll)
+		installAccount(t, b, "2", "600", "globex-co", domain.RepositorySelectionSelected)
+		installAccount(t, b, "3", "800", "initech", domain.RepositorySelectionAll)
+		for id, login := range map[string]string{"1": "acme-co", "2": "globex-co", "3": "initech"} {
+			replace(t, b, id, entry(b, id, login, "api", "1"+id))
+		}
+		track(t, b, register(t, b, "acme", "legacy", "70", "500"))
+		globex := track(t, b, register(t, b, "globex", "legacy", "80", "600"))
+		initech := track(t, b, register(t, b, "initech", "legacy", "90", "700"))
+		track(t, b, register(t, b, "initech", "web", "91", ""))
+
+		got, total, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("ListScopeDriftSystem: %v", err)
+		}
+		equal(t, "scope drift", trackedSlugs(got), []string{"globex/legacy", "initech/legacy"})
+		if total != 2 {
+			t.Errorf("total = %d; want 2", total)
+		}
+		for i, want := range [][2]string{{globex, "2"}, {initech, ""}} {
+			if got[i].RepositoryID != want[0] || got[i].InstallationID != want[1] {
+				t.Errorf("finding %d = (%q, installation %q); want (%q, installation %q)", i, got[i].RepositoryID, got[i].InstallationID, want[0], want[1])
+			}
+		}
+	})
+
 	t.Run("FindingsPageOnATotalOrderWithARealTotal", func(t *testing.T) {
 		// Both findings are served by list routes, so both page — and the
 		// total is the finding's size across every page, which is the number
@@ -608,9 +764,9 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// count-only read: the total, no rows.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
-		b.TrackRepo(t, "acme", "api")
+		trackRepo(t, b, "acme", "api")
 		for _, r := range []string{"d1", "d2", "d3"} {
-			b.TrackRepo(t, "acme", r)
+			trackRepo(t, b, "acme", r)
 		}
 		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
@@ -672,8 +828,8 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		b := mk(t)
 		const managed = domain.GitHubCredentialClassManagedApp
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
-		b.TrackRepo(t, "acme", "api")
-		b.TrackRepo(t, "acme", "legacy")
+		trackRepo(t, b, "acme", "api")
+		trackRepo(t, b, "acme", "legacy")
 		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, managed, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 			entry(b, "1", "acme", "secrets", "11"),

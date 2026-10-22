@@ -145,48 +145,6 @@ func TestTeamGitHubRepos_SQLite_CasingChangePreservesCache(t *testing.T) {
 	}
 }
 
-// TestTeamGitHubRepos_SQLite_TracksRepo pins the router-gate lookup,
-// including the case-insensitive owner match.
-func TestTeamGitHubRepos_SQLite_TracksRepo(t *testing.T) {
-	conn := openSQLiteForTest(t)
-	stores := sqlitestore.New(conn)
-	ctx := context.Background()
-	teamA := runmode.LocalDefaultTeamID
-
-	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
-		{Owner: "Acme", Repo: "api"},
-	}); err != nil {
-		t.Fatalf("replace: %v", err)
-	}
-
-	cases := []struct {
-		owner, repo string
-		want        bool
-	}{
-		{"Acme", "api", true},
-		{"acme", "api", true},  // owner matched case-insensitively
-		{"ACME", "api", true},  // ditto
-		{"acme", "web", false}, // untracked repo
-		{"other", "api", false},
-	}
-	for _, c := range cases {
-		got, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, teamA, dbtest.TestGitHubHost, c.owner, c.repo)
-		if err != nil {
-			t.Fatalf("TracksRepoSystem(%s/%s): %v", c.owner, c.repo, err)
-		}
-		if got != c.want {
-			t.Errorf("TracksRepoSystem(%s/%s) = %v, want %v", c.owner, c.repo, got, c.want)
-		}
-	}
-
-	// A different team tracks nothing.
-	teamB := "team-b-0000-0000-0000-000000000002"
-	seedExtraTeam(t, conn, teamB, "team-b")
-	if got, _ := stores.TeamGitHubRepos.TracksRepoSystem(ctx, teamB, dbtest.TestGitHubHost, "Acme", "api"); got {
-		t.Error("teamB should not track acme/api")
-	}
-}
-
 // TestTeamGitHubRepos_SQLite_TracksRepositoryViewerScoped pins the local-mode
 // asymmetry (TFAC-559): N=1 has no team boundary to enforce, so
 // TracksRepositoryViewerScoped always reports true regardless of whether the

@@ -1229,14 +1229,14 @@ func TestSearchIssues_CompletesOnlyTruncatedIssues(t *testing.T) {
 }
 
 // TestListLabels_ReadsEachLabelsGroup: the team's label list carries the group
-// each label sits in, which two labels sharing a name in different groups are
-// told apart by.
+// each label sits in, by id and by name, which two labels sharing a name in
+// different groups are told apart by.
 func TestListLabels_ReadsEachLabelsGroup(t *testing.T) {
 	s := newStub(t, scripted(reply{body: `{"data":{"issueLabels":{"nodes":[
-		{"id":"l-hard","name":"Hard","parent":{"name":"Difficulty"}},
-		{"id":"l-med-size","name":"Medium","parent":{"name":"Size"}},
+		{"id":"l-hard","name":"Hard","parent":{"id":"g-diff","name":"Difficulty"}},
+		{"id":"l-med-size","name":"Medium","parent":{"id":"g-size","name":"Size"}},
 		{"id":"l-bug","name":"Bug","parent":null},
-		{"id":"l-med-diff","name":"Medium","parent":{"name":"Difficulty"}}
+		{"id":"l-med-diff","name":"Medium","parent":{"id":"g-diff","name":"Difficulty"}}
 	],"pageInfo":{"hasNextPage":false}}}}`}))
 
 	labels, err := s.client().ListLabels(context.Background(), "team-1")
@@ -1245,14 +1245,14 @@ func TestListLabels_ReadsEachLabelsGroup(t *testing.T) {
 	}
 	want := []Label{
 		{ID: "l-bug", Name: "Bug"},
-		{ID: "l-hard", Name: "Hard", Group: "Difficulty"},
-		{ID: "l-med-diff", Name: "Medium", Group: "Difficulty"},
-		{ID: "l-med-size", Name: "Medium", Group: "Size"},
+		{ID: "l-hard", Name: "Hard", GroupID: "g-diff", Group: "Difficulty"},
+		{ID: "l-med-diff", Name: "Medium", GroupID: "g-diff", Group: "Difficulty"},
+		{ID: "l-med-size", Name: "Medium", GroupID: "g-size", Group: "Size"},
 	}
 	if !reflect.DeepEqual(labels, want) {
 		t.Errorf("labels =\n%+v\nwant\n%+v", labels, want)
 	}
-	if q := s.requests()[0].Query; !strings.Contains(q, "parent { name }") {
+	if q := s.requests()[0].Query; !strings.Contains(q, "parent { id name }") {
 		t.Errorf("label list does not select the group:\n%s", q)
 	}
 }

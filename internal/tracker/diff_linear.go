@@ -22,22 +22,24 @@ const linearNoParent = "none"
 //
 // State comparisons go through LinearStateRef.SameState, so a state renamed in
 // Linear is not a transition: the id is unchanged and the snapshot just stores
-// the new name. The assignee is compared on the Linear user id, so a person
-// renaming themselves is not a reassignment either. The creator is carried on
-// every event and never diffed: Linear does not let it change.
+// the new name. status_changed's dedup_key is the new state's id, so a state
+// renamed while a task waits on it does not open a second task the next time
+// the issue enters it. The assignee is compared on the Linear user id, so a
+// person renaming themselves is not a reassignment either. The creator is
+// carried on every event and never diffed: Linear does not let it change.
 //
 // comments is every comment made since prev, oldest first, with TF's marked
 // (linearNewComments): the snapshot holds only the newest.
 //
 // Labels are compared by id (linearLabelChanges), so a label renamed in Linear
-// is not a change. labelGroups maps a label's id to the name of the label group
-// it sits in; a label it does not name is reported in no group. The issue's
-// own labels carry no group, so the caller reads the groups from the team's
-// label list (linearLabelGroups).
+// is not a change. labelGroups maps a label's id to the label group it sits
+// in, by the group's id and name; a label it does not name is reported in no
+// group. The issue's own labels carry no group, so the caller reads the groups
+// from the team's label list (linearLabelGroups).
 //
 // Every event's source time is the issue's updatedAt, which Linear bumps for
 // each change diffed here, except commented's, which is its comment's.
-func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done []domain.LinearStateRef, comments []NewComment, labelGroups map[string]string) []domain.Event {
+func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done []domain.LinearStateRef, comments []NewComment, labelGroups map[string]domain.LinearLabelRef) []domain.Event {
 	terminal := func(snap domain.LinearSnapshot) bool {
 		return domain.ContainsState(done, snap.StateRef())
 	}
@@ -48,12 +50,13 @@ func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done
 		emitWithFallback(eventType, dedupKey, curr.UpdatedAt, metadata, eid, now, &evts)
 	}
 	id := linearIdentity(curr)
+	labelIDs := linearLabelIDs(curr)
 
 	if prev.ID == "" && prev.Identifier == "" {
 		switch {
 		case terminal(curr):
 			emit(domain.EventLinearIssueCompleted, "", events.LinearIssueCompletedMetadata{
-				LinearIssueIdentity: id, FinalStatus: curr.State.Name,
+				LinearIssueIdentity: id, FinalStatus: curr.State.Name, FinalStatusID: curr.State.ID,
 			})
 		case curr.OpenChildCount > 0:
 			// A parent of open sub-issues is a container, not a unit of work:
@@ -61,13 +64,13 @@ func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done
 			// discovers it once the sub-issues close.
 		case curr.AssigneeUserID != "":
 			emit(domain.EventLinearIssueAssigned, "", events.LinearIssueAssignedMetadata{
-				LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name,
-				Labels: curr.Labels,
+				LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name, StatusID: curr.State.ID,
+				Labels: curr.Labels, LabelIDs: labelIDs,
 			})
 		default:
 			emit(domain.EventLinearIssueAvailable, "", events.LinearIssueAvailableMetadata{
-				LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name,
-				Labels: curr.Labels,
+				LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name, StatusID: curr.State.ID,
+				Labels: curr.Labels, LabelIDs: labelIDs,
 			})
 		}
 		return evts
@@ -77,19 +80,21 @@ func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done
 
 	if prev.BodyHash != "" && curr.BodyHash != "" && prev.BodyHash != curr.BodyHash {
 		emit(domain.EventLinearIssueBodyUpdated, "", events.LinearIssueBodyUpdatedMetadata{
-			LinearIssueIdentity: id, Labels: curr.Labels,
+			LinearIssueIdentity: id, Labels: curr.Labels, LabelIDs: labelIDs,
 			PreviousBodyHash: prev.BodyHash, BodyHash: curr.BodyHash,
 		})
 	}
 
 	if !prev.StateRef().SameState(curr.StateRef()) && curr.State.Name != "" {
-		emit(domain.EventLinearIssueStatusChanged, curr.State.Name, events.LinearIssueStatusChangedMetadata{
-			LinearIssueIdentity: id, OldStatus: prev.State.Name, NewStatus: curr.State.Name,
+		emit(domain.EventLinearIssueStatusChanged, linearStateDedupKey(curr.State), events.LinearIssueStatusChangedMetadata{
+			LinearIssueIdentity: id,
+			OldStatus:           prev.State.Name, OldStatusID: prev.State.ID,
+			NewStatus: curr.State.Name, NewStatusID: curr.State.ID,
 			Priority: curr.PriorityLabel,
 		})
 		if terminal(curr) {
 			emit(domain.EventLinearIssueCompleted, "", events.LinearIssueCompletedMetadata{
-				LinearIssueIdentity: id, FinalStatus: curr.State.Name,
+				LinearIssueIdentity: id, FinalStatus: curr.State.Name, FinalStatusID: curr.State.ID,
 			})
 		}
 	}
@@ -99,13 +104,13 @@ func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done
 	if prev.AssigneeUserID != curr.AssigneeUserID && curr.OpenChildCount == 0 {
 		if curr.AssigneeUserID != "" {
 			emit(domain.EventLinearIssueAssigned, "", events.LinearIssueAssignedMetadata{
-				LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name,
-				Labels: curr.Labels,
+				LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name, StatusID: curr.State.ID,
+				Labels: curr.Labels, LabelIDs: labelIDs,
 			})
 		} else {
 			emit(domain.EventLinearIssueAvailable, "", events.LinearIssueAvailableMetadata{
-				LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name,
-				Labels: curr.Labels,
+				LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name, StatusID: curr.State.ID,
+				Labels: curr.Labels, LabelIDs: labelIDs,
 			})
 		}
 	}
@@ -122,16 +127,10 @@ func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done
 	// label on purpose.
 	added, removed := linearLabelChanges(prev, curr)
 	for _, l := range added {
-		emit(domain.EventLinearIssueLabelAdded, linearLabelDedupKey(l), events.LinearIssueLabelMetadata{
-			LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name,
-			LabelName: l.Name, LabelGroup: labelGroups[l.ID], Labels: curr.Labels,
-		})
+		emit(domain.EventLinearIssueLabelAdded, linearLabelDedupKey(l), linearLabelMetadata(id, curr, l, labelGroups[l.ID], labelIDs))
 	}
 	for _, l := range removed {
-		emit(domain.EventLinearIssueLabelRemoved, linearLabelDedupKey(l), events.LinearIssueLabelMetadata{
-			LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name,
-			LabelName: l.Name, LabelGroup: labelGroups[l.ID], Labels: curr.Labels,
-		})
+		emit(domain.EventLinearIssueLabelRemoved, linearLabelDedupKey(l), linearLabelMetadata(id, curr, l, labelGroups[l.ID], labelIDs))
 	}
 
 	// One event for the comments TF did not post, however many, attributed to
@@ -146,22 +145,24 @@ func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done
 	// Compared, and keyed, on the parent's UUID: its identifier changes when
 	// the parent moves team, which is not a change of parent, and a dedup key
 	// that changed with it would open a second task for the same one. The
-	// metadata names the parents by identifier, which is what a reader knows
-	// them by.
+	// metadata names the parents by UUID, which is what a predicate matches,
+	// and by identifier, which is what a reader knows them by.
 	if prev.ParentID != curr.ParentID {
 		key := curr.ParentID
 		if curr.ParentID == "" {
 			key = linearNoParent
 		}
 		emit(domain.EventLinearIssueParentChanged, key, events.LinearIssueParentChangedMetadata{
-			LinearIssueIdentity: id, OldParent: prev.ParentIdentifier, NewParent: curr.ParentIdentifier,
+			LinearIssueIdentity: id,
+			OldParentID:         prev.ParentID, NewParentID: curr.ParentID,
+			OldParent: prev.ParentIdentifier, NewParent: curr.ParentIdentifier,
 		})
 	}
 
 	if prev.OpenChildCount > 0 && curr.OpenChildCount == 0 && !terminal(curr) {
 		emit(domain.EventLinearIssueBecameAtomic, "", events.LinearIssueBecameAtomicMetadata{
-			LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name,
-			Labels: curr.Labels,
+			LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name, StatusID: curr.State.ID,
+			Labels: curr.Labels, LabelIDs: labelIDs,
 		})
 	}
 
@@ -220,6 +221,34 @@ func linearLabelChanges(prev, curr domain.LinearSnapshot) (added, removed []doma
 		}
 	}
 	return added, removed
+}
+
+// linearLabelMetadata is the metadata of a label event on curr for label l,
+// which sits in group (zero for a label in none). labelIDs is curr's label ids.
+func linearLabelMetadata(id events.LinearIssueIdentity, curr domain.LinearSnapshot, l, group domain.LinearLabelRef, labelIDs []string) events.LinearIssueLabelMetadata {
+	return events.LinearIssueLabelMetadata{
+		LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name, StatusID: curr.State.ID,
+		LabelID: l.ID, LabelName: l.Name, LabelGroupID: group.ID, LabelGroup: group.Name,
+		Labels: curr.Labels, LabelIDs: labelIDs,
+	}
+}
+
+// linearLabelIDs is the ids of snap's labels, in the order of its label names.
+func linearLabelIDs(snap domain.LinearSnapshot) []string {
+	ids := make([]string, 0, len(snap.LabelRefs))
+	for _, l := range snap.LabelRefs {
+		ids = append(ids, l.ID)
+	}
+	return ids
+}
+
+// linearStateDedupKey is status_changed's dedup_key: the new state's id, or
+// its name for a state read without one.
+func linearStateDedupKey(state domain.LinearStateRef) string {
+	if state.ID != "" {
+		return state.ID
+	}
+	return state.Name
 }
 
 // linearLabelDedupKey is a label event's dedup_key: the label's id, or its name

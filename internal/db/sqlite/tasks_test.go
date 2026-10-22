@@ -485,3 +485,12 @@ func TestTaskStore_SQLite_MemoryPendingConformance(t *testing.T) {
 		}
 	})
 }
+
+// TestTaskRequestedReviewer_SQLite runs the requested-reviewer projection
+// suite against the SQLite TaskStore.
+func TestTaskRequestedReviewer_SQLite(t *testing.T) {
+	dbtest.RunTaskRequestedReviewerConformance(t, func(t *testing.T) (db.Stores, string, string) {
+		t.Helper()
+		return sqlitestore.New(openSQLiteForTest(t)), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
+	})
+}

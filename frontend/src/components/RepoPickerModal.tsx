@@ -11,7 +11,9 @@ import {
   refFromCandidate,
   refreshReachableRepos,
   repoRefKey,
+  repoRefKeys,
   repoRefSlug,
+  sameRepoRef,
 } from '../lib/githubRepos'
 import type { GitHubRepo, RepoListStatus, RepoRef } from '../lib/githubRepos'
 import { useFocusTrap } from '../hooks/useFocusTrap'
@@ -23,7 +25,8 @@ interface Props {
   /** Initially selected repositories — a team's tracked set, as its GET returns it */
   selected: RepoRef[]
   /** Called with the new selection when user clicks Save. An entry picked here
-   *  that the team did not track carries no registry id yet (`id` is ''). */
+   *  for a repository TF holds no registry row for carries no registry id yet
+   *  (`id` is ''). */
   onSave: (repos: RepoRef[]) => void
   /** Called when user dismisses without saving */
   onClose: () => void
@@ -119,12 +122,14 @@ export default function RepoPickerModal({
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
-  // Keyed by repoRefKey — the GitHub id, or the folded name for a tracked row
-  // TF never learned an id for — so a candidate whose name moved since the
-  // tracked set was read still shows checked.
+  // Keyed by repoRefKey, and matched against a candidate on every id either
+  // carries (repoRefKeys), so a candidate whose name moved since the tracked
+  // set was read still shows checked, and one that merely shares a tracked
+  // entry's name does not.
   const [checked, setChecked] = useState<Map<string, RepoRef>>(
     () => new Map(selected.map((r) => [repoRefKey(r), r])),
   )
+  const checkedKeys = useMemo(() => new Set([...checked.values()].flatMap(repoRefKeys)), [checked])
 
   // Trap keyboard focus inside the dialog while it's the floating overlay
   // (never in `inline` mode, which is embedded page content, not a modal)
@@ -341,16 +346,18 @@ export default function RepoPickerModal({
     }
   }, [clearRefreshTimer])
 
-  const isChecked = (repo: GitHubRepo) => candidateKeys(repo).some((k) => checked.has(k))
+  const isChecked = (repo: GitHubRepo) => candidateKeys(repo).some((k) => checkedKeys.has(k))
 
+  // Unchecking removes the selected entries that name this candidate's
+  // repository and no others.
   const toggle = (repo: GitHubRepo) => {
     setChecked((prev) => {
       const next = new Map(prev)
-      const keys = candidateKeys(repo)
-      if (keys.some((k) => next.has(k))) {
-        for (const k of keys) next.delete(k)
+      const ref = refFromCandidate(repo)
+      const held = [...prev].filter(([, r]) => sameRepoRef(r, ref))
+      if (held.length > 0) {
+        for (const [k] of held) next.delete(k)
       } else {
-        const ref = refFromCandidate(repo)
         next.set(repoRefKey(ref), ref)
       }
       return next

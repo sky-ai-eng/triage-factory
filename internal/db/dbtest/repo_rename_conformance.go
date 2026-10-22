@@ -190,19 +190,14 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			t.Errorf("neighbour artifact target = %q, want it untouched", neighbourArtifact.Target)
 		}
 
-		// The placement override — human intent, keyed by slug.
-		if stale, _ := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, TestGitHubHost, renameOldSlug); stale != nil {
-			t.Errorf("placement override still keyed on the old slug: %+v", stale)
-		}
-		ov, err := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, TestGitHubHost, renameNewSlug)
+		// The placement override is the registry row's, keyed by its id, so
+		// the rename leaves it exactly as it was.
+		ov, err := s.PlacementOverrides.Get(ctx, orgID, fx.repositoryID)
 		if err != nil || ov == nil {
-			t.Fatalf("PlacementOverrides.Get(new) = %v, %v; want the moved pin", ov, err)
+			t.Fatalf("PlacementOverrides.Get(%s) = %v, %v; want the repository's override", fx.repositoryID, ov, err)
 		}
-		if ov.Replicas != 3 {
-			t.Errorf("placement replicas = %d, want 3 — the pin moves, its content does not", ov.Replicas)
-		}
-		if other, _ := s.PlacementOverrides.Get(ctx, orgID, "hostgroup", TestGitHubHost, renameOldSlug); other == nil {
-			t.Errorf("the other-kind override moved; only key_kind='repo' rows hold a slug")
+		if ov.Replicas != 3 || !ov.UpdatedAt.Equal(fx.override.UpdatedAt) {
+			t.Errorf("placement override = %+v, want it untouched: %+v", ov, fx.override)
 		}
 	})
 
@@ -265,14 +260,14 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		gheActionKey := "rename-ghe-" + fx.movedActionKey
 		if err := s.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
 			TeamID: seed.TeamID, Provider: "github", Scope: TestOtherGitHubHost, Action: domain.ActionPRCreated,
-			Target: renameOldSlug + "#19", ExternalID: "19",
+			Target: renameOldSlug + "#19", RepositoryID: gheRepo.ID, ExternalID: "19",
 			URL:        TestOtherGitHubHost + "/" + renameOldSlug + "/pull/19",
 			Credential: domain.CredentialGitHubApp, DedupKey: gheActionKey,
 		}); err != nil {
 			t.Fatalf("seed ghe action: %v", err)
 		}
 		if _, err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
-			OrgID: orgID, KeyKind: domain.PlacementKindRepo, Host: TestOtherGitHubHost, KeyValue: renameOldSlug, Replicas: 7,
+			OrgID: orgID, RepositoryID: gheRepo.ID, Replicas: 7,
 		}); err != nil {
 			t.Fatalf("seed ghe placement pin: %v", err)
 		}
@@ -327,14 +322,11 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if _, rawCurrent := seed.RawActionURL(t, gheActionKey); rawCurrent != "" {
 			t.Errorf("ghe action current_url = %q, want NULL — its object never moved", rawCurrent)
 		}
-		if pin, _ := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, TestOtherGitHubHost, renameOldSlug); pin == nil || pin.Replicas != 7 {
-			t.Errorf("ghe pin on %s after a github.com rename = %+v; want it still there", renameOldSlug, pin)
+		if pin, _ := s.PlacementOverrides.Get(ctx, orgID, gheRepo.ID); pin == nil || pin.Replicas != 7 {
+			t.Errorf("ghe pin after a github.com rename = %+v; want it still there", pin)
 		}
-		if pin, _ := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, TestOtherGitHubHost, renameNewSlug); pin != nil {
-			t.Errorf("a ghe pin answers to %s after a github.com rename: %+v", renameNewSlug, pin)
-		}
-		if pin, _ := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, TestGitHubHost, renameNewSlug); pin == nil || pin.Replicas != 3 {
-			t.Errorf("github.com pin after its own rename = %+v; want it moved to %s", pin, renameNewSlug)
+		if pin, _ := s.PlacementOverrides.Get(ctx, orgID, fx.repositoryID); pin == nil || pin.Replicas != 3 {
+			t.Errorf("github.com pin after its own rename = %+v; want it still on its row", pin)
 		}
 
 		// And the other way round: renaming the ghe repository moves only it.
@@ -366,11 +358,11 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if a := findActionByKey(t, s, orgID, gheActionKey); a.URL != TestOtherGitHubHost+"/octo/api-ghe/pull/19" {
 			t.Errorf("ghe action url after its own rename = %q, want it moved to octo/api-ghe", a.URL)
 		}
-		if pin, _ := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, TestOtherGitHubHost, "octo/api-ghe"); pin == nil || pin.Replicas != 7 {
-			t.Errorf("ghe pin after its own rename = %+v; want it moved to octo/api-ghe", pin)
+		if pin, _ := s.PlacementOverrides.Get(ctx, orgID, gheRepo.ID); pin == nil || pin.Replicas != 7 {
+			t.Errorf("ghe pin after its own rename = %+v; want it still on its row", pin)
 		}
-		if pin, _ := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, TestGitHubHost, renameNewSlug); pin == nil || pin.Replicas != 3 {
-			t.Errorf("github.com pin after a ghe rename = %+v; want it still at %s", pin, renameNewSlug)
+		if pin, _ := s.PlacementOverrides.Get(ctx, orgID, fx.repositoryID); pin == nil || pin.Replicas != 3 {
+			t.Errorf("github.com pin after a ghe rename = %+v; want it still on its row", pin)
 		}
 	})
 
@@ -419,12 +411,12 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 		other := artifactOn(lower, 21)
 		own := artifactOn(upper, 22)
-		actionOn := func(host string, number int) string {
+		actionOn := func(host, entityID string, number int) string {
 			t.Helper()
 			key := fmt.Sprintf("ctx-path-%d", number)
 			if err := s.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
 				TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Scope: host, Action: domain.ActionPRCreated,
-				Target: domain.PullRequestTarget(renameOldSlug, number), ExternalID: fmt.Sprint(number),
+				Target: domain.PullRequestTarget(renameOldSlug, number), EntityID: entityID, ExternalID: fmt.Sprint(number),
 				URL:        fmt.Sprintf("%s/%s/pull/%d", host, renameOldSlug, number),
 				Credential: domain.CredentialGitHubApp, DedupKey: key,
 			}); err != nil {
@@ -432,8 +424,8 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			}
 			return key
 		}
-		otherAction := actionOn(lower, 21)
-		ownAction := actionOn(upper, 22)
+		otherAction := actionOn(lower, "", 21)
+		ownAction := actionOn(upper, ownEntity.ID, 22)
 
 		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
 			Host: upper, Owner: "octo", Repo: "platform-api", ExternalID: "ctx-path-1",
@@ -589,6 +581,53 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			if got.CloneURL != c.want {
 				t.Errorf("%s/%s clone url = %q, want %q", c.owner, c.to, got.CloneURL, c.want)
 			}
+		}
+	})
+
+	t.Run("Rename_moves_the_owner_account_id", func(t *testing.T) {
+		// The owner id moves with the name: the observation's is written, and
+		// without one the stored id stays while the owner login does, and goes
+		// when a transfer moved the repository to another account. A restore
+		// writes it the same way.
+		s, orgID, _ := mk(t)
+		cases := []struct {
+			from, to, externalID, observedOwnerID, want string
+		}{
+			{"octo/same-owner", "octo/same-owner-2", "301", "", "900"},
+			{"octo/confirmed", "octo/confirmed-2", "302", "900", "900"},
+			{"octo/transferred", "globex/transferred", "303", "", ""},
+			{"octo/transferred-seen", "globex/transferred-seen", "304", "950", "950"},
+			{"octo/account-renamed", "octo-co/account-renamed", "305", "900", "900"},
+		}
+		for _, c := range cases {
+			from, to := repoRef(c.from), repoRef(c.to)
+			if _, err := s.Repos.UpsertSystem(ctx, orgID, domain.Repository{
+				Host: TestGitHubHost, Owner: from.Owner, Repo: from.Repo, ExternalID: c.externalID, OwnerExternalID: "900",
+			}); err != nil {
+				t.Fatalf("seed %s: %v", c.from, err)
+			}
+			to.ExternalID, to.OwnerExternalID = c.externalID, c.observedOwnerID
+			if out, err := s.Repos.RenameSystem(ctx, orgID, to); err != nil || !out.Renamed {
+				t.Fatalf("RenameSystem %s -> %s = %+v, %v; want a rename", c.from, c.to, out, err)
+			}
+			if got, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef(c.to)); err != nil || got == nil || got.OwnerExternalID != c.want {
+				t.Errorf("%s -> %s (observed owner %q) = %+v, %v; want OwnerExternalID %q", c.from, c.to, c.observedOwnerID, got, err, c.want)
+			}
+		}
+
+		retired := domain.RepoRef{Host: TestGitHubHost, Owner: "octo", Repo: "gone", ExternalID: "306"}
+		if _, err := s.Repos.UpsertSystem(ctx, orgID, domain.Repository{Host: TestGitHubHost, Owner: "octo", Repo: "gone", ExternalID: "306", OwnerExternalID: "900"}); err != nil {
+			t.Fatalf("seed octo/gone: %v", err)
+		}
+		if row, err := s.Repos.RetireSystem(ctx, orgID, retired); err != nil || row == nil {
+			t.Fatalf("RetireSystem = %v, %v", row, err)
+		}
+		retired.OwnerExternalID = "960"
+		if out, err := s.Repos.RenameSystem(ctx, orgID, retired); err != nil || !out.Restored {
+			t.Fatalf("RenameSystem (restore) = %+v, %v; want a restore", out, err)
+		}
+		if got, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef("octo/gone")); err != nil || got == nil || got.OwnerExternalID != "960" {
+			t.Errorf("restored row = %+v, %v; want owner id 960", got, err)
 		}
 	})
 
@@ -837,6 +876,16 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		const earlyRef = "refs/heads/early"
 		earlyBranch := bareBranch(earlyRef)
 		twiceBranch := bareBranch(fx.branchRef)
+		// The push of the early branch, recorded about the bare row.
+		const earlyPushKey = "rename-absorb-early-push"
+		if err := s.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
+			TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Scope: TestGitHubHost, Action: domain.ActionBranchPushed,
+			Target: renameNewSlug, RepositoryID: bare.ID, ExternalID: earlyRef,
+			URL:        "https://github.com/" + renameNewSlug + "/tree/early",
+			Credential: domain.CredentialGitHubApp, DedupKey: earlyPushKey,
+		}); err != nil {
+			t.Fatalf("seed the early push's ledger row: %v", err)
+		}
 
 		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
 			Host:  TestGitHubHost,
@@ -875,6 +924,11 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		// Its branches are re-keyed onto the renamed row, and a ref both rows
 		// recorded is one row.
 		assertArtifactAt(t, s, orgID, earlyBranch, renameNewSlug, domain.BranchDedupKey(renamed.ID, earlyRef))
+		// Its audit-ledger rows move onto the renamed row rather than being
+		// unlinked by the delete.
+		if a := findActionByKey(t, s, orgID, earlyPushKey); a.RepositoryID != renamed.ID {
+			t.Errorf("early push's ledger row references %q, want the renamed row %s", a.RepositoryID, renamed.ID)
+		}
 		branches, _, err := s.Artifacts.ListByOrgSystem(ctx, orgID, db.ArtifactListOpts{})
 		if err != nil {
 			t.Fatalf("ListByOrgSystem: %v", err)
@@ -1134,57 +1188,69 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		assertArtifactAt(t, s, orgID, deadRows.review, "octo/api#18", domain.ReviewDedupKey("PR_kwDOdead18", deadRows.conversationID))
 		assertArtifactAt(t, s, orgID, deadRows.comment, "octo/api#18", domain.GitHubCommentDedupKey(domain.GitHubIssueComment, 501))
 		assertArtifactAt(t, s, orgID, deadRows.branch, "octo/api", domain.BranchDedupKey(dead.ID, ref))
+		// The audit ledger the same way: the live repository's rows, about its
+		// pull request and about the repository, follow it; the retired one's,
+		// whose links spell the same name, keep theirs.
+		for key, want := range map[string]string{
+			liveRows.prAction:     "https://github.com/octo/api-v2/pull/18",
+			liveRows.branchAction: "https://github.com/octo/api-v2/tree/fix",
+			deadRows.prAction:     "",
+			deadRows.branchAction: "",
+		} {
+			if _, cur := seed.RawActionURL(t, key); cur != want {
+				t.Errorf("action %s current_url = %q, want %q", key, cur, want)
+			}
+		}
 	})
 
-	t.Run("Rename_absorbs_an_orphaned_placement_pin_on_the_target_slug", func(t *testing.T) {
-		// A placement pin is a bare string an admin typed into a polymorphic
-		// column, so it can name a repository nothing else has a row for. Such
-		// a pin collides with the move on the override's own key, and the
-		// repository-row guard above has already proved it is an orphan, so
-		// the move absorbs it. The alternative is a rename that fails forever
-		// over a row nothing points at.
-		//
-		// This case is down to placement pins alone. The tracked set and the
-		// worktree ledger reference the registry row by id now, so "a
-		// reference to a repository with no row" is not a state either can
-		// reach — the foreign key is what refuses it, rather than a rewrite
-		// having to clean up after it.
-		s, orgID, seed := mk(t)
-		fx := seedRenameFixture(t, s, orgID, seed, "orphan")
+	t.Run("Rename_moves_an_absorbed_bare_rows_placement_override", func(t *testing.T) {
+		// An operator pins a repository by name, which resolves to whatever
+		// row holds the name: here the bare row an entity create minted under
+		// the new name before the rename was observed. The rename absorbs the
+		// bare row, and its override moves onto the renamed row with it, unless
+		// the renamed row has one of its own, which wins. Deleting the bare row
+		// takes nothing else with it.
+		for _, renamedHasOne := range []bool{false, true} {
+			t.Run(fmt.Sprintf("renamed_row_has_one=%t", renamedHasOne), func(t *testing.T) {
+				s, orgID, seed := mk(t)
+				fx := seedRenameFixture(t, s, orgID, seed, "absorb-pin")
+				if !renamedHasOne {
+					if matched, err := s.PlacementOverrides.Delete(ctx, orgID, fx.repositoryID); err != nil || !matched {
+						t.Fatalf("clear the fixture's override: matched=%v err=%v", matched, err)
+					}
+				}
+				if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", TestGitHubHost, renameNewSlug+"#25", "", "pr", "Written under the new name", ""); err != nil {
+					t.Fatalf("seed the entity written under the new name: %v", err)
+				}
+				bare, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef(renameNewSlug))
+				if err != nil || bare == nil || bare.ID == fx.repositoryID {
+					t.Fatalf("resolve %s = %+v, %v; want the bare row the entity create minted", renameNewSlug, bare, err)
+				}
+				if _, err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
+					OrgID: orgID, RepositoryID: bare.ID, PinnedInstanceID: "exec-bare", Replicas: 9,
+				}); err != nil {
+					t.Fatalf("seed the bare row's override: %v", err)
+				}
 
-		if _, err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
-			OrgID: orgID, KeyKind: domain.PlacementKindRepo, Host: TestGitHubHost, KeyValue: renameNewSlug, Replicas: 9,
-		}); err != nil {
-			t.Fatalf("seed target placement override: %v", err)
-		}
-		// Another host's pin on the target slug is no collision: it names a
-		// different repository, and the move neither absorbs nor joins it.
-		if _, err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
-			OrgID: orgID, KeyKind: domain.PlacementKindRepo, Host: TestOtherGitHubHost, KeyValue: renameNewSlug, Replicas: 5,
-		}); err != nil {
-			t.Fatalf("seed other-host placement override: %v", err)
-		}
+				out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+					Host:  TestGitHubHost,
+					Owner: "octo", Repo: "platform-api", ExternalID: fx.externalID,
+				})
+				if err != nil || !out.Renamed {
+					t.Fatalf("RenameSystem = %+v, %v; want the rename applied", out, err)
+				}
 
-		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
-			Host:  TestGitHubHost,
-			Owner: "octo", Repo: "platform-api", ExternalID: fx.externalID,
-		})
-		if err != nil {
-			t.Fatalf("RenameSystem: %v", err)
-		}
-		if !out.Renamed {
-			t.Fatalf("outcome = %+v, want the rename to go through", out)
-		}
-
-		ov, err := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, TestGitHubHost, renameNewSlug)
-		if err != nil || ov == nil {
-			t.Fatalf("PlacementOverrides.Get(new) = %v, %v; want the moved pin", ov, err)
-		}
-		if ov.Replicas != 3 {
-			t.Errorf("placement replicas = %d, want 3 — the LIVE repository's pin wins, not the orphan's", ov.Replicas)
-		}
-		if other, _ := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, TestOtherGitHubHost, renameNewSlug); other == nil || other.Replicas != 5 {
-			t.Errorf("the other host's pin on %s = %+v; want it untouched", renameNewSlug, other)
+				wantReplicas, wantPin := 9, "exec-bare"
+				if renamedHasOne {
+					wantReplicas, wantPin = 3, ""
+				}
+				list, err := s.PlacementOverrides.List(ctx, orgID)
+				if err != nil || len(list) != 1 || list[0].RepositoryID != fx.repositoryID ||
+					list[0].Replicas != wantReplicas || list[0].PinnedInstanceID != wantPin {
+					t.Errorf("overrides after the absorb = %+v, %v; want the renamed row's alone, replicas %d pinned %q",
+						list, err, wantReplicas, wantPin)
+				}
+			})
 		}
 	})
 
@@ -1258,7 +1324,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			t.Fatalf("seed tracked set: %v", err)
 		}
 		if filled, err := s.Repos.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{
-			{Host: TestGitHubHost, Owner: "octo", Repo: "identified", ExternalID: "1296269"},
+			{Host: TestGitHubHost, Owner: "octo", Repo: "identified", ExternalID: "1296269", OwnerExternalID: "583231"},
 		}); err != nil || filled != 1 {
 			t.Fatalf("seed identified: filled=%d err=%v", filled, err)
 		}
@@ -1272,6 +1338,10 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 		if got[0].Slug() != "octo/identified" || got[0].ExternalID != "1296269" || got[0].Source != domain.RepoSourceGitHub {
 			t.Errorf("identity = %+v, want octo/identified/github/1296269", got[0])
+		}
+		// The owner's id rides along: resolving the row asks for its client by it.
+		if got[0].OwnerExternalID != "583231" {
+			t.Errorf("identity OwnerExternalID = %q, want 583231", got[0].OwnerExternalID)
 		}
 	})
 }
@@ -1289,6 +1359,7 @@ type renameFixture struct {
 	branchRef           string
 	movedActionKey      string
 	neighbourActionKey  string
+	override            domain.PlacementOverride
 }
 
 // seedRenameFixture stages one repository referenced from every table that
@@ -1336,19 +1407,21 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
-	if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", "https://github.com", renameNeighbourSlug+"#4", renameNeighbourPRNodeID, "pr", "Neighbour PR",
-		"https://github.com/"+renameNeighbourSlug+"/pull/4"); err != nil {
+	neighbourEntity, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", "https://github.com", renameNeighbourSlug+"#4", renameNeighbourPRNodeID, "pr", "Neighbour PR",
+		"https://github.com/"+renameNeighbourSlug+"/pull/4")
+	if err != nil {
 		t.Fatalf("seed neighbour entity: %v", err)
 	}
 
 	// Two ledger rows: one whose object the rename moves, one for the
-	// neighbour as the boundary control. Deterministic dedup keys so the
-	// assertions (and the raw column reads) can find them again.
+	// neighbour as the boundary control, each about its pull request's entity
+	// as its writer records it. Deterministic dedup keys so the assertions
+	// (and the raw column reads) can find them again.
 	movedActionKey := "rename-moved-" + suffix
 	neighbourActionKey := "rename-neighbour-" + suffix
 	if err := s.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
 		TeamID: seed.TeamID, Provider: "github", Scope: TestGitHubHost, Action: domain.ActionPRCreated,
-		Target: renameOldSlug + "#18", ExternalID: "18",
+		Target: renameOldSlug + "#18", EntityID: entity.ID, ExternalID: "18",
 		URL:        "https://github.com/" + renameOldSlug + "/pull/18",
 		Credential: domain.CredentialGitHubApp, DedupKey: movedActionKey,
 		DetailJSON: `{"method":"POST","path":"/repos/` + renameOldSlug + `/pulls"}`,
@@ -1357,7 +1430,7 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	}
 	if err := s.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
 		TeamID: seed.TeamID, Provider: "github", Scope: TestGitHubHost, Action: domain.ActionPRCreated,
-		Target: renameNeighbourSlug + "#4", ExternalID: "4",
+		Target: renameNeighbourSlug + "#4", EntityID: neighbourEntity.ID, ExternalID: "4",
 		URL:        "https://github.com/" + renameNeighbourSlug + "/pull/4",
 		Credential: domain.CredentialGitHubApp, DedupKey: neighbourActionKey,
 	}); err != nil {
@@ -1395,18 +1468,11 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 		t.Fatalf("seed neighbour artifact: %v", err)
 	}
 
-	if _, err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
-		OrgID: orgID, KeyKind: domain.PlacementKindRepo, Host: TestGitHubHost, KeyValue: renameOldSlug, Replicas: 3,
-	}); err != nil {
+	override, err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
+		OrgID: orgID, RepositoryID: repo.ID, Replicas: 3,
+	})
+	if err != nil {
 		t.Fatalf("seed placement override: %v", err)
-	}
-	// key_kind is a free-text column (no FK/CHECK), so an arbitrary other kind
-	// sharing the same key_value column proves the rename only rewrites
-	// key_kind='repo' rows.
-	if _, err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
-		OrgID: orgID, KeyKind: "hostgroup", Host: TestGitHubHost, KeyValue: renameOldSlug, Replicas: 2,
-	}); err != nil {
-		t.Fatalf("seed other-kind placement override: %v", err)
 	}
 
 	return renameFixture{
@@ -1421,21 +1487,26 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 		branchRef:           branchRef,
 		movedActionKey:      movedActionKey,
 		neighbourActionKey:  neighbourActionKey,
+		override:            override,
 	}
 }
 
 // repoArtifactRows names the pull request, review, comment and branch
-// artifacts recordRepoArtifacts records, and the conversation the review
-// belongs to.
+// artifacts recordRepoArtifacts records, the conversation the review belongs
+// to, and the dedup keys of the audit-ledger rows of the pull request's
+// creation and the branch's push.
 type repoArtifactRows struct {
 	pr, review, comment, branch string
 	conversationID              string
+	prAction, branchAction      string
 }
 
 // recordRepoArtifacts records, in repo on TestGitHubHost, pull request #number
 // (node id nodeID) with its entity, a review draft of it, a comment on it
 // (commentID) and a pushed branch ref, keyed and linked to the entity the way
-// their writers record them, and returns their ids.
+// their writers record them, with the audit-ledger rows of the pull request's
+// creation (about its entity) and the branch's push (about the repository's
+// registry row), and returns their ids and keys.
 func recordRepoArtifacts(t *testing.T, s db.Stores, orgID, teamID string, repo domain.Repository, number int, nodeID string, commentID int64, ref string) repoArtifactRows {
 	t.Helper()
 	ctx := context.Background()
@@ -1475,7 +1546,26 @@ func recordRepoArtifacts(t *testing.T, s db.Stores, orgID, teamID string, repo d
 	if err != nil {
 		t.Fatalf("seed branch artifact %s: %v", slug, err)
 	}
-	return repoArtifactRows{pr: storedPR.ID, review: storedReview.ID, comment: storedComment.ID, branch: storedBranch.ID, conversationID: conversationID}
+	prAction, branchAction := "created-"+nodeID, "pushed-"+nodeID
+	for _, act := range []domain.ExternalAction{
+		{
+			Action: domain.ActionPRCreated, Target: domain.PullRequestTarget(slug, number), EntityID: entity.ID,
+			URL: fmt.Sprintf("%s/%s/pull/%d", TestGitHubHost, slug, number), DedupKey: prAction,
+		},
+		{
+			Action: domain.ActionBranchPushed, Target: slug, RepositoryID: repo.ID, ExternalID: ref,
+			URL: TestGitHubHost + "/" + slug + "/tree/" + strings.TrimPrefix(ref, "refs/heads/"), DedupKey: branchAction,
+		},
+	} {
+		act.TeamID, act.Provider, act.Scope, act.Credential = teamID, domain.ArtifactProviderGitHub, TestGitHubHost, domain.CredentialGitHubApp
+		if err := s.ExternalActions.RecordSystem(ctx, orgID, act); err != nil {
+			t.Fatalf("seed ledger row %s: %v", act.DedupKey, err)
+		}
+	}
+	return repoArtifactRows{
+		pr: storedPR.ID, review: storedReview.ID, comment: storedComment.ID, branch: storedBranch.ID, conversationID: conversationID,
+		prAction: prAction, branchAction: branchAction,
+	}
 }
 
 // linkArtifactEntity returns a linked to the entity of its provider carrying

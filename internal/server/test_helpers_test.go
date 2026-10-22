@@ -5,6 +5,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"maps"
+	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"testing"
@@ -143,6 +145,39 @@ func orgSettingsPath() string { return "/api/orgs/" + runmode.LocalDefaultOrgID 
 func teamSettingsPath(teamID string) string { return "/api/teams/" + teamID + "/settings" }
 
 func teamJiraProjectsPath(teamID string) string { return "/api/teams/" + teamID + "/jira-projects" }
+
+// putTeamJiraProjects sends body to the default team's jira-projects PUT. An
+// element of body may name its project by "key", a spelling only these tests
+// use: it is rewritten to what the route takes, the registry id of the project
+// the team tracks under that key, else the project's id in the fake catalog
+// (fakeJiraProjectID), which names a project being added. An element without
+// "key" is sent as it is.
+func putTeamJiraProjects(t *testing.T, s *Server, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	tracked := map[string]string{}
+	rules, _ := teamJiraRules(t, s)
+	for _, rule := range rules {
+		tracked[rule.ProjectKey] = rule.JiraProjectID
+	}
+	projects, _ := body["jira_projects"].([]map[string]any)
+	wire := make([]map[string]any, len(projects))
+	for i, p := range projects {
+		wire[i] = maps.Clone(p)
+		key, ok := p["key"].(string)
+		if !ok {
+			continue
+		}
+		delete(wire[i], "key")
+		if id, isTracked := tracked[key]; isTracked {
+			wire[i]["id"] = id
+		} else {
+			wire[i]["jira_id"] = fakeJiraProjectID(key)
+		}
+	}
+	out := maps.Clone(body)
+	out["jira_projects"] = wire
+	return doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), out)
+}
 
 // orgSettingsVersion reads the settings row's current concurrency token.
 func orgSettingsVersion(t *testing.T, s *Server) int {

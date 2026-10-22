@@ -54,7 +54,7 @@ export function useDeploymentConfig(): {
 
 /** In-flight Promise dedup for /api/me. Multiple IdentityListField
  *  mounts in one render (e.g. a review-event predicate editing both
- *  author_in and reviewer_in) share one round-trip. No persistent
+ *  author_id_in and reviewer_id_in) share one round-trip. No persistent
  *  cache — identity fields can change mid-session (user opens editor,
  *  configures Jira via Settings, returns), and caching would shadow
  *  real changes until reload. */

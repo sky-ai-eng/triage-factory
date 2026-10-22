@@ -49,6 +49,10 @@ func (s *channelRegistryStore) FindOrCreateThreadSystem(context.Context, string,
 	return slackstore.Thread{}, db.ErrNotApplicableInLocal
 }
 
+func (s *channelRegistryStore) GetThreadSystem(context.Context, string, string, string) (*slackstore.ThreadEntity, error) {
+	return nil, db.ErrNotApplicableInLocal
+}
+
 func (s *channelRegistryStore) MoveSystem(context.Context, string, string, string) (slackstore.ChannelMove, error) {
 	return slackstore.ChannelMove{}, db.ErrNotApplicableInLocal
 }

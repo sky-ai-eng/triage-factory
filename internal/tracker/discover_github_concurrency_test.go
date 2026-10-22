@@ -156,7 +156,7 @@ func TestDiscoverGitHub_HangingRepoDoesNotBlockOthers(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(openPRBody))
+		_, _ = w.Write([]byte(openPRBodyFor(r.URL.Path)))
 	}))
 	t.Cleanup(srv.Close)
 
@@ -224,7 +224,7 @@ func TestDiscoverGitHub_DeterministicOrderAcrossConcurrency(t *testing.T) {
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(openPRBody))
+		_, _ = w.Write([]byte(openPRBodyFor(r.URL.Path)))
 	}))
 	t.Cleanup(srv.Close)
 
@@ -312,7 +312,7 @@ func TestRefreshGitHub_RateLimitStopsFanOutAndPropagatesDistinctly(t *testing.T)
 	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
-	_, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", repos, nil)
+	_, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, repos, nil)
 
 	var rl *ghclient.ErrRateLimited
 	if !errors.As(err, &rl) {
@@ -376,7 +376,7 @@ func TestRefreshGitHub_RateLimitSeedsAlreadyDiscoveredReposBeforeStopping(t *tes
 	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
-	_, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", repos, nil)
+	_, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, repos, nil)
 
 	var rl *ghclient.ErrRateLimited
 	if !errors.As(err, &rl) {
@@ -403,10 +403,7 @@ func TestRefreshGitHub_RateLimitSeedsAlreadyDiscoveredReposBeforeStopping(t *tes
 		}
 	}
 	for _, repo := range repos {
-		etag, _, err := stores.Repos.GetPullsPollStateByRefSystem(ctx, org, domain.RepoRefFromSlug("https://github.com", repo))
-		if err != nil {
-			t.Fatalf("GetPullsPollStateByRefSystem(%s): %v", repo, err)
-		}
+		etag, _ := pullsCursorOf(t, stores, repo)
 		want := ""
 		if repo == "octo/ok1" || repo == "octo/ok2" {
 			want = `"etag-1"`

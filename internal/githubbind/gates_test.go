@@ -152,11 +152,11 @@ func TestAssociatedByAccount(t *testing.T) {
 			if got := r.Header.Get("Authorization"); got != "Bearer ghu_test" {
 				t.Errorf("Authorization = %q, want the user access token", got)
 			}
-			fmt.Fprint(w, `{"total_count":2,"installations":[{"id":11,"account":{"login":"other"}},{"id":42,"account":{"login":"Acme"}}]}`)
+			fmt.Fprint(w, `{"total_count":2,"installations":[{"id":11,"account":{"id":7,"login":"other"}},{"id":42,"account":{"id":1234,"login":"Acme"}}]}`)
 		})
-		id, err := AssociatedByAccount(ctx, base, "ghu_test", "acme")
-		if err != nil || id != 42 {
-			t.Errorf("AssociatedByAccount = (%d, %v), want (42, nil) — logins compare case-insensitively", id, err)
+		id, accountID, err := AssociatedByAccount(ctx, base, "ghu_test", "acme")
+		if err != nil || id != 42 || accountID != 1234 {
+			t.Errorf("AssociatedByAccount = (%d, %d, %v), want (42, 1234, nil) — logins compare case-insensitively, and the matched account's id comes back for the App's read to agree with", id, accountID, err)
 		}
 	})
 
@@ -166,7 +166,7 @@ func TestAssociatedByAccount(t *testing.T) {
 		base := fakeGitHub(t, func(w http.ResponseWriter, _ *http.Request) {
 			fmt.Fprint(w, `{"total_count":1,"installations":[{"id":11,"account":{"login":"other"}}]}`)
 		})
-		id, err := AssociatedByAccount(ctx, base, "ghu_test", "acme")
+		id, _, err := AssociatedByAccount(ctx, base, "ghu_test", "acme")
 		if !errors.Is(err, ErrNotAssociated) || id != 0 {
 			t.Errorf("AssociatedByAccount = (%d, %v), want (0, ErrNotAssociated)", id, err)
 		}
@@ -179,7 +179,7 @@ func TestAssociatedByAccount(t *testing.T) {
 		base := fakeGitHub(t, func(w http.ResponseWriter, _ *http.Request) {
 			fmt.Fprint(w, `{"total_count":1,"installations":[{"account":{"login":"acme"}}]}`)
 		})
-		if _, err := AssociatedByAccount(ctx, base, "ghu_test", "acme"); !errors.Is(err, ErrNotAssociated) {
+		if _, _, err := AssociatedByAccount(ctx, base, "ghu_test", "acme"); !errors.Is(err, ErrNotAssociated) {
 			t.Errorf("AssociatedByAccount = %v, want ErrNotAssociated", err)
 		}
 	})
@@ -194,14 +194,14 @@ func TestAssociatedByAccount(t *testing.T) {
 			w.Header().Set("Link", `<`+base+`/user/installations?per_page=100&page=2>; rel="next"`)
 			fmt.Fprint(w, `{"installations":[{"id":11,"account":{"login":"other"}}]}`)
 		})
-		id, err := AssociatedByAccount(ctx, base, "ghu_test", "acme")
+		id, _, err := AssociatedByAccount(ctx, base, "ghu_test", "acme")
 		if err != nil || id != 42 {
 			t.Errorf("AssociatedByAccount = (%d, %v), want (42, nil)", id, err)
 		}
 	})
 
 	t.Run("TransportFailureIsUndetermined", func(t *testing.T) {
-		_, err := AssociatedByAccount(ctx, "http://127.0.0.1:1", "ghu_test", "acme")
+		_, _, err := AssociatedByAccount(ctx, "http://127.0.0.1:1", "ghu_test", "acme")
 		if !errors.Is(err, ErrUndetermined) {
 			t.Errorf("AssociatedByAccount = %v, want ErrUndetermined", err)
 		}
@@ -214,7 +214,7 @@ func TestAssociatedByAccount(t *testing.T) {
 		base := fakeGitHub(t, func(w http.ResponseWriter, _ *http.Request) {
 			fmt.Fprint(w, `not json`)
 		})
-		if _, err := AssociatedByAccount(ctx, base, "ghu_test", "acme"); !errors.Is(err, ErrUndetermined) {
+		if _, _, err := AssociatedByAccount(ctx, base, "ghu_test", "acme"); !errors.Is(err, ErrUndetermined) {
 			t.Errorf("AssociatedByAccount = %v, want ErrUndetermined", err)
 		}
 	})

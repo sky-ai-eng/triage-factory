@@ -66,10 +66,10 @@ func TestBuildSnapshot_UserLoginUnchanged(t *testing.T) {
 }
 
 // TestPRBaseFields_SelectActorTypename pins that every actor the snapshot
-// records a login from selects __typename; without it a bot decodes as a
-// person and keeps GraphQL's bare slug.
+// records a login from selects __typename, without which a bot decodes as a
+// person and keeps GraphQL's bare slug, and the account's id.
 func TestPRBaseFields_SelectActorTypename(t *testing.T) {
-	const sel = "author { __typename login }"
+	const sel = "author { __typename login ... on User { databaseId } ... on Bot { databaseId } }"
 	if n := strings.Count(prBaseFields, sel); n != 2 {
 		t.Errorf("prBaseFields selects %q %d times, want 2 (PR author, latestReviews author)", sel, n)
 	}

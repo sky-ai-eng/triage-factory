@@ -60,7 +60,10 @@ type grantLister interface {
 // and the GitHub host that client is minted against. It is satisfied by
 // github.Resolver via resolverSource below.
 type clientSource interface {
-	grantListerFor(ctx context.Context, orgID, accountLogin string) (grantLister, error)
+	// grantListerFor resolves the client for the installation row inst, which
+	// names its account by id as well as login, so the client is minted from
+	// that account's installation even while the row's login lags a rename.
+	grantListerFor(ctx context.Context, orgID string, inst domain.OrgGitHubAppInstallation) (grantLister, error)
 	// githubHostFor is the GitHub host grantListerFor resolves installations
 	// on — the org's current host — or "" when the org resolves none.
 	githubHostFor(ctx context.Context, orgID string) (string, error)
@@ -68,8 +71,8 @@ type clientSource interface {
 
 type resolverSource struct{ resolver github.Resolver }
 
-func (s resolverSource) grantListerFor(ctx context.Context, orgID, accountLogin string) (grantLister, error) {
-	return s.resolver.ClientFor(ctx, orgID, accountLogin)
+func (s resolverSource) grantListerFor(ctx context.Context, orgID string, inst domain.OrgGitHubAppInstallation) (grantLister, error) {
+	return s.resolver.ClientForInstallation(ctx, orgID, inst)
 }
 
 func (s resolverSource) githubHostFor(ctx context.Context, orgID string) (string, error) {
@@ -158,8 +161,9 @@ func NewReconciler(apps db.GitHubAppsStore, mirror db.ReachableReposStore, resol
 // It restores, for the managed class, the doctrine at the head of this package:
 // pull is the contract and webhooks are a latency optimization on it. Some of
 // what this converges has no push signal at all — an account rename fires no
-// event this deployment subscribes to, and account_login is what the resolver
-// matches on, so without it a renamed account stops minting tokens forever.
+// event this deployment subscribes to, and a caller acting on a repository finds
+// the installation by the repository owner's login, so without it a renamed
+// account's repositories stop resolving a token.
 // A lost unsuspend delivery is the other trap: RunOrg skips a suspended
 // installation's grant, correctly, so a suspended_at nothing clears is a grant
 // nothing refreshes.
@@ -270,10 +274,12 @@ func (r *Reconciler) RunOrg(ctx context.Context, orgID string) error {
 	}
 
 	// The installations on the host the resolver mints against, and no others.
-	// grantListerFor resolves a client by account login on that host, so an
-	// installation left on a host the org has moved off would be read through
-	// whichever installation on the current host answers to its login — and its
-	// grant written under the wrong installation id.
+	// grantListerFor resolves the installation's account on that host, by
+	// account id or login, and each names an account within one GitHub
+	// deployment only, so an installation left on a host the org has moved off
+	// would be read through whichever installation on the current host answers
+	// to the same id or login — and its grant written under the wrong
+	// installation id.
 	host, err := r.clients.githubHostFor(ctx, orgID)
 	if err != nil {
 		return fmt.Errorf("resolve github host: %w", err)
@@ -316,7 +322,7 @@ func (r *Reconciler) reconcileInstallation(ctx context.Context, orgID string, cl
 		return nil
 	}
 
-	client, err := r.clients.grantListerFor(ctx, orgID, inst.AccountLogin)
+	client, err := r.clients.grantListerFor(ctx, orgID, inst)
 	if err != nil {
 		return fmt.Errorf("resolve client: %w", err)
 	}
@@ -352,17 +358,20 @@ func (r *Reconciler) reconcileInstallation(ctx context.Context, orgID string, cl
 			Source:         domain.RepoSourceGitHub,
 			Owner:          owner,
 			Repo:           name,
-			// The listing returns whole repository objects, so the id and the
-			// display fields cost nothing here. The id is what lets a cache entry
-			// and a registry row be matched when their slugs momentarily disagree
-			// mid-rename; the rest is what the picker renders, which is why it is
+			// The listing returns whole repository objects, so the ids and the
+			// display fields cost nothing here. The repository id is what lets a
+			// cache entry and a registry row be matched when their slugs
+			// momentarily disagree mid-rename, and the owner's id is what a
+			// registration from the mirror records for the account that owns
+			// it; the rest is what the picker renders, which is why it is
 			// mirrored rather than re-fetched at read time.
-			ExternalID:  repo.ExternalID(),
-			Description: repo.Description,
-			Language:    repo.Language,
-			HTMLURL:     repo.HTMLURL,
-			PushedAt:    repo.PushedAt,
-			Private:     repo.Private,
+			ExternalID:      repo.ExternalID(),
+			OwnerExternalID: repo.OwnerExternalID(),
+			Description:     repo.Description,
+			Language:        repo.Language,
+			HTMLURL:         repo.HTMLURL,
+			PushedAt:        repo.PushedAt,
+			Private:         repo.Private,
 		})
 	}
 

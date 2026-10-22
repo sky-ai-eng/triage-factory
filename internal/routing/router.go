@@ -96,7 +96,7 @@ type Router struct {
 	handlers      dbpkg.EventHandlerStore
 	agents        dbpkg.AgentStore
 	teamAgents    dbpkg.TeamAgentStore        // read team_agents.enabled before auto-firing triggers
-	users         dbpkg.UsersStore            // read local user's host-scoped Jira identity for inline close gates
+	users         dbpkg.UsersStore            // reverse identity lookups (GitHub login, Jira account, Linear user → TF users) for owner routing
 	tasks         dbpkg.TaskStore             // task lifecycle, dedup, claims, breaker
 	conversations dbpkg.ConversationStore     // lookup active runs for the task-close cancel cascade
 	entities      dbpkg.EntityStore           // closed-entity guard + entity-terminating close cascade
@@ -158,9 +158,8 @@ type Router struct {
 // NewRouter creates a Router. teamAgents is nil-safe — callers wired
 // before that behavior existed can pass nil; the bot-disabled-team check
 // degrades to "always enabled" in that case (the prior
-// behavior). users is nil-safe too — the inline-close gate
-// degrades to "treat every reassignment as away-from-me" when missing,
-// which over-closes (acceptable: user can reopen via the next poll).
+// behavior). users is nil-safe too — the identity-based owner routing
+// resolves nobody when it is missing.
 // orgs is required — the terminal-state checker iterates it per org and
 // dereferences it directly, so a nil orgs is a startup wiring bug that
 // panics there, not a degraded mode.

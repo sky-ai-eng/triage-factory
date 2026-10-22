@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -23,13 +24,30 @@ func TestResolveCommitIdentity(t *testing.T) {
 	cases := []struct {
 		name        string
 		orgName     string
+		orgID       string
 		orgEmail    string
 		manual      bool
 		userLogin   string
+		userID      string
 		wantStamp   bool
 		wantName    string
 		wantTrailer string
 	}{
+		{
+			// The PAT owner renamed since its login was captured, or the human's
+			// stored login is the old one: the ids say they are one account.
+			name:    "manual same account id under different logins -> no trailer",
+			orgName: "octocat", orgID: "583231", orgEmail: "octocat@users.noreply.github.com",
+			manual: true, userLogin: "alice", userID: "583231",
+			wantStamp: true, wantName: "octocat", wantTrailer: "",
+		},
+		{
+			// Another account took the login: the ids say they are two.
+			name:    "manual different account ids under one login -> trailer",
+			orgName: "alice", orgID: "583231", orgEmail: "alice@users.noreply.github.com",
+			manual: true, userLogin: "alice", userID: "777",
+			wantStamp: true, wantName: "alice", wantTrailer: aliceTrailer,
+		},
 		{
 			name:    "manual distinct user -> trailer (PAT form)",
 			orgName: "octocat", orgEmail: "octocat@users.noreply.github.com",
@@ -81,7 +99,7 @@ func TestResolveCommitIdentity(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			id, stamp := ResolveCommitIdentity(tc.orgName, tc.orgEmail, tc.manual, tc.userLogin)
+			id, stamp := ResolveCommitIdentity(domain.GitHubAccount{Login: tc.orgName, ID: tc.orgID}, tc.orgEmail, tc.manual, domain.GitHubAccount{Login: tc.userLogin, ID: tc.userID})
 			if stamp != tc.wantStamp {
 				t.Fatalf("stamp = %v, want %v", stamp, tc.wantStamp)
 			}

@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"slices"
@@ -21,20 +20,20 @@ import (
 // The picker offers only projects the org credential can see, and the status
 // board only statuses the project's workflow has, so the handler enforces both
 // sets: a rule the UI applies and the handler does not is a convention, and the
-// first headless caller breaks it. Both are asked live — the same catalog read
-// POST /api/orgs/{org_id}/jira/projects/list serves from, and the same
-// ProjectStatuses read its statuses list serves from — because a catalog of
-// dozens behind a single org credential has nothing for a mirror to earn. The rules rows are
-// the only persistence: they snapshot the statuses a team actually acts on, at
-// the moment it arms them.
+// first headless caller breaks it. Both are asked live — the same project read
+// GET /api/orgs/{org_id}/jira/projects/{jira_id} serves from, by the Jira id
+// the caller sent, and the same ProjectStatuses read its statuses list serves
+// from — because a catalog of dozens behind a single org credential has
+// nothing for a mirror to earn. The rules rows are the only persistence: they
+// snapshot the statuses a team actually acts on, at the moment it arms them.
 //
 // Both checks are scoped to what CHANGED, and that scoping is the load-bearing
 // part. This route is a replace-set: every write resends the whole set. Gating
 // what was already stored would mean a project deleted upstream, a status
 // retired from a workflow, or a Jira outage locks the team out of its own
 // configuration door — including the write that would remove the offending row.
-// So a stored key is grandfathered, an unchanged rule is kept byte-for-byte,
-// and a write that only removes things asks Jira nothing at all.
+// So a stored project is grandfathered, an unchanged rule is kept
+// byte-for-byte, and a write that only removes things asks Jira nothing at all.
 //
 // Two failure modes, kept distinct because they ask different things of the
 // caller:
@@ -51,17 +50,6 @@ import (
 // name Jira spells it with today, in the same fetch that validates it. That is
 // also why a rename needs no handling anywhere: nothing matches on the name.
 // --------------------------------------------------------------------
-
-const (
-	// jiraGateWindow is the page size the gate reads the filtered catalog in.
-	// Cloud caps its own page below this and serves fewer; Data Center honors
-	// it against the catalog it holds in memory.
-	jiraGateWindow = 100
-	// jiraGateMaxPages bounds the catalog walk. Jira matches the filter against
-	// key AND name, so a key that is a common word can be preceded by pages of
-	// name-matches; this is what stops that from becoming an unbounded read.
-	jiraGateMaxPages = 20
-)
 
 // ruleWish is one rule as the caller expressed it, after the comparison
 // against what is stored. changed=false means the stored rule is carried
@@ -87,11 +75,22 @@ func (rw ruleWish) ids() []string {
 // projectPlan is one project's settled work: the row as far as the stored
 // rules carry it, plus what still has to be resolved against Jira.
 type projectPlan struct {
-	wish   jiraProjectWish
-	row    domain.JiraProjectStatusRules
-	newKey bool
+	wish jiraProjectWish
+	row  domain.JiraProjectStatusRules
+	// adding is a project the team does not track yet, which Jira has to
+	// confirm before its row can be registered.
+	adding bool
 
 	pickup, inProgress, inReview, done ruleWish
+}
+
+// label is how a fault names the project: its key once one is known, else
+// the Jira id the caller sent.
+func (p projectPlan) label() string {
+	if p.row.ProjectKey != "" {
+		return p.row.ProjectKey
+	}
+	return p.wish.jiraID
 }
 
 // statusRef names the project to Jira's status read: by its project id when
@@ -111,7 +110,7 @@ func (p projectPlan) changedIDs() int {
 }
 
 func (p projectPlan) needsJira() bool {
-	return p.newKey || p.changedIDs() > 0
+	return p.adding || p.changedIDs() > 0
 }
 
 // gateJiraProjects turns the request's wishes into the rules to store.
@@ -122,11 +121,11 @@ func (p projectPlan) needsJira() bool {
 // status ids — each is looked up in the project's workflow, which both refuses
 // the unknown ones and supplies the display names.
 //
-// A stored project keeps its registry row (JiraProjectID). A key being added
-// has none yet: the gate resolves it to the project Jira describes — its id,
-// its key as Jira spells it, its name — into ProjectExternalID, ProjectKey and
-// ProjectName, and the write registers the row. Two entries Jira calls one
-// project are refused, whatever keys they arrived under.
+// A stored project keeps its registry row (JiraProjectID). A project being
+// added has none yet: the gate reads it from Jira by the id the caller sent,
+// which refuses one the credential cannot see and supplies its key as Jira
+// spells it and its name, into ProjectExternalID, ProjectKey and ProjectName,
+// and the write registers the row.
 //
 // site is the org's Jira site, which every row added here is registered on.
 //
@@ -134,30 +133,29 @@ func (p projectPlan) needsJira() bool {
 func (s *Server) gateJiraProjects(
 	w http.ResponseWriter, r *http.Request,
 	orgID, userID, site string,
-	wishes []jiraProjectWish, stored []domain.JiraProjectStatusRules,
+	wishes []jiraProjectWish,
 ) ([]domain.JiraProjectStatusRules, bool) {
-	storedByKey := make(map[string]domain.JiraProjectStatusRules, len(stored))
-	for _, p := range stored {
-		storedByKey[p.ProjectKey] = p
-	}
-
 	// First pass: settle what each project needs from Jira, without asking yet.
 	// A set that needs nothing must not resolve a credential, let alone make a
 	// call — that is what keeps the door open while Jira is down.
 	plans := make([]projectPlan, 0, len(wishes))
 	needsJira := false
 	for _, wish := range wishes {
-		prior, isStored := storedByKey[wish.key]
-		row := domain.JiraProjectStatusRules{ProjectKey: wish.key}
-		if isStored {
-			row.JiraProjectID = prior.JiraProjectID
-			row.ProjectName = prior.ProjectName
-			row.ProjectExternalID = prior.ProjectExternalID
+		var prior domain.JiraProjectStatusRules
+		row := domain.JiraProjectStatusRules{ProjectExternalID: wish.jiraID}
+		if wish.stored != nil {
+			prior = *wish.stored
+			row = domain.JiraProjectStatusRules{
+				JiraProjectID:     prior.JiraProjectID,
+				ProjectKey:        prior.ProjectKey,
+				ProjectName:       prior.ProjectName,
+				ProjectExternalID: prior.ProjectExternalID,
+			}
 		}
 		p := projectPlan{
 			wish:       wish,
 			row:        row,
-			newKey:     !isStored,
+			adding:     wish.stored == nil,
 			pickup:     requestedPickup(wish.write.Pickup, prior.PickupMembers),
 			inProgress: requestedRule(wish.write.InProgress, prior.InProgressMembers, prior.InProgressCanonical),
 			inReview:   requestedRule(wish.write.InReview, prior.InReviewMembers, prior.InReviewCanonical),
@@ -206,17 +204,19 @@ func (s *Server) gateJiraProjects(
 	for i := range plans {
 		p := &plans[i]
 		base := fmt.Sprintf("jira_projects[%d]", p.wish.index)
-		if p.newKey {
-			project, visible, err := jiraProjectVisible(r.Context(), client, p.wish.key)
-			if err != nil {
-				writeJiraGateStopped(w, &v, orgID, "project "+p.wish.key, err)
-				return nil, false
-			}
-			if !visible {
-				v.Invalid(base+".key", "no Jira project "+p.wish.key+" is visible to this workspace's Jira credential")
+		if p.adding {
+			project, err := client.GetProject(r.Context(), p.wish.jiraID)
+			if jira.IsNotFound(err) {
+				v.Invalid(base+".jira_id", "no Jira project "+p.wish.jiraID+" is visible to this workspace's Jira credential")
 				continue
 			}
-			p.row.ProjectExternalID = project.ID
+			if err == nil && project.ID != p.wish.jiraID {
+				err = fmt.Errorf("jira answered project %s with id %q", p.wish.jiraID, project.ID)
+			}
+			if err != nil {
+				writeJiraGateStopped(w, &v, orgID, "Jira project "+p.wish.jiraID, err)
+				return nil, false
+			}
 			p.row.ProjectKey = normalizeJiraProjectKey(project.Key)
 			p.row.ProjectName = project.Name
 		}
@@ -229,7 +229,7 @@ func (s *Server) gateJiraProjects(
 		// display name comes from.
 		statuses, err := client.ProjectStatuses(r.Context(), p.statusRef())
 		if err != nil {
-			writeJiraGateStopped(w, &v, orgID, "the statuses of project "+p.wish.key, err)
+			writeJiraGateStopped(w, &v, orgID, "the statuses of project "+p.label(), err)
 			return nil, false
 		}
 		byID := make(map[string]domain.JiraStatusRef, len(statuses))
@@ -239,7 +239,7 @@ func (s *Server) gateJiraProjects(
 		resolve := func(ids []string, field string) []domain.JiraStatusRef {
 			refs := make([]domain.JiraStatusRef, 0, len(ids))
 			for _, id := range ids {
-				ref := resolveOne(id, byID, &v, field, p.wish.key)
+				ref := resolveOne(id, byID, &v, field, p.label())
 				if !ref.IsZero() {
 					refs = append(refs, ref)
 				}
@@ -252,36 +252,17 @@ func (s *Server) gateJiraProjects(
 		}
 		if p.inProgress.changed {
 			row.InProgressMembers = resolve(p.inProgress.memberIDs, base+".in_progress.member_ids")
-			row.InProgressCanonical = resolveOne(p.inProgress.canonicalID, byID, &v, base+".in_progress.canonical_id", p.wish.key)
+			row.InProgressCanonical = resolveOne(p.inProgress.canonicalID, byID, &v, base+".in_progress.canonical_id", p.label())
 		}
 		if p.inReview.changed {
 			row.InReviewMembers = resolve(p.inReview.memberIDs, base+".in_review.member_ids")
-			row.InReviewCanonical = resolveOne(p.inReview.canonicalID, byID, &v, base+".in_review.canonical_id", p.wish.key)
+			row.InReviewCanonical = resolveOne(p.inReview.canonicalID, byID, &v, base+".in_review.canonical_id", p.label())
 		}
 		if p.done.changed {
 			row.DoneMembers = resolve(p.done.memberIDs, base+".done.member_ids")
-			row.DoneCanonical = resolveOne(p.done.canonicalID, byID, &v, base+".done.canonical_id", p.wish.key)
+			row.DoneCanonical = resolveOne(p.done.canonicalID, byID, &v, base+".done.canonical_id", p.label())
 		}
 		out = append(out, row)
-	}
-	if v.Flush(w, http.StatusBadRequest) {
-		return nil, false
-	}
-	// Every entry now names its project by Jira's id where one is known, so two
-	// keys for one project — an old key stored before a rename and the new one
-	// being added — show up as one id. The gate answers one row per wish, in
-	// order, so a row's position is its wish's.
-	firstByID := map[string]int{}
-	for i, row := range out {
-		if row.ProjectExternalID == "" {
-			continue
-		}
-		if j, dup := firstByID[row.ProjectExternalID]; dup {
-			v.Invalid(fmt.Sprintf("jira_projects[%d].key", plans[i].wish.index),
-				fmt.Sprintf("Jira project %s is the project already in this set at jira_projects[%d] as %s", plans[i].wish.key, plans[j].wish.index, out[j].ProjectKey))
-			continue
-		}
-		firstByID[row.ProjectExternalID] = i
 	}
 	if v.Flush(w, http.StatusBadRequest) {
 		return nil, false
@@ -401,37 +382,4 @@ func writeJiraGateUpstream(w http.ResponseWriter, orgID, what string, err error)
 		Reason:  httpx.ReasonUpstreamUnavailable,
 		Message: "could not confirm " + what + " with Jira, so nothing was saved" + httpx.LocalDetail(err),
 	})
-}
-
-// jiraProjectVisible reports whether key names a project this credential can
-// see, and the project it names, reading the same live catalog the picker's
-// list route serves from.
-//
-// The filter is matched against key AND name upstream, so the exact key is
-// looked for across the pages that filter returns rather than assumed to be the
-// first row. Exhausting the page budget is an ERROR, not an absence: the walk
-// stopped without establishing anything, and reporting "no such project" there
-// would refuse a project that exists. So is a match with no project id, since
-// the project could not be registered by the identity that outlives its key.
-func jiraProjectVisible(ctx context.Context, client *jira.Client, key string) (jira.Project, bool, error) {
-	startAt := 0
-	for page := 0; page < jiraGateMaxPages; page++ {
-		got, err := client.ListProjects(ctx, key, startAt, jiraGateWindow)
-		if err != nil {
-			return jira.Project{}, false, err
-		}
-		for _, p := range got.Projects {
-			if normalizeJiraProjectKey(p.Key) == key {
-				if p.ID == "" {
-					return jira.Project{}, false, fmt.Errorf("jira listed project %s without its id", key)
-				}
-				return p, true, nil
-			}
-		}
-		if got.NextStartAt == 0 {
-			return jira.Project{}, false, nil
-		}
-		startAt = got.NextStartAt
-	}
-	return jira.Project{}, false, fmt.Errorf("jira project catalog for %s still had pages after %d", key, jiraGateMaxPages)
 }

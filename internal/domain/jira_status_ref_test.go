@@ -163,3 +163,26 @@ func TestJiraProjectStatusRules_Armed(t *testing.T) {
 		t.Error("an unmapped in-review rule contains nothing")
 	}
 }
+
+// StatusMatchSets is the split a terminal-candidate query matches on: a ref
+// with an id lands in IDs, and its name in IDNames (for snapshots that carry
+// no id); a ref with no id lands in Names.
+func TestStatusMatchSets(t *testing.T) {
+	want := domain.StatusMatchSets{
+		IDs:     []string{"10001", "10002"},
+		IDNames: []string{"Done"},
+		Names:   []string{"Won't Do"},
+	}
+	jira := domain.JiraStatusMatchSets([]domain.JiraStatusRef{
+		{ID: "10001", Name: "Done"}, {Name: "Won't Do"}, {ID: "10002"}, {},
+	})
+	if !reflect.DeepEqual(jira, want) {
+		t.Errorf("JiraStatusMatchSets = %+v, want %+v", jira, want)
+	}
+	linear := domain.LinearStateMatchSets([]domain.LinearStateRef{
+		{ID: "10001", Name: "Done"}, {Name: "Won't Do"}, {ID: "10002"}, {},
+	})
+	if !reflect.DeepEqual(linear, want) {
+		t.Errorf("LinearStateMatchSets = %+v, want %+v", linear, want)
+	}
+}

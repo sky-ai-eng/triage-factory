@@ -275,6 +275,12 @@ type Thread struct {
 	Channel  Channel
 }
 
+// ThreadEntity is GetThreadSystem's answer: a thread entity's id, kind and
+// state.
+type ThreadEntity struct {
+	ID, Kind, State string
+}
+
 // ErrChannelNotRegistered is FindOrCreateThreadSystem's error for a channel
 // id no registry row answers to.
 var ErrChannelNotRegistered = errors.New("slackstore: channel is not registered")
@@ -327,17 +333,31 @@ type ChannelRegistryStore interface {
 
 	// FindOrCreateThreadSystem returns the entity of the thread rooted at
 	// threadTS in the channel channelID names, creating one (kind, title,
-	// url) when no entity answers to the thread's key, or
+	// url) when the channel has none for the thread, or
 	// ErrChannelNotRegistered when no row answers to channelID. A Slack
 	// entity references its channel's row, so every Slack entity is created
 	// here. It takes the Slack id rather than a row id read earlier because a
 	// move can absorb that row and delete it; resolving the id and writing
 	// the entity under one hold of the move lock leaves no such gap, and the
-	// answer carries the row the call used. The key (domain.SlackSourceID)
-	// names the channel's Slack id as it is when the call runs. Like
-	// db.EntityStore.FindOrCreateSystem, a key only a closed entity holds
-	// returns that entity, and an existing entity's kind is never rewritten.
+	// answer carries the row the call used.
+	//
+	// A thread is identified by its channel's row and its root ts
+	// (entities.slack_channel_id, entities.slack_thread_ts), neither of which
+	// a move changes, and that is what the call finds it by. The key it
+	// writes (domain.SlackSourceID) spells the channel's Slack id as it is
+	// when the call runs; it is a display value, which MoveSystem rewrites.
+	// Like db.EntityStore.FindOrCreateSystem, a thread only a closed entity
+	// holds returns that entity, and an existing entity's kind is never
+	// rewritten.
 	FindOrCreateThreadSystem(ctx context.Context, orgID, channelID, threadTS, kind, title, url string) (Thread, error)
+
+	// GetThreadSystem returns the entity of the thread rooted at threadTS in
+	// the channel whose registry row is channel — the active one when there
+	// is one, else the most recently closed — or (nil, nil) when the channel
+	// has none for the thread. It never creates one: it is the lookup for a
+	// caller that has already resolved the channel and must not mint a
+	// thread, such as ingest's engaged-thread gate.
+	GetThreadSystem(ctx context.Context, orgID, channel, threadTS string) (*ThreadEntity, error)
 
 	// MoveSystem follows Slack's change of a channel's id (the
 	// channel_id_changed event: a private channel shared through Slack
@@ -356,21 +376,27 @@ type ChannelRegistryStore interface {
 	//     thread entities and the slack:message handlers whose channel_in
 	//     names it follow; a handler whose filter cannot be decoded is left as
 	//     stored and reported (ChannelMove.SkippedHandlers) rather than
-	//     failing the move;
-	//   - the key and permalink of each of the channel's thread entities keyed
-	//     "<oldID>/…". Two active entities for one thread — one the new id
-	//     minted for a mention delivered before the change arrived — resolve
-	//     to the older, the thread's original, which carries its tasks,
-	//     conversations, memory and kind and keeps the key. The newer is
-	//     closed (ChannelMove.Superseded) and keeps what it collected;
+	//     failing the move. Where the channel's row and the absorbed one each
+	//     have an active entity for one thread — the absorbed row's minted
+	//     for a mention delivered before the change arrived — the older, the
+	//     thread's original, which carries its tasks, conversations, memory
+	//     and kind, stays active, and the newer is closed
+	//     (ChannelMove.Superseded) and keeps what it collected. A Slack
+	//     artifact's dedup key names the registry row, so the keys naming the
+	//     absorbed row are rewritten to name the channel's; a key the
+	//     channel's row already holds for the same message is left as it is;
+	//   - the key and permalink of each of the channel's thread entities,
+	//     which spell the channel's Slack id. A thread is found by its
+	//     channel's row and root ts, so these are display values;
 	//   - the Slack artifacts naming the channel: the target, which takes the
 	//     key of the thread entity the artifact is about (artifacts.entity_id)
 	//     and, on an artifact linked to none, moves by the channel id it
-	//     spells, the dedup key and the permalink. A key the new id already
-	//     has is left as it is;
+	//     spells, and the permalink. The dedup key names the channel's row
+	//     and the message's ts, which the move leaves alone;
 	//   - external_actions.current_url, the audit ledger's pointer, for
-	//     actions whose link points into the channel. The record of the act
-	//     is not touched.
+	//     actions whose link points into the channel: those about one of its
+	//     thread entities (external_actions.entity_id) and those linked to no
+	//     entity. The record of the act is not touched.
 	//
 	// It also records the change, so oldID — and any id that earlier moved to
 	// oldID — resolves to the channel's row from then on. Slack changes a

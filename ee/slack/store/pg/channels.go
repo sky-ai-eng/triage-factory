@@ -20,9 +20,10 @@ import (
 //     gates on org membership; there is no app-pool write policy at all,
 //     see the migration's RLS notes).
 //   - admin: every write (UpsertSightingSystem, EnsureSystem, SetNameSystem,
-//     FindOrCreateThreadSystem, MoveSystem) and ResolveSystem — ingest
-//     sightings, name resolution, thread creation and the channels API's
-//     ensure/resolve are all system-initiated, claims-free callers.
+//     FindOrCreateThreadSystem, MoveSystem), ResolveSystem and GetThreadSystem
+//     — ingest sightings and thread lookups, name resolution, thread creation
+//     and the channels API's ensure/resolve are all system-initiated,
+//     claims-free callers.
 type channelRegistryStore struct {
 	app   db.Execer
 	admin db.Execer
@@ -193,10 +194,30 @@ func (s *channelRegistryStore) ListForOrg(ctx context.Context, orgID string) ([]
 	return out, rows.Err()
 }
 
-// threadKeyOrder is the key lookup's preference among entities sharing a
-// thread's key — the active one (there is at most one), otherwise the most
-// recently closed — the order db.EntityStore's key lookup reads in.
-const threadKeyOrder = `ORDER BY (state = 'active') DESC, closed_at DESC NULLS LAST, created_at DESC, id DESC`
+// threadOrder is the thread lookup's preference among a thread's entities —
+// the active one (there is at most one), otherwise the most recently closed —
+// the order db.EntityStore's key lookup reads in.
+const threadOrder = `ORDER BY (state = 'active') DESC, closed_at DESC NULLS LAST, created_at DESC, id DESC`
+
+// threadEntitySQL selects the entity of the thread rooted at $3 in the channel
+// whose registry row is $2, for org $1, in threadOrder.
+const threadEntitySQL = `
+	SELECT id::text, kind, state FROM entities
+	WHERE org_id = $1 AND slack_channel_id = $2 AND slack_thread_ts = $3
+	` + threadOrder + ` LIMIT 1`
+
+// GetThreadSystem — see the interface doc.
+func (s *channelRegistryStore) GetThreadSystem(ctx context.Context, orgID, channel, threadTS string) (*slackstore.ThreadEntity, error) {
+	var t slackstore.ThreadEntity
+	err := s.admin.QueryRowContext(ctx, threadEntitySQL, orgID, channel, threadTS).Scan(&t.ID, &t.Kind, &t.State)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get slack thread %s in %s: %w", threadTS, channel, err)
+	}
+	return &t, nil
+}
 
 // FindOrCreateThreadSystem — see the interface doc. It writes the entities
 // row itself because the row references the channel's registry row, which
@@ -225,16 +246,12 @@ func (s *channelRegistryStore) FindOrCreateThreadSystem(ctx context.Context, org
 		out.Channel = channel
 		key := domain.SlackSourceID(channel.ChannelID, threadTS)
 		find := func() (string, error) {
-			var found string
-			err := q.QueryRowContext(ctx, `
-				SELECT id FROM entities
-				WHERE org_id = $1 AND source = 'slack' AND scope = $2 AND source_id = $3
-				`+threadKeyOrder+` LIMIT 1
-			`, orgID, domain.SlackScope, key).Scan(&found)
+			var found slackstore.ThreadEntity
+			err := q.QueryRowContext(ctx, threadEntitySQL, orgID, channel.ID, threadTS).Scan(&found.ID, &found.Kind, &found.State)
 			if errors.Is(err, sql.ErrNoRows) {
 				return "", nil
 			}
-			return found, err
+			return found.ID, err
 		}
 		existing, err := find()
 		if err != nil {
@@ -248,10 +265,10 @@ func (s *channelRegistryStore) FindOrCreateThreadSystem(ctx context.Context, org
 		newID := uuid.New().String()
 		now := time.Now().UTC()
 		res, err := q.ExecContext(ctx, `
-			INSERT INTO entities (id, org_id, source, scope, source_id, kind, title, url, state, created_at, last_polled_at, slack_channel_id)
-			VALUES ($1, $2, 'slack', $3, $4, $5, $6, $7, 'active', $8, $8, $9)
+			INSERT INTO entities (id, org_id, source, scope, source_id, kind, title, url, state, created_at, last_polled_at, slack_channel_id, slack_thread_ts)
+			VALUES ($1, $2, 'slack', $3, $4, $5, $6, $7, 'active', $8, $8, $9, $10)
 			ON CONFLICT DO NOTHING
-		`, newID, orgID, domain.SlackScope, key, kind, title, url, now, channel.ID)
+		`, newID, orgID, domain.SlackScope, key, kind, title, url, now, channel.ID, threadTS)
 		if err != nil {
 			return fmt.Errorf("insert slack thread %s: %w", key, err)
 		}

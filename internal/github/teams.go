@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strconv"
 )
 
 // userTeam is the subset of GET /user/teams we care about. The endpoint
@@ -13,34 +14,75 @@ import (
 // PAT/local path. See:
 // https://docs.github.com/en/rest/teams/teams#list-teams-for-the-authenticated-user
 type userTeam struct {
+	ID           int64  `json:"id"`
 	Slug         string `json:"slug"`
 	Name         string `json:"name"`
 	MembersCount int    `json:"members_count"`
 	Organization struct {
+		ID    int64  `json:"id"`
 		Login string `json:"login"`
 	} `json:"organization"`
 }
 
-// UserTeam is one of the authenticated user's GitHub team memberships,
-// the wire-ready shape the onboarding team-mapping step
-// presents. OrgSlug + TeamSlug are the routing identity (matching what
-// the tracker emits for team reviewers); Name is display-only;
-// MemberCount drives the "broad team — noisy queue" hint and is
-// best-effort (0 when GitHub didn't return it).
+// UserTeam is a GitHub team as the team-mapping editor and the onboarding
+// wizard present it. ID and OrgID are GitHub's ids for the team and its
+// organization, which a mapping is stored and routed by ("" when GitHub
+// returned none). OrgSlug + TeamSlug are its current handle, for display;
+// Name is display-only; MemberCount drives the "broad team — noisy queue"
+// hint and is best-effort (0 when GitHub didn't return it).
 type UserTeam struct {
+	ID          string
+	OrgID       string
 	OrgSlug     string
 	TeamSlug    string
 	Name        string
 	MemberCount int
 }
 
-// OrgTeam is the subset of GET /orgs/{org}/teams we care about — the
-// candidate list the github-group mapping editor presents. Names only;
-// no membership or nesting. See:
+// OrgTeam is the subset of GET /orgs/{org}/teams the deletion reconcile
+// reads: GitHub's id for each team, which a mapping is identified by, and its
+// current slug and name. No membership or nesting. See:
 // https://docs.github.com/en/rest/teams/teams#list-teams
 type OrgTeam struct {
+	ID   int64  `json:"id"`
 	Slug string `json:"slug"`
 	Name string `json:"name"`
+}
+
+// Org is the subset of GET /orgs/{org} the deletion reconcile reads: GitHub's
+// id for the organization, which the mappings under it record, and its
+// current login.
+type Org struct {
+	ID    int64  `json:"id"`
+	Login string `json:"login"`
+}
+
+// GetOrg reads the organization GitHub currently calls login. A user account
+// or an organization the token cannot see answers 404, which surfaces as an
+// error so a caller skips it rather than treating it as an organization with
+// no teams.
+func (c *Client) GetOrg(ctx context.Context, login string) (Org, error) {
+	data, err := c.Get(ctx, "/orgs/"+url.PathEscape(login))
+	if err != nil {
+		return Org{}, fmt.Errorf("get org %s: %w", login, err)
+	}
+	var org Org
+	if err := json.Unmarshal(data, &org); err != nil {
+		return Org{}, fmt.Errorf("parse org %s: %w", login, err)
+	}
+	if org.ID == 0 {
+		return Org{}, fmt.Errorf("get org %s: GitHub returned no id", login)
+	}
+	return org, nil
+}
+
+// githubID renders one of GitHub's numeric ids the way TF stores them, "" for
+// the zero value GitHub never issues.
+func githubID(id int64) string {
+	if id <= 0 {
+		return ""
+	}
+	return strconv.FormatInt(id, 10)
 }
 
 // teamsPerPage is GitHub's per-page cap for REST list endpoints.
@@ -122,6 +164,8 @@ func (c *Client) ListMyTeamsDetailed(ctx context.Context) ([]UserTeam, error) {
 				continue
 			}
 			out = append(out, UserTeam{
+				ID:          githubID(t.ID),
+				OrgID:       githubID(t.Organization.ID),
 				OrgSlug:     t.Organization.Login,
 				TeamSlug:    t.Slug,
 				Name:        t.Name,
@@ -160,9 +204,11 @@ func (c *Client) ListUserTeamsInOrg(ctx context.Context, orgLogin, userLogin str
 	const query = `
 		query UserTeamsInOrg($org: String!, $login: String!, $cursor: String) {
 			organization(login: $org) {
+				databaseId
 				teams(first: 100, userLogins: [$login], after: $cursor) {
 					pageInfo { hasNextPage endCursor }
 					nodes {
+						databaseId
 						slug
 						name
 						members { totalCount }
@@ -186,15 +232,17 @@ func (c *Client) ListUserTeamsInOrg(ctx context.Context, orgLogin, userLogin str
 		var resp struct {
 			Data struct {
 				Organization *struct {
-					Teams struct {
+					DatabaseID int64 `json:"databaseId"`
+					Teams      struct {
 						PageInfo struct {
 							HasNextPage bool   `json:"hasNextPage"`
 							EndCursor   string `json:"endCursor"`
 						} `json:"pageInfo"`
 						Nodes []struct {
-							Slug    string `json:"slug"`
-							Name    string `json:"name"`
-							Members struct {
+							DatabaseID int64  `json:"databaseId"`
+							Slug       string `json:"slug"`
+							Name       string `json:"name"`
+							Members    struct {
 								TotalCount int `json:"totalCount"`
 							} `json:"members"`
 						} `json:"nodes"`
@@ -216,6 +264,8 @@ func (c *Client) ListUserTeamsInOrg(ctx context.Context, orgLogin, userLogin str
 				continue
 			}
 			out = append(out, UserTeam{
+				ID:          githubID(t.DatabaseID),
+				OrgID:       githubID(resp.Data.Organization.DatabaseID),
 				OrgSlug:     orgLogin,
 				TeamSlug:    t.Slug,
 				Name:        t.Name,
@@ -257,9 +307,11 @@ func (c *Client) ListOrgTeamsDetailed(ctx context.Context, orgLogin string) ([]U
 	const query = `
 		query OrgTeams($org: String!, $cursor: String) {
 			organization(login: $org) {
+				databaseId
 				teams(first: 100, after: $cursor) {
 					pageInfo { hasNextPage endCursor }
 					nodes {
+						databaseId
 						slug
 						name
 						members { totalCount }
@@ -282,15 +334,17 @@ func (c *Client) ListOrgTeamsDetailed(ctx context.Context, orgLogin string) ([]U
 		var resp struct {
 			Data struct {
 				Organization *struct {
-					Teams struct {
+					DatabaseID int64 `json:"databaseId"`
+					Teams      struct {
 						PageInfo struct {
 							HasNextPage bool   `json:"hasNextPage"`
 							EndCursor   string `json:"endCursor"`
 						} `json:"pageInfo"`
 						Nodes []struct {
-							Slug    string `json:"slug"`
-							Name    string `json:"name"`
-							Members struct {
+							DatabaseID int64  `json:"databaseId"`
+							Slug       string `json:"slug"`
+							Name       string `json:"name"`
+							Members    struct {
 								TotalCount int `json:"totalCount"`
 							} `json:"members"`
 						} `json:"nodes"`
@@ -312,6 +366,8 @@ func (c *Client) ListOrgTeamsDetailed(ctx context.Context, orgLogin string) ([]U
 				continue
 			}
 			out = append(out, UserTeam{
+				ID:          githubID(t.DatabaseID),
+				OrgID:       githubID(resp.Data.Organization.DatabaseID),
 				OrgSlug:     orgLogin,
 				TeamSlug:    t.Slug,
 				Name:        t.Name,
@@ -331,13 +387,13 @@ func (c *Client) ListOrgTeamsDetailed(ctx context.Context, orgLogin string) ([]U
 	return out, nil
 }
 
-// ListOrgTeams returns every team in the given GitHub org as {slug, name}
-// pairs — the source of truth the deletion-reconcile floor compares stored
-// mappings against. Names only; no membership, no nesting traversal. The
-// candidate-list callers (editor + wizard) use ListOrgTeamsDetailed instead,
-// for member counts; this bare REST form stays the reconcile floor's source
-// because pruning needs slugs, not counts, and must not depend on the extra
-// Members-read surface the count subfield can require.
+// ListOrgTeams returns every team in the given GitHub org with its id, slug
+// and name — the source of truth the deletion reconcile compares stored
+// mappings against. No membership, no nesting traversal. The candidate-list
+// callers (editor + wizard) use ListOrgTeamsDetailed instead, for member
+// counts; this bare REST form stays the reconcile's source because it needs
+// ids, not counts, and must not depend on the extra Members-read surface the
+// count subfield can require.
 //
 // Requires the PAT/App token to have read:org (or org-members read) for
 // the org. A 404/403 surfaces as an error so callers can skip an org
@@ -357,7 +413,7 @@ func (c *Client) ListOrgTeams(ctx context.Context, org string) ([]OrgTeam, error
 			return nil, fmt.Errorf("parse org %s teams page %d: %w", org, page, err)
 		}
 		for _, t := range teams {
-			if t.Slug == "" {
+			if t.Slug == "" || t.ID == 0 {
 				continue
 			}
 			out = append(out, t)

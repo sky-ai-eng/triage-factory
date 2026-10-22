@@ -25,6 +25,8 @@ type UserRepo struct {
 	Language    string `json:"language"`
 	PushedAt    string `json:"pushed_at"`
 	Private     bool   `json:"private"`
+	// Owner is the account that owns the repository, from the same object.
+	Owner RepoOwner `json:"owner"`
 }
 
 // ExternalID renders UserRepo.ID the way repositories.external_id stores it:
@@ -35,6 +37,28 @@ func (r UserRepo) ExternalID() string {
 		return ""
 	}
 	return strconv.FormatInt(r.ID, 10)
+}
+
+// OwnerExternalID renders the owning account's id the way
+// repositories.owner_external_id stores it (RepoOwner.ExternalID).
+func (r UserRepo) OwnerExternalID() string { return r.Owner.ExternalID() }
+
+// RepoOwner is the "owner" object a repository response carries. Only the id is
+// decoded: the login is already the first half of full_name, and the id is the
+// half of the account's identity a rename of the account does not move, which
+// is what matches the repository to the App installation on that account.
+type RepoOwner struct {
+	ID int64 `json:"id"`
+}
+
+// ExternalID renders RepoOwner.ID as decimal text, the form
+// org_github_app_installations.account_id stores an account id in, and empty
+// when GitHub sent no owner id.
+func (o RepoOwner) ExternalID() string {
+	if o.ID == 0 {
+		return ""
+	}
+	return strconv.FormatInt(o.ID, 10)
 }
 
 // ListUserRepos returns all repositories the authenticated user has access to,
@@ -264,6 +288,10 @@ type RepoMeta struct {
 	DefaultBranch string `json:"default_branch"`
 	CloneURL      string `json:"clone_url"`
 	SSHURL        string `json:"ssh_url"`
+	// Owner is the account that owns the repository now. A transfer moves the
+	// repository to another account, so its id is read off the same response
+	// as full_name rather than kept from an earlier one.
+	Owner RepoOwner `json:"owner"`
 }
 
 // ExternalID renders RepoMeta.ID the way repositories.external_id stores it:
@@ -275,6 +303,10 @@ func (m RepoMeta) ExternalID() string {
 	}
 	return strconv.FormatInt(m.ID, 10)
 }
+
+// OwnerExternalID renders the owning account's id the way
+// repositories.owner_external_id stores it (RepoOwner.ExternalID).
+func (m RepoMeta) OwnerExternalID() string { return m.Owner.ExternalID() }
 
 // GetRepoMeta fetches the default branch and clone URL for a repository.
 func (c *Client) GetRepoMeta(ctx context.Context, owner, repo string) (*RepoMeta, error) {

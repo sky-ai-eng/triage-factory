@@ -25,7 +25,7 @@ func TestTeamRosterList_LocalSingleMember(t *testing.T) {
 	// ghbase.ResolveBaseURL hands the PAT and Connect writers for an
 	// unconfigured org.
 	if err := s.users.UpsertGitHubIdentity(t.Context(), runmode.LocalDefaultUserID,
-		ghbase.DefaultBaseURL(), "AidanAllchin", "", "", "pat"); err != nil {
+		ghbase.DefaultBaseURL(), "AidanAllchin", "583231", "", "pat"); err != nil {
 		t.Fatalf("seed github identity: %v", err)
 	}
 
@@ -55,6 +55,9 @@ func TestTeamRosterList_LocalSingleMember(t *testing.T) {
 	}
 	if m.GitHubUsername == nil || *m.GitHubUsername != "AidanAllchin" {
 		t.Errorf("github_username = %v, want AidanAllchin", m.GitHubUsername)
+	}
+	if m.GitHubUserID == nil || *m.GitHubUserID != "583231" {
+		t.Errorf("github_user_id = %v, want 583231", m.GitHubUserID)
 	}
 	// newTestServer bootstraps a default-enabled agent + team_agents row, so
 	// the bot rides beside the page with its roleful fields filled in.
@@ -89,6 +92,32 @@ func TestTeamRosterList_LocalNoIdentityCaptured(t *testing.T) {
 	}
 	if resp.Items[0].GitHubUsername != nil {
 		t.Errorf("github_username = %q, want null (not yet captured)", *resp.Items[0].GitHubUsername)
+	}
+	if resp.Items[0].GitHubUserID != nil {
+		t.Errorf("github_user_id = %q, want null (not yet captured)", *resp.Items[0].GitHubUserID)
+	}
+}
+
+// TestHandleMe_LocalMode_GitHubAccountID: local /api/me carries GitHub's id
+// for the local user's bound account beside its login, the value the predicate
+// editor writes for "match me".
+func TestHandleMe_LocalMode_GitHubAccountID(t *testing.T) {
+	s := newTestServer(t)
+	if err := s.users.UpsertGitHubIdentity(t.Context(), runmode.LocalDefaultUserID,
+		ghbase.DefaultBaseURL(), "AidanAllchin", "583231", "", "pat"); err != nil {
+		t.Fatalf("seed github identity: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodGet, "/api/me", nil)
+	var me struct {
+		GitHubUsername string `json:"github_username"`
+		GitHubUserID   string `json:"github_user_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &me); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("/api/me = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if me.GitHubUsername != "AidanAllchin" || me.GitHubUserID != "583231" {
+		t.Errorf("/api/me github = (%q, %q), want (AidanAllchin, 583231)", me.GitHubUsername, me.GitHubUserID)
 	}
 }
 

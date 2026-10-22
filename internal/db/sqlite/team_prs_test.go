@@ -74,18 +74,23 @@ func newSQLiteTeamPRSeeder(conn *sql.DB, teamID string) dbtest.TeamPRSeeder {
 		}
 		return id
 	}
+	bound := func(t *testing.T, login, githubUserID string) string {
+		t.Helper()
+		id := member(t, login)
+		if _, err := conn.Exec(`
+			INSERT INTO user_github_identities (user_id, github_base_url, login, github_user_id, source)
+			VALUES (?, ?, ?, NULLIF(?, ''), 'connect_oauth')
+		`, id, dbtest.TestGitHubHost, login, githubUserID); err != nil {
+			t.Fatalf("bind identity for %s: %v", login, err)
+		}
+		return id
+	}
 	return dbtest.TeamPRSeeder{
 		Member: func(t *testing.T, login string) string {
 			t.Helper()
-			id := member(t, login)
-			if _, err := conn.Exec(`
-				INSERT INTO user_github_identities (user_id, github_base_url, login, source)
-				VALUES (?, ?, ?, 'connect_oauth')
-			`, id, dbtest.TestGitHubHost, login); err != nil {
-				t.Fatalf("bind identity for %s: %v", login, err)
-			}
-			return id
+			return bound(t, login, "")
 		},
+		MemberWithGitHubID:    bound,
 		MemberWithoutIdentity: member,
 		OtherTeam: func(t *testing.T, name string) string {
 			t.Helper()

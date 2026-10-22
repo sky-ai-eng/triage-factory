@@ -97,7 +97,7 @@ func TestExternalActionStore_SQLite_BranchTwinDedup(t *testing.T) {
 	ctx := context.Background()
 	conversationID := seedArtifactConversation(t, conn)
 
-	key := domain.BranchPushDedupKey(conversationID, "refs/heads/feat", "abc123")
+	key := domain.BranchPushDedupKey(conversationID, "repo-1", "refs/heads/feat", "abc123")
 	twin := func(url string) domain.ExternalAction {
 		return domain.ExternalAction{
 			OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
@@ -133,7 +133,7 @@ func TestExternalActionStore_SQLite_BranchTwinDedup(t *testing.T) {
 	if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalAction{
 		OrgID: runmode.LocalDefaultOrgID, Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com",
 		Action: domain.ActionBranchPushed, Target: "octo/repo", Credential: domain.CredentialGitHubApp,
-		DedupKey: domain.BranchPushDedupKey(conversationID, "refs/heads/feat", "def456"),
+		DedupKey: domain.BranchPushDedupKey(conversationID, "repo-1", "refs/heads/feat", "def456"),
 	}); err != nil {
 		t.Fatalf("new-push Record: %v", err)
 	}

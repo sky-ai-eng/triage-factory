@@ -43,13 +43,28 @@ const PROSE =
   'Any number of teams can watch a channel, but only one can be primary. ' +
   'Changes do not apply to runs already in-flight.'
 
-/** Who this channel's mentions belong to, in the words the table prints. */
-function ownerOf(c: SlackChannelView): string {
-  if (c.is_primary) return 'this team'
+/**
+ * Whose a channel's mentions are: this team's, another team's, nobody's while
+ * some team watches the channel, or `unwatched` when no team does.
+ */
+type OwnerKind = 'ours' | 'theirs' | 'none' | 'unwatched'
+
+/**
+ * Who this channel's mentions belong to: the kind, which tone and sort read,
+ * and the words the table prints. The kind is decided here and carried beside
+ * the text, because another team's name can be any text, "no one" included.
+ */
+function ownerOf(c: SlackChannelView): { kind: OwnerKind; text: string } {
+  if (c.is_primary) return { kind: 'ours', text: 'this team' }
   const primary = (c.tracked_by ?? []).find((t) => t.is_primary)
-  if (primary) return primary.team_name
-  return (c.tracked_by ?? []).length > 0 ? 'no one' : ''
+  if (primary) return { kind: 'theirs', text: primary.team_name }
+  return (c.tracked_by ?? []).length > 0
+    ? { kind: 'none', text: 'no one' }
+    : { kind: 'unwatched', text: '' }
 }
+
+/** The star column's order: ours, then the ones nobody owns, then the rest. */
+const OWNER_ORDER: Record<OwnerKind, number> = { ours: 0, none: 1, theirs: 2, unwatched: 3 }
 
 /**
  * The primary mark. Drawn rather than typed: a text star inherits its font's
@@ -58,8 +73,8 @@ function ownerOf(c: SlackChannelView): string {
  */
 function star(row: TableRow) {
   if (!row.watched) return null
-  const owner = row.owner as string
-  const tone = owner === 'no one' ? 'none' : owner === 'this team' ? 'ours' : 'theirs'
+  const kind = row.ownerKind as OwnerKind
+  const tone = kind === 'unwatched' ? 'none' : kind
   return (
     <span className="sp-star" data-tone={tone} aria-hidden="true">
       <svg width="13" height="13" viewBox="0 0 24 24">
@@ -116,13 +131,15 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
     () =>
       (channels ?? []).map((c) => {
         const min = minutesSince(c.last_mention_at)
+        const owner = ownerOf(c)
         return {
           id: c.channel_id,
           // A bare id is what the registry has when nothing has resolved a
           // name yet. Inventing one would be worse than showing the id.
           name: c.name ? '#' + c.name : c.channel_id,
           watched: c.tracked,
-          owner: ownerOf(c),
+          owner: owner.text,
+          ownerKind: owner.kind,
           mentions: null,
           last: min === null ? null : ago(min),
           lastMin: min,
@@ -145,8 +162,7 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
         label: '',
         width: '16px',
         render: star,
-        sortValue: (r) =>
-          r.owner === 'this team' ? 0 : r.owner === 'no one' ? 1 : r.owner ? 2 : 3,
+        sortValue: (r) => OWNER_ORDER[r.ownerKind as OwnerKind],
       },
       {
         key: 'name',
@@ -159,9 +175,9 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
         align: 'end',
         render: (r) => r.owner || '—',
         color: (r) =>
-          r.owner === 'no one'
+          r.ownerKind === 'none'
             ? 'var(--color-alarm)'
-            : r.owner === 'this team'
+            : r.ownerKind === 'ours'
               ? 'var(--color-ink-2)'
               : 'var(--color-ink-3)',
       },

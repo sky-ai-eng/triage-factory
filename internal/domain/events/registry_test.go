@@ -73,12 +73,11 @@ func TestRegistryFieldSchemaGeneration(t *testing.T) {
 		t.Fatalf("label_added schema not registered")
 	}
 	want := map[string]string{
-		"author_in":  "string_list",
-		"author":     "string",
-		"label_name": "string",
-		"repo_in":    "string_list",
-		"is_draft":   "bool",
-		"has_label":  "string",
+		"author_id_in": "string_list",
+		"label_name":   "string",
+		"repo_in":      "string_list",
+		"is_draft":     "bool",
+		"has_label":    "string",
 	}
 	got := map[string]string{}
 	for _, f := range s.Fields {
@@ -95,8 +94,9 @@ func TestRegistryFieldSchemaGeneration(t *testing.T) {
 }
 
 // TestIssueLabelEventFields pins the predicate fields of the Jira and Linear
-// label events. Every one is a string or an identity list, so the predicate
-// editor renders them with the field types it already has; the editor picks
+// label events. A Jira label has no id, so its filters are names; a Linear
+// label and its group have ids, so its filters are id lists the editor picks
+// from the labels the team's tracked Linear teams can use. The editor picks
 // the identity kind of assignee_in from the event's source.
 func TestIssueLabelEventFields(t *testing.T) {
 	jira := map[string]string{
@@ -108,9 +108,9 @@ func TestIssueLabelEventFields(t *testing.T) {
 	linear := map[string]string{
 		"assignee_in":       "string_list",
 		"linear_team_id_in": "string_list",
-		"label_name":        "string",
-		"label_group":       "string",
-		"has_label":         "string",
+		"label_id_in":       "string_list",
+		"label_group_id_in": "string_list",
+		"has_label_id_in":   "string_list",
 	}
 	for eventType, want := range map[string]map[string]string{
 		domain.EventJiraIssueLabelAdded:     jira,
@@ -144,6 +144,7 @@ func TestMatcherAppliesPredicate(t *testing.T) {
 
 	meta := GitHubPRCICheckFailedMetadata{
 		Author:       "aidan",
+		AuthorID:     "583231",
 		CheckName:    "test",
 		Repo:         "sky-ai-eng/triage-factory",
 		RepositoryID: "repo-tf",
@@ -157,16 +158,14 @@ func TestMatcherAppliesPredicate(t *testing.T) {
 		want      bool
 	}{
 		{"empty predicate matches all", "", true},
-		{"author_in matches when author is in list", `{"author_in":["aidan"]}`, true},
-		{"author_in matches case-insensitively", `{"author_in":["AIDAN"]}`, true},
-		{"author_in rejects when author not in list", `{"author_in":["someone-else"]}`, false},
-		{"empty author_in is no-filter (matches)", `{"author_in":[]}`, true},
-		{"author exact-match hits", `{"author":"aidan"}`, true},
-		{"author exact-match misses", `{"author":"renovate[bot]"}`, false},
+		{"author_id_in matches when the author's id is in list", `{"author_id_in":["1","583231"]}`, true},
+		{"author_id_in rejects when the author's id is not in list", `{"author_id_in":["49699333"]}`, false},
+		{"author_id_in holding the author's login matches nothing", `{"author_id_in":["aidan"]}`, false},
+		{"empty author_id_in is no-filter (matches)", `{"author_id_in":[]}`, true},
 		{"has_label hits when label present", `{"has_label":"self-review"}`, true},
 		{"has_label misses when absent", `{"has_label":"urgent"}`, false},
-		{"multi-field AND: all pass", `{"author_in":["aidan"],"check_name":"test"}`, true},
-		{"multi-field AND: one fails", `{"author_in":["aidan"],"check_name":"build"}`, false},
+		{"multi-field AND: all pass", `{"author_id_in":["583231"],"check_name":"test"}`, true},
+		{"multi-field AND: one fails", `{"author_id_in":["583231"],"check_name":"build"}`, false},
 		{"repo_in hits the event's repository id", `{"repo_in":["repo-other","repo-tf"]}`, true},
 		{"repo_in misses another repository id", `{"repo_in":["repo-other"]}`, false},
 	}
@@ -229,11 +228,11 @@ func TestValidatePredicateJSON(t *testing.T) {
 		{"empty → match-all", domain.EventGitHubPRNewCommits, "", "", false},
 		{"{} → match-all", domain.EventGitHubPRNewCommits, "{}", "", false},
 		{"null → match-all", domain.EventGitHubPRNewCommits, "null", "", false},
-		{"canonical round-trip", domain.EventGitHubPRNewCommits, `{"author_in":["aidan"]}`, `{"author_in":["aidan"]}`, false},
+		{"canonical round-trip", domain.EventGitHubPRNewCommits, `{"author_id_in":["583231"]}`, `{"author_id_in":["583231"]}`, false},
 		{"unknown field rejected", domain.EventGitHubPRNewCommits, `{"bogus_field":true}`, "", true},
 		{"deprecated author_is_self rejected", domain.EventGitHubPRNewCommits, `{"author_is_self":true}`, "", true},
-		{"wrong type rejected", domain.EventGitHubPRNewCommits, `{"author_in":"nope"}`, "", true},
-		{"unknown event type rejected", "github:pr:does_not_exist", `{"author_in":["aidan"]}`, "", true},
+		{"wrong type rejected", domain.EventGitHubPRNewCommits, `{"author_id_in":"nope"}`, "", true},
+		{"unknown event type rejected", "github:pr:does_not_exist", `{"author_id_in":["583231"]}`, "", true},
 	}
 
 	for _, tc := range cases {

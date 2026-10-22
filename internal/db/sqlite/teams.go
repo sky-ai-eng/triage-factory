@@ -726,6 +726,15 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 	if err != nil {
 		return nil, 0, fmt.Errorf("list team member github identities: %w", err)
 	}
+	ghIDMap, err := queryIdentityMap(ctx, s.q, `
+		SELECT gh.user_id, gh.github_user_id
+		FROM user_github_identities gh
+		JOIN memberships m ON m.user_id = gh.user_id AND m.team_id = ?
+		WHERE gh.github_base_url = ? AND gh.github_user_id IS NOT NULL
+	`, teamID, db.EffectiveGitHubHost(githubBaseURL))
+	if err != nil {
+		return nil, 0, fmt.Errorf("list team member github account ids: %w", err)
+	}
 	jiraMap, err := queryIdentityMap(ctx, s.q, `
 		SELECT j.user_id, j.account_id
 		FROM user_jira_identities j
@@ -749,6 +758,9 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 	for i := range out {
 		if login, ok := ghMap[out[i].UserID]; ok {
 			out[i].GitHubUsername = &login
+		}
+		if id, ok := ghIDMap[out[i].UserID]; ok {
+			out[i].GitHubUserID = &id
 		}
 		if acct, ok := jiraMap[out[i].UserID]; ok {
 			out[i].JiraAccountID = &acct

@@ -30,6 +30,9 @@ import { apiFetch, apiJSON } from '../lib/apiClient'
 import { usePagedList } from '../hooks/usePagedList'
 
 export interface PRSummary {
+  /** The pull request's entity id: the key the board holds it by and the id
+   *  its per-PR routes take. repo and number are display values. */
+  entity_id: string
   number: number
   title: string
   repo: string
@@ -101,7 +104,11 @@ export default function PRDashboard() {
   const seededFromCache = useRef(false)
   if (!seededFromCache.current) {
     seededFromCache.current = true
-    const cached = loadCached<PRSummary[]>('pr-dash-prs')
+    // A row cached before the list served entity ids has no id to address it
+    // by, so it is left out rather than painted as a card that cannot act.
+    const cached = loadCached<PRSummary[]>('pr-dash-prs')?.filter(
+      (pr) => typeof pr.entity_id === 'string' && pr.entity_id !== '',
+    )
     if (cached && cached.length > 0) setPrs(() => cached)
   }
 
@@ -202,7 +209,7 @@ export default function PRDashboard() {
   const mergedPRs = prs.filter((pr) => pr.state === 'merged').sort(byRecent)
   const closedPRs = prs.filter((pr) => pr.state === 'closed').sort(byRecent)
 
-  const prKey = (pr: PRSummary) => `${pr.repo}-${pr.number}`
+  const prKey = (pr: PRSummary) => pr.entity_id
   const prMap = new Map(prs.map((pr) => [prKey(pr), pr]))
 
   const getColumn = (id: string): ColumnId | null => {
@@ -249,8 +256,8 @@ export default function PRDashboard() {
 
     // Hit the API
     try {
-      await apiFetch(`/api/dashboard/prs/${pr.repo}/${pr.number}/draft`, {
-        method: 'POST',
+      await apiFetch(`/api/dashboard/prs/${encodeURIComponent(pr.entity_id)}`, {
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ draft: makeDraft }),
       })

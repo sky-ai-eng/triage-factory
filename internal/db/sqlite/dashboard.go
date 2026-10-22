@@ -27,7 +27,7 @@ func newDashboardStore(q queryer) db.DashboardStore { return &dashboardStore{q: 
 
 var _ db.DashboardStore = (*dashboardStore)(nil)
 
-func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, since time.Time) (*domain.DashboardStats, error) {
+func (s *dashboardStore) Stats(ctx context.Context, orgID string, viewer domain.GitHubAccount, since time.Time) (*domain.DashboardStats, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -58,7 +58,7 @@ func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinc
 			continue
 		}
 
-		if snap.Author == username {
+		if viewer.Is(snap.Author, snap.AuthorID) {
 			switch {
 			case snap.Merged:
 				mergedAt, err := time.Parse(time.RFC3339, snap.MergedAt)
@@ -78,13 +78,13 @@ func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinc
 			}
 
 			for _, review := range snap.Reviews {
-				if review.Author != username {
+				if !viewer.Is(review.Author, review.AuthorID) {
 					stats.ReviewsReceived++
 				}
 			}
 		} else {
 			for _, review := range snap.Reviews {
-				if review.Author == username {
+				if viewer.Is(review.Author, review.AuthorID) {
 					stats.ReviewsGiven++
 				}
 			}
@@ -99,7 +99,7 @@ func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinc
 	return stats, nil
 }
 
-// PRs pages the caller's own pull requests: authored under their GitHub login,
+// PRs pages the caller's own pull requests: authored by their GitHub account,
 // or commissioned by them (a run they asked for opened it under the bot's
 // login). Both legs are SQL predicates, so the window applies to the caller's
 // set rather than to the entity table — the Go-side filter this replaced would
@@ -116,26 +116,14 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID string, viewer db.PRView
 	if err != nil {
 		return nil, 0, err
 	}
-	// Each leg binds only when the viewer carries that id, so an unbound
-	// GitHub identity narrows the list to what they commissioned instead of
-	// matching every row whose author is the empty string.
-	var args []any
-	legs := make([]string, 0, 2)
-	if viewer.Login != "" {
-		args = append(args, viewer.Login)
-		legs = append(legs, `json_extract(e.snapshot_json, '$.author') = ?`)
-	}
-	if viewer.UserID != "" {
-		args = append(args, viewer.UserID)
-		legs = append(legs, `e.commissioned_by_user_id = ?`)
-	}
-	if len(legs) == 0 {
+	mine, args, ok := sqlitePRViewerLegs(viewer, nil)
+	if !ok {
 		return []domain.PRSummaryRow{}, 0, nil
 	}
 
 	where := `
 		WHERE e.source = 'github' AND ` + sqlitePRStateSnapshotGuard + `
-		  AND (` + strings.Join(legs, " OR ") + `)` + stateClause
+		  AND ` + mine + stateClause
 
 	var total int
 	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM entities e`+where, args...).Scan(&total); err != nil {
@@ -145,7 +133,7 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID string, viewer db.PRView
 		return []domain.PRSummaryRow{}, total, nil
 	}
 
-	query := `SELECT e.snapshot_json FROM entities e` + where + sqlitePRSummaryOrder
+	query := `SELECT ` + sqlitePRSummaryColumns + ` FROM entities e` + where + sqlitePRSummaryOrder
 	if opts.Limit > 0 {
 		query += ` LIMIT ? OFFSET ?`
 		args = append(args, opts.Limit, opts.Offset)
@@ -159,6 +147,50 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID string, viewer db.PRView
 		return nil, 0, err
 	}
 	return prs, total, nil
+}
+
+// PR reads one entity under the predicate PRs pages by, so a pull request
+// outside the viewer's list is a miss here too.
+func (s *dashboardStore) PR(ctx context.Context, orgID string, viewer db.PRViewer, entityID string) (*domain.Entity, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	mine, args, ok := sqlitePRViewerLegs(viewer, []any{entityID})
+	if !ok {
+		return nil, nil
+	}
+	return scanEntityRow(s.q.QueryRowContext(ctx, `
+		SELECT `+entitySelectCols+`
+		  FROM entities e
+		 WHERE e.id = ? AND e.source = 'github' AND `+sqlitePRStateSnapshotGuard+`
+		   AND `+mine, args...))
+}
+
+// sqlitePRViewerLegs renders the viewer's population as a parenthesized OR of
+// the identity legs the viewer carries, appending each leg's bind to args: the
+// pull requests authored by their GitHub account (by GitHub's id when both the
+// snapshot and the viewer carry one, by login otherwise —
+// sqliteGitHubAuthoredBy), and the ones they commissioned. Each leg binds only
+// when the viewer carries that identity, so an unbound GitHub identity narrows
+// the population to what they commissioned instead of matching every row whose
+// author is the empty string. ok is false when the viewer carries neither:
+// there is no population to answer for, and the caller answers empty rather
+// than for the whole install.
+func sqlitePRViewerLegs(viewer db.PRViewer, args []any) (clause string, out []any, ok bool) {
+	legs := make([]string, 0, 2)
+	if viewer.Login != "" || viewer.GitHubUserID != "" {
+		var leg string
+		leg, args = sqliteGitHubAuthoredBy(args, []domain.GitHubAccount{{Login: viewer.Login, ID: viewer.GitHubUserID}})
+		legs = append(legs, leg)
+	}
+	if viewer.UserID != "" {
+		args = append(args, viewer.UserID)
+		legs = append(legs, `e.commissioned_by_user_id = ?`)
+	}
+	if len(legs) == 0 {
+		return "", args, false
+	}
+	return "(" + strings.Join(legs, " OR ") + ")", args, true
 }
 
 // buildDashboardTimeline reshapes the per-day count map into a

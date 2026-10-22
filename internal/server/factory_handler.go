@@ -126,6 +126,14 @@ type factoryEntityJSON struct {
 	// latest. Bounded per-entity by factoryRecentEventsPerEntity.
 	RecentEvents []factoryRecentEventJSON `json:"recent_events,omitempty"`
 
+	// The registry row the entity belongs to: a pull request's repository,
+	// a Jira issue's project, a Linear issue's team. Only the one for the
+	// entity's source is set. The belt colors chips by it, so two chips
+	// share a hue when they share the row, whatever their keys spell.
+	RepositoryID  string `json:"repository_id,omitempty"`
+	JiraProjectID string `json:"jira_project_id,omitempty"`
+	LinearTeamID  string `json:"linear_team_id,omitempty"`
+
 	// GitHub PR fields.
 	Number    int    `json:"number,omitempty"`
 	Repo      string `json:"repo,omitempty"`
@@ -222,17 +230,22 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 	// identity (fresh install, no GitHub configured) degrades to
 	// everyone-is-other rather than failing the whole endpoint — the
 	// factory should still render for a user who's only set up Jira.
-	var ghUsername string
+	var me domain.GitHubAccount
+	var jiraAccountID string
 	var eventCounts, taskCounts, lifetimeCounts map[string]int
 	var activeConversations []domain.FactoryActiveConversation
 	var entityRows []domain.FactoryEntityRow
 	var recentByEntity map[string][]domain.FactoryRecentEvent
 	var pendingTasks []domain.PendingTaskRef
 	var openRunsByEntity map[string]struct{}
-	runAuthors := map[string]string{}
+	runAuthors := map[string]domain.GitHubAccount{}
 	if err := fh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		orgSet, _ := tx.Orgs.GetSettings(r.Context(), orgID)
-		ghUsername, _ = tx.Users.GetGitHubLogin(r.Context(), userID, orgSet.GitHubBaseURL)
+		identity, _ := tx.Users.GetGitHubIdentity(r.Context(), userID, orgSet.GitHubBaseURL)
+		me = domain.GitHubAccountOf(identity)
+		// The Jira identity is keyed by the org's Jira site, and degrades the
+		// same way: none stored means no Jira ticket is "mine".
+		jiraAccountID, _, _ = tx.Users.GetJiraIdentity(r.Context(), userID, orgSet.JiraBaseURL)
 
 		// --- Throughput counters --------------------------------------
 		var e error
@@ -264,7 +277,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 			}
 			ent, getErr := tx.Entities.Get(r.Context(), orgID, ar.Task.EntityID)
 			if getErr != nil || ent == nil {
-				runAuthors[ar.Task.EntityID] = ""
+				runAuthors[ar.Task.EntityID] = domain.GitHubAccount{}
 				continue
 			}
 			runAuthors[ar.Task.EntityID] = extractEntityAuthor(ent)
@@ -330,7 +343,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 		st.Runs = append(st.Runs, factoryRunJSON{
 			Run:  toFactoryRunSummary(ar.Conversation),
 			Task: taskToJSON(ar.Task),
-			Mine: ghUsername != "" && runAuthors[ar.Task.EntityID] == ghUsername,
+			Mine: me.Is(runAuthors[ar.Task.EntityID].Login, runAuthors[ar.Task.EntityID].ID),
 		})
 		stations[ar.Task.EventType] = st
 	}
@@ -364,6 +377,9 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 			Kind:             row.Entity.Kind,
 			Title:            row.Entity.Title,
 			URL:              row.Entity.URL,
+			RepositoryID:     row.Entity.RepositoryID,
+			JiraProjectID:    row.Entity.JiraProjectID,
+			LinearTeamID:     row.Entity.LinearTeamID,
 			CurrentEventType: row.LatestEventType,
 		}
 		if row.LatestEventAt != nil {
@@ -399,7 +415,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 					factoryLog.Warn("entity has malformed snapshot_json", "entity", row.Entity.ID, "error", err)
 				}
 			}
-			ej.Mine = ghUsername != "" && ej.Author == ghUsername
+			ej.Mine = me.Is(snap.Author, snap.AuthorID)
 		case "jira":
 			var snap domain.JiraSnapshot
 			if row.Entity.SnapshotJSON != "" {
@@ -409,10 +425,10 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 					ej.Assignee = snap.Assignee
 				}
 			}
-			// Jira "mine" = assigned to the session user. The session user's
-			// Jira display name lives in user_jira_identities (read via
-			// UsersStore.GetJiraIdentity for the org's host); keep this empty
-			// for v1 and let the UI fall back to the other tint.
+			// Jira "mine" = assigned to the session user, compared by the
+			// stable account id their identity on the org's site carries,
+			// never by display name.
+			ej.Mine = snap.AssignedTo(jiraAccountID)
 		case "linear":
 			var snap domain.LinearSnapshot
 			if row.Entity.SnapshotJSON != "" {
@@ -432,18 +448,20 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 	})
 }
 
-// extractEntityAuthor returns the GitHub author login for PR entities.
-// Jira entities return "" — we don't have a reliable author-to-self mapping
-// for Jira tickets at this layer (the user's Jira display name lives in a
-// different keychain slot). Factory overlay tint for jira runs just
-// defaults to "other" until that plumbing is added.
-func extractEntityAuthor(e *domain.Entity) string {
+// extractEntityAuthor returns the GitHub author's account (login, and GitHub's
+// id when the snapshot records one) for PR entities, which "mine" compares
+// with the caller's binding by id when both have one (domain.GitHubAccount.Is).
+// Jira entities return the zero account — we don't have a reliable
+// author-to-self mapping for Jira tickets at this layer (the user's Jira
+// display name lives in a different keychain slot). Factory overlay tint for
+// jira runs just defaults to "other" until that plumbing is added.
+func extractEntityAuthor(e *domain.Entity) domain.GitHubAccount {
 	if e.Source != "github" || e.SnapshotJSON == "" {
-		return ""
+		return domain.GitHubAccount{}
 	}
 	var snap domain.PRSnapshot
 	if err := json.Unmarshal([]byte(e.SnapshotJSON), &snap); err != nil {
-		return ""
+		return domain.GitHubAccount{}
 	}
-	return snap.Author
+	return domain.GitHubAccount{Login: snap.Author, ID: snap.AuthorID}
 }

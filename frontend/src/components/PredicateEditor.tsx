@@ -7,13 +7,18 @@ import SlackChannelListField from './SlackChannelListField'
 import RepoListField from './RepoListField'
 import LinearTeamListField from './LinearTeamListField'
 import JiraProjectListField from './JiraProjectListField'
+import CatalogListField from './CatalogListField'
+import { catalogKindFor } from './predicateCatalog'
+import GitHubTeamListField from './GitHubTeamListField'
 import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 interface PredicateEditorProps {
   eventType: string
   /** The handler's team, whose tracked Slack channels, repositories, Linear
    *  teams and Jira projects `channel_in`, `repo_in`, `linear_team_id_in` and
-   *  `jira_project_id_in` offer.
+   *  `jira_project_id_in` offer, whose GitHub-team mappings
+   *  `requested_team_id_in` offers, and whose tracked Jira projects and Linear
+   *  teams the status, priority, issue type and label fields offer values of.
    *  '' when the server resolves the team (the sole team). */
   teamId?: string
   value: Record<string, unknown>
@@ -123,6 +128,9 @@ interface FieldRowProps {
 }
 
 function FieldRow({ field, eventType, teamId, value, onChange }: FieldRowProps) {
+  // A Jira status, priority or issue type, or a Linear state, label or label
+  // group, named by id and picked from what the team's tracked sources offer.
+  const catalog = field.type === 'string_list' ? catalogKindFor(eventType, field.name) : null
   return (
     <div>
       <div className="flex items-center gap-1.5 mb-1.5">
@@ -176,14 +184,30 @@ function FieldRow({ field, eventType, teamId, value, onChange }: FieldRowProps) 
           onChange={(v) => onChange(v)}
         />
       )}
+      {catalog && (
+        <CatalogListField
+          kind={catalog}
+          teamId={teamId}
+          value={Array.isArray(value) ? (value as string[]) : undefined}
+          onChange={(v) => onChange(v)}
+        />
+      )}
+      {field.type === 'string_list' && field.name === 'requested_team_id_in' && (
+        <GitHubTeamListField
+          teamId={teamId}
+          value={Array.isArray(value) ? (value as string[]) : undefined}
+          onChange={(v) => onChange(v)}
+        />
+      )}
       {/* Every other string_list field is an identity allowlist:
-          GitHub → author_in / reviewer_in / commenter_in;
+          GitHub → author_id_in / reviewer_id_in / commenter_id_in /
+          requested_user_id_in;
           Jira → assignee_in / reporter_in / commenter_in;
           Linear → assignee_in / creator_in / commenter_in.
           IdentityListField branches on identityKind to read the right
-          column (github_username, jira_account_id or linear_user_id)
+          column (github_user_id, jira_account_id or linear_user_id)
           from /api/me and the team roster. */}
-      {field.type === 'string_list' && !REFERENCE_LIST_FIELDS.has(field.name) && (
+      {field.type === 'string_list' && !REFERENCE_LIST_FIELDS.has(field.name) && !catalog && (
         <IdentityListField
           fieldName={field.name}
           identityKind={identityKindFor(eventType)}
@@ -204,17 +228,18 @@ const LINEAR_TEAM_FIELDS = new Set(['linear_team_id_in', 'old_linear_team_id_in'
 const JIRA_PROJECT_FIELDS = new Set(['jira_project_id_in', 'old_jira_project_id_in'])
 
 // REFERENCE_LIST_FIELDS are the string_list fields that name rows the team
-// tracks, each with its own picker, rather than people.
+// tracks or maps, each with its own picker, rather than people.
 const REFERENCE_LIST_FIELDS = new Set([
   'channel_in',
   'repo_in',
+  'requested_team_id_in',
   ...LINEAR_TEAM_FIELDS,
   ...JIRA_PROJECT_FIELDS,
 ])
 
 // identityKindFor picks the identity an allowlist holds from the event's
 // source prefix: a Linear assignee is a Linear user id, never a GitHub
-// login.
+// account id.
 function identityKindFor(eventType: string): IdentityKind {
   if (eventType.startsWith('jira:')) return 'jira'
   if (eventType.startsWith('linear:')) return 'linear'

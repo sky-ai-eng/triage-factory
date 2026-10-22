@@ -9,8 +9,8 @@ import (
 )
 
 func TestPlacementOverrideStore_SQLite_Conformance(t *testing.T) {
-	dbtest.RunPlacementOverrideStoreConformance(t, func(t *testing.T) (db.PlacementOverrideStore, string) {
+	dbtest.RunPlacementOverrideStoreConformance(t, func(t *testing.T) (db.PlacementOverrideStore, db.RepositoryStore, string) {
 		conn := newSQLiteForArtifactTest(t)
-		return sqlitestore.NewPlacementOverrideStore(conn), "00000000-0000-0000-0000-000000000001"
+		return sqlitestore.NewPlacementOverrideStore(conn), sqlitestore.New(conn).Repos, "00000000-0000-0000-0000-000000000001"
 	})
 }

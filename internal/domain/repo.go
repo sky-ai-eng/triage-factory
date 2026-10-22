@@ -37,12 +37,17 @@ func NormalizeRepoSource(source string) (string, error) {
 // slug the rest of the product carries; ExternalID is the provider's own id for
 // that repository, which is what survives a rename, and is empty whenever the
 // caller has no id to hand (nothing fetches one just to fill it in).
+// OwnerExternalID is the provider's own id for the account that owns the
+// repository (GitHub's numeric account id), empty under the same terms; it
+// describes the repository ExternalID names, so a ref without ExternalID has
+// nothing to attach it to.
 type RepoRef struct {
-	Source     string // "" → RepoSourceGitHub
-	Host       string
-	Owner      string
-	Repo       string
-	ExternalID string // "" = unknown
+	Source          string // "" → RepoSourceGitHub
+	Host            string
+	Owner           string
+	Repo            string
+	ExternalID      string // "" = unknown
+	OwnerExternalID string // "" = unknown
 }
 
 // Slug renders the reference as the "owner/repo" string every slug-keyed
@@ -91,6 +96,17 @@ type Repository struct {
 	Host       string
 	ExternalID string
 
+	// OwnerExternalID is the provider's own id for the account that owns the
+	// repository: GitHub's numeric account id, which an account rename does
+	// not move, while Owner, the login, stays stale until TF applies the
+	// rename. It is what matches the repository to the App installation on
+	// its owner account (org_github_app_installations.account_id); the login
+	// stands in only while either side has no id. Empty when TF has not
+	// learned it, a supported state like an empty ExternalID. It is written
+	// only onto a row that carries the repository id of the response it was
+	// read from.
+	OwnerExternalID string
+
 	Description    string
 	HasReadme      bool
 	HasClaudeMd    bool
@@ -133,7 +149,10 @@ func (r Repository) Slug() string { return r.Owner + "/" + r.Repo }
 // Ref is the repository's provider identity as a RepoRef — what to hand a
 // *ByRef* store lookup when all you have is a row you already read.
 func (r Repository) Ref() RepoRef {
-	return RepoRef{Source: r.Source, Host: r.Host, Owner: r.Owner, Repo: r.Repo, ExternalID: r.ExternalID}
+	return RepoRef{
+		Source: r.Source, Host: r.Host, Owner: r.Owner, Repo: r.Repo,
+		ExternalID: r.ExternalID, OwnerExternalID: r.OwnerExternalID,
+	}
 }
 
 // SplitGitHubEntitySourceID splits a GitHub entity's key into its parts:

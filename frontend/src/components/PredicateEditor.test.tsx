@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import PredicateEditor from './PredicateEditor'
 import { jsonBody } from '../test/apiResponse'
+import { LOCAL_DEFAULT_ORG_ID } from '../lib/githubApp'
 import type { MeResponse, SlackChannelView, TeamMember } from '../types'
 
 // The viewer has an identity on every source, each a different value, so a
@@ -9,6 +10,7 @@ import type { MeResponse, SlackChannelView, TeamMember } from '../types'
 const me: MeResponse = {
   id: 'user-1',
   github_username: 'octocat',
+  github_user_id: '583231',
   jira_account_id: '557058:abc-me',
   jira_display_name: 'Me on Jira',
   linear_user_id: 'lin-me',
@@ -36,6 +38,7 @@ function member(over: Partial<TeamMember>): TeamMember {
     user_id: 'user-x',
     display_name: '',
     github_username: null,
+    github_user_id: null,
     jira_account_id: null,
     linear_user_id: null,
     role: 'member',
@@ -68,7 +71,8 @@ describe('PredicateEditor identity allowlists', () => {
     ['linear:issue:label_removed', 'assignee_in', 'lin-me'],
     ['jira:issue:assigned', 'reporter_in', '557058:abc-me'],
     ['jira:issue:commented', 'commenter_in', '557058:abc-me'],
-    ['github:pr:opened', 'author_in', 'octocat'],
+    ['github:pr:opened', 'author_id_in', '583231'],
+    ['github:pr:review_requested', 'requested_user_id_in', '583231'],
   ])(
     'the solo toggle on %s %s writes the viewer’s identity for that source',
     async (eventType, field, want) => {
@@ -111,6 +115,168 @@ describe('PredicateEditor identity allowlists', () => {
 
     fireEvent.mouseDown(screen.getByText('lin-ada'))
     expect(onChange).toHaveBeenCalledWith({ assignee_in: ['lin-ada'] })
+  })
+})
+
+// stubField answers the schema read with one string_list field and every
+// other read with route's [status, body].
+function stubField(field: string, route: (url: string) => [number, unknown]) {
+  const fetchMock = vi.fn((url: string) => {
+    const [status, body] = url.startsWith('/api/event-schemas/')
+      ? [200, { fields: [{ name: field, type: 'string_list' }] }]
+      : route(url)
+    return Promise.resolve({ ok: status < 400, status, ...jsonBody(body) })
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+const accounts = `/api/orgs/${LOCAL_DEFAULT_ORG_ID}/github/users/`
+// The accounts the org's GitHub answers for, by login and by id.
+const githubAccounts = [
+  { github_user_id: '583231', login: 'octocat' },
+  { github_user_id: '1001', login: 'ada-gh' },
+  { github_user_id: '29139614', login: 'renovate[bot]' },
+]
+const githubTeam = [
+  member({
+    user_id: 'user-1',
+    display_name: 'Me',
+    github_username: 'octocat',
+    github_user_id: '583231',
+    is_current_user: true,
+  }),
+  member({
+    user_id: 'user-2',
+    display_name: 'Ada',
+    github_username: 'ada-gh',
+    github_user_id: '1001',
+  }),
+  member({ user_id: 'user-3', display_name: 'Bob' }),
+]
+
+function renderAuthorField(value: Record<string, string[]> = {}, members = githubTeam) {
+  roster.members = members
+  const fetchMock = stubField('author_id_in', (url) => {
+    const account = githubAccounts.find(
+      (a) =>
+        url === `${accounts}by-name/${encodeURIComponent(a.login)}` ||
+        url === `${accounts}${a.github_user_id}`,
+    )
+    return account ? [200, account] : [404, { errors: [] }]
+  })
+  const onChange = vi.fn()
+  render(<PredicateEditor eventType="github:pr:opened" value={value} onChange={onChange} />)
+  return { fetchMock, onChange }
+}
+
+describe('PredicateEditor GitHub identities', () => {
+  it('lists team members by login and writes their GitHub account id', async () => {
+    const { onChange } = renderAuthorField()
+
+    fireEvent.focus(await screen.findByRole('combobox'))
+    expect(screen.getByText('— no GitHub identity')).toBeInTheDocument()
+    fireEvent.mouseDown(screen.getByText('ada-gh'))
+    expect(onChange).toHaveBeenCalledWith({ author_id_in: ['1001'] })
+  })
+
+  it('looks a typed login up on GitHub and writes its account id', async () => {
+    const { fetchMock, onChange } = renderAuthorField()
+
+    fireEvent.change(await screen.findByRole('combobox'), { target: { value: 'renovate[bot]' } })
+    fireEvent.mouseDown(screen.getByText(/as GitHub account/))
+    await vi.waitFor(() => expect(onChange).toHaveBeenCalledWith({ author_id_in: ['29139614'] }))
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${accounts}by-name/renovate%5Bbot%5D`,
+      expect.anything(),
+    )
+  })
+
+  it('refuses a login no GitHub account holds, beside the field', async () => {
+    const { onChange } = renderAuthorField()
+
+    const input = await screen.findByRole('combobox')
+    fireEvent.change(input, { target: { value: 'nobody-here' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'No GitHub account is called nobody-here.',
+    )
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('names a stored account id by member, else by GitHub, else by the id', async () => {
+    renderAuthorField({ author_id_in: ['1001', '29139614', '42'] })
+
+    expect(await screen.findByText('Ada · ada-gh')).toBeInTheDocument()
+    expect(await screen.findByText('renovate[bot]')).toBeInTheDocument()
+    expect(screen.getByText('42')).toBeInTheDocument()
+  })
+
+  it('looks the viewer up by login when their binding recorded no account id', async () => {
+    const stored = me.github_user_id
+    me.github_user_id = undefined
+    try {
+      const { onChange } = renderAuthorField({}, [])
+
+      const toggle = await screen.findByRole('button', { pressed: false })
+      await vi.waitFor(() => expect(toggle).toBeEnabled())
+      fireEvent.click(toggle)
+      expect(onChange).toHaveBeenCalledWith({ author_id_in: ['583231'] })
+    } finally {
+      me.github_user_id = stored
+    }
+  })
+})
+
+// renderTeamField mounts the editor on requested_team_id_in for team-b, whose
+// GitHub-team mappings read answers groups, or 500 when null.
+function renderTeamField(groups: unknown[] | null, value: Record<string, string[]> = {}) {
+  const fetchMock = stubField('requested_team_id_in', () =>
+    groups ? [200, { groups, candidates: [] }] : [500, { errors: [] }],
+  )
+  const onChange = vi.fn()
+  render(
+    <PredicateEditor
+      eventType="github:pr:review_requested"
+      teamId="team-b"
+      value={value}
+      onChange={onChange}
+    />,
+  )
+  return { fetchMock, onChange }
+}
+
+const teamGroups = [
+  { github_team_id: '11', github_org_id: '7', org_login: 'acme', team_slug: 'backend' },
+  { github_team_id: '', github_org_id: '', org_login: 'acme', team_slug: 'legacy' },
+]
+
+describe('PredicateEditor requested_team_id_in', () => {
+  it("offers the handler team's GitHub-team mappings and writes their GitHub team ids", async () => {
+    const { fetchMock, onChange } = renderTeamField(teamGroups)
+
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'acme/backend' }))
+    expect(onChange).toHaveBeenCalledWith({ requested_team_id_in: ['11'] })
+    // A mapping without its ids yet has nothing to filter by.
+    expect(screen.getAllByRole('checkbox')).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledWith('/api/teams/team-b/github-groups', expect.anything())
+  })
+
+  it('keeps a stored team the team no longer maps, removable', async () => {
+    const { onChange } = renderTeamField(teamGroups, { requested_team_id_in: ['11', '99'] })
+
+    expect(await screen.findByRole('checkbox', { name: 'acme/backend' })).toBeChecked()
+    expect(screen.getByText('99 · not mapped')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Remove 99' }))
+    expect(onChange).toHaveBeenCalledWith({ requested_team_id_in: ['11'] })
+  })
+
+  it('says so when the mappings cannot be read', async () => {
+    renderTeamField(null)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Could not load this team’s GitHub teams.',
+    )
   })
 })
 

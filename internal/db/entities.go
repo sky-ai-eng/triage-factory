@@ -116,8 +116,8 @@ import (
 //
 // # Every single-row write returns the row it persisted
 //
-// PatchSnapshot, UpdateTitle, UpdateDescription, UpdateURL, MarkClosed and
-// Close — and each one's ...System twin — hand back the stored
+// SetPullRequestDraft, UpdateTitle, UpdateDescription, UpdateURL, MarkClosed
+// and Close — and each one's ...System twin — hand back the stored
 // row, read off RETURNING on the write statement itself rather than from a
 // follow-up SELECT, projecting the point read's column list and scanner so
 // the write shape cannot drift from the read shape. Several of these stamp a
@@ -313,19 +313,24 @@ type EntityStore interface {
 	// (ErrEntityJiraProjectRequired), through FindOrCreateJiraSystem.
 	FindOrCreate(ctx context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error)
 
-	// PatchSnapshot writes the new snapshot_json **without** touching
-	// last_polled_at — deliberately distinct from the tracker's
-	// UpdateSnapshotCASSystem, which stamps it. Used
-	// by handlers that mutate an entity via an external API and want
-	// the local copy to match the just-pushed state, but still expect
-	// the next poll cycle to reconcile (so last_polled_at must stay
-	// stale enough for the poll gate to refresh the row). Race
-	// window: a concurrent in-flight poll can overwrite our patch
-	// with its pre-mutation snapshot. Caller accepts that as the cost
-	// of in-place patching.
+	// SetPullRequestDraft sets is_draft in a GitHub pull request's
+	// snapshot and changes nothing else in it, for a handler that has just
+	// changed the draft state on GitHub and wants the local copy to match
+	// before the next poll. It writes that one key inside the stored
+	// document rather than a document the caller read, so a poll that
+	// commits a newer snapshot while the caller waits on GitHub keeps
+	// everything it wrote: overwriting the snapshot from an older read
+	// would undo the poll's transitions, and the snapshot diff, the only
+	// guard against re-emitting them, would emit them again.
 	//
-	// Returns the patched row, or sql.ErrNoRows.
-	PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON string) (domain.Entity, error)
+	// It leaves last_polled_at and poll_seq alone, so the next poll still
+	// refreshes the row and a poll already in flight still commits. That
+	// poll may write back the draft state it read from GitHub before the
+	// change; the poll after it reads the new state.
+	//
+	// Returns the row it wrote, or nil when no GitHub row carrying a
+	// snapshot has id: a row with no snapshot has no draft state to set.
+	SetPullRequestDraft(ctx context.Context, orgID, id string, draft bool) (*domain.Entity, error)
 
 	// UpdateTitle writes a new entity title (e.g. a PR title was
 	// edited upstream). No snapshot or last_polled_at change.
@@ -417,11 +422,11 @@ type EntityStore interface {
 	//     which takes the new key. Their dedup key names the object by an id,
 	//     so it stays.
 	//   - external_actions.current_url, the audit ledger's maintained pointer,
-	//     for actions whose link resolves to the entity's old url. The record
-	//     of the act itself (target, url, detail) is never touched. A url
-	//     names its scope (a Jira url carries the site, a Linear url the
-	//     workspace's url key), so this match cannot reach another scope's
-	//     actions.
+	//     for the actions about the entity (external_actions.entity_id) whose
+	//     link resolves to its old url. The rows are selected by the entity's
+	//     id, so another object's actions under a link that once spelled the
+	//     same key are never touched. The record of the act itself (target,
+	//     url, detail) is never touched either.
 	//
 	// Detection happens here: a candidate that went stale between the
 	// caller's read and this call is a no-op. Every no-op is a nil error with
@@ -477,18 +482,21 @@ type EntityStore interface {
 	//     and this is only a narrowing read. An empty jiraDone excludes Jira
 	//     entirely.
 	//
-	//     A ref matches on EITHER half: its id against the snapshot's
-	//     status_id, or its name against the snapshot's status. Both arms are
-	//     required because either side may be missing one — a stored rule can
-	//     carry names without ids until its team next saves the rules, and a
-	//     snapshot captured before status ids were recorded carries none until
-	//     its next poll refresh.
+	//     A ref matches the way JiraStatusRef.SameStatus compares, which is
+	//     the caller's recheck: a ref with an id matches a snapshot whose
+	//     status_id is that id, and matches by name only a snapshot that
+	//     carries no status_id; a ref with no id matches any snapshot whose
+	//     status has its name. Names are needed because either side may lack
+	//     an id — a stored rule can carry names without ids until its team
+	//     next saves the rules, and a snapshot captured before status ids were
+	//     recorded carries none until its next poll refresh — but a name never
+	//     reaches a snapshot whose id says it is another status.
 	//   - linear: a superset, the Jira way. Terminality is per Linear team —
 	//     linear_team_rules' done states — so this filters on linearDone, the
-	//     caller's flat union across teams, matching a ref's id against the
-	//     snapshot's state.id or its name against state.name, and the caller
-	//     re-checks each row against its own team's set. An empty linearDone
-	//     excludes Linear entirely.
+	//     caller's flat union across teams, matching state.id and state.name
+	//     the way LinearStateRef.SameState compares (as for Jira above), and
+	//     the caller re-checks each row against its own team's set. An empty
+	//     linearDone excludes Linear entirely.
 	//
 	// Rows with no stored snapshot never match — an unseeded stub has said
 	// nothing about whether its subject is finished, and a snapshot an
@@ -541,11 +549,13 @@ type EntityStore interface {
 	// CAS miss; the caller drops the write AND suppresses the transitions
 	// it diffed (the snapshot-diff is the sole re-emit prevention — see
 	// the tracker) and lets the next poll cycle reconcile. There is no
-	// blind-write variant: every snapshot write goes through the CAS.
+	// blind-write variant: every write of a whole snapshot goes through
+	// the CAS. SetPullRequestDraft is the one snapshot write outside it,
+	// and it sets a single key.
 	//
 	// On a Linear row the same statement moves linear_team_id to the snapshot's
 	// team_id, and leaves it where it is when the snapshot names none; the
-	// reactivate and close twins below do the same, as does PatchSnapshot. On
+	// reactivate and close twins below do the same. On
 	// a Jira row it moves jira_project_id the same way, to the registry row on
 	// the entity's site carrying the snapshot's project_id, and leaves it where
 	// it is when the snapshot names no project or the registry has no row for
@@ -670,8 +680,9 @@ type EntityStore interface {
 	// MarkPolledSystem stamps last_polled_at without touching the
 	// snapshot or poll_seq — the row was read from the source, but
 	// nothing about it was diffed. Distinct from UpdateSnapshotCASSystem
-	// (which carries a snapshot) and from PatchSnapshot (which deliberately
-	// leaves last_polled_at stale so the next cycle still refreshes).
+	// (which carries a snapshot) and from SetPullRequestDraft (which
+	// deliberately leaves last_polled_at stale so the next cycle still
+	// refreshes).
 	//
 	// It exists for reads that confirm an entity's state outside the
 	// snapshot-diff, where the column's age is itself an input: the
@@ -720,9 +731,10 @@ type EntityStore interface {
 	//     answering for, under the key it has now;
 	//   - the survivor's poll_seq is bumped either way, so a cycle that read
 	//     either row before the merge misses its CAS;
-	//   - the newer row's artifacts move onto the survivor, and every
-	//     artifact of the survivor takes the key it keeps; audit-ledger links
-	//     under the url it no longer answers to move onto the one it keeps
+	//   - the newer row's artifacts and audit-ledger rows move onto the
+	//     survivor (entity_id), and every artifact of the survivor takes the
+	//     key it keeps; the links of its audit-ledger rows under the url it no
+	//     longer answers to move onto the one it keeps
 	//     (DuplicateEntityMergedKeys), as a rename moves them.
 	//
 	// Refused, writing nothing: the two ids are the same, either row is
@@ -751,14 +763,13 @@ type EntityStore interface {
 	//     duplicate_entity_merged, and a blueprint still running under one of
 	//     its unsettled conversations is marked cancel_requested;
 	//   - the stub's tasks, events, queue rows, pending firings, artifacts,
-	//     memory links (at the stronger of the two roles) and entity links
-	//     move onto into, and the stub's artifacts take into's key;
+	//     audit-ledger rows, memory links (at the stronger of the two roles)
+	//     and entity links move onto into, the stub's artifacts take into's
+	//     key, and the links of the audit-ledger rows under the stub's url
+	//     move onto into's, as a rename moves them;
 	//   - into takes the stub's owning team and commissioning user where it
 	//     has none;
 	//   - the stub is deleted.
-	//
-	// The audit ledger is not touched: it names a pull request by its key and
-	// url, not by an entity.
 	//
 	// Refused, writing nothing: the two ids are the same, either row is
 	// missing (sql.ErrNoRows), the rows differ in source or scope, or the stub
@@ -935,9 +946,9 @@ func sameEntityNamespace(op string, a, b domain.Entity) error {
 // the row whose key and link the merged row keeps and the row whose key and
 // link it stops answering to: the newer row's are kept when it is active (the
 // survivor takes its live state), the survivor's own otherwise. kept carries
-// the pair's external id, whichever row held it. Both dialects move
-// audit-ledger links from dropped onto kept, as a rename does; the merged
-// row's artifacts take its key by entity_id.
+// the pair's external id, whichever row held it. Both dialects move the links
+// of the merged row's audit-ledger rows from dropped onto kept, as a rename
+// does; the merged row's artifacts take its key. Both select by entity_id.
 func DuplicateEntityMergedKeys(survivor, loser domain.Entity) (kept, dropped domain.Entity) {
 	kept, dropped = survivor, loser
 	if loser.State == "active" {

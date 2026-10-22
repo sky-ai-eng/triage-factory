@@ -846,11 +846,15 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		Role  string `json:"role"`
 	}
 	type response struct {
-		ID              string `json:"id"`
-		Email           string `json:"email"`
-		DisplayName     string `json:"display_name,omitempty"`
-		AvatarURL       string `json:"avatar_url,omitempty"`
-		GitHubUsername  string `json:"github_username,omitempty"`
+		ID             string `json:"id"`
+		Email          string `json:"email"`
+		DisplayName    string `json:"display_name,omitempty"`
+		AvatarURL      string `json:"avatar_url,omitempty"`
+		GitHubUsername string `json:"github_username,omitempty"`
+		// GitHubUserID is GitHub's id for the account behind GitHubUsername,
+		// the value a GitHub predicate's identity filters (author_id_in and
+		// its siblings) take. Absent when the binding recorded none.
+		GitHubUserID    string `json:"github_user_id,omitempty"`
 		JiraAccountID   string `json:"jira_account_id,omitempty"`
 		JiraDisplayName string `json:"jira_display_name,omitempty"`
 		// LinearUserID / LinearDisplayName are the viewer's binding in the
@@ -942,7 +946,9 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 					linearWorkspace = orgSet.LinearWorkspaceID
 				}
 			}
-			resp.GitHubUsername, _ = s.users.GetGitHubLogin(r.Context(), runmode.LocalDefaultUserID, ghHost)
+			if identity, _ := s.users.GetGitHubIdentity(r.Context(), runmode.LocalDefaultUserID, ghHost); identity != nil {
+				resp.GitHubUsername, resp.GitHubUserID = identity.Login, identity.GitHubUserID
+			}
 			resp.JiraAccountID, resp.JiraDisplayName, _ = s.users.GetJiraIdentity(r.Context(), runmode.LocalDefaultUserID, jiraHost)
 			resp.LinearUserID, resp.LinearDisplayName, _ = s.users.GetLinearIdentity(r.Context(), runmode.LocalDefaultUserID, linearWorkspace)
 		}
@@ -972,9 +978,10 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	resp.Teams = []teamRow{}
 	resp.Email = claims.Email
 	resp.OrgCreationEnabled = runmode.OrgCreationEnabled()
-	// Deployment-operator flag: whether any of the principal's login identities
-	// holds an operator address verified — the same read the fleet gate makes,
-	// so the flag and the console agree. Never claims.Email: an SSO token
+	// Deployment-operator flag: whether a grant is bound to the principal, or
+	// one of its login identities holds a pending grant's address verified —
+	// the same read the fleet gate makes, so the flag and the console agree.
+	// Never claims.Email: an SSO token
 	// carries whatever address its identity provider asserted. Admin-pool read
 	// (operators has no RLS policy); best-effort — a lookup error leaves it
 	// false (fail closed, the console 404s), never fails the identity read.
@@ -1009,9 +1016,10 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		tfdb.Claims{Sub: claims.Subject, OrgID: resp.ActiveOrgID},
 		func(tx *sql.Tx) error {
 			// Identity is host-scoped for GitHub and Jira: prefer the row
-			// bound to the active org's host (GitHub login via the correlated
-			// subquery; Jira account_id + display_name via the LATERAL, which
-			// keeps the pair on one row), else the most recently verified row.
+			// bound to the active org's host (each through a LATERAL, which
+			// keeps a GitHub login and its account id, and a Jira account_id
+			// and display_name, on one row), else the most recently verified
+			// row.
 			//
 			// Linear is workspace-scoped and has no such fallback: a Linear
 			// user id is meaningful only in the workspace that issued it, so
@@ -1025,22 +1033,24 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 				SELECT u.id::text,
 				       COALESCE(u.display_name, ''),
 				       COALESCE(u.avatar_url, ''),
-				       COALESCE((
-				           SELECT i.login
-				             FROM user_github_identities i
-				            WHERE i.user_id = u.id
-					            ORDER BY (i.github_base_url = rtrim((
-					                        SELECT es.base_url FROM org_event_sources es
-					                         WHERE es.org_id = tf.current_org_id() AND es.kind = 'github'
-					                      ), '/')) DESC NULLS LAST,
-					                     i.verified_at DESC NULLS LAST
-				            LIMIT 1
-				       ), ''),
+				       COALESCE(g.login, ''),
+				       COALESCE(g.github_user_id, ''),
 				       COALESCE(j.account_id, ''),
 				       COALESCE(j.display_name, ''),
 				       COALESCE(li.linear_user_id, ''),
 				       COALESCE(li.display_name, '')
 				  FROM public.users u
+			  LEFT JOIN LATERAL (
+			           SELECT i.login, i.github_user_id
+			             FROM user_github_identities i
+			            WHERE i.user_id = u.id
+			            ORDER BY (i.github_base_url = rtrim((
+			                        SELECT es.base_url FROM org_event_sources es
+			                         WHERE es.org_id = tf.current_org_id() AND es.kind = 'github'
+			                      ), '/')) DESC NULLS LAST,
+			                     i.verified_at DESC NULLS LAST
+			            LIMIT 1
+			       ) g ON true
 			  LEFT JOIN LATERAL (
 			           SELECT ji.account_id, ji.display_name
 			             FROM user_jira_identities ji
@@ -1062,7 +1072,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			                             AND om.user_id = tf.current_user_id())
 			       )
 				 WHERE u.id = tf.current_user_id()
-			`).Scan(&resp.ID, &resp.DisplayName, &resp.AvatarURL, &resp.GitHubUsername, &resp.JiraAccountID, &resp.JiraDisplayName,
+			`).Scan(&resp.ID, &resp.DisplayName, &resp.AvatarURL, &resp.GitHubUsername, &resp.GitHubUserID, &resp.JiraAccountID, &resp.JiraDisplayName,
 				&resp.LinearUserID, &resp.LinearDisplayName); err != nil {
 				return fmt.Errorf("user lookup: %w", err)
 			}
@@ -1403,6 +1413,9 @@ func distinctNonEmpty(vs []string) []string {
 // another principal already holds, the row stores the address unverified and
 // the sign-in proceeds: the address stays with its first holder.
 //
+// A sign-in that leaves the address verified also binds a pending
+// deployment-operator grant for it to the principal, in the same transaction.
+//
 // Runs on the admin pool (the actor has no membership/claims yet, so RLS can't
 // express these reads/writes — same rationale as org provisioning).
 //
@@ -1588,6 +1601,22 @@ func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid
 			return fmt.Errorf("refresh identity: %w", err)
 		}
 
+		// A pending deployment-operator grant for this address binds to the
+		// principal that now holds it verified, and from then on admits that
+		// principal and nobody else (see the operators table). This runs under
+		// the email lock above, so no other login can verify the address
+		// between the refresh and the bind. A bound grant is left alone: an
+		// address that has passed to another principal does not take the
+		// grant with it.
+		if email != "" && verified {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE public.operators SET user_id = $1
+				 WHERE user_id IS NULL AND lower(email) = lower($2)
+			`, principalID, email); err != nil {
+				return fmt.Errorf("bind pending operator grant: %w", err)
+			}
+		}
+
 		// GitHub-INTEGRATION binding (which github account the agent acts as) — a
 		// separate axis from the login identity. Only a real GitHub login mirrors it
 		// (source='login_claim'); a SAML login writes none. Keyed on the principal.
@@ -1598,6 +1627,13 @@ func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid
 		// for this org's host — often a different one from the account they sign in
 		// with — and overwriting it at the next sign-in would silently undo that
 		// choice, and make "Change" on the settings page a verb that does not hold.
+		//
+		// The refresh applies UsersStore.UpsertGitHubIdentity's account test:
+		// GitHub's ids decide whether the sign-in is the account the row records
+		// when both carry one, and the logins (case-insensitively) otherwise. A
+		// rename of the same account keeps its id and email; another account
+		// replaces both. Either one, and any login change, clears the dashboard
+		// backfill marker, which records a search by the old login.
 		if !isSSO && ghUsername != "" {
 			githubEmail := ""
 			if emailTrusted {
@@ -1609,13 +1645,18 @@ func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid
 				VALUES ($1, 'https://github.com', $2, NULLIF($3, ''), NULLIF($4, ''), 'login_claim', now(), now(), now())
 				ON CONFLICT (user_id, github_base_url) DO UPDATE
 				   SET login       = EXCLUDED.login,
-				       github_user_id = COALESCE(EXCLUDED.github_user_id, user_github_identities.github_user_id),
+				       github_user_id = CASE
+				                       WHEN `+loginClaimAccountChanged+` THEN EXCLUDED.github_user_id
+				                       ELSE COALESCE(EXCLUDED.github_user_id, user_github_identities.github_user_id) END,
 				       email       = CASE
-				                       WHEN user_github_identities.login IS DISTINCT FROM EXCLUDED.login THEN EXCLUDED.email
+				                       WHEN `+loginClaimAccountChanged+` THEN EXCLUDED.email
 				                       ELSE COALESCE(EXCLUDED.email, user_github_identities.email) END,
 				       source      = EXCLUDED.source,
 				       verified_at = EXCLUDED.verified_at,
-				       updated_at  = now()
+				       updated_at  = now(),
+				       dashboard_backfilled_at = CASE
+				                       WHEN `+loginClaimAccountChanged+` OR user_github_identities.login IS DISTINCT FROM EXCLUDED.login THEN NULL
+				                       ELSE user_github_identities.dashboard_backfilled_at END
 				 WHERE user_github_identities.source = 'login_claim'
 			`, principalID, ghUsername, providerSubject, githubEmail); err != nil {
 				return fmt.Errorf("upsert github login identity: %w", err)
@@ -1627,6 +1668,16 @@ func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid
 	}
 	return principalID, nil
 }
+
+// loginClaimAccountChanged is the sign-in mirror's account test inside its
+// ON CONFLICT arm, the same test UsersStore.UpsertGitHubIdentity applies: true
+// when the sign-in names a different GitHub account than the stored row. Ids
+// decide when both sides carry one; otherwise the logins do, compared
+// case-insensitively as GitHub compares them.
+const loginClaimAccountChanged = `(CASE
+				                       WHEN user_github_identities.github_user_id IS NOT NULL AND EXCLUDED.github_user_id IS NOT NULL
+				                       THEN user_github_identities.github_user_id <> EXCLUDED.github_user_id
+				                       ELSE lower(user_github_identities.login) <> lower(EXCLUDED.login) END)`
 
 // gotrueRefreshFunc — POST /token?grant_type=refresh_token.
 //

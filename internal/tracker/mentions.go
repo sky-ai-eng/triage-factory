@@ -13,11 +13,12 @@ import (
 // prMention is where a poll found a user or team @-mentioned on a pull
 // request.
 type prMention struct {
-	handle    string // as ghclient.Mentions spells it: "login" or "org/slug"
-	source    string // one of the events.MentionSource values
-	commenter string // empty for the body
-	commentID int64  // the review's id for a review body; zero for the body
-	at        string
+	handle      string // as ghclient.Mentions spells it: "login" or "org/slug"
+	source      string // one of the events.MentionSource values
+	commenter   string // empty for the body
+	commenterID string // GitHub's id for the commenter's account; empty for the body
+	commentID   int64  // the review's id for a review body; zero for the body
+	at          string
 }
 
 // prMentions returns one mention for each user or team newly mentioned on the
@@ -58,7 +59,7 @@ func prMentions(prev, curr domain.PRSnapshot, reviews []NewReview, comments []Ne
 		}
 		commentID, _ := strconv.ParseInt(c.ID, 10, 64)
 		for _, h := range c.Mentions {
-			consider(prMention{handle: h, source: events.MentionSourceComment, commenter: c.Author, commentID: commentID, at: c.CreatedAt})
+			consider(prMention{handle: h, source: events.MentionSourceComment, commenter: c.Author, commenterID: c.AuthorID, commentID: commentID, at: c.CreatedAt})
 		}
 	}
 	for _, r := range reviews {
@@ -66,14 +67,14 @@ func prMentions(prev, curr domain.PRSnapshot, reviews []NewReview, comments []Ne
 			continue
 		}
 		for _, h := range r.Mentions {
-			consider(prMention{handle: h, source: events.MentionSourceReview, commenter: r.Author, commentID: r.ID, at: r.SubmittedAt})
+			consider(prMention{handle: h, source: events.MentionSourceReview, commenter: r.Author, commenterID: r.AuthorID, commentID: r.ID, at: r.SubmittedAt})
 		}
 		for _, c := range r.Comments {
 			if c.ByTF {
 				continue
 			}
 			for _, h := range c.Mentions {
-				consider(prMention{handle: h, source: events.MentionSourceReviewComment, commenter: r.Author, commentID: c.ID, at: r.SubmittedAt})
+				consider(prMention{handle: h, source: events.MentionSourceReviewComment, commenter: r.Author, commenterID: r.AuthorID, commentID: c.ID, at: r.SubmittedAt})
 			}
 		}
 	}
@@ -128,9 +129,11 @@ func openedPRMentions(entityID, repositoryID string, snap domain.PRSnapshot, res
 
 // appendMentioned appends the mentioned event for m on the pull request curr,
 // when resolver knows the identity m names. Its time is m's, or curr's
-// updatedAt when m's does not parse.
+// updatedAt when m's does not parse. A mention is text, so it names the user
+// or team by handle and carries no id: it is resolved and keyed by the handle.
 func appendMentioned(evts *[]domain.Event, entityID *string, repositoryID string, now time.Time, curr domain.PRSnapshot, m prMention, resolver ReviewerResolver) {
-	login, team, known := resolveReviewer(resolver, m.handle)
+	mentioned := handleReviewer(m.handle)
+	login, team, known := resolveReviewer(resolver, mentioned)
 	if !known {
 		return
 	}
@@ -138,8 +141,8 @@ func appendMentioned(evts *[]domain.Event, entityID *string, repositoryID string
 	if _, ok := domain.ParseExternalTime(at); !ok {
 		at = curr.UpdatedAt
 	}
-	emitWithFallback(domain.EventGitHubPRMentioned, reviewerDedupKey(m.handle), at, events.GitHubPRMentionedMetadata{
-		Author: curr.Author, Commenter: m.commenter, CommentID: m.commentID,
+	emitWithFallback(domain.EventGitHubPRMentioned, reviewerDedupKey(mentioned), at, events.GitHubPRMentionedMetadata{
+		Author: curr.Author, AuthorID: curr.AuthorID, Commenter: m.commenter, CommenterID: m.commenterID, CommentID: m.commentID,
 		MentionedLogin: login, MentionedTeam: team, MentionSource: m.source,
 		Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
 		IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,

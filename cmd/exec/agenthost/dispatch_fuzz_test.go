@@ -19,7 +19,7 @@ import (
 // (relay-backed, no db.Stores, no DB connection) whose effects resolve
 // instantly instead of standing up a database inside the fuzz loop.
 //
-// The two repo-gate reads answer permissively so the gh verbs get PAST the gate
+// The repo-gate reads answer permissively so the gh verbs get PAST the gate
 // and actually build a client, and the source-policy read answers "on" so the
 // Jira and Linear verbs do too — the point is to reach the fan-out, and a gate
 // that denied everything would fuzz one error path forty times. Every other op
@@ -29,13 +29,15 @@ type fuzzRelayConn struct{}
 
 func (fuzzRelayConn) call(_ context.Context, namespace, op string, _, out any) error {
 	switch op {
-	case opTeamTracksRepo:
-		return fuzzRelayResult(out, teamTracksRepoResult{Tracks: true})
+	case opGetRepo:
+		return fuzzRelayResult(out, repoResult{Repo: &domain.Repository{ID: "repo-fuzz", Owner: "o", Repo: "r"}})
+	case opTeamTracksRepository:
+		return fuzzRelayResult(out, teamTracksRepositoryResult{Tracks: true})
 	case opSourceDisabled:
 		return fuzzRelayResult(out, sourceDisabledResult{Disabled: false})
 	case opListConversationWorktrees:
 		return fuzzRelayResult(out, conversationWorktreesResult{Worktrees: []domain.ConversationWorktree{
-			{ConversationID: "conv-fuzz", RepoID: "o/r", Ref: "refs/heads/topic", Path: "/work/o-r"},
+			{ConversationID: "conv-fuzz", RepositoryID: "repo-fuzz", RepoID: "o/r", Ref: "refs/heads/topic", Path: "/work/o-r"},
 		}})
 	}
 	return fmt.Errorf("fuzz fixture: relay %s/%s unavailable", namespace, op)

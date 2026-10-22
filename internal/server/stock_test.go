@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -56,13 +57,22 @@ func seedStockConfig(t *testing.T, s *Server) {
 
 // seedStockTicket inserts an active Jira entity with a snapshot assigned to
 // the acting user and sitting in the project's pickup status — the shape the
-// deck's assigned bucket surfaces and the queue route accepts.
+// deck's assigned bucket surfaces and the queue route accepts. Its entity id
+// is "e_stock_" + issueKey.
 func seedStockTicket(t *testing.T, s *Server, issueKey string) {
+	t.Helper()
+	seedStockTicketIn(t, s, issueKey, "To Do", "Tester", "acc-1")
+}
+
+// seedStockTicketIn is seedStockTicket with the ticket in status and assigned
+// to the user with display name assignee and stable id accountID, both empty
+// for an unassigned ticket.
+func seedStockTicketIn(t *testing.T, s *Server, issueKey, status, assignee, accountID string) {
 	t.Helper()
 	project := dbseed.JiraIssueProject(issueKey)
 	snapshot := fmt.Sprintf(
-		`{"key":%q,"project_id":%q,"project_key":%q,"summary":"Carry over me","status":"To Do","issue_type":"Task","priority":"Medium","assignee":"Tester","assignee_account_id":"acc-1","url":"https://jira.example.com/browse/%s"}`,
-		issueKey, project.ID, project.Key, issueKey,
+		`{"key":%q,"project_id":%q,"project_key":%q,"summary":"Carry over me","status":%q,"issue_type":"Task","priority":"Medium","assignee":%q,"assignee_account_id":%q,"url":"https://jira.example.com/browse/%s"}`,
+		issueKey, project.ID, project.Key, status, assignee, accountID, issueKey,
 	)
 	if _, err := s.db.Exec(
 		`INSERT INTO entities (id, source, source_id, external_id, kind, title, url, state, snapshot_json, scope, jira_project_id)
@@ -81,27 +91,32 @@ type stockBatchBody struct {
 	Results []stockItemResult `json:"results"`
 }
 
+// postStock sends ids to a carry-over action route and decodes its answer.
+func postStock(t *testing.T, s *Server, action string, ids ...string) (*httptest.ResponseRecorder, stockBatchBody) {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodPost, "/api/jira/stock/"+action, map[string]any{"entity_ids": ids})
+	var body stockBatchBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("%s: decode body: %v; body=%s", action, err, rec.Body.String())
+	}
+	return rec, body
+}
+
 // TestStockQueue_PerItemAccounting pins the batch policy's core invariant:
-// every submitted key comes back in the results, ok either way, so applied +
+// every submitted id comes back in the results, ok either way, so applied +
 // failed = submitted and no id is silently dropped mid-loop. The mixed batch
 // here is the case that used to under-report — one applicable ticket next to
-// one that doesn't exist.
+// an id that names none, whose row names the field.
 func TestStockQueue_PerItemAccounting(t *testing.T) {
 	keyring.MockInit() // in-memory keychain — the sandbox has no dbus backend
 	s := newTestServer(t)
 	seedStockConfig(t, s)
 	seedStockTicket(t, s, "SKY-1")
 
-	submitted := []string{"SKY-1", "SKY-404"}
-	rec := doJSON(t, s, http.MethodPost, "/api/jira/stock/queue",
-		map[string]any{"issue_keys": submitted})
+	submitted := []string{"e_stock_SKY-1", "e_stock_missing"}
+	rec, body := postStock(t, s, "queue", submitted...)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-
-	var body stockBatchBody
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode body: %v", err)
 	}
 	if len(body.Results) != len(submitted) {
 		t.Fatalf("results = %d rows, want one per submitted key (%d): %s", len(body.Results), len(submitted), rec.Body.String())
@@ -114,18 +129,19 @@ func TestStockQueue_PerItemAccounting(t *testing.T) {
 	}
 	seen := map[string]stockItemResult{}
 	for _, row := range body.Results {
-		seen[row.IssueKey] = row
+		seen[row.EntityID] = row
 	}
-	if row, ok := seen["SKY-1"]; !ok || !row.OK {
-		t.Errorf("SKY-1 row = %+v, want ok", row)
+	if row, ok := seen["e_stock_SKY-1"]; !ok || !row.OK || row.IssueKey != "SKY-1" {
+		t.Errorf("e_stock_SKY-1 row = %+v, want ok under SKY-1", row)
 	}
-	// A failed row carries the envelope's item shape, not a prose string.
-	row, ok := seen["SKY-404"]
+	// A failed row carries the envelope's item shape, not a prose string, and
+	// an id that names no ticket names the field.
+	row, ok := seen["e_stock_missing"]
 	if !ok || row.OK {
-		t.Fatalf("SKY-404 row = %+v, want a failure", row)
+		t.Fatalf("e_stock_missing row = %+v, want a failure", row)
 	}
-	if len(row.Errors) == 0 || row.Errors[0].Reason == "" {
-		t.Errorf("SKY-404 errors = %+v, want a structured item with a reason", row.Errors)
+	if len(row.Errors) == 0 || row.Errors[0].Reason != "NOT_FOUND" || row.Errors[0].Field != "entity_ids" {
+		t.Errorf("e_stock_missing errors = %+v, want NOT_FOUND on entity_ids", row.Errors)
 	}
 
 	// The applied key really did mint a task — the accounting isn't reporting
@@ -143,9 +159,9 @@ func TestStockQueue_PerItemAccounting(t *testing.T) {
 
 // TestStockActions_RejectMalformedBatches pins the request-level half of the
 // batch policy: an empty list, an over-cap list, a blank or whitespace-padded
-// key and a repeated key fail the whole call, because each would otherwise
-// make the accounting invariant a lie for the batch that ran — the padded key
-// by answering under a key the caller never sent. Every action route enforces
+// id and a repeated id fail the whole call, because each would otherwise
+// make the accounting invariant a lie for the batch that ran — the padded id
+// by answering under an id the caller never sent. Every action route enforces
 // it identically: the validator is shared rather than restated per route.
 func TestStockActions_RejectMalformedBatches(t *testing.T) {
 	keyring.MockInit()
@@ -154,24 +170,27 @@ func TestStockActions_RejectMalformedBatches(t *testing.T) {
 
 	overCap := make([]string, maxStockBatch+1)
 	for i := range overCap {
-		overCap[i] = fmt.Sprintf("SKY-%d", i)
+		overCap[i] = fmt.Sprintf("e_%d", i)
 	}
 
 	for _, action := range []string{"queue", "claim", "done"} {
-		for name, keys := range map[string][]string{
-			"empty":      {},
-			"blank_key":  {"SKY-1", "   "},
-			"padded_key": {"SKY-1", " SKY-2 "},
-			"duplicate":  {"SKY-1", "SKY-1"},
-			"over_cap":   overCap,
+		for name, tc := range map[string]struct {
+			field string
+			ids   []string
+		}{
+			"empty":      {"entity_ids", []string{}},
+			"blank_id":   {"entity_ids", []string{"e_1", "   "}},
+			"padded_id":  {"entity_ids", []string{"e_1", " e_2 "}},
+			"duplicate":  {"entity_ids", []string{"e_1", "e_1"}},
+			"over_cap":   {"entity_ids", overCap},
+			"issue_keys": {"issue_keys", []string{"SKY-1"}},
 		} {
 			t.Run(action+"/"+name, func(t *testing.T) {
-				rec := doJSON(t, s, http.MethodPost, "/api/jira/stock/"+action,
-					map[string]any{"issue_keys": keys})
+				rec := doJSON(t, s, http.MethodPost, "/api/jira/stock/"+action, map[string]any{tc.field: tc.ids})
 				if rec.Code != http.StatusBadRequest {
 					t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 				}
-				if !strings.Contains(rec.Body.String(), "issue_keys") {
+				if !strings.Contains(rec.Body.String(), `"field":"`+tc.field+`"`) {
 					t.Errorf("body=%s; want the failing field named", rec.Body.String())
 				}
 			})
@@ -268,17 +287,13 @@ func TestStockDeck_ListsAndActsOnTheEntitysCurrentKey(t *testing.T) {
 		t.Fatalf("assigned = %v, want the renamed ticket", deck["assigned"])
 	}
 	row, _ := assigned[0].(map[string]any)
-	if row["issue_key"] != "SKY-9" || row["url"] != "https://jira.example.com/browse/SKY-9" {
-		t.Errorf("deck row = %v, want it under SKY-9", row)
+	if row["entity_id"] != "e_stock_SKY-1" || row["issue_key"] != "SKY-9" || row["url"] != "https://jira.example.com/browse/SKY-9" {
+		t.Errorf("deck row = %v, want e_stock_SKY-1 under SKY-9", row)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/jira/stock/queue", map[string]any{"issue_keys": []string{"SKY-9"}})
-	var body stockBatchBody
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode body: %v", err)
-	}
+	rec, body := postStock(t, s, "queue", "e_stock_SKY-1")
 	if rec.Code != http.StatusOK || body.Applied != 1 || len(body.Results) != 1 || body.Results[0].IssueKey != "SKY-9" {
-		t.Fatalf("queue SKY-9 = %d %s, want it applied", rec.Code, rec.Body.String())
+		t.Fatalf("queue e_stock_SKY-1 = %d %s, want it applied under SKY-9", rec.Code, rec.Body.String())
 	}
 	var meta string
 	if err := s.db.QueryRow(
@@ -328,10 +343,15 @@ func TestJiraReaders_FollowAProjectKeyRename(t *testing.T) {
 	if _, err := s.allStores.Entities.RenameSystem(ctx, org, "jira", site, "10002", "CORE-2", site+"/browse/CORE-2"); err != nil {
 		t.Fatalf("rename the issue: %v", err)
 	}
-	if _, err := s.allStores.Entities.PatchSnapshot(ctx, org, entityID,
+	renamed, err := s.allStores.Entities.Get(ctx, org, entityID)
+	if err != nil || renamed == nil {
+		t.Fatalf("read the renamed issue: %v", err)
+	}
+	if ok, err := s.allStores.Entities.UpdateSnapshotCASSystem(ctx, org, entityID,
 		`{"id":"10002","key":"CORE-2","project_id":"`+project.ID+`","project_key":"CORE","summary":"Pick me up","status":"To Do","assignee":""}`,
-	); err != nil {
-		t.Fatalf("refresh the snapshot: %v", err)
+		renamed.PollSeq,
+	); err != nil || !ok {
+		t.Fatalf("refresh the snapshot: ok=%v err=%v", ok, err)
 	}
 
 	team := runmode.LocalDefaultTeamID
@@ -348,7 +368,7 @@ func TestJiraReaders_FollowAProjectKeyRename(t *testing.T) {
 		}
 		var rule *domain.JiraProjectStatusRules
 		if err := s.tx.WithReadTx(ctx, org, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
-			rule = lookupJiraRuleForTask(ctx, tx, org, site, task)
+			rule = lookupJiraTaskTarget(ctx, tx, org, site, task).Rule
 			return nil
 		}); err != nil {
 			t.Fatalf("%s: read the rule: %v", stage, err)
@@ -363,4 +383,59 @@ func TestJiraReaders_FollowAProjectKeyRename(t *testing.T) {
 		t.Fatalf("rename the project: %v", err)
 	}
 	check("after the registry row is re-keyed", "CORE")
+}
+
+// TestStockDeck_BlankDisplayNameClaimsNoUnassignedTicket: a Jira identity can
+// carry no display name (some Data Center installs). An unassigned ticket has
+// none either, and must not read as the user's: it is neither on the deck's
+// assigned half nor actionable as theirs.
+func TestStockDeck_BlankDisplayNameClaimsNoUnassignedTicket(t *testing.T) {
+	keyring.MockInit()
+	s := newTestServer(t)
+	seedStockConfig(t, s)
+	if err := s.users.UpsertJiraIdentity(t.Context(), runmode.LocalDefaultUserID, "https://jira.example.com", "acc-1", "", "pat"); err != nil {
+		t.Fatalf("blank the identity's display name: %v", err)
+	}
+	// Outside the pickup rule too, so it belongs on neither half.
+	seedStockTicketIn(t, s, "SKY-3", "In Progress", "", "")
+	fake := newJiraIssueFake(t, statusInProgressID, "")
+	s.jiraResolver = &recordingJiraResolver{userClient: fake.client()}
+	if err := s.allStores.PollReadiness.MarkPollComplete(t.Context(), runmode.LocalDefaultOrgID, "jira", time.Time{}); err != nil {
+		t.Fatalf("mark jira poll complete: %v", err)
+	}
+
+	if assigned, _ := readStockDeckKeys(t, s)["assigned"].([]any); len(assigned) != 0 {
+		t.Errorf("assigned = %v, want no ticket: nobody is assigned SKY-3", assigned)
+	}
+	for _, action := range []string{"queue", "claim", "done"} {
+		if rec, body := postStock(t, s, action, "e_stock_SKY-3"); body.Applied != 0 || len(body.Results) != 1 || body.Results[0].OK {
+			t.Errorf("%s on an unassigned ticket = %s, want it refused", action, rec.Body.String())
+		}
+	}
+	var tasks int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE entity_id = 'e_stock_SKY-3'`).Scan(&tasks); err != nil || tasks != 0 {
+		t.Errorf("tasks on the unassigned ticket = %d (%v), want none", tasks, err)
+	}
+	if writes := fake.Writes(); len(writes) != 0 {
+		t.Errorf("Jira writes = %v, want none", writes)
+	}
+}
+
+// TestStockClaimAndDone_AddressJiraByIssueID: the claim and done writes name
+// the issue by its id, which a move leaves alone, never by its key.
+func TestStockClaimAndDone_AddressJiraByIssueID(t *testing.T) {
+	keyring.MockInit()
+	s := newTestServer(t)
+	seedStockConfig(t, s)
+	seedStockTicket(t, s, "SKY-1")
+	seedStockTicket(t, s, "SKY-2")
+	fake := newJiraIssueFake(t, statusToDoID, "")
+	s.jiraResolver = &recordingJiraResolver{userClient: fake.client()}
+
+	for action, entityID := range map[string]string{"claim": "e_stock_SKY-1", "done": "e_stock_SKY-2"} {
+		if rec, body := postStock(t, s, action, entityID); body.Applied != 1 {
+			t.Fatalf("%s %s = %d %s, want it applied", action, entityID, rec.Code, rec.Body.String())
+		}
+	}
+	fake.assertIssuesNamed(t, dbseed.JiraIssueID("SKY-1"), dbseed.JiraIssueID("SKY-2"))
 }

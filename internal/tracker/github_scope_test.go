@@ -196,7 +196,7 @@ func (fx *githubScopeFixture) cycle(t *testing.T, host string, client *ghclient.
 	fx.pub.events = nil
 	fx.pub.mu.Unlock()
 	fx.tr.RetireGitHubOutOfScope(context.Background(), host)
-	if _, _, err := fx.tr.RefreshGitHub(context.Background(), host, client, "", repos, nil); err != nil {
+	if _, _, err := fx.tr.RefreshGitHub(context.Background(), host, client, domain.GitHubAccount{}, repos, nil); err != nil {
 		t.Fatalf("RefreshGitHub on %s: %v", host, err)
 	}
 	return fx.pub.nonSystemEvents()
@@ -340,20 +340,29 @@ func TestGitHubScope_ReadsTheRepositoryByTheEntitysID(t *testing.T) {
 	fx := newGitHubScopeFixture(t)
 
 	// A stub retired off the old host carries its repository's new name, and
-	// that repository's listing cursor is the one dropped.
+	// that repository's listing cursor is the one dropped, not the cursor of
+	// the repository that took the old name.
 	retiredStub := fx.seedPR(t, ghOldHost, "octo/tools#7", nil)
 	dbseed.RenameRepositoryOnly(t, fx.database, retiredStub.RepositoryID, "octo", "gadgets")
-	renamedRef := domain.RepoRef{Host: ghOldHost, Owner: "octo", Repo: "gadgets"}
-	if err := fx.stores.Repos.SetPullsPollStateByRefSystem(ctx, org, renamedRef, `"etag-before"`, time.Now()); err != nil {
-		t.Fatalf("seed pulls cursor: %v", err)
+	namesake, err := fx.stores.Repos.FindOrCreateByRefSystem(ctx, org, domain.RepoRef{Host: ghOldHost, Owner: "octo", Repo: "tools"})
+	if err != nil || namesake.ID == retiredStub.RepositoryID {
+		t.Fatalf("register the namesake: row=%+v err=%v; want a row of its own", namesake, err)
+	}
+	for id, etag := range map[string]string{retiredStub.RepositoryID: `"etag-before"`, namesake.ID: `"etag-live"`} {
+		if err := fx.stores.Repos.SetPullsPollStateSystem(ctx, org, id, etag, time.Now()); err != nil {
+			t.Fatalf("seed pulls cursor: %v", err)
+		}
 	}
 	fx.tr.RetireGitHubOutOfScope(ctx, ghNewHost)
 	m, ok := unreachableByEntity(t, fx.pub.nonSystemEvents())[retiredStub.ID]
 	if !ok || m.Repo != "octo/gadgets" || m.PRNumber != 7 {
 		t.Errorf("unreachable for the stub = %+v (found %v), want repo octo/gadgets and number 7", m, ok)
 	}
-	if etag, _, err := fx.stores.Repos.GetPullsPollStateByRefSystem(ctx, org, renamedRef); err != nil || etag != "" {
+	if etag, _, err := fx.stores.Repos.GetPullsPollStateSystem(ctx, org, retiredStub.RepositoryID); err != nil || etag != "" {
 		t.Errorf("pulls cursor after retirement = %q, %v; want it cleared", etag, err)
+	}
+	if etag, _, err := fx.stores.Repos.GetPullsPollStateSystem(ctx, org, namesake.ID); err != nil || etag != `"etag-live"` {
+		t.Errorf("namesake's cursor = %q, %v; want it untouched", etag, err)
 	}
 
 	// A stub on the current host is resolved by asking GitHub for the pull

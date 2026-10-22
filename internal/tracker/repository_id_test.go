@@ -13,11 +13,13 @@ import (
 )
 
 // Every GitHub event's metadata names its entity's repository registry row,
-// which is what repo_in filters match. A literal that leaves RepositoryID out
-// emits events no repo_in filter can ever match, and compiles, so the package
-// source is checked directly: every events.GitHub…Metadata composite literal
-// outside tests must set it.
-func TestGitHubMetadataLiteralsSetRepositoryID(t *testing.T) {
+// which is what repo_in filters match, and each actor it names by GitHub's id
+// beside the login, which is what the id predicates match and routing resolves
+// by. A literal that leaves one out still compiles, so the package source is
+// checked directly: every events.GitHub…Metadata composite literal outside
+// tests sets RepositoryID, and the id of each actor it sets.
+func TestGitHubMetadataLiteralsSetIDs(t *testing.T) {
+	actorIDs := map[string]string{"Author": "AuthorID", "Reviewer": "ReviewerID", "Commenter": "CommenterID"}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
@@ -42,14 +44,22 @@ func TestGitHubMetadataLiteralsSetRepositoryID(t *testing.T) {
 				return true
 			}
 			checked++
+			keys := map[string]bool{}
 			for _, elt := range lit.Elts {
 				if kv, ok := elt.(*ast.KeyValueExpr); ok {
-					if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "RepositoryID" {
-						return true
+					if key, ok := kv.Key.(*ast.Ident); ok {
+						keys[key.Name] = true
 					}
 				}
 			}
-			t.Errorf("%s: events.%s literal does not set RepositoryID", fset.Position(lit.Pos()), sel.Sel.Name)
+			if !keys["RepositoryID"] {
+				t.Errorf("%s: events.%s literal does not set RepositoryID", fset.Position(lit.Pos()), sel.Sel.Name)
+			}
+			for login, id := range actorIDs {
+				if keys[login] && !keys[id] {
+					t.Errorf("%s: events.%s literal sets %s without %s", fset.Position(lit.Pos()), sel.Sel.Name, login, id)
+				}
+			}
 			return true
 		})
 	}
@@ -65,7 +75,7 @@ func TestDiff_EventsCarryTheEntitysRepositoryID(t *testing.T) {
 	curr.Labels = []string{"needs-review"}
 	curr.CheckRuns = []domain.CheckRun{{ID: 1, Name: "build", Conclusion: "failure"}}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testUser, nil, nil, nil)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testSelf, nil, nil, nil)
 	if len(evts) < 2 {
 		t.Fatalf("got %d events, want a label and a CI event", len(evts))
 	}

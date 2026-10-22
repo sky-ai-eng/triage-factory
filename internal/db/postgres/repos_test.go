@@ -114,12 +114,25 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Errorf("orgA's BaseBranch was mutated by orgB UpdateBaseBranch: got %q", got.BaseBranch)
 	}
 
-	// UpdateCloneStatus cross-org must not touch orgA's row.
-	if _, err := stores.Repos.UpdateCloneStatusByRef(ctx, orgB, domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "octo", Repo: "widget"}, "failed", "hack", "other"); err != nil {
-		t.Fatalf("UpdateCloneStatus cross-org: %v", err)
+	// The same for the other id-keyed writes: orgB naming orgA's row id is
+	// refused, and orgA's row is untouched.
+	if _, err := stores.Repos.UpdateCloneStatusSystem(ctx, orgB, rowA.ID, "failed", "hack", "other"); !errors.Is(err, db.ErrNoSuchRepository) {
+		t.Errorf("cross-org UpdateCloneStatusSystem = %v, want db.ErrNoSuchRepository", err)
 	}
-	if got, _ := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "octo/widget")); got.CloneStatus == "failed" {
-		t.Errorf("orgA's CloneStatus was mutated by orgB UpdateCloneStatus: got %q", got.CloneStatus)
+	if _, err := stores.Repos.UpdateProfileSystem(ctx, orgB, rowA.ID, domain.Repository{ProfileText: "hack"}); !errors.Is(err, db.ErrNoSuchRepository) {
+		t.Errorf("cross-org UpdateProfileSystem = %v, want db.ErrNoSuchRepository", err)
+	}
+	if err := stores.Repos.SetPullsPollStateSystem(ctx, orgB, rowA.ID, `"hack"`, time.Now()); err != nil {
+		t.Errorf("cross-org SetPullsPollStateSystem = %v, want the documented no-op", err)
+	}
+	if _, _, err := stores.Repos.GetPullsPollStateSystem(ctx, orgB, rowA.ID); !errors.Is(err, db.ErrNoSuchRepository) {
+		t.Errorf("cross-org GetPullsPollStateSystem = %v, want db.ErrNoSuchRepository", err)
+	}
+	if after, _ := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "octo/widget")); after.CloneStatus == "failed" || after.ProfileText == "hack" {
+		t.Errorf("orgA's row was mutated by orgB: clone=%q profile=%q", after.CloneStatus, after.ProfileText)
+	}
+	if etag, _, _ := stores.Repos.GetPullsPollStateSystem(ctx, orgA, rowA.ID); etag != "" {
+		t.Errorf("orgA's pulls etag was written by orgB: %q", etag)
 	}
 }
 
@@ -382,17 +395,6 @@ func TestRepositoryStore_Postgres_ReturnedRow_AppPool(t *testing.T) {
 		return e
 	})
 	dbtest.AssertWriteReturnedStoredRow(t, "UpdateBaseBranch (app pool)", branched, read(created.ID))
-
-	var stamped *domain.Repository
-	write("UpdateCloneStatusByRef", func(tx db.TxStores) error {
-		var e error
-		stamped, e = tx.Repos.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "acme", Repo: "api"}, "failed", "boom", "ssh")
-		return e
-	})
-	if stamped == nil {
-		t.Fatal("UpdateCloneStatusByRef returned no row for a repository the caller can see")
-	}
-	dbtest.AssertWriteReturnedStoredRow(t, "UpdateCloneStatusByRef (app pool)", *stamped, read(created.ID))
 }
 
 // TestRepositoryStore_Postgres_UpsertReturnedRowConformance runs the

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,12 +19,28 @@ import (
 
 type fakeExplainer struct {
 	plan    placement.Plan
-	lastKey [4]string // org, kind, host, value
+	lastKey [2]string // org, repository id
 }
 
-func (f *fakeExplainer) Explain(_ context.Context, org, kind, host, val string) (placement.Plan, error) {
-	f.lastKey = [4]string{org, kind, host, val}
+func (f *fakeExplainer) Explain(_ context.Context, org, repositoryID string) (placement.Plan, error) {
+	f.lastKey = [2]string{org, repositoryID}
 	return f.plan, nil
+}
+
+// placementRepos answers the registry read with the rows it holds, keyed by
+// host and case-folded name, the way GetByRefSystem matches.
+type placementRepos struct {
+	db.RepositoryStore
+	rows []domain.Repository
+}
+
+func (p placementRepos) GetByRefSystem(_ context.Context, _ string, ref domain.RepoRef) (*domain.Repository, error) {
+	for _, r := range p.rows {
+		if r.Host == ref.Host && strings.EqualFold(r.Slug(), ref.Slug()) {
+			return &r, nil
+		}
+	}
+	return nil, nil
 }
 
 // placementOrgs answers the settings read with a fixed GitHub base URL — the
@@ -44,9 +61,16 @@ func localModeReq(target string) *http.Request {
 	return r.WithContext(httpx.WithClaims(r.Context(), &verify.Claims{Subject: "u1"}))
 }
 
+// fleetRepos is the registry the handler tests resolve ?repo= against: acme/web
+// on the org's host, and the same name on another host.
+var fleetRepos = placementRepos{rows: []domain.Repository{
+	{ID: "repo-web", Host: "https://ghe.example.com", Owner: "acme", Repo: "Web"},
+	{ID: "repo-web-dotcom", Host: "https://github.com", Owner: "acme", Repo: "web"},
+}}
+
 func TestHandleFleetPlacement_ReturnsCandidateOrder(t *testing.T) {
 	fe := &fakeExplainer{plan: placement.Plan{
-		Enabled: true, OrgID: "org1", KeyKind: "repo", Host: "https://ghe.example.com", KeyValue: "acme/web",
+		Enabled: true, OrgID: "org1", RepositoryID: "repo-web",
 		PreferredSet: []string{"exec-a"},
 		Aging:        20 * time.Second, Liveness: 12 * time.Second,
 		Candidates: []placement.Candidate{
@@ -55,7 +79,7 @@ func TestHandleFleetPlacement_ReturnsCandidateOrder(t *testing.T) {
 			{InstanceID: "exec-dead", Reason: "dead"},
 		},
 	}}
-	s := &Server{az: &authz.Checker{}, placement: fe, orgs: placementOrgs{githubBase: "https://ghe.example.com/"}}
+	s := &Server{az: &authz.Checker{}, placement: fe, orgs: placementOrgs{githubBase: "https://ghe.example.com/"}, repos: fleetRepos}
 
 	rec := httptest.NewRecorder()
 	s.handleFleetPlacement(rec, localModeReq("/api/fleet/placement?org=org1&repo=acme/web"))
@@ -67,8 +91,12 @@ func TestHandleFleetPlacement_ReturnsCandidateOrder(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &dto); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !dto.Enabled || dto.KeyValue != "acme/web" || dto.Host != "https://ghe.example.com" || len(dto.Candidates) != 3 {
+	if !dto.Enabled || dto.KeyKind != "repo" || dto.RepositoryID != "repo-web" || len(dto.Candidates) != 3 {
 		t.Fatalf("unexpected dto: %+v", dto)
+	}
+	// The repository's current name and host, off its registry row.
+	if dto.Repo != "acme/Web" || dto.Host != "https://ghe.example.com" {
+		t.Fatalf("dto names %s on %s, want the registry row's acme/Web on https://ghe.example.com", dto.Repo, dto.Host)
 	}
 	if dto.Candidates[0].InstanceID != "exec-a" || !dto.Candidates[0].Preferred {
 		t.Fatalf("top candidate should be the preferred owner: %+v", dto.Candidates)
@@ -76,10 +104,34 @@ func TestHandleFleetPlacement_ReturnsCandidateOrder(t *testing.T) {
 	if dto.PreferredSet[0] != "exec-a" || dto.AgingSeconds != 20 {
 		t.Fatalf("preferred/aging wrong: %+v", dto)
 	}
-	// The handler derived the (org, repo) key it passed to the resolver, on
-	// the org's current GitHub host.
-	if fe.lastKey != [4]string{"org1", "repo", "https://ghe.example.com", "acme/web"} {
+	// The handler resolved the name on the org's current GitHub host to its
+	// registry row, and keyed the resolver on the row's id.
+	if fe.lastKey != [2]string{"org1", "repo-web"} {
 		t.Fatalf("resolver keyed on %v", fe.lastKey)
+	}
+}
+
+func TestHandleFleetPlacement_UnregisteredRepoIsNotFound(t *testing.T) {
+	fe := &fakeExplainer{}
+	s := &Server{az: &authz.Checker{}, placement: fe, orgs: placementOrgs{githubBase: "https://ghe.example.com"}, repos: fleetRepos}
+	rec := httptest.NewRecorder()
+	s.handleFleetPlacement(rec, localModeReq("/api/fleet/placement?org=org1&repo=acme/api"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("a name no registry row answers to should 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if fe.lastKey != [2]string{} {
+		t.Fatalf("the resolver was consulted for %v with no registry row", fe.lastKey)
+	}
+}
+
+func TestHandleFleetPlacement_RejectsAMalformedRepo(t *testing.T) {
+	for _, repo := range []string{"acme", "acme/", "/web", "acme/web/extra"} {
+		s := &Server{az: &authz.Checker{}, placement: &fakeExplainer{}, repos: fleetRepos}
+		rec := httptest.NewRecorder()
+		s.handleFleetPlacement(rec, localModeReq("/api/fleet/placement?org=org1&repo="+repo))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("repo=%q: status %d, want 400", repo, rec.Code)
+		}
 	}
 }
 

@@ -103,18 +103,25 @@ func (s *faultyEntityStore) ReactivateWithSnapshotCASSystem(ctx context.Context,
 	return s.EntityStore.ReactivateWithSnapshotCASSystem(ctx, orgID, id, snapshotJSON, expectedPollSeq)
 }
 
+// pullsCursorOf reads the listing state stored on the registry row repo
+// resolves to on cursorTestHost.
 func pullsCursorOf(t *testing.T, stores db.Stores, repo string) (string, *time.Time) {
 	t.Helper()
-	etag, polledAt, err := stores.Repos.GetPullsPollStateByRefSystem(context.Background(), runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(cursorTestHost, repo))
+	ctx := context.Background()
+	row, err := stores.Repos.GetByRefSystem(ctx, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(cursorTestHost, repo))
+	if err != nil || row == nil {
+		t.Fatalf("resolve %s: got=%v err=%v", repo, row, err)
+	}
+	etag, polledAt, err := stores.Repos.GetPullsPollStateSystem(ctx, runmode.LocalDefaultOrgID, row.ID)
 	if err != nil {
-		t.Fatalf("GetPullsPollStateByRefSystem(%s): %v", repo, err)
+		t.Fatalf("GetPullsPollStateSystem(%s): %v", repo, err)
 	}
 	return etag, polledAt
 }
 
 func refreshRepos(t *testing.T, tr *Tracker, client *ghclient.Client, repos ...string) {
 	t.Helper()
-	if _, _, err := tr.RefreshGitHub(context.Background(), cursorTestHost, client, "", repos, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(context.Background(), cursorTestHost, client, domain.GitHubAccount{}, repos, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 }
@@ -293,7 +300,7 @@ func TestRefreshGitHub_ExpiredCycleContextKeepsFinishedCursor(t *testing.T) {
 	defer cancel()
 	// Phase 2 runs on the expired context and fails; only the cursors are
 	// under test here.
-	_, _, _ = tr.RefreshGitHub(ctx, cursorTestHost, ghclient.NewClient(srv.URL, "tok"), "", repos, nil)
+	_, _, _ = tr.RefreshGitHub(ctx, cursorTestHost, ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, repos, nil)
 
 	if etag, _ := pullsCursorOf(t, stores, "octo/ok"); etag != `"etag-ok"` {
 		t.Errorf("octo/ok stored etag = %q; want %q", etag, `"etag-ok"`)

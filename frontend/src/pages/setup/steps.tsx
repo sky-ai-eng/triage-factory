@@ -1540,8 +1540,7 @@ const jiraProjectsStep: WizardStep = {
     const result = await saveTeamJiraProjects(teamId, state.team.jira_projects)
     if (!result.ok) throw new Error(result.error)
   },
-  collapsedSummary: (s) =>
-    `Tracked Jira projects: ${s.team.jira_projects.filter((p) => p.key.trim() !== '').length}`,
+  collapsedSummary: (s) => `Tracked Jira projects: ${s.team.jira_projects.length}`,
   render: ({ state, patch, orgId }) =>
     orgId ? (
       <JiraProjectRulesGroup

@@ -292,7 +292,13 @@ about):
   unknown width (unknown is not an answer), and each remaining row names the
   selective installation on its owner account when there is one — or none, when
   no bound installation covers the account at all, where the way out is
-  connecting the account or untracking the repository.
+  connecting the account or untracking the repository. The owner account is
+  matched to its installation by GitHub's account id, which the repository's
+  registry row records from the grant listing, the profiler and the reachable
+  mirror, and by login only while the row or the installation has no id. A
+  drifted repository is in no grant listing, so a rename of its owner account
+  reaches the installation's `account_login` and never the row's owner; the id
+  is what keeps the finding pointed at the right installation.
 
 Both are computed server-side from the mirror. Opening the panel issues no
 GitHub call and triggers no refresh; the refresh POST beside the status read is

@@ -40,6 +40,30 @@ func TestFactoryReadStore_Postgres(t *testing.T) {
 		orgID, userID := seedPgFactoryOrg(t, h)
 		promptID := seedPgFactoryPrompt(t, h, orgID, userID)
 		seeder := newPgFactorySeeder(h.AdminDB, orgID, userID, promptID)
+		seeder.GroupedEntity = func(t *testing.T, source string) (string, string) {
+			t.Helper()
+			teamID := firstTeamForOrg(t, h, orgID)
+			switch source {
+			case "github":
+				repo := pgtest.SeedTrackedRepo(t, h, orgID, teamID, "acme", "widget")
+				return seedPgGitHubEntityRaw(t, h, orgID, "acme", "widget", 7), repo
+			case "jira":
+				project := seedPgJiraRule(t, h, teamID, "SKY")
+				return seedPgJiraEntityRaw(t, h, orgID, "SKY", 3), project
+			}
+			pgtest.MustExec(t, h.AdminDB, `
+				INSERT INTO org_settings (org_id, linear_workspace_id) VALUES ($1, 'ws-test')
+				ON CONFLICT (org_id) DO UPDATE SET linear_workspace_id = EXCLUDED.linear_workspace_id`, orgID)
+			pgtest.MustExec(t, h.AdminDB, `
+				INSERT INTO linear_team_rules (team_id, linear_workspace_id, linear_team_id, linear_team_key, linear_team_name)
+				VALUES ($1, 'ws-test', 'lt-eng', 'ENG', 'Engineering')`, teamID)
+			id := uuid.New().String()
+			pgtest.MustExec(t, h.AdminDB, `
+				INSERT INTO entities (id, org_id, source, source_id, external_id, kind, title, url, snapshot_json, created_at, scope, linear_team_id)
+				VALUES ($1, $2, 'linear', 'ENG-1', 'uuid-ENG-1', 'issue', 'ENG-1', '', '{}'::jsonb, $3, 'ws-test', 'lt-eng')`,
+				id, orgID, time.Now().UTC())
+			return id, "lt-eng"
+		}
 		return stores.Factory, orgID, seeder
 	})
 }

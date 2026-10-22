@@ -113,7 +113,7 @@ func (a *App) buildAI() {
 	// reconcile on one tenant can't head-of-line-block another. The shared
 	// Reconciler is also handed to the server for the Tier-2 run-scoped refresh
 	// endpoint, so foreground and background reconciliation run one code path.
-	reconciler := reconcile.NewReconciler(a.ghResolver, a.stores.Artifacts, a.stores.ExternalActions, a.stores.Entities, a.stores.Orgs, a.wsHub)
+	reconciler := reconcile.NewReconciler(a.ghResolver, a.stores.Artifacts, a.stores.ExternalActions, a.stores.Entities, a.stores.Repos, a.stores.Orgs, a.wsHub)
 	a.reconcilerCore = reconciler
 	a.reconciler = reconcile.NewManager(reconciler)
 	a.srv.SetReconciler(reconciler)
@@ -498,6 +498,10 @@ func (a *App) newPollerManager() *poller.Manager {
 	// wherever no managed workspace has bound an installation; where one has and
 	// no deployment App is configured, an error the poller warns on every cycle.
 	m.RefreshManagedInstallations = a.grantReconciler.RunDeployment
+	// The mirror that pass writes, read back when an installation's grant
+	// cannot be listed: its last mirrored grant says which tracked
+	// repositories the cursor should resume at.
+	m.GrantMirror = a.stores.ReachableRepos
 	// Skip a cycle for a source an org admin turned off. This is what makes
 	// "a turned-off source makes zero API calls" true, which is a promise
 	// measurable from the other end; the router's drop beside it is what makes

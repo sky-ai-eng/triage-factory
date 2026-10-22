@@ -1184,8 +1184,8 @@ func (s *Server) routes() {
 	dh := &dashboardHandler{tx: s.tx, ghResolver: s.ghResolver, backfill: s.kickDashboardBackfill}
 	s.api("GET /api/dashboard/stats", dh.handleDashboardStats)
 	s.apiMutating("POST /api/dashboard/prs/list", dh.handleDashboardPRs)
-	s.api("GET /api/dashboard/prs/{owner}/{repo}/{number}/status", dh.handleDashboardPRStatus)
-	s.apiMutating("POST /api/dashboard/prs/{owner}/{repo}/{number}/draft", dh.handleDashboardPRDraft)
+	s.api("GET /api/dashboard/prs/{entity_id}/status", dh.handleDashboardPRStatus)
+	s.apiMutating("PATCH /api/dashboard/prs/{entity_id}", dh.handleDashboardPRUpdate)
 
 	// Prompt imports. Two routes rather than one with a source field: they
 	// take different bodies (a paste vs. nothing) and only one of them can
@@ -1236,9 +1236,16 @@ func (s *Server) routes() {
 	// total_count is null. Its GitHub sibling reads a mirror instead; see the
 	// handler file for why the two differ.
 	s.apiMutating("POST /api/orgs/{org_id}/jira/projects/list", s.handleJiraProjectsList)
-	s.api("GET /api/orgs/{org_id}/jira/projects/{project_key}", s.handleJiraProjectGet)
-	s.apiMutating("POST /api/orgs/{org_id}/jira/projects/{project_key}/statuses/list", s.handleJiraStatusesList)
-	s.api("GET /api/orgs/{org_id}/jira/projects/{project_key}/statuses/{status_id}", s.handleJiraStatusGet)
+	s.api("GET /api/orgs/{org_id}/jira/projects/{jira_id}", s.handleJiraProjectGet)
+	s.apiMutating("POST /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/list", s.handleJiraStatusesList)
+	s.api("GET /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/{status_id}", s.handleJiraStatusGet)
+	// The instance's priorities and each project's issue types, which Jira
+	// event predicates name by id. Proxied and member-gated like the routes
+	// above; see jira_issue_fields_handler.go.
+	s.apiMutating("POST /api/orgs/{org_id}/jira/priorities/list", s.handleJiraPrioritiesList)
+	s.api("GET /api/orgs/{org_id}/jira/priorities/{priority_id}", s.handleJiraPriorityGet)
+	s.apiMutating("POST /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/list", s.handleJiraIssueTypesList)
+	s.api("GET /api/orgs/{org_id}/jira/projects/{jira_id}/issue-types/{issue_type_id}", s.handleJiraIssueTypeGet)
 	// The org's Linear catalog — its teams, and each team's workflow states —
 	// proxied live under the org's Linear service credential and addressed at
 	// the org, so a caller in several orgs reads each without moving their
@@ -1247,6 +1254,10 @@ func (s *Server) routes() {
 	s.api("GET /api/orgs/{org_id}/linear/teams/{linear_team_id}", s.handleLinearTeamGet)
 	s.apiMutating("POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/list", s.handleLinearStatesList)
 	s.api("GET /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/{state_id}", s.handleLinearStateGet)
+	// The labels an issue in a Linear team can carry, which Linear event
+	// predicates name by id; see linear_labels_handler.go.
+	s.apiMutating("POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/labels/list", s.handleLinearLabelsList)
+	s.api("GET /api/orgs/{org_id}/linear/teams/{linear_team_id}/labels/{label_id}", s.handleLinearLabelGet)
 	// **Declared exception** to the list-envelope rule. The stock deck is a
 	// composite the discovery UI deals from — a readiness status plus two
 	// partitions of the same set — not a row list a client walks. It reads the
@@ -1319,7 +1330,7 @@ func (s *Server) routes() {
 	// with `kind` as the row discriminator on every read. The writes are split
 	// per kind, because a rule and a trigger require different fields and
 	// default `enabled` in opposite directions.
-	eh := &eventHandlersHandler{tx: s.tx, az: s.az}
+	eh := &eventHandlersHandler{tx: s.tx, az: s.az, catalogs: s}
 	s.apiMutating("POST /api/event-handlers/list", eh.handleEventHandlersList)
 	// The canonical single read. The mutation routes load this row internally;
 	// this is the only address that hands it back.
@@ -1608,6 +1619,11 @@ func (s *Server) routes() {
 	// always-available fallback to Connect (and the only path when no App is
 	// registered). Never stores the token.
 	s.apiMutating("POST /api/orgs/{org_id}/github/identity/pat", s.handleGitHubIdentityPAT)
+	// GitHub accounts on the org's GitHub, read through the org's credential:
+	// a login resolved to the account id a GitHub predicate's identity filters
+	// take, and an id named by its current login.
+	s.api("GET /api/orgs/{org_id}/github/users/by-name/{login}", s.handleGitHubAccountByName)
+	s.api("GET /api/orgs/{org_id}/github/users/{github_user_id}", s.handleGitHubAccountByID)
 
 	// The org's Jira credential — the Jira half of the addressable-resource
 	// pair whose rationale sits with the GitHub PAT routes above.

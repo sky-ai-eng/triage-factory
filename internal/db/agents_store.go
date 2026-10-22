@@ -94,23 +94,26 @@ type AgentStore interface {
 	// renders the row.
 	Create(ctx context.Context, orgID string, a domain.Agent) (id string, err error)
 
-	// SetGitHubOrgIdentity records the org credential's OWN GitHub login and
-	// verified primary email — the account the bot/org PAT authenticates as,
-	// distinct from github_pat_user_id (the user who pasted the PAT, which
-	// only Create stamps). Written by the org-PAT setup/rebind writers
-	// (internal/server/credentials.go and the other integrations.Save sites)
-	// so the credential resolver's OrgIdentityFor PAT tier can stamp the org
-	// commit-author identity. If either value is empty, both fields are
-	// cleared so a partial identity can never be persisted. Admin-only in
-	// Postgres via the app pool's RLS. App-tier orgs never write here — the
+	// SetGitHubOrgIdentity records the org credential's OWN GitHub login,
+	// numeric account id and verified primary email — the account the bot/org
+	// PAT authenticates as, distinct from github_pat_user_id (the user who
+	// pasted the PAT, which only Create stamps). Written by the org-PAT
+	// setup/rebind writers (internal/server/credentials.go and the other
+	// integrations.Save sites) so the credential resolver's OrgIdentityFor PAT
+	// tier can stamp the org commit-author identity, and a run can tell that
+	// account from the person who delegated it by id. If the login or the email
+	// is empty, every field is cleared so a partial identity can never be
+	// persisted; the id is written as given, "" storing none, because it
+	// describes the account this write's login names and no other. Admin-only
+	// in Postgres via the app pool's RLS. App-tier orgs never write here — the
 	// App bot login (<slug>[bot]) resolves live from the App registration, so
 	// this is the PAT path only.
 	//
 	// Returns the updated row, or ErrNoSuchAgent — which is what an id no row
 	// answers to gets, invalid-UUID input included. The row is where the
-	// all-or-nothing rule is visible: pass one half and both columns come back
-	// empty.
-	SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, login, email string) (domain.Agent, error)
+	// all-or-nothing rule is visible: pass one half and every column comes
+	// back empty.
+	SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, login, githubUserID, email string) (domain.Agent, error)
 
 	// GetForOrgSystem mirrors GetForOrg but routes through the admin
 	// pool in Postgres. Used by system / claims-free callers that have

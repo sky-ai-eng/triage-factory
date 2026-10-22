@@ -17,7 +17,7 @@ import (
 // *placement.Resolver: compute the full candidate order for a key,
 // even when the layer is advisory-off, so an operator can preview placement.
 type placementResolver interface {
-	Explain(ctx context.Context, orgID, keyKind, host, keyValue string) (placement.Plan, error)
+	Explain(ctx context.Context, orgID, repositoryID string) (placement.Plan, error)
 }
 
 // SetPlacementResolver wires the rendezvous resolver that backs GET
@@ -44,17 +44,22 @@ type placementOverrideDTO struct {
 }
 
 // placementExplainDTO is the GET /api/fleet/placement response: the computed
-// candidate order for the key, the preferred set the enqueue stamp draws
-// from, whether the layer is live or advisory-off, the aging/liveness windows
-// the claim runs with, and any override in effect. This is the debuggability
-// that made a mutable routing table tempting — delivered as a pure view over
-// deterministic state (spec §6.1).
+// candidate order for the repository's key, the preferred set the enqueue
+// stamp draws from, whether the layer is live or advisory-off, the
+// aging/liveness windows the claim runs with, and any override in effect. This
+// is the debuggability that made a mutable routing table tempting — delivered
+// as a pure view over deterministic state (spec §6.1).
+//
+// repository_id is the registry row the key is (the value the rendezvous hash
+// ranks on and the row any override belongs to); host and repo are that
+// row's current host and name, display values read off the row.
 type placementExplainDTO struct {
 	Enabled      bool                    `json:"enabled"`
 	OrgID        string                  `json:"org_id"`
 	KeyKind      string                  `json:"key_kind"`
+	RepositoryID string                  `json:"repository_id"`
 	Host         string                  `json:"host"`
-	KeyValue     string                  `json:"key_value"`
+	Repo         string                  `json:"repo"`
 	PreferredSet []string                `json:"preferred_set"`
 	Candidates   []placementCandidateDTO `json:"candidates"`
 	Override     *placementOverrideDTO   `json:"override,omitempty"`
@@ -62,13 +67,17 @@ type placementExplainDTO struct {
 	LivenessSec  float64                 `json:"liveness_seconds"`
 }
 
-// handleFleetPlacement is the placement explainer (spec §6.1): for a key it
-// returns the computed rendezvous candidate order and why (weights, overrides,
-// liveness) — the same order the claim honors. Org-admin gated on the ?org=
-// query (a dedicated fleet operator identity is a later ticket);
-// the answer names executor instance ids for the caller's own org's work, so
-// org-admin is the right scope until then. The key is the repository on the
-// org's current GitHub host, whose override (if any) is the one shown.
+// handleFleetPlacement is the placement explainer (spec §6.1): for a
+// repository it returns the computed rendezvous candidate order and why
+// (weights, overrides, liveness) — the same order the claim honors. Org-admin
+// gated on the ?org= query (a dedicated fleet operator identity is a later
+// ticket); the answer names executor instance ids for the caller's own org's
+// work, so org-admin is the right scope until then.
+//
+// ?repo= names the repository the way an operator knows it, owner/repo on the
+// org's current GitHub host, and is resolved to its registry row here, once:
+// the key and any override are that row's. A name no live row answers to is a
+// 404, since no run is keyed on a repository TF holds no row for.
 //
 // GET /api/fleet/placement?org=<uuid>&repo=<owner/repo>[&kind=repo]
 func (s *Server) handleFleetPlacement(w http.ResponseWriter, r *http.Request) {
@@ -116,11 +125,17 @@ func (s *Server) handleFleetPlacement(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	keyParam := "repo"
-	keyValue := strings.TrimSpace(r.URL.Query().Get(keyParam))
-	if keyValue == "" {
+	slug := strings.TrimSpace(r.URL.Query().Get("repo"))
+	if slug == "" {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidParam, Message: keyParam + " query parameter is required", Field: keyParam,
+			Reason: httpx.ReasonInvalidParam, Message: "repo query parameter is required", Field: "repo",
+		})
+		return
+	}
+	owner, name, ok := strings.Cut(slug, "/")
+	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidParam, Message: "repo must be owner/repo", Field: "repo",
 		})
 		return
 	}
@@ -129,7 +144,16 @@ func (s *Server) handleFleetPlacement(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	plan, err := s.placement.Explain(r.Context(), orgID, kind, host, keyValue)
+	repo, err := s.repos.GetByRefSystem(r.Context(), orgID, domain.RepoRef{Host: host, Owner: owner, Repo: name})
+	if err != nil {
+		internalError(w, "fleet-placement", err)
+		return
+	}
+	if repo == nil {
+		notFound(w, "repository")
+		return
+	}
+	plan, err := s.placement.Explain(r.Context(), orgID, repo.ID)
 	if err != nil {
 		internalError(w, "fleet-placement", err)
 		return
@@ -138,9 +162,10 @@ func (s *Server) handleFleetPlacement(w http.ResponseWriter, r *http.Request) {
 	dto := placementExplainDTO{
 		Enabled:      plan.Enabled,
 		OrgID:        plan.OrgID,
-		KeyKind:      plan.KeyKind,
-		Host:         plan.Host,
-		KeyValue:     plan.KeyValue,
+		KeyKind:      kind,
+		RepositoryID: plan.RepositoryID,
+		Host:         repo.Host,
+		Repo:         repo.Slug(),
 		PreferredSet: plan.PreferredSet,
 		AgingSeconds: plan.Aging.Seconds(),
 		LivenessSec:  plan.Liveness.Seconds(),

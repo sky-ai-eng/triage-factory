@@ -475,7 +475,7 @@ func (s *Server) handleGitHubManagedConnectAccount(w http.ResponseWriter, r *htt
 		writeBindRefusalJSON(w, *refusal)
 		return
 	}
-	raw, nonceHash, err := s.mintPendingBind(r.Context(), orgID, userID, domain.GitHubBindLegAuthorize, account)
+	raw, nonceHash, err := s.mintPendingBind(r.Context(), orgID, userID, domain.GitHubBindLegAuthorize, namedAccount{Login: account})
 	if err != nil {
 		internalError(w, "github-managed-bind", err)
 		return
@@ -494,12 +494,38 @@ func (s *Server) handleGitHubManagedConnectAccount(w http.ResponseWriter, r *htt
 	})
 }
 
+// namedAccount is the account a ceremony was started for: the login the admin
+// named, and GitHub's numeric id for it once the ceremony has resolved one (0
+// before it has).
+type namedAccount struct {
+	Login string
+	ID    int64
+}
+
+// namedAccountOf reads the account a pending-bind record names. An id that
+// does not parse is one the record does not have.
+func namedAccountOf(record domain.GitHubPendingBind) namedAccount {
+	id, _ := strconv.ParseInt(record.AccountID, 10, 64)
+	return namedAccount{Login: record.AccountLogin, ID: id}
+}
+
+// holds reports whether the installation GitHub returned is on the named
+// account. By numeric account id when both carry one, because a login is a
+// handle its owner can rename and another account can then take; by login
+// only when either side has no id.
+func (a namedAccount) holds(inst githubapp.Installation) bool {
+	if a.ID != 0 && inst.AccountID != 0 {
+		return inst.AccountID == a.ID
+	}
+	return strings.EqualFold(inst.AccountLogin, a.Login)
+}
+
 // mintPendingBind writes one pending-bind record for leg and account and
 // returns the nonce for the browser and its hash for the record. The nonce
 // goes to the browser and its hash to the database, so a database read yields
 // nothing that can complete a bind. The caller decides how the nonce reaches
 // the browser: a fresh cookie at the start, a replaced one mid-ceremony.
-func (s *Server) mintPendingBind(ctx context.Context, orgID, userID, leg, accountLogin string) (raw, nonceHash string, err error) {
+func (s *Server) mintPendingBind(ctx context.Context, orgID, userID, leg string, account namedAccount) (raw, nonceHash string, err error) {
 	nonce := make([]byte, managedBindNonceBytes)
 	if _, err := rand.Read(nonce); err != nil {
 		return "", "", err
@@ -507,12 +533,17 @@ func (s *Server) mintPendingBind(ctx context.Context, orgID, userID, leg, accoun
 	raw = hex.EncodeToString(nonce)
 	nonceHash = hashBindNonce(raw)
 	now := timeNow().UTC()
+	var accountID string
+	if account.ID != 0 {
+		accountID = strconv.FormatInt(account.ID, 10)
+	}
 	if _, err := s.githubPendingBinds.CreateSystem(ctx, domain.GitHubPendingBind{
 		NonceHash:    nonceHash,
 		OrgID:        orgID,
 		UserID:       userID,
 		Leg:          leg,
-		AccountLogin: accountLogin,
+		AccountLogin: account.Login,
+		AccountID:    accountID,
 		CreatedAt:    now,
 		ExpiresAt:    now.Add(db.GitHubPendingBindTTL),
 	}); err != nil {
@@ -694,9 +725,11 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 		// hold the installation to — every other proof runs — so a connect
 		// that was legitimately started does not refuse because the pods
 		// changed underneath it.
-		refusal, account, err = s.completeManagedBind(r, orgID, userID, "")
+		refusal, account, err = s.completeManagedBind(r, orgID, userID, namedAccount{})
 	case record.Leg == domain.GitHubBindLegInstall:
-		refusal, account, err = s.completeManagedBind(r, orgID, userID, record.AccountLogin)
+		// Stored records can carry no account id; such a record is held to
+		// its login.
+		refusal, account, err = s.completeManagedBind(r, orgID, userID, namedAccountOf(*record))
 	case record.Leg == domain.GitHubBindLegAuthorize:
 		refusal, account, hop, err = s.completeNamedAccountBind(r, orgID, userID, nonce, record.AccountLogin)
 	default:
@@ -762,11 +795,12 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 // a redirect. account is the login of the GitHub account the installation
 // targets, once the App has read the installation and "" before — it exists
 // for the operator log alone, which is the one surface an unbound
-// installation's login may reach.
+// installation's login may reach. named is the account the ceremony was
+// started for, the zero value when the record names none.
 //
 // No secret, token or code is logged on any path through here, including the
 // refusals.
-func (s *Server) completeManagedBind(r *http.Request, orgID, userID, namedLogin string) (refusal *bindRefusal, account string, err error) {
+func (s *Server) completeManagedBind(r *http.Request, orgID, userID string, named namedAccount) (refusal *bindRefusal, account string, err error) {
 	ctx := r.Context()
 
 	// GitHub reports setup_action=request when the installer lacked the right
@@ -836,12 +870,12 @@ func (s *Server) completeManagedBind(r *http.Request, orgID, userID, namedLogin 
 		githubAppLog.Warn("managed bind: installation read answered for another installation", "org", orgID)
 		return &refuseInstallationUnreadable, "", nil
 	}
-	if namedLogin != "" && !strings.EqualFold(inst.AccountLogin, namedLogin) {
+	if named.Login != "" && !named.holds(inst) {
 		// The ceremony was started for one account and GitHub installed on
 		// another: the preselection was changed on the way through. The gates
 		// below might well pass for this account too — the person may own
 		// both — and it still is not the connection they asked for.
-		out := refuseAccountMismatch.withAccounts(inst.AccountLogin, namedLogin)
+		out := refuseAccountMismatch.withAccounts(inst.AccountLogin, named.Login)
 		return &out, inst.AccountLogin, nil
 	}
 
@@ -932,7 +966,7 @@ func (s *Server) completeNamedAccountBind(r *http.Request, orgID, userID, nonce,
 		return refusal, "", nil, err
 	}
 
-	installationID, err := githubbind.AssociatedByAccount(ctx, ghWeb, token, login)
+	installationID, accountID, err := githubbind.AssociatedByAccount(ctx, ghWeb, token, login)
 	if errors.Is(err, githubbind.ErrNotAssociated) {
 		// On to GitHub's install page for the named account. The id GitHub's
 		// install URL takes is resolved under the person's own token from a
@@ -954,7 +988,7 @@ func (s *Server) completeNamedAccountBind(r *http.Request, orgID, userID, nonce,
 			// anyone to.
 			return &refuseNoDeploymentApp, "", nil, nil
 		}
-		raw, _, merr := s.mintPendingBind(ctx, orgID, userID, domain.GitHubBindLegInstall, target.Login)
+		raw, _, merr := s.mintPendingBind(ctx, orgID, userID, domain.GitHubBindLegInstall, namedAccount{Login: target.Login, ID: target.ID})
 		if merr != nil {
 			return nil, "", nil, merr
 		}
@@ -982,10 +1016,11 @@ func (s *Server) completeNamedAccountBind(r *http.Request, orgID, userID, nonce,
 		githubAppLog.Warn("managed bind: installation read failed", "org", orgID, "error", err)
 		return &refuseInstallationUnreadable, "", nil, nil
 	}
-	if inst.ID != installationID || !strings.EqualFold(inst.AccountLogin, login) {
+	if inst.ID != installationID || !(namedAccount{Login: login, ID: accountID}).holds(inst) {
 		// The App answered about some other installation, or about one that
-		// is not on the account the admin named. Nothing downstream may
-		// proceed on two answers.
+		// is not on the account the lookup resolved the admin's login to —
+		// compared by that account's id, which the listing named. Nothing
+		// downstream may proceed on two answers.
 		githubAppLog.Warn("managed bind: installation read disagrees with the lookup", "org", orgID)
 		return &refuseInstallationUnreadable, "", nil, nil
 	}

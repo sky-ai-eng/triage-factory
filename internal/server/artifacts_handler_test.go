@@ -858,11 +858,26 @@ func seedDraftPRArtifactWithConversation(t *testing.T, s *Server, suffix, owner,
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
-	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(s.db).Orgs, runmode.LocalDefaultOrgID, a))
+	a = linkPullRequestEntity(t, s, dbtest.InOrgScope(t, sqlitestore.New(s.db).Orgs, runmode.LocalDefaultOrgID, a))
+	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
 	if err != nil {
 		t.Fatalf("seed draft PR artifact: %v", err)
 	}
 	return stored.ID, conversationID, taskID
+}
+
+// linkPullRequestEntity links a pull request or review artifact to its pull
+// request's entity, creating it as the poller would, because the handlers
+// resolve the pull request through that entity.
+func linkPullRequestEntity(t *testing.T, s *Server, a domain.Artifact) domain.Artifact {
+	t.Helper()
+	nodeID, _ := domain.ArtifactPullRequestNodeID(a)
+	e, _, err := sqlitestore.New(s.db).Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "github", a.Scope, a.Target, nodeID, "pr", "Proposed title", a.URL)
+	if err != nil {
+		t.Fatalf("seed the pull request entity for %s: %v", a.Target, err)
+	}
+	a.EntityID = e.ID
+	return a
 }
 
 // assertAgentMemoryUntouched checks that the conversation still holds exactly
@@ -974,7 +989,7 @@ func newRejectStub(t *testing.T, srv *Server, live map[string]any, node string, 
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 	stores := sqlitestore.New(srv.db)
-	srv.SetReconciler(reconcile.NewReconciler(srv.ghResolver, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Orgs, nil))
+	srv.SetReconciler(reconcile.NewReconciler(srv.ghResolver, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil))
 	return rs
 }
 
@@ -1065,12 +1080,22 @@ func TestArtifactReject_PR(t *testing.T) {
 	if len(acts) != 1 || acts[0].Target != "acme/api" || acts[0].ExternalID != "refs/heads/feature/x" || acts[0].ConversationID != conversationID {
 		t.Errorf("branch_deleted audit rows = %+v, want one on acme/api refs/heads/feature/x for the drafting conversation", acts)
 	}
+	// The branch delete is about the repository, by its registry row.
+	repo, err := sqlitestore.New(srv.db).Repos.GetByRefSystem(context.Background(), runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(pr.Scope, "acme/api"))
+	if err != nil || repo == nil {
+		t.Fatalf("read acme/api's registry row: %v, %v", repo, err)
+	}
+	if len(acts) == 1 && (acts[0].RepositoryID != repo.ID || acts[0].EntityID != "") {
+		t.Errorf("branch_deleted references (entity %q, repository %q), want repository %s", acts[0].EntityID, acts[0].RepositoryID, repo.ID)
+	}
 	closedActs, _, err := sqlitestore.New(srv.db).ExternalActions.ListByOrgSystem(context.Background(), runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionPRClosed})
 	if err != nil {
 		t.Fatalf("list actions: %v", err)
 	}
 	if len(closedActs) != 1 {
 		t.Errorf("pr_closed audit rows = %d, want 1", len(closedActs))
+	} else if closedActs[0].EntityID != pr.EntityID {
+		t.Errorf("pr_closed references entity %q, want the PR artifact's %q", closedActs[0].EntityID, pr.EntityID)
 	}
 
 	assertAgentMemoryUntouched(t, srv, conversationID)

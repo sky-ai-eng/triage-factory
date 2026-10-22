@@ -114,16 +114,38 @@ func TestSplitOwnerRepoStr(t *testing.T) {
 	}
 }
 
-// fakeCheckouts is a runCheckouts that hands back canned
-// conversation_worktrees rows (host view) and a root pair to translate them.
+// fakeCheckouts is a prCheckouts that hands back canned
+// conversation_worktrees rows (host view), a root pair to translate them, and
+// a registry that resolves every name: through repoIDs (keyed by lowercased
+// "owner/repo"), else to fakeRepositoryID of the name, which is also the id a
+// row without a RepositoryID references.
 type fakeCheckouts struct {
 	rows                []domain.ConversationWorktree
 	hostRoot, agentRoot string
 	listErr             error
+	repoIDs             map[string]string
 }
 
+func fakeRepositoryID(slug string) string { return "repo:" + strings.ToLower(slug) }
+
 func (f fakeCheckouts) ListConversationWorktrees(context.Context) ([]domain.ConversationWorktree, error) {
-	return f.rows, f.listErr
+	rows := make([]domain.ConversationWorktree, len(f.rows))
+	for i, w := range f.rows {
+		if w.RepositoryID == "" {
+			w.RepositoryID = fakeRepositoryID(w.RepoID)
+		}
+		rows[i] = w
+	}
+	return rows, f.listErr
+}
+
+func (f fakeCheckouts) GetRepo(_ context.Context, slug string) (*domain.Repository, error) {
+	id := f.repoIDs[strings.ToLower(slug)]
+	if id == "" {
+		id = fakeRepositoryID(slug)
+	}
+	owner, repo, _ := strings.Cut(slug, "/")
+	return &domain.Repository{ID: id, Owner: owner, Repo: repo}, nil
 }
 
 func (f fakeCheckouts) WorkspaceRoots(context.Context) (string, string, error) {

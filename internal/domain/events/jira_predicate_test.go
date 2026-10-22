@@ -41,7 +41,7 @@ func TestJiraPredicates_ScopeByProjectID(t *testing.T) {
 // a caller might reach for, matches nothing.
 func TestJiraMatcher_ProjectIDIn(t *testing.T) {
 	s, _ := Get(domain.EventJiraIssueStatusChanged)
-	metaJSON, _ := json.Marshal(JiraIssueStatusChangedMetadata{IssueKey: "SKY-1", Project: "SKY", JiraProjectID: "jp-sky", NewStatus: "In Review"})
+	metaJSON, _ := json.Marshal(JiraIssueStatusChangedMetadata{IssueKey: "SKY-1", Project: "SKY", JiraProjectID: "jp-sky", NewStatus: "In Review", NewStatusID: "10003"})
 	cases := []struct {
 		name, predicate string
 		want            bool
@@ -51,7 +51,7 @@ func TestJiraMatcher_ProjectIDIn(t *testing.T) {
 		{"another project", `{"jira_project_id_in":["jp-ops"]}`, false},
 		{"the key matches nothing", `{"jira_project_id_in":["SKY"]}`, false},
 		{"ids are not case-folded", `{"jira_project_id_in":["JP-SKY"]}`, false},
-		{"with another filter", `{"jira_project_id_in":["jp-sky"],"new_status":"In Review"}`, true},
+		{"with another filter", `{"jira_project_id_in":["jp-sky"],"new_status_id_in":["10003"]}`, true},
 	}
 	for _, tc := range cases {
 		got, err := s.Match(tc.predicate, string(metaJSON))

@@ -229,8 +229,9 @@ func TestEventHandlerJiraProjectIn_RefusesProjectKey(t *testing.T) {
 }
 
 // The team-settings read names each tracked project by the registry id
-// jira_project_id_in takes, beside its key and name, and keeps naming it by
-// that id after the project's key is renamed.
+// jira_project_id_in and the team write take, beside Jira's id for it and its
+// key and name, and keeps naming it by both ids after the project's key is
+// renamed.
 func TestTeamSettingsGet_NamesJiraProjectsByRegistryID(t *testing.T) {
 	r := newJiraProjectInRig(t)
 	r.track(t, r.sky)
@@ -250,13 +251,13 @@ func TestTeamSettingsGet_NamesJiraProjectsByRegistryID(t *testing.T) {
 		return out.JiraProjects
 	}
 
-	if got := read(); len(got) != 1 || got[0].ID != r.sky || got[0].Key != "SKY" || got[0].Name != "SKY Project" {
-		t.Fatalf("jira_projects = %+v, want SKY under its registry id", got)
+	if got := read(); len(got) != 1 || got[0].ID != r.sky || got[0].JiraID != "10000" || got[0].Key != "SKY" || got[0].Name != "SKY Project" {
+		t.Fatalf("jira_projects = %+v, want SKY under its registry id and Jira's id", got)
 	}
 	if _, err := r.s.allStores.JiraProjects.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, r.site, "10000", "SKYNEW", "Sky renamed"); err != nil {
 		t.Fatalf("rename SKY: %v", err)
 	}
-	if got := read(); len(got) != 1 || got[0].ID != r.sky || got[0].Key != "SKYNEW" {
+	if got := read(); len(got) != 1 || got[0].ID != r.sky || got[0].JiraID != "10000" || got[0].Key != "SKYNEW" {
 		t.Errorf("jira_projects after the rename = %+v, want the same id under the new key", got)
 	}
 }

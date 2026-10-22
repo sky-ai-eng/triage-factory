@@ -247,9 +247,9 @@ func (c *IPCClient) GetRepo(ctx context.Context, slug string) (*domain.Repositor
 	return res.Repo, nil
 }
 
-func (c *IPCClient) TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error) {
-	var res teamTracksRepoResult
-	if err := c.call(ctx, methodTeamTracksRepo, teamTracksRepoArgs{Owner: owner, Repo: repo}, &res); err != nil {
+func (c *IPCClient) TeamTracksRepository(ctx context.Context, repositoryID string) (bool, error) {
+	var res teamTracksRepositoryResult
+	if err := c.call(ctx, methodTeamTracksRepository, repositoryIDArgs{RepositoryID: repositoryID}, &res); err != nil {
 		return false, err
 	}
 	return res.Tracks, nil

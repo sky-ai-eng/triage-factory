@@ -16,12 +16,9 @@ type fakeOverrides struct {
 	m map[string]*domain.PlacementOverride
 }
 
-func (f fakeOverrides) Get(_ context.Context, org, kind, host, val string) (*domain.PlacementOverride, error) {
-	return f.m[org+"|"+kind+"|"+host+"|"+val], nil
+func (f fakeOverrides) Get(_ context.Context, org, repositoryID string) (*domain.PlacementOverride, error) {
+	return f.m[org+"|"+repositoryID], nil
 }
-
-// testHost is the GitHub host the override fixtures are keyed on.
-const testHost = "https://github.com"
 
 func execRow(id string, maxRuns int, hbAgo time.Duration, now time.Time) domain.Instance {
 	m := maxRuns
@@ -35,7 +32,7 @@ func execRow(id string, maxRuns int, hbAgo time.Duration, now time.Time) domain.
 
 func TestResolve_DisabledIsNoOp(t *testing.T) {
 	r := NewResolver(fakeInstances{}, fakeOverrides{}, Config{Enabled: false})
-	plan, err := r.Resolve(context.Background(), "org1", domain.PlacementKindRepo, testHost, "acme/web")
+	plan, err := r.Resolve(context.Background(), "org1", "repo-web")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +53,7 @@ func TestResolve_SingleOwner(t *testing.T) {
 	}}, fakeOverrides{}, Config{Enabled: true, Liveness: DefaultLiveness})
 	r.SetNow(func() time.Time { return now })
 
-	plan, err := r.Resolve(context.Background(), "org1", domain.PlacementKindRepo, testHost, "acme/web")
+	plan, err := r.Resolve(context.Background(), "org1", "repo-web")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +83,7 @@ func TestResolve_ExcludesDeadDrainingControl(t *testing.T) {
 		fakeOverrides{}, Config{Enabled: true, Liveness: DefaultLiveness})
 	r.SetNow(func() time.Time { return now })
 
-	plan, err := r.Resolve(context.Background(), "o", domain.PlacementKindRepo, testHost, "a/b")
+	plan, err := r.Resolve(context.Background(), "o", "repo-ab")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,13 +118,13 @@ func TestResolve_PinWinsOverHash(t *testing.T) {
 		execRow("exec-a", 4, time.Second, now),
 		execRow("exec-b", 4, time.Second, now),
 	}
-	ov := &domain.PlacementOverride{OrgID: "o", KeyKind: domain.PlacementKindRepo, Host: testHost, KeyValue: "a/b", PinnedInstanceID: "exec-b"}
+	ov := &domain.PlacementOverride{OrgID: "o", RepositoryID: "repo-ab", PinnedInstanceID: "exec-b"}
 	r := NewResolver(fakeInstances{rows: rows}, fakeOverrides{m: map[string]*domain.PlacementOverride{
-		"o|" + domain.PlacementKindRepo + "|" + testHost + "|a/b": ov,
+		"o|repo-ab": ov,
 	}}, Config{Enabled: true, Liveness: DefaultLiveness})
 	r.SetNow(func() time.Time { return now })
 
-	plan, err := r.Resolve(context.Background(), "o", domain.PlacementKindRepo, testHost, "a/b")
+	plan, err := r.Resolve(context.Background(), "o", "repo-ab")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,13 +139,13 @@ func TestResolve_PinWinsOverHash(t *testing.T) {
 func TestResolve_PinToOfflineInstanceStillPreferred(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	rows := []domain.Instance{execRow("exec-a", 4, time.Second, now)}
-	ov := &domain.PlacementOverride{OrgID: "o", KeyKind: domain.PlacementKindRepo, Host: testHost, KeyValue: "a/b", PinnedInstanceID: "exec-ghost"}
+	ov := &domain.PlacementOverride{OrgID: "o", RepositoryID: "repo-ab", PinnedInstanceID: "exec-ghost"}
 	r := NewResolver(fakeInstances{rows: rows}, fakeOverrides{m: map[string]*domain.PlacementOverride{
-		"o|" + domain.PlacementKindRepo + "|" + testHost + "|a/b": ov,
+		"o|repo-ab": ov,
 	}}, Config{Enabled: true, Liveness: DefaultLiveness})
 	r.SetNow(func() time.Time { return now })
 
-	plan, _ := r.Resolve(context.Background(), "o", domain.PlacementKindRepo, testHost, "a/b")
+	plan, _ := r.Resolve(context.Background(), "o", "repo-ab")
 	if len(plan.PreferredSet) != 1 || plan.PreferredSet[0] != "exec-ghost" {
 		t.Fatalf("a pin to an offline instance is still the preferred target (claim aging handles it): %v", plan.PreferredSet)
 	}
@@ -165,13 +162,13 @@ func TestResolve_ReplicasSpreadAcrossTopK(t *testing.T) {
 		execRow("exec-c", 4, time.Second, now),
 		execRow("exec-d", 4, time.Second, now),
 	}
-	ov := &domain.PlacementOverride{OrgID: "o", KeyKind: domain.PlacementKindRepo, Host: testHost, KeyValue: "mono/repo", Replicas: 3}
+	ov := &domain.PlacementOverride{OrgID: "o", RepositoryID: "repo-mono", Replicas: 3}
 	r := NewResolver(fakeInstances{rows: rows}, fakeOverrides{m: map[string]*domain.PlacementOverride{
-		"o|" + domain.PlacementKindRepo + "|" + testHost + "|mono/repo": ov,
+		"o|repo-mono": ov,
 	}}, Config{Enabled: true, Liveness: DefaultLiveness})
 	r.SetNow(func() time.Time { return now })
 
-	plan, _ := r.Resolve(context.Background(), "o", domain.PlacementKindRepo, testHost, "mono/repo")
+	plan, _ := r.Resolve(context.Background(), "o", "repo-mono")
 	if len(plan.PreferredSet) != 3 {
 		t.Fatalf("replicas=3 → top-3 preferred, got %v", plan.PreferredSet)
 	}
@@ -212,34 +209,61 @@ func itoa(i int) string {
 	return string(b)
 }
 
-// TestResolve_PinAppliesOnlyOnItsHost pins that an override is read for the
-// key's own host: a pin on one host's owner/repo says nothing about the
-// same-named repository on another.
-func TestResolve_PinAppliesOnlyOnItsHost(t *testing.T) {
+// TestResolve_PinAppliesOnlyToItsRepository pins that an override is read
+// for the plan's own registry row: a pin on one repository says nothing about
+// another, whatever either is called.
+func TestResolve_PinAppliesOnlyToItsRepository(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	rows := []domain.Instance{
 		execRow("exec-a", 4, time.Second, now),
 		execRow("exec-b", 4, time.Second, now),
 	}
-	const other = "https://ghe.example.com"
-	ov := &domain.PlacementOverride{OrgID: "o", KeyKind: domain.PlacementKindRepo, Host: other, KeyValue: "a/b", PinnedInstanceID: "exec-pinned"}
+	ov := &domain.PlacementOverride{OrgID: "o", RepositoryID: "repo-pinned", PinnedInstanceID: "exec-pinned"}
 	r := NewResolver(fakeInstances{rows: rows}, fakeOverrides{m: map[string]*domain.PlacementOverride{
-		"o|" + domain.PlacementKindRepo + "|" + other + "|a/b": ov,
+		"o|repo-pinned": ov,
 	}}, Config{Enabled: true, Liveness: DefaultLiveness})
 	r.SetNow(func() time.Time { return now })
 
-	plan, err := r.Resolve(context.Background(), "o", domain.PlacementKindRepo, testHost, "a/b")
+	plan, err := r.Resolve(context.Background(), "o", "repo-other")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if plan.Override != nil || inSet(plan.PreferredSet, "exec-pinned") {
-		t.Fatalf("a pin on %s applied on %s: %+v", other, testHost, plan)
+		t.Fatalf("a pin on repo-pinned applied to repo-other: %+v", plan)
 	}
-	plan, err = r.Resolve(context.Background(), "o", domain.PlacementKindRepo, other, "a/b")
+	plan, err = r.Resolve(context.Background(), "o", "repo-pinned")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Host != other || len(plan.PreferredSet) != 1 || plan.PreferredSet[0] != "exec-pinned" {
-		t.Fatalf("the pin on %s did not apply there: %+v", other, plan)
+	if plan.RepositoryID != "repo-pinned" || len(plan.PreferredSet) != 1 || plan.PreferredSet[0] != "exec-pinned" {
+		t.Fatalf("the pin on repo-pinned did not apply to it: %+v", plan)
+	}
+}
+
+// TestResolve_RanksOnTheRegistryRowID pins the rendezvous key: the org and
+// the repository's registry row id under the repo kind. A rename moves the
+// row's name and not its id, so the owner stays put; a name never enters it.
+func TestResolve_RanksOnTheRegistryRowID(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	rows := []domain.Instance{
+		execRow("exec-a", 4, time.Second, now),
+		execRow("exec-b", 4, time.Second, now),
+		execRow("exec-c", 4, time.Second, now),
+	}
+	r := NewResolver(fakeInstances{rows: rows}, fakeOverrides{}, Config{Enabled: true, Liveness: DefaultLiveness})
+	r.SetNow(func() time.Time { return now })
+
+	if got, want := keyFor("o", "repo-1"), "o\x1frepo\x1frepo-1"; got != want {
+		t.Fatalf("keyFor = %q, want %q", got, want)
+	}
+	plan, err := r.Resolve(context.Background(), "o", "repo-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ranked := Rank(keyFor("o", "repo-1"), []Member{
+		{InstanceID: "exec-a", Weight: 4}, {InstanceID: "exec-b", Weight: 4}, {InstanceID: "exec-c", Weight: 4},
+	})
+	if len(plan.PreferredSet) != 1 || plan.PreferredSet[0] != ranked[0].InstanceID {
+		t.Fatalf("preferred = %v, want the top of the ranking on the row id (%s)", plan.PreferredSet, ranked[0].InstanceID)
 	}
 }

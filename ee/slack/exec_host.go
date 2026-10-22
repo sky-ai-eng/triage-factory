@@ -106,20 +106,33 @@ type slackReactResult struct{}
 // token), binding the conversation's org from its own ConversationInfo. The bot TOKEN is then
 // SELECTED locally from the claim's sealed bundle — so no secret crosses back.
 
+// authorizedChannel is the channel a verb acts on once authorized: ID is the
+// id Slack gives it now, and Row its slack_channels row, which a Slack
+// artifact's dedup key names so that a later change of the id moves no key.
+type authorizedChannel struct {
+	ID  string
+	Row string
+}
+
 // authorizeChannel is the stage-1 gate: the conversation's team must track channelID.
 // The op errors when it doesn't, so a nil error means authorized. It answers
 // with the id the channel has now, which the verb acts on from then on: an
 // agent passes the channel its task's event metadata names, and that is still
-// the old id for a channel Slack has since moved to a new one.
-func (h *slackExecHandler) authorizeChannel(ctx context.Context, rt agenthost.ExtensionRuntime, channelID string) (string, error) {
+// the old id for a channel Slack has since moved to a new one. The op read the
+// channel's registry row to authorize it, so an answer without one is refused.
+func (h *slackExecHandler) authorizeChannel(ctx context.Context, rt agenthost.ExtensionRuntime, channelID string) (authorizedChannel, error) {
 	var res slackAuthorizedResult
 	if err := rt.Relay(ctx, "slack", opAuthorizeChannel, slackChannelArg{Channel: channelID}, &res); err != nil {
-		return "", err
+		return authorizedChannel{}, err
 	}
-	if res.Channel == "" {
-		return channelID, nil
+	if res.ChannelRow == "" {
+		return authorizedChannel{}, fmt.Errorf("slack: authorizing channel %s answered no registry row", channelID)
 	}
-	return res.Channel, nil
+	out := authorizedChannel{ID: res.Channel, Row: res.ChannelRow}
+	if out.ID == "" {
+		out.ID = channelID
+	}
+	return out, nil
 }
 
 // resolveWorkspaceIdentity relays the workspace-identity decision for
@@ -203,7 +216,7 @@ func (h *slackExecHandler) send(ctx context.Context, rt agenthost.ExtensionRunti
 	if err != nil {
 		return slackSendResult{}, err
 	}
-	a.Channel = channel
+	a.Channel = channel.ID
 	ws, err := h.resolveWorkspaceIdentity(ctx, rt, a.Channel)
 	if err != nil {
 		return slackSendResult{}, err
@@ -274,7 +287,7 @@ func (h *slackExecHandler) send(ctx context.Context, rt agenthost.ExtensionRunti
 	// threadRootErr already reports below. There is deliberately no gate here
 	// to prevent that fallback from firing; recordThreadRoot's retries are the
 	// mitigation, not a hard guarantee.
-	h.recordMessage(ctx, rt, domain.ActionSlackMessagePosted, a.Channel, rootTS, ts, h.permalinkBestEffort(ctx, caller, token, a.Channel, ts))
+	h.recordMessage(ctx, rt, domain.ActionSlackMessagePosted, channel.Row, a.Channel, rootTS, ts, h.permalinkBestEffort(ctx, caller, token, a.Channel, ts))
 	switch {
 	case attachErr != nil && threadRootErr != nil:
 		return slackSendResult{Channel: a.Channel, TS: ts}, fmt.Errorf("%w; %w", attachErr, threadRootErr)
@@ -318,7 +331,7 @@ func (h *slackExecHandler) edit(ctx context.Context, rt agenthost.ExtensionRunti
 	if err != nil {
 		return slackEditResult{}, err
 	}
-	a.Channel = channel
+	a.Channel = channel.ID
 	caller, token, err := h.resolveToken(ctx, rt, a.Channel)
 	if err != nil {
 		return slackEditResult{}, err
@@ -330,7 +343,7 @@ func (h *slackExecHandler) edit(ctx context.Context, rt agenthost.ExtensionRunti
 	}
 
 	rootTS := h.resolveMessageRootTS(ctx, caller, token, a.Channel, a.TS)
-	h.recordMessage(ctx, rt, domain.ActionSlackMessageEdited, a.Channel, rootTS, a.TS, h.permalinkBestEffort(ctx, caller, token, a.Channel, a.TS))
+	h.recordMessage(ctx, rt, domain.ActionSlackMessageEdited, channel.Row, a.Channel, rootTS, a.TS, h.permalinkBestEffort(ctx, caller, token, a.Channel, a.TS))
 	return slackEditResult{Channel: a.Channel, TS: a.TS}, nil
 }
 
@@ -342,7 +355,7 @@ func (h *slackExecHandler) react(ctx context.Context, rt agenthost.ExtensionRunt
 	if err != nil {
 		return slackReactResult{}, err
 	}
-	a.Channel = channel
+	a.Channel = channel.ID
 	caller, token, err := h.resolveToken(ctx, rt, a.Channel)
 	if err != nil {
 		return slackReactResult{}, err
@@ -420,12 +433,14 @@ retry:
 		ts, recordThreadRootMaxAttempts, err)
 }
 
-// recordMessage records the send/edit matrix: an `artifacts` row keyed
-// channel+ts (the message's own ts — send and a later edit share the same
-// key, upserting in place per TFAC-596's matrix) with Target set to the
-// thread's SlackSourceID (rootTS), plus the paired `external_actions` audit
-// row under action.
-func (h *slackExecHandler) recordMessage(ctx context.Context, rt agenthost.ExtensionRuntime, action, channel, rootTS, ts, permalink string) {
+// recordMessage records the send/edit matrix: an `artifacts` row keyed on the
+// channel's registry row (channelRow) and the message's own ts — send and a
+// later edit share the key, so an edit upserts the send's row in place — with
+// Target set to the thread's SlackSourceID (rootTS), plus the paired
+// `external_actions` audit row under action. The key names the row rather than
+// the channel's Slack id, which can change, so a channel moving to a new id
+// leaves every message's key where it is.
+func (h *slackExecHandler) recordMessage(ctx context.Context, rt agenthost.ExtensionRuntime, action, channelRow, channel, rootTS, ts, permalink string) {
 	target := domain.SlackSourceID(channel, rootTS)
 	a := &domain.Artifact{
 		Provider:   domain.ArtifactProviderSlack,
@@ -434,7 +449,7 @@ func (h *slackExecHandler) recordMessage(ctx context.Context, rt agenthost.Exten
 		ExternalID: ts,
 		URL:        permalink,
 		State:      domain.ArtifactStateMessagePosted,
-		DedupKey:   domain.ArtifactDedupKey(domain.ArtifactProviderSlack, domain.ArtifactKindMessage, channel+"/"+ts, ""),
+		DedupKey:   domain.ArtifactDedupKey(domain.ArtifactProviderSlack, domain.ArtifactKindMessage, domain.SlackMessageResource(channelRow, ts), ""),
 	}
 	act := &domain.ExternalAction{
 		Provider:   domain.ArtifactProviderSlack,
@@ -545,7 +560,7 @@ func (h *slackExecHandler) readThread(ctx context.Context, rt agenthost.Extensio
 	if err != nil {
 		return nil, err
 	}
-	a.Channel = channel
+	a.Channel = channel.ID
 	caller, token, err := h.resolveToken(ctx, rt, a.Channel)
 	if err != nil {
 		return nil, err
@@ -576,7 +591,7 @@ func (h *slackExecHandler) readChannel(ctx context.Context, rt agenthost.Extensi
 	if err != nil {
 		return nil, err
 	}
-	a.Channel = channel
+	a.Channel = channel.ID
 	caller, token, err := h.resolveToken(ctx, rt, a.Channel)
 	if err != nil {
 		return nil, err

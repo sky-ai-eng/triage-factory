@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -11,21 +12,75 @@ import (
 )
 
 // init registers linearTeamInFaults for every Linear event type whose
-// predicate has a linear_team_id_in field. The events package registers its
-// schemas in its own init, which runs before this one because this package
-// imports it.
+// predicate has a linear_team_id_in field, and linearParentChangedFaults,
+// which adds new_parent_id to it, for parent_changed. The events package
+// registers its schemas in its own init, which runs before this one because
+// this package imports it.
 func init() {
 	for eventType, schema := range events.All() {
 		if !strings.HasPrefix(eventType, "linear:") {
 			continue
 		}
 		for _, field := range schema.Fields {
-			if field.Name == "linear_team_id_in" {
-				RegisterPredicateReferenceCheck(eventType, linearTeamInFaults)
-				break
+			if field.Name != "linear_team_id_in" {
+				continue
 			}
+			if eventType == domain.EventLinearIssueParentChanged {
+				RegisterPredicateReferenceCheck(eventType, linearParentChangedFaults)
+			} else {
+				RegisterPredicateReferenceCheck(eventType, linearTeamInFaults)
+			}
+			break
 		}
 	}
+}
+
+// linearParentChangedFaults is parent_changed's check: linearTeamInFaults,
+// and new_parent_id when the predicate gives it a value the stored one does
+// not hold. That value must be a Linear issue id (a lowercase UUID), since the
+// matcher compares it with the event's new_parent_id, the parent's UUID. An
+// identifier such as "ENG-12", the value a caller would naturally reach for,
+// is refused rather than stored as a filter that never fires. An empty value
+// is allowed: it matches a parent being cleared.
+func linearParentChangedFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, predicate, prior *string) ([]string, error) {
+	faults, err := linearTeamInFaults(ctx, tx, orgID, teamID, predicate, prior)
+	if err != nil {
+		return nil, err
+	}
+	next, err := predicateString(predicate, "new_parent_id")
+	if err != nil {
+		return nil, err
+	}
+	stored, err := predicateString(prior, "new_parent_id")
+	if err != nil {
+		return nil, err
+	}
+	if next != "" && next != stored && !isLinearID(next) {
+		faults = append(faults, fmt.Sprintf("new_parent_id: %q is not a Linear issue id "+
+			"(it takes the parent's UUID, the new_parent_id a parent_changed event carries, not its identifier)", next))
+	}
+	return faults, nil
+}
+
+// predicateString reads one string field from a predicate; "" for match-all
+// or a predicate without the field.
+func predicateString(predicate *string, field string) (string, error) {
+	if predicate == nil {
+		return "", nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(*predicate), &fields); err != nil {
+		return "", fmt.Errorf("decode predicate: %w", err)
+	}
+	raw, ok := fields[field]
+	if !ok {
+		return "", nil
+	}
+	var v string
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return "", fmt.Errorf("decode predicate %s: %w", field, err)
+	}
+	return v, nil
 }
 
 // linearTeamInFaults is the PredicateReferenceCheck for Linear event types:

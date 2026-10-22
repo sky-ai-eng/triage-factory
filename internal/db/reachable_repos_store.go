@@ -77,6 +77,11 @@ import (
 // display reads a future org page needs are the derived-state queries below,
 // both anchored in the org's own tracked set.
 //
+// Every read that returns entries resolves each one's live registry row into
+// ReachableRepository.RepositoryID ("" when TF holds none) under the same rule
+// the findings pair the two by: GitHub id when both carry one, folded name only
+// when either does not.
+//
 // SQLite collapses to one connection and one org.
 type ReachableReposStore interface {
 	// ReplaceForInstallationSystem replaces the App-tier entries of the
@@ -150,7 +155,11 @@ type ReachableReposStore interface {
 	// mints a row for any repository an agent adds to a workspace, and counting
 	// those as "tracked" would under-report the finding. A retired registry row
 	// tracks nothing here: it holds no name, so a team still tracking it says
-	// nothing about the repository GitHub now serves under that name.
+	// nothing about the repository GitHub now serves under that name. An entry
+	// and a tracked row are one repository by GitHub id when both carry one, and
+	// by folded name only when either does not, so a rename TF has not applied
+	// yet still counts as tracked and a name GitHub gave to another repository
+	// does not.
 	//
 	// Ordered by (installation, folded owner, folded repo), which the per-class
 	// unique index makes a total order, so offset paging cannot drop or repeat a
@@ -183,7 +192,18 @@ type ReachableReposStore interface {
 	// naming the covering installation when there is one, so the finding can
 	// point at the page where the grant is widened. A retired registry row is
 	// not reported: GitHub no longer serves it to the org at all, which is no
-	// grant's to fix. Ordered by folded slug.
+	// grant's to fix.
+	//
+	// A tracked row is in a grant when an entry is the same repository: by
+	// GitHub id when both carry one, by folded name only when either does not.
+	// The owner account's installation is found by the same rule one level up:
+	// by GitHub's account id when the registry row records its owner's
+	// (repositories.owner_external_id) and the installation row carries one
+	// (account_id), by folded login only when either does not. A drifted
+	// repository is in no grant listing, so a rename of its owner account
+	// reaches the installation's login and never the row's owner, and the id
+	// is what still pairs the two. One finding per registry row, carrying its
+	// id and GitHub id, ordered by folded slug then row id.
 	ListScopeDriftSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, opts ListOpts) ([]domain.ScopeDriftRepository, int, error)
 
 	// ListReachableSystem is the picker's read: one page of the org's reachable
@@ -235,6 +255,21 @@ type ReachableReposStore interface {
 	// Bounded by the caller's selection, like ReachableSlugsSystem. An empty
 	// externalIDs argument returns an empty map without a query.
 	ReachableByExternalIDsSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, externalIDs []string) (map[string]domain.ReachableRepository, error)
+
+	// ListTrackedInGrantsSystem returns the names ("owner/repo", as the
+	// registry spells them) of the live registry rows on host that some team
+	// tracks and that the mirror places in the grant of one of installationIDs.
+	// A row and an entry are one repository by GitHub id when both carry one,
+	// and by folded name only when either does not, so a tracked row is found in
+	// the grant that reaches it whatever either side currently calls it.
+	//
+	// It answers which tracked repositories an installation reaches at a moment
+	// its grant cannot be read from GitHub: the mirror is that grant as last
+	// read. The installation ids are matched on host only, since an
+	// installation id names one installation per GitHub deployment. Ordered by
+	// folded name, then registry id. An empty installationIDs returns an empty
+	// list without a query.
+	ListTrackedInGrantsSystem(ctx context.Context, orgID, host string, installationIDs []string) ([]string, error)
 }
 
 // RequireGrantClass is the guard every App-tier read of the mirror runs first:

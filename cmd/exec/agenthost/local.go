@@ -321,11 +321,13 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 // re-resolving there would mean a second settings read and credential probe to
 // answer a question already answered.
 func (c *LocalClient) resolveReviewPosture(ctx context.Context, art *domain.Artifact) (ReviewPostureResolution, bool) {
-	owner, repo, _, ok := domain.ParsePRTarget(art.Target)
-	if !ok {
+	pr, err := c.reviewedPullRequest(ctx, art)
+	if err != nil {
+		agenthostLog.Warn("review posture unresolved; staging the review for approval",
+			"conversation", c.info.ConversationID, "artifact", art.ID, "error", err)
 		return ReviewPostureResolution{}, false
 	}
-	res, err := c.rt.ReviewPosture(ctx, owner, repo)
+	res, err := c.rt.ReviewPosture(ctx, pr.Owner, pr.Repo)
 	if err != nil {
 		agenthostLog.Warn("review posture unresolved; staging the review for approval",
 			"conversation", c.info.ConversationID, "artifact", art.ID, "error", err)
@@ -375,10 +377,13 @@ func (c *LocalClient) resolveReviewPosture(ctx context.Context, art *domain.Arti
 // review re-submittable. Failures are logged host-side — stdout belongs to the
 // verb's JSON.
 func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artifact, posture ReviewPostureResolution) ReviewFinalizeResult {
-	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
-	if !ok {
+	pr, err := c.reviewedPullRequest(ctx, art)
+	if err != nil {
+		agenthostLog.Warn("auto-post review: the reviewed pull request is unresolved; leaving the review staged for approval",
+			"conversation", c.info.ConversationID, "artifact", art.ID, "error", err)
 		return ReviewFinalizeResult{}
 	}
+	owner, repo, number := pr.Owner, pr.Repo, pr.Number
 	client, err := c.githubClientForRepo(ctx, owner, repo)
 	if err != nil {
 		agenthostLog.Warn("auto-post review: no GitHub client; leaving the review staged for approval",
@@ -538,10 +543,11 @@ func (c *LocalClient) claimedReviewDetails(ctx context.Context, artifactID strin
 // any outdated comment fails the whole finalize with the actionable per-comment
 // listing.
 func (c *LocalClient) reconcileStagedCommentsToHead(ctx context.Context, art *domain.Artifact, details *domain.ReviewArtifactDetails) (baseSHA, headSHA string, err error) {
-	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
-	if !ok {
-		return "", "", fmt.Errorf("review artifact has a malformed target %q", art.Target)
+	reviewed, err := c.reviewedPullRequest(ctx, art)
+	if err != nil {
+		return "", "", err
 	}
+	owner, repo, number := reviewed.Owner, reviewed.Repo, reviewed.Number
 	client, err := c.githubClientForRepo(ctx, owner, repo)
 	if err != nil {
 		return "", "", err
@@ -760,8 +766,8 @@ func (c *LocalClient) GetRepo(ctx context.Context, slug string) (*domain.Reposit
 	return c.rt.GetRepo(ctx, slug)
 }
 
-func (c *LocalClient) TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error) {
-	return c.rt.TeamTracksRepo(ctx, owner, repo)
+func (c *LocalClient) TeamTracksRepository(ctx context.Context, repositoryID string) (bool, error) {
+	return c.rt.TeamTracksRepository(ctx, repositoryID)
 }
 
 func (c *LocalClient) SourceManifest(ctx context.Context) (domain.SourceManifest, error) {
@@ -816,6 +822,11 @@ func (c *LocalClient) footer(kind string) string {
 // fails: the loss is the relayed record's when there is one, and the push
 // still leaves its ledger row.
 func (c *LocalClient) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
+	if a.Kind == domain.ArtifactKindBranch {
+		// Keyed by onRegistryRow, never by its caller: in a sandbox the
+		// caller is the jail's pre-push hook.
+		a.DedupKey = ""
+	}
 	a, err := c.onRegistryRow(ctx, a)
 	a = c.hostAnchorBranchURL(ctx, a)
 	if err != nil {
@@ -1632,6 +1643,12 @@ func (c *LocalClient) legacyRepoClient(ctx context.Context, owner, repo string) 
 // denied gh op still leaves an audit trail — symmetric with the proxy's
 // "authorize-error" path.
 //
+// owner/repo is the name the verb was handed, resolved once (GetRepo) to the
+// registry row it names on the org's current GitHub host. Tracking, the ledger
+// and the task's own repo are each answered for that row's id, so the three
+// arms cannot disagree about which repository is meant. A name no row answers
+// to is a repository no team tracks.
+//
 // The two hard-deny outcomes are deliberately distinct, because the agent's
 // recovery differs and a bare "not authorized" left it guessing (the common
 // case: a Slack-triggered taskless run that hasn't cloned anything yet, so no
@@ -1649,10 +1666,18 @@ func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) err
 		return nil
 	}
 	repoID := owner + "/" + repo
-	tracks, err := c.rt.TeamTracksRepo(ctx, owner, repo)
+	profile, err := c.rt.GetRepo(ctx, repoID)
 	if err != nil {
 		c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
 		return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, err)
+	}
+	tracks := false
+	if profile != nil {
+		tracks, err = c.rt.TeamTracksRepository(ctx, profile.ID)
+		if err != nil {
+			c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
+			return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, err)
+		}
 	}
 	if !tracks {
 		c.RecordGitDenied(ctx, owner, repo, "", "gh", "repo-not-tracked")
@@ -1663,20 +1688,12 @@ func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) err
 		c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
 		return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, lerr)
 	}
-	// A ledger row names its repository by registry id, and the repository a
-	// verb reaches is the row for owner/repo on the org's current GitHub host.
-	// A checkout of the same owner/repo on another host is another repository
-	// and authorizes nothing here.
-	if len(rows) > 0 {
-		profile, perr := c.rt.GetRepo(ctx, repoID)
-		if perr != nil {
-			c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
-			return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, perr)
-		}
-		for _, w := range rows {
-			if profile != nil && w.RepositoryID == profile.ID {
-				return nil
-			}
+	// A ledger row names its repository by registry id. A checkout of the
+	// same owner/repo on another host is another row, so it authorizes
+	// nothing here.
+	for _, w := range rows {
+		if w.RepositoryID == profile.ID {
+			return nil
 		}
 	}
 	// No ledger row. The run's OWN task repo is authorized anyway, because a
@@ -1684,7 +1701,7 @@ func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) err
 	// row for the one repo its whole mission is about — and refusing there
 	// tells an agent to `workspace add` a repo it is already standing in. The
 	// exception is exactly one repo wide and resolves on the orchestrator.
-	isTaskRepo, terr := c.rt.TaskOwnRepo(ctx, owner, repo)
+	isTaskRepo, terr := c.rt.TaskOwnRepository(ctx, profile.ID)
 	if terr != nil {
 		c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
 		return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, terr)
@@ -1935,18 +1952,35 @@ func (c *LocalClient) pullRequestNodeID(ctx context.Context, owner, repo string,
 	return pr.NodeID, nil
 }
 
-// ReviewDraftTarget implements Client: the owner/repo#number recorded on this
-// conversation's review draft when start-review created it.
+// ReviewDraftTarget implements Client: the pull request this conversation's
+// review draft was started on, under the name its repository's registry row
+// holds now (reviewedPullRequest).
 func (c *LocalClient) ReviewDraftTarget(ctx context.Context, reviewID string) (string, string, int, error) {
 	art, err := c.conversationReviewArtifact(ctx, reviewID)
 	if err != nil {
 		return "", "", 0, err
 	}
-	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
-	if !ok {
-		return "", "", 0, fmt.Errorf("review artifact has a malformed target %q", art.Target)
+	pr, err := c.reviewedPullRequest(ctx, art)
+	if err != nil {
+		return "", "", 0, err
 	}
-	return owner, repo, number, nil
+	return pr.Owner, pr.Repo, pr.Number, nil
+}
+
+// reviewedPullRequest is the pull request the review draft art is about, read
+// by the registry row its entity references (Runtime.ArtifactPullRequest), so
+// a repository renamed since start-review is addressed under its current name.
+// A retired row is refused: GitHub serves its name as another repository now,
+// with another pull request under the draft's number.
+func (c *LocalClient) reviewedPullRequest(ctx context.Context, art *domain.Artifact) (db.ArtifactPullRequest, error) {
+	pr, err := c.rt.ArtifactPullRequest(ctx, art.ID)
+	if err != nil {
+		return db.ArtifactPullRequest{}, fmt.Errorf("resolve the pull request review %s is for: %w", art.ID, err)
+	}
+	if pr.Retired {
+		return db.ArtifactPullRequest{}, fmt.Errorf("review %s is for %s#%d, a repository GitHub no longer serves under that name", art.ID, pr.Slug(), pr.Number)
+	}
+	return pr, nil
 }
 
 // GithubAddPendingReviewComment appends one inline comment to this conversation's review
@@ -1994,19 +2028,21 @@ func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, 
 		return "", fmt.Errorf("this review has already been finalized for approval; start a fresh review to add more comments")
 	}
 
-	// The PR number comes from the artifact target (the handle the agent passes
-	// carries no coordinates). Needed for both the live-head fallback and to
-	// resolve the base ref the compare-validation diffs against. owner/repo
-	// must name the reviewed pull request's repository: validating against
-	// another repo's PR of the same number would accept lines from the wrong
-	// diff. The PR GitHub answers for owner/repo#number is compared with the
-	// one the draft is keyed on, by node id, so an old name GitHub still
-	// follows passes and a name GitHub has given to another repository does
-	// not. A draft whose key names no node id is compared by name instead.
-	targetOwner, targetRepo, number, ok := domain.ParsePRTarget(art.Target)
-	if !ok {
-		return "", fmt.Errorf("review artifact has a malformed target %q", art.Target)
+	// The PR number comes from the draft's pull request (the handle the agent
+	// passes carries no coordinates). Needed for both the live-head fallback
+	// and to resolve the base ref the compare-validation diffs against.
+	// owner/repo must name the reviewed pull request's repository: validating
+	// against another repo's PR of the same number would accept lines from
+	// the wrong diff. The PR GitHub answers for owner/repo#number is compared
+	// with the one the draft is keyed on, by node id, so an old name GitHub
+	// still follows passes and a name GitHub has given to another repository
+	// does not. A draft whose key names no node id is compared by name, with
+	// the name its repository's registry row holds now.
+	reviewed, err := c.reviewedPullRequest(ctx, art)
+	if err != nil {
+		return "", err
 	}
+	targetOwner, targetRepo, number := reviewed.Owner, reviewed.Repo, reviewed.Number
 	prNodeID, keyed := domain.ArtifactPullRequestNodeID(*art)
 	if !keyed && !strings.EqualFold(owner+"/"+repo, targetOwner+"/"+targetRepo) {
 		return "", fmt.Errorf("review %s is for %s/%s#%d, not %s/%s", art.ID, targetOwner, targetRepo, number, owner, repo)
@@ -2903,29 +2939,42 @@ func jiraAction(a domain.Artifact, action, from, to string) *domain.ExternalActi
 }
 
 // branchPushActionInfo builds the ActionBranchPushed row for a branch artifact,
-// or nil for any other kind. The dedup key is deterministic —
-// branch:<conversationID>:<ref>:<sha> — so the git pre-push hook and the
-// git-proxy backstop, which both observe the same push, collapse to one row; a
-// force-push (new sha) is recorded distinctly. The push lands on GitHub under
-// whichever org credential the conversation's git path carries, which is why
-// the caller supplies it. Free-function form (the counterpart of the
-// LocalClient method) so the direct runtime — which owns UpsertArtifact but
-// holds no LocalClient — can build it from a ConversationInfo directly.
+// or nil for any other kind. The row is about the repository the artifact's key
+// names (domain.BranchArtifactRepositoryID), so the key must be one the writer
+// built: directRuntime.UpsertArtifact keys a branch on its registry row
+// (keyBranch) before building this, discarding the key it arrived with, and
+// both observers of one push name the same row. The dedup key is deterministic —
+// branch:<conversationID>:<repository>:<ref>:<sha> (domain.BranchPushDedupKey) —
+// so the git pre-push hook and the git-proxy backstop, which both observe the
+// same push, collapse to one row; a force-push (new sha) is recorded
+// distinctly, and so is the same ref and sha pushed to another repository. A
+// branch with no registry row is keyed on the name it was recorded under. The
+// push lands on GitHub under whichever org credential the conversation's git
+// path carries, which is why the caller supplies it. Free-function form (the
+// counterpart of the LocalClient method) so the direct runtime — which owns
+// UpsertArtifact but holds no LocalClient — can build it from a
+// ConversationInfo directly.
 func branchPushActionInfo(a domain.Artifact, info ConversationInfo, credential string) *domain.ExternalAction {
 	if a.Kind != domain.ArtifactKindBranch {
 		return nil
 	}
 	sha := domain.ParseBranchArtifactSHA(a.DetailsJSON)
+	repositoryID, _ := domain.BranchArtifactRepositoryID(a)
+	repository := repositoryID
+	if repository == "" {
+		repository = a.Target
+	}
 	act := &domain.ExternalAction{
-		Provider:   domain.ArtifactProviderGitHub,
-		Action:     domain.ActionBranchPushed,
-		Target:     a.Target,
-		ExternalID: a.ExternalID, // the ref (refs/heads/...)
-		URL:        a.URL,
-		ToState:    domain.ArtifactStateBranchPushed,
-		Credential: credential,
-		DedupKey:   domain.BranchPushDedupKey(info.ConversationID, a.ExternalID, sha),
-		DetailJSON: a.DetailsJSON, // {"sha":...,"new":...}
+		Provider:     domain.ArtifactProviderGitHub,
+		Action:       domain.ActionBranchPushed,
+		Target:       a.Target,
+		RepositoryID: repositoryID,
+		ExternalID:   a.ExternalID, // the ref (refs/heads/...)
+		URL:          a.URL,
+		ToState:      domain.ArtifactStateBranchPushed,
+		Credential:   credential,
+		DedupKey:     domain.BranchPushDedupKey(info.ConversationID, repository, a.ExternalID, sha),
+		DetailJSON:   a.DetailsJSON, // {"sha":...,"new":...}
 	}
 	stampActionIdentityInfo(act, info)
 	return act

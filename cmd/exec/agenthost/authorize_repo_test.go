@@ -9,25 +9,33 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// gateRuntime is a minimal Runtime for exercising authorizeRepo in isolation:
-// it answers the team-tracks, conversation_worktrees and repository reads the
-// gate makes and records git-denied audit rows, panicking on any other method
-// (none is reached). repository is the row the asked-for name resolves to on
-// the org's current GitHub host; nil is a name with no row there.
+// gateRuntime is a minimal Runtime for exercising authorizeRepo in isolation;
+// any method the gate does not call panics. repository is the row the name
+// resolves to (repo-widgets when nil, none when noRow), asked the id each
+// id-keyed read was asked about, and denied the git-denied audit targets.
 type gateRuntime struct {
 	Runtime
 	tracks     bool
 	taskRepo   bool
 	worktrees  []domain.ConversationWorktree
 	repository *domain.Repository
-	denied     []string // audit targets recorded via Record
+	noRow      bool
+	asked      []string
+	denied     []string
 }
 
 func (r *gateRuntime) GetRepo(context.Context, string) (*domain.Repository, error) {
-	return r.repository, nil
+	if r.noRow {
+		return nil, nil
+	}
+	if r.repository != nil {
+		return r.repository, nil
+	}
+	return &domain.Repository{ID: "repo-widgets", Owner: "acme", Repo: "widgets"}, nil
 }
 
-func (r *gateRuntime) TeamTracksRepo(context.Context, string, string) (bool, error) {
+func (r *gateRuntime) TeamTracksRepository(_ context.Context, repositoryID string) (bool, error) {
+	r.asked = append(r.asked, repositoryID)
 	return r.tracks, nil
 }
 
@@ -35,7 +43,8 @@ func (r *gateRuntime) ListConversationWorktrees(context.Context) ([]domain.Conve
 	return r.worktrees, nil
 }
 
-func (r *gateRuntime) TaskOwnRepo(context.Context, string, string) (bool, error) {
+func (r *gateRuntime) TaskOwnRepository(_ context.Context, repositoryID string) (bool, error) {
+	r.asked = append(r.asked, repositoryID)
 	return r.taskRepo, nil
 }
 
@@ -161,6 +170,28 @@ func TestAuthorizeRepo(t *testing.T) {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("refusal %q does not name %q", err, want)
 			}
+		}
+	})
+
+	// The name is resolved once, and every arm after it asks about the row it
+	// resolved to. A name no row answers to is a repository no team tracks.
+	t.Run("every_arm_asks_about_the_resolved_row", func(t *testing.T) {
+		rt := &gateRuntime{tracks: true, taskRepo: true, repository: &domain.Repository{ID: "repo-renamed", Owner: "acme", Repo: "renamed"}}
+		c := newGateClient(rt)
+		if err := c.authorizeRepo(ctx, "acme", "widgets"); err != nil {
+			t.Fatalf("authorizeRepo = %v, want nil (the run's own task repo)", err)
+		}
+		if strings.Join(rt.asked, ",") != "repo-renamed,repo-renamed" {
+			t.Errorf("id-keyed reads asked about %v, want the resolved row for tracking and the task repo", rt.asked)
+		}
+
+		unresolved := &gateRuntime{tracks: true, taskRepo: true, noRow: true}
+		err := newGateClient(unresolved).authorizeRepo(ctx, "acme", "widgets")
+		if err == nil || !strings.Contains(err.Error(), "not tracked by this team") {
+			t.Fatalf("authorizeRepo for a name no row answers to = %v, want the not-tracked refusal", err)
+		}
+		if len(unresolved.asked) != 0 {
+			t.Errorf("id-keyed reads asked about %v for a name with no row, want none", unresolved.asked)
 		}
 	})
 

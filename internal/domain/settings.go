@@ -784,14 +784,30 @@ func JiraStatusNames(refs []JiraStatusRef) []string {
 	return out
 }
 
-// JiraStatusIDs renders refs as their identifiers, skipping the ones that
-// carry none — for the surfaces that can match on an id but must not treat a
-// name-only ref as having an empty one.
-func JiraStatusIDs(refs []JiraStatusRef) []string {
-	out := make([]string, 0, len(refs))
+// StatusMatchSets is a set of status refs split into the three lists a query
+// matching the way SameStatus and SameState compare has to test: IDs against
+// a value's id; IDNames, the names of the refs that carry an id, against the
+// name of a value that carries no id; and Names, the names of the refs that
+// carry no id, against any value's name. A value with an id is never matched
+// by the name of a ref that has one, so a status renamed to the name another
+// project's done status had stays apart from it.
+type StatusMatchSets struct {
+	IDs, IDNames, Names []string
+}
+
+// JiraStatusMatchSets splits refs for a query that compares the way
+// SameStatus does.
+func JiraStatusMatchSets(refs []JiraStatusRef) StatusMatchSets {
+	var out StatusMatchSets
 	for _, r := range refs {
-		if r.ID != "" {
-			out = append(out, r.ID)
+		switch {
+		case r.ID != "":
+			out.IDs = append(out.IDs, r.ID)
+			if r.Name != "" {
+				out.IDNames = append(out.IDNames, r.Name)
+			}
+		case r.Name != "":
+			out.Names = append(out.Names, r.Name)
 		}
 	}
 	return out
@@ -1028,47 +1044,70 @@ func (r LinearTeamRules) Unarmed() bool {
 		len(r.DoneMembers) == 0 && r.DoneCanonical.IsZero()
 }
 
-// TeamGitHubGroup is one row of team_github_groups — a fully-qualified
-// GitHub team (org login + team slug) mapped to a TF team for routing
-// human GitHub-team review requests to the right board. Dumb string
-// labels only: no membership resolution, no nested-team traversal, no
-// sync of GitHub's team graph. Fully-qualified with the org login so
-// @acme/frontend and @beta/frontend don't collide. Many of these can
-// sit under one TF team (the "funnel" direction).
+// TeamGitHubGroup is one row of team_github_groups: a GitHub team mapped to a
+// TF team, so a review request addressed to the GitHub team routes to the TF
+// team's board. No membership resolution, no nested-team traversal, no sync of
+// GitHub's team graph. Many of these can sit under one TF team (the "funnel"
+// direction).
+//
+// GitHubTeamID and GitHubOrgID are GitHub's ids for the team and for the
+// organization it is in: the identity routing and the deletion reconcile
+// match on, which a rename of either leaves alone. OrgLogin and TeamSlug are
+// display values, what GitHub called the two when the row was written or last
+// reconciled; a mention, which names a team by its handle, is matched against
+// them. Both ids are "" only on a local row stored before ids were recorded,
+// until the GitHub poll's reconcile identifies it.
 type TeamGitHubGroup struct {
-	OrgLogin string
-	TeamSlug string
+	GitHubTeamID string
+	GitHubOrgID  string
+	OrgLogin     string
+	TeamSlug     string
 }
 
-// NormalizeTeamGitHubGroups lowercase-trims every group's org login +
-// team slug, drops entries with an empty field, and de-duplicates —
-// the canonical form persisted by SetForTeam and matched by routing
-// lookups. GitHub team slugs are already lowercase and org logins are
-// case-insensitive, so normalizing on the way in keeps routing matches
-// reliable regardless of how the admin typed them. Returns an error
-// only if an entry has one field populated and the other empty (a
-// half-specified group, which is a caller bug rather than a value to
-// silently drop).
+// NormalizeTeamGitHubGroups validates a set of mappings for SetForTeam: every
+// entry names its team and organization by GitHub id (IsGitHubID) and carries
+// a non-blank login and slug, which are trimmed. A team named twice is kept
+// once, at its first position. An entry that fails is an error naming its
+// index, since a mapping without its ids can never be routed to or
+// reconciled.
 func NormalizeTeamGitHubGroups(groups []TeamGitHubGroup) ([]TeamGitHubGroup, error) {
 	out := make([]TeamGitHubGroup, 0, len(groups))
-	seen := map[TeamGitHubGroup]bool{}
+	seen := map[string]bool{}
 	for i, g := range groups {
-		login := strings.ToLower(strings.TrimSpace(g.OrgLogin))
-		slug := strings.ToLower(strings.TrimSpace(g.TeamSlug))
-		if login == "" && slug == "" {
+		n := TeamGitHubGroup{
+			GitHubTeamID: strings.TrimSpace(g.GitHubTeamID),
+			GitHubOrgID:  strings.TrimSpace(g.GitHubOrgID),
+			OrgLogin:     strings.TrimSpace(g.OrgLogin),
+			TeamSlug:     strings.TrimSpace(g.TeamSlug),
+		}
+		if !IsGitHubID(n.GitHubTeamID) || !IsGitHubID(n.GitHubOrgID) {
+			return nil, fmt.Errorf("groups[%d]: a github group needs GitHub's team and organization ids, got %q/%q", i, g.GitHubTeamID, g.GitHubOrgID)
+		}
+		if n.OrgLogin == "" || n.TeamSlug == "" {
+			return nil, fmt.Errorf("groups[%d]: a github group needs its org login and team slug, got %q/%q", i, g.OrgLogin, g.TeamSlug)
+		}
+		if seen[n.GitHubTeamID] {
 			continue
 		}
-		if login == "" || slug == "" {
-			return nil, fmt.Errorf("groups[%d]: github group needs both org login and team slug, got %q/%q", i, g.OrgLogin, g.TeamSlug)
-		}
-		n := TeamGitHubGroup{OrgLogin: login, TeamSlug: slug}
-		if seen[n] {
-			continue
-		}
-		seen[n] = true
+		seen[n.GitHubTeamID] = true
 		out = append(out, n)
 	}
 	return out, nil
+}
+
+// GitHubOrgTeams is one GitHub organization's team listing, as the deletion
+// reconcile reads it with the org's credential: the organization's id and
+// current login, and each team's id and current slug.
+type GitHubOrgTeams struct {
+	OrgID    string
+	OrgLogin string
+	Teams    []GitHubTeam
+}
+
+// GitHubTeam is one team in a GitHubOrgTeams listing.
+type GitHubTeam struct {
+	ID   string
+	Slug string
 }
 
 // TeamGitHubRepo is one row of team_github_repos — a single GitHub repo a TF
@@ -1096,35 +1135,27 @@ type TeamGitHubRepo struct {
 // Slug returns the "owner/repo" display form.
 func (r TeamGitHubRepo) Slug() string { return r.Owner + "/" + r.Repo }
 
-// TrackedRepoTeams is one tracked (owner, repo) in an org together with the
+// TrackedRepoTeams is one tracked repository in an org together with the
 // display names of every team that tracks it. It backs the GitHub-access
-// switch reachability preflights (TFAC-328): when a switch would leave a
-// tracked repo unreachable by the new credential, the diff names which teams
-// own that now-dark repo so the admin knows who's affected. The team list is
+// switch reachability preflights: when a switch would leave a tracked repo
+// unreachable by the new credential, the diff names which teams own that
+// now-dark repo so the admin knows who's affected. The team list is
 // deterministic (ordered by team name); a repo with no teams never appears
 // (it wouldn't be tracked).
 type TrackedRepoTeams struct {
-	Owner string
-	Repo  string
-	Teams []string
+	// RepositoryID is the registry row the entry is.
+	RepositoryID string
+	// ExternalID is the row's GitHub repository id, "" while TF has not learned
+	// it. A preflight matches the target credential's listing on it, and on the
+	// name only for a row without one.
+	ExternalID string
+	Owner      string
+	Repo       string
+	Teams      []string
 }
 
 // Slug returns the canonical "owner/repo" form, matching TeamGitHubRepo.Slug.
 func (r TrackedRepoTeams) Slug() string { return r.Owner + "/" + r.Repo }
-
-// NormalizeGitHubTeamSlugs lowercase-trims a list of GitHub team slugs
-// and drops blanks — the form PruneMissingSystem compares the stored
-// rows against.
-func NormalizeGitHubTeamSlugs(slugs []string) []string {
-	out := make([]string, 0, len(slugs))
-	for _, s := range slugs {
-		s = strings.ToLower(strings.TrimSpace(s))
-		if s != "" {
-			out = append(out, s)
-		}
-	}
-	return out
-}
 
 // Armed reports whether this project's rules are complete enough for TF to act
 // on the project: pickup members to discover with, and members-plus-canonical
@@ -1197,19 +1228,6 @@ func RuleForJiraProject(rules []JiraProjectStatusRules, jiraProjectID string) *J
 		}
 	}
 	return nil
-}
-
-// JiraProjectKeys returns the ordered list of project keys with empty
-// entries filtered out. Mirrors the helper the deleted config package
-// exposed for poller dispatch and JQL queries.
-func JiraProjectKeys(rules []JiraProjectStatusRules) []string {
-	keys := make([]string, 0, len(rules))
-	for _, p := range rules {
-		if p.ProjectKey != "" {
-			keys = append(keys, p.ProjectKey)
-		}
-	}
-	return keys
 }
 
 // JiraAllPickupMembers returns the union of every project's pickup

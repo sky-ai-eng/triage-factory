@@ -61,7 +61,7 @@ func newViewerRig(t *testing.T) *viewerRig {
 		s:      s,
 		ph:     &promptsHandler{db: h.AdminDB, tx: s.tx, az: s.az},
 		bh:     &blueprintsHandler{tx: s.tx, az: s.az, spawner: func() *delegate.Spawner { return nil }},
-		eh:     &eventHandlersHandler{tx: s.tx, az: s.az},
+		eh:     &eventHandlersHandler{tx: s.tx, az: s.az, catalogs: s},
 		orgID:  orgID,
 		teamID: teamID,
 		admin:  founder,

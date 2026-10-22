@@ -11,6 +11,10 @@ export interface Task {
   entity_kind: EntityKind
   event_type: string
   dedup_key?: string
+  // On a github:pr:review_requested task, the requested user's login or
+  // team's org/slug, as the event that last bumped the task named it. Display
+  // only: dedup_key identifies the reviewer, by GitHub's id when known.
+  requested_reviewer?: string
   severity?: string
   relevance_reason?: string
   scoring_status: string
@@ -763,6 +767,10 @@ export interface MeResponse {
   display_name?: string
   avatar_url?: string
   github_username?: string
+  /** GitHub's id for the account behind github_username: the value a GitHub
+   *  predicate's identity filters (author_id_in and its siblings) store.
+   *  Absent when GitHub is not connected, or the binding recorded no id. */
+  github_user_id?: string
   /** Atlassian account ID. Absent when Jira is not yet connected — the
    *  predicate editor renders the Variant-A toggle disabled with a
    *  "configure Jira on Settings" hint. */
@@ -1032,6 +1040,10 @@ export interface TeamMember {
   user_id: string
   display_name: string
   github_username: string | null
+  /** GitHub's id for the account behind github_username, the value a GitHub
+   *  predicate's identity filters store. Null when this member hasn't
+   *  connected GitHub, or their binding recorded no id. */
+  github_user_id: string | null
   /** Atlassian account ID. Null when this member hasn't
    *  connected Jira yet. */
   jira_account_id: string | null
@@ -1137,6 +1149,13 @@ export interface FactoryEntity {
    * events in sequence (new_commits → ci_passed) shows both transitions
    * rather than teleporting to the latest. */
   recent_events?: FactoryRecentEvent[]
+  /** The registry row the entity belongs to: a pull request's repository, a
+   *  Jira issue's project, a Linear issue's team. Only the one for the
+   *  entity's source is set. The belt groups chips by it rather than by a
+   *  name, so a renamed repository or project keeps its chips' hue. */
+  repository_id?: string
+  jira_project_id?: string
+  linear_team_id?: string
   // GitHub PR fields.
   number?: number
   repo?: string

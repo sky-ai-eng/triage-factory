@@ -163,7 +163,7 @@ func (p *Profiler) RunOrg(ctx context.Context, orgID string, force bool) (bool, 
 // — local mode is N=1 so there's no immediate dedup pressure.
 // The returned bool reports whether this cycle *successfully persisted* any
 // profile row — at least one repo passed the TTL + fetch gate and had its
-// clone metadata written by an UpsertSystem that returned nil. A
+// clone metadata written by an UpdateProfileSystem that returned nil. A
 // steady-state cycle where every repo is TTL-skipped (or where every write
 // failed) returns false, letting the caller skip the post-profile bare-clone
 // bootstrap (and its per-repo WS broadcasts) when nothing landed on disk.
@@ -178,7 +178,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 	repoprofileLog.Debug("profiling configured repos", "org", orgID, "repos", len(repos))
 
 	// touched flips true the first time a repo's row is *successfully*
-	// upserted this cycle (any of the three write sites below). A failed
+	// written this cycle (any of the three write sites below). A failed
 	// write leaves it false so the caller doesn't bootstrap bare clones for
 	// a clone_url that never landed.
 	touched := false
@@ -228,12 +228,13 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		owner, repo := parts[0], parts[1]
 
 		// One read of the stored row, serving three purposes: the TTL gate
-		// (skipped when forced), the registry id the websocket events below
-		// are keyed on, and proof the repository is still tracked. Ref-keyed,
-		// because name came out of the tracked set and is the same name the
-		// GitHub fetches are built from; the rename applied further down
-		// moves owner/repo and leaves the id alone, so an id read here stays
-		// the right one either way.
+		// (skipped when forced), the registry id every write below lands on
+		// and the websocket events are keyed on, and proof the name still
+		// answers to a row. Ref-keyed, because name came out of the tracked
+		// set and is the same name the GitHub fetches are built from; this is
+		// where it is resolved, once. The rename applied further down moves
+		// owner/repo and leaves the id alone, so the id read here stays the
+		// right one either way.
 		existing, existingErr := p.repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Host: host, Owner: owner, Repo: repo})
 		switch {
 		case existingErr != nil:
@@ -245,11 +246,9 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			continue
 		case existing == nil:
 			// The tracked-set list this loop walks joins tracking to the
-			// registry, and tracking rows cascade with their repository — so
-			// a name with no row was untracked between that read and this
-			// one. Profiling it anyway would upsert the row back into
-			// existence, resurrecting a repository a config save just
-			// deleted.
+			// registry, so a name no row answers to was renamed or retired
+			// between that read and this one. There is no row to write a
+			// profile to; the next cycle reads the tracked set again.
 			repoprofileLog.Info("repository row gone since the tracked-set read, skipping", "repo", name)
 			continue
 		case !force && existing.ProfiledAt != nil:
@@ -260,8 +259,11 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		}
 
 		// Resolve the per-(org, owner) GitHub client. Done after the TTL
-		// skip so we don't mint a token for a repo we're about to skip.
-		client, cerr := p.resolver.ClientFor(ctx, orgID, owner)
+		// skip so we don't mint a token for a repo we're about to skip. The
+		// owner is named by the account id the row records too, so a rename
+		// of the owner account that the row's name has not caught up with
+		// still resolves the installation on it.
+		client, cerr := github.ClientForOwner(ctx, p.resolver, orgID, existing.OwnerExternalID, owner)
 		if cerr != nil {
 			repoprofileLog.Warn("resolve github client failed, skipping", "repo", name, "error", cerr)
 			continue
@@ -328,11 +330,14 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			cloneURL = meta.SSHURL
 		}
 
-		// No ID: UpsertSystem keys on the identity columns below and hands
-		// back the row it wrote, which is where the id both emit sites key
-		// their event on comes from. Carrying one here would only invite a
-		// reader to believe this struct describes a row.
+		// The profile this pass learned, for the row read above: every write
+		// below lands on existing.ID (UpdateProfileSystem), so a rename or a
+		// retire landing while the documents were fetched cannot send it to
+		// whatever answers to the name by then. Owner and Repo are the name
+		// the documents were fetched under, which the batch prompt names the
+		// repository by; the write takes nothing from them.
 		prof := domain.Repository{
+			ID:     existing.ID,
 			Owner:  owner,
 			Repo:   repo,
 			Source: domain.RepoSourceGitHub,
@@ -343,12 +348,16 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			// without one behaves exactly as it always has — so a repo whose
 			// meta fetch failed (skipped above) or that is inside its profile
 			// TTL simply keeps whatever id it already had.
-			ExternalID:    meta.ExternalID(),
-			HasReadme:     readme != "",
-			HasClaudeMd:   claudeMd != "",
-			HasAgentsMd:   agentsMd != "",
-			CloneURL:      cloneURL,
-			DefaultBranch: defaultBranch,
+			ExternalID: meta.ExternalID(),
+			// The account that owns the repository, from the same response.
+			// UpdateProfileSystem records it only on a row that carries
+			// ExternalID once the write lands.
+			OwnerExternalID: meta.OwnerExternalID(),
+			HasReadme:       readme != "",
+			HasClaudeMd:     claudeMd != "",
+			HasAgentsMd:     agentsMd != "",
+			CloneURL:        cloneURL,
+			DefaultBranch:   defaultBranch,
 		}
 
 		// A repo with no docs is fully inspected by this fetch — there's
@@ -367,21 +376,23 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 
 		// Persist docs flags immediately so the UI can show them before
 		// profiling completes.
-		stored, err := p.repos.UpsertSystem(ctx, orgID, prof)
+		stored, err := p.repos.UpdateProfileSystem(ctx, orgID, prof.ID, prof)
 		if err != nil {
 			// Nothing landed, so nothing is announced: the event's job is to
 			// tell clients what the row now says, and a failed write left it
 			// saying what it said before. The repo still goes on into the
-			// batch below, whose own write is another attempt at the row.
-			repoprofileLog.Error("upsert docs flags failed", "repo", name, "error", err)
+			// batch below, whose own write is another attempt at the row. A
+			// row retired since the read refuses every one of them
+			// (ErrNoSuchRepository), which is the point: the documents were
+			// fetched under a name another repository now holds.
+			repoprofileLog.Error("write docs flags failed", "repo", name, "repository_id", prof.ID, "error", err)
 		} else {
 			touched = true
-			// The row the upsert returned, not the struct handed to it: the
-			// flags agree either way, but the id and the slug are the row's —
-			// the stored casing, and an id this pass never read.
+			// The row the write returned, not the struct handed to it: the
+			// flags agree either way, but the slug is the row's — the stored
+			// casing, and the name it holds now.
 			p.notify.Publish(ctx, orgID, repoevent.Update{
 				ID:          stored.ID,
-				Host:        stored.Host,
 				Slug:        stored.Slug(),
 				HasReadme:   repoevent.Ptr(stored.HasReadme),
 				HasClaudeMd: repoevent.Ptr(stored.HasClaudeMd),
@@ -429,13 +440,14 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			} else {
 				repoprofileLog.Error("profile batch failed", "batch", i/profileBatchSize+1, "error", err)
 			}
-			// Fallback: upsert without profile_text so the row at least exists.
-			// Nothing is published — the doc-flags emission above already said
-			// everything this write persists, and there is no profile text yet
-			// to announce.
+			// Fallback: write the doc flags and clone metadata without
+			// profile_text, so the row carries them even when the first write
+			// above failed. Nothing is published — the doc-flags emission
+			// above already said everything this write persists, and there is
+			// no profile text yet to announce.
 			for _, d := range batch {
-				if _, uErr := p.repos.UpsertSystem(ctx, orgID, d.profile); uErr != nil {
-					repoprofileLog.Error("upsert fallback failed", "repo", d.profile.Slug(), "error", uErr)
+				if _, uErr := p.repos.UpdateProfileSystem(ctx, orgID, d.profile.ID, d.profile); uErr != nil {
+					repoprofileLog.Error("write fallback profile failed", "repo", d.profile.Slug(), "repository_id", d.profile.ID, "error", uErr)
 				} else {
 					touched = true
 				}
@@ -460,9 +472,9 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			// fallback path above, which leaves profiled_at unset so the repo
 			// retries next cycle — error ≠ absence.)
 			prof.ProfiledAt = &now
-			stored, err := p.repos.UpsertSystem(ctx, orgID, prof)
+			stored, err := p.repos.UpdateProfileSystem(ctx, orgID, prof.ID, prof)
 			if err != nil {
-				repoprofileLog.Error("upsert profile failed", "repo", prof.Slug(), "error", err)
+				repoprofileLog.Error("write profile failed", "repo", prof.Slug(), "repository_id", prof.ID, "error", err)
 				continue
 			}
 			touched = true
@@ -472,7 +484,6 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 				profiled++
 				p.notify.Publish(ctx, orgID, repoevent.Update{
 					ID:          stored.ID,
-					Host:        stored.Host,
 					Slug:        stored.Slug(),
 					ProfileText: repoevent.Ptr(stored.ProfileText),
 				})
@@ -510,7 +521,8 @@ func (p *Profiler) applyRenameFromMeta(ctx context.Context, orgID, host, tracked
 		return "", false
 	}
 	applied, _ := reporename.Apply(ctx, p.repos, p.resolver, repoprofileLog, orgID, host, []domain.RepoRef{{
-		Source: domain.RepoSourceGitHub, Owner: owner, Repo: repo, ExternalID: id,
+		Source: domain.RepoSourceGitHub, Owner: owner, Repo: repo,
+		ExternalID: id, OwnerExternalID: meta.OwnerExternalID(),
 	}})
 	if applied == 0 {
 		return "", false

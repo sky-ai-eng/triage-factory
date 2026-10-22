@@ -3,15 +3,28 @@
 -- Every external object is keyed within the provider namespace it lives in, a
 -- GitHub entity references its repository's registry row and records its pull
 -- request's node id, a repository row can be retired to give up a name GitHub
--- has handed to another repository, a team's Jira tracked set and every Jira
--- issue entity reference a Jira project registry row, every Jira and Linear
+-- has handed to another repository, a GitHub team mapping records GitHub's
+-- ids for the team and its organization, a team's Jira tracked set and every
+-- Jira issue entity reference a Jira project registry row, every Jira and Linear
 -- issue entity is written with its issue id, pull request, review and branch
 -- artifacts are keyed on ids rather than their repository's name, every
 -- artifact references the entity it is about and Jira artifacts keyed on an
--- issue key are keyed on the issue's id, Linear
--- becomes a tracked source, and five smaller changes ride along: the org GitHub App's unusable state, the claim's source
--- manifest, the retirement of the 'completed' conversation status, node ids on
--- artifacts and audit-ledger rows, and the table of rate-limit readings.
+-- issue key are keyed on the issue's id, one live App installation per account
+-- is keyed on the account's id rather than its login, a placement override
+-- references its repository's registry row rather than its name, an
+-- audit-ledger row references the entity or repository it was about, a
+-- repository row and a reachable entry record GitHub's id for the account that
+-- owns the repository, an active task on a Jira status or priority change is
+-- keyed on the status's or priority's id rather than its name, GitHub
+-- event-handler predicates name people and teams by GitHub's id, Linear
+-- becomes a tracked source, and ten smaller changes ride along: the org GitHub
+-- App's unusable state, the claim's source manifest, the retirement of the
+-- 'completed' conversation status, node ids on artifacts and audit-ledger rows,
+-- the table of rate-limit readings, the principal a deployment-operator grant
+-- is bound to, the removal of the unused poller_state table, the GitHub account
+-- id on a pending bind and on the org PAT's identity, and the indexes that look
+-- a GitHub account up by GitHub's id (an identity binding, and a pull
+-- request's author).
 --
 -- NO TRANSACTION because rebuilding a table other tables reference needs
 -- foreign keys off, and PRAGMA foreign_keys is a no-op inside a transaction:
@@ -108,6 +121,44 @@ CREATE TABLE rate_limit_readings (
     observed_at  DATETIME NOT NULL,
     PRIMARY KEY (org_id, upstream, credential, bucket)
 );
+
+-- operators.user_id: the principal a deployment-operator grant rests on. The
+-- CLI names an operator by email, which stays the key it adds and removes by;
+-- the grant is bound to the principal holding that address verified, either
+-- when `operator add` runs or at that principal's first verified sign-in, and a
+-- bound row matches its principal and nobody else. An address can pass to
+-- another person, and a grant matched by address would pass with it. Local mode
+-- has no login identities, so nothing binds a row here; the column keeps the
+-- operators projection both dialects read one shape. ON DELETE CASCADE, as in
+-- Postgres: a row set back to pending would grant the console to the next
+-- holder of the address.
+ALTER TABLE operators ADD COLUMN user_id TEXT REFERENCES users(id) ON DELETE CASCADE;
+
+-- poller_state has no reader or writer. The tracker's snapshot-diff baseline is
+-- entities.snapshot_json.
+DROP TABLE poller_state;
+
+-- github_pending_binds.account_id: GitHub's numeric id for the account an
+-- install-leg record was minted for, which the installation GitHub returns has
+-- to be on. NULL on an authorize-leg record, which names the account only as
+-- the admin typed it, and on every record already stored. A record lives
+-- fifteen minutes, so none is backfilled; one without an id is held to its
+-- login.
+ALTER TABLE github_pending_binds ADD COLUMN account_id TEXT;
+
+-- agents.github_org_user_id: GitHub's numeric id for the account the org's PAT
+-- authenticates as, written with github_org_login on every PAT save. A run
+-- tells that account apart from the person who delegated it by this id. The
+-- PAT's next save fills it in on a stored row; until then the login decides.
+ALTER TABLE agents ADD COLUMN github_org_user_id TEXT;
+
+-- The reverse (host, GitHub account id) -> user lookup the routing
+-- subscribers run for an event that names its actor by GitHub's id rather
+-- than by login (UserIDsForGitHubUserIDSystem). The id-arm twin of
+-- user_github_identities_login_lookup_idx.
+CREATE INDEX user_github_identities_user_id_lookup_idx
+    ON user_github_identities (github_base_url, github_user_id)
+    WHERE github_user_id IS NOT NULL;
 
 -- ===========================================================================
 -- 2. Linear
@@ -290,15 +341,16 @@ CREATE UNIQUE INDEX org_linear_installs_workspace_live
 --                                 section 5, once the Jira project registry
 --                                 a Jira row references exists.
 --   repositories                  host
---   team_github_groups            host
+--   team_github_groups            host, and GitHub's ids for the team and
+--                                 its organization (section 3d)
 --   org_github_app_installations  github_host joins the primary key
 --   reachable_repositories,       host on every row
 --     reachable_scopes
 --   artifacts, external_actions   scope joins the dedup key
---   placement_overrides           host joins the primary key
 --
 -- team_github_repos and conversation_worktrees reference a repository by row
--- id, so they take the scope from the row and get no column.
+-- id, so they take the scope from the row and get no column, and so does
+-- placement_overrides once 3g moves each pin onto its repository's row.
 --
 -- A host or site is compared by exact string wherever it is a key, so every
 -- one is also stored in one spelling: the ghbase.CanonicalBaseURL form, which
@@ -663,19 +715,35 @@ SELECT entity_id, issue_id
  WHERE n = 1;
 
 -- ---------------------------------------------------------------------------
--- 3d. team_github_groups.host
+-- 3d. team_github_groups: host, and GitHub's ids for the team
 -- ---------------------------------------------------------------------------
 --
 -- A mapping names a GitHub organization by login, which another host can
--- reuse. Rebuilt because host joins the primary key.
+-- reuse, and a team by a slug GitHub changes when the team is renamed. So a
+-- row records its host, and GitHub's ids for the team (github_team_id) and
+-- for its organization (github_org_id), which routing and the deletion
+-- reconcile match on; the login and slug are display values. Rebuilt because
+-- the key changes.
+--
+-- The rows copied here carry no ids, since only GitHub can say which team a
+-- slug names. The GitHub poll's team reconcile fills them in once, matching
+-- the row's org login and slug against the organization's team listing, and
+-- never deletes a row it has not identified. Until then routing matches the
+-- row by its login and slug. The store refuses a new row without its ids, so
+-- a NULL is always a row copied here.
 CREATE TABLE team_github_groups_new (
     team_id          TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
     host             TEXT NOT NULL,
+    github_team_id   TEXT,
+    github_org_id    TEXT,
     github_org_login TEXT NOT NULL,
     github_team_slug TEXT NOT NULL,
     created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (team_id, host, github_org_login, github_team_slug),
+    UNIQUE (team_id, host, github_team_id),
     CONSTRAINT tgg_host_populated CHECK (host <> ''),
+    CONSTRAINT tgg_ids_together CHECK ((github_team_id IS NULL) = (github_org_id IS NULL)),
+    CONSTRAINT tgg_team_id_populated CHECK (github_team_id <> ''),
+    CONSTRAINT tgg_org_id_populated CHECK (github_org_id <> ''),
     CONSTRAINT tgg_org_login_populated CHECK (github_org_login <> ''),
     CONSTRAINT tgg_team_slug_populated CHECK (github_team_slug <> '')
 );
@@ -689,6 +757,10 @@ SELECT g.team_id, s.scope, g.github_org_login, g.github_team_slug, g.created_at
 DROP TABLE team_github_groups;
 ALTER TABLE team_github_groups_new RENAME TO team_github_groups;
 
+-- Routing's lookup: which teams a GitHub team's review requests route to. The
+-- unique key leads with team_id and cannot serve it.
+CREATE INDEX team_github_groups_github_team_idx ON team_github_groups (host, github_team_id);
+
 -- ---------------------------------------------------------------------------
 -- 3e. GitHub App installations and the reachable-repo cache
 -- ---------------------------------------------------------------------------
@@ -700,7 +772,11 @@ ALTER TABLE team_github_groups_new RENAME TO team_github_groups;
 --
 --   org_github_app_installations  github_host joins the primary key and the
 --       one-live-install-per-account key. The column has no DEFAULT: a row
---       names the host it was listed on, and nothing stands in for one.
+--       names the host it was listed on, and nothing stands in for one. The
+--       account key holds the account's numeric id rather than its login, and
+--       the login only for a row whose id is not known yet: a login moves with
+--       a rename, so the install of the account that takes a login another
+--       account gave up would collide with a row not caught up yet.
 --   reachable_repositories        every row carries its host. An App row's is
 --       its installation's, and the foreign key to the installation runs over
 --       (org_id, host, installation_id), so a row can only ever hang off the
@@ -840,9 +916,52 @@ ALTER TABLE org_github_app_installations_new RENAME TO org_github_app_installati
 ALTER TABLE reachable_repositories_new RENAME TO reachable_repositories;
 ALTER TABLE reachable_scopes_new RENAME TO reachable_scopes;
 
+-- The account key below is the account id, and the login key only allowed one
+-- live row per login, so one account can hold two live rows under two logins:
+-- it renamed between an uninstall TF never saw and its reinstall. The later
+-- install is the installation GitHub has. The earlier row is removed the way an
+-- uninstall removes it, with the reach and the refresh marker mirrored for it.
+CREATE TEMP TABLE superseded_installation AS
+SELECT o.org_id, o.github_host, o.installation_id
+  FROM org_github_app_installations o
+ WHERE o.removed_at IS NULL AND o.account_id IS NOT NULL
+   AND EXISTS (
+       SELECT 1 FROM org_github_app_installations n
+        WHERE n.org_id = o.org_id AND n.github_host = o.github_host
+          AND n.account_id = o.account_id AND n.removed_at IS NULL
+          AND (n.installed_at, n.installation_id) > (o.installed_at, o.installation_id));
+
+DELETE FROM reachable_repositories
+ WHERE EXISTS (
+       SELECT 1 FROM superseded_installation s
+        WHERE s.org_id = reachable_repositories.org_id
+          AND s.github_host = reachable_repositories.host
+          AND s.installation_id = reachable_repositories.installation_id);
+
+DELETE FROM reachable_scopes
+ WHERE credential_class <> 'pat'
+   AND EXISTS (
+       SELECT 1 FROM superseded_installation s
+        WHERE s.org_id = reachable_scopes.org_id
+          AND s.github_host = reachable_scopes.host
+          AND s.installation_id = reachable_scopes.scope);
+
+UPDATE org_github_app_installations
+   SET removed_at = CURRENT_TIMESTAMP
+ WHERE EXISTS (
+       SELECT 1 FROM superseded_installation s
+        WHERE s.org_id = org_github_app_installations.org_id
+          AND s.github_host = org_github_app_installations.github_host
+          AND s.installation_id = org_github_app_installations.installation_id);
+
+DROP TABLE superseded_installation;
+
 CREATE UNIQUE INDEX org_github_app_installations_active_account_key
+    ON org_github_app_installations (org_id, github_host, account_id)
+    WHERE removed_at IS NULL AND account_id IS NOT NULL;
+CREATE UNIQUE INDEX org_github_app_installations_active_login_key
     ON org_github_app_installations (org_id, github_host, account_login)
-    WHERE removed_at IS NULL;
+    WHERE removed_at IS NULL AND account_id IS NULL;
 CREATE UNIQUE INDEX org_github_app_installations_active_host_installation_key
     ON org_github_app_installations (github_host, installation_id)
     WHERE removed_at IS NULL;
@@ -857,6 +976,9 @@ CREATE UNIQUE INDEX reachable_repositories_pat_identity
     WHERE credential_class = 'pat';
 CREATE INDEX reachable_repositories_registry_join
     ON reachable_repositories (org_id, source, LOWER(owner), LOWER(repo));
+CREATE INDEX reachable_repositories_registry_external_join
+    ON reachable_repositories (org_id, source, host, external_id)
+    WHERE external_id IS NOT NULL;
 CREATE INDEX reachable_repositories_picker
     ON reachable_repositories (org_id, credential_class, LOWER(owner), LOWER(repo));
 
@@ -929,28 +1051,45 @@ CREATE INDEX idx_artifacts_external_id ON artifacts (org_id, scope, kind, extern
 CREATE INDEX idx_external_actions_org_action_occurred ON external_actions (org_id, action, occurred_at);
 
 -- ---------------------------------------------------------------------------
--- 3g. placement_overrides.host
+-- 3g. placement_overrides: keyed by the repository's registry row
 -- ---------------------------------------------------------------------------
 --
--- A repo pin is keyed on its owner/repo, which is unique only within one GitHub
--- host; repo is the only key kind TF writes, so every pin takes the org's
--- GitHub host. Rebuilt because host joins the primary key.
+-- A pin or replica count is one repository's, and the rendezvous key it
+-- overrides is the repository's registry row id, so the row references the
+-- repository by that id (domain.PlacementOverride.RepositoryID): a rename
+-- moves the registry row's name and leaves the override where it is, and a
+-- repository created under a freed name gets overrides of its own. The
+-- override of a row deleted because a rename absorbed it is moved onto the
+-- renamed row first; ON DELETE CASCADE drops whatever is left.
+--
+-- Each existing pin named its repository by owner/repo on the org's GitHub
+-- host, and repo is the only key kind TF writes. It moves onto the live
+-- registry row that answers to that name there, compared
+-- case-insensitively; of two pins that answer to one row, the most recently
+-- updated is kept. A pin no row answers to is dropped, as is a pin of any
+-- other kind: nothing resolves a repository for it, and nothing reads it,
+-- since placement is off in local mode (the hash always returns this
+-- process) and a pin here changes no run's placement.
 CREATE TABLE placement_overrides_new (
     org_id             TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
-    key_kind           TEXT NOT NULL,
-    host               TEXT NOT NULL,
-    key_value          TEXT NOT NULL,
+    repository_id      TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
     pinned_instance_id TEXT,
     replicas           INTEGER NOT NULL DEFAULT 0,
     updated_at         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (org_id, key_kind, host, key_value)
+    PRIMARY KEY (org_id, repository_id)
 );
 
-INSERT INTO placement_overrides_new
-    (org_id, key_kind, host, key_value, pinned_instance_id, replicas, updated_at)
-SELECT p.org_id, p.key_kind, s.scope, p.key_value, p.pinned_instance_id, p.replicas, p.updated_at
+INSERT OR IGNORE INTO placement_overrides_new
+    (org_id, repository_id, pinned_instance_id, replicas, updated_at)
+SELECT p.org_id, r.id, p.pinned_instance_id, p.replicas, p.updated_at
   FROM placement_overrides p
-  JOIN org_scope s ON s.org_id = p.org_id AND s.provider = 'github';
+  JOIN org_scope s ON s.org_id = p.org_id AND s.provider = 'github'
+  JOIN repositories r
+    ON r.org_id = p.org_id AND r.source = 'github' AND r.host = s.scope
+   AND LOWER(r.owner || '/' || r.repo) = LOWER(p.key_value)
+   AND r.retired_at IS NULL
+ WHERE p.key_kind = 'repo'
+ ORDER BY p.updated_at DESC, p.key_value;
 
 DROP TABLE placement_overrides;
 ALTER TABLE placement_overrides_new RENAME TO placement_overrides;
@@ -1309,6 +1448,13 @@ CREATE INDEX        idx_entities_github_author
     ON entities (json_extract(snapshot_json, '$.author'))
     WHERE source = 'github' AND snapshot_json IS NOT NULL AND snapshot_json != ''
       AND json_valid(snapshot_json);
+-- The author's GitHub account id, which a rename leaves alone: the dashboard
+-- and team pull-request lists match an author by it when the snapshot and the
+-- caller's binding both record one.
+CREATE INDEX        idx_entities_github_author_id
+    ON entities (json_extract(snapshot_json, '$.author_id'))
+    WHERE source = 'github' AND snapshot_json IS NOT NULL AND snapshot_json != ''
+      AND json_valid(snapshot_json);
 CREATE INDEX        idx_entities_commissioned_by
     ON entities (commissioned_by_user_id)
     WHERE commissioned_by_user_id IS NOT NULL;
@@ -1593,6 +1739,315 @@ UPDATE artifacts
 
 DROP TABLE jira_rekey;
 DROP TABLE artifact_subject;
+
+-- ===========================================================================
+-- 8. Audit-ledger rows reference what they were about
+-- ===========================================================================
+--
+-- external_actions.entity_id is the entity an act was about
+-- (domain.ExternalAction.EntityID): the pull request or issue a GitHub action
+-- names, the Jira or Linear issue, the Slack thread. repository_id is the
+-- registry row of the repository a GitHub act with no entity was about: a
+-- branch push, a branch delete, a repository-level write. target stays the
+-- display value the act was recorded under. Both are written with the row, and
+-- a rename of the entity or the repository selects the rows whose current_url
+-- it moves by them, never by the name a link spells. SET NULL keeps a row,
+-- unlinked, if what it references is deleted; a merge of two entities and a
+-- rename absorbing a bare registry row re-point it first.
+ALTER TABLE external_actions ADD COLUMN entity_id TEXT REFERENCES entities(id) ON DELETE SET NULL;
+ALTER TABLE external_actions ADD COLUMN repository_id TEXT REFERENCES repositories(id) ON DELETE SET NULL;
+CREATE INDEX idx_external_actions_entity ON external_actions (entity_id) WHERE entity_id IS NOT NULL;
+CREATE INDEX idx_external_actions_repository ON external_actions (repository_id) WHERE repository_id IS NOT NULL;
+
+-- Existing rows are linked once, best-effort, by what selected them for a
+-- rename before they had these columns, inside the row's scope and provider:
+-- the entity whose key the target names, compared case-insensitively; else
+-- the entity whose url the row's link continues (domain.RewriteEntityURL: the
+-- url, then the end or one of '#', '?', '/'), which is how a row recorded
+-- under a key the entity has since moved off finds it, since that move
+-- pointed the row's link at the entity's current url. An active entity is
+-- preferred, then the newest. A GitHub row that links to no entity is linked
+-- to the live registry row on its host that the target's owner/repo names,
+-- compared case-insensitively. A row nothing answers to stays unlinked, and no
+-- later rename moves its pointer.
+UPDATE external_actions
+   SET entity_id = COALESCE(
+       (SELECT e.id FROM entities e
+         WHERE e.org_id = external_actions.org_id AND e.source = external_actions.provider
+           AND e.scope = external_actions.scope
+           AND LOWER(e.source_id) = LOWER(external_actions.target)
+         ORDER BY e.state = 'active' DESC, e.created_at DESC, e.id LIMIT 1),
+       (SELECT e.id FROM entities e
+         WHERE e.org_id = external_actions.org_id AND e.source = external_actions.provider
+           AND e.scope = external_actions.scope
+           AND COALESCE(e.url, '') <> ''
+           AND substr(COALESCE(external_actions.current_url, external_actions.url, ''), 1, length(e.url)) = e.url
+           AND (length(COALESCE(external_actions.current_url, external_actions.url)) = length(e.url)
+                OR substr(COALESCE(external_actions.current_url, external_actions.url), length(e.url) + 1, 1) IN ('#', '?', '/'))
+         ORDER BY e.state = 'active' DESC, e.created_at DESC, e.id LIMIT 1))
+ WHERE provider IN ('github', 'jira', 'linear', 'slack');
+
+UPDATE external_actions
+   SET repository_id = (
+       SELECT r.id FROM repositories r
+        WHERE r.org_id = external_actions.org_id AND r.source = 'github'
+          AND r.host = external_actions.scope AND r.retired_at IS NULL
+          AND LOWER(r.owner || '/' || r.repo) = LOWER(
+                CASE WHEN instr(external_actions.target, '#') > 0
+                     THEN substr(external_actions.target, 1, instr(external_actions.target, '#') - 1)
+                     ELSE external_actions.target END))
+ WHERE provider = 'github' AND entity_id IS NULL;
+
+-- ===========================================================================
+-- 9. The account that owns a repository, by id
+-- ===========================================================================
+--
+-- owner_external_id is GitHub's numeric id for the account that owns the
+-- repository: the half of the owner a rename of the account does not move,
+-- where owner is the login. It is what matches a tracked repository to the App
+-- installation on its owner account (org_github_app_installations.account_id),
+-- which the scope-drift finding needs for a repository no grant lists, since
+-- no grant listing then applies a rename of the account to the row's owner.
+-- The login stands in only while either side has no id.
+--
+-- A registry row learns it with its external_id: from the poller's grant
+-- listing, the profiler's repository read, a rename, and a registration from
+-- the reachable mirror, whose entries carry it from the same listings. Nothing
+-- stored holds a GitHub account id for a repository, so no row is backfilled:
+-- every existing row and entry starts NULL, and the next grant listing,
+-- profile or mirror refresh fills it.
+ALTER TABLE repositories ADD COLUMN owner_external_id TEXT;
+ALTER TABLE reachable_repositories ADD COLUMN owner_external_id TEXT;
+
+-- ===========================================================================
+-- 10. Jira status and priority changes keyed on ids
+-- ===========================================================================
+--
+-- jira:issue:status_changed and jira:issue:priority_changed are deduplicated
+-- on the new status's or priority's Jira id, which a rename in Jira does not
+-- move, and on its name only for a read that carried no id. An active task
+-- opened under a name is re-keyed to the id when its entity's snapshot still
+-- shows that status or priority under that name and carries its id, so the
+-- next event into the same status or priority bumps the task rather than
+-- opening a second one beside it.
+--
+-- A task whose issue has moved on to another status or priority since, or
+-- whose snapshot carries no id, keeps its name: nothing stored says which id
+-- the name meant. If such an issue enters the named status or priority again,
+-- the event opens a second task beside the first. So does an event recorded
+-- under the name before this migration and routed after it. Linear's
+-- status_changed tasks need nothing here: Linear arrives in this migration, so
+-- none predates it.
+CREATE TEMP TABLE task_rekey AS
+SELECT id, entity_id, event_type, CAST(new_key AS TEXT) AS new_key
+  FROM (SELECT t.id, t.entity_id, t.event_type, t.dedup_key,
+               CASE WHEN json_valid(e.snapshot_json)
+                    THEN json_extract(e.snapshot_json,
+                                      CASE t.event_type WHEN 'jira:issue:status_changed' THEN '$.status'
+                                                        ELSE '$.priority' END) END AS name,
+               CASE WHEN json_valid(e.snapshot_json)
+                    THEN json_extract(e.snapshot_json,
+                                      CASE t.event_type WHEN 'jira:issue:status_changed' THEN '$.status_id'
+                                                        ELSE '$.priority_id' END) END AS new_key
+          FROM tasks t
+          JOIN entities e ON e.id = t.entity_id
+         WHERE e.source = 'jira'
+           AND t.event_type IN ('jira:issue:status_changed', 'jira:issue:priority_changed')
+           AND t.status NOT IN ('done', 'dismissed'))
+ WHERE name = dedup_key
+   AND COALESCE(CAST(new_key AS TEXT), '') NOT IN ('', dedup_key);
+
+UPDATE tasks
+   SET dedup_key = (SELECT r.new_key FROM task_rekey r WHERE r.id = tasks.id)
+ WHERE id IN (SELECT r.id
+                FROM task_rekey r
+               WHERE NOT EXISTS (SELECT 1 FROM tasks o
+                                  WHERE o.entity_id = r.entity_id AND o.event_type = r.event_type
+                                    AND o.dedup_key = r.new_key AND o.status NOT IN ('done', 'dismissed')));
+
+DROP TABLE task_rekey;
+
+-- ===========================================================================
+-- 11. GitHub event-handler predicates name people and teams by GitHub's id
+-- ===========================================================================
+--
+-- A GitHub predicate's identity filters take GitHub's ids, which a rename
+-- leaves alone: author_id_in, reviewer_id_in and commenter_id_in for accounts,
+-- requested_user_id_in and requested_team_id_in for a requested reviewer. The
+-- login-valued filters they replace are unknown fields now, and a predicate
+-- carrying one would refuse to match, so every stored GitHub predicate is
+-- rewritten to the id fields:
+--
+--   author_in, reviewer_in, commenter_in   become author_id_in, reviewer_id_in
+--                                          and commenter_id_in, each login
+--                                          replaced by its account's id;
+--   author, reviewer, commenter            a single login, folded into the
+--                                          list above as its one entry, or,
+--                                          beside a list of its own, narrowing
+--                                          the list to it;
+--   requested_login                        requested_user_id_in, one entry;
+--   requested_team                         requested_team_id_in, one entry.
+--
+-- A login's id is the github_user_id of the identity binding that holds the
+-- login on the org's GitHub host, the most recently verified one when several
+-- do. A login no binding with an id holds is kept as written, and a team's
+-- org/slug is always kept as written (the mappings 3d copied record no ids
+-- yet): neither is an id, so the filter matches nothing until the handler is
+-- edited, rather than matching everyone. For the same reason a singular login
+-- that narrows its list to nothing leaves the list ["0"], which no account has
+-- (GitHub numbers them from 1), where the pair before matched nothing too.
+-- mentioned_login and mentioned_team name the handle a mention spelled and are
+-- unchanged.
+CREATE TEMP TABLE gh_login_id (
+    host           TEXT NOT NULL,
+    login          TEXT NOT NULL,
+    github_user_id TEXT NOT NULL,
+    PRIMARY KEY (host, login)
+);
+
+INSERT INTO gh_login_id (host, login, github_user_id)
+SELECT github_base_url, lower(login), github_user_id
+  FROM (SELECT github_base_url, login, github_user_id,
+               row_number() OVER (PARTITION BY github_base_url, lower(login)
+                                  ORDER BY verified_at DESC, user_id) AS n
+          FROM user_github_identities
+         WHERE github_user_id IS NOT NULL)
+ WHERE n = 1;
+
+CREATE TEMP TABLE gh_predicate (
+    id   TEXT PRIMARY KEY,
+    host TEXT NOT NULL,
+    p    TEXT NOT NULL
+);
+
+INSERT INTO gh_predicate (id, host, p)
+SELECT h.id, s.scope, h.scope_predicate_json
+  FROM event_handlers h
+  JOIN org_scope s ON s.org_id = h.org_id AND s.provider = 'github'
+ WHERE h.event_type LIKE 'github:%'
+   AND json_valid(h.scope_predicate_json)
+   AND json_type(h.scope_predicate_json) = 'object';
+
+-- The lists, renamed, each entry resolved.
+UPDATE gh_predicate
+   SET p = json_remove(json_set(p, '$.author_id_in', json(
+             (SELECT json_group_array(COALESCE(
+                       (SELECT m.github_user_id FROM gh_login_id m
+                         WHERE m.host = gh_predicate.host AND m.login = lower(e.value)),
+                       e.value))
+                FROM json_each(gh_predicate.p, '$.author_in') e))), '$.author_in')
+ WHERE json_type(p, '$.author_in') = 'array';
+
+UPDATE gh_predicate
+   SET p = json_remove(json_set(p, '$.reviewer_id_in', json(
+             (SELECT json_group_array(COALESCE(
+                       (SELECT m.github_user_id FROM gh_login_id m
+                         WHERE m.host = gh_predicate.host AND m.login = lower(e.value)),
+                       e.value))
+                FROM json_each(gh_predicate.p, '$.reviewer_in') e))), '$.reviewer_in')
+ WHERE json_type(p, '$.reviewer_in') = 'array';
+
+UPDATE gh_predicate
+   SET p = json_remove(json_set(p, '$.commenter_id_in', json(
+             (SELECT json_group_array(COALESCE(
+                       (SELECT m.github_user_id FROM gh_login_id m
+                         WHERE m.host = gh_predicate.host AND m.login = lower(e.value)),
+                       e.value))
+                FROM json_each(gh_predicate.p, '$.commenter_in') e))), '$.commenter_in')
+ WHERE json_type(p, '$.commenter_in') = 'array';
+
+-- The singular logins, resolved the same way, and folded into their lists. An
+-- entry the singular is compared with is resolved already, so the two compare
+-- as ids, or as logins when neither resolved.
+UPDATE gh_predicate
+   SET p = json_remove(json_set(p, '$.author_id_in', json(
+             CASE WHEN json_array_length(p, '$.author_id_in') > 0
+                  THEN COALESCE(NULLIF(
+                         (SELECT json_group_array(e.value) FROM json_each(gh_predicate.p, '$.author_id_in') e
+                           WHERE lower(e.value) = lower(COALESCE(
+                                   (SELECT m.github_user_id FROM gh_login_id m
+                                     WHERE m.host = gh_predicate.host
+                                       AND m.login = lower(json_extract(gh_predicate.p, '$.author'))),
+                                   json_extract(gh_predicate.p, '$.author')))),
+                         '[]'), '["0"]')
+                  ELSE json_array(COALESCE(
+                         (SELECT m.github_user_id FROM gh_login_id m
+                           WHERE m.host = gh_predicate.host
+                             AND m.login = lower(json_extract(gh_predicate.p, '$.author'))),
+                         json_extract(gh_predicate.p, '$.author')))
+             END)), '$.author')
+ WHERE json_type(p, '$.author') = 'text';
+
+UPDATE gh_predicate
+   SET p = json_remove(json_set(p, '$.reviewer_id_in', json(
+             CASE WHEN json_array_length(p, '$.reviewer_id_in') > 0
+                  THEN COALESCE(NULLIF(
+                         (SELECT json_group_array(e.value) FROM json_each(gh_predicate.p, '$.reviewer_id_in') e
+                           WHERE lower(e.value) = lower(COALESCE(
+                                   (SELECT m.github_user_id FROM gh_login_id m
+                                     WHERE m.host = gh_predicate.host
+                                       AND m.login = lower(json_extract(gh_predicate.p, '$.reviewer'))),
+                                   json_extract(gh_predicate.p, '$.reviewer')))),
+                         '[]'), '["0"]')
+                  ELSE json_array(COALESCE(
+                         (SELECT m.github_user_id FROM gh_login_id m
+                           WHERE m.host = gh_predicate.host
+                             AND m.login = lower(json_extract(gh_predicate.p, '$.reviewer'))),
+                         json_extract(gh_predicate.p, '$.reviewer')))
+             END)), '$.reviewer')
+ WHERE json_type(p, '$.reviewer') = 'text';
+
+UPDATE gh_predicate
+   SET p = json_remove(json_set(p, '$.commenter_id_in', json(
+             CASE WHEN json_array_length(p, '$.commenter_id_in') > 0
+                  THEN COALESCE(NULLIF(
+                         (SELECT json_group_array(e.value) FROM json_each(gh_predicate.p, '$.commenter_id_in') e
+                           WHERE lower(e.value) = lower(COALESCE(
+                                   (SELECT m.github_user_id FROM gh_login_id m
+                                     WHERE m.host = gh_predicate.host
+                                       AND m.login = lower(json_extract(gh_predicate.p, '$.commenter'))),
+                                   json_extract(gh_predicate.p, '$.commenter')))),
+                         '[]'), '["0"]')
+                  ELSE json_array(COALESCE(
+                         (SELECT m.github_user_id FROM gh_login_id m
+                           WHERE m.host = gh_predicate.host
+                             AND m.login = lower(json_extract(gh_predicate.p, '$.commenter'))),
+                         json_extract(gh_predicate.p, '$.commenter')))
+             END)), '$.commenter')
+ WHERE json_type(p, '$.commenter') = 'text';
+
+UPDATE gh_predicate
+   SET p = json_remove(json_set(p, '$.requested_user_id_in', json(json_array(COALESCE(
+             (SELECT m.github_user_id FROM gh_login_id m
+               WHERE m.host = gh_predicate.host
+                 AND m.login = lower(json_extract(gh_predicate.p, '$.requested_login'))),
+             json_extract(p, '$.requested_login'))))), '$.requested_login')
+ WHERE json_type(p, '$.requested_login') = 'text';
+
+UPDATE gh_predicate
+   SET p = json_remove(json_set(p, '$.requested_team_id_in', json(json_array(json_extract(p, '$.requested_team')))),
+                       '$.requested_team')
+ WHERE json_type(p, '$.requested_team') = 'text';
+
+-- A null filter is no filter, as an absent one is, so a null old field is
+-- dropped.
+UPDATE gh_predicate SET p = json_remove(p, '$.author_in') WHERE json_type(p, '$.author_in') = 'null';
+UPDATE gh_predicate SET p = json_remove(p, '$.reviewer_in') WHERE json_type(p, '$.reviewer_in') = 'null';
+UPDATE gh_predicate SET p = json_remove(p, '$.commenter_in') WHERE json_type(p, '$.commenter_in') = 'null';
+UPDATE gh_predicate SET p = json_remove(p, '$.author') WHERE json_type(p, '$.author') = 'null';
+UPDATE gh_predicate SET p = json_remove(p, '$.reviewer') WHERE json_type(p, '$.reviewer') = 'null';
+UPDATE gh_predicate SET p = json_remove(p, '$.commenter') WHERE json_type(p, '$.commenter') = 'null';
+UPDATE gh_predicate SET p = json_remove(p, '$.requested_login') WHERE json_type(p, '$.requested_login') = 'null';
+UPDATE gh_predicate SET p = json_remove(p, '$.requested_team') WHERE json_type(p, '$.requested_team') = 'null';
+
+UPDATE event_handlers
+   SET scope_predicate_json = (SELECT g.p FROM gh_predicate g WHERE g.id = event_handlers.id)
+ WHERE id IN (SELECT g.id FROM gh_predicate g
+                JOIN event_handlers h ON h.id = g.id
+               WHERE g.p <> h.scope_predicate_json);
+
+DROP TABLE gh_predicate;
+DROP TABLE gh_login_id;
 
 DROP TABLE org_scope;
 DROP TABLE host_case;

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -79,17 +78,9 @@ type bedrockRoleResolver interface {
 // named here so the connect handler isn't the third copy of a magic string.
 const secretKeyAnthropicAPIKey = "anthropic_api_key"
 
-// jiraProjectKeyRe matches Jira's standard project-key rule: a
-// leading uppercase letter followed by uppercase letters or digits.
-// Keys arriving through the API are uppercased before matching so
-// users typing the key in lowercase land on the same canonical form
-// as Jira's wire-side representation.
-var jiraProjectKeyRe = regexp.MustCompile(`^[A-Z][A-Z0-9]*$`)
-
-// normalizeJiraProjectKey trims whitespace and uppercases. Used at
-// the HTTP boundary in handleTeamJiraProjectsPut (the write path) and in
-// validateTrackerKeys (the read/compare path) so lookups match
-// regardless of how the user typed the key.
+// normalizeJiraProjectKey trims whitespace and uppercases: the canonical
+// spelling of a project key, which the team write registers a project under
+// when Jira answers with it.
 func normalizeJiraProjectKey(s string) string {
 	return strings.ToUpper(strings.TrimSpace(s))
 }
@@ -251,12 +242,17 @@ type jiraStatusRuleJSON struct {
 }
 
 // jiraProjectSettings is the per-project read shape: the project's registry
-// row id, which a predicate's jira_project_id_in names it by, its key and name
-// as the registry holds them now, and the four rules. Armed is not a field —
-// it is derivable from these rules by the SPA and a headless caller alike.
-// The write shape names a project by key alone (jiraProjectWrite).
+// row id, which a predicate's jira_project_id_in and the team write name it
+// by, Jira's own id for it, its key and name as the registry holds them now,
+// and the four rules. Armed is not a field — it is derivable from these rules
+// by the SPA and a headless caller alike.
 type jiraProjectSettings struct {
-	ID         string             `json:"id"`
+	ID string `json:"id"`
+	// JiraID is Jira's project id, the jira_id the org's catalog serves the
+	// project under, so a client matches catalog candidates against the
+	// tracked set by it. "" while the poll has not resolved the registry row
+	// against Jira.
+	JiraID     string             `json:"jira_id"`
 	Key        string             `json:"key"`
 	Name       string             `json:"name"`
 	Pickup     jiraStatusRuleJSON `json:"pickup"`
@@ -307,6 +303,7 @@ func toJiraProjectSettings(in []domain.JiraProjectStatusRules) []jiraProjectSett
 	for _, p := range in {
 		out = append(out, jiraProjectSettings{
 			ID:         p.JiraProjectID,
+			JiraID:     p.ProjectExternalID,
 			Key:        p.ProjectKey,
 			Name:       p.ProjectName,
 			Pickup:     toJiraStatusRuleJSON(p.PickupMembers, domain.JiraStatusRef{}),

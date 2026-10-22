@@ -297,16 +297,17 @@ func (r *Refresher) refreshPAT(ctx context.Context, orgID, host string) (bool, e
 			return false, fmt.Errorf("repository %q is not a slug; refusing to write a partial reachable set", repo.FullName)
 		}
 		entries = append(entries, domain.ReachableRepository{
-			OrgID:       orgID,
-			Source:      domain.RepoSourceGitHub,
-			Owner:       owner,
-			Repo:        name,
-			ExternalID:  repo.ExternalID(),
-			Description: repo.Description,
-			Language:    repo.Language,
-			HTMLURL:     repo.HTMLURL,
-			PushedAt:    repo.PushedAt,
-			Private:     repo.Private,
+			OrgID:           orgID,
+			Source:          domain.RepoSourceGitHub,
+			Owner:           owner,
+			Repo:            name,
+			ExternalID:      repo.ExternalID(),
+			OwnerExternalID: repo.OwnerExternalID(),
+			Description:     repo.Description,
+			Language:        repo.Language,
+			HTMLURL:         repo.HTMLURL,
+			PushedAt:        repo.PushedAt,
+			Private:         repo.Private,
 		})
 	}
 	if err := r.mirror.ReplaceForPATSystem(ctx, orgID, host, entries); err != nil {

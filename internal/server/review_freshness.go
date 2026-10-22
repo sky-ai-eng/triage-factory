@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/review"
@@ -24,11 +25,15 @@ import (
 //
 // Freshness joins each out-comment to its staged comment by stable TF-local id, so
 // it never depends on slice ordering.
-func (ah *artifactsHandler) annotateReviewFreshness(ctx context.Context, orgID string, art *domain.Artifact, details domain.ReviewArtifactDetails, out *reviewArtifactDetailsJSON) {
-	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
-	if !ok {
-		return // malformed target — leave everything "unknown" (reviewArtifactDetails 500s a bad target before us)
+func (ah *artifactsHandler) annotateReviewFreshness(ctx context.Context, orgID string, art *domain.Artifact, reviewed db.ArtifactPullRequest, details domain.ReviewArtifactDetails, out *reviewArtifactDetailsJSON) {
+	// reviewed is the pull request under review, resolved by the registry row
+	// its entity references (artifactPullRequest). A retired row's name is
+	// another repository's now, with no head of this pull request to compare
+	// against.
+	if reviewed.Retired {
+		return
 	}
+	owner, repo, number := reviewed.Owner, reviewed.Repo, reviewed.Number
 	// The org's client reads its current GitHub host; a review recorded on
 	// another host has no live head there to compare against.
 	if onHost, _, err := ah.artifactOnCurrentHost(ctx, orgID, art); err != nil || !onHost {

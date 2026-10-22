@@ -170,22 +170,19 @@ func TestNormalizeJiraProjectKey(t *testing.T) {
 	}
 }
 
-func TestJiraProjectKeyRe(t *testing.T) {
-	// Matches the canonical Jira project-key shape: a leading uppercase
-	// letter followed by uppercase letters or digits. Underscores are
-	// not in Jira's allowed set even though some forks of the spec
-	// claim otherwise — rejecting them keeps storage aligned with
-	// what Jira's own UI would let you create.
-	valid := []string{"SKY", "SKY1", "A", "PROJ2024", "XYZ"}
-	invalid := []string{"", "1SKY", "_SKY", "sky", "SKY-X", "SKY.X", "SK Y", "PROJ_2024"}
-	for _, k := range valid {
-		if !jiraProjectKeyRe.MatchString(k) {
-			t.Errorf("expected %q to match jiraProjectKeyRe", k)
+func TestJiraProjectIDRe(t *testing.T) {
+	// A Jira project id is a decimal integer as both deployments write one; a
+	// project key is not one, so it never reaches Jira as an id.
+	valid := []string{"10000", "1", "42"}
+	invalid := []string{"", "SKY", "-1", "10 000", "1e3", " 10000"}
+	for _, id := range valid {
+		if !jiraProjectIDRe.MatchString(id) {
+			t.Errorf("expected %q to match jiraProjectIDRe", id)
 		}
 	}
-	for _, k := range invalid {
-		if jiraProjectKeyRe.MatchString(k) {
-			t.Errorf("expected %q to NOT match jiraProjectKeyRe", k)
+	for _, id := range invalid {
+		if jiraProjectIDRe.MatchString(id) {
+			t.Errorf("expected %q to NOT match jiraProjectIDRe", id)
 		}
 	}
 }
@@ -237,7 +234,7 @@ func TestTeamJiraProjectsPut_PickupCanonicalID_Refused(t *testing.T) {
 		validInProgress(),
 		validDone(),
 	)
-	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body)
+	rec := putTeamJiraProjects(t, s, body)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
@@ -256,7 +253,7 @@ func TestTeamJiraProjectsPut_InProgressCanonicalNotInMembers_Rejected(t *testing
 		map[string]any{"member_ids": []string{statusInProgressID}, "canonical_id": statusDoneID},
 		validDone(),
 	)
-	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body)
+	rec := putTeamJiraProjects(t, s, body)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
@@ -274,7 +271,7 @@ func TestTeamJiraProjectsPut_InProgressMembersWithoutCanonical_Rejected(t *testi
 		map[string]any{"member_ids": []string{statusInProgressID}},
 		validDone(),
 	)
-	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body)
+	rec := putTeamJiraProjects(t, s, body)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
@@ -292,7 +289,7 @@ func TestTeamJiraProjectsPut_DoneCanonicalNotInMembers_Rejected(t *testing.T) {
 		validInProgress(),
 		map[string]any{"member_ids": []string{statusToDoID}, "canonical_id": statusDoneID},
 	)
-	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body)
+	rec := putTeamJiraProjects(t, s, body)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
@@ -393,10 +390,10 @@ func TestSettingsPatch_PerProjectRules_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestSettingsPatch_DuplicateProjectKey_Rejected verifies that the
-// handler rejects two entries with the same key — two entries for one
-// project would silently last-write-win.
-func TestTeamJiraProjectsPut_DuplicateProjectKey_Rejected(t *testing.T) {
+// TestTeamJiraProjectsPut_DuplicateProject_Rejected verifies that the handler
+// rejects two entries naming one project — two entries for one project would
+// silently last-write-win.
+func TestTeamJiraProjectsPut_DuplicateProject_Rejected(t *testing.T) {
 	s := newTestServer(t)
 	body := map[string]any{
 		"jira_projects": []map[string]any{
@@ -404,13 +401,13 @@ func TestTeamJiraProjectsPut_DuplicateProjectKey_Rejected(t *testing.T) {
 			{"key": "SKY", "pickup": validPickup(), "in_progress": validInProgress(), "done": validDone()},
 		},
 	}
-	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body)
+	rec := putTeamJiraProjects(t, s, body)
 	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 on duplicate project key, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("expected 400 on a duplicate project, got %d: %s", rec.Code, rec.Body.String())
 	}
-	resp := firstErrorMessage(t, rec)
-	if !strings.Contains(resp, "duplicate project key") {
-		t.Errorf("error should mention duplicate, got: %q", resp)
+	items := decodeErrorItems(t, rec)
+	if len(items) != 1 || items[0].Field != "jira_projects[1].jira_id" || !strings.Contains(items[0].Message, "already in this set at jira_projects[0]") {
+		t.Errorf("errors = %+v, want one naming the second entry as the first's project", items)
 	}
 }
 

@@ -2,7 +2,6 @@ package dbtest
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -33,8 +32,16 @@ type RepoRecipientsSeeder struct {
 	OrgMembership func(t *testing.T, userID, orgID, role string)
 
 	// TrackRepo inserts a team_github_repos row for teamID referencing the
-	// registry row for owner/repo on host, minting that row if absent.
-	TrackRepo func(t *testing.T, teamID, host, owner, repo string)
+	// registry row for owner/repo on host, minting that row if absent, and
+	// returns the registry row's id.
+	TrackRepo func(t *testing.T, teamID, host, owner, repo string) string
+
+	// RenameRepo renames the registry row repositoryID to owner/repo and
+	// moves nothing else (dbseed.RenameRepositoryOnly).
+	RenameRepo func(t *testing.T, repositoryID, owner, repo string)
+
+	// RetireRepo sets the registry row's retired_at.
+	RetireRepo func(t *testing.T, repositoryID string)
 
 	// ArchiveTeam soft-deletes teamID (sets teams.deleted_at).
 	ArchiveTeam func(t *testing.T, teamID string)
@@ -49,24 +56,22 @@ type RepoRecipientsFactory func(t *testing.T) (db.TeamGitHubReposStore, RepoReci
 // delivery scope for repository_updated events. It pins the visibility
 // contract the method mirrors from the REST read (handleRepositories):
 // org admins/owners always receive; members receive only through a team
-// that tracks the repo (archived or not — archive hides nothing) on the
-// GitHub host asked about; nobody else does. Both backends run the
-// identical subtests so SQLite and Postgres pin to one result.
+// that tracks the registry row (archived or not — archive hides nothing);
+// nobody else does. The row is named by its id, so a rename moves nothing
+// and a same-named row on another host is another repository. Both
+// backends run the identical subtests so SQLite and Postgres pin to one
+// result.
 func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 	t.Helper()
 	ctx := context.Background()
 
-	recipientsOn := func(t *testing.T, s db.TeamGitHubReposStore, orgID, host, owner, repo string) []string {
+	recipients := func(t *testing.T, s db.TeamGitHubReposStore, orgID, repositoryID string) []string {
 		t.Helper()
-		got, err := s.RepoUpdateRecipientsSystem(ctx, orgID, host, owner, repo)
+		got, err := s.RepoUpdateRecipientsSystem(ctx, orgID, repositoryID)
 		if err != nil {
-			t.Fatalf("RepoUpdateRecipientsSystem(%s, %s, %s/%s): %v", orgID, host, owner, repo, err)
+			t.Fatalf("RepoUpdateRecipientsSystem(%s, %s): %v", orgID, repositoryID, err)
 		}
 		return got
-	}
-	recipients := func(t *testing.T, s db.TeamGitHubReposStore, orgID, owner, repo string) []string {
-		t.Helper()
-		return recipientsOn(t, s, orgID, TestGitHubHost, owner, repo)
 	}
 
 	t.Run("RepoRecipients_TrackingTeamMemberIn_NonTrackingOut", func(t *testing.T) {
@@ -84,14 +89,14 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 		seed.OrgMembership(t, userB, org, "member")
 		seed.TeamMembership(t, userA, teamA)
 		seed.TeamMembership(t, userB, teamB)
-		seed.TrackRepo(t, teamA, TestGitHubHost, "Acme", "api")
+		api := seed.TrackRepo(t, teamA, TestGitHubHost, "Acme", "api")
+		web := seed.TrackRepo(t, teamB, TestGitHubHost, "acme", "web")
 
-		assertSameSet(t, "recipients(tracked repo)", recipients(t, s, org, "Acme", "api"), []string{userA})
-		// Case-insensitive on both fields, matching TracksRepoSystem.
-		assertSameSet(t, "recipients(case-folded)", recipients(t, s, org, "acme", "API"), []string{userA})
-		// An untracked repo in the same org reaches nobody (no admins here).
-		if got := recipients(t, s, org, "acme", "web"); len(got) != 0 {
-			t.Errorf("recipients(untracked repo) = %v; want empty slice", got)
+		assertSameSet(t, "recipients(api)", recipients(t, s, org, api), []string{userA})
+		assertSameSet(t, "recipients(web)", recipients(t, s, org, web), []string{userB})
+		// An id naming no registry row reaches nobody (no admins here).
+		if got := recipients(t, s, org, "00000000-0000-0000-0000-000000000000"); len(got) != 0 {
+			t.Errorf("recipients(no such row) = %v; want empty slice", got)
 		}
 	})
 
@@ -111,10 +116,10 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 		tracker := seed.User(t)
 		seed.OrgMembership(t, tracker, org, "member")
 		seed.TeamMembership(t, tracker, team)
-		seed.TrackRepo(t, team, TestGitHubHost, "acme", "api")
+		api := seed.TrackRepo(t, team, TestGitHubHost, "acme", "api")
 
 		assertSameSet(t, "recipients(admins+tracker)",
-			recipients(t, s, org, "acme", "api"), []string{founder, admin, tracker})
+			recipients(t, s, org, api), []string{founder, admin, tracker})
 	})
 
 	t.Run("RepoRecipients_AdminWhoAlsoTracks_AppearsOnce", func(t *testing.T) {
@@ -124,9 +129,9 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 		team := seed.Team(t, org)
 		seed.OrgMembership(t, founder, org, "admin")
 		seed.TeamMembership(t, founder, team)
-		seed.TrackRepo(t, team, TestGitHubHost, "acme", "api")
+		api := seed.TrackRepo(t, team, TestGitHubHost, "acme", "api")
 
-		got := recipients(t, s, org, "acme", "api")
+		got := recipients(t, s, org, api)
 		if len(got) != 1 || got[0] != founder {
 			t.Errorf("recipients(admin who also tracks) = %v; want exactly [%s]", got, founder)
 		}
@@ -149,17 +154,18 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 		member := seed.User(t)
 		seed.OrgMembership(t, member, org, "member")
 		seed.TeamMembership(t, member, team)
-		seed.TrackRepo(t, team, TestGitHubHost, "acme", "api")
+		api := seed.TrackRepo(t, team, TestGitHubHost, "acme", "api")
 
-		assertSameSet(t, "recipients(live team)", recipients(t, s, org, "acme", "api"), []string{member})
+		assertSameSet(t, "recipients(live team)", recipients(t, s, org, api), []string{member})
 		seed.ArchiveTeam(t, team)
-		assertSameSet(t, "recipients(archived team)", recipients(t, s, org, "acme", "api"), []string{member})
+		assertSameSet(t, "recipients(archived team)", recipients(t, s, org, api), []string{member})
 	})
 
 	t.Run("RepoRecipients_OrgScoped", func(t *testing.T) {
 		// Two orgs can track the same (owner, repo) slug; each org's
 		// emission must resolve only its own users — neither the other
-		// org's tracking members nor its admins.
+		// org's tracking members nor its admins, even when it names the
+		// other org's row.
 		s, seed := mk(t)
 		founder1 := seed.User(t)
 		org1 := seed.Org(t, founder1)
@@ -167,7 +173,7 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 		user1 := seed.User(t)
 		seed.OrgMembership(t, user1, org1, "member")
 		seed.TeamMembership(t, user1, team1)
-		seed.TrackRepo(t, team1, TestGitHubHost, "acme", "api")
+		api1 := seed.TrackRepo(t, team1, TestGitHubHost, "acme", "api")
 
 		founder2 := seed.User(t)
 		org2 := seed.Org(t, founder2)
@@ -176,16 +182,20 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 		user2 := seed.User(t)
 		seed.OrgMembership(t, user2, org2, "member")
 		seed.TeamMembership(t, user2, team2)
-		seed.TrackRepo(t, team2, TestGitHubHost, "acme", "api")
+		api2 := seed.TrackRepo(t, team2, TestGitHubHost, "acme", "api")
 
-		assertSameSet(t, "recipients(org1)", recipients(t, s, org1, "acme", "api"), []string{user1})
-		assertSameSet(t, "recipients(org2)", recipients(t, s, org2, "acme", "api"), []string{founder2, user2})
+		assertSameSet(t, "recipients(org1)", recipients(t, s, org1, api1), []string{user1})
+		assertSameSet(t, "recipients(org2)", recipients(t, s, org2, api2), []string{founder2, user2})
+		if got := recipients(t, s, org1, api2); len(got) != 0 {
+			t.Errorf("recipients(org1, org2's row) = %v; want empty slice", got)
+		}
 	})
+
 	t.Run("RepoRecipients_HostScoped", func(t *testing.T) {
-		// One owner/repo on two GitHub hosts is two repositories. A member
-		// whose team tracks it on one host is not told about the other's
-		// updates; org admins are in on every host, as they are for every
-		// repository.
+		// One owner/repo on two GitHub hosts is two repositories, two
+		// registry rows. A member whose team tracks it on one host is not
+		// told about the other's updates; org admins are in on every
+		// host, as they are for every repository.
 		s, seed := mk(t)
 		founder := seed.User(t)
 		org := seed.Org(t, founder)
@@ -198,14 +208,31 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 		seed.OrgMembership(t, gheUser, org, "member")
 		seed.TeamMembership(t, dotcomUser, dotcomTeam)
 		seed.TeamMembership(t, gheUser, gheTeam)
-		seed.TrackRepo(t, dotcomTeam, TestGitHubHost, "acme", "api")
-		seed.TrackRepo(t, gheTeam, TestOtherGitHubHost, "acme", "api")
+		dotcom := seed.TrackRepo(t, dotcomTeam, TestGitHubHost, "acme", "api")
+		ghe := seed.TrackRepo(t, gheTeam, TestOtherGitHubHost, "acme", "api")
 
-		assertSameSet(t, "recipients(github.com)", recipientsOn(t, s, org, TestGitHubHost, "acme", "api"), []string{founder, dotcomUser})
-		assertSameSet(t, "recipients(ghe)", recipientsOn(t, s, org, TestOtherGitHubHost, "Acme", "API"), []string{founder, gheUser})
+		assertSameSet(t, "recipients(github.com)", recipients(t, s, org, dotcom), []string{founder, dotcomUser})
+		assertSameSet(t, "recipients(ghe)", recipients(t, s, org, ghe), []string{founder, gheUser})
+	})
 
-		if _, err := s.RepoUpdateRecipientsSystem(ctx, org, "", "acme", "api"); !errors.Is(err, db.ErrRepoHostRequired) {
-			t.Errorf("RepoUpdateRecipientsSystem with no host = %v, want db.ErrRepoHostRequired", err)
-		}
+	t.Run("RepoRecipients_FollowTheRowThroughARenameAndARetire", func(t *testing.T) {
+		// The event names the row by id, so a rename between the write that
+		// emitted it and this read keeps its audience. GET /api/repos leaves a
+		// retired row out, so its tracking teams' members are not its
+		// audience; org admins stay in, as they are for every row.
+		s, seed := mk(t)
+		founder := seed.User(t)
+		org := seed.Org(t, founder)
+		seed.OrgMembership(t, founder, org, "owner")
+		team := seed.Team(t, org)
+		member := seed.User(t)
+		seed.OrgMembership(t, member, org, "member")
+		seed.TeamMembership(t, member, team)
+		api := seed.TrackRepo(t, team, TestGitHubHost, "acme", "api")
+
+		seed.RenameRepo(t, api, "acme", "api-v2")
+		assertSameSet(t, "recipients(renamed row)", recipients(t, s, org, api), []string{founder, member})
+		seed.RetireRepo(t, api)
+		assertSameSet(t, "recipients(retired row)", recipients(t, s, org, api), []string{founder})
 	})
 }

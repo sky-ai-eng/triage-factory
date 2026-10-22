@@ -81,34 +81,11 @@ type inboundMention struct {
 	NewChannelID string
 }
 
-// entityFinder is the narrow slice of db.EntityStore the ingest pipeline
-// needs. Declared locally (rather than depending on the full store
-// interface) so tests can supply a single-method fake instead of
-// implementing db.EntityStore's entire surface; db.EntityStore satisfies
-// this structurally, so the production wiring (install.go) needs no
-// adapter. Thread entities are created through the channel registry
-// (ChannelRegistryStore.FindOrCreateThreadSystem), since each references its
-// channel's row.
-//
-// Every Slack entity is keyed under domain.SlackScope, never the workspace of
-// the connection an event came through: a shared channel has one id in every
-// workspace it is in, so the same thread can arrive through more than one
-// connection and must resolve to one entity.
-type entityFinder interface {
-	// GetBySourceSystem resolves an entity by its natural (source, scope,
-	// source_id) key without creating one — the engaged-thread branch's
-	// engagement gate (handleThreadMessage) needs to check a thread entity's
-	// existence, kind, and state before deciding to ingest a follow-up, never
-	// mint one.
-	GetBySourceSystem(ctx context.Context, orgID, source, scope, sourceID string) (*domain.Entity, error)
-}
-
 // ingestPipeline is the transport-neutral core both the Events API receiver
 // and (the next leaf) Socket Mode feed through handleEventCallback.
 // Constructed once at install with dependencies off ExtensionAPI
 // (Stores(), PublishEvent) — see install.go.
 type ingestPipeline struct {
-	entities   entityFinder
 	deliveries slackstore.DeliveryStore
 	publish    func(context.Context, domain.Event)
 	// identity resolves a message's sender to a TF user — both ingest branches
@@ -119,7 +96,12 @@ type ingestPipeline struct {
 	identity *IdentityResolver
 	// channels is the channel registry (slack_channels): every message
 	// resolves its channel to a registry row, and every thread entity is
-	// created through it. channelName resolves a sighted channel's display
+	// created and found through it, by that row and the thread's root ts.
+	// Every Slack entity is keyed under domain.SlackScope, never the
+	// workspace of the connection an event came through: a shared channel
+	// has one id in every workspace it is in, so the same thread can arrive
+	// through more than one connection and must resolve to one entity.
+	// channelName resolves a sighted channel's display
 	// name, best-effort and detached — see resolveChannelNameIfStale;
 	// nil-safe for the same reason as identity.
 	channels    slackstore.ChannelRegistryStore
@@ -181,11 +163,11 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 // budget. Publishes slack:message with Mentioned=true. Returns the delivery's
 // outcome label for handleEventCallback's single recordIngest.
 func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Workspace, ev inboundMention) (string, error) {
-	// EventID feeds the dedup key and Channel/TS feed the entity source_id
-	// (domain.SlackSourceID) — an empty value in any of them (a malformed
-	// or unexpectedly-shaped payload) would dedup unrelated deliveries
-	// together or collide entities across channels, so treat it as
-	// malformed and drop rather than deriving a garbage key from it.
+	// EventID feeds the dedup key and Channel/TS identify the thread — an
+	// empty value in any of them (a malformed or unexpectedly-shaped
+	// payload) would dedup unrelated deliveries together or collide threads
+	// across channels, so treat it as malformed and drop rather than deriving
+	// a garbage key from it.
 	if ev.EventID == "" || ev.Channel == "" || ev.TS == "" {
 		slackLog.Debug("dropping malformed app_mention: missing event_id/channel/ts", "workspace", ws.WorkspaceID)
 		return dropMalformed, nil
@@ -299,10 +281,9 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 		slackLog.Debug("dropping slack message: not a thread reply", "workspace", ws.WorkspaceID)
 		return dropNotThreadReply, nil
 	}
-	// EventID feeds the dedup key, Channel + ThreadTS feed the entity source_id
-	// (domain.SlackSourceID); TS feeds the occurred-at. Drop a payload missing
-	// any of them rather than deriving a garbage key — same discipline as the
-	// app_mention path.
+	// EventID feeds the dedup key, Channel + ThreadTS identify the thread; TS
+	// feeds the occurred-at. Drop a payload missing any of them rather than
+	// deriving a garbage key — same discipline as the app_mention path.
 	if ev.EventID == "" || ev.Channel == "" || ev.TS == "" {
 		slackLog.Debug("dropping malformed slack message: missing event_id/channel/ts", "workspace", ws.WorkspaceID)
 		return dropMalformed, nil
@@ -328,10 +309,10 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 	// bot-owned thread (kind="thread", not a mid-thread "message" summons into
 	// someone else's thread), and still be active. An unknown thread, someone
 	// else's thread, or a closed one is chatter the bot doesn't listen to. The
-	// channel is resolved first: a thread references its channel's row, so a
-	// channel TF holds no row for has no engaged thread and costs this one
-	// lookup, and a thread is keyed under the id its channel has now, which
-	// the row carries when the delivered id is one Slack has since replaced.
+	// channel is resolved first: a thread is its channel's row and its root
+	// ts, so a channel TF holds no row for has no engaged thread and costs
+	// this one lookup, and the row answers for the delivered id when it is
+	// one Slack has since replaced.
 	channel, err := p.resolveChannel(ctx, ws, ev.Channel)
 	if err != nil {
 		return outcomeError, err
@@ -341,13 +322,12 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 		return dropNotEngaged, nil
 	}
 	ev.Channel = channel.ChannelID
-	sourceID := domain.SlackSourceID(ev.Channel, ev.ThreadTS)
-	entity, err := p.entities.GetBySourceSystem(ctx, ws.OrgID, "slack", domain.SlackScope, sourceID)
+	entity, err := p.channels.GetThreadSystem(ctx, ws.OrgID, channel.ID, ev.ThreadTS)
 	if err != nil {
 		return outcomeError, fmt.Errorf("get slack thread entity: %w", err)
 	}
 	if entity == nil || entity.Kind != "thread" || entity.State != "active" {
-		slackLog.Debug("dropping slack message: no active engaged thread", "workspace", ws.WorkspaceID, "source_id", sourceID)
+		slackLog.Debug("dropping slack message: no active engaged thread", "workspace", ws.WorkspaceID, "channel", ev.Channel, "thread_ts", ev.ThreadTS)
 		return dropNotEngaged, nil
 	}
 
@@ -398,9 +378,9 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 // id after the move resolves to the channel's row at ingest. One made under
 // the new id before the move has no thread to land in yet: an un-mentioned
 // follow-up is dropped, and a mention registers the new id as a channel of
-// its own and mints an entity under the new key. The move absorbs that row
-// into the channel's, and closes the entity when the thread's original takes
-// the key.
+// its own and mints a thread entity on that row. The move absorbs that row
+// into the channel's, and when the channel already has an active entity for
+// the same thread, closes the newer of the two.
 func (p *ingestPipeline) handleChannelIDChanged(ctx context.Context, ws slackstore.Workspace, ev inboundMention) (string, error) {
 	if ev.OldChannelID == "" || ev.NewChannelID == "" || ev.OldChannelID == ev.NewChannelID {
 		slackLog.Debug("dropping malformed channel_id_changed: missing or unchanged channel id", "workspace", ws.WorkspaceID)

@@ -79,6 +79,12 @@ type FactorySeeder struct {
 	// memory_missing derivation, so a source the store door would refuse for
 	// this content has to be seedable anyway.
 	SetConversationMemory func(t *testing.T, conversationID, content string, source domain.MemorySource)
+
+	// GroupedEntity inserts an active entity of source ("github", "jira" or
+	// "linear") the belt shows, and returns its id and the id the belt groups
+	// it by: its repository's registry row, its Jira project's registry row,
+	// or its Linear team.
+	GroupedEntity func(t *testing.T, source string) (entityID, groupingID string)
 }
 
 // nullSentinel is the content string callers pass to SetConversationMemory
@@ -102,7 +108,8 @@ const nullSentinel = "<NULL>"
 //     entity, ordered ascending; empty input is a fast path.
 //   - Entities returns the active set + closed-grace ride-along,
 //     respecting the closed-grace cutoff, and the active limit is
-//     isolated from closure pressure.
+//     isolated from closure pressure. Each row carries the grouping id
+//     of its source.
 //
 // Cross-org leakage is Postgres-only (SQLite has no org_id column)
 // and lives in the backend test file directly.
@@ -426,6 +433,38 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		}
 		if closedFound != 10 {
 			t.Errorf("expected 10 closed-grace entities in snapshot, got %d", closedFound)
+		}
+	})
+
+	t.Run("Entities_CarryTheirGroupingIDs", func(t *testing.T) {
+		// Each row carries the grouping id of its own source, read from the
+		// entity's column, and no other source's.
+		store, orgID, seed := mk(t)
+		type ids struct{ repository, jiraProject, linearTeam string }
+		pr, repo := seed.GroupedEntity(t, "github")
+		issue, project := seed.GroupedEntity(t, "jira")
+		linear, team := seed.GroupedEntity(t, "linear")
+		if repo == "" || project == "" || team == "" {
+			t.Fatalf("seeded grouping ids (%q, %q, %q); want every one set", repo, project, team)
+		}
+		want := map[string]ids{pr: {repository: repo}, issue: {jiraProject: project}, linear: {linearTeam: team}}
+
+		rows, err := store.Entities(context.Background(), orgID, 100, nil)
+		if err != nil {
+			t.Fatalf("Entities: %v", err)
+		}
+		for _, r := range rows {
+			w, ok := want[r.Entity.ID]
+			if !ok {
+				continue
+			}
+			delete(want, r.Entity.ID)
+			if got := (ids{r.Entity.RepositoryID, r.Entity.JiraProjectID, r.Entity.LinearTeamID}); got != w {
+				t.Errorf("%s %s: grouping ids = %+v, want %+v", r.Entity.Source, r.Entity.SourceID, got, w)
+			}
+		}
+		if len(want) != 0 {
+			t.Errorf("belt is missing the seeded entities %v", want)
 		}
 	})
 

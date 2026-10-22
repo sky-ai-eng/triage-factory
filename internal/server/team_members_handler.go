@@ -44,12 +44,16 @@ var teamRoles = map[string]bool{"admin": true, "member": true, "viewer": true}
 // teamRosterRow is one roster row. github_username / jira_account_id are null
 // when the member holds no host-scoped identity binding on the org's host, and
 // linear_user_id when they hold none in the org's Linear workspace (the
-// frontend renders that as a "Not connected" readiness badge). is_current_user
-// lets the frontend swap the Remove control for Leave on the caller's own row.
+// frontend renders that as a "Not connected" readiness badge).
+// github_user_id is GitHub's id for the bound account, the value a GitHub
+// predicate's identity filters (author_id_in and its siblings) take; null also
+// when the binding recorded none. is_current_user lets the frontend swap the
+// Remove control for Leave on the caller's own row.
 type teamRosterRow struct {
 	UserID         string  `json:"user_id"`
 	DisplayName    string  `json:"display_name"`
 	GitHubUsername *string `json:"github_username"`
+	GitHubUserID   *string `json:"github_user_id"`
 	JiraAccountID  *string `json:"jira_account_id"`
 	LinearUserID   *string `json:"linear_user_id"`
 	Role           string  `json:"role"`
@@ -167,6 +171,7 @@ func (h *teamMembersHandler) handleTeamRosterList(w http.ResponseWriter, r *http
 			UserID:         m.UserID,
 			DisplayName:    m.DisplayName,
 			GitHubUsername: m.GitHubUsername,
+			GitHubUserID:   m.GitHubUserID,
 			JiraAccountID:  m.JiraAccountID,
 			LinearUserID:   m.LinearUserID,
 			Role:           m.Role,

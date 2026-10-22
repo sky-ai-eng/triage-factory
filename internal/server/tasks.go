@@ -73,6 +73,12 @@ type taskJSON struct {
 	// frontend only surfaces it when the viewer belongs to ≥2 teams.
 	// TODO: board row color-coding consumes this.
 	TeamID string `json:"team_id,omitempty"`
+	// RequestedReviewer is, on a github:pr:review_requested task, the
+	// requested user's login or team's org/slug as the event that last bumped
+	// the task named it, for display. dedup_key identifies the reviewer, by
+	// GitHub's id ("user_id:<id>" / "team_id:<id>") when the request carried
+	// one. Omitted on every other task.
+	RequestedReviewer string `json:"requested_reviewer,omitempty"`
 	// MemoryPending says a conversation on this task ended without leaving
 	// the memory its successor is owed, and the dispatcher will not claim the
 	// task's next delegation until one exists. Not omitempty: false is a real
@@ -139,6 +145,7 @@ func taskToJSON(t domain.Task) taskJSON {
 		CloseReason:         t.CloseReason,
 		SnoozeUntil:         snoozeUntil,
 		OpenSubtaskCount:    t.OpenSubtaskCount,
+		RequestedReviewer:   t.RequestedReviewer,
 		ClaimedByAgentID:    t.ClaimedByAgentID,
 		ClaimedByUserID:     t.ClaimedByUserID,
 		TeamID:              teamIDString(t.TeamID),
@@ -443,13 +450,38 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 	// picking the latest event by type alone and rejecting a mismatch would 422
 	// every time a sibling discriminator (label_added "help wanted") fired more
 	// recently than the requested one (label_added "bug").
-	var primaryEvent *domain.Event
+	//
+	// An active task can stand at a station no event names: a Jira status or
+	// priority change task keyed on the status's or priority's id, opened by
+	// events that carry its name as their dedup_key. That task already has its
+	// anchor, so it is the answer, as the find branch below would give it.
+	var (
+		primaryEvent *domain.Event
+		standing     *domain.Task
+	)
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		primaryEvent, e = tx.Events.LatestForEntityTypeAndDedupKey(r.Context(), orgID, req.EntityID, req.EventType, req.DedupKey)
-		return e
+		if e != nil || primaryEvent != nil {
+			return e
+		}
+		active, e := tx.Tasks.FindActiveByEntityAndType(r.Context(), orgID, req.EntityID, req.EventType)
+		if e != nil {
+			return e
+		}
+		for i := range active {
+			if active[i].DedupKey == req.DedupKey {
+				standing = &active[i]
+				break
+			}
+		}
+		return nil
 	}); err != nil {
 		internalError(w, "tasks", err)
+		return
+	}
+	if standing != nil {
+		writeJSON(w, http.StatusOK, taskToJSON(*standing))
 		return
 	}
 	if primaryEvent == nil {
@@ -1552,6 +1584,14 @@ func (t txTeardownStores) RecordExternalAction(ctx context.Context, orgID string
 	return t.tx.ExternalActions.Record(ctx, orgID, act)
 }
 
+func (t txTeardownStores) Entity(ctx context.Context, orgID, id string) (*domain.Entity, error) {
+	return t.tx.Entities.Get(ctx, orgID, id)
+}
+
+func (t txTeardownStores) Repository(ctx context.Context, orgID, id string) (*domain.Repository, error) {
+	return t.tx.Repos.Get(ctx, orgID, id)
+}
+
 // revertJiraStateIfApplicable reverses a Jira-backed task's claim as the task
 // goes back to the queue, acting as the requesting user: /undo and /requeue
 // both reach it through finalizeRequeue. task is the row as it stood before
@@ -1591,14 +1631,14 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 	// jira_rules_select RLS, matching the claim path. The user's Jira account
 	// id is what tells a ticket that was already theirs from one the claim
 	// assigned to them.
-	var rule *domain.JiraProjectStatusRules
+	var target jiraTaskTarget
 	var accountID string
 	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		orgSet, e := tx.Orgs.GetSettings(ctx, orgID)
 		if e != nil {
 			return fmt.Errorf("load org settings: %w", e)
 		}
-		rule = lookupJiraRuleForTask(ctx, tx, orgID, domain.EntityScope("jira", orgSet), task)
+		target = lookupJiraTaskTarget(ctx, tx, orgID, domain.EntityScope("jira", orgSet), task)
 		accountID, _, e = tx.Users.GetJiraIdentity(ctx, userID, orgSet.JiraBaseURL)
 		return e
 	}); err != nil {
@@ -1606,15 +1646,16 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 		return
 	}
 	var inProgressMembers []domain.JiraStatusRef
-	if rule != nil {
-		inProgressMembers = rule.InProgressMembers
+	if target.Rule != nil {
+		inProgressMembers = target.Rule.InProgressMembers
 	}
 	// Detached from the request (see syncJiraClaim): the revert outlives the
 	// response, so it uses a background context.
-	go applyJiraUnclaim(context.Background(), jiraUserClient, task.EntitySourceID, *task.SourceStatus, accountID, inProgressMembers)
+	go applyJiraUnclaim(context.Background(), jiraUserClient, target.IssueRef, task.EntitySourceID, *task.SourceStatus, accountID, inProgressMembers)
 }
 
-// applyJiraUnclaim is the write a requeue makes in Jira, as the client's user.
+// applyJiraUnclaim is the write a requeue makes in Jira, as the client's user,
+// on the issue issue names (its id; issueKey is the key, for the logs).
 // It reverses only what the claim changed, read against prior, the state the
 // claim recorded:
 //
@@ -1629,8 +1670,8 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 // reach back and undo that. Membership rather than the canonical status,
 // because a ticket moved from "In Progress" to "In Review" is still the
 // claimer's work in progress. Every failure is logged rather than returned.
-func applyJiraUnclaim(ctx context.Context, c *jira.Client, issueKey string, prior domain.SourceStatus, accountID string, ipMembers []domain.JiraStatusRef) {
-	state := c.GetClaimState(ctx, issueKey)
+func applyJiraUnclaim(ctx context.Context, c *jira.Client, issue, issueKey string, prior domain.SourceStatus, accountID string, ipMembers []domain.JiraStatusRef) {
+	state := c.GetClaimState(ctx, issue)
 	if state != nil && !state.AssignedToSelf && !state.Unassigned {
 		jiraLog.Warn("requeue guard: reassigned to someone else, skipping", "issue", issueKey)
 		return
@@ -1644,7 +1685,7 @@ func applyJiraUnclaim(ctx context.Context, c *jira.Client, issueKey string, prio
 
 	alreadyMine := prior.AssigneeID != "" && prior.AssigneeID == accountID
 	if (state == nil || state.AssignedToSelf) && !alreadyMine {
-		if err := c.Unassign(ctx, issueKey); err != nil {
+		if err := c.Unassign(ctx, issue); err != nil {
 			jiraLog.Error("failed to unassign on requeue", "issue", issueKey, "error", err)
 		}
 	}
@@ -1653,7 +1694,7 @@ func applyJiraUnclaim(ctx context.Context, c *jira.Client, issueKey string, prio
 		jiraLog.Info("requeue guard: the claim found the ticket already in progress, leaving its status", "issue", issueKey, "status", prior.StatusName)
 		return
 	}
-	if err := c.TransitionTo(ctx, issueKey, jira.Status{ID: prior.StatusID, Name: prior.StatusName}); err != nil {
+	if err := c.TransitionTo(ctx, issue, jira.Status{ID: prior.StatusID, Name: prior.StatusName}); err != nil {
 		jiraLog.Error("failed to transition back on requeue", "issue", issueKey, "status", prior.StatusName, "error", err)
 	}
 }
@@ -1701,6 +1742,10 @@ func (s *Server) revertLinearStateIfApplicable(ctx context.Context, orgID, userI
 		linearLog.Warn("requeue revert: no Linear identity stored for user, skipping", "issue", target.identifier, "user", userID)
 		return
 	}
+	if target.issueID == "" {
+		linearLog.Warn("requeue revert: the task's entity names no Linear issue id, skipping", "issue", target.identifier)
+		return
+	}
 	linearUserClient, err := s.linearResolver.ForUser(ctx, orgID, userID)
 	if err != nil {
 		if errors.Is(err, linear.ErrNoLinearUserCredential) {
@@ -1711,7 +1756,7 @@ func (s *Server) revertLinearStateIfApplicable(ctx context.Context, orgID, userI
 		return
 	}
 	// Detached from the request, like the Jira reversal.
-	go applyLinearUnclaim(context.Background(), linearUserClient, target.identifier, target.linearUserID,
+	go applyLinearUnclaim(context.Background(), linearUserClient, target.issueID, target.identifier, target.linearUserID,
 		*task.SourceStatus, target.rule.InProgressMembers)
 }
 

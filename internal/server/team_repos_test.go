@@ -346,7 +346,8 @@ func fakeReposServer(t *testing.T, fullNames ...string) *httptest.Server {
 // built from — over a slug→id map a test can rename and extend between
 // refreshes, so a case can stage what GitHub reports changing under TF. Every
 // per-repo probe answers 404, so a test that means the mirror to decide fails
-// rather than passing on the cold path.
+// rather than passing on the cold path. Every repository object names its
+// owner account, by mutablePATOwnerID.
 type mutablePATGitHub struct {
 	*httptest.Server
 	mu    sync.Mutex
@@ -363,7 +364,7 @@ func newMutablePATGitHub(t *testing.T, repos map[string]int64) *mutablePATGitHub
 		if r.URL.Query().Get("page") == "1" {
 			g.mu.Lock()
 			for slug, id := range g.repos {
-				page = append(page, ghclient.UserRepo{ID: id, FullName: slug})
+				page = append(page, ghclient.UserRepo{ID: id, FullName: slug, Owner: mutablePATOwner(slug)})
 			}
 			g.mu.Unlock()
 		}
@@ -379,7 +380,7 @@ func newMutablePATGitHub(t *testing.T, repos map[string]int64) *mutablePATGitHub
 		for slug, have := range g.repos {
 			if err == nil && have == id {
 				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(ghclient.RepoMeta{ID: id, FullName: slug})
+				_ = json.NewEncoder(w).Encode(ghclient.RepoMeta{ID: id, FullName: slug, Owner: mutablePATOwner(slug)})
 				return
 			}
 		}
@@ -388,6 +389,18 @@ func newMutablePATGitHub(t *testing.T, repos map[string]int64) *mutablePATGitHub
 	g.Server = httptest.NewServer(mux)
 	t.Cleanup(g.Close)
 	return g
+}
+
+// mutablePATOwnerID is the GitHub account id mutablePATGitHub reports for the
+// owner "acme". Other owners are reported with none.
+const mutablePATOwnerID = 9001
+
+// mutablePATOwner is the owner object mutablePATGitHub sends for slug.
+func mutablePATOwner(slug string) ghclient.RepoOwner {
+	if owner, _, _ := strings.Cut(slug, "/"); owner == "acme" {
+		return ghclient.RepoOwner{ID: mutablePATOwnerID}
+	}
+	return ghclient.RepoOwner{}
 }
 
 // rename moves a repository to a new name, keeping its id.
@@ -642,6 +655,10 @@ func TestRepoRegister(t *testing.T) {
 	api := registeredID(t, srv, "41")
 	if api.Slug != "acme/api" || api.GitHubID != "41" || !api.CanEdit {
 		t.Errorf("registered = %+v, want acme/api carrying 41, editable by the local admin", api)
+	}
+	// The mirror entry names the owner account by id, and the row records it.
+	if row, err := srv.allStores.Repos.GetSystem(t.Context(), runmode.LocalDefaultOrgID, api.ID); err != nil || row.OwnerExternalID != strconv.Itoa(mutablePATOwnerID) {
+		t.Errorf("registered row = %+v, err=%v; want owner id %d from the mirror", row, err, mutablePATOwnerID)
 	}
 	if again := registeredID(t, srv, "41"); again.ID != api.ID {
 		t.Errorf("second registration = %s, want %s", again.ID, api.ID)

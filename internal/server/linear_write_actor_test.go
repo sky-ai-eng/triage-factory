@@ -75,13 +75,16 @@ type linearWrite struct {
 // linearIssueFake stands in for Linear's GraphQL endpoint for one issue: it
 // answers the Issue read from its current assignee and state, and applies and
 // records every IssueUpdate, so a test sees which writes a sync made, in
-// order, and a later read sees what they changed.
+// order, and a later read sees what they changed. Like Linear, it answers to
+// the issue's UUID and to its current identifier, and records which one each
+// request named.
 type linearIssueFake struct {
 	URL string
 
 	mu         sync.Mutex
 	issue      linear.Issue
 	writes     []linearWrite
+	addressed  []string
 	requests   int
 	failAssign bool
 }
@@ -123,6 +126,7 @@ func (f *linearIssueFake) serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	id := stringVar(body.Variables, "id")
+	f.addressed = append(f.addressed, id)
 	if id != f.issue.ID && id != f.issue.Identifier {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"errors":[{"message":"Entity not found: Issue","extensions":{"code":"INVALID_INPUT"}}]}`)
@@ -194,6 +198,24 @@ func (f *linearIssueFake) Writes() []linearWrite {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return slices.Clone(f.writes)
+}
+
+// moveIssue gives the issue a new identifier, as a team move or a team key
+// rename does; its UUID stays.
+func (f *linearIssueFake) moveIssue(identifier string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.issue.Identifier = identifier
+}
+
+// assertAddressedByID fails unless every request named the issue's UUID.
+func (f *linearIssueFake) assertAddressedByID(t *testing.T) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if slices.ContainsFunc(f.addressed, func(id string) bool { return id != linearIssueUUID }) {
+		t.Errorf("Linear was addressed by %q, want only the issue's UUID %q", f.addressed, linearIssueUUID)
+	}
 }
 
 func (f *linearIssueFake) Requests() int {
@@ -558,10 +580,11 @@ func TestApplyLinearClaim(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := newLinearIssueFake(t, tc.assignee, linearFixtureState(t, tc.state))
 			fake.failAssign = tc.failAssign
-			applyLinearClaim(t.Context(), fake.client(), linearIssueIdentifier, linearMe, linearClaimRule)
+			applyLinearClaim(t.Context(), fake.client(), linearIssueUUID, linearIssueIdentifier, linearMe, linearClaimRule)
 			if got := fake.Writes(); !slices.Equal(got, tc.want) {
 				t.Errorf("writes = %v, want %v", got, tc.want)
 			}
+			fake.assertAddressedByID(t)
 		})
 	}
 }
@@ -629,10 +652,11 @@ func TestApplyLinearUnclaim(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := newLinearIssueFake(t, tc.assignee, linearFixtureState(t, tc.state))
-			applyLinearUnclaim(t.Context(), fake.client(), linearIssueIdentifier, linearMe, tc.prior, linearClaimRule.InProgressMembers)
+			applyLinearUnclaim(t.Context(), fake.client(), linearIssueUUID, linearIssueIdentifier, linearMe, tc.prior, linearClaimRule.InProgressMembers)
 			if got := fake.Writes(); !slices.Equal(got, tc.want) {
 				t.Errorf("writes = %v, want %v", got, tc.want)
 			}
+			fake.assertAddressedByID(t)
 		})
 	}
 
@@ -640,7 +664,7 @@ func TestApplyLinearUnclaim(t *testing.T) {
 	// back, so it asks Linear nothing at all, not even for the issue.
 	t.Run("recorded state has no id", func(t *testing.T) {
 		fake := newLinearIssueFake(t, &linear.User{ID: linearMe}, linearFixtureState(t, linearStateDoing))
-		applyLinearUnclaim(t.Context(), fake.client(), linearIssueIdentifier, linearMe,
+		applyLinearUnclaim(t.Context(), fake.client(), linearIssueUUID, linearIssueIdentifier, linearMe,
 			domain.SourceStatus{StatusName: "Todo"}, linearClaimRule.InProgressMembers)
 		if n := fake.Requests(); n != 0 {
 			t.Errorf("Linear received %d requests, want none", n)
@@ -652,7 +676,8 @@ func TestApplyLinearUnclaim(t *testing.T) {
 // the issue's state, and returning the task to the queue puts the issue back
 // in that state, unassigned, as the user who claimed it. Backlog is not the
 // rule's first pickup state, so the issue landing there shows the recorded
-// state was read.
+// state was read. The issue moves team between the claim and the requeue, and
+// the requeue still reaches it, by its UUID.
 func TestTaskRequeue_LinearTask_UndoesTheClaim(t *testing.T) {
 	fake := newLinearIssueFake(t, nil, linearFixtureState(t, linearStateBacklog))
 	res := &recordingLinearResolver{userClient: fake.client()}
@@ -664,6 +689,7 @@ func TestTaskRequeue_LinearTask_UndoesTheClaim(t *testing.T) {
 		t.Fatalf("claim status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	fake.waitForWrites(t, 2)
+	fake.moveIssue("OPS-3")
 
 	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", map[string]any{}); rec.Code != http.StatusOK {
 		t.Fatalf("requeue status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -675,6 +701,7 @@ func TestTaskRequeue_LinearTask_UndoesTheClaim(t *testing.T) {
 	if got := fake.waitForWrites(t, len(want)); !slices.Equal(got, want) {
 		t.Errorf("Linear writes = %v, want %v", got, want)
 	}
+	fake.assertAddressedByID(t)
 	if userCalls, systemCalls, _, gotUser := res.snapshot(); userCalls != 2 || systemCalls != 0 || gotUser != runmode.LocalDefaultUserID {
 		t.Errorf("resolver = (ForUser %d as %q, system %d), want ForUser twice as the acting user and the org's credential never",
 			userCalls, gotUser, systemCalls)

@@ -72,7 +72,7 @@ func TestExternalActionStore_Postgres_BranchTwinDedup(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
-	key := domain.BranchPushDedupKey("run-1", "refs/heads/feat", "abc123")
+	key := domain.BranchPushDedupKey("run-1", "repo-1", "refs/heads/feat", "abc123")
 	twin := func(url string) domain.ExternalAction {
 		return domain.ExternalAction{
 			OrgID: orgID, Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com", Action: domain.ActionBranchPushed,

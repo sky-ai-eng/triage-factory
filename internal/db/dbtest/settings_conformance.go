@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -42,6 +43,9 @@ type SettingsStores struct {
 	// register repositories through it.
 	Repos           db.RepositoryStore
 	OrgEventSources db.OrgEventSourceStore
+
+	// SeedTeam adds another team to the org and returns its id.
+	SeedTeam func(t *testing.T, slug string) string
 }
 
 // SettingsIDs are the tenancy keys the factory pre-seeded.
@@ -1961,159 +1965,225 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
+	// ghGroup builds one mapping row: GitHub's team id, the organization's id,
+	// and the two display values.
+	ghGroup := func(teamID, orgID, login, slug string) domain.TeamGitHubGroup {
+		return domain.TeamGitHubGroup{GitHubTeamID: teamID, GitHubOrgID: orgID, OrgLogin: login, TeamSlug: slug}
+	}
+	acmeBackend := ghGroup("11", "9", "acme", "backend")
+	acmeFrontend := ghGroup("12", "9", "acme", "frontend")
+	betaPlatform := ghGroup("21", "8", "beta", "platform")
+
+	listGroups := func(t *testing.T, stores SettingsStores, teamID, host string) []domain.TeamGitHubGroup {
+		t.Helper()
+		got, err := stores.TeamGitHubGroups.ListForTeam(ctx, teamID, host)
+		if err != nil {
+			t.Fatalf("ListForTeam(%s): %v", host, err)
+		}
+		return got
+	}
+	teamsFor := func(t *testing.T, stores SettingsStores, orgID, host, githubTeamID, login, slug string) []string {
+		t.Helper()
+		got, err := stores.TeamGitHubGroups.TeamsForGitHubTeamSystem(ctx, orgID, host, githubTeamID, login, slug)
+		if err != nil {
+			t.Fatalf("TeamsForGitHubTeamSystem(%q, %s/%s): %v", githubTeamID, login, slug, err)
+		}
+		return got
+	}
+
 	t.Run("TeamGitHubGroups_SetForTeam_RoundTrips", func(t *testing.T) {
 		stores, ids := factory(t)
-		input := []domain.TeamGitHubGroup{
-			{OrgLogin: "acme", TeamSlug: "backend"},
-			{OrgLogin: "acme", TeamSlug: "frontend"},
-		}
+		input := []domain.TeamGitHubGroup{acmeFrontend, acmeBackend}
 		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, input); err != nil {
 			t.Fatalf("SetForTeam: %v", err)
 		}
-		got, err := stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID, TestGitHubHost)
-		if err != nil {
-			t.Fatalf("ListForTeam: %v", err)
-		}
-		sortGroups(got)
-		sortGroups(input)
-		if !reflect.DeepEqual(got, input) {
-			t.Errorf("after SetForTeam, ListForTeam = %+v; want %+v", got, input)
+		// Ordered by org login, then team slug.
+		want := []domain.TeamGitHubGroup{acmeBackend, acmeFrontend}
+		if got := listGroups(t, stores, ids.TeamID, TestGitHubHost); !reflect.DeepEqual(got, want) {
+			t.Errorf("after SetForTeam, ListForTeam = %+v; want %+v", got, want)
 		}
 	})
 
-	t.Run("TeamGitHubGroups_SetForTeam_NormalizesAndDedups", func(t *testing.T) {
-		// Mixed case + duplicate + surrounding whitespace all collapse to
-		// one lowercase row, so routing lookups match regardless of input.
+	t.Run("TeamGitHubGroups_SetForTeam_KeepsDisplayValuesAndDedupsByTeamID", func(t *testing.T) {
+		// The login and slug are what GitHub called the team, kept as given;
+		// a team named twice is one row, identified by its id.
 		stores, ids := factory(t)
 		input := []domain.TeamGitHubGroup{
-			{OrgLogin: "Acme", TeamSlug: "Backend"},
-			{OrgLogin: " acme ", TeamSlug: " backend "},
+			ghGroup("11", "9", " Acme ", "backend"),
+			ghGroup("11", "9", "acme", "backend-renamed"),
 		}
 		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, input); err != nil {
 			t.Fatalf("SetForTeam: %v", err)
 		}
-		got, err := stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID, TestGitHubHost)
-		if err != nil {
-			t.Fatalf("ListForTeam: %v", err)
+		want := []domain.TeamGitHubGroup{ghGroup("11", "9", "Acme", "backend")}
+		if got := listGroups(t, stores, ids.TeamID, TestGitHubHost); !reflect.DeepEqual(got, want) {
+			t.Errorf("groups = %+v; want %+v", got, want)
 		}
-		want := []domain.TeamGitHubGroup{{OrgLogin: "acme", TeamSlug: "backend"}}
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("normalized groups = %+v; want %+v", got, want)
+	})
+
+	t.Run("TeamGitHubGroups_SetForTeam_RefusesAGroupWithoutItsIDs", func(t *testing.T) {
+		// A mapping that names no GitHub id could never be routed to or
+		// reconciled, so the write is refused whole.
+		stores, ids := factory(t)
+		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, []domain.TeamGitHubGroup{acmeBackend}); err != nil {
+			t.Fatalf("seed SetForTeam: %v", err)
 		}
-		// Case-insensitive routing lookup resolves the team.
-		teams, err := stores.TeamGitHubGroups.TeamsForGroupSystem(ctx, ids.OrgID, TestGitHubHost, "ACME", "BACKEND")
-		if err != nil {
-			t.Fatalf("TeamsForGroupSystem: %v", err)
+		for name, bad := range map[string]domain.TeamGitHubGroup{
+			"no team id":      ghGroup("", "9", "acme", "frontend"),
+			"no org id":       ghGroup("12", "", "acme", "frontend"),
+			"a slug, not ids": ghGroup("acme/frontend", "9", "acme", "frontend"),
+			"no slug":         ghGroup("12", "9", "acme", ""),
+		} {
+			if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, []domain.TeamGitHubGroup{acmeFrontend, bad}); err == nil {
+				t.Errorf("SetForTeam with %s = nil error; want a refusal", name)
+			}
 		}
-		if len(teams) != 1 || teams[0] != ids.TeamID {
-			t.Errorf("TeamsForGroupSystem = %v; want [%s]", teams, ids.TeamID)
+		if got := listGroups(t, stores, ids.TeamID, TestGitHubHost); !reflect.DeepEqual(got, []domain.TeamGitHubGroup{acmeBackend}) {
+			t.Errorf("groups after refused writes = %+v; want the seeded set untouched", got)
 		}
 	})
 
 	t.Run("TeamGitHubGroups_SetForTeam_ReplaceSetPrunes", func(t *testing.T) {
 		stores, ids := factory(t)
-		two := []domain.TeamGitHubGroup{
-			{OrgLogin: "acme", TeamSlug: "backend"},
-			{OrgLogin: "acme", TeamSlug: "frontend"},
-		}
-		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, two); err != nil {
+		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, []domain.TeamGitHubGroup{acmeBackend, acmeFrontend}); err != nil {
 			t.Fatalf("seed SetForTeam: %v", err)
 		}
-		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, two[:1]); err != nil {
+		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, []domain.TeamGitHubGroup{acmeBackend}); err != nil {
 			t.Fatalf("replace SetForTeam: %v", err)
 		}
-		got, err := stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID, TestGitHubHost)
-		if err != nil {
-			t.Fatalf("ListForTeam: %v", err)
-		}
-		if len(got) != 1 || got[0].TeamSlug != "backend" {
-			t.Errorf("after replace-set, got=%+v; want one row slug=backend", got)
+		if got := listGroups(t, stores, ids.TeamID, TestGitHubHost); !reflect.DeepEqual(got, []domain.TeamGitHubGroup{acmeBackend}) {
+			t.Errorf("after replace-set, got=%+v; want only acme/backend", got)
 		}
 		// Empty clears all.
 		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, nil); err != nil {
 			t.Fatalf("clear SetForTeam: %v", err)
 		}
-		got, err = stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID, TestGitHubHost)
-		if err != nil {
-			t.Fatalf("ListForTeam: %v", err)
-		}
-		if len(got) != 0 {
+		if got := listGroups(t, stores, ids.TeamID, TestGitHubHost); len(got) != 0 {
 			t.Errorf("after clear, got=%+v; want empty", got)
 		}
 	})
 
-	t.Run("TeamGitHubGroups_PruneMissingSystem_DropsDeletedSlugs", func(t *testing.T) {
+	t.Run("TeamGitHubGroups_TeamsForGitHubTeamSystem_MatchesTheIDOrElseTheHandle", func(t *testing.T) {
+		// A review request names the team by GitHub's id, which a rename of
+		// the team or its organization leaves alone, and the handle beside it
+		// is not consulted, so a different team now holding the old slug does
+		// not inherit the mapping. A mention names the team by its handle
+		// only, matched against the display values without regard to case.
 		stores, ids := factory(t)
-		seed := []domain.TeamGitHubGroup{
-			{OrgLogin: "acme", TeamSlug: "backend"},
-			{OrgLogin: "acme", TeamSlug: "frontend"},
-			{OrgLogin: "beta", TeamSlug: "platform"},
+		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, []domain.TeamGitHubGroup{acmeBackend}); err != nil {
+			t.Fatalf("SetForTeam: %v", err)
 		}
-		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, seed); err != nil {
+		for _, c := range []struct {
+			id, login, slug string
+			mapped          bool
+		}{
+			{"11", "acme-corp", "server", true},
+			{"99", "acme", "backend", false},
+			{"", "ACME", "Backend", true},
+			{"", "acme", "frontend", false},
+			{"", "", "", false},
+		} {
+			var want []string
+			if c.mapped {
+				want = []string{ids.TeamID}
+			}
+			if got := teamsFor(t, stores, ids.OrgID, TestGitHubHost, c.id, c.login, c.slug); !slices.Equal(got, want) {
+				t.Errorf("TeamsForGitHubTeamSystem(%q, %s/%s) = %v; want %v", c.id, c.login, c.slug, got, want)
+			}
+		}
+	})
+
+	t.Run("TeamGitHubGroups_ReconcileOrgTeamsSystem_RenamesAndPrunesByID", func(t *testing.T) {
+		stores, ids := factory(t)
+		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, []domain.TeamGitHubGroup{acmeBackend, acmeFrontend, betaPlatform}); err != nil {
 			t.Fatalf("seed SetForTeam: %v", err)
 		}
-		// "frontend" was deleted on GitHub — only "backend" remains under
-		// acme. The prune is scoped to the acme login, so beta/platform
-		// is untouched.
-		n, err := stores.TeamGitHubGroups.PruneMissingSystem(ctx, ids.OrgID, TestGitHubHost, "acme", []string{"backend"})
+		// GitHub renamed the organization and the backend team, and deleted
+		// frontend. The renamed team keeps its row under its new names;
+		// only the deleted one goes, and the other organization's row is
+		// not compared with this listing.
+		n, err := stores.TeamGitHubGroups.ReconcileOrgTeamsSystem(ctx, ids.OrgID, TestGitHubHost, domain.GitHubOrgTeams{
+			OrgID: "9", OrgLogin: "acme-corp",
+			Teams: []domain.GitHubTeam{{ID: "11", Slug: "server"}, {ID: "13", Slug: "unmapped"}},
+		})
 		if err != nil {
-			t.Fatalf("PruneMissingSystem: %v", err)
+			t.Fatalf("ReconcileOrgTeamsSystem: %v", err)
 		}
 		if n != 1 {
-			t.Errorf("PruneMissingSystem removed %d rows; want 1", n)
+			t.Errorf("ReconcileOrgTeamsSystem deleted %d rows; want 1", n)
 		}
-		got, err := stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID, TestGitHubHost)
-		if err != nil {
-			t.Fatalf("ListForTeam: %v", err)
+		want := []domain.TeamGitHubGroup{ghGroup("11", "9", "acme-corp", "server"), betaPlatform}
+		if got := listGroups(t, stores, ids.TeamID, TestGitHubHost); !reflect.DeepEqual(got, want) {
+			t.Errorf("after reconcile, groups=%+v; want %+v", got, want)
 		}
-		want := []domain.TeamGitHubGroup{
-			{OrgLogin: "acme", TeamSlug: "backend"},
-			{OrgLogin: "beta", TeamSlug: "platform"},
+		// An organization with no teams left deletes every mapping of it.
+		if _, err := stores.TeamGitHubGroups.ReconcileOrgTeamsSystem(ctx, ids.OrgID, TestGitHubHost, domain.GitHubOrgTeams{OrgID: "9", OrgLogin: "acme-corp"}); err != nil {
+			t.Fatalf("ReconcileOrgTeamsSystem (no teams): %v", err)
 		}
-		sortGroups(got)
-		sortGroups(want)
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("after prune, groups=%+v; want %+v", got, want)
+		if got := listGroups(t, stores, ids.TeamID, TestGitHubHost); !reflect.DeepEqual(got, []domain.TeamGitHubGroup{betaPlatform}) {
+			t.Errorf("after an empty listing, groups=%+v; want only beta/platform", got)
 		}
-		// Empty present-set clears every acme mapping (org has no acme
-		// teams left); beta survives.
-		if _, err := stores.TeamGitHubGroups.PruneMissingSystem(ctx, ids.OrgID, TestGitHubHost, "acme", nil); err != nil {
-			t.Fatalf("PruneMissingSystem (clear): %v", err)
+		if _, err := stores.TeamGitHubGroups.ReconcileOrgTeamsSystem(ctx, ids.OrgID, TestGitHubHost, domain.GitHubOrgTeams{OrgLogin: "beta"}); err == nil {
+			t.Error("ReconcileOrgTeamsSystem with no organization id = nil error; want a refusal")
 		}
-		got, err = stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID, TestGitHubHost)
-		if err != nil {
-			t.Fatalf("ListForTeam: %v", err)
+	})
+
+	t.Run("TeamGitHubGroups_RoutesAndReconcilesAcrossTeams", func(t *testing.T) {
+		// Many GitHub teams funnel into one TF team and one GitHub team into
+		// many, so a routing lookup answers every TF team mapping it. A GitHub
+		// team gone from the listing drops out of every TF team mapping it;
+		// the TF teams and their other mappings stay.
+		stores, ids := factory(t)
+		teamA, teamB := ids.TeamID, stores.SeedTeam(t, "team-b")
+		legacy, platform := ghGroup("14", "9", "acme", "legacy"), ghGroup("13", "9", "acme", "platform")
+		for team, groups := range map[string][]domain.TeamGitHubGroup{
+			teamA: {acmeBackend, acmeFrontend, legacy, platform},
+			teamB: {legacy, platform},
+		} {
+			if err := stores.TeamGitHubGroups.SetForTeam(ctx, team, TestGitHubHost, groups); err != nil {
+				t.Fatalf("SetForTeam(%s): %v", team, err)
+			}
 		}
-		if len(got) != 1 || got[0].OrgLogin != "beta" {
-			t.Errorf("after clear-acme prune, groups=%+v; want only beta/platform", got)
+		both := []string{teamA, teamB}
+		slices.Sort(both)
+		for id, want := range map[string][]string{"11": {teamA}, "12": {teamA}, "13": both, "99": nil} {
+			got := teamsFor(t, stores, ids.OrgID, TestGitHubHost, id, "", "")
+			slices.Sort(got)
+			if !slices.Equal(got, want) {
+				t.Errorf("TeamsForGitHubTeamSystem(%s) = %v; want %v", id, got, want)
+			}
+		}
+
+		n, err := stores.TeamGitHubGroups.ReconcileOrgTeamsSystem(ctx, ids.OrgID, TestGitHubHost, domain.GitHubOrgTeams{
+			OrgID: "9", OrgLogin: "acme",
+			Teams: []domain.GitHubTeam{{ID: "11", Slug: "backend"}, {ID: "12", Slug: "frontend"}, {ID: "13", Slug: "platform"}},
+		})
+		if err != nil || n != 2 {
+			t.Errorf("ReconcileOrgTeamsSystem = (%d, %v); want legacy deleted from both teams", n, err)
+		}
+		for team, want := range map[string][]domain.TeamGitHubGroup{teamA: {acmeBackend, acmeFrontend, platform}, teamB: {platform}} {
+			if got := listGroups(t, stores, team, TestGitHubHost); !reflect.DeepEqual(got, want) {
+				t.Errorf("team %s after reconcile = %+v; want %+v", team, got, want)
+			}
+			if got, err := stores.Teams.GetSystem(ctx, ids.OrgID, team); err != nil || got == nil {
+				t.Errorf("team %s after reconcile = %v, %v; the reconcile must never delete a TF team", team, got, err)
+			}
 		}
 	})
 
 	t.Run("TeamGitHubGroups_HostScoped", func(t *testing.T) {
-		// An org login names a different GitHub organization on another host,
-		// so one (login, slug) mapped on two hosts is two rows, and every
-		// read, replace and prune answers for the host it is given.
+		// GitHub's ids are unique only on their host, so one mapping saved on
+		// two hosts is two rows, and every read, replace and reconcile
+		// answers for the host it is given.
 		stores, ids := factory(t)
-		groups := []domain.TeamGitHubGroup{
-			{OrgLogin: "acme", TeamSlug: "backend"},
-			{OrgLogin: "acme", TeamSlug: "frontend"},
-		}
+		groups := []domain.TeamGitHubGroup{acmeBackend, acmeFrontend}
 		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, groups); err != nil {
 			t.Fatalf("SetForTeam(github.com): %v", err)
 		}
 		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestOtherGitHubHost, groups); err != nil {
 			t.Fatalf("SetForTeam(ghe): %v — the same group on another host must coexist", err)
 		}
-		list := func(host string) []domain.TeamGitHubGroup {
-			t.Helper()
-			got, err := stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID, host)
-			if err != nil {
-				t.Fatalf("ListForTeam(%s): %v", host, err)
-			}
-			sortGroups(got)
-			return got
-		}
-		if got := list(TestOtherGitHubHost); len(got) != 2 {
+		if got := listGroups(t, stores, ids.TeamID, TestOtherGitHubHost); len(got) != 2 {
 			t.Fatalf("ghe groups = %+v, want both", got)
 		}
 
@@ -2121,56 +2191,51 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, groups[:1]); err != nil {
 			t.Fatalf("SetForTeam(github.com, replace): %v", err)
 		}
-		if got := list(TestGitHubHost); !reflect.DeepEqual(got, groups[:1]) {
+		if got := listGroups(t, stores, ids.TeamID, TestGitHubHost); !reflect.DeepEqual(got, groups[:1]) {
 			t.Errorf("github.com groups after replace = %+v, want %+v", got, groups[:1])
 		}
-		if got := list(TestOtherGitHubHost); !reflect.DeepEqual(got, groups) {
+		if got := listGroups(t, stores, ids.TeamID, TestOtherGitHubHost); !reflect.DeepEqual(got, groups) {
 			t.Errorf("ghe groups after a github.com replace = %+v, want %+v untouched", got, groups)
 		}
 
 		// Routing resolves per host.
 		for _, c := range []struct {
-			host, slug string
-			want       int
+			host, id string
+			want     int
 		}{
-			{TestGitHubHost, "backend", 1},
-			{TestGitHubHost, "frontend", 0},
-			{TestOtherGitHubHost, "frontend", 1},
+			{TestGitHubHost, "11", 1},
+			{TestGitHubHost, "12", 0},
+			{TestOtherGitHubHost, "12", 1},
 		} {
-			teams, err := stores.TeamGitHubGroups.TeamsForGroupSystem(ctx, ids.OrgID, c.host, "acme", c.slug)
-			if err != nil {
-				t.Fatalf("TeamsForGroupSystem(%s, %s): %v", c.host, c.slug, err)
-			}
-			if len(teams) != c.want {
-				t.Errorf("TeamsForGroupSystem(%s, acme/%s) = %v, want %d team(s)", c.host, c.slug, teams, c.want)
+			if got := teamsFor(t, stores, ids.OrgID, c.host, c.id, "", ""); len(got) != c.want {
+				t.Errorf("TeamsForGitHubTeamSystem(%s, %s) = %v, want %d team(s)", c.host, c.id, got, c.want)
 			}
 		}
 
-		// The deletion reconcile compares a host's rows against that host's
-		// team set only.
-		n, err := stores.TeamGitHubGroups.PruneMissingSystem(ctx, ids.OrgID, TestGitHubHost, "acme", nil)
+		// The reconcile compares a host's rows against that host's listing only.
+		n, err := stores.TeamGitHubGroups.ReconcileOrgTeamsSystem(ctx, ids.OrgID, TestGitHubHost, domain.GitHubOrgTeams{OrgID: "9", OrgLogin: "acme"})
 		if err != nil {
-			t.Fatalf("PruneMissingSystem(github.com): %v", err)
+			t.Fatalf("ReconcileOrgTeamsSystem(github.com): %v", err)
 		}
 		if n != 1 {
-			t.Errorf("PruneMissingSystem(github.com) removed %d rows, want 1", n)
+			t.Errorf("ReconcileOrgTeamsSystem(github.com) deleted %d rows, want 1", n)
 		}
-		if got := list(TestGitHubHost); len(got) != 0 {
-			t.Errorf("github.com groups after prune = %+v, want none", got)
+		if got := listGroups(t, stores, ids.TeamID, TestGitHubHost); len(got) != 0 {
+			t.Errorf("github.com groups after reconcile = %+v, want none", got)
 		}
-		if got := list(TestOtherGitHubHost); !reflect.DeepEqual(got, groups) {
-			t.Errorf("ghe groups after a github.com prune = %+v, want %+v untouched", got, groups)
+		if got := listGroups(t, stores, ids.TeamID, TestOtherGitHubHost); !reflect.DeepEqual(got, groups) {
+			t.Errorf("ghe groups after a github.com reconcile = %+v, want %+v untouched", got, groups)
 		}
 
 		for name, err := range map[string]error{
 			"SetForTeam":  stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, "", groups),
 			"ListForTeam": func() error { _, err := stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID, ""); return err }(),
-			"TeamsForGroupSystem": func() error {
-				_, err := stores.TeamGitHubGroups.TeamsForGroupSystem(ctx, ids.OrgID, "", "acme", "backend")
+			"TeamsForGitHubTeamSystem": func() error {
+				_, err := stores.TeamGitHubGroups.TeamsForGitHubTeamSystem(ctx, ids.OrgID, "", "11", "acme", "backend")
 				return err
 			}(),
-			"PruneMissingSystem": func() error {
-				_, err := stores.TeamGitHubGroups.PruneMissingSystem(ctx, ids.OrgID, "", "acme", nil)
+			"ReconcileOrgTeamsSystem": func() error {
+				_, err := stores.TeamGitHubGroups.ReconcileOrgTeamsSystem(ctx, ids.OrgID, "", domain.GitHubOrgTeams{OrgID: "9"})
 				return err
 			}(),
 		} {
@@ -2178,19 +2243,15 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 				t.Errorf("%s with no host = %v, want db.ErrRepoHostRequired", name, err)
 			}
 		}
-		if got := list(TestOtherGitHubHost); !reflect.DeepEqual(got, groups) {
+		if got := listGroups(t, stores, ids.TeamID, TestOtherGitHubHost); !reflect.DeepEqual(got, groups) {
 			t.Errorf("ghe groups after the refusals = %+v, want %+v untouched", got, groups)
 		}
 	})
 
 	t.Run("TeamGitHubGroups_EmptyTeam_ReturnsEmptySlice", func(t *testing.T) {
 		stores, ids := factory(t)
-		got, err := stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID, TestGitHubHost)
-		if err != nil {
-			t.Fatalf("ListForTeam: %v", err)
-		}
-		if len(got) != 0 {
-			t.Errorf("ListForTeam on empty team = %+v; want empty slice", got)
+		if got := listGroups(t, stores, ids.TeamID, TestGitHubHost); got == nil || len(got) != 0 {
+			t.Errorf("ListForTeam on empty team = %#v; want empty slice", got)
 		}
 	})
 
@@ -2310,29 +2371,38 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
-	t.Run("TeamGitHubRepos_TracksRepoSystem_OwnerCaseInsensitive", func(t *testing.T) {
+	t.Run("TeamGitHubRepos_TracksRepositorySystem_AnswersForTheResolvedRow", func(t *testing.T) {
+		// A name a run hands TF is resolved to its row once, folding case,
+		// and tracking is asked of that row's id. A registry row the team
+		// does not track, an id no row carries, and another team's row are
+		// not tracked.
 		stores, ids := factory(t)
 		if err := TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, ids.OrgID, ids.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "Acme", Repo: "api"},
 		}); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
 		}
+		if _, err := stores.Repos.FindOrCreateByRefSystem(ctx, ids.OrgID, domain.RepoRef{Host: TestGitHubHost, Owner: "acme", Repo: "web"}); err != nil {
+			t.Fatalf("register acme/web: %v", err)
+		}
 		for _, c := range []struct {
 			owner, repo string
 			want        bool
 		}{
 			{"Acme", "api", true},
-			{"acme", "api", true},
+			{"acme", "API", true},
 			{"acme", "web", false},
 			{"other", "api", false},
 		} {
-			got, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, ids.TeamID, TestGitHubHost, c.owner, c.repo)
-			if err != nil {
-				t.Fatalf("TracksRepoSystem(%s/%s): %v", c.owner, c.repo, err)
+			if got := tracksByName(t, stores, ids.OrgID, ids.TeamID, TestGitHubHost, c.owner, c.repo); got != c.want {
+				t.Errorf("tracks %s/%s = %v; want %v", c.owner, c.repo, got, c.want)
 			}
-			if got != c.want {
-				t.Errorf("TracksRepoSystem(%s/%s) = %v; want %v", c.owner, c.repo, got, c.want)
-			}
+		}
+		if got, err := stores.TeamGitHubRepos.TracksRepositorySystem(ctx, ids.TeamID, unknownRepoID); err != nil || got {
+			t.Errorf("TracksRepositorySystem(no such row) = %v, %v; want false", got, err)
+		}
+		if tracksByName(t, stores, ids.OrgID, stores.SeedTeam(t, "team-b"), TestGitHubHost, "acme", "api") {
+			t.Error("a team that tracks nothing tracks acme/api")
 		}
 	})
 
@@ -2424,12 +2494,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			{TestOtherGitHubHost, "internal", true},
 			{TestOtherGitHubHost, "web", false},
 		} {
-			got, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, ids.TeamID, c.host, "Acme", c.repo)
-			if err != nil {
-				t.Fatalf("TracksRepoSystem(%s, acme/%s): %v", c.host, c.repo, err)
-			}
-			if got != c.want {
-				t.Errorf("TracksRepoSystem(%s, acme/%s) = %v, want %v", c.host, c.repo, got, c.want)
+			if got := tracksByName(t, stores, ids.OrgID, ids.TeamID, c.host, "Acme", c.repo); got != c.want {
+				t.Errorf("tracks (%s, acme/%s) = %v, want %v", c.host, c.repo, got, c.want)
 			}
 		}
 		withTeams, err := stores.TeamGitHubRepos.ListOrgReposWithTeamsSystem(ctx, ids.OrgID, TestOtherGitHubHost)
@@ -2444,6 +2510,29 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if !equalStringSlice(orgSlugs, []string{"acme/api", "acme/internal"}) {
 			t.Errorf("ListOrgReposWithTeamsSystem(ghe) = %v, want [acme/api acme/internal]", orgSlugs)
 		}
+		// Each entry is a registry row, named by its id and GitHub id: what a
+		// preflight matches a credential's listing on.
+		if _, err := stores.Repos.FillMissingExternalIDsSystem(ctx, ids.OrgID, []domain.RepoRef{{
+			Source: domain.RepoSourceGitHub, Host: TestOtherGitHubHost, Owner: "acme", Repo: "api", ExternalID: "77",
+		}}); err != nil {
+			t.Fatalf("FillMissingExternalIDsSystem: %v", err)
+		}
+		withTeams, err = stores.TeamGitHubRepos.ListOrgReposWithTeamsSystem(ctx, ids.OrgID, TestOtherGitHubHost)
+		if err != nil {
+			t.Fatalf("ListOrgReposWithTeamsSystem(ghe): %v", err)
+		}
+		for _, r := range withTeams {
+			row, err := stores.Repos.GetByRefSystem(ctx, ids.OrgID, domain.RepoRef{
+				Source: domain.RepoSourceGitHub, Host: TestOtherGitHubHost, Owner: r.Owner, Repo: r.Repo,
+			})
+			if err != nil || row == nil {
+				t.Fatalf("GetByRefSystem(%s/%s) = %v, %v", r.Owner, r.Repo, row, err)
+			}
+			if wantExternal := map[string]string{"api": "77"}[r.Repo]; r.RepositoryID != row.ID || r.ExternalID != wantExternal || len(r.Teams) != 1 {
+				t.Errorf("%s/%s = (row %q, GitHub id %q, teams %v); want (%q, %q, the one team tracking it)",
+					r.Owner, r.Repo, r.RepositoryID, r.ExternalID, r.Teams, row.ID, wantExternal)
+			}
+		}
 
 		// Untracking everything on github.com leaves the team's ghe tracking.
 		if err := TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, ids.OrgID, ids.TeamID, TestGitHubHost, nil); err != nil {
@@ -2455,18 +2544,14 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if got := list(TestOtherGitHubHost); !equalStringSlice(got, []string{"acme/api", "acme/internal"}) {
 			t.Errorf("ghe tracked after a github.com clear = %v, want it untouched", got)
 		}
-		if tracked, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, ids.TeamID, TestOtherGitHubHost, "acme", "api"); err != nil || !tracked {
-			t.Errorf("TracksRepoSystem(ghe, acme/api) after a github.com clear = %v, %v; want true", tracked, err)
+		if tracked := tracksByName(t, stores, ids.OrgID, ids.TeamID, TestOtherGitHubHost, "acme", "api"); !tracked {
+			t.Errorf("tracks (ghe, acme/api) after a github.com clear = %v; want true", tracked)
 		}
 
 		for name, err := range map[string]error{
 			"ReplaceForTeam": TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, ids.OrgID, ids.TeamID, "", nil),
 			"ListForTeamSystem": func() error {
 				_, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID, "")
-				return err
-			}(),
-			"TracksRepoSystem": func() error {
-				_, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, ids.TeamID, "", "acme", "api")
 				return err
 			}(),
 			"ListOrgReposWithTeamsSystem": func() error {
@@ -2501,15 +2586,6 @@ func sortRepos(repos []domain.TeamGitHubRepo) {
 			return repos[i].Owner < repos[j].Owner
 		}
 		return repos[i].Repo < repos[j].Repo
-	})
-}
-
-func sortGroups(groups []domain.TeamGitHubGroup) {
-	sort.Slice(groups, func(i, j int) bool {
-		if groups[i].OrgLogin != groups[j].OrgLogin {
-			return groups[i].OrgLogin < groups[j].OrgLogin
-		}
-		return groups[i].TeamSlug < groups[j].TeamSlug
 	})
 }
 
@@ -2568,4 +2644,24 @@ func registerRepo(t *testing.T, repos db.RepositoryStore, orgID, host, slug, git
 		t.Fatalf("register %s (%s) on %s: %v", slug, githubID, host, err)
 	}
 	return row
+}
+
+// tracksByName is the tracking question as a caller holding a name asks it:
+// resolve the name to its registry row on host, then ask the team's tracking
+// about that row's id. A name no row answers to is not tracked.
+func tracksByName(t *testing.T, stores SettingsStores, orgID, teamID, host, owner, repo string) bool {
+	t.Helper()
+	ctx := context.Background()
+	row, err := stores.Repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Host: host, Owner: owner, Repo: repo})
+	if err != nil {
+		t.Fatalf("resolve %s/%s on %s: %v", owner, repo, host, err)
+	}
+	if row == nil {
+		return false
+	}
+	tracked, err := stores.TeamGitHubRepos.TracksRepositorySystem(ctx, teamID, row.ID)
+	if err != nil {
+		t.Fatalf("TracksRepositorySystem(%s/%s on %s): %v", owner, repo, host, err)
+	}
+	return tracked
 }

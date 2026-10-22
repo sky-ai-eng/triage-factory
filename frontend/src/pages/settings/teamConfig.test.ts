@@ -5,14 +5,15 @@ import { describe, it, expect, vi } from 'vitest'
 
 import {
   dropStatus,
-  emptyProject,
   projectIsArmed,
   projectRulesValid,
   ruleIsIdentified,
+  saveTeamGitHubGroups,
   saveTeamJiraProjects,
   saveTeamRepos,
   teamProjectsBlocked,
   unresolvableStatuses,
+  watchedProject,
   type JiraProjectConfig,
 } from './teamConfig'
 import type { JiraStatusRef } from '../../components/JiraStatusRule'
@@ -23,9 +24,13 @@ const inProgress = { id: '10001', name: 'In Progress' }
 const done = { id: '10002', name: 'Done' }
 const codeReview = { id: '10003', name: 'Code Review' }
 
+// SKY is a catalog candidate: a project the team could add, by its Jira id.
+const SKY = { jira_id: '10100', key: 'SKY', name: 'Sky' }
+
 // armed leaves in_review empty — the optional rule is not part of armed, and
 // this is the shape a team without a review status stores.
 const armed = (key: string): JiraProjectConfig => ({
+  id: `reg-${key}`,
   key,
   pickup: { members: [toDo] },
   in_progress: { members: [inProgress], canonical: inProgress },
@@ -40,6 +45,7 @@ const withReview = (key: string): JiraProjectConfig => ({
 
 // legacy is a project stored before statuses were identified: names, no ids.
 const legacy = (key: string): JiraProjectConfig => ({
+  id: `reg-${key}`,
   key,
   pickup: { members: [{ id: '', name: 'To Do' }] },
   in_progress: {
@@ -68,13 +74,13 @@ function sentBody(fetchMock: ReturnType<typeof stubPut>): {
 }
 
 describe('saveTeamJiraProjects', () => {
-  it('sends status ids and never names', async () => {
+  it('names a tracked project by its registry id, and sends status ids and never names', async () => {
     const fetchMock = stubPut()
     await saveTeamJiraProjects('team-1', [armed('SKY')])
 
     const [project] = sentBody(fetchMock).jira_projects
     expect(project).toEqual({
-      key: 'SKY',
+      id: 'reg-SKY',
       pickup: { member_ids: ['10000'] },
       in_progress: { member_ids: ['10001'], canonical_id: '10001' },
       in_review: { member_ids: [], canonical_id: '' },
@@ -104,16 +110,16 @@ describe('saveTeamJiraProjects', () => {
     // Every rule the legacy project actually names is omitted. Its in-review
     // rule is empty, and an empty rule is always expressible in ids, so it is
     // sent — a clear that clears nothing.
-    expect(old).toEqual({ key: 'OLD', in_review: { member_ids: [], canonical_id: '' } })
+    expect(old).toEqual({ id: 'reg-OLD', in_review: { member_ids: [], canonical_id: '' } })
     expect(sky).toHaveProperty('pickup')
   })
 
-  it('sends an explicit empty rule to clear one', async () => {
+  it('names a project being added by its Jira id, and sends an explicit empty rule to clear one', async () => {
     const fetchMock = stubPut()
-    await saveTeamJiraProjects('team-1', [emptyProject('SKY')])
+    await saveTeamJiraProjects('team-1', [watchedProject(SKY)])
 
     expect(sentBody(fetchMock).jira_projects[0]).toEqual({
-      key: 'SKY',
+      jira_id: '10100',
       pickup: { member_ids: [] },
       in_progress: { member_ids: [], canonical_id: '' },
       in_review: { member_ids: [], canonical_id: '' },
@@ -138,7 +144,7 @@ describe('saveTeamJiraProjects', () => {
 
 describe('project rule predicates', () => {
   it('reads a watched-but-unmapped project as valid and unarmed', () => {
-    const watched = emptyProject('SKY')
+    const watched = watchedProject(SKY)
     expect(projectRulesValid(watched)).toBe(true)
     expect(projectIsArmed(watched)).toBe(false)
     // Unarmed does not block a save — arming is the step after watching.
@@ -146,7 +152,7 @@ describe('project rule predicates', () => {
   })
 
   it('blocks a save on a rule with members and no write target', () => {
-    const half = { ...emptyProject('SKY'), in_progress: { members: [inProgress] } }
+    const half = { ...watchedProject(SKY), in_progress: { members: [inProgress] } }
     expect(projectRulesValid(half)).toBe(false)
     expect(teamProjectsBlocked([half], true)).toBe(true)
   })
@@ -175,7 +181,7 @@ describe('unresolvableStatuses', () => {
   ]
 
   const project = (over: Partial<JiraProjectConfig> = {}): JiraProjectConfig => ({
-    ...emptyProject('SKY'),
+    ...watchedProject(SKY),
     ...over,
   })
 
@@ -237,7 +243,7 @@ describe('dropStatus', () => {
 
   it('removes the status from every rule that names it', () => {
     const p: JiraProjectConfig = {
-      ...emptyProject('SKY'),
+      ...watchedProject(SKY),
       pickup: {
         members: [{ id: '10001', name: 'To Do' }, gone],
       },
@@ -254,7 +260,7 @@ describe('dropStatus', () => {
 
   it('clears a canonical that pointed at the dropped status, leaving the rule incomplete', () => {
     const p: JiraProjectConfig = {
-      ...emptyProject('SKY'),
+      ...watchedProject(SKY),
       in_progress: { members: [gone], canonical: gone },
     }
     const next = dropStatus(p, gone)
@@ -265,7 +271,7 @@ describe('dropStatus', () => {
 
   it('strips the in-review rule as well, back to the unmapped state', () => {
     const p: JiraProjectConfig = {
-      ...emptyProject('SKY'),
+      ...watchedProject(SKY),
       in_review: { members: [gone], canonical: gone },
     }
     const next = dropStatus(p, gone)
@@ -321,5 +327,32 @@ describe('saveTeamRepos', () => {
 
     const put = fetchMock.mock.calls[1] as unknown as [string, { body: string }]
     expect(JSON.parse(put[1].body)).toEqual({ repository_ids: ['r-legacy'] })
+  })
+})
+
+describe('saveTeamGitHubGroups', () => {
+  it('names each GitHub team by its id, once, and returns the stored set', async () => {
+    const stored = [
+      { github_team_id: '11', github_org_id: '9', org_login: 'acme', team_slug: 'server' },
+    ]
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      ...jsonBody({ groups: stored }),
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const res = await saveTeamGitHubGroups('team-1', [
+      { github_team_id: '11', github_org_id: '9', org_login: 'acme', team_slug: 'backend' },
+      { github_team_id: '11', github_org_id: '9', org_login: 'acme', team_slug: 'backend' },
+      // Not identified by the server and matched to no candidate: no id to name it by.
+      { github_team_id: '', github_org_id: '', org_login: 'acme', team_slug: 'gone' },
+    ])
+
+    expect(res).toEqual({ ok: true, groups: stored })
+    const put = fetchMock.mock.calls[0] as unknown as [string, { method: string; body: string }]
+    expect(put[0]).toBe('/api/teams/team-1/github-groups')
+    expect(put[1].method).toBe('PUT')
+    expect(JSON.parse(put[1].body)).toEqual({ github_team_ids: ['11'] })
   })
 })

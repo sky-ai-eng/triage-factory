@@ -377,6 +377,8 @@ CREATE TABLE public.agents (
     default_autonomy_suitability real,
     github_pat_user_id uuid,
     github_org_login text,
+    -- GitHub's numeric id for the github_org_login account, written with it.
+    github_org_user_id text,
     github_org_email text,
     jira_service_account_id text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -438,7 +440,7 @@ CREATE TABLE public.access_change_log (
 -- a purge; actor_user_id is the human authorizer, NULL for an autonomous write.
 -- dedup_key is the natural per-action key - a branch push is observed twice (pre-push
 -- hook and git-proxy backstop) and carries a deterministic key so the twin collapses
--- under ON CONFLICT DO NOTHING. current_url is the only column an UPDATE may touch:
+-- under ON CONFLICT DO NOTHING. current_url is the only column a rename may touch:
 -- where the object lives now (reads serve COALESCE(current_url, url)).
 -- scope is the provider namespace the acted-on object lives in, the value an
 -- entity of that provider is scoped under (domain.ExternalObjectScope): the
@@ -447,6 +449,16 @@ CREATE TABLE public.access_change_log (
 -- action created, which only the create verb's pr_created row carries: the
 -- reconciler's PR backstop matches the row to its artifact by it, since a
 -- rename never changes it. Written once, like the rest of the record.
+-- entity_id is the entity the act was about (the pull request or issue, the
+-- Jira or Linear issue, the Slack thread), and repository_id the registry row of
+-- the repository a GitHub act with no entity was about (a branch push, a
+-- repository-level write); target is a display value recorded as the act named
+-- it. Both are written with the row, and a rename of the entity or the
+-- repository selects the rows whose current_url it moves by them, never by the
+-- name a link spells. They move only where the object they name is folded into
+-- another row of the same object: a merge or stub fold of two entities
+-- re-points entity_id onto the survivor, and a rename absorbing a bare registry
+-- row re-points repository_id onto the renamed row.
 CREATE TABLE public.external_actions (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -467,6 +479,8 @@ CREATE TABLE public.external_actions (
     dedup_key text NOT NULL,
     detail_json text,
     node_id text,
+    entity_id uuid,
+    repository_id uuid,
     occurred_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
@@ -516,6 +530,12 @@ CREATE TABLE public.entities (
     -- which can change; this does not. Required for source 'slack' (the
     -- foreign key is added after slack_channels below).
     slack_channel_id uuid,
+    -- The ts of the message a Slack thread is rooted at. With slack_channel_id
+    -- it is the thread's identity, which is what a thread is found by: neither
+    -- changes when Slack gives the channel a new id, while the key spells that
+    -- id and is rewritten for display when it changes. Required for source
+    -- 'slack', NULL for every other source.
+    slack_thread_ts text,
     -- The UUID of the Linear team a Linear issue sits in: the id
     -- linear_team_rules is keyed by. Set at creation from the response that
     -- found the issue, and moved by every snapshot write to the snapshot's
@@ -540,6 +560,10 @@ CREATE TABLE public.entities (
     -- added after jira_projects below).
     jira_project_id uuid,
     CONSTRAINT entities_slack_channel_required CHECK (source <> 'slack' OR slack_channel_id IS NOT NULL),
+    CONSTRAINT entities_slack_thread_ts_check CHECK (
+        CASE WHEN source = 'slack' THEN COALESCE(slack_thread_ts, '') <> ''
+             ELSE slack_thread_ts IS NULL END
+    ),
     CONSTRAINT entities_repository_required CHECK (source <> 'github' OR repository_id IS NOT NULL),
     CONSTRAINT entities_jira_project_required CHECK (source <> 'jira' OR jira_project_id IS NOT NULL),
     CONSTRAINT entities_external_id_required CHECK (source NOT IN ('jira', 'linear') OR COALESCE(external_id, '') <> ''),
@@ -734,19 +758,28 @@ CREATE TABLE public.linear_team_rules (
 );
 
 
--- One row per (team, host, github_org_login, github_team_slug): a team routing
--- a GitHub team's review requests to itself. Dumb string labels, no membership
--- resolution. Pure key tuples — edits are replace-sets, so no UPDATE policy.
--- host is the GitHub host (domain.GitHubHost) the GitHub team lives on: an org
--- login names a different organization on another host, so every read and the
--- deletion reconcile see only the org's current host's rows.
+-- One row per (team, host, github_team_id): a team routing a GitHub team's
+-- review requests to itself. No membership resolution. github_team_id is
+-- GitHub's id for the team and github_org_id its id for the organization the
+-- team is in; routing and the deletion reconcile match on them.
+-- github_org_login and github_team_slug are display values, refreshed by the
+-- reconcile when GitHub renames the organization or the team, and matched only
+-- for a mention, which names a team by its handle. A request handler writes a
+-- replace-set, so tf_app has no UPDATE; the refresh runs on the admin pool.
+-- host is the GitHub host (domain.GitHubHost) the GitHub team lives on: an id
+-- is unique only on its host, so every read and the deletion reconcile see
+-- only the org's current host's rows.
 CREATE TABLE public.team_github_groups (
     team_id uuid NOT NULL,
     host text NOT NULL,
+    github_team_id text NOT NULL,
+    github_org_id text NOT NULL,
     github_org_login text NOT NULL,
     github_team_slug text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT tgg_host_populated CHECK (host <> ''),
+    CONSTRAINT tgg_team_id_populated CHECK (github_team_id <> ''),
+    CONSTRAINT tgg_org_id_populated CHECK (github_org_id <> ''),
     CONSTRAINT tgg_org_login_populated CHECK (github_org_login <> ''),
     CONSTRAINT tgg_team_slug_populated CHECK (github_team_slug <> '')
 );
@@ -945,15 +978,6 @@ CREATE SEQUENCE public.pending_firings_id_seq
 ALTER SEQUENCE public.pending_firings_id_seq OWNED BY public.pending_firings.id;
 
 
-CREATE TABLE public.poller_state (
-    org_id uuid NOT NULL,
-    source text NOT NULL,
-    source_id text NOT NULL,
-    state_json jsonb NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
 CREATE TABLE public.prompts (
     id text DEFAULT (gen_random_uuid())::text NOT NULL,
     org_id uuid NOT NULL,
@@ -993,6 +1017,12 @@ CREATE TABLE public.prompts (
 -- name to another repository and the row's own id no longer answers (deleted,
 -- or no longer visible to the org's credential): the row keeps its id, name,
 -- provider id and everything referencing it, and stops holding the name.
+-- owner_external_id is GitHub's numeric id for the account that owns the
+-- repository, the half of the owner a rename of the account does not move; it
+-- matches the repository to the App installation on that account
+-- (org_github_app_installations.account_id). NULL until a response carrying
+-- the repository's owner object is read for a row that carries its
+-- external_id.
 CREATE TABLE public.repositories (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -1002,6 +1032,7 @@ CREATE TABLE public.repositories (
     host text NOT NULL
         CONSTRAINT repositories_host_check CHECK (host <> ''),
     external_id text,
+    owner_external_id text,
     description text,
     has_readme boolean DEFAULT false NOT NULL,
     has_claude_md boolean DEFAULT false NOT NULL,
@@ -1671,7 +1702,7 @@ ALTER TABLE ONLY public.linear_team_rules
 
 
 ALTER TABLE ONLY public.team_github_groups
-    ADD CONSTRAINT team_github_groups_pkey PRIMARY KEY (team_id, host, github_org_login, github_team_slug);
+    ADD CONSTRAINT team_github_groups_pkey PRIMARY KEY (team_id, host, github_team_id);
 
 
 ALTER TABLE ONLY public.team_github_repos
@@ -1700,10 +1731,6 @@ ALTER TABLE ONLY public.orgs
 
 ALTER TABLE ONLY public.pending_firings
     ADD CONSTRAINT pending_firings_pkey PRIMARY KEY (id);
-
-
-ALTER TABLE ONLY public.poller_state
-    ADD CONSTRAINT poller_state_pkey PRIMARY KEY (org_id, source, source_id);
 
 
 ALTER TABLE ONLY public.prompts
@@ -1876,6 +1903,12 @@ CREATE INDEX idx_entities_key ON public.entities USING btree (org_id, source, sc
 CREATE INDEX idx_entities_github_author ON public.entities USING btree (org_id, ((snapshot_json ->> 'author'::text)), last_polled_at DESC) WHERE ((source = 'github'::text) AND (snapshot_json IS NOT NULL));
 
 
+-- The same predicate's GitHub-account-id arm: the author's GitHub id, which a
+-- rename leaves alone, beside the login above.
+
+CREATE INDEX idx_entities_github_author_id ON public.entities USING btree (org_id, ((snapshot_json ->> 'author_id'::text)), last_polled_at DESC) WHERE ((source = 'github'::text) AND (snapshot_json IS NOT NULL));
+
+
 -- Serves the personal pull-request list's commissioned-by leg, OR-ed with the
 -- author predicate above; partial because only a bot-opened PR is ever stamped.
 
@@ -1986,6 +2019,12 @@ CREATE INDEX idx_external_actions_team_occurred ON public.external_actions USING
 
 
 CREATE INDEX idx_external_actions_conversation ON public.external_actions USING btree (conversation_id);
+
+
+-- An entity's rename, merge and fold, and a Slack channel's move, select the
+-- ledger rows they move by entity_id; a repository's rename by repository_id.
+CREATE INDEX idx_external_actions_entity ON public.external_actions USING btree (entity_id) WHERE (entity_id IS NOT NULL);
+CREATE INDEX idx_external_actions_repository ON public.external_actions USING btree (repository_id) WHERE (repository_id IS NOT NULL);
 
 
 CREATE UNIQUE INDEX idx_artifacts_dedup ON public.artifacts USING btree (org_id, scope, dedup_key);
@@ -2103,6 +2142,11 @@ CREATE INDEX team_agents_agent_idx ON public.team_agents USING btree (agent_id);
 CREATE INDEX team_agents_team_idx ON public.team_agents USING btree (team_id);
 
 
+-- Routing's lookup: which teams a GitHub team's review requests route to. The
+-- primary key leads with team_id and cannot serve it.
+CREATE INDEX team_github_groups_github_team_idx ON public.team_github_groups USING btree (host, github_team_id);
+
+
 -- Reverse lookup: which teams track this repository. The primary key leads with
 -- team_id and cannot serve it; the tracked-set semi-joins never pin a team.
 CREATE INDEX team_github_repos_repository_idx ON public.team_github_repos USING btree (repository_id, team_id);
@@ -2124,6 +2168,11 @@ CREATE INDEX jira_project_status_rules_project_idx ON public.jira_project_status
 -- because GitHub logins are case-insensitive while writers store them as captured;
 -- github_base_url leads because identity is host-scoped.
 CREATE INDEX user_github_identities_login_lookup_idx ON public.user_github_identities USING btree (github_base_url, lower(login));
+
+
+-- Reverse (host, GitHub account id) -> user lookup, for an event that names its
+-- actor by GitHub's id rather than by login.
+CREATE INDEX user_github_identities_user_id_lookup_idx ON public.user_github_identities USING btree (github_base_url, github_user_id) WHERE (github_user_id IS NOT NULL);
 
 
 CREATE TRIGGER org_memberships_keep_owner_on_delete AFTER DELETE ON public.org_memberships REFERENCING OLD TABLE AS affected FOR EACH STATEMENT EXECUTE FUNCTION tf.guard_org_owners();
@@ -2333,10 +2382,6 @@ ALTER TABLE ONLY public.pending_firings
     ADD CONSTRAINT pending_firings_triggering_event_id_org_id_fkey FOREIGN KEY (triggering_event_id, org_id) REFERENCES public.events(id, org_id);
 
 
-ALTER TABLE ONLY public.poller_state
-    ADD CONSTRAINT poller_state_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
-
-
 ALTER TABLE ONLY public.prompts
     ADD CONSTRAINT prompts_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
@@ -2371,6 +2416,17 @@ ALTER TABLE ONLY public.external_actions
 
 ALTER TABLE ONLY public.external_actions
     ADD CONSTRAINT external_actions_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id) ON DELETE SET NULL;
+
+
+-- SET NULL (entity_id) and SET NULL (repository_id) keep the audit row,
+-- unlinked, if what it references is deleted; a merge of duplicate entities and
+-- a rename absorbing a bare registry row re-point it first. Both pin the org.
+ALTER TABLE ONLY public.external_actions
+    ADD CONSTRAINT external_actions_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE SET NULL (entity_id);
+
+
+ALTER TABLE ONLY public.external_actions
+    ADD CONSTRAINT external_actions_repository_id_org_id_fkey FOREIGN KEY (repository_id, org_id) REFERENCES public.repositories(id, org_id) ON DELETE SET NULL (repository_id);
 
 
 ALTER TABLE ONLY public.artifacts
@@ -2810,12 +2866,6 @@ CREATE POLICY pending_firings_all ON public.pending_firings USING ((EXISTS ( SEL
   WHERE (t.id = pending_firings.task_id)))) WITH CHECK ((EXISTS ( SELECT 1
    FROM public.tasks t
   WHERE (t.id = pending_firings.task_id))));
-
-
-ALTER TABLE public.poller_state ENABLE ROW LEVEL SECURITY;
-
-
-CREATE POLICY poller_state_all ON public.poller_state USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
 
 
 ALTER TABLE public.prompts ENABLE ROW LEVEL SECURITY;
@@ -3278,13 +3328,6 @@ GRANT ALL ON SEQUENCE public.pending_firings_id_seq TO anon;
 GRANT ALL ON SEQUENCE public.pending_firings_id_seq TO authenticated;
 GRANT ALL ON SEQUENCE public.pending_firings_id_seq TO service_role;
 GRANT SELECT,USAGE ON SEQUENCE public.pending_firings_id_seq TO tf_app;
-
-
-GRANT ALL ON TABLE public.poller_state TO postgres;
-GRANT ALL ON TABLE public.poller_state TO anon;
-GRANT ALL ON TABLE public.poller_state TO authenticated;
-GRANT ALL ON TABLE public.poller_state TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.poller_state TO tf_app;
 
 
 GRANT ALL ON TABLE public.prompts TO postgres;
@@ -3923,11 +3966,19 @@ ALTER TABLE ONLY public.org_github_app_installations
 
 -- At most one active install per account on each GitHub deployment, without
 -- overwriting history: an uninstall stamps removed_at, a reinstall inserts a
--- fresh installation_id. github_host is in the key because a login is unique
--- only within one deployment: the same login on two GitHubs names two accounts.
+-- fresh installation_id. The account is its numeric id, which a rename leaves
+-- alone. Held on the login, the key would make the install of an account that
+-- took a login another account gave up collide with the other account's row
+-- until that row caught up with the rename. A row whose id is not known yet is
+-- held to its login, the one name it has. github_host is in both keys because
+-- an account id or a login names one account only within one deployment.
 CREATE UNIQUE INDEX org_github_app_installations_active_account_key
+    ON public.org_github_app_installations (org_id, github_host, account_id)
+    WHERE (removed_at IS NULL AND account_id IS NOT NULL);
+
+CREATE UNIQUE INDEX org_github_app_installations_active_login_key
     ON public.org_github_app_installations (org_id, github_host, account_login)
-    WHERE (removed_at IS NULL);
+    WHERE (removed_at IS NULL AND account_id IS NULL);
 
 -- An installation belongs to exactly one workspace per GitHub deployment. The
 -- grant is not divisible, `installation.deleted` fires once, the rate budget is
@@ -4028,9 +4079,14 @@ CREATE TABLE public.reachable_repositories (
     source text DEFAULT 'github'::text NOT NULL,
     owner text NOT NULL,
     repo text NOT NULL,
-    -- The provider's own repository id, so a cache entry and a registry row match
-    -- by id when slugs disagree mid-rename. NULL rows are matched by slug.
+    -- The provider's own repository id. A cache entry and a registry row are one
+    -- repository when their ids agree, whatever either is called mid-rename;
+    -- only when either has no id are they matched by slug.
     external_id text,
+    -- GitHub's numeric id for the account that owns the repository, read off
+    -- the same repository object; a registration from the mirror records it on
+    -- the registry row. NULL when the listing carried none.
+    owner_external_id text,
     -- The picker's display fields, mirrored because the picker is served from here
     -- rather than proxied. Empty string rather than NULL: display strings with no
     -- meaningful absent state.
@@ -4076,10 +4132,17 @@ CREATE UNIQUE INDEX reachable_repositories_pat_identity
     ON public.reachable_repositories USING btree (org_id, host, lower(owner), lower(repo))
     WHERE credential_class = 'pat';
 
--- The registry join and the drift queries over it. Same shape as
--- repositories_identity, so either side can drive the join.
+-- The registry join and the drift queries over it. A cache entry and a registry
+-- row are one repository by GitHub id when both carry one and by folded slug
+-- only when either does not, so the join has an index for each half, shaped
+-- like repositories_external_identity and repositories_identity so either side
+-- can drive it.
 CREATE INDEX reachable_repositories_registry_join
     ON public.reachable_repositories USING btree (org_id, source, lower(owner), lower(repo));
+
+CREATE INDEX reachable_repositories_registry_external_join
+    ON public.reachable_repositories USING btree (org_id, source, host, external_id)
+    WHERE (external_id IS NOT NULL);
 
 -- The picker's own read: one org's current class, ordered by folded slug —
 -- offset paging over an unordered set drops and repeats rows.
@@ -4225,9 +4288,13 @@ CREATE TABLE public.github_pending_binds (
     -- App-validated.
     leg           text NOT NULL DEFAULT 'authorize',
     -- The GitHub login the admin named. Carried here and nowhere else, so it
-    -- never rides a URL; on the install leg it is what the installation GitHub
-    -- returns has to be on.
+    -- never rides a URL.
     account_login text NOT NULL DEFAULT '',
+    -- GitHub's numeric id for that account, once the ceremony has resolved
+    -- one: an install-leg record carries it, and the installation GitHub
+    -- returns has to be on that id. NULL on an authorize-leg record, which
+    -- names the account only as the admin typed it.
+    account_id    text,
     created_at    timestamptz NOT NULL,
     expires_at  timestamptz NOT NULL,
     consumed_at timestamptz
@@ -5190,9 +5257,10 @@ REVOKE ALL ON public.slack_event_deliveries FROM anon, authenticated, service_ro
 -- caches display names, since Slack event payloads carry only the channel ID.
 -- id is the channel's identity in TF, and every reference to a channel holds
 -- it: a team's tracking row, a thread entity (entities.slack_channel_id), a
--- slack:message handler's channel_in filter. channel_id is the ID Slack gives
--- the channel now. It can change (slack_channel_id_changes below), and
--- following the change rewrites this one column. It is unique per org rather
+-- slack:message handler's channel_in filter, a Slack message artifact's dedup
+-- key. channel_id is the ID Slack gives the channel now. It can change
+-- (slack_channel_id_changes below), and following the change rewrites this one
+-- column here. It is unique per org rather
 -- than globally because a channel ID is the same in every workspace across
 -- Enterprise Grid / Slack Connect: two orgs each running their own app in a
 -- shared channel each get their own registry row. workspace_id is the
@@ -5219,8 +5287,13 @@ CREATE TABLE public.slack_channels (
 ALTER TABLE ONLY public.entities
     ADD CONSTRAINT entities_slack_channel_id_fkey FOREIGN KEY (slack_channel_id, org_id) REFERENCES public.slack_channels(id, org_id);
 
--- The channel move's selection of a channel's threads.
-CREATE INDEX idx_entities_slack_channel ON public.entities USING btree (slack_channel_id) WHERE (slack_channel_id IS NOT NULL);
+-- A Slack thread is its channel's row and its root ts: the lookup that finds
+-- one (the active entity, or else the most recently closed), and the channel
+-- move's selection of a channel's threads.
+CREATE INDEX idx_entities_slack_thread ON public.entities USING btree (slack_channel_id, slack_thread_ts) WHERE (slack_channel_id IS NOT NULL);
+
+-- At most one active entity per thread.
+CREATE UNIQUE INDEX entities_active_slack_thread ON public.entities USING btree (org_id, slack_channel_id, slack_thread_ts) WHERE ((state = 'active'::text) AND (source = 'slack'::text));
 
 ALTER TABLE public.slack_channels ENABLE ROW LEVEL SECURITY;
 
@@ -5822,29 +5895,33 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.model_availability TO tf_ap
 
 
 -- placement_overrides: human intent that wins over the computed
--- capacity-weighted rendezvous order for one placement key — a manual pin or a
+-- capacity-weighted rendezvous order for one repository — a manual pin or a
 -- hot-key replica count, nothing else (drain lives on the instances row).
--- Checked before the hash and expected to stay nearly empty. key_kind is
--- 'repo', key_value "owner/repo", and host the GitHub host (domain.GitHubHost)
--- that repository lives on: a slug names a repository only within one host,
--- so a pin is one host's and a rename moves only that host's pins. org_id is
--- plain text, matching the rendezvous key's own org fold. A pin wins when both
--- intents are set. Neither is FK-validated — a pin to a retired instance
+-- Checked before the hash and expected to stay nearly empty. A row is one
+-- repository's, referenced by its registry row (repository_id): the rendezvous
+-- key it overrides is the same row id, so a rename, which moves the row's name
+-- and not its id, leaves both where they are, and a repository created under a
+-- freed name has a row, a key and overrides of its own. The foreign key pins
+-- the org, and ON DELETE CASCADE drops a deleted row's override; the one
+-- delete a repository row sees, a rename absorbing a bare row minted under its
+-- new name, moves that row's override first. A pin wins when both intents are
+-- set. The pinned instance is not FK-validated — a pin to a retired instance
 -- self-heals via the claim's aging tier. Admin-pool-only system table, same
 -- posture as instances: RLS with NO policy plus REVOKE ALL, org_id bound by
 -- argument.
 CREATE TABLE public.placement_overrides (
-    org_id             text NOT NULL,
-    key_kind           text NOT NULL,
-    host               text NOT NULL,
-    key_value          text NOT NULL,
+    org_id             uuid NOT NULL,
+    repository_id      uuid NOT NULL,
     pinned_instance_id text,
     replicas           integer NOT NULL DEFAULT 0,
     updated_at         timestamp with time zone NOT NULL DEFAULT now()
 );
 
 ALTER TABLE ONLY public.placement_overrides
-    ADD CONSTRAINT placement_overrides_pkey PRIMARY KEY (org_id, key_kind, host, key_value);
+    ADD CONSTRAINT placement_overrides_pkey PRIMARY KEY (org_id, repository_id);
+
+ALTER TABLE ONLY public.placement_overrides
+    ADD CONSTRAINT placement_overrides_repository_id_fkey FOREIGN KEY (repository_id, org_id) REFERENCES public.repositories(id, org_id) ON DELETE CASCADE;
 
 ALTER TABLE public.placement_overrides ENABLE ROW LEVEL SECURITY;
 
@@ -5919,12 +5996,30 @@ REVOKE ALL ON public.sandbox_stats FROM anon, authenticated, service_role;
 -- operators: the deployment-operator flag gating the fleet console. Deployment
 -- scoped, so an operator is org-less rather than a member role, and is managed
 -- only through `triagefactory operator add|remove|list`; the trust boundary is
--- shell access. Keyed on the lower-cased email, not a user id: it is what the
--- CLI names and what every verified session carries, so an operator can be
--- authorized before their first login. Admin-pool-only system table: no
--- org_id, RLS with NO policy plus REVOKE ALL.
+-- shell access to a control container.
+--
+-- The CLI names an operator by email, the lower-cased primary key, because an
+-- address is what a person can be named by before they have signed in. The
+-- grant itself rests on user_id, the principal the address resolved to:
+-- `operator add` sets it when a login identity already holds the address
+-- verified, and a sign-in that verifies the address sets it on a row that has
+-- none. A row with a user_id matches that principal and nobody else. Only a
+-- pending row (user_id NULL) is matched by address, through a verified login
+-- identity. An address does not name one person for good: a login identity's
+-- address is refreshed at every sign-in, and a directory can give an address
+-- to someone new. A grant that kept matching by address would move to
+-- whichever principal holds the address verified next.
+--
+-- ON DELETE CASCADE rather than SET NULL: a row set back to pending would grant
+-- the console again to whoever next signs in holding the address.
+--
+-- Admin-pool-only system table: no org_id, RLS with NO policy plus REVOKE ALL.
+-- tf_system holds no grant on it: a role that can write it can grant the fleet
+-- console, and binding a grant reads user_identities, which the executor role
+-- cannot read.
 CREATE TABLE public.operators (
     email     text NOT NULL,
+    user_id   uuid REFERENCES public.users(id) ON DELETE CASCADE,
     added_at  timestamp with time zone NOT NULL DEFAULT now(),
     -- The OS user that ran the CLI; provenance only, not an authz input.
     added_by  text
@@ -6452,6 +6547,11 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.conversation_memory TO tf_system;
 -- UPDATE backs the role-precedence upgrade (touched -> produced -> primary).
 GRANT SELECT, INSERT, UPDATE ON TABLE public.conversation_memory_entities TO tf_system;
 GRANT SELECT, INSERT ON TABLE public.external_actions TO tf_system;
+-- current_url alone: an entity rename the agent's recording funnel applies on
+-- the executor (a moved Jira or Linear issue touched under its new key) moves
+-- the ledger pointers of the entity's actions in its transaction. The record
+-- of the act stays insert-only.
+GRANT UPDATE (current_url) ON TABLE public.external_actions TO tf_system;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.entities TO tf_system;
 GRANT SELECT ON TABLE public.entity_links TO tf_system;
 GRANT SELECT, INSERT ON TABLE public.task_events TO tf_system;
@@ -6478,8 +6578,6 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.instances TO tf_system;
 GRANT SELECT, INSERT, DELETE ON TABLE public.instance_stats TO tf_system;
 -- Same sampler and reaper, one row per live jail; SELECT serves usage reads.
 GRANT SELECT, INSERT, DELETE ON TABLE public.sandbox_stats TO tf_system;
--- Granted here so the operator CLI works whichever admin role its pool binds.
-GRANT SELECT, INSERT, DELETE ON TABLE public.operators TO tf_system;
 -- SELECT-only: the post-step reactor reads an override for the conversation's
 -- placement key. Writes are an operator action on a control pod.
 GRANT SELECT ON TABLE public.placement_overrides TO tf_system;

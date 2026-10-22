@@ -7,13 +7,14 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 )
 
-// TestRelayRuntime_TaskOwnRepo_AnsweredByTheOrchestrator pins where the repo
-// gate's task-repo arm is decided. The sidecar hosting the verbs is capless and
-// holds no stores, and the relay envelope carries no identity — the
-// orchestrator binds it from its own ConversationInfo — so a sidecar cannot
-// name a repo as its task's. It has to ask, and the answer is resolved against
-// the orchestrator's conversation → task → entity chain.
-func TestRelayRuntime_TaskOwnRepo_AnsweredByTheOrchestrator(t *testing.T) {
+// TestRelayRuntime_TaskOwnRepository_AnsweredByTheOrchestrator pins where the
+// repo gate's task-repo arm is decided. The sidecar hosting the verbs is
+// capless and holds no stores, and the relay envelope carries no identity —
+// the orchestrator binds it from its own ConversationInfo — so a sidecar
+// cannot name a repo as its task's. It has to ask, and the answer is resolved
+// against the orchestrator's conversation → task → entity chain. ownByName
+// asks the way authorizeRepo does: name to registry row, then the row's id.
+func TestRelayRuntime_TaskOwnRepository_AnsweredByTheOrchestrator(t *testing.T) {
 	conn, stores, info := newCaptureStoresConn(t, true)
 	ctx := context.Background()
 	repoID := dbseed.GitHubEntityRepository(t, conn, info.OrgID, "https://github.com", "octo/repo#7")
@@ -29,29 +30,44 @@ func TestRelayRuntime_TaskOwnRepo_AnsweredByTheOrchestrator(t *testing.T) {
 	if _, err := conn.Exec(`UPDATE conversations SET task_id = 'task-1' WHERE id = ?`, info.ConversationID); err != nil {
 		t.Fatalf("link conversation to task: %v", err)
 	}
+	dbseed.GitHubRepository(t, conn, info.OrgID, "https://github.com", "octo", "elsewhere")
 
 	rt := newRelayRuntime(directDispatchConn{srv: NewRelayServer(stores, info, nil)}, info, nil)
-
-	own, err := rt.TaskOwnRepo(ctx, "Octo", "Repo")
-	if err != nil || !own {
-		t.Fatalf("TaskOwnRepo(task's own repo) = (%v, %v), want (true, nil) — and case-insensitively", own, err)
+	ownByName := func(owner, repo string) bool {
+		t.Helper()
+		row, err := rt.GetRepo(ctx, owner+"/"+repo)
+		if err != nil {
+			t.Fatalf("GetRepo(%s/%s): %v", owner, repo, err)
+		}
+		if row == nil {
+			return false
+		}
+		own, err := rt.TaskOwnRepository(ctx, row.ID)
+		if err != nil {
+			t.Fatalf("TaskOwnRepository(%s/%s): %v", owner, repo, err)
+		}
+		return own
 	}
-	other, err := rt.TaskOwnRepo(ctx, "octo", "elsewhere")
-	if err != nil || other {
-		t.Fatalf("TaskOwnRepo(another repo) = (%v, %v), want (false, nil)", other, err)
+
+	if !ownByName("Octo", "Repo") {
+		t.Fatal("task's own repo, named in another casing, is not the task's")
+	}
+	if ownByName("octo", "elsewhere") {
+		t.Fatal("another repo is the task's")
+	}
+	if own, err := rt.TaskOwnRepository(ctx, ""); err != nil || own {
+		t.Fatalf("TaskOwnRepository(\"\") = (%v, %v), want (false, nil)", own, err)
 	}
 
 	// The task's repository is the row its entity references, so a rename that
 	// rewrites no key moves the answer with the row: the new name is the
 	// task's, and the old one, which the key still spells, names nothing.
 	dbseed.RenameRepositoryOnly(t, conn, repoID, "octo", "renamed")
-	renamed, err := rt.TaskOwnRepo(ctx, "octo", "renamed")
-	if err != nil || !renamed {
-		t.Fatalf("TaskOwnRepo(task's repo under its new name) = (%v, %v), want (true, nil)", renamed, err)
+	if !ownByName("octo", "renamed") {
+		t.Fatal("task's repo under its new name is not the task's")
 	}
-	stale, err := rt.TaskOwnRepo(ctx, "octo", "repo")
-	if err != nil || stale {
-		t.Fatalf("TaskOwnRepo(the name the task's key still spells) = (%v, %v), want (false, nil)", stale, err)
+	if ownByName("octo", "repo") {
+		t.Fatal("the name the task's key still spells is the task's")
 	}
 
 	// A task polled from a GitHub host other than the org's current one is about
@@ -61,8 +77,7 @@ func TestRelayRuntime_TaskOwnRepo_AnsweredByTheOrchestrator(t *testing.T) {
 	if _, err := conn.Exec(`UPDATE entities SET scope = 'https://ghe.example.com', repository_id = ? WHERE id = 'ent-1'`, gheRepoID); err != nil {
 		t.Fatalf("move entity to another host: %v", err)
 	}
-	elsewhere, err := rt.TaskOwnRepo(ctx, "octo", "renamed")
-	if err != nil || elsewhere {
-		t.Fatalf("TaskOwnRepo(task's repo, task polled from another host) = (%v, %v), want (false, nil)", elsewhere, err)
+	if ownByName("octo", "renamed") {
+		t.Fatal("task's repo is the task's on the current host, though the task was polled from another host")
 	}
 }

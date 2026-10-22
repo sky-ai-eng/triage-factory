@@ -130,6 +130,10 @@ func (f *fakeMirror) ReachableByExternalIDsSystem(context.Context, string, strin
 	panic("grantmirror must not read the write gate's id set")
 }
 
+func (f *fakeMirror) ListTrackedInGrantsSystem(context.Context, string, string, []string) ([]string, error) {
+	panic("grantmirror must not read the poller's tracked-in-grant set")
+}
+
 // testHost is the GitHub host fakeGrants resolves for when a test names none.
 const testHost = "https://ghe.current.example.com"
 
@@ -155,7 +159,8 @@ type grantAnswer struct {
 	err      error
 }
 
-func (f fakeGrants) grantListerFor(_ context.Context, _, accountLogin string) (grantLister, error) {
+func (f fakeGrants) grantListerFor(_ context.Context, _ string, inst domain.OrgGitHubAppInstallation) (grantLister, error) {
+	accountLogin := inst.AccountLogin
 	if err := f.resolveErr[accountLogin]; err != nil {
 		return nil, err
 	}

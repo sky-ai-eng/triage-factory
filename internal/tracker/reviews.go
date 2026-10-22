@@ -18,6 +18,7 @@ import (
 type NewReview struct {
 	ID           int64
 	Author       string // REST-spelled login; empty when GitHub names no author
+	AuthorID     string // GitHub's id for the author's account; empty when GitHub returns none
 	State        string // APPROVED, CHANGES_REQUESTED, COMMENTED or DISMISSED
 	SubmittedAt  string
 	CommentCount int
@@ -218,7 +219,7 @@ func newReview(r ghclient.PRReview) NewReview {
 		comments = append(comments, NewReviewComment{ID: c.ID, Mentions: c.Mentions})
 	}
 	return NewReview{
-		ID: r.ID, Author: r.Author, State: r.State, SubmittedAt: r.SubmittedAt,
+		ID: r.ID, Author: r.Author, AuthorID: r.AuthorID, State: r.State, SubmittedAt: r.SubmittedAt,
 		CommentCount: r.CommentCount, Paths: paths, Mentions: r.Mentions, Comments: comments,
 	}
 }

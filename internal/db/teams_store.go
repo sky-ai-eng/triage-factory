@@ -103,8 +103,9 @@ type TeamsStore interface {
 	// rather than the Go zero value with empty model + zero thresholds
 	// + auto_delegate=true. Row-missing is a test-fixture-only case;
 	// production paths seed a row at team-create time. JiraProjects
-	// is a denormalized fast path keyed `(team_id, project_key)`;
-	// the per-project status rules live on JiraStatusRulesStore.
+	// is the team's tracked Jira projects in display order, as
+	// jira_projects registry row ids; the per-project status rules
+	// live on JiraStatusRulesStore, keyed (team_id, jira_project_id).
 	// Postgres routes through the app pool (team_settings_select RLS
 	// gates by team membership).
 	GetSettings(ctx context.Context, teamID string) (domain.TeamSettings, error)
@@ -339,7 +340,7 @@ type TeamsStore interface {
 	// (EffectiveGitHubHost, NormalizeJiraHost: an unset base URL is no host
 	// and matches nothing). A member's
 	// GitHubUsername / JiraAccountID is nil when they hold no binding on that
-	// host. linearWorkspaceID is the org's Linear workspace
+	// host, and GitHubUserID when they hold none or it recorded no id. linearWorkspaceID is the org's Linear workspace
 	// (domain.OrgSettings.LinearWorkspaceID), matched verbatim; "" matches
 	// nothing, and a member's LinearUserID is nil when they hold no binding in
 	// it.

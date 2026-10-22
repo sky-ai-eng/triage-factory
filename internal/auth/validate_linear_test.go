@@ -2,9 +2,11 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,23 +19,28 @@ func linearConfigFor(url string) linear.Config {
 	return cfg
 }
 
+// An app user is whoever Linear says is one, whatever address it carries.
 // Not parallel: see TestCaptureGitHubIdentity.
-func TestValidateLinear_AppUserEmailRule(t *testing.T) {
+func TestValidateLinear_AppUserIsLinearsFlag(t *testing.T) {
 	cases := map[string]struct {
 		email string
+		app   string
 		isApp bool
 	}{
-		"person":            {"ada@example.com", false},
-		"app user":          {"4b1b3139-483d-455e-beba-f02f2d5b49b4@oauthapp.linear.app", true},
-		"app user, cased":   {"4B1B3139@OAuthApp.Linear.App", true},
-		"lookalike domain":  {"ada@oauthapp.linear.app.example.com", false},
-		"subdomain of host": {"ada@x.oauthapp.linear.app", false},
+		"app user, any address":       {"bot@example.com", "true", true},
+		"person, app-looking address": {"ada@oauthapp.linear.app", "false", false},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			var query string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					Query string `json:"query"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				query = body.Query
 				_, _ = w.Write([]byte(`{"data":{
-					"viewer":{"id":"u1","name":"TF","displayName":"tf","email":"` + tc.email + `"},
+					"viewer":{"id":"u1","name":"TF","displayName":"tf","email":"` + tc.email + `","app":` + tc.app + `},
 					"organization":{"id":"org-9","name":"Sky AI","urlKey":"sky"}}}`))
 			}))
 			t.Cleanup(srv.Close)
@@ -42,8 +49,11 @@ func TestValidateLinear_AppUserEmailRule(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ValidateLinear: %v", err)
 			}
+			if !strings.Contains(query, " app ") && !strings.Contains(query, " app}") {
+				t.Errorf("whoami query %q does not select the viewer's app flag", query)
+			}
 			if user.IsApp != tc.isApp {
-				t.Errorf("IsApp = %v for %q, want %v", user.IsApp, tc.email, tc.isApp)
+				t.Errorf("IsApp = %v for app=%s, want %v", user.IsApp, tc.app, tc.isApp)
 			}
 			if user.ID != "u1" || user.Email != tc.email {
 				t.Errorf("user = %+v", user)

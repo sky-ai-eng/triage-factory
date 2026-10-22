@@ -31,13 +31,10 @@ type GitHubNumericIDSeeder struct {
 	Org func(t *testing.T, ownerID string) string
 
 	// GitHubUserID reads user_github_identities.github_user_id for the (user,
-	// host) binding, "" for NULL or an absent row. It is a raw-SQL probe
-	// rather than a store method on purpose: nothing in the product reads
-	// this column yet — it is written now so the identity records WHICH
-	// account it bound, not only what that account is currently called — and
-	// adding a reader no caller wants would be worse than a test-local probe.
-	// Implementations must normalize the host the way the writers do
-	// (db.NormalizeGitHubHost).
+	// host) binding, "" for NULL or an absent row. It is a raw-SQL probe so
+	// the write assertions read the stored column itself rather than a store
+	// read built on it. Implementations must normalize the host the way the
+	// writers do (db.NormalizeGitHubHost).
 	GitHubUserID func(t *testing.T, userID, githubBaseURL string) string
 	GitHubEmail  func(t *testing.T, userID, githubBaseURL string) string
 }
@@ -59,10 +56,19 @@ type GitHubNumericIDFactory func(t *testing.T) (GitHubNumericIDStores, GitHubNum
 //   - account_login is overwritten when GitHub reports a new one for a known
 //     account_id, because the login is what the UI renders and a rename has to
 //     reach it;
+//   - one live installation per account is held on account_id, so two accounts
+//     whose rows share a login both land, and on account_login only for a row
+//     with no id;
 //   - user_github_identities.github_user_id round-trips through
-//     UpsertGitHubIdentity under the same fill-in-never-erase rule, and the
-//     reverse (host, login) → user lookup resolves regardless of the
-//     capitalisation either side was captured with.
+//     UpsertGitHubIdentity under the same fill-in-never-erase rule for the
+//     same account, and a capture naming a different account (by id when
+//     both sides carry one, by case-folded login otherwise) carries neither
+//     the old account's id nor its address;
+//   - the reverse (host, login) → user lookup resolves regardless of the
+//     capitalisation either side was captured with;
+//   - the reverse (host, GitHub id) → user lookup resolves an account under
+//     any login, never another account holding its login, and a binding that
+//     recorded no id by its login.
 func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -179,6 +185,33 @@ func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 		}
 	})
 
+	t.Run("OneLiveInstallationPerAccount", func(t *testing.T) {
+		// A row is held to its account id, and to its login only while it has
+		// no id. So an id-bearing row lands beside an id-less row under the
+		// same login, and two accounts whose rows share a login (one renamed
+		// away, another took the handle) both land.
+		stores, seed := mk(t)
+		org := seed.Org(t, seed.User(t))
+		for _, c := range []struct {
+			installationID, accountID, login string
+			refused                          bool
+		}{
+			{"456", "", "acme", false},
+			{"790", "", "acme", true},
+			{"791", "5678", "acme", false},
+			{"789", "1234", "acme", false},
+			{"999", "1234", "acme-corp", true},
+		} {
+			_, err := stores.GitHubApps.UpsertInstallation(ctx, install(org, c.installationID, c.accountID, c.login))
+			if (err != nil) != c.refused {
+				t.Errorf("UpsertInstallation(%s, account %q, login %s) = %v; want refused=%v", c.installationID, c.accountID, c.login, err, c.refused)
+			}
+		}
+		if insts, err := stores.GitHubApps.ListInstallationsForOrgSystem(ctx, org); err != nil || len(insts) != 3 {
+			t.Errorf("ListInstallationsForOrgSystem = %d installations, %v; want the 3 that landed", len(insts), err)
+		}
+	})
+
 	t.Run("IdentityGitHubUserIDRoundTrips", func(t *testing.T) {
 		stores, seed := mk(t)
 		u := seed.User(t)
@@ -219,6 +252,14 @@ func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 		}
 		if got, err := stores.Users.GetGitHubIdentity(ctx, u, "https://elsewhere.example"); err != nil || got != nil {
 			t.Errorf("GetGitHubIdentity(other host) = %+v, %v; want nil — identity is host-scoped", got, err)
+		}
+		// The System twin answers the same, for the claims-free delegated run.
+		sys, err := stores.Users.GetGitHubIdentitySystem(ctx, u, host)
+		if err != nil || sys == nil || *sys != *got {
+			t.Errorf("GetGitHubIdentitySystem = %+v, %v; want %+v", sys, err, *got)
+		}
+		if sys, err := stores.Users.GetGitHubIdentitySystem(ctx, seed.User(t), host); err != nil || sys != nil {
+			t.Errorf("GetGitHubIdentitySystem(unlinked) = %+v, %v; want nil, nil", sys, err)
 		}
 	})
 
@@ -299,6 +340,81 @@ func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 		}
 		if got := seed.GitHubUserID(t, u, host); got != "999" {
 			t.Errorf("github_user_id = %q after re-binding to another account; want %q", got, "999")
+		}
+	})
+
+	for _, c := range []struct {
+		name              string
+		login, id, email  string
+		newLogin, newID   string
+		wantID, wantEmail string
+	}{
+		// The same id under a new login is a rename: the id and address stay
+		// with the account even when the capture carries no address.
+		{"IdentityRenameOfTheSameAccountKeepsItsIDAndEmail", "octocat", "583231", "octocat@example.com",
+			"octo-renamed", "583231", "583231", "octocat@example.com"},
+		// With no id on either side the login decides, and GitHub logins are
+		// case-insensitive.
+		{"IdentityCaseChangeWithoutIDsIsTheSameAccount", "octocat", "", "octocat@example.com",
+			"OctoCat", "", "", "octocat@example.com"},
+		// A login GitHub has given to a different account: the stored address
+		// belongs to someone else.
+		{"IdentitySameLoginWithAnotherIDIsAnotherAccount", "octocat", "583231", "octocat@example.com",
+			"octocat", "999", "999", ""},
+		// A capture that learned no id for a different login is a different
+		// account, so the stored id is not carried onto it.
+		{"IdentityRebindToAnotherAccountWithoutAnIDDropsTheOldID", "octocat", "583231", "",
+			"hubber", "", "", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			stores, seed := mk(t)
+			u := seed.User(t)
+			if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, c.login, c.id, c.email, "pat"); err != nil {
+				t.Fatalf("UpsertGitHubIdentity: %v", err)
+			}
+			if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, c.newLogin, c.newID, "", "connect_oauth"); err != nil {
+				t.Fatalf("UpsertGitHubIdentity (re-bind): %v", err)
+			}
+			if got, err := stores.Users.GetGitHubIdentity(ctx, u, host); err != nil || got == nil || got.Login != c.newLogin {
+				t.Errorf("GetGitHubIdentity = %+v, %v; want login %s", got, err, c.newLogin)
+			}
+			if got := seed.GitHubUserID(t, u, host); got != c.wantID {
+				t.Errorf("github_user_id = %q; want %q", got, c.wantID)
+			}
+			if email := seed.GitHubEmail(t, u, host); email != c.wantEmail {
+				t.Errorf("email = %q; want %q", email, c.wantEmail)
+			}
+		})
+	}
+
+	t.Run("IdentityReverseLookupByGitHubID", func(t *testing.T) {
+		// An event that names its actor by GitHub's id resolves to the users
+		// bound to that account, whatever it is called now, and not to a user
+		// bound to another account that holds the event's login. A binding
+		// with no id recorded resolves by its login.
+		stores, seed := mk(t)
+		renamed, withoutID, other := seed.User(t), seed.User(t), seed.User(t)
+		for user, binding := range map[string][2]string{renamed: {"octocat", "583231"}, withoutID: {"OctoCat-Old", ""}, other: {"hubber", "999"}} {
+			if err := stores.Users.UpsertGitHubIdentity(ctx, user, host, binding[0], binding[1], "", "pat"); err != nil {
+				t.Fatalf("UpsertGitHubIdentity(%s): %v", binding[0], err)
+			}
+		}
+		for _, c := range []struct {
+			name, host, id, login string
+			want                  []string
+		}{
+			{"the account under its new login", host, "583231", "octocat-new", []string{renamed}},
+			{"a binding with no id, by login", host, "583231", "octocat-old", []string{renamed, withoutID}},
+			{"another account holding the login", host, "999", "octocat", []string{other}},
+			{"an account nobody bound", host, "1", "octocat", []string{}},
+			{"no id", host, "", "octocat", []string{}},
+			{"another host", "https://elsewhere.example", "583231", "octocat", []string{}},
+		} {
+			got, err := stores.Users.UserIDsForGitHubUserIDSystem(ctx, c.host, c.id, c.login)
+			if err != nil {
+				t.Fatalf("UserIDsForGitHubUserIDSystem(%s): %v", c.name, err)
+			}
+			assertSameSet(t, "UserIDsForGitHubUserIDSystem("+c.name+")", got, c.want)
 		}
 	})
 

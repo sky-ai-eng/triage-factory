@@ -78,10 +78,10 @@ func TestDiffLinearSnapshots(t *testing.T) {
 			curr: func(s *domain.LinearSnapshot) { s.Assignee, s.AssigneeUserID, s.OpenChildCount = "Bob", "u-bob", 1 }},
 		{name: "status changed",
 			curr: func(s *domain.LinearSnapshot) { s.State = linProgress },
-			want: []want{{domain.EventLinearIssueStatusChanged, "In Progress"}}},
+			want: []want{{domain.EventLinearIssueStatusChanged, linProgress.ID}}},
 		{name: "status changed into done",
 			curr: func(s *domain.LinearSnapshot) { s.State = linDone },
-			want: []want{{domain.EventLinearIssueStatusChanged, "Done"}, {domain.EventLinearIssueCompleted, ""}}},
+			want: []want{{domain.EventLinearIssueStatusChanged, linDone.ID}, {domain.EventLinearIssueCompleted, ""}}},
 		{name: "state renamed in Linear",
 			curr: func(s *domain.LinearSnapshot) { s.State.Name = "To Do" }},
 		{name: "priority changed",
@@ -116,7 +116,7 @@ func TestDiffLinearSnapshots(t *testing.T) {
 				s.Identifier, s.TeamID, s.TeamKey = "OPS-77", "team-ops", "OPS"
 				s.State = domain.LinearStateRef{ID: "state-ops-todo", Name: "Triage", Type: "triage"}
 			},
-			want: []want{{domain.EventLinearIssueIdentifierChanged, ""}, {domain.EventLinearIssueStatusChanged, "Triage"}}},
+			want: []want{{domain.EventLinearIssueIdentifierChanged, ""}, {domain.EventLinearIssueStatusChanged, "state-ops-todo"}}},
 		{name: "team key renamed",
 			curr: func(s *domain.LinearSnapshot) { s.Identifier, s.TeamKey = "CORE-1", "CORE" },
 			want: []want{{domain.EventLinearIssueIdentifierChanged, ""}}},
@@ -126,7 +126,7 @@ func TestDiffLinearSnapshots(t *testing.T) {
 		{name: "last sub-issue closed as the parent completed",
 			prev: func(s *domain.LinearSnapshot) { s.OpenChildCount = 1 },
 			curr: func(s *domain.LinearSnapshot) { s.State = linDone },
-			want: []want{{domain.EventLinearIssueStatusChanged, "Done"}, {domain.EventLinearIssueCompleted, ""}}},
+			want: []want{{domain.EventLinearIssueStatusChanged, linDone.ID}, {domain.EventLinearIssueCompleted, ""}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -157,6 +157,21 @@ func TestDiffLinearSnapshots(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// parent_changed names both parents by UUID, which new_parent_id matches, and
+// by identifier, for display.
+func TestDiffLinearSnapshots_ParentByIDAndIdentifier(t *testing.T) {
+	prev, curr := linSnap(), linSnap()
+	prev.ParentID, prev.ParentIdentifier = "uuid-9", "ENG-9"
+	curr.ParentID, curr.ParentIdentifier = "uuid-8", "OPS-8"
+	evts := DiffLinearSnapshots(prev, curr, "ent-1", linDoneSet, nil, nil)
+	if len(evts) != 1 || evts[0].EventType != domain.EventLinearIssueParentChanged {
+		t.Fatalf("events = %v, want one parent_changed", eventTypes(evts))
+	}
+	if meta := decodeMetadata[events.LinearIssueParentChangedMetadata](t, evts[0]); meta.OldParentID != "uuid-9" || meta.NewParentID != "uuid-8" || meta.OldParent != "ENG-9" || meta.NewParent != "OPS-8" {
+		t.Errorf("metadata parents = %+v, want ids uuid-9 -> uuid-8 and identifiers ENG-9 -> OPS-8", meta)
 	}
 }
 

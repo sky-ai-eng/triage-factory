@@ -321,7 +321,6 @@ func TestHandleEventCallback_DispatchesTitleResolutionOnCreated(t *testing.T) {
 			titles.done = make(chan struct{}, 1)
 			entities := newFakeEntities()
 			p := &ingestPipeline{
-				entities:   entities,
 				deliveries: newFakeDeliveries(),
 				channels:   newFakeChannelRegistryFor(entities),
 				publish:    func(context.Context, domain.Event) {},
