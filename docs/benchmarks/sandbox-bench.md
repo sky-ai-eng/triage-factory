@@ -138,15 +138,20 @@ the ceiling held is judged on each victim cgroup's own `memory.peak`,
 which teardown reads: a victim can climb to its ceiling and be killed
 between two samples of `memory.current`.
 
-Measured outcome (2026-10-21, kernel 7.0, PASS 2/2): **the kernel holds
+Measured outcome (2026-10-22, kernel 7.0, PASS 2/2): **the kernel holds
 the ceiling by killing the allocating process, and the jail survives.**
 Each victim's cgroup peaked at exactly its 512 MB ceiling with 1024 MB
 attempted, within half a second of the allocation starting. The kernel's
 memory cgroup OOM killer then killed one host process in that cgroup: a
 systrap stub, the host process that runs the application's address space,
 not the sentry or the gofer. The growing `node` died of SIGKILL inside
-the jail (exit 137), the tool returned what it had printed, neighbors
-took zero errors, and the canary went 336 → 357 ms across the breach.
+the jail, and its `bash` call came back as an error carrying what it had
+printed, `Command was killed by SIGKILL (signal 9)`, and the native loop's
+notice that the sandbox reached its 512 MB limit and the kernel killed a
+process to stay under it. The bench wraps each victim's tool host the way
+the loop does, prints that text, and records the victim as
+`process-killed`. Neighbors took zero errors, and the canary went
+342 → 405 ms across the breach.
 
 On kernel 6.17 (2026-08-06) the same scenario ended in allocation failure
 instead: the allocation failed inside the victim's own process at a

@@ -135,8 +135,14 @@ func (s *Spawner) leaveOnLostJail(ctx context.Context, park liveParkContext, pri
 	if s.parkConversationOpen(ctx, park, "") {
 		return engagementDisposition{fenced: true}
 	}
-	toast.Warning(s.wsHub, park.orgID, fmt.Sprintf("Run %s is paused: its sandbox was lost %d times in a row. Send a message to continue.",
-		shortConversationID(park.conversationID), losses))
+	if lost.MemoryLimit {
+		toast.Warning(s.wsHub, park.orgID, fmt.Sprintf(
+			"Run %s is paused: its sandbox was lost %d times in a row, the last time at its memory limit. Raise TF_CLAIM_MEMORY_LIMIT_MB if it legitimately needs more, then send a message to continue.",
+			shortConversationID(park.conversationID), losses))
+	} else {
+		toast.Warning(s.wsHub, park.orgID, fmt.Sprintf("Run %s is paused: its sandbox was lost %d times in a row. Send a message to continue.",
+			shortConversationID(park.conversationID), losses))
+	}
 	return engagementDisposition{}
 }
 

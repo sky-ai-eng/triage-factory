@@ -119,3 +119,51 @@ func TestRunSample_Observed(t *testing.T) {
 		})
 	}
 }
+
+// TestParseOOMKills pins the counter read the loop compares across a tool
+// call, and that the exit-time attribution reads the same parse: a body
+// without a usable oom_kill line is no reading at all, never a zero, because a
+// zero would hide a kill the next good read then attributes to the wrong call.
+func TestParseOOMKills(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		n    int
+		ok   bool
+	}{
+		{"full events", "low 0\nhigh 0\nmax 12\noom 2\noom_kill 2\noom_group_kill 0\n", 2, true},
+		{"none yet", "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n", 0, true},
+		{"no oom_kill line", "low 0\nhigh 0\n", 0, false},
+		{"unparseable value", "oom_kill many\n", 0, false},
+		{"empty body", "", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n, ok := parseOOMKills([]byte(tt.body))
+			if n != tt.n || ok != tt.ok {
+				t.Errorf("parseOOMKills(%q) = (%d, %v), want (%d, %v)", tt.body, n, ok, tt.n, tt.ok)
+			}
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "memory.events"), []byte(tt.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if got, want := cgroupOOMKilled(dir), tt.n > 0; got != want {
+				t.Errorf("cgroupOOMKilled = %v, want %v for %q", got, want, tt.body)
+			}
+		})
+	}
+}
+
+// TestRunCgroupOOMKills_MissingGroupIsUnread is the counter's side of
+// TestSampleRunCgroup_MissingGroupIsUnobserved: a group that does not exist
+// yet, or no longer, reads as no count rather than as zero kills.
+func TestRunCgroupOOMKills_MissingGroupIsUnread(t *testing.T) {
+	for name, containerID := range map[string]string{
+		"no container id":    "",
+		"group already gone": "tf-nonexistent-run-250",
+	} {
+		if n, ok := RunCgroupOOMKills(containerID); ok {
+			t.Errorf("%s: RunCgroupOOMKills = (%d, true), want unread", name, n)
+		}
+	}
+}

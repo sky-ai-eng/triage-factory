@@ -32,3 +32,22 @@ func SampleRunCgroup(containerID string) RunSample {
 	}
 	return sampleRunCgroup(containerID)
 }
+
+// RunCgroupOOMKills reads how many processes the OOM killer has taken from the
+// cgroup of the run whose runsc container id is containerID: memory.events'
+// oom_kill, read while the run is live.
+//
+// The counter, not the yes-or-no attribution Wait reports at exit, because the
+// caller is watching a jail that survives the kill: the kernel holds a jail at
+// its ceiling by killing the host process running one of its guest processes,
+// and the jail lives on without it. Only a rise between two reads says that
+// happened in between.
+//
+// Unprivileged and silent for the reasons SampleRunCgroup is. ok is false when
+// the group is absent or unreadable, and on non-Linux.
+func RunCgroupOOMKills(containerID string) (n int, ok bool) {
+	if containerID == "" {
+		return 0, false
+	}
+	return runCgroupOOMKills(containerID)
+}

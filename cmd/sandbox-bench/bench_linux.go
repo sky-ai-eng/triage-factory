@@ -386,9 +386,11 @@ type oomResult struct {
 
 // oomVictimJSON is one victim's fate. mode is "oom-killed" (the jail died
 // under the kernel's killer), "jail-died" (the call's transport died with the
-// jail), "alloc-failed" (the allocating process failed inside the jail and
-// the run survived its own failure), or "reached-target" (the allocation
-// reached its target resident — the failure case).
+// jail), "process-killed" (the kernel killed the allocating process and the
+// jail ran on without it), "alloc-failed" (the allocation failed inside the
+// allocating process and the run survived its own failure), or
+// "reached-target" (the allocation reached its target resident — the failure
+// case).
 type oomVictimJSON struct {
 	Mode        string  `json:"mode"`
 	PeakMB      int     `json:"peak_mb"`
@@ -432,6 +434,9 @@ func runOOMTest(ctx context.Context, cfg benchConfig, getAbort func() string) er
 		if err != nil {
 			return fmt.Errorf("oomtest: victim %d spawn failed: %w", i, err)
 		}
+		// What the native loop wraps every engagement's tool host in, so
+		// each victim's result below is the text its agent would read.
+		v.tools = agentloop.WatchMemoryKills(v.tools, v.jail, cfg.oomVictimLimitMB)
 		live = append(live, v)
 		victims = append(victims, v)
 	}
@@ -461,11 +466,11 @@ func runOOMTest(ctx context.Context, cfg benchConfig, getAbort func() string) er
 
 	// The wire outcome per victim: "jail-died" (transport error — the kill
 	// took the jail), "reached-target" (the grow printed its completion line
-	// — the ceiling never stopped it), or "alloc-failed" (any answered call
-	// that never reached target: the allocating process failed inside the
-	// jail, on ENOMEM from gVisor or under the kernel's OOM killer, which
-	// takes the host process running it and leaves the jail standing; a
-	// killed process answers with whatever it printed first).
+	// — the ceiling never stopped it), "process-killed" (an answered call
+	// during which the jail's OOM-kill count rose: the kernel took the host
+	// process running the allocation and left the jail standing), or
+	// "alloc-failed" (any other answered call that never reached target: the
+	// allocation failed inside the process, on ENOMEM from gVisor).
 	wireOutcome := make([]string, len(victims))
 	var callWG sync.WaitGroup
 	for i, v := range victims {
@@ -477,11 +482,12 @@ func runOOMTest(ctx context.Context, cfg benchConfig, getAbort func() string) er
 				"timeout": 150,
 			})
 			tail := func(s string) string {
-				if len(s) > 220 {
-					return "…" + s[len(s)-220:]
+				if len(s) > 1200 {
+					return "…" + s[len(s)-1200:]
 				}
 				return s
 			}
+			kills, _ := v.jail.OOMKills()
 			switch {
 			case err != nil:
 				wireOutcome[i] = "jail-died"
@@ -492,6 +498,9 @@ func runOOMTest(ctx context.Context, cfg benchConfig, getAbort func() string) er
 			case strings.Contains(out.Content, "target reached") || strings.Contains(out.ToolError, "target reached"):
 				wireOutcome[i] = "reached-target"
 				fmt.Printf("  victim %d: allocation REACHED TARGET — the ceiling did not stop it: %s\n", i, tail(out.Content))
+			case kills > 0:
+				wireOutcome[i] = "process-killed"
+				fmt.Printf("  victim %d: the kernel killed %d process(es) in the jail, which ran on; the agent reads:\n%s\n", i, kills, tail(out.ToolError+out.Content))
 			case out.ToolError != "":
 				wireOutcome[i] = "alloc-failed"
 				fmt.Printf("  victim %d: allocation failed inside the jail (tool error): %s\n", i, tail(out.ToolError))

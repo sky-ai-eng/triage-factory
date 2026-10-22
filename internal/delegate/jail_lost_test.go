@@ -131,17 +131,18 @@ func TestJailLost_TheConversationGoesOnInANewCell(t *testing.T) {
 // TestJailLost_TheLastLossTheBudgetAllowsParksForAPerson: the loss that
 // spends the jail budget does not start another cell. The conversation parks
 // sandbox_lost with a note naming what ended the last jail, its blueprint
-// keeps running, nothing claims it until someone writes, and a toast says so.
+// keeps running, nothing claims it until someone writes, and the toast names
+// the limit a person can raise when the memory ceiling ended the last jail.
 func TestJailLost_TheLastLossTheBudgetAllowsParksForAPerson(t *testing.T) {
 	f := newStallFixture(t, "r-jail-lost-spent", activityTimings{idle: time.Hour})
 	hub, captured := capturingHub(t)
 	f.s.wsHub = hub
 
-	reason := "the sandbox stopped unexpectedly"
+	reason := "the sandbox reached its 4096 MB memory limit and the kernel ended it"
 	disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID, jailLosses: maxJailLosses - 1},
 		"", "", "manual", runmode.LocalDefaultUserID, time.Now(),
-		agentloop.Result{Kind: agentloop.ResultToolHostLost, Err: &agentloop.ToolHostLostError{Reason: reason, Err: io.EOF}}, nil)
+		agentloop.Result{Kind: agentloop.ResultToolHostLost, Err: &agentloop.ToolHostLostError{Reason: reason, MemoryLimit: true, Err: io.EOF}}, nil)
 	if disp.handedBack || disp.fenced {
 		t.Fatalf("disposition = %+v, want a park", disp)
 	}
@@ -169,8 +170,8 @@ func TestJailLost_TheLastLossTheBudgetAllowsParksForAPerson(t *testing.T) {
 	if want := jailLostNote(maxJailLosses, reason); len(notes) != 1 || notes[0] != want {
 		t.Errorf("stop notes = %q, want one: %q", notes, want)
 	}
-	if got := captured.toasts(); len(got) != 1 || !strings.Contains(got[0], "lost 3 times in a row") {
-		t.Errorf("toasts = %q, want one saying how many sandboxes were lost", got)
+	if got := captured.toasts(); len(got) != 1 || !strings.Contains(got[0], "lost 3 times in a row") || !strings.Contains(got[0], "TF_CLAIM_MEMORY_LIMIT_MB") {
+		t.Errorf("toasts = %q, want one saying how many sandboxes were lost and naming TF_CLAIM_MEMORY_LIMIT_MB", got)
 	}
 
 	if next, err := f.s.conversationQueue.ClaimNextConversation(context.Background(), "exec-successor", 1, db.ClaimPlacement{}, time.Minute); err != nil || next != nil {

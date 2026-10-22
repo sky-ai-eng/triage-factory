@@ -20,6 +20,9 @@ type ToolHostLostError struct {
 	// Reason says what ended the tool host, in the words a person reads if
 	// the conversation stops being continued.
 	Reason string
+	// MemoryLimit reports that the jail's memory ceiling ended it, the one
+	// cause a person can do something about by raising a limit.
+	MemoryLimit bool
 	// Err is the failure the call returned.
 	Err error
 }

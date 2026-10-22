@@ -129,6 +129,7 @@ func (j *restartableJail) Exited() bool                     { return j.current()
 func (j *restartableJail) Freeze(ctx context.Context) error { return j.current().Freeze(ctx) }
 func (j *restartableJail) Thaw(ctx context.Context) error   { return j.current().Thaw(ctx) }
 func (j *restartableJail) OOMKilled() bool                  { return j.current().OOMKilled() }
+func (j *restartableJail) OOMKills() (int, bool)            { return j.current().OOMKills() }
 func (j *restartableJail) Sample() cell.Sample              { return j.current().Sample() }
 func (j *restartableJail) Close() error                     { return j.current().Close() }
 
