@@ -1352,6 +1352,44 @@ func TestMigrate_GitHubPredicatesNameIDs(t *testing.T) {
 	}
 }
 
+// A database seeded by an earlier build carries a catalog row for
+// system:task:delegation_blocked_by_subtasks, which db.SeedEventTypes only
+// upserts and so never removes. The migration deletes the handlers on it,
+// soft-deleted ones included, and then the row; a handler on another type
+// stays.
+func TestMigrate_ProviderScopesDropDelegationBlockedEventType(t *testing.T) {
+	const blocked = "system:task:delegation_blocked_by_subtasks"
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	for _, eventType := range []string{blocked, domain.EventGitHubPROpened} {
+		mustExec(t, database, `INSERT OR IGNORE INTO events_catalog (id, source, category, label, description)
+			VALUES (?, 'test', 'test', ?, '')`, eventType, eventType)
+	}
+	for _, h := range [][]any{
+		{"blocked", blocked, nil},
+		{"blocked-deleted", blocked, "2026-01-01 00:00:00"},
+		{"opened", domain.EventGitHubPROpened, nil},
+	} {
+		mustExec(t, database, `
+			INSERT INTO event_handlers (id, team_id, creator_user_id, kind, event_type, source, name,
+			                            default_priority, sort_order, deleted_at)
+			VALUES (?, 'team-1', 'u1', 'rule', ?, 'user', ?, 0.5, 0, ?)`, h[0], h[1], h[0], h[2])
+	}
+
+	migrateProviderScopes(t, database)
+
+	if n := queryInt(t, database, `SELECT COUNT(*) FROM events_catalog WHERE id = ?`, blocked); n != 0 {
+		t.Errorf("%d catalog rows for %s, want 0", n, blocked)
+	}
+	if n := queryInt(t, database, `SELECT COUNT(*) FROM event_handlers WHERE event_type = ?`, blocked); n != 0 {
+		t.Errorf("%d handlers on %s, want 0", n, blocked)
+	}
+	if got := queryString(t, database, `SELECT id FROM event_handlers WHERE event_type = ?`, domain.EventGitHubPROpened); got != "opened" {
+		t.Errorf("handler on %s = %q, want opened kept", domain.EventGitHubPROpened, got)
+	}
+	assertNoDanglingReferences(t, database)
+}
+
 func seedProviderScopesOrg(t *testing.T, database *sql.DB) {
 	t.Helper()
 	mustExec(t, database, `INSERT INTO orgs (id, slug, name) VALUES (?, 'local', 'Local')`, runmode.LocalDefaultOrgID)

@@ -106,23 +106,6 @@ func (p SystemPromptAutoSuspendedPredicate) Matches(m SystemPromptAutoSuspendedM
 }
 
 // -----------------------------------------------------------------------------
-// system:task:delegation_blocked_by_subtasks — auto-delegation skipped
-// because a Jira parent has open subtasks.
-// -----------------------------------------------------------------------------
-
-type SystemTaskDelegationBlockedSubtasksMetadata struct {
-	TaskID   string `json:"task_id"`
-	IssueKey string `json:"issue_key"`
-}
-
-// No predicate fields — fires once per instance, users can only enable / disable.
-type SystemTaskDelegationBlockedSubtasksPredicate struct{}
-
-func (p SystemTaskDelegationBlockedSubtasksPredicate) Matches(m SystemTaskDelegationBlockedSubtasksMetadata) bool {
-	return true
-}
-
-// -----------------------------------------------------------------------------
 // system:conversation:status / system:conversation:activity — EE-observable
 // conversation-lifecycle sentinels (TFAC-592), mirroring the two websocket
 // choke points in internal/delegate/spawner.go onto the bus. Deliberately
@@ -299,7 +282,6 @@ func init() {
 	Register(NewSchema[SystemDelegationCompletedMetadata, SystemDelegationCompletedPredicate](domain.EventSystemDelegationCompleted, OwnershipUnrouted))
 	Register(NewSchema[SystemDelegationFailedMetadata, SystemDelegationFailedPredicate](domain.EventSystemDelegationFailed, OwnershipUnrouted))
 	Register(NewSchema[SystemPromptAutoSuspendedMetadata, SystemPromptAutoSuspendedPredicate](domain.EventSystemPromptAutoSuspended, OwnershipUnrouted))
-	Register(NewSchema[SystemTaskDelegationBlockedSubtasksMetadata, SystemTaskDelegationBlockedSubtasksPredicate](domain.EventSystemTaskDelegationBlockedSubtasks, OwnershipUnrouted))
 	Register(NewSchema[SystemConversationStatusMetadata, SystemConversationStatusPredicate](domain.EventSystemConversationStatus, OwnershipUnrouted))
 	Register(NewSchema[SystemConversationActivityMetadata, SystemConversationActivityPredicate](domain.EventSystemConversationActivity, OwnershipUnrouted))
 	Register(NewSchema[SystemConversationResumedMetadata, SystemConversationResumedPredicate](domain.EventSystemConversationResumed, OwnershipUnrouted))
