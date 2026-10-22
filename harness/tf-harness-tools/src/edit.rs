@@ -113,6 +113,7 @@ pub fn execute(cwd: &str, args: &EditArgs) -> ToolResultOrError<EditToolDetails>
                 "Could not edit file: {path}. Error code: {code}."
             )));
         }
+        crate::special::refuse_special_file(&absolute_path, "edit")?;
 
         let buffer = std::fs::read(&absolute_path).map_err(|e| {
             ToolError::new(crate::errors::node_fs_error(&e, "open", &absolute_path).message)

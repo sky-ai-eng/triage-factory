@@ -43,6 +43,14 @@ const toolHostConfigureTool = "_configure"
 // memory budget the harness enforces on `bash`, in MB.
 const bashMemBudgetArg = "bash_mem_budget_mb"
 
+// bashDefaultTimeoutArg and bashMaxTimeoutArg are the configure frame's keys
+// for the `bash` time limits, in seconds: the timeout of a command given
+// none, and the largest one a command may give.
+const (
+	bashDefaultTimeoutArg = "bash_default_timeout_s"
+	bashMaxTimeoutArg     = "bash_max_timeout_s"
+)
+
 // ProtocolError is a tool-host failure below the tool layer: the request
 // never reached a tool, or its response could not be delivered.
 type ProtocolError struct {

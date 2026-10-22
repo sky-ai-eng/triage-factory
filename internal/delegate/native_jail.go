@@ -35,6 +35,11 @@ type restartableJail struct {
 	jail  cell.Jail
 	tools agentloop.ToolHost
 	spent cell.Actuals
+	// calls numbers the calls made to the tool host, and inFlight is the one
+	// running, zero between calls. overran is the call endOverrunCall ended,
+	// and overrunLimit the deadline it ran past.
+	calls, inFlight, overran uint64
+	overrunLimit             time.Duration
 }
 
 // launchRestartableJail launches the engagement's first jail and connects to
@@ -90,6 +95,26 @@ func (j *restartableJail) restart(ctx context.Context) error {
 	return nil
 }
 
+// endOverrunCall ends the tool call in flight, which has run past limit, by
+// stopping the jail it runs in. The call then fails on its socket like any
+// call whose jail died, and the loop restarts the jail; the call is told why
+// it ended. It reports whether there was a call to end: a restart that is
+// itself stuck has none, and stopping the engagement is all that is left.
+func (j *restartableJail) endOverrunCall(limit time.Duration) bool {
+	j.mu.Lock()
+	if j.inFlight == 0 {
+		j.mu.Unlock()
+		return false
+	}
+	j.overran, j.overrunLimit = j.inFlight, limit
+	jail := j.jail
+	j.mu.Unlock()
+	if err := jail.Stop(); err != nil {
+		delegateLog.Warn("stopping the jail to end a tool call past its deadline failed", "error", err)
+	}
+	return true
+}
+
 func (j *restartableJail) recordActuals(ctx context.Context, orgID, claimID string, a cell.Actuals) error {
 	j.mu.Lock()
 	if a.PeakMemMB != nil && (j.spent.PeakMemMB == nil || *a.PeakMemMB > *j.spent.PeakMemMB) {
@@ -138,9 +163,22 @@ type jailToolHost struct{ j *restartableJail }
 
 func (h jailToolHost) Call(name string, args map[string]any) (agentloop.ToolOutcome, error) {
 	h.j.mu.Lock()
+	h.j.calls++
+	call := h.j.calls
+	h.j.inFlight = call
 	tools := h.j.tools
 	h.j.mu.Unlock()
-	return tools.Call(name, args)
+	out, err := tools.Call(name, args)
+	h.j.mu.Lock()
+	h.j.inFlight = 0
+	overran, limit := h.j.overran == call, h.j.overrunLimit
+	h.j.mu.Unlock()
+	// A call that answered before the stop reached it keeps its answer, and
+	// the next call finds the jail gone, as it would any jail that died.
+	if err != nil && overran {
+		return out, agentloop.ToolCallOverranError(limit, err)
+	}
+	return out, err
 }
 
 // Close closes the connection to the current tool host. The jail is the

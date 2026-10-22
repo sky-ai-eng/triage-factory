@@ -26,7 +26,7 @@ var Bash = Tool{
 	Description: "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
 	Params: obj([]string{"command"},
 		str("command", "Bash command to execute"),
-		num("timeout", "Timeout in seconds (optional, no default timeout)"),
+		num("timeout", "Timeout in seconds (optional). Without one, the command is stopped at the sandbox's default limit; a timeout above the sandbox's maximum is refused."),
 		str("description", "What this command is doing, in 1-6 words and present tense: \"Reproducing the flake\", \"Vetting the sandbox package\". Describe the action, never its outcome."),
 		str("description_past", "The same summary in past tense, in 1-6 words: \"Ran the sampler test 50x\". You are writing it before the command runs, so describe the action, never a result you cannot know yet."),
 	),

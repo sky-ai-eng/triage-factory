@@ -237,6 +237,17 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	defer s.liveJails.add(cfg.claimID, jail)()
 	tools := launched.toolHost()
 	defer func() { _ = tools.Close() }()
+	// A tool call past its deadline ends with the jail it runs in, which the
+	// loop restarts and goes on, rather than with the engagement. The
+	// watchdog still stops the engagement for a call this does not end.
+	defer s.activityFor(conversationID).onToolOverrun(func(cause stallCause) bool {
+		ended := launched.endOverrunCall(timings.toolCall)
+		if ended {
+			delegateLog.Warn("a tool call ran past its deadline; stopping its jail to end it, and the loop restarts the jail",
+				"conversation", conversationID, "claim", cfg.claimID, "op", cause.op, "in_flight", cause.elapsed)
+		}
+		return ended
+	})()
 	if handedOff {
 		s.repointRenamedRemotesInJail(ctx, orgID, task.ID, claudeCwd, tools)
 	}
@@ -300,7 +311,12 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		HasBlueprint:   true,
 		// Derived from the very ceiling this jail was launched under, not from
 		// a constant that could drift from it.
-		BashMemBudgetMB:     nativeBashMemBudgetMB(memoryLimitMB),
+		BashMemBudgetMB: nativeBashMemBudgetMB(memoryLimitMB),
+		// Under the watchdog's bound for a tool call, the same timings the
+		// loop's activity reports against, so a command that never ends is
+		// answered as one that timed out before the call is overdue.
+		BashDefaultTimeout:  timings.bashDefaultTimeout(),
+		BashMaxTimeout:      timings.bashMaxTimeout(),
 		UserID:              creatorUserID,
 		ColdCompactionModel: coldModel,
 		Workspace:           cfg.workspace,

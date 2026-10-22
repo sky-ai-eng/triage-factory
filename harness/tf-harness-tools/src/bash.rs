@@ -34,6 +34,27 @@
 //! they produce false OOMs on healthy commands. Per-command cgroups don't
 //! exist under gVisor: the jail is one host cgroup and the in-jail cgroupfs is
 //! emulated and non-enforcing.
+//!
+//! # Time limits
+//!
+//! pi has no default timeout and no maximum. A configured session can have
+//! both: a command given no timeout gets the default, and a timeout above the
+//! maximum is refused before anything runs. The maximum is what lets a caller
+//! with its own deadline for a tool call count on the command ending, and
+//! being answered as one that timed out, before that deadline passes.
+//! Unconfigured, as the one-shot CLI and the parity corpus run, there is
+//! neither.
+//!
+//! # Background processes that keep the output open
+//!
+//! A process the command starts in the background inherits its stdout and
+//! stderr, so the pipes stay open after the shell exits. Read the way pi
+//! reads them, a process that logs steadily holds the call open forever, and
+//! one that is quiet when the call returns dies of SIGPIPE the next time it
+//! writes, because the pipes are closed under it. Here the reading after exit
+//! stops at [`POST_EXIT_GRACE_CAP`] at the latest, and the pipes are drained
+//! rather than closed until the process closes them: it keeps running, its
+//! later output is discarded, and the result says so.
 
 use std::os::unix::io::AsRawFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -53,6 +74,15 @@ use crate::truncate::{format_size, DEFAULT_MAX_BYTES};
 const MAX_TIMEOUT_MS: f64 = 2_147_483_647.0;
 const POST_EXIT_GRACE: Duration = Duration::from_millis(100);
 const READER_POLL_MS: i32 = 200;
+
+/// The longest the output is read after the shell exits. The idle grace above
+/// ends on a pipe that goes quiet; this ends it on one a background process
+/// keeps writing to.
+const POST_EXIT_GRACE_CAP: Duration = Duration::from_secs(2);
+
+/// How to run something that should outlast a tool call, in a form the model
+/// can copy.
+const BACKGROUND_EXAMPLE: &str = "`cmd > /tmp/cmd.log 2>&1 &`";
 
 /// How often the supervisor samples a command tree that is nowhere near its
 /// budget. Only armed when a budget is set: with no budget the supervisor
@@ -128,16 +158,47 @@ pub struct BashOptions {
     /// configured resident host — disables the watchdog entirely: no sampling
     /// tick, no `/proc` walk, no behavior to observe.
     pub mem_budget_mb: u64,
+    /// Timeout, in seconds, for a command the model gives none. Zero leaves
+    /// such a command unbounded, as pi does.
+    pub default_timeout_s: u64,
+    /// The largest timeout, in seconds, the model may give; a larger one is
+    /// refused before the command runs. Zero leaves only pi's own maximum.
+    pub max_timeout_s: u64,
 }
 
-fn resolve_timeout_ms(timeout: Option<f64>) -> Result<Option<f64>, ToolError> {
+/// A command's deadline, and whether the model chose it: what the model is
+/// told when it fires depends on which.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Deadline {
+    ms: f64,
+    defaulted: bool,
+}
+
+fn resolve_timeout(
+    timeout: Option<f64>,
+    options: &BashOptions,
+) -> Result<Option<Deadline>, ToolError> {
     let Some(timeout) = timeout else {
-        return Ok(None);
+        let mut default_s = options.default_timeout_s;
+        if options.max_timeout_s > 0 {
+            default_s = default_s.min(options.max_timeout_s);
+        }
+        return Ok((default_s > 0).then_some(Deadline {
+            ms: default_s as f64 * 1000.0,
+            defaulted: true,
+        }));
     };
     if !timeout.is_finite() || timeout <= 0.0 {
         return Err(ToolError::new(
             "Invalid timeout: must be a finite number of seconds",
         ));
+    }
+    if options.max_timeout_s > 0 && timeout > options.max_timeout_s as f64 {
+        return Err(ToolError::new(format!(
+            "Invalid timeout: maximum is {}. To run something longer, start it in the background with its \
+output in a file ({BACKGROUND_EXAMPLE}) and check on it with later commands.",
+            seconds_with_minutes(options.max_timeout_s)
+        )));
     }
     let timeout_ms = timeout * 1000.0;
     if timeout_ms > MAX_TIMEOUT_MS {
@@ -146,7 +207,72 @@ fn resolve_timeout_ms(timeout: Option<f64>) -> Result<Option<f64>, ToolError> {
             js_num(MAX_TIMEOUT_MS / 1000.0)
         )));
     }
-    Ok(Some(timeout_ms))
+    Ok(Some(Deadline {
+        ms: timeout_ms,
+        defaulted: false,
+    }))
+}
+
+/// A whole number of minutes as words: "10 minutes", "1 minute". None when
+/// `seconds` is not one.
+fn whole_minutes(seconds: u64) -> Option<String> {
+    if seconds == 0 || !seconds.is_multiple_of(60) {
+        return None;
+    }
+    let minutes = seconds / 60;
+    Some(if minutes == 1 {
+        "1 minute".to_string()
+    } else {
+        format!("{minutes} minutes")
+    })
+}
+
+/// A number of seconds as words: "1 second", "90 seconds".
+fn seconds_phrase(seconds: u64) -> String {
+    if seconds == 1 {
+        "1 second".to_string()
+    } else {
+        format!("{seconds} seconds")
+    }
+}
+
+/// A limit in the unit the `timeout` argument takes, with minutes beside it
+/// when they are whole: "1740 seconds (29 minutes)".
+fn seconds_with_minutes(seconds: u64) -> String {
+    match whole_minutes(seconds) {
+        Some(minutes) => format!("{} ({minutes})", seconds_phrase(seconds)),
+        None => seconds_phrase(seconds),
+    }
+}
+
+/// What the model is told when the default timeout ends a command it gave
+/// no timeout. It names the limit, since nothing else says one exists, and
+/// the two ways past it.
+fn default_timeout_notice(default_s: u64, max_s: u64) -> String {
+    let limit = whole_minutes(default_s).unwrap_or_else(|| seconds_phrase(default_s));
+    let longer = if max_s > 0 {
+        format!("pass a timeout of up to {}", seconds_with_minutes(max_s))
+    } else {
+        "pass a longer timeout".to_string()
+    };
+    format!(
+        "Command timed out after {limit}, the limit for a command run without a timeout. For a command that \
+needs longer, {longer}. For anything longer than that, or anything that does not exit on its own such as a \
+server or a watcher, start it in the background with its output in a file ({BACKGROUND_EXAMPLE}) and check \
+on it with later commands."
+    )
+}
+
+/// What the model is told when a process the command started in the
+/// background still holds its output as the call returns. Without it the
+/// model would not know the process outlived the command, or why it will
+/// never see that process's output.
+fn background_holder_notice() -> String {
+    format!(
+        "A process this command started in the background is still attached to its output. It keeps \
+running, but what it prints from now on is discarded; to keep that, redirect its output to a file \
+({BACKGROUND_EXAMPLE})."
+    )
 }
 
 /// Why the supervisor killed the command tree. Absent when the command exited
@@ -388,9 +514,14 @@ fn reader_thread(
                 break;
             }
             let data = &buf[..n as usize];
-            if shared.accepting.load(Ordering::Relaxed) {
+            // Read under the accumulator's lock, so nothing is appended once
+            // the call has taken its output: a pipe drained for a process
+            // still running in the background keeps arriving here.
+            {
                 let mut acc = shared.accumulator.lock().unwrap();
-                acc.append(data);
+                if shared.accepting.load(Ordering::Relaxed) {
+                    acc.append(data);
+                }
             }
             let mut state = shared.state.lock().unwrap();
             state.last_data_at = Instant::now();
@@ -462,7 +593,7 @@ pub fn execute(
     args: &BashArgs,
     options: &BashOptions,
 ) -> ToolResultOrError<BashToolDetails> {
-    let timeout_ms = resolve_timeout_ms(args.timeout)?;
+    let deadline_spec = resolve_timeout(args.timeout, options)?;
 
     let resolved_command = match &options.command_prefix {
         Some(prefix) => format!("{prefix}\n{}", args.command),
@@ -543,7 +674,7 @@ pub fn execute(
         let _ = exit_tx.send(child.wait());
     });
 
-    let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms as u64));
+    let deadline = deadline_spec.map(|d| Instant::now() + Duration::from_millis(d.ms as u64));
     let (wait_result, killed) = supervise(
         &exit_rx,
         pid,
@@ -553,27 +684,55 @@ pub fn execute(
     let _ = wait_handle.join();
 
     // Post-exit stdio grace: keep reading while data still arrives; release
-    // after both pipes end or the grace elapses idle.
-    {
+    // after both pipes end, the grace elapses idle, or the cap is reached.
+    // held is a pipe still open when it ends: something the command started
+    // in the background has it.
+    let held = {
         let mut state = shared.state.lock().unwrap();
-        state.last_data_at = Instant::now();
+        let grace_started = Instant::now();
+        state.last_data_at = grace_started;
         loop {
             if state.readers_done >= 2 {
-                break;
+                break false;
             }
             let idle = state.last_data_at.elapsed();
-            if idle >= POST_EXIT_GRACE {
-                break;
+            let reading = grace_started.elapsed();
+            if idle >= POST_EXIT_GRACE || reading >= POST_EXIT_GRACE_CAP {
+                break true;
             }
-            let wait_for = POST_EXIT_GRACE - idle;
+            let wait_for = (POST_EXIT_GRACE - idle).min(POST_EXIT_GRACE_CAP - reading);
             let (next, _timeout) = shared.condvar.wait_timeout(state, wait_for).unwrap();
             state = next;
         }
+    };
+    // Under the accumulator's lock, the lock every append takes, so no
+    // reader appends after this.
+    {
+        let _acc = shared.accumulator.lock().unwrap();
+        shared.accepting.store(false, Ordering::Relaxed);
     }
-    shared.accepting.store(false, Ordering::Relaxed);
-    shared.stop.store(true, Ordering::Relaxed);
-    let _ = reader_a.join();
-    let _ = reader_b.join();
+    if held {
+        // The readers are left draining: closing a pipe a process still
+        // writes to would kill it with SIGPIPE. Each ends at its pipe's EOF,
+        // when the last process holding it exits.
+        drop(reader_a);
+        drop(reader_b);
+    } else {
+        shared.stop.store(true, Ordering::Relaxed);
+        let _ = reader_a.join();
+        let _ = reader_b.join();
+    }
+    let with_holder_note = |text: String| -> String {
+        if !held {
+            return text;
+        }
+        let note = background_holder_notice();
+        if text.is_empty() {
+            note
+        } else {
+            format!("{text}\n\n{note}")
+        }
+    };
 
     let exit_code: Option<i64> = match &wait_result {
         Ok(status) => status.code().map(i64::from),
@@ -653,13 +812,19 @@ pub fn execute(
     match killed {
         Some(KillReason::Timeout) => {
             let (text, _) = format_output(&snapshot, "", last_line_bytes);
-            return Err(ToolError::new(append_status(
-                &text,
-                &format!(
+            let status = match deadline_spec {
+                Some(Deadline {
+                    ms,
+                    defaulted: true,
+                }) => default_timeout_notice((ms / 1000.0) as u64, options.max_timeout_s),
+                _ => format!(
                     "Command timed out after {} seconds",
                     js_num(args.timeout.unwrap_or(0.0))
                 ),
-            )));
+            };
+            return Err(ToolError::new(with_holder_note(append_status(
+                &text, &status,
+            ))));
         }
         Some(KillReason::MemoryBudget { observed_bytes }) => {
             // Reason first, then whatever the command managed to print: this
@@ -667,10 +832,10 @@ pub fn execute(
             // the model the limit exists — so it leads, and the partial output
             // it kept follows as evidence.
             let (text, _) = format_output(&snapshot, "", last_line_bytes);
-            return Err(ToolError::new(prepend_status(
+            return Err(ToolError::new(with_holder_note(prepend_status(
                 &memory_budget_notice(observed_bytes, options.mem_budget_mb),
                 &text,
-            )));
+            ))));
         }
         None => {}
     }
@@ -687,15 +852,15 @@ pub fn execute(
     }
     if let Some(code) = exit_code {
         if code != 0 {
-            return Err(ToolError::new(append_status(
+            return Err(ToolError::new(with_holder_note(append_status(
                 &output_text,
                 &format!("Command exited with code {code}"),
-            )));
+            ))));
         }
     }
 
     Ok(ToolResult {
-        content: vec![ContentBlock::text(output_text)],
+        content: vec![ContentBlock::text(with_holder_note(output_text))],
         details,
     })
 }
@@ -756,6 +921,68 @@ mod tests {
         assert_eq!(describe_signal(libc::SIGKILL), "SIGKILL (signal 9)");
         assert_eq!(describe_signal(libc::SIGSEGV), "SIGSEGV (signal 11)");
         assert_eq!(describe_signal(64), "signal 64");
+    }
+
+    /// The default applies only to a command given no timeout, never exceeds
+    /// the maximum, and a timeout over the maximum is refused; unconfigured,
+    /// nothing changes.
+    #[test]
+    fn a_session_s_time_limits_resolve_a_command_s_deadline() {
+        let limits = BashOptions {
+            default_timeout_s: 600,
+            max_timeout_s: 1740,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_timeout(None, &limits).unwrap(),
+            Some(Deadline {
+                ms: 600_000.0,
+                defaulted: true
+            })
+        );
+        assert_eq!(
+            resolve_timeout(Some(1740.0), &limits).unwrap(),
+            Some(Deadline {
+                ms: 1_740_000.0,
+                defaulted: false
+            })
+        );
+        assert_eq!(
+            resolve_timeout(Some(1741.0), &limits).unwrap_err().0,
+            "Invalid timeout: maximum is 1740 seconds (29 minutes). To run something longer, start it in the \
+background with its output in a file (`cmd > /tmp/cmd.log 2>&1 &`) and check on it with later commands."
+        );
+        let default_over_max = BashOptions {
+            default_timeout_s: 600,
+            max_timeout_s: 60,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_timeout(None, &default_over_max).unwrap(),
+            Some(Deadline {
+                ms: 60_000.0,
+                defaulted: true
+            })
+        );
+        let unconfigured = BashOptions::default();
+        assert_eq!(resolve_timeout(None, &unconfigured).unwrap(), None);
+        assert_eq!(
+            resolve_timeout(Some(100_000.0), &unconfigured).unwrap(),
+            Some(Deadline {
+                ms: 100_000_000.0,
+                defaulted: false
+            })
+        );
+    }
+
+    #[test]
+    fn limits_read_as_words() {
+        assert_eq!(seconds_with_minutes(1740), "1740 seconds (29 minutes)");
+        assert_eq!(seconds_with_minutes(60), "60 seconds (1 minute)");
+        assert_eq!(seconds_with_minutes(90), "90 seconds");
+        assert_eq!(seconds_with_minutes(1), "1 second");
+        assert_eq!(whole_minutes(600).as_deref(), Some("10 minutes"));
+        assert_eq!(whole_minutes(0), None);
     }
 
     /// Saturating arithmetic on both sides: a sample large enough to overflow a

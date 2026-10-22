@@ -7,6 +7,7 @@ use crate::image::{detect_supported_image_mime_type_from_file, process_image, Pr
 use crate::jsnum::{js_num, to_index};
 use crate::paths::resolve_read_path;
 use crate::result::{ContentBlock, ReadToolDetails, ToolError, ToolResult, ToolResultOrError};
+use crate::special::refuse_special_file;
 use crate::truncate::{format_size, truncate_head, TruncationOptions, DEFAULT_MAX_BYTES};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -61,6 +62,7 @@ pub fn execute(
 ) -> ToolResultOrError<ReadToolDetails> {
     let absolute_path = resolve_read_path(&args.path, cwd);
     access_readable(&absolute_path)?;
+    refuse_special_file(&absolute_path, "read")?;
 
     let non_vision_note = match options.model_supports_images {
         Some(false) => Some(NON_VISION_NOTE),

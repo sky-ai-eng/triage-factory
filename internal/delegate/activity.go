@@ -38,6 +38,14 @@ const (
 	toolCallDeadline   = 30 * time.Minute
 	toolSocketDeadline = toolCallDeadline + time.Minute
 
+	// A native engagement's bash time limits. A command the model gives no
+	// timeout is stopped at bashTimeoutDefault, and the largest timeout it
+	// may give sits bashTimeoutMargin under the tool-call bound
+	// (bashMaxTimeout), so the tool host ends a command and answers for it
+	// before the call is overdue.
+	bashTimeoutDefault = 10 * time.Minute
+	bashTimeoutMargin  = time.Minute
+
 	// One workspace operation: a clone, a snapshot rehydrate, or the
 	// snapshot an ending takes. This is the operation's own timeout; the
 	// watchdog tracks it backstopMargin past this, so the timeout fails the
@@ -117,15 +125,31 @@ type activityTracker struct {
 	// engagement letting go of the conversation reaches only its own tracker.
 	claimID string
 	// firing covers a decided stall while its callback runs, so stop can
-	// wait for the stop the callback is filing.
+	// wait for the stop the callback is filing. It covers an overrun's
+	// callback the same way.
 	firing sync.WaitGroup
+	// overrun, when set, is offered a tool call that has outlived its
+	// deadline before anything is decided. It reports whether it ended the
+	// call some other way than stopping the engagement; the call then has
+	// overrunGrace to return before the stall is decided after all.
+	overrun      func(stallCause) bool
+	overrunGrace time.Duration
 }
 
 type inflightOp struct {
 	name     string    // "provider", "tool:<name>", "clone", "rehydrate", "permission", ...
 	started  time.Time // monotonic
 	deadline time.Time // monotonic; extended by progress for provider streams
+	// overran marks a tool call already offered to overrun, so the one call
+	// is never ended twice: past its grace it is a stall like any other.
+	overran bool
 }
+
+// toolOverrunGrace is how long a tool call the overrun hook ended has to
+// return before the watchdog stops the engagement for it after all. Stopping
+// a jail fails the call on its socket at once, so a call still in flight this
+// long after is one the stop did not reach.
+const toolOverrunGrace = backstopMargin
 
 // newActivityTracker starts an engagement's watchdog with nothing in flight,
 // counting the start itself as activity.
@@ -134,6 +158,7 @@ func newActivityTracker(idleLimit time.Duration, stalled func(stallCause)) *acti
 		idleLimit:    idleLimit,
 		lastActivity: time.Now(),
 		stalled:      stalled,
+		overrunGrace: toolOverrunGrace,
 	}
 	a.timer = time.AfterFunc(idleLimit, a.check)
 	return a
@@ -162,6 +187,22 @@ func (a *activityTracker) begin(name string, bound time.Duration) (end func()) {
 		a.op = nil
 		a.lastActivity = time.Now()
 		a.rearmLocked()
+	}
+}
+
+// onToolOverrun installs the hook a tool call past its deadline is offered
+// before the watchdog stops the engagement for it, and returns its removal.
+func (a *activityTracker) onToolOverrun(hook func(stallCause) bool) (remove func()) {
+	if a == nil {
+		return func() {}
+	}
+	a.mu.Lock()
+	a.overrun = hook
+	a.mu.Unlock()
+	return func() {
+		a.mu.Lock()
+		a.overrun = nil
+		a.mu.Unlock()
 	}
 }
 
@@ -255,6 +296,28 @@ func (a *activityTracker) check() {
 		a.mu.Unlock()
 		return
 	}
+	if op := a.op; op != nil && !op.overran && a.overrun != nil && strings.HasPrefix(op.name, agentloop.ToolActivityOpPrefix) {
+		op.overran = true
+		op.deadline = now.Add(a.overrunGrace)
+		a.rearmLocked()
+		overrun := a.overrun
+		a.firing.Add(1)
+		a.mu.Unlock()
+		handled := overrun(stallCause{op: op.name, elapsed: now.Sub(op.started)})
+		a.firing.Done()
+		if handled {
+			return
+		}
+		// Nothing was in flight for the hook to end, such as a restart that
+		// is itself stuck, so the stall is decided now rather than after the
+		// grace.
+		a.mu.Lock()
+		if a.stopped || a.decided || a.op != op {
+			a.mu.Unlock()
+			return
+		}
+		now = time.Now()
+	}
 	var cause stallCause
 	if a.op != nil {
 		cause = stallCause{op: a.op.name, elapsed: now.Sub(a.op.started)}
@@ -294,6 +357,20 @@ type activityTimings struct {
 // fails it.
 func (t activityTimings) toolSocket() time.Duration {
 	return t.toolCall + (toolSocketDeadline - toolCallDeadline)
+}
+
+// bashMaxTimeout is the largest timeout a native engagement's bash command may
+// run under: the tool-call bound less the time the tool host needs to kill
+// the command, reap it and answer. The margin shrinks with an injected bound
+// so it never takes the whole of it.
+func (t activityTimings) bashMaxTimeout() time.Duration {
+	return t.toolCall - min(bashTimeoutMargin, t.toolCall/10)
+}
+
+// bashDefaultTimeout is the timeout of a native engagement's bash command
+// given none, never above the maximum.
+func (t activityTimings) bashDefaultTimeout() time.Duration {
+	return min(bashTimeoutDefault, t.bashMaxTimeout())
 }
 
 // workspaceOpBackstop is the watchdog's deadline for a workspace operation,

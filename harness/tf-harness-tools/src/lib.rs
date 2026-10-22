@@ -26,6 +26,7 @@ pub mod read;
 pub mod result;
 pub mod serve;
 pub mod shell;
+pub mod special;
 pub mod truncate;
 pub mod validate;
 pub mod write;
@@ -45,6 +46,12 @@ pub struct ToolConfig {
     /// Per-command resident-memory budget for `bash`, in MB. Zero disables the
     /// watchdog entirely.
     pub bash_mem_budget_mb: u64,
+    /// Timeout, in seconds, for a `bash` command given none. Zero leaves it
+    /// unbounded.
+    pub bash_default_timeout_s: u64,
+    /// Largest `bash` timeout, in seconds, a call may give. Zero leaves only
+    /// pi's own maximum.
+    pub bash_max_timeout_s: u64,
 }
 
 /// Execute a tool by name against JSON args, returning the pi-shaped result
@@ -86,6 +93,8 @@ pub fn run_tool_configured(
             let parsed: bash::BashArgs = serde_json::from_value(args).map_err(bad_args)?;
             let options = bash::BashOptions {
                 mem_budget_mb: config.bash_mem_budget_mb,
+                default_timeout_s: config.bash_default_timeout_s,
+                max_timeout_s: config.bash_max_timeout_s,
                 ..Default::default()
             };
             let result = bash::execute(cwd, &parsed, &options)?;

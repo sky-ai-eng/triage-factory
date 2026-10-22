@@ -389,3 +389,133 @@ fn a_configured_budget_kills_a_real_allocator_in_the_jail() {
         "the jail's tool host did not survive the kill: {after}"
     );
 }
+
+/// The bash time limits in the jail: a command given no timeout is ended at
+/// the configured default, a timeout over the maximum is refused before it
+/// runs, and the tool host goes on answering.
+#[test]
+fn configured_time_limits_end_and_refuse_commands_in_the_jail() {
+    if preflight().is_none() {
+        return;
+    }
+    let mut jail = Jail::start(&[]);
+
+    let configured = jail.call(&json!({
+        "id": 1,
+        "tool": "_configure",
+        "args": { "bash_default_timeout_s": 2, "bash_max_timeout_s": 5 },
+    }));
+    assert_eq!(
+        configured["ok"],
+        json!(true),
+        "configure failed in jail: {configured}"
+    );
+
+    let started = Instant::now();
+    let ended = jail.call(&json!({
+        "id": 2,
+        "tool": "bash",
+        "args": { "command": "echo start; sleep 60" },
+    }));
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the default took {:?} to end the command",
+        started.elapsed()
+    );
+    let message = ended["error"].as_str().unwrap_or_default();
+    assert!(
+        message.starts_with("start\n")
+            && message.contains(
+                "Command timed out after 2 seconds, the limit for a command run without a timeout."
+            ),
+        "unexpected in-jail default timeout: {ended}"
+    );
+
+    let refused = jail.call(&json!({
+        "id": 3,
+        "tool": "bash",
+        "args": { "command": "touch ran", "timeout": 6 },
+    }));
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("Invalid timeout: maximum is 5 seconds."),
+        "unexpected in-jail refusal: {refused}"
+    );
+
+    let after = jail.call(&json!({
+        "id": 4,
+        "tool": "bash",
+        "args": { "command": "test -e ran && echo ran || echo not-run" },
+    }));
+    assert_eq!(
+        text_of(&after),
+        "not-run\n",
+        "the refused command ran, or the host died: {after}"
+    );
+}
+
+/// A background process the command leaves holding its output neither holds
+/// the call open nor dies of SIGPIPE once the call returns.
+#[test]
+fn a_background_process_outlives_its_call_in_the_jail() {
+    if preflight().is_none() {
+        return;
+    }
+    let mut jail = Jail::start(&[]);
+
+    let started = Instant::now();
+    let launched = jail.call(&json!({
+        "id": 1,
+        "tool": "bash",
+        "args": {
+            "command": "(while :; do echo tick; sleep 0.05; done) & echo $! > steady.pid; (sleep 1; echo late; touch survived) & echo launched"
+        },
+    }));
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "the call waited {:?} on a background process",
+        started.elapsed()
+    );
+    assert_eq!(
+        launched["ok"],
+        json!(true),
+        "launch failed in jail: {launched}"
+    );
+    assert!(
+        text_of(&launched).contains("still attached to its output"),
+        "no note about the background process: {launched}"
+    );
+
+    std::thread::sleep(Duration::from_secs(3));
+    let check = jail.call(&json!({
+        "id": 2,
+        "tool": "bash",
+        "args": { "command": "kill -0 $(cat steady.pid) && echo steady-alive; test -e survived && echo survived" },
+    }));
+    assert_eq!(
+        text_of(&check),
+        "steady-alive\nsurvived\n",
+        "a background process died after its call returned: {check}"
+    );
+}
+
+/// A named pipe in the jail is refused by the file tools instead of holding
+/// the session's only call.
+#[test]
+fn the_file_tools_refuse_a_named_pipe_in_the_jail() {
+    if preflight().is_none() {
+        return;
+    }
+    let mut jail = Jail::start(&[]);
+    let made = jail.call(&json!({ "id": 1, "tool": "bash", "args": { "command": "mkfifo pipe" } }));
+    assert_eq!(made["ok"], json!(true), "mkfifo failed in jail: {made}");
+
+    let read = jail.call(&json!({ "id": 2, "tool": "read", "args": { "path": "pipe" } }));
+    assert_eq!(
+        read["error"],
+        json!("Cannot read /tf/work/pipe: it is a named pipe, not a regular file."),
+        "unexpected in-jail read of a pipe: {read}"
+    );
+}
