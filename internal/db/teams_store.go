@@ -339,7 +339,7 @@ type TeamsStore interface {
 	// (EffectiveGitHubHost, NormalizeJiraHost: an unset base URL is no host
 	// and matches nothing). A member's
 	// GitHubUsername / JiraAccountID is nil when they hold no binding on that
-	// host. linearWorkspaceID is the org's Linear workspace
+	// host, and GitHubUserID when they hold none or it recorded no id. linearWorkspaceID is the org's Linear workspace
 	// (domain.OrgSettings.LinearWorkspaceID), matched verbatim; "" matches
 	// nothing, and a member's LinearUserID is nil when they hold no binding in
 	// it.

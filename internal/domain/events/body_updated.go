@@ -20,16 +20,14 @@ type GitHubPRBodyUpdatedMetadata struct {
 }
 
 type GitHubPRBodyUpdatedPredicate struct {
-	AuthorIn []string `json:"author_in,omitempty" doc:"Match PR authors by GitHub login."`
-	Author   *string  `json:"author,omitempty"`
-	RepoIn   []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
-	IsDraft  *bool    `json:"is_draft,omitempty"`
-	HasLabel *string  `json:"has_label,omitempty"`
+	AuthorIDIn []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	RepoIn     []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	IsDraft    *bool    `json:"is_draft,omitempty"`
+	HasLabel   *string  `json:"has_label,omitempty"`
 }
 
 func (p GitHubPRBodyUpdatedPredicate) Matches(m GitHubPRBodyUpdatedMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) && idIn(p.RepoIn, m.RepositoryID) &&
+	return idIn(p.AuthorIDIn, m.AuthorID) && idIn(p.RepoIn, m.RepositoryID) &&
 		boolEq(p.IsDraft, m.IsDraft) && hasLabel(p.HasLabel, m.Labels)
 }
 

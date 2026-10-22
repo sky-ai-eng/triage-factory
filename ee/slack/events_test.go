@@ -32,7 +32,7 @@ func TestSlackMessageSchema_Registered(t *testing.T) {
 
 // TestSlackMessagePredicate_MatchesAll pins the empty-predicate case: an
 // empty (or absent) channel_in list means "no filter," matching everything
-// — the *_in convention shared with GitHubPRCICheckFailedPredicate.AuthorIn.
+// — the *_in convention shared with GitHubPRCICheckFailedPredicate.AuthorIDIn.
 func TestSlackMessagePredicate_MatchesAll(t *testing.T) {
 	sc, ok := events.Get(domain.EventSlackMessage)
 	if !ok {

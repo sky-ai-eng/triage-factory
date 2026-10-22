@@ -189,9 +189,12 @@ inline comment in a review) or `body`. `commenter` and `comment_id` name the
 comment or review: a review's id for `review`, and both empty for `body`. The
 event also carries the PR's `author`, `repo`, `pr_number`, `is_draft`,
 `head_sha` and `labels`. Predicates can filter on `mentioned_login`,
-`mentioned_team`, `mention_source`, `commenter_in`, `commenter`, `author_in`,
-`author`, `repo_in`, `is_draft` and `has_label`; a body mention has no commenter,
-so no `commenter_in` list matches it. The event's time is the comment's
+`mentioned_team`, `mention_source`, `commenter_id_in`, `author_id_in`,
+`repo_in`, `is_draft` and `has_label`; a body mention has no commenter, so no
+`commenter_id_in` list matches it. `mentioned_login` and `mentioned_team` take
+the handle, compared without regard to case, because a mention is text and
+names no id; `commenter_id_in` and `author_id_in` take GitHub account ids (see
+[Identity filters](#identity-filters)). The event's time is the comment's
 creation or the review's submission. The body records no time for an edit, so a
 body mention takes the PR's `updatedAt`.
 
@@ -315,10 +318,13 @@ rule (Cloud `accountId`, else Data Center `key`, else `name`), so a
 `commenter_in` list holds the same values as an `assignee_in` list. A Linear
 comment an integration posted names the integration as `commenter` and has no
 user id, so no `commenter_in` list matches it. On GitHub the commenter is a
-login, `<slug>[bot]` for a bot, whose comments emit like anyone's; the GitHub
-event also carries the PR's `author`, `repo`, `pr_number`, `is_draft`,
-`head_sha` and `labels`, and predicates can filter it on `author_in`, `repo_in`,
-`is_draft` and `has_label`. The event's time is the newest comment's.
+login, `<slug>[bot]` for a bot, whose comments emit like anyone's, and the
+metadata carries GitHub's id for each author (`commenter_id`,
+`commenter_ids`); the GitHub predicate's `commenter_id_in` matches when anyone
+it lists, by account id, wrote one of them. The GitHub event also carries the
+PR's `author`, `repo`, `pr_number`, `is_draft`, `head_sha` and `labels`, and
+predicates can filter it on `author_id_in`, `repo_in`, `is_draft` and
+`has_label`. The event's time is the newest comment's.
 
 GitHub's event covers the PR's conversation only. A comment in a review thread
 belongs to a review and emits as one (see [Reviews](#reviews)). Edits to a
@@ -849,6 +855,15 @@ The tracker stores these fields for each PR and diffs them between cycles:
 `author` and each review's `author` are logins as GitHub's REST API spells them: a bot is `<slug>[bot]` (`dependabot[bot]`), the form event metadata carries as `author` and `reviewer`. GraphQL returns a bot's login without the suffix; the snapshot builder adds it. Beside every login the snapshot records GitHub's id for the account (`author_id`), which a rename does not change. A snapshot stored before ids were recorded has none, and neither does an actor GitHub returns without one (a deleted account).
 
 Every GitHub event's metadata carries the ids beside the logins it names: `author_id` for the PR author, `reviewer_id` on the review events, `commenter_id` (and `commenter_ids`, beside `commenter_logins`) on `commented`, `commenter_id` on `mentioned`, and `requested_user_id` / `requested_team_id` on the review-request events. A mention has no id of its own: `mentioned_login` and `mentioned_team` are the handle the text spelled, and a mention is resolved and keyed by it. An event recorded before ids were carries none.
+
+#### Identity filters
+
+A GitHub handler predicate names people and teams by GitHub's id, which a rename does not change, never by login:
+
+- `author_id_in` (every GitHub event), `reviewer_id_in` (the review events), `commenter_id_in` (`commented` and `mentioned`) and `requested_user_id_in` (`review_requested`, `review_request_removed`) take GitHub account ids, matched exactly against `author_id`, `reviewer_id`, `commenter_ids` / `commenter_id` and `requested_user_id`. A team member's id is the `github_user_id` of `GET /api/me` and of the team roster (`POST /api/teams/{team_id}/members/list`). Any other account, a bot included, is resolved from its login through the org's GitHub credential with `GET /api/orgs/{org_id}/github/users/by-name/{login}`, which answers `404` for a login no account holds; `GET /api/orgs/{org_id}/github/users/{github_user_id}` names an id by its current login. Creating, editing or promoting a handler refuses an entry that is not an account id, a login included, with `422 INVALID_FIELD` on `scope_predicate`.
+- `requested_team_id_in` (`review_requested`, `review_request_removed`) takes GitHub team ids, matched against `requested_team_id`. Each entry must be the `github_team_id` of one of the handler's team's GitHub-team mappings (`GET /api/teams/{team_id}/github-groups`), the teams whose review requests route to it, and any other entry, an `org/slug` included, is refused with `422 INVALID_FIELD` on `scope_predicate`.
+
+As with `repo_in`, an edit is checked only for the entries it adds. An empty list filters nothing. An event recorded before ids were carries none, so an identity filter never matches it: re-evaluating such an event (a deferred trigger re-scored on an old task, an injected follow-up) finds no match. A GitHub predicate has no login-valued identity field: `author_in`, `author`, `reviewer_in`, `reviewer`, `commenter_in`, `commenter`, `requested_login` and `requested_team` are unknown fields, refused with `400`. A local install's stored predicates are migrated to the id fields, each login replaced by the id of the identity binding holding it on the org's GitHub host. An entry the migration could not resolve, a login no binding with an id holds or a team's `org/slug`, stays as written and matches nothing until the handler is edited.
 
 Every GitHub event's metadata names its repository twice: `repo`, the `owner/name` it had when the event fired, and `repository_id`, the repository's registry row, which a rename does not move. A handler predicate scopes to repositories with `repo_in`, which names them by registry id (the `id` field of `POST /api/repos/list` with `team_id`), not by `owner/name`. A team's handlers only ever see events from repositories the team tracks — the router's team gate asks about the registry row the event's pull request references, never the name in its key — so an empty `repo_in` matches every one of them, and each entry must be a repository the handler's team tracks. Creating, editing or promoting a handler refuses any other entry, an `owner/name` included, with `422 INVALID_FIELD` on `scope_predicate`. An edit is checked only for the entries it adds, so a repository the team has since stopped tracking never blocks an edit that leaves it in place.
 

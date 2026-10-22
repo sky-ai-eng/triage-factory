@@ -767,6 +767,10 @@ export interface MeResponse {
   display_name?: string
   avatar_url?: string
   github_username?: string
+  /** GitHub's id for the account behind github_username: the value a GitHub
+   *  predicate's identity filters (author_id_in and its siblings) store.
+   *  Absent when GitHub is not connected, or the binding recorded no id. */
+  github_user_id?: string
   /** Atlassian account ID. Absent when Jira is not yet connected — the
    *  predicate editor renders the Variant-A toggle disabled with a
    *  "configure Jira on Settings" hint. */
@@ -1036,6 +1040,10 @@ export interface TeamMember {
   user_id: string
   display_name: string
   github_username: string | null
+  /** GitHub's id for the account behind github_username, the value a GitHub
+   *  predicate's identity filters store. Null when this member hasn't
+   *  connected GitHub, or their binding recorded no id. */
+  github_user_id: string | null
   /** Atlassian account ID. Null when this member hasn't
    *  connected Jira yet. */
   jira_account_id: string | null

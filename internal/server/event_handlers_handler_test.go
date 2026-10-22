@@ -272,17 +272,17 @@ func TestHandleEventHandlerCreate_PredicateIsAnObject(t *testing.T) {
 		}
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", body(map[string]any{"author_in": []string{"aidan"}}))
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", body(map[string]any{"author_id_in": []string{"583231"}}))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("object predicate: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 	var got map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	if got["scope_predicate_json"] != `{"author_in":["aidan"]}` {
+	if got["scope_predicate_json"] != `{"author_id_in":["583231"]}` {
 		t.Errorf("stored predicate = %v, want the canonical object text", got["scope_predicate_json"])
 	}
 
-	if rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", body(`{"author_in":["aidan"]}`)); rec.Code != http.StatusBadRequest {
+	if rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", body(`{"author_id_in":["583231"]}`)); rec.Code != http.StatusBadRequest {
 		t.Errorf("string-wrapped predicate: expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

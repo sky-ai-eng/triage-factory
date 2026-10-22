@@ -92,7 +92,7 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 	t.Run("EqualContent_ZeroWrites", func(t *testing.T) {
 		stores, orgID, teamID, _, handlerID := factory(t)
 		handlers := []db.ShippedEventHandler{
-			syncRule("hr-eq", domain.EventGitHubPRCICheckFailed, `{"author_in":[]}`, "HEq", 0.5, 0),
+			syncRule("hr-eq", domain.EventGitHubPRCICheckFailed, `{"author_id_in":[]}`, "HEq", 0.5, 0),
 		}
 		if err := stores.EventHandlers.Sync(ctx, orgID, teamID, handlers, nil); err != nil {
 			t.Fatalf("sync: %v", err)
@@ -111,7 +111,7 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 	t.Run("StaleContent_UpdatedWithoutTouchingEnabled_WhenDisabled", func(t *testing.T) {
 		stores, orgID, teamID, _, handlerID := factory(t)
 		handlersA := []db.ShippedEventHandler{
-			syncRule("hr-stale-off", domain.EventGitHubPRCICheckFailed, `{"author_in":[]}`, "HStale", 0.5, 0),
+			syncRule("hr-stale-off", domain.EventGitHubPRCICheckFailed, `{"author_id_in":[]}`, "HStale", 0.5, 0),
 		}
 		if err := stores.EventHandlers.Sync(ctx, orgID, teamID, handlersA, nil); err != nil {
 			t.Fatalf("sync A: %v", err)
@@ -127,7 +127,7 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 		}
 
 		handlersB := []db.ShippedEventHandler{
-			syncRule("hr-stale-off", domain.EventGitHubPRCICheckFailed, `{"author_in":["someone"]}`, "HStale v2", 0.75, 0),
+			syncRule("hr-stale-off", domain.EventGitHubPRCICheckFailed, `{"author_id_in":["583231"]}`, "HStale v2", 0.75, 0),
 		}
 		if err := stores.EventHandlers.Sync(ctx, orgID, teamID, handlersB, nil); err != nil {
 			t.Fatalf("sync B: %v", err)
@@ -146,7 +146,7 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 			}
 			t.Errorf("stale content not restored: name=%q default_priority=%s", got.Name, dp)
 		}
-		if got.ScopePredicateJSON == nil || !db.PredicateJSONEqual(*got.ScopePredicateJSON, `{"author_in":["someone"]}`) {
+		if got.ScopePredicateJSON == nil || !db.PredicateJSONEqual(*got.ScopePredicateJSON, `{"author_id_in":["583231"]}`) {
 			pred := "nil"
 			if got.ScopePredicateJSON != nil {
 				pred = *got.ScopePredicateJSON

@@ -318,18 +318,17 @@ type ShippedEventHandler struct {
 var ShippedEventHandlers = []ShippedEventHandler{
 	// ----- rules ------------------------------------------------------------
 	//
-	// Rules that scope to "my PR" carry `author_in: []` as a placeholder.
-	// The SQLite Seed implementation substitutes the local user's
-	// users.github_username into the empty allowlist at insert time.
-	// Postgres Seed leaves the empty allowlist alone — multi
-	// mode doesn't have a single "self" to substitute; team visibility
-	// is the scoping mechanism there. Either way, users can edit the
-	// allowlist via the Settings UI to add or remove handles.
+	// Rules that scope to "my PR" carry an empty `author_id_in` allowlist,
+	// which filters nothing: both dialects seed it verbatim, and author-centric
+	// owner routing scopes these at event time instead, by delivering a PR's
+	// events to its author's team. It is there to show where a per-member
+	// author filter goes; users edit it via the Settings UI to add or remove
+	// GitHub accounts.
 	{
 		ID:              "system-rule-ci-check-failed",
 		Kind:            domain.EventHandlerKindRule,
 		EventType:       domain.EventGitHubPRCICheckFailed,
-		Predicate:       `{"author_in":[]}`,
+		Predicate:       `{"author_id_in":[]}`,
 		Name:            "CI check failed on my PR",
 		DefaultPriority: 0.75,
 		SortOrder:       0,
@@ -338,7 +337,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		ID:              "system-rule-review-changes-requested",
 		Kind:            domain.EventHandlerKindRule,
 		EventType:       domain.EventGitHubPRReviewChangesRequested,
-		Predicate:       `{"author_in":[]}`,
+		Predicate:       `{"author_id_in":[]}`,
 		Name:            "Changes requested on my PR",
 		DefaultPriority: 0.85,
 		SortOrder:       1,
@@ -347,7 +346,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		ID:              "system-rule-review-commented",
 		Kind:            domain.EventHandlerKindRule,
 		EventType:       domain.EventGitHubPRReviewCommented,
-		Predicate:       `{"author_in":[]}`,
+		Predicate:       `{"author_id_in":[]}`,
 		Name:            "Reviewer commented on my PR",
 		DefaultPriority: 0.65,
 		SortOrder:       2,
@@ -412,7 +411,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		Kind:                   domain.EventHandlerKindTrigger,
 		BlueprintID:            "system-ci-fix",
 		EventType:              domain.EventGitHubPRCICheckFailed,
-		Predicate:              `{"author_in":[]}`,
+		Predicate:              `{"author_id_in":[]}`,
 		BreakerThreshold:       3,
 		MinAutonomySuitability: 0.0,
 	},
@@ -421,7 +420,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		Kind:                   domain.EventHandlerKindTrigger,
 		BlueprintID:            "system-conflict-resolution",
 		EventType:              domain.EventGitHubPRConflicts,
-		Predicate:              `{"author_in":[]}`,
+		Predicate:              `{"author_id_in":[]}`,
 		BreakerThreshold:       2,
 		MinAutonomySuitability: 0.0,
 	},
@@ -467,7 +466,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		Kind:                   domain.EventHandlerKindTrigger,
 		BlueprintID:            "system-fix-review-feedback",
 		EventType:              domain.EventGitHubPRReviewChangesRequested,
-		Predicate:              `{"author_in":[]}`,
+		Predicate:              `{"author_id_in":[]}`,
 		BreakerThreshold:       3,
 		MinAutonomySuitability: 0.0,
 	},

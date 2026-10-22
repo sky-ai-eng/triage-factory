@@ -231,6 +231,46 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 		}
 	})
 
+	t.Run("ListMembers_GitHubUserID", func(t *testing.T) {
+		// github_user_id is GitHub's id for the member's bound account: the
+		// value a GitHub predicate's identity filters take. A binding that
+		// recorded no id, and one on another host, read nil.
+		stores, seed, teamID := team(t)
+		withID := seed.User(t, "With id")
+		withoutID := seed.User(t, "Without id")
+		elsewhere := seed.User(t, "Elsewhere")
+		seed.Membership(t, withID, teamID, "admin")
+		seed.Membership(t, withoutID, teamID, "member")
+		seed.Membership(t, elsewhere, teamID, "member")
+		if err := stores.Users.UpsertGitHubIdentity(ctx, withID, ghHost, "octocat", "583231", "", "pat"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity: %v", err)
+		}
+		if err := stores.Users.UpsertGitHubIdentity(ctx, withoutID, ghHost, "hubot", "", "", "pat"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity: %v", err)
+		}
+		if err := stores.Users.UpsertGitHubIdentity(ctx, elsewhere, "https://ghe.corp.example", "corp-login", "77", "", "pat"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity: %v", err)
+		}
+
+		members, _, err := stores.Teams.ListMembers(ctx, teamID, ghHost, jiraHost, linearWorkspace, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("ListMembers: %v", err)
+		}
+		rows := byID(members)
+		if got := rows[withID].GitHubUserID; got == nil || *got != "583231" {
+			t.Errorf("github_user_id = %v, want 583231", got)
+		}
+		if got := rows[withoutID].GitHubUserID; got != nil {
+			t.Errorf("github_user_id of a binding with no id = %v, want nil", *got)
+		}
+		if got := rows[withoutID].GitHubUsername; got == nil || *got != "hubot" {
+			t.Errorf("github_username of a binding with no id = %v, want hubot", got)
+		}
+		if got := rows[elsewhere].GitHubUserID; got != nil {
+			t.Errorf("github_user_id bound on another host = %v, want nil", *got)
+		}
+	})
+
 	t.Run("ListMembers_IdentityIsHostScoped", func(t *testing.T) {
 		stores, seed, teamID := team(t)
 		u := seed.User(t, "Enterprise")

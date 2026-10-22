@@ -29,19 +29,19 @@ import (
 type UsersStore interface {
 	// GetGitHubLogin returns the user's GitHub login on a specific host
 	// (user_github_identities, keyed on (user_id, github_base_url)), or
-	// "" when no row exists for that (user, host) pair. Used by the
-	// predicate matcher (author_in / reviewer_in / commenter_in
-	// allowlists) and several display surfaces. Callers resolve the host
-	// from the org's org_settings.github_base_url so the lookup matches
-	// the host the binding was captured against. An absent row degrades
-	// exactly as the old NULL github_username column did.
+	// "" when no row exists for that (user, host) pair. Used by display
+	// surfaces and by readers that name the user to GitHub by login, such
+	// as a search by author. Callers resolve the host from the org's
+	// org_settings.github_base_url so the lookup matches the host the
+	// binding was captured against.
 	GetGitHubLogin(ctx context.Context, userID, githubBaseURL string) (string, error)
 	// GetGitHubIdentity returns the user's whole GitHub identity row for a
 	// host — login, numeric account id, source, verification time — or nil
-	// when there is none. It exists for the one reader that must compare
-	// identities rather than display a login: the deployment-App bind
-	// ceremony, which requires the GitHub account that authorized to be the
-	// account linked to the TF user completing it, by id.
+	// when there is none. It is for readers that compare accounts rather than
+	// display a login, by GitHub's id when both sides have one: the
+	// deployment-App bind ceremony (the account that authorized must be the
+	// one linked to the TF user completing it), and the dashboard's and the
+	// factory's "mine".
 	GetGitHubIdentity(ctx context.Context, userID, githubBaseURL string) (*domain.UserGitHubIdentity, error)
 
 	// UpsertGitHubIdentity writes (or refreshes) the user's GitHub login

@@ -522,7 +522,7 @@ func TestReDeriveWorker_ZeroThresholdTrigger_IsNotReDerived(t *testing.T) {
 func TestReDeriveWorker_PredicateMismatch_AdmitsNothing(t *testing.T) {
 	database := newTestDB(t)
 
-	// The event's author isn't in the predicate's author_in allowlist.
+	// The event's author isn't in the predicate's author_id_in allowlist.
 	entity3, _, _ := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#3", "", "pr", "Test PR 3", "https://github.com/owner/repo/pull/3")
 	entityID := entity3.ID
 	meta := events.GitHubPRCICheckFailedMetadata{
@@ -537,7 +537,7 @@ func TestReDeriveWorker_PredicateMismatch_AdmitsNothing(t *testing.T) {
 
 	createTestPrompt(t, database, domain.Prompt{ID: "p3", Name: "Test3", Body: "Do", Source: "user"})
 
-	pred := `{"author_in":["aidan"]}`
+	pred := `{"author_id_in":["583231"]}`
 	createTriggerForTestRouting(t, database, domain.EventHandler{
 		ID: "t-pred", Kind: domain.EventHandlerKindTrigger,
 		BlueprintID: "p3", TriggerType: domain.TriggerTypeEvent,
@@ -563,14 +563,14 @@ func TestReDeriveWorker_PredicateMismatch_AdmitsNothing(t *testing.T) {
 // an event recorded under the id it replaced.
 func TestReDeriveWorker_MatchesThroughTheCurrentView(t *testing.T) {
 	events.RegisterCurrentView(domain.EventGitHubPRCICheckFailed, func(_ context.Context, _, meta string) (string, error) {
-		return strings.ReplaceAll(meta, `"author":"old-login"`, `"author":"aidan"`), nil
+		return strings.ReplaceAll(meta, `"author_id":"111"`, `"author_id":"583231"`), nil
 	})
 	t.Cleanup(func() { events.ResetCurrentView(domain.EventGitHubPRCICheckFailed) })
 
 	database := newTestDB(t)
 	entity, _, _ := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#4", "", "pr", "Test PR 4", "https://github.com/owner/repo/pull/4")
 	entityID := entity.ID
-	metaJSON, _ := json.Marshal(events.GitHubPRCICheckFailedMetadata{Author: "old-login", CheckName: "build", Repo: "owner/repo"})
+	metaJSON, _ := json.Marshal(events.GitHubPRCICheckFailedMetadata{Author: "old-login", AuthorID: "111", CheckName: "build", Repo: "owner/repo"})
 	eventID, _ := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entityID,
 		DedupKey: "build", MetadataJSON: string(metaJSON),
@@ -578,7 +578,7 @@ func TestReDeriveWorker_MatchesThroughTheCurrentView(t *testing.T) {
 	task, _, _ := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entityID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
 
 	createTestPrompt(t, database, domain.Prompt{ID: "p4", Name: "Test4", Body: "Do", Source: "user"})
-	pred := `{"author_in":["aidan"]}`
+	pred := `{"author_id_in":["583231"]}`
 	createTriggerForTestRouting(t, database, domain.EventHandler{
 		ID: "t-view", Kind: domain.EventHandlerKindTrigger,
 		BlueprintID: "p4", TriggerType: domain.TriggerTypeEvent,

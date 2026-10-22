@@ -70,11 +70,11 @@ func commentIDs(comments []NewComment) []string {
 // TestDiffPRSnapshots_Commented covers the commented branch of the PR diff:
 // comments TF posted are not a reason to emit, a mix is attributed to the
 // newest comment a person wrote, a bot's comment counts, and every commenter
-// is in the list commenter_in matches against, case-insensitively.
+// is in the list commenter_id_in matches against, by GitHub id.
 func TestDiffPRSnapshots_Commented(t *testing.T) {
 	by := func(login string) func(id, at string) NewComment {
 		return func(id, at string) NewComment {
-			return NewComment{ID: id, Author: login, AuthorID: login, CreatedAt: at}
+			return NewComment{ID: id, Author: login, AuthorID: testGitHubUserIDs[login], CreatedAt: at}
 		}
 	}
 	alice, bob, bot := by("alice"), by("bob"), by("dependabot[bot]")
@@ -111,6 +111,7 @@ func TestDiffPRSnapshots_Commented(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			prev := basePRSnapshot()
 			curr := basePRSnapshot()
+			prev.AuthorID, curr.AuthorID = "583231", "583231"
 			curr.IsDraft, curr.Labels = true, []string{"needs-reply"}
 			evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testSelf, nil, nil, tc.comments)
 			evt := findEvent(evts, domain.EventGitHubPRCommented)
@@ -136,15 +137,19 @@ func TestDiffPRSnapshots_Commented(t *testing.T) {
 				t.Errorf("occurred_at = %v, want the newest person's comment at %v", evt.OccurredAt, wantAt)
 			}
 			for _, login := range tc.wantLogins {
-				if !matchesPredicate(t, *evt, allowlist(t, "commenter_in", strings.ToUpper(login))) {
-					t.Errorf("commenter_in naming %s did not match", login)
+				if !matchesPredicate(t, *evt, allowlist(t, "commenter_id_in", testGitHubUserIDs[login])) {
+					t.Errorf("commenter_id_in naming %s's id did not match", login)
+				}
+				if matchesPredicate(t, *evt, allowlist(t, "commenter_id_in", login)) {
+					t.Errorf("commenter_id_in naming %s's login matched", login)
 				}
 			}
-			if matchesPredicate(t, *evt, allowlist(t, "commenter_in", "carol")) {
-				t.Error("commenter_in naming someone who did not comment matched")
+			if matchesPredicate(t, *evt, allowlist(t, "commenter_id_in", testGitHubUserIDs["carol"])) {
+				t.Error("commenter_id_in naming someone who did not comment matched")
 			}
-			if !matchesPredicate(t, *evt, allowlist(t, "author_in", testUser)) || matchesPredicate(t, *evt, allowlist(t, "author_in", "carol")) {
-				t.Error("author_in did not match on the PR author alone")
+			if !matchesPredicate(t, *evt, allowlist(t, "author_id_in", "583231")) ||
+				matchesPredicate(t, *evt, allowlist(t, "author_id_in", testGitHubUserIDs["carol"])) {
+				t.Error("author_id_in did not match on the PR author alone")
 			}
 		})
 	}
@@ -153,7 +158,7 @@ func TestDiffPRSnapshots_Commented(t *testing.T) {
 // A pull request seen for the first time emits no commented event, whatever
 // comments it carries.
 func TestDiffPRSnapshots_CommentedNotOnFirstDiscovery(t *testing.T) {
-	comments := []NewComment{{ID: "1", Author: "alice", AuthorID: "alice", CreatedAt: "2026-10-01T09:00:00Z"}}
+	comments := []NewComment{{ID: "1", Author: "alice", AuthorID: testGitHubUserIDs["alice"], CreatedAt: "2026-10-01T09:00:00Z"}}
 	if evt := findEvent(DiffPRSnapshots(domain.PRSnapshot{}, basePRSnapshot(), testEntityID, testRepositoryID, testSelf, nil, nil, comments), domain.EventGitHubPRCommented); evt != nil {
 		t.Errorf("first discovery emitted commented: %s", evt.MetadataJSON)
 	}

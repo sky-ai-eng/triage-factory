@@ -1150,7 +1150,7 @@ func TestDiff_AllPREvents_CarryLabels(t *testing.T) {
 // --- Metadata: Author -------------------------------------------------------
 //
 // The emitter records the author login on every PR event; predicate
-// matching against author_in allowlists is done by the matcher, not here.
+// matching against author_id_in allowlists is done by the matcher, not here.
 // These tests pin that the author login is propagated correctly regardless
 // of whether the session user authored the PR.
 

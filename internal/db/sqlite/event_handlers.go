@@ -51,21 +51,18 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blue
 	now := time.Now().UTC()
 	var inserted int64
 
-	// Shipped GitHub rules ship `author_in: []` (match-all) verbatim — the
-	// host-dependent seed-time rewrite that scoped them to the local user's
-	// login is GONE. Author-centric owner routing scopes these at event time
-	// instead (resolving the PR author's team via the owning-team ladder),
-	// which also fixes the "connected GitHub after the seed" gap the
-	// seed-once rewrite had. The author_in field + matcher stay, as an
+	// Shipped GitHub rules seed `author_id_in: []` (match-all) verbatim, with
+	// no seed-time rewrite to the local user's GitHub account: author-centric
+	// owner routing scopes them at event time instead (resolving the PR
+	// author's team via the owning-team ladder), which also covers a GitHub
+	// connected after the seed. The author_id_in field and matcher are an
 	// optional per-member filter for user-authored rules.
 	//
-	// Shipped Jira rules now ship `assignee_in: []` (match-all) verbatim too —
-	// the seed-time rewrite that scoped jira-assigned / jira-became-atomic to
-	// the local user's Atlassian account id is GONE, along with the org-host
-	// read it needed. Assignee-centric owner routing scopes these at event time
-	// instead (resolving the issue assignee's team via the owning-team ladder),
-	// matching the GitHub fix. The assignee_in field + matcher stay, as an
-	// optional per-member filter for user-authored rules.
+	// Shipped Jira and Linear rules seed `assignee_in: []` (match-all) verbatim
+	// for the same reason: assignee-centric owner routing scopes them at event
+	// time (resolving the issue assignee's team via the owning-team ladder).
+	// The assignee_in field and matcher are an optional per-member filter for
+	// user-authored rules.
 	for _, h := range db.ShippedEventHandlers {
 		var pred any
 		if h.Predicate != "" {

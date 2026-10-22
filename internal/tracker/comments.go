@@ -24,11 +24,12 @@ import (
 const jiraCommentPageSize = 50
 
 // NewComment is a comment made on a tracked issue or pull request since the
-// snapshot a diff compares against. AuthorID is the identity a commenter_in
+// snapshot a diff compares against. AuthorID is the identity a commenter
 // allowlist holds: the Jira author's stable id (jira.StableUserID, the rule
-// assignee_in's values follow), the Linear user id, which is empty for a
-// comment an integration posted, or GitHub's id for the author's account,
-// which is empty for an author GitHub returns without one.
+// assignee_in's values follow) for commenter_in, the Linear user id for
+// commenter_in, which is empty for a comment an integration posted, or
+// GitHub's id for the author's account for commenter_id_in, which is empty
+// for an author GitHub returns without one.
 type NewComment struct {
 	ID        string
 	Author    string // display name; on GitHub, the login

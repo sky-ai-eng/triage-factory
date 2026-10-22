@@ -75,7 +75,7 @@ func mentionKeys(evts []domain.Event) []string {
 }
 
 func mentionComment(id, login, at string, mentions ...string) NewComment {
-	return NewComment{ID: id, Author: login, AuthorID: login, CreatedAt: at, Mentions: mentions}
+	return NewComment{ID: id, Author: login, AuthorID: testGitHubUserIDs[login], CreatedAt: at, Mentions: mentions}
 }
 
 // TestDiffPRSnapshots_Mentioned covers which mentions in new comments and
@@ -205,13 +205,15 @@ func TestDiffPRSnapshots_MentionedPredicate(t *testing.T) {
 		t.Fatal("no mentioned event")
 	}
 	for pred, want := range map[string]bool{
-		`{"mentioned_login":"BOB"}`:                    true,
-		`{"mentioned_login":"erin"}`:                   false,
-		`{"mentioned_team":"acme/backend"}`:            false,
-		`{"mention_source":"comment"}`:                 true,
-		`{"mention_source":"body"}`:                    false,
-		allowlist(t, "commenter_in", "Carol"):          true,
-		`{"mentioned_login":"bob","author":"someone"}`: false,
+		`{"mentioned_login":"BOB"}`:                      true,
+		`{"mentioned_login":"erin"}`:                     false,
+		`{"mentioned_team":"acme/backend"}`:              false,
+		`{"mention_source":"comment"}`:                   true,
+		`{"mention_source":"body"}`:                      false,
+		allowlist(t, "commenter_id_in", "1003"):          true,
+		allowlist(t, "commenter_id_in", "1001"):          false,
+		allowlist(t, "commenter_id_in", "carol"):         false,
+		`{"mentioned_login":"bob","author_id_in":["1"]}`: false,
 	} {
 		if got := matchesPredicate(t, *evt, pred); got != want {
 			t.Errorf("%s matched = %v, want %v", pred, got, want)
