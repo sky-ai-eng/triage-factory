@@ -358,10 +358,13 @@ fn a_configured_budget_kills_a_real_allocator_in_the_jail() {
         "configure failed in jail: {configured}"
     );
 
+    // `| sleep` pins the hog over budget, as bash_budget.rs's HOG is. Unpinned,
+    // `tail` can write its whole buffer out before the kill, and the truncated
+    // output then keeps only NULs and loses the marker.
     let breach = jail.call(&json!({
         "id": 2,
         "tool": "bash",
-        "args": { "command": "echo starting; head -c 400M /dev/zero | tail" },
+        "args": { "command": "echo starting; head -c 400M /dev/zero | tail | sleep 30" },
     }));
     assert_eq!(
         breach["ok"],

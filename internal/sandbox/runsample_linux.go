@@ -21,6 +21,15 @@ func sampleRunCgroup(containerID string) RunSample {
 	}
 }
 
+// runCgroupOOMKills reads memory.events' oom_kill from tf-runs/<containerID>.
+func runCgroupOOMKills(containerID string) (int, bool) {
+	data, err := os.ReadFile(filepath.Join(cgroupRunsDir, containerID, "memory.events"))
+	if err != nil {
+		return 0, false
+	}
+	return parseOOMKills(data)
+}
+
 // cgroupCurrentMemMB reports the group's resident memory in MiB from
 // memory.current — always present on cgroup v2, no kernel-version floor like
 // memory.peak's 5.19.

@@ -53,6 +53,7 @@ func (j *fakeJail) Freeze(context.Context) error {
 }
 func (j *fakeJail) Thaw(context.Context) error { return nil }
 func (j *fakeJail) OOMKilled() bool            { return false }
+func (j *fakeJail) OOMKills() (int, bool)      { return j.n, true }
 func (j *fakeJail) Sample() cell.Sample {
 	n := j.n
 	return cell.Sample{MemCurrentMB: &n}
@@ -154,6 +155,9 @@ func TestRestartableJail_ARestartReplacesTheJailBehindEverythingThatHoldsIt(t *t
 	}
 	if s := j.Sample(); s.MemCurrentMB == nil || *s.MemCurrentMB != 2 {
 		t.Errorf("sample = %+v, want the new jail's", s)
+	}
+	if n, ok := j.OOMKills(); !ok || n != 2 {
+		t.Errorf("OOMKills = (%d, %v), want the new jail's count", n, ok)
 	}
 	if err := j.Stop(); err != nil || !next.stopped {
 		t.Errorf("stop = %v, new jail stopped %v", err, next.stopped)

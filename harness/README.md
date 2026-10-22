@@ -164,6 +164,13 @@ All model-visible strings match pi. The differences that exist:
   both.
 - **fd's global ignore file** (`~/.config/fd/ignore`) is not read; the
   sandbox has none.
+- **`bash` signal deaths** — pi returns a command whose shell died of a
+  signal as a success carrying whatever it printed, because Node reports the
+  exit code as `null`. Here it is a tool error: the output, then
+  `Command was killed by SIGKILL (signal 9)`, built the way
+  `Command exited with code N` is. In a jail the usual signal is the SIGKILL
+  the kernel sends when the jail reaches its memory ceiling, and it lands on
+  the shell itself when `bash -c` has exec'd a single command in its place.
 - **`bash` per-command memory budget** — pi has no such limit. Behavior parity
   holds for every command under the budget (byte-identical output, truncation
   and timeout semantics), and the budget is *off* unless a `serve` session was

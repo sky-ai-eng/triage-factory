@@ -189,6 +189,17 @@ func (j *toolHostJail) Sample() cell.Sample {
 	return sandbox.SampleRunCgroup(j.sb.ContainerID)
 }
 
+// OOMKills implements cell.Jail from the jail cgroup's memory.events, readable
+// by the executor for the same reason Sample's files are. The kernel's victim
+// is a host process, usually the systrap stub running one guest process, so
+// each kill the count records is one guest process ended.
+func (j *toolHostJail) OOMKills() (int, bool) {
+	if j == nil || j.sb == nil || j.Exited() {
+		return 0, false
+	}
+	return sandbox.RunCgroupOOMKills(j.sb.ContainerID)
+}
+
 // Close implements cell.Jail: it kills the jail, stamps the engagement's
 // measured actuals, reclaims the cgroup, closes the listener and removes the
 // socket. The socket's directory and the network belong to the cell and go

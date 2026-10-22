@@ -118,6 +118,22 @@ func TestToolHostJail_ExitedJailNeedsNoFreeze(t *testing.T) {
 	}
 }
 
+// An exited jail has no count to read: its cgroup went with it, and a zero
+// would read as "nothing was killed" to a caller comparing it to an earlier
+// count.
+func TestToolHostJail_ExitedJailHasNoOOMKillCount(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+	jail := &toolHostJail{run: deadRun{}, sb: &sandbox.Sandbox{ContainerID: "tf-exited-1"}, waitDone: done}
+	if n, ok := jail.OOMKills(); ok {
+		t.Errorf("OOMKills on an exited jail = (%d, true), want no count", n)
+	}
+	var never *toolHostJail
+	if n, ok := never.OOMKills(); ok {
+		t.Errorf("OOMKills on a jail never launched = (%d, true), want no count", n)
+	}
+}
+
 // Stop returns once the runtime has been reaped, and not before.
 func TestToolHostJail_StopWaitsForTheRuntime(t *testing.T) {
 	done := make(chan struct{})

@@ -257,14 +257,24 @@ func cgroupOOMKilled(dir string) bool {
 	if err != nil {
 		return false
 	}
+	n, _ := parseOOMKills(data)
+	return n > 0
+}
+
+// parseOOMKills reads the oom_kill count from a memory.events body. ok is
+// false when the body has no parseable oom_kill line.
+func parseOOMKills(data []byte) (n int, ok bool) {
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 2 && fields[0] == "oom_kill" {
-			n, _ := strconv.Atoi(fields[1])
-			return n > 0
+			n, err := strconv.Atoi(fields[1])
+			if err != nil || n < 0 {
+				return 0, false
+			}
+			return n, true
 		}
 	}
-	return false
+	return 0, false
 }
 
 // peakUnsupportedOnce keeps the missing-memory.peak warning to one line

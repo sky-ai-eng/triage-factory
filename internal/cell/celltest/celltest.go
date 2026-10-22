@@ -61,9 +61,12 @@ const (
 )
 
 // jailMemoryLimitMB caps every jail the suite launches, as production caps
-// every engagement's. A host that cannot set the ceiling runs the jail
-// without one, so no case depends on it.
+// every engagement's.
 const jailMemoryLimitMB = 4096
+
+// oomCeilingMB is the smaller ceiling the memory case launches under, so the
+// command it runs outgrows it quickly.
+const oomCeilingMB = 512
 
 // Run runs every conformance case against h.Backend. Cases run one after
 // another and each tears down every cell it built before the next starts.
@@ -80,6 +83,7 @@ func Run(t *testing.T, h Harness) {
 	t.Run("InternalDenylistUnreachable", func(t *testing.T) { testInternalDenylistUnreachable(t, h) })
 	t.Run("CellsAreIsolated", func(t *testing.T) { testCellsAreIsolated(t, h) })
 	t.Run("FreezeHoldsTheJailStill", func(t *testing.T) { testFreezeHoldsTheJailStill(t, h) })
+	t.Run("MemoryCeilingKillsAreCounted", func(t *testing.T) { testMemoryCeilingKillsAreCounted(t, h) })
 	t.Run("StopLeavesNothingRunning", func(t *testing.T) { testStopLeavesNothingRunning(t, h) })
 	t.Run("RelaunchAfterTheJailDies", func(t *testing.T) { testRelaunchAfterTheJailDies(t, h) })
 	t.Run("TeardownReleasesTheCell", func(t *testing.T) { testTeardownReleasesTheCell(t, h) })
@@ -350,6 +354,55 @@ func testFreezeHoldsTheJailStill(t *testing.T, h Harness) {
 	}
 }
 
+// testMemoryCeilingKillsAreCounted: a command that outgrows the jail's ceiling
+// is killed, the kill shows in OOMKills while the jail runs, and the jail and
+// its tool host go on without the process. The loop tells the agent its
+// command was killed for memory from exactly this count, so a backend that
+// kept the jail but not the count would leave the agent reading a bare
+// SIGKILL.
+func testMemoryCeilingKillsAreCounted(t *testing.T, h Harness) {
+	l := startWithCeiling(t, h, newConversationID(t), oomCeilingMB)
+
+	before, ok := l.jail.OOMKills()
+	if !ok {
+		t.Fatal("OOMKills has no count to read for a running jail")
+	}
+	if before != 0 {
+		t.Fatalf("a jail that has run nothing reports %d OOM kills", before)
+	}
+
+	// Filled buffers, so every page is touched: twice the ceiling, in 32 MB
+	// steps, and a line that says the ceiling never stopped it. A single
+	// command, so bash execs node and the kill lands on the tool host's own
+	// child.
+	grow := fmt.Sprintf(`node -e 'const a=[];for(let i=0;i<%d;i++){a.push(Buffer.alloc(32<<20,1))}console.log("target reached")'`,
+		2*oomCeilingMB/32)
+	out, err := l.tools.Call("bash", map[string]any{"command": grow, "timeout": int(toolTimeout / time.Second)})
+	if err != nil {
+		t.Fatalf("the tool host died with the command (the kill took the jail, not the process): %v", err)
+	}
+	if strings.Contains(out.Content+out.ToolError, "target reached") {
+		t.Fatalf("the command allocated %d MB under a %d MB ceiling: %+v", 2*oomCeilingMB, oomCeilingMB, out)
+	}
+	if out.ToolError == "" {
+		t.Errorf("a command the ceiling killed must come back as a failure, got the result %q", out.Content)
+	}
+
+	after, ok := l.jail.OOMKills()
+	if !ok {
+		t.Fatal("OOMKills has no count to read after the kill, while the jail still runs")
+	}
+	if after <= before {
+		t.Fatalf("OOMKills = %d after a command was killed at the ceiling, want more than %d", after, before)
+	}
+	if l.jail.Exited() {
+		t.Fatal("the jail exited; the ceiling must cost the process, not the jail")
+	}
+	if got := strings.TrimSpace(l.sh(t, "echo alive")); got != "alive" {
+		t.Fatalf("the tool host answered %q after the kill", got)
+	}
+}
+
 // testStopLeavesNothingRunning: Stop returns with the jail's processes gone,
 // the tool host no longer answers, and a second Stop is harmless.
 func testStopLeavesNothingRunning(t *testing.T, h Harness) {
@@ -464,6 +517,12 @@ type liveCell struct {
 // a jail lives no longer than the context it was launched with.
 func start(t *testing.T, h Harness, conversationID string) *liveCell {
 	t.Helper()
+	return startWithCeiling(t, h, conversationID, jailMemoryLimitMB)
+}
+
+// startWithCeiling is start with the jail capped at ceilingMB.
+func startWithCeiling(t *testing.T, h Harness, conversationID string, ceilingMB int) *liveCell {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 
 	l := &liveCell{
@@ -525,7 +584,7 @@ func start(t *testing.T, h Harness, conversationID string) *liveCell {
 		AgentHostSocket:  agenthost.SocketPathFor(conversationID),
 		CABundle:         agenthost.CABundlePathFor(conversationID),
 		GHChannel:        gh,
-		MemoryLimitMB:    jailMemoryLimitMB,
+		MemoryLimitMB:    ceilingMB,
 	}
 	l.launch(t)
 	return l

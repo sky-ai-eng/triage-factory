@@ -375,6 +375,40 @@ fn bash_command_error() {
     assert_eq!(err.0, "(no output)\n\nCommand exited with code 1");
 }
 
+/// A shell killed by a signal did not finish, so its partial output is an
+/// error rather than a result. pi returns it as a success; this is the
+/// divergence. `$$` is the shell itself, the process the jail's memory ceiling
+/// kills when `bash -c` has exec'd a single command in its place.
+#[test]
+fn bash_signal_death_is_an_error_naming_the_signal() {
+    let dir = tmp_dir();
+    let err = bash_tool(
+        dir.path().to_str().unwrap(),
+        serde_json::json!({ "command": "echo partial; kill -KILL $$" }),
+    )
+    .unwrap_err();
+    // The output keeps its trailing newline before the status, exactly as an
+    // exit-code error does.
+    assert_eq!(
+        err.0,
+        "partial\n\n\nCommand was killed by SIGKILL (signal 9)"
+    );
+}
+
+#[test]
+fn bash_signal_death_with_no_output() {
+    let dir = tmp_dir();
+    let err = bash_tool(
+        dir.path().to_str().unwrap(),
+        serde_json::json!({ "command": "kill -TERM $$" }),
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.0,
+        "(no output)\n\nCommand was killed by SIGTERM (signal 15)"
+    );
+}
+
 #[test]
 fn bash_timeout() {
     let dir = tmp_dir();

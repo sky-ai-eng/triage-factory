@@ -213,6 +213,15 @@ type Jail interface {
 	// Meaningful only once the jail has exited.
 	OOMKilled() bool
 
+	// OOMKills reports how many of the jail's processes have been killed for
+	// memory so far, read while the jail runs. A jail at its ceiling usually
+	// survives: the kernel kills the process holding the most memory, and the
+	// jail goes on without it. A count that rose across a tool call is how the
+	// loop learns that happened during the call. Like Sample it is cheap and
+	// silent; ok is false when there is no count to read, before the jail
+	// starts and after it exits.
+	OOMKills() (n int, ok bool)
+
 	// Sample reads what the jail is using right now. It is called on a timer
 	// while the jail runs, so it is cheap, silent and never fails: a jail
 	// that is not running yet, or no longer, yields an unobserved sample.

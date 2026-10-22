@@ -155,6 +155,7 @@ type Jail interface {
 	Freeze(ctx context.Context) error
 	Thaw(ctx context.Context) error
 	OOMKilled() bool
+	OOMKills() (n int, ok bool)
 	Sample() Sample
 	Close() error
 }
@@ -239,7 +240,11 @@ fails one does not meet the contract.
    it.
 7. **Freeze holds every process still; Stop leaves none running.**
 8. **Memory ceilings are enforced** where the host allows them, and an OOM
-   kill is attributed (`OOMKilled`).
+   kill is attributed: `OOMKilled` once the jail has exited, and `OOMKills`,
+   a count that rises while the jail runs, for a kill the jail survives. A
+   command that outgrows the ceiling is killed, the count rises, and the jail
+   and its tool host carry on. The native loop reads the count around every
+   tool call to tell the agent its command was killed for memory.
 9. **Teardown releases everything.** After a contract-order teardown, a new
    cell for the same conversation provisions and launches cleanly, and the
    boot-time reap runs without error.
@@ -723,7 +728,7 @@ version and checksum.
 | `Freeze` / `Thaw` | `Freeze` asks the init to freeze `/work`, then pauses the VMM over its API socket, which only the broker uses; `Thaw` resumes the VMM, then unfreezes `/work`. If the init does not confirm, the VMM is paused anyway, so every process is still held still, and a capture reads what the guest last flushed; only that run's capture is affected | Measured: freezing `/work` takes 51–57 ms and the pause about 1 ms; a tool call sent while paused waits and is answered after `Thaw` |
 | `Stop` | Stop the VM, wait for the VMM to exit, then copy the run tree out (§12.3) | Cost of the copy-out: **2.2 s** for the large tree whole and 0.33–0.40 s for changed paths only, after a capture-VM boot of about 0.15 s; 0.23–0.31 s and 22 ms on a fresh checkout |
 | `Close` | Delete the jailer directory and the images; network teardown as on gVisor | — |
-| `OOMKilled`, actuals, `Sample` | `Sample` reads the VMM's cgroup as gVisor's reads the jail's, and the actuals come from it too: CPU, and a `memory.peak` that is the most guest memory the VM touched, which is what it held on the host. The cgroup's limit sits above guest memory plus VMM overhead, so the guest's own OOM killer acts first and the cgroup records nothing. The init reports the guest's `/proc/vmstat` `oom_kill` count over vsock; `OOMKilled` is that count, or the cgroup's own `oom_kill`, which means the host killed the VMM and the cell is gone | Answered: an OOM inside the guest leaves the cgroup's events at zero |
+| `OOMKilled`, `OOMKills`, actuals, `Sample` | `Sample` reads the VMM's cgroup as gVisor's reads the jail's, and the actuals come from it too: CPU, and a `memory.peak` that is the most guest memory the VM touched, which is what it held on the host. The cgroup's limit sits above guest memory plus VMM overhead, so the guest's own OOM killer acts first and the cgroup records nothing. The init reports the guest's `/proc/vmstat` `oom_kill` count over vsock; `OOMKills` is that count while the VM runs, and `OOMKilled` is that count, or the cgroup's own `oom_kill`, which means the host killed the VMM and the cell is gone | Answered: an OOM inside the guest leaves the cgroup's events at zero |
 | `ReapOrphans` | Kill VMMs and delete jailer directories the broker's ledger does not hold; reap netns as on gVisor | — |
 
 A guest reaches the host over vsock only at sockets that exist under its own
