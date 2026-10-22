@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import PredicateEditor from './PredicateEditor'
@@ -210,6 +211,51 @@ describe('PredicateEditor GitHub identities', () => {
     expect(await screen.findByText('Ada · ada-gh')).toBeInTheDocument()
     expect(await screen.findByText('renovate[bot]')).toBeInTheDocument()
     expect(screen.getByText('42')).toBeInTheDocument()
+  })
+
+  it('adds a looked-up login to the value as it stands when GitHub answers', async () => {
+    roster.members = githubTeam
+    let answer = (_account: unknown) => {}
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (url.startsWith('/api/event-schemas/')) {
+          const fields = [{ name: 'author_id_in', type: 'string_list' }]
+          return Promise.resolve({ ok: true, status: 200, ...jsonBody({ fields }) })
+        }
+        if (url === `${accounts}by-name/renovate%5Bbot%5D`) {
+          return new Promise((resolve) => {
+            answer = (account) => resolve({ ok: true, status: 200, ...jsonBody(account) })
+          })
+        }
+        return Promise.resolve({ ok: false, status: 404, ...jsonBody({ errors: [] }) })
+      }),
+    )
+    const onChange = vi.fn()
+    function Editor() {
+      const [value, setValue] = useState<Record<string, unknown>>({ author_id_in: ['1001'] })
+      return (
+        <PredicateEditor
+          eventType="github:pr:opened"
+          value={value}
+          onChange={(v) => {
+            onChange(v)
+            setValue(v)
+          }}
+        />
+      )
+    }
+    render(<Editor />)
+
+    const input = await screen.findByRole('combobox')
+    fireEvent.change(input, { target: { value: 'renovate[bot]' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    // Ada is removed while GitHub is being asked about renovate[bot].
+    fireEvent.click(screen.getByRole('button', { name: 'Remove ada-gh' }))
+    answer({ github_user_id: '29139614', login: 'renovate[bot]' })
+    await vi.waitFor(() =>
+      expect(onChange).toHaveBeenLastCalledWith({ author_id_in: ['29139614'] }),
+    )
   })
 
   it('looks the viewer up by login when their binding recorded no account id', async () => {

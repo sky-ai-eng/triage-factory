@@ -485,6 +485,10 @@ function VariantB({
   // a fresh empty array every render when value is undefined, which
   // would invalidate every downstream memo.)
   const selected = useMemo(() => value ?? [], [value])
+  // A GitHub lookup answers after other edits may have landed, so every write
+  // starts from the value as it stands, not from the render that began it.
+  const latest = useRef(selected)
+  latest.current = selected
 
   // memberValue is what the field stores for a team member under the active
   // identity kind (github_user_id, jira_account_id or linear_user_id), and
@@ -517,7 +521,7 @@ function VariantB({
       })
     }
   }
-  const isSelected = (v: string) => selected.some((h) => h.toLowerCase() === v.toLowerCase())
+  const isSelected = (v: string) => latest.current.some((h) => h.toLowerCase() === v.toLowerCase())
 
   // The flat dropdown-items list. Filtering and the external-identity
   // affordance combine into one indexable sequence so keyboard nav has
@@ -563,7 +567,7 @@ function VariantB({
     setSearch('')
     setActiveIndex(0)
     if (isSelected(v)) return
-    onChange([...selected, v])
+    onChange([...latest.current, v])
   }
   // addTyped stores what a handle resolves to: itself for Jira and Linear,
   // the account id of a GitHub login, refused beside the field when GitHub
@@ -592,7 +596,7 @@ function VariantB({
     if (handle) void addTyped(handle)
   }
   const removeValue = (v: string) => {
-    const next = selected.filter((h) => h.toLowerCase() !== v.toLowerCase())
+    const next = latest.current.filter((h) => h.toLowerCase() !== v.toLowerCase())
     onChange(next.length === 0 ? undefined : next)
   }
 
