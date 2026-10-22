@@ -331,7 +331,7 @@ describe('saveTeamRepos', () => {
 })
 
 describe('saveTeamGitHubGroups', () => {
-  it('names each GitHub team by its id, once, and returns the stored set', async () => {
+  it('names each GitHub team once, by its id or else its handle, and returns the stored set', async () => {
     const stored = [
       { github_team_id: '11', github_org_id: '9', org_login: 'acme', team_slug: 'server' },
     ]
@@ -345,14 +345,18 @@ describe('saveTeamGitHubGroups', () => {
     const res = await saveTeamGitHubGroups('team-1', [
       { github_team_id: '11', github_org_id: '9', org_login: 'acme', team_slug: 'backend' },
       { github_team_id: '11', github_org_id: '9', org_login: 'acme', team_slug: 'backend' },
-      // Not identified by the server and matched to no candidate: no id to name it by.
+      // Not identified by the server and matched to no candidate: named by its handle.
       { github_team_id: '', github_org_id: '', org_login: 'acme', team_slug: 'gone' },
+      { github_team_id: '', github_org_id: '', org_login: 'ACME', team_slug: 'Gone' },
     ])
 
     expect(res).toEqual({ ok: true, groups: stored })
     const put = fetchMock.mock.calls[0] as unknown as [string, { method: string; body: string }]
     expect(put[0]).toBe('/api/teams/team-1/github-groups')
     expect(put[1].method).toBe('PUT')
-    expect(JSON.parse(put[1].body)).toEqual({ github_team_ids: ['11'] })
+    expect(JSON.parse(put[1].body)).toEqual({
+      github_team_ids: ['11'],
+      unidentified_groups: [{ org_login: 'acme', team_slug: 'gone' }],
+    })
   })
 })

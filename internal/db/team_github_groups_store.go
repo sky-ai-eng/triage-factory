@@ -45,7 +45,8 @@ import (
 // were recorded has neither, and holds only its org login and team slug.
 // ReconcileOrgTeamsSystem identifies such a row from GitHub's listing, and
 // until it does, TeamsForGitHubTeamSystem matches the row by its login and
-// slug. Nothing writes a new row without its ids.
+// slug, and SetForTeam keeps it when the set names it by them. Nothing writes
+// a new row without its ids.
 type TeamGitHubGroupsStore interface {
 	// ListForTeam returns the team's GitHub-team mappings on host, ordered
 	// by org login and team slug (case-insensitively), then team id. Empty
@@ -55,14 +56,17 @@ type TeamGitHubGroupsStore interface {
 	ListForTeam(ctx context.Context, teamID, host string) ([]domain.TeamGitHubGroup, error)
 
 	// SetForTeam replaces the team's entire mapping set on host with groups;
-	// the team's mappings on any other host are left as they stand. Each
-	// group must carry GitHub's team and organization ids
+	// the team's mappings on any other host are left as they stand. A group
+	// carries GitHub's team and organization ids, or neither
 	// (domain.NormalizeTeamGitHubGroups, which also drops a repeated team);
-	// the login and slug are stored as given, for display. The replace runs
-	// as a delete-all + insert inside a single transaction. Passing an empty
-	// slice clears every mapping for the team on host. Postgres routes
-	// through the app pool (team_github_groups_insert / _delete gate writes
-	// by team admin).
+	// the login and slug are stored as given, for display. A group without
+	// ids keeps the team's stored row without ids that has its login and slug
+	// (compared case-insensitively) and is never inserted, so naming one that
+	// no such row matches is an error, as it always is in Postgres, which
+	// stores none. The replace runs as a delete + insert inside a single
+	// transaction. Passing an empty slice clears every mapping for the team
+	// on host. Postgres routes through the app pool
+	// (team_github_groups_insert / _delete gate writes by team admin).
 	//
 	// Exempt from the returned-row rule: it reconciles a set, so there is no
 	// single row a return value could name.

@@ -447,6 +447,12 @@ func TestTeamGitHubGroupsPut_RefusesWhatItCannotResolve(t *testing.T) {
 		{"malformed ids", map[string]any{"github_team_ids": []string{"", "acme/platform", "011", "11", "11"}}, http.StatusBadRequest,
 			[]string{"github_team_ids[0]", "github_team_ids[1]", "github_team_ids[2]", "github_team_ids[4]"}},
 		{"a team no candidate carries", map[string]any{"github_team_ids": []string{"11", "99"}}, http.StatusUnprocessableEntity, []string{"github_team_ids[1]"}},
+		{"malformed unidentified groups", map[string]any{"github_team_ids": []string{"11"}, "unidentified_groups": []map[string]string{
+			{"org_login": "", "team_slug": " "}, {"org_login": "acme", "team_slug": "legacy"}, {"org_login": "ACME", "team_slug": "Legacy"},
+		}}, http.StatusBadRequest, []string{"unidentified_groups[0].org_login", "unidentified_groups[0].team_slug", "unidentified_groups[2]"}},
+		{"an unidentified group the team does not hold", map[string]any{"github_team_ids": []string{"11"}, "unidentified_groups": []map[string]string{
+			{"org_login": "acme", "team_slug": "legacy"},
+		}}, http.StatusUnprocessableEntity, []string{"unidentified_groups[0]"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-groups", tc.body)
@@ -460,5 +466,55 @@ func TestTeamGitHubGroupsPut_RefusesWhatItCannotResolve(t *testing.T) {
 				t.Errorf("groups after a refused PUT = %+v; want acme/platform untouched", got)
 			}
 		})
+	}
+}
+
+// A local install upgraded from before GitHub's ids were recorded holds
+// mappings without them. A save keeps each one it names by the handle the GET
+// shows, deletes the rest, and refuses a handle that the same request also
+// names by its id.
+func TestTeamGitHubGroupsPut_KeepsTheMappingsWithoutIDsItNames(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var calls int
+	groupsCandidateServer(t, srv, &calls)
+	host, err := srv.orgGitHubHost(t.Context(), runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("org github host: %v", err)
+	}
+	for _, slug := range []string{"platform", "legacy", "gone"} {
+		if _, err := srv.db.ExecContext(t.Context(), `
+			INSERT INTO team_github_groups (team_id, host, github_org_login, github_team_slug) VALUES (?, ?, 'acme', ?)`,
+			runmode.LocalDefaultTeamID, host, slug); err != nil {
+			t.Fatalf("seed acme/%s without ids: %v", slug, err)
+		}
+	}
+	put := func(body map[string]any) *httptest.ResponseRecorder {
+		t.Helper()
+		return doJSON(t, srv, http.MethodPut, "/api/teams/default/github-groups", body)
+	}
+
+	rec := put(map[string]any{"github_team_ids": []string{"11"}, "unidentified_groups": []map[string]string{
+		{"org_login": "acme", "team_slug": "legacy"}, {"org_login": "acme", "team_slug": "platform"},
+	}})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("PUT naming acme/platform by id and by handle = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := errorFields(t, rec); !reflect.DeepEqual(got, []string{"unidentified_groups[1]"}) {
+		t.Errorf("error fields = %v, want [unidentified_groups[1]]", got)
+	}
+
+	rec = put(map[string]any{"github_team_ids": []string{"11"}, "unidentified_groups": []map[string]string{
+		{"org_login": "ACME", "team_slug": "Legacy"},
+	}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	want := []gitHubGroupJSON{
+		{OrgLogin: "acme", TeamSlug: "legacy"},
+		{GitHubTeamID: "11", GitHubOrgID: "9", OrgLogin: "acme", TeamSlug: "platform"},
+	}
+	if got := readGitHubGroups(t, srv); !reflect.DeepEqual(got, want) {
+		t.Errorf("groups = %+v, want %+v", got, want)
 	}
 }

@@ -109,3 +109,44 @@ func TestTeamGitHubGroups_SQLite_RowsWithoutIDs(t *testing.T) {
 		t.Errorf("an identified row by its refreshed handle = %v; want [%s]", got, team)
 	}
 }
+
+// A save keeps a mapping without ids that the set names by its handle, as the
+// row it is, and deletes one the set leaves out or names by its id too.
+// Reading the set back and saving it changes nothing.
+func TestTeamGitHubGroups_SQLite_SetForTeamKeepsTheRowsWithoutIDsItNames(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	groups := sqlitestore.New(conn).TeamGitHubGroups
+	ctx, team := context.Background(), runmode.LocalDefaultTeamID
+	for _, g := range []domain.TeamGitHubGroup{
+		group("", "", "acme", "backend"),
+		group("", "", "acme", "gone"),
+		group("", "", "beta", "platform"),
+	} {
+		seedGroup(t, conn, team, g)
+	}
+
+	if err := groups.SetForTeam(ctx, team, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
+		group("", "", "ACME", "Backend"),
+		group("", "", "beta", "platform"),
+		group("13", "8", "beta", "platform"),
+		group("12", "9", "acme", "frontend"),
+	}); err != nil {
+		t.Fatalf("SetForTeam: %v", err)
+	}
+	want := []domain.TeamGitHubGroup{
+		group("", "", "acme", "backend"),
+		group("12", "9", "acme", "frontend"),
+		group("13", "8", "beta", "platform"),
+	}
+	got, err := groups.ListForTeam(ctx, team, dbtest.TestGitHubHost)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("groups = %+v, %v; want %+v", got, err, want)
+	}
+
+	if err := groups.SetForTeam(ctx, team, dbtest.TestGitHubHost, got); err != nil {
+		t.Fatalf("SetForTeam(the set as read): %v", err)
+	}
+	if again, err := groups.ListForTeam(ctx, team, dbtest.TestGitHubHost); err != nil || !reflect.DeepEqual(again, want) {
+		t.Errorf("after saving the set as read, groups = %+v, %v; want %+v", again, err, want)
+	}
+}

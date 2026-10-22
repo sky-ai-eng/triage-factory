@@ -14,6 +14,7 @@
 
 import { apiFetch, apiJSON, apiListAll, httpErrorMessage } from '../../lib/apiClient'
 import type { JiraStatusRef, JiraStatusRuleValue } from '../../components/JiraStatusRule'
+import { handleOf } from '../../lib/githubTeams'
 import type { GitHubTeamCandidate, GitHubTeamRef } from '../../lib/githubTeams'
 import type { JiraProjectCandidate } from '../../lib/jiraProjects'
 import { registerRepository } from '../../lib/githubRepos'
@@ -722,18 +723,26 @@ export type TeamGitHubGroupsSaveResult =
 // saveTeamGitHubGroups persists the GitHub-team → TF-team mappings via PUT
 // /api/teams/{id}/github-groups (a full replace-set), naming each GitHub team
 // by GitHub's id. A mapping with no id (one the server has not identified, and
-// identifyGroups could not match to a candidate) cannot be named, so the save
-// drops it.
+// identifyGroups could not match to a candidate) is named by its org login and
+// team slug, which keeps the stored row.
 export async function saveTeamGitHubGroups(
   teamId: string,
   groups: GitHubGroup[],
 ): Promise<TeamGitHubGroupsSaveResult> {
   try {
     const ids = [...new Set(groups.map((g) => g.github_team_id).filter((id) => id !== ''))]
+    const unidentified: { org_login: string; team_slug: string }[] = []
+    const handles = new Set<string>()
+    for (const g of groups) {
+      const h = handleOf(g).toLowerCase()
+      if (g.github_team_id !== '' || handles.has(h)) continue
+      handles.add(h)
+      unidentified.push({ org_login: g.org_login, team_slug: g.team_slug })
+    }
     const body = await apiJSON<{ groups?: GitHubGroup[] }>(`${teamPath(teamId)}/github-groups`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ github_team_ids: ids }),
+      body: JSON.stringify({ github_team_ids: ids, unidentified_groups: unidentified }),
     })
     return { ok: true, groups: body.groups ?? [] }
   } catch (e) {

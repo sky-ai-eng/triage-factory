@@ -2023,12 +2023,14 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 
 	t.Run("TeamGitHubGroups_SetForTeam_RefusesAGroupWithoutItsIDs", func(t *testing.T) {
 		// A mapping that names no GitHub id could never be routed to or
-		// reconciled, so the write is refused whole.
+		// reconciled, so the write is refused whole. A group with neither id
+		// keeps a stored row without them, and there is none here.
 		stores, ids := factory(t)
 		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, []domain.TeamGitHubGroup{acmeBackend}); err != nil {
 			t.Fatalf("seed SetForTeam: %v", err)
 		}
 		for name, bad := range map[string]domain.TeamGitHubGroup{
+			"no ids":          ghGroup("", "", "acme", "gone"),
 			"no team id":      ghGroup("", "9", "acme", "frontend"),
 			"no org id":       ghGroup("12", "", "acme", "frontend"),
 			"a slug, not ids": ghGroup("acme/frontend", "9", "acme", "frontend"),

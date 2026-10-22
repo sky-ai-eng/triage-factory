@@ -62,15 +62,43 @@ func (s *teamGitHubGroupsStore) SetForTeam(ctx context.Context, teamID, host str
 	if err := db.RequireRepoHost(host); err != nil {
 		return err
 	}
-	// Replace-set: delete the host's set, rows without ids included, and
-	// re-insert inside one tx.
+	// Replace-set: delete the host's set and re-insert inside one tx, except
+	// that a group without ids spares the stored row with its handle rather
+	// than inserting one.
+	keep := []string{}
+	for _, g := range norm {
+		if g.GitHubTeamID == "" {
+			keep = append(keep, g.Handle())
+		}
+	}
+	kept, err := json.Marshal(keep)
+	if err != nil {
+		return fmt.Errorf("encode kept handles: %w", err)
+	}
+	const handle = `lower(github_org_login) || '/' || lower(github_team_slug)`
 	return inTx(ctx, s.q, func(tx queryer) error {
-		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM team_github_groups WHERE team_id = ? AND host = ?`, teamID, host,
-		); err != nil {
+		var stored int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT count(DISTINCT `+handle+`) FROM team_github_groups
+			WHERE team_id = ? AND host = ? AND github_team_id IS NULL
+			  AND `+handle+` IN (SELECT value FROM json_each(?))
+		`, teamID, host, string(kept)).Scan(&stored); err != nil {
+			return fmt.Errorf("read team_github_groups without ids: %w", err)
+		}
+		if stored != len(keep) {
+			return fmt.Errorf("%d of the %d github groups without ids name no stored row", len(keep)-stored, len(keep))
+		}
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM team_github_groups
+			WHERE team_id = ? AND host = ?
+			  AND NOT (github_team_id IS NULL AND `+handle+` IN (SELECT value FROM json_each(?)))
+		`, teamID, host, string(kept)); err != nil {
 			return fmt.Errorf("clear team_github_groups: %w", err)
 		}
 		for _, g := range norm {
+			if g.GitHubTeamID == "" {
+				continue
+			}
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO team_github_groups (team_id, host, github_team_id, github_org_id, github_org_login, github_team_slug)
 				VALUES (?, ?, ?, ?, ?, ?)

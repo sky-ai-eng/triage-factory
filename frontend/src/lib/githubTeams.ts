@@ -8,8 +8,9 @@
 // ids for the team and its organization, which the PUT names a mapping by and
 // routing matches on, and the org login and team slug GitHub gave them, for
 // display. Both ids are '' on a stored mapping the server has not identified
-// yet (a local one saved before ids were recorded); the PUT cannot name such
-// a mapping, so it is kept only by matching it to a candidate (identifyGroups).
+// yet (a local one saved before ids were recorded); the PUT names such a
+// mapping by its org login and team slug until identifyGroups matches it to a
+// candidate.
 export interface GitHubTeamRef {
   github_team_id: string
   github_org_id: string
@@ -48,8 +49,7 @@ export const teamRef = (t: GitHubTeamRef): GitHubTeamRef => ({
 
 // identifyGroups gives each stored mapping that has no id the candidate with
 // its handle, so the next save names it by GitHub's id. A mapping no
-// candidate matches is returned unchanged, and a save drops it: it names a
-// team the org's credentials no longer list.
+// candidate matches is returned unchanged, and a save keeps it by its handle.
 export function identifyGroups(
   groups: GitHubTeamRef[],
   candidates: GitHubTeamRef[],

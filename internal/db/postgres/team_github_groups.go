@@ -65,6 +65,13 @@ func (s *teamGitHubGroupsStore) SetForTeam(ctx context.Context, teamID, host str
 	if err := db.RequireRepoHost(host); err != nil {
 		return err
 	}
+	// Every row here carries its ids, so a group without them names no
+	// stored row to keep.
+	for _, g := range norm {
+		if g.GitHubTeamID == "" {
+			return fmt.Errorf("no github group without ids is stored for %s/%s", g.OrgLogin, g.TeamSlug)
+		}
+	}
 	// Replace-set: delete the host's set and re-insert inside one tx so the
 	// table never observes a partial mid-sync state.
 	return inTx(ctx, s.app, func(tx queryer) error {

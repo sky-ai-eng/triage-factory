@@ -1065,14 +1065,16 @@ type TeamGitHubGroup struct {
 }
 
 // NormalizeTeamGitHubGroups validates a set of mappings for SetForTeam: every
-// entry names its team and organization by GitHub id (IsGitHubID) and carries
-// a non-blank login and slug, which are trimmed. A team named twice is kept
-// once, at its first position. An entry that fails is an error naming its
-// index, since a mapping without its ids can never be routed to or
-// reconciled.
+// entry carries a non-blank login and slug, which are trimmed, and names its
+// team and organization by GitHub id (IsGitHubID) or carries neither id. An
+// entry with neither is a stored row without ids, kept by its handle; one with
+// a single id is an error naming its index. A team named twice is kept once,
+// at its first position: by its id, or by its case-folded handle for an entry
+// without ids, which is dropped when an entry with ids has the same handle,
+// since at any one time a handle names one team.
 func NormalizeTeamGitHubGroups(groups []TeamGitHubGroup) ([]TeamGitHubGroup, error) {
-	out := make([]TeamGitHubGroup, 0, len(groups))
-	seen := map[string]bool{}
+	norm := make([]TeamGitHubGroup, 0, len(groups))
+	identified := map[string]bool{}
 	for i, g := range groups {
 		n := TeamGitHubGroup{
 			GitHubTeamID: strings.TrimSpace(g.GitHubTeamID),
@@ -1080,19 +1082,41 @@ func NormalizeTeamGitHubGroups(groups []TeamGitHubGroup) ([]TeamGitHubGroup, err
 			OrgLogin:     strings.TrimSpace(g.OrgLogin),
 			TeamSlug:     strings.TrimSpace(g.TeamSlug),
 		}
-		if !IsGitHubID(n.GitHubTeamID) || !IsGitHubID(n.GitHubOrgID) {
+		withoutIDs := n.GitHubTeamID == "" && n.GitHubOrgID == ""
+		if !withoutIDs && (!IsGitHubID(n.GitHubTeamID) || !IsGitHubID(n.GitHubOrgID)) {
 			return nil, fmt.Errorf("groups[%d]: a github group needs GitHub's team and organization ids, got %q/%q", i, g.GitHubTeamID, g.GitHubOrgID)
 		}
 		if n.OrgLogin == "" || n.TeamSlug == "" {
 			return nil, fmt.Errorf("groups[%d]: a github group needs its org login and team slug, got %q/%q", i, g.OrgLogin, g.TeamSlug)
 		}
-		if seen[n.GitHubTeamID] {
+		if !withoutIDs {
+			identified[n.Handle()] = true
+		}
+		norm = append(norm, n)
+	}
+	out := make([]TeamGitHubGroup, 0, len(norm))
+	seen := map[string]bool{}
+	for _, n := range norm {
+		key := "id:" + n.GitHubTeamID
+		if n.GitHubTeamID == "" {
+			if identified[n.Handle()] {
+				continue
+			}
+			key = "handle:" + n.Handle()
+		}
+		if seen[key] {
 			continue
 		}
-		seen[n.GitHubTeamID] = true
+		seen[key] = true
 		out = append(out, n)
 	}
 	return out, nil
+}
+
+// Handle is the team's case-folded org/slug, the handle a mention spells and
+// the only identity a row without ids has.
+func (g TeamGitHubGroup) Handle() string {
+	return strings.ToLower(g.OrgLogin + "/" + g.TeamSlug)
 }
 
 // GitHubOrgTeams is one GitHub organization's team listing, as the deletion

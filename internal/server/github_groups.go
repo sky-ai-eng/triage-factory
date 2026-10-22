@@ -19,7 +19,8 @@ import (
 // Jira project rules. GET (any team member) returns the team's current
 // GitHub-team mappings plus the org's live GitHub teams as
 // import-and-choose candidates; PUT (team admin) replace-sets the
-// mappings, naming each GitHub team by GitHub's id. The {team_id} segment
+// mappings, naming each GitHub team by GitHub's id, or a stored mapping
+// without ids by its handle. The {team_id} segment
 // accepts a UUID or the literal "default", same as the sibling team
 // routes.
 // --------------------------------------------------------------------
@@ -30,8 +31,8 @@ type gitHubGroupJSON struct {
 	// mapping by. GitHubOrgID is GitHub's id for the team's organization.
 	// Both are "" on a local mapping stored before ids were recorded, until
 	// the GitHub poll identifies it from the organization's team listing;
-	// the PUT cannot name such a mapping, so a client keeps it by picking
-	// its team from the candidates, which carry the ids.
+	// the PUT keeps such a mapping by its OrgLogin and TeamSlug
+	// (unidentified_groups), or by the id of the candidate with its handle.
 	GitHubTeamID string `json:"github_team_id"`
 	GitHubOrgID  string `json:"github_org_id"`
 	// OrgLogin and TeamSlug are what GitHub called the organization and the
@@ -180,7 +181,7 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	ids, ok := parseGitHubTeamIDs(w, req.GitHubTeamIDs)
+	ids, handles, ok := parseGitHubGroupsPut(w, req)
 	if !ok {
 		return
 	}
@@ -213,11 +214,13 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	var listed map[string]gitHubGroupCandidateJSON
-	groups := make([]domain.TeamGitHubGroup, 0, len(ids))
+	groups := make([]domain.TeamGitHubGroup, 0, len(ids)+len(handles))
+	named := make(map[string]int, len(ids)) // handle -> github_team_ids index
 	var refusals httpx.Validation
 	for i, id := range ids {
 		if g, ok := held[id]; ok {
 			groups = append(groups, g)
+			named[g.Handle()] = i
 			continue
 		}
 		if listed == nil {
@@ -233,9 +236,33 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 				"GitHub team "+id+" is not a team of an organization this team's tracked repositories belong to, as this organization's GitHub credentials list them")
 			continue
 		}
-		groups = append(groups, domain.TeamGitHubGroup{
+		g := domain.TeamGitHubGroup{
 			GitHubTeamID: c.GitHubTeamID, GitHubOrgID: c.GitHubOrgID, OrgLogin: c.OrgLogin, TeamSlug: c.TeamSlug,
-		})
+		}
+		groups = append(groups, g)
+		named[g.Handle()] = i
+	}
+	// A mapping without ids is kept only as the row it already is: the
+	// handle has to name one the team holds, and not a team the request also
+	// names by its id.
+	unidentified := make(map[string]domain.TeamGitHubGroup, len(existing))
+	for _, g := range existing {
+		if g.GitHubTeamID == "" {
+			unidentified[g.Handle()] = g
+		}
+	}
+	for i, h := range handles {
+		field := fmt.Sprintf("unidentified_groups[%d]", i)
+		if j, ok := named[h.Handle()]; ok {
+			refusals.Invalid(field, h.OrgLogin+"/"+h.TeamSlug+" is the GitHub team named at "+gitHubTeamIDField(j))
+			continue
+		}
+		g, ok := unidentified[h.Handle()]
+		if !ok {
+			refusals.Invalid(field, h.OrgLogin+"/"+h.TeamSlug+" is not a mapping this team holds without GitHub ids")
+			continue
+		}
+		groups = append(groups, g)
 	}
 	if refusals.Flush(w, http.StatusUnprocessableEntity) {
 		return
@@ -259,9 +286,20 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 
 // teamGitHubGroupsPutRequest is the desired set. GitHubTeamIDs is a pointer
 // because an absent field is not an empty set: a body that forgot it must not
-// clear the team's mappings.
+// clear the team's mappings. UnidentifiedGroups names the stored mappings
+// without GitHub ids the set keeps (the GET's groups whose github_team_id is
+// ""), by their org login and team slug; absent keeps none, as an empty list
+// does, since only a local install upgraded from before ids were recorded
+// holds any.
 type teamGitHubGroupsPutRequest struct {
-	GitHubTeamIDs *[]string `json:"github_team_ids"`
+	GitHubTeamIDs      *[]string               `json:"github_team_ids"`
+	UnidentifiedGroups []gitHubGroupHandleJSON `json:"unidentified_groups"`
+}
+
+// gitHubGroupHandleJSON names a mapping without ids by its handle.
+type gitHubGroupHandleJSON struct {
+	OrgLogin string `json:"org_login"`
+	TeamSlug string `json:"team_slug"`
 }
 
 // teamGitHubGroupsPutResponse echoes the set as stored, in the GET's shape.
@@ -269,17 +307,41 @@ type teamGitHubGroupsPutResponse struct {
 	Groups []gitHubGroupJSON `json:"groups"`
 }
 
-// parseGitHubTeamIDs validates the PUT body's shape: the field present, and
-// every entry one of GitHub's numeric ids in canonical form
-// (domain.IsGitHubID), named once. Every fault is reported, and it writes the
-// 400 on a false return. Whether an id names a team the org can map is the
-// handler's next question.
-func parseGitHubTeamIDs(w http.ResponseWriter, raw *[]string) ([]string, bool) {
+// parseGitHubGroupsPut validates the PUT body's shape: github_team_ids
+// present, every entry one of GitHub's numeric ids in canonical form
+// (domain.IsGitHubID), named once, and every unidentified_groups entry a
+// login and a slug, named once (case-insensitively). Every fault is reported,
+// and it writes the 400 on a false return. Whether an entry names a team the
+// org can map is the handler's next question.
+func parseGitHubGroupsPut(w http.ResponseWriter, req teamGitHubGroupsPutRequest) ([]string, []domain.TeamGitHubGroup, bool) {
 	var v httpx.Validation
+	handles := make([]domain.TeamGitHubGroup, 0, len(req.UnidentifiedGroups))
+	firstHandle := make(map[string]int, len(req.UnidentifiedGroups))
+	for i, h := range req.UnidentifiedGroups {
+		field := fmt.Sprintf("unidentified_groups[%d]", i)
+		hasLogin, hasSlug := strings.TrimSpace(h.OrgLogin) != "", strings.TrimSpace(h.TeamSlug) != ""
+		if !hasLogin {
+			v.Missing(field + ".org_login")
+		}
+		if !hasSlug {
+			v.Missing(field + ".team_slug")
+		}
+		if !hasLogin || !hasSlug {
+			continue
+		}
+		g := domain.TeamGitHubGroup{OrgLogin: h.OrgLogin, TeamSlug: h.TeamSlug}
+		if j, dup := firstHandle[g.Handle()]; dup {
+			v.Invalid(field, fmt.Sprintf("%s/%s is already named at unidentified_groups[%d]", g.OrgLogin, g.TeamSlug, j))
+			continue
+		}
+		firstHandle[g.Handle()] = i
+		handles = append(handles, g)
+	}
+	raw := req.GitHubTeamIDs
 	if raw == nil {
 		v.Missing("github_team_ids")
 		v.Flush(w, http.StatusBadRequest)
-		return nil, false
+		return nil, nil, false
 	}
 	ids := make([]string, 0, len(*raw))
 	first := make(map[string]int, len(*raw))
@@ -301,9 +363,9 @@ func parseGitHubTeamIDs(w http.ResponseWriter, raw *[]string) ([]string, bool) {
 		ids = append(ids, id)
 	}
 	if v.Flush(w, http.StatusBadRequest) {
-		return nil, false
+		return nil, nil, false
 	}
-	return ids, true
+	return ids, handles, true
 }
 
 func gitHubTeamIDField(i int) string { return fmt.Sprintf("github_team_ids[%d]", i) }
