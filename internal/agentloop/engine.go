@@ -138,11 +138,21 @@ type Params struct {
 	// a breach to the command that caused it rather than to whoever
 	// allocates next.
 	//
-	// Zero disables it: no configure frame is sent, and the harness arms no
-	// watchdog. Policy, so it comes from the driver as a constant — there is
-	// no env knob and no settings surface, and it is never a tool argument
-	// the model could raise for itself.
+	// Zero disables it, and the harness arms no watchdog. Policy, so it
+	// comes from the driver as a constant — there is no env knob and no
+	// settings surface, and it is never a tool argument the model could raise
+	// for itself.
 	BashMemBudgetMB int
+
+	// BashDefaultTimeout is the timeout of a `bash` command the model gives
+	// none, and BashMaxTimeout the largest one it may give; a larger one is
+	// refused before the command runs. A maximum under the driver's own
+	// deadline for a tool call is what brings a command that never ends back
+	// as one that timed out, instead of outliving the call. Zero leaves the
+	// harness's behavior where it is without them: no default, and pi's own
+	// maximum. Policy for the same reasons as the budget.
+	BashDefaultTimeout time.Duration
+	BashMaxTimeout     time.Duration
 
 	// Effort rides through to the provider call unchanged.
 	Effort string
@@ -310,6 +320,12 @@ type ActivityBounds struct {
 // Activity under. Exported because what a stall means depends on it: a
 // provider that sends nothing is an upstream outage, not a stuck engagement.
 const ProviderActivityOp = "provider"
+
+// ToolActivityOpPrefix starts the operation name a tool call is reported to
+// Activity under, followed by the tool's name. Exported because a tool call
+// past its deadline is ended differently from anything else that stalls: by
+// stopping the jail it runs in, which the loop restarts.
+const ToolActivityOpPrefix = "tool:"
 
 // beginActivity reports an operation to Activity, or does nothing.
 func (e *Engine) beginActivity(name string, bound time.Duration) (end func()) {
@@ -746,28 +762,38 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 	}
 }
 
-// configureToolHost hands the tool host this engagement's execution policy —
-// today the per-command bash memory budget, and nothing else.
+// configureToolHost hands the tool host this engagement's execution policy:
+// the per-command bash memory budget and the bash time limits.
 //
 // Skipped entirely when there is no policy to send, which is what makes an
 // unconfigured engagement byte-identical to the world before the frame
-// existed: no frame, no watchdog, no syscall.
+// existed: no frame, no watchdog, no syscall. A policy at zero is left out of
+// the frame rather than sent as zero, so it reads as never configured.
 //
 // Never fatal, in any of the three ways it can fail. A host older than the
 // verb answers the ordinary non-fatal unknown_tool; a host that rejects the
 // args answers a tool error; a dead connection answers nothing. All three
-// mean "this run has no per-command budget", and none of them is worth
-// refusing to run the engagement over — the jail ceiling is still underneath,
-// and a connection that is genuinely gone fails the first real tool call a
-// moment later with a diagnosis this frame could not improve on.
+// mean "this run has none of the policy", and none of them is worth refusing
+// to run the engagement over — the jail ceiling and the loop's deadline for a
+// tool call are still underneath, and a connection that is genuinely gone
+// fails the first real tool call a moment later with a diagnosis this frame
+// could not improve on.
 func (e *Engine) configureToolHost(params Params) {
-	if params.BashMemBudgetMB <= 0 {
+	args := map[string]any{}
+	if params.BashMemBudgetMB > 0 {
+		args[bashMemBudgetArg] = params.BashMemBudgetMB
+	}
+	if s := wholeSeconds(params.BashDefaultTimeout); s > 0 {
+		args[bashDefaultTimeoutArg] = s
+	}
+	if s := wholeSeconds(params.BashMaxTimeout); s > 0 {
+		args[bashMaxTimeoutArg] = s
+	}
+	if len(args) == 0 {
 		return
 	}
-	const notice = "configuring the tool host failed; this engagement runs without a per-command memory budget"
-	out, err := e.Tools.Call(toolHostConfigureTool, map[string]any{
-		bashMemBudgetArg: params.BashMemBudgetMB,
-	})
+	const notice = "configuring the tool host failed; this engagement runs without a per-command memory budget or time limits"
+	out, err := e.Tools.Call(toolHostConfigureTool, args)
 	switch {
 	case err != nil:
 		e.warn(notice, "conversation", params.ConversationID, "error", err)
@@ -776,6 +802,12 @@ func (e *Engine) configureToolHost(params Params) {
 	case out.ToolError != "":
 		e.warn(notice, "conversation", params.ConversationID, "error", out.ToolError)
 	}
+}
+
+// wholeSeconds is d in the whole seconds the harness's time limits take,
+// rounded down, so a limit is never sent longer than the one asked for.
+func wholeSeconds(d time.Duration) int {
+	return int(d / time.Second)
 }
 
 // buildRequest is the single constructor for a conversational provider

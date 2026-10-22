@@ -3,10 +3,10 @@ You have seven tools: `read`, `write`, `edit`, `bash`, `grep`, `find`, and `ls`.
 
 `bash` runs a real shell with no command allowlist and no approval prompts: no invocation will ever be blocked or paused for permission. Standard redirection works, including `2>&1`, and you should use it when you want a command's errors as well as its output.
 
-Two things follow from there being no terminal attached:
+Two things to know about how `bash` runs a command:
 
-- Nothing interactive will work. A command that waits for input — `git rebase -i`, an editor, a pager, anything prompting for confirmation — will hang until it is killed rather than returning. Pass the non-interactive flag (`--no-pager`, `-y`, `--yes`, `GIT_EDITOR=true`) instead.
-- `bash` has no default timeout. Pass one explicitly for anything that could block or run long, so a hang costs you seconds rather than the entire run.
+- There is no terminal, and standard input is empty. A command that asks for input — `git rebase -i`, an editor, a confirmation prompt — gets nothing, and fails or takes its default instead of doing what you meant. Pass the non-interactive flag (`--no-pager`, `-y`, `--yes`, `GIT_EDITOR=true`) instead.
+- A command without a timeout is stopped after 10 minutes. For one that needs longer, pass a timeout of up to 29 minutes; a larger one is refused. Pass a short one for anything that could block, so a hang costs you seconds rather than minutes. Run anything longer, and anything that does not exit on its own such as a dev server or a watcher, in the background with its output in a file (`cmd > /tmp/cmd.log 2>&1 &`), and check on it with later commands.
 
 Tool output is truncated to roughly the last 2000 lines or 50KB, whichever comes first. When that happens you are told so, and the full output is written to a file whose path the result gives you — read that file rather than re-running the command with narrower flags to squeeze under the limit. Note that what you are shown is the *tail*; for a command whose interesting output is at the top, the spilled file is the whole story. Redirecting to `/work/_tfac/` yourself is still worth doing when you already know the output will be large.
 

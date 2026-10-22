@@ -301,7 +301,7 @@ operation past its own deadline.
 | Operation | Deadline |
 | -- | -- |
 | `provider` | 150s without a byte from the model provider. |
-| `tool:<name>` | 30 minutes for one tool call. With parallel calls in flight, 30 minutes without one of them returning, named for the oldest still running. |
+| `tool:<name>` | 30 minutes for one tool call. With parallel calls in flight, 30 minutes without one of them returning, named for the oldest still running. A native engagement's `bash` command never gets that far: one given no timeout is stopped after 10 minutes, and a timeout above 29 minutes is refused. |
 | `clone`, `rehydrate` | 10 minutes. |
 | `permission` | 150s waiting on a person to answer a permission prompt. |
 | `sidecar_network`, `sidecar_launch`, `sidecar_bringup`, `fetch_pr`, `awaiting_credentials`, `snapshot_wait`, `checkpoint` | 30s past the timeout the operation already has, so its own timeout fires first. `snapshot_wait` is a cold resume waiting on another executor's workspace snapshot, bounded by `TF_SNAPSHOT_WAIT_SEC`. `checkpoint` is a tool call waiting for a workspace checkpoint to finish reading the tree, bounded by the checkpoint's 5-minute capture timeout. |
@@ -314,6 +314,13 @@ engagement is handed back `requeued_upstream` (below) instead of parked. The
 SDK runtime reports no provider operation, so its stalls all park, including
 one on a provider that never answers: the retry notices the SDK writes while it
 waits do not count as activity.
+
+A native engagement's `tool:<name>` operation is the other exception. A tool
+call past its 30 minutes is ended by stopping the sandbox it runs in; the agent
+loop restarts the sandbox, tells the agent why the call ended, and the run goes
+on. It is not counted in `tf_engagements_stalled_total`. The engagement parks
+`stalled` after all only when the call has still not returned 30 seconds after
+the stop, or when what ran past the deadline is the restart itself.
 
 An engagement can also **hand its claim back**: release it with the
 conversation still mid-flight, so the next claim continues the conversation

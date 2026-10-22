@@ -1,8 +1,10 @@
 package delegate
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -188,5 +190,25 @@ func TestNativeOpeningRow_TasklessRun(t *testing.T) {
 	}
 	if strings.HasSuffix(got, "\n") {
 		t.Error("the opening row should not carry trailing whitespace into the transcript")
+	}
+}
+
+// TestNativeSystemPrompt_StatesTheBashTimeLimitsTheToolHostEnforces: the
+// harness block names the bash limits as literal minutes, since a block is the
+// same bytes for every run. Those minutes have to be the ones the tool host is
+// configured with, or the model is told one limit and stopped at another.
+func TestNativeSystemPrompt_StatesTheBashTimeLimitsTheToolHostEnforces(t *testing.T) {
+	prompt := nativeSystemPrompt()
+	timings := activityTimings{toolCall: toolCallDeadline}
+	for name, limit := range map[string]time.Duration{
+		"default": timings.bashDefaultTimeout(),
+		"maximum": timings.bashMaxTimeout(),
+	} {
+		if limit%time.Minute != 0 {
+			t.Fatalf("the %s bash timeout %s is not a whole number of minutes; the block cannot state it", name, limit)
+		}
+		if phrase := fmt.Sprintf("%d minutes", int(limit/time.Minute)); !strings.Contains(prompt, phrase) {
+			t.Errorf("the native system prompt does not state the %s bash timeout as %q", name, phrase)
+		}
 	}
 }

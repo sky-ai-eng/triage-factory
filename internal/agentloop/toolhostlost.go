@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -91,6 +92,30 @@ const lostBeforeSentNotice = "This tool call was not executed: the tool host had
 // lostSandboxReason is the Reason of a tool host whose death nothing explains.
 const lostSandboxReason = "the sandbox stopped unexpectedly"
 
+// ToolCallOverranError is what a call returns when its driver ended it by
+// stopping the jail, because the call had run past limit, the longest one
+// tool call may run. The engine restarts the jail as it would one that died
+// on its own, and the call is told why it ended, which nothing the call
+// itself returned could say.
+func ToolCallOverranError(limit time.Duration, err error) *ToolHostLostError {
+	phrase := limitPhrase(limit)
+	return &ToolHostLostError{
+		Notice: "This tool call ran past the " + phrase + " limit on a single tool call, so the sandbox was stopped to " +
+			"end it. Its result is lost, and it may have run in part or in full: check its effects before you repeat it.",
+		Reason: "a tool call ran past the " + phrase + " limit on a single tool call",
+		Err:    err,
+	}
+}
+
+// limitPhrase is a deadline as the model reads it: "30-minute", or the
+// duration itself when it is not a whole number of minutes.
+func limitPhrase(d time.Duration) string {
+	if d >= time.Minute && d%time.Minute == 0 {
+		return fmt.Sprintf("%d-minute", int(d/time.Minute))
+	}
+	return d.String()
+}
+
 // toolHostLostFor describes a call that ended its engagement's tool host: the
 // transport failure dispatchErr, or, when that is nil, the fatal protocol
 // frame proto. An explanation the ToolHost already attached is kept.
@@ -136,7 +161,7 @@ func (e *Engine) restartToolHost(ctx context.Context, params Params, call domain
 	}
 	// The restart is part of answering the call, so the watchdog sees the
 	// call in flight until the new tool host is up.
-	end := e.beginActivity("tool:"+call.Name, e.ActivityBounds.Tool)
+	end := e.beginActivity(ToolActivityOpPrefix+call.Name, e.ActivityBounds.Tool)
 	err := host.Restart(ctx)
 	end()
 	if err != nil {

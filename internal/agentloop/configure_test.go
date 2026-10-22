@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -100,6 +101,30 @@ func TestRun_NoBudgetSendsNoConfigureFrame(t *testing.T) {
 	}
 }
 
+// TestRun_ConfiguresTheBashTimeLimits: the limits ride the same frame as the
+// budget, each in whole seconds.
+func TestRun_ConfiguresTheBashTimeLimits(t *testing.T) {
+	tr := newMemTranscript(pendingUser("build it"))
+	host := newScriptedToolHost()
+	params := testParams()
+	params.BashMemBudgetMB = 2048
+	params.BashDefaultTimeout = 10 * time.Minute
+	params.BashMaxTimeout = 29 * time.Minute
+	if got := newTestEngine(tr, oneToolCallThenDone(), host).Run(context.Background(), params); got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v, want concluded (err: %v)", got.Kind, got.Err)
+	}
+	args, _ := host.argsFor(toolHostConfigureTool)
+	want := map[string]any{bashMemBudgetArg: 2048, bashDefaultTimeoutArg: 600, bashMaxTimeoutArg: 1740}
+	if len(args) != len(want) {
+		t.Fatalf("frame args = %v, want %v", args, want)
+	}
+	for k, v := range want {
+		if args[k] != v {
+			t.Errorf("%s = %v, want %v", k, args[k], v)
+		}
+	}
+}
+
 // TestRun_ConfigureFailureIsToleratedWithOneLogLine — every way the frame can
 // fail means the same thing (this run has no per-command budget), and none of
 // them may stop the engagement. Version skew between the loop and the harness
@@ -154,7 +179,7 @@ func TestRun_ConfigureFailureIsToleratedWithOneLogLine(t *testing.T) {
 			if len(log.warns) != 1 {
 				t.Fatalf("logged %v, want exactly one warn", log.warns)
 			}
-			if !strings.Contains(log.warns[0], "without a per-command memory budget") {
+			if !strings.Contains(log.warns[0], "without a per-command memory budget or time limits") {
 				t.Errorf("warn = %q, want the one naming the lost budget", log.warns[0])
 			}
 		})

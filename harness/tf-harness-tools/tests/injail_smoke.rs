@@ -389,3 +389,48 @@ fn a_configured_budget_kills_a_real_allocator_in_the_jail() {
         "the jail's tool host did not survive the kill: {after}"
     );
 }
+
+/// A background process the command leaves holding its output neither holds
+/// the call open nor dies of SIGPIPE once the call returns.
+#[test]
+fn a_background_process_outlives_its_call_in_the_jail() {
+    if preflight().is_none() {
+        return;
+    }
+    let mut jail = Jail::start(&[]);
+
+    let started = Instant::now();
+    let launched = jail.call(&json!({
+        "id": 1,
+        "tool": "bash",
+        "args": {
+            "command": "(while :; do echo tick; sleep 0.05; done) & echo $! > steady.pid; (sleep 1; echo late; touch survived) & echo launched"
+        },
+    }));
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "the call waited {:?} on a background process",
+        started.elapsed()
+    );
+    assert_eq!(
+        launched["ok"],
+        json!(true),
+        "launch failed in jail: {launched}"
+    );
+    assert!(
+        text_of(&launched).contains("still attached to its output"),
+        "no note about the background process: {launched}"
+    );
+
+    std::thread::sleep(Duration::from_secs(3));
+    let check = jail.call(&json!({
+        "id": 2,
+        "tool": "bash",
+        "args": { "command": "kill -0 $(cat steady.pid) && echo steady-alive; test -e survived && echo survived" },
+    }));
+    assert_eq!(
+        text_of(&check),
+        "steady-alive\nsurvived\n",
+        "a background process died after its call returned: {check}"
+    );
+}

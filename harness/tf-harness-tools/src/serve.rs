@@ -98,7 +98,7 @@ use crate::ToolConfig;
 /// It is **not** a tool, and the distinction is the point. The peer sends it
 /// once, right after the connection is up and before any tool call, to impose
 /// policy the model must not be able to choose — today the `bash` per-command
-/// memory budget. Being dispatched ahead of [`crate::run_tool`] means it is
+/// memory budget and its time limits. Being dispatched ahead of [`crate::run_tool`] means it is
 /// absent from `--definitions` by construction, so the model-facing tool
 /// definitions (and the cached prefix built from them) cannot move because a
 /// policy knob was added here.
@@ -113,6 +113,14 @@ pub const CONFIGURE_TOOL: &str = "_configure";
 /// Args key of [`CONFIGURE_TOOL`]: the `bash` per-command resident-memory
 /// budget in MB. Zero disables the watchdog.
 const CONFIGURE_BASH_MEM_BUDGET_MB: &str = "bash_mem_budget_mb";
+
+/// Args key of [`CONFIGURE_TOOL`]: the timeout, in seconds, of a `bash`
+/// command given none. Zero leaves such a command unbounded.
+const CONFIGURE_BASH_DEFAULT_TIMEOUT_S: &str = "bash_default_timeout_s";
+
+/// Args key of [`CONFIGURE_TOOL`]: the largest `bash` timeout, in seconds, a
+/// call may give. Zero leaves only pi's own maximum.
+const CONFIGURE_BASH_MAX_TIMEOUT_S: &str = "bash_max_timeout_s";
 
 /// Upper bound on a single frame's JSON body, in bytes. Tool outputs are
 /// truncation-bounded well under this; the cap exists so a malformed or hostile
@@ -451,11 +459,15 @@ impl Session {
     /// and this host ship in one image today, and the day they don't, a policy
     /// one side has never heard of must not fail the other's engagement.
     fn configure(&mut self, args: &Value) {
-        if let Some(mb) = args
-            .get(CONFIGURE_BASH_MEM_BUDGET_MB)
-            .and_then(Value::as_u64)
-        {
+        let read = |key: &str| args.get(key).and_then(Value::as_u64);
+        if let Some(mb) = read(CONFIGURE_BASH_MEM_BUDGET_MB) {
             self.config.bash_mem_budget_mb = mb;
+        }
+        if let Some(seconds) = read(CONFIGURE_BASH_DEFAULT_TIMEOUT_S) {
+            self.config.bash_default_timeout_s = seconds;
+        }
+        if let Some(seconds) = read(CONFIGURE_BASH_MAX_TIMEOUT_S) {
+            self.config.bash_max_timeout_s = seconds;
         }
     }
 }
@@ -584,6 +596,23 @@ mod tests {
         assert_eq!(v["ok"], json!(true));
         assert_eq!(v["result"], json!({ "content": [] }));
         assert_eq!(session.config.bash_mem_budget_mb, 512);
+    }
+
+    #[test]
+    fn configure_sets_the_session_time_limits() {
+        let mut session = Session::new(".");
+        session.handle_request(
+            br#"{"id":1,"tool":"_configure","args":{"bash_default_timeout_s":600,"bash_max_timeout_s":1740}}"#,
+        );
+        assert_eq!(session.config.bash_default_timeout_s, 600);
+        assert_eq!(session.config.bash_max_timeout_s, 1740);
+        // A wrong-typed value leaves what was applied.
+        session.handle_request(
+            br#"{"id":2,"tool":"_configure","args":{"bash_max_timeout_s":"long"}}"#,
+        );
+        assert_eq!(session.config.bash_max_timeout_s, 1740);
+        assert_eq!(Session::new(".").config.bash_default_timeout_s, 0);
+        assert_eq!(Session::new(".").config.bash_max_timeout_s, 0);
     }
 
     #[test]

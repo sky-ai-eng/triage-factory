@@ -185,6 +185,31 @@ All model-visible strings match pi. The differences that exist:
   ceiling remains the hard backstop, and the budget's job is attributing a
   breach to the command that caused it instead of to the next innocent
   allocation in the session.
+- **`bash` time limits** — pi has no default timeout and no maximum. A `serve`
+  session can be configured with both (`bash_default_timeout_s`,
+  `bash_max_timeout_s`): a command given no timeout gets the default, and one
+  whose timeout exceeds the maximum is refused before it runs, with an error
+  naming the maximum and how to run longer work in the background. A command
+  the default ends is answered with a message naming the default and the same
+  advice; an explicit timeout that fires keeps pi's text. Both are off unless
+  configured, so the one-shot CLI and the parity corpus never see them. The
+  `timeout` parameter's description says a default and a maximum exist.
+- **`bash` background processes that keep the output open** — a process the
+  command starts in the background inherits its stdout and stderr. pi reads
+  them after the shell exits for as long as output keeps arriving, so a process
+  that logs steadily holds the call open forever, and then closes them, so a
+  process that writes after that dies of SIGPIPE. Here the reading after exit
+  stops after 2 seconds at most, the pipes are drained rather than closed until
+  the process closes them, so it keeps running with its later output
+  discarded, and the result ends with a note saying so. This applies whether
+  or not the session is configured; no parity case leaves a process holding
+  the output.
+- **File tools refuse what is not a regular file** — `read`, `write`, `edit`,
+  and a `grep` on a single path refuse a named pipe, a socket, or a device with
+  `Cannot <verb> <path>: it is a named pipe, not a regular file.` pi opens
+  them, and opening a named pipe blocks until something opens its other end,
+  which holds the session's only tool call. `grep` over a directory already
+  skipped them.
 - **TF branding on agent-facing strings** — the bash spill file is
   `/tmp/tf-bash-<hex>.log` where pi writes `pi-bash-…`. The path is
   model-visible in the truncation notice (and read back by the agent), so

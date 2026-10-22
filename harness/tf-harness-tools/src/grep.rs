@@ -114,6 +114,11 @@ pub fn execute(cwd: &str, args: &GrepArgs) -> ToolResultOrError<GrepToolDetails>
         Ok(meta) => meta.is_dir(),
         Err(_) => return Err(ToolError::new(format!("Path not found: {search_path}"))),
     };
+    // A directory walk already skips anything but regular files; a path
+    // named directly is opened, so it is checked here.
+    if !is_directory {
+        crate::special::refuse_special_file(&search_path, "search")?;
+    }
 
     let context_value = match args.context {
         Some(c) if c > 0.0 => c as i64,
