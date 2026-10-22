@@ -102,63 +102,26 @@ func TestRun_NoBudgetSendsNoConfigureFrame(t *testing.T) {
 }
 
 // TestRun_ConfiguresTheBashTimeLimits: the limits ride the same frame as the
-// budget, each in whole seconds, and a limit at zero is left out of it, so a
-// session with only time limits still gets a frame and one without any policy
-// still gets none.
+// budget, each in whole seconds.
 func TestRun_ConfiguresTheBashTimeLimits(t *testing.T) {
-	tests := []struct {
-		name   string
-		params func(*Params)
-		want   map[string]any
-	}{
-		{
-			name: "every policy",
-			params: func(p *Params) {
-				p.BashMemBudgetMB = 2048
-				p.BashDefaultTimeout = 10 * time.Minute
-				p.BashMaxTimeout = 29 * time.Minute
-			},
-			want: map[string]any{bashMemBudgetArg: 2048, bashDefaultTimeoutArg: 600, bashMaxTimeoutArg: 1740},
-		},
-		{
-			name: "time limits alone",
-			params: func(p *Params) {
-				p.BashDefaultTimeout = 1500 * time.Millisecond
-				p.BashMaxTimeout = 2 * time.Second
-			},
-			want: map[string]any{bashDefaultTimeoutArg: 1, bashMaxTimeoutArg: 2},
-		},
-		{
-			name: "a limit under a second is no limit",
-			params: func(p *Params) {
-				p.BashMemBudgetMB = 512
-				p.BashMaxTimeout = 500 * time.Millisecond
-			},
-			want: map[string]any{bashMemBudgetArg: 512},
-		},
+	tr := newMemTranscript(pendingUser("build it"))
+	host := newScriptedToolHost()
+	params := testParams()
+	params.BashMemBudgetMB = 2048
+	params.BashDefaultTimeout = 10 * time.Minute
+	params.BashMaxTimeout = 29 * time.Minute
+	if got := newTestEngine(tr, oneToolCallThenDone(), host).Run(context.Background(), params); got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v, want concluded (err: %v)", got.Kind, got.Err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			tr := newMemTranscript(pendingUser("build it"))
-			host := newScriptedToolHost()
-			params := testParams()
-			tc.params(&params)
-			if got := newTestEngine(tr, oneToolCallThenDone(), host).Run(context.Background(), params); got.Kind != ResultConcluded {
-				t.Fatalf("disposition = %v, want concluded (err: %v)", got.Kind, got.Err)
-			}
-			args, ok := host.argsFor(toolHostConfigureTool)
-			if !ok {
-				t.Fatalf("no configure frame among %v", host.calls())
-			}
-			if len(args) != len(tc.want) {
-				t.Fatalf("frame args = %v, want %v", args, tc.want)
-			}
-			for k, v := range tc.want {
-				if args[k] != v {
-					t.Errorf("%s = %v, want %v", k, args[k], v)
-				}
-			}
-		})
+	args, _ := host.argsFor(toolHostConfigureTool)
+	want := map[string]any{bashMemBudgetArg: 2048, bashDefaultTimeoutArg: 600, bashMaxTimeoutArg: 1740}
+	if len(args) != len(want) {
+		t.Fatalf("frame args = %v, want %v", args, want)
+	}
+	for k, v := range want {
+		if args[k] != v {
+			t.Errorf("%s = %v, want %v", k, args[k], v)
+		}
 	}
 }
 

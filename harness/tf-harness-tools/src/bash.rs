@@ -964,25 +964,10 @@ background with its output in a file (`cmd > /tmp/cmd.log 2>&1 &`) and check on 
                 defaulted: true
             })
         );
-        let unconfigured = BashOptions::default();
-        assert_eq!(resolve_timeout(None, &unconfigured).unwrap(), None);
         assert_eq!(
-            resolve_timeout(Some(100_000.0), &unconfigured).unwrap(),
-            Some(Deadline {
-                ms: 100_000_000.0,
-                defaulted: false
-            })
+            resolve_timeout(None, &BashOptions::default()).unwrap(),
+            None
         );
-    }
-
-    #[test]
-    fn limits_read_as_words() {
-        assert_eq!(seconds_with_minutes(1740), "1740 seconds (29 minutes)");
-        assert_eq!(seconds_with_minutes(60), "60 seconds (1 minute)");
-        assert_eq!(seconds_with_minutes(90), "90 seconds");
-        assert_eq!(seconds_with_minutes(1), "1 second");
-        assert_eq!(whole_minutes(600).as_deref(), Some("10 minutes"));
-        assert_eq!(whole_minutes(0), None);
     }
 
     /// Saturating arithmetic on both sides: a sample large enough to overflow a

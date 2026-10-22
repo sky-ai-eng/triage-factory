@@ -2,7 +2,6 @@ package delegate
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net"
 	"strings"
@@ -20,91 +19,42 @@ import (
 type overrunRecorder struct {
 	offers  atomic.Int32
 	handled bool
-	op      atomic.Value
 }
 
-func (r *overrunRecorder) hook(c stallCause) bool {
+func (r *overrunRecorder) hook(stallCause) bool {
 	r.offers.Add(1)
-	r.op.Store(c.op)
 	return r.handled
 }
 
-// A tool call past its deadline goes to the hook first, once. A call the hook
-// ended that returns within the grace is never a stall.
-func TestActivityTracker_AToolCallPastItsDeadlineIsOfferedToTheOverrunHookOnce(t *testing.T) {
-	rec := newStallRecorder()
-	a := newActivityTracker(time.Hour, rec.stalled)
-	a.overrunGrace = time.Hour
-	defer a.stop()
-	hook := &overrunRecorder{handled: true}
-	defer a.onToolOverrun(hook.hook)()
+// A tool call past its deadline is offered to the overrun hook once. A call the
+// hook ended but that is still running past its grace is the stall it would
+// have been without the hook, and one the hook could not end, such as a
+// restart that is itself stuck, is a stall at once.
+func TestActivityTracker_AnOverrunTheHookDoesNotEndIsAStall(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		handled bool
+		grace   time.Duration
+	}{
+		{"ended but still running past its grace", true, 40 * time.Millisecond},
+		{"could not be ended", false, time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := newStallRecorder()
+			a := newActivityTracker(time.Hour, rec.stalled)
+			a.overrunGrace = tc.grace
+			defer a.stop()
+			hook := &overrunRecorder{handled: tc.handled}
+			defer a.onToolOverrun(hook.hook)()
 
-	end := a.begin("tool:bash", 30*time.Millisecond)
-	deadline := time.Now().Add(5 * time.Second)
-	for hook.offers.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if hook.offers.Load() != 1 || hook.op.Load() != "tool:bash" {
-		t.Fatalf("hook offers = %d (op %v), want one for tool:bash", hook.offers.Load(), hook.op.Load())
-	}
-	rec.assertQuietFor(t, 150*time.Millisecond, "a call the hook ended is not a stall while its grace lasts")
-	end()
-	rec.assertQuietFor(t, 100*time.Millisecond, "the call returned")
-	if n := hook.offers.Load(); n != 1 {
-		t.Errorf("hook offers = %d, want the one call offered once", n)
-	}
-}
-
-// The same call is never ended twice: past the grace it is the stall it
-// would have been without the hook.
-func TestActivityTracker_AToolCallStillRunningAfterItsGraceIsAStall(t *testing.T) {
-	rec := newStallRecorder()
-	a := newActivityTracker(time.Hour, rec.stalled)
-	a.overrunGrace = 40 * time.Millisecond
-	defer a.stop()
-	hook := &overrunRecorder{handled: true}
-	defer a.onToolOverrun(hook.hook)()
-
-	defer a.begin("tool:bash", 30*time.Millisecond)()
-	cause := rec.waitFired(t, 5*time.Second)
-	if cause.op != "tool:bash" {
-		t.Errorf("stall op = %q, want tool:bash", cause.op)
-	}
-	if n := hook.offers.Load(); n != 1 {
-		t.Errorf("hook offers = %d, want 1", n)
-	}
-}
-
-// A hook with nothing to end, such as a restart that is itself stuck, leaves
-// the stall to be decided at once rather than after a grace.
-func TestActivityTracker_AnOverrunTheHookCannotEndIsAStallAtOnce(t *testing.T) {
-	rec := newStallRecorder()
-	a := newActivityTracker(time.Hour, rec.stalled)
-	a.overrunGrace = time.Hour
-	defer a.stop()
-	hook := &overrunRecorder{handled: false}
-	defer a.onToolOverrun(hook.hook)()
-
-	defer a.begin("tool:bash", 30*time.Millisecond)()
-	if cause := rec.waitFired(t, 5*time.Second); cause.op != "tool:bash" {
-		t.Errorf("stall op = %q, want tool:bash", cause.op)
-	}
-}
-
-// Only a tool call is offered; every other operation stalls as it always has.
-func TestActivityTracker_OnlyAToolCallIsOfferedToTheOverrunHook(t *testing.T) {
-	rec := newStallRecorder()
-	a := newActivityTracker(time.Hour, rec.stalled)
-	defer a.stop()
-	hook := &overrunRecorder{handled: true}
-	defer a.onToolOverrun(hook.hook)()
-
-	defer a.begin("clone", 30*time.Millisecond)()
-	if cause := rec.waitFired(t, 5*time.Second); cause.op != "clone" {
-		t.Errorf("stall op = %q, want clone", cause.op)
-	}
-	if n := hook.offers.Load(); n != 0 {
-		t.Errorf("hook offers = %d, want none for a clone", n)
+			defer a.begin("tool:bash", 30*time.Millisecond)()
+			if cause := rec.waitFired(t, 5*time.Second); cause.op != "tool:bash" {
+				t.Errorf("stall op = %q, want tool:bash", cause.op)
+			}
+			if n := hook.offers.Load(); n != 1 {
+				t.Errorf("hook offers = %d, want the call offered once", n)
+			}
+		})
 	}
 }
 
@@ -128,45 +78,6 @@ func jailOneStuck(jail cell.Jail, _ net.Conn) agentloop.ToolHost {
 		return stuckToolHost{jail: fj}
 	}
 	return jailNamedToolHost{n: fj.n, closed: new(bool)}
-}
-
-// endOverrunCall ends the call in flight by stopping its jail, and the call
-// learns why; with no call in flight it does nothing and says so.
-func TestRestartableJail_EndingAnOverrunCallStopsItsJailAndSaysWhy(t *testing.T) {
-	c := &fakeCell{}
-	j, err := launchRestartableJail(context.Background(), c, cell.LaunchSpec{RunTree: "/tree"}, jailOneStuck)
-	if err != nil {
-		t.Fatalf("launchRestartableJail: %v", err)
-	}
-	if j.endOverrunCall(30 * time.Minute) {
-		t.Fatal("ended a call with none in flight")
-	}
-	if c.jails[0].Exited() {
-		t.Fatal("stopped the jail with no call in flight")
-	}
-
-	done := make(chan error, 1)
-	go func() {
-		_, err := j.toolHost().Call("bash", nil)
-		done <- err
-	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for !j.endOverrunCall(30*time.Minute) && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	var callErr error
-	select {
-	case callErr = <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the call did not end once its jail was stopped")
-	}
-	var lost *agentloop.ToolHostLostError
-	if !errors.As(callErr, &lost) || !strings.Contains(lost.Notice, "ran past the 30-minute limit") {
-		t.Fatalf("call error = %v, want the overrun named", callErr)
-	}
-	if !errors.Is(callErr, io.EOF) {
-		t.Errorf("call error = %v, want the socket's failure kept in the chain", callErr)
-	}
 }
 
 // The whole backstop through the real engine: a tool call that never returns

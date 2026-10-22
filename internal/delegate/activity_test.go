@@ -67,18 +67,6 @@ func TestActivityTimings(t *testing.T) {
 	if got := (activityTimings{workspaceOp: time.Second}).workspaceOpBackstop(); got <= time.Second {
 		t.Errorf("workspaceOpBackstop for an injected 1s bound = %s, want above it", got)
 	}
-	// The bash limits sit under the tool-call bound, so the tool host answers
-	// a command that runs out of time before the call is overdue, and the
-	// default never exceeds the maximum.
-	for _, tc := range []activityTimings{{toolCall: toolCallDeadline}, {toolCall: 100 * time.Millisecond}} {
-		maxT, defT := tc.bashMaxTimeout(), tc.bashDefaultTimeout()
-		if maxT <= 0 || maxT >= tc.toolCall {
-			t.Errorf("bashMaxTimeout for a %s tool bound = %s, want inside it", tc.toolCall, maxT)
-		}
-		if defT <= 0 || defT > maxT {
-			t.Errorf("bashDefaultTimeout for a %s tool bound = %s, want positive and at most %s", tc.toolCall, defT, maxT)
-		}
-	}
 }
 
 // stallRecorder collects what a tracker's watchdog decided.

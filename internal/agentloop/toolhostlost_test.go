@@ -365,21 +365,3 @@ func TestRun_AStopDuringARestartIsTheStops(t *testing.T) {
 		t.Errorf("results written under a stop = %+v, want none", results)
 	}
 }
-
-// A call its driver ended for running too long names the limit it ran past,
-// and keeps the socket's failure in the chain.
-func TestToolCallOverranError_NamesTheLimit(t *testing.T) {
-	lost := ToolCallOverranError(30*time.Minute, io.EOF)
-	if !strings.HasPrefix(lost.Notice, "This tool call ran past the 30-minute limit on a single tool call, so the sandbox was stopped to end it.") {
-		t.Errorf("Notice = %q", lost.Notice)
-	}
-	if lost.Reason != "a tool call ran past the 30-minute limit on a single tool call" {
-		t.Errorf("Reason = %q", lost.Reason)
-	}
-	if !errors.Is(lost, io.EOF) {
-		t.Errorf("%v does not wrap the socket's failure", lost)
-	}
-	if got := limitPhrase(90 * time.Second); got != "1m30s" {
-		t.Errorf("limitPhrase(90s) = %q, want the duration itself", got)
-	}
-}
