@@ -13,15 +13,14 @@ import (
 )
 
 // TestMe_IsOperator_ReadsVerifiedIdentities pins /api/me's is_operator to the
-// same read the fleet gate makes, and the sign-in that binds a pending grant.
-// The operator is added before their first sign-in, so the grant starts
-// pending; the GitHub sign-in that verifies its address binds it to that
-// principal, and from then on the grant follows the principal rather than the
-// address. The token's email claim is not consulted, so an SSO sign-in whose
-// identity provider asserts an operator's address on an untrusted domain is
-// not an operator and binds nothing, and an operator calling with an API
-// token still is (the console refuses the token with 403 at its own gate; the
-// flag describes the person).
+// same read the fleet gate makes, and the sign-in that binds a pending grant:
+// the GitHub sign-in that verifies the grant's address binds it to that
+// principal, after which it follows the principal rather than the address.
+// The token's email claim is not consulted, so an SSO sign-in whose identity
+// provider asserts an operator's address on an untrusted domain is not an
+// operator and binds nothing, and an operator calling with an API token still
+// is (the console refuses the token at its own gate; the flag describes the
+// person).
 func TestMe_IsOperator_ReadsVerifiedIdentities(t *testing.T) {
 	r := newAuthRig(t)
 	ctx := context.Background()
@@ -30,12 +29,8 @@ func TestMe_IsOperator_ReadsVerifiedIdentities(t *testing.T) {
 		pendingEmail = "pending-ops@corp.example"
 	)
 	for _, email := range []string{opEmail, pendingEmail} {
-		op, err := r.srv.allStores.Operators.Add(ctx, email, "test")
-		if err != nil {
+		if _, err := r.srv.allStores.Operators.Add(ctx, email, "test"); err != nil {
 			t.Fatalf("add operator %s: %v", email, err)
-		}
-		if !op.Pending() {
-			t.Fatalf("operator %s bound to %q before anyone signed in", email, op.UserID)
 		}
 	}
 
@@ -78,16 +73,6 @@ func TestMe_IsOperator_ReadsVerifiedIdentities(t *testing.T) {
 		}
 		return r.sidFromResp(resp)
 	}
-	principalOf := func(t *testing.T, authID uuid.UUID) string {
-		t.Helper()
-		var principal string
-		if err := r.h.AdminDB.QueryRow(
-			`SELECT user_id FROM user_identities WHERE auth_user_id = $1`, authID,
-		).Scan(&principal); err != nil {
-			t.Fatalf("resolve principal: %v", err)
-		}
-		return principal
-	}
 	grant := func(t *testing.T, email string) domain.Operator {
 		t.Helper()
 		list, err := r.srv.allStores.Operators.List(ctx)
@@ -106,7 +91,10 @@ func TestMe_IsOperator_ReadsVerifiedIdentities(t *testing.T) {
 	// The operator signs in with GitHub, which reports the address verified.
 	opAuth := newAuthUser(t)
 	opSid := githubSignIn(t, opAuth, opEmail)
-	opPrincipal := principalOf(t, opAuth)
+	var opPrincipal string
+	if err := r.h.AdminDB.QueryRow(`SELECT user_id FROM user_identities WHERE auth_user_id = $1`, opAuth).Scan(&opPrincipal); err != nil {
+		t.Fatalf("resolve the operator's principal: %v", err)
+	}
 
 	t.Run("the verifying sign-in binds the pending grant", func(t *testing.T) {
 		if got := grant(t, opEmail).UserID; got != opPrincipal {

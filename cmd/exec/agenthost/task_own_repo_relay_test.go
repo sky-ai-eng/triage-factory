@@ -12,11 +12,8 @@ import (
 // capless and holds no stores, and the relay envelope carries no identity —
 // the orchestrator binds it from its own ConversationInfo — so a sidecar
 // cannot name a repo as its task's. It has to ask, and the answer is resolved
-// against the orchestrator's conversation → task → entity chain.
-//
-// The gate asks the way authorizeRepo does: the name it was handed is resolved
-// to a registry row once (GetRepo, relayed too), and the task-repo arm is asked
-// about that row's id.
+// against the orchestrator's conversation → task → entity chain. ownByName
+// asks the way authorizeRepo does: name to registry row, then the row's id.
 func TestRelayRuntime_TaskOwnRepository_AnsweredByTheOrchestrator(t *testing.T) {
 	conn, stores, info := newCaptureStoresConn(t, true)
 	ctx := context.Background()

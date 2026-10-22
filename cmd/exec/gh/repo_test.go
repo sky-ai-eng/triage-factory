@@ -116,10 +116,9 @@ func TestSplitOwnerRepoStr(t *testing.T) {
 
 // fakeCheckouts is a prCheckouts that hands back canned
 // conversation_worktrees rows (host view), a root pair to translate them, and
-// a registry that resolves every name. repoIDs maps a lowercased "owner/repo"
-// to the registry row id GetRepo resolves it to; a name it does not list
-// resolves to fakeRepositoryID of the name, which is also the id a row
-// without a RepositoryID references.
+// a registry that resolves every name: through repoIDs (keyed by lowercased
+// "owner/repo"), else to fakeRepositoryID of the name, which is also the id a
+// row without a RepositoryID references.
 type fakeCheckouts struct {
 	rows                []domain.ConversationWorktree
 	hostRoot, agentRoot string

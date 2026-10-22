@@ -347,9 +347,9 @@ func TestPersistPRDiff_CheckoutWithoutBaseWarns(t *testing.T) {
 
 // TestPRCheckout_ExactPRNumber pins the registry match: the row of the
 // repository the name resolves to (in any casing) and whose ref is exactly
-// pr-<N>. pr-4 must not
-// answer for 42 or the reverse, another repo's pr-42 must not answer for this
-// one, and the recorded host-view path is translated into this process's view.
+// pr-<N>. pr-4 must not answer for 42 or the reverse, another repo's pr-42
+// must not answer for this one, and the recorded host-view path is translated
+// into this process's view.
 func TestPRCheckout_ExactPRNumber(t *testing.T) {
 	agentRoot := t.TempDir()
 	for _, d := range []string{"owner/repo/pr-4", "owner/repo/pr-42", "other/repo/pr-42"} {
@@ -394,11 +394,8 @@ func TestPRCheckout_ExactPRNumber(t *testing.T) {
 }
 
 // TestPRCheckout_MatchesTheResolvedRegistryRow: the ledger is matched on the
-// registry row the name resolves to, not on the name a row spells. The run
-// holds a pr-42 checkout of a repository that was called owner/repo when it
-// was checked out; owner/repo now resolves to another row (GitHub gave the name
-// to another repository), so that checkout is not this PR's, and the diff
-// comes from the API instead.
+// registry row the name resolves to, not on the name a row spells. A pr-42
+// checkout made while owner/repo named another repository is not this PR's.
 func TestPRCheckout_MatchesTheResolvedRegistryRow(t *testing.T) {
 	agentRoot := t.TempDir()
 	gitInitAt(t, filepath.Join(agentRoot, "owner", "repo", "pr-42"))

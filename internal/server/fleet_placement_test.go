@@ -37,7 +37,6 @@ type placementRepos struct {
 func (p placementRepos) GetByRefSystem(_ context.Context, _ string, ref domain.RepoRef) (*domain.Repository, error) {
 	for _, r := range p.rows {
 		if r.Host == ref.Host && strings.EqualFold(r.Slug(), ref.Slug()) {
-			r := r
 			return &r, nil
 		}
 	}

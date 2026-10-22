@@ -45,9 +45,7 @@ type jiraIssueFake struct {
 	status   fakeJiraStatus
 	assignee string // user key, "" when unassigned
 	writes   []jiraWrite
-	// issues is the issue every /issue/ request named, in order: an id or a
-	// key, as the caller spelled it.
-	issues []string
+	issues   []string // what each /issue/ request named, id or key
 }
 
 func newJiraIssueFake(t *testing.T, statusID, assignee string) *jiraIssueFake {
@@ -142,11 +140,15 @@ func (f *jiraIssueFake) Writes() []jiraWrite {
 	return slices.Clone(f.writes)
 }
 
-// Issues is every issue the fake's /issue/ requests named.
-func (f *jiraIssueFake) Issues() []string {
+// assertIssuesNamed fails unless the fake received /issue/ requests and every
+// one named one of ids.
+func (f *jiraIssueFake) assertIssuesNamed(t *testing.T, ids ...string) {
+	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return slices.Clone(f.issues)
+	if len(f.issues) == 0 || slices.ContainsFunc(f.issues, func(issue string) bool { return !slices.Contains(ids, issue) }) {
+		t.Errorf("Jira requests named issues %v, want only %v", f.issues, ids)
+	}
 }
 
 // waitForWrites blocks until the fake has received n writes, for a sync the
@@ -236,8 +238,8 @@ func TestApplyJiraUnclaim(t *testing.T) {
 
 // TestTaskRequeue_JiraTask_PutsTheTicketBack: claiming a Jira task records
 // the ticket's state in the claim, and returning it to the queue puts the
-// ticket back in that status, unassigned, as the user who claimed it. Every
-// call names the issue by its id, which the issue keeps if it moves.
+// ticket back in that status, unassigned, as the user who claimed it,
+// addressing the issue by its id.
 func TestTaskRequeue_JiraTask_PutsTheTicketBack(t *testing.T) {
 	fake := newJiraIssueFake(t, statusToDoID, "")
 	s := newTestServer(t)
@@ -296,14 +298,5 @@ func TestTaskRequeue_JiraTask_PutsTheTicketBack(t *testing.T) {
 	if got := fake.waitForWrites(t, len(want)); !slices.Equal(got, want) {
 		t.Errorf("Jira writes = %v, want %v", got, want)
 	}
-	issues := fake.Issues()
-	if len(issues) == 0 {
-		t.Fatal("Jira received no issue requests")
-	}
-	for _, issue := range issues {
-		if issue != "id-SKY-5" {
-			t.Errorf("Jira requests named issues %v, want every one the issue id id-SKY-5", issues)
-			break
-		}
-	}
+	fake.assertIssuesNamed(t, "id-SKY-5")
 }

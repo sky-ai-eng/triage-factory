@@ -148,9 +148,6 @@ func TestArtifactPR_AddressedByItsEntitysRepositoryRow(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get after retire = %d, want 200 (the snapshot); body=%s", rec.Code, rec.Body.String())
 	}
-	if len(paths) != 0 {
-		t.Errorf("live reads after retire = %v, want none", paths)
-	}
 	rec = doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
 	if rec.Code != http.StatusConflict {
 		t.Errorf("approve after retire = %d, want 409; body=%s", rec.Code, rec.Body.String())

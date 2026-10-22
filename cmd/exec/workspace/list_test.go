@@ -93,10 +93,9 @@ func TestListWorkspaces_AvailableFiltersOutMaterialized(t *testing.T) {
 }
 
 // TestListWorkspaces_ARetiredRowsCheckoutIsNotItsNamesakes: a checkout and a
-// tracked repository are the same repository when they reference the same
-// registry row. The run holds a checkout of owner/beta from before GitHub gave
-// the name to another repository; that repository, tracked under the same
-// name, is still available to add.
+// tracked repository are one repository only when they reference one registry
+// row, so the namesake of a retired row the run holds a checkout of is still
+// available to add.
 func TestListWorkspaces_ARetiredRowsCheckoutIsNotItsNamesakes(t *testing.T) {
 	stores, database := newTestDB(t)
 	ctx := context.Background()

@@ -39,14 +39,10 @@ func fakeEntityKey(orgID, source, scope, sourceID string) string {
 	return orgID + "/" + source + "/" + scope + "/" + sourceID
 }
 
-// fakeThreadKey is a thread's identity: its org, its channel's registry row
-// and its root ts.
 func fakeThreadKey(orgID, channelRow, threadTS string) string {
 	return orgID + "|" + channelRow + "|" + threadTS
 }
 
-// findOrCreateThread returns the thread rooted at threadTS on channelRow,
-// creating it under the display key sourceID when there is none.
 func (f *fakeEntities) findOrCreateThread(orgID, channelRow, threadTS, sourceID, kind, title, url string) (*domain.Entity, bool, error) {
 	if f.err != nil {
 		return nil, false, f.err

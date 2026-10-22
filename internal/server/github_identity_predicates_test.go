@@ -1,18 +1,15 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/zalando/go-keyring"
+
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
-	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -68,9 +65,7 @@ func TestEventHandlerGitHubIdentities_CreateAcceptsIDs(t *testing.T) {
 	}
 }
 
-// A login where an account id belongs, an org/slug where a team id belongs,
-// and a team id the team does not map are each refused, every one reported,
-// and nothing is written.
+// Every entry that cannot match is reported, and nothing is written.
 func TestEventHandlerGitHubIdentities_CreateRefusesWhatCannotMatch(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -102,8 +97,7 @@ func TestEventHandlerGitHubIdentities_CreateRefusesWhatCannotMatch(t *testing.T)
 }
 
 // An entry the stored predicate already holds is not re-checked, so a team
-// mapping removed since never blocks an edit that keeps it; an entry the edit
-// adds is still checked.
+// mapping removed since never blocks an edit that keeps it; an added entry is.
 func TestEventHandlerGitHubIdentities_PatchChecksOnlyAddedEntries(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -131,8 +125,6 @@ func TestEventHandlerGitHubIdentities_PatchChecksOnlyAddedEntries(t *testing.T) 
 	}
 }
 
-// The login-valued fields are gone from the GitHub predicates, so a caller
-// still sending one is told so rather than having it dropped.
 func TestEventHandlerGitHubIdentities_RefusesLoginFields(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -153,43 +145,16 @@ func TestEventHandlerGitHubIdentities_RefusesLoginFields(t *testing.T) {
 	}
 }
 
-// accountResolver is a ghclient.Resolver whose every client reads the GitHub
-// at url, or which fails with err.
-type accountResolver struct {
-	url string
-	err error
-}
+func TestGitHubAccountReads(t *testing.T) {
+	keyring.MockInit()
+	s := newTestServer(t)
+	base := "/api/orgs/" + runmode.LocalDefaultOrgID + "/github/users/"
 
-func (r accountResolver) ClientFor(context.Context, string, string) (*ghclient.Client, error) {
-	if r.err != nil {
-		return nil, r.err
-	}
-	return ghclient.NewClient(r.url, "pat"), nil
-}
+	// An org with no GitHub credential is told GitHub is not connected, not
+	// that the account does not exist.
+	assertOneFault(t, doJSON(t, s, http.MethodGet, base+"by-name/octocat", nil), http.StatusConflict, "NOT_CONFIGURED", "")
 
-func (r accountResolver) ClientForRepo(ctx context.Context, orgID, owner, _ string) (*ghclient.Client, error) {
-	return r.ClientFor(ctx, orgID, owner)
-}
-
-func (r accountResolver) ClientForInstallation(ctx context.Context, orgID string, inst domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
-	return r.ClientFor(ctx, orgID, inst.AccountLogin)
-}
-
-func (accountResolver) TokenFor(context.Context, string, string) (githubapp.Token, error) {
-	return githubapp.Token{}, errors.New("no token in this test")
-}
-
-func (r accountResolver) BaseURLFor(context.Context, string) (string, error) { return r.url, nil }
-
-func (accountResolver) OrgIdentityFor(context.Context, string) (string, string, bool) {
-	return "", "", false
-}
-
-// serveAccounts is a GitHub that knows octocat and dependabot[bot], and fails
-// every request for "broken".
-func serveAccounts(t *testing.T) string {
-	t.Helper()
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.EscapedPath() {
 		case "/api/v3/users/octocat", "/api/v3/user/583231":
@@ -202,56 +167,35 @@ func serveAccounts(t *testing.T) string {
 			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
 		}
 	}))
-	t.Cleanup(ts.Close)
-	return ts.URL
-}
-
-func TestGitHubAccountReads(t *testing.T) {
-	s := newTestServer(t)
-	s.ghResolver = accountResolver{url: serveAccounts(t)}
-	base := "/api/orgs/" + runmode.LocalDefaultOrgID + "/github/users/"
+	t.Cleanup(gh.Close)
+	s.ghResolver = repositoriesByIDResolver{url: gh.URL}
 
 	for _, tc := range []struct {
-		path       string
-		wantStatus int
-		want       gitHubAccountJSON
-		wantReason string
+		path   string
+		status int
+		want   string // "id login" on a 200, else the error's reason
 	}{
-		{"by-name/octocat", http.StatusOK, gitHubAccountJSON{GitHubUserID: "583231", Login: "octocat"}, ""},
-		{"by-name/dependabot%5Bbot%5D", http.StatusOK, gitHubAccountJSON{GitHubUserID: "49699333", Login: "dependabot[bot]"}, ""},
-		{"583231", http.StatusOK, gitHubAccountJSON{GitHubUserID: "583231", Login: "octocat"}, ""},
-		{"by-name/nobody", http.StatusNotFound, gitHubAccountJSON{}, "NOT_FOUND"},
-		{"42", http.StatusNotFound, gitHubAccountJSON{}, "NOT_FOUND"},
-		{"by-name/not%20a%20login", http.StatusBadRequest, gitHubAccountJSON{}, "INVALID_ID"},
-		{"octocat", http.StatusBadRequest, gitHubAccountJSON{}, "INVALID_ID"},
-		{"0", http.StatusBadRequest, gitHubAccountJSON{}, "INVALID_ID"},
-		{"by-name/broken", http.StatusBadGateway, gitHubAccountJSON{}, "UPSTREAM_UNAVAILABLE"},
+		{"by-name/octocat", http.StatusOK, "583231 octocat"},
+		{"by-name/dependabot%5Bbot%5D", http.StatusOK, "49699333 dependabot[bot]"},
+		{"583231", http.StatusOK, "583231 octocat"},
+		{"by-name/nobody", http.StatusNotFound, "NOT_FOUND"},
+		{"42", http.StatusNotFound, "NOT_FOUND"},
+		{"by-name/not%20a%20login", http.StatusBadRequest, "INVALID_ID"},
+		{"octocat", http.StatusBadRequest, "INVALID_ID"},
+		{"0", http.StatusBadRequest, "INVALID_ID"},
+		{"by-name/broken", http.StatusBadGateway, "UPSTREAM_UNAVAILABLE"},
 	} {
 		rec := doJSON(t, s, http.MethodGet, base+tc.path, nil)
-		if rec.Code != tc.wantStatus {
-			t.Errorf("%s: status = %d, want %d: %s", tc.path, rec.Code, tc.wantStatus, rec.Body.String())
-			continue
+		var got string
+		if rec.Code == http.StatusOK {
+			var account gitHubAccountJSON
+			_ = json.Unmarshal(rec.Body.Bytes(), &account)
+			got = account.GitHubUserID + " " + account.Login
+		} else {
+			got = decodeErrorItems(t, rec)[0].Reason
 		}
-		if tc.wantReason != "" {
-			if !strings.Contains(rec.Body.String(), fmt.Sprintf("%q", tc.wantReason)) {
-				t.Errorf("%s: body = %s, want reason %s", tc.path, rec.Body.String(), tc.wantReason)
-			}
-			continue
+		if rec.Code != tc.status || got != tc.want {
+			t.Errorf("%s = %d %q, want %d %q: %s", tc.path, rec.Code, got, tc.status, tc.want, rec.Body.String())
 		}
-		var got gitHubAccountJSON
-		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || got != tc.want {
-			t.Errorf("%s: body = %s, want %+v", tc.path, rec.Body.String(), tc.want)
-		}
-	}
-}
-
-// An org with no GitHub credential is told GitHub is not connected, not that
-// the account does not exist.
-func TestGitHubAccountReads_NoCredential(t *testing.T) {
-	s := newTestServer(t)
-	s.ghResolver = accountResolver{err: fmt.Errorf("%w: org has none", ghclient.ErrNoGitHubCredentials)}
-	rec := doJSON(t, s, http.MethodGet, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/users/by-name/octocat", nil)
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"NOT_CONFIGURED"`) {
-		t.Errorf("status = %d, want 409 NOT_CONFIGURED: %s", rec.Code, rec.Body.String())
 	}
 }

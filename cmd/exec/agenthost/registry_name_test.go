@@ -21,17 +21,19 @@ const renamedRepoID = "4242"
 
 // registerRepo gives the registry a row for owner/repo on the test org's
 // GitHub host carrying GitHub's id for it, the way a tracked repository's row
-// carries one.
-func registerRepo(t *testing.T, stores db.Stores, owner, repo, externalID string) {
+// carries one, and returns the row's id.
+func registerRepo(t *testing.T, stores db.Stores, owner, repo, externalID string) string {
 	t.Helper()
 	ctx := context.Background()
 	ref := domain.RepoRef{Source: domain.RepoSourceGitHub, Host: testScope("github"), Owner: owner, Repo: repo, ExternalID: externalID}
-	if _, err := stores.Repos.FindOrCreateByRefSystem(ctx, runmode.LocalDefaultOrgID, ref); err != nil {
+	row, err := stores.Repos.FindOrCreateByRefSystem(ctx, runmode.LocalDefaultOrgID, ref)
+	if err != nil {
 		t.Fatalf("register %s/%s: %v", owner, repo, err)
 	}
 	if _, err := stores.Repos.FillMissingExternalIDsSystem(ctx, runmode.LocalDefaultOrgID, []domain.RepoRef{ref}); err != nil {
 		t.Fatalf("record the id of %s/%s: %v", owner, repo, err)
 	}
+	return row.ID
 }
 
 // renameRepo applies the rename of octo/old-name to octo/new-name the way the
@@ -83,7 +85,7 @@ func startRenamedRepoGitHub(t *testing.T) *httptest.Server {
 func TestLocalClient_ReviewUnderOldName_FoundByCoherenceReads(t *testing.T) {
 	gh := startRenamedRepoGitHub(t)
 	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
-	registerRepo(t, stores, "octo", "old-name", renamedRepoID)
+	repoID := registerRepo(t, stores, "octo", "old-name", renamedRepoID)
 	renameRepo(t, stores)
 	ctx := context.Background()
 
@@ -104,15 +106,11 @@ func TestLocalClient_ReviewUnderOldName_FoundByCoherenceReads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed the PR entity: %v", err)
 	}
-	repoRow, err := stores.Repos.GetByRefSystem(ctx, info.OrgID, domain.RepoRefFromSlug(testScope("github"), "octo/new-name"))
-	if err != nil || repoRow == nil {
-		t.Fatalf("read octo/new-name's registry row: %+v, %v", repoRow, err)
-	}
 	targets, err := stores.Conversations.ListPRCoherenceTargetsSystem(ctx, info.OrgID, db.PRCoherenceTargetQuery{
 		EntityID:         pr.ID,
 		EventID:          "event-new-commits",
-		BaseRepositoryID: repoRow.ID,
-		HeadRepositoryID: repoRow.ID,
+		BaseRepositoryID: repoID,
+		HeadRepositoryID: repoID,
 		PRRef:            "pr-5",
 	})
 	if err != nil {

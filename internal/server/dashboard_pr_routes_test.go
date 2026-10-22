@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -20,16 +21,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// The dashboard's per-PR routes address a pull request by the entity id its
-// list row served, and reach GitHub under the repository's current registry
-// name, whatever the entity's key still spells.
-
-// fakePRGitHub is a GitHub that knows one pull request, owner/repo#number,
-// answers the status reads and the draft mutation for it, and 404s every other
-// path. It records the paths it was asked for, without the API prefix.
+// fakePRGitHub answers the status reads and the draft mutation for one pull
+// request and 404s every other path, recording each request as
+// "METHOD path" without the API prefix.
 type fakePRGitHub struct {
-	url string
-
+	url   string
 	mu    sync.Mutex
 	paths []string
 }
@@ -39,19 +35,18 @@ func newFakePRGitHub(t *testing.T, owner, repo, number string) *fakePRGitHub {
 	f := &fakePRGitHub{}
 	pull := "/repos/" + owner + "/" + repo + "/pulls/" + number
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The client treats any host but github.com as GitHub Enterprise:
-		// REST under /api/v3, GraphQL at /api/graphql.
-		path := strings.TrimPrefix(r.URL.Path, "/api/v3")
-		path = strings.TrimPrefix(path, "/api")
+		// Any host but github.com is GitHub Enterprise: REST under /api/v3,
+		// GraphQL at /api/graphql.
+		req := r.Method + " " + strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/api/v3"), "/api")
 		f.mu.Lock()
-		f.paths = append(f.paths, r.Method+" "+path)
+		f.paths = append(f.paths, req)
 		f.mu.Unlock()
-		switch {
-		case r.Method == http.MethodGet && path == pull:
+		switch req {
+		case "GET " + pull:
 			_, _ = w.Write([]byte(`{"node_id":"PR_node","mergeable":true,"mergeable_state":"clean","head":{"sha":""}}`))
-		case r.Method == http.MethodGet && path == pull+"/reviews":
+		case "GET " + pull + "/reviews":
 			_, _ = w.Write([]byte(`[]`))
-		case r.Method == http.MethodPost && path == "/graphql":
+		case "POST /graphql":
 			_, _ = w.Write([]byte(`{"data":{"convertPullRequestToDraft":{"pullRequest":{"isDraft":true}}}}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -62,21 +57,14 @@ func newFakePRGitHub(t *testing.T, owner, repo, number string) *fakePRGitHub {
 	return f
 }
 
-func (f *fakePRGitHub) asked(method, path string) bool {
+func (f *fakePRGitHub) asked() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for _, p := range f.paths {
-		if p == method+" "+path {
-			return true
-		}
-	}
-	return false
+	return slices.Clone(f.paths)
 }
 
-// prRoutes serves the per-PR routes from a dashboard handler whose GitHub is
-// gh, with the local org and user on every request — what the session
-// middleware puts there for the server's own mux, whose handler holds the
-// server's resolver.
+// prRoutes serves the per-PR routes against gh, with the local org and user
+// on every request as the session middleware would put them.
 func prRoutes(s *Server, gh *fakePRGitHub) http.Handler {
 	dh := &dashboardHandler{tx: s.tx, ghResolver: repositoriesByIDResolver{url: gh.url}}
 	mux := http.NewServeMux()
@@ -98,10 +86,9 @@ func servePR(t *testing.T, h http.Handler, method, path, body string) *httptest.
 	return rec
 }
 
-// dashboardPRFixture binds the local user's GitHub login and seeds pull
-// request #7 in acme/old authored under it, then renames the registry row to
-// acme/new without touching the entity's key, as GitHub renaming the
-// repository leaves it until the next poll rewrites the key.
+// dashboardPRFixture seeds acme/old#7 authored by the local user's GitHub
+// login, then renames the registry row to acme/new without touching the
+// entity's key, as a GitHub rename leaves it until the next poll.
 func dashboardPRFixture(t *testing.T, s *Server) *domain.Entity {
 	t.Helper()
 	host := dashboardTestHost(t, s, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID)
@@ -115,32 +102,37 @@ func dashboardPRFixture(t *testing.T, s *Server) *domain.Entity {
 	return pr
 }
 
-func TestDashboardPRStatus_ReachesGitHubUnderTheRegistryName(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
+func TestDashboardPRRoutes_ReachGitHubUnderTheRegistryName(t *testing.T) {
 	s := newTestServer(t)
 	pr := dashboardPRFixture(t, s)
 	gh := newFakePRGitHub(t, "acme", "new", "7")
+	h := prRoutes(s, gh)
 
-	rec := servePR(t, prRoutes(s, gh), http.MethodGet, "/api/dashboard/prs/"+pr.ID+"/status", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
-	}
+	rec := servePR(t, h, http.MethodGet, "/api/dashboard/prs/"+pr.ID+"/status", "")
 	var status struct {
 		MergeableState string `json:"mergeable_state"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
-		t.Fatalf("decode: %v", err)
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil || rec.Code != http.StatusOK || status.MergeableState != "clean" {
+		t.Fatalf("status = %d %s, want 200 with the fake's answer for acme/new#7", rec.Code, rec.Body.String())
 	}
-	if status.MergeableState != "clean" {
-		t.Errorf("mergeable_state = %q, want the fake GitHub's answer for acme/new#7", status.MergeableState)
+
+	rec = servePR(t, h, http.MethodPatch, "/api/dashboard/prs/"+pr.ID, `{"draft":true}`)
+	var row domain.PRSummaryRow
+	if err := json.Unmarshal(rec.Body.Bytes(), &row); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("PATCH = %d %s, want 200", rec.Code, rec.Body.String())
 	}
-	if !gh.asked(http.MethodGet, "/repos/acme/new/pulls/7") {
-		t.Errorf("GitHub was not asked for acme/new#7; asked %v", gh.paths)
+	if row.EntityID != pr.ID || row.Number != 7 || !row.Draft {
+		t.Errorf("answered %+v, want the pull request's row with draft set", row)
+	}
+	if asked := gh.asked(); !slices.Contains(asked, "GET /repos/acme/new/pulls/7") || !slices.Contains(asked, "POST /graphql") {
+		t.Errorf("GitHub was not asked about acme/new#7; asked %v", asked)
+	}
+	if got := readPRSnapshot(t, s, pr.ID); !got.IsDraft {
+		t.Error("the entity's snapshot was not patched to draft")
 	}
 }
 
 func TestDashboardPRRoutes_RefuseAPullRequestOutsideTheViewersList(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 	dashboardPRFixture(t, s)
 	strangers := seedPRSnapshot(t, s, "acme", "new", 8, domain.PRSnapshot{
@@ -157,114 +149,67 @@ func TestDashboardPRRoutes_RefuseAPullRequestOutsideTheViewersList(t *testing.T)
 			t.Errorf("PATCH of %q = %d, want 404 (body=%s)", id, rec.Code, rec.Body.String())
 		}
 	}
-	if len(gh.paths) != 0 {
-		t.Errorf("GitHub was asked %v for pull requests the viewer cannot address", gh.paths)
+	if asked := gh.asked(); len(asked) != 0 {
+		t.Errorf("GitHub was asked %v for pull requests the viewer cannot address", asked)
 	}
 }
 
+// A retired repository and a pull request polled from another GitHub host are
+// in the viewer's list, but GitHub cannot be asked about either by name.
 func TestDashboardPRRoutes_RefuseWhatGitHubCannotBeAskedByName(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 	pr := dashboardPRFixture(t, s)
 	gh := newFakePRGitHub(t, "acme", "new", "7")
 	h := prRoutes(s, gh)
 
-	t.Run("a retired repository", func(t *testing.T) {
-		if _, err := s.db.Exec(`UPDATE repositories SET retired_at = CURRENT_TIMESTAMP WHERE id = ?`, pr.RepositoryID); err != nil {
-			t.Fatalf("retire repository: %v", err)
-		}
-		t.Cleanup(func() {
-			if _, err := s.db.Exec(`UPDATE repositories SET retired_at = NULL WHERE id = ?`, pr.RepositoryID); err != nil {
-				t.Fatalf("restore repository: %v", err)
-			}
-		})
-		if rec := servePR(t, h, http.MethodGet, "/api/dashboard/prs/"+pr.ID+"/status", ""); rec.Code != http.StatusConflict {
-			t.Errorf("status = %d, want 409 (body=%s)", rec.Code, rec.Body.String())
-		}
-		if rec := servePR(t, h, http.MethodPatch, "/api/dashboard/prs/"+pr.ID, `{"draft":true}`); rec.Code != http.StatusConflict {
-			t.Errorf("PATCH = %d, want 409 (body=%s)", rec.Code, rec.Body.String())
-		}
-	})
+	execSQL(t, s.db, `UPDATE repositories SET retired_at = CURRENT_TIMESTAMP WHERE id = ?`, pr.RepositoryID)
+	if rec := servePR(t, h, http.MethodGet, "/api/dashboard/prs/"+pr.ID+"/status", ""); rec.Code != http.StatusConflict {
+		t.Errorf("status of a retired repository's PR = %d, want 409 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if rec := servePR(t, h, http.MethodPatch, "/api/dashboard/prs/"+pr.ID, `{"draft":true}`); rec.Code != http.StatusConflict {
+		t.Errorf("PATCH of a retired repository's PR = %d, want 409 (body=%s)", rec.Code, rec.Body.String())
+	}
 
-	t.Run("a pull request from another GitHub host", func(t *testing.T) {
-		entities := sqlitestore.New(s.db).Entities
-		other, _, err := entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://ghe.example.com", "acme/new#9", "", "pr", "Elsewhere", "")
-		if err != nil {
-			t.Fatalf("seed entity: %v", err)
-		}
-		if ok, err := entities.UpdateSnapshotCASSystem(context.Background(), runmode.LocalDefaultOrgID, other.ID,
-			`{"number":9,"repo":"acme/new","author":"octocat","state":"OPEN"}`, other.PollSeq); err != nil || !ok {
-			t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
-		}
-		if rec := servePR(t, h, http.MethodGet, "/api/dashboard/prs/"+other.ID+"/status", ""); rec.Code != http.StatusConflict {
-			t.Errorf("status = %d, want 409 (body=%s)", rec.Code, rec.Body.String())
-		}
-	})
+	entities := sqlitestore.New(s.db).Entities
+	other, _, err := entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://ghe.example.com", "acme/new#9", "", "pr", "Elsewhere", "")
+	if err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if ok, err := entities.UpdateSnapshotCASSystem(context.Background(), runmode.LocalDefaultOrgID, other.ID,
+		`{"number":9,"repo":"acme/new","author":"octocat","state":"OPEN"}`, other.PollSeq); err != nil || !ok {
+		t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
+	}
+	if rec := servePR(t, h, http.MethodGet, "/api/dashboard/prs/"+other.ID+"/status", ""); rec.Code != http.StatusConflict {
+		t.Errorf("status of another host's PR = %d, want 409 (body=%s)", rec.Code, rec.Body.String())
+	}
 
-	if len(gh.paths) != 0 {
-		t.Errorf("GitHub was asked %v for pull requests it cannot be asked about by name", gh.paths)
-	}
-}
-
-func TestDashboardPRUpdate_SetsDraftAndAnswersTheRow(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-	pr := dashboardPRFixture(t, s)
-	gh := newFakePRGitHub(t, "acme", "new", "7")
-
-	rec := servePR(t, prRoutes(s, gh), http.MethodPatch, "/api/dashboard/prs/"+pr.ID, `{"draft":true}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("PATCH = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
-	}
-	var row domain.PRSummaryRow
-	if err := json.Unmarshal(rec.Body.Bytes(), &row); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if row.EntityID != pr.ID || row.Number != 7 || !row.Draft {
-		t.Errorf("answered %+v, want the pull request's row with draft set", row)
-	}
-	if !gh.asked(http.MethodGet, "/repos/acme/new/pulls/7") || !gh.asked(http.MethodPost, "/graphql") {
-		t.Errorf("GitHub was not asked to convert acme/new#7; asked %v", gh.paths)
-	}
-	if got := readPRSnapshot(t, s, pr.ID); !got.IsDraft {
-		t.Error("the entity's snapshot was not patched to draft")
+	if asked := gh.asked(); len(asked) != 0 {
+		t.Errorf("GitHub was asked %v for pull requests it cannot be asked about by name", asked)
 	}
 }
 
 func TestDashboardPRUpdate_RefusesABodyThatWritesNothingValid(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 	pr := dashboardPRFixture(t, s)
 	gh := newFakePRGitHub(t, "acme", "new", "7")
 	h := prRoutes(s, gh)
 
-	for _, tc := range []struct {
-		body, reason string
-	}{
-		{`{}`, httpx.ReasonMissingField},
-		{`{"draft":null}`, httpx.ReasonInvalidField},
-		{`{"draft":"yes"}`, httpx.ReasonInvalidField},
+	for _, tc := range []struct{ body, reason, field string }{
+		{`{}`, httpx.ReasonMissingField, "draft"},
+		{`{"draft":null}`, httpx.ReasonInvalidField, "draft"},
+		{`{"draft":"yes"}`, httpx.ReasonInvalidField, "draft"},
+		{`{"draft":true,"title":"x"}`, httpx.ReasonUnknownField, "title"},
 	} {
-		rec := servePR(t, h, http.MethodPatch, "/api/dashboard/prs/"+pr.ID, tc.body)
-		if rec.Code != http.StatusBadRequest {
-			t.Errorf("PATCH %s = %d, want 400 (body=%s)", tc.body, rec.Code, rec.Body.String())
-			continue
-		}
-		assertFirstError(t, rec, tc.reason, "draft")
+		assertOneFault(t, servePR(t, h, http.MethodPatch, "/api/dashboard/prs/"+pr.ID, tc.body), http.StatusBadRequest, tc.reason, tc.field)
 	}
-	if rec := servePR(t, h, http.MethodPatch, "/api/dashboard/prs/"+pr.ID, `{"draft":true,"title":"x"}`); rec.Code != http.StatusBadRequest {
-		t.Errorf("PATCH with an unknown field = %d, want 400", rec.Code)
-	}
-	if len(gh.paths) != 0 {
-		t.Errorf("GitHub was asked %v by a request that wrote nothing", gh.paths)
+	if asked := gh.asked(); len(asked) != 0 {
+		t.Errorf("GitHub was asked %v by a request that wrote nothing", asked)
 	}
 }
 
-// TestDashboardPRRoutes_RegisteredOnTheServer drives the server's own mux: the
-// routes answer under the entity id path, and a list row hands back the id
-// they take.
+// The server's own mux answers under the entity id path, and a list row hands
+// back the id the routes take.
 func TestDashboardPRRoutes_RegisteredOnTheServer(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 	pr := dashboardPRFixture(t, s)
 
@@ -272,7 +217,6 @@ func TestDashboardPRRoutes_RegisteredOnTheServer(t *testing.T) {
 	if len(out.Items) != 1 || out.Items[0].EntityID != pr.ID {
 		t.Fatalf("list = %+v, want the one pull request carrying entity id %s", out.Items, pr.ID)
 	}
-
 	if rec := doJSON(t, s, http.MethodGet, "/api/dashboard/prs/"+uuid.NewString()+"/status", nil); rec.Code != http.StatusNotFound {
 		t.Errorf("status of an unknown id = %d, want 404 (body=%s)", rec.Code, rec.Body.String())
 	}
@@ -280,6 +224,6 @@ func TestDashboardPRRoutes_RegisteredOnTheServer(t *testing.T) {
 		t.Errorf("PATCH {} = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
 	if rec := doJSON(t, s, http.MethodPost, "/api/dashboard/prs/"+pr.ID+"/draft", map[string]any{"draft": true}); rec.Code == http.StatusOK {
-		t.Error("the draft verb route still answers")
+		t.Error("POST .../draft answers; the draft write is the PATCH")
 	}
 }

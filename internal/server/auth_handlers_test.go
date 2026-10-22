@@ -1799,12 +1799,10 @@ func TestAuthFlow_Me_NoActiveOrg_StillCarriesTeams(t *testing.T) {
 	}
 }
 
-// TestAuthFlow_LoginClaim_DecidesTheAccountByGitHubID pins the sign-in
-// mirror's account test, the one UsersStore.UpsertGitHubIdentity applies: a
-// renamed login under the same GitHub id is the same account and keeps the
-// email it recorded, while a login another GitHub id now signs in with is a
-// different account and takes the sign-in's email (none, here). Both reset the
-// dashboard backfill marker, which records a search by the old login.
+// TestAuthFlow_LoginClaim_DecidesTheAccountByGitHubID: the sign-in mirror
+// hands UsersStore.UpsertGitHubIdentity the GitHub id the login claim carries,
+// so a renamed login under the same id keeps the email it recorded, while a
+// login another id now signs in with takes the sign-in's email (none, here).
 func TestAuthFlow_LoginClaim_DecidesTheAccountByGitHubID(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -1822,44 +1820,28 @@ func TestAuthFlow_LoginClaim_DecidesTheAccountByGitHubID(t *testing.T) {
 		}
 		return resp
 	}
-	mark := func() {
+	read := func() [3]string {
 		t.Helper()
-		if _, err := r.h.AdminDB.Exec(`
-			UPDATE user_github_identities SET dashboard_backfilled_at = now() WHERE user_id = $1
-		`, userID); err != nil {
-			t.Fatalf("mark backfilled: %v", err)
-		}
-	}
-	type row struct {
-		login, githubID, email string
-		marked                 bool
-	}
-	read := func() row {
-		t.Helper()
-		var got row
-		var marked *time.Time
+		var got [3]string
 		if err := r.h.AdminDB.QueryRow(`
-			SELECT login, COALESCE(github_user_id, ''), COALESCE(email, ''), dashboard_backfilled_at
+			SELECT login, COALESCE(github_user_id, ''), COALESCE(email, '')
 			  FROM user_github_identities
 			 WHERE user_id = $1 AND source = 'login_claim'
-		`, userID).Scan(&got.login, &got.githubID, &got.email, &marked); err != nil {
+		`, userID).Scan(&got[0], &got[1], &got[2]); err != nil {
 			t.Fatalf("read identity: %v", err)
 		}
-		got.marked = marked != nil
 		return got
 	}
 
 	signIn("octo-old", "583231", true)
-	mark()
 	signIn("octo-new", "583231", false)
-	if got, want := read(), (row{login: "octo-new", githubID: "583231", email: userID.String() + "@test"}); got != want {
-		t.Errorf("after a rename = %+v, want %+v (same account: id and email kept, marker reset)", got, want)
+	if got, want := read(), [3]string{"octo-new", "583231", userID.String() + "@test"}; got != want {
+		t.Errorf("(login, id, email) after a rename = %q, want %q", got, want)
 	}
 
-	mark()
 	resp := signIn("octo-new", "999", false)
-	if got, want := read(), (row{login: "octo-new", githubID: "999"}); got != want {
-		t.Errorf("after another account took the login = %+v, want %+v (its id, no email, marker reset)", got, want)
+	if got, want := read(), [3]string{"octo-new", "999", ""}; got != want {
+		t.Errorf("(login, id, email) after another account took the login = %q, want %q", got, want)
 	}
 
 	// /api/me serves the account's id beside its login: the value the

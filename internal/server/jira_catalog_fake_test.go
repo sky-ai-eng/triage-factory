@@ -44,8 +44,7 @@ type fakeJiraStatus struct {
 	Name string `json:"name"`
 }
 
-// The instance's priorities and every fixture project's issue types, as the
-// fake serves them unless a test replaces them.
+// What the fake serves unless a test replaces it.
 var (
 	jiraFixturePriorities = []fakeJiraStatus{{ID: "1", Name: "Highest"}, {ID: "2", Name: "High"}, {ID: "3", Name: "Medium"}}
 	jiraFixtureIssueTypes = []fakeJiraStatus{{ID: "10001", Name: "Task"}, {ID: "10004", Name: "Bug"}}
@@ -55,8 +54,9 @@ var (
 // /project, which serves the whole project catalog in one unpaged, unfiltered
 // response; /project/{idOrKey}, which serves one project of it with its issue
 // types; /project/{idOrKey}/statuses, which serves one project's workflow
-// statuses grouped by issue type; and /priority, the instance's priorities. Every project's id is fakeJiraProjectID of its key,
-// and the two reads addressed at one project answer the same whichever names it.
+// statuses grouped by issue type; and /priority, the instance's priorities.
+// Every project's id is fakeJiraProjectID of its key, and the two reads
+// addressed at one project answer the same whichever names it.
 //
 // It is the right fixture for every reader under test — the catalog routes and
 // both halves of the PUT's write gate — because each page or lookup they

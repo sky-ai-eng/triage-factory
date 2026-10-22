@@ -866,10 +866,9 @@ func seedDraftPRArtifactWithConversation(t *testing.T, s *Server, suffix, owner,
 	return stored.ID, conversationID, taskID
 }
 
-// linkPullRequestEntity links a pull request or review artifact to the entity
-// of the pull request its target names — created, as the poller would, when
-// none exists — the way every writer links one. The handlers resolve the pull
-// request through that entity.
+// linkPullRequestEntity links a pull request or review artifact to its pull
+// request's entity, creating it as the poller would, because the handlers
+// resolve the pull request through that entity.
 func linkPullRequestEntity(t *testing.T, s *Server, a domain.Artifact) domain.Artifact {
 	t.Helper()
 	nodeID, _ := domain.ArtifactPullRequestNodeID(a)

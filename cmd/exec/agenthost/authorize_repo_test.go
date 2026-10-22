@@ -9,13 +9,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// gateRuntime is a minimal Runtime for exercising authorizeRepo in isolation:
-// it answers the repository, team-tracks, conversation_worktrees and task-repo
-// reads the gate makes and records git-denied audit rows, panicking on any
-// other method (none is reached). repository is the row the asked-for name
-// resolves to on the org's current GitHub host — repo-widgets when unset —
-// and noRow is a name with no row there. asked records the registry id every
-// id-keyed read was asked about.
+// gateRuntime is a minimal Runtime for exercising authorizeRepo in isolation;
+// any method the gate does not call panics. repository is the row the name
+// resolves to (repo-widgets when nil, none when noRow), asked the id each
+// id-keyed read was asked about, and denied the git-denied audit targets.
 type gateRuntime struct {
 	Runtime
 	tracks     bool
@@ -24,7 +21,7 @@ type gateRuntime struct {
 	repository *domain.Repository
 	noRow      bool
 	asked      []string
-	denied     []string // audit targets recorded via Record
+	denied     []string
 }
 
 func (r *gateRuntime) GetRepo(context.Context, string) (*domain.Repository, error) {

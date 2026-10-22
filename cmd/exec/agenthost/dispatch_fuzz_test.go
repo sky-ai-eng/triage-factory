@@ -19,13 +19,12 @@ import (
 // (relay-backed, no db.Stores, no DB connection) whose effects resolve
 // instantly instead of standing up a database inside the fuzz loop.
 //
-// The three repo-gate reads answer permissively so the gh verbs get PAST the
-// gate and actually build a client — every name resolves to one registry row,
-// which the team tracks and the ledger holds a checkout of — and the
-// source-policy read answers "on" so the Jira and Linear verbs do too — the
-// point is to reach the fan-out, and a gate that denied everything would fuzz
-// one error path forty times. Every other op fails, which is a shape the verbs
-// must handle anyway (an orchestrator that went away mid-run).
+// The repo-gate reads answer permissively so the gh verbs get PAST the gate
+// and actually build a client, and the source-policy read answers "on" so the
+// Jira and Linear verbs do too — the point is to reach the fan-out, and a gate
+// that denied everything would fuzz one error path forty times. Every other op
+// fails, which is a shape the verbs must handle anyway (an orchestrator that
+// went away mid-run).
 type fuzzRelayConn struct{}
 
 func (fuzzRelayConn) call(_ context.Context, namespace, op string, _, out any) error {

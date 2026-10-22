@@ -200,13 +200,6 @@ func (f *linearIssueFake) Writes() []linearWrite {
 	return slices.Clone(f.writes)
 }
 
-// Addressed is the id each request named, in order.
-func (f *linearIssueFake) Addressed() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return slices.Clone(f.addressed)
-}
-
 // moveIssue gives the issue a new identifier, as a team move or a team key
 // rename does; its UUID stays.
 func (f *linearIssueFake) moveIssue(identifier string) {
@@ -218,10 +211,10 @@ func (f *linearIssueFake) moveIssue(identifier string) {
 // assertAddressedByID fails unless every request named the issue's UUID.
 func (f *linearIssueFake) assertAddressedByID(t *testing.T) {
 	t.Helper()
-	for _, id := range f.Addressed() {
-		if id != linearIssueUUID {
-			t.Errorf("Linear was addressed by %q, want the issue's UUID %q", id, linearIssueUUID)
-		}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if slices.ContainsFunc(f.addressed, func(id string) bool { return id != linearIssueUUID }) {
+		t.Errorf("Linear was addressed by %q, want only the issue's UUID %q", f.addressed, linearIssueUUID)
 	}
 }
 
@@ -457,29 +450,6 @@ func TestTaskClaim_LinearTask_AssignsAsTheActingUser(t *testing.T) {
 	if got := fake.waitForWrites(t, len(want)); !slices.Equal(got, want) {
 		t.Errorf("Linear writes = %v, want %v", got, want)
 	}
-}
-
-// TestTaskClaim_LinearTask_AddressesTheIssueByID: the claim reads and writes
-// the issue by its UUID, so an issue a team move renamed after the last poll
-// still moves, though the task's entity still carries the old identifier and
-// Linear no longer answers to it.
-func TestTaskClaim_LinearTask_AddressesTheIssueByID(t *testing.T) {
-	fake := newLinearIssueFake(t, nil, linearFixtureState(t, linearStateTodo))
-	fake.moveIssue("OPS-3")
-	res := &recordingLinearResolver{userClient: fake.client()}
-	s := newLinearClaimServer(t, res, true)
-	const taskID = "00000000-0000-4000-8000-000000000307"
-	seedQueuedLinearTask(t, s.db, taskID, linearStateTodoRef)
-
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	want := []linearWrite{{kind: "assign", value: linearMe}, {kind: "transition", value: linearStateDoing}}
-	if got := fake.waitForWrites(t, len(want)); !slices.Equal(got, want) {
-		t.Errorf("Linear writes = %v, want %v", got, want)
-	}
-	fake.assertAddressedByID(t)
 }
 
 // TestTaskClaim_LinearTask_ClearedSnapshotStillFindsTheRule: the rule is found

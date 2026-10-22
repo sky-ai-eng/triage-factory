@@ -557,9 +557,7 @@ func TestPickerOptionsNameTheirRegistryRow(t *testing.T) {
 	api := seedUntrackedRepo(t, srv, "acme", "api")
 	web := seedUntrackedRepo(t, srv, "acme", "web")
 	for id, external := range map[string]string{api: "1", web: "99"} {
-		if _, err := srv.db.Exec(`UPDATE repositories SET external_id = ? WHERE id = ?`, external, id); err != nil {
-			t.Fatalf("set external_id: %v", err)
-		}
+		execSQL(t, srv.db, `UPDATE repositories SET external_id = ? WHERE id = ?`, external, id)
 	}
 	wireReachRefresh(t, srv).refresh(t, runmode.LocalDefaultOrgID, true)
 

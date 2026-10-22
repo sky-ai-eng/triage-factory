@@ -39,9 +39,7 @@ func TestTaskCreate_AnswersAnActiveTaskNoEventNames(t *testing.T) {
 	if code != http.StatusCreated {
 		t.Fatalf("POST under the event's key = %d, want 201", code)
 	}
-	if _, err := s.db.Exec(`UPDATE tasks SET dedup_key = '10003' WHERE id = ?`, created.ID); err != nil {
-		t.Fatalf("key the task on the status id: %v", err)
-	}
+	execSQL(t, s.db, `UPDATE tasks SET dedup_key = '10003' WHERE id = ?`, created.ID)
 
 	code, found := post("10003")
 	if code != http.StatusOK || found.ID != created.ID {

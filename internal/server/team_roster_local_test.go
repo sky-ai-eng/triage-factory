@@ -3,7 +3,6 @@ package server
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
@@ -103,24 +102,19 @@ func TestTeamRosterList_LocalNoIdentityCaptured(t *testing.T) {
 // for the local user's bound account beside its login, the value the predicate
 // editor writes for "match me".
 func TestHandleMe_LocalMode_GitHubAccountID(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 	if err := s.users.UpsertGitHubIdentity(t.Context(), runmode.LocalDefaultUserID,
 		ghbase.DefaultBaseURL(), "AidanAllchin", "583231", "", "pat"); err != nil {
 		t.Fatalf("seed github identity: %v", err)
 	}
 
-	rec := httptest.NewRecorder()
-	s.withSession(http.HandlerFunc(s.handleMe)).ServeHTTP(rec, httptest.NewRequest("GET", "/api/me", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("/api/me status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
+	rec := doJSON(t, s, http.MethodGet, "/api/me", nil)
 	var me struct {
 		GitHubUsername string `json:"github_username"`
 		GitHubUserID   string `json:"github_user_id"`
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&me); err != nil {
-		t.Fatalf("decode /api/me: %v", err)
+	if err := json.Unmarshal(rec.Body.Bytes(), &me); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("/api/me = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	if me.GitHubUsername != "AidanAllchin" || me.GitHubUserID != "583231" {
 		t.Errorf("/api/me github = (%q, %q), want (AidanAllchin, 583231)", me.GitHubUsername, me.GitHubUserID)
