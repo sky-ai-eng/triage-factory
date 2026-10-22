@@ -12,8 +12,8 @@ import (
 )
 
 // contentionSampleInterval is how often a statement in flight is asked who
-// else is live. Long enough that the ordinary sub-10ms truncate never takes a
-// sample at all, short enough to land inside the one-second wait Postgres
+// else is live. Long enough that the ordinary few-millisecond reset never takes
+// a sample at all, short enough to land inside the one-second wait Postgres
 // gives a lock before it declares a deadlock.
 const contentionSampleInterval = 250 * time.Millisecond
 
@@ -194,15 +194,16 @@ func busyDuring(ctx context.Context, db *sql.DB, window time.Duration) ([]busyBa
 // Call it from a fixture's t.Cleanup, after joining whatever the fixture
 // started. A test's own work is finished by then, so anything still live is a
 // goroutine that outlived the test that created it — and the next test opens
-// with Reset, whose TRUNCATE takes ACCESS EXCLUSIVE on every table in turn and
-// deadlocks against exactly that. Catching it here names the test that leaked
-// it; catching it at the next Reset names only the test that paid for it.
+// with Reset, whose DELETEs wait on any row such a session has written and not
+// committed, and any row it writes after the reset lands in the next test.
+// Catching it here names the test that leaked it; catching it at the next
+// Reset names only the test that paid for it.
 //
 // It is a net, not a proof: it sees a goroutine only while that goroutine is
 // talking to the server (see busyDuring), so a leak that finishes quickly
 // slips past it. That is the right way round — the leak worth catching is the
 // slow one on a loaded machine, which is the same leak that is still going
-// when the next test truncates. It backs up the joins a fixture does; it does
+// when the next test resets. It backs up the joins a fixture does; it does
 // not replace them.
 func (h *Harness) AssertNoBusyBackends(t *testing.T) {
 	t.Helper()
@@ -217,6 +218,6 @@ func (h *Harness) AssertNoBusyBackends(t *testing.T) {
 	if len(busy) == 0 {
 		return
 	}
-	t.Errorf("%d database session(s) still live now the test has returned; the next test's Reset will deadlock against them:%s",
+	t.Errorf("%d database session(s) still live now the test has returned; the next test's Reset will wait on or race them:%s",
 		len(busy), describeBusyBackends(busy))
 }
