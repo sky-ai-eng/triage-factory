@@ -1,7 +1,7 @@
 // Package pgtest spins up a supabase/postgres testcontainer for D3+
 // Postgres-backed tests. The harness is shared per-process — the first
 // test pays the boot cost; subsequent tests share the same container and
-// call Reset between cases to TRUNCATE state.
+// call Reset between cases to clear state.
 //
 // The shared container is a single point of failure for the whole test
 // binary: if it dies mid-suite, every remaining Postgres test fails at
@@ -104,6 +104,10 @@ type Harness struct {
 	// The pools behind the three handles above, which is how bringUp
 	// re-aims them. admin.db IS AdminDB, and so on.
 	admin, app, system *swappable
+
+	// resetSQL is what Reset runs, built by planReset against the schema
+	// the current container was migrated to.
+	resetSQL string
 }
 
 var (
@@ -361,6 +365,11 @@ func (h *Harness) bringUp() error {
 	if err := db.Migrate(h.AdminDB, "postgres"); err != nil {
 		return fail(fmt.Errorf("migrate: %w", err))
 	}
+	resetSQL, err := planReset(ctx, h.AdminDB)
+	if err != nil {
+		return fail(fmt.Errorf("plan reset: %w", err))
+	}
+	h.resetSQL = resetSQL
 
 	// The image ships authenticator LOGIN but with no password. Set
 	// one so AppDB can connect. Reserved-role ALTERs only succeed as
@@ -458,14 +467,15 @@ func NewInstance(t *testing.T) (adminDB *sql.DB, adminDSN string) {
 	return adminDB, adminDSN
 }
 
-// orgScopedTables is the closed list of tables Reset truncates. Order
-// doesn't matter because CASCADE follows FK dependencies; the list is
-// just the set of tables that hold tenant-derived rows.
+// orgScopedTables is the closed list of tables Reset empties, together
+// with every table that references one of them through a foreign key
+// (planReset follows those). Order doesn't matter; the list is just the
+// set of tables that hold tenant-derived rows.
 var orgScopedTables = []string{
 	// Tenancy:
 	"sessions",
-	// user_api_tokens cascades from both users and orgs, so TRUNCATE CASCADE
-	// would reach it either way; listed with sessions because it is the other
+	// user_api_tokens references both users and orgs, so Reset would reach it
+	// either way; listed with sessions because it is the other
 	// half of the same credential surface and a reader looking for one expects
 	// to find the other.
 	"user_api_tokens",
@@ -509,16 +519,16 @@ var orgScopedTables = []string{
 	"slack_event_deliveries",
 	// github_webhook_deliveries: same shape and same reason — keyed
 	// (installation_id, delivery_id) with no org_id and no FK, deliberately,
-	// so TRUNCATE CASCADE from orgs would never reach it and a leaked row
+	// so following foreign keys from orgs would never reach it and a leaked row
 	// would make a later test's first delivery read as a redelivery.
 	"github_webhook_deliveries",
 	// slack_channels, team_slack_channels (TFAC-541): both carry an org_id
-	// FK (cascading via orgs, and via teams for the latter) so TRUNCATE
-	// CASCADE would reach them even unlisted; listed explicitly anyway,
+	// FK (reached via orgs, and via teams for the latter) so Reset would
+	// reach them even unlisted; listed explicitly anyway,
 	// matching the team_github_repos / team_github_groups convention above.
 	"slack_channels", "team_slack_channels", "slack_channel_id_changes",
 	// instances: carries no org_id column and no FK at all (a fleet
-	// member isn't tenant data) — TRUNCATE CASCADE from orgs would
+	// member isn't tenant data) — following foreign keys from orgs would
 	// never reach it, so it must be listed explicitly or Reset would leak
 	// registered-instance rows across tests sharing this container.
 	"instances",
@@ -528,12 +538,12 @@ var orgScopedTables = []string{
 	"leases",
 	// poll_readiness (TFAC-583): carries an org_id column but deliberately
 	// no FK to orgs (admin-pool-only system state, same posture as
-	// instances) — TRUNCATE CASCADE from orgs would never reach it, so it
+	// instances) — following foreign keys from orgs would never reach it, so it
 	// must be listed explicitly too.
 	"poll_readiness",
 	// placement_overrides (TFAC-587): org_id column but no FK to orgs
 	// (admin-pool-only system state, same posture as poll_readiness) — not
-	// reached by CASCADE, so listed explicitly.
+	// reached through a foreign key, so listed explicitly.
 	"placement_overrides",
 	// instance_stats + operators (TFAC-589): admin-pool-only system tables
 	// with no FK to orgs (fleet telemetry samples / the deployment-operator
@@ -544,7 +554,7 @@ var orgScopedTables = []string{
 	"instance_stats", "operators",
 	// sandbox_stats: same posture again — the per-sandbox resource series is
 	// keyed on a bare claim_id uuid with deliberately no FK to claims, so
-	// CASCADE never reaches it and Reset would otherwise leak samples across
+	// no foreign key reaches it and Reset would otherwise leak samples across
 	// tests sharing this container.
 	"sandbox_stats",
 	// users last — most other tables FK into it.
@@ -553,21 +563,20 @@ var orgScopedTables = []string{
 	// registry seeded once and deliberately survives Reset.
 }
 
-// Reset truncates all org-scoped tables (CASCADE follows FKs into
-// children we don't enumerate explicitly). auth.users is NOT cleared
-// — that's image-owned and our users table cascades from it. Tests
-// that seed auth.users via SeedAuthUser should call Reset *first*, then
-// re-seed.
+// Reset empties the org-scoped tables and every table that references
+// them, restarts the sequences those tables own, and empties auth.users
+// (see planReset). Tests that seed auth.users via SeedAuthUser should
+// call Reset *first*, then re-seed.
 //
 // Reset is also where a mid-suite container death surfaces in practice
 // (it's the first DB touch of nearly every Postgres test), so a failed
-// truncate is classified before failing the test: if a liveness probe
-// on the same connection also fails, the container is dead — revive it
-// and retry once. A live server answering the probe means the truncate
-// error was a genuine SQL failure, which fails loudly as before.
+// reset is classified before failing the test: if a liveness probe on
+// the same connection also fails, the container is dead — revive it and
+// retry once. A live server answering the probe means the reset error
+// was a genuine SQL failure, which fails loudly as before.
 func (h *Harness) Reset(t *testing.T) {
 	t.Helper()
-	err := h.truncateAll()
+	err := h.clearAll()
 	if err == nil {
 		return
 	}
@@ -586,41 +595,121 @@ func (h *Harness) Reset(t *testing.T) {
 	if reviveErr != nil {
 		t.Fatalf("Reset: container died mid-suite and revive failed: %v", reviveErr)
 	}
-	if err := h.truncateAll(); err != nil {
+	if err := h.clearAll(); err != nil {
 		t.Fatalf("Reset (after revive): %v", err)
 	}
 }
 
-// truncateAll is Reset's actual work. Bounded so a wedged server
-// converts into a classifiable error instead of hanging the whole
-// binary into go test's panic timeout.
-func (h *Harness) truncateAll() error {
+// clearAll is Reset's actual work: resetSQL, in one transaction. Bounded
+// so a wedged server converts into a classifiable error instead of
+// hanging the whole binary into go test's panic timeout.
+func (h *Harness) clearAll() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	// Build a single TRUNCATE statement so CASCADE works across all
-	// tables at once (TRUNCATE on a single table can fail if another
-	// table not in the list FKs into it; lumping them together avoids
-	// that ordering issue).
-	stmt := "TRUNCATE TABLE " + strings.Join(orgScopedTables, ", ") + " RESTART IDENTITY CASCADE"
-	// TRUNCATE takes ACCESS EXCLUSIVE on each table in turn, so it waits
-	// behind every other session still inside a transaction — and what
-	// Postgres hands back when that goes wrong ("deadlock detected") names
-	// neither the session nor the statement it lost to. Sample who else is
-	// live while this one is in flight, so a failure says who.
+	// A DELETE waits on every row another session has written and not yet
+	// committed, and what Postgres hands back when that goes wrong (a
+	// deadlock, or this timeout) names neither the session nor the
+	// statement it lost to. Sample who else is live while this one is in
+	// flight, so a failure says who.
 	stopWatch := watchContention(h.AdminDB)
-	_, err := h.AdminDB.ExecContext(ctx, stmt)
+	err := func() error {
+		tx, err := h.AdminDB.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, h.resetSQL); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}()
 	contenders := stopWatch()
 	if err != nil {
-		return fmt.Errorf("truncate org-scoped tables: %w%s", err, describeBusyBackends(contenders))
-	}
-	// Drop auth.users rows we may have seeded. Image schema FKs from
-	// public.users → auth.users(id) ON DELETE CASCADE, but the TRUNCATE
-	// above goes the other direction. Wipe auth.users explicitly so
-	// SeedAuthUser can re-insert the same IDs without conflict.
-	if _, err := h.AdminDB.ExecContext(ctx, `DELETE FROM auth.users`); err != nil {
-		return fmt.Errorf("clear auth.users: %w", err)
+		return fmt.Errorf("clear org-scoped tables: %w%s", err, describeBusyBackends(contenders))
 	}
 	return nil
+}
+
+// planReset builds resetSQL: a DELETE of every row in orgScopedTables and
+// in every table that references one of them through a foreign key,
+// transitively, then a restart of every sequence those tables own, then
+// a DELETE of auth.users so SeedAuthUser can re-insert the same ids.
+// Those are the rows and sequences TRUNCATE ... RESTART IDENTITY CASCADE
+// over the list clears, but TRUNCATE costs the same per table however
+// few rows it holds (about 190ms for this set), and a test leaves a
+// handful of rows behind, which DELETE clears in a few milliseconds.
+//
+// session_replication_role = replica turns the foreign-key checks off so
+// the tables can be emptied in any order: every table that references an
+// emptied table is emptied in the same transaction, so nothing is left
+// pointing at a deleted row. It also stops row triggers firing, as
+// TRUNCATE does. The role goes back to origin for auth.users, whose
+// image-owned dependents are cleared by their own ON DELETE CASCADE.
+func planReset(ctx context.Context, admin *sql.DB) (string, error) {
+	var missing []string
+	rows, err := admin.QueryContext(ctx,
+		`SELECT t FROM unnest($1::text[]) AS t WHERE to_regclass(format('public.%I', t)) IS NULL`,
+		orgScopedTables)
+	if err != nil {
+		return "", fmt.Errorf("check listed tables: %w", err)
+	}
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			rows.Close()
+			return "", err
+		}
+		missing = append(missing, t)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	if len(missing) > 0 {
+		return "", fmt.Errorf("orgScopedTables names tables the schema does not have: %s", strings.Join(missing, ", "))
+	}
+
+	rows, err = admin.QueryContext(ctx, `
+		WITH RECURSIVE reached(oid) AS (
+			SELECT format('public.%I', t)::regclass::oid FROM unnest($1::text[]) AS t
+			UNION
+			SELECT con.conrelid FROM pg_constraint con
+			  JOIN reached r ON con.confrelid = r.oid
+			 WHERE con.contype = 'f'
+		)
+		SELECT 1, format('DELETE FROM %I.%I;', n.nspname, c.relname)
+		  FROM reached r
+		  JOIN pg_class c ON c.oid = r.oid
+		  JOIN pg_namespace n ON n.oid = c.relnamespace
+		UNION ALL
+		SELECT 2, format('ALTER SEQUENCE %I.%I RESTART;', n.nspname, s.relname)
+		  FROM pg_depend d
+		  JOIN reached r ON d.refobjid = r.oid
+		  JOIN pg_class s ON s.oid = d.objid AND s.relkind = 'S'
+		  JOIN pg_namespace n ON n.oid = s.relnamespace
+		 WHERE d.classid = 'pg_class'::regclass
+		   AND d.refclassid = 'pg_class'::regclass
+		   AND d.deptype IN ('a', 'i')
+		ORDER BY 1, 2`, orgScopedTables)
+	if err != nil {
+		return "", fmt.Errorf("read the tables the list reaches: %w", err)
+	}
+	defer rows.Close()
+	var b strings.Builder
+	b.WriteString("SET LOCAL session_replication_role = replica;\n")
+	for rows.Next() {
+		var order int
+		var stmt string
+		if err := rows.Scan(&order, &stmt); err != nil {
+			return "", err
+		}
+		b.WriteString(stmt + "\n")
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	b.WriteString("SET LOCAL session_replication_role = origin;\nDELETE FROM auth.users;\n")
+	return b.String(), nil
 }
 
 // SeedAuthUser inserts a row into auth.users with the given id + email.
