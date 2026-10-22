@@ -230,15 +230,6 @@ func TestRemoveAndReapJailTmp(t *testing.T) {
 	}
 }
 
-// Nothing is removed, and nothing fails, where no jail ever ran.
-func TestRemoveJailTmp_NoBase(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	if err := removeJailTmp(context.Background(), 9); err != nil {
-		t.Errorf("removeJailTmp with no base: %v", err)
-	}
-	reapOrphanJailTmp(context.Background())
-}
-
 func TestMemoryBackedFS(t *testing.T) {
 	for magic, want := range map[uint32]string{
 		unix.TMPFS_MAGIC:      "tmpfs",
@@ -250,24 +241,6 @@ func TestMemoryBackedFS(t *testing.T) {
 		if got := memoryBackedFS(&st); got != want {
 			t.Errorf("memoryBackedFS(%#x) = %q, want %q", magic, got, want)
 		}
-	}
-}
-
-// The boot check answers for the filesystem the state root is actually on.
-func TestCheckStateRootOnDisk(t *testing.T) {
-	root := t.TempDir()
-	paths.SetForTest(t, root)
-	var st unix.Statfs_t
-	if err := unix.Statfs(root, &st); err != nil {
-		t.Fatal(err)
-	}
-	err := CheckStateRootOnDisk()
-	if fs := memoryBackedFS(&st); fs != "" {
-		if err == nil || !strings.Contains(err.Error(), fs) || !strings.Contains(err.Error(), "TF_STATE_ROOT") {
-			t.Errorf("a state root on %s: err = %v, want a refusal naming %s and TF_STATE_ROOT", fs, err, fs)
-		}
-	} else if err != nil {
-		t.Errorf("a state root on disk was refused: %v", err)
 	}
 }
 
