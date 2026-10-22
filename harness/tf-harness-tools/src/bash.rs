@@ -5,9 +5,16 @@
 //! group, and after exit the pipes get pi's 100ms idle grace so output from
 //! detached descendants isn't cut mid-write (`waitForChildProcess`).
 //!
+//! One divergence from pi is in how a command ends: a shell that dies of a
+//! signal is an error naming the signal, where pi returns its partial output
+//! as a success. In a jail the usual signal is the SIGKILL the kernel sends
+//! when the jail reaches its memory ceiling, and `bash -c` execs a single
+//! simple command in place of the shell, so that kill lands on the shell
+//! process itself.
+//!
 //! # The per-command memory budget
 //!
-//! One divergence from pi rides the same supervisor: when the session was
+//! Another divergence rides the same supervisor: when the session was
 //! configured with a budget, each poll also sums the command tree's resident
 //! memory and kills the tree that exceeds it. `bash` is the only tool that
 //! spawns children, so it is the only place a limit can be attributed to a
@@ -414,6 +421,34 @@ loading whole files, or split the work into smaller steps.",
     )
 }
 
+/// A signal as the model is told it: the name and the number. The number is
+/// what lets the model match it to the `128 + N` exit code a shell reports
+/// for a child that died the same way (`SIGKILL (signal 9)` and code 137).
+fn describe_signal(signal: i32) -> String {
+    let name = match signal {
+        libc::SIGHUP => "SIGHUP",
+        libc::SIGINT => "SIGINT",
+        libc::SIGQUIT => "SIGQUIT",
+        libc::SIGILL => "SIGILL",
+        libc::SIGTRAP => "SIGTRAP",
+        libc::SIGABRT => "SIGABRT",
+        libc::SIGBUS => "SIGBUS",
+        libc::SIGFPE => "SIGFPE",
+        libc::SIGKILL => "SIGKILL",
+        libc::SIGUSR1 => "SIGUSR1",
+        libc::SIGSEGV => "SIGSEGV",
+        libc::SIGUSR2 => "SIGUSR2",
+        libc::SIGPIPE => "SIGPIPE",
+        libc::SIGALRM => "SIGALRM",
+        libc::SIGTERM => "SIGTERM",
+        libc::SIGXCPU => "SIGXCPU",
+        libc::SIGXFSZ => "SIGXFSZ",
+        libc::SIGSYS => "SIGSYS",
+        _ => return format!("signal {signal}"),
+    };
+    format!("{name} (signal {signal})")
+}
+
 fn prepend_status(status: &str, text: &str) -> String {
     if text.is_empty() {
         status.to_string()
@@ -544,6 +579,10 @@ pub fn execute(
         Ok(status) => status.code().map(i64::from),
         Err(_) => None,
     };
+    let killed_by: Option<i32> = match &wait_result {
+        Ok(status) => status.signal(),
+        Err(_) => None,
+    };
 
     let finish_output = |shared: &ReaderShared| -> OutputSnapshot {
         let mut acc = shared.accumulator.lock().unwrap();
@@ -637,6 +676,15 @@ pub fn execute(
     }
 
     let (output_text, details) = format_output(&snapshot, "(no output)", last_line_bytes);
+    // pi answers a shell that died of a signal as a success, because Node
+    // reports its exit code as null. Here it is an error: the command did not
+    // finish, and what it printed before the signal is not its result.
+    if let Some(signal) = killed_by {
+        return Err(ToolError::new(append_status(
+            &output_text,
+            &format!("Command was killed by {}", describe_signal(signal)),
+        )));
+    }
     if let Some(code) = exit_code {
         if code != 0 {
             return Err(ToolError::new(append_status(
@@ -699,6 +747,15 @@ mod tests {
         // ~920 MB of slack at the default budget: many fast ticks even at the
         // fastest allocation rate measured (~840 MB/s single-threaded).
         assert!(budget - watermark > 512 * BYTES_PER_MB);
+    }
+
+    /// A signal with no conventional name still reaches the model as its
+    /// number, never as an empty or made-up name.
+    #[test]
+    fn a_signal_is_named_with_its_number() {
+        assert_eq!(describe_signal(libc::SIGKILL), "SIGKILL (signal 9)");
+        assert_eq!(describe_signal(libc::SIGSEGV), "SIGSEGV (signal 11)");
+        assert_eq!(describe_signal(64), "signal 64");
     }
 
     /// Saturating arithmetic on both sides: a sample large enough to overflow a
