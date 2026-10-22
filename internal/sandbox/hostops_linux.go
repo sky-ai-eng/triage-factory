@@ -93,6 +93,13 @@ func (hostOps) SetupNetwork(ctx context.Context, conversationID string, subnetId
 	if err := applyEgressPolicy(ctx, netSt.netnsName, netSt.vethHost, state.HostIP); err != nil {
 		return state, fmt.Errorf("egress policy: %w", err)
 	}
+	// The network's jails mount one /tmp, keyed by its index. It is emptied
+	// here rather than at each launch, so a jail relaunched into this network
+	// keeps what the one before it left, and a network on a reused index
+	// starts with nothing of an earlier one's.
+	if _, err := prepareJailTmp(ctx, subnetIdx); err != nil {
+		return state, err
+	}
 
 	return state, nil
 }

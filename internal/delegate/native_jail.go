@@ -14,8 +14,8 @@ import (
 // restartableJail is a native engagement's tool-host jail, which the agent
 // loop replaces in place when the one it talks to dies. Every jail is
 // launched in the engagement's own cell from the same spec, so a new one has
-// the same network, credentials, inputs and run tree as the first. Only what
-// lived inside the jail that died, its processes and its /tmp, is gone.
+// the same network, credentials, inputs, run tree and /tmp as the first. Only
+// the processes of the jail that died are gone.
 //
 // It is also the engagement's cell.Jail, standing for whichever jail is
 // current, so the checkpointer's freeze, the live-jail samples and the

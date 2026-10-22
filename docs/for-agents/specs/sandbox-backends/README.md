@@ -254,10 +254,11 @@ fails one does not meet the contract.
     every registry the egress proxy admits verifies in the jail (§6.1).
 11. **A cell relaunches after its jail dies.** Once a jail is stopped and
     closed, the same cell launches a new one from the same spec. The new jail
-    has the run tree as the old one left it and reaches the cell's sidecar.
-    No process of the old jail survives into it, and neither does anything in
-    its `/tmp`. This is how a native engagement whose jail dies goes on
-    without ending its agent loop.
+    has the run tree and `/tmp` as the old one left them, so the output of
+    what the old one was running is still there to read, and it reaches the
+    cell's sidecar. No process of the old jail survives into it. This is how
+    a native engagement whose jail dies goes on without ending its agent
+    loop.
 12. **A full `/tmp`, or a guest at its memory ceiling, costs a guest process
     and never the jail.** `/tmp` keeps its files where the memory ceiling
     does not count them as memory the kernel cannot reclaim, so a guest that
@@ -616,7 +617,7 @@ The cases, one per invariant:
 | `MemoryCeilingKillsAreCounted` | 8 — a process grown to twice a 512 MB ceiling is killed, `OOMKills` rises across the call, and the jail and its tool host carry on |
 | `TeardownReleasesTheCell` | 9 — two engagements of one conversation back to back, then a reap |
 | `TrustVariablesNameTheRunsBundle` | 10 — `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` and `PIP_CERT` each name a file whose hash is that of the bundle the sidecar wrote, which carries a name-constrained CA |
-| `RelaunchAfterTheJailDies` | 11 — a file written to `/work` is there in the second jail, a file in `/tmp` is not, a heartbeat a background process of the first jail writes into `/work` stops, and the second jail reaches every sidecar endpoint |
+| `RelaunchAfterTheJailDies` | 11 — a file written to `/work` and one written to `/tmp` are there in the second jail, a heartbeat a background process of the first jail writes into `/work` stops, and the second jail reaches every sidecar endpoint |
 | `AFullTmpEndsNoJail` | 12 — under a 512 MB ceiling the jail writes 1 GB into `/tmp` and keeps answering; a process then grown past the ceiling is killed, `OOMKills` rises, and the jail and its `/tmp` file are still there |
 
 The two memory cases, for invariants 8 and 12, need a host that grants a
@@ -624,10 +625,10 @@ private cgroup namespace, as `scripts/test-sandbox-linux.sh` does inside a
 `--cgroupns=private` container. `Jail.Sample` waits for a case of its own,
 since on gVisor a jail without a ceiling has no cgroup to read. When §7
 lands, the suite gains a case per capability, run on the backends that
-declare it. The `memory_checkpoint` case parks a jail, restores it into a new cell, and runs
-`TrustVariablesNameTheRunsBundle` and `OnlyTheSidecarIsReachable` against
-the new engagement, so a restore that kept the parked engagement's inputs
-fails it.
+declare it. The `memory_checkpoint` case parks a jail, restores it into a
+new cell, and runs `TrustVariablesNameTheRunsBundle` and
+`OnlyTheSidecarIsReachable` against the new engagement, so a restore that
+kept the parked engagement's inputs fails it.
 
 Two cases hold a VM backend to the hard parts of its design: `RunTreeAtWork`
 reads the jail's write back after `Stop`, which fails unless `Stop` copies the
@@ -803,11 +804,11 @@ points:
 - **Rootfs.** The apk package set and cache key of gVisor's rootfs
   (`rootfsCacheKey`), packed into an ext4 image and attached read-only, so
   the rule in horizontal-scaling §6.4 for sharing a baked rootfs across
-  tenants holds. `/tmp` is on a scratch disk image discarded at `Stop`, as a
-  gVisor jail's `/tmp` is a directory on the executor's disk emptied at every
-  launch: on tmpfs it would count against guest memory, and a full one would
-  leave the guest's OOM killer only the processes the jail is made of
-  (invariant 12). A guest with a container runtime keeps the runtime's images
+  tenants holds. `/tmp` is on a scratch disk image the cell keeps across
+  relaunches and discards when it is closed, as a gVisor jail's `/tmp` is a
+  directory on the executor's disk kept until its network is torn down: on
+  tmpfs it would count against guest memory, and a full one would leave the
+  guest's OOM killer only the processes the jail is made of (invariant 12). A guest with a container runtime keeps the runtime's images
   and volumes on the same scratch disk for the same reason (§8).
 - **Init.** A small TF-owned PID 1. It mounts the images at the §4.1 paths
   and sets a hostname that `/etc/hosts` resolves. At the start of every

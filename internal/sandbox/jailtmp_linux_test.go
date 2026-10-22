@@ -48,8 +48,8 @@ func ownerAndMode(t *testing.T, path string) (uid, gid int, perm os.FileMode) {
 	return int(st.Uid), int(st.Gid), info.Mode()
 }
 
-// Every launch gets an empty /tmp of its jail's own, closed to everyone else,
-// whatever the jail before it left in the same directory.
+// Every network gets an empty /tmp of its jails' own, closed to everyone
+// else, whatever a network before it on the same index left there.
 func TestPrepareJailTmp_EmptyAndTheJailsAlone(t *testing.T) {
 	root := jailTmpStateRoot(t)
 	ctx := context.Background()
@@ -78,7 +78,50 @@ func TestPrepareJailTmp_EmptyAndTheJailsAlone(t *testing.T) {
 		t.Fatalf("prepareJailTmp again: %v", err)
 	}
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
-		t.Errorf("the relaunched jail's /tmp holds %v (err %v), want nothing", entries, err)
+		t.Errorf("a new network's /tmp holds %v (err %v), want nothing", entries, err)
+	}
+}
+
+// A jail relaunched into its network keeps what the one before it left in
+// /tmp, and gets the directory back as its own whatever that jail did to its
+// mode.
+func TestJailTmp_KeepsWhatTheJailBeforeLeft(t *testing.T) {
+	jailTmpStateRoot(t)
+	ctx := context.Background()
+	dir, err := prepareJailTmp(ctx, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cmd.log"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := jailTmp(ctx, 7)
+	if err != nil {
+		t.Fatalf("jailTmp: %v", err)
+	}
+	if got != dir {
+		t.Errorf("jailTmp = %q, want the network's %q", got, dir)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "cmd.log")); err != nil || string(b) != "x" {
+		t.Errorf("the relaunched jail's /tmp lost cmd.log: %q, %v", b, err)
+	}
+	if uid, gid, mode := ownerAndMode(t, dir); uid != JailUID(7) || gid != JailGID(7) || mode != os.ModeDir|0o700 {
+		t.Errorf("jail /tmp is %d:%d %v, want %d:%d drwx------", uid, gid, mode, JailUID(7), JailGID(7))
+	}
+
+	// One that is missing is made again, empty.
+	if err := removeJailTmp(ctx, 7); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jailTmp(ctx, 7); err != nil {
+		t.Fatalf("jailTmp with none there: %v", err)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Errorf("a remade /tmp holds %v (err %v), want nothing", entries, err)
 	}
 }
 

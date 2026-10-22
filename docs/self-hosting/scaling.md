@@ -59,8 +59,8 @@ the instance-identity flock (the second refuses to boot). See the header of
 `docker-compose.yml` for the volume details.
 
 An executor's state root must be on disk. Every jail's `/tmp` is a directory
-under it (`jail-tmp/`), emptied at each launch, so a run that fills `/tmp`
-fills the executor's disk rather than the jail's memory. An executor whose
+under it (`jail-tmp/`), emptied when the jail's network is built, so a run
+that fills `/tmp` fills the executor's disk rather than the jail's memory. An executor whose
 `TF_STATE_ROOT` is on tmpfs or ramfs refuses to boot, naming the setting.
 
 Each executor's container HEALTHCHECK hits its localhost `GET /healthz` — see

@@ -1115,12 +1115,13 @@ func PrepareBundle(ctx context.Context, p LaunchParams) (string, error) {
 		Rlimits:        p.Rlimits,
 	}
 	// The jail's /tmp, keyed by the subnet index the network was validated
-	// against so the caller never names it, and emptied for every launch.
+	// against so the caller never names it. The network's setup emptied it,
+	// and a relaunch into the same network keeps it.
 	idx, err := validateNetnsPath(p.ConversationID, p.NetnsPath)
 	if err != nil {
 		return "", err
 	}
-	tmpDir, err := prepareJailTmp(ctx, idx)
+	tmpDir, err := jailTmp(ctx, idx)
 	if err != nil {
 		return "", err
 	}

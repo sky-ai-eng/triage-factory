@@ -31,10 +31,27 @@ const jailTmpDirName = "jail-tmp"
 // so nothing else on the host needs to reach either.
 const jailTmpMode = 0o700
 
-// prepareJailTmp gives the jail at subnetIdx an empty /tmp of its own and
-// returns the host path the spec mounts. Whatever a jail before it left there
-// is removed first, so a jail relaunched into the same network starts with an
-// empty /tmp, as a jail on a tmpfs would.
+// prepareJailTmp gives the network at subnetIdx an empty /tmp for its jails
+// and returns its host path. It runs when the network is built, so whatever
+// the jails of an earlier network on the same index left there is removed
+// first.
+func prepareJailTmp(ctx context.Context, subnetIdx uint8) (string, error) {
+	return jailTmpDir(ctx, subnetIdx, true)
+}
+
+// jailTmp returns the host path of the /tmp a jail launched into the network
+// at subnetIdx mounts. It is not emptied: a jail relaunched after the one
+// before it died finds that jail's files, the output of whatever it was
+// running among them. It is made again if it is missing, and its owner and
+// mode are set again whatever they are, because the jail owns it and may have
+// changed them; refusing the launch instead would let a command in the jail
+// end its run.
+func jailTmp(ctx context.Context, subnetIdx uint8) (string, error) {
+	return jailTmpDir(ctx, subnetIdx, false)
+}
+
+// jailTmpDir makes the /tmp of the network at subnetIdx the jail's own,
+// emptying it first when empty is set.
 //
 // Everything here is derived from the subnet index the caller's network was
 // validated against, never taken from the caller, and every operation is
@@ -42,7 +59,7 @@ const jailTmpMode = 0o700
 // orchestrator, so a path re-resolved after a check could be swapped under the
 // broker. The path it returns is resolved once more by runsc when it mounts
 // it, the same residual the run tree's mount carries.
-func prepareJailTmp(ctx context.Context, subnetIdx uint8) (string, error) {
+func jailTmpDir(ctx context.Context, subnetIdx uint8, empty bool) (string, error) {
 	baseFd, base, err := openJailTmpBase(true)
 	if err != nil {
 		return "", fmt.Errorf("sandbox: jail /tmp: %w", err)
@@ -51,10 +68,12 @@ func prepareJailTmp(ctx context.Context, subnetIdx uint8) (string, error) {
 
 	name := jailTmpEntryName(subnetIdx)
 	dir := filepath.Join(base, name)
-	if err := removeJailTmpEntry(ctx, baseFd, dir, name); err != nil {
-		return "", fmt.Errorf("sandbox: empty jail /tmp %s: %w", dir, err)
+	if empty {
+		if err := removeJailTmpEntry(ctx, baseFd, dir, name); err != nil {
+			return "", fmt.Errorf("sandbox: empty jail /tmp %s: %w", dir, err)
+		}
 	}
-	if err := unix.Mkdirat(baseFd, name, jailTmpMode); err != nil {
+	if err := unix.Mkdirat(baseFd, name, jailTmpMode); err != nil && (empty || !errors.Is(err, unix.EEXIST)) {
 		return "", fmt.Errorf("sandbox: create jail /tmp %s: %w", dir, err)
 	}
 	fd, err := openat2AnchoredChildDir(baseFd, name)
