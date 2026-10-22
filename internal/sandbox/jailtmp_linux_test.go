@@ -48,11 +48,19 @@ func ownerAndMode(t *testing.T, path string) (uid, gid int, perm os.FileMode) {
 	return int(st.Uid), int(st.Gid), info.Mode()
 }
 
-// Every network gets an empty /tmp of its jails' own, closed to everyone
-// else, whatever a network before it on the same index left there.
-func TestPrepareJailTmp_EmptyAndTheJailsAlone(t *testing.T) {
+// A network's /tmp through its life: made empty and the jail's alone when the
+// network is built, kept across a relaunch with the owner and mode the jail
+// changed put back, emptied for a later network on the same index, removed
+// with its network and no other, and reaped at boot.
+func TestJailTmp_Lifecycle(t *testing.T) {
 	root := jailTmpStateRoot(t)
 	ctx := context.Background()
+	theJails := func(dir string) {
+		t.Helper()
+		if uid, gid, mode := ownerAndMode(t, dir); uid != JailUID(7) || gid != JailGID(7) || mode != os.ModeDir|0o700 {
+			t.Errorf("jail /tmp is %d:%d %v, want %d:%d drwx------", uid, gid, mode, JailUID(7), JailGID(7))
+		}
+	}
 
 	dir, err := prepareJailTmp(ctx, 7)
 	if err != nil {
@@ -61,67 +69,52 @@ func TestPrepareJailTmp_EmptyAndTheJailsAlone(t *testing.T) {
 	if want := filepath.Join(root, jailTmpDirName, "7"); dir != want {
 		t.Errorf("dir = %q, want %q", dir, want)
 	}
-	if uid, gid, mode := ownerAndMode(t, dir); uid != JailUID(7) || gid != JailGID(7) || mode != os.ModeDir|0o700 {
-		t.Errorf("jail /tmp is %d:%d %v, want %d:%d drwx------", uid, gid, mode, JailUID(7), JailGID(7))
-	}
+	theJails(dir)
 	if uid, _, mode := ownerAndMode(t, filepath.Dir(dir)); uid != 0 || mode != os.ModeDir|0o700 {
 		t.Errorf("the base is uid %d %v, want root drwx------", uid, mode)
 	}
 
-	if err := os.MkdirAll(filepath.Join(dir, "a", "b"), 0o755); err != nil {
+	left := filepath.Join(dir, "a", "b", "cmd.log")
+	if err := os.MkdirAll(filepath.Dir(left), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "a", "b", "left-behind"), []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(left, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := jailTmp(ctx, 7); err != nil || got != dir {
+		t.Fatalf("jailTmp = %q, %v; want the network's %q", got, err, dir)
+	}
+	if b, err := os.ReadFile(left); err != nil || string(b) != "x" {
+		t.Errorf("the relaunched jail's /tmp lost cmd.log: %q, %v", b, err)
+	}
+	theJails(dir)
+
 	if _, err := prepareJailTmp(ctx, 7); err != nil {
 		t.Fatalf("prepareJailTmp again: %v", err)
 	}
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
 		t.Errorf("a new network's /tmp holds %v (err %v), want nothing", entries, err)
 	}
-}
 
-// A jail relaunched into its network keeps what the one before it left in
-// /tmp, and gets the directory back as its own whatever that jail did to its
-// mode.
-func TestJailTmp_KeepsWhatTheJailBeforeLeft(t *testing.T) {
-	jailTmpStateRoot(t)
-	ctx := context.Background()
-	dir, err := prepareJailTmp(ctx, 7)
+	other, err := prepareJailTmp(ctx, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "cmd.log"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dir, 0o000); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := jailTmp(ctx, 7)
-	if err != nil {
-		t.Fatalf("jailTmp: %v", err)
-	}
-	if got != dir {
-		t.Errorf("jailTmp = %q, want the network's %q", got, dir)
-	}
-	if b, err := os.ReadFile(filepath.Join(dir, "cmd.log")); err != nil || string(b) != "x" {
-		t.Errorf("the relaunched jail's /tmp lost cmd.log: %q, %v", b, err)
-	}
-	if uid, gid, mode := ownerAndMode(t, dir); uid != JailUID(7) || gid != JailGID(7) || mode != os.ModeDir|0o700 {
-		t.Errorf("jail /tmp is %d:%d %v, want %d:%d drwx------", uid, gid, mode, JailUID(7), JailGID(7))
-	}
-
-	// One that is missing is made again, empty.
 	if err := removeJailTmp(ctx, 7); err != nil {
-		t.Fatal(err)
+		t.Fatalf("removeJailTmp: %v", err)
 	}
-	if _, err := jailTmp(ctx, 7); err != nil {
-		t.Fatalf("jailTmp with none there: %v", err)
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		t.Errorf("index 7's /tmp survived its removal: %v", err)
 	}
-	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
-		t.Errorf("a remade /tmp holds %v (err %v), want nothing", entries, err)
+	if _, err := os.Lstat(other); err != nil {
+		t.Errorf("removing index 7's /tmp took index 4's: %v", err)
+	}
+	reapOrphanJailTmp(ctx)
+	if entries, err := os.ReadDir(filepath.Dir(dir)); err != nil || len(entries) != 0 {
+		t.Errorf("after the reap the base holds %v (err %v), want nothing", entries, err)
 	}
 }
 
@@ -191,42 +184,6 @@ func TestPrepareJailTmp_RefusesABaseItDidNotMake(t *testing.T) {
 				t.Fatalf("prepareJailTmp made %s in a base it did not make", dir)
 			}
 		})
-	}
-}
-
-// A jail's /tmp goes with its network, and a boot removes every one a dead
-// process left.
-func TestRemoveAndReapJailTmp(t *testing.T) {
-	jailTmpStateRoot(t)
-	ctx := context.Background()
-	var dirs []string
-	for _, idx := range []uint8{3, 4} {
-		dir, err := prepareJailTmp(ctx, idx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "f"), []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		dirs = append(dirs, dir)
-	}
-
-	if err := removeJailTmp(ctx, 3); err != nil {
-		t.Fatalf("removeJailTmp: %v", err)
-	}
-	if _, err := os.Lstat(dirs[0]); !os.IsNotExist(err) {
-		t.Errorf("index 3's /tmp survived its removal: %v", err)
-	}
-	if _, err := os.Lstat(dirs[1]); err != nil {
-		t.Errorf("removing index 3's /tmp took index 4's: %v", err)
-	}
-	if err := removeJailTmp(ctx, 3); err != nil {
-		t.Errorf("removing a /tmp already gone: %v", err)
-	}
-
-	reapOrphanJailTmp(ctx)
-	if entries, err := os.ReadDir(filepath.Dir(dirs[1])); err != nil || len(entries) != 0 {
-		t.Errorf("after the reap the base holds %v (err %v), want nothing", entries, err)
 	}
 }
 
