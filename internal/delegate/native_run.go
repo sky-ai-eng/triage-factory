@@ -241,12 +241,12 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// loop restarts and goes on, rather than with the engagement. The
 	// watchdog still stops the engagement for a call this does not end.
 	defer s.activityFor(conversationID).onToolOverrun(func(cause stallCause) bool {
-		ended := launched.endOverrunCall(timings.toolCall)
-		if ended {
+		handled, stopped := launched.endOverrunCall(timings.toolCall, cause.at)
+		if stopped {
 			delegateLog.Warn("a tool call ran past its deadline; stopping its jail to end it, and the loop restarts the jail",
 				"conversation", conversationID, "claim", cfg.claimID, "op", cause.op, "in_flight", cause.elapsed)
 		}
-		return ended
+		return handled
 	})()
 	if handedOff {
 		s.repointRenamedRemotesInJail(ctx, orgID, task.ID, claudeCwd, tools)

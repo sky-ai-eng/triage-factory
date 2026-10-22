@@ -103,6 +103,8 @@ func stopParkReason(ctx context.Context) domain.ParkReason {
 type stallCause struct {
 	op      string
 	elapsed time.Duration
+	// at is when the watchdog found it.
+	at time.Time
 }
 
 // activityTracker is one engagement's record of what it is doing. It
@@ -303,14 +305,13 @@ func (a *activityTracker) check() {
 		overrun := a.overrun
 		a.firing.Add(1)
 		a.mu.Unlock()
-		handled := overrun(stallCause{op: op.name, elapsed: now.Sub(op.started)})
+		handled := overrun(stallCause{op: op.name, elapsed: now.Sub(op.started), at: now})
 		a.firing.Done()
 		if handled {
 			return
 		}
-		// Nothing was in flight for the hook to end, such as a restart that
-		// is itself stuck, so the stall is decided now rather than after the
-		// grace.
+		// The hook could not end what overran, a restart that is itself
+		// stuck, so the stall is decided now rather than after the grace.
 		a.mu.Lock()
 		if a.stopped || a.decided || a.op != op {
 			a.mu.Unlock()

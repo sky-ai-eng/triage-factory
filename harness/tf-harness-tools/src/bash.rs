@@ -475,6 +475,21 @@ struct ReaderState {
     last_data_at: Instant,
 }
 
+/// Reads the blocking pipe fd until its last writer closes it, keeping
+/// nothing: one read per buffer, however fast the writer is.
+fn discard_until_eof(fd: i32, buf: &mut [u8]) {
+    loop {
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if n > 0 {
+            continue;
+        }
+        if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        return;
+    }
+}
+
 fn reader_thread(
     fd_owner: impl AsRawFd + Send + 'static,
     shared: Arc<ReaderShared>,
@@ -511,6 +526,13 @@ fn reader_thread(
                 break;
             }
             if n == 0 {
+                break;
+            }
+            if !shared.accepting.load(Ordering::Relaxed) {
+                // The call has returned and a background process holds the
+                // pipe. What it writes is discarded, so it is read away with
+                // nothing to wait on and no lock to take.
+                discard_until_eof(fd, &mut buf);
                 break;
             }
             let data = &buf[..n as usize];

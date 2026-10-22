@@ -36,10 +36,13 @@ type restartableJail struct {
 	tools agentloop.ToolHost
 	spent cell.Actuals
 	// calls numbers the calls made to the tool host, and inFlight is the one
-	// running, zero between calls. overran is the call endOverrunCall ended,
-	// and overrunLimit the deadline it ran past.
+	// running, zero between calls, begun at inFlightSince. overran is the
+	// call endOverrunCall ended, and overrunLimit the deadline it ran past.
 	calls, inFlight, overran uint64
+	inFlightSince            time.Time
 	overrunLimit             time.Duration
+	// restarting is set while restart runs.
+	restarting bool
 }
 
 // launchRestartableJail launches the engagement's first jail and connects to
@@ -79,7 +82,13 @@ func (j *restartableJail) launch(ctx context.Context) (cell.Jail, agentloop.Tool
 func (j *restartableJail) restart(ctx context.Context) error {
 	j.mu.Lock()
 	old, oldTools := j.jail, j.tools
+	j.restarting = true
 	j.mu.Unlock()
+	defer func() {
+		j.mu.Lock()
+		j.restarting = false
+		j.mu.Unlock()
+	}()
 	_ = oldTools.Close()
 	if err := old.Stop(); err != nil {
 		return fmt.Errorf("stop the jail that died: %w", err)
@@ -95,16 +104,25 @@ func (j *restartableJail) restart(ctx context.Context) error {
 	return nil
 }
 
-// endOverrunCall ends the tool call in flight, which has run past limit, by
-// stopping the jail it runs in. The call then fails on its socket like any
-// call whose jail died, and the loop restarts the jail; the call is told why
-// it ended. It reports whether there was a call to end: a restart that is
-// itself stuck has none, and stopping the engagement is all that is left.
-func (j *restartableJail) endOverrunCall(limit time.Duration) bool {
+// endOverrunCall ends the tool call that the watchdog found at seen to have
+// run past limit, by stopping the jail it runs in. The call then fails on its
+// socket like any call whose jail died, and the loop restarts the jail; the
+// call is told why it ended.
+//
+// The call may have returned since the watchdog looked. Then nothing is in
+// flight, or the call in flight began after seen, and the jail is left alone.
+// handled is false only when a restart is what overran: a restart that is
+// itself stuck has no call to end, and stopping the engagement is all that is
+// left. stopped reports whether the jail was stopped.
+func (j *restartableJail) endOverrunCall(limit time.Duration, seen time.Time) (handled, stopped bool) {
 	j.mu.Lock()
-	if j.inFlight == 0 {
+	if j.restarting {
 		j.mu.Unlock()
-		return false
+		return false, false
+	}
+	if j.inFlight == 0 || j.inFlightSince.After(seen) {
+		j.mu.Unlock()
+		return true, false
 	}
 	j.overran, j.overrunLimit = j.inFlight, limit
 	jail := j.jail
@@ -112,7 +130,7 @@ func (j *restartableJail) endOverrunCall(limit time.Duration) bool {
 	if err := jail.Stop(); err != nil {
 		delegateLog.Warn("stopping the jail to end a tool call past its deadline failed", "error", err)
 	}
-	return true
+	return true, true
 }
 
 func (j *restartableJail) recordActuals(ctx context.Context, orgID, claimID string, a cell.Actuals) error {
@@ -165,7 +183,7 @@ func (h jailToolHost) Call(name string, args map[string]any) (agentloop.ToolOutc
 	h.j.mu.Lock()
 	h.j.calls++
 	call := h.j.calls
-	h.j.inFlight = call
+	h.j.inFlight, h.j.inFlightSince = call, time.Now()
 	tools := h.j.tools
 	h.j.mu.Unlock()
 	out, err := tools.Call(name, args)

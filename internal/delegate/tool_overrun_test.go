@@ -80,6 +80,44 @@ func jailOneStuck(jail cell.Jail, _ net.Conn) agentloop.ToolHost {
 	return jailNamedToolHost{n: fj.n, closed: new(bool)}
 }
 
+// endOverrunCall stops the jail only under the call the watchdog found
+// overrunning. A call that has returned since, or one begun after, leaves the
+// jail alone and the overrun handled; a stuck restart is the only overrun it
+// cannot handle.
+func TestRestartableJail_EndOverrunCallStopsOnlyTheCallThatOverran(t *testing.T) {
+	c := &fakeCell{}
+	j, err := launchRestartableJail(context.Background(), c, cell.LaunchSpec{RunTree: "/tree"}, jailOneStuck)
+	if err != nil {
+		t.Fatalf("launchRestartableJail: %v", err)
+	}
+	if handled, stopped := j.endOverrunCall(time.Minute, time.Now()); !handled || stopped {
+		t.Errorf("with no call in flight: handled %v stopped %v, want handled and the jail left alone", handled, stopped)
+	}
+	j.restarting = true
+	if handled, _ := j.endOverrunCall(time.Minute, time.Now()); handled {
+		t.Error("a stuck restart was handled; only the stall can end it")
+	}
+	j.restarting = false
+
+	seen := time.Now()
+	go func() { _, _ = j.toolHost().Call("bash", nil) }()
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		j.mu.Lock()
+		inFlight := j.inFlight
+		j.mu.Unlock()
+		if inFlight != 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if handled, stopped := j.endOverrunCall(time.Minute, seen); !handled || stopped || c.jails[0].Exited() {
+		t.Errorf("a call begun after the overrun was seen: handled %v stopped %v, want handled and the jail left alone", handled, stopped)
+	}
+	if _, stopped := j.endOverrunCall(time.Minute, time.Now()); !stopped || !c.jails[0].Exited() {
+		t.Error("the call that overran was not ended by stopping its jail")
+	}
+}
+
 // The whole backstop through the real engine: a tool call that never returns
 // is ended at its deadline by stopping its jail, the loop restarts the jail,
 // the call is answered with why it ended, and the conversation goes on to
@@ -91,8 +129,9 @@ func TestNativeToolOverrun_TheJailIsRestartedAndTheLoopGoesOn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("launchRestartableJail: %v", err)
 	}
-	defer f.s.activityFor(f.conversationID).onToolOverrun(func(stallCause) bool {
-		return launched.endOverrunCall(100 * time.Millisecond)
+	defer f.s.activityFor(f.conversationID).onToolOverrun(func(c stallCause) bool {
+		handled, _ := launched.endOverrunCall(100*time.Millisecond, c.at)
+		return handled
 	})()
 
 	provider := &scriptedGateProvider{turns: []gateTurn{
