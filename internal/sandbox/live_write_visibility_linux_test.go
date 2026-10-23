@@ -92,6 +92,11 @@ func TestLiveJail_WritesReachHostWhileRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	jailTmp := t.TempDir()
+	if err := os.Chown(jailTmp, JailUID(0), JailGID(0)); err != nil {
+		t.Fatal(err)
+	}
+
 	cfg := Config{
 		ConversationID: "probe-" + suffix,
 		Worktree:       worktree,
@@ -99,7 +104,7 @@ func TestLiveJail_WritesReachHostWhileRunning(t *testing.T) {
 		Env:            []string{"PATH=/bin", "HOME=/work"},
 		ExtraMounts:    []Mount{{Source: sockDir, Destination: "/run/tf-tools", Options: []string{"rw"}}},
 	}
-	spec, err := buildSpec(cfg, netnsPath, JailUID(0), JailGID(0))
+	spec, err := buildSpec(cfg, netnsPath, jailTmp, JailUID(0), JailGID(0))
 	if err != nil {
 		t.Fatalf("build spec: %v", err)
 	}

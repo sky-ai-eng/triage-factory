@@ -84,6 +84,7 @@ func Run(t *testing.T, h Harness) {
 	t.Run("CellsAreIsolated", func(t *testing.T) { testCellsAreIsolated(t, h) })
 	t.Run("FreezeHoldsTheJailStill", func(t *testing.T) { testFreezeHoldsTheJailStill(t, h) })
 	t.Run("MemoryCeilingKillsAreCounted", func(t *testing.T) { testMemoryCeilingKillsAreCounted(t, h) })
+	t.Run("AFullTmpEndsNoJail", func(t *testing.T) { testAFullTmpEndsNoJail(t, h) })
 	t.Run("StopLeavesNothingRunning", func(t *testing.T) { testStopLeavesNothingRunning(t, h) })
 	t.Run("RelaunchAfterTheJailDies", func(t *testing.T) { testRelaunchAfterTheJailDies(t, h) })
 	t.Run("TeardownReleasesTheCell", func(t *testing.T) { testTeardownReleasesTheCell(t, h) })
@@ -403,6 +404,49 @@ func testMemoryCeilingKillsAreCounted(t *testing.T, h Harness) {
 	}
 }
 
+// testAFullTmpEndsNoJail: a jail that writes twice its memory ceiling into
+// /tmp, then grows a process past the ceiling, loses that process and nothing
+// else. /tmp must not hold its files where the ceiling counts them and the
+// kernel cannot reclaim them, and at the ceiling the kernel must kill the
+// guest's process before the runtime the jail is made of.
+func testAFullTmpEndsNoJail(t *testing.T, h Harness) {
+	l := startWithCeiling(t, h, newConversationID(t), oomCeilingMB)
+
+	// A /tmp with a limit of its own may stop the write early; what it must
+	// not do is take the jail with it.
+	t.Log(l.sh(t, fmt.Sprintf("dd if=/dev/zero of=/tmp/fill bs=1M count=%d 2>&1 | tail -1; ls -l /tmp/fill", 2*oomCeilingMB)))
+	if l.jail.Exited() {
+		t.Fatal("the jail exited while /tmp filled")
+	}
+	if got := strings.TrimSpace(l.sh(t, "echo alive")); got != "alive" {
+		t.Fatalf("the tool host answered %q after /tmp filled", got)
+	}
+
+	before, ok := l.jail.OOMKills()
+	if !ok {
+		t.Fatal("OOMKills has no count to read for a running jail")
+	}
+	grow := fmt.Sprintf(`node -e 'const a=[];for(let i=0;i<%d;i++){a.push(Buffer.alloc(32<<20,1))}console.log("target reached")'`,
+		2*oomCeilingMB/32)
+	out, err := l.tools.Call("bash", map[string]any{"command": grow, "timeout": int(toolTimeout / time.Second)})
+	if err != nil {
+		t.Fatalf("the tool host died with the command: the kill took the jail, not the process: %v", err)
+	}
+	if strings.Contains(out.Content+out.ToolError, "target reached") {
+		t.Fatalf("the command allocated %d MB under a %d MB ceiling: %+v", 2*oomCeilingMB, oomCeilingMB, out)
+	}
+	after, ok := l.jail.OOMKills()
+	if !ok || after <= before {
+		t.Fatalf("OOMKills = %d (readable %v) after the command was killed, want more than %d", after, ok, before)
+	}
+	if l.jail.Exited() {
+		t.Fatal("the jail exited; the ceiling must cost the process, not the jail")
+	}
+	if got := l.sh(t, "if [ -e /tmp/fill ]; then echo PRESENT; else echo ABSENT; fi"); !strings.Contains(got, "PRESENT") {
+		t.Errorf("/tmp lost its file to the kill: %s", got)
+	}
+}
+
 // testStopLeavesNothingRunning: Stop returns with the jail's processes gone,
 // the tool host no longer answers, and a second Stop is harmless.
 func testStopLeavesNothingRunning(t *testing.T, h Harness) {
@@ -426,9 +470,9 @@ func testStopLeavesNothingRunning(t *testing.T, h Harness) {
 
 // testRelaunchAfterTheJailDies: a cell launches a new jail once its last one
 // is stopped and closed, which is how an engagement goes on when its jail
-// dies. The new jail has the run tree as the old one left it and reaches the
-// cell's sidecar, and nothing else of the old jail survives: no process it
-// was running, and nothing in /tmp.
+// dies. The new jail has the run tree and /tmp as the old one left them and
+// reaches the cell's sidecar, and no process the old jail was running
+// survives into it.
 //
 // The old jail's process writes a heartbeat into the run tree, which the new
 // jail shares. A new jail can see no process of the old one in its own
@@ -438,7 +482,7 @@ func testRelaunchAfterTheJailDies(t *testing.T, h Harness) {
 	l := start(t, h, newConversationID(t))
 	marker := "kept-" + randomHex(t, 8)
 	const heartbeat = "(i=0; while :; do i=$((i+1)); echo $i > /work/beat; sleep 0.2; done) >/dev/null 2>&1 &"
-	l.sh(t, fmt.Sprintf("printf %%s %s > /work/kept.txt; echo gone > /tmp/gone.txt; %s sync; echo ok", shellQuote(marker), heartbeat))
+	l.sh(t, fmt.Sprintf("printf %%s %s > /work/kept.txt; printf %%s %s > /tmp/kept.txt; %s sync; echo ok", shellQuote(marker), shellQuote(marker), heartbeat))
 	const beatMoves = `a=$(cat /work/beat); sleep 1; b=$(cat /work/beat); if [ "$a" != "$b" ]; then echo MOVING; else echo STILL; fi`
 	if out := l.sh(t, beatMoves); !strings.Contains(out, "MOVING") {
 		t.Fatalf("the background process never started, so its stopping below proves nothing: %s", out)
@@ -454,8 +498,8 @@ func testRelaunchAfterTheJailDies(t *testing.T, h Harness) {
 	if got := strings.TrimSpace(l.sh(t, "cat /work/kept.txt")); got != marker {
 		t.Errorf("/work/kept.txt in the new jail = %q, want %q", got, marker)
 	}
-	if out := l.sh(t, "if [ -e /tmp/gone.txt ]; then echo PRESENT; else echo ABSENT; fi"); !strings.Contains(out, "ABSENT") {
-		t.Errorf("the old jail's /tmp survived into the new one: %s", out)
+	if got := strings.TrimSpace(l.sh(t, "cat /tmp/kept.txt")); got != marker {
+		t.Errorf("/tmp/kept.txt in the new jail = %q, want %q", got, marker)
 	}
 	if out := l.sh(t, beatMoves); !strings.Contains(out, "STILL") {
 		t.Errorf("a process the old jail was running is still writing /work/beat: %s", out)

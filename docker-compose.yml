@@ -34,9 +34,9 @@
 # ever holds sandbox capabilities. (`all` remains local mode's shape,
 # which needs none of this stack.)
 #
-# Only the EXECUTOR needs SYS_ADMIN + NET_ADMIN + a seccomp profile
-# permissive enough for the in-container gVisor sandbox (netns + iptables
-# + runsc) — a tailored allowlist as of TFAC-608, not `unconfined`; see
+# Only the EXECUTOR needs SYS_ADMIN + NET_ADMIN + SYS_RESOURCE + a seccomp
+# profile permissive enough for the in-container gVisor sandbox (netns +
+# iptables + runsc) — a tailored allowlist as of TFAC-608, not `unconfined`; see
 # docs/security/seccomp-profile.md. The control pod launches no sandbox —
 # every delegated run executes on an executor and the brain's own LLM work is
 # toolless direct calls — so it runs as an ordinary capless web service,
@@ -48,7 +48,7 @@
 # The executor's grant is a ceiling on the container, not a promise that
 # the whole TF process wields it. Inside the container,
 # docker/entrypoint.sh spawns a small `cap-broker` process that is the
-# only thing holding SYS_ADMIN/NET_ADMIN, then execs the main TF binary
+# only thing holding SYS_ADMIN/NET_ADMIN/SYS_RESOURCE, then execs the main TF binary
 # (the "orchestrator" — the one parsing agent output) into an empty
 # capability set, a different unprivileged uid, and a cleared capability
 # bounding set, before that process runs a single line of Go. See
@@ -73,6 +73,11 @@
 #   - SYS_ADMIN + NET_ADMIN: the in-container gVisor sandbox's netns +
 #     iptables + runsc work. Held ONLY by the cap-broker inside the
 #     container; the orchestrator execs capless (see the header above).
+#   - SYS_RESOURCE: runsc lowers each jail's runtime (the sentry, the gofer,
+#     and runsc itself) below the guest's processes in the kernel's OOM
+#     order, so a guest that reaches its memory ceiling loses a process
+#     rather than its whole jail. Lowering an OOM score takes this
+#     capability, and the cap-broker refuses to start without it.
 #   - seccomp: a tailored default-deny allowlist (TFAC-608), NOT unconfined —
 #     see docs/security/seccomp-profile.md.
 #   - cgroup: private — a private cgroup-v2 namespace so per-run memory
@@ -83,6 +88,7 @@ x-tf-hardening: &tf-hardening
   cap_add:
     - SYS_ADMIN
     - NET_ADMIN
+    - SYS_RESOURCE
   security_opt:
     - apparmor=unconfined
     - seccomp=docker/seccomp-profile.json

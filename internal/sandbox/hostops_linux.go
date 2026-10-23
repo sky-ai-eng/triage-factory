@@ -93,6 +93,13 @@ func (hostOps) SetupNetwork(ctx context.Context, conversationID string, subnetId
 	if err := applyEgressPolicy(ctx, netSt.netnsName, netSt.vethHost, state.HostIP); err != nil {
 		return state, fmt.Errorf("egress policy: %w", err)
 	}
+	// The network's jails mount one /tmp, keyed by its index. It is emptied
+	// here rather than at each launch, so a jail relaunched into this network
+	// keeps what the one before it left, and a network on a reused index
+	// starts with nothing of an earlier one's.
+	if _, err := prepareJailTmp(ctx, subnetIdx); err != nil {
+		return state, err
+	}
 
 	return state, nil
 }
@@ -134,6 +141,11 @@ func (hostOps) TeardownNetwork(ctx context.Context, state NetworkState) error {
 	// The in-netns OUTPUT rules went with the netns; the host-side ones are
 	// removed here.
 	removeHostEgressRules(ctx, netSt.vethHost, hostIP(idx))
+	// The jails of this network are stopped by now, and their /tmp is keyed
+	// by the index about to be released, so it goes with the network.
+	if err := removeJailTmp(ctx, idx); err != nil {
+		sandboxLog.Warn("jail /tmp not removed with its network", "subnet_idx", idx, "error", err)
+	}
 	return nil
 }
 
@@ -269,6 +281,10 @@ func (hostOps) ReapOrphans(ctx context.Context) error {
 	// sidecar uids and jail gids this boot will hand out again from index
 	// zero, so they go before any of them is.
 	reapOrphanRunSockets()
+
+	// Leftover jail /tmp directories, for the same reason: each is keyed by a
+	// subnet index this boot hands out again.
+	reapOrphanJailTmp(ctx)
 
 	// Leftover runsc container state from a crashed broker. Unlike the
 	// sweeps above, this one has no natural collision to rely on: the ids

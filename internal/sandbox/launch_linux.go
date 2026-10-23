@@ -4,12 +4,17 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // buildRuntimeCmd is the seam the broker's LaunchSupervised builds the runsc
@@ -158,9 +163,153 @@ func (t *stderrTap) Tail() string {
 // after the exec. ctx ties the runtime's lifetime to the broker (cancel →
 // SIGKILL of the runsc parent).
 func LaunchSupervised(ctx context.Context, bundleDir, containerID string, memoryLimitMB int, stdio *os.File, stderr io.Writer) (*SupervisedRuntime, error) {
-	return launchSupervised(ctx, containerID, memoryLimitMB, stdio, stderr, func() *exec.Cmd {
+	sr, err := launchSupervised(ctx, containerID, memoryLimitMB, stdio, stderr, func() *exec.Cmd {
 		return buildRuntimeCmd(ctx, bundleDir, containerID)
 	})
+	if err != nil {
+		return nil, err
+	}
+	lowerOOMScoreOnceBooted(sr.cmd.Process.Pid, runtimeOOMScoreAdj, containerID)
+	return sr, nil
+}
+
+// How often, and for how long, lowerOOMScoreOnceBooted looks for the sandbox
+// runsc starts. A sandbox boots in well under a second; the bound only ends
+// the wait for one that never comes up.
+const (
+	sandboxBootPoll = 20 * time.Millisecond
+	sandboxBootWait = time.Minute
+)
+
+// lowerOOMScoreOnceBooted gives the runsc process at pid the runtime's OOM
+// score (runtimeOOMScoreAdj) once it has started its sandbox. runsc runs in
+// the jail's cgroup, and the kernel killing it at the jail's ceiling tears
+// the sandbox down with it.
+//
+// Not at once: a score is inherited at fork, and the sandbox forks the
+// processes that run every guest program while it boots. Lowered before the
+// sandbox exists, runsc would pass the lowered score on to the guest's
+// processes with the runtime's, and the runtime would no longer rank below
+// them.
+//
+// The process is held by a descriptor on its /proc directory, opened while
+// it cannot yet have been reaped, so a pid reused after it exits is never
+// written to. A sandbox that never appears, a failed boot, leaves the score
+// as it was.
+func lowerOOMScoreOnceBooted(pid, score int, containerID string) {
+	procFd, err := unix.Open("/proc/"+strconv.Itoa(pid), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		sandboxLog.Warn("runsc keeps its OOM score: its /proc entry would not open", "container", containerID, "error", err)
+		return
+	}
+	go func() {
+		defer closeFd(procFd)
+		deadline := time.Now().Add(sandboxBootWait)
+		for {
+			booted, err := forkedSandbox(procFd)
+			if err != nil {
+				return // runsc is gone, and the jail with it
+			}
+			if booted {
+				if err := writeOOMScoreAdj(procFd, score); err != nil {
+					sandboxLog.Warn("runsc keeps its OOM score", "container", containerID, "error", err)
+				}
+				return
+			}
+			if time.Now().After(deadline) {
+				sandboxLog.Warn("runsc keeps its OOM score: its sandbox never appeared", "container", containerID, "waited", sandboxBootWait)
+				return
+			}
+			time.Sleep(sandboxBootPoll)
+		}
+	}()
+}
+
+// forkedSandbox reports whether the process procFd names has a child running
+// runsc's boot subcommand, which is the sandbox. An error means the process
+// itself is gone.
+func forkedSandbox(procFd int) (bool, error) {
+	taskFd, err := unix.Openat(procFd, "task", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return false, err
+	}
+	defer closeFd(taskFd)
+	tids, err := readDirNames(taskFd)
+	if err != nil {
+		return false, err
+	}
+	for _, tid := range tids {
+		children, err := readFileAt(taskFd, tid+"/children")
+		if err != nil {
+			continue // the thread exited between the listing and the read
+		}
+		for _, child := range strings.Fields(string(children)) {
+			cmdline, err := os.ReadFile("/proc/" + child + "/cmdline")
+			if err != nil {
+				continue
+			}
+			for _, arg := range strings.Split(string(cmdline), "\x00") {
+				if arg == "boot" {
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, nil
+}
+
+// writeOOMScoreAdj sets the oom_score_adj of the process procFd names.
+// CheckOOMScoreLowering sets this process's OOM score to the runtime's and
+// back, and reports whether the kernel allowed it. That is what runsc does
+// for every jail. A capability set naming CAP_SYS_RESOURCE does not show it
+// will work: in a user namespace the capability is the namespace's, and the
+// kernel lowers a score past its floor only for the host's. Raising a score
+// back needs no capability.
+func CheckOOMScoreLowering() error {
+	procFd, err := unix.Open("/proc/self", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open /proc/self: %w", err)
+	}
+	defer closeFd(procFd)
+	b, err := readFileAt(procFd, "oom_score_adj")
+	if err != nil {
+		return err
+	}
+	current, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return fmt.Errorf("parse oom_score_adj %q: %w", b, err)
+	}
+	if current <= runtimeOOMScoreAdj {
+		return nil
+	}
+	if err := writeOOMScoreAdj(procFd, runtimeOOMScoreAdj); err != nil {
+		return err
+	}
+	return writeOOMScoreAdj(procFd, current)
+}
+
+func writeOOMScoreAdj(procFd, score int) error {
+	fd, err := unix.Openat(procFd, "oom_score_adj", unix.O_WRONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open oom_score_adj: %w", err)
+	}
+	defer closeFd(fd)
+	if _, err := unix.Write(fd, []byte(strconv.Itoa(score))); err != nil {
+		return fmt.Errorf("write oom_score_adj: %w", err)
+	}
+	return nil
+}
+
+// readFileAt reads name, relative to dirFd, whole. For the small files under
+// /proc it reads.
+func readFileAt(dirFd int, name string) ([]byte, error) {
+	fd, err := unix.Openat(dirFd, name, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fd), name)
+	defer func() { _ = f.Close() }()
+	return io.ReadAll(f)
 }
 
 // launchSupervised is LaunchSupervised over whichever runsc command newCmd

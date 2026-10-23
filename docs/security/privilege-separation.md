@@ -5,9 +5,10 @@ it against a live deployment. For *why* it's built this way (the trust-domain
 decomposition and what a compromise of each component yields), see
 [security-overview.md §4](security-overview.md).
 
-The `triagefactory` container grants `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` (see
-`docker-compose.yml`'s `cap_add` comment) because the per-run gVisor sandbox needs
-them to set up netns/veth/iptables, cgroups, and the curated rootfs. That grant is
+The `triagefactory` container grants `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` +
+`CAP_SYS_RESOURCE` (see `docker-compose.yml`'s `cap_add` comment) because the
+per-run gVisor sandbox needs them to set up netns/veth/iptables, cgroups, the
+curated rootfs, and the runtime's place in the kernel's OOM order. That grant is
 a *ceiling* on the container, not a promise that the whole TF process wields it:
 `docker/entrypoint.sh` splits the container into two processes at boot, and only
 one of them ever touches those capabilities.
@@ -22,7 +23,7 @@ image is completely unaffected by this section.
 
 | Process | Holds capabilities | Holds credentials | Parses hostile input | Listens for connections |
 | --- | --- | --- | --- | --- |
-| **cap-broker** (`tf-cap-broker`) | **Yes** — `CAP_SYS_ADMIN`, `CAP_NET_ADMIN` | No | No | Yes — but only a host-only unix socket (`/run/tf/cap-broker.sock`, mode 0600), reachable only by the orchestrator |
+| **cap-broker** (`tf-cap-broker`) | **Yes** — `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, `CAP_SYS_RESOURCE` | No | No | Yes — but only a host-only unix socket (`/run/tf/cap-broker.sock`, mode 0600), reachable only by the orchestrator |
 | **orchestrator** (`tf-orchestrator`) | **No** — empty effective set, capability bounding set cleared | Its own control-plane work only — webhook/poll/DB credentials on the control role; **never a per-run agent credential** (those live only in the run's sidecar), and on a `TF_ROLE=executor` process, none at all (the secret store is disabled there — and multi mode has no fused role that would hold the store on a sandboxing host) | Its own control-plane inputs — webhook payloads, the HTTP API; **not** the per-run agent's output, which only the sidecar sees. Hosts the capless `RelayServer` that answers the sidecar's narrow, validated policy/DB/audit relays — no credential-bearing op | Yes — the public HTTP API / websocket |
 | **credential sidecar** (`tf-sidecar`, one per live run) | **No** — the setuid-from-root exec clears its effective/permitted capabilities | Yes — exactly **one** run's material, from the sealed per-run bundle (LLM key, GitHub/Jira/Linear/provider tokens), unsealed with a key the process mints for itself and that never leaves it | Yes — **that one run's** agent traffic, in both directions: the exec-verb socket the agent dials, the upstream API responses its proxies parse, and — at the `gh` injector only — the body of an outbound GraphQL request, a document the agent composed. The outbound read exists because a policy keyed on what a write *does* cannot be applied to a request whose act is stated only in its body. It is narrow by construction: one endpoint, a size cap, a grammar that collects top-level field names and skips everything beneath them uninterpreted, parse-fail refuses the request, and nothing forwarded is altered — see `internal/ghinjector` and `internal/ghwrite` | The per-run agenthost unix socket + that run's LLM/git/API proxies, bound on the run's own veth IP — reachable by the run's sandbox and the orchestrator, never off-box |
 | **sandbox** (the delegated agent) | No | No | Yes — it's the source of the hostile input | No — outbound only, through the run's egress proxy |

@@ -90,12 +90,13 @@ We never ask for a blanket `--privileged`:
 | --- | --- |
 | `CAP_NET_ADMIN` | Per-run network namespace, veth pair, NAT (MASQUERADE), and the fail-closed egress allowlist (`internal/sandbox/netns_linux.go`, `iptables_linux.go`). |
 | `CAP_SYS_ADMIN` | Namespace/mount setup for the gVisor OCI container and the netns; memory-cgroup setup. Per-run memory ceilings need a private cgroup namespace (compose `cgroup: private`, which is also Docker's default on cgroup v2 hosts); outside one they are off, with a warning, and runs proceed without a ceiling. |
+| `CAP_SYS_RESOURCE` | Lowering each jail's runtime (gVisor's sentry and gofer, and `runsc` itself) below the guest's processes in the kernel's OOM order, so a guest that reaches its memory ceiling loses a process rather than its jail (`internal/sandbox/spec.go`, `runtimeOOMScoreAdj`). runsc refuses to start a jail it cannot lower, so the cap-broker refuses to start without it. |
 | `seccomp=unconfined` | Docker's default syscall filter blocks operations gVisor needs to build the far stricter sandbox, so we use a tailored profile (§6). |
 | Private cgroup-v2 namespace | The per-run memory ceiling. |
 
 What Triage Factory doesn't require:
 
-- **not `--privileged`** — only the two capabilities above;
+- **not `--privileged`** — only the three capabilities above;
 - **no host devices** (`/dev` is not exposed);
 - **no host network namespace** (each run gets its own);
 - **no host PID namespace**;
@@ -136,7 +137,7 @@ it holds and the *hostile input* it is exposed to never overlap:
 | **credential sidecar** (one per run) | No (capless) | Yes — one run's material only | Yes — that one run's agent traffic, inbound and (at the `gh` injector) outbound |
 | **sandbox** (agent) | No | No | Yes |
 
-- **cap-broker** — the only process that holds `CAP_SYS_ADMIN`/`CAP_NET_ADMIN`. It
+- **cap-broker** — the only process that holds `CAP_SYS_ADMIN`/`CAP_NET_ADMIN`/`CAP_SYS_RESOURCE`. It
   builds the netns/veth/iptables/cgroup, launches and supervises the gVisor
   runtime, tears everything down, and reaps orphans at boot. It holds **no
   credentials**, binds **no proxies**, and **parses no agent output**. Its only

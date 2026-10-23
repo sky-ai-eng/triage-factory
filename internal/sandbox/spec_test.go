@@ -26,6 +26,9 @@ func canonicalConfig() Config {
 	}
 }
 
+// testJailTmp stands in for the directory prepareJailTmp makes.
+const testJailTmp = "/data/jail-tmp/7"
+
 func TestBuildSpec_RequiredFields(t *testing.T) {
 	for _, c := range []struct {
 		name   string
@@ -38,13 +41,60 @@ func TestBuildSpec_RequiredFields(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			cfg := canonicalConfig()
 			c.mutate(&cfg)
-			if _, err := buildSpec(cfg, "/var/run/netns/tf-test", JailUID(7), JailGID(7)); err == nil {
+			if _, err := buildSpec(cfg, "/var/run/netns/tf-test", testJailTmp, JailUID(7), JailGID(7)); err == nil {
 				t.Errorf("buildSpec accepted %s; want validation error", c.name)
 			}
 		})
 	}
-	if _, err := buildSpec(canonicalConfig(), "", JailUID(7), JailGID(7)); err == nil {
+	if _, err := buildSpec(canonicalConfig(), "", testJailTmp, JailUID(7), JailGID(7)); err == nil {
 		t.Errorf("buildSpec accepted empty netnsPath; want validation error")
+	}
+	for _, tmp := range []string{"", "data/jail-tmp/7", "/data/jail-tmp/../7"} {
+		if _, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", tmp, JailUID(7), JailGID(7)); err == nil {
+			t.Errorf("buildSpec accepted the /tmp source %q; want validation error", tmp)
+		}
+	}
+}
+
+// TestBuildSpec_TmpIsTheJailsOwnDirectory: /tmp is the directory the broker
+// made for the jail, bound read-write, and never a tmpfs, whose files would
+// count against the jail's memory where the kernel cannot reclaim them.
+func TestBuildSpec_TmpIsTheJailsOwnDirectory(t *testing.T) {
+	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", testJailTmp, JailUID(7), JailGID(7))
+	if err != nil {
+		t.Fatalf("buildSpec: %v", err)
+	}
+	var tmp []specs.Mount
+	for _, m := range spec.Mounts {
+		if m.Destination == "/tmp" {
+			tmp = append(tmp, m)
+		}
+	}
+	if len(tmp) != 1 {
+		t.Fatalf("/tmp mounts = %+v, want exactly one", tmp)
+	}
+	m := tmp[0]
+	if m.Type != "bind" || m.Source != testJailTmp {
+		t.Errorf("/tmp = %s of %q, want a bind of %q", m.Type, m.Source, testJailTmp)
+	}
+	for _, want := range []string{"rbind", "rw", "nosuid", "nodev"} {
+		if !hasOption(m.Options, want) {
+			t.Errorf("/tmp options %v lack %q", m.Options, want)
+		}
+	}
+}
+
+// TestBuildSpec_RuntimeGoesAfterTheGuestAtTheCeiling: the spec lowers the
+// runtime's OOM score, which runsc applies to the sentry and the gofer, by
+// enough to rank them below the guest's processes and no further: -1000
+// would make them unkillable.
+func TestBuildSpec_RuntimeGoesAfterTheGuestAtTheCeiling(t *testing.T) {
+	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", testJailTmp, JailUID(7), JailGID(7))
+	if err != nil {
+		t.Fatalf("buildSpec: %v", err)
+	}
+	if spec.Process.OOMScoreAdj == nil || *spec.Process.OOMScoreAdj != -500 {
+		t.Errorf("Process.OOMScoreAdj = %v, want -500", spec.Process.OOMScoreAdj)
 	}
 }
 
@@ -65,7 +115,7 @@ func TestBuildSpec_PropertyB_NoEnvLeakage(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "ghp_SENTINEL_from_host_env_must_not_leak")
 	t.Setenv("ANTHROPIC_FROM_HOST_PROBE", "PROBE-from-host-env-must-not-leak")
 
-	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", JailUID(7), JailGID(7))
+	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", testJailTmp, JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -93,7 +143,7 @@ func TestBuildSpec_ProcessEnvVerbatim(t *testing.T) {
 		"HOME=/work",
 		"CUSTOM_CALLER_VAR=value-from-caller",
 	}
-	spec, err := buildSpec(cfg, "/var/run/netns/tf-test", JailUID(7), JailGID(7))
+	spec, err := buildSpec(cfg, "/var/run/netns/tf-test", testJailTmp, JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -108,7 +158,7 @@ func TestBuildSpec_ProcessEnvVerbatim(t *testing.T) {
 }
 
 func TestBuildSpec_NonRootUID(t *testing.T) {
-	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", JailUID(7), JailGID(7))
+	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", testJailTmp, JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -127,14 +177,14 @@ func TestBuildSpec_NonRootUID(t *testing.T) {
 // a spec exists.
 func TestBuildSpec_RefusesNonJailIdentity(t *testing.T) {
 	for _, id := range [][2]int{{0, 0}, {10001, 10001}, {SidecarUID(7), SidecarUID(7)}, {JailUID(7), JailGID(8)}} {
-		if _, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", id[0], id[1]); err == nil {
+		if _, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", testJailTmp, id[0], id[1]); err == nil {
 			t.Errorf("buildSpec accepted jail identity %d:%d", id[0], id[1])
 		}
 	}
 }
 
 func TestBuildSpec_NoNewPrivileges(t *testing.T) {
-	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", JailUID(7), JailGID(7))
+	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", testJailTmp, JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -144,7 +194,7 @@ func TestBuildSpec_NoNewPrivileges(t *testing.T) {
 }
 
 func TestBuildSpec_CapabilitiesEmpty(t *testing.T) {
-	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", JailUID(7), JailGID(7))
+	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", testJailTmp, JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -167,7 +217,7 @@ func TestBuildSpec_CapabilitiesEmpty(t *testing.T) {
 
 func TestBuildSpec_NamespacesIncludeNetnsPath(t *testing.T) {
 	const want = "/var/run/netns/tf-test"
-	spec, err := buildSpec(canonicalConfig(), want, JailUID(7), JailGID(7))
+	spec, err := buildSpec(canonicalConfig(), want, testJailTmp, JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -187,7 +237,7 @@ func TestBuildSpec_NamespacesIncludeNetnsPath(t *testing.T) {
 
 func TestBuildSpec_MountsIncludeWorktree(t *testing.T) {
 	cfg := canonicalConfig()
-	spec, err := buildSpec(cfg, "/var/run/netns/tf-test", JailUID(7), JailGID(7))
+	spec, err := buildSpec(cfg, "/var/run/netns/tf-test", testJailTmp, JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -216,7 +266,7 @@ func TestBuildSpec_ExtraMountsAppended(t *testing.T) {
 	cfg.ExtraMounts = []Mount{
 		{Source: "/run/tf/abc.sock", Destination: "/run/tf.sock", Options: []string{"rw"}},
 	}
-	spec, err := buildSpec(cfg, "/var/run/netns/tf-test", JailUID(7), JailGID(7))
+	spec, err := buildSpec(cfg, "/var/run/netns/tf-test", testJailTmp, JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -244,7 +294,7 @@ func TestBuildSpec_ReadOnlyRepoMountIsRO(t *testing.T) {
 	cfg.ExtraMounts = []Mount{
 		{Source: "/data/orgs/acme/shared-repos/o/r", Destination: "/work/repos/o/r", Options: []string{"ro"}},
 	}
-	spec, err := buildSpec(cfg, "/var/run/netns/tf-test", JailUID(7), JailGID(7))
+	spec, err := buildSpec(cfg, "/var/run/netns/tf-test", testJailTmp, JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -270,9 +320,9 @@ func TestBuildSpec_ReadOnlyRepoMountIsRO(t *testing.T) {
 }
 
 // TestBuildSpec_NoHostMountOutsideDeclaredSet is the "no escape" test: the
-// only bind mounts that expose a host path are the worktree, the CA
-// certs, and the caller's explicit ExtraMounts. Nothing else from the host is
-// reachable — so a path outside the project/repo set cannot be read from
+// only bind mounts that expose a host path are the worktree, the jail's own
+// /tmp, the CA certs, and the caller's explicit ExtraMounts. Nothing else from
+// the host is reachable — so a path outside the project/repo set cannot be read from
 // inside the jail. A regression that mounted, say, the whole org root or a
 // sibling repo would trip this.
 func TestBuildSpec_NoHostMountOutsideDeclaredSet(t *testing.T) {
@@ -282,12 +332,13 @@ func TestBuildSpec_NoHostMountOutsideDeclaredSet(t *testing.T) {
 		{Source: "/run/tf/abc.sock", Destination: "/run/tf.sock"},
 		{Source: "/data/orgs/acme/shared-repos/o/r", Destination: "/work/repos/o/r", Options: []string{"ro"}},
 	}
-	spec, err := buildSpec(cfg, "/var/run/netns/tf-test", JailUID(7), JailGID(7))
+	spec, err := buildSpec(cfg, "/var/run/netns/tf-test", testJailTmp, JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
 	allowed := map[string]bool{
 		cfg.Worktree:                       true,
+		testJailTmp:                        true,
 		hostSSLCertsDir():                  true,
 		"/usr/local/bin/triagefactory":     true,
 		"/run/tf/abc.sock":                 true,
@@ -313,7 +364,7 @@ func hasOption(opts []string, want string) bool {
 }
 
 func TestBuildSpec_SeccompSet(t *testing.T) {
-	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", JailUID(7), JailGID(7))
+	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", testJailTmp, JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}

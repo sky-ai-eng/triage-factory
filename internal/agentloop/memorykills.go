@@ -154,11 +154,10 @@ func (w *memoryKillWatch) explainLostHost(name string, before int, beforeOK bool
 // call a kill can be the call's own.
 const bashToolName = "bash"
 
-// memoryRemedies is the advice every memory notice ends with. It matches the
-// harness's per-command budget error, plus the one cost an agent cannot see in
-// a process list: /tmp is held in memory.
+// memoryRemedies is the advice every memory notice ends with: the harness's
+// per-command budget error gives the same.
 const memoryRemedies = "use less memory: lower build parallelism, stream instead of loading whole files, " +
-	"split the work into smaller steps, or delete large files from /tmp, which is held in memory and counts against the limit."
+	"or split the work into smaller steps."
 
 func (w *memoryKillWatch) limitPhrase() string {
 	if w.limitMB <= 0 {

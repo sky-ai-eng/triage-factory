@@ -19,7 +19,7 @@ func TestWriteBundle_RoundTrip(t *testing.T) {
 	}
 
 	cfg := canonicalConfig()
-	spec, err := buildSpec(cfg, "/var/run/netns/tf-test", JailUID(0), JailGID(0))
+	spec, err := buildSpec(cfg, "/var/run/netns/tf-test", testJailTmp, JailUID(0), JailGID(0))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}

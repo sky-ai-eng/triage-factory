@@ -94,7 +94,7 @@ func TestWatchMemoryKills_AKillDuringACommandIsExplainedOnItsResult(t *testing.T
 		"killed a process in it",
 		"most likely this command or one of its children",
 		"The sandbox is still running.",
-		"/tmp",
+		"split the work into smaller steps.",
 	} {
 		if !strings.Contains(notice, want) {
 			t.Errorf("notice lacks %q: %q", want, notice)

@@ -1114,7 +1114,18 @@ func PrepareBundle(ctx context.Context, p LaunchParams) (string, error) {
 		MemoryLimitMB:  p.MemoryLimitMB,
 		Rlimits:        p.Rlimits,
 	}
-	spec, err := buildSpec(cfg, p.NetnsPath, p.JailUID, p.JailGID)
+	// The jail's /tmp, keyed by the subnet index the network was validated
+	// against so the caller never names it. The network's setup emptied it,
+	// and a relaunch into the same network keeps it.
+	idx, err := validateNetnsPath(p.ConversationID, p.NetnsPath)
+	if err != nil {
+		return "", err
+	}
+	tmpDir, err := jailTmp(ctx, idx)
+	if err != nil {
+		return "", err
+	}
+	spec, err := buildSpec(cfg, p.NetnsPath, tmpDir, p.JailUID, p.JailGID)
 	if err != nil {
 		return "", err
 	}

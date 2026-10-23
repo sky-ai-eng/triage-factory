@@ -38,7 +38,10 @@ func defaultRlimits() []specs.POSIXRlimit {
 // jailUID/jailGID are the run's own jail identity (JailUID/JailGID of its
 // subnet index), already validated at the broker's RPC boundary against the
 // index the netns was created for.
-func buildSpec(cfg Config, netnsPath string, jailUID, jailGID int) (*specs.Spec, error) {
+//
+// tmpDir is the host directory mounted at /tmp, which the broker made for
+// this jail (prepareJailTmp).
+func buildSpec(cfg Config, netnsPath, tmpDir string, jailUID, jailGID int) (*specs.Spec, error) {
 	if cfg.ConversationID == "" {
 		return nil, fmt.Errorf("spec: Config.ConversationID is required")
 	}
@@ -51,6 +54,9 @@ func buildSpec(cfg Config, netnsPath string, jailUID, jailGID int) (*specs.Spec,
 	if netnsPath == "" {
 		return nil, fmt.Errorf("spec: netnsPath is required")
 	}
+	if tmpDir == "" || !filepath.IsAbs(tmpDir) || filepath.Clean(tmpDir) != tmpDir {
+		return nil, fmt.Errorf("spec: jail /tmp %q must be a clean absolute path", tmpDir)
+	}
 	if !IsJailUID(jailUID) || jailGID != jailUID {
 		return nil, fmt.Errorf("spec: jail identity %d:%d is not a per-run jail identity", jailUID, jailGID)
 	}
@@ -61,10 +67,10 @@ func buildSpec(cfg Config, netnsPath string, jailUID, jailGID int) (*specs.Spec,
 	// tenant's agent persist files into /usr/bin/* (or anywhere in the
 	// rootfs) that the next tenant's agent then reads/executes. The
 	// places the agent legitimately needs to write — /work (the bind-
-	// mounted worktree), /tmp (a per-run tmpfs), /dev (a per-run
-	// tmpfs) — are already separate mounts and stay writable
-	// regardless of this flag.
+	// mounted worktree) and /tmp (the jail's own directory on disk) — are
+	// separate mounts and stay writable regardless of this flag.
 	readonlyRootfs := true
+	oomScoreAdj := runtimeOOMScoreAdj
 
 	spec := &specs.Spec{
 		Version: specs.Version,
@@ -93,6 +99,9 @@ func buildSpec(cfg Config, netnsPath string, jailUID, jailGID int) (*specs.Spec,
 				Ambient:     []string{},
 			},
 			Rlimits: rlimitsForSpec(cfg.Rlimits),
+			// runsc gives this to the sentry and the gofer, not to the
+			// processes that run the guest; see runtimeOOMScoreAdj.
+			OOMScoreAdj: &oomScoreAdj,
 		},
 		Root: &specs.Root{
 			Path:     "rootfs",
@@ -110,8 +119,11 @@ func buildSpec(cfg Config, netnsPath string, jailUID, jailGID int) (*specs.Spec,
 				Options: []string{"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620"}},
 			{Destination: "/sys", Type: "sysfs", Source: "sysfs",
 				Options: []string{"nosuid", "noexec", "nodev", "ro"}},
-			{Destination: "/tmp", Type: "tmpfs", Source: "tmpfs",
-				Options: []string{"nosuid", "nodev", "mode=1777"}},
+			// TODO(TFAC-1177): nothing bounds how much of the executor's disk
+			// this directory, or the run tree, takes; one run can fill it for
+			// every other run and the executor.
+			{Destination: "/tmp", Type: "bind", Source: tmpDir,
+				Options: []string{"rbind", "rw", "nosuid", "nodev"}},
 
 			// Agent's worktree — bind-mount RW so the agent can edit
 			// files. Caller must have handed it to this run's jail uid
@@ -166,6 +178,23 @@ func buildSpec(cfg Config, netnsPath string, jailUID, jailGID int) (*specs.Spec,
 
 	return spec, nil
 }
+
+// runtimeOOMScoreAdj is the oom_score_adj of the processes that are the
+// jail's runtime rather than its guest: the sentry and the gofer, which runsc
+// sets from the spec, and runsc itself, which the broker sets once the
+// sandbox is up (LaunchSupervised). At the jail's memory ceiling the kernel
+// kills the process in the jail's cgroup with the highest score, by default
+// the one with the most resident memory. The process that runs a guest
+// program carries only part of that program's memory in its own RSS, so
+// without this the sentry can outrank the program that is actually growing,
+// and the kernel ends the jail for a guest's allocation. Lowered, the runtime
+// is killed before a guest process only if it holds half the ceiling more
+// memory than that process does.
+//
+// Not -1000, which makes a process unkillable: a jail whose memory the
+// runtime itself holds would then leave the kernel only the guest's last
+// processes, the tool host among them, and the jail would end all the same.
+const runtimeOOMScoreAdj = -500
 
 // rlimitsForSpec maps the caller's numeric Rlimit set onto the OCI
 // spec type, falling back to defaultRlimits when the caller named none.

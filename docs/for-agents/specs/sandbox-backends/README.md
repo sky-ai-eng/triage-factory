@@ -254,10 +254,20 @@ fails one does not meet the contract.
     every registry the egress proxy admits verifies in the jail (§6.1).
 11. **A cell relaunches after its jail dies.** Once a jail is stopped and
     closed, the same cell launches a new one from the same spec. The new jail
-    has the run tree as the old one left it and reaches the cell's sidecar.
-    No process of the old jail survives into it, and neither does anything in
-    its `/tmp`. This is how a native engagement whose jail dies goes on
-    without ending its agent loop.
+    has the run tree and `/tmp` as the old one left them, so the output of
+    what the old one was running is still there to read, and it reaches the
+    cell's sidecar. No process of the old jail survives into it. This is how
+    a native engagement whose jail dies goes on without ending its agent
+    loop.
+12. **A full `/tmp`, or a guest at its memory ceiling, costs a guest process
+    and never the jail.** `/tmp` keeps its files where the memory ceiling
+    does not count them as memory the kernel cannot reclaim, so a guest that
+    writes past the ceiling into `/tmp` gets at most `ENOSPC`, once the disk
+    under it is full. That disk is shared: a run's `/tmp` and `/work` have no
+    limit of their own, so one run can fill it for every other run on the
+    executor (TFAC-1177). At the ceiling the kernel kills a guest process
+    before any of the backend's runtime: gVisor's sentry and gofer and `runsc`
+    itself rank below the guest in the OOM order.
 
 ## 6. Policy stays in TF on every backend
 
@@ -595,7 +605,7 @@ does, so the suite exercises the privilege-separated path rather than an
 in-process stand-in. The Firecracker backend wires it the same way from
 `internal/cell/firecracker`.
 
-The cases, one per invariant except 8:
+The cases, one per invariant:
 
 | Case | Invariant |
 | --- | --- |
@@ -606,20 +616,21 @@ The cases, one per invariant except 8:
 | `RunTreeAtWork` | 5 — the caller's seed is at `/work`; the jail's write is in the caller's tree after `Stop` |
 | `JailIsNotRoot` | 6 |
 | `FreezeHoldsTheJailStill`, `StopLeavesNothingRunning` | 7 |
+| `MemoryCeilingKillsAreCounted` | 8 — a process grown to twice a 512 MB ceiling is killed, `OOMKills` rises across the call, and the jail and its tool host carry on |
 | `TeardownReleasesTheCell` | 9 — two engagements of one conversation back to back, then a reap |
 | `TrustVariablesNameTheRunsBundle` | 10 — `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` and `PIP_CERT` each name a file whose hash is that of the bundle the sidecar wrote, which carries a name-constrained CA |
-| `RelaunchAfterTheJailDies` | 11 — a file written to `/work` is there in the second jail, a file in `/tmp` is not, a heartbeat a background process of the first jail writes into `/work` stops, and the second jail reaches every sidecar endpoint |
+| `RelaunchAfterTheJailDies` | 11 — a file written to `/work` and one written to `/tmp` are there in the second jail, a heartbeat a background process of the first jail writes into `/work` stops, and the second jail reaches every sidecar endpoint |
+| `AFullTmpEndsNoJail` | 12 — under a 512 MB ceiling the jail writes 1 GB into `/tmp` and keeps answering; a process then grown past the ceiling is killed, `OOMKills` rises, and the jail and its `/tmp` file are still there |
 
-Invariant 8 stays covered by `internal/sandbox`'s own integration tests for
-now: a memory case needs a host that grants a private cgroup namespace, and
-none of the hosts the suite has run on did. `Jail.Sample` waits on the same
-host for its case, since on gVisor a jail without a ceiling has no cgroup to
-read. When §7 lands, the suite gains a
-case per capability, run on the backends that declare it. The
-`memory_checkpoint` case parks a jail, restores it into a new cell, and runs
-`TrustVariablesNameTheRunsBundle` and `OnlyTheSidecarIsReachable` against
-the new engagement, so a restore that kept the parked engagement's inputs
-fails it.
+The two memory cases, for invariants 8 and 12, need a host that grants a
+private cgroup namespace, as `scripts/test-sandbox-linux.sh` does inside a
+`--cgroupns=private` container. `Jail.Sample` waits for a case of its own,
+since on gVisor a jail without a ceiling has no cgroup to read. When §7
+lands, the suite gains a case per capability, run on the backends that
+declare it. The `memory_checkpoint` case parks a jail, restores it into a
+new cell, and runs `TrustVariablesNameTheRunsBundle` and
+`OnlyTheSidecarIsReachable` against the new engagement, so a restore that
+kept the parked engagement's inputs fails it.
 
 Two cases hold a VM backend to the hard parts of its design: `RunTreeAtWork`
 reads the jail's write back after `Stop`, which fails unless `Stop` copies the
@@ -795,11 +806,12 @@ points:
 - **Rootfs.** The apk package set and cache key of gVisor's rootfs
   (`rootfsCacheKey`), packed into an ext4 image and attached read-only, so
   the rule in horizontal-scaling §6.4 for sharing a baked rootfs across
-  tenants holds. Writable paths outside `/work` are tmpfs and are discarded
-  at `Stop`, as a gVisor jail's are. A guest with a container runtime gets a
-  scratch disk image for the runtime's images and volumes instead, since on
-  tmpfs they would count against guest memory; it is discarded at `Stop` the
-  same way (§8).
+  tenants holds. `/tmp` is on a scratch disk image the cell keeps across
+  relaunches and discards when it is closed, as a gVisor jail's `/tmp` is a
+  directory on the executor's disk kept until its network is torn down: on
+  tmpfs it would count against guest memory, and a full one would leave the
+  guest's OOM killer only the processes the jail is made of (invariant 12). A guest with a container runtime keeps the runtime's images
+  and volumes on the same scratch disk for the same reason (§8).
 - **Init.** A small TF-owned PID 1. It mounts the images at the §4.1 paths
   and sets a hostname that `/etc/hosts` resolves. At the start of every
   engagement, after a cold boot or a restore, it takes the engagement's inputs

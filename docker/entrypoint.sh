@@ -110,8 +110,9 @@ done
 #      pod (control_role below), which never launches a sandbox and so
 #      skips the broker outright, the Go side role-gating it to match. On
 #      the executor, the broker stays root, holding whatever this
-#      container was granted (SYS_ADMIN + NET_ADMIN on top of Docker's
-#      own baseline set — see docker-compose.yml's cap_add comment); it
+#      container was granted (SYS_ADMIN, NET_ADMIN and SYS_RESOURCE on
+#      top of Docker's own baseline set — see docker-compose.yml's
+#      cap_add comment); it
 #      never touches credentials or hostile input. The control pod's
 #      compose service carries no sandbox caps at all (only the executor
 #      service references the hardening anchor), so the drop below has

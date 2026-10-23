@@ -93,8 +93,19 @@ else
   yellow "  MISS  systemd-run  — the stages run unwrapped; the cgroup tests will skip"
 fi
 
+# The tests put their state root under TMPDIR, and every jail's /tmp lives
+# under the state root, which the broker refuses to keep in memory. On a host
+# whose /tmp is a tmpfs, point TMPDIR at a directory on disk.
+tmp_fs="$(stat -f -c %T "${TMPDIR:-/tmp}" 2>/dev/null || echo unknown)"
+if [[ "$tmp_fs" == "tmpfs" || "$tmp_fs" == "ramfs" ]]; then
+  red   "  MISS  TMPDIR on disk  — ${TMPDIR:-/tmp} is on $tmp_fs; re-run with TMPDIR set to a directory on disk (mode 0711, short path)"
+  missing=1
+else
+  green "  ok    TMPDIR on disk  (${TMPDIR:-/tmp}, $tmp_fs)"
+fi
+
 if (( missing != 0 )); then
-  red "Aborting — install the missing tools above and re-run."
+  red "Aborting — fix the prerequisites above and re-run."
   exit 1
 fi
 
