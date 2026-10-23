@@ -57,16 +57,6 @@ once its snapshot is verifiably written and no run sharing it is live, and
 resuming afterwards rebuilds the workspace from that snapshot — slower than a
 warm resume, never lost work.
 
-## Repository clones
-
-Each tracked repository has one bare clone under `~/.triagefactory/repos`,
-kept for as long as the repository is tracked, so a run never waits on a full
-clone. A clone no tracked repository owns — one a team stopped tracking, or one
-from a GitHub host the org has moved off — is reclaimed once it has gone a week
-without use, so untracking and re-tracking a repository within that week reuses
-its clone. A clone backing a live run is never reclaimed. There is no setting
-for this.
-
 ## Logging
 
 Logs are structured (Go's `log/slog`) and written to stderr. Two environment
