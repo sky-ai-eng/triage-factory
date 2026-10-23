@@ -193,9 +193,10 @@ func (a *App) startBrain(term int64) {
 	// ended without its agent's own file still owes. Started with the brain in
 	// BOTH modes — local is always the brain, and an ending there owes a memory
 	// exactly as one in a fleet does — and stopped by brainCtx, which cancels
-	// any attempt in flight so a demoted holder is provably done generating
-	// before its successor starts. That attempt's row keeps completed_at NULL:
-	// abandonment is derived from started_at, never stamped.
+	// any attempt in flight. The cancellation is delivered, not awaited, so a
+	// demoted holder's attempt can still be returning when its successor
+	// starts. That attempt's row keeps completed_at NULL: abandonment is
+	// derived from started_at, never stamped.
 	//
 	// Every boundary stamper rings memoryOwed because it runs in a
 	// DIFFERENT process from the brain — a request handler on whichever

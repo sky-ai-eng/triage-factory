@@ -10,6 +10,14 @@
 // what "the brain" actually starts or stops; that's internal/app's job,
 // driven by the OnAcquire/OnDemote callbacks passed to NewManager.
 //
+// The guarantee: a holder that stops renewing, whether its renewals error,
+// hang, or report the row lost, stops reporting IsHolder and calls OnDemote
+// strictly before a standby may acquire, under every configuration
+// NewManager and KnobsFromEnv accept (demoteMarginError states the bound),
+// provided OnAcquire stays non-blocking (see Manager.onAcquire). Demoted
+// means OnDemote was called, not that the work it stops has finished; how
+// quickly the brain winds down after that is internal/app's stopBrain.
+//
 // Local mode and TF_ROLE=all never construct a Manager at all — the
 // single process always wins the lease with zero lease I/O (see
 // internal/app's role switch). There is no "always-holder" Elector type
@@ -36,8 +44,10 @@ const BackgroundBrainName = "background-brain"
 
 // Default knobs (spec's "Pre-made decisions — do not re-derive"): renew
 // every 5s, takeover TTL 20s, self-demote deadline 15s of monotonic time
-// since the last successful renewal — strictly less than the TTL, so the
-// old holder is provably stopping before a successor can acquire.
+// since the last successful renewal. A partitioned holder detects the
+// deadline within 3s of it (the longer of the 3s deadline-check interval
+// and the 2.5s store-call timeout), so it demotes by 18s, before a
+// successor may acquire at 20s (see demoteMarginError).
 const (
 	DefaultRenewInterval  = 5 * time.Second
 	DefaultTTL            = 20 * time.Second
@@ -69,9 +79,9 @@ func ParseTTL(s string) (time.Duration, error) {
 
 // ParseDemoteDeadline parses TF_LEASE_DEMOTE_SEC. Empty maps to
 // DefaultDemoteDeadline; anything else must parse as a positive integer
-// second count. Callers must separately enforce demoteDeadline < ttl —
-// NewManager does, at construction — since that check spans two env vars
-// this function can't see in isolation.
+// second count. Callers must separately check it against the TTL
+// (demoteMarginError) — NewManager does, at construction — since that
+// check spans two env vars this function can't see in isolation.
 func ParseDemoteDeadline(s string) (time.Duration, error) {
 	return parseSecondsEnv(s, "TF_LEASE_DEMOTE_SEC", DefaultDemoteDeadline)
 }
@@ -91,10 +101,10 @@ func parseSecondsEnv(raw, name string, def time.Duration) (time.Duration, error)
 // KnobsFromEnv resolves the three lease timing knobs from
 // TF_LEASE_RENEW_SEC / TF_LEASE_TTL_SEC / TF_LEASE_DEMOTE_SEC, applying
 // defaults for unset vars. Returns an error on a malformed value or on a
-// demote deadline that doesn't clear the TTL with room for the deadline
-// check's own granularity (see demoteMarginError) — boot refuses to start
-// with a configuration that can't guarantee a demoted holder stops before a
-// successor is eligible to acquire.
+// demote deadline that leaves too little room under the TTL for the latest
+// a partitioned holder can detect it (see demoteMarginError) — boot refuses
+// to start with a configuration that can't guarantee a holder demotes
+// before a successor is eligible to acquire.
 func KnobsFromEnv() (renewInterval, ttl, demoteDeadline time.Duration, err error) {
 	renewInterval, err = ParseRenewInterval(os.Getenv("TF_LEASE_RENEW_SEC"))
 	if err != nil {
