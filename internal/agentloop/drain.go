@@ -115,22 +115,65 @@ func idsOf(rows []domain.Message) []int {
 }
 
 // insertPending queues a row for the next drain. Used for the loop's own
-// injected input (the executor-changed notice, the turn-end nudge): it goes
+// injected input (the claim-time notices, the turn-end nudge): it goes
 // through the same queue as user input rather than being spliced into an
 // assembly, so there is exactly one injection point and it is durable. Every
 // caller passes an explicit injection subtype — the loop never mints a row
 // that could read as human input.
+//
+// The row is placed above any human input already waiting rather than
+// appended behind it. The drain delivers the two together and assembly packs
+// adjacent user rows into one message in assembly order, so an appended note
+// would follow the person's text instead of preceding it. Placing it here,
+// when it is written, keeps the stored order and the rendered order the same,
+// so the transcript a person reads shows the note where the model read it.
 func (e *Engine) insertPending(ctx context.Context, params Params, content, subtype string) error {
+	rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
+	if err != nil {
+		return err
+	}
 	pending := false
-	_, err := e.Transcript.Insert(ctx, params.OrgID, &domain.Message{
+	_, err = e.Transcript.Insert(ctx, params.OrgID, &domain.Message{
 		ConversationID: params.ConversationID,
 		UserID:         params.UserID,
 		Role:           "user",
 		Subtype:        subtype,
 		Content:        content,
 		Delivered:      &pending,
+		Seq:            aboveWaitingInput(rows),
 	})
 	return err
+}
+
+// aboveWaitingInput returns the assembly position for a system row queued
+// while human input is waiting: a fraction strictly between the first pending
+// human row and the row before it, or the half step below the human row when
+// nothing precedes it. nil, an ordinary append, when no human input is
+// waiting.
+//
+// The lower bound is whichever row precedes the human one, so a second note
+// lands between the first note and the human row: notes keep the order they
+// were queued in, and all of them sit above the person's text. Every caller
+// queues after the window's calls are answered — the claim-time notices after
+// the dangling-call repair, the nudge after a turn that made no calls — so the
+// row the note goes under is never a call still owed its result.
+func aboveWaitingInput(rows []domain.Message) *float64 {
+	ordered := make([]domain.Message, len(rows))
+	copy(ordered, rows)
+	sort.SliceStable(ordered, func(i, j int) bool { return assemblyKey(ordered[i]) < assemblyKey(ordered[j]) })
+	for i, r := range ordered {
+		if r.Role != "user" || isDelivered(r) || !IsHumanInput(r) {
+			continue
+		}
+		hi := assemblyKey(r)
+		lo := hi - 1
+		if i > 0 {
+			lo = assemblyKey(ordered[i-1])
+		}
+		seq := lo + (hi-lo)/2
+		return &seq
+	}
+	return nil
 }
 
 // insertDelivered writes a system-authored user row straight into the window,
