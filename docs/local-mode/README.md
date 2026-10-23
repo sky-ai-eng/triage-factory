@@ -18,6 +18,6 @@ To install the binary, start with [INSTALLATION.md](../INSTALLATION.md).
 
 ## Product behavior (both modes)
 
-- [GitHub polling](../concepts/polling.md) — what the poller tracks
+- [GitHub polling](../concepts/polling.md) — which pull requests the poller follows and how each cycle reads them
 - [Tracked events](../concepts/tracked-events.md) — the GitHub/Jira/Linear event taxonomy
 - [Repo profiling](../concepts/repo-profiling.md) — how repos get summarized for scoring
