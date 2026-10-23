@@ -491,8 +491,9 @@ func (t *Tracker) holdLinearUnreadableTeams(ctx context.Context, client LinearCl
 		return candidates, nil
 	}
 
-	ctx, span := tracer.Start(ctx, "tracker.linear.team_visibility",
-		trace.WithAttributes(telemetry.Count(len(ids))))
+	// The span's count is the entities held, set only when some are. The
+	// number of teams read is at most the armed teams, and nobody acts on it.
+	ctx, span := tracer.Start(ctx, "tracker.linear.team_visibility")
 	defer span.End()
 
 	unreadable := make(map[string]bool, len(ids))
@@ -542,7 +543,7 @@ func (t *Tracker) holdLinearUnreadableTeams(ctx context.Context, client LinearCl
 				"linear_team_id", id, "team_key", teams.ForTeam(id).Key, "held", n)
 		}
 	}
-	span.SetAttributes(telemetry.Disposition("issues_held"), telemetry.Attempt(len(candidates)-len(kept)))
+	span.SetAttributes(telemetry.Disposition("issues_held"), telemetry.Count(len(candidates)-len(kept)))
 	return kept, nil
 }
 

@@ -797,7 +797,7 @@ about each would retire them all and close their tasks. So before asking, the
 cycle reads the teams of the missing issues, once. An issue whose team is armed
 and unreadable is left tracked and unrefreshed, and the cycle logs the team
 with a warning (the `tracker.linear.team_visibility` span carries disposition
-`issues_held`). A failed team read holds them too. The issues refresh as soon
+`issues_held`, with the number held as `count`). A failed team read holds them too. The issues refresh as soon
 as the credential reads the team again. The **Linear connection** settings card
 names every tracked team the credential cannot read, and warns about private
 teams before a key is replaced or the app is installed over one. A team that

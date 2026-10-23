@@ -3,6 +3,7 @@ package tracker
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 // The team visibility tests: Linear answers not-found for an issue the
@@ -44,9 +46,13 @@ func TestRefreshLinear_UnreadableTeamIsHeld(t *testing.T) {
 
 	fx.client.hiddenTeams = map[string]bool{linTeamID: true}
 	fx.client.notFound = map[string]bool{eng.ID: true, ops.ID: true}
+	spans := recordSpans(t)
 	evts, err := fx.cycle(t, linRulesWithOps())
 	if err != nil {
 		t.Fatalf("RefreshLinear: %v", err)
+	}
+	if got := teamVisibilitySpans(spans()); !slices.Equal(got, []string{"issues_held:1"}) {
+		t.Errorf("team visibility spans = %v, want one holding ENG-1, its count the issues held", got)
 	}
 	if got := eventTypes(evts); !slices.Equal(got, []string{domain.EventLinearIssueUnreachable}) {
 		t.Fatalf("events = %v, want only OPS-2's unreachable", got)
@@ -150,4 +156,27 @@ func TestRefreshLinear_TeamReadFailureHolds(t *testing.T) {
 			}
 		})
 	}
+}
+
+// teamVisibilitySpans is each team visibility span's disposition and count,
+// as "disposition:count".
+func teamVisibilitySpans(spans []sdktrace.ReadOnlySpan) []string {
+	var out []string
+	for _, s := range spans {
+		if s.Name() != "tracker.linear.team_visibility" {
+			continue
+		}
+		var disposition string
+		var count int64
+		for _, a := range s.Attributes() {
+			switch a.Key {
+			case "disposition":
+				disposition = a.Value.AsString()
+			case "count":
+				count = a.Value.AsInt64()
+			}
+		}
+		out = append(out, fmt.Sprintf("%s:%d", disposition, count))
+	}
+	return out
 }
