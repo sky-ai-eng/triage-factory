@@ -970,6 +970,13 @@ export interface AcceptInviteResponse {
  *  (picked per the customer's IdP). */
 export type SSOConnectionKind = 'saml' | 'oidc'
 
+/** The identity-provider product behind a connection — sso_connections.idp's
+ *  closed vocabulary (ssostore.IdPValues), in the order an admin picks from.
+ *  `other` is a real answer, a provider that is none of the named ones,
+ *  distinct from absent, which means not known. */
+export const IDP_VALUES = ['entra', 'okta', 'google', 'onelogin', 'ping', 'other'] as const
+export type IdP = (typeof IDP_VALUES)[number]
+
 /** One registered IdP connection, from the `connection` field of
  *  GET/POST/PATCH /api/sso/connection (null until one is registered). A freshly
  *  registered connection is created enabled; disabling pauses SSO sign-in
@@ -989,6 +996,10 @@ export interface SSOConnection {
   /** Whether the connection has passed a verify-before-enforce Test. The
    *  enforce toggle is gated on this (plus `enabled` + a verified domain). */
   tested: boolean
+  /** Which identity-provider product this is, derived from the metadata URL's
+   *  host at registration and correctable through PATCH {idp}. Absent when not
+   *  known (a URL whose host could not be read). */
+  idp?: IdP
   created_at: string
   updated_at: string
 }
@@ -996,7 +1007,8 @@ export interface SSOConnection {
 /** GET/POST/PATCH /api/sso/connection response. The SP values are always
  *  present — even with no connection — because they're a pure function of the
  *  deployment's public URL, so the operator can configure the IdP side first.
- *  `entity_id` → the Entra "Identifier"; `acs_url` → the Entra "Reply URL". */
+ *  `entity_id` is the SAML SP Entity ID (Entra's "Identifier", Okta's
+ *  "Audience URI"); `acs_url` the Assertion Consumer Service URL. */
 export interface SSOConnectionResponse {
   connection: SSOConnection | null
   entity_id: string

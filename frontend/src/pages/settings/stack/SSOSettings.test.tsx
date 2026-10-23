@@ -74,8 +74,12 @@ function conflict(message: string): HttpError {
 // seedConnected primes the load with an existing connection (+ optional domains)
 // so a test starts past the register step. entityID is overridable to exercise
 // Sign-on URL derivation (e.g. a sub-pathed deployment public URL).
-function seedConnected(domains: SSODomain[] = [], entityID: string = SP.entity_id) {
-  connState = { connection: makeConnection(), entity_id: entityID, acs_url: SP.acs_url }
+function seedConnected(
+  domains: SSODomain[] = [],
+  entityID: string = SP.entity_id,
+  conn: Partial<SSOConnection> = {},
+) {
+  connState = { connection: makeConnection(conn), entity_id: entityID, acs_url: SP.acs_url }
   domainList = domains
 }
 
@@ -88,15 +92,17 @@ function installApi() {
       if (path === '/api/sso/connection') {
         if (method === 'GET') return connState
         if (method === 'POST') {
-          // Register → a freshly created connection is enabled.
-          connState = { ...connState, connection: makeConnection() }
+          // Register → a freshly created connection is enabled, its IdP derived
+          // from the metadata URL's host (every test registers an Entra URL).
+          connState = { ...connState, connection: makeConnection({ idp: 'entra' }) }
           return connState
         }
         if (method === 'PATCH') {
-          const { enabled } = JSON.parse(opts!.body!) as { enabled: boolean }
+          // Field-by-field, like the server: whatever the body names is written.
+          const patch = JSON.parse(opts!.body!) as Partial<SSOConnection>
           connState = {
             ...connState,
-            connection: connState.connection ? { ...connState.connection, enabled } : null,
+            connection: connState.connection ? { ...connState.connection, ...patch } : null,
           }
           return connState
         }
@@ -194,13 +200,14 @@ describe('SSOSettings — SP details + connection', () => {
   it('renders the SP Entity ID and ACS URL with copy buttons', async () => {
     render(<SSOSettings />)
 
-    const entity = (await screen.findByLabelText('Identifier (Entity ID)')) as HTMLInputElement
+    // No connection yet, so no IdP to name: the protocol's own labels.
+    const entity = (await screen.findByLabelText('Entity ID')) as HTMLInputElement
     expect(entity.value).toBe(SP.entity_id)
-    const acs = screen.getByLabelText('Reply URL (ACS)') as HTMLInputElement
+    const acs = screen.getByLabelText('ACS URL') as HTMLInputElement
     expect(acs.value).toBe(SP.acs_url)
 
     // Copy the Entity ID writes it to the clipboard.
-    fireEvent.click(screen.getByRole('button', { name: /copy identifier/i }))
+    fireEvent.click(screen.getByRole('button', { name: /copy entity id/i }))
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith(SP.entity_id)
 
     // The Sign-on URL needs a provider_id, so it's absent until connected.
@@ -233,7 +240,7 @@ describe('SSOSettings — SP details + connection', () => {
   it('registers a connection and reflects the enabled state', async () => {
     render(<SSOSettings />)
 
-    const input = (await screen.findByLabelText(/app federation metadata url/i)) as HTMLInputElement
+    const input = (await screen.findByLabelText(/saml metadata url/i)) as HTMLInputElement
     fireEvent.change(input, {
       target: { value: 'https://login.microsoftonline.com/x/federationmetadata.xml' },
     })
@@ -254,6 +261,10 @@ describe('SSOSettings — SP details + connection', () => {
     expect(screen.getByRole('switch', { name: /enable sso/i })).toBeChecked()
     // The domains surface opens once a connection exists.
     expect(screen.getByLabelText(/domain to claim/i)).toBeInTheDocument()
+    // The derived IdP now names the card and keys the SP details' wording.
+    expect(screen.getByRole('combobox', { name: 'Identity provider' })).toHaveValue('entra')
+    expect(screen.getByLabelText('Identifier (Entity ID)')).toBeInTheDocument()
+    expect(screen.getByLabelText('Reply URL (ACS)')).toBeInTheDocument()
   })
 
   it('opens the verify-before-enforce test in a popup, even when disabled', async () => {
@@ -296,6 +307,110 @@ describe('SSOSettings — SP details + connection', () => {
     )
     expect(await screen.findByText(/connected · disabled/i)).toBeInTheDocument()
     expect(screen.getByRole('switch', { name: /enable sso/i })).not.toBeChecked()
+  })
+})
+
+// The picker lists every provider, Entra included; the wording checks read
+// the rest of the section.
+const NOT_OPTIONS = { ignore: 'option, script, style' }
+
+describe('SSOSettings — identity provider', () => {
+  it('names the derived IdP on the card with its mark and words the SP details for it', async () => {
+    seedConnected([], SP.entity_id, { idp: 'okta' })
+    render(<SSOSettings />)
+
+    const picker = await screen.findByRole('combobox', { name: 'Identity provider' })
+    expect(picker).toHaveValue('okta')
+    expect(document.querySelector('img[src="/idp/okta.svg"]')).not.toBeNull()
+    // Okta's console names for the SP values, so a label matches its field.
+    expect(screen.getByLabelText('Audience URI (SP Entity ID)')).toHaveValue(SP.entity_id)
+    expect(screen.getByLabelText('Single sign-on URL (ACS)')).toHaveValue(SP.acs_url)
+    expect(screen.getByText(/paste these into okta/i)).toBeInTheDocument()
+    expect(screen.queryByText(/entra/i, NOT_OPTIONS)).not.toBeInTheDocument()
+  })
+
+  it('corrects the IdP via PATCH and rewords the section', async () => {
+    seedConnected([], SP.entity_id, { idp: 'entra' })
+    render(<SSOSettings />)
+
+    const picker = await screen.findByRole('combobox', { name: 'Identity provider' })
+    expect(screen.getByText(/in entra, also set the sign-on url/i)).toBeInTheDocument()
+    fireEvent.change(picker, { target: { value: 'onelogin' } })
+
+    await waitFor(() =>
+      expect(apiMocks.apiJSON).toHaveBeenCalledWith(
+        '/api/sso/connection',
+        expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ idp: 'onelogin' }) }),
+      ),
+    )
+    expect(await screen.findByLabelText('Audience (EntityID)')).toHaveValue(SP.entity_id)
+    expect(screen.getByRole('combobox', { name: 'Identity provider' })).toHaveValue('onelogin')
+    expect(toasts.toast.success).toHaveBeenCalledWith('Identity provider set to OneLogin')
+    // OneLogin has no vendor mark, and nothing on the section says Entra now.
+    expect(document.querySelector('img[src^="/idp/"]')).toBeNull()
+    expect(screen.queryByText(/entra/i, NOT_OPTIONS)).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['other', 'other' as const, 'Other'],
+    ['not known', undefined, 'Not known'],
+  ])('keeps the wording provider-neutral for %s', async (_, idp, shown) => {
+    seedConnected([], SP.entity_id, { idp })
+    render(<SSOSettings />)
+
+    const picker = (await screen.findByRole('combobox', {
+      name: 'Identity provider',
+    })) as HTMLSelectElement
+    expect(picker.selectedOptions[0].textContent).toBe(shown)
+    expect(screen.getByLabelText('Entity ID')).toHaveValue(SP.entity_id)
+    expect(screen.getByLabelText('ACS URL')).toHaveValue(SP.acs_url)
+    expect(screen.getByText(/paste these into your identity provider/i)).toBeInTheDocument()
+    expect(screen.getByText(/if your identity provider’s app tile/i)).toBeInTheDocument()
+    expect(document.querySelector('img[src^="/idp/"]')).toBeNull()
+    expect(screen.queryByText(/entra/i, NOT_OPTIONS)).not.toBeInTheDocument()
+  })
+
+  it('leaves the stored IdP showing when the correction is refused', async () => {
+    seedConnected([], SP.entity_id, { idp: 'google' })
+    refusals['PATCH /api/sso/connection'] = new HttpError(
+      422,
+      JSON.stringify({
+        errors: [{ reason: 'INVALID_FIELD', field: 'idp', message: 'idp must be one of …' }],
+      }),
+    )
+    render(<SSOSettings />)
+
+    const picker = await screen.findByRole('combobox', { name: 'Identity provider' })
+    fireEvent.change(picker, { target: { value: 'ping' } })
+
+    await waitFor(() => expect(toasts.toast.error).toHaveBeenCalledWith('idp must be one of …'))
+    expect(picker).toHaveValue('google')
+    expect(picker).not.toBeDisabled()
+  })
+
+  it('holds the enable switch while an IdP correction is in flight', async () => {
+    // Both PATCHes answer with the whole connection, so one landing after the
+    // other would overwrite its field with a stale value: one gate for both.
+    seedConnected([], SP.entity_id, { idp: 'entra' })
+    let release!: () => void
+    const held = new Promise<void>((r) => (release = r))
+    const base = apiMocks.apiJSON.getMockImplementation()!
+    apiMocks.apiJSON.mockImplementation(async (path: string, opts?: { method?: string }) => {
+      if (opts?.method === 'PATCH') await held
+      return base(path, opts)
+    })
+    render(<SSOSettings />)
+
+    const picker = await screen.findByRole('combobox', { name: 'Identity provider' })
+    fireEvent.change(picker, { target: { value: 'okta' } })
+    await waitFor(() => expect(screen.getByRole('switch', { name: /enable sso/i })).toBeDisabled())
+    expect(picker).toBeDisabled()
+
+    release()
+    await waitFor(() =>
+      expect(screen.getByRole('switch', { name: /enable sso/i })).not.toBeDisabled(),
+    )
+    expect(picker).toHaveValue('okta')
   })
 })
 

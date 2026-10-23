@@ -5,14 +5,17 @@
 // with no IdP, and every SSO endpoint 404s there). The backend additionally
 // 404s a non-admin, so this is never the trust boundary — just the UI.
 //
-// One screen, three parts, mirroring how an operator wires up Entra:
+// One screen, three parts, mirroring how an operator wires up a SAML IdP
+// (Entra, Okta, Google Workspace, OneLogin, Ping, or any other):
 //   1. SP details — the Entity ID + ACS URL (and, once connected, the Sign-on
-//      URL the My Apps tile points at) to paste into the IdP. Always shown:
+//      URL an IdP's app tile points at) to paste into the IdP. Always shown:
 //      they're a pure function of the deployment URL, so the operator can set up
-//      the Entra side before registering here.
-//   2. Connection — paste the Entra App Federation Metadata URL to register
-//      (POST), then enable/disable (PATCH). GoTrue fetches the metadata
-//      server-side; TF stores only the org↔provider binding.
+//      the IdP side before registering here.
+//   2. Connection — paste the IdP's SAML metadata URL to register (POST), then
+//      enable/disable and correct which IdP it is (PATCH). GoTrue fetches the
+//      metadata server-side; TF stores only the org↔provider binding and the
+//      IdP product, which the backend derives from the URL's host and which
+//      keys this section's provider-specific wording.
 //   3. Domains — claim an email domain (POST), publish the shown DNS-TXT record,
 //      Verify (POST {id}/verify) to flip Pending → Verified, or remove (DELETE).
 //      Only a verified domain routes sign-in. Gated on having a connection — the
@@ -25,9 +28,12 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Copy, Trash2 } from 'lucide-react'
 import * as Switch from '@radix-ui/react-switch'
 import { apiFetch, apiJSON, httpErrorMessage } from '../../../lib/apiClient'
+import { IDP_NAMES, idpMarkSrc } from '../../../lib/idp'
+import { useEffectiveTheme } from '../../../lib/theme'
 import { toast } from '../../../components/Toast/toastStore'
 import { glassInputClass } from '../primitives'
-import type { BreakGlassPrincipal, SSOConnectionResponse, SSODomain } from '../../../types'
+import { IDP_VALUES } from '../../../types'
+import type { BreakGlassPrincipal, IdP, SSOConnectionResponse, SSODomain } from '../../../types'
 
 export default function SSOSettings() {
   const [loading, setLoading] = useState(true)
@@ -90,6 +96,65 @@ export default function SSOSettings() {
   )
 }
 
+// ── Provider-keyed wording ──────────────────────────────────────────────────
+
+// ProviderCopy is the wording that depends on which IdP the connection is: the
+// console the SP values are pasted into, and that console's names for them, so
+// a label matches the field the admin is looking at.
+interface ProviderCopy {
+  spHint: string
+  entityLabel: string
+  acsLabel: string
+  signOnHint: string
+}
+
+// NEUTRAL_COPY is the protocol's own wording: for `other`, for a provider not
+// known yet (nothing registered, or none recorded), and for any field a named
+// provider has no wording of its own for.
+const NEUTRAL_COPY: ProviderCopy = {
+  spHint: 'Paste these into your identity provider when you create the SAML app.',
+  entityLabel: 'Entity ID',
+  acsLabel: 'ACS URL',
+  signOnHint:
+    'If your identity provider’s app tile can start sign-in at the app, point it at this URL so the tile launches sign-in here (SP-initiated).',
+}
+
+const PROVIDER_COPY: Partial<Record<IdP, Partial<ProviderCopy>>> = {
+  entra: {
+    spHint: 'Paste these into Microsoft Entra when you create the SAML enterprise application.',
+    entityLabel: 'Identifier (Entity ID)',
+    acsLabel: 'Reply URL (ACS)',
+    signOnHint:
+      'In Entra, also set the Sign-on URL to this so the My Apps tile launches sign-in here (SP-initiated).',
+  },
+  okta: {
+    spHint: 'Paste these into Okta when you create the SAML 2.0 app integration.',
+    entityLabel: 'Audience URI (SP Entity ID)',
+    acsLabel: 'Single sign-on URL (ACS)',
+  },
+  google: {
+    spHint: 'Paste these into the Google Admin console when you add the custom SAML app.',
+  },
+  onelogin: {
+    spHint: 'Paste these into OneLogin when you add the SAML Custom Connector (Advanced) app.',
+    entityLabel: 'Audience (EntityID)',
+    acsLabel: 'ACS (Consumer) URL',
+  },
+  ping: {
+    spHint: 'Paste these into Ping when you create the SAML application.',
+  },
+}
+
+function providerCopy(idp: IdP | undefined): ProviderCopy {
+  return { ...NEUTRAL_COPY, ...(idp && PROVIDER_COPY[idp]) }
+}
+
+// idpLabel names a pickable value. `other` names no product, so the picker
+// and its toast spell it out.
+function idpLabel(idp: IdP): string {
+  return IDP_NAMES[idp] ?? 'Other'
+}
+
 // ── Part 1: SP details to paste into the IdP ────────────────────────────────
 
 // SP_METADATA_SUFFIX is the fixed GoTrue SP metadata path the backend appends
@@ -100,8 +165,8 @@ export default function SSOSettings() {
 // endpoints sit under the same public base).
 const SP_METADATA_SUFFIX = '/auth/v1/sso/saml/metadata'
 
-// ssoStartURLFrom builds the SP-initiated start URL (the My Apps bookmark /
-// Entra "Sign-on URL") from the backend-provided Entity ID + the connection's
+// ssoStartURLFrom builds the SP-initiated start URL (an IdP app tile's target —
+// Entra's "Sign-on URL") from the backend-provided Entity ID + the connection's
 // provider_id. It derives the base by stripping the fixed metadata suffix —
 // NOT via URL().origin, which would drop a sub-path and produce a wrong Sign-on
 // URL for a deployment hosted under one (e.g. https://example.com/tf). The
@@ -127,22 +192,14 @@ function SPDetails({ resp }: { resp: SSOConnectionResponse }) {
     () => (resp.connection ? ssoStartURLFrom(resp.entity_id, resp.connection.provider_id) : ''),
     [resp.connection, resp.entity_id],
   )
+  const copy = providerCopy(resp.connection?.idp)
 
   return (
     <div className="space-y-3">
-      <BlockHeader
-        title="Service provider details"
-        hint="Paste these into your identity provider (e.g. Microsoft Entra) when you create the SAML enterprise app."
-      />
-      <CopyField label="Identifier (Entity ID)" value={resp.entity_id} />
-      <CopyField label="Reply URL (ACS)" value={resp.acs_url} />
-      {bookmarkURL && (
-        <CopyField
-          label="Sign-on URL"
-          value={bookmarkURL}
-          hint="In Entra, also set the Sign-on URL to this so the My Apps tile launches sign-in here (SP-initiated)."
-        />
-      )}
+      <BlockHeader title="Service provider details" hint={copy.spHint} />
+      <CopyField label={copy.entityLabel} value={resp.entity_id} />
+      <CopyField label={copy.acsLabel} value={resp.acs_url} />
+      {bookmarkURL && <CopyField label="Sign-on URL" value={bookmarkURL} hint={copy.signOnHint} />}
     </div>
   )
 }
@@ -156,9 +213,13 @@ function ConnectionBlock({
   setResp: React.Dispatch<React.SetStateAction<SSOConnectionResponse | null>>
 }) {
   const connection = resp.connection
+  const markSrc = idpMarkSrc(connection?.idp, useEffectiveTheme())
   const [metadataURL, setMetadataURL] = useState('')
   const [connecting, setConnecting] = useState(false)
-  const [toggling, setToggling] = useState(false)
+  // One gate for both PATCHes: each answers with the whole connection, so two
+  // in flight could land out of order and the later setResp would show the
+  // earlier write's stale value for the other field.
+  const [patching, setPatching] = useState(false)
 
   const connect = async () => {
     const url = metadataURL.trim()
@@ -183,8 +244,8 @@ function ConnectionBlock({
   }
 
   const toggle = async (enabled: boolean) => {
-    if (toggling) return
-    setToggling(true)
+    if (patching) return
+    setPatching(true)
     try {
       const next = await apiJSON<SSOConnectionResponse>('/api/sso/connection', {
         method: 'PATCH',
@@ -196,7 +257,27 @@ function ConnectionBlock({
     } catch (e) {
       toast.error(httpErrorMessage(e, 'Could not update the SSO connection.'))
     } finally {
-      setToggling(false)
+      setPatching(false)
+    }
+  }
+
+  // setIdP corrects the derived IdP. The select is controlled by the stored
+  // value, so a refused PATCH leaves it showing what the server still holds.
+  const setIdP = async (idp: IdP) => {
+    if (patching) return
+    setPatching(true)
+    try {
+      const next = await apiJSON<SSOConnectionResponse>('/api/sso/connection', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idp }),
+      })
+      setResp(next)
+      toast.success(`Identity provider set to ${idpLabel(idp)}`)
+    } catch (e) {
+      toast.error(httpErrorMessage(e, 'Could not update the identity provider.'))
+    } finally {
+      setPatching(false)
     }
   }
 
@@ -207,7 +288,7 @@ function ConnectionBlock({
   // connection — that's the point, confirming the IdP before flipping it on.
   //
   // noopener,noreferrer severs window.opener: the popup navigates to the external
-  // IdP (Entra), and without this that IdP-controlled page could reach back
+  // IdP, and without this that IdP-controlled page could reach back
   // through window.opener to navigate this Settings tab (reverse tab-nabbing). We
   // never call back to the opener (the result renders in the popup itself), so
   // dropping the handle costs nothing.
@@ -226,14 +307,43 @@ function ConnectionBlock({
         hint={
           connection
             ? 'Your organization is connected. Disable to pause SSO sign-in without removing the connection.'
-            : 'Paste your Entra App Federation Metadata URL to register the connection.'
+            : 'Paste the SAML metadata URL your identity provider publishes for the app to register the connection. The provider is read from the URL; you can correct it once connected.'
         }
       />
 
       {connection ? (
         <div className="flex items-center justify-between gap-4 rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40 px-4 py-3">
           <div className="min-w-0">
-            <p className="text-body font-medium text-ink-1">
+            <div className="flex items-center gap-2">
+              {markSrc && (
+                // Decorative: the select beside it already names the provider.
+                <img src={markSrc} width={14} height={14} alt="" className="shrink-0" />
+              )}
+              <select
+                aria-label="Identity provider"
+                value={connection.idp ?? ''}
+                disabled={patching}
+                onChange={(e) => void setIdP(e.target.value as IdP)}
+                // The options carry their own ground: Chromium on Windows and
+                // Linux draws the open list on the system's light ground, where
+                // dark mode's inherited ink-1 would be light on light.
+                className="rounded-md border border-line-1 bg-transparent px-2 py-0.5 text-ui font-medium text-ink-1 focus:border-warm focus:outline-none disabled:opacity-50 [&_option]:bg-raised [&_option]:text-ink-1"
+              >
+                {/* Not known is a state the server can hold but never one to
+                    pick, so it shows only while it is the stored value. */}
+                {!connection.idp && (
+                  <option value="" disabled>
+                    Not known
+                  </option>
+                )}
+                {IDP_VALUES.map((v) => (
+                  <option key={v} value={v}>
+                    {idpLabel(v)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <p className="mt-1.5 text-body font-medium text-ink-1">
               {connection.enabled ? 'Connected · enabled' : 'Connected · disabled'}
             </p>
             <p className="mt-0.5 truncate font-mono text-reported text-ink-3">
@@ -254,7 +364,7 @@ function ConnectionBlock({
               <Switch.Root
                 aria-label="Enable SSO"
                 checked={connection.enabled}
-                disabled={toggling}
+                disabled={patching}
                 onCheckedChange={(v) => void toggle(v)}
                 className="relative h-[18px] w-8 rounded-full transition-colors data-[state=checked]:bg-warm data-[state=unchecked]:bg-line-2 disabled:opacity-50"
               >
@@ -268,8 +378,8 @@ function ConnectionBlock({
           <input
             type="url"
             value={metadataURL}
-            aria-label="App Federation Metadata URL"
-            placeholder="https://login.microsoftonline.com/…/federationmetadata.xml"
+            aria-label="SAML metadata URL"
+            placeholder="https://idp.example.com/…/saml/metadata"
             onChange={(e) => setMetadataURL(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
