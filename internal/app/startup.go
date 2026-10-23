@@ -226,12 +226,17 @@ func (a *App) startWorkers(ctx context.Context) {
 	// Bounded bare+worktree cache reaper (TFAC-60). Every role keeps a
 	// per-pod worktree cache under its own TF_STATE_ROOT — run worktrees on
 	// an executor — so the reaper runs everywhere. One mechanism, policy
-	// per mode: started in both modes so
-	// the eviction path is exercised in local dev daily, but DefaultPolicy
-	// hands local an unbounded budget so every sweep is a cheap no-op (no
-	// silent eviction of the user's own repos). Multi gets a real per-pod
-	// disk budget + cold-bare TTL, bounding at-rest storage across tenants.
-	worktree.StartReaper(ctx, worktree.DefaultPolicy(), 0)
+	// per mode: DefaultPolicy hands local no budget and no TTL (no silent
+	// eviction of the user's own repos), and local adds its tracked set so
+	// a clone no tracked repository owns is reclaimed. Multi gets a real
+	// per-pod disk budget + cold-bare TTL, bounding at-rest storage across
+	// tenants; those reclaim its orphaned clones too, so it reads no
+	// tracked set.
+	reaperPolicy := worktree.DefaultPolicy()
+	if a.local() {
+		reaperPolicy.Tracked = trackedRepositoryIDs(a.stores.Repos, a.stores.Orgs)
+	}
+	worktree.StartReaper(ctx, reaperPolicy, 0)
 
 	// Wake from a system suspend: drop the idle HTTP connections that may
 	// not have survived it. Every role, since every role calls out over
@@ -362,6 +367,37 @@ func (a *App) wireCloneStatusCallback() {
 
 		record("failed", cloneErr.Error(), kind)
 	})
+}
+
+// trackedRepositoryIDs is local's keep-set for the bare-clone reaper: the
+// registry ids of the repositories a team tracks on the org's current GitHub
+// host, the same set bootstrapBareClones warms. A clone of any other id is
+// one nothing will read again: an untracked repository, a repository on a
+// host the org has left, or a row a rename absorbed. An org with no GitHub
+// host has no tracked set, and answers ok=false rather than an empty set so
+// that disconnecting GitHub does not reclaim the clones a reconnect to the
+// same host would use again.
+func trackedRepositoryIDs(repos db.RepositoryStore, orgs db.OrgsStore) worktree.TrackedSet {
+	return func(ctx context.Context) (map[string]bool, bool) {
+		host, err := db.OrgGitHubHostSystem(ctx, orgs, runmode.LocalDefaultOrgID)
+		if err != nil {
+			worktreeLog.Warn("reaper: load github host failed; skipping the tracked-set reconcile", "error", err)
+			return nil, false
+		}
+		if host == "" {
+			return nil, false
+		}
+		rows, _, err := repos.ListTrackedSystem(ctx, runmode.LocalDefaultOrgID, host, db.Unwindowed)
+		if err != nil {
+			worktreeLog.Warn("reaper: load tracked repositories failed; skipping the tracked-set reconcile", "error", err)
+			return nil, false
+		}
+		ids := make(map[string]bool, len(rows))
+		for _, r := range rows {
+			ids[r.ID] = true
+		}
+		return ids, true
+	}
 }
 
 // bootstrapBareClones reads the repos at least one team tracks and asks the

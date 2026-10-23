@@ -18,15 +18,15 @@ import (
 // cache both modes go through (TFAC-60). The seed/refresh/account half
 // lives in worktree.go / worktree_pr.go; here is the
 // account-and-evict half: per-bare last-used accounting, a disk-budget +
-// TTL reaper, and the safe-eviction guard that never reclaims a bare
-// with a live worktree.
+// TTL reaper, a reconcile pass against the tracked set, and the
+// safe-eviction guard that never reclaims a bare with a live worktree.
 //
-// "One mechanism, policy per mode": the SAME reaper runs in both modes,
-// but DefaultPolicy hands local an unbounded Policy so every sweep is a
-// cheap no-op (the reaper-off knob is literally Policy.unbounded()),
-// while multi gets a real per-pod byte budget + cold-bare TTL. Running
-// it in local too is deliberate — it keeps the eviction path exercised
-// in local dev daily rather than only in prod.
+// "One mechanism, policy per mode": the SAME reaper runs in both modes.
+// DefaultPolicy hands local no byte budget and no TTL, so a tracked
+// repository's bare stays warm on the user's disk however long it sits
+// unused; local's caller adds the tracked set (Policy.Tracked), so a bare
+// no tracked repository owns is reclaimed. Multi gets a real per-pod byte
+// budget + cold-bare TTL, which reclaim those bares too.
 
 const (
 	// envCacheMaxBytes overrides the multi-mode per-pod disk budget (bytes).
@@ -51,11 +51,19 @@ const (
 	// defaultReaperInterval is how often StartReaper sweeps when the caller
 	// passes a non-positive interval.
 	defaultReaperInterval = 15 * time.Minute
+
+	// untrackedGrace is how long the reconcile pass keeps a bare outside the
+	// tracked set, measured from the bare's last use (see touchBare). The
+	// warm and new runs stop using a bare once its repository is untracked,
+	// so the bare goes at most a week after the untrack, and sooner if it
+	// had already sat unused. Untracking and re-tracking a repository within
+	// that window keeps its clone; a clone left behind by a host move or a
+	// deleted registry row costs at most a week of disk.
+	untrackedGrace = 7 * 24 * time.Hour
 )
 
 // Policy controls the bounded bare+worktree cache. The zero value is
-// "unbounded" — the local-mode default, under which the reaper never
-// evicts anything (today's warm-and-persist behavior).
+// "unbounded": the reaper never evicts anything.
 type Policy struct {
 	// MaxBytes is the per-pod on-disk budget for all bares. <= 0 disables
 	// the disk-budget pass (unbounded).
@@ -63,18 +71,29 @@ type Policy struct {
 	// TTL evicts any bare untouched longer than this, independent of the
 	// byte budget. <= 0 disables the TTL pass.
 	TTL time.Duration
+	// Tracked supplies the reconcile pass's keep-set: a bare whose
+	// repository id is not in it is evicted once it has gone untrackedGrace
+	// without use. nil disables the pass.
+	Tracked TrackedSet
 }
 
-// unbounded reports whether this policy disables eviction entirely — both
-// passes off. EnforceBudget short-circuits on it, which is exactly the
-// "reaper off in local" knob.
-func (p Policy) unbounded() bool { return p.MaxBytes <= 0 && p.TTL <= 0 }
+// TrackedSet returns the registry ids of the repositories currently
+// tracked. ok=false means there is no set to reconcile against this sweep
+// (the read failed, or there is nothing to read it from), and the
+// reconcile pass evicts nothing; the reaper never treats a failed read as
+// an empty set.
+type TrackedSet func(ctx context.Context) (ids map[string]bool, ok bool)
+
+// unbounded reports whether this policy disables eviction entirely — every
+// pass off. EnforceBudget short-circuits on it.
+func (p Policy) unbounded() bool { return p.MaxBytes <= 0 && p.TTL <= 0 && p.Tracked == nil }
 
 // DefaultPolicy returns the cache policy for the current runmode.
 //
-//   - Local: the unbounded zero Policy — the reaper is a no-op, so local
-//     keeps warming + persisting every configured repo like today, never
-//     silently evicting the user's own repos off their own disk.
+//   - Local: the unbounded zero Policy — no byte budget and no TTL, so local
+//     keeps warming + persisting every tracked repo, never silently evicting
+//     the user's own repos off their own disk. The caller sets Tracked,
+//     since the tracked set is a database read this package cannot make.
 //   - Multi: a per-pod byte budget (TF_BARE_CACHE_MAX_BYTES, default
 //     defaultMultiBudgetBytes) plus a cold-bare TTL (TF_BARE_CACHE_TTL,
 //     default defaultMultiTTL). This is the launch-blocking bound: N orgs
@@ -82,9 +101,6 @@ func (p Policy) unbounded() bool { return p.MaxBytes <= 0 && p.TTL <= 0 }
 //     at-rest storage is additive across tenants and must be reclaimable.
 func DefaultPolicy() Policy {
 	if runmode.Current() != runmode.ModeMulti {
-		// TODO(TFAC-1152): unbounded also keeps clones of repositories no
-		// longer tracked, or with no registry row, forever; local needs a
-		// reconcile pass against the tracked set.
 		return Policy{}
 	}
 	p := Policy{MaxBytes: defaultMultiBudgetBytes, TTL: defaultMultiTTL}
@@ -107,9 +123,10 @@ func DefaultPolicy() Policy {
 
 // lastUsed records the wall-clock time each bare (keyed by its on-disk
 // path) was last seeded, refreshed, or read through one of the worktree
-// entry points. The reaper sorts coldest-first on this. Bares seeded
-// before this process started have no entry; scanBares falls back to the
-// bare dir's mtime for them.
+// entry points. The reaper sorts coldest-first on this. Bares this process
+// has not touched have no entry; scanBares falls back to the bare dir's
+// mtime for them, which touchBare also stamps, so the fallback is the
+// bare's last use before the process started.
 var (
 	lastUsedMu sync.Mutex
 	lastUsed   = map[string]time.Time{}
@@ -118,13 +135,24 @@ var (
 // touchBare stamps bareDir as used now. Called from every cache entry
 // point (seed, PR/branch worktree setup) so the LRU
 // reflects real access, not just clone time.
+//
+// The stamp is also written to the dir's mtime, because git changes the
+// bare's root dir only when it creates or replaces a file directly in it
+// (a config write, the first worktree), and a fetch does neither. Without
+// it, a restart would make a bare look as cold as its last such write, and
+// a bare outside the tracked set would lose its untrackedGrace to the
+// restart.
 func touchBare(bareDir string) {
 	if bareDir == "" {
 		return
 	}
+	now := time.Now()
 	lastUsedMu.Lock()
-	lastUsed[bareDir] = time.Now()
+	lastUsed[bareDir] = now
 	lastUsedMu.Unlock()
+	if err := os.Chtimes(bareDir, now, now); err != nil {
+		worktreeLog.Debug("stamp bare mtime failed", "dir", bareDir, "error", err)
+	}
 }
 
 // bareLastUsed returns the recorded last-used time for bareDir, or
@@ -160,13 +188,14 @@ type bareEntry struct {
 // EnforceBudget reclaims bare clones until the cache satisfies policy. It
 // is the single reaper both modes call.
 //
-// Local passes the unbounded DefaultPolicy, so this returns immediately —
-// the reaper-off-in-local knob is exactly policy.unbounded(). Multi
-// passes a real budget + TTL.
+// Local passes DefaultPolicy plus its tracked set, so only the reconcile
+// pass runs. Multi passes a real budget + TTL and no tracked set.
 //
-// Two passes, both skipping any bare that has a live worktree (an
+// Three passes, all skipping any bare that has a live worktree (an
 // in-flight delegation run reading it):
 //
+//   - Reconcile: evict every bare whose repository id policy.Tracked does
+//     not return, once it has gone untrackedGrace without use.
 //   - TTL: evict every bare untouched longer than policy.TTL.
 //   - Budget: while the total on-disk size exceeds policy.MaxBytes, evict
 //     the coldest (oldest last-used) bare first.
@@ -182,44 +211,46 @@ func EnforceBudget(ctx context.Context, policy Policy) (evicted int, reclaimed i
 	}
 
 	entries := scanBares()
-	var total int64
-	for _, e := range entries {
-		total += e.sizeB
+
+	// Reconcile pass: drop a bare no tracked repository owns once it has sat
+	// unused through the grace period.
+	var untracked int
+	if policy.Tracked != nil && len(entries) > 0 {
+		if tracked, ok := policy.Tracked(ctx); ok {
+			cutoff := time.Now().Add(-untrackedGrace)
+			var n int
+			var b int64
+			entries, n, b = evictWhere(ctx, entries, func(e bareEntry) bool {
+				id, ok := repositoryIDFromBareDir(e.dir)
+				return ok && !tracked[id] && e.lastUsed.Before(cutoff)
+			})
+			untracked = n
+			evicted += n
+			reclaimed += b
+		}
 	}
 
 	// TTL pass: drop anything colder than the TTL regardless of budget.
 	if policy.TTL > 0 {
 		cutoff := time.Now().Add(-policy.TTL)
-		kept := make([]bareEntry, 0, len(entries))
-		for _, e := range entries {
-			if ctx.Err() != nil {
-				return evicted, reclaimed
-			}
-			if e.lastUsed.Before(cutoff) {
-				if n := evictBare(e); n > 0 {
-					evicted++
-					reclaimed += n
-					continue // evicted — drop from kept
-				}
-				// evictBare returned 0: either the bare is in use (keep it)
-				// or it vanished externally between the scan and now (drop
-				// it). Distinguish so an already-gone bare doesn't linger in
-				// the kept set and inflate the budget pass's total.
-				if _, err := os.Stat(e.dir); os.IsNotExist(err) {
-					forgetBare(e.dir)
-					continue
-				}
-			}
-			kept = append(kept, e)
-		}
-		entries = kept
-		// Re-sum from what actually remains so the budget pass starts from an
-		// accurate footprint regardless of what the TTL pass evicted or what
-		// disappeared underneath it.
-		total = 0
-		for _, e := range entries {
-			total += e.sizeB
-		}
+		var n int
+		var b int64
+		entries, n, b = evictWhere(ctx, entries, func(e bareEntry) bool {
+			return e.lastUsed.Before(cutoff)
+		})
+		evicted += n
+		reclaimed += b
+	}
+	if ctx.Err() != nil {
+		return evicted, reclaimed
+	}
+
+	// Sum from what the passes above left so the budget pass starts from an
+	// accurate footprint regardless of what they evicted or what disappeared
+	// underneath them.
+	var total int64
+	for _, e := range entries {
+		total += e.sizeB
 	}
 
 	// Budget pass: evict coldest-first until under the byte budget.
@@ -248,9 +279,38 @@ func EnforceBudget(ctx context.Context, policy Policy) (evicted int, reclaimed i
 
 	if evicted > 0 {
 		worktreeLog.Info("cache reaper evicted bares",
-			"evicted", evicted, "reclaimed_bytes", reclaimed, "budget", budgetLabel(policy.MaxBytes), "ttl", ttlLabel(policy.TTL))
+			"evicted", evicted, "untracked", untracked, "reclaimed_bytes", reclaimed, "budget", budgetLabel(policy.MaxBytes), "ttl", ttlLabel(policy.TTL))
 	}
 	return evicted, reclaimed
+}
+
+// evictWhere evicts every entry evict selects and returns the entries still
+// on disk, with the count and bytes it reclaimed. It stops evicting when ctx
+// is cancelled and returns the rest as kept.
+func evictWhere(ctx context.Context, entries []bareEntry, evict func(bareEntry) bool) (kept []bareEntry, evicted int, reclaimed int64) {
+	kept = make([]bareEntry, 0, len(entries))
+	for i, e := range entries {
+		if ctx.Err() != nil {
+			return append(kept, entries[i:]...), evicted, reclaimed
+		}
+		if evict(e) {
+			if n := evictBare(e); n > 0 {
+				evicted++
+				reclaimed += n
+				continue // evicted — drop from kept
+			}
+			// evictBare returned 0: either the bare is in use (keep it)
+			// or it vanished externally between the scan and now (drop
+			// it). Distinguish so an already-gone bare doesn't linger in
+			// the kept set and inflate the budget pass's total.
+			if _, err := os.Stat(e.dir); os.IsNotExist(err) {
+				forgetBare(e.dir)
+				continue
+			}
+		}
+		kept = append(kept, e)
+	}
+	return kept, evicted, reclaimed
 }
 
 // budgetLabel renders a byte budget for the reaper log line — "off" when
@@ -272,11 +332,10 @@ func ttlLabel(ttl time.Duration) string {
 }
 
 // StartReaper runs EnforceBudget on a ticker until ctx is cancelled,
-// after one immediate sweep. Started in both modes so the eviction path
-// is exercised in local dev daily; under local's unbounded policy every
-// tick is a cheap no-op. Multi gets the real per-pod budget + TTL via
-// DefaultPolicy. A non-positive interval falls back to
-// defaultReaperInterval.
+// after one immediate sweep. Started in both modes: local's sweeps run the
+// reconcile pass against the tracked set its caller supplies, multi's run
+// the per-pod budget + TTL from DefaultPolicy. A non-positive interval
+// falls back to defaultReaperInterval.
 func StartReaper(ctx context.Context, policy Policy, interval time.Duration) {
 	if interval <= 0 {
 		interval = defaultReaperInterval

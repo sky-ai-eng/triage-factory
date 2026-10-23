@@ -37,8 +37,8 @@ func seedBare(t *testing.T, owner, repo string) string {
 }
 
 // TestDefaultPolicy_ModeDerived pins the one-mechanism/policy-per-mode
-// contract: local is unbounded (reaper off), multi carries a real budget +
-// TTL that the env knobs override.
+// contract: local has no budget or TTL (its caller adds the tracked set),
+// multi carries a real budget + TTL that the env knobs override.
 func TestDefaultPolicy_ModeDerived(t *testing.T) {
 	t.Run("local is unbounded", func(t *testing.T) {
 		runmode.SetForTest(t, runmode.ModeLocal)
@@ -72,8 +72,8 @@ func TestDefaultPolicy_ModeDerived(t *testing.T) {
 	})
 }
 
-// TestEnforceBudget_NoopUnbounded is the local-mode policy knob: under the
-// unbounded zero Policy the reaper never fires even with bares present.
+// TestEnforceBudget_NoopUnbounded pins the zero Policy: no pass runs, so
+// the reaper never fires even with bares present.
 func TestEnforceBudget_NoopUnbounded(t *testing.T) {
 	withTestHome(t)
 	dir := seedBare(t, "o", "cold")
@@ -149,6 +149,105 @@ func TestEnforceBudget_TTLEviction(t *testing.T) {
 	if _, err := os.Stat(fresh); err != nil {
 		t.Errorf("fresh bare wrongly TTL-evicted: %v", err)
 	}
+}
+
+// TestEnforceBudget_ReconcileEvictsUntracked drives the reconcile pass: a
+// bare outside the tracked set is reclaimed once it has gone untrackedGrace
+// without use, whether its repository was untracked or has no registry row
+// at all (both are just an id the set lacks). A tracked bare is kept however
+// cold, an untracked one inside the grace is kept, and so is an untracked
+// one with a live worktree.
+func TestEnforceBudget_ReconcileEvictsUntracked(t *testing.T) {
+	withTestHome(t)
+	tracked := seedBare(t, "o", "tracked")
+	untracked := seedBare(t, "o", "untracked")
+	recent := seedBare(t, "o", "recent")
+	live := seedBare(t, "o", "live")
+	wt := t.TempDir()
+	registerWorktree(t, live, "live-run", wt)
+
+	old := time.Now().Add(-2 * untrackedGrace)
+	setBareLastUsed(tracked, old)
+	setBareLastUsed(untracked, old)
+	setBareLastUsed(recent, time.Now().Add(-untrackedGrace/2))
+	setBareLastUsed(live, old)
+
+	var asked int
+	policy := Policy{Tracked: func(context.Context) (map[string]bool, bool) {
+		asked++
+		return map[string]bool{testRepo("o", "tracked").ID: true}, true
+	}}
+	evicted, reclaimed := EnforceBudget(context.Background(), policy)
+	if asked != 1 {
+		t.Errorf("tracked set read %d times, want once per sweep", asked)
+	}
+	if evicted != 1 || reclaimed <= 0 {
+		t.Fatalf("evicted=%d reclaimed=%d, want exactly the cold untracked bare", evicted, reclaimed)
+	}
+	if _, err := os.Stat(untracked); !os.IsNotExist(err) {
+		t.Errorf("cold untracked bare survived the reconcile pass: stat err=%v", err)
+	}
+	for name, dir := range map[string]string{"tracked": tracked, "within grace": recent, "live worktree": live} {
+		if _, err := os.Stat(dir); err != nil {
+			t.Errorf("%s bare wrongly reclaimed: %v", name, err)
+		}
+	}
+
+	// Once the checkout is gone, the next sweep reclaims the live bare too.
+	if err := os.RemoveAll(wt); err != nil {
+		t.Fatalf("remove worktree: %v", err)
+	}
+	if evicted, _ := EnforceBudget(context.Background(), policy); evicted != 1 {
+		t.Fatalf("after checkout removed: evicted=%d, want 1", evicted)
+	}
+	if _, err := os.Stat(live); !os.IsNotExist(err) {
+		t.Errorf("untracked bare not reclaimed after its checkout went: stat err=%v", err)
+	}
+}
+
+// TestEnforceBudget_ReconcileSkipsWithoutTrackedSet is the fail-safe: when
+// the tracked set has no answer (a failed read, an org with no GitHub host),
+// the reconcile pass evicts nothing rather than treating it as empty.
+func TestEnforceBudget_ReconcileSkipsWithoutTrackedSet(t *testing.T) {
+	withTestHome(t)
+	dir := seedBare(t, "o", "cold")
+	setBareLastUsed(dir, time.Now().Add(-2*untrackedGrace))
+
+	evicted, _ := EnforceBudget(context.Background(), Policy{Tracked: func(context.Context) (map[string]bool, bool) {
+		return nil, false
+	}})
+	if evicted != 0 {
+		t.Errorf("evicted=%d with no tracked set, want 0", evicted)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("bare reclaimed without a tracked set: %v", err)
+	}
+}
+
+// TestTouchBare_StampSurvivesRestart pins the stamp touchBare writes to the
+// bare dir: a process that never touched the bare (its in-memory entry
+// gone) still reads the last use, not the clone time, so a restart does not
+// cut a bare's untrackedGrace short.
+func TestTouchBare_StampSurvivesRestart(t *testing.T) {
+	withTestHome(t)
+	dir := seedBare(t, "o", "restarted")
+	cloned := time.Now().Add(-30 * 24 * time.Hour)
+	if err := os.Chtimes(dir, cloned, cloned); err != nil {
+		t.Fatalf("backdate bare: %v", err)
+	}
+	touchBare(dir)
+	forgetBare(dir)
+
+	for _, e := range scanBares() {
+		if e.dir != dir {
+			continue
+		}
+		if time.Since(e.lastUsed) > time.Hour {
+			t.Errorf("lastUsed after restart = %s, want the touch, not the clone time", e.lastUsed)
+		}
+		return
+	}
+	t.Fatalf("scanBares did not return %s", dir)
 }
 
 // TestEnforceBudget_SkipsInUseBare is the safe-eviction guard: a bare with
