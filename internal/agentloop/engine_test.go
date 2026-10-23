@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
 )
@@ -468,6 +470,149 @@ func TestRun_ResumeNoticesDoNotStack(t *testing.T) {
 			t.Errorf("sandbox notices = %d, want the pending one", len(n))
 		}
 	})
+}
+
+// TestRun_NotesQueuedBehindWaitingInputRenderAboveIt pins where a system note
+// lands when a person's message is already waiting. The drain delivers both
+// together and assembly packs them into one user message in assembly order,
+// so the note must be placed above the person's text when it is written:
+// appended, it would follow the text it is meant to precede.
+func TestRun_NotesQueuedBehindWaitingInputRenderAboveIt(t *testing.T) {
+	const followUp = "also bump the version"
+	priorWorkWithFollowUp := func(prior ...domain.Message) *memTranscript {
+		rows := []domain.Message{{ConversationID: "conv", Role: "user", Content: "go"}}
+		if len(prior) == 0 {
+			prior = []domain.Message{{ConversationID: "conv", Role: "assistant", Content: "started the dev server"}}
+		}
+		rows = append(rows, prior...)
+		return newMemTranscript(append(rows, pendingUser(followUp))...)
+	}
+	run := func(t *testing.T, e *Engine, params Params) {
+		t.Helper()
+		if got := e.Run(context.Background(), params); got.Kind != ResultConcluded {
+			t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
+		}
+	}
+	resumeParams := func(prov domain.WorkspaceProvenance) Params {
+		p := workspaceParams(prov, false)
+		p.NewSandbox = true
+		return p
+	}
+	noteOf := func(t *testing.T, tr *memTranscript, subtype string) domain.Message {
+		t.Helper()
+		n := tr.find(func(m domain.Message) bool { return m.Subtype == subtype })
+		if n == nil {
+			t.Fatalf("no %s row was written", subtype)
+		}
+		return *n
+	}
+
+	for _, tc := range []struct {
+		name    string
+		prov    domain.WorkspaceProvenance
+		subtype string
+	}{
+		{"a warm resume's sandbox note", domain.WorkspaceProvenanceWarm, domain.MessageSubtypeInjectionNewSandbox},
+		{"a rebuilt workspace's note", domain.WorkspaceProvenanceRehydrated, domain.MessageSubtypeInjectionExecutorChanged},
+	} {
+		t.Run(tc.name+" opens the message the person's text closes", func(t *testing.T) {
+			tr := priorWorkWithFollowUp()
+			p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
+			run(t, newTestEngine(tr, p, newScriptedToolHost()), resumeParams(tc.prov))
+
+			note := noteOf(t, tr, tc.subtype)
+			assertLastUserMessage(t, p.requests[0], note.Content, followUp)
+		})
+	}
+
+	t.Run("a note queued after a repaired call sits below the call's answer", func(t *testing.T) {
+		tr := priorWorkWithFollowUp(domain.Message{ConversationID: "conv", Role: "assistant",
+			ToolCalls: []domain.ToolCall{{ID: "c1", Name: "bash"}}})
+		p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
+		run(t, newTestEngine(tr, p, newScriptedToolHost()), resumeParams(domain.WorkspaceProvenanceWarm))
+
+		assertToolResultsAreAdjacent(t, p.requests[0])
+		note := noteOf(t, tr, domain.MessageSubtypeInjectionNewSandbox)
+		assertLastUserMessage(t, p.requests[0], note.Content, followUp)
+	})
+
+	t.Run("notes queued in turn keep their order, all above the waiting message", func(t *testing.T) {
+		tr := priorWorkWithFollowUp()
+		p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
+		e := newTestEngine(tr, p, newScriptedToolHost())
+		params := testParams()
+		for _, note := range []string{"first note", "second note"} {
+			if err := e.insertPending(context.Background(), params, note, domain.MessageSubtypeInjectionNudge); err != nil {
+				t.Fatalf("insertPending(%q): %v", note, err)
+			}
+		}
+		run(t, e, params)
+
+		assertLastUserMessage(t, p.requests[0], "first note", "second note", followUp)
+	})
+
+	t.Run("with no input waiting a note is an ordinary append", func(t *testing.T) {
+		tr := newMemTranscript(
+			domain.Message{ConversationID: "conv", Role: "user", Content: "go"},
+			domain.Message{ConversationID: "conv", Role: "assistant", Content: "started the dev server"},
+		)
+		p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
+		run(t, newTestEngine(tr, p, newScriptedToolHost()), resumeParams(domain.WorkspaceProvenanceWarm))
+
+		if note := noteOf(t, tr, domain.MessageSubtypeInjectionNewSandbox); note.Seq != nil {
+			t.Errorf("seq = %v, want NULL: nothing is waiting for the note to sit above", *note.Seq)
+		}
+	})
+
+	t.Run("the turn-end nudge sits above input that landed before it", func(t *testing.T) {
+		tr := newMemTranscript(pendingUser("go"))
+		p := &scriptedProvider{turns: []scriptedTurn{{text: "first stop"}, {text: "second stop"}}}
+		e := newTestEngine(tr, p, newScriptedToolHost())
+		asked := 0
+		e.Hooks.ShouldStopAfterTurn = func(context.Context, int, string) string {
+			asked++
+			if asked > 1 {
+				return ""
+			}
+			// The person's message arrives after the pending recheck and
+			// before the nudge is written.
+			arrived := pendingUser(followUp)
+			_, _ = tr.Insert(context.Background(), "org", &arrived)
+			return "you produced no artifact"
+		}
+		run(t, e, testParams())
+
+		if len(p.requests) != 2 {
+			t.Fatalf("requests = %d, want 2", len(p.requests))
+		}
+		assertLastUserMessage(t, p.requests[1], "you produced no artifact", followUp)
+	})
+}
+
+// assertLastUserMessage asserts that the request ends in one user message
+// whose text blocks are exactly want, in order.
+func assertLastUserMessage(t *testing.T, req inference.Request, want ...string) {
+	t.Helper()
+	msgs, err := inference.RowsToMessages(req.Rows, inference.AssemblyOptions{NoCacheBreakpoint: true})
+	if err != nil {
+		t.Fatalf("assemble request: %v", err)
+	}
+	last := msgs[len(msgs)-1]
+	if last.Role != schemas.ChatMessageRoleUser || last.Content == nil {
+		t.Fatalf("request must end in a user message; assembled: %s", describeAssembly(msgs))
+	}
+	var got []string
+	if last.Content.ContentStr != nil {
+		got = append(got, *last.Content.ContentStr)
+	}
+	for _, b := range last.Content.ContentBlocks {
+		if b.Text != nil {
+			got = append(got, *b.Text)
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("final user message blocks = %q, want %q", got, want)
+	}
 }
 
 func boolToInt(b bool) int {
