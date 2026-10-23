@@ -1,7 +1,9 @@
 # Identity-provider marks
 
-Vendor marks for the login identity on the personal settings page — the door
-a person came in by, drawn at 12px beside the provider's name. Literal marks,
+Vendor marks for the identity-provider product behind an SSO connection: the
+login identity on the personal settings page (the door a person came in by,
+drawn at 12px beside the provider's name) and the connection card in the org's
+SSO settings. `src/lib/idp.ts` maps a connection's `idp` to a file. Literal marks,
 like GitHub's and Jira's in `src/ui/accounts`: a vendor's mark is the one
 place the token layer does not reach.
 
@@ -20,5 +22,6 @@ otherwise as received.
 | `okta-dark.svg` | Okta              | dark ground — Okta ships a dark variant, so it follows the theme |
 | `google.svg`    | Google            |                                                        |
 
-OneLogin and Ping have no mark here yet; a login through either is named in
-type and carries no mark, as does a connection whose product is not known.
+OneLogin and Ping have no mark here yet; a login or connection through either
+is named in type and carries no mark, as does one whose product is `other` or
+not known.
