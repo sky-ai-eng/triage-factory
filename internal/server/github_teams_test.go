@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -12,11 +13,14 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // acmeTeamsGraphQL is GitHub's organization.teams answer for acme (9): teams
@@ -460,5 +464,154 @@ func TestTeamGitHubGroupsPut_RefusesWhatItCannotResolve(t *testing.T) {
 				t.Errorf("groups after a refused PUT = %+v; want acme/platform untouched", got)
 			}
 		})
+	}
+}
+
+// twoOwnerGitHub points the org's GitHub at a server that answers acme's teams
+// (acmeTeamsGraphQL) and fails every other organization's with a 503, and
+// tracks a repository of acme and one of down.
+func twoOwnerGitHub(t *testing.T, srv *Server) string {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/graphql") {
+			http.NotFound(w, r)
+			return
+		}
+		var req struct {
+			Variables struct {
+				Org string `json:"org"`
+			} `json:"variables"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Variables.Org != "acme" {
+			// A Retry-After past the client's backoff ceiling: no retries.
+			w.Header().Set("Retry-After", "3600")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(acmeTeamsGraphQL))
+	}))
+	t.Cleanup(ts.Close)
+	dbtest.SeedOrgSettings(t, srv.orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL})
+	seedSourceHost(t, srv, eventsource.KindGitHub, ts.URL)
+	if err := integrations.Save(context.Background(), srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
+		GitHubPAT: "ghp-test",
+	}); err != nil {
+		t.Fatalf("seed creds: %v", err)
+	}
+	seedConfiguredRepo(t, srv, "acme", "api")
+	seedConfiguredRepo(t, srv, "down", "svc")
+	return ts.URL
+}
+
+// assertGitHubGroupsUnconfirmed checks a PUT answered 502 UPSTREAM_UNAVAILABLE
+// with no field fault, and left the stored set at acme/platform.
+func assertGitHubGroupsUnconfirmed(t *testing.T, srv *Server, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("PUT = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	items := errorItems(t, rec)
+	if len(items) != 1 || items[0].Reason != httpx.ReasonUpstreamUnavailable || items[0].Field != "" ||
+		!strings.Contains(items[0].Message, "down") || !strings.Contains(items[0].Message, "99") {
+		t.Errorf("errors = %+v; want one UPSTREAM_UNAVAILABLE naming owner down and team 99, with no field", items)
+	}
+	if got := readGitHubGroups(t, srv); len(got) != 1 || got[0].GitHubTeamID != "11" {
+		t.Errorf("groups after a 502 = %+v; want acme/platform untouched", got)
+	}
+}
+
+// When GitHub fails one owner's team listing, a team found among the owners
+// that listed is still added, and the browse list carries those owners' teams.
+// A team found nowhere may be the failed owner's, so it is a 502, not a 422
+// blaming the request.
+func TestTeamGitHubGroupsPut_UnlistedOwnerIsAnUpstreamFault(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	twoOwnerGitHub(t, srv)
+
+	putGitHubGroups(t, srv, "11")
+	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-groups", map[string]any{"github_team_ids": []string{"11", "99"}})
+	assertGitHubGroupsUnconfirmed(t, srv, rec)
+
+	rec = doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups", nil)
+	var resp teamGitHubGroupsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(resp.Candidates) != 2 || resp.CredentialsMissing {
+		t.Errorf("GET candidates = %+v, credentials_missing=%v; want acme's two teams, false", resp.Candidates, resp.CredentialsMissing)
+	}
+}
+
+// ownerFailingResolver is repositoriesByIDResolver except that no client
+// resolves for one owner.
+type ownerFailingResolver struct {
+	repositoriesByIDResolver
+	owner string
+}
+
+func (r ownerFailingResolver) ClientFor(ctx context.Context, orgID, target string) (*ghclient.Client, error) {
+	if target == r.owner {
+		return nil, errors.New("mint installation token: connection refused")
+	}
+	return r.repositoriesByIDResolver.ClientFor(ctx, orgID, target)
+}
+
+// A client that fails to resolve for a reason other than a missing credential
+// leaves its owner unlisted, the same as a failed listing.
+func TestTeamGitHubGroupsPut_UnresolvedClientIsAnUpstreamFault(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	url := twoOwnerGitHub(t, srv)
+	srv.ghResolver = ownerFailingResolver{repositoriesByIDResolver{url: url}, "down"}
+
+	putGitHubGroups(t, srv, "11")
+	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-groups", map[string]any{"github_team_ids": []string{"11", "99"}})
+	assertGitHubGroupsUnconfirmed(t, srv, rec)
+}
+
+// failingTrackedRepos is a repository store whose tracked-repository read
+// fails.
+type failingTrackedRepos struct{ db.RepositoryStore }
+
+func (failingTrackedRepos) ListTrackedSystem(context.Context, string, string, db.ListOpts) ([]domain.Repository, int, error) {
+	return nil, 0, errors.New("tracked repositories unreadable")
+}
+
+// With the tracked repositories unreadable there are no owners to list, so an
+// added team is a 500, not a refusal of the id.
+func TestTeamGitHubGroupsPut_TrackedReposReadFailureIs500(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var calls int
+	groupsCandidateServer(t, srv, &calls)
+	srv.allStores.Repos = failingTrackedRepos{srv.allStores.Repos}
+
+	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-groups", map[string]any{"github_team_ids": []string{"11"}})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("PUT = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := readGitHubGroups(t, srv); len(got) != 0 {
+		t.Errorf("groups after a 500 = %+v; want none", got)
+	}
+}
+
+// An owner no connected credential reaches cannot be listed with what the org
+// has, which is the caller's to fix: the added team stays a 422, naming the
+// owner.
+func TestTeamGitHubGroupsPut_UncredentialedOwnerIs422(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	seedConfiguredRepo(t, srv, "acme", "api")
+
+	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-groups", map[string]any{"github_team_ids": []string{"11"}})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("PUT = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	items := errorItems(t, rec)
+	if len(items) != 1 || items[0].Field != "github_team_ids[0]" || !strings.Contains(items[0].Message, "reaches acme") {
+		t.Errorf("errors = %+v; want github_team_ids[0] naming acme as unreached by any credential", items)
 	}
 }
