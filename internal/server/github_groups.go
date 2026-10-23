@@ -115,22 +115,31 @@ func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Reques
 	// pre-check the admin's own teams. The Settings editor omits it — same
 	// candidate list, no per-user pre-check. Best-effort: a membership
 	// fetch failure leaves every Mine=false, never blanks the candidates.
-	candidates := []gitHubGroupCandidateJSON{}
-	credsMissing := false
-	if role != "" {
-		candidates, credsMissing = s.gitHubGroupCandidates(r.Context(), orgID)
-		if r.URL.Query().Get("include_membership") == "true" {
-			s.annotateGitHubGroupMembership(r.Context(), orgID, userID, candidates)
-		}
-	}
-
-	// The team's mappings on the org's current GitHub host: an org login on a
-	// host the org has left names another organization.
+	//
+	// The candidates are listed from the org's current GitHub host, and the
+	// team's mappings are read on it: an org login on a host the org has left
+	// names another organization.
 	host, err := s.orgGitHubHost(r.Context(), orgID)
 	if err != nil {
 		internalError(w, "teams/github-groups", err)
 		return
 	}
+	candidates := []gitHubGroupCandidateJSON{}
+	credsMissing := false
+	if role != "" {
+		// The browse list degrades rather than failing: with the tracked
+		// repositories unreadable the editor still edits existing mappings,
+		// and an owner whose teams could not be listed just contributes none.
+		if listing, err := s.gitHubGroupCandidates(r.Context(), orgID, host); err != nil {
+			githubGroupsLog.Error("list github team candidates failed", "error", err)
+		} else {
+			candidates, credsMissing = listing.candidates, listing.credentialsMissing
+		}
+		if r.URL.Query().Get("include_membership") == "true" {
+			s.annotateGitHubGroupMembership(r.Context(), orgID, userID, candidates)
+		}
+	}
+
 	var groups []domain.TeamGitHubGroup
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		if host == "" {
@@ -212,32 +221,49 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 			held[g.GitHubTeamID] = g
 		}
 	}
-	var listed map[string]gitHubGroupCandidateJSON
+	var (
+		listing gitHubGroupListing
+		listed  map[string]gitHubGroupCandidateJSON
+		missing []int // indexes into ids of added teams no candidate carries
+	)
 	groups := make([]domain.TeamGitHubGroup, 0, len(ids))
-	var refusals httpx.Validation
 	for i, id := range ids {
 		if g, ok := held[id]; ok {
 			groups = append(groups, g)
 			continue
 		}
 		if listed == nil {
-			candidates, _ := s.gitHubGroupCandidates(r.Context(), orgID)
-			listed = make(map[string]gitHubGroupCandidateJSON, len(candidates))
-			for _, c := range candidates {
+			var err error
+			if listing, err = s.gitHubGroupCandidates(r.Context(), orgID, host); err != nil {
+				internalError(w, "teams/github-groups", err)
+				return
+			}
+			listed = make(map[string]gitHubGroupCandidateJSON, len(listing.candidates))
+			for _, c := range listing.candidates {
 				listed[c.GitHubTeamID] = c
 			}
 		}
 		c, ok := listed[id]
 		if !ok {
-			refusals.Invalid(gitHubTeamIDField(i),
-				"GitHub team "+id+" is not a team of an organization this team's tracked repositories belong to, as this organization's GitHub credentials list them")
+			missing = append(missing, i)
 			continue
 		}
 		groups = append(groups, domain.TeamGitHubGroup{
 			GitHubTeamID: c.GitHubTeamID, GitHubOrgID: c.GitHubOrgID, OrgLogin: c.OrgLogin, TeamSlug: c.TeamSlug,
 		})
 	}
-	if refusals.Flush(w, http.StatusUnprocessableEntity) {
+	if len(missing) > 0 {
+		// A team missing from the list is the caller's mistake only when every
+		// owner was listed: one GitHub did not answer for may hold it.
+		if len(listing.unlisted) > 0 {
+			writeGitHubGroupsUnconfirmed(w, ids, missing, listing.unlisted)
+			return
+		}
+		var refusals httpx.Validation
+		for _, i := range missing {
+			refusals.Invalid(gitHubTeamIDField(i), gitHubTeamNotListedMessage(ids[i], listing.uncredentialed))
+		}
+		refusals.Flush(w, http.StatusUnprocessableEntity)
 		return
 	}
 
@@ -308,39 +334,56 @@ func parseGitHubTeamIDs(w http.ResponseWriter, raw *[]string) ([]string, bool) {
 
 func gitHubTeamIDField(i int) string { return fmt.Sprintf("github_team_ids[%d]", i) }
 
-// gitHubGroupCandidates fetches the org's live GitHub teams (one
-// GET /orgs/{org}/teams per distinct tracked-repo owner) and returns
-// them as the flat candidate list the editor presents. Read-only — the
-// deletion-reconcile prune runs in the GitHub poll cycle
-// (poller.Manager.reconcileGitHubGroups), not here, so this GET stays a
-// pure read. Stale mappings (a GitHub team deleted since the last poll)
-// still surface in the editor flagged "not found" until the next cycle
-// prunes them, and an admin can remove one immediately via the PUT.
+// gitHubGroupListing is the org's live GitHub teams, with what kept the list
+// from holding every team of every tracked repository's owner.
+type gitHubGroupListing struct {
+	candidates []gitHubGroupCandidateJSON
+	// unlisted holds the owners whose teams could not be read — a client that
+	// failed to resolve for a reason other than a missing credential, or a
+	// failed team listing — in owner order. A team absent from candidates may
+	// be one of theirs.
+	unlisted []unlistedGitHubOwner
+	// uncredentialed holds the owners no credential the org has connected
+	// reaches (no App installation, no org PAT), in owner order. Their teams
+	// cannot be listed with what the org has, which is a fact about its setup
+	// rather than a fault.
+	uncredentialed []string
+	// credentialsMissing is true when the team tracks repos but EVERY owner is
+	// uncredentialed — the org's GitHub access is gone, not "these orgs simply
+	// have no teams." Callers surface it as a reconnect prompt instead of a
+	// silent empty list.
+	credentialsMissing bool
+}
+
+// unlistedGitHubOwner is an owner whose teams could not be read, and why.
+type unlistedGitHubOwner struct {
+	owner string
+	err   error
+}
+
+// gitHubGroupCandidates fetches the org's live GitHub teams on host (one
+// organization.teams query per distinct tracked-repo owner) as the flat
+// candidate list the editor presents. Read-only — the deletion-reconcile
+// prune runs in the GitHub poll cycle (poller.Manager.reconcileGitHubGroups),
+// not here, so the GET stays a pure read. Stale mappings (a GitHub team
+// deleted since the last poll) still surface in the editor flagged "not
+// found" until the next cycle prunes them, and an admin can remove one
+// immediately via the PUT.
 //
 // Credentials resolve through s.ghResolver.ClientFor, which mints an App
 // installation token for the owner when one is installed (tier 1) and
 // falls back to the org PAT (tier 3) — so App-only workspaces (no PAT)
-// can still import their teams. Owners with no resolvable credential, or
-// that the token can't read (a user account, a private org the token
-// isn't in), are skipped. Returns nil when nothing is configured / the
-// repo list can't be read — the editor degrades to "edit existing
-// mappings only."
+// can still import their teams. An owner that is a user account, or an
+// organization the credential cannot see, lists cleanly with no teams.
 //
-// The second return value (credsMissing) disambiguates the empty-candidate
-// case: it is true when the team tracks repos but EVERY owner failed to
-// resolve a credential with ErrNoGitHubCredentials — i.e. the org's GitHub
-// access is gone, not "these orgs simply have no teams." A single owner that
-// did resolve a credential flips it back to false (the access works; that
-// owner just had nothing to import). Callers surface credsMissing as a
-// reconnect prompt instead of a silent empty list.
-func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID string) ([]gitHubGroupCandidateJSON, bool) {
-	host, err := s.orgGitHubHost(ctx, orgID)
-	if err != nil {
-		githubGroupsLog.Error("read github host failed", "error", err)
-		return nil, false
-	}
+// The error is a store failure, which leaves no list at all. An owner that
+// could not be listed is not an error: it is recorded in the listing and its
+// teams are left out, so the browse list stays partial while the PUT can tell
+// "listed, and the team isn't there" from "could not list".
+func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, host string) (gitHubGroupListing, error) {
+	listing := gitHubGroupListing{candidates: []gitHubGroupCandidateJSON{}}
 	if host == "" {
-		return nil, false // no GitHub URL: no tracked repos to derive owners from
+		return listing, nil // no GitHub URL: no tracked repos to derive owners from
 	}
 	// The repositories at least one team in the org tracks on its current
 	// host: their owners are the ones the credential below lists teams of.
@@ -353,38 +396,26 @@ func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID string) ([]git
 	// owners' GitHub teams are returned.
 	repos, _, err := s.allStores.Repos.ListTrackedSystem(ctx, orgID, host, db.Unwindowed)
 	if err != nil {
-		githubGroupsLog.Error("load tracked repos failed", "error", err)
-		return nil, false
+		return gitHubGroupListing{}, fmt.Errorf("load tracked repos: %w", err)
 	}
 
 	owners := distinctRepoOwners(repos)
-	out := []gitHubGroupCandidateJSON{}
-	// Track whether the only thing standing between us and candidates is
-	// missing credentials. Starts true once there's at least one owner, and
-	// is cleared the moment any owner resolves a credential (regardless of
-	// whether that owner had teams) — a working credential proves access
-	// isn't the problem.
-	credsMissing := len(owners) > 0
 	for _, owner := range owners {
 		client, err := s.ghResolver.ClientFor(ctx, orgID, owner)
-		if err != nil {
-			// ErrNoGitHubCredentials just means this owner has no App
-			// install and the org has no PAT — expected, skip quietly but
-			// leave credsMissing set so an all-missing run can surface it.
-			if !errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-				githubGroupsLog.Warn("resolve github client failed, skipping owner", "owner", owner, "error", err)
-				// A non-creds resolve failure is an opaque infra error, not a
-				// "reconnect GitHub" state — don't claim creds are missing.
-				credsMissing = false
-			}
+		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+			// No App install for this owner and no org PAT — expected.
+			listing.uncredentialed = append(listing.uncredentialed, owner)
 			continue
 		}
-		credsMissing = false
+		if err != nil {
+			githubGroupsLog.Warn("resolve github client failed, skipping owner", "owner", owner, "error", err)
+			listing.unlisted = append(listing.unlisted, unlistedGitHubOwner{owner: owner, err: err})
+			continue
+		}
 		teams, err := client.ListOrgTeamsDetailed(ctx, owner)
 		if err != nil {
-			// The owner may be a user account (no teams) or one the org
-			// credential can't read. Skip — candidates only.
 			githubGroupsLog.Warn("list teams failed, skipping owner", "owner", owner, "error", err)
+			listing.unlisted = append(listing.unlisted, unlistedGitHubOwner{owner: owner, err: err})
 			continue
 		}
 		login := strings.ToLower(owner)
@@ -394,7 +425,7 @@ func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID string) ([]git
 			if t.TeamSlug == "" || t.ID == "" || t.OrgID == "" {
 				continue
 			}
-			out = append(out, gitHubGroupCandidateJSON{
+			listing.candidates = append(listing.candidates, gitHubGroupCandidateJSON{
 				GitHubTeamID: t.ID,
 				GitHubOrgID:  t.OrgID,
 				OrgLogin:     login,
@@ -404,7 +435,44 @@ func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID string) ([]git
 			})
 		}
 	}
-	return out, credsMissing
+	listing.credentialsMissing = len(owners) > 0 && len(listing.uncredentialed) == len(owners)
+	return listing, nil
+}
+
+// gitHubTeamNotListedMessage refuses an added team no candidate carries, every
+// owner having been listed or having no credential. The owners with no
+// credential are named, since connecting one is how their teams become
+// addable.
+func gitHubTeamNotListedMessage(id string, uncredentialed []string) string {
+	msg := "GitHub team " + id + " is not a team of an organization this team's tracked repositories belong to, as this organization's GitHub credentials list them"
+	if len(uncredentialed) > 0 {
+		msg += "; no GitHub credential connected to this organization reaches " + strings.Join(uncredentialed, ", ") + ", whose teams were not listed"
+	}
+	return msg
+}
+
+// writeGitHubGroupsUnconfirmed answers a PUT whose added teams (ids at the
+// missing indexes) were not among the owners that listed, when some owner's
+// teams could not be read: the request may well be valid, so it is a 502
+// rather than a refusal of the ids. Nothing is stored.
+func writeGitHubGroupsUnconfirmed(w http.ResponseWriter, ids []string, missing []int, unlisted []unlistedGitHubOwner) {
+	teams := make([]string, len(missing))
+	for k, i := range missing {
+		teams[k] = ids[i]
+	}
+	owners := make([]string, len(unlisted))
+	for k, u := range unlisted {
+		owners[k] = u.owner
+	}
+	noun := "GitHub team "
+	if len(teams) > 1 {
+		noun = "GitHub teams "
+	}
+	httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{
+		Reason: httpx.ReasonUpstreamUnavailable,
+		Message: "could not list the GitHub teams of " + strings.Join(owners, ", ") + ", so " + noun +
+			strings.Join(teams, ", ") + " could not be confirmed and nothing was saved" + httpx.LocalDetail(unlisted[0].err),
+	})
 }
 
 // annotateGitHubGroupMembership flags each candidate the requesting user
