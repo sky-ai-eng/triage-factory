@@ -343,7 +343,7 @@ describe('SSOSettings — identity provider', () => {
         expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ idp: 'onelogin' }) }),
       ),
     )
-    expect(await screen.findByLabelText('Audience (Entity ID)')).toHaveValue(SP.entity_id)
+    expect(await screen.findByLabelText('Audience (EntityID)')).toHaveValue(SP.entity_id)
     expect(screen.getByRole('combobox', { name: 'Identity provider' })).toHaveValue('onelogin')
     expect(toasts.toast.success).toHaveBeenCalledWith('Identity provider set to OneLogin')
     // OneLogin has no vendor mark, and nothing on the section says Entra now.
@@ -386,6 +386,31 @@ describe('SSOSettings — identity provider', () => {
     await waitFor(() => expect(toasts.toast.error).toHaveBeenCalledWith('idp must be one of …'))
     expect(picker).toHaveValue('google')
     expect(picker).not.toBeDisabled()
+  })
+
+  it('holds the enable switch while an IdP correction is in flight', async () => {
+    // Both PATCHes answer with the whole connection, so one landing after the
+    // other would overwrite its field with a stale value: one gate for both.
+    seedConnected([], SP.entity_id, { idp: 'entra' })
+    let release!: () => void
+    const held = new Promise<void>((r) => (release = r))
+    const base = apiMocks.apiJSON.getMockImplementation()!
+    apiMocks.apiJSON.mockImplementation(async (path: string, opts?: { method?: string }) => {
+      if (opts?.method === 'PATCH') await held
+      return base(path, opts)
+    })
+    render(<SSOSettings />)
+
+    const picker = await screen.findByRole('combobox', { name: 'Identity provider' })
+    fireEvent.change(picker, { target: { value: 'okta' } })
+    await waitFor(() => expect(screen.getByRole('switch', { name: /enable sso/i })).toBeDisabled())
+    expect(picker).toBeDisabled()
+
+    release()
+    await waitFor(() =>
+      expect(screen.getByRole('switch', { name: /enable sso/i })).not.toBeDisabled(),
+    )
+    expect(picker).toHaveValue('okta')
   })
 })
 

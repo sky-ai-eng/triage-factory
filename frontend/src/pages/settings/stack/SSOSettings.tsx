@@ -137,7 +137,7 @@ const PROVIDER_COPY: Partial<Record<IdP, Partial<ProviderCopy>>> = {
   },
   onelogin: {
     spHint: 'Paste these into OneLogin when you add the SAML Custom Connector (Advanced) app.',
-    entityLabel: 'Audience (Entity ID)',
+    entityLabel: 'Audience (EntityID)',
     acsLabel: 'ACS (Consumer) URL',
   },
   ping: {
@@ -147,6 +147,12 @@ const PROVIDER_COPY: Partial<Record<IdP, Partial<ProviderCopy>>> = {
 
 function providerCopy(idp: IdP | undefined): ProviderCopy {
   return { ...NEUTRAL_COPY, ...(idp && PROVIDER_COPY[idp]) }
+}
+
+// idpLabel names a pickable value. `other` names no product, so the picker
+// and its toast spell it out.
+function idpLabel(idp: IdP): string {
+  return IDP_NAMES[idp] ?? 'Other'
 }
 
 // ── Part 1: SP details to paste into the IdP ────────────────────────────────
@@ -210,8 +216,10 @@ function ConnectionBlock({
   const markSrc = idpMarkSrc(connection?.idp, useEffectiveTheme())
   const [metadataURL, setMetadataURL] = useState('')
   const [connecting, setConnecting] = useState(false)
-  const [toggling, setToggling] = useState(false)
-  const [savingIdP, setSavingIdP] = useState(false)
+  // One gate for both PATCHes: each answers with the whole connection, so two
+  // in flight could land out of order and the later setResp would show the
+  // earlier write's stale value for the other field.
+  const [patching, setPatching] = useState(false)
 
   const connect = async () => {
     const url = metadataURL.trim()
@@ -236,8 +244,8 @@ function ConnectionBlock({
   }
 
   const toggle = async (enabled: boolean) => {
-    if (toggling) return
-    setToggling(true)
+    if (patching) return
+    setPatching(true)
     try {
       const next = await apiJSON<SSOConnectionResponse>('/api/sso/connection', {
         method: 'PATCH',
@@ -249,15 +257,15 @@ function ConnectionBlock({
     } catch (e) {
       toast.error(httpErrorMessage(e, 'Could not update the SSO connection.'))
     } finally {
-      setToggling(false)
+      setPatching(false)
     }
   }
 
   // setIdP corrects the derived IdP. The select is controlled by the stored
   // value, so a refused PATCH leaves it showing what the server still holds.
   const setIdP = async (idp: IdP) => {
-    if (savingIdP) return
-    setSavingIdP(true)
+    if (patching) return
+    setPatching(true)
     try {
       const next = await apiJSON<SSOConnectionResponse>('/api/sso/connection', {
         method: 'PATCH',
@@ -265,11 +273,11 @@ function ConnectionBlock({
         body: JSON.stringify({ idp }),
       })
       setResp(next)
-      toast.success(`Identity provider set to ${IDP_NAMES[idp] ?? 'Other'}`)
+      toast.success(`Identity provider set to ${idpLabel(idp)}`)
     } catch (e) {
       toast.error(httpErrorMessage(e, 'Could not update the identity provider.'))
     } finally {
-      setSavingIdP(false)
+      setPatching(false)
     }
   }
 
@@ -314,9 +322,12 @@ function ConnectionBlock({
               <select
                 aria-label="Identity provider"
                 value={connection.idp ?? ''}
-                disabled={savingIdP}
+                disabled={patching}
                 onChange={(e) => void setIdP(e.target.value as IdP)}
-                className="rounded-md border border-line-1 bg-transparent px-2 py-0.5 text-ui font-medium text-ink-1 focus:border-warm focus:outline-none disabled:opacity-50"
+                // The options carry their own ground: Chromium on Windows and
+                // Linux draws the open list on the system's light ground, where
+                // dark mode's inherited ink-1 would be light on light.
+                className="rounded-md border border-line-1 bg-transparent px-2 py-0.5 text-ui font-medium text-ink-1 focus:border-warm focus:outline-none disabled:opacity-50 [&_option]:bg-raised [&_option]:text-ink-1"
               >
                 {/* Not known is a state the server can hold but never one to
                     pick, so it shows only while it is the stored value. */}
@@ -327,7 +338,7 @@ function ConnectionBlock({
                 )}
                 {IDP_VALUES.map((v) => (
                   <option key={v} value={v}>
-                    {IDP_NAMES[v] ?? 'Other'}
+                    {idpLabel(v)}
                   </option>
                 ))}
               </select>
@@ -353,7 +364,7 @@ function ConnectionBlock({
               <Switch.Root
                 aria-label="Enable SSO"
                 checked={connection.enabled}
-                disabled={toggling}
+                disabled={patching}
                 onCheckedChange={(v) => void toggle(v)}
                 className="relative h-[18px] w-8 rounded-full transition-colors data-[state=checked]:bg-warm data-[state=unchecked]:bg-line-2 disabled:opacity-50"
               >
