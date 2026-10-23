@@ -619,6 +619,7 @@ func TestLinearCredential_MultiMode_AdminGate(t *testing.T) {
 
 	base := "/api/orgs/" + orgA.String() + "/linear/access"
 	cred := base + "/credential"
+	visibility := base + "/team-visibility"
 	// An empty key fails validation before any call to Linear, so the
 	// admin's 400 shows the request got past the gate.
 	emptyKey := map[string]any{"api_key": ""}
@@ -639,6 +640,11 @@ func TestLinearCredential_MultiMode_AdminGate(t *testing.T) {
 		{"admin PUT", http.MethodPut, cred, emptyKey, sidA, http.StatusBadRequest},
 		{"admin DELETE", http.MethodDelete, cred, nil, sidA, http.StatusOK},
 		{"member GET", http.MethodGet, base, nil, sidC, http.StatusOK},
+		// The org has no Linear credential, so the admin's 409 shows the
+		// request got past the gate.
+		{"member GET team-visibility", http.MethodGet, visibility, nil, sidC, http.StatusForbidden},
+		{"non-member GET team-visibility", http.MethodGet, visibility, nil, sidB, http.StatusNotFound},
+		{"admin GET team-visibility", http.MethodGet, visibility, nil, sidA, http.StatusConflict},
 	}
 	for _, tc := range cases {
 		if rec := rig.tokensJSON(tc.method, tc.path, tc.body, tc.sid, ""); rec.Code != tc.want {
@@ -704,13 +710,14 @@ func TestLinearSource_PauseAndCreateGate(t *testing.T) {
 	}
 }
 
-// TestLinearAccessRoutes_Registration pins how the three routes mount: the
-// two credential writes behind the CSRF wrap, the read without it.
+// TestLinearAccessRoutes_Registration pins how the routes mount: the two
+// credential writes behind the CSRF wrap, the reads without it.
 func TestLinearAccessRoutes_Registration(t *testing.T) {
 	want := map[string]string{
-		"GET /api/orgs/{org_id}/linear/access":               "api",
-		"PUT /api/orgs/{org_id}/linear/access/credential":    "apiMutating",
-		"DELETE /api/orgs/{org_id}/linear/access/credential": "apiMutating",
+		"GET /api/orgs/{org_id}/linear/access":                 "api",
+		"GET /api/orgs/{org_id}/linear/access/team-visibility": "api",
+		"PUT /api/orgs/{org_id}/linear/access/credential":      "apiMutating",
+		"DELETE /api/orgs/{org_id}/linear/access/credential":   "apiMutating",
 	}
 	got := map[string]string{}
 	for _, route := range discoverProtectedRoutes(t) {

@@ -60,6 +60,8 @@ import EventSourcesGroup from '../EventSourcesGroup'
 import ApiTokenPolicyGroup from '../ApiTokenPolicyGroup'
 import AtlassianOAuthAppCard from '../AtlassianOAuthAppCard'
 import LinearOAuthAppCard from '../LinearOAuthAppCard'
+import LinearSwitchDialog from '../LinearSwitchDialog'
+import { useLinearSwitchWarning } from '../linearSwitchWarning'
 import SlackWorkspacesCard from '../SlackWorkspacesCard'
 import TeamManagementSection from '../../../components/TeamManagementSection'
 import {
@@ -109,6 +111,9 @@ export default function OrgSettings({
   // The Linear sibling: the connected section re-opened to bind a replacement
   // key in place.
   const [linearRebinding, setLinearRebinding] = useState(false)
+  // A replacement key may not read the private teams the current one does;
+  // the Save names them before binding.
+  const linearSwitch = useLinearSwitchWarning()
 
   // Parked event_queue rows. Fetched at this level, not inside the panel,
   // because the collapsed section's badge has to show the count before the
@@ -380,6 +385,7 @@ export default function OrgSettings({
 
   return (
     <div className="divide-y divide-line-1">
+      <LinearSwitchDialog pending={linearSwitch.pending} />
       {/* ── GitHub URL ── */}
       <SettingsSection
         title="GitHub URL"
@@ -755,6 +761,9 @@ export default function OrgSettings({
             }
             setSavingKey('linear-connect', true)
             try {
+              if (linearRebinding && !(await linearSwitch.confirmSwitch(orgId, 'key'))) {
+                return false
+              }
               // Same call for a first bind and a replacement: the key is
               // validated against Linear before anything is stored, so a bad
               // one 422s with the org still on the key it had.

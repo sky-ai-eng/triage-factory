@@ -20,11 +20,13 @@ import (
 // The org's Linear service credential as a first-class resource: the bind
 // (PUT) and unbind (DELETE) pair whose rationale sits with the GitHub and Jira
 // routes in org_credentials.go, plus the status read the settings card and the
-// setup wizard render from.
+// setup wizard render from, and the read of which tracked teams the credential
+// can see.
 //
 //   PUT    /api/orgs/{org_id}/linear/access/credential
 //   DELETE /api/orgs/{org_id}/linear/access/credential
 //   GET    /api/orgs/{org_id}/linear/access
+//   GET    /api/orgs/{org_id}/linear/access/team-visibility
 //
 // The bind takes one shape, a personal API key. Linear has one host, so the
 // body carries no URL and no deployment discriminator, and the workspace is
@@ -383,6 +385,105 @@ func (s *Server) handleLinearAccessGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
+}
+
+// linearTrackedTeamJSON names one Linear team the org tracks.
+type linearTrackedTeamJSON struct {
+	ID   string `json:"id"`
+	Key  string `json:"key"`
+	Name string `json:"name"`
+}
+
+// linearTeamVisibility is the team-visibility body: the org's tracked Linear
+// teams as its current credential sees them, in two cuts. Both are always
+// lists, empty when nothing falls in them.
+type linearTeamVisibility struct {
+	// Private are the tracked teams the credential reads that are private to
+	// their members: the teams a switch to another credential can lose, since
+	// a personal key reads one only when its owner is a member, and an
+	// installed app only once the team is shared with it. Key and name are
+	// Linear's own, read now.
+	Private []linearTrackedTeamJSON `json:"private"`
+	// Unreadable are the tracked teams the credential cannot read at all. The
+	// tracker leaves their issues tracked and unrefreshed rather than retiring
+	// them, and discovery finds nothing new in them. Key and name are as
+	// stored when the team was tracked, since Linear will not say.
+	Unreadable []linearTrackedTeamJSON `json:"unreadable"`
+}
+
+// handleLinearTeamVisibility reports which of the org's tracked Linear teams
+// its current credential can read, and which of those are private. The
+// tracked set is every TF team's in the org's current workspace, watched or
+// armed. The settings card reads it before a credential switch, to name the
+// private teams the next credential may not see, and after one, to name the
+// teams this credential does not.
+//
+// Org admin: it spans every team's tracked set, and switching the credential,
+// the decision it informs, is an org-admin write. Bounded by the tracked set,
+// so it is a fixed-shape read with no paging. No credential is a 409; a failed
+// Linear read is a 502.
+//
+// GET /api/orgs/{org_id}/linear/access/team-visibility
+func (s *Server) handleLinearTeamVisibility(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	client, ok := s.linearSystemClient(w, r, orgID, "linear-access", "Linear is not connected for this workspace")
+	if !ok {
+		return
+	}
+	var orgSet domain.OrgSettings
+	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		var err error
+		orgSet, err = tx.Orgs.GetSettings(ctx, orgID)
+		return err
+	}); err != nil {
+		internalError(w, "linear-access", fmt.Errorf("load org settings: %w", err))
+		return
+	}
+	rules, err := s.linearRules.ListForOrgSystem(ctx, orgID, domain.EntityScope("linear", orgSet))
+	if err != nil {
+		internalError(w, "linear-access", fmt.Errorf("list linear rules: %w", err))
+		return
+	}
+
+	var tracked []linearTrackedTeamJSON
+	seen := map[string]bool{}
+	for _, rule := range rules {
+		if !seen[rule.LinearTeamID] {
+			seen[rule.LinearTeamID] = true
+			tracked = append(tracked, linearTrackedTeamJSON{ID: rule.LinearTeamID, Key: rule.LinearTeamKey, Name: rule.LinearTeamName})
+		}
+	}
+	readable := make(map[string]linear.Team, len(tracked))
+	for i := 0; i < len(tracked); i += linearPageMax {
+		ids := make([]string, 0, linearPageMax)
+		for _, t := range tracked[i:min(i+linearPageMax, len(tracked))] {
+			ids = append(ids, t.ID)
+		}
+		teams, err := client.GetTeams(ctx, ids)
+		if err != nil {
+			writeLinearUpstream(w, orgID, "the workspace's tracked Linear teams", err)
+			return
+		}
+		for _, t := range teams {
+			readable[t.ID] = t
+		}
+	}
+
+	out := linearTeamVisibility{Private: []linearTrackedTeamJSON{}, Unreadable: []linearTrackedTeamJSON{}}
+	for _, t := range tracked {
+		team, ok := readable[t.ID]
+		switch {
+		case !ok:
+			out.Unreadable = append(out.Unreadable, t)
+		case team.Private:
+			out.Private = append(out.Private, linearTrackedTeamJSON{ID: team.ID, Key: team.Key, Name: team.Name})
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // readLinearAccess derives the status body. connected is the same derivation

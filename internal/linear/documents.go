@@ -84,6 +84,17 @@ query Team($id: String!) {
   team(id: $id) { id key name private }
 }`
 
+// teamsByIDQuery reads teams by UUID. Linear's teams connection holds only the
+// teams whose issues the credential can read, so an id outside it is absent
+// rather than an error. Archived teams are included: their issues are still
+// readable.
+const teamsByIDQuery = `
+query TeamsByID($ids: [ID!]!, $first: Int!) {
+  teams(filter: { id: { in: $ids } }, first: $first, includeArchived: true) {
+    nodes { id key name private }
+  }
+}`
+
 // teamStatesQuery reads a team's states through the team rather than as a
 // filtered workflowStates listing, so a team the credential cannot see comes
 // back as a missing team instead of an empty list.

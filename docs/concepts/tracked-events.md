@@ -774,7 +774,8 @@ never inferred from an issue's absence. Its `reason` says why:
   batch read is asked about directly, by UUID, and only this answer retires
   it. Any other failure to read it is not evidence either way, and it is asked
   about again on a later cycle. At most 20 issues are asked about one at a
-  time per cycle; the rest wait for the next.
+  time per cycle; the rest wait for the next. An issue in an armed team the
+  credential cannot read is not asked about at all (see below).
 - `trashed`: the issue is in the trash.
 - `archived`: the issue is archived in a state outside its team's done states.
   Archived in a done state is the ordinary terminal path.
@@ -786,6 +787,22 @@ never inferred from an issue's absence. Its `reason` says why:
   new workspace that happens to share an old identifier is a different issue
   and gets its own entity — and binding the old workspace again finds them by
   UUID.
+
+**A team the credential cannot read is held, not retired.** Linear answers
+not-found for an issue the credential cannot see exactly as it does for a
+deleted one. When the org's credential changes to one that sees less, typically
+a personal key replaced by the app install while a private team has not been
+shared with the app, every issue in that team goes missing at once, and asking
+about each would retire them all and close their tasks. So before asking, the
+cycle reads the teams of the missing issues, once. An issue whose team is armed
+and unreadable is left tracked and unrefreshed, and the cycle logs the team
+with a warning (the `tracker.linear.team_visibility` span carries disposition
+`issues_held`). A failed team read holds them too. The issues refresh as soon
+as the credential reads the team again. The **Linear connection** settings card
+names every tracked team the credential cannot read, and warns about private
+teams before a key is replaced or the app is installed over one. A team that
+will not be readable again, such as one deleted in Linear, retires its issues
+once no rule arms it: an issue in an unarmed team is asked about as before.
 
 The event's metadata is the issue's last-known state. Its team comes from the
 stored snapshot, or from Linear's answer when there is one, never from the

@@ -61,9 +61,9 @@ var linearFixtureStates = []linear.WorkflowState{
 
 // linearCatalogFake stands in for Linear's GraphQL endpoint, answering the
 // documents the catalog routes and the write gate send — Teams (filtered and
-// cursor-paged), Team, TeamStates (cursor-paged), WorkflowState, Labels
-// (cursor-paged), Users (filtered and cursor-paged, active users only) and
-// User — from one in-memory workspace, so a paging, filtering or
+// cursor-paged), TeamsByID, Team, TeamStates (cursor-paged), WorkflowState,
+// Labels (cursor-paged), Users (filtered and cursor-paged, active users only)
+// and User — from one in-memory workspace, so a paging, filtering or
 // resolution bug shows up as wrong rows rather than as a stub running out of
 // scripted replies. A team with no states of its own set has
 // linearFixtureStates, and one with no labels of its own set has
@@ -143,6 +143,17 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		writeGraphQLData(w, map[string]any{"teams": fakeConnection(matched, body.Variables)})
+	case "TeamsByID":
+		ids, _ := body.Variables["ids"].([]any)
+		matched := []linear.Team{}
+		for _, t := range teams {
+			for _, id := range ids {
+				if id == t.ID {
+					matched = append(matched, t)
+				}
+			}
+		}
+		writeGraphQLData(w, map[string]any{"teams": map[string]any{"nodes": matched}})
 	case "Team":
 		id := stringVar(body.Variables, "id")
 		for _, t := range teams {

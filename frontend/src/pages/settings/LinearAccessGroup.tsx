@@ -3,10 +3,15 @@ import { Section, Field, inputClass, glassInputClass } from './primitives'
 import { toast } from '../../components/Toast/toastStore'
 import {
   disconnectLinear,
+  fetchLinearTeamVisibility,
   linearInstallErrorText,
   linearInstallReturnTo,
   linearInstallStartURL,
+  linearUnreadableText,
+  type LinearTrackedTeam,
 } from './linearConnect'
+import LinearSwitchDialog from './LinearSwitchDialog'
+import { useLinearSwitchWarning } from './linearSwitchWarning'
 
 /**
  * LinearAccessGroup is the org-level Linear credential field group — the
@@ -25,7 +30,13 @@ import {
  * through the install ceremony, after which TF acts as its own app user; a
  * personal API key is the alternative. The ceremony is a navigation away and
  * back, so its outcome arrives on this page's URL: an error code there is
- * shown as a banner and then dropped from the URL.
+ * shown as a banner and then dropped from the URL. Installing over a connected
+ * key first names the tracked teams that are private, since the app reads one
+ * only once it is shared with the app.
+ *
+ * Connected, the group reads which tracked Linear teams the credential can see
+ * and keeps a banner naming any it cannot: the tracker leaves those teams'
+ * issues tracked but unrefreshed, so nothing else would show it.
  *
  * Which Linear teams a team tracks is TEAM-level (LinearTeamRulesGroup), so it
  * lives outside this group.
@@ -96,11 +107,28 @@ export default function LinearAccessGroup({
   }, [returnedError])
   const banner = linearInstallErrorText(returnedError || (connected ? '' : lastError))
 
-  const install = () => {
+  // Read again whenever the credential changes shape or owner. A failed read
+  // shows nothing rather than an error: the banner is advisory. The banner
+  // renders only while connected, so a disconnect needs no reset here.
+  const [unreadable, setUnreadable] = useState<LinearTrackedTeam[]>([])
+  useEffect(() => {
+    if (!connected || !orgId) return
+    let live = true
+    void fetchLinearTeamVisibility(orgId).then((v) => {
+      if (live) setUnreadable(v?.unreadable ?? [])
+    })
+    return () => {
+      live = false
+    }
+  }, [connected, orgId, authMethod, boundAs])
+
+  const { confirmSwitch, pending } = useLinearSwitchWarning()
+  const install = async () => {
     if (!orgId) {
       toast.error('No organization context — reload and try again.')
       return
     }
+    if (connected && !(await confirmSwitch(orgId, 'app'))) return
     window.location.href = linearInstallStartURL(orgId, linearInstallReturnTo(window.location.href))
   }
 
@@ -182,6 +210,15 @@ export default function LinearAccessGroup({
         </p>
       )}
 
+      {connected && unreadable.length > 0 && (
+        <p
+          role="alert"
+          className="mb-3 rounded-xl border border-alarm/30 bg-alarm/5 px-4 py-2.5 text-ui leading-snug text-alarm"
+        >
+          {linearUnreadableText(unreadable, installed)}
+        </p>
+      )}
+
       {!connected ? (
         <div className="space-y-3">
           {installAvailable && (
@@ -245,5 +282,10 @@ export default function LinearAccessGroup({
     </>
   )
 
-  return bare ? body : <Section>{body}</Section>
+  return (
+    <>
+      {bare ? body : <Section>{body}</Section>}
+      <LinearSwitchDialog pending={pending} />
+    </>
+  )
 }
