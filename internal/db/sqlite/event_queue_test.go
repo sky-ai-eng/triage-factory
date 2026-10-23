@@ -30,6 +30,30 @@ func TestEventQueueStore_SQLite(t *testing.T) {
 	})
 }
 
+// TestSystemTx_SQLite runs the system-transaction conformance suite against
+// a fresh in-memory DB per subtest.
+func TestSystemTx_SQLite(t *testing.T) {
+	dbtest.RunSystemTxConformance(t, func(t *testing.T) (db.Stores, string, dbtest.EventQueueSeeder) {
+		t.Helper()
+		conn := newSQLiteForEventQueueTest(t)
+		return sqlitestore.New(conn), runmode.LocalDefaultOrgID, newSQLiteEventQueueSeeder(conn)
+	})
+}
+
+// TestSystemWithTx_SQLite_RejectsNonLocalOrg: the system door asserts the
+// local sentinel the way the claims doors do, before it opens a transaction.
+func TestSystemWithTx_SQLite_RejectsNonLocalOrg(t *testing.T) {
+	stores := sqlitestore.New(newSQLiteForEventQueueTest(t))
+	ran := false
+	err := stores.Tx.SystemWithTx(t.Context(), "11111111-1111-1111-1111-111111111111", func(db.SystemTxStores) error {
+		ran = true
+		return nil
+	})
+	if err == nil || ran {
+		t.Errorf("SystemWithTx with a non-local orgID = %v (body ran: %v); want an error before the body", err, ran)
+	}
+}
+
 // TestEventQueueStore_SQLite_RejectsNonLocalOrg pins the assertLocalOrg
 // guard on the org-scoped methods. Claim and PruneSettled are cross-org
 // system sweeps and take no orgID, so they're excluded by design; the

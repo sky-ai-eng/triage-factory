@@ -54,14 +54,14 @@ func New(bus *eventbus.Bus, queue db.EventQueueStore, wake func()) *Ingestor {
 // then forwards every event to the ephemeral bus. evt.OrgID must already
 // be stamped by the caller (the tracker does this in its publish()).
 //
-// ctx is the emitting work's — a poll cycle, a Slack webhook request — and
+// ctx is the emitting work's — a poll cycle — and
 // is what makes the durable hop traceable: the enqueue span below is the
 // producer an event's later routing links back to. A caller with no span
 // active (an untraced path, or tracing disabled) stamps nothing and the
 // row routes exactly as it always did.
 func (i *Ingestor) Publish(ctx context.Context, evt domain.Event) {
 	if i.queue != nil && routing.RouterBound(evt.EventType) {
-		id, err := i.enqueue(ctx, evt)
+		id, err := Enqueue(ctx, i.queue, evt)
 		if err != nil {
 			// The durability boundary failed — this event will not route
 			// (no events row, no task). That's the loss this package exists
@@ -74,14 +74,15 @@ func (i *Ingestor) Publish(ctx context.Context, evt domain.Event) {
 			// recover. An emit re-derived from durable state every cycle (the
 			// tracker reconciling a stale review-request against the stored
 			// snapshot) does come back on the next poll. One that fires off
-			// a one-time observation does not: an ee/ ingest runs behind a
-			// delivery id already recorded as consumed, so the upstream's own
-			// redelivery is dropped as a duplicate, and that one is gone for
-			// good.
-			// The tracker's snapshot-paired emits are not in this set at all
-			// — its diffed transitions and its discovery seed's review-request
+			// a one-time observation does not, which is why an emit behind a
+			// record that it was consumed — a webhook's delivery dedup — must
+			// not come through here: it enqueues through Enqueue inside the
+			// transaction that writes that record, and reaches this package
+			// only through PublishPreEnqueued.
+			// The tracker's snapshot-paired emits are not in this set either:
+			// its diffed transitions and its discovery seed's review-request
 			// backfill both commit inside the snapshot CAS's transaction and
-			// reach this package only through PublishPreEnqueued.
+			// reach this package the same way.
 			//
 			// Deliberately do NOT fall through to the bus: with no events
 			// row, evt.ID is empty, and forwarding an id-less event would
@@ -101,11 +102,13 @@ func (i *Ingestor) Publish(ctx context.Context, evt domain.Event) {
 
 // PublishPreEnqueued is Publish for an event the caller ALREADY committed
 // to the outbox itself: it nudges the drain worker and fans the event out
-// to the bus, and deliberately does not enqueue. The tracker is the caller
-// — it enqueues both its diffed transitions and its discovery seed's
+// to the bus, and deliberately does not enqueue. Two callers: the tracker,
+// which enqueues both its diffed transitions and its discovery seed's
 // review-request backfill inside the same transaction as the snapshot they
-// belong to (EnqueueBatchWithSnapshotCAS), so routing them through Publish
-// would write a second queue row for an event already queued.
+// belong to (EnqueueBatchWithSnapshotCAS), and an ee/ ingest that enqueues
+// through Enqueue inside the transaction recording its delivery — routing
+// either through Publish would write a second queue row for an event
+// already queued.
 //
 // evt.ID must be the id that enqueue minted, so the WS feed and the queue
 // row agree the way they do on the ordinary path.
@@ -116,22 +119,29 @@ func (i *Ingestor) PublishPreEnqueued(ctx context.Context, evt domain.Event) {
 	i.bus.Publish(evt)
 }
 
-// enqueue is the durable half, wrapped in the producer span whose context
-// travels on the queue row. The span is started BEFORE the traceparent is
-// rendered, so the consumer links to this enqueue rather than to whatever
-// happened to be active around it — one poll cycle emits many events, and
-// "which emit was mine" is the question a link has to answer.
+// Enqueue is Publish's durable half — the events audit row and the queue
+// row — and returns the event id it minted. Publish calls it on the
+// Ingestor's own queue; a caller that must commit the event with its own
+// writes calls it on the queue its transaction is bound to
+// (db.SystemTxStores.EventQueue), stamps the id onto the event, and hands it
+// to PublishPreEnqueued once the transaction commits. evt.OrgID must be set.
+//
+// The write is wrapped in the producer span whose context travels on the
+// queue row. The span is started BEFORE the traceparent is rendered, so the
+// consumer links to this enqueue rather than to whatever happened to be
+// active around it — one poll cycle emits many events, and "which emit was
+// mine" is the question a link has to answer.
 //
 // The bus fan-out gets no span of its own: it is a coalescing, lossy
 // broadcast to subscribers that root their own cycles, so there is nothing
 // for a span there to measure or a link there to point at.
-func (i *Ingestor) enqueue(ctx context.Context, evt domain.Event) (string, error) {
+func Enqueue(ctx context.Context, queue db.EventQueueStore, evt domain.Event) (string, error) {
 	ctx, span := tracer.Start(ctx, "event.enqueue",
 		trace.WithSpanKind(trace.SpanKindProducer),
 		trace.WithAttributes(telemetry.EventType(evt.EventType), telemetry.OrgID(evt.OrgID)))
 	defer span.End()
 
-	id, err := i.queue.Enqueue(ctx, evt.OrgID, evt, telemetry.TraceparentFrom(ctx))
+	id, err := queue.Enqueue(ctx, evt.OrgID, evt, telemetry.TraceparentFrom(ctx))
 	if err != nil {
 		span.SetStatus(codes.Error, "enqueue")
 		return "", err

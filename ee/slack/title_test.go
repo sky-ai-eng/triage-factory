@@ -326,6 +326,7 @@ func TestHandleEventCallback_DispatchesTitleResolutionOnCreated(t *testing.T) {
 				publish:    func(context.Context, domain.Event) {},
 				title:      &TitleResolver{secrets: &fakeSecrets{token: "xoxb-test"}, entities: titles, client: http.DefaultClient},
 			}
+			withFakeIngestTx(p)
 			ev := inboundMention{
 				Type: "app_mention", EventID: "Ev1", Channel: "C1", User: "U0SENDER",
 				Text: "<@U0BHY927K34> what can you do?", TS: mentionTS, ThreadTS: c.threadTS,

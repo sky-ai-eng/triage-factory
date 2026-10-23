@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"reflect"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -83,9 +85,98 @@ type fakeDeliveries struct {
 	// onFresh, if set, runs after a delivery is recorded as new — the gap
 	// between the dedup insert and the thread write.
 	onFresh func()
+
+	// prunes counts PruneDeliveredSystem calls, prunedInTx those made while
+	// a fakeIngestTx transaction was open (txOpen); pruneErr fails them.
+	prunes, prunedInTx int
+	pruneErr           error
+	txOpen             bool
 }
 
 func newFakeDeliveries() *fakeDeliveries { return &fakeDeliveries{seen: map[string]bool{}} }
+
+func (f *fakeDeliveries) PruneDeliveredSystem(context.Context) error {
+	f.prunes++
+	if f.txOpen {
+		f.prunedInTx++
+	}
+	return f.pruneErr
+}
+
+// fakeIngestTx is the delivery transaction the pipeline tests run in: a
+// db.TxRunner whose SystemWithTx hands the body the test's delivery and
+// channel fakes, plus an event queue, and when the body fails undoes what it
+// wrote through them — the delivery marks, the threads it created, the
+// events it enqueued — as a rollback does. Only SystemWithTx is called.
+type fakeIngestTx struct {
+	db.TxRunner
+	// deliveries is the dedup store the transaction marks on — a
+	// *fakeDeliveries, whose marks a rollback undoes, unless a test swaps in
+	// a store of its own.
+	deliveries slackstore.DeliveryStore
+	channels   *fakeChannelRegistry
+
+	// enqueueErr fails every enqueue while set.
+	enqueueErr error
+	// queued is every event a committed transaction enqueued, in order.
+	queued []domain.Event
+	nextID int
+}
+
+// withFakeIngestTx gives p a fakeIngestTx over its own delivery and channel
+// fakes — the stores outside the transaction and inside it are one
+// database — and returns it.
+func withFakeIngestTx(p *ingestPipeline) *fakeIngestTx {
+	tx := &fakeIngestTx{deliveries: p.deliveries, channels: p.channels.(*fakeChannelRegistry)}
+	p.tx = tx
+	return tx
+}
+
+func (f *fakeIngestTx) SystemWithTx(_ context.Context, _ string, fn func(db.SystemTxStores) error) error {
+	entities := f.channels.entities
+	byKey, byThread := maps.Clone(entities.byKey), maps.Clone(entities.byThread)
+	marks, _ := f.deliveries.(*fakeDeliveries)
+	var seen map[string]bool
+	if marks != nil {
+		seen = maps.Clone(marks.seen)
+		marks.txOpen = true
+		defer func() { marks.txOpen = false }()
+	}
+	q := &fakeEventQueue{tx: f}
+	if err := fn(db.SystemTxStores{
+		EventQueue: q,
+		Ext:        map[string]any{slackstore.ExtKey: &slackstore.Bundle{Deliveries: f.deliveries, Channels: f.channels}},
+	}); err != nil {
+		entities.byKey, entities.byThread = byKey, byThread
+		if marks != nil {
+			marks.seen = seen
+		}
+		return err
+	}
+	f.queued = append(f.queued, q.events...)
+	return nil
+}
+
+// fakeEventQueue is one fakeIngestTx transaction's event queue: Enqueue
+// mints an id and holds the event until the transaction commits.
+type fakeEventQueue struct {
+	db.EventQueueStore
+	tx     *fakeIngestTx
+	events []domain.Event
+}
+
+func (q *fakeEventQueue) Enqueue(_ context.Context, orgID string, evt domain.Event, _ string) (string, error) {
+	if q.tx.enqueueErr != nil {
+		return "", q.tx.enqueueErr
+	}
+	if orgID != evt.OrgID {
+		return "", fmt.Errorf("enqueue for org %q of an event stamped %q", orgID, evt.OrgID)
+	}
+	q.tx.nextID++
+	evt.ID = fmt.Sprintf("evt-%d", q.tx.nextID)
+	q.events = append(q.events, evt)
+	return evt.ID, nil
+}
 
 func (f *fakeDeliveries) MarkDeliveredSystem(_ context.Context, workspaceID, eventID string) (bool, error) {
 	if f.err != nil {
@@ -328,6 +419,7 @@ func newTestPipeline() (*ingestPipeline, *fakeEntities, *fakeDeliveries, *[]doma
 		channels:   newFakeChannelRegistryFor(entities),
 		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
 	}
+	withFakeIngestTx(p)
 	return p, entities, deliveries, published
 }
 
@@ -373,9 +465,9 @@ func TestHandleEventCallback_PublishesCorrectEventShape(t *testing.T) {
 
 // TestHandleEventCallback_MentionSurvivesAMoveAfterDedup: a mention under a
 // channel's new id registers a row of its own, and a move committing right
-// after the delivery is recorded absorbs that row. The delivery cannot be
-// retried past the dedup, so the thread and the message land on the
-// surviving row.
+// after the delivery is recorded absorbs that row. The thread resolves the
+// delivered id rather than the absorbed row, so the delivery lands on its
+// first attempt: the thread and the message land on the surviving row.
 func TestHandleEventCallback_MentionSurvivesAMoveAfterDedup(t *testing.T) {
 	p, entities, deliveries, published := newTestPipeline()
 	channels := p.channels.(*fakeChannelRegistry)
@@ -815,6 +907,104 @@ func TestHandleEventCallback_DuplicateEventIDPublishedOnce(t *testing.T) {
 	}
 }
 
+// TestHandleEventCallback_FailureAfterDedupRollsTheDeliveryBack: a mention
+// whose thread write or enqueue fails leaves no delivery recorded, no thread
+// and nothing queued or published, so Slack's redelivery runs fresh — and,
+// with the mark and the event committed together, publishes the message
+// exactly once across every redelivery after it, under its queue row's id.
+func TestHandleEventCallback_FailureAfterDedupRollsTheDeliveryBack(t *testing.T) {
+	cases := []struct {
+		name string
+		fail func(entities *fakeEntities, tx *fakeIngestTx, err error)
+	}{
+		{"thread write", func(entities *fakeEntities, _ *fakeIngestTx, err error) { entities.err = err }},
+		{"enqueue", func(_ *fakeEntities, tx *fakeIngestTx, err error) { tx.enqueueErr = err }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, entities, deliveries, published := newTestPipeline()
+			tx := p.tx.(*fakeIngestTx)
+			ws := testWorkspaceRow("org-1")
+			ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "C1", User: "U1", Text: "hi", TS: "1600000000.000100"}
+
+			boom := errors.New("boom")
+			tc.fail(entities, tx, boom)
+			if err := p.handleEventCallback(context.Background(), ws, ev); !errors.Is(err, boom) {
+				t.Fatalf("handleEventCallback = %v; want the injected failure", err)
+			}
+			if len(deliveries.seen) != 0 || len(entities.byThread) != 0 || len(tx.queued) != 0 || len(*published) != 0 {
+				t.Fatalf("after the failure: %d deliveries, %d threads, %d queued, %d published; want none",
+					len(deliveries.seen), len(entities.byThread), len(tx.queued), len(*published))
+			}
+
+			tc.fail(entities, tx, nil)
+			for i := range 2 {
+				if err := p.handleEventCallback(context.Background(), ws, ev); err != nil {
+					t.Fatalf("redelivery %d: %v", i+1, err)
+				}
+			}
+			if len(tx.queued) != 1 || len(*published) != 1 || len(entities.byThread) != 1 {
+				t.Fatalf("across the redeliveries: %d queued, %d published, %d threads; want 1 each", len(tx.queued), len(*published), len(entities.byThread))
+			}
+			if got := (*published)[0].ID; got == "" || got != tx.queued[0].ID {
+				t.Errorf("published event id = %q; want its queue row's %q", got, tx.queued[0].ID)
+			}
+		})
+	}
+}
+
+// TestHandleThreadMessage_EnqueueFailureRollsTheDeliveryBack is the
+// engaged-thread twin: a follow-up whose enqueue fails is not recorded as
+// delivered, and its redelivery publishes it once.
+func TestHandleThreadMessage_EnqueueFailureRollsTheDeliveryBack(t *testing.T) {
+	p, entities, deliveries, published := newTestPipeline()
+	tx := p.tx.(*fakeIngestTx)
+	entities.seedThread("org-1", engagedSourceID, "thread", "active")
+	ws := testWorkspaceRow("org-1")
+
+	boom := errors.New("boom")
+	tx.enqueueErr = boom
+	if err := p.handleEventCallback(context.Background(), ws, engagedFollowUp()); !errors.Is(err, boom) {
+		t.Fatalf("handleEventCallback = %v; want the injected failure", err)
+	}
+	if len(deliveries.seen) != 0 || len(tx.queued) != 0 || len(*published) != 0 {
+		t.Fatalf("after the failure: %d deliveries, %d queued, %d published; want none", len(deliveries.seen), len(tx.queued), len(*published))
+	}
+
+	tx.enqueueErr = nil
+	for i := range 2 {
+		if err := p.handleEventCallback(context.Background(), ws, engagedFollowUp()); err != nil {
+			t.Fatalf("redelivery %d: %v", i+1, err)
+		}
+	}
+	if len(tx.queued) != 1 || len(*published) != 1 {
+		t.Fatalf("across the redeliveries: %d queued, %d published; want 1 each", len(tx.queued), len(*published))
+	}
+	if got := (*published)[0]; got.ID != tx.queued[0].ID || got.EntityID == nil || *got.EntityID != engagedEntityID {
+		t.Errorf("published %+v; want the queued event %q on the engaged thread %q", got, tx.queued[0].ID, engagedEntityID)
+	}
+}
+
+// TestHandleEventCallback_PrunesAfterTheDeliveryTx: the dedup table's prune
+// runs once per delivery, after its transaction rather than inside it, and a
+// failing prune does not fail the delivery.
+func TestHandleEventCallback_PrunesAfterTheDeliveryTx(t *testing.T) {
+	p, _, deliveries, published := newTestPipeline()
+	deliveries.pruneErr = errors.New("boom")
+	ws := testWorkspaceRow("org-1")
+	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "C1", User: "U1", TS: "1600000000.000100"}
+
+	if err := p.handleEventCallback(context.Background(), ws, ev); err != nil {
+		t.Fatalf("handleEventCallback: %v", err)
+	}
+	if len(*published) != 1 {
+		t.Errorf("published %d events; want 1 (a failed prune is not the delivery's failure)", len(*published))
+	}
+	if deliveries.prunes != 1 || deliveries.prunedInTx != 0 {
+		t.Errorf("prunes = %d (%d inside the transaction); want 1, outside it", deliveries.prunes, deliveries.prunedInTx)
+	}
+}
+
 // TestHandleEventCallback_MalformedFieldsDropped: an app_mention missing
 // event_id, channel, or ts is dropped rather than flowing an empty string
 // into the dedup key or the entity source_id — an empty event_id would
@@ -896,6 +1086,7 @@ func TestHandleEventCallback_DispatchesIdentityResolution(t *testing.T) {
 		publish:    func(context.Context, domain.Event) {},
 		identity:   resolver,
 	}
+	withFakeIngestTx(p)
 	ws := testWorkspaceRow("org-1")
 	ev := inboundMention{
 		Type: "app_mention", EventID: "Ev1", Channel: "C1", User: "U0SENDER1",
@@ -951,6 +1142,7 @@ func TestHandleEventCallback_FollowUpDispatchesIdentityResolution(t *testing.T) 
 		publish:    func(context.Context, domain.Event) { published++ },
 		identity:   resolver,
 	}
+	withFakeIngestTx(p)
 	ws := testWorkspaceRow("org-1")
 	entities.seedThread("org-1", domain.SlackSourceID("C1", "1600000000.000100"), "thread", "active")
 	ev := inboundMention{
@@ -1066,6 +1258,7 @@ func TestHandleEventCallback_DispatchesChannelNameResolutionOnCreated(t *testing
 		publish:     func(context.Context, domain.Event) {},
 		channelName: resolver,
 	}
+	withFakeIngestTx(p)
 	ws := testWorkspaceRow("org-1")
 	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "C1", User: "U1", TS: "1600000000.000100"}
 
@@ -1120,6 +1313,7 @@ func TestHandleEventCallback_DispatchesPermalinkResolutionOnCreated(t *testing.T
 		publish:    func(context.Context, domain.Event) {},
 		permalink:  resolver,
 	}
+	withFakeIngestTx(p)
 	ws := testWorkspaceRow("org-1")
 	// Root-message mention (no ThreadTS): the resolved thread root is the
 	// message's own ts, "1600000000.000100".
@@ -1164,6 +1358,7 @@ func TestHandleEventCallback_DoesNotDispatchPermalinkResolutionOnReMention(t *te
 		publish:    func(context.Context, domain.Event) {},
 		permalink:  resolver,
 	}
+	withFakeIngestTx(p)
 	ws := testWorkspaceRow("org-1")
 
 	// First mention creates the thread entity and dispatches resolution.

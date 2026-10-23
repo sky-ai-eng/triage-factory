@@ -291,10 +291,9 @@ const deliveryPruneAge = 72 * time.Hour
 
 // MarkDeliveredSystem inserts (apiAppID, eventID) with ON CONFLICT DO
 // NOTHING; fresh reports whether the row was newly inserted (RowsAffected
-// > 0) versus an already-seen duplicate. The prune runs after, best-effort:
-// its error (if any) is swallowed rather than returned — a missed prune
-// just means the table grows a little until the next successful call, never
-// a reason to fail the delivery this call is trying to dedup.
+// > 0) versus an already-seen duplicate. The conflict arm waits on an
+// uncommitted insert of the same key, which is what serializes two
+// deliveries of one event across their transactions.
 func (s *deliveryStore) MarkDeliveredSystem(ctx context.Context, apiAppID, eventID string) (bool, error) {
 	res, err := s.admin.ExecContext(ctx, `
 		INSERT INTO slack_event_deliveries (api_app_id, event_id)
@@ -308,11 +307,17 @@ func (s *deliveryStore) MarkDeliveredSystem(ctx context.Context, apiAppID, event
 	if err != nil {
 		return false, fmt.Errorf("rows affected slack_event_deliveries: %w", err)
 	}
-	fresh := n > 0
+	return n > 0, nil
+}
 
-	_, _ = s.admin.ExecContext(ctx, `
+// PruneDeliveredSystem — see the interface doc. A missed prune only means
+// the table grows a little until the next one, so callers log its error and
+// move on.
+func (s *deliveryStore) PruneDeliveredSystem(ctx context.Context) error {
+	if _, err := s.admin.ExecContext(ctx, `
 		DELETE FROM slack_event_deliveries WHERE received_at < $1
-	`, time.Now().Add(-deliveryPruneAge))
-
-	return fresh, nil
+	`, time.Now().Add(-deliveryPruneAge)); err != nil {
+		return fmt.Errorf("prune slack_event_deliveries: %w", err)
+	}
+	return nil
 }

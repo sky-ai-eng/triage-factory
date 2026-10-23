@@ -20,24 +20,25 @@ import (
 // be wrong. The event_queue_all RLS policy is defense-in-depth (admin
 // bypasses it) and org_id is bound in every statement.
 //
-// Holds the admin *sql.DB directly (not the shared queryer) because Enqueue
-// runs the events-row insert and the queue-row admission in one transaction
-// — the outbox atomicity guarantee — which needs BeginTx, and because the
-// package's claim opens its own transaction per round.
+// q is the admin pool, or the admin-pool transaction a db.SystemTxStores is
+// bound to. Enqueue runs the events-row insert and the queue-row admission in
+// one transaction — the outbox atomicity guarantee — which is q itself when q
+// is a transaction, so the rows commit with the caller's other writes. Claim
+// needs the pool: the package's claim opens its own transaction per round.
 type eventQueueStore struct {
-	conn *sql.DB
+	q    queryer
 	kind workitem.Kind
 }
 
-func newEventQueueStore(conn *sql.DB) db.EventQueueStore {
-	return &eventQueueStore{conn: conn, kind: workkinds.EventQueue(workitem.Postgres)}
+func newEventQueueStore(q queryer) db.EventQueueStore {
+	return &eventQueueStore{q: q, kind: workkinds.EventQueue(workitem.Postgres)}
 }
 
 var _ db.EventQueueStore = (*eventQueueStore)(nil)
 
 func (s *eventQueueStore) Enqueue(ctx context.Context, orgID string, evt domain.Event, traceparent string) (string, error) {
 	var id string
-	if err := db.InTx(ctx, s.conn, func(tx *sql.Tx) error {
+	if err := inTx(ctx, s.q, func(tx queryer) error {
 		// recordEvent (postgres/events.go) is the canonical events insert —
 		// reused so the queue's audit row matches every other event row
 		// (jsonb metadata cast, nullable occurred_at, org_id bind).
@@ -63,7 +64,7 @@ func (s *eventQueueStore) Enqueue(ctx context.Context, orgID string, evt domain.
 // the poll_seq it just advanced to, the ingest path passes nil and the column
 // stores NULL. uniqueKey is set only for the close obligation. deduplicated
 // reports the package's answer, which only a keyed admission can return.
-func (s *eventQueueStore) admitQueueRow(ctx context.Context, tx *sql.Tx, orgID, eventID string, evt domain.Event, traceparent string, entityPollSeq *int64, uniqueKey string) (bool, error) {
+func (s *eventQueueStore) admitQueueRow(ctx context.Context, tx queryer, orgID, eventID string, evt domain.Event, traceparent string, entityPollSeq *int64, uniqueKey string) (bool, error) {
 	_, deduplicated, err := workitem.Admit(ctx, tx, s.kind, orgID, uniqueKey, db.EventQueueRowCols(eventID, evt, traceparent, entityPollSeq))
 	return deduplicated, err
 }
@@ -102,7 +103,7 @@ func unsettledCloseExists(ctx context.Context, q queryer, orgID, entityID string
 func (s *eventQueueStore) EnqueueBatchWithSnapshotCAS(ctx context.Context, orgID, entityID, snapshotJSON string, expectedPollSeq int64, events []domain.Event, traceparents []string) (bool, []string, error) {
 	var won bool
 	var ids []string
-	if err := db.InTx(ctx, s.conn, func(tx *sql.Tx) error {
+	if err := inTx(ctx, s.q, func(tx queryer) error {
 		var err error
 		won, err = updateSnapshotCAS(ctx, tx, orgID, entityID, snapshotJSON, expectedPollSeq)
 		if err != nil {
@@ -172,7 +173,11 @@ const pgQueuedEventSelect = `
 	FROM public.event_queue`
 
 func (s *eventQueueStore) Claim(ctx context.Context, owner workitem.Owner, n int) (db.EventQueueClaim, error) {
-	res, claimErr := workitem.Claim(ctx, s.conn, s.kind, owner, "", n)
+	conn, ok := s.q.(*sql.DB)
+	if !ok {
+		return db.EventQueueClaim{}, db.ErrEventQueueClaimInTx
+	}
+	res, claimErr := workitem.Claim(ctx, conn, s.kind, owner, "", n)
 	out := db.EventQueueClaim{Cancelled: res.Cancelled, Parked: res.Parked, Reclaimed: res.Reclaimed}
 	if len(res.Claimed) == 0 {
 		return out, claimErr
@@ -183,7 +188,7 @@ func (s *eventQueueStore) Claim(ctx context.Context, owner workitem.Owner, n int
 	for i, r := range res.Claimed {
 		ids[i] = r.ItemID
 	}
-	rows, err := s.conn.QueryContext(ctx, pgQueuedEventSelect+`
+	rows, err := conn.QueryContext(ctx, pgQueuedEventSelect+`
 		WHERE id = ANY($1)`, ids)
 	if err != nil {
 		return out, errors.Join(claimErr, err)
@@ -212,19 +217,19 @@ func (s *eventQueueStore) Claim(ctx context.Context, owner workitem.Owner, n int
 }
 
 func (s *eventQueueStore) RenewLease(ctx context.Context, r workitem.Receipt) (workitem.Receipt, error) {
-	return workitem.RenewLease(ctx, s.conn, s.kind, r)
+	return workitem.RenewLease(ctx, s.q, s.kind, r)
 }
 
 func (s *eventQueueStore) MarkDone(ctx context.Context, r workitem.Receipt) error {
-	return workitem.MarkDone(ctx, s.conn, s.kind, r)
+	return workitem.MarkDone(ctx, s.q, s.kind, r)
 }
 
 func (s *eventQueueStore) Requeue(ctx context.Context, r workitem.Receipt, outcome workitem.Outcome, cause error) (bool, error) {
-	return workitem.Requeue(ctx, s.conn, s.kind, r, outcome, cause)
+	return workitem.Requeue(ctx, s.q, s.kind, r, outcome, cause)
 }
 
 func (s *eventQueueStore) PruneSettled(ctx context.Context, before time.Time) (int, error) {
-	res, err := s.conn.ExecContext(ctx, `
+	res, err := s.q.ExecContext(ctx, `
 		DELETE FROM public.event_queue
 		WHERE status IN ('done', 'cancelled') AND done_at < $1
 	`, before)
@@ -245,7 +250,7 @@ var _ db.WorkKindHandle = (*eventQueueStore)(nil)
 func (s *eventQueueStore) Name() string          { return workkinds.EventQueueName }
 func (s *eventQueueStore) Label() string         { return workkinds.EventQueueLabel }
 func (s *eventQueueStore) Kind() workitem.Kind   { return s.kind }
-func (s *eventQueueStore) Conn() workitem.DBTX   { return s.conn }
+func (s *eventQueueStore) Conn() workitem.DBTX   { return s.q }
 func (s *eventQueueStore) Access() db.WorkAccess { return db.WorkAccessOrgAdmin }
 
 // Controls: redrive and cancel, never supersede. A supersede records a
@@ -273,7 +278,7 @@ func (s *eventQueueStore) Describe(ctx context.Context, orgID string, ids []int6
 	if len(ids) == 0 {
 		return map[int64]db.WorkSubject{}, nil
 	}
-	rows, err := s.conn.QueryContext(ctx, `
+	rows, err := s.q.QueryContext(ctx, `
 		SELECT q.id, q.event_id, q.event_type,
 		       COALESCE(q.entity_id::text, ''), COALESCE(e.source, ''), COALESCE(e.source_id, ''), COALESCE(e.title, '')
 		FROM public.event_queue q
@@ -299,11 +304,11 @@ func (s *eventQueueStore) Describe(ctx context.Context, orgID string, ids []int6
 }
 
 func (s *eventQueueStore) UnsettledCloseExistsSystem(ctx context.Context, orgID, entityID string) (bool, error) {
-	return unsettledCloseExists(ctx, s.conn, orgID, entityID)
+	return unsettledCloseExists(ctx, s.q, orgID, entityID)
 }
 
 func (s *eventQueueStore) ListForEntity(ctx context.Context, orgID, entityID string) ([]domain.QueuedEvent, error) {
-	rows, err := s.conn.QueryContext(ctx, pgQueuedEventSelect+`
+	rows, err := s.q.QueryContext(ctx, pgQueuedEventSelect+`
 		WHERE org_id = $1 AND entity_id = $2
 		ORDER BY id
 	`, orgID, entityID)

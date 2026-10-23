@@ -83,3 +83,7 @@ var _ slackstore.DeliveryStore = (*deliveryStore)(nil)
 func (s *deliveryStore) MarkDeliveredSystem(context.Context, string, string) (bool, error) {
 	return false, db.ErrNotApplicableInLocal
 }
+
+func (s *deliveryStore) PruneDeliveredSystem(context.Context) error {
+	return db.ErrNotApplicableInLocal
+}

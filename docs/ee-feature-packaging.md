@@ -45,7 +45,7 @@ What's admissible in **core** (exactly three kinds of things):
 | Event-type schemas               | `events.Register(EventSchema{...})` in `internal/domain/events`          | the feature's event types: metadata + predicate shape, matcher, and the per-type `Ownership` declaration                                                               |
 | Routing behavior                 | `routing.RegisterSource(prefix, SourceHooks{ResolveOwner, TracksScope})` | how an _Owned_ event of this source resolves its owning team, and whether a team tracks the event's scope. Registration also marks the prefix router-bound (see below) |
 | Entitlement gate                 | `entitlements.GateEventSource(prefix, feature)`                          | the dormancy contract for every event type of this source                                                                                                              |
-| Event publish                    | `ExtensionAPI.PublishEvent(evt)`                                         | ingest → durable outbox → router, without touching the bus directly                                                                                                    |
+| Event publish                    | `SystemWithTx` → `ingest.Enqueue` → `PublishPreEnqueued`                 | ingest → durable outbox → router: the ingest's own writes and the event's queue row commit in one admin-pool transaction, and the fan-out follows                      |
 | Event subscribe                  | `ExtensionAPI.Bus()`                                                     | bus subscriptions (live-update consumers)                                                                                                                              |
 | Background workers               | `ExtensionAPI.OnReady`                                                   | a long-lived worker goroutine (connection manager, poller) started post-wiring with a shutdown-cancelling context                                                      |
 | Agent CLI verbs                  | `exec.RegisterSubcommand` + `agenthost.RegisterExtension`                | an exec subcommand (arg parsing, ee-side) and its host-side logic, entitlement-gated at the `CallExtension` dispatch                                                   |
@@ -87,7 +87,7 @@ func init() {
 }
 
 func install(api server.ExtensionAPI) {
-    h := &handler{tx: api.Tx(), az: api.Authz(), publish: api.PublishEvent}
+    h := &handler{tx: api.Tx(), az: api.Authz(), publish: api.PublishPreEnqueued}
     // Signed-webhook ingest is pre-auth: Raw + PreAuthRateLimit, handler
     // verifies the signature itself, then gates on the entitlement before
     // doing anything: if !entitlements.For(orgID).Has(FeatureChat) { drop }.
@@ -148,8 +148,19 @@ return routing.Unowned(), nil       // I looked; nothing owns it
 return routing.OwnerResolution{}, err  // I couldn't look
 ```
 
-`ExtensionAPI.PublishEvent` and `Bus()` are read-through and nil until app
-wiring completes: use them at request time (any mounted handler is safe),
+An ingest writes its event in the transaction that records its input as
+consumed — a webhook's delivery dedup, a poller's snapshot.
+`api.Tx().SystemWithTx` hands the feature's store bundle (through its
+`FromSystemTx` accessor) and an `EventQueue`, all bound to one admin-pool
+transaction: record the delivery, write the feature's own rows, and write the
+event with `ingest.Enqueue`. After the commit,
+`ExtensionAPI.PublishPreEnqueued` fans the event out. A failure
+anywhere rolls the record back with the event, so the upstream's redelivery
+runs fresh instead of being dropped as a duplicate of an event that never
+queued. `ee/slack`'s `ingestPipeline.deliver` is the reference.
+
+`ExtensionAPI.PublishPreEnqueued` and `Bus()` are read-through and nil until
+app wiring completes: use them at request time (any mounted handler is safe),
 never inside the install closure itself.
 
 A feature that needs a long-lived background worker (a connection manager, a
@@ -159,8 +170,8 @@ hook every time this pod's background-brain lease starts — at
 before this ticket; under the control/standby split it's gated to exactly one
 pod at a time, and fires again on a fresh ctx if this pod later re-acquires
 the lease after a demotion. The ctx cancels on EITHER process shutdown OR
-lease demotion — by the time the hook runs, `Bus()` and `PublishEvent` are
-safe to use. The worker is not exempt from the dormancy contract: it must
+lease demotion — by the time the hook runs, `Bus()` and `PublishPreEnqueued`
+are safe to use. The worker is not exempt from the dormancy contract: it must
 gate its per-org work on `entitlements.For(orgID).Has(feature)` just like any
 handler, since `OnReady` fires unconditionally (across every entitled and
 unentitled org alike) for every install that currently holds the brain.
@@ -303,8 +314,9 @@ the feature constants, not an archaeology project.
 3. Migrations in the shared trees (`internal/db/migrations-*`) — schema is
    universal, access is gated.
 4. If it has events: `events.Register` (with `Ownership`),
-   `routing.RegisterSource`, `entitlements.GateEventSource`, publish via
-   `ExtensionAPI.PublishEvent`.
+   `routing.RegisterSource`, `entitlements.GateEventSource`; enqueue each
+   event in the `SystemWithTx` that records its input as consumed, and fan
+   it out with `ExtensionAPI.PublishPreEnqueued`.
 5. Routes via `server.RegisterExtension`; per-request entitlement gating in
    every handler; pre-auth ingest through `Raw` + `PreAuthRateLimit` with its
    own signature verification — or `Raw` + `SignedWebhookRateLimit` when the

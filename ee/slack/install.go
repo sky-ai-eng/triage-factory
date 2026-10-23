@@ -80,9 +80,10 @@ func install(api server.ExtensionAPI) {
 	// the no-op) before routes() runs this installer.
 	stats := newIngestStats(otel.GetMeterProvider())
 	pipeline := &ingestPipeline{
+		tx:          api.Tx(),
 		deliveries:  bundle.Deliveries,
 		channels:    bundle.Channels,
-		publish:     api.PublishEvent,
+		publish:     api.PublishPreEnqueued,
 		identity:    NewIdentityResolver(stores),
 		channelName: NewChannelResolver(stores),
 		permalink:   NewPermalinkResolver(stores),

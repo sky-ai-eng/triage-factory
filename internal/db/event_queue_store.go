@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
@@ -110,6 +111,10 @@ type ClaimedEvent struct {
 	Event   domain.QueuedEvent
 }
 
+// ErrEventQueueClaimInTx is Claim's refusal on a store bound to a caller's
+// transaction: the claim opens a transaction of its own per round.
+var ErrEventQueueClaimInTx = errors.New("db: event queue claim opens its own transactions and cannot run inside a caller's")
+
 // EventQueueClaim is one Claim call's work. Cancelled, Parked and Reclaimed
 // are workitem.ClaimResult's counts, passed through for the worker's log.
 type EventQueueClaim struct {
@@ -203,6 +208,10 @@ type EventQueueStore interface {
 	// A non-nil error still returns the events of rounds that committed
 	// before it, as workitem.Claim does with their receipts: they are real
 	// leases, and the caller disposes of them before it escalates.
+	//
+	// Each round is a transaction of its own, so a store bound to a
+	// caller's transaction (SystemTxStores.EventQueue) refuses with
+	// ErrEventQueueClaimInTx.
 	Claim(ctx context.Context, owner workitem.Owner, n int) (EventQueueClaim, error)
 
 	// RenewLease pushes the lease out to fresh database time plus the kind's

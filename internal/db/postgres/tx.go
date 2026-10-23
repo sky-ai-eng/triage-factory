@@ -76,6 +76,30 @@ func (s *Store) SyntheticClaimsWithReadTx(ctx context.Context, orgID, userID str
 	return s.runClaimsBoundTx(ctx, orgID, userID, true, fn)
 }
 
+// SystemWithTx runs fn in one transaction on the admin pool, with no claims
+// and no role change: every write in it is a system write, bound to org_id by
+// argument. The extension bundles get the app pool as their app half, the
+// same handle Stores hands them, so an app-pool method there fails at the
+// role layer rather than running unscoped on the admin connection.
+func (s *Store) SystemWithTx(ctx context.Context, orgID string, fn func(db.SystemTxStores) error) error {
+	ctx, span := tracer.Start(ctx, "db.tx.system",
+		trace.WithAttributes(telemetry.OrgID(orgID)))
+	defer span.End()
+
+	err := db.InTx(ctx, s.admin, func(tx *sql.Tx) error {
+		return fn(db.SystemTxStores{
+			EventQueue: newEventQueueStore(tx),
+			Ext:        db.BuildStoreExtensions(db.DialectPostgres, s.app, tx),
+		})
+	})
+	if err != nil {
+		// Not recorded as an exception, for the claims door's reason: the
+		// error text can carry tenant data.
+		span.SetStatus(codes.Error, "system tx")
+	}
+	return err
+}
+
 // syntheticUserID is the guardrail both synthetic doors share.
 func syntheticUserID(userID string) error {
 	if userID == runmode.LocalDefaultUserID {

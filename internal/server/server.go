@@ -266,8 +266,9 @@ type Server struct {
 	// ingestor is the durable emit seam (events audit row + queue row, then
 	// bus fan-out). nil until SetIngestor runs (wired in
 	// internal/app/subsystems.go immediately after ingest.New). Backs
-	// ExtensionAPI.PublishEvent — ee/ ingest must publish through here, never
-	// through the raw bus, or events lose the durable outbox.
+	// ExtensionAPI.PublishPreEnqueued — ee/ ingest fans out through here,
+	// never through the raw bus, so the drain worker is nudged for the
+	// queue row the ingest committed.
 	ingestor *ingest.Ingestor
 
 	// onInstallationTokensInvalid fires when an installation's already-minted
@@ -2055,11 +2056,10 @@ func (s *Server) SetLeaseStatus(fn LeaseStatusFunc) {
 	s.leaseStatus = fn
 }
 
-// SetIngestor wires the durable ingest seam so ExtensionAPI.PublishEvent can
-// delegate to it. Wired in internal/app/subsystems.go immediately after
+// SetIngestor wires the durable ingest seam so ExtensionAPI.PublishPreEnqueued
+// can delegate to it. Wired in internal/app/subsystems.go immediately after
 // ingest.New — before that point (and in any test wiring that skips it),
-// ingestor is nil and PublishEvent drops loudly rather than falling back to
-// a bare bus publish (which would silently skip the durable outbox).
+// ingestor is nil and PublishPreEnqueued logs and skips the fan-out.
 func (s *Server) SetIngestor(i *ingest.Ingestor) {
 	s.ingestor = i
 }
