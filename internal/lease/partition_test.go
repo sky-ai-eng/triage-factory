@@ -72,14 +72,15 @@ func (s *hungRenewalStore) committed() time.Time {
 // acquire commit across both tickers' phases, and the TryAcquire latency
 // separates its commit from its return. When both tickers are ready, Run's
 // select picks one at random, as it does in production. The configurations
-// are the default knobs plus, for a range of demote deadlines, the smallest
-// TTL the margin check accepts.
+// are the default knobs, a generous TTL, and, for a range of demote
+// deadlines, the smallest TTL the margin check accepts.
 func TestManager_PartitionedHolderDemotesBeforeTakeover(t *testing.T) {
 	restore := logging.SetOutput(io.Discard)
 	defer restore()
 
 	type knobs struct{ ttl, demote time.Duration }
-	configs := []knobs{{DefaultTTL, DefaultDemoteDeadline}}
+	// A 40s TTL makes the store-call timeout (5s) the larger term.
+	configs := []knobs{{DefaultTTL, DefaultDemoteDeadline}, {40 * time.Second, DefaultDemoteDeadline}}
 	for _, demote := range []time.Duration{1, 2, 3, 4, 5, 7, 10, 15, 30} {
 		demote *= time.Second
 		ttl := demote + time.Second

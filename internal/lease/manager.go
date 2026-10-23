@@ -142,10 +142,12 @@ func deadlineCheckInterval(demoteDeadline time.Duration) time.Duration {
 // renewal committed, and the holder measures its deadline from that
 // renewal's issue time, which is no later than the commit. So demoteDeadline
 // plus the longer of the two terms must stay strictly under ttl, or a
-// demoting holder and its successor can overlap (double-brain). Above its
-// 1s floor, storeCallTimeout is at most half the margin, so the
-// deadline-check interval is the term that binds today; the store-call term
-// keeps the check right if that sizing changes. Shared by NewManager
+// demoting holder and its successor can overlap (double-brain). Which term
+// is larger depends on the knobs: at the defaults it is the check interval
+// (3s against 2.5s), and with a 40s TTL over a 15s deadline it is the
+// store-call timeout (5s against 3s). Above its 1s floor, storeCallTimeout is
+// at most half the margin, so that term never causes a refusal on its own.
+// Shared by NewManager
 // and KnobsFromEnv so direct construction and the env path refuse the same
 // configurations.
 func demoteMarginError(demoteDeadline, ttl time.Duration) error {
