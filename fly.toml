@@ -4,10 +4,13 @@
 #           workflow publishes).
 # Deploy:   fly deploy --remote-only
 # Region:   iad — low-latency to GitHub + Anthropic API endpoints.
-# Sandbox:  the in-container gVisor runner needs SYS_ADMIN + NET_ADMIN
-#           and unconfined seccomp; Fly Machines grant these by default
-#           (validated against the SKY-254 runsc probe — see the parent
-#           epic for the platform-compatibility log). TFAC-608 replaced
+# Sandbox:  the in-container gVisor runner needs SYS_ADMIN, NET_ADMIN
+#           and SYS_RESOURCE, and unconfined seccomp. Fly Machines grant
+#           SYS_ADMIN and NET_ADMIN by default (validated against the
+#           SKY-254 runsc probe — see the parent epic for the
+#           platform-compatibility log). SYS_RESOURCE has not been
+#           checked on Fly; the cap-broker refuses to boot without it,
+#           naming it. TFAC-608 replaced
 #           unconfined seccomp with a tailored allowlist profile for
 #           self-host docker-compose (docker/seccomp-profile.json) —
 #           fly.toml has no security_opt-equivalent field to attach it

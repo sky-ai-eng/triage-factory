@@ -67,7 +67,7 @@ const maxConsecutiveDeaths = 3
 // once the engine has restarted it. The cell keeps the run tree and /tmp for
 // every jail it launches, so the files survive; processes belong to the jail
 // that died.
-const restartedSentence = "The sandbox has been restarted, so no process from before is running; files under /work and /tmp were kept."
+const restartedSentence = "The sandbox has been restarted in place, so no process from before is running; files under /work and /tmp were kept."
 
 // newSandboxSentence is what those calls are told when the engine could not
 // restart the tool host and the engagement ends: the next engagement runs in

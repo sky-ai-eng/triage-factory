@@ -119,6 +119,9 @@ func buildSpec(cfg Config, netnsPath, tmpDir string, jailUID, jailGID int) (*spe
 				Options: []string{"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620"}},
 			{Destination: "/sys", Type: "sysfs", Source: "sysfs",
 				Options: []string{"nosuid", "noexec", "nodev", "ro"}},
+			// TODO(TFAC-1177): nothing bounds how much of the executor's disk
+			// this directory, or the run tree, takes; one run can fill it for
+			// every other run and the executor.
 			{Destination: "/tmp", Type: "bind", Source: tmpDir,
 				Options: []string{"rbind", "rw", "nosuid", "nodev"}},
 

@@ -259,6 +259,35 @@ func forkedSandbox(procFd int) (bool, error) {
 }
 
 // writeOOMScoreAdj sets the oom_score_adj of the process procFd names.
+// CheckOOMScoreLowering sets this process's OOM score to the runtime's and
+// back, and reports whether the kernel allowed it. That is what runsc does
+// for every jail. A capability set naming CAP_SYS_RESOURCE does not show it
+// will work: in a user namespace the capability is the namespace's, and the
+// kernel lowers a score past its floor only for the host's. Raising a score
+// back needs no capability.
+func CheckOOMScoreLowering() error {
+	procFd, err := unix.Open("/proc/self", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open /proc/self: %w", err)
+	}
+	defer closeFd(procFd)
+	b, err := readFileAt(procFd, "oom_score_adj")
+	if err != nil {
+		return err
+	}
+	current, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return fmt.Errorf("parse oom_score_adj %q: %w", b, err)
+	}
+	if current <= runtimeOOMScoreAdj {
+		return nil
+	}
+	if err := writeOOMScoreAdj(procFd, runtimeOOMScoreAdj); err != nil {
+		return err
+	}
+	return writeOOMScoreAdj(procFd, current)
+}
+
 func writeOOMScoreAdj(procFd, score int) error {
 	fd, err := unix.Openat(procFd, "oom_score_adj", unix.O_WRONLY|unix.O_CLOEXEC, 0)
 	if err != nil {

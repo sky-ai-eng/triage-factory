@@ -163,14 +163,24 @@ func openJailTmpBase(create bool) (fd int, base string, err error) {
 		return -1, base, fmt.Errorf("open state root %s: %w", realRoot, err)
 	}
 	defer closeFd(rootFd)
+	created := false
 	if create {
-		if err := unix.Mkdirat(rootFd, jailTmpDirName, jailTmpMode); err != nil && !errors.Is(err, unix.EEXIST) {
+		err := unix.Mkdirat(rootFd, jailTmpDirName, jailTmpMode)
+		if err != nil && !errors.Is(err, unix.EEXIST) {
 			return -1, base, fmt.Errorf("create %s: %w", base, err)
 		}
+		created = err == nil
 	}
 	fd, err = openat2AnchoredChildDir(rootFd, jailTmpDirName)
 	if err != nil {
 		return -1, base, fmt.Errorf("open %s: %w", base, err)
+	}
+	// Mkdirat's mode passed through this process's umask.
+	if created {
+		if err := unix.Fchmod(fd, jailTmpMode); err != nil {
+			closeFd(fd)
+			return -1, base, fmt.Errorf("chmod %s: %w", base, err)
+		}
 	}
 	if err := checkJailTmpBase(fd); err != nil {
 		closeFd(fd)

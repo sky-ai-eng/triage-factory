@@ -262,10 +262,12 @@ fails one does not meet the contract.
 12. **A full `/tmp`, or a guest at its memory ceiling, costs a guest process
     and never the jail.** `/tmp` keeps its files where the memory ceiling
     does not count them as memory the kernel cannot reclaim, so a guest that
-    writes past the ceiling into `/tmp` gets at most `ENOSPC`. At the ceiling
-    the kernel kills a guest process before any of the backend's runtime:
-    gVisor's sentry and gofer and `runsc` itself rank below the guest in the
-    OOM order.
+    writes past the ceiling into `/tmp` gets at most `ENOSPC`, once the disk
+    under it is full. That disk is shared: a run's `/tmp` and `/work` have no
+    limit of their own, so one run can fill it for every other run on the
+    executor (TFAC-1177). At the ceiling the kernel kills a guest process
+    before any of the backend's runtime: gVisor's sentry and gofer and `runsc`
+    itself rank below the guest in the OOM order.
 
 ## 6. Policy stays in TF on every backend
 

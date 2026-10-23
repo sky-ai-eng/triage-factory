@@ -194,7 +194,13 @@ var requireBrokerCapabilities = func() error {
 	if err != nil {
 		return fmt.Errorf("capbroker: read own capabilities: %w", err)
 	}
-	return requireSysResource(names)
+	if err := requireSysResource(names); err != nil {
+		return err
+	}
+	if err := sandbox.CheckOOMScoreLowering(); err != nil {
+		return fmt.Errorf("capbroker: CAP_SYS_RESOURCE is held but lowering an OOM score was refused (%w), as it is when the broker runs in a user namespace (rootless Docker or Podman, userns-remap). runsc would refuse to start every jail. Run the executor with the capability in the host's user namespace", err)
+	}
+	return nil
 }
 
 // requireSysResource refuses a broker whose effective capabilities, names,
