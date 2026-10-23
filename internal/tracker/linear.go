@@ -534,6 +534,10 @@ func (t *Tracker) holdLinearUnreadableTeams(ctx context.Context, client LinearCl
 	}
 	for _, id := range ids {
 		if n := held[id]; n > 0 {
+			// TODO(TFAC-878): open a durable "Linear team unreadable" condition
+			// for the org's admins, keyed on the team and closed when a cycle
+			// reads it again. This line and the settings card's banner are the
+			// only signals, so nobody who isn't looking learns the team is stale.
 			trackerLog.WarnContext(ctx, "linear credential cannot read a tracked team; its missing issues stay tracked instead of being retired as not found",
 				"linear_team_id", id, "team_key", teams.ForTeam(id).Key, "held", n)
 		}
