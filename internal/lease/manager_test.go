@@ -137,11 +137,19 @@ func TestNewManager_RejectsDemoteDeadlineNotLessThanTTL(t *testing.T) {
 	if _, err := NewManager(store, "x", "me", time.Second, 20*time.Second, 15*time.Second, nil, nil, nil); err != nil {
 		t.Fatalf("expected no error for a valid deadline < ttl, got %v", err)
 	}
-	// demote < ttl but the deadline-check granularity closes the gap: 19s +
+	// demote < ttl but the deadline-check interval closes the gap: 19s +
 	// deadlineCheckInterval(19s)=3.8s = 22.8s >= 20s must be refused, even
-	// though 19 < 20 (the bare demote<ttl check would have let it through).
-	if _, err := NewManager(store, "x", "me", time.Second, 20*time.Second, 19*time.Second, nil, nil, nil); err == nil {
-		t.Fatal("expected an error when demote + check-granularity exceeds ttl")
+	// though 19 < 20, and the error names the term that does not fit.
+	_, err := NewManager(store, "x", "me", time.Second, 20*time.Second, 19*time.Second, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected an error when demote + check interval exceeds ttl")
+	}
+	if !strings.Contains(err.Error(), "deadline-check interval (3.8s)") {
+		t.Errorf("error should name the deadline-check interval, got: %v", err)
+	}
+	// Exactly at the TTL is refused too: 15s + 3s = 18s is not under 18s.
+	if _, err := NewManager(store, "x", "me", time.Second, 18*time.Second, 15*time.Second, nil, nil, nil); err == nil {
+		t.Fatal("expected an error when demote + check interval equals ttl")
 	}
 }
 
@@ -409,7 +417,7 @@ func TestManager_DemoteDeadlineFiresOnPersistentRenewError(t *testing.T) {
 		store.mu.Unlock()
 		a.tick(context.Background())
 		if !a.IsHolder() {
-			t.Fatalf("tick %d: must not demote from a Renew error alone (only the deadline ticker may)", i)
+			t.Fatalf("tick %d: must not demote from a Renew error alone, before the deadline elapses", i)
 		}
 	}
 	a.checkDemoteDeadline()

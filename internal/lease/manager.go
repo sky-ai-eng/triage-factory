@@ -19,11 +19,14 @@ import (
 //     erroring, not just returning renewed=false) is caught close to the
 //     deadline itself, not up to one whole renewInterval late.
 //
-// The deadline ticker can only stay this responsive because every store
-// call in tick is bounded by storeCallTimeout: sharing one goroutine, a
-// renewal blocked on a black-holed connection would otherwise stall the
-// select and the deadline check with it — the very partition the deadline
-// exists to catch (see storeCallTimeout).
+// A holder's renew tick also checks the deadline before it issues Renew and
+// again after Renew returns, and every store call in tick is bounded by
+// storeCallTimeout. A renewal blocked on a black-holed connection therefore
+// holds the goroutine for at most one timeout, and the deadline is checked
+// as soon as it returns, whichever ticker Run's select services next. While
+// holding, the deadline is checked at least once per
+// max(deadlineCheckInterval, storeCallTimeout); demoteMarginError reserves
+// that much room under the TTL.
 //
 // A renewal that explicitly reports "0 rows matched" (someone else's
 // TryAcquire already won) demotes immediately, on the spot — that's a
@@ -61,8 +64,8 @@ type Manager struct {
 	// NOTHING renews and NOTHING re-checks the demote deadline; if it
 	// ever ran longer than demoteDeadline, the very next deadline check
 	// would self-demote this instance immediately on return, even though
-	// its last DB-confirmed renewal (stamped at promote, just before
-	// onAcquire runs — see promote) was perfectly healthy. promote/demote
+	// its last DB-confirmed renewal (the winning TryAcquire, stamped with
+	// its issue time — see promote) was perfectly healthy. promote/demote
 	// time these calls and log loudly if one eats into that margin, as an
 	// early-warning net rather than a behavior change.
 	onAcquire func(term int64)
@@ -73,10 +76,10 @@ type Manager struct {
 	lastSuccessfulRenewal time.Time
 }
 
-// NewManager builds a Manager. Returns an error if demoteDeadline is not
-// strictly less than ttl (KnobsFromEnv already enforces this on the env
-// path; this is the belt-and-suspenders check for direct construction,
-// e.g. from tests). fenced may be nil (treated as "never fenced" — local
+// NewManager builds a Manager. Returns an error for knobs that fail
+// demoteMarginError (KnobsFromEnv applies the same check on the env path;
+// this is the belt-and-suspenders check for direct construction, e.g. from
+// tests). fenced may be nil (treated as "never fenced" — local
 // callers that don't wire identity-fence detection get plain lease
 // semantics). onAcquire/onDemote may be nil (a Manager with no brain to
 // drive, useful for pure election tests).
@@ -130,38 +133,51 @@ func deadlineCheckInterval(demoteDeadline time.Duration) time.Duration {
 	return d
 }
 
-// demoteMarginError rejects a demote deadline that leaves too little room
-// under ttl. The self-demote fires at the first deadline tick AFTER the
-// deadline elapses — up to deadlineCheckInterval late — and a standby may
-// acquire at ttl, so demoteDeadline + deadlineCheckInterval must stay
-// strictly under ttl or a demoting holder and its successor can overlap
-// (double-brain). Shared by NewManager and KnobsFromEnv so direct
-// construction and the env path refuse the identical unsafe configs; a bare
-// demoteDeadline < ttl check (the prior guard) missed the tick granularity.
+// demoteMarginError rejects knobs under which a partitioned holder can still
+// report itself holder when a standby becomes eligible to acquire. Once the
+// demote deadline elapses, the next check runs within one
+// deadlineCheckInterval if Run is idle in its select, or within one
+// storeCallTimeout if Run is inside a hung Renew (tick checks on both sides
+// of the call). A standby may acquire one TTL after the holder's last
+// renewal committed, and the holder measures its deadline from that
+// renewal's issue time, which is no later than the commit. So demoteDeadline
+// plus the longer of the two terms must stay strictly under ttl, or a
+// demoting holder and its successor can overlap (double-brain). Above its
+// 1s floor, storeCallTimeout is at most half the margin, so the
+// deadline-check interval is the term that binds today; the store-call term
+// keeps the check right if that sizing changes. Shared by NewManager
+// and KnobsFromEnv so direct construction and the env path refuse the same
+// configurations.
 func demoteMarginError(demoteDeadline, ttl time.Duration) error {
-	if demoteDeadline+deadlineCheckInterval(demoteDeadline) >= ttl {
-		return fmt.Errorf("lease demote deadline (%s) plus its check granularity (%s) must stay strictly under the takeover TTL (%s); raise TF_LEASE_TTL_SEC or lower TF_LEASE_DEMOTE_SEC", demoteDeadline, deadlineCheckInterval(demoteDeadline), ttl)
+	gap, term := deadlineCheckInterval(demoteDeadline), "deadline-check interval"
+	if call := storeCallTimeout(ttl, demoteDeadline); call > gap {
+		gap, term = call, "store-call timeout"
+	}
+	if demoteDeadline+gap >= ttl {
+		return fmt.Errorf("lease demote deadline (%s) plus the %s (%s) must stay strictly under the takeover TTL (%s), because a partitioned holder can demote that late and a standby may acquire at the TTL; raise TF_LEASE_TTL_SEC or lower TF_LEASE_DEMOTE_SEC", demoteDeadline, term, gap, ttl)
 	}
 	return nil
 }
 
-// storeCallTimeout bounds a single DB call inside tick. It is what makes the
-// deadline ticker actually independent: tick and checkDemoteDeadline share
-// Run's one goroutine, so an UNBOUNDED store call (a silently black-holed
-// connection — packets vanish, no RST, so the driver never returns on its
-// own) would block the whole select and starve the deadline check entirely,
-// letting a partitioned holder keep the lease past TTL while a standby
-// acquires (double-brain). Bounding each call means a blocked renewal fails
-// within this budget and the pending deadline tick is serviced right after,
-// so the worst-case self-demote is demoteDeadline + one timeout. Sized at half
-// the demote-vs-ttl margin and no more than demoteDeadline/3 — but never below
-// a 1s floor, which takes PRECEDENCE for a very tight demote deadline (where
-// demoteDeadline/3 would fall under 1s) so a healthy-but-slow renewal isn't
-// false-failed. D3's boot check guarantees the margin exceeds 1s, so even the
-// floored value stays under ttl.
+// storeCallTimeout bounds a single DB call inside tick. tick and
+// checkDemoteDeadline share Run's one goroutine, so an UNBOUNDED store call
+// (a silently black-holed connection — packets vanish, no RST, so the driver
+// never returns on its own) would block the whole select and stop the
+// deadline check entirely, letting a partitioned holder keep the lease past
+// TTL while a standby acquires (double-brain). Bounded, a hung Renew returns
+// within this budget and tick checks the deadline as soon as it does, so the
+// call delays the self-demote by at most one timeout; demoteMarginError
+// counts that delay against the TTL. Sized at half the demote-vs-ttl margin
+// and no more than demoteDeadline/3 — but never below a 1s floor, which
+// takes PRECEDENCE for a very tight demote deadline (where demoteDeadline/3
+// would fall under 1s) so a healthy-but-slow renewal isn't false-failed.
 func (m *Manager) storeCallTimeout() time.Duration {
-	d := (m.ttl - m.demoteDeadline) / 2
-	if cap := m.demoteDeadline / 3; d > cap {
+	return storeCallTimeout(m.ttl, m.demoteDeadline)
+}
+
+func storeCallTimeout(ttl, demoteDeadline time.Duration) time.Duration {
+	d := (ttl - demoteDeadline) / 2
+	if cap := demoteDeadline / 3; d > cap {
 		d = cap
 	}
 	if d < time.Second {
@@ -197,8 +213,9 @@ func (m *Manager) Run(ctx context.Context) {
 }
 
 // tick does one DB round-trip: renew if holder, else attempt acquisition.
-// The monotonic self-demote deadline is NOT checked here — see
-// checkDemoteDeadline, driven by its own faster ticker in Run.
+// A holder also checks the monotonic self-demote deadline before and after
+// its Renew; between renew ticks, checkDemoteDeadline runs on its own faster
+// ticker in Run.
 func (m *Manager) tick(ctx context.Context) {
 	if m.fenced() {
 		// A fenced instance must never hold, and never try to acquire —
@@ -210,6 +227,16 @@ func (m *Manager) tick(ctx context.Context) {
 	}
 
 	if m.IsHolder() {
+		// Check the deadline on both sides of the Renew rather than leaving
+		// it to the deadline ticker alone. When renewInterval is no longer
+		// than storeCallTimeout, a hung Renew returns with both tickers
+		// ready, and Run's select picks one at random: the deadline ticker
+		// can lose several picks in a row, each one costing another hung
+		// Renew. Checking here limits the delay to one call whatever the
+		// select picks.
+		if m.checkDemoteDeadline() {
+			return
+		}
 		// Stamp the ISSUE time, not the post-return time. lastSuccessfulRenewal
 		// feeds only time.Since (a local monotonic elapsed) — it is never
 		// compared against the DB clock — so it just needs to be a conservative
@@ -225,6 +252,7 @@ func (m *Manager) tick(ctx context.Context) {
 		cancel()
 		if err != nil {
 			leaseLog.Warn("lease renewal failed (transient?)", "name", m.name, "error", err)
+			m.checkDemoteDeadline()
 			return
 		}
 		if !renewed {
@@ -266,6 +294,11 @@ func (m *Manager) tick(ctx context.Context) {
 	}
 
 	acquireCtx, acquireCancel := context.WithTimeout(ctx, m.storeCallTimeout())
+	// Stamped before the call for the same reason the Renew path stamps its
+	// issue time: the acquisition sets renewed_at when it executes, after
+	// this, so a deadline measured from here can only expire early, never
+	// late.
+	issuedAt := time.Now()
 	term, acquired, err := m.store.TryAcquire(acquireCtx, m.name, m.holderID, m.ttl)
 	acquireCancel()
 	if err != nil {
@@ -273,7 +306,7 @@ func (m *Manager) tick(ctx context.Context) {
 		return
 	}
 	if acquired {
-		m.promote(term)
+		m.promote(term, issuedAt)
 		return
 	}
 	m.refreshObservedStatus(ctx)
@@ -281,15 +314,15 @@ func (m *Manager) tick(ctx context.Context) {
 
 // checkDemoteDeadline self-demotes a holder whose last successful renewal
 // is older than demoteDeadline — the guard against a silent partition
-// (Renew erroring every tick rather than explicitly losing) rather than
-// the ambiguous zero-successful-renewals-yet state right after promotion.
-func (m *Manager) checkDemoteDeadline() {
-	if !m.IsHolder() {
-		return
+// (Renew erroring or hanging every tick rather than explicitly losing).
+// Right after promotion the baseline is the winning TryAcquire, so a holder
+// with no renewals yet is not stale. Reports whether it demoted.
+func (m *Manager) checkDemoteDeadline() bool {
+	if !m.IsHolder() || m.sinceLastSuccess() < m.demoteDeadline {
+		return false
 	}
-	if m.sinceLastSuccess() >= m.demoteDeadline {
-		m.demote(fmt.Sprintf("no successful renewal within the demote deadline (%s)", m.demoteDeadline))
-	}
+	m.demote(fmt.Sprintf("no successful renewal within the demote deadline (%s)", m.demoteDeadline))
+	return true
 }
 
 func (m *Manager) currentTerm() int64 {
@@ -304,10 +337,13 @@ func (m *Manager) sinceLastSuccess() time.Duration {
 	return time.Since(m.lastSuccessfulRenewal)
 }
 
-func (m *Manager) promote(term int64) {
+// promote records the acquisition and runs onAcquire. issuedAt is when the
+// winning TryAcquire was issued, no later than the commit that set the
+// row's renewed_at, so it serves as the first renewal baseline.
+func (m *Manager) promote(term int64, issuedAt time.Time) {
 	m.mu.Lock()
 	m.status = Status{Name: m.name, HolderID: m.holderID, Term: term, IsHolder: true}
-	m.lastSuccessfulRenewal = time.Now()
+	m.lastSuccessfulRenewal = issuedAt
 	m.mu.Unlock()
 	leaseLog.Info("lease acquired", "name", m.name, "holder", m.holderID, "term", term)
 	if m.onAcquire == nil {
