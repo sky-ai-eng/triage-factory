@@ -163,6 +163,29 @@ func (c *Client) GetTeam(ctx context.Context, id string) (Team, error) {
 	return *data.Team, nil
 }
 
+// GetTeams returns the teams with the given UUIDs that the credential can
+// read. An id it cannot read is absent from the result, whether the team is
+// private and the credential's user is not in it or the team does not exist:
+// Linear answers both the same way. At most maxPageSize ids per call; the
+// caller batches.
+func (c *Client) GetTeams(ctx context.Context, ids []string) ([]Team, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if len(ids) > maxPageSize {
+		return nil, fmt.Errorf("linear: %d team ids in one call, at most %d", len(ids), maxPageSize)
+	}
+	var data struct {
+		Teams struct {
+			Nodes []Team `json:"nodes"`
+		} `json:"teams"`
+	}
+	if err := c.query(ctx, teamsByIDQuery, map[string]any{"ids": ids, "first": maxPageSize}, &data); err != nil {
+		return nil, err
+	}
+	return data.Teams.Nodes, nil
+}
+
 // ListTeamStates returns one page of a team's workflow states, at most first
 // of them; after is the previous page's EndCursor, or "" for the first page.
 // The page is in Linear's order, not the board's: Position orders the states,

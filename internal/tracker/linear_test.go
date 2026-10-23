@@ -26,20 +26,22 @@ import (
 // for ListCommentsSince, and labels each team's label list for ListLabels.
 // fail lets a test make a call return an error; notFound makes both reads
 // answer not-found for an id, and batchOmits makes only the batch read leave
-// it out.
+// it out. GetTeams answers every team the test has not put in hiddenTeams,
+// the ones the credential cannot read.
 type fakeLinear struct {
-	mu         sync.Mutex
-	viewer     linear.User
-	search     map[string][]linear.Issue // "pickup:<team>" / "assigned:<team>"
-	byID       map[string]linear.Issue
-	comments   map[string][]linear.Comment
-	labels     map[string][]linear.Label // a team's label list, by team id
-	calls      []string
-	filters    []linear.IssueFilter
-	batches    [][]string
-	fail       func(call string, n int) error
-	notFound   map[string]bool
-	batchOmits map[string]bool
+	mu          sync.Mutex
+	viewer      linear.User
+	search      map[string][]linear.Issue // "pickup:<team>" / "assigned:<team>"
+	byID        map[string]linear.Issue
+	comments    map[string][]linear.Comment
+	labels      map[string][]linear.Label // a team's label list, by team id
+	calls       []string
+	filters     []linear.IssueFilter
+	batches     [][]string
+	fail        func(call string, n int) error
+	notFound    map[string]bool
+	batchOmits  map[string]bool
+	hiddenTeams map[string]bool
 }
 
 func newFakeLinear() *fakeLinear {
@@ -116,6 +118,21 @@ func (f *fakeLinear) GetIssue(_ context.Context, ref string) (*linear.Issue, err
 		return &is, nil
 	}
 	return nil, fmt.Errorf("%w: issue %s", linear.ErrNotFound, ref)
+}
+
+func (f *fakeLinear) GetTeams(_ context.Context, ids []string) ([]linear.Team, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.record("teams:" + strings.Join(ids, ",")); err != nil {
+		return nil, err
+	}
+	var out []linear.Team
+	for _, id := range ids {
+		if !f.hiddenTeams[id] {
+			out = append(out, linear.Team{ID: id})
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeLinear) ListCommentsSince(_ context.Context, issueID, since string) ([]linear.Comment, error) {

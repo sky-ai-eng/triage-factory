@@ -71,6 +71,72 @@ export async function disconnectLinear(orgId: string): Promise<CredentialResult>
   )
 }
 
+/** A Linear team the org tracks, as LinearTeamVisibility names it. */
+export interface LinearTrackedTeam {
+  id: string
+  key: string
+  name: string
+}
+
+/** LinearTeamVisibility mirrors GET
+ *  /api/orgs/{org}/linear/access/team-visibility: the org's tracked Linear
+ *  teams as its current credential sees them. */
+export interface LinearTeamVisibility {
+  /** Tracked teams the credential reads that are private to their members:
+   *  the ones another credential may not see. */
+  private: LinearTrackedTeam[]
+  /** Tracked teams the credential cannot read. Their issues stay tracked but
+   *  stop refreshing, and nothing new in them is found. */
+  unreadable: LinearTrackedTeam[]
+}
+
+// fetchLinearTeamVisibility reads which tracked teams the org's Linear
+// credential can see. Org admin, and it asks Linear live. null when the read
+// failed: the warning and banner it feeds are advisory, and the tracker holds
+// an unreadable team's issues whether or not anyone was told.
+export async function fetchLinearTeamVisibility(
+  orgId: string,
+): Promise<LinearTeamVisibility | null> {
+  try {
+    return await apiJSON<LinearTeamVisibility>(
+      `/api/orgs/${encodeURIComponent(orgId)}/linear/access/team-visibility`,
+    )
+  } catch {
+    return null
+  }
+}
+
+// linearTeamNames lists teams for a sentence: "Ops (OPS)", "Ops (OPS) and
+// Platform (PLAT)", "A, B and C".
+export function linearTeamNames(teams: LinearTrackedTeam[]): string {
+  const names = teams.map((t) =>
+    t.name && t.key ? `${t.name} (${t.key})` : t.name || t.key || t.id,
+  )
+  if (names.length <= 1) return names.join('')
+  return names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1]
+}
+
+// linearUnreadableText is the connection card's banner for tracked teams the
+// connected credential cannot read. Linear answers the same way for a team the
+// credential is not let into and for one deleted in Linear, so the banner
+// gives the fix for each: access that fits the credential's shape, and
+// untracking, which lets a deleted team's issues retire.
+export function linearUnreadableText(teams: LinearTrackedTeam[], installed: boolean): string {
+  const one = teams.length === 1
+  const them = one ? 'it' : 'them'
+  const access = installed
+    ? `Share ${them} with the app on its page in Linear.`
+    : `Connect a key whose owner is a member.`
+  const deleted = one
+    ? 'If it was deleted in Linear, stop tracking it; its issues then retire.'
+    : 'Stop tracking any that were deleted in Linear; their issues then retire.'
+  return (
+    `This connection can't read the tracked Linear ${one ? 'team' : 'teams'} ${linearTeamNames(teams)}. ` +
+    `Triage Factory isn't seeing changes to ${one ? 'its' : 'their'} issues or finding new ones. ` +
+    `${access} ${deleted}`
+  )
+}
+
 // boundAsName is the name the connected line shows for the key's owner.
 export function boundAsName(access: LinearAccess): string {
   return access.bound_as?.display_name || access.bound_as?.name || ''

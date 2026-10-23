@@ -1639,6 +1639,9 @@ func (s *Server) routes() {
 	s.api("GET /api/orgs/{org_id}/linear/access", s.handleLinearAccessGet)
 	s.apiMutating("PUT /api/orgs/{org_id}/linear/access/credential", s.handleLinearCredentialPut)
 	s.apiMutating("DELETE /api/orgs/{org_id}/linear/access/credential", s.handleLinearCredentialDelete)
+	// Which tracked Linear teams the credential reads, and which are private:
+	// the card's warning before a credential switch and its banner after one.
+	s.api("GET /api/orgs/{org_id}/linear/access/team-visibility", s.handleLinearTeamVisibility)
 	// The org's own Linear OAuth app (linear_app_handlers.go): the status read
 	// the app card renders, and the admin's store and delete.
 	s.api("GET /api/orgs/{org_id}/linear/app", s.handleLinearAppStatus)

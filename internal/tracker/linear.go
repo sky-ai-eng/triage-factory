@@ -91,6 +91,7 @@ type LinearClient interface {
 	SearchIssues(ctx context.Context, f linear.IssueFilter, after string) (linear.IssuePage, error)
 	GetIssues(ctx context.Context, ids []string) ([]linear.Issue, error)
 	GetIssue(ctx context.Context, idOrIdentifier string) (*linear.Issue, error)
+	GetTeams(ctx context.Context, ids []string) ([]linear.Team, error)
 	ListCommentsSince(ctx context.Context, issueID, since string) ([]linear.Comment, error)
 	ListLabels(ctx context.Context, teamID string) ([]linear.Label, error)
 }
@@ -193,8 +194,12 @@ func (t *Tracker) RefreshLinear(ctx context.Context, scope string, client Linear
 	}
 
 	// The candidates arrive in the order the entities were listed, which is
-	// oldest-polled first.
-	confirmed, err := t.confirmLinearIndividually(ctx, client, orgID, scope, missing, prevs, teams, allDone, labelGroups)
+	// oldest-polled first, and the hold keeps that order.
+	candidates, err := t.holdLinearUnreadableTeams(ctx, client, missing, prevs, teams)
+	if err != nil {
+		return emitted, err
+	}
+	confirmed, err := t.confirmLinearIndividually(ctx, client, orgID, scope, candidates, prevs, teams, allDone, labelGroups)
 	emitted += confirmed
 	if err != nil {
 		return emitted, err
@@ -441,6 +446,105 @@ func (t *Tracker) refreshLinearBatches(ctx context.Context, client LinearClient,
 		span.SetAttributes(telemetry.Outcome("partial"))
 	}
 	return emitted, missing, nil
+}
+
+// holdLinearUnreadableTeams removes from the confirmation candidates every
+// entity in an armed team the credential cannot read, and returns the rest in
+// their order.
+//
+// Linear answers not-found for an issue the credential cannot read exactly as
+// for a deleted one. When the credential loses a whole team — a key whose
+// owner is not in a private team, or an install the team was not shared with —
+// asking about its issues one at a time would retire every one of them and
+// close their tasks, when what changed is the credential. One read of the
+// teams tells the two apart. A held entity stays active and unrefreshed until
+// the credential reads its team again; the connection card names the team.
+//
+// Only armed teams are held. An entity in a team no rule arms is asked about
+// as before, so untracking a team that will not be readable again, one deleted
+// in Linear, lets its issues retire.
+//
+// An entity's team is its own (entities.linear_team_id), or its snapshot's on
+// a row that predates the column; one naming neither is asked about. A failed
+// read of the teams holds every candidate in an armed team this cycle, since
+// it is no evidence the credential reads them. A rate limit is returned and
+// ends the cycle.
+func (t *Tracker) holdLinearUnreadableTeams(ctx context.Context, client LinearClient, candidates []domain.Entity, prevs map[string]*domain.LinearSnapshot, teams LinearRules) ([]domain.Entity, error) {
+	teamOf := func(e domain.Entity) string {
+		if e.LinearTeamID != "" {
+			return e.LinearTeamID
+		}
+		if prev := prevs[e.ID]; prev != nil {
+			return prev.TeamID
+		}
+		return ""
+	}
+	var ids []string
+	seen := map[string]bool{}
+	for _, e := range candidates {
+		if id := teamOf(e); id != "" && !seen[id] && teams.ForTeam(id) != nil {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return candidates, nil
+	}
+
+	// The span's count is the entities held, set only when some are. The
+	// number of teams read is at most the armed teams, and nobody acts on it.
+	ctx, span := tracer.Start(ctx, "tracker.linear.team_visibility")
+	defer span.End()
+
+	unreadable := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		unreadable[id] = true
+	}
+	for i := 0; i < len(ids); i += linearBatchSize {
+		readable, err := client.GetTeams(ctx, ids[i:min(i+linearBatchSize, len(ids))])
+		if errors.Is(err, linear.ErrRateLimited) {
+			span.SetAttributes(telemetry.Outcome("rate_limited"))
+			return nil, err
+		}
+		if err != nil {
+			span.SetStatus(codes.Error, "team read")
+			span.SetAttributes(telemetry.Outcome("failed"))
+			trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "linear team read failed; issues missing from tracked teams are left tracked this cycle",
+				"error", err)
+			for _, id := range ids {
+				unreadable[id] = true
+			}
+			break
+		}
+		for _, team := range readable {
+			delete(unreadable, team.ID)
+		}
+	}
+	if len(unreadable) == 0 {
+		return candidates, nil
+	}
+
+	kept := make([]domain.Entity, 0, len(candidates))
+	held := map[string]int{}
+	for _, e := range candidates {
+		if id := teamOf(e); unreadable[id] {
+			held[id]++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	for _, id := range ids {
+		if n := held[id]; n > 0 {
+			// TODO(TFAC-878): open a durable "Linear team unreadable" condition
+			// for the org's admins, keyed on the team and closed when a cycle
+			// reads it again. This line and the settings card's banner are the
+			// only signals, so nobody who isn't looking learns the team is stale.
+			trackerLog.WarnContext(ctx, "linear credential cannot read a tracked team; its missing issues stay tracked instead of being retired as not found",
+				"linear_team_id", id, "team_key", teams.ForTeam(id).Key, "held", n)
+		}
+	}
+	span.SetAttributes(telemetry.Disposition("issues_held"), telemetry.Count(len(candidates)-len(kept)))
+	return kept, nil
 }
 
 // confirmLinearIndividually asks Linear by UUID about each entity the batch

@@ -1,10 +1,12 @@
 // The Linear connection group's two faces. Connected, it names who the key
 // validated as and the workspace it belongs to. Unconnected, it is one masked
 // field and nothing else — no URL, no deployment choice.
-import { afterEach, describe, it, expect } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { afterEach, describe, it, expect, vi } from 'vitest'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 import LinearAccessGroup from './LinearAccessGroup'
+import type { LinearTeamVisibility } from './linearConnect'
+import { jsonBody } from '../../test/apiResponse'
 
 function renderGroup(over: Partial<{ connected: boolean; boundAs: string; workspace: string }>) {
   render(
@@ -178,3 +180,50 @@ function renderGroupWithInstall() {
     />,
   )
 }
+
+// The tracked teams the connected credential reads: what the card warns about
+// before a switch and names after one.
+describe('LinearAccessGroup tracked-team visibility', () => {
+  const stubVisibility = (v: LinearTeamVisibility) => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, ...jsonBody(v) })
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+  const tfac = { id: 't-1', key: 'TFAC', name: 'Triage Factory' }
+
+  it('names a tracked team the connected credential cannot read', async () => {
+    const fetchMock = stubVisibility({ private: [], unreadable: [tfac] })
+    renderGroupWithInstall()
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      "This connection can't read the tracked Linear team Triage Factory (TFAC).",
+    )
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/orgs/org-1/linear/access/team-visibility',
+      expect.anything(),
+    )
+  })
+
+  it('shows no banner when every tracked team is readable', async () => {
+    const fetchMock = stubVisibility({ private: [tfac], unreadable: [] })
+    renderGroupWithInstall()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('names the private teams before installing over a key, and stays on Cancel', async () => {
+    stubVisibility({ private: [tfac], unreadable: [] })
+    renderGroupWithInstall()
+    fireEvent.click(screen.getByRole('button', { name: 'Install app instead' }))
+    expect(await screen.findByText('A tracked team is private')).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        'Triage Factory (TFAC): changes stop reaching Triage Factory unless it is shared with the app',
+      ),
+    ).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() =>
+      expect(screen.queryByText('A tracked team is private')).not.toBeInTheDocument(),
+    )
+    expect(window.location.pathname).toBe('/')
+  })
+})

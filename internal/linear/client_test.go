@@ -583,6 +583,36 @@ func TestGetTeam_NotFound(t *testing.T) {
 	}
 }
 
+func TestGetTeams_ReturnsTheTeamsTheCredentialReads(t *testing.T) {
+	s := newStub(t, scripted(reply{body: `{"data":{"teams":{"nodes":[{"id":"team-1","key":"TFAC","name":"Triage Factory","private":true}]}}}`}))
+	got, err := s.client().GetTeams(context.Background(), []string{"team-1", "team-2"})
+	if err != nil {
+		t.Fatalf("GetTeams: %v", err)
+	}
+	if want := []Team{{ID: "team-1", Key: "TFAC", Name: "Triage Factory", Private: true}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("GetTeams = %+v, want %+v", got, want)
+	}
+	req := s.requests()[0]
+	assertJSON(t, "ids", req.Variables["ids"], `["team-1","team-2"]`)
+	if !strings.Contains(req.Query, "includeArchived: true") {
+		t.Errorf("query leaves archived teams out; an archived team's issues are still readable:\n%s", req.Query)
+	}
+}
+
+func TestGetTeams_Bounds(t *testing.T) {
+	s := newStub(t, scripted(reply{body: `{"data":{"teams":{"nodes":[]}}}`}))
+	c := s.client()
+	if got, err := c.GetTeams(context.Background(), nil); err != nil || got != nil {
+		t.Errorf("GetTeams(nil) = %v, %v; want nil, nil", got, err)
+	}
+	if _, err := c.GetTeams(context.Background(), make([]string, maxPageSize+1)); err == nil {
+		t.Error("GetTeams over the page cap succeeded, want an error")
+	}
+	if n := len(s.requests()); n != 0 {
+		t.Errorf("requests = %d, want none sent", n)
+	}
+}
+
 const issueJSON = `{
   "id": "uuid-1", "identifier": "TFAC-86", "title": "Linear", "description": "body",
   "url": "https://linear.app/sky/issue/TFAC-86", "priority": 2, "priorityLabel": "High",
