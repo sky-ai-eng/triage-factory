@@ -69,38 +69,30 @@ type ExtensionAPI interface {
 	// GotrueAdminBaseURL is the in-network GoTrue base URL for admin calls.
 	GotrueAdminBaseURL() string
 
-	// PublishEvent publishes evt through the durable Ingestor (durable
-	// outbox enqueue + bus fan-out). Never falls back to a bare bus
-	// publish: if the ingestor isn't wired yet (nil), it logs at ERROR and
-	// drops the event, matching ingest's own drop-loudly convention, rather
-	// than silently skipping durability. Read-through to the live server;
-	// nil until app wiring completes (internal/app/subsystems.go). Safe for
-	// request-time use and inside OnReady hooks (which fire post-wiring) —
-	// the install closure runs before the ingestor is wired, so an
-	// extension must NOT call this from its install closure.
+	// PublishPreEnqueued is the fan-out half of an extension's emit. An
+	// extension writes the event durably itself — ingest.Enqueue on the
+	// EventQueue of a Tx().SystemWithTx transaction, the one that also
+	// writes whatever records the event's input as consumed (a webhook's
+	// delivery dedup) — and, once that transaction commits, hands the event
+	// here for the bus fan-out and the drain-worker nudge, with no second
+	// enqueue. evt.ID must be the id ingest.Enqueue returned, so the live
+	// feed and the queue row agree. Pass the request's ctx to the enqueue
+	// where there is one: it stamps the trace context onto the durable row,
+	// so an inbound webhook's server span becomes the producer the event's
+	// later routing links back to.
 	//
-	// An enqueue that fails here is logged and dropped, so an emit behind a
-	// record that its input was consumed — an inbound webhook's delivery
-	// dedup — does not use it: it enqueues in the transaction writing that
-	// record (Tx().SystemWithTx, ingest.Enqueue) and fans out with
-	// PublishPreEnqueued.
-	//
-	// Pass the request's ctx where there is one: the ingestor stamps its
-	// trace context onto the durable row, so an inbound webhook's server
-	// span becomes the producer the event's later routing links back to.
-	PublishEvent(ctx context.Context, evt domain.Event)
-	// PublishPreEnqueued forwards an event the extension already committed
-	// to the durable outbox in its own transaction — the bus fan-out and the
-	// drain-worker nudge, with no second enqueue. evt.ID must be the id
-	// ingest.Enqueue returned, so the live feed and the queue row agree.
-	// Unwired (nil ingestor) it logs and skips the fan-out; the event is
-	// already queued and routes on the drain worker's floor scan. Same
-	// read-through and install-closure caveats as PublishEvent.
+	// Read-through to the live server's ingestor, which is nil until app
+	// wiring completes (internal/app/subsystems.go). Safe for request-time
+	// use and inside OnReady hooks (which fire post-wiring); the install
+	// closure runs before the ingestor is wired, so an extension must NOT
+	// call this from its install closure. Unwired, it logs and skips the
+	// fan-out — the event is already queued and routes on the drain
+	// worker's floor scan.
 	PublishPreEnqueued(ctx context.Context, evt domain.Event)
 	// Bus returns the in-process event bus, for subscribe-side consumers.
 	// Read-through to the live server; nil until app wiring completes. Safe
 	// for request-time use and inside OnReady hooks (which fire post-wiring)
-	// — same install-closure caveat as PublishEvent.
+	// — same install-closure caveat as PublishPreEnqueued.
 	Bus() *eventbus.Bus
 
 	// OnReady registers a hook to run once app wiring is complete AND this
@@ -112,8 +104,8 @@ type ExtensionAPI interface {
 	// AND on lease demotion — a worker that loses the brain gets the same
 	// ctx.Done() signal a process shutdown would give it, and is started
 	// fresh (a new goroutine, a new ctx) on a later re-acquisition. By
-	// hook time every read-through accessor on this API (Bus, PublishEvent,
-	// ...) is wired and non-nil. The hook MAY block for as long as this
+	// hook time every read-through accessor on this API (Bus,
+	// PublishPreEnqueued, ...) is wired and non-nil. The hook MAY block for as long as this
 	// pod holds the brain (run the worker loop directly); respect
 	// ctx.Done() for graceful stop — a worker needing drain time handles
 	// it inside the hook before returning. Hooks are fired in registration
@@ -276,18 +268,6 @@ func (a serverExtensionAPI) Stores() db.Stores          { return a.s.allStores }
 func (a serverExtensionAPI) DB() *sql.DB                { return a.s.db }
 func (a serverExtensionAPI) GotrueAdminBaseURL() string { return a.s.gotrueAdminBaseURL() }
 func (a serverExtensionAPI) Bus() *eventbus.Bus         { return a.s.bus }
-
-// PublishEvent delegates to the wired Ingestor. Deliberately does NOT fall
-// back to a.s.bus.Publish when unwired — that would silently skip the
-// durable outbox, exactly the loss internal/ingest exists to prevent (see
-// ingest.go's own drop-loudly convention on an enqueue failure).
-func (a serverExtensionAPI) PublishEvent(ctx context.Context, evt domain.Event) {
-	if a.s.ingestor == nil {
-		serverLog.ErrorContext(ctx, "ExtensionAPI.PublishEvent: ingestor not wired, dropping event", "event_type", evt.EventType)
-		return
-	}
-	a.s.ingestor.Publish(ctx, evt)
-}
 
 // PublishPreEnqueued delegates to the wired Ingestor. Unwired there is
 // nothing to fall back to and nothing lost: the event is already durable.

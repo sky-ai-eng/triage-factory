@@ -54,7 +54,7 @@ func New(bus *eventbus.Bus, queue db.EventQueueStore, wake func()) *Ingestor {
 // then forwards every event to the ephemeral bus. evt.OrgID must already
 // be stamped by the caller (the tracker does this in its publish()).
 //
-// ctx is the emitting work's — a poll cycle, a Slack webhook request — and
+// ctx is the emitting work's — a poll cycle — and
 // is what makes the durable hop traceable: the enqueue span below is the
 // producer an event's later routing links back to. A caller with no span
 // active (an untraced path, or tracing disabled) stamps nothing and the
