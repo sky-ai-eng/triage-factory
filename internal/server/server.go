@@ -266,8 +266,9 @@ type Server struct {
 	// ingestor is the durable emit seam (events audit row + queue row, then
 	// bus fan-out). nil until SetIngestor runs (wired in
 	// internal/app/subsystems.go immediately after ingest.New). Backs
-	// ExtensionAPI.PublishEvent — ee/ ingest must publish through here, never
-	// through the raw bus, or events lose the durable outbox.
+	// ExtensionAPI.PublishEvent and PublishPreEnqueued — ee/ ingest must
+	// publish through here, never through the raw bus, or events lose the
+	// durable outbox.
 	ingestor *ingest.Ingestor
 
 	// onInstallationTokensInvalid fires when an installation's already-minted

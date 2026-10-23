@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
@@ -56,6 +57,64 @@ func TestExtensionAPI_PublishEvent_NilIngestor_DropsWithLog(t *testing.T) {
 
 	if !strings.Contains(logbuf.String(), "ingestor not wired") {
 		t.Errorf("expected an ERROR 'ingestor not wired' log on a nil ingestor; got:\n%s", logbuf.String())
+	}
+}
+
+// enqueueForbidden is an event queue whose Enqueue fails the test: the
+// pre-enqueued path must reach the bus without writing a second queue row.
+type enqueueForbidden struct {
+	db.EventQueueStore
+	t *testing.T
+}
+
+func (q enqueueForbidden) Enqueue(context.Context, string, domain.Event, string) (string, error) {
+	q.t.Error("PublishPreEnqueued enqueued an event the caller already committed")
+	return "", nil
+}
+
+// TestExtensionAPI_PublishPreEnqueued_FansOutWithoutEnqueue pins that an
+// event an extension committed in its own transaction reaches the bus with
+// the id its enqueue minted, and is not enqueued again.
+func TestExtensionAPI_PublishPreEnqueued_FansOutWithoutEnqueue(t *testing.T) {
+	bus := eventbus.New()
+	got := make(chan domain.Event, 1)
+	bus.Subscribe(eventbus.Subscriber{
+		Name:   "capture",
+		Handle: func(e domain.Event) { got <- e },
+	})
+
+	woke := false
+	srv := &Server{}
+	srv.SetIngestor(ingest.New(bus, enqueueForbidden{t: t}, func() { woke = true }))
+	api := serverExtensionAPI{srv}
+
+	api.PublishPreEnqueued(context.Background(), domain.Event{ID: "evt-1", EventType: domain.EventSlackMessage, OrgID: "org-1"})
+
+	select {
+	case e := <-got:
+		if e.ID != "evt-1" {
+			t.Errorf("bus event id = %q, want evt-1 (the id the caller's enqueue minted)", e.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the ingestor to forward the event onto the bus")
+	}
+	if !woke {
+		t.Error("drain worker not nudged for a committed queue row")
+	}
+}
+
+// TestExtensionAPI_PublishPreEnqueued_NilIngestor_Logs: unwired, the fan-out
+// is skipped with a log line naming the queued event.
+func TestExtensionAPI_PublishPreEnqueued_NilIngestor_Logs(t *testing.T) {
+	var logbuf bytes.Buffer
+	restore := logging.SetOutput(&logbuf)
+	defer restore()
+
+	api := serverExtensionAPI{&Server{}}
+	api.PublishPreEnqueued(context.Background(), domain.Event{ID: "evt-1", EventType: domain.EventSlackMessage, OrgID: "org-1"})
+
+	if !strings.Contains(logbuf.String(), "ingestor not wired") || !strings.Contains(logbuf.String(), "evt-1") {
+		t.Errorf("expected an 'ingestor not wired' log naming evt-1 on a nil ingestor; got:\n%s", logbuf.String())
 	}
 }
 

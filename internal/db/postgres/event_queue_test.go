@@ -34,6 +34,20 @@ func TestEventQueueStore_Postgres(t *testing.T) {
 	})
 }
 
+// TestSystemTx_Postgres runs the system-transaction conformance suite on the
+// production pool split: the door opens its transaction on the admin pool.
+func TestSystemTx_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+
+	dbtest.RunSystemTxConformance(t, func(t *testing.T) (db.Stores, string, dbtest.EventQueueSeeder) {
+		t.Helper()
+		h.Reset(t)
+		orgID, _ := seedPgEventQueueOrg(t, h)
+		return stores, orgID, newPgEventQueueSeeder(h, orgID)
+	})
+}
+
 // TestEventQueueStore_Postgres_CrossOrg pins the org_id defense-in-depth
 // filter on the org-scoped reads and controls. Claim is cross-org by design
 // (one system worker drains every tenant), so it is excluded — the claimed

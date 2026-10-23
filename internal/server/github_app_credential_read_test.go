@@ -64,6 +64,10 @@ func (f failingSecretsTx) SyntheticClaimsWithReadTx(ctx context.Context, orgID, 
 	})
 }
 
+func (f failingSecretsTx) SystemWithTx(ctx context.Context, orgID string, fn func(db.SystemTxStores) error) error {
+	return f.inner.SystemWithTx(ctx, orgID, fn)
+}
+
 // assertNoAppRow fails the test if any org_github_apps row exists. The
 // staging decision reads the org's PAT to choose active=true/false; when
 // that read fails the request must leave no App row at all, in either

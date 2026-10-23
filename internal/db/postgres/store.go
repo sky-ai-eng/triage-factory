@@ -239,9 +239,10 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		Events: newEventStore(app, admin),
 		// EventQueue is admin-pool only: the ingestor and
 		// drain worker are system services with no JWT-claims context.
-		// The store self-manages the Enqueue transaction, so it holds
-		// the admin *sql.DB directly. event_queue_all RLS is
-		// defense-in-depth (admin bypasses it).
+		// The store self-manages the Enqueue transaction here; a writer
+		// that commits the enqueue with its own writes gets the
+		// transaction-bound store from SystemWithTx. event_queue_all RLS
+		// is defense-in-depth (admin bypasses it).
 		EventQueue: newEventQueueStore(admin),
 		// ConversationQueue is admin-pool only: the dispatcher is a system worker with
 		// no JWT-claims context. The claim uses FOR UPDATE SKIP LOCKED so a

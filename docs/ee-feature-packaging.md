@@ -46,11 +46,12 @@ What's admissible in **core** (exactly three kinds of things):
 | Routing behavior                 | `routing.RegisterSource(prefix, SourceHooks{ResolveOwner, TracksScope})` | how an _Owned_ event of this source resolves its owning team, and whether a team tracks the event's scope. Registration also marks the prefix router-bound (see below) |
 | Entitlement gate                 | `entitlements.GateEventSource(prefix, feature)`                          | the dormancy contract for every event type of this source                                                                                                              |
 | Event publish                    | `ExtensionAPI.PublishEvent(evt)`                                         | ingest → durable outbox → router, without touching the bus directly                                                                                                    |
+| Transactional publish            | `SystemWithTx` → `ingest.Enqueue` → `PublishPreEnqueued`                 | ingest behind a delivery dedup: the mark, its writes and the event's queue row commit in one admin-pool transaction; the bus fan-out follows the commit                |
 | Event subscribe                  | `ExtensionAPI.Bus()`                                                     | bus subscriptions (live-update consumers)                                                                                                                              |
 | Background workers               | `ExtensionAPI.OnReady`                                                   | a long-lived worker goroutine (connection manager, poller) started post-wiring with a shutdown-cancelling context                                                      |
 | Agent CLI verbs                  | `exec.RegisterSubcommand` + `agenthost.RegisterExtension`                | an exec subcommand (arg parsing, ee-side) and its host-side logic, entitlement-gated at the `CallExtension` dispatch                                                   |
 
-The first four apply to any feature. The next five are for a **feature with
+The first four apply to any feature. The next six are for a **feature with
 its own event source** — one that ingests external signals and mints
 entities/events/tasks. The last is for a feature that gives delegated agents
 CLI verbs.
@@ -151,6 +152,17 @@ return routing.OwnerResolution{}, err  // I couldn't look
 `ExtensionAPI.PublishEvent` and `Bus()` are read-through and nil until app
 wiring completes: use them at request time (any mounted handler is safe),
 never inside the install closure itself.
+
+An ingest that dedups its upstream's deliveries must not use `PublishEvent`:
+it logs and drops an event whose enqueue fails, and the upstream's redelivery
+of that event is then dropped as a duplicate. Record the delivery, the
+feature's own writes and the event's queue row in one transaction instead —
+`api.Tx().SystemWithTx` hands the feature's store bundle (through its
+`FromSystemTx` accessor) and an `EventQueue` bound to an admin-pool
+transaction, `ingest.Enqueue` writes the event there, and
+`ExtensionAPI.PublishPreEnqueued` fans it out after the commit. A failure
+anywhere rolls the delivery back, so the redelivery runs fresh. `ee/slack`'s
+`ingestPipeline.deliver` is the reference.
 
 A feature that needs a long-lived background worker (a connection manager, a
 poller) registers it via `ExtensionAPI.OnReady` during install; core fires the
@@ -304,7 +316,8 @@ the feature constants, not an archaeology project.
    universal, access is gated.
 4. If it has events: `events.Register` (with `Ownership`),
    `routing.RegisterSource`, `entitlements.GateEventSource`, publish via
-   `ExtensionAPI.PublishEvent`.
+   `ExtensionAPI.PublishEvent` — or, behind a delivery dedup, enqueue in the
+   delivery's `SystemWithTx` and fan out with `PublishPreEnqueued`.
 5. Routes via `server.RegisterExtension`; per-request entitlement gating in
    every handler; pre-auth ingest through `Raw` + `PreAuthRateLimit` with its
    own signature verification — or `Raw` + `SignedWebhookRateLimit` when the

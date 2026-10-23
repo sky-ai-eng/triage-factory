@@ -70,8 +70,7 @@ type ExtensionAPI interface {
 	GotrueAdminBaseURL() string
 
 	// PublishEvent publishes evt through the durable Ingestor (durable
-	// outbox enqueue + bus fan-out) — the ONLY correct way for ee/ ingest to
-	// emit an event into the pipeline. Never falls back to a bare bus
+	// outbox enqueue + bus fan-out). Never falls back to a bare bus
 	// publish: if the ingestor isn't wired yet (nil), it logs at ERROR and
 	// drops the event, matching ingest's own drop-loudly convention, rather
 	// than silently skipping durability. Read-through to the live server;
@@ -80,10 +79,24 @@ type ExtensionAPI interface {
 	// the install closure runs before the ingestor is wired, so an
 	// extension must NOT call this from its install closure.
 	//
+	// An enqueue that fails here is logged and dropped, so an emit behind a
+	// record that its input was consumed — an inbound webhook's delivery
+	// dedup — does not use it: it enqueues in the transaction writing that
+	// record (Tx().SystemWithTx, ingest.Enqueue) and fans out with
+	// PublishPreEnqueued.
+	//
 	// Pass the request's ctx where there is one: the ingestor stamps its
 	// trace context onto the durable row, so an inbound webhook's server
 	// span becomes the producer the event's later routing links back to.
 	PublishEvent(ctx context.Context, evt domain.Event)
+	// PublishPreEnqueued forwards an event the extension already committed
+	// to the durable outbox in its own transaction — the bus fan-out and the
+	// drain-worker nudge, with no second enqueue. evt.ID must be the id
+	// ingest.Enqueue returned, so the live feed and the queue row agree.
+	// Unwired (nil ingestor) it logs and skips the fan-out; the event is
+	// already queued and routes on the drain worker's floor scan. Same
+	// read-through and install-closure caveats as PublishEvent.
+	PublishPreEnqueued(ctx context.Context, evt domain.Event)
 	// Bus returns the in-process event bus, for subscribe-side consumers.
 	// Read-through to the live server; nil until app wiring completes. Safe
 	// for request-time use and inside OnReady hooks (which fire post-wiring)
@@ -274,6 +287,16 @@ func (a serverExtensionAPI) PublishEvent(ctx context.Context, evt domain.Event) 
 		return
 	}
 	a.s.ingestor.Publish(ctx, evt)
+}
+
+// PublishPreEnqueued delegates to the wired Ingestor. Unwired there is
+// nothing to fall back to and nothing lost: the event is already durable.
+func (a serverExtensionAPI) PublishPreEnqueued(ctx context.Context, evt domain.Event) {
+	if a.s.ingestor == nil {
+		serverLog.WarnContext(ctx, "ExtensionAPI.PublishPreEnqueued: ingestor not wired, skipping the bus fan-out of a queued event", "event_type", evt.EventType, "event_id", evt.ID)
+		return
+	}
+	a.s.ingestor.PublishPreEnqueued(ctx, evt)
 }
 
 // OnReady collects the hook onto the server's readyHooks slice. Called

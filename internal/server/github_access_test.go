@@ -280,6 +280,10 @@ func (w setActiveReturnsNilTx) SyntheticClaimsWithReadTx(ctx context.Context, or
 	})
 }
 
+func (w setActiveReturnsNilTx) SystemWithTx(ctx context.Context, orgID string, fn func(db.SystemTxStores) error) error {
+	return w.inner.SystemWithTx(ctx, orgID, fn)
+}
+
 // hookGitHubApps installs the race hook on the server and returns the store it
 // wrapped, so a hook body can mutate the row without recursing back through
 // itself.

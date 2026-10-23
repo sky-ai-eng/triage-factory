@@ -199,6 +199,7 @@ func newWebhookRig(t *testing.T, signingSecretRef string, licensed bool) *webhoo
 		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
 		stats:      stats,
 	}
+	withFakeIngestTx(pipeline)
 	return &webhookRig{
 		h:          &webhookHandler{stores: stores, pipeline: pipeline, stats: stats},
 		published:  published,
@@ -578,6 +579,7 @@ func TestHandleWebhook_TwoAppsOneWorkspace_SignatureSelectionFollowsRow(t *testi
 		channels:   newFakeChannelRegistryFor(entities),
 		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
 	}
+	withFakeIngestTx(pipeline)
 	h := &webhookHandler{stores: stores, pipeline: pipeline}
 
 	body1 := []byte(`{"type":"event_callback","team_id":"` + sharedWorkspaceID + `","api_app_id":"` + app1 + `","event_id":"Ev-app1","event":{"type":"app_mention","channel":"C1","user":"U1","ts":"1.0"}}`)

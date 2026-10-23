@@ -10,7 +10,9 @@ import (
 	"time"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 )
 
 // slackTitleMaxRunes bounds a Slack entity's title — enough to be
@@ -82,21 +84,31 @@ type inboundMention struct {
 }
 
 // ingestPipeline is the transport-neutral core both the Events API receiver
-// and (the next leaf) Socket Mode feed through handleEventCallback.
-// Constructed once at install with dependencies off ExtensionAPI
-// (Stores(), PublishEvent) — see install.go.
+// and Socket Mode feed through handleEventCallback. Constructed once at
+// install with dependencies off ExtensionAPI (Stores(), Tx(),
+// PublishPreEnqueued) — see install.go.
 type ingestPipeline struct {
+	// tx opens each delivery's transaction (SystemWithTx, see deliver): the
+	// delivery mark, a mention's thread and the event's queue row commit
+	// together, through the Slack bundle and event queue it binds.
+	tx db.TxRunner
+	// deliveries prunes the dedup table after each delivery's transaction;
+	// DeliveryStore.PruneDeliveredSystem has why never inside it.
 	deliveries slackstore.DeliveryStore
-	publish    func(context.Context, domain.Event)
+	// publish fans a committed event out to the bus
+	// (ExtensionAPI.PublishPreEnqueued); the event is already queued.
+	publish func(context.Context, domain.Event)
 	// identity resolves a message's sender to a TF user — both ingest branches
 	// dispatch it, since an engaged-thread follow-up's sender may never appear
 	// in an app_mention. Best-effort and detached — see resolveSender's doc.
 	// nil-safe: tests and any future caller that doesn't need identity capture
 	// simply construct ingestPipeline without it.
 	identity *IdentityResolver
-	// channels is the channel registry (slack_channels): every message
-	// resolves its channel to a registry row, and every thread entity is
-	// created and found through it, by that row and the thread's root ts.
+	// channels is the channel registry (slack_channels) outside any
+	// transaction: every message resolves its channel to a registry row
+	// through it, and the engaged-thread gate finds its thread by that row
+	// and the thread's root ts. A mention's thread is created through the
+	// registry bound to the delivery's transaction instead.
 	// Every Slack entity is keyed under domain.SlackScope, never the
 	// workspace of the connection an event came through: a shared channel
 	// has one id in every workspace it is in, so the same thread can arrive
@@ -158,10 +170,11 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 }
 
 // handleAppMention ingests an explicit @-mention. It is deliberately
-// synchronous: one channel sighting, one dedup insert, one thread
-// find-or-create, one publish — well inside Slack's 3-second webhook ack
-// budget. Publishes slack:message with Mentioned=true. Returns the delivery's
-// outcome label for handleEventCallback's single recordIngest.
+// synchronous: one channel sighting, then one transaction holding the dedup
+// insert, the thread find-or-create and the event's enqueue, then the bus
+// fan-out — well inside Slack's 3-second webhook ack budget. Publishes
+// slack:message with Mentioned=true. Returns the delivery's outcome label for
+// handleEventCallback's single recordIngest.
 func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Workspace, ev inboundMention) (string, error) {
 	// EventID feeds the dedup key and Channel/TS identify the thread — an
 	// empty value in any of them (a malformed or unexpectedly-shaped
@@ -177,26 +190,12 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 		return dropSelfOrBot, nil
 	}
 	occurredAt := parseSlackTS(ev.TS)
-	// Before the dedup insert, so a failed write leaves the delivery
-	// unrecorded and Slack's redelivery can still land it; recording a
-	// redelivered sighting again changes nothing. The sighting registers the
-	// channel the thread below references.
+	// Before the delivery's transaction, so a failed write leaves the
+	// delivery unrecorded and Slack's redelivery can still land it; recording
+	// a redelivered sighting again changes nothing. The sighting registers
+	// the channel the thread below references.
 	if _, err := p.channels.UpsertSightingSystem(ctx, ws.OrgID, ws.WorkspaceID, ev.Channel, occurredAt); err != nil {
 		return outcomeError, fmt.Errorf("record slack channel sighting: %w", err)
-	}
-
-	// TODO(TFAC-1139): the delivery is recorded before the thread write and
-	// the event's durable enqueue, so a failure in either loses the mention:
-	// Slack's redelivery is dropped as a duplicate, and PublishEvent drops an
-	// event whose enqueue fails. Needs the mark, thread and queue row in one
-	// admin-pool transaction, with the bus fan-out after commit.
-	fresh, err := p.deliveries.MarkDeliveredSystem(ctx, ws.APIAppID, ev.EventID)
-	if err != nil {
-		return outcomeError, fmt.Errorf("mark slack delivery: %w", err)
-	}
-	if !fresh {
-		slackLog.Debug("dropping duplicate slack delivery", "workspace", ws.WorkspaceID, "app", ws.APIAppID, "event_id", ev.EventID)
-		return dropDuplicate, nil
 	}
 
 	root := ev.ThreadTS
@@ -210,16 +209,32 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 	} else {
 		root = ev.TS
 	}
-	// By the delivered id, not the sighting's row: a move committing since the
-	// sighting can absorb that row, and the delivery is already recorded, so
-	// a failure here would lose the mention. The thread resolves the id under
-	// the move lock, and the message carries the row and id it found.
-	thread, err := p.channels.FindOrCreateThreadSystem(ctx, ws.OrgID, ev.Channel, root, kind, slackThreadTitle, "")
+
+	var thread slackstore.Thread
+	fresh, err := p.deliver(ctx, ws, ev.EventID, func(tx *slackstore.Bundle) (domain.Event, error) {
+		// By the delivered id, not the sighting's row: a move committing
+		// since the sighting can absorb that row. The thread resolves the id
+		// under the move lock, and the message carries the row and id it
+		// found.
+		var err error
+		thread, err = tx.Channels.FindOrCreateThreadSystem(ctx, ws.OrgID, ev.Channel, root, kind, slackThreadTitle, "")
+		if err != nil {
+			return domain.Event{}, fmt.Errorf("find or create slack thread entity: %w", err)
+		}
+		ev.Channel = thread.Channel.ChannelID
+		return slackMessageEvent(ws, ev, thread.Channel.ID, thread.EntityID, true, occurredAt)
+	})
 	if err != nil {
-		return outcomeError, fmt.Errorf("find or create slack thread entity: %w", err)
+		return outcomeError, err
 	}
+	if !fresh {
+		slackLog.Debug("dropping duplicate slack delivery", "workspace", ws.WorkspaceID, "app", ws.APIAppID, "event_id", ev.EventID)
+		return dropDuplicate, nil
+	}
+
+	// After the commit, so every resolver below writes to a thread entity
+	// that exists.
 	entityID, created, channel := thread.EntityID, thread.Created, thread.Channel
-	ev.Channel = channel.ChannelID
 	p.resolveChannelNameIfStale(ws, channel)
 	// Only on create: the thread-root permalink is stable once minted, and
 	// repeat mentions on an already-known thread shouldn't re-resolve it.
@@ -239,10 +254,6 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 			mentionUser: ev.User,
 			isRoot:      kind == "thread",
 		})
-	}
-
-	if err := p.publishMessage(ctx, ws, ev, channel.ID, entityID, true, occurredAt); err != nil {
-		return outcomeError, err
 	}
 
 	// Best-effort sender identity capture (TFAC-531), detached from the
@@ -332,25 +343,17 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 	}
 
 	// (6) Past every drop: record the delivery (dedup Slack's redeliveries)
-	// and publish. The delivery insert lands only here so the table tracks
-	// exactly the messages TF acts on.
-	//
-	// TODO(TFAC-1139): the delivery is recorded before the event's durable
-	// enqueue, and PublishEvent drops an event whose enqueue fails, so that
-	// failure loses the message: Slack's redelivery is dropped as a
-	// duplicate. Needs the mark and queue row in one admin-pool transaction,
-	// with the bus fan-out after commit.
-	fresh, err := p.deliveries.MarkDeliveredSystem(ctx, ws.APIAppID, ev.EventID)
+	// and enqueue the message, in one transaction. The delivery insert lands
+	// only here so the table tracks exactly the messages TF acts on.
+	fresh, err := p.deliver(ctx, ws, ev.EventID, func(*slackstore.Bundle) (domain.Event, error) {
+		return slackMessageEvent(ws, ev, channel.ID, entity.ID, false, parseSlackTS(ev.TS))
+	})
 	if err != nil {
-		return outcomeError, fmt.Errorf("mark slack delivery: %w", err)
+		return outcomeError, err
 	}
 	if !fresh {
 		slackLog.Debug("dropping duplicate slack delivery", "workspace", ws.WorkspaceID, "app", ws.APIAppID, "event_id", ev.EventID)
 		return dropDuplicate, nil
-	}
-
-	if err := p.publishMessage(ctx, ws, ev, channel.ID, entity.ID, false, parseSlackTS(ev.TS)); err != nil {
-		return outcomeError, err
 	}
 
 	// Same best-effort sender identity capture as the app_mention path, for
@@ -412,11 +415,50 @@ func (p *ingestPipeline) resolveChannel(ctx context.Context, ws slackstore.Works
 	return channel, nil
 }
 
-// publishMessage marshals the durable audit metadata and publishes the
-// slack:message event both ingest branches emit — identical but for the
-// Mentioned flag (an explicit @-mention vs an engaged-thread follow-up) and
-// the resolved channel row and entity the event hangs off.
-func (p *ingestPipeline) publishMessage(ctx context.Context, ws slackstore.Workspace, ev inboundMention, channelRowID, entityID string, mentioned bool, occurredAt time.Time) error {
+// deliver records the delivery and enqueues the event build returns in one
+// transaction, and fans the event out once it commits. build runs only for a
+// fresh delivery, on the Slack stores bound to the transaction, so whatever
+// it writes commits with the mark too. A failure anywhere — build, the
+// enqueue, the commit — rolls the mark back, so the handler's error has
+// Slack redeliver and the redelivery runs fresh; and because the mark and
+// the event commit together, a delivery never enqueues twice. fresh=false is
+// a duplicate: nothing was written and nothing is published.
+func (p *ingestPipeline) deliver(ctx context.Context, ws slackstore.Workspace, eventID string, build func(*slackstore.Bundle) (domain.Event, error)) (fresh bool, err error) {
+	var evt domain.Event
+	err = p.tx.SystemWithTx(ctx, ws.OrgID, func(tx db.SystemTxStores) error {
+		bundle := slackstore.FromSystemTx(tx)
+		var err error
+		if fresh, err = bundle.Deliveries.MarkDeliveredSystem(ctx, ws.APIAppID, eventID); err != nil {
+			return fmt.Errorf("mark slack delivery: %w", err)
+		}
+		if !fresh {
+			return nil
+		}
+		if evt, err = build(bundle); err != nil {
+			return err
+		}
+		if evt.ID, err = ingest.Enqueue(ctx, tx.EventQueue, evt); err != nil {
+			return fmt.Errorf("enqueue slack message: %w", err)
+		}
+		return nil
+	})
+	if pruneErr := p.deliveries.PruneDeliveredSystem(ctx); pruneErr != nil {
+		slackLog.Warn("slack delivery prune failed", "workspace", ws.WorkspaceID, "app", ws.APIAppID, "error", pruneErr)
+	}
+	if err != nil {
+		return false, err
+	}
+	if fresh {
+		p.publish(ctx, evt)
+	}
+	return fresh, nil
+}
+
+// slackMessageEvent builds the slack:message event both ingest branches emit —
+// identical but for the Mentioned flag (an explicit @-mention vs an
+// engaged-thread follow-up) and the resolved channel row and entity the
+// event hangs off — with its durable audit metadata.
+func slackMessageEvent(ws slackstore.Workspace, ev inboundMention, channelRowID, entityID string, mentioned bool, occurredAt time.Time) (domain.Event, error) {
 	metaJSON, err := json.Marshal(SlackMessageMetadata{
 		WorkspaceID:  ws.WorkspaceID,
 		APIAppID:     ws.APIAppID,
@@ -430,16 +472,15 @@ func (p *ingestPipeline) publishMessage(ctx context.Context, ws slackstore.Works
 		Mentioned:    mentioned,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal slack message metadata: %w", err)
+		return domain.Event{}, fmt.Errorf("marshal slack message metadata: %w", err)
 	}
-	p.publish(ctx, domain.Event{
+	return domain.Event{
 		OrgID:        ws.OrgID,
 		EventType:    domain.EventSlackMessage,
 		EntityID:     &entityID,
 		MetadataJSON: string(metaJSON),
 		OccurredAt:   occurredAt,
-	})
-	return nil
+	}, nil
 }
 
 // resolveChannelNameIfStale dispatches best-effort channel-name resolution

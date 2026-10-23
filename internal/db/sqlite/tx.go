@@ -50,7 +50,32 @@ func (s *Store) SyntheticClaimsWithReadTx(ctx context.Context, orgID, userID str
 	return s.runTx(ctx, orgID, userID, true, fn)
 }
 
-// runTx is the shared body between the four entry points. Request and
+// SystemWithTx runs fn in one transaction on the handle's IMMEDIATE begin.
+// SQLite has one connection and no claims, so the only difference from
+// WithTx is the stores it hands: both halves of every extension bundle are
+// the transaction, as they are everywhere in SQLite.
+func (s *Store) SystemWithTx(ctx context.Context, orgID string, fn func(db.SystemTxStores) error) error {
+	ctx, span := tracer.Start(ctx, "db.tx.system",
+		trace.WithAttributes(telemetry.OrgID(orgID)))
+	defer span.End()
+
+	if orgID != runmode.LocalDefaultOrgID {
+		span.SetStatus(codes.Error, "org mismatch")
+		return fmt.Errorf("sqlite SystemWithTx: orgID must be %q in local mode, got %q", runmode.LocalDefaultOrgID, orgID)
+	}
+	err := db.InTx(ctx, s.conn, func(tx *sql.Tx) error {
+		return fn(db.SystemTxStores{
+			EventQueue: newEventQueueStore(tx),
+			Ext:        db.BuildStoreExtensions(db.DialectSQLite, tx, tx),
+		})
+	})
+	if err != nil {
+		span.SetStatus(codes.Error, "system tx")
+	}
+	return err
+}
+
+// runTx is the shared body between the four claims entry points. Request and
 // synthetic identity behave identically in SQLite — the distinction only
 // matters in the Postgres impl, where the two paths set JWT claims
 // differently. readOnly picks the transaction: db.InReadTx's guarded

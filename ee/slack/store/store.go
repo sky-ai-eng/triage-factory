@@ -32,8 +32,10 @@ type Bundle struct {
 	Workspaces WorkspaceStore
 	Identities SlackIdentityStore
 	// Deliveries owns slack_event_deliveries — the cross-transport ingest
-	// dedup table. Admin-pool only (see DeliveryStore); read through
-	// FromStores, never FromTx (the pre-auth webhook receiver has no tx).
+	// dedup table. Admin-pool only (see DeliveryStore): marked through
+	// FromSystemTx, in the transaction that commits the delivery's work, and
+	// pruned through FromStores; never FromTx (the pre-auth webhook receiver
+	// has no claims).
 	Deliveries DeliveryStore
 	// Channels owns slack_channels — the org-wide channel registry
 	// (TFAC-541).
@@ -47,6 +49,14 @@ type Bundle struct {
 // registered (a community build with the Enterprise Edition not linked
 // in — in which case no Slack handler is mounted to call this).
 func FromTx(tx db.TxStores) *Bundle {
+	b, _ := tx.Extension(ExtKey).(*Bundle)
+	return b
+}
+
+// FromSystemTx returns the Slack bundle bound to a system transaction
+// (db.TxRunner.SystemWithTx) — every ...System method on it joins the
+// transaction — or nil if no Slack extension is registered.
+func FromSystemTx(tx db.SystemTxStores) *Bundle {
 	b, _ := tx.Extension(ExtKey).(*Bundle)
 	return b
 }
@@ -179,13 +189,23 @@ type WorkspaceStore interface {
 // db.ErrNotApplicableInLocal, same posture as WorkspaceStore.
 type DeliveryStore interface {
 	// MarkDeliveredSystem records one (apiAppID, eventID) delivery via an
-	// insert-on-conflict, and opportunistically prunes deliveries older than
-	// 72 hours in the same call. fresh=true means this delivery was not
-	// previously recorded — the caller should process it; fresh=false means
-	// a duplicate (a Slack retry) — the caller drops it silently. The prune
-	// is best-effort: a failure there does not affect fresh's correctness
-	// and is never surfaced as an error.
+	// insert-on-conflict. fresh=true means this delivery was not previously
+	// recorded — the caller should process it; fresh=false means a
+	// duplicate (a Slack retry) — the caller drops it silently.
+	//
+	// Ingest marks on the bundle FromSystemTx hands it, so the row commits
+	// only with the work the delivery stands for. A concurrent mark of the
+	// same delivery waits for that transaction: it reads as a duplicate
+	// once the transaction commits, and as fresh if it rolls back.
 	MarkDeliveredSystem(ctx context.Context, apiAppID, eventID string) (fresh bool, err error)
+
+	// PruneDeliveredSystem deletes deliveries older than 72 hours. Ingest
+	// calls it best-effort after each delivery's transaction, never inside
+	// one: the delete locks the stale rows it removes, so inside a
+	// delivery's transaction it would hold every concurrent delivery's
+	// prune until that transaction ended, and in Postgres its failure
+	// would abort the transaction it ran in.
+	PruneDeliveredSystem(ctx context.Context) error
 }
 
 // SlackIdentity is one row of user_slack_identities — the mapping from a

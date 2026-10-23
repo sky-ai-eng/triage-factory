@@ -605,6 +605,28 @@ type TxStores struct {
 	Ext map[string]any
 }
 
+// SystemTxStores is what SystemWithTx hands its body: the stores a system
+// write — one with no user behind it — commits in one admin-pool
+// transaction. Each is bound the way Stores binds it with the admin half
+// replaced by the transaction, so a ...System method joins the transaction;
+// in Postgres an app-pool method fails as it does on Stores, with no claims
+// to run under. A store is added here when a system write needs it in one
+// transaction with another. This is not TxStores because TxStores is wired
+// for a claims transaction, where the admin halves deliberately commit on
+// their own.
+type SystemTxStores struct {
+	// EventQueue's Enqueue writes the event's audit row and queue row on
+	// the transaction, so the event commits with the write it reports and
+	// the caller fans it out once the transaction commits.
+	EventQueue EventQueueStore
+
+	// Ext carries the opaque store bundles built by registered
+	// StoreExtension factories (see storeext.go) from the app pool and the
+	// transaction. Read through Extension; nil in a community build with no
+	// extension registered.
+	Ext map[string]any
+}
+
 // Extension returns the opaque store bundle registered under key (see
 // storeext.go), or nil when no extension registered it. The registering
 // package wraps this in a typed accessor that performs the assertion.
@@ -613,6 +635,10 @@ func (s Stores) Extension(key string) any { return s.Ext[key] }
 // Extension returns the tx-bound opaque store bundle registered under
 // key, or nil when no extension registered it.
 func (t TxStores) Extension(key string) any { return t.Ext[key] }
+
+// Extension returns the bundle registered under key, bound to the system
+// transaction, or nil when no extension registered it.
+func (t SystemTxStores) Extension(key string) any { return t.Ext[key] }
 
 // TxRunner runs fn inside a single database transaction. Postgres
 // impl additionally calls
@@ -651,11 +677,20 @@ func (t TxStores) Extension(key string) any { return t.Ext[key] }
 // so a write inside the body is refused by the engine on both dialects. A
 // body that reads and writes stays on WithTx — the read doors are for bodies
 // that would never take a write lock if they could say so, and now can.
+//
+// SystemWithTx is the door for a system write that must commit atomically
+// across stores — an inbound webhook recording its delivery together with
+// the work the delivery stands for. It runs fn in one transaction on the
+// admin pool and sets no claims: the stores it hands (SystemTxStores) bind
+// org_id by argument, as their ...System methods do outside a transaction.
+// orgID is the tenant the write is for; it labels the span, and SQLite
+// asserts it is runmode.LocalDefaultOrgID as the other doors do.
 type TxRunner interface {
 	WithTx(ctx context.Context, orgID, userID string, fn func(TxStores) error) error
 	SyntheticClaimsWithTx(ctx context.Context, orgID, userID string, fn func(TxStores) error) error
 	WithReadTx(ctx context.Context, orgID, userID string, fn func(TxStores) error) error
 	SyntheticClaimsWithReadTx(ctx context.Context, orgID, userID string, fn func(TxStores) error) error
+	SystemWithTx(ctx context.Context, orgID string, fn func(SystemTxStores) error) error
 }
 
 // ErrNotApplicableInLocal is returned by SQLite impls of multi-only

@@ -237,6 +237,7 @@ func newSocketTestRig(t *testing.T, rows ...*slackstore.Workspace) *socketTestRi
 		channels:   channels,
 		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
 	}
+	withFakeIngestTx(pipeline)
 
 	configChanged := make(chan struct{}, 1)
 	mgr := newSocketManager(stores, pipeline, http.DefaultClient, configChanged)
@@ -593,6 +594,7 @@ func TestSocketManager_PipelineError_NoAck_DuplicateDedupedAndAcked(t *testing.T
 	failing := &erroringDeliveries{}
 	failing.failNext.Store(true)
 	rig.mgr.pipeline.deliveries = failing
+	rig.mgr.pipeline.tx.(*fakeIngestTx).deliveries = failing
 	runManager(t, rig.mgr)
 
 	conn := fake.nextConn(t)
@@ -619,6 +621,8 @@ type erroringDeliveries struct {
 	mu       sync.Mutex
 	seen     map[string]bool
 }
+
+func (f *erroringDeliveries) PruneDeliveredSystem(context.Context) error { return nil }
 
 func (f *erroringDeliveries) MarkDeliveredSystem(_ context.Context, appID, eventID string) (bool, error) {
 	if f.failNext.Load() {
