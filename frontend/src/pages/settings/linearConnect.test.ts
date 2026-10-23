@@ -51,19 +51,21 @@ describe('linearUnreadableText', () => {
   const tfac = { id: 't', key: 'TFAC', name: 'Triage Factory' }
   const ops = { id: 'o', key: 'OPS', name: 'Operations' }
 
-  it('points an installed app at sharing the team', () => {
+  it('points an installed app at sharing the team, and a deleted one at untracking', () => {
     expect(linearUnreadableText([tfac], true)).toBe(
       "This connection can't read the tracked Linear team Triage Factory (TFAC). " +
         "Triage Factory isn't seeing changes to its issues or finding new ones. " +
-        'Share it with the app on its page in Linear, or stop tracking it.',
+        'Share it with the app on its page in Linear. ' +
+        'If it was deleted in Linear, stop tracking it; its issues then retire.',
     )
   })
 
-  it('points a key at a member of the teams', () => {
+  it('points a key at a member of the teams, and deleted ones at untracking', () => {
     expect(linearUnreadableText([tfac, ops], false)).toBe(
       "This connection can't read the tracked Linear teams Triage Factory (TFAC) and Operations (OPS). " +
         "Triage Factory isn't seeing changes to their issues or finding new ones. " +
-        'Connect a key whose owner is a member, or stop tracking them.',
+        'Connect a key whose owner is a member. ' +
+        'Stop tracking any that were deleted in Linear; their issues then retire.',
     )
   })
 })

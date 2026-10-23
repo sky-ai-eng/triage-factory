@@ -116,17 +116,24 @@ export function linearTeamNames(teams: LinearTrackedTeam[]): string {
   return names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1]
 }
 
-// linearUnreadableText is the connection card's banner for tracked teams the connected credential
-// cannot read, with the fix that fits the credential's shape.
+// linearUnreadableText is the connection card's banner for tracked teams the
+// connected credential cannot read. Linear answers the same way for a team the
+// credential is not let into and for one deleted in Linear, so the banner
+// gives the fix for each: access that fits the credential's shape, and
+// untracking, which lets a deleted team's issues retire.
 export function linearUnreadableText(teams: LinearTrackedTeam[], installed: boolean): string {
   const one = teams.length === 1
   const them = one ? 'it' : 'them'
-  const fix = installed
-    ? `Share ${them} with the app on its page in Linear, or stop tracking ${them}.`
-    : `Connect a key whose owner is a member, or stop tracking ${them}.`
+  const access = installed
+    ? `Share ${them} with the app on its page in Linear.`
+    : `Connect a key whose owner is a member.`
+  const deleted = one
+    ? 'If it was deleted in Linear, stop tracking it; its issues then retire.'
+    : 'Stop tracking any that were deleted in Linear; their issues then retire.'
   return (
     `This connection can't read the tracked Linear ${one ? 'team' : 'teams'} ${linearTeamNames(teams)}. ` +
-    `Triage Factory isn't seeing changes to ${one ? 'its' : 'their'} issues or finding new ones. ${fix}`
+    `Triage Factory isn't seeing changes to ${one ? 'its' : 'their'} issues or finding new ones. ` +
+    `${access} ${deleted}`
   )
 }
 
