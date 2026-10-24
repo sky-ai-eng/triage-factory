@@ -1,15 +1,15 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7.1
 #
 # Triage Factory runtime image.
 #
 # Multi-stage:
-#   1. frontend-builder — node:22-alpine, builds frontend/dist for go:embed
-#   2. sdk-builder      — node:22-alpine, pre-installs the Agent SDK so
+#   1. frontend-builder — node, builds frontend/dist for go:embed
+#   2. sdk-builder      — node, pre-installs the Agent SDK so
 #                         EnsureSDK is a no-op at runtime (the runtime layer
 #                         has no node)
-#   3. go-builder       — golang:1.26-alpine, static (CGO_ENABLED=0) build
+#   3. go-builder       — golang, static (CGO_ENABLED=0) build
 #                         of the TF binary with the embedded frontend
-#   4. runtime          — alpine:3.20, ships triagefactory + runsc + apk
+#   4. runtime          — alpine, ships triagefactory + runsc + apk
 #                         tools + the pre-installed SDK + entrypoint.sh
 #
 # Same image targets both deployments:
@@ -22,10 +22,21 @@
 # binary (internal/sandbox/rootfs.go alpineRootfsForArch via
 # runtime.GOARCH), NOT here — this Dockerfile only fetches the right
 # runsc.
+#
+# Every base image, and the syntax frontend above, is pinned to an exact
+# version tag. A build reuses whatever copy of a tag the machine has cached,
+# so a floating tag (golang:1.26-alpine) keeps building from a stale image
+# until something pulls it, and the Go image's GOTOOLCHAIN=local then refuses
+# a go.mod that asks for a newer Go. An exact tag changes with every version,
+# so no cached copy can stand in for the new one. Dependabot opens the bump
+# PRs for the FROM lines (.github/dependabot.yml). The pins are tags rather
+# than digests because CI builds from GHCR copies of these images that
+# scripts/ci-images.sh tags under their Docker Hub names, and a digest is not
+# a name docker tag can write.
 
 # --- stage 1: frontend ------------------------------------------------------
 
-FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend-builder
+FROM --platform=$BUILDPLATFORM node:22.23.4-alpine AS frontend-builder
 WORKDIR /src/frontend
 # pnpm is provisioned via corepack, pinned by the "packageManager" field
 # in frontend/package.json. COREPACK_ENABLE_DOWNLOAD_PROMPT=0 keeps the
@@ -51,7 +62,7 @@ RUN pnpm run build
 # second) makes the runtime layer see this as already-installed and
 # skip both the install AND the node/npm presence checks.
 
-FROM --platform=$BUILDPLATFORM node:22-alpine AS sdk-builder
+FROM --platform=$BUILDPLATFORM node:22.23.4-alpine AS sdk-builder
 WORKDIR /sdk-install
 # package-lock.json is the source of truth for transitive deps.
 # wrapper.mjs is the runtime shim the host binary materializes.
@@ -81,7 +92,10 @@ RUN set -eu; \
 
 # --- stage 3: static Go binary ----------------------------------------------
 
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS go-builder
+# The tag's version is go.mod's `go` line exactly, guarded by a drift test
+# (dockerfile_go_test.go), so CI, a local build, and this image all build with
+# the same Go. A Go bump moves both lines in one change.
+FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine AS go-builder
 RUN apk add --no-cache git
 WORKDIR /src
 # Pre-download deps so the source-copy layer rebuilds fast on edits.
@@ -126,7 +140,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # cargo refuses the build outright below that. Keep this at or above the
 # highest MSRV in the lockfile — when a `cargo update` raises one, this pin
 # moves with it or the image build fails at resolve time.
-FROM --platform=$BUILDPLATFORM rust:1.94-alpine AS toolhost-builder
+FROM --platform=$BUILDPLATFORM rust:1.94.1-alpine AS toolhost-builder
 ARG TARGETARCH
 RUN apk add --no-cache musl-dev
 WORKDIR /src
@@ -166,7 +180,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # --- stage 4: runtime -------------------------------------------------------
 
-FROM alpine:3.20 AS runtime
+FROM alpine:3.20.10 AS runtime
 
 # - iptables / iproute2: sandbox netns + NAT POSTROUTING setup
 # - ca-certificates: outbound TLS from the TF process (GitHub, Jira,
