@@ -58,12 +58,19 @@ func linearStateNames(refs []domain.LinearStateRef) string {
 	return strings.Join(domain.LinearStateNames(refs), ",")
 }
 
-// TestToTrackerLinearRules_SkipsUnarmed: a watched-but-unmapped Linear team has
-// no states to ask about, so it never reaches the tracker.
+// TestToTrackerLinearRules_SkipsUnarmed: a Linear team reaches the tracker only
+// once all three rules are mapped. One watched with nothing mapped has no
+// states to ask about, and one mapped in part has issues to discover with
+// nowhere to move them, or the reverse.
 func TestToTrackerLinearRules_SkipsUnarmed(t *testing.T) {
+	pickupOnly := domain.LinearTeamRules{TeamID: "team-a", LinearTeamID: "web", LinearTeamKey: "WEB", PickupMembers: linRefs("Todo")}
+	noDone := armedLinear("team-a", "api", []string{"Todo"}, []string{"Done"})
+	noDone.DoneMembers, noDone.DoneCanonical = nil, domain.LinearStateRef{}
 	got := toTrackerLinearRules([]domain.LinearTeamRules{
 		armedLinear("team-a", "eng", []string{"Todo"}, []string{"Done"}),
 		{TeamID: "team-a", LinearTeamID: "ops", LinearTeamKey: "OPS"},
+		pickupOnly,
+		noDone,
 	})
 	if ids := linearTeamIDs(got); ids != "eng" {
 		t.Errorf("merged teams = %q, want eng alone", ids)

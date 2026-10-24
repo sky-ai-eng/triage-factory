@@ -26,15 +26,16 @@ import (
 // and each state's name and type from Linear, in the fetch that validates the
 // ids (linear_team_gate.go), so a stored name is always one Linear gave us.
 //
-// **A team is watched, or armed, never half of either.** An element naming
-// only an id watches the team without mapping anything. Mapping is all three
-// rules at once: pickup members, and members plus a canonical for in_progress
-// and done. The client pre-fills a mapping from the states' types, so the
-// half-mapped state a Jira project can sit in is not one a Linear team needs.
+// **Each rule is complete or empty on its own**, as a Jira project's are. An
+// element naming only an id watches the team without mapping anything. Pickup
+// is a set of members; in_progress and done are members plus a canonical, both
+// or neither. A team with some rules mapped and others empty is stored, and is
+// armed — polled — only once all three are mapped, so a mapping can be built
+// one rule at a time and saved as it goes.
 //
 // An absent rule keeps the stored one, as on the Jira route, so an id-only
-// element for a team that is already armed leaves it armed. Disarming is three
-// explicitly empty rules.
+// element for a team that is already armed leaves it armed. Clearing any one
+// rule disarms it; clearing all three leaves it watched with nothing mapped.
 // --------------------------------------------------------------------
 
 // linearPickupRuleWrite is the pickup rule's write shape: members and nothing

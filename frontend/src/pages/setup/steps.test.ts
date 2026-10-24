@@ -357,11 +357,11 @@ describe('setup — the Linear tracker', () => {
     )
   })
 
-  it('blocks the team step on a half-mapped Linear team only', () => {
+  it('blocks the team step on a half-mapped Linear rule only', () => {
     const base = { ...initialWizardState(), tracker: 'linear' as const, linearConnected: true }
     const step = stepFor('team-linear-teams')
     expect(step.isComplete(base)).toBe(true)
-    const half = {
+    const withTeam = (in_progress: { members: { id: string; name: string; type: string }[] }) => ({
       ...base,
       team: {
         ...base.team,
@@ -371,14 +371,17 @@ describe('setup — the Linear tracker', () => {
             key: 'ENG',
             name: 'Engineering',
             pickup: { members: [{ id: 's1', name: 'Todo', type: 'unstarted' }] },
-            in_progress: { members: [] },
+            in_progress,
             done: { members: [] },
           },
         ],
       },
-    }
+    })
+    // A team mapped in part saves, unarmed.
+    expect(step.isComplete(withTeam({ members: [] }))).toBe(true)
+    const half = withTeam({ members: [{ id: 's2', name: 'In Progress', type: 'started' }] })
     expect(step.isComplete(half)).toBe(false)
-    expect(step.validate?.(half)).toMatch(/half-mapped Linear team/)
+    expect(step.validate?.(half)).toMatch(/half-mapped Linear state rule/)
   })
 
   it('names the workspace in the collapsed access bar', () => {

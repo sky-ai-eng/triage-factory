@@ -1,8 +1,9 @@
 // The team's Linear surface. Watching a Linear team also maps it — the
 // workflow's state types say which states are pickup, in progress and done —
 // so what is pinned here is that one click arrives at a mapped team when the
-// types allow it, an unmapped one when they don't, and that a half mapping is
-// called out rather than saved.
+// types allow it, an unmapped one when they don't, that a team mapped in part
+// saves, and that a write-target rule with no target is called out rather than
+// saved.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -175,7 +176,7 @@ describe('LinearTeamRulesGroup · mapping', () => {
     expect(screen.getByTestId('armed')).toHaveTextContent('ENG')
   })
 
-  it('calls out half a mapping', async () => {
+  it('saves a team mapped in part, unarmed', async () => {
     const user = userEvent.setup()
     render(<Harness seed={[unmappedLinearTeam('team-eng', 'ENG', 'Engineering')]} />)
     await user.click(screen.getByRole('button', { name: 'Expand ENG' }))
@@ -186,9 +187,25 @@ describe('LinearTeamRulesGroup · mapping', () => {
       .closest('div.space-y-2') as HTMLElement
     await user.click(within(pickup).getByRole('button', { name: 'Todo' }))
 
+    expect(screen.getByTestId('valid')).toHaveTextContent('yes')
+    expect(screen.getByTestId('armed')).toHaveTextContent('')
+    expect(screen.getByText('States not mapped')).toBeInTheDocument()
+  })
+
+  it('calls out a write-target rule with no target', async () => {
+    const user = userEvent.setup()
+    render(<Harness seed={[unmappedLinearTeam('team-eng', 'ENG', 'Engineering')]} />)
+    await user.click(screen.getByRole('button', { name: 'Expand ENG' }))
+    await screen.findByText('3 states available')
+
+    const inProgress = screen
+      .getByText(/Count as actively being worked on/)
+      .closest('div.space-y-2') as HTMLElement
+    await user.click(within(inProgress).getByRole('button', { name: 'In Progress' }))
+    await user.selectOptions(within(inProgress).getByRole('combobox'), '')
+
     expect(screen.getByTestId('valid')).toHaveTextContent('no')
-    expect(screen.getByText('Partly mapped')).toBeInTheDocument()
-    expect(screen.getByText(/or clear all three to keep ENG watched/)).toBeInTheDocument()
+    expect(screen.getByText('Needs a write target')).toBeInTheDocument()
   })
 })
 

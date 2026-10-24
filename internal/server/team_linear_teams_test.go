@@ -269,29 +269,62 @@ func TestLinearTeamsPut_RuleFaults(t *testing.T) {
 	}
 }
 
-// TestLinearTeamsPut_HalfAMappingRefused: a team is watched with no rules or
-// mapped with all three. Anything between is a 422 on the element.
-func TestLinearTeamsPut_HalfAMappingRefused(t *testing.T) {
+// TestLinearTeamsPut_PartlyMappedTeamIsStored: each rule is complete or empty
+// on its own, so a team mapped a rule at a time is stored at every step and
+// reads as unarmed until all three are mapped. Until then nothing the poller
+// asks has moved, so polling is not re-dued; arming it, and taking a rule
+// back off, both re-due it.
+func TestLinearTeamsPut_PartlyMappedTeamIsStored(t *testing.T) {
 	s, _ := newServerWithLinearCatalog(t, linearFixtureEng)
+	kicked := linearKicks(t, s)
 	full := armedLinearTeam(linearTeamEng)
 
-	pickupOnly := map[string]any{"id": linearTeamEng, "pickup": full["pickup"]}
-	assertOneFault(t, putLinearTeams(t, s, pickupOnly), http.StatusUnprocessableEntity, "INVALID_FIELD", "linear_teams[0]")
-
-	noDone := map[string]any{"id": linearTeamEng, "pickup": full["pickup"], "in_progress": full["in_progress"]}
-	rec := putLinearTeams(t, s, noDone)
-	assertOneFault(t, rec, http.StatusUnprocessableEntity, "INVALID_FIELD", "linear_teams[0]")
-	if msg := decodeErrorItems(t, rec)[0].Message; !strings.Contains(msg, "done") {
-		t.Errorf("message %q does not name the unmapped rule", msg)
+	pickupOnly := mustPutLinearTeams(t, s, map[string]any{"id": linearTeamEng, "pickup": full["pickup"]})
+	if len(pickupOnly) != 1 || pickupOnly[0].Armed {
+		t.Fatalf("pickup-only echo = %+v, want one unarmed team", pickupOnly)
+	}
+	eng := pickupOnly[0]
+	if n := stateNames(eng.Pickup.Members); n != "Triage/triage,Backlog/backlog,Todo/unstarted" {
+		t.Errorf("pickup = %s", n)
+	}
+	if len(eng.InProgress.Members) != 0 || eng.InProgress.Canonical != nil || len(eng.Done.Members) != 0 || eng.Done.Canonical != nil {
+		t.Errorf("pickup-only echo mapped a write target: %+v", eng)
+	}
+	if read := storedLinearTeamsRead(t, s); !reflect.DeepEqual(read, pickupOnly) {
+		t.Errorf("settings read after the write =\n%+v\nwant the echo\n%+v", read, pickupOnly)
+	}
+	if kicked() {
+		t.Error("mapping pickup alone re-dued Linear polling")
 	}
 
-	// Clearing one rule of an armed team is the same half mapping, reached
-	// from the other side.
-	mustPutLinearTeams(t, s, full)
-	clearDone := map[string]any{"id": linearTeamEng, "done": map[string]any{"member_ids": []string{}, "canonical_id": ""}}
-	assertOneFault(t, putLinearTeams(t, s, clearDone), http.StatusUnprocessableEntity, "INVALID_FIELD", "linear_teams[0]")
-	if read := storedLinearTeamsRead(t, s); len(read) != 1 || !read[0].Armed {
-		t.Errorf("a refused write changed the stored team: %+v", read)
+	noDone := mustPutLinearTeams(t, s, map[string]any{"id": linearTeamEng, "in_progress": full["in_progress"]})
+	if len(noDone) != 1 || noDone[0].Armed || noDone[0].InProgress.Canonical == nil || len(noDone[0].Pickup.Members) == 0 {
+		t.Errorf("echo with done unmapped = %+v, want pickup and in_progress, unarmed", noDone)
+	}
+	if kicked() {
+		t.Error("mapping two rules of three re-dued Linear polling")
+	}
+
+	if got := mustPutLinearTeams(t, s, full); !got[0].Armed {
+		t.Errorf("all three rules mapped, echo = %+v, want armed", got[0])
+	}
+	if !kicked() {
+		t.Error("arming the team did not re-due Linear polling")
+	}
+
+	// Clearing one rule of an armed team disarms it and keeps the other two.
+	clearDone := mustPutLinearTeams(t, s, map[string]any{
+		"id": linearTeamEng, "done": map[string]any{"member_ids": []string{}, "canonical_id": ""},
+	})
+	if got := clearDone[0]; got.Armed || len(got.Done.Members) != 0 || got.Done.Canonical != nil ||
+		len(got.Pickup.Members) == 0 || got.InProgress.Canonical == nil {
+		t.Errorf("echo after clearing done = %+v, want pickup and in_progress kept, unarmed", got)
+	}
+	if read := storedLinearTeamsRead(t, s); !reflect.DeepEqual(read, clearDone) {
+		t.Errorf("settings read after clearing done =\n%+v\nwant the echo\n%+v", read, clearDone)
+	}
+	if !kicked() {
+		t.Error("disarming the team did not re-due Linear polling")
 	}
 }
 
@@ -381,10 +414,10 @@ func TestLinearTeamsPut_RestartsPollReadiness(t *testing.T) {
 	}
 }
 
-// TestLinearTeamsPut_DisarmIsThreeEmptyRules: clearing every rule unarms the
-// team without untracking it, without asking Linear, and re-dues polling
-// because what the poller asks changed.
-func TestLinearTeamsPut_DisarmIsThreeEmptyRules(t *testing.T) {
+// TestLinearTeamsPut_ClearEveryRule: clearing every rule leaves the team
+// watched with nothing mapped, without untracking it, without asking Linear,
+// and re-dues polling because what the poller asks changed.
+func TestLinearTeamsPut_ClearEveryRule(t *testing.T) {
 	s, fake := newServerWithLinearCatalog(t, linearFixtureEng)
 	mustPutLinearTeams(t, s, armedLinearTeam(linearTeamEng))
 	before := fake.Calls()

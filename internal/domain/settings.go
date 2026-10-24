@@ -1001,10 +1001,11 @@ type JiraProjectStatusRules struct {
 // is keyed by its UUID; its key ("ENG") and name are display values captured
 // at the last save.
 //
-// A row is the team's commitment to WATCH the Linear team. It is either
-// unarmed — every rule empty, the state a team lands in when it is picked and
-// before its workflow states are mapped — or armed (see Armed). Half a mapping
-// is never stored: the linear_team_rules CHECK refuses it.
+// A row is the team's commitment to WATCH the Linear team. Each rule is
+// complete or empty on its own, as a Jira project's are (the linear_team_rules
+// CHECKs hold in_progress and done to members and a canonical together), so a
+// row may map some rules and leave others empty. It is armed only once all
+// three are mapped (see Armed); until then the poller asks nothing of it.
 //
 // There is no in_review rule. Nothing writes the in-review status for Jira
 // either (see JiraProjectStatusRules.InReviewMembers), so a Linear one would be
@@ -1034,14 +1035,6 @@ func (r LinearTeamRules) Armed() bool {
 	return len(r.PickupMembers) > 0 &&
 		len(r.InProgressMembers) > 0 && !r.InProgressCanonical.IsZero() &&
 		len(r.DoneMembers) > 0 && !r.DoneCanonical.IsZero()
-}
-
-// Unarmed reports whether every rule is empty: the Linear team is watched and
-// nothing is mapped yet.
-func (r LinearTeamRules) Unarmed() bool {
-	return len(r.PickupMembers) == 0 &&
-		len(r.InProgressMembers) == 0 && r.InProgressCanonical.IsZero() &&
-		len(r.DoneMembers) == 0 && r.DoneCanonical.IsZero()
 }
 
 // TeamGitHubGroup is one row of team_github_groups: a GitHub team mapped to a

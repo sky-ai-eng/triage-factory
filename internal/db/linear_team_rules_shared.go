@@ -9,7 +9,8 @@ import (
 
 // LinearRuleJSON is one linear_team_rules row's rule columns rendered for a
 // write, one field per column. A canonical is "" when unset; each dialect
-// store binds that as SQL NULL, which the ltr_armed_or_unarmed CHECK expects.
+// store binds that as SQL NULL, which the per-rule complete-or-empty CHECKs
+// expect of a rule with no members.
 type LinearRuleJSON struct {
 	Pickup              string
 	InProgress          string
