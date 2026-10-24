@@ -7,12 +7,8 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
-	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -89,7 +85,8 @@ func runNetFromNetnsName(name string) (*netState, uint8, bool) {
 //   - Per-run overhead is single-digit milliseconds vs ~80ms gVisor
 //     cold-start, so the speed difference doesn't matter.
 //
-// Returns netState with the names + IPs needed by teardown.
+// Returns netState with the names + IPs needed by teardown, with the error
+// too once the namespace exists, and nil before it does.
 func setupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (*netState, error) {
 	// Per-run identifiers. veth name length is constrained by
 	// IFNAMSIZ=16, leaving 13 chars after the "vh-"/"vs-" prefix.
@@ -155,11 +152,14 @@ func setupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (
 
 	// The namespace itself, ahead of the rest, so the ledger records it the
 	// moment it exists rather than after the addressing that follows. A
-	// failure between here and the end leaves it unregistered on purpose: the
-	// caller's error path tears this partial state down, and anything that
-	// survives that teardown is stale by definition and must stay reclaimable.
+	// failure from here on returns the state, which the caller tears down,
+	// and the teardown drops the ledger entry first.
+	//
+	// A failed add returns no state: the name may be a live cell's, which the
+	// gate above left in place, and a teardown by name would remove that
+	// cell's network.
 	if err := runIP(ctx, "netns", "add", netnsName); err != nil {
-		return state, fmt.Errorf("netns: netns add: %w", err)
+		return nil, fmt.Errorf("netns: netns add: %w", err)
 	}
 	markNetnsLive(netnsName, conversationID)
 
@@ -190,24 +190,13 @@ func setupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (
 		}
 	}
 
-	// The egress filter is IPv4-only (iptables, not ip6tables; the runner
-	// image bundles only iptables), so IPv6 must not work across the veth at
-	// all. Left on, the kernel gives the host side a link-local address, and
-	// a jail with IPv6 of its own reaches every host listener bound to "::"
-	// through it, below the filter that closes the gateway. The host side is
-	// the enforced half: with IPv6 off on the interface, the host drops every
-	// IPv6 packet that arrives on it, whatever the netns side sends. A kernel
-	// that has IPv6 and refuses the write gets no network.
-	if err := disableIPv6On(procRoot, vethHost); err != nil {
-		return state, fmt.Errorf("netns: host veth: %w", err)
-	}
-
-	// The netns side as well, so the jail has no IPv6 address to send from.
+	// IPv6 off in the netns, so the jail has no IPv6 address to send from.
 	// Best-effort (runIPNoErr swallows failure): it needs `sysctl` on the
-	// host, and the host-side disable above already drops anything the jail
-	// could send. Writing 1 to `all` disables v6 on every interface in the
-	// netns (existing + future), flushing any link-local the veth or lo may
-	// have picked up.
+	// host and a writable /proc/sys, which an unprivileged container does
+	// not have, and the host-side IPv6 drops (dropIPv6, applied with the
+	// egress policy) are the enforced half. Writing 1 to `all` disables v6
+	// on every interface in the netns (existing + future), flushing any
+	// link-local the veth or lo may have picked up.
 	_ = runIPNoErr(ctx, "netns", "exec", netnsName,
 		"sysctl", "-wq", "net.ipv6.conf.all.disable_ipv6=1")
 
@@ -335,30 +324,6 @@ func min(a, b int) int {
 		return a
 	}
 	return b
-}
-
-// procRoot is where disableIPv6On finds the kernel's sysctls.
-const procRoot = "/proc"
-
-// disableIPv6On turns IPv6 off on the interface iface. A kernel built or
-// booted without IPv6 has no sys/net/ipv6 under root and nothing to turn off.
-// The file is opened, never created, so a missing interface is an error.
-func disableIPv6On(root, iface string) error {
-	if _, err := os.Stat(filepath.Join(root, "sys/net/ipv6")); errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	f, err := os.OpenFile(filepath.Join(root, "sys/net/ipv6/conf", iface, "disable_ipv6"), os.O_WRONLY, 0)
-	if err != nil {
-		return fmt.Errorf("disable ipv6 on %s: %w", iface, err)
-	}
-	_, werr := f.WriteString("1\n")
-	if cerr := f.Close(); werr == nil {
-		werr = cerr
-	}
-	if werr != nil {
-		return fmt.Errorf("disable ipv6 on %s: %w", iface, werr)
-	}
-	return nil
 }
 
 // vethHostName is the host-side veth of conversationID's network at
