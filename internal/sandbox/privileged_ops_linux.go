@@ -27,9 +27,8 @@ type PrivilegedOps interface {
 	// MASQUERADE + egress-allowlist iptables rules, and ensures
 	// ip_forward is enabled — the full "Network" bucket from the
 	// privileged-op audit (spec §5). Returns the state TeardownNetwork
-	// needs to reverse it; on error the returned state carries
-	// whatever prefix of setup succeeded, so a caller that stores it
-	// unconditionally (even on error) can still clean up partial state.
+	// needs to reverse it. On error it has already removed whatever it
+	// built, and returns a zero state.
 	SetupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (NetworkState, error)
 
 	// TeardownNetwork reverses SetupNetwork: removes the iptables

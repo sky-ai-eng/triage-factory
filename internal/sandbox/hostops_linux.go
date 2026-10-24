@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"time"
 )
 
 // defaultOps is the PrivilegedOps implementation the package's
@@ -80,28 +81,56 @@ type hostOps struct{}
 // (netns_linux.go, iptables_linux.go) that together form the
 // "Network" privileged-op bucket (spec §5): netns/veth creation,
 // MASQUERADE, and the Part B egress allowlist.
+//
+// A setup that fails removes what it built before it returns. The caller
+// gets only the error, through the broker or in process, and a network left
+// half-built would outlive it: its namespace stays live in the ledger,
+// refusing every retry of the run, and its gateway's route shadows the next
+// network given its index.
 func (hostOps) SetupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (NetworkState, error) {
 	netSt, err := setupNetwork(ctx, conversationID, subnetIdx)
 	state := networkStateFrom(netSt, subnetIdx)
-	if err != nil {
-		return state, err
+	if err == nil {
+		err = secureNetwork(ctx, netSt, state, subnetIdx)
 	}
+	if err != nil {
+		abandonNetwork(ctx, state)
+		return NetworkState{}, err
+	}
+	return state, nil
+}
 
+// secureNetwork is the part of SetupNetwork after the network exists: its
+// route out, its egress policy, and its jails' /tmp.
+func secureNetwork(ctx context.Context, netSt *netState, state NetworkState, subnetIdx uint8) error {
 	if err := applyMasquerade(ctx, netSt.subnet, netSt.upstreamIF); err != nil {
-		return state, err
+		return err
 	}
 	if err := applyEgressPolicy(ctx, netSt.netnsName, netSt.vethHost, state.HostIP); err != nil {
-		return state, fmt.Errorf("egress policy: %w", err)
+		return fmt.Errorf("egress policy: %w", err)
 	}
 	// The network's jails mount one /tmp, keyed by its index. It is emptied
 	// here rather than at each launch, so a jail relaunched into this network
 	// keeps what the one before it left, and a network on a reused index
 	// starts with nothing of an earlier one's.
 	if _, err := prepareJailTmp(ctx, subnetIdx); err != nil {
-		return state, err
+		return err
 	}
+	return nil
+}
 
-	return state, nil
+// abandonNetworkTimeout bounds the teardown of a network whose setup failed.
+const abandonNetworkTimeout = 30 * time.Second
+
+// abandonNetwork tears down what a failed setup built. It does not inherit
+// ctx's cancellation, because a setup that failed when ctx ended still has a
+// network to remove.
+func abandonNetwork(ctx context.Context, state NetworkState) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abandonNetworkTimeout)
+	defer cancel()
+	if err := (hostOps{}).TeardownNetwork(ctx, state); err != nil {
+		sandboxLog.Warn("network of a failed setup not torn down", "netns", state.NetnsName, "error", err)
+	}
 }
 
 // networkStateFrom converts netns_linux.go's internal *netState (nil
@@ -178,6 +207,7 @@ func removeHostEgressRules(ctx context.Context, veth, gw string) {
 		return
 	}
 	reapEgressRules(ctx, gw, veth)
+	removeIPv6Drops(ctx, veth)
 }
 
 func (hostOps) AdmitJailPorts(ctx context.Context, conversationID string, subnetIdx uint8, ports []int) error {
@@ -265,6 +295,11 @@ func (hostOps) ReapOrphans(ctx context.Context) error {
 
 		defaultAllocator().Release(idx)
 	}
+
+	// The IPv6 drops name only a veth, so they are swept by the veth's name
+	// shape rather than per namespace above; the veths of the namespaces
+	// just reaped are gone, and a rule whose veth still exists is kept.
+	removeIPv6Drops(ctx, "")
 
 	// Leftover per-run memory-ceiling cgroups from a crashed process.
 	// Empty groups rmdir; one still holding a live orphan runsc stays

@@ -136,3 +136,30 @@ func TestArgsNameVeth(t *testing.T) {
 		})
 	}
 }
+
+// TestIPv6DropRuleVeth: the reap removes a listed ip6tables rule only when it
+// is exactly a drop dropIPv6 inserts, on a veth name runNetNames builds.
+func TestIPv6DropRuleVeth(t *testing.T) {
+	cases := []struct {
+		name  string
+		line  string
+		chain string
+		want  string
+	}{
+		{"input_drop", "-A INPUT -i vh-abcd7 -j DROP", "INPUT", "vh-abcd7"},
+		{"forward_drop", "-A FORWARD -i vh-abcd255 -j DROP", "FORWARD", "vh-abcd255"},
+		{"other_chain", "-A FORWARD -i vh-abcd7 -j DROP", "INPUT", ""},
+		{"narrower_match", "-A INPUT -i vh-abcd7 -p tcp -j DROP", "INPUT", ""},
+		{"accept", "-A INPUT -i vh-abcd7 -j ACCEPT", "INPUT", ""},
+		{"not_a_run_veth", "-A INPUT -i eth0 -j DROP", "INPUT", ""},
+		{"run_prefix_not_shape", "-A INPUT -i vh-test0 -j DROP", "INPUT", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := ipv6DropRuleVeth(c.line, c.chain)
+			if got != c.want || ok != (c.want != "") {
+				t.Errorf("ipv6DropRuleVeth(%q, %q) = %q, %v; want %q", c.line, c.chain, got, ok, c.want)
+			}
+		})
+	}
+}

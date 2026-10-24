@@ -5,9 +5,13 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
+	"net"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -80,12 +84,14 @@ func teardownIptables(ctx context.Context, rule iptablesRule) error {
 //     backstop that catches gVisor's netstack traffic: drop every packet
 //     arriving from the sandbox, to the gateway IP and to anywhere else.
 //     The sidecar's listeners are opened afterwards, port by port, by
-//     admitJailPorts, once the sidecar has bound them.
+//     admitJailPorts, once the sidecar has bound them. IPv6 arriving on
+//     the veth is dropped whole (dropIPv6), and nothing reopens it.
 //
 // Until admitJailPorts runs the sandbox can complete no connection to the
 // host at all, so a launch path that never admits fails closed. Teardown
-// finds the host-side rules by veth and gateway (reapEgressRules); the
-// in-netns rules go with the netns.
+// finds the host-side rules by veth and gateway (reapEgressRules) and the
+// IPv6 drops by veth (removeIPv6Drops); the in-netns rules go with the
+// netns.
 func applyEgressPolicy(ctx context.Context, netnsName, vethHost, gatewayIP string) error {
 	// Layer 1 — in-netns OUTPUT allowlist. Add the ACCEPTs before
 	// flipping the policy to DROP (config-time, no traffic in flight,
@@ -148,6 +154,93 @@ func applyEgressPolicy(ctx context.Context, netnsName, vethHost, gatewayIP strin
 			return fmt.Errorf("egress: host-side %s: %w", r.chain, err)
 		}
 		hostRules = append(hostRules, rule)
+	}
+	if err := dropIPv6(ctx, vethHost); err != nil {
+		for _, installed := range hostRules {
+			_ = teardownIptables(ctx, installed)
+		}
+		return fmt.Errorf("egress: host-side IPv6: %w", err)
+	}
+	return nil
+}
+
+// ipv6DropChains are the chains dropIPv6 closes on a run's veth: INPUT for
+// packets addressed to the host, FORWARD for packets routed past it.
+var ipv6DropChains = []string{"INPUT", "FORWARD"}
+
+// dropIPv6 drops every IPv6 packet arriving on vethHost. The rest of the
+// host-side filter is iptables, which sees only IPv4, and the kernel gives
+// both ends of a veth an IPv6 link-local address, so without these a jail
+// with IPv6 of its own reaches every host listener bound to "::" through the
+// host end. A kernel without IPv6 has nothing to drop and no ip6tables
+// tables to write. If the second insert fails the first is removed.
+func dropIPv6(ctx context.Context, vethHost string) error {
+	if _, err := os.Stat("/proc/sys/net/ipv6"); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	for i, chain := range ipv6DropChains {
+		if err := runIP6tables(ctx, ipv6DropArgs("-I", chain, vethHost)...); err != nil {
+			for _, inserted := range ipv6DropChains[:i] {
+				_ = runIP6tables(ctx, ipv6DropArgs("-D", inserted, vethHost)...)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+// removeIPv6Drops removes the drops dropIPv6 inserted on veth, or with veth
+// empty on every run veth, except those whose veth still exists: a live
+// network keeps its rules, and a veth that survived its delete stays closed.
+// The rules are found by listing the chains, so a duplicate an earlier
+// network with the same veth name left goes too.
+func removeIPv6Drops(ctx context.Context, veth string) {
+	for _, chain := range ipv6DropChains {
+		out, err := exec.CommandContext(ctx, "ip6tables", "-t", "filter", "-S", chain).Output()
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			got, ok := ipv6DropRuleVeth(line, chain)
+			if !ok || (veth != "" && got != veth) {
+				continue
+			}
+			if _, err := net.InterfaceByName(got); err == nil {
+				continue
+			}
+			_ = runIP6tables(ctx, ipv6DropArgs("-D", chain, got)...)
+		}
+	}
+}
+
+func ipv6DropArgs(op, chain, veth string) []string {
+	return []string{"-t", "filter", op, chain, "-i", veth, "-j", "DROP"}
+}
+
+// hostVethRE is the host-side veth name runNetNames builds.
+var hostVethRE = regexp.MustCompile(`^vh-[0-9a-f]{4}[0-9]{1,3}$`)
+
+// ipv6DropRuleVeth returns the veth an `ip6tables -S <chain>` line names
+// when the line is exactly a drop dropIPv6 inserts on a run veth.
+func ipv6DropRuleVeth(line, chain string) (string, bool) {
+	f := strings.Fields(line)
+	if len(f) != 6 || f[0] != "-A" || f[1] != chain || f[2] != "-i" || f[4] != "-j" || f[5] != "DROP" {
+		return "", false
+	}
+	if !hostVethRE.MatchString(f[3]) {
+		return "", false
+	}
+	return f[3], true
+}
+
+// runIP6tables wraps `ip6tables` as runIptables wraps `iptables`.
+func runIP6tables(ctx context.Context, args ...string) error {
+	var stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, "ip6tables", args...)
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ip6tables %s: %w (stderr: %s)",
+			strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }

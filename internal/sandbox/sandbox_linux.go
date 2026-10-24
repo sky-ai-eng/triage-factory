@@ -115,16 +115,16 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 
 	// Step 1-9: netns + veth + addressing, MASQUERADE, ip_forward, and
 	// the Part B egress allowlist — the full "Network" privileged-op
-	// bucket (spec §5), routed through defaultOps. td.netSt is stored
-	// unconditionally so a partial failure still leaves Close() enough
-	// to clean up whatever prefix of setup succeeded. Skipped when the
-	// caller supplied the network (already built + owned by them).
+	// bucket (spec §5), routed through defaultOps. A SetupNetwork that
+	// fails has removed what it built, so only a network that came up is
+	// left for Close. Skipped when the caller supplied the network
+	// (already built + owned by them).
 	if ownsNetwork {
 		ns, err := defaultOps.SetupNetwork(ctx, cfg.ConversationID, idx)
-		td.netSt = ns
 		if err != nil {
 			return nil, nil, fmt.Errorf("sandbox: %w", err)
 		}
+		td.netSt = ns
 		netSt = ns
 	}
 	sb.Subnet = netSt.Subnet
@@ -283,8 +283,8 @@ func (s *Sandbox) Close() error {
 
 // setupRunNetwork is the Linux implementation behind SetupRunNetwork:
 // allocate a subnet idx, then build the per-run network through the same
-// brokered privileged op wrap uses. On a SetupNetwork error the returned
-// (possibly partial) state is torn down and the idx released so the caller
+// brokered privileged op wrap uses. A SetupNetwork that fails has already
+// removed what it built, so on its error the idx is released and the caller
 // never has to Close a failed bring-up.
 func setupRunNetwork(ctx context.Context, conversationID string) (*RunNetwork, error) {
 	if defaultOps == nil {
@@ -296,9 +296,6 @@ func setupRunNetwork(ctx context.Context, conversationID string) (*RunNetwork, e
 	}
 	netSt, serr := defaultOps.SetupNetwork(ctx, conversationID, idx)
 	if serr != nil {
-		// netSt carries whatever prefix of setup succeeded — reverse it, then
-		// hand the idx back so a partial bring-up leaks neither veth nor slot.
-		_ = defaultOps.TeardownNetwork(ctx, netSt)
 		defaultAllocator().Release(idx)
 		return nil, fmt.Errorf("sandbox: %w", serr)
 	}
