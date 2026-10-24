@@ -11280,6 +11280,7 @@
   "supports_vision": true
  },
  "azure_ai/Phi-4": {
+  "deprecation_date": "2027-01-17",
   "input_cost_per_token": 1.25e-07,
   "litellm_provider": "azure_ai",
   "max_input_tokens": 16384,
@@ -11293,6 +11294,7 @@
   "supports_vision": false
  },
  "azure_ai/Phi-4-mini-instruct": {
+  "deprecation_date": "2027-01-17",
   "input_cost_per_token": 7.5e-08,
   "litellm_provider": "azure_ai",
   "max_input_tokens": 131072,
@@ -11304,6 +11306,7 @@
   "supports_function_calling": true
  },
  "azure_ai/Phi-4-mini-reasoning": {
+  "deprecation_date": "2027-01-17",
   "input_cost_per_token": 7.5e-08,
   "litellm_provider": "azure_ai",
   "max_input_tokens": 131072,
@@ -11315,6 +11318,7 @@
   "supports_function_calling": true
  },
  "azure_ai/Phi-4-multimodal-instruct": {
+  "deprecation_date": "2027-01-17",
   "input_cost_per_audio_token": 4e-06,
   "input_cost_per_token": 8e-08,
   "litellm_provider": "azure_ai",
@@ -11329,6 +11333,7 @@
   "supports_vision": true
  },
  "azure_ai/Phi-4-reasoning": {
+  "deprecation_date": "2027-01-17",
   "input_cost_per_token": 1.25e-07,
   "litellm_provider": "azure_ai",
   "max_input_tokens": 32768,
@@ -15787,7 +15792,8 @@
   "supports_function_calling": true,
   "supports_reasoning": true,
   "supports_response_schema": true,
-  "supports_tool_choice": true
+  "supports_tool_choice": true,
+  "supports_vision": false
  },
  "bedrock/us-gov-east-1/openai.gpt-oss-20b-1:0": {
   "input_cost_per_token": 8.4e-08,
@@ -15806,7 +15812,8 @@
   "supports_function_calling": true,
   "supports_reasoning": true,
   "supports_response_schema": true,
-  "supports_tool_choice": true
+  "supports_tool_choice": true,
+  "supports_vision": false
  },
  "bedrock/us-gov-west-1/amazon.nova-lite-v1:0": {
   "cache_read_input_token_cost": 1.8e-08,
@@ -16350,7 +16357,8 @@
   "supports_function_calling": true,
   "supports_reasoning": true,
   "supports_response_schema": true,
-  "supports_tool_choice": true
+  "supports_tool_choice": true,
+  "supports_vision": false
  },
  "bedrock/us-gov-west-1/openai.gpt-oss-20b-1:0": {
   "input_cost_per_token": 8.4e-08,
@@ -16369,7 +16377,8 @@
   "supports_function_calling": true,
   "supports_reasoning": true,
   "supports_response_schema": true,
-  "supports_tool_choice": true
+  "supports_tool_choice": true,
+  "supports_vision": false
  },
  "bedrock/us-west-1/meta.llama3-70b-instruct-v1:0": {
   "deprecation_date": "2027-03-30",
@@ -17411,7 +17420,8 @@
   "supports_parallel_function_calling": true,
   "supports_reasoning": true,
   "supports_response_schema": true,
-  "supports_tool_choice": true
+  "supports_tool_choice": true,
+  "supports_vision": false
  },
  "bedrock_mantle/openai.gpt-oss-20b": {
   "input_cost_per_token": 7e-08,
@@ -17436,7 +17446,8 @@
   "supports_parallel_function_calling": true,
   "supports_reasoning": true,
   "supports_response_schema": true,
-  "supports_tool_choice": true
+  "supports_tool_choice": true,
+  "supports_vision": false
  },
  "bedrock_mantle/openai.gpt-oss-safeguard-120b": {
   "input_cost_per_token": 1.5e-07,
@@ -17459,7 +17470,8 @@
   "supports_function_calling": true,
   "supports_reasoning": true,
   "supports_response_schema": true,
-  "supports_tool_choice": true
+  "supports_tool_choice": true,
+  "supports_vision": false
  },
  "bedrock_mantle/openai.gpt-oss-safeguard-20b": {
   "input_cost_per_token": 7e-08,
@@ -17482,7 +17494,8 @@
   "supports_function_calling": true,
   "supports_reasoning": true,
   "supports_response_schema": true,
-  "supports_tool_choice": true
+  "supports_tool_choice": true,
+  "supports_vision": false
  },
  "bedrock_mantle/qwen.qwen3-235b-a22b-2507": {
   "input_cost_per_token": 2.2e-07,
@@ -17662,7 +17675,8 @@
   "supports_parallel_function_calling": true,
   "supports_reasoning": true,
   "supports_response_schema": true,
-  "supports_tool_choice": true
+  "supports_tool_choice": true,
+  "supports_vision": false
  },
  "bedrock_mantle/us-gov-east-1/openai.gpt-oss-20b": {
   "input_cost_per_token": 8.4e-08,
@@ -17681,7 +17695,8 @@
   "supports_parallel_function_calling": true,
   "supports_reasoning": true,
   "supports_response_schema": true,
-  "supports_tool_choice": true
+  "supports_tool_choice": true,
+  "supports_vision": false
  },
  "bedrock_mantle/us-gov-east-1/xai.grok-4.6": {
   "cache_read_input_token_cost": 6.6e-07,
@@ -17992,7 +18007,8 @@
   "supports_parallel_function_calling": true,
   "supports_reasoning": true,
   "supports_response_schema": true,
-  "supports_tool_choice": true
+  "supports_tool_choice": true,
+  "supports_vision": false
  },
  "bedrock_mantle/us-gov-west-1/openai.gpt-oss-20b": {
   "input_cost_per_token": 8.4e-08,
@@ -18011,7 +18027,8 @@
   "supports_parallel_function_calling": true,
   "supports_reasoning": true,
   "supports_response_schema": true,
-  "supports_tool_choice": true
+  "supports_tool_choice": true,
+  "supports_vision": false
  },
  "bedrock_mantle/us-gov-west-1/xai.grok-4.3": {
   "cache_read_input_token_cost": 2.4e-07,
@@ -38856,21 +38873,21 @@
   "cache_creation_input_token_cost": 1.25e-07,
   "cache_creation_input_token_cost_above_272k_tokens": 2.5e-07,
   "cache_creation_input_token_cost_above_272k_tokens_batches": 1.25e-07,
-  "cache_creation_input_token_cost_above_272k_tokens_decisions": 2e-07,
+  "cache_creation_input_token_cost_above_272k_tokens_decisions": 2.5e-07,
   "cache_creation_input_token_cost_above_272k_tokens_flex": 1.25e-07,
   "cache_creation_input_token_cost_above_272k_tokens_priority": 5e-07,
   "cache_creation_input_token_cost_batches": 6.25e-08,
-  "cache_creation_input_token_cost_decisions": 1e-07,
+  "cache_creation_input_token_cost_decisions": 1.25e-07,
   "cache_creation_input_token_cost_flex": 6.25e-08,
   "cache_creation_input_token_cost_priority": 2.5e-07,
   "cache_read_input_token_cost": 1e-08,
   "cache_read_input_token_cost_above_272k_tokens": 2e-08,
   "cache_read_input_token_cost_above_272k_tokens_batches": 1e-08,
-  "cache_read_input_token_cost_above_272k_tokens_decisions": 2e-07,
+  "cache_read_input_token_cost_above_272k_tokens_decisions": 2e-08,
   "cache_read_input_token_cost_above_272k_tokens_flex": 1e-08,
   "cache_read_input_token_cost_above_272k_tokens_priority": 4e-08,
   "cache_read_input_token_cost_batches": 5e-09,
-  "cache_read_input_token_cost_decisions": 1e-07,
+  "cache_read_input_token_cost_decisions": 1e-08,
   "cache_read_input_token_cost_flex": 5e-09,
   "cache_read_input_token_cost_priority": 2e-08,
   "input_cost_per_token": 1e-07,
@@ -48319,7 +48336,8 @@
   "supports_function_calling": true,
   "supports_reasoning": true,
   "supports_response_schema": true,
-  "supports_tool_choice": true
+  "supports_tool_choice": true,
+  "supports_vision": false
  },
  "openai.gpt-oss-20b-1:0": {
   "input_cost_per_token": 7e-08,
@@ -48344,7 +48362,8 @@
   "supports_function_calling": true,
   "supports_reasoning": true,
   "supports_response_schema": true,
-  "supports_tool_choice": true
+  "supports_tool_choice": true,
+  "supports_vision": false
  },
  "openai.gpt-oss-safeguard-120b": {
   "input_cost_per_token": 1.5e-07,
@@ -53924,6 +53943,17 @@
   "supports_tool_choice": true,
   "supports_vision": true
  },
+ "together_ai/MiniMaxAI/MiniMax-M3.1-Flash": {
+  "cache_read_input_token_cost": 1.5e-08,
+  "input_cost_per_token": 1.5e-07,
+  "litellm_provider": "together_ai",
+  "max_input_tokens": 1048576,
+  "max_tokens": 1048576,
+  "mode": "chat",
+  "output_cost_per_token": 6e-07,
+  "source": "https://www.together.ai/pricing",
+  "supports_prompt_caching": true
+ },
  "together_ai/NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO": {
   "deprecation_date": "2025-08-28",
   "input_cost_per_token": 6e-07,
@@ -55244,7 +55274,8 @@
   "supports_function_calling": true,
   "supports_reasoning": true,
   "supports_response_schema": true,
-  "supports_tool_choice": true
+  "supports_tool_choice": true,
+  "supports_vision": false
  },
  "us-gov.openai.gpt-oss-20b-1:0": {
   "input_cost_per_token": 8.4e-08,
@@ -55263,7 +55294,8 @@
   "supports_function_calling": true,
   "supports_reasoning": true,
   "supports_response_schema": true,
-  "supports_tool_choice": true
+  "supports_tool_choice": true,
+  "supports_vision": false
  },
  "us-gov.xai.grok-4.6": {
   "cache_read_input_token_cost": 6.6e-07,
@@ -60738,12 +60770,14 @@
  },
  "vertex_ai/meta/llama-4-maverick-17b-16e-instruct-maas": {
   "input_cost_per_token": 3.5e-07,
+  "input_cost_per_token_batches": 1.75e-07,
   "litellm_provider": "vertex_ai-llama_models",
   "max_input_tokens": 1000000,
   "max_output_tokens": 1000000,
   "max_tokens": 1000000,
   "mode": "chat",
   "output_cost_per_token": 1.15e-06,
+  "output_cost_per_token_batches": 5.75e-07,
   "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing#partner-models",
   "supported_modalities": [
    "text",
@@ -60758,12 +60792,14 @@
  },
  "vertex_ai/meta/llama-4-scout-17b-128e-instruct-maas": {
   "input_cost_per_token": 2.5e-07,
+  "input_cost_per_token_batches": 1.25e-07,
   "litellm_provider": "vertex_ai-llama_models",
   "max_input_tokens": 10000000,
   "max_output_tokens": 10000000,
   "max_tokens": 10000000,
   "mode": "chat",
   "output_cost_per_token": 7e-07,
+  "output_cost_per_token_batches": 3.5e-07,
   "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing#partner-models",
   "supported_modalities": [
    "text",
