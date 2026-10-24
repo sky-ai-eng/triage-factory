@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.16.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.16.0...v1.16.1) (2026-10-24)
+
+
+### Bug Fixes
+
+* **sandbox:** drop IPv6 on the run veth with ip6tables, and remove a failed setup's network (TFAC-1180) ([#1299](https://github.com/sky-ai-eng/triage-factory/issues/1299)) ([1eb087c](https://github.com/sky-ai-eng/triage-factory/commit/1eb087cc6f462af1f4e66e40babbcb4e5972cbe7))
+
 ## [1.16.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.15.0...v1.16.0) (2026-10-24)
 
 
