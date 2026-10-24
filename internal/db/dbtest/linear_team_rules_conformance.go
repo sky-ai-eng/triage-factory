@@ -82,8 +82,8 @@ func linearTeamIDs(rules []domain.LinearTeamRules) []string {
 // db.LinearTeamRulesStore: replace-set semantics (an absent id's row is
 // deleted, a present one upserted, another team's rows untouched), ordering,
 // the stored set ReplaceForTeam returns, the org union, TracksTeamSystem, the
-// armed-or-unarmed CHECK, and every read and write confined to the workspace
-// it is given. RLS is the Postgres backend's own test.
+// per-rule complete-or-empty CHECKs, and every read and write confined to the
+// workspace it is given. RLS is the Postgres backend's own test.
 func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -231,23 +231,51 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 		}
 	})
 
-	t.Run("ReplaceForTeam_RefusesHalfAMapping", func(t *testing.T) {
-		// The armed-or-unarmed CHECK, in both dialects: pickup with nothing
-		// to move an issue into, or the reverse, never lands.
+	t.Run("ReplaceForTeam_StoresAPartlyMappedTeam", func(t *testing.T) {
+		// Each rule is complete or empty on its own, so a team with some
+		// rules mapped and others empty is stored as written, and is not
+		// armed.
 		f := factory(t)
-		noDone := armedLinearRules("lt-a", "AAA")
-		noDone.DoneMembers, noDone.DoneCanonical = nil, domain.LinearStateRef{}
-		onlyPickup := unarmedLinearRules("lt-b", "BBB")
+		onlyPickup := unarmedLinearRules("lt-a", "AAA")
 		onlyPickup.PickupMembers = []domain.LinearStateRef{linearState("todo", "unstarted")}
-		noCanonical := armedLinearRules("lt-c", "CCC")
+		noDone := armedLinearRules("lt-b", "BBB")
+		noDone.DoneMembers, noDone.DoneCanonical = []domain.LinearStateRef{}, domain.LinearStateRef{}
+		input := []domain.LinearTeamRules{onlyPickup, noDone}
+		got, err := f.Store.ReplaceForTeam(ctx, f.TeamID, linearWorkspace, input)
+		if err != nil {
+			t.Fatalf("ReplaceForTeam: %v", err)
+		}
+		if want := withTeam(input, f.TeamID); !reflect.DeepEqual(got, want) {
+			t.Errorf("ReplaceForTeam returned\n%#v\nwant\n%#v", got, want)
+		}
+		read, err := f.Store.ListForTeamSystem(ctx, f.TeamID, linearWorkspace)
+		if err != nil {
+			t.Fatalf("ListForTeamSystem: %v", err)
+		}
+		if !reflect.DeepEqual(read, got) {
+			t.Errorf("ListForTeamSystem after the write =\n%#v\nwant what ReplaceForTeam returned\n%#v", read, got)
+		}
+		for _, r := range read {
+			if r.Armed() {
+				t.Errorf("%s reads as armed with a rule unmapped: %#v", r.LinearTeamID, r)
+			}
+		}
+	})
+
+	t.Run("ReplaceForTeam_RefusesARuleWithoutItsTarget", func(t *testing.T) {
+		// The per-rule CHECKs, in both dialects: a write-target rule is
+		// members and a canonical together, or neither.
+		f := factory(t)
+		noCanonical := armedLinearRules("lt-a", "AAA")
 		noCanonical.InProgressCanonical = domain.LinearStateRef{}
+		noMembers := armedLinearRules("lt-b", "BBB")
+		noMembers.DoneMembers = []domain.LinearStateRef{}
 		for name, r := range map[string]domain.LinearTeamRules{
-			"no done rule":           noDone,
-			"pickup only":            onlyPickup,
-			"in_progress, no target": noCanonical,
+			"in_progress members, no canonical": noCanonical,
+			"done canonical, no members":        noMembers,
 		} {
 			if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, linearWorkspace, []domain.LinearTeamRules{r}); err == nil {
-				t.Errorf("%s: ReplaceForTeam stored half a mapping", name)
+				t.Errorf("%s: ReplaceForTeam stored a rule without its target", name)
 			}
 		}
 		got, err := f.Store.ListForTeamSystem(ctx, f.TeamID, linearWorkspace)

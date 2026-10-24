@@ -84,7 +84,7 @@ const mapped = (): LinearTeamConfig => ({
   ...prefillLinearRules(WORKFLOW)!,
 })
 
-describe('the watched-or-mapped rule', () => {
+describe('the complete-or-empty rules', () => {
   it('lets a team be watched with nothing mapped, or mapped whole', () => {
     expect(linearTeamRulesValid(unmappedLinearTeam('team-eng', 'ENG', 'Engineering'))).toBe(true)
     expect(linearTeamIsArmed(unmappedLinearTeam('team-eng', 'ENG', 'Engineering'))).toBe(false)
@@ -92,18 +92,31 @@ describe('the watched-or-mapped rule', () => {
     expect(linearTeamIsArmed(mapped())).toBe(true)
   })
 
-  it('blocks half a mapping', () => {
+  it('lets a team be mapped in part, unarmed', () => {
     const noDone: LinearTeamConfig = { ...mapped(), done: { members: [], canonical: null } }
+    const pickupOnly: LinearTeamConfig = {
+      ...unmappedLinearTeam('team-eng', 'ENG', 'Engineering'),
+      pickup: mapped().pickup,
+    }
+    expect(linearTeamRulesValid(noDone)).toBe(true)
+    expect(linearTeamIsArmed(noDone)).toBe(false)
+    expect(linearTeamRulesValid(pickupOnly)).toBe(true)
+    expect(linearTeamIsArmed(pickupOnly)).toBe(false)
+    expect(linearTeamsBlocked([mapped(), noDone, pickupOnly])).toBe(false)
+  })
+
+  it('blocks a write-target rule without its target, or a target without states', () => {
     const noTarget: LinearTeamConfig = {
       ...mapped(),
       in_progress: { ...mapped().in_progress, canonical: null },
     }
-    expect(linearTeamRulesValid(noDone)).toBe(false)
+    const noMembers: LinearTeamConfig = {
+      ...mapped(),
+      done: { members: [], canonical: mapped().done.canonical },
+    }
     expect(linearTeamRulesValid(noTarget)).toBe(false)
-    expect(linearTeamsBlocked([mapped(), noDone])).toBe(true)
-    expect(linearTeamsBlocked([mapped(), unmappedLinearTeam('t2', 'OPS', 'Operations')])).toBe(
-      false,
-    )
+    expect(linearTeamRulesValid(noMembers)).toBe(false)
+    expect(linearTeamsBlocked([mapped(), noTarget])).toBe(true)
   })
 
   it('blocks a write target outside its rule', () => {

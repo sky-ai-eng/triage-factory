@@ -324,18 +324,19 @@ export const linearTeamIsUnmapped = (t: LinearTeamConfig): boolean =>
   t.done.members.length === 0 &&
   !t.done.canonical
 
-/** linearTeamRulesValid mirrors what the server stores: a Linear team is
- *  either watched with every rule empty or mapped with all three, and a
- *  write-target rule's canonical is one of its members. Half a mapping is
- *  refused there, so it blocks the save here. */
-export const linearTeamRulesValid = (t: LinearTeamConfig): boolean => {
-  if (linearTeamIsUnmapped(t)) return true
-  if (!linearTeamIsArmed(t)) return false
-  return [t.in_progress, t.done].every((r) => r.members.some((m) => m.id === r.canonical?.id))
-}
+/** linearTeamRulesValid mirrors what the server stores: each rule is complete
+ *  or empty on its own, and in_progress and done bind their members and their
+ *  write target together, the target one of the members. A team mapped in part
+ *  saves, and stays unarmed until all three rules are mapped. */
+export const linearTeamRulesValid = (t: LinearTeamConfig): boolean =>
+  [t.in_progress, t.done].every(
+    (r) =>
+      r.members.length > 0 === !!r.canonical &&
+      (!r.canonical || r.members.some((m) => m.id === r.canonical?.id)),
+  )
 
 /** linearTeamsBlocked reports whether the team's Linear rules would be refused
- *  by the save. Watching a team without mapping it never blocks. */
+ *  by the save. Watching a team, or mapping it in part, never blocks. */
 export const linearTeamsBlocked = (teams: LinearTeamConfig[]): boolean =>
   teams.some((t) => !linearTeamRulesValid(t))
 

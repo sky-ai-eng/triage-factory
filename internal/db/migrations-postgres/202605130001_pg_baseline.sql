@@ -716,10 +716,12 @@ CREATE TABLE public.jira_project_status_rules (
 -- unit. linear_team_key ("ENG") and linear_team_name are display values
 -- refreshed on every write. Members are jsonb arrays of {"id","name","type"}
 -- workflow-state refs, a canonical one such object; the id is the identity.
--- No in_review rule. A row is watched-but-unarmed (every rule empty) or armed
--- (pickup members, plus members and a canonical for in_progress and done) —
--- never half of a mapping. "canonical is in members" needs a subquery, so it
--- is the HTTP validator's.
+-- No in_review rule. Each rule is complete or empty on its own, as on
+-- jira_project_status_rules: pickup has no constraint, and in_progress and done
+-- bind members and a canonical together. A row with some rules mapped is
+-- watched and unarmed; the poller asks nothing of it until all three are
+-- mapped. "canonical is in members" needs a subquery, so it is the HTTP
+-- validator's.
 CREATE TABLE public.linear_team_rules (
     team_id uuid NOT NULL,
     -- The Linear workspace the Linear team belongs to. A row saved under one
@@ -747,13 +749,13 @@ CREATE TABLE public.linear_team_rules (
         (in_progress_canonical IS NULL OR jsonb_typeof(in_progress_canonical) = 'object')
         AND (done_canonical IS NULL OR jsonb_typeof(done_canonical) = 'object')
     ),
-    CONSTRAINT ltr_armed_or_unarmed CHECK (
-        (jsonb_array_length(pickup_members) = 0
-            AND jsonb_array_length(in_progress_members) = 0 AND in_progress_canonical IS NULL
-            AND jsonb_array_length(done_members) = 0 AND done_canonical IS NULL)
-        OR (jsonb_array_length(pickup_members) > 0
-            AND jsonb_array_length(in_progress_members) > 0 AND in_progress_canonical IS NOT NULL
-            AND jsonb_array_length(done_members) > 0 AND done_canonical IS NOT NULL)
+    CONSTRAINT ltr_in_progress_complete_or_empty CHECK (
+        (jsonb_array_length(in_progress_members) = 0 AND in_progress_canonical IS NULL)
+        OR (jsonb_array_length(in_progress_members) > 0 AND in_progress_canonical IS NOT NULL)
+    ),
+    CONSTRAINT ltr_done_complete_or_empty CHECK (
+        (jsonb_array_length(done_members) = 0 AND done_canonical IS NULL)
+        OR (jsonb_array_length(done_members) > 0 AND done_canonical IS NOT NULL)
     )
 );
 

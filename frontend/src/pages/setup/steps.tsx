@@ -1558,8 +1558,9 @@ const jiraProjectsStep: WizardStep = {
 // states, pre-filled from the workflow's state types as a team is watched.
 // Gated on a connected Linear tracker. No load of its own — the teams came in
 // with the team load. Optional: zero watched teams is valid, and so is a team
-// watched but unmapped; only a half-mapped team, which the server refuses,
-// blocks.
+// watched but unmapped or mapped in part; only a half-mapped rule — an
+// in-progress or done rule with states and no write target, which the server
+// refuses — blocks.
 const linearTeamsStep: WizardStep = {
   id: 'team-linear-teams',
   section: 'team',
@@ -1568,7 +1569,7 @@ const linearTeamsStep: WizardStep = {
   isComplete: (s) => !linearTeamsBlocked(s.team.linear_teams),
   validate: (s) =>
     linearTeamsBlocked(s.team.linear_teams)
-      ? 'Finish or clear the half-mapped Linear team before continuing.'
+      ? 'Finish or clear the half-mapped Linear state rule before continuing.'
       : null,
   persist: async ({ state, teamId, patch }) => {
     if (!state.teamLoaded) {

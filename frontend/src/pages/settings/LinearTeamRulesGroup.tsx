@@ -50,8 +50,9 @@ interface WatchRow {
  * the types cannot map whole (no started or no completed state) is left
  * watched and unmapped, which the board says plainly.
  *
- * The server stores a team either watched with no rules or mapped with all
- * three, so a half-mapped team is flagged here and blocks the save.
+ * Each rule saves complete or empty on its own, so a team mapped in part is
+ * stored and stays unarmed until all three rules are mapped. A write-target
+ * rule with states and no target is flagged here and blocks the save.
  *
  * A controlled component: the container owns the teams (`value`) and the PUT
  * /api/teams/{id}/linear-teams. Org-level Linear access lives elsewhere; this
@@ -253,7 +254,7 @@ export default function LinearTeamRulesGroup({
         const states = statesByTeam[team.id] || []
         const missing = unresolvableLinearStates(team, states)
         const armed = linearTeamIsArmed(team)
-        const halfMapped = !linearTeamRulesValid(team)
+        const ruleFault = !linearTeamRulesValid(team)
         const isOpen = expanded[team.id] === true
         const prefill = isOpen && !armed && states.length > 0 ? prefillLinearRules(states) : null
         return (
@@ -280,15 +281,15 @@ export default function LinearTeamRulesGroup({
                 type="button"
                 onClick={() => toggleExpanded(team.id)}
                 className={`text-label uppercase tracking-wide ${
-                  missing.length > 0 || halfMapped
+                  missing.length > 0 || ruleFault
                     ? 'text-alarm hover:text-alarm/80'
                     : 'text-ink-2 hover:text-ink-2/80'
                 }`}
               >
                 {missing.length > 0
                   ? `${missing.length} state${missing.length === 1 ? '' : 's'} missing`
-                  : halfMapped
-                    ? 'Partly mapped'
+                  : ruleFault
+                    ? 'Needs a write target'
                     : armed
                       ? 'Ready'
                       : 'States not mapped'}
@@ -307,7 +308,7 @@ export default function LinearTeamRulesGroup({
 
             {isOpen && (
               <div className="px-4 pb-4 pt-1 space-y-3">
-                {!armed && !halfMapped && (
+                {!armed && !ruleFault && (
                   <p className="text-reported text-ink-3">
                     {team.key} is watched but not mapped, so nothing from it reaches the board yet.
                     {readOnly
@@ -315,12 +316,6 @@ export default function LinearTeamRulesGroup({
                       : !connected
                         ? ' Connect Linear to map its states.'
                         : ' Map its states below to arm it.'}
-                  </p>
-                )}
-                {halfMapped && (
-                  <p className="text-reported text-alarm">
-                    Map pickup, in progress and done — each in-progress and done rule with a write
-                    target — or clear all three to keep {team.key} watched without mapping it.
                   </p>
                 )}
                 {connected && (

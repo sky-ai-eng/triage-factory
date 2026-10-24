@@ -122,7 +122,8 @@ func TestLinearTeamRulesStore_Postgres_RLS(t *testing.T) {
 
 // TestLinearTeamRules_Postgres_ChecksRefuseMalformedRows is the SQLite test of
 // the same name against the jsonb columns: a rule column of the wrong JSON
-// shape and half a mapping are refused by the schema itself.
+// shape and a write-target rule without its target are refused by the schema
+// itself, and a partly mapped row is not.
 func TestLinearTeamRules_Postgres_ChecksRefuseMalformedRows(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -144,6 +145,12 @@ func TestLinearTeamRules_Postgres_ChecksRefuseMalformedRows(t *testing.T) {
 	if err := insert(arr, arr, ref, arr, ref); err != nil {
 		t.Fatalf("an armed row was refused: %v", err)
 	}
+	if err := insert(arr, "[]", nil, "[]", nil); err != nil {
+		t.Fatalf("a row mapping pickup alone was refused: %v", err)
+	}
+	if err := insert("[]", arr, ref, arr, ref); err != nil {
+		t.Fatalf("a row mapping the write targets alone was refused: %v", err)
+	}
 	for name, row := range map[string]struct {
 		pickup, inProgress, done           string
 		inProgressCanonical, doneCanonical any
@@ -151,8 +158,8 @@ func TestLinearTeamRules_Postgres_ChecksRefuseMalformedRows(t *testing.T) {
 		"object as members":  {"{}", arr, arr, ref, ref},
 		"null as members":    {"null", arr, arr, ref, ref},
 		"array as canonical": {arr, arr, arr, "[]", ref},
-		"half a mapping":     {arr, "[]", "[]", nil, nil},
-		"canonical unarmed":  {"[]", "[]", "[]", ref, nil},
+		"members, no target": {arr, arr, arr, nil, ref},
+		"target, no members": {arr, arr, "[]", ref, ref},
 	} {
 		if err := insert(row.pickup, row.inProgress, row.inProgressCanonical, row.done, row.doneCanonical); err == nil {
 			t.Errorf("%s: the row was accepted", name)

@@ -30,7 +30,8 @@ import (
 // What a check finds wrong with the body is a 422 naming the element and rule:
 // the body is well formed, and what it names does not fit the workspace — a
 // team the credential cannot see, a state from another team's workflow, a
-// mapping left half done. Linear not answering is a 502 and stores nothing.
+// write-target rule without its target. Linear not answering is a 502 and
+// stores nothing.
 // --------------------------------------------------------------------
 
 // linearRuleWish is one rule as the caller asked for it, settled against the
@@ -54,21 +55,11 @@ func (rw linearRuleWish) ids() []string {
 	return out
 }
 
-// mapped reports whether the rule will hold anything once written: the wish if
-// it changed, the stored rule otherwise.
-func (rw linearRuleWish) mapped(storedMembers []domain.LinearStateRef) bool {
-	if !rw.changed {
-		return len(storedMembers) > 0
-	}
-	return len(rw.memberIDs) > 0 || rw.canonicalID != ""
-}
-
 // linearTeamPlan is one element's settled work: the row as far as the stored
 // row carries it, and what still has to be resolved against Linear.
 type linearTeamPlan struct {
-	wish  linearTeamWish
-	prior domain.LinearTeamRules
-	row   domain.LinearTeamRules
+	wish linearTeamWish
+	row  domain.LinearTeamRules
 	// newTeam is a team this team does not track yet: its visibility, key and
 	// name come from Linear.
 	newTeam bool
@@ -104,7 +95,6 @@ func (s *Server) gateLinearTeams(
 		prior, isStored := storedByID[wish.write.ID]
 		p := linearTeamPlan{
 			wish:       wish,
-			prior:      prior,
 			newTeam:    !isStored,
 			pickup:     requestedLinearPickup(wish.write.Pickup, prior.PickupMembers),
 			inProgress: requestedLinearRule(wish.write.InProgress, prior.InProgressMembers, prior.InProgressCanonical),
@@ -235,10 +225,11 @@ func (s *Server) gateLinearTeams(
 
 // checkLinearPlanShape records every fault in one element that the ids alone
 // decide: a write-target rule with members and no canonical (or the reverse),
-// a canonical outside its rule's members, and a mapping left half done.
+// and a canonical outside its rule's members. Each rule is complete or empty
+// on its own, as a Jira project's are, so a team with some rules mapped and
+// others empty is stored, and reads as unarmed until all three are mapped.
 func checkLinearPlanShape(v *httpx.Validation, p linearTeamPlan) {
 	base := fmt.Sprintf("linear_teams[%d]", p.wish.index)
-	ruleFault := false
 	for _, rule := range []struct {
 		name string
 		wish linearRuleWish
@@ -251,52 +242,13 @@ func checkLinearPlanShape(v *httpx.Validation, p linearTeamPlan) {
 		case hasMembers && !hasCanonical:
 			v.Invalid(base+"."+rule.name+".canonical_id",
 				rule.name+" needs a canonical_id: the state TF moves an issue into, one of its member_ids")
-			ruleFault = true
 		case !hasMembers && hasCanonical:
 			v.Invalid(base+"."+rule.name+".member_ids",
 				rule.name+" names a canonical_id but no member_ids; the canonical must be one of them")
-			ruleFault = true
 		case hasMembers && !slices.Contains(rule.wish.memberIDs, rule.wish.canonicalID):
 			v.Invalid(base+"."+rule.name+".canonical_id",
 				"canonical_id "+rule.wish.canonicalID+" is not one of "+rule.name+".member_ids")
-			ruleFault = true
 		}
-	}
-	if ruleFault {
-		return
-	}
-	pickup := p.pickup.mapped(p.prior.PickupMembers)
-	inProgress := p.inProgress.mapped(p.prior.InProgressMembers)
-	done := p.done.mapped(p.prior.DoneMembers)
-	mapped := 0
-	for _, m := range []bool{pickup, inProgress, done} {
-		if m {
-			mapped++
-		}
-	}
-	if mapped > 0 && mapped < 3 {
-		v.Invalid(base, "a Linear team is either watched with no rules or mapped with all three — "+
-			"pickup, in_progress and done; this would leave "+missingLinearRules(pickup, inProgress, done)+" unmapped")
-	}
-}
-
-// missingLinearRules names the rules a half mapping leaves empty.
-func missingLinearRules(pickup, inProgress, done bool) string {
-	var missing []string
-	if !pickup {
-		missing = append(missing, "pickup")
-	}
-	if !inProgress {
-		missing = append(missing, "in_progress")
-	}
-	if !done {
-		missing = append(missing, "done")
-	}
-	switch len(missing) {
-	case 1:
-		return missing[0]
-	default:
-		return missing[0] + " and " + missing[1]
 	}
 }
 

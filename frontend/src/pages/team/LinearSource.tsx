@@ -20,10 +20,9 @@ import { toast } from '../../components/Toast/toastStore'
 // Linear, as this team's event source.
 //
 // The editor is the one the local Settings page uses, so watching, the
-// pre-fill from state types and the half-mapping check behave the same in
+// pre-fill from state types and the write-target check behave the same in
 // both places. Unlike Jira's board it does not save as each gesture lands:
-// the server stores a Linear team either unmapped or mapped in full, and a
-// mapping is built a rule at a time, so the edits are held until Save.
+// the edits are held until Save.
 //
 // A member sees what is watched and how it is mapped, with the verbs absent.
 //
@@ -152,7 +151,7 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
                 <div className="mt-4 flex items-center justify-end gap-2">
                   {blocked && (
                     <span className="mr-auto text-reported text-alarm">
-                      Finish or clear a partly mapped team to save.
+                      Finish or clear a half-mapped state rule to save.
                     </span>
                   )}
                   <button
