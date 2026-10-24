@@ -323,6 +323,19 @@ posture=$(dc exec -T executor sh -c '
 ' 2>&1) || fail "executor privsep posture: $posture"
 pass "executor privsep posture: $posture"
 
+# 6c. Executor: every host tool the cap-broker runs by name is on its PATH.
+#     A missing one boots green and fails only when the broker first runs it
+#     (prlimit, for instance, on the first workspace capture).
+tools=$(dc exec -T executor sh -c '
+  missing=""
+  for t in runsc prlimit iptables ip; do
+    command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+  done
+  [ -z "$missing" ] || { echo "missing from the executor image:$missing"; exit 1; }
+  echo "runsc, prlimit, iptables, ip"
+' 2>&1) || fail "executor host tools: $tools"
+pass "executor host tools on PATH: $tools"
+
 # 7. The observability stack. Each of these fails silently — no crash, no 503,
 #    just an empty UI weeks later when someone finally looks.
 
