@@ -192,6 +192,10 @@ FROM alpine:3.20 AS runtime
 #   this small, single-purpose, single-threaded C tool is a hard
 #   runtime dependency of docker/entrypoint.sh's multi-mode
 #   privilege-separation path.
+# - util-linux-misc: prlimit. The cap-broker starts every workspace
+#   capture's runsc under `prlimit --fsize`, because gVisor applies no
+#   in-jail file-size limit to the host descriptor the capture streams
+#   into; without it no capture jail launches and no snapshot is taken.
 RUN apk add --no-cache \
     iptables \
     iproute2 \
@@ -201,7 +205,8 @@ RUN apk add --no-cache \
     curl \
     git \
     openssh-client \
-    setpriv
+    setpriv \
+    util-linux-misc
 
 # The unprivileged orchestrator identity the entrypoint drops into for
 # multi mode. A fixed, dedicated,
