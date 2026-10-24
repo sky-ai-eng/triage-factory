@@ -175,7 +175,7 @@ var ipv6DropChains = []string{"INPUT", "FORWARD"}
 // host end. A kernel without IPv6 has nothing to drop and no ip6tables
 // tables to write. If the second insert fails the first is removed.
 func dropIPv6(ctx context.Context, vethHost string) error {
-	if _, err := os.Stat("/proc/sys/net/ipv6"); errors.Is(err, fs.ErrNotExist) {
+	if !kernelHasIPv6() {
 		return nil
 	}
 	for i, chain := range ipv6DropChains {
@@ -194,13 +194,20 @@ func dropIPv6(ctx context.Context, vethHost string) error {
 // network keeps its rules, and a veth that survived its delete stays closed.
 // The rules are found by listing the chains, so a duplicate an earlier
 // network with the same veth name left goes too.
+//
+// A drop it cannot list or delete stays in place. That is safe, since a drop
+// only closes, but it is a leak, so it is logged.
 func removeIPv6Drops(ctx context.Context, veth string) {
+	if !kernelHasIPv6() {
+		return
+	}
 	for _, chain := range ipv6DropChains {
-		out, err := exec.CommandContext(ctx, "ip6tables", "-t", "filter", "-S", chain).Output()
+		out, err := ip6tablesOutput(ctx, "-t", "filter", "-S", chain)
 		if err != nil {
+			sandboxLog.Warn("IPv6 drops not removed: their chain could not be listed", "chain", chain, "veth", veth, "error", err)
 			continue
 		}
-		for _, line := range strings.Split(string(out), "\n") {
+		for _, line := range strings.Split(out, "\n") {
 			got, ok := ipv6DropRuleVeth(line, chain)
 			if !ok || (veth != "" && got != veth) {
 				continue
@@ -208,9 +215,18 @@ func removeIPv6Drops(ctx context.Context, veth string) {
 			if _, err := net.InterfaceByName(got); err == nil {
 				continue
 			}
-			_ = runIP6tables(ctx, ipv6DropArgs("-D", chain, got)...)
+			if err := runIP6tables(ctx, ipv6DropArgs("-D", chain, got)...); err != nil {
+				sandboxLog.Warn("IPv6 drop not removed", "chain", chain, "veth", got, "error", err)
+			}
 		}
 	}
+}
+
+// kernelHasIPv6 reports whether the kernel has IPv6, so whether there is
+// anything to drop and any ip6tables tables to hold the drops.
+func kernelHasIPv6() bool {
+	_, err := os.Stat("/proc/sys/net/ipv6")
+	return !errors.Is(err, fs.ErrNotExist)
 }
 
 func ipv6DropArgs(op, chain, veth string) []string {
@@ -235,14 +251,20 @@ func ipv6DropRuleVeth(line, chain string) (string, bool) {
 
 // runIP6tables wraps `ip6tables` as runIptables wraps `iptables`.
 func runIP6tables(ctx context.Context, args ...string) error {
-	var stderr bytes.Buffer
+	_, err := ip6tablesOutput(ctx, args...)
+	return err
+}
+
+// ip6tablesOutput runs `ip6tables` and returns what it printed.
+func ip6tablesOutput(ctx context.Context, args ...string) (string, error) {
+	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, "ip6tables", args...)
-	cmd.Stderr = &stderr
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("ip6tables %s: %w (stderr: %s)",
+		return "", fmt.Errorf("ip6tables %s: %w (stderr: %s)",
 			strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
-	return nil
+	return stdout.String(), nil
 }
 
 // admitJailPorts opens TCP ports on a sandbox's gateway IP to its jail:
