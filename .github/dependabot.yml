@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # docker/Dockerfile pins every base image to an exact version tag, so these
+  # PRs are the only thing that moves them.
+  - package-ecosystem: docker
+    directory: /docker
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+      include: scope
+    ignore:
+      # A Go minor version moves go.mod's go line, CI, and the lint toolchain
+      # with it, so it is a deliberate change rather than a routine bump. A
+      # patch bump still arrives here, and it fails dockerfile_go_test.go until
+      # go.mod's go line moves in the same PR.
+      - dependency-name: golang
+        update-types: ["version-update:semver-minor"]
+      # The frontend and SDK builders move to a new Node major by decision.
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
