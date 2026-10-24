@@ -140,7 +140,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # cargo refuses the build outright below that. Keep this at or above the
 # highest MSRV in the lockfile — when a `cargo update` raises one, this pin
 # moves with it or the image build fails at resolve time.
-FROM --platform=$BUILDPLATFORM rust:1.94.1-alpine AS toolhost-builder
+FROM --platform=$BUILDPLATFORM rust:1.99.0-alpine AS toolhost-builder
 ARG TARGETARCH
 RUN apk add --no-cache musl-dev
 WORKDIR /src
