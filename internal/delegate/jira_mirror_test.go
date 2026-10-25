@@ -19,6 +19,7 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -46,11 +47,6 @@ type recordingJiraServer struct {
 	failAssign     bool
 
 	transitionPosted chan struct{}
-	// claimStateRead fires after the GetClaimState issue read is served — the
-	// observable point of a no-op mirror pass (one that reads state and then
-	// transitions nothing), so a test can join a detached mirror goroutine even
-	// when it makes no write.
-	claimStateRead chan struct{}
 }
 
 // jiraFakeIDToStatus maps the transition ids the fake serves back to their target
@@ -67,7 +63,6 @@ func newRecordingJiraServer(t *testing.T, status, assignee string) *recordingJir
 		status:           status,
 		assignee:         assignee,
 		transitionPosted: make(chan struct{}, 8),
-		claimStateRead:   make(chan struct{}, 8),
 	}
 	r.srv = httptest.NewServer(http.HandlerFunc(r.handle))
 	t.Cleanup(r.srv.Close)
@@ -136,10 +131,6 @@ func (r *recordingJiraServer) handle(w http.ResponseWriter, req *http.Request) {
 			assigneeJSON = `{"name":"` + assignee + `"}`
 		}
 		_, _ = io.WriteString(w, `{"key":"SKY-1","fields":{"status":{"name":"`+status+`"},"assignee":`+assigneeJSON+`}}`)
-		select {
-		case r.claimStateRead <- struct{}{}:
-		default:
-		}
 	default:
 		w.WriteHeader(http.StatusOK)
 	}
@@ -186,19 +177,6 @@ func (r *recordingJiraServer) waitTransition(t *testing.T) {
 	case <-r.transitionPosted:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for the mirror's Jira transition")
-	}
-}
-
-// waitClaimState blocks until the fake has served one GetClaimState issue read,
-// or fails on timeout — the deterministic join for a mirror pass that makes no
-// write (so waitTransition would never fire). After this returns the mirror
-// goroutine has read state and made its (no-op) decision.
-func (r *recordingJiraServer) waitClaimState(t *testing.T) {
-	t.Helper()
-	select {
-	case <-r.claimStateRead:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for the mirror's Jira claim-state read")
 	}
 }
 
@@ -253,6 +231,24 @@ func TestRunJiraMirror_InProgress_AssignsAndTransitions(t *testing.T) {
 	}
 }
 
+// A ticket assigned to a person keeps its assignee: the in-progress mirror
+// moves it into the InProgress bucket without reassigning it to the bot.
+func TestRunJiraMirror_InProgress_AssignedToAPerson_TransitionsWithoutReassigning(t *testing.T) {
+	fake := newRecordingJiraServer(t, "To Do", "alice")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
+
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "ent-sky-1", "SKY-1", "", mirrorRule(), false)
+
+	assigns, transitions := fake.snapshot()
+	if assigns != 0 {
+		t.Errorf("assigns = %d, want 0 (alice stays assigned)", assigns)
+	}
+	if len(transitions) != 1 || transitions[0] != "In Progress" {
+		t.Errorf("transitions = %v, want [In Progress]", transitions)
+	}
+}
+
 // The done mirror transitions into the Done bucket and never re-assigns — a
 // finished ticket stays assigned to the bot.
 func TestRunJiraMirror_Done_TransitionsOnly_NoAssign(t *testing.T) {
@@ -287,23 +283,22 @@ func TestRunJiraMirror_Idempotent_AlreadyInBucket_NoWrites(t *testing.T) {
 	}
 }
 
-// A second in-progress pass over the same ticket — the re-assert a clean
-// completion makes — finds it already in the bucket and makes no further Jira
-// move. This is what lets the mirror be called from more than one point
-// without a watcher seeing the ticket churn.
+// A second in-progress pass over the same ticket — another of its tasks
+// delegated — finds it already in the bucket and makes no further Jira move,
+// so a watcher never sees the ticket churn.
 func TestRunJiraMirror_SecondInProgressPass_NoDistinctMove(t *testing.T) {
 	fake := newRecordingJiraServer(t, "To Do", "")
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	// The mint-time mirror — assign + transition.
+	// The first delegation's mirror — assign + transition.
 	s.runJiraMirror(runmode.LocalDefaultOrgID, "ent-sky-1", "SKY-1", "", mirrorRule(), false)
-	// The completion's re-assert, onto the same InProgress canonical.
+	// The second's, onto the same InProgress canonical.
 	s.runJiraMirror(runmode.LocalDefaultOrgID, "ent-sky-1", "SKY-1", "", mirrorRule(), false)
 
 	assigns, transitions := fake.snapshot()
 	if assigns != 1 {
-		t.Errorf("assigns = %d, want 1 (assigned once; the re-assert is a no-op)", assigns)
+		t.Errorf("assigns = %d, want 1 (assigned once; the second pass is a no-op)", assigns)
 	}
 	if len(transitions) != 1 || transitions[0] != "In Progress" {
 		t.Errorf("transitions = %v, want exactly one In Progress move", transitions)
@@ -486,8 +481,9 @@ func TestRunJiraMirror_SkipsAnIssueOnAnotherSite(t *testing.T) {
 	}
 }
 
-// The mirror stays silent for ErrNoJiraSystemCredential (an expected, normal
-// state: a GitHub-only org, or creds removed mid-flight) and logs every other
+// The mirror stays silent for ErrNoJiraSystemCredential and
+// ErrNoLinearSystemCredential (expected, normal states: an org without that
+// tracker, or creds removed mid-flight) and logs every other
 // ForSystem error (a real failure worth surfacing). Tested as a pure decision
 // rather than by capturing the global logger — that races with the package's
 // many goroutine-spawning tests under -race. The wrapped case matters because
@@ -501,6 +497,12 @@ func TestShouldLogForSystemErr(t *testing.T) {
 	}
 	if shouldLogForSystemErr(fmt.Errorf("%w: org=acme", jira.ErrNoJiraSystemCredential)) {
 		t.Error("wrapped ErrNoJiraSystemCredential: want silent")
+	}
+	if shouldLogForSystemErr(linear.ErrNoLinearSystemCredential) {
+		t.Error("bare ErrNoLinearSystemCredential: want silent")
+	}
+	if shouldLogForSystemErr(fmt.Errorf("%w: org=acme", linear.ErrNoLinearSystemCredential)) {
+		t.Error("wrapped ErrNoLinearSystemCredential: want silent")
 	}
 	if !shouldLogForSystemErr(errors.New("vault unreachable")) {
 		t.Error("real backend error: want logged")
@@ -831,15 +833,12 @@ func delegatableJiraFixture(t *testing.T, database *sql.DB, suffix string) (doma
 	return *task, bpID
 }
 
-// --- Hook 2: terminateBlueprint completed -> in-progress mirror -----------
+// --- terminateBlueprint: a clean completion leaves the ticket alone ------
 
-// A clean blueprint completion re-asserts the InProgress bucket — NOT Done. The
-// agent has opened its PR and the work is awaiting human review + merge, which is
-// still "in progress" to a Jira watcher; the ticket only reaches Done when its
-// PR merges (a separate, entity-driven mirror). Starting from To Do/unassigned
-// also exercises the self-heal: completion brings a ticket left behind by a
-// failed dispatch-time mirror up to In Progress.
-func TestTerminateBlueprint_CompletedJiraTask_MirrorsInProgress(t *testing.T) {
+// A clean completion closes the card and makes no Jira call. The agent has
+// opened its PR and the work awaits review and merge; the ticket moved when
+// the task was delegated, and it reaches Done only when the PR merges.
+func TestTerminateBlueprint_CompletedJiraTask_LeavesTheTicketAlone(t *testing.T) {
 	s, database, conversationID, taskID, fake, res := setupJiraMirrorFixture(t, "complete", "To Do", "")
 	stampBotClaim(t, database, taskID)
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
@@ -850,82 +849,11 @@ func TestTerminateBlueprint_CompletedJiraTask_MirrorsInProgress(t *testing.T) {
 	if got := readTaskStatus(t, database, taskID); got != "done" {
 		t.Fatalf("task status = %q, want done (the board card still completes)", got)
 	}
-	fake.waitTransition(t)
-	if n := res.systemCalls(); n != 1 {
-		t.Errorf("ForSystem calls = %d, want 1", n)
-	}
-	assigns, transitions := fake.snapshot()
-	if assigns != 1 {
-		t.Errorf("assigns = %d, want 1 (completion assigns the bot + moves to In Progress)", assigns)
-	}
-	if len(transitions) != 1 || transitions[0] != "In Progress" {
-		t.Errorf("transitions = %v, want [In Progress] (completion must not move the ticket to Done)", transitions)
-	}
-}
-
-// A clean completion never transitions an already-In-Progress ticket — the
-// common case (the dispatch-time mirror already moved it) is an idempotent
-// no-op, and crucially does NOT advance it to Done.
-func TestTerminateBlueprint_CompletedJiraTask_AlreadyInProgress_NoDoneMove(t *testing.T) {
-	s, database, conversationID, taskID, fake, _ := setupJiraMirrorFixture(t, "complete-noop", "In Progress", "bot")
-	stampBotClaim(t, database, taskID)
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
-
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "",
-		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
-
-	if got := readTaskStatus(t, database, taskID); got != "done" {
-		t.Fatalf("task status = %q, want done", got)
-	}
-	// Join the detached mirror goroutine on its claim-state read (it makes no
-	// write, so there is no transition to wait on) before asserting — otherwise
-	// the assertion would win the race and pass even if a bug introduced an
-	// erroneous transition.
-	fake.waitClaimState(t)
-	// The mirror reads claim state but, finding the ticket already In Progress +
-	// assigned, makes no write — and crucially never advances it to Done.
-	if _, transitions := fake.snapshot(); len(transitions) != 0 {
-		t.Errorf("transitions = %v, want none (already In Progress; completion must not move to Done)", transitions)
-	}
-	if got := fake.currentStatus(); got != "In Progress" {
-		t.Errorf("final status = %q, want In Progress (completion never reaches Done)", got)
-	}
-}
-
-// A failed/aborted blueprint must NOT move the ticket at all — the mirror is
-// gated to the completed branch only, so ForSystem is never reached.
-func TestTerminateBlueprint_AbortedJiraTask_NoMirror(t *testing.T) {
-	s, database, conversationID, taskID, fake, res := setupJiraMirrorFixture(t, "abort", "In Progress", "bot")
-	stampBotClaim(t, database, taskID)
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
-
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "",
-		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusAborted, "needs a human", nil, true)
-
 	if n := res.systemCalls(); n != 0 {
-		t.Errorf("ForSystem calls = %d, want 0 (aborted run must not move the ticket to Done)", n)
+		t.Errorf("ForSystem calls = %d, want 0 (a completion does not touch the ticket)", n)
 	}
-	if _, transitions := fake.snapshot(); len(transitions) != 0 {
-		t.Errorf("transitions = %v, want none on abort", transitions)
-	}
-}
-
-// User takeover before a clean completion: the task is no longer agent-owned,
-// so the completion hook skips the Jira mirror (the terminal write is the
-// user's).
-func TestTerminateBlueprint_CompletedButUserTookOver_NoMirror(t *testing.T) {
-	s, database, conversationID, taskID, fake, res := setupJiraMirrorFixture(t, "takeover", "In Progress", "bot")
-	stampUserClaim(t, database, taskID) // takeover flipped the claim to the user
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
-
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "",
-		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
-
-	if n := res.systemCalls(); n != 0 {
-		t.Errorf("ForSystem calls = %d, want 0 (user takeover: bot must not mirror the completion)", n)
-	}
-	if _, transitions := fake.snapshot(); len(transitions) != 0 {
-		t.Errorf("transitions = %v, want none after takeover", transitions)
+	if assigns, transitions := fake.snapshot(); assigns != 0 || len(transitions) != 0 {
+		t.Errorf("assigns=%d transitions=%v, want no Jira writes", assigns, transitions)
 	}
 }
 

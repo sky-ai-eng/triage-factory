@@ -31,6 +31,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
+	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/pushpolicy"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
@@ -142,6 +143,11 @@ type Spawner struct {
 	// NewSpawner — a plain store ref like s.tasks, set once and never
 	// mutated, so it needs no mu guard (its sibling seam jiraResolver does).
 	jiraRules db.JiraStatusRulesStore
+	// linearRules reads the team's per-Linear-team rules under the admin pool
+	// (ListForTeamSystem) for the board→Linear mirror's rule lookup. A plain
+	// store ref like jiraRules, populated in NewSpawner; its sibling seam
+	// linearResolver is the mu-guarded one.
+	linearRules db.LinearTeamRulesStore
 	// externalActions records the TFAC-300 board→Jira mirror's writes into the
 	// append-only external-action audit log (TFAC-483) under the admin pool
 	// (RecordSystem — the detached mirror has no JWT-claims context). A plain
@@ -290,6 +296,14 @@ type Spawner struct {
 	// their writes against the same issue (which could drag a Done ticket back
 	// to In Progress). Its own keyed lock, independent of mu; zero value ready.
 	jiraMirrorLocks keyedMutex
+	// linearResolver routes the board→Linear mirror under the org's service
+	// credential (ForSystem). Wired post-construction via SetLinearResolver;
+	// nil disables the mirror. mu-guarded like jiraResolver, and resolved fresh
+	// per write for the same reason.
+	linearResolver linear.Resolver
+	// linearMirrorLocks serializes the board→Linear mirror per issue, as
+	// jiraMirrorLocks does for Jira. Zero value ready.
+	linearMirrorLocks keyedMutex
 	// workspaceLocks serializes mutation of one snapshot key's workspace tree
 	// within this process. Two things in an executor touch a parked tree: an
 	// engagement materializing it (ensureWorkspace — warm stat or cold
@@ -617,6 +631,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		orgs:                  stores.Orgs,
 		spend:                 stores.Spend,
 		jiraRules:             stores.JiraStatusRules,
+		linearRules:           stores.LinearTeamRules,
 		externalActions:       stores.ExternalActions,
 		repos:                 stores.Repos,
 		jiraProjects:          stores.JiraProjects,
@@ -905,6 +920,24 @@ func (s *Spawner) getJiraResolver() jira.Resolver {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.jiraResolver
+}
+
+// SetLinearResolver wires the Linear resolver the board→Linear mirror resolves
+// the org's service credential through at each write. Set once at startup,
+// post-NewSpawner, like SetJiraResolver; an unset resolver disables the
+// mirror.
+func (s *Spawner) SetLinearResolver(r linear.Resolver) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.linearResolver = r
+}
+
+// getLinearResolver returns the wired Linear resolver, or nil when the mirror
+// is disabled.
+func (s *Spawner) getLinearResolver() linear.Resolver {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.linearResolver
 }
 
 // SetStorage wires the durable blob store into the spawner. Done
@@ -1530,16 +1563,17 @@ func (s *Spawner) announceTaskPlacement(orgID, taskID string) {
 	}
 	s.broadcastTaskUpdate(orgID, taskID, task.Status)
 
-	// Mirror the move onto the task's Jira ticket under the org's system/bot
-	// credential, so a watcher on Jira sees the bot pick the ticket up. Past
-	// the guards above, so it fires once per delegation; task is bot-claimed
-	// here, so the write is bot-attributed by construction.
-	//
-	// TODO(TFAC-1184): a Linear-backed task's issue is not moved to its team's
-	// in-progress state here, nor re-asserted at terminateBlueprint's
-	// completion, though the source page's board says the ★ is what TF writes
-	// back; only a person's own claim moves a Linear issue today.
-	s.mirrorJiraInProgress(orgID, task)
+	// Mirror the move onto the task's Jira ticket or Linear issue under the
+	// org's system credential, so a watcher there sees the bot pick it up.
+	// Past the guards above, so it fires once per delegation; task is
+	// bot-claimed here, so the write is bot-attributed by construction. A task
+	// from any other source has nothing to move.
+	switch task.EntitySource {
+	case "jira":
+		s.mirrorJiraInProgress(orgID, task)
+	case "linear":
+		s.mirrorLinearInProgress(orgID, task)
+	}
 }
 
 // broadcastTaskUpdate emits a task_updated WS event so the

@@ -1085,8 +1085,9 @@ describe('Linear source page', () => {
     stub({ ...BOTH, '/api/teams/t1/activity': ACTIVITY })
     render(<LinearSource {...BODY} />)
 
+    // The catalog row loads on its own request, so wait for it too.
     await waitFor(() => expect(within(rowOf('Engineering')).getByText('4')).toBeInTheDocument())
-    expect(within(rowOf('Design')).getByText('—')).toBeInTheDocument()
+    await waitFor(() => expect(within(rowOf('Design')).getByText('—')).toBeInTheDocument())
   })
 
   it('gives a member the page without the verbs', async () => {
