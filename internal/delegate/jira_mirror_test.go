@@ -253,6 +253,24 @@ func TestRunJiraMirror_InProgress_AssignsAndTransitions(t *testing.T) {
 	}
 }
 
+// A ticket assigned to a person keeps its assignee: the in-progress mirror
+// moves it into the InProgress bucket without reassigning it to the bot.
+func TestRunJiraMirror_InProgress_AssignedToAPerson_TransitionsWithoutReassigning(t *testing.T) {
+	fake := newRecordingJiraServer(t, "To Do", "alice")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
+
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "ent-sky-1", "SKY-1", "", mirrorRule(), false)
+
+	assigns, transitions := fake.snapshot()
+	if assigns != 0 {
+		t.Errorf("assigns = %d, want 0 (alice stays assigned)", assigns)
+	}
+	if len(transitions) != 1 || transitions[0] != "In Progress" {
+		t.Errorf("transitions = %v, want [In Progress]", transitions)
+	}
+}
+
 // The done mirror transitions into the Done bucket and never re-assigns — a
 // finished ticket stays assigned to the bot.
 func TestRunJiraMirror_Done_TransitionsOnly_NoAssign(t *testing.T) {
