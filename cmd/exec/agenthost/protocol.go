@@ -342,6 +342,20 @@ type jiraSetPriorityArgs struct {
 	Priority string `json:"priority"`
 }
 
+type jiraAssignArgs struct {
+	Key  string `json:"key"`
+	User string `json:"user"`
+}
+
+type jiraUserSearchArgs struct {
+	Key   string `json:"key"`
+	Query string `json:"query"`
+}
+
+type jiraUserResult struct {
+	User jiraclient.User `json:"user"`
+}
+
 type jiraSearchArgs struct {
 	JQL        string   `json:"jql"`
 	Fields     []string `json:"fields,omitempty"`
@@ -393,6 +407,19 @@ type linearTransitionArgs struct {
 type linearCommentArgs struct {
 	Issue string `json:"issue"`
 	Body  string `json:"body"`
+}
+
+type linearAssignArgs struct {
+	Issue string `json:"issue"`
+	User  string `json:"user"`
+}
+
+type linearUserSearchArgs struct {
+	Query string `json:"query"`
+}
+
+type linearUserResult struct {
+	User linearclient.User `json:"user"`
 }
 
 type linearUpdateIssueArgs struct {
@@ -740,7 +767,7 @@ const (
 	methodJiraTransitionTo   = "JiraTransitionTo"
 	methodJiraGetTransitions = "JiraGetTransitions"
 	methodJiraAddComment     = "JiraAddComment"
-	methodJiraAssignToSelf   = "JiraAssignToSelf"
+	methodJiraAssign         = "JiraAssign"
 	methodJiraUnassign       = "JiraUnassign"
 	methodJiraCreateIssue    = "JiraCreateIssue"
 	methodJiraUpdateIssue    = "JiraUpdateIssue"
@@ -750,12 +777,13 @@ const (
 	methodJiraListPriorities = "JiraListPriorities"
 	methodJiraSetPriority    = "JiraSetPriority"
 	methodJiraListIssueTypes = "JiraListIssueTypes"
+	methodJiraSearchUsers    = "JiraSearchUsers"
 
 	methodLinearGetIssue     = "LinearGetIssue"
 	methodLinearListStates   = "LinearListStates"
 	methodLinearTransition   = "LinearTransition"
 	methodLinearAddComment   = "LinearAddComment"
-	methodLinearAssignSelf   = "LinearAssignSelf"
+	methodLinearAssign       = "LinearAssign"
 	methodLinearUnassign     = "LinearUnassign"
 	methodLinearCreateIssue  = "LinearCreateIssue"
 	methodLinearUpdateIssue  = "LinearUpdateIssue"
@@ -763,6 +791,7 @@ const (
 	methodLinearSetPriority  = "LinearSetPriority"
 	methodLinearListChildren = "LinearListChildren"
 	methodLinearSearch       = "LinearSearch"
+	methodLinearSearchUsers  = "LinearSearchUsers"
 
 	methodGithubGetPR            = "GithubGetPR"
 	methodGithubGetPRDiff        = "GithubGetPRDiff"

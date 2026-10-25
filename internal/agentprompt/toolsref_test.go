@@ -141,6 +141,38 @@ func TestLinearBlock_DocumentsEveryVerb(t *testing.T) {
 			t.Errorf("the Linear tools block does not document `issue %s`", verb)
 		}
 	}
+	if !strings.Contains(body, "triagefactory exec linear user search") {
+		t.Error("the Linear tools block does not document `user search`, the only way to name a person to assign")
+	}
+}
+
+// TestTrackerBlocks_AssignNamesThePerson pins how both tracker blocks teach
+// assignment: by the id their user search returns, with no "me" to fall back
+// on.
+func TestTrackerBlocks_AssignNamesThePerson(t *testing.T) {
+	for name, tc := range map[string]struct {
+		block string
+		want  []string
+	}{
+		"jira": {block(blockToolsJira), []string{
+			"triagefactory exec jira user search <query> --issue <KEY>",
+			"triagefactory exec jira ticket assign <KEY> --user <user-id>",
+		}},
+		"linear": {block(blockToolsLinear), []string{
+			"triagefactory exec linear user search <query>",
+			"triagefactory exec linear issue assign <ID> --user <user-id>",
+			"--assignee <user-id>|none",
+		}},
+	} {
+		for _, want := range tc.want {
+			if !strings.Contains(tc.block, want) {
+				t.Errorf("the %s tools block does not say %q", name, want)
+			}
+		}
+		if strings.Contains(tc.block, "--assignee me") || strings.Contains(tc.block, "`me` or") {
+			t.Errorf("the %s tools block still offers `me`", name)
+		}
+	}
 }
 
 func TestRegisterToolsReference_PanicsOnDuplicate(t *testing.T) {

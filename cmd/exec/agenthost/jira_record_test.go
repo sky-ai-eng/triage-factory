@@ -42,8 +42,16 @@ func fakeJiraIssueDedupKey(site, key string) string {
 
 // startFakeJira stands a minimal Jira REST backend covering the mutating verbs
 // the recording tests exercise: transition (list + apply), comment (returns an
-// id), assignee (self/unassign), create (returns an id and a key), and the
-// read-back of which issue a key names (fakeJiraIssueID).
+// id), assignee (assign/unassign), the user lookups an assign makes (the
+// person fakeJiraUserKey names and nobody else), create (returns an id and a
+// key), and the read-back of which issue a key names (fakeJiraIssueID).
+// fakeJiraUserKey is the Data Center user key of the one person startFakeJira
+// knows, and fakeJiraUser that person as Jira answers for them.
+const (
+	fakeJiraUserKey = "JIRAUSER10100"
+	fakeJiraUser    = `{"key":"` + fakeJiraUserKey + `","name":"ana","displayName":"Ana Lyst","emailAddress":"ana@acme.test","active":true}`
+)
+
 func startFakeJira(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -66,6 +74,15 @@ func startFakeJira(t *testing.T) *httptest.Server {
 			_, _ = io.WriteString(w, `{"id":"10042"}`)
 		case strings.HasSuffix(path, "/assignee"):
 			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(path, "/user/assignable/search"):
+			_, _ = io.WriteString(w, `[`+fakeJiraUser+`]`)
+		case strings.HasSuffix(path, "/user"):
+			if r.URL.Query().Get("key") != fakeJiraUserKey {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = io.WriteString(w, `{"errorMessages":["The user does not exist"]}`)
+				return
+			}
+			_, _ = io.WriteString(w, fakeJiraUser)
 		case strings.HasSuffix(path, "/issue"):
 			_, _ = io.WriteString(w, `{"id":"10001","key":"SKY-1"}`)
 		default:
@@ -218,8 +235,12 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				stores, info := newJiraRecordingStores(t, jira.URL, eventTriggered)
 				client := NewLocal(stores, info)
 
-				if err := client.JiraAssignToSelf(context.Background(), "SKY-9"); err != nil {
-					t.Fatalf("JiraAssignToSelf: %v", err)
+				user, err := client.JiraAssign(context.Background(), "SKY-9", fakeJiraUserKey)
+				if err != nil {
+					t.Fatalf("JiraAssign: %v", err)
+				}
+				if user.ID != fakeJiraUserKey || user.DisplayName != "Ana Lyst" {
+					t.Errorf("assigned %+v, want Ana Lyst", user)
 				}
 				arts := listConversationArtifacts(t, stores, info.ConversationID)
 				if len(arts) != 1 {
@@ -230,8 +251,15 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") {
 					t.Errorf("assign artifact mismatch: %+v", a)
 				}
-				if !strings.Contains(a.DetailsJSON, `"assignee":"self"`) {
-					t.Errorf("details_json %q did not carry the assignee", a.DetailsJSON)
+				for _, want := range []string{`"id":"` + fakeJiraUserKey + `"`, `"name":"Ana Lyst"`} {
+					if !strings.Contains(a.DetailsJSON, want) {
+						t.Errorf("details_json %q does not name the assignee (%s)", a.DetailsJSON, want)
+					}
+				}
+				acts := listExternalActions(t, stores)
+				if len(acts) != 1 || acts[0].Action != domain.ActionIssueAssigned || acts[0].Credential != domain.CredentialJiraOrg ||
+					!strings.Contains(acts[0].DetailJSON, `"id":"`+fakeJiraUserKey+`"`) || !strings.Contains(acts[0].DetailJSON, `"name":"Ana Lyst"`) {
+					t.Errorf("external actions = %+v, want one assign naming Ana under the org's Jira account", acts)
 				}
 			})
 

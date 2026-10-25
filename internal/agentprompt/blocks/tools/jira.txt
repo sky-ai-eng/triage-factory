@@ -2,10 +2,12 @@ Jira interactions use `triagefactory exec jira`. Run `triagefactory exec jira --
 
 Workflows:
 - Inspect an issue: `triagefactory exec jira ticket view <KEY>`, `triagefactory exec jira ticket list-children <KEY>`, `triagefactory exec jira ticket list-transitions <KEY>`.
-- Mutate an issue: `triagefactory exec jira ticket transition`, `triagefactory exec jira ticket assign`, `triagefactory exec jira ticket comment`, `triagefactory exec jira ticket set-priority`.
+- Mutate an issue: `triagefactory exec jira ticket transition`, `triagefactory exec jira ticket assign`, `triagefactory exec jira ticket unassign`, `triagefactory exec jira ticket comment`, `triagefactory exec jira ticket set-priority`.
 - Create issues: `triagefactory exec jira ticket create`. Use `--parent` to create sub-issues.
+- Assign a person: find them with `triagefactory exec jira user search <query> --issue <KEY>`, which returns only users who can be assigned that issue, each with an `id`; when `truncated` is true, more users matched than it listed, so narrow the query. Then run `triagefactory exec jira ticket assign <KEY> --user <user-id>`. `triagefactory exec jira ticket unassign <KEY>` clears the assignee.
 - Search: `triagefactory exec jira ticket search --jql "<query>"`. JQL is passed through directly.
 
 Gotchas:
-- Server/DC vs Cloud differences (parent linking, description format) are handled internally — you don't need to worry about them.
+- Server/DC vs Cloud differences (parent linking, description format, user ids) are handled internally — you don't need to worry about them.
+- Every write acts as the org's Jira account, not as a person. `assign` never falls back to it: it requires `--user`.
 - For multi-line `--body` or `--description` arguments, use the same heredoc pattern as GitHub tools.

@@ -25,7 +25,7 @@ var ticketHelp = map[string]string{
 	"transition":       "jira ticket transition <key> --status <status>",
 	"list-transitions": "jira ticket list-transitions <key>",
 	"comment":          "jira ticket comment <key> --body <text>",
-	"assign":           "jira ticket assign <key>",
+	"assign":           "jira ticket assign <key> --user <user-id>",
 	"unassign":         "jira ticket unassign <key>",
 	"create":           "jira ticket create <project> --type <type> --summary <text> [--description <text>] [--parent <key>] [--priority <priority>]",
 	"edit":             "jira ticket edit <key> [--summary <text>] [--description <text>] [--priority <priority>] [--type <type>] [--add-label <label>] [--remove-label <label>]",
@@ -59,6 +59,8 @@ var ValueFlags = map[string]bool{
 	"--jql":          true,
 	"--fields":       true,
 	"--max":          true,
+	"--user":         true,
+	"--issue":        true,
 }
 
 // hasHelpFlag reports a standalone --help/-h among args. Per-action
@@ -200,11 +202,15 @@ func ticketComment(host agenthost.Client, args []string) {
 
 func ticketAssign(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: jira ticket assign <key>")
+		exitErr("usage: jira ticket assign <key> --user <user-id>")
 	}
-	err := host.JiraAssignToSelf(context.Background(), args[0])
+	userID := flagVal(args, "--user")
+	if userID == "" {
+		exitErr("--user is required: name the person to assign by their Jira user id, which `" + prog.Prefix() + " jira user search <query> --issue <key>` returns")
+	}
+	user, err := host.JiraAssign(context.Background(), args[0], userID)
 	exitOnErr(err)
-	printJSON(map[string]any{"ok": true, "key": args[0], "assigned": "self"})
+	printJSON(map[string]any{"ok": true, "key": args[0], "assigned": user})
 }
 
 func ticketUnassign(host agenthost.Client, args []string) {

@@ -325,7 +325,10 @@ type Client interface {
 	JiraTransitionTo(ctx context.Context, key, status string) error
 	JiraGetTransitions(ctx context.Context, key string) ([]jiraclient.Transition, error)
 	JiraAddComment(ctx context.Context, key, body string) error
-	JiraAssignToSelf(ctx context.Context, key string) error
+	// JiraAssign assigns the issue to the user userID names (a
+	// jiraclient.User's ID) and returns that user. There is no default
+	// assignee: the org's own account is never one this verb picks.
+	JiraAssign(ctx context.Context, key, userID string) (jiraclient.User, error)
 	JiraUnassign(ctx context.Context, key string) error
 	JiraCreateIssue(ctx context.Context, project, issueType, summary, description, parentKey, priority string) (string, error)
 	JiraUpdateIssue(ctx context.Context, key string, fields jiraclient.UpdateIssueFields) error
@@ -335,6 +338,10 @@ type Client interface {
 	JiraListPriorities(ctx context.Context) ([]jiraclient.Priority, error)
 	JiraSetPriority(ctx context.Context, key, priority string) error
 	JiraListIssueTypes(ctx context.Context, project string) ([]jiraclient.IssueType, error)
+	// JiraSearchUsers returns the users who can be assigned the issue key
+	// names and match query, each with the ID JiraAssign takes, and whether
+	// more matched than it returned.
+	JiraSearchUsers(ctx context.Context, key, query string) (JiraUserMatches, error)
 
 	// --- linear (exec linear issue ...) ---
 	//
@@ -354,7 +361,10 @@ type Client interface {
 	LinearTransition(ctx context.Context, issue, state string) (linearclient.WorkflowState, error)
 	// LinearAddComment returns the new comment's id.
 	LinearAddComment(ctx context.Context, issue, body string) (string, error)
-	LinearAssignSelf(ctx context.Context, issue string) error
+	// LinearAssign assigns the issue to the user userID names (a Linear user
+	// UUID) and returns that user. There is no default assignee: the org's
+	// own Linear identity is never one this verb picks.
+	LinearAssign(ctx context.Context, issue, userID string) (linearclient.User, error)
 	LinearUnassign(ctx context.Context, issue string) error
 	LinearCreateIssue(ctx context.Context, req LinearCreateIssueRequest) (*linearclient.Issue, error)
 	LinearUpdateIssue(ctx context.Context, issue string, edit LinearIssueEdit) error
@@ -362,6 +372,10 @@ type Client interface {
 	LinearSetPriority(ctx context.Context, issue string, priority int) error
 	LinearListChildren(ctx context.Context, issue string) ([]linearclient.ChildIssue, error)
 	LinearSearch(ctx context.Context, req LinearSearchRequest) ([]linearclient.Issue, error)
+	// LinearSearchUsers returns the workspace's active people whose name,
+	// display name or email contains query, each with the id LinearAssign
+	// takes, and whether more matched than it returned.
+	LinearSearchUsers(ctx context.Context, query string) (LinearUserMatches, error)
 
 	// --- github (exec gh pr / actions ...) ---
 	//

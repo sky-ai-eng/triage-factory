@@ -21,19 +21,20 @@ var issueHelp = map[string]string{
 	"list-states":   "linear issue list-states <id>",
 	"transition":    "linear issue transition <id> --state <name-or-id>",
 	"comment":       "linear issue comment <id> --body <text>",
-	"assign":        "linear issue assign <id>",
+	"assign":        "linear issue assign <id> --user <user-id>",
 	"unassign":      "linear issue unassign <id>",
 	"create":        "linear issue create <team-key> --title <text> [--description <text>] [--parent <id>] [--priority <0-4>] [--label <name>]...",
 	"edit":          "linear issue edit <id> [--title <text>] [--description <text>] [--priority <0-4>] [--add-label <name>]... [--remove-label <name>]...",
 	"set-parent":    "linear issue set-parent <id> --parent <id>",
 	"set-priority":  "linear issue set-priority <id> --priority <0-4>",
 	"list-children": "linear issue list-children <id>",
-	"search":        "linear issue search --team <key> [--state <name>]... [--assignee me|none] [--max <N>] (default 50)",
+	"search":        "linear issue search --team <key> [--state <name>]... [--assignee <user-id>|none] [--max <N>] (default 50)",
 }
 
 // issueFlags is each action's flags, mapped to whether the flag may be given
 // more than once. An action absent here takes no flags.
 var issueFlags = map[string]map[string]bool{
+	"assign":       {"--user": false},
 	"transition":   {"--state": false},
 	"comment":      {"--body": false},
 	"create":       {"--title": false, "--description": false, "--parent": false, "--priority": false, "--label": true},
@@ -109,8 +110,12 @@ func handleIssue(host agenthost.Client, args []string) {
 		printJSON(map[string]any{"ok": true, "issue": a.positional[0], "comment_id": commentID})
 	case "assign":
 		a := parseOrExit(action, flags, 1)
-		exitOnErr(host.LinearAssignSelf(ctx, a.positional[0]))
-		printJSON(map[string]any{"ok": true, "issue": a.positional[0], "assigned": "self"})
+		if !a.has("--user") {
+			exitErr("--user is required: name the person to assign by their Linear user id, which `" + prog.Prefix() + " linear user search <query>` returns")
+		}
+		user, err := host.LinearAssign(ctx, a.positional[0], a.value("--user"))
+		exitOnErr(err)
+		printJSON(map[string]any{"ok": true, "issue": a.positional[0], "assigned": user})
 	case "unassign":
 		a := parseOrExit(action, flags, 1)
 		exitOnErr(host.LinearUnassign(ctx, a.positional[0]))
@@ -189,11 +194,6 @@ func issueSearch(ctx context.Context, host agenthost.Client, flags []string) {
 		States:   a.values["--state"],
 		Assignee: a.value("--assignee"),
 		Max:      50,
-	}
-	switch req.Assignee {
-	case "", agenthost.LinearAssigneeMe, agenthost.LinearAssigneeNone:
-	default:
-		exitErr("--assignee must be me or none")
 	}
 	if a.has("--max") {
 		n, err := strconv.Atoi(a.value("--max"))

@@ -136,6 +136,8 @@ func TestParseIssueArgs(t *testing.T) {
 		// A blank value would read as the flag being absent: any assignee,
 		// no parent, no title change.
 		"blank assignee":   {"search", []string{"--team", "ENG", "--assignee", ""}, 0, "--assignee must not be blank"},
+		"blank user":       {"assign", []string{"ENG-1", "--user", " "}, 1, "--user must not be blank"},
+		"user twice":       {"assign", []string{"ENG-1", "--user", "a", "--user", "b"}, 1, "given more than once"},
 		"blank state":      {"search", []string{"--team", "ENG", "--state", " "}, 0, "--state must not be blank"},
 		"blank parent":     {"create", []string{"ENG", "--title", "t", "--parent", ""}, 1, "--parent must not be blank"},
 		"blank edit title": {"edit", []string{"ENG-1", "--title", ""}, 1, "--title must not be blank"},

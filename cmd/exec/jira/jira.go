@@ -25,6 +25,8 @@ func Handle(host agenthost.Client, args []string) {
 	switch resource {
 	case "ticket":
 		handleTicket(host, cmdArgs)
+	case "user":
+		handleUser(host, cmdArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown jira resource: %s\n", resource)
 		os.Exit(1)
@@ -37,7 +39,7 @@ const HelpText = `Jira Ticket Commands:
   jira ticket transition <key> --status <status>               Transition to a workflow status
   jira ticket list-transitions <key>                           List available transitions
   jira ticket comment <key> --body <text>                      Add a comment
-  jira ticket assign <key>                                     Assign to the authenticated user
+  jira ticket assign <key> --user <user-id>                    Assign to a person, named by their user id
   jira ticket unassign <key>                                   Remove assignee
   jira ticket create <project> --type <type> --summary <text> [--description <text>] [--parent <key>] [--priority <priority>]
   jira ticket edit <key> [--summary <text>] [--description <text>] [--priority <p>] [--type <t>] [--add-label <l>] [--remove-label <l>]  Update fields on an existing issue
@@ -46,7 +48,10 @@ const HelpText = `Jira Ticket Commands:
   jira ticket search --jql <jql> [--fields <f1,f2,...>] [--max <N>] (default 50)  Search issues via JQL
   jira ticket list-children <key>                              List child issues (subtasks + epic children)
   jira ticket list-types <project>                             List available issue types
-  jira ticket list-priorities                                  List available priority levels`
+  jira ticket list-priorities                                  List available priority levels
+
+Jira User Commands:
+  jira user search <query> --issue <key>                       Users who can be assigned <key> and match <query>, with their ids (at most 50; truncated is true when more matched)`
 
 func printHelp() {
 	fmt.Print(helpText(prog.Prefix()))

@@ -526,6 +526,140 @@ func (c *Client) Unassign(ctx context.Context, idOrKey string) error {
 	return c.put(ctx, url, map[string]*string{"name": nil})
 }
 
+// User is a Jira user as GetUser and SearchAssignableUsers answer one. ID is
+// the user's stable id under StableUserID's precedence (the accountId on
+// Cloud, the user key on Data Center), and it is what GetUser and AssignTo
+// take. Email is empty when the user's profile hides it, which Cloud allows.
+type User struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName"`
+	Email       string `json:"email,omitempty"`
+	Active      bool   `json:"active"`
+	// accountID and name are what each deployment's assignee write names a
+	// user by: the accountId on Cloud, the username on Data Center.
+	accountID string
+	name      string
+}
+
+// userResponse is a user as both deployments' user endpoints return it.
+type userResponse struct {
+	AccountID    string `json:"accountId"`
+	Key          string `json:"key"`
+	Name         string `json:"name"`
+	DisplayName  string `json:"displayName"`
+	EmailAddress string `json:"emailAddress"`
+	Active       bool   `json:"active"`
+}
+
+func (u userResponse) user() User {
+	return User{
+		ID:          StableUserID(u.AccountID, u.Key, u.Name),
+		DisplayName: u.DisplayName,
+		Email:       u.EmailAddress,
+		Active:      u.Active,
+		accountID:   u.AccountID,
+		name:        u.Name,
+	}
+}
+
+// MaxUserSearchResults is the most users one SearchAssignableUsers returns.
+const MaxUserSearchResults = 50
+
+// assignableUserWindow is the maxResults SearchAssignableUsers asks for, the
+// most either deployment serves. Jira applies maxResults to the users that
+// match the query and only then drops the ones who cannot be assigned the
+// issue, so a request for MaxUserSearchResults+1 can come back short while
+// more assignable users match. Asking for the whole window and cutting the
+// answer here is what lets SearchAssignableUsers say when it cut.
+const assignableUserWindow = 1000
+
+// GetUser reads the user id names (a User's ID): by accountId on Cloud, by
+// user key on Data Center. A user that does not exist, or that the credential
+// may not see, is a 404 (IsNotFound).
+func (c *Client) GetUser(ctx context.Context, id string) (User, error) {
+	params := url.Values{}
+	if c.cfg.Deployment == DeploymentCloud {
+		params.Set("accountId", id)
+	} else {
+		params.Set("key", id)
+	}
+	body, err := c.get(ctx, c.apiURL("user?%s", params.Encode()))
+	if err != nil {
+		return User{}, err
+	}
+	var u userResponse
+	if err := json.Unmarshal(body, &u); err != nil {
+		return User{}, fmt.Errorf("parse user: %w", err)
+	}
+	return u.user(), nil
+}
+
+// SearchAssignableUsers returns up to MaxUserSearchResults users who can be
+// assigned the issue issueKey names and who match query, and whether more
+// matched than it returned. Cloud matches query against the display name and
+// the email; Data Center against the username, the display name and the
+// email. more is reported from Jira's first assignableUserWindow matches of
+// query, which is the most Jira looks at.
+func (c *Client) SearchAssignableUsers(ctx context.Context, issueKey, query string) (users []User, more bool, err error) {
+	params := url.Values{}
+	params.Set("issueKey", issueKey)
+	params.Set("maxResults", strconv.Itoa(assignableUserWindow))
+	if c.cfg.Deployment == DeploymentCloud {
+		params.Set("query", query)
+	} else {
+		params.Set("username", query)
+	}
+	body, err := c.get(ctx, c.apiURL("user/assignable/search?%s", params.Encode()))
+	if err != nil {
+		return nil, false, err
+	}
+	var found []userResponse
+	if err := json.Unmarshal(body, &found); err != nil {
+		return nil, false, fmt.Errorf("parse assignable users: %w", err)
+	}
+	if len(found) > MaxUserSearchResults {
+		found, more = found[:MaxUserSearchResults], true
+	}
+	users = make([]User, 0, len(found))
+	for _, u := range found {
+		users = append(users, u.user())
+	}
+	return users, more, nil
+}
+
+// AssignTo assigns the issue to the user userID names (a User's ID) and
+// returns that user. The user is read first, so an id that names nobody, or a
+// deactivated user, is refused before anything is written. Whether the user
+// may be assigned this issue is Jira's decision, and its refusal is the
+// write's error.
+func (c *Client) AssignTo(ctx context.Context, idOrKey, userID string) (User, error) {
+	u, err := c.GetUser(ctx, userID)
+	if IsNotFound(err) {
+		return User{}, fmt.Errorf("no Jira user has the id %q", userID)
+	}
+	if err != nil {
+		return User{}, fmt.Errorf("get user %s: %w", userID, err)
+	}
+	if !u.Active {
+		return User{}, fmt.Errorf("user %s (%s) is deactivated in Jira", u.ID, u.DisplayName)
+	}
+	var payload map[string]string
+	switch {
+	case c.cfg.Deployment == DeploymentCloud && u.accountID != "":
+		payload = map[string]string{"accountId": u.accountID}
+	case c.cfg.Deployment != DeploymentCloud && u.name != "":
+		payload = map[string]string{"name": u.name}
+	default:
+		// Sent empty, the write would not name this user, and a null one
+		// clears the assignee, so a user read without the field is refused.
+		return User{}, fmt.Errorf("jira answered for user %q without the id its assignee write takes", userID)
+	}
+	if err := c.put(ctx, c.apiURL("issue/%s/assignee", idOrKey), payload); err != nil {
+		return User{}, err
+	}
+	return u, nil
+}
+
 // TransitionTo transitions an issue into the target status.
 //
 // The target is matched by ID when it carries one: a Jira workflow references

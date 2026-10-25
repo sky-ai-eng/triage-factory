@@ -1072,17 +1072,22 @@ func (c *LocalClient) JiraAddComment(ctx context.Context, key, body string) (err
 	return nil
 }
 
-func (c *LocalClient) JiraAssignToSelf(ctx context.Context, key string) (err error) {
+func (c *LocalClient) JiraAssign(ctx context.Context, key, userID string) (_ jiraclient.User, err error) {
 	defer c.explainSourceMiss(ctx, eventsource.KindJira, &err)
+	if err := validateUserID("Jira", jiraUserLookup, userID); err != nil {
+		return jiraclient.User{}, err
+	}
 	client, err := c.jiraSystemClient(ctx)
 	if err != nil {
-		return err
+		return jiraclient.User{}, err
 	}
-	if err := client.AssignToSelf(ctx, key); err != nil {
-		return err
+	user, err := client.AssignTo(ctx, key, strings.TrimSpace(userID))
+	if err != nil {
+		return jiraclient.User{}, err
 	}
-	c.recordJiraIssue(ctx, client, key, domain.ActionIssueAssigned, domain.ArtifactStateIssueUpdated, "", artifactDetailsJSON(map[string]any{"assignee": "self"}))
-	return nil
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueAssigned, domain.ArtifactStateIssueUpdated, "",
+		artifactDetailsJSON(map[string]any{"assignee": map[string]any{"id": user.ID, "name": user.DisplayName}}))
+	return user, nil
 }
 
 func (c *LocalClient) JiraUnassign(ctx context.Context, key string) (err error) {
@@ -1194,6 +1199,37 @@ func (c *LocalClient) JiraSetPriority(ctx context.Context, key, priority string)
 	}
 	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", artifactDetailsJSON(map[string]any{"priority": priority}))
 	return nil
+}
+
+// jiraUserLookup is the verb that finds a Jira user's id, named in the
+// refusals of the verb that takes one.
+const jiraUserLookup = "jira user search <query> --issue <key>"
+
+// JiraUserMatches is what JiraSearchUsers found: the users who can be assigned
+// the issue and matched, and whether more matched than it returned.
+type JiraUserMatches struct {
+	Users     []jiraclient.User `json:"users"`
+	Truncated bool              `json:"truncated"`
+}
+
+func (c *LocalClient) JiraSearchUsers(ctx context.Context, key, query string) (_ JiraUserMatches, err error) {
+	defer c.explainSourceMiss(ctx, eventsource.KindJira, &err)
+	key, query = strings.TrimSpace(key), strings.TrimSpace(query)
+	if key == "" {
+		return JiraUserMatches{}, errors.New("an issue key is required: Jira answers which users can be assigned a particular issue")
+	}
+	if query == "" {
+		return JiraUserMatches{}, errors.New("query is required: part of the person's name, username or email")
+	}
+	client, err := c.jiraSystemClient(ctx)
+	if err != nil {
+		return JiraUserMatches{}, err
+	}
+	users, more, err := client.SearchAssignableUsers(ctx, key, query)
+	if err != nil {
+		return JiraUserMatches{}, err
+	}
+	return JiraUserMatches{Users: users, Truncated: more}, nil
 }
 
 func (c *LocalClient) JiraListIssueTypes(ctx context.Context, project string) (_ []jiraclient.IssueType, err error) {
@@ -1406,6 +1442,21 @@ func (c *LocalClient) jiraCommentURL(ctx context.Context, key, commentID string)
 		return ""
 	}
 	return fmt.Sprintf("%s/browse/%s?focusedCommentId=%s", base, key, commentID)
+}
+
+// validateUserID is the check every verb naming a person makes before it
+// reaches the tracker. There is no default person and no "me": the org's own
+// identity is not a person, so a verb that names nobody is refused rather
+// than pointed at it. tracker and lookup (the verb that finds a person's id)
+// are named in the refusal.
+func validateUserID(tracker, lookup, userID string) error {
+	switch {
+	case strings.TrimSpace(userID) == "":
+		return fmt.Errorf("a user is required: name the person by their %s user id, which `%s` returns", tracker, lookup)
+	case strings.EqualFold(strings.TrimSpace(userID), "me"):
+		return fmt.Errorf("there is no \"me\": the org's %s identity is not a person. Name the person by their %s user id, which `%s` returns", tracker, tracker, lookup)
+	}
+	return nil
 }
 
 // artifactDetailsJSON marshals a small kind-specific payload for an artifact's

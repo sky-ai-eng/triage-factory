@@ -25,6 +25,8 @@ func Handle(host agenthost.Client, args []string) {
 	switch resource {
 	case "issue":
 		handleIssue(host, cmdArgs)
+	case "user":
+		handleUser(host, cmdArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown linear resource: %s\n", resource)
 		os.Exit(1)
@@ -38,14 +40,17 @@ const HelpText = `Linear Issue Commands:
   linear issue list-states <id>                                Workflow states of the issue's team
   linear issue transition <id> --state <name-or-id>            Move to a workflow state of the issue's team
   linear issue comment <id> --body <text>                      Add a comment
-  linear issue assign <id>                                     Assign to the org's Linear identity
+  linear issue assign <id> --user <user-id>                    Assign to a person, named by their user id
   linear issue unassign <id>                                   Remove assignee
   linear issue create <team-key> --title <text> [--description <text>] [--parent <id>] [--priority <0-4>] [--label <name>]...
   linear issue edit <id> [--title <text>] [--description <text>] [--priority <0-4>] [--add-label <name>]... [--remove-label <name>]...  Update fields on an existing issue
   linear issue set-parent <id> --parent <id>                   Make the issue a sub-issue of another
   linear issue set-priority <id> --priority <0-4>              0 none, 1 urgent, 2 high, 3 normal, 4 low
   linear issue list-children <id>                              List sub-issues and their states
-  linear issue search --team <key> [--state <name>]... [--assignee me|none] [--max <N>] (default 50)  Search a team's issues`
+  linear issue search --team <key> [--state <name>]... [--assignee <user-id>|none] [--max <N>] (default 50)  Search a team's issues
+
+Linear User Commands:
+  linear user search <query>                                   Active people whose name, display name or email contains <query>, with their ids (at most 50; truncated is true when more matched)`
 
 func printHelp() {
 	fmt.Print(helpText(prog.Prefix()))
