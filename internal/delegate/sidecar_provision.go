@@ -13,7 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/githooks"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
@@ -174,6 +174,16 @@ func (rs *runSidecar) jailEnv() []string {
 	return rs.res.Env
 }
 
+// commitIdentity is the org identity the sidecar stamped into jailEnv's git
+// config, read off the sealed bundle; zero when the bundle carried none.
+// nil-safe.
+func (rs *runSidecar) commitIdentity() ghclient.OrgIdentity {
+	if rs == nil || rs.res == nil {
+		return ghclient.OrgIdentity{}
+	}
+	return ghclient.OrgIdentity{Name: rs.res.IdentityName, Email: rs.res.IdentityEmail, AccountID: rs.res.IdentityAccountID}
+}
+
 // jailEndpoints are the sidecar listeners jailEnv and the gh channel point
 // the jail at, threaded into cell.LaunchSpec.SidecarEndpoints: the only host
 // addresses the jail is admitted to. nil-safe.
@@ -327,12 +337,6 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 		git = s.managedGitGate(info, stores, auditHost)
 	}
 
-	// The commit identity's git config pairs (author/committer) fold into the
-	// sandbox's single GIT_CONFIG_* block alongside the proxy routing — resolved
-	// here because on the executor path agentproc runs no ConfigureProxies to
-	// fold them itself.
-	identity := s.resolveCommitIdentity(ctx, orgID, conv.TriggerType, conv.CreatorUserID)
-
 	// Held so its proxy coords can be set once bring-up returns them (below):
 	// the relayed workspace-add materialization clones through the run's proxies.
 	relaySrv := agenthost.NewRelayServer(stores, info, git)
@@ -343,8 +347,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 		// the git proxy's push authz/audit (backed by the same git gate) plus
 		// the exec verb-trace DB ops, all identity-bound from ConversationInfo. Holds
 		// the stores + secrets the capless sidecar cannot.
-		Relay:         relaySrv,
-		IdentityPairs: githooks.IdentityConfigPairs(identity.Name, identity.Email),
+		Relay: relaySrv,
 		// Every delegated run may touch a GitHub repo (clone/push + GetPR +
 		// agenthost gh verbs), so the git + GitHub-REST proxies are always on.
 		// No upstream travels with them: the host each lane forwards to is the

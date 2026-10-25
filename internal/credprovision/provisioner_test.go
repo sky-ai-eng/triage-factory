@@ -47,6 +47,7 @@ type fakeScopedResolver struct {
 	baseErr    error
 	name       string
 	email      string
+	accountID  string
 	hasCred    bool
 	token      githubapp.Token
 	identity   ghclient.Identity // the tier TokenForRepoScoped reports
@@ -61,6 +62,10 @@ func (f *fakeScopedResolver) BaseURLFor(context.Context, string) (string, error)
 
 func (f *fakeScopedResolver) OrgIdentityFor(context.Context, string) (string, string, bool) {
 	return f.name, f.email, f.name != ""
+}
+
+func (f *fakeScopedResolver) OrgIdentityAccountFor(context.Context, string) (ghclient.OrgIdentity, bool) {
+	return ghclient.OrgIdentity{Name: f.name, Email: f.email, AccountID: f.accountID}, f.name != ""
 }
 
 func (f *fakeScopedResolver) HasAnyCredential(context.Context, string) (bool, error) {
@@ -225,11 +230,12 @@ func TestManager_resolveGitHub_MintsScopedTokensForAuthorizedRepos(t *testing.T)
 	// token and stays robust if an expiry check is ever added downstream.
 	exp := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
 	res := &fakeScopedResolver{
-		base:    "https://ghe.example",
-		name:    "acme[bot]",
-		email:   "acme[bot]@users.noreply.github.com",
-		hasCred: true,
-		token:   githubapp.Token{Value: "ghs_scoped", ExpiresAt: exp},
+		base:      "https://ghe.example",
+		name:      "acme[bot]",
+		email:     "316798692+acme[bot]@users.noreply.github.com",
+		accountID: "316798692",
+		hasCred:   true,
+		token:     githubapp.Token{Value: "ghs_scoped", ExpiresAt: exp},
 	}
 	m := &Manager{
 		stores: db.Stores{
@@ -268,8 +274,9 @@ func TestManager_resolveGitHub_MintsScopedTokensForAuthorizedRepos(t *testing.T)
 	if gh.BaseURL != "https://ghe.example" {
 		t.Errorf("BaseURL = %q, want the resolver's base", gh.BaseURL)
 	}
-	if gh.IdentityName != "acme[bot]" {
-		t.Errorf("IdentityName = %q, want the resolver's org identity", gh.IdentityName)
+	if gh.IdentityName != "acme[bot]" || gh.IdentityEmail != "316798692+acme[bot]@users.noreply.github.com" || gh.IdentityAccountID != "316798692" {
+		t.Errorf("identity = (%q, %q, %q), want the resolver's org identity with its account id",
+			gh.IdentityName, gh.IdentityEmail, gh.IdentityAccountID)
 	}
 	if len(res.calls) != 1 {
 		t.Fatalf("TokenForRepoScoped called %d times, want exactly 1 (only the authorized repo)", len(res.calls))

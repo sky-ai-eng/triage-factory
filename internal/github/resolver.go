@@ -177,6 +177,17 @@ type OrgIdentityAccountResolver interface {
 	OrgIdentityAccountFor(ctx context.Context, orgID string) (OrgIdentity, bool)
 }
 
+// OrgIdentityAccount is the org's commit identity with its account id: through
+// OrgIdentityAccountResolver when resolver implements it, and through
+// OrgIdentityFor, with no account id, when it does not.
+func OrgIdentityAccount(ctx context.Context, resolver Resolver, orgID string) (OrgIdentity, bool) {
+	if ar, ok := resolver.(OrgIdentityAccountResolver); ok {
+		return ar.OrgIdentityAccountFor(ctx, orgID)
+	}
+	name, email, ok := resolver.OrgIdentityFor(ctx, orgID)
+	return OrgIdentity{Name: name, Email: email}, ok
+}
+
 // AccountClientResolver is the optional extension of Resolver, implemented by
 // the production resolver, for a caller that knows the account it acts on by
 // GitHub's numeric account id as well as by login: one holding a repository's

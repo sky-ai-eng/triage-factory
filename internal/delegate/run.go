@@ -67,17 +67,19 @@ func errorResultSummary(result, subtype string) string {
 
 // resolveCommitIdentity resolves the org's GitHub commit-author identity for
 // this run — and, on a manual run whose delegating human is not the org's
-// GitHub account, the Co-authored-by trailer crediting them. This is the
-// single seam: one resolution feeds both run modes (local direct + sandbox) and
-// both the GitHub-PR and Jira-branch paths, via RunOptions.GitUserName/Email
-// (the author/committer) and the prepare-commit-msg hook env var (the trailer).
+// GitHub account, the Co-authored-by trailer crediting them — through this
+// process's own resolver. It is the seam for a run whose credentials this
+// process holds: the local direct and sandboxed paths, both the GitHub-PR and
+// Jira-branch ones, via RunOptions.GitUserName/Email (the author/committer)
+// and the prepare-commit-msg hook env var (the trailer). A run with a
+// credential sidecar takes the org identity from the sidecar instead
+// (runCommitIdentity), because an executor cannot resolve it.
 //
 // Returns the zero CommitIdentity (stamp nothing) when the GitHub resolver isn't
-// wired (unit tests leave s.ghResolver nil), no org identity resolves
-// (ok=false — no App, no stored PAT login), or the stores aren't set for the
-// co-author lookup. The caller then leaves git identity unset and the agent
-// inherits ambient config — never a fabricated identity; it self-heals once the
-// org's PAT login is (re)persisted.
+// wired (unit tests leave s.ghResolver nil) or no org identity resolves
+// (ok=false — no App, no stored PAT login). The caller then leaves git
+// identity unset and the agent inherits ambient config — never a fabricated
+// identity; it self-heals once the org's PAT login is (re)persisted.
 //
 // This is also the single seam for a future per-team commit-author NAME: a
 // team_agents name override would replace id.Name here only (the email stays the
@@ -86,23 +88,30 @@ func (s *Spawner) resolveCommitIdentity(ctx context.Context, orgID, triggerType,
 	if s.ghResolver == nil {
 		return githooks.CommitIdentity{}
 	}
-	// The org's account id rides with its identity where the resolver can say
-	// it; a resolver that can't leaves the comparison below to the login.
-	var org domain.GitHubAccount
-	var orgEmail string
-	if ar, ok := s.ghResolver.(ghclient.OrgIdentityAccountResolver); ok {
-		identity, found := ar.OrgIdentityAccountFor(ctx, orgID)
-		if !found {
-			return githooks.CommitIdentity{}
-		}
-		org, orgEmail = domain.GitHubAccount{Login: identity.Name, ID: identity.AccountID}, identity.Email
-	} else {
-		name, email, found := s.ghResolver.OrgIdentityFor(ctx, orgID)
-		if !found {
-			return githooks.CommitIdentity{}
-		}
-		org, orgEmail = domain.GitHubAccount{Login: name}, email
+	org, found := ghclient.OrgIdentityAccount(ctx, s.ghResolver, orgID)
+	if !found {
+		return githooks.CommitIdentity{}
 	}
+	return s.commitIdentityFor(ctx, orgID, org, triggerType, creatorUserID)
+}
+
+// runCommitIdentity is the commit identity of a run that may have a credential
+// sidecar. With one, the org identity is the one the sidecar stamped into the
+// jail's git config from the bundle the brain sealed. Without one, this
+// process holds the org's credentials and resolves it itself.
+func (s *Spawner) runCommitIdentity(ctx context.Context, orgID string, sidecar *runSidecar, triggerType, creatorUserID string) githooks.CommitIdentity {
+	if sidecar == nil {
+		return s.resolveCommitIdentity(ctx, orgID, triggerType, creatorUserID)
+	}
+	return s.commitIdentityFor(ctx, orgID, sidecar.commitIdentity(), triggerType, creatorUserID)
+}
+
+// commitIdentityFor is the commit identity of a run whose org identity is org:
+// org itself, plus the co-author trailer on a manual run. A zero org stamps
+// nothing and carries no trailer. The org's account id, where known, is what
+// the co-author comparison uses; without it the comparison falls back to the
+// login.
+func (s *Spawner) commitIdentityFor(ctx context.Context, orgID string, org ghclient.OrgIdentity, triggerType, creatorUserID string) githooks.CommitIdentity {
 	// Co-author only on manual runs (creatorUserID is NULL for event runs).
 	// Resolve the delegating human's GitHub identity on the org's current host;
 	// ResolveCommitIdentity then emits the trailer only when it is not the org's
@@ -110,7 +119,7 @@ func (s *Spawner) resolveCommitIdentity(ctx context.Context, orgID, triggerType,
 	// same-PAT org gets none.
 	manual := triggerType == "manual"
 	var coAuthor domain.GitHubAccount
-	if manual && creatorUserID != "" {
+	if manual && creatorUserID != "" && org.Name != "" && s.ghResolver != nil {
 		if stores, set := s.getStores(); set {
 			// The login is host-scoped (user_github_identities is keyed by host), so
 			// a failed base-URL resolve must SKIP the lookup, not pass host="": on a
@@ -130,7 +139,7 @@ func (s *Spawner) resolveCommitIdentity(ctx context.Context, orgID, triggerType,
 			}
 		}
 	}
-	id, _ := githooks.ResolveCommitIdentity(org, orgEmail, manual, coAuthor)
+	id, _ := githooks.ResolveCommitIdentity(domain.GitHubAccount{Login: org.Name, ID: org.AccountID}, org.Email, manual, coAuthor)
 	return id
 }
 
@@ -428,11 +437,11 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	}
 	// Resolve the org's GitHub commit identity once for this run (TFAC-452). The
 	// org identity authors + commits every agent commit (injected as
-	// user.name/user.email via baseOpts below, both run modes); a manual run
+	// user.name/user.email via baseOpts below); a manual run
 	// whose delegating human differs additionally co-attributes them through the
 	// prepare-commit-msg hook, fed by this namespaced env var. A zero identity
 	// (resolver/stores unwired, or no org identity resolves) leaves git config
-	// ambient — no fabricated identity. One resolution feeds both modes and both
+	// ambient — no fabricated identity. One resolution feeds both
 	// the GitHub-PR and Jira-branch paths; it carries across blueprint steps via
 	// the copied creator/trigger. The env var is namespaced (not GIT_*) so it's
 	// never ambient git identity and the jail env's path translation passes it
