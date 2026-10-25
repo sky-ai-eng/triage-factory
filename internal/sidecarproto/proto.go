@@ -357,6 +357,9 @@ func (c *Conn) readLoop(r *bufio.Reader) {
 			c.shutdown(fmt.Errorf("%w: read loop panicked; see the serving process's log", ErrClosed))
 		}
 	}()
+	// TODO(TFAC-1189): no frame-size limit — the decoder buffers a whole frame
+	// before returning it, so on the orchestrator's end a compromised sidecar
+	// can exhaust the memory every run that process supervises shares.
 	dec := json.NewDecoder(r)
 	for {
 		var f Frame
