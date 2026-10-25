@@ -123,10 +123,6 @@ type SidecarBringUpParams struct {
 	// only in a test fixture, where a relayed op fails closed.
 	Relay RelayDispatcher
 
-	// IdentityPairs are the org commit-identity git config pairs folded into
-	// the sandbox's GIT_CONFIG block (user.name/user.email).
-	IdentityPairs [][2]string
-
 	// GitHubAPIEnabled requests the GitHub-REST credential proxy (GetPR +
 	// agenthost gh verbs). The REST base it prepends is derived sidecar-side
 	// from the sealed bundle; the orchestrator points its client at the bare
@@ -212,12 +208,11 @@ func BringUpRunSidecar(ctx context.Context, sc cell.Sidecar, provision SidecarPr
 	}
 
 	req := sidecarproto.StartProxiesBody{
-		HostVethIP:          params.HostVethIP,
-		GitEnabled:          params.Git != nil,
-		IdentityConfigPairs: params.IdentityPairs,
-		GitHubAPIEnabled:    params.GitHubAPIEnabled,
-		GHChannelEnabled:    params.GHChannelEnabled,
-		AgentHost:           params.AgentHost,
+		HostVethIP:       params.HostVethIP,
+		GitEnabled:       params.Git != nil,
+		GitHubAPIEnabled: params.GitHubAPIEnabled,
+		GHChannelEnabled: params.GHChannelEnabled,
+		AgentHost:        params.AgentHost,
 	}
 	var res sidecarproto.StartProxiesResult
 	proxyCtx, proxySpan := tracer.Start(ctx, "sidecar.start_proxies")

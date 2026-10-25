@@ -475,9 +475,10 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, conv
 	}
 
 	gh := &credbundle.GitHubCreds{Mode: credbundle.GitHubModeApp, BaseURL: base, RepoTokens: map[string]credbundle.RepoToken{}}
-	if name, email, ok := m.ghResolver.OrgIdentityFor(ctx, orgID); ok {
-		gh.IdentityName = name
-		gh.IdentityEmail = email
+	if id, ok := ghclient.OrgIdentityAccount(ctx, m.ghResolver, orgID); ok {
+		gh.IdentityName = id.Name
+		gh.IdentityEmail = id.Email
+		gh.IdentityAccountID = id.AccountID
 	}
 
 	// nil permissions = inherit the App installation's full granted set,

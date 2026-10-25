@@ -45,11 +45,6 @@ type StartProxiesBody struct {
 	// BaseURL, so the token and the host it belongs to arrive together.
 	GitEnabled bool `json:"git_enabled"`
 
-	// IdentityConfigPairs are the org commit-identity git config (key,value)
-	// pairs (user.name/user.email) folded into the sandbox's GIT_CONFIG_*
-	// block alongside the proxy routing. Non-secret. A [2]string per pair.
-	IdentityConfigPairs [][2]string `json:"identity_config_pairs,omitempty"`
-
 	// GitHubAPIEnabled requests the GitHub REST credential proxy — the one
 	// the orchestrator's own GetPR + agenthost gh verbs route through so they
 	// hold only a placeholder, never the real token. The REST mount is derived
@@ -111,6 +106,16 @@ type StartProxiesResult struct {
 	// LLM proxy. Non-secret for the reason every placeholder here is: the
 	// real provider key never leaves the sidecar.
 	LLMEnv []string `json:"llm_env,omitempty"`
+
+	// IdentityName / IdentityEmail / IdentityAccountID are the org commit
+	// identity the sidecar stamped into Env's git config, read off the sealed
+	// bundle, so the orchestrator can tell the org's account apart from the
+	// delegating human's when it decides on a co-author trailer. Empty when
+	// the bundle carried none and the jail commits under the neutral fallback
+	// identity instead. Non-secret: every commit the run pushes names it.
+	IdentityName      string `json:"identity_name,omitempty"`
+	IdentityEmail     string `json:"identity_email,omitempty"`
+	IdentityAccountID string `json:"identity_account_id,omitempty"`
 
 	// GitProxyURL / GitProxyToken are the sidecar's git-over-HTTPS proxy
 	// address and the per-run placeholder the orchestrator presents to it, so

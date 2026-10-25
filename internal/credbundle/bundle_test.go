@@ -11,9 +11,10 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 		BootEpoch: 3,
 		LLM:       map[string]string{"ANTHROPIC_API_KEY": "sk-ant-test"},
 		GitHub: &GitHubCreds{
-			Mode:          "app",
-			IdentityName:  "acme[bot]",
-			IdentityEmail: "acme[bot]@users.noreply.github.com",
+			Mode:              "app",
+			IdentityName:      "acme[bot]",
+			IdentityEmail:     "316798692+acme[bot]@users.noreply.github.com",
+			IdentityAccountID: "316798692",
 			RepoTokens: map[string]RepoToken{
 				"acme/widgets": {Token: "ghs_abc"},
 			},
@@ -36,7 +37,7 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 	if got.BootEpoch != b.BootEpoch || got.LLM["ANTHROPIC_API_KEY"] != "sk-ant-test" {
 		t.Fatalf("round trip mismatch: %+v", got)
 	}
-	if got.GitHub == nil || got.GitHub.RepoTokens["acme/widgets"].Token != "ghs_abc" {
+	if got.GitHub == nil || got.GitHub.RepoTokens["acme/widgets"].Token != "ghs_abc" || got.GitHub.IdentityAccountID != "316798692" {
 		t.Fatalf("github round trip mismatch: %+v", got.GitHub)
 	}
 	if got.Jira == nil || got.Jira.APIToken != "tok" {

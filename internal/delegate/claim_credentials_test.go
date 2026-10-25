@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -15,6 +16,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
 // fakeUsers is a minimal UsersStore for the co-author lookup: it returns a
@@ -413,6 +415,74 @@ func TestResolveCommitIdentity_DelegateSeam(t *testing.T) {
 		want := "Co-authored-by: octocat <octocat@users.noreply.github.com>"
 		if id := other.resolveCommitIdentity(context.Background(), orgID, "manual", "user-1"); id.CoAuthorTrailer != want {
 			t.Errorf("trailer = %q for another account under the PAT owner's login; want %q", id.CoAuthorTrailer, want)
+		}
+	})
+}
+
+// TestRunCommitIdentity_SidecarIsTheOrgIdentity pins where a sandboxed run's
+// org identity comes from: the sidecar's report of what it stamped from the
+// sealed bundle, never this process's resolver, which on an executor cannot
+// resolve the deployment App or a PAT. The co-author trailer is decided
+// against that identity.
+func TestRunCommitIdentity_SidecarIsTheOrgIdentity(t *testing.T) {
+	const orgID = "11111111-2222-3333-4444-555555555555"
+
+	newSpawner := func(resolver ghclient.Resolver, users db.UsersStore) *Spawner {
+		s := NewSpawner(nil, db.Stores{}, ghclient.NewClient("https://fallback", "tok"), nil, "m")
+		s.SetRunCredentialResolvers(resolver, nil, nil)
+		s.SetStores(db.Stores{Users: users})
+		return s
+	}
+	sidecarReporting := func(name, email, accountID string) *runSidecar {
+		return &runSidecar{res: &sidecarproto.StartProxiesResult{IdentityName: name, IdentityEmail: email, IdentityAccountID: accountID}}
+	}
+	const botEmail = "316798692+triage-factory[bot]@users.noreply.github.com"
+
+	t.Run("an identity the executor cannot resolve still gets the trailer", func(t *testing.T) {
+		// The executor's resolver answers nothing, as it does for a workspace on
+		// the deployment App.
+		s := newSpawner(&fakeResolver{}, fakeUsers{login: "alice"})
+		id := s.runCommitIdentity(context.Background(), orgID, sidecarReporting("triage-factory[bot]", botEmail, "316798692"), "manual", "user-1")
+		if id.Name != "triage-factory[bot]" || id.Email != botEmail {
+			t.Errorf("identity = (%q, %q), want the sidecar's", id.Name, id.Email)
+		}
+		if want := "Co-authored-by: alice <alice@users.noreply.github.com>"; id.CoAuthorTrailer != want {
+			t.Errorf("trailer = %q, want %q", id.CoAuthorTrailer, want)
+		}
+	})
+
+	t.Run("the reported account id decides who is the org", func(t *testing.T) {
+		s := newSpawner(&fakeResolver{}, fakeUsers{login: "octo-renamed", id: "583231"})
+		id := s.runCommitIdentity(context.Background(), orgID, sidecarReporting("octocat", "octocat@example.com", "583231"), "manual", "user-1")
+		if id.CoAuthorTrailer != "" {
+			t.Errorf("trailer = %q for the PAT owner's own run; want none", id.CoAuthorTrailer)
+		}
+	})
+
+	t.Run("a sidecar that stamped no identity means no trailer", func(t *testing.T) {
+		// The resolver here would answer, which is the point: with a sidecar it
+		// is not asked.
+		s := newSpawner(&fakeResolver{orgLogin: "acme-bot"}, fakeUsers{login: "alice"})
+		id := s.runCommitIdentity(context.Background(), orgID, sidecarReporting("", "", ""), "manual", "user-1")
+		if id != (githooks.CommitIdentity{}) {
+			t.Errorf("identity = %+v, want none", id)
+		}
+	})
+
+	t.Run("no sidecar resolves in process", func(t *testing.T) {
+		s := newSpawner(&fakeResolver{orgLogin: "acme-bot"}, fakeUsers{login: "alice"})
+		id := s.runCommitIdentity(context.Background(), orgID, nil, "manual", "user-1")
+		if id.Name != "acme-bot" || id.CoAuthorTrailer != "Co-authored-by: alice <alice@users.noreply.github.com>" {
+			t.Errorf("identity = %+v, want the resolver's org identity with alice's trailer", id)
+		}
+	})
+
+	t.Run("the native tool env carries the trailer", func(t *testing.T) {
+		s := newSpawner(&fakeResolver{}, fakeUsers{login: "alice"})
+		cfg := runConfig{runRoot: "/run/root", sidecar: sidecarReporting("triage-factory[bot]", botEmail, "316798692")}
+		env := s.nativeAgentEnv(context.Background(), orgID, "conv-1", "ws", cfg, "manual", "user-1")
+		if want := "TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER=Co-authored-by: alice <alice@users.noreply.github.com>"; !slices.Contains(env, want) {
+			t.Errorf("native tool env = %v, want it to carry %q", env, want)
 		}
 	})
 }

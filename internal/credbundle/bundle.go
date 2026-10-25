@@ -102,8 +102,17 @@ type GitHubCreds struct {
 
 	PAT string `json:"pat,omitempty"`
 
-	IdentityName  string `json:"identity_name,omitempty"`
-	IdentityEmail string `json:"identity_email,omitempty"`
+	// IdentityName / IdentityEmail are the org's GitHub commit identity, the
+	// author and committer of every commit the run makes: an App's
+	// "<slug>[bot]" and its noreply email, or the PAT owner's login and
+	// verified email. IdentityAccountID is GitHub's numeric id for that
+	// account, "" when it is not stored. The brain resolves them because the
+	// executor cannot: it holds neither the deployment App's key nor the
+	// secret store the PAT tier reads. All empty when the org has no identity
+	// to stamp.
+	IdentityName      string `json:"identity_name,omitempty"`
+	IdentityEmail     string `json:"identity_email,omitempty"`
+	IdentityAccountID string `json:"identity_account_id,omitempty"`
 
 	// BaseURL is the org's configured GitHub web base — github.com, a GHES
 	// host, or a *.ghe.com data-residency tenant. It travels sealed beside the

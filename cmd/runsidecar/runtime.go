@@ -28,6 +28,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
+	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -171,6 +172,34 @@ func (r *credRuntime) acceptSealedBundle(body json.RawMessage) error {
 	return nil
 }
 
+// orgIdentity is the org GitHub identity the brain sealed for this run's
+// commits.
+type orgIdentity struct {
+	name, email, accountID string
+}
+
+// commitIdentity reads the org identity off the bundle's GitHub half. Zero
+// when there is no GitHub half, no identity in it, or only half of one: a name
+// without an email stamps nothing.
+func commitIdentity(gh *credbundle.GitHubCreds) orgIdentity {
+	if gh == nil || gh.IdentityName == "" || gh.IdentityEmail == "" {
+		return orgIdentity{}
+	}
+	return orgIdentity{name: gh.IdentityName, email: gh.IdentityEmail, accountID: gh.IdentityAccountID}
+}
+
+// commitIdentityPairs is the git identity the jail's commits are authored
+// under: the org's when the bundle names one, else the neutral fallback. The
+// jail has no git config of its own to answer with, so without the fallback
+// git refuses every commit, and an agent left to get past that writes an
+// identity of its own into the history.
+func commitIdentityPairs(id orgIdentity) [][2]string {
+	if id.name == "" {
+		return githooks.FallbackIdentityConfigPairs()
+	}
+	return githooks.IdentityConfigPairs(id.name, id.email)
+}
+
 // currentBundle returns the newest held bundle, or nil if none has arrived.
 func (r *credRuntime) currentBundle() *credbundle.Bundle {
 	r.mu.Lock()
@@ -236,7 +265,8 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	// actual GitHub — GHES and data-residency deployments included, not just
 	// the public github.com family.
 	ghHosts := egressproxy.GitHubHostsForUpstreams(apiUpstream, gitUpstream)
-	handle, env, err := agentproc.StartRunProxies(ctx, req.HostVethIP, bundle.LLM, git, ghHosts, r.recordEgressDenial, r.llmSource, req.IdentityConfigPairs...)
+	identity := commitIdentity(bundle.GitHub)
+	handle, env, err := agentproc.StartRunProxies(ctx, req.HostVethIP, bundle.LLM, git, ghHosts, r.recordEgressDenial, r.llmSource, commitIdentityPairs(identity)...)
 	if err != nil {
 		return nil, err
 	}
@@ -245,6 +275,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	// no jail is ever pointed at the proxy. The proxy holds the key; the
 	// caller holds a per-run placeholder.
 	result := sidecarproto.StartProxiesResult{Env: env, LLMEnv: handle.LLMEnv(), JailEndpoints: handle.JailEndpoints()}
+	result.IdentityName, result.IdentityEmail, result.IdentityAccountID = identity.name, identity.email, identity.accountID
 	// Surface the git proxy's address + per-run placeholder so the orchestrator
 	// routes its OWN pre-sandbox clone through this same proxy — the real token
 	// stays here. Empty when no git proxy was started (GitEnabled false).
