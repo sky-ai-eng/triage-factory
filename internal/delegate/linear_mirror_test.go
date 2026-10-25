@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -12,6 +15,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -71,6 +77,9 @@ type recordingLinearServer struct {
 	updates    []map[string]any // every IssueUpdate input, in arrival order
 	addressed  []string         // the issue id every request named
 	failRead   bool
+	// failTransition refuses every IssueUpdate, as Linear does when the
+	// target state no longer exists. A refused update is not recorded.
+	failTransition bool
 
 	// transitioned fires after an IssueUpdate is applied; read fires after an
 	// Issue read is served. Together they join a detached mirror whether or
@@ -114,6 +123,12 @@ func (f *recordingLinearServer) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case strings.Contains(body.Query, "mutation IssueUpdate("):
+		if f.failTransition {
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"errors":[{"message":"Entity not found: WorkflowState","extensions":{"code":"INVALID_INPUT"}}]}`)
+			return
+		}
 		input, _ := body.Variables["input"].(map[string]any)
 		f.updates = append(f.updates, input)
 		if stateID, ok := input["stateId"].(string); ok {
@@ -506,6 +521,138 @@ func TestRunLinearMirror_SkipsAnIssueInAnotherWorkspace(t *testing.T) {
 	}
 	if n := len(linearMirrorActions(t, database)); n != 0 {
 		t.Errorf("recorded %d actions, want 0", n)
+	}
+}
+
+// --- linear.mirror_failures ------------------------------------------------
+
+// linearMirrorFailureCounter backs the mirror's failure counter with a manual
+// reader for the test's duration and returns a reader of the local org's
+// count for each reason. Reasons that were never counted read as zero.
+func linearMirrorFailureCounter(t *testing.T) func() map[string]int64 {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	prev := linearMirrorStats.Swap(newLinearMirrorCounters(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	t.Cleanup(func() { linearMirrorStats.Store(prev) })
+	return func() map[string]int64 {
+		t.Helper()
+		var rm metricdata.ResourceMetrics
+		if err := reader.Collect(context.Background(), &rm); err != nil {
+			t.Fatalf("collect metrics: %v", err)
+		}
+		out := map[string]int64{}
+		for _, sm := range rm.ScopeMetrics {
+			for _, m := range sm.Metrics {
+				if m.Name != "linear.mirror_failures" {
+					continue
+				}
+				sum, ok := m.Data.(metricdata.Sum[int64])
+				if !ok {
+					t.Fatalf("linear.mirror_failures is %T, want an int64 sum", m.Data)
+				}
+				for _, dp := range sum.DataPoints {
+					if org, _ := dp.Attributes.Value("org.id"); org.AsString() != runmode.LocalDefaultOrgID {
+						t.Errorf("a failure was counted under org %q, want %q", org.AsString(), runmode.LocalDefaultOrgID)
+					}
+					reason, _ := dp.Attributes.Value("reason")
+					out[reason.AsString()] += dp.Value
+				}
+			}
+		}
+		return out
+	}
+}
+
+// Each step that can stop a pass from moving an issue it should have moved is
+// counted under its own reason, once per failed pass.
+func TestRunLinearMirror_CountsEachFailure(t *testing.T) {
+	cases := []struct {
+		name   string
+		stage  func(f *recordingLinearServer, r *fakeLinearResolver)
+		entity func(e *domain.Entity) string // the entity id the pass is handed
+		want   string
+	}{
+		{
+			name:   "transition refused",
+			stage:  func(f *recordingLinearServer, _ *fakeLinearResolver) { f.failTransition = true },
+			entity: func(e *domain.Entity) string { return e.ID },
+			want:   linearMirrorTransitionFailed,
+		},
+		{
+			name:   "issue unreadable",
+			stage:  func(f *recordingLinearServer, _ *fakeLinearResolver) { f.failRead = true },
+			entity: func(e *domain.Entity) string { return e.ID },
+			want:   linearMirrorIssueReadFailed,
+		},
+		{
+			name:   "credential resolve failed",
+			stage:  func(_ *recordingLinearServer, r *fakeLinearResolver) { r.sysErr = errors.New("vault unreachable") },
+			entity: func(e *domain.Entity) string { return e.ID },
+			want:   linearMirrorCredentialFailed,
+		},
+		{
+			name:   "entity unreadable",
+			stage:  func(*recordingLinearServer, *fakeLinearResolver) {},
+			entity: func(*domain.Entity) string { return "no-such-entity" },
+			want:   linearMirrorStoreReadFailed,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			read := linearMirrorFailureCounter(t)
+			database := newDelegateTestDB(t)
+			bindLinearWorkspace(t, database, linearMirrorWorkspace)
+			e := seedLinearMirrorEntity(t, database, linearMirrorWorkspace, linearMirrorIdentifier)
+			s, fake, res := newLinearMirrorSpawner(t, database, linearTodo, nil)
+			tc.stage(fake, res)
+
+			s.runLinearMirror(runmode.LocalDefaultOrgID, tc.entity(e), linearMirrorIdentifier, runmode.LocalDefaultTeamID, linearMirrorRule())
+
+			if got := read(); !maps.Equal(got, map[string]int64{tc.want: 1}) {
+				t.Errorf("failures = %v, want one %s", got, tc.want)
+			}
+			if updates, _ := fake.snapshot(); len(updates) != 0 {
+				t.Errorf("updates = %v, want none applied", updates)
+			}
+			if n := len(linearMirrorActions(t, database)); n != 0 {
+				t.Errorf("recorded %d actions for a failed pass, want 0", n)
+			}
+		})
+	}
+}
+
+// A pass that moves the issue, or skips it by design, is not a failure. The
+// counter is a signal that something needs fixing, so the ordinary states it
+// would otherwise drown in are left out.
+func TestRunLinearMirror_CountsNoFailureForAMoveOrADeliberateSkip(t *testing.T) {
+	cases := []struct {
+		name      string
+		state     linear.WorkflowState
+		workspace string // the entity's workspace; the org's is linearMirrorWorkspace
+		sysErr    error
+	}{
+		{name: "moved", state: linearTodo, workspace: linearMirrorWorkspace},
+		{name: "already in progress", state: linearDoing, workspace: linearMirrorWorkspace},
+		{name: "already done", state: linearDone, workspace: linearMirrorWorkspace},
+		{name: "another workspace", state: linearTodo, workspace: "ws-old"},
+		{name: "no linear credential", state: linearTodo, workspace: linearMirrorWorkspace,
+			sysErr: fmt.Errorf("%w: org=acme", linear.ErrNoLinearSystemCredential)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			read := linearMirrorFailureCounter(t)
+			database := newDelegateTestDB(t)
+			bindLinearWorkspace(t, database, linearMirrorWorkspace)
+			e := seedLinearMirrorEntity(t, database, tc.workspace, linearMirrorIdentifier)
+			s, _, res := newLinearMirrorSpawner(t, database, tc.state, nil)
+			res.sysErr = tc.sysErr
+
+			s.runLinearMirror(runmode.LocalDefaultOrgID, e.ID, linearMirrorIdentifier, runmode.LocalDefaultTeamID, linearMirrorRule())
+
+			if got := read(); len(got) != 0 {
+				t.Errorf("failures = %v, want none", got)
+			}
+		})
 	}
 }
 

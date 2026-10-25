@@ -28,11 +28,16 @@ package delegate
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
 // linearMirrorTimeout bounds one mirror operation (resolve + GetIssue +
@@ -40,6 +45,62 @@ import (
 // caps the whole sequence so a slow issue can't pin the per-issue lock for
 // long.
 const linearMirrorTimeout = 30 * time.Second
+
+// The reasons recordLinearMirrorFailure counts. Each is a pass that should
+// have moved an issue and could not. A pass that skips by design (the issue
+// is already in progress or done, sits in another workspace, the team's
+// rule is unmapped, or the org has no Linear credential) is not a failure
+// and is not counted.
+const (
+	// linearMirrorStoreReadFailed: TF could not read the org's settings, the
+	// task's entity, or the team's Linear rules.
+	linearMirrorStoreReadFailed = "store_read_failed"
+	// linearMirrorCredentialFailed: resolving the org's Linear credential
+	// failed for a reason other than the org having none.
+	linearMirrorCredentialFailed = "credential_failed"
+	// linearMirrorIssueReadFailed: Linear did not answer the issue read.
+	linearMirrorIssueReadFailed = "issue_read_failed"
+	// linearMirrorTransitionFailed: Linear refused the move, as it does when
+	// the in-progress canonical has been deleted from the team's workflow.
+	linearMirrorTransitionFailed = "transition_failed"
+)
+
+// linearMirrorStats owns the mirror's failure counter. Package-level because
+// a metric instrument is process-global by nature, and swapped atomically so
+// a test can back it with a manual reader while a detached mirror may still
+// be counting.
+var linearMirrorStats atomic.Pointer[linearMirrorCounters]
+
+func init() {
+	linearMirrorStats.Store(newLinearMirrorCounters(otel.GetMeterProvider()))
+}
+
+type linearMirrorCounters struct {
+	failures metric.Int64Counter
+}
+
+// newLinearMirrorCounters builds the instrument against mp; production passes
+// the global provider, which telemetry.Init installs. An instrument-creation
+// error can only be a programmer error, and the API hands back a usable
+// no-op alongside it, so it is logged rather than propagated.
+func newLinearMirrorCounters(mp metric.MeterProvider) *linearMirrorCounters {
+	counter, err := mp.Meter("internal/delegate").Int64Counter("linear.mirror_failures",
+		metric.WithDescription("Board-to-Linear mirror passes that left a delegated task's issue where it was because a step failed, by reason."))
+	if err != nil {
+		linearLog.Warn("linear mirror failure counter setup failed", "error", err)
+	}
+	return &linearMirrorCounters{failures: counter}
+}
+
+// recordLinearMirrorFailure counts one failed mirror pass for orgID, with
+// reason one of the linearMirror*Failed constants.
+func recordLinearMirrorFailure(orgID, reason string) {
+	stats := linearMirrorStats.Load()
+	if stats == nil || stats.failures == nil {
+		return
+	}
+	stats.failures.Add(context.Background(), 1, metric.WithAttributes(telemetry.Reason(reason), telemetry.OrgID(orgID)))
+}
 
 // lookupLinearRuleForTaskSystem resolves the per-team Linear rule governing
 // the task's issue in workspaceID, under the admin pool (ListForTeamSystem):
@@ -56,6 +117,7 @@ func lookupLinearRuleForTaskSystem(ctx context.Context, entities db.EntityStore,
 	entity, err := entities.GetSystem(ctx, orgID, task.EntityID)
 	if err != nil {
 		linearLog.Warn("mirror: read the task's entity failed", "entity", task.EntityID, "error", err)
+		recordLinearMirrorFailure(orgID, linearMirrorStoreReadFailed)
 		return nil
 	}
 	if entity == nil || entity.LinearTeamID == "" {
@@ -64,6 +126,7 @@ func lookupLinearRuleForTaskSystem(ctx context.Context, entities db.EntityStore,
 	rules, err := linearRules.ListForTeamSystem(ctx, *task.TeamID, workspaceID)
 	if err != nil {
 		linearLog.Warn("mirror: list rules for team failed", "team", *task.TeamID, "error", err)
+		recordLinearMirrorFailure(orgID, linearMirrorStoreReadFailed)
 		return nil
 	}
 	for i := range rules {
@@ -86,6 +149,7 @@ func (s *Spawner) linearMirrorRule(orgID string, task *domain.Task) *domain.Line
 	settings, err := s.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
 		linearLog.Warn("mirror: read org settings for the linear workspace failed", "org", orgID, "error", err)
+		recordLinearMirrorFailure(orgID, linearMirrorStoreReadFailed)
 		return nil
 	}
 	return lookupLinearRuleForTaskSystem(ctx, s.entities, s.linearRules, orgID, domain.EntityScope("linear", settings), task)
@@ -120,7 +184,10 @@ func (s *Spawner) mirrorLinearInProgress(orgID string, task *domain.Task) {
 // state or has reached a done one. identifier is the caller's read of the
 // issue's key, which only labels a log line when the entity can't be read.
 //
-// TODO(TFAC-878): every failure below is a log line and a return. An
+// Every failure below is a log line, a count in linear.mirror_failures, and
+// a return.
+//
+// TODO(TFAC-878): the counter reaches an operator, not the team. An
 // in-progress canonical deleted from the Linear team's workflow makes the
 // mirror a no-op on every delegation, so Linear silently stops tracking the
 // board and nothing tells the team. Needs the durable notification channel.
@@ -146,6 +213,7 @@ func (s *Spawner) runLinearMirror(orgID, entityID, identifier, teamID string, ru
 	e, err := s.entities.GetSystem(ctx, orgID, entityID)
 	if err != nil || e == nil {
 		linearLog.Warn("mirror: read the issue's entity failed; skipping", "issue", identifier, "error", err)
+		recordLinearMirrorFailure(orgID, linearMirrorStoreReadFailed)
 		return
 	}
 	identifier = e.SourceID
@@ -155,6 +223,7 @@ func (s *Spawner) runLinearMirror(orgID, entityID, identifier, teamID string, ru
 	set, err := s.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
 		linearLog.Warn("mirror: read org linear workspace failed", "org", orgID, "error", err)
+		recordLinearMirrorFailure(orgID, linearMirrorStoreReadFailed)
 		return
 	}
 	if current := domain.EntityScope("linear", set); current != e.Scope {
@@ -166,6 +235,7 @@ func (s *Spawner) runLinearMirror(orgID, entityID, identifier, teamID string, ru
 	if err != nil {
 		if shouldLogForSystemErr(err) {
 			linearLog.Warn("mirror: resolve system client failed", "org", orgID, "error", err)
+			recordLinearMirrorFailure(orgID, linearMirrorCredentialFailed)
 		}
 		return
 	}
@@ -176,6 +246,7 @@ func (s *Spawner) runLinearMirror(orgID, entityID, identifier, teamID string, ru
 	issue, err := client.GetIssue(ctx, e.ExternalID)
 	if err != nil {
 		linearLog.Warn("mirror: read issue failed; skipping in-progress mirror", "issue", identifier, "error", err)
+		recordLinearMirrorFailure(orgID, linearMirrorIssueReadFailed)
 		return
 	}
 	state := domain.LinearStateRef{ID: issue.State.ID, Name: issue.State.Name, Type: issue.State.Type}
@@ -189,6 +260,7 @@ func (s *Spawner) runLinearMirror(orgID, entityID, identifier, teamID string, ru
 	}
 	if err := client.TransitionIssue(ctx, issue.ID, rule.InProgressCanonical.ID); err != nil {
 		linearLog.Warn("mirror: transition to in-progress failed", "issue", identifier, "target", rule.InProgressCanonical.Name, "error", err)
+		recordLinearMirrorFailure(orgID, linearMirrorTransitionFailed)
 		return
 	}
 	s.recordLinearMirrorTransition(ctx, orgID, teamID, e, issue, rule.InProgressCanonical.Name)

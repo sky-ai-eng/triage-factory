@@ -318,15 +318,23 @@ func (a *App) buildExecution() error {
 	if a.llmResolver != nil {
 		a.spawner.SetLLMResolver(a.llmResolver)
 	}
-	// TFAC-300: the board→Jira lifecycle mirror resolves the org's system/bot
-	// Jira credential per write through this resolver (same construction the
-	// server + poller use). A fresh instance is fine — the resolver is stateless,
-	// reading creds fresh each call, so a config-change hot-swap is honored.
-	a.spawner.SetJiraResolver(jira.NewResolver(a.stores.Secrets, a.stores.Orgs))
-	// The board→Linear mirror's sibling seam. It takes the process's one
-	// resolver (buildRunCredentials), so an installed org's token refreshes go
-	// through the same cache the poller and the credential provisioner use.
-	a.spawner.SetLinearResolver(a.linearResolver)
+	// The board→Jira and board→Linear lifecycle mirrors resolve the org's
+	// system credential per write through these resolvers. The Jira one is a
+	// fresh instance (the same construction the server + poller use): it is
+	// stateless and reads creds fresh each call, so a config-change hot-swap is
+	// honored. The Linear one is the process's one resolver
+	// (buildRunCredentials), so an installed org's token refreshes go through
+	// the same cache the poller and the credential provisioner use.
+	//
+	// An executor gets neither. Its secret store is the disabled one, so a
+	// resolver there could only fail, and the one mirror pass an executor
+	// reaches (the completion re-assert in terminateBlueprint) would fail and
+	// log on every clean completion. Leaving them unset makes that pass a
+	// no-op there. The mint-time pass runs where Delegate does, on control.
+	if a.plan.role != runmode.RoleExecutor {
+		a.spawner.SetJiraResolver(jira.NewResolver(a.stores.Secrets, a.stores.Orgs))
+		a.spawner.SetLinearResolver(a.linearResolver)
+	}
 	// Hand the full Stores bundle so the sandbox-branch agenthost daemon can
 	// serve the routing-sensitive RPCs the agent's `triagefactory exec`
 	// invocations send. Nil-safe inside the spawner on local/non-sandbox.

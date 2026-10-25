@@ -1592,7 +1592,8 @@ func (s *Spawner) mirrorInProgress(orgID string, task *domain.Task) {
 // completed branch; a failed/aborted/cancelled run never reaches it. Both
 // mirrors are idempotent, so in the common case (the mint-time mirror already
 // moved the issue) this is one read and no write, and it brings up an issue a
-// transient mint-time failure left behind.
+// transient mint-time failure left behind. On an executor, which holds no
+// credentials and is wired with no mirror resolver, it is a no-op.
 func (s *Spawner) mirrorInProgressForTask(ctx context.Context, orgID, taskID string) {
 	if s.tasks == nil {
 		return
