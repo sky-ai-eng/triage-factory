@@ -223,8 +223,8 @@ const (
 
 	// Git branch push the upstream REFUSED (a non-2xx on the receive-pack
 	// POST — auth or outage — or an "ng" line for the ref in the 200's
-	// report-status — branch protection, a ruleset, a pre-receive hook;
-	// nothing landed). Recorded by the git proxy's outcome capture so the
+	// report-status — branch protection, a ruleset, a pre-receive hook — or
+	// a fatal error the remote sent instead of a report; nothing landed). Recorded by the git proxy's outcome capture so the
 	// audit log never omits an attempted external write, while the branch
 	// artifact is deliberately NOT written (artifacts track only work that
 	// exists). detail_json carries {sha, new, http_status, reason,

@@ -412,11 +412,49 @@ func TestReportCapture(t *testing.T) {
 			},
 		},
 		{
-			name:     "band-3 fatal message and no report",
-			caps:     sb,
-			body:     band(3, "fatal: the remote end hung up unexpectedly\n"),
+			name: "band-3 fatal error in place of a report refuses every ref",
+			caps: sb,
+			body: band(2, "Resolving deltas: 100% (2/2), done.\n") + band(3, "fatal: internal server error\n") + "0000",
+			refs: map[string]refWant{
+				"refs/heads/ok":      {rejected: true, reason: "remote fatal error"},
+				"refs/heads/blocked": {rejected: true, reason: "remote fatal error"},
+			},
+			message: "Resolving deltas: 100% (2/2), done.\nfatal: internal server error",
+		},
+		{
+			name: "band-3 fatal error after a truncated report still refuses",
+			caps: sb,
+			body: band(1, ghReport[:20]) + band(3, "fatal: internal server error\n"),
+			refs: map[string]refWant{
+				"refs/heads/ok":      {rejected: true, reason: "remote fatal error"},
+				"refs/heads/blocked": {rejected: true, reason: "remote fatal error"},
+			},
+			message: "fatal: internal server error",
+		},
+		{
+			name: "band-3 fatal error refuses even when report-status was not requested",
+			caps: " side-band-64k",
+			body: band(3, "fatal: internal server error\n") + "0000",
+			refs: map[string]refWant{
+				"refs/heads/ok": {rejected: true, reason: "remote fatal error"},
+			},
+			message: "fatal: internal server error",
+		},
+		{
+			name: "a whole report beside a band-3 message is still what happened",
+			caps: sb,
+			body: band1(ghReport) + band(3, "fatal: error after the update\n") + "0000",
+			refs: map[string]refWant{
+				"refs/heads/ok":      {},
+				"refs/heads/blocked": {rejected: true, reason: ghReason},
+			},
+			message: "fatal: error after the update",
+		},
+		{
+			name:     "a band-3 byte means nothing without side-band",
+			caps:     " report-status",
+			body:     band(3, "fatal: internal server error\n") + "0000",
 			noReport: true,
-			message:  "fatal: the remote end hung up unexpectedly",
 		},
 		{
 			name:     "truncated mid-report",

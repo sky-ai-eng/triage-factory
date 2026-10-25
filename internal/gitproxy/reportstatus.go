@@ -18,7 +18,9 @@ import (
 // pkt-line's first payload byte is its band. Band 1 carries the report-status
 // (itself pkt-line framed), band 2 progress and messages, band 3 a fatal
 // error. The remote's message text — GitHub's rule-violation explanation —
-// comes from bands 2 and 3.
+// comes from bands 2 and 3. A fatal error that arrives in place of a report
+// refuses the push: git reports it to the agent as failed, and nothing in the
+// response says any ref landed.
 
 const (
 	// maxReportCapture bounds how much report-status the capture keeps: band 1
@@ -97,6 +99,8 @@ type reportCapture struct {
 	// closing flush-pkt. Either ends the demultiplexing.
 	broken bool
 	done   bool
+	// fatal marks a band-3 pkt-line: the remote ended in a fatal error.
+	fatal bool
 	// message is bands 2 and 3.
 	message messageTail
 }
@@ -153,7 +157,10 @@ func (c *reportCapture) demux(payload []byte) {
 			return
 		}
 		c.band1 = append(c.band1, payload[1:]...)
-	case sideBandProgress, sideBandError:
+	case sideBandError:
+		c.fatal = true
+		c.message.write(payload[1:])
+	case sideBandProgress:
 		c.message.write(payload[1:])
 	default:
 		c.broken = true // not a band: the body is not multiplexed
@@ -162,38 +169,50 @@ func (c *reportCapture) demux(payload []byte) {
 
 // result reads the report the captured response carried under the
 // capabilities the push asked for, and the remote's message. A nil report
-// means none could be read, and cause says why.
+// means none could be read, and cause says why. A side-band fatal error with
+// no report reads as a report refusing every ref; a report that did arrive
+// beside one still says what happened to each ref, so it wins.
 func (c *reportCapture) result(caps pushCapabilities) (report *receivePackReport, message, cause string) {
 	if caps.sideBand {
 		message = c.message.String()
 	}
+	report, cause = c.report(caps)
+	if report == nil && caps.sideBand && c.fatal {
+		return &receivePackReport{refused: "remote fatal error"}, message, ""
+	}
+	return report, message, cause
+}
+
+// report parses the captured report-status, if the push asked for one and
+// the response carried it whole.
+func (c *reportCapture) report(caps pushCapabilities) (report *receivePackReport, cause string) {
 	if !caps.reportStatus {
-		return nil, message, "report-status not requested"
+		return nil, "report-status not requested"
 	}
 	body := c.raw
 	if caps.sideBand {
 		if c.broken {
-			return nil, message, "side-band framing malformed"
+			return nil, "side-band framing malformed"
 		}
 		if c.band1Over {
-			return nil, message, "report-status over the capture bound"
+			return nil, "report-status over the capture bound"
 		}
 		body = c.band1
 	} else if c.rawOver {
-		return nil, message, "report-status over the capture bound"
+		return nil, "report-status over the capture bound"
 	}
 	if report = parseReportStatus(body); report == nil {
-		return nil, message, "report-status truncated or malformed"
+		return nil, "report-status truncated or malformed"
 	}
-	return report, message, ""
+	return report, ""
 }
 
 // receivePackReport is a parsed report-status block.
 type receivePackReport struct {
-	// unpack is the text after "unpack ": "ok", or the reason the pack was
-	// refused, which refuses every ref.
-	unpack string
-	refs   map[string]refReport
+	// refused, when set, refuses every ref with it as the reason: the pack
+	// failed to unpack, or the remote sent a fatal error instead of a report.
+	refused string
+	refs    map[string]refReport
 }
 
 // refReport is one ref's line in a report-status block.
@@ -204,8 +223,8 @@ type refReport struct {
 
 // refOutcome is the recorded outcome of a ref the push carried.
 func (r *receivePackReport) refOutcome(ref string) (rejected bool, reason string) {
-	if r.unpack != "ok" {
-		return true, "unpack " + r.unpack
+	if r.refused != "" {
+		return true, r.refused
 	}
 	rr, ok := r.refs[ref]
 	switch {
@@ -250,7 +269,10 @@ func parseReportStatus(b []byte) *receivePackReport {
 			if !ok {
 				return nil
 			}
-			report.unpack, sawUnpack = msg, true
+			if msg != "ok" {
+				report.refused = "unpack " + msg
+			}
+			sawUnpack = true
 			continue
 		}
 		kind, rest, _ := strings.Cut(line, " ")

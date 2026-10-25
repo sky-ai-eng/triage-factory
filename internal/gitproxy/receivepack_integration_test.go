@@ -418,3 +418,37 @@ func TestReceivePackBackstop_IdentityOnlyForPushes(t *testing.T) {
 		t.Errorf("upload-pack Accept-Encoding = %q, want the client's own", res.upstreamAcceptEncoding)
 	}
 }
+
+// TestReceivePackBackstop_FatalErrorInPlaceOfAReport is a 200 whose body is a
+// band-3 fatal error and no report-status. git reports that push to the agent
+// as failed, and nothing in the response says a ref landed, so every ref must
+// record refused, with the error as its remote message, on both paths.
+func TestReceivePackBackstop_FatalErrorInPlaceOfAReport(t *testing.T) {
+	response := band(3, "fatal: internal server error\n") + "0000"
+	body := pkt(zeroOID+" aaaa1111 refs/heads/feature\x00 report-status side-band-64k agent=git/2.43.0") +
+		"0000" + "PACKDATA"
+
+	for _, path := range []struct {
+		name        string
+		allowedRefs []string
+	}{
+		{"gated", []string{"refs/heads/feature"}},
+		{"observe", nil},
+	} {
+		t.Run(path.name, func(t *testing.T) {
+			res := runPush(t, pushRig{status: http.StatusOK, response: response, allowedRefs: path.allowedRefs},
+				http.MethodPost, "/octo/repo/git-receive-pack", body)
+
+			if res.clientBody != response {
+				t.Errorf("client body = %q, want the upstream's response unchanged", res.clientBody)
+			}
+			want := []gitproxy.PushedRef{{
+				Repo: "octo/repo", Ref: "refs/heads/feature", NewSHA: "aaaa1111", Created: true, Status: http.StatusOK,
+				Rejected: true, Reason: "remote fatal error", RemoteMessage: "fatal: internal server error",
+			}}
+			if !equalPushes(res.pushes, want) {
+				t.Fatalf("recorded pushes =\n  %+v\nwant\n  %+v", res.pushes, want)
+			}
+		})
+	}
+}

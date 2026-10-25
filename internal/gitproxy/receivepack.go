@@ -91,7 +91,8 @@ func (s *Server) serveReceivePack(w http.ResponseWriter, r *http.Request) {
 // A response with no readable report-status — the client did not ask for
 // one, the upstream answered non-2xx, or the body was truncated, malformed or
 // over the capture bound — falls back to the status alone, a 2xx counting as
-// accepted, and says so in a WARN.
+// accepted, and says so in a WARN. The exception is a side-band fatal error
+// in place of the report, which refuses every ref (reportCapture.result).
 func (s *Server) recordReceivePack(repoPath string, block []byte, rr *responseRecorder) {
 	if s.cfg.RecordPush == nil {
 		return
