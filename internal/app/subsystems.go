@@ -323,6 +323,10 @@ func (a *App) buildExecution() error {
 	// server + poller use). A fresh instance is fine — the resolver is stateless,
 	// reading creds fresh each call, so a config-change hot-swap is honored.
 	a.spawner.SetJiraResolver(jira.NewResolver(a.stores.Secrets, a.stores.Orgs))
+	// The board→Linear mirror's sibling seam. It takes the process's one
+	// resolver (buildRunCredentials), so an installed org's token refreshes go
+	// through the same cache the poller and the credential provisioner use.
+	a.spawner.SetLinearResolver(a.linearResolver)
 	// Hand the full Stores bundle so the sandbox-branch agenthost daemon can
 	// serve the routing-sensitive RPCs the agent's `triagefactory exec`
 	// invocations send. Nil-safe inside the spawner on local/non-sandbox.
