@@ -132,8 +132,10 @@ function deletedStar(
   return null
 }
 
-/** What a deleted ★ stops, by the column it marked: the admin's sentence names
- *  the repair, the member's who can make it. */
+/** What a deleted ★ means, by the column it marked: the admin's sentence names
+ *  the repair, the member's who can make it. Only IN PROGRESS's ★ is written
+ *  onto an issue (a claim moves the issue there), so only it names something
+ *  the deletion stops. */
 const STAR_CONSEQUENCE: Record<
   'IN PROGRESS' | 'IN REVIEW' | 'DONE',
   { admin: string; member: (key: string) => string }
@@ -143,12 +145,12 @@ const STAR_CONSEQUENCE: Record<
     member: (key) => `Claims can’t move ${key} issues until an admin stars another state.`,
   },
   'IN REVIEW': {
-    admin: 'TF can’t move an issue into review until another state there is starred.',
-    member: (key) => `TF can’t move ${key} issues into review until an admin stars another state.`,
+    admin: 'Star another state there.',
+    member: () => 'An admin can star another state there.',
   },
   DONE: {
-    admin: 'TF can’t move an issue to done until another state there is starred.',
-    member: (key) => `TF can’t move ${key} issues to done until an admin stars another state.`,
+    admin: 'Star another state there.',
+    member: () => 'An admin can star another state there.',
   },
 }
 
