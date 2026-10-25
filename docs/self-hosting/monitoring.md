@@ -224,14 +224,11 @@ sum by (role, source, reason) (increase(tf_memory_entity_links_skipped_total[1d]
 ### Linear mirror
 
 When TF delegates a Linear-backed task to an agent, it moves the issue to its
-team's IN PROGRESS ★ under the org's Linear credential. Local mode repeats the
-move when the run completes cleanly, which catches up an issue the first move
-missed. In multi mode only the first move happens, on a control pod, because
-the completion runs on an executor, which holds no credentials.
+team's IN PROGRESS ★ under the org's Linear credential, once per delegation.
 
 - `tf_linear_mirror_failures_total{reason, org_id}` — moves that should have
-  happened and did not. The issue stays where it was, and nothing retries it
-  except that completion move. `reason` is:
+  happened and did not. The issue stays where it was, and nothing retries it.
+  `reason` is:
 
   | `reason` | What happened |
   | --- | --- |

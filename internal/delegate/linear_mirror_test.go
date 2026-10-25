@@ -81,11 +81,9 @@ type recordingLinearServer struct {
 	// target state no longer exists. A refused update is not recorded.
 	failTransition bool
 
-	// transitioned fires after an IssueUpdate is applied; read fires after an
-	// Issue read is served. Together they join a detached mirror whether or
-	// not it writes.
+	// transitioned fires after an IssueUpdate is applied, the join for a
+	// detached mirror's write.
 	transitioned chan struct{}
-	read         chan struct{}
 }
 
 func newRecordingLinearServer(t *testing.T, state linear.WorkflowState, assignee *linear.User) *recordingLinearServer {
@@ -96,7 +94,6 @@ func newRecordingLinearServer(t *testing.T, state linear.WorkflowState, assignee
 		state:        state,
 		assignee:     assignee,
 		transitioned: make(chan struct{}, 8),
-		read:         make(chan struct{}, 8),
 	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
@@ -147,13 +144,11 @@ func (f *recordingLinearServer) serve(w http.ResponseWriter, r *http.Request) {
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = io.WriteString(w, `{"errors":[{"message":"read failed","extensions":{"code":"INVALID_INPUT"}}]}`)
-			signal(f.read)
 			return
 		}
 		node := f.issueNode()
 		f.mu.Unlock()
 		writeLinearData(w, map[string]any{"issue": node})
-		signal(f.read)
 	default:
 		f.mu.Unlock()
 		f.t.Errorf("fake linear: unexpected document %q", body.Query)
@@ -248,15 +243,6 @@ func (f *recordingLinearServer) waitTransition(t *testing.T) {
 	case <-f.transitioned:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for the mirror's Linear transition")
-	}
-}
-
-func (f *recordingLinearServer) waitRead(t *testing.T) {
-	t.Helper()
-	select {
-	case <-f.read:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for the mirror's Linear issue read")
 	}
 }
 
@@ -410,8 +396,8 @@ func TestRunLinearMirror_Idempotent_AlreadyInBucket_NoWrites(t *testing.T) {
 	}
 }
 
-// The completion's re-assert finds the issue the mint-time pass moved and
-// makes no further move.
+// A second pass over the same issue, as a second of its tasks being delegated
+// makes, finds it already moved and makes no further move.
 func TestRunLinearMirror_SecondInProgressPass_NoFurtherMove(t *testing.T) {
 	database := newDelegateTestDB(t)
 	bindLinearWorkspace(t, database, linearMirrorWorkspace)
@@ -819,12 +805,11 @@ func TestAnnounceTaskPlacement_GitHubTask_NoLinearMirror(t *testing.T) {
 	}
 }
 
-// --- Hook 2: terminateBlueprint completed -> in-progress mirror ------------
+// --- terminateBlueprint: a clean completion leaves the issue alone -------
 
-// A clean completion re-asserts the in-progress bucket, never Done: the work
-// awaits review and merge. Starting from Todo exercises the catch-up for an
-// issue a failed mint-time pass left behind.
-func TestTerminateBlueprint_CompletedLinearTask_MirrorsInProgress(t *testing.T) {
+// A clean completion closes the card and makes no Linear call: the issue moved
+// when the task was delegated, as a Jira ticket does.
+func TestTerminateBlueprint_CompletedLinearTask_LeavesTheIssueAlone(t *testing.T) {
 	s, database, conversationID, taskID, fake, res := setupLinearMirrorFixture(t, "complete", linearTodo)
 	stampBotClaim(t, database, taskID)
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
@@ -835,66 +820,10 @@ func TestTerminateBlueprint_CompletedLinearTask_MirrorsInProgress(t *testing.T) 
 	if got := readTaskStatus(t, database, taskID); got != "done" {
 		t.Fatalf("task status = %q, want done (the board card still completes)", got)
 	}
-	fake.waitTransition(t)
-	if n := res.systemCalls(); n != 1 {
-		t.Errorf("ForSystem calls = %d, want 1", n)
-	}
-	if got := fake.transitions(); !slices.Equal(got, []string{linearDoing.ID}) {
-		t.Errorf("transitions = %v, want [%s] (completion must not move the issue to Done)", got, linearDoing.ID)
-	}
-}
-
-// A clean completion over an issue already in progress reads it and writes
-// nothing.
-func TestTerminateBlueprint_CompletedLinearTask_AlreadyInProgress_NoWrite(t *testing.T) {
-	s, database, conversationID, taskID, fake, _ := setupLinearMirrorFixture(t, "complete-noop", linearDoing)
-	stampBotClaim(t, database, taskID)
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
-
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "",
-		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
-
-	// Join the detached mirror on its read before asserting; it makes no
-	// write, so there is no transition to wait on.
-	fake.waitRead(t)
-	updates, state := fake.snapshot()
-	if len(updates) != 0 || state.ID != linearDoing.ID {
-		t.Errorf("updates = %v, state = %s; want no writes and the issue still In Progress", updates, state.Name)
-	}
-}
-
-// A failed or aborted blueprint does not move the issue: the mirror is gated
-// to the completed branch.
-func TestTerminateBlueprint_AbortedLinearTask_NoMirror(t *testing.T) {
-	s, database, conversationID, taskID, fake, res := setupLinearMirrorFixture(t, "abort", linearTodo)
-	stampBotClaim(t, database, taskID)
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
-
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "",
-		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusAborted, "needs a human", nil, true)
-
 	if n := res.systemCalls(); n != 0 {
-		t.Errorf("ForSystem calls = %d, want 0 on abort", n)
+		t.Errorf("ForSystem calls = %d, want 0 (a completion does not touch the issue)", n)
 	}
 	if updates, _ := fake.snapshot(); len(updates) != 0 {
-		t.Errorf("updates = %v, want none on abort", updates)
-	}
-}
-
-// A user takeover before a clean completion leaves the issue to the user: the
-// completion hook re-reads the claim and stands down.
-func TestTerminateBlueprint_CompletedLinearTaskButUserTookOver_NoMirror(t *testing.T) {
-	s, database, conversationID, taskID, fake, res := setupLinearMirrorFixture(t, "takeover", linearTodo)
-	stampUserClaim(t, database, taskID)
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
-
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "",
-		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
-
-	if n := res.systemCalls(); n != 0 {
-		t.Errorf("ForSystem calls = %d, want 0 (user takeover)", n)
-	}
-	if updates, _ := fake.snapshot(); len(updates) != 0 {
-		t.Errorf("updates = %v, want none after takeover", updates)
+		t.Errorf("updates = %v, want no Linear writes", updates)
 	}
 }

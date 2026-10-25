@@ -1566,47 +1566,14 @@ func (s *Spawner) announceTaskPlacement(orgID, taskID string) {
 	// Mirror the move onto the task's Jira ticket or Linear issue under the
 	// org's system credential, so a watcher there sees the bot pick it up.
 	// Past the guards above, so it fires once per delegation; task is
-	// bot-claimed here, so the write is bot-attributed by construction.
-	s.mirrorInProgress(orgID, task)
-}
-
-// mirrorInProgress moves a bot-owned task's Jira ticket or Linear issue into
-// its rule's in-progress bucket, on the tracker the task's entity comes from.
-// A task from any other source has nothing to move.
-func (s *Spawner) mirrorInProgress(orgID string, task *domain.Task) {
+	// bot-claimed here, so the write is bot-attributed by construction. A task
+	// from any other source has nothing to move.
 	switch task.EntitySource {
 	case "jira":
 		s.mirrorJiraInProgress(orgID, task)
 	case "linear":
 		s.mirrorLinearInProgress(orgID, task)
 	}
-}
-
-// mirrorInProgressForTask loads the task and re-asserts the in-progress bucket
-// on its ticket or issue when a delegated run finishes cleanly, but only while
-// the bot still owns it. A finished run means the agent opened its PR and the
-// work is awaiting human review + merge: "in progress" to a watcher on Jira or
-// Linear, not done. A user takeover mid-run flips claimed_by_agent_id to the
-// user, after which the writes belong to the user's own task-lifecycle path,
-// so a task the bot no longer owns is skipped. Called from terminateBlueprint's
-// completed branch; a failed/aborted/cancelled run never reaches it. Both
-// mirrors are idempotent, so in the common case (the mint-time mirror already
-// moved the issue) this is one read and no write, and it brings up an issue a
-// transient mint-time failure left behind. On an executor, which holds no
-// credentials and is wired with no mirror resolver, it is a no-op.
-func (s *Spawner) mirrorInProgressForTask(ctx context.Context, orgID, taskID string) {
-	if s.tasks == nil {
-		return
-	}
-	task, err := s.tasks.GetSystem(ctx, orgID, taskID)
-	if err != nil || task == nil {
-		return
-	}
-	if task.ClaimedByAgentID == "" {
-		// User takeover (or never bot-owned): the bot does not mirror.
-		return
-	}
-	s.mirrorInProgress(orgID, task)
 }
 
 // broadcastTaskUpdate emits a task_updated WS event so the

@@ -5,11 +5,10 @@
 // card into In Progress. This file moves the issue into its Linear team's
 // in-progress canonical state under the org's service credential
 // (linear.Resolver.ForSystem), as server.applyLinearClaim does when a person
-// claims the task. It runs from the same two chokepoints as the Jira mirror,
-// through mirrorInProgress: announceTaskPlacement at mint, and
-// terminateBlueprint's completed branch, which re-asserts the bucket. Both
-// only ever see bot-owned tasks, so every write here is bot-attributed by
-// construction.
+// claims the task. It runs from the Jira mirror's chokepoint,
+// announceTaskPlacement, once per delegation. That point only ever sees
+// bot-owned tasks, so every write here is bot-attributed by construction. A
+// clean run completion leaves the issue alone, as it does a Jira ticket.
 //
 // It never touches the issue's assignee. TF assigns an issue only when a
 // person claims it with their own credential; the org credential assigns
@@ -21,8 +20,8 @@
 // skips a move the issue already satisfies, so it coexists with the agent's
 // own tfac exec linear verbs. It is forward-only: an issue already in one of
 // the rule's done states is never moved back, whoever moved it there. And it
-// is serialized per issue (linearMirrorLocks), so the mint-time pass and the
-// completion pass for one issue never interleave.
+// is serialized per issue (linearMirrorLocks), so two passes for one issue
+// (two of its tasks delegated together) never interleave.
 
 package delegate
 
@@ -177,7 +176,7 @@ func (s *Spawner) mirrorLinearInProgress(orgID string, task *domain.Task) {
 	go s.runLinearMirror(orgID, task.EntityID, task.EntitySourceID, teamID, *rule)
 }
 
-// runLinearMirror is the detached worker both in-progress hooks share. It
+// runLinearMirror is the detached worker mirrorLinearInProgress starts. It
 // resolves the org's Linear client fresh (credentials hot-swap on config
 // change, so a client is never cached), reads the issue, and moves it into
 // the rule's in-progress canonical unless it already sits in an in-progress
@@ -198,7 +197,7 @@ func (s *Spawner) runLinearMirror(orgID, entityID, identifier, teamID string, ru
 	}
 
 	// Serialize before any Linear call so the read→write decision for this
-	// issue is made under mutual exclusion with the other pass's mirror.
+	// issue is made under mutual exclusion with any other pass for it.
 	unlock := s.linearMirrorLocks.lock(orgID + "\x00" + entityID)
 	defer unlock()
 
@@ -241,8 +240,7 @@ func (s *Spawner) runLinearMirror(orgID, entityID, identifier, teamID string, ru
 	}
 
 	// A failed read leaves the state unknown. Skip rather than write: the
-	// issue may already be done, and a blind move would drag it back. A clean
-	// completion re-asserts the bucket later.
+	// issue may already be done, and a blind move would drag it back.
 	issue, err := client.GetIssue(ctx, e.ExternalID)
 	if err != nil {
 		linearLog.Warn("mirror: read issue failed; skipping in-progress mirror", "issue", identifier, "error", err)
