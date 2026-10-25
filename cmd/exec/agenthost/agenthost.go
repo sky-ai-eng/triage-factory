@@ -339,8 +339,9 @@ type Client interface {
 	JiraSetPriority(ctx context.Context, key, priority string) error
 	JiraListIssueTypes(ctx context.Context, project string) ([]jiraclient.IssueType, error)
 	// JiraSearchUsers returns the users who can be assigned the issue key
-	// names and match query, each with the ID JiraAssign takes.
-	JiraSearchUsers(ctx context.Context, key, query string) ([]jiraclient.User, error)
+	// names and match query, each with the ID JiraAssign takes, and whether
+	// more matched than it returned.
+	JiraSearchUsers(ctx context.Context, key, query string) (JiraUserMatches, error)
 
 	// --- linear (exec linear issue ...) ---
 	//
@@ -371,10 +372,10 @@ type Client interface {
 	LinearSetPriority(ctx context.Context, issue string, priority int) error
 	LinearListChildren(ctx context.Context, issue string) ([]linearclient.ChildIssue, error)
 	LinearSearch(ctx context.Context, req LinearSearchRequest) ([]linearclient.Issue, error)
-	// LinearSearchUsers returns the workspace's active users whose name,
+	// LinearSearchUsers returns the workspace's active people whose name,
 	// display name or email contains query, each with the id LinearAssign
-	// takes.
-	LinearSearchUsers(ctx context.Context, query string) ([]linearclient.User, error)
+	// takes, and whether more matched than it returned.
+	LinearSearchUsers(ctx context.Context, query string) (LinearUserMatches, error)
 
 	// --- github (exec gh pr / actions ...) ---
 	//

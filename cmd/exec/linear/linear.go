@@ -50,7 +50,7 @@ const HelpText = `Linear Issue Commands:
   linear issue search --team <key> [--state <name>]... [--assignee <user-id>|none] [--max <N>] (default 50)  Search a team's issues
 
 Linear User Commands:
-  linear user search <query>                                   Active users whose name, display name or email contains <query>, with their ids (at most 50)`
+  linear user search <query>                                   Active people whose name, display name or email contains <query>, with their ids (at most 50; truncated is true when more matched)`
 
 func printHelp() {
 	fmt.Print(helpText(prog.Prefix()))

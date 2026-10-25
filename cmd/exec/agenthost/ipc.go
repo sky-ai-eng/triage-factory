@@ -425,12 +425,12 @@ func (c *IPCClient) JiraListIssueTypes(ctx context.Context, project string) ([]j
 	return res.IssueTypes, nil
 }
 
-func (c *IPCClient) JiraSearchUsers(ctx context.Context, key, query string) ([]jiraclient.User, error) {
-	var res jiraUsersResult
+func (c *IPCClient) JiraSearchUsers(ctx context.Context, key, query string) (JiraUserMatches, error) {
+	var res JiraUserMatches
 	if err := c.call(ctx, methodJiraSearchUsers, jiraUserSearchArgs{Key: key, Query: query}, &res); err != nil {
-		return nil, err
+		return JiraUserMatches{}, err
 	}
-	return res.Users, nil
+	return res, nil
 }
 
 // --- linear ---
@@ -519,12 +519,12 @@ func (c *IPCClient) LinearSearch(ctx context.Context, req LinearSearchRequest) (
 	return res.Issues, nil
 }
 
-func (c *IPCClient) LinearSearchUsers(ctx context.Context, query string) ([]linearclient.User, error) {
-	var res linearUsersResult
+func (c *IPCClient) LinearSearchUsers(ctx context.Context, query string) (LinearUserMatches, error) {
+	var res LinearUserMatches
 	if err := c.call(ctx, methodLinearSearchUsers, linearUserSearchArgs{Query: query}, &res); err != nil {
-		return nil, err
+		return LinearUserMatches{}, err
 	}
-	return res.Users, nil
+	return res, nil
 }
 
 // --- github ---

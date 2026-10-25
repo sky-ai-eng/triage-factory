@@ -35,9 +35,9 @@ func (h *stubHost) LinearSearch(_ context.Context, req agenthost.LinearSearchReq
 	return nil, nil
 }
 
-func (h *stubHost) LinearSearchUsers(_ context.Context, query string) ([]linearclient.User, error) {
+func (h *stubHost) LinearSearchUsers(_ context.Context, query string) (agenthost.LinearUserMatches, error) {
 	h.queried = append(h.queried, query)
-	return []linearclient.User{{ID: "user-ana", Name: "Ana Lyst", Active: true}}, nil
+	return agenthost.LinearUserMatches{Users: []linearclient.User{{ID: "user-ana", Name: "Ana Lyst", Active: true}}, Truncated: true}, nil
 }
 
 func TestAssign_SendsTheNamedUser(t *testing.T) {
@@ -94,9 +94,9 @@ func TestUserSearch_SendsTheQuery(t *testing.T) {
 	if !reflect.DeepEqual(h.queried, []string{"ana lyst"}) {
 		t.Errorf("host was queried with %v, want [ana lyst]", h.queried)
 	}
-	var users []linearclient.User
-	if err := json.Unmarshal([]byte(out), &users); err != nil || len(users) != 1 || users[0].ID != "user-ana" {
-		t.Errorf("output %q is not the users the host answered (%v)", out, err)
+	var got agenthost.LinearUserMatches
+	if err := json.Unmarshal([]byte(out), &got); err != nil || len(got.Users) != 1 || got.Users[0].ID != "user-ana" || !got.Truncated {
+		t.Errorf("output %q is not the users the host answered, with its truncated flag (%v)", out, err)
 	}
 }
 

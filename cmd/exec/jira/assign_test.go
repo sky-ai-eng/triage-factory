@@ -29,9 +29,9 @@ func (h *stubHost) JiraAssign(_ context.Context, key, userID string) (jiraclient
 	return jiraclient.User{ID: userID, DisplayName: "Ana Lyst", Active: true}, nil
 }
 
-func (h *stubHost) JiraSearchUsers(_ context.Context, key, query string) ([]jiraclient.User, error) {
+func (h *stubHost) JiraSearchUsers(_ context.Context, key, query string) (agenthost.JiraUserMatches, error) {
 	h.searched = append(h.searched, [2]string{key, query})
-	return []jiraclient.User{{ID: "JIRAUSER10100", DisplayName: "Ana Lyst", Active: true}}, nil
+	return agenthost.JiraUserMatches{Users: []jiraclient.User{{ID: "JIRAUSER10100", DisplayName: "Ana Lyst", Active: true}}, Truncated: true}, nil
 }
 
 func TestAssign_SendsTheNamedUser(t *testing.T) {
@@ -83,9 +83,9 @@ func TestUserSearch_SendsTheQueryAndIssue(t *testing.T) {
 		if !reflect.DeepEqual(h.searched, [][2]string{{"SKY-1", "ana lyst"}}) {
 			t.Errorf("%v: host searched %v, want SKY-1 for \"ana lyst\"", args, h.searched)
 		}
-		var users []jiraclient.User
-		if err := json.Unmarshal([]byte(out), &users); err != nil || len(users) != 1 || users[0].ID != "JIRAUSER10100" {
-			t.Errorf("%v: output %q is not the users the host answered (%v)", args, out, err)
+		var got agenthost.JiraUserMatches
+		if err := json.Unmarshal([]byte(out), &got); err != nil || len(got.Users) != 1 || got.Users[0].ID != "JIRAUSER10100" || !got.Truncated {
+			t.Errorf("%v: output %q is not the users the host answered, with its truncated flag (%v)", args, out, err)
 		}
 	}
 }

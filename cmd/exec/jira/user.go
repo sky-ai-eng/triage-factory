@@ -40,12 +40,12 @@ func handleUser(host agenthost.Client, args []string) {
 	case "search":
 		query, issue, err := parseUserSearchArgs(rest)
 		exitOnErr(err)
-		users, err := host.JiraSearchUsers(context.Background(), issue, query)
+		matches, err := host.JiraSearchUsers(context.Background(), issue, query)
 		exitOnErr(err)
-		if users == nil {
-			users = []jiraclient.User{}
+		if matches.Users == nil {
+			matches.Users = []jiraclient.User{}
 		}
-		printJSON(users)
+		printJSON(matches)
 	default:
 		exitErr(unknownUserActionMessage(prog.Prefix(), action))
 	}

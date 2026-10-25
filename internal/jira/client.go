@@ -565,6 +565,14 @@ func (u userResponse) user() User {
 // MaxUserSearchResults is the most users one SearchAssignableUsers returns.
 const MaxUserSearchResults = 50
 
+// assignableUserWindow is the maxResults SearchAssignableUsers asks for, the
+// most either deployment serves. Jira applies maxResults to the users that
+// match the query and only then drops the ones who cannot be assigned the
+// issue, so a request for MaxUserSearchResults+1 can come back short while
+// more assignable users match. Asking for the whole window and cutting the
+// answer here is what lets SearchAssignableUsers say when it cut.
+const assignableUserWindow = 1000
+
 // GetUser reads the user id names (a User's ID): by accountId on Cloud, by
 // user key on Data Center. A user that does not exist, or that the credential
 // may not see, is a 404 (IsNotFound).
@@ -587,13 +595,15 @@ func (c *Client) GetUser(ctx context.Context, id string) (User, error) {
 }
 
 // SearchAssignableUsers returns up to MaxUserSearchResults users who can be
-// assigned the issue issueKey names and who match query. Cloud matches query
-// against the display name and the email; Data Center against the username,
-// the display name and the email.
-func (c *Client) SearchAssignableUsers(ctx context.Context, issueKey, query string) ([]User, error) {
+// assigned the issue issueKey names and who match query, and whether more
+// matched than it returned. Cloud matches query against the display name and
+// the email; Data Center against the username, the display name and the
+// email. more is reported from Jira's first assignableUserWindow matches of
+// query, which is the most Jira looks at.
+func (c *Client) SearchAssignableUsers(ctx context.Context, issueKey, query string) (users []User, more bool, err error) {
 	params := url.Values{}
 	params.Set("issueKey", issueKey)
-	params.Set("maxResults", strconv.Itoa(MaxUserSearchResults))
+	params.Set("maxResults", strconv.Itoa(assignableUserWindow))
 	if c.cfg.Deployment == DeploymentCloud {
 		params.Set("query", query)
 	} else {
@@ -601,17 +611,20 @@ func (c *Client) SearchAssignableUsers(ctx context.Context, issueKey, query stri
 	}
 	body, err := c.get(ctx, c.apiURL("user/assignable/search?%s", params.Encode()))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var found []userResponse
 	if err := json.Unmarshal(body, &found); err != nil {
-		return nil, fmt.Errorf("parse assignable users: %w", err)
+		return nil, false, fmt.Errorf("parse assignable users: %w", err)
 	}
-	users := make([]User, 0, len(found))
+	if len(found) > MaxUserSearchResults {
+		found, more = found[:MaxUserSearchResults], true
+	}
+	users = make([]User, 0, len(found))
 	for _, u := range found {
 		users = append(users, u.user())
 	}
-	return users, nil
+	return users, more, nil
 }
 
 // AssignTo assigns the issue to the user userID names (a User's ID) and

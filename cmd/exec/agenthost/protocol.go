@@ -356,10 +356,6 @@ type jiraUserResult struct {
 	User jiraclient.User `json:"user"`
 }
 
-type jiraUsersResult struct {
-	Users []jiraclient.User `json:"users"`
-}
-
 type jiraSearchArgs struct {
 	JQL        string   `json:"jql"`
 	Fields     []string `json:"fields,omitempty"`
@@ -424,10 +420,6 @@ type linearUserSearchArgs struct {
 
 type linearUserResult struct {
 	User linearclient.User `json:"user"`
-}
-
-type linearUsersResult struct {
-	Users []linearclient.User `json:"users"`
 }
 
 type linearUpdateIssueArgs struct {

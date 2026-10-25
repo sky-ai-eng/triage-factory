@@ -40,9 +40,10 @@ func handleUser(host agenthost.Client, args []string) {
 	case "search":
 		query, err := parseUserSearchArgs(rest)
 		exitOnErr(err)
-		users, err := host.LinearSearchUsers(context.Background(), query)
+		matches, err := host.LinearSearchUsers(context.Background(), query)
 		exitOnErr(err)
-		printJSON(nonNil(users))
+		matches.Users = nonNil(matches.Users)
+		printJSON(matches)
 	default:
 		exitErr(unknownUserActionMessage(prog.Prefix(), action))
 	}

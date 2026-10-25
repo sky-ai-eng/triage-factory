@@ -154,6 +154,7 @@ func TestJiraAssign_RefusesWithoutAnAssignablePerson(t *testing.T) {
 	}{
 		"no user":          {"", "a user is required", false},
 		"blank user":       {"  ", "a user is required", false},
+		"me":               {"me", `there is no "me"`, false},
 		"unknown user":     {"JIRAUSER99999", `no Jira user has the id "JIRAUSER99999"`, true},
 		"deactivated user": {"JIRAUSER10200", "deactivated", true},
 	}
@@ -176,21 +177,26 @@ func TestJiraAssign_RefusesWithoutAnAssignablePerson(t *testing.T) {
 
 // TestJiraSearchUsers_AsksWhoCanBeAssignedTheIssue pins the lookup verb: it
 // asks Jira's assignable-user search about the named issue, in each
-// deployment's parameter, and answers with the id an assign takes.
+// deployment's parameter, and answers with the id an assign takes. The issue
+// and the query are trimmed before they are sent.
 func TestJiraSearchUsers_AsksWhoCanBeAssignedTheIssue(t *testing.T) {
 	cases := map[string]struct{ query, id string }{
-		"data center": {"issueKey=SKY-9&maxResults=50&username=ana", "JIRAUSER10100"},
-		"cloud":       {"issueKey=SKY-9&maxResults=50&query=ana", "557058:ana"},
+		"data center": {"issueKey=SKY-9&maxResults=1000&username=ana", "JIRAUSER10100"},
+		"cloud":       {"issueKey=SKY-9&maxResults=1000&query=ana", "557058:ana"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			f, srv := startJiraAssignFake(t)
-			users, err := jiraAssignClients(srv.URL)[name].JiraSearchUsers(context.Background(), "SKY-9", "ana")
+			matches, err := jiraAssignClients(srv.URL)[name].JiraSearchUsers(context.Background(), " SKY-9 ", " ana ")
 			if err != nil {
 				t.Fatalf("JiraSearchUsers: %v", err)
 			}
+			users := matches.Users
 			if len(users) != 1 || users[0].ID != tc.id || users[0].DisplayName != "Ana Lyst" || users[0].Email != "ana@acme.test" || !users[0].Active {
 				t.Errorf("users = %+v, want Ana under %s", users, tc.id)
+			}
+			if matches.Truncated {
+				t.Error("one match reported truncated")
 			}
 			if calls := f.snapshot(); len(calls) != 1 || calls[0].query != tc.query {
 				t.Errorf("calls = %+v, want one search with %s", calls, tc.query)
@@ -231,7 +237,7 @@ func TestServer_JiraAssign_RoundTrip(t *testing.T) {
 	if _, err := client.JiraAssign(ctx, "SKY-9", ""); !strings.Contains(errString(err), "a user is required") {
 		t.Errorf("an assign naming nobody crossed as %v, want the refusal", err)
 	}
-	if users, err := client.JiraSearchUsers(ctx, "SKY-9", "ana"); err != nil || len(users) != 1 || users[0].ID != "JIRAUSER10100" {
-		t.Errorf("JiraSearchUsers = %+v, %v", users, err)
+	if m, err := client.JiraSearchUsers(ctx, "SKY-9", "ana"); err != nil || len(m.Users) != 1 || m.Users[0].ID != "JIRAUSER10100" || m.Truncated {
+		t.Errorf("JiraSearchUsers = %+v, %v", m, err)
 	}
 }

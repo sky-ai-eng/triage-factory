@@ -128,9 +128,11 @@ func startFakeLinear(t *testing.T) (*fakeLinear, *httptest.Server) {
 				data = map[string]any{"user": nil}
 			}
 		case "Users":
+			// The listing carries app users as well as people, and says
+			// there is more of it.
 			data = map[string]any{"users": map[string]any{
-				"nodes":    []any{fakeLinearUsers[fakeLinearPersonID]},
-				"pageInfo": map[string]any{"hasNextPage": false},
+				"nodes":    []any{fakeLinearUsers[fakeLinearPersonID], fakeLinearUsers[fakeLinearAppUserID]},
+				"pageInfo": map[string]any{"hasNextPage": true, "endCursor": "u1"},
 			}}
 		case "Teams":
 			data = map[string]any{"teams": map[string]any{
@@ -359,12 +361,16 @@ func TestLinearVerbs_ResolveTheAgentsVocabulary(t *testing.T) {
 	t.Run("user search narrows the workspace's users by the query", func(t *testing.T) {
 		f, srv := startFakeLinear(t)
 		lc, _, _ := linearProxyClient(t, srv.URL, true)
-		users, err := lc.LinearSearchUsers(ctx, "ana")
+		matches, err := lc.LinearSearchUsers(ctx, "ana")
 		if err != nil {
 			t.Fatalf("LinearSearchUsers: %v", err)
 		}
-		if len(users) != 1 || users[0].ID != fakeLinearPersonID || users[0].Email != "ana@acme.test" {
-			t.Errorf("users = %+v, want Ana with her id and email", users)
+		// The app user is left out: Linear never lets one be assigned.
+		if users := matches.Users; len(users) != 1 || users[0].ID != fakeLinearPersonID || users[0].Email != "ana@acme.test" {
+			t.Errorf("users = %+v, want Ana alone, with her id and email", users)
+		}
+		if !matches.Truncated {
+			t.Error("a listing with a further page did not report truncated")
 		}
 		got := f.last(t, "Users")
 		want := map[string]any{"or": []any{
@@ -815,8 +821,8 @@ func TestServer_LinearOps_RoundTrip(t *testing.T) {
 	if _, err := client.LinearAssign(ctx, "ENG-7", ""); !strings.Contains(errString(err), "a user is required") {
 		t.Errorf("an assign naming nobody crossed as %v, want the refusal", err)
 	}
-	if users, err := client.LinearSearchUsers(ctx, "ana"); err != nil || len(users) != 1 || users[0].ID != fakeLinearPersonID {
-		t.Errorf("LinearSearchUsers = %+v, %v", users, err)
+	if m, err := client.LinearSearchUsers(ctx, "ana"); err != nil || len(m.Users) != 1 || m.Users[0].ID != fakeLinearPersonID || !m.Truncated {
+		t.Errorf("LinearSearchUsers = %+v, %v", m, err)
 	}
 	if err := client.LinearUnassign(ctx, "ENG-7"); err != nil {
 		t.Errorf("LinearUnassign: %v", err)

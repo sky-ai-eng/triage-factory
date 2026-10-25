@@ -27,6 +27,17 @@ const LinearAssigneeNone = "none"
 // one page of Linear's users listing.
 const LinearUserSearchMaxResults = 50
 
+// linearUserLookup is the verb that finds a Linear user's id, named in the
+// refusals of the verbs that take one.
+const linearUserLookup = "linear user search <query>"
+
+// LinearUserMatches is what LinearSearchUsers found: the people who matched,
+// and whether more matched than it returned.
+type LinearUserMatches struct {
+	Users     []linearclient.User `json:"users"`
+	Truncated bool                `json:"truncated"`
+}
+
 // LinearCreateIssueRequest is a new issue in the agent's vocabulary: the team
 // by its key, the parent by identifier or UUID, labels by name. Priority 0 is
 // no priority.
@@ -207,7 +218,7 @@ func (c *LocalClient) LinearAddComment(ctx context.Context, issue, body string) 
 
 func (c *LocalClient) LinearAssign(ctx context.Context, issue, userID string) (_ linearclient.User, err error) {
 	defer c.explainSourceMiss(ctx, eventsource.KindLinear, &err)
-	if err := validateLinearUserID(userID); err != nil {
+	if err := validateUserID("Linear", linearUserLookup, userID); err != nil {
 		return linearclient.User{}, err
 	}
 	client, err := c.linearSystemClient(ctx)
@@ -404,7 +415,7 @@ func (c *LocalClient) LinearSearch(ctx context.Context, req LinearSearchRequest)
 		return nil, fmt.Errorf("max %d out of range 1-%d", req.Max, LinearSearchMaxResults)
 	}
 	if req.Assignee != "" && req.Assignee != LinearAssigneeNone {
-		if err := validateLinearUserID(req.Assignee); err != nil {
+		if err := validateUserID("Linear", linearUserLookup, req.Assignee); err != nil {
 			return nil, err
 		}
 	}
@@ -464,34 +475,29 @@ func (c *LocalClient) LinearSearch(ctx context.Context, req LinearSearchRequest)
 	return out, nil
 }
 
-func (c *LocalClient) LinearSearchUsers(ctx context.Context, query string) (_ []linearclient.User, err error) {
+// LinearSearchUsers returns the people LinearAssign can take. App users are
+// left out, since Linear never lets one be assigned an issue; Truncated is
+// Linear's own answer to whether its listing had a further page.
+func (c *LocalClient) LinearSearchUsers(ctx context.Context, query string) (_ LinearUserMatches, err error) {
 	defer c.explainSourceMiss(ctx, eventsource.KindLinear, &err)
 	if strings.TrimSpace(query) == "" {
-		return nil, errors.New("query is required: part of the person's name, display name or email")
+		return LinearUserMatches{}, errors.New("query is required: part of the person's name, display name or email")
 	}
 	client, err := c.linearSystemClient(ctx)
 	if err != nil {
-		return nil, err
+		return LinearUserMatches{}, err
 	}
 	page, err := client.ListUsers(ctx, query, "", LinearUserSearchMaxResults)
 	if err != nil {
-		return nil, err
+		return LinearUserMatches{}, err
 	}
-	return page.Items, nil
-}
-
-// validateLinearUserID is the check every verb naming a person makes before
-// it reaches Linear. There is no default person and no "me": the org's Linear
-// identity is not a person, so a verb that names nobody is refused rather
-// than pointed at it.
-func validateLinearUserID(userID string) error {
-	switch {
-	case strings.TrimSpace(userID) == "":
-		return errors.New("a user is required: name the person by their Linear user id, which `linear user search <query>` returns")
-	case strings.EqualFold(strings.TrimSpace(userID), "me"):
-		return errors.New(`there is no "me": the org's Linear identity is not a person. Name the person by their Linear user id, which ` + "`linear user search <query>`" + ` returns`)
+	people := make([]linearclient.User, 0, len(page.Items))
+	for _, u := range page.Items {
+		if !u.App {
+			people = append(people, u)
+		}
 	}
-	return nil
+	return LinearUserMatches{Users: people, Truncated: page.HasNextPage}, nil
 }
 
 // findLinearUser resolves a Linear user id to the user, refusing one that
@@ -499,7 +505,7 @@ func validateLinearUserID(userID string) error {
 func findLinearUser(ctx context.Context, client *linearclient.Client, userID string) (linearclient.User, error) {
 	user, err := client.GetUser(ctx, strings.TrimSpace(userID))
 	if errors.Is(err, linearclient.ErrNotFound) {
-		return linearclient.User{}, fmt.Errorf("no Linear user has the id %q; `linear user search <query>` returns users' ids", userID)
+		return linearclient.User{}, fmt.Errorf("no Linear user has the id %q; `%s` returns users' ids", userID, linearUserLookup)
 	}
 	return user, err
 }

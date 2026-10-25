@@ -772,11 +772,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		users, err := client.JiraSearchUsers(ctx, a.Key, a.Query)
-		if err != nil {
-			return nil, err
-		}
-		return jiraUsersResult{Users: users}, nil
+		return client.JiraSearchUsers(ctx, a.Key, a.Query)
 
 	// --- linear (exec linear issue ...) ---
 
@@ -901,11 +897,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		users, err := client.LinearSearchUsers(ctx, a.Query)
-		if err != nil {
-			return nil, err
-		}
-		return linearUsersResult{Users: users}, nil
+		return client.LinearSearchUsers(ctx, a.Query)
 
 	// --- github: build the org-tiered client host-side (App→PAT), make the
 	// REST call, return the result / error. The per-request LocalClient

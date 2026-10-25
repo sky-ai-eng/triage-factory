@@ -51,7 +51,7 @@ const HelpText = `Jira Ticket Commands:
   jira ticket list-priorities                                  List available priority levels
 
 Jira User Commands:
-  jira user search <query> --issue <key>                       Users who can be assigned <key> and match <query>, with their ids (at most 50)`
+  jira user search <query> --issue <key>                       Users who can be assigned <key> and match <query>, with their ids (at most 50; truncated is true when more matched)`
 
 func printHelp() {
 	fmt.Print(helpText(prog.Prefix()))
