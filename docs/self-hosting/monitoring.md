@@ -96,8 +96,9 @@ route `9464` externally**; scrape it from inside the compose network / cluster.
 
 Beyond the standard Go runtime and process collectors (`go_*`, `process_*`),
 the TF-specific set today covers dropped audit records, the entity
-terminal-state invariant, unwritten conversation memory links, the work
-queues, claims, Slack message-event volume,
+terminal-state invariant, unwritten conversation memory links, failed moves
+of delegated Linear issues, the work queues, claims, Slack message-event
+volume,
 and the outcome of every request TF makes to GitHub, Jira, Slack, and the LLM
 providers.
 
@@ -218,6 +219,31 @@ that ended without writing one.
 
 ```
 sum by (role, source, reason) (increase(tf_memory_entity_links_skipped_total[1d]))   # not an alert: how many links a day go unwritten, and why
+```
+
+### Linear mirror
+
+When TF delegates a Linear-backed task to an agent, it moves the issue to its
+team's IN PROGRESS ★ under the org's Linear credential, once per delegation.
+
+- `tf_linear_mirror_failures_total{reason, org_id}` — moves that should have
+  happened and did not. The issue stays where it was, and nothing retries it.
+  `reason` is:
+
+  | `reason` | What happened |
+  | --- | --- |
+  | `transition_failed` | Linear refused the move. The usual cause is that the team's IN PROGRESS ★ was deleted from its Linear workflow: every delegation on that team then fails the same way until an admin stars another state on the team's Linear source page. |
+  | `issue_read_failed` | Linear did not answer the read of the issue's current state. TF does not move an issue whose state it cannot see, because the issue may already be done. |
+  | `credential_failed` | Resolving the org's Linear credential failed. An org with no Linear credential is not counted. |
+  | `store_read_failed` | TF could not read the org's settings, the task's entity, or the team's Linear rules from its own database. |
+
+  Deliberate skips are not counted: the issue is already in progress or done,
+  it is in a Linear workspace the org has since left, the team's IN PROGRESS
+  rule is unmapped, or the org has no Linear credential. Each failure is also a
+  `WARN` line naming the issue. Counters are per process, so `sum` across pods.
+
+```
+sum by (org_id) (increase(tf_linear_mirror_failures_total{reason="transition_failed"}[1h])) > 0   # an org's delegated issues are not moving
 ```
 
 ### Work queues
