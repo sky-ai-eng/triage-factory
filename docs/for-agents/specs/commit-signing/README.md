@@ -137,8 +137,12 @@ What follows from it:
    signature.** The reason GitHub gave is shown on the signer. Every signature
    checks the signer's status, in both modes. A run that starts while the
    signer is not `active` is configured not to sign. A run that started while
-   it was `active` gets a refusal telling the agent to rerun the command with
-   `git -c commit.gpgsign=false`, so it commits unsigned instead of stopping.
+   it was `active` gets a refusal saying signing is off for the rest of the
+   run and to commit with `git -c commit.gpgsign=false`, so it commits
+   unsigned instead of stopping. An org that switches signers mid-run gets the
+   same: a run's identity is fixed when its sandbox starts, so the run keeps
+   committing as the old signer, unsigned, and its next run starts with the
+   new one.
 10. **Commits only.** A tag (or anything else) is refused.
 
 ## 4. Architecture
@@ -194,11 +198,11 @@ one line to stderr and exits 1; git then aborts the commit with
 
 - `triagefactory: this run signs commits only as <signer>; this commit's committer is <x>`
 - `triagefactory: commit signing is unavailable right now; retry the commit`
-- `triagefactory: commit signing is off for this org (<reason>); run the command again with git -c commit.gpgsign=false`
+- `triagefactory: commit signing is off for the rest of this run (<reason>); run this and every later commit with git -c commit.gpgsign=false`
 
-The last one answers a signer that is no longer `active` and a claim that has
-spent its signing budget. A signer over its per-minute budget, or no answer
-within 30 s, gets "unavailable".
+The last one answers a signer that is no longer `active` or no longer the
+org's, and a claim that has spent its signing budget. An org over its
+per-minute budget, or no answer within 30 s, gets "unavailable".
 
 The verb is not documented to the agent; git is its only intended caller.
 
@@ -267,7 +271,7 @@ One signature, the same for an org signer and the deployment signer:
    - the claim is still active, at the boot epoch the row names;
    - the org still resolves (§4.6) to the signer the row names, the same kind
      and account, and that signer is `active`;
-   - the claim and the signer are within their signing budgets (§10.4).
+   - the claim and the org are within their signing budgets (§10.4).
 
    A sidecar that names a different signer gains nothing: the check passes
    only for the signer the org resolves to now. The pod then reads that
@@ -315,6 +319,10 @@ One row per org.
 | `checked_at` | nullable |
 | `created_at`, `updated_at`, `created_by` | |
 
+Two orgs may register the same account. Each generates its own key, the
+account holds both, and each row's health is its own key's, so removing one
+org's key breaks only that org.
+
 RLS follows `org_event_sources`: members select, org admins write, and
 `REVOKE ALL` from the other roles. The Postgres change is a baseline edit; the
 SQLite one is a new migration.
@@ -335,7 +343,7 @@ and in both modes the signing log.
 | `id` | |
 | `org_id`, `conversation_id` (FK, `SET NULL`), `claim_id`, `boot_epoch` | |
 | `signer` | `org` \| `deployment` |
-| `signer_user_id`, `public_key` | which account and key signed |
+| `signer_host`, `signer_user_id`, `public_key` | which account and key signed |
 | `digest` | SHA-512 hex |
 | `state` | `requested` \| `signing` \| `signed` \| `refused` |
 | `refusal_reason`, `signature`, `claimed_by`, `signed_at` | |
@@ -349,6 +357,11 @@ orchestrator inserts it as `requested` (§4.5), and the daemon's commit id
 reaches it as a relay record, like `record_push`. `tf_system` (the executor)
 gets `INSERT`, `SELECT`, and `UPDATE (commit_sha, repository_id, pushed_at)`.
 Org members get `SELECT`.
+
+The signing budgets (§10.4) are counts over these rows, per org and per
+claim, so no counter is stored. The same rows give per-signer totals:
+grouping by `signer_host, signer_user_id` totals one account across every org
+that uses it, the deployment signer included.
 
 ### 5.4 `deployment_commit_signer` (Postgres only)
 
@@ -395,7 +408,8 @@ Under `/api/orgs/{org_id}/github/`, beside the App and PAT routes:
 - The suggested key title is "Triage Factory commit signing", because titles
   are public.
 - The fleet console gets `GET` and `POST …/verify` for the deployment signer,
-  operator-gated.
+  operator-gated, and a `usage` node (`?since=&until=`) with its signatures
+  by hour and by org.
 
 ## 7. Health
 
@@ -481,11 +495,12 @@ signature.
    check re-derives it, but whether GitHub keeps verifying the old address
    after a rename is untested. If it does not, a rename makes commits from
    runs started before the check fail with `no_user` until they finish.
-4. **The signing budget.** Initial values: 600 signatures per minute per
-   signer and 5,000 per claim. A rebase of a long branch is the case to size
-   for. Every managed workspace shares the deployment signer's per-minute
-   limit, so one workspace's rebase can spend it for all of them; a per-org
-   share of it may be needed.
+4. **The signing budget.** Initial values: 600 signatures per minute per org
+   and 5,000 per claim. A rebase of a long branch is the case to size for. The
+   limits bound what one compromised or runaway run, or one org, can get
+   signed. The deployment signer has no limit of its own: signing costs the
+   control plane microseconds and GitHub does not limit signatures, so its
+   total is the sum of its orgs', shown in the fleet console (§6).
 5. **The signing log in the UI.** `commit_signatures` is readable by members.
    Showing it (per conversation, or per signer) is not part of v1.
 6. **Local verification in the jail.** With an allowed-signers file in the
