@@ -15,7 +15,7 @@ permissions:
 # failure-report step below must agree on it. GitHub App committers
 # appear under their "<app-slug>[bot]" login, so the suffix is required.
 env:
-  CLA_ALLOWLIST: "AidanAllchin,sky-ai-bot,triage-factory-sky-ai[bot],dependabot[bot],github-actions[bot],claude[bot],claude"
+  CLA_ALLOWLIST: "AidanAllchin,sky-ai-bot,triage-factory[bot],triage-factory-sky-ai[bot],dependabot[bot],github-actions[bot],claude[bot],claude"
 
 jobs:
   cla:
@@ -69,8 +69,15 @@ jobs:
           # This step exists to explain a failure, so it must survive its own
           # API hiccups: a failed lookup degrades to a warning naming the
           # error rather than dying under -e/pipefail with no output at all.
+          #
+          # One line per commit: the GitHub login the action names it by (the
+          # author's, else the committer's), then the git author name and
+          # email. The action falls back to the git author name when neither
+          # is a GitHub account, so that is what its allowlist matches then.
+          # The fields are split on the unit separator rather than a tab,
+          # because read collapses an empty leading field before a tab.
           if ! committers=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/commits" \
-              --paginate --jq '.[] | .author.login // .commit.author.email' \
+              --paginate --jq '.[] | [(.author.login // .committer.login // ""), .commit.author.name, .commit.author.email] | join("\u001f")' \
               2>"${RUNNER_TEMP}/gh-commits-err" | sort -u); then
             echo "::warning::CLA diagnostics unavailable — could not list PR #${PR_NUMBER} commits: $(cat "${RUNNER_TEMP}/gh-commits-err")"
             exit 0
@@ -89,13 +96,15 @@ jobs:
             fi
           fi
 
-          # Same matching rules as contributor-assistant: exact match, with
-          # "*" as the only wildcard (so "[bot]" is literal, not a glob class).
+          # Same matching rules as contributor-assistant: each entry trimmed,
+          # exact match, with "*" as the only wildcard (so "[bot]" is literal,
+          # not a glob class).
           is_allowed() {
             local user="$1" pat regex
             IFS=',' read -ra patterns <<<"$CLA_ALLOWLIST"
             for pat in "${patterns[@]}"; do
-              pat="${pat// /}"
+              pat="${pat#"${pat%%[![:space:]]*}"}"
+              pat="${pat%"${pat##*[![:space:]]}"}"
               if [[ "$pat" == *'*'* ]]; then
                 regex="^$(printf '%s' "$pat" | sed -e 's/[][\.^$+?(){}|]/\\&/g' -e 's/\*/.*/g')$"
                 [[ "$user" =~ $regex ]] && return 0
@@ -106,31 +115,57 @@ jobs:
             return 1
           }
 
+          # A commit whose author and committer are both no GitHub account
+          # has no id to sign under, so the action can never count it signed:
+          # the fix is the commit's author email, not a signature.
           unsigned=()
-          for user in $committers; do
-            if is_allowed "$user" || grep -qxF "$user" <<<"$signed"; then
+          unlinked=()
+          while IFS=$'\x1f' read -r login name email; do
+            if [[ -z "$login" && -z "$name" ]]; then
               continue
             fi
-            unsigned+=("$user")
-          done
+            if is_allowed "${login:-$name}"; then
+              continue
+            fi
+            if [[ -z "$login" ]]; then
+              unlinked+=("${name} <${email}>")
+            elif ! grep -qxF "$login" <<<"$signed"; then
+              unsigned+=("$login")
+            fi
+          done <<<"$committers"
 
           if [[ ${#unsigned[@]} -gt 0 ]]; then
             echo "::error::CLA check failed for committer(s): ${unsigned[*]} — sign the CLA or add them to the allowlist in .github/workflows/cla.yml"
-            if [[ -n "$signatures_caveat" ]]; then
-              echo "::warning::${signatures_caveat}"
-            fi
-            {
-              echo "### CLA check failed"
+          fi
+          if [[ ${#unlinked[@]} -gt 0 ]]; then
+            printf -v unlinked_list '%s; ' "${unlinked[@]}"
+            echo "::error::Commit author(s) not linked to any GitHub account: ${unlinked_list%; } — GitHub links a commit to the account that verified its author email, and an author with no account cannot sign. Re-author these commits with an email a GitHub account has verified."
+          fi
+          if [[ ${#unsigned[@]} -eq 0 && ${#unlinked[@]} -eq 0 ]]; then
+            echo "::warning::CLA action failed, but every committer matches the allowlist or signature file — see the action step's own log for the cause."
+            exit 0
+          fi
+          if [[ -n "$signatures_caveat" ]]; then
+            echo "::warning::${signatures_caveat}"
+          fi
+          {
+            echo "### CLA check failed"
+            if [[ ${#unsigned[@]} -gt 0 ]]; then
               echo ""
               echo "Committers on PR #${PR_NUMBER} with no signature and no allowlist match:"
               for user in "${unsigned[@]}"; do
                 echo "- \`${user}\`"
               done
-              if [[ -n "$signatures_caveat" ]]; then
-                echo ""
-                echo "> Note: ${signatures_caveat}."
-              fi
-            } >>"$GITHUB_STEP_SUMMARY"
-          else
-            echo "::warning::CLA action failed, but every committer matches the allowlist or signature file — see the action step's own log for the cause."
-          fi
+            fi
+            if [[ ${#unlinked[@]} -gt 0 ]]; then
+              echo ""
+              echo "Commit authors on PR #${PR_NUMBER} that are not linked to any GitHub account, so cannot sign:"
+              for author in "${unlinked[@]}"; do
+                echo "- \`${author}\`"
+              done
+            fi
+            if [[ -n "$signatures_caveat" ]]; then
+              echo ""
+              echo "> Note: ${signatures_caveat}."
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
