@@ -22,11 +22,14 @@ cannot hold a signing key. A bot commit is Verified only when GitHub creates
 and signs it itself, as it does for a merge made in the web UI, so a commit TF
 makes with git and pushes can never be Verified as the bot.
 
-That has two costs:
+That has three costs:
 
 - A repository that requires signed commits, through branch protection or a
   ruleset, refuses every push TF makes.
 - An org that wants Verified badges on agent commits cannot get them.
+- Every commit is named for the bot: GitHub shows `<slug>[bot]`
+  (`triage-factory[bot]` on the cloud deployment) in the commit list and in
+  blame, and `git log` shows the same name.
 
 GitHub verifies an SSH-signed commit when the signing key is registered as a
 **signing key** on a GitHub **user** account and the commit's **committer**
@@ -40,7 +43,9 @@ Goals:
 1. An org admin registers one GitHub user account per org as its signer. TF
    generates the key pair, and the admin adds the public half to the account.
 2. Every commit an agent makes in that org is authored and committed as the
-   signer and signed.
+   signer and signed. GitHub shows it under the signer's login and avatar,
+   and git under the account's profile name (§4.2), so an org names its
+   agent's commits by naming the account.
 3. A workspace on the deployment App uses the deployment's signer unless it
    registers its own.
 4. No private key enters a jail. In multi mode no private key leaves the
@@ -55,6 +60,9 @@ Non-goals:
   refusal visible.
 - Signing tags, GPG keys, per-team signers, and signing commits people make
   outside a run.
+- **Renaming the bot on pull requests, reviews and comments.** Those are the
+  App's actions, and GitHub shows them as the App. Making them as the signer
+  would take a user token for the signer's account.
 
 ## 2. Spike findings
 
@@ -167,7 +175,7 @@ When a run signs, its single `GIT_CONFIG_*` block (`internal/agentproc/proxies.g
 in the sandbox, `githooks.DirectAgentEnv` in a direct local spawn) gains:
 
 ```
-user.name=<signer login>
+user.name=<signer name>
 user.email=<signer email>
 gpg.format=ssh
 commit.gpgsign=true
@@ -176,7 +184,12 @@ gpg.ssh.program=<hooks dir>/ssh-sign
 ```
 
 `user.name` / `user.email` are the identity TFAC-1187 already stamps; the
-signer simply becomes that identity. Git config keys pass the sandbox env
+signer simply becomes that identity. The name is the account's profile name,
+or its login when the profile has none. GitHub shows a commit linked to an
+account under the account's login and avatar, and the name is what `git log`,
+blame in an editor, and other git tools show. Claude Code's commits split the
+same way: `Claude` in git, `claude` on GitHub. A login cannot contain a space,
+so a name like "Triage Factory" exists only as the profile name. Git config keys pass the sandbox env
 allowlist through the `GIT_CONFIG_KEY_` / `GIT_CONFIG_VALUE_` prefixes, so the
 allowlist does not change.
 
@@ -310,6 +323,7 @@ One row per org.
 | `host` | the GitHub host the account is on, the org's host at registration |
 | `github_user_id` | the account's numeric id |
 | `login` | display value, refreshed by the periodic check (§7) |
+| `name` | nullable: the account's profile name, refreshed by the periodic check |
 | `email_override` | nullable; null means the derived noreply address |
 | `public_key` | `ssh-ed25519 AAAA…` |
 | `pending_public_key` | nullable, set during a rotation |
@@ -365,8 +379,9 @@ that uses it, the deployment signer included.
 
 ### 5.4 `deployment_commit_signer` (Postgres only)
 
-One row per deployment signer key, keyed by the public key: `status`,
-`status_reason`, `status_since`, `checked_at`. Every control pod reads it
+One row per deployment signer key, keyed by the public key: `github_user_id`
+and `name` (read from the account the login names, like an org signer's),
+`status`, `status_reason`, `status_since`, `checked_at`. Every control pod reads it
 before signing and the fleet console shows it.
 
 ### 5.5 The bundle
@@ -420,8 +435,8 @@ or signs.
 1. **Verify** (§6): the admin's action, and the only way out of `broken`
    apart from the case below.
 2. **Periodic check**, on the GitHub poll cycle, at most every 15 minutes per
-   signer. Using the org's credential, it refreshes the login by account id
-   and confirms the key is still on the account. A missing key sets
+   signer. Using the org's credential, it refreshes the login and name by
+   account id and confirms the key is still on the account. A missing key sets
    `broken (key_missing)`, and the same check clears it once the key is back.
 3. **Post-push check.** When a push lands a signed commit as a ref's new tip
    (TFAC-1188 supplies per-ref outcomes), the orchestrator stamps that
