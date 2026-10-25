@@ -16,7 +16,8 @@ import (
 // pull requests, failed runs — and by_day_source splits the first two by
 // source (merged and failed have no source axis); by_source is the
 // per-source totals band (events, became-tasks, runs) plus each poller's
-// last completed cycle. The window grammar is the usage node's own
+// last completed cycle; by_tracked is the same totals per unit of the team's
+// tracked set, for the source pages' per-row figures. The window grammar is the usage node's own
 // (parseUsageWindow): RFC3339 or YYYY-MM-DD, defaulting to month-to-date,
 // half-open [since, until) — so a caller asking in RFC3339 windows rows,
 // not whole days.
@@ -57,11 +58,27 @@ type teamActivitySourceJSON struct {
 	LastPollAt *time.Time `json:"last_poll_at"`
 }
 
+// teamActivityTrackedJSON is one unit of the team's tracked set. unit_id is
+// the id the unit's source page keys its row on — a repository's registry
+// id, a jira_projects row id, a Linear team's UUID — so a client joins with
+// no name lookup. A quiet unit answers zeros; last_event_at is null only for
+// a unit that has never sent an event, since it is bounded by the window's
+// end alone.
+type teamActivityTrackedJSON struct {
+	Source      string     `json:"source"`
+	UnitID      string     `json:"unit_id"`
+	Events      int        `json:"events"`
+	Tasks       int        `json:"tasks"`
+	Runs        int        `json:"runs"`
+	LastEventAt *time.Time `json:"last_event_at"`
+}
+
 type teamActivityResponse struct {
 	TeamID      string                      `json:"team_id"`
 	ByDay       []teamActivityDayJSON       `json:"by_day"`
 	ByDaySource []teamActivityDaySourceJSON `json:"by_day_source"`
 	BySource    []teamActivitySourceJSON    `json:"by_source"`
+	ByTracked   []teamActivityTrackedJSON   `json:"by_tracked"`
 }
 
 func (s *Server) handleTeamActivity(w http.ResponseWriter, r *http.Request) {
@@ -111,6 +128,7 @@ func (s *Server) handleTeamActivity(w http.ResponseWriter, r *http.Request) {
 		ByDay:       make([]teamActivityDayJSON, 0, len(activity.ByDay)),
 		ByDaySource: make([]teamActivityDaySourceJSON, 0, len(activity.ByDaySource)),
 		BySource:    make([]teamActivitySourceJSON, 0, len(activity.BySource)),
+		ByTracked:   make([]teamActivityTrackedJSON, 0, len(activity.ByTracked)),
 	}
 	for _, d := range activity.ByDay {
 		resp.ByDay = append(resp.ByDay, teamActivityDayJSON{
@@ -128,6 +146,12 @@ func (s *Server) handleTeamActivity(w http.ResponseWriter, r *http.Request) {
 			row.LastPollAt = &at
 		}
 		resp.BySource = append(resp.BySource, row)
+	}
+	for _, u := range activity.ByTracked {
+		resp.ByTracked = append(resp.ByTracked, teamActivityTrackedJSON{
+			Source: u.Source, UnitID: u.UnitID,
+			Events: u.Events, Tasks: u.Tasks, Runs: u.Runs, LastEventAt: u.LastEventAt,
+		})
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

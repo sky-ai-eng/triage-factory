@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,7 +44,55 @@ func TestTeamActivityStore_Postgres(t *testing.T) {
 		h.Reset(t)
 		orgID, userID := seedPgFactoryOrg(t, h)
 		promptID := seedPgFactoryPrompt(t, h, orgID, userID)
-		return stores.TeamActivity, orgID, teamOf(t, orgID), newPgFactorySeeder(h.AdminDB, orgID, userID, promptID)
+		return stores.TeamActivity, orgID, teamOf(t, orgID), newPgTeamActivitySeeder(h, orgID, userID, promptID)
+	})
+
+	// The tracked-set cut's rows are the subject team's tracking rows and no
+	// one else's: not a repository another team in the org tracks, not one
+	// nobody tracks, and not a Linear team saved under a workspace the org
+	// has moved off. The untracked repository's task is the one place the
+	// cut and by_source part: by_source counts the team's task wherever its
+	// entity is, and the cut has no row for it to land on.
+	t.Run("by_tracked_is_only_this_teams_tracked_set", func(t *testing.T) {
+		h.Reset(t)
+		orgID, userID := seedPgFactoryOrg(t, h)
+		promptID := seedPgFactoryPrompt(t, h, orgID, userID)
+		seed := newPgTeamActivitySeeder(h, orgID, userID, promptID)
+		now := time.Now().UTC()
+		subject := teamOf(t, orgID)
+
+		_, repo := seed.TrackedEntity(t, "github")
+		seed.TrackedEntity(t, "linear")
+		pgtest.MustExec(t, h.AdminDB,
+			`UPDATE linear_team_rules SET linear_workspace_id = 'ws-former' WHERE team_id = $1`, subject)
+
+		untracked := seedPgUntrackedEntity(t, h, orgID, "untracked")
+		ev := seed.Event(t, untracked, domain.EventGitHubPROpened, "", now.Add(-time.Hour), time.Time{})
+		seed.Task(t, untracked, domain.EventGitHubPROpened, "", ev, "queued", now.Add(-time.Hour))
+
+		other := seedPgDefaultTeam(t, h, orgID, userID)
+		pgtest.SeedTrackedRepo(t, h, orgID, other, "acme", "theirs")
+		theirs := seedPgGitHubEntityRaw(t, h, orgID, "acme", "theirs", 1)
+		seed.Event(t, theirs, domain.EventGitHubPROpened, "", now.Add(-time.Hour), time.Time{})
+
+		got, err := stores.TeamActivity.TeamActivity(context.Background(), orgID, subject, now.Add(-2*time.Hour), now)
+		if err != nil {
+			t.Fatalf("TeamActivity: %v", err)
+		}
+		if len(got.ByTracked) != 1 || got.ByTracked[0].Source != "github" || got.ByTracked[0].UnitID != repo {
+			t.Errorf("by_tracked = %+v, want only the subject team's one tracked repository", got.ByTracked)
+		}
+		for _, row := range got.BySource {
+			if row.Source != "github" {
+				continue
+			}
+			if row.Events == nil || *row.Events != 0 {
+				t.Errorf("github by_source events = %v, want 0 — neither event is on the team's tracked set", row.Events)
+			}
+			if row.Tasks != 1 {
+				t.Errorf("github by_source tasks = %d, want 1 — the team's task counts wherever its entity is", row.Tasks)
+			}
+		}
 	})
 
 	// Merged rides the events cut's tracked-set predicate, so a pull request
@@ -136,7 +185,7 @@ func TestTeamActivityStore_Postgres(t *testing.T) {
 		}
 		for _, row := range got.BySource {
 			switch row.Source {
-			case "github", "jira":
+			case "github", "jira", "linear":
 				if row.Events == nil {
 					t.Errorf("%s events undefined, want a defined zero", row.Source)
 				}
@@ -147,6 +196,43 @@ func TestTeamActivityStore_Postgres(t *testing.T) {
 			}
 		}
 	})
+}
+
+// newPgTeamActivitySeeder is the factory seeder plus TrackedEntity, which
+// registers each new unit in the org's first team's tracked set.
+func newPgTeamActivitySeeder(h *pgtest.Harness, orgID, userID, promptID string) dbtest.FactorySeeder {
+	seed := newPgFactorySeeder(h.AdminDB, orgID, userID, promptID)
+	seed.TrackedEntity = func(t *testing.T, source string) (string, string) {
+		t.Helper()
+		teamID := firstTeamForOrg(t, h, orgID)
+		key := "K" + strings.ToUpper(uuid.New().String()[:6])
+		switch source {
+		case "github":
+			repo := strings.ToLower(key)
+			unit := pgtest.SeedTrackedRepo(t, h, orgID, teamID, "acme", repo)
+			return seedPgGitHubEntityRaw(t, h, orgID, "acme", repo, 1), unit
+		case "jira":
+			unit := seedPgJiraRule(t, h, teamID, key)
+			return seedPgJiraEntityRaw(t, h, orgID, key, 1), unit
+		case "linear":
+			unit := "lt-" + strings.ToLower(key)
+			pgtest.MustExec(t, h.AdminDB, `
+				INSERT INTO org_settings (org_id, linear_workspace_id) VALUES ($1, 'ws-test')
+				ON CONFLICT (org_id) DO UPDATE SET linear_workspace_id = EXCLUDED.linear_workspace_id`, orgID)
+			pgtest.MustExec(t, h.AdminDB, `
+				INSERT INTO linear_team_rules (team_id, linear_workspace_id, linear_team_id, linear_team_key, linear_team_name)
+				VALUES ($1, 'ws-test', $2, $3, $3)`, teamID, unit, key)
+			id := uuid.New().String()
+			pgtest.MustExec(t, h.AdminDB, `
+				INSERT INTO entities (id, org_id, source, source_id, external_id, kind, title, url, snapshot_json, created_at, scope, linear_team_id)
+				VALUES ($1, $2, 'linear', $3, $4, 'issue', $3, '', '{}'::jsonb, $5, 'ws-test', $6)`,
+				id, orgID, key+"-1", "uuid-"+id, time.Now().UTC(), unit)
+			return id, unit
+		}
+		t.Fatalf("TrackedEntity: no tracked set for source %q", source)
+		return "", ""
+	}
+	return seed
 }
 
 // seedPgUntrackedEntity inserts an active GitHub PR entity whose repo is in

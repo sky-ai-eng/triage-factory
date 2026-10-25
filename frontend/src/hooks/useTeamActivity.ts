@@ -27,11 +27,25 @@ export type ActivitySourceRow = {
   runs: number
   last_poll_at: string | null
 }
+/** One unit of the team's tracked set and its flow over the window. unit_id
+ * is the id the unit's source page keys its row on — a repository's registry
+ * id, a Jira project's registry row id, a Linear team's id. A quiet unit
+ * answers zeros; a unit the team does not track has no row at all.
+ * last_event_at is not windowed: null only for a unit that never sent one. */
+export type ActivityTrackedRow = {
+  source: string
+  unit_id: string
+  events: number
+  tasks: number
+  runs: number
+  last_event_at: string | null
+}
 export type TeamActivity = {
   team_id: string
   by_day: ActivityDay[]
   by_day_source: ActivityDaySource[]
   by_source: ActivitySourceRow[]
+  by_tracked: ActivityTrackedRow[]
 }
 
 /** The window's opening day, `days` back, in the node's own date grammar
@@ -71,6 +85,18 @@ export function useTeamActivity(teamId: string, days: number): TeamActivity | nu
 /** One source's totals row, or null while the node hasn't answered. */
 export function activitySource(a: TeamActivity | null, source: string): ActivitySourceRow | null {
   return a?.by_source.find((r) => r.source === source) ?? null
+}
+
+/** One source's tracked-set rows, by unit id. Empty while the node hasn't
+ * answered, so every lookup misses and every row keeps its dash; once it has,
+ * a miss means the team does not track that unit. */
+export function activityTracked(
+  a: TeamActivity | null,
+  source: string,
+): Map<string, ActivityTrackedRow> {
+  return new Map(
+    (a?.by_tracked ?? []).filter((r) => r.source === source).map((r) => [r.unit_id, r]),
+  )
 }
 
 /**

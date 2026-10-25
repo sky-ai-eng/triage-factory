@@ -51,6 +51,36 @@ const teamActivityTaskTeamPredicate = ` AND (
 			AND EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tt.team_id = $4))
 	)`
 
+// pgTeamActivityUnitKey is an entities row's (alias e) unit in its source's
+// tracked set: the column that source's tracking rows reference — the
+// repository's registry row, the Jira project's registry row, the Linear
+// team's UUID. Empty for a source with no tracked set, which names no unit.
+const pgTeamActivityUnitKey = `COALESCE(CASE e.source
+		WHEN 'github' THEN e.repository_id::text
+		WHEN 'jira' THEN e.jira_project_id::text
+		WHEN 'linear' THEN e.linear_team_id
+	END, '')`
+
+// pgTeamActivityTrackedSet lists the subject team's tracked set, bound at $1
+// (org) and $2 (team) — one arm per arm of factoryEntityTrackedForTeams, with
+// the same filters, so a unit listed here is exactly a unit whose entities
+// that predicate admits. A unit the team tracks on a retired repository is
+// still listed: the team still tracks it, and its page still shows the row.
+const pgTeamActivityTrackedSet = `
+	SELECT 'github', g.repository_id::text
+	FROM team_github_repos g
+	WHERE g.org_id = $1 AND g.team_id = $2
+	UNION ALL
+	SELECT 'jira', jr.jira_project_id::text
+	FROM jira_project_status_rules jr
+	WHERE jr.org_id = $1 AND jr.team_id = $2
+	UNION ALL
+	SELECT 'linear', lr.linear_team_id
+	FROM linear_team_rules lr
+	JOIN teams tm ON tm.id = lr.team_id
+	WHERE tm.org_id = $1 AND lr.team_id = $2
+	  AND lr.linear_workspace_id = (SELECT os.linear_workspace_id FROM org_settings os WHERE os.org_id = $1)`
+
 func (s *teamActivityStore) TeamActivity(ctx context.Context, orgID, teamID string, since, until time.Time) (domain.TeamActivity, error) {
 	sinceArg, untilArg := since.UTC(), until.UTC()
 
@@ -137,12 +167,97 @@ func (s *teamActivityStore) TeamActivity(ctx context.Context, orgID, teamID stri
 		return domain.TeamActivity{}, err
 	}
 
+	trackedRows, err := s.q.QueryContext(ctx, pgTeamActivityTrackedSet, orgID, teamID)
+	if err != nil {
+		return domain.TeamActivity{}, err
+	}
+	defer trackedRows.Close()
+	tracked, err := db.ScanTeamActivityUnits(trackedRows)
+	if err != nil {
+		return domain.TeamActivity{}, err
+	}
+
+	// The tracked-set cut's events ride the events cut's predicate and
+	// window, so a source's units sum to its by-source events.
+	unitEvents, err := s.unitCounts(ctx, `
+		SELECT e.source, `+pgTeamActivityUnitKey+`, COUNT(*)
+		FROM events ev
+		JOIN entities e ON e.id = ev.entity_id AND e.org_id = ev.org_id
+		WHERE ev.org_id = $1 AND ev.created_at >= $2 AND ev.created_at < $3
+		  AND `+factoryEntityTrackedForTeams("$4")+`
+		GROUP BY 1, 2`, orgID, sinceArg, untilArg, teamID)
+	if err != nil {
+		return domain.TeamActivity{}, err
+	}
+	// A unit's latest event has no lower bound — it is wanted however long
+	// before the window it was — so it is read per tracked entity, one probe
+	// of idx_events_org_entity_created each, rather than by scanning the
+	// tracked set's whole event history.
+	lastRows, err := s.q.QueryContext(ctx, `
+		SELECT e.source, `+pgTeamActivityUnitKey+`, MAX(last.created_at)
+		FROM entities e
+		CROSS JOIN LATERAL (
+			SELECT ev.created_at FROM events ev
+			WHERE ev.org_id = e.org_id AND ev.entity_id = e.id AND ev.created_at < $2
+			ORDER BY ev.created_at DESC
+			LIMIT 1
+		) last
+		WHERE e.org_id = $1
+		  AND `+factoryEntityTrackedForTeams("$3")+`
+		GROUP BY 1, 2`, orgID, untilArg, teamID)
+	if err != nil {
+		return domain.TeamActivity{}, err
+	}
+	defer lastRows.Close()
+	lastEvent := map[db.TeamActivityUnit]time.Time{}
+	for lastRows.Next() {
+		var u db.TeamActivityUnit
+		var at time.Time
+		if err := lastRows.Scan(&u.Source, &u.UnitID, &at); err != nil {
+			return domain.TeamActivity{}, err
+		}
+		lastEvent[u] = at.UTC()
+	}
+	if err := lastRows.Err(); err != nil {
+		return domain.TeamActivity{}, err
+	}
+
+	// Tasks and runs per unit take the tasks and runs cuts' team predicate
+	// and no tracked-set gate: a task the team keeps on a unit it stopped
+	// tracking still counts in by_source, and has no row here to land on —
+	// the builder drops it.
+	unitTasks, err := s.unitCounts(ctx, `
+		SELECT e.source, `+pgTeamActivityUnitKey+`, COUNT(*)
+		FROM tasks t
+		JOIN entities e ON e.id = t.entity_id AND e.org_id = t.org_id
+		WHERE t.org_id = $1 AND t.created_at >= $2 AND t.created_at < $3`+teamActivityTaskTeamPredicate+`
+		GROUP BY 1, 2`, orgID, sinceArg, untilArg, teamID)
+	if err != nil {
+		return domain.TeamActivity{}, err
+	}
+	unitRuns, err := s.unitCounts(ctx, `
+		SELECT e.source, `+pgTeamActivityUnitKey+`, COUNT(*)
+		FROM conversations r
+		JOIN tasks t ON t.id = r.task_id AND t.org_id = r.org_id
+		JOIN entities e ON e.id = t.entity_id AND e.org_id = t.org_id
+		WHERE r.org_id = $1 AND r.type = 'delegation'
+		  AND r.started_at >= $2 AND r.started_at < $3`+teamActivityTaskTeamPredicate+`
+		GROUP BY 1, 2`, orgID, sinceArg, untilArg, teamID)
+	if err != nil {
+		return domain.TeamActivity{}, err
+	}
+
 	return db.BuildTeamActivity(db.TeamActivityCuts{
 		Events:           events,
 		Tasks:            tasks,
 		Runs:             runs,
 		Merged:           merged,
 		Failed:           failed,
+		Tracked:          tracked,
+		UnitEvents:       unitEvents,
+		UnitTasks:        unitTasks,
+		UnitRuns:         unitRuns,
+		LastEvent:        lastEvent,
 		EventsDefinedFor: teamActivityEventSources,
 	}), nil
 }
@@ -163,4 +278,13 @@ func (s *teamActivityStore) dayCounts(ctx context.Context, query string, args ..
 	}
 	defer rows.Close()
 	return db.ScanTeamActivityDayCounts(rows)
+}
+
+func (s *teamActivityStore) unitCounts(ctx context.Context, query string, args ...any) ([]db.TeamActivityUnitCount, error) {
+	rows, err := s.q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return db.ScanTeamActivityUnitCounts(rows)
 }

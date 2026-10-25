@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Table from '../../ui/table/Table'
 import type { TableColumn, TableRow } from '../../ui/table/Table'
-import { ago } from '../../ui/table/cells'
+import { ago, minutesSince } from '../../ui/table/cells'
 import { Odometer } from '../../ui/odometer/Odometer'
 import SourceChart from '../../ui/sourcechart/SourceChart'
 import { SourceFrame, FigureRow, FilterField } from './SourceFrame'
@@ -82,14 +82,6 @@ function star(row: TableRow) {
       </svg>
     </span>
   )
-}
-
-/** Minutes since an ISO timestamp, or null when there has never been one. */
-function minutesSince(at: string | undefined): number | null {
-  if (!at) return null
-  const t = Date.parse(at)
-  if (Number.isNaN(t)) return null
-  return Math.max(0, (Date.now() - t) / 60000)
 }
 
 export default function SlackSource({ teamId, teamName, isAdmin, onBack }: SourceBodyProps) {

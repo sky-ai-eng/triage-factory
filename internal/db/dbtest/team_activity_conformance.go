@@ -17,16 +17,19 @@ import (
 type TeamActivityStoreFactory func(t *testing.T) (store db.TeamActivityStore, orgID, teamID string, seed FactorySeeder)
 
 // RunTeamActivityConformance covers the read contract every
-// TeamActivityStore impl must hold: the window clips, the three cuts agree
-// on totals, the by-source cut carries a row per external catalog source
-// regardless of traffic, and system events (NULL entity) never count.
+// TeamActivityStore impl must hold: the window clips, the cuts agree on
+// totals, the by-source cut carries a row per external catalog source
+// regardless of traffic, the tracked-set cut carries a row per tracked unit
+// and no other, and system events (NULL entity) never count.
 //
 // What it deliberately does NOT pin: whether a source's event count is
 // defined (github and jira are defined everywhere; slack diverges by design
 // — defined at N=1 where the team is the org, undefined under the
 // tracked-set rule), nor the scoping of the merged and failed cuts, which
-// only multi-mode has a second team to scope against. Each backend's test
-// file asserts its own side of both.
+// only multi-mode has a second team to scope against, nor what the
+// by-source cut counts for a unit outside the tracked set, which the two
+// dialects scope differently. Each backend's test file asserts its own side
+// of all three.
 func RunTeamActivityConformance(t *testing.T, mk TeamActivityStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -123,6 +126,96 @@ func RunTeamActivityConformance(t *testing.T, mk TeamActivityStoreFactory) {
 		}
 	})
 
+	t.Run("by_tracked_is_the_tracked_set", func(t *testing.T) {
+		s, orgID, teamID, seed := mk(t)
+		// Millisecond precision, as in window_is_half_open, so a latest
+		// event read back from either dialect compares exactly.
+		now := time.Now().UTC().Truncate(time.Millisecond)
+		since, until := now.Add(-72*time.Hour), now.Add(time.Minute)
+
+		pr, repo := seed.TrackedEntity(t, "github")
+		issue, project := seed.TrackedEntity(t, "jira")
+		linear, linearTeam := seed.TrackedEntity(t, "linear")
+		// Tracked, and has never sent an event.
+		_, quietRepo := seed.TrackedEntity(t, "github")
+
+		prLast := now.Add(-2 * time.Hour)
+		prEvent := seed.Event(t, pr, domain.EventGitHubPRCICheckFailed, "", prLast, time.Time{})
+		seed.Event(t, pr, domain.EventGitHubPRNewCommits, "", now.Add(-26*time.Hour), time.Time{})
+		seed.Event(t, pr, domain.EventGitHubPROpened, "", now.Add(-80*time.Hour), time.Time{})
+		issueLast := now.Add(-3 * time.Hour)
+		issueEvent := seed.Event(t, issue, domain.EventJiraIssueAssigned, "", issueLast, time.Time{})
+		// The Linear team's only event is before the window: a row of zeros
+		// that still says when the unit was last heard from.
+		linearLast := now.Add(-100 * time.Hour)
+		seed.Event(t, linear, domain.EventLinearIssueAssigned, "", linearLast, time.Time{})
+
+		prTask := seed.Task(t, pr, domain.EventGitHubPRCICheckFailed, "", prEvent, "queued", now.Add(-90*time.Minute))
+		seed.Conversation(t, prTask, "running")
+		seed.Conversation(t, prTask, domain.StatusFailed)
+		issueTask := seed.Task(t, issue, domain.EventJiraIssueAssigned, "", issueEvent, "queued", now.Add(-2*time.Hour))
+		seed.Conversation(t, issueTask, domain.StatusFailed)
+
+		got, err := s.TeamActivity(ctx, orgID, teamID, since, until)
+		if err != nil {
+			t.Fatalf("TeamActivity: %v", err)
+		}
+
+		type unit struct{ source, id string }
+		type want struct {
+			events, tasks, runs int
+			last                *time.Time
+		}
+		wants := map[unit]want{
+			{"github", repo}:       {2, 1, 2, &prLast},
+			{"github", quietRepo}:  {0, 0, 0, nil},
+			{"jira", project}:      {1, 1, 1, &issueLast},
+			{"linear", linearTeam}: {0, 0, 0, &linearLast},
+		}
+		if len(got.ByTracked) != len(wants) {
+			t.Errorf("by_tracked = %+v, want exactly the %d tracked units", got.ByTracked, len(wants))
+		}
+		type sums struct{ events, tasks, runs int }
+		bySource := map[string]sums{}
+		for _, row := range got.ByTracked {
+			w, ok := wants[unit{row.Source, row.UnitID}]
+			if !ok {
+				t.Errorf("by_tracked carries %s %q, which is no tracked unit", row.Source, row.UnitID)
+				continue
+			}
+			if row.Events != w.events || row.Tasks != w.tasks || row.Runs != w.runs {
+				t.Errorf("%s %q = %d events / %d tasks / %d runs, want %d / %d / %d",
+					row.Source, row.UnitID, row.Events, row.Tasks, row.Runs, w.events, w.tasks, w.runs)
+			}
+			switch {
+			case w.last == nil && row.LastEventAt != nil:
+				t.Errorf("%s %q last_event_at = %v, want nil — it has never sent an event", row.Source, row.UnitID, *row.LastEventAt)
+			case w.last != nil && (row.LastEventAt == nil || !row.LastEventAt.Equal(*w.last)):
+				t.Errorf("%s %q last_event_at = %v, want %v", row.Source, row.UnitID, row.LastEventAt, *w.last)
+			}
+			sum := bySource[row.Source]
+			sum.events += row.Events
+			sum.tasks += row.Tasks
+			sum.runs += row.Runs
+			bySource[row.Source] = sum
+		}
+
+		// Every unit here is tracked, so each source's rows add up to its
+		// by-source figures exactly.
+		for _, src := range got.BySource {
+			sum := bySource[src.Source]
+			if src.Source == "slack" {
+				if sum != (sums{}) {
+					t.Errorf("by_tracked carries slack rows; slack has no tracked set")
+				}
+				continue
+			}
+			if src.Events == nil || *src.Events != sum.events || src.Tasks != sum.tasks || src.Runs != sum.runs {
+				t.Errorf("%s by_source = %+v, disagrees with its by_tracked rows' sum %+v", src.Source, src, sum)
+			}
+		}
+	})
+
 	t.Run("a_failed_run_alone_still_makes_a_day", func(t *testing.T) {
 		s, orgID, teamID, seed := mk(t)
 		now := time.Now().UTC()
@@ -201,6 +294,11 @@ func RunTeamActivityConformance(t *testing.T, mk TeamActivityStoreFactory) {
 		}
 		if len(got.BySource) < 3 {
 			t.Errorf("by_source = %+v, want the full external-source row set even with no traffic", got.BySource)
+		}
+		for _, row := range got.ByTracked {
+			if row.Events != 0 || row.Tasks != 0 || row.Runs != 0 {
+				t.Errorf("by_tracked row %+v in a quiet window, want zeros", row)
+			}
 		}
 	})
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { SourceFrame } from './SourceFrame'
 import type { SourceBodyProps } from './SourceFrame'
 import LinearTeamRulesGroup from '../settings/LinearTeamRulesGroup'
@@ -12,7 +12,12 @@ import {
 } from '../settings/teamConfig'
 import type { LinearTeamConfig } from '../settings/teamConfig'
 import { useActiveOrgId } from '../../contexts/OrgContext'
-import { useTeamActivity, activitySource, sinceLabel } from '../../hooks/useTeamActivity'
+import {
+  useTeamActivity,
+  activitySource,
+  activityTracked,
+  sinceLabel,
+} from '../../hooks/useTeamActivity'
 import { useEventSources } from '../../hooks/useEventSources'
 import { sourceUnavailableReason } from '../../lib/eventSources'
 import { toast } from '../../components/Toast/toastStore'
@@ -51,7 +56,13 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
   const setDraft = (teams: LinearTeamConfig[]) => setEdited({ teamId, teams })
   const error = failedFor === teamId ? 'Could not read this team’s Linear configuration.' : ''
 
-  const flow = activitySource(useTeamActivity(teamId, 7), 'linear')
+  // The frame's figures and each watched team's events, from one answer at
+  // the seven-day window. The cut keys a Linear team by its id, which is the
+  // id the editor holds, so a draft team not saved yet simply misses.
+  const activity = useTeamActivity(teamId, 7)
+  const flow = activitySource(activity, 'linear')
+  const perTeam = useMemo(() => activityTracked(activity, 'linear'), [activity])
+  const eventsOf = useCallback((id: string) => perTeam.get(id)?.events ?? null, [perTeam])
 
   // Why Linear cannot reach this org right now, or null. A paused source keeps
   // its credential, so its catalog still reads and its mapping stays editable.
@@ -146,6 +157,7 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
                 connected={connected}
                 readOnly={!isAdmin}
                 bare
+                eventsOf={eventsOf}
               />
               {isAdmin && (
                 <div className="mt-4 flex items-center justify-end gap-2">

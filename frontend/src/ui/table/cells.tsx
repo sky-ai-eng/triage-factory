@@ -31,6 +31,14 @@ export function ago(min: number): string {
   return Math.round(min / (60 * 24 * 7)) + 'w'
 }
 
+/** Minutes since an ISO timestamp, for `ago`; null when there is none to read. */
+export function minutesSince(at: string | null | undefined): number | null {
+  if (!at) return null
+  const t = Date.parse(at)
+  if (Number.isNaN(t)) return null
+  return Math.max(0, (Date.now() - t) / 60000)
+}
+
 /** A spark bar: a fraction the cell scales, or one the caller has sized itself. */
 export type SparkBar = number | { h: string; bg?: string }
 
