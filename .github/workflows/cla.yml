@@ -15,7 +15,7 @@ permissions:
 # failure-report step below must agree on it. GitHub App committers
 # appear under their "<app-slug>[bot]" login, so the suffix is required.
 env:
-  CLA_ALLOWLIST: "AidanAllchin,sky-ai-bot,triage-factory[bot],triage-factory-sky-ai[bot],dependabot[bot],github-actions[bot],claude[bot],claude"
+  CLA_ALLOWLIST: "AidanAllchin,sky-ai-bot,TriageFactory,triage-factory[bot],triage-factory-sky-ai[bot],dependabot[bot],github-actions[bot],claude[bot],claude"
 
 jobs:
   cla:
