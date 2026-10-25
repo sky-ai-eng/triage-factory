@@ -43,8 +43,8 @@ Goals:
    signer and signed.
 3. A workspace on the deployment App uses the deployment's signer unless it
    registers its own.
-4. The private key never enters a jail. The deployment signer's private key
-   never leaves the control plane.
+4. No private key enters a jail. In multi mode no private key leaves the
+   control plane.
 5. When signatures would not verify, TF stops signing and says why, rather
    than producing commits GitHub marks Unverified.
 
@@ -115,21 +115,30 @@ What follows from it:
 5. **One signer per org.** The commit identity resolves, in order, to the
    org's signer, then the deployment signer (managed workspaces only), then
    today's identity (the App bot or the PAT owner).
-6. **A per-org key travels sealed in the run's bundle, and the sidecar
-   signs.** A compromised sidecar exposes that org's own signing identity, no
-   more than the tokens it already holds.
-7. **The deployment signer signs on the control plane, from a digest.** Its
-   key is on the control pods only, like the deployment App's key. Any control
-   pod answers a signing request; it is not gated on the background-brain
-   lease. The control plane receives the SHA-512 digest that an SSH signature
-   covers and never the commit, so no agent-written bytes are parsed in the
-   most privileged process.
+6. **In multi mode every signature is made on the control plane.** A per-org
+   key stays in the secret store and the deployment key in control-pod config;
+   no signing key is sealed into a bundle or reaches an executor. A signing
+   key does not expire: it works until someone removes it from the account,
+   and it verifies in any repository on GitHub, not only the org's. An App
+   org's bundle otherwise holds only installation tokens, which expire within
+   an hour, so a key in it would turn a compromised sidecar's one-hour
+   exposure into an indefinite one. Instead, a compromised sidecar can only
+   request signatures while its claim is active, within the budget, and each
+   one is logged. Local mode has no control plane; its daemon signs in the TF
+   process.
+7. **The control plane signs a digest, and any control pod answers.** It
+   receives the SHA-512 digest that an SSH signature covers and never the
+   commit, so no agent-written bytes are parsed in the most privileged
+   process. A signing request is not gated on the background-brain lease.
 8. **The signer checks the committer only.** The daemon refuses to sign a
    commit whose committer is not the signer. The author is free, because a
    rebase or cherry-pick re-signs commits that keep their original author.
-9. **When signatures would not verify, the next seal stops signing.** The
-   reason GitHub gave is shown on the signer. A run already in flight keeps the
-   configuration it started with.
+9. **When signatures would not verify, signing stops at the next
+   signature.** The reason GitHub gave is shown on the signer. Every signature
+   checks the signer's status, in both modes. A run that starts while the
+   signer is not `active` is configured not to sign. A run that started while
+   it was `active` gets a refusal telling the agent to rerun the command with
+   `git -c commit.gpgsign=false`, so it commits unsigned instead of stopping.
 10. **Commits only.** A tag (or anything else) is refused.
 
 ## 4. Architecture
@@ -143,10 +152,9 @@ git commit
             └─ agenthost daemon: SignCommit(payload)  (sidecar in multi,
                  │                                     TF process in local)
                  ├─ check: commit object, committer == signer
-                 ├─ org signer ──────── sign with the key from the bundle
-                 │                       (multi) or the secret store (local)
-                 └─ deployment signer ─ relay the digest to the executor,
-                                         which queues it for the control plane
+                 ├─ local ─ sign with the key from the secret store
+                 └─ multi ─ relay the digest to the executor, which queues
+                            it for the control plane (§4.5)
 ```
 
 ### 4.2 In the run: git config and the shim
@@ -186,6 +194,11 @@ one line to stderr and exits 1; git then aborts the commit with
 
 - `triagefactory: this run signs commits only as <signer>; this commit's committer is <x>`
 - `triagefactory: commit signing is unavailable right now; retry the commit`
+- `triagefactory: commit signing is off for this org (<reason>); run the command again with git -c commit.gpgsign=false`
+
+The last one answers a signer that is no longer `active` and a claim that has
+spent its signing budget. A signer over its per-minute budget, or no answer
+within 30 s, gets "unavailable".
 
 The verb is not documented to the agent; git is its only intended caller.
 
@@ -201,11 +214,11 @@ sandbox on, and in-process with it off:
 2. Require the `committer` header's name and email to equal the run's signer
    identity. The timestamp is free.
 3. Compute `SHA-512(payload)`.
-4. Sign (§4.4) or relay the digest (§4.5).
+4. Sign in the TF process (local, §4.4) or relay the digest (multi, §4.5).
 5. Compute the resulting commit id the way git does: the armored signature
    becomes a `gpgsig` header at the end of the header block, and the id is the
    SHA-1 of `commit <size>\0<object>`.
-6. Record the signature (§5.3).
+6. Record the commit id on the signature's row (§5.3).
 
 The SSH signature format (`SSHSIG`, armored as `BEGIN SSH SIGNATURE`) is not
 in `x/crypto`. TF implements it: the signed data is the `SSHSIG` magic, the
@@ -213,33 +226,38 @@ namespace (`git`), an empty reserved field, the hash algorithm (`sha512`) and
 the digest. Its test signs with TF's implementation and verifies with
 `ssh-keygen -Y verify`.
 
-### 4.4 Per-org signing
+### 4.4 Where the keys are
 
-- **Local mode.** The private key is in the secret store (the OS keychain, or
-  the encrypted file backend). The daemon reads it per signature.
-- **Multi mode.** `credprovision.ProvisionForConversation` seals the signer
+- **Local mode.** A per-org key is in the secret store (the OS keychain, or
+  the encrypted file backend). The daemon reads it, and the signer's status,
+  for every signature. There is no deployment signer.
+- **Multi mode.** A per-org key is in the secret store, which only control
+  pods open (executors run `pgstore.NewWithoutSecrets`). The deployment key is
+  operator config on the control pods, in the same class as the deployment
+  App:
+  - `TF_GITHUB_COMMIT_SIGNER_LOGIN`
+  - `TF_GITHUB_COMMIT_SIGNER_KEY` (secret, honours `_FILE`)
+
+  `docker-compose.yml` forwards both to the control service only.
+  `credprovision.ProvisionForConversation` seals the signer's public half
   into `credbundle.GitHubCreds` (§5.5) when the signer is `active`. The
-  sidecar signs with it. The executor never sees the key.
+  signer's name, email and public key are all an executor gets.
 
-### 4.5 Deployment signing (multi only)
+Each signature reads the signer's current key, so a run that started before a
+rotation signs with the new key once `verify` promotes it. Git does not
+compare the signature's key with `user.signingkey`; a Phase 1 test commits
+across a rotation to hold that.
 
-The deployment signer is operator config on the control pods, in the same
-class as the deployment App:
+### 4.5 Signing on the control plane (multi only)
 
-- `TF_GITHUB_COMMIT_SIGNER_LOGIN`
-- `TF_GITHUB_COMMIT_SIGNER_KEY` (secret, honours `_FILE`)
-
-`docker-compose.yml` forwards both to the control service only. Executors get
-the signer's name, email and public key through the bundle, never the private
-key.
-
-One signature:
+One signature, the same for an org signer and the deployment signer:
 
 1. The sidecar's daemon passes its check (§4.3) and makes a relay call,
-   `sign_digest {digest}`, to the orchestrator.
+   `sign_digest {digest, signer, signer_user_id}`, to the orchestrator. The
+   signer kind and account id are the ones the run was sealed with.
 2. The orchestrator inserts a `commit_signatures` row in state `requested`
-   (§5.3), naming the conversation and the claim, and publishes `sign_request`
-   on `tf_ctl`.
+   (§5.3), naming the conversation, the claim and that signer, and publishes
+   `sign_request` on `tf_ctl`.
 3. Every control pod handles `sign_request`. It is not gated on the
    background-brain lease, unlike `cred_request` (`internal/app/relay.go`).
    Each pod also sweeps for `requested` rows once a second, because `tf_ctl`
@@ -247,11 +265,15 @@ One signature:
 4. A pod claims the row (`requested` → `signing`, conditional update with
    `RETURNING`). It checks that:
    - the claim is still active, at the boot epoch the row names;
-   - the org still resolves to the deployment signer;
-   - the claim is within its signing budget (§10.4).
+   - the org still resolves (§4.6) to the signer the row names, the same kind
+     and account, and that signer is `active`;
+   - the claim and the signer are within their signing budgets (§10.4).
 
-   It then signs the digest and stores the signature (`signed`), or the
-   refusal (`refused`, with the reason). Finally it publishes `sign_done`.
+   A sidecar that names a different signer gains nothing: the check passes
+   only for the signer the org resolves to now. The pod then reads that
+   signer's key (the org's from the secret store, the deployment's from its
+   config), signs the digest and stores the signature (`signed`), or stores
+   the refusal (`refused`, with the reason). Finally it publishes `sign_done`.
 5. The orchestrator wakes on `sign_done` (polling the row every 250 ms as a
    backstop) and returns the signature to the sidecar.
 6. After 30 s with no answer the call fails, and the shim reports
@@ -259,14 +281,16 @@ One signature:
 
 The latency is a notify, a sign and a row read: milliseconds normally, and up
 to the backstop intervals when a notify is dropped. A rebase re-signs every
-commit it rewrites, so it pays that latency once per commit.
+commit it rewrites, so it pays that latency once per commit. With every
+control pod down, a signed commit fails with "unavailable" until one is back.
 
 ### 4.6 Resolving the identity
 
 One function resolves a run's commit identity and its signing mode
 (`none` | `org` | `deployment`) from the org signer row, the org's credential
 class and the deployment signer's status. `credprovision` calls it in multi
-mode and the spawner's `resolveCommitIdentity` in local mode. The co-author
+mode and the spawner's `resolveCommitIdentity` in local mode. Every signature
+calls it again: the daemon locally, the control pod in multi mode. The co-author
 trailer on manual runs compares the delegating person against the signer's
 account id, as it compares against the bot's today.
 
@@ -303,8 +327,8 @@ and the keychain list in `scripts/clean-slate.sh`.
 
 ### 5.3 `commit_signatures` (both dialects)
 
-One row per signature: the request queue for deployment signing and the
-signing log for both kinds.
+One row per signature: in multi mode the queue the control pods sign from,
+and in both modes the signing log.
 
 | column | |
 | --- | --- |
@@ -320,10 +344,11 @@ signing log for both kinds.
 | `verification_reason`, `checked_at` | GitHub's answer for a pushed commit (§7) |
 | `created_at` | |
 
-An org signature is inserted as `signed`. Locally the daemon inserts it; in
-multi mode it reaches the orchestrator as a relay record, like `record_push`.
-`tf_system` (the executor) gets `INSERT`, `SELECT`, and
-`UPDATE (commit_sha, repository_id, pushed_at)`. Org members get `SELECT`.
+Locally the daemon inserts the row as `signed`. In multi mode the
+orchestrator inserts it as `requested` (§4.5), and the daemon's commit id
+reaches it as a relay record, like `record_push`. `tf_system` (the executor)
+gets `INSERT`, `SELECT`, and `UPDATE (commit_sha, repository_id, pushed_at)`.
+Org members get `SELECT`.
 
 ### 5.4 `deployment_commit_signer` (Postgres only)
 
@@ -339,14 +364,14 @@ before signing and the fleet console shows it.
 Signer *SignerCreds `json:"signer,omitempty"`
 
 type SignerCreds struct {
-	Mode       string `json:"mode"`                  // "org" | "deployment"
-	PublicKey  string `json:"public_key"`
-	PrivateKey string `json:"private_key,omitempty"` // org only
+	Mode      string `json:"mode"` // "org" | "deployment"
+	PublicKey string `json:"public_key"`
 }
 ```
 
 The signer's name, email and account id travel in the identity fields
-TFAC-1187 added. `Signer` is nil when the run does not sign.
+TFAC-1187 added. `Signer` is nil when the run does not sign. The bundle never
+carries a private signing key (§3.6).
 
 ## 6. API
 
@@ -375,7 +400,8 @@ Under `/api/orgs/{org_id}/github/`, beside the App and PAT routes:
 ## 7. Health
 
 A signer is `pending` until its key is found, `active` while signing, and
-`broken` when a check fails. Only `active` signers are sealed into bundles.
+`broken` when a check fails. Only an `active` signer is sealed into a bundle
+or signs.
 
 1. **Verify** (§6): the admin's action, and the only way out of `broken`
    apart from the case below.
@@ -394,9 +420,9 @@ The UI explains the common reasons: `unknown_key` (the key is not on the
 account), `no_user` (the email belongs to no account), `unverified_email`
 (verify the email on the account). Any other reason is shown verbatim.
 
-A broken deployment signer stops signing for every managed workspace at its
-next seal. Operators see it in the fleet console and in a WARN on each control
-pod.
+A broken deployment signer stops signing for every managed workspace at the
+next signature. Operators see it in the fleet console and in a WARN on each
+control pod.
 
 ## 8. UI
 
@@ -423,22 +449,25 @@ secrets; the API; the settings section. Local mode needs git ≥ 2.34: below
 that the run commits as the signer, unsigned, and `GET commit-identity` says
 why. (L)
 
-**Phase 2 — Multi, per-org.** Sealing the signer into the bundle, signing in
-the sidecar, and relaying the signature record. The jail's git is Alpine
-3.21's (`internal/sandbox/rootfs.go`), well past 2.34. (M)
+**Phase 2 — Multi, per-org.** Sealing the signer's public half into the
+bundle; the `sign_digest` relay call, the request flow and doorbells, and the
+budget; signing on the control plane from the secret store; relaying the
+commit id. The jail's git is Alpine 3.21's (`internal/sandbox/rootfs.go`),
+well past 2.34. (L)
 
 **Phase 3 — The deployment signer.** The control-pod config, the
-`sign_digest` relay call, the request flow and doorbells, the budget, the
-managed-workspace default, and the fleet console status. Add the signer's
-login to this repository's CLA allowlist before enabling it. (L)
+`deployment_commit_signer` table, the managed-workspace default, and the
+fleet console status. Add the signer's login to this repository's CLA
+allowlist before enabling it. (M)
 
 **Phase 4 — Health.** The periodic and post-push checks, and the status and
 reasons in the UI. (M)
 
 *Exit criteria:* in both modes, an org with an active signer pushes commits
 GitHub marks Verified as that account; a managed workspace does the same with
-the deployment signer while no executor ever holds its key; a signer whose
-key is removed is `broken` within one check, and the next seal stops signing.
+the deployment signer; no executor ever holds a signing key; a signer whose
+key is removed is `broken` within one check, and signing stops at the next
+signature.
 
 ## 10. Open questions
 
@@ -451,10 +480,12 @@ key is removed is `broken` within one check, and the next seal stops signing.
 3. **Login renames.** The derived address contains the login. The periodic
    check re-derives it, but whether GitHub keeps verifying the old address
    after a rename is untested. If it does not, a rename makes commits from
-   runs sealed before the check fail with `no_user` until they finish.
-4. **The deployment signing budget.** Initial values: 600 signatures per
-   minute and 5,000 per claim. A rebase of a long branch is the case to size
-   for.
+   runs started before the check fail with `no_user` until they finish.
+4. **The signing budget.** Initial values: 600 signatures per minute per
+   signer and 5,000 per claim. A rebase of a long branch is the case to size
+   for. Every managed workspace shares the deployment signer's per-minute
+   limit, so one workspace's rebase can spend it for all of them; a per-org
+   share of it may be needed.
 5. **The signing log in the UI.** `commit_signatures` is readable by members.
    Showing it (per conversation, or per signer) is not part of v1.
 6. **Local verification in the jail.** With an allowed-signers file in the
@@ -469,10 +500,14 @@ key is removed is `broken` within one check, and the next seal stops signing.
    signer as committer, which also verifies (§2, case E). One identity on the
    commit, and the same shape as Claude Code's commits.
 4. **A derived noreply address** — §3.4, from spike cases A and B.
-5. **Per-org keys in the bundle; the deployment key on the control plane** —
-   §3.6 and §3.7. The deployment key would otherwise sit in every managed
-   tenant's runs, where one compromised sidecar would expose a key that signs
-   as one account across all of GitHub.
+5. **Every signing key on the control plane** — §3.6. Chosen over sealing
+   per-org keys into the bundle for the sidecar to sign with, which saves a
+   round trip per commit and keeps commits working while every control pod is
+   down, but puts a key that does not expire into a bundle otherwise made of
+   tokens that do. The deployment key could not go in a bundle in any case: it
+   would sit in every managed tenant's runs, where one compromised sidecar
+   would expose a key that signs as one account across all of GitHub. One
+   signing path in multi mode is also less code than two.
 6. **Any control pod signs** — leader failover would otherwise stall commits
    for the lease's handover window.
 7. **Digest only** — the control plane never parses agent-written bytes. The
@@ -480,7 +515,9 @@ key is removed is `broken` within one check, and the next seal stops signing.
    the log bound that.
 8. **Stop signing on failure** — chosen over continuing to sign (Unverified
    badges) and over refusing to commit (one misconfiguration stops every run's
-   commits).
+   commits). A run already going when its signer stops verifying is told to
+   rerun the command without signing, so it loses one command, not its
+   commits.
 9. **Managed workspaces default to the deployment signer** — the deployment
    App's bot already authors their commits, so the deployment signer puts no
    new account on them. An org can register its own.
