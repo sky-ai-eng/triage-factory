@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
@@ -228,5 +229,86 @@ func TestGitPushRecorder_DedupConvergesWithHook(t *testing.T) {
 	_ = json.Unmarshal([]byte(arts[0].DetailsJSON), &d)
 	if d.SHA != "bbb" {
 		t.Errorf("details sha after re-record = %q, want bbb", d.SHA)
+	}
+}
+
+// TestGitPushRecorder_RejectedRefInsideA200 is the refusal GitHub reports in
+// the body of a successful POST: the ref's report-status line is "ng". The
+// HTTP status says 200, and the recorder must still leave no artifact and a
+// branch_push_failed row carrying GitHub's reason and message.
+func TestGitPushRecorder_RejectedRefInsideA200(t *testing.T) {
+	stores, conversationID := newRecorderStores(t)
+	info := recorderInfo(conversationID)
+	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
+	ctx := context.Background()
+
+	rec(ctx, gitproxy.PushedRef{
+		Repo:          "octo/repo",
+		Ref:           "refs/heads/feature/x",
+		NewSHA:        "abc123",
+		Created:       true,
+		Status:        200,
+		Rejected:      true,
+		Reason:        "push declined due to repository rule violations",
+		RemoteMessage: "error: GH013: Repository rule violations found for refs/heads/feature/x.",
+	})
+
+	arts, err := stores.Artifacts.ListByConversation(ctx, runmode.LocalDefaultOrgID, conversationID)
+	if err != nil {
+		t.Fatalf("ListByConversation: %v", err)
+	}
+	if len(arts) != 0 {
+		t.Fatalf("got %d artifacts for a rejected ref, want 0", len(arts))
+	}
+	pushed, _, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchPushed})
+	if err != nil {
+		t.Fatalf("ListByOrgSystem (branch_pushed): %v", err)
+	}
+	if len(pushed) != 0 {
+		t.Fatalf("got %d branch_pushed actions for a rejected ref, want 0", len(pushed))
+	}
+	acts, _, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchPushFailed})
+	if err != nil {
+		t.Fatalf("ListByOrgSystem: %v", err)
+	}
+	if len(acts) != 1 {
+		t.Fatalf("got %d branch_push_failed actions, want 1", len(acts))
+	}
+	var d map[string]any
+	if err := json.Unmarshal([]byte(acts[0].DetailJSON), &d); err != nil {
+		t.Fatalf("detail_json %q: %v", acts[0].DetailJSON, err)
+	}
+	want := map[string]any{
+		"sha":            "abc123",
+		"new":            true,
+		"http_status":    float64(200),
+		"reason":         "push declined due to repository rule violations",
+		"remote_message": "error: GH013: Repository rule violations found for refs/heads/feature/x.",
+	}
+	if !reflect.DeepEqual(d, want) {
+		t.Errorf("detail = %v, want %v", d, want)
+	}
+}
+
+// TestGitPushRecorder_FailureDetailOmitsEmpty pins that a refusal with no
+// report (a bare 403) leaves reason and remote_message out of the detail
+// rather than recording them empty.
+func TestGitPushRecorder_FailureDetailOmitsEmpty(t *testing.T) {
+	stores, conversationID := newRecorderStores(t)
+	info := recorderInfo(conversationID)
+	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
+	ctx := context.Background()
+
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/feature/x", NewSHA: "abc123", Status: 403})
+
+	acts, _, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchPushFailed})
+	if err != nil {
+		t.Fatalf("ListByOrgSystem: %v", err)
+	}
+	if len(acts) != 1 {
+		t.Fatalf("got %d branch_push_failed actions, want 1", len(acts))
+	}
+	if want := `{"sha":"abc123","new":false,"http_status":403}`; acts[0].DetailJSON != want {
+		t.Errorf("detail_json = %s, want %s", acts[0].DetailJSON, want)
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 	linearclient "github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/review"
@@ -2931,25 +2932,34 @@ func (c *LocalClient) RecordGHWriteDenied(ctx context.Context, req ghwrite.Reque
 }
 
 // RecordGitPushFailed records one `branch_push_failed` external-action audit
-// row for a branch push the upstream refused (a non-2xx receive-pack response —
-// observed by the git proxy's outcome capture). The audit log records every
-// attempted external write, success or failure; the branch ARTIFACT is
-// deliberately not written here — artifacts track only work that landed, and
-// the proxy wiring only upserts one on a 2xx. Host-side only (not on the
-// Client interface): like RecordGitDenied, the observer runs on the host, never
-// in the sandbox. No natural key — the recording funnel gives each act a key of
+// row for a branch push the upstream refused (a non-2xx receive-pack response,
+// or a ref its report-status refused inside a 2xx — observed by the git
+// proxy's outcome capture). The audit log records every attempted external
+// write, success or failure; the branch ARTIFACT is deliberately not written
+// here — artifacts track only work that landed, and the proxy wiring only
+// upserts one for a ref that landed. The detail carries the report's reason
+// and the remote's message when the response had them: that is where GitHub
+// says which rule refused the push. Host-side only (not on the Client
+// interface): like RecordGitDenied, the observer runs on the host, never in
+// the sandbox. No natural key — the recording funnel gives each act a key of
 // its own (mintActionDedupKey) — so repeated failed attempts each leave their
 // own row and a later successful push of the same (run, ref, sha) can never be
-// swallowed by a prior failure. No URL
-// either — nothing landed, so a github.com branch link would dangle.
-// Best-effort: a recording failure is logged and swallowed.
-func (c *LocalClient) RecordGitPushFailed(ctx context.Context, repoPath, ref, sha string, created bool, httpStatus int) {
-	detail, _ := json.Marshal(map[string]any{"sha": sha, "new": created, "http_status": httpStatus})
+// swallowed by a prior failure. No URL either — nothing landed, so a
+// github.com branch link would dangle. Best-effort: a recording failure is
+// logged and swallowed.
+func (c *LocalClient) RecordGitPushFailed(ctx context.Context, push gitproxy.PushedRef) {
+	detail, _ := json.Marshal(struct {
+		SHA           string `json:"sha"`
+		New           bool   `json:"new"`
+		HTTPStatus    int    `json:"http_status"`
+		Reason        string `json:"reason,omitempty"`
+		RemoteMessage string `json:"remote_message,omitempty"`
+	}{push.NewSHA, push.Created, push.Status, push.Reason, push.RemoteMessage})
 	c.recordBotAction(ctx, &domain.ExternalAction{
 		Provider:   domain.ArtifactProviderGitHub,
 		Action:     domain.ActionBranchPushFailed,
-		Target:     repoPath,
-		ExternalID: ref,
+		Target:     push.Repo,
+		ExternalID: push.Ref,
 		Credential: c.githubCredential(),
 		DetailJSON: string(detail),
 	})
