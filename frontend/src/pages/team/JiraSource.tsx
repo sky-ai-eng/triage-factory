@@ -120,9 +120,9 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   const [candidates, setCandidates] = useState<JiraProjectCandidate[] | null>(null)
   const [truncated, setTruncated] = useState(false)
   // Each watched project's own status vocabulary, keyed by its Jira id and
-  // fetched when its board is first shown. Per project because statuses come
-  // from a project's workflow scheme, so two watched projects can offer
-  // different ones.
+  // fetched when its board is shown, until a read answers. Per project
+  // because statuses come from a project's workflow scheme, so two watched
+  // projects can offer different ones.
   const [statusesByJiraId, setStatusesByJiraId] = useState<Record<string, JiraStatusRef[]>>({})
   const [error, setError] = useState('')
   const [filter, setFilter] = useState('')
@@ -159,6 +159,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
           setError('Could not read this team’s Jira configuration.')
           return
         }
+        confirmed.current = { seq: 0, set: data.jira_projects ?? [] }
         setProjects(data.jira_projects ?? [])
       })
       .catch(() => {
@@ -227,8 +228,9 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
         if (live) setStatusesByJiraId((m) => ({ ...m, [shownJiraId]: list }))
       })
       .catch(() => {
-        // The board still draws what is mapped; only the tray goes empty.
-        if (live) setStatusesByJiraId((m) => ({ ...m, [shownJiraId]: [] }))
+        // Nothing is recorded, so the read is asked again the next time this
+        // board is shown. Until then the board still draws what is mapped,
+        // and only the tray is empty.
       })
     return () => {
       live = false
@@ -304,22 +306,30 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   // set AS STORED (status names re-resolved from Jira), and adopting a stale
   // answer over a newer optimistic set would undo the newer gesture.
   const commitSeq = useRef(0)
+  // The newest set the server has confirmed, and the write that confirmed it.
+  // A failure rolls back to this rather than to the set the gesture was built
+  // on: with two writes out, that set carries the first one's change, which
+  // the server may have refused as well.
+  const confirmed = useRef<{ seq: number; set: JiraProjectConfig[] }>({ seq: 0, set: [] })
 
   // The one write door for this page — the table's verbs and the board's
   // gestures alike. Optimistic, latest-wins, and honest on failure: the
   // optimistic set rolls back rather than leaving the page rendering a
   // configuration the server never accepted.
   const persist = useCallback(
-    (next: JiraProjectConfig[], prev: JiraProjectConfig[]) => {
+    (next: JiraProjectConfig[]) => {
       setProjects(next)
       const seq = ++commitSeq.current
       void saveTeamJiraProjects(teamId, next).then((res) => {
+        if (res.ok && seq > confirmed.current.seq) {
+          confirmed.current = { seq, set: res.projects }
+        }
         if (commitSeq.current !== seq) return
         if (res.ok) {
           setProjects(res.projects)
           setError('')
         } else {
-          setProjects(prev)
+          setProjects(confirmed.current.set)
           setError(res.error)
         }
       })
@@ -344,7 +354,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
                 .map(watchedProject),
             )
           : projects.filter((p) => !picked.has(jiraProjectRef(p)))
-      persist(next, projects)
+      persist(next)
     },
     [projects, catalog, persist],
   )
@@ -384,10 +394,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
         in_review: rule(next.review, true),
         done: rule(next.done, true),
       }
-      persist(
-        projects.map((p) => (jiraProjectRef(p) === shownR ? edited : p)),
-        projects,
-      )
+      persist(projects.map((p) => (jiraProjectRef(p) === shownR ? edited : p)))
     },
     [shown, shownR, shownJiraId, projects, statusesByJiraId, persist],
   )

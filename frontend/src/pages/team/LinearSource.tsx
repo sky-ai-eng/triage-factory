@@ -181,7 +181,8 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
   const [candidates, setCandidates] = useState<LinearTeamCandidate[] | null>(null)
   const [truncated, setTruncated] = useState(false)
   // Each watched team's workflow, keyed by its Linear id and read when its
-  // board is first shown; null when the read failed.
+  // board is shown until a read answers; null when Linear answered that the
+  // credential cannot see the team.
   const [statesByTeam, setStatesByTeam] = useState<Record<string, LinearStateOption[] | null>>({})
   const [error, setError] = useState('')
   const [filter, setFilter] = useState('')
@@ -229,7 +230,9 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
         setError('Could not read this team’s Linear configuration.')
         return
       }
-      setTeams((data.linear_teams ?? []).map(linearTeamFromWire))
+      const stored = (data.linear_teams ?? []).map(linearTeamFromWire)
+      confirmed.current = { seq: 0, set: stored }
+      setTeams(stored)
     })
     return () => {
       live = false
@@ -333,10 +336,15 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
       })
       .catch((e) => {
         if (!live) return
-        // The board still draws what is mapped; only the tray goes empty. A
-        // 404 is Linear saying the credential cannot see the team at all.
-        setStatesByTeam((m) => ({ ...m, [shownTeamId]: null }))
-        if (e instanceof HttpError && e.status === 404) markMissing(shownTeamId)
+        // A 404 is Linear saying the credential cannot see the team at all,
+        // which is an answer, and is kept. Any other failure records nothing,
+        // so the read is asked again the next time this board is shown; until
+        // then the board still draws what is mapped, and only the tray is
+        // empty.
+        if (e instanceof HttpError && e.status === 404) {
+          setStatesByTeam((m) => ({ ...m, [shownTeamId]: null }))
+          markMissing(shownTeamId)
+        }
       })
     return () => {
       live = false
@@ -445,22 +453,30 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
   // adopting a stale answer over a newer optimistic set would undo the newer
   // gesture.
   const commitSeq = useRef(0)
+  // The newest set the server has confirmed, and the write that confirmed it.
+  // A failure rolls back to this rather than to the set the gesture was built
+  // on: with two writes out, that set carries the first one's change, which
+  // the server may have refused as well.
+  const confirmed = useRef<{ seq: number; set: LinearTeamConfig[] }>({ seq: 0, set: [] })
 
   // The one write door for this page — the table's verbs and the board's
   // gestures alike. Optimistic, latest-wins, and honest on failure: the
   // optimistic set rolls back rather than leaving the page rendering a
   // configuration the server never accepted.
   const persist = useCallback(
-    (next: LinearTeamConfig[], prev: LinearTeamConfig[]) => {
+    (next: LinearTeamConfig[]) => {
       setTeams(next)
       const seq = ++commitSeq.current
       void saveTeamLinearTeams(teamId, next).then((res) => {
+        if (res.ok && seq > confirmed.current.seq) {
+          confirmed.current = { seq, set: res.teams }
+        }
         if (!mounted.current || commitSeq.current !== seq) return
         if (res.ok) {
           setTeams(res.teams)
           setError('')
         } else {
-          setTeams(prev)
+          setTeams(confirmed.current.set)
           setError(res.error)
         }
       })
@@ -483,7 +499,7 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
                 .map((c) => unmappedLinearTeam(c.id, c.key, c.name)),
             )
           : teams.filter((t) => !picked.has(t.id))
-      persist(next, teams)
+      persist(next)
     },
     [teams, catalog, watchedIds, persist],
   )
@@ -542,10 +558,7 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
         in_review: rule(settle(next.review, was.review)),
         done: rule(settle(next.done, was.done)),
       }
-      persist(
-        teams.map((t) => (t.id === shown.id ? edited : t)),
-        teams,
-      )
+      persist(teams.map((t) => (t.id === shown.id ? edited : t)))
     },
     [shown, teams, statesByTeam, persist],
   )

@@ -1274,4 +1274,71 @@ describe('Linear source page', () => {
       ).toBeInTheDocument(),
     )
   })
+
+  it('rolls two refused gestures back to what the server holds, not the first gesture', async () => {
+    const fetchMock = stub(BOTH)
+    const answer = fetchMock.getMockImplementation()!
+    // Both PUTs are held open until the test refuses them, in order.
+    const refusals: Array<() => void> = []
+    fetchMock.mockImplementation((input: unknown, init?: RequestInit) =>
+      String(input) === '/api/teams/t1/linear-teams'
+        ? new Promise((resolve) => {
+            refusals.push(() =>
+              resolve({
+                ok: false,
+                status: 502,
+                ...jsonBody({
+                  errors: [{ reason: 'UPSTREAM_UNAVAILABLE', message: 'could not reach Linear' }],
+                }),
+              }),
+            )
+          })
+        : answer(input, init),
+    )
+    render(<LinearSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('Duplicate')).toBeInTheDocument())
+
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Duplicate' }), { key: 'Enter' })
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Put Duplicate in DONE' }), {
+      key: 'Enter',
+    })
+    fireEvent.keyDown(screen.getByRole('button', { name: 'In Review' }), { key: 'Enter' })
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Put In Review in IN REVIEW' }), {
+      key: 'Enter',
+    })
+    await waitFor(() => expect(refusals).toHaveLength(2))
+
+    // The first refusal lands while the second write is still out, so the page
+    // keeps showing the newer gesture; the second one rolls everything back.
+    act(() => refusals[0]())
+    act(() => refusals[1]())
+    await waitFor(() => expect(screen.getByText('could not reach Linear')).toBeInTheDocument())
+    expect(column('DONE').textContent).not.toContain('Duplicate')
+    expect(column('IN REVIEW').textContent).not.toContain('In Review')
+    expect(screen.getByRole('button', { name: 'Duplicate' })).toBeInTheDocument()
+  })
+
+  it('asks for a workflow again when a failed read’s board is shown again', async () => {
+    const fetchMock = stub(BOTH)
+    const answer = fetchMock.getMockImplementation()!
+    const engStates = `${LINEAR}/${ENG}/states/list`
+    let engReads = 0
+    fetchMock.mockImplementation((input: unknown, init?: RequestInit) => {
+      if (String(input) === engStates && ++engReads === 1) {
+        return Promise.resolve({ ok: false, status: 502, ...jsonBody({ errors: [] }) })
+      }
+      return answer(input, init)
+    })
+    render(<LinearSource {...BODY} />)
+    await waitFor(() => expect(engReads).toBe(1))
+    expect(screen.queryByText('Duplicate')).not.toBeInTheDocument()
+
+    const keys = () => Array.from(document.querySelectorAll('.sp-projkey'))
+    fireEvent.click(keys()[1])
+    await waitFor(() => expect(screen.getByText('Queued')).toBeInTheDocument())
+    fireEvent.click(keys()[0])
+
+    await waitFor(() => expect(screen.getByText('Duplicate')).toBeInTheDocument())
+    expect(engReads).toBe(2)
+  })
 })
