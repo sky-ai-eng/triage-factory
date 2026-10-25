@@ -85,6 +85,14 @@ type FactorySeeder struct {
 	// it by: its repository's registry row, its Jira project's registry row,
 	// or its Linear team.
 	GroupedEntity func(t *testing.T, source string) (entityID, groupingID string)
+
+	// TrackedEntity inserts an active entity of source ("github", "jira" or
+	// "linear") in a unit of its own that the team tracks, and returns its id
+	// and the unit's: its repository's registry row, its Jira project's
+	// registry row, or its Linear team. Every call is a new unit, so a
+	// subtest can hold several of one source. Set by the team activity
+	// suites, whose tracked-set cut reads the tracking rows in both dialects.
+	TrackedEntity func(t *testing.T, source string) (entityID, unitID string)
 }
 
 // nullSentinel is the content string callers pass to SetConversationMemory

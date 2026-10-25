@@ -10,6 +10,7 @@ type TeamActivity struct {
 	ByDay       []TeamActivityDay
 	ByDaySource []TeamActivityDaySource
 	BySource    []TeamActivitySource
+	ByTracked   []TeamActivityTracked
 }
 
 // TeamActivityDay is one UTC calendar day's flow across every source:
@@ -59,4 +60,28 @@ type TeamActivitySource struct {
 	Tasks      int
 	Runs       int
 	LastPollAt *time.Time
+}
+
+// TeamActivityTracked is one unit of the team's tracked set and its flow over
+// the window: a GitHub repository (UnitID is its registry row id), a Jira
+// project (its jira_projects row id) or a Linear team (its Linear UUID) —
+// the ids the source pages key their rows on. A tracked unit that was quiet
+// in the window is a row of zeros; a unit the team does not track has no row.
+// Slack has no tracked set, so it has no rows.
+//
+// Events, Tasks and Runs are counted the way the by-source cut counts them,
+// so a source's rows sum to its TeamActivitySource. The two part only on
+// activity attached to a unit outside the tracked set, which has no row to
+// land on: tasks and runs a team keeps on a unit it stopped tracking, and,
+// in local mode, whose by-source cut is unscoped, events on such a unit too.
+//
+// LastEventAt is the unit's latest event before the window's end, however
+// long before its start — nil only for a unit that has never sent one.
+type TeamActivityTracked struct {
+	Source      string
+	UnitID      string
+	Events      int
+	Tasks       int
+	Runs        int
+	LastEventAt *time.Time
 }

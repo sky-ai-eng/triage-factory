@@ -44,6 +44,20 @@ type TeamActivityDayCount struct {
 	N   int
 }
 
+// TeamActivityUnit is one unit of a team's tracked set: its source and the id
+// that source keys it by (see domain.TeamActivityTracked).
+type TeamActivityUnit struct {
+	Source string
+	UnitID string
+}
+
+// TeamActivityUnitCount is one unit and its count — the shape of the
+// tracked-set cut's events, tasks and runs rows.
+type TeamActivityUnitCount struct {
+	Unit TeamActivityUnit
+	N    int
+}
+
 // TeamActivityCuts is what one dialect's queries produce and
 // BuildTeamActivity assembles. A struct rather than a positional argument
 // list because Merged and Failed are same-typed neighbours a call site could
@@ -63,6 +77,18 @@ type TeamActivityCuts struct {
 	Merged []TeamActivityDayCount
 	Failed []TeamActivityDayCount
 
+	// Tracked is the team's tracked set, which decides the tracked-set cut's
+	// rows. UnitEvents, UnitTasks and UnitRuns count per unit under the same
+	// scoping as Events, Tasks and Runs, and LastEvent holds each unit's
+	// latest event before the window's end, with no lower bound. Anything
+	// naming a unit outside Tracked is dropped, because a unit the team does
+	// not track has no row.
+	Tracked    []TeamActivityUnit
+	UnitEvents []TeamActivityUnitCount
+	UnitTasks  []TeamActivityUnitCount
+	UnitRuns   []TeamActivityUnitCount
+	LastEvent  map[TeamActivityUnit]time.Time
+
 	EventsDefinedFor []string
 }
 
@@ -79,6 +105,10 @@ type TeamActivityCuts struct {
 // events/tasks queries happened to find: a day whose only fact is a merged
 // pull request — or a failed run — is still a day the team had, and dropping
 // it would make a client's sum over by_day disagree with the store.
+//
+// The tracked-set cut is the inverse: its rows are exactly Tracked, whatever
+// the data mentions. A unit with no activity is a row of zeros, and activity
+// on a unit outside Tracked is no row at all.
 func BuildTeamActivity(cuts TeamActivityCuts) domain.TeamActivity {
 	type cell struct{ events, tasks int }
 	type dayCell struct{ events, tasks, merged, failed int }
@@ -169,6 +199,48 @@ func BuildTeamActivity(cuts TeamActivityCuts) domain.TeamActivity {
 		}
 		out.BySource = append(out.BySource, row)
 	}
+
+	type unitCell struct {
+		events, tasks, runs int
+		last                *time.Time
+	}
+	units := make(map[TeamActivityUnit]*unitCell, len(cuts.Tracked))
+	for _, u := range cuts.Tracked {
+		units[u] = &unitCell{}
+	}
+	for _, r := range cuts.UnitEvents {
+		if c := units[r.Unit]; c != nil {
+			c.events += r.N
+		}
+	}
+	for u, at := range cuts.LastEvent {
+		if c := units[u]; c != nil {
+			c.last = &at
+		}
+	}
+	for _, r := range cuts.UnitTasks {
+		if c := units[r.Unit]; c != nil {
+			c.tasks += r.N
+		}
+	}
+	for _, r := range cuts.UnitRuns {
+		if c := units[r.Unit]; c != nil {
+			c.runs += r.N
+		}
+	}
+	for u, c := range units {
+		out.ByTracked = append(out.ByTracked, domain.TeamActivityTracked{
+			Source: u.Source, UnitID: u.UnitID,
+			Events: c.events, Tasks: c.tasks, Runs: c.runs, LastEventAt: c.last,
+		})
+	}
+	sort.Slice(out.ByTracked, func(i, j int) bool {
+		a, b := out.ByTracked[i], out.ByTracked[j]
+		if a.Source != b.Source {
+			return a.Source < b.Source
+		}
+		return a.UnitID < b.UnitID
+	})
 	return out
 }
 
@@ -193,6 +265,33 @@ func ScanTeamActivityDayCounts(rows RowScanner) ([]TeamActivityDayCount, error) 
 	for rows.Next() {
 		var c TeamActivityDayCount
 		if err := rows.Scan(&c.Day, &c.N); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// ScanTeamActivityUnits drains rows of (source, unit_id) into a tracked set.
+func ScanTeamActivityUnits(rows RowScanner) ([]TeamActivityUnit, error) {
+	var out []TeamActivityUnit
+	for rows.Next() {
+		var u TeamActivityUnit
+		if err := rows.Scan(&u.Source, &u.UnitID); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// ScanTeamActivityUnitCounts drains rows of (source, unit_id, n) into unit
+// counts.
+func ScanTeamActivityUnitCounts(rows RowScanner) ([]TeamActivityUnitCount, error) {
+	var out []TeamActivityUnitCount
+	for rows.Next() {
+		var c TeamActivityUnitCount
+		if err := rows.Scan(&c.Unit.Source, &c.Unit.UnitID, &c.N); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

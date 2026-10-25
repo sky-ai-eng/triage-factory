@@ -63,6 +63,11 @@ interface WatchRow {
  * with every verb absent rather than disabled and no catalog to pick from.
  * Without a connection the same summary is shown to everyone, since there is
  * no workflow to map against; an admin can still stop watching a team.
+ *
+ * `eventsOf` puts a figure on each watched team's row: its events in the
+ * window the caller reads, or null for a dash where nothing counts them (the
+ * activity read has not answered, or the team is watched in the draft and not
+ * saved yet). A surface that shows no figures leaves it out.
  */
 export default function LinearTeamRulesGroup({
   orgId,
@@ -71,6 +76,7 @@ export default function LinearTeamRulesGroup({
   connected,
   readOnly = false,
   bare = false,
+  eventsOf,
 }: {
   orgId: string
   value: LinearTeamConfig[]
@@ -78,6 +84,7 @@ export default function LinearTeamRulesGroup({
   connected: boolean
   readOnly?: boolean
   bare?: boolean
+  eventsOf?: (linearTeamId: string) => number | null
 }) {
   const [statesByTeam, setStatesByTeam] = useState<Record<string, LinearStateOption[]>>({})
   const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set())
@@ -277,6 +284,11 @@ export default function LinearTeamRulesGroup({
               </button>
               <span className="text-body font-medium text-ink-1">{team.key}</span>
               <span className="flex-1 min-w-0 truncate text-ui text-ink-3">{team.name}</span>
+              {eventsOf && (
+                <span className="shrink-0 text-reported text-ink-3 tabular-nums">
+                  {eventsOf(team.id) ?? '—'} events
+                </span>
+              )}
               <button
                 type="button"
                 onClick={() => toggleExpanded(team.id)}

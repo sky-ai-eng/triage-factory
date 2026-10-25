@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -19,6 +20,15 @@ func newTeamActivityStore(q queryer) db.TeamActivityStore {
 }
 
 var _ db.TeamActivityStore = (*teamActivityStore)(nil)
+
+// sqliteTeamActivityUnitKey is an entities row's (alias e) unit in its
+// source's tracked set: the column that source's tracking rows reference.
+// Empty for a source with no tracked set, which names no unit.
+const sqliteTeamActivityUnitKey = `COALESCE(CASE e.source
+		WHEN 'github' THEN e.repository_id
+		WHEN 'jira' THEN e.jira_project_id
+		WHEN 'linear' THEN e.linear_team_id
+	END, '')`
 
 func (s *teamActivityStore) TeamActivity(ctx context.Context, orgID, _ string, since, until time.Time) (domain.TeamActivity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
@@ -112,12 +122,100 @@ func (s *teamActivityStore) TeamActivity(ctx context.Context, orgID, _ string, s
 		return domain.TeamActivity{}, err
 	}
 
+	// The tracked set is the one read here that does not take every row: it
+	// is what the local team watches, and a source page puts a figure only on
+	// a watched row. UNION rather than UNION ALL, since the read is not
+	// narrowed to one team. Only rules saved under the org's current Linear
+	// workspace count, as everywhere else they are read.
+	trackedRows, err := s.q.QueryContext(ctx, `
+		SELECT 'github', repository_id FROM team_github_repos
+		UNION
+		SELECT 'jira', jira_project_id FROM jira_project_status_rules
+		UNION
+		SELECT 'linear', lr.linear_team_id FROM linear_team_rules lr
+		WHERE lr.linear_workspace_id <> ''
+		  AND lr.linear_workspace_id = (SELECT os.linear_workspace_id FROM org_settings os WHERE os.org_id = ?)`,
+		orgID)
+	if err != nil {
+		return domain.TeamActivity{}, err
+	}
+	defer trackedRows.Close()
+	tracked, err := db.ScanTeamActivityUnits(trackedRows)
+	if err != nil {
+		return domain.TeamActivity{}, err
+	}
+
+	// Per unit, counted like the cuts above, so the units of a source sum to
+	// its by-source figures except for activity on a unit the team does not
+	// track, which the builder drops. The events scan has no lower bound,
+	// because the unit's latest event is wanted however long before the
+	// window it was; the count alone is windowed. One pass serves both: a
+	// local database is small enough that the history scan costs less than a
+	// second query. The latest is taken over julianday() and rendered back by
+	// strftime() rather than MAX() over the stored text, which orders
+	// correctly only when every row was written in one format.
+	unitEventRows, err := s.q.QueryContext(ctx, `
+		SELECT e.source, `+sqliteTeamActivityUnitKey+`,
+		       SUM(julianday(ev.created_at) >= julianday(?)),
+		       strftime('%Y-%m-%dT%H:%M:%fZ', MAX(julianday(ev.created_at)))
+		FROM events ev
+		JOIN entities e ON e.id = ev.entity_id
+		WHERE julianday(ev.created_at) < julianday(?)
+		GROUP BY 1, 2`, sinceArg, untilArg)
+	if err != nil {
+		return domain.TeamActivity{}, err
+	}
+	defer unitEventRows.Close()
+	var unitEvents []db.TeamActivityUnitCount
+	lastEvent := map[db.TeamActivityUnit]time.Time{}
+	for unitEventRows.Next() {
+		var r db.TeamActivityUnitCount
+		var last string
+		if err := unitEventRows.Scan(&r.Unit.Source, &r.Unit.UnitID, &r.N, &last); err != nil {
+			return domain.TeamActivity{}, err
+		}
+		at, err := time.Parse(time.RFC3339, last)
+		if err != nil {
+			return domain.TeamActivity{}, fmt.Errorf("parse latest event %q: %w", last, err)
+		}
+		unitEvents = append(unitEvents, r)
+		lastEvent[r.Unit] = at
+	}
+	if err := unitEventRows.Err(); err != nil {
+		return domain.TeamActivity{}, err
+	}
+	unitTasks, err := s.unitCounts(ctx, `
+		SELECT e.source, `+sqliteTeamActivityUnitKey+`, COUNT(*)
+		FROM tasks t
+		JOIN entities e ON e.id = t.entity_id
+		WHERE julianday(t.created_at) >= julianday(?) AND julianday(t.created_at) < julianday(?)
+		GROUP BY 1, 2`, sinceArg, untilArg)
+	if err != nil {
+		return domain.TeamActivity{}, err
+	}
+	unitRuns, err := s.unitCounts(ctx, `
+		SELECT e.source, `+sqliteTeamActivityUnitKey+`, COUNT(*)
+		FROM conversations r
+		JOIN tasks t ON t.id = r.task_id
+		JOIN entities e ON e.id = t.entity_id
+		WHERE r.type = 'delegation'
+		  AND julianday(r.started_at) >= julianday(?) AND julianday(r.started_at) < julianday(?)
+		GROUP BY 1, 2`, sinceArg, untilArg)
+	if err != nil {
+		return domain.TeamActivity{}, err
+	}
+
 	return db.BuildTeamActivity(db.TeamActivityCuts{
-		Events: events,
-		Tasks:  tasks,
-		Runs:   runs,
-		Merged: merged,
-		Failed: failed,
+		Events:     events,
+		Tasks:      tasks,
+		Runs:       runs,
+		Merged:     merged,
+		Failed:     failed,
+		Tracked:    tracked,
+		UnitEvents: unitEvents,
+		UnitTasks:  unitTasks,
+		UnitRuns:   unitRuns,
+		LastEvent:  lastEvent,
 	}), nil
 }
 
@@ -137,4 +235,13 @@ func (s *teamActivityStore) dayCounts(ctx context.Context, query string, args ..
 	}
 	defer rows.Close()
 	return db.ScanTeamActivityDayCounts(rows)
+}
+
+func (s *teamActivityStore) unitCounts(ctx context.Context, query string, args ...any) ([]db.TeamActivityUnitCount, error) {
+	rows, err := s.q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return db.ScanTeamActivityUnitCounts(rows)
 }

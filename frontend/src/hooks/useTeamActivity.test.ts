@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { activitySeries, activitySource, sinceParts, sinceLabel } from './useTeamActivity'
+import {
+  activitySeries,
+  activitySource,
+  activityTracked,
+  sinceParts,
+  sinceLabel,
+} from './useTeamActivity'
 import type { TeamActivity } from './useTeamActivity'
 
 const day = (n: number) => new Date(Date.now() - n * 86400_000).toISOString().slice(0, 10)
@@ -15,6 +21,10 @@ const ACTIVITY: TeamActivity = {
   by_source: [
     { source: 'github', events: 6, tasks: 1, runs: 2, last_poll_at: null },
     { source: 'slack', events: null, tasks: 0, runs: 0, last_poll_at: null },
+  ],
+  by_tracked: [
+    { source: 'github', unit_id: 'r1', events: 6, tasks: 1, runs: 2, last_event_at: null },
+    { source: 'jira', unit_id: 'r1', events: 9, tasks: 9, runs: 0, last_event_at: null },
   ],
 }
 
@@ -41,6 +51,18 @@ describe('activitySource', () => {
     expect(activitySource(ACTIVITY, 'slack')?.events).toBeNull()
     expect(activitySource(ACTIVITY, 'jira')).toBeNull()
     expect(activitySource(null, 'github')).toBeNull()
+  })
+})
+
+describe('activityTracked', () => {
+  it("keys one source's units by id, and answers nothing before the node does", () => {
+    const github = activityTracked(ACTIVITY, 'github')
+    expect([...github.keys()]).toEqual(['r1'])
+    // The same id under another source is another unit.
+    expect(github.get('r1')?.events).toBe(6)
+    expect(activityTracked(ACTIVITY, 'jira').get('r1')?.events).toBe(9)
+    expect(activityTracked(ACTIVITY, 'linear').size).toBe(0)
+    expect(activityTracked(null, 'github').size).toBe(0)
   })
 })
 

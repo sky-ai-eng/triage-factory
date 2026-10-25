@@ -11,9 +11,11 @@ import {
   useTeamActivity,
   activitySource,
   activitySeries,
+  activityTracked,
   sinceParts,
   sinceLabel,
 } from '../../hooks/useTeamActivity'
+import { ago, minutesSince } from '../../ui/table/cells'
 import { fetchTeamRepos, saveTeamRepos } from '../settings/teamConfig'
 import {
   candidateKeys,
@@ -34,10 +36,11 @@ import type { GitHubRepo, RepoRef } from '../../lib/githubRepos'
 // The page's own figures — events, what became of them, runs, the time since
 // the last poll, and the fortnight chart — come from the team activity node,
 // fetched at the two windows the surface reads (seven days for figures, a
-// fortnight for the chart). FIGURES THE API DOES NOT ANSWER READ `—`: the
-// per-repository columns (runs, last event) still need a per-repo cut that
-// does not exist, and a zero there would be a claim about a repository's
-// week.
+// fortnight for the chart). The per-repository columns (runs, last event)
+// come from the node's tracked-set cut at the seven-day window, which answers
+// for watched repositories only. FIGURES THE API DOES NOT ANSWER READ `—`: a
+// repository the team does not watch has no row in the cut, and a zero there
+// would be a claim about a repository's week.
 
 const PROSE =
   'Tracked repositories spawn events this team can automate, like PRs in need of review or CI failing. ' +
@@ -46,7 +49,8 @@ const PROSE =
 /**
  * A repository's share of the team's runs: a hatched track filled to the
  * value, with the number at the right so the column reads as a ranking and as
- * a measurement at once. An em dash where nothing counts runs yet.
+ * a measurement at once. An em dash where nothing counts the repository's
+ * runs.
  */
 function runBar(row: TableRow, max: number) {
   const runs = row.runs as number | null
@@ -84,6 +88,7 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
   const activity14 = useTeamActivity(teamId, 14)
   const flow = activitySource(activity7, 'github')
   const poll = sinceParts(flow?.last_poll_at ?? null)
+  const perRepo = useMemo(() => activityTracked(activity7, 'github'), [activity7])
 
   // The authoritative tracked set, so a second verb inside one undo window
   // computes from what the last one wrote rather than from what the screen
@@ -157,17 +162,24 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
     }
     entries.sort((a, b) => Number(b.on) - Number(a.on) || a.name.localeCompare(b.name))
     return {
-      rows: entries.map((e) => ({
-        id: e.key,
-        name: e.name,
-        tracked: e.on,
-        retired: isRetired(e.ref),
-        runs: null,
-        last: null,
-      })),
+      rows: entries.map((e) => {
+        // The cut keys a repository by its registry id, which every tracked
+        // ref carries once saved. A watched row is matched on it alone, so a
+        // repository the team does not watch never borrows a figure.
+        const unit = e.on && e.ref.id ? perRepo.get(e.ref.id) : undefined
+        const min = minutesSince(unit?.last_event_at)
+        return {
+          id: e.key,
+          name: e.name,
+          tracked: e.on,
+          retired: isRetired(e.ref),
+          runs: unit ? unit.runs : null,
+          last: min === null ? null : ago(min),
+        }
+      }),
       refsByRow: new Map(entries.map((e) => [e.key, e.ref])),
     }
-  }, [tracked, visible])
+  }, [tracked, visible, perRepo])
 
   const shown = useMemo(() => {
     const q = filter.trim().toLowerCase()
@@ -203,9 +215,9 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
         label: 'RUNS',
         width: '168px',
         render: (r) => runBar(r, maxRuns),
-        // Not a claim about runs: with nothing counting them the watched set
-        // is the only ordering the column can honestly offer.
-        sortValue: (r) => -((r.runs as number | null) ?? (r.tracked ? 1 : 0)),
+        // Runs rank the watched set; a repository nothing counts sorts after
+        // every watched one, which is also the order before the node answers.
+        sortValue: (r) => -((r.runs as number | null) ?? (r.tracked ? 0 : -1)),
       },
       {
         key: 'last',

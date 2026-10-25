@@ -67,6 +67,23 @@ const ACTIVITY = {
     { source: 'jira', events: 0, tasks: 0, runs: 0, last_poll_at: null },
     { source: 'slack', events: null, tasks: 1, runs: 0, last_poll_at: null },
   ],
+  // Per unit, keyed by the id each page holds: the GitHub page's registry
+  // ids, the Jira page's registry rows, the Linear page's team ids. A quiet
+  // watched unit is a row of zeros, never absent.
+  by_tracked: [
+    {
+      source: 'github',
+      unit_id: 'r1',
+      events: 6,
+      tasks: 2,
+      runs: 3,
+      last_event_at: new Date(Date.now() - 4 * 60000).toISOString(),
+    },
+    { source: 'github', unit_id: 'r2', events: 0, tasks: 0, runs: 0, last_event_at: null },
+    { source: 'jira', unit_id: 'reg-PLAT', events: 7, tasks: 0, runs: 0, last_event_at: null },
+    { source: 'jira', unit_id: 'reg-SKY', events: 0, tasks: 0, runs: 0, last_event_at: null },
+    { source: 'linear', unit_id: 'team-eng', events: 4, tasks: 0, runs: 0, last_event_at: null },
+  ],
 }
 
 function stub(payloads: Record<string, unknown>) {
@@ -223,6 +240,21 @@ describe('GitHub source page', () => {
     // The fortnight drew: legend keys exist and the empty label is gone.
     expect(screen.queryByText('no daily series yet')).not.toBeInTheDocument()
     expect(screen.getByText('EVENTS')).toBeInTheDocument()
+  })
+
+  it("reads each watched repository's runs and last event, and dashes the rest", async () => {
+    stub({ ...REPOS, '/api/teams/t1/activity': ACTIVITY })
+    render(<GitHubSource {...BODY} />)
+    const rowOf = (name: string) => screen.getByText(name).closest<HTMLElement>('[role="row"]')!
+
+    await waitFor(() => expect(rowOf('sky/agent-runner').textContent).toContain('4m'))
+    expect(within(rowOf('sky/agent-runner')).getByText('3')).toBeInTheDocument()
+    // Watched and quiet: a real zero, and no last event because it has
+    // never sent one.
+    expect(within(rowOf('sky/planner')).getByText('0')).toBeInTheDocument()
+    expect(within(rowOf('sky/planner')).getByText('—')).toBeInTheDocument()
+    // Not watched: nothing counts it, so neither column is a number.
+    expect(within(rowOf('sky/docs-site')).getAllByText('—')).toHaveLength(2)
   })
 
   it('lists a tracked repository the picker can no longer see', async () => {
@@ -556,6 +588,16 @@ describe('Jira source page', () => {
     expect(order[1]).toBeLessThan(order[2])
   })
 
+  it("counts a watched project's events, and dashes a catalog project's", async () => {
+    stub({ ...SETTINGS, '/api/teams/t1/activity': ACTIVITY })
+    render(<JiraSource {...BODY} />)
+    const rowOf = (name: string) => screen.getByText(name).closest<HTMLElement>('[role="row"]')!
+
+    await waitFor(() => expect(within(rowOf('Platform Core')).getByText('7')).toBeInTheDocument())
+    expect(within(rowOf('Skyworks')).getByText('0')).toBeInTheDocument()
+    expect(within(rowOf('Operations')).getByText('—')).toBeInTheDocument()
+  })
+
   it('states why Jira is off and holds the live reads, keeping the config', async () => {
     sources.state = { jira: 'disabled' }
     const fetchMock = stub(SETTINGS)
@@ -850,6 +892,33 @@ describe('LinearSource', () => {
         },
       ],
     })
+  })
+
+  it("puts each watched team's events on its row, and a dash until the node answers", async () => {
+    const watched = {
+      ...PAYLOADS,
+      '/api/teams/t1/settings': {
+        linear_teams: [
+          {
+            id: ENG_ID,
+            key: 'ENG',
+            name: 'Engineering',
+            armed: false,
+            pickup: { members: [] },
+            in_progress: { members: [], canonical: null },
+            done: { members: [], canonical: null },
+          },
+        ],
+      },
+    }
+    stub(watched)
+    const { unmount } = render(<LinearSource {...BODY} isAdmin={false} />)
+    await waitFor(() => expect(screen.getByText('— events')).toBeInTheDocument())
+    unmount()
+
+    stub({ ...watched, '/api/teams/t1/activity': ACTIVITY })
+    render(<LinearSource {...BODY} isAdmin={false} />)
+    await waitFor(() => expect(screen.getByText('4 events')).toBeInTheDocument())
   })
 
   it('shows a member the mapping with no verbs and no catalog read', async () => {

@@ -5,7 +5,12 @@ import StatusRules from '../../ui/statusrules/StatusRules'
 import type { StatusItem, StatusMap, StatusRule } from '../../ui/statusrules/StatusRules'
 import { SourceFrame, FilterField } from './SourceFrame'
 import type { SourceBodyProps } from './SourceFrame'
-import { useTeamActivity, activitySource, sinceLabel } from '../../hooks/useTeamActivity'
+import {
+  useTeamActivity,
+  activitySource,
+  activityTracked,
+  sinceLabel,
+} from '../../hooks/useTeamActivity'
 import { useEventSources } from '../../hooks/useEventSources'
 import { useActiveOrgId } from '../../contexts/OrgContext'
 import { sourceUnavailableReason } from '../../lib/eventSources'
@@ -121,8 +126,11 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   const [shownRef, setShownRef] = useState('')
 
   // The frame's three figures, from the team activity node at the window
-  // their labels name.
-  const flow = activitySource(useTeamActivity(teamId, 7), 'jira')
+  // their labels name, and the table's per-project events from the same
+  // answer.
+  const activity = useTeamActivity(teamId, 7)
+  const flow = activitySource(activity, 'jira')
+  const perProject = useMemo(() => activityTracked(activity, 'jira'), [activity])
 
   // Why Jira cannot reach this org right now, or null — which is also the
   // answer while the availability read is unresolved, so the page never
@@ -248,14 +256,18 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
       ) {
         continue
       }
-      out.push({ id: ref, key: p.key, name, issues: null, watched: true })
+      // The cut keys a project by its registry row, which a watched project
+      // carries once saved; one added in this page and not saved yet has none
+      // and keeps its dash.
+      const unit = p.id ? perProject.get(p.id) : undefined
+      out.push({ id: ref, key: p.key, name, events: unit ? unit.events : null, watched: true })
     }
     for (const c of catalog ?? []) {
       if (candidateRefs(c).some((ref) => watchedRefs.has(ref))) continue
-      out.push({ id: jiraProjectRef(c), key: c.key, name: c.name, issues: null, watched: false })
+      out.push({ id: jiraProjectRef(c), key: c.key, name: c.name, events: null, watched: false })
     }
     return out
-  }, [catalog, filter, watched, watchedRefs])
+  }, [catalog, filter, watched, watchedRefs, perProject])
 
   const columns: TableColumn[] = useMemo(
     () => [
@@ -276,14 +288,15 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
         color: (r) => (r.watched ? 'var(--color-ink-2)' : 'var(--color-ink-4)'),
       },
       {
-        key: 'issues',
-        label: 'ISSUES',
+        key: 'events',
+        label: 'EVENTS',
         align: 'end',
         drop: 1,
-        // Nothing counts a project's issues for a team yet; a number here
-        // would be a claim.
-        render: (r) => r.issues ?? '—',
-        sortValue: (r) => -((r.issues as number | null) ?? 0),
+        // A watched project's events in seven days, the frame's window. A
+        // project the team does not watch is counted by nothing, so it reads
+        // a dash rather than a zero.
+        render: (r) => r.events ?? '—',
+        sortValue: (r) => -((r.events as number | null) ?? 0),
         color: () => 'var(--color-ink-4)',
       },
     ],

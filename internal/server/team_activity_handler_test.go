@@ -36,16 +36,33 @@ type activityBody struct {
 		Events int    `json:"events"`
 		Tasks  int    `json:"tasks"`
 	} `json:"by_day_source"`
-	BySource []activitySourceRow `json:"by_source"`
+	BySource  []activitySourceRow `json:"by_source"`
+	ByTracked []struct {
+		Source      string     `json:"source"`
+		UnitID      string     `json:"unit_id"`
+		Events      int        `json:"events"`
+		Tasks       int        `json:"tasks"`
+		Runs        int        `json:"runs"`
+		LastEventAt *time.Time `json:"last_event_at"`
+	} `json:"by_tracked"`
 }
 
 // TestTeamActivity_NodeShape walks the node end to end in local mode: the
 // seeded flow lands in every cut, the by-source rows cover the external
-// sources whatever the traffic, and last_poll_at is stitched in from
-// poll_readiness for exactly the sources that have completed a cycle.
+// sources whatever the traffic, last_poll_at is stitched in from
+// poll_readiness for exactly the sources that have completed a cycle, and
+// the tracked repository's row carries its flow under its registry id.
 func TestTeamActivity_NodeShape(t *testing.T) {
 	s := newTestServer(t)
-	seedTaskFixture(t, s.db, taskFixture{name: "activity", status: "queued"})
+	taskID := seedTaskFixture(t, s.db, taskFixture{name: "activity", status: "queued"})
+	var repoID string
+	if err := s.db.QueryRow(
+		`SELECT e.repository_id FROM tasks t JOIN entities e ON e.id = t.entity_id WHERE t.id = ?`, taskID,
+	).Scan(&repoID); err != nil {
+		t.Fatalf("read fixture repository: %v", err)
+	}
+	execSQL(t, s.db, `INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES (?, ?, ?)`,
+		runmode.LocalDefaultTeamID, repoID, runmode.LocalDefaultOrgID)
 	if err := s.allStores.PollReadiness.MarkPollComplete(
 		context.Background(), runmode.LocalDefaultOrgID, "github", time.Time{}); err != nil {
 		t.Fatalf("stamp poll completion: %v", err)
@@ -96,6 +113,17 @@ func TestTeamActivity_NodeShape(t *testing.T) {
 	}
 	if _, ok := rows["slack"]; !ok {
 		t.Error("by_source is missing the slack row")
+	}
+
+	if len(body.ByTracked) != 1 {
+		t.Fatalf("by_tracked = %+v, want the one tracked repository", body.ByTracked)
+	}
+	unit := body.ByTracked[0]
+	if unit.Source != "github" || unit.UnitID != repoID || unit.Events != 1 || unit.Tasks != 1 || unit.Runs != 0 {
+		t.Errorf("by_tracked row = %+v, want github %s with events 1 / tasks 1 / runs 0", unit, repoID)
+	}
+	if unit.LastEventAt == nil {
+		t.Error("by_tracked last_event_at is null for a repository that sent an event")
 	}
 }
 
