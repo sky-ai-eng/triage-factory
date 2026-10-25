@@ -22,6 +22,7 @@ import (
 	linearclient "github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/review"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
 // LocalClient is the in-process implementation of Client. Holds a
@@ -740,6 +741,11 @@ func (c *LocalClient) listArtifactsByConversation(ctx context.Context) ([]domain
 // submittable) again. A lost race surfaces as an actionable error.
 func (c *LocalClient) saveReviewDraftDetails(ctx context.Context, artifactID string, details domain.ReviewArtifactDetails) error {
 	updated, err := c.rt.UpdateReviewDetailsIfPending(ctx, artifactID, domain.MarshalReviewArtifactDetails(details))
+	if errors.Is(err, sidecarproto.ErrFrameTooLarge) {
+		// The whole draft travels on every save, so the remedy is to make the
+		// draft smaller, which the error alone does not say.
+		return fmt.Errorf("this review draft is too large to save — shorten or delete some staged comments; nothing was changed (%w)", err)
+	}
 	if err != nil {
 		return err
 	}

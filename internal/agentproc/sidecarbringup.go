@@ -23,30 +23,10 @@ import (
 // that started but wedged before minting its key.
 const sidecarHelloTimeout = 30 * time.Second
 
-// sidecarFrameLimit bounds each frame the orchestrator reads from a run's
-// sidecar. The sidecar is the process that parses hostile traffic, and this
-// one supervises every run on the executor, so without a bound a compromised
-// sidecar could send one frame big enough to exhaust the memory all of those
-// runs share, and write values of any size into the audit ledger through the
-// relay ops. A frame over the limit closes that run's supervision channel and
-// no other.
-//
-// The value comes from measuring the largest frames a working sidecar sends.
-// Nearly every frame describes one object, and the largest of those is the
-// record of a pull request the agent opened, which carries its body: under
-// 1 MiB for a body at GitHub's 65,536-character maximum, even with every
-// character escaped at the worst rate. The exception is a write of a review
-// draft, which carries the whole draft — once finalized, every staged comment
-// twice, the second copy in the proposed snapshot — and so grows with the
-// number of comments: 0.5 MiB for 100 comments of 2,000 characters, 15.8 MiB
-// for 100 comments of English prose each at GitHub's maximum length. 16 MiB
-// fits that, and is the cap the agenthost socket already puts on a single
-// request from the agent.
-const sidecarFrameLimit = 16 << 20
-
-// oversizedFrames owns the counter of frames refused at sidecarFrameLimit.
-// Package-level because a metric instrument is process-global by nature, and
-// swapped atomically so a test can back it with a manual reader.
+// oversizedFrames owns the counter of frames refused at
+// sidecarproto.MaxSidecarFrameSize. Package-level because a metric instrument
+// is process-global by nature, and swapped atomically so a test can back it
+// with a manual reader.
 var oversizedFrames atomic.Pointer[oversizedFrameStats]
 
 func init() {
@@ -71,10 +51,11 @@ func newOversizedFrameStats(mp metric.MeterProvider) *oversizedFrameStats {
 }
 
 // reportOversizedFrame waits for a run's supervision channel to close and, if
-// it closed because the sidecar sent a frame over sidecarFrameLimit, logs and
-// counts the refusal. On the wire, a legitimate frame refused because the
-// limit is too low looks the same as an attack, so the log line names the
-// conversation where the two can be told apart. Returns when the channel
+// it closed because the sidecar sent a frame over
+// sidecarproto.MaxSidecarFrameSize, logs and counts the refusal. A working
+// sidecar refuses such a frame before sending it, so a refusal here means the
+// sidecar skipped its own limit, which only a broken or compromised one does;
+// the log line names the conversation to look at. Returns when the channel
 // closes, which bring-up's failure paths and the run's teardown both do.
 func reportOversizedFrame(conn *sidecarproto.Conn, conversationID string) {
 	<-conn.Done()
@@ -82,7 +63,7 @@ func reportOversizedFrame(conn *sidecarproto.Conn, conversationID string) {
 		return
 	}
 	agentprocLog.Error("sidecar sent a supervision frame over the size limit; closed its supervision channel",
-		"conversation", conversationID, "limit_bytes", sidecarFrameLimit)
+		"conversation", conversationID, "limit_bytes", sidecarproto.MaxSidecarFrameSize)
 	if s := oversizedFrames.Load(); s != nil && s.refused != nil {
 		s.refused.Add(context.Background(), 1)
 	}
@@ -173,7 +154,7 @@ func (s *sidecarSupervisor) Handle(ctx context.Context, kind sidecarproto.Kind, 
 type SidecarBringUpParams struct {
 	// ConversationID is the conversation the sidecar serves. It names the run
 	// in the log line written if the sidecar sends a frame over
-	// sidecarFrameLimit.
+	// sidecarproto.MaxSidecarFrameSize.
 	ConversationID string
 
 	// HostVethIP is the host-side veth address the sidecar binds every proxy
@@ -239,7 +220,7 @@ func BringUpRunSidecar(ctx context.Context, sc cell.Sidecar, provision SidecarPr
 		return nil, nil, fmt.Errorf("agentproc: launched sidecar exposes no supervision channel")
 	}
 	sup := newSidecarSupervisor(params.Relay)
-	conn := sidecarproto.New(stream, sup, sidecarproto.WithMaxFrameSize(sidecarFrameLimit))
+	conn := sidecarproto.New(stream, sup, sidecarproto.WithReadLimit(sidecarproto.MaxSidecarFrameSize))
 	go reportOversizedFrame(conn, params.ConversationID)
 
 	// The sidecar's hello is its first write; wait for it before provisioning

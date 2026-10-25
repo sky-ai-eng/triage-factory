@@ -516,7 +516,7 @@ func limitedConn(t *testing.T, handler Handler) (*Conn, *countingStream, net.Con
 	t.Helper()
 	ours, peer := net.Pipe()
 	stream := &countingStream{Conn: ours}
-	c := New(stream, handler, WithMaxFrameSize(testFrameLimit))
+	c := New(stream, handler, WithReadLimit(testFrameLimit))
 	t.Cleanup(func() {
 		_ = c.Close()
 		_ = ours.Close()
@@ -605,4 +605,78 @@ func TestConn_AFrameThatNeverEndsIsRefused(t *testing.T) {
 	c, stream, peer := limitedConn(t, nil)
 	writeRaw(peer, []byte(strings.Repeat("x", 4*testFrameLimit)))
 	awaitOversized(t, c, stream)
+}
+
+// TestConn_ACallOverTheWriteLimitIsNotSent: a frame the peer would refuse
+// fails on this end, before any of it is written, and the conn stays open for
+// the next Call.
+func TestConn_ACallOverTheWriteLimitIsNotSent(t *testing.T) {
+	ours, peer := net.Pipe()
+	peerStream := &countingStream{Conn: peer}
+	served := make(chan Kind, 4)
+	server := New(peerStream, HandlerFunc(func(_ context.Context, kind Kind, _ json.RawMessage) (any, error) {
+		served <- kind
+		return StartProxiesResult{Env: []string{"OK=1"}}, nil
+	}))
+	client := New(ours, nil, WithWriteLimit(testFrameLimit))
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = server.Close()
+		_ = ours.Close()
+		_ = peer.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := client.Call(ctx, KindStartProxies, StartProxiesBody{HostVethIP: strings.Repeat("x", testFrameLimit)}, nil)
+	if !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("Call over the write limit = %v; want ErrFrameTooLarge", err)
+	}
+	if errors.Is(err, ErrClosed) {
+		t.Fatalf("Call over the write limit = %v; a refused frame must not read as a closed conn", err)
+	}
+
+	var res StartProxiesResult
+	if err := client.Call(ctx, KindStartProxies, StartProxiesBody{HostVethIP: "10.42.1.1"}, &res); err != nil {
+		t.Fatalf("the next Call after the refused one: %v", err)
+	}
+	if len(served) != 1 {
+		t.Fatalf("the peer served %d requests; want 1, the refused frame never sent", len(served))
+	}
+	if n := peerStream.read.Load(); n > 1024 {
+		t.Fatalf("the peer read %d bytes; only the small Call should have crossed", n)
+	}
+}
+
+// TestConn_AResponseOverTheWriteLimitIsAnsweredWithTheRefusal: a handler whose
+// answer is too large to send still answers, with the refusal, so the caller
+// is not left waiting out its deadline.
+func TestConn_AResponseOverTheWriteLimitIsAnsweredWithTheRefusal(t *testing.T) {
+	ca, cb := net.Pipe()
+	client := New(ca, nil)
+	server := New(cb, HandlerFunc(func(context.Context, Kind, json.RawMessage) (any, error) {
+		return StartProxiesResult{Env: []string{strings.Repeat("x", testFrameLimit)}}, nil
+	}), WithWriteLimit(testFrameLimit))
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = server.Close()
+		_ = ca.Close()
+		_ = cb.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	answered := make(chan error, 1)
+	go func() { answered <- client.Call(ctx, KindStartProxies, StartProxiesBody{}, nil) }()
+	select {
+	case err := <-answered:
+		if err == nil || !strings.Contains(err.Error(), ErrFrameTooLarge.Error()) {
+			t.Fatalf("Call = %v; want the remote refusal naming the size limit", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the caller was left waiting on an answer too large to send")
+	}
+	if err := server.Err(); err != nil {
+		t.Fatalf("the serving end closed: %v", err)
+	}
 }

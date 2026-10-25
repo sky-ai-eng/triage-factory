@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -94,8 +95,9 @@ func (o *fakeOrchestrator) snapshot() (attempts, applied []sidecarproto.RelayRec
 // newSenderPair wires a record sender on a sidecar-side Conn to orch over an
 // in-memory supervision channel. The sidecar end answers a drain request the
 // way the sidecar's runtime does, so DrainRecords can be driven over the wire.
-// It returns the sender and the orchestrator-side Conn.
-func newSenderPair(t *testing.T, orch *fakeOrchestrator, policy recordSendPolicy) (*RecordSender, *sidecarproto.Conn) {
+// It returns the sender and the orchestrator-side Conn. opts build the
+// sidecar-side Conn.
+func newSenderPair(t *testing.T, orch *fakeOrchestrator, policy recordSendPolicy, opts ...sidecarproto.Option) (*RecordSender, *sidecarproto.Conn) {
 	t.Helper()
 	sidecarEnd, orchEnd := net.Pipe()
 	var sender *RecordSender
@@ -104,7 +106,7 @@ func newSenderPair(t *testing.T, orch *fakeOrchestrator, policy recordSendPolicy
 			return sender.Drain(ctx), nil
 		}
 		return nil, nil
-	}))
+	}), opts...)
 	orchConn := sidecarproto.New(orchEnd, orch)
 	sender = newRecordSender(sidecarConn, policy)
 	t.Cleanup(func() {
@@ -324,5 +326,37 @@ func TestRecordSender_DrainDoesNotWaitOnADeadSender(t *testing.T) {
 	}
 	if len(res.Undelivered) != 1 || res.Undelivered[0].Op != OpRecordPush || res.Undelivered[0].Count != 1 {
 		t.Fatalf("undelivered = %+v; want the one queued push", res.Undelivered)
+	}
+}
+
+// TestRecordSender_GivesUpOnARecordTooLargeToSend: a record over the channel's
+// write limit would be refused on every attempt, so it is given up on at once,
+// counted for the drain, and the records behind it are delivered.
+func TestRecordSender_GivesUpOnARecordTooLargeToSend(t *testing.T) {
+	orch := newFakeOrchestrator(0)
+	sender, orchConn := newSenderPair(t, orch, testRecordSendPolicy, sidecarproto.WithWriteLimit(4096))
+
+	if err := sender.Send(RelayNamespaceCore, OpRecordDenial, RecordDenialArgs{Owner: "acme", Repo: "widgets", Reason: strings.Repeat("r", 8192)}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := sender.Send(RelayNamespaceCore, OpRecordPush, pushRecord("after")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	applied := orch.waitApplied(t, 1)
+	if got := recordSHA(t, applied[0]); got != "after" {
+		t.Fatalf("applied record %q; want the one queued behind the oversized record", got)
+	}
+	if attempts, _ := orch.snapshot(); len(attempts) != 1 {
+		t.Fatalf("the orchestrator saw %d attempts; want 1, the oversized record never sent", len(attempts))
+	}
+
+	got, err := DrainRecords(context.Background(), orchConn)
+	if err != nil {
+		t.Fatalf("DrainRecords: %v", err)
+	}
+	want := sidecarproto.UndeliveredRecords{Namespace: RelayNamespaceCore, Op: OpRecordDenial, Count: 1}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("undelivered = %+v; want %+v", got, want)
 	}
 }
