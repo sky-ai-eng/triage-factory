@@ -111,10 +111,11 @@ func (s *Spawner) jiraMirrorRule(orgID string, task *domain.Task) *domain.JiraPr
 }
 
 // mirrorJiraInProgress mirrors a bot-owned task's board move onto its Jira
-// ticket: assign the service account and transition into the InProgress bucket,
-// under the org's system/bot credential. Detached so Jira latency never blocks
-// the board WS update; a no-op for non-Jira tasks or when no rule resolves
-// (skip + log, like the user path's "no in_progress rule configured" branch).
+// ticket: assign the service account if the ticket is unassigned, and
+// transition into the InProgress bucket, under the org's system/bot credential.
+// Detached so Jira latency never blocks the board WS update; a no-op for
+// non-Jira tasks or when no rule resolves (skip + log, like the user path's
+// "no in_progress rule configured" branch).
 func (s *Spawner) mirrorJiraInProgress(orgID string, task *domain.Task) {
 	rule := s.jiraMirrorRule(orgID, task)
 	if rule == nil {
@@ -168,8 +169,9 @@ func (s *Spawner) mirrorJiraInProgressForTask(ctx context.Context, orgID, taskID
 // done worker the forthcoming merge-driven Done mirror calls. It resolves the
 // org's system/bot Jira client fresh (creds hot-swap on config change, so a
 // client is never cached) and then assigns the service account (in-progress
-// only) and transitions the ticket into the target bucket, skipping any step the
-// ticket already satisfies.
+// only, and only on an unassigned ticket — a ticket assigned to a person keeps
+// its assignee) and transitions the ticket into the target bucket, skipping any
+// step the ticket already satisfies.
 //
 // Two safeguards keep a slow in-progress mirror from clobbering a Done write for
 // the same ticket (Done now comes from a human or the merge mirror, not the
@@ -286,7 +288,7 @@ func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule d
 		jiraLog.Debug("mirror: already advanced to done, skipping in-progress mirror", "issue", issueKey, "status", state.StatusName)
 		return
 	}
-	if !state.AssignedToSelf {
+	if state.Unassigned {
 		if err := client.AssignToSelf(ctx, issue); err != nil {
 			// Skip the transition too: assign + transition move together (same as
 			// the user-path claim guard), so a failed assign leaves the ticket
