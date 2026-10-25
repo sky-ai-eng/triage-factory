@@ -152,6 +152,26 @@ const recordLaneLimit = 64
 // fails with it rather than blocking forever.
 var ErrClosed = errors.New("sidecarproto: connection closed")
 
+// ErrFrameTooLarge is beneath the cause a Conn built WithMaxFrameSize shuts
+// down with when the peer sends a frame longer than the limit. The cause wraps
+// ErrClosed too, so a Call it fails reads as any other closed connection, and
+// the Conn's owner finds this one with errors.Is on Err.
+var ErrFrameTooLarge = errors.New("sidecarproto: inbound frame exceeds the size limit")
+
+// Option configures a Conn at New.
+type Option func(*Conn)
+
+// WithMaxFrameSize bounds the frames the Conn reads to n bytes, not counting
+// the newline that ends each one. A longer frame shuts the Conn down with
+// ErrFrameTooLarge, as an undecodable frame shuts it down, and is refused
+// before more than n bytes of it plus one read buffer have been read, so the
+// peer cannot make this end hold a frame of the peer's choosing. Without it,
+// or with n <= 0, frames are unbounded, which is right only for the end whose
+// peer is the trusted side.
+func WithMaxFrameSize(n int) Option {
+	return func(c *Conn) { c.maxFrame = n }
+}
+
 // Conn is one end of the duplex supervision channel. Construct with New,
 // then use Call/Notify to talk to the peer; inbound requests are dispatched
 // to the Handler passed to New. Safe for concurrent use.
@@ -168,6 +188,10 @@ type Conn struct {
 	wmu sync.Mutex
 
 	handler Handler
+
+	// maxFrame is the longest inbound frame readFrame accepts, in bytes; 0 for
+	// no limit. Set by WithMaxFrameSize.
+	maxFrame int
 
 	// records is the record lane: KindRelayRecord frames wait here, in the
 	// order the reader took them off the wire, for serveRecords. Buffered so the
@@ -191,7 +215,7 @@ type Conn struct {
 // New wraps a duplex byte stream (the stdio socket) as a Conn and starts its
 // read loop. handler dispatches inbound Calls/Notifies; pass nil for a side
 // that only originates Calls. The caller owns rwc's lifetime beyond Close.
-func New(rwc io.ReadWriteCloser, handler Handler) *Conn {
+func New(rwc io.ReadWriteCloser, handler Handler, opts ...Option) *Conn {
 	c := &Conn{
 		w:       json.NewEncoder(rwc),
 		rwc:     rwc,
@@ -199,6 +223,9 @@ func New(rwc io.ReadWriteCloser, handler Handler) *Conn {
 		pending: make(map[uint64]chan Frame),
 		records: make(chan Frame, recordLaneLimit),
 		done:    make(chan struct{}),
+	}
+	for _, opt := range opts {
+		opt(c)
 	}
 	// Recovers — see readLoop.
 	go c.readLoop(bufio.NewReader(rwc))
@@ -296,8 +323,8 @@ func (c *Conn) Notify(kind Kind, body any) error {
 // ErrClosed, and closes Done. It does NOT close the underlying stream — the
 // caller owns the socket's lifecycle (e.g. the broker's sidecarHandle) — and
 // therefore does NOT on its own stop the read-loop goroutine: that goroutine
-// stays blocked in Decode until the stream's owner/peer closes it, at which
-// point Decode errors and the loop exits via a second (idempotent) shutdown.
+// stays blocked in a read until the stream's owner/peer closes it, at which
+// point the read errors and the loop exits via a second (idempotent) shutdown.
 // So a caller reasoning about goroutine lifetime must close rwc, not just call
 // Close. Idempotent.
 func (c *Conn) Close() error {
@@ -357,18 +384,22 @@ func (c *Conn) readLoop(r *bufio.Reader) {
 			c.shutdown(fmt.Errorf("%w: read loop panicked; see the serving process's log", ErrClosed))
 		}
 	}()
-	// TODO(TFAC-1189): no frame-size limit — the decoder buffers a whole frame
-	// before returning it, so on the orchestrator's end a compromised sidecar
-	// can exhaust the memory every run that process supervises shares.
-	dec := json.NewDecoder(r)
 	for {
-		var f Frame
-		if err := dec.Decode(&f); err != nil {
+		line, err := c.readFrame(r)
+		if err != nil {
 			cause := ErrClosed
-			if err != io.EOF {
+			switch {
+			case errors.Is(err, ErrFrameTooLarge):
+				cause = fmt.Errorf("%w: read: %w", ErrClosed, err)
+			case err != io.EOF:
 				cause = fmt.Errorf("%w: read: %v", ErrClosed, err)
 			}
 			c.shutdown(cause)
+			return
+		}
+		var f Frame
+		if err := json.Unmarshal(line, &f); err != nil {
+			c.shutdown(fmt.Errorf("%w: read: %v", ErrClosed, err))
 			return
 		}
 		if f.IsResponse {
@@ -376,6 +407,38 @@ func (c *Conn) readLoop(r *bufio.Reader) {
 			continue
 		}
 		c.dispatchRequest(f)
+	}
+}
+
+// readFrame reads one frame — everything up to the newline the encoder ends
+// it with — and returns it without the newline. It takes the frame a read
+// buffer at a time and checks the limit before keeping each piece, so a peer
+// sending a frame over the limit, or one it never ends, has at most the limit
+// plus one buffer read from it before the frame is refused.
+//
+// The stream ending between frames is io.EOF; ending inside one is
+// io.ErrUnexpectedEOF.
+func (c *Conn) readFrame(r *bufio.Reader) ([]byte, error) {
+	var frame []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		size := len(frame) + len(chunk)
+		if err == nil {
+			size-- // the newline ends the frame and is not part of it
+		}
+		if c.maxFrame > 0 && size > c.maxFrame {
+			return nil, fmt.Errorf("%w (%d bytes)", ErrFrameTooLarge, c.maxFrame)
+		}
+		frame = append(frame, chunk...)
+		switch {
+		case err == nil:
+			return frame[:len(frame)-1], nil
+		case errors.Is(err, bufio.ErrBufferFull):
+		case err == io.EOF && len(frame) > 0:
+			return nil, io.ErrUnexpectedEOF
+		default:
+			return nil, err
+		}
 	}
 }
 

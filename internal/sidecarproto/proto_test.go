@@ -1,12 +1,14 @@
 package sidecarproto
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -471,4 +473,136 @@ func TestConn_AFullRecordLaneAnswersAtOnce(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("a record arriving at a full lane was not answered")
 	}
+}
+
+// testFrameLimit is the frame limit the size tests build their Conns with:
+// small enough to cross quickly, and many read buffers long.
+const testFrameLimit = 64 << 10
+
+// readBufferSize is the size of the bufio.Reader New reads through
+// (bufio.NewReader's default), which is how far past the limit a read may go
+// before an oversized frame is refused.
+const readBufferSize = 4096
+
+// countingStream is a duplex stream that counts the bytes read from it, so a
+// test can show how much of an oversized frame the reader took in.
+type countingStream struct {
+	net.Conn
+	read atomic.Int64
+}
+
+func (s *countingStream) Read(p []byte) (int, error) {
+	n, err := s.Conn.Read(p)
+	s.read.Add(int64(n))
+	return n, err
+}
+
+// helloFrame is a hello frame exactly n bytes long, its newline not counted,
+// padded out through the public key.
+func helloFrame(t *testing.T, n int) []byte {
+	t.Helper()
+	const prefix, suffix = `{"kind":"hello","body":{"pubkey":"`, `"}}`
+	pad := n - len(prefix) - len(suffix)
+	if pad < 0 {
+		t.Fatalf("a hello frame cannot be %d bytes", n)
+	}
+	return []byte(prefix + strings.Repeat("k", pad) + suffix)
+}
+
+// limitedConn builds a Conn with testFrameLimit over one end of a pipe, and
+// returns the Conn, the counted stream under it, and the raw other end the
+// test writes frames to.
+func limitedConn(t *testing.T, handler Handler) (*Conn, *countingStream, net.Conn) {
+	t.Helper()
+	ours, peer := net.Pipe()
+	stream := &countingStream{Conn: ours}
+	c := New(stream, handler, WithMaxFrameSize(testFrameLimit))
+	t.Cleanup(func() {
+		_ = c.Close()
+		_ = ours.Close()
+		_ = peer.Close()
+	})
+	return c, stream, peer
+}
+
+// writeRaw writes b to the peer end in the background. A write the reader
+// stops consuming blocks until the test's cleanup closes the pipe.
+func writeRaw(peer net.Conn, b []byte) {
+	go func() { _, _ = peer.Write(b) }()
+}
+
+// awaitOversized waits for c to shut down and checks that it shut down for an
+// oversized frame, having read at most the limit plus one buffer of it.
+func awaitOversized(t *testing.T, c *Conn, stream *countingStream) {
+	t.Helper()
+	select {
+	case <-c.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("the conn stayed open after a frame over the limit")
+	}
+	if err := c.Err(); !errors.Is(err, ErrFrameTooLarge) || !errors.Is(err, ErrClosed) {
+		t.Fatalf("shutdown cause = %v; want it to wrap ErrFrameTooLarge and ErrClosed", err)
+	}
+	if got, most := stream.read.Load(), int64(testFrameLimit+readBufferSize); got > most {
+		t.Fatalf("read %d bytes of the oversized frame; at most %d (the limit plus one buffer) should have been read", got, most)
+	}
+}
+
+func TestConn_AFrameAtTheLimitIsDelivered(t *testing.T) {
+	got := make(chan int, 1)
+	handler := HandlerFunc(func(_ context.Context, kind Kind, body json.RawMessage) (any, error) {
+		var h HelloBody
+		if err := json.Unmarshal(body, &h); err != nil {
+			t.Errorf("decode hello: %v", err)
+		}
+		got <- len(h.PubKey)
+		return nil, nil
+	})
+	c, _, peer := limitedConn(t, handler)
+
+	frame := helloFrame(t, testFrameLimit)
+	writeRaw(peer, append(frame, '\n'))
+	select {
+	case n := <-got:
+		if want := len(frame) - len(`{"kind":"hello","body":{"pubkey":""}}`); n != want {
+			t.Fatalf("delivered a %d-byte key; want %d", n, want)
+		}
+	case <-c.Done():
+		t.Fatalf("a frame at the limit closed the conn: %v", c.Err())
+	case <-time.After(2 * time.Second):
+		t.Fatal("a frame at the limit was never delivered")
+	}
+}
+
+// TestConn_AFrameOverTheLimitClosesTheConn: one byte over is refused before the
+// reader holds it, and the Call this side has open fails with the shutdown
+// cause rather than waiting for an answer that can no longer arrive.
+func TestConn_AFrameOverTheLimitClosesTheConn(t *testing.T) {
+	c, stream, peer := limitedConn(t, nil)
+
+	// The peer reads this side's request off the wire, so the Call is in
+	// flight, then answers with a frame one byte over the limit.
+	oversized := append(helloFrame(t, testFrameLimit+1), '\n')
+	go func() {
+		if _, err := bufio.NewReader(peer).ReadBytes('\n'); err != nil {
+			return
+		}
+		_, _ = peer.Write(oversized)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := c.Call(ctx, KindStartProxies, StartProxiesBody{HostVethIP: "10.42.1.1"}, nil)
+	if !errors.Is(err, ErrFrameTooLarge) || !errors.Is(err, ErrClosed) {
+		t.Fatalf("in-flight Call = %v; want the shutdown cause, wrapping ErrFrameTooLarge and ErrClosed", err)
+	}
+	awaitOversized(t, c, stream)
+}
+
+// TestConn_AFrameThatNeverEndsIsRefused: a peer that never sends the newline
+// is refused once the limit is passed, not read until it stops.
+func TestConn_AFrameThatNeverEndsIsRefused(t *testing.T) {
+	c, stream, peer := limitedConn(t, nil)
+	writeRaw(peer, []byte(strings.Repeat("x", 4*testFrameLimit)))
+	awaitOversized(t, c, stream)
 }

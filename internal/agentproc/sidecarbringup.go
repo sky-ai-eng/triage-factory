@@ -3,9 +3,14 @@ package agentproc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
@@ -17,6 +22,71 @@ import (
 // hello is the first thing the sidecar writes, so this only guards a sidecar
 // that started but wedged before minting its key.
 const sidecarHelloTimeout = 30 * time.Second
+
+// sidecarFrameLimit bounds each frame the orchestrator reads from a run's
+// sidecar. The sidecar is the process that parses hostile traffic, and this
+// one supervises every run on the executor, so without a bound a compromised
+// sidecar could send one frame big enough to exhaust the memory all of those
+// runs share, and write values of any size into the audit ledger through the
+// relay ops. A frame over the limit closes that run's supervision channel and
+// no other.
+//
+// The value comes from measuring the largest frames a working sidecar sends.
+// Nearly every frame describes one object, and the largest of those is the
+// record of a pull request the agent opened, which carries its body: under
+// 1 MiB for a body at GitHub's 65,536-character maximum, even with every
+// character escaped at the worst rate. The exception is a write of a review
+// draft, which carries the whole draft — once finalized, every staged comment
+// twice, the second copy in the proposed snapshot — and so grows with the
+// number of comments: 0.5 MiB for 100 comments of 2,000 characters, 15.8 MiB
+// for 100 comments of English prose each at GitHub's maximum length. 16 MiB
+// fits that, and is the cap the agenthost socket already puts on a single
+// request from the agent.
+const sidecarFrameLimit = 16 << 20
+
+// oversizedFrames owns the counter of frames refused at sidecarFrameLimit.
+// Package-level because a metric instrument is process-global by nature, and
+// swapped atomically so a test can back it with a manual reader.
+var oversizedFrames atomic.Pointer[oversizedFrameStats]
+
+func init() {
+	oversizedFrames.Store(newOversizedFrameStats(otel.GetMeterProvider()))
+}
+
+type oversizedFrameStats struct {
+	refused metric.Int64Counter
+}
+
+// newOversizedFrameStats builds the instrument against mp — production passes
+// the global provider, which telemetry.Init installs. An instrument-creation
+// error can only be a programmer error, and the API hands back a usable no-op
+// alongside it, so it is logged rather than propagated.
+func newOversizedFrameStats(mp metric.MeterProvider) *oversizedFrameStats {
+	counter, err := mp.Meter("internal/agentproc").Int64Counter("sidecar.frames.oversized",
+		metric.WithDescription("Supervision frames refused because a run's credential sidecar sent one over the size limit. Each refusal closes that run's supervision channel."))
+	if err != nil {
+		agentprocLog.Warn("oversized sidecar frame counter setup failed", "error", err)
+	}
+	return &oversizedFrameStats{refused: counter}
+}
+
+// reportOversizedFrame waits for a run's supervision channel to close and, if
+// it closed because the sidecar sent a frame over sidecarFrameLimit, logs and
+// counts the refusal. On the wire, a legitimate frame refused because the
+// limit is too low looks the same as an attack, so the log line names the
+// conversation where the two can be told apart. Returns when the channel
+// closes, which bring-up's failure paths and the run's teardown both do.
+func reportOversizedFrame(conn *sidecarproto.Conn, conversationID string) {
+	<-conn.Done()
+	if !errors.Is(conn.Err(), sidecarproto.ErrFrameTooLarge) {
+		return
+	}
+	agentprocLog.Error("sidecar sent a supervision frame over the size limit; closed its supervision channel",
+		"conversation", conversationID, "limit_bytes", sidecarFrameLimit)
+	if s := oversizedFrames.Load(); s != nil && s.refused != nil {
+		s.refused.Add(context.Background(), 1)
+	}
+}
 
 // SidecarProvisionFunc parks the run in awaiting-credentials with the
 // sidecar's published public key and returns the opaque sealed bundle the
@@ -101,6 +171,11 @@ func (s *sidecarSupervisor) Handle(ctx context.Context, kind sidecarproto.Kind, 
 // authorize/denial relay (the sidecar's git proxy calls back for the
 // DB-backed push decision, which only the orchestrator can make).
 type SidecarBringUpParams struct {
+	// ConversationID is the conversation the sidecar serves. It names the run
+	// in the log line written if the sidecar sends a frame over
+	// sidecarFrameLimit.
+	ConversationID string
+
 	// HostVethIP is the host-side veth address the sidecar binds every proxy
 	// on — reachable both from the sandbox (the jailed agent) and from the
 	// host (the orchestrator's own clone + agenthost).
@@ -164,7 +239,8 @@ func BringUpRunSidecar(ctx context.Context, sc cell.Sidecar, provision SidecarPr
 		return nil, nil, fmt.Errorf("agentproc: launched sidecar exposes no supervision channel")
 	}
 	sup := newSidecarSupervisor(params.Relay)
-	conn := sidecarproto.New(stream, sup)
+	conn := sidecarproto.New(stream, sup, sidecarproto.WithMaxFrameSize(sidecarFrameLimit))
+	go reportOversizedFrame(conn, params.ConversationID)
 
 	// The sidecar's hello is its first write; wait for it before provisioning
 	// (the brain needs the public key to seal against). Its own span because

@@ -341,8 +341,9 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	// the relayed workspace-add materialization clones through the run's proxies.
 	relaySrv := agenthost.NewRelayServer(stores, info, git)
 	params := agentproc.SidecarBringUpParams{
-		HostVethIP: c.ProxyHost(),
-		Git:        git,
+		ConversationID: conv.ID,
+		HostVethIP:     c.ProxyHost(),
+		Git:            git,
 		// The org-bound op server the sidecar's relay envelope dispatches to:
 		// the git proxy's push authz/audit (backed by the same git gate) plus
 		// the exec verb-trace DB ops, all identity-bound from ConversationInfo. Holds
