@@ -7,8 +7,8 @@ import (
 )
 
 // LinearTeamRulesStore owns the linear_team_rules table: one row per (team_id,
-// linear_team_id) carrying the team's pickup / in_progress / done rules for one
-// Linear team. The Linear sibling of JiraStatusRulesStore, with a Linear team
+// linear_team_id) carrying the team's pickup / in_progress / in_review / done
+// rules for one Linear team. The Linear sibling of JiraStatusRulesStore, with a Linear team
 // as the tracked unit where Jira has a project.
 //
 // A row is the team's commitment to watch the Linear team, armed or not (see

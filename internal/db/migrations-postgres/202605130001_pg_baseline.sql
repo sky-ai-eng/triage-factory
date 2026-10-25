@@ -716,11 +716,11 @@ CREATE TABLE public.jira_project_status_rules (
 -- unit. linear_team_key ("ENG") and linear_team_name are display values
 -- refreshed on every write. Members are jsonb arrays of {"id","name","type"}
 -- workflow-state refs, a canonical one such object; the id is the identity.
--- No in_review rule. Each rule is complete or empty on its own, as on
--- jira_project_status_rules: pickup has no constraint, and in_progress and done
--- bind members and a canonical together. A row with some rules mapped is
--- watched and unarmed; the poller asks nothing of it until all three are
--- mapped. "canonical is in members" needs a subquery, so it is the HTTP
+-- Each rule is complete or empty on its own, as on jira_project_status_rules:
+-- pickup has no constraint, and in_progress, in_review and done bind members
+-- and a canonical together. A row with some rules mapped is watched and
+-- unarmed; the poller asks nothing of it until pickup, in_progress and done
+-- are mapped. "canonical is in members" needs a subquery, so it is the HTTP
 -- validator's.
 CREATE TABLE public.linear_team_rules (
     team_id uuid NOT NULL,
@@ -735,6 +735,12 @@ CREATE TABLE public.linear_team_rules (
     pickup_members jsonb DEFAULT '[]'::jsonb NOT NULL,
     in_progress_members jsonb DEFAULT '[]'::jsonb NOT NULL,
     in_progress_canonical jsonb,
+    -- in_review is the OPTIONAL fourth rule, as on jira_project_status_rules.
+    -- The poller and the claim path read none of it, so an empty rule leaves a
+    -- row armed and a state may appear in both in_progress_members and
+    -- in_review_members.
+    in_review_members jsonb DEFAULT '[]'::jsonb NOT NULL,
+    in_review_canonical jsonb,
     done_members jsonb DEFAULT '[]'::jsonb NOT NULL,
     done_canonical jsonb,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -743,15 +749,21 @@ CREATE TABLE public.linear_team_rules (
     CONSTRAINT ltr_members_are_arrays CHECK (
         jsonb_typeof(pickup_members) = 'array'
         AND jsonb_typeof(in_progress_members) = 'array'
+        AND jsonb_typeof(in_review_members) = 'array'
         AND jsonb_typeof(done_members) = 'array'
     ),
     CONSTRAINT ltr_canonicals_are_objects CHECK (
         (in_progress_canonical IS NULL OR jsonb_typeof(in_progress_canonical) = 'object')
+        AND (in_review_canonical IS NULL OR jsonb_typeof(in_review_canonical) = 'object')
         AND (done_canonical IS NULL OR jsonb_typeof(done_canonical) = 'object')
     ),
     CONSTRAINT ltr_in_progress_complete_or_empty CHECK (
         (jsonb_array_length(in_progress_members) = 0 AND in_progress_canonical IS NULL)
         OR (jsonb_array_length(in_progress_members) > 0 AND in_progress_canonical IS NOT NULL)
+    ),
+    CONSTRAINT ltr_in_review_complete_or_empty CHECK (
+        (jsonb_array_length(in_review_members) = 0 AND in_review_canonical IS NULL)
+        OR (jsonb_array_length(in_review_members) > 0 AND in_review_canonical IS NOT NULL)
     ),
     CONSTRAINT ltr_done_complete_or_empty CHECK (
         (jsonb_array_length(done_members) = 0 AND done_canonical IS NULL)

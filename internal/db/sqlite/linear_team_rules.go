@@ -27,6 +27,7 @@ var _ db.LinearTeamRulesStore = (*linearTeamRulesStore)(nil)
 const linearRuleCols = `team_id, linear_team_id, linear_team_key, linear_team_name,
 	       pickup_members,
 	       in_progress_members, in_progress_canonical,
+	       in_review_members, in_review_canonical,
 	       done_members, done_canonical`
 
 func (s *linearTeamRulesStore) ListForTeam(ctx context.Context, teamID, workspaceID string) ([]domain.LinearTeamRules, error) {
@@ -94,8 +95,9 @@ func (s *linearTeamRulesStore) ReplaceForTeam(ctx context.Context, teamID, works
 				INSERT INTO linear_team_rules (
 					team_id, linear_workspace_id, linear_team_id, linear_team_key, linear_team_name,
 					pickup_members, in_progress_members, in_progress_canonical,
+					in_review_members, in_review_canonical,
 					done_members, done_canonical, updated_at
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 				ON CONFLICT(team_id, linear_team_id) DO UPDATE SET
 					linear_workspace_id = excluded.linear_workspace_id,
 					linear_team_key = excluded.linear_team_key,
@@ -103,6 +105,8 @@ func (s *linearTeamRulesStore) ReplaceForTeam(ctx context.Context, teamID, works
 					pickup_members = excluded.pickup_members,
 					in_progress_members = excluded.in_progress_members,
 					in_progress_canonical = excluded.in_progress_canonical,
+					in_review_members = excluded.in_review_members,
+					in_review_canonical = excluded.in_review_canonical,
 					done_members = excluded.done_members,
 					done_canonical = excluded.done_canonical,
 					updated_at = CURRENT_TIMESTAMP
@@ -110,6 +114,7 @@ func (s *linearTeamRulesStore) ReplaceForTeam(ctx context.Context, teamID, works
 				teamID, workspaceID, r.LinearTeamID, r.LinearTeamKey, r.LinearTeamName,
 				cols.Pickup,
 				cols.InProgress, nullStringValue(cols.InProgressCanonical),
+				cols.InReview, nullStringValue(cols.InReviewCanonical),
 				cols.Done, nullStringValue(cols.DoneCanonical),
 			); err != nil {
 				return fmt.Errorf("upsert linear_team_rules[%s]: %w", r.LinearTeamID, err)

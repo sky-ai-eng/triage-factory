@@ -46,8 +46,9 @@ export interface JiraProjectConfig {
 }
 
 // LinearTeamConfig is one tracked Linear team: its id, the key and name Linear
-// gave for it at the last save, and its three workflow-state rules. There is
-// no in_review rule for Linear.
+// gave for it at the last save, and the three workflow-state rules the form
+// edits. The server also stores an optional in_review rule; the form does not
+// hold it, and a save that leaves it out keeps it as stored.
 export interface LinearTeamConfig {
   id: string
   key: string
@@ -650,9 +651,8 @@ export type LinearTeamsSaveResult =
 
 // saveTeamLinearTeams persists the tracked Linear teams and their rules via
 // PUT /api/teams/{id}/linear-teams — a full replace-set, in display order.
-// Every rule is sent: the form always holds a team's whole rule set by id, so
-// there is no rule it cannot express, and an empty rule is a real request to
-// clear it.
+// Every rule the form holds is sent, by id, and an empty one is a real request
+// to clear it. in_review is not sent, which keeps it as stored.
 export async function saveTeamLinearTeams(
   teamId: string,
   teams: LinearTeamConfig[],
