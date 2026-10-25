@@ -504,6 +504,13 @@
   overflow: hidden;
 }
 
+/* Under its own heading the table hangs from it rather than centering: the
+   rows sit straight under "Which projects", and the height a short list does
+   not use falls below the pager, where it reads as the list's end. */
+.sp-listcol > .sp-tablewrap > .tb {
+  justify-content: flex-start;
+}
+
 .sp-listcol > .sp-chartwrap {
   flex: none;
   padding-bottom: 12px;
