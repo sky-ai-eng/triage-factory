@@ -118,8 +118,17 @@ What follows from it:
    `claude` user). The bot stays the account that pushes and that opens pull
    requests. The identity does not change with the key's health: a
    signer whose key stops verifying still authors the commits, unsigned.
-4. **The committer email is derived:** `<id>+<login>@users.noreply.github.com`.
-   An org signer may override it (§10.1).
+4. **The committer email is derived unless the signer sets one.** The
+   default is `<id>+<login>@users.noreply.github.com`, so an admin types no
+   email. A signer may name a real address instead, verified on its account
+   (§2, case C): an org signer through `PATCH commit-signer`, the deployment
+   signer through `TF_GITHUB_COMMIT_SIGNER_EMAIL`. A ruleset that requires
+   commit emails on the org's domain rejects the noreply address, so for that
+   org a real address is the only way to commit at all. A real address also
+   reads better in `git log` and stays the same when the login changes. TF
+   cannot read another account's verified emails, so a wrong address shows up
+   in the post-push check (§7). The address is on every commit, so it should
+   not be the one that recovers the account.
 5. **One signer per org.** The commit identity resolves, in order, to the
    org's signer, then the deployment signer (managed workspaces only), then
    today's identity (the App bot or the PAT owner).
@@ -254,8 +263,10 @@ the digest. Its test signs with TF's implementation and verifies with
   App:
   - `TF_GITHUB_COMMIT_SIGNER_LOGIN`
   - `TF_GITHUB_COMMIT_SIGNER_KEY` (secret, honours `_FILE`)
+  - `TF_GITHUB_COMMIT_SIGNER_EMAIL` (optional; unset means the derived
+    noreply address)
 
-  `docker-compose.yml` forwards both to the control service only.
+  `docker-compose.yml` forwards all three to the control service only.
   `credprovision.ProvisionForConversation` seals the signer's public half
   into `credbundle.GitHubCreds` (§5.5) when the signer is `active`. The
   signer's name, email and public key are all an executor gets.
@@ -284,7 +295,7 @@ One signature, the same for an org signer and the deployment signer:
    - the claim is still active, at the boot epoch the row names;
    - the org still resolves (§4.6) to the signer the row names, the same kind
      and account, and that signer is `active`;
-   - the claim and the org are within their signing budgets (§10.4).
+   - the claim and the org are within their signing budgets (§10.3).
 
    A sidecar that names a different signer gains nothing: the check passes
    only for the signer the org resolves to now. The pod then reads that
@@ -372,7 +383,7 @@ reaches it as a relay record, like `record_push`. `tf_system` (the executor)
 gets `INSERT`, `SELECT`, and `UPDATE (commit_sha, repository_id, pushed_at)`.
 Org members get `SELECT`.
 
-The signing budgets (§10.4) are counts over these rows, per org and per
+The signing budgets (§10.3) are counts over these rows, per org and per
 claim, so no counter is stored. The same rows give per-signer totals:
 grouping by `signer_host, signer_user_id` totals one account across every org
 that uses it, the deployment signer included.
@@ -464,7 +475,9 @@ A "Commit signing" section in `OrgSettings.tsx`, after "GitHub access":
 - **Using the deployment signer:** "Commits are signed as `<login>`, this
   deployment's signing account", with **Use your own account**.
 - **Pending / active / broken:** the status, the reason, and **Verify**,
-  **Rotate key** and **Remove**, for org admins.
+  **Rotate key** and **Remove**, for org admins. The commit email is shown
+  with **Change**, which says to add and verify the address on the account
+  first.
 
 ## 9. Rollout
 
@@ -501,25 +514,23 @@ signature.
 
 ## 10. Open questions
 
-1. **Email override.** An enterprise rule that requires author or committer
-   emails on the org's domain needs a real address, which is why the override
-   exists. Without one, v1 could drop it. Keep it?
-2. **GHES.** The minimum GHES version with SSH commit-signature verification
+1. **GHES.** The minimum GHES version with SSH commit-signature verification
    and the `ssh_signing_keys` endpoints needs checking before GHES orgs are
    offered signing.
-3. **Login renames.** The derived address contains the login. The periodic
+2. **Login renames.** The derived address contains the login. The periodic
    check re-derives it, but whether GitHub keeps verifying the old address
    after a rename is untested. If it does not, a rename makes commits from
-   runs started before the check fail with `no_user` until they finish.
-4. **The signing budget.** Initial values: 600 signatures per minute per org
+   runs started before the check fail with `no_user` until they finish. A
+   signer with a real address is not affected.
+3. **The signing budget.** Initial values: 600 signatures per minute per org
    and 5,000 per claim. A rebase of a long branch is the case to size for. The
    limits bound what one compromised or runaway run, or one org, can get
    signed. The deployment signer has no limit of its own: signing costs the
    control plane microseconds and GitHub does not limit signatures, so its
    total is the sum of its orgs', shown in the fleet console (§6).
-5. **The signing log in the UI.** `commit_signatures` is readable by members.
+4. **The signing log in the UI.** `commit_signatures` is readable by members.
    Showing it (per conversation, or per signer) is not part of v1.
-6. **Local verification in the jail.** With an allowed-signers file in the
+5. **Local verification in the jail.** With an allowed-signers file in the
    git config, `git log --show-signature` would verify inside a run. Nothing
    needs it yet.
 
@@ -530,7 +541,9 @@ signature.
 3. **The signer authors and commits** — chosen over a bot author with the
    signer as committer, which also verifies (§2, case E). One identity on the
    commit, and the same shape as Claude Code's commits.
-4. **A derived noreply address** — §3.4, from spike cases A and B.
+4. **A derived noreply address, or a real one** — §3.4, from spike cases A,
+   B and C. Chosen over the noreply address alone, which leaves an org whose
+   rules require its own domain unable to commit.
 5. **Every signing key on the control plane** — §3.6. Chosen over sealing
    per-org keys into the bundle for the sidecar to sign with, which saves a
    round trip per commit and keeps commits working while every control pod is
