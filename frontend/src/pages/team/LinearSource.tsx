@@ -145,12 +145,12 @@ const STAR_CONSEQUENCE: Record<
     member: (key) => `Claims can’t move ${key} issues until an admin stars another state.`,
   },
   'IN REVIEW': {
-    admin: 'Star another state there.',
-    member: () => 'An admin can star another state there.',
+    admin: 'Star a state there to replace it.',
+    member: () => 'An admin can star a state there to replace it.',
   },
   DONE: {
-    admin: 'Star another state there.',
-    member: () => 'An admin can star another state there.',
+    admin: 'Star a state there to replace it.',
+    member: () => 'An admin can star a state there to replace it.',
   },
 }
 
