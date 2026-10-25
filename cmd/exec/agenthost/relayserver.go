@@ -833,11 +833,14 @@ func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args js
 		}
 		if s.git != nil && s.git.RecordPush != nil {
 			s.git.RecordPush(ctx, gitproxy.PushedRef{
-				Repo:    a.Repo,
-				Ref:     a.Ref,
-				NewSHA:  a.NewSHA,
-				Created: a.Created,
-				Status:  a.Status,
+				Repo:          a.Repo,
+				Ref:           a.Ref,
+				NewSHA:        a.NewSHA,
+				Created:       a.Created,
+				Status:        a.Status,
+				Rejected:      a.Rejected,
+				Reason:        a.Reason,
+				RemoteMessage: a.RemoteMessage,
 			})
 		}
 

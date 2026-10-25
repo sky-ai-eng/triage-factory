@@ -1,15 +1,23 @@
 package agentproc
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
@@ -141,13 +149,16 @@ func (f *fakeRelayDispatcher) DispatchRecord(_ context.Context, ns, op, key stri
 	return nil
 }
 
-func bringUpWithDispatcher(t *testing.T, relay RelayDispatcher) *scriptedSidecar {
+// bringUpWithDispatcher brings a scripted sidecar up against relay and returns
+// the sidecar and the orchestrator's end of the supervision channel. opts
+// build the sidecar's end.
+func bringUpWithDispatcher(t *testing.T, relay RelayDispatcher, opts ...sidecarproto.Option) (*scriptedSidecar, *sidecarproto.Conn) {
 	t.Helper()
 	kp, _ := credseal.GenerateKeyPair()
 	orchEnd, sidecarEnd := net.Pipe()
 
 	sc := &scriptedSidecar{kp: kp, gotBundle: make(chan *credbundle.Bundle, 1), startEnv: nil}
-	sc.conn = sidecarproto.New(sidecarEnd, sc)
+	sc.conn = sidecarproto.New(sidecarEnd, sc, opts...)
 	go func() {
 		_ = sc.conn.Notify(sidecarproto.KindHello, sidecarproto.HelloBody{PubKey: base64.StdEncoding.EncodeToString(kp.Public[:])})
 	}()
@@ -169,7 +180,7 @@ func bringUpWithDispatcher(t *testing.T, relay RelayDispatcher) *scriptedSidecar
 		t.Fatalf("BringUpRunSidecar: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	return sc
+	return sc, conn
 }
 
 func TestBringUpSidecar_RelayCallRoutesToDispatcher(t *testing.T) {
@@ -177,7 +188,7 @@ func TestBringUpSidecar_RelayCallRoutesToDispatcher(t *testing.T) {
 		callReply: json.RawMessage(`{"allowed":true,"allowed_refs":["refs/heads/feature"]}`),
 		calls:     make(chan sidecarproto.RelayCallBody, 1),
 	}
-	sc := bringUpWithDispatcher(t, relay)
+	sc, _ := bringUpWithDispatcher(t, relay)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -211,7 +222,7 @@ func TestBringUpSidecar_RelayCallRoutesToDispatcher(t *testing.T) {
 
 func TestBringUpSidecar_RelayRecordRoutesToDispatcher(t *testing.T) {
 	relay := &fakeRelayDispatcher{records: make(chan sidecarproto.RelayRecordBody, 1)}
-	sc := bringUpWithDispatcher(t, relay)
+	sc, _ := bringUpWithDispatcher(t, relay)
 
 	// The sidecar's git proxy records a completed push through the run's
 	// record sender; the supervisor must route it, key included, to the
@@ -239,4 +250,180 @@ func TestBringUpSidecar_RelayRecordRoutesToDispatcher(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("push record was never routed to the dispatcher")
 	}
+}
+
+// largestReviewDraftDetails is the details of the largest review draft
+// sidecarproto.MaxSidecarFrameSize is set to fit: finalized, with 100 comments of English
+// prose (code punctuation included), each at GitHub's 65,536-character
+// maximum, every one held twice — once staged and once in the proposed
+// snapshot.
+func largestReviewDraftDetails() string {
+	const unit = "This change moves the `Foo` call ahead of the lock, so a caller that \"holds\" it <never> waits & retries.\n"
+	body := strings.Repeat(unit, 65536/len(unit)+1)[:65536]
+	line := 10
+	comments := make([]domain.ReviewArtifactComment, 100)
+	for i := range comments {
+		comments[i] = domain.ReviewArtifactComment{
+			ID: fmt.Sprintf("c%04d", i), Path: "internal/some/package/file_name.go",
+			Line: &line, Body: body, CommitSHA: strings.Repeat("a", 40),
+		}
+	}
+	return domain.MarshalReviewArtifactDetails(domain.ReviewArtifactDetails{
+		Number: 1311, HeadSHA: strings.Repeat("b", 40),
+		FinalizedHeadSHA: strings.Repeat("b", 40), FinalizedBaseSHA: strings.Repeat("c", 40),
+		ReviewBody: body, ReviewEvent: "COMMENT", StagedComments: comments,
+		Proposed: domain.ReviewArtifactProposed{Body: body, Event: "COMMENT", Comments: comments},
+	})
+}
+
+// reviewDetailsArgs is the wire shape of agenthost's update_review_details_if_pending
+// op, which agentproc cannot import.
+type reviewDetailsArgs struct {
+	ArtifactID  string `json:"artifact_id"`
+	DetailsJSON string `json:"details_json"`
+}
+
+// TestBringUpSidecar_TheLargestLegitimateFrameGetsThrough: the review-draft
+// write sidecarproto.MaxSidecarFrameSize is measured against passes the
+// sidecar's write limit, crosses the orchestrator's end of a real bring-up's
+// channel, and reaches the dispatcher whole.
+func TestBringUpSidecar_TheLargestLegitimateFrameGetsThrough(t *testing.T) {
+	relay := &fakeRelayDispatcher{callReply: json.RawMessage(`{"updated":true}`), calls: make(chan sidecarproto.RelayCallBody, 1)}
+	sc, conn := bringUpWithDispatcher(t, relay, sidecarproto.WithWriteLimit(sidecarproto.MaxSidecarFrameSize))
+
+	args := reviewDetailsArgs{ArtifactID: "art-1", DetailsJSON: largestReviewDraftDetails()}
+	// Measured the way the Conn writes it, so this checks the frame is the
+	// size the limit was set for and not a smaller stand-in.
+	rawArgs, _ := json.Marshal(args)
+	body, _ := json.Marshal(sidecarproto.RelayCallBody{Namespace: RelayNamespaceCore, Op: "update_review_details_if_pending", Args: rawArgs})
+	var frame bytes.Buffer
+	_ = json.NewEncoder(&frame).Encode(sidecarproto.Frame{Kind: sidecarproto.KindRelayCall, ID: 1, Body: body})
+	if size := frame.Len() - 1; size < 15<<20 || size > sidecarproto.MaxSidecarFrameSize {
+		t.Fatalf("the review-draft frame is %d bytes; the test needs one between 15 MiB and the %d-byte limit", size, sidecarproto.MaxSidecarFrameSize)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var out struct {
+		Updated bool `json:"updated"`
+	}
+	if err := CallRelay(ctx, sc.conn, RelayNamespaceCore, "update_review_details_if_pending", args, &out); err != nil {
+		t.Fatalf("relay the review draft: %v", err)
+	}
+	if !out.Updated {
+		t.Fatal("the dispatcher's answer did not come back")
+	}
+	got := <-relay.calls
+	var gotArgs reviewDetailsArgs
+	if err := json.Unmarshal(got.Args, &gotArgs); err != nil {
+		t.Fatalf("decode relayed args: %v", err)
+	}
+	if gotArgs.DetailsJSON != args.DetailsJSON {
+		t.Fatalf("the dispatcher saw %d bytes of details; the sidecar sent %d", len(gotArgs.DetailsJSON), len(args.DetailsJSON))
+	}
+	if err := conn.Err(); err != nil {
+		t.Fatalf("the channel closed: %v", err)
+	}
+}
+
+// TestBringUpSidecar_AFrameTooLargeToSendFailsOnlyItsCall: a working sidecar
+// refuses a frame the orchestrator would refuse, before sending any of it. The
+// call fails with ErrFrameTooLarge, which is what the agent's verb reports,
+// and the channel stays open for the next call.
+func TestBringUpSidecar_AFrameTooLargeToSendFailsOnlyItsCall(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	prev := oversizedFrames.Swap(newOversizedFrameStats(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	t.Cleanup(func() { oversizedFrames.Store(prev) })
+
+	relay := &fakeRelayDispatcher{callReply: json.RawMessage(`{"updated":true}`), calls: make(chan sidecarproto.RelayCallBody, 1)}
+	sc, conn := bringUpWithDispatcher(t, relay, sidecarproto.WithWriteLimit(sidecarproto.MaxSidecarFrameSize))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tooLarge := reviewDetailsArgs{ArtifactID: "art-1", DetailsJSON: strings.Repeat("x", sidecarproto.MaxSidecarFrameSize)}
+	err := CallRelay(ctx, sc.conn, RelayNamespaceCore, "update_review_details_if_pending", tooLarge, nil)
+	if !errors.Is(err, sidecarproto.ErrFrameTooLarge) {
+		t.Fatalf("relaying a frame over the limit = %v; want ErrFrameTooLarge", err)
+	}
+	select {
+	case <-relay.calls:
+		t.Fatal("the dispatcher was handed a frame the sidecar should have refused to send")
+	default:
+	}
+
+	var out struct {
+		Updated bool `json:"updated"`
+	}
+	if err := CallRelay(ctx, sc.conn, RelayNamespaceCore, "update_review_details_if_pending", reviewDetailsArgs{ArtifactID: "art-1", DetailsJSON: "{}"}, &out); err != nil {
+		t.Fatalf("the next call after the refused one: %v", err)
+	}
+	if !out.Updated {
+		t.Fatal("the dispatcher's answer did not come back")
+	}
+	if err := conn.Err(); err != nil {
+		t.Fatalf("the orchestrator's end closed: %v", err)
+	}
+	if n := oversizedFrameCount(t, reader); n != 0 {
+		t.Fatalf("sidecar.frames.oversized = %d; a frame refused before sending reached the orchestrator", n)
+	}
+}
+
+// TestBringUpSidecar_AFrameOverTheLimitClosesTheChannelAndIsCounted: once the
+// run is up, a frame over sidecarproto.MaxSidecarFrameSize from a sidecar that
+// skips its own write limit, as a compromised one would, closes the
+// orchestrator's end of the channel, and the refusal is counted.
+func TestBringUpSidecar_AFrameOverTheLimitClosesTheChannelAndIsCounted(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	prev := oversizedFrames.Swap(newOversizedFrameStats(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	t.Cleanup(func() { oversizedFrames.Store(prev) })
+
+	sc, conn := bringUpWithDispatcher(t, &fakeRelayDispatcher{})
+
+	// The write cannot finish once the orchestrator stops reading; the
+	// cleanup's close of the sidecar's end releases it.
+	go func() {
+		_ = sc.conn.Notify(sidecarproto.KindHello, sidecarproto.HelloBody{PubKey: strings.Repeat("k", sidecarproto.MaxSidecarFrameSize)})
+	}()
+	select {
+	case <-conn.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the channel stayed open after a frame over the limit")
+	}
+	if err := conn.Err(); !errors.Is(err, sidecarproto.ErrFrameTooLarge) {
+		t.Fatalf("channel closed with %v; want ErrFrameTooLarge", err)
+	}
+
+	// Counted by the goroutine watching the channel, so wait for it.
+	deadline := time.Now().Add(2 * time.Second)
+	for oversizedFrameCount(t, reader) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("sidecar.frames.oversized = %d; want 1", oversizedFrameCount(t, reader))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// oversizedFrameCount reads sidecar.frames.oversized off reader.
+func oversizedFrameCount(t *testing.T, reader *sdkmetric.ManualReader) int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+	var n int64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "sidecar.frames.oversized" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("sidecar.frames.oversized is %T, want an int64 sum", m.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				n += dp.Value
+			}
+		}
+	}
+	return n
 }

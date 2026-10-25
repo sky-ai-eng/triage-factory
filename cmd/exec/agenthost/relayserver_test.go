@@ -102,11 +102,17 @@ func TestRelayServer_RecordPushRoutesToRecorder(t *testing.T) {
 	}
 	s := NewRelayServer(db.Stores{}, ConversationInfo{}, git)
 
-	args, _ := json.Marshal(agentproc.RecordPushArgs{Repo: "acme/widgets", Ref: "refs/heads/feature", NewSHA: "deadbeef", Created: true, Status: 200})
+	args, _ := json.Marshal(agentproc.RecordPushArgs{
+		Repo: "acme/widgets", Ref: "refs/heads/feature", NewSHA: "deadbeef", Created: true, Status: 200,
+		Rejected: true, Reason: "push declined due to repository rule violations", RemoteMessage: "error: GH013: ...",
+	})
 	relayRecord(t, s, agentproc.RelayNamespaceCore, agentproc.OpRecordPush, args)
 
 	got := <-recorded
-	want := gitproxy.PushedRef{Repo: "acme/widgets", Ref: "refs/heads/feature", NewSHA: "deadbeef", Created: true, Status: 200}
+	want := gitproxy.PushedRef{
+		Repo: "acme/widgets", Ref: "refs/heads/feature", NewSHA: "deadbeef", Created: true, Status: 200,
+		Rejected: true, Reason: "push declined due to repository rule violations", RemoteMessage: "error: GH013: ...",
+	}
 	if got != want {
 		t.Fatalf("recorder saw %+v, want %+v", got, want)
 	}

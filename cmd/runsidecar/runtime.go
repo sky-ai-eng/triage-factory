@@ -1062,11 +1062,14 @@ func (r *credRuntime) gitProxyConfig(upstream string) *agentproc.GitProxyConfig 
 			// no executor push reaches the audit log.
 			r.recordAudit(agentproc.OpRecordPush,
 				agentproc.RecordPushArgs{
-					Repo:    push.Repo,
-					Ref:     push.Ref,
-					NewSHA:  push.NewSHA,
-					Created: push.Created,
-					Status:  push.Status,
+					Repo:          push.Repo,
+					Ref:           push.Ref,
+					NewSHA:        push.NewSHA,
+					Created:       push.Created,
+					Status:        push.Status,
+					Rejected:      push.Rejected,
+					Reason:        push.Reason,
+					RemoteMessage: push.RemoteMessage,
 				})
 		},
 	}

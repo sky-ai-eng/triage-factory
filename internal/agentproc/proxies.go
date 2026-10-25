@@ -679,10 +679,10 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 			bundle.jailEndpoints = append(bundle.jailEndpoints, strings.TrimPrefix(gitProxyURL, "http://"))
 		}
 		gitPairs = append(gitPairs, proxyPairs...)
-		// The proxy owns push capture for this run: it observes each push's
-		// actual upstream outcome (artifact on 2xx, audit failure row
-		// otherwise), so the pre-push hook — which fires before the transfer
-		// and can't know the outcome — stands down.
+		// The proxy owns push capture for this run: it observes each ref's
+		// actual upstream outcome (artifact for a ref that landed, audit
+		// failure row otherwise), so the pre-push hook — which fires before
+		// the transfer and can't know the outcome — stands down.
 		env = append(env, githooks.PushCaptureEnvVar+"="+githooks.PushCaptureProxy)
 	}
 
