@@ -1003,13 +1003,10 @@ type JiraProjectStatusRules struct {
 //
 // A row is the team's commitment to WATCH the Linear team. Each rule is
 // complete or empty on its own, as a Jira project's are (the linear_team_rules
-// CHECKs hold in_progress and done to members and a canonical together), so a
-// row may map some rules and leave others empty. It is armed only once all
-// three are mapped (see Armed); until then the poller asks nothing of it.
-//
-// There is no in_review rule. Nothing writes the in-review status for Jira
-// either (see JiraProjectStatusRules.InReviewMembers), so a Linear one would be
-// stored configuration that nothing reads.
+// CHECKs hold in_progress, in_review and done to members and a canonical
+// together), so a row may map some rules and leave others empty. It is armed
+// only once pickup, in_progress and done are mapped (see Armed); until then
+// the poller asks nothing of it.
 type LinearTeamRules struct {
 	// TeamID is the owning TF team. The List* store methods populate it;
 	// ReplaceForTeam ignores it (the team is a parameter).
@@ -1018,19 +1015,28 @@ type LinearTeamRules struct {
 	LinearTeamKey  string
 	LinearTeamName string
 	// PickupMembers are the states an unassigned issue waits in to be picked
-	// up. InProgress and Done carry the states that count as each, plus the
-	// canonical one TF moves an issue into; a canonical is always one of its
-	// rule's members.
+	// up. InProgress, InReview and Done carry the states that count as each,
+	// plus the canonical one TF moves an issue into; a canonical is always one
+	// of its rule's members.
+	//
+	// InReview is optional, and the poller and the claim path read none of
+	// it, as with JiraProjectStatusRules.InReviewMembers: nothing moves an
+	// issue into InReviewCanonical. It is stored so a team maps Linear and
+	// Jira to the same four columns. A state may sit in both
+	// InProgressMembers and InReviewMembers.
 	PickupMembers       []LinearStateRef
 	InProgressMembers   []LinearStateRef
 	InProgressCanonical LinearStateRef
+	InReviewMembers     []LinearStateRef
+	InReviewCanonical   LinearStateRef
 	DoneMembers         []LinearStateRef
 	DoneCanonical       LinearStateRef
 }
 
-// Armed reports whether every rule is mapped: pickup members to discover
-// issues with, and members plus a canonical on in_progress and done to move
-// them through.
+// Armed reports whether every rule the poller and the claim path use is
+// mapped: pickup members to discover issues with, and members plus a canonical
+// on in_progress and done to move them through. InReview is not among them,
+// so a team that leaves it unmapped is completely configured.
 func (r LinearTeamRules) Armed() bool {
 	return len(r.PickupMembers) > 0 &&
 		len(r.InProgressMembers) > 0 && !r.InProgressCanonical.IsZero() &&

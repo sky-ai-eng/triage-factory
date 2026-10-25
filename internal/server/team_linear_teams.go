@@ -13,9 +13,9 @@ import (
 
 // --------------------------------------------------------------------
 // PUT /api/teams/{team_id}/linear-teams — the Linear teams this team tracks,
-// and the pickup / in-progress / done workflow-state rules for each. The
-// Linear sibling of PUT /api/teams/{team_id}/jira-projects, with a Linear team
-// (by UUID) as the tracked unit.
+// and the pickup / in-progress / in-review / done workflow-state rules for
+// each. The Linear sibling of PUT /api/teams/{team_id}/jira-projects, with a
+// Linear team (by UUID) as the tracked unit.
 //
 // A replace-set: the body is the desired set, and a Linear team absent from it
 // is untracked. Team admin, non-archived team — the same gate as its Jira
@@ -28,14 +28,17 @@ import (
 //
 // **Each rule is complete or empty on its own**, as a Jira project's are. An
 // element naming only an id watches the team without mapping anything. Pickup
-// is a set of members; in_progress and done are members plus a canonical, both
-// or neither. A team with some rules mapped and others empty is stored, and is
-// armed — polled — only once all three are mapped, so a mapping can be built
-// one rule at a time and saved as it goes.
+// is a set of members; in_progress, in_review and done are members plus a
+// canonical, both or neither. A team with some rules mapped and others empty
+// is stored, and is armed — polled — only once pickup, in_progress and done
+// are mapped, so a mapping can be built one rule at a time and saved as it
+// goes. in_review is optional, as on Jira: the poller and the claim path read
+// none of it, so mapping or clearing it never arms or disarms a team.
 //
 // An absent rule keeps the stored one, as on the Jira route, so an id-only
-// element for a team that is already armed leaves it armed. Clearing any one
-// rule disarms it; clearing all three leaves it watched with nothing mapped.
+// element for a team that is already armed leaves it armed. Clearing pickup,
+// in_progress or done disarms it; clearing every rule leaves it watched with
+// nothing mapped.
 // --------------------------------------------------------------------
 
 // linearPickupRuleWrite is the pickup rule's write shape: members and nothing
@@ -59,6 +62,7 @@ type linearTeamWrite struct {
 	ID         string                 `json:"id"`
 	Pickup     *linearPickupRuleWrite `json:"pickup"`
 	InProgress *linearStateRuleWrite  `json:"in_progress"`
+	InReview   *linearStateRuleWrite  `json:"in_review"`
 	Done       *linearStateRuleWrite  `json:"done"`
 }
 
@@ -104,6 +108,7 @@ type linearTeamSettings struct {
 	Armed      bool                 `json:"armed"`
 	Pickup     linearPickupRuleJSON `json:"pickup"`
 	InProgress linearStateRuleJSON  `json:"in_progress"`
+	InReview   linearStateRuleJSON  `json:"in_review"`
 	Done       linearStateRuleJSON  `json:"done"`
 }
 
@@ -209,8 +214,9 @@ func (s *Server) handleTeamLinearTeamsPut(w http.ResponseWriter, r *http.Request
 	}
 
 	// Re-due the org's Linear poll only when what the poller would ask moved:
-	// watching a team without mapping it contributes nothing to a poll, and
-	// resending an identical set changes nothing at all.
+	// watching a team without mapping it contributes nothing to a poll, nor
+	// does its in_review rule, and resending an identical set changes nothing
+	// at all.
 	if !sameArmedLinearTeams(prev, next) && s.onLinearChanged != nil {
 		s.MarkLinearRestarted(r.Context(), orgID)
 		go s.onLinearChanged(orgID)
@@ -248,7 +254,7 @@ func shapeLinearTeamWishes(w http.ResponseWriter, in []linearTeamWrite) ([]linea
 		for _, rule := range []struct {
 			name  string
 			write *linearStateRuleWrite
-		}{{"in_progress", t.InProgress}, {"done", t.Done}} {
+		}{{"in_progress", t.InProgress}, {"in_review", t.InReview}, {"done", t.Done}} {
 			if rule.write == nil {
 				continue
 			}
@@ -346,6 +352,7 @@ func toLinearTeamSettings(in []domain.LinearTeamRules) []linearTeamSettings {
 			Armed:      r.Armed(),
 			Pickup:     linearPickupRuleJSON{Members: toLinearStateRefsJSON(r.PickupMembers)},
 			InProgress: toLinearStateRuleJSON(r.InProgressMembers, r.InProgressCanonical),
+			InReview:   toLinearStateRuleJSON(r.InReviewMembers, r.InReviewCanonical),
 			Done:       toLinearStateRuleJSON(r.DoneMembers, r.DoneCanonical),
 		})
 	}
@@ -369,8 +376,8 @@ func toLinearStateRefsJSON(refs []domain.LinearStateRef) []linearStateRefJSON {
 }
 
 // sameArmedLinearTeams reports whether two sets arm the same Linear teams with
-// the same rules, by id. Order and display names are not compared: neither
-// changes anything a poll asks Linear.
+// the same rules, by id. Order, display names and the in_review rule are not
+// compared: none of them changes anything a poll asks Linear.
 func sameArmedLinearTeams(a, b []domain.LinearTeamRules) bool {
 	key := func(in []domain.LinearTeamRules) []string {
 		var out []string

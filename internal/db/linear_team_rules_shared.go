@@ -15,6 +15,8 @@ type LinearRuleJSON struct {
 	Pickup              string
 	InProgress          string
 	InProgressCanonical string
+	InReview            string
+	InReviewCanonical   string
 	Done                string
 	DoneCanonical       string
 }
@@ -35,6 +37,12 @@ func MarshalLinearTeamRules(r domain.LinearTeamRules) (LinearRuleJSON, error) {
 	if out.InProgressCanonical, err = domain.MarshalLinearStateRef(r.InProgressCanonical); err != nil {
 		return LinearRuleJSON{}, fmt.Errorf("marshal in_progress_canonical for %s: %w", r.LinearTeamID, err)
 	}
+	if out.InReview, err = domain.MarshalLinearStateRefs(r.InReviewMembers); err != nil {
+		return LinearRuleJSON{}, fmt.Errorf("marshal in_review_members for %s: %w", r.LinearTeamID, err)
+	}
+	if out.InReviewCanonical, err = domain.MarshalLinearStateRef(r.InReviewCanonical); err != nil {
+		return LinearRuleJSON{}, fmt.Errorf("marshal in_review_canonical for %s: %w", r.LinearTeamID, err)
+	}
 	if out.Done, err = domain.MarshalLinearStateRefs(r.DoneMembers); err != nil {
 		return LinearRuleJSON{}, fmt.Errorf("marshal done_members for %s: %w", r.LinearTeamID, err)
 	}
@@ -47,17 +55,19 @@ func MarshalLinearTeamRules(r domain.LinearTeamRules) (LinearRuleJSON, error) {
 // ScanLinearTeamRules decodes one linear_team_rules row in the order each
 // dialect store's linearRuleCols projects it: team_id, linear_team_id,
 // linear_team_key, linear_team_name, pickup_members, in_progress_members,
-// in_progress_canonical, done_members, done_canonical — the JSON columns as
-// text. Both dialects read the same plain types once Postgres casts its jsonb
-// to text, so the decode lives here once rather than per dialect.
+// in_progress_canonical, in_review_members, in_review_canonical, done_members,
+// done_canonical — the JSON columns as text. Both dialects read the same
+// plain types once Postgres casts its jsonb to text, so the decode lives here
+// once rather than per dialect.
 func ScanLinearTeamRules(scan func(...any) error) (domain.LinearTeamRules, error) {
 	var (
-		r                                  domain.LinearTeamRules
-		pickup, inProgress, done           string
-		inProgressCanonical, doneCanonical sql.NullString
+		r                                                     domain.LinearTeamRules
+		pickup, inProgress, inReview, done                    string
+		inProgressCanonical, inReviewCanonical, doneCanonical sql.NullString
 	)
 	if err := scan(&r.TeamID, &r.LinearTeamID, &r.LinearTeamKey, &r.LinearTeamName,
-		&pickup, &inProgress, &inProgressCanonical, &done, &doneCanonical); err != nil {
+		&pickup, &inProgress, &inProgressCanonical, &inReview, &inReviewCanonical,
+		&done, &doneCanonical); err != nil {
 		return domain.LinearTeamRules{}, err
 	}
 	var err error
@@ -69,6 +79,12 @@ func ScanLinearTeamRules(scan func(...any) error) (domain.LinearTeamRules, error
 	}
 	if r.InProgressCanonical, err = domain.UnmarshalLinearStateRef(inProgressCanonical.String); err != nil {
 		return domain.LinearTeamRules{}, fmt.Errorf("unmarshal in_progress_canonical for %s: %w", r.LinearTeamID, err)
+	}
+	if r.InReviewMembers, err = domain.UnmarshalLinearStateRefs(inReview); err != nil {
+		return domain.LinearTeamRules{}, fmt.Errorf("unmarshal in_review_members for %s: %w", r.LinearTeamID, err)
+	}
+	if r.InReviewCanonical, err = domain.UnmarshalLinearStateRef(inReviewCanonical.String); err != nil {
+		return domain.LinearTeamRules{}, fmt.Errorf("unmarshal in_review_canonical for %s: %w", r.LinearTeamID, err)
 	}
 	if r.DoneMembers, err = domain.UnmarshalLinearStateRefs(done); err != nil {
 		return domain.LinearTeamRules{}, fmt.Errorf("unmarshal done_members for %s: %w", r.LinearTeamID, err)

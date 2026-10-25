@@ -30,6 +30,7 @@ var _ db.LinearTeamRulesStore = (*linearTeamRulesStore)(nil)
 const linearRuleCols = `r.team_id, r.linear_team_id, r.linear_team_key, r.linear_team_name,
 	       r.pickup_members::text,
 	       r.in_progress_members::text, r.in_progress_canonical::text,
+	       r.in_review_members::text, r.in_review_canonical::text,
 	       r.done_members::text, r.done_canonical::text`
 
 func (s *linearTeamRulesStore) ListForTeam(ctx context.Context, teamID, workspaceID string) ([]domain.LinearTeamRules, error) {
@@ -95,8 +96,9 @@ func (s *linearTeamRulesStore) ReplaceForTeam(ctx context.Context, teamID, works
 				INSERT INTO linear_team_rules (
 					team_id, linear_workspace_id, linear_team_id, linear_team_key, linear_team_name,
 					pickup_members, in_progress_members, in_progress_canonical,
+					in_review_members, in_review_canonical,
 					done_members, done_canonical, updated_at
-				) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, now())
+				) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb, now())
 				ON CONFLICT (team_id, linear_team_id) DO UPDATE SET
 					linear_workspace_id = EXCLUDED.linear_workspace_id,
 					linear_team_key = EXCLUDED.linear_team_key,
@@ -104,6 +106,8 @@ func (s *linearTeamRulesStore) ReplaceForTeam(ctx context.Context, teamID, works
 					pickup_members = EXCLUDED.pickup_members,
 					in_progress_members = EXCLUDED.in_progress_members,
 					in_progress_canonical = EXCLUDED.in_progress_canonical,
+					in_review_members = EXCLUDED.in_review_members,
+					in_review_canonical = EXCLUDED.in_review_canonical,
 					done_members = EXCLUDED.done_members,
 					done_canonical = EXCLUDED.done_canonical,
 					updated_at = now()
@@ -111,6 +115,7 @@ func (s *linearTeamRulesStore) ReplaceForTeam(ctx context.Context, teamID, works
 				teamID, workspaceID, r.LinearTeamID, r.LinearTeamKey, r.LinearTeamName,
 				cols.Pickup,
 				cols.InProgress, nullString(cols.InProgressCanonical),
+				cols.InReview, nullString(cols.InReviewCanonical),
 				cols.Done, nullString(cols.DoneCanonical),
 			); err != nil {
 				return fmt.Errorf("upsert linear_team_rules[%s]: %w", r.LinearTeamID, err)

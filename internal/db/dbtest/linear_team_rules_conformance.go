@@ -32,7 +32,9 @@ func linearState(name, typ string) domain.LinearStateRef {
 	return domain.LinearStateRef{ID: "state-" + name, Name: name, Type: typ}
 }
 
-// armedLinearRules is a fully mapped row for linearTeamID.
+// armedLinearRules is a row for linearTeamID with every rule but the optional
+// in_review mapped. The stores hand empty members back as empty slices, never
+// nil, so that is what its in_review carries.
 func armedLinearRules(linearTeamID, key string) domain.LinearTeamRules {
 	started := linearState(key+"-started", "started")
 	done := linearState(key+"-done", "completed")
@@ -43,6 +45,7 @@ func armedLinearRules(linearTeamID, key string) domain.LinearTeamRules {
 		PickupMembers:       []domain.LinearStateRef{linearState(key+"-todo", "unstarted"), linearState(key+"-backlog", "backlog")},
 		InProgressMembers:   []domain.LinearStateRef{started},
 		InProgressCanonical: started,
+		InReviewMembers:     []domain.LinearStateRef{},
 		DoneMembers:         []domain.LinearStateRef{done, linearState(key+"-canceled", "canceled")},
 		DoneCanonical:       done,
 	}
@@ -57,6 +60,7 @@ func unarmedLinearRules(linearTeamID, key string) domain.LinearTeamRules {
 		LinearTeamName:    key + " Team",
 		PickupMembers:     []domain.LinearStateRef{},
 		InProgressMembers: []domain.LinearStateRef{},
+		InReviewMembers:   []domain.LinearStateRef{},
 		DoneMembers:       []domain.LinearStateRef{},
 	}
 }
@@ -81,9 +85,10 @@ func linearTeamIDs(rules []domain.LinearTeamRules) []string {
 // RunLinearTeamRulesConformance is the shared suite for
 // db.LinearTeamRulesStore: replace-set semantics (an absent id's row is
 // deleted, a present one upserted, another team's rows untouched), ordering,
-// the stored set ReplaceForTeam returns, the org union, TracksTeamSystem, the
-// per-rule complete-or-empty CHECKs, and every read and write confined to the
-// workspace it is given. RLS is the Postgres backend's own test.
+// the stored set ReplaceForTeam returns, the optional in_review rule, the org
+// union, TracksTeamSystem, the per-rule complete-or-empty CHECKs, and every
+// read and write confined to the workspace it is given. RLS is the Postgres
+// backend's own test.
 func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -262,6 +267,38 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 		}
 	})
 
+	t.Run("ReplaceForTeam_StoresAnInReviewRule", func(t *testing.T) {
+		// in_review round-trips, may share a state with in_progress, and arms
+		// nothing: an armed team that maps it is still armed, and a team that
+		// maps it alone is not.
+		f := factory(t)
+		withReview := armedLinearRules("lt-a", "AAA")
+		review := linearState("AAA-review", "started")
+		withReview.InReviewMembers = []domain.LinearStateRef{review, withReview.InProgressCanonical}
+		withReview.InReviewCanonical = review
+		onlyReview := unarmedLinearRules("lt-b", "BBB")
+		onlyReview.InReviewMembers = []domain.LinearStateRef{linearState("BBB-review", "started")}
+		onlyReview.InReviewCanonical = onlyReview.InReviewMembers[0]
+		input := []domain.LinearTeamRules{withReview, onlyReview}
+		got, err := f.Store.ReplaceForTeam(ctx, f.TeamID, linearWorkspace, input)
+		if err != nil {
+			t.Fatalf("ReplaceForTeam: %v", err)
+		}
+		if want := withTeam(input, f.TeamID); !reflect.DeepEqual(got, want) {
+			t.Errorf("ReplaceForTeam returned\n%#v\nwant\n%#v", got, want)
+		}
+		read, err := f.Store.ListForTeamSystem(ctx, f.TeamID, linearWorkspace)
+		if err != nil {
+			t.Fatalf("ListForTeamSystem: %v", err)
+		}
+		if !reflect.DeepEqual(read, got) {
+			t.Errorf("ListForTeamSystem after the write =\n%#v\nwant what ReplaceForTeam returned\n%#v", read, got)
+		}
+		if len(read) != 2 || !read[0].Armed() || read[1].Armed() {
+			t.Errorf("armed = %v, want lt-a armed with in_review mapped and lt-b unarmed with only in_review", read)
+		}
+	})
+
 	t.Run("ReplaceForTeam_RefusesARuleWithoutItsTarget", func(t *testing.T) {
 		// The per-rule CHECKs, in both dialects: a write-target rule is
 		// members and a canonical together, or neither.
@@ -270,9 +307,15 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 		noCanonical.InProgressCanonical = domain.LinearStateRef{}
 		noMembers := armedLinearRules("lt-b", "BBB")
 		noMembers.DoneMembers = []domain.LinearStateRef{}
+		reviewNoCanonical := armedLinearRules("lt-c", "CCC")
+		reviewNoCanonical.InReviewMembers = []domain.LinearStateRef{linearState("CCC-review", "started")}
+		reviewNoMembers := armedLinearRules("lt-d", "DDD")
+		reviewNoMembers.InReviewCanonical = linearState("DDD-review", "started")
 		for name, r := range map[string]domain.LinearTeamRules{
 			"in_progress members, no canonical": noCanonical,
 			"done canonical, no members":        noMembers,
+			"in_review members, no canonical":   reviewNoCanonical,
+			"in_review canonical, no members":   reviewNoMembers,
 		} {
 			if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, linearWorkspace, []domain.LinearTeamRules{r}); err == nil {
 				t.Errorf("%s: ReplaceForTeam stored a rule without its target", name)

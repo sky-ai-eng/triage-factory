@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,9 +60,9 @@ func linearStateNames(refs []domain.LinearStateRef) string {
 }
 
 // TestToTrackerLinearRules_SkipsUnarmed: a Linear team reaches the tracker only
-// once all three rules are mapped. One watched with nothing mapped has no
-// states to ask about, and one mapped in part has issues to discover with
-// nowhere to move them, or the reverse.
+// once pickup, in_progress and done are mapped. One watched with nothing
+// mapped has no states to ask about, and one mapped in part has issues to
+// discover with nowhere to move them, or the reverse.
 func TestToTrackerLinearRules_SkipsUnarmed(t *testing.T) {
 	pickupOnly := domain.LinearTeamRules{TeamID: "team-a", LinearTeamID: "web", LinearTeamKey: "WEB", PickupMembers: linRefs("Todo")}
 	noDone := armedLinear("team-a", "api", []string{"Todo"}, []string{"Done"})
@@ -74,6 +75,23 @@ func TestToTrackerLinearRules_SkipsUnarmed(t *testing.T) {
 	})
 	if ids := linearTeamIDs(got); ids != "eng" {
 		t.Errorf("merged teams = %q, want eng alone", ids)
+	}
+}
+
+// TestToTrackerLinearRules_IgnoresInReview: the in_review rule reaches nothing
+// the tracker is asked. An armed team that maps it merges exactly as one that
+// does not, and a team that maps only it is skipped as unarmed.
+func TestToTrackerLinearRules_IgnoresInReview(t *testing.T) {
+	plain := armedLinear("team-a", "eng", []string{"Todo"}, []string{"Done"})
+	withReview := plain
+	withReview.InReviewMembers, withReview.InReviewCanonical = linRefs("In Review", "In Progress"), linRef("In Review")
+	onlyReview := domain.LinearTeamRules{
+		TeamID: "team-a", LinearTeamID: "ops", LinearTeamKey: "OPS",
+		InReviewMembers: linRefs("In Review"), InReviewCanonical: linRef("In Review"),
+	}
+	got := toTrackerLinearRules([]domain.LinearTeamRules{withReview, onlyReview})
+	if want := toTrackerLinearRules([]domain.LinearTeamRules{plain}); !reflect.DeepEqual(got, want) {
+		t.Errorf("with in_review mapped =\n%+v\nwant the same as without\n%+v", got, want)
 	}
 }
 

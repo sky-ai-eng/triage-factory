@@ -16,9 +16,10 @@ import (
 
 func teamLinearTeamsPath(teamID string) string { return "/api/teams/" + teamID + "/linear-teams" }
 
-// armedLinearTeam is a body element mapping all three rules the way the
-// picker's pre-fill would: pickup from the not-started states, in_progress
-// from the started ones, done from completed and canceled.
+// armedLinearTeam is a body element mapping the three rules that arm a team
+// the way the picker's pre-fill would: pickup from the not-started states,
+// in_progress from the started ones, done from completed and canceled. It
+// leaves the optional in_review out.
 func armedLinearTeam(id string) map[string]any {
 	return map[string]any{
 		"id":          id,
@@ -141,6 +142,7 @@ func TestLinearTeamsPut_WatchWithoutRules(t *testing.T) {
 		ID: linearTeamEng, Key: "ENG", Name: "Engineering", Armed: false,
 		Pickup:     linearPickupRuleJSON{Members: []linearStateRefJSON{}},
 		InProgress: linearStateRuleJSON{Members: []linearStateRefJSON{}},
+		InReview:   linearStateRuleJSON{Members: []linearStateRefJSON{}},
 		Done:       linearStateRuleJSON{Members: []linearStateRefJSON{}},
 	}}
 	if !reflect.DeepEqual(got, want) {
@@ -200,7 +202,8 @@ func TestLinearTeamsPut_ShapeFaults(t *testing.T) {
 		{"a state twice", map[string]any{"linear_teams": []map[string]any{withPickup(linearStateTodo, linearStateTodo)}}, "INVALID_FIELD", "linear_teams[0].pickup.member_ids"},
 		{"canonical not an id", map[string]any{"linear_teams": []map[string]any{withDone(map[string]any{"member_ids": []string{linearStateDone}, "canonical_id": "Done"})}}, "INVALID_FIELD", "linear_teams[0].done.canonical_id"},
 		{"pickup has no canonical", map[string]any{"linear_teams": []map[string]any{{"id": linearTeamEng, "pickup": map[string]any{"member_ids": []string{}, "canonical_id": linearStateTodo}}}}, "UNKNOWN_FIELD", "canonical_id"},
-		{"an in_review rule", map[string]any{"linear_teams": []map[string]any{{"id": linearTeamEng, "in_review": map[string]any{}}}}, "UNKNOWN_FIELD", "in_review"},
+		{"in_review canonical not an id", map[string]any{"linear_teams": []map[string]any{{"id": linearTeamEng, "in_review": map[string]any{"member_ids": []string{linearStateReview}, "canonical_id": "In Review"}}}}, "INVALID_FIELD", "linear_teams[0].in_review.canonical_id"},
+		{"in_review state not an id", map[string]any{"linear_teams": []map[string]any{{"id": linearTeamEng, "in_review": map[string]any{"member_ids": []string{"In Review"}, "canonical_id": linearStateReview}}}}, "INVALID_FIELD", "linear_teams[0].in_review.member_ids"},
 		{"a name with the id", map[string]any{"linear_teams": []map[string]any{{"id": linearTeamEng, "name": "Engineering"}}}, "UNKNOWN_FIELD", "name"},
 	}
 	for _, c := range cases {

@@ -64,11 +64,11 @@ type linearTeamPlan struct {
 	// name come from Linear.
 	newTeam bool
 
-	pickup, inProgress, done linearRuleWish
+	pickup, inProgress, inReview, done linearRuleWish
 }
 
 func (p linearTeamPlan) changedIDs() int {
-	return len(p.pickup.ids()) + len(p.inProgress.ids()) + len(p.done.ids())
+	return len(p.pickup.ids()) + len(p.inProgress.ids()) + len(p.inReview.ids()) + len(p.done.ids())
 }
 
 // needsLinear reports whether this element asks Linear anything. A changed
@@ -98,6 +98,7 @@ func (s *Server) gateLinearTeams(
 			newTeam:    !isStored,
 			pickup:     requestedLinearPickup(wish.write.Pickup, prior.PickupMembers),
 			inProgress: requestedLinearRule(wish.write.InProgress, prior.InProgressMembers, prior.InProgressCanonical),
+			inReview:   requestedLinearRule(wish.write.InReview, prior.InReviewMembers, prior.InReviewCanonical),
 			done:       requestedLinearRule(wish.write.Done, prior.DoneMembers, prior.DoneCanonical),
 			row: domain.LinearTeamRules{
 				LinearTeamID:   wish.write.ID,
@@ -111,6 +112,10 @@ func (s *Server) gateLinearTeams(
 		if !p.inProgress.changed {
 			p.row.InProgressMembers = slices.Clone(prior.InProgressMembers)
 			p.row.InProgressCanonical = prior.InProgressCanonical
+		}
+		if !p.inReview.changed {
+			p.row.InReviewMembers = slices.Clone(prior.InReviewMembers)
+			p.row.InReviewCanonical = prior.InReviewCanonical
 		}
 		if !p.done.changed {
 			p.row.DoneMembers = slices.Clone(prior.DoneMembers)
@@ -166,7 +171,7 @@ func (s *Server) gateLinearTeams(
 			continue
 		}
 
-		// One read per team with a changed rule, shared by all three rules:
+		// One read per team with a changed rule, shared by every rule:
 		// it is the gate, and it is where each state's name and type come
 		// from.
 		states, err := client.ListWorkflowStates(r.Context(), p.wish.write.ID)
@@ -204,6 +209,7 @@ func (s *Server) gateLinearTeams(
 			canonical *domain.LinearStateRef
 		}{
 			{"in_progress", p.inProgress, &row.InProgressMembers, &row.InProgressCanonical},
+			{"in_review", p.inReview, &row.InReviewMembers, &row.InReviewCanonical},
 			{"done", p.done, &row.DoneMembers, &row.DoneCanonical},
 		} {
 			if !rule.wish.changed {
@@ -227,13 +233,15 @@ func (s *Server) gateLinearTeams(
 // decide: a write-target rule with members and no canonical (or the reverse),
 // and a canonical outside its rule's members. Each rule is complete or empty
 // on its own, as a Jira project's are, so a team with some rules mapped and
-// others empty is stored, and reads as unarmed until all three are mapped.
+// others empty is stored, and reads as unarmed until pickup, in_progress and
+// done are mapped. in_review is checked like the other write targets, though
+// it arms nothing.
 func checkLinearPlanShape(v *httpx.Validation, p linearTeamPlan) {
 	base := fmt.Sprintf("linear_teams[%d]", p.wish.index)
 	for _, rule := range []struct {
 		name string
 		wish linearRuleWish
-	}{{"in_progress", p.inProgress}, {"done", p.done}} {
+	}{{"in_progress", p.inProgress}, {"in_review", p.inReview}, {"done", p.done}} {
 		if !rule.wish.changed {
 			continue
 		}

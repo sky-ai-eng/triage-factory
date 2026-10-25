@@ -123,7 +123,7 @@ func TestLinearTeamRulesStore_Postgres_RLS(t *testing.T) {
 // TestLinearTeamRules_Postgres_ChecksRefuseMalformedRows is the SQLite test of
 // the same name against the jsonb columns: a rule column of the wrong JSON
 // shape and a write-target rule without its target are refused by the schema
-// itself, and a partly mapped row is not.
+// itself, in_review included, and a partly mapped row is not.
 func TestLinearTeamRules_Postgres_ChecksRefuseMalformedRows(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -162,6 +162,32 @@ func TestLinearTeamRules_Postgres_ChecksRefuseMalformedRows(t *testing.T) {
 		"target, no members": {arr, arr, "[]", ref, ref},
 	} {
 		if err := insert(row.pickup, row.inProgress, row.inProgressCanonical, row.done, row.doneCanonical); err == nil {
+			t.Errorf("%s: the row was accepted", name)
+		}
+	}
+
+	insertReview := func(inReview string, inReviewCanonical any) error {
+		_, err := h.AdminDB.Exec(`
+			INSERT INTO linear_team_rules (team_id, linear_workspace_id, linear_team_id, linear_team_key,
+				pickup_members, in_progress_members, in_progress_canonical,
+				in_review_members, in_review_canonical, done_members, done_canonical)
+			VALUES ($1, 'ws-test', gen_random_uuid()::text, 'KEY', $2::jsonb, $2::jsonb, $3::jsonb, $4::jsonb, $5::jsonb, $2::jsonb, $3::jsonb)`,
+			teamID, arr, ref, inReview, inReviewCanonical)
+		return err
+	}
+	if err := insertReview(arr, ref); err != nil {
+		t.Fatalf("a row mapping in_review was refused: %v", err)
+	}
+	for name, row := range map[string]struct {
+		members   string
+		canonical any
+	}{
+		"in_review object as members":  {"{}", ref},
+		"in_review array as canonical": {arr, "[]"},
+		"in_review members, no target": {arr, nil},
+		"in_review target, no members": {"[]", ref},
+	} {
+		if err := insertReview(row.members, row.canonical); err == nil {
 			t.Errorf("%s: the row was accepted", name)
 		}
 	}
