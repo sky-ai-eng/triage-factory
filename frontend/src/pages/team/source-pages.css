@@ -146,7 +146,7 @@
 /* Jira's and Linear's halves are one argument and one list, and they weigh
    the same. */
 .sp-cols[data-split='even'] {
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 0;
 }
 
@@ -496,6 +496,12 @@
   min-height: 0;
   padding-left: 44px;
   border-left: 1px solid var(--color-line-1);
+}
+
+/* The table never grows its column. The wrap clips, which also makes it the
+   frame the table's auto page size measures against. */
+.sp-listcol > .sp-tablewrap {
+  overflow: hidden;
 }
 
 .sp-listcol > .sp-chartwrap {

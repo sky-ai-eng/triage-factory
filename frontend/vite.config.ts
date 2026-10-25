@@ -6,8 +6,10 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   // Vitest: jsdom component/integration tests under src/**/*.test.tsx. globals
   // off (explicit imports keep the app's type surface clean); CSS skipped (the
-  // tests assert on text/roles, not Tailwind output). setup wires jest-dom
-  // matchers + per-test cleanup.
+  // tests assert on text/roles, not Tailwind output), except a `?raw` import,
+  // which is how a test reads a stylesheet's text — skipped, that arrives as
+  // an empty string and a sweep over every sheet passes on nothing. setup
+  // wires jest-dom matchers + per-test cleanup.
   //
   // eslint-rules/ is in the include set so the custom lint rules ship with
   // RuleTester fixtures that run in CI like any other test. They live outside
@@ -16,7 +18,7 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: false,
-    css: false,
+    css: { include: [/[?&]raw\b/] },
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.test.{ts,tsx}', 'eslint-rules/*.test.js'],
   },

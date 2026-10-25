@@ -7,8 +7,8 @@ import { shortModelName } from './shortModelName'
 // exists to go blank), hover swaps the readout rather than adding one, the
 // money rule drops precision instead of characters, and offline is a dash.
 
-const hole = () => document.querySelector('.sr-total')
-const cap = () => document.querySelector('.sr-cap')
+const hole = () => document.querySelector('.spr-total')
+const cap = () => document.querySelector('.spr-cap')
 
 describe('shortModelName', () => {
   it('strips the vendor prefix and the build date, nothing else', () => {
@@ -30,12 +30,12 @@ describe('SpendRing', () => {
     expect(hole()).toHaveTextContent('$37.90')
     expect(cap()).toHaveTextContent('SPENT TODAY')
     // The split lives in the hole alone: two bands, no list of rows.
-    expect(document.querySelectorAll('.sr-seg')).toHaveLength(2)
+    expect(document.querySelectorAll('.spr-seg')).toHaveLength(2)
   })
 
   it('swaps the hole for the hovered model and restores it on leave', () => {
     render(<SpendRing models={MODELS} />)
-    const bands = document.querySelectorAll('.sr-seg')
+    const bands = document.querySelectorAll('.spr-seg')
 
     fireEvent.mouseEnter(bands[0])
     expect(hole()).toHaveTextContent('$24.80')
@@ -55,33 +55,33 @@ describe('SpendRing', () => {
   it('reads $0.00 with no bands on a zero-spend day — quiet, not broken', () => {
     render(<SpendRing models={[]} />)
     expect(hole()).toHaveTextContent('$0.00')
-    expect(document.querySelectorAll('.sr-seg')).toHaveLength(0)
+    expect(document.querySelectorAll('.spr-seg')).toHaveLength(0)
   })
 
   it('goes inert offline: a dash and an empty track, not the last figure', () => {
     render(<SpendRing models={MODELS} offline />)
     expect(hole()).toHaveTextContent('--')
-    expect(document.querySelectorAll('.sr-seg')).toHaveLength(0)
+    expect(document.querySelectorAll('.spr-seg')).toHaveLength(0)
   })
 
   it('is a link with a destination and a plain block without one', () => {
     const { rerender } = render(<SpendRing models={MODELS} href="/usage" />)
-    expect(document.querySelector('a.sr')).toHaveAttribute('href', '/usage')
+    expect(document.querySelector('a.spr')).toHaveAttribute('href', '/usage')
 
     rerender(<SpendRing models={MODELS} />)
-    expect(document.querySelector('a.sr')).toBeNull()
+    expect(document.querySelector('a.spr')).toBeNull()
   })
 
   it('scales both readouts from size, flooring the caption at 7.5px', () => {
     render(<SpendRing models={MODELS} size={104} />)
-    const el = document.querySelector('.sr') as HTMLElement
-    expect(el.style.getPropertyValue('--sr-fig')).toBe('13px')
-    expect(el.style.getPropertyValue('--sr-cap')).toBe('7.5px')
+    const el = document.querySelector('.spr') as HTMLElement
+    expect(el.style.getPropertyValue('--spr-fig')).toBe('13px')
+    expect(el.style.getPropertyValue('--spr-cap')).toBe('7.5px')
   })
 
   it('honors a caller-supplied shortener for display names', () => {
     render(<SpendRing models={[{ name: 'Claude Opus 5', v: 5 }]} shorten={(s) => s} />)
-    fireEvent.mouseEnter(document.querySelector('.sr-seg')!)
+    fireEvent.mouseEnter(document.querySelector('.spr-seg')!)
     expect(cap()).toHaveTextContent('CLAUDE OPUS 5')
   })
 
@@ -96,6 +96,6 @@ describe('SpendRing', () => {
         ]}
       />,
     )
-    expect(document.querySelector('.sr-total')).toHaveTextContent('$0.00')
+    expect(document.querySelector('.spr-total')).toHaveTextContent('$0.00')
   })
 })

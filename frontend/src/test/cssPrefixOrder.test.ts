@@ -56,8 +56,9 @@ describe('vendor-prefixed declarations precede their unprefixed twins', () => {
   })
 
   it('holds across every stylesheet under src/', () => {
-    // The glob has to have found the sheets, or the sweep below passes empty.
-    expect(Object.keys(SHEETS)).toContain('../components/board/assignee-picker.css')
+    // The glob has to have found the sheets, with their text, or the sweep
+    // below passes empty.
+    expect(SHEETS['../components/board/assignee-picker.css']).toMatch(/\{[^}]+\}/)
     const report = Object.entries(SHEETS)
       .flatMap(([file, css]) => offenders(css).map((o) => `${file}:${o}`))
       .sort()

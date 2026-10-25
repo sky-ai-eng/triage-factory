@@ -118,12 +118,12 @@ export function SpendRing({
   const label = open ? shorten(models[h].name).toUpperCase() : caption
   const body = (
     <>
-      <svg className="sr-svg" viewBox="0 0 104 104" aria-hidden="true">
-        <circle className="sr-track" cx="52" cy="52" r="40" />
+      <svg className="spr-svg" viewBox="0 0 104 104" aria-hidden="true">
+        <circle className="spr-track" cx="52" cy="52" r="40" />
         {segs.map((s) => (
           <circle
             key={s.i}
-            className="sr-seg"
+            className="spr-seg"
             cx="52"
             cy="52"
             r="40"
@@ -146,13 +146,13 @@ export function SpendRing({
           />
         ))}
       </svg>
-      <span className="sr-hole">
+      <span className="spr-hole">
         {/* Offline is not zero: a readout with nothing behind it shows a dash
             rather than the last figure it happened to hold. */}
-        <span className="sr-total">
+        <span className="spr-total">
           {offline ? '--' : open ? format(models[h].v) : format(total)}
         </span>
-        <span className="sr-cap" data-open={open || undefined}>
+        <span className="spr-cap" data-open={open || undefined}>
           {label}
         </span>
       </span>
@@ -170,13 +170,13 @@ export function SpendRing({
   // — the standing label, which must always fit — ellipsed at 104px.
   const style = {
     width: size,
-    '--sr-fig': Math.max(11, Math.round(size / 8.25)) + 'px',
-    '--sr-cap': Math.max(7.5, Math.round((size / 8.25) * 0.53 * 10) / 10) + 'px',
+    '--spr-fig': Math.max(11, Math.round(size / 8.25)) + 'px',
+    '--spr-cap': Math.max(7.5, Math.round((size / 8.25) * 0.53 * 10) / 10) + 'px',
   } as CSSProperties
 
   return onOpen || href !== '#' ? (
     <a
-      className="sr"
+      className="spr"
       style={style}
       href={href}
       onClick={(e) => {
@@ -191,7 +191,7 @@ export function SpendRing({
       {body}
     </a>
   ) : (
-    <span className="sr" style={style}>
+    <span className="spr" style={style}>
       {body}
     </span>
   )

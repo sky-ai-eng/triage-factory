@@ -243,12 +243,12 @@ describe('RUNNING', () => {
 describe('the ring', () => {
   it('shows the model-attributed total in its hole, splitting only on hover — no legend', async () => {
     mount()
-    await waitFor(() => expect(document.querySelector('.sr-total')).toHaveTextContent('$37.90'))
-    expect(document.querySelector('.sr-cap')).toHaveTextContent('SPENT TODAY')
-    expect(document.querySelectorAll('.sr-seg')).toHaveLength(2)
+    await waitFor(() => expect(document.querySelector('.spr-total')).toHaveTextContent('$37.90'))
+    expect(document.querySelector('.spr-cap')).toHaveTextContent('SPENT TODAY')
+    expect(document.querySelectorAll('.spr-seg')).toHaveLength(2)
     // No legend anywhere: the model names appear only in the hole, on hover.
     expect(screen.queryByText('OPUS-5')).not.toBeInTheDocument()
-    expect(document.querySelector('a.sr')).toHaveAttribute('href', '/usage')
+    expect(document.querySelector('a.spr')).toHaveAttribute('href', '/usage')
   })
 
   it('removes the ring entirely when the grant refuses spend — one fewer answer, not a dash forever', async () => {
@@ -278,7 +278,7 @@ describe('offline', () => {
     expect(
       within(document.querySelector('.convtitle') as HTMLElement).getByText('—'),
     ).toBeInTheDocument()
-    expect(document.querySelector('.sr-total')).toHaveTextContent('--')
+    expect(document.querySelector('.spr-total')).toHaveTextContent('--')
     expect(document.querySelector('.cp-ghost')).not.toBeNull()
     expect(screen.getByText('filtered by rules')).toBeInTheDocument()
   })
