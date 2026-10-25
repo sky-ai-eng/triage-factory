@@ -1072,17 +1072,24 @@ func (c *LocalClient) JiraAddComment(ctx context.Context, key, body string) (err
 	return nil
 }
 
-func (c *LocalClient) JiraAssignToSelf(ctx context.Context, key string) (err error) {
+func (c *LocalClient) JiraAssign(ctx context.Context, key, userID string) (_ jiraclient.User, err error) {
 	defer c.explainSourceMiss(ctx, eventsource.KindJira, &err)
+	if strings.TrimSpace(userID) == "" {
+		// There is no default person: the org's account is not one, so an
+		// assign that names nobody is refused rather than pointed at it.
+		return jiraclient.User{}, errors.New("a user is required: name the person by their Jira user id, which `jira user search <query> --issue <key>` returns")
+	}
 	client, err := c.jiraSystemClient(ctx)
 	if err != nil {
-		return err
+		return jiraclient.User{}, err
 	}
-	if err := client.AssignToSelf(ctx, key); err != nil {
-		return err
+	user, err := client.AssignTo(ctx, key, strings.TrimSpace(userID))
+	if err != nil {
+		return jiraclient.User{}, err
 	}
-	c.recordJiraIssue(ctx, client, key, domain.ActionIssueAssigned, domain.ArtifactStateIssueUpdated, "", artifactDetailsJSON(map[string]any{"assignee": "self"}))
-	return nil
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueAssigned, domain.ArtifactStateIssueUpdated, "",
+		artifactDetailsJSON(map[string]any{"assignee": map[string]any{"id": user.ID, "name": user.DisplayName}}))
+	return user, nil
 }
 
 func (c *LocalClient) JiraUnassign(ctx context.Context, key string) (err error) {
@@ -1194,6 +1201,21 @@ func (c *LocalClient) JiraSetPriority(ctx context.Context, key, priority string)
 	}
 	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", artifactDetailsJSON(map[string]any{"priority": priority}))
 	return nil
+}
+
+func (c *LocalClient) JiraSearchUsers(ctx context.Context, key, query string) (_ []jiraclient.User, err error) {
+	defer c.explainSourceMiss(ctx, eventsource.KindJira, &err)
+	if strings.TrimSpace(key) == "" {
+		return nil, errors.New("an issue key is required: Jira answers which users can be assigned a particular issue")
+	}
+	if strings.TrimSpace(query) == "" {
+		return nil, errors.New("query is required: part of the person's name, username or email")
+	}
+	client, err := c.jiraSystemClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return client.SearchAssignableUsers(ctx, key, query)
 }
 
 func (c *LocalClient) JiraListIssueTypes(ctx context.Context, project string) (_ []jiraclient.IssueType, err error) {

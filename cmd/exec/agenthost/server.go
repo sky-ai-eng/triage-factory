@@ -677,12 +677,16 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return emptyResult{}, client.JiraAddComment(ctx, a.Key, a.Body)
 
-	case methodJiraAssignToSelf:
-		var a jiraKeyArgs
+	case methodJiraAssign:
+		var a jiraAssignArgs
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		return emptyResult{}, client.JiraAssignToSelf(ctx, a.Key)
+		user, err := client.JiraAssign(ctx, a.Key, a.User)
+		if err != nil {
+			return nil, err
+		}
+		return jiraUserResult{User: user}, nil
 
 	case methodJiraUnassign:
 		var a jiraKeyArgs
@@ -763,6 +767,17 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return jiraIssueTypesResult{IssueTypes: types}, nil
 
+	case methodJiraSearchUsers:
+		var a jiraUserSearchArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		users, err := client.JiraSearchUsers(ctx, a.Key, a.Query)
+		if err != nil {
+			return nil, err
+		}
+		return jiraUsersResult{Users: users}, nil
+
 	// --- linear (exec linear issue ...) ---
 
 	case methodLinearGetIssue:
@@ -809,12 +824,16 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return linearCommentResult{CommentID: commentID}, nil
 
-	case methodLinearAssignSelf:
-		var a linearIssueArgs
+	case methodLinearAssign:
+		var a linearAssignArgs
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		return emptyResult{}, client.LinearAssignSelf(ctx, a.Issue)
+		user, err := client.LinearAssign(ctx, a.Issue, a.User)
+		if err != nil {
+			return nil, err
+		}
+		return linearUserResult{User: user}, nil
 
 	case methodLinearUnassign:
 		var a linearIssueArgs
@@ -876,6 +895,17 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 			return nil, err
 		}
 		return linearIssuesResult{Issues: issues}, nil
+
+	case methodLinearSearchUsers:
+		var a linearUserSearchArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		users, err := client.LinearSearchUsers(ctx, a.Query)
+		if err != nil {
+			return nil, err
+		}
+		return linearUsersResult{Users: users}, nil
 
 	// --- github: build the org-tiered client host-side (App→PAT), make the
 	// REST call, return the result / error. The per-request LocalClient

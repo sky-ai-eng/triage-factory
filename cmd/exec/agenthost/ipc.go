@@ -354,8 +354,12 @@ func (c *IPCClient) JiraAddComment(ctx context.Context, key, body string) error 
 	return c.call(ctx, methodJiraAddComment, jiraCommentArgs{Key: key, Body: body}, nil)
 }
 
-func (c *IPCClient) JiraAssignToSelf(ctx context.Context, key string) error {
-	return c.call(ctx, methodJiraAssignToSelf, jiraKeyArgs{Key: key}, nil)
+func (c *IPCClient) JiraAssign(ctx context.Context, key, userID string) (jiraclient.User, error) {
+	var res jiraUserResult
+	if err := c.call(ctx, methodJiraAssign, jiraAssignArgs{Key: key, User: userID}, &res); err != nil {
+		return jiraclient.User{}, err
+	}
+	return res.User, nil
 }
 
 func (c *IPCClient) JiraUnassign(ctx context.Context, key string) error {
@@ -421,6 +425,14 @@ func (c *IPCClient) JiraListIssueTypes(ctx context.Context, project string) ([]j
 	return res.IssueTypes, nil
 }
 
+func (c *IPCClient) JiraSearchUsers(ctx context.Context, key, query string) ([]jiraclient.User, error) {
+	var res jiraUsersResult
+	if err := c.call(ctx, methodJiraSearchUsers, jiraUserSearchArgs{Key: key, Query: query}, &res); err != nil {
+		return nil, err
+	}
+	return res.Users, nil
+}
+
 // --- linear ---
 //
 // Thin RPCs like the Jira ones above: the daemon resolves the org's Linear
@@ -459,8 +471,12 @@ func (c *IPCClient) LinearAddComment(ctx context.Context, issue, body string) (s
 	return res.CommentID, nil
 }
 
-func (c *IPCClient) LinearAssignSelf(ctx context.Context, issue string) error {
-	return c.call(ctx, methodLinearAssignSelf, linearIssueArgs{Issue: issue}, nil)
+func (c *IPCClient) LinearAssign(ctx context.Context, issue, userID string) (linearclient.User, error) {
+	var res linearUserResult
+	if err := c.call(ctx, methodLinearAssign, linearAssignArgs{Issue: issue, User: userID}, &res); err != nil {
+		return linearclient.User{}, err
+	}
+	return res.User, nil
 }
 
 func (c *IPCClient) LinearUnassign(ctx context.Context, issue string) error {
@@ -501,6 +517,14 @@ func (c *IPCClient) LinearSearch(ctx context.Context, req LinearSearchRequest) (
 		return nil, err
 	}
 	return res.Issues, nil
+}
+
+func (c *IPCClient) LinearSearchUsers(ctx context.Context, query string) ([]linearclient.User, error) {
+	var res linearUsersResult
+	if err := c.call(ctx, methodLinearSearchUsers, linearUserSearchArgs{Query: query}, &res); err != nil {
+		return nil, err
+	}
+	return res.Users, nil
 }
 
 // --- github ---

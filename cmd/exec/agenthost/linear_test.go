@@ -35,7 +35,18 @@ const (
 	fakeLinearViewerID   = "app-user"
 	fakeLinearCommentID  = "cmt-1"
 	fakeLinearPlaceholer = "run-placeholder"
+	// The workspace's users: a person, an app user, and a deactivated person.
+	fakeLinearPersonID      = "user-ana"
+	fakeLinearAppUserID     = "user-app"
+	fakeLinearDeactivatedID = "user-gone"
 )
+
+// fakeLinearUsers is the fake workspace's users, by id.
+var fakeLinearUsers = map[string]map[string]any{
+	fakeLinearPersonID:      {"id": fakeLinearPersonID, "name": "Ana Lyst", "displayName": "ana", "email": "ana@acme.test", "active": true},
+	fakeLinearAppUserID:     {"id": fakeLinearAppUserID, "name": "Triage Factory", "displayName": "triage-factory", "active": true, "app": true},
+	fakeLinearDeactivatedID: {"id": fakeLinearDeactivatedID, "name": "Old Timer", "displayName": "old", "active": false},
+}
 
 // fakeLinearCall is one GraphQL request the fake saw.
 type fakeLinearCall struct {
@@ -109,6 +120,18 @@ func startFakeLinear(t *testing.T) (*fakeLinear, *httptest.Server) {
 			}
 		case "Viewer":
 			data = map[string]any{"viewer": map[string]any{"id": fakeLinearViewerID, "name": "Triage Factory", "isMe": true}}
+		case "User":
+			id, _ := req.Variables["id"].(string)
+			if u, ok := fakeLinearUsers[id]; ok {
+				data = map[string]any{"user": u}
+			} else {
+				data = map[string]any{"user": nil}
+			}
+		case "Users":
+			data = map[string]any{"users": map[string]any{
+				"nodes":    []any{fakeLinearUsers[fakeLinearPersonID]},
+				"pageInfo": map[string]any{"hasNextPage": false},
+			}}
 		case "Teams":
 			data = map[string]any{"teams": map[string]any{
 				"nodes": []any{
@@ -293,14 +316,64 @@ func TestLinearVerbs_ResolveTheAgentsVocabulary(t *testing.T) {
 		}
 	})
 
-	t.Run("assign targets the org's identity", func(t *testing.T) {
+	t.Run("assign sends the named person's id under the org credential", func(t *testing.T) {
 		f, srv := startFakeLinear(t)
 		lc, _, _ := linearProxyClient(t, srv.URL, true)
-		if err := lc.LinearAssignSelf(ctx, "ENG-7"); err != nil {
-			t.Fatalf("LinearAssignSelf: %v", err)
+		user, err := lc.LinearAssign(ctx, "ENG-7", fakeLinearPersonID)
+		if err != nil {
+			t.Fatalf("LinearAssign: %v", err)
 		}
-		if input(t, f.last(t, "IssueUpdate"))["assigneeId"] != fakeLinearViewerID {
-			t.Error("assign did not assign the viewer")
+		if user.ID != fakeLinearPersonID || user.Name != "Ana Lyst" {
+			t.Errorf("assigned %+v, want Ana Lyst", user)
+		}
+		upd := f.last(t, "IssueUpdate")
+		if upd.vars["id"] != fakeLinearIssueUUID || input(t, upd)["assigneeId"] != fakeLinearPersonID {
+			t.Errorf("issueUpdate vars = %v, want the issue's UUID and %s", upd.vars, fakeLinearPersonID)
+		}
+		if upd.auth != "Bearer "+fakeLinearPlaceholer {
+			t.Errorf("Authorization = %q, want the per-run placeholder", upd.auth)
+		}
+		if n := f.count("Viewer"); n != 0 {
+			t.Errorf("assign read the org's own identity %d time(s); it must never be the assignee", n)
+		}
+	})
+
+	t.Run("assign refuses a person Linear cannot assign and writes nothing", func(t *testing.T) {
+		for userID, want := range map[string]string{
+			"user-nobody":           `no Linear user has the id "user-nobody"`,
+			fakeLinearAppUserID:     "app user",
+			fakeLinearDeactivatedID: "deactivated",
+		} {
+			f, srv := startFakeLinear(t)
+			lc, _, _ := linearProxyClient(t, srv.URL, true)
+			_, err := lc.LinearAssign(ctx, "ENG-7", userID)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("assign %s: err = %v, want one containing %q", userID, err, want)
+			}
+			if n := f.count("IssueUpdate"); n != 0 {
+				t.Errorf("assign %s still wrote %d update(s)", userID, n)
+			}
+		}
+	})
+
+	t.Run("user search narrows the workspace's users by the query", func(t *testing.T) {
+		f, srv := startFakeLinear(t)
+		lc, _, _ := linearProxyClient(t, srv.URL, true)
+		users, err := lc.LinearSearchUsers(ctx, "ana")
+		if err != nil {
+			t.Fatalf("LinearSearchUsers: %v", err)
+		}
+		if len(users) != 1 || users[0].ID != fakeLinearPersonID || users[0].Email != "ana@acme.test" {
+			t.Errorf("users = %+v, want Ana with her id and email", users)
+		}
+		got := f.last(t, "Users")
+		want := map[string]any{"or": []any{
+			map[string]any{"name": map[string]any{"containsIgnoreCase": "ana"}},
+			map[string]any{"displayName": map[string]any{"containsIgnoreCase": "ana"}},
+			map[string]any{"email": map[string]any{"containsIgnoreCase": "ana"}},
+		}}
+		if !reflect.DeepEqual(got.vars["filter"], want) || got.vars["first"] != float64(LinearUserSearchMaxResults) {
+			t.Errorf("users vars = %v, want the query on name, display name and email, one page of %d", got.vars, LinearUserSearchMaxResults)
 		}
 	})
 
@@ -367,7 +440,7 @@ func TestLinearVerbs_ResolveTheAgentsVocabulary(t *testing.T) {
 	t.Run("search resolves team, states and assignee, and pages to max", func(t *testing.T) {
 		f, srv := startFakeLinear(t)
 		lc, _, _ := linearProxyClient(t, srv.URL, true)
-		issues, err := lc.LinearSearch(ctx, LinearSearchRequest{TeamKey: "ENG", States: []string{"todo", "In Progress"}, Assignee: LinearAssigneeMe, Max: 3})
+		issues, err := lc.LinearSearch(ctx, LinearSearchRequest{TeamKey: "ENG", States: []string{"todo", "In Progress"}, Assignee: fakeLinearPersonID, Max: 3})
 		if err != nil {
 			t.Fatalf("LinearSearch: %v", err)
 		}
@@ -382,10 +455,22 @@ func TestLinearVerbs_ResolveTheAgentsVocabulary(t *testing.T) {
 		want := map[string]any{
 			"team":     map[string]any{"id": map[string]any{"eq": "team-eng"}},
 			"state":    map[string]any{"id": map[string]any{"in": []any{"st-todo", "st-prog"}}},
-			"assignee": map[string]any{"id": map[string]any{"eq": fakeLinearViewerID}},
+			"assignee": map[string]any{"id": map[string]any{"eq": fakeLinearPersonID}},
 		}
 		if !reflect.DeepEqual(filter, want) {
 			t.Errorf("filter = %v, want %v", filter, want)
+		}
+	})
+
+	t.Run("search by an assignee who does not exist is refused, not empty", func(t *testing.T) {
+		f, srv := startFakeLinear(t)
+		lc, _, _ := linearProxyClient(t, srv.URL, true)
+		_, err := lc.LinearSearch(ctx, LinearSearchRequest{TeamKey: "ENG", Assignee: "user-nobody", Max: 5})
+		if err == nil || !strings.Contains(err.Error(), `"user-nobody"`) {
+			t.Errorf("err = %v, want a refusal naming the id", err)
+		}
+		if n := f.count("SearchIssues"); n != 0 {
+			t.Errorf("an unknown assignee still searched %d time(s)", n)
 		}
 	})
 
@@ -415,14 +500,22 @@ func TestLinearVerbs_BadCallsFailBeforeCallingLinear(t *testing.T) {
 			_, err := lc.LinearSearch(ctx, LinearSearchRequest{TeamKey: "ENG", Max: 201})
 			return err
 		},
-		"search assignee": func() error {
-			_, err := lc.LinearSearch(ctx, LinearSearchRequest{TeamKey: "ENG", Assignee: "bob", Max: 5})
+		"search assignee me": func() error {
+			_, err := lc.LinearSearch(ctx, LinearSearchRequest{TeamKey: "ENG", Assignee: "me", Max: 5})
 			return err
 		},
-		"priority 5":       func() error { return lc.LinearSetPriority(ctx, "ENG-7", 5) },
-		"edit priority -1": func() error { m := -1; return lc.LinearUpdateIssue(ctx, "ENG-7", LinearIssueEdit{Priority: &m}) },
-		"edit nothing":     func() error { return lc.LinearUpdateIssue(ctx, "ENG-7", LinearIssueEdit{}) },
-		"edit blank title": func() error { b := " "; return lc.LinearUpdateIssue(ctx, "ENG-7", LinearIssueEdit{Title: &b}) },
+		"search assignee ME": func() error {
+			_, err := lc.LinearSearch(ctx, LinearSearchRequest{TeamKey: "ENG", Assignee: "ME", Max: 5})
+			return err
+		},
+		"assign no user":       func() error { _, err := lc.LinearAssign(ctx, "ENG-7", ""); return err },
+		"assign blank user":    func() error { _, err := lc.LinearAssign(ctx, "ENG-7", "  "); return err },
+		"assign me":            func() error { _, err := lc.LinearAssign(ctx, "ENG-7", "me"); return err },
+		"user search no query": func() error { _, err := lc.LinearSearchUsers(ctx, " "); return err },
+		"priority 5":           func() error { return lc.LinearSetPriority(ctx, "ENG-7", 5) },
+		"edit priority -1":     func() error { m := -1; return lc.LinearUpdateIssue(ctx, "ENG-7", LinearIssueEdit{Priority: &m}) },
+		"edit nothing":         func() error { return lc.LinearUpdateIssue(ctx, "ENG-7", LinearIssueEdit{}) },
+		"edit blank title":     func() error { b := " "; return lc.LinearUpdateIssue(ctx, "ENG-7", LinearIssueEdit{Title: &b}) },
 		"create no title": func() error {
 			_, err := lc.LinearCreateIssue(ctx, LinearCreateIssueRequest{TeamKey: "ENG"})
 			return err
@@ -522,6 +615,36 @@ func TestLinearVerbs_RecordArtifacts(t *testing.T) {
 				t.Errorf("create action = %+v", c)
 			}
 		})
+	}
+}
+
+// TestLinearAssign_RecordsTheAssignee pins an assign's audit trail: the issue's
+// artifact and its external action name the person assigned, by id and name,
+// under the org's Linear identity.
+func TestLinearAssign_RecordsTheAssignee(t *testing.T) {
+	ctx := context.Background()
+	_, srv := startFakeLinear(t)
+	lc, stores, info := linearProxyClient(t, srv.URL, true)
+	if _, err := lc.LinearAssign(ctx, "ENG-7", fakeLinearPersonID); err != nil {
+		t.Fatalf("LinearAssign: %v", err)
+	}
+	names := []string{`"id":"` + fakeLinearPersonID + `"`, `"name":"Ana Lyst"`}
+
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
+	if len(arts) != 1 || arts[0].ExternalID != fakeLinearIssueUUID || arts[0].State != domain.ArtifactStateIssueUpdated {
+		t.Fatalf("artifacts = %+v, want ENG-7's one issue row", arts)
+	}
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 || acts[0].Action != domain.ActionIssueAssigned || acts[0].Credential != domain.CredentialLinearOrg {
+		t.Fatalf("external actions = %+v, want one assign under the org's Linear identity", acts)
+	}
+	for _, want := range names {
+		if !strings.Contains(arts[0].DetailsJSON, want) {
+			t.Errorf("artifact details %q do not name the assignee (%s)", arts[0].DetailsJSON, want)
+		}
+		if !strings.Contains(acts[0].DetailJSON, want) {
+			t.Errorf("action details %q do not name the assignee (%s)", acts[0].DetailJSON, want)
+		}
 	}
 }
 
@@ -683,8 +806,17 @@ func TestServer_LinearOps_RoundTrip(t *testing.T) {
 	if id, err := client.LinearAddComment(ctx, "ENG-7", "hi"); err != nil || id != fakeLinearCommentID {
 		t.Errorf("LinearAddComment = %q, %v", id, err)
 	}
-	if err := client.LinearAssignSelf(ctx, "ENG-7"); err != nil {
-		t.Errorf("LinearAssignSelf: %v", err)
+	if user, err := client.LinearAssign(ctx, "ENG-7", fakeLinearPersonID); err != nil || user.ID != fakeLinearPersonID || user.Name != "Ana Lyst" {
+		t.Errorf("LinearAssign = %+v, %v", user, err)
+	}
+	if in := input(t, f.last(t, "IssueUpdate")); in["assigneeId"] != fakeLinearPersonID {
+		t.Errorf("assign input = %v, want the named person", in)
+	}
+	if _, err := client.LinearAssign(ctx, "ENG-7", ""); !strings.Contains(errString(err), "a user is required") {
+		t.Errorf("an assign naming nobody crossed as %v, want the refusal", err)
+	}
+	if users, err := client.LinearSearchUsers(ctx, "ana"); err != nil || len(users) != 1 || users[0].ID != fakeLinearPersonID {
+		t.Errorf("LinearSearchUsers = %+v, %v", users, err)
 	}
 	if err := client.LinearUnassign(ctx, "ENG-7"); err != nil {
 		t.Errorf("LinearUnassign: %v", err)

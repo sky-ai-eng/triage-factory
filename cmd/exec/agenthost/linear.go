@@ -18,14 +18,14 @@ import (
 // daemon's per-call budget, so the cap bounds the pages one call can take.
 const LinearSearchMaxResults = 200
 
-// The LinearSearchRequest.Assignee values. Empty matches any assignee.
-const (
-	// LinearAssigneeMe keeps issues assigned to the org's Linear identity —
-	// the identity every exec linear write acts as.
-	LinearAssigneeMe = "me"
-	// LinearAssigneeNone keeps unassigned issues.
-	LinearAssigneeNone = "none"
-)
+// LinearAssigneeNone is the LinearSearchRequest.Assignee value that keeps
+// unassigned issues. Empty matches any assignee, and any other value is the
+// Linear user id of the person whose issues to keep.
+const LinearAssigneeNone = "none"
+
+// LinearUserSearchMaxResults is the most users one LinearSearchUsers returns:
+// one page of Linear's users listing.
+const LinearUserSearchMaxResults = 50
 
 // LinearCreateIssueRequest is a new issue in the agent's vocabulary: the team
 // by its key, the parent by identifier or UUID, labels by name. Priority 0 is
@@ -57,7 +57,7 @@ func (e LinearIssueEdit) IsEmpty() bool {
 
 // LinearSearchRequest is the whole vocabulary of LinearSearch: one team by its
 // key, optionally narrowed to states of that team by name and to an assignee
-// (LinearAssigneeMe, LinearAssigneeNone, or empty for any). Max is how many
+// (a Linear user id, LinearAssigneeNone, or empty for any). Max is how many
 // issues to return, 1 through LinearSearchMaxResults. There is deliberately no
 // raw filter: linear.IssueFilter is the client's whole vocabulary, and this is
 // the part of it an agent can name.
@@ -205,26 +205,35 @@ func (c *LocalClient) LinearAddComment(ctx context.Context, issue, body string) 
 	return commentID, nil
 }
 
-func (c *LocalClient) LinearAssignSelf(ctx context.Context, issue string) (err error) {
+func (c *LocalClient) LinearAssign(ctx context.Context, issue, userID string) (_ linearclient.User, err error) {
 	defer c.explainSourceMiss(ctx, eventsource.KindLinear, &err)
+	if err := validateLinearUserID(userID); err != nil {
+		return linearclient.User{}, err
+	}
 	client, err := c.linearSystemClient(ctx)
 	if err != nil {
-		return err
+		return linearclient.User{}, err
 	}
 	got, err := client.GetIssue(ctx, issue)
 	if err != nil {
-		return err
+		return linearclient.User{}, err
 	}
-	viewer, err := client.Viewer(ctx)
+	user, err := findLinearUser(ctx, client, userID)
 	if err != nil {
-		return err
+		return linearclient.User{}, err
 	}
-	if err := client.AssignIssue(ctx, got.ID, viewer.ID); err != nil {
-		return err
+	switch {
+	case user.App:
+		return linearclient.User{}, fmt.Errorf("user %s (%s) is a Linear app user, which Linear does not let be assigned an issue", user.ID, user.Name)
+	case !user.Active:
+		return linearclient.User{}, fmt.Errorf("user %s (%s) is deactivated in Linear", user.ID, user.Name)
+	}
+	if err := client.AssignIssue(ctx, got.ID, user.ID); err != nil {
+		return linearclient.User{}, err
 	}
 	c.recordLinearIssue(ctx, got, domain.ActionIssueAssigned, domain.ArtifactStateIssueUpdated, "", "",
-		artifactDetailsJSON(map[string]any{"assignee": "self"}))
-	return nil
+		artifactDetailsJSON(map[string]any{"assignee": map[string]any{"id": user.ID, "name": user.Name}}))
+	return user, nil
 }
 
 func (c *LocalClient) LinearUnassign(ctx context.Context, issue string) (err error) {
@@ -394,10 +403,10 @@ func (c *LocalClient) LinearSearch(ctx context.Context, req LinearSearchRequest)
 	if req.Max < 1 || req.Max > LinearSearchMaxResults {
 		return nil, fmt.Errorf("max %d out of range 1-%d", req.Max, LinearSearchMaxResults)
 	}
-	switch req.Assignee {
-	case "", LinearAssigneeMe, LinearAssigneeNone:
-	default:
-		return nil, fmt.Errorf("assignee %q is not one of %s, %s", req.Assignee, LinearAssigneeMe, LinearAssigneeNone)
+	if req.Assignee != "" && req.Assignee != LinearAssigneeNone {
+		if err := validateLinearUserID(req.Assignee); err != nil {
+			return nil, err
+		}
 	}
 	client, err := c.linearSystemClient(ctx)
 	if err != nil {
@@ -423,14 +432,17 @@ func (c *LocalClient) LinearSearch(ctx context.Context, req LinearSearchRequest)
 		}
 	}
 	switch req.Assignee {
-	case LinearAssigneeMe:
-		viewer, err := client.Viewer(ctx)
+	case "":
+	case LinearAssigneeNone:
+		filter.Unassigned = true
+	default:
+		// Resolved rather than passed through, so an id that names nobody is
+		// refused instead of answering with no issues.
+		user, err := findLinearUser(ctx, client, req.Assignee)
 		if err != nil {
 			return nil, err
 		}
-		filter.AssigneeID = viewer.ID
-	case LinearAssigneeNone:
-		filter.Unassigned = true
+		filter.AssigneeID = user.ID
 	}
 
 	out := []linearclient.Issue{}
@@ -450,6 +462,46 @@ func (c *LocalClient) LinearSearch(ctx context.Context, req LinearSearchRequest)
 		out = out[:req.Max]
 	}
 	return out, nil
+}
+
+func (c *LocalClient) LinearSearchUsers(ctx context.Context, query string) (_ []linearclient.User, err error) {
+	defer c.explainSourceMiss(ctx, eventsource.KindLinear, &err)
+	if strings.TrimSpace(query) == "" {
+		return nil, errors.New("query is required: part of the person's name, display name or email")
+	}
+	client, err := c.linearSystemClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	page, err := client.ListUsers(ctx, query, "", LinearUserSearchMaxResults)
+	if err != nil {
+		return nil, err
+	}
+	return page.Items, nil
+}
+
+// validateLinearUserID is the check every verb naming a person makes before
+// it reaches Linear. There is no default person and no "me": the org's Linear
+// identity is not a person, so a verb that names nobody is refused rather
+// than pointed at it.
+func validateLinearUserID(userID string) error {
+	switch {
+	case strings.TrimSpace(userID) == "":
+		return errors.New("a user is required: name the person by their Linear user id, which `linear user search <query>` returns")
+	case strings.EqualFold(strings.TrimSpace(userID), "me"):
+		return errors.New(`there is no "me": the org's Linear identity is not a person. Name the person by their Linear user id, which ` + "`linear user search <query>`" + ` returns`)
+	}
+	return nil
+}
+
+// findLinearUser resolves a Linear user id to the user, refusing one that
+// names nobody.
+func findLinearUser(ctx context.Context, client *linearclient.Client, userID string) (linearclient.User, error) {
+	user, err := client.GetUser(ctx, strings.TrimSpace(userID))
+	if errors.Is(err, linearclient.ErrNotFound) {
+		return linearclient.User{}, fmt.Errorf("no Linear user has the id %q; `linear user search <query>` returns users' ids", userID)
+	}
+	return user, err
 }
 
 // findLinearTeam resolves a team key to the team. ListTeams narrows by a
