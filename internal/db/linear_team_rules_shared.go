@@ -56,8 +56,9 @@ func MarshalLinearTeamRules(r domain.LinearTeamRules) (LinearRuleJSON, error) {
 // dialect store's linearRuleCols projects it: team_id, linear_team_id,
 // linear_team_key, linear_team_name, pickup_members, in_progress_members,
 // in_progress_canonical, in_review_members, in_review_canonical, done_members,
-// done_canonical — the JSON columns as text. Both dialects read the same plain types once Postgres casts its jsonb
-// to text, so the decode lives here once rather than per dialect.
+// done_canonical — the JSON columns as text. Both dialects read the same
+// plain types once Postgres casts its jsonb to text, so the decode lives here
+// once rather than per dialect.
 func ScanLinearTeamRules(scan func(...any) error) (domain.LinearTeamRules, error) {
 	var (
 		r                                                     domain.LinearTeamRules

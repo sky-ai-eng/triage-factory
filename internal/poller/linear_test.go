@@ -60,9 +60,9 @@ func linearStateNames(refs []domain.LinearStateRef) string {
 }
 
 // TestToTrackerLinearRules_SkipsUnarmed: a Linear team reaches the tracker only
-// once pickup, in_progress and done are mapped. One watched with nothing mapped has no
-// states to ask about, and one mapped in part has issues to discover with
-// nowhere to move them, or the reverse.
+// once pickup, in_progress and done are mapped. One watched with nothing
+// mapped has no states to ask about, and one mapped in part has issues to
+// discover with nowhere to move them, or the reverse.
 func TestToTrackerLinearRules_SkipsUnarmed(t *testing.T) {
 	pickupOnly := domain.LinearTeamRules{TeamID: "team-a", LinearTeamID: "web", LinearTeamKey: "WEB", PickupMembers: linRefs("Todo")}
 	noDone := armedLinear("team-a", "api", []string{"Todo"}, []string{"Done"})

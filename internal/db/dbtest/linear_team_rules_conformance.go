@@ -87,7 +87,8 @@ func linearTeamIDs(rules []domain.LinearTeamRules) []string {
 // deleted, a present one upserted, another team's rows untouched), ordering,
 // the stored set ReplaceForTeam returns, the optional in_review rule, the org
 // union, TracksTeamSystem, the per-rule complete-or-empty CHECKs, and every
-// read and write confined to the workspace it is given. RLS is the Postgres backend's own test.
+// read and write confined to the workspace it is given. RLS is the Postgres
+// backend's own test.
 func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory) {
 	t.Helper()
 	ctx := context.Background()
