@@ -1,8 +1,9 @@
 /* An event source's own page.
-   Three of them — GitHub, Jira, Slack — sharing one header band and splitting
-   below it. GitHub and Slack put prose, figures and a fortnight's chart in a
-   narrow left column against a wide table; Jira has no chart, because its
-   status board already lands column by column and owns that space.
+   Four of them — GitHub, Slack, Jira, Linear — sharing one header band and
+   splitting below it. GitHub and Slack put prose, figures and a fortnight's
+   chart in a narrow left column against a wide table. Jira and Linear split
+   evenly: the prose and the status board on the left, the chart and the table
+   of projects or teams on the right.
 
    Measurements are the prototype's. Nothing scrolls: the view fits the height
    it is given and the table fits its rows to what is left. */
@@ -142,7 +143,8 @@
   gap: 0 64px;
 }
 
-/* Jira's two halves are one argument and one list, and they weigh the same. */
+/* Jira's and Linear's halves are one argument and one list, and they weigh
+   the same. */
 .sp-cols[data-split='even'] {
   grid-template-columns: 1fr 1fr;
   gap: 0;
@@ -265,6 +267,40 @@
   margin-left: 6px;
 }
 
+/* A name sharing its cell with a tag. A cell holding more than text owns its
+   own type, so the name restates the table's text cell. */
+.sp-cellname {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--font-weight-regular) var(--text-reported) / 1.5 var(--font-mono);
+}
+
+/* A Linear team's tags, after its name: the same chip, with a tooltip that
+   says what the word means. The host carries the spacing, since the tooltip
+   wraps the chip. */
+.sp-taghost {
+  flex: none;
+  display: inline-flex;
+  margin-left: 6px;
+}
+
+.sp-tag {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-ink-4);
+  border: 1px solid var(--color-line-1);
+  border-radius: 4px;
+  padding: 0 4px;
+  cursor: help;
+}
+
+.sp-tag[data-tone='alarm'] {
+  color: var(--color-alarm);
+  border-color: color-mix(in srgb, var(--color-alarm) 40%, var(--color-line-1));
+}
+
 /* The chart is a ui component with its own stylesheet — see
    src/ui/sourcechart/. The page owns only where it sits. */
 .sp-left > .sc {
@@ -320,9 +356,9 @@
   flex: none;
 }
 
-/* ── Jira ──────────────────────────────────────────────────────────── */
+/* ── Jira and Linear ───────────────────────────────────────────────── */
 
-.sp-jira-left {
+.sp-mapcol {
   display: flex;
   flex-direction: column;
   gap: 20px;
@@ -331,15 +367,23 @@
   padding-right: 44px;
 }
 
-.sp-jira-left .sp-prose {
+/* The board's column is half the page, so the prose runs its whole width
+   rather than stopping at a measure meant for the narrow column. */
+.sp-mapcol .sp-prose {
   flex: none;
+  max-width: none;
 }
 
+/* The board's title, with the strip of watched keys at its other end. The
+   rule above it closes the prose. */
 .sp-subhead {
   flex: none;
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  align-items: baseline;
+  gap: 14px;
+  margin-top: 56px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-line-1);
 }
 
 .sp-subhead-t {
@@ -347,22 +391,6 @@
   line-height: 1.25;
   font-weight: var(--font-weight-semi);
   color: var(--color-ink-1);
-}
-
-.sp-subhead-p {
-  font-size: 11.5px;
-  line-height: 1.6;
-  color: var(--color-ink-3);
-  text-wrap: pretty;
-}
-
-/* Linear's editor: the watched teams and the picker below them, one column
-   that scrolls inside the page rather than pushing the band off it. */
-.sp-linear-right {
-  min-width: 0;
-  min-height: 0;
-  overflow-y: auto;
-  padding-bottom: 24px;
 }
 
 /* The one sentence for a source that cannot reach the org — an availability
@@ -382,11 +410,10 @@
    because scanning for unfinished setup is what the strip is for. */
 
 .sp-projstrip {
-  flex: none;
   display: flex;
   flex-wrap: wrap;
   gap: 4px 16px;
-  margin-top: -6px;
+  margin-left: auto;
 }
 
 .sp-projkey {
@@ -412,7 +439,8 @@
   border-bottom-color: var(--color-warm);
 }
 
-.sp-projkey[data-unarmed]::after {
+.sp-projkey[data-unarmed]::after,
+.sp-projkey[data-alarm]::after {
   content: '';
   display: inline-block;
   width: 4px;
@@ -423,15 +451,44 @@
   border: 1px solid var(--color-ink-4);
 }
 
+/* Filled, in alarm ink: a key whose mapping Linear broke — its ★ deleted, or
+   the team gone from the credential's view — rather than one nobody has
+   finished. */
+.sp-projkey[data-alarm]::after {
+  background: var(--color-alarm);
+  border-color: var(--color-alarm);
+}
+
 .sp-board {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  gap: 10px;
   padding-bottom: 54px;
 }
 
-.sp-jira-right {
+/* The board takes the column's height; the flag line under it keeps its own. */
+.sp-board > .sr {
+  flex: 1;
+  min-height: 0;
+}
+
+/* What Linear changed under a stored mapping, under the board. Alarm unless it
+   is only telling the reader something. */
+.sp-flag {
+  flex: none;
+  margin: 0;
+  font: var(--font-weight-regular) 10.5px / 1.5 var(--font-mono);
+  color: var(--color-alarm);
+  text-wrap: pretty;
+}
+
+.sp-flag[data-tone='faint'] {
+  color: var(--color-ink-3);
+}
+
+.sp-listcol {
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -441,11 +498,18 @@
   border-left: 1px solid var(--color-line-1);
 }
 
-.sp-jira-head {
+.sp-listcol > .sp-chartwrap {
+  flex: none;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--color-line-1);
+}
+
+.sp-listhead {
   flex: none;
   display: flex;
   align-items: center;
   gap: 12px;
+  margin-top: 56px;
 }
 
 /* ── The filter ────────────────────────────────────────────────────── */

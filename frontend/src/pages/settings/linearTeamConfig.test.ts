@@ -160,6 +160,48 @@ describe('linearTeamFromWire', () => {
   })
 })
 
+describe('the in_review rule', () => {
+  const review = { id: 's-review', name: 'In Review', type: 'started' }
+  const withReview = (): LinearTeamConfig => ({
+    ...mapped(),
+    in_review: { members: [review], canonical: review },
+  })
+
+  it('round-trips from the wire and goes back out by id', async () => {
+    expect(linearTeamFromWire({ ...withReview(), armed: true })).toEqual(withReview())
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      ...jsonBody({ linear_teams: [] }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await saveTeamLinearTeams('team-1', [withReview()])
+    const sent = JSON.parse(fetchMock.mock.calls[0][1].body).linear_teams[0]
+    expect(sent.in_review).toEqual({ member_ids: ['s-review'], canonical_id: 's-review' })
+  })
+
+  it('arms nothing, but is held to the same complete-or-empty rule', () => {
+    const reviewOnly: LinearTeamConfig = {
+      ...unmappedLinearTeam('team-eng', 'ENG', 'Engineering'),
+      in_review: { members: [review], canonical: review },
+    }
+    expect(linearTeamIsArmed(reviewOnly)).toBe(false)
+    expect(linearTeamRulesValid(reviewOnly)).toBe(true)
+    expect(
+      linearTeamRulesValid({ ...withReview(), in_review: { members: [review], canonical: null } }),
+    ).toBe(false)
+  })
+
+  it('is part of what makes a set dirty, and of what a gone state is dropped from', () => {
+    expect(linearTeamsEqual([withReview()], [mapped()])).toBe(false)
+    expect(ids(unresolvableLinearStates(withReview(), [WORKFLOW[1]]))).toContain('s-review')
+    expect(dropLinearState(withReview(), review).in_review).toEqual({
+      members: [],
+      canonical: null,
+    })
+  })
+})
+
 describe('linearTeamsEqual', () => {
   // A stored team as the wire renders it: refs carry id, name and type only.
   const stored: LinearTeamConfig = {
@@ -242,12 +284,14 @@ describe('saveTeamLinearTeams', () => {
         id: 'team-eng',
         pickup: { member_ids: ['s-triage', 's-backlog', 's-todo'] },
         in_progress: { member_ids: ['s-doing', 's-review'], canonical_id: 's-doing' },
+        in_review: { member_ids: [], canonical_id: '' },
         done: { member_ids: ['s-shipped', 's-done', 's-canceled'], canonical_id: 's-shipped' },
       },
       {
         id: 'team-ops',
         pickup: { member_ids: [] },
         in_progress: { member_ids: [], canonical_id: '' },
+        in_review: { member_ids: [], canonical_id: '' },
         done: { member_ids: [], canonical_id: '' },
       },
     ])

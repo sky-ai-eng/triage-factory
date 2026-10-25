@@ -62,6 +62,23 @@ promises and then fails.
 which a member legitimately needs. Dimming it would hide information to signal a
 permission.
 
+## placeholder
+
+`placeholder` is a message in place of a board, for a page with nothing to map
+yet — a team source page whose team watches no project or Linear team. The
+columns draw as a skeleton — their labels, and two or three bars of different
+widths each — faded and slightly softened, with the message centered over them.
+Each column draws a faint outline, so the skeleton has a bottom edge. The tray
+and the note are absent, because with nothing to map there is nothing unmapped,
+and the column build does not play: nothing is arriving.
+
+It implies `interactive={false}`: no drag, no tab stops, no cursor. The board is
+`aria-hidden`; the message is the reading and carries `role="status"`.
+
+The message is text, never a control. The verb it names lives elsewhere on the
+page (the table beside it), and a member — who has no such verb — is given a
+sentence without one rather than the admin's instruction.
+
 ## Keyboard
 
 The board is a drag surface, and drag is pointer-only. It does not need a
@@ -121,7 +138,8 @@ Every value is a selector in `status-rules.css`, keyed off data attributes the
 component sets from content: `[data-over]` for the column under the pointer,
 `[data-staged]`, `[data-canonical]` for ★, `[data-more]` for a column that
 scrolls, `[data-clipped]` for a name too long for its column, `[data-empty]` and
-`[data-board-empty]` for the two ends of the board/tray height trade.
+`[data-board-empty]` for the two ends of the board/tray height trade, and
+`[data-placeholder]` for the skeleton board.
 
 Two things stay inline, because both are measured at runtime: each column's and
 chip's build delay (`--at`) and the peek label's fixed position.

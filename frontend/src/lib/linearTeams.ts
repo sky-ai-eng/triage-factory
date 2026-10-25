@@ -1,4 +1,4 @@
-import { apiJSON, apiList, apiListAll } from './apiClient'
+import { HttpError, apiJSON, apiList, apiListAll } from './apiClient'
 
 /** One option in the Linear team picker. The id is what the rules are keyed
  *  on and what the save sends; key and name are what a person recognizes the
@@ -63,6 +63,23 @@ export async function getLinearTeam(
   return apiJSON<LinearTeamCandidate>(
     `/api/orgs/${encodeURIComponent(orgId)}/linear/teams/${encodeURIComponent(teamId)}`,
   ).catch(() => null)
+}
+
+/** lookupLinearTeam reads one team by id and says whether the org's Linear
+ *  credential can still see it: the team when it can, 'gone' when the server
+ *  answers that Linear has no such team for this credential, and null when the
+ *  read fails any other way, which establishes nothing either way. */
+export async function lookupLinearTeam(
+  orgId: string,
+  teamId: string,
+): Promise<LinearTeamCandidate | 'gone' | null> {
+  try {
+    return await apiJSON<LinearTeamCandidate>(
+      `/api/orgs/${encodeURIComponent(orgId)}/linear/teams/${encodeURIComponent(teamId)}`,
+    )
+  } catch (e) {
+    return e instanceof HttpError && e.status === 404 ? 'gone' : null
+  }
 }
 
 /** listLinearStates reads one team's whole workflow, in board order. The list

@@ -40,6 +40,10 @@ export type StatusRulesProps = {
    * not disabled.
    */
   interactive?: boolean
+  /** A message in place of a board. The columns draw as an inert, faded
+   *  skeleton under it and the tray is absent — for a page with nothing to map
+   *  yet. Implies interactive={false}. */
+  placeholder?: string
 }
 
 // StatusRules — the Jira board: statuses live in columns, you drag them between
@@ -78,6 +82,9 @@ const DEFAULT_MAP: StatusMap = {
   review: { members: ['In Review', 'Code Review'].map(demoItem), primary: 'In Review' },
   done: { members: ['Done', 'Closed'].map(demoItem), primary: 'Done' },
 }
+// Chip widths for the skeleton, per column, so the faded board reads as
+// columns of different lengths rather than a grid of identical bars.
+const SKELETON: number[][] = [[78, 56], [88, 64, 72], [70], [82, 60]]
 const EMPTY_MAP: StatusMap = {
   ready: { members: [], primary: null },
   inprogress: { members: [], primary: null },
@@ -157,11 +164,12 @@ export function StatusRules({
   note = '',
   build = true,
   interactive = true,
+  placeholder,
 }: StatusRulesProps) {
   // Not interactive means not interactive-looking either: a grab cursor over a
   // chip that cannot be picked up is the board telling the reader something that
   // is not true. It also means no tab stops — see StatusRules.md.
-  const readonly = !interactive
+  const readonly = !interactive || !!placeholder
   const all = statuses || STATUSES
   const catalog = projects || PROJECTS
   // Controlled when the caller listens, self-posing when it does not — the
@@ -395,7 +403,11 @@ export function StatusRules({
   const colTab = () => (staged && !readonly ? 0 : undefined)
 
   return (
-    <div className="sr" data-readonly={readonly || undefined}>
+    <div
+      className="sr"
+      data-readonly={readonly || undefined}
+      data-placeholder={placeholder ? '' : undefined}
+    >
       {showProjects ? (
         <div className="sr-projects">
           <div className="sr-search-wrap">
@@ -518,7 +530,11 @@ export function StatusRules({
       {/* The column IS the drop target, so it runs to the tray rather than
           stopping under its last chip — dropping into the empty space below a
           short column is the obvious move. */}
-      <div className="sr-board" data-board-empty={boardEmpty || undefined}>
+      <div
+        className="sr-board"
+        data-board-empty={(boardEmpty && !placeholder) || undefined}
+        aria-hidden={placeholder ? true : undefined}
+      >
         {COLS.map(([id, label], ci) => {
           const rule = rules[id]
           const colAt = 0.06 + ci * 0.09
@@ -568,7 +584,7 @@ export function StatusRules({
                 }}
                 onScroll={gauge}
               >
-                {rule.members.map((m, si) => {
+                {(placeholder ? [] : rule.members).map((m, si) => {
                   const canonical = rule.primary === m.id
                   // `ready` chips carry no ★ affordance at all — TF reads work
                   // out of that column and never writes it, so there is no
@@ -670,12 +686,26 @@ export function StatusRules({
                   )
                 })}
 
-                {rule.members.length === 0 ? <span className="sr-slot" /> : null}
+                {placeholder ? (
+                  SKELETON[ci % SKELETON.length].map((w, gi) => (
+                    <span key={gi} className="sr-skel" style={{ width: w + '%' }} />
+                  ))
+                ) : rule.members.length === 0 ? (
+                  <span className="sr-slot" />
+                ) : null}
               </div>
             </div>
           )
         })}
       </div>
+
+      {/* The message a skeleton board stands under. Text, not a control: the
+          verb it names lives elsewhere on the page. */}
+      {placeholder ? (
+        <p className="sr-placeholder" role="status">
+          {placeholder}
+        </p>
+      ) : null}
 
       <div
         className="sr-tray"
