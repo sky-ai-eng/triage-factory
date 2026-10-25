@@ -591,3 +591,61 @@
     transform: none;
   }
 }
+
+/* ---- placeholder: a skeleton board under a message ---------------------- */
+
+.sr[data-placeholder] {
+  position: relative;
+}
+
+/* Faded and softened rather than greyed: it is a picture of what will be here,
+   not a control that is switched off. */
+.sr[data-placeholder] .sr-board {
+  opacity: 0.5;
+  filter: blur(1px);
+  pointer-events: none;
+  user-select: none;
+}
+
+/* With nothing to map there is nothing unmapped either. */
+.sr[data-placeholder] .sr-tray,
+.sr[data-placeholder] .sr-note {
+  display: none;
+}
+
+/* Each column draws its own outline, so the skeleton has a bottom edge rather
+   than bars hanging in space. Inset, so it sits on the column's own padding
+   box and never fights the grid gap. */
+.sr[data-placeholder] .sr-col {
+  box-shadow: inset 0 0 0 1px var(--color-line-2);
+}
+
+/* Nothing is arriving, so nothing builds: the columns and their bars are
+   simply there. */
+.sr[data-placeholder] .sr-col[data-building],
+.sr[data-placeholder] .sr-chip[data-building] {
+  animation: none;
+}
+
+.sr-skel {
+  flex: none;
+  height: 24px;
+  border-radius: 4px;
+  background: var(--color-tint-2);
+  box-shadow: inset 0 0 0 1px var(--color-line-1);
+}
+
+.sr-placeholder {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 32px;
+  text-align: center;
+  text-wrap: balance;
+  font: var(--font-weight-regular) 12px / 1.6 var(--font-sans);
+  color: var(--color-ink-2);
+  pointer-events: none;
+}

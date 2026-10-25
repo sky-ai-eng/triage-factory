@@ -4,6 +4,7 @@ import GitHubSource from './GitHubSource'
 import JiraSource from './JiraSource'
 import SlackSource from './SlackSource'
 import LinearSource from './LinearSource'
+import { jsonBody } from '../../test/apiResponse'
 
 // The source pages, each mounted against a stubbed API.
 //
@@ -505,13 +506,38 @@ describe('Jira source page', () => {
     },
   }
 
-  it('has no chart — the board is its build', async () => {
+  it('draws the fortnight beside the board, over the projects', async () => {
     stub(SETTINGS)
     render(<JiraSource {...BODY} />)
     await waitFor(() => expect(screen.getByText('What each status means')).toBeInTheDocument())
 
-    expect(document.querySelector('.sc')).toBeNull()
-    expect(document.querySelector('.sr-board')).not.toBeNull()
+    expect(screen.getByText('WHAT THE PROJECTS SENT')).toBeInTheDocument()
+    expect(document.querySelector('.sp-listcol .sc')).not.toBeNull()
+    expect(document.querySelector('.sp-mapcol .sr-board')).not.toBeNull()
+  })
+
+  it('draws a skeleton board under what to do when nothing is watched', async () => {
+    const none = {
+      ...SETTINGS,
+      '/api/teams/t1/settings': { ...SETTINGS['/api/teams/t1/settings'], jira_projects: [] },
+    }
+    stub(none)
+    const admin = render(<JiraSource {...BODY} />)
+    await waitFor(() =>
+      expect(
+        screen.getByText('Track a Jira project to the right to map ticket statuses.'),
+      ).toBeInTheDocument(),
+    )
+    expect(document.querySelector('.sr[data-placeholder]')).not.toBeNull()
+    expect(document.querySelector('[draggable="true"]')).toBeNull()
+    admin.unmount()
+
+    // A member has no verb to follow, so is told only what is true.
+    stub(none)
+    render(<JiraSource {...BODY} isAdmin={false} />)
+    await waitFor(() =>
+      expect(screen.getByText('No Jira project is watched by this team yet.')).toBeInTheDocument(),
+    )
   })
 
   it("maps the stored rules into the board, from its own project's statuses", async () => {
@@ -604,7 +630,11 @@ describe('Jira source page', () => {
     render(<JiraSource {...BODY} />)
 
     await waitFor(() =>
-      expect(screen.getByText('Jira is turned off — an org admin paused it.')).toBeInTheDocument(),
+      expect(
+        screen.getByText(
+          'Jira is turned off — an org admin paused it. The mapping below is what is stored; a project can still be unwatched.',
+        ),
+      ).toBeInTheDocument(),
     )
     // The stored configuration still renders — watched keys, the board's map —
     // because the team's config is TF's data, not Jira's.
@@ -618,6 +648,9 @@ describe('Jira source page', () => {
     // And with no catalog there is nothing to offer Watch on: only the
     // watched rows are listed.
     expect(screen.queryByText('Operations')).not.toBeInTheDocument()
+    // Nor anything live to report on: the figures and the chart hold their
+    // dashes even where the node has counted.
+    expect(screen.getByText('no daily series yet')).toBeInTheDocument()
   })
 
   it('gives a member a board with nothing to reach, and an admin the drag', async () => {
@@ -842,208 +875,470 @@ describe('Slack source page', () => {
   })
 })
 
-describe('LinearSource', () => {
-  const ENG_ID = 'team-eng'
+describe('Linear source page', () => {
+  const ENG = 'team-eng'
+  const OPS = 'team-ops'
   const LINEAR = '/api/orgs/org-1/linear/teams'
-  const PAYLOADS = {
-    '/api/teams/t1/settings': { linear_teams: [] },
-    [`${LINEAR}/list`]: [{ id: ENG_ID, key: 'ENG', name: 'Engineering', private: false }],
-    [`${LINEAR}/${ENG_ID}/states/list`]: [
-      { id: 's-done', name: 'Done', type: 'completed', position: 3 },
-      { id: 's-todo', name: 'Todo', type: 'unstarted', position: 1 },
-      { id: 's-doing', name: 'In Progress', type: 'started', position: 2 },
-    ],
+  const state = (id: string, name: string, type: string, position: number) => ({
+    id,
+    name,
+    type,
+    position,
+  })
+  const ref = ({ id, name, type }: { id: string; name: string; type: string }) => ({
+    id,
+    name,
+    type,
+  })
+  const TODO = state('s-todo', 'Todo', 'unstarted', 1)
+  const DOING = state('s-doing', 'In Progress', 'started', 2)
+  const REVIEW = state('s-review', 'In Review', 'started', 3)
+  const DONE = state('s-done', 'Done', 'completed', 4)
+  // Linear's seventh category: offered like any other state, and unmapped
+  // here, so it is the one chip reachable only through the workflow read.
+  const DUP = state('s-dup', 'Duplicate', 'duplicate', 5)
+  const ENG_STATES = [TODO, DOING, REVIEW, DONE, DUP]
+  const OPS_STATES = [state('o-todo', 'Queued', 'unstarted', 1)]
+
+  const ENG_ROW = {
+    id: ENG,
+    key: 'ENG',
+    name: 'Engineering',
+    armed: true,
+    pickup: { members: [ref(TODO)] },
+    in_progress: { members: [ref(DOING)], canonical: ref(DOING) },
+    in_review: { members: [], canonical: null },
+    done: { members: [ref(DONE)], canonical: ref(DONE) },
   }
-  const calledWith = (fetchMock: ReturnType<typeof stub>, path: string, method: string) =>
-    fetchMock.mock.calls.find(
-      ([url, init]) => String(url) === path && (init as RequestInit | undefined)?.method === method,
-    )
+  // Watched and never mapped: a valid stored state, and the strip's marker.
+  const OPS_ROW = {
+    id: OPS,
+    key: 'OPS',
+    name: 'Operations',
+    armed: false,
+    pickup: { members: [] },
+    in_progress: { members: [], canonical: null },
+    in_review: { members: [], canonical: null },
+    done: { members: [], canonical: null },
+  }
+  const CATALOG = [
+    { id: ENG, key: 'ENG', name: 'Engineering', private: false },
+    { id: OPS, key: 'OPS', name: 'Operations', private: false },
+    { id: 'team-des', key: 'DES', name: 'Design', private: false },
+  ]
+  const payloads = (linear_teams: unknown[], over: Record<string, unknown> = {}) => ({
+    '/api/teams/t1/settings': { linear_teams },
+    [`${LINEAR}/list`]: CATALOG,
+    [`${LINEAR}/${ENG}/states/list`]: ENG_STATES,
+    [`${LINEAR}/${OPS}/states/list`]: OPS_STATES,
+    ...over,
+  })
+  const BOTH = payloads([ENG_ROW, OPS_ROW])
+
+  const urls = (fetchMock: ReturnType<typeof stub>) => fetchMock.mock.calls.map((c) => String(c[0]))
+  const puts = (fetchMock: ReturnType<typeof stub>): Record<string, unknown>[][] =>
+    fetchMock.mock.calls
+      .filter(([path, init]) => path === '/api/teams/t1/linear-teams' && init?.method === 'PUT')
+      .map(([, init]) => JSON.parse(String(init!.body)).linear_teams)
+  const column = (label: string) =>
+    Array.from(document.querySelectorAll('.sr-col')).find(
+      (c) => c.querySelector('.sr-col-label')?.textContent === label,
+    )!
+  const rowOf = (text: string) => screen.getByText(text).closest<HTMLElement>('[role="row"]')!
 
   beforeEach(() => {
     sources.state = { linear: 'available' }
   })
 
-  it('lets a team admin watch a team, mapped from its state types, and save it', async () => {
-    const fetchMock = stub(PAYLOADS)
+  it("maps the stored rules into four columns, from the team's own workflow", async () => {
+    const fetchMock = stub(BOTH)
     render(<LinearSource {...BODY} />)
 
-    // The catalog is read at the org the page belongs to.
-    await waitFor(() => expect(screen.getByText('Engineering')).toBeInTheDocument())
-    expect(calledWith(fetchMock, `${LINEAR}/list`, 'POST')).toBeDefined()
-    const save = screen.getByRole('button', { name: 'Save' })
-    expect(save).toBeDisabled()
+    await waitFor(() => expect(screen.getByText('Duplicate')).toBeInTheDocument())
+    expect(column('READY').textContent).toContain('Todo')
+    expect(column('IN PROGRESS').textContent).toContain('In Progress')
+    expect(column('IN REVIEW')).toBeDefined()
+    expect(column('DONE').textContent).toContain('Done')
+    // The shown team's workflow only, never another watched team's.
+    expect(urls(fetchMock).filter((u) => u.endsWith('/states/list'))).toEqual([
+      `${LINEAR}/${ENG}/states/list`,
+    ])
+    expect(screen.getByText('WHAT THE TEAMS SENT')).toBeInTheDocument()
+  })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Watch' }))
-    await waitFor(() => expect(screen.getByText('Ready')).toBeInTheDocument())
-    expect(calledWith(fetchMock, `${LINEAR}/${ENG_ID}/states/list`, 'POST')).toBeDefined()
+  it('names the team it shows when there is no strip to', async () => {
+    stub(payloads([ENG_ROW]))
+    render(<LinearSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText(/showing ENG/)).toBeInTheDocument())
+    expect(screen.getByText(/saves as it lands/)).toBeInTheDocument()
+    expect(document.querySelector('.sp-projstrip')).toBeNull()
+  })
 
-    fireEvent.click(save)
+  it('switches the board through the strip, and marks the unmapped key', async () => {
+    const fetchMock = stub(BOTH)
+    render(<LinearSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('Duplicate')).toBeInTheDocument())
+
+    const keys = Array.from(document.querySelectorAll('.sp-projkey'))
+    expect(keys.map((k) => k.textContent)).toEqual(['ENG', 'OPS'])
+    expect(keys[0].hasAttribute('data-unarmed')).toBe(false)
+    expect(keys[1].hasAttribute('data-unarmed')).toBe(true)
+
+    fireEvent.click(keys[1])
     await waitFor(() =>
-      expect(calledWith(fetchMock, '/api/teams/t1/linear-teams', 'PUT')).toBeDefined(),
+      expect(
+        screen.getByText('not armed yet · drag states into the columns to arm it'),
+      ).toBeInTheDocument(),
     )
-    const [, init] = calledWith(fetchMock, '/api/teams/t1/linear-teams', 'PUT')!
-    expect(JSON.parse(String((init as RequestInit).body))).toEqual({
-      linear_teams: [
-        {
-          id: ENG_ID,
-          pickup: { member_ids: ['s-todo'] },
-          in_progress: { member_ids: ['s-doing'], canonical_id: 's-doing' },
-          done: { member_ids: ['s-done'], canonical_id: 's-done' },
-        },
-      ],
-    })
+    await waitFor(() => expect(screen.getByText('Queued')).toBeInTheDocument())
+    expect(urls(fetchMock).filter((u) => u.endsWith('/states/list'))).toEqual([
+      `${LINEAR}/${ENG}/states/list`,
+      `${LINEAR}/${OPS}/states/list`,
+    ])
   })
 
-  it("puts each watched team's events on its row, and a dash until the node answers", async () => {
-    const watched = {
-      ...PAYLOADS,
-      '/api/teams/t1/settings': {
-        linear_teams: [
-          {
-            id: ENG_ID,
-            key: 'ENG',
-            name: 'Engineering',
-            armed: false,
-            pickup: { members: [] },
-            in_progress: { members: [], canonical: null },
-            done: { members: [], canonical: null },
-          },
-        ],
-      },
-    }
-    stub(watched)
-    const { unmount } = render(<LinearSource {...BODY} isAdmin={false} />)
-    await waitFor(() => expect(screen.getByText('— events')).toBeInTheDocument())
-    unmount()
-
-    stub({ ...watched, '/api/teams/t1/activity': ACTIVITY })
-    render(<LinearSource {...BODY} isAdmin={false} />)
-    await waitFor(() => expect(screen.getByText('4 events')).toBeInTheDocument())
-  })
-
-  it('shows a member the mapping with no verbs and no catalog read', async () => {
+  it('saves a board gesture as the four rules, state ids on the wire', async () => {
     const fetchMock = stub({
-      ...PAYLOADS,
-      '/api/teams/t1/settings': {
+      ...BOTH,
+      '/api/teams/t1/linear-teams': {
         linear_teams: [
-          {
-            id: ENG_ID,
-            key: 'ENG',
-            name: 'Engineering',
-            armed: false,
-            pickup: { members: [] },
-            in_progress: { members: [], canonical: null },
-            done: { members: [], canonical: null },
-          },
+          { ...ENG_ROW, in_review: { members: [ref(REVIEW)], canonical: ref(REVIEW) } },
+          OPS_ROW,
         ],
       },
     })
-    render(<LinearSource {...BODY} isAdmin={false} />)
+    render(<LinearSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('Duplicate')).toBeInTheDocument())
 
-    await waitFor(() => expect(screen.getByText('ENG')).toBeInTheDocument())
-    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Stop watching ENG' })).toBeNull()
-    expect(calledWith(fetchMock, `${LINEAR}/list`, 'POST')).toBeUndefined()
+    // Stage the tray's In Review and land it in IN REVIEW from the keyboard.
+    fireEvent.keyDown(screen.getByRole('button', { name: 'In Review' }), { key: 'Enter' })
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Put In Review in IN REVIEW' }), {
+      key: 'Enter',
+    })
+
+    await waitFor(() => expect(puts(fetchMock)).toHaveLength(1))
+    const [sent] = puts(fetchMock)
+    // The first state into a write-target column takes its ★.
+    expect(sent[0]).toEqual({
+      id: ENG,
+      pickup: { member_ids: ['s-todo'] },
+      in_progress: { member_ids: ['s-doing'], canonical_id: 's-doing' },
+      in_review: { member_ids: ['s-review'], canonical_id: 's-review' },
+      done: { member_ids: ['s-done'], canonical_id: 's-done' },
+    })
+    expect(sent[1]).toEqual({
+      id: OPS,
+      pickup: { member_ids: [] },
+      in_progress: { member_ids: [], canonical_id: '' },
+      in_review: { member_ids: [], canonical_id: '' },
+      done: { member_ids: [], canonical_id: '' },
+    })
+    await waitFor(() => expect(column('IN REVIEW').textContent).toContain('In Review'))
   })
 
-  it('says Linear needs connecting rather than offering an empty catalog', async () => {
-    sources.state = { linear: 'unconfigured' }
-    const fetchMock = stub(PAYLOADS)
+  it('rolls a refused gesture back and says why', async () => {
+    const fetchMock = stub(BOTH)
+    const answer = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation((input: unknown, init?: RequestInit) =>
+      String(input) === '/api/teams/t1/linear-teams'
+        ? Promise.resolve({
+            ok: false,
+            status: 502,
+            ...jsonBody({
+              errors: [{ reason: 'UPSTREAM_UNAVAILABLE', message: 'could not reach Linear' }],
+            }),
+          })
+        : answer(input, init),
+    )
+    render(<LinearSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('Duplicate')).toBeInTheDocument())
+
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Duplicate' }), { key: 'Enter' })
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Put Duplicate in DONE' }), {
+      key: 'Enter',
+    })
+
+    await waitFor(() => expect(screen.getByText('could not reach Linear')).toBeInTheDocument())
+    expect(column('DONE').textContent).not.toContain('Duplicate')
+    expect(screen.getByRole('button', { name: 'Duplicate' })).toBeInTheDocument()
+  })
+
+  it('watches a catalog team with every rule empty', async () => {
+    const fetchMock = stub(BOTH)
+    render(<LinearSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('Design')).toBeInTheDocument())
+
+    commitVerb('Design', 'Watch', 300)
+    await waitFor(() => expect(puts(fetchMock)).toHaveLength(1))
+    const [sent] = puts(fetchMock)
+    expect(sent.map((t) => t.id)).toEqual([ENG, OPS, 'team-des'])
+    expect(sent[2]).toEqual({
+      id: 'team-des',
+      pickup: { member_ids: [] },
+      in_progress: { member_ids: [], canonical_id: '' },
+      in_review: { member_ids: [], canonical_id: '' },
+      done: { member_ids: [], canonical_id: '' },
+    })
+  })
+
+  it("counts a watched team's events, and dashes a catalog team's", async () => {
+    stub({ ...BOTH, '/api/teams/t1/activity': ACTIVITY })
+    render(<LinearSource {...BODY} />)
+
+    await waitFor(() => expect(within(rowOf('Engineering')).getByText('4')).toBeInTheDocument())
+    expect(within(rowOf('Design')).getByText('—')).toBeInTheDocument()
+  })
+
+  it('gives a member the page without the verbs', async () => {
+    const fetchMock = stub(BOTH)
+    render(<LinearSource {...BODY} isAdmin={false} />)
+    await waitFor(() => expect(screen.getByText('Duplicate')).toBeInTheDocument())
+
+    // The catalog and the workflow still read — a member is shown what is
+    // watched and what could be — but nothing picks up, stars or selects.
+    expect(urls(fetchMock)).toContain(`${LINEAR}/list`)
+    expect(document.querySelector('[draggable="true"]')).toBeNull()
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+    expect(screen.queryByText(/saves as it lands/)).toBeNull()
+  })
+
+  it('keeps a paused Linear readable and its mapping editable', async () => {
+    sources.state = { linear: 'disabled' }
+    const fetchMock = stub(BOTH)
     render(<LinearSource {...BODY} />)
 
     await waitFor(() =>
       expect(
         screen.getByText(
-          'Connect Linear under Workspace settings before configuring tracked teams.',
+          'Linear is paused for this workspace. Nothing is polled until it resumes; the mapping stays editable.',
         ),
       ).toBeInTheDocument(),
     )
-    // An admin keeps the save bar — stopping watching a team asks Linear
-    // nothing — but there is no catalog to read.
-    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
-    expect(calledWith(fetchMock, `${LINEAR}/list`, 'POST')).toBeUndefined()
+    await waitFor(() => expect(screen.getByText('Duplicate')).toBeInTheDocument())
+    expect(urls(fetchMock)).toContain(`${LINEAR}/list`)
+    expect(document.querySelector('[draggable="true"]')).not.toBeNull()
   })
 
-  it('keeps an edit made while a save is out, unsaved', async () => {
-    const fetchMock = stub({
-      ...PAYLOADS,
-      [`${LINEAR}/list`]: [
-        { id: ENG_ID, key: 'ENG', name: 'Engineering', private: false },
-        { id: 'team-ops', key: 'OPS', name: 'Operations', private: false },
-      ],
-      '/api/teams/t1/settings': {
-        linear_teams: [
-          {
-            id: ENG_ID,
-            key: 'ENG',
-            name: 'Engineering',
-            armed: false,
-            pickup: { members: [] },
-            in_progress: { members: [], canonical: null },
-            done: { members: [], canonical: null },
-          },
-        ],
-      },
-    })
-    // The PUT is held open until the test answers it.
-    let answerPut: (body: unknown) => void = () => {}
-    const answer = fetchMock.getMockImplementation()!
-    fetchMock.mockImplementation((input: unknown, init?: RequestInit) => {
-      if (String(input) !== '/api/teams/t1/linear-teams') return answer(input, init)
-      return new Promise((resolve) => {
-        answerPut = (body) =>
-          resolve({ ok: true, status: 200, text: () => Promise.resolve(JSON.stringify(body)) })
-      })
-    })
+  it('shows what is stored while Linear is not connected, and still unwatches', async () => {
+    sources.state = { linear: 'unconfigured' }
+    const fetchMock = stub({ ...BOTH, '/api/teams/t1/activity': ACTIVITY })
     render(<LinearSource {...BODY} />)
-    await waitFor(() => expect(screen.getByText('Operations')).toBeInTheDocument())
 
-    fireEvent.click(screen.getByRole('button', { name: 'Stop watching ENG' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() =>
-      expect(calledWith(fetchMock, '/api/teams/t1/linear-teams', 'PUT')).toBeDefined(),
+      expect(
+        screen.getByText(
+          'Linear is not connected for this workspace. The mapping below is what is stored; a team can still be unwatched.',
+        ),
+      ).toBeInTheDocument(),
     )
+    await waitFor(() => expect(screen.getByText('Engineering')).toBeInTheDocument())
+    // Nothing Linear could answer is asked, and nothing live is reported.
+    expect(urls(fetchMock).some((u) => u.startsWith(LINEAR))).toBe(false)
+    expect(screen.queryByText('Design')).not.toBeInTheDocument()
+    expect(screen.getByText('no daily series yet')).toBeInTheDocument()
+    expect(within(rowOf('Engineering')).getByText('—')).toBeInTheDocument()
+    expect(document.querySelector('[draggable="true"]')).toBeNull()
 
-    // While the save is out: watch OPS.
-    const opsRow = screen.getByText('Operations').closest('div')!.parentElement!
-    fireEvent.click(within(opsRow).getByRole('button', { name: 'Watch' }))
-    expect(screen.getByRole('button', { name: 'Expand OPS' })).toBeInTheDocument()
-
-    answerPut({ linear_teams: [] })
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled())
-    expect(screen.getByRole('button', { name: 'Expand OPS' })).toBeInTheDocument()
+    commitVerb('Engineering', /^Stop watching/, 1_200)
+    await waitFor(() => expect(puts(fetchMock)).toHaveLength(1))
+    expect(puts(fetchMock)[0].map((t) => t.id)).toEqual([OPS])
   })
 
-  it('never carries one team’s set into another team’s page', async () => {
+  it('draws a skeleton board under what to do when nothing is watched', async () => {
+    stub(payloads([]))
+    const admin = render(<LinearSource {...BODY} />)
+    await waitFor(() =>
+      expect(
+        screen.getByText('Track a Linear team to the right to map workflow statuses.'),
+      ).toBeInTheDocument(),
+    )
+    expect(document.querySelector('.sr[data-placeholder] .sr-board[aria-hidden="true"]')).not.toBe(
+      null,
+    )
+    admin.unmount()
+
+    stub(payloads([]))
+    render(<LinearSource {...BODY} isAdmin={false} />)
+    await waitFor(() =>
+      expect(screen.getByText('No Linear team is tracked by this team yet.')).toBeInTheDocument(),
+    )
+  })
+
+  it('tags a private team and says what that means for its tasks', async () => {
+    stub(
+      payloads([ENG_ROW], {
+        [`${LINEAR}/list`]: [{ ...CATALOG[0], private: true }, CATALOG[2]],
+      }),
+    )
+    render(<LinearSource {...BODY} />)
+
+    await waitFor(() =>
+      expect(within(rowOf('Engineering')).getByText('private')).toBeInTheDocument(),
+    )
+    expect(
+      screen.getByText(
+        'ENG is private in Linear. Its issues still become tasks every member of this team can read.',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('marks a watched team the whole catalog no longer has as out of reach', async () => {
+    stub({ ...BOTH, [`${LINEAR}/list`]: CATALOG.slice(1) })
+    render(<LinearSource {...BODY} />)
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          'Linear no longer shows ENG to this workspace’s Linear connection, so nothing is polled from it. The stored mapping stays until it is unwatched.',
+        ),
+      ).toBeInTheDocument(),
+    )
+    expect(within(rowOf('Engineering')).getByText('out of reach')).toBeInTheDocument()
+    const eng = Array.from(document.querySelectorAll('.sp-projkey'))[0]
+    expect(eng.hasAttribute('data-alarm')).toBe(true)
+    // Every change to it would ask Linear about a team it no longer serves.
+    expect(document.querySelector('[draggable="true"]')).toBeNull()
+  })
+
+  it('asks after a watched team by id when the catalog does not fit one page', async () => {
     const fetchMock = stub({
-      ...PAYLOADS,
-      '/api/teams/t1/settings': {
-        linear_teams: [
-          {
-            id: ENG_ID,
-            key: 'ENG',
-            name: 'Engineering',
-            armed: false,
-            pickup: { members: [] },
-            in_progress: { members: [], canonical: null },
-            done: { members: [], canonical: null },
-          },
-        ],
-      },
+      ...BOTH,
+      [`${LINEAR}/${OPS}`]: { ...CATALOG[1], private: true },
     })
-    // The next team's read is still in flight.
     const answer = fetchMock.getMockImplementation()!
     fetchMock.mockImplementation((input: unknown, init?: RequestInit) =>
-      String(input) === '/api/teams/t2/settings' ? new Promise(() => {}) : answer(input, init),
+      String(input) === `${LINEAR}/list`
+        ? Promise.resolve({
+            ok: true,
+            status: 200,
+            ...jsonBody({ items: [CATALOG[2]], next_page_token: 'more', total_count: 0 }),
+          })
+        : answer(input, init),
     )
-    const { rerender } = render(<LinearSource {...BODY} />)
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Expand ENG' })).toBeInTheDocument(),
-    )
+    render(<LinearSource {...BODY} />)
 
-    rerender(<LinearSource {...BODY} teamId="t2" />)
-    expect(screen.queryAllByText('ENG')).toHaveLength(0)
-    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull()
-    expect(screen.getByText('Loading…')).toBeInTheDocument()
+    // ENG answers 404 (the stub's default), OPS answers as a private team.
+    await waitFor(() =>
+      expect(within(rowOf('Engineering')).getByText('out of reach')).toBeInTheDocument(),
+    )
+    await waitFor(() =>
+      expect(within(rowOf('Operations')).getByText('private')).toBeInTheDocument(),
+    )
+    expect(screen.getByText('more teams exist · narrow the filter')).toBeInTheDocument()
+  })
+
+  it('flags a ★ Linear deleted, and drops it when a gesture changes its rule', async () => {
+    const fetchMock = stub({
+      ...BOTH,
+      [`${LINEAR}/${ENG}/states/list`]: ENG_STATES.filter((s) => s.id !== 's-doing'),
+    })
+    render(<LinearSource {...BODY} />)
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          'In Progress, the ★ in IN PROGRESS, was deleted in Linear. A claim can’t move an issue until another state there is starred.',
+        ),
+      ).toBeInTheDocument(),
+    )
+    expect(Array.from(document.querySelectorAll('.sp-projkey'))[0].hasAttribute('data-alarm')).toBe(
+      true,
+    )
+    // The flag carries the instruction, so the note does not repeat one.
+    expect(screen.queryByText(/drag to remap/)).toBeNull()
+
+    // Land In Review beside the deleted ★: the rule changed, so it sheds the
+    // state Linear no longer has, and the ★ passes to what remains.
+    fireEvent.keyDown(screen.getByRole('button', { name: 'In Review' }), { key: 'Enter' })
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Put In Review in IN PROGRESS' }), {
+      key: 'Enter',
+    })
+    await waitFor(() => expect(puts(fetchMock)).toHaveLength(1))
+    const eng = puts(fetchMock)[0][0]
+    expect(eng.in_progress).toEqual({ member_ids: ['s-review'], canonical_id: 's-review' })
+    // A rule the gesture did not touch goes out as stored.
+    expect(eng.done).toEqual({ member_ids: ['s-done'], canonical_id: 's-done' })
+  })
+
+  it('tells a member who can repair a deleted ★', async () => {
+    stub({
+      ...BOTH,
+      [`${LINEAR}/${ENG}/states/list`]: ENG_STATES.filter((s) => s.id !== 's-doing'),
+    })
+    render(<LinearSource {...BODY} isAdmin={false} />)
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          'In Progress, the ★ in IN PROGRESS, was deleted in Linear. Claims can’t move ENG issues until an admin stars another state.',
+        ),
+      ).toBeInTheDocument(),
+    )
+  })
+
+  it('rolls two refused gestures back to what the server holds, not the first gesture', async () => {
+    const fetchMock = stub(BOTH)
+    const answer = fetchMock.getMockImplementation()!
+    // Both PUTs are held open until the test refuses them, in order.
+    const refusals: Array<() => void> = []
+    fetchMock.mockImplementation((input: unknown, init?: RequestInit) =>
+      String(input) === '/api/teams/t1/linear-teams'
+        ? new Promise((resolve) => {
+            refusals.push(() =>
+              resolve({
+                ok: false,
+                status: 502,
+                ...jsonBody({
+                  errors: [{ reason: 'UPSTREAM_UNAVAILABLE', message: 'could not reach Linear' }],
+                }),
+              }),
+            )
+          })
+        : answer(input, init),
+    )
+    render(<LinearSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('Duplicate')).toBeInTheDocument())
+
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Duplicate' }), { key: 'Enter' })
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Put Duplicate in DONE' }), {
+      key: 'Enter',
+    })
+    fireEvent.keyDown(screen.getByRole('button', { name: 'In Review' }), { key: 'Enter' })
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Put In Review in IN REVIEW' }), {
+      key: 'Enter',
+    })
+    await waitFor(() => expect(refusals).toHaveLength(2))
+
+    // The first refusal lands while the second write is still out, so the page
+    // keeps showing the newer gesture; the second one rolls everything back.
+    act(() => refusals[0]())
+    act(() => refusals[1]())
+    await waitFor(() => expect(screen.getByText('could not reach Linear')).toBeInTheDocument())
+    expect(column('DONE').textContent).not.toContain('Duplicate')
+    expect(column('IN REVIEW').textContent).not.toContain('In Review')
+    expect(screen.getByRole('button', { name: 'Duplicate' })).toBeInTheDocument()
+  })
+
+  it('asks for a workflow again when a failed read’s board is shown again', async () => {
+    const fetchMock = stub(BOTH)
+    const answer = fetchMock.getMockImplementation()!
+    const engStates = `${LINEAR}/${ENG}/states/list`
+    let engReads = 0
+    fetchMock.mockImplementation((input: unknown, init?: RequestInit) => {
+      if (String(input) === engStates && ++engReads === 1) {
+        return Promise.resolve({ ok: false, status: 502, ...jsonBody({ errors: [] }) })
+      }
+      return answer(input, init)
+    })
+    render(<LinearSource {...BODY} />)
+    await waitFor(() => expect(engReads).toBe(1))
+    expect(screen.queryByText('Duplicate')).not.toBeInTheDocument()
+
+    const keys = () => Array.from(document.querySelectorAll('.sp-projkey'))
+    fireEvent.click(keys()[1])
+    await waitFor(() => expect(screen.getByText('Queued')).toBeInTheDocument())
+    fireEvent.click(keys()[0])
+
+    await waitFor(() => expect(screen.getByText('Duplicate')).toBeInTheDocument())
+    expect(engReads).toBe(2)
   })
 })

@@ -1534,6 +1534,11 @@ func (s *Spawner) announceTaskPlacement(orgID, taskID string) {
 	// credential, so a watcher on Jira sees the bot pick the ticket up. Past
 	// the guards above, so it fires once per delegation; task is bot-claimed
 	// here, so the write is bot-attributed by construction.
+	//
+	// TODO(TFAC-1184): a Linear-backed task's issue is not moved to its team's
+	// in-progress state here, nor re-asserted at terminateBlueprint's
+	// completion, though the source page's board says the ★ is what TF writes
+	// back; only a person's own claim moves a Linear issue today.
 	s.mirrorJiraInProgress(orgID, task)
 }
 

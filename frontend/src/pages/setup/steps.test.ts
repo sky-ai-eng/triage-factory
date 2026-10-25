@@ -372,6 +372,7 @@ describe('setup — the Linear tracker', () => {
             name: 'Engineering',
             pickup: { members: [{ id: 's1', name: 'Todo', type: 'unstarted' }] },
             in_progress,
+            in_review: { members: [] },
             done: { members: [] },
           },
         ],

@@ -1,6 +1,6 @@
 /* SpendRing — see SpendRing.tsx for the reasoning. Geometry only here. */
 
-.sr {
+.spr {
   position: relative;
   display: block;
   aspect-ratio: 1;
@@ -9,14 +9,14 @@
   color: inherit;
   transition: opacity 0.16s var(--ease-default);
 }
-a.sr:hover {
+a.spr:hover {
   opacity: 0.86;
 }
 
 /* -90deg so the first band starts at twelve o'clock. overflow visible because
    a hovered band is 3px thicker than the track and would otherwise be clipped
    by the viewBox. */
-.sr-svg {
+.spr-svg {
   width: 100%;
   height: 100%;
   display: block;
@@ -24,13 +24,13 @@ a.sr:hover {
   overflow: visible;
 }
 
-.sr-track {
+.spr-track {
   fill: none;
   stroke: var(--color-tint-3);
   stroke-width: 14;
 }
 
-.sr-seg {
+.spr-seg {
   fill: none;
   cursor: pointer;
   transition:
@@ -39,7 +39,7 @@ a.sr:hover {
     opacity 0.18s var(--ease-default);
 }
 
-.sr-hole {
+.spr-hole {
   position: absolute;
   inset: 0;
   display: flex;
@@ -51,7 +51,7 @@ a.sr:hover {
      leaving the band underneath. */
   pointer-events: none;
 }
-.sr-total {
+.spr-total {
   /* Scales with the ring, set from `size` in the component. A fixed size meant
      a 104px ring carried the same readout as a 168px one, and a three-digit
      total ran through the band on both sides.
@@ -59,18 +59,18 @@ a.sr:hover {
      Precision does NOT scale — see `money` in SpendRing.tsx. One rule at every
      size, or a ring reads differently at 104 than at 168 and they stop being
      the same component. */
-  font: 500 var(--sr-fig, 16px) / 1 var(--font-mono);
+  font: 500 var(--spr-fig, 16px) / 1 var(--font-mono);
   color: var(--color-ink-1);
   letter-spacing: -0.01em;
   /* Tabular so a figure changing in place does not shuffle its own digits
      sideways. */
   font-variant-numeric: tabular-nums;
 }
-.sr-cap {
+.spr-cap {
   /* Scales with the ring too, but on its own ratio — a caption at half the
      figure's size stops being legible before the figure does, so it floors at
      7.5px and the two converge on large rings. */
-  font: 400 var(--sr-cap, 8.5px) / 1 var(--font-mono);
+  font: 400 var(--spr-cap, 8.5px) / 1 var(--font-mono);
   letter-spacing: 0.09em;
   color: var(--color-ink-4);
   /* The hole is a fixed circular aperture, so the label fits it rather than
@@ -96,7 +96,7 @@ a.sr:hover {
    sit at ink-4; a name is an ANSWER to the pointer and has to be read, and at
    8.5px with this much tracking ink-4 was not enough for a string anyone needs
    to parse. */
-.sr-cap[data-open] {
+.spr-cap[data-open] {
   color: var(--color-ink-2);
 }
 

@@ -3,12 +3,15 @@ import Table from '../../ui/table/Table'
 import type { TableColumn, TableRow } from '../../ui/table/Table'
 import StatusRules from '../../ui/statusrules/StatusRules'
 import type { StatusItem, StatusMap, StatusRule } from '../../ui/statusrules/StatusRules'
+import SourceChart from '../../ui/sourcechart/SourceChart'
 import { SourceFrame, FilterField } from './SourceFrame'
 import type { SourceBodyProps } from './SourceFrame'
+import { EMPTY_STATUS_MAP, boardNote, eventsColumn } from './mapping'
 import {
   useTeamActivity,
   activitySource,
   activityTracked,
+  activitySeries,
   sinceLabel,
 } from '../../hooks/useTeamActivity'
 import { useEventSources } from '../../hooks/useEventSources'
@@ -32,15 +35,15 @@ import {
 
 // Jira, as this team's event source.
 //
-// JIRA'S BOARD IS ITS BUILD. This is the one source page with no chart: the
-// status board already lands column by column and owns that space, so the two
-// halves weigh the same rather than 2:3, and the prose and the board share a
-// column because they are one argument.
+// The two halves weigh the same rather than 2:3. The prose and the board share
+// the left column because they are one argument; the chart of what the
+// projects sent and the table of which projects send it share the right.
+// Linear's page is this one in Linear's vocabulary.
 //
 // Watching and arming are two different gestures. The table on the right picks
 // from the org credential's live project catalog, and watching is one verb —
 // a project joins the tracked set carrying no rules at all. Mapping its
-// statuses (arming) happens in Settings, and until then the project simply
+// statuses (arming) happens on the board, and until then the project simply
 // contributes nothing to the poller's discovery query.
 //
 // EVERY PROJECT CARRIES ITS OWN MAP, so the board shows one project at a time
@@ -117,20 +120,13 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   const [candidates, setCandidates] = useState<JiraProjectCandidate[] | null>(null)
   const [truncated, setTruncated] = useState(false)
   // Each watched project's own status vocabulary, keyed by its Jira id and
-  // fetched when its board is first shown. Per project because statuses come
-  // from a project's workflow scheme, so two watched projects can offer
-  // different ones.
+  // fetched when its board is shown, until a read answers. Per project
+  // because statuses come from a project's workflow scheme, so two watched
+  // projects can offer different ones.
   const [statusesByJiraId, setStatusesByJiraId] = useState<Record<string, JiraStatusRef[]>>({})
   const [error, setError] = useState('')
   const [filter, setFilter] = useState('')
   const [shownRef, setShownRef] = useState('')
-
-  // The frame's three figures, from the team activity node at the window
-  // their labels name, and the table's per-project events from the same
-  // answer.
-  const activity = useTeamActivity(teamId, 7)
-  const flow = activitySource(activity, 'jira')
-  const perProject = useMemo(() => activityTracked(activity, 'jira'), [activity])
 
   // Why Jira cannot reach this org right now, or null — which is also the
   // answer while the availability read is unresolved, so the page never
@@ -140,6 +136,18 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   // never asks Jira anything.
   const { stateOf } = useEventSources()
   const offReason = sourceUnavailableReason('jira', stateOf('jira'))
+
+  // The frame's three figures, from the team activity node at the window
+  // their labels name, and the table's per-project events from the same
+  // answer; the chart reads its own fortnight. While Jira is off they all
+  // hold their dashes: the page has no live connection to report on.
+  const activity = useTeamActivity(teamId, 7)
+  const activity14 = useTeamActivity(teamId, 14)
+  const flow = offReason ? null : activitySource(activity, 'jira')
+  const perProject = useMemo(
+    () => activityTracked(offReason ? null : activity, 'jira'),
+    [activity, offReason],
+  )
 
   useEffect(() => {
     if (!teamId) return
@@ -151,6 +159,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
           setError('Could not read this team’s Jira configuration.')
           return
         }
+        confirmed.current = { seq: 0, set: data.jira_projects ?? [] }
         setProjects(data.jira_projects ?? [])
       })
       .catch(() => {
@@ -219,8 +228,9 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
         if (live) setStatusesByJiraId((m) => ({ ...m, [shownJiraId]: list }))
       })
       .catch(() => {
-        // The board still draws what is mapped; only the tray goes empty.
-        if (live) setStatusesByJiraId((m) => ({ ...m, [shownJiraId]: [] }))
+        // Nothing is recorded, so the read is asked again the next time this
+        // board is shown. Until then the board still draws what is mapped,
+        // and only the tray is empty.
       })
     return () => {
       live = false
@@ -287,18 +297,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
         render: (r) => r.name ?? '—',
         color: (r) => (r.watched ? 'var(--color-ink-2)' : 'var(--color-ink-4)'),
       },
-      {
-        key: 'events',
-        label: 'EVENTS',
-        align: 'end',
-        drop: 1,
-        // A watched project's events in seven days, the frame's window. A
-        // project the team does not watch is counted by nothing, so it reads
-        // a dash rather than a zero.
-        render: (r) => r.events ?? '—',
-        sortValue: (r) => -((r.events as number | null) ?? 0),
-        color: () => 'var(--color-ink-4)',
-      },
+      eventsColumn,
     ],
     [],
   )
@@ -307,20 +306,30 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   // set AS STORED (status names re-resolved from Jira), and adopting a stale
   // answer over a newer optimistic set would undo the newer gesture.
   const commitSeq = useRef(0)
+  // The newest set the server has confirmed, and the write that confirmed it.
+  // A failure rolls back to this rather than to the set the gesture was built
+  // on: with two writes out, that set carries the first one's change, which
+  // the server may have refused as well.
+  const confirmed = useRef<{ seq: number; set: JiraProjectConfig[] }>({ seq: 0, set: [] })
 
   // The one write door for this page — the table's verbs and the board's
   // gestures alike. Optimistic, latest-wins, and honest on failure: the
   // optimistic set rolls back rather than leaving the page rendering a
   // configuration the server never accepted.
   const persist = useCallback(
-    (next: JiraProjectConfig[], prev: JiraProjectConfig[]) => {
+    (next: JiraProjectConfig[]) => {
       setProjects(next)
       const seq = ++commitSeq.current
       void saveTeamJiraProjects(teamId, next).then((res) => {
+        if (res.ok && seq > confirmed.current.seq) {
+          confirmed.current = { seq, set: res.projects }
+        }
         if (commitSeq.current !== seq) return
-        if (res.ok) setProjects(res.projects)
-        else {
-          setProjects(prev)
+        if (res.ok) {
+          setProjects(res.projects)
+          setError('')
+        } else {
+          setProjects(confirmed.current.set)
           setError(res.error)
         }
       })
@@ -345,7 +354,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
                 .map(watchedProject),
             )
           : projects.filter((p) => !picked.has(jiraProjectRef(p)))
-      persist(next, projects)
+      persist(next)
     },
     [projects, catalog, persist],
   )
@@ -385,32 +394,20 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
         in_review: rule(next.review, true),
         done: rule(next.done, true),
       }
-      persist(
-        projects.map((p) => (jiraProjectRef(p) === shownR ? edited : p)),
-        projects,
-      )
+      persist(projects.map((p) => (jiraProjectRef(p) === shownR ? edited : p)))
     },
     [shown, shownR, shownJiraId, projects, statusesByJiraId, persist],
   )
 
-  // The note under the board: the strip names the shown project when there is
-  // one to pick, so the note only carries the key when it is the sole voice.
-  // An admin is told the board saves; a member is only told what is missing.
-  const note = (() => {
-    if (!shown) return ''
-    const parts: string[] = []
-    if (watched.length <= 1) parts.push(`showing ${shown.key}`)
-    if (isAdmin && !offReason) {
-      parts.push(
-        projectIsArmed(shown)
-          ? 'drag to remap · ★ is what TF writes back · saves as it lands'
-          : 'not armed yet · drag statuses into the columns to arm it',
-      )
-    } else if (!projectIsArmed(shown)) {
-      parts.push('statuses not mapped yet')
-    }
-    return parts.join(' · ')
-  })()
+  const note = shown
+    ? boardNote({
+        shownKey: shown.key,
+        sole: watched.length <= 1,
+        editable: isAdmin && !offReason,
+        armed: projectIsArmed(shown),
+        noun: 'statuses',
+      })
+    : ''
 
   return (
     <SourceFrame
@@ -425,39 +422,38 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
       <div className="sp-cols" data-split="even">
         {/* What the page is for, and the map that answers it: the description
             and the board are one argument, so they share a column. */}
-        <div className="sp-jira-left">
+        <div className="sp-mapcol">
           <p className="sp-prose">{PROSE}</p>
-          {offReason ? <p className="sp-offnote">{offReason}</p> : null}
+          {offReason ? (
+            <p className="sp-offnote">
+              {offReason} The mapping below is what is stored; a project can still be unwatched.
+            </p>
+          ) : null}
           <div className="sp-subhead">
             <span className="sp-subhead-t">What each status means</span>
-            <span className="sp-subhead-p">
-              Map ticket statuses to these primitives so the factory knows what state every ticket
-              is in. ★ is the one written back to Jira when the factory moves a ticket into that
-              column.
-            </span>
+            {watched.length > 1 ? (
+              <div className="sp-projstrip" role="tablist" aria-label="Watched projects">
+                {watched.map((p) => {
+                  const ref = jiraProjectRef(p)
+                  return (
+                    <button
+                      key={ref}
+                      type="button"
+                      role="tab"
+                      aria-selected={ref === shownR}
+                      className="sp-projkey"
+                      data-on={ref === shownR ? '' : undefined}
+                      data-unarmed={projectIsArmed(p) ? undefined : ''}
+                      title={projectIsArmed(p) ? undefined : 'statuses not mapped'}
+                      onClick={() => setShownRef(ref)}
+                    >
+                      {p.key}
+                    </button>
+                  )
+                })}
+              </div>
+            ) : null}
           </div>
-          {watched.length > 1 ? (
-            <div className="sp-projstrip" role="tablist" aria-label="Watched projects">
-              {watched.map((p) => {
-                const ref = jiraProjectRef(p)
-                return (
-                  <button
-                    key={ref}
-                    type="button"
-                    role="tab"
-                    aria-selected={ref === shownR}
-                    className="sp-projkey"
-                    data-on={ref === shownR ? '' : undefined}
-                    data-unarmed={projectIsArmed(p) ? undefined : ''}
-                    title={projectIsArmed(p) ? undefined : 'statuses not mapped'}
-                    onClick={() => setShownRef(ref)}
-                  >
-                    {p.key}
-                  </button>
-                )
-              })}
-            </div>
-          ) : null}
           <div className="sp-board">
             {board ? (
               <StatusRules
@@ -470,20 +466,38 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
                 build
                 note={note}
               />
-            ) : (
-              <p className="sp-prose">
-                {projects
-                  ? 'No Jira project is watched by this team yet, so there is no lifecycle to map.'
-                  : ''}
-              </p>
-            )}
+            ) : projects ? (
+              // Nothing watched: the board's shape, faded, under what to do
+              // about it — or, for a reader with no verb to follow, under what
+              // is true.
+              <StatusRules
+                key="placeholder"
+                value={EMPTY_STATUS_MAP}
+                statuses={[]}
+                showProjects={false}
+                build
+                placeholder={
+                  isAdmin && !offReason
+                    ? 'Track a Jira project to the right to map ticket statuses.'
+                    : 'No Jira project is watched by this team yet.'
+                }
+              />
+            ) : null}
           </div>
         </div>
 
-        {/* The projects: what is watched, and what the credential could
-            watch, in that order. */}
-        <div className="sp-jira-right">
-          <div className="sp-jira-head">
+        {/* What the projects sent, then the projects: what is watched, and
+            what the credential could watch, in that order. */}
+        <div className="sp-listcol">
+          <div className="sp-chartwrap">
+            <SourceChart
+              title="WHAT THE PROJECTS SENT"
+              keys={['EVENTS', 'TASKS']}
+              units={['events', 'tasks']}
+              series={offReason ? null : activitySeries(activity14, 'jira', 14)}
+            />
+          </div>
+          <div className="sp-listhead">
             <span className="sp-subhead-t">Which projects</span>
             <span className="sp-grow" />
             <FilterField value={filter} onChange={setFilter} label="Filter projects" />
