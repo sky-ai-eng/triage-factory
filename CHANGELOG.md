@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.16.2](https://github.com/sky-ai-eng/triage-factory/compare/v1.16.1...v1.16.2) (2026-10-25)
+
+
+### Bug Fixes
+
+* **activity:** fill the source tables' per-row figures from a by_tracked cut (TFAC-1183) ([#1304](https://github.com/sky-ai-eng/triage-factory/issues/1304)) ([40f3583](https://github.com/sky-ai-eng/triage-factory/commit/40f3583aef39f8e00f766d9f34812fe8531d01ad))
+* **delegate:** stamp a sandboxed run's commits with the identity the brain sealed (TFAC-1187) ([#1309](https://github.com/sky-ai-eng/triage-factory/issues/1309)) ([b93ae25](https://github.com/sky-ai-eng/triage-factory/commit/b93ae258883c9bb0448cc88f968c50ba0347522b))
+* **deps:** bump fast-uri, body-parser, undici, vitest and zod past their advisories ([#1310](https://github.com/sky-ai-eng/triage-factory/issues/1310)) ([9a958f5](https://github.com/sky-ai-eng/triage-factory/commit/9a958f52bd118371cf19b3bcbff154c0adac21fa))
+* **exec:** assign Jira and Linear issues to a named person, never to the org identity (TFAC-1186) ([#1308](https://github.com/sky-ai-eng/triage-factory/issues/1308)) ([4749436](https://github.com/sky-ai-eng/triage-factory/commit/474943690b184fde617f62875e20a420f17a2247))
+* **jira:** assign a ticket to the org account only when it is unassigned (TFAC-1185) ([#1306](https://github.com/sky-ai-eng/triage-factory/issues/1306)) ([f097ff7](https://github.com/sky-ai-eng/triage-factory/commit/f097ff7c32a4ff90669a06967d3aa67d4e11d6ce))
+* **linear:** move a delegated Linear issue to its team's IN PROGRESS ★, as Jira's bot mirror does (TFAC-1184) ([#1307](https://github.com/sky-ai-eng/triage-factory/issues/1307)) ([79025d8](https://github.com/sky-ai-eng/triage-factory/commit/79025d8b977807dbf56ca01f5c746d9f51398b79))
+* **linear:** store a partly mapped Linear team the way a Jira project is stored (TFAC-1181) ([#1301](https://github.com/sky-ai-eng/triage-factory/issues/1301)) ([507048e](https://github.com/sky-ai-eng/triage-factory/commit/507048e48df68596ed394b3cf0142067d5f1a7ec))
+* **linear:** store an optional in_review rule on a Linear team, as on a Jira project (TFAC-1182) ([#1303](https://github.com/sky-ai-eng/triage-factory/issues/1303)) ([a9154a9](https://github.com/sky-ai-eng/triage-factory/commit/a9154a99c8257d4d1b116c737744b902a33360cf))
+* **team:** rebuild the Linear source page on Jira's board, and give both the same layout ([#1305](https://github.com/sky-ai-eng/triage-factory/issues/1305)) ([9c284da](https://github.com/sky-ai-eng/triage-factory/commit/9c284da8eb1753c7b6ee1bec10e0fd72c100b341))
+
 ## [1.16.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.16.0...v1.16.1) (2026-10-24)
 
 
