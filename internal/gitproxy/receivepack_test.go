@@ -403,6 +403,22 @@ func TestReportCapture(t *testing.T) {
 			},
 		},
 		{
+			name: "an over-long reason is cut",
+			caps: sb,
+			body: band1(pktLine("unpack ok\n")+pktLine("ng refs/heads/blocked "+strings.Repeat("r", 5000)+"\n")+"0000") + "0000",
+			refs: map[string]refWant{
+				"refs/heads/blocked": {rejected: true, reason: strings.Repeat("r", maxReasonLen)},
+			},
+		},
+		{
+			name: "an over-long unpack failure is cut",
+			caps: sb,
+			body: band1(pktLine("unpack "+strings.Repeat("u", 5000)+"\n")+"0000") + "0000",
+			refs: map[string]refWant{
+				"refs/heads/ok": {rejected: true, reason: "unpack " + strings.Repeat("u", maxReasonLen-len("unpack "))},
+			},
+		},
+		{
 			name: "a ref the report leaves out is refused",
 			caps: sb,
 			body: band1(pktLine("unpack ok\n")+pktLine("ok refs/heads/ok\n")+"0000") + "0000",
@@ -651,6 +667,30 @@ func TestMessageTail_MatchesTheRule(t *testing.T) {
 		}
 		if got, want := m.String(), remoteMessageRule(text); got != want {
 			t.Fatalf("text %q:\n got %q\nwant %q", text, got, want)
+		}
+	}
+}
+
+func TestBoundReason(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"short is kept", "hook declined", "hook declined"},
+		{"exactly the bound is kept", strings.Repeat("a", maxReasonLen), strings.Repeat("a", maxReasonLen)},
+		{"long keeps its start", strings.Repeat("a", maxReasonLen) + "tail", strings.Repeat("a", maxReasonLen)},
+		// 255 ASCII bytes then "é": the bound falls inside the rune, so all
+		// of it goes.
+		{"a cut never splits a rune", strings.Repeat("a", maxReasonLen-1) + "éé", strings.Repeat("a", maxReasonLen-1)},
+	}
+	for _, c := range cases {
+		got := boundReason(c.in)
+		if got != c.want {
+			t.Errorf("%s: boundReason = %q, want %q", c.name, got, c.want)
+		}
+		if !utf8.ValidString(got) || len(got) > maxReasonLen {
+			t.Errorf("%s: boundReason = %d bytes, valid UTF-8 %v", c.name, len(got), utf8.ValidString(got))
 		}
 	}
 }

@@ -88,11 +88,13 @@ func (s *Server) serveReceivePack(w http.ResponseWriter, r *http.Request) {
 // away and shouldn't be the only thing standing between a future caller and a
 // panic.
 //
-// A response with no readable report-status — the client did not ask for
-// one, the upstream answered non-2xx, or the body was truncated, malformed or
-// over the capture bound — falls back to the status alone, a 2xx counting as
-// accepted, and says so in a WARN. The exception is a side-band fatal error
-// in place of the report, which refuses every ref (reportCapture.result).
+// A response with no readable report-status falls back to the status alone.
+// A non-2xx needs no report: nothing landed, and the status says why. A 2xx
+// counts as accepted, which may be wrong — the client did not ask for a
+// report, or the body was compressed, truncated, malformed or over the
+// capture bound — so that case says so in a WARN naming the cause. The
+// exception is a side-band fatal error in place of the report, which refuses
+// every ref (reportCapture.result).
 func (s *Server) recordReceivePack(repoPath string, block []byte, rr *responseRecorder) {
 	if s.cfg.RecordPush == nil {
 		return
@@ -104,11 +106,16 @@ func (s *Server) recordReceivePack(repoPath string, block []byte, rr *responseRe
 	resp := pushResponse{status: rr.status}
 	var cause string
 	resp.report, resp.remoteMessage, cause = rr.body.result(parsePushCapabilities(block))
-	if resp.status < 200 || resp.status >= 300 {
-		resp.report, cause = nil, "non-2xx status"
+	if enc := rr.Header().Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
+		// The upstream compressed the body despite the identity request, so
+		// whatever the capture made of it is not the report.
+		resp.report, cause = nil, "response compressed ("+enc+")"
 	}
-	if resp.report == nil {
-		gitproxyLog.Warn("receive-pack response carried no readable report-status; recording its refs by HTTP status",
+	switch {
+	case resp.status < 200 || resp.status >= 300:
+		resp.report = nil
+	case resp.report == nil:
+		gitproxyLog.Warn("receive-pack 2xx carried no readable report-status; recording its refs as accepted",
 			"conversation", s.cfg.ConversationID, "repo", repoPath, "status", resp.status, "cause", cause)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), recordPushTimeout)
@@ -209,6 +216,8 @@ func (w *responseRecorder) Write(b []byte) (int, error) {
 		w.status = http.StatusOK
 	}
 	n, err := w.ResponseWriter.Write(b)
+	// All of b, even on a short write: the capture reads what the upstream
+	// answered, which is what landed, not how much of it reached the client.
 	w.body.feed(b)
 	return n, err
 }

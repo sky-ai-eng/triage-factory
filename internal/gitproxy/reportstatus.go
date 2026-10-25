@@ -36,6 +36,12 @@ const (
 	remoteMessageLines = 20
 	remoteMessageMax   = 1 << 10
 
+	// maxReasonLen bounds a refusal's reason. A real one is a short phrase —
+	// receive-pack's "hook declined", GitHub's "push declined due to
+	// repository rule violations" — and every ref of the push carries it, so
+	// a longer one is cut rather than copied per ref into the audit row.
+	maxReasonLen = 256
+
 	sideBandData     = 1
 	sideBandProgress = 2
 	sideBandError    = 3
@@ -221,7 +227,9 @@ type refReport struct {
 	reason string // the "ng" line's reason
 }
 
-// refOutcome is the recorded outcome of a ref the push carried.
+// refOutcome is the recorded outcome of a ref the push carried. A refusal of
+// the whole push outranks the ref's own line: a failed unpack means no ref
+// was updated, whatever the lines after it say.
 func (r *receivePackReport) refOutcome(ref string) (rejected bool, reason string) {
 	if r.refused != "" {
 		return true, r.refused
@@ -270,7 +278,7 @@ func parseReportStatus(b []byte) *receivePackReport {
 				return nil
 			}
 			if msg != "ok" {
-				report.refused = "unpack " + msg
+				report.refused = boundReason("unpack " + msg)
 			}
 			sawUnpack = true
 			continue
@@ -287,12 +295,25 @@ func parseReportStatus(b []byte) *receivePackReport {
 			if ref == "" {
 				return nil
 			}
-			report.refs[ref] = refReport{reason: reason}
+			report.refs[ref] = refReport{reason: boundReason(reason)}
 		case "option":
 		default:
 			return nil
 		}
 	}
+}
+
+// boundReason cuts a reason to maxReasonLen bytes, keeping its start, at a
+// rune boundary.
+func boundReason(s string) string {
+	if len(s) <= maxReasonLen {
+		return s
+	}
+	cut := maxReasonLen
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut-- // s[cut] continues a rune the cut would split; drop all of it
+	}
+	return s[:cut]
 }
 
 // messageTail keeps the end of a push's remote message text as it streams:

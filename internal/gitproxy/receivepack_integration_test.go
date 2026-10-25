@@ -1,6 +1,8 @@
 package gitproxy_test
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
 
 const zeroOID = "0000000000000000000000000000000000000000"
@@ -37,9 +40,11 @@ type pushResult struct {
 // pushRig is the upstream a push is run against, and which receive-pack path
 // the proxy takes to it.
 type pushRig struct {
-	// status and response are what the fake upstream answers.
-	status   int
-	response string
+	// status and response are what the fake upstream answers, with
+	// contentEncoding as its Content-Encoding when set.
+	status          int
+	response        string
+	contentEncoding string
 	// allowedRefs, when non-nil, wires an Authorize gate allowing them, so the
 	// push takes the enforcing path rather than the observe one.
 	allowedRefs []string
@@ -71,6 +76,9 @@ func runPush(t *testing.T, rig pushRig, method, path, body string) pushResult {
 			gotAuth = r.Header.Get("Authorization")
 			gotEncoded = r.Header.Get("Accept-Encoding")
 			mu.Unlock()
+			if rig.contentEncoding != "" {
+				w.Header().Set("Content-Encoding", rig.contentEncoding)
+			}
 			w.WriteHeader(rig.status)
 			_, _ = w.Write([]byte(rig.response))
 		}))
@@ -450,5 +458,54 @@ func TestReceivePackBackstop_FatalErrorInPlaceOfAReport(t *testing.T) {
 				t.Fatalf("recorded pushes =\n  %+v\nwant\n  %+v", res.pushes, want)
 			}
 		})
+	}
+}
+
+// TestReceivePackBackstop_CompressedResponseFallsBack covers an upstream that
+// compresses the response despite the identity request, as a front end in
+// the path might. The body cannot be read as a report, so the push keeps the
+// status rule — the ref the compressed report refuses still records as
+// accepted — and the WARN names the compression rather than a parse failure.
+// The client gets the compressed response exactly as sent.
+func TestReceivePackBackstop_CompressedResponseFallsBack(t *testing.T) {
+	var buf bytes.Buffer
+	defer logging.SetOutput(&buf)()
+
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	_, _ = zw.Write([]byte(band(1, pkt("unpack ok\n")+pkt("ng refs/heads/feature push declined due to repository rule violations\n")+"0000") + "0000"))
+	_ = zw.Close()
+	body := pkt(zeroOID+" aaaa1111 refs/heads/feature\x00 report-status side-band-64k") + "0000" + "PACKDATA"
+
+	res := runPush(t, pushRig{status: http.StatusOK, response: gz.String(), contentEncoding: "gzip"},
+		http.MethodPost, "/octo/repo/git-receive-pack", body)
+
+	if res.clientBody != gz.String() {
+		t.Errorf("client body altered: got %d bytes, want the %d compressed bytes sent", len(res.clientBody), gz.Len())
+	}
+	want := []gitproxy.PushedRef{{Repo: "octo/repo", Ref: "refs/heads/feature", NewSHA: "aaaa1111", Created: true, Status: http.StatusOK}}
+	if !equalPushes(res.pushes, want) {
+		t.Errorf("recorded pushes = %+v, want %+v (an unreadable 2xx keeps the status rule)", res.pushes, want)
+	}
+	if got := buf.String(); !strings.Contains(got, "no readable report-status") || !strings.Contains(got, "response compressed (gzip)") {
+		t.Errorf("log does not name the compression as the cause; got:\n%s", got)
+	}
+}
+
+// TestReceivePackBackstop_RefusedStatusDoesNotWarn pins that a non-2xx push
+// logs nothing: its status is the whole answer, and the WARN is for the 2xx
+// whose report could not be read, where recording it accepted may be wrong.
+func TestReceivePackBackstop_RefusedStatusDoesNotWarn(t *testing.T) {
+	var buf bytes.Buffer
+	defer logging.SetOutput(&buf)()
+
+	body := pkt(zeroOID+" aaaa refs/heads/main\x00 report-status side-band-64k") + "0000" + "PACKDATA"
+	res := runReceivePack(t, http.StatusForbidden, http.MethodPost, "/octo/repo/git-receive-pack", body)
+
+	if len(res.pushes) != 1 || res.pushes[0].Succeeded() {
+		t.Fatalf("recorded pushes = %+v, want one refused ref", res.pushes)
+	}
+	if got := buf.String(); strings.Contains(got, "report-status") {
+		t.Errorf("a 403 push logged a report-status WARN:\n%s", got)
 	}
 }

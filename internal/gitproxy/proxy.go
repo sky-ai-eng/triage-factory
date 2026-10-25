@@ -280,7 +280,7 @@ type Config struct {
 // "ng" line, a failed unpack, or a report that leaves the ref out — which
 // GitHub does inside a 200 for branch protection, a ruleset, or a pre-receive
 // hook, and when the remote sent a fatal error instead of a report. Reason is
-// the report's reason for it. RemoteMessage is the tail of
+// the report's reason for it, cut to 256 bytes. RemoteMessage is the tail of
 // what the remote printed during the push (side-band bands 2 and 3, progress
 // meters dropped): where GitHub explains a refusal. A response with no
 // readable report leaves Rejected false, so the ref's outcome is its status.
