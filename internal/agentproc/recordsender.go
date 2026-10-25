@@ -28,6 +28,8 @@ import (
 // and moves on only once the orchestrator acknowledges it. An error answer, an
 // answer that never came, or a full record lane leaves the head where it is,
 // to be sent again after a backoff, until it is acknowledged or the run ends.
+// A head too large to send (sidecarproto.ErrFrameTooLarge) never will be, so
+// it is given up on at once and the queue moves on.
 // The orchestrator applies records one at a time (sidecarproto's record lane),
 // so a record that took three attempts is still applied before the one queued
 // after it.
@@ -246,6 +248,12 @@ func (s *RecordSender) run() {
 			delay = s.policy.resendInitial
 			continue
 		}
+		if errors.Is(err, sidecarproto.ErrFrameTooLarge) {
+			s.givenUp(head)
+			agentprocLog.Error("audit record too large to send; it will not be delivered",
+				"namespace", head.Namespace, "op", head.Op, "error", err)
+			continue
+		}
 		agentprocLog.Warn("audit record not acknowledged; it will be sent again",
 			"namespace", head.Namespace, "op", head.Op, "retry_in", delay, "error", err)
 		t := time.NewTimer(delay)
@@ -304,6 +312,17 @@ func (s *RecordSender) acknowledged(key string) {
 	if len(s.queue) == 0 {
 		close(s.empty)
 	}
+}
+
+// givenUp removes head, which will never be delivered, and counts it for Drain
+// to report. The key check is acknowledged's.
+func (s *RecordSender) givenUp(head sidecarproto.RelayRecordBody) {
+	s.mu.Lock()
+	if len(s.queue) > 0 && s.queue[0].Key == head.Key {
+		s.undelivered[recordName{namespace: head.Namespace, op: head.Op}]++
+	}
+	s.mu.Unlock()
+	s.acknowledged(head.Key)
 }
 
 // logLost names what the sender still held when the channel closed before any

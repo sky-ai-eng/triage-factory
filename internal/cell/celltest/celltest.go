@@ -598,6 +598,7 @@ func startWithCeiling(t *testing.T, h Harness, conversationID string, ceilingMB 
 	l.cell = c
 
 	res, conn, err := agentproc.BringUpRunSidecar(ctx, c.Sidecar(), l.provision, agentproc.SidecarBringUpParams{
+		ConversationID:   conversationID,
 		HostVethIP:       c.ProxyHost(),
 		Git:              &agentproc.GitProxyConfig{},
 		Relay:            refusingRelay{},
