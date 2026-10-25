@@ -7,7 +7,7 @@ signed with a key only Triage Factory holds. Workspaces on the deployment
 GitHub App get the deployment's signer by default.
 
 Status: **accepted design**; §10 lists what is still open. Builds on the sealed commit identity
-(**TFAC-1187**) and depends on per-ref push outcomes (**TFAC-1188**).
+(**TFAC-1187**) and the per-ref push outcomes (**TFAC-1188**), both merged.
 
 Scope: both run modes, core (no licence gate). The deployment signer is
 multi-mode only, because the deployment App is.
@@ -468,8 +468,9 @@ A "Commit signing" section in `OrgSettings.tsx`, after "GitHub access":
 
 ## 9. Rollout
 
-**Phase 0 — TFAC-1188.** Per-ref push outcomes. The post-push check and a
-visible "signed commits required" refusal both depend on it. (M)
+**Phase 0 — TFAC-1188 (merged).** Per-ref push outcomes
+(`gitproxy.PushedRef`). The post-push check and a visible "signed commits
+required" refusal both depend on it.
 
 **Phase 1 — Local, per-org, end to end.** The `SSHSIG` implementation and its
 `ssh-keygen` test; the shim and `exec git sign`; the daemon check; the
