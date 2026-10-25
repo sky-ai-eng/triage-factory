@@ -56,46 +56,73 @@ func receivePackRepoPath(p string) string {
 }
 
 // serveReceivePack proxies a push while teeing its body, then reports each
-// non-delete ref it carried — together with the upstream's final status — to
+// non-delete ref it carried — together with the upstream's answer for it — to
 // RecordPush. The recording runs only after ServeHTTP returns — the upstream
 // response is fully written to the client by then — so it can neither block,
 // alter, nor fail the push or its response. The handler goroutine does stay
 // alive until recording finishes, so a graceful Shutdown waits for it (bounded
 // by recordPushTimeout); the integration test relies on exactly that to
-// synchronize. Every final status is reported, success and failure alike: the
-// wiring gates artifact creation on 2xx and records the refused attempt
-// (401/403/5xx — nothing landed) as an audit-only failure row, so the external
-// action log never silently omits a push attempt.
+// synchronize. Every outcome is reported, success and failure alike: the
+// wiring gates artifact creation on PushedRef.Succeeded and records a refused
+// attempt (a 401/403/5xx, or a ref the report-status refused inside a 2xx —
+// nothing landed) as an audit-only failure row, so the external action log
+// never silently omits a push attempt.
 func (s *Server) serveReceivePack(w http.ResponseWriter, r *http.Request) {
 	tee := &receivePackCapture{rc: r.Body, max: maxReceivePackCapture}
 	r.Body = tee
 	repoPath := receivePackRepoPath(r.URL.Path)
 
-	sr := &statusRecorder{ResponseWriter: w}
-	s.proxy.ServeHTTP(sr, r)
+	rr := &responseRecorder{ResponseWriter: w}
+	s.proxy.ServeHTTP(rr, r)
 
-	s.recordReceivePack(repoPath, tee.buf, sr.status)
+	s.recordReceivePack(repoPath, tee.buf, rr)
 }
 
-// recordReceivePack parses the captured command block and invokes RecordPush
-// once per non-delete ref (stamping the upstream's final status on each), under
-// a context whose deadline mirrors the pre-push hook's cap. Self-guarding on a
-// nil RecordPush (no-op) so the safety is local rather than an invariant every
-// caller must uphold — the Handler does route pushes here only when RecordPush
-// is wired (a nil-RecordPush observe push takes the plain proxy path, skipping
-// the tee entirely), but that routing lives a file away and shouldn't be the
-// only thing standing between a future caller and a panic.
-func (s *Server) recordReceivePack(repoPath string, body []byte, status int) {
+// recordReceivePack parses the captured command block, reads the per-ref
+// outcome out of the captured response, and invokes RecordPush once per
+// non-delete ref, under a context whose deadline mirrors the pre-push hook's
+// cap. Self-guarding on a nil RecordPush (no-op) so the safety is local rather
+// than an invariant every caller must uphold — the Handler does route pushes
+// here only when RecordPush is wired (a nil-RecordPush observe push takes the
+// plain proxy path, skipping the tee entirely), but that routing lives a file
+// away and shouldn't be the only thing standing between a future caller and a
+// panic.
+//
+// A response with no readable report-status — the client did not ask for
+// one, the upstream answered non-2xx, or the body was truncated, malformed or
+// over the capture bound — falls back to the status alone, a 2xx counting as
+// accepted, and says so in a WARN.
+func (s *Server) recordReceivePack(repoPath string, block []byte, rr *responseRecorder) {
 	if s.cfg.RecordPush == nil {
 		return
 	}
-	cmds := parseReceivePackCommands(body)
+	cmds := parseReceivePackCommands(block)
 	if len(cmds) == 0 {
 		return
 	}
+	resp := pushResponse{status: rr.status}
+	var cause string
+	resp.report, resp.remoteMessage, cause = rr.body.result(parsePushCapabilities(block))
+	if resp.status < 200 || resp.status >= 300 {
+		resp.report, cause = nil, "non-2xx status"
+	}
+	if resp.report == nil {
+		gitproxyLog.Warn("receive-pack response carried no readable report-status; recording its refs by HTTP status",
+			"conversation", s.cfg.ConversationID, "repo", repoPath, "status", resp.status, "cause", cause)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), recordPushTimeout)
 	defer cancel()
-	s.dispatchPushes(ctx, repoPath, cmds, status)
+	s.dispatchPushes(ctx, repoPath, cmds, resp)
+}
+
+// pushResponse is what the upstream answered a receive-pack POST with.
+type pushResponse struct {
+	status int
+	// report is the per-ref report-status; nil when none could be read, which
+	// leaves every ref's outcome to status.
+	report *receivePackReport
+	// remoteMessage is the tail of the remote's side-band message text.
+	remoteMessage string
 }
 
 // dispatchPushes invokes RecordPush once per ref, stopping as soon as ctx is
@@ -103,18 +130,23 @@ func (s *Server) recordReceivePack(repoPath string, body []byte, status int) {
 // bounded window would have every remaining call observe ctx.Err() and fail — a
 // burst of guaranteed-failing work and logs. Stopping instead records fewer
 // refs for that (pathological) push, which is the best-effort contract.
-func (s *Server) dispatchPushes(ctx context.Context, repoPath string, cmds []refUpdate, status int) {
+func (s *Server) dispatchPushes(ctx context.Context, repoPath string, cmds []refUpdate, resp pushResponse) {
 	for _, c := range cmds {
 		if ctx.Err() != nil {
 			break
 		}
-		s.cfg.RecordPush(ctx, PushedRef{
-			Repo:    repoPath,
-			Ref:     c.ref,
-			NewSHA:  c.newSHA,
-			Created: c.created,
-			Status:  status,
-		})
+		push := PushedRef{
+			Repo:          repoPath,
+			Ref:           c.ref,
+			NewSHA:        c.newSHA,
+			Created:       c.created,
+			Status:        resp.status,
+			RemoteMessage: resp.remoteMessage,
+		}
+		if resp.report != nil {
+			push.Rejected, push.Reason = resp.report.refOutcome(c.ref)
+		}
+		s.cfg.RecordPush(ctx, push)
 	}
 }
 
@@ -144,17 +176,21 @@ func (c *receivePackCapture) Read(p []byte) (int, error) {
 
 func (c *receivePackCapture) Close() error { return c.rc.Close() }
 
-// statusRecorder wraps the ResponseWriter for a proxied push to capture the
-// upstream's final status code, so the backstop records a branch only for a
-// push the upstream accepted (2xx). Flush is passed through so the
-// ReverseProxy's response streaming is unaffected; Unwrap lets an
-// http.ResponseController reach the underlying writer for anything else.
-type statusRecorder struct {
+// responseRecorder wraps the ResponseWriter for a proxied push to capture the
+// upstream's final status code and, as the body streams to the client, the
+// report-status that says which refs landed (reportCapture), so the backstop
+// records a branch only for a ref the upstream accepted. Each write reaches
+// the client before the capture sees it, and the capture only copies bounded
+// bytes, so the response is neither altered nor held back. Flush is passed
+// through so the ReverseProxy's response streaming is unaffected; Unwrap lets
+// an http.ResponseController reach the underlying writer for anything else.
+type responseRecorder struct {
 	http.ResponseWriter
 	status int
+	body   reportCapture
 }
 
-func (w *statusRecorder) WriteHeader(code int) {
+func (w *responseRecorder) WriteHeader(code int) {
 	// Capture the first FINAL status only. A backend 1xx interim response —
 	// chiefly 100 Continue, which a git client elicits with Expect:
 	// 100-continue and httputil.ReverseProxy forwards by calling WriteHeader
@@ -167,20 +203,22 @@ func (w *statusRecorder) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
-func (w *statusRecorder) Write(b []byte) (int, error) {
+func (w *responseRecorder) Write(b []byte) (int, error) {
 	if w.status == 0 {
 		w.status = http.StatusOK
 	}
-	return w.ResponseWriter.Write(b)
+	n, err := w.ResponseWriter.Write(b)
+	w.body.feed(b)
+	return n, err
 }
 
-func (w *statusRecorder) Flush() {
+func (w *responseRecorder) Flush() {
 	if fl, ok := w.ResponseWriter.(http.Flusher); ok {
 		fl.Flush()
 	}
 }
 
-func (w *statusRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+func (w *responseRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // refUpdate is one non-delete ref-update command parsed from a receive-pack
 // request: the ref and the commit it now points to, plus whether the push
@@ -273,8 +311,9 @@ func isZeroOID(s string) bool {
 // A command block that overflows the capture cap before its flush-pkt fails
 // closed. On success it reconstructs the body (buffered block + the still-
 // unread packfile) and proxies it, then reports each ref + the upstream's
-// final status to RecordPush exactly like the observe path (the wiring gates
-// artifacts on 2xx and records a refused push as an audit failure row).
+// answer for it to RecordPush exactly like the observe path (the wiring gates
+// artifacts on PushedRef.Succeeded and records a refused push as an audit
+// failure row).
 func (s *Server) serveReceivePackGated(w http.ResponseWriter, r *http.Request, owner, repo string, decision Decision) {
 	allowedRefs := decision.AllowedRefs
 	block, sawFlush, err := readCommandBlock(r.Body, maxReceivePackCapture)
@@ -316,16 +355,16 @@ func (s *Server) serveReceivePackGated(w http.ResponseWriter, r *http.Request, o
 	// them directly rather than re-deriving from the URL (receivePackRepoPath
 	// stays the legacy observe-path's helper).
 	repoPath := owner + "/" + repo
-	sr := &statusRecorder{ResponseWriter: w}
-	s.proxy.ServeHTTP(sr, r)
+	rr := &responseRecorder{ResponseWriter: w}
+	s.proxy.ServeHTTP(rr, r)
 
 	// Outcome record (success artifact / failure audit — the wiring branches
-	// on the status), same contract as the observe path. The command block is
-	// already in hand, so re-parse the non-delete refs from it rather than
-	// re-reading the (consumed) body. recordReceivePack no-ops on a nil
-	// RecordPush (the gated path runs regardless, since the ref gate is
-	// enforcement, not recording).
-	s.recordReceivePack(repoPath, block, sr.status)
+	// on each ref's outcome), same contract as the observe path. The command
+	// block is already in hand, so re-parse the non-delete refs and the
+	// capabilities from it rather than re-reading the (consumed) body.
+	// recordReceivePack no-ops on a nil RecordPush (the gated path runs
+	// regardless, since the ref gate is enforcement, not recording).
+	s.recordReceivePack(repoPath, block, rr)
 }
 
 // refDenial builds the audit reason + 403 body for one rejected ref. Three

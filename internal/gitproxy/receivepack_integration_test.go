@@ -20,43 +20,65 @@ const zeroOID = "0000000000000000000000000000000000000000"
 // pkt frames s as a git pkt-line (4-hex-digit length, the 4 bytes included).
 func pkt(s string) string { return fmt.Sprintf("%04x%s", len(s)+4, s) }
 
-// pushResult is what runReceivePack observed: the client-facing status, the
-// exact body the upstream received (to prove the tee never alters it), the
-// Authorization the upstream saw (to prove the backstop doesn't break
-// credential injection), and the refs handed to RecordPush.
+// pushResult is what runReceivePack observed: the client-facing status and
+// body, the exact body the upstream received (to prove the tee never alters
+// it), the Authorization and Accept-Encoding the upstream saw (to prove the
+// backstop doesn't break credential injection, and asks for a readable
+// response), and the refs handed to RecordPush.
 type pushResult struct {
-	clientStatus int
-	upstreamBody string
-	upstreamAuth string
-	pushes       []gitproxy.PushedRef
+	clientStatus           int
+	clientBody             string
+	upstreamBody           string
+	upstreamAuth           string
+	upstreamAcceptEncoding string
+	pushes                 []gitproxy.PushedRef
+}
+
+// pushRig is the upstream a push is run against, and which receive-pack path
+// the proxy takes to it.
+type pushRig struct {
+	// status and response are what the fake upstream answers.
+	status   int
+	response string
+	// allowedRefs, when non-nil, wires an Authorize gate allowing them, so the
+	// push takes the enforcing path rather than the observe one.
+	allowedRefs []string
 }
 
 // runReceivePack boots a proxy in front of a fake upstream that returns
-// upstreamStatus, sends one request, then Shuts the proxy down. Shutdown waits
-// for the in-flight handler — including the synchronous, post-response
-// recordReceivePack — so the returned pushes are deterministic, not
-// timing-dependent.
+// upstreamStatus with a bare flush-pkt, sends one request, then Shuts the
+// proxy down. Shutdown waits for the in-flight handler — including the
+// synchronous, post-response recordReceivePack — so the returned pushes are
+// deterministic, not timing-dependent.
 func runReceivePack(t *testing.T, upstreamStatus int, method, path, body string) pushResult {
+	t.Helper()
+	return runPush(t, pushRig{status: upstreamStatus, response: "0000"}, method, path, body)
+}
+
+// runPush is runReceivePack against the upstream rig describes.
+func runPush(t *testing.T, rig pushRig, method, path, body string) pushResult {
 	t.Helper()
 
 	var (
-		mu       sync.Mutex
-		gotBody  []byte
-		gotAuth  string
-		upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu         sync.Mutex
+		gotBody    []byte
+		gotAuth    string
+		gotEncoded string
+		upstream   = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			b, _ := io.ReadAll(r.Body)
 			mu.Lock()
 			gotBody = b
 			gotAuth = r.Header.Get("Authorization")
+			gotEncoded = r.Header.Get("Accept-Encoding")
 			mu.Unlock()
-			w.WriteHeader(upstreamStatus)
-			_, _ = w.Write([]byte("0000")) // a minimal report-status-shaped body
+			w.WriteHeader(rig.status)
+			_, _ = w.Write([]byte(rig.response))
 		}))
 	)
 	t.Cleanup(upstream.Close)
 
 	var res pushResult
-	srv, err := gitproxy.New(gitproxy.Config{
+	cfg := gitproxy.Config{
 		TokenSource: func(context.Context, string, string) (gitproxy.Token, error) {
 			return gitproxy.Token{Value: "ghs_tok"}, nil
 		},
@@ -66,7 +88,13 @@ func runReceivePack(t *testing.T, upstreamStatus int, method, path, body string)
 			res.pushes = append(res.pushes, p)
 			mu.Unlock()
 		},
-	})
+	}
+	if rig.allowedRefs != nil {
+		cfg.Authorize = func(context.Context, string, string) (gitproxy.Decision, error) {
+			return gitproxy.Decision{Allowed: true, AllowedRefs: rig.allowedRefs}, nil
+		}
+	}
+	srv, err := gitproxy.New(cfg)
 	if err != nil {
 		t.Fatalf("gitproxy.New: %v", err)
 	}
@@ -80,14 +108,17 @@ func runReceivePack(t *testing.T, upstreamStatus int, method, path, body string)
 		t.Fatalf("NewRequest: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
+	// What git's curl client advertises.
+	req.Header.Set("Accept-Encoding", "deflate, gzip")
 	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
+	clientBody, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	res.clientStatus = resp.StatusCode
+	res.clientBody = string(clientBody)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -96,6 +127,7 @@ func runReceivePack(t *testing.T, upstreamStatus int, method, path, body string)
 	mu.Lock()
 	res.upstreamBody = string(gotBody)
 	res.upstreamAuth = gotAuth
+	res.upstreamAcceptEncoding = gotEncoded
 	mu.Unlock()
 	return res
 }
@@ -197,10 +229,10 @@ func TestReceivePackBackstop_LargePackForwardedIntact(t *testing.T) {
 // TestReceivePackBackstop_InterimResponseStillRecords drives a real push through
 // the proxy against an upstream that sends a 1xx interim response (103 Early
 // Hints) before its final 200. httputil.ReverseProxy forwards that 1xx by
-// calling WriteHeader(103) on the wrapped statusRecorder (verified on Go 1.26),
+// calling WriteHeader(103) on the wrapped responseRecorder (verified on Go 1.26),
 // so without the recorder's "first FINAL status" guard the 103 would latch the
 // gate and the branch would be silently dropped on a successful push. This is
-// the full-path companion to the statusRecorder unit test.
+// the full-path companion to the responseRecorder unit test.
 func TestReceivePackBackstop_InterimResponseStillRecords(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
@@ -317,4 +349,72 @@ func equalPushes(a, b []gitproxy.PushedRef) bool {
 		}
 	}
 	return true
+}
+
+// band frames s as one side-band pkt-line on band n.
+func band(n byte, s string) string { return pkt(string([]byte{n}) + s) }
+
+// TestReceivePackBackstop_ReadsRefusalInsideA200 is the case the status code
+// cannot tell apart: GitHub accepts one ref, refuses the other under a
+// repository ruleset, and answers the whole POST with a 200. RecordPush must
+// see one accepted ref and one rejected ref carrying GitHub's reason and its
+// rule-violation text, on the enforcing path and the observe path alike — and
+// the client must receive GitHub's response untouched.
+func TestReceivePackBackstop_ReadsRefusalInsideA200(t *testing.T) {
+	const (
+		reason = "push declined due to repository rule violations"
+		gh013  = "error: GH013: Repository rule violations found for refs/heads/blocked.\n" +
+			"- Commits must have verified signatures.\n"
+	)
+	response := band(2, "Resolving deltas: 100% (1/1)\rResolving deltas: 100% (2/2), done.\n") +
+		band(2, gh013) +
+		band(1, pkt("unpack ok\n")+pkt("ok refs/heads/ok\n")+pkt("ng refs/heads/blocked "+reason+"\n")+"0000") +
+		"0000"
+	body := pkt(zeroOID+" aaaa1111 refs/heads/ok\x00 report-status side-band-64k agent=git/2.43.0") +
+		pkt(zeroOID+" bbbb2222 refs/heads/blocked") +
+		"0000" + "PACKDATA"
+
+	for _, path := range []struct {
+		name        string
+		allowedRefs []string
+	}{
+		{"gated", []string{"refs/heads/ok", "refs/heads/blocked"}},
+		{"observe", nil},
+	} {
+		t.Run(path.name, func(t *testing.T) {
+			res := runPush(t, pushRig{status: http.StatusOK, response: response, allowedRefs: path.allowedRefs},
+				http.MethodPost, "/octo/repo/git-receive-pack", body)
+
+			if res.clientStatus != http.StatusOK || res.clientBody != response {
+				t.Errorf("client got %d %q, want 200 and the upstream's response unchanged", res.clientStatus, res.clientBody)
+			}
+			if res.upstreamBody != body {
+				t.Errorf("upstream body altered: got %q want %q", res.upstreamBody, body)
+			}
+			if res.upstreamAcceptEncoding != "identity" {
+				t.Errorf("upstream Accept-Encoding = %q, want identity (the report must arrive readable)", res.upstreamAcceptEncoding)
+			}
+			want := []gitproxy.PushedRef{
+				{Repo: "octo/repo", Ref: "refs/heads/ok", NewSHA: "aaaa1111", Created: true, Status: http.StatusOK,
+					RemoteMessage: strings.TrimSpace(gh013)},
+				{Repo: "octo/repo", Ref: "refs/heads/blocked", NewSHA: "bbbb2222", Created: true, Status: http.StatusOK,
+					Rejected: true, Reason: reason, RemoteMessage: strings.TrimSpace(gh013)},
+			}
+			if !equalPushes(res.pushes, want) {
+				t.Fatalf("recorded pushes =\n  %+v\nwant\n  %+v", res.pushes, want)
+			}
+			if !res.pushes[0].Succeeded() || res.pushes[1].Succeeded() {
+				t.Errorf("Succeeded = (%v, %v), want (true, false)", res.pushes[0].Succeeded(), res.pushes[1].Succeeded())
+			}
+		})
+	}
+}
+
+// TestReceivePackBackstop_IdentityOnlyForPushes pins that only the push POST
+// has its Accept-Encoding rewritten: a fetch keeps what the client asked for.
+func TestReceivePackBackstop_IdentityOnlyForPushes(t *testing.T) {
+	res := runReceivePack(t, http.StatusOK, http.MethodPost, "/octo/repo/git-upload-pack", "0000")
+	if res.upstreamAcceptEncoding != "deflate, gzip" {
+		t.Errorf("upload-pack Accept-Encoding = %q, want the client's own", res.upstreamAcceptEncoding)
+	}
 }

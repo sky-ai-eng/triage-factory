@@ -222,11 +222,14 @@ const (
 	ActionLinkedBranchCreated = "linked_branch_created"
 
 	// Git branch push the upstream REFUSED (a non-2xx on the receive-pack
-	// POST — auth, protection, or outage; nothing landed). Recorded by the
-	// git proxy's outcome capture so the audit log never omits an attempted
-	// external write, while the branch artifact is deliberately NOT written
-	// (artifacts track only work that exists). detail_json carries
-	// {sha, new, http_status}. No natural key (each act's key is its own; see
+	// POST — auth or outage — or an "ng" line for the ref in the 200's
+	// report-status — branch protection, a ruleset, a pre-receive hook;
+	// nothing landed). Recorded by the git proxy's outcome capture so the
+	// audit log never omits an attempted external write, while the branch
+	// artifact is deliberately NOT written (artifacts track only work that
+	// exists). detail_json carries {sha, new, http_status, reason,
+	// remote_message}, the last two only when the response reported them.
+	// No natural key (each act's key is its own; see
 	// ExternalAction.DedupKey): each failed attempt is its own audit event,
 	// and sharing branch_pushed's deterministic key would let a failed attempt
 	// swallow the later successful push of the same (conversation, ref, sha).
