@@ -412,6 +412,41 @@ The signer's name, email and account id travel in the identity fields
 TFAC-1187 added. `Signer` is nil when the run does not sign. The bundle never
 carries a private signing key (§3.6).
 
+### 5.6 The audit log
+
+The governance feeds carry what an auditor acts on, and `commit_signatures`
+keeps the rest. The rows below are written for every org; only the feed that
+shows them is licensed.
+
+- **Signer changes** go to the access log under a new credential kind,
+  `github_commit_signer`: register, verify, rotate, an email change, and
+  removal (§6).
+- **Pushes.** A `branch_pushed` or `branch_push_failed` row's `detail_json`
+  gains `signer`: the login that signed the pushed tip, or `unsigned`. The
+  orchestrator fills it when it records the push, from the `commit_signatures`
+  row whose `commit_sha` is the new tip, the same lookup that stamps that row
+  for the post-push check (§7). On a refused push, `unsigned` beside a ruleset
+  refusal names the cause.
+- **Refusals** are a security signal, recorded like `gh_write_denied`: a new
+  action, `commit_sign_denied`, under `CredentialNone`, because nothing was
+  signed. `detail_json` carries `{reason}`:
+  - `committer_mismatch`, with the committer the commit named: an agent asked
+    to sign as someone else. The daemon's check (§4.3) records it.
+  - `budget_exhausted`: a run reached its per-claim cap. One row per
+    conversation, keyed the way `EgressDenialDedupKey` keys an egress denial,
+    because the signal is that it happened.
+  - `claim_inactive`: a request from a claim that is no longer active. The
+    control pod records it (§4.5).
+
+  The governance feed's `ACTION_META` gains the action;
+  `feature_parity_test.go` holds the two lists together.
+
+Kept out: each signature (a rebase of 100 commits would be 100 rows, and a
+signature is not an external act), "unavailable" timeouts (an operations
+fault, for metrics), "signing is off" refusals after a signer breaks (the
+signer's status already shows it), and health changes (TF acted on nothing
+external; the signer shows its status and since when).
+
 ## 6. API
 
 Under `/api/orgs/{org_id}/github/`, beside the App and PAT routes:
@@ -427,7 +462,7 @@ Under `/api/orgs/{org_id}/github/`, beside the App and PAT routes:
 | `GET commit-identity` | member | the identity this org's runs commit as, and whether and how they sign (§4.6) |
 
 - Writes take the org's GitHub credential lock (`githubAppRegMu`) and record
-  an access-log row under a new credential kind.
+  an access-log row under a new credential kind (§5.6).
 - The signer counts as a connected credential for the host: add it to
   `githubCredentialConnected` (`internal/server/github_credential_class.go`),
   so `github_base_url` cannot change while one exists.
@@ -488,7 +523,8 @@ required" refusal both depend on it.
 **Phase 1 — Local, per-org, end to end.** The `SSHSIG` implementation and its
 `ssh-keygen` test; the shim and `exec git sign`; the daemon check; the
 `org_commit_signers` and `commit_signatures` tables in both dialects; the
-secrets; the API; the settings section. Local mode needs git ≥ 2.34: below
+secrets; the API; the settings section; the audit rows (§5.6). Local mode
+needs git ≥ 2.34: below
 that the run commits as the signer, unsigned, and `GET commit-identity` says
 why. (L)
 
@@ -528,9 +564,7 @@ signature.
    signed. The deployment signer has no limit of its own: signing costs the
    control plane microseconds and GitHub does not limit signatures, so its
    total is the sum of its orgs', shown in the fleet console (§6).
-4. **The signing log in the UI.** `commit_signatures` is readable by members.
-   Showing it (per conversation, or per signer) is not part of v1.
-5. **Local verification in the jail.** With an allowed-signers file in the
+4. **Local verification in the jail.** With an allowed-signers file in the
    git config, `git log --show-signature` would verify inside a run. Nothing
    needs it yet.
 
@@ -565,6 +599,10 @@ signature.
 9. **Managed workspaces default to the deployment signer** — the deployment
    App's bot already authors their commits, so the deployment signer puts no
    new account on them. An org can register its own.
+10. **Signing reaches the governance feeds, not a screen of its own** —
+    §5.6. Chosen over a signing log in the UI, which would list every
+    signature when an auditor asks whether a push was signed and whether a
+    gate refused something.
 
 ## Related
 
