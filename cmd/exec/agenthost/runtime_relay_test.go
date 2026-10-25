@@ -3,11 +3,15 @@ package agenthost
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
 // directDispatchConn wires a relayRuntime straight to a RelayServer in-memory
@@ -242,5 +246,29 @@ func TestRelayServer_BindsOrgFromConversationInfoNotArgs(t *testing.T) {
 	if stored.OrgID != info.OrgID {
 		t.Fatalf("write bound the org from the sidecar's runtime (%q); it MUST bind from the orchestrator's ConversationInfo (%q)",
 			stored.OrgID, info.OrgID)
+	}
+}
+
+// tooLargeConn is a relay connection whose every call is refused as too large
+// to send, the way the sidecar's write limit refuses one.
+type tooLargeConn struct{}
+
+func (tooLargeConn) call(context.Context, string, string, any, any) error {
+	return fmt.Errorf("%w: the relay_call frame is 17000000 bytes, over the 16777216 the peer accepts", sidecarproto.ErrFrameTooLarge)
+}
+
+func (tooLargeConn) record(string, string, any) {}
+
+// TestSaveReviewDraftDetails_TooLargeTellsTheAgentWhatToDo: the whole draft
+// travels on every save, so a draft too large to relay comes back to the agent
+// saying to make the draft smaller, with the size refusal beneath it.
+func TestSaveReviewDraftDetails_TooLargeTellsTheAgentWhatToDo(t *testing.T) {
+	c := &LocalClient{rt: newRelayRuntime(tooLargeConn{}, ConversationInfo{OrgID: "org", ConversationID: "conv"}, nil)}
+	err := c.saveReviewDraftDetails(context.Background(), "art-1", domain.ReviewArtifactDetails{ReviewBody: "body"})
+	if !errors.Is(err, sidecarproto.ErrFrameTooLarge) {
+		t.Fatalf("saveReviewDraftDetails = %v; want the size refusal beneath it", err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "shorten or delete some staged comments") || !strings.Contains(msg, "17000000 bytes") {
+		t.Fatalf("error = %q; want what to do and the size", msg)
 	}
 }

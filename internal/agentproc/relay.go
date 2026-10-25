@@ -167,17 +167,22 @@ type AuthorizeGHWriteReply struct {
 }
 
 // RecordPushArgs is record_push's payload: one branch ref a receive-pack
-// transited plus the upstream's final HTTP status, mirroring gitproxy.PushedRef
+// transited plus the upstream's answer for it, mirroring gitproxy.PushedRef
 // across the wire. The orchestrator reshapes it into the same branch artifact /
 // push-failed row the in-process backstop writes. Repo is the "owner/repo" the
 // proxy parsed from the request path; Created marks a newly-created ref; Status
-// is the receive-pack response code (a 2xx means the push landed).
+// is the receive-pack response code; Rejected, Reason and RemoteMessage carry
+// the response's report-status refusal of the ref and the remote's message
+// text (the push landed only for a 2xx Status with Rejected false).
 type RecordPushArgs struct {
-	Repo    string `json:"repo"`
-	Ref     string `json:"ref"`
-	NewSHA  string `json:"new_sha"`
-	Created bool   `json:"created"`
-	Status  int    `json:"status"`
+	Repo          string `json:"repo"`
+	Ref           string `json:"ref"`
+	NewSHA        string `json:"new_sha"`
+	Created       bool   `json:"created"`
+	Status        int    `json:"status"`
+	Rejected      bool   `json:"rejected"`
+	Reason        string `json:"reason"`
+	RemoteMessage string `json:"remote_message"`
 }
 
 // RelayDispatcher serves the sidecar's org-bound relay ops. The concrete impl

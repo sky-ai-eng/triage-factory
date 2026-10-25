@@ -226,11 +226,12 @@ type Config struct {
 	// pushes. On each git-receive-pack POST it transits, the proxy tees the
 	// request body, parses the pkt-line ref-update commands (the block that
 	// precedes the packfile), and invokes RecordPush once per non-delete ref
-	// after the upstream responds — for EVERY final status, with that status
-	// on the PushedRef. The wiring is what branches on the outcome: a 2xx
-	// (PushedRef.Succeeded) upserts the branch artifact (same constructor +
-	// dedup key as the pre-push hook, so a normal hook+push never
-	// double-records), while a refused push (403/404/422/5xx — nothing
+	// after the upstream responds — for EVERY outcome, with the final status
+	// and the ref's report-status line read into the PushedRef. The wiring is
+	// what branches on the outcome: an accepted ref (PushedRef.Succeeded)
+	// upserts the branch artifact (same constructor + dedup key as the
+	// pre-push hook, so a normal hook+push never double-records), while a
+	// refused one (a 403/404/422/5xx, or an "ng" ref inside a 200 — nothing
 	// landed) must record only an audit-log failure row, never an artifact.
 	//
 	// Because every push transits this proxy — `git push --no-verify` skips
@@ -273,23 +274,37 @@ type Config struct {
 // "owner/repo" from the request path; Ref is the full remote ref
 // (refs/heads/...); NewSHA is the commit the push carried for it; Created is
 // true when the push would create the ref (the remote held no prior value);
-// Status is the upstream's final HTTP status for the receive-pack POST — the
-// outcome discriminator the wiring branches on (see Succeeded). It is pure
-// data — no domain dependency — so the proxy stays free of the artifact model;
-// the wiring layer maps it to a branch artifact / audit row.
+// Status is the upstream's final HTTP status for the receive-pack POST.
+//
+// Rejected is true when the response's report-status refused this ref — an
+// "ng" line, a failed unpack, or a report that leaves the ref out — which
+// GitHub does inside a 200 for branch protection, a ruleset, or a pre-receive
+// hook, and when the remote sent a fatal error instead of a report. Reason is
+// the report's reason for it, cut to 256 bytes. RemoteMessage is the tail of
+// what the remote printed during the push (side-band bands 2 and 3, progress
+// meters dropped): where GitHub explains a refusal. A response with no
+// readable report leaves Rejected false, so the ref's outcome is its status.
+//
+// Status and Rejected together are the outcome discriminator the wiring
+// branches on (see Succeeded). It is pure data — no domain dependency — so the
+// proxy stays free of the artifact model; the wiring layer maps it to a branch
+// artifact / audit row.
 type PushedRef struct {
-	Repo    string
-	Ref     string
-	NewSHA  string
-	Created bool
-	Status  int
+	Repo          string
+	Ref           string
+	NewSHA        string
+	Created       bool
+	Status        int
+	Rejected      bool
+	Reason        string
+	RemoteMessage string
 }
 
-// Succeeded reports whether the upstream accepted the push's transport (a 2xx
-// final status). Only a succeeded push may become an artifact; a refused one
-// is audit-log material only.
+// Succeeded reports whether the upstream accepted this ref: a 2xx final
+// status the report-status did not refuse it under. Only a succeeded push may
+// become an artifact; a refused one is audit-log material only.
 func (p PushedRef) Succeeded() bool {
-	return p.Status >= 200 && p.Status < 300
+	return p.Status >= 200 && p.Status < 300 && !p.Rejected
 }
 
 // Server is a single per-run proxy instance with a cached installation
@@ -672,6 +687,14 @@ func (s *Server) rewrite(pr *httputil.ProxyRequest) {
 	// those credentials to GitHub.
 	pr.Out.Header.Del("Proxy-Authorization")
 	pr.Out.Header.Del("Proxy-Connection")
+
+	// The proxy reads each ref's outcome out of a push's response, so it asks
+	// for that response uncompressed: git's curl client advertises gzip and
+	// deflate. A receive-pack response is a few lines of report-status, so
+	// compression buys nothing there.
+	if isReceivePackPush(pr.In) {
+		pr.Out.Header.Set("Accept-Encoding", "identity")
+	}
 
 	tok, _ := pr.In.Context().Value(tokenCtxKey{}).(string)
 	if tok == "" {

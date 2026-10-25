@@ -128,8 +128,10 @@ func run(args []string) error {
 	// to a single duplex socket whose other end the orchestrator holds. Serve
 	// the credential protocol over it — the orchestrator relays the sealed
 	// bundle down and asks for proxies; the runtime answers, and calls back
-	// for git-authorize decisions.
-	conn := sidecarproto.New(stdioChannel{}, rt)
+	// for git-authorize decisions. Written with the orchestrator's own read
+	// limit, so a frame it would refuse, closing the channel, fails on its own
+	// here and the agent's verb says why.
+	conn := sidecarproto.New(stdioChannel{}, rt, sidecarproto.WithWriteLimit(sidecarproto.MaxSidecarFrameSize))
 	rt.setConn(conn)
 
 	// Announce the public key first, before processing any request, so the

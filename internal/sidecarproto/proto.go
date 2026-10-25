@@ -152,6 +152,65 @@ const recordLaneLimit = 64
 // fails with it rather than blocking forever.
 var ErrClosed = errors.New("sidecarproto: connection closed")
 
+// MaxSidecarFrameSize is the largest frame a sidecar may send the
+// orchestrator. The orchestrator reads its end with this limit and the
+// sidecar writes its end with it.
+//
+// The orchestrator's read limit is the bound that holds against a sidecar that
+// has been compromised: the sidecar is the process that parses hostile
+// traffic, and the orchestrator supervises every run on the executor, so
+// without it one sidecar could send a frame big enough to exhaust the memory
+// all of those runs share, and write values of any size into the audit ledger
+// through the relay ops. The sidecar's write limit holds nothing against an
+// attacker, who would not apply it. It is there so that a working sidecar
+// with a frame too big to send fails that one request, and the agent is told
+// why, instead of sending the frame and losing the channel.
+//
+// The value comes from measuring the largest frames a working sidecar sends.
+// Nearly every frame describes one object, and the largest of those is the
+// record of a pull request the agent opened, which carries its body: under
+// 1 MiB for a body at GitHub's 65,536-character maximum, even with every
+// character escaped at the worst rate. The exception is a write of a review
+// draft, which carries the whole draft — once finalized, every staged comment
+// twice, the second copy in the proposed snapshot — and so grows with the
+// number of comments: 0.5 MiB for 100 comments of 2,000 characters, 15.8 MiB
+// for 100 comments of English prose each at GitHub's maximum length. 16 MiB
+// fits that, and is the cap the agenthost socket already puts on a single
+// request from the agent.
+const MaxSidecarFrameSize = 16 << 20
+
+// ErrFrameTooLarge marks a frame over a Conn's limit, in either direction.
+// Reading, it is beneath the cause a Conn built WithReadLimit shuts down with
+// when the peer sends one; the cause wraps ErrClosed too, so a Call it fails
+// reads as any other closed connection, and the Conn's owner finds this one
+// with errors.Is on Err. Writing, it is the error a Conn built WithWriteLimit
+// returns for a frame it refused to send, and the Conn stays open.
+var ErrFrameTooLarge = errors.New("sidecarproto: frame exceeds the size limit")
+
+// Option configures a Conn at New.
+type Option func(*Conn)
+
+// WithReadLimit bounds the frames the Conn reads to n bytes, not counting the
+// newline that ends each one. A longer frame shuts the Conn down with
+// ErrFrameTooLarge, as an undecodable frame shuts it down, and is refused
+// before more than n bytes of it plus one read buffer have been read, so the
+// peer cannot make this end hold a frame of the peer's choosing. Without it,
+// or with n <= 0, frames are unbounded, which is right only for the end whose
+// peer is the trusted side.
+func WithReadLimit(n int) Option {
+	return func(c *Conn) { c.maxRead = n }
+}
+
+// WithWriteLimit bounds the frames the Conn writes to n bytes, not counting
+// the newline. A Call or Notify whose frame is longer fails with
+// ErrFrameTooLarge and writes nothing, and a response that is longer is
+// replaced by an error response saying so. Set it to the peer's read limit,
+// so a frame the peer would refuse, closing the channel, fails on its own
+// instead. Without it, or with n <= 0, frames are unbounded.
+func WithWriteLimit(n int) Option {
+	return func(c *Conn) { c.maxWrite = n }
+}
+
 // Conn is one end of the duplex supervision channel. Construct with New,
 // then use Call/Notify to talk to the peer; inbound requests are dispatched
 // to the Handler passed to New. Safe for concurrent use.
@@ -160,14 +219,19 @@ var ErrClosed = errors.New("sidecarproto: connection closed")
 // exception: KindRelayRecord frames are served by a single goroutine in the
 // order they arrived, each finishing before the next starts.
 type Conn struct {
-	w   *json.Encoder
+	w   io.Writer
 	rwc io.Closer
 
-	// wmu serializes frame writes — json.Encoder is not safe for concurrent
-	// Encode, and a torn frame would desync the newline framing.
+	// wmu serializes frame writes — a torn frame would desync the newline
+	// framing.
 	wmu sync.Mutex
 
 	handler Handler
+
+	// maxRead is the longest inbound frame readFrame accepts, and maxWrite the
+	// longest frame writeFrame sends, in bytes; 0 for no limit. Set by
+	// WithReadLimit and WithWriteLimit.
+	maxRead, maxWrite int
 
 	// records is the record lane: KindRelayRecord frames wait here, in the
 	// order the reader took them off the wire, for serveRecords. Buffered so the
@@ -191,14 +255,17 @@ type Conn struct {
 // New wraps a duplex byte stream (the stdio socket) as a Conn and starts its
 // read loop. handler dispatches inbound Calls/Notifies; pass nil for a side
 // that only originates Calls. The caller owns rwc's lifetime beyond Close.
-func New(rwc io.ReadWriteCloser, handler Handler) *Conn {
+func New(rwc io.ReadWriteCloser, handler Handler, opts ...Option) *Conn {
 	c := &Conn{
-		w:       json.NewEncoder(rwc),
+		w:       rwc,
 		rwc:     rwc,
 		handler: handler,
 		pending: make(map[uint64]chan Frame),
 		records: make(chan Frame, recordLaneLimit),
 		done:    make(chan struct{}),
+	}
+	for _, opt := range opts {
+		opt(c)
 	}
 	// Recovers — see readLoop.
 	go c.readLoop(bufio.NewReader(rwc))
@@ -296,8 +363,8 @@ func (c *Conn) Notify(kind Kind, body any) error {
 // ErrClosed, and closes Done. It does NOT close the underlying stream — the
 // caller owns the socket's lifecycle (e.g. the broker's sidecarHandle) — and
 // therefore does NOT on its own stop the read-loop goroutine: that goroutine
-// stays blocked in Decode until the stream's owner/peer closes it, at which
-// point Decode errors and the loop exits via a second (idempotent) shutdown.
+// stays blocked in a read until the stream's owner/peer closes it, at which
+// point the read errors and the loop exits via a second (idempotent) shutdown.
 // So a caller reasoning about goroutine lifetime must close rwc, not just call
 // Close. Idempotent.
 func (c *Conn) Close() error {
@@ -321,7 +388,19 @@ func (c *Conn) shutdown(cause error) {
 	})
 }
 
+// writeFrame sends f as one line. A frame over the write limit, or one that
+// does not marshal, is refused before anything is written, so the stream is
+// intact and the conn stays open; only a failed write collapses it.
 func (c *Conn) writeFrame(f Frame) error {
+	line, err := json.Marshal(f)
+	if err != nil {
+		return fmt.Errorf("sidecarproto: marshal %s frame: %w", f.Kind, err)
+	}
+	if c.maxWrite > 0 && len(line) > c.maxWrite {
+		return fmt.Errorf("%w: the %s frame is %d bytes, over the %d the peer accepts", ErrFrameTooLarge, f.Kind, len(line), c.maxWrite)
+	}
+	line = append(line, '\n')
+
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
 	c.mu.Lock()
@@ -331,7 +410,7 @@ func (c *Conn) writeFrame(f Frame) error {
 	if closed {
 		return closeErr
 	}
-	if err := c.w.Encode(f); err != nil {
+	if _, err := c.w.Write(line); err != nil {
 		// A write failure means the peer is gone — collapse the conn so
 		// in-flight Calls unblock rather than hang on a dead socket.
 		c.shutdown(fmt.Errorf("%w: write: %v", ErrClosed, err))
@@ -357,15 +436,22 @@ func (c *Conn) readLoop(r *bufio.Reader) {
 			c.shutdown(fmt.Errorf("%w: read loop panicked; see the serving process's log", ErrClosed))
 		}
 	}()
-	dec := json.NewDecoder(r)
 	for {
-		var f Frame
-		if err := dec.Decode(&f); err != nil {
+		line, err := c.readFrame(r)
+		if err != nil {
 			cause := ErrClosed
-			if err != io.EOF {
+			switch {
+			case errors.Is(err, ErrFrameTooLarge):
+				cause = fmt.Errorf("%w: read: %w", ErrClosed, err)
+			case err != io.EOF:
 				cause = fmt.Errorf("%w: read: %v", ErrClosed, err)
 			}
 			c.shutdown(cause)
+			return
+		}
+		var f Frame
+		if err := json.Unmarshal(line, &f); err != nil {
+			c.shutdown(fmt.Errorf("%w: read: %v", ErrClosed, err))
 			return
 		}
 		if f.IsResponse {
@@ -373,6 +459,38 @@ func (c *Conn) readLoop(r *bufio.Reader) {
 			continue
 		}
 		c.dispatchRequest(f)
+	}
+}
+
+// readFrame reads one frame — everything up to the newline the encoder ends
+// it with — and returns it without the newline. It takes the frame a read
+// buffer at a time and checks the limit before keeping each piece, so a peer
+// sending a frame over the limit, or one it never ends, has at most the limit
+// plus one buffer read from it before the frame is refused.
+//
+// The stream ending between frames is io.EOF; ending inside one is
+// io.ErrUnexpectedEOF.
+func (c *Conn) readFrame(r *bufio.Reader) ([]byte, error) {
+	var frame []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		size := len(frame) + len(chunk)
+		if err == nil {
+			size-- // the newline ends the frame and is not part of it
+		}
+		if c.maxRead > 0 && size > c.maxRead {
+			return nil, fmt.Errorf("%w: an inbound frame passed %d bytes", ErrFrameTooLarge, c.maxRead)
+		}
+		frame = append(frame, chunk...)
+		switch {
+		case err == nil:
+			return frame[:len(frame)-1], nil
+		case errors.Is(err, bufio.ErrBufferFull):
+		case err == io.EOF && len(frame) > 0:
+			return nil, io.ErrUnexpectedEOF
+		default:
+			return nil, err
+		}
 	}
 }
 
@@ -449,7 +567,12 @@ func (c *Conn) respond(f Frame, respBody any, err error) {
 	} else {
 		resp.Body = payload
 	}
-	_ = c.writeFrame(resp)
+	if wErr := c.writeFrame(resp); wErr != nil && !errors.Is(wErr, ErrClosed) {
+		// Refused before anything was written (too large, or a raw body that
+		// is not JSON), so the stream is intact: answer with the refusal, so
+		// the caller is not left waiting out its deadline.
+		_ = c.writeFrame(Frame{Kind: f.Kind, ID: f.ID, IsResponse: true, Err: wErr.Error()})
+	}
 }
 
 // serveGuarded runs the handler under a panic guard, converting a panicking

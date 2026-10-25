@@ -23,6 +23,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
+	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
@@ -772,5 +773,50 @@ func TestRuntime_DrainRecordsStopsTheSender(t *testing.T) {
 	}
 	if err := rt.records.Send(agentproc.RelayNamespaceCore, agentproc.OpRecordEgressDenial, agentproc.RecordEgressDenialArgs{}); err == nil {
 		t.Fatal("a record sent after the drain was accepted; want it refused")
+	}
+}
+
+// TestRuntime_RecordPushRelaysTheRefOutcome pins that a push the git proxy
+// records reaches the orchestrator whole: the report-status refusal and the
+// remote's message travel with the ref, or the orchestrator records a refused
+// ref as a landed branch.
+func TestRuntime_RecordPushRelaysTheRefOutcome(t *testing.T) {
+	records := make(chan sidecarproto.RelayRecordBody, 1)
+	handler := sidecarproto.HandlerFunc(func(_ context.Context, kind sidecarproto.Kind, body json.RawMessage) (any, error) {
+		if kind != sidecarproto.KindRelayRecord {
+			return nil, nil
+		}
+		var rc sidecarproto.RelayRecordBody
+		if err := json.Unmarshal(body, &rc); err != nil {
+			return nil, err
+		}
+		records <- rc
+		return nil, nil
+	})
+	_, rt := dialRuntimeWithHandler(t, handler)
+
+	rt.gitProxyConfig("https://github.com").RecordPush(context.Background(), gitproxy.PushedRef{
+		Repo: "acme/widgets", Ref: "refs/heads/feature", NewSHA: "deadbeef", Created: true, Status: 200,
+		Rejected: true, Reason: "push declined due to repository rule violations", RemoteMessage: "error: GH013: ...",
+	})
+
+	select {
+	case got := <-records:
+		if got.Op != agentproc.OpRecordPush {
+			t.Fatalf("relayed op = %q, want %q", got.Op, agentproc.OpRecordPush)
+		}
+		var a agentproc.RecordPushArgs
+		if err := json.Unmarshal(got.Args, &a); err != nil {
+			t.Fatalf("unmarshal relayed push: %v", err)
+		}
+		want := agentproc.RecordPushArgs{
+			Repo: "acme/widgets", Ref: "refs/heads/feature", NewSHA: "deadbeef", Created: true, Status: 200,
+			Rejected: true, Reason: "push declined due to repository rule violations", RemoteMessage: "error: GH013: ...",
+		}
+		if a != want {
+			t.Errorf("relayed push = %+v, want %+v", a, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the push record never reached the orchestrator")
 	}
 }

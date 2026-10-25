@@ -1187,18 +1187,20 @@ func gitDenyNotMaterialized(repoID string) gitproxy.Decision {
 
 // gitPushRecorder builds the git proxy's RecordPush callback for one run. The
 // proxy parses each non-delete ref out of a receive-pack body and hands it here
-// with the upstream's final status; this is where the outcome splits:
+// with the upstream's answer for it; this is where the outcome splits:
 //
-//   - 2xx (the push landed): shape it into a branch artifact and upsert it
-//     through the same host-side path the pre-push hook uses —
+//   - accepted (PushedRef.Succeeded: a 2xx whose report-status did not refuse
+//     the ref — the push landed): shape it into a branch artifact and upsert
+//     it through the same host-side path the pre-push hook uses —
 //     agenthost.NewLocal → UpsertArtifact — so the write routes to the right
 //     pool (admin for an event-triggered run, the kicking-off user's synthetic
 //     claims for a manual one) and lands the ActionBranchPushed audit row in
 //     the same write. The same constructor and sink as the hook, which keys
 //     the row on the repository's registry row, so an (out-of-mode) hook twin
 //     still converges on one row.
-//   - non-2xx (the upstream refused it — nothing landed): record ONLY the
-//     branch_push_failed audit row. The audit log never omits an attempt;
+//   - refused (a non-2xx, or an "ng" ref inside a 200 — nothing landed):
+//     record ONLY the branch_push_failed audit row, carrying the report's
+//     reason and the remote's message. The audit log never omits an attempt;
 //     the artifact ledger never gains a branch that doesn't exist.
 //
 // host is the run's shared audit client rather than one built here, so the
@@ -1221,7 +1223,7 @@ func gitPushRecorder(host *agenthost.LocalClient, info agenthost.ConversationInf
 			return // not a branch ref (tag/other) or an unparseable repo path
 		}
 		if !push.Succeeded() {
-			host.RecordGitPushFailed(ctx, push.Repo, push.Ref, push.NewSHA, push.Created, push.Status)
+			host.RecordGitPushFailed(ctx, push)
 			return
 		}
 		if _, err := host.UpsertArtifact(ctx, art); err != nil {
