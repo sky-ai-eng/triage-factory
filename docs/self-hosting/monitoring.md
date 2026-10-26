@@ -468,15 +468,16 @@ boot:
 
 A rebase re-signs every commit it rewrites, so a long branch is hundreds of
 signatures in seconds; a typical run makes a handful. The limits are counted
-from the stored signatures, so two control pods deciding requests for one org
-at the same moment can each admit one past a limit. A request refused because
+from the stored signatures, so requests for one org decided at the same moment
+can each admit one past a limit: up to five per control pod, which decides four
+requests at once beside its sweep. A request refused because
 its engagement no longer holds its claim, or because the engagement spent its
 budget, is also recorded in the governance feed as `commit_sign_denied` (the
 budget one once per conversation).
 
 | Metric | Labels | Meaning |
 | -- | -- | -- |
-| `tf_commit_signatures_total` | `signer`, `outcome`, `reason`, `org_id` | Signature requests by the result the run got. `signer` is `org` or `deployment`. `outcome` is `signed`, `refused` or `unanswered`. `reason` names a refusal and is empty otherwise: `signer_inactive` (the org removed its signer, signs as another account now, or its signer is not `active`), `org_minute_budget`, `claim_budget`, `claim_inactive`. Counted by the executor whose run asked. |
+| `tf_commit_signatures_total` | `signer`, `outcome`, `reason`, `org_id` | Signature requests by the result the run got. `signer` is `org` or `deployment`. `outcome` is `signed`, `refused` or `unanswered`. `reason` names a refusal and is empty otherwise: `signer_inactive` (the org removed its signer, signs as another account now, or its signer is not `active`), `org_minute_budget`, `claim_budget`, `claim_inactive`. Counted by the executor whose run asked. A request that could not be queued or waited on at all is not counted; its `commit_signing.sign` span carries the error. |
 | `tf_commit_signing_duration_seconds` (histogram) | `signer`, `mode` | From a run's request to the signature in hand, for the requests signed. `mode` is `control_plane`. Buckets from 5ms to 30s. Executors. |
 | `tf_commit_signing_requests_pending` | — | Requests no control pod has claimed. **Zero is the steady state.** Read by the control pod holding the brain lease. |
 | `tf_commit_signing_oldest_pending_age_seconds` | — | How long the oldest of them has waited. Same source. |

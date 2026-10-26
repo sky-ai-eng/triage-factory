@@ -31,11 +31,18 @@ type memSecrets struct {
 	db.SecretStore
 	mu     sync.Mutex
 	values map[string]string
+	// onGet, when set, runs before each read, and its error is the read's.
+	onGet func() error
 }
 
 func (m *memSecrets) GetSystem(_ context.Context, _ string, key string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.onGet != nil {
+		if err := m.onGet(); err != nil {
+			return "", err
+		}
+	}
 	return m.values[key], nil
 }
 
@@ -463,6 +470,31 @@ func TestControlPlane_ClosesARequestNobodyWaitsOnUnanswered(t *testing.T) {
 	cp.Handle(context.Background(), f.orgID, req.ID)
 	if got := f.row(t, req.ID); got.State != domain.CommitSignatureRefused || Refusal(got.RefusalReason) != RefusalUnanswered {
 		t.Errorf("row = state %q reason %q, want refused unanswered: the run stopped waiting", got.State, got.RefusalReason)
+	}
+}
+
+// TestControlPlane_StoresADecisionWhoseContextEnded cancels the pod's context
+// partway through a decision, as a shutdown does. The key read fails with it,
+// and the request must still be closed and the run rung, not left signing for
+// the run to wait out.
+func TestControlPlane_StoresADecisionWhoseContextEnded(t *testing.T) {
+	f := newFixture(t)
+	b := &bell{}
+	req := f.request(t, domain.CommitSigningOrg, 1, "tree shutdown\n")
+	ctx, cancel := context.WithCancel(context.Background())
+	f.secrets.onGet = func() error {
+		cancel()
+		return context.Canceled
+	}
+
+	if !f.controlPlane("pod-a", roomyBudgets, b).Handle(ctx, f.orgID, req.ID) {
+		t.Fatal("Handle = false, want the request claimed")
+	}
+	if got := f.row(t, req.ID); got.State != domain.CommitSignatureRefused || Refusal(got.RefusalReason) != RefusalUnanswered {
+		t.Errorf("row = state %q reason %q, want refused unanswered rather than left signing", got.State, got.RefusalReason)
+	}
+	if msgs := b.messages(); len(msgs) != 1 || msgs[0].Kind != KindSignDone {
+		t.Errorf("published %+v, want sign_done for the closed request", msgs)
 	}
 }
 

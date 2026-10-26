@@ -48,8 +48,12 @@ const (
 	// finds its request.
 	nudgeQueueDepth = 256
 
-	// decideTimeout bounds one request's claim, decision and write.
+	// decideTimeout bounds one request's claim and decision.
 	decideTimeout = 10 * time.Second
+
+	// writeTimeout bounds storing a decision, ringing the run and recording
+	// a refusal's audit row.
+	writeTimeout = 5 * time.Second
 
 	// expiryMargin is how far past RequestTimeout a request must be before a
 	// pod closes it unanswered rather than signing it. The run stopped
@@ -76,9 +80,10 @@ var errNoSigningKey = errors.New("commitsigner: the secret store holds no privat
 // each request through ClaimRequestSystem's conditional update, so each is
 // decided once.
 //
-// The budgets are counted before signing, from rows, so two pods signing for
-// one org at the same instant can each admit one past the limit. The limits
-// bound a runaway or compromised run, which that does not change.
+// The budgets are counted before signing, from rows, so every request for one
+// org decided at the same instant, by any pod's workers or sweep, can admit one
+// past the limit: at most signerWorkers+1 per control pod. The limits bound a
+// runaway or compromised run, which that does not change.
 type ControlPlane struct {
 	stores  db.Stores
 	budgets Budgets
@@ -166,12 +171,16 @@ func (c *ControlPlane) Sweep(ctx context.Context) {
 // claimed the request; false is another pod having it, or a request that is
 // not one.
 //
-// A decision that cannot be stored leaves the row signing, and the run that
-// asked stops waiting at its deadline.
+// The decision is written on a budget of its own, detached from ctx and from
+// the one the claim and decision spent: a decision that ran out of time, or
+// whose pod began shutting down while it decided, is still stored, as
+// unanswered when its reads failed. A decision that cannot be stored even then
+// leaves the row signing, and the run that asked stops waiting at its
+// deadline.
 func (c *ControlPlane) Handle(ctx context.Context, orgID, id string) bool {
-	ctx, cancel := context.WithTimeout(ctx, decideTimeout)
+	decideCtx, cancel := context.WithTimeout(ctx, decideTimeout)
 	defer cancel()
-	row, err := c.stores.CommitSignatures.ClaimRequestSystem(ctx, orgID, id, c.podID)
+	row, err := c.stores.CommitSignatures.ClaimRequestSystem(decideCtx, orgID, id, c.podID)
 	if err != nil {
 		signerLog.Warn("claiming a signature request failed", "org", orgID, "signature", id, "error", err)
 		return false
@@ -180,14 +189,17 @@ func (c *ControlPlane) Handle(ctx context.Context, orgID, id string) bool {
 		return false
 	}
 
-	ctx, span := tracer.Start(ctx, "commit_signing.decide", trace.WithAttributes(
+	decideCtx, span := tracer.Start(decideCtx, "commit_signing.decide", trace.WithAttributes(
 		telemetry.OrgID(row.OrgID),
 		telemetry.ConversationID(row.ConversationID),
 		telemetry.Signer(string(row.Signer)),
 	))
 	defer span.End()
 
-	d := c.decide(ctx, *row)
+	d := c.decide(decideCtx, *row)
+
+	ctx, cancelWrite := context.WithTimeout(context.WithoutCancel(decideCtx), writeTimeout)
+	defer cancelWrite()
 	if err := c.store(ctx, *row, d); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
