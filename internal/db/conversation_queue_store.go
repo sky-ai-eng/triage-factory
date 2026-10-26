@@ -807,6 +807,15 @@ type ConversationQueueStore interface {
 	// own conversation's history, not an operator surface.
 	ClaimExecutorSystem(ctx context.Context, orgID, claimID string) (executorID string, ok bool, err error)
 
+	// ClaimLiveSystem reports whether claimID is a live claim in the org, held
+	// at bootEpoch: unreleased, with its lease still ahead on the database's
+	// clock, and taken by the executor boot that bootEpoch names. An unknown
+	// id is false, not an error. A control pod
+	// asks it before signing for an engagement, so a request from an
+	// engagement that has ended, or from an executor boot that no longer
+	// holds it, is refused.
+	ClaimLiveSystem(ctx context.Context, orgID, claimID string, bootEpoch int64) (bool, error)
+
 	// ListAwaitingCredentials returns every conversation — of EVERY surface
 	// — whose active claim is currently parked in
 	// phase='awaiting_credentials'. One scan serves the whole provisioner:

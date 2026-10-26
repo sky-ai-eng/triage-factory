@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/credprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/instance"
@@ -107,6 +108,15 @@ func (a *App) startBrain(term int64) {
 	// process exports it, beside the poller that owns the state.
 	a.connectionGauge = poller.NewConnectionObserver(otel.GetMeterProvider(), a.stores.PollReadiness)
 	go a.connectionGauge.Run(brainCtx, poller.DefaultConnectionInterval)
+	// Commit-signing queue gauges: the requests no control pod has claimed,
+	// and how long the oldest has waited. Here rather than beside the
+	// signers, which run on every control pod: a queue every signer stopped
+	// draining is what this reports. Multi mode only; a local process signs
+	// in place and queues nothing.
+	if runmode.Current() == runmode.ModeMulti {
+		a.commitSignQueue = commitsigner.NewQueueObserver(otel.GetMeterProvider(), a.stores.CommitSignatures)
+		go a.commitSignQueue.Run(brainCtx, workmetrics.DefaultDepthInterval)
+	}
 	// Durable event-queue drain worker: claims github:/jira: events the
 	// ingestor enqueued under the work-item contract's leases, routes them,
 	// and marks them done under the lease's fence. A failed attempt returns
@@ -290,6 +300,10 @@ func (a *App) stopBrain(reason string) {
 	if a.connectionGauge != nil {
 		a.connectionGauge.Close()
 		a.connectionGauge = nil
+	}
+	if a.commitSignQueue != nil {
+		a.commitSignQueue.Close()
+		a.commitSignQueue = nil
 	}
 	if a.pollerMgr != nil {
 		a.pollerMgr.StopAll()

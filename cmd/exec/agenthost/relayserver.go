@@ -10,7 +10,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
@@ -64,6 +67,10 @@ type RelayServer struct {
 	// so it leaves credRefresh nil and the wait no-ops.
 	credRefresh *CredentialRefresh
 
+	// signing queues the run's commit signature requests for the control
+	// plane. nil until SetCommitSigning; sign_digest is refused without it.
+	signing *CommitSigning
+
 	// engagement is the trace context of the engagement that built this
 	// server, captured once at bring-up (SetEngagementSpanContext). It is how
 	// a relayed op — which arrives long after the setup span ended, over a
@@ -78,6 +85,26 @@ type RelayServer struct {
 // SetProxyCreds is: the run's identity in the trace only exists once the
 // engagement that owns the sidecar has started.
 func (s *RelayServer) SetEngagementSpanContext(sc trace.SpanContext) { s.engagement = sc }
+
+// CommitSignRequester queues one signature request for the control plane and
+// waits for its answer. commitsigner.Requester, in production.
+type CommitSignRequester interface {
+	Request(ctx context.Context, req commitsigner.Request) (commitsigner.Result, error)
+}
+
+// CommitSigning is what sign_digest needs beyond the run's identity: the
+// engagement its requests are made for, which a control pod checks still holds
+// its claim before it signs, and the requester that queues them.
+type CommitSigning struct {
+	ClaimID   string
+	BootEpoch int64
+	Requester CommitSignRequester
+}
+
+// SetCommitSigning wires sign_digest. Injected late, like SetProxyCreds, from
+// the bring-up that knows the engagement; set before the agent runs, so it is
+// in place before git can ask for a signature.
+func (s *RelayServer) SetCommitSigning(cs CommitSigning) { s.signing = &cs }
 
 // CredentialRefresh is the orchestrator's read-only handle on the run's sealed
 // credential bundle. Neither half opens it: SealedAt reports only
@@ -498,6 +525,17 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 			Retired:      pr.Retired,
 		})
 
+	case agentproc.OpSignDigest:
+		var a agentproc.SignDigestArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, err
+		}
+		reply, err := s.signDigest(ctx, a)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(reply)
+
 	case opCheckEntitlement:
 		var a checkEntitlementArgs
 		if err := json.Unmarshal(args, &a); err != nil {
@@ -716,6 +754,58 @@ func (s *RelayServer) repoReservedAt(ctx context.Context, owner, repo string) (t
 		}
 	}
 	return oldest, found, nil
+}
+
+// signDigest queues a sign_digest request for the control plane and relays its
+// answer. Of the request, only the digest and the signer the run was sealed
+// with come from the sidecar; the org, conversation and engagement are this
+// server's, and the signer's host is the org's GitHub host, the one a signer is
+// registered on and which cannot change while it exists. The sidecar checked
+// the commit before computing the digest; nothing here, and nothing on the
+// control plane, reads the commit.
+func (s *RelayServer) signDigest(ctx context.Context, a agentproc.SignDigestArgs) (agentproc.SignDigestReply, error) {
+	if s.signing == nil || s.signing.Requester == nil {
+		return agentproc.SignDigestReply{}, errors.New("agenthost: commit signing is not wired for this run")
+	}
+	digest, err := commitsign.ParseDigest(a.Digest)
+	if err != nil {
+		return agentproc.SignDigestReply{}, fmt.Errorf("agenthost: sign_digest: %w", err)
+	}
+	signer := domain.CommitSigningMode(a.Signer)
+	if !signer.Signs() || a.SignerUserID <= 0 {
+		return agentproc.SignDigestReply{}, fmt.Errorf("agenthost: sign_digest names no signer (%q, account %d)", a.Signer, a.SignerUserID)
+	}
+	if s.stores.Orgs == nil {
+		return agentproc.SignDigestReply{}, errors.New("agenthost: sign_digest: no org store to read the GitHub host from")
+	}
+	settings, err := s.stores.Orgs.GetSettingsSystem(ctx, s.info.OrgID)
+	if err != nil {
+		return agentproc.SignDigestReply{}, fmt.Errorf("agenthost: sign_digest: read the org's settings: %w", err)
+	}
+	host := domain.GitHubHost(settings.GitHubBaseURL)
+	if host == "" {
+		return agentproc.SignDigestReply{}, errors.New("agenthost: sign_digest: the org has no GitHub host")
+	}
+	res, err := s.signing.Requester.Request(ctx, commitsigner.Request{
+		OrgID:          s.info.OrgID,
+		ConversationID: s.info.ConversationID,
+		ClaimID:        s.signing.ClaimID,
+		BootEpoch:      s.signing.BootEpoch,
+		Signer:         signer,
+		SignerHost:     host,
+		SignerUserID:   a.SignerUserID,
+		Digest:         digest,
+	})
+	if err != nil {
+		return agentproc.SignDigestReply{}, err
+	}
+	return agentproc.SignDigestReply{
+		Outcome:           string(res.Outcome),
+		SignatureID:       res.SignatureID,
+		Signature:         res.Signature,
+		Reason:            string(res.Refusal),
+		RetryAfterSeconds: res.RetryAfterSeconds,
+	}, nil
 }
 
 // authorizeGHWrite decides one gh-channel request the injector recognized as a

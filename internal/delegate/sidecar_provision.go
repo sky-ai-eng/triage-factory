@@ -421,6 +421,15 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	es := &runSidecar{conversationID: conv.ID, cell: c, conn: conn, res: res, stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
 	_, myBootEpoch := s.executorIdentity()
 
+	// The engagement a sign_digest request is made for, which a control pod
+	// checks still holds its claim, at this boot, before it signs.
+	s.mu.Lock()
+	signRequester := s.commitSignRequester
+	s.mu.Unlock()
+	if signRequester != nil && conv.ClaimID != "" {
+		relaySrv.SetCommitSigning(agenthost.CommitSigning{ClaimID: conv.ClaimID, BootEpoch: myBootEpoch, Requester: signRequester})
+	}
+
 	// A relayed `workspace add` widens this run's authorized repo set, which
 	// its already-sealed bundle predates — so the materialization waits for a
 	// bundle sealed after the reservation and has it pushed to the sidecar

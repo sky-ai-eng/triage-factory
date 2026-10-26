@@ -3,6 +3,9 @@ package postgres_test
 import (
 	"database/sql"
 	"errors"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -226,6 +229,84 @@ func TestCommitSignatureStore_Postgres_Conformance(t *testing.T) {
 		orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "signatures")
 		return pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey).CommitSignatures, orgID, pgCommitSignatureSeeder(t, h, orgID, userID)
 	})
+}
+
+// TestCommitSignatureQueue_Postgres_Conformance runs the control-plane queue's
+// contract on the admin pool, the control pods' wiring.
+func TestCommitSignatureQueue_Postgres_Conformance(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunCommitSignatureQueueConformance(t, func(t *testing.T) dbtest.CommitSignatureQueueFixture {
+		h.Reset(t)
+		orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "signature-queue")
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+		return dbtest.CommitSignatureQueueFixture{
+			Signatures: stores.CommitSignatures,
+			Claims:     stores.ConversationQueue,
+			OrgID:      orgID,
+			Claim: func(t *testing.T, claimedAt time.Time, released bool) (string, string) {
+				t.Helper()
+				conversationID := seedPgSnapshotConversation(t, h.AdminDB, orgID, userID, seedPgTask(t, h, orgID, userID))
+				return conversationID, seedPgSnapshotClaim(t, h.AdminDB, orgID, conversationID, claimedAt, released)
+			},
+		}
+	})
+}
+
+// TestCommitSignatureQueue_Postgres_PodsRaceForOneRequest pins the claim's
+// conditional update under real concurrency: pods racing for one request get
+// it exactly once.
+func TestCommitSignatureQueue_Postgres_PodsRaceForOneRequest(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "signature-race")
+	store := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey).CommitSignatures
+	conversationID, claimID := pgCommitSignatureSeeder(t, h, orgID, userID).Claim(t)
+	row, err := store.InsertSystem(t.Context(), domain.CommitSignature{
+		OrgID: orgID, ConversationID: conversationID, ClaimID: claimID, BootEpoch: 1,
+		Signer: domain.CommitSigningOrg, SignerHost: "https://github.com", SignerUserID: 583231,
+		Digest: strings.Repeat("ab", 64), State: domain.CommitSignatureRequested,
+	})
+	if err != nil {
+		t.Fatalf("InsertSystem: %v", err)
+	}
+
+	const pods = 8
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		takes []string
+	)
+	start := make(chan struct{})
+	for i := range pods {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			pod := fmt.Sprintf("pod-%d", i)
+			got, err := store.ClaimRequestSystem(t.Context(), orgID, row.ID, pod)
+			if err != nil {
+				t.Errorf("ClaimRequestSystem (%s): %v", pod, err)
+				return
+			}
+			if got != nil {
+				mu.Lock()
+				takes = append(takes, pod)
+				mu.Unlock()
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if len(takes) != 1 {
+		t.Fatalf("pods that claimed the request = %v, want exactly one", takes)
+	}
+	stored, err := store.GetSystem(t.Context(), orgID, row.ID)
+	if err != nil || stored == nil {
+		t.Fatalf("GetSystem: %+v, %v", stored, err)
+	}
+	if stored.ClaimedBy != takes[0] {
+		t.Errorf("claimed_by = %q, want the one pod that took it (%s)", stored.ClaimedBy, takes[0])
+	}
 }
 
 // TestCommitSignatureStore_Postgres_OrgScoped pins org_id defense in depth on

@@ -524,6 +524,22 @@ func (s *conversationQueueStore) ClaimExecutorSystem(ctx context.Context, orgID,
 	return executorID, true, nil
 }
 
+// ClaimLiveSystem reads the claim's liveness the way the claim fence does:
+// unreleased with its lease ahead of the database's clock.
+func (s *conversationQueueStore) ClaimLiveSystem(ctx context.Context, orgID, claimID string, bootEpoch int64) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	var live bool
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM claims
+			 WHERE org_id = ? AND id = ? AND boot_epoch = ?
+			   AND released_at IS NULL AND lease_expires_at > `+sqliteNowExpr+`)
+	`, orgID, claimID, bootEpoch).Scan(&live)
+	return live, err
+}
+
 func (s *conversationQueueStore) ListAwaitingCredentials(ctx context.Context) ([]db.AwaitingCredentialsConversation, error) {
 	// The parked set is keyed off the active claim's phase (served by the
 	// idx_claims_active_phase partial index); an inner join is right here —

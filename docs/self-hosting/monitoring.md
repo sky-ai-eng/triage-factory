@@ -430,6 +430,74 @@ Every dispatcher takes expired claims over at the top of its pass, whether or
 not it has capacity to claim anything, so a claim past expiry for minutes means
 no dispatcher in the fleet is running.
 
+### Commit signing
+
+When an org has an active commit signer, its agents' commits are signed as that
+GitHub account. In multi mode no executor holds a signing key, so a sandboxed
+run's signature is made on a control pod:
+
+1. The run's executor writes a `commit_signatures` row in state `requested`,
+   holding the SHA-512 digest of the commit (never the commit itself), and
+   rings every control pod over `tf_ctl` (`sign_request`).
+2. Every control pod signs, whether or not it holds the background-brain lease.
+   The pods race for the row, and the one that claims it checks that:
+   - the run's engagement still holds its claim, at the executor boot that
+     asked;
+   - the org still signs as the account the request names, and that signer is
+     `active`;
+   - the engagement and the org are within their budgets (below).
+3. It signs the digest with the signer's key from the secret store, or stores
+   the refusal, and rings the executor back (`sign_done`).
+4. The executor reads the row every 250ms in case that doorbell was dropped,
+   and gives up after 30s; the run is then told to run the same git command
+   again.
+
+`tf_ctl` can drop the first doorbell too, so each control pod also sweeps once
+a second for requests no pod has claimed half a second after they were made. A
+request a pod first reaches more than 40 seconds after it was made is closed
+without being signed: its run stopped waiting at 30.
+
+Two budgets bound what one run, or one org, can get signed. Every control pod
+reads them at boot, and a value that is not a positive integer refuses the
+boot:
+
+| Setting | Default | Counts |
+| -- | -- | -- |
+| `TF_MAX_COMMIT_SIGNATURES_PER_ORG_MINUTE` | 600 | Signatures for one org in any 60s. A request over it is refused with the seconds until the oldest counted signature leaves the window. |
+| `TF_MAX_COMMIT_SIGNATURES_PER_CLAIM` | 5000 | Signatures for one engagement. Once spent, every later request from that engagement is refused. |
+
+A rebase re-signs every commit it rewrites, so a long branch is hundreds of
+signatures in seconds; a typical run makes a handful. The limits are counted
+from the stored signatures, so requests for one org decided at the same moment
+can each admit one past a limit: up to five per control pod, which decides four
+requests at once beside its sweep. A request refused because
+its engagement no longer holds its claim, or because the engagement spent its
+budget, is also recorded in the governance feed as `commit_sign_denied` (the
+budget one once per conversation).
+
+| Metric | Labels | Meaning |
+| -- | -- | -- |
+| `tf_commit_signatures_total` | `signer`, `outcome`, `reason`, `org_id` | Signature requests by the result the run got. `signer` is `org` or `deployment`. `outcome` is `signed`, `refused` or `unanswered`. `reason` names a refusal and is empty otherwise: `signer_inactive` (the org removed its signer, signs as another account now, or its signer is not `active`), `org_minute_budget`, `claim_budget`, `claim_inactive`. Counted by the executor whose run asked. A request that could not be queued or waited on at all is not counted; its `commit_signing.sign` span carries the error. |
+| `tf_commit_signing_duration_seconds` (histogram) | `signer`, `mode` | From a run's request to the signature in hand, for the requests signed. `mode` is `control_plane`. Buckets from 5ms to 30s. Executors. |
+| `tf_commit_signing_requests_pending` | — | Requests no control pod has claimed. **Zero is the steady state.** Read by the control pod holding the brain lease. |
+| `tf_commit_signing_oldest_pending_age_seconds` | — | How long the oldest of them has waited. Same source. |
+| `tf_commit_signing_swept_total` | — | Requests a control pod found by its once-a-second sweep rather than the `sign_request` doorbell. A steady rate means `tf_ctl` is dropping notifications, and each of those signatures waited up to a second and a half. Every control pod. |
+| `tf_commit_signing_limit` | `budget` | The configured budgets, `org_per_minute` and `per_claim`, so a rule compares two series instead of hard-coding a number. Every control pod. |
+
+The two gauges come from the brain rather than the signers on purpose: a queue
+no control pod is draining is what they report, so the signers must not be what
+reports it.
+
+```
+tf_commit_signing_oldest_pending_age_seconds > 5                                    # control pods are not signing
+increase(tf_commit_signatures_total{outcome="unanswered"}[15m]) > 0                  # signatures timing out
+increase(tf_commit_signatures_total{reason="claim_budget"}[1h]) > 0                  # a run reached its cap
+increase(tf_commit_signatures_total{reason="claim_inactive"}[1h]) > 0                # an engagement asked for signatures after it ended
+sum by (org_id) (increase(tf_commit_signatures_total{outcome="signed"}[1m]))
+  > on() group_left 0.8 * max(tf_commit_signing_limit{budget="org_per_minute"})     # an org near its per-minute budget
+sum(rate(tf_commit_signing_swept_total[15m])) > 0                                   # not an alert on its own: tf_ctl dropping doorbells
+```
+
 ### Slack ingest
 
 Per Slack app (`message.channels`/`message.groups` are a firehose, unlike
@@ -1129,6 +1197,14 @@ Two spans on that path measure someone else's work.
 linked, because the doorbell between them is lossy by design and the sweep is
 the real completion path — a link would promise a handoff neither side can
 guarantee. Query `conversation.id` to see both.
+
+A commit signature splits the same way. `commit_signing.sign`, inside the
+`relay.call` that carried it, is the executor queuing a sandboxed run's
+signature request and waiting for the answer, with `signer`, `outcome` and
+`reason`; `commit_signing.decide` is the control pod that claimed the request
+deciding it, with the same three. They are not linked, for the same reason:
+the doorbells between them are lossy and the sweep is a real completion path.
+Query `conversation.id` to see both.
 
 A local-mode run traces a shorter version of the same thing: with no sandbox
 there is no broker, sidecar, or credential span at all, and the trace is
