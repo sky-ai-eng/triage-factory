@@ -282,15 +282,26 @@ exec "${TRIAGE_FACTORY_BIN:-triagefactory}" exec git sign "$@"
 the last argument as the buffer, ignores `-f` and `-U`, sends the buffer to
 the daemon, and writes `<buffer>.sig`. On a refusal or a failure it prints
 one line to stderr and exits 1; git then aborts the commit with
-`error: gpg failed to sign the data`. The messages say what to do:
+`error: gpg failed to sign the data`. The agent reads that line and nothing
+else, so each message says what happened, that nothing was committed, and the
+exact next step. Every one starts `triagefactory: `:
 
-- `triagefactory: this run signs commits only as <signer>; this commit's committer is <x>`
-- `triagefactory: commit signing is unavailable right now; retry the commit`
-- `triagefactory: commit signing is off for the rest of this run (<reason>); run this and every later commit with git -c commit.gpgsign=false`
+| case | message |
+| --- | --- |
+| the committer is not the signer | `this run signs commits only as <signer name> <<signer email>>, and this commit's committer is <name> <<email>>. Nothing was committed. Run the command again without setting the committer: no GIT_COMMITTER_NAME or GIT_COMMITTER_EMAIL, and no -c user.name or -c user.email. --author is fine.` |
+| not a commit | `this run signs commits only, and this is a <object type>. Nothing was created. Create it without signing; for a tag, drop -s.` |
+| the org is over its per-minute budget | `this org has made <limit> signed commits in the last minute, its limit, so signing resumes in <n>s. Nothing was committed. Wait <n>s, then run the same git command again; a rebase that stopped here resumes with git rebase --continue.` |
+| the claim has spent its budget | `this run has made <limit> signed commits, the most one run may make, so signing is off for the rest of this run. Nothing was committed. Run this and every later commit with git -c commit.gpgsign=false.` |
+| the signer is not `active`, or not the org's | `commit signing is off for the rest of this run: <reason>. Nothing was committed. Run this and every later commit with git -c commit.gpgsign=false. Commits are still authored as <signer name>.` |
+| no answer within 30 s | `commit signing did not answer within 30s. Nothing was committed. Run the same git command again; a rebase that stopped here resumes with git rebase --continue. If it fails three times in a row, commit with git -c commit.gpgsign=false.` |
+| the claim is no longer active | `this run no longer holds its engagement, so commit signing refused. Nothing was committed.` |
 
-The last one answers a signer that is no longer `active` or no longer the
-org's, and a claim that has spent its signing budget. An org over its
-per-minute budget, or no answer within 30 s, gets "unavailable".
+`<reason>` is a sentence, never a code: "the signer's key is no longer on its
+GitHub account", "an org admin removed the signer", "the org now signs as a
+different account", "GitHub reported a recent commit's email as not verified
+on the signer's account". A test fails a signature partway through a rebase
+and checks that `git rebase --continue` resumes it, since two of the messages
+promise that.
 
 The verb is not documented to the agent; git is its only intended caller.
 
@@ -361,17 +372,18 @@ One signature, the same for an org signer and the deployment signer:
    - the claim is still active, at the boot epoch the row names;
    - the org still resolves (§4.6) to the signer the row names, the same kind
      and account, and that signer is `active`;
-   - the claim and the org are within their signing budgets (§10.2).
+   - the claim and the org are within their signing budgets (§4.7).
 
    A sidecar that names a different signer gains nothing: the check passes
    only for the signer the org resolves to now. The pod then reads that
    signer's key (the org's from the secret store, the deployment's from its
    config), signs the digest and stores the signature (`signed`), or stores
-   the refusal (`refused`, with the reason). Finally it publishes `sign_done`.
+   the refusal (`refused`, with the reason, and for the per-minute budget the
+   seconds until signing resumes). Finally it publishes `sign_done`.
 5. The orchestrator wakes on `sign_done` (polling the row every 250 ms as a
    backstop) and returns the signature to the sidecar.
-6. After 30 s with no answer the call fails, and the shim reports
-   "unavailable, retry".
+6. After 30 s with no answer the call fails, and the shim prints the
+   no-answer message (§4.2).
 
 The latency is a notify, a sign and a row read: milliseconds normally, and up
 to the backstop intervals when a notify is dropped. A rebase re-signs every
@@ -387,6 +399,27 @@ mode and the spawner's `resolveCommitIdentity` in local mode. Every signature
 calls it again: the daemon locally, the control pod in multi mode. The co-author
 trailer on manual runs compares the delegating person against the signer's
 account id, as it compares against the bot's today.
+
+### 4.7 Signing budgets
+
+Two limits, operator config read where the signature is made (the control
+pods in multi mode, the TF process locally), and counted over
+`commit_signatures` rows (§5.3), so no counter is stored:
+
+- `TF_MAX_COMMIT_SIGNATURES_PER_ORG_MINUTE`, default 600: signatures for one
+  org in any 60 s. Over it, the refusal carries the seconds until the oldest
+  counted signature leaves the window.
+- `TF_MAX_COMMIT_SIGNATURES_PER_CLAIM`, default 5000: signatures for one
+  claim. Once spent, signing is off for the rest of that claim.
+
+They bound what one compromised or runaway run, or one org, can get signed.
+A rebase is the case they are sized for: it re-signs every commit it
+rewrites, so a 300-commit branch is 300 signatures in seconds, while a
+typical run makes a handful. The deployment signer has no limit of its own:
+signing costs the control plane microseconds and GitHub does not limit
+signatures, so its total is the sum of its orgs', shown in the fleet console
+(§6). The defaults are a starting point, tuned from
+`tf_commit_signatures_total` (§7, Metrics).
 
 ## 5. Data
 
@@ -449,7 +482,7 @@ reaches it as a relay record, like `record_push`. `tf_system` (the executor)
 gets `INSERT`, `SELECT`, and `UPDATE (commit_sha, repository_id, pushed_at)`.
 Org members get `SELECT`.
 
-The signing budgets (§10.2) are counts over these rows, per org and per
+The signing budgets (§4.7) are counts over these rows, per org and per
 claim, so no counter is stored. The same rows give per-signer totals:
 grouping by `signer_host, signer_user_id` totals one account across every org
 that uses it, the deployment signer included.
@@ -568,8 +601,38 @@ account), `no_user` (the email belongs to no account), `unverified_email`
 (verify the email on the account). Any other reason is shown verbatim.
 
 A broken deployment signer stops signing for every managed workspace at the
-next signature. Operators see it in the fleet console and in a WARN on each
-control pod.
+next signature. Operators see it in the fleet console, in a WARN on each
+control pod, and in `tf_deployment_commit_signer_up`.
+
+### Metrics
+
+| metric | labels | meaning |
+| --- | --- | --- |
+| `tf_commit_signatures_total` | `signer`, `outcome`, `reason`, `org_id` | Signature requests by result. `signer` is `org` or `deployment`. `outcome` is `signed`, `refused` or `unanswered`. `reason` names a refusal (`committer_mismatch`, `not_a_commit`, `signer_inactive`, `org_minute_budget`, `claim_budget`, `claim_inactive`) and is empty otherwise. |
+| `tf_commit_signing_duration_seconds` (histogram) | `signer`, `mode` | From the daemon's request to the signature in hand. `mode` is `local` or `control_plane`. Buckets from 5 ms to 30 s. |
+| `tf_commit_signing_requests_pending` | — | `requested` rows no control pod has claimed. **Zero is the steady state.** |
+| `tf_commit_signing_oldest_pending_age_seconds` | — | Age of the oldest of them. |
+| `tf_commit_signing_swept_total` | — | Requests a control pod found by its once-a-second sweep rather than the `sign_request` doorbell. A steady rate means `tf_ctl` is dropping notifications, and each of those signatures waited up to a second. |
+| `tf_commit_signing_limit` | `budget` | The configured limits (`org_per_minute`, `per_claim`), so a rule compares two series instead of hard-coding a number. |
+| `tf_commit_signers` | `status` | Org signers by status: `pending`, `active`, `broken`. |
+| `tf_commit_signer_broken` | `org_id`, `reason` | 1 for each broken org signer, with its reason. No series for a signer that is not broken. |
+| `tf_deployment_commit_signer_up` | — | 1 while the deployment signer is `active`, 0 while it is not. No series when none is configured. |
+| `tf_commit_signer_checks_total` | `check`, `result` | Health checks: `check` is `verify`, `periodic` or `post_push`; `result` is GitHub's reason (`valid`, `unknown_key`, `no_user`, `unverified_email`, `other`), `key_missing`, or `error` when GitHub could not be read. |
+| `tf_commit_signing_pushes_total` | `signed`, `org_id` | Pushes from runs whose org resolves to a signer, by whether the pushed tip was signed. An unsigned one is a run that committed with signing off. |
+
+Each signature is one span, `commit_signing.sign`, in the run's trace: from
+the daemon through the relay to the control pod's signature, with the signer
+kind, outcome and reason as attributes.
+
+The rules worth shipping with it:
+
+```promql
+tf_deployment_commit_signer_up == 0                                                    # every managed workspace is committing unsigned
+increase(tf_commit_signatures_total{reason="committer_mismatch"}[1h]) > 0             # a run asked to sign as someone else
+increase(tf_commit_signatures_total{reason="claim_budget"}[1h]) > 0                   # a run reached its cap
+increase(tf_commit_signatures_total{outcome="unanswered"}[15m]) > 0                   # signatures timing out
+tf_commit_signing_oldest_pending_age_seconds > 5                                      # control pods are not signing
+```
 
 ## 8. UI
 
@@ -593,6 +656,9 @@ A "Commit signing" section in `OrgSettings.tsx`, after "GitHub access":
   must be verified first.
 
 ## 9. Rollout
+
+Every phase ships its metrics (§7, Metrics) and documents them, with their
+rules, in `docs/self-hosting/monitoring.md`.
 
 **Phase 0 — TFAC-1188 (merged).** Per-ref push outcomes
 (`gitproxy.PushedRef`). The post-push check and a visible "signed commits
@@ -630,12 +696,6 @@ signature.
 1. **GHE.com's noreply address.** It is not documented, so a GHE.com signer
    needs a real address (§3.4). A spike against a GHE.com tenant would show
    whether a derived address verifies there.
-2. **The signing budget.** Initial values: 600 signatures per minute per org
-   and 5,000 per claim. A rebase of a long branch is the case to size for. The
-   limits bound what one compromised or runaway run, or one org, can get
-   signed. The deployment signer has no limit of its own: signing costs the
-   control plane microseconds and GitHub does not limit signatures, so its
-   total is the sum of its orgs', shown in the fleet console (§6).
 
 ## 11. Decision log
 
@@ -683,6 +743,10 @@ signature.
     none, which fails repository tooling that runs `git verify-commit` on
     TF's own commits, and over every contributor's keys, which GitHub's API
     already answers for.
+14. **Budgets as operator config, counted per org and per claim** — §4.7.
+    Chosen over fixed numbers, which nobody can size before there is data,
+    and over a per-signer count, which would let one managed workspace spend
+    the deployment signer's limit for every other.
 
 ## Related
 
