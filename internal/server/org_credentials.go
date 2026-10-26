@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -60,6 +61,27 @@ type githubPATRequest struct {
 	PAT string `json:"pat"`
 }
 
+// refuseWorkspaceTokenInMulti answers 404 for a route that puts a workspace
+// GitHub token in place, when this is multi mode, and reports whether it did.
+// A multi workspace's GitHub access is a GitHub App, the deployment's or its
+// own: an App's installation tokens last an hour and cover only the
+// installation's repositories, where a token is one person's long-lived,
+// unscoped credential, and an App's client secret is what lets members link
+// their GitHub accounts. No setting reopens these routes there, because one
+// would reopen exactly that gap. The unbind (DELETE …/github/pat) stays in both
+// modes, so a workspace that holds a token can always remove it.
+//
+// Every token-placing route calls this first, before authorization: a route
+// that does not exist in this mode is a 404 to everyone, the way the
+// deployment-App routes are in local mode.
+func refuseWorkspaceTokenInMulti(w http.ResponseWriter) bool {
+	if runmode.Current() != runmode.ModeMulti {
+		return false
+	}
+	notFound(w, "route")
+	return true
+}
+
 // handleGitHubPATPut binds (or rotates) the org's GitHub bot PAT — PAT_1, the
 // token TF authenticates to GitHub with. It validates the token live against
 // the org's configured GitHub host, then in one transaction stores the
@@ -70,8 +92,13 @@ type githubPATRequest struct {
 // (PAT_2) is captured by its own surface, so access and identity stay
 // independent even when the same token is used for both.
 //
+// Local mode only: see refuseWorkspaceTokenInMulti.
+//
 // PUT /api/orgs/{org_id}/github/pat
 func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
+	if refuseWorkspaceTokenInMulti(w) {
+		return
+	}
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
@@ -97,10 +124,8 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	//
 	// A byo_app org is caught by the App-row gate below with its own, more
 	// useful message, and a pat org is exactly who this endpoint is for. A
-	// managed_app org passes both of those — known class, no App row — which is
-	// why the managed guard follows: binding a PAT would flip the class while
-	// its bound installation rows stayed live, and the deployment App's
-	// deliveries would keep routing to a workspace that says it has no App.
+	// managed_app org never gets here: this route exists only in local mode,
+	// and the deployment App only in multi.
 	if _, err := s.githubCredentialClass(ctx, orgID); err != nil {
 		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
 			settingsOrgLog.Error("unknown github credential class; refusing to bind a pat", "org", orgID)
@@ -108,9 +133,6 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		internalError(w, "github-access", err)
-		return
-	}
-	if s.refuseManagedInTheWay(w, ctx, orgID) {
 		return
 	}
 
@@ -168,7 +190,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	// The authoritative gates: ALL re-read inside the critical section, because
 	// the advisory checks above raced everything that happened during validation.
 	// The class first — it decides whether the App-row question is even the right
-	// one to be asking — then the managed guard, then the XOR gate itself.
+	// one to be asking — then the XOR gate itself.
 	if _, err := s.githubCredentialClass(ctx, orgID); err != nil {
 		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
 			settingsOrgLog.Error("unknown github credential class; refusing to bind a pat", "org", orgID)
@@ -176,9 +198,6 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		internalError(w, "github-access", err)
-		return
-	}
-	if s.refuseManagedInTheWay(w, ctx, orgID) {
 		return
 	}
 	if app, err := s.githubApps.GetForOrgSystem(ctx, orgID); err != nil {

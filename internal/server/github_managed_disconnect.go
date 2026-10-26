@@ -23,17 +23,18 @@ import (
 // installation row means "this workspace rides the deployment App". The static
 // webhook receiver routes a delivery by that row, the cadence pass refreshes
 // every live row, and the resolver mints tokens from them — none of them
-// consult the credential class. So a workspace whose class moved to pat or
-// byo_app while its rows stayed live would keep receiving, and acting on, the
-// deployment App's deliveries under a credential class that says it has no App
-// at all. The rows and the class must never disagree, and two things hold that:
+// consult the credential class. So a workspace whose class moved to byo_app
+// while its rows stayed live would keep receiving, and acting on, the
+// deployment App's deliveries under a credential class that says the App is
+// another one. The rows and the class must never disagree, and two things hold that:
 //
 //   - the disconnect verbs, which soft-remove the rows and reset the class in
 //     one motion under the App-registration lock;
 //   - the door guards, one predicate called from every other credential bind
-//     (the PAT bind, BYO registration start and callback, BYO import), which
-//     refuse a managed workspace that still holds a live row and name the
-//     disconnect as the way out.
+//     (BYO registration start and callback, BYO import), which refuse a
+//     managed workspace that still holds a live row and name the disconnect as
+//     the way out. The workspace token bind needs none: it exists only in
+//     local mode, and the deployment App only in multi.
 //
 // Nothing here uninstalls anything on GitHub. The grant is edited on GitHub's
 // installation page, so after a disconnect the installation persists there
@@ -43,7 +44,7 @@ import (
 // account instead of picking it there.
 
 // managedInTheWayMessage is the one sentence every door says to a managed
-// workspace. Same rule on four routes is the same rule, so it is spelled once.
+// workspace. Same rule on three routes is the same rule, so it is spelled once.
 const managedInTheWayMessage = "This workspace is connected through the deployment's GitHub App. " +
 	"Disconnect it in Workspace Settings first."
 
@@ -63,7 +64,8 @@ var errOrgManagedInTheWay = errors.New("org rides the deployment app with a live
 // That, and not the class alone, is what the guard is about — the hole it
 // closes is a live row under a different class, so a managed workspace whose
 // rows have all been removed (an uninstall reported by webhook, say) is free to
-// bind a PAT and become the plain PAT workspace it already effectively is.
+// bring an App of its own, as the credential-less workspace it already
+// effectively is.
 //
 // Rows on every host count. The class is the org's, not a host's: a live
 // managed row the org left on a GitHub it has moved off is still a row under
@@ -176,7 +178,7 @@ func (s *Server) serveManagedDisconnect(w http.ResponseWriter, r *http.Request, 
 	ctx := r.Context()
 
 	// The App-registration lock, keyed by org — the same one every credential
-	// transition takes. A PAT bind or a BYO registration racing this verb lands
+	// transition takes. A BYO registration or import racing this verb lands
 	// wholly before or wholly after it, and whichever runs second reads the
 	// other's committed state: a bind that arrives second meets the guard on an
 	// empty workspace and proceeds, or meets a live row and refuses.

@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -453,7 +452,8 @@ func TestManagedDisconnect_LocalModeIs404(t *testing.T) {
 // walked through every other credential bind, acquired the credential, and
 // kept its bound installation rows live under a class that said it had no App.
 // Each door refuses now, names the disconnect as the way out, and writes
-// nothing: no PAT stored, no App row, class and rows untouched.
+// nothing: no PAT stored, no App row, class and rows untouched. The workspace
+// token bind is no door at all in multi mode, where the managed class lives.
 func TestManagedClass_DoorsRefuseAManagedWorkspace(t *testing.T) {
 	assertUntouched := func(t *testing.T, rig *bindRig) {
 		t.Helper()
@@ -472,20 +472,17 @@ func TestManagedClass_DoorsRefuseAManagedWorkspace(t *testing.T) {
 		rig.assertRowsAgreeWithClass(t)
 	}
 
-	t.Run("pat_bind", func(t *testing.T) {
+	t.Run("pat_bind_is_no_route", func(t *testing.T) {
 		rig := newBindRig(t, newFakeGitHub())
 		rig.bindManaged(t, 4242)
 		calls := rig.gh.callCount()
 
 		resp := rig.postJSONWithSid("PUT", "/api/orgs/"+rig.orgID.String()+"/github/pat", rig.sid, map[string]string{"pat": "ghp_new"})
-		if resp.StatusCode != http.StatusConflict {
-			t.Fatalf("PAT bind on a managed workspace status=%d, want 409", resp.StatusCode)
-		}
-		if msg := errorMessage(t, resp.Body); msg != managedInTheWayMessage {
-			t.Errorf("refusal message = %q, want %q", msg, managedInTheWayMessage)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("PAT bind on a managed workspace status=%d, want 404", resp.StatusCode)
 		}
 		if rig.gh.callCount() != calls {
-			t.Error("the PAT was validated against GitHub before the guard refused; the advisory guard must fire first")
+			t.Error("the PAT was validated against GitHub on a route that does not exist")
 		}
 		assertUntouched(t, rig)
 	})
@@ -565,7 +562,7 @@ func TestManagedClass_DoorsRefuseAManagedWorkspace(t *testing.T) {
 		calls := rig.gh.callCount()
 
 		resp := rig.postJSONWithSid("POST", "/api/orgs/"+rig.orgID.String()+"/github/app/import", rig.sid,
-			map[string]string{"app_id": "777", "pem": "-----BEGIN RSA PRIVATE KEY-----\nnot-a-key\n-----END RSA PRIVATE KEY-----"})
+			map[string]string{"app_id": "777", "pem": "-----BEGIN RSA PRIVATE KEY-----\nnot-a-key\n-----END RSA PRIVATE KEY-----", "client_secret": "cs"})
 		if resp.StatusCode != http.StatusConflict {
 			t.Fatalf("import on a managed workspace status=%d, want 409", resp.StatusCode)
 		}
@@ -581,86 +578,22 @@ func TestManagedClass_DoorsRefuseAManagedWorkspace(t *testing.T) {
 	t.Run("a_managed_workspace_with_no_live_row_is_not_in_the_way", func(t *testing.T) {
 		// The guard is about live rows, not the class alone: once every row is
 		// gone (an uninstall reported by webhook, say) the workspace is free
-		// to become the plain PAT workspace it already effectively is.
+		// to bring an App of its own, so registering one gets the manifest
+		// page rather than the refusal.
 		rig := newBindRig(t, newFakeGitHub())
 		rig.bindManaged(t, 4242)
 		if _, err := rig.srv.githubApps.MarkInstallationRemoved(context.Background(), rig.orgID.String(), ghbase.DefaultBaseURL(), "4242"); err != nil {
 			t.Fatalf("remove installation: %v", err)
 		}
-		resp := rig.postJSONWithSid("PUT", "/api/orgs/"+rig.orgID.String()+"/github/pat", rig.sid, map[string]string{"pat": "ghp_new"})
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			t.Fatalf("PAT bind on a managed workspace with no live row status=%d body=%s, want 200", resp.StatusCode, body)
+		req := httptest.NewRequest("GET", "/api/orgs/"+rig.orgID.String()+"/github/app/register/launch?owner_type=org&owner_login=acme", nil)
+		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: rig.sid})
+		rec := httptest.NewRecorder()
+		rig.srv.mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("register launch on a managed workspace with no live row status=%d body=%s, want 200", rec.Code, rec.Body.String())
 		}
-		if class := rig.credentialClass(t); class != string(domain.GitHubCredentialClassPAT) {
-			t.Errorf("class after the PAT bind = %q, want pat", class)
+		if strings.Contains(rec.Body.String(), "Disconnect it") {
+			t.Errorf("launch page carries the managed refusal: %s", rec.Body.String())
 		}
-		rig.assertRowsAgreeWithClass(t)
 	})
-}
-
-// TestManagedDisconnect_RacesAPATBind: a disconnect and a PAT bind on one
-// workspace serialize under the App-registration lock, and the loser sees the
-// winner's state. Both are released onto the lock at once; whichever runs
-// second reads the other's commit — a bind after the disconnect lands on an
-// empty workspace and succeeds, a bind before it meets the guard and refuses,
-// and the disconnect after a refused bind still finds the rows to remove. In
-// every ordering the workspace ends with no live rows and the pat class, and
-// holds a PAT exactly when the bind reported success.
-func TestManagedDisconnect_RacesAPATBind(t *testing.T) {
-	rig := newBindRig(t, newFakeGitHub())
-	rig.bindManaged(t, 4242)
-
-	// Hold the lock so both requests queue on it, then release them together.
-	// The PAT bind validates against GitHub before it reaches the lock, so it
-	// is given a head start to get there.
-	release, err := rig.srv.acquireKeyedLock(context.Background(), &rig.srv.githubAppRegMu, githubAppRegRMWLockSalt, rig.orgID.String())
-	if err != nil {
-		t.Fatalf("hold lock: %v", err)
-	}
-
-	var (
-		done       sync.WaitGroup
-		bindStatus int
-		discStatus int
-	)
-	done.Add(2)
-	go func() {
-		defer done.Done()
-		resp := rig.postJSONWithSid("PUT", "/api/orgs/"+rig.orgID.String()+"/github/pat", rig.sid, map[string]string{"pat": "ghp_new"})
-		bindStatus = resp.StatusCode
-	}()
-	go func() {
-		defer done.Done()
-		time.Sleep(100 * time.Millisecond)
-		discStatus = rig.disconnect(t, "").Code
-	}()
-	time.Sleep(300 * time.Millisecond)
-	release()
-	done.Wait()
-
-	if discStatus != http.StatusNoContent {
-		t.Errorf("disconnect status=%d, want 204 whichever order the lock chose", discStatus)
-	}
-	if live := rig.liveInstallations(t); len(live) != 0 {
-		t.Errorf("live rows after the race = %v, want none", live)
-	}
-	if class := rig.credentialClass(t); class != string(domain.GitHubCredentialClassPAT) {
-		t.Errorf("class after the race = %q, want pat", class)
-	}
-	rig.assertRowsAgreeWithClass(t)
-
-	pat := rig.storedPAT(t)
-	switch bindStatus {
-	case http.StatusOK:
-		if pat == "" {
-			t.Error("the PAT bind reported success and stored nothing")
-		}
-	case http.StatusConflict:
-		if pat != "" {
-			t.Error("the PAT bind was refused and stored a PAT anyway")
-		}
-	default:
-		t.Errorf("PAT bind status=%d, want 200 (ran after the disconnect) or 409 (ran before it)", bindStatus)
-	}
 }

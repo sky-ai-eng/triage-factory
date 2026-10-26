@@ -1,6 +1,7 @@
 // The wizard's step registry — one atomic action per stack entry. The
-// ORGANIZATION steps (GitHub URL → GitHub access method → [App: account type →
-// register | PAT: token → clone protocol (local only)] → GitHub poll interval →
+// ORGANIZATION steps (GitHub URL → GitHub access method (local only; multi is
+// always App) → [App: source → account type → register | PAT: token → clone
+// protocol (local only)] → GitHub poll interval →
 // Trackers → [Jira URL → Jira access → Jira poll interval, shown only when Jira
 // is the chosen/connected tracker | Linear access → Linear poll interval, the
 // same for Linear] → org max model tier → Claude credentials
@@ -224,7 +225,9 @@ async function fetchIntegrationsState(): Promise<{
 // entry still edits it for *.ghe.com / GHES). The url/access-confirmed flags
 // seed from the connection signals: a connected org has, by definition, a
 // previously-confirmed URL and access, so it resumes past those steps; the
-// access tab defaults to PAT for an org with a stored token, else App.
+// access tab defaults to PAT for an org with a stored token, else App. In multi
+// mode it is always App: a multi workspace's GitHub access is a GitHub App, so
+// there is no choice to make and no token step to reach.
 export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
   if (!ctx.orgId) throw new Error('Could not load organization settings')
   const [org, integrations, linear] = await Promise.all([
@@ -261,8 +264,16 @@ export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
     githubUrlConfirmed: integrations.githubReady,
     // A returning org pre-selects its method (PAT if a token is stored, else App
     // when already connected); a fresh org starts unselected so the picker opens
-    // with neither chosen and advances on the first click.
-    githubAccessTab: org.has_github_pat ? 'pat' : integrations.githubReady ? 'app' : null,
+    // with neither chosen and advances on the first click. Multi has no picker:
+    // the method is App, even for a workspace that holds a token, whose way out
+    // is registering or importing one.
+    githubAccessTab: !ctx.isLocal
+      ? 'app'
+      : org.has_github_pat
+        ? 'pat'
+        : integrations.githubReady
+          ? 'app'
+          : null,
     jiraConnected: integrations.jiraConnected,
     jiraUrlConfirmed: integrations.jiraConnected,
     // A returning connected org resumes past the deployment picker with its
@@ -481,15 +492,18 @@ const githubUrlStep: WizardStep = {
   render: (ctx) => <GitHubUrlStep {...ctx} />,
 }
 
-// Step · GitHub access method (the mode picker). App vs PAT, as its own step;
-// it starts unselected and advances on click (selfAdvancing — no Continue
-// button), the in-body action both recording the choice and moving on. Complete
-// once a method is chosen; the mandatory GitHub gate lives on whichever config
-// step the choice makes visible.
+// Step · GitHub access method (the mode picker, local only). App vs PAT, as its
+// own step; it starts unselected and advances on click (selfAdvancing — no
+// Continue button), the in-body action both recording the choice and moving on.
+// Complete once a method is chosen; the mandatory GitHub gate lives on whichever
+// config step the choice makes visible. Hidden in multi, where the method is
+// always App (loadOrg seeds it), so the URL step leads straight to the App
+// source step.
 const githubModeStep: WizardStep = {
   id: 'org-github-mode',
   section: 'org',
   title: 'GitHub access',
+  visible: (s) => s.isLocal,
   selfAdvancing: true,
   isComplete: (s) => s.githubAccessTab !== null,
   persist: async () => {},
@@ -722,12 +736,13 @@ const githubAppInstallStep: WizardStep = {
 }
 
 // Step · Personal access token (mandatory, visible when PAT is the chosen
-// method). No separate Connect button — Continue performs the connect: a PUT on
-// the org's GitHub credential resource, which validates the PAT against the
-// base URL and 422s on a bad token. A freshly-entered token is trusted on a
-// successful save; an empty field relied on a *stored* token, which the save
-// does NOT re-validate, so confirm against the server's github_ready signal
-// rather than optimistically marking connected.
+// method; local only, since multi has no token route). No separate Connect
+// button — Continue performs the connect: a PUT on the org's GitHub credential
+// resource, which validates the PAT against the base URL and 422s on a bad
+// token. A freshly-entered token is trusted on a successful save; an empty field
+// relied on a *stored* token, which the save does NOT re-validate, so confirm
+// against the server's github_ready signal rather than optimistically marking
+// connected.
 //
 // Cross-pick (an App is registered, user picked PAT to switch): Continue tears
 // the App down instead of the plain settings save (which 409s while an App
@@ -746,7 +761,7 @@ const githubPatStep: WizardStep = {
   id: 'org-github-pat',
   section: 'org',
   title: 'Personal access token',
-  visible: (s) => s.githubAccessTab === 'pat',
+  visible: (s) => s.isLocal && s.githubAccessTab === 'pat',
   isComplete: (s) => s.githubReady && !s.githubAppRegistered,
   validate: (s) => {
     if (s.githubReady && !s.githubAppRegistered) return null

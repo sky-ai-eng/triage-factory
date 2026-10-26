@@ -718,3 +718,56 @@ describe('setup — the Linear tracker', () => {
     await expect(loadOrg({ orgId: ORG_ID, teamId: 'default', isLocal: true })).rejects.toThrow()
   })
 })
+
+// A multi workspace's GitHub access is a GitHub App, so the wizard asks no
+// access-method question there and never reaches the token step: the GitHub
+// section goes from the URL straight to the App source. Local keeps both.
+describe('setup — GitHub access method by mode', () => {
+  beforeEach(() => vi.restoreAllMocks())
+
+  const githubIds = (state: WizardState) =>
+    WIZARD_STEPS.filter((s) => s.id.startsWith('org-github') && isStepVisible(s, state)).map(
+      (s) => s.id,
+    )
+
+  it('goes from the URL step straight to the App source in multi', () => {
+    const state = { ...initialWizardState(), isLocal: false, githubAccessTab: 'app' as const }
+    const ids = githubIds(state)
+    expect(ids).not.toContain('org-github-mode')
+    expect(ids).not.toContain('org-github-pat')
+    expect(ids.slice(0, 2)).toEqual(['org-github-url', 'org-github-app-source'])
+  })
+
+  it('never shows the token step in multi, whatever the access tab says', () => {
+    const state = { ...initialWizardState(), isLocal: false, githubAccessTab: 'pat' as const }
+    expect(githubIds(state)).not.toContain('org-github-pat')
+  })
+
+  it('keeps the method picker and the token step in local', () => {
+    const fresh = { ...initialWizardState(), isLocal: true }
+    expect(githubIds(fresh).slice(0, 2)).toEqual(['org-github-url', 'org-github-mode'])
+    expect(githubIds({ ...fresh, githubAccessTab: 'pat' })).toContain('org-github-pat')
+  })
+
+  it('seeds the App method in multi, even for a workspace that holds a token', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.endsWith('/linear/access')) {
+          return { ok: true, status: 200, ...jsonBody({ connected: false }) }
+        }
+        if (url === '/api/integrations/status') {
+          return { ok: true, status: 200, ...jsonBody({ github_ready: true }) }
+        }
+        return {
+          ok: true,
+          status: 200,
+          ...jsonBody({ version: 1, github_base_url: '', has_github_pat: true }),
+        }
+      }),
+    )
+    const ctx = { orgId: ORG_ID, teamId: 'default' }
+    expect((await loadOrg({ ...ctx, isLocal: false })).githubAccessTab).toBe('app')
+    expect((await loadOrg({ ...ctx, isLocal: true })).githubAccessTab).toBe('pat')
+  })
+})

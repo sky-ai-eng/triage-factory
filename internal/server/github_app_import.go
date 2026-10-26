@@ -32,11 +32,13 @@ import (
 // regardless of how the row was created — so this persists through the same path
 // the manifest callback does, with the same staging rule.
 
-// githubAppImportRequest is the import endpoint body. client_secret,
-// webhook_secret, and accept_partial are optional: the client secret only
-// enables per-user OAuth Connect (skipping it lands on the PAT-capture identity
-// path); the webhook secret is multi-mode only (local is hookless/backfill);
-// accept_partial acknowledges soft permission gaps.
+// githubAppImportRequest is the import endpoint body. client_secret is
+// required in multi mode and optional in local: it is what lets members sign in
+// with GitHub to link their accounts, and every multi workspace's App is held to
+// being able to (local can skip it and capture identity from a token instead).
+// webhook_secret and accept_partial are optional: the webhook secret is
+// multi-mode only (local is hookless/backfill); accept_partial acknowledges
+// soft permission gaps.
 type githubAppImportRequest struct {
 	AppID         string `json:"app_id"`
 	PEM           string `json:"pem"`
@@ -260,11 +262,11 @@ func mapAppOwnerType(githubType string) string {
 }
 
 // handleGitHubAppImport validates a bring-your-own GitHub App (App ID + private
-// key) via an app-JWT GET /app round trip, permission-preflights it, optionally
-// validates a client secret, and persists it through the same path the manifest
-// callback uses — with the same staging rule (an import while an org PAT is live
-// stages active=false; a fresh setup imports active=true). Org-admin only; works
-// in both local and multi mode.
+// key) via an app-JWT GET /app round trip, permission-preflights it, validates
+// the client secret (required in multi mode, optional in local), and persists it
+// through the same path the manifest callback uses — with the same staging rule
+// (an import while an org PAT is live stages active=false; a fresh setup imports
+// active=true). Org-admin only; works in both local and multi mode.
 //
 // POST /api/orgs/{org_id}/github/app/import
 func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
@@ -279,12 +281,21 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	appIDStr := strings.TrimSpace(req.AppID)
+	clientSecret := strings.TrimSpace(req.ClientSecret)
+	var v httpx.Validation
 	if appIDStr == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "An App ID is required.", Field: "app_id"})
-		return
+		v.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "An App ID is required.", Field: "app_id"})
 	}
 	if strings.TrimSpace(req.PEM) == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "The App's private key (PEM) is required.", Field: "pem"})
+		v.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "The App's private key (PEM) is required.", Field: "pem"})
+	}
+	// Every workspace App in multi mode can run OAuth, so every member of a
+	// setup-complete workspace has a way to link their GitHub account. The
+	// manifest flow always returns a client secret; this is the import's half.
+	if clientSecret == "" && runmode.Current() == runmode.ModeMulti {
+		v.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "The App's client secret is required: it is what lets members sign in with GitHub to link their accounts.", Field: "client_secret"})
+	}
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -387,9 +398,8 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Optional client-secret validation. A bad secret is rejected; an inconclusive
-	// check stores it unvalidated and flags that in the response.
-	clientSecret := strings.TrimSpace(req.ClientSecret)
+	// Client-secret validation, when there is one. A bad secret is rejected; an
+	// inconclusive check stores it unvalidated and flags that in the response.
 	hasClientSecret := clientSecret != ""
 	clientSecretValidated := false
 	if hasClientSecret {

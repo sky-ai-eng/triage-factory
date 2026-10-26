@@ -96,7 +96,7 @@ function connectAs(label: string, login: string) {
   fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
 }
 
-function renderControl(over: Partial<WizardState> = {}) {
+function renderControl(over: Partial<WizardState> = {}, isLocal = true) {
   const patch = vi.fn()
   const reload = vi.fn()
   const state: WizardState = {
@@ -108,7 +108,7 @@ function renderControl(over: Partial<WizardState> = {}) {
   const ctx: StepContext = {
     orgId: 'org-1',
     teamId: 'default',
-    isLocal: true,
+    isLocal,
     state,
     patch,
     advance: () => {},
@@ -1092,5 +1092,80 @@ describe('GitHubAccessControl · an App GitHub no longer accepts', () => {
       'href',
       'https://github.com/apps/acme-bot/installations/new',
     )
+  })
+})
+
+// Multi mode: a workspace's GitHub access is a GitHub App, the deployment's or
+// its own, so no state offers a way to add, replace or switch to a token. A
+// workspace that holds one anyway keeps the switch to an App, its way out.
+describe('GitHubAccessControl · multi mode offers no token', () => {
+  const multi = false
+  const noTokenButton = () => {
+    expect(screen.queryByRole('button', { name: /personal access token/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Replace token…' })).not.toBeInTheDocument()
+  }
+  const liveApp = {
+    githubAppRegistered: true,
+    githubAppStaged: false,
+    githubAppSlug: 'acme-bot',
+    hasGitHubPat: false,
+    githubPatLogin: '',
+  }
+
+  it('offers Connect, register and import, and no token, when nothing is bound', () => {
+    installMocks.status = statusOf({ deployment_app_available: true })
+    renderControl({ hasGitHubPat: false, githubPatLogin: '' }, multi)
+    expect(screen.getByRole('button', { name: 'Connect GitHub…' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Register a GitHub App…' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Connect an existing App…' })).toBeInTheDocument()
+    noTokenButton()
+    expect(screen.queryByText(/personal access token/i)).not.toBeInTheDocument()
+  })
+
+  it('offers register and import, and no token, without a deployment App', () => {
+    installMocks.status = statusOf({ deployment_app_available: false })
+    renderControl({ hasGitHubPat: false, githubPatLogin: '' }, multi)
+    expect(screen.getByRole('button', { name: 'Register a GitHub App…' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Connect an existing App…' })).toBeInTheDocument()
+    noTokenButton()
+    expect(screen.queryByText(/personal access token/i)).not.toBeInTheDocument()
+  })
+
+  it('offers no switch to a token from a live App', () => {
+    installMocks.status = statusOf({
+      installations: [installation({})],
+      deployment_app_available: true,
+    })
+    renderControl(liveApp, multi)
+    expect(
+      screen.getByRole('button', { name: 'Switch to the deployment’s App…' }),
+    ).toBeInTheDocument()
+    noTokenButton()
+  })
+
+  it('offers no switch to a token from an App GitHub no longer accepts', () => {
+    installMocks.status = statusOf({
+      app: {
+        app_id: '123',
+        slug: 'acme-bot',
+        owner_type: 'org',
+        registered_at: '2026-01-02T03:04:05Z',
+        registered_by_display_name: '',
+        active: true,
+        unusable_reason: 'missing',
+        unusable_since: '',
+      },
+      installations: [installation({})],
+    })
+    renderControl(liveApp, multi)
+    expect(screen.getByRole('button', { name: 'Remove this App…' })).toBeInTheDocument()
+    noTokenButton()
+    expect(screen.queryByText(/personal access token/i)).not.toBeInTheDocument()
+  })
+
+  it('keeps the switch to an App, and no replacement, for a workspace holding a token', () => {
+    renderControl({}, multi)
+    expect(screen.getByRole('button', { name: 'Switch to GitHub App…' })).toBeInTheDocument()
+    noTokenButton()
   })
 })
