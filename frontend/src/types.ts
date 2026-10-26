@@ -887,6 +887,11 @@ export interface JiraIdentityStatus {
    *  render the right fields — a Cloud org binds an email + API token, a Data
    *  Center org a single PAT. Empty/absent when no Jira host is configured. */
   deployment?: 'cloud' | 'data_center'
+  /** Why a user who had a connection no longer has one, present only while
+   *  `connected` is false: `refused` when Jira refused the stored grant
+   *  (revoked or expired), `app_removed` when no Atlassian app the workspace
+   *  has can refresh it. Absent for a user who never connected. */
+  disconnected_reason?: 'app_removed' | 'refused'
 }
 
 /** GET /api/orgs/{org}/linear/identity — the Linear sibling of

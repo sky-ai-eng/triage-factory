@@ -143,6 +143,18 @@ func (f *fakeSecrets) PutUserSystem(_ context.Context, orgID, userID, key, value
 	return nil
 }
 
+func (f *fakeSecrets) PutUserSystemIfValue(_ context.Context, orgID, userID, key, old, value, _ string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := f.key(orgID, userID, key)
+	if cur, ok := f.bag[k]; !ok || cur != old {
+		return false, nil
+	}
+	f.bag[k] = value
+	f.puts++
+	return true, nil
+}
+
 func (f *fakeSecrets) DeleteUserSystemIfValue(_ context.Context, orgID, userID, key, value string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -403,10 +415,10 @@ func TestTokenCache_UnattributedTokenTriesEachApp(t *testing.T) {
 	}
 }
 
-// TestTokenCache_UnattributedTokenEveryAppRefusedRemovesTheCredential: when
+// TestTokenCache_UnattributedTokenEveryAppRefusedLeavesARefusedMarker: when
 // every app the org can authenticate as refuses the grant, none of them can
-// refresh it, so it is removed as a refused grant is.
-func TestTokenCache_UnattributedTokenEveryAppRefusedRemovesTheCredential(t *testing.T) {
+// refresh it, so it is replaced with a refused marker as a refused grant is.
+func TestTokenCache_UnattributedTokenEveryAppRefusedLeavesARefusedMarker(t *testing.T) {
 	secrets := newFakeSecrets()
 	seedOAuthEnvelope(t, secrets, "ref-0")
 	endpoint := &fakeTokenEndpoint{answer: func(string, string) (int, string) {
@@ -418,9 +430,7 @@ func TestTokenCache_UnattributedTokenEveryAppRefusedRemovesTheCredential(t *test
 	if !errors.Is(err, jira.ErrJiraUserCredentialRefused) {
 		t.Fatalf("err = %v, want ErrJiraUserCredentialRefused", err)
 	}
-	if raw := storedEnvelope(secrets); raw != "" {
-		t.Errorf("stored credential = %q, want it removed", raw)
-	}
+	assertRefusedMarker(t, secrets)
 	if got := endpoint.clientIDs(); !slices.Equal(got, []string{"org-client", "dep-client"}) {
 		t.Errorf("token requests' client_id = %v, want each app once", got)
 	}
@@ -583,12 +593,24 @@ func storedEnvelope(secrets *fakeSecrets) string {
 	return raw
 }
 
-// TestTokenCache_RefusedGrantRemovesTheCredential: a refresh token Atlassian
-// refuses with invalid_grant is dead, so the credential holding it is removed
-// and the refusal reads as a credential the user has to connect again.
-func TestTokenCache_RefusedGrantRemovesTheCredential(t *testing.T) {
+// assertRefusedMarker checks that the stored credential is a refused marker,
+// carrying nothing of the credential it replaced.
+func assertRefusedMarker(t *testing.T, secrets *fakeSecrets) {
+	t.Helper()
+	got := storedCredential(t, secrets)
+	want := jira.UserCredential{Method: jira.AuthMethodCloudOAuth, Refused: true}
+	if got != want {
+		t.Errorf("stored credential = %+v, want a refused marker %+v", got, want)
+	}
+}
+
+// TestTokenCache_RefusedGrantLeavesARefusedMarker: a refresh token Atlassian
+// refuses with invalid_grant is dead, so the credential holding it is replaced
+// with a refused marker and the refusal reads as a credential the user has to
+// connect again.
+func TestTokenCache_RefusedGrantLeavesARefusedMarker(t *testing.T) {
 	secrets := newFakeSecrets()
-	seedOAuthEnvelope(t, secrets, "ref-0")
+	seedIssuedEnvelope(t, secrets, "ref-0", orgApp.ClientID)
 	endpoint := &fakeTokenEndpoint{answer: func(string, string) (int, string) {
 		return http.StatusBadRequest, `{"error":"invalid_grant","error_description":"Unknown or invalid refresh token."}`
 	}}
@@ -598,11 +620,36 @@ func TestTokenCache_RefusedGrantRemovesTheCredential(t *testing.T) {
 	if !errors.Is(err, jira.ErrJiraUserCredentialRefused) || !errors.Is(err, jira.ErrNoJiraUserCredential) {
 		t.Fatalf("err = %v, want ErrJiraUserCredentialRefused, which is ErrNoJiraUserCredential", err)
 	}
-	if raw := storedEnvelope(secrets); raw != "" {
-		t.Errorf("stored credential = %q, want it removed", raw)
-	}
+	assertRefusedMarker(t, secrets)
 	if got := endpoint.tokens(); len(got) != 1 {
 		t.Errorf("token requests = %v, want one: nothing replaced the refused token, so nothing is retried", got)
+	}
+}
+
+// TestTokenCache_RefusedMarkerAnswersWithoutATokenRequest: a stored refused
+// marker has no token to refresh, so it is answered as the refusal it records
+// without asking Atlassian, and is left as it is.
+func TestTokenCache_RefusedMarkerAnswersWithoutATokenRequest(t *testing.T) {
+	secrets := newFakeSecrets()
+	env, err := jira.MarshalUserCredential(jira.UserCredential{Method: jira.AuthMethodCloudOAuth, Refused: true})
+	if err != nil {
+		t.Fatalf("marshal marker: %v", err)
+	}
+	if err := secrets.PutUserSystem(context.Background(), cOrg, cUser, jira.UserTokenKey(cHost), env, ""); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	endpoint := &fakeTokenEndpoint{}
+	cache := newTokenCache(endpoint.minter(t), orgAppOnly(secrets), secrets)
+
+	_, err = cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
+	if !errors.Is(err, jira.ErrJiraUserCredentialRefused) {
+		t.Fatalf("err = %v, want ErrJiraUserCredentialRefused", err)
+	}
+	if got := endpoint.tokens(); len(got) != 0 {
+		t.Errorf("token requests = %v, want none", got)
+	}
+	if got := storedEnvelope(secrets); got != env {
+		t.Errorf("stored credential = %q, want the marker %q kept", got, env)
 	}
 }
 

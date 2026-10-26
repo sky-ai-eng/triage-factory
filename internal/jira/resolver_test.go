@@ -666,3 +666,29 @@ func TestForUser_CloudOAuthIncomplete(t *testing.T) {
 		t.Errorf("OAuth source called %d times for an unusable envelope, want 0", src.calls)
 	}
 }
+
+// TestForUser_CloudOAuthRefusedMarker: a refused marker answers as the
+// refusal it records, not as a credential that was never connected, so a
+// Jira action tells the user their connection was revoked or expired. It has
+// no token to mint from, so the OAuth source is never asked.
+func TestForUser_CloudOAuthRefusedMarker(t *testing.T) {
+	const base = "https://acme.atlassian.net"
+	env, err := MarshalUserCredential(UserCredential{Method: AuthMethodCloudOAuth, Refused: true})
+	if err != nil {
+		t.Fatalf("MarshalUserCredential: %v", err)
+	}
+	secrets := &fakeSecrets{
+		sys:  map[string]string{keyJiraAuthMethod: string(AuthMethodCloudOAuth)},
+		user: map[string]string{UserTokenKey(base): env},
+	}
+	src := &fakeOAuthSource{tok: UserAccessToken{CloudID: "cloud-9", AccessToken: "acc-tok", App: SourceDeployment}}
+	r := NewResolverWithOAuth(secrets, &fakeOrgs{jiraBase: base}, src)
+
+	_, err = r.ForUser(context.Background(), testOrgID, testUserID)
+	if !errors.Is(err, ErrJiraUserCredentialRefused) || !errors.Is(err, ErrNoJiraUserCredential) {
+		t.Fatalf("ForUser err = %v, want ErrJiraUserCredentialRefused, which is ErrNoJiraUserCredential", err)
+	}
+	if src.calls != 0 {
+		t.Errorf("OAuth source called %d times for a refused marker, want 0", src.calls)
+	}
+}
