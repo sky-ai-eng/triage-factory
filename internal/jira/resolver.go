@@ -30,9 +30,10 @@ var (
 	// ErrJiraUserCredentialRefused is ErrNoJiraUserCredential for a stored
 	// credential Jira refused outright: Atlassian answered a Cloud OAuth
 	// refresh with invalid_grant, so the user revoked the grant or it
-	// expired, and the stored credential was removed. A caller that asks only
-	// whether a usable credential exists gets the answer it already handles;
-	// one that can say why the user has to connect again tells them so.
+	// expired, and the stored credential was replaced with a refused marker
+	// (UserCredential.Refused). A caller that asks only whether a usable
+	// credential exists gets the answer it already handles; one that can say
+	// why the user has to connect again tells them so.
 	ErrJiraUserCredentialRefused = fmt.Errorf("%w: jira refused the stored credential", ErrNoJiraUserCredential)
 
 	// ErrJiraUserCredentialAppRemoved is ErrNoJiraUserCredential for a Cloud
@@ -123,6 +124,13 @@ type UserCredential struct {
 	// now. Empty on a credential stored before the field existed; the first
 	// refresh that succeeds records it.
 	ClientID string `json:"client_id,omitempty"`
+	// Refused marks the envelope as a refused marker: what a refresh leaves
+	// in place of a Cloud OAuth credential whose refresh token Atlassian
+	// refused with invalid_grant. A marker is {Method: AuthMethodCloudOAuth,
+	// Refused: true} with every other field empty, so it holds no secret. It
+	// is kept so the identity status can tell the user why they have to
+	// connect again; connecting again or binding a token writes over it.
+	Refused bool `json:"refused,omitempty"`
 }
 
 // MarshalUserCredential renders a UserCredential to the JSON envelope persisted
@@ -450,6 +458,12 @@ func (r *resolver) ForUser(ctx context.Context, orgID, userID string) (*Client, 
 		}
 		return NewClient(DataCenterPAT(host, cred.Token)).WithOrg(orgID), nil
 	case AuthMethodCloudOAuth:
+		// A refused marker is unusable too, but it records why: answering it
+		// as a plain missing credential would tell the user to connect their
+		// Jira without saying the connection they had was revoked or expired.
+		if cred.Refused {
+			return nil, fmt.Errorf("%w: org=%s user=%s host=%s", ErrJiraUserCredentialRefused, orgID, userID, host)
+		}
 		// Same usability gate as the static schemes: a Cloud OAuth credential
 		// left over after a Cloud→DC cutover (or one missing its cloud_id /
 		// refresh token) is an absent-credential boundary, fixed by re-binding.

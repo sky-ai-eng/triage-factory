@@ -398,6 +398,9 @@ func TestJiraIdentityStatus_StaleCrossSchemeCredential_NotConnected(t *testing.T
 	if out.Connected {
 		t.Errorf("connected=true for a DC PAT on a Cloud org: %+v (want false — stale cross-scheme cred)", out)
 	}
+	if out.DisconnectedReason != "" {
+		t.Errorf("disconnected_reason = %q, want none for a credential from the other deployment", out.DisconnectedReason)
+	}
 }
 
 // TestJiraIdentityStatus_ConfiguredHostNoCredential scopes the status reader's
@@ -437,6 +440,10 @@ func TestJiraIdentityStatus_ConfiguredHostNoCredential(t *testing.T) {
 	}
 	if out.ConnectAvailable {
 		t.Errorf("connect_available=true, want false: %+v", out)
+	}
+	// Never connected is not a lost connection, so there is nothing to explain.
+	if out.DisconnectedReason != "" {
+		t.Errorf("disconnected_reason = %q, want none for a user who never connected", out.DisconnectedReason)
 	}
 }
 

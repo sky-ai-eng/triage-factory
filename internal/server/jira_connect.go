@@ -85,12 +85,27 @@ type jiraIdentityStatusResponse struct {
 	// fields — a Cloud org pastes an email + API token, a Data Center org a
 	// single PAT. Empty when no Jira host is configured.
 	Deployment string `json:"deployment,omitempty"`
+	// DisconnectedReason says why a user who had a connection no longer has
+	// one, so the Connect page can tell them instead of showing the page a
+	// new member sees: "refused" when Jira refused the stored grant (revoked
+	// or expired), "app_removed" when no Atlassian app the org has can
+	// refresh it. Set only while Connected is false, and absent when there is
+	// no such reason: never connected, or a credential that is unreadable,
+	// incomplete or for the other deployment.
+	DisconnectedReason string `json:"disconnected_reason,omitempty"`
 }
+
+// The values of jiraIdentityStatusResponse.DisconnectedReason.
+const (
+	jiraDisconnectedRefused    = "refused"
+	jiraDisconnectedAppRemoved = "app_removed"
+)
 
 // handleJiraIdentityStatus reports whether the caller has a stored Jira access
 // credential for the active org's Jira host — the gate's "is this user set up
 // for Jira" check. Read-only; any org member. An absent credential is
-// connected=false (the durable supported state). Mirrors
+// connected=false (the durable supported state); a connection the user lost
+// without doing anything is connected=false with disconnected_reason. Mirrors
 // handleGitHubIdentityStatus, but `connected` keys on credential presence
 // rather than an identity row.
 //
@@ -102,13 +117,15 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 	}
 
 	var (
-		connected  bool
-		account    string
-		host       string
-		deployment string
-		// oauthClientID is the app that issued a connected Cloud OAuth
-		// credential, empty for any other credential or one that does not
+		connected          bool
+		account            string
+		host               string
+		deployment         string
+		disconnectedReason string
+		// cloudOAuth is set for a connected Cloud OAuth credential, and
+		// oauthClientID is the app that issued it, empty when it does not
 		// record its app.
+		cloudOAuth    bool
 		oauthClientID string
 	)
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -163,11 +180,18 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 			jiraIdentityLog.Warn("stored credential unparsable, reporting not-connected", "user", userID, "org", orgID, "host", jiraHost, "error", perr)
 			return nil
 		}
+		// Checked before the deployment, as ForUser does, so the status says
+		// what a Jira action would answer.
+		if cred.Refused {
+			disconnectedReason = jiraDisconnectedRefused
+			return nil
+		}
 		connected = cred.UsableFor(deploymentEnum)
 		if !connected {
 			return nil
 		}
 		if cred.Method == jira.AuthMethodCloudOAuth {
+			cloudOAuth = true
 			oauthClientID = cred.ClientID
 		}
 
@@ -193,22 +217,32 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 	// A Cloud OAuth refresh token is accepted only from the app that issued
 	// it: once the org can no longer authenticate as that app, the credential
 	// cannot be refreshed and the user has to connect again. A credential that
-	// does not record its app reports as usable; its next refresh tries each
-	// app the org has. The resolver reads outside the transaction above,
-	// because local mode's database has a single connection.
-	if connected && oauthClientID != "" {
-		_, _, err := s.jiraOAuthApps.ResolveClient(r.Context(), orgID, oauthClientID)
-		switch {
-		case errors.Is(err, jira.ErrNoAtlassianOAuthApp):
-			// TODO(TFAC-1203): say why with disconnected_reason (app_removed
-			// here, refused for a refused marker) so Connect Jira can show it;
-			// today the user gets the page a new member sees.
-			connected, account = false, ""
-		case err != nil:
-			// Whether the credential still works is unknown, so the read
-			// fails rather than report either answer.
-			internalError(w, "jira-identity", err)
-			return
+	// does not record its app reports as usable while the org has any app,
+	// since its next refresh tries each one; with none at all, no refresh can
+	// succeed. Both are derived on every read rather than stored, so restoring
+	// the app brings the connection back. The resolver reads outside the
+	// transaction above, because local mode's database has a single
+	// connection. A resolver failure fails the read: whether the credential
+	// still works is unknown, so it reports neither answer.
+	if connected && cloudOAuth {
+		var removed bool
+		if oauthClientID != "" {
+			_, _, err := s.jiraOAuthApps.ResolveClient(r.Context(), orgID, oauthClientID)
+			removed = errors.Is(err, jira.ErrNoAtlassianOAuthApp)
+			if err != nil && !removed {
+				internalError(w, "jira-identity", err)
+				return
+			}
+		} else {
+			apps, err := s.jiraOAuthApps.Candidates(r.Context(), orgID)
+			if err != nil {
+				internalError(w, "jira-identity", err)
+				return
+			}
+			removed = len(apps) == 0
+		}
+		if removed {
+			connected, account, disconnectedReason = false, "", jiraDisconnectedAppRemoved
 		}
 	}
 
@@ -220,11 +254,12 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 	// handleJiraConnectCallback) — this endpoint just advertises that the
 	// app credential it needs is in place.
 	writeJSON(w, http.StatusOK, jiraIdentityStatusResponse{
-		Connected:        connected,
-		Account:          account,
-		Host:             host,
-		ConnectAvailable: s.connectAvailableForOrg(r, orgID),
-		Deployment:       deployment,
+		Connected:          connected,
+		Account:            account,
+		Host:               host,
+		ConnectAvailable:   s.connectAvailableForOrg(r, orgID),
+		Deployment:         deployment,
+		DisconnectedReason: disconnectedReason,
 	})
 }
 

@@ -66,6 +66,25 @@ function jiraErrorBanner(code: string | null, host: string): { text: string } | 
   }
 }
 
+/** disconnectedBanner explains a connection the user lost without doing
+ *  anything (the status's disconnected_reason), in the same words a Jira
+ *  action's 409 uses, so the user reads one explanation whichever they hit
+ *  first. An unrecognized reason gets no banner. */
+function disconnectedBanner(reason: string | undefined): { text: string } | null {
+  switch (reason) {
+    case 'app_removed':
+      return {
+        text: 'The Jira app your connection was made through was removed from this workspace. Connect your Jira again to act on tickets.',
+      }
+    case 'refused':
+      return {
+        text: 'Jira no longer accepts your connection: it was revoked or expired. Connect your Jira again to act on tickets.',
+      }
+    default:
+      return null
+  }
+}
+
 function Card({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-h-screen bg-ground flex items-center justify-center p-4">
@@ -131,7 +150,7 @@ export default function ConnectJira() {
     )
   }
 
-  const { connected, host, connect_available, deployment } = state.data
+  const { connected, host, connect_available, deployment, disconnected_reason } = state.data
   // The paste fields follow the org's deployment: Cloud binds an email + API
   // token, Data Center a single PAT.
   const cloud = deployment === 'cloud'
@@ -153,7 +172,9 @@ export default function ConnectJira() {
       encodeURIComponent(returnTo)
   }
 
-  const banner = jiraErrorBanner(errorCode, host)
+  // A callback error describes the attempt the user just made, so it wins
+  // over the reason an earlier connection stopped working.
+  const banner = jiraErrorBanner(errorCode, host) ?? disconnectedBanner(disconnected_reason)
   const submitReady = cloud ? email.trim() !== '' && apiToken.trim() !== '' : pat.trim() !== ''
   const submit = async () => {
     if (!submitReady || capturing) return
@@ -190,7 +211,10 @@ export default function ConnectJira() {
       </div>
 
       {banner && (
-        <div className="rounded-xl border border-alarm/30 bg-alarm/[0.06] px-4 py-2.5 text-ui leading-relaxed text-alarm">
+        <div
+          role="alert"
+          className="rounded-xl border border-alarm/30 bg-alarm/[0.06] px-4 py-2.5 text-ui leading-relaxed text-alarm"
+        >
           {banner.text}
         </div>
       )}

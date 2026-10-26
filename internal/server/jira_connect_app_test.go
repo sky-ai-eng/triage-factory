@@ -96,16 +96,28 @@ func storedJiraUserCredential(t *testing.T, s *Server) jira.UserCredential {
 
 func seedJiraOAuthCredential(t *testing.T, s *Server, clientID string) {
 	t.Helper()
-	env, err := jira.MarshalUserCredential(jira.UserCredential{
+	seedJiraUserCredential(t, s, jiraOAuthSite, jira.UserCredential{
 		Method:       jira.AuthMethodCloudOAuth,
 		CloudID:      "cloud-1",
 		RefreshToken: "ref-0",
 		ClientID:     clientID,
 	})
+}
+
+// seedJiraRefusedMarker stores what a refresh leaves once Jira refused the
+// user's grant.
+func seedJiraRefusedMarker(t *testing.T, s *Server, host string) {
+	t.Helper()
+	seedJiraUserCredential(t, s, host, jira.UserCredential{Method: jira.AuthMethodCloudOAuth, Refused: true})
+}
+
+func seedJiraUserCredential(t *testing.T, s *Server, host string, cred jira.UserCredential) {
+	t.Helper()
+	env, err := jira.MarshalUserCredential(cred)
 	if err != nil {
 		t.Fatalf("marshal credential: %v", err)
 	}
-	if err := s.secrets.PutUser(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, jiraTokenKey(jiraOAuthSite), env, ""); err != nil {
+	if err := s.secrets.PutUser(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, jiraTokenKey(host), env, ""); err != nil {
 		t.Fatalf("seed credential: %v", err)
 	}
 }
@@ -164,8 +176,8 @@ func TestJiraConnectCallback_StoresTheIssuingApp(t *testing.T) {
 
 // TestJiraIdentityStatus_IssuingAppRemoved_NotConnected: a Cloud OAuth
 // credential whose app the org can no longer authenticate as cannot be
-// refreshed, so it reports not connected and the user gets the Connect button.
-// Configuring the same app again brings it back.
+// refreshed, so it reports not connected, says the app was removed, and the
+// user gets the Connect button. Configuring the same app again brings it back.
 func TestJiraIdentityStatus_IssuingAppRemoved_NotConnected(t *testing.T) {
 	s := newJiraOAuthOrg(t)
 	saveJiraApp(t, s, "atl-client")
@@ -174,8 +186,8 @@ func TestJiraIdentityStatus_IssuingAppRemoved_NotConnected(t *testing.T) {
 		t.Fatalf("seed identity: %v", err)
 	}
 
-	if got := jiraIdentityStatus(t, s); !got.Connected || got.Account != "OAuth User" {
-		t.Fatalf("status with the issuing app configured = %+v, want connected as OAuth User", got)
+	if got := jiraIdentityStatus(t, s); !got.Connected || got.Account != "OAuth User" || got.DisconnectedReason != "" {
+		t.Fatalf("status with the issuing app configured = %+v, want connected as OAuth User with no reason", got)
 	}
 
 	saveJiraApp(t, s, "other-client")
@@ -183,24 +195,62 @@ func TestJiraIdentityStatus_IssuingAppRemoved_NotConnected(t *testing.T) {
 	if got.Connected || got.Account != "" {
 		t.Errorf("status after the app was replaced = %+v, want not connected and no account", got)
 	}
+	if got.DisconnectedReason != jiraDisconnectedAppRemoved {
+		t.Errorf("disconnected_reason after the app was replaced = %q, want %q", got.DisconnectedReason, jiraDisconnectedAppRemoved)
+	}
 	if !got.ConnectAvailable {
 		t.Errorf("status after the app was replaced = %+v, want Connect available through the new app", got)
 	}
 
 	saveJiraApp(t, s, "atl-client")
-	if got := jiraIdentityStatus(t, s); !got.Connected {
-		t.Errorf("status after the app was configured again = %+v, want connected", got)
+	if got := jiraIdentityStatus(t, s); !got.Connected || got.DisconnectedReason != "" {
+		t.Errorf("status after the app was configured again = %+v, want connected with no reason", got)
 	}
 }
 
-// TestJiraIdentityStatus_UnattributedOAuthCredential_Connected: a credential
-// that does not record its app reports as it always has, even with no app
-// configured; its next refresh is what finds out.
-func TestJiraIdentityStatus_UnattributedOAuthCredential_Connected(t *testing.T) {
+// TestJiraIdentityStatus_UnattributedOAuthCredential: a credential that does
+// not record its app reports connected while the org has any app, since its
+// next refresh tries each one. With no app configured at all, no refresh can
+// succeed, so it reads as the app having been removed.
+func TestJiraIdentityStatus_UnattributedOAuthCredential(t *testing.T) {
 	s := newJiraOAuthOrg(t)
 	seedJiraOAuthCredential(t, s, "")
 
-	if got := jiraIdentityStatus(t, s); !got.Connected {
-		t.Errorf("status = %+v, want connected", got)
+	got := jiraIdentityStatus(t, s)
+	if got.Connected || got.DisconnectedReason != jiraDisconnectedAppRemoved {
+		t.Errorf("status with no app configured = %+v, want not connected, reason %q", got, jiraDisconnectedAppRemoved)
+	}
+
+	saveJiraApp(t, s, "atl-client")
+	if got := jiraIdentityStatus(t, s); !got.Connected || got.DisconnectedReason != "" {
+		t.Errorf("status with an app configured = %+v, want connected with no reason", got)
+	}
+}
+
+// TestJiraIdentityStatus_RefusedMarker: once Jira refused the user's grant, the
+// status says so, whatever apps the org has, and binding an API token over the
+// marker connects the user again.
+func TestJiraIdentityStatus_RefusedMarker(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	jiraStub := jiraCloudMyselfStub(t, `{"accountId":"acc-cloud","displayName":"Cloud User"}`, nil)
+	seedLocalOrgJiraHost(t, s, jiraStub.URL)
+	seedLocalOrgJiraAuthMethod(t, s, string(jira.AuthMethodCloudOAuth))
+	saveJiraApp(t, s, "atl-client")
+	seedJiraRefusedMarker(t, s, jiraStub.URL)
+
+	got := jiraIdentityStatus(t, s)
+	if got.Connected || got.Account != "" || got.DisconnectedReason != jiraDisconnectedRefused {
+		t.Fatalf("status over a refused marker = %+v, want not connected, reason %q", got, jiraDisconnectedRefused)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
+		map[string]any{"email": "me@acme.com", "token": "cloud-tok"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bind over the marker: %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := jiraIdentityStatus(t, s); !got.Connected || got.Account != "Cloud User" || got.DisconnectedReason != "" {
+		t.Errorf("status after binding over the marker = %+v, want connected as Cloud User with no reason", got)
 	}
 }
