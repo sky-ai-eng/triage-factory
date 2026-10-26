@@ -123,7 +123,7 @@ export function ShellCard() {
               immediately and never guesses at what is about to fill it.
             </p>
             <p>
-              <kbd>⌘\</kbd> pins the rail and the preference survives a reload. <kbd>⌘K</kbd> opens
+              <kbd>⌘B</kbd> pins the rail and the preference survives a reload. <kbd>⌘K</kbd> opens
               the palette, which searches the same route table the rail is generated from, so it can
               never offer a page the rail is hiding. <kbd>Esc</kbd> closes whatever is open,
               innermost first.
