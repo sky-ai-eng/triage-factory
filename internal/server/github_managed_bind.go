@@ -565,9 +565,9 @@ func writeBindRefusalJSON(w http.ResponseWriter, refusal bindRefusal) {
 // callback, and the reason that callback is not simply mounted through s.api.
 //
 // Three callers arrive at this one URL. A member linking their GitHub identity
-// through the deployment App (Connect) carries that flow's state cookie, and a
-// state on the query that equals the cookie's nonce. Someone finishing a bind
-// ceremony this deployment started carries the bind cookie. Both go on to
+// through the deployment App (Connect) carries that flow's state cookie and a
+// state on the query. Someone finishing a bind ceremony this deployment
+// started carries the bind cookie. Both go on to
 // WRITE — an identity, a credential — so both must be authenticated, and
 // withSession's 401 is exactly right for them. Someone who installed the
 // deployment App straight from its public page on GitHub carries neither cookie
@@ -578,9 +578,11 @@ func writeBindRefusalJSON(w http.ResponseWriter, refusal bindRefusal) {
 // what happened.
 //
 // So the cookies decide which door, before any session lookup. Connect's
-// cookie is asked first, and only a matching state takes that door: the bind's
-// install leg carries no state, and its authorize leg carries the bind's own,
-// so a bind in flight in the same browser still reaches the bind on both legs.
+// cookie is asked first, and any state that is not the bind's takes that door
+// (deploymentAppConnectReturn): the bind's install leg carries no state, and
+// its authorize leg carries the bind's own, so a bind in flight in the same
+// browser still reaches the bind on both legs, and a Connect return that
+// cannot complete is refused as a Connect without spending the bind's record.
 // The pre-auth branch reads nothing, writes nothing, and resolves no identity —
 // it renders one fixed page — which is also why it is not IP-rate-limited:
 // there is no work behind it to flood, and a 429 on a shared NAT would break
@@ -599,7 +601,7 @@ func (s *Server) managedBindCallback() http.Handler {
 			return
 		}
 
-		if cs := s.deploymentAppConnectState(r); cs != nil {
+		if cs := s.deploymentAppConnectReturn(r); cs != nil {
 			s.withSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				s.completeDeploymentAppConnect(w, r, cs)
 			})).ServeHTTP(w, r)

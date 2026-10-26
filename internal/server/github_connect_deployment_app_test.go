@@ -342,9 +342,8 @@ func TestDeploymentAppConnect_Refusals(t *testing.T) {
 		rig := newConnectRig(t, newFakeGitHub())
 		cookie, _ := rig.connectStarted(t, rig.memberSID, rig.returnTo())
 		out := rig.serveManagedCallback(t, rig.memberSID, connectQuery("not-the-cookies-state"), cookie)
-		// Not this Connect's response, so the front door leaves it to the bind,
-		// which has no ceremony behind it here.
-		assertOutcome(t, out, "unbound")
+		rig.assertGateError(t, out, "state")
+		assertConnectCookieKept(t, out)
 		rig.assertNoIdentity(t, rig.member)
 		if rig.gh.served("/login/oauth/access_token") {
 			t.Error("a mismatched state reached the code exchange")
@@ -420,6 +419,77 @@ func TestDeploymentAppConnect_Refusals(t *testing.T) {
 		rig.assertGateError(t, rig.serveManagedCallback(t, rig.memberSID, connectQuery(state), cookie), "no_app")
 		rig.assertNoIdentity(t, rig.member)
 	})
+}
+
+// assertConnectCookieKept asserts a response left the Connect state cookie as
+// it was: a stale return must not end the Connect whose cookie it is.
+func assertConnectCookieKept(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	for _, c := range (&http.Response{Header: rec.Header()}).Cookies() {
+		if c.Name == connectStateCookieName {
+			t.Errorf("response set the Connect cookie (%q, max-age %d); it belongs to a Connect still in flight", c.Value, c.MaxAge)
+		}
+	}
+}
+
+// TestDeploymentAppConnect_TwoTabs: every Connect through the deployment App
+// shares one cookie, so a second start replaces the first's. The first tab's
+// return is refused as an expired attempt and leaves the cookie alone, and the
+// second tab's return then completes.
+func TestDeploymentAppConnect_TwoTabs(t *testing.T) {
+	rig := newConnectRig(t, newFakeGitHub())
+	_, stateA := rig.connectStarted(t, rig.memberSID, rig.returnTo())
+	cookieB, stateB := rig.connectStarted(t, rig.memberSID, rig.returnTo())
+
+	outA := rig.serveManagedCallback(t, rig.memberSID, connectQuery(stateA), cookieB)
+	rig.assertGateError(t, outA, "state")
+	assertConnectCookieKept(t, outA)
+	rig.assertNoIdentity(t, rig.member)
+	if rig.gh.served("/login/oauth/access_token") {
+		t.Error("the replaced Connect's code was exchanged")
+	}
+
+	outB := rig.serveManagedCallback(t, rig.memberSID, connectQuery(stateB), cookieB)
+	if outB.Code != http.StatusFound || outB.Header().Get("Location") != rig.returnTo() {
+		t.Fatalf("second tab status=%d location=%q body=%s, want 302 to %q",
+			outB.Code, outB.Header().Get("Location"), outB.Body.String(), rig.returnTo())
+	}
+	if _, source, ok := rig.identityOnDeploymentGitHub(t, rig.member); !ok || source != "connect_oauth" {
+		t.Errorf("identity source = %q (present %v) after the second tab, want connect_oauth", source, ok)
+	}
+}
+
+// TestDeploymentAppConnect_StaleReturnLeavesABindAlone: a Connect return that
+// cannot complete, in a browser that also holds a bind ceremony, is refused as
+// a Connect. It neither spends the bind's record nor clears its cookie, and the
+// bind then completes.
+func TestDeploymentAppConnect_StaleReturnLeavesABindAlone(t *testing.T) {
+	gh := newFakeGitHub()
+	rig := newBindRig(t, gh)
+	_, staleState := rig.connectStarted(t, rig.sid, "/orgs/"+rig.orgID.String()+"/settings")
+	connectCookie, _ := rig.connectStarted(t, rig.sid, "/orgs/"+rig.orgID.String()+"/settings")
+	bindCookie, bindState := rig.namedCeremony(t, gh.accountLogin)
+
+	stale := rig.serveManagedCallback(t, rig.sid, connectQuery(staleState), connectCookie, bindCookie)
+	rig.assertGateError(t, stale, "state")
+	assertConnectCookieKept(t, stale)
+	if rig.recordConsumed(t, bindCookie) {
+		t.Fatal("a stale Connect return spent the bind ceremony's record")
+	}
+	for _, c := range (&http.Response{Header: stale.Header()}).Cookies() {
+		if c.Name == managedBindCookieName {
+			t.Errorf("a stale Connect return touched the bind cookie: %v", c)
+		}
+	}
+
+	bound := rig.serveManagedCallback(t, rig.sid, namedCallbackQuery(bindState), connectCookie, bindCookie)
+	if bound.Code != http.StatusFound || bound.Header().Get("X-TF-Bind-Outcome") != "" {
+		t.Fatalf("bind status=%d outcome=%q body=%s, want a completed bind",
+			bound.Code, bound.Header().Get("X-TF-Bind-Outcome"), bound.Body.String())
+	}
+	if n := rig.installationCount(t); n != 1 {
+		t.Errorf("installations = %d, want 1", n)
+	}
 }
 
 // TestDeploymentAppConnect_EmailsPermission: a deployment App without the

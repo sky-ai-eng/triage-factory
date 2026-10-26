@@ -399,7 +399,17 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 // completeDeploymentAppConnect completes a Connect that ran through the
 // deployment App. It arrives at ManagedBindCallbackPath, the one callback that
 // App registers, and the front door (managedBindCallback) hands it here because
-// the query's state is the nonce in this flow's state cookie, cs.
+// the browser holds this flow's state cookie, cs, and the query's state is not
+// the bind ceremony's (deploymentAppConnectReturn).
+//
+// That state need not be cs's nonce. Every Connect through the deployment App
+// shares one cookie name and path, so a Connect started in a second tab
+// replaces the first's cookie, and the first tab's return then carries a state
+// the cookie no longer holds. That return is refused as an expired attempt and
+// leaves the cookie alone, because the cookie is the later Connect's, still in
+// flight. Nothing is lost by it: every Connect here targets the App's one
+// GitHub, and the identity row is keyed by user and host, so the later Connect
+// links the same row.
 //
 // The org comes from the cookie rather than the path, so this re-establishes
 // what a path-scoped route gets from RequireOrgMember: a session rather than an
@@ -409,12 +419,11 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 // of the bind's admin re-check.
 func (s *Server) completeDeploymentAppConnect(w http.ResponseWriter, r *http.Request, cs *connectState) {
 	ctx := r.Context()
-	// Cleared before anything else, so a stale cookie can never be replayed.
-	http.SetCookie(w, s.connectStateCookie(r, ManagedBindCallbackPath, "", -1))
-
 	// A session, specifically, for the reason completeManagedBindCallback
 	// gives: this path names no org for a token's sealed org to be checked
-	// against.
+	// against. Checked before the cookie is cleared, as the bind checks it
+	// before spending its record: a stray header must not end the browser's
+	// Connect.
 	claims := httpx.ClaimsFrom(ctx)
 	if SessionFrom(ctx) == nil || claims == nil || claims.Subject == "" {
 		s.renderBindOutcome(w, "", refuseSessionRequired)
@@ -425,6 +434,13 @@ func (s *Server) completeDeploymentAppConnect(w http.ResponseWriter, r *http.Req
 	// own workspace, never the cookie's: the caller has proven no relationship
 	// to it.
 	fallbackOrg := httpx.OrgIDFrom(ctx)
+	if r.URL.Query().Get("state") != cs.CSRF {
+		s.redirectConnect(w, r, fallbackOrg, "", "state")
+		return
+	}
+	// This return is the cookie's own, so it spends the cookie: cleared before
+	// anything else is decided, so it can never be replayed.
+	http.SetCookie(w, s.connectStateCookie(r, ManagedBindCallbackPath, "", -1))
 	if cs.UserID != userID {
 		s.redirectConnect(w, r, fallbackOrg, "", "state")
 		return
@@ -816,18 +832,32 @@ func (s *Server) connectStateCookie(r *http.Request, path, value string, maxAge 
 	}
 }
 
-// deploymentAppConnectState returns the Connect state a request to
-// ManagedBindCallbackPath belongs to: the state cookie the deployment App's
-// Connect start set, carrying the CSRF nonce the query's state echoes. nil
-// when there is none, which leaves the request to the bind ceremony — whose
-// install leg carries no state, and whose authorize leg carries its own.
-func (s *Server) deploymentAppConnectState(r *http.Request) *connectState {
+// deploymentAppConnectReturn reports whether a request to
+// ManagedBindCallbackPath is a Connect's return, and returns the state cookie
+// the deployment App's Connect start set when it is: the browser holds that
+// cookie, and the query carries a state that is not the bind ceremony's. The
+// bind's install leg carries no state, and its authorize leg carries the hash
+// of its cookie's nonce (hashBindNonce), which is computed here from the cookie
+// alone, so the choice reads nothing. nil leaves the request to the bind.
+//
+// Whether the state is this cookie's own nonce is not decided here: a return
+// from a Connect whose cookie a later one replaced is still a Connect's, and
+// completeDeploymentAppConnect refuses it as one rather than letting it reach a
+// bind ceremony it would spend.
+func (s *Server) deploymentAppConnectReturn(r *http.Request) *connectState {
+	state := r.URL.Query().Get("state")
+	if state == "" {
+		return nil
+	}
+	if bind, err := r.Cookie(managedBindCookieName); err == nil && bind.Value != "" && state == hashBindNonce(bind.Value) {
+		return nil
+	}
 	cookie, err := r.Cookie(connectStateCookieName)
 	if err != nil || cookie.Value == "" {
 		return nil
 	}
 	cs, err := parseConnectState(cookie.Value, s.deployCfg.hmacKey)
-	if err != nil || cs.CSRF == "" || r.URL.Query().Get("state") != cs.CSRF {
+	if err != nil || cs.CSRF == "" {
 		return nil
 	}
 	return cs
