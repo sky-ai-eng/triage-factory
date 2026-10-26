@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
@@ -223,9 +224,19 @@ func (q *QueueObserver) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// CheckVerify is the check an org admin runs with Verify: is the signer's key
-// on its account, and does the commit that broke it verify now.
-const CheckVerify = "verify"
+// The checks tf_commit_signer_checks_total counts a result under.
+const (
+	// CheckVerify is the check an org admin runs with Verify: is the
+	// signer's key on its account, and does the commit that broke it verify
+	// now.
+	CheckVerify = "verify"
+	// CheckPeriodic is the poll cycle's check of the signer's key on its
+	// account.
+	CheckPeriodic = "periodic"
+	// CheckPostPush is the poll cycle's read of a pushed commit's
+	// verification.
+	CheckPostPush = "post_push"
+)
 
 // The check results that are not a verification reason GitHub gave.
 const (
@@ -240,12 +251,22 @@ const (
 
 // checkResults are the verification reasons a check result keeps as they are.
 var checkResults = map[string]bool{
-	domain.CommitVerificationValid: true,
-	"unknown_key":                  true,
-	"no_user":                      true,
-	"unverified_email":             true,
-	CheckResultKeyMissing:          true,
-	CheckResultError:               true,
+	domain.CommitVerificationValid:      true,
+	domain.CommitVerificationUnknownKey: true,
+	"no_user":                           true,
+	"unverified_email":                  true,
+	CheckResultKeyMissing:               true,
+	CheckResultError:                    true,
+}
+
+// resultLabel is result as a check result's label value: other for a reason
+// outside the ones the metrics name, so a reason GitHub adds cannot mint
+// series.
+func resultLabel(result string) string {
+	if !checkResults[result] {
+		return checkResultOther
+	}
+	return result
 }
 
 // checkStats owns the health-check counter. Package-level because a metric
@@ -276,17 +297,130 @@ func newStats(mp metric.MeterProvider) *stats {
 
 // CountCheck counts one run of check that ended in result: GitHub's
 // verification reason, CheckResultKeyMissing or CheckResultError. A reason
-// outside the ones the metric names is counted as other.
+// outside the ones the metric names is counted as other. The periodic check
+// counts valid for a key it found.
 func CountCheck(ctx context.Context, check, result string) {
 	s := checkStats.Load()
 	if s == nil || s.checks == nil {
 		return
 	}
-	if !checkResults[result] {
-		result = checkResultOther
-	}
 	s.checks.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("check", check), attribute.String("result", result)))
+		attribute.String("check", check), attribute.String("result", resultLabel(result))))
+}
+
+// HealthSource is the read the signer gauges sample.
+// db.OrgCommitSignerStore satisfies it.
+type HealthSource interface {
+	ListHealthSystem(ctx context.Context) ([]db.SignerHealth, error)
+}
+
+// signerStatuses are the statuses tf_commit_signers reports, each on every
+// sample, so a status no signer holds reads as zero rather than as no series.
+var signerStatuses = []domain.CommitSignerStatus{domain.CommitSignerPending, domain.CommitSignerActive, domain.CommitSignerBroken}
+
+// SignerGauges samples every org signer's status on a ticker and reports it at
+// scrape time as tf_commit_signers{status}, the count of signers in each
+// status, and tf_commit_signer_broken{org_id, reason}, 1 for each broken
+// signer with the reason it broke for.
+//
+// It runs on the background brain, one process at a time, beside the checks
+// that move the statuses, so each org's signer is reported once.
+type SignerGauges struct {
+	src HealthSource
+
+	mu      sync.Mutex
+	health  []db.SignerHealth
+	sampled bool
+	reg     metric.Registration
+}
+
+// NewSignerGauges creates the gauges against a provider and registers the
+// callback that reports them. A provider that cannot build an instrument
+// leaves them unregistered, and the ticks still run.
+func NewSignerGauges(provider metric.MeterProvider, src HealthSource) *SignerGauges {
+	g := &SignerGauges{src: src}
+	m := provider.Meter(meterName)
+	signers, err := m.Int64ObservableGauge("commit_signers",
+		metric.WithDescription("Org commit signers by status: pending, active or broken."))
+	if err != nil {
+		signerLog.Error("commit signer gauge setup failed", "instrument", "commit_signers", "error", err)
+		return g
+	}
+	broken, err := m.Int64ObservableGauge("commit_signer.broken",
+		metric.WithDescription("1 for each broken org commit signer, with the reason it broke for."))
+	if err != nil {
+		signerLog.Error("commit signer gauge setup failed", "instrument", "commit_signer.broken", "error", err)
+		return g
+	}
+	reg, err := m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		// Nothing before the first successful sample: zero signers this
+		// process has not counted would read as an org with none.
+		if !g.sampled {
+			return nil
+		}
+		counts := map[domain.CommitSignerStatus]int64{}
+		for _, h := range g.health {
+			counts[h.Status]++
+			if h.Status == domain.CommitSignerBroken {
+				o.ObserveInt64(broken, 1, metric.WithAttributes(telemetry.OrgID(h.OrgID), telemetry.Reason(resultLabel(h.Reason))))
+			}
+		}
+		for _, status := range signerStatuses {
+			o.ObserveInt64(signers, counts[status], metric.WithAttributes(attribute.String("status", string(status))))
+		}
+		return nil
+	}, signers, broken)
+	if err != nil {
+		signerLog.Error("commit signer gauge callback registration failed", "error", err)
+		return g
+	}
+	g.reg = reg
+	return g
+}
+
+// Tick samples once. A failed read keeps the previous sample.
+func (g *SignerGauges) Tick(ctx context.Context) {
+	health, err := g.src.ListHealthSystem(ctx)
+	if err != nil {
+		signerLog.Error("commit signer status read failed; keeping the previous values", "error", err)
+		return
+	}
+	g.mu.Lock()
+	g.health, g.sampled = health, true
+	g.mu.Unlock()
+}
+
+// Close unregisters the gauges, so gauges the brain stopped on demotion stop
+// reporting. Safe to call more than once.
+func (g *SignerGauges) Close() {
+	g.mu.Lock()
+	reg := g.reg
+	g.reg = nil
+	g.mu.Unlock()
+	if reg != nil {
+		if err := reg.Unregister(); err != nil {
+			signerLog.Error("commit signer gauge callback unregister failed", "error", err)
+		}
+	}
+}
+
+// Run samples now and then on every tick until ctx is cancelled, then
+// unregisters the gauges.
+func (g *SignerGauges) Run(ctx context.Context, interval time.Duration) {
+	defer g.Close()
+	g.Tick(ctx)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			g.Tick(ctx)
+		}
+	}
 }
 
 // TestT is the minimal slice of *testing.T that SetMeterProviderForTest needs,

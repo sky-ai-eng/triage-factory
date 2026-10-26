@@ -117,6 +117,11 @@ func (a *App) startBrain(term int64) {
 		a.commitSignQueue = commitsigner.NewQueueObserver(otel.GetMeterProvider(), a.stores.CommitSignatures)
 		go a.commitSignQueue.Run(brainCtx, workmetrics.DefaultDepthInterval)
 	}
+	// Org-signer status gauges: how many signers are in each status, and
+	// which are broken and why. Beside the health checks that move the
+	// statuses, which also run on the brain, so one process reports each org.
+	a.signerGauges = commitsigner.NewSignerGauges(otel.GetMeterProvider(), a.stores.OrgCommitSigners)
+	go a.signerGauges.Run(brainCtx, workmetrics.DefaultDepthInterval)
 	// Durable event-queue drain worker: claims github:/jira: events the
 	// ingestor enqueued under the work-item contract's leases, routes them,
 	// and marks them done under the lease's fence. A failed attempt returns
@@ -304,6 +309,10 @@ func (a *App) stopBrain(reason string) {
 	if a.commitSignQueue != nil {
 		a.commitSignQueue.Close()
 		a.commitSignQueue = nil
+	}
+	if a.signerGauges != nil {
+		a.signerGauges.Close()
+		a.signerGauges = nil
 	}
 	if a.pollerMgr != nil {
 		a.pollerMgr.StopAll()

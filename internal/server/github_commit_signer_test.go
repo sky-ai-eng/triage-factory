@@ -24,6 +24,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -653,6 +654,58 @@ func TestCommitSigner_VerifySkipsAFailureAlreadyReplaced(t *testing.T) {
 				t.Errorf("commit reads = %d, want %d", got, wantReads)
 			}
 		})
+	}
+}
+
+// TestCommitSigner_PostPushBreakClearedByVerify follows a signer from the
+// post-push check to Verify: a pushed commit GitHub reads as unverified_email
+// breaks the signer, Verify refuses while that commit still fails, and once
+// the address is verified on the account, Verify's re-read of the same commit
+// clears it.
+func TestCommitSigner_PostPushBreakClearedByVerify(t *testing.T) {
+	s, gh := newSignerServer(t, "https://github.com")
+	checks := signerChecks(t)
+	active := registerActiveSigner(t, s, gh)
+	ctx := t.Context()
+	orgID := runmode.LocalDefaultOrgID
+
+	conversationID := uuid.New().String()
+	dbtest.SeedConversation(t, s.db, domain.Conversation{ID: conversationID})
+	claimID := dbtest.SeedActiveClaim(t, s.db, conversationID, "executor-1", 1)
+	at := time.Now().UTC()
+	sig, err := s.allStores.CommitSignatures.InsertSystem(ctx, domain.CommitSignature{
+		OrgID: orgID, ConversationID: conversationID, ClaimID: claimID, BootEpoch: 1,
+		Signer: domain.CommitSigningOrg, SignerHost: "https://github.com", SignerUserID: 583231,
+		PublicKey: active.PublicKey, Digest: "ab", State: domain.CommitSignatureSigned,
+		Signature: "sig", SignedAt: &at, CommitSHA: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+	})
+	if err != nil {
+		t.Fatalf("InsertSystem: %v", err)
+	}
+	repo, err := s.allStores.Repos.FindOrCreateByRefSystem(ctx, orgID, domain.RepoRefFromSlug("https://github.com", "acme/app"))
+	if err != nil {
+		t.Fatalf("seed repository: %v", err)
+	}
+	if _, err := s.allStores.CommitSignatures.MarkPushedSystem(ctx, orgID, sig.ID, repo.ID); err != nil {
+		t.Fatalf("MarkPushedSystem: %v", err)
+	}
+
+	gh.setCommit(&ghclient.CommitVerification{Reason: "unverified_email", CommitterEmail: active.CommitEmail})
+	(&commitsigner.HealthChecker{Stores: s.allStores, GitHub: s.ghResolver}).Check(ctx, orgID)
+	broken := mustSigner(t, s, http.MethodGet, "", nil, http.StatusOK)
+	if broken.Status != "broken" || broken.StatusReason == nil || *broken.StatusReason != "unverified_email" {
+		t.Fatalf("after the post-push check = %+v, want broken for unverified_email", broken)
+	}
+
+	assertOneFault(t, doJSON(t, s, http.MethodPost, commitSignerPath("/verify"), nil), http.StatusConflict, "COMMIT_UNVERIFIED", "")
+
+	gh.setCommit(&ghclient.CommitVerification{Verified: true, Reason: "valid", CommitterEmail: active.CommitEmail})
+	if got := mustSigner(t, s, http.MethodPost, "/verify", nil, http.StatusOK); got.Status != "active" || got.StatusReason != nil {
+		t.Errorf("verified = %+v, want active with no reason", got)
+	}
+	want := map[string]int64{"verify valid": 2, "post_push unverified_email": 1, "verify unverified_email": 1}
+	if got := checks(); !maps.Equal(got, want) {
+		t.Errorf("checks = %v, want %v", got, want)
 	}
 }
 

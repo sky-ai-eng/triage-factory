@@ -140,6 +140,85 @@ func (s *orgCommitSignerStore) Delete(ctx context.Context, orgID string) error {
 	return nil
 }
 
+func (s *orgCommitSignerStore) RecordKeyCheckSystem(ctx context.Context, orgID string, check db.SignerKeyCheck) (*domain.OrgCommitSigner, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	fromStatus, fromReason, toStatus, toReason := db.KeyCheckTransition(check.KeyFound)
+	// ?4 NULL is an account the check could not read, which keeps the login
+	// and name. Every CASE reads the row as it was before the statement, so
+	// the three status columns move together or not at all.
+	row, err := db.ScanOrgCommitSigner(s.q.QueryRowContext(ctx, `
+		UPDATE org_commit_signers SET
+			login         = COALESCE(?4, login),
+			name          = CASE WHEN ?4 IS NULL THEN name ELSE ?5 END,
+			status_since  = CASE WHEN status = ?6 AND COALESCE(status_reason, '') = ?7 THEN ?10 ELSE status_since END,
+			status_reason = CASE WHEN status = ?6 AND COALESCE(status_reason, '') = ?7 THEN ?9 ELSE status_reason END,
+			status        = CASE WHEN status = ?6 AND COALESCE(status_reason, '') = ?7 THEN ?8 ELSE status END,
+			checked_at    = ?10,
+			updated_at    = ?10
+		 WHERE org_id = ?1 AND github_user_id = ?2 AND public_key = ?3
+		RETURNING `+db.OrgCommitSignerColumns,
+		orgID, check.GitHubUserID, check.PublicKey, nullIfEmpty(check.Login), nullIfEmpty(check.Name),
+		string(fromStatus), fromReason, string(toStatus), nullIfEmpty(toReason), time.Now().UTC()).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+func (s *orgCommitSignerStore) BreakSystem(ctx context.Context, orgID, publicKey, reason string) (*domain.OrgCommitSigner, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if err := db.ValidateBreakReason(reason); err != nil {
+		return nil, err
+	}
+	row, err := db.ScanOrgCommitSigner(s.q.QueryRowContext(ctx, `
+		UPDATE org_commit_signers SET
+			status_since  = CASE WHEN status = ?4 THEN status_since ELSE ?8 END,
+			status        = ?4,
+			status_reason = ?3,
+			updated_at    = ?8
+		 WHERE org_id = ?1 AND public_key = ?2
+		   AND (status = ?5 OR (status = ?4 AND status_reason = ?6 AND ?3 <> ?7))
+		RETURNING `+db.OrgCommitSignerColumns,
+		orgID, publicKey, reason, string(domain.CommitSignerBroken), string(domain.CommitSignerActive),
+		domain.CommitSignerReasonKeyMissing, domain.CommitVerificationUnknownKey, time.Now().UTC()).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+func (s *orgCommitSignerStore) ListHealthSystem(ctx context.Context) ([]db.SignerHealth, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT org_id, status, COALESCE(status_reason, '') FROM org_commit_signers ORDER BY org_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []db.SignerHealth
+	for rows.Next() {
+		var (
+			h      db.SignerHealth
+			status string
+		)
+		if err := rows.Scan(&h.OrgID, &status, &h.Reason); err != nil {
+			return nil, err
+		}
+		h.Status = domain.CommitSignerStatus(status)
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
 // commitSignatureStore is the SQLite impl of db.CommitSignatureStore. The
 // local daemon is its only writer, and records each signature as it makes
 // it.
@@ -291,6 +370,72 @@ func (s *commitSignatureStore) NewestFailedVerificationSystem(ctx context.Contex
 		return nil, err
 	}
 	return &row, nil
+}
+
+func (s *commitSignatureStore) MarkPushedSystem(ctx context.Context, orgID, id, repositoryID string) (*domain.CommitSignature, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if repositoryID == "" {
+		return nil, fmt.Errorf("%w: a push names its repository", db.ErrInvalidCommitSignature)
+	}
+	row, err := db.ScanCommitSignature(s.q.QueryRowContext(ctx, `
+		UPDATE commit_signatures SET repository_id = ?3, pushed_at = ?5
+		 WHERE org_id = ?1 AND id = ?2 AND state = ?4 AND pushed_at IS NULL
+		RETURNING `+db.CommitSignatureColumns,
+		orgID, id, repositoryID, string(domain.CommitSignatureSigned), time.Now().UTC()).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+func (s *commitSignatureStore) UncheckedPushesSystem(ctx context.Context, orgID string, signer domain.CommitSigningMode, since time.Time, limit int) ([]domain.CommitSignature, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+	// pushed_at compares and orders as text for the reason
+	// OrgSignaturesSinceSystem's min() does.
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+db.CommitSignatureColumns+` FROM commit_signatures
+		 WHERE org_id = ? AND signer = ? AND pushed_at > ? AND checked_at IS NULL
+		 ORDER BY pushed_at DESC, id DESC
+		 LIMIT ?`,
+		orgID, string(signer), since.UTC(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.CommitSignature
+	for rows.Next() {
+		row, err := db.ScanCommitSignature(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *commitSignatureStore) SetVerificationSystem(ctx context.Context, orgID, id, reason string) (domain.CommitSignature, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return domain.CommitSignature{}, err
+	}
+	row, err := db.ScanCommitSignature(s.q.QueryRowContext(ctx, `
+		UPDATE commit_signatures SET verification_reason = ?3, checked_at = ?4
+		 WHERE org_id = ?1 AND id = ?2 AND pushed_at IS NOT NULL
+		RETURNING `+db.CommitSignatureColumns,
+		orgID, id, nullIfEmpty(reason), time.Now().UTC()).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.CommitSignature{}, db.ErrNoSuchCommitSignature
+	}
+	return row, err
 }
 
 // The queue transitions below are multi mode's: the local daemon records each

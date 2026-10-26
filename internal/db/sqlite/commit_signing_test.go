@@ -24,35 +24,54 @@ func TestOrgCommitSignerStore_SQLite_Conformance(t *testing.T) {
 }
 
 // TestCommitSignatureStore_SQLite_Conformance runs the shared signing-log
-// contract against the SQLite impl, seeding the task → conversation → claim
-// chain the way the workspace-snapshot suite does.
+// contract against the SQLite impl.
 func TestCommitSignatureStore_SQLite_Conformance(t *testing.T) {
-	dbtest.RunCommitSignatureStoreConformance(t, func(t *testing.T) (db.CommitSignatureStore, string, dbtest.CommitSignatureSeeder) {
-		conn := openSQLiteForTest(t)
-		seed := dbtest.CommitSignatureSeeder{
-			Claim: func(t *testing.T) (string, string) {
-				t.Helper()
-				taskID := seedSQLiteTaskForSnapshot(t, conn, uuid.New().String()[:8])
-				conversationID := uuid.New().String()
-				dbtest.SeedConversation(t, conn, domain.Conversation{ID: conversationID, TaskID: taskID})
-				return conversationID, seedSQLiteClaimForSnapshot(t, conn, conversationID, time.Now(), false)
-			},
-			DeleteConversation: func(t *testing.T, conversationID string) {
-				t.Helper()
-				if _, err := conn.Exec(`DELETE FROM conversations WHERE id = ?`, conversationID); err != nil {
-					t.Fatalf("delete conversation: %v", err)
-				}
-			},
-			SetVerification: func(t *testing.T, id, reason string) {
-				t.Helper()
-				if _, err := conn.Exec(`UPDATE commit_signatures SET verification_reason = ?, checked_at = ? WHERE id = ?`,
-					reason, time.Now().UTC(), id); err != nil {
-					t.Fatalf("set verification: %v", err)
-				}
-			},
-		}
-		return sqlitestore.New(conn).CommitSignatures, runmode.LocalDefaultOrgID, seed
-	})
+	dbtest.RunCommitSignatureStoreConformance(t, sqliteCommitSignatureStore)
+}
+
+// TestCommitSignatureCheck_SQLite_Conformance runs the post-push check's
+// verdict write against the SQLite impl.
+func TestCommitSignatureCheck_SQLite_Conformance(t *testing.T) {
+	dbtest.RunCommitSignatureCheckConformance(t, sqliteCommitSignatureStore)
+}
+
+// sqliteCommitSignatureStore is a fresh database's signature store, seeding
+// the task → conversation → claim chain the way the workspace-snapshot suite
+// does.
+func sqliteCommitSignatureStore(t *testing.T) (db.CommitSignatureStore, string, dbtest.CommitSignatureSeeder) {
+	conn := openSQLiteForTest(t)
+	seed := dbtest.CommitSignatureSeeder{
+		Claim: func(t *testing.T) (string, string) {
+			t.Helper()
+			taskID := seedSQLiteTaskForSnapshot(t, conn, uuid.New().String()[:8])
+			conversationID := uuid.New().String()
+			dbtest.SeedConversation(t, conn, domain.Conversation{ID: conversationID, TaskID: taskID})
+			return conversationID, seedSQLiteClaimForSnapshot(t, conn, conversationID, time.Now(), false)
+		},
+		DeleteConversation: func(t *testing.T, conversationID string) {
+			t.Helper()
+			if _, err := conn.Exec(`DELETE FROM conversations WHERE id = ?`, conversationID); err != nil {
+				t.Fatalf("delete conversation: %v", err)
+			}
+		},
+		SetVerification: func(t *testing.T, id, reason string) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE commit_signatures SET verification_reason = ?, checked_at = ? WHERE id = ?`,
+				reason, time.Now().UTC(), id); err != nil {
+				t.Fatalf("set verification: %v", err)
+			}
+		},
+		Repository: func(t *testing.T) string {
+			t.Helper()
+			repo, err := sqlitestore.New(conn).Repos.FindOrCreateByRefSystem(t.Context(), runmode.LocalDefaultOrgID,
+				domain.RepoRefFromSlug("https://github.com", "acme/"+uuid.New().String()[:8]))
+			if err != nil {
+				t.Fatalf("seed repository: %v", err)
+			}
+			return repo.ID
+		},
+	}
+	return sqlitestore.New(conn).CommitSignatures, runmode.LocalDefaultOrgID, seed
 }
 
 // TestCommitSignatureQueue_SQLite_Conformance runs the control-plane queue's

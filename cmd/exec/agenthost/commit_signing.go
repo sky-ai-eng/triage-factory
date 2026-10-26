@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
+	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -175,6 +176,43 @@ func pushSigner(ctx context.Context, stores db.Stores, orgID, sha string) string
 	}
 	countSigningPush(ctx, stores, orgID, signed)
 	return signer
+}
+
+// MarkPushedSignature stamps the signature that produced a landed push's new
+// tip with the repository and the push time, when one of the org's
+// signatures produced it, so the control plane's post-push check reads the
+// commit's verification on its next GitHub cycle. The first push of a commit
+// is the one kept. Host-side only, like RecordGitPushFailed: the git proxy's
+// push observer calls it for a branch the upstream accepted. Best-effort: the
+// push already happened, so a failure is logged and the commit goes
+// unchecked.
+func (c *LocalClient) MarkPushedSignature(ctx context.Context, push gitproxy.PushedRef) {
+	if c.stores.CommitSignatures == nil || push.NewSHA == "" || !push.Succeeded() {
+		return
+	}
+	sig, err := c.stores.CommitSignatures.ForCommitSystem(ctx, c.info.OrgID, push.NewSHA)
+	if err != nil {
+		agenthostLog.Warn("reading the signature of a pushed commit failed; the post-push check will not read it",
+			"org", c.info.OrgID, "sha", push.NewSHA, "error", err)
+		return
+	}
+	if sig == nil {
+		return
+	}
+	owner, repo, _ := strings.Cut(push.Repo, "/")
+	row, err := c.registryRepo(ctx, owner, repo)
+	if err == nil && row == nil {
+		err = fmt.Errorf("%w: %s", errNoRegistryRow, push.Repo)
+	}
+	if err != nil {
+		agenthostLog.Warn("resolving a pushed commit's repository failed; the post-push check will not read it",
+			"org", c.info.OrgID, "sha", push.NewSHA, "error", err)
+		return
+	}
+	if _, err := c.stores.CommitSignatures.MarkPushedSystem(ctx, c.info.OrgID, sig.ID, row.ID); err != nil {
+		agenthostLog.Warn("stamping a pushed commit's signature failed; the post-push check will not read it",
+			"org", c.info.OrgID, "sha", push.NewSHA, "error", err)
+	}
 }
 
 // countSigningPush counts a push in tf_commit_signing_pushes_total when the

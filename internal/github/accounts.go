@@ -3,9 +3,12 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
 // Account is a GitHub user or bot account: GitHub's id for it, which a rename
@@ -55,4 +58,31 @@ func (c *Client) getAccount(ctx context.Context, path string) (Account, error) {
 		return Account{}, fmt.Errorf("account %s: response carried no id or login", path)
 	}
 	return Account{ID: strconv.FormatInt(u.ID, 10), Login: u.Login, Type: u.Type, Name: u.Name}, nil
+}
+
+// AccountClient resolves a client on orgID's GitHub credential for reading
+// accounts, which any of the org's credentials can: its PAT, or an
+// installation token of its App. An App installed on several accounts has no
+// single installation to name, so the first one on the org's host that mints a
+// token answers.
+func AccountClient(ctx context.Context, resolver Resolver, orgs db.OrgsStore, apps db.GitHubAppsStore, orgID string) (*Client, error) {
+	client, err := resolver.ClientFor(ctx, orgID, "")
+	if !errors.Is(err, ErrAmbiguousInstallation) {
+		return client, err
+	}
+	set, serr := orgs.GetSettingsSystem(ctx, orgID)
+	if serr != nil {
+		return nil, fmt.Errorf("read github host: %w", serr)
+	}
+	installations, lerr := apps.ListInstallationsOnHostSystem(ctx, orgID, db.EffectiveGitHubHost(set.GitHubBaseURL))
+	if lerr != nil {
+		return nil, fmt.Errorf("list github app installations: %w", lerr)
+	}
+	for _, inst := range installations {
+		var c *Client
+		if c, err = resolver.ClientForInstallation(ctx, orgID, inst); err == nil {
+			return c, nil
+		}
+	}
+	return nil, err
 }

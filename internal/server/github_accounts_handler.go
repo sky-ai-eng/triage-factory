@@ -101,27 +101,7 @@ func (s *Server) answerGitHubAccount(w http.ResponseWriter, r *http.Request, org
 }
 
 // gitHubAccountClient resolves a client on the org's GitHub credential for
-// reading accounts, which any of the org's credentials can: its PAT, or an
-// installation token of its App. An App installed on several accounts has no
-// single installation to name, so the first one that mints a token answers.
+// reading accounts (ghclient.AccountClient).
 func (s *Server) gitHubAccountClient(ctx context.Context, orgID string) (*ghclient.Client, error) {
-	client, err := s.ghResolver.ClientFor(ctx, orgID, "")
-	if !errors.Is(err, ghclient.ErrAmbiguousInstallation) {
-		return client, err
-	}
-	host, herr := s.orgGitHubHost(ctx, orgID)
-	if herr != nil {
-		return nil, herr
-	}
-	installations, lerr := s.allStores.GitHubApps.ListInstallationsOnHostSystem(ctx, orgID, host)
-	if lerr != nil {
-		return nil, fmt.Errorf("list github app installations: %w", lerr)
-	}
-	for _, inst := range installations {
-		var c *ghclient.Client
-		if c, err = s.ghResolver.ClientForInstallation(ctx, orgID, inst); err == nil {
-			return c, nil
-		}
-	}
-	return nil, err
+	return ghclient.AccountClient(ctx, s.ghResolver, s.orgs, s.allStores.GitHubApps, orgID)
 }
