@@ -129,6 +129,25 @@ What follows from it:
   `$TMPDIR`, else `/tmp`. The program path must be absolute, because
   `git commit` runs from the repository's top directory.
 
+From GitHub's documentation (`github/docs`, the source of docs.github.com,
+read 2026-10-26), for hosts other than github.com:
+
+- **Every supported GHES version verifies SSH signatures** and serves the
+  SSH signing-key endpoints (3.18 through 3.22). 3.7 is the earliest version
+  whose documentation describes SSH signing.
+- **GHES has no noreply address.** The noreply address and **Keep my email
+  address private** are documented for github.com and GitHub Enterprise
+  Cloud only. A GHES account commits under an address of its own.
+- **GHES persists verification by default from 3.17, and a site admin can
+  turn it off** (`ghe-config app.persist-commit-signature-verification.enabled
+  false`). With it off, a commit's verification is evaluated again against
+  the account's current keys, so deleting a key from the account turns that
+  key's past commits Unverified.
+- **GHE.com verifies SSH signatures** once the key is on the account there and
+  the committer email is verified on it. Its noreply address is not
+  documented. Every GHE.com account is a managed user, and a managed user
+  created after 2024-08-01 starts with an unverified email.
+
 ## 3. Settled decisions
 
 1. **SSH signing keys, not GPG.** An SSH key has no user id to bind an email
@@ -142,17 +161,20 @@ What follows from it:
    `claude` user). The bot stays the account that pushes and that opens pull
    requests. The identity does not change with the key's health: a
    signer whose key stops verifying still authors the commits, unsigned.
-4. **The committer email is derived unless the signer sets one.** The
-   default is `<id>+<login>@users.noreply.github.com`, the form that keeps
-   verifying across a login rename (§2), so an admin types no email. A signer may name a real address instead, verified on its account
+4. **On github.com the committer email is derived unless the signer sets
+   one.** The default is `<id>+<login>@users.noreply.github.com`, the form
+   that keeps verifying across a login rename (§2), so an admin types no
+   email. A signer may name a real address instead, verified on its account
    (§2, case C): an org signer through `PATCH commit-signer`, the deployment
-   signer through `TF_GITHUB_COMMIT_SIGNER_EMAIL`. A ruleset that requires
-   commit emails on the org's domain rejects the noreply address, so for that
-   org a real address is the only way to commit at all. A real address also
-   reads better in `git log`. TF cannot read another account's verified
-   emails, so a wrong address shows up in the post-push check, and Verify
-   confirms the fix (§7). The address is on every commit, so it should
-   not be the one that recovers the account.
+   signer through `TF_GITHUB_COMMIT_SIGNER_EMAIL`. On any other host the
+   address is required, because GHES has no noreply address and GHE.com's is
+   not documented (§2, §10.1). A ruleset that requires commit emails on the
+   org's domain rejects the noreply address, so for that org a real address
+   is the only way to commit at all. A real address also reads better in
+   `git log`. TF cannot read another account's verified emails, so a wrong
+   address shows up in the post-push check, and Verify confirms the fix
+   (§7). The address is on every commit, so it should not be the one that
+   recovers the account.
 5. **One signer per org.** The commit identity resolves, in order, to the
    org's signer, then the deployment signer (managed workspaces only), then
    today's identity (the App bot or the PAT owner).
@@ -478,10 +500,10 @@ Under `/api/orgs/{org_id}/github/`, beside the App and PAT routes:
 | route | gate | does |
 | --- | --- | --- |
 | `GET commit-signer` | member | the org's signer, 404 when none |
-| `POST commit-signer` `{login, email?}` | admin | resolve the login on the org's host (must be a user, not a bot), generate the key pair, create the row `pending`; returns the public key and a suggested key title; 409 when the org already has one |
+| `POST commit-signer` `{login, email?}` | admin | resolve the login on the org's host (must be a user, not a bot), generate the key pair, create the row `pending`; returns the public key and a suggested key title; 409 when the org already has one; `email` is required on a host other than github.com (§3.4); 422 `SSH_SIGNING_UNSUPPORTED` when the host answers 404 for the signing-key listing of a user that exists, the way `internal/githubapp/hook.go` treats a GHES without the deliveries endpoint |
 | `POST commit-signer/verify` | admin | look for the key in the account's public listing (not found → 409 `KEY_NOT_FOUND`, saying the listing can lag a minute); for a signer the post-push check broke, also re-read the commit that failed (still failing → 409 `COMMIT_UNVERIFIED`, with GitHub's reason); both pass → `active` |
 | `POST commit-signer/rotate` | admin | generate a pending key; the current key keeps signing until `verify` finds the new one, then the new one replaces it |
-| `PATCH commit-signer` `{email}` | admin | `null` restores the derived address |
+| `PATCH commit-signer` `{email}` | admin | `null` restores the derived address, and is refused on a host other than github.com |
 | `DELETE commit-signer` | admin | remove the row and its secrets |
 | `GET commit-identity` | member | the identity this org's runs commit as, and whether and how they sign (§4.6) |
 
@@ -541,7 +563,13 @@ A "Commit signing" section in `OrgSettings.tsx`, after "GitHub access":
 - **Pending / active / broken:** the status, the reason, and **Verify**,
   **Rotate key** and **Remove**, for org admins. The commit email is shown
   with **Change**, which says to add and verify the address on the account
-  first.
+  first. After a rotation the section says to leave the old public key on the
+  account unless it may have leaked: TF has destroyed its private half, so it
+  signs nothing, and on a GHES with persistent verification off, deleting it
+  turns its past commits Unverified (§2).
+- **On a managed-user account** (every GHE.com account, and Enterprise
+  Managed Users on github.com), the setup steps add that the account's email
+  must be verified first.
 
 ## 9. Rollout
 
@@ -552,10 +580,9 @@ required" refusal both depend on it.
 **Phase 1 — Local, per-org, end to end.** The `SSHSIG` implementation and its
 `ssh-keygen` test; the shim and `exec git sign`; the daemon check; the
 `org_commit_signers` and `commit_signatures` tables in both dialects; the
-secrets; the API; the settings section; the audit rows (§5.6). Local mode
-needs git ≥ 2.34: below
-that the run commits as the signer, unsigned, and `GET commit-identity` says
-why. (L)
+secrets; the API, including the host checks (§3.4, §6); the settings
+section; the audit rows (§5.6). Local mode needs git ≥ 2.34: below that the
+run commits as the signer, unsigned, and `GET commit-identity` says why. (L)
 
 **Phase 2 — Multi, per-org.** Sealing the signer's public half into the
 bundle; the `sign_digest` relay call, the request flow and doorbells, and the
@@ -579,9 +606,9 @@ signature.
 
 ## 10. Open questions
 
-1. **GHES.** The minimum GHES version with SSH commit-signature verification
-   and the `ssh_signing_keys` endpoints needs checking before GHES orgs are
-   offered signing.
+1. **GHE.com's noreply address.** It is not documented, so a GHE.com signer
+   needs a real address (§3.4). A spike against a GHE.com tenant would show
+   whether a derived address verifies there.
 2. **The signing budget.** Initial values: 600 signatures per minute per org
    and 5,000 per claim. A rebase of a long branch is the case to size for. The
    limits bound what one compromised or runaway run, or one org, can get
@@ -628,6 +655,12 @@ signature.
     §5.6. Chosen over a signing log in the UI, which would list every
     signature when an auditor asks whether a push was signed and whether a
     gate refused something.
+11. **Detect SSH signing support; don't check versions** — §6. Every
+    supported GHES version has it, and a 404 from the signing-key listing
+    identifies a server that does not, the way TF already handles a GHES
+    without hook deliveries.
+12. **A real address off github.com** — §3.4. Chosen over deriving one for
+    every host: GHES has no noreply address, and GHE.com's is not documented.
 
 ## Related
 
