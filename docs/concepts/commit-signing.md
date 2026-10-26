@@ -5,6 +5,9 @@ An org can have the commits its agents make signed, so GitHub marks them
 is for the org admin who sets it up: what the signer account is, how to create
 it, and what to do in **Settings → Commit signing** once it exists.
 
+<!-- TODO(TFAC-1198): multi-mode runs sign once the sidecar relays
+signatures; this paragraph goes with the section's local-only gate in
+OrgSettings.tsx. -->
 The section is in local mode's Settings. Runs in a multi-mode deployment are
 not wired to sign yet, so a multi-mode deployment does not show it.
 

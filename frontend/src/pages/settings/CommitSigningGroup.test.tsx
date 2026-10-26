@@ -251,6 +251,11 @@ describe('CommitSigningGroup · no signer', () => {
       await screen.findByText(/only a user account can hold a signing key/),
     ).toBeInTheDocument()
     expect(screen.getByLabelText('GitHub login')).toHaveAttribute('aria-invalid', 'true')
+    // The message is the field's description, so a screen reader reads it
+    // with the field.
+    expect(screen.getByLabelText('GitHub login')).toHaveAccessibleDescription(
+      /only a user account can hold a signing key/,
+    )
 
     api.refuse('POST /commit-signer', 422, {
       reason: 'SSH_SIGNING_UNSUPPORTED',
@@ -553,7 +558,9 @@ describe('CommitSigningGroup · commit email', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     expect(await screen.findByText(/must be a bare email address/)).toBeInTheDocument()
-    expect(screen.getByLabelText('Commit email')).toBeInTheDocument()
+    expect(screen.getByLabelText('Commit email')).toHaveAccessibleDescription(
+      /must be a bare email address/,
+    )
   })
 })
 

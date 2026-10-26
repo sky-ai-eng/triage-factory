@@ -15,7 +15,7 @@
 // canManage follows the routes' gates: an org admin gets the controls, a
 // member reads the same state without them.
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { AlertTriangle, Check, Copy, ExternalLink } from 'lucide-react'
 import { apiErrors, httpErrorMessage } from '../../lib/apiClient'
 import {
@@ -216,6 +216,8 @@ function SetupForm({
   const [email, setEmail] = useState('')
   const [busy, setBusy] = useState(false)
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
+  const loginErrId = useId()
+  const emailErrId = useId()
   const [error, setError] = useState<string | null>(null)
 
   const submit = async () => {
@@ -275,10 +277,15 @@ function SetupForm({
             autoComplete="off"
             spellCheck={false}
             aria-invalid={!!fieldErrors.login}
+            aria-describedby={fieldErrors.login ? loginErrId : undefined}
             className={inputClass}
           />
         </label>
-        {fieldErrors.login && <p className="text-ui text-alarm">{fieldErrors.login}</p>}
+        {fieldErrors.login && (
+          <p id={loginErrId} className="text-ui text-alarm">
+            {fieldErrors.login}
+          </p>
+        )}
       </div>
       {needsEmail && (
         <div className="space-y-1.5">
@@ -292,6 +299,7 @@ function SetupForm({
               autoComplete="off"
               spellCheck={false}
               aria-invalid={!!fieldErrors.email}
+              aria-describedby={fieldErrors.email ? emailErrId : undefined}
               className={inputClass}
             />
           </label>
@@ -299,7 +307,11 @@ function SetupForm({
             An address verified on the account. {hostOf(githubUrl)} has no noreply address for
             commits to carry, so the signer needs one of its own.
           </p>
-          {fieldErrors.email && <p className="text-ui text-alarm">{fieldErrors.email}</p>}
+          {fieldErrors.email && (
+            <p id={emailErrId} className="text-ui text-alarm">
+              {fieldErrors.email}
+            </p>
+          )}
         </div>
       )}
       {error && <p className="text-ui text-alarm">{error}</p>}
@@ -636,6 +648,7 @@ function EmailRow({
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
+  const errId = useId()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const derives = isGitHubCom(signer.host)
@@ -697,6 +710,7 @@ function EmailRow({
           placeholder="agent@example.com"
           autoComplete="off"
           spellCheck={false}
+          aria-describedby={error ? errId : undefined}
           className={inputClass}
         />
       </label>
@@ -705,7 +719,11 @@ function EmailRow({
         commit Verified only when its committer address is verified on the signing account, and
         Triage Factory cannot check the account&rsquo;s addresses before a commit is pushed.
       </p>
-      {error && <p className="text-ui text-alarm">{error}</p>}
+      {error && (
+        <p id={errId} className="text-ui text-alarm">
+          {error}
+        </p>
+      )}
       <div className="flex flex-wrap items-center gap-2">
         <button type="submit" disabled={!draft.trim() || busy} className={primaryBtn}>
           {busy ? 'Saving…' : 'Save'}
