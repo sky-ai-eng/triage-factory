@@ -221,6 +221,10 @@ func pgCommitSignatureSeeder(t *testing.T, h *pgtest.Harness, orgID, userID stri
 			t.Helper()
 			pgtest.MustExec(t, h.AdminDB, `UPDATE commit_signatures SET verification_reason = $2, checked_at = now() WHERE id = $1`, id, reason)
 		},
+		Repository: func(t *testing.T) string {
+			t.Helper()
+			return pgtest.SeedRepository(t, h, orgID, "acme", "app-"+uuid.New().String()[:8])
+		},
 	}
 }
 
@@ -231,6 +235,17 @@ func TestCommitSignatureStore_Postgres_Conformance(t *testing.T) {
 	dbtest.RunCommitSignatureStoreConformance(t, func(t *testing.T) (db.CommitSignatureStore, string, dbtest.CommitSignatureSeeder) {
 		h.Reset(t)
 		orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "signatures")
+		return pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey).CommitSignatures, orgID, pgCommitSignatureSeeder(t, h, orgID, userID)
+	})
+}
+
+// TestCommitSignatureCheck_Postgres_Conformance runs the post-push check's
+// verdict write on the admin pool, the control plane's wiring.
+func TestCommitSignatureCheck_Postgres_Conformance(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunCommitSignatureCheckConformance(t, func(t *testing.T) (db.CommitSignatureStore, string, dbtest.CommitSignatureSeeder) {
+		h.Reset(t)
+		orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "signature-checks")
 		return pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey).CommitSignatures, orgID, pgCommitSignatureSeeder(t, h, orgID, userID)
 	})
 }

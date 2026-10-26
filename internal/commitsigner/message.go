@@ -113,7 +113,7 @@ func signerOffReason(res Result) string {
 		return "the signer's key is waiting for an org admin to verify it on its GitHub account"
 	case domain.CommitSignerBroken:
 		switch res.SignerReason {
-		case domain.CommitSignerReasonKeyMissing, "unknown_key":
+		case domain.CommitSignerReasonKeyMissing, domain.CommitVerificationUnknownKey:
 			return "the signer's key is no longer on its GitHub account"
 		case "unverified_email":
 			return "GitHub reported a recent commit's email as not verified on the signer's account"

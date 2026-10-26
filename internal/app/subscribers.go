@@ -56,6 +56,15 @@ func (a *App) registerSubscribers() {
 		Filter: []string{"system:poll:"},
 		Handle: a.brainHolderOnly(a.handleReconcilerPoll),
 	})
+	// Check each org's commit signer on GitHub poll-complete sentinels: the
+	// periodic check of its key (at most every 15 minutes, gated inside) and
+	// the post-push check of the commits pushed since the last cycle. GitHub
+	// completions only, like the reconciler.
+	a.bus.Subscribe(eventbus.Subscriber{
+		Name:   "commit-signer-health",
+		Filter: []string{"system:poll:"},
+		Handle: a.brainHolderOnly(a.handleSignerHealthPoll),
+	})
 	// Track Jira/GitHub poll completions: gate /api/jira/stock and surface
 	// the one-shot "config took effect" toast.
 	a.bus.Subscribe(eventbus.Subscriber{
@@ -123,6 +132,17 @@ func (a *App) handleReconcilerPoll(evt domain.Event) {
 		return
 	}
 	a.reconciler.Trigger(orgID)
+}
+
+// handleSignerHealthPoll runs the commit signer checks for the org whose
+// GitHub poll just completed, in the background so a slow GitHub for one org
+// holds back no other's.
+func (a *App) handleSignerHealthPoll(evt domain.Event) {
+	orgID, ok := pollEventProfilesGitHub(evt)
+	if !ok {
+		return
+	}
+	a.signerHealth.Trigger(a.runCtx, orgID)
 }
 
 // broadcastEvent forwards a bus event to the websocket hub, scoped to the

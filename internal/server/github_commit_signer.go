@@ -80,7 +80,8 @@ type commitSignerJSON struct {
 	// reason for a pushed commit, or key_missing.
 	StatusReason *string   `json:"status_reason"`
 	StatusSince  time.Time `json:"status_since"`
-	// CheckedAt is when a check last found the key on the account.
+	// CheckedAt is when a check last read the account's signing keys: a
+	// Verify that found the key, or the periodic check, whatever it found.
 	CheckedAt *time.Time `json:"checked_at"`
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
@@ -538,15 +539,15 @@ func promotePendingSigningKey(ctx context.Context, tx db.TxStores, orgID string)
 // read under its new name, and a login someone else has since claimed is
 // never read at all.
 //
-// The failing commit is re-read only when it can still say something about
-// the signer as it is now. GitHub evaluates a failing result again on every
-// read, so it reads valid once its fault is fixed: the key is back on the
-// account, or the address is verified on it. A commit signed with a key other
-// than the one being verified, or committed under an address the signer no
-// longer commits as, fails for a fault the rotation or the email change has
-// already replaced, and holding the signer on it would keep it broken for
-// good; the next push is checked instead. So is a commit GitHub no longer
-// has.
+// The failing commit holds the signer only while it can still say something
+// about the signer as it is now (commitsigner.FailureHolds). GitHub evaluates
+// a failing result again on every read, so it reads valid once its fault is
+// fixed: the key is back on the account, or the address is verified on it. A
+// commit signed with a key other than the one being verified is not re-read
+// at all, and one committed under an address the signer no longer commits as
+// does not hold it: the rotation or the email change has already replaced
+// their fault, and the next push is checked instead. So is a commit GitHub no
+// longer has.
 func (s *Server) checkCommitSigner(ctx context.Context, client *ghclient.Client, orgID string, signer domain.OrgCommitSigner, key string) (string, *signerCheckFault, error) {
 	account, err := client.GetAccountByID(ctx, strconv.FormatInt(signer.GitHubUserID, 10))
 	if err != nil {
@@ -608,7 +609,11 @@ func (s *Server) checkCommitSigner(ctx context.Context, client *ghclient.Client,
 		}
 		return commitsigner.CheckResultError, upstreamFault("could not re-read commit "+failed.CommitSHA+" from GitHub", err), nil
 	}
-	if verdict.Verified || !strings.EqualFold(verdict.CommitterEmail, signer.CommitEmail()) {
+	if commitsigner.VerificationUnavailable(verdict.Reason) {
+		return commitsigner.CheckResultError, upstreamFault(
+			"GitHub's signature verification did not answer for commit "+failed.CommitSHA+" ("+verdict.Reason+"); verify again shortly", nil), nil
+	}
+	if !commitsigner.FailureHolds(signer, key, *failed, verdict) {
 		return domain.CommitVerificationValid, nil, nil
 	}
 	return verdict.Reason, &signerCheckFault{status: http.StatusConflict, item: httpx.ErrorItem{
@@ -622,7 +627,7 @@ func (s *Server) checkCommitSigner(ctx context.Context, client *ghclient.Client,
 // admin can fix on the account.
 func unverifiedCommitAdvice(reason, email, login string) string {
 	switch reason {
-	case "unknown_key":
+	case domain.CommitVerificationUnknownKey:
 		return "the key that signed it is not on " + login + "'s signing keys"
 	case "no_user":
 		return email + " belongs to no GitHub account; add and verify it on " + login + ", or change the signer's email"

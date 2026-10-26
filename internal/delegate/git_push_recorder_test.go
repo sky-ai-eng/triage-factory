@@ -418,6 +418,62 @@ func TestGitPushRecorder_NamesTheTipsSigner(t *testing.T) {
 	}
 }
 
+// A landed push stamps the signature that produced its tip with the
+// repository and the push time, which is what has the post-push check read
+// the commit; a refused push stamps nothing, and a second push of the
+// same tip keeps the first.
+func TestGitPushRecorder_StampsTheSignedTipForThePostPushCheck(t *testing.T) {
+	stores, conn, conversationID := newRecorderStoresConn(t)
+	ctx := context.Background()
+	const landedTip, refusedTip = "1111111111111111111111111111111111111111", "3333333333333333333333333333333333333333"
+
+	claimID := dbtest.SeedActiveClaim(t, conn, conversationID, "executor-1", 1)
+	signature := func(sha string) domain.CommitSignature {
+		t.Helper()
+		at := time.Now().UTC()
+		row, err := stores.CommitSignatures.InsertSystem(ctx, domain.CommitSignature{
+			OrgID: runmode.LocalDefaultOrgID, ConversationID: conversationID, ClaimID: claimID, BootEpoch: 1,
+			Signer: domain.CommitSigningOrg, SignerHost: "https://github.com", SignerUserID: 583231,
+			PublicKey: "ssh-ed25519 AAAAkey", Digest: "ab", State: domain.CommitSignatureSigned,
+			Signature: "sig", SignedAt: &at, CommitSHA: sha,
+		})
+		if err != nil {
+			t.Fatalf("InsertSystem: %v", err)
+		}
+		return row
+	}
+	landed, refused := signature(landedTip), signature(refusedTip)
+
+	info := recorderInfo(conversationID)
+	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/signed", NewSHA: landedTip, Created: true, Status: 200})
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/refused", NewSHA: refusedTip, Created: true, Status: 200, Rejected: true})
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/unsigned", NewSHA: "2222222222222222222222222222222222222222", Created: true, Status: 200})
+
+	row := func(id string) domain.CommitSignature {
+		t.Helper()
+		got, err := stores.CommitSignatures.GetSystem(ctx, runmode.LocalDefaultOrgID, id)
+		if err != nil || got == nil {
+			t.Fatalf("GetSystem(%s) = %+v, %v", id, got, err)
+		}
+		return *got
+	}
+	stamped := row(landed.ID)
+	if stamped.RepositoryID != registerOctoRepo(t, stores) || stamped.PushedAt == nil {
+		t.Fatalf("landed tip's signature = repository %q pushed_at %v, want octo/repo's row and a push time",
+			stamped.RepositoryID, stamped.PushedAt)
+	}
+	if got := row(refused.ID); got.RepositoryID != "" || got.PushedAt != nil {
+		t.Errorf("refused tip's signature = repository %q pushed_at %v, want it unstamped", got.RepositoryID, got.PushedAt)
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/again", NewSHA: landedTip, Created: true, Status: 200})
+	if got := row(landed.ID); !got.PushedAt.Equal(*stamped.PushedAt) {
+		t.Errorf("a second push of the tip moved pushed_at to %v, want the first push's %v", got.PushedAt, stamped.PushedAt)
+	}
+}
+
 // An executor cannot read the org's signer, so a multi-mode push is counted
 // as a signing org's by the signer the run's sealed bundle named, as its
 // sidecar reported it; a run whose bundle named none is not counted. The

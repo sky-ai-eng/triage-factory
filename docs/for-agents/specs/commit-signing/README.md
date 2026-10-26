@@ -641,12 +641,24 @@ or signs.
    signer. Using the org's credential, it refreshes the login and name by
    account id and confirms the key is still on the account. A missing key sets
    `broken (key_missing)`, and the same check clears it once the key is back.
+   An account GitHub no longer has is a missing key. A pending signer waits
+   for Verify either way.
 3. **Post-push check.** When a push lands a signed commit as a ref's new tip
    (TFAC-1188 supplies per-ref outcomes), the orchestrator stamps that
-   commit's `commit_signatures` row with the repository and push time. On its
-   next cycle, the control plane reads the commit's `verification` with the
-   org's credential and stores the reason. Anything other than `valid` sets
-   `broken` with that reason, which stays until a verify.
+   commit's `commit_signatures` row with the repository and push time; the
+   first push of a commit is the one kept. On its next cycle, the control
+   plane reads the commit's `verification` with the org's credential and
+   stores the reason. Anything other than `valid` sets `broken` with that
+   reason, which stays until a verify. A failure counts against the signer
+   only while it can say something about the signer as it is, by the test
+   Verify's re-read uses (point 1). A signer already `broken` keeps its
+   reason, except that a failing commit replaces `key_missing`, unless the
+   commit's reason is `unknown_key`: that is the same fault seen on a commit,
+   and the periodic check clears it once the key is back. A commit GitHub
+   cannot be read for is asked about again each cycle for a day after its
+   push, and so is one whose read ends in GitHub's own verification service
+   failing (`gpgverify_unavailable`, `gpgverify_error`): that is no verdict
+   on the commit, and Verify answers it as GitHub being unavailable.
 
 The UI explains the common reasons: `unknown_key` (the key is not on the
 account), `no_user` (the email belongs to no account), `unverified_email`

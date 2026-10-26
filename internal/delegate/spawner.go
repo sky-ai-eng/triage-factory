@@ -1253,7 +1253,9 @@ func gitDenyNotMaterialized(repoID string) gitproxy.Decision {
 //     claims for a manual one) and lands the ActionBranchPushed audit row in
 //     the same write. The same constructor and sink as the hook, which keys
 //     the row on the repository's registry row, so an (out-of-mode) hook twin
-//     still converges on one row.
+//     still converges on one row. When one of the org's signatures produced
+//     the tip, it is stamped with the push (MarkPushedSignature), which is
+//     what has the post-push check read the commit.
 //   - refused (a non-2xx, or an "ng" ref inside a 200 — nothing landed):
 //     record ONLY the branch_push_failed audit row, carrying the report's
 //     reason and the remote's message. The audit log never omits an attempt;
@@ -1286,6 +1288,7 @@ func gitPushRecorder(host *agenthost.LocalClient, info agenthost.ConversationInf
 			delegateLog.Warn("git-proxy push capture: record branch artifact failed",
 				"conversation", info.ConversationID, "repo", push.Repo, "ref", push.Ref, "error", err)
 		}
+		host.MarkPushedSignature(ctx, push)
 	}
 }
 

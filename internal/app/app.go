@@ -106,6 +106,11 @@ type App struct {
 	// commitSignDoorbells routes sign_done to the signature requests this
 	// executor's runs are waiting on. nil on a control pod and in local mode.
 	commitSignDoorbells *commitsigner.Doorbells
+	// signerHealth makes the periodic and post-push checks of each org's
+	// signer, kicked by the GitHub poll's completions. Built on every
+	// brain-capable process and triggered only while it holds the brain.
+	// nil on an executor.
+	signerHealth *commitsigner.HealthChecker
 
 	// capBroker is the spawned cap-broker subprocess, non-nil only on a host
 	// that sandboxes runs (multi mode + Linux). nil otherwise — local mode
@@ -296,6 +301,10 @@ type App struct {
 	// same lifecycle and for the same reason as workDepth above. nil when the
 	// brain isn't running, and in local mode, which queues no requests.
 	commitSignQueue *commitsigner.QueueObserver
+	// signerGauges is the brain's org-signer status observer, on the same
+	// lifecycle and for the same reason as workDepth above. nil when the
+	// brain isn't running.
+	signerGauges *commitsigner.SignerGauges
 
 	// shuttingDown latches once Run's blocking listener has unwound and the
 	// dispatch drain has begun (drainDispatches). The executor healthz reads
@@ -461,8 +470,10 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	if err = a.buildCredProvisioner(); err != nil {
 		return nil, err
 	}
-	// Multi mode's control-plane commit signing: the signer on control pods,
-	// the requester on executors. After buildExecution (the spawner).
+	// Commit signing: multi mode's control plane (the signer on control
+	// pods, the requester on executors) and, on a brain-capable process in
+	// either mode, the signer health checks. After buildExecution (the
+	// spawner).
 	a.buildCommitSigning()
 	// The memory provisioner (brain-capable roles in BOTH modes, unlike the
 	// credential one above). After buildRunCredentials and buildServer, whose

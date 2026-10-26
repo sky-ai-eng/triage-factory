@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -299,6 +300,222 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 			t.Fatalf("Create after Delete: %v", err)
 		}
 	})
+
+	keyCheck := func(found bool) db.SignerKeyCheck {
+		return db.SignerKeyCheck{GitHubUserID: 583231, PublicKey: signerKeyA, Login: "octocat", Name: "The Octocat", KeyFound: found}
+	}
+
+	t.Run("a_key_check_breaks_an_active_signer_and_restores_it", func(t *testing.T) {
+		store, orgID, userID := mk(t)
+		if got, err := store.RecordKeyCheckSystem(ctx, orgID, keyCheck(false)); err != nil || got != nil {
+			t.Fatalf("RecordKeyCheckSystem with no signer = %+v, %v; want nil", got, err)
+		}
+		if _, err := store.Create(ctx, newSigner(orgID, userID)); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		active, err := store.Activate(ctx, orgID, signerKeyA)
+		if err != nil {
+			t.Fatalf("Activate: %v", err)
+		}
+		read := func() (*domain.OrgCommitSigner, error) { return store.GetSystem(ctx, orgID) }
+
+		time.Sleep(5 * time.Millisecond)
+		missing, err := store.RecordKeyCheckSystem(ctx, orgID, keyCheck(false))
+		if err != nil || missing == nil {
+			t.Fatalf("RecordKeyCheckSystem (key gone) = %+v, %v", missing, err)
+		}
+		AssertWriteReturnedStoredRow(t, "RecordKeyCheckSystem (key gone)", *missing, read)
+		if missing.Status != domain.CommitSignerBroken || missing.StatusReason != domain.CommitSignerReasonKeyMissing {
+			t.Errorf("after the key went: status %q reason %q, want broken for key_missing", missing.Status, missing.StatusReason)
+		}
+		if !missing.StatusSince.After(active.StatusSince) {
+			t.Errorf("status_since = %s, want it moved past %s", missing.StatusSince, active.StatusSince)
+		}
+		if missing.CheckedAt == nil || !missing.CheckedAt.After(*active.CheckedAt) {
+			t.Errorf("checked_at = %v, want a new stamp after %s", missing.CheckedAt, active.CheckedAt)
+		}
+
+		time.Sleep(5 * time.Millisecond)
+		again, err := store.RecordKeyCheckSystem(ctx, orgID, keyCheck(false))
+		if err != nil || again == nil {
+			t.Fatalf("RecordKeyCheckSystem (still gone) = %+v, %v", again, err)
+		}
+		if again.Status != domain.CommitSignerBroken || !again.StatusSince.Equal(missing.StatusSince) {
+			t.Errorf("a second missing check: status %q since %s, want broken since %s", again.Status, again.StatusSince, missing.StatusSince)
+		}
+
+		time.Sleep(5 * time.Millisecond)
+		back, err := store.RecordKeyCheckSystem(ctx, orgID, keyCheck(true))
+		if err != nil || back == nil {
+			t.Fatalf("RecordKeyCheckSystem (key back) = %+v, %v", back, err)
+		}
+		AssertWriteReturnedStoredRow(t, "RecordKeyCheckSystem (key back)", *back, read)
+		if back.Status != domain.CommitSignerActive || back.StatusReason != "" {
+			t.Errorf("after the key came back: status %q reason %q, want active with no reason", back.Status, back.StatusReason)
+		}
+		if !back.StatusSince.After(missing.StatusSince) {
+			t.Errorf("status_since = %s, want it moved past %s", back.StatusSince, missing.StatusSince)
+		}
+	})
+
+	t.Run("a_key_check_refreshes_the_account", func(t *testing.T) {
+		store, orgID, userID := mk(t)
+		if _, err := store.Create(ctx, newSigner(orgID, userID)); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		renamed := keyCheck(true)
+		renamed.Login, renamed.Name = "octocat-renamed", ""
+		got, err := store.RecordKeyCheckSystem(ctx, orgID, renamed)
+		if err != nil || got == nil {
+			t.Fatalf("RecordKeyCheckSystem = %+v, %v", got, err)
+		}
+		if got.Login != "octocat-renamed" || got.Name != "" {
+			t.Errorf("login %q name %q, want the account as GitHub answered it, with no profile name", got.Login, got.Name)
+		}
+		unread := keyCheck(true)
+		unread.Login, unread.Name = "", "ignored"
+		if got, err = store.RecordKeyCheckSystem(ctx, orgID, unread); err != nil || got == nil {
+			t.Fatalf("RecordKeyCheckSystem (account unread) = %+v, %v", got, err)
+		}
+		if got.Login != "octocat-renamed" || got.Name != "" {
+			t.Errorf("an unread account changed login %q name %q, want both kept", got.Login, got.Name)
+		}
+	})
+
+	t.Run("a_key_check_leaves_other_statuses_and_other_keys", func(t *testing.T) {
+		store, orgID, userID := mk(t)
+		created, err := store.Create(ctx, newSigner(orgID, userID))
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		// A pending signer waits for an admin's Verify either way.
+		for _, found := range []bool{true, false} {
+			got, err := store.RecordKeyCheckSystem(ctx, orgID, keyCheck(found))
+			if err != nil || got == nil {
+				t.Fatalf("RecordKeyCheckSystem on a pending signer (found=%v) = %+v, %v", found, got, err)
+			}
+			if got.Status != domain.CommitSignerPending || !got.StatusSince.Equal(created.StatusSince) {
+				t.Errorf("pending signer after a check (found=%v): status %q since %s, want pending since %s",
+					found, got.Status, got.StatusSince, created.StatusSince)
+			}
+		}
+		// One a pushed commit broke keeps that reason until a Verify.
+		if _, err := store.Activate(ctx, orgID, signerKeyA); err != nil {
+			t.Fatalf("Activate: %v", err)
+		}
+		if _, err := store.BreakSystem(ctx, orgID, signerKeyA, "unverified_email"); err != nil {
+			t.Fatalf("BreakSystem: %v", err)
+		}
+		for _, found := range []bool{true, false} {
+			got, err := store.RecordKeyCheckSystem(ctx, orgID, keyCheck(found))
+			if err != nil || got == nil {
+				t.Fatalf("RecordKeyCheckSystem on a commit-broken signer (found=%v) = %+v, %v", found, got, err)
+			}
+			if got.Status != domain.CommitSignerBroken || got.StatusReason != "unverified_email" {
+				t.Errorf("commit-broken signer after a check (found=%v): status %q reason %q, want broken for unverified_email",
+					found, got.Status, got.StatusReason)
+			}
+		}
+		// A check of a key or account the signer no longer has is a miss.
+		stale := keyCheck(false)
+		stale.PublicKey = signerKeyB
+		if got, err := store.RecordKeyCheckSystem(ctx, orgID, stale); err != nil || got != nil {
+			t.Errorf("RecordKeyCheckSystem for another key = %+v, %v; want nil", got, err)
+		}
+		stale = keyCheck(false)
+		stale.GitHubUserID = 1
+		if got, err := store.RecordKeyCheckSystem(ctx, orgID, stale); err != nil || got != nil {
+			t.Errorf("RecordKeyCheckSystem for another account = %+v, %v; want nil", got, err)
+		}
+	})
+
+	t.Run("a_failing_commit_breaks_an_active_signer_and_the_first_reason_holds", func(t *testing.T) {
+		store, orgID, userID := mk(t)
+		if got, err := store.BreakSystem(ctx, orgID, signerKeyA, "no_user"); err != nil || got != nil {
+			t.Fatalf("BreakSystem with no signer = %+v, %v; want nil", got, err)
+		}
+		if _, err := store.Create(ctx, newSigner(orgID, userID)); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if got, err := store.BreakSystem(ctx, orgID, signerKeyA, "no_user"); err != nil || got != nil {
+			t.Errorf("BreakSystem on a pending signer = %+v, %v; want nil", got, err)
+		}
+		active, err := store.Activate(ctx, orgID, signerKeyA)
+		if err != nil {
+			t.Fatalf("Activate: %v", err)
+		}
+		if got, err := store.BreakSystem(ctx, orgID, signerKeyB, "no_user"); err != nil || got != nil {
+			t.Errorf("BreakSystem for another key = %+v, %v; want nil", got, err)
+		}
+		for _, reason := range []string{"", domain.CommitVerificationValid} {
+			if _, err := store.BreakSystem(ctx, orgID, signerKeyA, reason); !errors.Is(err, db.ErrInvalidOrgCommitSigner) {
+				t.Errorf("BreakSystem(%q) = %v, want ErrInvalidOrgCommitSigner", reason, err)
+			}
+		}
+
+		time.Sleep(5 * time.Millisecond)
+		broken, err := store.BreakSystem(ctx, orgID, signerKeyA, "unverified_email")
+		if err != nil || broken == nil {
+			t.Fatalf("BreakSystem = %+v, %v", broken, err)
+		}
+		AssertWriteReturnedStoredRow(t, "BreakSystem", *broken, func() (*domain.OrgCommitSigner, error) {
+			return store.GetSystem(ctx, orgID)
+		})
+		if broken.Status != domain.CommitSignerBroken || broken.StatusReason != "unverified_email" {
+			t.Errorf("after BreakSystem: status %q reason %q, want broken for unverified_email", broken.Status, broken.StatusReason)
+		}
+		if !broken.StatusSince.After(active.StatusSince) {
+			t.Errorf("status_since = %s, want it moved past %s", broken.StatusSince, active.StatusSince)
+		}
+		if got, err := store.BreakSystem(ctx, orgID, signerKeyA, "no_user"); err != nil || got != nil {
+			t.Errorf("a second failure on a broken signer = %+v, %v; want nil, the first reason kept", got, err)
+		}
+	})
+
+	t.Run("a_failing_commit_replaces_key_missing_unless_it_is_the_missing_key", func(t *testing.T) {
+		store, orgID, userID := mk(t)
+		if _, err := store.Create(ctx, newSigner(orgID, userID)); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if _, err := store.Activate(ctx, orgID, signerKeyA); err != nil {
+			t.Fatalf("Activate: %v", err)
+		}
+		missing, err := store.RecordKeyCheckSystem(ctx, orgID, keyCheck(false))
+		if err != nil || missing == nil {
+			t.Fatalf("RecordKeyCheckSystem = %+v, %v", missing, err)
+		}
+		if got, err := store.BreakSystem(ctx, orgID, signerKeyA, domain.CommitVerificationUnknownKey); err != nil || got != nil {
+			t.Errorf("unknown_key on a signer missing its key = %+v, %v; want nil, key_missing kept", got, err)
+		}
+		got, err := store.BreakSystem(ctx, orgID, signerKeyA, "no_user")
+		if err != nil || got == nil {
+			t.Fatalf("BreakSystem (no_user) = %+v, %v", got, err)
+		}
+		if got.StatusReason != "no_user" || !got.StatusSince.Equal(missing.StatusSince) {
+			t.Errorf("after no_user: reason %q since %s, want no_user, broken since %s", got.StatusReason, got.StatusSince, missing.StatusSince)
+		}
+	})
+
+	t.Run("health_lists_each_signer", func(t *testing.T) {
+		store, orgID, userID := mk(t)
+		if _, err := store.Create(ctx, newSigner(orgID, userID)); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if _, err := store.Activate(ctx, orgID, signerKeyA); err != nil {
+			t.Fatalf("Activate: %v", err)
+		}
+		if _, err := store.BreakSystem(ctx, orgID, signerKeyA, "no_user"); err != nil {
+			t.Fatalf("BreakSystem: %v", err)
+		}
+		health, err := store.ListHealthSystem(ctx)
+		if err != nil {
+			t.Fatalf("ListHealthSystem: %v", err)
+		}
+		want := db.SignerHealth{OrgID: orgID, Status: domain.CommitSignerBroken, Reason: "no_user"}
+		if !slices.Contains(health, want) {
+			t.Errorf("ListHealthSystem = %+v, want it to hold %+v", health, want)
+		}
+	})
 }
 
 // CommitSignatureStoreFactory hands the conformance suite a wired store over
@@ -318,6 +535,51 @@ type CommitSignatureSeeder struct {
 	// SetVerification records reason as GitHub's verdict on signature id's
 	// pushed commit, the column the post-push check writes.
 	SetVerification func(t *testing.T, id, reason string)
+
+	// Repository inserts a registry row for a push to land in and returns
+	// its id.
+	Repository func(t *testing.T) string
+}
+
+const (
+	signatureDigest    = "1f40fc92da241694750979ee6cf582f2d5d7d28e18335de05abc54d0560e0f5302860c652bf08d560252aa5e74210546f369fbbbce8c12cfc7957b2652fe9a75"
+	signatureArmored   = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----"
+	signatureCommitSHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+)
+
+// signedSignature is a signature already made at at, as a local daemon
+// records one.
+func signedSignature(orgID, conversationID, claimID string, at time.Time) domain.CommitSignature {
+	at = at.UTC().Truncate(time.Millisecond)
+	return domain.CommitSignature{
+		OrgID:          orgID,
+		ConversationID: conversationID,
+		ClaimID:        claimID,
+		BootEpoch:      3,
+		Signer:         domain.CommitSigningOrg,
+		SignerHost:     "https://github.com/",
+		SignerUserID:   583231,
+		PublicKey:      signerKeyA,
+		Digest:         signatureDigest,
+		State:          domain.CommitSignatureSigned,
+		Signature:      signatureArmored,
+		SignedAt:       &at,
+	}
+}
+
+// requestedSignature is a request no control pod has decided yet.
+func requestedSignature(orgID, conversationID, claimID string) domain.CommitSignature {
+	return domain.CommitSignature{
+		OrgID:          orgID,
+		ConversationID: conversationID,
+		ClaimID:        claimID,
+		BootEpoch:      3,
+		Signer:         domain.CommitSigningOrg,
+		SignerHost:     "https://github.com",
+		SignerUserID:   583231,
+		Digest:         signatureDigest,
+		State:          domain.CommitSignatureRequested,
+	}
 }
 
 // RunCommitSignatureStoreConformance pins the signing log: a row enters as a
@@ -329,40 +591,11 @@ func RunCommitSignatureStoreConformance(t *testing.T, mk CommitSignatureStoreFac
 	ctx := context.Background()
 
 	const (
-		digest    = "1f40fc92da241694750979ee6cf582f2d5d7d28e18335de05abc54d0560e0f5302860c652bf08d560252aa5e74210546f369fbbbce8c12cfc7957b2652fe9a75"
-		armored   = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----"
-		commitSHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+		digest    = signatureDigest
+		armored   = signatureArmored
+		commitSHA = signatureCommitSHA
 	)
-	signed := func(orgID, conversationID, claimID string, at time.Time) domain.CommitSignature {
-		at = at.UTC().Truncate(time.Millisecond)
-		return domain.CommitSignature{
-			OrgID:          orgID,
-			ConversationID: conversationID,
-			ClaimID:        claimID,
-			BootEpoch:      3,
-			Signer:         domain.CommitSigningOrg,
-			SignerHost:     "https://github.com/",
-			SignerUserID:   583231,
-			PublicKey:      signerKeyA,
-			Digest:         digest,
-			State:          domain.CommitSignatureSigned,
-			Signature:      armored,
-			SignedAt:       &at,
-		}
-	}
-	requested := func(orgID, conversationID, claimID string) domain.CommitSignature {
-		return domain.CommitSignature{
-			OrgID:          orgID,
-			ConversationID: conversationID,
-			ClaimID:        claimID,
-			BootEpoch:      3,
-			Signer:         domain.CommitSigningOrg,
-			SignerHost:     "https://github.com",
-			SignerUserID:   583231,
-			Digest:         digest,
-			State:          domain.CommitSignatureRequested,
-		}
-	}
+	signed, requested := signedSignature, requestedSignature
 
 	t.Run("a_signature_already_made_is_stored_as_given", func(t *testing.T) {
 		store, orgID, seed := mk(t)
@@ -710,6 +943,166 @@ func RunCommitSignatureStoreConformance(t *testing.T, mk CommitSignatureStoreFac
 		}
 		if window.Count != 1 {
 			t.Errorf("org window after the purge = %d, want the signature still counted", window.Count)
+		}
+	})
+
+	t.Run("a_push_is_stamped_once", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		conversationID, claimID := seed.Claim(t)
+		repositoryID := seed.Repository(t)
+		sig := signed(orgID, conversationID, claimID, time.Now())
+		sig.CommitSHA = commitSHA
+		row, err := store.InsertSystem(ctx, sig)
+		if err != nil {
+			t.Fatalf("InsertSystem: %v", err)
+		}
+
+		if _, err := store.MarkPushedSystem(ctx, orgID, row.ID, ""); !errors.Is(err, db.ErrInvalidCommitSignature) {
+			t.Errorf("MarkPushedSystem with no repository = %v, want ErrInvalidCommitSignature", err)
+		}
+		pushed, err := store.MarkPushedSystem(ctx, orgID, row.ID, repositoryID)
+		if err != nil || pushed == nil {
+			t.Fatalf("MarkPushedSystem = %+v, %v", pushed, err)
+		}
+		AssertWriteReturnedStoredRow(t, "MarkPushedSystem", *pushed, func() (*domain.CommitSignature, error) {
+			return store.GetSystem(ctx, orgID, row.ID)
+		})
+		if pushed.RepositoryID != repositoryID || pushed.PushedAt == nil {
+			t.Errorf("stamped repository %q pushed_at %v, want %s and a push time", pushed.RepositoryID, pushed.PushedAt, repositoryID)
+		}
+		if pushed.VerificationReason != "" || pushed.CheckedAt != nil {
+			t.Errorf("a push stamped a verdict (%q at %v), want none until the check asks", pushed.VerificationReason, pushed.CheckedAt)
+		}
+
+		// The first push is the one kept.
+		if again, err := store.MarkPushedSystem(ctx, orgID, row.ID, repositoryID); err != nil || again != nil {
+			t.Errorf("a second MarkPushedSystem = %+v, %v; want nil", again, err)
+		}
+		if got, err := store.GetSystem(ctx, orgID, row.ID); err != nil || got == nil || !got.PushedAt.Equal(*pushed.PushedAt) {
+			t.Errorf("after a second push the row is %+v, %v; want the first push kept", got, err)
+		}
+		// A request was never signed, and an unknown id is no signature.
+		request, err := store.InsertSystem(ctx, requested(orgID, conversationID, claimID))
+		if err != nil {
+			t.Fatalf("InsertSystem (requested): %v", err)
+		}
+		if got, err := store.MarkPushedSystem(ctx, orgID, request.ID, repositoryID); err != nil || got != nil {
+			t.Errorf("MarkPushedSystem on a request = %+v, %v; want nil", got, err)
+		}
+		if got, err := store.MarkPushedSystem(ctx, orgID, uuid.NewString(), repositoryID); err != nil || got != nil {
+			t.Errorf("MarkPushedSystem on an unknown id = %+v, %v; want nil", got, err)
+		}
+	})
+
+	t.Run("unchecked_pushes_are_the_newest_not_yet_asked_about", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		conversationID, claimID := seed.Claim(t)
+		repositoryID := seed.Repository(t)
+		insert := func(mode domain.CommitSigningMode, push bool) domain.CommitSignature {
+			t.Helper()
+			sig := signed(orgID, conversationID, claimID, time.Now())
+			sig.Signer = mode
+			row, err := store.InsertSystem(ctx, sig)
+			if err != nil {
+				t.Fatalf("InsertSystem: %v", err)
+			}
+			if push {
+				time.Sleep(5 * time.Millisecond)
+				if _, err := store.MarkPushedSystem(ctx, orgID, row.ID, repositoryID); err != nil {
+					t.Fatalf("MarkPushedSystem: %v", err)
+				}
+			}
+			return row
+		}
+		older := insert(domain.CommitSigningOrg, true)
+		newer := insert(domain.CommitSigningOrg, true)
+		insert(domain.CommitSigningOrg, false)
+		checked := insert(domain.CommitSigningOrg, true)
+		seed.SetVerification(t, checked.ID, domain.CommitVerificationValid)
+		deployment := insert(domain.CommitSigningDeployment, true)
+
+		ids := func(rows []domain.CommitSignature) []string {
+			out := make([]string, 0, len(rows))
+			for _, r := range rows {
+				out = append(out, r.ID)
+			}
+			return out
+		}
+		hourAgo := time.Now().Add(-time.Hour)
+		got, err := store.UncheckedPushesSystem(ctx, orgID, domain.CommitSigningOrg, hourAgo, 10)
+		if err != nil {
+			t.Fatalf("UncheckedPushesSystem: %v", err)
+		}
+		if want := []string{newer.ID, older.ID}; !slices.Equal(ids(got), want) {
+			t.Errorf("UncheckedPushesSystem = %v, want the two unchecked pushes newest first %v", ids(got), want)
+		}
+		if got, err = store.UncheckedPushesSystem(ctx, orgID, domain.CommitSigningOrg, hourAgo, 1); err != nil ||
+			!slices.Equal(ids(got), []string{newer.ID}) {
+			t.Errorf("UncheckedPushesSystem limit 1 = %v, %v; want only the newest", ids(got), err)
+		}
+		if got, err = store.UncheckedPushesSystem(ctx, orgID, domain.CommitSigningDeployment, hourAgo, 10); err != nil ||
+			!slices.Equal(ids(got), []string{deployment.ID}) {
+			t.Errorf("UncheckedPushesSystem (deployment) = %v, %v; want the deployment signer's push", ids(got), err)
+		}
+		if got, err = store.UncheckedPushesSystem(ctx, orgID, domain.CommitSigningOrg, time.Now().Add(time.Hour), 10); err != nil || len(got) != 0 {
+			t.Errorf("UncheckedPushesSystem since a later time = %v, %v; want none", ids(got), err)
+		}
+		if got, err = store.UncheckedPushesSystem(ctx, orgID, domain.CommitSigningOrg, hourAgo, 0); err != nil || len(got) != 0 {
+			t.Errorf("UncheckedPushesSystem limit 0 = %v, %v; want none", ids(got), err)
+		}
+	})
+}
+
+// RunCommitSignatureCheckConformance pins the post-push check's verdict write,
+// a control-plane write the executor's role cannot make, so it runs apart from
+// RunCommitSignatureStoreConformance, which the executor's role runs too.
+func RunCommitSignatureCheckConformance(t *testing.T, mk CommitSignatureStoreFactory) {
+	t.Helper()
+	ctx := context.Background()
+
+	t.Run("a_verdict_is_stored_on_a_pushed_commit", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		conversationID, claimID := seed.Claim(t)
+		repositoryID := seed.Repository(t)
+		row, err := store.InsertSystem(ctx, signedSignature(orgID, conversationID, claimID, time.Now()))
+		if err != nil {
+			t.Fatalf("InsertSystem: %v", err)
+		}
+		if _, err := store.SetVerificationSystem(ctx, orgID, row.ID, "no_user"); !errors.Is(err, db.ErrNoSuchCommitSignature) {
+			t.Errorf("SetVerificationSystem before a push = %v, want ErrNoSuchCommitSignature", err)
+		}
+		if _, err := store.SetVerificationSystem(ctx, orgID, uuid.NewString(), "no_user"); !errors.Is(err, db.ErrNoSuchCommitSignature) {
+			t.Errorf("SetVerificationSystem on an unknown id = %v, want ErrNoSuchCommitSignature", err)
+		}
+		if _, err := store.MarkPushedSystem(ctx, orgID, row.ID, repositoryID); err != nil {
+			t.Fatalf("MarkPushedSystem: %v", err)
+		}
+		read := func() (*domain.CommitSignature, error) { return store.GetSystem(ctx, orgID, row.ID) }
+
+		failed, err := store.SetVerificationSystem(ctx, orgID, row.ID, "unverified_email")
+		if err != nil {
+			t.Fatalf("SetVerificationSystem: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "SetVerificationSystem", failed, read)
+		if failed.VerificationReason != "unverified_email" || failed.CheckedAt == nil {
+			t.Errorf("stored verdict %q at %v, want unverified_email with a check time", failed.VerificationReason, failed.CheckedAt)
+		}
+		if pending, err := store.UncheckedPushesSystem(ctx, orgID, domain.CommitSigningOrg, time.Now().Add(-time.Hour), 10); err != nil || len(pending) != 0 {
+			t.Errorf("UncheckedPushesSystem after the verdict = %d rows, %v; want none", len(pending), err)
+		}
+		newest, err := store.NewestFailedVerificationSystem(ctx, orgID, "https://github.com", 583231)
+		if err != nil || newest == nil || newest.ID != row.ID {
+			t.Errorf("NewestFailedVerificationSystem = %+v, %v; want the commit just checked", newest, err)
+		}
+
+		// No answer: the commit or its repository is gone.
+		gone, err := store.SetVerificationSystem(ctx, orgID, row.ID, "")
+		if err != nil {
+			t.Fatalf("SetVerificationSystem(\"\"): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "SetVerificationSystem (no answer)", gone, read)
+		if gone.VerificationReason != "" || gone.CheckedAt == nil {
+			t.Errorf("stored verdict %q at %v, want no reason with a check time", gone.VerificationReason, gone.CheckedAt)
 		}
 	})
 }

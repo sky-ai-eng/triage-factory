@@ -1038,24 +1038,63 @@ sum by (upstream, op) (rate(tf_upstream_query_cost_sum[1h])) / sum by (upstream,
   operations are the documents' own names (`IssuesByID`, `SearchIssues`,
   `CommentCreate`, …).
 
-### Commit signing
+### Commit signer health
 
 An org can register a GitHub user account as its commit signer: TF generates
 an SSH key pair, an org admin adds the public half to the account as a signing
-key, and **Verify** looks for it there before the signer is `active`. Each
-health check of a signer is counted:
+key, and **Verify** looks for it there before the signer is `active`. Between
+Verifies, TF checks the signer on the GitHub poll cycle, with the org's own
+GitHub credential, so a signer whose commits GitHub would mark Unverified stops
+signing at the next signature. In local mode the checks run in the TF process;
+in multi mode on the control pod holding the brain lease.
+
+- **Periodic check**, at most every 15 minutes per signer. It reads the
+  account by its id, refreshes the signer's login and profile name, and looks
+  for the key among the account's signing keys. A key no longer there (or an
+  account GitHub no longer has) moves an `active` signer to `broken` with
+  reason `key_missing`, and the same check moves it back to `active` once the
+  key is there again. GitHub caches the listing for a minute, so a key just
+  added can take that long to show.
+- **Post-push check.** When a push lands a signed commit as a branch's new tip,
+  the run's orchestrator (the executor in multi mode, the TF process locally)
+  stamps that commit's `commit_signatures` row with the repository and the
+  push time. The next GitHub cycle reads the commit's verification and stores
+  GitHub's reason on the row. Any reason other than `valid` moves an `active`
+  signer to `broken` with that reason, which stays until an admin's Verify
+  re-reads the same commit and GitHub answers `valid`. A failure does not
+  count against the signer when the commit was signed with a key the signer no
+  longer uses or committed under an address it no longer commits as; a signer
+  already `broken` keeps the reason it broke for, except that a failing
+  commit's reason replaces `key_missing` (an `unknown_key` commit is the same
+  fault, and leaves `key_missing` for the periodic check to clear). A commit
+  GitHub cannot be read for, or whose read ends in GitHub's own verification
+  service failing (`gpgverify_unavailable`, `gpgverify_error`), is asked about
+  again each cycle for a day after its push; one GitHub no longer has is
+  recorded with no reason.
+
+A signer moving to `broken` logs a WARN on the process that checked it
+(`commit signer is broken; the org's runs commit unsigned until an admin fixes
+it`, with `org`, `check` and `reason`), and recovering logs `commit signer
+recovered` at INFO. A run that started while the signer was `active` is told at
+its next signature that signing is off for the rest of the run, with the
+reason; its commits stay authored as the signer, unsigned.
 
 | Metric | Labels | Value |
 | --- | --- | --- |
-| `tf_commit_signer_checks_total` | `check`, `result` | Health checks of an org's commit signer. `check` is `verify`, an admin's Verify. `result` is GitHub's verification reason for the commit Verify re-read (`valid`, `unknown_key`, `no_user`, `unverified_email`, or `other` for any reason not named here), `key_missing` when the key was not on the account, or `error` when GitHub could not be read. A Verify that finds the key and has no failing commit to re-read counts `valid`. |
+| `tf_commit_signer_checks_total` | `check`, `result` | Health checks of an org's commit signer. `check` is `verify` (an admin's Verify), `periodic` or `post_push`. `result` is GitHub's verification reason (`valid`, `unknown_key`, `no_user`, `unverified_email`, or `other` for any reason not named here), `key_missing` when the key was not on the account, or `error` when GitHub could not be read or its signature verification service did not answer (`gpgverify_unavailable`, `gpgverify_error`). A Verify that finds the key and has no failing commit to re-read counts `valid`, and so does a periodic check that finds the key. A pushed commit GitHub no longer has is not counted. |
+| `tf_commit_signers` | `status` | Org signers by status: `pending`, `active`, `broken`, each reported, zero included. Read by the process holding the brain lease. |
+| `tf_commit_signer_broken` | `org_id`, `reason` | 1 for each broken org signer, with the reason it broke for (`key_missing`, a reason named above, or `other`). No series for a signer that is not broken. Same source. |
 
 A Verify that keeps ending in `key_missing` is an admin who has not added the
-key yet, or whose GitHub listing has not caught up (it is cached for a
-minute); one that ends in `error` is GitHub, or the org's credential, failing
-to answer.
+key yet, or whose GitHub listing has not caught up; one that ends in `error`
+is GitHub, or the org's credential, failing to answer. A steady
+`periodic`/`post_push` `error` rate is the same for the background checks, and
+while it lasts a removed key goes unnoticed.
 
 ```
-increase(tf_commit_signer_checks_total{result="error"}[1h]) > 0   # Verify could not read GitHub
+tf_commit_signer_broken == 1                                                          # an org's commits are going out unsigned
+increase(tf_commit_signer_checks_total{check=~"periodic|post_push",result="error"}[1h]) > 0   # the checks cannot read GitHub
+increase(tf_commit_signer_checks_total{check="verify",result="error"}[1h]) > 0        # Verify could not read GitHub
 ```
 
 ## Traces — `TF_TRACES_ENDPOINT`

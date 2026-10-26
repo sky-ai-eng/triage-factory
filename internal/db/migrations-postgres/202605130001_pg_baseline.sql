@@ -6435,6 +6435,10 @@ CREATE INDEX commit_signatures_org_signed_idx ON public.commit_signatures USING 
 CREATE INDEX commit_signatures_claim_signed_idx ON public.commit_signatures USING btree (claim_id) WHERE (state = 'signed'::text);
 -- A push's audit row: the signature that produced the pushed tip.
 CREATE INDEX commit_signatures_commit_idx ON public.commit_signatures USING btree (org_id, commit_sha) WHERE (commit_sha IS NOT NULL);
+-- The post-push check's work: the org's signatures whose pushed commit GitHub
+-- has not yet been asked about, newest push first. Zero rows between cycles is
+-- the steady state.
+CREATE INDEX commit_signatures_unchecked_push_idx ON public.commit_signatures USING btree (org_id, pushed_at) WHERE ((pushed_at IS NOT NULL) AND (checked_at IS NULL));
 -- The control pods' once-a-second sweep and the pending gauge: requests no
 -- pod has claimed, oldest first. Zero rows is the steady state.
 CREATE INDEX commit_signatures_requested_idx ON public.commit_signatures USING btree (created_at, id) WHERE (state = 'requested'::text);

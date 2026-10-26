@@ -89,6 +89,79 @@ type OrgCommitSignerStore interface {
 	// Delete removes the org's signer. ErrNoSuchOrgCommitSigner when it has
 	// none.
 	Delete(ctx context.Context, orgID string) error
+
+	// RecordKeyCheckSystem records a periodic check of the signer's key on its
+	// account and returns the stored row, or (nil, nil) when the org's signer
+	// is no longer the account and key the check read: it was removed,
+	// registered again, or had a rotation promoted while the check was out.
+	//
+	// It refreshes the login and profile name, stamps checked_at, and moves
+	// the status only between active and broken for key_missing: a key gone
+	// from the account breaks an active signer, and a key back on it restores
+	// one broken for its absence. A pending signer waits for an admin's
+	// Verify, and one broken by a pushed commit keeps that reason until a
+	// Verify. status_since moves only with the status.
+	RecordKeyCheckSystem(ctx context.Context, orgID string, check SignerKeyCheck) (*domain.OrgCommitSigner, error)
+
+	// BreakSystem records that GitHub reported a pushed commit signed with
+	// publicKey as not verified, for reason, and returns the stored row: an
+	// active signer holding that key becomes broken with that reason, which
+	// stays until a Verify. A signer broken because its key was missing takes
+	// the reason too, unless it is unknown_key: that is the commit's view of
+	// the same fault, which the periodic check clears once the key is back.
+	// Any other signer, or none holding publicKey, is left as it is and
+	// (nil, nil) is returned. status_since moves only with the status. An
+	// empty reason, or valid, gets ErrInvalidOrgCommitSigner.
+	BreakSystem(ctx context.Context, orgID, publicKey, reason string) (*domain.OrgCommitSigner, error)
+
+	// ListHealthSystem returns every org's signer status and reason, ordered
+	// by org, for the signer gauges. Cross-org: the gauges are a system job
+	// serving every org.
+	ListHealthSystem(ctx context.Context) ([]SignerHealth, error)
+}
+
+// SignerKeyCheck is one periodic check of a signer's key, as
+// RecordKeyCheckSystem stores it.
+type SignerKeyCheck struct {
+	// GitHubUserID and PublicKey are the account and key the check read. The
+	// write misses a signer that is no longer that account or no longer signs
+	// with that key.
+	GitHubUserID int64
+	PublicKey    string
+	// Login and Name are the account as GitHub answered for it by its id; an
+	// empty Name is a profile with no name. An empty Login is an account the
+	// check could not read, which keeps both as stored.
+	Login string
+	Name  string
+	// KeyFound is whether PublicKey is among the account's signing keys.
+	KeyFound bool
+}
+
+// KeyCheckTransition is the one status move a key check makes: from the status
+// and reason a signer must hold to the ones it takes. Both dialects render
+// their UPDATE from it, so they move the same signers.
+func KeyCheckTransition(keyFound bool) (fromStatus domain.CommitSignerStatus, fromReason string, toStatus domain.CommitSignerStatus, toReason string) {
+	if keyFound {
+		return domain.CommitSignerBroken, domain.CommitSignerReasonKeyMissing, domain.CommitSignerActive, ""
+	}
+	return domain.CommitSignerActive, "", domain.CommitSignerBroken, domain.CommitSignerReasonKeyMissing
+}
+
+// ValidateBreakReason is BreakSystem's refusal of a reason that is no failure,
+// shared so both dialects refuse the same writes.
+func ValidateBreakReason(reason string) error {
+	if reason == "" || reason == domain.CommitVerificationValid {
+		return fmt.Errorf("%w: a signer is broken for a failing verification reason, not %q", ErrInvalidOrgCommitSigner, reason)
+	}
+	return nil
+}
+
+// SignerHealth is one org signer's status, as ListHealthSystem reads it.
+// Reason is "" for a signer that is not broken.
+type SignerHealth struct {
+	OrgID  string
+	Status domain.CommitSignerStatus
+	Reason string
 }
 
 // CommitSignatureStore owns commit_signatures: one row per commit signature a
@@ -97,9 +170,11 @@ type OrgCommitSignerStore interface {
 //
 // Admin-pool only in Postgres. Every writer is a run's signing daemon, its
 // orchestrator or a control pod, none of them acting for a signed-in user. The
-// executor's tf_system role holds the INSERT and the commit-id UPDATE the
-// orchestrator's methods need; the queue's transitions (ClaimRequestSystem,
-// SignSystem, RefuseSystem) are a control pod's, which tf_system cannot make.
+// executor's tf_system role holds the INSERT and the commit-id and push UPDATEs
+// the orchestrator's methods need; the queue's transitions (ClaimRequestSystem,
+// SignSystem, RefuseSystem) and the post-push check's verdict
+// (SetVerificationSystem) are the control plane's, which tf_system cannot
+// make.
 type CommitSignatureStore interface {
 	// InsertSystem records one signature and returns the stored row: a
 	// request (state requested, with no key, signature, signing time or
@@ -148,6 +223,30 @@ type CommitSignatureStore interface {
 	// failing result again on every read, so it reads valid once the fault is
 	// fixed.
 	NewestFailedVerificationSystem(ctx context.Context, orgID, host string, userID int64) (*domain.CommitSignature, error)
+
+	// MarkPushedSystem records that a push landed signature id's commit as a
+	// ref's new tip in repositoryID, stamping pushed_at, and returns the
+	// stored row. The first push is the one kept, so the post-push check
+	// reads the commit once: a row already stamped is left as it is, and it
+	// and a row that is not a signature of the org's get (nil, nil). An empty
+	// repositoryID gets ErrInvalidCommitSignature.
+	MarkPushedSystem(ctx context.Context, orgID, id, repositoryID string) (*domain.CommitSignature, error)
+
+	// UncheckedPushesSystem returns up to limit of the org's signatures made
+	// as signer whose commit a push landed after since and whose verification
+	// GitHub has not yet been asked for: the post-push check's work. Newest
+	// push first, so a commit GitHub keeps failing to answer for cannot hold
+	// back the ones pushed after it; since bounds how long one is retried.
+	UncheckedPushesSystem(ctx context.Context, orgID string, signer domain.CommitSigningMode, since time.Time, limit int) ([]domain.CommitSignature, error)
+
+	// SetVerificationSystem records GitHub's verification reason for a pushed
+	// signature's commit, stamps checked_at, and returns the stored row. An
+	// empty reason records that GitHub had no answer to give: the commit or
+	// its repository is gone. A row that is not a pushed signature of the
+	// org's gets ErrNoSuchCommitSignature.
+	//
+	// A control-plane write: the executor's tf_system role cannot make it.
+	SetVerificationSystem(ctx context.Context, orgID, id, reason string) (domain.CommitSignature, error)
 
 	// ClaimRequestSystem takes one request for the control pod claimedBy to
 	// decide: requested → signing, stamping the pod, and returns the stored

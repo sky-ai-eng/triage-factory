@@ -28,6 +28,11 @@ const CommitSignerReasonKeyMissing = "key_missing"
 // commit. Any other reason on a pushed commit is a failure.
 const CommitVerificationValid = "valid"
 
+// CommitVerificationUnknownKey is GitHub's verification reason for a commit
+// signed with a key that is not on the account its committer address belongs
+// to: what a pushed commit reads when the signer's key went missing.
+const CommitVerificationUnknownKey = "unknown_key"
+
 // OrgCommitSigner is one org_commit_signers row: the GitHub user account an
 // org's agent commits are authored, committed and signed as, and the public
 // half of the key TF signs with. The private half is a secret
@@ -58,11 +63,14 @@ type OrgCommitSigner struct {
 	Status           CommitSignerStatus `json:"status"`
 	// StatusReason says why the signer is broken: GitHub's verification
 	// reason for a pushed commit, or key_missing. "" otherwise.
-	StatusReason string     `json:"status_reason,omitempty"`
-	StatusSince  time.Time  `json:"status_since"`
-	CheckedAt    *time.Time `json:"checked_at,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	StatusReason string    `json:"status_reason,omitempty"`
+	StatusSince  time.Time `json:"status_since"`
+	// CheckedAt is when a check last read the account's signing keys: a
+	// Verify that found the key, or the periodic check, whatever it found.
+	// The periodic check runs again once it is 15 minutes old.
+	CheckedAt *time.Time `json:"checked_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
 	// CreatedBy is the user who registered the signer, "" once that user is
 	// deleted.
 	CreatedBy string `json:"created_by,omitempty"`

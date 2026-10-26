@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, within } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, screen, fireEvent, within, cleanup } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import RunStation, { type StationActions } from './RunStation'
 import type { Conversation } from '../../types'
@@ -85,6 +85,15 @@ describe('RunStation composer gate', () => {
 })
 
 describe('RunStation dock approval affordance', () => {
+  // Radix FocusScope dispatches its unmount event from a zero-delay timer. On
+  // a slow runner that timer can outlive the file's jsdom environment and
+  // surface as an unhandled "dispatchEvent ... not of type 'Event'" error that
+  // fails the whole run. Unmount first, then let the timer fire in-environment.
+  afterEach(async () => {
+    cleanup()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  })
+
   beforeEach(() => {
     vi.stubGlobal(
       'fetch',

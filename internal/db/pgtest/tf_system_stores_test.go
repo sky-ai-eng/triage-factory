@@ -148,15 +148,21 @@ func TestTfSystem_CommitSignatureStoreConformance(t *testing.T) {
 				t.Helper()
 				MustExec(t, h.AdminDB, `UPDATE commit_signatures SET verification_reason = $2, checked_at = now() WHERE id = $1`, id, reason)
 			},
+			Repository: func(t *testing.T) string {
+				t.Helper()
+				return SeedRepository(t, h, orgID, "acme", "app-"+uuid.New().String()[:8])
+			},
 		}
 		return pgstore.New(h.SystemDB, h.AppDB, SecretKey).CommitSignatures, orgID, seed
 	})
 }
 
 // TestTfSystem_CommitSignatureQueueWritesDenied pins the other half of the
-// grant: the executor records a request and its commit id, but claiming a
-// request and storing its signature or refusal are control-pod writes, so a
-// compromised executor can neither sign a request nor mark one signed.
+// grant: the executor records a request, its commit id and the push that
+// landed it, but claiming a request, storing its signature or refusal, and
+// storing GitHub's verdict on the pushed commit are control-plane writes, so a
+// compromised executor can neither sign a request, mark one signed, nor clear
+// a failing verdict before the post-push check reads it.
 func TestTfSystem_CommitSignatureQueueWritesDenied(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
@@ -168,6 +174,8 @@ func TestTfSystem_CommitSignatureQueueWritesDenied(t *testing.T) {
 		`UPDATE commit_signatures SET refusal_reason = 'x'`,
 		`UPDATE commit_signatures SET retry_after_seconds = 1`,
 		`UPDATE commit_signatures SET signed_at = now()`,
+		`UPDATE commit_signatures SET verification_reason = 'x'`,
+		`UPDATE commit_signatures SET checked_at = now()`,
 		`DELETE FROM commit_signatures`,
 	} {
 		_, err := h.SystemDB.Exec(stmt)
