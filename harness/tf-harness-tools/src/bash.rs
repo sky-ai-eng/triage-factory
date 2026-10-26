@@ -667,6 +667,12 @@ pub fn execute(
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());
             }
+            // An ignored signal stays ignored across exec, and the serving
+            // tool host ignores SIGXFSZ for its own sake
+            // (serve::ignore_file_size_signal); the command gets the default.
+            if libc::signal(libc::SIGXFSZ, libc::SIG_DFL) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
             Ok(())
         });
     }

@@ -93,7 +93,7 @@ func CleanupWithOptions(opts CleanupOptions) {
 	// sweep below. /tmp is routinely wiped on reboot, which is exactly the
 	// case where a locked=initializing ghost survives in the persistent
 	// ~/.triagefactory/repos bare and needs reclaiming.
-	runsBase := filepath.Join(os.TempDir(), runsDir)
+	runsBase := RunsBase()
 	if entries, err := os.ReadDir(runsBase); err == nil {
 		count := 0
 		for _, e := range entries {

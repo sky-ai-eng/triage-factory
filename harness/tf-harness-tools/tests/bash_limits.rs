@@ -106,3 +106,24 @@ fn a_background_process_that_logs_steadily_does_not_hold_the_call() {
         "the background process died once the call returned"
     );
 }
+
+/// The serving tool host ignores SIGXFSZ so that its own write past the jail's
+/// file-size limit fails instead of ending it. A command it runs gets the
+/// default back, so a process writing past the limit is ended by the signal
+/// (exit status 128 + 25) rather than inheriting the tool host's disposition
+/// and seeing only EFBIG.
+#[test]
+fn a_command_writing_past_the_file_size_limit_dies_of_sigxfsz_while_the_tool_host_ignores_it() {
+    tf_harness_tools::serve::ignore_file_size_signal();
+    let dir = tempfile::TempDir::new().unwrap();
+    let out = execute(
+        dir.path().to_str().unwrap(),
+        &args(serde_json::json!({
+            "command": "ulimit -f 1; head -c 8192 /dev/zero > out; echo \"status $?\""
+        })),
+        &BashOptions::default(),
+    )
+    .unwrap();
+    let text = out.text_output();
+    assert!(text.contains("status 153"), "got: {text}");
+}

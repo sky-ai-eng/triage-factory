@@ -273,6 +273,15 @@ func (a *App) buildExecution() error {
 	} else if floor != delegate.DefaultDispatchMemFloorMB {
 		appLog.Info("dispatch memory floor configured", "floor_mb", floor)
 	}
+	diskFloor, err := delegate.ParseDispatchDiskFloorMB(os.Getenv("TF_DISPATCH_DISK_FLOOR_MB"), a.local())
+	a.spawner.SetDispatchDiskFloor(diskFloor)
+	if err != nil {
+		appLog.Warn("dispatch disk floor", "error", err)
+	} else if diskFloor == 0 && !a.local() {
+		appLog.Warn("dispatch disk guardrail disabled (TF_DISPATCH_DISK_FLOOR_MB=0): a full disk keeps taking runs and parked workspaces are evicted only by idle time")
+	} else if diskFloor > 0 && diskFloor != delegate.DefaultDispatchDiskFloorMultiMB {
+		appLog.Info("dispatch disk floor configured", "floor_mb", diskFloor)
+	}
 	// Advertise what this host's memory supports and flag an over-
 	// provisioned cap at boot, when the operator is watching — a cap the
 	// hardware can never honor deserves a loud line now, not a mystery

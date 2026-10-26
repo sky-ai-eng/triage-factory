@@ -530,6 +530,7 @@ fn serve_connection(stream: UnixStream, cwd: &str) -> io::Result<()> {
 /// here and, because this is the jail's main process, as a non-zero exit the
 /// launcher can report instead of waiting out a timeout.
 pub fn connect_and_serve(socket_path: &Path, cwd: &str) -> io::Result<()> {
+    ignore_file_size_signal();
     let stream = UnixStream::connect(socket_path).map_err(|e| {
         io::Error::new(
             e.kind(),
@@ -537,6 +538,21 @@ pub fn connect_and_serve(socket_path: &Path, cwd: &str) -> io::Result<()> {
         )
     })?;
     serve_connection(stream, cwd)
+}
+
+/// Makes a write past the jail's file-size limit (RLIMIT_FSIZE) a failed write
+/// in this process rather than its death. The tool host spills a command's
+/// output to a file under /tmp, and a command that prints without end grows
+/// that file to the limit; by default the kernel answers that write with
+/// SIGXFSZ, which would end the tool host and with it every later tool call of
+/// the engagement. Ignored, the write fails with EFBIG, which the spill already
+/// handles as lost output. `bash` restores the default in every command it
+/// runs, so a command writing past the limit still ends as it would anywhere
+/// else.
+pub fn ignore_file_size_signal() {
+    unsafe {
+        libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+    }
 }
 
 #[cfg(test)]

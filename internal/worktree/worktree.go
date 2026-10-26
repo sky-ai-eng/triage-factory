@@ -388,7 +388,13 @@ func RepoDir(repositoryID string) (string, error) {
 // rootKey names the id a run root is keyed by — see RunRoot for which id that
 // is, and why this family does not spell it conversationID.
 func runDir(rootKey string) string {
-	return filepath.Join(os.TempDir(), runsDir, rootKey)
+	return filepath.Join(RunsBase(), rootKey)
+}
+
+// RunsBase returns the directory every run tree lives under, without creating
+// it. The dispatcher's disk floor reads the free space of its filesystem.
+func RunsBase() string {
+	return filepath.Join(os.TempDir(), runsDir)
 }
 
 // RunRoot returns the run-root path for a given rootKey, without creating it.
@@ -444,7 +450,7 @@ const runsBaseMode = 0o711
 // whatever umask it ran under. Locally no other identity reaches a run tree,
 // so the base is created owner-only and an existing one keeps the mode it has.
 func EnsureRunsBase() (string, error) {
-	base := filepath.Join(os.TempDir(), runsDir)
+	base := RunsBase()
 	if runmode.Current() != runmode.ModeMulti {
 		if err := os.MkdirAll(base, 0o700); err != nil {
 			return "", fmt.Errorf("mkdir runs base: %w", err)

@@ -193,8 +193,8 @@ func (s *Spawner) runRecovery(ctx context.Context, interval time.Duration) {
 // finished engagement from one still tearing down), then everyone else's. The
 // stranded-run replay runs last.
 //
-// No step waits on any of the claim loop's gates (capacity, the memory gate,
-// the drain, and the identity and partition fences), because each of those
+// No step waits on any of the claim loop's gates (capacity, the memory and
+// disk gates, the drain, and the identity and partition fences), because each of those
 // answers whether this executor may start new work and none of these steps
 // starts any. The own-claim release is the only release a fenced engagement's
 // claim gets short of another executor's takeover a lease later, and in local
@@ -410,6 +410,11 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 		// BEFORE the semaphore acquire so a gated host parks with no
 		// slot held.
 		if s.dispatchMemGated() {
+			return
+		}
+		// Disk guardrail, the same shape: a claimed run writes a tree, so a
+		// disk below the floor takes no more of them.
+		if s.dispatchDiskGated() {
 			return
 		}
 		// Identity fence: a superseded instance identity (another process

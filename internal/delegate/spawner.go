@@ -489,6 +489,16 @@ type Spawner struct {
 	// transition (and only the transition) is logged — a gated host
 	// would otherwise emit a line every scan tick.
 	memGated atomic.Bool
+	// diskFloorMB is the dispatch disk guardrail, memFloorMB's twin for the
+	// filesystems run trees and jails write to (executorDiskAvailableMB):
+	// below it the dispatcher defers claims and parked trees are evicted
+	// ahead of their idle window. Zero disables. Set once at startup via
+	// SetDispatchDiskFloor.
+	diskFloorMB int
+	// diskAvailMB probes that free space (MiB); tests swap in a fake.
+	diskAvailMB func() int
+	// diskGated is memGated's twin for the disk floor.
+	diskGated atomic.Bool
 	// capSaturated tracks whether the dispatcher last found every runSem
 	// slot occupied with runs queued behind it, so the saturation episode
 	// is logged on its transitions only — same rationale as memGated.
@@ -658,6 +668,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		signalApplyWake:       make(chan struct{}, 1),
 		runSem:                make(chan struct{}, DefaultMaxConcurrentClaims),
 		memAvailMB:            hostmem.AvailableMB,
+		diskAvailMB:           executorDiskAvailableMB,
 		snapshotInterval:      DefaultSnapshotInterval,
 	}
 	s.controller = inProcessController{s: s}

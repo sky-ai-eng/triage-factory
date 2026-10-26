@@ -107,7 +107,7 @@ func TestRunDispatcher_RecoveryRunsEveryScanTickWhateverGatesTheClaims(t *testin
 	// settles or replays work no slot and no fresh claim is needed for, and a
 	// fenced or draining executor's own expired claims are released by no one
 	// else short of a takeover a lease later.
-	t.Run("draining_fenced_and_memory_gated", func(t *testing.T) {
+	t.Run("draining_fenced_and_memory_and_disk_gated", func(t *testing.T) {
 		run(t, func(s *Spawner) {
 			s.SetDraining(true)
 			s.identityFenced.Store(true)
@@ -115,6 +115,8 @@ func TestRunDispatcher_RecoveryRunsEveryScanTickWhateverGatesTheClaims(t *testin
 			s.mu.Lock()
 			s.memFloorMB = 1 << 20
 			s.memAvailMB = func() int { return 1 }
+			s.diskFloorMB = 1 << 20
+			s.diskAvailMB = func() int { return 1 }
 			s.mu.Unlock()
 		})
 	})
