@@ -66,9 +66,11 @@ Non-goals:
 
 ## 2. Spike findings
 
-Run 2026-10-25 against github.com (git 2.53.0, OpenSSH 10.2p1). Each case was
-an empty commit pushed on its own branch, read back through
+Two runs against github.com (git 2.53.0, OpenSSH 10.2p1). Each case was an
+empty commit pushed on its own branch, read back through
 `GET /repos/{o}/{r}/commits/{sha}` → `commit.verification`.
+
+Run 2026-10-25:
 
 | case | author | committer | verified | reason |
 | --- | --- | --- | --- | --- |
@@ -81,18 +83,40 @@ an empty commit pushed on its own branch, read back through
 | H | case A, re-read after the key was deleted | — | true | `valid`, `verified_at` unchanged |
 | H | a new case-A commit after the key was deleted | same | false | `unknown_key` |
 
+Run 2026-10-26, a login rename and an unverified address. The account was
+renamed `<old>` → `<new>` and back, about 76 s apart. A swapped round, with
+the names exchanged after the rename back, matched R1–R3.
+
+| case | committer | when | verified | reason |
+| --- | --- | --- | --- | --- |
+| R1 | `<id>+<old>@users.noreply.github.com` | after the rename | true | `valid` |
+| R2 | `<old>@users.noreply.github.com` | after the rename | false | `no_user` |
+| R3 | `<id>+<new>@…` and `<new>@…` | after the rename | true | `valid` |
+| R4 | R2, re-read after the rename back | — | true | `valid`, a new `verified_at` |
+| R5 | a case-B commit pushed before the rename, re-read after it | — | true | `valid`; `committer.login` null |
+| U1 | an address on the account, not verified | — | false | `unverified_email` |
+| U2 | U1, re-read after the address was verified | — | true | `valid` |
+
 What follows from it:
 
 - **Only the committer counts** (E).
-- **Both noreply forms verify** (A, B), so TF can derive the committer email
-  from the account's id and login. No mailbox is needed, and the admin types
-  no email.
-- **Verification is decided at push time and stored** (H). Deleting a key
-  changes no commit already pushed; only later pushes fail, with
-  `unknown_key`. Rotating a key therefore breaks nothing in the history.
-- **An address that belongs to no account fails with `no_user`** (D), not an
-  unverified-email reason. An unverified address that does belong to the
-  account was not tested.
+- **The id form of the noreply address survives a rename; the login-only form
+  does not** (A, B, R1–R3). `<id>+<login>@users.noreply.github.com` verifies
+  with any login the account has held, so TF derives that form. No mailbox is
+  needed, and the admin types no email. `<login>@users.noreply.github.com`
+  verifies only while the login is current.
+- **A passing result is stored at push time; a failing one is evaluated again
+  on every read** (H, R4, R5, U2). Deleting a key changes no verified commit;
+  only later pushes fail, with `unknown_key`, so rotating a key breaks nothing
+  in the history. A commit that failed reads `valid` once the fault is fixed,
+  which Verify relies on (§7).
+- **An address that belongs to no account fails with `no_user`** (D, R2), and
+  one on the account but not verified fails with `unverified_email` (U1). An
+  unverified address still links the commit to the account; only
+  verification needs it verified.
+- **A rename releases the old login at once.** `GET /users/<old>` answered 404
+  straight after, so anyone could claim the name. TF identifies a signer by
+  account id (§5.1), so signing is unaffected.
 - **`GET /users/{login}/ssh_signing_keys` needs no authentication.** It
   returns `[{id, key, title, created_at}]`, with no fingerprint and no
   verified flag, so a match is an exact comparison of the `key` string. It is
@@ -119,15 +143,15 @@ What follows from it:
    requests. The identity does not change with the key's health: a
    signer whose key stops verifying still authors the commits, unsigned.
 4. **The committer email is derived unless the signer sets one.** The
-   default is `<id>+<login>@users.noreply.github.com`, so an admin types no
-   email. A signer may name a real address instead, verified on its account
+   default is `<id>+<login>@users.noreply.github.com`, the form that keeps
+   verifying across a login rename (§2), so an admin types no email. A signer may name a real address instead, verified on its account
    (§2, case C): an org signer through `PATCH commit-signer`, the deployment
    signer through `TF_GITHUB_COMMIT_SIGNER_EMAIL`. A ruleset that requires
    commit emails on the org's domain rejects the noreply address, so for that
    org a real address is the only way to commit at all. A real address also
-   reads better in `git log` and stays the same when the login changes. TF
-   cannot read another account's verified emails, so a wrong address shows up
-   in the post-push check (§7). The address is on every commit, so it should
+   reads better in `git log`. TF cannot read another account's verified
+   emails, so a wrong address shows up in the post-push check, and Verify
+   confirms the fix (§7). The address is on every commit, so it should
    not be the one that recovers the account.
 5. **One signer per org.** The commit identity resolves, in order, to the
    org's signer, then the deployment signer (managed workspaces only), then
@@ -295,7 +319,7 @@ One signature, the same for an org signer and the deployment signer:
    - the claim is still active, at the boot epoch the row names;
    - the org still resolves (§4.6) to the signer the row names, the same kind
      and account, and that signer is `active`;
-   - the claim and the org are within their signing budgets (§10.3).
+   - the claim and the org are within their signing budgets (§10.2).
 
    A sidecar that names a different signer gains nothing: the check passes
    only for the signer the org resolves to now. The pod then reads that
@@ -383,7 +407,7 @@ reaches it as a relay record, like `record_push`. `tf_system` (the executor)
 gets `INSERT`, `SELECT`, and `UPDATE (commit_sha, repository_id, pushed_at)`.
 Org members get `SELECT`.
 
-The signing budgets (§10.3) are counts over these rows, per org and per
+The signing budgets (§10.2) are counts over these rows, per org and per
 claim, so no counter is stored. The same rows give per-signer totals:
 grouping by `signer_host, signer_user_id` totals one account across every org
 that uses it, the deployment signer included.
@@ -455,7 +479,7 @@ Under `/api/orgs/{org_id}/github/`, beside the App and PAT routes:
 | --- | --- | --- |
 | `GET commit-signer` | member | the org's signer, 404 when none |
 | `POST commit-signer` `{login, email?}` | admin | resolve the login on the org's host (must be a user, not a bot), generate the key pair, create the row `pending`; returns the public key and a suggested key title; 409 when the org already has one |
-| `POST commit-signer/verify` | admin | look for the key in the account's public listing: found → `active`; not found → 409 `KEY_NOT_FOUND`, saying the listing can lag a minute |
+| `POST commit-signer/verify` | admin | look for the key in the account's public listing (not found → 409 `KEY_NOT_FOUND`, saying the listing can lag a minute); for a signer the post-push check broke, also re-read the commit that failed (still failing → 409 `COMMIT_UNVERIFIED`, with GitHub's reason); both pass → `active` |
 | `POST commit-signer/rotate` | admin | generate a pending key; the current key keeps signing until `verify` finds the new one, then the new one replaces it |
 | `PATCH commit-signer` `{email}` | admin | `null` restores the derived address |
 | `DELETE commit-signer` | admin | remove the row and its secrets |
@@ -479,7 +503,12 @@ A signer is `pending` until its key is found, `active` while signing, and
 or signs.
 
 1. **Verify** (§6): the admin's action, and the only way out of `broken`
-   apart from the case below.
+   apart from the case below. For a signer the post-push check broke, it also
+   re-reads the commit that failed: the newest `commit_signatures` row for the
+   signer with a failing `verification_reason`. GitHub evaluates a failing
+   result again on every read (§2, cases R4 and U2), so that commit reads
+   `valid` once the fault is fixed. This is how TF confirms an email it cannot
+   see.
 2. **Periodic check**, on the GitHub poll cycle, at most every 15 minutes per
    signer. Using the org's credential, it refreshes the login and name by
    account id and confirms the key is still on the account. A missing key sets
@@ -553,18 +582,13 @@ signature.
 1. **GHES.** The minimum GHES version with SSH commit-signature verification
    and the `ssh_signing_keys` endpoints needs checking before GHES orgs are
    offered signing.
-2. **Login renames.** The derived address contains the login. The periodic
-   check re-derives it, but whether GitHub keeps verifying the old address
-   after a rename is untested. If it does not, a rename makes commits from
-   runs started before the check fail with `no_user` until they finish. A
-   signer with a real address is not affected.
-3. **The signing budget.** Initial values: 600 signatures per minute per org
+2. **The signing budget.** Initial values: 600 signatures per minute per org
    and 5,000 per claim. A rebase of a long branch is the case to size for. The
    limits bound what one compromised or runaway run, or one org, can get
    signed. The deployment signer has no limit of its own: signing costs the
    control plane microseconds and GitHub does not limit signatures, so its
    total is the sum of its orgs', shown in the fleet console (§6).
-4. **Local verification in the jail.** With an allowed-signers file in the
+3. **Local verification in the jail.** With an allowed-signers file in the
    git config, `git log --show-signature` would verify inside a run. Nothing
    needs it yet.
 
@@ -576,8 +600,9 @@ signature.
    signer as committer, which also verifies (§2, case E). One identity on the
    commit, and the same shape as Claude Code's commits.
 4. **A derived noreply address, or a real one** — §3.4, from spike cases A,
-   B and C. Chosen over the noreply address alone, which leaves an org whose
-   rules require its own domain unable to commit.
+   B, C and R1–R3. The id form, because the login-only form stops verifying
+   when the login changes. Chosen over the noreply address alone, which
+   leaves an org whose rules require its own domain unable to commit.
 5. **Every signing key on the control plane** — §3.6. Chosen over sealing
    per-org keys into the bundle for the sidecar to sign with, which saves a
    round trip per commit and keeps commits working while every control pod is
