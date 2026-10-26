@@ -211,18 +211,25 @@ func RunOrgCommitSignerStoreConformance(t *testing.T, mk OrgCommitSignerStoreFac
 				again.PublicKey, again.PendingPublicKey)
 		}
 
-		// A key the row has never held is a rotation staged after the
-		// caller read it, and must not activate.
-		if _, err := store.Activate(ctx, orgID, signerKeyC); !errors.Is(err, db.ErrCommitSignerKeyChanged) {
-			t.Fatalf("Activate with neither key = %v, want ErrCommitSignerKeyChanged", err)
+		// A second rotation before the verify replaces the pending key, so a
+		// verify that found the first one is too late and must not activate
+		// a key nobody has checked.
+		if _, err := store.StagePendingKey(ctx, orgID, signerKeyC); err != nil {
+			t.Fatalf("StagePendingKey (second rotation): %v", err)
+		}
+		if _, err := store.Activate(ctx, orgID, signerKeyB); !errors.Is(err, db.ErrCommitSignerKeyChanged) {
+			t.Fatalf("Activate with the replaced pending key = %v, want ErrCommitSignerKeyChanged", err)
+		}
+		if got, err := read(); err != nil || got == nil || got.PublicKey != signerKeyA || got.PendingPublicKey != signerKeyC {
+			t.Fatalf("after a refused Activate the signer reads %+v (%v), want key A signing and key C pending", got, err)
 		}
 
-		promoted, err := store.Activate(ctx, orgID, signerKeyB)
+		promoted, err := store.Activate(ctx, orgID, signerKeyC)
 		if err != nil {
 			t.Fatalf("Activate (pending key): %v", err)
 		}
 		AssertWriteReturnedStoredRow(t, "Activate (pending key)", promoted, read)
-		if promoted.PublicKey != signerKeyB || promoted.PendingPublicKey != "" {
+		if promoted.PublicKey != signerKeyC || promoted.PendingPublicKey != "" {
 			t.Errorf("Activate on the pending key: key %q pending %q, want the pending key promoted and the rotation over",
 				promoted.PublicKey, promoted.PendingPublicKey)
 		}
@@ -514,6 +521,13 @@ func RunCommitSignatureStoreConformance(t *testing.T, mk CommitSignatureStoreFac
 		}
 		if _, err := store.SetCommitSHASystem(ctx, orgID, uuid.New().String(), commitSHA); !errors.Is(err, db.ErrNoSuchCommitSignature) {
 			t.Errorf("SetCommitSHASystem on an unknown id = %v, want ErrNoSuchCommitSignature", err)
+		}
+		fresh, err := store.InsertSystem(ctx, signed(orgID, conversationID, claimID, time.Now()))
+		if err != nil {
+			t.Fatalf("InsertSystem (fresh): %v", err)
+		}
+		if _, err := store.SetCommitSHASystem(ctx, orgID, fresh.ID, ""); !errors.Is(err, db.ErrNoSuchCommitSignature) {
+			t.Errorf("SetCommitSHASystem with no commit id = %v, want ErrNoSuchCommitSignature", err)
 		}
 	})
 

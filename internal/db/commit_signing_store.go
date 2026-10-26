@@ -81,7 +81,9 @@ type OrgCommitSignerStore interface {
 	// rotation ends. status_since moves only when the status changes;
 	// checked_at is stamped either way. A publicKey that is neither of the
 	// signer's keys gets ErrCommitSignerKeyChanged, so a rotation staged
-	// after the caller read the row is never activated unverified.
+	// after the caller read the row is never activated unverified; a caller
+	// the write policy refuses gets ErrNoSuchOrgCommitSigner, as from the
+	// other writes.
 	Activate(ctx context.Context, orgID, publicKey string) (domain.OrgCommitSigner, error)
 
 	// Delete removes the org's signer. ErrNoSuchOrgCommitSigner when it has
@@ -182,6 +184,18 @@ func ScanUpdatedOrgCommitSigner(scan func(...any) error) (domain.OrgCommitSigner
 		return domain.OrgCommitSigner{}, ErrNoSuchOrgCommitSigner
 	}
 	return out, err
+}
+
+// ActivateMiss is Activate's answer when its UPDATE matched no row, given the
+// signer a follow-up read found. Only a signer that holds neither key is a
+// rotation staged after the caller read it. A signer that still holds the key
+// was out of the statement's reach, as RLS keeps it from a member who is not
+// an org admin, and that reads as every other refused signer write does.
+func ActivateMiss(current *domain.OrgCommitSigner, publicKey string) error {
+	if current != nil && current.PublicKey != publicKey && current.PendingPublicKey != publicKey {
+		return ErrCommitSignerKeyChanged
+	}
+	return ErrNoSuchOrgCommitSigner
 }
 
 // ValidateNewOrgCommitSigner is Create's refusal for a signer that names no

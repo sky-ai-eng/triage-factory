@@ -102,16 +102,11 @@ func (s *orgCommitSignerStore) Activate(ctx context.Context, orgID, publicKey st
 	if !errors.Is(err, db.ErrNoSuchOrgCommitSigner) {
 		return row, err
 	}
-	// The miss is either no signer or keys that moved since the caller read
-	// them; only the second is worth a verify again.
 	current, getErr := getOrgCommitSigner(ctx, s.q, orgID)
 	if getErr != nil {
 		return domain.OrgCommitSigner{}, getErr
 	}
-	if current != nil {
-		return domain.OrgCommitSigner{}, db.ErrCommitSignerKeyChanged
-	}
-	return domain.OrgCommitSigner{}, db.ErrNoSuchOrgCommitSigner
+	return domain.OrgCommitSigner{}, db.ActivateMiss(current, publicKey)
 }
 
 func (s *orgCommitSignerStore) Delete(ctx context.Context, orgID string) error {

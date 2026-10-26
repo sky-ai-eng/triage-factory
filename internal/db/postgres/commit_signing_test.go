@@ -164,6 +164,11 @@ func TestOrgCommitSignerStore_Postgres_MemberReadsAdminWrites(t *testing.T) {
 		if _, err := store.StagePendingKey(t.Context(), orgID, "ssh-ed25519 AAAAmember"); !errors.Is(err, db.ErrNoSuchOrgCommitSigner) {
 			t.Errorf("member StagePendingKey = %v, want ErrNoSuchOrgCommitSigner", err)
 		}
+		// The key is the signer's own, so the miss is the policy's, not a
+		// rotation that moved the keys.
+		if _, err := store.Activate(t.Context(), orgID, pgSignerKey); !errors.Is(err, db.ErrNoSuchOrgCommitSigner) {
+			t.Errorf("member Activate = %v, want ErrNoSuchOrgCommitSigner", err)
+		}
 		if err := store.Delete(t.Context(), orgID); !errors.Is(err, db.ErrNoSuchOrgCommitSigner) {
 			t.Errorf("member Delete = %v, want ErrNoSuchOrgCommitSigner", err)
 		}
@@ -176,7 +181,7 @@ func TestOrgCommitSignerStore_Postgres_MemberReadsAdminWrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSystem: %v", err)
 	}
-	if got == nil || got.EmailOverride != "" || got.PendingPublicKey != "" {
+	if got == nil || got.EmailOverride != "" || got.PendingPublicKey != "" || got.Status != domain.CommitSignerPending {
 		t.Errorf("after the member's writes the signer reads %+v, want it as the admin left it", got)
 	}
 
