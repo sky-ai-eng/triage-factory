@@ -95,11 +95,16 @@ func currentArchRootfs() (url, sha string, err error) {
 //   - make — ubiquitous in build flows.
 //   - curl — ubiquitous, tiny, expected.
 //   - openssh-client — git over SSH and any tooling that calls ssh.
+//   - openssh-keygen — ssh-keygen, which the githooks ssh-sign shim hands
+//     every signature check to, so git verify-commit and git log
+//     --show-signature work on a signing run's commits. Named rather than
+//     left to openssh-client's dependencies, because the shim calls it
+//     directly.
 //   - build-base — gcc + make + musl-dev; required for native deps
 //     (node-gyp, cgo, anything that compiles at install time).
 var apkPackages = []string{
 	"nodejs", "npm", "git", "ripgrep", "bash", "ca-certificates",
-	"python3", "go", "make", "curl", "openssh-client", "build-base",
+	"python3", "go", "make", "curl", "openssh-client", "openssh-keygen", "build-base",
 }
 
 // pnpmVersion pins the pnpm release that installToolchain bakes into
