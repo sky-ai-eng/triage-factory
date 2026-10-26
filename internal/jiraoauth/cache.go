@@ -136,17 +136,18 @@ func (c *TokenCache) AccessTokenForUser(ctx context.Context, orgID, userID, host
 // refresh mints a fresh access token off the stored refresh token (refreshOnce)
 // and answers a refresh token Atlassian refused with invalid_grant.
 //
-// A refused token is dead for good, so the credential holding it is removed
-// and the refusal returned as jira.ErrJiraUserCredentialRefused: the user's
-// connection then reads as not connected, which is what has to happen for
-// them to connect again. It is removed only while it still holds the refused
-// token. The singleflight covers one process, and another one refreshing the
-// same user rotates the token under this one, which Atlassian then refuses
-// here; the credential it stored is live, so the refresh is tried once more
-// with it instead. A refusal that loses to a rotation again is one this
-// refresh cannot settle. It is still the user's credential and not the org's
-// OAuth app, so it gets the same answer, and connecting again replaces
-// whatever is stored by then.
+// A token refused by the app that issued it (or, for a credential that does
+// not record its app, by every app the org can authenticate as) is dead for
+// good, so the credential holding it is removed and the refusal returned as
+// jira.ErrJiraUserCredentialRefused: the user's connection then reads as not
+// connected, which is what has to happen for them to connect again. It is
+// removed only while it still holds the refused token. The singleflight covers
+// one process, and another one refreshing the same user rotates the token
+// under this one, which Atlassian then refuses here; the credential it stored
+// is live, so the refresh is tried once more with it instead. A refusal that
+// loses to a rotation again is one this refresh cannot settle. It is still the
+// user's credential and not the org's OAuth app, so it gets the same answer,
+// and connecting again replaces whatever is stored by then.
 func (c *TokenCache) refresh(ctx context.Context, orgID, userID, host, key string) (cachedToken, error) {
 	for attempt := 0; ; attempt++ {
 		ct, raw, err := c.refreshOnce(ctx, orgID, userID, host, key)
@@ -179,10 +180,34 @@ func refusedGrant(err error) bool {
 	return errors.As(err, &se) && se.Op == opToken && se.Code == "invalid_grant"
 }
 
+// mayBelongToAnotherClient reports whether err is an answer the token
+// endpoint gives a refresh token presented by a client other than the one it
+// was issued to. RFC 6749 §5.2 names invalid_grant for it, and an endpoint may
+// instead refuse the client with invalid_client or unauthorized_client.
+func mayBelongToAnotherClient(err error) bool {
+	var se *StatusError
+	if !errors.As(err, &se) || se.Op != opToken {
+		return false
+	}
+	switch se.Code {
+	case "invalid_grant", "invalid_client", "unauthorized_client":
+		return true
+	}
+	return false
+}
+
 // refreshOnce reads the stored envelope, mints a fresh access token off its
-// refresh token with the org's OAuth app, persists the rotated refresh token
-// back, and caches the result with the app that minted it. raw is the envelope
-// it read, for refresh to remove when the token in it was refused.
+// refresh token with the OAuth app that issued it, persists the rotated
+// refresh token back with that app's client ID, and caches the result with
+// the app that minted it. raw is the envelope it read, for refresh to remove
+// when the token in it was refused.
+//
+// Atlassian accepts a refresh token only from the app that issued it, so the
+// app is the one the envelope's client_id names, not whichever app the org
+// resolves now. When the org can no longer authenticate as that app, the
+// answer is jira.ErrJiraUserCredentialAppRemoved and the credential is kept,
+// so configuring the same app again brings it back. An envelope with no
+// client_id is refreshed by refreshUnattributed.
 func (c *TokenCache) refreshOnce(ctx context.Context, orgID, userID, host, key string) (_ cachedToken, raw string, _ error) {
 	raw, err := c.secrets.GetUserSystem(ctx, orgID, userID, jira.UserTokenKey(host))
 	if err != nil {
@@ -199,23 +224,37 @@ func (c *TokenCache) refreshOnce(ctx context.Context, orgID, userID, host, key s
 		return cachedToken{}, raw, fmt.Errorf("jiraoauth: stored credential is not a usable cloud oauth credential (method=%q)", cred.Method)
 	}
 
-	app, source, err := c.apps.Resolve(ctx, orgID)
-	if err != nil {
-		return cachedToken{}, raw, fmt.Errorf("jiraoauth: resolve oauth app: %w", err)
+	var (
+		tok    Token
+		app    jira.OAuthApp
+		source jira.OAuthAppSource
+	)
+	if cred.ClientID != "" {
+		app, source, err = c.apps.ResolveClient(ctx, orgID, cred.ClientID)
+		if errors.Is(err, jira.ErrNoAtlassianOAuthApp) {
+			return cachedToken{}, raw, fmt.Errorf("%w: org=%s user=%s host=%s client_id=%s",
+				jira.ErrJiraUserCredentialAppRemoved, orgID, userID, host, cred.ClientID)
+		}
+		if err != nil {
+			return cachedToken{}, raw, fmt.Errorf("jiraoauth: resolve oauth app: %w", err)
+		}
+		tok, err = c.minter.Refresh(ctx, app, cred.RefreshToken)
+	} else {
+		tok, app, source, err = c.refreshUnattributed(ctx, orgID, userID, host, cred.RefreshToken)
 	}
-
-	tok, err := c.minter.Refresh(ctx, app, cred.RefreshToken)
 	if err != nil {
 		return cachedToken{}, raw, err
 	}
 
 	// Rotation write-back — the load-bearing step. Persist the NEW refresh
-	// token (preserving cloud_id) before caching the access token, so a crash
-	// after this point still leaves a live credential for the next refresh.
-	// PutUserSystem (not PutUser): the cache runs on the claims-free system
-	// pool, the write-side mirror of the GetUserSystem read above.
+	// token (preserving cloud_id) and the app that issued it before caching
+	// the access token, so a crash after this point still leaves a live
+	// credential for the next refresh. PutUserSystem (not PutUser): the cache
+	// runs on the claims-free system pool, the write-side mirror of the
+	// GetUserSystem read above.
 	rotated := cred
 	rotated.RefreshToken = tok.RefreshToken
+	rotated.ClientID = app.ClientID
 	env, err := jira.MarshalUserCredential(rotated)
 	if err != nil {
 		return cachedToken{}, raw, fmt.Errorf("jiraoauth: marshal rotated credential: %w", err)
@@ -232,6 +271,49 @@ func (c *TokenCache) refreshOnce(ctx context.Context, orgID, userID, host, key s
 	c.cache[key] = ct
 	c.mu.Unlock()
 	return ct, raw, nil
+}
+
+// refreshUnattributed refreshes a token whose envelope does not record the app
+// that issued it, trying each app the org can authenticate as, in Resolve's
+// order, until one succeeds. An answer that the token may be another client's
+// moves on to the next app; any other failure is returned at once, as it is
+// for a token whose app is known.
+//
+// When every app refuses it, the error returned is an invalid_grant only if
+// every app answered invalid_grant, so refresh removes the credential only
+// then. Otherwise the answer that was not invalid_grant is returned and the
+// credential is kept. With no app configured at all, the app that issued the
+// token is not configured either.
+func (c *TokenCache) refreshUnattributed(ctx context.Context, orgID, userID, host, refreshToken string) (Token, jira.OAuthApp, jira.OAuthAppSource, error) {
+	apps, err := c.apps.Candidates(ctx, orgID)
+	if err != nil {
+		return Token{}, jira.OAuthApp{}, jira.SourceNone, fmt.Errorf("jiraoauth: resolve oauth app: %w", err)
+	}
+	if len(apps) == 0 {
+		return Token{}, jira.OAuthApp{}, jira.SourceNone, fmt.Errorf("%w: org=%s user=%s host=%s",
+			jira.ErrJiraUserCredentialAppRemoved, orgID, userID, host)
+	}
+	var refused, other error
+	for _, cand := range apps {
+		tok, err := c.minter.Refresh(ctx, cand.App, refreshToken)
+		if err == nil {
+			return tok, cand.App, cand.Source, nil
+		}
+		if !mayBelongToAnotherClient(err) {
+			return Token{}, jira.OAuthApp{}, jira.SourceNone, err
+		}
+		if refusedGrant(err) {
+			if refused == nil {
+				refused = err
+			}
+		} else if other == nil {
+			other = err
+		}
+	}
+	if other != nil {
+		return Token{}, jira.OAuthApp{}, jira.SourceNone, other
+	}
+	return Token{}, jira.OAuthApp{}, jira.SourceNone, refused
 }
 
 // Invalidate drops any cached access token for the user — call after a

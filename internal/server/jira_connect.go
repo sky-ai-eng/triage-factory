@@ -106,6 +106,10 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 		account    string
 		host       string
 		deployment string
+		// oauthClientID is the app that issued a connected Cloud OAuth
+		// credential, empty for any other credential or one that does not
+		// record its app.
+		oauthClientID string
 	)
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		orgSet, lerr := tx.Orgs.GetSettings(r.Context(), orgID)
@@ -163,6 +167,9 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 		if !connected {
 			return nil
 		}
+		if cred.Method == jira.AuthMethodCloudOAuth {
+			oauthClientID = cred.ClientID
+		}
 
 		// Identity (user_jira_identities) is host-scoped, keyed on
 		// the same canonical host the credential is stored under — read it
@@ -181,6 +188,25 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 	}); err != nil {
 		internalError(w, "jira-identity", err)
 		return
+	}
+
+	// A Cloud OAuth refresh token is accepted only from the app that issued
+	// it: once the org can no longer authenticate as that app, the credential
+	// cannot be refreshed and the user has to connect again. A credential that
+	// does not record its app reports as usable; its next refresh tries each
+	// app the org has. The resolver reads outside the transaction above,
+	// because local mode's database has a single connection.
+	if connected && oauthClientID != "" {
+		_, _, err := s.jiraOAuthApps.ResolveClient(r.Context(), orgID, oauthClientID)
+		switch {
+		case errors.Is(err, jira.ErrNoAtlassianOAuthApp):
+			connected, account = false, ""
+		case err != nil:
+			// Whether the credential still works is unknown, so the read
+			// fails rather than report either answer.
+			internalError(w, "jira-identity", err)
+			return
+		}
 	}
 
 	// connect_available is true exactly when an Atlassian OAuth app resolves
@@ -544,9 +570,9 @@ func (s *Server) handleJiraConnectStart(w http.ResponseWriter, r *http.Request) 
 // the code for {access, refresh} tokens, resolve the cloud_id by matching the
 // org's configured site against accessible-resources, derive the bound account
 // from /myself, and store the rotating refresh token as the per-user credential
-// envelope ({method:cloud_oauth, cloud_id, refresh_token}). The access token is
-// never stored. On any failure it redirects back to the gate page with a
-// distinguishing error code.
+// envelope ({method:cloud_oauth, cloud_id, refresh_token, client_id}). The
+// access token is never stored. On any failure it redirects back to the gate
+// page with a distinguishing error code.
 //
 // GET /api/orgs/{org_id}/jira/connect/callback?code=...&state=...
 func (s *Server) handleJiraConnectCallback(w http.ResponseWriter, r *http.Request) {
@@ -658,10 +684,13 @@ func (s *Server) handleJiraConnectCallback(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// The app the code was exchanged with issued the refresh token, and only
+	// it can refresh it, so the envelope names it.
 	envelope, err := jira.MarshalUserCredential(jira.UserCredential{
 		Method:       jira.AuthMethodCloudOAuth,
 		CloudID:      cloudID,
 		RefreshToken: tok.RefreshToken,
+		ClientID:     app.ClientID,
 	})
 	if err != nil {
 		internalError(w, "jira-connect", err)

@@ -21,6 +21,14 @@ import {
   type JiraAppStatus,
 } from '../../lib/jiraApp'
 
+// A Jira connection is refreshed only by the app it was made through, so
+// removing or replacing the workspace's own app sends everyone who connected
+// through it back to Connect. Rotating the same app's secret does not.
+const removeConfirm =
+  "Remove this Atlassian OAuth app? Anyone who connected Jira through it will have to connect again, and one-click Connect will use the deployment's app if there is one."
+const replaceConfirm =
+  'Replace this Atlassian OAuth app? Anyone who connected Jira through it will have to connect again.'
+
 export default function AtlassianOAuthAppCard({ orgId }: { orgId: string }) {
   const [status, setStatus] = useState<JiraAppStatus | null>(null)
   const [clientId, setClientId] = useState('')
@@ -65,6 +73,8 @@ export default function AtlassianOAuthAppCard({ orgId }: { orgId: string }) {
 
   const submit = async () => {
     if (!canSubmit) return
+    const storedClientId = status?.app?.client_id
+    if (storedClientId && storedClientId !== idTrim && !window.confirm(replaceConfirm)) return
     setBusy(true)
     setError(null)
     const outcome = await importJiraApp(orgId, { client_id: idTrim, client_secret: secretTrim })
@@ -82,13 +92,7 @@ export default function AtlassianOAuthAppCard({ orgId }: { orgId: string }) {
 
   const remove = async () => {
     if (busy) return
-    if (
-      !window.confirm(
-        'Remove this Atlassian OAuth app? The one-click Connect option will stop working unless a deployment app covers your workspace.',
-      )
-    ) {
-      return
-    }
+    if (!window.confirm(removeConfirm)) return
     setBusy(true)
     setError(null)
     try {
