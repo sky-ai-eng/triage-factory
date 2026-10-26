@@ -33,20 +33,29 @@ func MarshalPrivateKey(key ed25519.PrivateKey) ([]byte, error) {
 }
 
 // ParsePrivateKey decodes an unencrypted PEM private key, the form
-// MarshalPrivateKey writes. A key of any type but ed25519 is refused.
+// MarshalPrivateKey writes. A key of any type but ed25519 is refused, and so
+// is one whose public half does not match its seed.
 func ParsePrivateKey(data []byte) (ed25519.PrivateKey, error) {
 	raw, err := ssh.ParseRawPrivateKey(data)
 	if err != nil {
 		return nil, fmt.Errorf("commitsign: parse private key: %w", err)
 	}
-	switch key := raw.(type) {
+	var key ed25519.PrivateKey
+	switch k := raw.(type) {
 	case *ed25519.PrivateKey:
-		return *key, nil
+		key = *k
 	case ed25519.PrivateKey:
-		return key, nil
+		key = k
 	default:
 		return nil, fmt.Errorf("commitsign: private key is %T, want ed25519", raw)
 	}
+	// An ed25519 private key stores its public half beside the seed, and
+	// ed25519.Sign uses the stored half without deriving it, so a key whose
+	// halves disagree signs without error and nothing verifies the result.
+	if len(key) != ed25519.PrivateKeySize || !key.Equal(ed25519.NewKeyFromSeed(key.Seed())) {
+		return nil, fmt.Errorf("commitsign: private key's public half does not match its seed")
+	}
+	return key, nil
 }
 
 // PublicKey returns key's public half as "ssh-ed25519 AAAA…" with no comment:

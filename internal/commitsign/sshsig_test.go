@@ -252,6 +252,18 @@ func TestParsePrivateKeyRefusesOtherKeys(t *testing.T) {
 	}
 }
 
+func TestParsePrivateKeyRefusesMismatchedPublicHalf(t *testing.T) {
+	key := mustKey(t)
+	key[len(key)-1] ^= 0xff
+	data, err := MarshalPrivateKey(key)
+	if err != nil {
+		t.Fatalf("MarshalPrivateKey: %v", err)
+	}
+	if _, err := ParsePrivateKey(data); err == nil {
+		t.Fatal("ParsePrivateKey accepted a key whose public half does not match its seed")
+	}
+}
+
 func TestParseDigest(t *testing.T) {
 	d := DigestOf([]byte(testPayload))
 	got, err := ParseDigest(d.String())
