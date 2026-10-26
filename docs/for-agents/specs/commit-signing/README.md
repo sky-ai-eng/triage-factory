@@ -63,6 +63,9 @@ Non-goals:
 - **Renaming the bot on pull requests, reviews and comments.** Those are the
   App's actions, and GitHub shows them as the App. Making them as the signer
   would take a user token for the signer's account.
+- **Checking other people's signatures inside a run.** The allowed-signers
+  file (§4.2) names only the run's signer. GitHub's API answers for anyone
+  else's commits.
 
 ## 2. Spike findings
 
@@ -236,6 +239,7 @@ gpg.format=ssh
 commit.gpgsign=true
 user.signingkey=key::<signer public key>
 gpg.ssh.program=<hooks dir>/ssh-sign
+gpg.ssh.allowedSignersFile=<allowed-signers path>
 ```
 
 `user.name` / `user.email` are the identity TFAC-1187 already stamps; the
@@ -244,9 +248,25 @@ or its login when the profile has none. GitHub shows a commit linked to an
 account under the account's login and avatar, and the name is what `git log`,
 blame in an editor, and other git tools show. Claude Code's commits split the
 same way: `Claude` in git, `claude` on GitHub. A login cannot contain a space,
-so a name like "Triage Factory" exists only as the profile name. Git config keys pass the sandbox env
-allowlist through the `GIT_CONFIG_KEY_` / `GIT_CONFIG_VALUE_` prefixes, so the
-allowlist does not change.
+so a name like "Triage Factory" exists only as the profile name. Git config
+keys pass the sandbox env allowlist through the `GIT_CONFIG_KEY_` /
+`GIT_CONFIG_VALUE_` prefixes, so the allowlist does not change.
+
+The allowed-signers file lets git inside the run check the run's own
+commits: `git verify-commit`, `git log --show-signature`, and repository
+tooling that calls them. Without it every local check fails with
+`gpg.ssh.allowedSignersFile needs to be configured`, signed or not. It holds
+one line per key, `<signer email> namespaces="git" <public key>`, for the
+signer's key and, during a rotation, its pending key, so a run that started
+before `verify` promotes the new key still checks its later commits. The
+file holds only public values. It is presented read-only, like the run's CA
+bundle: in multi mode the sidecar writes it into the run's socket directory
+beside `ca-bundle.crt` and the jail sees it at `/run/tf-allowed-signers`; in
+local mode TF writes it under the state root and the local sandbox binds it
+read-only. A run therefore cannot add a key to make its own check pass,
+although the check gates nothing: GitHub and the daemon's check (§4.3) do.
+Commits signed by anyone else still fail locally with "No principal
+matched"; GitHub's API reports their verification.
 
 The shim is a script embedded in `internal/githooks` beside `pre-push` and
 `prepare-commit-msg`. `githooks.Ensure` writes it to the host hooks dir, which
@@ -449,8 +469,9 @@ before signing and the fleet console shows it.
 Signer *SignerCreds `json:"signer,omitempty"`
 
 type SignerCreds struct {
-	Mode      string `json:"mode"` // "org" | "deployment"
-	PublicKey string `json:"public_key"`
+	Mode             string `json:"mode"` // "org" | "deployment"
+	PublicKey        string `json:"public_key"`
+	PendingPublicKey string `json:"pending_public_key,omitempty"` // during a rotation
 }
 ```
 
@@ -581,13 +602,13 @@ required" refusal both depend on it.
 `ssh-keygen` test; the shim and `exec git sign`; the daemon check; the
 `org_commit_signers` and `commit_signatures` tables in both dialects; the
 secrets; the API, including the host checks (§3.4, §6); the settings
-section; the audit rows (§5.6). Local mode needs git ≥ 2.34: below that the
+section; the audit rows (§5.6); the allowed-signers file (§4.2). Local mode needs git ≥ 2.34: below that the
 run commits as the signer, unsigned, and `GET commit-identity` says why. (L)
 
 **Phase 2 — Multi, per-org.** Sealing the signer's public half into the
 bundle; the `sign_digest` relay call, the request flow and doorbells, and the
 budget; signing on the control plane from the secret store; relaying the
-commit id. The jail's git is Alpine 3.21's (`internal/sandbox/rootfs.go`),
+commit id; the allowed-signers file and its read-only mount. The jail's git is Alpine 3.21's (`internal/sandbox/rootfs.go`),
 well past 2.34. (L)
 
 **Phase 3 — The deployment signer.** The control-pod config, the
@@ -615,9 +636,6 @@ signature.
    signed. The deployment signer has no limit of its own: signing costs the
    control plane microseconds and GitHub does not limit signatures, so its
    total is the sum of its orgs', shown in the fleet console (§6).
-3. **Local verification in the jail.** With an allowed-signers file in the
-   git config, `git log --show-signature` would verify inside a run. Nothing
-   needs it yet.
 
 ## 11. Decision log
 
@@ -661,6 +679,10 @@ signature.
     without hook deliveries.
 12. **A real address off github.com** — §3.4. Chosen over deriving one for
     every host: GHES has no noreply address, and GHE.com's is not documented.
+13. **The run's own signer in an allowed-signers file** — §4.2. Chosen over
+    none, which fails repository tooling that runs `git verify-commit` on
+    TF's own commits, and over every contributor's keys, which GitHub's API
+    already answers for.
 
 ## Related
 
