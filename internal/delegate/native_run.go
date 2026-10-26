@@ -216,6 +216,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		SidecarEndpoints: cfg.sidecar.jailEndpoints(),
 		AgentHostSocket:  agenthost.SocketPathFor(conversationID),
 		CABundle:         agenthost.CABundlePathFor(conversationID),
+		AllowedSigners:   agenthost.AllowedSignersPathFor(conversationID),
 		GHChannel:        cellGHChannel(cfg.sidecar.ghChannel()),
 		SkillsSource:     cfg.skillsSourcePath,
 		MemorySource:     cfg.memorySourcePath,

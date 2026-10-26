@@ -6376,6 +6376,8 @@ GRANT SELECT, DELETE ON TABLE public.claim_credentials TO tf_system;
 -- current key. digest is the hex SHA-512 of the commit payload, all the
 -- control plane ever sees of the commit. retry_after_seconds is set on a
 -- refusal by the org's per-minute budget: how long until it admits another.
+-- refusal_limit is set on a refusal by either budget: the limit it ran into,
+-- read on the control pod that refused, which the run's refusal line names.
 -- commit_sha is the commit id the signature produced; repository_id and
 -- pushed_at are stamped when a push lands that commit as a ref's new tip, and
 -- verification_reason / checked_at hold GitHub's answer for it. signer, state
@@ -6394,6 +6396,7 @@ CREATE TABLE public.commit_signatures (
     state               text NOT NULL,
     refusal_reason      text,
     retry_after_seconds integer,
+    refusal_limit       integer,
     signature           text,
     claimed_by          text,
     signed_at           timestamp with time zone,

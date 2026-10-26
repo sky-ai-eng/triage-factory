@@ -128,6 +128,14 @@ func mintActionDedupKey(ctx context.Context, info ConversationInfo, act *domain.
 	act.DedupKey = uuid.NewString()
 }
 
+// mintDedupKey is mintActionDedupKey's key for a ledger row built outside this
+// package, whose writer takes the key as given.
+func mintDedupKey(ctx context.Context, info ConversationInfo) string {
+	act := &domain.ExternalAction{}
+	mintActionDedupKey(ctx, info, act)
+	return act.DedupKey
+}
+
 // recordWriteDrop accounts for a record lost at the write stage, cause being
 // the error that lost it. Outside a relayed record it is counted at once. In
 // one, it is held until the application's outcome is known, and a retryable

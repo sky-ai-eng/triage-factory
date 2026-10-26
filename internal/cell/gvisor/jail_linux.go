@@ -412,7 +412,8 @@ func prepareToolHostSocket(conversationID string) (string, net.Listener, error) 
 
 // toolHostMounts assembles the jail's bind mounts: the tool host binary and
 // the socket directory it needs, the TF binary under both names, the
-// exec-verb socket, the run's CA bundle, the git-hooks directory, the gh
+// exec-verb socket, the run's CA bundle and allowed-signers file, the
+// git-hooks directory, the gh
 // channel's pinned binary, and this launch's staged skill and memory.
 func toolHostMounts(sockDir string, spec cell.LaunchSpec) ([]sandbox.Mount, error) {
 	if _, err := os.Stat(hostToolHostBinaryPath); err != nil {
@@ -431,6 +432,11 @@ func toolHostMounts(sockDir string, spec cell.LaunchSpec) ([]sandbox.Mount, erro
 		// Mounted unconditionally for the same reason: the sidecar wrote it
 		// during bring-up, and the broker validates the source.
 		{Source: spec.CABundle, Destination: sandbox.TrustedCABundleDestination, Options: []string{"ro"}},
+	}
+	// Read-only, like the CA bundle and for the same reason: it is a file the
+	// sidecar wrote for the run to read, and the broker validates its source.
+	if spec.AllowedSigners != "" {
+		mounts = append(mounts, sandbox.Mount{Source: spec.AllowedSigners, Destination: sandbox.TrustedAllowedSignersDestination, Options: []string{"ro"}})
 	}
 	if selfBin, err := os.Executable(); err == nil && selfBin != "" {
 		mounts = append(mounts,

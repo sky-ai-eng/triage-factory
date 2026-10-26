@@ -297,23 +297,20 @@ func (s *commitSignatureStore) SignSystem(ctx context.Context, orgID, id, claime
 	return row, err
 }
 
-func (s *commitSignatureStore) RefuseSystem(ctx context.Context, orgID, id, claimedBy, reason string, retryAfterSeconds int) (domain.CommitSignature, error) {
-	if err := db.ValidateCommitSignatureRefusal(reason, retryAfterSeconds); err != nil {
+func (s *commitSignatureStore) RefuseSystem(ctx context.Context, orgID, id, claimedBy string, refusal db.CommitSignatureRefusal) (domain.CommitSignature, error) {
+	if err := db.ValidateCommitSignatureRefusal(refusal); err != nil {
 		return domain.CommitSignature{}, err
 	}
 	if !isValidUUID(id) {
 		return domain.CommitSignature{}, db.ErrNoSuchCommitSignature
 	}
-	var retryAfter any
-	if retryAfterSeconds > 0 {
-		retryAfter = retryAfterSeconds
-	}
+	retryAfter, limit := refusal.Columns()
 	row, err := db.ScanCommitSignature(s.q.QueryRowContext(ctx, `
-		UPDATE commit_signatures SET state = $5, refusal_reason = $6, retry_after_seconds = $7
+		UPDATE commit_signatures SET state = $5, refusal_reason = $6, retry_after_seconds = $7, refusal_limit = $8
 		 WHERE org_id = $1 AND id = $2 AND state = $3 AND claimed_by = $4
 		RETURNING `+db.CommitSignatureColumns,
 		orgID, id, string(domain.CommitSignatureSigning), claimedBy,
-		string(domain.CommitSignatureRefused), reason, retryAfter).Scan)
+		string(domain.CommitSignatureRefused), refusal.Reason, retryAfter, limit).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.CommitSignature{}, db.ErrNoSuchCommitSignature
 	}

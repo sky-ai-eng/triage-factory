@@ -206,6 +206,7 @@ func (r *Requester) await(ctx context.Context, orgID, id string, ring <-chan str
 				SignatureID:       id,
 				Refusal:           Refusal(row.RefusalReason),
 				RetryAfterSeconds: row.RetryAfterSeconds,
+				Limit:             row.RefusalLimit,
 			}, nil
 		}
 		select {

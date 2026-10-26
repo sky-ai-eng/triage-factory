@@ -387,8 +387,9 @@ func TestControlPlane_EnforcesTheClaimBudget(t *testing.T) {
 		req := f.request(t, domain.CommitSigningOrg, 1, "tree budget\n")
 		cp.Handle(context.Background(), f.orgID, req.ID)
 		got := f.row(t, req.ID)
-		if got.State != domain.CommitSignatureRefused || Refusal(got.RefusalReason) != RefusalClaimBudget || got.RetryAfterSeconds != 0 {
-			t.Errorf("request %d = state %q reason %q retry %d, want refused claim_budget with no retry", i, got.State, got.RefusalReason, got.RetryAfterSeconds)
+		if got.State != domain.CommitSignatureRefused || Refusal(got.RefusalReason) != RefusalClaimBudget || got.RetryAfterSeconds != 0 || got.RefusalLimit != 2 {
+			t.Errorf("request %d = state %q reason %q retry %d limit %d, want refused claim_budget at its limit of 2 with no retry",
+				i, got.State, got.RefusalReason, got.RetryAfterSeconds, got.RefusalLimit)
 		}
 	}
 	denials := f.denials(t)
@@ -426,6 +427,9 @@ func TestControlPlane_EnforcesTheOrgMinuteBudget(t *testing.T) {
 	}
 	if got.RetryAfterSeconds != 10 {
 		t.Errorf("retry after = %ds, want 10: the signature made 50s ago leaves the window in 10s", got.RetryAfterSeconds)
+	}
+	if got.RefusalLimit != 3 {
+		t.Errorf("refusal limit = %d, want the per-minute budget of 3", got.RefusalLimit)
 	}
 	if d := f.denials(t); len(d) != 0 {
 		t.Errorf("the per-minute budget recorded %d commit_sign_denied rows, want none", len(d))
@@ -574,8 +578,8 @@ func TestRequester_ReadsADecisionWhoseDoorbellWasDropped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
-	if res.Outcome != OutcomeRefused || res.Refusal != RefusalOrgMinuteBudget || res.RetryAfterSeconds < 29 || res.RetryAfterSeconds > 31 {
-		t.Errorf("result = %+v, want refused org_minute_budget with about 30s to wait", res)
+	if res.Outcome != OutcomeRefused || res.Refusal != RefusalOrgMinuteBudget || res.RetryAfterSeconds < 29 || res.RetryAfterSeconds > 31 || res.Limit != 1 {
+		t.Errorf("result = %+v, want refused org_minute_budget at its limit of 1 with about 30s to wait", res)
 	}
 }
 

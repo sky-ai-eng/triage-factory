@@ -417,6 +417,14 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	if auditHost != nil {
 		auditHost.SetGitHubCredential(res.GitHubCredential)
 	}
+	// The signer the sidecar configured the jail's git to sign as, read off
+	// the same bundle: the run's pushes are counted as a signing org's by it,
+	// since nothing on this side can read the org's signer.
+	sealedSigner := domain.CommitSigningMode(res.CommitSigner)
+	relaySrv.SetSealedCommitSigner(sealedSigner)
+	if auditHost != nil {
+		auditHost.SetSealedCommitSigner(sealedSigner)
+	}
 
 	es := &runSidecar{conversationID: conv.ID, cell: c, conn: conn, res: res, stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
 	_, myBootEpoch := s.executorIdentity()

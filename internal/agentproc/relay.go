@@ -55,6 +55,16 @@ const (
 	// the signing keys, and answers with what they decided, so neither the
 	// sidecar nor the orchestrator ever holds a key.
 	OpSignDigest = "sign_digest"
+	// OpRecordCommitSHA is the sidecar daemon's record of the commit id a
+	// signed digest gave the commit, for the signature's commit_signatures
+	// row: a push of that commit names its signer from it.
+	OpRecordCommitSHA = "record_commit_sha"
+	// OpRecordSignRefusal is the sidecar daemon's record of a commit it
+	// refused before asking any signer, a committer that is not the run's
+	// signer or something that is not a commit. The sidecar has no database
+	// and no metrics, so the orchestrator counts it and, for a committer
+	// mismatch, writes its commit_sign_denied row.
+	OpRecordSignRefusal = "record_sign_refusal"
 )
 
 // SignDigestArgs is sign_digest's payload: the hex SHA-512 digest of the commit
@@ -74,15 +84,38 @@ type SignDigestArgs struct {
 // holds the armored SSH signature), "refused" (Reason names why, and
 // RetryAfterSeconds, set only for the org's per-minute budget, says how long
 // until it admits another) or "unanswered" (nothing answered in time; the run
-// may try the same command again). SignatureID names the request's
-// commit_signatures row, which the commit id the daemon computes is recorded
-// on.
+// may try the same command again). Limit is the budget a refusal by the
+// per-minute or per-claim budget ran into, which the agent's refusal line
+// names. SignatureID names the request's commit_signatures row, which the
+// commit id the daemon computes is recorded on.
 type SignDigestReply struct {
 	Outcome           string `json:"outcome"`
 	SignatureID       string `json:"signature_id,omitempty"`
 	Signature         string `json:"signature,omitempty"`
 	Reason            string `json:"reason,omitempty"`
 	RetryAfterSeconds int    `json:"retry_after_seconds,omitempty"`
+	Limit             int    `json:"limit,omitempty"`
+}
+
+// RecordCommitSHAArgs is record_commit_sha's payload: the signature's row, as
+// sign_digest's reply named it, and the commit id the daemon computed from the
+// signature. The orchestrator stamps it only on a row of the run's own.
+type RecordCommitSHAArgs struct {
+	SignatureID string `json:"signature_id"`
+	CommitSHA   string `json:"commit_sha"`
+}
+
+// RecordSignRefusalArgs is record_sign_refusal's payload: the refusal
+// ("committer_mismatch" or "not_a_commit"), the signer the run was sealed
+// with, and for a committer mismatch the committer the commit named. The
+// orchestrator binds the org and conversation from its own identity for the
+// run.
+type RecordSignRefusalArgs struct {
+	Reason         string `json:"reason"`
+	Signer         string `json:"signer"`
+	SignerUserID   int64  `json:"signer_user_id"`
+	CommitterName  string `json:"committer_name,omitempty"`
+	CommitterEmail string `json:"committer_email,omitempty"`
 }
 
 // AuthorizeRepoArgs / AuthorizeRepoReply are the authorize_repo op's payloads

@@ -447,7 +447,7 @@ func TestRelayedRecords_RetriedRecordStaysAheadOfLaterOnes(t *testing.T) {
 		_ = orchEnd.Close()
 		_ = sidecarEnd.Close()
 	})
-	rt := NewRelayRuntime(sidecarConn, agentproc.NewRecordSender(sidecarConn), info, nil)
+	rt := NewRelayRuntime(sidecarConn, agentproc.NewRecordSender(sidecarConn), info, nil, nil)
 
 	key := domain.GitHubCommentDedupKey(domain.GitHubIssueComment, 7)
 	rt.Record(context.Background(),

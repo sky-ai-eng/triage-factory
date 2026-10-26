@@ -3,10 +3,15 @@ package agenthost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
+	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -94,6 +99,24 @@ func (c *LocalClient) SetCommitSigning(s *LocalCommitSigning, err error) {
 	}
 }
 
+// SetSealedCommitSigner records the signer the run's sealed bundle named, as
+// its sidecar reported it ("" for a run that does not sign), for a client
+// recording an executor run's pushes: the executor cannot read the org's
+// signer, so this is what tells it the run's org signs (countSigningPush).
+func (c *LocalClient) SetSealedCommitSigner(mode domain.CommitSigningMode) {
+	if dr, ok := c.rt.(*directRuntime); ok {
+		dr.sealedSigner = mode
+	}
+}
+
+// sealedSigner is the signer SetSealedCommitSigner recorded.
+func (c *LocalClient) sealedSigner() domain.CommitSigningMode {
+	if dr, ok := c.rt.(*directRuntime); ok {
+		return dr.sealedSigner
+	}
+	return ""
+}
+
 // SignCommit signs one commit object git handed the run's signing program, as
 // the run's signer, or returns why not. Every check is made where the run's
 // state lives: the runtime's.
@@ -133,15 +156,171 @@ func (r *directRuntime) SignCommit(ctx context.Context, payload []byte) (SignCom
 	return SignCommitResult{Refusal: commitsigner.RefusalLine(res, cs.Signer)}, nil
 }
 
-// SignCommit on the sidecar answers that the run does not sign: no executor
-// run is configured to sign yet.
-//
-// TODO(TFAC-1198): make the daemon's check here, relay the digest as
-// sign_digest, compute the commit id from the signature that comes back and
-// relay it to the signature's row.
-func (r *relayRuntime) SignCommit(context.Context, []byte) (SignCommitResult, error) {
-	res := commitsigner.Result{Outcome: commitsigner.OutcomeRefused, Refusal: commitsigner.RefusalNotSigning}
-	return SignCommitResult{Refusal: commitsigner.RefusalLine(res, commitsigner.Identity{Mode: domain.CommitSigningNone})}, nil
+// SignCommit on the sidecar makes the daemon's check on the commit, relays its
+// digest to the orchestrator as sign_digest for a control pod to sign as the
+// signer the run was sealed with, and records the commit id the signature
+// produces on the signature's row. The sidecar holds no signing key, and the
+// control plane never sees the commit: what crosses is the digest one way and
+// the signature the other. A run whose bundle named no signer has git
+// configured not to sign, and is told so if it asks anyway.
+func (r *relayRuntime) SignCommit(ctx context.Context, payload []byte) (SignCommitResult, error) {
+	if r.signer == nil || !r.signer.Mode.Signs() {
+		res := commitsigner.Result{Outcome: commitsigner.OutcomeRefused, Refusal: commitsigner.RefusalNotSigning}
+		return SignCommitResult{Refusal: commitsigner.RefusalLine(res, commitsigner.Identity{Mode: domain.CommitSigningNone})}, nil
+	}
+	signer := *r.signer
+	res := r.signCommit(ctx, signer, payload)
+	if res.Outcome == commitsigner.OutcomeSigned {
+		return SignCommitResult{Signature: res.Signature}, nil
+	}
+	return SignCommitResult{Refusal: commitsigner.RefusalLine(res, signer)}, nil
+}
+
+// signCommit is SignCommit for a run that signs as signer. Every failure to
+// get an answer is OutcomeUnanswered, which tells the run to try again.
+func (r *relayRuntime) signCommit(ctx context.Context, signer commitsigner.Identity, payload []byte) commitsigner.Result {
+	unanswered := commitsigner.Result{Outcome: commitsigner.OutcomeUnanswered}
+	accountID, err := strconv.ParseInt(signer.AccountID, 10, 64)
+	if err != nil || accountID <= 0 {
+		agenthostLog.Error("the run's sealed signer has no account id; answering its signature unanswered",
+			"conversation", r.info.ConversationID, "account", signer.AccountID)
+		return unanswered
+	}
+
+	res, err := commitsigner.CheckCommit(payload, signer)
+	if err != nil {
+		agenthostLog.Warn("could not read the commit git asked to have signed; answering it unanswered",
+			"conversation", r.info.ConversationID, "error", err)
+		return unanswered
+	}
+	if res.Outcome != "" {
+		// The orchestrator counts the refusal and, for a committer mismatch,
+		// writes its commit_sign_denied row: this process has no database
+		// and no metrics.
+		r.conn.record(agentproc.RelayNamespaceCore, agentproc.OpRecordSignRefusal, agentproc.RecordSignRefusalArgs{
+			Reason:         string(res.Refusal),
+			Signer:         string(signer.Mode),
+			SignerUserID:   accountID,
+			CommitterName:  res.Committer.Name,
+			CommitterEmail: res.Committer.Email,
+		})
+		return res
+	}
+
+	var reply agentproc.SignDigestReply
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, agentproc.OpSignDigest, agentproc.SignDigestArgs{
+		Digest:       commitsign.DigestOf(payload).String(),
+		Signer:       string(signer.Mode),
+		SignerUserID: accountID,
+	}, &reply); err != nil {
+		agenthostLog.Warn("relaying a commit signature request failed; answering it unanswered",
+			"conversation", r.info.ConversationID, "error", err)
+		return unanswered
+	}
+	res = commitsigner.Result{
+		Outcome:           commitsigner.Outcome(reply.Outcome),
+		SignatureID:       reply.SignatureID,
+		Signature:         reply.Signature,
+		Refusal:           commitsigner.Refusal(reply.Reason),
+		RetryAfterSeconds: reply.RetryAfterSeconds,
+		Limit:             reply.Limit,
+	}
+	if res.Outcome != commitsigner.OutcomeSigned {
+		return res
+	}
+	if res.Signature == "" {
+		agenthostLog.Error("the orchestrator answered a signature request signed with no signature; answering it unanswered",
+			"conversation", r.info.ConversationID, "signature", res.SignatureID)
+		return unanswered
+	}
+	// The commit id git will give the commit, recorded on the signature's row
+	// so a push of it can name its signer. Sent through the same record lane
+	// as the git proxy's push records, so it reaches the orchestrator before
+	// any push of the commit does.
+	res.CommitSHA = commitsign.CommitID(commitsign.SignedCommit(payload, []byte(res.Signature)))
+	r.conn.record(agentproc.RelayNamespaceCore, agentproc.OpRecordCommitSHA, agentproc.RecordCommitSHAArgs{
+		SignatureID: res.SignatureID,
+		CommitSHA:   res.CommitSHA,
+	})
+	return res
+}
+
+// recordCommitSHA stores a relayed commit id on the signature's row. The row
+// must be this run's: the wire names it, and a sidecar may stamp only its own
+// run's signatures. A row is given its commit id once, so a resent record
+// writes nothing new.
+func (s *RelayServer) recordCommitSHA(ctx context.Context, a agentproc.RecordCommitSHAArgs) error {
+	if uuid.Validate(a.SignatureID) != nil || !isCommitID(a.CommitSHA) {
+		return fmt.Errorf("agenthost: a relayed commit id names no signature or no commit (%q, %q)", a.SignatureID, a.CommitSHA)
+	}
+	if s.stores.CommitSignatures == nil {
+		return errors.New("agenthost: no signature store to record a commit id in")
+	}
+	ctx, cancel := recordContext(ctx)
+	defer cancel()
+	var row *domain.CommitSignature
+	if err := withRecordRetry(ctx, func() error {
+		var e error
+		row, e = s.stores.CommitSignatures.GetSystem(ctx, s.info.OrgID, a.SignatureID)
+		return e
+	}); err != nil {
+		recordWriteDrop(ctx, agentproc.OpRecordCommitSHA, err)
+		return nil
+	}
+	if row == nil || row.ConversationID != s.info.ConversationID {
+		return fmt.Errorf("agenthost: a relayed commit id names signature %s, which is not this run's", a.SignatureID)
+	}
+	if err := withRecordRetry(ctx, func() error {
+		_, e := s.stores.CommitSignatures.SetCommitSHASystem(ctx, s.info.OrgID, a.SignatureID, a.CommitSHA)
+		return e
+	}); err != nil {
+		recordWriteDrop(ctx, agentproc.OpRecordCommitSHA, err)
+	}
+	return nil
+}
+
+// recordSignRefusal records a commit the sidecar's daemon refused. The org and
+// conversation are this server's and the signer's host the org's; the wire
+// says only which refusal, as which signer, and the committer.
+func (s *RelayServer) recordSignRefusal(ctx context.Context, a agentproc.RecordSignRefusalArgs) error {
+	refusal := commitsigner.Refusal(a.Reason)
+	signer := domain.CommitSigningMode(a.Signer)
+	if (refusal != commitsigner.RefusalCommitterMismatch && refusal != commitsigner.RefusalNotACommit) ||
+		!signer.Signs() || a.SignerUserID <= 0 {
+		return fmt.Errorf("agenthost: a relayed signing refusal names no daemon refusal or no signer (%q, %q, account %d)",
+			a.Reason, a.Signer, a.SignerUserID)
+	}
+	ctx, cancel := recordContext(ctx)
+	defer cancel()
+	host, err := s.signerHost(ctx)
+	if err != nil {
+		return fmt.Errorf("agenthost: record a signing refusal: %w", err)
+	}
+	commitsigner.RecordDaemonRefusal(ctx, s.stores, commitsigner.DaemonRefusal{
+		OrgID:          s.info.OrgID,
+		ConversationID: s.info.ConversationID,
+		Signer:         signer,
+		SignerHost:     host,
+		SignerUserID:   a.SignerUserID,
+		Refusal:        refusal,
+		Committer:      commitsign.Identity{Name: a.CommitterName, Email: a.CommitterEmail},
+		DedupKey:       mintDedupKey(ctx, s.info),
+	})
+	return nil
+}
+
+// isCommitID reports whether s is a commit id as git spells one: 40 lowercase
+// hex digits.
+func isCommitID(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // signCommitArgs is the SignCommit IPC method's payload: the commit object, as
@@ -163,7 +342,9 @@ func (c *IPCClient) SignCommit(ctx context.Context, payload []byte) (SignCommitR
 // signature log cannot be read here, which leaves the field off rather than
 // guessing; the push already happened and its row is written either way. It
 // also counts the push in tf_commit_signing_pushes_total when the org signs.
-func pushSigner(ctx context.Context, stores db.Stores, orgID, sha string) string {
+// sealed is the signer the run's bundle named, on an executor
+// (countSigningPush).
+func pushSigner(ctx context.Context, stores db.Stores, orgID, sha string, sealed domain.CommitSigningMode) string {
 	if stores.CommitSignatures == nil || sha == "" {
 		return ""
 	}
@@ -173,17 +354,22 @@ func pushSigner(ctx context.Context, stores db.Stores, orgID, sha string) string
 			"org", orgID, "sha", sha, "error", err)
 		return ""
 	}
-	countSigningPush(ctx, stores, orgID, signed)
+	countSigningPush(ctx, stores, orgID, sealed, signed)
 	return signer
 }
 
 // countSigningPush counts a push in tf_commit_signing_pushes_total when the
-// org resolves to a signer that signs.
-//
-// TODO(TFAC-1198): a multi-mode push is recorded on the executor, which cannot
-// read the org's signer; count the pushes of runs whose bundle names one.
-func countSigningPush(ctx context.Context, stores db.Stores, orgID string, signed bool) {
-	if runmode.Current() != runmode.ModeLocal || stores.OrgCommitSigners == nil {
+// run's org resolves to a signer that signs. A multi-mode push is recorded on
+// the executor, which cannot read the org's signer, so there it counts when
+// the run's sealed bundle named one (sealed); locally the org is resolved.
+func countSigningPush(ctx context.Context, stores db.Stores, orgID string, sealed domain.CommitSigningMode, signed bool) {
+	if runmode.Current() == runmode.ModeMulti {
+		if sealed.Signs() {
+			commitsigner.CountPush(ctx, orgID, signed)
+		}
+		return
+	}
+	if stores.OrgCommitSigners == nil {
 		return
 	}
 	id, err := commitsigner.Resolver{Signers: stores.OrgCommitSigners}.Resolve(ctx, orgID)

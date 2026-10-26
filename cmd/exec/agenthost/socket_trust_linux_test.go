@@ -65,3 +65,23 @@ func TestCABundlePath_MatchesBrokerTrustedDerivation(t *testing.T) {
 		}
 	}
 }
+
+// TestAllowedSignersPath_MatchesBrokerTrustedDerivation is the same drift
+// guard for the run's allowed-signers file, which the sidecar writes beside
+// the CA bundle (WriteAllowedSigners → AllowedSignersPathFor) and the broker
+// validates through sandbox.TrustedAllowedSignersPath.
+func TestAllowedSignersPath_MatchesBrokerTrustedDerivation(t *testing.T) {
+	for _, conversationID := range []string{
+		"conv-1", "itestSomeTestName", "00000000-0000-0000-0000-0000000000aa",
+		"weird/../chars\x00 here!", "",
+	} {
+		got := AllowedSignersPathFor(conversationID)
+		want := sandbox.TrustedAllowedSignersPath(conversationID)
+		if got != want {
+			t.Errorf("AllowedSignersPathFor(%q) = %q, want %q (broker's trusted derivation)", conversationID, got, want)
+		}
+		if filepath.Dir(got) != runSocketDir(conversationID) {
+			t.Errorf("AllowedSignersPathFor(%q) is not inside the run's socket directory %q", conversationID, runSocketDir(conversationID))
+		}
+	}
+}

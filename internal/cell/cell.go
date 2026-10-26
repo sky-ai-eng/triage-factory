@@ -147,6 +147,12 @@ type LaunchSpec struct {
 	// admits verifies in the jail.
 	CABundle string
 
+	// AllowedSigners is the host path of the allowed-signers file the sidecar
+	// wrote beside the CA bundle, presented read-only at AllowedSignersPath.
+	// Empty presents none, which a run whose git is configured to sign needs
+	// for git verify-commit and nothing else.
+	AllowedSigners string
+
 	// GHChannel wires the real-gh credential injector when the sidecar bound
 	// one; nil otherwise.
 	GHChannel *GHChannel

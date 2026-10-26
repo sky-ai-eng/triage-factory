@@ -214,27 +214,33 @@ func TestGHChannelWanted(t *testing.T) {
 	}
 }
 
-// stubPrivilegedSideEffects redirects the two things startProxies does under the
-// root-only /run/tf socket root — writing the jail's CA bundle and binding the
-// exec-verb socket — into a temp dir and a no-op.
+// stubPrivilegedSideEffects redirects the three things startProxies does under
+// the root-only /run/tf socket root — writing the jail's CA bundle and
+// allowed-signers file, and binding the exec-verb socket — into a temp dir and
+// a no-op. It returns the dir, where the allowed-signers file is
+// <conversationID>.allowed-signers.
 //
-// Both are required together for any test that passes an AgentHost, whose run
-// identity names the bundle's path. Neither is what such a
+// All are required together for any test that passes an AgentHost, whose run
+// identity names the files' paths. None is what such a
 // test is about, and a CI runner is unprivileged: without these the test does not
 // assert something weaker, it fails outright on a bind it was never exercising.
-func stubPrivilegedSideEffects(t *testing.T) {
+func stubPrivilegedSideEffects(t *testing.T) string {
 	t.Helper()
-	origWrite, origStart := writeCABundle, startAgentHostSocket
+	origWrite, origSigners, origStart := writeCABundle, writeAllowedSigners, startAgentHostSocket
 	dir := t.TempDir()
 	writeCABundle = func(conversationID string, pem []byte) error {
 		return os.WriteFile(filepath.Join(dir, conversationID+".crt"), pem, 0o600)
+	}
+	writeAllowedSigners = func(conversationID string, content []byte) error {
+		return os.WriteFile(filepath.Join(dir, conversationID+".allowed-signers"), content, 0o600)
 	}
 	startAgentHostSocket = func(*agenthost.Server, string) (*agenthost.HostDaemon, sandbox.Mount, error) {
 		return nil, sandbox.Mount{}, nil
 	}
 	t.Cleanup(func() {
-		writeCABundle, startAgentHostSocket = origWrite, origStart
+		writeCABundle, writeAllowedSigners, startAgentHostSocket = origWrite, origSigners, origStart
 	})
+	return dir
 }
 
 // gitConfigFromEnv decodes git's indexed env-config form back into a map, so a

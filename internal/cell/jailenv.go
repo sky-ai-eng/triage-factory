@@ -29,6 +29,11 @@ const (
 	// bundle: the host's system roots, the egress interceptor's CA for this
 	// engagement, and the gh injector's leaf when that channel is on.
 	CABundlePath = "/run/tf-ca-bundle.crt"
+	// AllowedSignersPath is where the run's allowed-signers file is
+	// presented, read-only: the gpg.ssh.allowedSignersFile a run that signs
+	// its commits checks them against. The sidecar writes it, listing the
+	// run's signer's public keys, and empty for a run that does not sign.
+	AllowedSignersPath = "/run/tf-allowed-signers"
 )
 
 // goToolchainEnvKey / goToolchainEnvValue are the Go toolchain policy every
