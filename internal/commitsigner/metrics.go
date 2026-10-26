@@ -34,6 +34,7 @@ type instruments struct {
 	signatures metric.Int64Counter
 	duration   metric.Float64Histogram
 	swept      metric.Int64Counter
+	pushes     metric.Int64Counter
 }
 
 // newInstruments creates the instruments against a provider. A creation error
@@ -55,6 +56,10 @@ func newInstruments(provider metric.MeterProvider) *instruments {
 	if in.swept, err = m.Int64Counter("commit_signing.swept",
 		metric.WithDescription("Signature requests a control pod found by its once-a-second sweep rather than by the sign_request doorbell.")); err != nil {
 		signerLog.Warn("commit signing counter setup failed", "instrument", "commit_signing.swept", "error", err)
+	}
+	if in.pushes, err = m.Int64Counter("commit_signing.pushes",
+		metric.WithDescription("Pushes from runs whose org resolves to a commit signer, by whether the pushed tip was signed.")); err != nil {
+		signerLog.Warn("commit signing counter setup failed", "instrument", "commit_signing.pushes", "error", err)
 	}
 	return in
 }
@@ -291,13 +296,18 @@ type TestT interface {
 	Cleanup(func())
 }
 
-// SetMeterProviderForTest points the check counter at provider for the
-// duration of t and restores the previous one via t.Cleanup. It lives in a
-// non-_test.go file so the packages that run checks can read what their tests
-// recorded. It swaps a process global, so tests that call it must not run in
-// parallel with each other.
+// SetMeterProviderForTest points the package's counters and histogram at
+// provider for the duration of t and restores the previous ones via t.Cleanup.
+// It lives in a non-_test.go file so the packages that run checks and record
+// pushes can read what their tests recorded. It swaps process globals, so
+// tests that call it must not run in parallel with each other.
 func SetMeterProviderForTest(t TestT, provider metric.MeterProvider) {
 	t.Helper()
 	prev := checkStats.Swap(newStats(provider))
-	t.Cleanup(func() { checkStats.Store(prev) })
+	current()
+	prevInstruments := global.Swap(newInstruments(provider))
+	t.Cleanup(func() {
+		checkStats.Store(prev)
+		global.Store(prevInstruments)
+	})
 }

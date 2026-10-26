@@ -499,6 +499,17 @@ type Client interface {
 	// → error; otherwise the handler runs with the run's identity.
 	CallExtension(ctx context.Context, namespace, method string, args json.RawMessage) (json.RawMessage, error)
 
+	// --- commit signing (exec git sign, git's gpg.ssh.program) ---
+
+	// SignCommit signs one commit object as the run's signer: the payload is
+	// what git wrote to its signing program's buffer file. The daemon checks
+	// it is a commit whose committer is the signer, that the signer is still
+	// the org's and active, and that the run and the org are within their
+	// budgets, then signs and records the signature. SignCommitResult holds the
+	// armored signature, or the line the agent reads in its place; an error is
+	// a call that never reached an answer.
+	SignCommit(ctx context.Context, payload []byte) (SignCommitResult, error)
+
 	// Close releases any resources held by the client. LocalClient is
 	// a no-op (it doesn't own the DB conn — that's exec.Handle's
 	// problem). IPCClient closes the unix socket.

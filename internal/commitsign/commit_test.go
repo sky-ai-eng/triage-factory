@@ -129,3 +129,30 @@ func TestSignedCommit(t *testing.T) {
 		t.Fatalf("SignedCommit =\n%s\nwant\n%s", got, want)
 	}
 }
+
+func TestIdentName(t *testing.T) {
+	cases := map[string]string{
+		"Acme Inc.":         "Acme Inc.",
+		`"Acme"`:            "Acme",
+		"Acme;":             "Acme",
+		"  Acme  ":          "Acme",
+		"Acme <x>":          "Acme x",
+		`'Ac,me'`:           "Ac,me",
+		`\Acme\`:            "Acme",
+		"\tAc\x01me\t":      "Ac\x01me",
+		":Acme:":            "Acme",
+		"Ä \"Acme\" é,":     "Ä \"Acme\" é",
+		"Ac\nme":            "Acme",
+		".Acme.":            ".Acme.",
+		"Triage Factory":    "Triage Factory",
+		`" ;:,<>'\`:         "",
+		"\x7fAcme":          "\x7fAcme",
+		"Octo\x00Cat":       "Octo\x00Cat",
+		"<Acme> Industries": "Acme Industries",
+	}
+	for in, want := range cases {
+		if got := IdentName(in); got != want {
+			t.Errorf("IdentName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

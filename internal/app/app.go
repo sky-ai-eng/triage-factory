@@ -94,9 +94,8 @@ type App struct {
 	// org and one claim are given, read at boot on the roles that sign
 	// (plan.signsCommits) so a bad value refuses the boot instead of the
 	// first signature. In multi mode every control pod's commitSigner
-	// enforces them.
-	// TODO(TFAC-1196): the local signing daemon enforces them on every local
-	// signature.
+	// enforces them; in local mode the spawner hands them to each run's
+	// signing daemon.
 	commitSigningBudgets commitsigner.Budgets
 
 	// commitSigner is this control pod's half of multi-mode commit signing:

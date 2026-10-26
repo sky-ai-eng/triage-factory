@@ -244,7 +244,11 @@ gpg.ssh.allowedSignersFile=<allowed-signers path>
 
 `user.name` / `user.email` are the identity TFAC-1187 already stamps; the
 signer simply becomes that identity. The name is the account's profile name,
-or its login when the profile has none. GitHub shows a commit linked to an
+or its login when the profile has none, as git writes it into the committer
+header: git trims whitespace and `, : ; < > " \ '` from both ends of a name and
+drops `<`, `>` and newlines anywhere, so the identity is resolved with the same
+rule (`commitsign.IdentName`) and the daemon's committer check compares the
+string git wrote. GitHub shows a commit linked to an
 account under the account's login and avatar, and the name is what `git log`,
 blame in an editor, and other git tools show. Claude Code's commits split the
 same way: `Claude` in git, `claude` on GitHub. A login cannot contain a space,
@@ -258,7 +262,11 @@ tooling that calls them. Without it every local check fails with
 `gpg.ssh.allowedSignersFile needs to be configured`, signed or not. It holds
 one line per key, `<signer email> namespaces="git" <public key>`, for the
 signer's key and, during a rotation, its pending key, so a run that started
-before `verify` promotes the new key still checks its later commits. The
+before `verify` promotes the new key still checks its later commits. A
+local run whose signer rotates to a key the file does not list yet gets the
+key added when it first signs with it. A run continued in a new process
+writes a new file from the keys current then, so a commit it signed earlier
+with a key the signer has since dropped no longer checks inside the run. The
 file holds only public values. It is presented read-only, like the run's CA
 bundle: in multi mode the sidecar writes it into the run's socket directory
 beside `ca-bundle.crt` and the jail sees it at `/run/tf-allowed-signers`; in
@@ -271,11 +279,18 @@ matched"; GitHub's API reports their verification.
 The shim is a script embedded in `internal/githooks` beside `pre-push` and
 `prepare-commit-msg`. `githooks.Ensure` writes it to the host hooks dir, which
 the jail mounts read-only at `/run/tf-hooks` (`internal/cell/gvisor/jail_linux.go`)
-and a local run reads in place:
+and a local run reads in place. Git calls `gpg.ssh.program` to check
+signatures as well as to make them (`git verify-commit` and `git log
+--show-signature` run it with `-Y find-principals`, `-Y verify` and `-Y
+check-novalidate`), so only the signing call goes to TF and every other call
+to `ssh-keygen`:
 
 ```sh
 #!/bin/sh
-exec "${TRIAGE_FACTORY_BIN:-triagefactory}" exec git sign "$@"
+if [ "$1" = "-Y" ] && [ "$2" = "sign" ]; then
+	exec "${TRIAGE_FACTORY_BIN:-triagefactory}" exec git sign "$@"
+fi
+exec ssh-keygen "$@"
 ```
 
 `exec git sign` is a new exec verb. It accepts only `-Y sign -n git`, takes
@@ -290,18 +305,32 @@ exact next step. Every one starts `triagefactory: `:
 | --- | --- |
 | the committer is not the signer | `this run signs commits only as <signer name> <<signer email>>, and this commit's committer is <name> <<email>>. Nothing was committed. Run the command again without setting the committer: no GIT_COMMITTER_NAME or GIT_COMMITTER_EMAIL, and no -c user.name or -c user.email. --author is fine.` |
 | not a commit | `this run signs commits only, and this is a <object type>. Nothing was created. Create it without signing; for a tag, drop -s.` |
-| the org is over its per-minute budget | `this org has made <limit> signed commits in the last minute, its limit, so signing resumes in <n>s. Nothing was committed. Wait <n>s, then run the same git command again; a rebase that stopped here resumes with git rebase --continue.` |
-| the claim has spent its budget | `this run has made <limit> signed commits, the most one run may make, so signing is off for the rest of this run. Nothing was committed. Run this and every later commit with git -c commit.gpgsign=false.` |
-| the signer is not `active`, or not the org's | `commit signing is off for the rest of this run: <reason>. Nothing was committed. Run this and every later commit with git -c commit.gpgsign=false. Commits are still authored as <signer name>.` |
-| no answer within 30 s | `commit signing did not answer within 30s. Nothing was committed. Run the same git command again; a rebase that stopped here resumes with git rebase --continue. If it fails three times in a row, commit with git -c commit.gpgsign=false.` |
+| the org is over its per-minute budget | `this org has made <limit> signed commits in the last minute, its limit, so signing resumes in <n>s. Nothing was committed. Wait <n>s, then run the same git command again. A rebase that stopped here resumes with git rebase --continue; if that refuses because of staged changes, run git reset --hard first, and the rebase applies this commit's changes again.` |
+| the claim has spent its budget | `this run has made <limit> signed commits, the most one run may make, so signing is off for the rest of this run. Nothing was committed. Run this and every later commit with git -c commit.gpgsign=false. A rebase that stopped here still signs: run git rebase --abort, then the rebase again with git -c commit.gpgsign=false.` |
+| the signer is not `active`, or not the org's | `commit signing is off for the rest of this run: <reason>. Nothing was committed. Run this and every later commit with git -c commit.gpgsign=false. A rebase that stopped here still signs: run git rebase --abort, then the rebase again with git -c commit.gpgsign=false. Commits are still authored as <signer name>.` |
+| no answer within 30 s | `commit signing did not answer within 30s. Nothing was committed. Run the same git command again. A rebase that stopped here resumes with git rebase --continue; if that refuses because of staged changes, run git reset --hard first, and the rebase applies this commit's changes again. If it fails three times in a row, commit with git -c commit.gpgsign=false; for a rebase, abort it and run it again that way.` |
 | the claim is no longer active | `this run no longer holds its engagement, so commit signing refused. Nothing was committed.` |
 
 `<reason>` is a sentence, never a code: "the signer's key is no longer on its
 GitHub account", "an org admin removed the signer", "the org now signs as a
 different account", "GitHub reported a recent commit's email as not verified
-on the signer's account". A test fails a signature partway through a rebase
-and checks that `git rebase --continue` resumes it, since two of the messages
-promise that.
+on the signer's account".
+
+The rebase clauses follow what git does when a rebase's commit cannot be
+signed (git 2.43, and the same sequencer code on git's master):
+
+- A commit that fails while the rebase picks it is rescheduled with its changes
+  left staged, and `git rebase --continue` refuses with "you have staged
+  changes". `git reset --hard` clears them and the rescheduled pick applies
+  them again.
+- A commit that fails inside `git rebase --continue`, after a conflict was
+  resolved, is not rescheduled; the next `--continue` commits the resolution,
+  which a reset would throw away. Hence "if that refuses".
+- A rebase keeps signing once it has started (`rebase-merge/gpg_sign_opt`),
+  whatever `-c commit.gpgsign=false` says on `--continue`, so a run whose
+  signing is off aborts it and runs it again.
+
+The tests in `cmd/exec/git` follow each of these through git.
 
 The verb is not documented to the agent; git is its only intended caller.
 
@@ -334,6 +363,16 @@ and verifies with `ssh-keygen -Y verify`.
 - **Local mode.** A per-org key is in the secret store (the OS keychain, or
   the encrypted file backend). The daemon reads it, and the signer's status,
   for every signature. There is no deployment signer.
+
+  The key is out of a run's reach only while the local sandbox is on, which
+  masks the store. With it off (macOS, or `TF_LOCAL_SANDBOX=off`) the agent
+  runs as the operator and can read the key from the store, as it can the
+  org's GitHub token. It can also run `exec git sign` with signing settings
+  of its own, past the claim, budget and committer checks (§4.3, §4.7),
+  though only as the org's signer. Local mode is not a security boundary,
+  and signing does not make it one: an org that signs locally should sign
+  with a dedicated account, so a key that leaks signs only as that account.
+  TFAC-885 tracks what closing this would take.
 - **Multi mode.** A per-org key is in the secret store, which only control
   pods open (executors run `pgstore.NewWithoutSecrets`). The deployment key is
   operator config on the control pods, in the same class as the deployment
@@ -413,6 +452,9 @@ pods in multi mode, the TF process locally), and counted over
   claim. Once spent, signing is off for the rest of that claim.
 
 They bound what one compromised or runaway run, or one org, can get signed.
+The count is read before a signature is made and its row is written after,
+so signatures made at the same moment can each pass at the limit: a limit
+is exceeded by at most the signatures in flight when it is reached.
 A rebase is the case they are sized for: it re-signs every commit it
 rewrites, so a 300-commit branch is 300 signatures in seconds, while a
 typical run makes a handful. The deployment signer has no limit of its own:

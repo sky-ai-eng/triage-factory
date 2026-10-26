@@ -10,14 +10,18 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// buildCommitSigning wires multi mode's control-plane commit signing: on every
-// control pod the signer that answers requests from any executor, and on every
-// executor the requester a sandboxed run's sign_digest queues through, with the
-// doorbells its answers ring. Local mode signs in the TF process and builds
-// neither. After buildExecution, which builds the spawner the requester is
-// handed to.
+// buildCommitSigning wires commit signing. In multi mode that is the control
+// plane: on every control pod the signer that answers requests from any
+// executor, and on every executor the requester a sandboxed run's sign_digest
+// queues through, with the doorbells its answers ring. Local mode signs in the
+// TF process, in each run's daemon, so it hands the spawner the budgets those
+// daemons enforce. After buildExecution, which builds the spawner.
 func (a *App) buildCommitSigning() {
 	if runmode.Current() != runmode.ModeMulti {
+		if a.plan.signsCommits && a.spawner != nil {
+			a.spawner.SetCommitSigningBudgets(a.commitSigningBudgets)
+			commitsigner.RegisterLimitGauge(otel.GetMeterProvider(), a.commitSigningBudgets)
+		}
 		return
 	}
 	publish := func(ctx context.Context, msg ctlbus.Message) error {

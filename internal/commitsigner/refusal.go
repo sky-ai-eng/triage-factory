@@ -47,6 +47,19 @@ const (
 	// reached it only after the run had stopped waiting, or could not read
 	// what it needed to decide. The run reads it as OutcomeUnanswered.
 	RefusalUnanswered Refusal = "unanswered"
+
+	// RefusalCommitterMismatch: the commit's committer is not the run's
+	// signer. The daemon that holds the commit refuses it before anything is
+	// signed, so no row records it.
+	RefusalCommitterMismatch Refusal = "committer_mismatch"
+	// RefusalNotACommit: what git asked to have signed is a tag, a push
+	// certificate or no object at all. Refused by the daemon, like a
+	// committer mismatch.
+	RefusalNotACommit Refusal = "not_a_commit"
+	// RefusalNotSigning: the run was started without a signer to sign as, so
+	// nothing it asks for is signed. Git is configured not to ask in such a
+	// run; this answers anything that asks anyway.
+	RefusalNotSigning Refusal = "not_signing"
 )
 
 // metricReason is the refusal's value on tf_commit_signatures_total's reason
@@ -54,16 +67,17 @@ const (
 // stopped for the signer, and the signer's own status says why.
 func (r Refusal) metricReason() string {
 	switch r {
-	case RefusalSignerRemoved, RefusalSignerChanged:
+	case RefusalSignerRemoved, RefusalSignerChanged, RefusalNotSigning:
 		return string(RefusalSignerInactive)
 	}
 	return string(r)
 }
 
 // Commit-sign-denied reasons, the detail_json reason of the commit_sign_denied
-// audit row a refusal writes when it is a security signal (spec §5.6). Only
-// these two refusals are recorded on the control plane.
+// audit row a refusal writes when it is a security signal (spec §5.6). The
+// control plane records the first two; a local signature can record all three.
 const (
-	deniedClaimInactive   = "claim_inactive"
-	deniedBudgetExhausted = "budget_exhausted"
+	deniedClaimInactive     = "claim_inactive"
+	deniedBudgetExhausted   = "budget_exhausted"
+	deniedCommitterMismatch = "committer_mismatch"
 )

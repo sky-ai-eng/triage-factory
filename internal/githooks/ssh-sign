@@ -1,0 +1,19 @@
+#!/bin/sh
+# Triage Factory ssh-sign: the program a run's git signs its commits with.
+#
+# A run that signs has gpg.ssh.program pointed here. Git calls that program for
+# two jobs. To sign a commit it runs
+#   ssh-sign -Y sign -n git -f <public key file> -U <buffer file>
+# and reads the signature from <buffer file>.sig; that call goes to
+# `exec git sign`, which has the run's daemon check the commit and sign it as
+# the run's signer. To check a signature (git verify-commit, git log
+# --show-signature) it runs -Y find-principals, -Y verify and
+# -Y check-novalidate, which are ssh-keygen's: they read only the signature,
+# the commit and the run's allowed-signers file.
+#
+# The binary is resolved from $TRIAGE_FACTORY_BIN (set by the spawner in both
+# run modes), falling back to PATH.
+if [ "$1" = "-Y" ] && [ "$2" = "sign" ]; then
+	exec "${TRIAGE_FACTORY_BIN:-triagefactory}" exec git sign "$@"
+fi
+exec ssh-keygen "$@"

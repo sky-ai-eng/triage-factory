@@ -261,24 +261,18 @@ func (c *ControlPlane) decide(ctx context.Context, row domain.CommitSignature) d
 		return decision{refusal: refusal}
 	}
 
-	claimed, err := c.stores.CommitSignatures.ClaimSignaturesSystem(ctx, row.OrgID, row.ClaimID)
-	if err != nil {
-		return c.undecided(ctx, row, "count the claim's signatures", err)
-	}
-	if claimed >= c.budgets.PerClaim {
-		signerLog.WarnContext(ctx, "refused a signature: the engagement spent its signing budget",
-			"org", row.OrgID, "conversation", row.ConversationID, "claim", row.ClaimID, "limit", c.budgets.PerClaim)
-		return decision{refusal: RefusalClaimBudget, denied: deniedBudgetExhausted}
-	}
-	window, err := c.stores.CommitSignatures.OrgSignaturesSinceSystem(ctx, row.OrgID, now.Add(-OrgWindow))
-	if err != nil {
-		return c.undecided(ctx, row, "count the org's signatures", err)
-	}
-	if window.Count >= c.budgets.PerOrgMinute {
-		return decision{refusal: RefusalOrgMinuteBudget, retryAfter: retryAfter(window.Oldest, now)}
+	if res, ok, err := checkBudgets(ctx, c.stores.CommitSignatures, c.budgets, row.OrgID, row.ClaimID, now); err != nil {
+		return c.undecided(ctx, row, "count the signatures", err)
+	} else if !ok {
+		if res.Refusal == RefusalClaimBudget {
+			signerLog.WarnContext(ctx, "refused a signature: the engagement spent its signing budget",
+				"org", row.OrgID, "conversation", row.ConversationID, "claim", row.ClaimID, "limit", res.Limit)
+			return decision{refusal: RefusalClaimBudget, denied: deniedBudgetExhausted}
+		}
+		return decision{refusal: res.Refusal, retryAfter: res.RetryAfterSeconds}
 	}
 
-	key, err := c.signingKey(ctx, row.OrgID, signer.PublicKey)
+	key, err := signingKey(ctx, c.stores.Secrets, row.OrgID, signer.PublicKey)
 	if err != nil {
 		return c.undecided(ctx, row, "read the signer's key", err)
 	}
@@ -316,26 +310,39 @@ func (c *ControlPlane) checkSigner(ctx context.Context, row domain.CommitSignatu
 	if err != nil {
 		return Identity{}, "", err
 	}
-	switch {
-	case id.AccountID == "":
-		return Identity{}, RefusalSignerRemoved, nil
-	case id.AccountID != strconv.FormatInt(row.SignerUserID, 10):
-		return Identity{}, RefusalSignerChanged, nil
-	case !id.Mode.Signs():
-		return Identity{}, RefusalSignerInactive, nil
-	case id.Mode != row.Signer || db.NormalizeGitHubHost(id.Host) != row.SignerHost:
-		return Identity{}, RefusalSignerChanged, nil
+	if refusal := signerRefusal(id, row.Signer, row.SignerHost, strconv.FormatInt(row.SignerUserID, 10)); refusal != "" {
+		return Identity{}, refusal, nil
 	}
 	return id, "", nil
+}
+
+// signerRefusal compares the signer an org resolves to now with the one a
+// signature is asked for as: mode, an account id in text, and the host that
+// account is on. It returns the refusal when they are not the same kind of
+// signer, on the same account on the same host, and active, and "" when the
+// signature may be made. The refusal says which of those failed, because the
+// run turns it into the sentence its agent reads.
+func signerRefusal(now Identity, mode domain.CommitSigningMode, host, accountID string) Refusal {
+	switch {
+	case now.AccountID == "":
+		return RefusalSignerRemoved
+	case now.AccountID != accountID:
+		return RefusalSignerChanged
+	case !now.Mode.Signs():
+		return RefusalSignerInactive
+	case now.Mode != mode || db.NormalizeGitHubHost(now.Host) != db.NormalizeGitHubHost(host):
+		return RefusalSignerChanged
+	}
+	return ""
 }
 
 // signingKey returns the private key whose public half is publicKey, from the
 // org's signing-key secret or, while a verify promotes a rotation, its pending
 // twin: the two are swapped beside the signer row, so for a moment the key the
 // row names can be in either.
-func (c *ControlPlane) signingKey(ctx context.Context, orgID, publicKey string) (ed25519.PrivateKey, error) {
+func signingKey(ctx context.Context, secrets db.SecretStore, orgID, publicKey string) (ed25519.PrivateKey, error) {
 	for _, name := range []string{integrations.KeyGitHubCommitSigningKey, integrations.KeyGitHubCommitSigningKeyPending} {
-		raw, err := c.stores.Secrets.GetSystem(ctx, orgID, name)
+		raw, err := secrets.GetSystem(ctx, orgID, name)
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", name, err)
 		}
@@ -377,51 +384,79 @@ func retryAfter(oldest *time.Time, now time.Time) int {
 	return max(int(math.Ceil(wait.Seconds())), 1)
 }
 
+// recordDenied writes the commit_sign_denied audit row for a refusal of row
+// that is a security signal.
+func (c *ControlPlane) recordDenied(ctx context.Context, row domain.CommitSignature, reason string) {
+	recordDenied(ctx, c.stores, denial{
+		orgID:          row.OrgID,
+		conversationID: row.ConversationID,
+		signerHost:     row.SignerHost,
+		signerUserID:   row.SignerUserID,
+		reason:         reason,
+	})
+}
+
+// denial is one commit_sign_denied audit row: the refusal's reason, the
+// account the signature was asked for as, and the run that asked. committer is
+// set for a committer mismatch, as the committer the refused commit named.
+type denial struct {
+	orgID          string
+	conversationID string
+	signerHost     string
+	signerUserID   int64
+	reason         string
+	committer      string
+}
+
 // recordDenied writes the commit_sign_denied audit row for a refusal that is a
 // security signal. Nothing was signed, so it is written under CredentialNone,
 // about the signer's account on its host. Best-effort, like every audit row a
-// gate writes: the refusal is the row this pod already stored, and does not
-// depend on this one.
-func (c *ControlPlane) recordDenied(ctx context.Context, row domain.CommitSignature, reason string) {
-	if c.stores.ExternalActions == nil {
+// gate writes: the refusal is already decided, and does not depend on this
+// row.
+func recordDenied(ctx context.Context, stores db.Stores, d denial) {
+	if stores.ExternalActions == nil {
 		return
 	}
-	detail, _ := json.Marshal(map[string]string{"reason": reason})
+	detail := map[string]string{"reason": d.reason}
+	if d.committer != "" {
+		detail["committer"] = d.committer
+	}
+	raw, _ := json.Marshal(detail)
 	act := domain.ExternalAction{
 		Provider:       domain.ArtifactProviderGitHub,
-		Scope:          domain.GitHubHost(row.SignerHost),
+		Scope:          domain.GitHubHost(d.signerHost),
 		Action:         domain.ActionCommitSignDenied,
-		Target:         c.signerLogin(ctx, row),
-		ExternalID:     strconv.FormatInt(row.SignerUserID, 10),
-		ConversationID: row.ConversationID,
+		Target:         signerLogin(ctx, stores.OrgCommitSigners, d.orgID, d.signerUserID),
+		ExternalID:     strconv.FormatInt(d.signerUserID, 10),
+		ConversationID: d.conversationID,
 		Credential:     domain.CredentialNone,
-		DetailJSON:     string(detail),
+		DetailJSON:     string(raw),
 	}
-	if row.ConversationID != "" {
-		if reason == deniedBudgetExhausted {
-			act.DedupKey = domain.CommitSignBudgetDedupKey(row.ConversationID)
+	if d.conversationID != "" {
+		if d.reason == deniedBudgetExhausted {
+			act.DedupKey = domain.CommitSignBudgetDedupKey(d.conversationID)
 		}
-		conv, err := c.stores.Conversations.GetSystem(ctx, row.OrgID, row.ConversationID)
+		conv, err := stores.Conversations.GetSystem(ctx, d.orgID, d.conversationID)
 		if err != nil {
 			signerLog.WarnContext(ctx, "reading the conversation for a commit_sign_denied row failed; recording it without its team",
-				"org", row.OrgID, "conversation", row.ConversationID, "error", err)
+				"org", d.orgID, "conversation", d.conversationID, "error", err)
 		} else if conv != nil {
 			act.TeamID, act.ActorUserID = conv.TeamID, conv.CreatorUserID
 		}
 	}
-	if err := c.stores.ExternalActions.RecordSystem(ctx, row.OrgID, act); err != nil {
+	if err := stores.ExternalActions.RecordSystem(ctx, d.orgID, act); err != nil {
 		signerLog.WarnContext(ctx, "recording a commit_sign_denied row failed",
-			"org", row.OrgID, "conversation", row.ConversationID, "reason", reason, "error", err)
+			"org", d.orgID, "conversation", d.conversationID, "reason", d.reason, "error", err)
 	}
 }
 
-// signerLogin names the request's signer for the audit row: the login of the
-// org's signer when it is still the account the request names, else the
-// account's id.
-func (c *ControlPlane) signerLogin(ctx context.Context, row domain.CommitSignature) string {
-	if signer, err := c.stores.OrgCommitSigners.GetSystem(ctx, row.OrgID); err == nil && signer != nil &&
-		signer.GitHubUserID == row.SignerUserID {
-		return signer.Login
+// signerLogin names the account userID for an audit row: the login of the
+// org's signer when it is still that account, else the account's id.
+func signerLogin(ctx context.Context, signers db.OrgCommitSignerStore, orgID string, userID int64) string {
+	if signers != nil {
+		if signer, err := signers.GetSystem(ctx, orgID); err == nil && signer != nil && signer.GitHubUserID == userID {
+			return signer.Login
+		}
 	}
-	return strconv.FormatInt(row.SignerUserID, 10)
+	return strconv.FormatInt(userID, 10)
 }

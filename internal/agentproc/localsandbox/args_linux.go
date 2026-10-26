@@ -36,7 +36,11 @@ func Args(spec Spec, host Host) ([]string, error) {
 	if host.Cwd == "" {
 		return nil, errors.New("localsandbox: Host.Cwd is required")
 	}
-	for _, p := range append(append([]string{spec.RunRoot, host.Home, host.Cwd}, spec.AddDirs...), spec.ReadOnly...) {
+	paths := append(append([]string{spec.RunRoot, host.Home, host.Cwd}, spec.AddDirs...), spec.ReadOnly...)
+	if spec.AllowedSignersFile != "" {
+		paths = append(paths, spec.AllowedSignersFile)
+	}
+	for _, p := range paths {
 		if !filepath.IsAbs(p) {
 			return nil, fmt.Errorf("localsandbox: %q is not an absolute path (the mount plan binds every path at its real location)", p)
 		}
@@ -121,6 +125,9 @@ func Args(spec Spec, host Host) ([]string, error) {
 	if spec.AgentHostSocket != "" {
 		args = append(args, "--bind", spec.AgentHostSocket, AgentHostSocketDest)
 	}
+	if spec.AllowedSignersFile != "" {
+		args = append(args, "--ro-bind", spec.AllowedSignersFile, spec.AllowedSignersFile)
+	}
 	// Host paths the run resolved rather than configured — the node
 	// interpreter, this binary, the SDK install. -try because a race that
 	// removes one between resolution and spawn should surface as the command
@@ -197,6 +204,11 @@ func Preflight(spec Spec, host Host) error {
 	}
 	if spec.AgentHostSocket != "" {
 		if err := mustExist(spec.AgentHostSocket, "agenthost socket"); err != nil {
+			return err
+		}
+	}
+	if spec.AllowedSignersFile != "" {
+		if err := mustExist(spec.AllowedSignersFile, "allowed-signers file"); err != nil {
 			return err
 		}
 	}

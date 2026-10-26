@@ -41,7 +41,7 @@ func TestStartLocalSandbox_DisabledIsFreeAndNil(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetStores(db.Stores{})
 
-	sbx, err := s.startLocalSandbox("conv-1", "rk-1", worktree.RunRoot("rk-1"), nil, agenthost.ConversationInfo{ConversationID: "conv-1"})
+	sbx, err := s.startLocalSandbox("conv-1", "rk-1", worktree.RunRoot("rk-1"), nil, agenthost.ConversationInfo{ConversationID: "conv-1"}, nil)
 	if err != nil {
 		t.Fatalf("startLocalSandbox: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestStartLocalSandbox_BuildsPlanAndDaemon(t *testing.T) {
 
 	sbx, err := s.startLocalSandbox("conv-7", "rk-7", worktree.RunRoot("rk-7"),
 		&agentproc.GHChannelParams{Host: "127.0.0.1:1234"},
-		agenthost.ConversationInfo{ConversationID: "conv-7", OrgID: runmode.LocalDefaultOrgID})
+		agenthost.ConversationInfo{ConversationID: "conv-7", OrgID: runmode.LocalDefaultOrgID}, nil)
 	if err != nil {
 		t.Fatalf("startLocalSandbox: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestStartLocalSandbox_NoGHChannelBindsNoChannelDir(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetStores(db.Stores{})
 
-	sbx, err := s.startLocalSandbox("conv-8", "rk-8", worktree.RunRoot("rk-8"), nil, agenthost.ConversationInfo{ConversationID: "conv-8"})
+	sbx, err := s.startLocalSandbox("conv-8", "rk-8", worktree.RunRoot("rk-8"), nil, agenthost.ConversationInfo{ConversationID: "conv-8"}, nil)
 	if err != nil {
 		t.Fatalf("startLocalSandbox: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestStartLocalSandbox_RequiresARunTreeKey(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetStores(db.Stores{})
 
-	if _, err := s.startLocalSandbox("conv-9", "", t.TempDir(), nil, agenthost.ConversationInfo{ConversationID: "conv-9"}); err == nil {
+	if _, err := s.startLocalSandbox("conv-9", "", t.TempDir(), nil, agenthost.ConversationInfo{ConversationID: "conv-9"}, nil); err == nil {
 		t.Error("startLocalSandbox accepted an empty run-tree key")
 	}
 }
@@ -160,7 +160,7 @@ func TestStartLocalSandbox_RefusesWithoutStores(t *testing.T) {
 
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 
-	_, err := s.startLocalSandbox("conv-10", "rk-10", worktree.RunRoot("rk-10"), nil, agenthost.ConversationInfo{ConversationID: "conv-10"})
+	_, err := s.startLocalSandbox("conv-10", "rk-10", worktree.RunRoot("rk-10"), nil, agenthost.ConversationInfo{ConversationID: "conv-10"}, nil)
 	if err == nil {
 		t.Fatal("startLocalSandbox succeeded with unwired stores")
 	}

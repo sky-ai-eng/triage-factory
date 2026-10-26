@@ -76,14 +76,34 @@ type Result struct {
 	Outcome     Outcome
 	SignatureID string
 
-	// Signature is the armored SSH signature, for OutcomeSigned.
+	// Signature is the armored SSH signature, and PublicKey the key that made
+	// it, for OutcomeSigned.
 	Signature string
+	PublicKey string
 
 	// Refusal says why, for OutcomeRefused; RetryAfterSeconds is how long
 	// until the org's per-minute budget admits another, set only for
 	// RefusalOrgMinuteBudget.
 	Refusal           Refusal
 	RetryAfterSeconds int
+
+	// The rest fill in the line the run's agent reads (RefusalLine) and are
+	// set only by a signer that knows them.
+	//
+	// CommitSHA is the id git gives the signed commit, for OutcomeSigned.
+	CommitSHA string
+	// Limit is the budget a RefusalOrgMinuteBudget or RefusalClaimBudget
+	// refusal ran into.
+	Limit int
+	// Committer is the committer a RefusalCommitterMismatch commit named.
+	Committer commitsign.Identity
+	// Object is what a RefusalNotACommit payload was: commitsign.ObjectTag,
+	// commitsign.ObjectPushCertificate, or "" for no object git signs.
+	Object string
+	// SignerStatus and SignerReason are the signer's status and its reason,
+	// for a RefusalSignerInactive.
+	SignerStatus domain.CommitSignerStatus
+	SignerReason string
 }
 
 // errRequestVanished is a waiting request whose row is gone: its org was
@@ -177,7 +197,7 @@ func (r *Requester) await(ctx context.Context, orgID, id string, ring <-chan str
 		case row == nil:
 			return Result{}, errRequestVanished
 		case row.State == domain.CommitSignatureSigned:
-			return Result{Outcome: OutcomeSigned, SignatureID: id, Signature: row.Signature}, nil
+			return Result{Outcome: OutcomeSigned, SignatureID: id, Signature: row.Signature, PublicKey: row.PublicKey}, nil
 		case row.State == domain.CommitSignatureRefused && Refusal(row.RefusalReason) == RefusalUnanswered:
 			return Result{Outcome: OutcomeUnanswered, SignatureID: id}, nil
 		case row.State == domain.CommitSignatureRefused:

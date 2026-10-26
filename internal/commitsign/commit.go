@@ -17,6 +17,43 @@ type Identity struct {
 	Email string
 }
 
+// IdentName returns the name git writes into an ident line, such as a commit's
+// committer header, when it is given name as user.name. Git trims bytes up to
+// and including space, and the characters , : ; < > " \ ', from both ends, and
+// drops newlines, < and > anywhere else (strbuf_addstr_without_crud in git's
+// ident.c). A name compared against what ParseCommitter returns has to be
+// passed through this first, or a profile name like "Acme" (quotes included)
+// never matches the Acme git wrote. Git applies the same rule to user.email.
+func IdentName(name string) string {
+	start, end := 0, len(name)
+	for start < end && identCrud(name[start]) {
+		start++
+	}
+	for end > start && identCrud(name[end-1]) {
+		end--
+	}
+	var b strings.Builder
+	b.Grow(end - start)
+	for i := start; i < end; i++ {
+		switch c := name[i]; c {
+		case '\n', '<', '>':
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// identCrud is git's crud(): what IdentName trims from either end of a name.
+// It compares bytes, so a multi-byte UTF-8 character is never crud.
+func identCrud(c byte) bool {
+	switch c {
+	case ',', ':', ';', '<', '>', '"', '\\', '\'':
+		return true
+	}
+	return c <= ' '
+}
+
 // What NotACommitError.Object names when a payload is an object git signs
 // that is not a commit.
 const (

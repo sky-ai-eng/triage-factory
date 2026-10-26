@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -94,13 +95,23 @@ func (r Resolver) Resolve(ctx context.Context, orgID string) (Identity, error) {
 // signerIdentity is the identity an org's signer gives its runs, or false when
 // the signer has no committer address: it is off github.com, where there is
 // no noreply address to derive, and has no override.
+//
+// The name is the one git writes into the committer header for it
+// (commitsign.IdentName), so the user.name a run is given and the committer
+// every signature is checked against are the same string. A profile name git
+// would reduce to nothing falls back to the login, which has no characters git
+// strips.
 func signerIdentity(s domain.OrgCommitSigner) (Identity, bool) {
 	email := s.CommitEmail()
 	if email == "" {
 		return Identity{}, false
 	}
+	name := commitsign.IdentName(s.CommitName())
+	if name == "" {
+		name = s.Login
+	}
 	id := Identity{
-		Name:      s.CommitName(),
+		Name:      name,
 		Email:     email,
 		AccountID: strconv.FormatInt(s.GitHubUserID, 10),
 		Mode:      domain.CommitSigningNone,

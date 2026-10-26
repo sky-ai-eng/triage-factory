@@ -223,6 +223,25 @@ func (s *commitSignatureStore) ClaimSignaturesSystem(ctx context.Context, orgID,
 	return n, err
 }
 
+func (s *commitSignatureStore) ForCommitSystem(ctx context.Context, orgID, commitSHA string) (*domain.CommitSignature, error) {
+	if commitSHA == "" {
+		return nil, nil
+	}
+	row, err := db.ScanCommitSignature(s.q.QueryRowContext(ctx, `
+		SELECT `+db.CommitSignatureColumns+` FROM commit_signatures
+		 WHERE org_id = $1 AND commit_sha = $2 AND state = $3
+		 ORDER BY signed_at DESC, id DESC
+		 LIMIT 1`,
+		orgID, commitSHA, string(domain.CommitSignatureSigned)).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
 func (s *commitSignatureStore) NewestFailedVerificationSystem(ctx context.Context, orgID, host string, userID int64) (*domain.CommitSignature, error) {
 	row, err := db.ScanCommitSignature(s.q.QueryRowContext(ctx, `
 		SELECT `+db.CommitSignatureColumns+` FROM commit_signatures

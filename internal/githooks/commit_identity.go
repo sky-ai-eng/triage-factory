@@ -1,6 +1,13 @@
 package githooks
 
-import "github.com/sky-ai-eng/triage-factory/internal/domain"
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+)
 
 // CommitIdentity is the git author/committer identity stamped onto a
 // delegated-agent run's commits, plus the optional Co-authored-by trailer the
@@ -99,4 +106,72 @@ const (
 // GIT_CONFIG_* block a spawn assembles.
 func FallbackIdentityConfigPairs() [][2]string {
 	return IdentityConfigPairs(FallbackIdentityName, FallbackIdentityEmail)
+}
+
+// SigningConfigPairs returns the git config that has every commit a run makes
+// signed by the run's signer, in the shape IdentityConfigPairs produces so both
+// feed the one GIT_CONFIG_* block a spawn assembles:
+//
+//   - gpg.format=ssh and commit.gpgsign=true: sign every commit, with SSH.
+//   - user.signingkey=key::<publicKey>: the signer's public key, which git
+//     hands the signing program and which a run's own signature check reads.
+//     Git does not compare the key that signs with it.
+//   - gpg.ssh.program=<hooksDir>/ssh-sign: the shim that hands the signing
+//     call to the run's daemon. hooksDir is the hooks dir where the run sees
+//     it (HostDir in a local run, SandboxDir in a jail). Git needs the path
+//     absolute, because it runs commits from the repository's top directory.
+//   - gpg.ssh.allowedSignersFile=<allowedSigners>: the run's allowed-signers
+//     file (AllowedSigners), so git verify-commit and git log
+//     --show-signature can check the run's own commits.
+//
+// Tags and pushes are not signed: tag.gpgsign and push.gpgsign stay unset.
+func SigningConfigPairs(hooksDir, publicKey, allowedSigners string) [][2]string {
+	return [][2]string{
+		{"gpg.format", "ssh"},
+		{"commit.gpgsign", "true"},
+		{"user.signingkey", "key::" + publicKey},
+		{"gpg.ssh.program", filepath.Join(hooksDir, SignProgram)},
+		{"gpg.ssh.allowedSignersFile", allowedSigners},
+	}
+}
+
+// AllowedSigners is the content of a run's allowed-signers file: one line per
+// public key, `<email> namespaces="git" <key>`, for the signer's key and,
+// during a rotation, its pending key, so a run that started before the new key
+// was verified still checks the commits it signs with it. Empty keys are
+// skipped. The file holds only public values.
+func AllowedSigners(email string, publicKeys ...string) []byte {
+	var b strings.Builder
+	for _, key := range publicKeys {
+		if key == "" {
+			continue
+		}
+		b.WriteString(email + ` namespaces="git" ` + key + "\n")
+	}
+	return []byte(b.String())
+}
+
+// AddAllowedSigner appends publicKey's line to the allowed-signers file at
+// path when the file does not list it yet: a key the signer rotated to after
+// the run started, which git then checks the run's later commits against.
+// The file is appended to in place, never replaced, because the local sandbox
+// binds it by inode.
+func AddAllowedSigner(path, email, publicKey string) error {
+	line := AllowedSigners(email, publicKey)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if len(line) == 0 || bytes.Contains(content, line) {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(line); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }

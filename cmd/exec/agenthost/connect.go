@@ -65,14 +65,16 @@ func NewLocalFromEnv(ctx context.Context, stores db.Stores) (Client, error) {
 		}
 		return nil, fmt.Errorf("agenthost: resolve conversation identity: %w", err)
 	}
-	return NewLocal(stores, ConversationInfo{
+	client := NewLocal(stores, ConversationInfo{
 		OrgID:            ident.OrgID,
 		UserID:           ident.UserID,
 		ConversationID:   ident.ConversationID,
 		TeamID:           ident.TeamID,
 		IsEventTriggered: ident.IsEventTriggered,
 		RunURL:           os.Getenv(RunURLEnvVar),
-	}), nil
+	})
+	client.SetCommitSigning(commitSigningFromEnv())
+	return client, nil
 }
 
 func socketExists(path string) bool {

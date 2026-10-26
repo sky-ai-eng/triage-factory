@@ -311,6 +311,23 @@ func AgentHostSocketPath(conversationID string) string {
 	return filepath.Join(AgentHostSocketDir(), sanitizePathSegment(conversationID)+".sock")
 }
 
+// AllowedSignersDir holds the allowed-signers files of local engagements that
+// sign their commits: <StateRoot>/allowed-signers.
+func AllowedSignersDir() string {
+	return filepath.Join(StateRoot(), "allowed-signers")
+}
+
+// AllowedSignersPath is one local engagement's allowed-signers file:
+// <StateRoot>/allowed-signers/<claimID>. It is written from the run's signer
+// when the engagement starts, named by the run's gpg.ssh.allowedSignersFile,
+// bound read-only into the local sandbox, and removed when the engagement
+// ends. Keyed by the claim rather than the conversation, so an engagement that
+// ends while the next one on the same conversation starts removes only its
+// own.
+func AllowedSignersPath(claimID string) string {
+	return filepath.Join(AllowedSignersDir(), sanitizePathSegment(claimID))
+}
+
 // sanitizePathSegment reduces an id to a filesystem-safe single segment.
 // Conversation ids are UUIDs in every production caller, so this is defense in
 // depth against a future caller with a less constrained shape — never a path

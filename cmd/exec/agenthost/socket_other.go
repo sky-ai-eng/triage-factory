@@ -18,7 +18,7 @@ type HostDaemon struct{}
 // StartLocal always returns an "unsupported platform" error off Linux. The
 // local sandbox is a Linux mount namespace, so nothing off Linux ever asks
 // for its socket (runmode resolves the posture to off there).
-func StartLocal(_ db.Stores, _ ConversationInfo, _ string) (*HostDaemon, error) {
+func StartLocal(_ db.Stores, _ ConversationInfo, _ string, _ *LocalCommitSigning) (*HostDaemon, error) {
 	return nil, errors.New("agenthost: HostDaemon not supported on this platform")
 }
 

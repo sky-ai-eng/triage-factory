@@ -597,6 +597,44 @@ func RunCommitSignatureStoreConformance(t *testing.T, mk CommitSignatureStoreFac
 		}
 	})
 
+	t.Run("a_commit_finds_the_signature_that_produced_it", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		conversationID, claimID := seed.Claim(t)
+		now := time.Now()
+
+		if none, err := store.ForCommitSystem(ctx, orgID, commitSHA); err != nil || none != nil {
+			t.Fatalf("ForCommitSystem with no signature = %+v, %v; want nil", none, err)
+		}
+		withSHA := func(at time.Time, sha string) domain.CommitSignature {
+			t.Helper()
+			sig := signed(orgID, conversationID, claimID, at)
+			sig.CommitSHA = sha
+			row, err := store.InsertSystem(ctx, sig)
+			if err != nil {
+				t.Fatalf("InsertSystem: %v", err)
+			}
+			return row
+		}
+		withSHA(now.Add(-time.Hour), commitSHA)
+		want := withSHA(now.Add(-time.Minute), commitSHA)
+		withSHA(now, "1111111111111111111111111111111111111111")
+		// A request names no commit until it is signed.
+		if _, err := store.InsertSystem(ctx, requested(orgID, conversationID, claimID)); err != nil {
+			t.Fatalf("InsertSystem (requested): %v", err)
+		}
+
+		got, err := store.ForCommitSystem(ctx, orgID, commitSHA)
+		if err != nil {
+			t.Fatalf("ForCommitSystem: %v", err)
+		}
+		if got == nil || got.ID != want.ID {
+			t.Errorf("ForCommitSystem = %+v, want the newest signature of the commit, %s", got, want.ID)
+		}
+		if blank, err := store.ForCommitSystem(ctx, orgID, ""); err != nil || blank != nil {
+			t.Errorf("ForCommitSystem with no commit id = %+v, %v; want nil", blank, err)
+		}
+	})
+
 	t.Run("the_newest_failed_verification_is_the_signers_latest_failing_commit", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		conversationID, claimID := seed.Claim(t)

@@ -170,6 +170,13 @@ type Spec struct {
 	// silently falling back to a host DB it cannot reach.
 	AgentHostSocket string
 
+	// AllowedSignersFile is the host path of this run's allowed-signers file,
+	// which its git config names for checking the run's own signed commits.
+	// Bound read-only at its real path, out of the state-root mask, so the run
+	// cannot add a key to make its own check pass. Empty for a run that does
+	// not sign.
+	AllowedSignersFile string
+
 	// AddDirs are the run's --add-dir grants, bound rw at their real paths.
 	// The spawn seam folds RunOptions.AddDirs in on top of whatever the
 	// caller set, so the granted list and the bound list cannot drift apart.

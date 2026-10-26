@@ -19,6 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -348,7 +349,9 @@ func writeSSHSigningUnsupported(w http.ResponseWriter, host string) {
 
 // commitEmailProblem is why email cannot be a committer address, "" when it
 // can: a bare address, as git writes it between the angle brackets of the
-// committer header, with no display name, surrounding space or brackets.
+// committer header, with no display name, surrounding space or brackets, and
+// one git writes unchanged. A bare address can begin with an apostrophe, which
+// git drops, and the commit would then name an address the signer never set.
 func commitEmailProblem(email string) string {
 	if email == "" {
 		return "email must not be empty; send null to commit under the derived noreply address"
@@ -358,6 +361,9 @@ func commitEmailProblem(email string) string {
 	}
 	if addr, err := mail.ParseAddress(email); err != nil || addr.Name != "" || addr.Address != email {
 		return "email must be a bare email address, such as agent@example.com"
+	}
+	if commitsign.IdentName(email) != email {
+		return "email must not begin with an apostrophe, which git drops from a committer address"
 	}
 	return ""
 }
@@ -882,6 +888,13 @@ type commitIdentityJSON struct {
 	// Signing is how the commits are signed: none, org (the org's own
 	// signer) or deployment (the deployment's signer).
 	Signing string `json:"signing"`
+	// UnsignedReason says why an org whose signer is active still commits
+	// unsigned, null when it does not: git_too_old (local mode, this host's
+	// git predates SSH signing, 2.34) or git_unavailable (local mode, git
+	// could not be run). GitVersion is the version the reason was read from,
+	// null without one.
+	UnsignedReason *string `json:"unsigned_reason"`
+	GitVersion     *string `json:"git_version"`
 }
 
 type commitIdentityAccountJSON struct {
@@ -907,6 +920,16 @@ func (s *Server) handleCommitIdentityGet(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	out := commitIdentityJSON{Signing: string(id.Mode)}
+	// A local run signs with this host's git, which signs with an SSH key
+	// only from 2.34; below that the run commits as the signer, unsigned.
+	// Multi mode's runs use the jail image's git, well past it.
+	if id.Mode.Signs() && runmode.Current() == runmode.ModeLocal {
+		if git := commitsigner.ProbeLocalGit(r.Context()); git.UnsignedReason != "" {
+			out.Signing = string(domain.CommitSigningNone)
+			out.UnsignedReason = &git.UnsignedReason
+			out.GitVersion = nilIfEmpty(git.Version)
+		}
+	}
 	if id.Name != "" {
 		out.Identity = &commitIdentityAccountJSON{Name: id.Name, Email: id.Email, GitHubUserID: nilIfEmpty(id.AccountID)}
 	}

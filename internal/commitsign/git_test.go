@@ -216,3 +216,37 @@ func TestSignedCommitMatchesGit(t *testing.T) {
 		})
 	}
 }
+
+// IdentName returns the committer name git itself writes for each user.name.
+func TestIdentNameMatchesGit(t *testing.T) {
+	git := requireGit(t)
+	repo := newGitRepo(t, git, Identity{Name: "unused", Email: "unused@example.com"})
+	names := []string{
+		"Acme Inc.", `"Acme"`, "Acme;", "  Acme  ", "Acme <x>", `'Ac,me'`, `\Acme\`,
+		"\tAc\x01me\t", ":Acme:", "Ä \"Acme\" é,", "Ac\nme", ".Acme.", "\x7fAcme",
+	}
+	tree := repo.id(nil, []byte{}, "mktree")
+	for _, name := range names {
+		// The repo's env names a committer; drop it so user.name is what git
+		// reads.
+		cmd := exec.Command(git, "-c", "user.name="+name, "-c", "user.email=a@example.com", "commit-tree", tree, "-m", "x")
+		cmd.Dir = repo.dir
+		for _, kv := range repo.env {
+			if !strings.HasPrefix(kv, "GIT_COMMITTER_NAME=") {
+				cmd.Env = append(cmd.Env, kv)
+			}
+		}
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("git commit-tree with user.name %q: %v", name, err)
+		}
+		object := repo.run(nil, nil, "cat-file", "commit", strings.TrimSpace(string(out)))
+		got, err := ParseCommitter(object)
+		if err != nil {
+			t.Fatalf("ParseCommitter for user.name %q: %v", name, err)
+		}
+		if want := IdentName(name); got.Name != want {
+			t.Errorf("git wrote %q for user.name %q; IdentName = %q", got.Name, name, want)
+		}
+	}
+}

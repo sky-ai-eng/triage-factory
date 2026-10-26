@@ -138,6 +138,7 @@ func FuzzHandleConn(f *testing.F) {
 		{methodLinearAssign, `{"issue":"ENG-1","user":"me"}`},
 		{methodLinearSearchUsers, `{"query":""}`},
 		{methodMemoryLoad, `{"source":"github","source_id":"o/r#1","limit":-5}`},
+		{methodSignCommit, `{"payload":"dHJlZSB4Cgo="}`},
 		{methodCallExtension, `{"namespace":"n","method":"m","args":{"a":1}}`},
 		{methodUpsertArtifact, `{"artifact":{"provider":"github","kind":"comment","target":"o/r#1"}}`},
 		{"", ``},

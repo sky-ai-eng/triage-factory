@@ -153,6 +153,11 @@ func TestResolve_SignerNameAndEmail(t *testing.T) {
 	}{
 		{"profile name and derived address", func(*domain.OrgCommitSigner) {}, "The Octocat", "583231+octocat@users.noreply.github.com"},
 		{"no profile name", func(s *domain.OrgCommitSigner) { s.Name = "" }, "octocat", "583231+octocat@users.noreply.github.com"},
+		// The name is what git writes for it, so the committer git records
+		// is the one the signature check compares against.
+		{"profile name git trims", func(s *domain.OrgCommitSigner) { s.Name = `"Acme";` }, "Acme", "583231+octocat@users.noreply.github.com"},
+		{"profile name git drops brackets from", func(s *domain.OrgCommitSigner) { s.Name = "Acme <Bots>" }, "Acme Bots", "583231+octocat@users.noreply.github.com"},
+		{"profile name git reduces to nothing", func(s *domain.OrgCommitSigner) { s.Name = `"<>"` }, "octocat", "583231+octocat@users.noreply.github.com"},
 		{"override on github.com", func(s *domain.OrgCommitSigner) { s.EmailOverride = "agent@acme.example" }, "The Octocat", "agent@acme.example"},
 		{"override on GHES", func(s *domain.OrgCommitSigner) {
 			s.Host, s.EmailOverride = "https://ghe.acme.example", "agent@acme.example"
