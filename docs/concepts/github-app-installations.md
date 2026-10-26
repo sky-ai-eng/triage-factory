@@ -78,10 +78,11 @@ disconnected. Its per-installation form
 account and keeps the class — until it drops the last one, which is the full
 disconnect. Nothing is uninstalled on GitHub: the installation persists there
 unbound, in the "installed but not bound" state described below, and the
-named-account leg reconnects it. The other credential doors — the PAT bind,
-BYO registration, BYO import — refuse a managed workspace that still holds a
-live installation row and name the disconnect as the way out, so a workspace's
-live rows and its class can never disagree. That is what lets the receiver
+named-account leg reconnects it. The other credential doors — BYO
+registration, BYO import — refuse a managed workspace that still holds a live
+installation row and name the disconnect as the way out, so a workspace's live
+rows and its class can never disagree. (A multi workspace has no token bind to
+guard: its GitHub access is always an App.) That is what lets the receiver
 above route on the row alone.
 
 The door runs the other way too. The bind refuses a workspace that still holds

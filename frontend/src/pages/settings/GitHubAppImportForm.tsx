@@ -1,8 +1,9 @@
 // GitHubAppImportForm is the bring-your-own-App import surface: App ID + private
-// key, an optional OAuth client secret, and (multi mode) an optional webhook
-// secret. It validates server-side — an app-JWT GET /app round trip proves the
-// ID+key pair and derives the App's slug/owner/permissions — then permission-
-// preflights and persists through the same path the manifest flow uses.
+// key, the OAuth client secret (required in multi mode, optional in local), and
+// (multi mode) an optional webhook secret. It validates server-side — an app-JWT
+// GET /app round trip proves the ID+key pair and derives the App's
+// slug/owner/permissions — then permission-preflights and persists through the
+// same path the manifest flow uses.
 //
 // Self-contained: it owns all the transient import state (draft fields, the
 // granted-vs-required permission table from a failed preflight, the soft-gap
@@ -30,7 +31,10 @@ export default function GitHubAppImportForm({
   orgId: string
   // Gates the webhook-secret field — multi mode receives deliveries (so a
   // webhook secret is meaningful); local is hookless (backfill discovery), so
-  // the field is hidden there.
+  // the field is hidden there. Also decides whether the client secret is
+  // required: in multi every workspace's App must let members sign in with
+  // GitHub to link their accounts, and the server refuses an import without
+  // one.
   isLocal: boolean
   // Called with the import result on success. The form has already persisted —
   // the caller reacts (patch wizard state + advance, or resume the switch flow).
@@ -91,21 +95,31 @@ export default function GitHubAppImportForm({
     }
   }
 
+  const secretRequired = !isLocal
   const idTrim = appId.trim()
   const pemTrim = pem.trim()
-  const canSubmit = idTrim !== '' && pemTrim !== '' && !busy && !(softGap && !ack)
+  const csTrim = clientSecret.trim()
+  const canSubmit =
+    idTrim !== '' &&
+    pemTrim !== '' &&
+    (!secretRequired || csTrim !== '') &&
+    !busy &&
+    !(softGap && !ack)
 
   const submit = async () => {
     if (idTrim === '' || pemTrim === '') {
       setError('Enter the App ID and paste the private key.')
       return
     }
+    if (secretRequired && csTrim === '') {
+      setError('Enter the App’s client secret.')
+      return
+    }
     if (busy) return
     setBusy(true)
     setError(null)
     const input: GitHubAppImportInput = { app_id: idTrim, pem: pemTrim }
-    const cs = clientSecret.trim()
-    if (cs) input.client_secret = cs
+    if (csTrim) input.client_secret = csTrim
     const wh = webhookSecret.trim()
     if (wh && !isLocal) input.webhook_secret = wh
     // accept_partial is only meaningful once the user has acknowledged a soft gap.
@@ -131,6 +145,49 @@ export default function GitHubAppImportForm({
       setSoftGap(false)
     }
   }
+
+  const clientSecretInput = (
+    <input
+      type="password"
+      autoComplete="off"
+      value={clientSecret}
+      placeholder="Generate one in the App's settings"
+      onChange={(e) => setClientSecret(e.target.value)}
+      className={glassInputClass}
+    />
+  )
+
+  // The Connect callback URL the App owner registers on GitHub, beside the
+  // client secret it goes with. Nothing to show until the status read lands.
+  const callbackField = callbackUrl ? (
+    <div className="space-y-1.5">
+      <span className="block text-reported font-medium uppercase tracking-wide text-ink-3">
+        Callback URL to register on the App
+      </span>
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          readOnly
+          value={callbackUrl}
+          onFocus={(e) => e.target.select()}
+          className={`${glassInputClass} font-mono text-ui`}
+        />
+        <button
+          type="button"
+          onClick={copyCallback}
+          aria-label="Copy callback URL"
+          className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-[var(--color-line-1)] px-3 py-2 text-ui font-medium text-ink-2 transition-colors hover:text-ink-1"
+        >
+          {copied ? <Check size={13} /> : <Copy size={13} />}
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      <p className="text-reported leading-relaxed text-ink-3">
+        Add this as a Callback URL under the App&rsquo;s settings on GitHub — OAuth sign-in only
+        works once it&rsquo;s registered there.
+      </p>
+    </div>
+  ) : null
 
   return (
     <div className="space-y-5">
@@ -182,77 +239,63 @@ export default function GitHubAppImportForm({
         </span>
       </div>
 
-      {/* Optional OAuth client secret — collapsible, recommended. */}
-      <div className="rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40">
-        <button
-          type="button"
-          onClick={() => setOauthOpen((v) => !v)}
-          aria-expanded={oauthOpen}
-          className="flex w-full items-center gap-2 px-4 py-3 text-left"
-        >
-          {oauthOpen ? (
-            <ChevronDown size={14} className="shrink-0 text-ink-3" />
-          ) : (
-            <ChevronRight size={14} className="shrink-0 text-ink-3" />
-          )}
-          <span className="flex-1 text-body font-medium text-ink-2">
-            Enable browser sign-in for your team{' '}
-            <span className="font-normal text-ink-3">(recommended)</span>
-          </span>
-        </button>
-        {oauthOpen && (
-          <div className="space-y-3 px-4 pb-4">
-            <p className="text-ui leading-relaxed text-ink-3">
-              A client secret lets teammates connect their GitHub identity with one click instead of
-              pasting a token. You can skip it — identity capture falls back to a personal access
-              token. Apps can hold two client secrets at once, so generating one here won&rsquo;t
-              disturb an existing consumer.
-            </p>
-            <label className="block space-y-2">
-              <span className="block text-reported font-medium uppercase tracking-wide text-ink-3">
-                Client secret
-              </span>
-              <input
-                type="password"
-                autoComplete="off"
-                value={clientSecret}
-                placeholder="Generate one in the App's settings"
-                onChange={(e) => setClientSecret(e.target.value)}
-                className={glassInputClass}
-              />
-            </label>
-            {callbackUrl && (
-              <div className="space-y-1.5">
-                <span className="block text-reported font-medium uppercase tracking-wide text-ink-3">
-                  Callback URL to register on the App
-                </span>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    readOnly
-                    value={callbackUrl}
-                    onFocus={(e) => e.target.select()}
-                    className={`${glassInputClass} font-mono text-ui`}
-                  />
-                  <button
-                    type="button"
-                    onClick={copyCallback}
-                    aria-label="Copy callback URL"
-                    className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-[var(--color-line-1)] px-3 py-2 text-ui font-medium text-ink-2 transition-colors hover:text-ink-1"
-                  >
-                    {copied ? <Check size={13} /> : <Copy size={13} />}
-                    {copied ? 'Copied' : 'Copy'}
-                  </button>
-                </div>
-                <p className="text-reported leading-relaxed text-ink-3">
-                  Add this as a Callback URL under the App&rsquo;s settings on GitHub — OAuth
-                  sign-in only works once it&rsquo;s registered there.
-                </p>
-              </div>
+      {/* The OAuth client secret. Required in multi mode, where every
+          workspace's App must let members sign in with GitHub to link their
+          accounts, so it is a plain field there; optional in local, where
+          identity capture falls back to a token, so it sits behind a
+          collapsible, recommended section. */}
+      {secretRequired ? (
+        <div className="space-y-3">
+          <label className="block space-y-2">
+            <span className="block text-reported font-medium uppercase tracking-wide text-ink-3">
+              Client secret
+            </span>
+            {clientSecretInput}
+            <span className="block text-reported leading-relaxed text-ink-3">
+              Members sign in with GitHub through this App to link their accounts, and the client
+              secret is what lets them. Apps can hold two client secrets at once, so generating one
+              here won&rsquo;t disturb an existing consumer.
+            </span>
+          </label>
+          {callbackField}
+        </div>
+      ) : (
+        <div className="rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40">
+          <button
+            type="button"
+            onClick={() => setOauthOpen((v) => !v)}
+            aria-expanded={oauthOpen}
+            className="flex w-full items-center gap-2 px-4 py-3 text-left"
+          >
+            {oauthOpen ? (
+              <ChevronDown size={14} className="shrink-0 text-ink-3" />
+            ) : (
+              <ChevronRight size={14} className="shrink-0 text-ink-3" />
             )}
-          </div>
-        )}
-      </div>
+            <span className="flex-1 text-body font-medium text-ink-2">
+              Enable browser sign-in for your team{' '}
+              <span className="font-normal text-ink-3">(recommended)</span>
+            </span>
+          </button>
+          {oauthOpen && (
+            <div className="space-y-3 px-4 pb-4">
+              <p className="text-ui leading-relaxed text-ink-3">
+                A client secret lets teammates connect their GitHub identity with one click instead
+                of pasting a token. You can skip it — identity capture falls back to a personal
+                access token. Apps can hold two client secrets at once, so generating one here
+                won&rsquo;t disturb an existing consumer.
+              </p>
+              <label className="block space-y-2">
+                <span className="block text-reported font-medium uppercase tracking-wide text-ink-3">
+                  Client secret
+                </span>
+                {clientSecretInput}
+              </label>
+              {callbackField}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Webhook secret — multi mode only (local is hookless).
 

@@ -4,16 +4,17 @@
 //   GitHubUrlStep         — the base-URL field. Continue runs the URL-only
 //                           reachability probe; an unreachable host bounces
 //                           Continue and turns the box red.
-//   GitHubModeStep        — the access-method picker (App vs PAT), a flush
-//                           two-panel ChoiceCards, action-on-click.
+//   GitHubModeStep        — local only: the access-method picker (App vs PAT),
+//                           a flush two-panel ChoiceCards, action-on-click.
+//                           Multi mode is always App.
 //   GitHubAccountTypeStep — App only: which account the App is registered under
 //                           (Personal vs Organization), a ChoiceCards before the
 //                           registration step. Rides state.githubAppOwnerType.
 //   GitHubAppStep         — App only: GitHubAppPanel's external Register launch
 //                           (a redirect can't fold into Continue), owner type
 //                           controlled from the prior step.
-//   GitHubPatStep         — PAT only: the token field. Continue performs the
-//                           connect (no separate button).
+//   GitHubPatStep         — PAT + local only: the token field. Continue
+//                           performs the connect (no separate button).
 //   GitHubCloneStep       — PAT + local only: SSH vs HTTPS clone protocol, a
 //                           ChoiceCards after the token step.
 //
@@ -163,7 +164,7 @@ const SOURCE_CARDS: { kind: GitHubAppSource; title: string; detail: string }[] =
 // the Settings empty state does, and that surface sits behind the setup-complete
 // gate, so a workspace with no GitHub credential — every fresh one on a
 // deployment with a deployment App — cannot reach it. The step needs Connect
-// beside these two cards and the token, offered when the status read reports
+// beside these two cards, offered when the status read reports
 // deployment_app_available.
 export function GitHubAppSourcePicker({
   selected,

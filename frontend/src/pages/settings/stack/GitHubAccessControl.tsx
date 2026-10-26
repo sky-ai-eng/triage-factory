@@ -33,21 +33,26 @@
 // Three credential classes render here, and the affordances are per class:
 //
 //   - A workspace with its OWN App: its slug, its installations (with
-//     suspension and grant width), both grant findings, and the switch to a
-//     token. An App GitHub no longer accepts — deleted there, or its key
-//     deleted there — replaces all of that with what happened and the ways
-//     out, since installations and findings describe an App that is gone.
+//     suspension and grant width), both grant findings, and (local mode) the
+//     switch to a token. An App GitHub no longer accepts — deleted there, or
+//     its key deleted there — replaces all of that with what happened and the
+//     ways out, since installations and findings describe an App that is gone.
 //   - A workspace on the DEPLOYMENT's App (multi mode): no App of its own to
 //     show and none to register or import — the same treatment the Atlassian
 //     card gives "using the deployment app". What it has is the accounts it
 //     bound, each with its own Disconnect, the findings, Connect for another
 //     account, and Disconnect for the whole workspace: the way out for one that
-//     wants its own App or a token instead. The grant stays on GitHub either
-//     way; the copy says so and links there.
+//     wants its own App instead. The grant stays on GitHub either way; the copy
+//     says so and links there.
 //   - A workspace with a TOKEN, or nothing: neither finding — a token's reach
 //     is not a grant TF holds — and, with nothing bound, every way in at once:
 //     Connect (only when the deployment offers an App; a default, never the
-//     only option), register, import, or a token.
+//     only option), register, import, or (local mode) a token.
+//
+// Multi mode offers no way to add, replace or switch to a token in any state:
+// a multi workspace's GitHub access is an App, and the server has no route
+// that puts a token in place there. A multi workspace that holds a token
+// anyway keeps "Switch to GitHub App…", its way out.
 
 import { useState } from 'react'
 import { AlertTriangle, ExternalLink } from 'lucide-react'
@@ -131,6 +136,9 @@ export default function GitHubAccessControl({
 }) {
   const orgId = ctx.orgId
   const s = ctx.state
+  // Whether any way to a workspace token is offered. Local only: see the
+  // header.
+  const offerToken = ctx.isLocal
   const registered = s.githubAppRegistered
   const staged = s.githubAppStaged
   const liveApp = registered && !staged
@@ -742,7 +750,12 @@ export default function GitHubAccessControl({
         // the webhook health all describe an App that is gone, so none of them
         // render; what does is what happened and every way out.
         <>
-          <GitHubAppUnusableNotice reason={unusableReason} since={unusableSince} slug={slug} />
+          <GitHubAppUnusableNotice
+            reason={unusableReason}
+            since={unusableSince}
+            slug={slug}
+            offerToken={offerToken}
+          />
           {error && <p className="text-ui text-alarm">{error}</p>}
           <div className="flex flex-wrap items-center gap-2">
             <button
@@ -761,14 +774,16 @@ export default function GitHubAccessControl({
                 beforeStart={disconnectOwnAppFor}
               />
             )}
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => setPhase({ kind: 'to-pat-token' })}
-              className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1 disabled:opacity-40"
-            >
-              Switch to a personal access token…
-            </button>
+            {offerToken && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setPhase({ kind: 'to-pat-token' })}
+                className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1 disabled:opacity-40"
+              >
+                Switch to a personal access token…
+              </button>
+            )}
           </div>
         </>
       ) : liveApp ? (
@@ -819,26 +834,30 @@ export default function GitHubAccessControl({
           <GitHubGrantFindings findings={findings} />
           {error && <p className="text-ui text-alarm">{error}</p>}
           {/* The ways off the workspace's own App: the deployment's App where
-              the deployment offers one, or a token. Never a bare teardown —
-              see disconnectOwnAppFor. */}
-          <div className="flex flex-wrap items-center gap-2">
-            {deploymentAppAvailable && orgId && (
-              <ConnectGitHubAccount
-                orgId={orgId}
-                label="Switch to the deployment’s App…"
-                disabled={busy}
-                beforeStart={disconnectOwnAppFor}
-              />
-            )}
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => setPhase({ kind: 'to-pat-token' })}
-              className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1 disabled:opacity-40"
-            >
-              Switch to a personal access token…
-            </button>
-          </div>
+              the deployment offers one, or (local mode) a token. Never a bare
+              teardown — see disconnectOwnAppFor. */}
+          {((deploymentAppAvailable && orgId) || offerToken) && (
+            <div className="flex flex-wrap items-center gap-2">
+              {deploymentAppAvailable && orgId && (
+                <ConnectGitHubAccount
+                  orgId={orgId}
+                  label="Switch to the deployment’s App…"
+                  disabled={busy}
+                  beforeStart={disconnectOwnAppFor}
+                />
+              )}
+              {offerToken && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setPhase({ kind: 'to-pat-token' })}
+                  className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1 disabled:opacity-40"
+                >
+                  Switch to a personal access token…
+                </button>
+              )}
+            </div>
+          )}
         </>
       ) : managed ? (
         // The deployment's App. Nothing here registers or imports an App —
@@ -882,7 +901,7 @@ export default function GitHubAccessControl({
                 disabled={busy}
               />
               {/* The way out of the class, for a workspace that wants its own
-                  App or a token instead. It releases every bound account; the
+                  App instead. It releases every bound account; the
                   installations stay on GitHub. */}
               <button
                 type="button"
@@ -911,14 +930,16 @@ export default function GitHubAccessControl({
             {/* Rotation lives beside the switch, not inside it: replacing an
                 expired or revoked token is routine hygiene, and routing it
                 through a mode change (App and back) would be a teardown to swap
-                a string. */}
-            <button
-              type="button"
-              onClick={() => setPhase({ kind: 'rotate-token' })}
-              className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
-            >
-              Replace token…
-            </button>
+                a string. Local only: in multi the switch is the way out. */}
+            {offerToken && (
+              <button
+                type="button"
+                onClick={() => setPhase({ kind: 'rotate-token' })}
+                className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
+              >
+                Replace token…
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setPhase({ kind: 'to-app-source' })}
@@ -932,20 +953,22 @@ export default function GitHubAccessControl({
         // Nothing bound. Every way in is offered at once, none hidden behind
         // another: the deployment's App when the deployment has one (the fast
         // path — a default, never a mandate), an App of the workspace's own,
-        // an existing App, or a token.
+        // an existing App, or (local mode) a token.
         <>
           <p className="text-body leading-relaxed text-ink-3">
             GitHub access isn&rsquo;t configured for this workspace yet.{' '}
             {deploymentAppAvailable ? (
               <>
                 Connect GitHub to use this deployment&rsquo;s App, or set up a GitHub App of your
-                own to {appPitch}. A personal access token works too.
+                own to {appPitch}.{offerToken && ' A personal access token works too.'}
               </>
-            ) : (
+            ) : offerToken ? (
               <>
                 Register a GitHub App to {appPitch}, connect an App that already exists, or use a
                 personal access token.
               </>
+            ) : (
+              <>Register a GitHub App to {appPitch}, or connect an App that already exists.</>
             )}
           </p>
           <div className="flex flex-wrap items-center gap-2">
@@ -972,13 +995,15 @@ export default function GitHubAccessControl({
             >
               Connect an existing App…
             </button>
-            <button
-              type="button"
-              onClick={() => setPhase({ kind: 'rotate-token' })}
-              className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
-            >
-              Use a personal access token…
-            </button>
+            {offerToken && (
+              <button
+                type="button"
+                onClick={() => setPhase({ kind: 'rotate-token' })}
+                className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
+              >
+                Use a personal access token…
+              </button>
+            )}
           </div>
         </>
       )}
@@ -1044,10 +1069,13 @@ function GitHubAppUnusableNotice({
   reason,
   since,
   slug,
+  offerToken,
 }: {
   reason: GitHubAppUnusableReason
   since: string
   slug: string
+  // Whether a token is among the ways back (local mode only).
+  offerToken: boolean
 }) {
   const app = slug ? `The ${slug} App` : 'This workspace’s GitHub App'
   const detected = since ? ` Detected ${timeAgo(since)}.` : ''
@@ -1066,8 +1094,8 @@ function GitHubAppUnusableNotice({
   return (
     <PanelNotice headline={`${app} no longer exists on GitHub.`}>
       It was deleted on GitHub, outside Triage Factory, so nothing is being polled and agents
-      can&rsquo;t reach GitHub.{detected} Remove it here, then connect GitHub again with a new App,
-      an existing one, or a personal access token.
+      can&rsquo;t reach GitHub.{detected} Remove it here, then connect GitHub again with a new App
+      {offerToken ? ', an existing one, or a personal access token.' : ' or an existing one.'}
     </PanelNotice>
   )
 }

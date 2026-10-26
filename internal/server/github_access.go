@@ -28,6 +28,11 @@ import (
 // stays the live credential until a cutover flips the bit and deletes the PAT
 // in one transaction. See handleGitHubAppRegisterCallback for the staging side.
 //
+// The App→PAT direction exists only in local mode (refuseWorkspaceTokenInMulti):
+// a multi workspace's GitHub access is an App. The PAT→App cutover and the
+// discard stay in both modes, so a multi workspace that holds a token anyway
+// keeps its way onto an App.
+//
 // All three transitions here serialize on githubAppRegRMWLockSalt keyed by org,
 // the same lock the PAT bind/unbind and the two registration paths take — one
 // credential slot per workspace means one transition at a time, deployment-wide.
@@ -53,7 +58,7 @@ import (
 const (
 	msgAppAlreadyLive  = "the GitHub App is already the live credential"
 	msgAppNotInstalled = "install the App before switching"
-	msgAppIsLiveCred   = "this GitHub App is the live credential; switch the org to a PAT to remove it"
+	msgAppIsLiveCred   = "this GitHub App is the live credential, not a staged one; disconnect it instead"
 	msgAppIsStaged     = "this GitHub App is staged, not live; discard the staged registration instead"
 )
 
@@ -399,8 +404,13 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 // that so the UI can point the admin at GitHub to delete it there. Org-admin
 // only. Also valid from a staged state (re-committing to PAT mid-switch).
 //
+// Local mode only: see refuseWorkspaceTokenInMulti.
+//
 // POST /api/orgs/{org_id}/github/pat/switch-to
 func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Request) {
+	if refuseWorkspaceTokenInMulti(w) {
+		return
+	}
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
@@ -551,8 +561,8 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 // handleGitHubAppDiscard discards a STAGED App registration — the exit for an
 // abandoned PAT→App switch. It tears down the registration (row +
 // installations) and its secrets, leaving the still-live PAT untouched (so no
-// poller restart). 409 for an active App: removing a live App only happens
-// through switch-to-pat. Org-admin only.
+// poller restart). 409 for an active App: a live App is removed by the
+// disconnect, or in local mode by switch-to-pat. Org-admin only.
 //
 // DELETE /api/orgs/{org_id}/github/app
 func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) {
@@ -964,8 +974,13 @@ type patPreflightResponse struct {
 // plus the PAT's login. Does NOT store the PAT — the commit endpoint
 // re-validates. Org-admin only.
 //
+// Local mode only: see refuseWorkspaceTokenInMulti.
+//
 // POST /api/orgs/{org_id}/github/pat/preflight
 func (s *Server) handleGitHubAccessPATPreflight(w http.ResponseWriter, r *http.Request) {
+	if refuseWorkspaceTokenInMulti(w) {
+		return
+	}
 	orgID, _, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
