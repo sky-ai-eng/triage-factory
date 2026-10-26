@@ -656,7 +656,9 @@ or signs.
    commit's reason is `unknown_key`: that is the same fault seen on a commit,
    and the periodic check clears it once the key is back. A commit GitHub
    cannot be read for is asked about again each cycle for a day after its
-   push.
+   push, and so is one whose read ends in GitHub's own verification service
+   failing (`gpgverify_unavailable`, `gpgverify_error`): that is no verdict
+   on the commit, and Verify answers it as GitHub being unavailable.
 
 The UI explains the common reasons: `unknown_key` (the key is not on the
 account), `no_user` (the email belongs to no account), `unverified_email`

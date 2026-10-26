@@ -700,11 +700,19 @@ func TestCommitSigner_PostPushBreakClearedByVerify(t *testing.T) {
 
 	assertOneFault(t, doJSON(t, s, http.MethodPost, commitSignerPath("/verify"), nil), http.StatusConflict, "COMMIT_UNVERIFIED", "")
 
+	// GitHub's verification service failing is no verdict: Verify asks for a
+	// retry and the signer stays broken.
+	gh.setCommit(&ghclient.CommitVerification{Reason: "gpgverify_unavailable", CommitterEmail: active.CommitEmail})
+	assertOneFault(t, doJSON(t, s, http.MethodPost, commitSignerPath("/verify"), nil), http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "")
+	if got := mustSigner(t, s, http.MethodGet, "", nil, http.StatusOK); got.Status != "broken" {
+		t.Errorf("after an unavailable verification the signer is %q, want broken", got.Status)
+	}
+
 	gh.setCommit(&ghclient.CommitVerification{Verified: true, Reason: "valid", CommitterEmail: active.CommitEmail})
 	if got := mustSigner(t, s, http.MethodPost, "/verify", nil, http.StatusOK); got.Status != "active" || got.StatusReason != nil {
 		t.Errorf("verified = %+v, want active with no reason", got)
 	}
-	want := map[string]int64{"verify valid": 2, "post_push unverified_email": 1, "verify unverified_email": 1}
+	want := map[string]int64{"verify valid": 2, "post_push unverified_email": 1, "verify unverified_email": 1, "verify error": 1}
 	if got := checks(); !maps.Equal(got, want) {
 		t.Errorf("checks = %v, want %v", got, want)
 	}
