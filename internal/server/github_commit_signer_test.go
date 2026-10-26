@@ -657,6 +657,10 @@ func TestCommitSigner_VerifySkipsAFailureAlreadyReplaced(t *testing.T) {
 // org can register again.
 func TestCommitSigner_Delete(t *testing.T) {
 	s, gh := newSignerServer(t, "https://github.com")
+	// The org's own credential, which keeps its host once the signer goes.
+	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{GitHubPAT: "ghp_bound"}); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
 	assertOneFault(t, doJSON(t, s, http.MethodDelete, commitSignerPath(""), nil), http.StatusNotFound, "NOT_FOUND", "")
 
 	registerActiveSigner(t, s, gh)
@@ -703,11 +707,31 @@ func TestCommitSigner_HoldsTheGitHubHost(t *testing.T) {
 		t.Errorf("host after the token's disconnect = %q, want it kept for the signer", host)
 	}
 
-	// Once the signer is gone nothing holds the host.
+	// The signer was the last thing holding the host, so removing it clears
+	// the host the token's disconnect left: the same state as removing the
+	// two in the other order.
 	if rec := doJSON(t, s, http.MethodDelete, commitSignerPath(""), nil); rec.Code != http.StatusNoContent {
 		t.Fatalf("DELETE signer = %d; body=%s", rec.Code, rec.Body.String())
 	}
-	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": "https://ghe.example.com"})
+	if host := seedRepoHost(t, s); host != "" {
+		t.Errorf("host after the signer's removal = %q, want it cleared: nothing is connected", host)
+	}
+}
+
+// TestCommitSigner_DeleteKeepsAHostStillInUse: removing the signer clears the
+// host only when nothing else is connected on it.
+func TestCommitSigner_DeleteKeepsAHostStillInUse(t *testing.T) {
+	s, _ := newSignerServer(t, "https://github.com")
+	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{GitHubPAT: "ghp_bound"}); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	mustSigner(t, s, http.MethodPost, "", map[string]any{"login": "octocat"}, http.StatusCreated)
+	if rec := doJSON(t, s, http.MethodDelete, commitSignerPath(""), nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("DELETE signer = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	if host := seedRepoHost(t, s); host != "https://github.com" {
+		t.Errorf("host after the signer's removal = %q, want it kept for the token", host)
+	}
 }
 
 // TestCommitSigner_AppDisconnectKeepsTheHost: disconnecting the org's own App

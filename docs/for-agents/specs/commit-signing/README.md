@@ -567,7 +567,8 @@ Under `/api/orgs/{org_id}/github/`, beside the App and PAT routes:
   `githubCredentialConnected` (`internal/server/github_credential_class.go`),
   so `github_base_url` cannot change while one exists. The PAT unbind and the
   App disconnect, which otherwise clear the host, keep it while a signer
-  exists, as the PAT unbind keeps it for a staged App registration.
+  exists, as the PAT unbind keeps it for a staged App registration; removing
+  the signer then clears it when nothing else is connected.
 - The suggested key title is "Triage Factory commit signing", because titles
   are public.
 - The fleet console gets `GET` and `POST …/verify` for the deployment signer,

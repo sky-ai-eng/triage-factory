@@ -7,6 +7,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -83,5 +85,55 @@ func TestCommitSigner_Gates(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCommitSigner_HostOrderIndependent_Postgres: the token's disconnect keeps
+// the org's GitHub host while a signer exists, and removing the signer
+// afterwards clears it, with every read in both requests running under the
+// admin's claims.
+func TestCommitSigner_HostOrderIndependent_Postgres(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	founder := r.seedUser()
+	org, _ := r.seedOrg(founder, "acme")
+	admin := pgstore.New(r.h.AdminDB, r.h.AdminDB, pgtest.SecretKey)
+	ctx := t.Context()
+
+	if _, err := admin.Orgs.SetSourceBaseURL(ctx, org.String(), eventsource.KindGitHub, "https://github.com"); err != nil {
+		t.Fatalf("seed host: %v", err)
+	}
+	if err := admin.Secrets.Put(ctx, org.String(), integrations.KeyGitHubPAT, "ghp_bound", ""); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	if _, err := admin.OrgCommitSigners.Create(ctx, domain.OrgCommitSigner{
+		OrgID: org.String(), Host: "https://github.com", GitHubUserID: 583231, Login: "octocat",
+		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", CreatedBy: founder.String(),
+	}); err != nil {
+		t.Fatalf("seed signer: %v", err)
+	}
+	host := func() string {
+		t.Helper()
+		set, err := admin.Orgs.GetSettingsSystem(ctx, org.String())
+		if err != nil {
+			t.Fatalf("read settings: %v", err)
+		}
+		return set.GitHubBaseURL
+	}
+
+	resp, _ := r.driveCallback(founder)
+	sid := r.sidFromResp(resp)
+	base := "/api/orgs/" + org.String() + "/github"
+	if got := r.postJSONWithSid(http.MethodDelete, base+"/pat", sid, nil).StatusCode; got != http.StatusOK {
+		t.Fatalf("DELETE pat = %d, want 200", got)
+	}
+	if got := host(); got != "https://github.com" {
+		t.Errorf("host after the token's disconnect = %q, want it kept for the signer", got)
+	}
+	if got := r.postJSONWithSid(http.MethodDelete, base+"/commit-signer", sid, nil).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("DELETE commit-signer = %d, want 204", got)
+	}
+	if got := host(); got != "" {
+		t.Errorf("host after the signer's removal = %q, want it cleared: nothing is connected", got)
 	}
 }
