@@ -13,8 +13,9 @@ import (
 // writeJiraUserClientError answers a request whose acting user's Jira client
 // could not be resolved, by who can fix what stopped it.
 //
-// Only the user connecting again fixes a missing or refused credential, so both
-// are 409 NOT_CONFIGURED, the refusal saying why. A Cloud OAuth mint the token
+// Only the user connecting again fixes a missing or refused credential, or one
+// whose issuing OAuth app was removed, so all three are 409 NOT_CONFIGURED,
+// the refusal and the removal saying why. A Cloud OAuth mint the token
 // endpoint did not answer, or rate limited, clears on a retry; a rate limit is
 // 429 RATE_LIMITED, the status that reason has wherever it is answered. One
 // it refused for any reason but the user's grant is about the org's OAuth app,
@@ -25,6 +26,12 @@ import (
 // is not Jira's.
 func writeJiraUserClientError(w http.ResponseWriter, scope string, err error) {
 	switch {
+	case errors.Is(err, jira.ErrJiraUserCredentialAppRemoved):
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonNotConfigured,
+			Message: "The Jira app your connection was made through was removed from this workspace. Connect your Jira again to act on tickets.",
+		})
+		return
 	case errors.Is(err, jira.ErrJiraUserCredentialRefused):
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason:  httpx.ReasonNotConfigured,

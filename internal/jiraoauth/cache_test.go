@@ -7,11 +7,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
@@ -52,19 +54,54 @@ func (f *fakeRefresher) Refresh(_ context.Context, _ jira.OAuthApp, refreshToken
 	}, nil
 }
 
-// fakeAppResolver always resolves a fixed app.
-type fakeAppResolver struct{}
+var (
+	orgApp        = jira.OAuthApp{ClientID: "org-client", ClientSecret: "org-secret"}
+	deploymentApp = jira.OAuthApp{ClientID: "dep-client", ClientSecret: "dep-secret"}
+)
 
-func (fakeAppResolver) Resolve(_ context.Context, _ string) (jira.OAuthApp, jira.OAuthAppSource, error) {
-	return jira.OAuthApp{ClientID: "c", ClientSecret: "s"}, jira.SourceOrgOverride, nil
+const orgAppSecretRef = "jira_oauth_client_secret"
+
+// fakeJiraApps holds the org's org_jira_apps row, nil for none. Embeds the
+// interface so the unexercised methods compile-satisfy.
+type fakeJiraApps struct {
+	db.JiraAppsStore
+	app *domain.OrgJiraApp
 }
 
-// tierAppResolver resolves an app from the tier source names, which a test
-// changes to stand for an admin changing the org's app.
-type tierAppResolver struct{ source jira.OAuthAppSource }
+func (f *fakeJiraApps) GetForOrgSystem(context.Context, string) (*domain.OrgJiraApp, error) {
+	return f.app, nil
+}
 
-func (r *tierAppResolver) Resolve(_ context.Context, _ string) (jira.OAuthApp, jira.OAuthAppSource, error) {
-	return jira.OAuthApp{ClientID: "c", ClientSecret: "s"}, r.source, nil
+// testApps is the production resolver over the org's own app (a row and its
+// secret) and the deployment app. setOrg changes the org's own app, as an
+// admin does; the zero app removes it.
+type testApps struct {
+	jira.OAuthAppResolver
+	rows    *fakeJiraApps
+	secrets *fakeSecrets
+}
+
+func newTestApps(secrets *fakeSecrets, own, deployment jira.OAuthApp) *testApps {
+	a := &testApps{rows: &fakeJiraApps{}, secrets: secrets}
+	a.OAuthAppResolver = jira.NewOAuthAppResolver(a.rows, secrets, deployment)
+	a.setOrg(own)
+	return a
+}
+
+// orgAppOnly is an org with its own app and no deployment app.
+func orgAppOnly(secrets *fakeSecrets) *testApps {
+	return newTestApps(secrets, orgApp, jira.OAuthApp{})
+}
+
+func (a *testApps) setOrg(app jira.OAuthApp) {
+	if !app.Configured() {
+		a.rows.app = nil
+		return
+	}
+	a.rows.app = &domain.OrgJiraApp{OrgID: cOrg, ClientID: app.ClientID, ClientSecretRef: orgAppSecretRef}
+	a.secrets.mu.Lock()
+	a.secrets.sys[orgAppSecretRef] = app.ClientSecret
+	a.secrets.mu.Unlock()
 }
 
 // fakeSecrets is an in-memory per-user secret bag exercising GetUserSystem +
@@ -74,10 +111,19 @@ type fakeSecrets struct {
 	db.SecretStore
 	mu   sync.Mutex
 	bag  map[string]string
+	sys  map[string]string // org-level secrets, by key
 	puts int
 }
 
-func newFakeSecrets() *fakeSecrets { return &fakeSecrets{bag: map[string]string{}} }
+func newFakeSecrets() *fakeSecrets {
+	return &fakeSecrets{bag: map[string]string{}, sys: map[string]string{}}
+}
+
+func (f *fakeSecrets) GetSystem(_ context.Context, _, key string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sys[key], nil
+}
 
 func (f *fakeSecrets) key(orgID, userID, key string) string {
 	return orgID + "|" + userID + "|" + key
@@ -114,12 +160,21 @@ const (
 	cHost = "https://acme.atlassian.net"
 )
 
+// seedOAuthEnvelope stores a credential that does not record the app that
+// issued it, as one stored before the envelope carried client_id.
 func seedOAuthEnvelope(t *testing.T, secrets *fakeSecrets, refreshToken string) {
+	t.Helper()
+	seedIssuedEnvelope(t, secrets, refreshToken, "")
+}
+
+// seedIssuedEnvelope stores a credential issued by the app with clientID.
+func seedIssuedEnvelope(t *testing.T, secrets *fakeSecrets, refreshToken, clientID string) {
 	t.Helper()
 	env, err := jira.MarshalUserCredential(jira.UserCredential{
 		Method:       jira.AuthMethodCloudOAuth,
 		CloudID:      "cloud-1",
 		RefreshToken: refreshToken,
+		ClientID:     clientID,
 	})
 	if err != nil {
 		t.Fatalf("marshal envelope: %v", err)
@@ -131,12 +186,17 @@ func seedOAuthEnvelope(t *testing.T, secrets *fakeSecrets, refreshToken string) 
 
 func storedRefresh(t *testing.T, secrets *fakeSecrets) string {
 	t.Helper()
+	return storedCredential(t, secrets).RefreshToken
+}
+
+func storedCredential(t *testing.T, secrets *fakeSecrets) jira.UserCredential {
+	t.Helper()
 	raw, _ := secrets.GetUserSystem(context.Background(), cOrg, cUser, jira.UserTokenKey(cHost))
 	cred, err := jira.ParseUserCredential(raw)
 	if err != nil {
 		t.Fatalf("parse stored: %v", err)
 	}
-	return cred.RefreshToken
+	return cred
 }
 
 // TestTokenCache_RotationWriteBack is the acceptance scenario: after the access
@@ -152,7 +212,7 @@ func TestTokenCache_RotationWriteBack(t *testing.T) {
 	clock := time.Date(2026, 6, 16, 0, 0, 0, 0, time.UTC)
 	now := func() time.Time { return clock }
 	ref := &fakeRefresher{expires: time.Hour, now: now}
-	cache := newTokenCache(ref, fakeAppResolver{}, secrets)
+	cache := newTokenCache(ref, orgAppOnly(secrets), secrets)
 	cache.now = now
 
 	// First mint: refreshes ref-0 → access acc-1 / rotate ref-1, stored back.
@@ -166,8 +226,9 @@ func TestTokenCache_RotationWriteBack(t *testing.T) {
 	if tok.AccessToken != "acc-1" {
 		t.Errorf("access = %q, want acc-1", tok.AccessToken)
 	}
-	if got := storedRefresh(t, secrets); got != "ref-1" {
-		t.Fatalf("stored refresh after first mint = %q, want ref-1 (write-back failed)", got)
+	if got := storedCredential(t, secrets); got.RefreshToken != "ref-1" || got.ClientID != orgApp.ClientID {
+		t.Fatalf("stored credential after first mint = (refresh %q, client %q), want ref-1 issued by %s (write-back failed)",
+			got.RefreshToken, got.ClientID, orgApp.ClientID)
 	}
 
 	// Advance the clock past the first token's expiry, then mint again. The
@@ -200,7 +261,7 @@ func TestTokenCache_CachesWithinExpiry(t *testing.T) {
 	clock := time.Date(2026, 6, 16, 0, 0, 0, 0, time.UTC)
 	now := func() time.Time { return clock }
 	ref := &fakeRefresher{expires: time.Hour, now: now}
-	cache := newTokenCache(ref, fakeAppResolver{}, secrets)
+	cache := newTokenCache(ref, orgAppOnly(secrets), secrets)
 	cache.now = now
 
 	if _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err != nil {
@@ -216,26 +277,30 @@ func TestTokenCache_CachesWithinExpiry(t *testing.T) {
 	}
 }
 
-// TestTokenCache_ReportsTheAppTheTokenWasMintedUnder: a token reports the app
-// that minted it, whose quota its requests spend. After the org's app changes,
-// the cached token still reports the app it was minted under, and the token
-// minted once it expires reports the new one.
-func TestTokenCache_ReportsTheAppTheTokenWasMintedUnder(t *testing.T) {
+// TestTokenCache_RefreshesWithTheAppThatIssuedTheToken is the case an admin
+// adding the org's own app used to break: a credential the deployment app
+// issued keeps refreshing with the deployment app, since Atlassian accepts a
+// refresh token only from the app that issued it. Each token reports the app
+// that minted it, whose quota its requests spend.
+func TestTokenCache_RefreshesWithTheAppThatIssuedTheToken(t *testing.T) {
 	secrets := newFakeSecrets()
-	seedOAuthEnvelope(t, secrets, "ref-0")
-
+	seedIssuedEnvelope(t, secrets, "ref-0", deploymentApp.ClientID)
+	endpoint := &fakeTokenEndpoint{}
+	minter := endpoint.minter(t)
 	clock := time.Date(2026, 6, 16, 0, 0, 0, 0, time.UTC)
-	now := func() time.Time { return clock }
-	apps := &tierAppResolver{source: jira.SourceDeployment}
-	cache := newTokenCache(&fakeRefresher{expires: time.Hour, now: now}, apps, secrets)
-	cache.now = now
+	minter.now = func() time.Time { return clock }
+	apps := newTestApps(secrets, jira.OAuthApp{}, deploymentApp)
+	cache := newTokenCache(minter, apps, secrets)
+	cache.now = func() time.Time { return clock }
 
 	tok, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
 	if err != nil || tok.App != jira.SourceDeployment {
 		t.Fatalf("first mint = (app %d, %v), want the deployment app", tok.App, err)
 	}
 
-	apps.source = jira.SourceOrgOverride
+	// The admin adds the org's own app. The cached token is still the
+	// deployment app's until it expires.
+	apps.setOrg(orgApp)
 	clock = clock.Add(5 * time.Minute)
 	tok, err = cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
 	if err != nil || tok.AccessToken != "acc-1" || tok.App != jira.SourceDeployment {
@@ -245,9 +310,169 @@ func TestTokenCache_ReportsTheAppTheTokenWasMintedUnder(t *testing.T) {
 
 	clock = clock.Add(2 * time.Hour)
 	tok, err = cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
-	if err != nil || tok.AccessToken != "acc-2" || tok.App != jira.SourceOrgOverride {
-		t.Fatalf("mint after expiry = (%q, app %d, %v), want acc-2 minted under the org's app",
+	if err != nil || tok.AccessToken != "acc-2" || tok.App != jira.SourceDeployment {
+		t.Fatalf("mint after expiry = (%q, app %d, %v), want acc-2 minted under the deployment app",
 			tok.AccessToken, tok.App, err)
+	}
+	if got := endpoint.clientIDs(); !slices.Equal(got, []string{"dep-client", "dep-client"}) {
+		t.Errorf("token requests' client_id = %v, want both from the deployment app that issued the token", got)
+	}
+	if got := storedCredential(t, secrets); got.ClientID != "dep-client" || got.RefreshToken != "ref-2" {
+		t.Errorf("stored credential = (client %q, refresh %q), want the deployment app's ref-2", got.ClientID, got.RefreshToken)
+	}
+}
+
+// TestTokenCache_IssuingAppRemovedKeepsTheCredential: the org can no longer
+// authenticate as the app that issued the token, so no app can refresh it.
+// That is answered without a token request, and the credential is kept:
+// configuring the same app again brings it back.
+func TestTokenCache_IssuingAppRemovedKeepsTheCredential(t *testing.T) {
+	secrets := newFakeSecrets()
+	seedIssuedEnvelope(t, secrets, "ref-0", "gone-client")
+	before := storedEnvelope(secrets)
+	endpoint := &fakeTokenEndpoint{}
+	apps := newTestApps(secrets, orgApp, deploymentApp)
+	cache := newTokenCache(endpoint.minter(t), apps, secrets)
+
+	_, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
+	if !errors.Is(err, jira.ErrJiraUserCredentialAppRemoved) || !errors.Is(err, jira.ErrNoJiraUserCredential) {
+		t.Fatalf("err = %v, want ErrJiraUserCredentialAppRemoved, which is ErrNoJiraUserCredential", err)
+	}
+	if errors.Is(err, jira.ErrJiraUserCredentialRefused) {
+		t.Errorf("err = %v, want it not to read as a refused grant", err)
+	}
+	if got := endpoint.tokens(); len(got) != 0 {
+		t.Errorf("token requests = %v, want none", got)
+	}
+	if got := storedEnvelope(secrets); got != before {
+		t.Errorf("stored credential changed to %q, want it kept", got)
+	}
+
+	apps.setOrg(jira.OAuthApp{ClientID: "gone-client", ClientSecret: "restored-secret"})
+	if _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err != nil {
+		t.Fatalf("after the app was configured again: %v", err)
+	}
+	if got := endpoint.clientIDs(); !slices.Equal(got, []string{"gone-client"}) {
+		t.Errorf("token requests' client_id = %v, want the restored app", got)
+	}
+}
+
+// TestTokenCache_RotationWriteBackKeepsTheIssuingApp: the envelope written back
+// after a refresh still names the app that issued its token.
+func TestTokenCache_RotationWriteBackKeepsTheIssuingApp(t *testing.T) {
+	secrets := newFakeSecrets()
+	seedIssuedEnvelope(t, secrets, "ref-0", orgApp.ClientID)
+	cache := newTokenCache(&fakeRefresher{}, orgAppOnly(secrets), secrets)
+
+	if _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err != nil {
+		t.Fatalf("AccessTokenForUser: %v", err)
+	}
+	got := storedCredential(t, secrets)
+	if got.RefreshToken != "ref-1" || got.ClientID != orgApp.ClientID || got.CloudID != "cloud-1" {
+		t.Errorf("stored credential = %+v, want ref-1 issued by %s on cloud-1", got, orgApp.ClientID)
+	}
+}
+
+// TestTokenCache_UnattributedTokenTriesEachApp: a credential that does not
+// record its app is refreshed with the app the org resolves now, and then
+// with the other one when the first says the token may be another client's.
+// The app that succeeds is recorded.
+func TestTokenCache_UnattributedTokenTriesEachApp(t *testing.T) {
+	secrets := newFakeSecrets()
+	seedOAuthEnvelope(t, secrets, "ref-0")
+	endpoint := &fakeTokenEndpoint{answer: func(client, _ string) (int, string) {
+		if client == orgApp.ClientID {
+			return http.StatusBadRequest, `{"error":"invalid_grant"}`
+		}
+		return 0, ""
+	}}
+	cache := newTokenCache(endpoint.minter(t), newTestApps(secrets, orgApp, deploymentApp), secrets)
+
+	tok, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
+	if err != nil {
+		t.Fatalf("AccessTokenForUser = %v, want the deployment app's refresh to succeed", err)
+	}
+	if tok.App != jira.SourceDeployment {
+		t.Errorf("token app = %d, want the deployment app that refreshed it", tok.App)
+	}
+	if got := endpoint.clientIDs(); !slices.Equal(got, []string{"org-client", "dep-client"}) {
+		t.Errorf("token requests' client_id = %v, want the org's app, then the deployment app", got)
+	}
+	if got := storedCredential(t, secrets); got.ClientID != "dep-client" || got.RefreshToken != "ref-2" {
+		t.Errorf("stored credential = (client %q, refresh %q), want the deployment app's ref-2", got.ClientID, got.RefreshToken)
+	}
+}
+
+// TestTokenCache_UnattributedTokenEveryAppRefusedRemovesTheCredential: when
+// every app the org can authenticate as refuses the grant, none of them can
+// refresh it, so it is removed as a refused grant is.
+func TestTokenCache_UnattributedTokenEveryAppRefusedRemovesTheCredential(t *testing.T) {
+	secrets := newFakeSecrets()
+	seedOAuthEnvelope(t, secrets, "ref-0")
+	endpoint := &fakeTokenEndpoint{answer: func(string, string) (int, string) {
+		return http.StatusBadRequest, `{"error":"invalid_grant"}`
+	}}
+	cache := newTokenCache(endpoint.minter(t), newTestApps(secrets, orgApp, deploymentApp), secrets)
+
+	_, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
+	if !errors.Is(err, jira.ErrJiraUserCredentialRefused) {
+		t.Fatalf("err = %v, want ErrJiraUserCredentialRefused", err)
+	}
+	if raw := storedEnvelope(secrets); raw != "" {
+		t.Errorf("stored credential = %q, want it removed", raw)
+	}
+	if got := endpoint.clientIDs(); !slices.Equal(got, []string{"org-client", "dep-client"}) {
+		t.Errorf("token requests' client_id = %v, want each app once", got)
+	}
+}
+
+// TestTokenCache_UnattributedTokenOtherFailuresKeepTheCredential: a failure
+// that says nothing about whose token it is stops the refresh at that app, and
+// an app refusing the client rather than the grant means the token may still
+// be good. Either way the credential is kept.
+func TestTokenCache_UnattributedTokenOtherFailuresKeepTheCredential(t *testing.T) {
+	cases := []struct {
+		name   string
+		answer func(clientID string) (status int, body string)
+		want   []string // the token requests' client_id
+	}{
+		{
+			name: "first_unavailable",
+			answer: func(string) (int, string) {
+				return http.StatusServiceUnavailable, `<html>down</html>`
+			},
+			want: []string{"org-client"},
+		},
+		{
+			name: "grant_then_client_refused",
+			answer: func(client string) (int, string) {
+				if client == orgApp.ClientID {
+					return http.StatusBadRequest, `{"error":"invalid_grant"}`
+				}
+				return http.StatusUnauthorized, `{"error":"invalid_client"}`
+			},
+			want: []string{"org-client", "dep-client"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			secrets := newFakeSecrets()
+			seedOAuthEnvelope(t, secrets, "ref-0")
+			before := storedEnvelope(secrets)
+			endpoint := &fakeTokenEndpoint{answer: func(client, _ string) (int, string) { return tc.answer(client) }}
+			cache := newTokenCache(endpoint.minter(t), newTestApps(secrets, orgApp, deploymentApp), secrets)
+
+			_, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
+			if err == nil || errors.Is(err, jira.ErrNoJiraUserCredential) {
+				t.Fatalf("err = %v, want a failure that is not a missing credential", err)
+			}
+			if got := endpoint.clientIDs(); !slices.Equal(got, tc.want) {
+				t.Errorf("token requests' client_id = %v, want %v", got, tc.want)
+			}
+			if got := storedEnvelope(secrets); got != before {
+				t.Errorf("stored credential changed to %q, want it kept", got)
+			}
+		})
 	}
 }
 
@@ -261,7 +486,7 @@ func TestTokenCache_Invalidate(t *testing.T) {
 	clock := time.Date(2026, 6, 16, 0, 0, 0, 0, time.UTC)
 	now := func() time.Time { return clock }
 	ref := &fakeRefresher{expires: time.Hour, now: now}
-	cache := newTokenCache(ref, fakeAppResolver{}, secrets)
+	cache := newTokenCache(ref, orgAppOnly(secrets), secrets)
 	cache.now = now
 
 	if _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err != nil {
@@ -282,7 +507,7 @@ func TestTokenCache_Invalidate(t *testing.T) {
 // TestTokenCache_NoCredential errors clearly when there's no stored envelope.
 func TestTokenCache_NoCredential(t *testing.T) {
 	secrets := newFakeSecrets()
-	cache := newTokenCache(&fakeRefresher{}, fakeAppResolver{}, secrets)
+	cache := newTokenCache(&fakeRefresher{}, orgAppOnly(secrets), secrets)
 	if _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err == nil {
 		t.Fatal("want error for missing credential, got nil")
 	}
@@ -295,7 +520,7 @@ func TestTokenCache_WrongMethod(t *testing.T) {
 	env, _ := jira.MarshalUserCredential(jira.UserCredential{Method: jira.AuthMethodDCPAT, Token: "pat"})
 	_ = secrets.PutUserSystem(context.Background(), cOrg, cUser, jira.UserTokenKey(cHost), env, "")
 
-	cache := newTokenCache(&fakeRefresher{}, fakeAppResolver{}, secrets)
+	cache := newTokenCache(&fakeRefresher{}, orgAppOnly(secrets), secrets)
 	if _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err == nil {
 		t.Fatal("want error for non-oauth credential, got nil")
 	}
@@ -306,10 +531,11 @@ func TestTokenCache_WrongMethod(t *testing.T) {
 // them. answer decides each request by the refresh token it carries; nil
 // answers a fresh rotation.
 type fakeTokenEndpoint struct {
-	mu     sync.Mutex
-	seen   []string
-	n      int
-	answer func(refreshToken string) (status int, body string)
+	mu      sync.Mutex
+	seen    []string
+	clients []string // the client_id of each request, in call order
+	n       int
+	answer  func(clientID, refreshToken string) (status int, body string)
 }
 
 func (e *fakeTokenEndpoint) minter(t *testing.T) *Minter {
@@ -318,16 +544,17 @@ func (e *fakeTokenEndpoint) minter(t *testing.T) *Minter {
 		if err := r.ParseForm(); err != nil {
 			t.Errorf("parse form: %v", err)
 		}
-		token := r.PostForm.Get("refresh_token")
+		token, client := r.PostForm.Get("refresh_token"), r.PostForm.Get("client_id")
 		e.mu.Lock()
 		e.seen = append(e.seen, token)
+		e.clients = append(e.clients, client)
 		e.n++
 		n := e.n
 		answer := e.answer
 		e.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		if answer != nil {
-			if status, body := answer(token); status != 0 {
+			if status, body := answer(client, token); status != 0 {
 				w.WriteHeader(status)
 				_, _ = io.WriteString(w, body)
 				return
@@ -345,6 +572,12 @@ func (e *fakeTokenEndpoint) tokens() []string {
 	return append([]string(nil), e.seen...)
 }
 
+func (e *fakeTokenEndpoint) clientIDs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.clients...)
+}
+
 func storedEnvelope(secrets *fakeSecrets) string {
 	raw, _ := secrets.GetUserSystem(context.Background(), cOrg, cUser, jira.UserTokenKey(cHost))
 	return raw
@@ -356,10 +589,10 @@ func storedEnvelope(secrets *fakeSecrets) string {
 func TestTokenCache_RefusedGrantRemovesTheCredential(t *testing.T) {
 	secrets := newFakeSecrets()
 	seedOAuthEnvelope(t, secrets, "ref-0")
-	endpoint := &fakeTokenEndpoint{answer: func(string) (int, string) {
+	endpoint := &fakeTokenEndpoint{answer: func(string, string) (int, string) {
 		return http.StatusBadRequest, `{"error":"invalid_grant","error_description":"Unknown or invalid refresh token."}`
 	}}
-	cache := newTokenCache(endpoint.minter(t), fakeAppResolver{}, secrets)
+	cache := newTokenCache(endpoint.minter(t), orgAppOnly(secrets), secrets)
 
 	_, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
 	if !errors.Is(err, jira.ErrJiraUserCredentialRefused) || !errors.Is(err, jira.ErrNoJiraUserCredential) {
@@ -381,7 +614,7 @@ func TestTokenCache_RefusedGrantOfATokenAnotherProcessRotatedRetries(t *testing.
 	secrets := newFakeSecrets()
 	seedOAuthEnvelope(t, secrets, "ref-0")
 	endpoint := &fakeTokenEndpoint{}
-	endpoint.answer = func(token string) (int, string) {
+	endpoint.answer = func(_, token string) (int, string) {
 		if token != "ref-0" {
 			return 0, ""
 		}
@@ -389,7 +622,7 @@ func TestTokenCache_RefusedGrantOfATokenAnotherProcessRotatedRetries(t *testing.
 		seedOAuthEnvelope(t, secrets, "ref-other")
 		return http.StatusBadRequest, `{"error":"invalid_grant"}`
 	}
-	cache := newTokenCache(endpoint.minter(t), fakeAppResolver{}, secrets)
+	cache := newTokenCache(endpoint.minter(t), orgAppOnly(secrets), secrets)
 
 	tok, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
 	if err != nil {
@@ -415,7 +648,7 @@ func TestTokenCache_RefusedAgainAfterASecondRotationAsksToConnectAgain(t *testin
 	secrets := newFakeSecrets()
 	seedOAuthEnvelope(t, secrets, "ref-0")
 	endpoint := &fakeTokenEndpoint{}
-	endpoint.answer = func(token string) (int, string) {
+	endpoint.answer = func(_, token string) (int, string) {
 		switch token {
 		case "ref-0":
 			seedOAuthEnvelope(t, secrets, "ref-other")
@@ -424,7 +657,7 @@ func TestTokenCache_RefusedAgainAfterASecondRotationAsksToConnectAgain(t *testin
 		}
 		return http.StatusBadRequest, `{"error":"invalid_grant"}`
 	}
-	cache := newTokenCache(endpoint.minter(t), fakeAppResolver{}, secrets)
+	cache := newTokenCache(endpoint.minter(t), orgAppOnly(secrets), secrets)
 
 	_, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
 	if !errors.Is(err, jira.ErrJiraUserCredentialRefused) {
@@ -453,8 +686,8 @@ func TestTokenCache_OtherFailuresKeepTheCredential(t *testing.T) {
 			secrets := newFakeSecrets()
 			seedOAuthEnvelope(t, secrets, "ref-0")
 			before := storedEnvelope(secrets)
-			endpoint := &fakeTokenEndpoint{answer: func(string) (int, string) { return tc.status, tc.body }}
-			cache := newTokenCache(endpoint.minter(t), fakeAppResolver{}, secrets)
+			endpoint := &fakeTokenEndpoint{answer: func(string, string) (int, string) { return tc.status, tc.body }}
+			cache := newTokenCache(endpoint.minter(t), orgAppOnly(secrets), secrets)
 
 			_, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
 			if err == nil || errors.Is(err, jira.ErrNoJiraUserCredential) {

@@ -305,6 +305,9 @@ func (c *UserTokenCache) dropRefused(ctx context.Context, orgID, userID, workspa
 	})
 	if err == nil && !moved {
 		var deleted bool
+		// TODO(TFAC-1204): replace the refused envelope with a refused marker
+		// (a compare-and-swap) instead of deleting it, so the identity status
+		// can tell the user why they were disconnected.
 		deleted, err = c.secrets.DeleteUserSystemIfValue(ctx, orgID, userID, key, raw)
 		if err == nil && !deleted {
 			moved = true

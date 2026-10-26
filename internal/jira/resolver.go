@@ -34,6 +34,15 @@ var (
 	// whether a usable credential exists gets the answer it already handles;
 	// one that can say why the user has to connect again tells them so.
 	ErrJiraUserCredentialRefused = fmt.Errorf("%w: jira refused the stored credential", ErrNoJiraUserCredential)
+
+	// ErrJiraUserCredentialAppRemoved is ErrNoJiraUserCredential for a Cloud
+	// OAuth credential whose issuing app the org can no longer authenticate
+	// as: an admin removed or replaced the org's Atlassian app, or the
+	// operator replaced the deployment app. Atlassian accepts a refresh token
+	// only from the app that issued it, so the credential cannot be refreshed
+	// until that app is configured again. It is kept rather than removed, so
+	// restoring the same app (the same client ID) brings it back.
+	ErrJiraUserCredentialAppRemoved = fmt.Errorf("%w: the oauth app that issued the credential is no longer configured", ErrNoJiraUserCredential)
 )
 
 // The well-known org-level Jira secret keys. They mirror integrations.KeyJira*
@@ -107,6 +116,13 @@ type UserCredential struct {
 	// refresh, so the minter writes a new envelope back after each mint — this
 	// field is the one that changes under rotation.
 	RefreshToken string `json:"refresh_token,omitempty"`
+	// ClientID is the client ID of the Atlassian OAuth app that issued
+	// RefreshToken, set only for AuthMethodCloudOAuth. Atlassian accepts a
+	// refresh token only from the app that issued it, so the token is
+	// refreshed with this app rather than with whichever app the org resolves
+	// now. Empty on a credential stored before the field existed; the first
+	// refresh that succeeds records it.
+	ClientID string `json:"client_id,omitempty"`
 }
 
 // MarshalUserCredential renders a UserCredential to the JSON envelope persisted

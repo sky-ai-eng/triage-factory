@@ -3,6 +3,7 @@ package jira
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -119,6 +120,86 @@ func TestResolveOAuthApp_SecretErrorPropagates(t *testing.T) {
 	_, _, err := r.Resolve(context.Background(), testOrgID)
 	if !errors.Is(err, boom) {
 		t.Fatalf("Resolve err = %v, want wrapped vault error", err)
+	}
+}
+
+// TestResolveClient: a token an app issued is answered with that app, and its
+// tier, while the org can still authenticate as it — its own app or the
+// deployment app, whichever Resolve would pick now — and with
+// ErrNoAtlassianOAuthApp once it cannot.
+func TestResolveClient(t *testing.T) {
+	deployment := OAuthApp{ClientID: "dep-client", ClientSecret: "dep-secret"}
+	withOrgApp := NewOAuthAppResolver(
+		&fakeJiraApps{app: &domain.OrgJiraApp{ClientID: "org-client", ClientSecretRef: jiraSecretRef}},
+		&fakeSecrets{sys: map[string]string{jiraSecretRef: "org-secret"}},
+		deployment)
+	for _, tc := range []struct {
+		clientID string
+		want     OAuthApp
+		source   OAuthAppSource
+	}{
+		{"org-client", OAuthApp{ClientID: "org-client", ClientSecret: "org-secret"}, SourceOrgOverride},
+		// The deployment app still refreshes the tokens it issued after the
+		// org registered its own.
+		{"dep-client", deployment, SourceDeployment},
+	} {
+		got, source, err := withOrgApp.ResolveClient(context.Background(), testOrgID, tc.clientID)
+		if err != nil || got != tc.want || source != tc.source {
+			t.Errorf("ResolveClient(%s) = (%+v, %v, %v), want (%+v, %v)", tc.clientID, got, source, err, tc.want, tc.source)
+		}
+	}
+	for _, clientID := range []string{"replaced-client", ""} {
+		_, source, err := withOrgApp.ResolveClient(context.Background(), testOrgID, clientID)
+		if !errors.Is(err, ErrNoAtlassianOAuthApp) || source != SourceNone {
+			t.Errorf("ResolveClient(%q) = (%v, %v), want ErrNoAtlassianOAuthApp", clientID, source, err)
+		}
+	}
+
+	// A row whose secret is gone authenticates nothing.
+	noSecret := NewOAuthAppResolver(
+		&fakeJiraApps{app: &domain.OrgJiraApp{ClientID: "org-client", ClientSecretRef: jiraSecretRef}},
+		&fakeSecrets{}, OAuthApp{})
+	if _, _, err := noSecret.ResolveClient(context.Background(), testOrgID, "org-client"); !errors.Is(err, ErrNoAtlassianOAuthApp) {
+		t.Errorf("ResolveClient with the secret gone err = %v, want ErrNoAtlassianOAuthApp", err)
+	}
+
+	boom := errors.New("db down")
+	broken := NewOAuthAppResolver(&fakeJiraApps{err: boom}, &fakeSecrets{}, deployment)
+	_, _, err := broken.ResolveClient(context.Background(), testOrgID, "dep-client")
+	if !errors.Is(err, boom) || errors.Is(err, ErrNoAtlassianOAuthApp) {
+		t.Errorf("ResolveClient over a failed read err = %v, want the read error", err)
+	}
+}
+
+// TestCandidates: the apps an unattributed token is tried with, in Resolve's
+// order, the same app registered as both tiers once.
+func TestCandidates(t *testing.T) {
+	deployment := OAuthApp{ClientID: "dep-client", ClientSecret: "dep-secret"}
+	org := OAuthApp{ClientID: "org-client", ClientSecret: "org-secret"}
+	orgRow := func(clientID string) *fakeJiraApps {
+		return &fakeJiraApps{app: &domain.OrgJiraApp{ClientID: clientID, ClientSecretRef: jiraSecretRef}}
+	}
+	for _, tc := range []struct {
+		name string
+		r    OAuthAppResolver
+		want []CandidateApp
+	}{
+		{"both", NewOAuthAppResolver(orgRow("org-client"), &fakeSecrets{sys: map[string]string{jiraSecretRef: "org-secret"}}, deployment),
+			[]CandidateApp{{org, SourceOrgOverride}, {deployment, SourceDeployment}}},
+		{"deployment_only", NewOAuthAppResolver(&fakeJiraApps{}, &fakeSecrets{}, deployment),
+			[]CandidateApp{{deployment, SourceDeployment}}},
+		{"org_only", NewOAuthAppResolver(orgRow("org-client"), &fakeSecrets{sys: map[string]string{jiraSecretRef: "org-secret"}}, OAuthApp{}),
+			[]CandidateApp{{org, SourceOrgOverride}}},
+		{"same_app_twice", NewOAuthAppResolver(orgRow("dep-client"), &fakeSecrets{sys: map[string]string{jiraSecretRef: "dep-secret"}}, deployment),
+			[]CandidateApp{{deployment, SourceOrgOverride}}},
+		{"none", NewOAuthAppResolver(&fakeJiraApps{}, &fakeSecrets{}, OAuthApp{}), nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.r.Candidates(context.Background(), testOrgID)
+			if err != nil || !slices.Equal(got, tc.want) {
+				t.Errorf("Candidates = (%+v, %v), want %+v", got, err, tc.want)
+			}
+		})
 	}
 }
 

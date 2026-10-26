@@ -195,6 +195,16 @@ func NewMinter() *Minter {
 	}
 }
 
+// NewMinterWithEndpoints is NewMinter with the token and accessible-resources
+// endpoints replaced, for tests outside this package that stand up a fake
+// Atlassian.
+func NewMinterWithEndpoints(tokenURL, resourcesURL string) *Minter {
+	m := NewMinter()
+	m.tokenURL = tokenURL
+	m.resourcesURL = resourcesURL
+	return m
+}
+
 func (m *Minter) timeNow() time.Time {
 	if m.now != nil {
 		return m.now()

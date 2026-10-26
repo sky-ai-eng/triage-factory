@@ -183,6 +183,11 @@ func (s *Server) handleLinearIdentityStatus(w http.ResponseWriter, r *http.Reque
 			// A Connect refresh token is accepted only with the secret of
 			// the app that minted it: usable while the org can still
 			// authenticate as that app, dead to TF once it cannot.
+			//
+			// TODO(TFAC-1204): say why with disconnected_reason (app_removed
+			// when this is ErrNoLinearOAuthApp, refused for a refused marker)
+			// so Connect Linear can show it; today the user gets the page a
+			// new member sees.
 			_, err := s.linearOAuthApps.ResolveClient(ctx, orgID, cred.ClientID)
 			switch {
 			case err == nil:
