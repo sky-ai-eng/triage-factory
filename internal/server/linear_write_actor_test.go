@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -361,35 +362,51 @@ func swipeActions(t *testing.T, db *sql.DB, taskID string) []string {
 // TestTaskClaim_LinearTask_NoUserCredential_Returns409: a user with no Linear
 // credential of their own is refused before the claim lands, and the org's
 // credential is never reached for in its place. The SPA's gate is onboarding;
-// this refusal is what holds for a headless caller.
+// this refusal is what holds for a headless caller. Its message names why the
+// user's connection stopped working when the resolver says so.
 func TestTaskClaim_LinearTask_NoUserCredential_Returns409(t *testing.T) {
-	res := &recordingLinearResolver{userErr: linear.ErrNoLinearUserCredential}
-	s := newLinearClaimServer(t, res, true)
-	const taskID = "00000000-0000-4000-8000-000000000300"
-	seedQueuedLinearTask(t, s.db, taskID, linearStateTodoRef)
+	cases := []struct {
+		name    string
+		err     error
+		message string
+	}{
+		{"no_credential", linear.ErrNoLinearUserCredential, "connect your Linear to act on issues"},
+		{"refused", fmt.Errorf("mint: %w", linear.ErrLinearUserCredentialRefused),
+			"Linear no longer accepts your connection: it was revoked or expired. Connect your Linear again to act on issues."},
+		{"app_removed", fmt.Errorf("mint: %w", linear.ErrLinearUserCredentialAppRemoved),
+			"The Linear app your connection was made through was removed from this workspace. Connect your Linear again to act on issues."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := &recordingLinearResolver{userErr: tc.err}
+			s := newLinearClaimServer(t, res, true)
+			const taskID = "00000000-0000-4000-8000-000000000300"
+			seedQueuedLinearTask(t, s.db, taskID, linearStateTodoRef)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
-	}
-	var body struct {
-		Errors []httpx.ErrorItem `json:"errors"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || len(body.Errors) != 1 {
-		t.Fatalf("body = %s, want one error item (%v)", rec.Body.String(), err)
-	}
-	if body.Errors[0].Reason != httpx.ReasonNotConfigured || !strings.Contains(body.Errors[0].Message, "connect your Linear") {
-		t.Errorf("error = %+v, want NOT_CONFIGURED asking the user to connect their Linear", body.Errors[0])
-	}
+			rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+			}
+			var body struct {
+				Errors []httpx.ErrorItem `json:"errors"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || len(body.Errors) != 1 {
+				t.Fatalf("body = %s, want one error item (%v)", rec.Body.String(), err)
+			}
+			if body.Errors[0].Reason != httpx.ReasonNotConfigured || body.Errors[0].Message != tc.message {
+				t.Errorf("error = %+v, want NOT_CONFIGURED with %q", body.Errors[0], tc.message)
+			}
 
-	if got := claimedBy(t, s.db, taskID); got != "" {
-		t.Errorf("claimed_by_user_id = %q, want unclaimed (the refusal must not mutate)", got)
-	}
-	if got := swipeActions(t, s.db, taskID); len(got) != 0 {
-		t.Errorf("swipe_events = %v, want none (a refused claim leaves no audit)", got)
-	}
-	if _, system, _, _ := res.snapshot(); system != 0 {
-		t.Errorf("the org's credential was reached for %d times, want never", system)
+			if got := claimedBy(t, s.db, taskID); got != "" {
+				t.Errorf("claimed_by_user_id = %q, want unclaimed (the refusal must not mutate)", got)
+			}
+			if got := swipeActions(t, s.db, taskID); len(got) != 0 {
+				t.Errorf("swipe_events = %v, want none (a refused claim leaves no audit)", got)
+			}
+			if _, system, _, _ := res.snapshot(); system != 0 {
+				t.Errorf("the org's credential was reached for %d times, want never", system)
+			}
+		})
 	}
 }
 

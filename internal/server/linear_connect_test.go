@@ -610,17 +610,25 @@ func TestLinearConnect_RefusedRefreshClearsTheBinding(t *testing.T) {
 	r.oauth.mu.Unlock()
 
 	_, err := r.s.linearResolver.ForUser(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID)
-	if !errors.Is(err, linear.ErrNoLinearUserCredential) {
-		t.Fatalf("ForUser = %v, want ErrNoLinearUserCredential", err)
+	if !errors.Is(err, linear.ErrLinearUserCredentialRefused) {
+		t.Fatalf("ForUser = %v, want ErrLinearUserCredentialRefused", err)
 	}
-	if v := r.userSecret(t); v != "" {
-		t.Errorf("user credential = %q after Linear refused it, want none", v)
+	if cred := r.userCredential(t); cred != linear.RefusedUserCredential() {
+		t.Errorf("user credential = %+v after Linear refused it, want the refused marker", cred)
 	}
 	if id, _, _ := r.identity(t); id != "" {
 		t.Errorf("identity = %q after Linear refused the credential, want none", id)
 	}
-	if st := r.status(t); st.Connected {
-		t.Error("status reads connected after Linear refused the credential")
+	if st := r.status(t); st.Connected || st.DisconnectedReason != linearDisconnectedRefused || st.Account != "" {
+		t.Errorf("status = %+v after Linear refused the credential, want not connected, reason refused", st)
+	}
+	// The marker answers the next read itself, without asking Linear again.
+	grants := len(r.oauth.Grants())
+	if _, err := r.s.linearResolver.ForUser(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID); !errors.Is(err, linear.ErrLinearUserCredentialRefused) {
+		t.Errorf("ForUser on the marker = %v, want ErrLinearUserCredentialRefused", err)
+	}
+	if got := len(r.oauth.Grants()); got != grants {
+		t.Errorf("token requests = %d after reading the marker, want %d", got, grants)
 	}
 	// The org's credential was never reached for in its place.
 	if v := r.secret(t, integrations.KeyLinearAPIKey); v != linearOrgKey {
@@ -634,24 +642,166 @@ func TestLinearConnect_ConnectedFollowsTheApp(t *testing.T) {
 	// Replacing the org's app overwrites the secret of the app that minted
 	// the grant, so nothing can refresh or revoke it any more.
 	r.registerApp(t, "lin-client-2")
-	if st := r.status(t); st.Connected {
-		t.Errorf("status = %+v; a Connect credential the org's app can no longer refresh must read as not connected", st)
+	if st := r.status(t); st.Connected || st.DisconnectedReason != linearDisconnectedAppRemoved {
+		t.Errorf("status = %+v; a Connect credential the org's app can no longer refresh must read as not connected, reason app_removed", st)
 	}
-	if _, err := r.s.linearResolver.ForUser(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID); !errors.Is(err, linear.ErrNoLinearUserCredential) {
-		t.Errorf("ForUser = %v, want ErrNoLinearUserCredential", err)
+	if _, err := r.s.linearResolver.ForUser(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID); !errors.Is(err, linear.ErrLinearUserCredentialAppRemoved) {
+		t.Errorf("ForUser = %v, want ErrLinearUserCredentialAppRemoved", err)
+	}
+	if cred := r.userCredential(t); cred.ClientID != "lin-client-1" || cred.RefreshToken == "" {
+		t.Errorf("user credential = %+v, want the grant kept for its app to come back", cred)
 	}
 	// A pasted key does not depend on the app.
 	if rec := r.pasteKey(t, linearUserKey); rec.Code != http.StatusOK {
 		t.Fatalf("paste: %d: %s", rec.Code, rec.Body.String())
 	}
-	if st := r.status(t); !st.Connected {
-		t.Error("a pasted key reads as not connected")
+	if st := r.status(t); !st.Connected || st.DisconnectedReason != "" {
+		t.Errorf("status = %+v after a key paste, want connected with no reason", st)
 	}
 	// Linear accepts a revoke only from the app that minted the token, and
 	// its secret is gone, so the replaced grant is not revoked with another.
 	if got := r.oauth.Revoked(); len(got) != 0 {
 		t.Errorf("revoked %v with an app that did not mint it", got)
 	}
+}
+
+// TestLinearIdentity_AppRemovedIsDerivedOnRead: app_removed is read off the
+// app the grant names on every status read, never stored, so restoring the
+// same client ID brings the connection back.
+func TestLinearIdentity_AppRemovedIsDerivedOnRead(t *testing.T) {
+	r := newLinearConnectRig(t)
+	r.connect(t)
+	if rec := doJSON(t, r.s, http.MethodDelete, linearAppPath(), nil); rec.Code != http.StatusOK {
+		t.Fatalf("delete app: %d: %s", rec.Code, rec.Body.String())
+	}
+	if st := r.status(t); st.Connected || st.DisconnectedReason != linearDisconnectedAppRemoved {
+		t.Errorf("status = %+v with the app gone, want not connected, reason app_removed", st)
+	}
+	r.registerApp(t, "lin-client-1")
+	if st := r.status(t); !st.Connected || st.DisconnectedReason != "" || st.Account != "Ada" {
+		t.Errorf("status = %+v with the same app back, want connected as Ada with no reason", st)
+	}
+}
+
+// TestLinearIdentity_NoDisconnectedReason: a reason is given only for a
+// refused marker or a grant whose app is gone; every other state reports none.
+func TestLinearIdentity_NoDisconnectedReason(t *testing.T) {
+	cases := []struct {
+		name      string
+		stored    string
+		connected bool
+	}{
+		{name: "never connected"},
+		{name: "a pasted key", stored: `{"method":"api_key","token":"lin_api_ada"}`, connected: true},
+		{name: "an unusable connect credential", stored: `{"method":"connect_oauth","refresh_token":"ref-0","client_id":"lin-client-1"}`},
+		{name: "an empty api key", stored: `{"method":"api_key"}`},
+		{name: "an unknown method", stored: `{"method":"carrier_pigeon","token":"x"}`},
+		{name: "unparsable", stored: `{not json`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newLinearConnectRig(t)
+			if tc.stored != "" {
+				r.putUserSecret(t, tc.stored)
+			}
+			st := r.status(t)
+			if st.Connected != tc.connected || st.DisconnectedReason != "" {
+				t.Errorf("status = %+v, want connected=%v with no reason", st, tc.connected)
+			}
+		})
+	}
+	t.Run("connected through Connect", func(t *testing.T) {
+		r := newLinearConnectRig(t)
+		r.connect(t)
+		if st := r.status(t); !st.Connected || st.DisconnectedReason != "" {
+			t.Errorf("status = %+v, want connected with no reason", st)
+		}
+	})
+}
+
+// TestLinearIdentity_RefusedMarkerIsReplacedOrRemoved: a key paste or a
+// Connect over a refused marker reads as connected with no reason, and the
+// user's own disconnect removes a marker, with its audit row, revoking
+// nothing.
+func TestLinearIdentity_RefusedMarkerIsReplacedOrRemoved(t *testing.T) {
+	t.Run("key paste", func(t *testing.T) {
+		r := newLinearConnectRig(t)
+		r.putRefusedMarker(t)
+		if st := r.status(t); st.Connected || st.DisconnectedReason != linearDisconnectedRefused {
+			t.Fatalf("status = %+v over a marker, want not connected, reason refused", st)
+		}
+		if rec := r.pasteKey(t, linearUserKey); rec.Code != http.StatusOK {
+			t.Fatalf("paste: %d: %s", rec.Code, rec.Body.String())
+		}
+		if st := r.status(t); !st.Connected || st.DisconnectedReason != "" || st.Account != "Ada" {
+			t.Errorf("status = %+v after the paste, want connected as Ada with no reason", st)
+		}
+		if got := r.oauth.Revoked(); len(got) != 0 {
+			t.Errorf("revoked %v replacing a marker, which holds no token", got)
+		}
+	})
+	t.Run("connect", func(t *testing.T) {
+		r := newLinearConnectRig(t)
+		r.putRefusedMarker(t)
+		r.connect(t)
+		if st := r.status(t); !st.Connected || st.DisconnectedReason != "" {
+			t.Errorf("status = %+v after Connect, want connected with no reason", st)
+		}
+		if got := r.oauth.Revoked(); len(got) != 0 {
+			t.Errorf("revoked %v replacing a marker, which holds no token", got)
+		}
+	})
+	t.Run("disconnect", func(t *testing.T) {
+		r := newLinearConnectRig(t)
+		r.putRefusedMarker(t)
+		if rec := doJSON(t, r.s, http.MethodDelete, linearIdentityPath(), nil); rec.Code != http.StatusOK {
+			t.Fatalf("DELETE: %d: %s", rec.Code, rec.Body.String())
+		}
+		if v := r.userSecret(t); v != "" {
+			t.Errorf("user credential = %q after the disconnect, want none", v)
+		}
+		if got := r.userCredentialActions(t); !slices.Equal(got, []string{domain.AccessActionCredentialRemoved}) {
+			t.Errorf("personal credential actions = %v, want one removed", got)
+		}
+		if got := r.oauth.Revoked(); len(got) != 0 {
+			t.Errorf("revoked %v removing a marker, which holds no token", got)
+		}
+		if st := r.status(t); st.Connected || st.DisconnectedReason != "" {
+			t.Errorf("status = %+v after the disconnect, want not connected with no reason", st)
+		}
+	})
+	t.Run("member sweep", func(t *testing.T) {
+		r := newLinearConnectRig(t)
+		r.putRefusedMarker(t)
+		if err := r.s.sweepLinearUserCredential(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID); err != nil {
+			t.Fatalf("sweep: %v", err)
+		}
+		if v := r.userSecret(t); v != "" {
+			t.Errorf("user credential = %q after the sweep, want none", v)
+		}
+		if got := r.oauth.Revoked(); len(got) != 0 {
+			t.Errorf("revoked %v sweeping a marker, which holds no token", got)
+		}
+	})
+}
+
+// putUserSecret stores value as the user's credential for the Acme workspace,
+// bypassing the bind.
+func (r *linearConnectRig) putUserSecret(t *testing.T, value string) {
+	t.Helper()
+	if err := r.stores.Secrets.PutUser(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, linear.UserTokenKey(acmeWorkspaceID), value, "Linear user access token"); err != nil {
+		t.Fatalf("store user credential: %v", err)
+	}
+}
+
+// putRefusedMarker stores the marker a refused Connect credential leaves.
+func (r *linearConnectRig) putRefusedMarker(t *testing.T) {
+	t.Helper()
+	env, err := linear.MarshalUserCredential(linear.RefusedUserCredential())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.putUserSecret(t, env)
 }
 
 // TestLinearConnect_ReplacedGrantRevokedWithTheAppThatMintedIt: a grant

@@ -214,7 +214,7 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 		if errors.Is(lerr, linear.ErrNoLinearUserCredential) {
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 				Reason:  httpx.ReasonNotConfigured,
-				Message: "connect your Linear to act on issues",
+				Message: linearUserCredentialMissingMessage(lerr),
 			})
 			return nil, nil, claimLandingIdempotent, false
 		}
@@ -306,6 +306,20 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 		})
 	}
 	return jiraUserClient, linearUserClient, landing, true
+}
+
+// linearUserCredentialMissingMessage is the claim's refusal for an
+// ErrNoLinearUserCredential from ForUser, naming why the user's connection
+// stopped working when the error says so.
+func linearUserCredentialMissingMessage(err error) string {
+	switch {
+	case errors.Is(err, linear.ErrLinearUserCredentialAppRemoved):
+		return "The Linear app your connection was made through was removed from this workspace. Connect your Linear again to act on issues."
+	case errors.Is(err, linear.ErrLinearUserCredentialRefused):
+		return "Linear no longer accepts your connection: it was revoked or expired. Connect your Linear again to act on issues."
+	default:
+		return "connect your Linear to act on issues"
+	}
 }
 
 // reassignClaim is the claim route's target_user_id arm: the user↔user

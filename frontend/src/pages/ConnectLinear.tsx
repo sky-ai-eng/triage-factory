@@ -5,6 +5,7 @@ import {
   captureLinearIdentityApiKey,
   linearConnectErrorText,
   linearConnectStartURL,
+  linearDisconnectedText,
 } from '../lib/linearIdentity'
 import { safeReturnTo } from '../lib/returnTo'
 
@@ -81,7 +82,12 @@ export default function ConnectLinear() {
     )
   }
 
-  const { connected, workspace_url_key: workspace, connect_available } = state.data
+  const {
+    connected,
+    workspace_url_key: workspace,
+    connect_available,
+    disconnected_reason,
+  } = state.data
 
   // Already bound, or the org has no Linear to bind against: nothing to do
   // here, so send the user where they were headed.
@@ -93,7 +99,9 @@ export default function ConnectLinear() {
     window.location.href = linearConnectStartURL(orgId, returnTo)
   }
 
-  const banner = linearConnectErrorText(errorCode)
+  // A Connect that just failed explains itself first; otherwise say why a
+  // connection the user had stopped working.
+  const banner = linearConnectErrorText(errorCode) ?? linearDisconnectedText(disconnected_reason)
   const submit = async () => {
     if (apiKey.trim() === '' || capturing) return
     setCapturing(true)

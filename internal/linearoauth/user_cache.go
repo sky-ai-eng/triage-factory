@@ -36,9 +36,10 @@ var errGrantReplaced = errors.New("linearoauth: user credential replaced during 
 // the envelope its refresh read, under the user's UserCredentialLock, so it
 // never resurrects a disconnected credential or overwrites a newer one. A
 // refresh token Linear refuses with invalid_grant means the user revoked TF's
-// access in Linear: the identity row derived from the envelope and then the
-// envelope are removed under the same lock (dropRefused), and the user has to
-// connect again.
+// access in Linear: under the same lock, the identity row derived from the
+// envelope is removed and the envelope is replaced with a refused marker
+// (dropRefused). The user has to connect again, and the marker is how they are
+// told why.
 type UserTokenCache struct {
 	minter  refresher
 	apps    linear.OAuthAppResolver
@@ -94,9 +95,10 @@ func userCacheKey(orgID, userID, workspaceID string) string {
 // AccessTokenForUser returns a live access token for the user's Connect
 // credential in workspaceID, refreshing when the cache holds none for the
 // stored grant or the one it holds has less than a minute left. A user with
-// no Connect credential, one minted by an app the org can no longer
-// authenticate as, one Linear has refused, or one that changed during two
-// refreshes in a row is linear.ErrNoLinearUserCredential.
+// no Connect credential, or one that changed during two refreshes in a row, is
+// linear.ErrNoLinearUserCredential. One minted by an app the org can no longer
+// authenticate as is linear.ErrLinearUserCredentialAppRemoved, and one Linear
+// has refused is linear.ErrLinearUserCredentialRefused; both wrap it.
 func (c *UserTokenCache) AccessTokenForUser(ctx context.Context, orgID, userID, workspaceID string) (string, error) {
 	key := userCacheKey(orgID, userID, workspaceID)
 	cred, _, err := c.readEnvelope(ctx, orgID, userID, workspaceID)
@@ -138,9 +140,10 @@ func (c *UserTokenCache) fresh(key, grantID string) (cachedUserToken, bool) {
 }
 
 // readEnvelope reads and parses the user's envelope for workspaceID, returning
-// the raw value too for a compare-and-swap. No envelope, or one that is not a
-// usable Connect credential, is ErrNoLinearUserCredential: a pasted key has no
-// access token to mint, and the resolver reads it before ever calling here.
+// the raw value too for a compare-and-swap. A refused marker is
+// ErrLinearUserCredentialRefused. No envelope, or one that is not a usable
+// Connect credential, is ErrNoLinearUserCredential: a pasted key has no access
+// token to mint, and the resolver reads it before ever calling here.
 func (c *UserTokenCache) readEnvelope(ctx context.Context, orgID, userID, workspaceID string) (linear.UserCredential, string, error) {
 	raw, err := c.secrets.GetUserSystem(ctx, orgID, userID, linear.UserTokenKey(workspaceID))
 	if err != nil {
@@ -153,6 +156,10 @@ func (c *UserTokenCache) readEnvelope(ctx context.Context, orgID, userID, worksp
 	if err != nil {
 		return linear.UserCredential{}, raw, fmt.Errorf("linearoauth: org %s user %s: %w", orgID, userID, err)
 	}
+	if cred.Refused {
+		return linear.UserCredential{}, raw, fmt.Errorf("%w: org=%s user=%s workspace=%s",
+			linear.ErrLinearUserCredentialRefused, orgID, userID, workspaceID)
+	}
 	if cred.Method != linear.AuthMethodConnectOAuth || !cred.Usable() {
 		return linear.UserCredential{}, raw, fmt.Errorf("%w: org=%s user=%s workspace=%s (stored credential is not a usable connect_oauth credential, method=%q)",
 			linear.ErrNoLinearUserCredential, orgID, userID, workspaceID, cred.Method)
@@ -164,8 +171,9 @@ func (c *UserTokenCache) readEnvelope(ctx context.Context, orgID, userID, worksp
 // refresh can lose its footing. A refresh that outlives its grant (the user
 // connecting again or pasting a key while the request was in flight) is
 // retried once against what is stored now. A refresh token Linear refuses is
-// removed (dropRefused), unless it is no longer the stored one: another
-// process rotated it, so the stored token is tried once instead.
+// replaced with a refused marker (dropRefused), unless it is no longer the
+// stored one: another process rotated it, so the stored token is tried once
+// instead.
 //
 // A retry that loses to another writer again is one this refresh cannot
 // settle. The credential is still the user's own, so it gets the answer of
@@ -213,7 +221,7 @@ func (c *UserTokenCache) refreshOnce(ctx context.Context, orgID, userID, workspa
 	if errors.Is(err, linear.ErrNoLinearOAuthApp) {
 		// It stays stored: connecting again or pasting a key replaces it.
 		return cachedUserToken{}, raw, fmt.Errorf("%w: org=%s user=%s (connected through OAuth app %s, which the org can no longer authenticate as; connect again or paste a key)",
-			linear.ErrNoLinearUserCredential, orgID, userID, cred.ClientID)
+			linear.ErrLinearUserCredentialAppRemoved, orgID, userID, cred.ClientID)
 	}
 	if err != nil {
 		return cachedUserToken{}, raw, fmt.Errorf("linearoauth: resolve oauth app %s for org %s: %w", cred.ClientID, orgID, err)
@@ -266,19 +274,23 @@ func (c *UserTokenCache) refreshOnce(ctx context.Context, orgID, userID, workspa
 }
 
 // dropRefused answers Linear refusing the user's refresh token, refused,
-// which every error it returns wraps. Under the user's credential lock, and
-// only while the stored envelope is still the refused one, it removes the
-// identity row derived from the envelope and then the envelope itself.
+// which every error it returns wraps; each one that reports the refusal wraps
+// linear.ErrLinearUserCredentialRefused too. Under the user's credential lock,
+// and only while the stored envelope is still the refused one, it removes the
+// identity row derived from the envelope and then replaces the envelope with a
+// refused marker (linear.RefusedUserCredential), a compare-and-swap against
+// the envelope it read. The marker is what tells the identity status, and so
+// the user, why they have to connect again.
 //
 // The order is what keeps the two from drifting apart for good. The envelope
 // is the one whose presence brings a later read back here: the next refresh
-// off it is refused again and this runs again. So it is deleted last, and
+// off it is refused again and this runs again. So it is replaced last, and
 // only once the identity clear has committed. A failure anywhere before that
-// leaves the envelope, and the removal is finished by the next read. Deleting
-// it inside the identity's transaction would not do: in local mode the
-// keychain delete lands outside the SQLite transaction, so a failed commit
-// would roll back the identity clear with the envelope already gone, and
-// nothing would come back to clear the identity.
+// leaves the envelope, and the next read finishes the job. Swapping it inside
+// the identity's transaction would not do: in local mode the keychain write
+// lands outside the SQLite transaction, so a failed commit would roll back the
+// identity clear with the envelope already replaced, and nothing would come
+// back to clear the identity.
 func (c *UserTokenCache) dropRefused(ctx context.Context, orgID, userID, workspaceID, raw string, refused error) error {
 	release, err := c.lock.Lock(ctx, orgID, userID)
 	if err != nil {
@@ -289,7 +301,7 @@ func (c *UserTokenCache) dropRefused(ctx context.Context, orgID, userID, workspa
 	moved := false
 	err = c.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		// Every writer of the envelope holds the lock, so it cannot change
-		// between this read and the delete below.
+		// between this read and the swap below.
 		current, err := tx.Secrets.GetUser(ctx, orgID, userID, key)
 		if err != nil {
 			return fmt.Errorf("read user credential: %w", err)
@@ -304,29 +316,30 @@ func (c *UserTokenCache) dropRefused(ctx context.Context, orgID, userID, workspa
 		return nil
 	})
 	if err == nil && !moved {
-		var deleted bool
-		// TODO(TFAC-1204): replace the refused envelope with a refused marker
-		// (a compare-and-swap) instead of deleting it, so the identity status
-		// can tell the user why they were disconnected.
-		deleted, err = c.secrets.DeleteUserSystemIfValue(ctx, orgID, userID, key, raw)
-		if err == nil && !deleted {
-			moved = true
+		var marker string
+		marker, err = linear.MarshalUserCredential(linear.RefusedUserCredential())
+		if err == nil {
+			var swapped bool
+			swapped, err = c.secrets.PutUserSystemIfValue(ctx, orgID, userID, key, raw, marker, "Linear user access token")
+			if err == nil && !swapped {
+				moved = true
+			}
 		}
 	}
 	switch {
 	case err != nil:
 		// Still dead, so the caller gets the same answer. The envelope stays
-		// and the next read finishes the removal.
-		cacheLog.Warn("linear refused a user's refresh token and removing it failed",
+		// and the next read finishes the job.
+		cacheLog.Warn("linear refused a user's refresh token and replacing it with a refused marker failed",
 			"org", orgID, "user", userID, "workspace", workspaceID, "error", err)
-		return fmt.Errorf("%w: org=%s user=%s (refused by linear): %w", linear.ErrNoLinearUserCredential, orgID, userID, refused)
+		return fmt.Errorf("%w: org=%s user=%s (refused by linear): %w", linear.ErrLinearUserCredentialRefused, orgID, userID, refused)
 	case moved:
 		return fmt.Errorf("%w: %w", errEnvelopeMoved, refused)
 	}
 	c.mu.Lock()
 	delete(c.cache, userCacheKey(orgID, userID, workspaceID))
 	c.mu.Unlock()
-	cacheLog.Warn("linear refused a user's refresh token: they revoked Triage Factory's access in Linear; removed the credential, so they have to connect again",
+	cacheLog.Warn("linear refused a user's refresh token: they revoked Triage Factory's access in Linear; replaced the credential with a refused marker, so they have to connect again",
 		"org", orgID, "user", userID, "workspace", workspaceID)
-	return fmt.Errorf("%w: org=%s user=%s (refused by linear): %w", linear.ErrNoLinearUserCredential, orgID, userID, refused)
+	return fmt.Errorf("%w: org=%s user=%s (refused by linear): %w", linear.ErrLinearUserCredentialRefused, orgID, userID, refused)
 }
