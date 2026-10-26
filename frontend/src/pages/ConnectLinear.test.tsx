@@ -1,8 +1,9 @@
 // The Linear gate page. Pinned: Connect is offered only when an app resolves,
 // the key paste always is, a refused Connect explains itself (including the
-// admin-approval caveat on `denied`), a pasted key binds through the user's
-// own route, and a connected user is sent on to where they were headed, but
-// never off this origin.
+// admin-approval caveat on `denied`), a connection that stopped working says
+// why unless a refused Connect is explaining itself, a pasted key binds
+// through the user's own route, and a connected user is sent on to where they
+// were headed, but never off this origin.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
@@ -81,6 +82,44 @@ describe('ConnectLinear', () => {
     stubBackend()
     renderPage(`?error=${code}`)
     expect(await screen.findByRole('alert')).toHaveTextContent(text)
+  })
+
+  it.each([
+    ['app_removed', /app your connection was made through was removed/],
+    ['refused', /no longer accepts your connection: it was revoked or expired/],
+  ] as const)('says why a connection stopped working (%s)', async (reason, text) => {
+    identity = { ...identity, disconnected_reason: reason }
+    stubBackend()
+    renderPage()
+    expect(await screen.findByRole('alert')).toHaveTextContent(text)
+  })
+
+  it('shows no banner without a reason or a callback error', async () => {
+    stubBackend()
+    renderPage()
+    expect(await screen.findByRole('button', { name: 'Connect Linear' })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('shows no banner for a reason this build does not know', async () => {
+    identity = {
+      ...identity,
+      disconnected_reason:
+        'carrier_pigeon' as unknown as LinearIdentityStatus['disconnected_reason'],
+    }
+    stubBackend()
+    renderPage()
+    expect(await screen.findByRole('button', { name: 'Connect Linear' })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('lets a callback error win over the reason', async () => {
+    identity = { ...identity, disconnected_reason: 'refused' }
+    stubBackend()
+    renderPage('?error=denied')
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/admin to approve Triage Factory/)
+    expect(alert).not.toHaveTextContent(/no longer accepts your connection/)
   })
 
   it('binds a pasted key through the user route, then goes where the user was headed', async () => {

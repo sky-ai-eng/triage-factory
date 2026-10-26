@@ -908,6 +908,11 @@ export interface LinearIdentityStatus {
   /** Whether one-click Connect is offerable — true when a Linear OAuth app
    *  resolves for the org. False means the surfaces offer only the key paste. */
   connect_available: boolean
+  /** Why a credential the user holds stopped working, set only when not
+   *  connected: `refused` when Linear refused it (revoked in Linear, or
+   *  expired), `app_removed` when the OAuth app it was made through is no
+   *  longer configured. Absent when the user never connected. */
+  disconnected_reason?: 'app_removed' | 'refused'
 }
 
 // ──────────────────────────────────────────────────────────────────────

@@ -86,13 +86,29 @@ const (
 // Linear display name; workspace_url_key is the org's Linear workspace, ""
 // when the org has no Linear and so nothing to gate; connect_available is
 // whether a Linear OAuth app resolves for the org, which one-click Connect
-// needs.
+// needs. disconnected_reason, set only when connected is false, says why a
+// credential the user holds stopped working: linearDisconnectedRefused or
+// linearDisconnectedAppRemoved. It is absent when the user never connected or
+// the cause is not one of those.
 type linearIdentityStatusResponse struct {
-	Connected        bool   `json:"connected"`
-	Account          string `json:"account,omitempty"`
-	WorkspaceURLKey  string `json:"workspace_url_key"`
-	ConnectAvailable bool   `json:"connect_available"`
+	Connected          bool   `json:"connected"`
+	Account            string `json:"account,omitempty"`
+	WorkspaceURLKey    string `json:"workspace_url_key"`
+	ConnectAvailable   bool   `json:"connect_available"`
+	DisconnectedReason string `json:"disconnected_reason,omitempty"`
 }
+
+// The disconnected_reason values.
+const (
+	// linearDisconnectedRefused is a refused marker: Linear refused the
+	// Connect credential's refresh token, so the user revoked Triage
+	// Factory's access in Linear or the grant expired.
+	linearDisconnectedRefused = "refused"
+	// linearDisconnectedAppRemoved is a usable Connect credential whose app
+	// the org can no longer authenticate as. Derived on every read, never
+	// stored, so restoring the same client ID brings the connection back.
+	linearDisconnectedAppRemoved = "app_removed"
+)
 
 // linearIdentityAPIKeyRequest is the key-paste body.
 type linearIdentityAPIKeyRequest struct {
@@ -176,6 +192,10 @@ func (s *Server) handleLinearIdentityStatus(w http.ResponseWriter, r *http.Reque
 			// Reported as not connected, so the gate asks for a new bind,
 			// which replaces it.
 			linearConnectLog.Warn("stored credential unparsable, reporting not connected", "org", orgID, "user", userID, "error", err)
+		case cred.Refused:
+			// Ahead of !Usable(), which a marker also matches and which
+			// reports no reason.
+			resp.DisconnectedReason = linearDisconnectedRefused
 		case !cred.Usable():
 		case cred.Method == linear.AuthMethodAPIKey:
 			resp.Connected = true
@@ -183,16 +203,13 @@ func (s *Server) handleLinearIdentityStatus(w http.ResponseWriter, r *http.Reque
 			// A Connect refresh token is accepted only with the secret of
 			// the app that minted it: usable while the org can still
 			// authenticate as that app, dead to TF once it cannot.
-			//
-			// TODO(TFAC-1204): say why with disconnected_reason (app_removed
-			// when this is ErrNoLinearOAuthApp, refused for a refused marker)
-			// so Connect Linear can show it; today the user gets the page a
-			// new member sees.
 			_, err := s.linearOAuthApps.ResolveClient(ctx, orgID, cred.ClientID)
 			switch {
 			case err == nil:
 				resp.Connected = true
-			case !errors.Is(err, linear.ErrNoLinearOAuthApp):
+			case errors.Is(err, linear.ErrNoLinearOAuthApp):
+				resp.DisconnectedReason = linearDisconnectedAppRemoved
+			default:
 				// Whether the credential still works is unknown, so the read
 				// fails rather than send a connected user to the gate.
 				internalError(w, "linear-identity", err)

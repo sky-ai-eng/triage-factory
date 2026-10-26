@@ -23,8 +23,8 @@ type fakeUserSecrets struct {
 	db.SecretStore
 	mu  sync.Mutex
 	bag map[string]string
-	// deleteErr fails DeleteUserSystemIfValue while set.
-	deleteErr error
+	// putErr fails PutUserSystemIfValue while set.
+	putErr error
 }
 
 func newFakeUserSecrets() *fakeUserSecrets { return &fakeUserSecrets{bag: map[string]string{}} }
@@ -46,28 +46,14 @@ func (f *fakeUserSecrets) PutUserSystemIfValue(ctx context.Context, orgID, userI
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.putErr != nil {
+		return false, f.putErr
+	}
 	k := userBagKey(orgID, userID, key)
 	if cur, ok := f.bag[k]; !ok || cur != old {
 		return false, nil
 	}
 	f.bag[k] = value
-	return true, nil
-}
-
-func (f *fakeUserSecrets) DeleteUserSystemIfValue(ctx context.Context, orgID, userID, key, value string) (bool, error) {
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.deleteErr != nil {
-		return false, f.deleteErr
-	}
-	k := userBagKey(orgID, userID, key)
-	if cur, ok := f.bag[k]; !ok || cur != value {
-		return false, nil
-	}
-	delete(f.bag, k)
 	return true, nil
 }
 
@@ -110,6 +96,22 @@ func (f *fakeUserSecrets) stored(t *testing.T) (linear.UserCredential, bool) {
 		t.Fatalf("parse stored: %v", err)
 	}
 	return cred, true
+}
+
+// storedMarker reports whether what is stored is the refused marker.
+func (f *fakeUserSecrets) storedMarker(t *testing.T) bool {
+	t.Helper()
+	cred, ok := f.stored(t)
+	return ok && cred == linear.RefusedUserCredential()
+}
+
+func refusedMarker(t *testing.T) string {
+	t.Helper()
+	env, err := linear.MarshalUserCredential(linear.RefusedUserCredential())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return env
 }
 
 // fakeIdentities records ClearLinearIdentity calls, failing them while err
@@ -283,8 +285,12 @@ func TestUserTokenCache_NoConnectCredential(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			r := newUserRig(t)
 			r.secrets.set(env)
-			if _, err := r.token(t, r.cache()); !errors.Is(err, linear.ErrNoLinearUserCredential) {
+			_, err := r.token(t, r.cache())
+			if !errors.Is(err, linear.ErrNoLinearUserCredential) {
 				t.Errorf("err = %v, want ErrNoLinearUserCredential", err)
+			}
+			if errors.Is(err, linear.ErrLinearUserCredentialRefused) || errors.Is(err, linear.ErrLinearUserCredentialAppRemoved) {
+				t.Errorf("err = %v, names a cause this credential does not have", err)
 			}
 			if r.ref.calls.Load() != 0 {
 				t.Error("refreshed without a usable credential")
@@ -293,49 +299,69 @@ func TestUserTokenCache_NoConnectCredential(t *testing.T) {
 	}
 }
 
-func TestUserTokenCache_RefusedGrantRemovesCredentialAndIdentity(t *testing.T) {
+func TestUserTokenCache_RefusedGrantLeavesAMarkerAndClearsTheIdentity(t *testing.T) {
 	r := newUserRig(t)
 	r.ref.refuse = map[string]bool{"ref-0": true}
 
 	_, err := r.token(t, r.cache())
-	if !errors.Is(err, linear.ErrNoLinearUserCredential) {
-		t.Fatalf("err = %v, want ErrNoLinearUserCredential", err)
+	if !errors.Is(err, linear.ErrLinearUserCredentialRefused) {
+		t.Fatalf("err = %v, want ErrLinearUserCredentialRefused", err)
 	}
 	if !RefusedGrant(err) {
 		t.Errorf("err = %v; the refusal should still be readable", err)
 	}
-	if _, ok := r.secrets.stored(t); ok {
-		t.Error("refused credential still stored")
+	if cred, ok := r.secrets.stored(t); !ok || cred != linear.RefusedUserCredential() {
+		t.Errorf("stored = %+v (%v), want the refused marker in place of the credential", cred, ok)
 	}
 	if got := r.ids.cleared; len(got) != 1 || got[0] != uUser+":"+uWorkspace {
 		t.Errorf("identities cleared = %v, want [%s:%s]", got, uUser, uWorkspace)
 	}
 }
 
+// TestUserTokenCache_StoredMarkerIsRefusedWithoutARefresh: a refused marker
+// answers with the refusal and asks Linear nothing.
+func TestUserTokenCache_StoredMarkerIsRefusedWithoutARefresh(t *testing.T) {
+	r := newUserRig(t)
+	r.secrets.set(refusedMarker(t))
+
+	if _, err := r.token(t, r.cache()); !errors.Is(err, linear.ErrLinearUserCredentialRefused) {
+		t.Fatalf("err = %v, want ErrLinearUserCredentialRefused", err)
+	}
+	if n := r.ref.calls.Load(); n != 0 {
+		t.Errorf("refreshes = %d, want none for a marker", n)
+	}
+	if !r.secrets.storedMarker(t) {
+		t.Error("the marker was not left as it was")
+	}
+	if len(r.ids.cleared) != 0 {
+		t.Errorf("identities cleared = %v, want none: the refusal that wrote the marker already did", r.ids.cleared)
+	}
+}
+
 // TestUserTokenCache_RefusalRemovalIsAllOrNothing: a refused credential whose
 // identity cannot be cleared keeps its envelope too, so the two never
-// disagree, and the next read removes both.
+// disagree, and the next read clears the identity and writes the marker.
 func TestUserTokenCache_RefusalRemovalIsAllOrNothing(t *testing.T) {
 	r := newUserRig(t)
 	r.ref.refuse = map[string]bool{"ref-0": true}
 	r.ids.err = errors.New("identities down")
 	c := r.cache()
 
-	if _, err := r.token(t, c); !errors.Is(err, linear.ErrNoLinearUserCredential) {
-		t.Fatalf("err = %v, want ErrNoLinearUserCredential", err)
+	if _, err := r.token(t, c); !errors.Is(err, linear.ErrLinearUserCredentialRefused) {
+		t.Fatalf("err = %v, want ErrLinearUserCredentialRefused", err)
 	}
-	if _, ok := r.secrets.stored(t); !ok {
-		t.Fatal("the envelope was removed while its identity stayed")
+	if cred, ok := r.secrets.stored(t); !ok || cred.RefreshToken != "ref-0" {
+		t.Fatalf("stored = %+v (%v); the envelope was replaced while its identity stayed", cred, ok)
 	}
 
 	r.ids.mu.Lock()
 	r.ids.err = nil
 	r.ids.mu.Unlock()
-	if _, err := r.token(t, c); !errors.Is(err, linear.ErrNoLinearUserCredential) {
-		t.Fatalf("second err = %v, want ErrNoLinearUserCredential", err)
+	if _, err := r.token(t, c); !errors.Is(err, linear.ErrLinearUserCredentialRefused) {
+		t.Fatalf("second err = %v, want ErrLinearUserCredentialRefused", err)
 	}
-	if _, ok := r.secrets.stored(t); ok {
-		t.Error("the envelope is still stored after the second refusal")
+	if !r.secrets.storedMarker(t) {
+		t.Error("the envelope is not the refused marker after the second refusal")
 	}
 	if len(r.ids.cleared) != 1 {
 		t.Errorf("identities cleared = %v, want one", r.ids.cleared)
@@ -436,12 +462,12 @@ func TestUserTokenCache_DisconnectDuringRefreshIsNotResurrected(t *testing.T) {
 	}
 }
 
-func TestUserTokenCache_AppChangedIsNoCredential(t *testing.T) {
+func TestUserTokenCache_AppChangedIsAppRemoved(t *testing.T) {
 	r := newUserRig(t)
 	r.apps = fakeAppResolver{clientID: "client-2"}
 
-	if _, err := r.token(t, r.cache()); !errors.Is(err, linear.ErrNoLinearUserCredential) {
-		t.Fatalf("err = %v, want ErrNoLinearUserCredential", err)
+	if _, err := r.token(t, r.cache()); !errors.Is(err, linear.ErrLinearUserCredentialAppRemoved) {
+		t.Fatalf("err = %v, want ErrLinearUserCredentialAppRemoved", err)
 	}
 	if r.ref.calls.Load() != 0 {
 		t.Error("refreshed with an app that did not mint the token")
@@ -490,11 +516,14 @@ func TestUserTokenCache_RefreshesWithTheMintingApp(t *testing.T) {
 	}
 }
 
-func TestUserTokenCache_NoAppIsNoCredential(t *testing.T) {
+func TestUserTokenCache_NoAppIsAppRemoved(t *testing.T) {
 	r := newUserRig(t)
 	r.apps = noApp{}
-	if _, err := r.token(t, r.cache()); !errors.Is(err, linear.ErrNoLinearUserCredential) {
-		t.Fatalf("err = %v, want ErrNoLinearUserCredential", err)
+	if _, err := r.token(t, r.cache()); !errors.Is(err, linear.ErrLinearUserCredentialAppRemoved) {
+		t.Fatalf("err = %v, want ErrLinearUserCredentialAppRemoved", err)
+	}
+	if cred, ok := r.secrets.stored(t); !ok || cred.RefreshToken != "ref-0" {
+		t.Errorf("stored = %+v (%v), want the credential kept for the app to come back", cred, ok)
 	}
 }
 
@@ -556,48 +585,68 @@ func TestUserTokenCache_FailedCommitKeepsTheEnvelope(t *testing.T) {
 	r.tx.commitErr = errors.New("commit failed")
 	c := r.cache()
 
-	if _, err := r.token(t, c); !errors.Is(err, linear.ErrNoLinearUserCredential) {
-		t.Fatalf("err = %v, want ErrNoLinearUserCredential", err)
+	if _, err := r.token(t, c); !errors.Is(err, linear.ErrLinearUserCredentialRefused) {
+		t.Fatalf("err = %v, want ErrLinearUserCredentialRefused", err)
 	}
-	if _, ok := r.secrets.stored(t); !ok {
-		t.Fatal("the envelope was deleted although the identity clear did not commit")
+	if cred, ok := r.secrets.stored(t); !ok || cred.RefreshToken != "ref-0" {
+		t.Fatalf("stored = %+v (%v); the envelope was replaced although the identity clear did not commit", cred, ok)
 	}
 
 	r.tx.commitErr = nil
-	if _, err := r.token(t, c); !errors.Is(err, linear.ErrNoLinearUserCredential) {
-		t.Fatalf("second err = %v, want ErrNoLinearUserCredential", err)
+	if _, err := r.token(t, c); !errors.Is(err, linear.ErrLinearUserCredentialRefused) {
+		t.Fatalf("second err = %v, want ErrLinearUserCredentialRefused", err)
 	}
-	if _, ok := r.secrets.stored(t); ok {
-		t.Error("the envelope is still stored after the removal committed")
+	if !r.secrets.storedMarker(t) {
+		t.Error("the envelope is not the refused marker after the identity clear committed")
 	}
 }
 
-// TestUserTokenCache_FailedEnvelopeDeleteIsFinishedByTheNextRead: the
-// envelope delete failing after the identity clear committed leaves the
-// envelope, and the next read, refused again, removes it.
-func TestUserTokenCache_FailedEnvelopeDeleteIsFinishedByTheNextRead(t *testing.T) {
+// TestUserTokenCache_FailedSwapIsFinishedByTheNextRead: the marker swap
+// failing after the identity clear committed leaves the original envelope,
+// and the next read, refused again, writes the marker.
+func TestUserTokenCache_FailedSwapIsFinishedByTheNextRead(t *testing.T) {
 	r := newUserRig(t)
 	r.ref.refuse = map[string]bool{"ref-0": true}
-	r.secrets.deleteErr = errors.New("keychain locked")
+	r.secrets.putErr = errors.New("keychain locked")
 	c := r.cache()
 
-	if _, err := r.token(t, c); !errors.Is(err, linear.ErrNoLinearUserCredential) {
-		t.Fatalf("err = %v, want ErrNoLinearUserCredential", err)
+	if _, err := r.token(t, c); !errors.Is(err, linear.ErrLinearUserCredentialRefused) {
+		t.Fatalf("err = %v, want ErrLinearUserCredentialRefused", err)
 	}
-	if _, ok := r.secrets.stored(t); !ok {
-		t.Fatal("envelope gone although its delete failed")
+	if cred, ok := r.secrets.stored(t); !ok || cred.RefreshToken != "ref-0" {
+		t.Fatalf("stored = %+v (%v), want the original envelope kept after its swap failed", cred, ok)
 	}
 	if len(r.ids.cleared) != 1 {
 		t.Fatalf("identities cleared = %v, want one", r.ids.cleared)
 	}
 
 	r.secrets.mu.Lock()
-	r.secrets.deleteErr = nil
+	r.secrets.putErr = nil
 	r.secrets.mu.Unlock()
-	if _, err := r.token(t, c); !errors.Is(err, linear.ErrNoLinearUserCredential) {
-		t.Fatalf("second err = %v, want ErrNoLinearUserCredential", err)
+	if _, err := r.token(t, c); !errors.Is(err, linear.ErrLinearUserCredentialRefused) {
+		t.Fatalf("second err = %v, want ErrLinearUserCredentialRefused", err)
 	}
-	if _, ok := r.secrets.stored(t); ok {
-		t.Error("the envelope survived the next read")
+	if n := r.ref.calls.Load(); n != 2 {
+		t.Errorf("refreshes = %d, want the next read refused again", n)
+	}
+	if !r.secrets.storedMarker(t) {
+		t.Error("the next read did not write the refused marker")
+	}
+}
+
+// TestUserTokenCache_MarkerWrittenDuringARefreshStays: a refused marker that
+// another process writes while this refresh is in flight stays: the rotated
+// token's write-back does not overwrite it, and the caller is told the
+// credential was refused.
+func TestUserTokenCache_MarkerWrittenDuringARefreshStays(t *testing.T) {
+	r := newUserRig(t)
+	marker := refusedMarker(t)
+	r.ref.onRefresh = func(string) { r.secrets.set(marker) }
+
+	if _, err := r.token(t, r.cache()); !errors.Is(err, linear.ErrLinearUserCredentialRefused) {
+		t.Fatalf("err = %v, want ErrLinearUserCredentialRefused", err)
+	}
+	if !r.secrets.storedMarker(t) {
+		t.Error("the write-back replaced the refused marker")
 	}
 }

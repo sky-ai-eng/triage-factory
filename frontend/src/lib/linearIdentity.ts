@@ -48,6 +48,19 @@ export function linearConnectStartURL(orgId: string, returnTo: string): string {
   )
 }
 
+// linearDisconnectedText maps the identity status's disconnected_reason to the
+// banner copy. null for no reason, or one this build does not know.
+export function linearDisconnectedText(reason: string | undefined): string | null {
+  switch (reason) {
+    case 'app_removed':
+      return 'The Linear app your connection was made through was removed from this workspace. Connect your Linear again to act on issues.'
+    case 'refused':
+      return 'Linear no longer accepts your connection: it was revoked or expired. Connect your Linear again to act on issues.'
+    default:
+      return null
+  }
+}
+
 // linearConnectErrorText maps a Connect's ?error= code to the banner copy.
 // null for no error.
 export function linearConnectErrorText(code: string | null): string | null {

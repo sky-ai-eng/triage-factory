@@ -22,6 +22,24 @@ var (
 	// credential in its place: a user-initiated write made as the org's
 	// identity would be attributed to the wrong actor.
 	ErrNoLinearUserCredential = errors.New("linear: no user credential for org/user")
+
+	// ErrLinearUserCredentialRefused is ErrNoLinearUserCredential for a
+	// Connect credential Linear refused outright: it answered a refresh with
+	// invalid_grant, so the user revoked Triage Factory's access in Linear or
+	// the grant expired, and the stored credential was replaced with a refused
+	// marker. A caller that asks only whether a usable credential exists gets
+	// the answer it already handles; one that can say why the user has to
+	// connect again tells them so.
+	ErrLinearUserCredentialRefused = fmt.Errorf("%w: linear refused the stored credential", ErrNoLinearUserCredential)
+
+	// ErrLinearUserCredentialAppRemoved is ErrNoLinearUserCredential for a
+	// Connect credential whose issuing app the org can no longer authenticate
+	// as: an admin removed or replaced the org's Linear OAuth app, or the
+	// operator replaced the deployment app. Linear accepts a refresh token only
+	// with the secret of the app that minted it, so the credential cannot be
+	// refreshed until that app is configured again. It is kept rather than
+	// removed, so restoring the same app (the same client ID) brings it back.
+	ErrLinearUserCredentialAppRemoved = fmt.Errorf("%w: the oauth app that issued the credential is no longer configured", ErrNoLinearUserCredential)
 )
 
 // The org-level Linear secret keys this package reads. They are copies of
@@ -48,12 +66,23 @@ func UserTokenKey(workspaceID string) string {
 // rotation keeps it and connecting again replaces it, so a cached access token
 // is served only while the stored credential is still the grant it was minted
 // for.
+//
+// Refused marks the record left in place of a Connect credential Linear
+// refused (RefusedUserCredential). It carries no token, so it is never usable;
+// it exists so the user can be told why they have to connect again.
 type UserCredential struct {
 	Method       AuthMethod `json:"method"`
 	Token        string     `json:"token,omitempty"`
 	RefreshToken string     `json:"refresh_token,omitempty"`
 	ClientID     string     `json:"client_id,omitempty"`
 	GrantID      string     `json:"grant_id,omitempty"`
+	Refused      bool       `json:"refused,omitempty"`
+}
+
+// RefusedUserCredential is the marker stored in place of a Connect credential
+// Linear refused.
+func RefusedUserCredential() UserCredential {
+	return UserCredential{Method: AuthMethodConnectOAuth, Refused: true}
 }
 
 // Usable reports whether c carries what its method needs: a key for api_key;
@@ -154,9 +183,12 @@ type InstallTokenSource interface {
 
 // UserTokenSource mints the access token of a user's Connect credential for a
 // workspace. internal/linearoauth's UserTokenCache implements it. A user with
-// no usable Connect credential, including one Linear has refused, is
-// ErrNoLinearUserCredential, and so is one the source cannot mint a token for
-// because it kept changing during the refresh: connecting again fixes both.
+// no usable Connect credential is ErrNoLinearUserCredential, and so is one the
+// source cannot mint a token for because it kept changing during the refresh:
+// connecting again fixes both. Two causes are named by their own sentinels,
+// which wrap it: ErrLinearUserCredentialRefused for a credential Linear
+// refused, and ErrLinearUserCredentialAppRemoved for one minted by an app the
+// org can no longer authenticate as.
 type UserTokenSource interface {
 	AccessTokenForUser(ctx context.Context, orgID, userID, workspaceID string) (string, error)
 }
