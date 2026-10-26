@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.16.3](https://github.com/sky-ai-eng/triage-factory/compare/v1.16.2...v1.16.3) (2026-10-26)
+
+
+### Bug Fixes
+
+* **gitproxy:** record a push GitHub refused inside an HTTP 200 as refused (TFAC-1188) ([#1311](https://github.com/sky-ai-eng/triage-factory/issues/1311)) ([41b0f55](https://github.com/sky-ai-eng/triage-factory/commit/41b0f557757da7366f86312faf3c5f5cb2711e7f))
+* **sandbox:** cap a jail's file size and stop claiming below a disk floor (TFAC-1177) ([#1315](https://github.com/sky-ai-eng/triage-factory/issues/1315)) ([45a2361](https://github.com/sky-ai-eng/triage-factory/commit/45a23614e0694cade65f9100e98a33107ac99a54))
+* **sidecarproto:** bound the frames the orchestrator reads from a run's sidecar (TFAC-1189) ([#1314](https://github.com/sky-ai-eng/triage-factory/issues/1314)) ([e9db258](https://github.com/sky-ai-eng/triage-factory/commit/e9db258c9b6a5377e3a30d203d22860dcdf0a3ea))
+* **worktree:** put an executor's run trees under its state root (TFAC-1190) ([#1316](https://github.com/sky-ai-eng/triage-factory/issues/1316)) ([8a47b02](https://github.com/sky-ai-eng/triage-factory/commit/8a47b02fcd7a1fecdb938da3cb7620b44bed1c5f))
+
 ## [1.16.2](https://github.com/sky-ai-eng/triage-factory/compare/v1.16.1...v1.16.2) (2026-10-25)
 
 
