@@ -200,6 +200,9 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 		_, _, err := s.jiraOAuthApps.ResolveClient(r.Context(), orgID, oauthClientID)
 		switch {
 		case errors.Is(err, jira.ErrNoAtlassianOAuthApp):
+			// TODO(TFAC-1203): say why with disconnected_reason (app_removed
+			// here, refused for a refused marker) so Connect Jira can show it;
+			// today the user gets the page a new member sees.
 			connected, account = false, ""
 		case err != nil:
 			// Whether the credential still works is unknown, so the read

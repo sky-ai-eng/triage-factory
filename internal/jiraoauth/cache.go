@@ -154,6 +154,9 @@ func (c *TokenCache) refresh(ctx context.Context, orgID, userID, host, key strin
 		if err == nil || !refusedGrant(err) {
 			return ct, err
 		}
+		// TODO(TFAC-1203): replace the refused credential with a refused marker
+		// (a compare-and-swap) instead of deleting it, so the identity status
+		// can tell the user why they were disconnected.
 		deleted, derr := c.secrets.DeleteUserSystemIfValue(ctx, orgID, userID, jira.UserTokenKey(host), raw)
 		switch {
 		case derr != nil:
