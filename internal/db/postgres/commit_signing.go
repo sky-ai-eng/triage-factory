@@ -69,27 +69,27 @@ func (s *orgCommitSignerStore) Create(ctx context.Context, signer domain.OrgComm
 }
 
 func (s *orgCommitSignerStore) SetEmailOverride(ctx context.Context, orgID, email string) (domain.OrgCommitSigner, error) {
-	return updateOrgCommitSigner(s.q.QueryRowContext(ctx, `
+	return db.ScanUpdatedOrgCommitSigner(s.q.QueryRowContext(ctx, `
 		UPDATE org_commit_signers SET email_override = $2
 		 WHERE org_id = $1
-		RETURNING `+db.OrgCommitSignerColumns, orgID, nullIfEmpty(email)))
+		RETURNING `+db.OrgCommitSignerColumns, orgID, nullIfEmpty(email)).Scan)
 }
 
 func (s *orgCommitSignerStore) StagePendingKey(ctx context.Context, orgID, publicKey string) (domain.OrgCommitSigner, error) {
 	if publicKey == "" {
 		return domain.OrgCommitSigner{}, fmt.Errorf("%w: no public key", db.ErrInvalidOrgCommitSigner)
 	}
-	return updateOrgCommitSigner(s.q.QueryRowContext(ctx, `
+	return db.ScanUpdatedOrgCommitSigner(s.q.QueryRowContext(ctx, `
 		UPDATE org_commit_signers SET pending_public_key = $2
 		 WHERE org_id = $1
-		RETURNING `+db.OrgCommitSignerColumns, orgID, publicKey))
+		RETURNING `+db.OrgCommitSignerColumns, orgID, publicKey).Scan)
 }
 
 func (s *orgCommitSignerStore) Activate(ctx context.Context, orgID, publicKey string) (domain.OrgCommitSigner, error) {
 	// Every SET expression reads the row as it was before the statement, so
 	// status_since compares against the old status and the pending key is
 	// cleared only when it is the one being promoted.
-	row, err := updateOrgCommitSigner(s.q.QueryRowContext(ctx, `
+	row, err := db.ScanUpdatedOrgCommitSigner(s.q.QueryRowContext(ctx, `
 		UPDATE org_commit_signers SET
 			public_key         = $2,
 			pending_public_key = CASE WHEN pending_public_key = $2 THEN NULL ELSE pending_public_key END,
@@ -98,7 +98,7 @@ func (s *orgCommitSignerStore) Activate(ctx context.Context, orgID, publicKey st
 			status_reason      = NULL,
 			checked_at         = now()
 		 WHERE org_id = $1 AND (public_key = $2 OR pending_public_key = $2)
-		RETURNING `+db.OrgCommitSignerColumns, orgID, publicKey, string(domain.CommitSignerActive)))
+		RETURNING `+db.OrgCommitSignerColumns, orgID, publicKey, string(domain.CommitSignerActive)).Scan)
 	if !errors.Is(err, db.ErrNoSuchOrgCommitSigner) {
 		return row, err
 	}
@@ -127,14 +127,6 @@ func (s *orgCommitSignerStore) Delete(ctx context.Context, orgID string) error {
 		return db.ErrNoSuchOrgCommitSigner
 	}
 	return nil
-}
-
-func updateOrgCommitSigner(row *sql.Row) (domain.OrgCommitSigner, error) {
-	out, err := db.ScanOrgCommitSigner(row.Scan)
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.OrgCommitSigner{}, db.ErrNoSuchOrgCommitSigner
-	}
-	return out, err
 }
 
 // commitSignatureStore is the Postgres impl of db.CommitSignatureStore.

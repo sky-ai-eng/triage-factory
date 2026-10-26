@@ -173,6 +173,17 @@ func ScanOrgCommitSigner(scan func(...any) error) (domain.OrgCommitSigner, error
 	return out, nil
 }
 
+// ScanUpdatedOrgCommitSigner is ScanOrgCommitSigner for an UPDATE … RETURNING
+// keyed on the org: no row back is the org having no signer the statement
+// could reach, ErrNoSuchOrgCommitSigner.
+func ScanUpdatedOrgCommitSigner(scan func(...any) error) (domain.OrgCommitSigner, error) {
+	out, err := ScanOrgCommitSigner(scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.OrgCommitSigner{}, ErrNoSuchOrgCommitSigner
+	}
+	return out, err
+}
+
 // ValidateNewOrgCommitSigner is Create's refusal for a signer that names no
 // host, account or key, shared so both dialects refuse the same rows. host is
 // the canonicalized host the row would store.
