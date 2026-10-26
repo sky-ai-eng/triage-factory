@@ -217,6 +217,10 @@ func pgCommitSignatureSeeder(t *testing.T, h *pgtest.Harness, orgID, userID stri
 			t.Helper()
 			pgtest.MustExec(t, h.AdminDB, `DELETE FROM conversations WHERE id = $1`, conversationID)
 		},
+		SetVerification: func(t *testing.T, id, reason string) {
+			t.Helper()
+			pgtest.MustExec(t, h.AdminDB, `UPDATE commit_signatures SET verification_reason = $2, checked_at = now() WHERE id = $1`, id, reason)
+		},
 	}
 }
 

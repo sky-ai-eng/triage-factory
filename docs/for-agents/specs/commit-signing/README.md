@@ -565,7 +565,10 @@ Under `/api/orgs/{org_id}/github/`, beside the App and PAT routes:
   an access-log row under a new credential kind (§5.6).
 - The signer counts as a connected credential for the host: add it to
   `githubCredentialConnected` (`internal/server/github_credential_class.go`),
-  so `github_base_url` cannot change while one exists.
+  so `github_base_url` cannot change while one exists. The PAT unbind and the
+  App disconnect, which otherwise clear the host, keep it while a signer
+  exists, as the PAT unbind keeps it for a staged App registration; removing
+  the signer then clears it when nothing else is connected.
 - The suggested key title is "Triage Factory commit signing", because titles
   are public.
 - The fleet console gets `GET` and `POST …/verify` for the deployment signer,
@@ -584,7 +587,14 @@ or signs.
    signer with a failing `verification_reason`. GitHub evaluates a failing
    result again on every read (§2, cases R4 and U2), so that commit reads
    `valid` once the fault is fixed. This is how TF confirms an email it cannot
-   see.
+   see. The commit holds the signer only while it can still say something
+   about the signer as it is: one signed with a key other than the one being
+   verified (a rotation replaced it), one whose committer address is not the
+   one the signer now commits as (an email change replaced it), or one GitHub
+   no longer has, is skipped, and the next push is checked instead. Otherwise
+   a fault fixed by a rotation or an email change would keep the signer
+   broken for good. Verify reads the account by its id, so a renamed login is
+   read under its new name and a released one is never read.
 2. **Periodic check**, on the GitHub poll cycle, at most every 15 minutes per
    signer. Using the org's credential, it refreshes the login and name by
    account id and confirms the key is still on the account. A missing key sets

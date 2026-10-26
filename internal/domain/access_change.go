@@ -127,24 +127,31 @@ const (
 // fact an admin audits ("this TF user acts as @login"), so it shares the
 // credential category rather than getting a third one.
 //
+// GitHubCommitSigner is the org's commit signer: the GitHub account its agent
+// commits are signed as and the key pair TF signs with. Registering it,
+// verifying it, rotating its key and changing its committer address each
+// record credential_set with the change named in the detail; removing it
+// records credential_removed.
+//
 // SlackWorkspace is the whole connected workspace, not one token: a Slack
 // connect binds a bot token and (per transport) a signing secret and app-level
 // token, and a disconnect sweeps all three together. They are acquired,
 // rotated, and destroyed as a unit from a single admin action, so they record
 // as one row — three rows per connect would be noise in a log an admin scans.
 const (
-	CredentialKindGitHubPAT      = "github_pat"
-	CredentialKindGitHubApp      = "github_app"
-	CredentialKindGitHubIdentity = "github_identity"
-	CredentialKindJiraOrg        = "jira_org"
-	CredentialKindJiraUser       = "jira_user"
-	CredentialKindJiraOAuthApp   = "jira_oauth_app"
-	CredentialKindLinearOrg      = "linear_org"
-	CredentialKindLinearUser     = "linear_user"
-	CredentialKindLinearOAuthApp = "linear_oauth_app"
-	CredentialKindAnthropicKey   = "anthropic_key"
-	CredentialKindBedrock        = "bedrock"
-	CredentialKindSlackWorkspace = "slack_workspace"
+	CredentialKindGitHubPAT          = "github_pat"
+	CredentialKindGitHubApp          = "github_app"
+	CredentialKindGitHubIdentity     = "github_identity"
+	CredentialKindGitHubCommitSigner = "github_commit_signer"
+	CredentialKindJiraOrg            = "jira_org"
+	CredentialKindJiraUser           = "jira_user"
+	CredentialKindJiraOAuthApp       = "jira_oauth_app"
+	CredentialKindLinearOrg          = "linear_org"
+	CredentialKindLinearUser         = "linear_user"
+	CredentialKindLinearOAuthApp     = "linear_oauth_app"
+	CredentialKindAnthropicKey       = "anthropic_key"
+	CredentialKindBedrock            = "bedrock"
+	CredentialKindSlackWorkspace     = "slack_workspace"
 )
 
 // AccessChangeListOpts bounds a ListByOrg read for the audit viewer. Rows come

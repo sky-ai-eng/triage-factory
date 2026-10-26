@@ -1521,6 +1521,24 @@ func (s *Server) routes() {
 	s.apiMutating("PUT /api/orgs/{org_id}/github/pat", s.handleGitHubPATPut)
 	s.apiMutating("DELETE /api/orgs/{org_id}/github/pat", s.handleGitHubPATDelete)
 
+	// The org's commit signer: the GitHub user account its agents' commits
+	// are authored, committed and signed as, and the key pair TF signs with.
+	// A resource of its own beside the credentials, because it is one: its
+	// writes take the same lock, record the same access log, and hold the
+	// org's GitHub host in place while it exists. The read is member-gated,
+	// every write org-admin. verify and rotate are verb routes because each
+	// is a GitHub read or a key generation, not a field write; the email is
+	// the one field a PATCH writes. commit-identity is the resolution a run's
+	// commits take — the signer, or the identity the org commits as without
+	// one — and whether they sign. See github_commit_signer.go.
+	s.api("GET /api/orgs/{org_id}/github/commit-signer", s.handleCommitSignerGet)
+	s.apiMutating("POST /api/orgs/{org_id}/github/commit-signer", s.handleCommitSignerCreate)
+	s.apiMutating("PATCH /api/orgs/{org_id}/github/commit-signer", s.handleCommitSignerPatch)
+	s.apiMutating("DELETE /api/orgs/{org_id}/github/commit-signer", s.handleCommitSignerDelete)
+	s.apiMutating("POST /api/orgs/{org_id}/github/commit-signer/verify", s.handleCommitSignerVerify)
+	s.apiMutating("POST /api/orgs/{org_id}/github/commit-signer/rotate", s.handleCommitSignerRotate)
+	s.api("GET /api/orgs/{org_id}/github/commit-identity", s.handleCommitIdentityGet)
+
 	// The org's pure CONFIG — hosts, poller cadence, clone transport, spend
 	// governance. Path-scoped like the credential resources beside it because
 	// the write is admin-gated, and PATCH rather than POST because it is a

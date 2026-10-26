@@ -43,6 +43,13 @@ func TestCommitSignatureStore_SQLite_Conformance(t *testing.T) {
 					t.Fatalf("delete conversation: %v", err)
 				}
 			},
+			SetVerification: func(t *testing.T, id, reason string) {
+				t.Helper()
+				if _, err := conn.Exec(`UPDATE commit_signatures SET verification_reason = ?, checked_at = ? WHERE id = ?`,
+					reason, time.Now().UTC(), id); err != nil {
+					t.Fatalf("set verification: %v", err)
+				}
+			},
 		}
 		return sqlitestore.New(conn).CommitSignatures, runmode.LocalDefaultOrgID, seed
 	})

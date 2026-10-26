@@ -248,6 +248,29 @@ func (s *commitSignatureStore) ClaimSignaturesSystem(ctx context.Context, orgID,
 	return n, err
 }
 
+func (s *commitSignatureStore) NewestFailedVerificationSystem(ctx context.Context, orgID, host string, userID int64) (*domain.CommitSignature, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	// signed_at orders as text for the reason OrgSignaturesSinceSystem's
+	// min() does.
+	row, err := db.ScanCommitSignature(s.q.QueryRowContext(ctx, `
+		SELECT `+db.CommitSignatureColumns+` FROM commit_signatures
+		 WHERE org_id = ? AND state = ? AND signer = ? AND signer_host = ? AND signer_user_id = ?
+		   AND verification_reason IS NOT NULL AND verification_reason <> ?
+		 ORDER BY signed_at DESC, id DESC
+		 LIMIT 1`,
+		orgID, string(domain.CommitSignatureSigned), string(domain.CommitSigningOrg),
+		db.NormalizeGitHubHost(host), userID, domain.CommitVerificationValid).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
 // The queue transitions below are multi mode's: the local daemon records each
 // signature as it makes it, so a local database never holds a request. They
 // are implemented for the interface's sake, with the same semantics.

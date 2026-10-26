@@ -223,6 +223,24 @@ func (s *commitSignatureStore) ClaimSignaturesSystem(ctx context.Context, orgID,
 	return n, err
 }
 
+func (s *commitSignatureStore) NewestFailedVerificationSystem(ctx context.Context, orgID, host string, userID int64) (*domain.CommitSignature, error) {
+	row, err := db.ScanCommitSignature(s.q.QueryRowContext(ctx, `
+		SELECT `+db.CommitSignatureColumns+` FROM commit_signatures
+		 WHERE org_id = $1 AND state = $2 AND signer = $3 AND signer_host = $4 AND signer_user_id = $5
+		   AND verification_reason IS NOT NULL AND verification_reason <> $6
+		 ORDER BY signed_at DESC, id DESC
+		 LIMIT 1`,
+		orgID, string(domain.CommitSignatureSigned), string(domain.CommitSigningOrg),
+		db.NormalizeGitHubHost(host), userID, domain.CommitVerificationValid).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
 func (s *commitSignatureStore) ClaimRequestSystem(ctx context.Context, orgID, id, claimedBy string) (*domain.CommitSignature, error) {
 	if !isValidUUID(id) {
 		return nil, nil

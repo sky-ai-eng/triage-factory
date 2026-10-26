@@ -253,7 +253,8 @@ var errGitHubHostMovedDuringBind = errors.New("this workspace's GitHub URL chang
 // switch, and an App works only on the GitHub it was registered on, so the
 // host stays while a registration does. With an App present the disconnect
 // touches the credential only, and the App's own teardown (discard /
-// switch-to-pat) owns the host from there.
+// switch-to-pat) owns the host from there. A commit signer keeps it too: its
+// account is on that GitHub, and the host stays until the signer is removed.
 //
 // Per-user GitHub identity (PAT_2) is deliberately untouched: it's owned by its
 // own surface, and disconnecting the org's access doesn't unmake the fact that
@@ -288,7 +289,12 @@ func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "github-access", err)
 		return
 	}
-	keepHost := app != nil
+	signer, err := s.allStores.OrgCommitSigners.GetSystem(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-access", err)
+		return
+	}
+	keepHost := app != nil || signer != nil
 
 	// In local mode the keychain sits outside the transaction, so a failure
 	// after the clear puts the credential back: the request reports the

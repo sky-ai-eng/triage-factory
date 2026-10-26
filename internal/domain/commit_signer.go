@@ -19,6 +19,15 @@ const (
 	CommitSignerBroken  CommitSignerStatus = "broken"
 )
 
+// CommitSignerReasonKeyMissing is a broken signer's StatusReason when its key
+// is no longer on the account. Every other reason a signer is broken for is
+// the verification reason GitHub gave for a pushed commit.
+const CommitSignerReasonKeyMissing = "key_missing"
+
+// CommitVerificationValid is GitHub's verification reason for a verified
+// commit. Any other reason on a pushed commit is a failure.
+const CommitVerificationValid = "valid"
+
 // OrgCommitSigner is one org_commit_signers row: the GitHub user account an
 // org's agent commits are authored, committed and signed as, and the public
 // half of the key TF signs with. The private half is a secret
@@ -77,10 +86,18 @@ func (s OrgCommitSigner) CommitEmail() string {
 	if s.EmailOverride != "" {
 		return s.EmailOverride
 	}
-	if s.Host != ghbase.GitHubCom || s.GitHubUserID <= 0 || s.Login == "" {
+	if !DerivesCommitEmail(s.Host) || s.GitHubUserID <= 0 || s.Login == "" {
 		return ""
 	}
 	return strconv.FormatInt(s.GitHubUserID, 10) + "+" + s.Login + "@users.noreply.github.com"
+}
+
+// DerivesCommitEmail reports whether a signer on host, in
+// ghbase.CanonicalBaseURL form, has a committer address without an override.
+// Only github.com does: GHES has no noreply address, and GHE.com's is not
+// documented.
+func DerivesCommitEmail(host string) bool {
+	return host == ghbase.GitHubCom
 }
 
 // CommitSigningMode is how a run's commits are signed: not at all, as the

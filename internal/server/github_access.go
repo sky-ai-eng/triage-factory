@@ -685,7 +685,8 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 //
 // The host is cleared because nothing remains that uses it: the workspace is
 // back to having no GitHub, as a fresh one has, and sets a URL again when it
-// connects. Org-admin only.
+// connects. A commit signer is the exception: its account is on that GitHub,
+// so the host stays until the signer is removed. Org-admin only.
 //
 // POST /api/orgs/{org_id}/github/app/disconnect
 func (s *Server) handleGitHubAppDisconnect(w http.ResponseWriter, r *http.Request) {
@@ -777,13 +778,20 @@ func (s *Server) handleGitHubAppDisconnect(w http.ResponseWriter, r *http.Reques
 		if err := teardownAppSecrets(ctx, tx, orgID, app); err != nil {
 			return err
 		}
-		// Nothing is left that uses the host — the same branch the PAT
-		// unbind takes once no registration remains.
+		// Nothing is left that uses the host unless a commit signer does,
+		// whose account is on that GitHub — the same branch the PAT unbind
+		// takes once no registration remains.
 		if err := integrations.ClearGitHub(ctx, tx.Secrets, orgID); err != nil {
 			return fmt.Errorf("clear github host: %w", err)
 		}
-		if _, err := tx.Orgs.SetSourceBaseURL(ctx, orgID, eventsource.KindGitHub, ""); err != nil {
-			return fmt.Errorf("clear github base url: %w", err)
+		signer, err := tx.OrgCommitSigners.Get(ctx, orgID)
+		if err != nil {
+			return fmt.Errorf("read commit signer: %w", err)
+		}
+		if signer == nil {
+			if _, err := tx.Orgs.SetSourceBaseURL(ctx, orgID, eventsource.KindGitHub, ""); err != nil {
+				return fmt.Errorf("clear github base url: %w", err)
+			}
 		}
 		return tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
 			ActorUserID: userID,
