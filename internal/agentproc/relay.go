@@ -49,7 +49,41 @@ const (
 	// at all), and the denial row is written by the handler before it answers,
 	// so the row is in the ledger by the time the agent sees the refusal.
 	OpAuthorizeGHWrite = "authorize_gh_write"
+	// OpSignDigest asks the control plane to sign one commit's digest as the
+	// run's signer. A Call: git waits on the signature to write the commit.
+	// The orchestrator queues the request for the control pods, which hold
+	// the signing keys, and answers with what they decided, so neither the
+	// sidecar nor the orchestrator ever holds a key.
+	OpSignDigest = "sign_digest"
 )
+
+// SignDigestArgs is sign_digest's payload: the hex SHA-512 digest of the commit
+// payload the sidecar's daemon checked, and the signer the run was sealed with
+// (its kind, "org" or "deployment", and its GitHub account id). It carries no
+// org: the orchestrator binds the org, conversation and engagement from its
+// own identity for the run, and a control pod signs only for the signer the
+// org resolves to when it signs, so a signer named here that is not the org's
+// is refused.
+type SignDigestArgs struct {
+	Digest       string `json:"digest"`
+	Signer       string `json:"signer"`
+	SignerUserID int64  `json:"signer_user_id"`
+}
+
+// SignDigestReply is what came of the request. Outcome is "signed" (Signature
+// holds the armored SSH signature), "refused" (Reason names why, and
+// RetryAfterSeconds, set only for the org's per-minute budget, says how long
+// until it admits another) or "unanswered" (nothing answered in time; the run
+// may try the same command again). SignatureID names the request's
+// commit_signatures row, which the commit id the daemon computes is recorded
+// on.
+type SignDigestReply struct {
+	Outcome           string `json:"outcome"`
+	SignatureID       string `json:"signature_id,omitempty"`
+	Signature         string `json:"signature,omitempty"`
+	Reason            string `json:"reason,omitempty"`
+	RetryAfterSeconds int    `json:"retry_after_seconds,omitempty"`
+}
 
 // AuthorizeRepoArgs / AuthorizeRepoReply are the authorize_repo op's payloads
 // — the repo a transiting git op targets, and the DB-backed decision: whether

@@ -159,6 +159,9 @@ func TestTfSystem_CommitSignatureQueueWritesDenied(t *testing.T) {
 		`UPDATE commit_signatures SET signature = 'x'`,
 		`UPDATE commit_signatures SET claimed_by = 'x'`,
 		`UPDATE commit_signatures SET public_key = 'x'`,
+		`UPDATE commit_signatures SET refusal_reason = 'x'`,
+		`UPDATE commit_signatures SET retry_after_seconds = 1`,
+		`UPDATE commit_signatures SET signed_at = now()`,
 		`DELETE FROM commit_signatures`,
 	} {
 		_, err := h.SystemDB.Exec(stmt)

@@ -116,6 +116,12 @@ func (a *App) startWorkers(ctx context.Context) {
 	// handleCtlMessage (which holder-gates them).
 	if runmode.Current() == runmode.ModeMulti {
 		a.startCtlListener(ctx)
+		// Every control pod signs, holder or standby: the signer answers
+		// sign_request doorbells from the listener above and sweeps for the
+		// requests whose doorbell was dropped. nil on an executor.
+		if a.commitSigner != nil {
+			go a.commitSigner.Run(ctx)
+		}
 		// The signal apply loop only makes sense on dispatcher-capable
 		// roles — only they can ever own a run's live process. The tf_wake
 		// LISTEN (TFAC-586) is the same gate: only a dispatcher-capable

@@ -372,6 +372,13 @@ type Spawner struct {
 	// the brain's backstop sweep settles the debt either way.
 	memoryOwed func(orgID, conversationID string)
 
+	// commitSignRequester queues a sandboxed run's commit signature requests
+	// for the control plane, handed to each engagement's relay server at
+	// bring-up. nil-safe; set post-construction via SetCommitSignRequester,
+	// in multi mode only, where signing happens on the control plane. With
+	// none, a run's sign_digest is refused.
+	commitSignRequester agenthost.CommitSignRequester
+
 	// procs holds the live agent process handle for each run currently
 	// executing as a LiveRun, keyed by run id. It survives across HTTP
 	// turns because the spawner is the startup singleton, so a control op
@@ -750,6 +757,15 @@ func (s *Spawner) SetOnMemoryOwed(fn func(orgID, conversationID string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.memoryOwed = fn
+}
+
+// SetCommitSignRequester wires the queue a sandboxed run's sign_digest relay op
+// signs through. Post-construction, same pattern as SetOnMemoryOwed; the app
+// sets it on the roles that run sandboxed engagements in multi mode.
+func (s *Spawner) SetCommitSignRequester(r agenthost.CommitSignRequester) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.commitSignRequester = r
 }
 
 // kickMemoryOwed rings the doorbell for a conversation this spawner just

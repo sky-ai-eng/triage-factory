@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/pgnotify"
 	"github.com/sky-ai-eng/triage-factory/internal/wsbackplane"
@@ -27,6 +28,10 @@ import (
 //	"sources_changed"     → the brain's event-source policy cache + poll
 //	                        re-due after an admin paused or resumed a
 //	                        source, holder-gated the same way
+//	"sign_request"        → this control pod's commit signer, NOT
+//	                        holder-gated: every control pod signs
+//	"sign_done"           → the signature request this executor's run is
+//	                        waiting on
 //
 // Uses wsbackplane.DirectDSN (TF_DATABASE_DIRECT_URL falling back to
 // TF_DATABASE_URL) — LISTEN needs a session-scoped connection that
@@ -78,6 +83,20 @@ func (a *App) dispatchCtl(payload string) {
 			return
 		}
 		a.handleCtlMessage(msg)
+	case commitsigner.KindSignRequest, commitsigner.KindSignDone:
+		var msg ctlbus.Message
+		if err := json.Unmarshal([]byte(payload), &msg); err != nil {
+			appLog.Warn("tf_ctl: malformed commit signing doorbell; dropping", "error", err)
+			return
+		}
+		// Both nil-safe, and each nil on the role that has no use for the
+		// other's doorbell: a control pod queues no requests, and an
+		// executor signs none. Neither blocks the read loop.
+		if probe.Kind == commitsigner.KindSignRequest {
+			a.commitSigner.Nudge(msg.OrgID, msg.SignatureID)
+		} else {
+			a.commitSignDoorbells.Ring(msg.SignatureID)
+		}
 	case "kick":
 		// nil on a pod whose backplane build found no DSN — no sockets to
 		// kick there anyway (local never reaches this listener at all).

@@ -6422,6 +6422,9 @@ ALTER TABLE ONLY public.commit_signatures
 -- claim's in total.
 CREATE INDEX commit_signatures_org_signed_idx ON public.commit_signatures USING btree (org_id, signed_at) WHERE (state = 'signed'::text);
 CREATE INDEX commit_signatures_claim_signed_idx ON public.commit_signatures USING btree (claim_id) WHERE (state = 'signed'::text);
+-- The control pods' once-a-second sweep and the pending gauge: requests no
+-- pod has claimed, oldest first. Zero rows is the steady state.
+CREATE INDEX commit_signatures_requested_idx ON public.commit_signatures USING btree (created_at, id) WHERE (state = 'requested'::text);
 
 ALTER TABLE public.commit_signatures ENABLE ROW LEVEL SECURITY;
 

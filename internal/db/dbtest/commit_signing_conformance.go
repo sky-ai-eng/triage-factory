@@ -621,3 +621,279 @@ func RunCommitSignatureStoreConformance(t *testing.T, mk CommitSignatureStoreFac
 		}
 	})
 }
+
+// CommitSignatureQueueFixture is what the queue suite runs against: the
+// signature store and the claims it checks liveness against, the org every
+// call is scoped to, and a seeder for engagements.
+type CommitSignatureQueueFixture struct {
+	Signatures db.CommitSignatureStore
+	Claims     db.ConversationQueueStore
+	OrgID      string
+
+	// Claim inserts a conversation and a claim on it at boot epoch 1,
+	// claimed at claimedAt with a five-minute lease, released or not, and
+	// returns both ids.
+	Claim func(t *testing.T, claimedAt time.Time, released bool) (conversationID, claimID string)
+}
+
+// CommitSignatureQueueFactory hands the queue suite a fixture over storage no
+// earlier subtest wrote to.
+type CommitSignatureQueueFactory func(t *testing.T) CommitSignatureQueueFixture
+
+// RunCommitSignatureQueueConformance pins the control-plane queue: a request
+// is claimed by exactly one pod, only that pod stores its outcome, the sweep
+// sees only what no pod has claimed, and a claim is live only while
+// unreleased, within its lease and at the boot epoch named.
+//
+// It is the control pods' half of the store, run on their admin pool. The
+// executor's tf_system role is refused these writes, which
+// RunCommitSignatureStoreConformance's caller pins separately.
+func RunCommitSignatureQueueConformance(t *testing.T, mk CommitSignatureQueueFactory) {
+	t.Helper()
+	ctx := context.Background()
+
+	const (
+		digest  = "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
+		armored = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----"
+	)
+	request := func(t *testing.T, f CommitSignatureQueueFixture, conversationID, claimID string) domain.CommitSignature {
+		t.Helper()
+		row, err := f.Signatures.InsertSystem(ctx, domain.CommitSignature{
+			OrgID:          f.OrgID,
+			ConversationID: conversationID,
+			ClaimID:        claimID,
+			BootEpoch:      1,
+			Signer:         domain.CommitSigningOrg,
+			SignerHost:     "https://github.com",
+			SignerUserID:   583231,
+			Digest:         digest,
+			State:          domain.CommitSignatureRequested,
+		})
+		if err != nil {
+			t.Fatalf("InsertSystem (requested): %v", err)
+		}
+		return row
+	}
+
+	t.Run("a_request_is_claimed_by_one_pod", func(t *testing.T) {
+		f := mk(t)
+		conversationID, claimID := f.Claim(t, time.Now(), false)
+		row := request(t, f, conversationID, claimID)
+
+		got, err := f.Signatures.ClaimRequestSystem(ctx, f.OrgID, row.ID, "pod-a")
+		if err != nil {
+			t.Fatalf("ClaimRequestSystem: %v", err)
+		}
+		if got == nil {
+			t.Fatal("ClaimRequestSystem = nil, want the request it took")
+		}
+		AssertWriteReturnedStoredRow(t, "ClaimRequestSystem", *got, func() (*domain.CommitSignature, error) {
+			return f.Signatures.GetSystem(ctx, f.OrgID, row.ID)
+		})
+		if got.State != domain.CommitSignatureSigning || got.ClaimedBy != "pod-a" {
+			t.Errorf("claimed row = state %q by %q, want signing by pod-a", got.State, got.ClaimedBy)
+		}
+
+		again, err := f.Signatures.ClaimRequestSystem(ctx, f.OrgID, row.ID, "pod-b")
+		if err != nil {
+			t.Fatalf("ClaimRequestSystem (second pod): %v", err)
+		}
+		if again != nil {
+			t.Errorf("a second pod claimed %+v, want nil: the request is pod-a's", again)
+		}
+		for name, id := range map[string]string{"unknown": uuid.New().String(), "malformed": "not-a-uuid"} {
+			if got, err := f.Signatures.ClaimRequestSystem(ctx, f.OrgID, id, "pod-a"); err != nil || got != nil {
+				t.Errorf("ClaimRequestSystem(%s id) = %+v, %v; want nil, nil", name, got, err)
+			}
+		}
+	})
+
+	t.Run("only_the_claiming_pod_signs", func(t *testing.T) {
+		f := mk(t)
+		conversationID, claimID := f.Claim(t, time.Now(), false)
+		row := request(t, f, conversationID, claimID)
+		signedAt := time.Now().UTC().Truncate(time.Millisecond)
+
+		if _, err := f.Signatures.SignSystem(ctx, f.OrgID, row.ID, "pod-a", signerKeyA, armored, signedAt); !errors.Is(err, db.ErrNoSuchCommitSignature) {
+			t.Errorf("SignSystem on an unclaimed request = %v, want ErrNoSuchCommitSignature", err)
+		}
+		if _, err := f.Signatures.ClaimRequestSystem(ctx, f.OrgID, row.ID, "pod-a"); err != nil {
+			t.Fatalf("ClaimRequestSystem: %v", err)
+		}
+		if _, err := f.Signatures.SignSystem(ctx, f.OrgID, row.ID, "pod-b", signerKeyA, armored, signedAt); !errors.Is(err, db.ErrNoSuchCommitSignature) {
+			t.Errorf("SignSystem by another pod = %v, want ErrNoSuchCommitSignature", err)
+		}
+		for name, args := range map[string][2]string{"no key": {"", armored}, "no signature": {signerKeyA, ""}} {
+			if _, err := f.Signatures.SignSystem(ctx, f.OrgID, row.ID, "pod-a", args[0], args[1], signedAt); !errors.Is(err, db.ErrInvalidCommitSignature) {
+				t.Errorf("SignSystem with %s = %v, want ErrInvalidCommitSignature", name, err)
+			}
+		}
+
+		got, err := f.Signatures.SignSystem(ctx, f.OrgID, row.ID, "pod-a", signerKeyA, armored, signedAt)
+		if err != nil {
+			t.Fatalf("SignSystem: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "SignSystem", got, func() (*domain.CommitSignature, error) {
+			return f.Signatures.GetSystem(ctx, f.OrgID, row.ID)
+		})
+		if got.State != domain.CommitSignatureSigned || got.PublicKey != signerKeyA || got.Signature != armored ||
+			got.SignedAt == nil || !got.SignedAt.Equal(signedAt) || got.ClaimedBy != "pod-a" {
+			t.Errorf("signed row = %+v, want signed by pod-a with its key, signature and time", got)
+		}
+		if n, err := f.Signatures.ClaimSignaturesSystem(ctx, f.OrgID, claimID); err != nil || n != 1 {
+			t.Errorf("ClaimSignaturesSystem = %d, %v; want the signature counted", n, err)
+		}
+		if w, err := f.Signatures.OrgSignaturesSinceSystem(ctx, f.OrgID, signedAt.Add(-time.Minute)); err != nil || w.Count != 1 {
+			t.Errorf("OrgSignaturesSinceSystem = %+v, %v; want the signature counted", w, err)
+		}
+		if _, err := f.Signatures.SignSystem(ctx, f.OrgID, row.ID, "pod-a", signerKeyB, armored, signedAt); !errors.Is(err, db.ErrNoSuchCommitSignature) {
+			t.Errorf("signing a signed row again = %v, want ErrNoSuchCommitSignature", err)
+		}
+		if _, err := f.Signatures.RefuseSystem(ctx, f.OrgID, row.ID, "pod-a", "claim_budget", 0); !errors.Is(err, db.ErrNoSuchCommitSignature) {
+			t.Errorf("refusing a signed row = %v, want ErrNoSuchCommitSignature", err)
+		}
+	})
+
+	t.Run("only_the_claiming_pod_refuses", func(t *testing.T) {
+		f := mk(t)
+		conversationID, claimID := f.Claim(t, time.Now(), false)
+		row := request(t, f, conversationID, claimID)
+
+		if _, err := f.Signatures.RefuseSystem(ctx, f.OrgID, row.ID, "pod-a", "org_minute_budget", 12); !errors.Is(err, db.ErrNoSuchCommitSignature) {
+			t.Errorf("RefuseSystem on an unclaimed request = %v, want ErrNoSuchCommitSignature", err)
+		}
+		if _, err := f.Signatures.ClaimRequestSystem(ctx, f.OrgID, row.ID, "pod-a"); err != nil {
+			t.Fatalf("ClaimRequestSystem: %v", err)
+		}
+		if _, err := f.Signatures.RefuseSystem(ctx, f.OrgID, row.ID, "pod-b", "org_minute_budget", 12); !errors.Is(err, db.ErrNoSuchCommitSignature) {
+			t.Errorf("RefuseSystem by another pod = %v, want ErrNoSuchCommitSignature", err)
+		}
+		if _, err := f.Signatures.RefuseSystem(ctx, f.OrgID, row.ID, "pod-a", "", 0); !errors.Is(err, db.ErrInvalidCommitSignature) {
+			t.Errorf("RefuseSystem with no reason = %v, want ErrInvalidCommitSignature", err)
+		}
+		if _, err := f.Signatures.RefuseSystem(ctx, f.OrgID, row.ID, "pod-a", "org_minute_budget", -1); !errors.Is(err, db.ErrInvalidCommitSignature) {
+			t.Errorf("RefuseSystem with a negative wait = %v, want ErrInvalidCommitSignature", err)
+		}
+
+		got, err := f.Signatures.RefuseSystem(ctx, f.OrgID, row.ID, "pod-a", "org_minute_budget", 12)
+		if err != nil {
+			t.Fatalf("RefuseSystem: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "RefuseSystem", got, func() (*domain.CommitSignature, error) {
+			return f.Signatures.GetSystem(ctx, f.OrgID, row.ID)
+		})
+		if got.State != domain.CommitSignatureRefused || got.RefusalReason != "org_minute_budget" || got.RetryAfterSeconds != 12 {
+			t.Errorf("refused row = %+v, want refused for org_minute_budget, retry in 12s", got)
+		}
+		if got.PublicKey != "" || got.Signature != "" || got.SignedAt != nil {
+			t.Errorf("refused row = %+v, want nothing signed", got)
+		}
+		if n, err := f.Signatures.ClaimSignaturesSystem(ctx, f.OrgID, claimID); err != nil || n != 0 {
+			t.Errorf("ClaimSignaturesSystem = %d, %v; want a refusal not counted", n, err)
+		}
+
+		other := request(t, f, conversationID, claimID)
+		if _, err := f.Signatures.ClaimRequestSystem(ctx, f.OrgID, other.ID, "pod-a"); err != nil {
+			t.Fatalf("ClaimRequestSystem (other): %v", err)
+		}
+		plain, err := f.Signatures.RefuseSystem(ctx, f.OrgID, other.ID, "pod-a", "claim_inactive", 0)
+		if err != nil {
+			t.Fatalf("RefuseSystem (no wait): %v", err)
+		}
+		if plain.RetryAfterSeconds != 0 {
+			t.Errorf("a refusal with no wait stored retry_after %d, want 0", plain.RetryAfterSeconds)
+		}
+	})
+
+	t.Run("the_sweep_sees_only_unclaimed_requests", func(t *testing.T) {
+		f := mk(t)
+		conversationID, claimID := f.Claim(t, time.Now(), false)
+
+		empty, err := f.Signatures.ListRequestedSystem(ctx, 0, 10)
+		if err != nil {
+			t.Fatalf("ListRequestedSystem (empty): %v", err)
+		}
+		if len(empty) != 0 {
+			t.Errorf("ListRequestedSystem with no requests = %d rows, want none", len(empty))
+		}
+		if n, age, err := f.Signatures.PendingRequestsSystem(ctx); err != nil || n != 0 || age != 0 {
+			t.Errorf("PendingRequestsSystem with no requests = %d, %s, %v; want 0, 0", n, age, err)
+		}
+
+		first := request(t, f, conversationID, claimID)
+		claimed := request(t, f, conversationID, claimID)
+		third := request(t, f, conversationID, claimID)
+		if _, err := f.Signatures.ClaimRequestSystem(ctx, f.OrgID, claimed.ID, "pod-a"); err != nil {
+			t.Fatalf("ClaimRequestSystem: %v", err)
+		}
+		signedAt := time.Now()
+		if _, err := f.Signatures.InsertSystem(ctx, domain.CommitSignature{
+			OrgID: f.OrgID, ConversationID: conversationID, ClaimID: claimID, BootEpoch: 1,
+			Signer: domain.CommitSigningOrg, SignerHost: "https://github.com", SignerUserID: 583231,
+			PublicKey: signerKeyA, Digest: digest, State: domain.CommitSignatureSigned,
+			Signature: armored, SignedAt: &signedAt,
+		}); err != nil {
+			t.Fatalf("InsertSystem (signed): %v", err)
+		}
+
+		got, err := f.Signatures.ListRequestedSystem(ctx, 0, 10)
+		if err != nil {
+			t.Fatalf("ListRequestedSystem: %v", err)
+		}
+		if len(got) != 2 || got[0].ID != first.ID || got[1].ID != third.ID {
+			t.Errorf("ListRequestedSystem = %v, want the two unclaimed requests oldest first (%s, %s)", signatureIDs(got), first.ID, third.ID)
+		}
+		if limited, err := f.Signatures.ListRequestedSystem(ctx, 0, 1); err != nil || len(limited) != 1 || limited[0].ID != first.ID {
+			t.Errorf("ListRequestedSystem(limit 1) = %v, %v; want the oldest alone", signatureIDs(limited), err)
+		}
+		if young, err := f.Signatures.ListRequestedSystem(ctx, time.Hour, 10); err != nil || len(young) != 0 {
+			t.Errorf("ListRequestedSystem(min age 1h) = %v, %v; want none: every request is younger", signatureIDs(young), err)
+		}
+
+		n, age, err := f.Signatures.PendingRequestsSystem(ctx)
+		if err != nil {
+			t.Fatalf("PendingRequestsSystem: %v", err)
+		}
+		if n != 2 {
+			t.Errorf("PendingRequestsSystem count = %d, want the 2 unclaimed requests", n)
+		}
+		if age < 0 || age > time.Minute {
+			t.Errorf("PendingRequestsSystem oldest age = %s, want the few moments since the first request", age)
+		}
+	})
+
+	t.Run("a_claim_is_live_only_unreleased_within_its_lease_at_its_epoch", func(t *testing.T) {
+		f := mk(t)
+		_, live := f.Claim(t, time.Now(), false)
+		_, released := f.Claim(t, time.Now(), true)
+		_, lapsed := f.Claim(t, time.Now().Add(-10*time.Minute), false)
+
+		for name, c := range map[string]struct {
+			claimID string
+			epoch   int64
+			want    bool
+		}{
+			"live at its epoch":     {live, 1, true},
+			"live at another epoch": {live, 2, false},
+			"released":              {released, 1, false},
+			"past its lease":        {lapsed, 1, false},
+			"unknown":               {uuid.New().String(), 1, false},
+		} {
+			got, err := f.Claims.ClaimLiveSystem(ctx, f.OrgID, c.claimID, c.epoch)
+			if err != nil {
+				t.Fatalf("ClaimLiveSystem (%s): %v", name, err)
+			}
+			if got != c.want {
+				t.Errorf("ClaimLiveSystem (%s) = %v, want %v", name, got, c.want)
+			}
+		}
+	})
+}
+
+func signatureIDs(rows []domain.CommitSignature) []string {
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.ID
+	}
+	return out
+}
