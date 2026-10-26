@@ -965,10 +965,19 @@ func snapshotPhase(ctx context.Context, name, runtime string) (context.Context, 
 // compressible text — without touching the member-by-member streaming inside
 // writeSnapshotTar.
 //
+// The archive is staged in the runs base, beside the tree it is a snapshot of:
+// on an executor that is the state root's volume, with the tree and the jails'
+// /tmp, rather than the container's writable layer. The startup sweep removes
+// one a stopped process left there.
+//
 // man is the manifest's identity half — when the tree was read and, for a
 // checkpoint, the position it covers; the rest is filled in from the capture.
 func stageSnapshotArchive(ctx context.Context, captured *capturedSnapshot, wtPath string, man snapshotManifest) (_ *os.File, rawBytes, compressedBytes int64, err error) {
-	f, err := os.CreateTemp("", "tf-snapshot-*.tar.zst")
+	base, err := worktree.EnsureRunsBase()
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	f, err := os.CreateTemp(base, ".snapshot-*.tar.zst")
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("tempfile: %w", err)
 	}

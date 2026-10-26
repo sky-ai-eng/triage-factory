@@ -15,6 +15,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // accessProbeEnv gates this test binary's access-probe re-exec: the child
@@ -231,7 +234,8 @@ func withJailHost(t *testing.T) string {
 	t.Helper()
 	base := t.TempDir()
 	// t.TempDir's own directories are 0700; a probe at another uid has to be
-	// able to traverse to the paths under test, as it can to /run/tf and /tmp.
+	// able to traverse to the paths under test, as it can to /run/tf, /tmp and
+	// an executor's state root.
 	for _, d := range []string{filepath.Dir(base), base} {
 		if err := os.Chmod(d, 0o711); err != nil {
 			t.Fatal(err)
@@ -249,6 +253,18 @@ func withJailHost(t *testing.T) string {
 	orig := trustedAgentHostSocketRoot
 	trustedAgentHostSocketRoot = root
 	t.Cleanup(func() { trustedAgentHostSocketRoot = orig })
+
+	// An executor's state root, where its runs base is: a volume directory at
+	// the mode a container gives one.
+	runmode.SetForTest(t, runmode.ModeMulti)
+	stateRoot := filepath.Join(base, "data")
+	if err := os.Mkdir(stateRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stateRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	paths.SetForTest(t, stateRoot)
 
 	// The runs base at production's mode. The staging bases are opened to
 	// traversal too, which production does not need — a jail reads its staging

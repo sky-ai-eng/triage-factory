@@ -88,46 +88,53 @@ type CleanupOptions struct {
 // to keep resumable conversations' warm worktrees alive across restarts — see
 // CleanupOptions.PreserveWorktreeFor.
 func CleanupWithOptions(opts CleanupOptions) {
-	// Orphaned-worktree (temp-dir) cleanup. A missing runs dir just means
-	// there's nothing to remove here — it must NOT skip the bare-repo
-	// sweep below. /tmp is routinely wiped on reboot, which is exactly the
-	// case where a locked=initializing ghost survives in the persistent
-	// ~/.triagefactory/repos bare and needs reclaiming.
-	runsBase := RunsBase()
-	if entries, err := os.ReadDir(runsBase); err == nil {
+	// Orphaned-worktree cleanup. A missing runs dir just means there's
+	// nothing to remove here — it must NOT skip the bare-repo sweep below.
+	// Locally the runs base is in /tmp, which is routinely wiped on reboot:
+	// exactly the case where a locked=initializing ghost survives in the
+	// persistent ~/.triagefactory/repos bare and needs reclaiming.
+	base := runsBase()
+	if entries, err := os.ReadDir(base); err == nil {
 		count := 0
 		for _, e := range entries {
-			if e.IsDir() {
-				fullPath := filepath.Join(runsBase, e.Name())
-				rootKey := strings.TrimSuffix(e.Name(), "-nocwd")
-				// Resumable conversations keep their worktree WHOLE — the dir
-				// and its session JSONL — as the warm resume cache, so skip
-				// them entirely (no project-dir delete, no dir removal). A
-				// swept one still resumes via snapshot rehydrate.
-				if opts.PreserveWorktreeFor[rootKey] {
-					continue
+			fullPath := filepath.Join(base, e.Name())
+			if !e.IsDir() {
+				// A snapshot's staged archive (stageSnapshotArchive), left by a
+				// process that stopped while writing it. Nothing else in the
+				// runs base is a file, and the orchestrator owns it.
+				if err := os.Remove(fullPath); err != nil {
+					worktreeLog.Warn("orphaned staging file not removed", "path", fullPath, "error", err)
 				}
-				// Project-dir deletion has one opt-out: a global SkipAll
-				// (non-local modes, where the preserve set can't be
-				// determined). It keeps the JSONL intact while we still
-				// remove the worktree dir below.
-				if !opts.SkipClaudeProjectCleanup {
-					// Each entry here was a live claude cwd at some point — nuke its
-					// ghost ~/.claude/projects entry before removing the dir itself
-					// (EvalSymlinks needs the dir to still exist to resolve).
-					RemoveClaudeProjectDir(fullPath)
-				}
-				// Privileged seam (see RemoveAt): an orphan from a crashed
-				// sandboxed run is owned by the sandbox identity, which the
-				// post-drop orchestrator can't unlink itself. Errors are
-				// logged rather than swallowed — a leaked tree the sweep
-				// exists to reclaim should be visible, not silent.
-				if err := sandbox.RemoveRunTree(context.Background(), fullPath); err != nil {
-					worktreeLog.Warn("orphaned worktree not removed", "path", fullPath, "error", err)
-					continue
-				}
-				count++
+				continue
 			}
+			rootKey := strings.TrimSuffix(e.Name(), "-nocwd")
+			// Resumable conversations keep their worktree WHOLE — the dir
+			// and its session JSONL — as the warm resume cache, so skip
+			// them entirely (no project-dir delete, no dir removal). A
+			// swept one still resumes via snapshot rehydrate.
+			if opts.PreserveWorktreeFor[rootKey] {
+				continue
+			}
+			// Project-dir deletion has one opt-out: a global SkipAll
+			// (non-local modes, where the preserve set can't be
+			// determined). It keeps the JSONL intact while we still
+			// remove the worktree dir below.
+			if !opts.SkipClaudeProjectCleanup {
+				// Each entry here was a live claude cwd at some point — nuke its
+				// ghost ~/.claude/projects entry before removing the dir itself
+				// (EvalSymlinks needs the dir to still exist to resolve).
+				RemoveClaudeProjectDir(fullPath)
+			}
+			// Privileged seam (see RemoveAt): an orphan from a crashed
+			// sandboxed run is owned by the sandbox identity, which the
+			// post-drop orchestrator can't unlink itself. Errors are
+			// logged rather than swallowed — a leaked tree the sweep
+			// exists to reclaim should be visible, not silent.
+			if err := sandbox.RemoveRunTree(context.Background(), fullPath); err != nil {
+				worktreeLog.Warn("orphaned worktree not removed", "path", fullPath, "error", err)
+				continue
+			}
+			count++
 		}
 		if count > 0 {
 			worktreeLog.Info("cleaned up orphaned worktrees", "count", count)
@@ -360,19 +367,29 @@ func recordedWorktreePath(adminDir string) string {
 	return filepath.Dir(gitPath)
 }
 
+// isRunsBase reports whether dir is a runs base: the directory run trees are
+// built under. Locally that is any directory named runsDir, matched on the
+// segment rather than the full os.TempDir() prefix because $TMPDIR can differ
+// between the run that created a tree and the process asking; the name itself
+// is constant. In multi it is exactly <state root>/runs, the one base an
+// executor builds under: "runs" is too common a name to match on its own.
+func isRunsBase(dir string) bool {
+	if runmode.Current() == runmode.ModeMulti {
+		return filepath.Clean(dir) == runsBase()
+	}
+	return filepath.Base(dir) == runsDir
+}
+
 // isTFRunWorktreePath reports whether p is one of TF's own ephemeral run
-// worktrees — a path inside the triagefactory-runs temp namespace, whether a
-// run root (runDir = <tmp>/triagefactory-runs/<rootKey>) or a checkout beneath
-// one (<root>/<owner>/<repo>/<slug>). Matched on the runsDir path segment
-// rather than the full os.TempDir() prefix because $TMPDIR can differ between
-// the run that created the worktree and the process asking; the namespace
-// itself is constant.
+// worktrees — a path inside a runs base, whether a run root
+// (runDir = <runs base>/<rootKey>) or a checkout beneath one
+// (<root>/<owner>/<repo>/<slug>).
 func isTFRunWorktreePath(p string) bool {
 	if p == "" {
 		return false
 	}
 	for dir := filepath.Dir(filepath.Clean(p)); ; dir = filepath.Dir(dir) {
-		if filepath.Base(dir) == runsDir {
+		if isRunsBase(dir) {
 			return true
 		}
 		if parent := filepath.Dir(dir); parent == dir {
@@ -381,15 +398,15 @@ func isTFRunWorktreePath(p string) bool {
 	}
 }
 
-// isTFRunRoot reports whether p is a run root itself: a direct child of the
-// triagefactory-runs namespace.
+// isTFRunRoot reports whether p is a run root itself: a direct child of a
+// runs base.
 func isTFRunRoot(p string) bool {
-	return p != "" && filepath.Base(filepath.Dir(p)) == runsDir
+	return p != "" && isRunsBase(filepath.Dir(p))
 }
 
 // IsRunTreeFor reports whether p is the run tree of rootKey specifically:
 // TF's own ephemeral run namespace AND the directory that key names within it
-// (runDir = <tmp>/triagefactory-runs/<rootKey>, so the basename IS the key).
+// (runDir = <runs base>/<rootKey>, so the basename IS the key).
 //
 // This, rather than a bare "is it in the namespace", is what a caller wants
 // when it holds a recorded path and is about to act on it as if it belonged to
@@ -400,10 +417,10 @@ func isTFRunRoot(p string) bool {
 // directory in hand. Requiring the key to name the path is what collapses the
 // two facts into one.
 //
-// Namespace-relative like its sibling above, deliberately: a tree recorded
-// under a different $TMPDIR still resolves here if that directory survives, so
-// pinning this process's os.TempDir() would reject a tree that really is the
-// key's.
+// Namespace-relative like its sibling above, deliberately: locally a tree
+// recorded under a different $TMPDIR still resolves here if that directory
+// survives, so pinning this process's os.TempDir() would reject a tree that
+// really is the key's.
 func IsRunTreeFor(p, rootKey string) bool {
 	return rootKey != "" && isTFRunRoot(p) && filepath.Base(p) == rootKey
 }
@@ -425,7 +442,7 @@ func IsRunTreeFor(p, rootKey string) bool {
 //     `worktree lock` contract: a worktree a user deliberately locked
 //     because its checkout lives on a removable/network volume that's
 //     merely unmounted right now also looks "locked + checkout-missing",
-//     but it is NOT under triagefactory-runs, so we leave it alone.
+//     but it is NOT under a runs base, so we leave it alone.
 //
 // CONCURRENCY: startup-only. An in-progress `git worktree add` is briefly
 // locked with its checkout not yet populated, so a concurrent sweep could

@@ -262,10 +262,12 @@ func finishSelfContainedPRClone(ctx context.Context, bareDir, wtDir, localBranch
 // materialization and any later in-sandbox fetch/push resolve through the
 // gitproxy against GitHub.
 func materializeSelfContainedClone(ctx context.Context, bareDir, wtDir, branch, baseBranch, upstreamCloneURL string, auth CloneAuth) error {
-	// Local object COPY (--no-hardlinks): the bare (/data) and the run root
-	// (/tmp, ephemeral) sit on different filesystems, so hardlinks can't span
-	// them. --no-checkout defers the working tree until the promisor is wired,
-	// so the deferred-blob fetch has an upstream to resolve against.
+	// Local object COPY (--no-hardlinks): the hand-off chowns every inode in
+	// the run tree to the jail's uid, and an object linked from the bare is the
+	// bare's own inode, so it would change owner in the bare too — the bare
+	// every later run of this repository clones from. --no-checkout defers the
+	// working tree until the promisor is wired, so the deferred-blob fetch has
+	// an upstream to resolve against.
 	if err := gitRunCtx(ctx, "", "clone", "--no-hardlinks", "--no-checkout", "--single-branch", "--branch", branch, bareDir, wtDir); err != nil {
 		return fmt.Errorf("clone run root from bare: %w", err)
 	}
