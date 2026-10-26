@@ -55,7 +55,7 @@ func TestRelocation_RelayRuntimeOverRealConn(t *testing.T) {
 	})
 
 	// The sidecar's runtime — the real exported constructor, over the real conn.
-	rt := NewRelayRuntime(sidecarConn, agentproc.NewRecordSender(sidecarConn), info, nil)
+	rt := NewRelayRuntime(sidecarConn, agentproc.NewRecordSender(sidecarConn), info, nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

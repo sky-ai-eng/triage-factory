@@ -25,13 +25,15 @@ import (
 // directory that is its own, and in nothing shared.
 const hostSocketRoot = "/run/tf"
 
-// agentHostSocketName and caBundleName are the files a run's sidecar creates
-// in its socket directory. internal/sandbox derives the same paths
-// (TrustedAgentHostSocketPath, TrustedCABundlePath) to validate the launch's
-// mounts; a drift test cross-checks the two derivations.
+// agentHostSocketName, caBundleName and allowedSignersName are the files a
+// run's sidecar creates in its socket directory. internal/sandbox derives the
+// same paths (TrustedAgentHostSocketPath, TrustedCABundlePath,
+// TrustedAllowedSignersPath) to validate the launch's mounts; a drift test
+// cross-checks the two derivations.
 const (
 	agentHostSocketName = "agenthost.sock"
 	caBundleName        = "ca-bundle.crt"
+	allowedSignersName  = "allowed-signers"
 )
 
 // HostDaemon is the per-run socket + server lifecycle. StartWithServer
@@ -367,11 +369,43 @@ func WriteCABundle(conversationID string, bundlePEM []byte, jailGID int) error {
 // creating the file new rather than truncating in place makes it belong to
 // whoever is serving it either way.
 func writeFreshCABundle(path string, bundlePEM []byte) error {
+	return writeFreshRunFile(path, bundlePEM, "CA bundle")
+}
+
+// writeFreshRunFile creates a file in the run's socket directory as a new
+// file, by the rule writeFreshCABundle states.
+func writeFreshRunFile(path string, content []byte, what string) error {
 	_ = os.Remove(path)
-	if err := os.WriteFile(path, bundlePEM, 0o640); err != nil {
-		return fmt.Errorf("agenthost: write CA bundle %s: %w", path, err)
+	if err := os.WriteFile(path, content, 0o640); err != nil {
+		return fmt.Errorf("agenthost: write %s %s: %w", what, path, err)
 	}
 	return nil
+}
+
+// AllowedSignersPathFor returns the host-side path of conversationID's
+// allowed-signers file, beside the CA bundle in the run's socket directory:
+// the gpg.ssh.allowedSignersFile the jail's git checks the run's own commits
+// against, presented read-only at cell.AllowedSignersPath. Deterministic for
+// the same reason as CABundlePathFor, and re-derived by the cap-broker as
+// sandbox.TrustedAllowedSignersPath.
+func AllowedSignersPathFor(conversationID string) string {
+	return filepath.Join(runSocketDir(conversationID), allowedSignersName)
+}
+
+// WriteAllowedSigners writes conversationID's allowed-signers file (public
+// keys only) to AllowedSignersPathFor(conversationID) and grants the run's
+// jail gid read access, as WriteCABundle does the CA bundle. The sidecar
+// writes it during bring-up of every run, empty for one that does not sign,
+// because the launch mounts it by path.
+func WriteAllowedSigners(conversationID string, content []byte, jailGID int) error {
+	path := AllowedSignersPathFor(conversationID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("agenthost: mkdir %s: %w", filepath.Dir(path), err)
+	}
+	if err := writeFreshRunFile(path, content, "allowed-signers file"); err != nil {
+		return err
+	}
+	return grantToJail(path, jailGID, 0o640)
 }
 
 // sanitizeSocketName trims a conversation id to a fs-safe form. ConversationIDs are

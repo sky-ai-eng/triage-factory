@@ -117,6 +117,13 @@ type StartProxiesResult struct {
 	IdentityEmail     string `json:"identity_email,omitempty"`
 	IdentityAccountID string `json:"identity_account_id,omitempty"`
 
+	// CommitSigner is the kind of signer ("org" or "deployment") the sidecar
+	// configured Env's git to sign every commit as, read off the sealed
+	// bundle, and empty when the run does not sign. The orchestrator records
+	// the run's pushes by it, since an executor cannot read the org's signer.
+	// Non-secret: it names a kind, and the signer's key is public.
+	CommitSigner string `json:"commit_signer,omitempty"`
+
 	// GitProxyURL / GitProxyToken are the sidecar's git-over-HTTPS proxy
 	// address and the per-run placeholder the orchestrator presents to it, so
 	// the orchestrator's OWN pre-sandbox clone (GetPR's worktree materialize)

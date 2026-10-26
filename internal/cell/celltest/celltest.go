@@ -17,6 +17,7 @@ package celltest
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -30,8 +31,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,8 +42,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -78,6 +83,7 @@ func Run(t *testing.T, h Harness) {
 	t.Run("PropertyB", func(t *testing.T) { testPropertyB(t, h) })
 	t.Run("RunTreeAtWork", func(t *testing.T) { testRunTreeAtWork(t, h) })
 	t.Run("TrustVariablesNameTheRunsBundle", func(t *testing.T) { testTrustVariablesNameTheRunsBundle(t, h) })
+	t.Run("CommitsAreSignedAsTheSealedSigner", func(t *testing.T) { testCommitsAreSignedAsTheSealedSigner(t, h) })
 	t.Run("JailIsNotRoot", func(t *testing.T) { testJailIsNotRoot(t, h) })
 	t.Run("OnlyTheSidecarIsReachable", func(t *testing.T) { testOnlyTheSidecarIsReachable(t, h) })
 	t.Run("InternalDenylistUnreachable", func(t *testing.T) { testInternalDenylistUnreachable(t, h) })
@@ -176,6 +182,45 @@ func testTrustVariablesNameTheRunsBundle(t *testing.T, h Harness) {
 		if got != want {
 			t.Errorf("%s in the jail: %q, want a file with the run's CA bundle (sha256 %s)", v, out, want)
 		}
+	}
+}
+
+// testCommitsAreSignedAsTheSealedSigner: a bundle naming a signer has the
+// jail's git sign every commit as it, through the sidecar's daemon and the
+// relay, with no key in the jail. The commit id the sidecar relays is the
+// commit's own, git verify-commit passes against the allowed-signers file the
+// sidecar wrote, and the jail cannot write that file.
+func testCommitsAreSignedAsTheSealedSigner(t *testing.T, h Harness) {
+	signer := newTestSigner(t)
+	l := startCell(t, h, newConversationID(t), jailMemoryLimitMB, signer)
+
+	out := l.sh(t, `set -e
+cd "$(mktemp -d)"
+git init -q -b main .
+git commit -q --allow-empty -m "signed in a jail"
+echo "HEAD=$(git rev-parse HEAD)"
+git cat-file commit HEAD | grep -q '^gpgsig -----BEGIN SSH SIGNATURE-----' && echo SIGNED
+git verify-commit HEAD 2>&1 && echo VERIFIED`)
+	if !strings.Contains(out, "SIGNED") {
+		t.Fatalf("the jail's commit carries no SSH signature:\n%s", out)
+	}
+	if !strings.Contains(out, "VERIFIED") {
+		t.Errorf("git verify-commit HEAD failed in the jail:\n%s", out)
+	}
+	head := ""
+	for _, line := range strings.Split(out, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "HEAD="); ok {
+			head = v
+		}
+	}
+	// The commit id is a record, delivered after git has its signature.
+	if commits := signer.awaitCommits(1, bringUpTimeout); len(commits) != 1 || commits[0] != head {
+		t.Errorf("the sidecar relayed commit ids %v, want the jail's HEAD %q", commits, head)
+	}
+
+	write := l.sh(t, fmt.Sprintf(`if echo 'x namespaces="git" ssh-ed25519 AAAA' >> %s 2>/dev/null; then echo WROTE; else echo REFUSED; fi`, cell.AllowedSignersPath))
+	if !strings.Contains(write, "REFUSED") {
+		t.Errorf("the jail wrote %s; it must be read-only:\n%s", cell.AllowedSignersPath, write)
 	}
 }
 
@@ -544,6 +589,9 @@ type liveCell struct {
 	seed           string
 	canaries       []string
 
+	// signer is the run's sealed signer, nil for an unsigned run.
+	signer *testSigner
+
 	cell  cell.Cell
 	conn  *sidecarproto.Conn
 	res   *sidecarproto.StartProxiesResult
@@ -567,10 +615,19 @@ func start(t *testing.T, h Harness, conversationID string) *liveCell {
 // startWithCeiling is start with the jail capped at ceilingMB.
 func startWithCeiling(t *testing.T, h Harness, conversationID string, ceilingMB int) *liveCell {
 	t.Helper()
+	return startCell(t, h, conversationID, ceilingMB, nil)
+}
+
+// startCell builds a live cell capped at ceilingMB. A non-nil signer is sealed
+// into the bundle as the run's signer and answers the relay's signature
+// requests; nil leaves the run unsigned and its relay refusing every op.
+func startCell(t *testing.T, h Harness, conversationID string, ceilingMB int, signer *testSigner) *liveCell {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 
 	l := &liveCell{
 		cancel:         cancel,
+		signer:         signer,
 		conversationID: conversationID,
 		seed:           "seed-" + randomHex(t, 12),
 		canaries: []string{
@@ -597,11 +654,15 @@ func startWithCeiling(t *testing.T, h Harness, conversationID string, ceilingMB 
 	}
 	l.cell = c
 
+	var relay agentproc.RelayDispatcher = refusingRelay{}
+	if signer != nil {
+		relay = signer
+	}
 	res, conn, err := agentproc.BringUpRunSidecar(ctx, c.Sidecar(), l.provision, agentproc.SidecarBringUpParams{
 		ConversationID:   conversationID,
 		HostVethIP:       c.ProxyHost(),
 		Git:              &agentproc.GitProxyConfig{},
-		Relay:            refusingRelay{},
+		Relay:            relay,
 		GitHubAPIEnabled: true,
 		GHChannelEnabled: true,
 		AgentHost: &sidecarproto.AgentHostInfo{
@@ -628,6 +689,7 @@ func startWithCeiling(t *testing.T, h Harness, conversationID string, ceilingMB 
 		SidecarEndpoints: res.JailEndpoints,
 		AgentHostSocket:  agenthost.SocketPathFor(conversationID),
 		CABundle:         agenthost.CABundlePathFor(conversationID),
+		AllowedSigners:   agenthost.AllowedSignersPathFor(conversationID),
 		GHChannel:        gh,
 		MemoryLimitMB:    ceilingMB,
 	}
@@ -701,6 +763,11 @@ func (l *liveCell) provision(_ context.Context, pubKeyB64 string) ([]byte, int64
 				"celltest/repo": {Token: l.canaries[3], ExpiresAt: time.Now().Add(time.Hour)},
 			},
 		},
+	}
+	if l.signer != nil {
+		gh := bundle.GitHub
+		gh.IdentityName, gh.IdentityEmail, gh.IdentityAccountID = testSignerName, testSignerEmail, testSignerAccountID
+		gh.Signer = &credbundle.SignerCreds{Mode: string(domain.CommitSigningOrg), PublicKey: l.signer.public}
 	}
 	plaintext, err := bundle.Marshal()
 	if err != nil {
@@ -802,6 +869,99 @@ func executorAddresses(t *testing.T, proxyHost string) []string {
 		}
 	}
 	return out
+}
+
+// The identity the signing case's bundle names as its signer.
+const (
+	testSignerName      = "Celltest Signer"
+	testSignerEmail     = "583231+celltest-signer@users.noreply.github.com"
+	testSignerAccountID = "583231"
+)
+
+// testSigner is the orchestrator's relay for a run that signs, standing in for
+// the control plane: it signs each relayed digest with a key generated for the
+// case, which never leaves this process, and keeps the commit ids the sidecar
+// records. Every other op fails closed, as refusingRelay's do.
+type testSigner struct {
+	key    ed25519.PrivateKey
+	public string
+
+	mu      sync.Mutex
+	commits []string
+}
+
+func newTestSigner(t *testing.T) *testSigner {
+	t.Helper()
+	key, err := commitsign.GenerateKey()
+	if err != nil {
+		t.Fatalf("generate the signing key: %v", err)
+	}
+	public, err := commitsign.PublicKey(key)
+	if err != nil {
+		t.Fatalf("encode the signing key: %v", err)
+	}
+	return &testSigner{key: key, public: public}
+}
+
+func (s *testSigner) DispatchCall(_ context.Context, namespace, op string, args json.RawMessage) (json.RawMessage, error) {
+	if namespace != agentproc.RelayNamespaceCore || op != agentproc.OpSignDigest {
+		return nil, fmt.Errorf("celltest: no relay op %s/%s is served", namespace, op)
+	}
+	var a agentproc.SignDigestArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return nil, err
+	}
+	if a.Signer != string(domain.CommitSigningOrg) || strconv.FormatInt(a.SignerUserID, 10) != testSignerAccountID {
+		return nil, fmt.Errorf("celltest: sign_digest named signer %s/%d, not the sealed one", a.Signer, a.SignerUserID)
+	}
+	digest, err := commitsign.ParseDigest(a.Digest)
+	if err != nil {
+		return nil, err
+	}
+	sig, err := commitsign.SignDigest(s.key, digest)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(agentproc.SignDigestReply{Outcome: "signed", SignatureID: randomUUID(), Signature: string(sig)})
+}
+
+func (s *testSigner) DispatchRecord(_ context.Context, namespace, op, _ string, args json.RawMessage) error {
+	if namespace != agentproc.RelayNamespaceCore || op != agentproc.OpRecordCommitSHA {
+		return nil
+	}
+	var a agentproc.RecordCommitSHAArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return nil
+	}
+	s.mu.Lock()
+	s.commits = append(s.commits, a.CommitSHA)
+	s.mu.Unlock()
+	return nil
+}
+
+// awaitCommits returns the commit ids the sidecar has recorded once there are
+// at least n, or whatever there are when timeout passes.
+func (s *testSigner) awaitCommits(n int, timeout time.Duration) []string {
+	deadline := time.Now().Add(timeout)
+	for {
+		s.mu.Lock()
+		commits := slices.Clone(s.commits)
+		s.mu.Unlock()
+		if len(commits) >= n || time.Now().After(deadline) {
+			return commits
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// randomUUID is a v4-shaped id for a signature's row.
+func randomUUID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	h := hex.EncodeToString(b)
+	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
 }
 
 // refusingRelay is the orchestrator's relay with nothing behind it: every op

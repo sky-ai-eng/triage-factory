@@ -77,6 +77,21 @@ func TrustedCABundlePath(conversationID string) string {
 	return filepath.Join(RunSocketDir(conversationID), caBundleName)
 }
 
+// TrustedAllowedSignersDestination is the fixed in-sandbox path the run's
+// allowed-signers file is bind-mounted at: the cell contract's path, which the
+// run's gpg.ssh.allowedSignersFile names.
+const TrustedAllowedSignersDestination = cell.AllowedSignersPath
+
+// TrustedAllowedSignersPath is the broker's own derivation of "this run's own
+// allowed-signers file" host-side path. The sidecar writes it during bring-up
+// (agenthost.WriteAllowedSigners → AllowedSignersPathFor) beside the CA
+// bundle, so the broker validates a launch's mount source against this
+// derivation, as it does the bundle's. A drift test cross-checks it agrees
+// with agenthost.AllowedSignersPathFor.
+func TrustedAllowedSignersPath(conversationID string) string {
+	return filepath.Join(RunSocketDir(conversationID), allowedSignersName)
+}
+
 // TrustedToolHostBinaryDestination is the fixed in-sandbox path the
 // compiled tool host is bind-mounted at, and the first element of the
 // native runtime's pinned argv. Its source is a fixed image path, validated
@@ -874,6 +889,22 @@ func validateWorktreeAndMounts(conversationID, workspaceKey, worktree string, mo
 			}
 			if realSource != realTrusted {
 				return fmt.Errorf("sandbox: mount %q source %q is not this run's own CA bundle (want %q)", m.Destination, m.Source, trusted)
+			}
+		case TrustedAllowedSignersDestination:
+			// Read-only for the same reason as the CA bundle: the jail would
+			// otherwise add a key of its own to make its own signature check
+			// pass. That check gates nothing, but it is the run's signer's
+			// to answer, not the run's.
+			if err := requireReadOnlyMount(m); err != nil {
+				return err
+			}
+			trusted := TrustedAllowedSignersPath(conversationID)
+			realTrusted, rErr := realPath(trusted)
+			if rErr != nil {
+				return fmt.Errorf("sandbox: resolve this run's allowed-signers file: %w", rErr)
+			}
+			if realSource != realTrusted {
+				return fmt.Errorf("sandbox: mount %q source %q is not this run's own allowed-signers file (want %q)", m.Destination, m.Source, trusted)
 			}
 		case TrustedSkillsDestination:
 			// This run's own step-skill staging dir (optional — present only on a

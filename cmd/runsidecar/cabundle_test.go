@@ -46,15 +46,16 @@ func TestRuntime_StartProxiesWritesTheCABundle(t *testing.T) {
 			}
 
 			written := map[string][]byte{}
-			origWrite, origStart := writeCABundle, startAgentHostSocket
+			origWrite, origSigners, origStart := writeCABundle, writeAllowedSigners, startAgentHostSocket
 			writeCABundle = func(conversationID string, pem []byte) error {
 				written[conversationID] = pem
 				return nil
 			}
+			writeAllowedSigners = func(string, []byte) error { return nil }
 			startAgentHostSocket = func(*agenthost.Server, string) (*agenthost.HostDaemon, sandbox.Mount, error) {
 				return nil, sandbox.Mount{}, nil
 			}
-			t.Cleanup(func() { writeCABundle, startAgentHostSocket = origWrite, origStart })
+			t.Cleanup(func() { writeCABundle, writeAllowedSigners, startAgentHostSocket = origWrite, origSigners, origStart })
 
 			var res sidecarproto.StartProxiesResult
 			if err := orch.Call(ctx, sidecarproto.KindStartProxies, sidecarproto.StartProxiesBody{

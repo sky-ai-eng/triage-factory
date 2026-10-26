@@ -22,6 +22,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -475,10 +476,15 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, conv
 	}
 
 	gh := &credbundle.GitHubCreds{Mode: credbundle.GitHubModeApp, BaseURL: base, RepoTokens: map[string]credbundle.RepoToken{}}
-	if id, ok := ghclient.OrgIdentityAccount(ctx, m.ghResolver, orgID); ok {
-		gh.IdentityName = id.Name
-		gh.IdentityEmail = id.Email
-		gh.IdentityAccountID = id.AccountID
+	id, err := m.commitIdentity(ctx, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve commit identity: %w", err)
+	}
+	gh.IdentityName, gh.IdentityEmail, gh.IdentityAccountID = id.Name, id.Email, id.AccountID
+	if id.Mode.Signs() {
+		// The public half only: the private key stays in the secret store,
+		// and a control pod signs with it when the run relays a digest.
+		gh.Signer = &credbundle.SignerCreds{Mode: string(id.Mode), PublicKey: id.PublicKey, PendingPublicKey: id.PendingPublicKey}
 	}
 
 	// nil permissions = inherit the App installation's full granted set,
@@ -544,6 +550,23 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, conv
 		}
 	}
 	return gh, nil
+}
+
+// commitIdentity is the identity the run's commits are authored and committed
+// as, and how they are signed (commitsigner.Resolver): the org's signer when
+// it has one, else the App's bot or the PAT's owner. A signer that cannot be
+// read fails the seal rather than sealing the identity the signer would have
+// replaced; the sweeps seal again. With no signer store wired it is the org's
+// GitHub identity, unsigned.
+func (m *Manager) commitIdentity(ctx context.Context, orgID string) (commitsigner.Identity, error) {
+	if m.stores.OrgCommitSigners == nil {
+		id := commitsigner.Identity{Mode: domain.CommitSigningNone}
+		if org, ok := ghclient.OrgIdentityAccount(ctx, m.ghResolver, orgID); ok {
+			id.Name, id.Email, id.AccountID = org.Name, org.Email, org.AccountID
+		}
+		return id, nil
+	}
+	return commitsigner.Resolver{Signers: m.stores.OrgCommitSigners, GitHub: m.ghResolver}.Resolve(ctx, orgID)
 }
 
 // cliChannelScope picks the single owner the real-gh channel's team-set token

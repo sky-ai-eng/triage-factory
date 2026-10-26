@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -414,5 +415,85 @@ func TestGitPushRecorder_NamesTheTipsSigner(t *testing.T) {
 	}
 	if counted["true"] != 1 || counted["false"] != 2 {
 		t.Errorf("tf_commit_signing_pushes_total = %v, want 1 signed and 2 unsigned", counted)
+	}
+}
+
+// An executor cannot read the org's signer, so a multi-mode push is counted
+// as a signing org's by the signer the run's sealed bundle named, as its
+// sidecar reported it; a run whose bundle named none is not counted. The
+// audit row's signer falls back to the account id the signature names.
+func TestGitPushRecorder_CountsAMultiRunsPushesByItsSealedSigner(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	stores, conn, conversationID := newRecorderStoresConn(t)
+	ctx := context.Background()
+	const signedTip, unsignedTip = "3333333333333333333333333333333333333333", "4444444444444444444444444444444444444444"
+	claimID := dbtest.SeedActiveClaim(t, conn, conversationID, "executor-1", 1)
+	at := time.Now().UTC()
+	if _, err := stores.CommitSignatures.InsertSystem(ctx, domain.CommitSignature{
+		OrgID: runmode.LocalDefaultOrgID, ConversationID: conversationID, ClaimID: claimID, BootEpoch: 1,
+		Signer: domain.CommitSigningOrg, SignerHost: "https://github.com", SignerUserID: 583231,
+		PublicKey: "ssh-ed25519 AAAAkey", Digest: "ab", State: domain.CommitSignatureSigned,
+		Signature: "sig", SignedAt: &at, CommitSHA: signedTip,
+	}); err != nil {
+		t.Fatalf("InsertSystem: %v", err)
+	}
+
+	for _, c := range []struct {
+		sealed domain.CommitSigningMode
+		want   map[string]int64
+	}{
+		{domain.CommitSigningOrg, map[string]int64{"true": 1, "false": 1}},
+		{"", map[string]int64{}},
+	} {
+		t.Run("sealed "+string(c.sealed), func(t *testing.T) {
+			reader := sdkmetric.NewManualReader()
+			commitsigner.SetMeterProviderForTest(t, sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+
+			info := recorderInfo(conversationID)
+			host := agenthost.NewLocal(stores, info)
+			host.SetSealedCommitSigner(c.sealed)
+			rec := gitPushRecorder(host, info)
+			rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/signed-" + string(c.sealed), NewSHA: signedTip, Created: true, Status: 200})
+			rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/unsigned-" + string(c.sealed), NewSHA: unsignedTip, Created: true, Status: 200})
+
+			var rm metricdata.ResourceMetrics
+			if err := reader.Collect(ctx, &rm); err != nil {
+				t.Fatalf("collect: %v", err)
+			}
+			counted := map[string]int64{}
+			for _, sm := range rm.ScopeMetrics {
+				for _, m := range sm.Metrics {
+					if m.Name != "commit_signing.pushes" {
+						continue
+					}
+					for _, dp := range m.Data.(metricdata.Sum[int64]).DataPoints {
+						signed, _ := dp.Attributes.Value("signed")
+						counted[signed.AsString()] += dp.Value
+					}
+				}
+			}
+			if !reflect.DeepEqual(counted, c.want) {
+				t.Errorf("tf_commit_signing_pushes_total = %v, want %v", counted, c.want)
+			}
+		})
+	}
+
+	acts, _, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchPushed})
+	if err != nil {
+		t.Fatalf("ListByOrgSystem: %v", err)
+	}
+	for _, a := range acts {
+		if !strings.HasPrefix(a.ExternalID, "refs/heads/signed") {
+			continue
+		}
+		var d struct {
+			Signer string `json:"signer"`
+		}
+		if err := json.Unmarshal([]byte(a.DetailJSON), &d); err != nil {
+			t.Fatalf("detail_json %q: %v", a.DetailJSON, err)
+		}
+		if d.Signer != "583231" {
+			t.Errorf("%s detail signer = %q, want the signing account's id", a.ExternalID, d.Signer)
+		}
 	}
 }

@@ -46,3 +46,12 @@ func CABundlePathFor(_ string) string { return "" }
 func WriteCABundle(_ string, _ []byte, _ int) error {
 	return errors.New("agenthost: the jail's CA bundle is not supported on this platform")
 }
+
+// AllowedSignersPathFor returns "" on non-Linux (the sandbox path is
+// Linux-only).
+func AllowedSignersPathFor(_ string) string { return "" }
+
+// WriteAllowedSigners is unsupported off Linux.
+func WriteAllowedSigners(_ string, _ []byte, _ int) error {
+	return errors.New("agenthost: the jail's allowed-signers file is not supported on this platform")
+}

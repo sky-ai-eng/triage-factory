@@ -841,41 +841,45 @@ func RunCommitSignatureQueueConformance(t *testing.T, mk CommitSignatureQueueFac
 		if _, err := f.Signatures.SignSystem(ctx, f.OrgID, row.ID, "pod-a", signerKeyB, armored, signedAt); !errors.Is(err, db.ErrNoSuchCommitSignature) {
 			t.Errorf("signing a signed row again = %v, want ErrNoSuchCommitSignature", err)
 		}
-		if _, err := f.Signatures.RefuseSystem(ctx, f.OrgID, row.ID, "pod-a", "claim_budget", 0); !errors.Is(err, db.ErrNoSuchCommitSignature) {
+		if _, err := f.Signatures.RefuseSystem(ctx, f.OrgID, row.ID, "pod-a", db.CommitSignatureRefusal{Reason: "claim_budget", Limit: 5000}); !errors.Is(err, db.ErrNoSuchCommitSignature) {
 			t.Errorf("refusing a signed row = %v, want ErrNoSuchCommitSignature", err)
 		}
 	})
 
 	t.Run("only_the_claiming_pod_refuses", func(t *testing.T) {
 		f := mk(t)
+		minuteRefusal := db.CommitSignatureRefusal{Reason: "org_minute_budget", RetryAfterSeconds: 12, Limit: 600}
 		conversationID, claimID := f.Claim(t, time.Now(), false)
 		row := request(t, f, conversationID, claimID)
 
-		if _, err := f.Signatures.RefuseSystem(ctx, f.OrgID, row.ID, "pod-a", "org_minute_budget", 12); !errors.Is(err, db.ErrNoSuchCommitSignature) {
+		if _, err := f.Signatures.RefuseSystem(ctx, f.OrgID, row.ID, "pod-a", minuteRefusal); !errors.Is(err, db.ErrNoSuchCommitSignature) {
 			t.Errorf("RefuseSystem on an unclaimed request = %v, want ErrNoSuchCommitSignature", err)
 		}
 		if _, err := f.Signatures.ClaimRequestSystem(ctx, f.OrgID, row.ID, "pod-a"); err != nil {
 			t.Fatalf("ClaimRequestSystem: %v", err)
 		}
-		if _, err := f.Signatures.RefuseSystem(ctx, f.OrgID, row.ID, "pod-b", "org_minute_budget", 12); !errors.Is(err, db.ErrNoSuchCommitSignature) {
+		if _, err := f.Signatures.RefuseSystem(ctx, f.OrgID, row.ID, "pod-b", minuteRefusal); !errors.Is(err, db.ErrNoSuchCommitSignature) {
 			t.Errorf("RefuseSystem by another pod = %v, want ErrNoSuchCommitSignature", err)
 		}
-		if _, err := f.Signatures.RefuseSystem(ctx, f.OrgID, row.ID, "pod-a", "", 0); !errors.Is(err, db.ErrInvalidCommitSignature) {
+		if _, err := f.Signatures.RefuseSystem(ctx, f.OrgID, row.ID, "pod-a", db.CommitSignatureRefusal{}); !errors.Is(err, db.ErrInvalidCommitSignature) {
 			t.Errorf("RefuseSystem with no reason = %v, want ErrInvalidCommitSignature", err)
 		}
-		if _, err := f.Signatures.RefuseSystem(ctx, f.OrgID, row.ID, "pod-a", "org_minute_budget", -1); !errors.Is(err, db.ErrInvalidCommitSignature) {
+		if _, err := f.Signatures.RefuseSystem(ctx, f.OrgID, row.ID, "pod-a", db.CommitSignatureRefusal{Reason: "org_minute_budget", RetryAfterSeconds: -1, Limit: 600}); !errors.Is(err, db.ErrInvalidCommitSignature) {
 			t.Errorf("RefuseSystem with a negative wait = %v, want ErrInvalidCommitSignature", err)
 		}
+		if _, err := f.Signatures.RefuseSystem(ctx, f.OrgID, row.ID, "pod-a", db.CommitSignatureRefusal{Reason: "claim_budget", Limit: -1}); !errors.Is(err, db.ErrInvalidCommitSignature) {
+			t.Errorf("RefuseSystem with a negative limit = %v, want ErrInvalidCommitSignature", err)
+		}
 
-		got, err := f.Signatures.RefuseSystem(ctx, f.OrgID, row.ID, "pod-a", "org_minute_budget", 12)
+		got, err := f.Signatures.RefuseSystem(ctx, f.OrgID, row.ID, "pod-a", minuteRefusal)
 		if err != nil {
 			t.Fatalf("RefuseSystem: %v", err)
 		}
 		AssertWriteReturnedStoredRow(t, "RefuseSystem", got, func() (*domain.CommitSignature, error) {
 			return f.Signatures.GetSystem(ctx, f.OrgID, row.ID)
 		})
-		if got.State != domain.CommitSignatureRefused || got.RefusalReason != "org_minute_budget" || got.RetryAfterSeconds != 12 {
-			t.Errorf("refused row = %+v, want refused for org_minute_budget, retry in 12s", got)
+		if got.State != domain.CommitSignatureRefused || got.RefusalReason != "org_minute_budget" || got.RetryAfterSeconds != 12 || got.RefusalLimit != 600 {
+			t.Errorf("refused row = %+v, want refused for org_minute_budget at its limit of 600, retry in 12s", got)
 		}
 		if got.PublicKey != "" || got.Signature != "" || got.SignedAt != nil {
 			t.Errorf("refused row = %+v, want nothing signed", got)
@@ -888,12 +892,30 @@ func RunCommitSignatureQueueConformance(t *testing.T, mk CommitSignatureQueueFac
 		if _, err := f.Signatures.ClaimRequestSystem(ctx, f.OrgID, other.ID, "pod-a"); err != nil {
 			t.Fatalf("ClaimRequestSystem (other): %v", err)
 		}
-		plain, err := f.Signatures.RefuseSystem(ctx, f.OrgID, other.ID, "pod-a", "claim_inactive", 0)
+		plain, err := f.Signatures.RefuseSystem(ctx, f.OrgID, other.ID, "pod-a", db.CommitSignatureRefusal{Reason: "claim_inactive"})
 		if err != nil {
 			t.Fatalf("RefuseSystem (no wait): %v", err)
 		}
-		if plain.RetryAfterSeconds != 0 {
-			t.Errorf("a refusal with no wait stored retry_after %d, want 0", plain.RetryAfterSeconds)
+		if plain.RetryAfterSeconds != 0 || plain.RefusalLimit != 0 || plain.SignerStatus != "" || plain.SignerStatusReason != "" {
+			t.Errorf("a refusal with no wait, limit or signer status stored retry_after %d, limit %d, status (%q, %q); want none",
+				plain.RetryAfterSeconds, plain.RefusalLimit, plain.SignerStatus, plain.SignerStatusReason)
+		}
+
+		inactive := request(t, f, conversationID, claimID)
+		if _, err := f.Signatures.ClaimRequestSystem(ctx, f.OrgID, inactive.ID, "pod-a"); err != nil {
+			t.Fatalf("ClaimRequestSystem (inactive): %v", err)
+		}
+		broken, err := f.Signatures.RefuseSystem(ctx, f.OrgID, inactive.ID, "pod-a", db.CommitSignatureRefusal{
+			Reason: "signer_inactive", SignerStatus: domain.CommitSignerBroken, SignerStatusReason: "key_missing",
+		})
+		if err != nil {
+			t.Fatalf("RefuseSystem (signer inactive): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "RefuseSystem (signer inactive)", broken, func() (*domain.CommitSignature, error) {
+			return f.Signatures.GetSystem(ctx, f.OrgID, inactive.ID)
+		})
+		if broken.SignerStatus != domain.CommitSignerBroken || broken.SignerStatusReason != "key_missing" {
+			t.Errorf("signer-inactive refusal stored status (%q, %q), want (broken, key_missing)", broken.SignerStatus, broken.SignerStatusReason)
 		}
 	})
 
