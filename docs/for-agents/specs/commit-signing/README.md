@@ -324,10 +324,10 @@ sandbox on, and in-process with it off:
 6. Record the commit id on the signature's row (§5.3).
 
 The SSH signature format (`SSHSIG`, armored as `BEGIN SSH SIGNATURE`) is not
-in `x/crypto`. TF implements it: the signed data is the `SSHSIG` magic, the
-namespace (`git`), an empty reserved field, the hash algorithm (`sha512`) and
-the digest. Its test signs with TF's implementation and verifies with
-`ssh-keygen -Y verify`.
+in `x/crypto`. TF implements it in `internal/commitsign`: the signed data is
+the `SSHSIG` magic, the namespace (`git`), an empty reserved field, the hash
+algorithm (`sha512`) and the digest. Its test signs with TF's implementation
+and verifies with `ssh-keygen -Y verify`.
 
 ### 4.4 Where the keys are
 
