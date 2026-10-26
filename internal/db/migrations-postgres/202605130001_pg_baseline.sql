@@ -5816,6 +5816,69 @@ REVOKE ALL ON public.org_event_sources FROM anon, authenticated, service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_event_sources TO tf_app;
 
 
+-- org_commit_signers: the GitHub user account an org's agent commits are
+-- authored, committed and signed as, one row per org. The key pair is TF's:
+-- public_key is the half the admin adds to the account as a signing key, and
+-- the private half is the org secret github_commit_signing_key, never a
+-- column. pending_public_key is a rotation's new key, NULL outside one.
+--
+-- The account is identified by github_user_id; login and name are display
+-- values nothing keys on. host is the GitHub the account is on, the org's host
+-- at registration. Nothing is unique on the account: two orgs may register the
+-- same one, each with its own key, and each row's health is its own key's.
+--
+-- email_override NULL means commits use the derived noreply address, which
+-- exists only on github.com, so a signer on any other host needs one. status
+-- ('pending' | 'active' | 'broken') and status_reason (GitHub's verification
+-- reason, or 'key_missing') are app-validated, like the other vocabulary
+-- columns. created_by carries an FK so a departed admin's deletion nulls it
+-- rather than taking the signer with it.
+CREATE TABLE public.org_commit_signers (
+    org_id             uuid NOT NULL,
+    host               text NOT NULL,
+    github_user_id     bigint NOT NULL,
+    login              text NOT NULL,
+    name               text,
+    email_override     text,
+    public_key         text NOT NULL,
+    pending_public_key text,
+    status             text DEFAULT 'pending'::text NOT NULL,
+    status_reason      text,
+    status_since       timestamp with time zone DEFAULT now() NOT NULL,
+    checked_at         timestamp with time zone,
+    created_at         timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at         timestamp with time zone DEFAULT now() NOT NULL,
+    created_by         uuid,
+    CONSTRAINT org_commit_signers_host_check CHECK (host <> '')
+);
+
+ALTER TABLE ONLY public.org_commit_signers
+    ADD CONSTRAINT org_commit_signers_pkey PRIMARY KEY (org_id);
+
+ALTER TABLE ONLY public.org_commit_signers
+    ADD CONSTRAINT org_commit_signers_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.org_commit_signers
+    ADD CONSTRAINT org_commit_signers_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.users(id) ON DELETE SET NULL;
+
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.org_commit_signers FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+
+ALTER TABLE public.org_commit_signers ENABLE ROW LEVEL SECURITY;
+
+-- Member SELECT, admin write — the org_event_sources split. A member reads it
+-- to see who the org's commits are authored as; registering, verifying,
+-- rotating and removing a signer are org-admin acts.
+CREATE POLICY org_commit_signers_select ON public.org_commit_signers FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+CREATE POLICY org_commit_signers_insert ON public.org_commit_signers FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+CREATE POLICY org_commit_signers_update ON public.org_commit_signers FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+CREATE POLICY org_commit_signers_delete ON public.org_commit_signers FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+
+REVOKE ALL ON public.org_commit_signers FROM PUBLIC;
+REVOKE ALL ON public.org_commit_signers FROM anon, authenticated, service_role;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_commit_signers TO tf_app;
+
+
 -- rate_limit_readings: the latest reading of every rate-limit bucket an org's
 -- credentials are metered on, keyed (upstream, credential, bucket) within the
 -- org. Each serving pod keeps its readings in memory and writes the ones that
@@ -6296,6 +6359,85 @@ REVOKE ALL ON public.claim_credentials FROM anon, authenticated, service_role;
 -- The executor polls for the bundle sealed to its pubkey and deletes the row
 -- at teardown. No INSERT: only the brain provisions, on its own admin pool.
 GRANT SELECT, DELETE ON TABLE public.claim_credentials TO tf_system;
+
+
+-- commit_signatures: one row per commit signature an agent's git asked for. In
+-- multi mode it is the queue the control pods sign from ('requested' →
+-- 'signing' → 'signed' | 'refused'); in both modes it is the signing log, and
+-- the signing budgets are counts over it, so no counter is stored. Local mode
+-- records a signature already made, so its rows start 'signed'.
+--
+-- conversation_id and claim_id name the run and the engagement that asked;
+-- both null on the conversation's purge, so the log outlives it. signer is
+-- 'org' | 'deployment' and, with signer_host and signer_user_id, names the
+-- account that signs; grouping on (signer_host, signer_user_id) totals one
+-- account across every org that uses it. public_key is the key that signed,
+-- NULL until a signature is made, because each signature reads the signer's
+-- current key. digest is the hex SHA-512 of the commit payload, all the
+-- control plane ever sees of the commit. retry_after_seconds is set on a
+-- refusal by the org's per-minute budget: how long until it admits another.
+-- commit_sha is the commit id the signature produced; repository_id and
+-- pushed_at are stamped when a push lands that commit as a ref's new tip, and
+-- verification_reason / checked_at hold GitHub's answer for it. signer, state
+-- and refusal_reason are app-validated.
+CREATE TABLE public.commit_signatures (
+    id                  uuid DEFAULT gen_random_uuid() NOT NULL,
+    org_id              uuid NOT NULL,
+    conversation_id     uuid,
+    claim_id            uuid,
+    boot_epoch          bigint NOT NULL,
+    signer              text NOT NULL,
+    signer_host         text NOT NULL,
+    signer_user_id      bigint NOT NULL,
+    public_key          text,
+    digest              text NOT NULL,
+    state               text NOT NULL,
+    refusal_reason      text,
+    retry_after_seconds integer,
+    signature           text,
+    claimed_by          text,
+    signed_at           timestamp with time zone,
+    commit_sha          text,
+    repository_id       uuid,
+    pushed_at           timestamp with time zone,
+    verification_reason text,
+    checked_at          timestamp with time zone,
+    created_at          timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT commit_signatures_signer_host_check CHECK (signer_host <> '')
+);
+
+ALTER TABLE ONLY public.commit_signatures
+    ADD CONSTRAINT commit_signatures_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.commit_signatures
+    ADD CONSTRAINT commit_signatures_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.commit_signatures
+    ADD CONSTRAINT commit_signatures_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id) ON DELETE SET NULL;
+ALTER TABLE ONLY public.commit_signatures
+    ADD CONSTRAINT commit_signatures_claim_id_fkey FOREIGN KEY (claim_id) REFERENCES public.claims(id) ON DELETE SET NULL;
+ALTER TABLE ONLY public.commit_signatures
+    ADD CONSTRAINT commit_signatures_repository_id_fkey FOREIGN KEY (repository_id) REFERENCES public.repositories(id) ON DELETE SET NULL;
+
+-- The two signing budgets: an org's signatures in the last minute, and one
+-- claim's in total.
+CREATE INDEX commit_signatures_org_signed_idx ON public.commit_signatures USING btree (org_id, signed_at) WHERE (state = 'signed'::text);
+CREATE INDEX commit_signatures_claim_signed_idx ON public.commit_signatures USING btree (claim_id) WHERE (state = 'signed'::text);
+
+ALTER TABLE public.commit_signatures ENABLE ROW LEVEL SECURITY;
+
+-- Member SELECT and no app-pool write: every writer is a run's daemon, its
+-- orchestrator or a control pod, none of them acting for a signed-in user.
+CREATE POLICY commit_signatures_select ON public.commit_signatures FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+REVOKE ALL ON public.commit_signatures FROM PUBLIC;
+REVOKE ALL ON public.commit_signatures FROM anon, authenticated, service_role;
+
+GRANT SELECT ON TABLE public.commit_signatures TO tf_app;
+-- The executor's orchestrator records a run's request and, once the daemon has
+-- computed it, the commit id, and stamps the commit a push landed. Claiming a
+-- request and storing its signature or refusal are control-pod writes.
+GRANT SELECT, INSERT ON TABLE public.commit_signatures TO tf_system;
+GRANT UPDATE (commit_sha, repository_id, pushed_at) ON TABLE public.commit_signatures TO tf_system;
 
 
 -- conversation_permissions: the durable record of every tool-approval prompt a

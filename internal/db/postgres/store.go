@@ -442,6 +442,15 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// background prober would be the automatic re-probing this design
 		// refuses — so there is no admin-pool arm to give it.
 		ModelAvailability: newModelAvailabilityStore(app),
+		// OrgCommitSigners is split-pool: the settings routes read and write
+		// through the app pool under RLS (member SELECT, admin write), and
+		// GetSystem runs on the admin pool for the identity resolution that
+		// carries no request claims.
+		OrgCommitSigners: newOrgCommitSignerStore(app, admin),
+		// CommitSignatures is admin-pool only: its writers are a run's
+		// daemon, its orchestrator and the control pods, none of them acting
+		// for a signed-in user.
+		CommitSignatures: newCommitSignatureStore(admin),
 		// PollReadiness is admin-pool only: callers already hold an
 		// authorized orgID (session claims or system context) by the time
 		// they reach it, same admin-only shape as Instances. Org-scoped
@@ -561,6 +570,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		OrgEventSources:          newOrgEventSourceStore(tx, tx),
 		RateLimitReadings:        newRateLimitReadingStore(tx, tx),
 		ModelAvailability:        newModelAvailabilityStore(tx),
+		OrgCommitSigners:         newOrgCommitSignerStore(tx, tx),
 		Ext:                      db.BuildStoreExtensions("postgres", tx, tx),
 	}
 }

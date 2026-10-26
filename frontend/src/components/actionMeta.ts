@@ -320,6 +320,15 @@ export const ACTION_META: Record<string, ActionMeta> = {
     text: 'text-ink-3',
     tone: 'attention',
   },
+  // The signing gate's refusal, on the same shield and tone as the gates
+  // above: a run asking to sign as someone other than its signer, a run past
+  // its signing budget, or a request from an engagement that has ended.
+  commit_sign_denied: {
+    icon: ShieldBan,
+    label: 'Commit signing refused',
+    text: 'text-ink-3',
+    tone: 'attention',
+  },
   // Its GraphQL sibling. Separate because the two rows know different things —
   // this one's details carry the mutation names rather than a path — and
   // because a conversation whose unnamed writes are all GraphQL is a different signal

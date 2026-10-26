@@ -175,6 +175,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		OrgEventSources:          newOrgEventSourceStore(tx),
 		RateLimitReadings:        newRateLimitReadingStore(tx),
 		ModelAvailability:        newModelAvailabilityStore(tx),
+		OrgCommitSigners:         newOrgCommitSignerStore(tx),
 		Ext:                      db.BuildStoreExtensions(db.DialectSQLite, tx, tx),
 	}
 }

@@ -493,6 +493,19 @@ type Stores struct {
 	// give an admin-pool arm to.
 	ModelAvailability ModelAvailabilityStore
 
+	// OrgCommitSigners owns the org_commit_signers table — the GitHub user
+	// account an org's agent commits are authored, committed and signed as.
+	// Split-pool in Postgres: member-readable / admin-writable through the
+	// app pool under RLS, with a ...System read on the admin pool for the
+	// identity resolution that runs without request claims.
+	OrgCommitSigners OrgCommitSignerStore
+
+	// CommitSignatures owns the commit_signatures table — the signing log in
+	// both modes, the control-plane signing queue in multi mode, and what the
+	// signing budgets count. Admin-pool only in Postgres: no writer acts for
+	// a signed-in user.
+	CommitSignatures CommitSignatureStore
+
 	// PollReadiness owns the poll_readiness table — the org-scoped
 	// readiness gate for /api/jira/stock and the one-shot "config took
 	// effect" announce toast (TFAC-583). Admin-pool-only, same shape as
@@ -597,6 +610,7 @@ type TxStores struct {
 	OrgEventSources          OrgEventSourceStore
 	RateLimitReadings        RateLimitReadingStore
 	ModelAvailability        ModelAvailabilityStore
+	OrgCommitSigners         OrgCommitSignerStore
 
 	// Ext carries opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go), tx-bound to the same

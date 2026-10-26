@@ -45,6 +45,8 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		// access_change_log: low-volume audit log of governance actions
 		// (membership/role grants/changes/revokes, credential bind/rotate). TFAC-471.
 		"access_change_log",
+		// The org's commit signer and the signing log its budgets count over.
+		"org_commit_signers", "commit_signatures",
 	}
 	for _, table := range expectedTables {
 		var n int
@@ -3241,7 +3243,8 @@ func TestTeamGitHubRepos_CrossTenantRowIsUnrepresentable(t *testing.T) {
 }
 
 // TestBaseline_HostAndScopeRefuseEmpty pins the CHECKs that keep a repository's
-// host and an artifact's or audit row's scope from being the empty string. Every
+// or a commit signer's host and an artifact's or audit row's scope from being
+// the empty string. Every
 // read addresses these rows by a host or scope, and none asks for "", so an
 // empty one is a row nothing can find. The stores refuse it before writing;
 // these hold for a write that goes around them.
@@ -3275,6 +3278,20 @@ func TestBaseline_HostAndScopeRefuseEmpty(t *testing.T) {
 			insert: `INSERT INTO external_actions (org_id, provider, scope, action, target, credential, dedup_key)
 			         VALUES ($1, 'github', $2, 'comment', 'acme/api#1', 'github_app', $3)`,
 			args: func(v string) []any { return []any{orgID, v, "comment:" + v} },
+		},
+		{
+			name:       "org_commit_signers.host",
+			constraint: "org_commit_signers_host_check",
+			insert: `INSERT INTO org_commit_signers (org_id, host, github_user_id, login, public_key)
+			         VALUES ($1, $2, 583231, 'octocat', 'ssh-ed25519 AAAA')`,
+			args: func(v string) []any { return []any{orgID, v} },
+		},
+		{
+			name:       "commit_signatures.signer_host",
+			constraint: "commit_signatures_signer_host_check",
+			insert: `INSERT INTO commit_signatures (org_id, boot_epoch, signer, signer_host, signer_user_id, digest, state)
+			         VALUES ($1, 1, 'org', $2, 583231, 'ab', 'requested')`,
+			args: func(v string) []any { return []any{orgID, v} },
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

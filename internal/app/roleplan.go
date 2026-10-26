@@ -76,6 +76,12 @@ type subsystemPlan struct {
 	// absence is the executor/control split.
 	dispatcher bool
 
+	// signsCommits marks the roles where commit signatures are made: the
+	// local process for its own runs, and in multi mode every control pod,
+	// whichever one holds the brain lease. An executor never holds a signing
+	// key, so the signing budgets are read on these roles and nowhere else.
+	signsCommits bool
+
 	// executorHealthz starts the localhost-only executor healthz listener.
 	// executor only: control + all already expose /api/health and /readyz
 	// on the main HTTP port, so a second listener would be redundant there.
@@ -87,14 +93,15 @@ type subsystemPlan struct {
 // The derivations, stated positively for the reader:
 //   - all      = everything — local mode's single-process shape (the only
 //     place all still boots; multi rejects it at role resolution).
-//   - control  = serve HTTP + brain, but NO run dispatcher.
-//   - executor = run dispatcher + healthz, but NO HTTP, NO brain.
+//   - control  = serve HTTP + brain + commit signing, but NO run dispatcher.
+//   - executor = run dispatcher + healthz, but NO HTTP, NO brain, NO signing.
 func planForRole(role runmode.DeployRole) subsystemPlan {
 	return subsystemPlan{
 		role:            role,
 		serveHTTP:       role == runmode.RoleAll || role == runmode.RoleControl,
 		brain:           role == runmode.RoleAll || role == runmode.RoleControl,
 		dispatcher:      role == runmode.RoleAll || role == runmode.RoleExecutor,
+		signsCommits:    role == runmode.RoleAll || role == runmode.RoleControl,
 		executorHealthz: role == runmode.RoleExecutor,
 	}
 }

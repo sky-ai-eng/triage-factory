@@ -148,6 +148,16 @@ const (
 	KeyAWSExternalID = "aws_external_id"
 )
 
+// The org's commit-signing keys: the OpenSSH private half of the key its
+// signer signs with, and, during a rotation, of the key that replaces it once
+// Verify finds it on the account. Their companion row is org_commit_signers,
+// whose own routes write and remove them, so like the org secrets above they
+// are swept only by AllLocalSweepKeys.
+const (
+	KeyGitHubCommitSigningKey        = "github_commit_signing_key"
+	KeyGitHubCommitSigningKeyPending = "github_commit_signing_key_pending"
+)
+
 // BedrockKeys returns every Bedrock-related secret key the connect flow
 // manages: both auth methods' credentials plus the non-secret config
 // riding the same vault. One list so the write path (replace/clear), the
@@ -184,10 +194,11 @@ func AllKeys() []string {
 // AllLocalSweepKeys returns every STATIC keychain key a full local uninstall /
 // clean-slate must remove: the per-org integration set (AllKeys) plus the
 // org-level secrets that share the keychain but aren't integration credentials
-// (the Anthropic API key, the Atlassian OAuth client secret). It is a SUPERSET
-// of AllKeys, used only by the full-wipe paths (cmd/uninstall, clean-slate.sh)
-// — never by the per-org integrations.Clear, which can't reconcile those keys'
-// companion DB refs (see the KeyAnthropicAPIKey/KeyJiraOAuthClientSecret note).
+// (the Anthropic API key, the Atlassian OAuth client secret, the Bedrock set,
+// the commit-signing keys). It is a SUPERSET of AllKeys, used only by the
+// full-wipe paths (cmd/uninstall, clean-slate.sh) — never by the per-org
+// integrations.Clear, which can't reconcile those keys' companion DB refs (see
+// the KeyAnthropicAPIKey/KeyJiraOAuthClientSecret note).
 //
 // Dynamic per-GitHub-App keys (github_app_<id>_{pem,client_secret,webhook_secret})
 // can't live in a static list; uninstall enumerates configured App ids from
@@ -195,7 +206,9 @@ func AllKeys() []string {
 // sweeping. Keep scripts/clean-slate.sh's hardcoded keychain list in sync with
 // this function.
 func AllLocalSweepKeys() []string {
-	return append(append(AllKeys(), KeyAnthropicAPIKey, KeyJiraOAuthClientSecret, KeyLinearOAuthClientSecret), BedrockKeys()...)
+	keys := append(AllKeys(), KeyAnthropicAPIKey, KeyJiraOAuthClientSecret, KeyLinearOAuthClientSecret)
+	keys = append(keys, BedrockKeys()...)
+	return append(keys, KeyGitHubCommitSigningKey, KeyGitHubCommitSigningKeyPending)
 }
 
 // GitHubAppKeyset is the trio of keychain/vault keys one registered GitHub App

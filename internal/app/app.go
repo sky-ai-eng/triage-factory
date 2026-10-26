@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/credprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -87,6 +89,16 @@ type App struct {
 	database *sql.DB
 	appDB    *sql.DB
 	stores   db.Stores
+
+	// commitSigningBudgets are the limits on how many commit signatures one
+	// org and one claim are given, read at boot on the roles that sign
+	// (plan.signsCommits) so a bad value refuses the boot instead of the
+	// first signature.
+	// TODO(TFAC-1195): the control-plane signer enforces them on every
+	// control pod.
+	// TODO(TFAC-1196): the local signing daemon enforces them on every local
+	// signature.
+	commitSigningBudgets commitsigner.Budgets
 
 	// capBroker is the spawned cap-broker subprocess, non-nil only on a host
 	// that sandboxes runs (multi mode + Linux). nil otherwise — local mode
@@ -305,6 +317,13 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	// before anything acquires a lock or opens a pool.
 	if err = checkModelCatalog(cfg.Version, errors.Join(modelcatalog.JoinError(), modelcatalog.SDKLoadError())); err != nil {
 		return nil, err
+	}
+	if a.plan.signsCommits {
+		if a.commitSigningBudgets, err = commitsigner.ParseBudgets(os.Getenv); err != nil {
+			return nil, fmt.Errorf("commit signing budgets: %w", err)
+		}
+		appLog.Info("commit signing budgets",
+			"per_org_minute", a.commitSigningBudgets.PerOrgMinute, "per_claim", a.commitSigningBudgets.PerClaim)
 	}
 
 	// Install the OTel meter provider before anything downstream constructs

@@ -11,12 +11,12 @@ import (
 // here.
 func TestPlanForRole_Positive(t *testing.T) {
 	cases := []struct {
-		role                                      runmode.DeployRole
-		serveHTTP, brain, dispatcher, execHealthz bool
+		role                                                    runmode.DeployRole
+		serveHTTP, brain, dispatcher, signsCommits, execHealthz bool
 	}{
-		{runmode.RoleAll, true, true, true, false},
-		{runmode.RoleControl, true, true, false, false},
-		{runmode.RoleExecutor, false, false, true, true},
+		{runmode.RoleAll, true, true, true, true, false},
+		{runmode.RoleControl, true, true, false, true, false},
+		{runmode.RoleExecutor, false, false, true, false, true},
 	}
 	for _, tc := range cases {
 		p := planForRole(tc.role)
@@ -28,6 +28,9 @@ func TestPlanForRole_Positive(t *testing.T) {
 		}
 		if p.dispatcher != tc.dispatcher {
 			t.Errorf("%s: dispatcher = %v, want %v", tc.role, p.dispatcher, tc.dispatcher)
+		}
+		if p.signsCommits != tc.signsCommits {
+			t.Errorf("%s: signsCommits = %v, want %v", tc.role, p.signsCommits, tc.signsCommits)
 		}
 		if p.executorHealthz != tc.execHealthz {
 			t.Errorf("%s: executorHealthz = %v, want %v", tc.role, p.executorHealthz, tc.execHealthz)
@@ -64,6 +67,7 @@ func TestExecutorPlan_ExcludesEveryBrainAndHTTPSubsystem(t *testing.T) {
 		{"reachable-repo cache manager", p.brain},
 		{"marketplace-stats manager", p.brain},
 		{"poll-completion bus subscribers", p.brain},
+		{"commit signing", p.signsCommits},
 	}
 	for _, f := range forbidden {
 		if f.started {

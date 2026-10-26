@@ -14,10 +14,11 @@ echo "Cleaning Triage Factory local state..."
 # Keychain keys to sweep at the end. The static list mirrors
 # integrations.AllLocalSweepKeys() in internal/integrations/creds.go (the
 # canonical set `triagefactory uninstall` sweeps via auth.SweepKeychain) —
-# integration creds, the legacy github_username / jira_display_name keys, and the
-# org-level anthropic_api_key + jira_oauth_client_secret + linear_oauth_client_secret.
-# Drift between the two leaves stale entries after clean-slate (TFAC-405 was the
-# most recent miss).
+# integration creds, the legacy github_username / jira_display_name keys, the
+# org-level anthropic_api_key + jira_oauth_client_secret + linear_oauth_client_secret,
+# the Bedrock set, and the commit-signing keys. Drift between the two leaves stale
+# entries after clean-slate; integrations.TestCleanSlateSweepsEveryLocalKey fails
+# on it.
 # Per-GitHub-App keys (github_app_<id>_*) are dynamic, so we enumerate App ids
 # from the DB below — this MUST run before the DB is removed.
 keychain_keys=(
@@ -27,6 +28,8 @@ keychain_keys=(
   anthropic_api_key jira_oauth_client_secret linear_oauth_client_secret
   aws_access_key_id aws_secret_access_key aws_session_token aws_region
   aws_bearer_token_bedrock bedrock_model_id bedrock_base_url
+  aws_role_arn aws_external_id
+  github_commit_signing_key github_commit_signing_key_pending
 )
 
 # Enumerate per-App keys from org_github_apps before the DB is deleted. Needs
