@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -782,6 +783,11 @@ func (s *Server) handleCommitSignerPatch(w http.ResponseWriter, r *http.Request)
 // The public keys stay on the account until someone removes them there:
 // deleting one changes no commit GitHub has already verified.
 //
+// The PAT unbind and the App disconnect keep the org's GitHub host while a
+// signer exists, so when nothing else is connected on it, this removal is the
+// one that leaves the workspace with no GitHub, and it clears the host as they
+// would have. Either order of the two removals ends in the same state.
+//
 // DELETE /api/orgs/{org_id}/github/commit-signer
 func (s *Server) handleCommitSignerDelete(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
@@ -819,6 +825,9 @@ func (s *Server) handleCommitSignerDelete(w http.ResponseWriter, r *http.Request
 				return fmt.Errorf("delete %s: %w", key, err)
 			}
 		}
+		if err := clearGitHubHostIfUnheld(ctx, tx, orgID); err != nil {
+			return err
+		}
 		return tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
 			ActorUserID: userID,
 			Action:      domain.AccessActionCredentialRemoved,
@@ -836,6 +845,32 @@ func (s *Server) handleCommitSignerDelete(w http.ResponseWriter, r *http.Request
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// clearGitHubHostIfUnheld clears the org's GitHub host when no GitHub
+// credential is connected on it. The caller holds githubAppRegMu and has
+// already removed what it is removing in tx, so the read sees the org as the
+// write leaves it.
+func clearGitHubHostIfUnheld(ctx context.Context, tx db.TxStores, orgID string) error {
+	set, err := tx.Orgs.GetSettings(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("load org settings: %w", err)
+	}
+	host := db.EffectiveGitHubHost(set.GitHubBaseURL)
+	if host == "" {
+		return nil
+	}
+	connected, err := githubCredentialConnected(ctx, tx, orgID, host)
+	if err != nil {
+		return err
+	}
+	if connected != "" {
+		return nil
+	}
+	if _, err := tx.Orgs.SetSourceBaseURL(ctx, orgID, eventsource.KindGitHub, ""); err != nil {
+		return fmt.Errorf("clear github base url: %w", err)
+	}
+	return nil
 }
 
 // commitIdentityJSON is the identity an org's runs commit as, and how they
