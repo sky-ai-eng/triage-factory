@@ -419,9 +419,10 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	}
 	// The signer the sidecar configured the jail's git to sign as, read off
 	// the same bundle: the run's pushes are counted as a signing org's by it,
-	// since nothing on this side can read the org's signer.
+	// and the sidecar's signing refusals are recorded against it, since
+	// nothing on this side can read the org's signer.
 	sealedSigner := domain.CommitSigningMode(res.CommitSigner)
-	relaySrv.SetSealedCommitSigner(sealedSigner)
+	relaySrv.SetSealedCommitSigner(sealedSigner, res.IdentityAccountID)
 	if auditHost != nil {
 		auditHost.SetSealedCommitSigner(sealedSigner)
 	}

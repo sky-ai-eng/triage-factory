@@ -71,6 +71,11 @@ type RelayServer struct {
 	// plane. nil until SetCommitSigning; sign_digest is refused without it.
 	signing *CommitSigning
 
+	// sealed is the signer the sidecar reported at bring-up, from the bundle
+	// it holds: what the run's signing refusals are recorded against. Zero
+	// until SetSealedCommitSigner, and for a run that does not sign.
+	sealed sealedSigner
+
 	// engagement is the trace context of the engagement that built this
 	// server, captured once at bring-up (SetEngagementSpanContext). It is how
 	// a relayed op — which arrives long after the setup span ended, over a
@@ -106,11 +111,22 @@ type CommitSigning struct {
 // in place before git can ask for a signature.
 func (s *RelayServer) SetCommitSigning(cs CommitSigning) { s.signing = &cs }
 
+// sealedSigner is the signer a run's sealed bundle named: its kind and the
+// GitHub account id, in text, its identity carries.
+type sealedSigner struct {
+	mode      domain.CommitSigningMode
+	accountID string
+}
+
 // SetSealedCommitSigner records the signer the run's sealed bundle named, as
-// the sidecar reported it at bring-up ("" for a run that does not sign), for
-// the pushes recorded through this server: an executor cannot read the org's
-// signer (LocalClient.SetSealedCommitSigner).
-func (s *RelayServer) SetSealedCommitSigner(mode domain.CommitSigningMode) {
+// the sidecar reported it at bring-up (mode "" for a run that does not sign),
+// and the account id of the identity it signs as. An executor cannot read the
+// org's signer, so the pushes recorded through this server count by it
+// (LocalClient.SetSealedCommitSigner) and the sidecar's signing refusals are
+// recorded against it. Reported before the agent ran, it is not something a
+// sidecar can change after reading the agent's output.
+func (s *RelayServer) SetSealedCommitSigner(mode domain.CommitSigningMode, accountID string) {
+	s.sealed = sealedSigner{mode: mode, accountID: accountID}
 	s.rt.sealedSigner = mode
 	s.audit.SetSealedCommitSigner(mode)
 }

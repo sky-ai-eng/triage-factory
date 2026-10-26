@@ -187,20 +187,18 @@ func (r *relayRuntime) signCommit(ctx context.Context, signer commitsigner.Ident
 		return unanswered
 	}
 
-	res, err := commitsigner.CheckCommit(payload, signer)
+	res, ok, err := commitsigner.CheckCommit(payload, signer)
 	if err != nil {
 		agenthostLog.Warn("could not read the commit git asked to have signed; answering it unanswered",
 			"conversation", r.info.ConversationID, "error", err)
 		return unanswered
 	}
-	if res.Outcome != "" {
+	if !ok {
 		// The orchestrator counts the refusal and, for a committer mismatch,
 		// writes its commit_sign_denied row: this process has no database
 		// and no metrics.
 		r.conn.record(agentproc.RelayNamespaceCore, agentproc.OpRecordSignRefusal, agentproc.RecordSignRefusalArgs{
 			Reason:         string(res.Refusal),
-			Signer:         string(signer.Mode),
-			SignerUserID:   accountID,
 			CommitterName:  res.Committer.Name,
 			CommitterEmail: res.Committer.Email,
 		})
@@ -281,16 +279,20 @@ func (s *RelayServer) recordCommitSHA(ctx context.Context, a agentproc.RecordCom
 	return nil
 }
 
-// recordSignRefusal records a commit the sidecar's daemon refused. The org and
-// conversation are this server's and the signer's host the org's; the wire
-// says only which refusal, as which signer, and the committer.
+// recordSignRefusal records a commit the sidecar's daemon refused. The wire
+// says only which refusal and the committer. The org and conversation are this
+// server's, the signer's host the org's, and the signer the one the sidecar
+// reported at bring-up (SetSealedCommitSigner), before the agent ran: the
+// account an audit row names is never one a sidecar chose mid-run.
 func (s *RelayServer) recordSignRefusal(ctx context.Context, a agentproc.RecordSignRefusalArgs) error {
 	refusal := commitsigner.Refusal(a.Reason)
-	signer := domain.CommitSigningMode(a.Signer)
-	if (refusal != commitsigner.RefusalCommitterMismatch && refusal != commitsigner.RefusalNotACommit) ||
-		!signer.Signs() || a.SignerUserID <= 0 {
-		return fmt.Errorf("agenthost: a relayed signing refusal names no daemon refusal or no signer (%q, %q, account %d)",
-			a.Reason, a.Signer, a.SignerUserID)
+	if refusal != commitsigner.RefusalCommitterMismatch && refusal != commitsigner.RefusalNotACommit {
+		return fmt.Errorf("agenthost: a relayed signing refusal names no daemon refusal (%q)", a.Reason)
+	}
+	accountID, err := strconv.ParseInt(s.sealed.accountID, 10, 64)
+	if !s.sealed.mode.Signs() || err != nil || accountID <= 0 {
+		return fmt.Errorf("agenthost: a signing refusal from a run that was sealed no signer (%q, account %q)",
+			s.sealed.mode, s.sealed.accountID)
 	}
 	ctx, cancel := recordContext(ctx)
 	defer cancel()
@@ -301,9 +303,9 @@ func (s *RelayServer) recordSignRefusal(ctx context.Context, a agentproc.RecordS
 	commitsigner.RecordDaemonRefusal(ctx, s.stores, commitsigner.DaemonRefusal{
 		OrgID:          s.info.OrgID,
 		ConversationID: s.info.ConversationID,
-		Signer:         signer,
+		Signer:         s.sealed.mode,
 		SignerHost:     host,
-		SignerUserID:   a.SignerUserID,
+		SignerUserID:   accountID,
 		Refusal:        refusal,
 		Committer:      commitsign.Identity{Name: a.CommitterName, Email: a.CommitterEmail},
 		DedupKey:       mintDedupKey(ctx, s.info),

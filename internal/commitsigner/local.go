@@ -117,9 +117,9 @@ func (l *LocalSigner) Sign(ctx context.Context, req LocalRequest) (res Result) {
 		return l.unanswered(ctx, req, "read the run's signer", errors.New("the run's signer has no account id"))
 	}
 
-	if res, err := CheckCommit(req.Payload, req.Signer); err != nil {
+	if res, ok, err := CheckCommit(req.Payload, req.Signer); err != nil {
 		return l.unanswered(ctx, req, "read the commit", err)
-	} else if res.Outcome != "" {
+	} else if !ok {
 		if res.Refusal == RefusalCommitterMismatch {
 			signerLog.WarnContext(ctx, "refused to sign a commit whose committer is not the run's signer",
 				"org", req.OrgID, "conversation", req.ConversationID, "committer", formatIdent(res.Committer))
@@ -217,27 +217,27 @@ func (l *LocalSigner) Sign(ctx context.Context, req LocalRequest) (res Result) {
 // a cherry-pick re-signs commits that keep their original author; the
 // committer's timestamp is free too.
 //
-// It returns the zero Result for a commit that may be signed, a refusal
-// (RefusalNotACommit with the object, or RefusalCommitterMismatch with the
-// committer the commit named) for one that may not, and an error for a
-// payload that could not be read as an object at all.
-func CheckCommit(payload []byte, signer Identity) (Result, error) {
+// ok is true for a commit that may be signed. Otherwise the Result is the
+// refusal: RefusalNotACommit with the object, or RefusalCommitterMismatch
+// with the committer the commit named. An error is a payload that could not
+// be read as an object at all.
+func CheckCommit(payload []byte, signer Identity) (Result, bool, error) {
 	committer, err := commitsign.ParseCommitter(payload)
 	if err != nil {
 		var nac *commitsign.NotACommitError
 		if errors.As(err, &nac) {
 			res := refused(RefusalNotACommit)
 			res.Object = nac.Object
-			return res, nil
+			return res, false, nil
 		}
-		return Result{}, err
+		return Result{}, false, err
 	}
 	if committer.Name != signer.Name || committer.Email != signer.Email {
 		res := refused(RefusalCommitterMismatch)
 		res.Committer = committer
-		return res, nil
+		return res, false, nil
 	}
-	return Result{}, nil
+	return Result{}, true, nil
 }
 
 // unanswered logs why a signature could not be made and answers the run to

@@ -82,6 +82,7 @@ func newSidecarSigning(t *testing.T, budgets commitsigner.Budgets) *sidecarSigni
 
 	info := ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: conversationID}
 	srv := NewRelayServer(stores, info, nil)
+	srv.SetSealedCommitSigner(signer.Mode, signer.AccountID)
 	srv.SetCommitSigning(CommitSigning{ClaimID: claimID, BootEpoch: 1, Requester: &commitsigner.Requester{
 		Signatures:   stores.CommitSignatures,
 		Publish:      publish,
@@ -305,5 +306,34 @@ func TestRelayServer_RecordCommitSHAStampsOnlyThisRunsSignature(t *testing.T) {
 	record(other.ID, sha)
 	if got, _ := f.stores.CommitSignatures.GetSystem(ctx, runmode.LocalDefaultOrgID, other.ID); got == nil || got.CommitSHA != "" {
 		t.Errorf("another run's signature = %+v, want no commit id: a sidecar stamps only its own run's", got)
+	}
+}
+
+// TestRelayServer_RecordSignRefusalNamesTheBringUpSigner: a sidecar's signing
+// refusal is recorded against the signer it reported at bring-up, before the
+// agent ran, and a refusal from a run that reported none writes nothing.
+func TestRelayServer_RecordSignRefusalNamesTheBringUpSigner(t *testing.T) {
+	f := newSidecarSigning(t, commitsigner.Budgets{PerOrgMinute: 600, PerClaim: 5000})
+	ctx := context.Background()
+	record := func() {
+		raw, _ := json.Marshal(agentproc.RecordSignRefusalArgs{
+			Reason: string(commitsigner.RefusalCommitterMismatch), CommitterName: "mallory", CommitterEmail: "mallory@example.com",
+		})
+		if err := f.srv.DispatchRecord(ctx, agentproc.RelayNamespaceCore, agentproc.OpRecordSignRefusal, uuid.NewString(), raw); err != nil {
+			t.Fatalf("DispatchRecord: %v", err)
+		}
+	}
+
+	f.srv.SetSealedCommitSigner("", "")
+	record()
+	if n := len(f.denials(t)); n != 0 {
+		t.Fatalf("commit_sign_denied rows from a run sealed no signer = %d, want none", n)
+	}
+
+	f.srv.SetSealedCommitSigner(domain.CommitSigningOrg, "583231")
+	record()
+	denials := f.denials(t)
+	if len(denials) != 1 || denials[0].ExternalID != "583231" || denials[0].Target != "octocat" {
+		t.Fatalf("commit_sign_denied rows = %+v, want one about the bring-up signer's account", denials)
 	}
 }

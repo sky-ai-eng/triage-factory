@@ -110,14 +110,13 @@ type RecordCommitSHAArgs struct {
 }
 
 // RecordSignRefusalArgs is record_sign_refusal's payload: the refusal
-// ("committer_mismatch" or "not_a_commit"), the signer the run was sealed
-// with, and for a committer mismatch the committer the commit named. The
-// orchestrator binds the org and conversation from its own identity for the
+// ("committer_mismatch" or "not_a_commit") and, for a committer mismatch, the
+// committer the commit named. It names no signer: the orchestrator records the
+// refusal against the signer the sidecar reported at bring-up, before the
+// agent ran, and binds the org and conversation from its own identity for the
 // run.
 type RecordSignRefusalArgs struct {
 	Reason         string `json:"reason"`
-	Signer         string `json:"signer"`
-	SignerUserID   int64  `json:"signer_user_id"`
 	CommitterName  string `json:"committer_name,omitempty"`
 	CommitterEmail string `json:"committer_email,omitempty"`
 }
