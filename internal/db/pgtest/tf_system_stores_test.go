@@ -142,6 +142,12 @@ func TestTfSystem_CommitSignatureStoreConformance(t *testing.T) {
 				t.Helper()
 				MustExec(t, h.AdminDB, `DELETE FROM conversations WHERE id = $1`, conversationID)
 			},
+			// The control plane's post-push check writes the verdict; the
+			// executor's role cannot, so the admin connection stages it.
+			SetVerification: func(t *testing.T, id, reason string) {
+				t.Helper()
+				MustExec(t, h.AdminDB, `UPDATE commit_signatures SET verification_reason = $2, checked_at = now() WHERE id = $1`, id, reason)
+			},
 		}
 		return pgstore.New(h.SystemDB, h.AppDB, SecretKey).CommitSignatures, orgID, seed
 	})

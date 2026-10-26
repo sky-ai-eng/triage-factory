@@ -133,6 +133,14 @@ type CommitSignatureStore interface {
 	// ClaimSignaturesSystem counts the signatures made for one claim, for the
 	// per-claim budget.
 	ClaimSignaturesSystem(ctx context.Context, orgID, claimID string) (int, error)
+
+	// NewestFailedVerificationSystem returns the most recently signed of the
+	// org's signatures made as its own signer on the account (host, userID)
+	// whose pushed commit GitHub last reported as not verified, or (nil, nil)
+	// when there is none. Verify re-reads that commit: GitHub evaluates a
+	// failing result again on every read, so it reads valid once the fault is
+	// fixed.
+	NewestFailedVerificationSystem(ctx context.Context, orgID, host string, userID int64) (*domain.CommitSignature, error)
 }
 
 // SignatureWindow is OrgSignaturesSinceSystem's answer. Oldest is nil when

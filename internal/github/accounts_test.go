@@ -25,13 +25,13 @@ func TestGetAccount(t *testing.T) {
 	c := NewClient(ts.URL, "pat")
 	ctx := context.Background()
 
-	if got, err := c.GetAccountByLogin(ctx, "Octocat"); err != nil || got != (Account{ID: "583231", Login: "octocat"}) {
+	if got, err := c.GetAccountByLogin(ctx, "Octocat"); err != nil || got != (Account{ID: "583231", Login: "octocat", Type: AccountTypeUser}) {
 		t.Errorf("GetAccountByLogin(Octocat) = %+v, %v; want octocat 583231", got, err)
 	}
-	if got, err := c.GetAccountByLogin(ctx, "dependabot[bot]"); err != nil || got != (Account{ID: "49699333", Login: "dependabot[bot]"}) {
+	if got, err := c.GetAccountByLogin(ctx, "dependabot[bot]"); err != nil || got != (Account{ID: "49699333", Login: "dependabot[bot]", Type: "Bot"}) {
 		t.Errorf("GetAccountByLogin(dependabot[bot]) = %+v, %v; want the bot's id", got, err)
 	}
-	if got, err := c.GetAccountByID(ctx, "583231"); err != nil || got != (Account{ID: "583231", Login: "octocat"}) {
+	if got, err := c.GetAccountByID(ctx, "583231"); err != nil || got != (Account{ID: "583231", Login: "octocat", Type: AccountTypeUser}) {
 		t.Errorf("GetAccountByID(583231) = %+v, %v; want octocat", got, err)
 	}
 	if _, err := c.GetAccountByLogin(ctx, "nobody"); !IsHTTP404(err) {

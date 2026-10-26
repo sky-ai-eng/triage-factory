@@ -98,9 +98,8 @@ Beyond the standard Go runtime and process collectors (`go_*`, `process_*`),
 the TF-specific set today covers dropped audit records, the entity
 terminal-state invariant, unwritten conversation memory links, failed moves
 of delegated Linear issues, the work queues, claims, Slack message-event
-volume,
-and the outcome of every request TF makes to GitHub, Jira, Slack, and the LLM
-providers.
+volume, the outcome of every request TF makes to GitHub, Jira, Slack, and the
+LLM providers, and commit signer health checks.
 
 ### Dropped audit records
 
@@ -948,6 +947,26 @@ sum by (upstream, op) (rate(tf_upstream_query_cost_sum[1h])) / sum by (upstream,
 - **Linear** states it in `X-Complexity`, for queries and mutations alike. The
   operations are the documents' own names (`IssuesByID`, `SearchIssues`,
   `CommentCreate`, …).
+
+### Commit signing
+
+An org can register a GitHub user account as its commit signer: TF generates
+an SSH key pair, an org admin adds the public half to the account as a signing
+key, and **Verify** looks for it there before the signer is `active`. Each
+health check of a signer is counted:
+
+| Metric | Labels | Value |
+| --- | --- | --- |
+| `tf_commit_signer_checks_total` | `check`, `result` | Health checks of an org's commit signer. `check` is `verify`, an admin's Verify. `result` is GitHub's verification reason for the commit Verify re-read (`valid`, `unknown_key`, `no_user`, `unverified_email`, or `other` for any reason not named here), `key_missing` when the key was not on the account, or `error` when GitHub could not be read. A Verify that finds the key and has no failing commit to re-read counts `valid`. |
+
+A Verify that keeps ending in `key_missing` is an admin who has not added the
+key yet, or whose GitHub listing has not caught up (it is cached for a
+minute); one that ends in `error` is GitHub, or the org's credential, failing
+to answer.
+
+```
+increase(tf_commit_signer_checks_total{result="error"}[1h]) > 0   # Verify could not read GitHub
+```
 
 ## Traces — `TF_TRACES_ENDPOINT`
 

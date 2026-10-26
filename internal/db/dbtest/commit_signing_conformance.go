@@ -314,6 +314,10 @@ type CommitSignatureSeeder struct {
 	// DeleteConversation purges a conversation, which takes its claims with
 	// it.
 	DeleteConversation func(t *testing.T, conversationID string)
+
+	// SetVerification records reason as GitHub's verdict on signature id's
+	// pushed commit, the column the post-push check writes.
+	SetVerification func(t *testing.T, id, reason string)
 }
 
 // RunCommitSignatureStoreConformance pins the signing log: a row enters as a
@@ -590,6 +594,56 @@ func RunCommitSignatureStoreConformance(t *testing.T, mk CommitSignatureStoreFac
 			if got != want {
 				t.Errorf("ClaimSignaturesSystem(%s) = %d, want %d", claimID, got, want)
 			}
+		}
+	})
+
+	t.Run("the_newest_failed_verification_is_the_signers_latest_failing_commit", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		conversationID, claimID := seed.Claim(t)
+		now := time.Now()
+
+		none, err := store.NewestFailedVerificationSystem(ctx, orgID, "https://github.com", 583231)
+		if err != nil {
+			t.Fatalf("NewestFailedVerificationSystem (empty): %v", err)
+		}
+		if none != nil {
+			t.Errorf("an org with no checked commit = %+v, want nil", none)
+		}
+
+		insert := func(sig domain.CommitSignature, reason string) domain.CommitSignature {
+			t.Helper()
+			row, err := store.InsertSystem(ctx, sig)
+			if err != nil {
+				t.Fatalf("InsertSystem: %v", err)
+			}
+			if reason != "" {
+				seed.SetVerification(t, row.ID, reason)
+			}
+			return row
+		}
+		older := insert(signed(orgID, conversationID, claimID, now.Add(-3*time.Hour)), "unknown_key")
+		want := insert(signed(orgID, conversationID, claimID, now.Add(-2*time.Hour)), "no_user")
+		// Newer, and none of them a failure of this signer's: a commit that
+		// verified, one never checked, one made as the deployment's signer and
+		// one made as another account.
+		insert(signed(orgID, conversationID, claimID, now.Add(-time.Hour)), domain.CommitVerificationValid)
+		insert(signed(orgID, conversationID, claimID, now.Add(-time.Hour)), "")
+		deployment := signed(orgID, conversationID, claimID, now.Add(-time.Hour))
+		deployment.Signer = domain.CommitSigningDeployment
+		insert(deployment, "unknown_key")
+		otherAccount := signed(orgID, conversationID, claimID, now.Add(-time.Hour))
+		otherAccount.SignerUserID = 1
+		insert(otherAccount, "unknown_key")
+
+		got, err := store.NewestFailedVerificationSystem(ctx, orgID, "https://GitHub.com/", 583231)
+		if err != nil {
+			t.Fatalf("NewestFailedVerificationSystem: %v", err)
+		}
+		if got == nil || got.ID != want.ID || got.VerificationReason != "no_user" {
+			t.Errorf("NewestFailedVerificationSystem = %+v, want row %s (no_user), not the older %s", got, want.ID, older.ID)
+		}
+		if other, err := store.NewestFailedVerificationSystem(ctx, orgID, "https://ghe.example.com", 583231); err != nil || other != nil {
+			t.Errorf("the same account id on another host = %+v, %v; want nil", other, err)
 		}
 	})
 

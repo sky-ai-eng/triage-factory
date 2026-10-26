@@ -54,6 +54,17 @@ const (
 	// than the message alone.
 	ReasonPermissionGap = "PERMISSION_GAP"
 
+	// The commit-signer refusals, each its own code because each sends the
+	// caller somewhere different. SSH_SIGNING_UNSUPPORTED: the org's GitHub
+	// does not serve SSH signing keys, so nothing TF signs could verify there.
+	// KEY_NOT_FOUND: the signer's key is not on its account yet — add it on
+	// GitHub, then verify again. COMMIT_UNVERIFIED: the key is there but the
+	// commit that broke the signer still fails GitHub's check, for the reason
+	// the message names.
+	ReasonSSHSigningUnsupported = "SSH_SIGNING_UNSUPPORTED"
+	ReasonKeyNotFound           = "KEY_NOT_FOUND"
+	ReasonCommitUnverified      = "COMMIT_UNVERIFIED"
+
 	// Partial success reported as an error: the delegation's claim stamped
 	// but the agent run could not be spawned (bad blueprint reference at
 	// 422, spawn/DB fault at 500). Clients key the claim-survived retry

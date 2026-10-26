@@ -234,7 +234,11 @@ type accessDetail struct {
 	// which is the point of recording it, since the cap applies at use
 	// against whatever the setting says later. token_id is left to the raw
 	// passthrough for the same reason as the other uuids.
-	Prefix       string     `json:"prefix"`
+	Prefix string `json:"prefix"`
+	// Change is what a github_commit_signer credential_set row did to the
+	// signer; Email, shared with the invite rows, is the committer address
+	// its email change set. Its public_key is left to the raw passthrough.
+	Change       string     `json:"change"`
 	ExpiresAt    *time.Time `json:"expires_at"`
 	MaxAgeDays   *int       `json:"max_age_days"`
 	AllowedCIDRs []string   `json:"allowed_cidrs"`
@@ -291,6 +295,9 @@ func accessChangeLabel(e domain.AccessChange, targetName, teamName string) strin
 		}
 		return "revoked a pending invite"
 	case domain.AccessActionCredentialSet:
+		if d.Kind == domain.CredentialKindGitHubCommitSigner && d.Change != "" {
+			return commitSignerLabel(d)
+		}
 		return credentialActionLabel("set the ", d)
 	case domain.AccessActionCredentialRemoved:
 		return credentialActionLabel("removed the ", d)
@@ -419,6 +426,35 @@ func credentialActionLabel(verb string, d accessDetail) string {
 	return s
 }
 
+// commitSignerLabel renders a commit-signer credential_set row by the change it
+// records, since "set the commit signer" would say the same thing for a
+// registration, a verify, a rotation and an email change. A change this build
+// does not know reads as the generic credential label.
+func commitSignerLabel(d accessDetail) string {
+	signer := "the commit signer"
+	if d.Name != "" {
+		signer += " " + d.Name
+	}
+	switch d.Change {
+	case commitSignerRegistered:
+		if d.Host != "" {
+			return "registered " + signer + " for " + d.Host
+		}
+		return "registered " + signer
+	case commitSignerVerified:
+		return "verified " + signer
+	case commitSignerRotated:
+		return "started rotating " + signer + "'s key"
+	case commitSignerEmailChanged:
+		if d.Email == "" {
+			return "reset " + signer + "'s commit email to its noreply address"
+		}
+		return "set " + signer + "'s commit email to " + d.Email
+	default:
+		return credentialActionLabel("set the ", d)
+	}
+}
+
 // credentialKindLabel maps a credential kind to its human name.
 func credentialKindLabel(kind string) string {
 	switch kind {
@@ -428,6 +464,8 @@ func credentialKindLabel(kind string) string {
 		return "GitHub App"
 	case domain.CredentialKindGitHubIdentity:
 		return "personal GitHub identity"
+	case domain.CredentialKindGitHubCommitSigner:
+		return "commit signer"
 	case domain.CredentialKindJiraOrg:
 		return "Jira credential"
 	case domain.CredentialKindJiraUser:
