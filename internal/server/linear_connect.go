@@ -193,6 +193,8 @@ func (s *Server) handleLinearIdentityStatus(w http.ResponseWriter, r *http.Reque
 			// which replaces it.
 			linearConnectLog.Warn("stored credential unparsable, reporting not connected", "org", orgID, "user", userID, "error", err)
 		case cred.Refused:
+			// Ahead of !Usable(), which a marker also matches and which
+			// reports no reason.
 			resp.DisconnectedReason = linearDisconnectedRefused
 		case !cred.Usable():
 		case cred.Method == linear.AuthMethodAPIKey:
