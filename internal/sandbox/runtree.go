@@ -4,28 +4,39 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // runTreeBasename is the directory ephemeral per-run worktrees live under
-// inside os.TempDir(): os.TempDir()/triagefactory-runs/<rootKey>. This is the
-// GitHub-PR / Jira / Slack task-run shape of Config.Worktree — org-blind by
-// construction, since these trees don't outlive their own run.
-// internal/worktree is the historical owner of this path (its
-// makeWorktreeDir / MakeRunRoot materialize exactly here); it duplicates
-// this literal in its own private runsDir constant rather than importing
+// inside os.TempDir() locally: os.TempDir()/triagefactory-runs/<rootKey>, and
+// runTreeStateDir the one they live under inside the state root in multi:
+// <state root>/runs/<rootKey>. This is the GitHub-PR / Jira / Slack task-run
+// shape of Config.Worktree — org-blind by construction, since these trees
+// don't outlive their task. internal/worktree is the owner of this path (its
+// MakeRunRoot materializes exactly here); it duplicates these literals in its
+// own private runsDir / stateRunsDir constants rather than importing
 // RunTreeRoot (worktree already imports this package for ChownRunTree /
 // RemoveRunTree, and having the broker-side validator define the trusted
 // shape independently — rather than depend on the producer's constant —
-// mirrors how TrustedGitHooksDir resolves elsewhere in this
-// package). A worktree package test cross-checks the two literals stay
-// equal.
-const runTreeBasename = "triagefactory-runs"
+// mirrors how TrustedGitHooksDir resolves elsewhere in this package). A
+// worktree package test cross-checks the two stay equal in both modes.
+const (
+	runTreeBasename = "triagefactory-runs"
+	runTreeStateDir = "runs"
+)
 
 // RunTreeRoot returns the ephemeral per-run worktree root for rootKey. This
 // is the ONLY legitimate shape for a delegated task run's Config.Worktree;
 // launchspec_linux.go's mount-source validation rejects any Worktree that
 // is neither this exact path nor under the org-scoped state-root tree
 // (see worktreeScope).
+//
+// In multi it is under the state root, the executor's data volume, beside
+// every jail's /tmp: an executor's temp dir is its container's writable layer.
+// The broker resolves the state root from the same environment the
+// orchestrator does, as it does for the jails' /tmp.
 //
 // rootKey is the tree's key, not a conversation id: a delegated run's tree is
 // keyed by its workspace key (the task id), so a task's conversations share one
@@ -34,6 +45,9 @@ const runTreeBasename = "triagefactory-runs"
 // Config.ConversationID stays the conversation — which is why worktreeScope
 // accepts either and this parameter claims neither.
 func RunTreeRoot(rootKey string) string {
+	if runmode.Current() == runmode.ModeMulti {
+		return filepath.Join(paths.StateRoot(), runTreeStateDir, rootKey)
+	}
 	return filepath.Join(os.TempDir(), runTreeBasename, rootKey)
 }
 

@@ -100,13 +100,28 @@ func lockRepo(repositoryID string) *sync.Mutex {
 	return mu
 }
 
-// runsDir is the basename for ephemeral run worktrees under
-// os.TempDir() (/tmp/triagefactory-runs/{rootKey}). Ephemeral and
-// unique-by-rootKey, so it is deliberately NOT routed through
-// internal/paths — there is no persistence and no cross-tenant
-// collision risk. The persistent bare clone cache, by contrast, lives
-// under paths.BareCacheDir / paths.BareCacheRoot.
+// runsDir is the basename of the local runs base, under os.TempDir()
+// (/tmp/triagefactory-runs/{rootKey}). Ephemeral and unique-by-rootKey, so
+// it is deliberately NOT routed through internal/paths — there is no
+// persistence and no cross-tenant collision risk. The persistent bare clone
+// cache, by contrast, lives under paths.BareCacheDir / paths.BareCacheRoot.
 const runsDir = "triagefactory-runs" // worktrees: /tmp/triagefactory-runs/{rootKey}
+
+// stateRunsDir is the basename of the multi runs base, under the state root
+// (<state root>/runs/{rootKey}). An executor's temp dir is its container's
+// writable layer, which a recreated container does not keep; the state root is
+// the volume that holds its bare clones and its jails' /tmp, so a run's tree
+// sits on the same disk as its /tmp and the clones it is built from.
+const stateRunsDir = "runs"
+
+// runsBase is the directory every run tree lives under: <state root>/runs in
+// multi, <tmp>/triagefactory-runs locally.
+func runsBase() string {
+	if runmode.Current() == runmode.ModeMulti {
+		return filepath.Join(paths.StateRoot(), stateRunsDir)
+	}
+	return filepath.Join(os.TempDir(), runsDir)
+}
 
 // CloneAuth is an optional HTTPS credential for a host-side `git clone` /
 // `git fetch`. The zero value injects nothing — the git subprocess
@@ -388,7 +403,7 @@ func RepoDir(repositoryID string) (string, error) {
 // rootKey names the id a run root is keyed by — see RunRoot for which id that
 // is, and why this family does not spell it conversationID.
 func runDir(rootKey string) string {
-	return filepath.Join(os.TempDir(), runsDir, rootKey)
+	return filepath.Join(runsBase(), rootKey)
 }
 
 // RunRoot returns the run-root path for a given rootKey, without creating it.
@@ -437,14 +452,15 @@ func MakeRunRoot(rootKey string) (string, error) {
 const runsBaseMode = 0o711
 
 // EnsureRunsBase creates the directory every run tree lives under, if it is
-// not there. Every path that makes a run root goes through it.
+// not there. Every path that makes a run root goes through it, and so does
+// every path that stages a snapshot of one beside it.
 //
 // In multi it also pins the base's mode — on every call, so the mode is
 // runsBaseMode whichever path happens to create the base first after boot, and
 // whatever umask it ran under. Locally no other identity reaches a run tree,
 // so the base is created owner-only and an existing one keeps the mode it has.
 func EnsureRunsBase() (string, error) {
-	base := filepath.Join(os.TempDir(), runsDir)
+	base := runsBase()
 	if runmode.Current() != runmode.ModeMulti {
 		if err := os.MkdirAll(base, 0o700); err != nil {
 			return "", fmt.Errorf("mkdir runs base: %w", err)

@@ -42,7 +42,7 @@ const TrustedSkillsDestination = "/opt/tf/skills"
 
 // skillStagingBasename is the directory per-run step-skill staging dirs live
 // under inside os.TempDir(): os.TempDir()/triagefactory-skills/<conversationID>. A
-// deliberate sibling of runTreeBasename's triagefactory-runs, with the opposite
+// deliberate counterpart of the run-tree base (RunTreeRoot), with the opposite
 // ownership contract: a run tree is handed to the sandbox uid at launch, a
 // staging dir is NEVER chowned and never appears on the host inside anything
 // the agent can reach.

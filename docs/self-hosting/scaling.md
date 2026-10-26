@@ -63,6 +63,11 @@ under it (`jail-tmp/`), emptied when the jail's network is built, so a run
 that fills `/tmp` fills the executor's disk rather than the jail's memory. An executor whose
 `TF_STATE_ROOT` is on tmpfs or ramfs refuses to boot, naming the setting.
 
+Each run's working tree (`/work` in the jail) is under the state root too
+(`runs/<task id>`), and so is the staging for a snapshot of it, so a run's
+checkouts, its `/tmp` and its snapshot all land on the one volume. The executor
+empties `runs/` when it starts.
+
 Each executor's container HEALTHCHECK hits its localhost `GET /healthz` — see
 [Monitoring & health checks](monitoring.md#executor-health--get-healthz).
 

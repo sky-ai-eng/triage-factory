@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,7 +15,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -153,6 +156,35 @@ func TestLocalClient_WorkspaceRoots(t *testing.T) {
 	}
 	if host != "/data/runs/rehydrated-root" || agent != host {
 		t.Errorf("roots = (%q, %q), want the recorded worktree_path for both", host, agent)
+	}
+}
+
+// TestLocalClient_WorkspaceRoots_MultiFallbackIsUnderTheStateRoot: in multi
+// the daemon runs in the run's sidecar, and the fallback has to name the
+// directory the orchestrator built the tree in and the broker mounts, which on
+// an executor is under the state root rather than the temp dir.
+func TestLocalClient_WorkspaceRoots_MultiFallbackIsUnderTheStateRoot(t *testing.T) {
+	stores, conn := newTestDB(t)
+	seedConversation(t, stores, conn, "conv-multi-roots", runmode.LocalDefaultUserID, "manual")
+	client := NewLocal(stores, workspaceInfo("conv-multi-roots"))
+	conv, err := stores.Conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, "conv-multi-roots")
+	if err != nil || conv == nil {
+		t.Fatalf("read the seeded conversation: err=%v got=%v", err, conv)
+	}
+
+	runmode.SetForTest(t, runmode.ModeMulti)
+	stateRoot := t.TempDir()
+	paths.SetForTest(t, stateRoot)
+
+	host, _, err := client.WorkspaceRoots(context.Background())
+	if err != nil {
+		t.Fatalf("WorkspaceRoots: %v", err)
+	}
+	if want := filepath.Join(stateRoot, "runs", conv.TaskID); host != want {
+		t.Errorf("host root (no worktree_path) = %q, want %q", host, want)
+	}
+	if want := sandbox.RunTreeRoot(conv.TaskID); host != want {
+		t.Errorf("host root = %q, but the broker mounts %q", host, want)
 	}
 }
 

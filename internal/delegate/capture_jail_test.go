@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -207,5 +209,37 @@ func TestCaptureTreeInJail_FailureReleasesStaging(t *testing.T) {
 	captured.release()
 	if _, err := os.Stat(staged); !os.IsNotExist(err) {
 		t.Errorf("staging %s survived the release (%v)", staged, err)
+	}
+}
+
+// TestSnapshotStaging_IsInTheRunsBase pins where an executor stages a snapshot:
+// the capture's stream and the archive built from it are each the size of the
+// tree's delta, so they go in the runs base on the state root with the tree,
+// not in the container's temp dir.
+func TestSnapshotStaging_IsInTheRunsBase(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	stateRoot := t.TempDir()
+	paths.SetForTest(t, stateRoot)
+	base := filepath.Join(stateRoot, "runs")
+
+	dir, err := prepareCaptureStaging()
+	if err != nil {
+		t.Fatalf("prepareCaptureStaging: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if filepath.Dir(dir) != base {
+		t.Errorf("capture staging at %s, want it in %s", dir, base)
+	}
+
+	f, _, _, err := stageSnapshotArchive(context.Background(), &capturedSnapshot{}, t.TempDir(), snapshotManifest{})
+	if err != nil {
+		t.Fatalf("stageSnapshotArchive: %v", err)
+	}
+	_ = f.Close()
+	t.Cleanup(func() { _ = os.Remove(f.Name()) })
+	if filepath.Dir(f.Name()) != base {
+		t.Errorf("snapshot archive staged at %s, want it in %s", f.Name(), base)
 	}
 }

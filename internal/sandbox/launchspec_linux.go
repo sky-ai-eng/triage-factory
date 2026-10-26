@@ -697,8 +697,9 @@ func realPath(p string) (string, error) {
 // (internal/worktree, verified — not assumed):
 //
 //   - The ephemeral per-run tree: GitHub PR / Jira / Slack delegated task
-//     runs materialize (or park) their whole working tree under
-//     os.TempDir()/triagefactory-runs/<key>. The key is the run's workspace
+//     runs materialize (or park) their whole working tree at
+//     RunTreeRoot(<key>), <StateRoot>/runs/<key> in multi mode — beside the
+//     org tree below, never inside it. The key is the run's workspace
 //     key — the task id, which every conversation on the task shares and
 //     which a cold rehydrate rebuilds the tree under
 //     (internal/delegate's snapshot restore). Only that key is accepted;
