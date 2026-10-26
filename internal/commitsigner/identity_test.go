@@ -75,6 +75,7 @@ func TestResolve_EveryCredentialClassAndSignerStatus(t *testing.T) {
 		Name:      "The Octocat",
 		Email:     "583231+octocat@users.noreply.github.com",
 		AccountID: "583231",
+		Login:     "octocat",
 		Mode:      domain.CommitSigningNone,
 	}
 	signing := signerID

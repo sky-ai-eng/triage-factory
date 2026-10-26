@@ -288,8 +288,8 @@ func TestCommitSigner_RegisterAndVerify(t *testing.T) {
 	checks := signerChecks(t)
 
 	assertOneFault(t, doJSON(t, s, http.MethodGet, commitSignerPath(""), nil), http.StatusNotFound, "NOT_FOUND", "")
-	if got := commitIdentity(t, s); got.Signing != "none" || got.Identity == nil || got.Identity.Name != "acme-tf[bot]" {
-		t.Errorf("identity with no signer = %+v, want the bot, unsigned", got)
+	if got := commitIdentity(t, s); got.Signing != "none" || got.Identity == nil || got.Identity.Name != "acme-tf[bot]" || got.Identity.Login != nil {
+		t.Errorf("identity with no signer = %+v, want the bot, unsigned, with no signer login", got)
 	}
 
 	created := mustSigner(t, s, http.MethodPost, "", map[string]any{"login": "octocat"}, http.StatusCreated)
@@ -312,7 +312,8 @@ func TestCommitSigner_RegisterAndVerify(t *testing.T) {
 	assertOneFault(t, doJSON(t, s, http.MethodPost, commitSignerPath(""), map[string]any{"login": "plainuser"}),
 		http.StatusConflict, "CONFLICT", "")
 	if got := commitIdentity(t, s); got.Signing != "none" || got.Identity == nil || got.Identity.Name != "The Octocat" ||
-		got.Identity.GitHubUserID == nil || *got.Identity.GitHubUserID != "583231" {
+		got.Identity.GitHubUserID == nil || *got.Identity.GitHubUserID != "583231" ||
+		got.Identity.Login == nil || *got.Identity.Login != "octocat" {
 		t.Errorf("identity with a pending signer = %+v, want the signer, unsigned", got)
 	}
 

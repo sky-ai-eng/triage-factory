@@ -903,6 +903,9 @@ type commitIdentityAccountJSON struct {
 	// GitHubUserID is the account the identity belongs to, null when it is
 	// not known.
 	GitHubUserID *string `json:"github_user_id"`
+	// Login is the signer's GitHub login when the identity is a signer's,
+	// null otherwise.
+	Login *string `json:"login"`
 }
 
 // handleCommitIdentityGet answers who this org's runs commit as and whether
@@ -931,7 +934,7 @@ func (s *Server) handleCommitIdentityGet(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	if id.Name != "" {
-		out.Identity = &commitIdentityAccountJSON{Name: id.Name, Email: id.Email, GitHubUserID: nilIfEmpty(id.AccountID)}
+		out.Identity = &commitIdentityAccountJSON{Name: id.Name, Email: id.Email, GitHubUserID: nilIfEmpty(id.AccountID), Login: nilIfEmpty(id.Login)}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
