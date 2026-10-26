@@ -32,7 +32,8 @@ import (
 // conversation-signal doorbells, and TFAC-614's cred_request doorbell —
 // payloads are discriminated by their JSON "kind" field (see
 // internal/app/ctl.go), so Message kinds must stay disjoint from theirs
-// ("kick", "new", "ack", "cred_request", "memory_owed").
+// ("kick", "new", "ack", "cred_request", "memory_owed", "sign_request",
+// "sign_done").
 const Channel = "tf_ctl"
 
 // Message is the relay payload. Kind selects which field group applies:
@@ -55,6 +56,15 @@ const Channel = "tf_ctl"
 // the setting those attempts failed on may have just been fixed. Lossy like the
 // rest, and this one says so loudest: a dropped message costs one sweep
 // interval, never a lost memory.
+// "sign_request" and "sign_done" use OrgID/SignatureID, and are the commit
+// signing queue's doorbells (internal/commitsigner): an executor that queued a
+// commit_signatures request rings every control pod, which race to claim it,
+// and the pod that decided it rings the executor waiting on the answer. Unlike
+// the kinds above, neither is gated on the background-brain lease: every
+// control pod signs. Lossy like the rest: a dropped sign_request costs the
+// request up to a second and a half, until a control pod's sweep finds it, and
+// a dropped sign_done up to 250ms, until the waiting executor's next read of
+// the row.
 type Message struct {
 	Kind           string `json:"kind"`
 	Manager        string `json:"manager,omitempty"`
@@ -62,6 +72,7 @@ type Message struct {
 	Source         string `json:"source,omitempty"`
 	Force          bool   `json:"force,omitempty"`
 	ConversationID string `json:"conversation_id,omitempty"`
+	SignatureID    string `json:"signature_id,omitempty"`
 }
 
 // execer is the minimal *sql.DB surface Publish needs — a pooled

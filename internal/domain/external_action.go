@@ -470,9 +470,10 @@ func ExternalActionTypes() []string {
 // with no row there is no id, and a name keeps two such repositories apart.
 // An id holds no '/', so the two never collide.
 //
-// This is one of the two actions with a deterministic natural key (the other is
-// EgressDenialDedupKey); every other action's key names that one act (see
-// ExternalAction.DedupKey), so it can never be deduped against another.
+// This is one of the three actions with a deterministic natural key (the others
+// are EgressDenialDedupKey and CommitSignBudgetDedupKey); every other action's
+// key names that one act (see ExternalAction.DedupKey), so it can never be
+// deduped against another.
 func BranchPushDedupKey(conversationID, repository, ref, sha string) string {
 	return strings.Join([]string{"branch", conversationID, repository, ref, sha}, ":")
 }
@@ -491,6 +492,16 @@ func BranchPushDedupKey(conversationID, repository, ref, sha string) string {
 // same host — org-wide, for the lifetime of the table.
 func EgressDenialDedupKey(conversationID, target string) string {
 	return strings.Join([]string{"egress", conversationID, target}, ":")
+}
+
+// CommitSignBudgetDedupKey builds the deterministic dedup key for the
+// commit_sign_denied row a run gets when it reaches its per-claim signing
+// budget: "commit_sign_budget:<conversationID>". Once spent, the budget refuses
+// every later signature the run asks for, and the signal is that the run
+// reached it, so the refusals after the first collapse onto one row per
+// conversation, the way an egress denial's repeats do (EgressDenialDedupKey).
+func CommitSignBudgetDedupKey(conversationID string) string {
+	return "commit_sign_budget:" + conversationID
 }
 
 // RelayedRecordDedupKey builds the dedup key for the nth action (from 0) a

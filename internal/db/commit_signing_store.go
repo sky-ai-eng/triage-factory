@@ -96,9 +96,10 @@ type OrgCommitSignerStore interface {
 // queue the control pods sign from; the signing budgets are counts over it.
 //
 // Admin-pool only in Postgres. Every writer is a run's signing daemon, its
-// orchestrator or a control pod, none of them acting for a signed-in user, and
-// the executor's tf_system role holds the INSERT and the commit-id UPDATE
-// these methods need.
+// orchestrator or a control pod, none of them acting for a signed-in user. The
+// executor's tf_system role holds the INSERT and the commit-id UPDATE the
+// orchestrator's methods need; the queue's transitions (ClaimRequestSystem,
+// SignSystem, RefuseSystem) are a control pod's, which tf_system cannot make.
 type CommitSignatureStore interface {
 	// InsertSystem records one signature and returns the stored row: a
 	// request (state requested, with no key, signature, signing time or
@@ -141,6 +142,45 @@ type CommitSignatureStore interface {
 	// failing result again on every read, so it reads valid once the fault is
 	// fixed.
 	NewestFailedVerificationSystem(ctx context.Context, orgID, host string, userID int64) (*domain.CommitSignature, error)
+
+	// ClaimRequestSystem takes one request for the control pod claimedBy to
+	// decide: requested → signing, stamping the pod, and returns the stored
+	// row. The update is conditional on the row still being a request, so
+	// when several pods race for one row exactly one gets it; the others,
+	// and a caller naming a row that is not a request in the org, get
+	// (nil, nil).
+	//
+	// A row whose pod dies before it decides stays signing. Nothing waits on
+	// it by then: the run that asked gives up within its own deadline, and a
+	// row that is not signed counts toward no budget.
+	ClaimRequestSystem(ctx context.Context, orgID, id, claimedBy string) (*domain.CommitSignature, error)
+
+	// SignSystem stores the signature claimedBy made for a request it
+	// claimed, with the key that made it and the signing time, and returns
+	// the stored row: signing → signed. A row that is not signing under that
+	// pod gets ErrNoSuchCommitSignature; a missing key or signature gets
+	// ErrInvalidCommitSignature.
+	SignSystem(ctx context.Context, orgID, id, claimedBy, publicKey, signature string, signedAt time.Time) (domain.CommitSignature, error)
+
+	// RefuseSystem stores claimedBy's refusal of a request it claimed and
+	// returns the stored row: signing → refused, with the reason and, for a
+	// refusal by the per-minute budget, the seconds until the budget admits
+	// another (zero otherwise). A row that is not signing under that pod
+	// gets ErrNoSuchCommitSignature; an empty reason or a negative wait gets
+	// ErrInvalidCommitSignature.
+	RefuseSystem(ctx context.Context, orgID, id, claimedBy, reason string, retryAfterSeconds int) (domain.CommitSignature, error)
+
+	// ListRequestedSystem returns up to limit requests no pod has claimed
+	// that are at least minAge old on the database's clock, oldest first:
+	// a control pod's sweep for the requests whose doorbell it never heard.
+	// minAge keeps the sweep off a request whose doorbell is still in
+	// flight. Cross-org: the sweep is a system job serving every org.
+	ListRequestedSystem(ctx context.Context, minAge time.Duration, limit int) ([]domain.CommitSignature, error)
+
+	// PendingRequestsSystem counts the requests no pod has claimed, across
+	// every org, and returns how long the oldest has waited on the
+	// database's clock (zero when there are none).
+	PendingRequestsSystem(ctx context.Context) (count int, oldestAge time.Duration, err error)
 }
 
 // SignatureWindow is OrgSignaturesSinceSystem's answer. Oldest is nil when
@@ -294,6 +334,27 @@ func ValidateNewCommitSignature(sig domain.CommitSignature) error {
 		}
 	default:
 		return fmt.Errorf("%w: a row is inserted requested or signed, not %q", ErrInvalidCommitSignature, sig.State)
+	}
+	return nil
+}
+
+// ValidateCommitSignatureSign is SignSystem's refusal of a signature that
+// could not verify, shared so both dialects refuse the same writes.
+func ValidateCommitSignatureSign(publicKey, signature string, signedAt time.Time) error {
+	if publicKey == "" || signature == "" || signedAt.IsZero() {
+		return fmt.Errorf("%w: a signature needs its key, signature and signing time", ErrInvalidCommitSignature)
+	}
+	return nil
+}
+
+// ValidateCommitSignatureRefusal is RefuseSystem's refusal of a refusal that
+// names no reason, shared so both dialects refuse the same writes.
+func ValidateCommitSignatureRefusal(reason string, retryAfterSeconds int) error {
+	if reason == "" {
+		return fmt.Errorf("%w: a refusal names its reason", ErrInvalidCommitSignature)
+	}
+	if retryAfterSeconds < 0 {
+		return fmt.Errorf("%w: a negative wait", ErrInvalidCommitSignature)
 	}
 	return nil
 }

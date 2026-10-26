@@ -93,12 +93,20 @@ type App struct {
 	// commitSigningBudgets are the limits on how many commit signatures one
 	// org and one claim are given, read at boot on the roles that sign
 	// (plan.signsCommits) so a bad value refuses the boot instead of the
-	// first signature.
-	// TODO(TFAC-1195): the control-plane signer enforces them on every
-	// control pod.
+	// first signature. In multi mode every control pod's commitSigner
+	// enforces them.
 	// TODO(TFAC-1196): the local signing daemon enforces them on every local
 	// signature.
 	commitSigningBudgets commitsigner.Budgets
+
+	// commitSigner is this control pod's half of multi-mode commit signing:
+	// it decides the signature requests executors queue, and runs whether or
+	// not this pod holds the brain lease. nil on an executor and in local
+	// mode.
+	commitSigner *commitsigner.ControlPlane
+	// commitSignDoorbells routes sign_done to the signature requests this
+	// executor's runs are waiting on. nil on a control pod and in local mode.
+	commitSignDoorbells *commitsigner.Doorbells
 
 	// capBroker is the spawned cap-broker subprocess, non-nil only on a host
 	// that sandboxes runs (multi mode + Linux). nil otherwise — local mode
@@ -285,6 +293,10 @@ type App struct {
 	// (tf_upstream_up), on the same lifecycle and for the same reason as
 	// workDepth above. nil when the brain isn't running.
 	connectionGauge *poller.ConnectionObserver
+	// commitSignQueue is the brain's commit-signing queue observer, on the
+	// same lifecycle and for the same reason as workDepth above. nil when the
+	// brain isn't running, and in local mode, which queues no requests.
+	commitSignQueue *commitsigner.QueueObserver
 
 	// shuttingDown latches once Run's blocking listener has unwound and the
 	// dispatch drain has begun (drainDispatches). The executor healthz reads
@@ -450,6 +462,9 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	if err = a.buildCredProvisioner(); err != nil {
 		return nil, err
 	}
+	// Multi mode's control-plane commit signing: the signer on control pods,
+	// the requester on executors. After buildExecution (the spawner).
+	a.buildCommitSigning()
 	// The memory provisioner (brain-capable roles in BOTH modes, unlike the
 	// credential one above). After buildRunCredentials and buildServer, whose
 	// recorder / credential seams and websocket hub it holds.

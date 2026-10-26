@@ -240,3 +240,102 @@ func (s *commitSignatureStore) NewestFailedVerificationSystem(ctx context.Contex
 	}
 	return &row, nil
 }
+
+func (s *commitSignatureStore) ClaimRequestSystem(ctx context.Context, orgID, id, claimedBy string) (*domain.CommitSignature, error) {
+	if !isValidUUID(id) {
+		return nil, nil
+	}
+	row, err := db.ScanCommitSignature(s.q.QueryRowContext(ctx, `
+		UPDATE commit_signatures SET state = $3, claimed_by = $4
+		 WHERE org_id = $1 AND id = $2 AND state = $5
+		RETURNING `+db.CommitSignatureColumns,
+		orgID, id, string(domain.CommitSignatureSigning), claimedBy, string(domain.CommitSignatureRequested)).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+func (s *commitSignatureStore) SignSystem(ctx context.Context, orgID, id, claimedBy, publicKey, signature string, signedAt time.Time) (domain.CommitSignature, error) {
+	if err := db.ValidateCommitSignatureSign(publicKey, signature, signedAt); err != nil {
+		return domain.CommitSignature{}, err
+	}
+	if !isValidUUID(id) {
+		return domain.CommitSignature{}, db.ErrNoSuchCommitSignature
+	}
+	row, err := db.ScanCommitSignature(s.q.QueryRowContext(ctx, `
+		UPDATE commit_signatures SET state = $5, public_key = $6, signature = $7, signed_at = $8
+		 WHERE org_id = $1 AND id = $2 AND state = $3 AND claimed_by = $4
+		RETURNING `+db.CommitSignatureColumns,
+		orgID, id, string(domain.CommitSignatureSigning), claimedBy,
+		string(domain.CommitSignatureSigned), publicKey, signature, signedAt.UTC()).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.CommitSignature{}, db.ErrNoSuchCommitSignature
+	}
+	return row, err
+}
+
+func (s *commitSignatureStore) RefuseSystem(ctx context.Context, orgID, id, claimedBy, reason string, retryAfterSeconds int) (domain.CommitSignature, error) {
+	if err := db.ValidateCommitSignatureRefusal(reason, retryAfterSeconds); err != nil {
+		return domain.CommitSignature{}, err
+	}
+	if !isValidUUID(id) {
+		return domain.CommitSignature{}, db.ErrNoSuchCommitSignature
+	}
+	var retryAfter any
+	if retryAfterSeconds > 0 {
+		retryAfter = retryAfterSeconds
+	}
+	row, err := db.ScanCommitSignature(s.q.QueryRowContext(ctx, `
+		UPDATE commit_signatures SET state = $5, refusal_reason = $6, retry_after_seconds = $7
+		 WHERE org_id = $1 AND id = $2 AND state = $3 AND claimed_by = $4
+		RETURNING `+db.CommitSignatureColumns,
+		orgID, id, string(domain.CommitSignatureSigning), claimedBy,
+		string(domain.CommitSignatureRefused), reason, retryAfter).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.CommitSignature{}, db.ErrNoSuchCommitSignature
+	}
+	return row, err
+}
+
+func (s *commitSignatureStore) ListRequestedSystem(ctx context.Context, minAge time.Duration, limit int) ([]domain.CommitSignature, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+db.CommitSignatureColumns+` FROM commit_signatures
+		 WHERE state = $1 AND created_at <= statement_timestamp() - make_interval(secs => $2)
+		 ORDER BY created_at, id
+		 LIMIT $3`,
+		string(domain.CommitSignatureRequested), minAge.Seconds(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.CommitSignature
+	for rows.Next() {
+		row, err := db.ScanCommitSignature(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *commitSignatureStore) PendingRequestsSystem(ctx context.Context) (int, time.Duration, error) {
+	var (
+		count  int
+		oldest float64
+	)
+	if err := s.q.QueryRowContext(ctx, `
+		SELECT count(*), COALESCE(EXTRACT(EPOCH FROM statement_timestamp() - min(created_at)), 0)::float8
+		  FROM commit_signatures WHERE state = $1`,
+		string(domain.CommitSignatureRequested)).Scan(&count, &oldest); err != nil {
+		return 0, 0, err
+	}
+	return count, max(time.Duration(oldest*float64(time.Second)), 0), nil
+}

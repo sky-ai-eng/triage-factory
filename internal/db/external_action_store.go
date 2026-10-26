@@ -31,8 +31,9 @@ import (
 // Both Record paths use ON CONFLICT(org_id, scope, dedup_key) DO NOTHING —
 // append-only, never a mutation. An empty entry.DedupKey is filled with a uuid
 // (a unique, non-colliding key) so the row is an unconditional append. A
-// caller that sets one gets the collapse: the natural keys of the branch push
-// and the egress denial (domain.BranchPushDedupKey, domain.EgressDenialDedupKey),
+// caller that sets one gets the collapse: the natural keys of the branch push,
+// the egress denial and the spent signing budget (domain.BranchPushDedupKey,
+// domain.EgressDenialDedupKey, domain.CommitSignBudgetDedupKey),
 // and the per-act key the agent's recording funnel fixes before its first
 // attempt, so a retried write lands on the row it may already have written.
 // An empty entry.Scope is refused with

@@ -1,6 +1,11 @@
 // Package commitsigner decides who a delegated run's commits are authored and
 // committed as, and whether and how they are signed, and holds the operator
 // limits on how many signatures TF makes.
+//
+// It also holds multi mode's signing queue, whose two halves never share a
+// process: an executor's Requester queues a sandboxed run's digest and waits
+// for the answer, and every control pod's ControlPlane claims, checks and
+// signs it with a key no executor holds.
 package commitsigner
 
 import (

@@ -270,3 +270,114 @@ func (s *commitSignatureStore) NewestFailedVerificationSystem(ctx context.Contex
 	}
 	return &row, nil
 }
+
+// The queue transitions below are multi mode's: the local daemon records each
+// signature as it makes it, so a local database never holds a request. They
+// are implemented for the interface's sake, with the same semantics.
+
+func (s *commitSignatureStore) ClaimRequestSystem(ctx context.Context, orgID, id, claimedBy string) (*domain.CommitSignature, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	row, err := db.ScanCommitSignature(s.q.QueryRowContext(ctx, `
+		UPDATE commit_signatures SET state = ?, claimed_by = ?
+		 WHERE org_id = ? AND id = ? AND state = ?
+		RETURNING `+db.CommitSignatureColumns,
+		string(domain.CommitSignatureSigning), claimedBy, orgID, id, string(domain.CommitSignatureRequested)).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+func (s *commitSignatureStore) SignSystem(ctx context.Context, orgID, id, claimedBy, publicKey, signature string, signedAt time.Time) (domain.CommitSignature, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return domain.CommitSignature{}, err
+	}
+	if err := db.ValidateCommitSignatureSign(publicKey, signature, signedAt); err != nil {
+		return domain.CommitSignature{}, err
+	}
+	row, err := db.ScanCommitSignature(s.q.QueryRowContext(ctx, `
+		UPDATE commit_signatures SET state = ?, public_key = ?, signature = ?, signed_at = ?
+		 WHERE org_id = ? AND id = ? AND state = ? AND claimed_by = ?
+		RETURNING `+db.CommitSignatureColumns,
+		string(domain.CommitSignatureSigned), publicKey, signature, signedAt.UTC(),
+		orgID, id, string(domain.CommitSignatureSigning), claimedBy).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.CommitSignature{}, db.ErrNoSuchCommitSignature
+	}
+	return row, err
+}
+
+func (s *commitSignatureStore) RefuseSystem(ctx context.Context, orgID, id, claimedBy, reason string, retryAfterSeconds int) (domain.CommitSignature, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return domain.CommitSignature{}, err
+	}
+	if err := db.ValidateCommitSignatureRefusal(reason, retryAfterSeconds); err != nil {
+		return domain.CommitSignature{}, err
+	}
+	var retryAfter any
+	if retryAfterSeconds > 0 {
+		retryAfter = retryAfterSeconds
+	}
+	row, err := db.ScanCommitSignature(s.q.QueryRowContext(ctx, `
+		UPDATE commit_signatures SET state = ?, refusal_reason = ?, retry_after_seconds = ?
+		 WHERE org_id = ? AND id = ? AND state = ? AND claimed_by = ?
+		RETURNING `+db.CommitSignatureColumns,
+		string(domain.CommitSignatureRefused), reason, retryAfter,
+		orgID, id, string(domain.CommitSignatureSigning), claimedBy).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.CommitSignature{}, db.ErrNoSuchCommitSignature
+	}
+	return row, err
+}
+
+// ListRequestedSystem compares against a Go time, the way every created_at
+// here is bound, so both sides of the comparison are the same text format.
+func (s *commitSignatureStore) ListRequestedSystem(ctx context.Context, minAge time.Duration, limit int) ([]domain.CommitSignature, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+db.CommitSignatureColumns+` FROM commit_signatures
+		 WHERE state = ? AND created_at <= ?
+		 ORDER BY created_at, id
+		 LIMIT ?`,
+		string(domain.CommitSignatureRequested), time.Now().UTC().Add(-minAge), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.CommitSignature
+	for rows.Next() {
+		row, err := db.ScanCommitSignature(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *commitSignatureStore) PendingRequestsSystem(ctx context.Context) (int, time.Duration, error) {
+	var (
+		count  int
+		oldest sql.NullString
+	)
+	if err := s.q.QueryRowContext(ctx, `
+		SELECT count(*), min(created_at) FROM commit_signatures WHERE state = ?`,
+		string(domain.CommitSignatureRequested)).Scan(&count, &oldest); err != nil {
+		return 0, 0, err
+	}
+	if !oldest.Valid {
+		return count, 0, nil
+	}
+	t, err := parseDBDatetime(oldest.String)
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse oldest created_at %q: %w", oldest.String, err)
+	}
+	return count, max(time.Since(t), 0), nil
+}

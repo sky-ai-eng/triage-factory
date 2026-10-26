@@ -487,6 +487,11 @@ services:
       # arithmetic in docs/self-hosting/scaling.md.
       TF_DB_MAX_OPEN_CONNS: ${TF_DB_MAX_OPEN_CONNS:-}
       TF_PLATFORM_RESERVE_MB: ${TF_PLATFORM_RESERVE_MB:-}
+      # Commit signing budgets, read where signatures are made: every control
+      # pod. Empty → the defaults (600 per org per minute, 5000 per claim).
+      # The executor below never signs, so neither is forwarded to it.
+      TF_MAX_COMMIT_SIGNATURES_PER_ORG_MINUTE: ${TF_MAX_COMMIT_SIGNATURES_PER_ORG_MINUTE:-}
+      TF_MAX_COMMIT_SIGNATURES_PER_CLAIM: ${TF_MAX_COMMIT_SIGNATURES_PER_CLAIM:-}
       # supabase_admin is the real superuser in the supabase/postgres
       # image; the `postgres` role is demoted by the image's bundled
       # migrations and supautils blocks reserved-role ALTERs from it.

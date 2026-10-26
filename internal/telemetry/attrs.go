@@ -54,6 +54,9 @@ const (
 	keySnapWaitedMS   = attribute.Key("snapshot.waited_ms")
 	keyAgentCostUSD   = attribute.Key("agent.cost_usd")
 	keyAgentDuration  = attribute.Key("agent.duration_ms")
+	keySigner         = attribute.Key("signer")
+	keySigningMode    = attribute.Key("mode")
+	keyBudget         = attribute.Key("budget")
 )
 
 // Opaque row identifiers, the backbone of the set. Each is the id and
@@ -194,3 +197,13 @@ func SnapshotWaitedMs(ms int64) attribute.KeyValue { return keySnapWaitedMS.Int6
 // place as "which runs were slow to start".
 func AgentCostUSD(usd float64) attribute.KeyValue { return keyAgentCostUSD.Float64(usd) }
 func AgentDuration(ms int64) attribute.KeyValue   { return keyAgentDuration.Int64(ms) }
+
+// The commit-signing vocabulary, all closed sets TF declares. Signer is which
+// kind of signer a signature is made as, domain.CommitSigningMode's signing
+// values ("org", "deployment"); never the account's login or id. SigningMode
+// is where a signature is made, "local" (the TF process, for its own runs) or
+// "control_plane" (a control pod, for a sandboxed run's digest). Budget names
+// one of the signing limits, "org_per_minute" or "per_claim".
+func Signer(kind string) attribute.KeyValue       { return keySigner.String(kind) }
+func SigningMode(where string) attribute.KeyValue { return keySigningMode.String(where) }
+func Budget(name string) attribute.KeyValue       { return keyBudget.String(name) }

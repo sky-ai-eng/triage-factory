@@ -54,3 +54,25 @@ func TestCommitSignatureStore_SQLite_Conformance(t *testing.T) {
 		return sqlitestore.New(conn).CommitSignatures, runmode.LocalDefaultOrgID, seed
 	})
 }
+
+// TestCommitSignatureQueue_SQLite_Conformance runs the control-plane queue's
+// contract against the SQLite impl. Local mode never queues a request, but the
+// store answers the interface the same way in both dialects.
+func TestCommitSignatureQueue_SQLite_Conformance(t *testing.T) {
+	dbtest.RunCommitSignatureQueueConformance(t, func(t *testing.T) dbtest.CommitSignatureQueueFixture {
+		conn := openSQLiteForTest(t)
+		stores := sqlitestore.New(conn)
+		return dbtest.CommitSignatureQueueFixture{
+			Signatures: stores.CommitSignatures,
+			Claims:     stores.ConversationQueue,
+			OrgID:      runmode.LocalDefaultOrgID,
+			Claim: func(t *testing.T, claimedAt time.Time, released bool) (string, string) {
+				t.Helper()
+				taskID := seedSQLiteTaskForSnapshot(t, conn, uuid.New().String()[:8])
+				conversationID := uuid.New().String()
+				dbtest.SeedConversation(t, conn, domain.Conversation{ID: conversationID, TaskID: taskID})
+				return conversationID, seedSQLiteClaimForSnapshot(t, conn, conversationID, claimedAt, released)
+			},
+		}
+	})
+}

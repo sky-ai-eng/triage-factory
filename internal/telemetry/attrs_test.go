@@ -30,6 +30,7 @@ var approvedKeys = []string{
 	"attempt",
 	"blueprint_run.id",
 	"bucket",
+	"budget",
 	"claim.attempt",
 	"conversation.id",
 	"count",
@@ -39,6 +40,7 @@ var approvedKeys = []string{
 	"event.id",
 	"event.type",
 	"job",
+	"mode",
 	"op",
 	"org.id",
 	"outcome",
@@ -46,6 +48,7 @@ var approvedKeys = []string{
 	"queue.wait_ms",
 	"reason",
 	"runtime",
+	"signer",
 	"size_bytes",
 	"snapshot.bundle_bytes",
 	"snapshot.patch_bytes",
@@ -73,6 +76,7 @@ func TestAttributeHelpersEmitOnlyApprovedKeys(t *testing.T) {
 		Op("SetupNetwork"), Workspace("rehydrated"), Bucket("core"), Credential("pat"), SizeBytes(4096),
 		SnapshotBundleBytes(1024), SnapshotPatchBytes(512),
 		SnapshotTranscriptBytes(2048), SnapshotRawBytes(8192), SnapshotWaitedMs(250),
+		Signer("org"), SigningMode("control_plane"), Budget("per_claim"),
 		AgentCostUSD(0.42), AgentDuration(9000),
 		WorkKind("event_queue"), Reason("budget_exhausted"),
 	}
@@ -117,6 +121,7 @@ func TestEveryAttributeHelperIsCovered(t *testing.T) {
 		"SnapshotWaitedMs": true,
 		"AgentCostUSD":     true, "AgentDuration": true,
 		"WorkKind": true, "Reason": true,
+		"Signer": true, "SigningMode": true, "Budget": true,
 	}
 	sort.Strings(declared)
 	for _, name := range declared {
