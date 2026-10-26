@@ -265,7 +265,7 @@ export function Shell({
         setPal((p) => !p)
         setQ('')
         setSel(0)
-      } else if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
+      } else if ((e.metaKey || e.ctrlKey) && e.key === 'b') {
         e.preventDefault()
         toggleRef.current()
       } else if (e.key === 'Escape') {
@@ -653,14 +653,14 @@ export function Shell({
             tabIndex={0}
             aria-label={open ? 'Collapse navigation' : 'Expand navigation'}
             onKeyDown={enter(toggle)}
-            onMouseEnter={tipOn('Expand · ⌘\\')}
+            onMouseEnter={tipOn('Expand · ⌘B')}
             onMouseLeave={tipOff}
           >
             <div className="sh-ico">
               <Ico d={open ? 'narrow' : 'wide'} />
             </div>
             <div className="sh-name">Collapse</div>
-            <div className="sh-tail">⌘\</div>
+            <div className="sh-tail">⌘B</div>
           </div>
           {open && (
             <div className={'sh-youwrap' + (me ? ' on' : '')}>

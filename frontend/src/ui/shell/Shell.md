@@ -19,7 +19,7 @@ for a feature the reader cannot buy.
 
 ## Collapsed by default
 
-52px closed, 208px open, `⌘\` to pin, and the preference persists. Closed, a
+52px closed, 208px open, `⌘B` to pin, and the preference persists. Closed, a
 section heading becomes a hairline rule — and gives up its height, or the closed
 rail ends up taller than the open one. Four short runs of glyphs read cold in a
 way one column of twelve does not.
@@ -93,7 +93,7 @@ the only one that is earned — a retry loop genuinely is still running.
 
 ## Keyboard
 
-`⌘K` opens the palette, `⌘\` pins the rail, `Esc` closes whatever is open,
+`⌘K` opens the palette, `⌘B` pins the rail, `Esc` closes whatever is open,
 innermost first. Every row takes focus and announces itself: a parent that opens
 a column is a `button`, a row that goes somewhere is a `link`, and the active
 row carries `aria-current`. Focusing a glyph in the collapsed rail shows its

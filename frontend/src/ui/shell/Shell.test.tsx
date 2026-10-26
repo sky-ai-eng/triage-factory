@@ -157,11 +157,11 @@ describe('Shell — the rail pin', () => {
 
     expect(rail()).not.toHaveClass('open')
 
-    await user.keyboard('{Meta>}\\{/Meta}')
+    await user.keyboard('{Meta>}b{/Meta}')
     expect(rail()).toHaveClass('open')
     expect(localStorage.getItem('tf-rail')).toBe('1')
 
-    await user.keyboard('{Meta>}\\{/Meta}')
+    await user.keyboard('{Meta>}b{/Meta}')
     expect(localStorage.getItem('tf-rail')).toBe('0')
 
     // Opening a panel from a collapsed rail widens it — a panel is a region of
