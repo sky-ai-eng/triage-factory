@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -31,6 +32,11 @@ type LocalCommitSigning struct {
 	// in the exec CLI counts against the same numbers as one the server's
 	// daemon makes.
 	Budgets commitsigner.Budgets `json:"budgets"`
+
+	// AllowedSignersFile is the run's gpg.ssh.allowedSignersFile. A signature
+	// made with a key it does not list yet adds the key, so git verifies the
+	// commits a run signs after a rotation it did not start with.
+	AllowedSignersFile string `json:"allowed_signers_file"`
 }
 
 // CommitSigningEnvVar carries a LocalCommitSigning, as JSON, to the exec CLI
@@ -38,6 +44,12 @@ type LocalCommitSigning struct {
 // in-process, with no daemon to be handed it. A run with the sandbox on is
 // served by a daemon the spawner hands it directly, and its CLI never reads
 // this.
+//
+// The agent of a run with the sandbox off runs as the operator's user, in
+// this environment, so it can run the CLI with a value of its own. The claim,
+// the budgets and the committer named here then hold only for an agent that
+// does not. Its signer is still checked against the org's, so a value naming
+// another account signs nothing.
 const CommitSigningEnvVar = "TRIAGE_FACTORY_COMMIT_SIGNING"
 
 // EnvEntry is s as the KEY=VALUE environment entry CommitSigningEnvVar names.
@@ -110,6 +122,12 @@ func (r *directRuntime) SignCommit(ctx context.Context, payload []byte) (SignCom
 		Payload:        payload,
 	})
 	if res.Outcome == commitsigner.OutcomeSigned {
+		if cs.AllowedSignersFile != "" {
+			if err := githooks.AddAllowedSigner(cs.AllowedSignersFile, cs.Signer.Email, res.PublicKey); err != nil {
+				agenthostLog.Warn("adding the signing key to the run's allowed-signers file failed; git in the run reports this commit's signature unverified",
+					"org", r.info.OrgID, "conversation", r.info.ConversationID, "error", err)
+			}
+		}
 		return SignCommitResult{Signature: res.Signature}, nil
 	}
 	return SignCommitResult{Refusal: commitsigner.RefusalLine(res, cs.Signer)}, nil

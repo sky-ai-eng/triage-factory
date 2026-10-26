@@ -382,6 +382,7 @@ func TestCommitSigner_RegisterRefusals(t *testing.T) {
 		{"an empty email", map[string]any{"login": "octocat", "email": ""}, http.StatusBadRequest, "INVALID_FIELD", "email"},
 		{"an email with a name", map[string]any{"login": "octocat", "email": "Bot <bot@acme.example>"}, http.StatusBadRequest, "INVALID_FIELD", "email"},
 		{"an email with space", map[string]any{"login": "octocat", "email": " bot@acme.example"}, http.StatusBadRequest, "INVALID_FIELD", "email"},
+		{"an email git would rewrite", map[string]any{"login": "octocat", "email": "'bot@acme.example"}, http.StatusBadRequest, "INVALID_FIELD", "email"},
 		{"no such account", map[string]any{"login": "nobody"}, http.StatusUnprocessableEntity, "INVALID_FIELD", "login"},
 		{"a bot", map[string]any{"login": "helper"}, http.StatusUnprocessableEntity, "INVALID_FIELD", "login"},
 		{"an organization", map[string]any{"login": "acme"}, http.StatusUnprocessableEntity, "INVALID_FIELD", "login"},

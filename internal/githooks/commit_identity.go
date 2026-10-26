@@ -1,6 +1,8 @@
 package githooks
 
 import (
+	"bytes"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -147,4 +149,29 @@ func AllowedSigners(email string, publicKeys ...string) []byte {
 		b.WriteString(email + ` namespaces="git" ` + key + "\n")
 	}
 	return []byte(b.String())
+}
+
+// AddAllowedSigner appends publicKey's line to the allowed-signers file at
+// path when the file does not list it yet: a key the signer rotated to after
+// the run started, which git then checks the run's later commits against.
+// The file is appended to in place, never replaced, because the local sandbox
+// binds it by inode.
+func AddAllowedSigner(path, email, publicKey string) error {
+	line := AllowedSigners(email, publicKey)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if len(line) == 0 || bytes.Contains(content, line) {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(line); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }

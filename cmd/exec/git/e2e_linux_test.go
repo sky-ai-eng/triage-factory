@@ -156,7 +156,8 @@ func startSigningRun(t *testing.T, profileName string, key ed25519.PrivateKey, a
 		OrgID: runmode.LocalDefaultOrgID, ConversationID: conversationID, IsEventTriggered: true,
 	}, filepath.Join(sockDir, "run.sock"), &agenthost.LocalCommitSigning{
 		ClaimID: claimID, BootEpoch: 1, Signer: r.signer,
-		Budgets: commitsigner.Budgets{PerOrgMinute: commitsigner.DefaultMaxSignaturesPerOrgMinute, PerClaim: commitsigner.DefaultMaxSignaturesPerClaim},
+		Budgets:            commitsigner.Budgets{PerOrgMinute: commitsigner.DefaultMaxSignaturesPerOrgMinute, PerClaim: commitsigner.DefaultMaxSignaturesPerClaim},
+		AllowedSignersFile: allowed,
 	})
 	if err != nil {
 		t.Fatalf("StartLocal: %v", err)
@@ -490,4 +491,42 @@ func TestSigningRun_CommitsAcrossAKeyRotation(t *testing.T) {
 	r.commitFile("b.txt", "after the promotion")
 	r.assertSigned("HEAD", newPublic)
 	r.assertSigned("HEAD~1", oldPublic)
+}
+
+// A rotation that starts after the run does is in no allowed-signers file the
+// run was started with: the run adds the new key when it first signs with it,
+// so git still verifies what it commits.
+func TestSigningRun_VerifiesAfterARotationItDidNotStartWith(t *testing.T) {
+	oldKey, newKey := newKey(t), newKey(t)
+	oldPublic, newPublic := publicKey(t, oldKey), publicKey(t, newKey)
+	r := startSigningRun(t, "The Octocat", oldKey, nil)
+	if r.signer.PendingPublicKey != "" {
+		t.Fatalf("the run started with a pending key %q", r.signer.PendingPublicKey)
+	}
+	r.commitFile("a.txt", "before the rotation")
+	r.assertSigned("HEAD", oldPublic)
+
+	ctx := context.Background()
+	if _, err := r.stores.OrgCommitSigners.StagePendingKey(ctx, runmode.LocalDefaultOrgID, newPublic); err != nil {
+		t.Fatalf("StagePendingKey: %v", err)
+	}
+	if _, err := r.stores.OrgCommitSigners.Activate(ctx, runmode.LocalDefaultOrgID, newPublic); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	r.secrets.set(integrations.KeyGitHubCommitSigningKey, marshal(t, newKey))
+
+	r.commitFile("b.txt", "after the rotation")
+	r.assertSigned("HEAD", newPublic)
+	r.assertSigned("HEAD~1", oldPublic)
+
+	r.commitFile("c.txt", "signed with the new key again")
+	r.assertSigned("HEAD", newPublic)
+	allowed := r.run("config", "gpg.ssh.allowedSignersFile")
+	content, err := os.ReadFile(allowed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(content), newPublic); n != 1 {
+		t.Errorf("the allowed-signers file lists the new key %d times:\n%s", n, content)
+	}
 }

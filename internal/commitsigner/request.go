@@ -76,8 +76,10 @@ type Result struct {
 	Outcome     Outcome
 	SignatureID string
 
-	// Signature is the armored SSH signature, for OutcomeSigned.
+	// Signature is the armored SSH signature, and PublicKey the key that made
+	// it, for OutcomeSigned.
 	Signature string
+	PublicKey string
 
 	// Refusal says why, for OutcomeRefused; RetryAfterSeconds is how long
 	// until the org's per-minute budget admits another, set only for
@@ -195,7 +197,7 @@ func (r *Requester) await(ctx context.Context, orgID, id string, ring <-chan str
 		case row == nil:
 			return Result{}, errRequestVanished
 		case row.State == domain.CommitSignatureSigned:
-			return Result{Outcome: OutcomeSigned, SignatureID: id, Signature: row.Signature}, nil
+			return Result{Outcome: OutcomeSigned, SignatureID: id, Signature: row.Signature, PublicKey: row.PublicKey}, nil
 		case row.State == domain.CommitSignatureRefused && Refusal(row.RefusalReason) == RefusalUnanswered:
 			return Result{Outcome: OutcomeUnanswered, SignatureID: id}, nil
 		case row.State == domain.CommitSignatureRefused:

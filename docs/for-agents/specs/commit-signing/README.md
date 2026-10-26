@@ -262,7 +262,11 @@ tooling that calls them. Without it every local check fails with
 `gpg.ssh.allowedSignersFile needs to be configured`, signed or not. It holds
 one line per key, `<signer email> namespaces="git" <public key>`, for the
 signer's key and, during a rotation, its pending key, so a run that started
-before `verify` promotes the new key still checks its later commits. The
+before `verify` promotes the new key still checks its later commits. A
+local run whose signer rotates to a key the file does not list yet gets the
+key added when it first signs with it. A run continued in a new process
+writes a new file from the keys current then, so a commit it signed earlier
+with a key the signer has since dropped no longer checks inside the run. The
 file holds only public values. It is presented read-only, like the run's CA
 bundle: in multi mode the sidecar writes it into the run's socket directory
 beside `ca-bundle.crt` and the jail sees it at `/run/tf-allowed-signers`; in
@@ -438,6 +442,9 @@ pods in multi mode, the TF process locally), and counted over
   claim. Once spent, signing is off for the rest of that claim.
 
 They bound what one compromised or runaway run, or one org, can get signed.
+The count is read before a signature is made and its row is written after,
+so signatures made at the same moment can each pass at the limit: a limit
+is exceeded by at most the signatures in flight when it is reached.
 A rebase is the case they are sized for: it re-signs every commit it
 rewrites, so a 300-commit branch is 300 signatures in seconds, while a
 typical run makes a handful. The deployment signer has no limit of its own:

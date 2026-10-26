@@ -23,7 +23,7 @@ type Identity struct {
 // drops newlines, < and > anywhere else (strbuf_addstr_without_crud in git's
 // ident.c). A name compared against what ParseCommitter returns has to be
 // passed through this first, or a profile name like "Acme" (quotes included)
-// never matches the Acme git wrote.
+// never matches the Acme git wrote. Git applies the same rule to user.email.
 func IdentName(name string) string {
 	start, end := 0, len(name)
 	for start < end && identCrud(name[start]) {

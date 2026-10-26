@@ -114,3 +114,39 @@ func TestAllowedSigners(t *testing.T) {
 		t.Errorf("a rotation:\n%s\nwant\n%s", got, want)
 	}
 }
+
+func TestAddAllowedSigner(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "allowed")
+	if err := AddAllowedSigner(path, "a@example.com", "ssh-ed25519 AAAA2"); err == nil {
+		t.Error("a missing file was created rather than refused")
+	}
+	if err := os.WriteFile(path, AllowedSigners("a@example.com", "ssh-ed25519 AAAA1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := AddAllowedSigner(path, "a@example.com", "ssh-ed25519 AAAA2"); err != nil {
+			t.Fatalf("AddAllowedSigner: %v", err)
+		}
+	}
+	if err := AddAllowedSigner(path, "a@example.com", "ssh-ed25519 AAAA1"); err != nil {
+		t.Fatalf("AddAllowedSigner of a listed key: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := string(AllowedSigners("a@example.com", "ssh-ed25519 AAAA1", "ssh-ed25519 AAAA2")); string(got) != want {
+		t.Errorf("file =\n%s\nwant\n%s", got, want)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Error("the file was replaced; the sandbox's bind would still show the old one")
+	}
+}

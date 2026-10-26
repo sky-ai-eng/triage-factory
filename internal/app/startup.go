@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/ratelimits"
 	"github.com/sky-ai-eng/triage-factory/internal/repoevent"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -39,6 +40,12 @@ func (a *App) runStartupTasks(ctx context.Context) {
 	}
 	a.cleanupWorktrees(ctx)
 	if a.local() {
+		// Every engagement that wrote an allowed-signers file ended with the
+		// process before this one, and a run that continues writes its own
+		// under its new claim, so none of them is read again.
+		if err := os.RemoveAll(paths.AllowedSignersDir()); err != nil {
+			serverLog.Warn("removing the allowed-signers files of earlier runs failed", "error", err)
+		}
 		// The workspace key widened from the blueprint run to the task, and a
 		// migration re-keyed the lifecycle rows. The blobs those rows describe
 		// live in the object store, where no migration reaches, so they are

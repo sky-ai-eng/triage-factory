@@ -204,7 +204,7 @@ func (l *LocalSigner) Sign(ctx context.Context, req LocalRequest) (res Result) {
 	if err != nil {
 		return l.unanswered(ctx, req, "record the signature", err)
 	}
-	return Result{Outcome: OutcomeSigned, SignatureID: row.ID, Signature: row.Signature, CommitSHA: sha}
+	return Result{Outcome: OutcomeSigned, SignatureID: row.ID, Signature: row.Signature, PublicKey: row.PublicKey, CommitSHA: sha}
 }
 
 // unanswered logs why a signature could not be made and answers the run to

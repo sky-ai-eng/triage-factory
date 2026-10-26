@@ -19,9 +19,8 @@ import (
 // not sign, and every method is nil-safe so the caller wires it
 // unconditionally.
 type localCommitSigning struct {
-	signing        agenthost.LocalCommitSigning
-	allowedSigners string
-	envEntry       string
+	signing  agenthost.LocalCommitSigning
+	envEntry string
 }
 
 // prepareLocalCommitSigning sets up commit signing for a local engagement whose
@@ -29,8 +28,16 @@ type localCommitSigning struct {
 // not sign: the signer is not active, this host's git predates SSH signing, or
 // the allowed-signers file or the signing hand-off could not be written. A run
 // that does not sign still commits as the signer, unsigned.
+//
+// The engagement's claim id names its allowed-signers file and is what every
+// signature is checked against, so a run without one does not sign.
 func (s *Spawner) prepareLocalCommitSigning(ctx context.Context, orgID, conversationID, claimID string, signer commitsigner.Identity) *localCommitSigning {
 	if !signer.Mode.Signs() || runmode.Current() != runmode.ModeLocal {
+		return nil
+	}
+	if claimID == "" {
+		delegateLog.Error("the org has an active commit signer, but the engagement has no claim id; the run commits as the signer, unsigned",
+			"org", orgID, "conversation", conversationID)
 		return nil
 	}
 	if git := commitsigner.ProbeLocalGit(ctx); git.UnsignedReason != "" {
@@ -41,17 +48,17 @@ func (s *Spawner) prepareLocalCommitSigning(ctx context.Context, orgID, conversa
 	_, bootEpoch := s.executorIdentity()
 	c := &localCommitSigning{
 		signing: agenthost.LocalCommitSigning{
-			ClaimID:   claimID,
-			BootEpoch: bootEpoch,
-			Signer:    signer,
-			Budgets:   s.commitSigningBudgets(),
+			ClaimID:            claimID,
+			BootEpoch:          bootEpoch,
+			Signer:             signer,
+			Budgets:            s.commitSigningBudgets(),
+			AllowedSignersFile: paths.AllowedSignersPath(claimID),
 		},
-		allowedSigners: paths.AllowedSignersPath(claimID),
 	}
 	entry, err := c.signing.EnvEntry()
 	if err == nil {
 		c.envEntry = entry
-		err = writeAllowedSigners(c.allowedSigners, githooks.AllowedSigners(signer.Email, signer.PublicKey, signer.PendingPublicKey))
+		err = writeAllowedSigners(c.signing.AllowedSignersFile, githooks.AllowedSigners(signer.Email, signer.PublicKey, signer.PendingPublicKey))
 	}
 	if err != nil {
 		delegateLog.Error("setting up commit signing failed; the run commits as the signer, unsigned",
@@ -80,7 +87,7 @@ func (c *localCommitSigning) configPairs() [][2]string {
 	if c == nil {
 		return nil
 	}
-	return githooks.SigningConfigPairs(githooks.HostDir(), c.signing.Signer.PublicKey, c.allowedSigners)
+	return githooks.SigningConfigPairs(githooks.HostDir(), c.signing.Signer.PublicKey, c.signing.AllowedSignersFile)
 }
 
 // env carries the signing to the exec CLI that serves a run with the local
@@ -106,7 +113,7 @@ func (c *localCommitSigning) allowedSignersPath() string {
 	if c == nil {
 		return ""
 	}
-	return c.allowedSigners
+	return c.signing.AllowedSignersFile
 }
 
 // Close removes the engagement's allowed-signers file.
@@ -114,7 +121,7 @@ func (c *localCommitSigning) Close() {
 	if c == nil {
 		return
 	}
-	if err := os.Remove(c.allowedSigners); err != nil && !os.IsNotExist(err) {
-		delegateLog.Warn("removing an engagement's allowed-signers file failed", "path", c.allowedSigners, "error", err)
+	if err := os.Remove(c.signing.AllowedSignersFile); err != nil && !os.IsNotExist(err) {
+		delegateLog.Warn("removing an engagement's allowed-signers file failed", "path", c.signing.AllowedSignersFile, "error", err)
 	}
 }

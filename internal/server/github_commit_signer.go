@@ -349,7 +349,9 @@ func writeSSHSigningUnsupported(w http.ResponseWriter, host string) {
 
 // commitEmailProblem is why email cannot be a committer address, "" when it
 // can: a bare address, as git writes it between the angle brackets of the
-// committer header, with no display name, surrounding space or brackets.
+// committer header, with no display name, surrounding space or brackets, and
+// one git writes unchanged. A bare address can begin with an apostrophe, which
+// git drops, and the commit would then name an address the signer never set.
 func commitEmailProblem(email string) string {
 	if email == "" {
 		return "email must not be empty; send null to commit under the derived noreply address"
@@ -359,6 +361,9 @@ func commitEmailProblem(email string) string {
 	}
 	if addr, err := mail.ParseAddress(email); err != nil || addr.Name != "" || addr.Address != email {
 		return "email must be a bare email address, such as agent@example.com"
+	}
+	if commitsign.IdentName(email) != email {
+		return "email must not begin with an apostrophe, which git drops from a committer address"
 	}
 	return ""
 }

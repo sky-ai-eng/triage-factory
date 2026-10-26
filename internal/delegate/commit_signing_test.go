@@ -119,7 +119,8 @@ func TestPrepareLocalCommitSigning(t *testing.T) {
 		t.Fatalf("decode the env hand-off: %v", err)
 	}
 	if handed.ClaimID != "claim-1" || handed.BootEpoch != 7 || handed.Signer.Name != "Acme" ||
-		handed.Signer.Mode != domain.CommitSigningOrg || handed.Budgets.PerClaim != commitsigner.DefaultMaxSignaturesPerClaim {
+		handed.Signer.Mode != domain.CommitSigningOrg || handed.Budgets.PerClaim != commitsigner.DefaultMaxSignaturesPerClaim ||
+		handed.AllowedSignersFile != path {
 		t.Errorf("handed off %+v", handed)
 	}
 	if d := c.daemon(); d == nil || *d != handed {
@@ -156,6 +157,16 @@ func TestPrepareLocalCommitSigning_RunsThatDoNotSign(t *testing.T) {
 		}
 		if _, err := os.Stat(paths.AllowedSignersPath("claim-1")); !os.IsNotExist(err) {
 			t.Errorf("an unsigned run wrote an allowed-signers file: %v", err)
+		}
+	})
+	t.Run("no claim id", func(t *testing.T) {
+		s, _, _ := signingSpawner(t, true)
+		_, signer := s.resolveCommitIdentity(context.Background(), runmode.LocalDefaultOrgID, "event", "")
+		if c := s.prepareLocalCommitSigning(context.Background(), runmode.LocalDefaultOrgID, "conv-1", "", signer); c != nil {
+			t.Error("an engagement with no claim id prepared signing")
+		}
+		if entries, err := os.ReadDir(paths.AllowedSignersDir()); err == nil && len(entries) > 0 {
+			t.Errorf("an engagement with no claim id wrote %d allowed-signers files", len(entries))
 		}
 	})
 	t.Run("multi mode", func(t *testing.T) {
