@@ -115,7 +115,13 @@ describe('actionMeta', () => {
     // the push that never landed. They were the last four rendering as an
     // anonymous "action" pill — and, because the filter dropdown is derived
     // from ACTION_META, the only rows an operator could not narrow the feed to.
-    const denials = ['git_denied', 'egress_denied', 'branch_push_failed', 'gh_write_denied']
+    const denials = [
+      'git_denied',
+      'egress_denied',
+      'branch_push_failed',
+      'gh_write_denied',
+      'commit_sign_denied',
+    ]
     for (const action of denials) {
       expect(metaForAction(action)).not.toBe(FALLBACK_ACTION_META)
       expect(ACTION_OPTIONS.map((o) => o.value)).toContain(action)

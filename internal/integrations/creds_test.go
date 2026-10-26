@@ -3,7 +3,9 @@ package integrations_test
 import (
 	"context"
 	"database/sql"
+	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/zalando/go-keyring"
@@ -366,13 +368,17 @@ func TestAllKeys_IncludesLegacyKeychainKeys(t *testing.T) {
 }
 
 // TestStaticOrgSecretsExcludedFromAllKeys pins the TFAC-405 design decision: the
-// org-level Anthropic / Atlassian-OAuth secrets must NOT ride the integration-
-// credential key set. Nothing on that path reconciles their companion DB refs
-// (org_settings.anthropic_api_key_ref / the org_jira_apps row) — sweeping them
-// there would dangle the ref. They belong only in AllLocalSweepKeys (the full
-// uninstall wipe, where the DB is gone too).
+// org-level Anthropic / Atlassian-OAuth secrets and the commit-signing keys must
+// NOT ride the integration-credential key set. Nothing on that path reconciles
+// their companion DB state (org_settings.anthropic_api_key_ref / the
+// org_jira_apps row / the org_commit_signers row) — sweeping them there would
+// dangle it. They belong only in AllLocalSweepKeys (the full uninstall wipe,
+// where the DB is gone too).
 func TestStaticOrgSecretsExcludedFromAllKeys(t *testing.T) {
-	for _, k := range []string{integrations.KeyAnthropicAPIKey, integrations.KeyJiraOAuthClientSecret, integrations.KeyLinearOAuthClientSecret} {
+	for _, k := range []string{
+		integrations.KeyAnthropicAPIKey, integrations.KeyJiraOAuthClientSecret, integrations.KeyLinearOAuthClientSecret,
+		integrations.KeyGitHubCommitSigningKey, integrations.KeyGitHubCommitSigningKeyPending,
+	} {
 		if slices.Contains(integrations.AllKeys(), k) {
 			t.Errorf("%q must NOT be in AllKeys: nothing on that path reconciles its companion DB ref", k)
 		}
@@ -393,6 +399,7 @@ func TestAllLocalSweepKeys_IsAllKeysPlusStaticOrgSecrets(t *testing.T) {
 	}
 	orgSecrets := append([]string{integrations.KeyAnthropicAPIKey, integrations.KeyJiraOAuthClientSecret, integrations.KeyLinearOAuthClientSecret},
 		integrations.BedrockKeys()...)
+	orgSecrets = append(orgSecrets, integrations.KeyGitHubCommitSigningKey, integrations.KeyGitHubCommitSigningKeyPending)
 	for _, k := range orgSecrets {
 		if !slices.Contains(sweep, k) {
 			t.Errorf("AllLocalSweepKeys missing org-level secret %q", k)
@@ -632,5 +639,30 @@ func TestAllKeys_IncludesLinear(t *testing.T) {
 		if !slices.Contains(integrations.AllKeys(), k) {
 			t.Errorf("AllKeys missing %q", k)
 		}
+	}
+}
+
+// TestCleanSlateSweepsEveryLocalKey pins scripts/clean-slate.sh's hardcoded
+// keychain list to AllLocalSweepKeys, the set `triagefactory uninstall` sweeps.
+// The script cannot call the Go function, so the two are kept equal by this
+// test rather than by a comment asking for it: a key missing from the script
+// is a keychain entry clean-slate leaves behind.
+func TestCleanSlateSweepsEveryLocalKey(t *testing.T) {
+	src, err := os.ReadFile("../../scripts/clean-slate.sh")
+	if err != nil {
+		t.Fatalf("read clean-slate.sh: %v", err)
+	}
+	_, list, ok := strings.Cut(string(src), "\nkeychain_keys=(\n")
+	if !ok {
+		t.Fatal("clean-slate.sh has no keychain_keys=( block — its shape changed and this guard has stopped reading it")
+	}
+	list, _, ok = strings.Cut(list, "\n)")
+	if !ok {
+		t.Fatal("clean-slate.sh's keychain_keys block is not closed by a line holding only )")
+	}
+	script := slices.Sorted(slices.Values(strings.Fields(list)))
+	want := slices.Sorted(slices.Values(integrations.AllLocalSweepKeys()))
+	if !slices.Equal(script, want) {
+		t.Errorf("clean-slate.sh's keychain list drifted from AllLocalSweepKeys:\n  script = %v\n  Go     = %v", script, want)
 	}
 }

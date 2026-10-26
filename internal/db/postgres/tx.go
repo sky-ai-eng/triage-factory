@@ -378,6 +378,11 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// ModelAvailability has no admin half: every write is a request-path
 		// gesture, so the tx IS the whole store.
 		ModelAvailability: newModelAvailabilityStore(tx),
+		// OrgCommitSigners: app half is the tx, so a member's read and an
+		// admin's write both run under the caller's claims and commit with
+		// the rest of the transaction; the admin half stays pinned to s.admin
+		// like OrgEventSources'.
+		OrgCommitSigners: newOrgCommitSignerStore(tx, s.admin),
 		// Opaque extension bundles (the Enterprise Edition SSO stores) built
 		// from the same (app=tx, admin=s.admin) handles, so their app/admin
 		// pool split is identical to core's own stores — the login-time reads

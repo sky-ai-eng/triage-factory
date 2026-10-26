@@ -111,6 +111,61 @@ func TestTfSystem_WorkspaceSnapshotStoreConformance(t *testing.T) {
 	})
 }
 
+// TestTfSystem_CommitSignatureStoreConformance runs the signing log as the
+// role that records a run's signatures: the executor's orchestrator inserts a
+// request and stamps the commit id the daemon computed, and the budget counts
+// read over the same rows.
+func TestTfSystem_CommitSignatureStoreConformance(t *testing.T) {
+	h := Shared(t)
+	dbtest.RunCommitSignatureStoreConformance(t, func(t *testing.T) (db.CommitSignatureStore, string, dbtest.CommitSignatureSeeder) {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID, _ := SeedOrgWithUser(t, h, "signature-executor-org")
+		seed := dbtest.CommitSignatureSeeder{
+			Claim: func(t *testing.T) (string, string) {
+				t.Helper()
+				suffix := uuid.New().String()[:8]
+				taskID := seedTask(t, h, orgID, userID, seedEntity(t, h, orgID, "github", "octo/repo#"+suffix), "github:pr:opened")
+				conversationID, claimID := uuid.New().String(), uuid.New().String()
+				MustExec(t, h.AdminDB, `
+					INSERT INTO conversations (id, org_id, task_id, team_id, origin, trigger_type, creator_user_id, visibility)
+					VALUES ($1, $2, $3, (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
+					        'interactive', 'manual', $4, 'team')
+				`, conversationID, orgID, taskID, userID)
+				MustExec(t, h.AdminDB, `
+					INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+					VALUES ($1, $2, $3, 'signature-conformance', 1, now() + interval '5 minutes')
+				`, claimID, orgID, conversationID)
+				return conversationID, claimID
+			},
+			DeleteConversation: func(t *testing.T, conversationID string) {
+				t.Helper()
+				MustExec(t, h.AdminDB, `DELETE FROM conversations WHERE id = $1`, conversationID)
+			},
+		}
+		return pgstore.New(h.SystemDB, h.AppDB, SecretKey).CommitSignatures, orgID, seed
+	})
+}
+
+// TestTfSystem_CommitSignatureQueueWritesDenied pins the other half of the
+// grant: the executor records a request and its commit id, but claiming a
+// request and storing its signature or refusal are control-pod writes, so a
+// compromised executor can neither sign a request nor mark one signed.
+func TestTfSystem_CommitSignatureQueueWritesDenied(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+	for _, stmt := range []string{
+		`UPDATE commit_signatures SET state = 'signed'`,
+		`UPDATE commit_signatures SET signature = 'x'`,
+		`UPDATE commit_signatures SET claimed_by = 'x'`,
+		`UPDATE commit_signatures SET public_key = 'x'`,
+		`DELETE FROM commit_signatures`,
+	} {
+		_, err := h.SystemDB.Exec(stmt)
+		assertPgCode(t, err, "42501", "tf_system "+stmt)
+	}
+}
+
 // TestTfSystem_MissingGrantFailsTheWayProductionDid proves the guard above
 // actually sees a missing grant, by taking one away: revoke the sampler's
 // INSERT on sandbox_stats and the very first write the conformance suite makes

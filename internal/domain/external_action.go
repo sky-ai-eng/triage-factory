@@ -271,6 +271,17 @@ const (
 	// turning down an act, recorded as a security signal.
 	ActionGHWriteDenied = "gh_write_denied"
 
+	// A commit signature Triage Factory refused, recorded as a security
+	// signal like the gates above. Nothing was signed, so it is written under
+	// CredentialNone. detail_json carries {reason}: committer_mismatch, with
+	// the committer the commit named (a run asked to sign as someone other
+	// than its signer); budget_exhausted (a run reached its per-claim cap,
+	// one row per conversation, because the signal is that it happened); or
+	// claim_inactive (a request from an engagement that no longer holds its
+	// claim). A refusal because the signer stopped verifying is not recorded:
+	// the signer's own status already says so.
+	ActionCommitSignDenied = "commit_sign_denied"
+
 	// The fallback for a write the agent made through the real-`gh` credential
 	// channel — a mutating REST request whose method+path the shared classifier
 	// (internal/ghwrite) does not recognize, or a recognized one the upstream
@@ -430,7 +441,7 @@ func ExternalActionTypes() []string {
 		ActionLabelRemoved, ActionConversationLocked, ActionConversationUnlocked,
 		ActionWorkflowDispatched, ActionWorkflowRunCancelled, ActionBranchPushed,
 		ActionLinkedBranchCreated, ActionBranchPushFailed, ActionBranchDeleted, ActionGitDenied,
-		ActionEgressDenied, ActionGHWriteDenied, ActionGHChannelWrite, ActionGraphQLWrite,
+		ActionEgressDenied, ActionGHWriteDenied, ActionCommitSignDenied, ActionGHChannelWrite, ActionGraphQLWrite,
 		ActionIssueCreated, ActionIssueTransitioned, ActionIssueAssigned, ActionIssueUpdated,
 		ActionIssueCommentPosted, ActionIssueClosed, ActionIssueReopened, ActionIssueDeleted,
 		ActionIssuePinned, ActionIssueUnpinned, ActionIssueTransferred,
