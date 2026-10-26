@@ -34,6 +34,9 @@ type Identity struct {
 	// text, "" when it is not known. The manual-run co-author trailer
 	// compares the delegating person against it.
 	AccountID string
+	// Login is the signer's GitHub login when the identity is a signer's,
+	// which is what GitHub shows its commits under; "" otherwise.
+	Login string
 
 	// Mode is how the run's commits are signed. It is never empty.
 	Mode domain.CommitSigningMode
@@ -114,6 +117,7 @@ func signerIdentity(s domain.OrgCommitSigner) (Identity, bool) {
 		Name:      name,
 		Email:     email,
 		AccountID: strconv.FormatInt(s.GitHubUserID, 10),
+		Login:     s.Login,
 		Mode:      domain.CommitSigningNone,
 	}
 	if s.Status == domain.CommitSignerActive {
