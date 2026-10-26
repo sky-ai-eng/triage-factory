@@ -425,6 +425,11 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	// active signs here as runAgent's does, with the identity resolved now.
 	// Only a run that signs takes the identity: git can sign only a commit
 	// whose committer is the signer.
+	//
+	// TODO(TFAC-1206): stamp the identity and the co-author trailer on every
+	// resume, as runAgent does; a run whose org has no active signer commits
+	// here under the sandbox's placeholder identity or the operator's git
+	// config.
 	commitIdentity, signer := s.resolveCommitIdentity(ctx, orgID, triggerType, creatorUserID)
 	commitSigning := s.prepareLocalCommitSigning(ctx, orgID, conversationID, opts.claimID, signer)
 	defer commitSigning.Close()
