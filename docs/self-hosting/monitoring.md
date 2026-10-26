@@ -448,11 +448,13 @@ later; below that it commits as the signer, unsigned, and `GET
 git_too_old`.
 
 In multi mode no executor holds a signing key, so a sandboxed run's signature
-is made on a control pod:
+is made on a control pod. The run's sidecar holds the commit and makes the
+daemon's check; what leaves it is the commit's SHA-512 digest, relayed to its
+executor, and the signer the run's credential bundle was sealed with:
 
 1. The run's executor writes a `commit_signatures` row in state `requested`,
-   holding the SHA-512 digest of the commit (never the commit itself), and
-   rings every control pod over `tf_ctl` (`sign_request`).
+   holding the digest (never the commit itself), and rings every control pod
+   over `tf_ctl` (`sign_request`).
 2. Every control pod signs, whether or not it holds the background-brain lease.
    The pods race for the row, and the one that claims it checks that:
    - the run's engagement still holds its claim, at the executor boot that
@@ -465,6 +467,9 @@ is made on a control pod:
 4. The executor reads the row every 250ms in case that doorbell was dropped,
    and gives up after 30s; the run is then told to run the same git command
    again.
+5. The sidecar hands git the signature, computes the commit id it gives the
+   commit, and sends that id back to be stored on the row, in order with the
+   run's push records, so a push of the commit names its signer.
 
 `tf_ctl` can drop the first doorbell too, so each control pod also sweeps once
 a second for requests no pod has claimed half a second after they were made. A
@@ -491,13 +496,13 @@ budget one once per conversation).
 
 | Metric | Labels | Meaning |
 | -- | -- | -- |
-| `tf_commit_signatures_total` | `signer`, `outcome`, `reason`, `org_id` | Signature requests by the result the run got. `signer` is `org` or `deployment`. `outcome` is `signed`, `refused` or `unanswered`. `reason` names a refusal and is empty otherwise: `committer_mismatch` (the commit's committer is not the signer), `not_a_commit` (a tag or push certificate), `signer_inactive` (the org removed its signer, signs as another account now, or its signer is not `active`), `org_minute_budget`, `claim_budget`, `claim_inactive`. Counted by the executor whose run asked, or in local mode by the TF process. A local signature that could not be made (a read failed, the key could not be read) is `unanswered`. A multi-mode request that could not be queued or waited on at all is not counted; its `commit_signing.sign` span carries the error. |
+| `tf_commit_signatures_total` | `signer`, `outcome`, `reason`, `org_id` | Signature requests by the result the run got. `signer` is `org` or `deployment`. `outcome` is `signed`, `refused` or `unanswered`. `reason` names a refusal and is empty otherwise: `committer_mismatch` (the commit's committer is not the signer), `not_a_commit` (a tag or push certificate), `signer_inactive` (the org removed its signer, signs as another account now, or its signer is not `active`), `org_minute_budget`, `claim_budget`, `claim_inactive`. Counted by the executor whose run asked, or in local mode by the TF process; in multi mode a refusal the sidecar makes before asking (`committer_mismatch`, `not_a_commit`) is counted when its record reaches the executor. A local signature that could not be made (a read failed, the key could not be read) is `unanswered`. A multi-mode request that could not be queued or waited on at all is not counted; its `commit_signing.sign` span carries the error. |
 | `tf_commit_signing_duration_seconds` (histogram) | `signer`, `mode` | From a run's request to the signature in hand, for the requests signed. `mode` is `control_plane` (executors) or `local` (the local TF process). Buckets from 5ms to 30s. |
 | `tf_commit_signing_requests_pending` | — | Requests no control pod has claimed. **Zero is the steady state.** Read by the control pod holding the brain lease. |
 | `tf_commit_signing_oldest_pending_age_seconds` | — | How long the oldest of them has waited. Same source. |
 | `tf_commit_signing_swept_total` | — | Requests a control pod found by its once-a-second sweep rather than the `sign_request` doorbell. A steady rate means `tf_ctl` is dropping notifications, and each of those signatures waited up to a second and a half. Every control pod. |
 | `tf_commit_signing_limit` | `budget` | The configured budgets, `org_per_minute` and `per_claim`, so a rule compares two series instead of hard-coding a number. Every control pod, and the local TF process. |
-| `tf_commit_signing_pushes_total` | `signed`, `org_id` | Pushes from runs whose org resolves to an active signer, by whether the pushed tip was signed (`true` or `false`), landed or refused alike. An unsigned one is a run that committed with signing off. Local mode. |
+| `tf_commit_signing_pushes_total` | `signed`, `org_id` | Pushes from runs whose org resolves to an active signer, by whether the pushed tip was signed (`true` or `false`), landed or refused alike. An unsigned one is a run that committed with signing off. Local mode resolves the org's signer at each push; an executor cannot read it, so in multi mode a push counts when the run's credential bundle named a signer when its sandbox started. |
 
 The two gauges come from the brain rather than the signers on purpose: a queue
 no control pod is draining is what they report, so the signers must not be what

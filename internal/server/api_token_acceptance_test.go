@@ -89,11 +89,12 @@ func TestBearerAuth_CursorScopedSurfaceNeedsNoActiveOrg(t *testing.T) {
 	}
 }
 
-// TestBearerAuth_WizardWritesLandUnderToken covers the two writes the headless
-// wizard drive needed and could not make: the team's tracked set, and the
-// per-user GitHub identity bind. The tracked-set write is proven by read-back.
-// The identity bind is proven against a stand-in GitHub that accepts the PAT,
-// so what lands is the identity row the real flow would write.
+// TestBearerAuth_WizardWritesLandUnderToken covers the write the headless
+// wizard drive needed and could not make: the team's tracked set, proven by
+// read-back. The per-user GitHub identity is not a token's to bind in multi
+// mode: it is linked through Connect, a browser flow, and the token-capture
+// route does not exist there, so the token gets the 404 any caller gets and
+// nothing is written.
 func TestBearerAuth_WizardWritesLandUnderToken(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -101,25 +102,10 @@ func TestBearerAuth_WizardWritesLandUnderToken(t *testing.T) {
 	sid := r.signIn(userID)
 	tok := r.createToken(sid, map[string]any{"name": "wizard", "org_id": orgID.String()})
 
-	// The org's GitHub, which the tracked set is kept on: a stand-in that
-	// answers the two calls the bind makes — whoami and the email list — for
-	// exactly one PAT, so the handler's own validation is exercised without a
-	// network and the outcome is a persisted identity.
-	const pat = "ghp_wizard_probe"
-	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if req.Header.Get("Authorization") != "Bearer "+pat {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		switch req.URL.Path {
-		case "/api/v3/user":
-			_, _ = w.Write([]byte(`{"login":"wizard-user","id":4242}`))
-		case "/api/v3/user/emails":
-			_, _ = w.Write([]byte(`[{"email":"wizard@test","primary":true,"verified":true}]`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
+	// The org's GitHub, which the tracked set is kept on. Nothing here asks it
+	// anything; a stand-in keeps the host a real URL.
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
 	}))
 	t.Cleanup(github.Close)
 	if _, err := r.h.AdminDB.Exec(`
@@ -160,27 +146,18 @@ func TestBearerAuth_WizardWritesLandUnderToken(t *testing.T) {
 	}
 
 	bind := "/api/orgs/" + orgID.String() + "/github/identity/pat"
-	rec = r.tokensJSON("POST", bind, map[string]any{"pat": "ghp_wrong"}, "", tok.Token)
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("bind with a PAT GitHub rejects = %d, want 422 (the handler's own fault, not the credential's): %s",
-			rec.Code, rec.Body.String())
+	rec = r.tokensJSON("POST", bind, map[string]any{"pat": "ghp_wizard_probe"}, "", tok.Token)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("token identity capture in multi mode = %d, want 404: %s", rec.Code, rec.Body.String())
 	}
-	if f := errorItems(t, rec)[0].Field; f != "github_pat" {
-		t.Errorf("bind fault field = %q, want github_pat", f)
-	}
-
-	rec = r.tokensJSON("POST", bind, map[string]any{"pat": pat}, "", tok.Token)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("bind under a token = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
-	var login, source string
+	var n int
 	if err := r.h.AdminDB.QueryRow(`
-		SELECT login, source FROM user_github_identities WHERE user_id = $1 AND github_base_url = $2
-	`, userID, github.URL).Scan(&login, &source); err != nil {
-		t.Fatalf("identity row after the token's bind: %v", err)
+		SELECT count(*) FROM user_github_identities WHERE user_id = $1 AND github_base_url = $2
+	`, userID, github.URL).Scan(&n); err != nil {
+		t.Fatalf("count identity rows: %v", err)
 	}
-	if login != "wizard-user" || source != "pat" {
-		t.Errorf("identity row = (%q, %q), want (wizard-user, pat)", login, source)
+	if n != 0 {
+		t.Errorf("%d identity rows written by a refused capture, want 0", n)
 	}
 }
 

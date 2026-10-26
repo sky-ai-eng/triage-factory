@@ -75,7 +75,9 @@ func (r Refusal) metricReason() string {
 
 // Commit-sign-denied reasons, the detail_json reason of the commit_sign_denied
 // audit row a refusal writes when it is a security signal (spec §5.6). The
-// control plane records the first two; a local signature can record all three.
+// control plane records the first two; a local signature can record all three,
+// and a multi-mode run's orchestrator records the third for its sidecar
+// (RecordDaemonRefusal).
 const (
 	deniedClaimInactive     = "claim_inactive"
 	deniedBudgetExhausted   = "budget_exhausted"

@@ -21,3 +21,4 @@ To install the binary, start with [INSTALLATION.md](../INSTALLATION.md).
 - [GitHub polling](../concepts/polling.md) — what the poller tracks
 - [Tracked events](../concepts/tracked-events.md) — the GitHub/Jira/Linear event taxonomy
 - [Repo profiling](../concepts/repo-profiling.md) — how repos get summarized for scoring
+- [Commit signing](../concepts/commit-signing.md) — creating the GitHub account agents' commits are signed as, and registering it

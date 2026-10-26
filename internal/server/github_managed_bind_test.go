@@ -64,6 +64,7 @@ type fakeGitHub struct {
 	slug        string
 	clientID    string
 	membersPerm string
+	emailsPerm  string
 
 	// The installation GET /app/installations/{id} reports, and whether it
 	// exists at all.
@@ -96,9 +97,11 @@ type fakeGitHub struct {
 	onServe func(path string)
 
 	// calls records the paths served, so a test can prove a step was (or was
-	// not) reached.
-	mu    sync.Mutex
-	calls []string
+	// not) reached; tokenForm is the last code exchange's form, so a test can
+	// prove which OAuth client it ran as.
+	mu        sync.Mutex
+	calls     []string
+	tokenForm url.Values
 }
 
 func newFakeGitHub() *fakeGitHub {
@@ -106,6 +109,7 @@ func newFakeGitHub() *fakeGitHub {
 		slug:                "tf-deployment",
 		clientID:            "Iv1.deployment_client",
 		membersPerm:         "read",
+		emailsPerm:          "read",
 		installationID:      4242,
 		accountType:         "Organization",
 		accountLogin:        "acme",
@@ -160,6 +164,11 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	// The OAuth token endpoint lives on the WEB host, not under /api/v3.
 	case path == "/login/oauth/access_token":
+		if err := r.ParseForm(); err == nil {
+			f.mu.Lock()
+			f.tokenForm = r.PostForm
+			f.mu.Unlock()
+		}
 		if f.tokenExchangeStatus != http.StatusOK {
 			w.WriteHeader(f.tokenExchangeStatus)
 			fmt.Fprint(w, `{"error":"bad_verification_code"}`)
@@ -168,8 +177,8 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"access_token":"ghu_proof","token_type":"bearer"}`)
 
 	case path == "/api/v3/app":
-		fmt.Fprintf(w, `{"id":12345,"slug":%q,"client_id":%q,"owner":{"login":"tf","type":"Organization"},"permissions":{"members":%q}}`,
-			f.slug, f.clientID, f.membersPerm)
+		fmt.Fprintf(w, `{"id":12345,"slug":%q,"client_id":%q,"owner":{"login":"tf","type":"Organization"},"permissions":{"members":%q,"emails":%q}}`,
+			f.slug, f.clientID, f.membersPerm, f.emailsPerm)
 
 	case strings.HasPrefix(path, "/api/v3/app/installations/"):
 		if f.installationGone {

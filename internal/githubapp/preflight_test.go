@@ -40,13 +40,21 @@ func deploymentAppMinter(t *testing.T, apiBase string, client *http.Client) *git
 	return m
 }
 
-// appJSON is a GET /app body with the given members grant. An empty level omits
-// the permission entirely, which is what an App that was never granted it looks
-// like on the wire.
+// appJSON is a GET /app body with the given members grant and emails read. An
+// empty level omits the permission entirely, which is what an App that was
+// never granted it looks like on the wire.
 func appJSON(membersLevel string) string {
+	return appJSONWith(membersLevel, "read")
+}
+
+// appJSONWith is appJSON with the emails grant chosen too.
+func appJSONWith(membersLevel, emailsLevel string) string {
 	perms := `"issues": "write", "pull_requests": "write", "contents": "write", "metadata": "read"`
 	if membersLevel != "" {
 		perms += `, "members": "` + membersLevel + `"`
+	}
+	if emailsLevel != "" {
+		perms += `, "emails": "` + emailsLevel + `"`
 	}
 	return `{
 		"id": 424242,
@@ -90,6 +98,9 @@ func TestPreflightDeploymentApp_DerivesIdentity(t *testing.T) {
 			}
 			if id.MembersPermission != level {
 				t.Errorf("MembersPermission = %q, want %q", id.MembersPermission, level)
+			}
+			if id.EmailsPermission != "read" {
+				t.Errorf("EmailsPermission = %q, want read", id.EmailsPermission)
 			}
 		})
 	}
@@ -174,6 +185,38 @@ func TestPreflightDeploymentApp_MembersPermission(t *testing.T) {
 				t.Errorf("identity = %+v; a refused App must not return one", id)
 			}
 			if !strings.Contains(err.Error(), "Members") {
+				t.Errorf("error does not name the permission to grant: %v", err)
+			}
+		})
+	}
+}
+
+// TestPreflightDeploymentApp_EmailsPermission: the identity link reads a
+// person's verified primary email under the App's user token, which needs the
+// account emails permission — so its absence refuses with an error naming it,
+// rather than a 403 from GitHub after the person has already authorized.
+func TestPreflightDeploymentApp_EmailsPermission(t *testing.T) {
+	for name, level := range map[string]string{
+		"absent":       "",
+		"unrecognised": "none",
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(appJSONWith("read", level)))
+			}))
+			defer srv.Close()
+
+			id, err := githubapp.PreflightDeploymentApp(context.Background(), deploymentAppMinter(t, srv.URL, srv.Client()))
+			if !errors.Is(err, githubapp.ErrDeploymentAppEmailsPermission) {
+				t.Fatalf("err = %v, want ErrDeploymentAppEmailsPermission", err)
+			}
+			if errors.Is(err, githubapp.ErrDeploymentAppMembersPermission) {
+				t.Error("a missing emails grant must not read as the members permission")
+			}
+			if id != (githubapp.DeploymentAppIdentity{}) {
+				t.Errorf("identity = %+v; a refused App must not return one", id)
+			}
+			if !strings.Contains(err.Error(), "Email addresses") {
 				t.Errorf("error does not name the permission to grant: %v", err)
 			}
 		})

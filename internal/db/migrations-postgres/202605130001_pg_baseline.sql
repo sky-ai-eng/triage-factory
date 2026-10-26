@@ -6371,38 +6371,49 @@ GRANT SELECT, DELETE ON TABLE public.claim_credentials TO tf_system;
 -- both null on the conversation's purge, so the log outlives it. signer is
 -- 'org' | 'deployment' and, with signer_host and signer_user_id, names the
 -- account that signs; grouping on (signer_host, signer_user_id) totals one
--- account across every org that uses it. public_key is the key that signed,
--- NULL until a signature is made, because each signature reads the signer's
--- current key. digest is the hex SHA-512 of the commit payload, all the
--- control plane ever sees of the commit. retry_after_seconds is set on a
--- refusal by the org's per-minute budget: how long until it admits another.
+-- account across every org that uses it. digest is the hex SHA-512 of the
+-- commit payload, all the control plane ever sees of the commit.
+--
+-- A signed row records the key that made the signature (public_key, NULL
+-- until then, because each signature reads the signer's current key), the
+-- armored signature, the control pod that claimed the request, and when it
+-- signed. A refused row records why (refusal_reason) and what the run's
+-- refusal line says about it, because the executor waiting on the answer can
+-- read neither the budgets nor the signer: for the org's per-minute budget,
+-- the seconds until it admits another (retry_after_seconds); for either
+-- budget, the limit it ran into (refusal_limit); for a signer that is not
+-- active, its status and status reason (signer_status, signer_status_reason).
+--
 -- commit_sha is the commit id the signature produced; repository_id and
 -- pushed_at are stamped when a push lands that commit as a ref's new tip, and
--- verification_reason / checked_at hold GitHub's answer for it. signer, state
--- and refusal_reason are app-validated.
+-- verification_reason / checked_at hold GitHub's answer for it. signer, state,
+-- refusal_reason and signer_status are app-validated.
 CREATE TABLE public.commit_signatures (
-    id                  uuid DEFAULT gen_random_uuid() NOT NULL,
-    org_id              uuid NOT NULL,
-    conversation_id     uuid,
-    claim_id            uuid,
-    boot_epoch          bigint NOT NULL,
-    signer              text NOT NULL,
-    signer_host         text NOT NULL,
-    signer_user_id      bigint NOT NULL,
-    public_key          text,
-    digest              text NOT NULL,
-    state               text NOT NULL,
-    refusal_reason      text,
-    retry_after_seconds integer,
-    signature           text,
-    claimed_by          text,
-    signed_at           timestamp with time zone,
-    commit_sha          text,
-    repository_id       uuid,
-    pushed_at           timestamp with time zone,
-    verification_reason text,
-    checked_at          timestamp with time zone,
-    created_at          timestamp with time zone DEFAULT now() NOT NULL,
+    id                   uuid DEFAULT gen_random_uuid() NOT NULL,
+    org_id               uuid NOT NULL,
+    conversation_id      uuid,
+    claim_id             uuid,
+    boot_epoch           bigint NOT NULL,
+    signer               text NOT NULL,
+    signer_host          text NOT NULL,
+    signer_user_id       bigint NOT NULL,
+    public_key           text,
+    digest               text NOT NULL,
+    state                text NOT NULL,
+    refusal_reason       text,
+    retry_after_seconds  integer,
+    refusal_limit        integer,
+    signer_status        text,
+    signer_status_reason text,
+    signature            text,
+    claimed_by           text,
+    signed_at            timestamp with time zone,
+    commit_sha           text,
+    repository_id        uuid,
+    pushed_at            timestamp with time zone,
+    verification_reason  text,
+    checked_at           timestamp with time zone,
+    created_at           timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT commit_signatures_signer_host_check CHECK (signer_host <> '')
 );
 

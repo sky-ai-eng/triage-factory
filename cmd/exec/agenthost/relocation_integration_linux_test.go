@@ -98,7 +98,7 @@ func TestIntegration_RelocatedAgentHost_ExecVerbRoundTrip(t *testing.T) {
 
 	// Host the exec-verb socket server the way the sidecar does: a relay-backed
 	// Server on the real /run/tf socket, granted to a jail gid.
-	agentSrv := NewServerWithRuntime(NewRelayRuntime(sidecarConn, agentproc.NewRecordSender(sidecarConn), info, nil), nil)
+	agentSrv := NewServerWithRuntime(NewRelayRuntime(sidecarConn, agentproc.NewRecordSender(sidecarConn), info, nil, nil), nil)
 	hd, mount, err := StartWithServer(agentSrv, info.ConversationID, sandbox.JailGID(0))
 	if err != nil {
 		t.Fatalf("StartWithServer (relocated host): %v", err)

@@ -21,6 +21,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/apiproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/cabundle"
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -200,6 +201,53 @@ func commitIdentityPairs(id orgIdentity) [][2]string {
 	return githooks.IdentityConfigPairs(id.name, id.email)
 }
 
+// runSigner is the signer the run's commits are signed as: the bundle's
+// identity, when the brain sealed the signer that identity belongs to. nil
+// when the bundle names no signer or no complete identity to sign as, and when
+// the run gets no exec-verb daemon (daemon false) to answer git's signing
+// program; git is then configured not to sign.
+func runSigner(gh *credbundle.GitHubCreds, id orgIdentity, daemon bool) *commitsigner.Identity {
+	if !daemon || gh == nil || gh.Signer == nil || id.name == "" {
+		return nil
+	}
+	mode := domain.CommitSigningMode(gh.Signer.Mode)
+	if !mode.Signs() || gh.Signer.PublicKey == "" || id.accountID == "" {
+		sidecarLog.Warn("the bundle names a signer the run cannot sign as; committing unsigned",
+			"mode", gh.Signer.Mode, "has_key", gh.Signer.PublicKey != "", "has_account", id.accountID != "")
+		return nil
+	}
+	return &commitsigner.Identity{
+		Name:             id.name,
+		Email:            id.email,
+		AccountID:        id.accountID,
+		Mode:             mode,
+		PublicKey:        gh.Signer.PublicKey,
+		PendingPublicKey: gh.Signer.PendingPublicKey,
+	}
+}
+
+// gitConfigPairs is the jail's git config beyond the hooks and the proxy
+// routing: the commit identity and, for a run that signs, the signing config,
+// with the shim at the hooks directory's in-jail path and the allowed-signers
+// file at its in-jail path.
+func gitConfigPairs(id orgIdentity, signer *commitsigner.Identity) [][2]string {
+	pairs := commitIdentityPairs(id)
+	if signer != nil {
+		pairs = append(pairs, githooks.SigningConfigPairs(githooks.SandboxDir, signer.PublicKey, cell.AllowedSignersPath)...)
+	}
+	return pairs
+}
+
+// allowedSigners is the content of the run's allowed-signers file: the
+// signer's keys, current and pending, and nothing for a run that does not
+// sign. Public keys only.
+func allowedSigners(signer *commitsigner.Identity) []byte {
+	if signer == nil {
+		return nil
+	}
+	return githooks.AllowedSigners(signer.Email, signer.PublicKey, signer.PendingPublicKey)
+}
+
 // currentBundle returns the newest held bundle, or nil if none has arrived.
 func (r *credRuntime) currentBundle() *credbundle.Bundle {
 	r.mu.Lock()
@@ -266,7 +314,11 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	// the public github.com family.
 	ghHosts := egressproxy.GitHubHostsForUpstreams(apiUpstream, gitUpstream)
 	identity := commitIdentity(bundle.GitHub)
-	handle, env, err := agentproc.StartRunProxies(ctx, req.HostVethIP, bundle.LLM, git, ghHosts, r.recordEgressDenial, r.llmSource, commitIdentityPairs(identity)...)
+	// The signer is fixed here, from the bundle held now: the jail's git is
+	// configured once, so a re-seal naming another signer changes nothing for
+	// this run, whose signatures the control plane then refuses.
+	signer := runSigner(bundle.GitHub, identity, req.AgentHost != nil)
+	handle, env, err := agentproc.StartRunProxies(ctx, req.HostVethIP, bundle.LLM, git, ghHosts, r.recordEgressDenial, r.llmSource, gitConfigPairs(identity, signer)...)
 	if err != nil {
 		return nil, err
 	}
@@ -276,6 +328,9 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	// caller holds a per-run placeholder.
 	result := sidecarproto.StartProxiesResult{Env: env, LLMEnv: handle.LLMEnv(), JailEndpoints: handle.JailEndpoints()}
 	result.IdentityName, result.IdentityEmail, result.IdentityAccountID = identity.name, identity.email, identity.accountID
+	if signer != nil {
+		result.CommitSigner = string(signer.Mode)
+	}
 	// Surface the git proxy's address + per-run placeholder so the orchestrator
 	// routes its OWN pre-sandbox clone through this same proxy — the real token
 	// stays here. Empty when no git proxy was started (GitEnabled false).
@@ -365,8 +420,17 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	// when that channel is on. It has to exist before the launch, which mounts
 	// it; the bundle is public certificates only, and the CA's key stays in
 	// the egress proxy.
+	//
+	// The allowed-signers file beside it is written for the same reason: the
+	// launch mounts it, so every run gets one, empty when it does not sign.
 	if conversationID != "" {
-		if werr := writeCABundle(conversationID, cabundle.WithSystemRoots(handle.EgressCACertPEM(), ghLeafPEM)); werr != nil {
+		werr := writeCABundle(conversationID, cabundle.WithSystemRoots(handle.EgressCACertPEM(), ghLeafPEM))
+		if werr != nil {
+			werr = fmt.Errorf("write the jail's CA bundle: %w", werr)
+		} else if werr = writeAllowedSigners(conversationID, allowedSigners(signer)); werr != nil {
+			werr = fmt.Errorf("write the jail's allowed-signers file: %w", werr)
+		}
+		if werr != nil {
 			_ = handle.Shutdown(ctx)
 			if r.githubAPI != nil {
 				_ = r.githubAPI.Shutdown(ctx)
@@ -380,7 +444,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 			if r.ghInjector != nil {
 				_ = r.ghInjector.Shutdown(ctx)
 			}
-			return nil, fmt.Errorf("runsidecar: write the jail's CA bundle: %w", werr)
+			return nil, fmt.Errorf("runsidecar: %w", werr)
 		}
 	}
 
@@ -391,7 +455,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	// gh/jira/linear verbs build clients against the API proxies just bound
 	// above, so the real credential never leaves this process's proxy hop.
 	if req.AgentHost != nil {
-		if aerr := r.startAgentHost(req.AgentHost, result); aerr != nil {
+		if aerr := r.startAgentHost(req.AgentHost, result, signer); aerr != nil {
 			_ = handle.Shutdown(ctx)
 			if r.githubAPI != nil {
 				_ = r.githubAPI.Shutdown(ctx)
@@ -427,7 +491,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 // Identity comes from the
 // orchestrator's AgentHostInfo but is never trusted for org-scoping: every
 // relayed op is re-bound to the orchestrator's own ConversationInfo.
-func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sidecarproto.StartProxiesResult) error {
+func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sidecarproto.StartProxiesResult, signer *commitsigner.Identity) error {
 	info := agenthost.ConversationInfo{
 		OrgID:            ai.OrgID,
 		UserID:           ai.UserID,
@@ -451,8 +515,9 @@ func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sid
 	// The runtime reads the held bundle in-process: a provider handler (Slack)
 	// selects its bot token from it, and the verbs explain a refusal from its
 	// source manifest — live reads, so a mid-run brain re-seal is picked up.
-	// The orchestrator is never asked for a secret.
-	srv := agenthost.NewServerWithRuntime(agenthost.NewRelayRuntime(r.conn, r.records, info, r), proxyCreds)
+	// The orchestrator is never asked for a secret. signer is not read live:
+	// it is the signer the jail's git was configured with.
+	srv := agenthost.NewServerWithRuntime(agenthost.NewRelayRuntime(r.conn, r.records, info, r, signer), proxyCreds)
 	hd, _, err := startAgentHostSocket(srv, info.ConversationID)
 	if err != nil {
 		return fmt.Errorf("runsidecar: start agenthost: %w", err)
@@ -461,18 +526,19 @@ func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sid
 	return nil
 }
 
-// The two privileged filesystem effects startProxies has, behind vars so a test
-// can drive the wiring around them. Both land under the root-only per-run socket
-// root (/run/tf) — one writes the jail's CA bundle there, the other binds the
-// exec-verb socket — so an unprivileged test process cannot take either path,
-// and a test that needs the surrounding logic has to stand in for them.
+// The privileged filesystem effects startProxies has, behind vars so a test
+// can drive the wiring around them. All land under the root-only per-run socket
+// root (/run/tf) — two write the jail's CA bundle and allowed-signers file
+// there, the third binds the exec-verb socket — so an unprivileged test process
+// cannot take any of these paths, and a test that needs the surrounding logic
+// has to stand in for them.
 //
 // The seams live here, in the consumer, deliberately: cmd/exec/agenthost resolves
 // those paths as constants and is the privileged side of this boundary. Making
 // its path resolution mutable so another package's test can retarget it would
 // trade a real invariant for test convenience.
 //
-// Both grant what they create to the run's jail gid, which this process derives
+// Each grants what it creates to the run's jail gid, which this process derives
 // from its own uid (ownJailGID) — so a test standing in for them stands in for
 // that derivation too, and never needs to run at a sidecar uid.
 var (
@@ -482,6 +548,13 @@ var (
 			return err
 		}
 		return agenthost.WriteCABundle(conversationID, bundlePEM, gid)
+	}
+	writeAllowedSigners = func(conversationID string, content []byte) error {
+		gid, err := ownJailGID()
+		if err != nil {
+			return err
+		}
+		return agenthost.WriteAllowedSigners(conversationID, content, gid)
 	}
 	startAgentHostSocket = func(srv *agenthost.Server, conversationID string) (*agenthost.HostDaemon, sandbox.Mount, error) {
 		gid, err := ownJailGID()

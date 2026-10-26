@@ -57,14 +57,23 @@ var (
 	// permissions do not include organization `members`. See above for why
 	// this refuses rather than warns.
 	ErrDeploymentAppMembersPermission = errors.New("githubapp: the deployment App is not granted the organization members permission")
+
+	// ErrDeploymentAppEmailsPermission reports an App whose granted
+	// permissions do not include the account `emails` permission. See above
+	// for why this refuses rather than warns.
+	ErrDeploymentAppEmailsPermission = errors.New("githubapp: the deployment App is not granted the account email addresses permission")
 )
 
 // membersPermission is the organization permission the authority gate needs and
 // the installer restriction depends on.
 const membersPermission = "members"
 
+// emailsPermission is the account permission the identity link needs to read a
+// person's verified primary email.
+const emailsPermission = "emails"
+
 // DeploymentAppIdentity is what the deployment App turns out to be: the
-// identity GET /app reports, plus the granted level on the permission the
+// identity GET /app reports, plus the granted levels on the permissions the
 // preflight gates on.
 //
 // AppID is GitHub's own id for the App, which is worth carrying even though the
@@ -77,16 +86,18 @@ type DeploymentAppIdentity struct {
 	OwnerLogin        string
 	OwnerType         string
 	MembersPermission string
+	EmailsPermission  string
 }
 
 // PreflightDeploymentApp resolves the deployment App's identity and returns it
 // with a verdict: nil error means this App may serve the managed credential
-// class, and a non-nil one names which of the three failures happened, since
+// class, and a non-nil one names which of the four failures happened, since
 // they want different things from the operator.
 //
 //	ErrDeploymentAppKeyRejected        fix TF_GITHUB_APP_ID / _PRIVATE_KEY
 //	ErrDeploymentAppUnreachable        wait, or check the API base / network
 //	ErrDeploymentAppMembersPermission  grant Members on the App, then re-accept
+//	ErrDeploymentAppEmailsPermission   grant Email addresses on the App
 //
 // m is a Minter built from the config (DeploymentApp.Minter). Nothing here
 // writes, mints an installation token, or reads a database.
@@ -107,10 +118,16 @@ func PreflightDeploymentApp(ctx context.Context, m *Minter) (DeploymentAppIdenti
 	}
 
 	granted := app.Permissions[membersPermission]
-	if !membersPermissionSatisfied(granted) {
+	if !readPermissionSatisfied(granted) {
 		return DeploymentAppIdentity{}, fmt.Errorf(
 			"%w: GET /app reports members=%q; grant the App the organization \"Members\" permission at read (or write), and have each installing account accept the updated permissions",
 			ErrDeploymentAppMembersPermission, granted)
+	}
+	emails := app.Permissions[emailsPermission]
+	if !readPermissionSatisfied(emails) {
+		return DeploymentAppIdentity{}, fmt.Errorf(
+			"%w: GET /app reports emails=%q; grant the App the account \"Email addresses\" permission at read",
+			ErrDeploymentAppEmailsPermission, emails)
 	}
 
 	return DeploymentAppIdentity{
@@ -120,18 +137,19 @@ func PreflightDeploymentApp(ctx context.Context, m *Minter) (DeploymentAppIdenti
 		OwnerLogin:        app.OwnerLogin,
 		OwnerType:         app.OwnerType,
 		MembersPermission: granted,
+		EmailsPermission:  emails,
 	}, nil
 }
 
-// membersPermissionSatisfied reports whether a granted level on the `members`
-// permission is enough for the authority gate, which only ever reads.
+// readPermissionSatisfied reports whether a granted level on a gated permission
+// is enough for what TF does with it, which only ever reads.
 //
-// read and write are the levels GitHub documents for it; admin is accepted as
-// the superset it would be. Everything else — absent, empty, or a value this
-// build does not recognise — fails, because a permission string we cannot rank
-// is not evidence that the gate will work, and a wrong refusal costs a retry
-// where a wrong acceptance is unrecoverable.
-func membersPermissionSatisfied(granted string) bool {
+// read and write are the levels GitHub documents; admin is accepted as the
+// superset it would be. Everything else — absent, empty, or a value this build
+// does not recognise — fails, because a permission string we cannot rank is not
+// evidence that the read will work, and a wrong refusal costs a retry where a
+// wrong acceptance is unrecoverable.
+func readPermissionSatisfied(granted string) bool {
 	switch granted {
 	case "read", "write", "admin":
 		return true

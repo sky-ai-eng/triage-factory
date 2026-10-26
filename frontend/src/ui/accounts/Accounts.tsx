@@ -21,6 +21,8 @@ export type Account = {
   /** The host the binding is keyed under: github.com, a GHES origin, an Atlassian site. */
   host?: string
   method?: AccountMethod
+  /** With a Connect method: Connect is the only way in, and the band offers no token path. */
+  connectOnly?: boolean
   /** Overrides the band's explanatory line. */
   hint?: string
 }
@@ -227,7 +229,7 @@ function Band({
   )
   const method = acct.method || (acct.kind === 'github' ? 'pat' : 'cloud')
   const hasConnect = method === 'app' || method === 'oauth'
-  const showFields = !hasConnect || alt
+  const showFields = !hasConnect || (alt && !acct.connectOnly)
   const cloud = acct.kind === 'jira' && method !== 'dc'
   const twoFields = showFields && cloud
   const ready = twoFields ? !!(a.trim() && b.trim()) : !!a.trim()
@@ -278,16 +280,20 @@ function Band({
             )}
             {acct.kind === 'github' ? 'Continue with GitHub' : 'Continue with Atlassian'}
           </button>
-          <span className="ac-or">or</span>
-          <span
-            role="button"
-            tabIndex={0}
-            className="ac-link"
-            onClick={() => setAlt(true)}
-            onKeyDown={pressable(() => setAlt(true))}
-          >
-            {acct.kind === 'github' ? 'paste a personal access token' : 'use an API token'}
-          </span>
+          {!acct.connectOnly && (
+            <>
+              <span className="ac-or">or</span>
+              <span
+                role="button"
+                tabIndex={0}
+                className="ac-link"
+                onClick={() => setAlt(true)}
+                onKeyDown={pressable(() => setAlt(true))}
+              >
+                {acct.kind === 'github' ? 'paste a personal access token' : 'use an API token'}
+              </span>
+            </>
+          )}
         </div>
       )}
       {showFields && (

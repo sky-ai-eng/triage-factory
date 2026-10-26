@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
@@ -412,6 +413,12 @@ type directRuntime struct {
 	// LocalClient.SetCommitSigning, or by StartLocal for a sandboxed run.
 	commitSigning    *LocalCommitSigning
 	commitSigningErr error
+
+	// sealedSigner is the signer the run's sealed bundle named, set on an
+	// executor through LocalClient.SetSealedCommitSigner: a push there is
+	// counted as a signing org's when it is non-empty, because the executor
+	// cannot read the org's signer. Unused locally.
+	sealedSigner domain.CommitSigningMode
 }
 
 func newDirectRuntime(stores db.Stores, info ConversationInfo) *directRuntime {
@@ -748,7 +755,7 @@ func (r *directRuntime) branchPushAction(ctx context.Context, a domain.Artifact)
 	act := branchPushActionInfo(a, r.info, r.githubCredential(ctx, a))
 	if act != nil {
 		act.Scope = a.Scope
-		act.DetailJSON = withPushSigner(act.DetailJSON, pushSigner(ctx, r.stores, r.info.OrgID, domain.ParseBranchArtifactSHA(a.DetailsJSON)))
+		act.DetailJSON = withPushSigner(act.DetailJSON, pushSigner(ctx, r.stores, r.info.OrgID, domain.ParseBranchArtifactSHA(a.DetailsJSON), r.sealedSigner))
 	}
 	return act
 }
@@ -951,6 +958,12 @@ type relayRuntime struct {
 	// snapshot) so a mid-run brain re-seal is picked up. nil when the sidecar
 	// was built with no bundle view.
 	held HeldBundle
+	// signer is the identity the run's commits are signed as, fixed when the
+	// sidecar configured the jail's git from the bundle it held then; nil for
+	// a run that does not sign. Not read from held: a run keeps its signer for
+	// its whole engagement, and a re-seal naming another one changes nothing
+	// for it (the control plane refuses that run's signatures instead).
+	signer *commitsigner.Identity
 }
 
 // HeldBundle is the sidecar's live view of the sealed bundle it holds, as much
@@ -1245,7 +1258,11 @@ func NewDirectRuntime(stores db.Stores, info ConversationInfo) Runtime {
 // every DB effect relays to the orchestrator, the sidecar holds no stores.
 // records is the run's one record sender on that channel, which the runtime's
 // audit records go through. held reads the sidecar's bundle for a provider's
-// sealed keyed set (nil when the run carries no provider credentials).
-func NewRelayRuntime(conn *sidecarproto.Conn, records *agentproc.RecordSender, info ConversationInfo, held HeldBundle) Runtime {
-	return newRelayRuntime(sidecarRelayConn{conn: conn, records: records}, info, held)
+// sealed keyed set (nil when the run carries no provider credentials). signer
+// is the identity the run's commits are signed as, from the bundle the sidecar
+// configured the jail's git with, nil for a run that does not sign.
+func NewRelayRuntime(conn *sidecarproto.Conn, records *agentproc.RecordSender, info ConversationInfo, held HeldBundle, signer *commitsigner.Identity) Runtime {
+	rt := newRelayRuntime(sidecarRelayConn{conn: conn, records: records}, info, held)
+	rt.signer = signer
+	return rt
 }

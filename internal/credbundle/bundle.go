@@ -103,16 +103,22 @@ type GitHubCreds struct {
 	PAT string `json:"pat,omitempty"`
 
 	// IdentityName / IdentityEmail are the org's GitHub commit identity, the
-	// author and committer of every commit the run makes: an App's
-	// "<slug>[bot]" and its noreply email, or the PAT owner's login and
-	// verified email. IdentityAccountID is GitHub's numeric id for that
-	// account, "" when it is not stored. The brain resolves them because the
-	// executor cannot: it holds neither the deployment App's key nor the
-	// secret store the PAT tier reads. All empty when the org has no identity
-	// to stamp.
+	// author and committer of every commit the run makes: the org's commit
+	// signer when it has one, in any status, else an App's "<slug>[bot]" and
+	// its noreply email, or the PAT owner's login and verified email.
+	// IdentityAccountID is GitHub's numeric id for that account, "" when it is
+	// not stored. The brain resolves them because the executor cannot: it
+	// holds neither the deployment App's key nor the secret store the PAT
+	// tier reads, and cannot read the org's signer. All empty when the org
+	// has no identity to stamp.
 	IdentityName      string `json:"identity_name,omitempty"`
 	IdentityEmail     string `json:"identity_email,omitempty"`
 	IdentityAccountID string `json:"identity_account_id,omitempty"`
+
+	// Signer is how the run's commits are signed as the identity above: set
+	// when that identity is the org's signer and the signer is active, nil
+	// when the run does not sign.
+	Signer *SignerCreds `json:"signer,omitempty"`
 
 	// BaseURL is the org's configured GitHub web base — github.com, a GHES
 	// host, or a *.ghe.com data-residency tenant. It travels sealed beside the
@@ -139,6 +145,24 @@ type GitHubCreds struct {
 	// per-repo exec-verb/SDK channel and git proxy consume until their P4
 	// retirement. Nil when the org has no GitHub credential.
 	CLIToken *RepoToken `json:"cli_token,omitempty"`
+}
+
+// SignerCreds is the public half of the signer a run signs its commits as.
+// The signer's private key never leaves the control plane, which signs a
+// digest the sidecar relays to it, so nothing here can sign: the sidecar
+// configures the jail's git with the public key, writes the allowed-signers
+// file from it, and names the signer it relays a digest for by Mode and the
+// identity's account id.
+type SignerCreds struct {
+	// Mode is the kind of signer: domain.CommitSigningOrg or
+	// domain.CommitSigningDeployment.
+	Mode string `json:"mode"`
+	// PublicKey is the signer's key, `ssh-ed25519 AAAA…`.
+	PublicKey string `json:"public_key"`
+	// PendingPublicKey is the key a rotation under way will replace it with,
+	// so a run that started before the rotation finishes can check the
+	// commits it signs after.
+	PendingPublicKey string `json:"pending_public_key,omitempty"`
 }
 
 // Credential names the audit-log credential the run's GitHub writes act under

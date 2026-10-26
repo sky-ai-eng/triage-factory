@@ -56,7 +56,7 @@ type deploymentGH struct {
 
 func newDeploymentGH(t *testing.T) *deploymentGH {
 	t.Helper()
-	g := &deploymentGH{appPermissions: map[string]string{"members": "read", "contents": "write"}}
+	g := &deploymentGH{appPermissions: map[string]string{"members": "read", "emails": "read", "contents": "write"}}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/v3/app", func(w http.ResponseWriter, _ *http.Request) {
@@ -352,8 +352,16 @@ func TestResolver_ManagedClass_PreflightFailure_RefusesAndNeverBorrowsThePAT(t *
 			// AND what restricts installation to org owners. An App without it
 			// must serve nobody.
 			name:  "members permission missing",
-			setup: func(gh *deploymentGH) { gh.appPermissions = map[string]string{"contents": "write"} },
+			setup: func(gh *deploymentGH) { gh.appPermissions = map[string]string{"emails": "read", "contents": "write"} },
 			cause: githubapp.ErrDeploymentAppMembersPermission,
+		},
+		{
+			// emails is what lets a member link their GitHub identity through
+			// the App. The preflight refuses without it, and the resolver
+			// refuses with it.
+			name:  "emails permission missing",
+			setup: func(gh *deploymentGH) { gh.appPermissions = map[string]string{"members": "read", "contents": "write"} },
+			cause: githubapp.ErrDeploymentAppEmailsPermission,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

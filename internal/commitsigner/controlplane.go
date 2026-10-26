@@ -224,14 +224,20 @@ func (c *ControlPlane) Handle(ctx context.Context, orgID, id string) bool {
 }
 
 // decision is what a pod does with one request: sign it with publicKey's
-// private half, or refuse it. denied names the commit_sign_denied row a
-// refusal records, "" for none.
+// private half, or refuse it. limit is the budget a budget refusal ran into,
+// and signerStatus and signerReason the signer's status and its reason for a
+// refusal because the signer is not active: the run's refusal line names
+// them. denied names the commit_sign_denied row a refusal records, "" for
+// none.
 type decision struct {
-	refusal    Refusal
-	retryAfter int
-	denied     string
-	publicKey  string
-	signature  []byte
+	refusal      Refusal
+	retryAfter   int
+	limit        int
+	signerStatus domain.CommitSignerStatus
+	signerReason string
+	denied       string
+	publicKey    string
+	signature    []byte
 }
 
 // decide runs a claimed request's checks in order and signs when they pass.
@@ -257,6 +263,13 @@ func (c *ControlPlane) decide(ctx context.Context, row domain.CommitSignature) d
 	if err != nil {
 		return c.undecided(ctx, row, "resolve the org's signer", err)
 	}
+	if refusal == RefusalSignerInactive && row.Signer == domain.CommitSigningOrg {
+		status, reason, err := signerStatus(ctx, c.stores.OrgCommitSigners, row.OrgID)
+		if err != nil {
+			return c.undecided(ctx, row, "read the signer's status", err)
+		}
+		return decision{refusal: refusal, signerStatus: status, signerReason: reason}
+	}
 	if refusal != "" {
 		return decision{refusal: refusal}
 	}
@@ -267,9 +280,9 @@ func (c *ControlPlane) decide(ctx context.Context, row domain.CommitSignature) d
 		if res.Refusal == RefusalClaimBudget {
 			signerLog.WarnContext(ctx, "refused a signature: the engagement spent its signing budget",
 				"org", row.OrgID, "conversation", row.ConversationID, "claim", row.ClaimID, "limit", res.Limit)
-			return decision{refusal: RefusalClaimBudget, denied: deniedBudgetExhausted}
+			return decision{refusal: RefusalClaimBudget, limit: res.Limit, denied: deniedBudgetExhausted}
 		}
-		return decision{refusal: res.Refusal, retryAfter: res.RetryAfterSeconds}
+		return decision{refusal: res.Refusal, retryAfter: res.RetryAfterSeconds, limit: res.Limit}
 	}
 
 	key, err := signingKey(ctx, c.stores.Secrets, row.OrgID, signer.PublicKey)
@@ -367,7 +380,13 @@ func signingKey(ctx context.Context, secrets db.SecretStore, orgID, publicKey st
 // store writes the decision onto the row this pod claimed.
 func (c *ControlPlane) store(ctx context.Context, row domain.CommitSignature, d decision) error {
 	if d.refusal != "" {
-		_, err := c.stores.CommitSignatures.RefuseSystem(ctx, row.OrgID, row.ID, c.podID, string(d.refusal), d.retryAfter)
+		_, err := c.stores.CommitSignatures.RefuseSystem(ctx, row.OrgID, row.ID, c.podID, db.CommitSignatureRefusal{
+			Reason:             string(d.refusal),
+			RetryAfterSeconds:  d.retryAfter,
+			Limit:              d.limit,
+			SignerStatus:       d.signerStatus,
+			SignerStatusReason: d.signerReason,
+		})
 		return err
 	}
 	_, err := c.stores.CommitSignatures.SignSystem(ctx, row.OrgID, row.ID, c.podID, d.publicKey, string(d.signature), c.now())
@@ -399,6 +418,9 @@ func (c *ControlPlane) recordDenied(ctx context.Context, row domain.CommitSignat
 // denial is one commit_sign_denied audit row: the refusal's reason, the
 // account the signature was asked for as, and the run that asked. committer is
 // set for a committer mismatch, as the committer the refused commit named.
+// dedupKey keys a row that may be recorded more than once, "" for one that
+// is recorded once; a budget refusal is keyed per conversation whatever it
+// says.
 type denial struct {
 	orgID          string
 	conversationID string
@@ -406,6 +428,7 @@ type denial struct {
 	signerUserID   int64
 	reason         string
 	committer      string
+	dedupKey       string
 }
 
 // recordDenied writes the commit_sign_denied audit row for a refusal that is a
@@ -431,6 +454,7 @@ func recordDenied(ctx context.Context, stores db.Stores, d denial) {
 		ConversationID: d.conversationID,
 		Credential:     domain.CredentialNone,
 		DetailJSON:     string(raw),
+		DedupKey:       d.dedupKey,
 	}
 	if d.conversationID != "" {
 		if d.reason == deniedBudgetExhausted {

@@ -160,7 +160,7 @@ Fill the form in top to bottom. Anything not listed keeps its default.
 |---|---|
 | **GitHub App name** | Any name that is unique on that GitHub. Workspace admins see it on GitHub's install page, so name it after your deployment. |
 | **Homepage URL** | Your `TF_PUBLIC_URL`. |
-| **Callback URL** (under *Identifying and authorizing users*) | `${TF_PUBLIC_URL}/api/github/managed/callback`, absolute — for example `https://triagefactory.yourcompany.com/api/github/managed/callback`. One entry. It carries no workspace id on purpose: an App has one callback list fixed at registration, and the workspace is recovered from the connect ceremony's own record instead. |
+| **Callback URL** (under *Identifying and authorizing users*) | `${TF_PUBLIC_URL}/api/github/managed/callback`, absolute — for example `https://triagefactory.yourcompany.com/api/github/managed/callback`. One entry. It carries no workspace id on purpose: an App has one callback list fixed at registration, and the workspace is recovered from the connect ceremony's own record instead. The same URL also serves members linking their GitHub accounts through the App (8.5). |
 | **Expire user authorization tokens** | Leave as is. |
 | **Request user authorization (OAuth) during installation** | **Check it.** This is what lets TF learn *who* completed the installation, which is how a workspace proves an installation is theirs. GitHub greys out **Setup URL** the moment this is on — the two are mutually exclusive — so leave Setup URL blank and **Redirect on update** unchecked. With this box off, every connection fails with `The deployment's GitHub App is missing the “Request user authorization (OAuth) during installation” setting`. |
 | **Enable Device Flow** | Leave unchecked. |
@@ -187,7 +187,11 @@ Fill the form in top to bottom. Anything not listed keeps its default.
 
 > **Organization → Members: Read-only is load-bearing. Do not trim it.** It is what lets TF confirm that the person connecting an *organization* is an owner of it: the connect ceremony asks GitHub for that person's role in the organization, and anything short of a definite owner refuses the connection. Without this permission, connecting an organization fails — TF reads the App's granted permissions from GitHub when a workspace connects and refuses with `the deployment App is not granted the organization members permission` — and, separately, GitHub only restricts installing an App to organization owners when the App requests an organization permission, so dropping it would also let any repository admin install your App. If you later change the App's permissions, each account that already installed it must accept the new permission set on GitHub before it takes effect.
 
-Account permissions: none.
+| Account permissions | Access |
+|---|---|
+| **Email addresses** | **Read-only — required.** |
+
+> **Account → Email addresses: Read-only is required too.** In a workspace with no App of its own, members link their GitHub account through this App, and linking reads their verified primary email. Without it, linking fails before anyone is sent to GitHub, and the control pod logs `the deployment App is not granted the account email addresses permission`. Connecting a workspace refuses the same way.
 
 **Subscribe to events.** Tick **Check run**, **Check suite**, **Issue comment**, **Pull request**, **Pull request review**, **Pull request review comment**, and **Push**. The installation events (`installation`, `installation_repositories`) are delivered to every App's webhook without being asked for.
 
@@ -244,6 +248,7 @@ Check it took:
 ### 8.5 What to expect afterwards
 
 - **Connecting.** A workspace admin presses **Connect GitHub…**, types the login of the GitHub organization or user to connect, and confirms on GitHub. If the App is already installed there, that is the whole trip and they land back in Workspace Settings with the account connected. If it is not, GitHub's install page opens with that account preselected; they choose which repositories to grant, and the same thing happens on the way back. **Connect another account…** adds more; each is its own connect. On every one TF confirms that the person is an owner of the organization they are connecting, and that they confirmed on GitHub as the GitHub account linked to their Triage Factory user — an admin who has not linked one is told to do that first. Nothing is ever listed; the admin names the account.
+- **Linking members' GitHub accounts.** Every member links the GitHub account Triage Factory matches their pull requests and reviews to. In a workspace with no App of its own, that link runs through this App: the member presses **Connect GitHub**, authorizes the App on GitHub, and comes back through the callback URL from 8.2. Nothing is installed, and an admin can link theirs before the workspace has connected an account, which the connect ceremony then requires. Multi mode has no token paste for this.
 - **Tenancy.** The App being deployment-wide does not make one workspace able to see another's repositories. Each workspace sees only the accounts it connected, and an installation belongs to at most one workspace — connecting an account that another workspace already holds is refused.
 - **Installed but not yet connected.** If an organization *member* without owner rights names that organization, GitHub sends an install request to an owner instead of installing, and TF shows `Install request sent`; once the owner approves, the admin connects it as above. Someone who installs from the App's public page on GitHub, outside any workspace, lands on TF's `/github/installed` page, which asks them to sign in, pick the workspace, and name the account. Both are ordinary states, not faults.
 - **Moving a workspace that already has its own App.** Its GitHub access card offers **Switch to the deployment's App…**, which asks for the account first: the workspace's own App is then disconnected (the registration, its installations and its key are removed from TF; the App itself stays registered on GitHub) and the admin goes straight through the Connect flow above for that account. The workspace has no GitHub access for the length of that trip; an admin who leaves GitHub without finishing is taken back to the setup wizard.
@@ -256,6 +261,7 @@ If a connection is refused, the message names the cause. The ones that point bac
 | `This deployment isn't set up to connect GitHub accounts.` | One or more of the four variables is missing or malformed on the control pod — see the boot log in 8.4. |
 | `…missing the “Request user authorization (OAuth) during installation” setting.` | Tick that box on the App (8.2). |
 | `…not granted the organization members permission` | Add Organization → Members: Read-only on the App (8.2), then have each installed account accept the updated permissions on GitHub. |
+| `…not granted the account email addresses permission` (log) | Add Account → Email addresses: Read-only on the App (8.2). Members are asked to approve it on GitHub the next time they link. |
 | `This workspace is pointed at <host>; the deployment's GitHub App is on <host>.` | That workspace's GitHub is not the deployment default (8.1). It brings its own App. |
 | `GitHub rejected the deployment App's ID and private key` (log) | `TF_GITHUB_APP_ID` names a different App than the PEM belongs to. Re-check the App ID (not the client id) and the key. |
 

@@ -206,13 +206,16 @@ paths inside the jail: the run tree at `cell.WorkDir` (`/work`), TF's binaries
 at the fixed destinations in `internal/sandbox/launchspec_linux.go`
 (`/opt/tf/bin/...`, and the TF binary at `cell.TFBinaryPath`), the exec-verb
 socket at `agenthost.DefaultSocketPath`, the run's CA bundle at
-`cell.CABundlePath` with the trust variables pointing at it, staged skills and
+`cell.CABundlePath` with the trust variables pointing at it, the run's
+allowed-signers file at `cell.AllowedSignersPath` (read-only, named by the
+signing git config of a run that signs), staged skills and
 memory at
 `sandbox.TrustedSkillsDestination` / `TrustedMemoryDestination`. `LaunchSpec`
 names the inputs by their host source; the backend decides how they arrive.
 Firecracker has no shared-filesystem device, so its backend attaches TF's
 binaries as read-only disk images mounted at the same paths (§12.3), and
-writes the inputs minted per engagement (the CA bundle, skills, memory) to
+writes the inputs minted per engagement (the CA bundle, the allowed-signers
+file, skills, memory) to
 tmpfs at those paths at the start of every engagement, because a restored
 guest would otherwise keep the parked engagement's (§8).
 

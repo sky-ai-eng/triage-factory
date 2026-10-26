@@ -1,8 +1,10 @@
-// The User group of the Settings stack — always rendered, for every role. The
-// first durable home for GitHub-identity management (previously only the setup
-// wizard's User step and the Connect gate page): show the bound @login + host,
-// with a re-Connect / re-enter affordance, reusing the captured-and-discarded
-// PAT_2 path. Plus device-local preferences (theme), which commit immediately.
+// The User group of the Settings stack — always rendered, for every role, and
+// local mode only: multi mode's /settings is UserSettingsPage, which links a
+// GitHub identity through Connect alone. Here, the durable home for
+// GitHub-identity management beside the setup wizard's User step and the Connect
+// gate page: show the bound @login + host, with a re-Connect / re-enter
+// affordance, reusing the captured-and-discarded PAT_2 path. Plus device-local
+// preferences (theme), which commit immediately.
 
 import { useState } from 'react'
 import { useGitHubIdentity } from '../../../hooks/useGitHubIdentity'

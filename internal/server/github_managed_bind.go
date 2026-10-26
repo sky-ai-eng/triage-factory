@@ -561,27 +561,36 @@ func writeBindRefusalJSON(w http.ResponseWriter, refusal bindRefusal) {
 		Reason: strings.ToUpper(refusal.code), Message: refusal.message})
 }
 
-// managedBindCallback is the front door for the return leg, and the reason that
-// leg is not simply mounted through s.api.
+// managedBindCallback is the front door for the deployment App's one registered
+// callback, and the reason that callback is not simply mounted through s.api.
 //
-// Two callers arrive at this one URL and they need opposite treatment. Someone
-// finishing a ceremony this deployment started carries the bind cookie, and
-// what happens next WRITES a credential — so it must be authenticated, and
-// withSession's 401 is exactly right for it. Someone who installed the
-// deployment App straight from its public page on GitHub carries no cookie and,
-// in the ordinary case, no Triage Factory session at all: GitHub's install page
-// is reachable by anyone the account's owner points at it, with no reason ever
-// to have visited TF in that browser. Behind withSession that person gets a
-// JSON 401, which dead-ends a top-level navigation and says nothing true about
+// Three callers arrive at this one URL. A member linking their GitHub identity
+// through the deployment App (Connect) carries that flow's state cookie and a
+// state on the query. Someone finishing a bind ceremony this deployment
+// started carries the bind cookie. Both go on to
+// WRITE — an identity, a credential — so both must be authenticated, and
+// withSession's 401 is exactly right for them. Someone who installed the
+// deployment App straight from its public page on GitHub carries neither cookie
+// and, in the ordinary case, no Triage Factory session at all: GitHub's install
+// page is reachable by anyone the account's owner points at it, with no reason
+// ever to have visited TF in that browser. Behind withSession that person gets
+// a JSON 401, which dead-ends a top-level navigation and says nothing true about
 // what happened.
 //
-// So the cookie decides which door, before any session lookup. The pre-auth
-// branch reads nothing, writes nothing, and resolves no identity — it renders
-// one fixed page — which is also why it is not IP-rate-limited: there is no
-// work behind it to flood, and a 429 on a shared NAT would break the flow of
-// the one person it is for. Everything past it stays behind withSession.
+// So the cookies decide which door, before any session lookup. Connect's
+// cookie is asked first, and any state that is not the bind's takes that door
+// (deploymentAppConnectReturn): the bind's install leg carries no state, and
+// its authorize leg carries the bind's own, so a bind in flight in the same
+// browser still reaches the bind on both legs, and a Connect return that
+// cannot complete is refused as a Connect without spending the bind's record.
+// The pre-auth branch reads nothing, writes nothing, and resolves no identity —
+// it renders one fixed page — which is also why it is not IP-rate-limited:
+// there is no work behind it to flood, and a 429 on a shared NAT would break
+// the flow of the one person it is for. Everything past it stays behind
+// withSession.
 //
 // GET /api/github/managed/callback?code=…&installation_id=…&setup_action=…
+// GET /api/github/managed/callback?code=…&state=…
 func (s *Server) managedBindCallback() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.deployCfg == nil || runmode.Current() != runmode.ModeMulti {
@@ -589,6 +598,13 @@ func (s *Server) managedBindCallback() http.Handler {
 			// this route does not exist — and a route that doesn't exist in
 			// this deployment mode answers like one that doesn't exist at all.
 			notFound(w, "route")
+			return
+		}
+
+		if cs := s.deploymentAppConnectReturn(r); cs != nil {
+			s.withSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				s.completeDeploymentAppConnect(w, r, cs)
+			})).ServeHTTP(w, r)
 			return
 		}
 
@@ -1281,11 +1297,12 @@ func (s *Server) credentialSlotRefusal(ctx context.Context, orgID, userID string
 // is the workspace's when it has one, which has to be the App's; a workspace
 // with none gets the App's.
 //
-// The preflight is also the members-permission gate, and running it here rather
-// than trusting a cached verdict is deliberate: `members: read` is what the
+// The preflight is also the permission gate, and running it here rather than
+// trusting a cached verdict is deliberate: `members: read` is what the
 // authority gate reads, so an App that has lost it must not be able to start a
-// ceremony whose second gate cannot answer. One extra GET /app per bind
-// attempt, on a human-paced flow.
+// ceremony whose second gate cannot answer. (It refuses an App without
+// `emails: read` too, which members need to link the identity proof 5 reads.)
+// One extra GET /app per bind attempt, on a human-paced flow.
 //
 // The three returns are exclusive: a non-nil error is TF's own fault (render a
 // 500), a non-nil refusal is the deployment's, and neither means the identity

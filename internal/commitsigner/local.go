@@ -57,9 +57,23 @@ func (l *LocalSigner) clock() time.Time {
 	return time.Now()
 }
 
-// errSignerVanished is a signer that resolved as active and whose row was gone
-// when its status was read back: removed between the two reads.
+// errSignerVanished is a signer that resolved as not active and whose row was
+// gone when its status was read back: removed between the two reads.
 var errSignerVanished = errors.New("commitsigner: the org's signer was removed while the signature was checked")
+
+// signerStatus reads the org's signer's status and its reason, for a refusal
+// because the signer is not active: the run's line says why in a sentence
+// (signerOffReason). A signer removed since it resolved is errSignerVanished.
+func signerStatus(ctx context.Context, signers db.OrgCommitSignerStore, orgID string) (domain.CommitSignerStatus, string, error) {
+	row, err := signers.GetSystem(ctx, orgID)
+	if err != nil {
+		return "", "", err
+	}
+	if row == nil {
+		return "", "", errSignerVanished
+	}
+	return row.Status, row.StatusReason, nil
+}
 
 // Sign checks one commit and, when every check passes, signs it, records the
 // signature with the commit id it produces, and returns both. In order:
@@ -103,29 +117,21 @@ func (l *LocalSigner) Sign(ctx context.Context, req LocalRequest) (res Result) {
 		return l.unanswered(ctx, req, "read the run's signer", errors.New("the run's signer has no account id"))
 	}
 
-	committer, err := commitsign.ParseCommitter(req.Payload)
-	if err != nil {
-		var nac *commitsign.NotACommitError
-		if errors.As(err, &nac) {
-			res := refused(RefusalNotACommit)
-			res.Object = nac.Object
-			return res
-		}
+	if res, ok, err := CheckCommit(req.Payload, req.Signer); err != nil {
 		return l.unanswered(ctx, req, "read the commit", err)
-	}
-	if committer.Name != req.Signer.Name || committer.Email != req.Signer.Email {
-		signerLog.WarnContext(ctx, "refused to sign a commit whose committer is not the run's signer",
-			"org", req.OrgID, "conversation", req.ConversationID, "committer", formatIdent(committer))
-		recordDenied(ctx, l.Stores, denial{
-			orgID:          req.OrgID,
-			conversationID: req.ConversationID,
-			signerHost:     req.Signer.Host,
-			signerUserID:   accountID,
-			reason:         deniedCommitterMismatch,
-			committer:      formatIdent(committer),
-		})
-		res := refused(RefusalCommitterMismatch)
-		res.Committer = committer
+	} else if !ok {
+		if res.Refusal == RefusalCommitterMismatch {
+			signerLog.WarnContext(ctx, "refused to sign a commit whose committer is not the run's signer",
+				"org", req.OrgID, "conversation", req.ConversationID, "committer", formatIdent(res.Committer))
+			recordDenied(ctx, l.Stores, denial{
+				orgID:          req.OrgID,
+				conversationID: req.ConversationID,
+				signerHost:     req.Signer.Host,
+				signerUserID:   accountID,
+				reason:         deniedCommitterMismatch,
+				committer:      formatIdent(res.Committer),
+			})
+		}
 		return res
 	}
 
@@ -150,14 +156,11 @@ func (l *LocalSigner) Sign(ctx context.Context, req LocalRequest) (res Result) {
 	if refusal := signerRefusal(now, req.Signer.Mode, req.Signer.Host, req.Signer.AccountID); refusal != "" {
 		res := refused(refusal)
 		if refusal == RefusalSignerInactive {
-			row, err := l.Stores.OrgCommitSigners.GetSystem(ctx, req.OrgID)
-			if err == nil && row == nil {
-				err = errSignerVanished
-			}
+			status, reason, err := signerStatus(ctx, l.Stores.OrgCommitSigners, req.OrgID)
 			if err != nil {
 				return l.unanswered(ctx, req, "read the signer's status", err)
 			}
-			res.SignerStatus, res.SignerReason = row.Status, row.StatusReason
+			res.SignerStatus, res.SignerReason = status, reason
 		}
 		return res
 	}
@@ -205,6 +208,36 @@ func (l *LocalSigner) Sign(ctx context.Context, req LocalRequest) (res Result) {
 		return l.unanswered(ctx, req, "record the signature", err)
 	}
 	return Result{Outcome: OutcomeSigned, SignatureID: row.ID, Signature: row.Signature, PublicKey: row.PublicKey, CommitSHA: sha}
+}
+
+// CheckCommit is the daemon's check on what git asked to have signed (spec
+// §4.3), made by whatever holds the commit before any signer is asked: the
+// payload is a commit object, and its committer is the run's signer, the
+// identity the run was started with. The author is free, because a rebase or
+// a cherry-pick re-signs commits that keep their original author; the
+// committer's timestamp is free too.
+//
+// ok is true for a commit that may be signed. Otherwise the Result is the
+// refusal: RefusalNotACommit with the object, or RefusalCommitterMismatch
+// with the committer the commit named. An error is a payload that could not
+// be read as an object at all.
+func CheckCommit(payload []byte, signer Identity) (Result, bool, error) {
+	committer, err := commitsign.ParseCommitter(payload)
+	if err != nil {
+		var nac *commitsign.NotACommitError
+		if errors.As(err, &nac) {
+			res := refused(RefusalNotACommit)
+			res.Object = nac.Object
+			return res, false, nil
+		}
+		return Result{}, false, err
+	}
+	if committer.Name != signer.Name || committer.Email != signer.Email {
+		res := refused(RefusalCommitterMismatch)
+		res.Committer = committer
+		return res, false, nil
+	}
+	return Result{}, true, nil
 }
 
 // unanswered logs why a signature could not be made and answers the run to

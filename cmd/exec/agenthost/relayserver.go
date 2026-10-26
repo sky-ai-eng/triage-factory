@@ -71,6 +71,11 @@ type RelayServer struct {
 	// plane. nil until SetCommitSigning; sign_digest is refused without it.
 	signing *CommitSigning
 
+	// sealed is the signer the sidecar reported at bring-up, from the bundle
+	// it holds: what the run's signing refusals are recorded against. Zero
+	// until SetSealedCommitSigner, and for a run that does not sign.
+	sealed sealedSigner
+
 	// engagement is the trace context of the engagement that built this
 	// server, captured once at bring-up (SetEngagementSpanContext). It is how
 	// a relayed op — which arrives long after the setup span ended, over a
@@ -105,6 +110,26 @@ type CommitSigning struct {
 // the bring-up that knows the engagement; set before the agent runs, so it is
 // in place before git can ask for a signature.
 func (s *RelayServer) SetCommitSigning(cs CommitSigning) { s.signing = &cs }
+
+// sealedSigner is the signer a run's sealed bundle named: its kind and the
+// GitHub account id, in text, its identity carries.
+type sealedSigner struct {
+	mode      domain.CommitSigningMode
+	accountID string
+}
+
+// SetSealedCommitSigner records the signer the run's sealed bundle named, as
+// the sidecar reported it at bring-up (mode "" for a run that does not sign),
+// and the account id of the identity it signs as. An executor cannot read the
+// org's signer, so the pushes recorded through this server count by it
+// (LocalClient.SetSealedCommitSigner) and the sidecar's signing refusals are
+// recorded against it. Reported before the agent ran, it is not something a
+// sidecar can change after reading the agent's output.
+func (s *RelayServer) SetSealedCommitSigner(mode domain.CommitSigningMode, accountID string) {
+	s.sealed = sealedSigner{mode: mode, accountID: accountID}
+	s.rt.sealedSigner = mode
+	s.audit.SetSealedCommitSigner(mode)
+}
 
 // CredentialRefresh is the orchestrator's read-only handle on the run's sealed
 // credential bundle. Neither half opens it: SealedAt reports only
@@ -775,16 +800,9 @@ func (s *RelayServer) signDigest(ctx context.Context, a agentproc.SignDigestArgs
 	if !signer.Signs() || a.SignerUserID <= 0 {
 		return agentproc.SignDigestReply{}, fmt.Errorf("agenthost: sign_digest names no signer (%q, account %d)", a.Signer, a.SignerUserID)
 	}
-	if s.stores.Orgs == nil {
-		return agentproc.SignDigestReply{}, errors.New("agenthost: sign_digest: no org store to read the GitHub host from")
-	}
-	settings, err := s.stores.Orgs.GetSettingsSystem(ctx, s.info.OrgID)
+	host, err := s.signerHost(ctx)
 	if err != nil {
-		return agentproc.SignDigestReply{}, fmt.Errorf("agenthost: sign_digest: read the org's settings: %w", err)
-	}
-	host := domain.GitHubHost(settings.GitHubBaseURL)
-	if host == "" {
-		return agentproc.SignDigestReply{}, errors.New("agenthost: sign_digest: the org has no GitHub host")
+		return agentproc.SignDigestReply{}, fmt.Errorf("agenthost: sign_digest: %w", err)
 	}
 	res, err := s.signing.Requester.Request(ctx, commitsigner.Request{
 		OrgID:          s.info.OrgID,
@@ -800,12 +818,33 @@ func (s *RelayServer) signDigest(ctx context.Context, a agentproc.SignDigestArgs
 		return agentproc.SignDigestReply{}, err
 	}
 	return agentproc.SignDigestReply{
-		Outcome:           string(res.Outcome),
-		SignatureID:       res.SignatureID,
-		Signature:         res.Signature,
-		Reason:            string(res.Refusal),
-		RetryAfterSeconds: res.RetryAfterSeconds,
+		Outcome:            string(res.Outcome),
+		SignatureID:        res.SignatureID,
+		Signature:          res.Signature,
+		Reason:             string(res.Refusal),
+		RetryAfterSeconds:  res.RetryAfterSeconds,
+		Limit:              res.Limit,
+		SignerStatus:       string(res.SignerStatus),
+		SignerStatusReason: res.SignerReason,
 	}, nil
+}
+
+// signerHost is the GitHub host of the signer a run of this org signs as: the
+// org's GitHub host, the one a signer is registered on and which cannot change
+// while it exists.
+func (s *RelayServer) signerHost(ctx context.Context) (string, error) {
+	if s.stores.Orgs == nil {
+		return "", errors.New("no org store to read the GitHub host from")
+	}
+	settings, err := s.stores.Orgs.GetSettingsSystem(ctx, s.info.OrgID)
+	if err != nil {
+		return "", fmt.Errorf("read the org's settings: %w", err)
+	}
+	host := domain.GitHubHost(settings.GitHubBaseURL)
+	if host == "" {
+		return "", errors.New("the org has no GitHub host")
+	}
+	return host, nil
 }
 
 // authorizeGHWrite decides one gh-channel request the injector recognized as a
@@ -933,6 +972,20 @@ func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args js
 				RemoteMessage: a.RemoteMessage,
 			})
 		}
+
+	case agentproc.OpRecordCommitSHA:
+		var a agentproc.RecordCommitSHAArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return fmt.Errorf("agenthost: decode relayed commit id: %w", err)
+		}
+		return s.recordCommitSHA(ctx, a)
+
+	case agentproc.OpRecordSignRefusal:
+		var a agentproc.RecordSignRefusalArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return fmt.Errorf("agenthost: decode relayed signing refusal: %w", err)
+		}
+		return s.recordSignRefusal(ctx, a)
 
 	case opRecordExternalWrite:
 		var a recordExternalWriteArgs
