@@ -363,6 +363,16 @@ and verifies with `ssh-keygen -Y verify`.
 - **Local mode.** A per-org key is in the secret store (the OS keychain, or
   the encrypted file backend). The daemon reads it, and the signer's status,
   for every signature. There is no deployment signer.
+
+  The key is out of a run's reach only while the local sandbox is on, which
+  masks the store. With it off (macOS, or `TF_LOCAL_SANDBOX=off`) the agent
+  runs as the operator and can read the key from the store, as it can the
+  org's GitHub token. It can also run `exec git sign` with signing settings
+  of its own, past the claim, budget and committer checks (§4.3, §4.7),
+  though only as the org's signer. Local mode is not a security boundary,
+  and signing does not make it one: an org that signs locally should sign
+  with a dedicated account, so a key that leaks signs only as that account.
+  TFAC-885 tracks what closing this would take.
 - **Multi mode.** A per-org key is in the secret store, which only control
   pods open (executors run `pgstore.NewWithoutSecrets`). The deployment key is
   operator config on the control pods, in the same class as the deployment
