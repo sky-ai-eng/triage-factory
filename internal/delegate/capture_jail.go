@@ -268,9 +268,15 @@ func writeStaged(dest string, body io.Reader) error {
 
 // prepareCaptureStaging makes the directory a capture's stream is written
 // through: owner-only, holding the one pre-created owner-only file the broker
-// validates and hands the jail as its only writable output.
+// validates and hands the jail as its only writable output. It is in the runs
+// base, as the archive staged from it is (stageSnapshotArchive), and for the
+// same reason: the stream is the tree's whole delta.
 func prepareCaptureStaging() (string, error) {
-	dir, err := os.MkdirTemp("", "tf-capture-*")
+	base, err := worktree.EnsureRunsBase()
+	if err != nil {
+		return "", err
+	}
+	dir, err := os.MkdirTemp(base, ".capture-*")
 	if err != nil {
 		return "", err
 	}

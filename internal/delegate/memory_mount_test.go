@@ -244,7 +244,9 @@ func TestRehydrate_RestoredTreeCarriesTheMemorySymlink(t *testing.T) {
 	}
 
 	runmode.SetForTest(t, runmode.ModeMulti)
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: conversationID}
+	// Recorded where an executor builds the tree, under its state root, rather
+	// than where the local capture side above made it.
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: worktree.RunRoot(conversationID), TaskID: conversationID}
 	got, _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, checkoutRestorer{}, nil)
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)

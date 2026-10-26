@@ -3,6 +3,8 @@ package worktree
 import (
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
@@ -15,10 +17,20 @@ import (
 // two would make every real delegated run's worktree fail the broker's
 // launch validation — this test is what catches that instead of it
 // surfacing as every sandboxed run rejected in production.
+//
+// Both modes, because the two derive the base per mode: the temp dir locally,
+// the state root in multi.
 func TestRunRoot_MatchesBrokerTrustedRoot(t *testing.T) {
-	for _, conversationID := range []string{"run-1", "00000000-0000-0000-0000-0000000000aa", "itest-abc"} {
-		if got, want := RunRoot(conversationID), sandbox.RunTreeRoot(conversationID); got != want {
-			t.Errorf("RunRoot(%q) = %q, want sandbox.RunTreeRoot %q", conversationID, got, want)
-		}
+	for _, mode := range []runmode.Mode{runmode.ModeLocal, runmode.ModeMulti} {
+		t.Run(string(mode), func(t *testing.T) {
+			runmode.SetForTest(t, mode)
+			t.Setenv("TMPDIR", t.TempDir())
+			paths.SetForTest(t, t.TempDir())
+			for _, rootKey := range []string{"run-1", "00000000-0000-0000-0000-0000000000aa", "itest-abc"} {
+				if got, want := RunRoot(rootKey), sandbox.RunTreeRoot(rootKey); got != want {
+					t.Errorf("RunRoot(%q) = %q, want sandbox.RunTreeRoot %q", rootKey, got, want)
+				}
+			}
+		})
 	}
 }

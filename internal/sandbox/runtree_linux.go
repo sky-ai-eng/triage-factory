@@ -268,8 +268,9 @@ func allowedRunTreeOwner(uid uint32) bool {
 // missing-path case must still reject malformed input rather than
 // blessing it as a silent no-op). Requires an absolute, clean path at
 // least two components deep: every legitimate run tree lives under a
-// parent like /tmp/<runs-dir>/ or a state-root subdirectory — "/",
-// "/tmp", "/data" themselves can never be run trees.
+// parent like <state root>/runs/ (multi), <tmp>/triagefactory-runs/ (local)
+// or another state-root subdirectory — "/", "/tmp", "/data" themselves can
+// never be run trees.
 func validateRunTreeShape(op, path string) error {
 	if !filepath.IsAbs(path) || path != filepath.Clean(path) {
 		return fmt.Errorf("sandbox: %s: path %q must be absolute and clean", op, path)
