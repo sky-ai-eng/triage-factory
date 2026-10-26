@@ -861,9 +861,10 @@ export interface GitHubIdentityStatus {
   login?: string
   /** The org's GitHub host the binding is keyed against. */
   host: string
-  /** Whether Connect is offerable — true once the org has a registered
-   *  GitHub App (Connect reuses its client_id). When false, the gate tells
-   *  the user their admin must finish GitHub setup. */
+  /** Whether Connect is offerable — true when the org's own GitHub App can
+   *  run it, or in multi mode when the deployment's App serves the org's
+   *  host. When false, the gate tells the user their admin must finish
+   *  GitHub setup. */
   connect_available: boolean
 }
 

@@ -6,7 +6,6 @@ import { useGitHubIdentity } from '../../hooks/useGitHubIdentity'
 import { useJiraIdentity } from '../../hooks/useJiraIdentity'
 import { useTokens } from '../../hooks/useTokens'
 import { apiJSON, httpErrorMessage } from '../../lib/apiClient'
-import { captureGitHubIdentityPat } from '../../lib/githubIdentity'
 import { IDP_NAMES, idpMarkSrc } from '../../lib/idp'
 import { captureJiraIdentityApiToken, captureJiraIdentityPat } from '../../lib/jiraIdentity'
 import { getStoredTheme, setTheme, useEffectiveTheme } from '../../lib/theme'
@@ -131,13 +130,15 @@ export default function UserSettingsPage() {
     const g = gh.state.status === 'ready' ? gh.state.data : null
     // Only when the org has a GitHub host, as for Jira below. Until the read
     // lands the row stays, so the loading and offline states still show it.
+    // Connect is the only way to link a GitHub identity in multi mode.
     if (gh.state.status !== 'ready' || g?.host) {
       list.push({
         id: 'gh',
         kind: 'github',
         account: g?.connected && g.login ? '@' + g.login : null,
         host: g?.host,
-        method: g?.connect_available ? 'app' : 'pat',
+        method: 'app',
+        connectOnly: true,
       })
     }
     const j = jira.state.status === 'ready' ? jira.state.data : null
@@ -166,14 +167,9 @@ export default function UserSettingsPage() {
       '/connect/start?return_to=' +
       encodeURIComponent('/settings')
   }
-  const onVerify = async (id: string, f: { token: string; email?: string }) => {
+  // The token path is Jira's alone: GitHub's band offers Connect only.
+  const onVerify = async (_id: string, f: { token: string; email?: string }) => {
     if (!orgId) throw new Error('No active organization.')
-    if (id === 'gh') {
-      const got = await captureGitHubIdentityPat(orgId, f.token)
-      gh.refresh()
-      void refreshMe()
-      return '@' + got.login
-    }
     const cloud = jira.state.status === 'ready' && jira.state.data.deployment !== 'data_center'
     const got = cloud
       ? await captureJiraIdentityApiToken(orgId, f.email ?? '', f.token)

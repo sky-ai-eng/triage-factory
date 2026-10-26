@@ -6,9 +6,11 @@
 //
 // Two capture paths, both ending in the identical state (a verified identity
 // row, no token retained):
-//   - Connect (one-click OAuth) when the org has a registered GitHub App.
-//   - PAT_2 paste otherwise (and as the universal fallback): the wizard's
-//     Continue validates the token, reads the login, and discards it.
+//   - Connect (one-click OAuth) through the workspace's own GitHub App, or in
+//     multi mode the deployment's App.
+//   - PAT_2 paste, local mode only: the wizard's Continue validates the token,
+//     reads the login, and discards it. Multi mode links identity through
+//     Connect alone.
 //
 // The Connect button is an external redirect (an OAuth round-trip can't fold
 // into Continue); it returns to /setup, where the step's load re-reads identity
@@ -23,7 +25,7 @@ const GitHubMark = () => (
   </svg>
 )
 
-export function UserIdentityStep({ state, patch, orgId, error }: StepContext) {
+export function UserIdentityStep({ state, patch, orgId, isLocal, error }: StepContext) {
   const host = state.userIdentityHost || 'GitHub'
 
   // Already bound (a github.com login_claim, a prior Connect, or this session's
@@ -70,6 +72,13 @@ export function UserIdentityStep({ state, patch, orgId, error }: StepContext) {
         </p>
       </div>
 
+      {!isLocal && !state.userConnectAvailable && (
+        <p className="text-body leading-relaxed text-ink-3">
+          GitHub isn&rsquo;t connected for this workspace yet. Once an admin connects it in
+          Workspace Settings, come back here to connect your account.
+        </p>
+      )}
+
       {state.userConnectAvailable && (
         <button
           type="button"
@@ -81,33 +90,35 @@ export function UserIdentityStep({ state, patch, orgId, error }: StepContext) {
         </button>
       )}
 
-      <div className="space-y-2">
-        <label className="block">
-          <span className="mb-2 block text-reported font-medium uppercase tracking-wide text-ink-3">
+      {isLocal && (
+        <div className="space-y-2">
+          <label className="block">
+            <span className="mb-2 block text-reported font-medium uppercase tracking-wide text-ink-3">
+              {state.userConnectAvailable
+                ? 'Or paste a personal access token'
+                : 'Personal access token'}
+            </span>
+            <input
+              type="password"
+              autoComplete="off"
+              value={state.userGitHubPat}
+              placeholder="ghp_…"
+              onChange={(e) => patch({ userGitHubPat: e.target.value })}
+              aria-invalid={!!error || undefined}
+              className={`${glassInputClass}${
+                error
+                  ? ' !border-[var(--color-alarm)] focus:!border-[var(--color-alarm)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
+                  : ''
+              }`}
+            />
+          </label>
+          <p className="text-reported leading-relaxed text-ink-3">
             {state.userConnectAvailable
-              ? 'Or paste a personal access token'
-              : 'Personal access token'}
-          </span>
-          <input
-            type="password"
-            autoComplete="off"
-            value={state.userGitHubPat}
-            placeholder="ghp_…"
-            onChange={(e) => patch({ userGitHubPat: e.target.value })}
-            aria-invalid={!!error || undefined}
-            className={`${glassInputClass}${
-              error
-                ? ' !border-[var(--color-alarm)] focus:!border-[var(--color-alarm)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
-                : ''
-            }`}
-          />
-        </label>
-        <p className="text-reported leading-relaxed text-ink-3">
-          {state.userConnectAvailable
-            ? 'A token works too — your username and verified primary email are read, and the token isn’t stored.'
-            : 'Paste a token with read access to your identity and email addresses. The token isn’t stored.'}
-        </p>
-      </div>
+              ? 'A token works too — your username and verified primary email are read, and the token isn’t stored.'
+              : 'Paste a token with read access to your identity and email addresses. The token isn’t stored.'}
+          </p>
+        </div>
+      )}
     </div>
   )
 }

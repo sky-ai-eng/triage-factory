@@ -25,8 +25,9 @@ import (
 // account's numeric id, for the commit email that links a bot's commits on
 // github.com — is a second, public read alongside it.
 //
-// That preflight is also a gate: it is where the members permission is
-// asserted, and a deployment App that fails it must serve nobody. It runs on
+// That preflight is also a gate: it is where the members and emails
+// permissions are asserted, and a deployment App that fails it must serve
+// nobody. It runs on
 // FIRST USE of the deployment credential rather than at boot, because a GitHub
 // blip must never refuse to start the deployment — and its answer is cached, so
 // the cost is one pair of reads per host per TTL rather than one per
@@ -35,8 +36,8 @@ import (
 // ErrDeploymentAppUnavailable is returned when a managed-class org's resolution
 // cannot use the deployment App: none is configured on this deployment, or its
 // preflight did not come back clean (GitHub rejected the key pair, GitHub did
-// not answer, or the App is not granted the organization members permission —
-// the cause is wrapped and names which).
+// not answer, or the App is not granted the organization members or account
+// emails permission — the cause is wrapped and names which).
 //
 // Like ErrUnknownCredentialClass it deliberately does NOT wrap
 // ErrNoGitHubCredentials. "GitHub is not configured" is a claim about the

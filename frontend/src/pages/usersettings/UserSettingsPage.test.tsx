@@ -65,12 +65,8 @@ vi.mock('../../hooks/useGitHubIdentity', () => ({ useGitHubIdentity: () => gh })
 vi.mock('../../hooks/useJiraIdentity', () => ({ useJiraIdentity: () => jira }))
 
 const captures = vi.hoisted(() => ({
-  captureGitHubIdentityPat: vi.fn(),
   captureJiraIdentityApiToken: vi.fn(),
   captureJiraIdentityPat: vi.fn(),
-}))
-vi.mock('../../lib/githubIdentity', () => ({
-  captureGitHubIdentityPat: captures.captureGitHubIdentityPat,
 }))
 vi.mock('../../lib/jiraIdentity', () => ({
   captureJiraIdentityApiToken: captures.captureJiraIdentityApiToken,
@@ -228,9 +224,30 @@ describe('UserSettingsPage — accounts are who the factory acts as', () => {
     const assign = vi.fn()
     Object.defineProperty(window, 'location', { value: { href: '' }, writable: true })
     fireEvent.click(screen.getByRole('button', { name: 'Change' }))
+    // Multi mode links a GitHub identity through Connect alone: no token path.
+    expect(
+      screen.queryByRole('button', { name: 'paste a personal access token' }),
+    ).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Continue with GitHub' }))
     expect(window.location.href).toBe('/api/orgs/o1/github/connect/start?return_to=%2Fsettings')
     void assign
+  })
+
+  it('offers no GitHub token field even when Connect is not advertised', async () => {
+    const saved = gh.state
+    gh.state = {
+      status: 'ready',
+      data: { connected: false, login: '', host: 'github.com', connect_available: false },
+    }
+    try {
+      stub(BASE)
+      render(<UserSettingsPage />)
+      fireEvent.click(screen.getAllByRole('button', { name: 'Connect' })[0])
+      expect(screen.getByRole('button', { name: 'Continue with GitHub' })).toBeInTheDocument()
+      expect(screen.queryByLabelText(/PERSONAL ACCESS TOKEN/)).not.toBeInTheDocument()
+    } finally {
+      gh.state = saved
+    }
   })
 
   it('verifies a Cloud Jira credential through the capture path and refreshes', async () => {

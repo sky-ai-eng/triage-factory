@@ -1635,7 +1635,7 @@ const teamModelStep: WizardStep = {
 // active org's host (the same endpoint the RequireGitHubIdentity gate polls).
 // It seeds the User step: `connected` resumes it complete (a github.com login
 // already has an identity via login_claim — zero extra clicks), `login`/`host`
-// drive the copy, and `connect_available` chooses Connect vs. the PAT_2 paste.
+// drive the copy, and `connect_available` says whether Connect is offered.
 // Throws on a hard read failure so the host shows a retry rather than wrongly
 // prompting a connected user to reconnect.
 export async function loadUserIdentity(ctx: LoadContext): Promise<Partial<WizardState>> {
@@ -1656,13 +1656,15 @@ export async function loadUserIdentity(ctx: LoadContext): Promise<Partial<Wizard
 
 // Step · Your GitHub identity (the sole User-section step). Captures the
 // signed-in user's own @login on the org's host — PAT_2, independent of the
-// org's PAT_1 credential. Connect (one click) when an App is registered, else a
-// PAT_2 paste; either way the end state is a verified user_github_identities
-// row with no token retained. The Connect button (in the body) is an external
-// OAuth redirect that returns to /setup; the PAT path is this step's Continue,
-// which validates the token, records the login, and discards it. Mandatory: the
-// wizard can't finish until a host-verified identity exists — the in-flow mirror
-// of the RequireGitHubIdentity gate.
+// org's PAT_1 credential. Connect (one click) through the workspace's own App or
+// the deployment's; in local mode a PAT_2 paste too. Either way the end state is
+// a verified user_github_identities row with no token retained. The Connect
+// button (in the body) is an external OAuth redirect that returns to /setup; the
+// PAT path is this step's Continue, which validates the token, records the
+// login, and discards it. Multi mode has no PAT path, so Continue there only
+// finishes a step Connect already completed. Mandatory: the wizard can't finish
+// until a host-verified identity exists — the in-flow mirror of the
+// RequireGitHubIdentity gate.
 const userIdentityStep: WizardStep = {
   id: 'user-github-identity',
   section: 'user',
@@ -1670,14 +1672,18 @@ const userIdentityStep: WizardStep = {
   advanceOnEnter: true,
   load: loadUserIdentity,
   isComplete: (s) => s.userIdentityConnected,
-  validate: (s) =>
-    s.userIdentityConnected || s.userGitHubPat.trim() !== ''
+  validate: (s) => {
+    if (s.userIdentityConnected) return null
+    if (!s.isLocal) return 'Connect your GitHub to finish.'
+    return s.userGitHubPat.trim() !== ''
       ? null
-      : 'Connect your GitHub, or paste a personal access token, to finish.',
-  persist: async ({ state, orgId, patch }) => {
+      : 'Connect your GitHub, or paste a personal access token, to finish.'
+  },
+  persist: async ({ state, orgId, isLocal, patch }) => {
     // Already bound (Connect return, or a github.com login_claim) — nothing to
     // do; Continue just finishes.
     if (state.userIdentityConnected) return
+    if (!isLocal) throw new Error('Connect your GitHub to finish.')
     if (!orgId) throw new Error('No organization context.')
     const pat = state.userGitHubPat.trim()
     if (pat === '') {

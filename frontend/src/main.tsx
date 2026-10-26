@@ -124,7 +124,7 @@ function LocalRoutes() {
         path="/orgs/:org_id/connect-github"
         element={
           <AuthGate mode="local">
-            <ConnectGitHub />
+            <ConnectGitHub isLocal />
           </AuthGate>
         }
       />

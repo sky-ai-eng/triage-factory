@@ -16,8 +16,11 @@ import { safeReturnTo } from '../lib/returnTo'
  * joined after first-run, lands here. Satisfiable two ways, both ending in the
  * same state (a verified identity row, no token retained):
  *   - Connect — one consent click against the org's host (github.com OR GHES),
- *     when a GitHub App is registered.
- *   - PAT_2 paste — always available, and the only path when no App exists.
+ *     through the workspace's own GitHub App or, in multi mode, the
+ *     deployment's App.
+ *   - PAT_2 paste — local mode only, where it is the fallback to Connect and
+ *     the only path when no App exists. Multi mode links identity through
+ *     Connect alone.
  * The org PAT (PAT_1) is deliberately NOT a capture path here: access and
  * identity are independent, so there is no "ask your admin to save a token"
  * shortcut — every user binds their own identity. There is no voluntary skip.
@@ -28,9 +31,10 @@ import { safeReturnTo } from '../lib/returnTo'
  * Collapsing them would blame the user for a network problem.
  *
  * Runs in BOTH modes — the org id comes from the route param (/orgs/:org_id/
- * connect-github), so it needs no OrgContext (absent in local mode). Rendered
- * outside RequireGitHubIdentity (its own route) so it isn't gated by the very
- * check it satisfies — no redirect loop.
+ * connect-github), so it needs no OrgContext (absent in local mode); `isLocal`
+ * says which, since only local offers the token paste. Rendered outside
+ * RequireGitHubIdentity (its own route) so it isn't gated by the very check it
+ * satisfies — no redirect loop.
  */
 
 function Card({ children }: { children: React.ReactNode }) {
@@ -76,6 +80,21 @@ function errorBanner(
       }
     case 'state':
       return { tone: 'retry', text: 'That connection attempt expired. Please try again.' }
+    case 'sso_required':
+      return {
+        tone: 'retry',
+        text: 'This workspace requires signing in through its single sign-on. Sign in that way, then connect GitHub again.',
+      }
+    case 'no_app':
+      return {
+        tone: 'retry',
+        text: "This workspace doesn't have a GitHub App that can connect your account yet. Ask your admin to finish GitHub setup in Workspace Settings.",
+      }
+    case 'deployment_app_unavailable':
+      return {
+        tone: 'infra',
+        text: "This deployment's GitHub App can't connect accounts right now. Ask your operator to check its configuration, then try again.",
+      }
     default:
       return {
         tone: 'retry',
@@ -84,14 +103,14 @@ function errorBanner(
   }
 }
 
-export default function ConnectGitHub() {
+export default function ConnectGitHub({ isLocal = false }: { isLocal?: boolean }) {
   const { org_id: orgId } = useParams<{ org_id: string }>()
   const location = useLocation()
   const { state, refresh } = useGitHubIdentity(orgId ?? null)
 
-  // PAT_2 fallback state — always available (the only path when no App is
-  // registered). On success we refresh(), which re-reads identity → connected →
-  // navigates to returnTo below.
+  // PAT_2 fallback state — local mode only (and there the only path when no App
+  // is registered). On success we refresh(), which re-reads identity →
+  // connected → navigates to returnTo below.
   const [pat, setPat] = useState('')
   const [capturing, setCapturing] = useState(false)
   const [patError, setPatError] = useState<string | null>(null)
@@ -207,48 +226,57 @@ export default function ConnectGitHub() {
         </button>
       )}
 
-      {/* PAT_2 fallback — always offered, and the sole capture path when no App
-          is registered (connect_available=false). */}
-      <div className="space-y-2">
-        <label className="block">
-          <span className="mb-1.5 block text-reported font-medium uppercase tracking-wide text-ink-3">
-            {connect_available
-              ? 'Or paste a personal access token'
-              : 'Paste a personal access token'}
-          </span>
-          <input
-            type="password"
-            autoComplete="off"
-            value={pat}
-            placeholder="ghp_…"
-            onChange={(e) => {
-              setPat(e.target.value)
-              if (patError) setPatError(null)
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void submitPat()
-            }}
-            aria-invalid={!!patError || undefined}
-            className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 focus:outline-none focus:ring-2 focus:ring-warm/30 transition-colors ${
-              patError ? 'border-alarm/50' : 'border-line-1 focus:border-warm/40'
-            }`}
-          />
-        </label>
-        {patError && <p className="text-ui text-alarm leading-relaxed">{patError}</p>}
-        <button
-          type="button"
-          onClick={() => void submitPat()}
-          disabled={pat.trim() === '' || capturing}
-          className="w-full rounded-xl border border-line-1 px-4 py-2.5 text-body font-medium text-ink-2 hover:text-ink-1 hover:border-warm/40 disabled:opacity-40 disabled:hover:border-line-1 transition-colors"
-        >
-          {capturing ? 'Verifying…' : 'Verify token'}
-        </button>
-      </div>
+      {!isLocal && !connect_available && (
+        <p className="text-body text-ink-3 leading-relaxed">
+          GitHub isn&apos;t connected for this workspace yet. Ask an admin to connect it in
+          Workspace Settings, then come back here.
+        </p>
+      )}
+
+      {/* PAT_2 fallback — local mode only, and there the sole capture path when
+          no App is registered (connect_available=false). */}
+      {isLocal && (
+        <div className="space-y-2">
+          <label className="block">
+            <span className="mb-1.5 block text-reported font-medium uppercase tracking-wide text-ink-3">
+              {connect_available
+                ? 'Or paste a personal access token'
+                : 'Paste a personal access token'}
+            </span>
+            <input
+              type="password"
+              autoComplete="off"
+              value={pat}
+              placeholder="ghp_…"
+              onChange={(e) => {
+                setPat(e.target.value)
+                if (patError) setPatError(null)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void submitPat()
+              }}
+              aria-invalid={!!patError || undefined}
+              className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 focus:outline-none focus:ring-2 focus:ring-warm/30 transition-colors ${
+                patError ? 'border-alarm/50' : 'border-line-1 focus:border-warm/40'
+              }`}
+            />
+          </label>
+          {patError && <p className="text-ui text-alarm leading-relaxed">{patError}</p>}
+          <button
+            type="button"
+            onClick={() => void submitPat()}
+            disabled={pat.trim() === '' || capturing}
+            className="w-full rounded-xl border border-line-1 px-4 py-2.5 text-body font-medium text-ink-2 hover:text-ink-1 hover:border-warm/40 disabled:opacity-40 disabled:hover:border-line-1 transition-colors"
+          >
+            {capturing ? 'Verifying…' : 'Verify token'}
+          </button>
+        </div>
+      )}
 
       <p className="text-reported text-ink-3 leading-relaxed">
-        Either way, Triage Factory reads your GitHub username and verified primary email — it
-        doesn&apos;t store your token or gain access to your repositories. Repository access is
-        configured separately by your admin.
+        {isLocal && 'Either way, '}Triage Factory reads your GitHub username and verified primary
+        email — it doesn&apos;t store your token or gain access to your repositories. Repository
+        access is configured separately by your admin.
       </p>
     </Card>
   )

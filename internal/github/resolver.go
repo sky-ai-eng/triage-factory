@@ -1445,7 +1445,7 @@ func (r *resolver) installationToken(ctx context.Context, orgID string, app reso
 func (r *resolver) minterFor(ctx context.Context, orgID string, app resolvedApp, base string) (*githubapp.Minter, error) {
 	if app.deployment != nil {
 		// Already preflighted by activeApp — the App is configured, GitHub
-		// answered for it, and it holds the members permission — so this only
+		// answered for it, and it holds the permissions it gates on — so this only
 		// builds the signer.
 		return r.deployment.app.Minter(ghbase.APIBase(base))
 	}

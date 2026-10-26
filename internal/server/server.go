@@ -1456,11 +1456,13 @@ func (s *Server) routes() {
 	// from the consumed pending-bind record rather than from the path.
 	//
 	// It is also mounted RAW rather than through s.api, and takes withSession
-	// itself — see managedBindCallback. One URL serves two callers: a ceremony
-	// coming back (authenticated, because the next thing it does is write a
-	// credential) and someone who installed the App from its public page on
+	// itself — see managedBindCallback. One URL serves three callers: a member
+	// linking their GitHub identity through the deployment App, a ceremony
+	// coming back (both authenticated, because the next thing each does is a
+	// write), and someone who installed the App from its public page on
 	// GitHub, who has no session at all and must not be answered with a JSON
-	// 401. The bind cookie decides which, before any session lookup.
+	// 401. The Connect and bind cookies decide which, before any session
+	// lookup.
 	s.apiMutating("POST /api/orgs/{org_id}/github/managed/connect-account", s.handleGitHubManagedConnectAccount)
 	// Leaving the class — the bind's mirror. Verb routes because each is a
 	// multi-row transition (soft-remove the rows, reset the class, record the
@@ -1638,9 +1640,10 @@ func (s *Server) routes() {
 	s.api("GET /api/orgs/{org_id}/github/connect/callback", s.handleGitHubConnectCallback)
 	s.api("GET /api/orgs/{org_id}/github/identity", s.handleGitHubIdentityStatus)
 	// Capture-and-discard per-user identity from a user-supplied PAT (PAT_2):
-	// validate → whoami → write user_github_identities → drop the token. The
-	// always-available fallback to Connect (and the only path when no App is
-	// registered). Never stores the token.
+	// validate → whoami → write user_github_identities → drop the token. Local
+	// mode only — the fallback to Connect there, and the only path when no App
+	// is registered; multi mode links identity through Connect alone, and the
+	// handler 404s. Never stores the token.
 	s.apiMutating("POST /api/orgs/{org_id}/github/identity/pat", s.handleGitHubIdentityPAT)
 	// GitHub accounts on the org's GitHub, read through the org's credential:
 	// a login resolved to the account id a GitHub predicate's identity filters
