@@ -85,8 +85,10 @@ func (s *Spawner) dispatchDiskGated() bool {
 }
 
 // executorDiskAvailableMB is the free space the disk floor reads: the least
-// of the filesystem run trees live on and the state root's, which holds every
-// jail's /tmp and the bare clones.
+// of the filesystem holding the run trees and their snapshot staging and the
+// state root's, which holds every jail's /tmp and the bare clones. In multi
+// the runs base is under the state root, so the two are normally one
+// filesystem; locally the run trees are in the temp dir.
 func executorDiskAvailableMB() int {
 	dirs := []string{worktree.RunsBase()}
 	if root, err := paths.StateRootErr(); err == nil {
