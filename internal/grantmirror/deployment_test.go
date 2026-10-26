@@ -239,7 +239,7 @@ func newDeploymentGH(t *testing.T) *deploymentGH {
 			"slug":        "tf-deployment",
 			"client_id":   "Iv1.deployment",
 			"owner":       map[string]any{"login": "tf-inc", "type": "Organization"},
-			"permissions": map[string]string{"members": "read", "contents": "write"},
+			"permissions": map[string]string{"members": "read", "emails": "read", "contents": "write"},
 		})
 	})
 	mux.HandleFunc("GET /api/v3/users/", func(w http.ResponseWriter, _ *http.Request) {

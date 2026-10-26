@@ -66,6 +66,16 @@ describe('Accounts — the band', () => {
     expect(screen.getByLabelText('PERSONAL ACCESS TOKEN · GITHUB.COM')).toBeInTheDocument()
   })
 
+  it('offers Continue alone for a connect-only account', () => {
+    render(<Accounts accounts={[{ ...bound[0], connectOnly: true }]} onConnect={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Change' }))
+    expect(screen.getByRole('button', { name: 'Continue with GitHub' })).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'paste a personal access token' }),
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText('or')).not.toBeInTheDocument()
+  })
+
   it('opens the fields at once for a PAT org, and Verify waits for them', async () => {
     const onVerify = vi.fn().mockResolvedValue('@corp-login')
     const onChange = vi.fn()

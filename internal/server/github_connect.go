@@ -19,6 +19,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
+	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -38,11 +40,15 @@ import (
 //     against the org's actual host (github.com OR a GHES host), writing
 //     user_github_identities with source='connect_oauth'.
 //
-// It reuses the org App's stored client_id/secret (the App's user-to-server
-// OAuth credentials), exchanges the code for a `ghu_` user token, calls
-// GET /user plus /user/emails, records the identity, and discards the token —
-// there's no per-user API consumer yet, so nothing is persisted beyond the
-// identity row.
+// It runs through one of two OAuth clients. A workspace with its own App uses
+// that App's stored client_id/secret and its per-workspace callback. In multi
+// mode, a workspace without one, on the deployment App's GitHub or on none yet,
+// uses the deployment App's client and returns to the one callback that App
+// registers (ManagedBindCallbackPath), where the front door tells a Connect from
+// a bind by this flow's state cookie. Either way the code is exchanged for a
+// `ghu_` user token, GET /user plus /user/emails capture the account, the
+// identity is recorded, and the token is discarded — there's no per-user API
+// consumer yet, so nothing is persisted beyond the identity row.
 //
 // This is NOT a TF session: it's attribute-binding, not login. The session
 // the user already holds (from GoTrue or SAML) is untouched.
@@ -134,11 +140,89 @@ func (s *Server) requireOrgGitHubHost(ctx context.Context, w http.ResponseWriter
 	return host, true
 }
 
+// connectClient is the OAuth client a Connect runs through and the GitHub it
+// captures the identity on: the workspace's own App, or the deployment App.
+type connectClient struct {
+	ghWeb        string
+	clientID     string
+	clientSecret string // only the callback's code exchange uses it
+	redirectURI  string
+	// statePath scopes the state cookie to the callback this client returns
+	// to, so the cookie travels on the GitHub→TF redirect and nowhere else.
+	statePath string
+}
+
+// ownAppCanConnect reports whether the workspace's own App can run Connect's
+// code exchange: it needs the client id and a stored client secret both.
+func ownAppCanConnect(app *domain.OrgGitHubApp) bool {
+	return app != nil && app.ClientID != "" && app.ClientSecretRef != ""
+}
+
+// ownAppConnectClient is the workspace's own App as Connect's client, on the
+// workspace's host and its per-workspace callback.
+func (s *Server) ownAppConnectClient(orgID, ghWeb string, app *domain.OrgGitHubApp, clientSecret string) connectClient {
+	return connectClient{
+		ghWeb:        ghWeb,
+		clientID:     app.ClientID,
+		clientSecret: clientSecret,
+		redirectURI:  s.connectCallbackURL(orgID),
+		statePath:    connectStatePath(orgID),
+	}
+}
+
+// deploymentAppServesConnect reports whether Connect runs through the
+// deployment App for a workspace whose GitHub URL is orgBase: multi mode, a
+// configured deployment App, and a workspace on that App's GitHub or on none
+// yet. A workspace with no host links on the App's GitHub, which is the host the
+// bind then gives it. Decided from configuration and the stored host alone, so
+// the identity status read can answer it without asking GitHub anything.
+func (s *Server) deploymentAppServesConnect(orgBase string) bool {
+	if runmode.Current() != runmode.ModeMulti || !s.deploymentApp.Configured() {
+		return false
+	}
+	host := ghbase.CanonicalBaseURL(orgBase)
+	return host == "" || host == ghbase.DefaultBaseURL()
+}
+
+// deploymentAppConnectClient is the deployment App as Connect's client. The
+// client id is not configured but reported by GET /app, so this runs the App's
+// preflight, which also refuses an App missing a permission the capture needs.
+// On failure it returns the gate page's error code instead.
+func (s *Server) deploymentAppConnectClient(ctx context.Context, orgID string) (connectClient, string) {
+	ghWeb := ghbase.DefaultBaseURL()
+	minter, err := s.deploymentApp.Minter(ghbase.APIBase(ghWeb))
+	if err != nil {
+		githubConnectLog.Warn("deployment app minter unavailable", "org", orgID, "error", err)
+		return connectClient{}, "deployment_app_unavailable"
+	}
+	identity, err := githubapp.PreflightDeploymentApp(ctx, minter)
+	if err != nil {
+		githubConnectLog.Warn("deployment app preflight failed", "org", orgID, "error", err)
+		if errors.Is(err, githubapp.ErrDeploymentAppUnreachable) {
+			return connectClient{}, "host_unreachable"
+		}
+		return connectClient{}, "deployment_app_unavailable"
+	}
+	if identity.ClientID == "" {
+		githubConnectLog.Warn("deployment app reports no client id", "org", orgID)
+		return connectClient{}, "deployment_app_unavailable"
+	}
+	return connectClient{
+		ghWeb:        ghWeb,
+		clientID:     identity.ClientID,
+		clientSecret: s.deploymentApp.ClientSecret,
+		redirectURI:  s.deployCfg.publicURL + ManagedBindCallbackPath,
+		statePath:    ManagedBindCallbackPath,
+	}, ""
+}
+
 // handleGitHubConnectStart kicks off the user-to-server OAuth dance:
-// redirect the browser to {github_base_url}/login/oauth/authorize with the
-// org App's client_id and an HMAC-signed CSRF state. Deliberately targets the
-// org's host, NOT github.com — the whole point is binding the correct GHES
-// login for a GHES org. Any org member may bind their own identity.
+// redirect the browser to {host}/login/oauth/authorize with the client_id of
+// the client that serves this workspace and an HMAC-signed CSRF state. The
+// workspace's own App targets the workspace's host, NOT github.com — the whole
+// point is binding the correct GHES login for a GHES org; the deployment App
+// targets its own GitHub, which is the workspace's or will be. Any org member
+// may bind their own identity.
 //
 // GET /api/orgs/{org_id}/github/connect/start?return_to=/some/path
 func (s *Server) handleGitHubConnectStart(w http.ResponseWriter, r *http.Request) {
@@ -168,18 +252,28 @@ func (s *Server) handleGitHubConnectStart(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Connect reuses the App's client_id, so it's only available once an App
-	// is registered. Bounce back to the gate page with a code the FE turns
-	// into "your admin needs to finish GitHub setup" rather than dead-ending.
-	if app == nil || app.ClientID == "" {
+	// The workspace's own App first, then the deployment App. With neither
+	// there is no OAuth client to run, so bounce back to the gate page with a
+	// code rather than dead-ending.
+	var client connectClient
+	switch {
+	case ownAppCanConnect(app):
+		ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
+		if !okHost {
+			githubConnectLog.Warn("invalid github base url", "org", orgID)
+			s.redirectConnect(w, r, orgID, returnTo, "bad_host")
+			return
+		}
+		client = s.ownAppConnectClient(orgID, ghWeb, app, "")
+	case s.deploymentAppServesConnect(orgSet.GitHubBaseURL):
+		var errCode string
+		client, errCode = s.deploymentAppConnectClient(r.Context(), orgID)
+		if errCode != "" {
+			s.redirectConnect(w, r, orgID, returnTo, errCode)
+			return
+		}
+	default:
 		s.redirectConnect(w, r, orgID, returnTo, "no_app")
-		return
-	}
-
-	ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
-	if !okHost {
-		githubConnectLog.Warn("invalid github base url", "org", orgID)
-		s.redirectConnect(w, r, orgID, returnTo, "bad_host")
 		return
 	}
 
@@ -200,15 +294,7 @@ func (s *Server) handleGitHubConnectStart(w http.ResponseWriter, r *http.Request
 		internalError(w, "github-connect", err)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     connectStateCookieName,
-		Value:    signed,
-		Path:     connectStatePath(orgID),
-		HttpOnly: true,
-		Secure:   s.cookieSecure(r),
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   600,
-	})
+	http.SetCookie(w, s.connectStateCookie(r, client.statePath, signed, 600))
 
 	// No `scope`: this is a GitHub *App* user-to-server flow, where the token's
 	// capabilities come from the App's configured permissions, not an OAuth
@@ -217,20 +303,20 @@ func (s *Server) handleGitHubConnectStart(w http.ResponseWriter, r *http.Request
 	// orgID/userID/return_to stay in the signed cookie, off GitHub's logs and
 	// the URL bar.
 	q := url.Values{}
-	q.Set("client_id", app.ClientID)
-	q.Set("redirect_uri", s.connectCallbackURL(orgID))
+	q.Set("client_id", client.clientID)
+	q.Set("redirect_uri", client.redirectURI)
 	q.Set("state", st.CSRF)
-	target := ghWeb + "/login/oauth/authorize?" + q.Encode()
+	target := client.ghWeb + "/login/oauth/authorize?" + q.Encode()
 
 	http.Redirect(w, r, target, http.StatusFound)
 }
 
-// handleGitHubConnectCallback completes the dance: validate state/CSRF,
-// exchange the code for a `ghu_` token, GET /user against the org's host,
-// upsert user_github_identities(source='connect_oauth'), discard the token.
-// On any failure it redirects back to the gate page with a distinguishing
-// error code (host_unreachable vs connect_failed vs denied) rather than
-// dead-ending a top-level navigation in a JSON error.
+// handleGitHubConnectCallback completes the dance for the workspace's own
+// App: validate state/CSRF, then finishGitHubConnect. On any failure it
+// redirects back to the gate page with a distinguishing error code
+// (host_unreachable vs connect_failed vs denied) rather than dead-ending a
+// top-level navigation in a JSON error. The deployment App's Connect returns
+// to ManagedBindCallbackPath instead (completeDeploymentAppConnect).
 //
 // GET /api/orgs/{org_id}/github/connect/callback?code=...&state=...
 func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Request) {
@@ -246,7 +332,7 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 	// State cookie carries the signed flow context; clear it once read so a
 	// stale cookie can't be replayed.
 	cookie, cookieErr := r.Cookie(connectStateCookieName)
-	s.clearConnectCookie(w, r, orgID)
+	http.SetCookie(w, s.connectStateCookie(r, connectStatePath(orgID), "", -1))
 	if cookieErr != nil {
 		s.redirectConnect(w, r, orgID, "", "state")
 		return
@@ -265,20 +351,10 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	returnTo := normalizeReturnTo(cs.ReturnTo)
-	if returnTo == "/" {
-		returnTo = "/orgs/" + orgID
-	}
-
-	// User denied consent (or GitHub reported another OAuth error).
-	if ghErr := r.URL.Query().Get("error"); ghErr != "" {
-		githubConnectLog.Warn("github oauth error", "github_error", ghErr, "org", orgID)
-		s.redirectConnect(w, r, orgID, returnTo, "denied")
-		return
-	}
-	code := r.URL.Query().Get("code")
-	if code == "" {
-		s.redirectConnect(w, r, orgID, returnTo, "connect_failed")
+	returnTo := connectReturnTo(cs.ReturnTo, orgID)
+	code, errCode := connectCode(r, orgID)
+	if errCode != "" {
+		s.redirectConnect(w, r, orgID, returnTo, errCode)
 		return
 	}
 
@@ -317,18 +393,153 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Exchange the code for a user-to-server token, then whoami. The token is
-	// used only for this GET /user and never stored — identity binding, not
-	// an API consumer. A network failure on either call surfaces as
-	// host_unreachable so the FE shows the infra state, not "you didn't
-	// connect."
-	token, err := auth.ExchangeGitHubOAuthCode(r.Context(), ghWeb, app.ClientID, clientSecret, code, s.connectCallbackURL(orgID))
+	s.finishGitHubConnect(w, r, orgID, userID, returnTo, s.ownAppConnectClient(orgID, ghWeb, app, clientSecret), code)
+}
+
+// completeDeploymentAppConnect completes a Connect that ran through the
+// deployment App. It arrives at ManagedBindCallbackPath, the one callback that
+// App registers, and the front door (managedBindCallback) hands it here because
+// the browser holds this flow's state cookie, cs, and the query's state is not
+// the bind ceremony's (deploymentAppConnectReturn).
+//
+// That state need not be cs's nonce. Every Connect through the deployment App
+// shares one cookie name and path, so a Connect started in a second tab
+// replaces the first's cookie, and the first tab's return then carries a state
+// the cookie no longer holds. That return is refused as an expired attempt and
+// leaves the cookie alone, because the cookie is the later Connect's, still in
+// flight. Nothing is lost by it: every Connect here targets the App's one
+// GitHub, and the identity row is keyed by user and host, so the later Connect
+// links the same row.
+//
+// The org comes from the cookie rather than the path, so this re-establishes
+// what a path-scoped route gets from RequireOrgMember: a session rather than an
+// API token, the cookie's user as the session's user, that user still a member
+// of the cookie's org, and the org's "Require SSO" asked here. Open to any
+// member, like the per-workspace callback, so it runs before and independently
+// of the bind's admin re-check.
+func (s *Server) completeDeploymentAppConnect(w http.ResponseWriter, r *http.Request, cs *connectState) {
+	ctx := r.Context()
+	// A session, specifically, for the reason completeManagedBindCallback
+	// gives: this path names no org for a token's sealed org to be checked
+	// against. Checked before the cookie is cleared, as the bind checks it
+	// before spending its record: a stray header must not end the browser's
+	// Connect.
+	claims := httpx.ClaimsFrom(ctx)
+	if SessionFrom(ctx) == nil || claims == nil || claims.Subject == "" {
+		s.renderBindOutcome(w, "", refuseSessionRequired)
+		return
+	}
+	userID := claims.Subject
+	// A refusal before the cookie's org is established goes to the session's
+	// own workspace, never the cookie's: the caller has proven no relationship
+	// to it.
+	fallbackOrg := httpx.OrgIDFrom(ctx)
+	if r.URL.Query().Get("state") != cs.CSRF {
+		s.redirectConnect(w, r, fallbackOrg, "", "state")
+		return
+	}
+	// This return is the cookie's own, so it spends the cookie: cleared before
+	// anything else is decided, so it can never be replayed.
+	http.SetCookie(w, s.connectStateCookie(r, ManagedBindCallbackPath, "", -1))
+	if cs.UserID != userID {
+		s.redirectConnect(w, r, fallbackOrg, "", "state")
+		return
+	}
+	// From here the org is the cookie's, and membership is read again rather
+	// than trusted from the start: minutes have passed.
+	orgID := cs.OrgID
+	member, err := s.az.UserHasOrgAccess(ctx, userID, orgID)
+	if err != nil {
+		internalError(w, "github-connect", err)
+		return
+	}
+	if !member {
+		s.redirectConnect(w, r, fallbackOrg, "", "state")
+		return
+	}
+	returnTo := connectReturnTo(cs.ReturnTo, orgID)
+	gate, err := s.requestSSOGate(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-connect", err)
+		return
+	}
+	if gate.Barred {
+		s.redirectConnect(w, r, orgID, returnTo, "sso_required")
+		return
+	}
+
+	code, errCode := connectCode(r, orgID)
+	if errCode != "" {
+		s.redirectConnect(w, r, orgID, returnTo, errCode)
+		return
+	}
+
+	// The workspace may have moved to another GitHub since the start; the
+	// deployment App then no longer serves it.
+	var orgSet domain.OrgSettings
+	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		var lerr error
+		orgSet, lerr = tx.Orgs.GetSettings(ctx, orgID)
+		return lerr
+	}); err != nil {
+		internalError(w, "github-connect", err)
+		return
+	}
+	if !s.deploymentAppServesConnect(orgSet.GitHubBaseURL) {
+		s.redirectConnect(w, r, orgID, returnTo, "no_app")
+		return
+	}
+	client, errCode := s.deploymentAppConnectClient(ctx, orgID)
+	if errCode != "" {
+		s.redirectConnect(w, r, orgID, returnTo, errCode)
+		return
+	}
+
+	s.finishGitHubConnect(w, r, orgID, userID, returnTo, client, code)
+}
+
+// connectReturnTo is where a completed Connect sends the browser: the start's
+// return_to, or the workspace's home when it named none.
+func connectReturnTo(raw, orgID string) string {
+	returnTo := normalizeReturnTo(raw)
+	if returnTo == "/" {
+		returnTo = "/orgs/" + orgID
+	}
+	return returnTo
+}
+
+// connectCode reads the authorization code GitHub's redirect carries, or the
+// gate page's error code when it carries none: denied when GitHub reports an
+// OAuth error (the person declined, typically), connect_failed otherwise.
+func connectCode(r *http.Request, orgID string) (code, errCode string) {
+	if ghErr := r.URL.Query().Get("error"); ghErr != "" {
+		githubConnectLog.Warn("github oauth error", "github_error", ghErr, "org", orgID)
+		return "", "denied"
+	}
+	code = r.URL.Query().Get("code")
+	if code == "" {
+		return "", "connect_failed"
+	}
+	return code, ""
+}
+
+// finishGitHubConnect is the half of Connect both clients share: exchange the
+// code for a user-to-server token, capture the account it belongs to on the
+// client's GitHub, upsert user_github_identities(source='connect_oauth'), and
+// send the browser to returnTo.
+//
+// The token is used only for the whoami and never stored — identity binding,
+// not an API consumer. A network failure on either call surfaces as
+// host_unreachable so the FE shows the infra state, not "you didn't connect."
+func (s *Server) finishGitHubConnect(w http.ResponseWriter, r *http.Request, orgID, userID, returnTo string, client connectClient, code string) {
+	ctx := r.Context()
+	token, err := auth.ExchangeGitHubOAuthCode(ctx, client.ghWeb, client.clientID, client.clientSecret, code, client.redirectURI)
 	if err != nil {
 		githubConnectLog.Warn("token exchange failed", "org", orgID, "error", err)
 		s.redirectConnect(w, r, orgID, returnTo, connectErrCode(err))
 		return
 	}
-	ghUser, err := auth.CaptureGitHubIdentity(r.Context(), ghWeb, token)
+	ghUser, err := auth.CaptureGitHubIdentity(ctx, client.ghWeb, token)
 	if err != nil {
 		githubConnectLog.Warn("whoami failed", "org", orgID, "error", err)
 		s.redirectConnect(w, r, orgID, returnTo, connectErrCode(err))
@@ -339,29 +550,29 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if err := tx.Users.UpsertGitHubIdentity(r.Context(), userID, ghWeb, ghUser.Login, ghUser.UserID(), ghUser.PrimaryEmail, "connect_oauth"); err != nil {
+	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		if err := tx.Users.UpsertGitHubIdentity(ctx, userID, client.ghWeb, ghUser.Login, ghUser.UserID(), ghUser.PrimaryEmail, "connect_oauth"); err != nil {
 			return err
 		}
-		return recordGitHubIdentityBind(r.Context(), tx, orgID, userID, ghWeb, ghUser.Login)
+		return recordGitHubIdentityBind(ctx, tx, orgID, userID, client.ghWeb, ghUser.Login)
 	}); err != nil {
 		internalError(w, "github-connect", err)
 		return
 	}
 
 	githubConnectLog.Info("bound user",
-		"user", userID, "login", ghUser.Login, "host", ghWeb, "org", orgID, "source", "connect_oauth")
+		"user", userID, "login", ghUser.Login, "host", client.ghWeb, "org", orgID, "source", "connect_oauth")
 	// Seed this login's trailing-window PR history so the personal dashboard
-	// isn't blank for activity that predates tracking (TFAC-396). Fire-and-
-	// forget + marker-guarded; multi-mode only.
-	s.kickDashboardBackfill(orgID, userID, ghUser.Login, ghWeb)
+	// isn't blank for activity that predates tracking. Fire-and-forget +
+	// marker-guarded; multi-mode only.
+	s.kickDashboardBackfill(orgID, userID, ghUser.Login, client.ghWeb)
 	http.Redirect(w, r, returnTo, http.StatusFound)
 }
 
 // githubIdentityStatusResponse is the read-only shape the onboarding gate
 // polls to decide whether to block. `connected` is the single load-bearing
-// bit; `connect_available` lets the gate page choose between offering the
-// Connect button and telling the user their admin must register an App first.
+// bit; `connect_available` says whether Connect has an OAuth client to run
+// for this workspace, its own App's or the deployment App's.
 type githubIdentityStatusResponse struct {
 	Connected        bool   `json:"connected"`
 	Login            string `json:"login,omitempty"`
@@ -374,6 +585,11 @@ type githubIdentityStatusResponse struct {
 // up" check. Read-only; any org member. An absent row is connected=false,
 // the durable supported state runtime tolerates (this endpoint never asserts
 // a row must exist; it just reports presence).
+//
+// A workspace with no GitHub URL that the deployment App serves reports the
+// App's host and reads the user's identity there: that is where Connect links
+// it, and the host the bind gives the workspace, so an admin who linked before
+// binding reads as connected.
 //
 // GET /api/orgs/{org_id}/github/identity
 func (s *Server) handleGitHubIdentityStatus(w http.ResponseWriter, r *http.Request) {
@@ -393,6 +609,10 @@ func (s *Server) handleGitHubIdentityStatus(w http.ResponseWriter, r *http.Reque
 			return lerr
 		}
 		ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
+		deploymentServes := s.deploymentAppServesConnect(orgSet.GitHubBaseURL)
+		if !okHost && deploymentServes {
+			ghWeb, okHost = ghbase.DefaultBaseURL(), true
+		}
 		if okHost {
 			host = ghWeb
 			login, lerr = tx.Users.GetGitHubLogin(r.Context(), userID, ghWeb)
@@ -408,15 +628,11 @@ func (s *Server) handleGitHubIdentityStatus(w http.ResponseWriter, r *http.Reque
 		if lerr != nil {
 			return lerr
 		}
-		// Connect (the user-to-server OAuth code exchange) needs BOTH the App's
-		// client_id AND a stored client_secret — the exchange at :259 already
-		// requires the secret. An imported App may have no secret
-		// (the BYOA owner often skips it), so requiring only client_id here would
-		// advertise an OAuth flow that can't complete; the gate page would offer
-		// Connect, the user would consent, and the callback would dead-end on the
-		// missing secret. Requiring the ref too makes the gate fall back to the
-		// always-available PAT-capture identity path instead.
-		connectAvailable = app != nil && app.ClientID != "" && app.ClientSecretRef != ""
+		// The same two clients the start chooses between, decided from
+		// configuration and the stored host alone. An own App needs its stored
+		// client secret as well as its client id, or the gate would offer a
+		// Connect whose callback dead-ends on the missing secret.
+		connectAvailable = ownAppCanConnect(app) || deploymentServes
 		return nil
 	}); err != nil {
 		internalError(w, "github-identity", err)
@@ -492,11 +708,18 @@ func validateGitHubIdentityPAT(ctx context.Context, ghWeb, pat string) (auth.Git
 // state as the Connect OAuth flow, just proven by a token instead of a consent
 // click. This is PAT_2: the per-user identity credential, independent of the
 // org's PAT_1 access credential (they may be the same token; they are captured
-// and stored independently). It's the always-available fallback to Connect, and
-// the only capture path when no GitHub App is registered.
+// and stored independently). Local mode only: it is the fallback to Connect
+// there, and the only capture path when no GitHub App is registered. In multi
+// mode every set-up workspace has an OAuth client on its own GitHub (its own
+// App, or the deployment App), so Connect is the one way in, and this route
+// does not exist.
 //
 // POST /api/orgs/{org_id}/github/identity/pat
 func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request) {
+	if runmode.Current() == runmode.ModeMulti {
+		notFound(w, "route")
+		return
+	}
 	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
 		return
@@ -573,7 +796,13 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 // redirectConnect bounces a failed/aborted Connect flow back to the FE gate
 // page with an error code (and the original return_to so a retry resumes the
 // right destination). errCode "" means a bare redirect with no error banner.
+// With no org there is no gate page to name, so the browser goes to the app
+// root, where the SPA resolves one.
 func (s *Server) redirectConnect(w http.ResponseWriter, r *http.Request, orgID, returnTo, errCode string) {
+	if orgID == "" {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
 	q := url.Values{}
 	if errCode != "" {
 		q.Set("error", errCode)
@@ -588,18 +817,50 @@ func (s *Server) redirectConnect(w http.ResponseWriter, r *http.Request, orgID, 
 	http.Redirect(w, r, dest, http.StatusFound)
 }
 
-// clearConnectCookie expires the state cookie. Its Secure/SameSite/Path must
-// match the SetCookie in the start handler or the browser may keep a copy.
-func (s *Server) clearConnectCookie(w http.ResponseWriter, r *http.Request, orgID string) {
-	http.SetCookie(w, &http.Cookie{
+// connectStateCookie builds the state cookie — the set and the clear, from one
+// place, because a clear whose Secure/SameSite/Path differ from the set may
+// leave the browser holding a copy. path is the client's statePath.
+func (s *Server) connectStateCookie(r *http.Request, path, value string, maxAge int) *http.Cookie {
+	return &http.Cookie{
 		Name:     connectStateCookieName,
-		Value:    "",
-		Path:     connectStatePath(orgID),
-		MaxAge:   -1,
+		Value:    value,
+		Path:     path,
 		HttpOnly: true,
 		Secure:   s.cookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
-	})
+		MaxAge:   maxAge,
+	}
+}
+
+// deploymentAppConnectReturn reports whether a request to
+// ManagedBindCallbackPath is a Connect's return, and returns the state cookie
+// the deployment App's Connect start set when it is: the browser holds that
+// cookie, and the query carries a state that is not the bind ceremony's. The
+// bind's install leg carries no state, and its authorize leg carries the hash
+// of its cookie's nonce (hashBindNonce), which is computed here from the cookie
+// alone, so the choice reads nothing. nil leaves the request to the bind.
+//
+// Whether the state is this cookie's own nonce is not decided here: a return
+// from a Connect whose cookie a later one replaced is still a Connect's, and
+// completeDeploymentAppConnect refuses it as one rather than letting it reach a
+// bind ceremony it would spend.
+func (s *Server) deploymentAppConnectReturn(r *http.Request) *connectState {
+	state := r.URL.Query().Get("state")
+	if state == "" {
+		return nil
+	}
+	if bind, err := r.Cookie(managedBindCookieName); err == nil && bind.Value != "" && state == hashBindNonce(bind.Value) {
+		return nil
+	}
+	cookie, err := r.Cookie(connectStateCookieName)
+	if err != nil || cookie.Value == "" {
+		return nil
+	}
+	cs, err := parseConnectState(cookie.Value, s.deployCfg.hmacKey)
+	if err != nil || cs.CSRF == "" {
+		return nil
+	}
+	return cs
 }
 
 // connectErrCode maps an exchange/whoami error to the FE error code. A

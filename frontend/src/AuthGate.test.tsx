@@ -1,14 +1,23 @@
 // RequireLinearIdentity: the per-user Linear gate. What's pinned is the
 // ticket's contract — no gate in an org without Linear, a redirect to the
 // Connect page (carrying where the user was headed) when they have no
-// credential of their own, and fail-closed on a read error.
+// credential of their own, and fail-closed on a read error. Then
+// RequireGitHubIdentity's multi-mode rule, at the end.
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
-import { RequireLinearIdentity } from './AuthGate'
+import { RequireGitHubIdentity, RequireLinearIdentity } from './AuthGate'
 import { LOCAL_DEFAULT_ORG_ID } from './lib/githubApp'
 import { jsonBody } from './test/apiResponse'
-import type { LinearIdentityStatus } from './types'
+import type { GitHubIdentityStatus, LinearIdentityStatus } from './types'
+
+// A multi-mode active org, for the gates that read it from OrgContext. The
+// local-mode gates below pass isLocal and key on the sentinel instead.
+const MULTI_ORG = 'org-multi'
+vi.mock('./contexts/OrgContext', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./contexts/OrgContext')>()
+  return { ...actual, useActiveOrgId: () => MULTI_ORG }
+})
 
 const identityPath = `/api/orgs/${LOCAL_DEFAULT_ORG_ID}/linear/identity`
 
@@ -88,5 +97,71 @@ describe('RequireLinearIdentity', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
     expect(await screen.findByText('the app')).toBeInTheDocument()
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+  })
+})
+
+// RequireGitHubIdentity in multi mode: nobody is admitted without an identity,
+// whatever the identity read says about Connect.
+const githubIdentityPath = `/api/orgs/${MULTI_ORG}/github/identity`
+
+function stubGitHubIdentity(answer: GitHubIdentityStatus) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input: unknown) =>
+      Promise.resolve(
+        String(input) === githubIdentityPath
+          ? { ok: true, status: 200, ...jsonBody(answer) }
+          : { ok: false, status: 404, ...jsonBody({}) },
+      ),
+    ),
+  )
+}
+
+function renderGitHubGate(at = '/board') {
+  return render(
+    <MemoryRouter initialEntries={[at]}>
+      <Routes>
+        <Route path="/orgs/:org_id/connect-github" element={<Landed />} />
+        <Route
+          path="*"
+          element={
+            <RequireGitHubIdentity>
+              <p>the app</p>
+            </RequireGitHubIdentity>
+          }
+        />
+      </Routes>
+    </MemoryRouter>,
+  )
+}
+
+describe('RequireGitHubIdentity — multi mode', () => {
+  it.each([true, false])(
+    'sends a member without an identity to the Connect page (connect_available=%s)',
+    async (connectAvailable) => {
+      stubGitHubIdentity({
+        connected: false,
+        host: 'https://github.com',
+        connect_available: connectAvailable,
+      })
+      renderGitHubGate()
+      expect(
+        await screen.findByText(
+          `connect page /orgs/${MULTI_ORG}/connect-github?return_to=${encodeURIComponent('/board')}`,
+        ),
+      ).toBeInTheDocument()
+      expect(screen.queryByText('the app')).not.toBeInTheDocument()
+    },
+  )
+
+  it('admits a member with an identity', async () => {
+    stubGitHubIdentity({
+      connected: true,
+      login: 'octocat',
+      host: 'https://github.com',
+      connect_available: true,
+    })
+    renderGitHubGate()
+    expect(await screen.findByText('the app')).toBeInTheDocument()
   })
 })
