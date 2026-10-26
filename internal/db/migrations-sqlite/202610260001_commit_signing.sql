@@ -32,39 +32,46 @@ CREATE TABLE org_commit_signers (
 -- commit_signatures: one row per commit signature an agent's git asked for —
 -- the signing log, and what the signing budgets count, so no counter is
 -- stored. A local daemon records a signature already made, so its rows start
--- 'signed'; the 'requested' and 'signing' states and the claimed_by and
--- retry_after_seconds columns serve multi mode's control-plane queue and stay
+-- 'signed'; the 'requested', 'signing' and 'refused' states and the
+-- claimed_by, retry_after_seconds, refusal_limit, signer_status and
+-- signer_status_reason columns serve multi mode's control-plane queue and stay
 -- unused here. conversation_id and claim_id null on the conversation's purge,
 -- so the log outlives it. The columns are described on the Postgres table.
 CREATE TABLE commit_signatures (
-    id                  TEXT PRIMARY KEY,
-    org_id              TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    conversation_id     TEXT REFERENCES conversations(id) ON DELETE SET NULL,
-    claim_id            TEXT REFERENCES claims(id) ON DELETE SET NULL,
-    boot_epoch          INTEGER NOT NULL,
-    signer              TEXT NOT NULL,
-    signer_host         TEXT NOT NULL CHECK (signer_host <> ''),
-    signer_user_id      INTEGER NOT NULL,
-    public_key          TEXT,
-    digest              TEXT NOT NULL,
-    state               TEXT NOT NULL,
-    refusal_reason      TEXT,
-    retry_after_seconds INTEGER,
-    signature           TEXT,
-    claimed_by          TEXT,
-    signed_at           DATETIME,
-    commit_sha          TEXT,
-    repository_id       TEXT REFERENCES repositories(id) ON DELETE SET NULL,
-    pushed_at           DATETIME,
-    verification_reason TEXT,
-    checked_at          DATETIME,
-    created_at          DATETIME NOT NULL
+    id                   TEXT PRIMARY KEY,
+    org_id               TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    conversation_id      TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+    claim_id             TEXT REFERENCES claims(id) ON DELETE SET NULL,
+    boot_epoch           INTEGER NOT NULL,
+    signer               TEXT NOT NULL,
+    signer_host          TEXT NOT NULL CHECK (signer_host <> ''),
+    signer_user_id       INTEGER NOT NULL,
+    public_key           TEXT,
+    digest               TEXT NOT NULL,
+    state                TEXT NOT NULL,
+    refusal_reason       TEXT,
+    retry_after_seconds  INTEGER,
+    refusal_limit        INTEGER,
+    signer_status        TEXT,
+    signer_status_reason TEXT,
+    signature            TEXT,
+    claimed_by           TEXT,
+    signed_at            DATETIME,
+    commit_sha           TEXT,
+    repository_id        TEXT REFERENCES repositories(id) ON DELETE SET NULL,
+    pushed_at            DATETIME,
+    verification_reason  TEXT,
+    checked_at           DATETIME,
+    created_at           DATETIME NOT NULL
 );
 
 -- The two signing budgets: an org's signatures in the last minute, and one
 -- claim's in total.
 CREATE INDEX commit_signatures_org_signed_idx ON commit_signatures (org_id, signed_at) WHERE state = 'signed';
 CREATE INDEX commit_signatures_claim_signed_idx ON commit_signatures (claim_id) WHERE state = 'signed';
+-- A push's audit row names the account that signed the pushed tip, read from
+-- the signature whose commit_sha is that tip.
+CREATE INDEX commit_signatures_commit_idx ON commit_signatures (org_id, commit_sha) WHERE commit_sha IS NOT NULL;
 
 -- +goose Down
 SELECT 'down not supported';

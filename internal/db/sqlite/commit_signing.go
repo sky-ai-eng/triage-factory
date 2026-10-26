@@ -341,12 +341,13 @@ func (s *commitSignatureStore) RefuseSystem(ctx context.Context, orgID, id, clai
 	if err := db.ValidateCommitSignatureRefusal(refusal); err != nil {
 		return domain.CommitSignature{}, err
 	}
-	retryAfter, limit := refusal.Columns()
+	retryAfter, limit, signerStatus, signerStatusReason := refusal.Columns()
 	row, err := db.ScanCommitSignature(s.q.QueryRowContext(ctx, `
-		UPDATE commit_signatures SET state = ?, refusal_reason = ?, retry_after_seconds = ?, refusal_limit = ?
+		UPDATE commit_signatures SET state = ?, refusal_reason = ?, retry_after_seconds = ?, refusal_limit = ?,
+		       signer_status = ?, signer_status_reason = ?
 		 WHERE org_id = ? AND id = ? AND state = ? AND claimed_by = ?
 		RETURNING `+db.CommitSignatureColumns,
-		string(domain.CommitSignatureRefused), refusal.Reason, retryAfter, limit,
+		string(domain.CommitSignatureRefused), refusal.Reason, retryAfter, limit, signerStatus, signerStatusReason,
 		orgID, id, string(domain.CommitSignatureSigning), claimedBy).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.CommitSignature{}, db.ErrNoSuchCommitSignature

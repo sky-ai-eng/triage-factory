@@ -802,12 +802,14 @@ func (s *RelayServer) signDigest(ctx context.Context, a agentproc.SignDigestArgs
 		return agentproc.SignDigestReply{}, err
 	}
 	return agentproc.SignDigestReply{
-		Outcome:           string(res.Outcome),
-		SignatureID:       res.SignatureID,
-		Signature:         res.Signature,
-		Reason:            string(res.Refusal),
-		RetryAfterSeconds: res.RetryAfterSeconds,
-		Limit:             res.Limit,
+		Outcome:            string(res.Outcome),
+		SignatureID:        res.SignatureID,
+		Signature:          res.Signature,
+		Reason:             string(res.Refusal),
+		RetryAfterSeconds:  res.RetryAfterSeconds,
+		Limit:              res.Limit,
+		SignerStatus:       string(res.SignerStatus),
+		SignerStatusReason: res.SignerReason,
 	}, nil
 }
 

@@ -85,16 +85,20 @@ type SignDigestArgs struct {
 // RetryAfterSeconds, set only for the org's per-minute budget, says how long
 // until it admits another) or "unanswered" (nothing answered in time; the run
 // may try the same command again). Limit is the budget a refusal by the
-// per-minute or per-claim budget ran into, which the agent's refusal line
-// names. SignatureID names the request's commit_signatures row, which the
-// commit id the daemon computes is recorded on.
+// per-minute or per-claim budget ran into, and SignerStatus and
+// SignerStatusReason the signer's status and its reason for a refusal because
+// the signer is not active; the agent's refusal line names them. SignatureID
+// names the request's commit_signatures row, which the commit id the daemon
+// computes is recorded on.
 type SignDigestReply struct {
-	Outcome           string `json:"outcome"`
-	SignatureID       string `json:"signature_id,omitempty"`
-	Signature         string `json:"signature,omitempty"`
-	Reason            string `json:"reason,omitempty"`
-	RetryAfterSeconds int    `json:"retry_after_seconds,omitempty"`
-	Limit             int    `json:"limit,omitempty"`
+	Outcome            string `json:"outcome"`
+	SignatureID        string `json:"signature_id,omitempty"`
+	Signature          string `json:"signature,omitempty"`
+	Reason             string `json:"reason,omitempty"`
+	RetryAfterSeconds  int    `json:"retry_after_seconds,omitempty"`
+	Limit              int    `json:"limit,omitempty"`
+	SignerStatus       string `json:"signer_status,omitempty"`
+	SignerStatusReason string `json:"signer_status_reason,omitempty"`
 }
 
 // RecordCommitSHAArgs is record_commit_sha's payload: the signature's row, as

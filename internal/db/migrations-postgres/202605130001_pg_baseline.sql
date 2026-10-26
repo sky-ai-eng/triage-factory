@@ -6378,34 +6378,40 @@ GRANT SELECT, DELETE ON TABLE public.claim_credentials TO tf_system;
 -- refusal by the org's per-minute budget: how long until it admits another.
 -- refusal_limit is set on a refusal by either budget: the limit it ran into,
 -- read on the control pod that refused, which the run's refusal line names.
+-- signer_status and signer_status_reason are set on a refusal because the
+-- signer is not active: the signer's status and its reason as that pod read
+-- them, which the run's refusal line says in a sentence, since the executor
+-- cannot read the signer.
 -- commit_sha is the commit id the signature produced; repository_id and
 -- pushed_at are stamped when a push lands that commit as a ref's new tip, and
 -- verification_reason / checked_at hold GitHub's answer for it. signer, state
 -- and refusal_reason are app-validated.
 CREATE TABLE public.commit_signatures (
-    id                  uuid DEFAULT gen_random_uuid() NOT NULL,
-    org_id              uuid NOT NULL,
-    conversation_id     uuid,
-    claim_id            uuid,
-    boot_epoch          bigint NOT NULL,
-    signer              text NOT NULL,
-    signer_host         text NOT NULL,
-    signer_user_id      bigint NOT NULL,
-    public_key          text,
-    digest              text NOT NULL,
-    state               text NOT NULL,
-    refusal_reason      text,
-    retry_after_seconds integer,
-    refusal_limit       integer,
-    signature           text,
-    claimed_by          text,
-    signed_at           timestamp with time zone,
-    commit_sha          text,
-    repository_id       uuid,
-    pushed_at           timestamp with time zone,
-    verification_reason text,
-    checked_at          timestamp with time zone,
-    created_at          timestamp with time zone DEFAULT now() NOT NULL,
+    id                   uuid DEFAULT gen_random_uuid() NOT NULL,
+    org_id               uuid NOT NULL,
+    conversation_id      uuid,
+    claim_id             uuid,
+    boot_epoch           bigint NOT NULL,
+    signer               text NOT NULL,
+    signer_host          text NOT NULL,
+    signer_user_id       bigint NOT NULL,
+    public_key           text,
+    digest               text NOT NULL,
+    state                text NOT NULL,
+    refusal_reason       text,
+    retry_after_seconds  integer,
+    refusal_limit        integer,
+    signer_status        text,
+    signer_status_reason text,
+    signature            text,
+    claimed_by           text,
+    signed_at            timestamp with time zone,
+    commit_sha           text,
+    repository_id        uuid,
+    pushed_at            timestamp with time zone,
+    verification_reason  text,
+    checked_at           timestamp with time zone,
+    created_at           timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT commit_signatures_signer_host_check CHECK (signer_host <> '')
 );
 

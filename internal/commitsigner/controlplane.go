@@ -225,15 +225,19 @@ func (c *ControlPlane) Handle(ctx context.Context, orgID, id string) bool {
 
 // decision is what a pod does with one request: sign it with publicKey's
 // private half, or refuse it. limit is the budget a budget refusal ran into,
-// which the run names in its refusal line. denied names the
-// commit_sign_denied row a refusal records, "" for none.
+// and signerStatus and signerReason the signer's status and its reason for a
+// refusal because the signer is not active: the run's refusal line names
+// them. denied names the commit_sign_denied row a refusal records, "" for
+// none.
 type decision struct {
-	refusal    Refusal
-	retryAfter int
-	limit      int
-	denied     string
-	publicKey  string
-	signature  []byte
+	refusal      Refusal
+	retryAfter   int
+	limit        int
+	signerStatus domain.CommitSignerStatus
+	signerReason string
+	denied       string
+	publicKey    string
+	signature    []byte
 }
 
 // decide runs a claimed request's checks in order and signs when they pass.
@@ -258,6 +262,13 @@ func (c *ControlPlane) decide(ctx context.Context, row domain.CommitSignature) d
 	signer, refusal, err := c.checkSigner(ctx, row)
 	if err != nil {
 		return c.undecided(ctx, row, "resolve the org's signer", err)
+	}
+	if refusal == RefusalSignerInactive && row.Signer == domain.CommitSigningOrg {
+		status, reason, err := signerStatus(ctx, c.stores.OrgCommitSigners, row.OrgID)
+		if err != nil {
+			return c.undecided(ctx, row, "read the signer's status", err)
+		}
+		return decision{refusal: refusal, signerStatus: status, signerReason: reason}
 	}
 	if refusal != "" {
 		return decision{refusal: refusal}
@@ -370,9 +381,11 @@ func signingKey(ctx context.Context, secrets db.SecretStore, orgID, publicKey st
 func (c *ControlPlane) store(ctx context.Context, row domain.CommitSignature, d decision) error {
 	if d.refusal != "" {
 		_, err := c.stores.CommitSignatures.RefuseSystem(ctx, row.OrgID, row.ID, c.podID, db.CommitSignatureRefusal{
-			Reason:            string(d.refusal),
-			RetryAfterSeconds: d.retryAfter,
-			Limit:             d.limit,
+			Reason:             string(d.refusal),
+			RetryAfterSeconds:  d.retryAfter,
+			Limit:              d.limit,
+			SignerStatus:       d.signerStatus,
+			SignerStatusReason: d.signerReason,
 		})
 		return err
 	}

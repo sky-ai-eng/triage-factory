@@ -101,7 +101,7 @@ type Result struct {
 	// commitsign.ObjectPushCertificate, or "" for no object git signs.
 	Object string
 	// SignerStatus and SignerReason are the signer's status and its reason,
-	// for a RefusalSignerInactive.
+	// for a RefusalSignerInactive of an org signer.
 	SignerStatus domain.CommitSignerStatus
 	SignerReason string
 }
@@ -207,6 +207,8 @@ func (r *Requester) await(ctx context.Context, orgID, id string, ring <-chan str
 				Refusal:           Refusal(row.RefusalReason),
 				RetryAfterSeconds: row.RetryAfterSeconds,
 				Limit:             row.RefusalLimit,
+				SignerStatus:      row.SignerStatus,
+				SignerReason:      row.SignerStatusReason,
 			}, nil
 		}
 		select {

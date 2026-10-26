@@ -896,8 +896,26 @@ func RunCommitSignatureQueueConformance(t *testing.T, mk CommitSignatureQueueFac
 		if err != nil {
 			t.Fatalf("RefuseSystem (no wait): %v", err)
 		}
-		if plain.RetryAfterSeconds != 0 || plain.RefusalLimit != 0 {
-			t.Errorf("a refusal with no wait or limit stored retry_after %d, limit %d; want 0 and 0", plain.RetryAfterSeconds, plain.RefusalLimit)
+		if plain.RetryAfterSeconds != 0 || plain.RefusalLimit != 0 || plain.SignerStatus != "" || plain.SignerStatusReason != "" {
+			t.Errorf("a refusal with no wait, limit or signer status stored retry_after %d, limit %d, status (%q, %q); want none",
+				plain.RetryAfterSeconds, plain.RefusalLimit, plain.SignerStatus, plain.SignerStatusReason)
+		}
+
+		inactive := request(t, f, conversationID, claimID)
+		if _, err := f.Signatures.ClaimRequestSystem(ctx, f.OrgID, inactive.ID, "pod-a"); err != nil {
+			t.Fatalf("ClaimRequestSystem (inactive): %v", err)
+		}
+		broken, err := f.Signatures.RefuseSystem(ctx, f.OrgID, inactive.ID, "pod-a", db.CommitSignatureRefusal{
+			Reason: "signer_inactive", SignerStatus: domain.CommitSignerBroken, SignerStatusReason: "key_missing",
+		})
+		if err != nil {
+			t.Fatalf("RefuseSystem (signer inactive): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "RefuseSystem (signer inactive)", broken, func() (*domain.CommitSignature, error) {
+			return f.Signatures.GetSystem(ctx, f.OrgID, inactive.ID)
+		})
+		if broken.SignerStatus != domain.CommitSignerBroken || broken.SignerStatusReason != "key_missing" {
+			t.Errorf("signer-inactive refusal stored status (%q, %q), want (broken, key_missing)", broken.SignerStatus, broken.SignerStatusReason)
 		}
 	})
 

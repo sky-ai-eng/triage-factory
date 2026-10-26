@@ -339,6 +339,10 @@ func TestControlPlane_RefusesASignerThatChangedSinceTheSeal(t *testing.T) {
 		stage  func(t *testing.T, f *fixture)
 		signer domain.CommitSigningMode
 		want   Refusal
+		// status and reason are the signer's, stored on the refusal so the
+		// run's line can say why signing stopped.
+		status domain.CommitSignerStatus
+		reason string
 	}{
 		"removed": {signer: domain.CommitSigningOrg, want: RefusalSignerRemoved, stage: func(t *testing.T, f *fixture) {
 			if err := f.stores.OrgCommitSigners.Delete(context.Background(), f.orgID); err != nil {
@@ -352,9 +356,16 @@ func TestControlPlane_RefusesASignerThatChangedSinceTheSeal(t *testing.T) {
 		"the same account on another host": {signer: domain.CommitSigningOrg, want: RefusalSignerChanged, stage: func(t *testing.T, f *fixture) {
 			f.registerSigner(t, signerAccount, "https://ghe.example.com", f.public, true)
 		}},
-		"no longer active": {signer: domain.CommitSigningOrg, want: RefusalSignerInactive, stage: func(t *testing.T, f *fixture) {
-			f.registerSigner(t, signerAccount, "https://github.com", f.public, false)
-		}},
+		"no longer active": {signer: domain.CommitSigningOrg, want: RefusalSignerInactive, status: domain.CommitSignerPending,
+			stage: func(t *testing.T, f *fixture) {
+				f.registerSigner(t, signerAccount, "https://github.com", f.public, false)
+			}},
+		"broken": {signer: domain.CommitSigningOrg, want: RefusalSignerInactive, status: domain.CommitSignerBroken, reason: "unverified_email",
+			stage: func(t *testing.T, f *fixture) {
+				if _, err := f.conn.Exec(`UPDATE org_commit_signers SET status = 'broken', status_reason = 'unverified_email' WHERE org_id = ?`, f.orgID); err != nil {
+					t.Fatalf("break the signer: %v", err)
+				}
+			}},
 		"a deployment signer": {signer: domain.CommitSigningDeployment, want: RefusalSignerInactive},
 	}
 	for name, c := range cases {
@@ -368,6 +379,9 @@ func TestControlPlane_RefusesASignerThatChangedSinceTheSeal(t *testing.T) {
 			got := f.row(t, req.ID)
 			if got.State != domain.CommitSignatureRefused || Refusal(got.RefusalReason) != c.want || got.Signature != "" {
 				t.Errorf("row = state %q reason %q, want refused %s with nothing signed", got.State, got.RefusalReason, c.want)
+			}
+			if got.SignerStatus != c.status || got.SignerStatusReason != c.reason {
+				t.Errorf("row signer status = (%q, %q), want (%q, %q)", got.SignerStatus, got.SignerStatusReason, c.status, c.reason)
 			}
 			if d := f.denials(t); len(d) != 0 {
 				t.Errorf("a signer refusal recorded %d commit_sign_denied rows, want none: the signer's status says why", len(d))

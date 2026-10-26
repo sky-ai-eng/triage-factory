@@ -230,6 +230,19 @@ func TestRelayRuntime_SignCommitPrintsTheControlPlanesRefusals(t *testing.T) {
 		}
 	})
 
+	// The executor cannot read the signer, so why it stopped signing reaches
+	// the agent on the refusal the control pod stored.
+	t.Run("signer broken", func(t *testing.T) {
+		f := newSidecarSigning(t, commitsigner.Budgets{PerOrgMinute: 600, PerClaim: 5000})
+		if _, err := f.conn.Exec(`UPDATE org_commit_signers SET status = 'broken', status_reason = 'key_missing' WHERE org_id = ?`, runmode.LocalDefaultOrgID); err != nil {
+			t.Fatal(err)
+		}
+		res, err := f.rt.SignCommit(ctx, commitBy(f.signer.Name, f.signer.Email, "after the key was removed"))
+		if err != nil || !strings.Contains(res.Refusal, "commit signing is off for the rest of this run: the signer's key is no longer on its GitHub account.") {
+			t.Errorf("SignCommit = %+v, %v; want the signing-off line naming the missing key", res, err)
+		}
+	})
+
 	t.Run("signer removed", func(t *testing.T) {
 		f := newSidecarSigning(t, commitsigner.Budgets{PerOrgMinute: 600, PerClaim: 5000})
 		if err := f.stores.OrgCommitSigners.Delete(ctx, runmode.LocalDefaultOrgID); err != nil {

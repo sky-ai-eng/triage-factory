@@ -162,10 +162,13 @@ type CommitSignature struct {
 	// RetryAfterSeconds is how long until the org's per-minute budget admits
 	// another signature, set only on that refusal. RefusalLimit is the budget
 	// a refusal by the per-minute or per-claim budget ran into, set only on
-	// those two.
-	RefusalReason     string `json:"refusal_reason,omitempty"`
-	RetryAfterSeconds int    `json:"retry_after_seconds,omitempty"`
-	RefusalLimit      int    `json:"refusal_limit,omitempty"`
+	// those two. SignerStatus and SignerStatusReason are the signer's status
+	// and its reason, set only on a refusal because the signer is not active.
+	RefusalReason      string             `json:"refusal_reason,omitempty"`
+	RetryAfterSeconds  int                `json:"retry_after_seconds,omitempty"`
+	RefusalLimit       int                `json:"refusal_limit,omitempty"`
+	SignerStatus       CommitSignerStatus `json:"signer_status,omitempty"`
+	SignerStatusReason string             `json:"signer_status_reason,omitempty"`
 	// Signature is the armored SSH signature.
 	Signature string `json:"signature,omitempty"`
 	// ClaimedBy is the control pod that took the request.

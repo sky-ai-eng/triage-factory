@@ -170,7 +170,7 @@ type CommitSignatureStore interface {
 
 	// RefuseSystem stores claimedBy's refusal of a request it claimed and
 	// returns the stored row: signing → refused, with the refusal's reason,
-	// wait and limit. A row that is not signing under that pod gets
+	// wait, limit and the signer's status. A row that is not signing under that pod gets
 	// ErrNoSuchCommitSignature; an empty reason, or a negative wait or
 	// limit, gets ErrInvalidCommitSignature.
 	RefuseSystem(ctx context.Context, orgID, id, claimedBy string, refusal CommitSignatureRefusal) (domain.CommitSignature, error)
@@ -200,6 +200,12 @@ type CommitSignatureRefusal struct {
 	// that asked names it in the line its agent reads, and cannot read the
 	// limits itself: they are control-pod config.
 	Limit int
+	// SignerStatus and SignerStatusReason are the signer's status and its
+	// reason, for a refusal because the signer is not active; empty
+	// otherwise. The run's line says why in a sentence, and the executor
+	// cannot read the signer to find out.
+	SignerStatus       domain.CommitSignerStatus
+	SignerStatusReason string
 }
 
 // SignatureWindow is OrgSignaturesSinceSystem's answer. Oldest is nil when
@@ -287,8 +293,9 @@ func ValidateNewOrgCommitSigner(s domain.OrgCommitSigner, host string) error {
 // CommitSignatureColumns is the projection both dialects read a
 // commit_signatures row through, for the same reason as OrgCommitSignerColumns.
 const CommitSignatureColumns = `id, org_id, conversation_id, claim_id, boot_epoch, signer, signer_host,
-	signer_user_id, public_key, digest, state, refusal_reason, retry_after_seconds, refusal_limit, signature,
-	claimed_by, signed_at, commit_sha, repository_id, pushed_at, verification_reason, checked_at, created_at`
+	signer_user_id, public_key, digest, state, refusal_reason, retry_after_seconds, refusal_limit, signer_status,
+	signer_status_reason, signature, claimed_by, signed_at, commit_sha, repository_id, pushed_at,
+	verification_reason, checked_at, created_at`
 
 // ScanCommitSignature decodes one row of CommitSignatureColumns.
 func ScanCommitSignature(scan func(...any) error) (domain.CommitSignature, error) {
@@ -296,13 +303,15 @@ func ScanCommitSignature(scan func(...any) error) (domain.CommitSignature, error
 		out                                                          domain.CommitSignature
 		conversationID, claimID, publicKey, refusalReason, signature sql.NullString
 		claimedBy, commitSHA, repositoryID, verificationReason       sql.NullString
+		signerStatus, signerStatusReason                             sql.NullString
 		signer, state                                                string
 		retryAfter, refusalLimit                                     sql.NullInt64
 		signedAt, pushedAt, checkedAt                                sql.NullTime
 	)
 	if err := scan(&out.ID, &out.OrgID, &conversationID, &claimID, &out.BootEpoch, &signer, &out.SignerHost,
-		&out.SignerUserID, &publicKey, &out.Digest, &state, &refusalReason, &retryAfter, &refusalLimit, &signature,
-		&claimedBy, &signedAt, &commitSHA, &repositoryID, &pushedAt, &verificationReason, &checkedAt, &out.CreatedAt); err != nil {
+		&out.SignerUserID, &publicKey, &out.Digest, &state, &refusalReason, &retryAfter, &refusalLimit, &signerStatus,
+		&signerStatusReason, &signature, &claimedBy, &signedAt, &commitSHA, &repositoryID, &pushedAt,
+		&verificationReason, &checkedAt, &out.CreatedAt); err != nil {
 		return domain.CommitSignature{}, err
 	}
 	out.ConversationID = conversationID.String
@@ -313,6 +322,8 @@ func ScanCommitSignature(scan func(...any) error) (domain.CommitSignature, error
 	out.RefusalReason = refusalReason.String
 	out.RetryAfterSeconds = int(retryAfter.Int64)
 	out.RefusalLimit = int(refusalLimit.Int64)
+	out.SignerStatus = domain.CommitSignerStatus(signerStatus.String)
+	out.SignerStatusReason = signerStatusReason.String
 	out.Signature = signature.String
 	out.ClaimedBy = claimedBy.String
 	out.SignedAt = utcTimePtr(signedAt)
@@ -383,17 +394,26 @@ func ValidateCommitSignatureRefusal(r CommitSignatureRefusal) error {
 	return nil
 }
 
-// Columns is r's wait and limit as both dialects' RefuseSystem binds them:
-// NULL for zero, which is how a refusal without one stores it.
-func (r CommitSignatureRefusal) Columns() (retryAfter, limit any) {
-	return nullIfZero(r.RetryAfterSeconds), nullIfZero(r.Limit)
+// Columns is r's wait, limit and signer status as both dialects'
+// RefuseSystem binds them: NULL for a zero or empty value, which is how a
+// refusal without one stores it.
+func (r CommitSignatureRefusal) Columns() (retryAfter, limit, signerStatus, signerStatusReason any) {
+	return nullInt(r.RetryAfterSeconds), nullInt(r.Limit),
+		nullString(string(r.SignerStatus)), nullString(r.SignerStatusReason)
 }
 
-func nullIfZero(n int) any {
+func nullInt(n int) any {
 	if n == 0 {
 		return nil
 	}
 	return n
+}
+
+func nullString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 func utcTimePtr(v sql.NullTime) *time.Time {

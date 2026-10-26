@@ -224,6 +224,8 @@ func (r *relayRuntime) signCommit(ctx context.Context, signer commitsigner.Ident
 		Refusal:           commitsigner.Refusal(reply.Reason),
 		RetryAfterSeconds: reply.RetryAfterSeconds,
 		Limit:             reply.Limit,
+		SignerStatus:      domain.CommitSignerStatus(reply.SignerStatus),
+		SignerReason:      reply.SignerStatusReason,
 	}
 	if res.Outcome != commitsigner.OutcomeSigned {
 		return res
