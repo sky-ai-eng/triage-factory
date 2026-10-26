@@ -713,6 +713,10 @@ services:
       # here only if the executor pods are far larger/smaller than typical.
       TF_DB_MAX_OPEN_CONNS: ${TF_DB_MAX_OPEN_CONNS:-}
       TF_PLATFORM_RESERVE_MB: ${TF_PLATFORM_RESERVE_MB:-}
+      # Free space (MiB) below which this executor stops claiming and evicts
+      # parked workspaces early. Empty → 10240; lower it on a small disk, or
+      # 0 to disable. See docs/self-hosting/scaling.md.
+      TF_DISPATCH_DISK_FLOOR_MB: ${TF_DISPATCH_DISK_FLOOR_MB:-}
       # Privilege separation (docker/entrypoint.sh): the executor sandboxes
       # every delegated run, so the cap-broker is spawned unconditionally —
       # unlike the control pod, which skips it. These only tune the

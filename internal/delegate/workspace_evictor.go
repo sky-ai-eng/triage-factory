@@ -20,6 +20,10 @@
 // beside it (snapshot_reaper.go), and the two are deliberately different
 // numbers — hours of idleness costs disk on one machine, where a fortnight of
 // retention costs object storage the whole fleet shares.
+//
+// The idle window is the only gate disk pressure moves: while free space is
+// below the dispatch disk floor, EvictWorkspacesForSpace reclaims trees that
+// are inside it, under every other gate unchanged.
 
 package delegate
 
@@ -47,6 +51,11 @@ const DefaultWorkspaceEvictAfterMulti = 6 * time.Hour
 // hours, so hourly is plenty frequent (and matches the retention reaper); each
 // pass is one indexed query that usually finds nothing.
 const DefaultWorkspaceEvictInterval = time.Hour
+
+// DefaultDiskPressureInterval is how often the disk floor is checked for
+// evictions. A check above the floor is one statfs per filesystem; only a
+// check below it queries the store.
+const DefaultDiskPressureInterval = time.Minute
 
 // removeWorkspaceTree is the privileged removal seam, as a package var so a
 // test can assert an eviction or a setup's removal goes through it, and see
@@ -96,7 +105,7 @@ func ParseWorkspaceEvictAfter(raw string, localMode bool) (time.Duration, error)
 // store there is no way to confirm a tree is safely evictable.
 func (s *Spawner) RunWorkspaceEvictor(ctx context.Context, interval, after time.Duration) {
 	if after <= 0 {
-		delegateLog.Info("workspace eviction disabled; parked trees are reclaimed only at startup",
+		delegateLog.Info("workspace eviction by idle time disabled",
 			"env", "TF_WORKSPACE_EVICT_AFTER_SEC")
 		return
 	}
@@ -151,6 +160,71 @@ func (s *Spawner) EvictIdleWorkspaces(ctx context.Context, after time.Duration) 
 	}
 	if evicted > 0 {
 		delegateLog.Info("workspace evictor: reclaimed idle parked workspaces", "trees", evicted)
+	}
+}
+
+// RunDiskPressureEvictor checks the dispatch disk floor on a ticker and runs
+// EvictWorkspacesForSpace whenever free space is below it. Wired beside
+// RunWorkspaceEvictor and independent of its idle window: an operator who
+// keeps parked trees indefinitely still loses them before the executor stops
+// taking work. A disabled floor returns immediately; a missing store or blob
+// store makes it a logged no-op, as for the idle sweep.
+func (s *Spawner) RunDiskPressureEvictor(ctx context.Context, interval time.Duration) {
+	s.mu.Lock()
+	floor := s.diskFloorMB
+	s.mu.Unlock()
+	if floor <= 0 {
+		return
+	}
+	if s.conversations == nil || s.Storage() == nil {
+		delegateLog.Warn("disk pressure evictor not started: no store / blob store wired")
+		return
+	}
+	if interval <= 0 {
+		interval = DefaultDiskPressureInterval
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.EvictWorkspacesForSpace(ctx)
+		}
+	}
+}
+
+// EvictWorkspacesForSpace reclaims this host's parked trees, inside their idle
+// window or not, while free space is below the dispatch disk floor, and stops
+// as soon as it is not. Every other gate of evictWorkspace holds: a tree goes
+// only when its snapshot is recorded written and present in the blob store and
+// no conversation on its key holds a claim, so each one evicted resumes by
+// rehydrating. The candidates come in no order of idleness; any of them costs
+// one cold rehydrate.
+//
+// A run filling the disk while it runs holds a claim, so its tree is never a
+// candidate. Eviction frees what parked trees hold; the floor's gate is what
+// stops new runs from adding to it.
+func (s *Spawner) EvictWorkspacesForSpace(ctx context.Context) {
+	if s.conversations == nil || s.Storage() == nil || !s.dispatchDiskGated() {
+		return
+	}
+	keys, err := s.conversations.ListEvictableWorkspacesSystem(ctx, time.Now().UTC())
+	if err != nil {
+		delegateLog.Warn("disk pressure evictor: list evictable workspaces failed", "error", err)
+		return
+	}
+	evicted := 0
+	for _, key := range keys {
+		evicted += s.evictWorkspace(ctx, key)
+		if !s.dispatchDiskGated() {
+			break
+		}
+	}
+	if evicted > 0 {
+		delegateLog.Warn("disk pressure evictor: free disk below floor; reclaimed parked workspaces ahead of their idle window",
+			"trees", evicted, "env", "TF_DISPATCH_DISK_FLOOR_MB")
 	}
 }
 

@@ -57,6 +57,12 @@ once its snapshot is verifiably written and no run sharing it is live, and
 resuming afterwards rebuilds the workspace from that snapshot — slower than a
 warm resume, never lost work.
 
+`TF_DISPATCH_DISK_FLOOR_MB`, also off unless you set it (multi mode defaults it
+to 10240), stops the dispatcher from claiming new runs while free space under
+the state root or the run trees is below the given number of MiB, and while it
+is below, reclaims trees that meet the conditions above without waiting for
+the idle window.
+
 ## Logging
 
 Logs are structured (Go's `log/slog`) and written to stderr. Two environment

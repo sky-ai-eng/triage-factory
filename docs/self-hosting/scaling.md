@@ -68,6 +68,21 @@ Each run's working tree (`/work` in the jail) is under the state root too
 checkouts, its `/tmp` and its snapshot all land on the one volume. The executor
 empties `runs/` when it starts.
 
+A run's disk use has no total limit. A process in a jail can write no single
+file larger than 16 GiB, which stops a runaway log or a `dd` into `/tmp`, but a
+run that writes many smaller files can still fill the executor's disk, and
+every other run on that executor then fails its writes. Two things limit the
+damage. Below `TF_DISPATCH_DISK_FLOOR_MB` of free space (default 10240) the
+executor stops claiming new conversations, and its heartbeat reports it gated
+so placement sends queued work to other executors. While it is below the floor
+it also evicts parked workspaces whose snapshots are stored, without waiting
+for their idle window (see [Storage](storage.md#executor-disk-evicting-idle-parked-workspaces)).
+A run that is filling the disk while it runs is not stopped by either.
+
+On a single machine, the executor's disk is usually the disk Postgres and the
+object store use too, and Postgres stops when it cannot write. For a production
+deployment, give the executor's `/data` a disk of its own.
+
 Each executor's container HEALTHCHECK hits its localhost `GET /healthz` — see
 [Monitoring & health checks](monitoring.md#executor-health--get-healthz).
 

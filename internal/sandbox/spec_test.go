@@ -98,6 +98,30 @@ func TestBuildSpec_RuntimeGoesAfterTheGuestAtTheCeiling(t *testing.T) {
 	}
 }
 
+// TestBuildSpec_CapsFileSize: every jail carries the file-size limit, whether
+// the launch named its own rlimits or took the defaults, and it is the same
+// soft and hard so nothing in the jail can raise it.
+func TestBuildSpec_CapsFileSize(t *testing.T) {
+	withOwn := canonicalConfig()
+	withOwn.Rlimits = []Rlimit{{Type: "RLIMIT_NOFILE", Soft: 4096, Hard: 4096}}
+	for name, cfg := range map[string]Config{"defaults": canonicalConfig(), "launch's own set": withOwn} {
+		spec, err := buildSpec(cfg, "/var/run/netns/tf-test", testJailTmp, JailUID(7), JailGID(7))
+		if err != nil {
+			t.Fatalf("%s: buildSpec: %v", name, err)
+		}
+		var got []specs.POSIXRlimit
+		for _, r := range spec.Process.Rlimits {
+			if r.Type == "RLIMIT_FSIZE" {
+				got = append(got, r)
+			}
+		}
+		want := specs.POSIXRlimit{Type: "RLIMIT_FSIZE", Soft: 16 << 30, Hard: 16 << 30}
+		if len(got) != 1 || got[0] != want {
+			t.Errorf("%s: RLIMIT_FSIZE entries = %+v, want exactly %+v", name, got, want)
+		}
+	}
+}
+
 // TestBuildSpec_PropertyB_NoEnvLeakage is THE load-bearing test for
 // the sandbox's security posture. The sandbox MUST NOT propagate any
 // credential-shaped env var from the test process into the sandbox's

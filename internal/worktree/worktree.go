@@ -114,9 +114,10 @@ const runsDir = "triagefactory-runs" // worktrees: /tmp/triagefactory-runs/{root
 // sits on the same disk as its /tmp and the clones it is built from.
 const stateRunsDir = "runs"
 
-// runsBase is the directory every run tree lives under: <state root>/runs in
-// multi, <tmp>/triagefactory-runs locally.
-func runsBase() string {
+// RunsBase is the directory every run tree lives under: <state root>/runs in
+// multi, <tmp>/triagefactory-runs locally. It does not create it. The
+// dispatcher's disk floor reads the free space of its filesystem.
+func RunsBase() string {
 	if runmode.Current() == runmode.ModeMulti {
 		return filepath.Join(paths.StateRoot(), stateRunsDir)
 	}
@@ -403,7 +404,7 @@ func RepoDir(repositoryID string) (string, error) {
 // rootKey names the id a run root is keyed by — see RunRoot for which id that
 // is, and why this family does not spell it conversationID.
 func runDir(rootKey string) string {
-	return filepath.Join(runsBase(), rootKey)
+	return filepath.Join(RunsBase(), rootKey)
 }
 
 // RunRoot returns the run-root path for a given rootKey, without creating it.
@@ -460,7 +461,7 @@ const runsBaseMode = 0o711
 // whatever umask it ran under. Locally no other identity reaches a run tree,
 // so the base is created owner-only and an existing one keeps the mode it has.
 func EnsureRunsBase() (string, error) {
-	base := runsBase()
+	base := RunsBase()
 	if runmode.Current() != runmode.ModeMulti {
 		if err := os.MkdirAll(base, 0o700); err != nil {
 			return "", fmt.Errorf("mkdir runs base: %w", err)

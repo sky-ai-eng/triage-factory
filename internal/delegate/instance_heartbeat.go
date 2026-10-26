@@ -170,7 +170,7 @@ func (s *Spawner) heartbeatOnce(ctx context.Context) bool {
 		// has stopped admits none: the heartbeat outlives the loop through a
 		// shutdown drain, and reporting it gated is what stops placement
 		// holding queued work for a pod that will never claim it.
-		gated := s.dispatchMemGated() || !s.dispatcherRunning.Load()
+		gated := s.dispatchMemGated() || s.dispatchDiskGated() || !s.dispatcherRunning.Load()
 		hb.MaxRuns = &maxRuns
 		hb.ActiveRuns = &activeRuns
 		hb.DispatchGated = &gated

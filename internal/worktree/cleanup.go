@@ -93,7 +93,7 @@ func CleanupWithOptions(opts CleanupOptions) {
 	// Locally the runs base is in /tmp, which is routinely wiped on reboot:
 	// exactly the case where a locked=initializing ghost survives in the
 	// persistent ~/.triagefactory/repos bare and needs reclaiming.
-	base := runsBase()
+	base := RunsBase()
 	if entries, err := os.ReadDir(base); err == nil {
 		count := 0
 		for _, e := range entries {
@@ -375,7 +375,7 @@ func recordedWorktreePath(adminDir string) string {
 // executor builds under: "runs" is too common a name to match on its own.
 func isRunsBase(dir string) bool {
 	if runmode.Current() == runmode.ModeMulti {
-		return filepath.Clean(dir) == runsBase()
+		return filepath.Clean(dir) == RunsBase()
 	}
 	return filepath.Base(dir) == runsDir
 }

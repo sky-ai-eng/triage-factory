@@ -250,11 +250,13 @@ func TestValidateLaunchParams_RejectsForgedNetns(t *testing.T) {
 
 // TestValidateLaunchParams_RejectsBadRlimit pins the rlimit boundary: an
 // unlisted type, a soft limit above the hard limit, and a duplicated type
-// are all rejected.
+// are all rejected. The file-size limit is the broker's, so a launch naming
+// it is refused like any other unlisted type.
 func TestValidateLaunchParams_RejectsBadRlimit(t *testing.T) {
 	cases := map[string][]Rlimit{
-		"unlisted type": {{Type: "RLIMIT_MEMLOCK", Soft: 1, Hard: 1}},
-		"soft > hard":   {{Type: "RLIMIT_NOFILE", Soft: 2048, Hard: 1024}},
+		"unlisted type":   {{Type: "RLIMIT_MEMLOCK", Soft: 1, Hard: 1}},
+		"file size limit": {{Type: "RLIMIT_FSIZE", Soft: 1 << 62, Hard: 1 << 62}},
+		"soft > hard":     {{Type: "RLIMIT_NOFILE", Soft: 2048, Hard: 1024}},
 		"duplicate type": {
 			{Type: "RLIMIT_NOFILE", Soft: 1024, Hard: 1024},
 			{Type: "RLIMIT_NOFILE", Soft: 512, Hard: 512},

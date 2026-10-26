@@ -119,9 +119,10 @@ func buildSpec(cfg Config, netnsPath, tmpDir string, jailUID, jailGID int) (*spe
 				Options: []string{"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620"}},
 			{Destination: "/sys", Type: "sysfs", Source: "sysfs",
 				Options: []string{"nosuid", "noexec", "nodev", "ro"}},
-			// TODO(TFAC-1177): nothing bounds how much of the executor's disk
-			// this directory, or the run tree, takes; one run can fill it for
-			// every other run and the executor.
+			// No limit bounds how much of the executor's disk this directory
+			// and the run tree take together; jailFileSizeLimitBytes bounds
+			// each file, and the dispatcher's disk floor keeps a full disk
+			// from taking new work.
 			{Destination: "/tmp", Type: "bind", Source: tmpDir,
 				Options: []string{"rbind", "rw", "nosuid", "nodev"}},
 
@@ -196,19 +197,34 @@ func buildSpec(cfg Config, netnsPath, tmpDir string, jailUID, jailGID int) (*spe
 // processes, the tool host among them, and the jail would end all the same.
 const runtimeOOMScoreAdj = -500
 
+// jailFileSizeLimitBytes is the largest file a process in a jail may write
+// (RLIMIT_FSIZE, soft and hard). Nothing bounds the total a run writes to
+// /work and /tmp, so this is what stops the commonest way one run fills the
+// executor's disk for every run: a single file that grows without end, such
+// as a `dd` into /tmp or a dev server's log.
+//
+// gVisor enforces it in the sentry, and applies the spec's rlimits only to
+// the guest, never to the sentry or the gofer on the host, so a write past it
+// costs the writing process (SIGXFSZ, or EFBIG where the process ignores the
+// signal) and never the jail.
+const jailFileSizeLimitBytes = 16 << 30
+
 // rlimitsForSpec maps the caller's numeric Rlimit set onto the OCI
 // spec type, falling back to defaultRlimits when the caller named none.
 // The values reach here having already passed validateRlimits at the
 // broker's RPC boundary (the gate in ValidateLaunchParams).
+//
+// The file-size limit is added to either set. It is not on
+// allowedRlimitTypes, so a launch can neither raise nor drop it.
 func rlimitsForSpec(rl []Rlimit) []specs.POSIXRlimit {
-	if len(rl) == 0 {
-		return defaultRlimits()
+	out := defaultRlimits()
+	if len(rl) > 0 {
+		out = make([]specs.POSIXRlimit, 0, len(rl)+1)
+		for _, r := range rl {
+			out = append(out, specs.POSIXRlimit{Type: r.Type, Soft: r.Soft, Hard: r.Hard})
+		}
 	}
-	out := make([]specs.POSIXRlimit, 0, len(rl))
-	for _, r := range rl {
-		out = append(out, specs.POSIXRlimit{Type: r.Type, Soft: r.Soft, Hard: r.Hard})
-	}
-	return out
+	return append(out, specs.POSIXRlimit{Type: "RLIMIT_FSIZE", Soft: jailFileSizeLimitBytes, Hard: jailFileSizeLimitBytes})
 }
 
 // mountsFromExtra converts the public Mount type to specs.Mount.

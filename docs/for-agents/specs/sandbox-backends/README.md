@@ -263,9 +263,15 @@ fails one does not meet the contract.
     and never the jail.** `/tmp` keeps its files where the memory ceiling
     does not count them as memory the kernel cannot reclaim, so a guest that
     writes past the ceiling into `/tmp` gets at most `ENOSPC`, once the disk
-    under it is full. That disk is shared: a run's `/tmp` and `/work` have no
-    limit of their own, so one run can fill it for every other run on the
-    executor (TFAC-1177). At the ceiling the kernel kills a guest process
+    under it is full. That disk is shared. No process in the jail can write a
+    file larger than 16 GiB (`RLIMIT_FSIZE`, which gVisor enforces in the
+    sentry and applies to the guest only), and a write past it costs the
+    writing process; the tool host ignores `SIGXFSZ`, so its own write fails
+    instead. A run's `/tmp` and `/work` together have no limit, so a run that
+    writes many files can still fill the disk for every other run on the
+    executor. This is an accepted gap: the dispatcher stops claiming and
+    evicts parked trees below its disk floor, and nothing stops a run that is
+    filling the disk while it runs. At the ceiling the kernel kills a guest process
     before any of the backend's runtime: gVisor's sentry and gofer and `runsc`
     itself rank below the guest in the OOM order.
 

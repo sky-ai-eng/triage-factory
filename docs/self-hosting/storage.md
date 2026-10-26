@@ -61,7 +61,12 @@ TF_WORKSPACE_EVICT_AFTER_SEC=21600   # default 6h in multi mode; 0 disables
 
 A tree is only ever evicted when the durable snapshot is recorded written *and*
 the blob store confirms the object is there, no conversation sharing the tree
-holds a live claim, and the whole key has been idle past the TTL. Anything else
+holds a live claim, and the whole key has been idle past the TTL. The TTL is
+the one condition disk pressure drops: when free space falls below
+`TF_DISPATCH_DISK_FLOOR_MB` (default 10240; 0 disables), the executor stops
+claiming new work and, once a minute, evicts trees that meet every other
+condition until free space is back above the floor. This runs even with
+`TF_WORKSPACE_EVICT_AFTER_SEC=0`. Anything else
 — a persist still in flight, a persist that failed, a blob that is missing
 despite the record — leaves the tree alone, because it is then the only copy of
 the agent's uncommitted work. An evicted workspace is not lost: the next resume

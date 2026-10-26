@@ -101,6 +101,7 @@ func (a *App) startWorkers(ctx context.Context) {
 			appLog.Warn("workspace eviction window", "error", eerr)
 		}
 		go a.spawner.RunWorkspaceEvictor(ctx, delegate.DefaultWorkspaceEvictInterval, evictAfter)
+		go a.spawner.RunDiskPressureEvictor(ctx, delegate.DefaultDiskPressureInterval)
 	}
 
 	// The shared tf_ctl control-plane listener + the cross-pod run-control
