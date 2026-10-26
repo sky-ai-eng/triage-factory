@@ -1062,8 +1062,10 @@ in multi mode on the control pod holding the brain lease.
   already `broken` keeps the reason it broke for, except that a failing
   commit's reason replaces `key_missing` (an `unknown_key` commit is the same
   fault, and leaves `key_missing` for the periodic check to clear). A commit
-  GitHub cannot be read for is asked about again each cycle for a day after
-  its push; one GitHub no longer has is recorded with no reason.
+  GitHub cannot be read for, or whose read ends in GitHub's own verification
+  service failing (`gpgverify_unavailable`, `gpgverify_error`), is asked about
+  again each cycle for a day after its push; one GitHub no longer has is
+  recorded with no reason.
 
 A signer moving to `broken` logs a WARN on the process that checked it
 (`commit signer is broken; the org's runs commit unsigned until an admin fixes
@@ -1074,7 +1076,7 @@ reason; its commits stay authored as the signer, unsigned.
 
 | Metric | Labels | Value |
 | --- | --- | --- |
-| `tf_commit_signer_checks_total` | `check`, `result` | Health checks of an org's commit signer. `check` is `verify` (an admin's Verify), `periodic` or `post_push`. `result` is GitHub's verification reason (`valid`, `unknown_key`, `no_user`, `unverified_email`, or `other` for any reason not named here), `key_missing` when the key was not on the account, or `error` when GitHub could not be read. A Verify that finds the key and has no failing commit to re-read counts `valid`, and so does a periodic check that finds the key. A pushed commit GitHub no longer has is not counted. |
+| `tf_commit_signer_checks_total` | `check`, `result` | Health checks of an org's commit signer. `check` is `verify` (an admin's Verify), `periodic` or `post_push`. `result` is GitHub's verification reason (`valid`, `unknown_key`, `no_user`, `unverified_email`, or `other` for any reason not named here), `key_missing` when the key was not on the account, or `error` when GitHub could not be read or its signature verification service did not answer (`gpgverify_unavailable`, `gpgverify_error`). A Verify that finds the key and has no failing commit to re-read counts `valid`, and so does a periodic check that finds the key. A pushed commit GitHub no longer has is not counted. |
 | `tf_commit_signers` | `status` | Org signers by status: `pending`, `active`, `broken`, each reported, zero included. Read by the process holding the brain lease. |
 | `tf_commit_signer_broken` | `org_id`, `reason` | 1 for each broken org signer, with the reason it broke for (`key_missing`, a reason named above, or `other`). No series for a signer that is not broken. Same source. |
 

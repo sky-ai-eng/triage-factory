@@ -446,3 +446,39 @@ func TestSignerGauges(t *testing.T) {
 		t.Errorf("tf_commit_signer_broken = %v, want %v: a reason the metrics do not name folds into other", broken, want)
 	}
 }
+
+// A read that ends in GitHub's verification service failing is no verdict on
+// the commit: the signer is left as it is and the commit is read again next
+// cycle, when a real answer counts.
+func TestHealth_VerificationUnavailableIsReadAgain(t *testing.T) {
+	f := newFixture(t)
+	checks := healthChecks(t)
+	h, gh, notDue := f.healthChecker(t)
+	ctx := context.Background()
+
+	sig := f.pushedSignature(t, shaA)
+	for _, reason := range []string{"gpgverify_unavailable", "gpgverify_error"} {
+		gh.set(func(g *healthGitHub) {
+			g.commits[shaA] = ghclient.CommitVerification{Reason: reason, CommitterEmail: "signer@example.com"}
+		})
+		h.Check(ctx, f.orgID)
+		notDue(true)
+		if got := f.signer(t); got.Status != domain.CommitSignerActive {
+			t.Errorf("after %s the signer is %q (%q), want active", reason, got.Status, got.StatusReason)
+		}
+		if row := f.row(t, sig.ID); row.CheckedAt != nil || row.VerificationReason != "" {
+			t.Errorf("after %s the commit holds %q at %v, want it left unchecked", reason, row.VerificationReason, row.CheckedAt)
+		}
+	}
+
+	gh.set(func(g *healthGitHub) {
+		g.commits[shaA] = ghclient.CommitVerification{Reason: "unverified_email", CommitterEmail: "signer@example.com"}
+	})
+	h.Check(ctx, f.orgID)
+	if got := f.signer(t); got.Status != domain.CommitSignerBroken || got.StatusReason != "unverified_email" {
+		t.Errorf("once GitHub answered, the signer is %q (%q), want broken for unverified_email", got.Status, got.StatusReason)
+	}
+	if got, want := checks(), map[string]int64{"periodic valid": 1, "post_push error": 2, "post_push unverified_email": 1}; !maps.Equal(got, want) {
+		t.Errorf("checks = %v, want %v", got, want)
+	}
+}

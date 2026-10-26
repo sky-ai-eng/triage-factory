@@ -25,6 +25,9 @@ const (
 	// the signer as it is now.
 	postPushWindow = 24 * time.Hour
 	// postPushBatch bounds the pushed commits one cycle reads for one org.
+	// They are read newest first, so in a burst of pushes an older one can
+	// leave postPushWindow unread: the newest say the most about the signer
+	// as it is now.
 	postPushBatch = 20
 	// healthCheckTimeout bounds one org's checks.
 	healthCheckTimeout = 2 * time.Minute
@@ -223,7 +226,22 @@ func (h *HealthChecker) readVerification(ctx context.Context, sig domain.CommitS
 	if err != nil {
 		return ghclient.CommitVerification{}, false, err
 	}
+	if VerificationUnavailable(verdict.Reason) {
+		return ghclient.CommitVerification{}, false, fmt.Errorf("GitHub's signature verification answered %s", verdict.Reason)
+	}
 	return verdict, true, nil
+}
+
+// verificationUnavailable are the verification reasons GitHub gives when its
+// own signature verification service failed to answer. They say nothing about
+// the commit, and a failing result is evaluated again on every read.
+var verificationUnavailable = map[string]bool{"gpgverify_unavailable": true, "gpgverify_error": true}
+
+// VerificationUnavailable reports whether reason is GitHub's verification
+// service failing rather than a verdict on the commit: a read that ends in it
+// is one GitHub did not answer, to be made again.
+func VerificationUnavailable(reason string) bool {
+	return verificationUnavailable[reason]
 }
 
 // FailureHolds reports whether a pushed commit GitHub does not verify still

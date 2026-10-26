@@ -609,6 +609,10 @@ func (s *Server) checkCommitSigner(ctx context.Context, client *ghclient.Client,
 		}
 		return commitsigner.CheckResultError, upstreamFault("could not re-read commit "+failed.CommitSHA+" from GitHub", err), nil
 	}
+	if commitsigner.VerificationUnavailable(verdict.Reason) {
+		return commitsigner.CheckResultError, upstreamFault(
+			"GitHub's signature verification did not answer for commit "+failed.CommitSHA+" ("+verdict.Reason+"); verify again shortly", nil), nil
+	}
 	if !commitsigner.FailureHolds(signer, key, *failed, verdict) {
 		return domain.CommitVerificationValid, nil, nil
 	}
