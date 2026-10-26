@@ -90,8 +90,8 @@ func IdentityConfigPairs(name, email string) [][2]string {
 // never to resolve: this identity is a placeholder standing in for an
 // unanswered question, and it should not be able to look like a real mailbox.
 const (
-	FallbackIdentityName  = "Triage Factory Agent"
-	FallbackIdentityEmail = "agent@triagefactory.invalid"
+	FallbackIdentityName  = "Triage Factory"
+	FallbackIdentityEmail = "triagefactory@triagefactory.invalid"
 )
 
 // FallbackIdentityConfigPairs returns the neutral identity as git config
