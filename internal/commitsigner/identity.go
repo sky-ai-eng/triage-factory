@@ -41,6 +41,12 @@ type Identity struct {
 	// Mode is how the run's commits are signed. It is never empty.
 	Mode domain.CommitSigningMode
 
+	// Status and StatusReason are the signer's health when the identity is
+	// a signer's, in any status, and empty otherwise: a refusal because the
+	// signer is not active says why in a sentence (signerOffReason).
+	Status       domain.CommitSignerStatus
+	StatusReason string
+
 	// Host, PublicKey and PendingPublicKey describe the signer the run signs
 	// as, and are set only when Mode signs: the GitHub its account is on, the
 	// key that signs, and a rotation's new key, which a run that started
@@ -55,21 +61,38 @@ type Identity struct {
 // answers for callers with no request claims: credprovision sealing a bundle,
 // the spawner starting a local run, and every signature, which resolves again
 // rather than trusting what the run started with. GitHub resolves the
-// identity an org without a signer commits as; nil resolves none.
+// identity an org without a signer commits as; nil resolves none. Deployment
+// resolves a workspace on the deployment App to the deployment's signer; nil,
+// as in local mode, on an executor and on a control pod configured with none,
+// resolves no deployment arm.
 type Resolver struct {
-	Signers db.OrgCommitSignerStore
-	GitHub  ghclient.Resolver
+	Signers    db.OrgCommitSignerStore
+	GitHub     ghclient.Resolver
+	Deployment *DeploymentArm
+}
+
+// DeploymentArm is what resolving the deployment signer reads: this control
+// pod's configured signer, the store its health is kept in, and the org
+// settings that say whether a workspace is on the deployment App.
+type DeploymentArm struct {
+	Signer *DeploymentSigner
+	Health db.DeploymentCommitSignerStore
+	Orgs   db.OrgsStore
 }
 
 // Resolve returns orgID's commit identity. In order, it is:
 //
 //   - the org's signer, in whatever status: the identity does not change with
 //     the key's health, so a pending or broken signer still authors the
-//     commits, unsigned. Only an active one signs.
+//     commits, unsigned. Only an active one signs. An org's own signer always
+//     wins, and one that cannot sign never falls back to the deployment's.
+//   - for a workspace on the deployment App, the deployment's signer, by the
+//     same rule: once a check has read its account it authors the commits
+//     in any status, and signs while it is active.
 //   - the identity the org commits as without a signer: the App's bot or the
 //     PAT's owner, unsigned.
 //
-// An error is a failed read of the signer, which the caller must not answer
+// An error is a failed read of a signer, which the caller must not answer
 // with the identity a signer would have replaced.
 func (r Resolver) Resolve(ctx context.Context, orgID string) (Identity, error) {
 	signer, err := r.Signers.GetSystem(ctx, orgID)
@@ -87,12 +110,59 @@ func (r Resolver) Resolve(ctx context.Context, orgID string) (Identity, error) {
 			"org", orgID, "host", signer.Host, "login", signer.Login)
 		return r.withoutSigner(ctx, orgID), nil
 	}
-	// TODO(TFAC-1200): an org on the deployment App with no signer of its own
-	// resolves to the deployment signer while that signer is active, which
-	// reads the org's credential class and the deployment signer's status.
-	// Until then every org without a signer commits as it does today,
-	// unsigned.
+	id, ok, err := r.Deployment.identity(ctx, orgID)
+	if err != nil {
+		return Identity{}, err
+	}
+	if ok {
+		return id, nil
+	}
 	return r.withoutSigner(ctx, orgID), nil
+}
+
+// identity is the deployment signer's identity for orgID, or false when the
+// org does not resolve to it: no deployment signer is configured, the org is
+// not on the deployment App, its GitHub is not the one the signer's account is
+// on, or no check has read the account yet, so there is no account to commit
+// as. An error is a failed read of the org or of the signer's health.
+func (d *DeploymentArm) identity(ctx context.Context, orgID string) (Identity, bool, error) {
+	if d == nil || !d.Signer.Configured() {
+		return Identity{}, false, nil
+	}
+	set, err := d.Orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		return Identity{}, false, fmt.Errorf("read the org's GitHub credential class: %w", err)
+	}
+	if set.GitHubCredentialClass != domain.GitHubCredentialClassManagedApp ||
+		db.NormalizeGitHubHost(set.GitHubBaseURL) != db.NormalizeGitHubHost(d.Signer.Host) {
+		return Identity{}, false, nil
+	}
+	row, err := d.Health.GetSystem(ctx, d.Signer.Host, d.Signer.PublicKey)
+	if err != nil {
+		return Identity{}, false, fmt.Errorf("read the deployment commit signer: %w", err)
+	}
+	if row == nil || row.GitHubUserID <= 0 {
+		return Identity{}, false, nil
+	}
+	name := commitsign.IdentName(row.CommitName())
+	if name == "" {
+		name = row.Login
+	}
+	id := Identity{
+		Name:         name,
+		Email:        d.Signer.CommitEmail(*row),
+		AccountID:    strconv.FormatInt(row.GitHubUserID, 10),
+		Login:        row.Login,
+		Mode:         domain.CommitSigningNone,
+		Status:       row.Status,
+		StatusReason: row.StatusReason,
+	}
+	if row.Status == domain.CommitSignerActive {
+		id.Mode = domain.CommitSigningDeployment
+		id.Host = row.Host
+		id.PublicKey = row.PublicKey
+	}
+	return id, true, nil
 }
 
 // signerIdentity is the identity an org's signer gives its runs, or false when
@@ -114,11 +184,13 @@ func signerIdentity(s domain.OrgCommitSigner) (Identity, bool) {
 		name = s.Login
 	}
 	id := Identity{
-		Name:      name,
-		Email:     email,
-		AccountID: strconv.FormatInt(s.GitHubUserID, 10),
-		Login:     s.Login,
-		Mode:      domain.CommitSigningNone,
+		Name:         name,
+		Email:        email,
+		AccountID:    strconv.FormatInt(s.GitHubUserID, 10),
+		Login:        s.Login,
+		Mode:         domain.CommitSigningNone,
+		Status:       s.Status,
+		StatusReason: s.StatusReason,
 	}
 	if s.Status == domain.CommitSignerActive {
 		id.Mode = domain.CommitSigningOrg

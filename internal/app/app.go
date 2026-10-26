@@ -103,6 +103,16 @@ type App struct {
 	// not this pod holds the brain lease. nil on an executor and in local
 	// mode.
 	commitSigner *commitsigner.ControlPlane
+	// deploymentSigner is the deployment's commit signer, the account every
+	// workspace on the deployment App signs as unless it registers its own:
+	// TF_GITHUB_COMMIT_SIGNER_*, read at boot on a multi-mode control pod and
+	// nowhere else, so no executor holds its key. nil when none is
+	// configured, and on every other role and mode.
+	deploymentSigner *commitsigner.DeploymentSigner
+	// deploymentSignerHealth keeps the deployment signer's health on this
+	// control pod: its row, its periodic check, its gauge and the WARN when it
+	// is broken. Runs on every control pod; nil without a deployment signer.
+	deploymentSignerHealth *commitsigner.DeploymentHealth
 	// commitSignDoorbells routes sign_done to the signature requests this
 	// executor's runs are waiting on. nil on a control pod and in local mode.
 	commitSignDoorbells *commitsigner.Doorbells
@@ -344,6 +354,18 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 		}
 		appLog.Info("commit signing budgets",
 			"per_org_minute", a.commitSigningBudgets.PerOrgMinute, "per_claim", a.commitSigningBudgets.PerClaim)
+		// Half a configuration refuses the boot rather than leaving every
+		// managed workspace committing unsigned with nothing saying why.
+		if a.deploymentSigner, err = commitsigner.DeploymentSignerFromEnv(); err != nil {
+			return nil, fmt.Errorf("deployment commit signer: %w", err)
+		}
+		if a.deploymentSigner.Configured() {
+			appLog.Info("deployment commit signer", "signer", a.deploymentSigner)
+		} else if runmode.Current() == runmode.ModeLocal && deploymentSignerSet() {
+			appLog.Warn("TF_GITHUB_COMMIT_SIGNER_* is set but ignored in local mode: the deployment signer serves workspaces on the deployment App, which local mode has none of; register the org's own signer in Settings → Commit signing")
+		}
+	} else if deploymentSignerSet() {
+		appLog.Warn("TF_GITHUB_COMMIT_SIGNER_* is set but ignored on TF_ROLE=executor: an executor never holds a signing key, so forward the deployment signer to the control pods only")
 	}
 
 	// Install the OTel meter provider before anything downstream constructs

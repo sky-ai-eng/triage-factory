@@ -265,6 +265,58 @@ If a connection is refused, the message names the cause. The ones that point bac
 | `This workspace is pointed at <host>; the deployment's GitHub App is on <host>.` | That workspace's GitHub is not the deployment default (8.1). It brings its own App. |
 | `GitHub rejected the deployment App's ID and private key` (log) | `TF_GITHUB_APP_ID` names a different App than the PEM belongs to. Re-check the App ID (not the client id) and the key. |
 
+### 8.6 (Optional) Configure the deployment commit signer
+
+A workspace on the deployment App commits as the App's bot, and GitHub never marks a commit Verified as a bot unless GitHub made the commit itself. The **deployment commit signer** fixes that for every workspace on the deployment App at once: a GitHub **user** account whose name and address its agents' commits carry, and whose SSH signing key Triage Factory signs them with, so GitHub marks them Verified and a repository that requires signed commits accepts them. A workspace that registers a signer of its own in **Workspace Settings → Commit signing** uses that one instead, and a workspace whose own signer is broken commits unsigned rather than falling back to the deployment's. The App still pushes and opens the pull requests; the account only lends its identity and key.
+
+What a signer account is, and why it should be one made for the purpose rather than a person's, is in [Commit signing: creating the signer account](../concepts/commit-signing.md). In short: create a dedicated user account on the deployment's GitHub (8.1), give it a profile name, since that is the name every commit carries, and verify an email on it.
+
+1. **Generate the key** on a machine you trust, with no passphrase (Triage Factory cannot unlock one):
+
+   ```sh
+   ssh-keygen -t ed25519 -N '' -C 'Triage Factory commit signing' -f ./secrets/commit-signer
+   ```
+
+2. **Add the public half to the account.** Signed in as the signer account: **Settings → SSH and GPG keys → New SSH key**, **Key type: Signing key**, paste `./secrets/commit-signer.pub`. Key titles are public, so name it after the product, not a customer.
+
+3. **Configure the control pod** and restart it. The key is multi-line, so mount it as a file:
+
+   ```yaml
+   # compose.override.yml
+   secrets:
+     tf_commit_signer_key: { file: ./secrets/commit-signer }
+   services:
+     triagefactory:
+       secrets: [tf_commit_signer_key]
+   ```
+
+   ```dotenv
+   # .env
+   TF_GITHUB_COMMIT_SIGNER_LOGIN=TriageFactory
+   TF_GITHUB_COMMIT_SIGNER_KEY_FILE=/run/secrets/tf_commit_signer_key
+   # Optional on github.com, where unset means the account's noreply address
+   # (<id>+<login>@users.noreply.github.com, which survives a rename of the
+   # login). Required on GitHub Enterprise Server, which has no noreply address:
+   # an address verified on the account.
+   # TF_GITHUB_COMMIT_SIGNER_EMAIL=agent@yourcompany.com
+   ```
+
+| Setting | Required | Meaning |
+|---|---|---|
+| `TF_GITHUB_COMMIT_SIGNER_LOGIN` | with the key | The signer account's login. The first check reads the account it names; from then on the account is followed by its id, so renaming the login changes nothing. |
+| `TF_GITHUB_COMMIT_SIGNER_KEY` | with the login | The unencrypted ed25519 private key in OpenSSH format. A secret: it honours `TF_GITHUB_COMMIT_SIGNER_KEY_FILE` ([Deployment secrets](secrets.md)). |
+| `TF_GITHUB_COMMIT_SIGNER_EMAIL` | off github.com | The committer address. It must be verified on the account, or GitHub reports the commits `unverified_email`. Don't use the address that recovers the account: it is on every commit. |
+
+A login without a key, a key without a login, an email alone, a key that is not an unencrypted ed25519 key, or no email off github.com refuses the boot with the variable named. Only the `triagefactory` (control) service carries these, and every control pod should carry the same three: each pod signs whichever managed workspace's signature request it claims, and a sandboxed run's sidecar sends it the commit's digest, so **no executor ever holds the key**. Local mode ignores them; a local org registers its own signer.
+
+Check it took. Within a minute of the restart a control pod checks the account and, finding the key, makes the signer **active** and logs `deployment commit signer is active; managed workspaces sign as it`. A `deployment commit signer is pending` line followed by `the deployment commit signer's key is not among the account's signing keys` means step 2 is missing; GitHub's listing can also take a minute to show a key just added. Then `GET /api/fleet/commit-signer` (a deployment operator's session; [Fleet console](fleet-console.md#deployment-commit-signer)) shows the signer, `POST /api/fleet/commit-signer/verify` checks it again on demand, and a managed workspace's **Workspace Settings → Commit signing** reads `Commits are signed as TriageFactory, this deployment's signing account`. Runs pick it up at their next start.
+
+To **rotate the key**, add the new public half to the account first, then change the key and restart the control pods. A new key starts a new status row, pending until a check finds it on the account, so a key not yet added stops managed workspaces signing until it is. Leave the old public key on the account unless it may have leaked: on a GHES with persistent verification off, deleting it turns the commits it signed Unverified.
+
+When the signer breaks (its key removed from the account, or GitHub failing a pushed commit for its address) every managed workspace commits unsigned from its next signature on, each control pod logs `deployment commit signer is broken; managed workspaces commit unsigned until an operator fixes it`, and `tf_deployment_commit_signer_up` reads 0 ([Monitoring](monitoring.md#commit-signer-health)). Fix the cause on the account, then Verify. A key put back on the account restores it on the next check without one.
+
+Add the signer's login to your repositories' CLA allowlist, if they run one, before enabling it: its commits are authored as that account.
+
 ## 9. (Optional) Register a deployment Linear app
 
 A workspace that installs Triage Factory in Linear normally registers a Linear OAuth app of its own first, from **Workspace Settings → Linear OAuth app**. A **deployment Linear app** is the alternative: one app, registered once, that every workspace with no app of its own installs through. A workspace admin clicks **Install Triage Factory** and approves on Linear, and there is nothing to create or paste.

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -128,6 +129,11 @@ func (a *App) startWorkers(ctx context.Context) {
 		// requests whose doorbell was dropped. nil on an executor.
 		if a.commitSigner != nil {
 			go a.commitSigner.Run(ctx)
+		}
+		// Every control pod reads the deployment signer's health it signs
+		// with, reports it, and makes its periodic check when one is due.
+		if a.deploymentSignerHealth != nil {
+			go a.deploymentSignerHealth.Run(ctx, commitsigner.DeploymentWatchInterval)
 		}
 		// The signal apply loop only makes sense on dispatcher-capable
 		// roles — only they can ever own a run's live process. The tf_wake

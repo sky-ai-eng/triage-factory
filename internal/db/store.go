@@ -506,6 +506,13 @@ type Stores struct {
 	// a signed-in user.
 	CommitSignatures CommitSignatureStore
 
+	// DeploymentCommitSigners owns the deployment_commit_signer table — the
+	// health of the deployment's commit signer, whose login and key are
+	// control-pod config. Postgres only, admin pool: the SQLite impl is a stub
+	// returning ErrNotApplicableInLocal, since local mode has no deployment
+	// App and so no deployment signer.
+	DeploymentCommitSigners DeploymentCommitSignerStore
+
 	// PollReadiness owns the poll_readiness table — the org-scoped
 	// readiness gate for /api/jira/stock and the one-shot "config took
 	// effect" announce toast (TFAC-583). Admin-pool-only, same shape as

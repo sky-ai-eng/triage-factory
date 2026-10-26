@@ -16,5 +16,6 @@ func (a *App) buildCredProvisioner() error {
 		return nil
 	}
 	a.credProvisioner = credprovision.NewManager(a.stores, a.llmResolver, a.linearResolver)
+	a.credProvisioner.SetDeploymentSigner(a.deploymentSigner)
 	return nil
 }

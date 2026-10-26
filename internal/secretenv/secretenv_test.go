@@ -220,3 +220,36 @@ func TestResolve_DeploymentLinearAppSecret(t *testing.T) {
 		t.Errorf("TF_LINEAR_CLIENT_SECRET_FILE still in env = %q; resolve must unset it", v)
 	}
 }
+
+// TestResolve_DeploymentCommitSignerKey: the deployment commit signer's
+// private key is registered here and resolves through the NAME_FILE
+// convention with its internal newlines intact. Its login and committer
+// address are plain config and are not captured.
+func TestResolve_DeploymentCommitSignerKey(t *testing.T) {
+	if !slices.Contains(Secrets, "TF_GITHUB_COMMIT_SIGNER_KEY") {
+		t.Error("Secrets does not contain TF_GITHUB_COMMIT_SIGNER_KEY")
+	}
+	for _, name := range []string{"TF_GITHUB_COMMIT_SIGNER_LOGIN", "TF_GITHUB_COMMIT_SIGNER_EMAIL"} {
+		if slices.Contains(Secrets, name) {
+			t.Errorf("Secrets contains %s, which is not a secret", name)
+		}
+	}
+
+	const key = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk\nAAAA\n-----END OPENSSH PRIVATE KEY-----"
+	path := filepath.Join(t.TempDir(), "commit-signer-key")
+	if err := os.WriteFile(path, []byte(key+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TF_GITHUB_COMMIT_SIGNER_KEY_FILE", path)
+
+	dst := map[string]string{}
+	if err := resolveInto(dst, Secrets); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got := dst["TF_GITHUB_COMMIT_SIGNER_KEY"]; got != key {
+		t.Errorf("TF_GITHUB_COMMIT_SIGNER_KEY = %q, want the file's value", got)
+	}
+	if v := os.Getenv("TF_GITHUB_COMMIT_SIGNER_KEY_FILE"); v != "" {
+		t.Errorf("TF_GITHUB_COMMIT_SIGNER_KEY_FILE still in env = %q; resolve must unset it", v)
+	}
+}

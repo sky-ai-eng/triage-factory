@@ -590,6 +590,20 @@ services:
       TF_GITHUB_APP_WEBHOOK_SECRET_FILE: ${TF_GITHUB_APP_WEBHOOK_SECRET_FILE:-}
       TF_GITHUB_APP_CLIENT_SECRET: ${TF_GITHUB_APP_CLIENT_SECRET:-}
       TF_GITHUB_APP_CLIENT_SECRET_FILE: ${TF_GITHUB_APP_CLIENT_SECRET_FILE:-}
+      # Deployment commit signer — the GitHub user account every workspace on
+      # the deployment App signs its agents' commits as unless it registers
+      # its own (optional; the login and the key together, or neither, and
+      # half refuses the boot). Control-only, and never forwarded to the
+      # executor below: every control pod signs, and a sandboxed run's sidecar
+      # sends the control plane a commit digest, never holding the key. The
+      # key wants the file form, a private key being multi-line. The email is
+      # required when the deployment's GitHub is not github.com. See
+      # docs/self-hosting/install.md ("Configure the deployment commit
+      # signer").
+      TF_GITHUB_COMMIT_SIGNER_LOGIN: ${TF_GITHUB_COMMIT_SIGNER_LOGIN:-}
+      TF_GITHUB_COMMIT_SIGNER_KEY: ${TF_GITHUB_COMMIT_SIGNER_KEY:-}
+      TF_GITHUB_COMMIT_SIGNER_KEY_FILE: ${TF_GITHUB_COMMIT_SIGNER_KEY_FILE:-}
+      TF_GITHUB_COMMIT_SIGNER_EMAIL: ${TF_GITHUB_COMMIT_SIGNER_EMAIL:-}
       # The deployment's default GitHub — the web base a workspace with no
       # base URL of its own resolves to, and the GitHub the deployment App is
       # registered on. Empty means https://github.com. Plain config, not a
@@ -705,6 +719,9 @@ services:
       # pod's brain instead — see internal/credprovision. openStores warns
       # and ignores this var if it's set on an executor anyway.
       # TF_SECRET_ENCRYPTION_KEY intentionally omitted.
+      # Nor the deployment commit signer (TF_GITHUB_COMMIT_SIGNER_*): an
+      # executor never holds a signing key. Its runs' sidecars relay commit
+      # digests to the control pods, which sign them.
       # Durable-workspace object store (per-run snapshots + cross-host rehydrate).
       TF_BLOB_ENDPOINT: ${TF_BLOB_ENDPOINT:-http://seaweedfs:8333}
       TF_BLOB_BUCKET: ${TF_BLOB_BUCKET:-tf-workspaces}

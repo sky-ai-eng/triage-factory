@@ -47,6 +47,8 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		"access_change_log",
 		// The org's commit signer and the signing log its budgets count over.
 		"org_commit_signers", "commit_signatures",
+		// The deployment signer's health, a system table with no org.
+		"deployment_commit_signer",
 	}
 	for _, table := range expectedTables {
 		var n int
@@ -3292,6 +3294,12 @@ func TestBaseline_HostAndScopeRefuseEmpty(t *testing.T) {
 			insert: `INSERT INTO commit_signatures (org_id, boot_epoch, signer, signer_host, signer_user_id, digest, state)
 			         VALUES ($1, 1, 'org', $2, 583231, 'ab', 'requested')`,
 			args: func(v string) []any { return []any{orgID, v} },
+		},
+		{
+			name:       "deployment_commit_signer.host",
+			constraint: "deployment_commit_signer_host_check",
+			insert:     `INSERT INTO deployment_commit_signer (host, public_key, login) VALUES ($1, 'ssh-ed25519 AAAA', 'TriageFactory')`,
+			args:       func(v string) []any { return []any{v} },
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

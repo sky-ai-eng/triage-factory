@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/mail"
 	"slices"
 	"strconv"
 	"strings"
@@ -45,10 +44,6 @@ import (
 // account. Key titles are public, so it names the product and nothing about
 // the org.
 const commitSignerKeyTitle = "Triage Factory commit signing"
-
-// maxCommitEmailLen bounds a committer address at the longest an address can
-// be.
-const maxCommitEmailLen = 254
 
 // commitSigningKeys are the secrets a signer owns: the private half of its key
 // and of a rotation's pending key.
@@ -348,25 +343,14 @@ func writeSSHSigningUnsupported(w http.ResponseWriter, host string) {
 	})
 }
 
-// commitEmailProblem is why email cannot be a committer address, "" when it
-// can: a bare address, as git writes it between the angle brackets of the
-// committer header, with no display name, surrounding space or brackets, and
-// one git writes unchanged. A bare address can begin with an apostrophe, which
-// git drops, and the commit would then name an address the signer never set.
+// commitEmailProblem is why email cannot be the signer's committer address,
+// "" when it can (commitsigner.CommitEmailProblem). An empty one is refused
+// here with the way to ask for the derived address instead.
 func commitEmailProblem(email string) string {
 	if email == "" {
 		return "email must not be empty; send null to commit under the derived noreply address"
 	}
-	if len(email) > maxCommitEmailLen {
-		return fmt.Sprintf("email must be at most %d characters", maxCommitEmailLen)
-	}
-	if addr, err := mail.ParseAddress(email); err != nil || addr.Name != "" || addr.Address != email {
-		return "email must be a bare email address, such as agent@example.com"
-	}
-	if commitsign.IdentName(email) != email {
-		return "email must not begin with an apostrophe, which git drops from a committer address"
-	}
-	return ""
+	return commitsigner.CommitEmailProblem(email)
 }
 
 // commitSignerClient resolves the org's GitHub client for the signer's reads,
@@ -619,23 +603,8 @@ func (s *Server) checkCommitSigner(ctx context.Context, client *ghclient.Client,
 	return verdict.Reason, &signerCheckFault{status: http.StatusConflict, item: httpx.ErrorItem{
 		Reason: httpx.ReasonCommitUnverified,
 		Message: fmt.Sprintf("GitHub still reports commit %s in %s as not verified (%s): %s",
-			failed.CommitSHA, repo.Slug(), verdict.Reason, unverifiedCommitAdvice(verdict.Reason, verdict.CommitterEmail, account.Login)),
+			failed.CommitSHA, repo.Slug(), verdict.Reason, commitsigner.UnverifiedCommitAdvice(verdict.Reason, verdict.CommitterEmail, account.Login)),
 	}}, nil
-}
-
-// unverifiedCommitAdvice says what to do about the verification reasons an
-// admin can fix on the account.
-func unverifiedCommitAdvice(reason, email, login string) string {
-	switch reason {
-	case domain.CommitVerificationUnknownKey:
-		return "the key that signed it is not on " + login + "'s signing keys"
-	case "no_user":
-		return email + " belongs to no GitHub account; add and verify it on " + login + ", or change the signer's email"
-	case "unverified_email":
-		return email + " is not verified on " + login + "; verify it there, then verify the signer again"
-	default:
-		return "GitHub gave this reason for the commit's signature; fix it on " + login + ", then verify again"
-	}
 }
 
 // handleCommitSignerRotate starts a key rotation: it generates a new key pair
@@ -922,7 +891,7 @@ func (s *Server) handleCommitIdentityGet(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	id, err := commitsigner.Resolver{Signers: s.allStores.OrgCommitSigners, GitHub: s.ghResolver}.Resolve(r.Context(), orgID)
+	id, err := s.commitIdentityResolver().Resolve(r.Context(), orgID)
 	if err != nil {
 		internalError(w, "commit-identity", err)
 		return

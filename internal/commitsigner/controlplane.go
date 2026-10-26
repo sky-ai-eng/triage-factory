@@ -67,6 +67,13 @@ const (
 // unanswered, which the run retries.
 var errNoSigningKey = errors.New("commitsigner: the secret store holds no private key for the signer's public key")
 
+// errNoDeploymentSigner is a deployment request decided by a control pod
+// configured with no deployment signer, or with a key other than the one the
+// org resolves to. Every control pod should carry the same signer config; a
+// pod that does not answers unanswered, and the run's next attempt can land on
+// one that does.
+var errNoDeploymentSigner = errors.New("commitsigner: this control pod is not configured with the deployment signer the request names")
+
 // ControlPlane is a control pod's half of a multi-mode signature. It claims a
 // queued request, checks that the engagement that asked still holds its claim,
 // that the org still signs as the signer the request names, and that the claim
@@ -84,13 +91,17 @@ var errNoSigningKey = errors.New("commitsigner: the secret store holds no privat
 // org decided at the same instant, by any pod's workers or sweep, can admit one
 // past the limit: at most signerWorkers+1 per control pod. The limits bound a
 // runaway or compromised run, which that does not change.
+//
+// A request as the deployment signer is decided the same way, with the key
+// from this pod's config (SetDeploymentSigner) instead of the secret store.
 type ControlPlane struct {
-	stores  db.Stores
-	budgets Budgets
-	podID   string
-	publish Publisher
-	now     func() time.Time
-	nudges  chan requestRef
+	stores     db.Stores
+	budgets    Budgets
+	podID      string
+	publish    Publisher
+	deployment *DeploymentSigner
+	now        func() time.Time
+	nudges     chan requestRef
 }
 
 type requestRef struct{ orgID, id string }
@@ -106,6 +117,24 @@ func NewControlPlane(stores db.Stores, budgets Budgets, podID string, publish Pu
 		now:     time.Now,
 		nudges:  make(chan requestRef, nudgeQueueDepth),
 	}
+}
+
+// SetDeploymentSigner gives the pod the deployment's signer, which it signs
+// deployment requests with while every workspace on the deployment App with no
+// signer of its own resolves to it. nil, the default, signs none. Call it
+// before Run.
+func (c *ControlPlane) SetDeploymentSigner(d *DeploymentSigner) {
+	c.deployment = d
+}
+
+// resolver is the identity resolution every decision makes again, with the
+// deployment arm when this pod has a deployment signer.
+func (c *ControlPlane) resolver() Resolver {
+	r := Resolver{Signers: c.stores.OrgCommitSigners}
+	if c.deployment.Configured() {
+		r.Deployment = &DeploymentArm{Signer: c.deployment, Health: c.stores.DeploymentCommitSigners, Orgs: c.stores.Orgs}
+	}
+	return r
 }
 
 // Nudge is the sign_request doorbell: a request was queued. It hands the
@@ -259,18 +288,20 @@ func (c *ControlPlane) decide(ctx context.Context, row domain.CommitSignature) d
 		return decision{refusal: RefusalClaimInactive, denied: deniedClaimInactive}
 	}
 
-	signer, refusal, err := c.checkSigner(ctx, row)
+	if row.Signer == domain.CommitSigningDeployment && !c.deployment.Configured() {
+		return c.undecided(ctx, row, "find the deployment signer", errNoDeploymentSigner)
+	}
+	signer, err := c.resolver().Resolve(ctx, row.OrgID)
 	if err != nil {
 		return c.undecided(ctx, row, "resolve the org's signer", err)
 	}
-	if refusal == RefusalSignerInactive && row.Signer == domain.CommitSigningOrg {
-		status, reason, err := signerStatus(ctx, c.stores.OrgCommitSigners, row.OrgID)
-		if err != nil {
-			return c.undecided(ctx, row, "read the signer's status", err)
-		}
-		return decision{refusal: refusal, signerStatus: status, signerReason: reason}
-	}
-	if refusal != "" {
+	// The run's line says why signing stopped for a signer that is still the
+	// org's but not active, from the status the resolution read.
+	switch refusal := signerRefusal(signer, row.Signer, row.SignerHost, strconv.FormatInt(row.SignerUserID, 10)); refusal {
+	case "":
+	case RefusalSignerInactive:
+		return decision{refusal: refusal, signerStatus: signer.Status, signerReason: signer.StatusReason}
+	default:
 		return decision{refusal: refusal}
 	}
 
@@ -285,7 +316,7 @@ func (c *ControlPlane) decide(ctx context.Context, row domain.CommitSignature) d
 		return decision{refusal: res.Refusal, retryAfter: res.RetryAfterSeconds, limit: res.Limit}
 	}
 
-	key, err := signingKey(ctx, c.stores.Secrets, row.OrgID, signer.PublicKey)
+	key, err := c.signingKey(ctx, row.OrgID, signer)
 	if err != nil {
 		return c.undecided(ctx, row, "read the signer's key", err)
 	}
@@ -308,25 +339,16 @@ func (c *ControlPlane) undecided(ctx context.Context, row domain.CommitSignature
 	return decision{refusal: RefusalUnanswered}
 }
 
-// checkSigner resolves the org's signer now and compares it with the one the
-// request names: the same kind, the same account on the same host, and
-// active. It returns the resolved identity when they match, and the refusal
-// when they do not.
-func (c *ControlPlane) checkSigner(ctx context.Context, row domain.CommitSignature) (Identity, Refusal, error) {
-	if row.Signer == domain.CommitSigningDeployment {
-		// TODO(TFAC-1200): sign as the deployment signer, with the key from
-		// the control pods' config, while it is active and the org resolves
-		// to it. Until then no deployment signer exists to sign as.
-		return Identity{}, RefusalSignerInactive, nil
+// signingKey returns the private key that signs as signer: the deployment
+// signer's from this pod's config, or the org's from the secret store.
+func (c *ControlPlane) signingKey(ctx context.Context, orgID string, signer Identity) (ed25519.PrivateKey, error) {
+	if signer.Mode == domain.CommitSigningDeployment {
+		if !c.deployment.Configured() || c.deployment.PublicKey != signer.PublicKey {
+			return nil, errNoDeploymentSigner
+		}
+		return c.deployment.key, nil
 	}
-	id, err := Resolver{Signers: c.stores.OrgCommitSigners}.Resolve(ctx, row.OrgID)
-	if err != nil {
-		return Identity{}, "", err
-	}
-	if refusal := signerRefusal(id, row.Signer, row.SignerHost, strconv.FormatInt(row.SignerUserID, 10)); refusal != "" {
-		return Identity{}, refusal, nil
-	}
-	return id, "", nil
+	return signingKey(ctx, c.stores.Secrets, orgID, signer.PublicKey)
 }
 
 // signerRefusal compares the signer an org resolves to now with the one a

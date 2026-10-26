@@ -90,6 +90,28 @@ func TestTfSystem_OffSurfaceReadDenied(t *testing.T) {
 	}
 }
 
+// TestTfSystem_DeploymentSignerUnreachable pins that an executor cannot read or
+// write the deployment signer's health. Every reader is a control pod: the
+// resolution that seals a bundle or decides a signature, the brain's checks,
+// and the fleet console. An executor that could write the row could mark a
+// broken signer active for every managed workspace's next signature.
+func TestTfSystem_DeploymentSignerUnreachable(t *testing.T) {
+	h := Shared(t)
+
+	var n int
+	err := h.SystemDB.QueryRow(`SELECT COUNT(*) FROM deployment_commit_signer`).Scan(&n)
+	if err == nil {
+		t.Fatal("tf_system SELECT deployment_commit_signer succeeded, want permission denied")
+	}
+	assertPgCode(t, err, "42501", "tf_system SELECT deployment_commit_signer")
+
+	_, err = h.SystemDB.Exec(`UPDATE deployment_commit_signer SET status = 'active'`)
+	if err == nil {
+		t.Fatal("tf_system UPDATE deployment_commit_signer succeeded, want permission denied")
+	}
+	assertPgCode(t, err, "42501", "tf_system UPDATE deployment_commit_signer")
+}
+
 // TestTfSystem_MemoryAttemptsAreReadOnly pins the shape of the one grant the
 // task projection forced open. The ledger stays brain-written: an executor
 // reads it, transitively, because the task read projects the pending task's

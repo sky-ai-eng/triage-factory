@@ -471,6 +471,16 @@ executor, and the signer the run's credential bundle was sealed with:
    commit, and sends that id back to be stored on the row, in order with the
    run's push records, so a push of the commit names its signer.
 
+A workspace on the deployment App with no signer of its own signs as the
+deployment's signer, configured on the control pods
+(`TF_GITHUB_COMMIT_SIGNER_*`, [setup](install.md#86-optional-configure-the-deployment-commit-signer)).
+Its requests take the same path and checks, under `signer="deployment"`, and
+the pod signs with the key from its own config rather than the secret store; a
+control pod configured with no deployment signer closes a deployment request
+unanswered, so the run's next attempt can reach one that has it. It has no
+budget of its own: each managed workspace's signatures count against that
+org's.
+
 `tf_ctl` can drop the first doorbell too, so each control pod also sweeps once
 a second for requests no pod has claimed half a second after they were made. A
 request a pod first reaches more than 40 seconds after it was made is closed
@@ -1091,11 +1101,52 @@ is GitHub, or the org's credential, failing to answer. A steady
 `periodic`/`post_push` `error` rate is the same for the background checks, and
 while it lasts a removed key goes unnoticed.
 
+#### The deployment commit signer
+
+The deployment's signer, which every managed workspace with no signer of its
+own signs as, is checked the same way with two differences, because it belongs
+to no org:
+
+- **Periodic check, on every control pod.** Each control pod reads the
+  signer's status row every 30 seconds and, once the row's last check is 15
+  minutes old, makes the check itself: it reads the account (by the configured
+  login the first time, by its id after) and its signing keys **without a
+  credential**, since both are public on GitHub. Pods racing for a due check
+  is harmless; the write is a compare-and-set. Finding the key makes a
+  `pending` signer `active` as well as one broken for `key_missing`, because
+  the operator adds the key to the account before configuring it. A GitHub
+  Enterprise Server in private mode refuses unauthenticated reads, so there the
+  periodic check counts `error` and the signer waits for an operator's Verify.
+- **Post-push check, per org.** Each managed workspace's GitHub cycle reads the
+  commits its runs signed as the deployment signer, with that workspace's
+  credential, on the control pod holding the brain lease. A failure breaks the
+  deployment signer for every managed workspace, until an operator's Verify in
+  the fleet console (`POST /api/fleet/commit-signer/verify`) re-reads the commit
+  and GitHub answers `valid`.
+
+Its checks count in `tf_commit_signer_checks_total` like an org signer's. A
+broken deployment signer stops signing for every managed workspace at the next
+signature, and each control pod logs a WARN when it reads the signer broken
+(`deployment commit signer is broken; managed workspaces commit unsigned until
+an operator fixes it`, with `login`, `host`, `reason` and `since`), so any
+pod's log shows it, and `deployment commit signer is active` at INFO once it
+recovers.
+
+| Metric | Labels | Value |
+| --- | --- | --- |
+| `tf_deployment_commit_signer_up` | — | 1 while the deployment commit signer is `active`, 0 while it is `pending` or `broken`. Every control pod reports the signer it is configured with, from its last read of the status row. No series when none is configured, and none on a pod before its first read. |
+
 ```
 tf_commit_signer_broken == 1                                                          # an org's commits are going out unsigned
+tf_deployment_commit_signer_up == 0                                                   # every managed workspace is committing unsigned
 increase(tf_commit_signer_checks_total{check=~"periodic|post_push",result="error"}[1h]) > 0   # the checks cannot read GitHub
 increase(tf_commit_signer_checks_total{check="verify",result="error"}[1h]) > 0        # Verify could not read GitHub
 ```
+
+`tf_deployment_commit_signer_up == 0` fires on each control pod reporting it, so
+group it by job rather than instance if one page per deployment is wanted. A
+signer just configured reads 0 until its first check finds the key, seconds
+after the pods start.
 
 ## Traces — `TF_TRACES_ENDPOINT`
 

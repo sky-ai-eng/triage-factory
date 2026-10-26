@@ -366,7 +366,9 @@ func TestControlPlane_RefusesASignerThatChangedSinceTheSeal(t *testing.T) {
 					t.Fatalf("break the signer: %v", err)
 				}
 			}},
-		"a deployment signer": {signer: domain.CommitSigningDeployment, want: RefusalSignerInactive},
+		// A pod configured with no deployment signer cannot decide the
+		// request, so the run tries again and may reach one that can.
+		"a deployment request on a pod with no deployment signer": {signer: domain.CommitSigningDeployment, want: RefusalUnanswered},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

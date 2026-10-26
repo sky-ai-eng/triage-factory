@@ -94,10 +94,18 @@ func (s OrgCommitSigner) CommitEmail() string {
 	if s.EmailOverride != "" {
 		return s.EmailOverride
 	}
-	if !DerivesCommitEmail(s.Host) || s.GitHubUserID <= 0 || s.Login == "" {
+	return NoreplyCommitEmail(s.Host, s.GitHubUserID, s.Login)
+}
+
+// NoreplyCommitEmail is the committer address a signer on host derives when it
+// has no address of its own: on github.com the id form of the account's
+// noreply address, which keeps verifying across a rename of the login, and ""
+// on any other host, or for an account whose id or login is not known.
+func NoreplyCommitEmail(host string, githubUserID int64, login string) string {
+	if !DerivesCommitEmail(host) || githubUserID <= 0 || login == "" {
 		return ""
 	}
-	return strconv.FormatInt(s.GitHubUserID, 10) + "+" + s.Login + "@users.noreply.github.com"
+	return strconv.FormatInt(githubUserID, 10) + "+" + login + "@users.noreply.github.com"
 }
 
 // DerivesCommitEmail reports whether a signer on host, in
@@ -106,6 +114,55 @@ func (s OrgCommitSigner) CommitEmail() string {
 // documented.
 func DerivesCommitEmail(host string) bool {
 	return host == ghbase.GitHubCom
+}
+
+// DeploymentCommitSigner is one deployment_commit_signer row: the health of
+// one key the deployment's commit signer is configured with, on one GitHub.
+// The signer itself (its login, key and committer address) is control-pod
+// config, so the row holds only what TF learns about it from GitHub: the
+// account the login names, and whether GitHub verifies what the key signs.
+//
+// The account is identified by its id once a check has read it. Login and Name
+// are display values, refreshed by the checks, so a rename of the account
+// changes neither which account signs nor whether its commits verify.
+//
+// Empty strings and zero numbers stand for the nullable columns' NULL.
+type DeploymentCommitSigner struct {
+	// Host is the GitHub the account is on, in ghbase.CanonicalBaseURL form:
+	// the deployment's default GitHub, where the deployment App is
+	// registered.
+	Host      string `json:"host"`
+	PublicKey string `json:"public_key"`
+	// GitHubUserID is the account the configured login named when a check
+	// first read it, 0 until one has. Until then the signer has no account
+	// to commit as.
+	GitHubUserID int64 `json:"github_user_id,omitempty"`
+	// Login is the account's login as the last check read it, and the
+	// configured login until a check has.
+	Login string `json:"login"`
+	// Name is the account's profile name, "" when the profile has none.
+	Name string `json:"name,omitempty"`
+	// Status is pending until a check finds the key on the account, active
+	// while it signs, and broken once a check fails. StatusReason is a
+	// broken signer's reason: GitHub's verification reason for a pushed
+	// commit, or key_missing.
+	Status       CommitSignerStatus `json:"status"`
+	StatusReason string             `json:"status_reason,omitempty"`
+	StatusSince  time.Time          `json:"status_since"`
+	// CheckedAt is when a check last read the account's signing keys. The
+	// periodic check runs again once it is 15 minutes old.
+	CheckedAt *time.Time `json:"checked_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+}
+
+// CommitName is the name the signer's commits carry: the account's profile
+// name, or its login when the profile has none.
+func (s DeploymentCommitSigner) CommitName() string {
+	if s.Name != "" {
+		return s.Name
+	}
+	return s.Login
 }
 
 // CommitSigningMode is how a run's commits are signed: not at all, as the

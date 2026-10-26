@@ -531,10 +531,14 @@ that uses it, the deployment signer included.
 
 ### 5.4 `deployment_commit_signer` (Postgres only)
 
-One row per deployment signer key, keyed by the public key: `github_user_id`
-and `name` (read from the account the login names, like an org signer's),
-`status`, `status_reason`, `status_since`, `checked_at`. Every control pod reads it
-before signing and the fleet console shows it.
+One row per deployment signer key, keyed by the host and the public key:
+`github_user_id`, `login` and `name` (read from the account the login names,
+like an org signer's, and refreshed by id after), `status`, `status_reason`,
+`status_since`, `checked_at`. Every control pod reads it before signing and the
+fleet console shows it. Rotating the key in config starts a new row, pending;
+the host in the key keeps a deployment whose default GitHub changed from
+inheriting another host's account. Until a check has read the account,
+`github_user_id` is null and no workspace commits as the signer.
 
 ### 5.5 The bundle
 
@@ -615,7 +619,9 @@ Under `/api/orgs/{org_id}/github/`, beside the App and PAT routes:
   are public.
 - The fleet console gets `GET` and `POST …/verify` for the deployment signer,
   operator-gated, and a `usage` node (`?since=&until=`) with its signatures
-  by hour and by org.
+  by hour and by org: `/api/fleet/commit-signer`, in core and without the
+  fleet console's licence, since Verify is the only way out of a broken
+  signer.
 
 ## 7. Health
 
@@ -667,6 +673,14 @@ account), `no_user` (the email belongs to no account), `unverified_email`
 A broken deployment signer stops signing for every managed workspace at the
 next signature. Operators see it in the fleet console, in a WARN on each
 control pod, and in `tf_deployment_commit_signer_up`.
+
+The deployment signer belongs to no org, so its periodic check differs: every
+control pod reads the row every 30 s and, once it is due, checks the account
+and its keys itself, without a credential, since both are public. Finding the
+key activates a `pending` deployment signer too: the operator adds the key to
+the account before configuring it, so there is no admin step to wait for. Its
+post-push check runs in each managed workspace's cycle with that workspace's
+credential, and Verify re-reads the failing commit, from any org, the same way.
 
 ### Metrics
 

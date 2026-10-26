@@ -553,6 +553,9 @@ var orgScopedTables = []string{
 	// no foreign key reaches it and Reset would otherwise leak samples across
 	// tests sharing this container.
 	"sandbox_stats",
+	// deployment_commit_signer: the deployment signer's health, keyed by its
+	// key with no org_id at all, so no foreign key reaches it either.
+	"deployment_commit_signer",
 	// users last — most other tables FK into it.
 	"users",
 	// NOT INCLUDED explicitly: events_catalog — it is a read-only system

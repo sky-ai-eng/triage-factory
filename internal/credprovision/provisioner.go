@@ -86,6 +86,9 @@ type Manager struct {
 	jiraResolver   jira.Resolver
 	linearResolver linear.Resolver
 	llm            llmResolver
+	// deploymentSigner is the deployment's commit signer, from this control
+	// pod's config; nil seals none. Only its public half reaches a bundle.
+	deploymentSigner *commitsigner.DeploymentSigner
 
 	// sources overrides the availability resolve (availability) for a test
 	// that drives a whole provision over fake stores. nil in production.
@@ -552,10 +555,18 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, conv
 	return gh, nil
 }
 
+// SetDeploymentSigner gives the provisioner the deployment's commit signer, so
+// a workspace on the deployment App with no signer of its own seals it. Call
+// it before the first seal.
+func (m *Manager) SetDeploymentSigner(d *commitsigner.DeploymentSigner) {
+	m.deploymentSigner = d
+}
+
 // commitIdentity is the identity the run's commits are authored and committed
 // as, and how they are signed (commitsigner.Resolver): the org's signer when
-// it has one, else the App's bot or the PAT's owner. A signer that cannot be
-// read fails the seal rather than sealing the identity the signer would have
+// it has one, else, for a workspace on the deployment App, the deployment's
+// signer, else the App's bot or the PAT's owner. A signer that cannot be read
+// fails the seal rather than sealing the identity the signer would have
 // replaced; the sweeps seal again. With no signer store wired it is the org's
 // GitHub identity, unsigned.
 func (m *Manager) commitIdentity(ctx context.Context, orgID string) (commitsigner.Identity, error) {
@@ -566,7 +577,11 @@ func (m *Manager) commitIdentity(ctx context.Context, orgID string) (commitsigne
 		}
 		return id, nil
 	}
-	return commitsigner.Resolver{Signers: m.stores.OrgCommitSigners, GitHub: m.ghResolver}.Resolve(ctx, orgID)
+	r := commitsigner.Resolver{Signers: m.stores.OrgCommitSigners, GitHub: m.ghResolver}
+	if m.deploymentSigner.Configured() {
+		r.Deployment = &commitsigner.DeploymentArm{Signer: m.deploymentSigner, Health: m.stores.DeploymentCommitSigners, Orgs: m.stores.Orgs}
+	}
+	return r.Resolve(ctx, orgID)
 }
 
 // cliChannelScope picks the single owner the real-gh channel's team-set token

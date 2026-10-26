@@ -449,16 +449,10 @@ export default function OrgSettings({
           signed as. An action section: every control commits inline through
           /api/orgs/{org}/github/commit-signer, so there is no Save footer.
           canManage is unconditional for the same reason as Event sources':
-          this group renders only for an org admin (multi) or N=1 (local).
-          TODO(TFAC-1198): multi-mode runs neither commit as the signer nor
-          sign until the sidecar relays signatures, while GET commit-identity
-          reports the signer there, so the section would claim signing that
-          does not happen. It shows in local mode only until then. */}
-      {isLocal && (
-        <SettingsSection title="Commit signing" summary="Sign agents' commits as a GitHub user">
-          <CommitSigningGroup orgId={orgId} githubUrl={baseline.org.github_url} canManage />
-        </SettingsSection>
-      )}
+          this group renders only for an org admin (multi) or N=1 (local). */}
+      <SettingsSection title="Commit signing" summary="Sign agents' commits as a GitHub user">
+        <CommitSigningGroup orgId={orgId} githubUrl={baseline.org.github_url} canManage />
+      </SettingsSection>
 
       {/* ── Clone protocol (PAT + local only) ── */}
       {isPat && isLocal && (
