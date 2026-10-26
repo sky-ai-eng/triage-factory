@@ -44,8 +44,11 @@ func TestArgs_MountPlan(t *testing.T) {
 		ClaudeProjectDir: testProjectDir,
 		GHChannelDir:     "/home/dev/.triagefactory/gh-channel/conv-1",
 		AgentHostSocket:  "/home/dev/.triagefactory/agenthost/conv-1.sock",
-		AddDirs:          []string{"/home/dev/notes", "/srv/shared"},
-		ReadOnly:         []string{"/home/dev/.nvm/versions/node/v22/bin/node", "/home/dev/src/tf/triagefactory"},
+		// Read-only, past the state-root mask: the run checks its own commits
+		// against it and cannot add a key to it.
+		AllowedSignersFile: "/home/dev/.triagefactory/allowed-signers/claim-1",
+		AddDirs:            []string{"/home/dev/notes", "/srv/shared"},
+		ReadOnly:           []string{"/home/dev/.nvm/versions/node/v22/bin/node", "/home/dev/src/tf/triagefactory"},
 	}
 
 	got, err := Args(spec, testHost())
@@ -72,6 +75,7 @@ func TestArgs_MountPlan(t *testing.T) {
 		"--bind-try", "/home/dev/.triagefactory/gh-channel/conv-1", "/home/dev/.triagefactory/gh-channel/conv-1",
 		"--bind", "/tmp/triagefactory-runs/rk1", "/tmp/triagefactory-runs/rk1",
 		"--bind", "/home/dev/.triagefactory/agenthost/conv-1.sock", "/run/tf.sock",
+		"--ro-bind", "/home/dev/.triagefactory/allowed-signers/claim-1", "/home/dev/.triagefactory/allowed-signers/claim-1",
 		"--ro-bind-try", "/home/dev/.nvm/versions/node/v22/bin/node", "/home/dev/.nvm/versions/node/v22/bin/node",
 		"--ro-bind-try", "/home/dev/src/tf/triagefactory", "/home/dev/src/tf/triagefactory",
 		// Grants last.
@@ -150,6 +154,9 @@ func TestArgs_OmitsAbsentOptionalPaths(t *testing.T) {
 	}
 	if strings.Contains(joined, "gh-channel") {
 		t.Errorf("plan binds a gh-channel dir the Spec never named: %v", got)
+	}
+	if strings.Contains(joined, "allowed-signers") {
+		t.Errorf("plan binds an allowed-signers file for a run that does not sign: %v", got)
 	}
 	for i, arg := range got {
 		if arg == "" {

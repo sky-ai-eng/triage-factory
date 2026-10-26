@@ -84,6 +84,24 @@ type Result struct {
 	// RefusalOrgMinuteBudget.
 	Refusal           Refusal
 	RetryAfterSeconds int
+
+	// The rest fill in the line the run's agent reads (RefusalLine) and are
+	// set only by a signer that knows them.
+	//
+	// CommitSHA is the id git gives the signed commit, for OutcomeSigned.
+	CommitSHA string
+	// Limit is the budget a RefusalOrgMinuteBudget or RefusalClaimBudget
+	// refusal ran into.
+	Limit int
+	// Committer is the committer a RefusalCommitterMismatch commit named.
+	Committer commitsign.Identity
+	// Object is what a RefusalNotACommit payload was: commitsign.ObjectTag,
+	// commitsign.ObjectPushCertificate, or "" for no object git signs.
+	Object string
+	// SignerStatus and SignerReason are the signer's status and its reason,
+	// for a RefusalSignerInactive.
+	SignerStatus domain.CommitSignerStatus
+	SignerReason string
 }
 
 // errRequestVanished is a waiting request whose row is gone: its org was

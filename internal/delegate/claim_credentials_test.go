@@ -351,7 +351,7 @@ func TestResolveCommitIdentity_DelegateSeam(t *testing.T) {
 	t.Run("resolver miss -> no identity (ambient inherited)", func(t *testing.T) {
 		// orgLogin unset -> OrgIdentityFor returns ok=false.
 		s := newSpawner(&fakeResolver{}, nil)
-		id := s.resolveCommitIdentity(context.Background(), orgID, "manual", "user-1")
+		id, _ := s.resolveCommitIdentity(context.Background(), orgID, "manual", "user-1")
 		if id != (githooks.CommitIdentity{}) {
 			t.Fatalf("resolver miss stamped %+v; want zero CommitIdentity (no injection)", id)
 		}
@@ -359,7 +359,7 @@ func TestResolveCommitIdentity_DelegateSeam(t *testing.T) {
 
 	t.Run("event run -> org identity, no trailer", func(t *testing.T) {
 		s := newSpawner(&fakeResolver{orgLogin: "acme-bot"}, nil)
-		id := s.resolveCommitIdentity(context.Background(), orgID, "event", "")
+		id, _ := s.resolveCommitIdentity(context.Background(), orgID, "event", "")
 		if id.Name != "acme-bot" || id.Email != "acme-bot@users.noreply.github.com" {
 			t.Errorf("identity = %+v; want the acme-bot org identity", id)
 		}
@@ -370,7 +370,7 @@ func TestResolveCommitIdentity_DelegateSeam(t *testing.T) {
 
 	t.Run("manual distinct user -> org identity + trailer", func(t *testing.T) {
 		s := newSpawner(&fakeResolver{orgLogin: "acme-bot"}, fakeUsers{login: "alice"})
-		id := s.resolveCommitIdentity(context.Background(), orgID, "manual", "user-1")
+		id, _ := s.resolveCommitIdentity(context.Background(), orgID, "manual", "user-1")
 		if id.Name != "acme-bot" {
 			t.Errorf("author = %q; want acme-bot", id.Name)
 		}
@@ -388,7 +388,7 @@ func TestResolveCommitIdentity_DelegateSeam(t *testing.T) {
 			orgLogin: "acme-bot[bot]",
 			orgEmail: "41898282+acme-bot[bot]@users.noreply.github.com",
 		}, fakeUsers{login: "alice"})
-		id := s.resolveCommitIdentity(context.Background(), orgID, "manual", "user-1")
+		id, _ := s.resolveCommitIdentity(context.Background(), orgID, "manual", "user-1")
 		if id.Name != "acme-bot[bot]" {
 			t.Errorf("name = %q; want acme-bot[bot]", id.Name)
 		}
@@ -407,13 +407,13 @@ func TestResolveCommitIdentity_DelegateSeam(t *testing.T) {
 		// PAT owner's login is a co-author.
 		same := newSpawner(accountResolver{&fakeResolver{orgLogin: "octocat"}, "583231"},
 			fakeUsers{login: "octo-renamed", id: "583231"})
-		if id := same.resolveCommitIdentity(context.Background(), orgID, "manual", "user-1"); id.CoAuthorTrailer != "" {
+		if id, _ := same.resolveCommitIdentity(context.Background(), orgID, "manual", "user-1"); id.CoAuthorTrailer != "" {
 			t.Errorf("trailer = %q for the PAT owner's own run; want none", id.CoAuthorTrailer)
 		}
 		other := newSpawner(accountResolver{&fakeResolver{orgLogin: "octocat"}, "583231"},
 			fakeUsers{login: "octocat", id: "777"})
 		want := "Co-authored-by: octocat <octocat@users.noreply.github.com>"
-		if id := other.resolveCommitIdentity(context.Background(), orgID, "manual", "user-1"); id.CoAuthorTrailer != want {
+		if id, _ := other.resolveCommitIdentity(context.Background(), orgID, "manual", "user-1"); id.CoAuthorTrailer != want {
 			t.Errorf("trailer = %q for another account under the PAT owner's login; want %q", id.CoAuthorTrailer, want)
 		}
 	})

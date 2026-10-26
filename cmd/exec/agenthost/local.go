@@ -838,7 +838,11 @@ func (c *LocalClient) UpsertArtifact(ctx context.Context, a domain.Artifact) (do
 	a = c.hostAnchorBranchURL(ctx, a)
 	if err != nil {
 		dropRelayedArtifact(ctx, a, err)
-		c.recordBotAction(ctx, branchPushActionInfo(a, c.info, c.githubCredential()))
+		act := branchPushActionInfo(a, c.info, c.githubCredential())
+		if act != nil {
+			act.DetailJSON = withPushSigner(act.DetailJSON, pushSigner(ctx, c.stores, c.info.OrgID, domain.ParseBranchArtifactSHA(a.DetailsJSON)))
+		}
+		c.recordBotAction(ctx, act)
 		return domain.Artifact{}, err
 	}
 	return c.rt.UpsertArtifact(ctx, a)
@@ -2960,7 +2964,10 @@ func (c *LocalClient) RecordGitPushFailed(ctx context.Context, push gitproxy.Pus
 		HTTPStatus    int    `json:"http_status"`
 		Reason        string `json:"reason,omitempty"`
 		RemoteMessage string `json:"remote_message,omitempty"`
-	}{push.NewSHA, push.Created, push.Status, push.Reason, push.RemoteMessage})
+		// Signer is the login that signed the tip the push tried to land, or
+		// "unsigned": beside a ruleset's refusal, unsigned names the cause.
+		Signer string `json:"signer,omitempty"`
+	}{push.NewSHA, push.Created, push.Status, push.Reason, push.RemoteMessage, pushSigner(ctx, c.stores, c.info.OrgID, push.NewSHA)})
 	c.recordBotAction(ctx, &domain.ExternalAction{
 		Provider:   domain.ArtifactProviderGitHub,
 		Action:     domain.ActionBranchPushFailed,

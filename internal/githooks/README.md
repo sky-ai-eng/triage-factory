@@ -85,3 +85,14 @@ process in both modes:
   a 2xx, a `branch_push_failed` audit row on anything else. Local mode has
   no proxy, so the hook keeps both roles there (push outcome unobservable
   — accepted).
+
+## The signing program
+
+- `ssh-sign` — not a hook. A run whose org has an active commit signer has
+  `gpg.ssh.program` pointed at it, so git runs it for every commit. Git's
+  signing call (`-Y sign -n git ... <buffer file>`) goes to
+  `triagefactory exec git sign`, which has the run's daemon check the commit
+  and sign it as the signer, then writes `<buffer file>.sig`. Every other
+  call is the one git makes to check a signature (`git verify-commit`,
+  `git log --show-signature`), and goes to `ssh-keygen` unchanged. Rewritten
+  by `Ensure` on every startup, like the hooks.

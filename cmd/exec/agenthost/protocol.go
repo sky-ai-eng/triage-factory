@@ -817,4 +817,6 @@ const (
 	methodRecordReadTouch = "RecordReadTouch"
 
 	methodMemoryLoad = "MemoryLoad"
+
+	methodSignCommit = "SignCommit"
 )

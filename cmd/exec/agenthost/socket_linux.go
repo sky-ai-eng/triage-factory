@@ -123,10 +123,14 @@ func StartWithServer(server *Server, conversationID string, jailGID int) (*HostD
 // `workspace add` checkout is already the agent's, so it is not handed to the
 // sandbox uid.
 //
+// signing is what the run's commits are signed with, nil for a run that does
+// not sign. Its daemon signs in this process, with the key from the secret
+// store.
+//
 // The caller supplies the path (from internal/paths) rather than this package
 // deriving it, so the ".triagefactory" literal stays where the lint guard
 // keeps it. Caller MUST invoke .Close() exactly once, as with Start.
-func StartLocal(stores db.Stores, info ConversationInfo, sockPath string) (*HostDaemon, error) {
+func StartLocal(stores db.Stores, info ConversationInfo, sockPath string, signing *LocalCommitSigning) (*HostDaemon, error) {
 	if info.ConversationID == "" {
 		return nil, fmt.Errorf("agenthost: ConversationInfo.ConversationID required")
 	}
@@ -138,6 +142,9 @@ func StartLocal(stores db.Stores, info ConversationInfo, sockPath string) (*Host
 	}
 	srv := NewServer(stores, info, nil)
 	srv.sharesNamespace = true
+	if dr, ok := srv.rt.(*directRuntime); ok {
+		dr.commitSigning = signing
+	}
 	return listenAndServe(srv, sockPath, grantSocketToOwnerOnly)
 }
 

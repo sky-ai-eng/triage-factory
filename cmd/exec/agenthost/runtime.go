@@ -193,6 +193,13 @@ type Runtime interface {
 	// reads as unresolved. The direct runtime has no bundle and builds the
 	// same entries from a live availability resolve (LiveSourceManifest).
 	SourceManifest(ctx context.Context) (domain.SourceManifest, error)
+
+	// SignCommit signs one commit object git handed the run's signing
+	// program, as the run's signer, or answers the line the agent reads in
+	// place of a signature. The direct runtime signs in its own process
+	// (local mode); a refusal or a failure to sign is the result's, and the
+	// error is reserved for a run whose signing could not be read at all.
+	SignCommit(ctx context.Context, payload []byte) (SignCommitResult, error)
 }
 
 // ExtensionRuntime is the narrower runtime a provider's sidecar-half handler
@@ -398,6 +405,13 @@ type directRuntime struct {
 	// executor, from the resolved tier on every other placement. Empty falls
 	// back to the resolver below, and to the App when even that can't answer.
 	ghCredential string
+
+	// commitSigning is what SignCommit signs the run's commits with, nil for a
+	// run that does not sign. commitSigningErr is a CommitSigningEnvVar that
+	// could not be read, which every SignCommit returns. Set through
+	// LocalClient.SetCommitSigning, or by StartLocal for a sandboxed run.
+	commitSigning    *LocalCommitSigning
+	commitSigningErr error
 }
 
 func newDirectRuntime(stores db.Stores, info ConversationInfo) *directRuntime {
@@ -734,6 +748,7 @@ func (r *directRuntime) branchPushAction(ctx context.Context, a domain.Artifact)
 	act := branchPushActionInfo(a, r.info, r.githubCredential(ctx, a))
 	if act != nil {
 		act.Scope = a.Scope
+		act.DetailJSON = withPushSigner(act.DetailJSON, pushSigner(ctx, r.stores, r.info.OrgID, domain.ParseBranchArtifactSHA(a.DetailsJSON)))
 	}
 	return act
 }

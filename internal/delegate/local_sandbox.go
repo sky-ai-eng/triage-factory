@@ -61,7 +61,7 @@ func (c *localSandboxChannel) runSpec() *localsandbox.Spec {
 // A failure here fails the run. The boot probe already established that
 // bubblewrap works on this host, so there is nothing left that would make a
 // silent unsandboxed fallback the honest answer.
-func (s *Spawner) startLocalSandbox(conversationID, rootKey, cwd string, ghChannel *agentproc.GHChannelParams, info agenthost.ConversationInfo) (*localSandboxChannel, error) {
+func (s *Spawner) startLocalSandbox(conversationID, rootKey, cwd string, ghChannel *agentproc.GHChannelParams, info agenthost.ConversationInfo, signing *localCommitSigning) (*localSandboxChannel, error) {
 	if !runmode.LocalSandboxEnabled() {
 		return nil, nil
 	}
@@ -79,7 +79,7 @@ func (s *Spawner) startLocalSandbox(conversationID, rootKey, cwd string, ghChann
 	if !ok {
 		return nil, errors.New("local sandbox: stores are unwired, so the run's exec verbs would have no daemon to dial")
 	}
-	daemon, err := agenthost.StartLocal(stores, info, paths.AgentHostSocketPath(conversationID))
+	daemon, err := agenthost.StartLocal(stores, info, paths.AgentHostSocketPath(conversationID), signing.daemon())
 	if err != nil {
 		return nil, fmt.Errorf("local sandbox: %w", err)
 	}
@@ -90,6 +90,10 @@ func (s *Spawner) startLocalSandbox(conversationID, rootKey, cwd string, ghChann
 		RunRoot:          worktree.RunRoot(rootKey),
 		ClaudeProjectDir: claudeProjectDir,
 		AgentHostSocket:  daemon.SocketPath(),
+		// The run's allowed-signers file, which its git config names: read-only,
+		// so the run cannot add a key to make its own check pass. Empty for a
+		// run that does not sign.
+		AllowedSignersFile: signing.allowedSignersPath(),
 	}
 	if ghChannel != nil {
 		// The conversation's own gh config + trust file. Only this

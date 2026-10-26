@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/convident"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/gh"
+	gitexec "github.com/sky-ai-eng/triage-factory/cmd/exec/git"
 	jiraexec "github.com/sky-ai-eng/triage-factory/cmd/exec/jira"
 	linearexec "github.com/sky-ai-eng/triage-factory/cmd/exec/linear"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/memory"
@@ -196,6 +197,12 @@ func dispatch(args []string, buildAgentHost func() agenthost.Client) {
 		host := buildAgentHost()
 		defer func() { _ = host.Close() }()
 		memory.Handle(context.Background(), host, cmdArgs)
+
+	case "git":
+		// Git's commit signing program, not an agent verb: the run's git
+		// config points gpg.ssh.program at the ssh-sign shim, which calls
+		// this. Absent from the help index for that reason.
+		os.Exit(gitexec.Handle(context.Background(), buildAgentHost, cmdArgs, os.Stderr))
 
 	default:
 		// EE-registered verbs (agenthost.RegisterExtension's exec-side

@@ -156,8 +156,9 @@ type RunOptions struct {
 
 	// GitConfigPairs are additional process-scoped git settings for the direct
 	// path. Local delegated runs use them to route GitHub remotes through their
-	// per-engagement credential proxy. A jailed run carries its equivalent in
-	// the sidecar's proxy env (cell.LaunchSpec.ProxyEnv).
+	// per-engagement credential proxy, and, when their org's signer is active,
+	// to sign every commit (githooks.SigningConfigPairs). A jailed run carries
+	// its equivalent in the sidecar's proxy env (cell.LaunchSpec.ProxyEnv).
 	GitConfigPairs [][2]string
 
 	// LocalSandbox, when non-nil, wraps the direct (non-gVisor) spawn in a

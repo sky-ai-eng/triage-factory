@@ -135,6 +135,12 @@ type CommitSignatureStore interface {
 	// per-claim budget.
 	ClaimSignaturesSystem(ctx context.Context, orgID, claimID string) (int, error)
 
+	// ForCommitSystem returns the signature that produced the commit
+	// commitSHA, the newest when more than one did (signing the same commit
+	// twice makes the same commit), or (nil, nil) when none of the org's did.
+	// A push's audit row reads it for the account that signed the pushed tip.
+	ForCommitSystem(ctx context.Context, orgID, commitSHA string) (*domain.CommitSignature, error)
+
 	// NewestFailedVerificationSystem returns the most recently signed of the
 	// org's signatures made as its own signer on the account (host, userID)
 	// whose pushed commit GitHub last reported as not verified, or (nil, nil)

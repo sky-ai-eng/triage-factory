@@ -23,6 +23,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/artifactteardown"
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -378,6 +379,11 @@ type Spawner struct {
 	// in multi mode only, where signing happens on the control plane. With
 	// none, a run's sign_digest is refused.
 	commitSignRequester agenthost.CommitSignRequester
+
+	// signingBudgets are the commit signing limits a local run's signatures
+	// count against, read at boot by the app (SetCommitSigningBudgets). The
+	// zero value, a spawner nothing wired, signs under the defaults.
+	signingBudgets commitsigner.Budgets
 
 	// procs holds the live agent process handle for each run currently
 	// executing as a LiveRun, keyed by run id. It survives across HTTP
@@ -766,6 +772,29 @@ func (s *Spawner) SetCommitSignRequester(r agenthost.CommitSignRequester) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.commitSignRequester = r
+}
+
+// SetCommitSigningBudgets sets the limits a local run's signatures count
+// against. Post-construction, like SetCommitSignRequester; the app sets it in
+// local mode, where the run's daemon signs in this process.
+func (s *Spawner) SetCommitSigningBudgets(b commitsigner.Budgets) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.signingBudgets = b
+}
+
+// commitSigningBudgets is the limits a local run signs under: the ones the app
+// set, or the defaults when nothing did.
+func (s *Spawner) commitSigningBudgets() commitsigner.Budgets {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.signingBudgets == (commitsigner.Budgets{}) {
+		return commitsigner.Budgets{
+			PerOrgMinute: commitsigner.DefaultMaxSignaturesPerOrgMinute,
+			PerClaim:     commitsigner.DefaultMaxSignaturesPerClaim,
+		}
+	}
+	return s.signingBudgets
 }
 
 // kickMemoryOwed rings the doorbell for a conversation this spawner just

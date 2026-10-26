@@ -36,7 +36,7 @@ func TestStartWithServer_KeepsTheJailSocketPath(t *testing.T) {
 func TestStartLocal_ServesOnTheGivenPathOwnerOnly(t *testing.T) {
 	sockPath := filepath.Join(t.TempDir(), "agenthost", "conv-local.sock")
 
-	hd, err := StartLocal(db.Stores{}, ConversationInfo{ConversationID: "conv-local", OrgID: "org-1"}, sockPath)
+	hd, err := StartLocal(db.Stores{}, ConversationInfo{ConversationID: "conv-local", OrgID: "org-1"}, sockPath, nil)
 	if err != nil {
 		t.Fatalf("StartLocal: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestStartLocal_TightensAnExistingSocketRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	hd, err := StartLocal(db.Stores{}, ConversationInfo{ConversationID: "conv"}, filepath.Join(dir, "conv.sock"))
+	hd, err := StartLocal(db.Stores{}, ConversationInfo{ConversationID: "conv"}, filepath.Join(dir, "conv.sock"), nil)
 	if err != nil {
 		t.Fatalf("StartLocal: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestStartLocal_TightensAnExistingSocketRoot(t *testing.T) {
 // engagement's dial land on a dead inode instead of failing to find one.
 func TestStartLocal_RemovesTheSocketOnClose(t *testing.T) {
 	sockPath := filepath.Join(t.TempDir(), "conv.sock")
-	hd, err := StartLocal(db.Stores{}, ConversationInfo{ConversationID: "conv"}, sockPath)
+	hd, err := StartLocal(db.Stores{}, ConversationInfo{ConversationID: "conv"}, sockPath, nil)
 	if err != nil {
 		t.Fatalf("StartLocal: %v", err)
 	}
@@ -132,10 +132,10 @@ func TestStartLocal_RemovesTheSocketOnClose(t *testing.T) {
 // come up without the two things it cannot do its job without, rather than
 // serving a socket nobody can attribute.
 func TestStartLocal_RejectsAnIncompleteRequest(t *testing.T) {
-	if _, err := StartLocal(db.Stores{}, ConversationInfo{}, filepath.Join(t.TempDir(), "x.sock")); err == nil {
+	if _, err := StartLocal(db.Stores{}, ConversationInfo{}, filepath.Join(t.TempDir(), "x.sock"), nil); err == nil {
 		t.Error("StartLocal accepted a ConversationInfo with no conversation id")
 	}
-	if _, err := StartLocal(db.Stores{}, ConversationInfo{ConversationID: "c"}, ""); err == nil {
+	if _, err := StartLocal(db.Stores{}, ConversationInfo{ConversationID: "c"}, "", nil); err == nil {
 		t.Error("StartLocal accepted an empty socket path")
 	} else if !strings.Contains(err.Error(), "socket path") {
 		t.Errorf("error %q does not name the missing socket path", err)
@@ -166,7 +166,7 @@ func TestStartLocal_AnswersForTheAgentsOwnNamespace(t *testing.T) {
 	}
 	stubWorkspaceCreates(t, &createRecorder{path: checkout})
 
-	hd, err := StartLocal(stores, workspaceInfo("conv-local-ws"), filepath.Join(t.TempDir(), "agenthost", "conv-local-ws.sock"))
+	hd, err := StartLocal(stores, workspaceInfo("conv-local-ws"), filepath.Join(t.TempDir(), "agenthost", "conv-local-ws.sock"), nil)
 	if err != nil {
 		t.Fatalf("StartLocal: %v", err)
 	}

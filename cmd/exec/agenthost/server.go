@@ -430,6 +430,13 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 	case methodLookupConversation:
 		return lookupConversationResult{Info: s.info}, nil
 
+	case methodSignCommit:
+		var a signCommitArgs
+		if err := dec(&a); err != nil {
+			return nil, fmt.Errorf("agenthost: decode SignCommit args: %w", err)
+		}
+		return client.SignCommit(ctx, a.Payload)
+
 	case methodSourceManifest:
 		m, err := client.SourceManifest(ctx)
 		if err != nil {

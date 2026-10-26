@@ -96,6 +96,18 @@ var prePushHook []byte
 //go:embed prepare-commit-msg
 var prepareCommitMsgHook []byte
 
+// SignProgram is the file Ensure writes into the hooks dir for git to sign
+// commits with: a run that signs has gpg.ssh.program pointed at it
+// (SigningConfigPairs). It is not a hook, and git runs it only when named.
+const SignProgram = "ssh-sign"
+
+// signProgram is SignProgram's embedded content. It sends git's signing call
+// to `exec git sign` and every other call, the ones git makes to check a
+// signature, to ssh-keygen.
+//
+//go:embed ssh-sign
+var signProgram []byte
+
 // HostDir returns the host-side TF-controlled hooks directory. In local
 // mode this is what the agent's core.hooksPath points at directly; in
 // multi mode it is the bind-mount source for SandboxDir.
@@ -108,10 +120,11 @@ func HostDir() string {
 // startup. Called before any run can spawn so core.hooksPath always
 // resolves to a real directory with the current hook set.
 //
-// The managed hooks (A·3, TFAC-460 pre-push; TFAC-452 prepare-commit-msg) are
-// rewritten every call so an upgraded binary refreshes a stale on-disk copy —
-// the hooks dir lives under the state root and persists across upgrades. They
-// are written 0755 because git skips non-executable hooks.
+// The managed hooks (A·3, TFAC-460 pre-push; TFAC-452 prepare-commit-msg) and
+// the signing program (SignProgram) are rewritten every call so an upgraded
+// binary refreshes a stale on-disk copy — the hooks dir lives under the state
+// root and persists across upgrades. They are written 0755 because git skips
+// non-executable hooks and cannot run a non-executable gpg.ssh.program.
 func Ensure() error {
 	dir := HostDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -128,6 +141,9 @@ func Ensure() error {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "prepare-commit-msg"), prepareCommitMsgHook, 0o755); err != nil {
 		return fmt.Errorf("githooks: write prepare-commit-msg hook: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, SignProgram), signProgram, 0o755); err != nil {
+		return fmt.Errorf("githooks: write %s: %w", SignProgram, err)
 	}
 	return nil
 }

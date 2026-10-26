@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"strconv"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -57,6 +58,7 @@ const (
 	keySigner         = attribute.Key("signer")
 	keySigningMode    = attribute.Key("mode")
 	keyBudget         = attribute.Key("budget")
+	keySigned         = attribute.Key("signed")
 )
 
 // Opaque row identifiers, the backbone of the set. Each is the id and
@@ -207,3 +209,6 @@ func AgentDuration(ms int64) attribute.KeyValue   { return keyAgentDuration.Int6
 func Signer(kind string) attribute.KeyValue       { return keySigner.String(kind) }
 func SigningMode(where string) attribute.KeyValue { return keySigningMode.String(where) }
 func Budget(name string) attribute.KeyValue       { return keyBudget.String(name) }
+
+// Signed is whether a pushed commit was signed, "true" or "false".
+func Signed(signed bool) attribute.KeyValue { return keySigned.String(strconv.FormatBool(signed)) }

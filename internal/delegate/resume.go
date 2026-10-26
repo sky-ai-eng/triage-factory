@@ -421,6 +421,19 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		extraEnv = append(extraEnv, opts.localGit.sshBridgeEnv()...)
 	}
 
+	// A cold resume starts a new process, so a run whose org's signer is
+	// active signs here as runAgent's does, with the identity resolved now.
+	// Only a run that signs takes the identity: git can sign only a commit
+	// whose committer is the signer.
+	commitIdentity, signer := s.resolveCommitIdentity(ctx, orgID, triggerType, creatorUserID)
+	commitSigning := s.prepareLocalCommitSigning(ctx, orgID, conversationID, opts.claimID, signer)
+	defer commitSigning.Close()
+	extraEnv = append(extraEnv, commitSigning.env()...)
+	var gitUserName, gitUserEmail string
+	if commitSigning != nil {
+		gitUserName, gitUserEmail = commitIdentity.Name, commitIdentity.Email
+	}
+
 	// A resume gets the same isolation the initial invocation had — the
 	// namespace is per-invocation, like the gh channel above, so a cold resume
 	// builds its own plan and its own agenthost daemon over the same run tree.
@@ -431,7 +444,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		TeamID:           opts.TeamID,
 		IsEventTriggered: triggerType == domain.TriggerTypeEvent,
 		RunURL:           runURL,
-	})
+	}, commitSigning)
 	if err != nil {
 		return nil, err
 	}
@@ -467,7 +480,9 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		ClaimID:              opts.claimID,
 		RecordSandboxActuals: s.recordSandboxActuals,
 		GHChannel:            ghChannel,
-		GitConfigPairs:       opts.localGit.configPairs(ghChannel),
+		GitUserName:          gitUserName,
+		GitUserEmail:         gitUserEmail,
+		GitConfigPairs:       append(opts.localGit.configPairs(ghChannel), commitSigning.configPairs()...),
 		LocalSandbox:         localSbx.runSpec(),
 		// Re-mount the step skill this run's original claim staged, when it's
 		// still on disk — a resume continues the same step, so it should see the

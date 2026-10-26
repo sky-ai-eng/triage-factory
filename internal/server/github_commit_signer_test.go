@@ -7,6 +7,8 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -748,4 +750,31 @@ func TestCommitSigner_AppDisconnectKeepsTheHost(t *testing.T) {
 		t.Errorf("host after the App's disconnect = %q, want it kept for the signer", host)
 	}
 	mustSigner(t, s, http.MethodGet, "", nil, http.StatusOK)
+}
+
+// A local run signs with the host's git, which signs with an SSH key only from
+// 2.34. With an older one, an org whose signer is active commits as the
+// signer, unsigned, and commit-identity says why.
+func TestCommitIdentity_LocalGitTooOldToSign(t *testing.T) {
+	s, gh := newSignerServer(t, "https://github.com")
+	created := mustSigner(t, s, http.MethodPost, "", map[string]any{"login": "octocat"}, http.StatusCreated)
+	gh.addKey(583231, created.PublicKey)
+	mustSigner(t, s, http.MethodPost, "/verify", nil, http.StatusOK)
+
+	if got := commitIdentity(t, s); got.Signing != "org" || got.UnsignedReason != nil || got.GitVersion != nil {
+		t.Errorf("identity with a git that signs = %+v, want org with no unsigned reason", got)
+	}
+
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\necho 'git version 2.33.8'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	got := commitIdentity(t, s)
+	if got.Signing != "none" || got.Identity == nil || got.Identity.Name != "The Octocat" {
+		t.Errorf("identity with git 2.33 = %+v, want the signer, unsigned", got)
+	}
+	if got.UnsignedReason == nil || *got.UnsignedReason != "git_too_old" || got.GitVersion == nil || *got.GitVersion != "2.33.8" {
+		t.Errorf("unsigned reason = %v, git version = %v; want git_too_old and 2.33.8", got.UnsignedReason, got.GitVersion)
+	}
 }

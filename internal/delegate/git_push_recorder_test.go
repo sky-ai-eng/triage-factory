@@ -6,13 +6,18 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	_ "modernc.org/sqlite"
 )
 
@@ -22,6 +27,14 @@ import (
 // mirroring the pre-push hook's own test fixture so the two writers are
 // exercised against the same store.
 func newRecorderStores(t *testing.T) (db.Stores, string) {
+	t.Helper()
+	stores, _, conversationID := newRecorderStoresConn(t)
+	return stores, conversationID
+}
+
+// newRecorderStoresConn is newRecorderStores with the connection, for a test
+// that seeds rows no store writes.
+func newRecorderStoresConn(t *testing.T) (db.Stores, *sql.DB, string) {
 	t.Helper()
 	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
@@ -42,7 +55,7 @@ func newRecorderStores(t *testing.T) (db.Stores, string) {
 	}
 	stores := sqlitestore.New(conn)
 	registerOctoRepo(t, stores)
-	return stores, "run-1"
+	return stores, conn, "run-1"
 }
 
 // registerOctoRepo gives the registry a row for octo/repo on the org's GitHub
@@ -284,6 +297,8 @@ func TestGitPushRecorder_RejectedRefInsideA200(t *testing.T) {
 		"http_status":    float64(200),
 		"reason":         "push declined due to repository rule violations",
 		"remote_message": "error: GH013: Repository rule violations found for refs/heads/feature/x.",
+		// Beside a ruleset's refusal, an unsigned tip names the cause.
+		"signer": "unsigned",
 	}
 	if !reflect.DeepEqual(d, want) {
 		t.Errorf("detail = %v, want %v", d, want)
@@ -308,7 +323,96 @@ func TestGitPushRecorder_FailureDetailOmitsEmpty(t *testing.T) {
 	if len(acts) != 1 {
 		t.Fatalf("got %d branch_push_failed actions, want 1", len(acts))
 	}
-	if want := `{"sha":"abc123","new":false,"http_status":403}`; acts[0].DetailJSON != want {
+	if want := `{"sha":"abc123","new":false,"http_status":403,"signer":"unsigned"}`; acts[0].DetailJSON != want {
 		t.Errorf("detail_json = %s, want %s", acts[0].DetailJSON, want)
+	}
+}
+
+// A push's audit row names the account that signed its tip, from the
+// signature whose commit id is the tip, and "unsigned" when none is; landed
+// and refused alike. A push from an org whose signer signs is counted by
+// whether its tip was signed.
+func TestGitPushRecorder_NamesTheTipsSigner(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	stores, conn, conversationID := newRecorderStoresConn(t)
+	ctx := context.Background()
+	const signedTip, unsignedTip = "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222"
+
+	if _, err := stores.OrgCommitSigners.Create(ctx, domain.OrgCommitSigner{
+		OrgID: runmode.LocalDefaultOrgID, Host: "https://github.com", GitHubUserID: 583231,
+		Login: "octocat", PublicKey: "ssh-ed25519 AAAAkey",
+	}); err != nil {
+		t.Fatalf("Create signer: %v", err)
+	}
+	if _, err := stores.OrgCommitSigners.Activate(ctx, runmode.LocalDefaultOrgID, "ssh-ed25519 AAAAkey"); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	claimID := dbtest.SeedActiveClaim(t, conn, conversationID, "executor-1", 1)
+	at := time.Now().UTC()
+	if _, err := stores.CommitSignatures.InsertSystem(ctx, domain.CommitSignature{
+		OrgID: runmode.LocalDefaultOrgID, ConversationID: conversationID, ClaimID: claimID, BootEpoch: 1,
+		Signer: domain.CommitSigningOrg, SignerHost: "https://github.com", SignerUserID: 583231,
+		PublicKey: "ssh-ed25519 AAAAkey", Digest: "ab", State: domain.CommitSignatureSigned,
+		Signature: "sig", SignedAt: &at, CommitSHA: signedTip,
+	}); err != nil {
+		t.Fatalf("InsertSystem: %v", err)
+	}
+
+	reader := sdkmetric.NewManualReader()
+	commitsigner.SetMeterProviderForTest(t, sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+
+	info := recorderInfo(conversationID)
+	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/signed", NewSHA: signedTip, Created: true, Status: 200})
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/unsigned", NewSHA: unsignedTip, Created: true, Status: 200})
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/refused", NewSHA: unsignedTip, Created: true, Status: 403})
+
+	signers := map[string]string{}
+	for _, action := range []string{domain.ActionBranchPushed, domain.ActionBranchPushFailed} {
+		acts, _, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: action})
+		if err != nil {
+			t.Fatalf("ListByOrgSystem: %v", err)
+		}
+		for _, a := range acts {
+			var d struct {
+				SHA    string `json:"sha"`
+				Signer string `json:"signer"`
+			}
+			if err := json.Unmarshal([]byte(a.DetailJSON), &d); err != nil {
+				t.Fatalf("detail_json %q: %v", a.DetailJSON, err)
+			}
+			if d.SHA == "" {
+				t.Errorf("%s detail lost its sha: %s", action, a.DetailJSON)
+			}
+			signers[action+" "+a.ExternalID] = d.Signer
+		}
+	}
+	want := map[string]string{
+		"branch_pushed refs/heads/signed":       "octocat",
+		"branch_pushed refs/heads/unsigned":     "unsigned",
+		"branch_push_failed refs/heads/refused": "unsigned",
+	}
+	if !reflect.DeepEqual(signers, want) {
+		t.Errorf("signers = %v, want %v", signers, want)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	counted := map[string]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "commit_signing.pushes" {
+				continue
+			}
+			for _, dp := range m.Data.(metricdata.Sum[int64]).DataPoints {
+				signed, _ := dp.Attributes.Value("signed")
+				counted[signed.AsString()] += dp.Value
+			}
+		}
+	}
+	if counted["true"] != 1 || counted["false"] != 2 {
+		t.Errorf("tf_commit_signing_pushes_total = %v, want 1 signed and 2 unsigned", counted)
 	}
 }
