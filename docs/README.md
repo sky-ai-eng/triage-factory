@@ -1,6 +1,7 @@
 # Triage Factory documentation
 
-Installing, deploying and operating Triage Factory, and working on its code.
+Official documentation for Triage Factory. Covers development, deployment, and
+operation of the product.
 
 ## Run it on your machine (local mode)
 
