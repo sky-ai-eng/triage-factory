@@ -1,22 +1,18 @@
 # Local mode
 
 Local mode (`TF_MODE=local`, the default) is Triage Factory as a single binary on
-your own machine: SQLite for state at `~/.triagefactory/`, the OS keychain (or an
-encrypted file when there is no keychain) for credentials, and **no Postgres, GoTrue, or
-Docker**. It's the single-user shape — one operator, one machine. For the
-multi-tenant deployment, see [self-hosting](../self-hosting/).
+your own machine: SQLite for state under `~/.triagefactory/`, the OS keychain
+(or an encrypted file when there is no keychain) for credentials, and no
+Postgres, GoTrue or Docker. For a deployment that serves a whole organization,
+see [self-hosting](../self-hosting/).
 
-To install the binary, start with [INSTALLATION.md](install.md).
+Everything you connect and configure after install (GitHub, Jira, Linear,
+Claude, repositories, teams) is set up in the app.
 
-## Guides
-
-- [Running](running.md) — CLI flags, `install` / `uninstall`, the exec subcommands
-- [Configuration](configuration.md) — settings storage, poll intervals, Jira and Linear setup, credentials
-- [Secret storage](secret-storage.md) — keychain vs. encrypted-file backend, `TF_SECRET_ENCRYPTION_KEY`
-- [Running on a server](server.md) — a host with no keychain or browser: `TF_SECRET_ENCRYPTION_KEY`, reaching the UI, configuring there
-- [Environment tuning](tuning.md) — run concurrency (`TF_MAX_CONCURRENT_CLAIMS`), logging, tracing (`TF_TRACES_ENDPOINT` + a one-container Tempo), `TF_CLAUDE_BINARY`, agent-engine JIT
-
-## Product behavior (both modes)
-
-- [Tracked events](../../../specs/tracked-events.md) — the GitHub/Jira/Linear event taxonomy
-- [Commit signing](../workspace/commit-signing.md) — creating the GitHub account agents' commits are signed as, and registering it
+- [Install](install.md): Homebrew, a release tarball, or a source build
+- [Running](running.md): flags, network exposure, `install` / `uninstall`
+- [Configuration](configuration.md): where state lives, credentials, the Linux agent sandbox, the clone protocol
+- [Secret storage](secret-storage.md): keychain or encrypted file, `TF_SECRET_ENCRYPTION_KEY`
+- [Running on a server](server.md): a host with no keychain or browser
+- [Tuning](tuning.md): run concurrency, disk, logging, tracing, the Claude binary
+- [Commit signing](../workspace/commit-signing.md): creating the GitHub account agents' commits are signed as

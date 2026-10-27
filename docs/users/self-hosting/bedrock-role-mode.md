@@ -1,35 +1,45 @@
-# Bedrock role mode: short-lived LLM credentials
+# Bedrock role mode
 
-Most Bedrock deployments hand Triage Factory a long-lived credential — a bearer token or an AWS access-key pair — that TF stores (encrypted, per org) and replays on every model call. **Role mode** is the alternative for teams who don't want a standing Bedrock secret living in TF at all: the org configures only a customer **IAM Role ARN** and a TF-generated **External ID**, stores no secret, and TF mints a fresh, short-lived credential per unit of work by assuming that role. Bearer-token Bedrock, access-key Bedrock, and the Anthropic-key path are unchanged passthrough — TF stores and replays those credentials exactly as before, and nothing in this page applies to them.
+With role mode, an org connects Amazon Bedrock by naming an IAM role in its own
+AWS account instead of storing a Bedrock key. Triage Factory stores only the
+role ARN and an External ID it generates, and for each run or model call it
+assumes the role to get a credential that lasts at most an hour and can call
+only that org's model. The calls show up in the org's CloudTrail under the
+run's id. Bearer-token, access-key and Anthropic-key connections are
+unaffected by anything on this page.
 
-## Prerequisite — the control service needs an ambient AWS identity
+## Prerequisite: an AWS identity for the control service
 
-Minting runs on the control ("brain") process, and it assumes the customer role *as itself* — there is no assume-with-a-customer-static-key path. So the control service must be able to call `sts:AssumeRole` under its own AWS identity, via one of:
+The control service assumes each org's role as itself, so it needs an AWS
+identity that can call `sts:AssumeRole`. Executors need none. Either:
 
-- **An instance role** — an EC2 instance profile, ECS task role, EKS IRSA, or a Fly.io machine role. The best option: nothing AWS-related lands in `.env`.
-- **`AWS_*` environment variables** (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, plus `AWS_REGION`) set on the control service. Treat these as a **deployment secret in the same class as the GoTrue signing material** — they belong in the operator's `.env`, not the keychain, because they are the deployment's own identity, not a per-user integration credential. Executors need no AWS identity of their own; only the control process assumes roles.
+- **an instance role** (EC2 instance profile, ECS task role, EKS IRSA, Fly.io
+  machine role), which keeps AWS credentials out of `.env`; or
+- **`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_REGION`** on the
+  control service. They are a deployment secret, like the rest of `.env`.
 
-## How a mint works
+## What an org does
 
-For each unit of work — a delegated run, and each brain-side model call (scoring, repo profiling) — the control process calls `sts:AssumeRole` on the org's configured role ARN, passing the org's External ID and a `RoleSessionName` of the run id, and attaches an **inline session policy** that scopes the resulting credential to `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` on that org's configured model and nothing else. The credential is short-lived (`TF_LLM_CRED_TTL_SEC`, one hour max) and every call lands in the customer's own CloudTrail attributed to the run (`RoleSessionName = run id`). Because the org stores no secret, there is nothing in TF's database to leak; the worst an exfiltrated session credential buys is minutes of `InvokeModel` on a single model — optionally pinned to your egress (below).
+In its Claude credentials settings, an org admin picks Bedrock with role auth
+and runs the setup. Triage Factory shows the External ID and a trust policy
+naming your control service's identity, which the admin adds to their role.
+Connecting tests a real AssumeRole and says which side is wrong:
 
-## The customer's trust policy — the role-setup endpoint
+- **no ambient AWS identity:** the control service has neither an instance
+  role nor `AWS_*` variables. That's yours to fix.
+- **AssumeRole denied:** the org's role doesn't trust your control identity or
+  doesn't require the External ID. That's the org's trust policy to fix.
 
-The customer's IAM role must trust *your* control identity and require the External ID. `POST /api/bedrock/role-setup` returns the caller ARN your control process actually assumes as, the org's External ID, and a copyable trust-policy JSON snippet the customer pastes into their role — so they don't hand-assemble the `Principal` + `sts:ExternalId` condition themselves.
+## Settings
 
-## The connect probe distinguishes the two failure classes
+All optional, read by the control service.
 
-`POST /api/bedrock/connect` with `auth_method=role` does a *live* `AssumeRole` and reports which side is misconfigured:
+| Variable | Default | Meaning |
+|---|---|---|
+| `TF_LLM_CRED_TTL_SEC` | `3600` | Lifetime of each credential, in seconds. Minimum `900`, maximum one hour. |
+| `TF_EXECUTOR_EGRESS_CIDRS` | unset | Comma-separated CIDRs of your executors' egress. A credential sent to an executor then works only from those addresses. |
+| `TF_EXECUTOR_VPCE_IDS` | unset | Comma-separated `vpce-…` ids. The PrivateLink equivalent of the CIDR setting. |
 
-- **No ambient identity** — the control service itself has no AWS identity to assume *from*. This is an **operator** problem (missing instance role / `AWS_*`), not the customer's; fix it on the control service.
-- **AssumeRole denied** — the control identity is fine, but the customer's role won't let it in. This is a **trust-policy or External-ID** problem on the customer's side; re-check the role's trust relationship against the role-setup snippet.
-
-## Env knobs
-
-All three are read on the control service and all are optional.
-
-- **`TF_LLM_CRED_TTL_SEC`** — lifetime, in seconds, of each minted STS session credential. Default `3600`; mints are capped at one hour and floored at `900` (15 minutes). Lower it to shrink the window an exfiltrated credential stays valid.
-- **`TF_EXECUTOR_EGRESS_CIDRS`** — comma-separated CIDRs of your executors' egress. When set, an **executor-bound** mint carries a network condition (`aws:SourceIp`) in its session policy, so a credential lifted off an executor is unusable from anywhere but that egress. Unset → no network condition.
-- **`TF_EXECUTOR_VPCE_IDS`** — comma-separated `vpce-…` VPC-endpoint ids, the PrivateLink equivalent of the CIDR knob: an executor-bound mint is pinned to `aws:SourceVpce`. Unset → no network condition.
-
-The network binding applies only to **executor-bound** mints — the credential that travels to a sandbox host. **Brain-bound** mints (the scorer, the repo profiler, and the connect probe, which call Bedrock from the control process itself) carry no network condition, since there is no separate executor egress to pin them to.
+The network restriction applies only to credentials sent to executors. The
+control service's own Bedrock calls (scoring, repo profiling, the connect test)
+are not restricted.

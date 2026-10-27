@@ -1,133 +1,49 @@
-# Running Triage Factory (local mode)
-
-Local mode (`TF_MODE=local`, the default) runs Triage Factory as a single binary
-on your own machine — SQLite for state, the OS keychain for credentials, no
-Postgres, GoTrue, or Docker. This page covers launching the binary and the CLI
-subcommands. To install it first, see [INSTALLATION.md](install.md).
+# Running (local mode)
 
 ## Launching
 
 ```bash
-# Default (port 3000, opens browser)
-triagefactory
-
-# Custom port, no browser
-triagefactory --port 8080 --no-browser
-
-# Bind to all interfaces (default is 127.0.0.1 — loopback only).
-# Only do this on a trusted network: the HTTP API is unauthenticated
-# and the server holds keychain-backed credentials, so a non-loopback
-# bind refuses to start without TF_ALLOW_PUBLIC_LOCAL=true.
-TF_ALLOW_PUBLIC_LOCAL=true triagefactory --host 0.0.0.0
-
-# Top-level help — points humans at the user commands and agents at exec.
-triagefactory --help
+triagefactory                              # port 3000, opens the browser
+triagefactory --port 8080 --no-browser     # another port, no browser
+triagefactory --help                       # one-screen summary of commands
 ```
 
-To reach a server's UI without exposing the API, keep the default loopback
-bind and tunnel to it — see [Running on a server](server.md).
+The server binds `127.0.0.1` by default. Local mode has no authentication:
+every request is treated as the owner, and the server holds your credentials.
+A non-loopback bind (`--host 0.0.0.0`) therefore refuses to start with
+`refusing to start: local mode runs with NO authentication …` unless you also
+set `TF_ALLOW_PUBLIC_LOCAL=true`:
+
+```bash
+TF_ALLOW_PUBLIC_LOCAL=true triagefactory --host 0.0.0.0
+```
+
+Only do that on a network where everyone who can reach the port is you. To
+reach a remote machine's UI without exposing it, keep the loopback bind and
+tunnel to it; see [Running on a server](server.md).
 
 ## CLI subcommands
 
-The binary's subcommands fall into two audiences. Run `triagefactory --help` for
-a one-screen summary.
-
-### User commands
-
-These are meant for you to invoke from a terminal.
-
 ```bash
-# Symlink the binary onto PATH so the `triagefactory` CLI works from
-# any directory. Defaults: /usr/local/bin on macOS, ~/.local/bin on Linux.
-# Override with --dest /full/path/to/triagefactory. Only relevant if you didn't
-# install through homebrew.
+# Symlink the binary onto PATH: /usr/local/bin on macOS, ~/.local/bin on Linux.
+# --dest /full/path/to/triagefactory picks another location. Not needed with Homebrew.
 triagefactory install
 
-# Removes all local data. Run this before running `brew uninstall triagefactory`
+# Delete all local data. Run this before `brew uninstall triagefactory`.
 triagefactory uninstall
 ```
 
-### Agent commands
+`triagefactory exec …` is the set of commands delegated agents run from their
+worktree. You don't need to call them; `triagefactory exec --help` lists them.
 
-These are invoked by delegated Claude Code agents inside their worktree, not by
-you. Run `triagefactory exec --help` for the full subcommand list.
+## The agents' `gh`
 
-## The `gh` channel
+Agents use the GitHub CLI through a per-run credential proxy, never your own
+installation. Triage Factory downloads one pinned `gh` release on the first run
+that needs it, checks its SHA256, and keeps it at `~/.triagefactory/bin/gh`.
+Agents get their own `gh` config, so your `~/.config/gh` and the account it is
+logged in as are never read.
 
-A delegated agent talks to GitHub through the real `gh` CLI, behind a per-run
-credential proxy. Local mode runs the same channel multi-mode deployments do —
-the difference is only how the pieces get on the machine.
-
-### The binary
-
-Triage Factory pins one `gh` release (`internal/ghpin`) and fetches it on the
-first run that needs it, into:
-
-```
-~/.triagefactory/bin/gh          # the binary
-~/.triagefactory/bin/gh.pin      # what was installed, and from where
-```
-
-The download is checked against the pinned SHA256 before anything is installed,
-and the binary is re-verified on every run — a stale pin or a rewritten file is
-re-fetched. `~/.triagefactory/bin` leads the agent subprocess's `PATH`, so `gh`
-resolves there.
-
-**Your own `gh` is never used.** It may be any version, and — the real problem —
-it is logged in as *you*: an agent invoking it would act under your full personal
-GitHub scope, outside the per-run credential channel entirely. The agent also
-gets its own `GH_CONFIG_DIR`, so `~/.config/gh` (including the account and token
-in your `hosts.yml`) is never read.
-
-### The credential
-
-Each run gets a loopback proxy on `127.0.0.1`. The agent's `gh` holds only a
-random per-run placeholder; the proxy strips it and attaches the org's real
-GitHub credential on the way upstream, reading it fresh per request so a
-credential you rotate mid-run is picked up. The real token never enters the
-agent's environment, arguments, or any file it can read. A repo the credential
-can't reach returns GitHub's own 404, unchanged.
-
-The agent gets an enumerated set of subcommands — `gh pr` (view / list / diff /
-checkout / create / comment / ready / close), `gh issue`, `gh run`, `gh repo
-view`, `gh search`. Not the whole binary: `gh api` would let a prompt-injected
-agent POST anything anywhere with the org's credential attached, `gh auth` /
-`config` / `alias` / `extension` are credential and configuration surfaces, and
-`gh pr merge` has no local equivalent of the merge-intent question. Those are
-refused, and the refusal is visible to the agent as an ordinary permission
-denial.
-
-### Writes the channel refuses
-
-Two families are refused at the proxy itself, before the request reaches GitHub:
-submitting a review, and creating a repository. The refusal is on the credential
-rather than on the command, so it covers every spelling — `gh pr review`, the
-same call written as `gh api`, an inline GraphQL mutation, a raw `curl` from a
-script the agent wrote. There is no per-run authorization and no flag that opts
-out.
-
-A refused request gets a 403 whose JSON body names what was refused and what to
-do instead, and leaves a `gh_write_denied` row in the run's actions. Nothing
-reaches GitHub, so nothing needs undoing.
-
-The reasoning differs per family. A review posted this way cannot anchor to a
-line, carry a severity badge, be revised as a draft, or go through approval —
-the `triagefactory exec gh pr` review verbs do all four, so they strictly
-dominate it. And a repository created mid-run sits outside the tracked set that
-scopes polling, task routing, and the run's own credential.
-
-**Merging is not refused here.** Some missions are legitimately for landing
-work, and there is no better command to redirect to, so the control is a
-question rather than a refusal: the delegated runtime interrupts the first merge
-attempt and asks the agent to quote the line of its mission that authorizes one.
-A model that re-issues proceeds. That check only sees shell commands on the
-native runtime — a merge through a script, or from a run on the SDK runtime,
-meets nothing — which is an accepted limit, not an oversight.
-
-### When the fetch fails
-
-Nothing breaks. An unreachable release, an unsupported platform, or a checksum
-mismatch is logged, the run starts without the gh channel, and the agent works
-through the scoped `triagefactory exec gh` verbs exactly as it does today. `gh`
-is also left out of the agent's allowed commands entirely in that case — which
-is what keeps it from falling through to your own installation.
+If the download fails (no network, an unsupported platform, a checksum
+mismatch), the failure is logged and runs continue without `gh`, using
+Triage Factory's own GitHub commands instead.
