@@ -91,26 +91,6 @@ It's a DB-backed live view (10-second poll, no Prometheus dependency) over:
 - **run timings** — queue/exec durations from the `conversations` table; and
 - **LLM spend** — from `llm_spend`, over a 24H / 7D window.
 
-## Deployment commit signer
-
-The deployment commit signer ([setup](install.md#86-optional-configure-the-deployment-commit-signer))
-has three operator routes. They are **not part of the console and not
-licensed**: commit signing is core, so they need only the operator grant above,
-and Verify is the only way out of a signer a pushed commit broke. They have no
-page in the UI; from a shell on a control container, `triagefactory
-commit-signer status` and `triagefactory commit-signer verify` make the same
-read and Verify. As with the console, a non-operator gets `404` and an API token
-gets `403`; call them with a signed-in session. A control pod with no deployment signer
-configured answers `404`. Each answers for the signer the pod that serves it is
-configured with, so every control pod should carry the same
-`TF_GITHUB_COMMIT_SIGNER_*` settings.
-
-| Route | Does |
-| --- | --- |
-| `GET /api/fleet/commit-signer` | The signer and its health: the account it signs as (`github_user_id` is null until a check has read the account the configured login names, and until then no workspace commits as it), the committer address its commits carry, its public key, and `status` (`pending`, `active`, `broken`) with `status_reason` and `checked_at`. |
-| `POST /api/fleet/commit-signer/verify` | Checks the signer now and, when it passes, makes it `active`: its key is among the account's signing keys and, for a signer a pushed commit broke, that commit verifies now. `409 KEY_NOT_FOUND` (the key is not on the account, or the login names no user), `409 COMMIT_UNVERIFIED` (with GitHub's reason and what to fix on the account), `422 SSH_SIGNING_UNSUPPORTED`, `502 UPSTREAM_UNAVAILABLE`. |
-| `GET /api/fleet/commit-signer/usage?since=&until=` | The signatures made as the deployment signer in the window, every org's: `total`, `by_hour` and `by_org` (hours and orgs with none left out). The window parses like every usage node: RFC3339 or `YYYY-MM-DD`, both absent is the current month to now, one absent leaves that side open. The signer has no budget of its own; each org's signatures count against that org's. |
-
 ## Troubleshooting
 
 - **Licensed `fleet` but no Fleet tab.** You're almost certainly not an operator

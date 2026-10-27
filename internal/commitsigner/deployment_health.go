@@ -39,10 +39,10 @@ const DeploymentWatchInterval = 30 * time.Second
 // The account reads carry no credential: an account and its signing keys are
 // public on GitHub, and the deployment signer belongs to no org whose
 // credential the check could borrow. Verify, an operator's action
-// (POST /api/fleet/commit-signer/verify), makes the same check on demand and, for a signer a pushed
-// commit broke, re-reads that commit with its org's credential. The post-push
-// check itself runs per org on the brain (HealthChecker), because each pushed
-// commit is in an org's repository.
+// (`triagefactory commit-signer verify`), makes the same check on demand and,
+// for a signer a pushed commit broke, re-reads that commit with its org's
+// credential. The post-push check itself runs per org on the brain
+// (HealthChecker), because each pushed commit is in an org's repository.
 type DeploymentHealth struct {
 	Signer *DeploymentSigner
 	Stores db.Stores
@@ -141,18 +141,6 @@ func (d *DeploymentHealth) Tick(ctx context.Context) {
 		return
 	}
 	d.checkKey(ctx, row)
-}
-
-// Current is the signer's health as this pod last read it, nil before its
-// first read.
-func (d *DeploymentHealth) Current() *domain.DeploymentCommitSigner {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.observed == nil {
-		return nil
-	}
-	row := *d.observed
-	return &row
 }
 
 // observe records row as this pod's view of the signer and logs a move of its
@@ -256,28 +244,11 @@ func (d *DeploymentHealth) checkKey(ctx context.Context, row domain.DeploymentCo
 	}
 }
 
-// VerifyFault is a Verify that did not pass: Kind says which check failed and
-// Message what to do about it, for the operator.
+// VerifyFault is a Verify that did not pass: Message says which check failed
+// and what to do about it, for the operator.
 type VerifyFault struct {
-	Kind    VerifyFaultKind
 	Message string
 }
-
-// VerifyFaultKind is the answer class Verify's route maps a VerifyFault to.
-type VerifyFaultKind string
-
-const (
-	// FaultKeyNotFound: the account is not one GitHub has, not a user, or
-	// does not list the key.
-	FaultKeyNotFound VerifyFaultKind = "key_not_found"
-	// FaultSSHSigningUnsupported: the GitHub does not serve SSH signing keys.
-	FaultSSHSigningUnsupported VerifyFaultKind = "ssh_signing_unsupported"
-	// FaultCommitUnverified: the pushed commit that broke the signer still
-	// fails GitHub's check for the same signer.
-	FaultCommitUnverified VerifyFaultKind = "commit_unverified"
-	// FaultUpstream: GitHub could not be read.
-	FaultUpstream VerifyFaultKind = "upstream"
-)
 
 // Verify checks the signer against GitHub now and, when it passes, makes it
 // active: its key is among the account's signing keys and, for a signer a
@@ -325,25 +296,20 @@ func (d *DeploymentHealth) check(ctx context.Context, row domain.DeploymentCommi
 	read, err := d.readKey(ctx, row)
 	if err != nil {
 		if ghclient.IsHTTP404(err) {
-			return verifyResult{reason: CheckResultError}, &VerifyFault{Kind: FaultSSHSigningUnsupported,
-				Message: d.Signer.Host + " does not serve SSH signing keys, so it cannot verify a commit TF signs"}, nil
+			return verifyResult{reason: CheckResultError}, &VerifyFault{Message: d.Signer.Host + " does not serve SSH signing keys, so it cannot verify a commit TF signs"}, nil
 		}
-		return verifyResult{reason: CheckResultError}, &VerifyFault{Kind: FaultUpstream,
-			Message: "could not read the deployment signer's account from GitHub: " + err.Error()}, nil
+		return verifyResult{reason: CheckResultError}, &VerifyFault{Message: "could not read the deployment signer's account from GitHub: " + err.Error()}, nil
 	}
 	missing := verifyResult{reason: CheckResultKeyMissing}
 	switch {
 	case !read.found && read.account.Login != "":
-		return missing, &VerifyFault{Kind: FaultKeyNotFound,
-			Message: fmt.Sprintf("%s is a %s account on %s; the deployment signer must be a user account. Set %s to one",
-				read.account.Login, read.account.Type, d.Signer.Host, EnvDeploymentSignerLogin)}, nil
+		return missing, &VerifyFault{Message: fmt.Sprintf("%s is a %s account on %s; the deployment signer must be a user account. Set %s to one",
+			read.account.Login, read.account.Type, d.Signer.Host, EnvDeploymentSignerLogin)}, nil
 	case !read.found:
-		return missing, &VerifyFault{Kind: FaultKeyNotFound,
-			Message: fmt.Sprintf("%s has no account %s; set %s to the account that should sign", d.Signer.Host, row.Login, EnvDeploymentSignerLogin)}, nil
+		return missing, &VerifyFault{Message: fmt.Sprintf("%s has no account %s; set %s to the account that should sign", d.Signer.Host, row.Login, EnvDeploymentSignerLogin)}, nil
 	case !read.keyFound:
-		return missing, &VerifyFault{Kind: FaultKeyNotFound,
-			Message: fmt.Sprintf("the deployment signer's key is not among %s's signing keys on GitHub; add it in Settings → SSH and GPG keys → New SSH key with key type Signing key, then verify again. GitHub's listing can take a minute to show a key just added",
-				read.account.Login)}, nil
+		return missing, &VerifyFault{Message: fmt.Sprintf("the deployment signer's key is not among %s's signing keys on GitHub; add it in Settings → SSH and GPG keys → New SSH key with key type Signing key, then verify again. GitHub's listing can take a minute to show a key just added",
+			read.account.Login)}, nil
 	}
 	accountID, err := strconv.ParseInt(read.account.ID, 10, 64)
 	if err != nil {
@@ -379,27 +345,25 @@ func (d *DeploymentHealth) recheckFailedCommit(ctx context.Context, row domain.D
 	}
 	client, err := ghclient.ClientForOwner(ctx, d.GitHub, failed.OrgID, repo.OwnerExternalID, repo.Owner)
 	if err != nil {
-		return CheckResultError, &VerifyFault{Kind: FaultUpstream, Message: "could not reach " + repo.Slug() + " on GitHub: " + err.Error()}, nil
+		return CheckResultError, &VerifyFault{Message: "could not reach " + repo.Slug() + " on GitHub: " + err.Error()}, nil
 	}
 	verdict, err := client.GetCommitVerification(ctx, repo.Owner, repo.Repo, failed.CommitSHA)
 	if ghclient.IsHTTP404(err) {
 		return domain.CommitVerificationValid, nil, nil
 	}
 	if err != nil {
-		return CheckResultError, &VerifyFault{Kind: FaultUpstream, Message: "could not re-read commit " + failed.CommitSHA + " from GitHub: " + err.Error()}, nil
+		return CheckResultError, &VerifyFault{Message: "could not re-read commit " + failed.CommitSHA + " from GitHub: " + err.Error()}, nil
 	}
 	if VerificationUnavailable(verdict.Reason) {
-		return CheckResultError, &VerifyFault{Kind: FaultUpstream,
-			Message: "GitHub's signature verification did not answer for commit " + failed.CommitSHA + " (" + verdict.Reason + "); verify again shortly"}, nil
+		return CheckResultError, &VerifyFault{Message: "GitHub's signature verification did not answer for commit " + failed.CommitSHA + " (" + verdict.Reason + "); verify again shortly"}, nil
 	}
 	current := row
 	current.GitHubUserID = accountID
 	if !DeploymentFailureHolds(d.Signer, current, *failed, verdict) {
 		return domain.CommitVerificationValid, nil, nil
 	}
-	return verdict.Reason, &VerifyFault{Kind: FaultCommitUnverified,
-		Message: fmt.Sprintf("GitHub still reports commit %s in %s as not verified (%s): %s",
-			failed.CommitSHA, repo.Slug(), verdict.Reason, UnverifiedCommitAdvice(verdict.Reason, verdict.CommitterEmail, login))}, nil
+	return verdict.Reason, &VerifyFault{Message: fmt.Sprintf("GitHub still reports commit %s in %s as not verified (%s): %s",
+		failed.CommitSHA, repo.Slug(), verdict.Reason, UnverifiedCommitAdvice(verdict.Reason, verdict.CommitterEmail, login))}, nil
 }
 
 // DeploymentFailureHolds is FailureHolds for the deployment signer as row

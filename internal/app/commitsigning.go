@@ -44,7 +44,7 @@ func (a *App) buildCommitSigning() {
 			a.deploymentSignerHealth = commitsigner.NewDeploymentHealth(otel.GetMeterProvider(), a.deploymentSigner, a.stores, a.ghResolver)
 		}
 		if a.srv != nil {
-			a.srv.SetDeploymentCommitSigner(a.deploymentSignerHealth)
+			a.srv.SetDeploymentCommitSigner(a.deploymentSigner)
 		}
 	}
 	if a.plan.dispatcher {

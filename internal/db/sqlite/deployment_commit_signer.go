@@ -2,7 +2,6 @@ package sqlite
 
 import (
 	"context"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -44,8 +43,4 @@ func (deploymentCommitSignerStore) BreakSystem(context.Context, string, string, 
 
 func (deploymentCommitSignerStore) NewestFailedVerificationSystem(context.Context, string, int64) (*domain.CommitSignature, error) {
 	return nil, db.ErrNotApplicableInLocal
-}
-
-func (deploymentCommitSignerStore) UsageSystem(context.Context, time.Time, time.Time) (db.DeploymentSignerUsage, error) {
-	return db.DeploymentSignerUsage{}, db.ErrNotApplicableInLocal
 }

@@ -882,6 +882,25 @@ type commitIdentityAccountJSON struct {
 	Login *string `json:"login"`
 }
 
+// SetDeploymentCommitSigner gives the server this control pod's deployment
+// commit signer, nil when none is configured, so GET commit-identity resolves a
+// managed workspace the way its runs' commits are resolved.
+func (s *Server) SetDeploymentCommitSigner(d *commitsigner.DeploymentSigner) {
+	s.deploymentSigner = d
+}
+
+// commitIdentityResolver is the resolution a run's commits take, with the
+// deployment arm when this pod has a deployment signer.
+func (s *Server) commitIdentityResolver() commitsigner.Resolver {
+	r := commitsigner.Resolver{Signers: s.allStores.OrgCommitSigners, GitHub: s.ghResolver}
+	if s.deploymentSigner.Configured() {
+		r.Deployment = &commitsigner.DeploymentArm{
+			Signer: s.deploymentSigner, Health: s.allStores.DeploymentCommitSigners, Orgs: s.allStores.Orgs,
+		}
+	}
+	return r
+}
+
 // handleCommitIdentityGet answers who this org's runs commit as and whether
 // and how they sign, from the same resolution a run's commits take.
 //

@@ -1122,9 +1122,8 @@ to no org:
   commits its runs signed as the deployment signer, with that workspace's
   credential, on the control pod holding the brain lease. A failure breaks the
   deployment signer for every managed workspace, until an operator's Verify
-  (`triagefactory commit-signer verify` on a control container, or
-  `POST /api/fleet/commit-signer/verify`) re-reads the commit and GitHub
-  answers `valid`.
+  (`triagefactory commit-signer verify` on a control container) re-reads the
+  commit and GitHub answers `valid`.
 
 Its checks count in `tf_commit_signer_checks_total` like an org signer's. A
 broken deployment signer stops signing for every managed workspace at the next

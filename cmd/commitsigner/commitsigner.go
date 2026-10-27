@@ -4,10 +4,10 @@
 //	triagefactory commit-signer status    show the signer and its health
 //	triagefactory commit-signer verify    check it against GitHub now
 //
-// They are the read and the Verify that GET and POST
-// /api/fleet/commit-signer{,/verify} answer, for an operator working from a
-// shell: shell access to a control container is the trust boundary, the same
-// as for `operator` and `instance`. Each answers for the signer the container
+// The deployment signer has no HTTP routes: its config is env on the control
+// containers, so whoever can change or fix it has a shell there, and shell
+// access to a control container is the trust boundary, the same as for
+// `operator` and `instance`. Each answers for the signer the container
 // it runs in is configured with (TF_GITHUB_COMMIT_SIGNER_*), and opens its own
 // DB handle (db.OpenForCLI), independent of a running server.
 package commitsigner
@@ -187,9 +187,7 @@ NOTES
   for a signer a pushed commit broke, re-reads that commit; when both pass, the
   signer is active. Only a signer a pushed commit broke needs it: a pending
   signer, or one broken because its key was missing, turns active at the next
-  periodic check once the key is on the account, and verify does that now. The
-  same checks are POST /api/fleet/commit-signer/verify, for a deployment
-  operator's session.
+  periodic check once the key is on the account, and verify does that now.
 
   Run it on a control container: it answers for the signer that container is
   configured with, and an executor carries none.`)

@@ -3,7 +3,6 @@ package sqlite_test
 import (
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -26,7 +25,6 @@ func TestDeploymentCommitSignerStore_SQLite_NotApplicable(t *testing.T) {
 	_, errs["ActivateSystem"] = store.ActivateSystem(ctx, host, key, 1, "TriageFactory", "")
 	_, errs["BreakSystem"] = store.BreakSystem(ctx, host, key, "no_user")
 	_, errs["NewestFailedVerificationSystem"] = store.NewestFailedVerificationSystem(ctx, host, 1)
-	_, errs["UsageSystem"] = store.UsageSystem(ctx, time.Time{}, time.Time{})
 	for method, err := range errs {
 		if !errors.Is(err, db.ErrNotApplicableInLocal) {
 			t.Errorf("%s = %v, want ErrNotApplicableInLocal", method, err)

@@ -2,7 +2,6 @@ package commitsigner
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -137,10 +136,6 @@ func (m *memDeploymentSigners) NewestFailedVerificationSystem(context.Context, s
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.failed, m.err
-}
-
-func (m *memDeploymentSigners) UsageSystem(context.Context, time.Time, time.Time) (db.DeploymentSignerUsage, error) {
-	return db.DeploymentSignerUsage{}, errors.New("memDeploymentSigners: UsageSystem is not modelled")
 }
 
 // set stores row as the signer's health, keyed by its host and key.

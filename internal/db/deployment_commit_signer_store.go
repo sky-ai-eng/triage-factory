@@ -5,9 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"slices"
-	"strings"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -28,7 +25,7 @@ var ErrNoSuchDeploymentCommitSigner = errors.New("db: no deployment commit signe
 // deployment App is: the SQLite impl answers ErrNotApplicableInLocal from
 // every method. Admin pool only: every reader and writer is a control pod (the
 // resolution that seals a bundle or decides a signature, the brain's checks,
-// the operator-gated routes), none acting under an org's RLS.
+// the operator's `commit-signer` CLI), none acting under an org's RLS.
 type DeploymentCommitSignerStore interface {
 	// GetSystem returns the row for publicKey on host, or (nil, nil) when
 	// there is none.
@@ -75,12 +72,6 @@ type DeploymentCommitSignerStore interface {
 	// org's credential. Cross-org: the deployment signer serves every managed
 	// workspace.
 	NewestFailedVerificationSystem(ctx context.Context, host string, userID int64) (*domain.CommitSignature, error)
-
-	// UsageSystem counts the signatures made as the deployment signer in
-	// [since, until), by the hour they were signed in (UTC, oldest first) and
-	// by org (most first, then by org id). A zero since or until leaves that
-	// side open. Cross-org, for the operator-gated usage node.
-	UsageSystem(ctx context.Context, since, until time.Time) (DeploymentSignerUsage, error)
 }
 
 // DeploymentSignerKeyCheck is one read of the deployment signer's account and
@@ -112,37 +103,6 @@ func DeploymentKeyCheckTransition(status domain.CommitSignerStatus, reason strin
 		return domain.CommitSignerBroken, domain.CommitSignerReasonKeyMissing
 	}
 	return status, reason
-}
-
-// DeploymentSignerUsage is UsageSystem's answer.
-type DeploymentSignerUsage struct {
-	Total  int
-	ByHour []HourCount
-	ByOrg  []OrgCount
-}
-
-// HourCount is the signatures made in the hour starting at Hour.
-type HourCount struct {
-	Hour  time.Time
-	Count int
-}
-
-// OrgCount is the signatures made for one org.
-type OrgCount struct {
-	OrgID string
-	Count int
-}
-
-// SortDeploymentSignerUsage puts u's cuts in the order UsageSystem promises:
-// hours oldest first, orgs by most signatures and then by id.
-func SortDeploymentSignerUsage(u *DeploymentSignerUsage) {
-	slices.SortFunc(u.ByHour, func(a, b HourCount) int { return a.Hour.Compare(b.Hour) })
-	slices.SortFunc(u.ByOrg, func(a, b OrgCount) int {
-		if a.Count != b.Count {
-			return b.Count - a.Count
-		}
-		return strings.Compare(a.OrgID, b.OrgID)
-	})
 }
 
 // DeploymentCommitSignerColumns is the projection deployment_commit_signer is

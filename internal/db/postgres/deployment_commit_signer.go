@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -158,42 +157,4 @@ func (s *deploymentCommitSignerStore) NewestFailedVerificationSystem(ctx context
 		return nil, err
 	}
 	return &row, nil
-}
-
-func (s *deploymentCommitSignerStore) UsageSystem(ctx context.Context, since, until time.Time) (db.DeploymentSignerUsage, error) {
-	// One statement, so both cuts count the same signatures: the hour set
-	// leaves org_id NULL and the org set leaves the hour NULL.
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT date_trunc('hour', signed_at, 'UTC'), org_id, count(*) FROM commit_signatures
-		 WHERE state = $1 AND signer = $2
-		   AND ($3::timestamptz IS NULL OR signed_at >= $3::timestamptz)
-		   AND ($4::timestamptz IS NULL OR signed_at < $4::timestamptz)
-		 GROUP BY GROUPING SETS ((date_trunc('hour', signed_at, 'UTC')), (org_id))`,
-		string(domain.CommitSignatureSigned), string(domain.CommitSigningDeployment), nullTime(since), nullTime(until))
-	if err != nil {
-		return db.DeploymentSignerUsage{}, err
-	}
-	defer rows.Close()
-	var out db.DeploymentSignerUsage
-	for rows.Next() {
-		var (
-			hour  sql.NullTime
-			orgID sql.NullString
-			n     int
-		)
-		if err := rows.Scan(&hour, &orgID, &n); err != nil {
-			return db.DeploymentSignerUsage{}, err
-		}
-		if hour.Valid {
-			out.Total += n
-			out.ByHour = append(out.ByHour, db.HourCount{Hour: hour.Time.UTC(), Count: n})
-		} else {
-			out.ByOrg = append(out.ByOrg, db.OrgCount{OrgID: orgID.String, Count: n})
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return db.DeploymentSignerUsage{}, err
-	}
-	db.SortDeploymentSignerUsage(&out)
-	return out, nil
 }

@@ -131,7 +131,7 @@ type Server struct {
 	fleetQueue fleetQueueReader
 	// deploymentSigner is this control pod's deployment commit signer, nil
 	// when none is configured (SetDeploymentCommitSigner).
-	deploymentSigner *commitsigner.DeploymentHealth
+	deploymentSigner *commitsigner.DeploymentSigner
 	// ghResolver picks the right GitHub credential (org App installation token
 	// → PAT) per request, given the org + target account. Every per-repo
 	// handler operation goes through it — review diff/submit, pending-PR
@@ -837,13 +837,6 @@ func (s *Server) routes() {
 	// cap. Org-admin gated inside the handler on ?org=, like the placement
 	// explainer above. Read-only.
 	s.api("GET /api/fleet/queue", s.handleFleetQueue)
-	// The deployment commit signer: its health, an operator's Verify, and
-	// its signatures by hour and by org. Operator-gated inside the handlers
-	// and unlicensed: commit signing is core, not part of the EE fleet
-	// console. See fleet_commit_signer.go.
-	s.api("GET /api/fleet/commit-signer", s.handleDeploymentSignerGet)
-	s.apiMutating("POST /api/fleet/commit-signer/verify", s.handleDeploymentSignerVerify)
-	s.api("GET /api/fleet/commit-signer/usage", s.handleDeploymentSignerUsage)
 	// Logout-everywhere: must be authenticated to use it (you can only
 	// nuke your own sessions).
 	s.apiMutating("POST /api/auth/logout/all", s.handleLogoutAll)

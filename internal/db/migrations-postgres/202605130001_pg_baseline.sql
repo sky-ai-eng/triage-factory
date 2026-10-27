@@ -6459,10 +6459,8 @@ GRANT SELECT ON TABLE public.commit_signatures TO tf_app;
 GRANT SELECT, INSERT ON TABLE public.commit_signatures TO tf_system;
 GRANT UPDATE (commit_sha, repository_id, pushed_at) ON TABLE public.commit_signatures TO tf_system;
 
--- The fleet console's usage of the deployment signer, every org's signatures in
--- a window, and Verify's re-read of the deployment signer's newest failing
--- commit, across orgs. The second holds only failing rows.
-CREATE INDEX commit_signatures_deployment_signed_idx ON public.commit_signatures USING btree (signed_at) WHERE ((state = 'signed'::text) AND (signer = 'deployment'::text));
+-- Verify's re-read of the deployment signer's newest failing commit, across
+-- orgs. It holds only failing rows.
 CREATE INDEX commit_signatures_deployment_failed_idx ON public.commit_signatures USING btree (signer_host, signer_user_id, signed_at) WHERE ((state = 'signed'::text) AND (signer = 'deployment'::text) AND (verification_reason IS NOT NULL) AND (verification_reason <> 'valid'::text));
 
 

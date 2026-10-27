@@ -233,10 +233,10 @@ func TestDeploymentCommitSignerStore_Postgres_ActivateAndBreak(t *testing.T) {
 	}
 }
 
-// TestDeploymentCommitSignerStore_Postgres_SignatureReads pins the two reads
-// over commit_signatures that serve the deployment signer across every org:
-// Verify's newest failing commit, and the fleet console's usage.
-func TestDeploymentCommitSignerStore_Postgres_SignatureReads(t *testing.T) {
+// TestDeploymentCommitSignerStore_Postgres_NewestFailedVerification pins
+// Verify's read of the newest failing commit signed as the deployment signer,
+// across every org.
+func TestDeploymentCommitSignerStore_Postgres_NewestFailedVerification(t *testing.T) {
 	store, h := deploymentSignerStore(t)
 	ctx := t.Context()
 	sigs := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey).CommitSignatures
@@ -264,33 +264,7 @@ func TestDeploymentCommitSignerStore_Postgres_SignatureReads(t *testing.T) {
 	a1 := sign(seedA, orgA, domain.CommitSigningDeployment, hour.Add(5*time.Minute))
 	a2 := sign(seedA, orgA, domain.CommitSigningDeployment, hour.Add(70*time.Minute))
 	b1 := sign(seedB, orgB, domain.CommitSigningDeployment, hour.Add(10*time.Minute))
-	sign(seedA, orgA, domain.CommitSigningDeployment, hour.Add(80*time.Minute))
 	orgSigned := sign(seedA, orgA, domain.CommitSigningOrg, hour.Add(20*time.Minute))
-	sign(seedB, orgB, domain.CommitSigningDeployment, hour.Add(3*time.Hour))
-	conversationID, claimID := seedA.Claim(t)
-	if _, err := sigs.InsertSystem(ctx, domain.CommitSignature{
-		OrgID: orgA, ConversationID: conversationID, ClaimID: claimID, BootEpoch: 1,
-		Signer: domain.CommitSigningDeployment, SignerHost: deploymentHost, SignerUserID: deploymentUserID,
-		Digest: "cd", State: domain.CommitSignatureRequested,
-	}); err != nil {
-		t.Fatalf("InsertSystem request: %v", err)
-	}
-
-	usage, err := store.UsageSystem(ctx, hour, hour.Add(2*time.Hour))
-	if err != nil {
-		t.Fatalf("UsageSystem: %v", err)
-	}
-	want := db.DeploymentSignerUsage{
-		Total:  4,
-		ByHour: []db.HourCount{{Hour: hour, Count: 2}, {Hour: hour.Add(time.Hour), Count: 2}},
-		ByOrg:  []db.OrgCount{{OrgID: orgA, Count: 3}, {OrgID: orgB, Count: 1}},
-	}
-	if !reflect.DeepEqual(usage, want) {
-		t.Errorf("UsageSystem = %+v\nwant %+v\n(org signatures, requests and signatures outside the window are not counted)", usage, want)
-	}
-	if open, err := store.UsageSystem(ctx, time.Time{}, time.Time{}); err != nil || open.Total != 5 {
-		t.Errorf("UsageSystem with an open window = %+v, %v; want all 5 deployment signatures", open, err)
-	}
 
 	if got, err := store.NewestFailedVerificationSystem(ctx, deploymentHost, deploymentUserID); err != nil || got != nil {
 		t.Fatalf("NewestFailedVerificationSystem with no failure = %+v, %v; want nil", got, err)
