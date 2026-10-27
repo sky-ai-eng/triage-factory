@@ -123,17 +123,24 @@ func (a *App) startWorkers(ctx context.Context) {
 	// kicks to the WS backplane, and trigger/PollSoon relays to
 	// handleCtlMessage (which holder-gates them).
 	if runmode.Current() == runmode.ModeMulti {
+		// Every control pod reads the deployment signer's health it signs
+		// with, reports it, and makes its periodic check when one is due.
+		// Started first and waited on, so a pod on a key the deployment has
+		// not checked yet makes that check before the listener below hands it
+		// a signature request or a bundle to seal.
+		if a.deploymentSignerHealth != nil {
+			go a.deploymentSignerHealth.Run(ctx, commitsigner.DeploymentWatchInterval)
+			if !a.deploymentSignerHealth.WaitFirstTick(ctx, commitsigner.FirstTickWait) {
+				appLog.Warn("deployment commit signer's first check is still running; starting without it",
+					"waited", commitsigner.FirstTickWait)
+			}
+		}
 		a.startCtlListener(ctx)
 		// Every control pod signs, holder or standby: the signer answers
 		// sign_request doorbells from the listener above and sweeps for the
 		// requests whose doorbell was dropped. nil on an executor.
 		if a.commitSigner != nil {
 			go a.commitSigner.Run(ctx)
-		}
-		// Every control pod reads the deployment signer's health it signs
-		// with, reports it, and makes its periodic check when one is due.
-		if a.deploymentSignerHealth != nil {
-			go a.deploymentSignerHealth.Run(ctx, commitsigner.DeploymentWatchInterval)
 		}
 		// The signal apply loop only makes sense on dispatcher-capable
 		// roles — only they can ever own a run's live process. The tf_wake

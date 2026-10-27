@@ -21,6 +21,10 @@ import (
 // a periodic check runs on once one is due.
 const DeploymentWatchInterval = 30 * time.Second
 
+// FirstTickWait is how long a control pod's boot waits for its first tick
+// (WaitFirstTick) before it signs or seals anything.
+const FirstTickWait = 5 * time.Second
+
 // DeploymentHealth keeps the deployment signer's health on one control pod. It
 // runs on every control pod, whether or not it holds the brain lease, because
 // every pod signs and every pod reports what it would sign with:
@@ -60,6 +64,10 @@ type DeploymentHealth struct {
 	failures int
 	retryAt  time.Time
 
+	// firstTick is closed when the first Tick returns.
+	firstTick     chan struct{}
+	firstTickOnce sync.Once
+
 	mu       sync.Mutex
 	observed *domain.DeploymentCommitSigner
 	reg      metric.Registration
@@ -69,7 +77,7 @@ type DeploymentHealth struct {
 // against provider. A provider that cannot build the instrument leaves it
 // unregistered, and the watch still runs.
 func NewDeploymentHealth(provider metric.MeterProvider, signer *DeploymentSigner, stores db.Stores, gh ghclient.Resolver) *DeploymentHealth {
-	d := &DeploymentHealth{Signer: signer, Stores: stores, GitHub: gh, client: ghclient.NewClient(signer.Host, "")}
+	d := &DeploymentHealth{Signer: signer, Stores: stores, GitHub: gh, client: ghclient.NewClient(signer.Host, ""), firstTick: make(chan struct{})}
 	up, err := provider.Meter(meterName).Int64ObservableGauge("deployment_commit_signer.up",
 		metric.WithDescription("1 while the deployment commit signer is active, 0 while it is not."))
 	if err != nil {
@@ -134,10 +142,36 @@ func (d *DeploymentHealth) close() {
 	}
 }
 
+// WaitFirstTick waits up to timeout for the first Tick to return, and reports
+// whether it did. A control pod waits on it before it signs or seals: a key the
+// deployment has never checked has no account until a check finds it, so a pod
+// that started on a new key would, until its first check, answer a managed
+// workspace as though it had no signer, and a run that asked in that second
+// would stop signing for the rest of the run. A first tick still reading
+// GitHub at timeout carries on; the pod starts without it, as it would
+// without this wait.
+func (d *DeploymentHealth) WaitFirstTick(ctx context.Context, timeout time.Duration) bool {
+	select {
+	case <-d.firstTick:
+		return true
+	default:
+	}
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+	select {
+	case <-d.firstTick:
+		return true
+	case <-t.C:
+	case <-ctx.Done():
+	}
+	return false
+}
+
 // Tick reads the signer's health, reports it, and makes the periodic check
 // when one is due. A read that fails keeps what the gauge last reported; the
 // next tick reads again.
 func (d *DeploymentHealth) Tick(ctx context.Context) {
+	defer d.firstTickOnce.Do(func() { close(d.firstTick) })
 	row, err := d.Stores.DeploymentCommitSigners.RegisterSystem(ctx, d.Signer.Host, d.Signer.PublicKey, d.Signer.Login)
 	if err != nil {
 		signerLog.ErrorContext(ctx, "reading the deployment commit signer failed; keeping the last status", "error", err)

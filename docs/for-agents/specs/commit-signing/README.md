@@ -686,7 +686,10 @@ key activates a `pending` deployment signer too: the operator adds the key to
 the account before configuring it, so there is no admin step to wait for. A
 check that cannot read GitHub writes nothing, so the row stays due; the pod
 waits a minute before trying again, doubling up to the check interval, so
-anonymous rate limits are not spent on retries. The first check that finds the
+anonymous rate limits are not spent on retries. A pod's boot waits up to 5 s
+for its first tick before it signs or seals: until a check finds a new key it
+has no account, and a run that asked in that window would be told signing is
+off for the rest of the run. The first check that finds the
 key binds it to that account's id and later checks follow the id, as an org
 signer's do: a configured login that no longer names the account is a WARN on
 each check, and signing as another account takes a new key. Its post-push

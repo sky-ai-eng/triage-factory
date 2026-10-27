@@ -102,10 +102,13 @@ func objectPhrase(object string) string {
 // or key_missing; a reason with no sentence of its own reads as GitHub having
 // stopped verifying the signer's commits. mode is the kind of signer the run
 // signs as: a pending deployment signer waits for a check on the control
-// plane, not for an org admin.
+// plane, not for an org admin, and no org admin removes it.
 func signerOffReason(res Result, mode domain.CommitSigningMode) string {
 	switch res.Refusal {
 	case RefusalSignerRemoved:
+		if mode == domain.CommitSigningDeployment {
+			return "this workspace no longer signs as the deployment's signing account"
+		}
 		return "an org admin removed the signer"
 	case RefusalSignerChanged:
 		return "the org now signs as a different account"

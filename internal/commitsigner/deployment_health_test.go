@@ -147,6 +147,31 @@ func TestDeploymentHealth_PeriodicCheckActivatesBreaksAndRestores(t *testing.T) 
 	}
 }
 
+// A control pod's boot waits on the first tick, so a pod that starts on a key
+// the deployment has never checked has made that check before it signs: the
+// wait gives up at its timeout before any tick, and returns as soon as the
+// first one has, with the key found and the signer active.
+func TestDeploymentHealth_WaitFirstTick(t *testing.T) {
+	f := newFixture(t)
+	h, _, health, _, _ := f.deploymentHealth(t)
+	ctx := context.Background()
+
+	if h.WaitFirstTick(ctx, 10*time.Millisecond) {
+		t.Fatal("WaitFirstTick returned true before any tick")
+	}
+	go h.Tick(ctx)
+	if !h.WaitFirstTick(ctx, 10*time.Second) {
+		t.Fatal("WaitFirstTick timed out with a tick running against a GitHub that answers")
+	}
+	if got := health.only(t); got.Status != domain.CommitSignerActive || got.CheckedAt == nil {
+		t.Errorf("after the first tick the signer is %+v, want active and checked", got)
+	}
+	h.Tick(ctx)
+	if !h.WaitFirstTick(ctx, 0) {
+		t.Error("WaitFirstTick after later ticks = false, want true")
+	}
+}
+
 // A check that cannot read GitHub writes nothing, so the row stays due; the
 // pod waits a minute before reading again, then two, and starts over at a
 // minute once a check succeeds.

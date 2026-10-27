@@ -157,6 +157,15 @@ func TestRefusalLine_SignerReasonsAreSentences(t *testing.T) {
 			t.Errorf("a pending %s signer reads as %q, want it to say %q", mode, s, want)
 		}
 	}
+	removed := Result{Refusal: RefusalSignerRemoved}
+	for mode, want := range map[domain.CommitSigningMode]string{
+		domain.CommitSigningOrg:        "an org admin removed the signer",
+		domain.CommitSigningDeployment: "this workspace no longer signs as the deployment's signing account",
+	} {
+		if s := signerOffReason(removed, mode); s != want {
+			t.Errorf("a removed %s signer reads as %q, want %q", mode, s, want)
+		}
+	}
 }
 
 func TestParseGitVersion(t *testing.T) {
