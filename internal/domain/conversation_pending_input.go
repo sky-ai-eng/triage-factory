@@ -8,7 +8,7 @@ import "time"
 // claiming executor's resume path consumes it (DELETE ... RETURNING) and
 // delivers it as the turn's input, exactly once. See
 // internal/db.ConversationPendingInputStore and
-// docs/for-agents/specs/horizontal-scaling/README.md §5.2.
+// specs/horizontal-scaling/README.md §5.2.
 type ConversationPendingInput struct {
 	ConversationID string
 	OrgID          string

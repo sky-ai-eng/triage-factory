@@ -36,9 +36,9 @@ Work flows through an automation engine drawn as a factory floor. A durable **en
 brew tap sky-ai-eng/tap && brew install triagefactory && triagefactory
 ```
 
-State lives in SQLite, credentials live in the OS keychain or an encrypted file, and agent runs execute in isolated git worktrees (not secured sandboxes). No Postgres, no Docker, no DevOps. For direct downloads, building from source, and the full flag reference, see [docs/local-mode/](docs/local-mode/README.md) and [docs/INSTALLATION.md](docs/INSTALLATION.md).
+State lives in SQLite, credentials live in the OS keychain or an encrypted file, and agent runs execute in isolated git worktrees (not secured sandboxes). No Postgres, no Docker, no DevOps. For direct downloads, building from source, and the full flag reference, see [docs/users/local/](docs/users/local/README.md) and [docs/users/local/install.md](docs/users/local/install.md).
 
-**Self-hosted (multi-tenant)** — your whole org, on Linux hosts you control. The same binary and schema, deployed with Docker Compose as a control + executor split: Postgres with per-org row-level security, SSO/SAML sign-in, audit logs, and Slack ingest via the [Enterprise Edition](ee/), a `/usage` dashboard with per-team and org-wide spend caps, and every agent run confined to its own gVisor sandbox. See [docs/self-hosting/](docs/self-hosting/README.md) to stand one up.
+**Self-hosted (multi-tenant)** — your whole org, on Linux hosts you control. The same binary and schema, deployed with Docker Compose as a control + executor split: Postgres with per-org row-level security, SSO/SAML sign-in, audit logs, and Slack ingest via the [Enterprise Edition](ee/), a `/usage` dashboard with per-team and org-wide spend caps, and every agent run confined to its own gVisor sandbox. See [docs/users/self-hosting/](docs/users/self-hosting/README.md) to stand one up.
 
 ## Security & isolation
 
@@ -50,15 +50,15 @@ Triage Factory runs code written by an AI agent acting on untrusted input such a
 
 **Tenants are isolated by construction.** Data is fenced with per-org Postgres row-level security. And unlike the usual container setup — every run hanging off one shared Linux bridge, a single ARP-spoof away from its neighbors — each run gets its own point-to-point virtual link on its own private subnet, with no layer-2 path between concurrent runs. Cross-tenant snooping isn't "blocked by a rule"; there's no shared wire to snoop. Each run's egress is a fail-closed allowlist that reaches only the hosts it needs.
 
-**Evaluating Triage Factory for your own infrastructure?** The full threat model, the privilege-separation process model, and what a compromise of each component yields — every claim anchored to something you can run against the binary — are in [docs/security/security-overview.md](docs/security/security-overview.md).
+**Evaluating Triage Factory for your own infrastructure?** The full threat model, the privilege-separation process model, and what a compromise of each component yields — every claim anchored to something you can run against the binary — are in [docs/users/security/security-overview.md](docs/users/security/security-overview.md).
 
 ## Documentation
 
-- [docs/INSTALLATION.md](docs/INSTALLATION.md) — install, build from source, prerequisites
-- [docs/local-mode/](docs/local-mode/README.md) — local mode: CLI flags, configuration, secret storage, running on a server
-- [docs/self-hosting/](docs/self-hosting/README.md) — multi-tenant self-hosting (install, scaling, SSO, monitoring)
-- [docs/security/](docs/security/README.md) — isolation tiers, security overview, privilege separation
-- [docs/concepts/tracked-events.md](docs/concepts/tracked-events.md) — the GitHub/Jira/Linear event taxonomy
+- [docs/users/local/install.md](docs/users/local/install.md) — install, build from source, prerequisites
+- [docs/users/local/](docs/users/local/README.md) — local mode: CLI flags, configuration, secret storage, running on a server
+- [docs/users/self-hosting/](docs/users/self-hosting/README.md) — multi-tenant self-hosting (install, scaling, SSO, monitoring)
+- [docs/users/security/](docs/users/security/README.md) — isolation tiers, security overview, privilege separation
+- [specs/tracked-events.md](specs/tracked-events.md) — the GitHub/Jira/Linear event taxonomy
 - [CONTRIBUTING.md](CONTRIBUTING.md) — contribution terms
 
 ## License
@@ -71,4 +71,4 @@ Triage Factory is provided "as is", without warranty of any kind; see the [LICEN
 
 Triage Factory delegates work to autonomous agents that read and write to your source repositories, ticket trackers, and local filesystem. You are solely responsible for reviewing what agents do on your behalf, for the credentials you configure, and for the consequences of any automated actions taken against your systems or third-party services.
 
-**Self-hosted multi-tenant deployments.** When you self-host Triage Factory to serve multiple organizations from one deployment, tenant isolation depends on your infrastructure, configuration, network topology, secrets management, and patching cadence, as well as on the correctness of the upstream software itself — which, like all software, may contain isolation, sandboxing, or row-level-security defects, known or unknown. See [docs/security/](docs/security/README.md) for the isolation model to evaluate.
+**Self-hosted multi-tenant deployments.** When you self-host Triage Factory to serve multiple organizations from one deployment, tenant isolation depends on your infrastructure, configuration, network topology, secrets management, and patching cadence, as well as on the correctness of the upstream software itself — which, like all software, may contain isolation, sandboxing, or row-level-security defects, known or unknown. See [docs/users/security/](docs/users/security/README.md) for the isolation model to evaluate.

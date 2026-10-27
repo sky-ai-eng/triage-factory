@@ -232,7 +232,7 @@ type App struct {
 	cellsConfirmedClean bool
 
 	// cells is the backend this process builds delegated runs' cells with
-	// (docs/for-agents/specs/sandbox-backends/). Set by openStores in multi
+	// (specs/sandbox-backends/). Set by openStores in multi
 	// mode, ahead of the boot-time orphan reap that goes through it; nil in
 	// local mode, which builds no cells.
 	cells cell.Backend

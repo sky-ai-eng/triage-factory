@@ -5,7 +5,7 @@ Triage Factory's gVisor sandboxes.
 
 ## Why
 
-`docs/benchmarks/gvisor-cpu-tax.md`: under gVisor `systrap`, CPU cost is
+`docs/contributors/benchmarks/gvisor-cpu-tax.md`: under gVisor `systrap`, CPU cost is
 ~linear in guest syscall rate, and ~72% of a real run's syscalls are
 JS-runtime churn (GC, event loop) with another ~12% tool fork/exec. A
 compiled harness that also services common tools natively removes up to ~83%
@@ -136,7 +136,7 @@ process + runtime startup:
 
 The ~11k-syscall bun baseline is the per-process JS-runtime tax; the
 per-call GC/event-loop churn that dominates real runs (bucket A in
-`docs/benchmarks/gvisor-cpu-tax.md`) disappears with the runtime itself.
+`docs/contributors/benchmarks/gvisor-cpu-tax.md`) disappears with the runtime itself.
 
 ## Known intentional divergences
 

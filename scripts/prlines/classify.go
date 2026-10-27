@@ -75,9 +75,9 @@ func classifyPath(p string) fileClass {
 		}
 	}
 
-	// docs/ wins over everything below it, including the architecture specs
-	// that happen to ship as .html and the Dockerfiles embedded in them.
-	if strings.HasPrefix(p, "docs/") || hasSegment(p, "docs") {
+	// docs/ and specs/ win over everything below them, including the specs
+	// that ship as .html and the Dockerfiles embedded in them.
+	if strings.HasPrefix(p, "docs/") || strings.HasPrefix(p, "specs/") || hasSegment(p, "docs") {
 		return classDocs
 	}
 	for _, e := range docExts {

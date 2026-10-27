@@ -10,7 +10,7 @@ import (
 )
 
 // Channel names for the three LISTEN/NOTIFY channels this package owns
-// (docs/for-agents/specs/horizontal-scaling/README.md §5). tf_wake (control→executor
+// (specs/horizontal-scaling/README.md §5). tf_wake (control→executor
 // claim nudges) belongs to the conversation-queue dispatcher, not here.
 const (
 	// ChannelWS carries websocket.Hub.Broadcast envelopes: every control

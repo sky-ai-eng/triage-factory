@@ -7,7 +7,7 @@ Thanks for contributing.
 By contributing to this repository, you agree that your contributions may be
 licensed under the repository's [Triage Factory License 1.0](LICENSE) — which
 covers the whole repo, including the [`ee/`](ee/) subtree — as set out in the
-contributor license agreement in [`docs/CLA.md`](docs/CLA.md), which all
+contributor license agreement in [`docs/contributors/CLA.md`](docs/contributors/CLA.md), which all
 contributions must be covered by.
 
 Triage Factory follows an open-core model: the repository is source-available,
@@ -31,12 +31,12 @@ relicense, and distribute contributions as part of the project.
 For pull requests submitted through GitHub, the expected workflow is:
 
 1. Open a pull request.
-2. If prompted by CLA Assistant, review [`docs/CLA.md`](docs/CLA.md) and sign the agreement in the
+2. If prompted by CLA Assistant, review [`docs/contributors/CLA.md`](docs/contributors/CLA.md) and sign the agreement in the
    PR flow.
 3. Wait for the CLA status check to pass before requesting review or merge.
 
 If you are contributing on behalf of an employer or client, make sure you have
-permission to submit the work under the terms in [`docs/CLA.md`](docs/CLA.md).
+permission to submit the work under the terms in [`docs/contributors/CLA.md`](docs/contributors/CLA.md).
 
 ## Pull Requests
 

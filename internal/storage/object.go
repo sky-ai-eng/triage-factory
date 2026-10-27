@@ -21,7 +21,7 @@ import (
 )
 
 // Env var names for the object backend. Documented in
-// docs/self-hosting/storage.md and .env.example.
+// docs/users/self-hosting/storage.md and .env.example.
 const (
 	envBlobEndpoint  = "TF_BLOB_ENDPOINT"
 	envBlobBucket    = "TF_BLOB_BUCKET"

@@ -24,8 +24,8 @@ func TestClassifyPath(t *testing.T) {
 		{"internal/tracker/testdata/pr.json", classTests},
 
 		{"README.md", classDocs},
-		{"docs/concepts/tracked-events.md", classDocs},
-		{"docs/for-agents/specs/sky-261-d-claims.html", classDocs},
+		{"specs/tracked-events.md", classDocs},
+		{"specs/sky-261-d-claims.html", classDocs},
 		{"LICENSE", classDocs},
 		{"CHANGELOG.md", classDocs},
 
@@ -43,9 +43,9 @@ func TestClassifyPath(t *testing.T) {
 }
 
 func TestDocsBeatsTestsForDocPaths(t *testing.T) {
-	// A spec under docs/ that happens to sit next to a fixture directory is
+	// A spec under specs/ that happens to sit next to a fixture directory is
 	// still documentation; the docs rule runs first for exactly this reason.
-	if got := classifyPath("docs/for-agents/specs/sky-254-runsc-validation/tests/notes.md"); got != classDocs {
+	if got := classifyPath("specs/sky-254-runsc-validation/tests/notes.md"); got != classDocs {
 		t.Errorf("got %v, want documentation", got)
 	}
 }

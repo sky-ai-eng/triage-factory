@@ -34,7 +34,7 @@ var bedrockRoleARNRe = regexp.MustCompile(`^arn:aws[a-z-]*:iam::\d{12}:role/.+`)
 // OPERATOR problem the org admin can't fix from the UI. Surfaced by both the
 // role-setup endpoint and the connect probe when the control service has no
 // AWS identity.
-const operatorRemediationMsg = "the control service has no AWS identity; set AWS_* on the control service or attach an instance role — see docs/self-hosting/bedrock-role-mode.md"
+const operatorRemediationMsg = "the control service has no AWS identity; set AWS_* on the control service or attach an instance role — see docs/users/self-hosting/bedrock-role-mode.md"
 
 // handleBedrockRoleSetup returns the control service's caller identity ARN
 // (sts:GetCallerIdentity) and the org's TF-generated External ID, so the UI

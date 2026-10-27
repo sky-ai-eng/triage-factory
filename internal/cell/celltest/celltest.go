@@ -1,5 +1,5 @@
 // Package celltest is the conformance suite every cell backend must pass
-// (docs/for-agents/specs/sandbox-backends/ §5, §9). It drives a backend
+// (specs/sandbox-backends/ §5, §9). It drives a backend
 // through internal/cell exactly as a native engagement does — provision the
 // cell, bring its sidecar up with a sealed bundle, launch the tool host into a
 // handed-off run tree, connect — and asserts each invariant from inside the

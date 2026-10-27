@@ -176,7 +176,7 @@ describe('CommitSigningGroup · no signer', () => {
     expect(screen.getByRole('button', { name: 'Set up signing' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /How to create the signer account/ })).toHaveAttribute(
       'href',
-      expect.stringContaining('docs/concepts/commit-signing.md'),
+      expect.stringContaining('docs/users/workspace/commit-signing.md'),
     )
   })
 

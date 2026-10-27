@@ -17,9 +17,8 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 //     matches such an event;
 //   - Labels []string — snapshot at emission time, so predicates can scope
 //     to labeled PRs (e.g. HasLabel "self-review"). This is the user opt-in
-//     surface for label-driven flows (see Scenario 5 in docs/data-model-
-//     target.md). The snapshot is what was on the PR when the event was
-//     observed, not what "caused" the event;
+//     surface for label-driven flows. The snapshot is what was on the PR
+//     when the event was observed, not what "caused" the event;
 //   - Repo + PRNumber for scoping;
 //   - IsDraft + HeadSHA for display / context.
 //

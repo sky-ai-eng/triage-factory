@@ -218,5 +218,5 @@ AGENT COMMANDS
                                            for the full list)
   triagefactory status <run-id>            check a delegated run's status
 
-For configuration, polling, and feature details, see docs/local-mode/.`)
+For configuration, polling, and feature details, see docs/users/local/.`)
 }

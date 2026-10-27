@@ -4,7 +4,7 @@
 # + the TF binary as a service. Local-mode (SQLite, the default) doesn't
 # need any of this.
 #
-# Prerequisites — see docs/self-hosting/install.md:
+# Prerequisites — see docs/users/self-hosting/install.md:
 #   1. Create a GitHub OAuth app with callback ${TF_PUBLIC_URL}/auth/v1/callback
 #   2. cp .env.example .env, fill in the placeholders
 #   3. ./triagefactory jwk-init --write-env .env   (writes GOTRUE_JWT_KEYS + GOTRUE_JWT_SECRET)
@@ -37,7 +37,7 @@
 # Only the EXECUTOR needs SYS_ADMIN + NET_ADMIN + SYS_RESOURCE + a seccomp
 # profile permissive enough for the in-container gVisor sandbox (netns +
 # iptables + runsc) — a tailored allowlist as of TFAC-608, not `unconfined`; see
-# docs/security/seccomp-profile.md. The control pod launches no sandbox —
+# docs/users/security/seccomp-profile.md. The control pod launches no sandbox —
 # every delegated run executes on an executor and the brain's own LLM work is
 # toolless direct calls — so it runs as an ordinary capless web service,
 # hostable even on platforms (managed Kubernetes / Railway / Render) that
@@ -52,7 +52,7 @@
 # (the "orchestrator" — the one parsing agent output) into an empty
 # capability set, a different unprivileged uid, and a cleared capability
 # bounding set, before that process runs a single line of Go. See
-# docs/security/privilege-separation.md for the process-model table.
+# docs/users/security/privilege-separation.md for the process-model table.
 #
 # ── Scaling out ────────────────────────────────────────────────────────
 # Add executors by scaling the executor service:
@@ -62,7 +62,7 @@
 # Control stays the single published entrypoint (executors take no
 # inbound traffic, so there is NO load balancer in this shape); each
 # executor replica gets its own anonymous TF_STATE_ROOT volume. See
-# docs/self-hosting/scaling.md for the max_connections arithmetic and the
+# docs/users/self-hosting/scaling.md for the max_connections arithmetic and the
 # M≥2-control (HA) reference reverse-proxy config.
 
 # Shared, security-critical container hardening for the SANDBOX-HOSTING
@@ -79,7 +79,7 @@
 #     rather than its whole jail. Lowering an OOM score takes this
 #     capability, and the cap-broker refuses to start without it.
 #   - seccomp: a tailored default-deny allowlist (TFAC-608), NOT unconfined —
-#     see docs/security/seccomp-profile.md.
+#     see docs/users/security/seccomp-profile.md.
 #   - cgroup: private — a private cgroup-v2 namespace so per-run memory
 #     ceilings (TF_CLAIM_MEMORY_LIMIT_MB) manage this container's own delegated
 #     subtree and can never reach host cgroups. Fails open without it.
@@ -165,7 +165,7 @@ services:
   # is demoted by the image's migrations and supautils blocks non-supers
   # from modifying "reserved" roles like supabase_auth_admin).
   # supabase_admin shares POSTGRES_PASSWORD by image convention — set
-  # at initdb, NOT rotatable in-place. See docs/self-hosting/install.md.
+  # at initdb, NOT rotatable in-place. See docs/users/self-hosting/install.md.
   postgres-postinit:
     image: supabase/postgres:15.14.1.121
     depends_on:
@@ -250,7 +250,7 @@ services:
       #
       # NOTE: gobuffalo/pop (GoTrue's DB library) ONLY accepts URL form
       # here, not libpq key=value DSN. That means SUPABASE_AUTH_ADMIN_PASSWORD
-      # must use a URL-safe charset — see .env.example and docs/self-hosting/install.md
+      # must use a URL-safe charset — see .env.example and docs/users/self-hosting/install.md
       # for the recommended generator. Reserved URL characters (`/`, `?`, `#`,
       # `@`) in the password will break parsing.
       GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${SUPABASE_AUTH_ADMIN_PASSWORD:?missing SUPABASE_AUTH_ADMIN_PASSWORD (see .env.example)}@postgres:5432/postgres?search_path=auth
@@ -287,7 +287,7 @@ services:
       # Generate ONCE and keep it stable in .env (rotating it invalidates every
       # registered provider). It's `:-` (optional) because it's required only
       # WHEN SAML is enabled, a conditional GoTrue enforces at boot (enabled +
-      # blank key → GoTrue refuses to boot). See docs/sso-entra.md + .env.example.
+      # blank key → GoTrue refuses to boot). See docs/users/self-hosting/sso.md + .env.example.
       GOTRUE_SAML_ENABLED: ${GOTRUE_SAML_ENABLED:-false}
       GOTRUE_SAML_PRIVATE_KEY: ${GOTRUE_SAML_PRIVATE_KEY:-}
       GOTRUE_SITE_URL: ${TF_PUBLIC_URL}
@@ -478,13 +478,13 @@ services:
       # Set TF_LICENSE in your .env to the signed token from your vendor; the
       # control pod runs the license-gated brain features (Slack, fleet console).
       # Or supply it as a mounted file: set TF_LICENSE_FILE (forwarded below) to
-      # the mount path — see docs/self-hosting/secrets.md.
+      # the mount path — see docs/users/self-hosting/secrets.md.
       TF_LICENSE: ${TF_LICENSE:-}
       TF_LICENSE_FILE: ${TF_LICENSE_FILE:-}
       # Per-role Postgres pool ceiling (per pool) + advisory platform reserve.
       # Empty → the role default (control: 25 conns/pool, 12 GB reserve;
       # executor: 6 conns/pool, 2 GB reserve). See the max_connections
-      # arithmetic in docs/self-hosting/scaling.md.
+      # arithmetic in docs/users/self-hosting/scaling.md.
       TF_DB_MAX_OPEN_CONNS: ${TF_DB_MAX_OPEN_CONNS:-}
       TF_PLATFORM_RESERVE_MB: ${TF_PLATFORM_RESERVE_MB:-}
       # Commit signing budgets, read where signatures are made: every control
@@ -518,7 +518,7 @@ services:
       # TF-only at-rest keys. Supply each as a plain value OR — to keep it out of
       # the container env and `docker inspect` — as a mounted file via <NAME>_FILE
       # (both are forwarded, so an operator only sets one; see the *_FILE section
-      # in docs/self-hosting/secrets.md). These are `:-` not `:?` because the file
+      # in docs/users/self-hosting/secrets.md). These are `:-` not `:?` because the file
       # form leaves the plain var empty; the binary fails fast at boot with a clear
       # "<NAME> is empty" if it gets NEITHER, so for these three the missing-secret
       # check moves from compose-parse to boot. (The shared/constructed secrets
@@ -559,7 +559,7 @@ services:
       # (optional; the control pod serves the connect flow, so control-only).
       # Read from the process env at boot — forwarded here or a .env value is
       # silently ignored. The secret can also be a mounted file via
-      # TF_ATLASSIAN_CLIENT_SECRET_FILE (see docs/self-hosting/secrets.md).
+      # TF_ATLASSIAN_CLIENT_SECRET_FILE (see docs/users/self-hosting/secrets.md).
       TF_ATLASSIAN_CLIENT_ID: ${TF_ATLASSIAN_CLIENT_ID:-}
       TF_ATLASSIAN_CLIENT_SECRET: ${TF_ATLASSIAN_CLIENT_SECRET:-}
       TF_ATLASSIAN_CLIENT_SECRET_FILE: ${TF_ATLASSIAN_CLIENT_SECRET_FILE:-}
@@ -581,8 +581,8 @@ services:
       # the key. Read from the process env at boot — forwarded here or a .env
       # value is silently ignored. Each secret can also be a mounted file via
       # <NAME>_FILE (both forms forwarded, set one); the private key wants the
-      # file form, a PEM being multi-line. See docs/self-hosting/install.md
-      # ("Register a deployment GitHub App") and docs/self-hosting/secrets.md.
+      # file form, a PEM being multi-line. See docs/users/self-hosting/install.md
+      # ("Register a deployment GitHub App") and docs/users/self-hosting/secrets.md.
       TF_GITHUB_APP_ID: ${TF_GITHUB_APP_ID:-}
       TF_GITHUB_APP_PRIVATE_KEY: ${TF_GITHUB_APP_PRIVATE_KEY:-}
       TF_GITHUB_APP_PRIVATE_KEY_FILE: ${TF_GITHUB_APP_PRIVATE_KEY_FILE:-}
@@ -598,7 +598,7 @@ services:
       # sends the control plane a commit digest, never holding the key. The
       # key wants the file form, a private key being multi-line. The email is
       # required when the deployment's GitHub is not github.com. See
-      # docs/self-hosting/install.md ("Configure the deployment commit
+      # docs/users/self-hosting/install.md ("Configure the deployment commit
       # signer").
       TF_GITHUB_COMMIT_SIGNER_LOGIN: ${TF_GITHUB_COMMIT_SIGNER_LOGIN:-}
       TF_GITHUB_COMMIT_SIGNER_KEY: ${TF_GITHUB_COMMIT_SIGNER_KEY:-}
@@ -709,7 +709,7 @@ services:
       # runs no migrations and no RLS request handlers, so its app pool is
       # effectively idle; both pools ship much smaller ceilings than the API
       # tier (see TF_DB_MAX_OPEN_CONNS and the max_connections arithmetic in
-      # docs/self-hosting/scaling.md). Control pods keep the supabase_admin
+      # docs/users/self-hosting/scaling.md). Control pods keep the supabase_admin
       # DSN unchanged — narrowing control is explicitly out of scope.
       TF_DATABASE_URL: postgres://tf_system:${TF_SYSTEM_PASSWORD:?missing TF_SYSTEM_PASSWORD (see .env.example)}@postgres:5432/postgres
       TF_AUTHENTICATOR_PASSWORD: ${TF_AUTHENTICATOR_PASSWORD:?missing TF_AUTHENTICATOR_PASSWORD (see .env.example)}
@@ -737,7 +737,7 @@ services:
       TF_PLATFORM_RESERVE_MB: ${TF_PLATFORM_RESERVE_MB:-}
       # Free space (MiB) below which this executor stops claiming and evicts
       # parked workspaces early. Empty → 10240; lower it on a small disk, or
-      # 0 to disable. See docs/self-hosting/scaling.md.
+      # 0 to disable. See docs/users/self-hosting/scaling.md.
       TF_DISPATCH_DISK_FLOOR_MB: ${TF_DISPATCH_DISK_FLOOR_MB:-}
       # Privilege separation (docker/entrypoint.sh): the executor sandboxes
       # every delegated run, so the cap-broker is spawned unconditionally —

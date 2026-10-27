@@ -3,7 +3,7 @@
 // isolated environment taken as a unit: its network, its credential sidecar,
 // its run-tree grants and its jail. The gVisor implementation lives in
 // internal/cell/gvisor; internal/cell/celltest is the conformance suite every
-// implementation must pass. docs/for-agents/specs/sandbox-backends/ is the
+// implementation must pass. specs/sandbox-backends/ is the
 // design of record.
 //
 // Everything that is the product stays outside this package and identical on

@@ -1,6 +1,6 @@
 // The org's commit signer: the GitHub user account agents' commits are
 // authored, committed and signed as, so GitHub marks them Verified
-// (docs/for-agents/specs/commit-signing). The section shows one of three
+// (specs/commit-signing). The section shows one of three
 // states, read from GET commit-signer and GET commit-identity:
 //
 //   - no signer, and the org's runs commit unsigned as its GitHub identity;
