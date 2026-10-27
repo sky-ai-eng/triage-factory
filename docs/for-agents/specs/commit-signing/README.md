@@ -683,9 +683,15 @@ The deployment signer belongs to no org, so its periodic check differs: every
 control pod reads the row every 30 s and, once it is due, checks the account
 and its keys itself, without a credential, since both are public. Finding the
 key activates a `pending` deployment signer too: the operator adds the key to
-the account before configuring it, so there is no admin step to wait for. Its
-post-push check runs in each managed workspace's cycle with that workspace's
-credential, and Verify re-reads the failing commit, from any org, the same way.
+the account before configuring it, so there is no admin step to wait for. A
+check that cannot read GitHub writes nothing, so the row stays due; the pod
+waits a minute before trying again, doubling up to the check interval, so
+anonymous rate limits are not spent on retries. The first check that finds the
+key binds it to that account's id and later checks follow the id, as an org
+signer's do: a configured login that no longer names the account is a WARN on
+each check, and signing as another account takes a new key. Its post-push
+check runs in each managed workspace's cycle with that workspace's credential,
+and Verify re-reads the failing commit, from any org, the same way.
 
 ### Metrics
 

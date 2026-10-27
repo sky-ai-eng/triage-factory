@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,6 +53,12 @@ type DeploymentHealth struct {
 
 	client *ghclient.Client
 	now    func() time.Time
+
+	// failures and retryAt pace this pod's periodic check after one fails. A
+	// failed check writes nothing, so the row stays due, and without them
+	// every tick would read GitHub again. Only Tick touches them.
+	failures int
+	retryAt  time.Time
 
 	mu       sync.Mutex
 	observed *domain.DeploymentCommitSigner
@@ -140,7 +147,31 @@ func (d *DeploymentHealth) Tick(ctx context.Context) {
 	if row.CheckedAt != nil && d.clock().Sub(*row.CheckedAt) < PeriodicCheckInterval {
 		return
 	}
+	if d.clock().Before(d.retryAt) {
+		return
+	}
 	d.checkKey(ctx, row)
+}
+
+// backOff records a failed periodic check and returns how long this pod waits
+// before the next.
+func (d *DeploymentHealth) backOff() time.Duration {
+	d.failures++
+	delay := checkRetryDelay(d.failures)
+	d.retryAt = d.clock().Add(delay)
+	return delay
+}
+
+// checkRetryDelay is how long a pod waits to check again after its failures-th
+// failed read in a row: a minute, doubling up to PeriodicCheckInterval, so a
+// GitHub refusing anonymous reads (a rate limit, a private-mode Enterprise
+// Server) costs each pod at most one check per interval.
+func checkRetryDelay(failures int) time.Duration {
+	delay := time.Minute
+	for i := 1; i < failures && delay < PeriodicCheckInterval; i++ {
+		delay *= 2
+	}
+	return min(delay, PeriodicCheckInterval)
 }
 
 // observe records row as this pod's view of the signer and logs a move of its
@@ -167,9 +198,11 @@ func (d *DeploymentHealth) observe(ctx context.Context, row domain.DeploymentCom
 }
 
 // keyRead is one read of the signer's account and its signing keys. found is
-// false for an account GitHub does not have, or that is not a user.
+// false for an account GitHub does not have, or that is not a user; id is the
+// account's id when found.
 type keyRead struct {
 	account  ghclient.Account
+	id       int64
 	found    bool
 	keyFound bool
 }
@@ -195,28 +228,44 @@ func (d *DeploymentHealth) readKey(ctx context.Context, row domain.DeploymentCom
 	if account.Type != ghclient.AccountTypeUser {
 		return keyRead{account: account}, nil
 	}
+	id, err := strconv.ParseInt(account.ID, 10, 64)
+	if err != nil {
+		return keyRead{}, fmt.Errorf("read the signer's account id %q: %w", account.ID, err)
+	}
 	keys, err := d.client.ListSSHSigningKeys(ctx, account.Login)
 	if err != nil {
 		return keyRead{}, fmt.Errorf("read the account's signing keys: %w", err)
 	}
-	return keyRead{account: account, found: true, keyFound: slices.Contains(keys, d.Signer.PublicKey)}, nil
+	return keyRead{account: account, id: id, found: true, keyFound: slices.Contains(keys, d.Signer.PublicKey)}, nil
 }
+
+// loginMoved reports whether the account row follows by id now has a login
+// other than the configured one: renamed on GitHub, or the setting changed to
+// name another account. Either way the key keeps signing as the account a
+// check first found it on.
+func (d *DeploymentHealth) loginMoved(row domain.DeploymentCommitSigner, read keyRead) bool {
+	return row.GitHubUserID > 0 && read.found && !strings.EqualFold(read.account.Login, d.Signer.Login)
+}
+
+// newKeyAdvice is what an operator does to sign as an account other than the
+// one a key is bound to.
+const newKeyAdvice = "a key stays with the account a check first found it on, so to sign as another account, generate a new key and set " + EnvDeploymentSignerKey
 
 // checkKey is the periodic check.
 func (d *DeploymentHealth) checkKey(ctx context.Context, row domain.DeploymentCommitSigner) {
 	read, err := d.readKey(ctx, row)
 	if err != nil {
 		CountCheck(ctx, CheckPeriodic, CheckResultError)
-		signerLog.WarnContext(ctx, "deployment commit signer periodic check could not read GitHub; it runs again next interval",
-			"login", row.Login, "host", row.Host, "error", err)
+		msg := "deployment commit signer periodic check could not read GitHub; this pod tries again after retry_in"
+		if ghclient.IsHTTP404(err) {
+			msg = "the deployment commit signer's GitHub does not serve SSH signing keys, so it cannot verify a commit TF signs"
+		}
+		signerLog.WarnContext(ctx, msg, "login", row.Login, "host", row.Host, "retry_in", d.backOff(), "error", err)
 		return
 	}
 	check := db.DeploymentSignerKeyCheck{KeyFound: read.keyFound}
 	if read.found {
-		id, err := strconv.ParseInt(read.account.ID, 10, 64)
-		if err == nil {
-			check.GitHubUserID, check.Login, check.Name = id, read.account.Login, read.account.Name
-		}
+		check.GitHubUserID, check.Login, check.Name = read.id, read.account.Login, read.account.Name
 	}
 	result := domain.CommitVerificationValid
 	if !read.keyFound {
@@ -227,18 +276,27 @@ func (d *DeploymentHealth) checkKey(ctx context.Context, row domain.DeploymentCo
 	case !read.found && read.account.Login != "":
 		signerLog.WarnContext(ctx, "the deployment commit signer's login names an account that is not a user; a signer must be a user account",
 			"login", read.account.Login, "type", read.account.Type, "host", row.Host)
+	case !read.found && row.GitHubUserID > 0:
+		signerLog.WarnContext(ctx, "GitHub no longer has the account the deployment commit signer's key signs as; "+newKeyAdvice,
+			"login", row.Login, "github_user_id", row.GitHubUserID, "host", row.Host)
 	case !read.found:
 		signerLog.WarnContext(ctx, "GitHub has no account for the deployment commit signer",
-			"login", row.Login, "github_user_id", row.GitHubUserID, "host", row.Host)
+			"login", row.Login, "host", row.Host)
 	case !read.keyFound:
 		signerLog.WarnContext(ctx, "the deployment commit signer's key is not among the account's signing keys; add it under Settings → SSH and GPG keys with key type Signing key",
 			"login", read.account.Login, "host", row.Host, "public_key", d.Signer.PublicKey)
 	}
+	if d.loginMoved(row, read) {
+		signerLog.WarnContext(ctx, EnvDeploymentSignerLogin+" names another account than the one the deployment commit signer's key signs as; after a rename, set it to the account's login, and "+newKeyAdvice,
+			"configured_login", d.Signer.Login, "github_user_id", row.GitHubUserID, "login", read.account.Login, "host", row.Host)
+	}
 	updated, err := d.Stores.DeploymentCommitSigners.RecordKeyCheckSystem(ctx, row, check)
 	if err != nil {
-		signerLog.ErrorContext(ctx, "deployment commit signer periodic check could not be recorded", "error", err)
+		signerLog.ErrorContext(ctx, "deployment commit signer periodic check could not be recorded; this pod tries again after retry_in",
+			"retry_in", d.backOff(), "error", err)
 		return
 	}
+	d.failures, d.retryAt = 0, time.Time{}
 	if updated != nil {
 		d.observe(ctx, *updated)
 	}
@@ -305,21 +363,23 @@ func (d *DeploymentHealth) check(ctx context.Context, row domain.DeploymentCommi
 	case !read.found && read.account.Login != "":
 		return missing, &VerifyFault{Message: fmt.Sprintf("%s is a %s account on %s; the deployment signer must be a user account. Set %s to one",
 			read.account.Login, read.account.Type, d.Signer.Host, EnvDeploymentSignerLogin)}, nil
+	case !read.found && row.GitHubUserID > 0:
+		return missing, &VerifyFault{Message: fmt.Sprintf("%s no longer has account %d (last seen as %s), the account this key signs as; %s",
+			d.Signer.Host, row.GitHubUserID, row.Login, newKeyAdvice)}, nil
 	case !read.found:
 		return missing, &VerifyFault{Message: fmt.Sprintf("%s has no account %s; set %s to the account that should sign", d.Signer.Host, row.Login, EnvDeploymentSignerLogin)}, nil
+	case !read.keyFound && d.loginMoved(row, read):
+		return missing, &VerifyFault{Message: fmt.Sprintf("%s is %s, but this key signs as account %d, now %s, and is not among its signing keys. To keep signing as %s, put the key back on it and set %s to %s; %s",
+			EnvDeploymentSignerLogin, d.Signer.Login, row.GitHubUserID, read.account.Login, read.account.Login, EnvDeploymentSignerLogin, read.account.Login, newKeyAdvice)}, nil
 	case !read.keyFound:
 		return missing, &VerifyFault{Message: fmt.Sprintf("the deployment signer's key is not among %s's signing keys on GitHub; add it in Settings → SSH and GPG keys → New SSH key with key type Signing key, then verify again. GitHub's listing can take a minute to show a key just added",
 			read.account.Login)}, nil
 	}
-	accountID, err := strconv.ParseInt(read.account.ID, 10, 64)
-	if err != nil {
-		return verifyResult{}, nil, fmt.Errorf("read the signer's account id %q: %w", read.account.ID, err)
-	}
-	passed := verifyResult{reason: domain.CommitVerificationValid, account: read.account, accountID: accountID}
+	passed := verifyResult{reason: domain.CommitVerificationValid, account: read.account, accountID: read.id}
 	if row.Status != domain.CommitSignerBroken || row.StatusReason == "" || row.StatusReason == domain.CommitSignerReasonKeyMissing {
 		return passed, nil, nil
 	}
-	reason, fault, err := d.recheckFailedCommit(ctx, row, accountID, read.account.Login)
+	reason, fault, err := d.recheckFailedCommit(ctx, row, read.id, read.account.Login)
 	if err != nil || fault != nil {
 		return verifyResult{reason: reason}, fault, err
 	}

@@ -41,6 +41,10 @@ type healthGitHub struct {
 	// repository the credential lost access to.
 	commits map[string]ghclient.CommitVerification
 	failing bool
+	// limited makes every account read a 403, as a rate limit does, and
+	// accountReads counts the account reads made.
+	limited      bool
+	accountReads int
 }
 
 func newHealthGitHub(t *testing.T, key string) (*healthGitHub, string) {
@@ -65,7 +69,11 @@ func (g *healthGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		kind = ghclient.AccountTypeUser
 	}
 	switch {
+	case g.limited && (strings.HasPrefix(path, "/user/") || strings.HasPrefix(path, "/users/")):
+		g.accountReads++
+		http.Error(w, `{"message":"API rate limit exceeded"}`, http.StatusForbidden)
 	case path == fmt.Sprintf("/user/%d", id), path == "/users/"+g.login:
+		g.accountReads++
 		if g.deleted {
 			notFound()
 			return

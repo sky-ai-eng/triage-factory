@@ -19,6 +19,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -144,7 +145,7 @@ func printSigner(w io.Writer, signer *signing.DeploymentSigner, row domain.Deplo
 		account = strconv.FormatInt(row.GitHubUserID, 10)
 	}
 	fmt.Fprintf(tw, "login\t%s on %s (account %s)\n", row.Login, row.Host, account)
-	if row.Login != signer.Login {
+	if !strings.EqualFold(row.Login, signer.Login) {
 		fmt.Fprintf(tw, "configured login\t%s\n", signer.Login)
 	}
 	status := string(row.Status)

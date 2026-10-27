@@ -1114,10 +1114,19 @@ to no org:
   credential**, since both are public on GitHub. Pods racing for a due check
   is harmless; the write is a compare-and-set. Finding the key makes a
   `pending` signer `active` as well as one broken for `key_missing`, because
-  the operator adds the key to the account before configuring it. A GitHub
+  the operator adds the key to the account before configuring it. A check
+  that cannot read GitHub writes nothing and logs a WARN with `retry_in`: that
+  pod tries again after a minute, then two, doubling up to the 15-minute
+  interval, so a rate limit on anonymous reads (60 an hour per address on
+  github.com, shared by pods behind one NAT) is not spent retrying. A GitHub
   Enterprise Server in private mode refuses unauthenticated reads, so there the
   periodic check counts `error`, and Verify, which reads the account the same
   way, cannot pass: the deployment signer stays `pending` on such a host.
+- **A key stays with its account.** The first check that finds the key binds
+  it to that account's id, and every later check follows the id, so a rename
+  on GitHub keeps signing. When `TF_GITHUB_COMMIT_SIGNER_LOGIN` no longer
+  names that account, each check logs a WARN saying so: after a rename, set it
+  to the new login; to sign as another account, generate a new key.
 - **Post-push check, per org.** Each managed workspace's GitHub cycle reads the
   commits its runs signed as the deployment signer, with that workspace's
   credential, on the control pod holding the brain lease. A failure breaks the
@@ -1125,7 +1134,9 @@ to no org:
   (`triagefactory commit-signer verify` on a control container) re-reads the
   commit and GitHub answers `valid`.
 
-Its checks count in `tf_commit_signer_checks_total` like an org signer's. A
+Its checks count in `tf_commit_signer_checks_total` like an org signer's,
+except that a periodic check is counted by each control pod that makes it, so
+its rate grows with the number of control pods. A
 broken deployment signer stops signing for every managed workspace at the next
 signature, and each control pod logs a WARN when it reads the signer broken
 (`deployment commit signer is broken; managed workspaces commit unsigned until

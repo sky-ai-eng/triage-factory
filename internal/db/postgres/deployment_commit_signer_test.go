@@ -164,6 +164,10 @@ func TestDeploymentCommitSignerStore_Postgres_KeyCheck(t *testing.T) {
 		if gone.Status != domain.CommitSignerBroken || gone.StatusReason != domain.CommitSignerReasonKeyMissing {
 			t.Errorf("status = %s (%q), want broken (key_missing): an account GitHub no longer has holds no key", gone.Status, gone.StatusReason)
 		}
+		noLogin, err := store.RecordKeyCheckSystem(ctx, *gone, db.DeploymentSignerKeyCheck{GitHubUserID: deploymentUserID, KeyFound: true})
+		if err != nil || noLogin == nil || noLogin.Login != "TriageFactory" {
+			t.Errorf("a check that read the account with no login = %+v, %v; want the stored login kept", noLogin, err)
+		}
 	})
 
 	t.Run("another account than the one the row follows", func(t *testing.T) {

@@ -65,12 +65,12 @@ func (s *deploymentCommitSignerStore) RecordKeyCheckSystem(ctx context.Context, 
 	status, reason := db.DeploymentKeyCheckTransition(before.Status, before.StatusReason, check.KeyFound)
 	var userID, login any
 	if check.GitHubUserID > 0 {
-		userID, login = check.GitHubUserID, check.Login
+		userID, login = check.GitHubUserID, nullIfEmpty(check.Login)
 	}
-	// $3 NULL is an account the check could not find, which keeps what the
-	// row holds. The WHERE is the compare half of a compare-and-set on the
-	// status the check read, and refuses an account other than the one the
-	// row already follows.
+	// $3 NULL is an account the check could not find, and $4 NULL a login
+	// GitHub did not give; each keeps what the row holds. The WHERE is the
+	// compare half of a compare-and-set on the status the check read, and
+	// refuses an account other than the one the row already follows.
 	row, err := db.ScanDeploymentCommitSigner(s.q.QueryRowContext(ctx, `
 		UPDATE deployment_commit_signer SET
 			github_user_id = COALESCE($3::bigint, github_user_id),

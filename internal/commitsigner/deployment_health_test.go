@@ -135,12 +135,74 @@ func TestDeploymentHealth_PeriodicCheckActivatesBreaksAndRestores(t *testing.T) 
 	if !strings.Contains(logs.String(), "deployment commit signer is broken") {
 		t.Errorf("logs = %s\nwant a WARN that the deployment commit signer is broken", logs)
 	}
+	if !strings.Contains(logs.String(), "names another account than the one the deployment commit signer's key signs as") {
+		t.Errorf("logs = %s\nwant a WARN that the configured login no longer names the account", logs)
+	}
 
 	gh.set(func(g *healthGitHub) { g.keys = []string{h.Signer.PublicKey} })
 	*clock = clock.Add(PeriodicCheckInterval + time.Minute)
 	h.Tick(ctx)
 	if got := health.only(t); got.Status != domain.CommitSignerActive {
 		t.Errorf("with the key back the signer is %s, want active", got.Status)
+	}
+}
+
+// A check that cannot read GitHub writes nothing, so the row stays due; the
+// pod waits a minute before reading again, then two, and starts over at a
+// minute once a check succeeds.
+func TestDeploymentHealth_FailedReadWaitsBeforeRetrying(t *testing.T) {
+	f := newFixture(t)
+	logs := captureLogs(t)
+	h, gh, health, _, clock := f.deploymentHealth(t)
+	ctx := context.Background()
+	reads := func() int {
+		gh.mu.Lock()
+		defer gh.mu.Unlock()
+		return gh.accountReads
+	}
+	tickAfter := func(d time.Duration) int {
+		*clock = clock.Add(d)
+		h.Tick(ctx)
+		return reads()
+	}
+
+	gh.set(func(g *healthGitHub) { g.limited = true })
+	if n := tickAfter(0); n != 1 {
+		t.Fatalf("account reads after the first tick = %d, want 1", n)
+	}
+	if got := health.only(t); got.Status != domain.CommitSignerPending || got.CheckedAt != nil {
+		t.Fatalf("after a failed check the signer is %+v, want pending and never checked", got)
+	}
+	if !strings.Contains(logs.String(), "retry_in=1m0s") {
+		t.Errorf("logs = %s\nwant the WARN to say when the pod tries again", logs)
+	}
+	for _, step := range []struct {
+		after time.Duration
+		want  int
+	}{
+		{DeploymentWatchInterval, 1},
+		{time.Minute - DeploymentWatchInterval, 2},
+		{time.Minute, 2},
+		{time.Minute, 3},
+	} {
+		if n := tickAfter(step.after); n != step.want {
+			t.Fatalf("account reads %v later = %d, want %d", step.after, n, step.want)
+		}
+	}
+
+	gh.set(func(g *healthGitHub) { g.limited = false })
+	if n := tickAfter(4 * time.Minute); n != 4 {
+		t.Fatalf("account reads once the wait is over = %d, want 4", n)
+	}
+	if got := health.only(t); got.Status != domain.CommitSignerActive {
+		t.Fatalf("once GitHub answers the signer is %s, want active", got.Status)
+	}
+	gh.set(func(g *healthGitHub) { g.limited = true })
+	if n := tickAfter(PeriodicCheckInterval); n != 5 {
+		t.Fatalf("account reads at the next due check = %d, want 5", n)
+	}
+	if n := tickAfter(time.Minute); n != 6 {
+		t.Errorf("account reads a minute after a failure that followed a success = %d, want 6: the wait starts over", n)
 	}
 }
 
@@ -236,6 +298,41 @@ func TestDeploymentHealth_Verify(t *testing.T) {
 	})
 	if row, fault, err := h.Verify(ctx); err != nil || fault != nil || row.Status != domain.CommitSignerActive || row.StatusReason != "" {
 		t.Errorf("Verify after the fix = %+v, %+v, %v; want active with no reason", row, fault, err)
+	}
+}
+
+// A key stays with the account a check first found it on. When the configured
+// login no longer names that account and the key has left it, or the account
+// is gone, Verify says so and that signing as another account takes a new key,
+// rather than naming a key missing from an account the operator did not
+// configure.
+func TestDeploymentHealth_VerifyNamesTheAccountTheKeyIsBoundTo(t *testing.T) {
+	for name, tc := range map[string]struct {
+		stage func(g *healthGitHub)
+		want  string
+	}{
+		"the key moved to another account": {
+			stage: func(g *healthGitHub) { g.login, g.keys = "OtherAccount", nil },
+			want:  "TF_GITHUB_COMMIT_SIGNER_LOGIN is TriageFactory, but this key signs as account 90001, now OtherAccount",
+		},
+		"the account was deleted": {
+			stage: func(g *healthGitHub) { g.deleted = true },
+			want:  "no longer has account 90001 (last seen as TriageFactory)",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			h, gh, _, _, _ := f.deploymentHealth(t)
+			ctx := context.Background()
+			if _, fault, err := h.Verify(ctx); err != nil || fault != nil {
+				t.Fatalf("first Verify = %+v, %v", fault, err)
+			}
+			gh.set(tc.stage)
+			_, fault, err := h.Verify(ctx)
+			if err != nil || fault == nil || !strings.Contains(fault.Message, tc.want) || !strings.Contains(fault.Message, "generate a new key") {
+				t.Errorf("Verify = %+v, %v; want a fault saying %q and that another account takes a new key", fault, err, tc.want)
+			}
+		})
 	}
 }
 
