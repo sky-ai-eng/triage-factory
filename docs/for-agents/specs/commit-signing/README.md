@@ -621,7 +621,10 @@ Under `/api/orgs/{org_id}/github/`, beside the App and PAT routes:
   `usage` node (`?since=&until=`) with its signatures by hour and by org:
   `/api/fleet/commit-signer`. They are core and carry no licence: they are not
   part of the EE fleet console, which would need an entitlement of its own to
-  hold them, and Verify is the only way out of a broken signer.
+  hold them, and Verify is the only way out of a broken signer. The core CLI
+  makes the same read and Verify from a control container
+  (`triagefactory commit-signer status | verify`), as `instance drain` does
+  for the console's drain.
 
 ## 7. Health
 

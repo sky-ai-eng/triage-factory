@@ -1116,13 +1116,15 @@ to no org:
   `pending` signer `active` as well as one broken for `key_missing`, because
   the operator adds the key to the account before configuring it. A GitHub
   Enterprise Server in private mode refuses unauthenticated reads, so there the
-  periodic check counts `error` and the signer waits for an operator's Verify.
+  periodic check counts `error`, and Verify, which reads the account the same
+  way, cannot pass: the deployment signer stays `pending` on such a host.
 - **Post-push check, per org.** Each managed workspace's GitHub cycle reads the
   commits its runs signed as the deployment signer, with that workspace's
   credential, on the control pod holding the brain lease. A failure breaks the
   deployment signer for every managed workspace, until an operator's Verify
-  (`POST /api/fleet/commit-signer/verify`) re-reads the commit
-  and GitHub answers `valid`.
+  (`triagefactory commit-signer verify` on a control container, or
+  `POST /api/fleet/commit-signer/verify`) re-reads the commit and GitHub
+  answers `valid`.
 
 Its checks count in `tf_commit_signer_checks_total` like an org signer's. A
 broken deployment signer stops signing for every managed workspace at the next
