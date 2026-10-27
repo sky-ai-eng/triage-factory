@@ -94,6 +94,7 @@ func TestDispatchJailCLI_RefusesHostSubcommands(t *testing.T) {
 		{"uninstall", []string{"uninstall", "--yes"}},
 		{"migrate", []string{"migrate", "up"}},
 		{"jwk-init", []string{"jwk-init"}},
+		{"deploy", []string{"deploy", "init"}},
 		{"instance", []string{"instance", "list"}},
 		{"operator", []string{"operator", "list"}},
 		{"commit-signer", []string{"commit-signer", "verify"}},

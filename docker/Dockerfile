@@ -105,6 +105,11 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 COPY . .
 # embed.go pulls frontend/dist/ into the binary; ship it in before build.
 COPY --from=frontend-builder /src/frontend/dist ./frontend/dist
+# embed.go also embeds docker-compose.yml, for `triagefactory deploy`, which
+# runs on a Docker host and never from this image. .dockerignore keeps that
+# file out of the context (see the note there), so an empty one stands in for
+# the embed; deploy refuses to render from an empty compose file.
+RUN touch docker-compose.yml
 # Static build for alpine (musl) runtime. The same binary is also
 # bind-mounted into the gVisor sandbox's alpine rootfs at runtime, so
 # musl-static is the only correct shape — a glibc-linked binary would
