@@ -113,7 +113,10 @@ func firstInit(ctx context.Context, h *host, b Bundle, dir string, o initOptions
 	} else {
 		ref, err := h.resolveImage(ctx, b.Version)
 		if err != nil {
-			h.report(check{fail, "Signature", "not verified; nothing was written"})
+			// Not necessarily a bad signature: the tag may be unpublished,
+			// the registry may refuse the pull, or the trust root may be
+			// unreachable. The error says which.
+			h.report(check{fail, "Pinned", "no verified digest; nothing was written"})
 			return err
 		}
 		src.image = ref
@@ -165,7 +168,9 @@ Start the stack:
 // lacks and touches nothing else. Re-rendering is an upgrade, not this.
 func reinit(h *host, b Bundle, dir string, st deployState, o initOptions) error {
 	if st.Version != b.Version {
-		return fmt.Errorf("%s was rendered by %s and this binary is %s; init does not re-render a deployment. Run the %s binary, or deploy upgrade to move the deployment to %s", dir, st.Version, b.Version, st.Version, b.Version)
+		// TODO(TFAC-1214): name `deploy upgrade` here as the way to move the
+		// deployment to this binary's version once that subcommand exists.
+		return fmt.Errorf("%s was rendered by %s and this binary is %s; init does not re-render a deployment. Run the %s binary against it", dir, st.Version, b.Version, st.Version)
 	}
 	if o.project != "" && o.project != st.Project {
 		return fmt.Errorf("--project %s: this deployment's compose project is %s, and init never changes it", o.project, st.Project)
@@ -209,14 +214,35 @@ func reinit(h *host, b Bundle, dir string, st deployState, o initOptions) error 
 		return err
 	}
 
-	var added, lossy []string
+	env := envValues(base)
+	var added, replaced, lossy []string
+	newKeypair := false
 	for _, v := range vars {
-		added = append(added, v.Key)
+		if env.get(v.Key) != "" {
+			replaced = append(replaced, v.Key)
+		} else {
+			added = append(added, v.Key)
+		}
 		if lossyIfReplaced[v.Key] {
 			lossy = append(lossy, v.Key)
 		}
+		newKeypair = newKeypair || v.Key == "GOTRUE_JWT_KEYS"
 	}
-	fmt.Fprintf(h.stdout, "\nAdded to %s: %s\n", envPath, strings.Join(added, ", "))
+	if len(added) > 0 {
+		fmt.Fprintf(h.stdout, "\nAdded to %s: %s\n", envPath, strings.Join(added, ", "))
+	}
+	if len(replaced) > 0 {
+		fmt.Fprintf(h.stdout, "\nReplaced in %s, because the GoTrue key that signed them is new: %s\n", envPath, strings.Join(replaced, ", "))
+	}
+	if newKeypair && env.get("TF_GOTRUE_SERVICE_ROLE_TOKEN_FILE") != "" {
+		fmt.Fprintf(h.stdout, `
+warning: TF_GOTRUE_SERVICE_ROLE_TOKEN_FILE names a token signed by the old
+GoTrue key, which no longer verifies. Mint one against the new key with
+  triagefactory jwk-init --write-env .env
+which reuses the new key and writes only TF_GOTRUE_SERVICE_ROLE_TOKEN, and
+move that value into the file.
+`)
+	}
 	if len(lossy) > 0 {
 		fmt.Fprintf(h.stdout, `
 warning: these values were missing and are new: %s
@@ -270,7 +296,7 @@ func checkoutPath(path string) (string, error) {
 }
 
 // writeDeployment writes a first init's files. dir was empty or absent, so
-// when a write fails everything in it is this call's to remove.
+// when a write fails everything this call wrote there is its to remove.
 func writeDeployment(dir string, create bool, files map[string][]byte, env []byte, st deployState) (err error) {
 	if create {
 		if err := os.Mkdir(dir, 0o755); err != nil {
@@ -285,9 +311,10 @@ func writeDeployment(dir string, create bool, files map[string][]byte, env []byt
 			_ = os.RemoveAll(dir)
 			return
 		}
-		entries, _ := os.ReadDir(dir)
-		for _, e := range entries {
-			_ = os.RemoveAll(filepath.Join(dir, e.Name()))
+		// Only the names this call writes: dir was checked empty before the
+		// image was resolved, and anything that arrived since is not ours.
+		for _, name := range topLevelNames(files) {
+			_ = os.RemoveAll(filepath.Join(dir, name))
 		}
 	}()
 	for _, path := range slices.Sorted(maps.Keys(files)) {
@@ -304,6 +331,18 @@ func writeDeployment(dir string, create bool, files map[string][]byte, env []byt
 	}
 	// Last, so a directory holding a state file holds everything with it.
 	return writeState(dir, st)
+}
+
+// topLevelNames are the entries a first init creates directly in the
+// deployment directory: each rendered file's first path segment, .env and the
+// state file.
+func topLevelNames(files map[string][]byte) []string {
+	names := map[string]bool{envFile: true, stateFile: true}
+	for path := range files {
+		first, _, _ := strings.Cut(path, "/")
+		names[first] = true
+	}
+	return slices.Sorted(maps.Keys(names))
 }
 
 // mkdirs creates rel's directories under dir at mode 0755, whatever the
@@ -354,9 +393,9 @@ On a terminal, init asks for whichever of the three values no flag gave;
 without one, it fails and names the missing flags.
 
 WHAT IT DOES
-  Checks the host (Linux, Docker Engine, Compose 2+, cgroup v2, port 3000),
-  resolves ghcr.io/sky-ai-eng/triage-factory:<this binary's version> to a
-  digest, verifies that digest's cosign signature in-process against
+  Checks the host (Linux, Docker Engine, Compose 2+, cgroup v2, ports 3000,
+  9999 and 3030), resolves ghcr.io/sky-ai-eng/triage-factory:<this binary's
+  version> to a digest, verifies that digest's cosign signature in-process against
   Sigstore's public trust root — issuer token.actions.githubusercontent.com,
   identity exactly this repository's docker-publish.yml at this version's tag —
   and only then renders:

@@ -119,7 +119,7 @@ func TestDoctor_BundleWarnings(t *testing.T) {
 		if code := doctorRun(t, f, b, dir); code != 0 {
 			t.Fatalf("exit = %d; want 0\n%s", code, f.out)
 		}
-		wantLine(t, f.out.String(), "Binary version", warn, "or deploy upgrade to move the deployment to v99.0.0")
+		wantLine(t, f.out.String(), "Binary version", warn, "and this binary is v99.0.0; run the")
 	})
 	t.Run("source build", func(t *testing.T) {
 		f := newFakeHost(t)

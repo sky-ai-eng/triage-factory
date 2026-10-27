@@ -164,7 +164,8 @@ type deployState struct {
 	Image     *string `json:"image"`
 	BuildFrom *string `json:"build_from"`
 	// Project is the compose project name, which compose prefixes every
-	// volume with; every compose call deploy makes passes it.
+	// volume with and labels every container with; doctor finds the stack's
+	// containers by that label.
 	Project string `json:"project"`
 	// Executors is how many executor replicas the stack runs.
 	Executors int `json:"executors"`

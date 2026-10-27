@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/jwkinit"
@@ -215,8 +216,17 @@ func validatePublicURL(raw string) error {
 		return fmt.Errorf("%q must not end with a slash", raw)
 	case u.Path != "" || u.Opaque != "":
 		return fmt.Errorf("%q must not have a path; serve the deployment at the root of its host", raw)
-	case u.RawQuery != "" || u.ForceQuery || u.Fragment != "":
+	case u.RawQuery != "" || u.ForceQuery || strings.Contains(raw, "#"):
+		// url.Parse reports a bare trailing # as an empty fragment, so the
+		// raw string is what tells it apart from no fragment at all.
 		return fmt.Errorf("%q must not have a query or fragment", raw)
+	}
+	if port := u.Port(); port != "" {
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("%q has port %s, which is not a TCP port", raw, port)
+		}
+	} else if strings.HasSuffix(u.Host, ":") {
+		return fmt.Errorf("%q has an empty port", raw)
 	}
 	return nil
 }

@@ -529,6 +529,27 @@ func TestInit_Refusals(t *testing.T) {
 			wantErr: "must not have a query or fragment",
 		},
 		{
+			name: "public URL with an empty fragment",
+			args: func(t *testing.T, dir string) []string {
+				return withFlag(initArgs(t, dir), "--public-url", "https://tf.example.com#")
+			},
+			wantErr: "must not have a query or fragment",
+		},
+		{
+			name: "public URL with an empty port",
+			args: func(t *testing.T, dir string) []string {
+				return withFlag(initArgs(t, dir), "--public-url", "https://tf.example.com:")
+			},
+			wantErr: "has an empty port",
+		},
+		{
+			name: "public URL with an out-of-range port",
+			args: func(t *testing.T, dir string) []string {
+				return withFlag(initArgs(t, dir), "--public-url", "https://tf.example.com:99999")
+			},
+			wantErr: "is not a TCP port",
+		},
+		{
 			name: "public URL with credentials",
 			args: func(t *testing.T, dir string) []string {
 				return withFlag(initArgs(t, dir), "--public-url", "https://u:p@tf.example.com")

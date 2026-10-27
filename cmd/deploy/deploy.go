@@ -32,10 +32,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/term"
@@ -108,21 +110,26 @@ type host struct {
 func newHost() *host {
 	stdinFD := int(os.Stdin.Fd())
 	return &host{
-		goos:     runtime.GOOS,
-		stdin:    os.Stdin,
-		stdout:   os.Stdout,
-		stderr:   os.Stderr,
-		terminal: term.IsTerminal(stdinFD),
-		readSecret: func() (string, error) {
-			b, err := term.ReadPassword(stdinFD)
-			return string(b), err
-		},
+		goos:       runtime.GOOS,
+		stdin:      os.Stdin,
+		stdout:     os.Stdout,
+		stderr:     os.Stderr,
+		terminal:   term.IsTerminal(stdinFD),
+		readSecret: func() (string, error) { return readSecretRestoringOnSignal(stdinFD) },
 		docker: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			// Bounded, so a daemon that accepts the connection and never
+			// answers fails the check instead of hanging the command.
+			ctx, cancel := context.WithTimeout(ctx, dockerCallTimeout)
+			defer cancel()
 			cmd := exec.CommandContext(ctx, "docker", args...)
 			cmd.Dir = dir
 			var stdout, stderr strings.Builder
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
 			err := cmd.Run()
+			if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				err = fmt.Errorf("docker %s did not finish within %s", strings.Join(args, " "), dockerCallTimeout)
+				return []byte(stdout.String()), nil, err
+			}
 			return []byte(stdout.String()), []byte(stderr.String()), err
 		},
 		cgroupControllers: "/sys/fs/cgroup/cgroup.controllers",
@@ -141,6 +148,38 @@ func newHost() *host {
 		controlURL: "http://127.0.0.1:3000",
 		gotrueURL:  "http://127.0.0.1:9999",
 	}
+}
+
+// readSecretRestoringOnSignal reads one line from the terminal at fd without
+// echoing it. term.ReadPassword restores echo only when it returns, and an
+// interrupt kills the process before it does, which would leave the
+// operator's shell not echoing what they type; so an interrupt during the
+// read restores the terminal first and then exits as the signal would have.
+func readSecretRestoringOnSignal(fd int) (string, error) {
+	state, err := term.GetState(fd)
+	if err != nil {
+		return "", err
+	}
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigs)
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case sig := <-sigs:
+			_ = term.Restore(fd, state)
+			fmt.Fprintln(os.Stderr)
+			code := 130
+			if s, ok := sig.(syscall.Signal); ok {
+				code = 128 + int(s)
+			}
+			os.Exit(code)
+		case <-done:
+		}
+	}()
+	b, err := term.ReadPassword(fd)
+	return string(b), err
 }
 
 // status is one check's outcome. A fail makes the command exit non-zero; a
@@ -247,18 +286,33 @@ func preflight(ctx context.Context, h *host, firstInit bool) ([]check, bool) {
 		cs = append(cs, check{fail, "cgroup v2", fmt.Sprintf("%s is missing: this host runs cgroup v1, and the executor's per-run memory ceilings need v2", h.cgroupControllers)})
 	}
 	if firstInit {
-		if h.portFree(controlPort) {
-			cs = append(cs, check{pass, "Port 3000", "free"})
-		} else {
-			cs = append(cs, check{warn, "Port 3000", "in use; the control service publishes it, so the stack cannot start until it is free (or compose.override.yml moves it)"})
+		for _, p := range publishedPorts {
+			name := "Port " + strconv.Itoa(p.port)
+			if h.portFree(p.port) {
+				cs = append(cs, check{pass, name, "free"})
+			} else {
+				cs = append(cs, check{warn, name, fmt.Sprintf("in use; the %s service publishes it, so the stack cannot start until it is free (or compose.override.yml moves it)", p.service)})
+			}
 		}
 	}
 	return cs, true
 }
 
-// controlPort is the host port docker-compose.yml publishes the control
-// service on.
-const controlPort = 3000
+// dockerCallTimeout bounds one docker CLI call. The slowest deploy makes is
+// doctor's container start under the seccomp profile, which takes seconds.
+const dockerCallTimeout = 2 * time.Minute
+
+// publishedPorts are the host ports docker-compose.yml publishes, each with
+// the service that publishes it. Any one of them held by another process
+// stops `docker compose up`.
+var publishedPorts = []struct {
+	port    int
+	service string
+}{
+	{3000, "control"},
+	{9999, "gotrue"},
+	{3030, "grafana"},
+}
 
 // firstLine is the first non-empty line of a command's stderr, or err's text
 // when stderr is empty: enough to say why a docker call failed on one line.

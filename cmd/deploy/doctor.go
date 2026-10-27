@@ -91,7 +91,9 @@ func bundleChecks(h *host, b Bundle, dir string, st deployState) []check {
 	if st.Version == b.Version {
 		cs = append(cs, check{pass, "Binary version", b.Version})
 	} else {
-		cs = append(cs, check{warn, "Binary version", fmt.Sprintf("the deployment is %s and this binary is %s; run the %s binary, or deploy upgrade to move the deployment to %s", st.Version, b.Version, st.Version, b.Version)})
+		// TODO(TFAC-1214): name `deploy upgrade` here as the way to move the
+		// deployment to this binary's version once that subcommand exists.
+		cs = append(cs, check{warn, "Binary version", fmt.Sprintf("the deployment is %s and this binary is %s; run the %s binary against it", st.Version, b.Version, st.Version)})
 	}
 	return cs
 }
@@ -148,13 +150,19 @@ func stackChecks(ctx context.Context, h *host, dir string, st deployState) []che
 	if len(idList) == 0 {
 		return []check{{skip, "Containers", fmt.Sprintf("compose project %s has no containers; the running-stack checks run once it is up", st.Project)}}
 	}
+	// A container removed between the two calls (a one-shot run with --rm)
+	// makes inspect exit non-zero while still printing the rest, so its
+	// output is read before its exit status.
 	out, errOut, err := h.docker(ctx, "", append([]string{"inspect"}, idList...)...)
-	if err != nil {
-		return []check{{fail, "Containers", "docker inspect failed: " + firstLine(errOut, err)}}
-	}
 	var containers []container
-	if err := json.Unmarshal(out, &containers); err != nil {
-		return []check{{fail, "Containers", "read docker inspect: " + err.Error()}}
+	if jerr := json.Unmarshal(out, &containers); jerr != nil || len(containers) == 0 {
+		if err != nil {
+			return []check{{fail, "Containers", "docker inspect failed: " + firstLine(errOut, err)}}
+		}
+		if jerr != nil {
+			return []check{{fail, "Containers", "read docker inspect: " + jerr.Error()}}
+		}
+		return []check{{skip, "Containers", fmt.Sprintf("compose project %s has no containers; the running-stack checks run once it is up", st.Project)}}
 	}
 
 	cs := []check{containersCheck(containers)}
@@ -273,7 +281,8 @@ One line per check, each pass, warn, fail or skip. Exits non-zero when any
 check fails; warnings do not.
 
   Preflight      Linux, Docker Engine reachable, Docker Compose 2 or later,
-                 cgroup v2, and port 3000 free (before the first init only)
+                 cgroup v2, and ports 3000, 9999 and 3030 free (before the
+                 first init only)
   Bundle         the state file is present, the rendered files match what
                  init rendered (a warning if not), and this binary is the
                  deployment's version (a warning if not)
