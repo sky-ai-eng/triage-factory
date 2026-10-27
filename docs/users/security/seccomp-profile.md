@@ -43,17 +43,6 @@ narrows what a compromised process in the container can call.
   separate from the seccomp list in the sandboxed agent's own OCI spec, which
   gVisor does not enforce.
 
-## Checking it
-
-On a running executor:
-
-```sh
-docker compose exec executor grep Seccomp /proc/1/status
-```
-
-`Seccomp: 2` means a filter is in force. `0` means the container is running
-unconfined.
-
 ## If the executor fails to start with an unknown syscall name
 
 The profile is copied from a recent Docker release and names newer syscalls
