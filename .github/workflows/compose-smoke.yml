@@ -6,7 +6,7 @@ name: compose-smoke
 # surface — the Go suite tests the S3 client, never the stack. See
 # scripts/compose-smoke.sh for what's asserted.
 #
-# Triggered on PRs that touch the deploy surface (compose file, image build,
+# Triggered on PRs that touch the deploy surface (compose files, image build,
 # env template, Postgres migrations, the script/workflow, or the module graph)
 # and on every push to main — the release source — so a regression that lands
 # is caught before a release is cut from it. ubuntu-latest ships Docker +
@@ -16,6 +16,7 @@ on:
   pull_request:
     paths:
       - 'docker-compose.yml'
+      - 'compose.dev.yml'
       - 'docker/**'
       - '.env.example'
       - 'internal/db/migrations-postgres/**'
