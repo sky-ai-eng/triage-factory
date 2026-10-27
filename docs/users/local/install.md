@@ -1,9 +1,9 @@
 # Install (local mode)
 
-Local mode runs as a single binary on your machine. To deploy Triage Factory for
-an organization, see [self-hosting](../self-hosting/install.md) instead.
-
-## Homebrew (macOS and Linux, recommended)
+Local mode is currently only supported on macOS and Linux. There are a few ways
+to download the software and a number of possible configuration flags, but I
+highly recommend ignoring all of that, using homebrew to download it, and
+running it without any flags.
 
 ```bash
 brew tap sky-ai-eng/tap
@@ -11,7 +11,18 @@ brew install triagefactory
 triagefactory
 ```
 
-## Release tarball
+## First launch
+
+The binary opens the app in your browser, and setup walks you through
+connecting GitHub, then optionally Jira or Linear. Either tracker can be added
+later in Settings. To put `triagefactory` on your `PATH` when you didn't use
+Homebrew, see [Running](running.md#cli-subcommands).
+
+---
+
+## Alternate installation methods
+
+### Release tarball
 
 Download `triagefactory_<version>_<platform>.tar.gz` from the
 [latest release](https://github.com/sky-ai-eng/triage-factory/releases/latest),
@@ -38,7 +49,7 @@ xattr -d com.apple.quarantine ./triagefactory
 To verify a release's signature first, see
 [Verifying releases](../security/verifying-releases.md).
 
-## Build from source
+### Build from source
 
 Requires Go 1.23+, Node.js 22.13+ (run `corepack enable` once to get the pinned
 pnpm), and the [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code).
@@ -50,10 +61,3 @@ cd frontend && pnpm install && pnpm run build && cd ..
 go build -o ./triagefactory .
 ./triagefactory
 ```
-
-## First launch
-
-The binary opens the app in your browser, and setup walks you through
-connecting GitHub, then optionally Jira or Linear. Either tracker can be added
-later in Settings. To put `triagefactory` on your `PATH` when you didn't use
-Homebrew, see [Running](running.md#cli-subcommands).

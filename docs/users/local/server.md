@@ -1,8 +1,6 @@
 # Running on a server (local mode)
 
-Local mode runs fine on a server, VM or container with no desktop session. This
-is still the single-user product; to serve an organization, see
-[self-hosting](../self-hosting/install.md).
+Local mode runs fine on a server, VM or container with no desktop session.
 
 A server has no OS keychain and no browser. Credentials go in an encrypted file,
 and you reach the UI from your own machine. Everything else is configured in the
@@ -20,8 +18,7 @@ app, as on a desktop.
    ```
 
    Persist it wherever the process gets its environment (a systemd unit's
-   `Environment=`, an env file, a shell profile). The server refuses to start
-   without it, and losing or changing it means re-entering every credential.
+   `Environment=`, an env file, a shell profile).
 
 3. **Start without a browser:**
 
@@ -45,8 +42,8 @@ app, as on a desktop.
 
 ## Claude credentials
 
-Either enter an Anthropic or Bedrock key in the app, or choose *Use system
-Claude Code credentials* and export the variables Claude Code reads
+Either enter an Anthropic or Bedrock key in the app, or choose _Use system
+Claude Code credentials_ and export the variables Claude Code reads
 (`ANTHROPIC_API_KEY`, or the Bedrock / Vertex variables) in the server
 process's environment, the same way as `TF_SECRET_ENCRYPTION_KEY`. See
 [Configuration](configuration.md#credentials).
