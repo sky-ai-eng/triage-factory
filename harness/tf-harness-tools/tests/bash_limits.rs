@@ -78,7 +78,8 @@ output in a file (`cmd > /tmp/cmd.log 2>&1 &`) and check on it with later comman
 
 /// A process that keeps writing to the command's output neither holds the call
 /// open nor dies of SIGPIPE once the call returns: it writes every 50 ms, so
-/// closed pipes would kill it well inside the 500 ms it is checked after.
+/// closed pipes would kill it well inside the 500 ms it is checked after. It
+/// sleeps before its first write so that `launched` is reliably the first line.
 #[test]
 fn a_background_process_that_logs_steadily_does_not_hold_the_call() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -87,7 +88,7 @@ fn a_background_process_that_logs_steadily_does_not_hold_the_call() {
     let out = execute(
         dir.path().to_str().unwrap(),
         &args(serde_json::json!({
-            "command": "echo $$ > pgid; (while :; do echo tick; sleep 0.05; done) & echo launched"
+            "command": "echo $$ > pgid; (while :; do sleep 0.05; echo tick; done) & echo launched"
         })),
         &BashOptions::default(),
     )
