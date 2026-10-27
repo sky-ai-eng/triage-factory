@@ -38,6 +38,7 @@ package jwkinit
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -50,7 +51,6 @@ import (
 	"math"
 	"math/big"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -58,6 +58,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
+	"github.com/sky-ai-eng/triage-factory/internal/envfile"
 )
 
 // serviceRoleSubject is the fixed `sub` on the long-lived service-role admin
@@ -102,97 +103,133 @@ func runGenerate(writeEnvPath string, rotate bool) error {
 	// GOTRUE_JWT_KEYS so enabling SSO on a live deployment mints only the
 	// service-role token — no keypair rotation, no forced re-auth. We look in
 	// the --write-env file first, then the process env.
-	var (
-		priv   *rsa.PrivateKey
-		kid    string
-		reused bool
-	)
+	existing := ""
 	if !rotate {
-		if existing := readExistingJWTKeys(writeEnvPath); existing != "" {
-			p, k, err := parseSigningKey(existing)
-			if err != nil {
-				return fmt.Errorf("reuse existing GOTRUE_JWT_KEYS: %w (pass --rotate to replace the keypair instead)", err)
-			}
-			priv, kid, reused = p, k, true
+		existing = readExistingJWTKeys(writeEnvPath)
+	}
+	m, err := Generate(existing, os.Getenv("TF_PUBLIC_URL"))
+	if err != nil {
+		if existing != "" {
+			return fmt.Errorf("%w (pass --rotate to replace the keypair instead)", err)
 		}
+		return err
 	}
 
-	// Fresh keypair material — only generated when there's nothing to reuse (or
-	// the operator asked to rotate). jwtSecret/keys stay zero-valued on the
-	// reuse path, signalling "don't touch GOTRUE_JWT_KEYS / GOTRUE_JWT_SECRET".
-	var (
-		keys      []map[string]any
-		jwtSecret string
-	)
-	if !reused {
-		var err error
-		keys, priv, kid, err = generateGoTrueKeys()
-		if err != nil {
-			return err
+	if writeEnvPath == "" {
+		if m.Reused() {
+			// Reusing an existing key from the env — print only the token; the
+			// keypair and secret already live wherever the operator keeps them.
+			fmt.Println("# service-role token signed with your existing GOTRUE_JWT_KEYS (TFAC-424); treat as a secret:")
+			fmt.Printf("TF_GOTRUE_SERVICE_ROLE_TOKEN=%s\n", m.ServiceRoleToken)
+			return nil
 		}
+		// Pretty-print stdout for human inspection; the .env form is compact.
+		var pretty bytes.Buffer
+		if err := json.Indent(&pretty, []byte(m.Keys), "", "  "); err != nil {
+			return fmt.Errorf("format keys: %w", err)
+		}
+		fmt.Println(pretty.String())
+		fmt.Println()
+		fmt.Println("# also set GOTRUE_JWT_SECRET (required by gotrue config; unused under RS256):")
+		fmt.Printf("GOTRUE_JWT_SECRET=%s\n", m.Secret)
+		fmt.Println()
+		fmt.Println("# service-role token TF presents to GoTrue's admin SSO API (TFAC-424); treat as a secret:")
+		fmt.Printf("TF_GOTRUE_SERVICE_ROLE_TOKEN=%s\n", m.ServiceRoleToken)
+		return nil
+	}
+
+	if err := envfile.Upsert(writeEnvPath, m.EnvVars()); err != nil {
+		return err
+	}
+	if m.Reused() {
+		fmt.Fprintf(os.Stderr, "reused existing GOTRUE_JWT_KEYS; wrote TF_GOTRUE_SERVICE_ROLE_TOKEN to %s (no keypair rotation)\n", writeEnvPath)
+	} else {
+		fmt.Fprintf(os.Stderr, "wrote GOTRUE_JWT_KEYS + GOTRUE_JWT_SECRET + TF_GOTRUE_SERVICE_ROLE_TOKEN to %s\n", writeEnvPath)
+	}
+	return nil
+}
+
+// Material is GoTrue's RS256 signing material as .env values.
+type Material struct {
+	// Keys is GOTRUE_JWT_KEYS (compact JSON) and Secret is GOTRUE_JWT_SECRET.
+	// Both are empty when Generate reused an existing keypair.
+	Keys   string
+	Secret string
+	// ServiceRoleToken is TF_GOTRUE_SERVICE_ROLE_TOKEN, signed with the reused
+	// or fresh key.
+	ServiceRoleToken string
+}
+
+// Reused reports whether the material came from an existing keypair, in
+// which case only the token is new.
+func (m Material) Reused() bool { return m.Keys == "" }
+
+// EnvVars returns the material as .env assignments: all three for a fresh
+// keypair, only the token for a reused one, so writing them never touches a
+// keypair the caller asked to keep.
+func (m Material) EnvVars() []envfile.Var {
+	if m.Reused() {
+		return []envfile.Var{{Key: "TF_GOTRUE_SERVICE_ROLE_TOKEN", Value: m.ServiceRoleToken}}
+	}
+	return []envfile.Var{
+		{Key: "GOTRUE_JWT_KEYS", Value: m.Keys},
+		{Key: "GOTRUE_JWT_SECRET", Value: m.Secret},
+		{Key: "TF_GOTRUE_SERVICE_ROLE_TOKEN", Value: m.ServiceRoleToken},
+	}
+}
+
+// Generate produces GoTrue's signing material. existingKeys is a
+// GOTRUE_JWT_KEYS value whose keypair to reuse, minting only the service-role
+// token against it; "" generates a fresh keypair and GOTRUE_JWT_SECRET
+// alongside. publicURL is the deployment's TF_PUBLIC_URL: the token's iss is
+// <publicURL>/auth/v1, and "" leaves the claim out (GoTrue does not enforce
+// it). Nothing here reads the environment or writes a file; the caller decides
+// where the values go.
+func Generate(existingKeys, publicURL string) (Material, error) {
+	var (
+		m    Material
+		priv *rsa.PrivateKey
+		kid  string
+	)
+	if existingKeys != "" {
+		p, k, err := parseSigningKey(existingKeys)
+		if err != nil {
+			return Material{}, fmt.Errorf("reuse existing GOTRUE_JWT_KEYS: %w", err)
+		}
+		priv, kid = p, k
+	} else {
+		keys, p, k, err := generateGoTrueKeys()
+		if err != nil {
+			return Material{}, err
+		}
+		priv, kid = p, k
+		encoded, err := json.Marshal(keys)
+		if err != nil {
+			return Material{}, fmt.Errorf("marshal keys: %w", err)
+		}
+		m.Keys = string(encoded)
 		// GoTrue's config validation still requires GOTRUE_JWT_SECRET to be
 		// non-empty even when ALGORITHM=RS256 (it's a legacy HS256 fallback that
 		// the asymmetric path doesn't actually exercise). Generate a random value
 		// alongside the JWKS so the operator install flow stays one command — and
 		// so the unused secret is at least cryptographically random rather than a
 		// sentinel string.
-		jwtSecret, err = randomHexSecret(32)
+		m.Secret, err = randomHexSecret(32)
 		if err != nil {
-			return fmt.Errorf("generate jwt secret: %w", err)
+			return Material{}, fmt.Errorf("generate jwt secret: %w", err)
 		}
 	}
 
 	// The long-lived RS256 service-role token TF presents to GoTrue's admin SSO
-	// API (TFAC-424). Signed with the (reused or fresh) private key — the key
+	// API. Signed with the (reused or fresh) private key — the key
 	// stays in this process and never reaches the TF server, which holds only
 	// the resulting token. The header kid must match the signing JWK's kid.
-	serviceToken, err := mintServiceRoleToken(priv, kid, serviceRoleIssuer())
+	token, err := mintServiceRoleToken(priv, kid, serviceRoleIssuer(publicURL))
 	if err != nil {
-		return fmt.Errorf("mint service-role token: %w", err)
+		return Material{}, fmt.Errorf("mint service-role token: %w", err)
 	}
-
-	if writeEnvPath == "" {
-		if reused {
-			// Reusing an existing key from the env — print only the token; the
-			// keypair and secret already live wherever the operator keeps them.
-			fmt.Println("# service-role token signed with your existing GOTRUE_JWT_KEYS (TFAC-424); treat as a secret:")
-			fmt.Printf("TF_GOTRUE_SERVICE_ROLE_TOKEN=%s\n", serviceToken)
-			return nil
-		}
-		// Pretty-print stdout for human inspection; the .env form is compact.
-		pretty, _ := json.MarshalIndent(keys, "", "  ")
-		fmt.Println(string(pretty))
-		fmt.Println()
-		fmt.Println("# also set GOTRUE_JWT_SECRET (required by gotrue config; unused under RS256):")
-		fmt.Printf("GOTRUE_JWT_SECRET=%s\n", jwtSecret)
-		fmt.Println()
-		fmt.Println("# service-role token TF presents to GoTrue's admin SSO API (TFAC-424); treat as a secret:")
-		fmt.Printf("TF_GOTRUE_SERVICE_ROLE_TOKEN=%s\n", serviceToken)
-		return nil
-	}
-
-	vars := []envVar{}
-	if !reused {
-		encoded, err := json.Marshal(keys)
-		if err != nil {
-			return fmt.Errorf("marshal keys: %w", err)
-		}
-		vars = append(vars,
-			envVar{"GOTRUE_JWT_KEYS", string(encoded)},
-			envVar{"GOTRUE_JWT_SECRET", jwtSecret},
-		)
-	}
-	vars = append(vars, envVar{"TF_GOTRUE_SERVICE_ROLE_TOKEN", serviceToken})
-
-	if err := upsertEnvFile(writeEnvPath, vars); err != nil {
-		return err
-	}
-	if reused {
-		fmt.Fprintf(os.Stderr, "reused existing GOTRUE_JWT_KEYS; wrote TF_GOTRUE_SERVICE_ROLE_TOKEN to %s (no keypair rotation)\n", writeEnvPath)
-	} else {
-		fmt.Fprintf(os.Stderr, "wrote GOTRUE_JWT_KEYS + GOTRUE_JWT_SECRET + TF_GOTRUE_SERVICE_ROLE_TOKEN to %s\n", writeEnvPath)
-	}
-	return nil
+	m.ServiceRoleToken = token
+	return m, nil
 }
 
 func runVerify() error {
@@ -292,11 +329,11 @@ func mintServiceRoleToken(priv *rsa.PrivateKey, kid, issuer string) (string, err
 }
 
 // serviceRoleIssuer derives the GoTrue issuer (API_EXTERNAL_URL =
-// <TF_PUBLIC_URL>/auth/v1) for the token's iss claim, best-effort from the env.
-// Returns "" when TF_PUBLIC_URL isn't set — iss isn't enforced by GoTrue, so the
-// token still works; this is hygiene only.
-func serviceRoleIssuer() string {
-	pub := strings.TrimRight(strings.TrimSpace(os.Getenv("TF_PUBLIC_URL")), "/")
+// <TF_PUBLIC_URL>/auth/v1) for the token's iss claim. Returns "" when
+// publicURL is empty — iss isn't enforced by GoTrue, so the token still works;
+// this is hygiene only.
+func serviceRoleIssuer(publicURL string) string {
+	pub := strings.TrimRight(strings.TrimSpace(publicURL), "/")
 	if pub == "" {
 		return ""
 	}
@@ -316,12 +353,6 @@ func randomHexSecret(nBytes int) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// envVar is one KEY=value pair destined for the .env file.
-type envVar struct {
-	key   string
-	value string
-}
-
 // readExistingJWTKeys resolves the current GOTRUE_JWT_KEYS value, preferring the
 // --write-env file (so the documented one-file workflow needs no extra `export`)
 // and falling back to the process env. Returns "" when neither has it — the
@@ -330,14 +361,7 @@ type envVar struct {
 func readExistingJWTKeys(writeEnvPath string) string {
 	if writeEnvPath != "" {
 		if b, err := os.ReadFile(writeEnvPath); err == nil {
-			val := ""
-			for _, line := range strings.Split(string(b), "\n") {
-				if envLineKey(line) == "GOTRUE_JWT_KEYS" {
-					_, v, _ := strings.Cut(line, "=")
-					val = unquoteEnvValue(strings.TrimSpace(v))
-				}
-			}
-			if val != "" {
+			if val, _ := envfile.Lookup(b, "GOTRUE_JWT_KEYS"); val != "" {
 				return val
 			}
 		}
@@ -449,121 +473,6 @@ func jwkBigInt(jwk map[string]any, field string) (*big.Int, error) {
 		return nil, fmt.Errorf("decode JWK %q: %w", field, err)
 	}
 	return new(big.Int).SetBytes(b), nil
-}
-
-// upsertEnvFile writes vars into path, replacing each key's existing line in
-// place (and dropping any stale duplicate lines for that key) rather than
-// appending — so re-running jwk-init never leaves the duplicate GOTRUE_JWT_KEYS
-// the old append path produced. Keys not already present are appended in order.
-// The write is atomic (temp file + rename) and the file stays 0600.
-func upsertEnvFile(path string, vars []envVar) error {
-	var existing []byte
-	if b, err := os.ReadFile(path); err == nil {
-		existing = b
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("read env file: %w", err)
-	}
-
-	targets := make(map[string]string, len(vars))
-	order := make([]string, 0, len(vars))
-	for _, v := range vars {
-		targets[v.key] = v.value
-		order = append(order, v.key)
-	}
-
-	written := make(map[string]bool, len(vars))
-	var out []string
-	if len(existing) > 0 {
-		body := strings.TrimSuffix(string(existing), "\n")
-		for _, line := range strings.Split(body, "\n") {
-			key := envLineKey(line)
-			if _, isTarget := targets[key]; isTarget {
-				if written[key] {
-					continue // collapse a stale duplicate line
-				}
-				written[key] = true
-				// Preserve a leading `export ` so an .env that's `source`d in a
-				// shell (not just consumed by compose's env_file) keeps exporting
-				// the rotated var.
-				prefix := ""
-				if strings.HasPrefix(strings.TrimSpace(line), "export ") {
-					prefix = "export "
-				}
-				out = append(out, prefix+key+"="+targets[key])
-				continue
-			}
-			out = append(out, line)
-		}
-	}
-	for _, k := range order {
-		if !written[k] {
-			written[k] = true
-			out = append(out, k+"="+targets[k])
-		}
-	}
-
-	content := strings.Join(out, "\n") + "\n"
-	return writeFileAtomic(path, []byte(content), 0o600)
-}
-
-// envLineKey returns the variable name a .env line assigns, or "" for blank
-// lines, comments, and any line with no `=`. Tolerates a leading `export ` and
-// surrounding whitespace so hand-edited files round-trip cleanly. The
-// compose env_file format this targets is strictly one KEY=value per line — no
-// line continuations or multi-line values — so each line stands alone here.
-func envLineKey(line string) string {
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-		return ""
-	}
-	trimmed = strings.TrimPrefix(trimmed, "export ")
-	key, _, ok := strings.Cut(trimmed, "=")
-	if !ok {
-		return ""
-	}
-	return strings.TrimSpace(key)
-}
-
-// unquoteEnvValue strips a single pair of matching surrounding quotes from a
-// .env value. jwk-init writes values raw, but an operator may have quoted the
-// GOTRUE_JWT_KEYS JSON by hand.
-func unquoteEnvValue(v string) string {
-	if len(v) >= 2 {
-		if (v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'') {
-			return v[1 : len(v)-1]
-		}
-	}
-	return v
-}
-
-// writeFileAtomic writes data to a temp file in the destination's directory and
-// renames it over path, so a crash mid-write can't leave a half-written .env.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".jwk-init-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temp env file: %w", err)
-	}
-	tmpName := tmp.Name()
-	// Best-effort cleanup; a no-op once the rename succeeds (and an orphaned
-	// temp in the .env's dir is harmless), so the remove error is intentionally
-	// ignored.
-	defer func() { _ = os.Remove(tmpName) }()
-	if err := tmp.Chmod(perm); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("chmod temp env file: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("write temp env file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp env file: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("rename temp env file into place: %w", err)
-	}
-	return nil
 }
 
 const usage = `triagefactory jwk-init — generate the GoTrue RS256 signing key.

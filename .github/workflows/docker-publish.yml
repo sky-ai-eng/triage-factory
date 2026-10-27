@@ -87,6 +87,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # v3 of the installer installs cosign 2, which stores the signature as
+      # the tag sha256-<digest>.sig: the format `triagefactory deploy init`
+      # reads to verify a release's image (cmd/deploy/image.go). cosign 3
+      # stores a bundle as an OCI referrer instead, so moving to it means
+      # teaching deploy that format first; cmd/deploy's tests hold the two
+      # together.
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
