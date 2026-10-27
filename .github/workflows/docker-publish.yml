@@ -3,10 +3,19 @@
 # Trigger surface:
 #   - push to main         → ghcr.io/<owner>/triage-factory:sha-<short>,
 #                            ghcr.io/<owner>/triage-factory:edge
-#   - push of a v* tag     → ghcr.io/<owner>/triage-factory:vX.Y.Z,
-#                            ghcr.io/<owner>/triage-factory:latest
-#   - manual workflow_dispatch — same as a tag push without the tag,
-#                            useful for testing the workflow itself.
+#   - called by release.yml on a v* tag push
+#                          → ghcr.io/<owner>/triage-factory:vX.Y.Z,
+#                            :vX.Y, :vX, :latest
+#   - manual workflow_dispatch — tags by the ref it runs on, by the same
+#                            rules; useful for testing the workflow itself.
+#
+# A release's image is built inside release.yml, as a job goreleaser waits
+# on, because the release's compose bundle pins this image: the bundle must
+# never be attached to a release whose image is not yet pushed and signed.
+# It is a call to this file rather than a copy in release.yml so the image's
+# signing identity stays docker-publish.yml@refs/tags/vX.Y.Z — Fulcio names
+# the called workflow, not its caller — which is the identity
+# docs/security/verifying-releases.md tells verifiers to require.
 #
 # Multi-arch via buildx + QEMU; the alpine runtime image and the
 # static Go binary both build cleanly on amd64 + arm64 because:
@@ -30,9 +39,11 @@ name: docker-publish
 on:
   push:
     branches: [main]
-    tags: ['v*']
+  workflow_call:
   workflow_dispatch:
 
+# When release.yml calls this file, these can only narrow what its calling
+# job grants, so that job grants the same three.
 permissions:
   contents: read
   packages: write
@@ -47,10 +58,11 @@ jobs:
       - uses: actions/checkout@v4
 
       # Fail-closed gate on the baked Enterprise public key, mirroring release.yml's
-      # verify-license-key job. A workflow can't `needs:` a job in another workflow, so
-      # we run the same check inline here — before the (expensive) build — or a mangled
-      # ee.publicKeyB64 source default would publish :latest/:vX.Y.Z/:edge images with
-      # enterprise features silently disabled. Runs on both the tag and main (:edge) paths.
+      # verify-license-key job. A push to main can't `needs:` that job, so we run the
+      # same check inline here — before the (expensive) build — or a mangled
+      # ee.publicKeyB64 source default would publish :edge images with enterprise
+      # features silently disabled. A release call runs it too, after release.yml's
+      # own gate has passed; it costs seconds and keeps this file one path.
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -90,7 +102,10 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/triage-factory
           # Tag rules:
-          #   - sha-<short> on every build, for pin-by-commit consumers.
+          #   - sha-<short> on every main build, for pin-by-commit consumers.
+          #     Not on a release build: the push to main of the same release
+          #     commit already publishes it, and a second build would race it
+          #     for the tag with a different digest.
           #   - edge on main pushes. type=raw is the right type for a
           #     constant tag; type=ref derives from the ref name and
           #     doesn't honor value=, so an earlier draft published
@@ -100,7 +115,7 @@ jobs:
           #     :v1, :latest`). prefix=v is what makes the docker tag
           #     match the source-of-truth git tag.
           tags: |
-            type=sha,prefix=sha-,format=short
+            type=sha,prefix=sha-,format=short,enable=${{ !startsWith(github.ref, 'refs/tags/') }}
             type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
             type=semver,pattern=v{{version}}
             type=semver,pattern=v{{major}}.{{minor}}
@@ -129,7 +144,7 @@ jobs:
           provenance: mode=max
 
       # Sign by digest, not tag — a tag is mutable, the digest is what was
-      # actually just pushed. Runs on every trigger (main push, tag push,
+      # actually just pushed. Runs on every trigger (main push, release call,
       # workflow_dispatch): a signing failure here indicates real breakage
       # and should fail the job visibly rather than be swallowed.
       - name: Sign image (keyless)

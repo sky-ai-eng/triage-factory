@@ -1,6 +1,7 @@
 name: release
 
-# Builds binaries + publishes the Homebrew Formula on every v* tag push.
+# Builds binaries, publishes the Homebrew Formula, and builds + signs the
+# release image (by calling docker-publish.yml) on every v* tag push.
 # Tags come from two sources:
 #   1. release-please.yml when a Release PR is merged on main (the
 #      automated path).
@@ -17,10 +18,10 @@ permissions:
 
 jobs:
   # Hard pre-release gate on third-party dependency licenses. A v* tag must not
-  # publish binaries unless the check passes — goreleaser `needs` this job below,
-  # so a copyleft/forbidden dep blocks the release rather than merely warning on
-  # it. Same scripts/license-check.sh the dependency-licenses.yml workflow runs
-  # on PRs + main.
+  # publish binaries or the image unless the check passes — `image` and
+  # `goreleaser` both `need` this job below, so a copyleft/forbidden dep blocks
+  # the release rather than merely warning on it. Same scripts/license-check.sh
+  # the dependency-licenses.yml workflow runs on PRs + main.
   dependency-licenses:
     runs-on: ubuntu-latest
     # Cap the gate so a hung install/check can't block the release for GitHub's
@@ -52,8 +53,22 @@ jobs:
       - name: Verify baked Enterprise public key
         run: go test ./ee/ -run TestShippedPublicKeyDefaultLoads
 
-  goreleaser:
+  # The release image, pushed and signed before goreleaser runs: the compose
+  # bundle goreleaser attaches pins this image's tag, so it must not be
+  # published ahead of the image. A call to docker-publish.yml rather than a
+  # job written here, so the image's signing identity stays that file's (see
+  # its header). A failed image build therefore holds back the binaries too;
+  # re-running the failed jobs resumes from it.
+  image:
     needs: [dependency-licenses, verify-license-key]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: ./.github/workflows/docker-publish.yml
+
+  goreleaser:
+    needs: [dependency-licenses, verify-license-key, image]
     runs-on: ubuntu-latest
     permissions:
       contents: write
