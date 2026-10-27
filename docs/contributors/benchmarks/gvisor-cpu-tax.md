@@ -15,8 +15,8 @@ CI-shaped build bursts, versus the ~2.8 cores/run measured here — a
 longer binds concurrency on this host class: the 256 subnet ceiling binds
 light fleets and CPU binds CI fleets at ~67 staggered runs / 32 cores,
 with fair-sharing degrading gracefully at 2× oversubscription. Current
-numbers: `docs/contributors/benchmarks/sandbox-bench.md`. The analysis below stands as
-the evidence trail.
+numbers: [sandbox-bench](sandbox-bench.md). The analysis below is the
+evidence trail; to rerun it, see [Reproducing](#reproducing).
 
 **Conclusion: one active run costs ~2.8 host cores under gVisor `systrap`, and
 the majority is per-syscall trap-and-dispatch overhead, not the agent's compute.

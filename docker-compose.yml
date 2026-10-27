@@ -10,11 +10,10 @@
 #   3. ./triagefactory jwk-init --write-env .env   (writes GOTRUE_JWT_KEYS + GOTRUE_JWT_SECRET)
 #   4. docker compose up -d
 #
-# To rotate the JWT signing key after first boot: remove the existing
-# GOTRUE_JWT_KEYS / GOTRUE_JWT_SECRET lines from .env, re-run jwk-init,
-# then `docker compose up -d gotrue` (NOT `docker compose start gotrue` —
-# the start subcommand reuses the existing container's cached env and the
-# new keys would not load).
+# To rotate the JWT signing key after first boot: `jwk-init --write-env .env
+# --rotate`, then `docker compose up -d` (NOT `docker compose start` — it
+# reuses the existing containers' cached env and the new keys would not
+# load). See docs/users/self-hosting/jwt-key-rotation.md.
 #
 # D13 (SKY-256) ships the `control` service below — the TF
 # image runs the Go binary alongside Postgres + GoTrue.  Operator
@@ -581,8 +580,9 @@ services:
       # the key. Read from the process env at boot — forwarded here or a .env
       # value is silently ignored. Each secret can also be a mounted file via
       # <NAME>_FILE (both forms forwarded, set one); the private key wants the
-      # file form, a PEM being multi-line. See docs/users/self-hosting/install.md
-      # ("Register a deployment GitHub App") and docs/users/self-hosting/secrets.md.
+      # file form, a PEM being multi-line. See
+      # docs/users/self-hosting/deployment-github-app.md and
+      # docs/users/self-hosting/secrets.md.
       TF_GITHUB_APP_ID: ${TF_GITHUB_APP_ID:-}
       TF_GITHUB_APP_PRIVATE_KEY: ${TF_GITHUB_APP_PRIVATE_KEY:-}
       TF_GITHUB_APP_PRIVATE_KEY_FILE: ${TF_GITHUB_APP_PRIVATE_KEY_FILE:-}
@@ -598,8 +598,7 @@ services:
       # sends the control plane a commit digest, never holding the key. The
       # key wants the file form, a private key being multi-line. The email is
       # required when the deployment's GitHub is not github.com. See
-      # docs/users/self-hosting/install.md ("Configure the deployment commit
-      # signer").
+      # docs/users/self-hosting/deployment-commit-signer.md.
       TF_GITHUB_COMMIT_SIGNER_LOGIN: ${TF_GITHUB_COMMIT_SIGNER_LOGIN:-}
       TF_GITHUB_COMMIT_SIGNER_KEY: ${TF_GITHUB_COMMIT_SIGNER_KEY:-}
       TF_GITHUB_COMMIT_SIGNER_KEY_FILE: ${TF_GITHUB_COMMIT_SIGNER_KEY_FILE:-}

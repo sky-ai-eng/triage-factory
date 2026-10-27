@@ -19,7 +19,7 @@ sandbox pool, sibling gateways), which nothing can widen.
 
 | Lane | Mechanism | For | Add support by |
 | --- | --- | --- | --- |
-| **Tunnel** | CONNECT proxy with a hostname allowlist. TLS is terminated under a per-run CA, and registries are read-only (GET and HEAD, plus POSTs a registry lists as reads). | Registries that serve artifacts from their own or a dedicated hostname | An allowlist entry in `egressproxy.DefaultRegistries` |
+| **Tunnel** | CONNECT proxy with a hostname allowlist. TLS is terminated under a CA minted for each engagement, and registries are read-only (GET and HEAD, plus POSTs a registry lists as reads). | Registries that serve artifacts from their own or a dedicated hostname | An allowlist entry in `egressproxy.DefaultRegistries` |
 | **Fetch relay** | Host-side HTTP relay that follows redirects itself and checks every hop against the denylist | Registries that redirect artifacts into shared multi-tenant storage | A catalog entry in `internal/egressrelay/catalog.go` |
 | **Credential** | Per-run proxies that attach a credential (git, `gh`) | Authenticated egress | Its own design and a security review; see [Privilege separation](../users/security/privilege-separation.md) |
 

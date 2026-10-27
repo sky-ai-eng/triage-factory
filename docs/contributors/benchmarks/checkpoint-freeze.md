@@ -3,7 +3,9 @@
 A checkpoint of a live native engagement pauses the run's tool-host jail
 (`runsc pause`), captures the run tree in a one-shot capture jail, and resumes.
 This page records what that costs and what the agent can observe while it is
-paused. The design is in `docs/users/security/privilege-separation.md`.
+paused. The capture jail is described in
+[Privilege separation](../../users/security/privilege-separation.md#snapshots).
+To run it yourself, see [Reproducing](#reproducing).
 
 Measured with runsc `release-20260511.0`, `--platform=systrap --ignore-cgroups`,
 on a single Linux host, as root. Numbers are wall-clock and vary with the host;

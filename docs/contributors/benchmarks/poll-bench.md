@@ -6,7 +6,8 @@ latency. The scenario it models is the one webhooks don't cover: the
 **cold-start sync** (first full poll of the tracked set) and post-outage
 catch-up, where the poller must list and refresh everything. It is also the
 before/after measurement vehicle for polling-path work: rate-limit backoff,
-refresh concurrency, and budgeted/resumable cycles.
+refresh concurrency, and budgeted/resumable cycles. Run it with
+`./scripts/poll-bench.sh` (see [Running it](#running-it)).
 
 ## What the harness runs
 

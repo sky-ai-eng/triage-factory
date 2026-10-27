@@ -3,7 +3,8 @@
 `cmd/sandbox-bench` measures what concurrent gVisor sandboxes cost on a host
 — memory **and per-run CPU** — and verifies the memory-containment contract,
 using the production launch path end to end. Its output is the capacity
-model the public sizing page consumes.
+model the public sizing page consumes. Run it with
+`./scripts/sandbox-bench.sh` (see [Running it](#running-it)).
 
 ## What it launches
 
