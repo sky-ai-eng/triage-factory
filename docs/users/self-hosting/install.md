@@ -2,10 +2,9 @@
 
 This sets up the multi-tenant deployment: Postgres, GoTrue (sign-in), an object
 store, and Triage Factory as a `control` + `executor` pair, all from
-`docker-compose.yml`. For a single user on one machine, use
-[local mode](../local/) instead; it needs none of this.
+`docker-compose.yml`.
 
-## Before you start
+## 0. Requirements
 
 - A Linux VM or bare-metal host with Docker Engine and Compose v2. The
   `executor` container needs `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`,
@@ -27,7 +26,7 @@ store, and Triage Factory as a `control` + `executor` pair, all from
 People sign in to Triage Factory with GitHub. At
 <https://github.com/settings/developers> → **New OAuth App**:
 
-- **Homepage URL:** your public URL, e.g. `https://triagefactory.example.com`
+- **Homepage URL:** your public URL, e.g. `https://tfac.example.com`
 - **Authorization callback URL:** `<public URL>/auth/v1/callback`
 
 Keep the **Client ID** and a new **Client secret** for step 2.
@@ -42,26 +41,26 @@ Generate every key and password with `openssl rand -hex 32`. Use hex, not
 base64: some of these values are written into database connection URLs, where
 base64's `/`, `+` and `=` break parsing.
 
-| Variable | What it is |
-|---|---|
-| `POSTGRES_PASSWORD` | Postgres superuser, used for migrations. |
-| `SUPABASE_AUTH_ADMIN_PASSWORD` | The database role GoTrue connects as. |
-| `TF_AUTHENTICATOR_PASSWORD` | The database role `control` serves requests as. |
-| `TF_SYSTEM_PASSWORD` | The least-privilege database role executors connect as. |
-| `TF_PUBLIC_URL` | Your public URL, no trailing slash. |
-| `GH_CLIENT_ID`, `GH_CLIENT_SECRET` | The OAuth app from step 1. |
-| `TF_SESSION_ENCRYPTION_KEY` | Encrypts sign-in sessions. Changing it signs everyone out. |
-| `TF_COOKIE_SECRET` | Signs the short-lived sign-in state cookie. Changing it only breaks sign-ins in progress. |
-| `TF_SECRET_ENCRYPTION_KEY` | Encrypts every stored integration credential (GitHub App keys, Jira and Linear tokens). Changing or losing it makes them all unreadable, and every workspace has to enter them again. |
-| `TF_BLOB_ACCESS_KEY`, `TF_BLOB_SECRET_KEY` | Credentials for the bundled SeaweedFS object store. To use S3, R2 or Supabase Storage instead, see [Durable workspace storage](storage.md). |
+| Variable                                   | What it is                                                                                                                                                                            |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POSTGRES_PASSWORD`                        | Postgres superuser, used for migrations.                                                                                                                                              |
+| `SUPABASE_AUTH_ADMIN_PASSWORD`             | The database role GoTrue connects as.                                                                                                                                                 |
+| `TF_AUTHENTICATOR_PASSWORD`                | The database role `control` serves requests as.                                                                                                                                       |
+| `TF_SYSTEM_PASSWORD`                       | The least-privilege database role executors connect as.                                                                                                                               |
+| `TF_PUBLIC_URL`                            | Your public URL, no trailing slash.                                                                                                                                                   |
+| `GH_CLIENT_ID`, `GH_CLIENT_SECRET`         | The OAuth app from step 1.                                                                                                                                                            |
+| `TF_SESSION_ENCRYPTION_KEY`                | Encrypts sign-in sessions. Changing it signs everyone out.                                                                                                                            |
+| `TF_COOKIE_SECRET`                         | Signs the short-lived sign-in state cookie. Changing it only breaks sign-ins in progress.                                                                                             |
+| `TF_SECRET_ENCRYPTION_KEY`                 | Encrypts every stored integration credential (GitHub App keys, Jira and Linear tokens). Changing or losing it makes them all unreadable, and every workspace has to enter them again. |
+| `TF_BLOB_ACCESS_KEY`, `TF_BLOB_SECRET_KEY` | Credentials for the bundled SeaweedFS object store. To use S3, R2, or Supabase Storage instead, see [Durable workspace storage](storage.md).                                          |
 
 `docker compose up` refuses to start while a required value is blank. Every
 other variable in `.env.example` is optional and documented there.
 
 **On GitHub Enterprise Server**, also set `TF_DEFAULT_GITHUB_HOST` to your GHES
-URL (e.g. `https://ghe.example.com`) now, **before the first workspace is
-created**. Records are keyed under the host they were created with and are
-never migrated, so changing it later means a fresh install.
+URL (e.g. `https://ghe.example.com`) **before the first workspace is created**.
+Records are keyed under the host they were created with and are never migrated,
+so changing it later means a fresh install.
 
 To change a database password later, edit `.env` and run
 `docker compose up -d`; the password sidecars reapply it on every boot.

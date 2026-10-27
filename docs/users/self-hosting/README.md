@@ -1,9 +1,19 @@
 # Self-hosting
 
-Guides for running the multi-tenant deployment (`TF_MODE=multi`): a Docker
-Compose stack with Postgres, GoTrue and an object store, split into a control
-service and one or more executors. For the single-user binary, see
-[local mode](../local/README.md).
+Guides for running the multi-tenant deployment (`TF_MODE=multi`). This ships
+as a Docker Compose stack with Postgres, GoTrue, and an object store, split
+into control and executor services, but using the docs here you should be
+able to run it however you want.
+
+This is a heavy solution for solo devs to host themselves. I've tried to make
+it simple to set up but between the hardware requirements and the deployment
+configuration, I recommend either using
+[the hosted SaaS solution](https://triagefactory.com) (coming soon for wider
+use) or the single-user binary running in [local mode](../local/README.md).
+This is primarily for exceptionally security-conscious consumers needing
+self-managed infrastructure. Self-hosting in this mode is also required for
+GHES tenants running on a VPC — the SaaS offering has no path into those
+networks at present.
 
 ## Set up
 
