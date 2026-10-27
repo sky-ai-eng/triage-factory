@@ -1,129 +1,72 @@
-# Durable workspace storage (SeaweedFS)
+# Workspace storage
 
-A blueprint's workspace — its run root, with every repository checkout beneath
-it and the scratch space its steps hand off through — must survive the executor
-that created it (an open run can outlast the process; an executor can scale down
-mid-run). The TF binary snapshots that workspace to an **S3-compatible object
-store** and rehydrates it on resume, rebuilding each checkout; the host copy is
-only a warm cache.
+A run's workspace has to outlive the executor running it, since a run can be
+resumed after its executor restarts or scales away. Triage Factory snapshots
+workspaces to an S3-compatible object store and restores them on resume. The
+same bucket holds each team's knowledge base documents.
 
-Self-host runs **SeaweedFS** for this: one self-contained S3 container (Apache-2.0,
-Go), no Postgres or JWT coupling. The workspace snapshots are opaque
-server-internal tarballs — they need a dumb bucket, not a storage API's RLS /
-resumable-upload / CDN layer. The `seaweedfs` service in `docker-compose.yml` runs
-`weed server -s3` (the all-in-one master+volume+filer+S3 process), and a one-shot
-`seaweedfs-postinit` sidecar creates the bucket on every `up` (`head-bucket ||
-create-bucket` via aws-cli — idempotent).
+## The bundled store (SeaweedFS)
 
-The TF binary talks to it through the `TF_BLOB_*` env (read only in multi mode;
-local mode writes blobs to `~/.triagefactory/blobs` and runs none of this). The
-compose stack templates a single-identity `s3.json` from the same
-`TF_BLOB_ACCESS_KEY` / `TF_BLOB_SECRET_KEY` pair you set in `.env`, so server,
-bucket sidecar, and client all share one credential — there's no second input to
-drift. Supplying that identity is also what takes SeaweedFS **out of its
-open-by-default "allow-all" mode**: the bundled store always requires the creds,
-never serving anonymously on the compose network. The S3 port (`8333`) is
-deliberately **not** published to the host — TF and the sidecar reach it only over
-the compose network.
+The compose stack runs SeaweedFS as a single S3 container. A `seaweedfs-postinit`
+container creates the bucket on every `docker compose up`.
 
-Smoke-test the round-trip through the aws-cli sidecar (exercises the same bucket
-and creds TF's S3 client uses; the stack must already be up):
+`TF_BLOB_ACCESS_KEY` and `TF_BLOB_SECRET_KEY` from `.env` are both the store's
+only identity and the credentials Triage Factory uses, so the store never
+serves anonymous requests. Its S3 port (8333) is not published to the host.
+
+To check the store works (with the stack up):
 
 ```sh
 docker compose run --rm --no-deps --entrypoint sh seaweedfs-postinit -c '
   EP=http://seaweedfs:8333; B=${TF_BLOB_BUCKET:-tf-workspaces}
   echo hello | aws --endpoint-url "$EP" s3 cp - "s3://$B/smoke.txt" &&
-  aws --endpoint-url "$EP" s3 cp "s3://$B/smoke.txt" - &&            # -> hello
+  aws --endpoint-url "$EP" s3 cp "s3://$B/smoke.txt" - &&            # prints hello
   aws --endpoint-url "$EP" s3 rm "s3://$B/smoke.txt"'
 ```
 
-To eyeball stored snapshot objects there's no published browser console; list them
-through the same sidecar: `docker compose run --rm --no-deps --entrypoint sh
-seaweedfs-postinit -c 'aws --endpoint-url http://seaweedfs:8333 s3 ls
-"s3://${TF_BLOB_BUCKET:-tf-workspaces}/"'`.
-
-## Executor disk: evicting idle parked workspaces
-
-The object store bounds the **durable** copy of a workspace (snapshots are
-dropped 14 days after the last park or terminal). The **warm** copy — the actual
-worktree on an executor's disk — is bounded separately, because it costs one
-machine's disk rather than the fleet's bucket.
-
-A parked tree is kept as the warm-resume cache: a resume that lands back on the
-same executor reuses it instead of rehydrating. Left alone, an executor that
-never restarts accumulates one full checkout per parked blueprint run and slowly
-loses the disk headroom to take new work while its CPU and memory sit idle. So
-every executor sweeps hourly and reclaims trees that have been idle past a TTL:
+To list what is stored:
 
 ```sh
-TF_WORKSPACE_EVICT_AFTER_SEC=21600   # default 6h in multi mode; 0 disables
+docker compose run --rm --no-deps --entrypoint sh seaweedfs-postinit -c \
+  'aws --endpoint-url http://seaweedfs:8333 s3 ls "s3://${TF_BLOB_BUCKET:-tf-workspaces}/"'
 ```
 
-A tree is only ever evicted when the durable snapshot is recorded written *and*
-the blob store confirms the object is there, no conversation sharing the tree
-holds a live claim, and the whole key has been idle past the TTL. The TTL is
-the one condition disk pressure drops: when free space falls below
-`TF_DISPATCH_DISK_FLOOR_MB` (default 10240; 0 disables), the executor stops
-claiming new work and, once a minute, evicts trees that meet every other
-condition until free space is back above the floor. This runs even with
-`TF_WORKSPACE_EVICT_AFTER_SEC=0`. Anything else
-— a persist still in flight, a persist that failed, a blob that is missing
-despite the record — leaves the tree alone, because it is then the only copy of
-the agent's uncommitted work. An evicted workspace is not lost: the next resume
-rehydrates it from the snapshot, exactly as it does after an executor restart.
+The bucket is the only durable copy of knowledge base documents, so include it
+in your backups.
 
-## Hosted Supabase Storage, S3, or R2 (SaaS / BYO)
+## Another S3-compatible store (S3, R2, Supabase Storage)
 
-The same `aws-sdk-go-v2` client (path-style addressing, configurable
-`BaseEndpoint`) drives **any** S3-protocol backend — there's no compose change to
-point it elsewhere. Set `TF_BLOB_ACCESS_KEY` / `TF_BLOB_SECRET_KEY` to that
-backend's keys and override the endpoint (and bucket / region as needed) in
-`.env`:
+Set `TF_BLOB_ACCESS_KEY` and `TF_BLOB_SECRET_KEY` to that store's keys and
+override the endpoint, and the bucket and region if needed, in `.env`:
 
 ```sh
-TF_BLOB_ENDPOINT=https://<ref>.supabase.co/storage/v1/s3   # base path IS preserved
+TF_BLOB_ENDPOINT=https://<ref>.supabase.co/storage/v1/s3
 TF_BLOB_BUCKET=tf-workspaces
 TF_BLOB_REGION=us-east-1
 ```
 
-`TF_BLOB_ENDPOINT` is a full URL — its scheme selects TLS and any base path
-(Supabase Storage's `/storage/v1/s3`) is kept intact. The bundled `seaweedfs`
-service still starts in this configuration but goes unused; drop it via a compose
-override (and remove `seaweedfs-postinit` from `control`'s `depends_on` in
-that override) if you don't want it running. Pre-create the bucket on the hosted
-side (the `seaweedfs-postinit` sidecar only ensures the bucket on the bundled
-SeaweedFS).
+`TF_BLOB_ENDPOINT` is a full URL; its scheme selects TLS and any base path is
+kept. Create the bucket yourself: the postinit container only creates it on the
+bundled SeaweedFS. The `seaweedfs` service still starts but goes unused; to
+drop it, remove it in a compose override, along with `seaweedfs-postinit` from
+`control`'s `depends_on`.
 
-## Team knowledge bases (multi mode)
+Whichever store you use, give the bucket a lifecycle rule that aborts
+incomplete multipart uploads (see [Scaling](scaling.md)).
 
-The same blob store is also where each **team's knowledge base** lives — the
-documents people upload on the Knowledge page — under keys of the form:
+## Executor disk: parked workspaces
 
-```
-<orgID>/teams/<teamID>/kb/private/<path…>
-<orgID>/teams/<teamID>/kb/shared/<path…>
-```
+Stored snapshots are deleted 14 days after a run last parked or finished. The
+copy on an executor's own disk is managed separately: a parked run's worktree
+stays there so a resume on the same executor is instant, and each executor
+deletes worktrees that have been idle too long:
 
-**Visibility is the prefix, not a setting.** A document under `private/` is
-readable only through its own team's gate; one under `shared/` is readable by
-any member of the org. Publishing is a move between the two roots, which is why
-there is no visibility column in the database and nothing to keep in step with
-the object store. The layout under each root is an ordinary folder tree; every
-path segment is validated (no traversal, no separators inside a segment, no dot
-files) at the one place keys are built, `internal/kbstore`.
+| Variable | Default | Effect |
+|---|---|---|
+| `TF_WORKSPACE_EVICT_AFTER_SEC` | `21600` (6h) | Hourly, delete parked worktrees idle longer than this. `0` turns it off. |
+| `TF_DISPATCH_DISK_FLOOR_MB` | `10240` | While free disk is below this many MiB, stop taking new runs and, once a minute, delete parked worktrees without waiting for the idle time. Runs even when `TF_WORKSPACE_EVICT_AFTER_SEC=0`. `0` turns it off. |
 
-Every pod is equal here: control pods serve the read and write routes through
-the store, and an executor stages a run's knowledge from it at claim — the task
-team's whole KB plus every other team's `shared/` root, copied into the run tree
-under `_tfac/knowledge/`. There is no pod-local durable copy; a staged tree is
-rebuilt from the store on every launch and is deliberately excluded from a
-parked run's workspace snapshot.
-
-Knowledge is binary-safe: the same multipart uploader that carries workspace
-snapshots carries an uploaded document, so a diagram or a screenshot files
-alongside a runbook.
-
-Local mode keeps knowledge as plain files under the state root
-(`~/.triagefactory/teams/<teamID>/kb/{private,shared}/…`) and constructs no blob
-store for it — the on-disk copy is the durable copy, and an operator can edit
-their own team's notes with an ordinary text editor.
+A worktree is deleted only when its snapshot is confirmed in the object store
+and no live run is using it. Otherwise, it may be the only copy of the agent's
+uncommitted work, so it stays. A resume after deletion restores the workspace
+from the snapshot.
