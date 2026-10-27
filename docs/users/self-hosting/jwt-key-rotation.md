@@ -1,33 +1,33 @@
-# Rotating the JWT signing key
+# Rotating the session JWT key
 
-The current tooling supports **single-key replacement** only. Because the default
-`jwk-init --write-env` reuses an existing keypair, rotation is an explicit opt-in
-via `--rotate`:
+This is the RS256 key GoTrue signs sign-in tokens with (`GOTRUE_JWT_KEYS`,
+written by `jwk-init`). It is not the commit-signing key or the SAML
+request-signing key ([SSO](sso.md)).
 
-1. `./triagefactory jwk-init --write-env .env --rotate` — regenerates the keypair,
-   secret, and service-role token, replacing the old lines in place (no manual
-   deletion needed)
-2. Recreate GoTrue so it picks up the new env: `docker compose up -d gotrue`
+Rotating it ends every active session: tokens signed with the old key stop
+verifying as soon as GoTrue restarts, so everyone signs in again. Rotate in a
+quiet window.
 
-Any `jwk-init --write-env` run (rotate or not) rewrites `.env` atomically and
-normalizes its mode to `0600`, since the file holds private RSA material. If you'd
-deliberately set a looser mode (e.g. `0640` for a `docker` group), re-apply it
-after running.
+1. Regenerate the keypair, the JWT secret and the service-role token in place:
 
-`docker compose up -d` (without `stop`/`start`) detects the env diff against the
-existing container and recreates it. `docker compose start gotrue` would reuse the
-cached env from container creation and the new key would NOT be loaded — this is a
-common foot-gun. The Verifier picks up the new key automatically on the next
-unknown-`kid` lookup — no TF restart needed.
+   ```sh
+   ./triagefactory jwk-init --write-env .env --rotate
+   ```
 
-**Caveat:** any access tokens still in flight that were signed by the old key will
-fail verification as soon as GoTrue restarts. GoTrue's default access-token
-lifetime is 1 hour, so the practical impact is "users with active sessions need to
-re-authenticate." For zero-downtime overlap rotation (publish both old and new
-keys, switch the signing kid, wait for the old to expire, drop the old) you'd need
-to maintain a multi-key `GOTRUE_JWT_KEYS` array by hand — our `jwk-init` doesn't
-currently support merge semantics. Planned for a future ticket; for now, rotate
-during low-traffic windows or treat each rotation as a forced re-auth event.
+   Without `--rotate`, `jwk-init` reuses the existing keypair.
 
-The SAML request-signing key is a **different** key with different rotation
-semantics — see the [SSO guide](sso.md).
+2. Recreate GoTrue and the control service so they load the new values:
+
+   ```sh
+   docker compose up -d
+   ```
+
+   Use `up -d`. `docker compose start` reuses the container's old environment,
+   so the new key would not load. Triage Factory picks up the new public key on
+   its own.
+
+`jwk-init --write-env` rewrites `.env` with mode `0600`. If you had set a looser
+mode on purpose (for example `0640` for a `docker` group), set it again.
+
+Only one key at a time is supported: `jwk-init` can't publish the old and new
+keys side by side for a no-downtime switch.

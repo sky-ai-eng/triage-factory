@@ -1,95 +1,56 @@
-# Environment tuning (local mode)
+# Tuning (local mode)
 
-Environment-variable knobs for run concurrency, logging, tracing, the Claude
-binary, and the agent engine's runtime. The concurrency, logging, tracing, and
-JIT settings apply in multi mode too; the `TF_CLAUDE_BINARY` override is
-local-mode only.
+Environment variables for run concurrency, disk use, logging, tracing, and the
+agent runtime. Except for `TF_CLAUDE_BINARY`, each also applies in a
+self-hosted deployment.
 
 ## Run concurrency
 
-Delegated runs execute through a process-wide dispatcher that runs at most
-`TF_MAX_CONCURRENT_CLAIMS` agents at once — **default 8, and the cap applies in
-local mode too**, not just multi (concurrency is an API-spend throttle as much
-as a memory guard). Delegating more work than the cap is normal: the extra runs
-wait in a durable queue — the board card and the run page show **QUEUED** with
-the time spent waiting — and each starts automatically as a slot frees. Nothing
-is stuck, and queued runs survive a restart (the dispatcher re-claims them on
-boot). Queue time is tracked separately from working time: elapsed/duration
-readouts measure from when the run actually started executing, and a run that
-waited meaningfully shows its dwell as its own `queued` readout on the card
-footer and the run page's telemetry rail.
+| Variable | Default | Effect |
+|---|---|---|
+| `TF_MAX_CONCURRENT_CLAIMS` | `8` | Most agent runs at once. Each costs about 256 MB of RAM plus API spend. Values above 256 are clamped to 256. |
+| `TF_DISPATCH_MEM_FLOOR_MB` | `4096` | No new run starts while available memory is below this. Ignored where memory can't be read (macOS). |
 
-```bash
-export TF_MAX_CONCURRENT_CLAIMS=16   # each concurrent run costs ~256 MB RAM plus API spend
-```
-
-The effective cap is logged at boot (`run concurrency cap`); when a burst
-saturates it the dispatcher logs `run concurrency cap reached; queued runs
-start as slots free`, and logs again once slots open up. Values above 256 clamp
-to 256 (a sandbox-allocator structural limit shared with multi mode).
-
-One companion guardrail also defers queued runs on a loaded host:
-`TF_DISPATCH_MEM_FLOOR_MB` (default 4096) stops the dispatcher from claiming
-new runs while the host's available memory is below the floor — runs stay
-queued and dispatch resumes when memory recovers. It fails open where memory
-isn't reportable (for example macOS). The per-run memory ceiling
-(`TF_CLAIM_MEMORY_LIMIT_MB`) is a multi-mode sandbox control and does not apply
-locally.
+Runs past the cap wait in a queue and start as slots free. Their card and run
+page show **QUEUED** with the time spent waiting, and queued runs survive a
+restart. The startup log prints the cap (`run concurrency cap`), and a full
+queue logs `run concurrency cap reached; queued runs start as slots free`.
 
 ## Parked workspace disk
 
-A stopped run keeps its worktree on disk so resuming it is instant — a resume
-reuses the tree rather than rebuilding it from the snapshot TF also wrote. Those
-trees are full checkouts, and nothing reclaims them while the process is
-running; a restart sweeps the ones no parked run still wants.
+A stopped run keeps its worktree on disk so resuming it is instant. Nothing
+removes those worktrees while the process runs; a restart clears the ones no
+parked run still needs. Two variables, both off unless set, reclaim them
+sooner:
 
-If parked runs pile up faster than you restart and the disk matters more than
-warm resumes, `TF_WORKSPACE_EVICT_AFTER_SEC` turns on an hourly sweep that
-reclaims trees idle longer than the given number of seconds:
+| Variable | Effect |
+|---|---|
+| `TF_WORKSPACE_EVICT_AFTER_SEC` | Hourly, delete parked worktrees idle longer than this many seconds (for example `21600` for 6h). |
+| `TF_DISPATCH_DISK_FLOOR_MB` | While free disk is below this many MiB, start no new runs and delete parked worktrees without waiting for the idle time. |
 
-```bash
-export TF_WORKSPACE_EVICT_AFTER_SEC=21600   # reclaim trees parked >6h ago
-```
-
-It is **off unless you set it** (multi mode defaults it to 6h — there the disk
-belongs to shared infrastructure rather than to you). A tree is only reclaimed
-once its snapshot is verifiably written and no run sharing it is live, and
-resuming afterwards rebuilds the workspace from that snapshot — slower than a
-warm resume, never lost work.
-
-`TF_DISPATCH_DISK_FLOOR_MB`, also off unless you set it (multi mode defaults it
-to 10240), stops the dispatcher from claiming new runs while free space under
-the state root or the run trees is below the given number of MiB, and while it
-is below, reclaims trees that meet the conditions above without waiting for
-the idle window.
+A worktree is only deleted once its snapshot is saved and no live run is using
+it. Resuming afterwards rebuilds the workspace from the snapshot: slower, but
+nothing is lost.
 
 ## Logging
 
-Logs are structured (Go's `log/slog`) and written to stderr. Two environment
-variables tune output:
+Logs go to stderr.
 
-- `TF_LOG_LEVEL` — minimum level: `debug`, `info` (default), `warn`, or `error`.
-- `TF_LOG_FORMAT` — `text` (human-readable, the default in local mode) or `json`
-  (machine-parseable, the default when `TF_MODE=multi`).
+| Variable | Values |
+|---|---|
+| `TF_LOG_LEVEL` | `debug`, `info` (default), `warn`, `error` |
+| `TF_LOG_FORMAT` | `text` (default in local mode), `json` (default in self-hosted deployments) |
 
-Every line carries a `component` field (e.g. `component=router`) naming the
-subsystem — the structured replacement for the old `[router]` prefixes. Verbose
-steady-state traces (such as per-poll credential-tier resolution) log at `debug`,
-so set `TF_LOG_LEVEL=debug` to surface them.
+Every line carries a `component` field naming the subsystem.
 
 ## Tracing
 
-`TF_TRACES_ENDPOINT` names an OTLP/HTTP backend and is the whole switch — same
-variable in both modes, no `runmode` gate. Unset (local mode's default) installs
-no tracer provider at all. The compose stack defaults it to its bundled Tempo;
-locally you point it at your own.
+Set `TF_TRACES_ENDPOINT` to an OTLP/HTTP endpoint to export traces. Unset, no
+traces are produced. At startup Triage Factory logs `tracing enabled` with the
+address; if that line is missing, the variable didn't reach the process.
 
-Spans are **pushed**, so something has to be listening before any of them is
-visible. For the local dev loop that something is one container.
-
-### Tempo in one `docker run`
-
-From the repo root (the `-v` paths are relative to it):
+The quickest backend is a single Tempo container, run from the repository
+root:
 
 ```bash
 docker run -d --name tf-tempo \
@@ -100,65 +61,13 @@ docker run -d --name tf-tempo \
 TF_TRACES_ENDPOINT=http://localhost:4318 ./triagefactory
 ```
 
-`4318` is OTLP ingest (where TF pushes) and `3200` is Tempo's query API (where
-you read); both bind loopback. The config is checked in — local-disk storage, a
-day of retention, no cluster, nothing to operate. TF logs `tracing enabled` with
-the resolved address at boot; if it doesn't, the variable didn't reach the
-process.
-
-Read what arrived straight off the query API — no UI required, which is exactly
-what you want when the question is "did the span I just added export, with the
-attributes I expect?":
+Port 4318 receives traces and 3200 answers queries. To list recent traces:
 
 ```bash
-# every trace Tempo has seen recently
 curl -sS -G http://localhost:3200/api/search --data-urlencode 'q={}' | jq '.traces[].rootTraceName'
-
-# one pipeline's traces, by the attribute that identifies it
-curl -sS -G http://localhost:3200/api/search --data-urlencode 'q={ .conversation.id = "<id>" }' | jq
-
-# the whole trace, spans and attributes included
-curl -sS http://localhost:3200/api/traces/<trace-id> | jq
-
-# an aggregate over spans rather than a search for them
-curl -sS -G http://localhost:3200/api/metrics/query_range \
-  --data-urlencode 'q={} | count_over_time() by (name)' \
-  --data-urlencode "start=$(($(date +%s) - 900))" --data-urlencode "end=$(date +%s)" \
-  --data-urlencode 'step=60s' | jq
 ```
 
-That last one is a **TraceQL metrics** query, and it runs on the checked-in
-config's `local-blocks` processor — the one that stores the spans it receives so
-a query can group them by an attribute nobody declared in advance. Without it in
-`metrics_generator`, those queries and every panel of Grafana's Traces Drilldown
-fail with `localblocks processor not found` rather than coming back empty. Two of
-Tempo's defaults bound them: a range wider than 3h is rejected outright, and
-anything past the last 30 minutes is read from storage rather than the generator.
-
-A trace is searchable a beat after it finishes (Tempo cuts it once it has been
-idle ~10s); `/api/traces/<id>` finds it immediately. If nothing shows up at all,
-push a span by hand to tell a broken exporter from a quiet TF:
-
-```bash
-s=$(date +%s)
-curl -sS -X POST http://localhost:4318/v1/traces -H 'content-type: application/json' -d "{
-  \"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"smoke\"}}]},
-  \"scopeSpans\":[{\"spans\":[{\"traceId\":\"1234567890abcdef1234567890abcdef\",\"spanId\":\"1234567890abcdef\",
-  \"name\":\"smoke.test\",\"kind\":1,
-  \"startTimeUnixNano\":\"$((s-1))000000000\",\"endTimeUnixNano\":\"${s}000000000\",
-  \"attributes\":[{\"key\":\"conversation.id\",\"value\":{\"stringValue\":\"smoke-1\"}}]}]}]}]}"
-```
-
-Second-precision timestamps on purpose: `date +%s%N` exists on neither macOS nor
-busybox, and a span accidentally stamped in 1970 is stored happily and then
-never appears in any search.
-
-### Adding the trace view
-
-When reading JSON stops being enough — waterfalls, span attributes side by side,
-the attribute correlations that jump from a span to every other trace touching
-the same conversation — add Grafana next to it. Same provisioning file the
-compose stack uses, so the correlations are identical:
+For a UI, add Grafana with the repository's provisioning file:
 
 ```bash
 docker network create tf-traces
@@ -171,53 +80,33 @@ docker run -d --name tf-grafana --network tf-traces -p 127.0.0.1:3030:3000 \
   grafana/grafana:13.1.2
 ```
 
-Then open <http://localhost:3030> → **Explore** → **Tempo**, or **Drilldown →
-Traces** for the aggregate view over the same spans — Grafana fetches that app
-from `grafana.com` when it first starts, so with no outbound access the section
-is absent rather than broken. The file also provisions a
-Prometheus data source, which has nothing behind it in this two-container shape;
-the only things that notice are the trace view's Service Graph tab and its
-trace-to-metrics links — Drilldown reads Tempo directly and works here. No login
-form, and both containers publish to `127.0.0.1` only.
+Open <http://localhost:3030>, then **Explore → Tempo** or **Drilldown →
+Traces**. Remove both with
+`docker rm -f tf-tempo tf-grafana && docker network rm tf-traces`.
 
-Tear the whole thing down with `docker rm -f tf-tempo tf-grafana && docker
-network rm tf-traces` — no state outside the containers, and TF's own SQLite
-never learns any of this happened.
-In multi mode the compose stack ships these same pieces already wired: see
-[Monitoring → The bundled trace
-stack](../self-hosting/monitoring.md#the-bundled-trace-stack).
+A self-hosted deployment ships the same pieces already wired; see
+[Monitoring](../self-hosting/monitoring.md).
 
 ## Claude binary
 
-By default the Agent SDK launches the Claude binary bundled with Triage Factory.
-To point it at a specific `claude` instead — a locally-built, pinned, or debug
-binary — set `TF_CLAUDE_BINARY` to its path:
+Agents run the Claude binary bundled with Triage Factory. To use another one
+(a pinned or debug build), point `TF_CLAUDE_BINARY` at it:
 
 ```bash
 export TF_CLAUDE_BINARY=/path/to/claude
 ```
 
-The path is validated at spawn (it must exist and be executable), so a wrong path
-fails the run with a clear error rather than falling back silently. **Local mode
-only** — the sandboxed multi-tenant path runs the image-baked binary and ignores
-this variable.
+A path that doesn't exist or isn't executable fails the run with an error.
+Local mode only.
 
 ## Agent engine JIT
 
-The vendored agent engine is a Bun-compiled binary running on JavaScriptCore. By
-default Triage Factory disables its JIT (`BUN_JSC_useJIT=0`), which cuts peak RSS
-per agent process by roughly a fifth with no measurable startup cost — agent
-workloads are I/O-bound enough that interpreter-only execution is noise. Set
-`TF_AGENT_JSC_JIT=1` to restore the JIT if a compute-heavy workload regresses
-under the interpreter:
+Triage Factory turns off the JavaScript JIT in the agent engine, which lowers
+each agent's memory use by about a fifth. If a compute-heavy workload gets
+slower, turn it back on:
 
 ```bash
 export TF_AGENT_JSC_JIT=1
 ```
 
-Applies on both the sandbox and direct/local spawn paths, on every host
-**except macOS**. There the JIT is always left on and `TF_AGENT_JSC_JIT` has no
-effect:
-JavaScriptCore treats a disabled JIT there as a signal that signal-handler-based
-features are off limits and removes `SharedArrayBuffer` along with the JIT, and
-the engine needs that global to start at all.
+On macOS the JIT is always on and this variable has no effect.

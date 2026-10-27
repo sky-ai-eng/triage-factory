@@ -1,44 +1,58 @@
 # Deployment secrets
 
-The multi-mode stack reads several secrets at boot: the at-rest encryption keys (`TF_SECRET_ENCRYPTION_KEY`, `TF_SESSION_ENCRYPTION_KEY`, `TF_COOKIE_SECRET`), the database DSN and role passwords, the object-store keys (`TF_BLOB_*`), the GoTrue admin bearer (`TF_GOTRUE_SERVICE_ROLE_TOKEN`), and — optionally — the Enterprise license token (`TF_LICENSE`), the deployment Atlassian app secret (`TF_ATLASSIAN_CLIENT_SECRET`), the deployment Linear app secret (`TF_LINEAR_CLIENT_SECRET`), and the deployment GitHub App's private key, webhook secret, and client secret (`TF_GITHUB_APP_PRIVATE_KEY`, `TF_GITHUB_APP_WEBHOOK_SECRET`, `TF_GITHUB_APP_CLIENT_SECRET`). Every one is documented inline in [`.env.example`](../../../.env.example). This page is about how to *supply* them and how TF handles them.
+Every secret the deployment reads is listed, with what it's for, in
+[`.env.example`](../../../.env.example). This page covers supplying them as
+files and how Triage Factory handles them at boot. For rotation, see the notes
+on each variable in `.env.example` and [JWT key rotation](jwt-key-rotation.md).
 
-For **rotating** a secret, see [key rotation](jwt-key-rotation.md) (the JWT signing key) and the per-variable notes in `.env.example` (each key's rotation impact). For the deployment's overall threat model, see [docs/users/security/](../security/).
+## Plain variable or file
 
-## Two ways to supply a secret
+- **Plain variable:** set `NAME` in `.env`.
+- **File:** set `NAME_FILE` to the mounted path and leave `NAME` blank. This is
+  the Docker and Kubernetes secrets convention, and it keeps the value out of
+  the compose file, `docker inspect` and the process environment.
 
-**Plain environment variable** (the default). Set `NAME` in `.env`; the bundled compose forwards it into the container.
+If both are set, the file wins and a warning is logged. A `NAME_FILE` that
+can't be read fails boot with an error naming it. A required key supplied
+neither way fails boot with `<NAME> is empty`.
 
-**A file** (`NAME_FILE`) — the standard convention for Docker and Kubernetes secrets, which are mounted as files. Set `NAME_FILE` to the mount path and leave the plain `NAME` blank. This keeps the secret's *value* out of the compose file, out of `docker inspect`, and out of the container's environment entirely — only the path is an env var.
+At boot Triage Factory reads each secret into memory and removes it from its
+environment, so child processes (git, `gh`, the agent SDK installer) never
+inherit it.
 
-## How TF handles a secret at boot
-
-At startup TF captures each deployment secret into process memory (from `NAME_FILE` if set, else the plain `NAME`) and then **unsets it from the environment**. A set-but-unreadable `NAME_FILE` fails boot with a clear error; if both `NAME` and `NAME_FILE` are set, the file wins (with a warning).
-
-What that buys you, and where the value can still be observed:
-
-| Surface | Plain `NAME=` | Via `NAME_FILE` |
+| Where the value can be seen | Plain `NAME` | `NAME_FILE` |
 |---|---|---|
-| Child processes (git, `gh`, the SDK installer) inheriting it | **no** — unset from `os.Environ()` before any child spawns | **no** |
-| `docker inspect` / the compose file | yes | **no** — never a container-create env var |
-| This process's own `/proc/<pid>/environ` | **yes** — the kernel's exec-time snapshot; TF can't rewrite it in-process | **no** — only the path was ever in env |
-| Process heap (`/proc/<pid>/mem`, root/same-uid) | yes | yes — unavoidable: TF must hold the value to decrypt/sign/connect |
+| Child processes | no | no |
+| `docker inspect`, the compose file | yes | no |
+| The process's `/proc/<pid>/environ` | yes | no |
+| The process's memory (root or same uid) | yes | yes |
 
-So `NAME_FILE` is strictly better for the sensitive keys — above all `TF_SECRET_ENCRYPTION_KEY`, the master key for the org-secrets vault. Credentials handed to *sandboxed agents* are a separate, stronger boundary — see [docs/users/security/](../security/).
+Prefer the file form for the sensitive keys, above all
+`TF_SECRET_ENCRYPTION_KEY`, and for anything multi-line, such as a PEM.
 
-## Which secrets support `NAME_FILE` in the bundled compose
+## Which secrets accept `NAME_FILE`
 
-The **binary** honors `NAME_FILE` for `TF_SECRET_ENCRYPTION_KEY`, `TF_SESSION_ENCRYPTION_KEY`, `TF_COOKIE_SECRET`, `TF_LICENSE`, `TF_GOTRUE_SERVICE_ROLE_TOKEN`, `TF_ATLASSIAN_CLIENT_SECRET`, `TF_LINEAR_CLIENT_SECRET`, `TF_GITHUB_APP_PRIVATE_KEY`, `TF_GITHUB_APP_WEBHOOK_SECRET`, `TF_GITHUB_APP_CLIENT_SECRET`, `TF_GITHUB_COMMIT_SIGNER_KEY`, `TF_DATABASE_URL`, `TF_DATABASE_DIRECT_URL`, `TF_AUTHENTICATOR_PASSWORD`, `TF_BLOB_ACCESS_KEY`, and `TF_BLOB_SECRET_KEY` — but only if the container's environment actually carries the `NAME_FILE` variable.
+| Secret | Forwarded by the bundled compose |
+|---|---|
+| `TF_LICENSE` | control and executor |
+| `TF_SECRET_ENCRYPTION_KEY`, `TF_SESSION_ENCRYPTION_KEY`, `TF_COOKIE_SECRET`, `TF_GOTRUE_SERVICE_ROLE_TOKEN` | control |
+| `TF_ATLASSIAN_CLIENT_SECRET`, `TF_LINEAR_CLIENT_SECRET` | control |
+| `TF_GITHUB_APP_PRIVATE_KEY`, `TF_GITHUB_APP_WEBHOOK_SECRET`, `TF_GITHUB_APP_CLIENT_SECRET` | control |
+| `TF_GITHUB_COMMIT_SIGNER_KEY` | control |
+| `TF_DATABASE_URL`, `TF_DATABASE_DIRECT_URL`, `TF_AUTHENTICATOR_PASSWORD`, `TF_BLOB_ACCESS_KEY`, `TF_BLOB_SECRET_KEY` | no |
 
-The bundled `docker-compose.yml` **forwards `NAME_FILE` for the TF-only secrets**: `TF_LICENSE`, `TF_GOTRUE_SERVICE_ROLE_TOKEN`, `TF_SESSION_ENCRYPTION_KEY`, `TF_COOKIE_SECRET`, `TF_SECRET_ENCRYPTION_KEY` (all pods), and — the control pod only — `TF_ATLASSIAN_CLIENT_SECRET` (control serves the Jira connect flow), `TF_LINEAR_CLIENT_SECRET` (control serves the Linear install and connect ceremonies, and its background brain refreshes the tokens they mint), plus `TF_GITHUB_APP_PRIVATE_KEY`, `TF_GITHUB_APP_WEBHOOK_SECRET`, and `TF_GITHUB_APP_CLIENT_SECRET` (control serves the deployment App's connect ceremony and webhook receiver, and its background brain mints the installation tokens that reach executors already sealed into per-run bundles, so an executor never holds the key), and `TF_GITHUB_COMMIT_SIGNER_KEY` (every control pod signs managed workspaces' commits with it, from digests a run's sidecar relays, so an executor never holds it either). For those, set `NAME_FILE` in `.env`, leave the plain `NAME` blank, and mount the file. The private keys are the ones to reach for first: a PEM is multi-line, which a `.env` carries badly and a mounted file carries natively.
+With the bundled compose, set `NAME_FILE` in `.env` and mount the file; the
+variable is already forwarded. The last row is not forwarded because the
+compose file builds those values itself or shares them with a sidecar that
+needs the plain value. Use the file form for them only in a deployment where
+you set the container environment yourself.
 
-The rest are **not** `_FILE`-wired in the bundled stack, because the compose file either **constructs** them (`TF_DATABASE_URL` is built from `POSTGRES_PASSWORD`) or **shares** them with a sidecar that needs the plain value (`TF_BLOB_*` are templated into SeaweedFS's S3 identity; `TF_AUTHENTICATOR_PASSWORD` is applied to the DB role by `postgres-postinit`). Use `NAME_FILE` for those only in a custom deployment (Kubernetes, your own compose) where you set the container environment yourself.
+## Example
 
-## Example: mount secrets with Docker Compose
-
-Docker Compose secrets mount under `/run/secrets/<name>`. Because the bundled compose already forwards the `_FILE` vars, an override only needs the **mount**; point `_FILE` at it from `.env`:
+Compose mounts secrets under `/run/secrets/<name>`:
 
 ```yaml
-# compose.override.yml  (auto-merged by `docker compose`)
+# compose.override.yml (merged automatically by docker compose)
 secrets:
   tf_enc_key: { file: ./secrets/enc_key }
   tf_license: { file: ./secrets/license }
@@ -51,17 +65,18 @@ services:
 ```
 
 ```dotenv
-# .env — leave the plain TF_SECRET_ENCRYPTION_KEY blank; point _FILE at the mount
+# .env: leave the plain variables blank
 TF_SECRET_ENCRYPTION_KEY_FILE=/run/secrets/tf_enc_key
 TF_LICENSE_FILE=/run/secrets/tf_license
-# the deployment GitHub App's PEM, mounted whole (BEGIN/END lines included)
 TF_GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/tf_gh_app_key
 ```
 
-### File ownership
+In a source checkout, `secrets/` and `compose.override.yml` are gitignored.
 
-Keep the host file private to you (`chmod 600`); nothing else needs to read it. Compose bind-mounts a `file:` secret with the host file's owner and mode, and ignores a secret's `uid`/`gid`/`mode` (it warns that they are unsupported), so inside the container the file still belongs to your host uid. The TF process runs as uid `10001` once the entrypoint drops privileges, so the entrypoint, while still root, copies every `NAME_FILE` it finds into `/run/tf-secrets/`, owned by that uid and mode `0400`, and points the variable at the copy before the drop. The mount itself is never chmod'd or chown'd. A `NAME_FILE` naming a path root cannot read is left alone, so boot fails with the binary's own error naming it.
+## File ownership
 
-When deploying from a source checkout, `secrets/` and `compose.override.yml` are gitignored: the files in the example above cannot land in a commit through a careless `git add`.
-
-> The three crypto keys are optional (`:-`) in the bundled compose specifically so the file form can leave the plain var blank — if you supply *neither* the plain value nor a readable file, the binary fails fast at boot with a clear `"<NAME> is empty"`. The other required secrets keep compose's parse-time `${VAR:?}` check, so an unfilled `.env` still fails at `docker compose up`.
+Keep each host file `chmod 600` and owned by you. Compose ignores a secret's
+`uid`, `gid` and `mode`, so the mounted file keeps your ownership. The
+container's entrypoint copies each `NAME_FILE` it can read into
+`/run/tf-secrets/`, readable only by the uid Triage Factory runs as, and
+points the variable at the copy. Your mounted file is never modified.

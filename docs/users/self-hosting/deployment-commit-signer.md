@@ -1,0 +1,108 @@
+# Deployment commit signer
+
+Workspaces on the [deployment GitHub App](deployment-github-app.md) commit as
+the App's bot, and GitHub never marks a bot's commit Verified unless GitHub
+made it. The deployment commit signer is a GitHub **user** account whose name
+and SSH signing key those workspaces' agent commits carry, so GitHub marks them
+Verified and repositories that require signed commits accept them.
+
+A workspace that registers its own signer in **Workspace Settings → Commit
+signing** uses that one instead. A workspace whose own signer is broken
+commits unsigned; it never falls back to the deployment's. Local mode ignores
+these variables.
+
+## 1. Create the account
+
+Create a dedicated user account on the deployment's GitHub, set a profile name
+(every commit carries it) and verify an email on it.
+[Creating the signer account](../workspace/commit-signing.md) covers what the
+account needs. If your repositories run a CLA check, add the account's login to
+its allowlist first: commits are authored as that account.
+
+## 2. Generate the key
+
+On a machine you trust, with no passphrase (TF can't unlock one):
+
+```sh
+ssh-keygen -t ed25519 -N '' -C 'Triage Factory commit signing' -f ./secrets/commit-signer
+```
+
+## 3. Add the public key to the account
+
+Signed in as the signer account: **Settings → SSH and GPG keys → New SSH key**,
+**Key type: Signing key**, paste `./secrets/commit-signer.pub`. Key titles are
+public, so name it after the product.
+
+## 4. Configure `control` and restart
+
+```yaml
+# compose.override.yml
+secrets:
+  tf_commit_signer_key: { file: ./secrets/commit-signer }
+services:
+  control:
+    secrets: [tf_commit_signer_key]
+```
+
+```dotenv
+# .env
+TF_GITHUB_COMMIT_SIGNER_LOGIN=TriageFactory
+TF_GITHUB_COMMIT_SIGNER_KEY_FILE=/run/secrets/tf_commit_signer_key
+# TF_GITHUB_COMMIT_SIGNER_EMAIL=agent@example.com
+```
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `TF_GITHUB_COMMIT_SIGNER_LOGIN` | with the key | The account's login. Renaming the account later changes nothing; TF follows it by id. |
+| `TF_GITHUB_COMMIT_SIGNER_KEY` | with the login | The unencrypted ed25519 private key in OpenSSH format. Supply it as a file with `TF_GITHUB_COMMIT_SIGNER_KEY_FILE` ([Deployment secrets](secrets.md)). |
+| `TF_GITHUB_COMMIT_SIGNER_EMAIL` | off github.com | The committer address, verified on the account. On github.com, unset means the account's noreply address. Don't use the account's recovery address: it appears on every commit. |
+
+Half a configuration (a login without a key, a key without a login, an email
+alone, a key that isn't an unencrypted ed25519 key, or no email off github.com)
+refuses the boot and names the variable. Give every `control` pod the same
+three values. Executors never hold the key.
+
+```sh
+docker compose up -d
+```
+
+## 5. Check it took
+
+Within a minute `control` logs
+`deployment commit signer is active; managed workspaces sign as it`. If it logs
+`deployment commit signer is pending` followed by
+`the deployment commit signer's key is not among the account's signing keys`,
+step 3 is missing, or GitHub hasn't listed the new key yet (allow a minute).
+
+```sh
+docker compose exec control triagefactory commit-signer status   # shows the signer
+docker compose exec control triagefactory commit-signer verify   # checks it again now
+```
+
+A workspace on the deployment App shows **Commits are signed as
+TriageFactory, this deployment's signing account** under Workspace Settings →
+Commit signing. Runs pick the signer up at their next start.
+
+## Rotating the key
+
+Add the new public key to the account first, then change the key and restart
+the `control` pods. Until a check finds the new key on the account, workspaces
+don't sign. Leave the old public key on the account unless it may have leaked:
+on a GHES with persistent commit verification off, deleting it turns the
+commits it signed Unverified.
+
+## Changing the account
+
+Generate a new key as well. A key stays bound to the account it was first
+found on, so changing only `TF_GITHUB_COMMIT_SIGNER_LOGIN` leaves it on the old
+account, and each `control` pod logs a warning saying so.
+
+## When it breaks
+
+If the key is removed from the account or GitHub fails a pushed commit for its
+address, workspaces commit unsigned from their next signature, `control` logs
+`deployment commit signer is broken; managed workspaces commit unsigned until an operator fixes it`,
+and the `tf_deployment_commit_signer_up` metric reads 0
+([Monitoring](monitoring.md)). Fix the cause on the account, then run
+`triagefactory commit-signer verify` on a `control` container. A key put back
+on the account also recovers on the next periodic check.

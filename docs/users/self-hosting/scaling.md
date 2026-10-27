@@ -1,256 +1,146 @@
 # Scaling out: control + N executors
 
-Multi mode is **always** a control + executor split — there is no fused
-single-process option (`TF_ROLE=all`, or leaving it unset, refuses to boot in
-multi mode; `all` is local mode's shape). The default `docker compose up`
-brings up the smallest split: one **control** pod (API/WS, the
-background brain, migrations, the secret store) co-located with one
-**executor** (the run dispatcher, gVisor sandboxes, per-run credential
-sidecars) on the same box. That goes a long way (executors are memory-bound;
-budget ~0.25 GB RAM per concurrent run). When you outgrow one box, or want the
-sandbox fleet to fail independently of the API, add executors.
+A self-hosted deployment is always split into two roles. `docker compose up`
+starts one of each on the same machine:
 
-`TF_ROLE` names the role each container plays (the bundled compose file sets
-it per service; only a custom deployment sets it by hand):
+| Role | Serves the UI and API | Polls, routes, scores | Runs migrations | Runs agents (gVisor sandboxes) |
+|------|:---:|:---:|:---:|:---:|
+| `control` | ✅ | ✅ | ✅ | ❌ |
+| `executor` | ❌ | ❌ | ❌ | ✅ |
 
-| Role | Serves user HTTP/WS | Pollers + router + AI brain | Runs migrations | Claims + executes delegated runs | Sandboxes |
-|------|:---:|:---:|:---:|:---:|:---:|
-| `control` | ✅ | ✅ | ✅ | ❌ | ❌ |
-| `executor` | ❌ | ❌ | ❌ (asserts schema) | ✅ | ✅ (delegated runs) |
+The bundled compose file sets `TF_ROLE` per service; set it yourself only in a
+custom deployment. There is no single-process option in multi mode (`TF_ROLE`
+unset or `all` fails startup): keeping agents off the process that holds the
+secret store is what keeps one run's credentials away from everything else.
 
-Scale to 1 control + 2 executors:
+Executors are memory-bound; budget about 0.25 GB of RAM per concurrent run. To
+add executors:
 
 ```sh
 docker compose up -d --scale executor=2
+docker compose ps                 # 1 control + 2 executors, all healthy
+docker compose logs -f executor   # delegate a run and watch an executor pick it up
 ```
 
-> **Why there is no single-process multi shape.** The split is what carries
-> the credential-isolation guarantee: the control pod holds the secret store
-> but launches no sandbox (and carries no sandbox caps — it schedules on any
-> substrate that forbids privileged containers, managed Kubernetes included),
-> while an executor sandboxes hostile agent workloads but never holds the
-> secret-decryption key — every run's credentials arrive as a sealed per-run
-> bundle that only that run's sidecar can open. A fused process would hold
-> both powers at once, so multi mode makes it unbootable rather than
-> discouraged: the isolation boundary hangs on `TF_MODE`, not on a deployment
-> knob an operator could forget.
+Executors take no inbound traffic (their only listener is a localhost health
+check), so adding them needs no load balancer.
 
-That's the whole topology — **there is no load balancer.** Executors accept no
-inbound traffic (no published ports; their only listener is a localhost-only
-healthz), so the single control pod stays the single entrypoint. Verify a run
-flows end-to-end:
+## Executor disk
 
-```sh
-docker compose ps                 # 1 control + N executor, all healthy
-# Enqueue a manual delegation through the control pod's API, then watch an
-# executor claim it (messages land, the conversation completes):
-docker compose logs -f executor
-```
+Each executor needs its own state-root volume (`TF_STATE_ROOT`, `/data` in the
+compose file) and rootfs cache. Never share one between executors: the second
+refuses to start. The compose file header describes the volumes.
 
-Both roles run the **same image and entrypoint**, but **only executors carry the
-sandbox caps** (and the broker-then-drop privilege separation that contains them)
-— every sandboxed workload, every delegated run, executes
-on executors. A control pod is an ordinary unprivileged web service: its own
-background LLM work (task scoring, repo profiling) is
-toolless direct API calls that never spawn a sandbox. Each executor
-replica gets its **own** `TF_STATE_ROOT` (`/data`) and rootfs-cache volume: the
-fleet is shared-nothing, and two processes sharing one state root would collide on
-the instance-identity flock (the second refuses to boot). See the header of
-`docker-compose.yml` for the volume details.
+An executor's state root must be on disk, not tmpfs or ramfs; an executor
+pointed at one refuses to start. Agents' working trees, their `/tmp`, and
+workspace snapshots all land on that volume, so a run can fill it. A single
+file can't exceed 16 GiB, but there is no total limit per run. In production,
+give each executor's `/data` a disk of its own: on a single machine it is
+usually the disk Postgres uses, and Postgres stops when its disk is full.
 
-An executor's state root must be on disk. Every jail's `/tmp` is a directory
-under it (`jail-tmp/`), emptied when the jail's network is built, so a run
-that fills `/tmp` fills the executor's disk rather than the jail's memory. An executor whose
-`TF_STATE_ROOT` is on tmpfs or ramfs refuses to boot, naming the setting.
+Below `TF_DISPATCH_DISK_FLOOR_MB` of free space (default `10240`), an executor
+stops taking new runs, so queued work goes to other executors, and deletes
+parked workspaces whose snapshots are stored ([Storage](storage.md)). Neither
+stops a run that is already filling the disk.
 
-Each run's working tree (`/work` in the jail) is under the state root too
-(`runs/<task id>`), and so is the staging for a snapshot of it, so a run's
-checkouts, its `/tmp` and its snapshot all land on the one volume. The executor
-empties `runs/` when it starts.
-
-A run's disk use has no total limit. A process in a jail can write no single
-file larger than 16 GiB, which stops a runaway log or a `dd` into `/tmp`, but a
-run that writes many smaller files can still fill the executor's disk, and
-every other run on that executor then fails its writes. Two things limit the
-damage. Below `TF_DISPATCH_DISK_FLOOR_MB` of free space (default 10240) the
-executor stops claiming new conversations, and its heartbeat reports it gated
-so placement sends queued work to other executors. While it is below the floor
-it also evicts parked workspaces whose snapshots are stored, without waiting
-for their idle window (see [Storage](storage.md#executor-disk-evicting-idle-parked-workspaces)).
-A run that is filling the disk while it runs is not stopped by either.
-
-On a single machine, the executor's disk is usually the disk Postgres and the
-object store use too, and Postgres stops when it cannot write. For a production
-deployment, give the executor's `/data` a disk of its own.
-
-Each executor's container HEALTHCHECK hits its localhost `GET /healthz` — see
-[Monitoring & health checks](monitoring.md#executor-health--get-healthz).
+Each executor's container health check calls its localhost `GET /healthz`; see
+[Monitoring](monitoring.md).
 
 ## Rolling restarts
 
-An executor that is asked to stop hands its conversations to the rest of the
-fleet, including ones whose agent is mid-turn. On SIGTERM it stops claiming new
-work, its `GET /healthz` flips to 503 with `shutting_down: true`, and every
-in-flight engagement is cancelled: an agent's model call or tool call is cut off
-where it is. The ordering is the point: a draining executor answers its probe
-rather than refusing connections, so an orchestrator sees a pod that is leaving
-instead of one that has already gone.
+On SIGTERM an executor stops taking new runs, its `GET /healthz` returns 503
+with `shutting_down: true`, and every run on it is interrupted and handed to
+another executor. Each handed-off run uploads a snapshot of its workspace
+(uncommitted files included); the next executor restores it and continues the
+transcript. A tool call that was cut off is reported to the agent as
+interrupted. Hand-offs don't count against `TF_MAX_CLAIM_ATTEMPTS`.
 
-Each cancelled engagement then hands its conversation back rather than stopping
-it:
+Set alongside it:
 
-1. It files the agent's memory file and settles what the engagement spent.
-2. It releases its claim. The conversation stays in flight, so another
-   executor can claim it at once, and a restart does not count against its
-   `TF_MAX_CLAIM_ATTEMPTS` budget: that budget is for engagements that were
-   lost, and a deliberate stop is not one.
-3. It uploads a snapshot of the workspace, uncommitted and untracked files
-   included.
+- **A termination grace period of at least 30s** (the compose default). An
+  executor shuts down within 25s. If its 15s hand-off window expires, it logs a
+  WARN and exits anyway; a run it hadn't released is picked up by another
+  executor after 75s and counts as a lost attempt.
+- **Drain first to avoid interrupting runs.** Find the executor's id, drain
+  it, wait until `instance list` shows its `RUNS` at 0, then stop it. Draining
+  takes effect within a few seconds; live runs finish or park at the end of
+  their turn and no new ones start.
 
-The executor waits up to 15s for those hand-backs, and for any dispatch whose
-agent had just finished: that dispatch's last act is advancing or finalizing
-its blueprint, which deliberately ignores the shutdown. Closing the database
-pools underneath it would turn a completed agent turn into a failed write, and
-the conversation would re-run. An engagement that was still being set up
-(cloning, starting its sandbox) hands back nothing itself; once the wait
-returns, the executor releases its claim the same way.
+  ```sh
+  docker compose exec control triagefactory instance list
+  docker compose exec control triagefactory instance drain <id>
+  ```
 
-The executor that picks a conversation up continues it. It waits for the
-snapshot if the upload is still running (the leaving pod keeps heartbeating
-until it exits, which is how the successor knows the upload is still coming),
-restores the workspace from it, and resumes the transcript. A tool call the
-shutdown cut off is answered as interrupted, with the result unknown, so the
-agent checks the state before repeating it. The model call in flight is simply
-made again. In local mode the same process picks the conversation up on its
-next boot, in the same working tree.
-
-Two things to set alongside it:
-
-- **A termination grace period of at least 30s.** The shutdown sequence is
-  bounded at 25s (15s drain, then 5s to stop the healthz listener and 5s to
-  flush traces), so the compose default of 30s covers it with room to spare.
-  If the drain deadline expires, TF logs one WARN naming it and closes anyway.
-  A snapshot upload cut off by the exit leaves the successor with the previous
-  snapshot (the last step boundary or park), and the agent is told its
-  workspace was restored to that point. A dispatch that had not yet released
-  its claim keeps it; another executor takes the claim over once its 75s lease
-  lapses, and that counts as a lost engagement.
-- **Drain first to avoid interrupting turns.** A hand-back costs the turn in
-  flight and nothing before it. To retire an executor without cutting any turn
-  off, mark it draining (it stops claiming while live runs finish or park at
-  their turn end), wait for `active_runs` on its healthz to reach 0, then stop
-  it.
-
-An executor that dies without SIGTERM (SIGKILL, an OOM kill, a lost node)
-hands nothing back. Its claims are taken over once their 75s leases lapse, each
-counted as a lost engagement, and the workspace comes back from the last
-snapshot taken before the loss — usually a workspace checkpoint (below) — or
-from what was pushed to the remote if there is none. The transcript is intact
-either way, so the agent continues from where it was and is told what its
-workspace lost: after a checkpoint, the notice names the tool calls that came
-after it.
+An executor that dies without SIGTERM (SIGKILL, an out-of-memory kill, a lost
+node) hands nothing off. Its runs move to other executors after 75s, each
+counted as a lost attempt, and the workspace comes back from the last
+checkpoint.
 
 ## Workspace checkpoints
 
-A running native engagement snapshots its workspace to the blob store every
-`TF_SNAPSHOT_INTERVAL_SEC` (default 300), so a hard kill loses at most that
-interval plus the tool call that was running. A checkpoint is taken only at a
-tool-batch boundary, and only when a tool has run since the last one:
+A running agent's workspace is snapshotted to the object store every
+`TF_SNAPSHOT_INTERVAL_SEC` (default `300`), between tool calls, so a hard kill
+loses at most that interval plus the tool call in progress (tool calls can run
+up to 30 minutes). Each task keeps one snapshot, overwritten each time, so the
+cost is upload bandwidth and executor CPU, not storage. `0` turns checkpoints
+off; a hard kill then falls back to the last park or blueprint step.
 
-- **When.** Once a batch of tool calls has every result recorded and the
-  interval has passed since the last checkpoint started, the executor reads the
-  tree while the model works out its next call. If the model answers first,
-  its next tool call waits for the read to finish; it never waits for the
-  upload. A checkpoint is never taken during a tool call, which can run for up
-  to 30 minutes, so the worst case is the interval plus the longest tool call.
-- **What it costs.** The same blob a park writes, overwriting the one before
-  it: one blob per task, so storage stays flat and the cost is upload bandwidth
-  and executor CPU. A tree unchanged since the last checkpoint (the agent only
-  read files) costs one git capture and one small database write, and uploads
-  nothing; a restore still counts every tool call up to it as covered. At most
-  two
-  checkpoints capture at once per executor; one that finds no slot, or finds
-  its engagement's previous checkpoint still uploading, is skipped until the
-  next boundary.
-- **What it misses.** Background processes the agent started can still be
-  writing while the tree is read, so their files can be captured part-way,
-  exactly as they would be at a park. Anything outside the workspace (a push, a
-  comment) is not in the tree at all; the restored agent is told to verify
-  those before repeating them.
-- **Turning it off.** `TF_SNAPSHOT_INTERVAL_SEC=0` disables checkpoints; hard
-  kills then fall back to the last park or step boundary. Local mode never
-  checkpoints: its workspace is on the executor's own disk and survives a
-  process crash.
+`tf_claims_oldest_checkpoint_age_seconds` and
+`tf_workspace_checkpoints_total{outcome}` track them ([Monitoring](monitoring.md)),
+and the fleet console shows each run's checkpoint age.
 
-`tf_claims_oldest_checkpoint_age_seconds` is the workspace at risk right now,
-and `tf_workspace_checkpoints_total{outcome}` counts what checkpoints came to
-(see [Monitoring](monitoring.md#claims)). The fleet console's claim
-table shows each live claim's checkpoint age beside its idle time.
-
-An upload killed part-way through leaves the previous blob in place, since
-neither the filesystem store (write then rename) nor an object store (a
-multipart upload, visible only when completed) exposes a partial one. What the
-object store does keep is the **incomplete multipart upload**, which is billed
-and never cleaned up on its own. Give the snapshot bucket a lifecycle rule that
-aborts incomplete multipart uploads after a day or so (on S3,
+An interrupted upload leaves an **incomplete multipart upload** in the bucket,
+which is billed and never cleaned up on its own. Give the bucket a lifecycle
+rule that aborts incomplete multipart uploads after a day (on S3,
 `AbortIncompleteMultipartUpload`; SeaweedFS and MinIO have equivalents).
-
-Control pods claim nothing, so none of this applies to them: they shut down on
-their HTTP server's own graceful drain.
 
 ## Executor database role (`tf_system`)
 
-An executor's admin database pool connects as `tf_system`, not `supabase_admin` — a least-privilege role (`BYPASSRLS`, no DDL, an enumerated grant list covering only the run-execution tables the dispatcher touches). Executors are the most-exposed machine class in the fleet (they run agent workloads and parse agent output), so a compromised executor holding `tf_system` never has superuser reach — no other org's rows outside the granted tables, no DDL, no server-wide surface. Control pods are unaffected; they keep the `supabase_admin` DSN because they run migrations.
+Executors connect to Postgres as `tf_system`, a role with no DDL and access to
+only the tables running agents need, so a compromised executor never holds
+superuser access. Control pods keep the `supabase_admin` connection because
+they run migrations.
 
-This is wired automatically by the bundled compose file (the `executor` service's `TF_DATABASE_URL` is templated from `TF_SYSTEM_PASSWORD`) — nothing to configure beyond filling in `.env`. If you're running an executor outside the shipped compose file (bare-metal, a custom orchestrator) and it ends up pointed at a superuser DSN — e.g. a dev box reusing the control pod's connection string — TF logs one `ERROR` at boot naming the misconfiguration and continues (it does not refuse to boot): compose, the supported deployment path, ships this correctly, so a hard failure there would be disproportionate; the warning is for exactly this kind of bare-metal drift. Fix it by pointing the executor's `TF_DATABASE_URL` at `tf_system` instead.
+The bundled compose file sets this up from `TF_SYSTEM_PASSWORD`. In a custom
+deployment, point each executor's `TF_DATABASE_URL` at `tf_system`; an
+executor connected as a superuser logs an `ERROR` at startup naming the
+problem, and keeps running.
 
-## Per-role DB pools and `max_connections`
+## Database connections
 
-Every pod opens two Postgres pools (an admin pool and an app/RLS pool). The API
-tier (`control`) keeps 25 connections per pool; an **executor ships much
-smaller ceilings** — its dispatcher, heartbeat, and run sinks need a fraction of
-the API tier's request concurrency, and its app pool is effectively idle (no RLS
-request handlers run on an executor). At the defaults:
+Every pod opens two Postgres connection pools. Defaults per pool:
 
-| Role | Per-pool ceiling | Pools | Per-pod worst case |
-|------|:---:|:---:|:---:|
-| `control` | 25 | 2 | 50 |
-| `executor` | 6 | 2 | 12 |
+| Role | Per pool | Per pod |
+|------|:---:|:---:|
+| `control` | 25 | 50 |
+| `executor` | 6 | 12 |
 
-So the 1-control + 2-executor profile demands at most **25×2 + 2×(6×2) = 74**
-connections — comfortably inside a stock `supabase/postgres` `max_connections=100`
-with headroom. Sizing your own fleet: `Σ pods (per-pool ceiling × 2)` must fit
-`max_connections` minus what GoTrue and any admin tooling reserve. Three executors
-+ two control pods at the defaults is `2×50 + 3×12 = 136` — past a default 100, so
-either raise `max_connections` (and Postgres' memory) or lower
-`TF_DB_MAX_OPEN_CONNS`. Override the per-pool ceiling with `TF_DB_MAX_OPEN_CONNS`
-(floored at 2). A dedicated transaction-mode pooler in front of Postgres stays a
-large-fleet option, not a requirement for this profile.
+The total across pods, plus what GoTrue and admin tools use, must fit in
+Postgres' `max_connections` (100 in the stock `supabase/postgres` image). One
+control pod and two executors need 74. Two control pods and three executors
+need 136, so either raise `max_connections` (and Postgres' memory) or lower
+`TF_DB_MAX_OPEN_CONNS`, the per-pool ceiling (minimum 2).
 
 ## Multiple control pods (HA)
 
-> **One control pod needs no proxy.** The single-control shape above already works
-> with zero extra infrastructure. Running **M ≥ 2 control pods** for HA works
-> today: exactly one control pod holds the `background-brain` lease (a
-> Postgres-backed election, `TF_LEASE_*` env knobs — see `.env.example`) and runs
-> the pollers/router/AI managers/sweepers at a time; the rest stay standbys, ready
-> to take over within roughly a TTL + one renewal interval (~30s at the defaults)
-> of the holder going away. `GET /readyz` reflects this per pod — a `lease` field
-> reports `{name, holder_id, is_holder, term}`, and a standby hard-checks only DB +
-> migrations (never poller-alive) so the proxy below keeps every standby in
-> rotation. A delegated run is executor-claimed, not pod-local, so a
-> mid-run failover or a proxy re-route to a different control pod is
-> seamless. The config below is the reverse-proxy half you put in front of M
-> control pods.
+One control pod needs no proxy. With two or more, one holds the
+`background-brain` lease and runs polling, routing and scoring; the others
+stand by and take over within about 30s of the holder disappearing (the
+`TF_LEASE_*` variables in `.env.example` tune this). Running agents are on
+executors, so a failover doesn't interrupt them.
 
-We ship configuration as a worked example, never proxy software. Any stock reverse
-proxy works; the load-bearing requirements are: **WebSocket upgrade passthrough**
-(TF streams run activity over `/api/ws`), **generous idle timeouts** (those
-connections are long-lived), **readiness-aware rotation** (poll `GET /readyz` and
-pull a pod that 503s out of rotation), and **`X-Forwarded-For` set to the real
-client** paired with `TF_TRUSTED_PROXY_CIDR` (see
-[Client IP & trusted proxies](networking.md) — TF only trusts XFF from a proxy in
-that allowlist).
+`GET /readyz` on each control pod includes a `lease` field
+(`{name, holder_id, is_holder, term}`). A standby stays ready, so a load
+balancer keeps every control pod in rotation.
+
+Put any reverse proxy in front of the control pods. It needs:
+
+- WebSocket upgrade passthrough (`/api/ws`).
+- Long idle timeouts, since those connections stay open.
+- Health checks on `GET /readyz`, removing a pod that returns 503.
+- `X-Forwarded-For` set to the real client, with `TF_TRUSTED_PROXY_CIDR` set on
+  the control pods to the proxy's address range
+  ([Client IP & trusted proxies](networking.md)).
 
 Caddy:
 
@@ -258,19 +148,16 @@ Caddy:
 triagefactory.yourcompany.com {
 	reverse_proxy control-1:3000 control-2:3000 {
 		lb_policy round_robin
-		# Readiness-aware rotation: a control pod that 503s /readyz is
-		# pulled until it recovers.
 		health_uri  /readyz
 		health_interval 10s
 		health_status 200
-		# Long-lived WS + streaming responses.
 		transport http {
 			read_timeout  1h
 			write_timeout 1h
 		}
 	}
-	# Caddy forwards X-Forwarded-For by default; keep the edge stripping any
-	# client-supplied XFF so only the proxy's value reaches TF.
+	# Caddy sets X-Forwarded-For by default; strip any client-supplied value
+	# at the edge so only the proxy's reaches Triage Factory.
 }
 ```
 
@@ -291,24 +178,18 @@ server {
 	location / {
 		proxy_pass http://tf_control;
 
-		# WebSocket upgrade passthrough (/api/ws).
 		proxy_http_version 1.1;
 		proxy_set_header Upgrade    $http_upgrade;
 		proxy_set_header Connection $connection_upgrade;
 
-		# Long-lived streams: don't cut the connection mid-run.
 		proxy_read_timeout  1h;
 		proxy_send_timeout  1h;
 		proxy_buffering     off;
 
-		# Set (don't append) XFF to just the real peer, then set
-		# TF_TRUSTED_PROXY_CIDR to this proxy's egress CIDR so TF honors it.
+		# Replace (don't append) X-Forwarded-For with the real peer.
 		proxy_set_header Host              $host;
 		proxy_set_header X-Forwarded-For   $remote_addr;
 		proxy_set_header X-Forwarded-Proto $scheme;
 	}
 }
 ```
-
-Then set `TF_TRUSTED_PROXY_CIDR` on the control pods to the proxy's egress CIDR(s)
-so `X-Forwarded-For` is honored — see [Client IP & trusted proxies](networking.md).
