@@ -40,14 +40,33 @@ archives:
     files:
       - LICENSE
       - README.md
+  # The multi-mode compose stack: docker-compose.yml (which pins this
+  # release's image), its env template, and the files it bind-mounts, so a
+  # deployment needs no source checkout. Paths are kept as they are in the
+  # repo because compose mounts them by relative path. Being an archive, it is
+  # listed in checksums.txt, so the checksum signature below covers it.
+  - id: compose-bundle
+    meta: true
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}-compose_{{ .Version }}"
+    files:
+      - docker-compose.yml
+      - .env.example
+      - docker/seccomp-profile.json
+      - docker/observability/**
 
 checksum:
   name_template: "checksums.txt"
 
-# SPDX SBOM per archive, attached to the GitHub release as "*.sbom.json".
-# Requires `syft` on PATH in the goreleaser job — see release.yml.
+# SPDX SBOM per binary archive, attached to the GitHub release as
+# "*.sbom.json". The compose bundle holds configuration and no software, so
+# it gets none. Requires `syft` on PATH in the goreleaser job — see
+# release.yml.
 sboms:
   - artifacts: archive
+    ids:
+      - default
 
 # Keyless signing (Sigstore/cosign) of checksums.txt via GitHub OIDC — no
 # signing keys to provision or rotate. Verifying the checksum signature
@@ -107,6 +126,9 @@ release:
 
 brews:
   - name: triagefactory
+    # The binary archives only, never the compose bundle.
+    ids:
+      - default
     repository:
       owner: sky-ai-eng
       name: homebrew-tap

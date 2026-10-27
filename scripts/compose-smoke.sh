@@ -40,8 +40,10 @@ PUBLIC_URL=http://localhost:3000
 HEALTH_TIMEOUT=${HEALTH_TIMEOUT:-300}
 
 # All compose commands go through the throwaway project + env file so a parallel
-# real stack and the developer's .env are never touched.
-dc() { docker compose -p "$PROJECT" --env-file "$ENV_FILE" "$@"; }
+# real stack and the developer's .env are never touched. compose.dev.yml builds
+# the TF image from the working tree in place of the release image the base
+# file pins, so this tests the current code.
+dc() { docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f docker-compose.yml -f compose.dev.yml "$@"; }
 
 # Tear the stack down and remove the env file on ANY exit. On failure, dump
 # compose logs first so CI (and a local run) has the diagnostic inline.
@@ -112,11 +114,10 @@ TF_PUBLIC_URL="$PUBLIC_URL" "$BIN" jwk-init --write-env "$ENV_FILE"
 
 # --- Bring the stack up ----------------------------------------------------
 #
-# Build from the working tree (the control service uses build:, so this
-# tests the current code, not a published image). depends_on conditions make
-# `up` wait for postgres/gotrue healthy and both postinit sidecars to complete
-# successfully before starting control — so a sidecar that errors aborts
-# `up` here with a non-zero exit.
+# Build from the working tree (compose.dev.yml, see dc above), not a published
+# image. depends_on conditions make `up` wait for postgres/gotrue healthy and
+# both postinit sidecars to complete successfully before starting control — so
+# a sidecar that errors aborts `up` here with a non-zero exit.
 # Clear any leftovers from a previously-crashed run so stale named volumes (an
 # old bucket, an old migration set) from a reused project can't taint this run.
 dc down -v --remove-orphans >/dev/null 2>&1 || true

@@ -18,8 +18,8 @@
 #   tests    the pgtest image, the storage test's SeaweedFS image, and the
 #            Ryuk image of the pinned testcontainers-go (pgtest relies on Ryuk
 #            to remove each test binary's containers, so it stays on in CI)
-#   compose  the image: lines of docker-compose.yml, and the FROM lines and
-#            # syntax= frontend of docker/Dockerfile (what
+#   compose  the image: lines of docker-compose.yml except TF's own, and the
+#            FROM lines and # syntax= frontend of docker/Dockerfile (what
 #            scripts/compose-smoke.sh pulls and builds)
 #
 # prefetch never fails its job: an image with no copy is left for testcontainers
@@ -64,7 +64,10 @@ tests_refs() {
 
 compose_refs() {
   local refs stages
-  refs=$(sed -nE 's/^[[:space:]]+image:[[:space:]]*([^[:space:]#]+).*/\1/p' docker-compose.yml)
+  # TF's own image is left out: CI builds it from source (compose.dev.yml),
+  # and it is not a Docker Hub image to mirror.
+  refs=$(sed -nE 's/^[[:space:]]+image:[[:space:]]*([^[:space:]#]+).*/\1/p' docker-compose.yml |
+    grep -vE '^ghcr\.io/sky-ai-eng/triage-factory[:@]' || true)
   [ -n "$refs" ] || die "no image: lines in docker-compose.yml"
   echo "$refs"
   refs=$(sed -nE 's/^FROM[[:space:]]+(--platform=[^[:space:]]+[[:space:]]+)?([^[:space:]]+).*/\2/p' docker/Dockerfile)

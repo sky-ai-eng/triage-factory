@@ -25,6 +25,13 @@
 *.db-wal
 *.db-shm
 
+# Compose files are deployment config, not build inputs. A release commit
+# bumps the image pin in docker-compose.yml and otherwise changes only
+# ignored files, so keeping it out lets the release build reuse the cache of
+# the main build before it.
+/docker-compose.yml
+/compose.dev.yml
+
 # Docs and scripts that aren't build inputs. Top-level *.md only —
 # do NOT use a recursive `*.md` exclude here: the Go binary embeds prompt
 # files under internal/**/prompts/*.txt via go:embed, and a future prompt

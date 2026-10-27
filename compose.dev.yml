@@ -1,0 +1,34 @@
+# Builds the control and executor images from this source checkout instead
+# of running the release image docker-compose.yml pins. For contributors; a
+# deployment runs the release image.
+#
+# Enable it once by adding this line to .env:
+#
+#   COMPOSE_FILE=docker-compose.yml:compose.dev.yml
+#
+# then `docker compose up -d --build` builds the working tree and runs it.
+#
+# The build is tagged triagefactory:dev rather than the release tag, so a
+# dev image never sits in the local cache under a release's name, where a
+# later `up -d` without this file would run it as that release.
+# `pull_policy: build` stops compose looking for triagefactory:dev on Docker
+# Hub, where no such image exists.
+
+# One definition for both services: they run one image, and two builds
+# that differed in TF_LICENSE_PUBLIC_KEY would disagree on license validity.
+x-tf-dev-build: &tf-dev-build
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+    # Optional Enterprise public-key OVERRIDE (a dev/fork issuer key).
+    # Empty → the source default (the production key).
+    args:
+      TF_LICENSE_PUBLIC_KEY: "${TF_LICENSE_PUBLIC_KEY:-}"
+  image: triagefactory:dev
+  pull_policy: build
+
+services:
+  control:
+    <<: *tf-dev-build
+  executor:
+    <<: *tf-dev-build
