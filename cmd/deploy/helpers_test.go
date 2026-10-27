@@ -131,8 +131,6 @@ func newFakeHost(t *testing.T) *fakeHost {
 		cgroupControllers: cgroup,
 		portFree:          func(int) bool { return true },
 		http:              http.DefaultClient,
-		controlURL:        "http://127.0.0.1:1",
-		gotrueURL:         "http://127.0.0.1:1",
 	}
 	f.docker = func(_ context.Context, _ string, args ...string) ([]byte, []byte, error) {
 		f.dockerCalls = append(f.dockerCalls, args)
@@ -155,6 +153,7 @@ func newFakeHost(t *testing.T) *fakeHost {
 		f.verified = append(f.verified, version+" "+ref)
 		return f.verifyErr
 	}
+	f.getenv = func(string) string { return "" }
 	f.clock = time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 	f.now = func() time.Time { return f.clock }
 	f.sleep = func(_ context.Context, d time.Duration) error {

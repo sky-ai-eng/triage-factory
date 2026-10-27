@@ -201,6 +201,20 @@ func TestUpgrade_Refusals(t *testing.T) {
 			wantErr: "which is older; install the v",
 		},
 		{
+			name: "a required value the new release adds that deploy cannot generate",
+			arrange: func(t *testing.T, _ *fakeHost, next *Bundle, _ string) {
+				requireInNewCompose(t, next, "TF_NEW_REQUIRED")
+			},
+			wantErr: "requires TF_NEW_REQUIRED, which .env does not set and deploy cannot generate",
+		},
+		{
+			name: "an operator input .env lacks, with no terminal to ask on",
+			arrange: func(t *testing.T, _ *fakeHost, _ *Bundle, dir string) {
+				setEnvLine(t, dir, "GH_CLIENT_ID", "")
+			},
+			wantErr: ".env does not set GH_CLIENT_ID, which only you can supply",
+		},
+		{
 			name:    "a binary that is not a release",
 			arrange: func(_ *testing.T, _ *fakeHost, next *Bundle, _ string) { next.Version = "dev" },
 			wantErr: "not a release",
@@ -438,5 +452,90 @@ func TestUpgrade_NegativeDrainTimeout(t *testing.T) {
 	f, next, dir := upgradeFixture(t)
 	if code := upgradeRun(t, f, next, dir, "--drain-timeout", "-1s"); code != 2 {
 		t.Fatalf("exit = %d; want 2\n%s%s", code, f.out, f.errOut)
+	}
+}
+
+// requireInNewCompose makes next's docker-compose.yml require name, the way
+// a release that adds a required setting would.
+func requireInNewCompose(t *testing.T, next *Bundle, name string) {
+	t.Helper()
+	files := next.Files.(fstest.MapFS)
+	compose := string(files[composeFile].Data)
+	const anchor = "      TF_MODE: multi\n"
+	if !strings.Contains(compose, anchor) {
+		t.Fatalf("docker-compose.yml has no %q line to add a required value after", strings.TrimSpace(anchor))
+	}
+	compose = strings.Replace(compose, anchor, anchor+"      "+name+": ${"+name+":?missing "+name+"}\n", 1)
+	files[composeFile] = &fstest.MapFile{Data: []byte(compose)}
+}
+
+// TestUpgrade_FillsWhatTheNewReleaseNeeds: a value boot needs that .env
+// lacks, as when a release adds a generated secret, is filled before compose
+// starts the new release, and nothing .env had changes.
+func TestUpgrade_FillsWhatTheNewReleaseNeeds(t *testing.T) {
+	f, next, dir := upgradeFixture(t)
+	before, err := os.ReadFile(filepath.Join(dir, envFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	setEnvLine(t, dir, "TF_COOKIE_SECRET", "")
+
+	if code := upgradeRun(t, f, next, dir); code != 0 {
+		t.Fatalf("exit = %d; want 0\n%s%s", code, f.out, f.errOut)
+	}
+	wantLine(t, f.out.String(), "Environment", pass, next.Version+" adds 1 value(s) to .env: TF_COOKIE_SECRET")
+	if got := envOf(t, dir, "TF_COOKIE_SECRET"); len(got) != 64 {
+		t.Errorf("TF_COOKIE_SECRET = %q; want a generated 32-byte hex value", got)
+	}
+	for _, key := range append([]string{"TF_PUBLIC_URL", "GH_CLIENT_ID", "GH_CLIENT_SECRET", "GOTRUE_JWT_KEYS"}, generatedSecrets...) {
+		if key == "TF_COOKIE_SECRET" {
+			continue
+		}
+		if want := envValues(before).get(key); envOf(t, dir, key) != want {
+			t.Errorf("upgrade changed %s, which .env already had", key)
+		}
+	}
+	if info, err := os.Stat(filepath.Join(dir, envFile)); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf(".env mode = %v (%v); want 0600", info.Mode().Perm(), err)
+	}
+}
+
+// TestUpgrade_RequiredValueFromTheEnvironment: compose interpolates from the
+// environment deploy runs it in as well as .env, so a required value set
+// there is not missing.
+func TestUpgrade_RequiredValueFromTheEnvironment(t *testing.T) {
+	f, next, dir := upgradeFixture(t)
+	requireInNewCompose(t, &next, "TF_NEW_REQUIRED")
+	f.getenv = func(key string) string {
+		if key == "TF_NEW_REQUIRED" {
+			return "set"
+		}
+		return ""
+	}
+	if code := upgradeRun(t, f, next, dir); code != 0 {
+		t.Fatalf("exit = %d; want 0\n%s%s", code, f.out, f.errOut)
+	}
+}
+
+func TestMissingRequired(t *testing.T) {
+	compose := []byte(`services:
+  control:
+    environment:
+      A: ${A:?missing A}
+      B: ${B?unset B}
+      C: ${C:-default}
+      D: "${D:?} and ${A:?again}"
+      # E: ${E:?only in a comment}
+      F: ${F:?}
+`)
+	env := []byte("B=set\nF=\n")
+	got := missingRequired(compose, env, func(key string) string {
+		if key == "D" {
+			return "from the environment"
+		}
+		return ""
+	})
+	if want := []string{"A", "F"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("missingRequired = %q; want %q", got, want)
 	}
 }

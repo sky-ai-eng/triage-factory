@@ -88,6 +88,17 @@ var inputs = []input{
 	{key: "GH_CLIENT_SECRET", flag: "--github-client-secret-file", prompt: "GitHub OAuth app client secret", secret: true, validate: validateToken},
 }
 
+// missingInputs lists the operator inputs env does not set.
+func missingInputs(env envValues) []string {
+	var keys []string
+	for _, in := range inputs {
+		if env.get(in.key) == "" {
+			keys = append(keys, in.key)
+		}
+	}
+	return keys
+}
+
 // resolveInputs settles TF_PUBLIC_URL, GH_CLIENT_ID and GH_CLIENT_SECRET.
 // What .env already has stands, and a flag naming a different value is
 // refused rather than applied; a flag fills a missing value, and on a

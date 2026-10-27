@@ -177,11 +177,11 @@ func waitHealthy(ctx context.Context, h *host, st deployState) error {
 // control service's health endpoint, and GoTrue's signing keys. up is false
 // when there are no containers to check further.
 func healthChecks(ctx context.Context, h *host, st deployState) (cs []check, up bool) {
-	c, up := containerCheck(ctx, h, st.Project)
+	c, containers, up := containerCheck(ctx, h, st.Project)
 	if !up {
 		return []check{c}, false
 	}
-	return []check{c, controlHealthCheck(ctx, h), jwksCheck(ctx, h)}, true
+	return []check{c, controlHealthCheck(ctx, h, containers), jwksCheck(ctx, h, containers)}, true
 }
 
 // publicURLOf is TF_PUBLIC_URL in dir's .env, empty when .env does not set it.
@@ -260,7 +260,8 @@ WHAT IT DOES
 
   in the deployment directory (with --build for a source build), and waits up
   to 5 minutes for every container to be running and healthy, GET /api/health
-  on port 3000 to answer 200, and GoTrue to publish a signing key.
+  to answer 200 and GoTrue to publish a signing key, each on the host port its
+  container publishes (3000 and 9999 unless compose.override.yml moves them).
 
   A plain docker compose up -d resets the executor count to 1; deploy up always
   passes the stored count. Running deploy up on a stack that is already up

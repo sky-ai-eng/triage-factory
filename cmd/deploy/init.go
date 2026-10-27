@@ -187,27 +187,52 @@ func reinit(h *host, b Bundle, dir string, st deployState, o initOptions) error 
 		h.report(unverifiedSourceCheck("Source build", *st.BuildFrom))
 	}
 
-	envPath := filepath.Join(dir, envFile)
-	base, err := os.ReadFile(envPath)
-	if errors.Is(err, fs.ErrNotExist) {
-		if base, err = fs.ReadFile(b.Files, envExampleFile); err != nil {
-			return fmt.Errorf("read the embedded %s: %w", envExampleFile, err)
-		}
-	} else if err != nil {
-		return fmt.Errorf("read %s: %w", envPath, err)
-	}
-	values, err := resolveInputs(h, base, o.inputs)
+	base, err := readEnvBase(b, dir)
 	if err != nil {
 		return err
 	}
-	vars, err := envFill(base, values)
+	vars, err := planEnvFill(h, base, o.inputs)
 	if err != nil {
 		return err
 	}
 	if len(vars) == 0 {
-		fmt.Fprintf(h.stdout, "\n%s already holds every value boot needs; nothing changed.\n", envPath)
+		fmt.Fprintf(h.stdout, "\n%s already holds every value boot needs; nothing changed.\n", filepath.Join(dir, envFile))
 		return nil
 	}
+	return writeEnvFill(h, dir, base, vars)
+}
+
+// readEnvBase reads dir's .env, or the embedded .env.example when it has
+// none: what a fill adds to.
+func readEnvBase(b Bundle, dir string) ([]byte, error) {
+	envPath := filepath.Join(dir, envFile)
+	base, err := os.ReadFile(envPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		if base, err = fs.ReadFile(b.Files, envExampleFile); err != nil {
+			return nil, fmt.Errorf("read the embedded %s: %w", envExampleFile, err)
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("read %s: %w", envPath, err)
+	}
+	return base, nil
+}
+
+// planEnvFill works out what to add to base, a .env's content: the
+// operator's inputs from flags or prompts, and every value boot needs that
+// this binary can generate. Nothing base already has is in vars.
+func planEnvFill(h *host, base []byte, in inputFlags) ([]envfile.Var, error) {
+	values, err := resolveInputs(h, base, in)
+	if err != nil {
+		return nil, err
+	}
+	return envFill(base, values)
+}
+
+// writeEnvFill writes vars into dir's .env, whose content was base, and
+// says what changed, warning where a new value strands something the old
+// one made.
+func writeEnvFill(h *host, dir string, base []byte, vars []envfile.Var) error {
+	envPath := filepath.Join(dir, envFile)
 	if err := envfile.WriteAtomic(envPath, envfile.Set(base, vars), 0o600); err != nil {
 		return err
 	}

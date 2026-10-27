@@ -8,9 +8,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/envfile"
 )
 
 const (
@@ -54,8 +57,9 @@ func runUpgrade(ctx context.Context, args []string, b Bundle, h *host) int {
 
 // upgrade moves dir's deployment to this binary's version. Everything that
 // can refuse — the version, the new image's signature, an edited rendered
-// file, the new image's pull and its seccomp profile — is settled before
-// anything changes; from the drain on, the stack is being upgraded.
+// file, a value the new release needs that .env cannot get, the new image's
+// pull and its seccomp profile — is settled before anything changes; from
+// the drain on, the stack is being upgraded.
 func upgrade(ctx context.Context, h *host, b Bundle, o upgradeOptions) error {
 	dir, err := deploymentDir(o.dir)
 	if err != nil {
@@ -112,6 +116,38 @@ func upgrade(ctx context.Context, h *host, b Bundle, o upgradeOptions) error {
 		h.report(check{warn, "Rendered files", changed + "; --force overwrites them"})
 	}
 
+	// What the new release needs in .env, before any executor is drained:
+	// compose refuses to start on a missing required value, and a refusal
+	// after the drain would leave the executors drained and not restarted.
+	h.heading("Environment")
+	envBase, err := readEnvBase(b, dir)
+	if err != nil {
+		return err
+	}
+	// upgrade takes no input flags: without a terminal to ask on, a value
+	// only the operator can supply has to be in .env already.
+	if keys := missingInputs(envBase); len(keys) > 0 && !h.terminal {
+		h.report(check{fail, "Environment", "missing: " + strings.Join(keys, ", ")})
+		return fmt.Errorf("%s does not set %s, which only you can supply; set them there, or run upgrade on a terminal to be asked. Nothing was changed", envFile, strings.Join(keys, ", "))
+	}
+	envVars, err := planEnvFill(h, envBase, inputFlags{})
+	if err != nil {
+		return err
+	}
+	if missing := missingRequired(files[composeFile], envfile.Set(envBase, envVars), h.getenv); len(missing) > 0 {
+		h.report(check{fail, "Environment", "missing: " + strings.Join(missing, ", ")})
+		return fmt.Errorf("%s's %s requires %s, which %s does not set and deploy cannot generate; set them there (.env.example in the release documents each), then run upgrade again. Nothing was changed", b.Version, composeFile, strings.Join(missing, ", "), envFile)
+	}
+	if len(envVars) == 0 {
+		h.report(check{pass, "Environment", envFile + " holds every value " + b.Version + " needs"})
+	} else {
+		keys := make([]string, len(envVars))
+		for i, v := range envVars {
+			keys[i] = v.Key
+		}
+		h.report(check{pass, "Environment", fmt.Sprintf("%s adds %d value(s) to %s: %s", b.Version, len(keys), envFile, strings.Join(keys, ", "))})
+	}
+
 	// The new image, under the new release's profile, before any executor
 	// is drained: a host that refuses the profile would leave every
 	// executor unable to start once compose recreates it.
@@ -130,6 +166,11 @@ func upgrade(ctx context.Context, h *host, b Bundle, o upgradeOptions) error {
 	h.heading("Drain")
 	drainExecutors(ctx, h, dir, st.Project, o.drainTimeout)
 
+	if len(envVars) > 0 {
+		if err := writeEnvFill(h, dir, envBase, envVars); err != nil {
+			return fmt.Errorf("%w. The executors are drained until they restart; once the cause is fixed, run `triagefactory deploy upgrade` again", err)
+		}
+	}
 	from, oldFiles := st.Version, st.Files
 	st.Version, st.Image, st.Files = b.Version, &ref, map[string]string{}
 	for path, data := range files {
@@ -179,6 +220,31 @@ func writeRendered(dir string, files map[string][]byte, oldFiles map[string]stri
 		}
 	}
 	return writeState(dir, st)
+}
+
+// requiredVar is a ${NAME:?…} or ${NAME?…} interpolation, which compose
+// refuses to start without.
+var requiredVar = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*):?\?`)
+
+// missingRequired lists the variables compose requires that neither env (a
+// .env's content) nor the environment deploy runs compose in sets. Comment
+// lines are skipped: compose does not interpolate them.
+func missingRequired(compose, env []byte, getenv func(string) string) []string {
+	values := envValues(env)
+	var missing []string
+	for _, line := range strings.Split(string(compose), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		for _, m := range requiredVar.FindAllStringSubmatch(line, -1) {
+			name := m[1]
+			if values.get(name) == "" && getenv(name) == "" && !slices.Contains(missing, name) {
+				missing = append(missing, name)
+			}
+		}
+	}
+	slices.Sort(missing)
+	return missing
 }
 
 // newSeccompCheck starts image under profile, the new release's seccomp
@@ -384,22 +450,27 @@ WHAT IT DOES
   2. Checks the rendered files against the hashes deploy recorded. A file that
      changed is listed and the upgrade refused: changes belong in
      compose.override.yml. --force overwrites them.
-  3. Pulls the new image if the host lacks it, and starts it under the new
+  3. Works out what the new release needs in .env and that this binary can
+     generate, the way a re-run of init does: nothing .env has is changed. A
+     value compose requires that .env does not set and deploy cannot generate
+     stops the upgrade before anything changes.
+  4. Pulls the new image if the host lacks it, and starts it under the new
      release's docker/seccomp-profile.json. A failed pull, or a profile this
      host's Docker Engine or libseccomp refuses, stops the upgrade before
      anything changes.
-  4. Drains every live executor until its next restart
+  5. Drains every live executor until its next restart
      (triagefactory instance drain --until-restart, run in the control
      container) and waits for their runs to finish, up to --drain-timeout. A run
      still in flight after that is parked with a workspace snapshot when its
      executor stops, and resumes on the upgraded executors. An executor an
      operator drained stays drained.
-  5. Re-renders the bundle files and the state file.
-  6. Runs docker compose -p <project> up -d --scale executor=<N> with the
+  6. Writes what step 3 found into .env, and re-renders the bundle files and
+     the state file.
+  7. Runs docker compose -p <project> up -d --scale executor=<N> with the
      stored executor count. control migrates the schema as it boots, and the
      executors come up on the new image; their drain ended when they
      restarted, so there is nothing to undo.
-  7. Waits for the stack to be healthy, as deploy up does.
+  8. Waits for the stack to be healthy, as deploy up does.
 
 The API is unavailable while control restarts. Zero-downtime upgrades are not
 supported.

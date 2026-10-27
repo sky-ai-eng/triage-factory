@@ -120,15 +120,17 @@ type host struct {
 	resolveImage func(ctx context.Context, version string) (string, error)
 	verifyImage  func(ctx context.Context, version, ref string) error
 
+	// getenv reads the environment deploy runs compose in, which compose
+	// interpolates the compose file from alongside .env.
+	getenv func(string) string
+
 	// now and sleep are the clock the waits in up and upgrade run on.
 	now   func() time.Time
 	sleep func(ctx context.Context, d time.Duration) error
 
-	// http, controlURL and gotrueURL are how doctor reaches a running stack:
-	// the ports docker-compose.yml publishes on the host.
-	http       *http.Client
-	controlURL string
-	gotrueURL  string
+	// http is how the health checks reach a running stack, at the host
+	// ports its containers publish.
+	http *http.Client
 }
 
 func newHost() *host {
@@ -177,7 +179,8 @@ func newHost() *host {
 		verifyImage: func(ctx context.Context, version, ref string) error {
 			return newImageVerifier(version).verifyPinned(ctx, version, ref)
 		},
-		now: time.Now,
+		getenv: os.Getenv,
+		now:    time.Now,
 		sleep: func(ctx context.Context, d time.Duration) error {
 			t := time.NewTimer(d)
 			defer t.Stop()
@@ -188,9 +191,7 @@ func newHost() *host {
 				return nil
 			}
 		},
-		http:       &http.Client{Timeout: 5 * time.Second},
-		controlURL: "http://127.0.0.1:3000",
-		gotrueURL:  "http://127.0.0.1:9999",
+		http: &http.Client{Timeout: 5 * time.Second},
 	}
 }
 

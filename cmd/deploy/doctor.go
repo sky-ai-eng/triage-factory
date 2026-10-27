@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -114,9 +116,12 @@ func seccompProbe(ctx context.Context, h *host, image, profile string) check {
 	return check{pass, name, "Docker starts a container under " + seccompFile}
 }
 
-// container is the part of `docker inspect` stackChecks reads.
+// container is the part of `docker inspect` the stack checks read.
 type container struct {
-	Name  string
+	Name   string
+	Config struct {
+		Labels map[string]string
+	}
 	State struct {
 		Status   string
 		ExitCode int
@@ -129,6 +134,59 @@ type container struct {
 			Name string
 		}
 	}
+	NetworkSettings struct {
+		// Ports maps a container port ("3000/tcp") to the host addresses
+		// it is published on.
+		Ports map[string][]struct {
+			HostIP   string `json:"HostIp"`
+			HostPort string
+		}
+	}
+}
+
+// The container ports the health checks reach from the host. Each is found
+// at the host port its container actually publishes, so a
+// compose.override.yml that moves one is followed.
+const (
+	controlPort = 3000
+	gotruePort  = 9999
+)
+
+// publishedURL is the http:// URL on the host for port of service's first
+// container that publishes it. An unspecified host address (0.0.0.0, ::) is
+// reached on loopback, and an IPv4 binding is preferred, the one docker
+// lists beside an IPv6 one for the same port.
+func publishedURL(containers []container, service string, port int) (string, bool) {
+	key := strconv.Itoa(port) + "/tcp"
+	for _, c := range containers {
+		if c.Config.Labels["com.docker.compose.service"] != service {
+			continue
+		}
+		bindings := c.NetworkSettings.Ports[key]
+		for _, ipv4 := range []bool{true, false} {
+			for _, b := range bindings {
+				ip := net.ParseIP(b.HostIP)
+				if b.HostPort == "" || (ipv4 && ip != nil && ip.To4() == nil) {
+					continue
+				}
+				host := b.HostIP
+				switch {
+				case host == "" || (ip != nil && ip.IsUnspecified() && ip.To4() != nil):
+					host = "127.0.0.1"
+				case ip != nil && ip.IsUnspecified():
+					host = "::1"
+				}
+				return "http://" + net.JoinHostPort(host, b.HostPort), true
+			}
+		}
+	}
+	return "", false
+}
+
+// unpublished is the check for a service the health checks cannot reach
+// because none of its containers publishes port on the host.
+func unpublished(name, service string, port int) check {
+	return check{fail, name, fmt.Sprintf("no %s container publishes its port %d on the host, so deploy cannot reach it; check the ports in compose.override.yml", service, port)}
 }
 
 // stackChecks checks a running stack: its containers, the control service's
@@ -146,43 +204,47 @@ func stackChecks(ctx context.Context, h *host, dir string, st deployState) []che
 // could not list them or the project has none. Containers are found by the
 // project label compose puts on them, so the check needs nothing from the
 // compose file or .env.
-func containerCheck(ctx context.Context, h *host, project string) (c check, up bool) {
+func containerCheck(ctx context.Context, h *host, project string) (c check, containers []container, up bool) {
 	ids, errOut, err := h.docker(ctx, "", "ps", "--all", "--quiet", "--filter", "label=com.docker.compose.project="+project)
 	if err != nil {
-		return check{fail, "Containers", "docker ps failed: " + firstLine(errOut, err)}, false
+		return check{fail, "Containers", "docker ps failed: " + firstLine(errOut, err)}, nil, false
 	}
 	idList := strings.Fields(string(ids))
 	none := check{skip, "Containers", fmt.Sprintf("compose project %s has no containers; the running-stack checks run once it is up", project)}
 	if len(idList) == 0 {
-		return none, false
+		return none, nil, false
 	}
 	// A container removed between the two calls (a one-shot run with --rm)
 	// makes inspect exit non-zero while still printing the rest, so its
 	// output is read before its exit status.
 	out, errOut, err := h.docker(ctx, "", append([]string{"inspect"}, idList...)...)
-	var containers []container
 	if jerr := json.Unmarshal(out, &containers); jerr != nil || len(containers) == 0 {
 		if err != nil {
-			return check{fail, "Containers", "docker inspect failed: " + firstLine(errOut, err)}, false
+			return check{fail, "Containers", "docker inspect failed: " + firstLine(errOut, err)}, nil, false
 		}
 		if jerr != nil {
-			return check{fail, "Containers", "read docker inspect: " + jerr.Error()}, false
+			return check{fail, "Containers", "read docker inspect: " + jerr.Error()}, nil, false
 		}
-		return none, false
+		return none, nil, false
 	}
-	return containersCheck(containers), true
+	return containersCheck(containers), containers, true
 }
 
-func controlHealthCheck(ctx context.Context, h *host) check {
+func controlHealthCheck(ctx context.Context, h *host, containers []container) check {
 	const name = "Control health"
-	code, _, err := h.get(ctx, h.controlURL+"/api/health")
+	base, ok := publishedURL(containers, "control", controlPort)
+	if !ok {
+		return unpublished(name, "control", controlPort)
+	}
+	url := base + "/api/health"
+	code, _, err := h.get(ctx, url)
 	switch {
 	case err != nil:
 		return check{fail, name, err.Error()}
 	case code != http.StatusOK:
-		return check{fail, name, fmt.Sprintf("GET %s/api/health answered %d", h.controlURL, code)}
+		return check{fail, name, fmt.Sprintf("GET %s answered %d", url, code)}
 	}
-	return check{pass, name, "GET /api/health answered 200"}
+	return check{pass, name, "GET " + url + " answered 200"}
 }
 
 // containersCheck folds the project's containers into one line. A container
@@ -218,9 +280,13 @@ func containersCheck(containers []container) check {
 
 // jwksCheck wants GoTrue publishing at least one signing key: with none,
 // no session TF verifies can exist.
-func jwksCheck(ctx context.Context, h *host) check {
+func jwksCheck(ctx context.Context, h *host, containers []container) check {
 	const name = "GoTrue JWKS"
-	url := h.gotrueURL + "/.well-known/jwks.json"
+	base, ok := publishedURL(containers, "gotrue", gotruePort)
+	if !ok {
+		return unpublished(name, "gotrue", gotruePort)
+	}
+	url := base + "/.well-known/jwks.json"
 	code, body, err := h.get(ctx, url)
 	if err != nil {
 		return check{fail, name, err.Error()}
@@ -296,7 +362,8 @@ check fails; warnings do not.
                  older Docker Engine or libseccomp refuses (once the image is
                  on the host)
   Running stack  every container running and healthy, GET /api/health on
-                 port 3000, GoTrue publishing a signing key, and the public
+                 the port control publishes (3000 unless compose.override.yml
+                 moves it), GoTrue publishing a signing key, and the public
                  URL reachable from this host (a warning if not); run once
                  the stack is up
 `
