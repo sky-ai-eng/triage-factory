@@ -1120,8 +1120,8 @@ to no org:
 - **Post-push check, per org.** Each managed workspace's GitHub cycle reads the
   commits its runs signed as the deployment signer, with that workspace's
   credential, on the control pod holding the brain lease. A failure breaks the
-  deployment signer for every managed workspace, until an operator's Verify in
-  the fleet console (`POST /api/fleet/commit-signer/verify`) re-reads the commit
+  deployment signer for every managed workspace, until an operator's Verify
+  (`POST /api/fleet/commit-signer/verify`) re-reads the commit
   and GitHub answers `valid`.
 
 Its checks count in `tf_commit_signer_checks_total` like an org signer's. A

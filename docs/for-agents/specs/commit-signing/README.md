@@ -617,11 +617,11 @@ Under `/api/orgs/{org_id}/github/`, beside the App and PAT routes:
   the signer then clears it when nothing else is connected.
 - The suggested key title is "Triage Factory commit signing", because titles
   are public.
-- The fleet console gets `GET` and `POST …/verify` for the deployment signer,
-  operator-gated, and a `usage` node (`?since=&until=`) with its signatures
-  by hour and by org: `/api/fleet/commit-signer`, in core and without the
-  fleet console's licence, since Verify is the only way out of a broken
-  signer.
+- The deployment signer gets `GET` and `POST …/verify`, operator-gated, and a
+  `usage` node (`?since=&until=`) with its signatures by hour and by org:
+  `/api/fleet/commit-signer`. They are core and carry no licence: they are not
+  part of the EE fleet console, which would need an entitlement of its own to
+  hold them, and Verify is the only way out of a broken signer.
 
 ## 7. Health
 

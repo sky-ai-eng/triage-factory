@@ -838,9 +838,9 @@ func (s *Server) routes() {
 	// explainer above. Read-only.
 	s.api("GET /api/fleet/queue", s.handleFleetQueue)
 	// The deployment commit signer: its health, an operator's Verify, and
-	// its signatures by hour and by org. Operator-gated inside the handlers,
-	// like the rest of the fleet console, and unlicensed: commit signing is
-	// core. See fleet_commit_signer.go.
+	// its signatures by hour and by org. Operator-gated inside the handlers
+	// and unlicensed: commit signing is core, not part of the EE fleet
+	// console. See fleet_commit_signer.go.
 	s.api("GET /api/fleet/commit-signer", s.handleDeploymentSignerGet)
 	s.apiMutating("POST /api/fleet/commit-signer/verify", s.handleDeploymentSignerVerify)
 	s.api("GET /api/fleet/commit-signer/usage", s.handleDeploymentSignerUsage)

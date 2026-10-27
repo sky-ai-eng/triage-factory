@@ -28,7 +28,7 @@ var ErrNoSuchDeploymentCommitSigner = errors.New("db: no deployment commit signe
 // deployment App is: the SQLite impl answers ErrNotApplicableInLocal from
 // every method. Admin pool only: every reader and writer is a control pod (the
 // resolution that seals a bundle or decides a signature, the brain's checks,
-// the operator-gated fleet console), none acting under an org's RLS.
+// the operator-gated routes), none acting under an org's RLS.
 type DeploymentCommitSignerStore interface {
 	// GetSystem returns the row for publicKey on host, or (nil, nil) when
 	// there is none.
@@ -79,7 +79,7 @@ type DeploymentCommitSignerStore interface {
 	// UsageSystem counts the signatures made as the deployment signer in
 	// [since, until), by the hour they were signed in (UTC, oldest first) and
 	// by org (most first, then by org id). A zero since or until leaves that
-	// side open. Cross-org, for the fleet console.
+	// side open. Cross-org, for the operator-gated usage node.
 	UsageSystem(ctx context.Context, since, until time.Time) (DeploymentSignerUsage, error)
 }
 

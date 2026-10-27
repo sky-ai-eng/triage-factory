@@ -75,10 +75,10 @@ func deploymentSignerForTest(t *testing.T, r *authRig) (*commitsigner.Deployment
 	return health, gh
 }
 
-// TestFleetCommitSigner_Gates pins the fleet console's gate on the three
+// TestFleetCommitSigner_Gates pins the operator gate on the three
 // deployment-signer routes: no session is a 401, a signed-in caller who is not
-// a deployment operator finds no console (404), an operator holding an API
-// token is refused (403, since a token is sealed to an org and the console's
+// a deployment operator finds no route (404), an operator holding an API
+// token is refused (403, since a token is sealed to an org and the routes'
 // subject is the deployment), and an operator's session passes, licensed or
 // not.
 func TestFleetCommitSigner_Gates(t *testing.T) {

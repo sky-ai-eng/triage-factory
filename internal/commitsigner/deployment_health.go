@@ -38,8 +38,8 @@ const DeploymentWatchInterval = 30 * time.Second
 //
 // The account reads carry no credential: an account and its signing keys are
 // public on GitHub, and the deployment signer belongs to no org whose
-// credential the check could borrow. Verify, an operator's action in the
-// fleet console, makes the same check on demand and, for a signer a pushed
+// credential the check could borrow. Verify, an operator's action
+// (POST /api/fleet/commit-signer/verify), makes the same check on demand and, for a signer a pushed
 // commit broke, re-reads that commit with its org's credential. The post-push
 // check itself runs per org on the brain (HealthChecker), because each pushed
 // commit is in an org's repository.
@@ -263,7 +263,7 @@ type VerifyFault struct {
 	Message string
 }
 
-// VerifyFaultKind is the fleet console's answer class for a VerifyFault.
+// VerifyFaultKind is the answer class Verify's route maps a VerifyFault to.
 type VerifyFaultKind string
 
 const (

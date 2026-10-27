@@ -452,8 +452,8 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// for a signed-in user.
 		CommitSignatures: newCommitSignatureStore(admin),
 		// DeploymentCommitSigners is admin-pool only: every reader and writer
-		// is a control pod, and the fleet console that shows it is a
-		// cross-org operator read.
+		// is a control pod, and the operator routes that show it are
+		// cross-org reads.
 		DeploymentCommitSigners: newDeploymentCommitSignerStore(admin),
 		// PollReadiness is admin-pool only: callers already hold an
 		// authorized orgID (session claims or system context) by the time

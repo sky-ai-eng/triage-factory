@@ -11,21 +11,20 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// The deployment commit signer in the fleet console: the account every
-// workspace on the deployment App signs its agents' commits as unless it
-// registers its own, whose login and key are control-pod config. Its subject
-// is the deployment, so these routes are operator-gated like the rest of the
-// console and no API token reaches them. They carry no licence gate: commit
-// signing is core, and Verify is the only way out of a broken signer that a
-// pushed commit broke, which a deployment without the fleet console's licence
-// needs as much as one with it.
+// The deployment commit signer's routes: the account every workspace on the
+// deployment App signs its agents' commits as unless it registers its own,
+// whose login and key are control-pod config. Their subject is the
+// deployment, so they are gated on the deployment operator flag and no API
+// token reaches them. They are core and not part of the licensed fleet
+// console: commit signing is core, and Verify is the only way out of a signer
+// a pushed commit broke.
 //
 // Each answers for the signer this control pod is configured with. Every
 // control pod should carry the same TF_GITHUB_COMMIT_SIGNER_* settings; during
 // a rolling change of them, two pods can answer for different keys.
 
 // SetDeploymentCommitSigner gives the server this control pod's deployment
-// signer, nil when none is configured: the fleet console's routes answer for
+// signer, nil when none is configured: the routes in this file answer for
 // it, and GET commit-identity resolves a managed workspace to it.
 func (s *Server) SetDeploymentCommitSigner(h *commitsigner.DeploymentHealth) {
 	s.deploymentSigner = h
@@ -44,7 +43,7 @@ func (s *Server) commitIdentityResolver() commitsigner.Resolver {
 }
 
 // requireOperator admits a deployment operator signed in with a session. A
-// caller who is not an operator gets a 404, so the console does not exist for
+// caller who is not an operator gets a 404, so the routes do not exist for
 // them; an operator holding an API token gets a 403, because a token is
 // sealed to one org and the console's subject is the deployment. It reports
 // whether the caller was admitted, having written the response when not.
@@ -66,16 +65,16 @@ func (s *Server) requireOperator(w http.ResponseWriter, r *http.Request) bool {
 	if httpx.TokenAuthFrom(r.Context()) != nil {
 		httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
 			Reason:  httpx.ReasonForbidden,
-			Message: "the fleet console is deployment-scoped and cannot be reached with an org-scoped API token; sign in to use it",
+			Message: "the deployment commit signer is deployment-scoped and cannot be reached with an org-scoped API token; sign in to use it",
 		})
 		return false
 	}
 	return true
 }
 
-// isDeploymentOperator is the fleet console's operator read: whether a grant
-// is bound to the principal, or one of its login identities holds a pending
-// grant's address verified.
+// isDeploymentOperator is the operator read, the same one the fleet console's
+// gate makes: whether a grant is bound to the principal, or one of its login
+// identities holds a pending grant's address verified.
 func (s *Server) isDeploymentOperator(ctx context.Context, userID string) (bool, error) {
 	if s.allStores.Operators == nil {
 		return false, nil
@@ -93,7 +92,7 @@ func (s *Server) requireDeploymentSigner(w http.ResponseWriter) (*commitsigner.D
 	return s.deploymentSigner, true
 }
 
-// deploymentSignerJSON is the deployment signer as the fleet console shows it.
+// deploymentSignerJSON is the deployment signer as these routes answer it.
 type deploymentSignerJSON struct {
 	// Host is the GitHub the account is on, the deployment App's.
 	Host string `json:"host"`

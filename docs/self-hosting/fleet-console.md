@@ -94,11 +94,11 @@ It's a DB-backed live view (10-second poll, no Prometheus dependency) over:
 ## Deployment commit signer
 
 The deployment commit signer ([setup](install.md#86-optional-configure-the-deployment-commit-signer))
-has three routes beside the console's. They are **operator-gated but not
-licensed**: commit signing is core, and Verify is the only way out of a signer
-a pushed commit broke, which a community deployment needs as much as a licensed
-one. Like the rest of the console, a non-operator gets `404` and an API token
-gets `403`; sign in with a session. A control pod with no deployment signer
+has three operator routes. They are **not part of the console and not
+licensed**: commit signing is core, so they need only the operator grant above,
+and Verify is the only way out of a signer a pushed commit broke. They have no
+page in the UI. As with the console, a non-operator gets `404` and an API token
+gets `403`; call them with a signed-in session. A control pod with no deployment signer
 configured answers `404`. Each answers for the signer the pod that serves it is
 configured with, so every control pod should carry the same
 `TF_GITHUB_COMMIT_SIGNER_*` settings.
