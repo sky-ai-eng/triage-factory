@@ -38,7 +38,8 @@ operator access below.
 Use the `triagefactory operator` CLI. It opens its own admin-pool DB handle
 (independent of the running server), so run it inside the control container,
 which already has the database env. It refuses to run on an executor: the
-executor's database role (`tf_system`) has no access to operator grants.
+executor's database role (`tf_system`) has no access to operator grants. It
+also refuses in local mode, which has no operators to grant.
 
 ```sh
 # Grant — use a verified email of one of your sign-in methods
