@@ -14,7 +14,7 @@ import (
 func TestOperatorStore_SQLite_Conformance(t *testing.T) {
 	dbtest.RunOperatorStoreConformance(t, func(t *testing.T) (db.OperatorStore, *dbtest.LoginIdentitySeeder) {
 		conn := newSQLiteForArtifactTest(t)
-		return sqlitestore.NewOperatorStore(conn), nil
+		return sqlitestore.New(conn).Operators, nil
 	})
 }
 
@@ -23,7 +23,7 @@ func TestOperatorStore_SQLite_Conformance(t *testing.T) {
 // its principal by id and nobody else.
 func TestOperatorStore_SQLite_BoundGrantMatchesItsPrincipal(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
-	store := sqlitestore.NewOperatorStore(conn)
+	store := sqlitestore.New(conn).Operators
 	ctx := context.Background()
 
 	if _, err := conn.ExecContext(ctx,
