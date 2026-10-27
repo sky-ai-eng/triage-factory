@@ -16,12 +16,12 @@ Factory**, approves on Linear, and has nothing to create or paste.
 
 Linear recommends owning the app from a dedicated Linear workspace, so every
 admin of that workspace can manage it. Signed in there as an admin, open this
-link with `https://tf.example.com` replaced by your `TF_PUBLIC_URL` (three
+link with `https://tfac.example.com` replaced by your `TF_PUBLIC_URL` (three
 places) and `Example%20Corp` by the developer name workspace admins should see
 (2–80 characters, spaces as `%20`):
 
 ```text
-https://linear.app/settings/api/applications/new?distribution=public&developer.name=Example%20Corp&oauth.client_name=Triage%20Factory&oauth.client_uri=https://tf.example.com&oauth.redirect_uris=https://tf.example.com/api/linear/install/callback&oauth.redirect_uris=https://tf.example.com/api/linear/connect/callback&oauth.grant_types=authorization_code
+https://linear.app/settings/api/applications/new?distribution=public&developer.name=Example%20Corp&oauth.client_name=Triage%20Factory&oauth.client_uri=https://tfac.example.com&oauth.redirect_uris=https://tfac.example.com/api/linear/install/callback&oauth.redirect_uris=https://tfac.example.com/api/linear/connect/callback&oauth.grant_types=authorization_code
 ```
 
 Check the pre-filled form against this before creating the app:

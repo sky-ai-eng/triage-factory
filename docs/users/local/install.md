@@ -2,7 +2,7 @@
 
 Local mode is currently only supported on macOS and Linux. There are a few ways
 to download the software and a number of possible configuration flags, but I
-highly recommend ignoring all of that, using homebrew to download it, and
+highly recommend ignoring all of that, using Homebrew to download it, and
 running it without any flags.
 
 ```bash

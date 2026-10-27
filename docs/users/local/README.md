@@ -15,7 +15,7 @@ included. To deploy Triage Factory for an organization, see
 Everything you connect and configure after install (GitHub, Jira, Linear,
 Claude, repositories, teams) is set up in the app.
 
-## Additional local mode documentation
+## Pages
 
 - [Install](install.md): Homebrew, a release tarball, or a source build
 - [Running](running.md): flags, network exposure, `install` / `uninstall`

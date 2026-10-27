@@ -145,7 +145,7 @@ Put any reverse proxy in front of the control pods. It needs:
 Caddy:
 
 ```caddy
-triagefactory.yourcompany.com {
+tfac.example.com {
 	reverse_proxy control-1:3000 control-2:3000 {
 		lb_policy round_robin
 		health_uri  /readyz
@@ -173,7 +173,7 @@ upstream tf_control {
 
 server {
 	listen 443 ssl;
-	server_name triagefactory.yourcompany.com;
+	server_name tfac.example.com;
 
 	location / {
 		proxy_pass http://tf_control;

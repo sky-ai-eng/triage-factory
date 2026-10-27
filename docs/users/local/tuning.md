@@ -49,8 +49,8 @@ Set `TF_TRACES_ENDPOINT` to an OTLP/HTTP endpoint to export traces. Unset, no
 traces are produced. If correctly configured, at startup Triage Factory will
 log `tracing enabled` with the address.
 
-> I don't know why anyone would want to do this when using it day-to-day, but
-> I use it for debugging and figured it should be documented.
+> Most people won't need this; it's mainly for debugging Triage Factory
+> itself.
 
 The quickest backend is a single Tempo container, run from the repository
 root:

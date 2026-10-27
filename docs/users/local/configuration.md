@@ -14,7 +14,7 @@ Everything is under `~/.triagefactory/`:
 | `secrets.enc`                          | Credentials when there is no OS keychain ([Secret storage](secret-storage.md)).                   |
 | `bin/gh`                               | The `gh` release agents use.                                                                      |
 | `blobs/`                               | Snapshots of parked runs' workspaces.                                                             |
-| `teams/<team id>/kb/{private,shared}/` | Each team's knowledge base, as plain files you can edit in any editor.                            |
+| `teams/<team id>/kb/{private,shared}/` | The team's knowledge base, as plain files you can edit in any editor.                             |
 
 `triagefactory uninstall` deletes all of it.
 
@@ -46,8 +46,8 @@ environment.
 On Linux, each run executes in a
 [bubblewrap](https://github.com/containers/bubblewrap) namespace that hides your
 home directory, Triage Factory's database, and other runs' worktrees. This only
-guards against accidents, not attacks. Despite this setting, in local mode the
-agent always runs as you and shares your network.
+guards against accidents, not attacks. Even with the sandbox on, the agent still
+runs as you and shares your network.
 
 Auth helpers from `~/.claude/settings.json` run inside the sandbox, so one that
 reads files in your home directory (`~/.aws`, `~/.config/gcloud`, its own
