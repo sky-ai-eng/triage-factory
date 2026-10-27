@@ -1382,7 +1382,9 @@ config, Prometheus's scrape config and alerting rules, and Grafana's data
 sources and dashboards.
 One detail worth knowing: Prometheus finds TF's `:9464` by DNS service discovery
 rather than static targets, so `--scale executor=3` is scraped as three targets
-instead of whichever replica DNS happened to answer with.
+instead of whichever replica DNS happened to answer with. Each target carries a
+`tf_service` label naming the compose service it was found through, `control`
+or `executor`, which is how a query or an alert tells the roles apart.
 
 #### Bundled dashboards
 

@@ -62,14 +62,14 @@ func composeServiceEnv(t *testing.T) map[string]map[string]bool {
 // the signing key, whatever an operator puts in .env.
 func TestCompose_DeploymentCommitSignerIsControlOnly(t *testing.T) {
 	env := composeServiceEnv(t)
-	control, executor := env["triagefactory"], env["executor"]
+	control, executor := env["control"], env["executor"]
 	if len(control) == 0 || len(executor) == 0 {
 		t.Fatalf("found no environment for the control (%d keys) or executor (%d keys) service; the compose parse is wrong", len(control), len(executor))
 	}
 	names := append([]string{commitsigner.EnvDeploymentSignerKey + "_FILE"}, commitsigner.DeploymentSignerEnvNames...)
 	for service, keys := range env {
 		for _, name := range names {
-			if forwards, control := keys[name], service == "triagefactory"; forwards != control {
+			if forwards, control := keys[name], service == "control"; forwards != control {
 				t.Errorf("service %s forwards %s = %v; only the control service may, and it must", service, name, forwards)
 			}
 		}

@@ -44,7 +44,7 @@ secrets:
   tf_license: { file: ./secrets/license }
   tf_gh_app_key: { file: ./secrets/github-app.private-key.pem }
 services:
-  triagefactory:
+  control:
     secrets: [tf_enc_key, tf_license, tf_gh_app_key]
   executor:
     secrets: [tf_license]

@@ -5,7 +5,7 @@ it against a live deployment. For *why* it's built this way (the trust-domain
 decomposition and what a compromise of each component yields), see
 [security-overview.md §4](security-overview.md).
 
-The `triagefactory` container grants `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` +
+The `executor` container grants `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` +
 `CAP_SYS_RESOURCE` (see `docker-compose.yml`'s `cap_add` comment) because the
 per-run gVisor sandbox needs them to set up netns/veth/iptables, cgroups, the
 curated rootfs, and the runtime's place in the kernel's OOM order. That grant is
@@ -179,7 +179,7 @@ tini's `-g` signal fan-out reaches both processes directly.
 
 ## Verifying it against a running deployment
 
-- `docker compose exec triagefactory ps aux` (or `ps -ef` inside the container's
+- `docker compose exec executor ps aux` (or `ps -ef` inside the container's
   PID namespace) shows two `triagefactory`-derived processes named `tf-cap-broker`
   and `tf-orchestrator` — not two processes both named `triagefactory` — plus one
   `tf-sidecar` per delegated run currently in flight (none when the box is idle).

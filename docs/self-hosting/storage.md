@@ -89,7 +89,7 @@ TF_BLOB_REGION=us-east-1
 `TF_BLOB_ENDPOINT` is a full URL — its scheme selects TLS and any base path
 (Supabase Storage's `/storage/v1/s3`) is kept intact. The bundled `seaweedfs`
 service still starts in this configuration but goes unused; drop it via a compose
-override (and remove `seaweedfs-postinit` from `triagefactory`'s `depends_on` in
+override (and remove `seaweedfs-postinit` from `control`'s `depends_on` in
 that override) if you don't want it running. Pre-create the bucket on the hosted
 side (the `seaweedfs-postinit` sidecar only ensures the bucket on the bundled
 SeaweedFS).

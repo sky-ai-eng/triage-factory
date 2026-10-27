@@ -3,7 +3,7 @@
 Multi mode is **always** a control + executor split — there is no fused
 single-process option (`TF_ROLE=all`, or leaving it unset, refuses to boot in
 multi mode; `all` is local mode's shape). The default `docker compose up`
-brings up the smallest split: one `triagefactory` **control** pod (API/WS, the
+brings up the smallest split: one **control** pod (API/WS, the
 background brain, migrations, the secret store) co-located with one
 **executor** (the run dispatcher, gVisor sandboxes, per-run credential
 sidecars) on the same box. That goes a long way (executors are memory-bound;
@@ -41,7 +41,7 @@ healthz), so the single control pod stays the single entrypoint. Verify a run
 flows end-to-end:
 
 ```sh
-docker compose ps                 # 1 triagefactory (control) + N executor, all healthy
+docker compose ps                 # 1 control + N executor, all healthy
 # Enqueue a manual delegation through the control pod's API, then watch an
 # executor claim it (messages land, the conversation completes):
 docker compose logs -f executor

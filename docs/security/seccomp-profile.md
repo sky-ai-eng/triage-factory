@@ -1,16 +1,16 @@
 # Tailored seccomp profile
 
-The `triagefactory` service in `docker-compose.yml` runs with `security_opt:
+The `executor` service in `docker-compose.yml` runs with `security_opt:
 seccomp=docker/seccomp-profile.json` — a default-deny allowlist, not
 `seccomp=unconfined`. See
 [security-overview.md](security-overview.md) §3/§6 vector 2 for the
 threat-model framing.
 
-This profile applies to the **sandbox-hosting** services only — the `all`
-default and every `executor`. A capless control pod launches no sandbox and
-so needs none of it: `docker-compose.control.yml` clears `security_opt` (and
-the caps) via Compose's `!reset`, leaving the control pod on Docker's default
-seccomp profile.
+This profile applies to the **sandbox-hosting** service only — every
+`executor` replica. A capless control pod launches no sandbox and so needs
+none of it: the `control` service doesn't reference the hardening anchor that
+carries `security_opt` (and the caps), leaving it on Docker's default seccomp
+profile.
 
 **Scope — self-host `docker-compose` only.** Fly.io-hosted production (`fly.toml`)
 runs with unconfined seccomp inside its Fly Machine and is not covered by this
@@ -27,7 +27,7 @@ the wrong one. It reads as "no syscall filtering at all" to a security reviewer,
 which overstates what is actually required: the gap is a single syscall.
 
 **Scope — this is the host-level profile, not the in-sandbox one.**
-`docker/seccomp-profile.json` constrains the `triagefactory` **container** as seen
+`docker/seccomp-profile.json` constrains the `executor` **container** as seen
 by the host kernel — i.e., the TF binary itself, `ip`/`iptables`/`sysctl`, the
 `chroot`+`apk` rootfs bake, and `runsc` (and everything `runsc` forks). It is
 unrelated to the OCI seccomp profile `internal/sandbox/spec.go` attaches to the
