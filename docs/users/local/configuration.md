@@ -43,45 +43,26 @@ environment.
 
 ## Agent sandbox (Linux)
 
-On Linux, each delegated run executes inside a
-[bubblewrap](https://github.com/containers/bubblewrap) mount and pid namespace.
-A run sees its own worktree, the directories you granted it, and the Claude
-Code credential file and its own transcript directory under `~/.claude`. Your
-home directory, the Triage Factory database, other runs' worktrees and `/run`
-are hidden, and a run sees only its own processes.
+On Linux, each run executes in a
+[bubblewrap](https://github.com/containers/bubblewrap) namespace that hides your
+home directory, Triage Factory's database and other runs' worktrees. It guards
+against accidents, not attacks: the agent still runs as you and shares your
+network.
 
-This prevents accidents (a confused or prompt-injected agent reading your
-dotfiles, the database or another run's work). It is not a security boundary:
-the agent still runs as you, shares your network, and could break out on
-purpose.
+Auth helpers from `~/.claude/settings.json` run inside the sandbox, so one that
+reads files in your home directory (`~/.aws`, `~/.config/gcloud`, its own
+script) fails. Move the script out of your home directory, set the credential in
+Triage Factory's environment, or store a key in the app.
 
-What changes with the sandbox on:
-
-- Each run's worktree is a full clone rather than a linked worktree, which
-  costs clone time and disk.
-- An agent can read and write the Claude Code credential its run uses, since a
-  token refresh mid-run has to reach your own sessions.
-- An auth helper passed on from your `settings.json` runs inside the sandbox,
-  so one that needs a file in your home directory (its own script, `~/.aws`,
-  `~/.config/gcloud`) fails. Keep the script outside your home directory, set
-  the credential in Triage Factory's environment, or store a key in the app.
-
-If Triage Factory can't build the sandbox it refuses to start, with a message
-beginning `refusing to start: local agent runs are sandboxed with bubblewrap,
-but …`. Install bubblewrap from your distribution
-(`sudo apt install bubblewrap`; on Ubuntu 23.10 and later the distribution
-package is what allows unprivileged user namespaces), or turn the sandbox off:
+If Triage Factory can't build the sandbox, it refuses to start with
+`refusing to start: local agent runs are sandboxed with bubblewrap, but …`.
+Install bubblewrap from your distribution (`sudo apt install bubblewrap`; on
+Ubuntu 23.10 and later it must be the distribution's package), or turn the
+sandbox off, for example when Triage Factory itself runs in a container:
 
 ```bash
 TF_LOCAL_SANDBOX=off triagefactory
 ```
-
-With it off, agents run with your user's full access. Turn it off when Triage
-Factory itself runs in a container (nested user namespaces are usually
-blocked) or on a host without bubblewrap.
-
-The sandbox is Linux-only. On macOS and Windows it is off, and setting
-`TF_LOCAL_SANDBOX=on` there fails at startup.
 
 ## Clone protocol
 
