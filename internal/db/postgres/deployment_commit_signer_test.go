@@ -83,66 +83,45 @@ func TestDeploymentCommitSignerStore_Postgres_Register(t *testing.T) {
 	}
 }
 
-// TestDeploymentCommitSignerStore_Postgres_KeyCheck walks every status a check
-// can find the signer in, with the key found and not, and pins that a check
+// TestDeploymentCommitSignerStore_Postgres_KeyCheck pins the key check's
+// write (db.DeploymentKeyCheckTransition decides the status it writes): the
+// account is recorded, status_since moves only with the status, and a check
 // read against a status that has since moved changes nothing.
 func TestDeploymentCommitSignerStore_Postgres_KeyCheck(t *testing.T) {
-	account := db.DeploymentSignerKeyCheck{GitHubUserID: deploymentUserID, Login: "TriageFactory", Name: "Triage Factory"}
-	for _, tc := range []struct {
-		name       string
-		from       domain.CommitSignerStatus
-		fromReason string
-		found      bool
-		want       domain.CommitSignerStatus
-		wantReason string
-	}{
-		{"pending, key found", domain.CommitSignerPending, "", true, domain.CommitSignerActive, ""},
-		{"pending, key missing", domain.CommitSignerPending, "", false, domain.CommitSignerPending, ""},
-		{"active, key found", domain.CommitSignerActive, "", true, domain.CommitSignerActive, ""},
-		{"active, key missing", domain.CommitSignerActive, "", false, domain.CommitSignerBroken, domain.CommitSignerReasonKeyMissing},
-		{"broken for its key, key back", domain.CommitSignerBroken, domain.CommitSignerReasonKeyMissing, true, domain.CommitSignerActive, ""},
-		{"broken by a commit, key found", domain.CommitSignerBroken, "unverified_email", true, domain.CommitSignerBroken, "unverified_email"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			store, h := deploymentSignerStore(t)
-			ctx := t.Context()
-			if _, err := store.RegisterSystem(ctx, deploymentHost, deploymentKey, "TriageFactory"); err != nil {
-				t.Fatalf("RegisterSystem: %v", err)
-			}
-			pgtest.MustExec(t, h.AdminDB, `
-				UPDATE deployment_commit_signer SET status = $1, status_reason = NULLIF($2, ''),
-					status_since = now() - interval '1 hour'`, string(tc.from), tc.fromReason)
-			before, err := store.GetSystem(ctx, deploymentHost, deploymentKey)
-			if err != nil || before == nil {
-				t.Fatalf("GetSystem: %+v, %v", before, err)
-			}
+	found := db.DeploymentSignerKeyCheck{GitHubUserID: deploymentUserID, Login: "TriageFactory", Name: "Triage Factory", KeyFound: true}
+	t.Run("a check that moves the status, and one that does not", func(t *testing.T) {
+		store, h := deploymentSignerStore(t)
+		ctx := t.Context()
+		if _, err := store.RegisterSystem(ctx, deploymentHost, deploymentKey, "TriageFactory"); err != nil {
+			t.Fatalf("RegisterSystem: %v", err)
+		}
+		pgtest.MustExec(t, h.AdminDB, `UPDATE deployment_commit_signer SET status_since = now() - interval '1 hour'`)
+		read := func() (*domain.DeploymentCommitSigner, error) {
+			return store.GetSystem(ctx, deploymentHost, deploymentKey)
+		}
+		pending, err := read()
+		if err != nil || pending == nil {
+			t.Fatalf("GetSystem: %+v, %v", pending, err)
+		}
 
-			check := account
-			check.KeyFound = tc.found
-			got, err := store.RecordKeyCheckSystem(ctx, *before, check)
-			if err != nil || got == nil {
-				t.Fatalf("RecordKeyCheckSystem = %+v, %v", got, err)
-			}
-			if got.Status != tc.want || got.StatusReason != tc.wantReason {
-				t.Errorf("status = %s (%q), want %s (%q)", got.Status, got.StatusReason, tc.want, tc.wantReason)
-			}
-			if got.GitHubUserID != deploymentUserID || got.Login != "TriageFactory" || got.Name != "Triage Factory" || got.CheckedAt == nil {
-				t.Errorf("row = %+v, want the account recorded and checked_at stamped", got)
-			}
-			if moved := !got.StatusSince.Equal(before.StatusSince); moved != (tc.want != tc.from) {
-				t.Errorf("status_since moved = %v, want it to move only with the status", moved)
-			}
-			dbtest.AssertWriteReturnedStoredRow(t, "RecordKeyCheckSystem", *got, func() (*domain.DeploymentCommitSigner, error) {
-				return store.GetSystem(ctx, deploymentHost, deploymentKey)
-			})
+		active, err := store.RecordKeyCheckSystem(ctx, *pending, found)
+		if err != nil || active == nil {
+			t.Fatalf("RecordKeyCheckSystem = %+v, %v", active, err)
+		}
+		if active.Status != domain.CommitSignerActive || active.GitHubUserID != deploymentUserID || active.Login != "TriageFactory" ||
+			active.Name != "Triage Factory" || active.CheckedAt == nil || active.StatusSince.Equal(pending.StatusSince) {
+			t.Errorf("row = %+v, want active on the account, checked, status_since moved", active)
+		}
+		dbtest.AssertWriteReturnedStoredRow(t, "RecordKeyCheckSystem", *active, read)
+		if stale, err := store.RecordKeyCheckSystem(ctx, *pending, found); err != nil || stale != nil {
+			t.Errorf("a check against a status that has moved = %+v, %v; want (nil, nil)", stale, err)
+		}
 
-			// The row moved since before was read, so a check made against
-			// before is a lost race and changes nothing.
-			if stale, err := store.RecordKeyCheckSystem(ctx, *before, check); err != nil || (stale != nil && tc.want != tc.from) {
-				t.Errorf("a check against a status that has moved = %+v, %v; want (nil, nil)", stale, err)
-			}
-		})
-	}
+		again, err := store.RecordKeyCheckSystem(ctx, *active, found)
+		if err != nil || again == nil || again.Status != domain.CommitSignerActive || !again.StatusSince.Equal(active.StatusSince) {
+			t.Errorf("a check that keeps the status = %+v, %v; want active with status_since kept", again, err)
+		}
+	})
 
 	t.Run("an account the check could not find keeps the row's", func(t *testing.T) {
 		store, _ := deploymentSignerStore(t)

@@ -75,14 +75,16 @@ func TestControlPlane_SignsAsTheDeploymentSigner(t *testing.T) {
 // A deployment signer that is not active refuses with the line that turns
 // signing off for the rest of the run, naming why from its health; an org that
 // has registered a signer of its own since the run started is refused as a
-// change of signer; and the budgets still count.
+// change of signer; a request for an org that no longer resolves to the
+// deployment signer (its own App, or a key no check has found an account for)
+// is refused, never signed; and the budgets still count.
 func TestControlPlane_RefusesADeploymentSignerThatCannotSign(t *testing.T) {
 	runSigner := Identity{Name: "Triage Factory", Email: "90001+TriageFactory@users.noreply.github.com", AccountID: "90001", Mode: domain.CommitSigningDeployment}
 	for _, tc := range []struct {
 		name     string
 		status   domain.CommitSignerStatus
 		reason   string
-		stage    func(t *testing.T, f *fixture)
+		stage    func(t *testing.T, f *fixture, d *DeploymentSigner, health *memDeploymentSigners)
 		budgets  Budgets
 		want     Refusal
 		wantLine string
@@ -92,21 +94,33 @@ func TestControlPlane_RefusesADeploymentSignerThatCannotSign(t *testing.T) {
 		{name: "broken by a pushed commit", status: domain.CommitSignerBroken, reason: "unverified_email", want: RefusalSignerInactive,
 			wantLine: "commit signing is off for the rest of this run: GitHub reported a recent commit's email as not verified on the signer's account."},
 		{name: "the org registered its own signer", status: domain.CommitSignerActive, want: RefusalSignerChanged,
-			stage: func(t *testing.T, f *fixture) {
+			stage: func(t *testing.T, f *fixture, _ *DeploymentSigner, _ *memDeploymentSigners) {
 				f.registerSigner(t, signerAccount, "https://github.com", f.public, true)
 			},
 			wantLine: "commit signing is off for the rest of this run: the org now signs as a different account."},
+		{name: "the org moved to its own App", status: domain.CommitSignerActive, want: RefusalSignerRemoved,
+			stage: func(t *testing.T, f *fixture, _ *DeploymentSigner, _ *memDeploymentSigners) {
+				if _, err := f.stores.Orgs.SetGitHubCredentialClass(context.Background(), f.orgID, domain.GitHubCredentialClassBYOApp); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantLine: "commit signing is off for the rest of this run: this workspace no longer signs as the deployment's signing account."},
+		{name: "no account read yet", status: domain.CommitSignerActive, want: RefusalSignerRemoved,
+			stage: func(_ *testing.T, _ *fixture, d *DeploymentSigner, health *memDeploymentSigners) {
+				health.set(domain.DeploymentCommitSigner{Host: d.Host, PublicKey: d.PublicKey, Login: d.Login, Status: domain.CommitSignerPending})
+			},
+			wantLine: "commit signing is off for the rest of this run: this workspace no longer signs as the deployment's signing account."},
 		{name: "the org's per-minute budget", status: domain.CommitSignerActive, budgets: Budgets{PerOrgMinute: 1, PerClaim: 10},
-			stage: func(t *testing.T, f *fixture) {
+			stage: func(t *testing.T, f *fixture, _ *DeploymentSigner, _ *memDeploymentSigners) {
 				f.signedAt(t, time.Now())
 			},
 			want: RefusalOrgMinuteBudget, wantLine: "this org has made 1 signed commits in the last minute, its limit"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
-			d, _ := f.onDeploymentApp(t, tc.status, tc.reason)
+			d, health := f.onDeploymentApp(t, tc.status, tc.reason)
 			if tc.stage != nil {
-				tc.stage(t, f)
+				tc.stage(t, f, d, health)
 			}
 			budgets := tc.budgets
 			if budgets == (Budgets{}) {
@@ -127,36 +141,6 @@ func TestControlPlane_RefusesADeploymentSignerThatCannotSign(t *testing.T) {
 			}, runSigner)
 			if !strings.Contains(line, tc.wantLine) {
 				t.Errorf("the run's line = %q, want it to say %q", line, tc.wantLine)
-			}
-		})
-	}
-}
-
-// A request a sandbox makes as the deployment signer for an org that does not
-// resolve to it gains nothing: its own App's workspace, or one whose
-// deployment signer has no account yet, is refused, never signed.
-func TestControlPlane_DeploymentRequestForAnOrgNotOnIt(t *testing.T) {
-	for name, stage := range map[string]func(t *testing.T, f *fixture, health *memDeploymentSigners, d *DeploymentSigner){
-		"its own App": func(t *testing.T, f *fixture, _ *memDeploymentSigners, _ *DeploymentSigner) {
-			if _, err := f.stores.Orgs.SetGitHubCredentialClass(context.Background(), f.orgID, domain.GitHubCredentialClassBYOApp); err != nil {
-				t.Fatal(err)
-			}
-		},
-		"no account read yet": func(t *testing.T, _ *fixture, health *memDeploymentSigners, d *DeploymentSigner) {
-			health.set(domain.DeploymentCommitSigner{Host: d.Host, PublicKey: d.PublicKey, Login: d.Login, Status: domain.CommitSignerPending})
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			f := newFixture(t)
-			d, health := f.onDeploymentApp(t, domain.CommitSignerActive, "")
-			stage(t, f, health, d)
-			cp := f.controlPlane("pod-a", roomyBudgets, &bell{})
-			cp.SetDeploymentSigner(d)
-			req := f.requestAs(t, domain.CommitSigningDeployment, deploymentAccount, "tree stray\n")
-			cp.Handle(context.Background(), f.orgID, req.ID)
-			if got := f.row(t, req.ID); got.State != domain.CommitSignatureRefused || got.Signature != "" ||
-				(Refusal(got.RefusalReason) != RefusalSignerRemoved && Refusal(got.RefusalReason) != RefusalSignerChanged) {
-				t.Errorf("row = state %q reason %q, want refused for the signer with nothing signed", got.State, got.RefusalReason)
 			}
 		})
 	}

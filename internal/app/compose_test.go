@@ -67,21 +67,10 @@ func TestCompose_DeploymentCommitSignerIsControlOnly(t *testing.T) {
 		t.Fatalf("found no environment for the control (%d keys) or executor (%d keys) service; the compose parse is wrong", len(control), len(executor))
 	}
 	names := append([]string{commitsigner.EnvDeploymentSignerKey + "_FILE"}, commitsigner.DeploymentSignerEnvNames...)
-	for _, name := range names {
-		if !control[name] {
-			t.Errorf("the control service does not forward %s", name)
-		}
-		if executor[name] {
-			t.Errorf("the executor service forwards %s; an executor must never hold the deployment signer", name)
-		}
-	}
 	for service, keys := range env {
-		if service == "triagefactory" {
-			continue
-		}
 		for _, name := range names {
-			if keys[name] {
-				t.Errorf("service %s forwards %s; only the control service signs", service, name)
+			if forwards, control := keys[name], service == "triagefactory"; forwards != control {
+				t.Errorf("service %s forwards %s = %v; only the control service may, and it must", service, name, forwards)
 			}
 		}
 	}

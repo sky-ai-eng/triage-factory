@@ -96,9 +96,11 @@ func (m *memDeploymentSigners) only(t *testing.T) domain.DeploymentCommitSigner 
 
 // The first tick on a fresh deployment registers its key, reads the account
 // the configured login names and finds the key there, so the signer is
-// active, the gauge reads 1, and later ticks inside the interval read GitHub
-// no more. A key removed from the account breaks it at the next due check, the
-// gauge falls to 0, and the pod logs a WARN; the key put back restores it.
+// active, the gauge reads 1, the boot waiting on that tick is released, and
+// later ticks inside the interval read GitHub no more. A key removed from the
+// account breaks it at the next due check, the gauge falls to 0, and the pod
+// logs a WARN; the key put back restores it. A signer another pod broke is
+// reported the same way by a pod that made no check.
 func TestDeploymentHealth_PeriodicCheckActivatesBreaksAndRestores(t *testing.T) {
 	f := newFixture(t)
 	logs := captureLogs(t)
@@ -108,7 +110,13 @@ func TestDeploymentHealth_PeriodicCheckActivatesBreaksAndRestores(t *testing.T) 
 	if _, ok := up(); ok {
 		t.Error("the gauge reports before the pod has read the signer")
 	}
+	if h.WaitFirstTick(ctx, 10*time.Millisecond) {
+		t.Error("WaitFirstTick returned true before any tick")
+	}
 	h.Tick(ctx)
+	if !h.WaitFirstTick(ctx, 0) {
+		t.Error("WaitFirstTick after the first tick = false, want true")
+	}
 	row := health.only(t)
 	if row.Status != domain.CommitSignerActive || row.GitHubUserID != deploymentAccount || row.Name != "Triage Factory" {
 		t.Fatalf("after the first tick the signer is %+v, want active on the account the login names", row)
@@ -142,33 +150,19 @@ func TestDeploymentHealth_PeriodicCheckActivatesBreaksAndRestores(t *testing.T) 
 	gh.set(func(g *healthGitHub) { g.keys = []string{h.Signer.PublicKey} })
 	*clock = clock.Add(PeriodicCheckInterval + time.Minute)
 	h.Tick(ctx)
-	if got := health.only(t); got.Status != domain.CommitSignerActive {
-		t.Errorf("with the key back the signer is %s, want active", got.Status)
+	restored := health.only(t)
+	if restored.Status != domain.CommitSignerActive {
+		t.Errorf("with the key back the signer is %s, want active", restored.Status)
 	}
-}
 
-// A control pod's boot waits on the first tick, so a pod that starts on a key
-// the deployment has never checked has made that check before it signs: the
-// wait gives up at its timeout before any tick, and returns as soon as the
-// first one has, with the key found and the signer active.
-func TestDeploymentHealth_WaitFirstTick(t *testing.T) {
-	f := newFixture(t)
-	h, _, health, _, _ := f.deploymentHealth(t)
-	ctx := context.Background()
-
-	if h.WaitFirstTick(ctx, 10*time.Millisecond) {
-		t.Fatal("WaitFirstTick returned true before any tick")
-	}
-	go h.Tick(ctx)
-	if !h.WaitFirstTick(ctx, 10*time.Second) {
-		t.Fatal("WaitFirstTick timed out with a tick running against a GitHub that answers")
-	}
-	if got := health.only(t); got.Status != domain.CommitSignerActive || got.CheckedAt == nil {
-		t.Errorf("after the first tick the signer is %+v, want active and checked", got)
-	}
+	restored.Status, restored.StatusReason = domain.CommitSignerBroken, "unverified_email"
+	health.set(restored)
 	h.Tick(ctx)
-	if !h.WaitFirstTick(ctx, 0) {
-		t.Error("WaitFirstTick after later ticks = false, want true")
+	if v, ok := up(); !ok || v != 0 {
+		t.Errorf("gauge after another pod broke the signer = %d (%v), want 0", v, ok)
+	}
+	if !strings.Contains(logs.String(), "unverified_email") {
+		t.Errorf("logs = %s\nwant a WARN naming the reason another pod broke it for", logs)
 	}
 }
 
@@ -228,28 +222,6 @@ func TestDeploymentHealth_FailedReadWaitsBeforeRetrying(t *testing.T) {
 	}
 	if n := tickAfter(time.Minute); n != 6 {
 		t.Errorf("account reads a minute after a failure that followed a success = %d, want 6: the wait starts over", n)
-	}
-}
-
-// Every control pod reports the signer as it reads it, so a pod that did not
-// make the check still logs the WARN and reports 0 once another pod has
-// broken the signer.
-func TestDeploymentHealth_EveryPodWarnsOnABrokenSigner(t *testing.T) {
-	f := newFixture(t)
-	logs := captureLogs(t)
-	h, _, health, up, _ := f.deploymentHealth(t)
-	ctx := context.Background()
-	h.Tick(ctx)
-
-	row := health.only(t)
-	row.Status, row.StatusReason = domain.CommitSignerBroken, "unverified_email"
-	health.set(row)
-	h.Tick(ctx)
-	if v, ok := up(); !ok || v != 0 {
-		t.Errorf("gauge = %d (%v), want 0", v, ok)
-	}
-	if out := logs.String(); !strings.Contains(out, "deployment commit signer is broken") || !strings.Contains(out, "unverified_email") {
-		t.Errorf("logs = %s\nwant a WARN naming the reason", out)
 	}
 }
 

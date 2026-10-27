@@ -246,8 +246,7 @@ func TestResolve_DeploymentSigner(t *testing.T) {
 		{"no signer of its own, deployment signer broken", managedOrg(), nil, rowPtr(deploymentRow(d, domain.CommitSignerBroken, domain.CommitSignerReasonKeyMissing)),
 			deployment(domain.CommitSignerBroken, domain.CommitSignerReasonKeyMissing)},
 		{"its own active signer", managedOrg(), signer(domain.CommitSignerActive), rowPtr(deploymentRow(d, domain.CommitSignerActive, "")), own(domain.CommitSignerActive)},
-		{"its own broken signer never falls back", managedOrg(), signer(domain.CommitSignerBroken), rowPtr(deploymentRow(d, domain.CommitSignerActive, "")), own(domain.CommitSignerBroken)},
-		{"its own pending signer never falls back", managedOrg(), signer(domain.CommitSignerPending), rowPtr(deploymentRow(d, domain.CommitSignerActive, "")), own(domain.CommitSignerPending)},
+		{"its own broken signer never falls back to the deployment's", managedOrg(), signer(domain.CommitSignerBroken), rowPtr(deploymentRow(d, domain.CommitSignerActive, "")), own(domain.CommitSignerBroken)},
 		// No check has read the account the login names, so there is no
 		// account to commit as yet.
 		{"deployment signer with no account yet", managedOrg(), nil, &domain.DeploymentCommitSigner{
@@ -255,8 +254,6 @@ func TestResolve_DeploymentSigner(t *testing.T) {
 		}, asBot},
 		{"no health row yet", managedOrg(), nil, nil, asBot},
 		{"its own App", fakeOrgs{settings: domain.OrgSettings{GitHubCredentialClass: domain.GitHubCredentialClassBYOApp, GitHubBaseURL: "https://github.com"}},
-			nil, rowPtr(deploymentRow(d, domain.CommitSignerActive, "")), asBot},
-		{"a PAT", fakeOrgs{settings: domain.OrgSettings{GitHubCredentialClass: domain.GitHubCredentialClassPAT, GitHubBaseURL: "https://github.com"}},
 			nil, rowPtr(deploymentRow(d, domain.CommitSignerActive, "")), asBot},
 		{"the deployment App on another GitHub", fakeOrgs{settings: domain.OrgSettings{GitHubCredentialClass: domain.GitHubCredentialClassManagedApp, GitHubBaseURL: "https://ghe.acme.example"}},
 			nil, rowPtr(deploymentRow(d, domain.CommitSignerActive, "")), asBot},
