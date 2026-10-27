@@ -15,11 +15,28 @@
 # reuses the existing containers' cached env and the new keys would not
 # load). See docs/users/self-hosting/jwt-key-rotation.md.
 #
-# D13 (SKY-256) ships the `control` service below — the TF
-# image runs the Go binary alongside Postgres + GoTrue.  Operator
-# brings the full stack up with:
+# ── Image ──────────────────────────────────────────────────────────────
+# `control` and `executor` run the signed release image, pinned to the
+# release this file ships with (release-please bumps the tag on each
+# release). An upgrade happens when this file's pin changes, never when a
+# cache refreshes. Each release attaches triagefactory-compose_<version>.tar.gz,
+# which holds this file, .env.example, and the files it mounts
+# (docker/seccomp-profile.json, docker/observability/), so running the stack
+# needs no source checkout. See docs/users/security/verifying-releases.md for
+# verifying the image signature and the release checksums.
 #
-#   docker compose up -d
+# To build the image from a source checkout instead, add this line to .env:
+#
+#   COMPOSE_FILE=docker-compose.yml:compose.dev.yml
+#
+# compose.dev.yml then layers a build of the working tree, tagged
+# triagefactory:dev, over the release pin, and `docker compose up -d --build`
+# runs it.
+#
+# The project name is fixed (`name:` below) because compose prefixes every
+# volume with it. Without it the project is named after the directory, and
+# moving or renaming the deployment directory would start the stack against
+# new, empty volumes.
 #
 # ── Topology: multi mode is ALWAYS control + executor ─────────────────
 # The default `docker compose up` brings up the co-located split: one
@@ -63,6 +80,8 @@
 # executor replica gets its own anonymous TF_STATE_ROOT volume. See
 # docs/users/self-hosting/scaling.md for the max_connections arithmetic and the
 # M≥2-control (HA) reference reverse-proxy config.
+
+name: triage-factory
 
 # Shared, security-critical container hardening for the SANDBOX-HOSTING
 # role — the executor service (every replica). Anchored so the shape can
@@ -424,11 +443,9 @@ services:
         fi
     restart: "no"
 
-  # Triage Factory itself. Image is built from docker/Dockerfile for
-  # local iteration; in production an operator pins
-  # `ghcr.io/sky-ai-eng/triage-factory:<tag>` instead (see the commented
-  # `image:` below). Same compose file works for both — comment the
-  # `build:` block and uncomment `image:` to switch.
+  # Triage Factory itself, as the control half. Runs the release image
+  # pinned below; compose.dev.yml replaces it with a build of the source
+  # checkout (see "Image" in the header).
   #
   # GoTrue keypair: this service does NOT auto-generate the GoTrue
   # signing keys. Those belong to the gotrue service above (which
@@ -440,14 +457,7 @@ services:
   #   ./triagefactory jwk-init --write-env .env
   #   docker compose up -d
   control:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-      # Optional Enterprise public-key OVERRIDE (a dev/fork issuer key).
-      # Empty → the source default (the production key).
-      args:
-        TF_LICENSE_PUBLIC_KEY: "${TF_LICENSE_PUBLIC_KEY:-}"
-    # image: ghcr.io/sky-ai-eng/triage-factory:latest
+    image: ghcr.io/sky-ai-eng/triage-factory:v1.16.3 # x-release-please-version
     # Auto-restart on any exit. Load-bearing for the fleet's identity-
     # supersession fence (TFAC-586): a process that boots off a duplicated
     # tf-data volume exits with code 3 by design (see the volume-identity
@@ -660,14 +670,8 @@ services:
   # Executor disk is cache by design — durable state (Postgres, workspace
   # snapshots, the KB blob store) lives in the backing services.
   executor:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-      # Same optional key override as the `control` service — the two
-      # builds must agree or the roles would disagree on license validity.
-      args:
-        TF_LICENSE_PUBLIC_KEY: "${TF_LICENSE_PUBLIC_KEY:-}"
-    # image: ghcr.io/sky-ai-eng/triage-factory:latest
+    # The same image as control; both pins move together on each release.
+    image: ghcr.io/sky-ai-eng/triage-factory:v1.16.3 # x-release-please-version
     # See the `control` service's identical restart policy comment —
     # same identity-supersession crash-loop-is-the-alarm rationale applies
     # to every role, executors included.

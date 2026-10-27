@@ -19,12 +19,6 @@ func newOperatorStore(q queryer) db.OperatorStore {
 	return &operatorStore{q: q}
 }
 
-// NewOperatorStore builds a standalone store against a pooled *sql.DB — the
-// narrow constructor the `triagefactory operator` CLI uses.
-func NewOperatorStore(conn *sql.DB) db.OperatorStore {
-	return newOperatorStore(conn)
-}
-
 var _ db.OperatorStore = (*operatorStore)(nil)
 
 func normalizeEmail(email string) string { return strings.ToLower(strings.TrimSpace(email)) }

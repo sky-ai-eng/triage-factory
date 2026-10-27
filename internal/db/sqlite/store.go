@@ -166,8 +166,8 @@ func New(conn *sql.DB) db.Stores {
 		// row, epoch bumping per restart.
 		Instances: newInstanceStore(conn),
 		// InstanceStats + Operators collapse to the one connection (N=1). The
-		// sampler still writes stats; operators is effectively unused (the
-		// single local user is implicitly the operator). See TFAC-589.
+		// sampler still writes stats; nothing reads or writes operators here,
+		// since the single local user is implicitly the operator.
 		InstanceStats: newInstanceStatStore(conn),
 		// SandboxStats records nothing in practice here: local mode never
 		// sandboxes, so no jail exists to sample. Wired so the bundle is

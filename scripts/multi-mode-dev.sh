@@ -4,11 +4,13 @@
 # never touch it, so this only runs when explicitly invoked.
 #
 # Brings up Postgres + GoTrue + SeaweedFS from the real docker-compose.yml
-# (the same file self-host uses) but deliberately skips the triagefactory
-# service — building its image from docker/Dockerfile requires apk access
-# that isn't guaranteed in every environment (sandboxes included). Instead
-# this runs the already-built host binary directly in TF_MODE=multi against
-# the containers, which needs no image build at all.
+# (the same file self-host uses) but deliberately skips the control and
+# executor services. That file runs them from the pinned release image, not
+# this checkout, and building this checkout's image instead (compose.dev.yml)
+# requires apk access that isn't guaranteed in every environment (sandboxes
+# included). Instead this runs the host binary built from the working tree
+# directly in TF_MODE=multi against the containers, which needs no TF image
+# at all.
 #
 # Usage:
 #   go build -o triagefactory .              # build the binary first

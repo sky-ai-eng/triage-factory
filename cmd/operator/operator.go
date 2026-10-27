@@ -14,13 +14,14 @@
 // the SOC2 log with a nullable org — is its home, not the org-scoped
 // access_change_log).
 //
-// Local mode: an operator is meaningless there (N=1, a single implicit
-// operator), but the verbs still work against the local SQLite row for parity.
+// Multi mode only. Local mode's single user is the operator implicitly and
+// nothing there reads a grant, so the verbs refuse rather than write one.
 package operator
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/user"
@@ -30,7 +31,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
-	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -57,28 +57,35 @@ func Handle(args []string) {
 	}
 }
 
-// openStores opens the DB the running server would use for the current runmode
-// and wraps it in the narrow operator + auth-event constructors — no full
-// db.Stores bundle needed to reach two admin-pool tables. Callers close conn.
-//
-// An executor is refused before it connects: its database role (tf_system)
-// holds no grant on operators, because a role that can write the table can
-// grant the fleet console, and binding a grant reads login identities, which
-// that role cannot read either.
+// openStores opens the deployment's Postgres over the admin DSN and wraps it in
+// the narrow operator + auth-event constructors — no full db.Stores bundle
+// needed to reach two admin-pool tables. Callers close conn.
 func openStores() (ops db.OperatorStore, audit db.AuthEventStore, closeFn func() error) {
-	if runmode.Current() == runmode.ModeMulti && runmode.Role() == runmode.RoleExecutor {
-		fail("operator grants are managed from a control container (TF_ROLE=control); an executor's database role has no access to them")
+	if err := checkProcess(); err != nil {
+		fail("%v", err)
 	}
-	conn, dialect, err := db.OpenForCLI()
+	conn, _, err := db.OpenForCLI()
 	if err != nil {
 		fail("%v", err)
 	}
-	switch dialect {
-	case "postgres":
-		return pgstore.NewOperatorStore(conn), pgstore.NewAuthEventStore(conn), conn.Close
-	default:
-		return sqlitestore.NewOperatorStore(conn), sqlitestore.NewAuthEventStore(conn), conn.Close
+	return pgstore.NewOperatorStore(conn), pgstore.NewAuthEventStore(conn), conn.Close
+}
+
+// checkProcess refuses, before anything connects, the processes that cannot
+// manage a grant. Local mode has none to manage: its single user is the
+// operator implicitly, and neither the fleet gate nor /api/me reads the table
+// there, so a grant written locally would report success and change nothing.
+// An executor's database role (tf_system) holds no grant on operators, because
+// a role that can write the table can grant the fleet console, and binding a
+// grant reads login identities, which that role cannot read either.
+func checkProcess() error {
+	if runmode.Current() != runmode.ModeMulti {
+		return errors.New("local mode has no deployment operators: its single user is the operator implicitly; grants exist only on a multi-mode deployment")
 	}
+	if runmode.Role() == runmode.RoleExecutor {
+		return errors.New("operator grants are managed from a control container (TF_ROLE=control); an executor's database role has no access to them")
+	}
+	return nil
 }
 
 func runAdd(args []string) {
@@ -92,13 +99,9 @@ func runAdd(args []string) {
 		fail("add operator %q: %v", email, err)
 	}
 	recordAudit(audit, domain.AuthEventOperatorGranted, email, actor)
-	switch {
-	case runmode.Current() == runmode.ModeLocal:
-		// No sign-ins in local mode, so nothing binds and pending says nothing.
-		fmt.Printf("%s is now a deployment operator.\n", op.Email)
-	case op.Pending():
+	if op.Pending() {
 		fmt.Printf("%s is now a deployment operator, pending: no sign-in holds that address verified yet, so the grant binds to the first person who signs in with it verified.\n", op.Email)
-	default:
+	} else {
 		fmt.Printf("%s is now a deployment operator, bound to user %s, the account that holds that address verified. The grant stays with that account if its address changes later.\n", op.Email, op.UserID)
 	}
 	fmt.Println("They can reach the fleet console once the deployment is licensed for fleet administration (FeatureFleet); operability (drain, `instance list`) needs no license.")
@@ -214,7 +217,10 @@ NOTES
 
   Run it on a control container: an executor's database role has no access to
   operator grants. Shell access is the trust boundary (same as jwk-init). Each
-  add/remove is recorded in the auth_events audit log.`)
+  add/remove is recorded in the auth_events audit log.
+
+  Multi mode only. In local mode the single user is the operator implicitly,
+  so every verb refuses.`)
 }
 
 func fail(format string, args ...any) {
