@@ -45,9 +45,9 @@ environment.
 
 On Linux, each run executes in a
 [bubblewrap](https://github.com/containers/bubblewrap) namespace that hides your
-home directory, Triage Factory's database and other runs' worktrees. It guards
-against accidents, not attacks: the agent still runs as you and shares your
-network.
+home directory, Triage Factory's database, and other runs' worktrees. This only
+guards against accidents, not attacks. Despite this setting, in local mode the
+agent always runs as you and shares your network.
 
 Auth helpers from `~/.claude/settings.json` run inside the sandbox, so one that
 reads files in your home directory (`~/.aws`, `~/.config/gcloud`, its own
@@ -71,16 +71,15 @@ GitHub API uses HTTPS either way.
 
 - **HTTPS** (the default) authenticates with the GitHub credential you
   connected, through a per-run proxy. Pushes to a repository's base branch are
-  checked against the team's policy, and pushes are recorded. A push the proxy
-  can't authorize is refused; it never falls back to your SSH key or Git
-  credential helper.
+  checked against the team's policy, and pushes are recorded. We intentionally
+  refuse pushes the proxy can't authorize with no fallback.
 - **SSH** uses your own SSH agent and key, exactly as Git would from your
   shell. Use it only if your GitHub host restricts Git over HTTPS. The
   base-branch policy and push recording don't apply; a local pre-push hook
   still refuses base-branch pushes, but `git push --no-verify` skips it. If
   SSH fails (for example, an agent that lost its keys after a reboot), the
-  operation fails; Triage Factory never switches to HTTPS on its own.
+  operation fails; Triage Factory will never switch to HTTPS on its own.
 
-Neither is a security boundary in local mode: an agent runs as you and can
-bypass these checks deliberately. GitHub branch protection is the server-side
-guard.
+Again, neither is a security boundary in local mode: an agent runs as you and
+can bypass these checks deliberately. GitHub branch protection is the
+server-side guard.

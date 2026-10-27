@@ -6,15 +6,15 @@ self-hosted deployment.
 
 ## Run concurrency
 
-| Variable | Default | Effect |
-|---|---|---|
-| `TF_MAX_CONCURRENT_CLAIMS` | `8` | Most agent runs at once. Each costs about 256 MB of RAM plus API spend. Values above 256 are clamped to 256. |
-| `TF_DISPATCH_MEM_FLOOR_MB` | `4096` | No new run starts while available memory is below this. Ignored where memory can't be read (macOS). |
+| Variable                   | Default | Effect                                                                                                       |
+| -------------------------- | ------- | ------------------------------------------------------------------------------------------------------------ |
+| `TF_MAX_CONCURRENT_CLAIMS` | `8`     | Most agent runs at once. Each costs about 256 MB of RAM plus API spend. Values above 256 are clamped to 256. |
+| `TF_DISPATCH_MEM_FLOOR_MB` | `4096`  | No new run starts while available memory is below this. Ignored where memory can't be read (macOS).          |
 
-Runs past the cap wait in a queue and start as slots free. Their card and run
-page show **QUEUED** with the time spent waiting, and queued runs survive a
-restart. The startup log prints the cap (`run concurrency cap`), and a full
-queue logs `run concurrency cap reached; queued runs start as slots free`.
+Runs past the cap wait in a queue for slots to free up. Their card and run
+page show **QUEUED** with the time spent waiting. The startup log prints
+the cap (`run concurrency cap`), and a full queue logs
+`run concurrency cap reached; queued runs start as slots free`.
 
 ## Parked workspace disk
 
@@ -23,10 +23,10 @@ removes those worktrees while the process runs; a restart clears the ones no
 parked run still needs. Two variables, both off unless set, reclaim them
 sooner:
 
-| Variable | Effect |
-|---|---|
-| `TF_WORKSPACE_EVICT_AFTER_SEC` | Hourly, delete parked worktrees idle longer than this many seconds (for example `21600` for 6h). |
-| `TF_DISPATCH_DISK_FLOOR_MB` | While free disk is below this many MiB, start no new runs and delete parked worktrees without waiting for the idle time. |
+| Variable                       | Effect                                                                                                                   |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `TF_WORKSPACE_EVICT_AFTER_SEC` | Hourly, delete parked worktrees idle longer than this many seconds (for example `21600` for 6h).                         |
+| `TF_DISPATCH_DISK_FLOOR_MB`    | While free disk is below this many MiB, start no new runs and delete parked worktrees without waiting for the idle time. |
 
 A worktree is only deleted once its snapshot is saved and no live run is using
 it. Resuming afterwards rebuilds the workspace from the snapshot: slower, but
@@ -36,9 +36,9 @@ nothing is lost.
 
 Logs go to stderr.
 
-| Variable | Values |
-|---|---|
-| `TF_LOG_LEVEL` | `debug`, `info` (default), `warn`, `error` |
+| Variable        | Values                                                                      |
+| --------------- | --------------------------------------------------------------------------- |
+| `TF_LOG_LEVEL`  | `debug`, `info` (default), `warn`, `error`                                  |
 | `TF_LOG_FORMAT` | `text` (default in local mode), `json` (default in self-hosted deployments) |
 
 Every line carries a `component` field naming the subsystem.
@@ -46,8 +46,11 @@ Every line carries a `component` field naming the subsystem.
 ## Tracing
 
 Set `TF_TRACES_ENDPOINT` to an OTLP/HTTP endpoint to export traces. Unset, no
-traces are produced. At startup Triage Factory logs `tracing enabled` with the
-address; if that line is missing, the variable didn't reach the process.
+traces are produced. If correctly configured, at startup Triage Factory will
+log `tracing enabled` with the address.
+
+> I don't know why anyone would want to do this when using it day-to-day, but
+> I use it for debugging and figured it should be documented.
 
 The quickest backend is a single Tempo container, run from the repository
 root:
