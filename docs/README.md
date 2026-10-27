@@ -1,9 +1,6 @@
 # Triage Factory documentation
 
-Setup you do inside a workspace (connecting GitHub, Jira, Linear or Slack,
-mapping events to prompts, team settings) is explained in the app. These pages
-cover what happens outside it: installing, deploying, and operating Triage
-Factory, and working on its code.
+Installing, deploying and operating Triage Factory, and working on its code.
 
 ## Run it on your machine (local mode)
 
