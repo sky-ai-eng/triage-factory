@@ -36,9 +36,9 @@ Work flows through an automation engine drawn as a factory floor. A durable **en
 brew tap sky-ai-eng/tap && brew install triagefactory && triagefactory
 ```
 
-State lives in SQLite, credentials live in the OS keychain or an encrypted file, and agent runs execute in isolated git worktrees (not secured sandboxes). No Postgres, no Docker, no DevOps. For direct downloads, building from source, and the full flag reference, see [docs/users/local/](docs/users/local/README.md) and [docs/users/local/install.md](docs/users/local/install.md).
+State lives in SQLite, credentials live in the OS keychain or an encrypted file, and agent runs execute in isolated git worktrees (not secured sandboxes). No Postgres, no Docker, no DevOps. For direct downloads, building from source, and the flag reference, see [local mode](docs/users/local/README.md).
 
-**Self-hosted (multi-tenant)** — your whole org, on Linux hosts you control. The same binary and schema, deployed with Docker Compose as a control + executor split: Postgres with per-org row-level security, SSO/SAML sign-in, audit logs, and Slack ingest via the [Enterprise Edition](ee/), a `/usage` dashboard with per-team and org-wide spend caps, and every agent run confined to its own gVisor sandbox. See [docs/users/self-hosting/](docs/users/self-hosting/README.md) to stand one up.
+**Self-hosted (multi-tenant)** — your whole org, on Linux hosts you control. The same binary and schema, deployed with Docker Compose as a control + executor split: Postgres with per-org row-level security, SSO/SAML sign-in, audit logs, and Slack ingest via the [Enterprise Edition](ee/), a `/usage` dashboard with per-team and org-wide spend caps, and every agent run confined to its own gVisor sandbox. See [self-hosting](docs/users/self-hosting/README.md) to stand one up.
 
 ## Security & isolation
 
@@ -54,12 +54,12 @@ Triage Factory runs code written by an AI agent acting on untrusted input such a
 
 ## Documentation
 
-- [docs/users/local/install.md](docs/users/local/install.md) — install, build from source, prerequisites
-- [docs/users/local/](docs/users/local/README.md) — local mode: CLI flags, configuration, secret storage, running on a server
-- [docs/users/self-hosting/](docs/users/self-hosting/README.md) — multi-tenant self-hosting (install, scaling, SSO, monitoring)
-- [docs/users/security/](docs/users/security/README.md) — isolation tiers, security overview, privilege separation
-- [specs/tracked-events.md](specs/tracked-events.md) — the GitHub/Jira/Linear event taxonomy
-- [CONTRIBUTING.md](CONTRIBUTING.md) — contribution terms
+Everything starts at [docs/README.md](docs/README.md):
+
+- [Local mode](docs/users/local/README.md) — install, run and configure the single-user binary
+- [Self-hosting](docs/users/self-hosting/README.md) — deploy and operate the multi-tenant stack
+- [Security](docs/users/security/README.md) — the isolation model, for evaluating a deployment
+- [Contributing](CONTRIBUTING.md) — contribution terms; contributor docs are in [docs/contributors/](docs/contributors/README.md) and design specs in [specs/](specs/)
 
 ## License
 

@@ -280,8 +280,15 @@ Two tiers, and the default is the cheap one. The push economics are the opposite
 
 ## Reference docs
 
-- `specs/tracked-events.md` — GitHub/Jira event taxonomy + snapshot field list.
-- `docs/users/local/` — local-mode usage: CLI flags, configuration, secret storage, running on a server, polling.
-- `docs/users/self-hosting/` — multi-mode operator guides (install, scaling, SSO, monitoring).
-- `docs/users/security/` — isolation tiers, security overview, privilege separation, sandbox egress lanes, seccomp, release verification.
-- `specs/auto-delegation-briefing.md` — briefing for delegated agents.
+- `specs/` — design specs and agent briefings, by feature. `specs/tracked-events.md` is the GitHub/Jira/Linear event taxonomy + snapshot field list (the poll e2e test checks against it); `specs/auto-delegation-briefing.md` briefs delegated agents.
+- `docs/users/local/` — local-mode usage: CLI flags, credentials, the Linux sandbox, secret storage, running on a server.
+- `docs/users/self-hosting/` — multi-mode operator guides (install, deployment-wide apps, SSO, scaling, monitoring).
+- `docs/users/security/` — isolation tiers, security overview, privilege separation, seccomp, release verification.
+- `docs/contributors/` — EE features, sandbox egress lanes, seccomp regeneration, benchmarks.
+
+## Writing docs
+
+- `docs/users/` is for people running Triage Factory; `docs/contributors/` is for people changing it. Both are written for humans: short, task-shaped, and free of internals the code already explains (package names, tables, protocols, why the code is shaped the way it is). Keep what a reader acts on: commands, values, consequences, and the exact log lines and errors they will search for.
+- Setup done per workspace in the app is explained by the app's own copy, not by a page in `docs/`. A page exists for host- or deployment-level setup: install, env vars, flags, deployment-wide apps, operations.
+- `.env.example` is the one per-variable reference. A guide shows the variables it needs and links there rather than re-explaining them.
+- Design specs and agent briefings go in `specs/`, never `docs/`.

@@ -1,28 +1,30 @@
-# Self-hosting (multi-mode)
+# Self-hosting
 
-Operator guides for running the multi-tenant deployment (`TF_MODE=multi`) — the
-Docker Compose stack with Postgres, GoTrue, and an object store. For the
-single-user binary, see [local mode](../local/); for the security model a
-reviewer evaluates, see [docs/users/security/](../security/).
+Guides for running the multi-tenant deployment (`TF_MODE=multi`): a Docker
+Compose stack with Postgres, GoTrue and an object store, split into a control
+service and one or more executors. For the single-user binary, see
+[local mode](../local/README.md).
 
-## Setup
+## Set up
 
-- [Self-host setup](install.md) — GitHub OAuth app, `.env`, `jwk-init`, `docker compose up`, verify the OAuth flow, register a deployment GitHub App
-- [SSO with Microsoft Entra (SAML)](sso.md) — enable GoTrue SAML + register an org's connection
-- [Bedrock role mode](bedrock-role-mode.md) — short-lived STS LLM credentials via a customer IAM role (no stored Bedrock secret)
+- [Install](install.md) — GitHub OAuth app, `.env`, `jwk-init`, `docker compose up`
+- [Deployment GitHub App](deployment-github-app.md) — one App every workspace without its own can connect to
+- [Deployment Jira app](deployment-jira-app.md) — one Atlassian OAuth app for one-click Jira Cloud connections
+- [Deployment Linear app](deployment-linear-app.md) — one Linear OAuth app every workspace can install
+- [Deployment commit signer](deployment-commit-signer.md) — signed, Verified commits for workspaces on the deployment App
+- [SSO](sso.md) — SAML sign-in through GoTrue
+- [Bedrock role mode](bedrock-role-mode.md) — short-lived Bedrock credentials from a customer IAM role
 
 ## Operate
 
-- [Fleet console & operators](fleet-console.md) — the deployment-wide admin view + granting operator access via the `operator` CLI
-- [Monitoring & health checks](monitoring.md) — `/api/health`, `/readyz`, executor `/healthz`, `:9464` metrics, and traces (`TF_TRACES_ENDPOINT` + the bundled Tempo/Grafana stack)
-- [Scaling out](scaling.md) — control + N executors, per-role DB pools, HA reverse proxy
-- [Client IP & trusted proxies](networking.md) — `TF_TRUSTED_PROXY_CIDR` behind a load balancer
-- [Durable workspace storage](storage.md) — SeaweedFS + BYO S3/R2
-- [Deployment secrets](secrets.md) — supplying secrets from files (`*_FILE` / Docker & K8s secrets) and how TF handles them
-- [Rotating the JWT signing key](jwt-key-rotation.md)
+- [Monitoring](monitoring.md) — health endpoints, metrics, traces
+- [Scaling](scaling.md) — more executors, multiple control pods, database pools
+- [Networking](networking.md) — client IPs behind a load balancer
+- [Storage](storage.md) — durable workspace storage
+- [Secrets](secrets.md) — supplying secrets from files
+- [JWT key rotation](jwt-key-rotation.md) — rotating the key that signs login sessions
+- [Fleet console](fleet-console.md) — the deployment-wide admin view and operator access
 
-## Security
-
-The threat model, privilege-separation process model, seccomp profile, and release
-verification live under [docs/users/security/](../security/) — they span self-host and
-SaaS, so they're not filed here.
+Every variable is listed with a short note in
+[`.env.example`](../../../.env.example). The security model is under
+[security](../security/README.md).
