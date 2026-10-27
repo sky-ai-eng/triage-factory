@@ -96,7 +96,7 @@ When an org admin registers a connection, TF calls GoTrue's admin SSO API
 authenticated with a **pre-minted RS256 `service_role` token**,
 `TF_GOTRUE_SERVICE_ROLE_TOKEN`. `triagefactory jwk-init --write-env .env` mints
 it for you (signed with the same RSA key as `GOTRUE_JWT_KEYS`) and writes it to
-`.env`; the compose stack passes it to the `triagefactory` service. No extra
+`.env`; the compose stack passes it to the `control` service. No extra
 step beyond running `jwk-init` — just don't strip it.
 
 > **Enabling SSO on an already-running deployment (no key rotation).** If you
@@ -106,8 +106,8 @@ step beyond running `jwk-init` — just don't strip it.
 > detects the existing `GOTRUE_JWT_KEYS`, **reuses that keypair** to sign the
 > token, and writes **only** the `TF_GOTRUE_SERVICE_ROLE_TOKEN` line — it does
 > **not** rotate the signing key, so every active session keeps verifying and no
-> one is forced to re-authenticate. Then recreate the `triagefactory` service
-> (`docker compose up -d triagefactory`) to load the new token. (Pass `--rotate`
+> one is forced to re-authenticate. Then recreate the `control` service
+> (`docker compose up -d control`) to load the new token. (Pass `--rotate`
 > only if you actually want to roll the signing key — that *does* force a re-auth
 > for everyone; see [Rotating the signing key](key-rotation.md).)
 
@@ -510,11 +510,11 @@ transitions rather than button presses.
 ## Troubleshooting
 
 - **`POST /api/sso/connection` returns 503 "SSO admin token not configured".**
-  `TF_GOTRUE_SERVICE_ROLE_TOKEN` isn't set on the `triagefactory` service. Run
+  `TF_GOTRUE_SERVICE_ROLE_TOKEN` isn't set on the `control` service. Run
   `triagefactory jwk-init --write-env .env` — it reuses your existing
   `GOTRUE_JWT_KEYS` to mint the token (no keypair rotation, no forced re-auth)
   and writes only the token line — then recreate the container with
-  `docker compose up -d triagefactory` so it picks up the new env.
+  `docker compose up -d control` so it picks up the new env.
 - **`POST /api/sso/connection` returns 500 mentioning GoTrue.** Common causes:
   - *Provider registration failed with a metadata error* — GoTrue couldn't
     fetch the metadata URL. Check the gotrue container has **outbound** access
@@ -526,7 +526,7 @@ transitions rather than button presses.
     re-minting the token: re-run `triagefactory jwk-init --write-env .env`, which
     reuses the current `GOTRUE_JWT_KEYS` to re-mint the token against it (it
     upserts the line in place — no stale duplicates to hand-delete), then
-    recreate the `triagefactory` container.
+    recreate the `control` container.
 - **`POST /api/sso/connection` returns 404.** You're not an org admin in the
   active org (the endpoint is non-disclosing — it 404s rather than 403s), or the
   deployment is in local mode (SSO is multi-mode only).
@@ -550,7 +550,7 @@ transitions rather than button presses.
   that transaction can't commit because the database is unhealthy (disk full, in
   recovery/read-only, `access_change_log` schema drift), the grant rolls back and
   the callback fails **closed**: a 500, no session, nothing half-provisioned.
-  Check the `triagefactory` logs for `jit: grant membership failed` /
+  Check the `control` logs for `jit: grant membership failed` /
   `audit jit member granted` and the health of the database. The user simply
   retries once it's restored (the grant is idempotent); there is no break-glass
   that grants membership while the audit write is down — by design.

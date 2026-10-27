@@ -112,10 +112,10 @@ TF_PUBLIC_URL="$PUBLIC_URL" "$BIN" jwk-init --write-env "$ENV_FILE"
 
 # --- Bring the stack up ----------------------------------------------------
 #
-# Build from the working tree (the triagefactory service uses build:, so this
+# Build from the working tree (the control service uses build:, so this
 # tests the current code, not a published image). depends_on conditions make
 # `up` wait for postgres/gotrue healthy and both postinit sidecars to complete
-# successfully before starting triagefactory — so a sidecar that errors aborts
+# successfully before starting control — so a sidecar that errors aborts
 # `up` here with a non-zero exit.
 # Clear any leftovers from a previously-crashed run so stale named volumes (an
 # old bucket, an old migration set) from a reused project can't taint this run.
@@ -123,26 +123,26 @@ dc down -v --remove-orphans >/dev/null 2>&1 || true
 echo "Building + starting the stack (this builds the TF image; first run is slow)..."
 dc up -d --build
 
-# triagefactory is the long pole: its depends_on transitively gates on every
+# control is the long pole: its depends_on transitively gates on every
 # other service, and its healthcheck curls /api/health, which only answers once
 # migrate-up succeeded and the server is serving. So waiting for it healthy is a
 # full boot+migrate gate.
-echo "Waiting for triagefactory to become healthy (timeout ${HEALTH_TIMEOUT}s)..."
+echo "Waiting for control to become healthy (timeout ${HEALTH_TIMEOUT}s)..."
 # head -1: a service can map to >1 container id in a degraded project; inspect one.
-cid=$(dc ps -aq triagefactory | head -1)
-[ -n "$cid" ] || fail "triagefactory container was not created"
+cid=$(dc ps -aq control | head -1)
+[ -n "$cid" ] || fail "control container was not created"
 elapsed=0
 while :; do
   status=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid" 2>/dev/null || echo missing)
   case "$status" in
     healthy) break ;;
-    exited|dead) fail "triagefactory $status before becoming healthy" ;;
+    exited|dead) fail "control $status before becoming healthy" ;;
   esac
-  [ "$elapsed" -ge "$HEALTH_TIMEOUT" ] && fail "triagefactory not healthy after ${HEALTH_TIMEOUT}s (last status: $status)"
+  [ "$elapsed" -ge "$HEALTH_TIMEOUT" ] && fail "control not healthy after ${HEALTH_TIMEOUT}s (last status: $status)"
   sleep 3
   elapsed=$((elapsed + 3))
 done
-pass "control healthy (triagefactory up — implies postgres + gotrue healthy, sidecars completed, migrate-up ran)"
+pass "control healthy (implies postgres + gotrue healthy, sidecars completed, migrate-up ran)"
 
 # The executor is the second half of the default co-located split. It only
 # starts after the control pod is healthy (its schema assert needs the
@@ -167,11 +167,11 @@ done
 pass "executor healthy (role accepted, schema assert passed, broker up, dispatcher heartbeating)"
 
 # postgres-postinit-system (reconciles tf_system's password) deliberately
-# starts only AFTER triagefactory is healthy — tf_system doesn't exist
-# until triagefactory's entrypoint has migrated the schema, so this
+# starts only AFTER control is healthy — tf_system doesn't exist
+# until control's entrypoint has migrated the schema, so this
 # sidecar can't run any earlier (see its comment in docker-compose.yml).
 # Unlike postgres-postinit/seaweedfs-postinit below, nothing gates on it
-# finishing, so it isn't guaranteed done just because triagefactory is
+# finishing, so it isn't guaranteed done just because control is
 # healthy — wait for it explicitly before asserting its exit code.
 echo "Waiting for postgres-postinit-system to complete..."
 pscid=$(dc ps -aq postgres-postinit-system | head -1)
@@ -190,7 +190,7 @@ done
 echo "Asserting the deployment contract..."
 
 # 1. One-shot sidecars exited 0. `up` already gates dependents on this for
-#    postgres-postinit/seaweedfs-postinit (triagefactory depends_on them);
+#    postgres-postinit/seaweedfs-postinit (control depends_on them);
 #    postgres-postinit-system is gated by the explicit wait above instead,
 #    since nothing depends on it. Assert all three explicitly so a
 #    regression names the offending sidecar.
@@ -239,7 +239,7 @@ else
 fi
 
 # 4. /api/health → 200 from the host's published port (the binary booted and is
-#    serving). triagefactory publishes 3000:3000.
+#    serving). control publishes 3000:3000.
 # No -f: it makes curl exit non-zero on an HTTP error and (version-dependently)
 # garbles or suppresses the -w status code. Without it, curl exits 0 for any
 # response so %{http_code} is the real status; || true keeps the connection-
@@ -272,7 +272,7 @@ esac
 #                 group, /run/tf orchestrator-owned at 0711.
 
 # 6a. Control: capless, broker-free.
-posture=$(dc exec -T triagefactory sh -c '
+posture=$(dc exec -T control sh -c '
   broker=""; orch=""
   for c in /proc/[0-9]*/comm; do
     read -r name < "$c" 2>/dev/null || continue
@@ -351,7 +351,7 @@ pass "executor host tools on PATH: $tools"
 #     it that compose was still writing. The line it looks for is emitted at
 #     boot and the pod logs steadily afterwards, so this got likelier the
 #     longer the checks above took.
-tf_logs=$(dc logs triagefactory 2>/dev/null || true)
+tf_logs=$(dc logs control 2>/dev/null || true)
 case "$tf_logs" in
   *"tracing enabled"*) ;;
   *) fail "control pod never logged 'tracing enabled' — TF_TRACES_ENDPOINT didn't reach it, or the exporter refused the value" ;;
@@ -474,6 +474,27 @@ for uid in tf-tempo tf-prometheus; do
   esac
 done
 pass "grafana provisioned tf-overview, serves it as the home dashboard, and its panels address both data sources"
+
+# 7f. Prometheus scrapes both roles. It finds the pods by their compose
+#     service names (dns_sd_configs in docker/observability/prometheus.yml), so
+#     a service renamed in docker-compose.yml and not there resolves to nothing:
+#     the job has no targets, every TF panel goes blank, and no alert fires.
+#     The tf_service label is the service name each target was found through,
+#     which is what the dashboards and any operator alert filter on. The
+#     discovery refreshes every 30s and the stack has been up for minutes by
+#     now, so this normally passes on the first read.
+scraped=""
+for _ in $(seq 1 30); do
+  up=$(dc exec -T grafana curl -sS -G http://prometheus:9090/api/v1/query \
+    --data-urlencode 'query=count by (tf_service) (up{job="triagefactory"} == 1)' 2>/dev/null || true)
+  case "$up" in
+    *'"tf_service":"control"'*) case "$up" in *'"tf_service":"executor"'*) scraped=yes ;; esac ;;
+  esac
+  [ -n "$scraped" ] && break
+  sleep 3
+done
+[ -n "$scraped" ] || fail "prometheus is not scraping both TF roles as tf_service=control and tf_service=executor (last answer: ${up:-<none>}) — check that dns_sd_configs names in docker/observability/prometheus.yml match the service names in docker-compose.yml"
+pass "prometheus scrapes both roles (tf_service=control, tf_service=executor)"
 
 echo ""
 echo "compose-smoke: ALL CHECKS PASSED ✓"

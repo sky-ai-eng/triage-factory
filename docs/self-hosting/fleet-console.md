@@ -42,13 +42,13 @@ executor's database role (`tf_system`) has no access to operator grants.
 
 ```sh
 # Grant — use a verified email of one of your sign-in methods
-docker compose exec triagefactory triagefactory operator add you@example.com
+docker compose exec control triagefactory operator add you@example.com
 
 # List every operator, with the account each grant is bound to
-docker compose exec triagefactory triagefactory operator list
+docker compose exec control triagefactory operator list
 
 # Revoke
-docker compose exec triagefactory triagefactory operator remove you@example.com
+docker compose exec control triagefactory operator remove you@example.com
 ```
 
 - **Use a verified email from one of your sign-in methods.** The email is how
@@ -106,5 +106,5 @@ It's a DB-backed live view (10-second poll, no Prometheus dependency) over:
   includes `fleet` (a community build ignores the license entirely — see
   [self-host setup](install.md)).
 - **`operator` CLI errors on the DB.** It needs the same database env the server
-  uses; run it via `docker compose exec triagefactory …` (the control service),
-  not on the host where that env is absent.
+  uses; run it via `docker compose exec control triagefactory …`, not on the
+  host where that env is absent.

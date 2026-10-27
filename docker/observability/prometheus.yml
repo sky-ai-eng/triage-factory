@@ -35,7 +35,7 @@ scrape_configs:
   # counters are per-process, so a fleet total is a `sum` at query time.
   - job_name: triagefactory
     dns_sd_configs:
-      - names: [triagefactory, executor]
+      - names: [control, executor]
         type: A
         port: 9464
         refresh_interval: 30s

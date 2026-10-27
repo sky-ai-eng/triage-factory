@@ -16,7 +16,7 @@
 # the start subcommand reuses the existing container's cached env and the
 # new keys would not load).
 #
-# D13 (SKY-256) ships the `triagefactory` service below — the TF
+# D13 (SKY-256) ships the `control` service below — the TF
 # image runs the Go binary alongside Postgres + GoTrue.  Operator
 # brings the full stack up with:
 #
@@ -24,7 +24,7 @@
 #
 # ── Topology: multi mode is ALWAYS control + executor ─────────────────
 # The default `docker compose up` brings up the co-located split: one
-# `triagefactory` control pod (the published entrypoint — API/WS, the
+# `control` pod (the published entrypoint — API/WS, the
 # leader-elected background brain, the secret store) plus one `executor`
 # (the sandbox worker — run dispatcher, gVisor jails, per-run credential
 # sidecars). There is no single-process `all` shape in multi mode: the
@@ -201,12 +201,12 @@ services:
   # Reconciles TF_SYSTEM_PASSWORD on the tf_system role — split out
   # from postgres-postinit above deliberately, not merged in. tf_system is
   # CREATEd by the pg baseline migration, which runs inside the
-  # `triagefactory` container's entrypoint (`migrate up`, before it starts
-  # serving) — and postgres-postinit is a DEPENDENCY of `triagefactory`,
+  # `control` container's entrypoint (`migrate up`, before it starts
+  # serving) — and postgres-postinit is a DEPENDENCY of `control`,
   # not a dependent, so on a fresh volume it runs BEFORE that migration
   # has ever applied. An `ALTER ROLE tf_system ...` there would be
   # ALTERing a role that doesn't exist yet and fail first boot. Waiting on
-  # `triagefactory: healthy` instead guarantees the migration already ran
+  # `control: healthy` instead guarantees the migration already ran
   # (the healthcheck only passes once the server is serving, which is
   # strictly after `migrate up` succeeds — see docker/entrypoint.sh).
   #
@@ -223,7 +223,7 @@ services:
   postgres-postinit-system:
     image: supabase/postgres:15.14.1.121
     depends_on:
-      triagefactory: { condition: service_healthy }
+      control: { condition: service_healthy }
     environment:
       PGPASSWORD: ${POSTGRES_PASSWORD:?missing POSTGRES_PASSWORD (see .env.example)}
       SYSTEM_PASSWORD: ${TF_SYSTEM_PASSWORD:?missing TF_SYSTEM_PASSWORD (see .env.example)}
@@ -379,7 +379,7 @@ services:
     # the store stays off the host's network surface entirely.
     healthcheck:
       # curl ships in the image. No -f, so any HTTP response on the S3 port
-      # counts as ready — this gates the bucket sidecar and triagefactory on
+      # counts as ready — this gates the bucket sidecar and the control pod on
       # the S3 gateway actually serving (8333), not merely the master being up.
       test: ["CMD-SHELL", "curl -s -o /dev/null http://localhost:8333/"]
       interval: 5s
@@ -391,7 +391,7 @@ services:
   # generic aws-cli against the S3 API: head-bucket succeeds when the bucket
   # already exists (the re-run no-op), otherwise create-bucket makes it. Reads
   # the same creds + bucket name TF does, keeping one source of truth across
-  # server, sidecar, and client. The triagefactory service waits on this
+  # server, sidecar, and client. The control service waits on this
   # completing so its first snapshot never races a missing bucket.
   seaweedfs-postinit:
     image: amazon/aws-cli:2.35.11
@@ -440,7 +440,7 @@ services:
   #
   #   ./triagefactory jwk-init --write-env .env
   #   docker compose up -d
-  triagefactory:
+  control:
     build:
       context: .
       dockerfile: docker/Dockerfile
@@ -664,12 +664,12 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
-      # Same optional key override as the `triagefactory` service — the two
+      # Same optional key override as the `control` service — the two
       # builds must agree or the roles would disagree on license validity.
       args:
         TF_LICENSE_PUBLIC_KEY: "${TF_LICENSE_PUBLIC_KEY:-}"
     # image: ghcr.io/sky-ai-eng/triage-factory:latest
-    # See the `triagefactory` service's identical restart policy comment —
+    # See the `control` service's identical restart policy comment —
     # same identity-supersession crash-loop-is-the-alarm rationale applies
     # to every role, executors included.
     restart: unless-stopped
@@ -683,10 +683,10 @@ services:
       # instead of riding out the entrypoint's behind-schema retry loop.
       # This is ALSO what makes postgres-postinit-system's ordering work —
       # see that service's comment.
-      triagefactory: { condition: service_healthy }
+      control: { condition: service_healthy }
       # Reconciles tf_system's password — the executor's admin pool
       # authenticates as tf_system, not supabase_admin. Depends on
-      # triagefactory (above) internally too; listed explicitly here for
+      # control (above) internally too; listed explicitly here for
       # the same belt-and-suspenders clarity as postgres-postinit/postgres.
       postgres-postinit-system: { condition: service_completed_successfully }
       # The bucket must exist before the first workspace snapshot.
