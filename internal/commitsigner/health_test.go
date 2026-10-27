@@ -27,7 +27,11 @@ import (
 // commits in acme/app. Tests mutate it between checks to play the admin
 // removing a key or GitHub renaming the account.
 type healthGitHub struct {
-	mu      sync.Mutex
+	mu sync.Mutex
+	// id is the account's id, signerAccount when zero; kind is its type,
+	// User when empty.
+	id      int64
+	kind    string
 	login   string
 	name    string
 	deleted bool
@@ -37,6 +41,10 @@ type healthGitHub struct {
 	// repository the credential lost access to.
 	commits map[string]ghclient.CommitVerification
 	failing bool
+	// limited makes every account read a 403, as a rate limit does, and
+	// accountReads counts the account reads made.
+	limited      bool
+	accountReads int
 }
 
 func newHealthGitHub(t *testing.T, key string) (*healthGitHub, string) {
@@ -53,13 +61,24 @@ func (g *healthGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	path := strings.TrimPrefix(r.URL.Path, "/api/v3")
 	notFound := func() { http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound) }
+	id, kind := g.id, g.kind
+	if id == 0 {
+		id = signerAccount
+	}
+	if kind == "" {
+		kind = ghclient.AccountTypeUser
+	}
 	switch {
-	case path == fmt.Sprintf("/user/%d", signerAccount):
+	case g.limited && (strings.HasPrefix(path, "/user/") || strings.HasPrefix(path, "/users/")):
+		g.accountReads++
+		http.Error(w, `{"message":"API rate limit exceeded"}`, http.StatusForbidden)
+	case path == fmt.Sprintf("/user/%d", id), path == "/users/"+g.login:
+		g.accountReads++
 		if g.deleted {
 			notFound()
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": signerAccount, "login": g.login, "type": "User", "name": g.name})
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "login": g.login, "type": kind, "name": g.name})
 	case path == "/users/"+g.login+"/ssh_signing_keys" && !g.deleted:
 		items := []map[string]any{}
 		for i, k := range g.keys {

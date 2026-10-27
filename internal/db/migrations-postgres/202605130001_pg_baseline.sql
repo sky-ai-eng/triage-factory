@@ -6459,6 +6459,54 @@ GRANT SELECT ON TABLE public.commit_signatures TO tf_app;
 GRANT SELECT, INSERT ON TABLE public.commit_signatures TO tf_system;
 GRANT UPDATE (commit_sha, repository_id, pushed_at) ON TABLE public.commit_signatures TO tf_system;
 
+-- Verify's re-read of the deployment signer's newest failing commit, across
+-- orgs. It holds only failing rows.
+CREATE INDEX commit_signatures_deployment_failed_idx ON public.commit_signatures USING btree (signer_host, signer_user_id, signed_at) WHERE ((state = 'signed'::text) AND (signer = 'deployment'::text) AND (verification_reason IS NOT NULL) AND (verification_reason <> 'valid'::text));
+
+
+-- deployment_commit_signer: the health of the deployment's commit signer, the
+-- GitHub user account every workspace on the deployment App signs its agents'
+-- commits as unless it registers a signer of its own. The signer's login, key
+-- and committer address are control-pod config (TF_GITHUB_COMMIT_SIGNER_*), so
+-- a row holds only what TF learns from GitHub: the account the login names and
+-- whether GitHub verifies what the key signs. One row per key on one GitHub,
+-- so rotating the key in config starts a new row, pending, and a deployment
+-- whose default GitHub changed does not inherit another host's account.
+--
+-- github_user_id is NULL until a check reads the account the configured login
+-- names; from then on the checks read it by id, and login and name are display
+-- values they refresh. status ('pending' | 'active' | 'broken') and
+-- status_reason (GitHub's verification reason for a pushed commit, or
+-- 'key_missing') are app-validated, as on org_commit_signers.
+--
+-- Admin-pool-only system table, like operators: no org_id, RLS with no policy
+-- plus REVOKE ALL. Every reader and writer is a control pod; tf_system holds no
+-- grant, because no executor reads the signer.
+CREATE TABLE public.deployment_commit_signer (
+    host           text NOT NULL,
+    public_key     text NOT NULL,
+    github_user_id bigint,
+    login          text NOT NULL,
+    name           text,
+    status         text DEFAULT 'pending'::text NOT NULL,
+    status_reason  text,
+    status_since   timestamp with time zone DEFAULT now() NOT NULL,
+    checked_at     timestamp with time zone,
+    created_at     timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at     timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT deployment_commit_signer_host_check CHECK (host <> '')
+);
+
+ALTER TABLE ONLY public.deployment_commit_signer
+    ADD CONSTRAINT deployment_commit_signer_pkey PRIMARY KEY (host, public_key);
+
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.deployment_commit_signer FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+
+ALTER TABLE public.deployment_commit_signer ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.deployment_commit_signer FROM PUBLIC;
+REVOKE ALL ON public.deployment_commit_signer FROM anon, authenticated, service_role;
+
 
 -- conversation_permissions: the durable record of every tool-approval prompt a
 -- conversation raised and how it was answered — an address a refresh or a

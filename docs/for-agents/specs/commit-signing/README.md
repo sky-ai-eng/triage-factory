@@ -459,8 +459,9 @@ A rebase is the case they are sized for: it re-signs every commit it
 rewrites, so a 300-commit branch is 300 signatures in seconds, while a
 typical run makes a handful. The deployment signer has no limit of its own:
 signing costs the control plane microseconds and GitHub does not limit
-signatures, so its total is the sum of its orgs', shown in the fleet console
-(§6). The defaults are a starting point, tuned from
+signatures, so its total is the sum of its orgs', which
+`tf_commit_signatures_total{signer="deployment"}` counts by org (§7, Metrics).
+The defaults are a starting point, tuned from
 `tf_commit_signatures_total` (§7, Metrics).
 
 ## 5. Data
@@ -531,10 +532,14 @@ that uses it, the deployment signer included.
 
 ### 5.4 `deployment_commit_signer` (Postgres only)
 
-One row per deployment signer key, keyed by the public key: `github_user_id`
-and `name` (read from the account the login names, like an org signer's),
-`status`, `status_reason`, `status_since`, `checked_at`. Every control pod reads it
-before signing and the fleet console shows it.
+One row per deployment signer key, keyed by the host and the public key:
+`github_user_id`, `login` and `name` (read from the account the login names,
+like an org signer's, and refreshed by id after), `status`, `status_reason`,
+`status_since`, `checked_at`. Every control pod reads it before signing, and
+`triagefactory commit-signer status` shows it. Rotating the key in config starts a new row, pending;
+the host in the key keeps a deployment whose default GitHub changed from
+inheriting another host's account. Until a check has read the account,
+`github_user_id` is null and no workspace commits as the signer.
 
 ### 5.5 The bundle
 
@@ -613,9 +618,15 @@ Under `/api/orgs/{org_id}/github/`, beside the App and PAT routes:
   the signer then clears it when nothing else is connected.
 - The suggested key title is "Triage Factory commit signing", because titles
   are public.
-- The fleet console gets `GET` and `POST …/verify` for the deployment signer,
-  operator-gated, and a `usage` node (`?since=&until=`) with its signatures
-  by hour and by org.
+- The deployment signer has no routes. Its config is env on the control pods,
+  so whoever can change or fix it has a shell there, and the operator CLI
+  serves it the way `triagefactory operator` serves operator grants:
+  `triagefactory commit-signer status` reads the row, and
+  `triagefactory commit-signer verify` is its Verify, the only way out of a
+  signer a pushed commit broke. It is core and needs no licence. Its health is
+  also in a WARN on each control pod and `tf_deployment_commit_signer_up`,
+  and its signatures by org in `tf_commit_signatures_total{signer="deployment"}`
+  (§7). A managed workspace's admin sees it through `GET commit-identity`.
 
 ## 7. Health
 
@@ -665,8 +676,25 @@ account), `no_user` (the email belongs to no account), `unverified_email`
 (verify the email on the account). Any other reason is shown verbatim.
 
 A broken deployment signer stops signing for every managed workspace at the
-next signature. Operators see it in the fleet console, in a WARN on each
-control pod, and in `tf_deployment_commit_signer_up`.
+next signature. Operators see it in `triagefactory commit-signer status`, in a
+WARN on each control pod, and in `tf_deployment_commit_signer_up`.
+
+The deployment signer belongs to no org, so its periodic check differs: every
+control pod reads the row every 30 s and, once it is due, checks the account
+and its keys itself, without a credential, since both are public. Finding the
+key activates a `pending` deployment signer too: the operator adds the key to
+the account before configuring it, so there is no admin step to wait for. A
+check that cannot read GitHub writes nothing, so the row stays due; the pod
+waits a minute before trying again, doubling up to the check interval, so
+anonymous rate limits are not spent on retries. A pod's boot waits up to 5 s
+for its first tick before it signs or seals: until a check finds a new key it
+has no account, and a run that asked in that window would be told signing is
+off for the rest of the run. The first check that finds the
+key binds it to that account's id and later checks follow the id, as an org
+signer's do: a configured login that no longer names the account is a WARN on
+each check, and signing as another account takes a new key. Its post-push
+check runs in each managed workspace's cycle with that workspace's credential,
+and Verify re-reads the failing commit, from any org, the same way.
 
 ### Metrics
 
@@ -743,7 +771,7 @@ well past 2.34. (L)
 
 **Phase 3 — The deployment signer.** The control-pod config, the
 `deployment_commit_signer` table, the managed-workspace default, and the
-fleet console status. Add the signer's login to this repository's CLA
+`commit-signer` CLI. Add the signer's login to this repository's CLA
 allowlist before enabling it. (M)
 
 **Phase 4 — Health.** The periodic and post-push checks, and the status and

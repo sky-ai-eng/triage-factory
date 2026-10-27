@@ -220,3 +220,17 @@ func TestResolve_DeploymentLinearAppSecret(t *testing.T) {
 		t.Errorf("TF_LINEAR_CLIENT_SECRET_FILE still in env = %q; resolve must unset it", v)
 	}
 }
+
+// TestSecrets_DeploymentCommitSigner: the deployment commit signer's private
+// key is captured like every other secret (the NAME_FILE convention is pinned
+// above), and its login and committer address, which are plain config, are not.
+func TestSecrets_DeploymentCommitSigner(t *testing.T) {
+	if !slices.Contains(Secrets, "TF_GITHUB_COMMIT_SIGNER_KEY") {
+		t.Error("Secrets does not contain TF_GITHUB_COMMIT_SIGNER_KEY")
+	}
+	for _, name := range []string{"TF_GITHUB_COMMIT_SIGNER_LOGIN", "TF_GITHUB_COMMIT_SIGNER_EMAIL"} {
+		if slices.Contains(Secrets, name) {
+			t.Errorf("Secrets contains %s, which is not a secret", name)
+		}
+	}
+}

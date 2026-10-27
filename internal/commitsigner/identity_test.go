@@ -62,9 +62,10 @@ func signer(status domain.CommitSignerStatus) *domain.OrgCommitSigner {
 // bot, the deployment App's bot); a signer, in any status, replaces that
 // identity in every class, and only an active one signs.
 //
-// The deployment App row is the deployment arm: a workspace on it with no
-// signer of its own commits as the deployment's bot, unsigned. A workspace
-// with its own signer, broken included, never resolves past it.
+// With no deployment signer configured, a workspace on the deployment App
+// with no signer of its own commits as the deployment's bot, unsigned
+// (TestResolve_DeploymentSigner covers one configured). A workspace with its
+// own signer, broken included, never resolves past it.
 func TestResolve_EveryCredentialClassAndSignerStatus(t *testing.T) {
 	classes := map[domain.GitHubCredentialClass]ghclient.OrgIdentity{
 		domain.GitHubCredentialClassPAT:        {Name: "pat-owner", Email: "owner@example.com", AccountID: "42"},
@@ -96,6 +97,9 @@ func TestResolve_EveryCredentialClassAndSignerStatus(t *testing.T) {
 			{"active signer", signer(domain.CommitSignerActive), signing},
 			{"broken signer", signer(domain.CommitSignerBroken), signerID},
 		} {
+			if tc.signer != nil {
+				tc.want.Status, tc.want.StatusReason = tc.signer.Status, tc.signer.StatusReason
+			}
 			t.Run(string(class)+"/"+tc.name, func(t *testing.T) {
 				r := Resolver{Signers: fakeSigners{row: tc.signer}, GitHub: fakeGitHub{id: today, ok: true}}
 				got, err := r.Resolve(t.Context(), testOrg)
@@ -181,3 +185,123 @@ func TestResolve_SignerNameAndEmail(t *testing.T) {
 		})
 	}
 }
+
+// fakeOrgs answers the org's GitHub credential class and host; nothing else
+// is called.
+type fakeOrgs struct {
+	db.OrgsStore
+	settings domain.OrgSettings
+	err      error
+}
+
+func (f fakeOrgs) GetSettingsSystem(context.Context, string) (domain.OrgSettings, error) {
+	return f.settings, f.err
+}
+
+func managedOrg() fakeOrgs {
+	return fakeOrgs{settings: domain.OrgSettings{
+		GitHubCredentialClass: domain.GitHubCredentialClassManagedApp,
+		GitHubBaseURL:         "https://github.com",
+	}}
+}
+
+// TestResolve_DeploymentSigner covers a workspace on the deployment App: with
+// no signer of its own it resolves to the deployment signer, which signs while
+// it is active and otherwise authors the commits unsigned; with a signer of its
+// own, in any status, it resolves to that signer and never to the deployment's.
+func TestResolve_DeploymentSigner(t *testing.T) {
+	bot := fakeGitHub{id: ghclient.OrgIdentity{Name: "triage-factory[bot]", Email: "9+triage-factory[bot]@users.noreply.github.com", AccountID: "9"}, ok: true}
+	asBot := Identity{Name: "triage-factory[bot]", Email: "9+triage-factory[bot]@users.noreply.github.com", AccountID: "9", Mode: domain.CommitSigningNone}
+	d := newDeploymentSigner(t)
+	deployment := func(status domain.CommitSignerStatus, reason string) Identity {
+		id := Identity{
+			Name: "Triage Factory", Email: "90001+TriageFactory@users.noreply.github.com", AccountID: "90001",
+			Login: "TriageFactory", Mode: domain.CommitSigningNone, Status: status, StatusReason: reason,
+		}
+		if status == domain.CommitSignerActive {
+			id.Mode, id.Host, id.PublicKey = domain.CommitSigningDeployment, "https://github.com", d.PublicKey
+		}
+		return id
+	}
+	own := func(status domain.CommitSignerStatus) Identity {
+		id := Identity{
+			Name: "The Octocat", Email: "583231+octocat@users.noreply.github.com", AccountID: "583231",
+			Login: "octocat", Mode: domain.CommitSigningNone, Status: status,
+		}
+		if status == domain.CommitSignerActive {
+			id.Mode, id.Host, id.PublicKey, id.PendingPublicKey = domain.CommitSigningOrg, "https://github.com", activeKey, rotationKey
+		}
+		return id
+	}
+
+	for _, tc := range []struct {
+		name   string
+		orgs   fakeOrgs
+		own    *domain.OrgCommitSigner
+		health *domain.DeploymentCommitSigner
+		want   Identity
+	}{
+		{"no signer of its own, deployment signer active", managedOrg(), nil, rowPtr(deploymentRow(d, domain.CommitSignerActive, "")), deployment(domain.CommitSignerActive, "")},
+		{"no signer of its own, deployment signer pending", managedOrg(), nil, rowPtr(deploymentRow(d, domain.CommitSignerPending, "")), deployment(domain.CommitSignerPending, "")},
+		{"no signer of its own, deployment signer broken", managedOrg(), nil, rowPtr(deploymentRow(d, domain.CommitSignerBroken, domain.CommitSignerReasonKeyMissing)),
+			deployment(domain.CommitSignerBroken, domain.CommitSignerReasonKeyMissing)},
+		{"its own active signer", managedOrg(), signer(domain.CommitSignerActive), rowPtr(deploymentRow(d, domain.CommitSignerActive, "")), own(domain.CommitSignerActive)},
+		{"its own broken signer never falls back to the deployment's", managedOrg(), signer(domain.CommitSignerBroken), rowPtr(deploymentRow(d, domain.CommitSignerActive, "")), own(domain.CommitSignerBroken)},
+		// No check has read the account the login names, so there is no
+		// account to commit as yet.
+		{"deployment signer with no account yet", managedOrg(), nil, &domain.DeploymentCommitSigner{
+			Host: d.Host, PublicKey: d.PublicKey, Login: "TriageFactory", Status: domain.CommitSignerPending,
+		}, asBot},
+		{"no health row yet", managedOrg(), nil, nil, asBot},
+		{"its own App", fakeOrgs{settings: domain.OrgSettings{GitHubCredentialClass: domain.GitHubCredentialClassBYOApp, GitHubBaseURL: "https://github.com"}},
+			nil, rowPtr(deploymentRow(d, domain.CommitSignerActive, "")), asBot},
+		{"the deployment App on another GitHub", fakeOrgs{settings: domain.OrgSettings{GitHubCredentialClass: domain.GitHubCredentialClassManagedApp, GitHubBaseURL: "https://ghe.acme.example"}},
+			nil, rowPtr(deploymentRow(d, domain.CommitSignerActive, "")), asBot},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			health := newMemDeploymentSigners()
+			if tc.health != nil {
+				health.set(*tc.health)
+			}
+			r := Resolver{
+				Signers:    fakeSigners{row: tc.own},
+				GitHub:     bot,
+				Deployment: &DeploymentArm{Signer: d, Health: health, Orgs: tc.orgs},
+			}
+			got, err := r.Resolve(t.Context(), testOrg)
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("Resolve =\n  %+v\nwant\n  %+v", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("a configured email", func(t *testing.T) {
+		withEmail := *d
+		withEmail.EmailOverride = "agent@triage.example"
+		health := newMemDeploymentSigners()
+		health.set(deploymentRow(d, domain.CommitSignerActive, ""))
+		got, err := Resolver{Signers: fakeSigners{}, Deployment: &DeploymentArm{Signer: &withEmail, Health: health, Orgs: managedOrg()}}.Resolve(t.Context(), testOrg)
+		if err != nil || got.Email != "agent@triage.example" {
+			t.Errorf("Resolve = %+v, %v; want the configured address", got, err)
+		}
+	})
+
+	// A failed read never resolves to the bot the deployment signer would
+	// have replaced.
+	t.Run("read failures are errors", func(t *testing.T) {
+		boom := errors.New("connection reset")
+		for name, arm := range map[string]*DeploymentArm{
+			"org settings": {Signer: d, Health: newMemDeploymentSigners(), Orgs: fakeOrgs{err: boom}},
+			"health":       {Signer: d, Health: &memDeploymentSigners{err: boom}, Orgs: managedOrg()},
+		} {
+			if _, err := (Resolver{Signers: fakeSigners{}, GitHub: bot, Deployment: arm}).Resolve(t.Context(), testOrg); !errors.Is(err, boom) {
+				t.Errorf("%s: Resolve = %v, want the read's error", name, err)
+			}
+		}
+	})
+}
+
+func rowPtr(r domain.DeploymentCommitSigner) *domain.DeploymentCommitSigner { return &r }

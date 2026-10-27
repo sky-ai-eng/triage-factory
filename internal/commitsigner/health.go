@@ -51,9 +51,17 @@ const (
 // in local mode in the TF process, in multi mode on the control pod holding
 // the brain lease. A check that cannot read GitHub changes nothing and runs
 // again on the next cycle.
+//
+// In multi mode the org's cycle also makes the post-push check of the commits
+// its runs signed as the deployment signer, with the org's credential, since
+// each is in one of its repositories; a failure breaks the deployment signer
+// for every managed workspace. Its periodic check belongs to no org, and every
+// control pod makes it (DeploymentHealth).
 type HealthChecker struct {
 	Stores db.Stores
 	GitHub ghclient.Resolver
+	// Deployment is the deployment's signer, nil where none is configured.
+	Deployment *DeploymentSigner
 
 	// now replaces time.Now when set. Tests move the clock.
 	now func() time.Time
@@ -86,22 +94,20 @@ func (h *HealthChecker) Trigger(ctx context.Context, orgID string) {
 	}()
 }
 
-// Check runs orgID's checks once: the periodic check when the signer is due
-// one, then the post-push check. An org with no signer has nothing to check.
+// Check runs orgID's checks once: the periodic check when the org's signer is
+// due one, then the post-push check of the commits it signed, then that of the
+// commits it signed as the deployment signer.
 func (h *HealthChecker) Check(ctx context.Context, orgID string) {
 	signer, err := h.Stores.OrgCommitSigners.GetSystem(ctx, orgID)
 	if err != nil {
 		signerLog.ErrorContext(ctx, "commit signer health check could not read the signer", "org", orgID, "error", err)
 		return
 	}
-	// TODO(TFAC-1200): check the deployment signer too, on the control pods,
-	// once one can be configured: its key on its account, and the pushed
-	// commits of the managed workspaces that sign as it.
-	if signer == nil {
-		return
+	if signer != nil {
+		current := h.checkKey(ctx, *signer)
+		h.checkPushes(ctx, current)
 	}
-	current := h.checkKey(ctx, *signer)
-	h.checkPushes(ctx, current)
+	h.checkDeploymentPushes(ctx, orgID)
 }
 
 // checkKey is the periodic check. It returns the signer as the check left it.
@@ -201,6 +207,61 @@ func (h *HealthChecker) checkPushes(ctx context.Context, signer domain.OrgCommit
 	}
 }
 
+// checkDeploymentPushes is the post-push check of the commits orgID's runs
+// signed as the deployment signer. A failure that still says something about
+// the signer as this pod is configured with it breaks it for every managed
+// workspace, with GitHub's reason.
+func (h *HealthChecker) checkDeploymentPushes(ctx context.Context, orgID string) {
+	d := h.Deployment
+	if !d.Configured() {
+		return
+	}
+	pushed, err := h.Stores.CommitSignatures.UncheckedPushesSystem(ctx, orgID, domain.CommitSigningDeployment,
+		h.clock().Add(-postPushWindow), postPushBatch)
+	if err != nil {
+		signerLog.ErrorContext(ctx, "deployment commit signer post-push check could not read the pushed commits", "org", orgID, "error", err)
+		return
+	}
+	if len(pushed) == 0 {
+		return
+	}
+	row, err := h.Stores.DeploymentCommitSigners.GetSystem(ctx, d.Host, d.PublicKey)
+	if err != nil {
+		signerLog.ErrorContext(ctx, "deployment commit signer post-push check could not read the signer", "org", orgID, "error", err)
+		return
+	}
+	for _, sig := range pushed {
+		verdict, found, err := h.readVerification(ctx, sig)
+		if err != nil {
+			CountCheck(ctx, CheckPostPush, CheckResultError)
+			signerLog.WarnContext(ctx, "deployment commit signer post-push check could not read GitHub; it runs again next cycle",
+				"org", orgID, "signature", sig.ID, "error", err)
+			continue
+		}
+		reason := ""
+		if found {
+			reason = verdict.Reason
+			CountCheck(ctx, CheckPostPush, reason)
+		}
+		if found && reason != "" && row != nil && DeploymentFailureHolds(d, *row, sig, verdict) {
+			broken, err := h.Stores.DeploymentCommitSigners.BreakSystem(ctx, d.Host, sig.PublicKey, reason)
+			if err != nil {
+				signerLog.ErrorContext(ctx, "deployment commit signer post-push check could not break the signer", "org", orgID, "error", err)
+				continue
+			}
+			if broken != nil {
+				signerLog.WarnContext(ctx, "deployment commit signer is broken; managed workspaces commit unsigned until an operator fixes it",
+					"check", CheckPostPush, "org", orgID, "commit", sig.CommitSHA, "reason", broken.StatusReason, "was", row.Status)
+				row = broken
+			}
+		}
+		if _, err := h.Stores.CommitSignatures.SetVerificationSystem(ctx, orgID, sig.ID, reason); err != nil {
+			signerLog.ErrorContext(ctx, "deployment commit signer post-push check could not record GitHub's answer",
+				"org", orgID, "signature", sig.ID, "error", err)
+		}
+	}
+}
+
 // readVerification reads sig's pushed commit's verification from GitHub.
 // found is false when there is no answer to give: the repository is gone from
 // the registry, or GitHub no longer has the commit or the repository.
@@ -252,11 +313,17 @@ func VerificationUnavailable(reason string) bool {
 // fault that a re-registration, a rotation or an email change has already
 // replaced, and holding the signer on it would keep it broken for good.
 func FailureHolds(signer domain.OrgCommitSigner, key string, sig domain.CommitSignature, verdict ghclient.CommitVerification) bool {
+	return failureHolds(signer.Host, signer.GitHubUserID, signer.CommitEmail(), key, sig, verdict)
+}
+
+// failureHolds is FailureHolds for the signer on account userID on host,
+// committing under email and signing with key, whichever kind it is.
+func failureHolds(host string, userID int64, email, key string, sig domain.CommitSignature, verdict ghclient.CommitVerification) bool {
 	return !verdict.Verified &&
 		sig.PublicKey == key &&
-		sig.SignerUserID == signer.GitHubUserID &&
-		db.NormalizeGitHubHost(sig.SignerHost) == db.NormalizeGitHubHost(signer.Host) &&
-		strings.EqualFold(verdict.CommitterEmail, signer.CommitEmail())
+		sig.SignerUserID == userID &&
+		db.NormalizeGitHubHost(sig.SignerHost) == db.NormalizeGitHubHost(host) &&
+		strings.EqualFold(verdict.CommitterEmail, email)
 }
 
 // logTransition logs a check that moved the signer's status: a WARN when it

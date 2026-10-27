@@ -5,11 +5,13 @@ An org can have the commits its agents make signed, so GitHub marks them
 is for the org admin who sets it up: what the signer account is, how to create
 it, and what to do in **Settings → Commit signing** once it exists.
 
-<!-- TODO(TFAC-1198): multi-mode runs sign once the sidecar relays
-signatures; this paragraph goes with the section's local-only gate in
-OrgSettings.tsx. -->
-The section is in local mode's Settings. Runs in a multi-mode deployment are
-not wired to sign yet, so a multi-mode deployment does not show it.
+A workspace on a multi-mode deployment's GitHub App may not need one: the
+deployment can have a signer of its own, which every such workspace signs as
+until it registers its own. The section then reads "Commits are signed as
+`<login>`, this deployment's signing account". Registering a signer of your own
+replaces it for your workspace. Setting up the deployment's signer is the
+operator's, in
+[the self-host guide](../self-hosting/install.md#86-optional-configure-the-deployment-commit-signer).
 
 ## What a signer is
 
@@ -154,8 +156,13 @@ then on.
   deleting it turns the commits it signed Unverified. On github.com a commit
   that verified stays verified when its key is deleted.
 - **Remove.** Deletes the signer and its keys from Triage Factory, and runs go
-  back to committing as they did before. The public key stays on the account
+  back to committing as they did before: as the deployment's signer on its
+  GitHub App, when the deployment has one. The public key stays on the account
   until you delete it there.
+
+A workspace's own signer always wins over the deployment's: while it is
+pending or broken, the workspace's commits are unsigned, and never signed as
+the deployment's signer instead.
 
 The design behind all of this is in
 [`docs/for-agents/specs/commit-signing/`](../for-agents/specs/commit-signing/README.md).

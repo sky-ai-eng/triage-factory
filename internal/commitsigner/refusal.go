@@ -29,8 +29,8 @@ const (
 	// run's identity is fixed when its sandbox starts, so it keeps
 	// committing as the old signer, unsigned.
 	RefusalSignerChanged Refusal = "signer_changed"
-	// RefusalSignerInactive: the run's signer is still the org's, and is not
-	// active. Also every deployment signer until one can be configured.
+	// RefusalSignerInactive: the run's signer is still the one the org
+	// resolves to, its own or the deployment's, and is not active.
 	RefusalSignerInactive Refusal = "signer_inactive"
 	// RefusalOrgMinuteBudget: the org made its per-minute budget of
 	// signatures in the last minute. It carries the seconds until the budget

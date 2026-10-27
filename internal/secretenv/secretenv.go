@@ -66,6 +66,9 @@ var Secrets = []string{
 	"TF_GITHUB_APP_PRIVATE_KEY",
 	"TF_GITHUB_APP_WEBHOOK_SECRET",
 	"TF_GITHUB_APP_CLIENT_SECRET",
+	// The deployment commit signer's private key. Its login and committer
+	// address are not secrets and are read as plain config.
+	"TF_GITHUB_COMMIT_SIGNER_KEY",
 	"TF_DATABASE_URL",
 	"TF_DATABASE_DIRECT_URL",
 	"TF_AUTHENTICATOR_PASSWORD",

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/capbroker"
+	"github.com/sky-ai-eng/triage-factory/cmd/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
@@ -93,6 +94,8 @@ func dispatchCLI(args []string) (handled bool, err error) {
 		instance.Handle(args[1:])
 	case "operator":
 		operator.Handle(args[1:])
+	case "commit-signer":
+		commitsigner.Handle(args[1:])
 	case "-h", "--help", "help":
 		printTopLevelHelp()
 	case "-v", "--version", "version":
@@ -113,8 +116,8 @@ func dispatchCLI(args []string) (handled bool, err error) {
 // identity. It runs the exec verbs and prints help; every other subcommand is
 // refused, because none of them can work in a jail and each would fail in a
 // more confusing way than a refusal. install/uninstall/migrate/jwk-init/
-// instance/operator all reach for local state that isn't there (and would
-// create some by reaching), a leading flag means server mode, and the internal
+// instance/operator/commit-signer all reach for local state that isn't there
+// (and would create some by reaching), a leading flag means server mode, and the internal
 // namespaces — hook, snapshot-capture, cap-broker, run-sidecar — are all
 // host-side callbacks the jail never legitimately invokes.
 //
@@ -203,6 +206,8 @@ USER COMMANDS
   triagefactory operator add <email>       grant the fleet-console operator flag
   triagefactory operator remove <email>    revoke it
   triagefactory operator list              show deployment operators
+  triagefactory commit-signer status       show the deployment commit signer
+  triagefactory commit-signer verify       check it against GitHub now
 
 AGENT COMMANDS
   Used by delegated Claude Code agents inside their worktree, not

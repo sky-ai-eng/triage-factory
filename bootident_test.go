@@ -96,6 +96,7 @@ func TestDispatchJailCLI_RefusesHostSubcommands(t *testing.T) {
 		{"jwk-init", []string{"jwk-init"}},
 		{"instance", []string{"instance", "list"}},
 		{"operator", []string{"operator", "list"}},
+		{"commit-signer", []string{"commit-signer", "verify"}},
 		{"hook", []string{"hook", "record-push"}},
 		{"snapshot-capture", []string{"snapshot-capture", "/work"}},
 		{"cap-broker", []string{"cap-broker"}},

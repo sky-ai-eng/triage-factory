@@ -206,6 +206,9 @@ func New(conn *sql.DB) db.Stores {
 		// to the one connection, where the local daemon records each
 		// signature it makes.
 		CommitSignatures: newCommitSignatureStore(conn),
+		// DeploymentCommitSigners is Postgres only: local mode has no
+		// deployment App, so no deployment signer.
+		DeploymentCommitSigners: newDeploymentCommitSignerStore(),
 		// PollReadiness is admin-pool only in Postgres; SQLite collapses to
 		// the one connection (N=1, no RLS). Org-scoped readiness gate for
 		// /api/jira/stock + the one-shot "config took effect" announce

@@ -141,13 +141,21 @@ func TestRefusalLine(t *testing.T) {
 func TestRefusalLine_SignerReasonsAreSentences(t *testing.T) {
 	for _, reason := range []string{"key_missing", "unknown_key", "unverified_email", "no_user", "bad_email", "gpgverify_error", ""} {
 		r := Result{Outcome: OutcomeRefused, Refusal: RefusalSignerInactive, SignerStatus: domain.CommitSignerBroken, SignerReason: reason}
-		sentence := signerOffReason(r)
-		if reason != "" && strings.Contains(sentence, reason) {
-			t.Errorf("reason %q reads as %q", reason, sentence)
+		for _, mode := range []domain.CommitSigningMode{domain.CommitSigningOrg, domain.CommitSigningDeployment} {
+			sentence := signerOffReason(r, mode)
+			if reason != "" && strings.Contains(sentence, reason) {
+				t.Errorf("reason %q reads as %q", reason, sentence)
+			}
 		}
 	}
-	if s := signerOffReason(Result{Refusal: RefusalSignerInactive, SignerStatus: domain.CommitSignerPending}); strings.Contains(s, "pending") {
-		t.Errorf("a pending signer reads as %q", s)
+	pending := Result{Refusal: RefusalSignerInactive, SignerStatus: domain.CommitSignerPending}
+	for mode, want := range map[domain.CommitSigningMode]string{
+		domain.CommitSigningOrg:        "waiting for an org admin to verify it",
+		domain.CommitSigningDeployment: "the deployment's signing key has not been found on its GitHub account yet",
+	} {
+		if s := signerOffReason(pending, mode); strings.Contains(s, "pending") || !strings.Contains(s, want) {
+			t.Errorf("a pending %s signer reads as %q, want it to say %q", mode, s, want)
+		}
 	}
 }
 

@@ -57,24 +57,6 @@ func (l *LocalSigner) clock() time.Time {
 	return time.Now()
 }
 
-// errSignerVanished is a signer that resolved as not active and whose row was
-// gone when its status was read back: removed between the two reads.
-var errSignerVanished = errors.New("commitsigner: the org's signer was removed while the signature was checked")
-
-// signerStatus reads the org's signer's status and its reason, for a refusal
-// because the signer is not active: the run's line says why in a sentence
-// (signerOffReason). A signer removed since it resolved is errSignerVanished.
-func signerStatus(ctx context.Context, signers db.OrgCommitSignerStore, orgID string) (domain.CommitSignerStatus, string, error) {
-	row, err := signers.GetSystem(ctx, orgID)
-	if err != nil {
-		return "", "", err
-	}
-	if row == nil {
-		return "", "", errSignerVanished
-	}
-	return row.Status, row.StatusReason, nil
-}
-
 // Sign checks one commit and, when every check passes, signs it, records the
 // signature with the commit id it produces, and returns both. In order:
 //
@@ -156,11 +138,7 @@ func (l *LocalSigner) Sign(ctx context.Context, req LocalRequest) (res Result) {
 	if refusal := signerRefusal(now, req.Signer.Mode, req.Signer.Host, req.Signer.AccountID); refusal != "" {
 		res := refused(refusal)
 		if refusal == RefusalSignerInactive {
-			status, reason, err := signerStatus(ctx, l.Stores.OrgCommitSigners, req.OrgID)
-			if err != nil {
-				return l.unanswered(ctx, req, "read the signer's status", err)
-			}
-			res.SignerStatus, res.SignerReason = status, reason
+			res.SignerStatus, res.SignerReason = now.Status, now.StatusReason
 		}
 		return res
 	}

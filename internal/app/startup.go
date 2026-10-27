@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -122,6 +123,18 @@ func (a *App) startWorkers(ctx context.Context) {
 	// kicks to the WS backplane, and trigger/PollSoon relays to
 	// handleCtlMessage (which holder-gates them).
 	if runmode.Current() == runmode.ModeMulti {
+		// Every control pod reads the deployment signer's health it signs
+		// with, reports it, and makes its periodic check when one is due.
+		// Started first and waited on, so a pod on a key the deployment has
+		// not checked yet makes that check before the listener below hands it
+		// a signature request or a bundle to seal.
+		if a.deploymentSignerHealth != nil {
+			go a.deploymentSignerHealth.Run(ctx, commitsigner.DeploymentWatchInterval)
+			if !a.deploymentSignerHealth.WaitFirstTick(ctx, commitsigner.FirstTickWait) {
+				appLog.Warn("deployment commit signer's first check is still running; starting without it",
+					"waited", commitsigner.FirstTickWait)
+			}
+		}
 		a.startCtlListener(ctx)
 		// Every control pod signs, holder or standby: the signer answers
 		// sign_request doorbells from the listener above and sweeps for the

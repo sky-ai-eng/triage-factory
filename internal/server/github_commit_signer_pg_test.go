@@ -1,9 +1,13 @@
 package server
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -137,3 +141,60 @@ func TestCommitSigner_HostOrderIndependent_Postgres(t *testing.T) {
 		t.Errorf("host after the signer's removal = %q, want it cleared: nothing is connected", got)
 	}
 }
+
+// TestCommitIdentity_ManagedWorkspaceSignsAsTheDeploymentSigner: GET
+// commit-identity answers a managed workspace with no signer of its own with
+// the deployment signer, from the same resolution its runs take.
+func TestCommitIdentity_ManagedWorkspaceSignsAsTheDeploymentSigner(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	admin := pgstore.New(r.h.AdminDB, r.h.AdminDB, pgtest.SecretKey)
+	founder := r.seedUser()
+	org, _ := r.seedOrg(founder, "managed")
+	ctx := t.Context()
+	if _, err := admin.Orgs.SetSourceBaseURL(ctx, org.String(), eventsource.KindGitHub, "https://github.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Orgs.SetGitHubCredentialClass(ctx, org.String(), domain.GitHubCredentialClassManagedApp); err != nil {
+		t.Fatal(err)
+	}
+	key, err := commitsign.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pem, err := commitsign.MarshalPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{
+		commitsigner.EnvDeploymentSignerLogin: "TriageFactory",
+		commitsigner.EnvDeploymentSignerKey:   string(pem),
+	}
+	get := func(name string) string { return env[name] }
+	signer, err := commitsigner.ParseDeploymentSigner(get, get, "https://github.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.DeploymentCommitSigners.RegisterSystem(ctx, signer.Host, signer.PublicKey, signer.Login); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.DeploymentCommitSigners.ActivateSystem(ctx, signer.Host, signer.PublicKey, 90001, "TriageFactory", "Triage Factory"); err != nil {
+		t.Fatal(err)
+	}
+	r.srv.SetDeploymentCommitSigner(signer)
+
+	sid := r.sidFromResp(first(r.driveCallback(founder)))
+	resp := r.requestWithSid(http.MethodGet, fmt.Sprintf("/api/orgs/%s/github/commit-identity", org), sid)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET commit-identity = %d", resp.StatusCode)
+	}
+	var got commitIdentityJSON
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Signing != string(domain.CommitSigningDeployment) || got.Identity == nil || got.Identity.Login == nil || *got.Identity.Login != "TriageFactory" {
+		t.Errorf("commit-identity = %+v (identity %+v), want the deployment signer, signing as it", got, got.Identity)
+	}
+}
+
+func first[A, B any](a A, _ B) A { return a }

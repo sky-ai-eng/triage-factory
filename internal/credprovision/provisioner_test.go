@@ -140,6 +140,7 @@ func (f *fakeTeamRepos) ListForTeamSystem(_ context.Context, _, host string) ([]
 type fakeOrgs struct {
 	db.OrgsStore
 	githubBaseURL string
+	class         domain.GitHubCredentialClass
 }
 
 func (f *fakeOrgs) GetSettingsSystem(context.Context, string) (domain.OrgSettings, error) {
@@ -147,7 +148,7 @@ func (f *fakeOrgs) GetSettingsSystem(context.Context, string) (domain.OrgSetting
 	if base == "" {
 		base = "https://github.com"
 	}
-	return domain.OrgSettings{GitHubBaseURL: base}, nil
+	return domain.OrgSettings{GitHubBaseURL: base, GitHubCredentialClass: f.class}, nil
 }
 
 type fakeTasks struct {

@@ -57,7 +57,7 @@ func RefusalLine(res Result, signer Identity) string {
 	case RefusalSignerRemoved, RefusalSignerChanged, RefusalSignerInactive:
 		return linePrefix + fmt.Sprintf("commit signing is off for the rest of this run: %s. Nothing was committed. "+
 			"Run this and every later commit with git -c commit.gpgsign=false. %s Commits are still authored as %s.",
-			signerOffReason(res), rebaseRestarts, signer.Name)
+			signerOffReason(res, signer.Mode), rebaseRestarts, signer.Name)
 	case RefusalClaimInactive:
 		return linePrefix + "this run no longer holds its engagement, so commit signing refused. Nothing was committed."
 	case RefusalNotSigning:
@@ -100,16 +100,24 @@ func objectPhrase(object string) string {
 // signerOffReason is why signing stopped for the signer, as a sentence. A
 // broken signer's reason is GitHub's verification reason for a pushed commit,
 // or key_missing; a reason with no sentence of its own reads as GitHub having
-// stopped verifying the signer's commits.
-func signerOffReason(res Result) string {
+// stopped verifying the signer's commits. mode is the kind of signer the run
+// signs as: a pending deployment signer waits for a check on the control
+// plane, not for an org admin, and no org admin removes it.
+func signerOffReason(res Result, mode domain.CommitSigningMode) string {
 	switch res.Refusal {
 	case RefusalSignerRemoved:
+		if mode == domain.CommitSigningDeployment {
+			return "this workspace no longer signs as the deployment's signing account"
+		}
 		return "an org admin removed the signer"
 	case RefusalSignerChanged:
 		return "the org now signs as a different account"
 	}
 	switch res.SignerStatus {
 	case domain.CommitSignerPending:
+		if mode == domain.CommitSigningDeployment {
+			return "the deployment's signing key has not been found on its GitHub account yet"
+		}
 		return "the signer's key is waiting for an org admin to verify it on its GitHub account"
 	case domain.CommitSignerBroken:
 		switch res.SignerReason {

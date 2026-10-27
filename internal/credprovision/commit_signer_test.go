@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
@@ -171,5 +172,68 @@ func TestResolveGitHub_UnreadableSignerFailsTheSeal(t *testing.T) {
 	readErr := errors.New("signer read failed")
 	if _, err := signerManager(fakeSigners{err: readErr}, nil).resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "conv-1"); !errors.Is(err, readErr) {
 		t.Fatalf("resolveGitHub = %v, want the signer read's error", err)
+	}
+}
+
+// fakeDeploymentHealth answers the deployment signer's health row.
+type fakeDeploymentHealth struct {
+	db.DeploymentCommitSignerStore
+	row *domain.DeploymentCommitSigner
+}
+
+func (f fakeDeploymentHealth) GetSystem(context.Context, string, string) (*domain.DeploymentCommitSigner, error) {
+	return f.row, nil
+}
+
+// TestResolveGitHub_ManagedWorkspaceSealsTheDeploymentSigner: a workspace on
+// the deployment App with no signer of its own seals the deployment signer as
+// its identity and its public key as the run's signer, and the bundle carries
+// no line of the deployment's private key, which this control pod holds.
+func TestResolveGitHub_ManagedWorkspaceSealsTheDeploymentSigner(t *testing.T) {
+	private, public := signerKeys(t)
+	env := map[string]string{
+		commitsigner.EnvDeploymentSignerLogin: "TriageFactory",
+		commitsigner.EnvDeploymentSignerKey:   string(private),
+	}
+	d, err := commitsigner.ParseDeploymentSigner(func(k string) string { return env[k] }, func(k string) string { return env[k] }, ghbase.GitHubCom)
+	if err != nil {
+		t.Fatalf("ParseDeploymentSigner: %v", err)
+	}
+	for _, status := range []domain.CommitSignerStatus{domain.CommitSignerActive, domain.CommitSignerBroken} {
+		t.Run(string(status), func(t *testing.T) {
+			m := signerManager(fakeSigners{}, nil)
+			m.stores.Orgs = &fakeOrgs{class: domain.GitHubCredentialClassManagedApp}
+			m.stores.DeploymentCommitSigners = fakeDeploymentHealth{row: &domain.DeploymentCommitSigner{
+				Host: ghbase.GitHubCom, PublicKey: public, GitHubUserID: 90001, Login: "TriageFactory", Name: "Triage Factory", Status: status,
+			}}
+			m.SetDeploymentSigner(d)
+
+			gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "conv-1")
+			if err != nil {
+				t.Fatalf("resolveGitHub: %v", err)
+			}
+			if gh.IdentityName != "Triage Factory" || gh.IdentityEmail != "90001+TriageFactory@users.noreply.github.com" || gh.IdentityAccountID != "90001" {
+				t.Errorf("identity = (%q, %q, %q), want the deployment signer's", gh.IdentityName, gh.IdentityEmail, gh.IdentityAccountID)
+			}
+			if status != domain.CommitSignerActive {
+				if gh.Signer != nil {
+					t.Errorf("Signer = %+v, want nil for a %s deployment signer", gh.Signer, status)
+				}
+				return
+			}
+			want := credbundle.SignerCreds{Mode: string(domain.CommitSigningDeployment), PublicKey: public}
+			if gh.Signer == nil || *gh.Signer != want {
+				t.Fatalf("Signer = %+v, want %+v", gh.Signer, want)
+			}
+			sealed, err := (&credbundle.Bundle{GitHub: gh}).Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, line := range strings.Split(string(private), "\n") {
+				if len(line) > 20 && !strings.HasPrefix(line, "-----") && bytes.Contains(sealed, []byte(line)) {
+					t.Fatalf("the bundle carries a line of the deployment's private key: %q", line)
+				}
+			}
+		})
 	}
 }

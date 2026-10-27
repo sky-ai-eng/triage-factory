@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -128,6 +129,9 @@ type Server struct {
 	// ConversationQueue store; a narrow interface so the handler test can
 	// inject canned shares.
 	fleetQueue fleetQueueReader
+	// deploymentSigner is this control pod's deployment commit signer, nil
+	// when none is configured (SetDeploymentCommitSigner).
+	deploymentSigner *commitsigner.DeploymentSigner
 	// ghResolver picks the right GitHub credential (org App installation token
 	// → PAT) per request, given the org + target account. Every per-repo
 	// handler operation goes through it — review diff/submit, pending-PR
