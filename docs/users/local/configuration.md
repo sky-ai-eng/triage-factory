@@ -12,7 +12,7 @@ Everything is under `~/.triagefactory/`:
 |---|---|
 | `triagefactory.db` | The SQLite database, settings included. Change settings in the app, not in the database. |
 | `secrets.enc` | Credentials, when there is no OS keychain ([Secret storage](secret-storage.md)). |
-| `bin/gh` | The `gh` release agents use ([Running](running.md#the-agents-gh)). |
+| `bin/gh` | The `gh` release agents use. |
 | `blobs/` | Snapshots of parked runs' workspaces. |
 | `teams/<team id>/kb/{private,shared}/` | Each team's knowledge base, as plain files you can edit in any editor. |
 

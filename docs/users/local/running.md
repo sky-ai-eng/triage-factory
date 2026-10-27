@@ -35,15 +35,3 @@ triagefactory uninstall
 
 `triagefactory exec …` is the set of commands delegated agents run from their
 worktree. You don't need to call them; `triagefactory exec --help` lists them.
-
-## The agents' `gh`
-
-Agents use the GitHub CLI through a per-run credential proxy, never your own
-installation. Triage Factory downloads one pinned `gh` release on the first run
-that needs it, checks its SHA256, and keeps it at `~/.triagefactory/bin/gh`.
-Agents get their own `gh` config, so your `~/.config/gh` and the account it is
-logged in as are never read.
-
-If the download fails (no network, an unsupported platform, a checksum
-mismatch), the failure is logged and runs continue without `gh`, using
-Triage Factory's own GitHub commands instead.
