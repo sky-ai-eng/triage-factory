@@ -533,7 +533,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			        SELECT 1 FROM instances i
 			        WHERE i.id = r.preferred_executor_id
 			          AND i.last_heartbeat_at >= now() - make_interval(secs => $4)
-			          AND i.draining = false
+			          AND NOT ` + drainingSQL("i.") + `
 			          AND i.dispatch_gated IS NOT TRUE
 			    )
 			  )`

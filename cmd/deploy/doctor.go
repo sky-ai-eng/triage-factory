@@ -78,22 +78,13 @@ func bundleChecks(h *host, b Bundle, dir string, st deployState) []check {
 	case len(edited)+len(missing) == 0:
 		cs = append(cs, check{pass, "Rendered files", fmt.Sprintf("all %d match what init rendered", len(st.Files))})
 	default:
-		var parts []string
-		if len(edited) > 0 {
-			parts = append(parts, "edited: "+strings.Join(edited, ", "))
-		}
-		if len(missing) > 0 {
-			parts = append(parts, "missing: "+strings.Join(missing, ", "))
-		}
-		cs = append(cs, check{warn, "Rendered files", strings.Join(parts, "; ") + ". Changes belong in compose.override.yml; a re-render replaces these files"})
+		cs = append(cs, check{warn, "Rendered files", describeChanges(edited, missing) + ". Changes belong in compose.override.yml; deploy upgrade refuses to replace these files without --force"})
 	}
 
 	if st.Version == b.Version {
 		cs = append(cs, check{pass, "Binary version", b.Version})
 	} else {
-		// TODO(TFAC-1214): name `deploy upgrade` here as the way to move the
-		// deployment to this binary's version once that subcommand exists.
-		cs = append(cs, check{warn, "Binary version", fmt.Sprintf("the deployment is %s and this binary is %s; run the %s binary against it", st.Version, b.Version, st.Version)})
+		cs = append(cs, check{warn, "Binary version", fmt.Sprintf("the deployment is %s and this binary is %s; %s", st.Version, b.Version, versionFix(b.Version, st.Version))})
 	}
 	return cs
 }
@@ -139,16 +130,28 @@ type container struct {
 
 // stackChecks checks a running stack: its containers, the control service's
 // health endpoint, GoTrue's signing keys, and the public URL from the host.
-// Containers are found by the project label compose puts on them, so the
-// checks need nothing from the compose file or .env.
 func stackChecks(ctx context.Context, h *host, dir string, st deployState) []check {
-	ids, errOut, err := h.docker(ctx, "", "ps", "--all", "--quiet", "--filter", "label=com.docker.compose.project="+st.Project)
+	c, up := containerCheck(ctx, h, st.Project)
+	if !up {
+		return []check{c}
+	}
+	return []check{c, controlHealthCheck(ctx, h), jwksCheck(ctx, h), publicURLCheck(ctx, h, dir)}
+}
+
+// containerCheck reads the project's containers and folds them into one
+// check. up is false when there are none to check further, because docker
+// could not list them or the project has none. Containers are found by the
+// project label compose puts on them, so the check needs nothing from the
+// compose file or .env.
+func containerCheck(ctx context.Context, h *host, project string) (c check, up bool) {
+	ids, errOut, err := h.docker(ctx, "", "ps", "--all", "--quiet", "--filter", "label=com.docker.compose.project="+project)
 	if err != nil {
-		return []check{{fail, "Containers", "docker ps failed: " + firstLine(errOut, err)}}
+		return check{fail, "Containers", "docker ps failed: " + firstLine(errOut, err)}, false
 	}
 	idList := strings.Fields(string(ids))
+	none := check{skip, "Containers", fmt.Sprintf("compose project %s has no containers; the running-stack checks run once it is up", project)}
 	if len(idList) == 0 {
-		return []check{{skip, "Containers", fmt.Sprintf("compose project %s has no containers; the running-stack checks run once it is up", st.Project)}}
+		return none, false
 	}
 	// A container removed between the two calls (a one-shot run with --rm)
 	// makes inspect exit non-zero while still printing the rest, so its
@@ -157,25 +160,26 @@ func stackChecks(ctx context.Context, h *host, dir string, st deployState) []che
 	var containers []container
 	if jerr := json.Unmarshal(out, &containers); jerr != nil || len(containers) == 0 {
 		if err != nil {
-			return []check{{fail, "Containers", "docker inspect failed: " + firstLine(errOut, err)}}
+			return check{fail, "Containers", "docker inspect failed: " + firstLine(errOut, err)}, false
 		}
 		if jerr != nil {
-			return []check{{fail, "Containers", "read docker inspect: " + jerr.Error()}}
+			return check{fail, "Containers", "read docker inspect: " + jerr.Error()}, false
 		}
-		return []check{{skip, "Containers", fmt.Sprintf("compose project %s has no containers; the running-stack checks run once it is up", st.Project)}}
+		return none, false
 	}
+	return containersCheck(containers), true
+}
 
-	cs := []check{containersCheck(containers)}
-	if code, _, err := h.get(ctx, h.controlURL+"/api/health"); err != nil {
-		cs = append(cs, check{fail, "Control health", err.Error()})
-	} else if code != http.StatusOK {
-		cs = append(cs, check{fail, "Control health", fmt.Sprintf("GET %s/api/health answered %d", h.controlURL, code)})
-	} else {
-		cs = append(cs, check{pass, "Control health", "GET /api/health answered 200"})
+func controlHealthCheck(ctx context.Context, h *host) check {
+	const name = "Control health"
+	code, _, err := h.get(ctx, h.controlURL+"/api/health")
+	switch {
+	case err != nil:
+		return check{fail, name, err.Error()}
+	case code != http.StatusOK:
+		return check{fail, name, fmt.Sprintf("GET %s/api/health answered %d", h.controlURL, code)}
 	}
-	cs = append(cs, jwksCheck(ctx, h))
-	cs = append(cs, publicURLCheck(ctx, h, dir))
-	return cs
+	return check{pass, name, "GET /api/health answered 200"}
 }
 
 // containersCheck folds the project's containers into one line. A container

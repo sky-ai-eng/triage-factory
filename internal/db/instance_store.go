@@ -22,7 +22,7 @@ type InstanceStore interface {
 	// row with boot_epoch=1, or — on a restart with the same id — bump
 	// boot_epoch by one and refresh role/version/started_at/
 	// last_heartbeat_at. pubkey is this boot's ephemeral X25519 public key
-	// (TFAC-614, base64) — re-stamped on every Register call exactly like
+	// (base64) — re-stamped on every Register call exactly like
 	// role/version, never preserved across a restart the way draining/
 	// labels are; empty when the caller has no bundle-sealing key to
 	// publish (control/all roles). Returns the minted/bumped boot_epoch.
@@ -35,10 +35,11 @@ type InstanceStore interface {
 	// false when the fence matched no row — a later boot of this same id
 	// has already re-registered (the split-identity signal); callers log
 	// that as a warning, not an error. draining is the row's CURRENT
-	// operator-intent flag, read back in the same statement (matched=true
-	// only) so the drain verb (TFAC-586) needs no separate poll: the
-	// existing heartbeat cadence is also how a running instance learns an
-	// operator drained it. draining is meaningless when matched is false.
+	// drain state, of either kind (see SetDrainUntilRestart), read back in
+	// the same statement (matched=true only) so the drain verb needs no
+	// separate poll: the existing heartbeat cadence is also how a running
+	// instance learns an operator drained it. draining is meaningless when
+	// matched is false.
 	Heartbeat(ctx context.Context, id string, bootEpoch int64, hb domain.InstanceHeartbeat) (matched bool, draining bool, err error)
 
 	// Get returns one instance row, or nil if id is unknown. For tests and
@@ -46,15 +47,28 @@ type InstanceStore interface {
 	Get(ctx context.Context, id string) (*domain.Instance, error)
 
 	// List returns every instance row, newest-registered first. Backs the
-	// `triagefactory instance list` CLI verb (TFAC-586) and, later, the
+	// `triagefactory instance list` CLI verb and, later, the
 	// fleet dashboard. Not org-scoped — see the package doc.
 	List(ctx context.Context) ([]domain.Instance, error)
 
 	// SetDraining writes the operator-intent drain flag directly (the
-	// `triagefactory instance drain|undrain` CLI verb, TFAC-586) — a
+	// `triagefactory instance drain|undrain` CLI verb) — a
 	// write the heartbeat deliberately never performs (see
-	// domain.InstanceHeartbeat). matched is false when id is unknown.
+	// domain.InstanceHeartbeat). This drain survives restarts. Undraining
+	// also ends a drain SetDrainUntilRestart set, so it ends either kind.
+	// matched is false when id is unknown.
 	SetDraining(ctx context.Context, id string, draining bool) (matched bool, err error)
+
+	// SetDrainUntilRestart drains the instance until it next registers: it
+	// records the row's current boot_epoch in drain_until_epoch, and the
+	// instance is draining while the two are equal. Register bumps
+	// boot_epoch on every boot, so the drain lapses on its own with nothing
+	// written at boot, and a value left behind is inert because epochs only
+	// increase. `deploy upgrade` drains executors this way before it
+	// recreates them, so an upgrade interrupted at any point leaves no
+	// executor drained past its next start. matched is false when id is
+	// unknown.
+	SetDrainUntilRestart(ctx context.Context, id string) (matched bool, err error)
 
 	// DeleteStaleSystem deletes every instance row whose last heartbeat is
 	// older than olderThan, and returns how many went. claims.executor_id

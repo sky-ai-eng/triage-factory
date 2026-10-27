@@ -159,7 +159,7 @@ The GitHub OAuth app's authorization callback URL must be
   %s/auth/v1/callback
 
 Start the stack:
-  cd %s && docker compose up -d
+  triagefactory deploy up --dir %s
 `, dir, len(files), envFile, stateFile, publicURL, dir)
 	return nil
 }
@@ -168,9 +168,7 @@ Start the stack:
 // lacks and touches nothing else. Re-rendering is an upgrade, not this.
 func reinit(h *host, b Bundle, dir string, st deployState, o initOptions) error {
 	if st.Version != b.Version {
-		// TODO(TFAC-1214): name `deploy upgrade` here as the way to move the
-		// deployment to this binary's version once that subcommand exists.
-		return fmt.Errorf("%s was rendered by %s and this binary is %s; init does not re-render a deployment. Run the %s binary against it", dir, st.Version, b.Version, st.Version)
+		return fmt.Errorf("%s was rendered by %s and this binary is %s; init does not re-render a deployment. To fix it, %s", dir, st.Version, b.Version, versionFix(b.Version, st.Version))
 	}
 	if o.project != "" && o.project != st.Project {
 		return fmt.Errorf("--project %s: this deployment's compose project is %s, and init never changes it", o.project, st.Project)

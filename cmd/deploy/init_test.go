@@ -687,13 +687,22 @@ func TestInit_RerunRefusals(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "another binary version",
+			name: "a newer binary",
 			bundle: func(t *testing.T) Bundle {
 				b := releaseBundle(t)
 				b.Version = "v99.0.0"
 				return b
 			},
-			wantErr: "init does not re-render a deployment. Run the v",
+			wantErr: "init does not re-render a deployment. To fix it, run `triagefactory deploy upgrade` to move the deployment to v99.0.0",
+		},
+		{
+			name: "an older binary",
+			bundle: func(t *testing.T) Bundle {
+				b := releaseBundle(t)
+				b.Version = "v0.0.1"
+				return b
+			},
+			wantErr: "init does not re-render a deployment. To fix it, install the v",
 		},
 		{
 			name:    "another project",

@@ -13,9 +13,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	protobundle "github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v1"
@@ -103,45 +105,82 @@ func newImageVerifier(version string) imageVerifier {
 // resolve returns version's image pinned by digest, <repository>:<version>@
 // sha256:…, once a signature over that digest verifies as version's.
 func (v imageVerifier) resolve(ctx context.Context, version string) (string, error) {
-	tagRef := v.repository + ":" + version
-	tag, err := name.NewTag(tagRef, name.StrictValidation)
+	tag, err := v.tag(version)
 	if err != nil {
-		return "", fmt.Errorf("image reference %s: %w", tagRef, err)
+		return "", err
 	}
-	opts := append([]remote.Option{remote.WithContext(ctx)}, v.remoteOptions...)
+	opts := v.options(ctx)
 
 	desc, err := remote.Get(tag, opts...)
 	if err != nil {
 		switch {
 		case isNotFound(err):
-			return "", fmt.Errorf("%s is not published yet. A release's image is pushed and signed by its release workflow; if %s was tagged in the last few minutes, wait for that workflow to finish and run init again", tagRef, version)
+			return "", fmt.Errorf("%s is not published yet. A release's image is pushed and signed by its release workflow; if %s was tagged in the last few minutes, wait for that workflow to finish and try again", tag, version)
 		case isDenied(err):
-			return "", fmt.Errorf("%s: the registry refused the pull (%w); if the package is private, run `docker login ghcr.io` first", tagRef, err)
+			return "", fmt.Errorf("%s: the registry refused the pull (%w); if the package is private, run `docker login ghcr.io` first", tag, err)
 		}
-		return "", fmt.Errorf("resolve %s: %w", tagRef, err)
+		return "", fmt.Errorf("resolve %s: %w", tag, err)
 	}
-	digest := desc.Digest.String()
-
-	payloads, err := v.signatureLayers(ctx, tag, desc.Digest.Hex, opts)
-	if err != nil {
+	if err := v.verifyDigest(ctx, tag, desc.Digest, version, opts); err != nil {
 		return "", err
 	}
+	return tag.String() + "@" + desc.Digest.String(), nil
+}
 
+// verifyPinned verifies the signature of an image deploy already pinned,
+// ref being <repository>:<version>@sha256:…: the pinned digest itself, not
+// whatever the tag names now, so a tag moved since the pin changes nothing.
+func (v imageVerifier) verifyPinned(ctx context.Context, version, ref string) error {
+	tag, err := v.tag(version)
+	if err != nil {
+		return err
+	}
+	base, digestStr, ok := strings.Cut(ref, "@")
+	if !ok || base != tag.String() {
+		return fmt.Errorf("the pinned image %s is not %s@<digest>", ref, tag)
+	}
+	digest, err := v1.NewHash(digestStr)
+	if err != nil {
+		return fmt.Errorf("the pinned image %s: %w", ref, err)
+	}
+	return v.verifyDigest(ctx, tag, digest, version, v.options(ctx))
+}
+
+func (v imageVerifier) tag(version string) (name.Tag, error) {
+	tagRef := v.repository + ":" + version
+	tag, err := name.NewTag(tagRef, name.StrictValidation)
+	if err != nil {
+		return name.Tag{}, fmt.Errorf("image reference %s: %w", tagRef, err)
+	}
+	return tag, nil
+}
+
+func (v imageVerifier) options(ctx context.Context) []remote.Option {
+	return append([]remote.Option{remote.WithContext(ctx)}, v.remoteOptions...)
+}
+
+// verifyDigest checks that a signature cosign attached to digest verifies as
+// version's.
+func (v imageVerifier) verifyDigest(ctx context.Context, tag name.Tag, digest v1.Hash, version string, opts []remote.Option) error {
+	payloads, err := v.signatureLayers(ctx, tag, digest.Hex, opts)
+	if err != nil {
+		return err
+	}
 	material, err := v.trust()
 	if err != nil {
-		return "", fmt.Errorf("load the Sigstore trust root: %w", err)
+		return fmt.Errorf("load the Sigstore trust root: %w", err)
 	}
 	identity := signerIdentity(version)
 	var failures []error
 	for _, p := range payloads {
-		err := verifySignatureLayer(material, v.verifierOptions, identity, digest, p)
+		err := verifySignatureLayer(material, v.verifierOptions, identity, digest.String(), p)
 		if err == nil {
-			return tagRef + "@" + digest, nil
+			return nil
 		}
 		failures = append(failures, err)
 	}
-	return "", fmt.Errorf("%s@%s has no signature that verifies as %s's (want issuer %s and identity %s): %w",
-		tagRef, digest, version, signerIssuer, identity, errors.Join(failures...))
+	return fmt.Errorf("%s@%s has no signature that verifies as %s's (want issuer %s and identity %s): %w",
+		tag, digest, version, signerIssuer, identity, errors.Join(failures...))
 }
 
 // signatureLayer is one cosign signature: the payload it signs and the

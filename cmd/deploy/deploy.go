@@ -3,6 +3,8 @@
 //
 //	triagefactory deploy init     render a deployment directory
 //	triagefactory deploy doctor   check the host, the rendered files and the stack
+//	triagefactory deploy up       start it and wait for it to be healthy
+//	triagefactory deploy upgrade  move it to this binary's version
 //
 // The deployment stays a docker compose project — Postgres, GoTrue, SeaweedFS
 // and the executor's gVisor jails need containers — and deploy renders it
@@ -16,6 +18,12 @@
 // all: Linux, a reachable Docker Engine, and Compose 2 or later. The executor
 // needs Linux, so a host that fails the gate is told why and nothing is
 // written; there is no rendering a bundle on one machine to run on another.
+//
+// The binary's version decides the image a release deployment runs, so up
+// refuses a binary that is not the deployment's version, and upgrade is the
+// one way to move a deployment to a newer one. Upgrades are orderly, not
+// zero-downtime: the API is down while control restarts, and runs in flight
+// are drained or handed off with workspace snapshots.
 //
 // deploy runs before any server wiring, opens no database, and writes nothing
 // outside the deployment directory.
@@ -65,6 +73,10 @@ func run(ctx context.Context, args []string, b Bundle, h *host) int {
 		return runInit(ctx, args[1:], b, h)
 	case "doctor":
 		return runDoctor(ctx, args[1:], b, h)
+	case "up":
+		return runUp(ctx, args[1:], b, h)
+	case "upgrade":
+		return runUpgrade(ctx, args[1:], b, h)
 	case "-h", "--help", "help":
 		fmt.Fprint(h.stdout, usage)
 		return 0
@@ -96,9 +108,21 @@ type host struct {
 	// portFree reports whether a TCP port on the host can be bound.
 	portFree func(port int) bool
 
+	// stream runs the docker CLI with args, in dir when dir is not empty,
+	// with its output on the terminal and no time limit: compose pulling,
+	// building and starting a stack takes as long as it takes, and the
+	// operator watches it.
+	stream func(ctx context.Context, dir string, args ...string) error
+
 	// resolveImage pins a release's image by a digest whose signature it
-	// has verified.
+	// has verified, and verifyImage verifies the signature of an image
+	// already pinned (repository:version@sha256:…).
 	resolveImage func(ctx context.Context, version string) (string, error)
+	verifyImage  func(ctx context.Context, version, ref string) error
+
+	// now and sleep are the clock the waits in up and upgrade run on.
+	now   func() time.Time
+	sleep func(ctx context.Context, d time.Duration) error
 
 	// http, controlURL and gotrueURL are how doctor reaches a running stack:
 	// the ports docker-compose.yml publishes on the host.
@@ -141,8 +165,28 @@ func newHost() *host {
 			_ = l.Close()
 			return true
 		},
+		stream: func(ctx context.Context, dir string, args ...string) error {
+			cmd := exec.CommandContext(ctx, "docker", args...)
+			cmd.Dir = dir
+			cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+			return cmd.Run()
+		},
 		resolveImage: func(ctx context.Context, version string) (string, error) {
 			return newImageVerifier(version).resolve(ctx, version)
+		},
+		verifyImage: func(ctx context.Context, version, ref string) error {
+			return newImageVerifier(version).verifyPinned(ctx, version, ref)
+		},
+		now: time.Now,
+		sleep: func(ctx context.Context, d time.Duration) error {
+			t := time.NewTimer(d)
+			defer t.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-t.C:
+				return nil
+			}
 		},
 		http:       &http.Client{Timeout: 5 * time.Second},
 		controlURL: "http://127.0.0.1:3000",
@@ -363,7 +407,8 @@ func parseFlags(fset *flag.FlagSet, args []string, h *host) int {
 	return -1
 }
 
-const usage = `triagefactory deploy — render and check a self-hosted multi-mode deployment.
+const usage = `triagefactory deploy — render, start, upgrade and check a self-hosted
+multi-mode deployment.
 
 USAGE
   triagefactory deploy init [flags]     render a deployment directory: the
@@ -371,8 +416,17 @@ USAGE
                                         release image pinned by a verified
                                         digest, and a .env with every secret
                                         boot needs
+  triagefactory deploy up [flags]       start the deployment, with the stored
+                                        executor count, and wait for it to be
+                                        healthy
+  triagefactory deploy upgrade [flags]  move the deployment to this binary's
+                                        version: verify the new image, drain the
+                                        executors, re-render, restart
   triagefactory deploy doctor [flags]   check the host, the rendered files and
                                         the running stack
+
+A release deployment runs the image of the binary's own version. After
+installing a newer binary, run deploy upgrade before deploy up.
 
 Every subcommand takes --dir (default: the current directory), the deployment
 directory it works on, and first checks the host: Linux, a reachable Docker

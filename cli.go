@@ -205,6 +205,8 @@ USER COMMANDS
   triagefactory migrate status             list applied + pending migrations
   triagefactory instance list              show every registered fleet instance
   triagefactory instance drain <id>        stop new claims, quiesce
+                                           (--until-restart: only until
+                                           the instance next restarts)
   triagefactory instance undrain <id>      resume claims
   triagefactory instance placement ...     inspect / steer run placement
   triagefactory operator add <email>       grant the fleet-console operator flag
@@ -214,6 +216,9 @@ USER COMMANDS
   triagefactory commit-signer verify       check it against GitHub now
   triagefactory deploy init                render a self-hosted multi-mode
                                            deployment (docker compose)
+  triagefactory deploy up                  start it and wait for it to be
+                                           healthy
+  triagefactory deploy upgrade             move it to this binary's version
   triagefactory deploy doctor              check a deployment and its host
 
 AGENT COMMANDS

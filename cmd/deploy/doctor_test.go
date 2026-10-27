@@ -24,6 +24,7 @@ func initedFixture(t *testing.T) (*fakeHost, Bundle, string) {
 	f.out.Reset()
 	f.errOut.Reset()
 	f.dockerCalls = nil
+	f.resolved = nil
 	// The image is not on the host and the stack is not up, until a test
 	// says otherwise.
 	f.dockerReplies["image inspect"] = dockerReply{stderr: "No such image\n", err: errors.New("exit status 1")}
@@ -119,7 +120,7 @@ func TestDoctor_BundleWarnings(t *testing.T) {
 		if code := doctorRun(t, f, b, dir); code != 0 {
 			t.Fatalf("exit = %d; want 0\n%s", code, f.out)
 		}
-		wantLine(t, f.out.String(), "Binary version", warn, "and this binary is v99.0.0; run the")
+		wantLine(t, f.out.String(), "Binary version", warn, "and this binary is v99.0.0; run `triagefactory deploy upgrade`")
 	})
 	t.Run("source build", func(t *testing.T) {
 		f := newFakeHost(t)

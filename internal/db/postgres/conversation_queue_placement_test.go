@@ -172,6 +172,18 @@ func TestPlacementClaim_DrainingAndGatedPreferredSpill(t *testing.T) {
 		}
 	})
 
+	t.Run("draining until restart", func(t *testing.T) {
+		registerLiveExecutor(t, stores, "exec-drain-restart")
+		if _, err := stores.Instances.SetDrainUntilRestart(ctx, "exec-drain-restart"); err != nil {
+			t.Fatalf("SetDrainUntilRestart: %v", err)
+		}
+		conversationID := stagePgConversationPreferred(t, h, stores, orgID, userID, "exec-drain-restart")
+		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-helper", 1, placementClaimCfg, db.DefaultClaimLease)
+		if err != nil || got == nil || got.ID != conversationID {
+			t.Fatalf("an owner drained until restart should spill its conversation: got=(%+v, %v)", got, err)
+		}
+	})
+
 	t.Run("gated", func(t *testing.T) {
 		registerLiveExecutor(t, stores, "exec-gated")
 		pgtest.MustExec(t, h.AdminDB, `UPDATE instances SET dispatch_gated = true WHERE id = $1`, "exec-gated")
