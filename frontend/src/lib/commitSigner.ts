@@ -11,10 +11,6 @@ import { apiFetch, apiJSON, HttpError } from './apiClient'
 import { hostOf } from './reachability'
 import { timeAgo } from './relativeTime'
 
-/** The guide to creating the signer account, linked from the section. */
-export const COMMIT_SIGNING_GUIDE_URL =
-  'https://github.com/sky-ai-eng/triage-factory/blob/main/docs/users/workspace/commit-signing.md'
-
 /** Whether a GitHub web base is github.com, the only host with a noreply
  *  address a signer's commits can carry without an address of its own. */
 export function isGitHubCom(baseUrl: string): boolean {

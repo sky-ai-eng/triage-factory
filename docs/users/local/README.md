@@ -15,4 +15,3 @@ Claude, repositories, teams) is set up in the app.
 - [Secret storage](secret-storage.md): keychain or encrypted file, `TF_SECRET_ENCRYPTION_KEY`
 - [Running on a server](server.md): a host with no keychain or browser
 - [Tuning](tuning.md): run concurrency, disk, logging, tracing, the Claude binary
-- [Commit signing](../workspace/commit-signing.md): creating the GitHub account agents' commits are signed as

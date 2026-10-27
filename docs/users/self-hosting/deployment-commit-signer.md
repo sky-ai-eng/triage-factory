@@ -13,11 +13,22 @@ these variables.
 
 ## 1. Create the account
 
-Create a dedicated user account on the deployment's GitHub, set a profile name
-(every commit carries it) and verify an email on it.
-[Creating the signer account](../workspace/commit-signing.md) covers what the
-account needs. If your repositories run a CLA check, add the account's login to
-its allowlist first: commits are authored as that account.
+Create a GitHub **user** account on the deployment's GitHub for this alone,
+not a person's: every commit is authored as it, and a leaked key can sign only
+as it. GitHub treats it as a machine account, so a person creates it, is
+responsible for it, and gives it an email address someone receives.
+
+- Turn on two-factor authentication.
+- Set a profile name (**Settings → Public profile → Name**). Commits carry it;
+  without one they carry the login.
+- Keep the email private, and use a second verified address, not the recovery
+  one, if you set `TF_GITHUB_COMMIT_SIGNER_EMAIL` (step 4).
+- On GHE.com, or in an enterprise with managed users, create the account
+  through your identity provider and verify its email before step 4.
+
+The account needs no membership or seat in your GitHub organization. If your
+repositories run a CLA check, add its login to the allowlist first: commits are
+authored as that account.
 
 ## 2. Generate the key
 

@@ -31,11 +31,6 @@ Factory, and working on its code.
   [JWT key rotation](users/self-hosting/jwt-key-rotation.md),
   [fleet console](users/self-hosting/fleet-console.md)
 
-## Set up a workspace
-
-- [Commit signing](users/workspace/commit-signing.md) — the GitHub account agents' commits are signed as, so GitHub marks them Verified
-- [SSO identity provider](users/workspace/sso-identity-provider.md) — configuring Microsoft Entra for an org's SAML connection
-
 ## Evaluate its security
 
 - [Security](users/security/README.md) — threat model, isolation tiers, privilege separation, seccomp, verifying releases
@@ -44,7 +39,7 @@ Factory, and working on its code.
 
 | You want to… | Page |
 |---|---|
-| Have agents' commits show as Verified on GitHub | [Commit signing](users/workspace/commit-signing.md) (a workspace) or [deployment commit signer](users/self-hosting/deployment-commit-signer.md) (every workspace on the deployment's GitHub App) |
+| Have agents' commits show as Verified on GitHub | **Settings → Commit signing** in the app (one workspace), or the [deployment commit signer](users/self-hosting/deployment-commit-signer.md) (every workspace on the deployment's GitHub App) |
 | Rotate the key that signs login sessions | [JWT key rotation](users/self-hosting/jwt-key-rotation.md) |
 | Set up the key that signs SAML requests | [SSO](users/self-hosting/sso.md) |
 | Check a release's signature | [Verifying releases](users/security/verifying-releases.md) |

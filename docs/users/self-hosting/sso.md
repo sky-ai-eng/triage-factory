@@ -3,8 +3,7 @@
 SAML single sign-on runs through GoTrue, so it is multi-mode only, and it needs
 an Enterprise license that includes `sso`. This page is the one-time
 deployment setup. Each org then connects its own identity provider from
-**Settings → Single sign-on**; see
-[Connecting an identity provider](../workspace/sso-identity-provider.md).
+**Settings → Single sign-on** in the app.
 
 A fresh deployment has no SSO: the first admin signs in with GitHub and sets up
 SSO for everyone else. GitHub sign-in stays available afterwards.
