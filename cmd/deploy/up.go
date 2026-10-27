@@ -79,6 +79,14 @@ func up(ctx context.Context, h *host, b Bundle, dirFlag string, executors int) e
 			return err
 		}
 	}
+	// compose runs the rendered files as they are on disk, so an image pin
+	// edited since deploy rendered it is not the image verified above.
+	switch edited, missing, err := changedFiles(dir, st); {
+	case err != nil:
+		h.report(check{warn, "Rendered files", err.Error()})
+	case len(edited)+len(missing) > 0:
+		h.report(check{warn, "Rendered files", describeChanges(edited, missing) + "; compose runs them as they are now, not as deploy rendered them. Changes belong in compose.override.yml"})
+	}
 
 	h.heading("Seccomp")
 	if failed := h.reportAll([]check{seccompCheck(ctx, h, dir, st)}); failed {
@@ -98,7 +106,7 @@ func up(ctx context.Context, h *host, b Bundle, dirFlag string, executors int) e
 		return err
 	}
 
-	publicURL := publicURLOf(dir)
+	publicURL, _ := publicURLOf(dir)
 	h.report(publicURLCheck(ctx, h, dir))
 	fmt.Fprintf(h.stdout, "\nThe deployment is up at %s with %d executor(s).\nNext: open %s and sign in with GitHub.\n", publicURL, st.Executors, publicURL)
 	return nil
@@ -149,7 +157,7 @@ func waitHealthy(ctx context.Context, h *host, st deployState) error {
 	fmt.Fprintf(h.stdout, "\nWaiting up to %s for the stack to be healthy...\n", healthTimeout)
 	deadline := h.now().Add(healthTimeout)
 	for {
-		cs := healthChecks(ctx, h, st)
+		cs, _ := healthChecks(ctx, h, st)
 		healthy := !slices.ContainsFunc(cs, func(c check) bool { return c.status != pass })
 		if healthy || !h.now().Before(deadline) {
 			h.heading("Health")
@@ -166,21 +174,23 @@ func waitHealthy(ctx context.Context, h *host, st deployState) error {
 }
 
 // healthChecks are what the stack needs to serve: its containers, the
-// control service's health endpoint, and GoTrue's signing keys.
-func healthChecks(ctx context.Context, h *host, st deployState) []check {
+// control service's health endpoint, and GoTrue's signing keys. up is false
+// when there are no containers to check further.
+func healthChecks(ctx context.Context, h *host, st deployState) (cs []check, up bool) {
 	c, up := containerCheck(ctx, h, st.Project)
 	if !up {
-		return []check{c}
+		return []check{c}, false
 	}
-	return []check{c, controlHealthCheck(ctx, h), jwksCheck(ctx, h)}
+	return []check{c, controlHealthCheck(ctx, h), jwksCheck(ctx, h)}, true
 }
 
-func publicURLOf(dir string) string {
+// publicURLOf is TF_PUBLIC_URL in dir's .env, empty when .env does not set it.
+func publicURLOf(dir string) (string, error) {
 	env, err := os.ReadFile(filepath.Join(dir, envFile))
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("read %s: %w", envFile, err)
 	}
-	return envValues(env).get("TF_PUBLIC_URL")
+	return envValues(env).get("TF_PUBLIC_URL"), nil
 }
 
 // versionFix is what to do about a binary that is not the deployment's

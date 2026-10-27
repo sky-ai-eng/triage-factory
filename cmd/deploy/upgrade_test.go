@@ -66,13 +66,20 @@ func fleetJSON(executors ...string) string {
 }
 
 // upgradeFixture is a deployment init rendered at the repo's release, a
-// binary of the next release, and a stack that is up and healthy.
+// binary of the next release whose image a pull puts on the host, and a
+// stack that is up and healthy.
 func upgradeFixture(t *testing.T) (*fakeHost, Bundle, string) {
 	t.Helper()
 	f, b, dir := initedFixture(t)
 	healthyStack().apply(t, f, dir)
+	imagePulledByStream(f)
 	f.dockerReplies[controlRunning] = dockerReply{stdout: "c0ffee\n"}
 	return f, nextRelease(t, b), dir
+}
+
+// pinnedImage is the image the fake resolver pins for version.
+func pinnedImage(version string) string {
+	return imageRepository + ":" + version + "@" + testDigest
 }
 
 func drainCalls(f *fakeHost) []string {
@@ -114,26 +121,36 @@ func TestUpgrade_ToTheNextRelease(t *testing.T) {
 	if strings.Join(f.resolved, ",") != next.Version {
 		t.Errorf("resolved %q; want the new version %s", f.resolved, next.Version)
 	}
-	wantStreamed(t, f, composeUpArgs("triage-factory", "3"))
-	// The drain finished before compose recreated anything.
-	lastDrainPoll, start := -1, -1
+	wantStreamed(t, f, "pull "+pinnedImage(next.Version), composeUpArgs("triage-factory", "3"))
+	// The new image was pulled and probed before the drain, and the drain
+	// finished before compose recreated anything.
+	probe, firstDrainPoll, lastDrainPoll, start := -1, -1, -1, -1
 	for i, call := range f.dockerCalls {
 		switch joined := strings.Join(call, " "); {
+		case strings.HasPrefix(joined, "run --rm") && strings.HasSuffix(joined, pinnedImage(next.Version)):
+			probe = i
 		case joined == fleetList:
+			if firstDrainPoll < 0 {
+				firstDrainPoll = i
+			}
 			lastDrainPoll = i
 		case strings.HasPrefix(joined, "compose -p triage-factory up"):
 			start = i
 		}
 	}
+	if probe < 0 || probe >= firstDrainPoll {
+		t.Errorf("want the seccomp probe of the new image before the drain; calls: %q", f.dockerCalls)
+	}
 	if lastDrainPoll < 0 || lastDrainPoll >= start {
 		t.Errorf("want the drain wait before compose up; calls: %q", f.dockerCalls)
 	}
+	wantLine(t, f.out.String(), "Seccomp profile", pass, "Docker starts a container")
 
 	st, err := readState(dir)
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
-	wantImage := imageRepository + ":" + next.Version + "@" + testDigest
+	wantImage := pinnedImage(next.Version)
 	if st.Version != next.Version || st.Image == nil || *st.Image != wantImage || st.Executors != 3 || st.Project != "triage-factory" {
 		t.Errorf("state = %+v; want version %s, image %s, 3 executors", st, next.Version, wantImage)
 	}
@@ -216,6 +233,20 @@ func TestUpgrade_Refusals(t *testing.T) {
 			arrange: func(_ *testing.T, f *fakeHost, _ *Bundle, _ string) { f.goos = "darwin" },
 			wantErr: "failed preflight; nothing was changed",
 		},
+		{
+			name: "a new image that does not pull",
+			arrange: func(_ *testing.T, f *fakeHost, _ *Bundle, _ string) {
+				f.dockerReplies["pull"] = dockerReply{err: errors.New("exit status 1")}
+			},
+			wantErr: "Nothing was changed",
+		},
+		{
+			name: "a new seccomp profile the host refuses",
+			arrange: func(_ *testing.T, f *fakeHost, _ *Bundle, _ string) {
+				f.dockerReplies["run"] = dockerReply{stderr: "unknown syscall\n", err: errors.New("exit status 125")}
+			},
+			wantErr: "seccomp profile is refused on this host, so its executor would not start; nothing was changed",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -231,10 +262,38 @@ func TestUpgrade_Refusals(t *testing.T) {
 			if after := snapshotDir(t, dir); fmt.Sprint(after) != fmt.Sprint(before) {
 				t.Error("a refused upgrade changed the directory")
 			}
-			if f.called("compose -p") || len(f.streamed) > 0 {
+			// Every compose call names the project, so this covers the
+			// drain, which runs in the control container, and the start.
+			if f.called("compose -p") {
 				t.Errorf("a refused upgrade drove the stack: %q", f.dockerCalls)
 			}
 		})
+	}
+}
+
+// TestUpgrade_StatePathOutsideTheDirectory: a state file that records a
+// path outside the deployment directory is refused before anything runs,
+// so the removal of files the new bundle dropped never reaches outside it.
+func TestUpgrade_StatePathOutsideTheDirectory(t *testing.T) {
+	f, next, dir := upgradeFixture(t)
+	outside := filepath.Join(filepath.Dir(dir), "outside.txt")
+	mustWrite(t, outside, "not the deployment's\n")
+	st, err := readState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Files["../outside.txt"] = sha256Hex([]byte("not the deployment's\n"))
+	if err := writeState(dir, st); err != nil {
+		t.Fatal(err)
+	}
+	if code := upgradeRun(t, f, next, dir); code != 1 {
+		t.Fatalf("exit = %d; want 1\n%s%s", code, f.out, f.errOut)
+	}
+	if !strings.Contains(f.errOut.String(), "not a path inside the deployment directory") {
+		t.Errorf("stderr = %q; want the path refused", f.errOut)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Errorf("a file outside the deployment directory is gone: %v", err)
 	}
 }
 
@@ -334,11 +393,44 @@ func TestUpgrade_DrainNeverStopsTheUpgrade(t *testing.T) {
 				t.Fatalf("exit = %d; want 0\n%s%s", code, f.out, f.errOut)
 			}
 			wantLine(t, f.out.String(), tt.check, tt.status, tt.detail)
-			wantStreamed(t, f, composeUpArgs("triage-factory", "1"))
+			wantStreamed(t, f, "pull "+pinnedImage(next.Version), composeUpArgs("triage-factory", "1"))
 			if tt.args != nil && f.clock.Sub(start) < defaultDrainTimeout/10 {
 				t.Errorf("the drain waited %s; want the 1m timeout", f.clock.Sub(start))
 			}
 		})
+	}
+}
+
+// TestUpgrade_DrainWaitsOnTheDrained: the wait counts only executors that
+// are draining and still heartbeating, and trusts a zero run count only
+// from a heartbeat written after the drain, the one that told the executor
+// to stop claiming.
+func TestUpgrade_DrainWaitsOnTheDrained(t *testing.T) {
+	f, next, dir := upgradeFixture(t)
+	// exec-a's drain fails, so it keeps claiming and its runs never settle.
+	f.dockerReplies[drainPrefix+"exec-a"] = dockerReply{stderr: "boom\n", err: errors.New("exit status 1")}
+	f.dockerSeqs[fleetList] = []dockerReply{
+		{stdout: fleetJSON("exec-a:none:2:1", "exec-b:none:0:1", "exec-c:none:3:1")},
+		// exec-b reports no runs from a heartbeat older than its drain, and
+		// exec-c has stopped heartbeating with its last count frozen.
+		{stdout: fleetJSON("exec-a:none:2:1", "exec-b:until_restart:0:1", "exec-c:until_restart:3:120")},
+		{stdout: fleetJSON("exec-a:none:2:1", "exec-b:until_restart:0:1", "exec-c:until_restart:3:125")},
+	}
+	start := f.clock
+	if code := upgradeRun(t, f, next, dir); code != 0 {
+		t.Fatalf("exit = %d; want 0\n%s%s", code, f.out, f.errOut)
+	}
+	if got := strings.Join(drainCalls(f), ","); got != "exec-a,exec-b,exec-c" {
+		t.Errorf("drained %q; want exec-a, exec-b and exec-c tried", got)
+	}
+	out := f.out.String()
+	wantLine(t, out, "Executors", warn, "could not drain exec-a (boom)")
+	if !strings.Contains(out, "drained 2 until their restart; 1 not drained (exec-a)") {
+		t.Errorf("the drain summary does not name the executor it could not drain:\n%s", out)
+	}
+	wantLine(t, out, "Runs", pass, "none in flight")
+	if waited := f.clock.Sub(start); waited != pollInterval {
+		t.Errorf("waited %s; want one poll (%s): no trusting exec-b's pre-drain zero, no waiting on exec-a or the stopped exec-c", waited, pollInterval)
 	}
 }
 

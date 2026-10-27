@@ -134,6 +134,19 @@ func TestUp_Executors(t *testing.T) {
 	}
 }
 
+// TestUp_WarnsOnEditedRenderedFiles: compose runs the files as they are on
+// disk, so up says when they are not the ones deploy rendered and verified.
+func TestUp_WarnsOnEditedRenderedFiles(t *testing.T) {
+	f, b, dir := initedFixture(t)
+	healthyStack().apply(t, f, dir)
+	delete(f.dockerReplies, "image inspect")
+	mustWrite(t, filepath.Join(dir, composeFile), "services: {}\n")
+	if code := upRun(t, f, b, dir); code != 0 {
+		t.Fatalf("exit = %d; want 0\n%s%s", code, f.out, f.errOut)
+	}
+	wantLine(t, f.out.String(), "Rendered files", warn, "edited: docker-compose.yml; compose runs them as they are now")
+}
+
 func TestUp_ProjectFromState(t *testing.T) {
 	f := newFakeHost(t)
 	b := releaseBundle(t)

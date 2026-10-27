@@ -221,7 +221,7 @@ func runDrain(args []string) {
 		failUnknown(id)
 	}
 	if *untilRestart {
-		fmt.Printf("instance %s is now draining until it next restarts: it will stop claiming new runs (existing runs carry on until they finish or park), and claims again once it restarts, with no undrain needed.\n", id)
+		fmt.Printf("instance %s is now draining until it next restarts: it will stop claiming new runs (existing runs carry on until they finish or park), and claims again once it restarts, with no undrain needed. A plain `instance drain` on it still holds after the restart; `instance list` shows which drain is in effect.\n", id)
 		return
 	}
 	fmt.Printf("instance %s is now draining: it will stop claiming new runs (existing runs carry on until they finish or park), and stays drained across restarts until undrained; check `triagefactory instance list` for RUNS reaching 0/N before retiring it.\n", id)

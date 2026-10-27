@@ -6,14 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"time"
-
-	"github.com/sky-ai-eng/triage-factory/internal/envfile"
 )
 
 const (
@@ -57,8 +54,8 @@ func runUpgrade(ctx context.Context, args []string, b Bundle, h *host) int {
 
 // upgrade moves dir's deployment to this binary's version. Everything that
 // can refuse — the version, the new image's signature, an edited rendered
-// file — is settled before anything changes; from the drain on, the stack
-// is being upgraded.
+// file, the new image's pull and its seccomp profile — is settled before
+// anything changes; from the drain on, the stack is being upgraded.
 func upgrade(ctx context.Context, h *host, b Bundle, o upgradeOptions) error {
 	dir, err := deploymentDir(o.dir)
 	if err != nil {
@@ -115,6 +112,21 @@ func upgrade(ctx context.Context, h *host, b Bundle, o upgradeOptions) error {
 		h.report(check{warn, "Rendered files", changed + "; --force overwrites them"})
 	}
 
+	// The new image, under the new release's profile, before any executor
+	// is drained: a host that refuses the profile would leave every
+	// executor unable to start once compose recreates it.
+	h.heading("Seccomp")
+	if err := pullIfMissing(ctx, h, ref); err != nil {
+		return fmt.Errorf("%w. Nothing was changed", err)
+	}
+	probe, err := newSeccompCheck(ctx, h, dir, ref, files[seccompFile])
+	if err != nil {
+		return err
+	}
+	if failed := h.reportAll([]check{probe}); failed {
+		return fmt.Errorf("%s's executor seccomp profile is refused on this host, so its executor would not start; nothing was changed", b.Version)
+	}
+
 	h.heading("Drain")
 	drainExecutors(ctx, h, dir, st.Project, o.drainTimeout)
 
@@ -124,7 +136,10 @@ func upgrade(ctx context.Context, h *host, b Bundle, o upgradeOptions) error {
 		st.Files[path] = sha256Hex(data)
 	}
 	if err := writeRendered(dir, files, oldFiles, st); err != nil {
-		return err
+		// The state file is written last, so it still names the old
+		// version, and the files written so far no longer match its
+		// hashes: a re-run needs --force to replace them.
+		return fmt.Errorf("%w. The executors are drained until they restart, and %s may be partly re-rendered; once the cause is fixed, run `triagefactory deploy upgrade --force` again", err, dir)
 	}
 	if err := composeUp(ctx, h, dir, st); err != nil {
 		return fmt.Errorf("%w. %s is rendered for %s now; once the cause is fixed, `triagefactory deploy up` starts it", err, dir, st.Version)
@@ -152,14 +167,8 @@ func describeChanges(edited, missing []string) string {
 // does not, and writes the state file last, so a state file that names the
 // new version means every file with it was written.
 func writeRendered(dir string, files map[string][]byte, oldFiles map[string]string, st deployState) error {
-	for _, path := range slices.Sorted(maps.Keys(files)) {
-		rel := filepath.FromSlash(path)
-		if err := mkdirs(dir, filepath.Dir(rel)); err != nil {
-			return err
-		}
-		if err := envfile.WriteAtomic(filepath.Join(dir, rel), files[path], 0o644); err != nil {
-			return err
-		}
+	if err := writeBundleFiles(dir, files); err != nil {
+		return err
 	}
 	for path := range oldFiles {
 		if _, ok := files[path]; ok {
@@ -170,6 +179,26 @@ func writeRendered(dir string, files map[string][]byte, oldFiles map[string]stri
 		}
 	}
 	return writeState(dir, st)
+}
+
+// newSeccompCheck starts image under profile, the new release's seccomp
+// profile, which is not in dir until the re-render. The docker CLI reads a
+// profile itself and hands the daemon its contents, so a copy staged in dir
+// for the probe and removed after it is all the probe needs.
+func newSeccompCheck(ctx context.Context, h *host, dir, image string, profile []byte) (check, error) {
+	f, err := os.CreateTemp(dir, ".seccomp-probe-*.json")
+	if err != nil {
+		return check{}, fmt.Errorf("stage the new seccomp profile: %w", err)
+	}
+	defer func() { _ = os.Remove(f.Name()) }()
+	_, err = f.Write(profile)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return check{}, fmt.Errorf("stage the new seccomp profile: %w", err)
+	}
+	return seccompProbe(ctx, h, image, f.Name()), nil
 }
 
 // fleetInstance is the part of `triagefactory instance list --json` the
@@ -214,7 +243,7 @@ func drainExecutors(ctx context.Context, h *host, dir, project string, timeout t
 		h.report(check{skip, name, "no live executors"})
 		return
 	}
-	var drained, already []string
+	var drained, already, failed []string
 	for _, e := range executors {
 		if e.Drain != "none" {
 			already = append(already, e.ID)
@@ -224,50 +253,76 @@ func drainExecutors(ctx context.Context, h *host, dir, project string, timeout t
 			"triagefactory", "instance", "drain", "--until-restart", e.ID)
 		if err != nil {
 			h.report(check{warn, name, fmt.Sprintf("could not drain %s (%s); its runs are handed off when it stops", e.ID, firstLine(errOut, err))})
+			failed = append(failed, e.ID)
 			continue
 		}
 		drained = append(drained, e.ID)
 	}
-	detail := fmt.Sprintf("drained %d until their restart", len(drained))
+	drainedAt := h.now()
+	result := check{pass, name, fmt.Sprintf("drained %d until their restart", len(drained))}
 	if len(already) > 0 {
-		detail += fmt.Sprintf("; %d already draining (%s)", len(already), strings.Join(already, ", "))
+		result.detail += fmt.Sprintf("; %d already draining (%s)", len(already), strings.Join(already, ", "))
 	}
-	h.report(check{pass, name, detail})
+	if len(failed) > 0 {
+		result.status = warn
+		result.detail += fmt.Sprintf("; %d not drained (%s)", len(failed), strings.Join(failed, ", "))
+	}
+	h.report(result)
 
-	ids := make([]string, len(executors))
-	for i, e := range executors {
-		ids[i] = e.ID
+	// An executor that is not draining keeps claiming work, so its run
+	// count says nothing about when the others are done.
+	ids := slices.Concat(drained, already)
+	if len(ids) == 0 {
+		h.report(check{skip, "Runs", "no executor is draining, so there are no runs to wait for"})
+		return
 	}
-	waitForRuns(ctx, h, dir, project, ids, timeout)
+	waitForRuns(ctx, h, dir, project, ids, drainedAt, timeout)
 }
 
-// waitForRuns waits until the executors ids report no runs in flight, or
-// until timeout passes.
-func waitForRuns(ctx context.Context, h *host, dir, project string, ids []string, timeout time.Duration) {
+// waitForRuns waits until the draining executors ids report no runs in
+// flight, or until timeout passes. An executor learns of its drain on its
+// next heartbeat, and the run count it reports is the one that heartbeat
+// wrote, so its zero counts only once it has heartbeat since drainedAt: until
+// then it may still be claiming. An executor whose heartbeat has gone stale
+// stopped, its count frozen, and is not waited on.
+func waitForRuns(ctx context.Context, h *host, dir, project string, ids []string, drainedAt time.Time, timeout time.Duration) {
 	const name = "Runs"
 	deadline := h.now().Add(timeout)
 	last := -1
 	for {
+		polledAt := h.now()
 		fleet, err := listFleet(ctx, h, dir, project)
 		if err != nil {
 			h.report(check{warn, name, err.Error() + "; continuing, and runs in flight are handed off when their executor stops"})
 			return
 		}
-		runs := 0
+		runs, unsettled := 0, 0
 		for _, inst := range fleet {
-			if slices.Contains(ids, inst.ID) && inst.ActiveRuns != nil {
+			if !slices.Contains(ids, inst.ID) || inst.HeartbeatAgeSeconds > liveHeartbeat.Seconds() {
+				continue
+			}
+			// The list ran after polledAt, so a heartbeat younger than the
+			// time since the drain landed after it.
+			if inst.HeartbeatAgeSeconds >= polledAt.Sub(drainedAt).Seconds() {
+				unsettled++
+			}
+			if inst.ActiveRuns != nil {
 				runs += *inst.ActiveRuns
 			}
 		}
-		if runs == 0 {
+		if runs == 0 && unsettled == 0 {
 			h.report(check{pass, name, "none in flight"})
 			return
 		}
 		if !h.now().Before(deadline) {
-			h.report(check{warn, name, fmt.Sprintf("%d still in flight after %s; continuing: each executor parks its runs with a workspace snapshot when it stops, and they resume on the upgraded executors", runs, timeout)})
+			stillGoing := fmt.Sprintf("%d still in flight", runs)
+			if runs == 0 {
+				stillGoing = fmt.Sprintf("%d executor(s) have not heartbeat since the drain", unsettled)
+			}
+			h.report(check{warn, name, fmt.Sprintf("%s after %s; continuing: each executor parks its runs with a workspace snapshot when it stops, and they resume on the upgraded executors", stillGoing, timeout)})
 			return
 		}
-		if runs != last {
+		if runs > 0 && runs != last {
 			fmt.Fprintf(h.stdout, "        waiting for %d run(s) to finish (up to %s)\n", runs, deadline.Sub(h.now()).Round(time.Second))
 			last = runs
 		}
@@ -329,18 +384,22 @@ WHAT IT DOES
   2. Checks the rendered files against the hashes deploy recorded. A file that
      changed is listed and the upgrade refused: changes belong in
      compose.override.yml. --force overwrites them.
-  3. Drains every live executor until its next restart
+  3. Pulls the new image if the host lacks it, and starts it under the new
+     release's docker/seccomp-profile.json. A failed pull, or a profile this
+     host's Docker Engine or libseccomp refuses, stops the upgrade before
+     anything changes.
+  4. Drains every live executor until its next restart
      (triagefactory instance drain --until-restart, run in the control
      container) and waits for their runs to finish, up to --drain-timeout. A run
      still in flight after that is parked with a workspace snapshot when its
      executor stops, and resumes on the upgraded executors. An executor an
      operator drained stays drained.
-  4. Re-renders the bundle files and the state file.
-  5. Runs docker compose -p <project> up -d --scale executor=<N> with the
+  5. Re-renders the bundle files and the state file.
+  6. Runs docker compose -p <project> up -d --scale executor=<N> with the
      stored executor count. control migrates the schema as it boots, and the
      executors come up on the new image; their drain ended when they
      restarted, so there is nothing to undo.
-  6. Waits for the stack to be healthy, as deploy up does.
+  7. Waits for the stack to be healthy, as deploy up does.
 
 The API is unavailable while control restarts. Zero-downtime upgrades are not
 supported.

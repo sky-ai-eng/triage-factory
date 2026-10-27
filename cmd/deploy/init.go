@@ -315,6 +315,19 @@ func writeDeployment(dir string, create bool, files map[string][]byte, env []byt
 			_ = os.RemoveAll(filepath.Join(dir, name))
 		}
 	}()
+	if err := writeBundleFiles(dir, files); err != nil {
+		return err
+	}
+	if err := envfile.WriteAtomic(filepath.Join(dir, envFile), env, 0o600); err != nil {
+		return err
+	}
+	// Last, so a directory holding a state file holds everything with it.
+	return writeState(dir, st)
+}
+
+// writeBundleFiles writes the rendered bundle files, keyed by slash path,
+// into dir, each atomically at mode 0644 under directories mkdirs creates.
+func writeBundleFiles(dir string, files map[string][]byte) error {
 	for _, path := range slices.Sorted(maps.Keys(files)) {
 		rel := filepath.FromSlash(path)
 		if err := mkdirs(dir, filepath.Dir(rel)); err != nil {
@@ -324,11 +337,7 @@ func writeDeployment(dir string, create bool, files map[string][]byte, env []byt
 			return err
 		}
 	}
-	if err := envfile.WriteAtomic(filepath.Join(dir, envFile), env, 0o600); err != nil {
-		return err
-	}
-	// Last, so a directory holding a state file holds everything with it.
-	return writeState(dir, st)
+	return nil
 }
 
 // topLevelNames are the entries a first init creates directly in the

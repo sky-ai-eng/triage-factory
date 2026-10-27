@@ -198,6 +198,14 @@ func (s deployState) validate() error {
 	if len(s.Files) == 0 {
 		problems = append(problems, "files is empty")
 	}
+	// upgrade removes a recorded file the new bundle does not ship, so a
+	// path that leaves the deployment directory would remove a file outside
+	// it.
+	for _, path := range slices.Sorted(maps.Keys(s.Files)) {
+		if !filepath.IsLocal(filepath.FromSlash(path)) {
+			problems = append(problems, fmt.Sprintf("files names %q, which is not a path inside the deployment directory", path))
+		}
+	}
 	if len(problems) > 0 {
 		return errors.New(strings.Join(problems, "; "))
 	}

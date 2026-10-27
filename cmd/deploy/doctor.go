@@ -94,12 +94,15 @@ func bundleChecks(h *host, b Bundle, dir string, st deployState) []check {
 // syscall they do not know, and on an older host that refusal would
 // otherwise first show up as an executor that will not start.
 func seccompCheck(ctx context.Context, h *host, dir string, st deployState) check {
+	return seccompProbe(ctx, h, st.imageRef(), filepath.Join(dir, filepath.FromSlash(seccompFile)))
+}
+
+// seccompProbe starts image under the seccomp profile at the path profile.
+func seccompProbe(ctx context.Context, h *host, image, profile string) check {
 	const name = "Seccomp profile"
-	image := st.imageRef()
 	if _, _, err := h.docker(ctx, "", "image", "inspect", "--format", "{{.Id}}", image); err != nil {
 		return check{skip, name, fmt.Sprintf("%s is not on this host yet; this runs once it is pulled or built", image)}
 	}
-	profile := filepath.Join(dir, filepath.FromSlash(seccompFile))
 	if _, err := os.Stat(profile); err != nil {
 		return check{fail, name, fmt.Sprintf("%s is missing, and the executor will not start without it", seccompFile)}
 	}
@@ -131,11 +134,11 @@ type container struct {
 // stackChecks checks a running stack: its containers, the control service's
 // health endpoint, GoTrue's signing keys, and the public URL from the host.
 func stackChecks(ctx context.Context, h *host, dir string, st deployState) []check {
-	c, up := containerCheck(ctx, h, st.Project)
+	cs, up := healthChecks(ctx, h, st)
 	if !up {
-		return []check{c}
+		return cs
 	}
-	return []check{c, controlHealthCheck(ctx, h), jwksCheck(ctx, h), publicURLCheck(ctx, h, dir)}
+	return append(cs, publicURLCheck(ctx, h, dir))
 }
 
 // containerCheck reads the project's containers and folds them into one
@@ -239,11 +242,10 @@ func jwksCheck(ctx context.Context, h *host) check {
 // not, or this host may simply not be able to see its own public name.
 func publicURLCheck(ctx context.Context, h *host, dir string) check {
 	const name = "Public URL"
-	env, err := os.ReadFile(filepath.Join(dir, envFile))
+	publicURL, err := publicURLOf(dir)
 	if err != nil {
-		return check{warn, name, fmt.Sprintf("read %s: %v", envFile, err)}
+		return check{warn, name, err.Error()}
 	}
-	publicURL := envValues(env).get("TF_PUBLIC_URL")
 	if publicURL == "" {
 		return check{warn, name, "TF_PUBLIC_URL is not set in " + envFile}
 	}

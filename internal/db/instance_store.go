@@ -56,7 +56,9 @@ type InstanceStore interface {
 	// write the heartbeat deliberately never performs (see
 	// domain.InstanceHeartbeat). This drain survives restarts. Undraining
 	// also ends a drain SetDrainUntilRestart set, so it ends either kind.
-	// matched is false when id is unknown.
+	// matched is false when id is unknown. It returns matched rather than
+	// the row: no caller reads the row back, and the drain in effect is
+	// List's and Get's to report.
 	SetDraining(ctx context.Context, id string, draining bool) (matched bool, err error)
 
 	// SetDrainUntilRestart drains the instance until it next registers: it
@@ -67,7 +69,7 @@ type InstanceStore interface {
 	// increase. `deploy upgrade` drains executors this way before it
 	// recreates them, so an upgrade interrupted at any point leaves no
 	// executor drained past its next start. matched is false when id is
-	// unknown.
+	// unknown. It returns matched rather than the row, as SetDraining does.
 	SetDrainUntilRestart(ctx context.Context, id string) (matched bool, err error)
 
 	// DeleteStaleSystem deletes every instance row whose last heartbeat is
