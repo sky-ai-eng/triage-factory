@@ -20,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
@@ -603,7 +604,8 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	// Jira write-actor resolver: ForSystem (org/bot cred) + ForUser (acting
 	// user's cred, incl. the Cloud OAuth mint path). Constructed here like
 	// ghResolver so a Server is always usable without external wiring.
-	s.jiraResolver = jira.NewResolverWithOAuth(stores.Secrets, stores.Orgs, s.jiraTokenCache)
+	s.jiraResolver = jira.NewResolverWithOAuth(stores.Secrets, stores.Orgs,
+		eventsource.ResolverGate(stores.OrgEventSources, eventsource.KindJira), s.jiraTokenCache)
 	// Linear credential resolver. The picker and the team-rules write gate
 	// read the org's catalog through ForSystem, whichever shape the org's
 	// service credential takes; an installed org's access token comes from the
@@ -616,6 +618,7 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	s.linearCredentialLock = linearoauth.NewCredentialLock(database)
 	s.linearUserCredentialLock = linearoauth.NewUserCredentialLock(database)
 	s.linearResolver = linear.NewResolverWithOAuth(stores.Secrets, stores.Orgs,
+		eventsource.ResolverGate(stores.OrgEventSources, eventsource.KindLinear),
 		linearoauth.NewTokenCache(s.linearOAuthMinter, s.linearOAuthApps, stores.Secrets, stores.LinearInstalls, s.linearCredentialLock),
 		linearoauth.NewUserTokenCache(s.linearOAuthMinter, s.linearOAuthApps, stores.Secrets, stores.Tx, s.linearUserCredentialLock))
 	s.validateLinear = auth.ValidateLinear

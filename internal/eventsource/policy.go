@@ -49,6 +49,32 @@ func Disabled(ctx context.Context, store db.OrgEventSourceStore, orgID, kind str
 	return slices.Contains(kinds, kind), nil
 }
 
+// ResolverGate is the off switch as a Jira or Linear credential resolver checks
+// it before every resolution (jira.SourceGate, linear.SourceGate). It answers
+// nil while kind is on for the org, an error wrapping ErrDisabled once an org
+// admin turns it off, and the policy read's own error when the policy cannot
+// be read. The resolver refuses on either error, for the reason every gate on
+// the switch does: reading an unanswerable policy as permission would reopen
+// the source exactly while the database is unhealthy.
+//
+// It reads per call, with no cache, so a source turned off is refused on the
+// next resolution and one turned back on resolves again with no rebind.
+func ResolverGate(store db.OrgEventSourceStore, kind string) func(ctx context.Context, orgID string) error {
+	if store == nil {
+		panic("eventsource.ResolverGate: store must not be nil")
+	}
+	return func(ctx context.Context, orgID string) error {
+		off, err := Disabled(ctx, store, orgID, kind)
+		if err != nil {
+			return err
+		}
+		if off {
+			return fmt.Errorf("%s for org %s: %w", Label(kind), orgID, ErrDisabled)
+		}
+		return nil
+	}
+}
+
 // Label renders a kind the way a person writes it. Core's own are spelled the
 // way their products spell them; a registered source gets its kind
 // capitalized, which is right for the single-word kinds a source registry

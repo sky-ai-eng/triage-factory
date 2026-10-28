@@ -35,6 +35,13 @@ const (
 	ReasonNotConfigured   = "NOT_CONFIGURED" // a required integration isn't set up
 	ReasonVersionConflict = "VERSION_CONFLICT"
 
+	// The request needs an event source an org admin has turned off. Its own
+	// code rather than NOT_CONFIGURED because the fix differs: the source's
+	// credential is still bound, so connecting one again changes nothing, and
+	// what the client tells the reader is to ask an org admin to turn the
+	// source back on.
+	ReasonSourceDisabled = "SOURCE_DISABLED"
+
 	// The invite the caller holds was addressed to a different email than the
 	// one they are signed in as. Its own code because the client's response is
 	// not "try again" but "sign in as someone else" — the address itself is in

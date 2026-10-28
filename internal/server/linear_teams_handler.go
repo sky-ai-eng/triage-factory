@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -271,11 +272,16 @@ func linearPathID(w http.ResponseWriter, r *http.Request, name, thing string) (s
 }
 
 // linearSystemClient resolves the org's Linear service credential into a
-// client. No credential is a 409 NOT_CONFIGURED carrying notConfigured; a
-// failed read is a 500, never "not connected", so a store outage cannot send
-// an admin off to rebind a credential that is fine.
+// client. No credential is a 409 NOT_CONFIGURED carrying notConfigured, and
+// Linear turned off by an org admin a 409 SOURCE_DISABLED, which no Linear
+// call is made past; a failed read is a 500, never "not connected", so a store
+// outage cannot send an admin off to rebind a credential that is fine.
 func (s *Server) linearSystemClient(w http.ResponseWriter, r *http.Request, orgID, op, notConfigured string) (*linear.Client, bool) {
 	client, err := s.linearResolver.ForSystem(r.Context(), orgID)
+	if errors.Is(err, eventsource.ErrDisabled) {
+		writeSourceDisabled(w, eventsource.KindLinear)
+		return nil, false
+	}
 	if errors.Is(err, linear.ErrNoLinearSystemCredential) {
 		writeNotConfigured(w, notConfigured)
 		return nil, false

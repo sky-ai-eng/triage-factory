@@ -131,17 +131,6 @@ func DeploymentForMarker(method AuthMethod, host string) Deployment {
 	}
 }
 
-// SystemAuthMethod is the AuthMethod of an org's service credential on d: an
-// org connects Jira Cloud with an API token and Data Center with a personal
-// access token. It names the credential a client built from the org's
-// service credential is metered against (Client.WithCredential).
-func SystemAuthMethod(d Deployment) AuthMethod {
-	if d == DeploymentCloud {
-		return AuthMethodCloudAPIToken
-	}
-	return AuthMethodDCPAT
-}
-
 // authScheme renders the Authorization header onto a request. It is
 // unexported by design: callers pick a named constructor (DataCenterPAT,
 // CloudAPIToken) instead of assembling a scheme themselves.

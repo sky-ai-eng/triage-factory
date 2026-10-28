@@ -14,6 +14,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 )
 
+// openGate is the SourceGate of an org whose Linear is on.
+func openGate(context.Context, string) error { return nil }
+
 // keyedSecrets answers GetSystem from a map keyed by the integrations names.
 type keyedSecrets struct {
 	db.SecretStore
@@ -37,7 +40,7 @@ func TestResolver_KeysMatchIntegrations(t *testing.T) {
 		integrations.KeyLinearAuthMethod: string(linear.AuthMethodAPIKey),
 		integrations.KeyLinearAPIKey:     "lin_api_org",
 	}}
-	cred, err := linear.NewResolver(secrets, stubOrgs{}).ResolveSystemCredential(context.Background(), "org-1")
+	cred, err := linear.NewResolver(secrets, stubOrgs{}, openGate).ResolveSystemCredential(context.Background(), "org-1")
 	if err != nil {
 		t.Fatalf("ResolveSystemCredential with integrations-keyed secrets: %v\n"+
 			"linear.keyLinear{APIKey,AuthMethod} have drifted from integrations.KeyLinear*", err)

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -13,7 +14,8 @@ import (
 // writeJiraUserClientError answers a request whose acting user's Jira client
 // could not be resolved, by who can fix what stopped it.
 //
-// Only the user connecting again fixes a missing or refused credential, or one
+// Jira turned off by an org admin is 409 SOURCE_DISABLED: only an org admin
+// turning it back on fixes it. Only the user connecting again fixes a missing or refused credential, or one
 // whose issuing OAuth app was removed, so all three are 409 NOT_CONFIGURED,
 // the refusal and the removal saying why. A Cloud OAuth mint the token
 // endpoint did not answer, or rate limited, clears on a retry; a rate limit is
@@ -26,6 +28,9 @@ import (
 // is not Jira's.
 func writeJiraUserClientError(w http.ResponseWriter, scope string, err error) {
 	switch {
+	case errors.Is(err, eventsource.ErrDisabled):
+		writeSourceDisabled(w, eventsource.KindJira)
+		return
 	case errors.Is(err, jira.ErrJiraUserCredentialAppRemoved):
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason:  httpx.ReasonNotConfigured,

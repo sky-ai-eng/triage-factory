@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -59,6 +60,9 @@ const (
 	testUserID = "user-1"
 )
 
+// openGate is the SourceGate of an org whose Jira is on.
+func openGate(context.Context, string) error { return nil }
+
 // TestForSystem_BuildsOrgClient pins the system path: the org's Jira site
 // (org_settings.jira_base_url) and jira_pat secret become a Bearer client that
 // talks to that site.
@@ -67,7 +71,7 @@ func TestForSystem_BuildsOrgClient(t *testing.T) {
 	secrets := &fakeSecrets{sys: map[string]string{
 		keyJiraPAT: "org-pat",
 	}}
-	r := NewResolver(secrets, &fakeOrgs{jiraBase: srv.URL})
+	r := NewResolver(secrets, &fakeOrgs{jiraBase: srv.URL}, openGate)
 
 	c, err := r.ForSystem(context.Background(), testOrgID)
 	if err != nil {
@@ -98,7 +102,7 @@ func TestForSystem_MissingCredential(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			r := NewResolver(&fakeSecrets{sys: tc.sys}, &fakeOrgs{jiraBase: tc.site})
+			r := NewResolver(&fakeSecrets{sys: tc.sys}, &fakeOrgs{jiraBase: tc.site}, openGate)
 			_, err := r.ForSystem(context.Background(), testOrgID)
 			if !errors.Is(err, ErrNoJiraSystemCredential) {
 				t.Errorf("ForSystem err = %v, want ErrNoJiraSystemCredential", err)
@@ -112,8 +116,8 @@ func TestForSystem_MissingCredential(t *testing.T) {
 func TestForSystem_BackendError(t *testing.T) {
 	sentinel := errors.New("vault down")
 	for name, r := range map[string]Resolver{
-		"secrets":  NewResolver(&fakeSecrets{sysErr: sentinel}, &fakeOrgs{jiraBase: "https://jira.example.com"}),
-		"settings": NewResolver(&fakeSecrets{sys: map[string]string{keyJiraPAT: "org-pat"}}, &fakeOrgs{err: sentinel}),
+		"secrets":  NewResolver(&fakeSecrets{sysErr: sentinel}, &fakeOrgs{jiraBase: "https://jira.example.com"}, openGate),
+		"settings": NewResolver(&fakeSecrets{sys: map[string]string{keyJiraPAT: "org-pat"}}, &fakeOrgs{err: sentinel}, openGate),
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := r.ForSystem(context.Background(), testOrgID)
@@ -137,7 +141,7 @@ func TestForSystem_CanonicalizesBaseURL(t *testing.T) {
 	secrets := &fakeSecrets{sys: map[string]string{
 		keyJiraPAT: "org-pat",
 	}}
-	c, err := NewResolver(secrets, &fakeOrgs{jiraBase: "  " + srv.URL + "/  "}).ForSystem(context.Background(), testOrgID)
+	c, err := NewResolver(secrets, &fakeOrgs{jiraBase: "  " + srv.URL + "/  "}, openGate).ForSystem(context.Background(), testOrgID)
 	if err != nil {
 		t.Fatalf("ForSystem: %v", err)
 	}
@@ -159,7 +163,7 @@ func TestForSystem_BuildsCloudClient(t *testing.T) {
 		keyJiraEmail:      "bot@acme.com",
 		keyJiraAPIToken:   "cloud-token",
 	}}
-	r := NewResolver(secrets, &fakeOrgs{jiraBase: srv.URL})
+	r := NewResolver(secrets, &fakeOrgs{jiraBase: srv.URL}, openGate)
 
 	c, err := r.ForSystem(context.Background(), testOrgID)
 	if err != nil {
@@ -192,7 +196,7 @@ func TestForSystem_CloudMissingCredential(t *testing.T) {
 	}
 	for name, sys := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := NewResolver(&fakeSecrets{sys: sys}, &fakeOrgs{jiraBase: "https://acme.atlassian.net"}).ForSystem(context.Background(), testOrgID)
+			_, err := NewResolver(&fakeSecrets{sys: sys}, &fakeOrgs{jiraBase: "https://acme.atlassian.net"}, openGate).ForSystem(context.Background(), testOrgID)
 			if !errors.Is(err, ErrNoJiraSystemCredential) {
 				t.Errorf("ForSystem err = %v, want ErrNoJiraSystemCredential", err)
 			}
@@ -233,7 +237,7 @@ func TestForUser_UsesUserToken(t *testing.T) {
 		sys:  map[string]string{keyJiraPAT: "org-pat"},
 		user: map[string]string{UserTokenKey(srv.URL): "user-pat"},
 	}
-	r := NewResolver(secrets, &fakeOrgs{jiraBase: srv.URL})
+	r := NewResolver(secrets, &fakeOrgs{jiraBase: srv.URL}, openGate)
 
 	c, err := r.ForUser(context.Background(), testOrgID, testUserID)
 	if err != nil {
@@ -281,7 +285,7 @@ func TestForUser_CloudEnvelope(t *testing.T) {
 		},
 		user: map[string]string{UserTokenKey(srv.URL): env},
 	}
-	r := NewResolver(secrets, &fakeOrgs{jiraBase: srv.URL})
+	r := NewResolver(secrets, &fakeOrgs{jiraBase: srv.URL}, openGate)
 
 	c, err := r.ForUser(context.Background(), testOrgID, testUserID)
 	if err != nil {
@@ -313,7 +317,7 @@ func TestForUser_DCEnvelope(t *testing.T) {
 		t.Fatalf("MarshalUserCredential: %v", err)
 	}
 	secrets := &fakeSecrets{user: map[string]string{UserTokenKey(srv.URL): env}}
-	r := NewResolver(secrets, &fakeOrgs{jiraBase: srv.URL})
+	r := NewResolver(secrets, &fakeOrgs{jiraBase: srv.URL}, openGate)
 
 	c, err := r.ForUser(context.Background(), testOrgID, testUserID)
 	if err != nil {
@@ -339,7 +343,7 @@ func TestForUser_CloudEnvelopeIncomplete(t *testing.T) {
 		sys:  map[string]string{keyJiraPAT: "org-pat"},
 		user: map[string]string{UserTokenKey(base): env},
 	}
-	r := NewResolver(secrets, &fakeOrgs{jiraBase: base})
+	r := NewResolver(secrets, &fakeOrgs{jiraBase: base}, openGate)
 	if _, err := r.ForUser(context.Background(), testOrgID, testUserID); !errors.Is(err, ErrNoJiraUserCredential) {
 		t.Fatalf("ForUser err = %v, want ErrNoJiraUserCredential", err)
 	}
@@ -378,7 +382,7 @@ func TestForUser_StaleCrossScheme_NoClient(t *testing.T) {
 				sys:  map[string]string{keyJiraAuthMethod: string(tc.marker)},
 				user: map[string]string{UserTokenKey(tc.host): env},
 			}
-			r := NewResolver(secrets, &fakeOrgs{jiraBase: tc.host})
+			r := NewResolver(secrets, &fakeOrgs{jiraBase: tc.host}, openGate)
 			if _, err := r.ForUser(context.Background(), testOrgID, testUserID); !errors.Is(err, ErrNoJiraUserCredential) {
 				t.Fatalf("ForUser err = %v, want ErrNoJiraUserCredential (stale cross-scheme cred)", err)
 			}
@@ -403,7 +407,7 @@ func TestForUser_UnknownMethod_Errors(t *testing.T) {
 		sys:  map[string]string{keyJiraPAT: "org-pat"},
 		user: map[string]string{UserTokenKey(base): env},
 	}
-	r := NewResolver(secrets, &fakeOrgs{jiraBase: base})
+	r := NewResolver(secrets, &fakeOrgs{jiraBase: base}, openGate)
 	_, err = r.ForUser(context.Background(), testOrgID, testUserID)
 	if err == nil {
 		t.Fatal("ForUser err = nil, want an unknown-method error")
@@ -476,7 +480,7 @@ func TestForUser_AbsentCredential_NoOrgFallback(t *testing.T) {
 		sys:  map[string]string{keyJiraPAT: "org-pat"},
 		user: map[string]string{}, // no user token stored
 	}
-	r := NewResolver(secrets, &fakeOrgs{jiraBase: "https://jira.example.com"})
+	r := NewResolver(secrets, &fakeOrgs{jiraBase: "https://jira.example.com"}, openGate)
 
 	_, err := r.ForUser(context.Background(), testOrgID, testUserID)
 	if !errors.Is(err, ErrNoJiraUserCredential) {
@@ -488,7 +492,7 @@ func TestForUser_AbsentCredential_NoOrgFallback(t *testing.T) {
 // absent-credential boundary — there's no host to key a user credential under.
 func TestForUser_NoOrgHost(t *testing.T) {
 	for _, base := range []string{"", "   ", "not-a-url"} {
-		r := NewResolver(&fakeSecrets{}, &fakeOrgs{jiraBase: base})
+		r := NewResolver(&fakeSecrets{}, &fakeOrgs{jiraBase: base}, openGate)
 		_, err := r.ForUser(context.Background(), testOrgID, testUserID)
 		if !errors.Is(err, ErrNoJiraUserCredential) {
 			t.Errorf("ForUser(base=%q) err = %v, want ErrNoJiraUserCredential", base, err)
@@ -501,7 +505,7 @@ func TestForUser_NoOrgHost(t *testing.T) {
 func TestForUser_BackendError(t *testing.T) {
 	sentinel := errors.New("vault down")
 	secrets := &fakeSecrets{userErr: sentinel}
-	r := NewResolver(secrets, &fakeOrgs{jiraBase: "https://jira.example.com"})
+	r := NewResolver(secrets, &fakeOrgs{jiraBase: "https://jira.example.com"}, openGate)
 	_, err := r.ForUser(context.Background(), testOrgID, testUserID)
 	if !errors.Is(err, sentinel) {
 		t.Errorf("ForUser err = %v, want the backend error", err)
@@ -515,7 +519,7 @@ func TestForUser_BackendError(t *testing.T) {
 // know the host, so we can't claim "no credential").
 func TestForUser_OrgSettingsError(t *testing.T) {
 	sentinel := errors.New("db down")
-	r := NewResolver(&fakeSecrets{}, &fakeOrgs{err: sentinel})
+	r := NewResolver(&fakeSecrets{}, &fakeOrgs{err: sentinel}, openGate)
 	_, err := r.ForUser(context.Background(), testOrgID, testUserID)
 	if !errors.Is(err, sentinel) {
 		t.Errorf("ForUser err = %v, want the org-settings read error", err)
@@ -591,7 +595,7 @@ func TestForUser_CloudOAuthEnvelope(t *testing.T) {
 		user: map[string]string{UserTokenKey(base): env},
 	}
 	src := &fakeOAuthSource{tok: UserAccessToken{CloudID: "cloud-9", AccessToken: "acc-tok", App: SourceDeployment}}
-	r := NewResolverWithOAuth(secrets, &fakeOrgs{jiraBase: base}, src)
+	r := NewResolverWithOAuth(secrets, &fakeOrgs{jiraBase: base}, openGate, src)
 
 	c, err := r.ForUser(context.Background(), testOrgID, testUserID)
 	if err != nil {
@@ -637,7 +641,7 @@ func TestForUser_CloudOAuth_NoSource(t *testing.T) {
 		sys:  map[string]string{keyJiraAuthMethod: string(AuthMethodCloudOAuth)},
 		user: map[string]string{UserTokenKey(base): env},
 	}
-	r := NewResolver(secrets, &fakeOrgs{jiraBase: base}) // no OAuth source
+	r := NewResolver(secrets, &fakeOrgs{jiraBase: base}, openGate) // no OAuth source
 	_, err := r.ForUser(context.Background(), testOrgID, testUserID)
 	if err == nil {
 		t.Fatal("ForUser err = nil, want a config error")
@@ -658,7 +662,7 @@ func TestForUser_CloudOAuthIncomplete(t *testing.T) {
 		user: map[string]string{UserTokenKey(base): env},
 	}
 	src := &fakeOAuthSource{tok: UserAccessToken{CloudID: "cloud-9", AccessToken: "acc-tok", App: SourceDeployment}}
-	r := NewResolverWithOAuth(secrets, &fakeOrgs{jiraBase: base}, src)
+	r := NewResolverWithOAuth(secrets, &fakeOrgs{jiraBase: base}, openGate, src)
 	if _, err := r.ForUser(context.Background(), testOrgID, testUserID); !errors.Is(err, ErrNoJiraUserCredential) {
 		t.Fatalf("ForUser err = %v, want ErrNoJiraUserCredential", err)
 	}
@@ -682,7 +686,7 @@ func TestForUser_CloudOAuthRefusedMarker(t *testing.T) {
 		user: map[string]string{UserTokenKey(base): env},
 	}
 	src := &fakeOAuthSource{tok: UserAccessToken{CloudID: "cloud-9", AccessToken: "acc-tok", App: SourceDeployment}}
-	r := NewResolverWithOAuth(secrets, &fakeOrgs{jiraBase: base}, src)
+	r := NewResolverWithOAuth(secrets, &fakeOrgs{jiraBase: base}, openGate, src)
 
 	_, err = r.ForUser(context.Background(), testOrgID, testUserID)
 	if !errors.Is(err, ErrJiraUserCredentialRefused) || !errors.Is(err, ErrNoJiraUserCredential) {
@@ -690,5 +694,54 @@ func TestForUser_CloudOAuthRefusedMarker(t *testing.T) {
 	}
 	if src.calls != 0 {
 		t.Errorf("OAuth source called %d times for a refused marker, want 0", src.calls)
+	}
+}
+
+// TestResolver_GateRefusesEveryResolutionFirst: a gate that refuses ends every
+// resolution, ForSystem, ForUser and ResolveSystemCredential alike, before the
+// resolver reads a secret or the org's settings (both stores are nil here, so
+// a read would panic), and returns the gate's own error, so a caller can tell
+// a turned-off Jira from a missing credential.
+func TestResolver_GateRefusesEveryResolutionFirst(t *testing.T) {
+	ctx := context.Background()
+	off := errors.New("jira is turned off")
+	var asked []string
+	gate := func(_ context.Context, orgID string) error {
+		asked = append(asked, orgID)
+		return off
+	}
+	r := NewResolverWithOAuth(nil, nil, gate, nil).(*resolver)
+
+	_, sysErr := r.ForSystem(ctx, testOrgID)
+	_, userErr := r.ForUser(ctx, testOrgID, testUserID)
+	_, credErr := r.ResolveSystemCredential(ctx, testOrgID)
+	for name, err := range map[string]error{"ForSystem": sysErr, "ForUser": userErr, "ResolveSystemCredential": credErr} {
+		if !errors.Is(err, off) {
+			t.Errorf("%s = %v, want the gate's refusal", name, err)
+		}
+		if errors.Is(err, ErrNoJiraSystemCredential) || errors.Is(err, ErrNoJiraUserCredential) {
+			t.Errorf("%s = %v, reads as a missing credential", name, err)
+		}
+	}
+	if want := []string{testOrgID, testOrgID, testOrgID}; !slices.Equal(asked, want) {
+		t.Errorf("gate asked about %v, want %v", asked, want)
+	}
+}
+
+// TestNewResolver_RequiresAGate: no constructor builds a resolver that skips
+// the off switch.
+func TestNewResolver_RequiresAGate(t *testing.T) {
+	for name, build := range map[string]func(){
+		"NewResolver":          func() { NewResolver(&fakeSecrets{}, &fakeOrgs{}, nil) },
+		"NewResolverWithOAuth": func() { NewResolverWithOAuth(&fakeSecrets{}, &fakeOrgs{}, nil, nil) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Error("built a resolver with no gate")
+				}
+			}()
+			build()
+		})
 	}
 }

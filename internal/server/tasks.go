@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
@@ -1617,12 +1618,16 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 	// The reversal undoes the user's own claim, so it acts as that user, not
 	// the org service account. Best-effort: the task is already requeued, so
 	// a missing or unresolvable credential is logged and skipped rather than
-	// failing the response or acting as the bot.
+	// failing the response or acting as the bot, and so is Jira turned off by
+	// an org admin, where leaving the ticket alone is the switch working.
 	jiraUserClient, jerr := s.jiraResolver.ForUser(ctx, orgID, userID)
 	if jerr != nil {
-		if errors.Is(jerr, jira.ErrNoJiraUserCredential) {
+		switch {
+		case errors.Is(jerr, eventsource.ErrDisabled):
+			jiraLog.Info("requeue revert: jira is turned off for the org, leaving the ticket", "ticket", task.EntitySourceID)
+		case errors.Is(jerr, jira.ErrNoJiraUserCredential):
 			jiraLog.Warn("requeue revert: no jira credential for user, skipping ticket", "user", userID, "ticket", task.EntitySourceID)
-		} else {
+		default:
 			jiraLog.Warn("requeue revert: resolve user client failed, skipping", "ticket", task.EntitySourceID, "error", jerr)
 		}
 		return
@@ -1707,8 +1712,9 @@ func applyJiraUnclaim(ctx context.Context, c *jira.Client, issue, issueKey strin
 // applyLinearUnclaim decides what to write.
 //
 // Best-effort, like the Jira reversal: the task is already queued, so a
-// missing credential, rule or identity is logged and skipped rather than
-// failing the response or acting as the org's identity instead.
+// missing credential, rule or identity, or Linear turned off by an org admin,
+// is logged and skipped rather than failing the response or acting as the
+// org's identity instead.
 func (s *Server) revertLinearStateIfApplicable(ctx context.Context, orgID, userID string, task *domain.Task) {
 	if task == nil || task.EntitySource != "linear" {
 		return
@@ -1748,9 +1754,12 @@ func (s *Server) revertLinearStateIfApplicable(ctx context.Context, orgID, userI
 	}
 	linearUserClient, err := s.linearResolver.ForUser(ctx, orgID, userID)
 	if err != nil {
-		if errors.Is(err, linear.ErrNoLinearUserCredential) {
+		switch {
+		case errors.Is(err, eventsource.ErrDisabled):
+			linearLog.Info("requeue revert: linear is turned off for the org, leaving the issue", "issue", target.identifier)
+		case errors.Is(err, linear.ErrNoLinearUserCredential):
 			linearLog.Warn("requeue revert: no linear credential for user, skipping", "user", userID, "issue", target.identifier)
-		} else {
+		default:
 			linearLog.Warn("requeue revert: resolve user client failed, skipping", "issue", target.identifier, "error", err)
 		}
 		return

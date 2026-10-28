@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -105,7 +106,7 @@ func (s *Server) handleJiraProjectsList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	client, ok := s.jiraSystemClient(w, r, orgID, "jira/projects")
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/projects", "Jira is not connected for this workspace")
 	if !ok {
 		return
 	}
@@ -135,7 +136,7 @@ func (s *Server) handleJiraProjectGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	client, ok := s.jiraSystemClient(w, r, orgID, "jira/project")
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/project", "Jira is not connected for this workspace")
 	if !ok {
 		return
 	}
@@ -200,7 +201,7 @@ func (s *Server) handleJiraStatusesList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	client, ok := s.jiraSystemClient(w, r, orgID, "jira/statuses")
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/statuses", "Jira is not connected for this workspace")
 	if !ok {
 		return
 	}
@@ -252,7 +253,7 @@ func (s *Server) handleJiraStatusGet(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "jira workflow status")
 		return
 	}
-	client, ok := s.jiraSystemClient(w, r, orgID, "jira/status")
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/status", "Jira is not connected for this workspace")
 	if !ok {
 		return
 	}
@@ -319,13 +320,18 @@ func jiraPathProjectID(w http.ResponseWriter, r *http.Request) (string, bool) {
 }
 
 // jiraSystemClient resolves the org's Jira service credential into a client.
-// No credential is a 409 NOT_CONFIGURED; a failed read is a 500, never "not
-// connected", so a store outage cannot send an admin off to rebind a
-// credential that is fine.
-func (s *Server) jiraSystemClient(w http.ResponseWriter, r *http.Request, orgID, op string) (*jira.Client, bool) {
+// No credential is a 409 NOT_CONFIGURED, and Jira turned off by an org admin a
+// 409 SOURCE_DISABLED, which no Jira call is made past; a failed read is a
+// 500, never "not connected", so a store outage cannot send an admin off to
+// rebind a credential that is fine.
+func (s *Server) jiraSystemClient(w http.ResponseWriter, r *http.Request, orgID, op, notConfigured string) (*jira.Client, bool) {
 	client, err := s.jiraResolver.ForSystem(r.Context(), orgID)
+	if errors.Is(err, eventsource.ErrDisabled) {
+		writeSourceDisabled(w, eventsource.KindJira)
+		return nil, false
+	}
 	if errors.Is(err, jira.ErrNoJiraSystemCredential) {
-		writeNotConfigured(w, "Jira is not connected for this workspace")
+		writeNotConfigured(w, notConfigured)
 		return nil, false
 	}
 	if err != nil {

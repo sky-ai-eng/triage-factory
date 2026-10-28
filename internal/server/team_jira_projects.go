@@ -208,7 +208,7 @@ func (s *Server) handleTeamJiraProjectsPut(w http.ResponseWriter, r *http.Reques
 	// projects being added must exist, and status ids in a rule that changed
 	// must be in that project's workflow — the same fetch resolving each id to
 	// its display name.
-	next, ok := s.gateJiraProjects(w, r, orgID, userID, site, wishes)
+	next, ok := s.gateJiraProjects(w, r, orgID, site, wishes)
 	if !ok {
 		return
 	}

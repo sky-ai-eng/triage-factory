@@ -55,6 +55,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 )
@@ -343,15 +344,17 @@ func (s *Spawner) jiraBrowseURL(ctx context.Context, orgID, issueKey string) str
 // shouldLogForSystemErr reports whether a resolver.ForSystem error, from the
 // Jira or the Linear resolver, is worth logging. ErrNoJiraSystemCredential and
 // ErrNoLinearSystemCredential are expected, normal states (an org without that
-// tracker, or creds removed mid-flight), so the mirror no-ops silently rather
-// than logging on every mirrored board transition; any other error is a real
-// failure (e.g. a vault outage) and is logged. errors.Is unwraps, so the
-// wrapped sentinel ForSystem actually returns ("%w: org=...") is still treated
-// as silent.
+// tracker, or creds removed mid-flight), and so is eventsource.ErrDisabled (an
+// org admin turned the tracker off, so leaving its tickets alone is the
+// switch working), so the mirror no-ops silently rather than logging on every
+// mirrored board transition; any other error is a real failure (e.g. a vault
+// outage) and is logged. errors.Is unwraps, so the wrapped sentinel ForSystem
+// actually returns ("%w: org=...") is still treated as silent.
 func shouldLogForSystemErr(err error) bool {
 	return err != nil &&
 		!errors.Is(err, jira.ErrNoJiraSystemCredential) &&
-		!errors.Is(err, linear.ErrNoLinearSystemCredential)
+		!errors.Is(err, linear.ErrNoLinearSystemCredential) &&
+		!errors.Is(err, eventsource.ErrDisabled)
 }
 
 // keyedMutex hands out a mutex per string key, so callers can serialize work on

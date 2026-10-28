@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
@@ -211,6 +212,10 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 	var linearUserClient *linear.Client
 	if task.EntitySource == "linear" {
 		c, lerr := s.linearResolver.ForUser(r.Context(), orgID, userID)
+		if errors.Is(lerr, eventsource.ErrDisabled) {
+			writeSourceDisabled(w, eventsource.KindLinear)
+			return nil, nil, claimLandingIdempotent, false
+		}
 		if errors.Is(lerr, linear.ErrNoLinearUserCredential) {
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 				Reason:  httpx.ReasonNotConfigured,

@@ -8,6 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/credprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
@@ -106,7 +107,8 @@ func (a *App) buildRunCredentials() error {
 	linearApps := linear.NewOAuthAppResolver(a.stores.LinearApps, a.stores.Secrets, linear.DeploymentOAuthAppFromEnv())
 	linearTokens := linearoauth.NewTokenCache(linearoauth.NewMinter(), linearApps, a.stores.Secrets, a.stores.LinearInstalls,
 		linearoauth.NewCredentialLock(a.database), linearoauth.WithHeadroom(credprovision.LinearTokenHeadroom))
-	a.linearResolver = linear.NewResolverWithInstall(a.stores.Secrets, a.stores.Orgs, linearTokens)
+	a.linearResolver = linear.NewResolverWithInstall(a.stores.Secrets, a.stores.Orgs,
+		eventsource.ResolverGate(a.stores.OrgEventSources, eventsource.KindLinear), linearTokens)
 	return nil
 }
 

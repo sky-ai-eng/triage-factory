@@ -221,44 +221,65 @@ func (s SystemCredential) Config() Config {
 //
 // Every store read goes through the ...System doors: resolving a credential is
 // a system operation, and the ids it is handed are already authorized by the
-// request middleware or are a background job's own.
+// request middleware or are a background job's own. Every resolution first
+// passes the resolver's SourceGate, so no client is made for an org whose
+// admin turned Linear off.
 type Resolver interface {
 	ForSystem(ctx context.Context, orgID string) (*Client, error)
 	ForUser(ctx context.Context, orgID, userID string) (*Client, error)
 	ResolveSystemCredential(ctx context.Context, orgID string) (SystemCredential, error)
 }
 
-// TODO(TFAC-1222): no resolution checks whether an org admin turned Linear off,
-// so every caller outside the pollers, the agenthost funnels and credential
-// sealing (the event-handler catalog check, the pickers, the lifecycle
-// mirror, user claims) still gets a client and calls a turned-off Linear.
+// SourceGate is the check a Resolver runs before every resolution — ForSystem,
+// ForUser and ResolveSystemCredential alike — and before it reads any secret:
+// whether orgID may use Linear at all. nil lets the resolution proceed; any
+// error refuses it and is returned unchanged. The gate the product wires is
+// eventsource.ResolverGate, which refuses a source an org admin turned off
+// with an error wrapping eventsource.ErrDisabled (a sentinel this package
+// cannot name, since eventsource imports it), and refuses a policy it cannot
+// read with the read's own error.
+//
+// It is required, and it lives here rather than at the callers, because every
+// Linear client TF makes comes out of a Resolver: a caller that forgot the
+// check would be a hole in the off switch that nothing else closes.
+type SourceGate func(ctx context.Context, orgID string) error
+
 type resolver struct {
 	secrets db.SecretStore
 	orgs    db.OrgsStore
+	gate    SourceGate
 	install InstallTokenSource // nil when the app-install shape isn't wired
 	user    UserTokenSource    // nil when the connect_oauth shape isn't wired
 }
 
 // NewResolver builds a Resolver over the secret and org-settings stores. It
 // resolves the api_key shape only; an installed org is an error. Callers that
-// serve installed orgs use NewResolverWithInstall.
-func NewResolver(secrets db.SecretStore, orgs db.OrgsStore) Resolver {
-	return &resolver{secrets: secrets, orgs: orgs}
+// serve installed orgs use NewResolverWithInstall. gate is required
+// (SourceGate).
+func NewResolver(secrets db.SecretStore, orgs db.OrgsStore, gate SourceGate) Resolver {
+	return newResolver(secrets, orgs, gate, nil, nil)
 }
 
 // NewResolverWithInstall builds a Resolver that also resolves the app_install
 // shape, minting the app user's access token through install. ForUser answers
 // a user's Connect credential with an error; callers that serve per-user
 // writes use NewResolverWithOAuth.
-func NewResolverWithInstall(secrets db.SecretStore, orgs db.OrgsStore, install InstallTokenSource) Resolver {
-	return &resolver{secrets: secrets, orgs: orgs, install: install}
+func NewResolverWithInstall(secrets db.SecretStore, orgs db.OrgsStore, gate SourceGate, install InstallTokenSource) Resolver {
+	return newResolver(secrets, orgs, gate, install, nil)
 }
 
 // NewResolverWithOAuth builds a Resolver that resolves every shape: the
 // app_install org credential through install, and a user's Connect
 // credential through user.
-func NewResolverWithOAuth(secrets db.SecretStore, orgs db.OrgsStore, install InstallTokenSource, user UserTokenSource) Resolver {
-	return &resolver{secrets: secrets, orgs: orgs, install: install, user: user}
+func NewResolverWithOAuth(secrets db.SecretStore, orgs db.OrgsStore, gate SourceGate, install InstallTokenSource, user UserTokenSource) Resolver {
+	return newResolver(secrets, orgs, gate, install, user)
+}
+
+func newResolver(secrets db.SecretStore, orgs db.OrgsStore, gate SourceGate, install InstallTokenSource, user UserTokenSource) *resolver {
+	if gate == nil {
+		panic("linear: a Resolver requires a SourceGate")
+	}
+	return &resolver{secrets: secrets, orgs: orgs, gate: gate, install: install, user: user}
 }
 
 // ForSystem builds a client from the org's service credential, counted under
@@ -282,6 +303,9 @@ func (r *resolver) ForSystem(ctx context.Context, orgID string) (*Client, error)
 // marker this build does not know is an error of its own, because rebinding is
 // not what fixes it.
 func (r *resolver) ResolveSystemCredential(ctx context.Context, orgID string) (SystemCredential, error) {
+	if err := r.gate(ctx, orgID); err != nil {
+		return SystemCredential{}, err
+	}
 	method, err := r.secrets.GetSystem(ctx, orgID, keyLinearAuthMethod)
 	if err != nil {
 		return SystemCredential{}, fmt.Errorf("resolve linear auth method for org %s: %w", orgID, err)
@@ -320,6 +344,9 @@ func (r *resolver) ResolveSystemCredential(ctx context.Context, orgID string) (S
 // instead. A failed read, a corrupt envelope or a method this build does not
 // know is returned as an error of its own.
 func (r *resolver) ForUser(ctx context.Context, orgID, userID string) (*Client, error) {
+	if err := r.gate(ctx, orgID); err != nil {
+		return nil, err
+	}
 	orgSet, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve linear workspace for org %s: %w", orgID, err)
