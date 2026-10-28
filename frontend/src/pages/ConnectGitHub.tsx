@@ -16,7 +16,7 @@ import { safeReturnTo } from '../lib/returnTo'
  * joined after first-run, lands here. Satisfiable two ways, both ending in the
  * same state (a verified identity row, no token retained):
  *   - Connect — one consent click against the org's host (github.com OR GHES),
- *     through the workspace's own GitHub App or, in multi mode, the
+ *     through the org's own GitHub App or, in multi mode, the
  *     deployment's App.
  *   - PAT_2 paste — local mode only, where it is the fallback to Connect and
  *     the only path when no App exists. Multi mode links identity through
@@ -66,7 +66,7 @@ function errorBanner(
     case 'host_unreachable':
       return {
         tone: 'infra',
-        text: `We couldn't reach ${host || 'your GitHub host'}. This is a connectivity issue between Triage Factory and your GitHub server, not something you did — try again, or ask your workspace admin to check that the host is reachable.`,
+        text: `We couldn't reach ${host || 'your GitHub host'}. This is a connectivity issue between Triage Factory and your GitHub server, not something you did — try again, or ask your org admin to check that the host is reachable.`,
       }
     case 'denied':
       return {
@@ -76,19 +76,19 @@ function errorBanner(
     case 'bad_host':
       return {
         tone: 'retry',
-        text: "Your workspace's GitHub URL looks misconfigured. Ask your admin to fix it in Workspace Settings, then try again.",
+        text: "Your organization's GitHub URL looks misconfigured. Ask your admin to fix it in organization settings, then try again.",
       }
     case 'state':
       return { tone: 'retry', text: 'That connection attempt expired. Please try again.' }
     case 'sso_required':
       return {
         tone: 'retry',
-        text: 'This workspace requires signing in through its single sign-on. Sign in that way, then connect GitHub again.',
+        text: 'This organization requires signing in through its single sign-on. Sign in that way, then connect GitHub again.',
       }
     case 'no_app':
       return {
         tone: 'retry',
-        text: "This workspace doesn't have a GitHub App that can connect your account yet. Ask your admin to finish GitHub setup in Workspace Settings.",
+        text: "This organization doesn't have a GitHub App that can connect your account yet. Ask your admin to finish GitHub setup in organization settings.",
       }
     case 'deployment_app_unavailable':
       return {
@@ -228,8 +228,8 @@ export default function ConnectGitHub({ isLocal = false }: { isLocal?: boolean }
 
       {!isLocal && !connect_available && (
         <p className="text-body text-ink-3 leading-relaxed">
-          GitHub isn&apos;t connected for this workspace yet. Ask an admin to connect it in
-          Workspace Settings, then come back here.
+          GitHub isn&apos;t connected for this organization yet. Ask an admin to connect it in
+          organization settings, then come back here.
         </p>
       )}
 

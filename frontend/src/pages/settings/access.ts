@@ -11,7 +11,7 @@ export interface AccessInputs {
   /** The orgs the user belongs to (from /api/me). Drives orgs.length. */
   orgs: AuthOrg[]
   /** Session active org id (/api/me.active_org_id), used to pick which
-   *  org's role gates the Workspace tab. */
+   *  org's role gates the org tab. */
   activeOrgId: string | null
   /** Member counts from the scope GET responses (not /api/me). */
   orgMemberCount: number
@@ -24,7 +24,7 @@ export interface AccessInputs {
 export interface Access {
   /** Render the flat single-page layout instead of tabs. */
   isN1: boolean
-  /** Workspace (org-scope) write fields enabled. */
+  /** Org-scope write fields enabled. */
   isOrgAdmin: boolean
   /** Team-scope write fields enabled. Strict: mirrors the backend's
    *  tf.user_is_team_admin, which only accepts memberships.role='admin'.

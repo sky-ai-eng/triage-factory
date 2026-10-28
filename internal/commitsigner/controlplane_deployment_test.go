@@ -47,7 +47,7 @@ func (f *fixture) requestAs(t *testing.T, signer domain.CommitSigningMode, accou
 	return row
 }
 
-// A managed workspace with no signer of its own signs as the deployment signer,
+// A managed org with no signer of its own signs as the deployment signer,
 // with the key from the control pod's config: the secret store holds no key
 // for it, and the signature is the configured key's.
 func TestControlPlane_SignsAsTheDeploymentSigner(t *testing.T) {
@@ -104,12 +104,12 @@ func TestControlPlane_RefusesADeploymentSignerThatCannotSign(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			wantLine: "commit signing is off for the rest of this run: this workspace no longer signs as the deployment's signing account."},
+			wantLine: "commit signing is off for the rest of this run: this organization no longer signs as the deployment's signing account."},
 		{name: "no account read yet", status: domain.CommitSignerActive, want: RefusalSignerRemoved,
 			stage: func(_ *testing.T, _ *fixture, d *DeploymentSigner, health *memDeploymentSigners) {
 				health.set(domain.DeploymentCommitSigner{Host: d.Host, PublicKey: d.PublicKey, Login: d.Login, Status: domain.CommitSignerPending})
 			},
-			wantLine: "commit signing is off for the rest of this run: this workspace no longer signs as the deployment's signing account."},
+			wantLine: "commit signing is off for the rest of this run: this organization no longer signs as the deployment's signing account."},
 		{name: "the org's per-minute budget", status: domain.CommitSignerActive, budgets: Budgets{PerOrgMinute: 1, PerClaim: 10},
 			stage: func(t *testing.T, f *fixture, _ *DeploymentSigner, _ *memDeploymentSigners) {
 				f.signedAt(t, time.Now())

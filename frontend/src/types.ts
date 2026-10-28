@@ -890,7 +890,7 @@ export interface JiraIdentityStatus {
   deployment?: 'cloud' | 'data_center'
   /** Why a user who had a connection no longer has one, present only while
    *  `connected` is false: `refused` when Jira refused the stored grant
-   *  (revoked or expired), `app_removed` when no Atlassian app the workspace
+   *  (revoked or expired), `app_removed` when no Atlassian app the org
    *  has can refresh it. Absent for a user who never connected. */
   disconnected_reason?: 'app_removed' | 'refused'
 }
@@ -1308,7 +1308,7 @@ export type WSEvent =
   // without touching its status — a human resolving an artifact, the
   // reconciler retiring one because GitHub moved.
   | { type: 'conversations_updated'; data: Record<string, never> }
-  // The workspace's reachable-repo mirror was refreshed. Payload-free: the
+  // The org's reachable-repo mirror was refreshed. Payload-free: the
   // repository picker refetches through the REST read, which carries the
   // scoping — the cheap tier, and what turns a first-ever open's "discovering
   // repositories…" into a list without the client polling for it.

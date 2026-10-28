@@ -515,9 +515,9 @@ func TestLinearTeamsPut_FieldFaultSurvivesALaterUpstreamFailure(t *testing.T) {
 	assertOneFault(t, rec, http.StatusUnprocessableEntity, "INVALID_FIELD", "linear_teams[0].pickup.member_ids")
 }
 
-// TestLinearTeamsPut_UnconnectedWorkspace: with no Linear credential nothing
+// TestLinearTeamsPut_UnconnectedOrg: with no Linear credential nothing
 // can be added — a 409 naming why — but a removal still goes through.
-func TestLinearTeamsPut_UnconnectedWorkspace(t *testing.T) {
+func TestLinearTeamsPut_UnconnectedOrg(t *testing.T) {
 	s, _ := newServerWithLinearCatalog(t, linearFixtureEng)
 	mustPutLinearTeams(t, s, armedLinearTeam(linearTeamEng))
 	if _, err := s.secrets.Delete(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyLinearAPIKey); err != nil {
@@ -526,7 +526,7 @@ func TestLinearTeamsPut_UnconnectedWorkspace(t *testing.T) {
 	assertOneFault(t, putLinearTeams(t, s, armedLinearTeam(linearTeamEng), map[string]any{"id": linearTeamOps}),
 		http.StatusConflict, "NOT_CONFIGURED", "")
 	if got := mustPutLinearTeams(t, s); len(got) != 0 {
-		t.Errorf("removal on an unconnected workspace left %+v", got)
+		t.Errorf("removal on an unconnected org left %+v", got)
 	}
 }
 

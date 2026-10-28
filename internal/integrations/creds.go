@@ -471,14 +471,14 @@ func LinearSystemConfigured(c auth.Credentials) bool {
 //
 // Reading credential presence ahead of the class is the same inference the
 // class column exists to remove, one layer up: it answers "a credential exists"
-// when the question was "would this workspace's credential system use it".
+// when the question was "would this org's credential system use it".
 //
 // The managed arm asks the one question that has an answer here: has this
-// workspace bound the shared App to any account on its current GitHub host? The
+// org bound the shared App to any account on its current GitHub host? The
 // App itself is a deployment fact — configured in the operator's environment,
 // not in anything this function can read — so what makes it READY FOR THIS ORG
 // is the bind, which is also the only thing the org can do about it. Zero
-// installations on the host is a workspace that has connected nothing it can
+// installations on the host is an org that has connected nothing it can
 // use, which is exactly what the setup step exists to prompt; a binding left on
 // a host the org has moved off resolves nothing.
 //

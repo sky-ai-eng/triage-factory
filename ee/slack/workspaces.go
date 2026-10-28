@@ -321,7 +321,7 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 		return e
 	}); err != nil {
 		if errors.Is(err, errAppBoundToOtherOrg) {
-			// Deliberately generic: a workspace admin may learn "already
+			// Deliberately generic: the caller may learn "already
 			// connected", never which org holds it (the app-single-org
 			// invariant).
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this app is already connected"})

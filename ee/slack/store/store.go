@@ -102,7 +102,7 @@ type Workspace struct {
 
 // WorkspaceStore owns the org_slack_workspaces table. Postgres-only; the
 // SQLite impl is a stub returning db.ErrNotApplicableInLocal (SSO posture:
-// local mode is N=1, no multi-workspace concept). App pool for the
+// local mode is N=1, no multi-org concept). App pool for the
 // org-admin-gated CRUD (RLS gates SELECT on org membership, writes on
 // org-admin); admin pool for ListAllSystem/GetByWorkspaceAppSystem/
 // AppBoundToOtherOrgSystem, the org-wide system reads a claims-free caller

@@ -1,4 +1,4 @@
-// The client secret by mode. In multi every workspace's App must let members
+// The client secret by mode. In multi every org's App must let members
 // sign in with GitHub to link their accounts, so the form asks for it as a
 // plain field and won't submit without it; in local identity capture falls back
 // to a token, so it stays optional behind the recommended section.

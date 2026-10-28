@@ -260,7 +260,7 @@ function Band({
         ? `You will be sent to ${host} and back. Triage Factory reads your username and verified email; it keeps no token and gains no access to your repositories.`
         : 'The token is used once, to read which account it belongs to, and discarded. Any scope will do.'
       : hasConnect && !alt
-        ? `Triage Factory acts as you on ${host}, so the tickets it claims and updates are attributed to you. The credential is stored in the workspace’s secret store and never shared.`
+        ? `Triage Factory acts as you on ${host}, so the tickets it claims and updates are attributed to you. The credential is stored in the organization’s secret store and never shared.`
         : cloud
           ? 'Create a token at id.atlassian.com → Security → API tokens. It is stored so the factory can act as you.'
           : 'A personal access token from your Jira site. It is stored so the factory can act as you.'

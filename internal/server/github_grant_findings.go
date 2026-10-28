@@ -12,7 +12,7 @@ import (
 )
 
 // The two grant findings — what the reachable-repo mirror exists to make
-// computable, served to the Workspace Settings "GitHub access" panel:
+// computable, served to the organization settings "GitHub access" panel:
 //
 //   - REACH WITHOUT PURPOSE: the App can reach a repository no team tracks. TF
 //     holds write access to code nobody asked it to touch. The verb is on
@@ -28,7 +28,7 @@ import (
 // page load — opening the panel is a read, and the refresh POST beside the
 // status route is the deliberate gesture for a fresh answer. Both read only
 // App-class rows: a PAT's reach is a fact about a person's token, not a grant
-// TF holds, so a PAT workspace is refused rather than answered with an empty
+// TF holds, so a PAT org is refused rather than answered with an empty
 // finding that would read as an all-clear.
 //
 // Neither is derived from the viewer's own GitHub permissions. Two admins with
@@ -88,7 +88,7 @@ type scopeDriftItem struct {
 
 // grantFindingsClass is what both routes do before reading: authorize the
 // admin and resolve the class the findings are computed under. A PAT
-// workspace is a 404 — it holds no grant, so there is no finding resource to
+// org is a 404 — it holds no grant, so there is no finding resource to
 // list, and the answer is the same one the refresh route gives it. The class
 // read is System (claims-free), like every class read beside it: the admin
 // gate already authorized orgID.

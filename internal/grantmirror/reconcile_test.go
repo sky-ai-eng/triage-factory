@@ -27,7 +27,7 @@ type fakeApps struct {
 	backfillErr   error
 	backfillCalls int
 	// registrationReads counts reads of the org's own App registration — the row
-	// a managed workspace does not have and must not be asked for.
+	// a managed org does not have and must not be asked for.
 	registrationReads int
 	listErr           error
 	installs          []domain.OrgGitHubAppInstallation
@@ -208,7 +208,7 @@ func (f fakeClasses) For(context.Context, string) (domain.GitHubCredentialClass,
 	return f.class, f.err
 }
 
-// newReconciler builds the pass for a workspace that owns its App key, which is
+// newReconciler builds the pass for an org that owns its App key, which is
 // the shape every case below takes bar the managed ones. The staged and PAT
 // cases keep this class deliberately: the registration gate they pin runs before
 // the class selects anything, so the answer the live resolver would narrow to
@@ -526,7 +526,7 @@ func TestRunOrg_PATOrgReconcilesNothingAndFailsNothing(t *testing.T) {
 
 func TestRunOrg_BYOOrgKeysItsEntriesUnderItsOwnClass(t *testing.T) {
 	// The class is what every read filters on, so the right slugs under the wrong
-	// class are entries nothing serves. A workspace on its own App keys them
+	// class are entries nothing serves. An org on its own App keys them
 	// 'byo_app'.
 	apps := &fakeApps{app: activeApp(), installs: []domain.OrgGitHubAppInstallation{live("1", "acme")}}
 	mirror := newFakeMirror()
@@ -542,8 +542,8 @@ func TestRunOrg_BYOOrgKeysItsEntriesUnderItsOwnClass(t *testing.T) {
 	}
 }
 
-func TestRunOrg_ManagedWorkspaceRefreshesWhatItBoundAndDiscoversNothing(t *testing.T) {
-	// A workspace on the deployment's shared App holds no registration row and
+func TestRunOrg_ManagedOrgRefreshesWhatItBoundAndDiscoversNothing(t *testing.T) {
+	// An org on the deployment's shared App holds no registration row and
 	// can hold none, so the two reads the BYO preamble makes are not skipped for
 	// speed: the registration read has no row to find, and the existence
 	// reconcile asks a shared key a question that answers with every tenant's
@@ -559,10 +559,10 @@ func TestRunOrg_ManagedWorkspaceRefreshesWhatItBoundAndDiscoversNothing(t *testi
 		t.Fatalf("RunOrg: %v", err)
 	}
 	if apps.backfillCalls != 0 {
-		t.Errorf("the existence reconcile ran %d times for a managed workspace; want 0 — it discovers, and only the bind may", apps.backfillCalls)
+		t.Errorf("the existence reconcile ran %d times for a managed org; want 0 — it discovers, and only the bind may", apps.backfillCalls)
 	}
 	if apps.registrationReads != 0 {
-		t.Errorf("the org's own App registration was read %d times for a managed workspace; want 0 — there is no row", apps.registrationReads)
+		t.Errorf("the org's own App registration was read %d times for a managed org; want 0 — there is no row", apps.registrationReads)
 	}
 	if got := mirror.rows["7"]; len(got) != 1 || got[0] != "acme/api" {
 		t.Errorf("bound installation's mirror = %v; want [acme/api]", got)
@@ -575,8 +575,8 @@ func TestRunOrg_ManagedWorkspaceRefreshesWhatItBoundAndDiscoversNothing(t *testi
 	}
 }
 
-func TestRunOrg_ManagedWorkspaceWithNothingBoundWritesNothing(t *testing.T) {
-	// An installed-but-never-bound workspace is an ordinary state, not an
+func TestRunOrg_ManagedOrgWithNothingBoundWritesNothing(t *testing.T) {
+	// An installed-but-never-bound org is an ordinary state, not an
 	// anomaly. Its refresh has nothing to refresh, and inventing an installation
 	// for it is exactly the discovery the shared key cannot do safely.
 	apps := &fakeApps{}
@@ -589,7 +589,7 @@ func TestRunOrg_ManagedWorkspaceWithNothingBoundWritesNothing(t *testing.T) {
 		t.Fatalf("RunOrg: %v", err)
 	}
 	if mirror.replaces != 0 {
-		t.Error("mirror was touched for a managed workspace with no bound installation; want untouched")
+		t.Error("mirror was touched for a managed org with no bound installation; want untouched")
 	}
 }
 

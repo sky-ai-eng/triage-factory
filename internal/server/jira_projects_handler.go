@@ -106,13 +106,13 @@ func (s *Server) handleJiraProjectsList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	client, ok := s.jiraSystemClient(w, r, orgID, "jira/projects", "Jira is not connected for this workspace")
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/projects", "Jira is not connected for this organization")
 	if !ok {
 		return
 	}
 	upstream, err := client.ListProjects(r.Context(), q, startAt, page.Limit)
 	if err != nil {
-		writeJiraUpstream(w, orgID, "the workspace's Jira projects", err)
+		writeJiraUpstream(w, orgID, "the organization's Jira projects", err)
 		return
 	}
 	items := make([]jiraProjectJSON, 0, len(upstream.Projects))
@@ -136,7 +136,7 @@ func (s *Server) handleJiraProjectGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	client, ok := s.jiraSystemClient(w, r, orgID, "jira/project", "Jira is not connected for this workspace")
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/project", "Jira is not connected for this organization")
 	if !ok {
 		return
 	}
@@ -201,7 +201,7 @@ func (s *Server) handleJiraStatusesList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	client, ok := s.jiraSystemClient(w, r, orgID, "jira/statuses", "Jira is not connected for this workspace")
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/statuses", "Jira is not connected for this organization")
 	if !ok {
 		return
 	}
@@ -253,7 +253,7 @@ func (s *Server) handleJiraStatusGet(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "jira workflow status")
 		return
 	}
-	client, ok := s.jiraSystemClient(w, r, orgID, "jira/status", "Jira is not connected for this workspace")
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/status", "Jira is not connected for this organization")
 	if !ok {
 		return
 	}

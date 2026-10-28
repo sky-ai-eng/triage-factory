@@ -62,7 +62,7 @@ describe('ConnectGitHub — multi mode', () => {
     identity = { ...identity, connect_available: false }
     stubBackend()
     renderPage()
-    expect(await screen.findByText(/isn.t connected for this workspace yet/)).toBeInTheDocument()
+    expect(await screen.findByText(/isn.t connected for this organization yet/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Connect GitHub' })).not.toBeInTheDocument()
     expect(screen.queryByPlaceholderText('ghp_…')).not.toBeInTheDocument()
   })

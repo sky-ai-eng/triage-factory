@@ -15,15 +15,15 @@ import {
 } from './primitives'
 
 /**
- * GitHubAppPanel is the org/workspace-scope "GitHub access" block — the
- * App-registration alternative to a PAT. A registered App gives the workspace
+ * GitHubAppPanel is the org-scope "GitHub access" block — the
+ * App-registration alternative to a PAT. A registered App gives the org
  * a bot identity of its own, which outlives the person who set it up (a PAT
  * leaves with them), and moves per-team repository scoping into GitHub's
  * hands: a team's work runs on an installation token minted for that team's
  * repositories, and the token cannot reach past them — the limit is GitHub's,
  * not something TF enforces in code. It's self-contained (owns its
  * load/error/register state) so it drops identically into the Settings
- * workspace tab and the org-create configure step.
+ * org tab and the org-create configure step.
  *
  * Installation lives elsewhere now — the wizard's "Install the App" step and
  * Settings' "App installation" section own that affordance (one place per

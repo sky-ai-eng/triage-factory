@@ -43,8 +43,8 @@ export default function ModelAvailabilityPanel({ orgId }: { orgId: string | null
   if (rows.length === 0) {
     return (
       <p className="text-[13px] text-ink-3">
-        This workspace runs on the Claude credentials of the machine hosting it, so there is nothing
-        stored to test against. Connect a provider above to test models against your own
+        This organization runs on the Claude credentials of the machine hosting it, so there is
+        nothing stored to test against. Connect a provider above to test models against your own
         credentials.
       </p>
     )

@@ -79,7 +79,7 @@ type Manager struct {
 	ReconcileGrant func(ctx context.Context, orgID string) error
 
 	// RefreshManagedInstallations refreshes the installation set of every
-	// workspace on the deployment's shared GitHub App, from one listing. nil
+	// org on the deployment's shared GitHub App, from one listing. nil
 	// disables the pass (tests, and any embedder that hasn't wired it).
 	//
 	// It is a deployment singleton rather than a per-org call like
@@ -1187,7 +1187,7 @@ func (m *Manager) orgHasRegisteredApp(ctx context.Context, orgID string) bool {
 		// managed org outright when the shared App is unconfigured or fails its
 		// preflight. The cycle then reports degraded and polls nothing, which is
 		// the correct outcome and not one a false here could produce — false
-		// would poll as a PAT the workspace never chose.
+		// would poll as a PAT the org never chose.
 		return true
 	default:
 		githubLog.Warn("unknown github credential class; polling as PAT this cycle",

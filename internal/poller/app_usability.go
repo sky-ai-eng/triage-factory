@@ -9,7 +9,7 @@ import (
 
 // appRegistration reads the org's own App registration for the cycle's
 // before/after comparison: nil when the org has none (a PAT or managed
-// workspace) and when the read fails, which is logged — a missed comparison
+// org) and when the read fails, which is logged — a missed comparison
 // costs one transition log line, and the resolver reads the row itself before
 // it would mint from it.
 func (m *Manager) appRegistration(ctx context.Context, orgID string) *domain.OrgGitHubApp {
@@ -43,7 +43,7 @@ func logAppUsabilityChange(ctx context.Context, orgID string, before, after *dom
 	case after.UnusableReason == previous:
 	case after.Unusable():
 		// TODO(TFAC-878): this line and the Settings panel are the only notice
-		// an admin gets that the workspace's App was deleted on GitHub, or its
+		// an admin gets that the org's App was deleted on GitHub, or its
 		// key was, and the panel only tells whoever opens it. A durable
 		// notification for the org's admins would open here and close in the
 		// branch below.

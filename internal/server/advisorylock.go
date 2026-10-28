@@ -58,7 +58,7 @@ const (
 	// githubInstallationBindLockSalt namespaces the managed bind's
 	// installation-identity lock. It is a SECOND keyspace rather than a second
 	// key in the org one because the two answer different questions — "one
-	// credential transition per workspace at a time" and "one workspace may
+	// credential transition per org at a time" and "one org may
 	// claim this installation" — and because an org id and a host+installation
 	// string sharing a keyspace would be two unrelated domains colliding by
 	// accident.

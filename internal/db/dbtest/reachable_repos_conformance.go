@@ -821,7 +821,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 	})
 
 	t.Run("FindingsReadTheClassTheyAreAskedFor", func(t *testing.T) {
-		// A managed workspace's grant is keyed under its own class, and the
+		// A managed org's grant is keyed under its own class, and the
 		// findings are computed from whichever class the caller names — never
 		// from the other one, and never from the PAT class, which holds no
 		// grant to have findings about.
@@ -855,12 +855,12 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		if reach, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed); err != nil {
 			t.Fatalf("ListReachWithoutPurposeSystem(byo): %v", err)
 		} else if len(reach) != 0 {
-			t.Errorf("byo_app reach without purpose = %v for a managed workspace; want none", slugs(t, reach))
+			t.Errorf("byo_app reach without purpose = %v for a managed org; want none", slugs(t, reach))
 		}
 		if drift, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed); err != nil {
 			t.Fatalf("ListScopeDriftSystem(byo): %v", err)
 		} else if len(drift) != 0 {
-			t.Errorf("byo_app scope drift = %v for a managed workspace; want none", trackedSlugs(drift))
+			t.Errorf("byo_app scope drift = %v for a managed org; want none", trackedSlugs(drift))
 		}
 
 		// The PAT class is refused outright rather than answered with an empty
@@ -1362,8 +1362,8 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}
 	})
 
-	t.Run("ManagedWorkspaceRoundTrips", func(t *testing.T) {
-		// A workspace riding the deployment's shared App keys its reach exactly as
+	t.Run("ManagedOrgRoundTrips", func(t *testing.T) {
+		// An org riding the deployment's shared App keys its reach exactly as
 		// one on its own App does: per installation, with a host of nothing. Until
 		// the tables were taught the class, every one of these writes was refused
 		// by a CHECK — and the picker read that follows returned nothing to serve.
@@ -1381,7 +1381,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		if err != nil {
 			t.Fatalf("ListReachableSystem: %v", err)
 		}
-		equal(t, "managed workspace's reachable set", slugs(t, rows), []string{"acme/api", "acme/web"})
+		equal(t, "managed org's reachable set", slugs(t, rows), []string{"acme/api", "acme/web"})
 		if total != 2 {
 			t.Errorf("total_count = %d; want 2 — a real count is the whole reason the picker reads this table", total)
 		}
@@ -1410,7 +1410,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("ReachableStateSystem(byo_app): %v", err)
 		}
 		if byo.Known() || byo.Count != 0 {
-			t.Errorf("byo_app state = %+v for a managed workspace; want unknown and empty", byo)
+			t.Errorf("byo_app state = %+v for a managed org; want unknown and empty", byo)
 		}
 	})
 

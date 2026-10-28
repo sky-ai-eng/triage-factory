@@ -73,11 +73,11 @@ func TestClassResolver(t *testing.T) {
 	}
 
 	t.Run("the managed class is returned as it stands, with no narrowing", func(t *testing.T) {
-		// A workspace on the deployment's shared App holds no registration row —
+		// An org on the deployment's shared App holds no registration row —
 		// that table is one row per org with a UNIQUE app_id — so there is no
 		// Active bit to narrow on and no staged window to be in. The apps store
 		// answers nil here exactly as it would for a PAT org, and reading that
-		// as "no active App, borrow a PAT" would key the workspace's reach under
+		// as "no active App, borrow a PAT" would key the org's reach under
 		// a credential system it never chose.
 		r := NewClassResolver(
 			fakeOrgs{settings: domain.OrgSettings{GitHubCredentialClass: domain.GitHubCredentialClassManagedApp}},

@@ -120,7 +120,7 @@ func NewControlPlane(stores db.Stores, budgets Budgets, podID string, publish Pu
 }
 
 // SetDeploymentSigner gives the pod the deployment's signer, which it signs
-// deployment requests with while every workspace on the deployment App with no
+// deployment requests with while every org on the deployment App with no
 // signer of its own resolves to it. nil, the default, signs none. Call it
 // before Run.
 func (c *ControlPlane) SetDeploymentSigner(d *DeploymentSigner) {

@@ -1,6 +1,6 @@
 # GitHub App installations: ownership and propagation
 
-How Triage Factory learns which GitHub App installations a workspace holds, and
+How Triage Factory learns which GitHub App installations an org holds, and
 how the changes an admin makes on GitHub's side flow back in. The rules here are
 tenancy boundaries, not conventions — read this before changing
 `internal/db/github_app_backfill.go`, `internal/grantmirror`, or the bind
@@ -15,7 +15,7 @@ enumerated selection (`selected`).
 
 The two change independently, and TF stores them separately:
 
-- `org_github_app_installations` — one row per (workspace, GitHub account).
+- `org_github_app_installations` — one row per (org, GitHub account).
 - `reachable_repositories` — the mirrored grant: which repositories each
   installation reaches, feeding the repository picker and the team-repos write
   gate.
@@ -26,22 +26,22 @@ new account, or uninstalling it, changes the **installation set**.
 
 ## Two credential shapes, two answers to "whose installation is this?"
 
-**A workspace with its own App key** (the `byo_app` credential class) gets
+**An org with its own App key** (the `byo_app` credential class) gets
 tenancy answered by GitHub itself. Its key can only list installations of its
 own App, so everything `GET /app/installations` returns under that key belongs
-to that workspace by construction. TF may therefore *discover*: the reconcile
+to that org by construction. TF may therefore *discover*: the reconcile
 (`BackfillInstallationsFromAPI`) writes every installation the listing reports
 and soft-removes any it no longer reports, every GitHub poll cycle.
 
-**A workspace on the deployment App** (the `managed_app` class, multi mode
-only) shares one App key with every other workspace on the deployment. The same
+**An org on the deployment App** (the `managed_app` class, multi mode
+only) shares one App key with every other org on the deployment. The same
 listing now returns *every tenant's* installations, and nothing about the
-credential says which belong where. So for these workspaces the question has
+credential says which belong where. So for these orgs the question has
 exactly one source of truth:
 
 > The reconcile refreshes; it never discovers. It may update installation rows
-> the workspace already has and may never create one. Creating the link between
-> a workspace and an installation is the bind ceremony's job alone.
+> the org already has and may never create one. Creating the link between
+> an org and an installation is the bind ceremony's job alone.
 
 The bind ceremony (the Connect button) proves the link — the person completing
 the install can see the installation, administers the account it targets, and
@@ -55,22 +55,22 @@ victim's ceremony. An admin with no GitHub account linked on the deployment's
 GitHub cannot connect one until they link it. The scoped reconcile then keeps bound rows current from the
 shared listing and touches nothing else. It has two doors with two scopes: the
 on-demand refresh route (`POST /api/orgs/{org_id}/github/app/installations/refresh`)
-runs it for one workspace (`RefreshManagedInstallations`), and the poll cadence runs it for every managed
-workspace at once from a single listing (`RefreshAllManagedInstallations`,
+runs it for one org (`RefreshManagedInstallations`), and the poll cadence runs it for every managed
+org at once from a single listing (`RefreshAllManagedInstallations`,
 driven by `grantmirror.RunDeployment`) — one `GET /app/installations` per
 GitHub cycle whatever the tenant count, since under a shared key the answer is
 the same whoever asks. Two mechanisms hold the boundary on both doors: the
 reconcile filters to bound installation ids before writing, and a unique index
-over live `(github_host, installation_id)` pairs refuses a second workspace's
+over live `(github_host, installation_id)` pairs refuses a second org's
 claim outright.
-An installation belongs to exactly one workspace per GitHub host; after an
+An installation belongs to exactly one org per GitHub host; after an
 uninstall the id is freed, and connecting it elsewhere is an ordinary new bind.
 
 Leaving the class is as deliberate as entering it. The deployment App is
-something a workspace *chooses*, so the bind is the only way in and the
+something an org *chooses*, so the bind is the only way in and the
 disconnect verb is the only way out: `POST
 /api/orgs/{org_id}/github/managed/disconnect` soft-removes every installation
-the workspace holds (the same removal an `installation.deleted` delivery
+the org holds (the same removal an `installation.deleted` delivery
 performs, reach-cache cascade and token invalidation included), resets the
 class to the rowless default, and records one access change per account
 disconnected. Its per-installation form
@@ -79,17 +79,17 @@ account and keeps the class — until it drops the last one, which is the full
 disconnect. Nothing is uninstalled on GitHub: the installation persists there
 unbound, in the "installed but not bound" state described below, and the
 named-account leg reconnects it. The other credential doors — BYO
-registration, BYO import — refuse a managed workspace that still holds a live
-installation row and name the disconnect as the way out, so a workspace's live
-rows and its class can never disagree. (A multi workspace has no token bind to
+registration, BYO import — refuse a managed org that still holds a live
+installation row and name the disconnect as the way out, so an org's live
+rows and its class can never disagree. (A multi org has no token bind to
 guard: its GitHub access is always an App.) That is what lets the receiver
 above route on the row alone.
 
-The door runs the other way too. The bind refuses a workspace that still holds
-a credential of its own, so a workspace with its own App leaves it first:
+The door runs the other way too. The bind refuses an org that still holds
+a credential of its own, so an org with its own App leaves it first:
 `POST /api/orgs/{org_id}/github/app/disconnect` tears down the live App —
 registration row, installations, secrets and stored host, in one transaction —
-and resets the class to the rowless default, leaving the workspace exactly as
+and resets the class to the rowless default, leaving the org exactly as
 a fresh one. It is a separate verb from the discard (`DELETE …/github/app`,
 which removes a *staged* registration and leaves the token live) because the
 two are different intents with different consequences, and each refuses the
@@ -98,14 +98,14 @@ whichever way a concurrent cutover moves the row. As with every teardown here,
 nothing is uninstalled on GitHub — the App stays registered there, and the
 response carries the link to its settings. The Settings panel offers the verb
 bare in one case only, an App GitHub no longer accepts (below), where the
-workspace already has no working GitHub access and the registration is all
-that is left to remove. Otherwise a workspace with no GitHub credential is one
+org already has no working GitHub access and the registration is all
+that is left to remove. Otherwise an org with no GitHub credential is one
 whose setup is unfinished, and the app shell routes its admins to the setup
 wizard, so the panel's other use of it is the switch to the deployment App,
 which follows the teardown with Connect in the same gesture.
 
 What the rule forbids is exactly one thing: TF *guessing* — attributing an
-installation from the shared listing to a workspace whose admin never proved
+installation from the shared listing to an org whose admin never proved
 it. Everything after the proof updates freely, as the next section enumerates.
 
 ## What an admin's change on GitHub does, and how TF picks it up
@@ -118,8 +118,8 @@ it. Everything after the proof updates freely, as the next section enumerates.
 | Rename the account | Installation field (`account_login`) | Reconcile, every poll cycle; on-demand refresh | Reconcile, every poll cycle; on-demand refresh |
 | Install the App on a **new** account | New installation | Reconcile discovers it, every poll cycle; on-demand refresh | Connect button — one bind ceremony per account, additive |
 | Uninstall from an account | Installation removed | Reconcile soft-removes; webhook; on-demand refresh | Reconcile soft-removes, every poll cycle; webhook; on-demand refresh |
-| Delete the App | The App is gone | Reconcile records `unusable_reason = missing`, every poll cycle; on-demand refresh | Not covered: the shared App is the operator's, not the workspace's |
-| Delete or regenerate the App's private key | GitHub refuses the stored key | Reconcile records `unusable_reason = key_rejected`, every poll cycle; on-demand refresh | Not covered: the shared App is the operator's, not the workspace's |
+| Delete the App | The App is gone | Reconcile records `unusable_reason = missing`, every poll cycle; on-demand refresh | Not covered: the shared App is the operator's, not the org's |
+| Delete or regenerate the App's private key | GitHub refuses the stored key | Reconcile records `unusable_reason = key_rejected`, every poll cycle; on-demand refresh | Not covered: the shared App is the operator's, not the org's |
 
 The last two rows have no webhook at all, and from inside a poll cycle they
 look like any other refused request. The reconcile settles them by asking: when
@@ -134,9 +134,9 @@ requests GitHub will refuse, and the Settings panel says what happened.
 
 Two things in that table are on demand rather than on a timer, and both work
 for both classes. **On-demand refresh** is
-`POST /api/orgs/{org_id}/github/app/installations/refresh`: for a workspace with
-its own App it re-lists the App's installations from GitHub; for a workspace on
-the deployment App it re-reads only the installations that workspace has
+`POST /api/orgs/{org_id}/github/app/installations/refresh`: for an org with
+its own App it re-lists the App's installations from GitHub; for an org on
+the deployment App it re-reads only the installations that org has
 already bound, and never adds one. The Settings panel has no standalone button
 for it today — the UI calls it during the PAT → App switch and in the setup
 wizard. **Picker refresh** is the Refresh button in the repository picker
@@ -161,7 +161,7 @@ exists, only makes it converge sooner.
 
 ## Installed but not bound
 
-An installation of the deployment App can exist with no workspace bound to it,
+An installation of the deployment App can exist with no org bound to it,
 through paths that are entirely ordinary: a member without install rights
 selected the account, GitHub sent the install to an owner instead, and the
 owner approved it later; someone installed from the App's public page on
@@ -200,7 +200,7 @@ treats it as one:
   says which leg it is waiting for; there is still no path that creates a
   binding from an installation id the browser carried in, and an authorize
   ceremony ignores one on its query string.
-- A managed workspace with no bound installation shows the same form as its
+- A managed org with no bound installation shows the same form as its
   Settings empty state.
 - The deployment webhook receiver acknowledges a delivery for an unbound
   installation with 2xx, writes nothing, and logs **one line at INFO** naming
@@ -218,15 +218,15 @@ account and hands back one id, and nothing renders or retains the listing.
 
 ## The Settings surface, and the two grant findings
 
-Workspace Settings' "GitHub access" panel renders one of three shapes, decided
+The "GitHub access" panel in the org settings renders one of three shapes, decided
 by the credential class the status read (`GET /api/orgs/{org_id}/github/app`)
 reports, and the affordances are per class:
 
-- **A workspace with its own App** shows the App's slug, its installations, both
+- **An org with its own App** shows the App's slug, its installations, both
   findings below, and the ways off it: the switch to the deployment's App
   (only where the deployment has one — the connect form under that label,
   which asks for the account first, then runs the disconnect verb above and
-  starts the ceremony for that account, so the workspace holds no credential
+  starts the ceremony for that account, so the org holds no credential
   for the length of the trip to GitHub, and an admin who leaves GitHub
   without finishing is routed to the setup wizard) and the switch to a token.
   Never a bare disconnect while the App works. An App GitHub no longer accepts
@@ -237,14 +237,14 @@ reports, and the affordances are per class:
   opens every way back in, including the same App with a new key through
   import. An App installed on no account says that nothing is polled and links
   to the install page.
-- **A workspace on the deployment's App** (`using_deployment_default: true`)
+- **An org on the deployment's App** (`using_deployment_default: true`)
   shows no App of its own — there is no row, and there never will be — and is
   never offered registration or import. What it shows is the accounts it has
   bound, each with its own per-installation disconnect, the findings, Connect
-  for another account, and Disconnect for the whole workspace: the way out for
-  a workspace that wants its own App or a token instead. Both call the verbs
+  for another account, and Disconnect for the whole org: the way out for
+  an org that wants its own App or a token instead. Both call the verbs
   above and nothing else creates or destroys a binding from the panel.
-- **A workspace with a token, or nothing.** A token workspace sees neither
+- **An org with a token, or nothing.** A token org sees neither
   finding and no copy implying it holds a grant: a token's reach is a fact
   about a person's account, not a grant TF is answerable for. With nothing
   bound, every way in is offered together — Connect (only when the deployment
@@ -266,7 +266,7 @@ renders the grant as a form, because GitHub enforces who may edit it.
 
 Nothing on the panel is derived from the viewer's own GitHub permissions. Two
 admins with different GitHub access receive byte-identical payloads for the
-same workspace. Delegation mints from the grant and never consults anyone's
+same org. Delegation mints from the grant and never consults anyone's
 personal access, so a list narrowed to the viewer would describe nothing about
 capability and only mislead; it is the rule a well-meaning filter is most
 likely to break, and a test asserts it directly.
@@ -274,7 +274,7 @@ likely to break, and a test asserts it directly.
 The two findings are what the reachable-repo mirror exists to make computable,
 and they are served as ordinary paginated lists — `page_size` / `page_token`
 in, `{items, next_page_token, total_count}` out, org admin, App-class
-workspaces only (a token workspace is a 404: it holds no grant to have findings
+orgs only (a token org is a 404: it holds no grant to have findings
 about):
 
 - **Reach without purpose** — `POST
@@ -306,17 +306,17 @@ GitHub call and triggers no refresh; the refresh POST beside the status read is
 the deliberate gesture for a fresh answer. An empty finding renders as "nothing
 to address", never as a blank region that reads like a load that failed.
 
-## Webhooks for deployment-App workspaces
+## Webhooks for deployment-App orgs
 
-The shared App has one webhook URL, so its deliveries cannot carry a workspace
-id in the path the way an own-App workspace's do. They arrive at the static
+The shared App has one webhook URL, so its deliveries cannot carry an org
+id in the path the way an own-App org's do. They arrive at the static
 receiver, `POST /api/webhooks/github`, which verifies the signature against the
 deployment's webhook secret first and only then looks up the installation the
 verified payload names in the binding table — the same `(host, installation id)`
 key the bind ceremony writes — to learn whose delivery it is. A bound
-installation's delivery is applied exactly as a per-workspace delivery would be;
+installation's delivery is applied exactly as a per-org delivery would be;
 an unbound one is acknowledged and logged, as described above, and never creates
-a binding. The two receivers are deliberately separate: a managed workspace's
-delivery to the per-workspace URL is refused there, and an own-App workspace's
+a binding. The two receivers are deliberately separate: a managed org's
+delivery to the per-org URL is refused there, and an own-App org's
 delivery to the static one fails its signature check. Pull remains the contract
 for both classes; the webhook only makes convergence sooner.

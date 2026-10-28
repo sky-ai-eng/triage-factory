@@ -46,7 +46,7 @@ export function TeamModelStep({ state, patch }: StepContext) {
 // `allowOff` is passed by the render site, not carried on StepContext, because
 // the two surfaces want opposite things from the same body. The wizard step is
 // mandatory — it blocks until a model is chosen, which is the whole reason a
-// fresh workspace cannot end up with jobs that silently never run — so it
+// fresh org cannot end up with jobs that silently never run — so it
 // offers no way out. Settings passes it where turning the jobs off is a
 // decision an admin is allowed to make later.
 export function OrgBackgroundJobsModelStep({

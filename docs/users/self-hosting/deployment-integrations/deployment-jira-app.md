@@ -1,14 +1,15 @@
 # Deployment Jira app
 
 Members connect their own Jira Cloud accounts through an Atlassian OAuth (3LO)
-app. By default each workspace registers one under **Workspace Settings →
-Atlassian OAuth app**. A **deployment Jira app** is one app you register once,
-so workspaces without their own get one-click **Connect Jira**.
+app. By default each organization registers one under **Organization →
+Settings → Atlassian OAuth app**. A **deployment Jira app** is one app you
+register once, so organizations without their own get one-click **Connect
+Jira**.
 
-- **It is a default, not an override.** A workspace's own app always wins for
-  new connections.
-- **Leaving both variables unset changes nothing.** Workspaces keep bringing
-  their own app.
+- **It is a default, not an override.** An organization's own app always wins
+  for new connections.
+- **Leaving both variables unset changes nothing.** Organizations keep
+  bringing their own app.
 - **Multi mode and Jira Cloud only.** Local mode ignores these variables.
 
 ## 1. Register the app
@@ -21,8 +22,8 @@ create an OAuth 2.0 (3LO) integration:
   also requests `offline_access`.
 - **Authorization → Callback URL:**
   `<TF_PUBLIC_URL>/api/orgs/{org}/jira/connect/callback`, where `{org}` is the
-  workspace's id. A workspace's **Atlassian OAuth app** card in Workspace
-  Settings shows its exact URL.
+  organization's id. An organization's **Atlassian OAuth app** card under
+  **Organization → Settings** shows its exact URL.
 
 Copy the app's **Client ID** and **Secret**.
 
@@ -41,8 +42,8 @@ The secret can be a mounted file via `TF_ATLASSIAN_CLIENT_SECRET_FILE`
 docker compose up -d
 ```
 
-A workspace with no app of its own now reads _Using this deployment's
-Atlassian app_ under **Workspace Settings → Atlassian OAuth app**.
+An organization with no app of its own now reads _Using this deployment's
+Atlassian app_ under **Organization → Settings → Atlassian OAuth app**.
 
 ## Changing the app
 

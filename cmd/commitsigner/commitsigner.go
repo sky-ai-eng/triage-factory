@@ -74,7 +74,7 @@ func Handle(args []string) {
 // DB with closeFn.
 func open() (health *signing.DeploymentHealth, closeFn func() error) {
 	if runmode.Current() != runmode.ModeMulti {
-		fail("local mode has no deployment commit signer: it signs commits only for workspaces on a multi-mode deployment's GitHub App")
+		fail("local mode has no deployment commit signer: it signs commits only for organizations on a multi-mode deployment's GitHub App")
 	}
 	if runmode.Role() == runmode.RoleExecutor {
 		fail("run it on a control container (TF_ROLE=control): an executor carries no deployment signer settings and no secret key")
@@ -117,7 +117,7 @@ func runStatus(ctx context.Context, w io.Writer, h *signing.DeploymentHealth) er
 	}
 	printSigner(w, h.Signer, *row)
 	if row.Status != domain.CommitSignerActive {
-		fmt.Fprintln(w, "\nManaged workspaces commit unsigned until it is active. Fix the account, then run `triagefactory commit-signer verify`.")
+		fmt.Fprintln(w, "\nManaged organizations commit unsigned until it is active. Fix the account, then run `triagefactory commit-signer verify`.")
 	}
 	return nil
 }
@@ -180,9 +180,10 @@ USAGE
   triagefactory commit-signer verify    check it against GitHub now
 
 NOTES
-  The deployment commit signer is the account every workspace on the
-  deployment's GitHub App signs its agents' commits as, unless the workspace
-  registers its own (TF_GITHUB_COMMIT_SIGNER_*, on the control containers).
+  The deployment commit signer is the account every organization on the
+  deployment's GitHub App signs its agents' commits as, unless the
+  organization registers its own (TF_GITHUB_COMMIT_SIGNER_*, on the control
+  containers).
 
   verify looks for the configured key among the account's signing keys and,
   for a signer a pushed commit broke, re-reads that commit; when both pass, the

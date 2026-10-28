@@ -7,7 +7,7 @@ const ORG_ADMIN_ROLES = new Set(['owner', 'admin'])
 
 // isOrgAdminRole is the same test as useOrgRole's isAdmin, for a caller that
 // holds a role string for an org other than the active one — a page offering a
-// choice of workspaces reads each membership's role rather than the hook's
+// choice of orgs reads each membership's role rather than the hook's
 // single answer.
 export function isOrgAdminRole(role: string | null | undefined): boolean {
   return !!role && ORG_ADMIN_ROLES.has(role)

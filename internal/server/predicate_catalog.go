@@ -80,7 +80,7 @@ var predicateCatalogs = []*predicateCatalog{
 	{
 		// Priorities are the Jira instance's, not a project's.
 		source: "jira", fields: []string{"priority_id_in", "new_priority_id_in", "old_priority_id_in"},
-		hint: "is not the id of one of this workspace's Jira priorities " +
+		hint: "is not the id of one of this organization's Jira priorities " +
 			"(it takes a priority id from POST /api/orgs/{org_id}/jira/priorities/list, not the priority name)",
 		ids: func(c *catalogCheck) ([]string, error) {
 			client, err := c.jira()
@@ -231,7 +231,7 @@ func writeCatalogStopped(w http.ResponseWriter, orgID, source string, err error)
 		return
 	}
 	if errors.Is(err, jira.ErrNoJiraSystemCredential) || errors.Is(err, linear.ErrNoLinearSystemCredential) {
-		writeNotConfigured(w, provider+" is not connected for this workspace, so the ids the scope predicate names cannot be checked")
+		writeNotConfigured(w, provider+" is not connected for this organization, so the ids the scope predicate names cannot be checked")
 		return
 	}
 	serverLog.Warn("predicate catalog check could not reach the provider", "org", orgID, "provider", provider, "error", err)

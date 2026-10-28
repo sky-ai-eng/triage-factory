@@ -69,10 +69,10 @@ func (a readyApps) ListInstallationsOnHostSystem(ctx context.Context, orgID, hos
 //
 // The managed arm is the one worth reading twice. The shared App itself is a
 // deployment fact — it lives in the operator's environment, which this function
-// cannot see — so what it asks instead is the question the workspace can act
-// on: has this workspace bound the App to any account? Zero installations is a
-// workspace that has connected nothing, which is exactly what the setup step
-// exists to prompt; one or more is a workspace TF can reach GitHub for.
+// cannot see — so what it asks instead is the question the org can act
+// on: has this org bound the App to any account? Zero installations is an
+// org that has connected nothing, which is exactly what the setup step
+// exists to prompt; one or more is an org TF can reach GitHub for.
 func TestGitHubReady_EveryCredentialClass(t *testing.T) {
 	ctx := context.Background()
 	live := &domain.OrgGitHubApp{Active: true, ClientID: "Iv1.byo"}
@@ -91,7 +91,7 @@ func TestGitHubReady_EveryCredentialClass(t *testing.T) {
 		{"byo app, staged", domain.GitHubCredentialClassBYOApp, staged, nil, false},
 		{"byo app class with no row", domain.GitHubCredentialClassBYOApp, nil, nil, false},
 		// No registration row, and none can exist: what makes the shared App
-		// usable FOR THIS WORKSPACE is the bind.
+		// usable FOR THIS ORG is the bind.
 		{"managed app, bound", domain.GitHubCredentialClassManagedApp, nil, bound, true},
 		{"managed app, nothing bound", domain.GitHubCredentialClassManagedApp, nil, nil, false},
 		// An unrecognised class resolves no App and leaves the PAT signal
@@ -128,7 +128,7 @@ func TestGitHubReady_EveryCredentialClass(t *testing.T) {
 // this gate honest: a stored PAT is not readiness by itself, it is readiness
 // only for a class whose resolution would actually reach for it.
 //
-// The managed rows are the ones that matter. A workspace on the deployment's
+// The managed rows are the ones that matter. An org on the deployment's
 // shared App resolves from that App or fails — github.activeApp has no path
 // from the managed class to the PAT tier — so a PAT left in its secret store is
 // a credential it will never act on. Reporting it as connected would tell a
@@ -192,7 +192,7 @@ func TestGitHubReady_PATAnswersOnlyWhereItWouldBeBorrowed(t *testing.T) {
 	}
 }
 
-// TestGitHubReady_ManagedBindOnAnotherHostIsNotReady: a managed workspace is
+// TestGitHubReady_ManagedBindOnAnotherHostIsNotReady: a managed org is
 // ready when it has bound an account on its current GitHub host, because those
 // are the installations its resolution mints from. A bind left on a host the
 // org has moved off resolves nothing here, so it reads as connecting nothing.

@@ -28,14 +28,14 @@ import (
 // stays the live credential until a cutover flips the bit and deletes the PAT
 // in one transaction. See handleGitHubAppRegisterCallback for the staging side.
 //
-// The App→PAT direction exists only in local mode (refuseWorkspaceTokenInMulti):
-// a multi workspace's GitHub access is an App. The PAT→App cutover and the
-// discard stay in both modes, so a multi workspace that holds a token anyway
+// The App→PAT direction exists only in local mode (refuseOrgTokenInMulti):
+// a multi org's GitHub access is an App. The PAT→App cutover and the
+// discard stay in both modes, so a multi org that holds a token anyway
 // keeps its way onto an App.
 //
 // All three transitions here serialize on githubAppRegRMWLockSalt keyed by org,
 // the same lock the PAT bind/unbind and the two registration paths take — one
-// credential slot per workspace means one transition at a time, deployment-wide.
+// credential slot per org means one transition at a time, deployment-wide.
 // They share one shape, so where the guards sit isn't something a reader has to
 // re-derive per handler: the pre-lock read is ADVISORY (it fails the common
 // rejection fast, before spending a GitHub round-trip on a transition that's
@@ -404,11 +404,11 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 // that so the UI can point the admin at GitHub to delete it there. Org-admin
 // only. Also valid from a staged state (re-committing to PAT mid-switch).
 //
-// Local mode only: see refuseWorkspaceTokenInMulti.
+// Local mode only: see refuseOrgTokenInMulti.
 //
 // POST /api/orgs/{org_id}/github/pat/switch-to
 func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Request) {
-	if refuseWorkspaceTokenInMulti(w) {
+	if refuseOrgTokenInMulti(w) {
 		return
 	}
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
@@ -681,10 +681,10 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 
 // handleGitHubAppDisconnect tears down the org's LIVE App with nothing bound in
 // its place: registration row, installations, secrets, class and host all go
-// in one transaction, leaving the org in the state a fresh workspace is in —
+// in one transaction, leaving the org in the state a fresh org is in —
 // the one state from which every way in, the deployment's App included, is
-// open. It is the door a workspace with an App of its own takes to reach the
-// deployment App, which refuses a workspace that still holds a credential.
+// open. It is the door an org with an App of its own takes to reach the
+// deployment App, which refuses an org that still holds a credential.
 //
 // Deliberately not the discard: the two are different intents. Discarding a
 // staged registration abandons a switch and leaves the org running on its
@@ -693,7 +693,7 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 // the discard refuses a live one — a request that meant one can never do the
 // other, whichever way a concurrent cutover moves the row between the two.
 //
-// The host is cleared because nothing remains that uses it: the workspace is
+// The host is cleared because nothing remains that uses it: the org is
 // back to having no GitHub, as a fresh one has, and sets a URL again when it
 // connects. A commit signer is the exception: its account is on that GitHub,
 // so the host stays until the signer is removed. Org-admin only.
@@ -780,7 +780,7 @@ func (s *Server) handleGitHubAppDisconnect(w http.ResponseWriter, r *http.Reques
 		}
 		// No registration remains and no token is bound, so the org is in the
 		// rowless default: a PAT class with nothing stored, the state a fresh
-		// workspace is in. In this transaction so the row and the class go
+		// org is in. In this transaction so the row and the class go
 		// together.
 		if _, err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassPAT); err != nil {
 			return fmt.Errorf("set github credential class: %w", err)
@@ -974,11 +974,11 @@ type patPreflightResponse struct {
 // plus the PAT's login. Does NOT store the PAT — the commit endpoint
 // re-validates. Org-admin only.
 //
-// Local mode only: see refuseWorkspaceTokenInMulti.
+// Local mode only: see refuseOrgTokenInMulti.
 //
 // POST /api/orgs/{org_id}/github/pat/preflight
 func (s *Server) handleGitHubAccessPATPreflight(w http.ResponseWriter, r *http.Request) {
-	if refuseWorkspaceTokenInMulti(w) {
+	if refuseOrgTokenInMulti(w) {
 		return
 	}
 	orgID, _, ok := s.az.RequireOrgAdmin(w, r)

@@ -226,7 +226,7 @@ func TestDeploymentHealth_FailedReadWaitsBeforeRetrying(t *testing.T) {
 }
 
 // A login that names no account, or a bot, leaves the signer pending with no
-// account, so no managed workspace commits as it.
+// account, so no managed org commits as it.
 func TestDeploymentHealth_LoginThatNamesNoUser(t *testing.T) {
 	for name, stage := range map[string]func(g *healthGitHub){
 		"no account": func(g *healthGitHub) { g.deleted = true },

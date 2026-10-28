@@ -1,4 +1,4 @@
-// Helpers for the Workspace Settings "Atlassian OAuth app" card — the Jira
+// Helpers for the org settings "Atlassian OAuth app" card — the Jira
 // sibling of githubApp.ts. An admin enters a bring-your-own Atlassian OAuth
 // app (client_id + client_secret) that the per-user "Connect Jira" flow runs
 // against; the card also shows the callback URL the app owner must register.

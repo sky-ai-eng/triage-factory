@@ -32,7 +32,7 @@
 #   fly secrets set TF_COOKIE_SECRET="$(openssl rand -hex 32)"
 #   fly secrets set TF_SECRET_ENCRYPTION_KEY="$(openssl rand -hex 32)"
 #
-# The deployment GitHub App — one App key serving every workspace on this
+# The deployment GitHub App — one App key serving every organization on this
 # deployment. Set all four or none; a strict subset is refused rather than
 # silently half-configured. The App's slug and client id are deliberately
 # absent: TF reads those back from GET /app with a JWT it signs itself.
@@ -44,7 +44,7 @@
 # the App's settings page; the App ID is not itself secret, but it is
 # per-deployment and so is set the same way rather than committed to [env].
 #
-# The deployment Linear app — one public OAuth app every workspace on this
+# The deployment Linear app — one public OAuth app every organization on this
 # deployment installs through. Set both or neither; one without the other is
 # logged at boot and treated as neither.
 #   fly secrets set TF_LINEAR_CLIENT_ID='...'
@@ -69,11 +69,11 @@ primary_region = "iad"
 
 [env]
   TF_MODE = "multi"
-  # The deployment's default GitHub: the web base a workspace with no
+  # The deployment's default GitHub: the web base an organization with no
   # github_base_url resolves to, and the GitHub the deployment App above is
   # registered on — one variable because they are one fact. Unset means
   # https://github.com, which is right for this deployment; a self-hoster
-  # whose GitHub is a GHES sets it before the first workspace is created,
+  # whose GitHub is a GHES sets it before the first organization is created,
   # since installation, reachability and identity rows are keyed under the
   # host they were written with and nothing migrates them. Plain config,
   # not a secret.

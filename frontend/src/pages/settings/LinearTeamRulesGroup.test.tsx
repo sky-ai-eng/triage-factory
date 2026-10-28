@@ -266,7 +266,9 @@ describe('LinearTeamRulesGroup · not connected', () => {
     render(<Harness seed={[MAPPED]} connected={false} />)
 
     expect(
-      screen.getByText('Connect Linear under Workspace settings before configuring tracked teams.'),
+      screen.getByText(
+        'Connect Linear under organization settings before configuring tracked teams.',
+      ),
     ).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Expand ENG' }))
     expect(screen.getByText('In Progress ★')).toBeInTheDocument()

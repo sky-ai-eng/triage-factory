@@ -289,6 +289,7 @@ Two tiers, and the default is the cheap one. The push economics are the opposite
 ## Writing docs
 
 - `docs/users/` is for people running Triage Factory; `docs/contributors/` is for people changing it. Both are written for humans: short, task-shaped, and free of internals the code already explains (package names, tables, protocols, why the code is shaped the way it is). Keep what a reader acts on: commands, values, consequences, and the exact errors they will search for. Log lines are not monitoring: a condition an operator should watch gets a metric or an alert, and a doc points at that, never at a log line.
-- Setup done per workspace in the app is explained by the app's own copy, not by a page in `docs/`. A page exists for host- or deployment-level setup: install, env vars, flags, deployment-wide apps, operations.
+- Setup done per organization in the app is explained by the app's own copy, not by a page in `docs/`. A page exists for host- or deployment-level setup: install, env vars, flags, deployment-wide apps, operations.
 - `.env.example` is the one per-variable reference. A guide shows the variables it needs and links there rather than re-explaining them.
 - Design specs and agent briefings go in `specs/`, never `docs/`.
+- The tenant people configure is an **organization** ("org" in code and where it reads naturally), in docs, UI copy, messages and comments alike. "Workspace" means a run's workspace (its run root, checkouts and snapshots), or a Slack or Linear workspace, and nothing else.

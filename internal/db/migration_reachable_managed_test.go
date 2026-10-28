@@ -6,7 +6,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// The reachable-repo mirror has to hold a workspace riding the deployment's
+// The reachable-repo mirror has to hold an org riding the deployment's
 // shared App, and three constraints per dialect decide whether it can. Two of
 // them refuse loudly if they are wrong; the third does not, which is why it is
 // pinned here beside them —
@@ -54,7 +54,7 @@ func TestMigrate_ReachableRepoManagedClass(t *testing.T) {
 		t.Error("a second casing of one repository landed on the managed class; the folded key must refuse it")
 	}
 
-	// The scope alternative holds for managed exactly as it does for a workspace
+	// The scope alternative holds for managed exactly as it does for an org
 	// on its own App: an installation and no host, never the reverse and never
 	// both.
 	if _, err := database.Exec(`
@@ -95,7 +95,7 @@ func TestMigrate_ReachableRepoManagedClass(t *testing.T) {
 	}
 
 	// The refresh marker: a managed org records its installation id here exactly
-	// as a workspace on its own App does, and the class is part of the key.
+	// as an org on its own App does, and the class is part of the key.
 	if _, err := database.Exec(`
 		INSERT INTO reachable_scopes (org_id, credential_class, scope) VALUES (?, 'managed_app', '456')`, org,
 	); err != nil {

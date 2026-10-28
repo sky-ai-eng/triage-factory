@@ -27,13 +27,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// The bind ceremony — the only thing that maps a workspace to an installation
-// of the DEPLOYMENT App, the one App key that serves many workspaces.
+// The bind ceremony — the only thing that maps an org to an installation
+// of the DEPLOYMENT App, the one App key that serves many orgs.
 //
 // Everything else GitHub-shaped in this codebase gets that mapping for free:
 // each org owns its own App key, so "which installations exist?" is answered by
 // the credential and GitHub enforces the boundary. The moment one key serves
-// every workspace, GET /app/installations returns everyone's installations and
+// every org, GET /app/installations returns everyone's installations and
 // the question stops having a free answer. This file is where TF answers it,
 // and everything downstream — the scoped reconcile, webhook routing — is
 // defined in terms of what it writes.
@@ -48,7 +48,7 @@ import (
 // always lands in whoever's TF session is active, so an attacker cannot steal
 // one — but they can complete an install themselves, obtain a valid code +
 // installation_id, and induce a signed-in TF admin to load this callback with
-// those parameters, putting THEIR repositories into the victim's workspace
+// those parameters, putting THEIR repositories into the victim's org
 // where the victim's agents, spend and surrounding credentials then operate on
 // attacker-authored content. Confused deputy, and the reason for the ceremony.
 //
@@ -56,14 +56,14 @@ import (
 // independent of the others:
 //
 //  1. the pending-bind cookie + record, which prove the callback belongs to a
-//     bind THIS workspace's admin started (github_pending_binds);
+//     bind THIS org's admin started (github_pending_binds);
 //  2. association — GitHub's own prescribed check, that the installation is one
 //     the authorizing user can see (githubbind.Associated);
 //  3. authority — that the same user administers the account the installation
 //     targets (githubbind.Authority), which is the half GitHub does NOT
 //     prescribe and which a read-only contractor would otherwise walk straight
 //     through;
-//  4. uniqueness — that no other workspace already holds this installation;
+//  4. uniqueness — that no other org already holds this installation;
 //  5. identity — that the GitHub account which authorized IS the account
 //     linked to the TF admin completing the ceremony (user_github_identities,
 //     compared by numeric id). This is the proof that joins the other four.
@@ -72,7 +72,7 @@ import (
 //     attacker minted by installing on their own account, planted into a
 //     browser holding a live ceremony, would pass every gate on the
 //     attacker's own identity and land their repositories in the victim's
-//     workspace. The link is captured only under the person's own credential
+//     org. The link is captured only under the person's own credential
 //     (a whoami GitHub answered), so it is GitHub's word for who the TF user
 //     is there, and the ceremony requires the two to agree.
 //
@@ -120,12 +120,12 @@ const (
 
 	// ManagedInstallRecoveryPath is the SPA page a callback with no ceremony
 	// behind it lands on: the installation is real and belongs to no
-	// workspace, and the page says so and offers the Connect button that
+	// org, and the page says so and offers the Connect button that
 	// finishes the job. It is an SPA route rather than a page rendered here
-	// because finishing needs a signed-in admin and a workspace to connect
+	// because finishing needs a signed-in admin and an org to connect
 	// FROM, and the SPA is what holds both — an unauthenticated visitor gets
 	// the login page with this path as the return target, and a signed-in one
-	// gets their workspaces to choose from. This handler cannot know either.
+	// gets their orgs to choose from. This handler cannot know either.
 	ManagedInstallRecoveryPath = "/github/installed"
 
 	// managedInstallRecoveryRequested is the query the recovery page reads to
@@ -144,7 +144,7 @@ const managedBindNonceBytes = 32
 //
 // The set below is CLOSED, and that is a property worth protecting: each arm
 // says what happened and what the reader can do about it, none of them
-// discloses anything about another workspace, and none of them is a catch-all
+// discloses anything about another org, and none of them is a catch-all
 // that would let a new failure arrive wearing somebody else's explanation. A
 // new failure mode gets a new member here.
 //
@@ -165,8 +165,8 @@ type bindRefusal struct {
 // The closed set. Ordered as the ceremony meets them.
 var (
 	// The deployment has no usable shared App, so there is nothing for this
-	// workspace to bind to. A statement about the DEPLOYMENT, not the
-	// workspace: the workspace did nothing wrong and has nothing to fix.
+	// org to bind to. A statement about the DEPLOYMENT, not the
+	// org: the org did nothing wrong and has nothing to fix.
 	refuseNoDeploymentApp = bindRefusal{
 		code:   "deployment_app_unavailable",
 		status: http.StatusServiceUnavailable,
@@ -174,10 +174,10 @@ var (
 			"Ask your operator to configure the deployment's GitHub App.",
 	}
 
-	// The workspace is pointed at a GitHub the deployment App is not on. The
-	// App is registered on exactly one GitHub — the deployment's default — so a
-	// workspace whose github_base_url names another cannot ride it, and saying
-	// so here is what keeps that workspace from being preflighted against the
+	// The org is pointed at a GitHub the deployment App is not on. The
+	// App is registered on exactly one GitHub — the deployment's default — so an
+	// org whose github_base_url names another cannot ride it, and saying
+	// so here is what keeps that org from being preflighted against the
 	// wrong GitHub and refused with a message about the App instead of about
 	// the host. Names both hosts, which the admin can already read off their
 	// own settings and the operator's; what it points them at is the one thing
@@ -185,7 +185,7 @@ var (
 	refuseWrongGitHub = bindRefusal{
 		code:   "wrong_github_host",
 		status: http.StatusConflict,
-		message: "This workspace is pointed at %s; the deployment's GitHub App is on %s. " +
+		message: "This organization is pointed at %s; the deployment's GitHub App is on %s. " +
 			"Bring your own App for this GitHub.",
 	}
 
@@ -210,7 +210,7 @@ var (
 		code:   "state_mismatch",
 		status: http.StatusBadRequest,
 		message: "That GitHub response doesn't belong to the connection you started. " +
-			"Start again from Workspace Settings.",
+			"Start again from organization settings.",
 	}
 
 	// The named account does not exist on GitHub. Account existence is public
@@ -231,7 +231,7 @@ var (
 		code:   "account_mismatch",
 		status: http.StatusConflict,
 		message: "GitHub connected %s, but you asked to connect %s. " +
-			"Start again from Workspace Settings and install on the account you named.",
+			"Start again from organization settings and install on the account you named.",
 	}
 
 	// No record, expired, already consumed, or a session that isn't the one
@@ -242,7 +242,7 @@ var (
 		code:   "link_expired",
 		status: http.StatusBadRequest,
 		message: "That connection didn't finish in time, or was already used. " +
-			"Start again from Workspace Settings.",
+			"Start again from organization settings.",
 	}
 
 	// GitHub returned no installation to connect. Distinct from the stale
@@ -253,7 +253,7 @@ var (
 		code:   "no_installation",
 		status: http.StatusBadRequest,
 		message: "GitHub didn't say which installation to connect. " +
-			"Start again from Workspace Settings.",
+			"Start again from organization settings.",
 	}
 
 	// An API token tried to complete a ceremony. See the gate for why this
@@ -267,19 +267,19 @@ var (
 
 	// The TF-side authorization re-check at write time. The record was written
 	// by an admin; the role is read again here because minutes have passed.
-	refuseNotWorkspaceAdmin = bindRefusal{
-		code:    "not_workspace_admin",
+	refuseNotOrgAdmin = bindRefusal{
+		code:    "not_org_admin",
 		status:  http.StatusForbidden,
-		message: "You need to be an admin of this workspace to connect a GitHub account.",
+		message: "You need to be an admin of this organization to connect a GitHub account.",
 	}
 
-	// The workspace requires signing in through its own single sign-on, and
+	// The org requires signing in through its own single sign-on, and
 	// the session completing the ceremony was not. Asked of the record's org,
-	// the workspace the bind writes into, after the admin re-check.
+	// the org the bind writes into, after the admin re-check.
 	refuseSSORequired = bindRefusal{
 		code:    "sso_required",
 		status:  http.StatusForbidden,
-		message: "This workspace requires signing in through its single sign-on. Sign in that way, then connect GitHub again.",
+		message: "This organization requires signing in through its single sign-on. Sign in that way, then connect GitHub again.",
 	}
 
 	// GitHub did not confirm who the caller is: the code exchange failed, or
@@ -343,26 +343,26 @@ var (
 		message: "GitHub couldn't confirm your access to that account. Try connecting again in a moment.",
 	}
 
-	// Uniqueness. Never names the other workspace.
+	// Uniqueness. Never names the other org.
 	refuseBoundElsewhere = bindRefusal{
 		code:    "bound_elsewhere",
 		status:  http.StatusConflict,
-		message: "That installation is already connected to another workspace.",
+		message: "That installation is already connected to another organization.",
 	}
 
-	// One credential slot per workspace. Two arms, because the credential in
+	// One credential slot per org. Two arms, because the credential in
 	// the way decides what the admin has to go and disconnect.
 	refuseOwnAppInTheWay = bindRefusal{
 		code:   "credential_app_in_use",
 		status: http.StatusConflict,
-		message: "This workspace already has its own GitHub App. " +
-			"Disconnect it in Workspace Settings before connecting a managed installation.",
+		message: "This organization already has its own GitHub App. " +
+			"Disconnect it in organization settings before connecting a managed installation.",
 	}
 	refusePATInTheWay = bindRefusal{
 		code:   "credential_pat_in_use",
 		status: http.StatusConflict,
-		message: "This workspace already has a GitHub personal access token. " +
-			"Disconnect it in Workspace Settings before connecting a managed installation.",
+		message: "This organization already has a GitHub personal access token. " +
+			"Disconnect it in organization settings before connecting a managed installation.",
 	}
 
 	// Not a failure of ours: GitHub sent the install to an owner for approval
@@ -372,7 +372,7 @@ var (
 		status:  http.StatusAccepted,
 		heading: "Install request sent",
 		message: "GitHub sent your install request to an owner of that account. " +
-			"Once they approve it, connect again from Workspace Settings.",
+			"Once they approve it, connect again from organization settings.",
 	}
 )
 
@@ -392,9 +392,9 @@ func (b bindRefusal) withAccounts(connected, named string) bindRefusal {
 }
 
 // withHosts fills the one refusal whose message names two GitHub hosts: the
-// workspace's and the deployment's.
-func (b bindRefusal) withHosts(workspaceHost, deploymentHost string) bindRefusal {
-	b.message = fmt.Sprintf(b.message, workspaceHost, deploymentHost)
+// org's and the deployment's.
+func (b bindRefusal) withHosts(orgHost, deploymentHost string) bindRefusal {
+	b.message = fmt.Sprintf(b.message, orgHost, deploymentHost)
 	return b
 }
 
@@ -464,7 +464,7 @@ func (s *Server) handleGitHubManagedConnectAccount(w http.ResponseWriter, r *htt
 	}
 	// One credential slot, stated twice — once here, once authoritatively
 	// inside the lock at write time. This evaluation is ADVISORY and its only
-	// job is to fail fast: without it an admin whose workspace already holds a
+	// job is to fail fast: without it an admin whose org already holds a
 	// PAT would be sent to GitHub, complete a real installation, and only then
 	// be told it cannot be connected. Both evaluations owe the caller the same
 	// sentence; which one they hit is a matter of when they arrived.
@@ -611,7 +611,7 @@ func (s *Server) managedBindCallback() http.Handler {
 		cookie, err := r.Cookie(managedBindCookieName)
 		if err != nil || cookie.Value == "" {
 			// No cookie is not an error. It is the GitHub-initiated install:
-			// the installation exists and belongs to no workspace, which is an
+			// the installation exists and belongs to no org, which is an
 			// ordinary state rather than an anomaly.
 			s.redirectUnboundInstall(w, r)
 			return
@@ -645,7 +645,7 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 	// tokenScopeAllows against the {org_id} in its path — and this route has no
 	// org in its path to check, by construction. Its org comes from a record the
 	// caller does not name. Without this gate a user who administers two
-	// workspaces could start a ceremony for one in a browser and complete it on
+	// orgs could start a ceremony for one in a browser and complete it on
 	// a request that also carried a token sealed to the OTHER, binding a
 	// credential outside the scope that token was minted for.
 	//
@@ -687,9 +687,9 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 		// not distinguish them and neither does the answer. This is also the
 		// one refusal that renders with NO org, and the difference is the
 		// point: every other arm here is answering the person who started the
-		// ceremony, so a back-link into their own workspace's settings is both
+		// ceremony, so a back-link into their own org's settings is both
 		// useful and something they already know, while a viewer holding a
-		// colleague's cookie has proven no relationship to any workspace at
+		// colleague's cookie has proven no relationship to any org at
 		// all, and naming one in a back-link would hand out an org id they
 		// never asked for — the disclosure the bound-elsewhere refusal is
 		// careful to avoid further down.
@@ -707,7 +707,7 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if !isAdmin {
-		s.renderBindOutcome(w, orgID, refuseNotWorkspaceAdmin)
+		s.renderBindOutcome(w, orgID, refuseNotOrgAdmin)
 		return
 	}
 	// The record's org, not the session's cursor, is the one this writes into,
@@ -778,7 +778,7 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 	if refusal != nil {
 		// The operator's view of a bind that did not land. On a self-hosted
 		// deployment the operator is the one person who can work out that an
-		// install went to the wrong workspace, so the line names the
+		// install went to the wrong org, so the line names the
 		// installation GitHub sent back and, once the App has read it, the
 		// account it targets — and nothing else: no code, no token, no page.
 		// The installation id is the caller's own claim (an unsigned query
@@ -793,7 +793,7 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// The bind changed the org's GitHub credential, and on a workspace that had
+	// The bind changed the org's GitHub credential, and on an org that had
 	// no GitHub URL its host too. The poller set the org's next poll when it
 	// last skipped it as unconfigured, and the reachable-repo mirror is empty,
 	// so without this kick the first poll and the repository picker would both
@@ -926,7 +926,7 @@ type installHop struct {
 // completeNamedAccountBind is the authorize leg's proofs. The order is the
 // disclosure rule made concrete: identity is proven first, and every question
 // about the account is then asked of a listing GitHub already shows this
-// person, so a workspace admin cannot use the route to learn whether an
+// person, so an org admin cannot use the route to learn whether an
 // arbitrary account has the App.
 //
 //  1. state — GitHub echoed the state this ceremony's authorize carried, so the
@@ -1106,23 +1106,23 @@ func bindGateRefusal(err error, definitive bindRefusal, accountLogin string) *bi
 }
 
 // errBindHostMoved rolls back writeManagedBinding's transaction when the
-// workspace's GitHub host is no longer the App's; it never leaves that
+// org's GitHub host is no longer the App's; it never leaves that
 // function.
-var errBindHostMoved = errors.New("workspace github host is not the deployment app's")
+var errBindHostMoved = errors.New("organization github host is not the deployment app's")
 
 // writeManagedBinding is the ceremony's only write: the installation row, the
-// org's credential class set to managed_app, and — for a workspace with no
-// GitHub URL — the App's host as the workspace's.
+// org's credential class set to managed_app, and — for an org with no
+// GitHub URL — the App's host as the org's.
 //
 // It runs under the App-registration advisory lock, keyed by org — the same
 // lock the PAT bind/unbind, the manifest callback, the import and the two
-// either/or transitions take. One credential slot per workspace means one
+// either/or transitions take. One credential slot per org means one
 // transition at a time, deployment-wide, and the checks below are only worth
 // anything if nothing can commit a different credential between them and the
 // write.
 //
-// The class flips on the first bind and subsequent binds are additive: a
-// workspace may hold several installations, one per GitHub account, and each
+// The class flips on the first bind and subsequent binds are additive: an
+// org may hold several installations, one per GitHub account, and each
 // one runs this whole ceremony.
 func (s *Server) writeManagedBinding(ctx context.Context, orgID, userID, ghWeb string, inst githubapp.Installation) (*bindRefusal, error) {
 	release, err := s.acquireKeyedLock(ctx, &s.githubAppRegMu, githubAppRegRMWLockSalt, orgID)
@@ -1134,12 +1134,12 @@ func (s *Server) writeManagedBinding(ctx context.Context, orgID, userID, ghWeb s
 	installationID := strconv.FormatInt(inst.ID, 10)
 	host := db.EffectiveGitHubHost(ghWeb)
 
-	// A SECOND lock, keyed by the installation rather than by the workspace,
+	// A SECOND lock, keyed by the installation rather than by the org,
 	// and it is what makes the uniqueness check below mean anything.
 	//
-	// The org lock above serializes this workspace's credential transitions
+	// The org lock above serializes this org's credential transitions
 	// against each other. Uniqueness is not that question: it asks whether
-	// ANOTHER workspace holds this installation, and two workspaces racing to
+	// ANOTHER org holds this installation, and two orgs racing to
 	// claim one hold two DIFFERENT org keys — so under the org lock alone both
 	// read owner == "" and both write, landing one installation in two tenants.
 	// The lock has to be keyed by the thing being claimed.
@@ -1168,15 +1168,15 @@ func (s *Server) writeManagedBinding(ctx context.Context, orgID, userID, ghWeb s
 	}
 	defer instRelease()
 
-	// An installation another workspace holds must not be bound here;
-	// re-binding one this workspace already holds is idempotent rather than an
+	// An installation another org holds must not be bound here;
+	// re-binding one this org already holds is idempotent rather than an
 	// error, which is what makes a retry after a browser back-button harmless.
 	owner, err := s.githubApps.InstallationOwnerSystem(ctx, host, installationID)
 	if err != nil {
 		return nil, err
 	}
 	if owner != "" && owner != orgID {
-		// The refusal deliberately says nothing about which workspace: the
+		// The refusal deliberately says nothing about which org: the
 		// caller has no business learning that another one exists.
 		return &refuseBoundElsewhere, nil
 	}
@@ -1192,9 +1192,9 @@ func (s *Server) writeManagedBinding(ctx context.Context, orgID, userID, ghWeb s
 		return slotRefusal, nil
 	}
 
-	// The App's host becomes the workspace's in the same transaction as the
+	// The App's host becomes the org's in the same transaction as the
 	// installation and the class, the way the disconnect clears the host and
-	// the credential together. A workspace an admin pointed at another GitHub
+	// the credential together. An org an admin pointed at another GitHub
 	// since the start is refused, as the start refuses it, and nothing is
 	// written. The store compares stored strings; the canonical comparison
 	// here is the one deploymentAppIdentity made.
@@ -1229,7 +1229,7 @@ func (s *Server) writeManagedBinding(ctx context.Context, orgID, userID, ghWeb s
 		if _, lerr := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassManagedApp); lerr != nil {
 			return fmt.Errorf("set github credential class: %w", lerr)
 		}
-		// Binding an installation is what gives this workspace's agents access
+		// Binding an installation is what gives this org's agents access
 		// to an account's repositories, so it belongs in the change log beside
 		// the credential binds — recorded as the App credential it is, named by
 		// the account it reaches.
@@ -1251,7 +1251,7 @@ func (s *Server) writeManagedBinding(ctx context.Context, orgID, userID, ghWeb s
 	return nil, nil
 }
 
-// credentialSlotRefusal answers the one-credential-slot rule: a workspace that
+// credentialSlotRefusal answers the one-credential-slot rule: an org that
 // already holds its own App registration or a live PAT cannot bind a managed
 // installation until it disconnects, and the refusal names which credential is
 // in the way.
@@ -1294,7 +1294,7 @@ func (s *Server) credentialSlotRefusal(ctx context.Context, orgID, userID string
 // deploymentAppIdentity resolves the host the ceremony runs on and the
 // deployment App's preflight-established identity — its slug and client id,
 // which the operator never configures because GET /app reports them. The host
-// is the workspace's when it has one, which has to be the App's; a workspace
+// is the org's when it has one, which has to be the App's; an org
 // with none gets the App's.
 //
 // The preflight is also the permission gate, and running it here rather than
@@ -1314,9 +1314,9 @@ func (s *Server) deploymentAppIdentity(ctx context.Context, orgID string) (ghWeb
 	deploymentHost := ghbase.DefaultBaseURL()
 	ghWeb, err = s.ghResolver.BaseURLFor(ctx, orgID)
 	if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-		// A workspace with no GitHub URL binds on the App's host, and the bind
-		// writes it as the workspace's host (writeManagedBinding). Nothing
-		// reads this as a default: until the bind commits, the workspace still
+		// An org with no GitHub URL binds on the App's host, and the bind
+		// writes it as the org's host (writeManagedBinding). Nothing
+		// reads this as a default: until the bind commits, the org still
 		// has no host.
 		ghWeb, err = deploymentHost, nil
 	}
@@ -1324,8 +1324,8 @@ func (s *Server) deploymentAppIdentity(ctx context.Context, orgID string) (ghWeb
 		return "", identity, nil, fmt.Errorf("resolve github base for org %s: %w", orgID, err)
 	}
 	// The deployment App lives on the deployment's default GitHub and nowhere
-	// else, so a workspace whose host is another GitHub is refused here,
-	// before anything is asked of GitHub: a preflight against the workspace's
+	// else, so an org whose host is another GitHub is refused here,
+	// before anything is asked of GitHub: a preflight against the org's
 	// host would be the deployment's key presented to a server that has never
 	// seen it, and the 401 that earns reads like a bad key.
 	if ghWeb != deploymentHost {
@@ -1438,7 +1438,7 @@ a:hover{text-decoration:underline}
 
 // renderBindOutcome writes a refusal page with its own CSP and no-store. orgID
 // may be empty — a refusal that happens before the record is consumed has no
-// workspace to send anyone back to, and the app root is where the SPA will
+// org to send anyone back to, and the app root is where the SPA will
 // resolve one.
 func (s *Server) renderBindOutcome(w http.ResponseWriter, orgID string, refusal bindRefusal) {
 	// The code rides a header rather than the body so a machine caller — and a
@@ -1456,7 +1456,7 @@ func (s *Server) renderBindOutcome(w http.ResponseWriter, orgID string, refusal 
 // installed the deployment App from its public page, or an owner approved a
 // request GitHub had parked, or a reinstall came back without the cookie the
 // original Connect click set. Not a refusal — the installation is real and
-// simply belongs to no workspace yet — so it answers with a redirect into the
+// simply belongs to no org yet — so it answers with a redirect into the
 // SPA page that says so and offers the Connect button.
 //
 // Recovery is the ceremony, which is one thing: the page asks the admin to
@@ -1469,7 +1469,7 @@ func (s *Server) renderBindOutcome(w http.ResponseWriter, orgID string, refusal 
 // side effect is a log line naming the installation, which is the operator's
 // only signal that an install arrived with nowhere to land: on a self-hosted
 // deployment that operator is the one person placed to work out that it went
-// to the wrong workspace. The id is the caller's own claim and is logged as
+// to the wrong org. The id is the caller's own claim and is logged as
 // such; the code is never logged, and no account login is known here to log.
 func (s *Server) redirectUnboundInstall(w http.ResponseWriter, r *http.Request) {
 	setupAction := r.URL.Query().Get("setup_action")

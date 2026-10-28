@@ -31,17 +31,17 @@ beforeEach(() => {
 describe('ConnectGitHubAccount · a refused start', () => {
   it('toasts the message when beforeStart ran first', async () => {
     ghMocks.startManagedGitHubConnectAccount.mockRejectedValue(
-      new Error('This workspace is pointed at https://ghe.example.com.'),
+      new Error('This organization is pointed at https://ghe.example.com.'),
     )
     connect(async () => true)
 
     await waitFor(() => {
       expect(toasts.toast.error).toHaveBeenCalledWith(
-        'This workspace is pointed at https://ghe.example.com.',
+        'This organization is pointed at https://ghe.example.com.',
       )
     })
     expect(
-      screen.getByText('This workspace is pointed at https://ghe.example.com.'),
+      screen.getByText('This organization is pointed at https://ghe.example.com.'),
     ).toBeInTheDocument()
   })
 

@@ -51,7 +51,7 @@ const linearAppCreateURL = "https://linear.app/settings/api/applications/new"
 
 // linearDeveloperNameFallback names the app's developer when the org's own
 // name is outside Linear's 2–80 character bounds.
-const linearDeveloperNameFallback = "Triage Factory workspace"
+const linearDeveloperNameFallback = "Triage Factory organization"
 
 // linearAppInfo is the org's own app, public half only.
 type linearAppInfo struct {

@@ -1,6 +1,6 @@
 // The Linear OAuth app card: it links to Linear's pre-filled creation page,
 // lists the redirect URIs to register, says when the deployment's app already
-// serves the workspace, and reports the server's refusal to remove an app a
+// serves the org, and reports the server's refusal to remove an app a
 // live install depends on.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
@@ -42,7 +42,7 @@ describe('LinearOAuthAppCard', () => {
     expect(onStatus).toHaveBeenCalledWith(expect.objectContaining({ install_available: false }))
   })
 
-  it("on the deployment app, says so and still offers an app of the workspace's own", async () => {
+  it("on the deployment app, says so and still offers an app of the org's own", async () => {
     const onStatus = vi.fn()
     const onDeployment = status({ install_available: true, using_deployment_default: true })
     delete (onDeployment as Record<string, unknown>).create_url

@@ -23,7 +23,7 @@ const unknownCredentialClass = domain.GitHubCredentialClass("not-a-credential-cl
 // exactly what makes the assertion meaningful — the old "no App row means PAT"
 // inference would have found it and handed it over. A class the resolver cannot
 // name is a class whose credential system it cannot name either, and quietly
-// picking the one it happens to find is how a workspace ends up acting on a
+// picking the one it happens to find is how an org ends up acting on a
 // credential that was never its own.
 //
 // Every entry point is covered, because a refusal that holds on ClientFor and

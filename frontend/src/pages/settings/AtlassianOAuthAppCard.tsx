@@ -22,7 +22,7 @@ import {
 } from '../../lib/jiraApp'
 
 // A Jira connection is refreshed only by the app it was made through, so
-// removing or replacing the workspace's own app sends everyone who connected
+// removing or replacing the org's own app sends everyone who connected
 // through it back to Connect. Rotating the same app's secret does not.
 const removeConfirm =
   "Remove this Atlassian OAuth app? Anyone who connected Jira through it will have to connect again, and one-click Connect will use the deployment's app if there is one."
@@ -138,7 +138,7 @@ export default function AtlassianOAuthAppCard({ orgId }: { orgId: string }) {
       {!hasOverride && status?.using_deployment_default && (
         <div className="rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40 px-4 py-3 text-ui text-ink-2">
           Using this deployment's Atlassian app. Add your own below to override it for this
-          workspace.
+          organization.
         </div>
       )}
 

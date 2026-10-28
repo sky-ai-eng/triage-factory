@@ -143,7 +143,7 @@ func (s *Server) gateLinearTeams(
 	}
 
 	client, ok := s.linearSystemClient(w, r, orgID, "settings/team/linear-teams",
-		"Linear is not connected for this workspace, so a Linear team or a state mapping cannot be added")
+		"Linear is not connected for this organization, so a Linear team or a state mapping cannot be added")
 	if !ok {
 		return nil, false
 	}
@@ -157,7 +157,7 @@ func (s *Server) gateLinearTeams(
 		base := fmt.Sprintf("linear_teams[%d]", p.wish.index)
 		team, err := client.GetTeam(r.Context(), p.wish.write.ID)
 		if errors.Is(err, linear.ErrNotFound) {
-			v.Invalid(base+".id", "no Linear team "+p.wish.write.ID+" is visible to this workspace's Linear credential")
+			v.Invalid(base+".id", "no Linear team "+p.wish.write.ID+" is visible to this organization's Linear credential")
 			continue
 		}
 		if err != nil {

@@ -18,8 +18,8 @@ import (
 // are keyed under the host they were written with, so changing the default is
 // a fresh-install decision. This line is the only signal the operator gets, so
 // it names the org, the installation and both hosts. It never refuses to
-// start: the rows are stale, not dangerous, and the workspaces they belong to
-// have a way out (bind again, or bring their own App).
+// start: the rows are stale, not dangerous, and the orgs they belong to have
+// a way out (bind again, or bring their own App).
 //
 // A read failure is logged and swallowed for the same reason: a boot that
 // cannot answer this question is still a boot worth finishing.
@@ -34,7 +34,7 @@ func (a *App) warnManagedInstallationsOffDefaultHost(ctx context.Context) {
 	for _, inst := range rows {
 		appLog.Warn("managed installation is bound under a GitHub other than the deployment default; "+
 			"the deployment App's webhooks cannot route to it and the bind ceremony keys on the default alone. "+
-			"Rows are not migrated between hosts: rebind the workspace under the default, or have it bring its own App",
+			"Rows are not migrated between hosts: rebind the organization under the default, or have it bring its own App",
 			"org", inst.OrgID, "installation", inst.InstallationID, "account", inst.AccountLogin,
 			"installation_host", inst.GitHubHost, "default_host", host)
 	}

@@ -10,7 +10,7 @@ import ConnectGitHubAccount from './settings/ConnectGitHubAccount'
  * there is no bind ceremony behind it: someone installed the App from its
  * public page on GitHub, or an owner approved an install request GitHub had
  * parked, or a reinstall came back without the cookie Connect set. The
- * installation is real and belongs to no workspace — an ordinary outcome of a
+ * installation is real and belongs to no org — an ordinary outcome of a
  * supported install path, not a failure, and the copy here never calls it one.
  *
  * The page does exactly two things: says what happened, and offers the one
@@ -33,7 +33,7 @@ export default function GitHubInstalled() {
   const location = useLocation()
   const requested = new URLSearchParams(location.search).get('outcome') === 'requested'
 
-  // The workspace to connect FROM. The active one by default; a member of
+  // The org to connect FROM. The active one by default; a member of
   // several picks, because the one the callback interrupted is not
   // necessarily the one the installation is for.
   const orgs = auth.orgs
@@ -53,15 +53,15 @@ export default function GitHubInstalled() {
             {requested ? (
               <>
                 GitHub sent your install request to an owner of that account rather than installing
-                the App. Once they approve it, come back and press Connect from the workspace it
+                the App. Once they approve it, come back and press Connect from the organization it
                 belongs to.
               </>
             ) : (
               <>
-                The installation went through on GitHub, but it isn&rsquo;t connected to a workspace
-                yet &mdash; Triage Factory can&rsquo;t tell which one it belongs to when the App is
-                installed from GitHub rather than from here. Name the account it was installed on to
-                connect it; you&rsquo;ll confirm on GitHub as yourself.
+                The installation went through on GitHub, but it isn&rsquo;t connected to an
+                organization yet &mdash; Triage Factory can&rsquo;t tell which one it belongs to
+                when the App is installed from GitHub rather than from here. Name the account it was
+                installed on to connect it; you&rsquo;ll confirm on GitHub as yourself.
               </>
             )}
           </p>
@@ -69,7 +69,7 @@ export default function GitHubInstalled() {
 
         {orgs.length > 1 && (
           <label className="block space-y-1.5">
-            <span className="text-label uppercase tracking-wide text-ink-3">Workspace</span>
+            <span className="text-label uppercase tracking-wide text-ink-3">Organization</span>
             <select
               value={orgId ?? ''}
               onChange={(e) => setChosenOrgId(e.target.value)}
@@ -90,8 +90,8 @@ export default function GitHubInstalled() {
 
         {org && !requested && !canConnect && (
           <p className="text-reported text-ink-3 leading-relaxed">
-            Connecting GitHub takes a workspace admin. Ask an admin of {org.name} to press Connect
-            GitHub in Workspace Settings.
+            Connecting GitHub takes an org admin. Ask an admin of {org.name} to press Connect GitHub
+            in organization settings.
           </p>
         )}
 
@@ -101,7 +101,9 @@ export default function GitHubInstalled() {
               to={`/orgs/${encodeURIComponent(org.id)}/settings#github-app`}
               className="text-warm hover:underline"
             >
-              {requested ? 'Go to Workspace Settings' : 'Or finish later from Workspace Settings'}
+              {requested
+                ? 'Go to organization settings'
+                : 'Or finish later from organization settings'}
             </Link>
           </p>
         )}

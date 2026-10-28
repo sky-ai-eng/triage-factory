@@ -14,7 +14,7 @@ import (
 )
 
 // The two grant findings as the panel reads them. What is pinned: each is a
-// paginated list with a real total, a PAT workspace is refused rather than
+// paginated list with a real total, a PAT org is refused rather than
 // answered with an empty finding, and opening the panel — the status read plus
 // both findings — asks GitHub nothing.
 
@@ -213,16 +213,16 @@ func TestGitHubGrantFindings_ScopeDriftFollowsTheGrantsWidth(t *testing.T) {
 	}
 }
 
-// A PAT workspace holds no grant: no finding is computed for it, and the
+// A PAT org holds no grant: no finding is computed for it, and the
 // answer is a refusal rather than an empty list that would read as "nothing
 // to address".
-func TestGitHubGrantFindings_PATWorkspaceHasNoGrant(t *testing.T) {
+func TestGitHubGrantFindings_PATOrgHasNoGrant(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 	for _, path := range []string{reachWithoutPurposePath, scopeDriftPath} {
 		rec := doJSON(t, s, "POST", path, map[string]any{})
 		if rec.Code != http.StatusNotFound {
-			t.Errorf("%s: status=%d, want 404 for a PAT workspace", path, rec.Code)
+			t.Errorf("%s: status=%d, want 404 for a PAT org", path, rec.Code)
 		}
 	}
 }

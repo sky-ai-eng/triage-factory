@@ -1,4 +1,4 @@
-// Helpers for the Workspace Settings "GitHub access" panel. The
+// Helpers for the org settings "GitHub access" panel. The
 // registration ceremony is a top-level browser navigation to a backend
 // bounce page, which then POSTs the manifest to github.com (manifest
 // flow) — see startGitHubAppRegistration. The endpoints are org-scoped
@@ -119,7 +119,7 @@ export interface GitHubAppStatus {
   app: GitHubAppInfo | null
   installations: GitHubAppInstallation[]
   using_deployment_default: boolean
-  // Whether this deployment offers a deployment App for a workspace to bind —
+  // Whether this deployment offers a deployment App for an org to bind —
   // a fact about the deployment, not the org. It decides whether the
   // no-credential empty state offers Connect beside register, import and a
   // token; always false in local mode, where the managed class does not exist.
@@ -462,10 +462,10 @@ export async function discardStagedApp(orgId: string): Promise<void> {
   }
 }
 
-// disconnectOwnApp tears down the workspace's LIVE App with nothing bound in
+// disconnectOwnApp tears down the org's LIVE App with nothing bound in
 // its place: registration, installations, secrets and host go in one
-// transaction and the workspace is left as a fresh one, with every way in
-// open — the deployment's App included, which refuses a workspace that still
+// transaction and the org is left as a fresh one, with every way in
+// open — the deployment's App included, which refuses an org that still
 // holds a credential. The App still exists on GitHub (the result carries the
 // link out, as switch-to-pat's does). 409s for a staged App (discardStagedApp
 // is that door).
@@ -494,7 +494,7 @@ export async function disconnectOwnApp(orgId: string): Promise<SwitchToPatResult
 // account preselected and completes when GitHub returns. Nothing is listed
 // and nothing is picked from: the name is the admin's, the proof is GitHub's.
 // Control never comes back here on success; a refusal (the deployment has no
-// App, the workspace already holds a credential) rejects with the backend's
+// App, the org already holds a credential) rejects with the backend's
 // sentence.
 //
 // POST /api/orgs/{org_id}/github/managed/connect-account
@@ -519,9 +519,9 @@ export async function startManagedGitHubConnectAccount(
   window.location.assign(authorizeUrl)
 }
 
-// disconnectManagedGitHub moves the workspace off the deployment App: every
+// disconnectManagedGitHub moves the org off the deployment App: every
 // bound installation is released and the credential class resets, so the
-// workspace is back in its no-credential state and free to register its own
+// org is back in its no-credential state and free to register its own
 // App or bind a token. Nothing is uninstalled on GitHub — the installation
 // persists there unbound, and startManagedGitHubConnectAccount re-binds it.
 //
@@ -559,7 +559,7 @@ export async function disconnectManagedInstallation(
 // ── The two grant findings ────────────────────────────────────────────────
 // Computed server-side from the reachable-repo mirror, never by asking GitHub
 // on page load, and served as ordinary paginated lists (usePagedList over the
-// paths below). Both exist only for an App-class workspace — a PAT's reach is
+// paths below). Both exist only for an App-class org — a PAT's reach is
 // not a grant TF holds, and the routes 404 for one.
 
 // A repository the App can reach that no team tracks: TF holds write access to

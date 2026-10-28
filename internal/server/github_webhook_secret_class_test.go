@@ -18,7 +18,7 @@ import (
 // answers.
 
 // TestResolveWebhookSecret_EveryCredentialClass pins that only a BYO-App
-// workspace has a secret to find on this route.
+// org has a secret to find on this route.
 func TestResolveWebhookSecret_EveryCredentialClass(t *testing.T) {
 	ctx := context.Background()
 
@@ -58,10 +58,10 @@ func TestResolveWebhookSecret_EveryCredentialClass(t *testing.T) {
 // arm returns "" rather than the deployment's secret.
 //
 // The shared App signs EVERY tenant's deliveries with one secret. If this route
-// verified against it, a caller could put any workspace's id in the path and
+// verified against it, a caller could put any org's id in the path and
 // have GitHub's own signature let the delivery through — the receiver would
-// accept a delivery for a workspace it was never sent for, which is the tenant
-// confusion the whole epic exists to prevent. A managed workspace's deliveries
+// accept a delivery for an org it was never sent for, which is the tenant
+// confusion the whole epic exists to prevent. A managed org's deliveries
 // arrive on a route with no org in its path, which verifies first and works out
 // whose installation it was afterwards.
 //
@@ -80,7 +80,7 @@ func TestGitHubWebhook_ManagedOrg_PerOrgDeliveryIs401(t *testing.T) {
 	rec := postWebhook(s, "installation", signWith(deploymentSecret, body), body)
 
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 — a managed workspace's deliveries do not arrive on the per-org URL; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("status = %d, want 401 — a managed org's deliveries do not arrive on the per-org URL; body=%s", rec.Code, rec.Body.String())
 	}
 	if rec.Body.Len() != 0 {
 		t.Errorf("401 response has body %q, want empty — every org-dependent refusal on this route is the same bare 401", rec.Body.String())

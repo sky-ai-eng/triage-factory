@@ -36,12 +36,12 @@ operation of the product.
 
 ## Which "signing"?
 
-| You want to…                                    | Page                                                                                                                                                                                                                 |
-| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Have agents' commits show as Verified on GitHub | **Settings → Commit signing** in the app (one workspace), or the [deployment commit signer](users/self-hosting/deployment-integrations/deployment-commit-signer.md) (every workspace on the deployment's GitHub App) |
-| Rotate the key that signs login sessions        | [JWT key rotation](users/self-hosting/jwt-key-rotation.md)                                                                                                                                                           |
-| Set up the key that signs SAML requests         | [SSO](users/self-hosting/sso.md)                                                                                                                                                                                     |
-| Check a release's signature                     | [Verifying releases](users/security/verifying-releases.md)                                                                                                                                                           |
+| You want to…                                    | Page                                                                                                                                                                                                                              |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Have agents' commits show as Verified on GitHub | **Commit signing** in the organization settings (one organization), or the [deployment commit signer](users/self-hosting/deployment-integrations/deployment-commit-signer.md) (every organization on the deployment's GitHub App) |
+| Rotate the key that signs login sessions        | [JWT key rotation](users/self-hosting/jwt-key-rotation.md)                                                                                                                                                                        |
+| Set up the key that signs SAML requests         | [SSO](users/self-hosting/sso.md)                                                                                                                                                                                                  |
+| Check a release's signature                     | [Verifying releases](users/security/verifying-releases.md)                                                                                                                                                                        |
 
 ## Contributing
 

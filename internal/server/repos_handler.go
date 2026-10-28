@@ -299,7 +299,7 @@ func (s *Server) pickerCredentialClass(w http.ResponseWriter, r *http.Request, o
 	if class.AppTier() {
 		// An App with at least one installation on the org's current host is
 		// usable by definition — the installations ARE the reach, whether the App
-		// is the workspace's own or the deployment's shared one. One left on a
+		// is the org's own or the deployment's shared one. One left on a
 		// host the org has moved off reaches nothing the picker lists. A read
 		// failure here is carried rather than refused: reporting it would mean
 		// claiming "not installed", which only a successful read of zero
@@ -343,7 +343,7 @@ func (s *Server) pickerCredentialClass(w http.ResponseWriter, r *http.Request, o
 	}
 	if creds.GitHubPAT == "" || orgSet.GitHubBaseURL == "" {
 		reposLog.Warn("github not configured, no usable app installation and no pat", "org", orgID)
-		writeNotConfigured(w, "GitHub is not connected for this workspace")
+		writeNotConfigured(w, "GitHub is not connected for this organization")
 		return pickerPreflight{}, false
 	}
 	return pickerPreflight{class: class}, true
@@ -1250,7 +1250,7 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 			reposLog.Warn("github not configured", "org", orgID, "owner", owner, "repo", repo, "error", err)
-			writeNotConfigured(w, "GitHub is not connected for this workspace")
+			writeNotConfigured(w, "GitHub is not connected for this organization")
 			return
 		}
 		internalError(w, "repos", err)

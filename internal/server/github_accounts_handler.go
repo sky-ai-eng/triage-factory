@@ -82,7 +82,7 @@ func (s *Server) answerGitHubAccount(w http.ResponseWriter, r *http.Request, org
 	client, err := s.gitHubAccountClient(r.Context(), orgID)
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-			writeNotConfigured(w, "GitHub is not connected for this workspace")
+			writeNotConfigured(w, "GitHub is not connected for this organization")
 			return
 		}
 		internalError(w, "github-accounts", err)

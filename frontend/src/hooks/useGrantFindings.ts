@@ -13,7 +13,7 @@ import {
   type ScopeDriftItem,
 } from '../lib/githubApp'
 
-// The finding routes 404 for a workspace that holds no grant (a PAT one), and
+// The finding routes 404 for an org that holds no grant (a PAT one), and
 // a role that lapsed mid-session earns a 403; neither is a load failure. A
 // module constant, because the hook memoizes on it.
 const findingsListOptions = { emptyOnStatus: [403, 404] }
@@ -26,7 +26,7 @@ export interface GrantFindings {
 // useGrantFindings loads both findings when `enabled`, and again whenever
 // `bindingsKey` changes — the bound set moved (an account disconnected), so the
 // grant the findings describe moved with it. Disabled, it loads nothing: a PAT
-// workspace has no grant to have findings about, and the empty lists it holds
+// org has no grant to have findings about, and the empty lists it holds
 // are never rendered.
 export function useGrantFindings(
   orgId: string | null,

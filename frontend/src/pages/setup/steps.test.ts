@@ -259,7 +259,7 @@ describe('team-model step — collapsed summary', () => {
 // The order is the requirement, not a preference: a picker asked before the
 // credential can only offer models the org may turn out to have no way of
 // running, and its availability badges have nothing to be about. And both picks
-// are mandatory, because nothing falls back — a workspace through setup without
+// are mandatory, because nothing falls back — an org through setup without
 // them has background jobs that never run and a team whose unpinned steps refuse
 // at dispatch.
 describe('setup — credentials before the model picks, and both picks mandatory', () => {
@@ -719,7 +719,7 @@ describe('setup — the Linear tracker', () => {
   })
 })
 
-// A multi workspace's GitHub access is a GitHub App, so the wizard asks no
+// A multi org's GitHub access is a GitHub App, so the wizard asks no
 // access-method question there and never reaches the token step: the GitHub
 // section goes from the URL straight to the App source. Local keeps both.
 describe('setup — GitHub access method by mode', () => {
@@ -749,7 +749,7 @@ describe('setup — GitHub access method by mode', () => {
     expect(githubIds({ ...fresh, githubAccessTab: 'pat' })).toContain('org-github-pat')
   })
 
-  it('seeds the App method in multi, even for a workspace that holds a token', async () => {
+  it('seeds the App method in multi, even for an org that holds a token', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url: string) => {

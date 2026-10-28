@@ -174,7 +174,7 @@ and the rule it wrote into CLAUDE.md ("The path is the address") is the
 version to read — this section is its audit.
 
 What moved, for the record: `/api/setup/start` → `POST /api/orgs` (the
-local arm of the create-workspace route); the two team-settings siblings
+local arm of the create-org route); the two team-settings siblings
 the settings decomposition left behind → `/api/teams/{team_id}/`
 `github-repos` and `github-groups`; `/api/settings/user` →
 `GET|PATCH /api/me/settings`; `github/access/pat*` → `github/pat*`;

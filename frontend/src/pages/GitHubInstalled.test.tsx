@@ -1,5 +1,5 @@
 // The recovery page for an installation of the deployment GitHub App that no
-// workspace has bound. What's pinned here is the ticket's contract: the page
+// org has bound. What's pinned here is the ticket's contract: the page
 // describes an ordinary outcome (never a failure), offers the ORDINARY Connect
 // ceremony and nothing else — no adopt path, no list to pick from — and renders
 // nothing about the installation that sent the visitor here, because on a
@@ -55,7 +55,7 @@ describe('GitHubInstalled', () => {
   it('describes the installed-but-unbound state without calling it a failure', () => {
     renderAt()
     expect(screen.getByRole('heading', { name: 'GitHub App installed' })).toBeInTheDocument()
-    expect(screen.getByText(/isn.t connected to a workspace yet/i)).toBeInTheDocument()
+    expect(screen.getByText(/isn.t connected to an organization yet/i)).toBeInTheDocument()
     expect(document.body.textContent).not.toMatch(FAULT_WORDS)
   })
 
@@ -78,21 +78,21 @@ describe('GitHubInstalled', () => {
 
   it('surfaces a refused start inline and stays put', async () => {
     connect.startManagedGitHubConnectAccount.mockRejectedValue(
-      new Error('This workspace already has a GitHub personal access token.'),
+      new Error('This organization already has a GitHub personal access token.'),
     )
     renderAt()
     fireEvent.click(screen.getByRole('button', { name: 'Connect GitHub to Acme' }))
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'acme-corp' } })
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
     expect(
-      await screen.findByText('This workspace already has a GitHub personal access token.'),
+      await screen.findByText('This organization already has a GitHub personal access token.'),
     ).toBeInTheDocument()
     expect(screen.getByRole('textbox')).toBeInTheDocument()
   })
 
-  it('links back to the workspace settings surface that carries the same button', () => {
+  it('links back to the organization settings surface that carries the same button', () => {
     renderAt()
-    expect(screen.getByRole('link', { name: /workspace settings/i })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: /organization settings/i })).toHaveAttribute(
       'href',
       '/orgs/org-1/settings#github-app',
     )
@@ -112,11 +112,11 @@ describe('GitHubInstalled', () => {
     authState.orgs = [{ id: 'org-1', name: 'Acme', role: 'member' }]
     renderAt()
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
-    expect(screen.getByText(/takes a workspace admin/i)).toBeInTheDocument()
+    expect(screen.getByText(/takes an org admin/i)).toBeInTheDocument()
     expect(document.body.textContent).not.toMatch(FAULT_WORDS)
   })
 
-  it('lets a member of several workspaces choose which one to connect from', () => {
+  it('lets a member of several organizations choose which one to connect from', () => {
     authState.orgs = [
       { id: 'org-1', name: 'Acme', role: 'admin' },
       { id: 'org-2', name: 'Globex', role: 'admin' },
@@ -138,7 +138,7 @@ describe('GitHubInstalled', () => {
     expect(screen.getByRole('heading', { name: 'Install request sent' })).toBeInTheDocument()
     expect(screen.getByText(/once they approve it/i)).toBeInTheDocument()
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /workspace settings/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /organization settings/i })).toBeInTheDocument()
     expect(document.body.textContent).not.toMatch(FAULT_WORDS)
   })
 })

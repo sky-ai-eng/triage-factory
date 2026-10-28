@@ -13,7 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
 )
 
-// The deployment App — one App key serving many workspaces — keeps its identity
+// The deployment App — one App key serving many orgs — keeps its identity
 // and key in the operator's environment rather than in the schema. It is
 // operator config in the same class as the GoTrue signing material: a secret
 // store is keyed (orgID, key) by construction and a deployment secret has no

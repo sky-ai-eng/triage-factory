@@ -32,7 +32,7 @@ export default function GitHubAppImportForm({
   // Gates the webhook-secret field — multi mode receives deliveries (so a
   // webhook secret is meaningful); local is hookless (backfill discovery), so
   // the field is hidden there. Also decides whether the client secret is
-  // required: in multi every workspace's App must let members sign in with
+  // required: in multi every org's App must let members sign in with
   // GitHub to link their accounts, and the server refuses an import without
   // one.
   isLocal: boolean
@@ -240,7 +240,7 @@ export default function GitHubAppImportForm({
       </div>
 
       {/* The OAuth client secret. Required in multi mode, where every
-          workspace's App must let members sign in with GitHub to link their
+          org's App must let members sign in with GitHub to link their
           accounts, so it is a plain field there; optional in local, where
           identity capture falls back to a token, so it sits behind a
           collapsible, recommended section. */}
@@ -302,7 +302,7 @@ export default function GitHubAppImportForm({
           The copy names the CONSEQUENCE, not the field. Skipping this is
           accepted silently and then rejects every delivery GitHub sends, which
           leaves installation tracking to the periodic sync — the field being
-          "(optional)" is true of the form and misleading about the workspace.
+          "(optional)" is true of the form and misleading about the org.
           The Settings panel's webhook-health line is where that shows up
           afterwards; this is where it can still be avoided. */}
       {!isLocal && (
@@ -324,8 +324,8 @@ export default function GitHubAppImportForm({
           <span className="block text-reported leading-relaxed text-ink-3">
             Paste the secret set on the App&rsquo;s webhook so Triage Factory can verify deliveries
             are genuine. Without it every delivery is rejected: installs, uninstalls and suspensions
-            reach this workspace only on the next periodic sync. Leave blank only if the App has no
-            webhook secret — you can add one on GitHub and import again.
+            reach this organization only on the next periodic sync. Leave blank only if the App has
+            no webhook secret — you can add one on GitHub and import again.
           </span>
         </label>
       )}

@@ -94,7 +94,7 @@ func TestTfSystem_OffSurfaceReadDenied(t *testing.T) {
 // write the deployment signer's health. Every reader is a control pod: the
 // resolution that seals a bundle or decides a signature, the brain's checks,
 // and the fleet console. An executor that could write the row could mark a
-// broken signer active for every managed workspace's next signature.
+// broken signer active for every managed org's next signature.
 func TestTfSystem_DeploymentSignerUnreachable(t *testing.T) {
 	h := Shared(t)
 

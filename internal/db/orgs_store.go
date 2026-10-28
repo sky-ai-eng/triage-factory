@@ -211,7 +211,7 @@ type OrgsStore interface {
 
 	// AdoptSourceBaseURL writes baseURL as kind's host only when the org has
 	// no host stored for kind — the write a credential bind makes when the
-	// credential decides the host and the workspace has not named one. It
+	// credential decides the host and the org has not named one. It
 	// never replaces a host:
 	//
 	//   - no host stored: writes baseURL, bumps the version as

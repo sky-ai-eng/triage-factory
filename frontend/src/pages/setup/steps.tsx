@@ -226,7 +226,7 @@ async function fetchIntegrationsState(): Promise<{
 // seed from the connection signals: a connected org has, by definition, a
 // previously-confirmed URL and access, so it resumes past those steps; the
 // access tab defaults to PAT for an org with a stored token, else App. In multi
-// mode it is always App: a multi workspace's GitHub access is a GitHub App, so
+// mode it is always App: a multi org's GitHub access is a GitHub App, so
 // there is no choice to make and no token step to reach.
 export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
   if (!ctx.orgId) throw new Error('Could not load organization settings')
@@ -265,7 +265,7 @@ export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
     // A returning org pre-selects its method (PAT if a token is stored, else App
     // when already connected); a fresh org starts unselected so the picker opens
     // with neither chosen and advances on the first click. Multi has no picker:
-    // the method is App, even for a workspace that holds a token, whose way out
+    // the method is App, even for an org that holds a token, whose way out
     // is registering or importing one.
     githubAccessTab: !ctx.isLocal
       ? 'app'
@@ -479,7 +479,7 @@ const githubUrlStep: WizardStep = {
     // Persist the base URL now: it is what both access paths read. The App
     // registration derives its host from the stored value, and the PAT bind
     // validates the token against it — neither carries a host of its own, so
-    // this step is where the workspace commits to one. The save names only the
+    // this step is where the org commits to one. The save names only the
     // URL, so the intervals / model cap are untouched by construction.
     if (!orgId) throw new Error('Settings didn’t load — retry before saving.')
     const settings = await saveOrgSlice({ state, patch, orgId }, { github_url: url })
@@ -1656,7 +1656,7 @@ export async function loadUserIdentity(ctx: LoadContext): Promise<Partial<Wizard
 
 // Step · Your GitHub identity (the sole User-section step). Captures the
 // signed-in user's own @login on the org's host — PAT_2, independent of the
-// org's PAT_1 credential. Connect (one click) through the workspace's own App or
+// org's PAT_1 credential. Connect (one click) through the org's own App or
 // the deployment's; in local mode a PAT_2 paste too. Either way the end state is
 // a verified user_github_identities row with no token retained. The Connect
 // button (in the body) is an external OAuth redirect that returns to /setup; the
@@ -1741,7 +1741,7 @@ export async function loadJiraUserAccess(ctx: LoadContext): Promise<Partial<Wiza
 // get a one-click Connect button instead (see JiraUserAccessStep.tsx). The PAT
 // path is this step's Continue, which validates the token, stores it, and
 // derives the account. Mandatory while visible: the wizard can't finish a
-// Jira-tracked workspace until the user has bound their own access.
+// Jira-tracked org until the user has bound their own access.
 const jiraUserAccessStep: WizardStep = {
   id: 'user-jira-access',
   section: 'user',
@@ -1817,7 +1817,7 @@ export async function loadLinearUserAccess(ctx: LoadContext): Promise<Partial<Wi
 // connected tracker). The Jira user step's sibling: the credential is STORED,
 // because Triage Factory acts as each person in Linear. One-click Connect is
 // an external redirect (LinearUserAccessStep.tsx); the key paste is this
-// step's Continue. Mandatory while visible: a Linear-tracked workspace can't
+// step's Continue. Mandatory while visible: a Linear-tracked org can't
 // finish setup until the user has bound their own access.
 const linearUserAccessStep: WizardStep = {
   id: 'user-linear-access',

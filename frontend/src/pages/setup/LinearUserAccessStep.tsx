@@ -88,7 +88,7 @@ export function LinearUserAccessStep({ state, patch, orgId, error }: StepContext
         </label>
         <p className="text-reported leading-relaxed text-ink-3">
           Create a key in Linear under Settings → Account → Security &amp; Access. Whichever way you
-          connect, your key or token is stored in your workspace&rsquo;s secret store so Triage
+          connect, your key or token is stored in your organization&rsquo;s secret store so Triage
           Factory can act as you, and is never shared with other users.
         </p>
       </div>

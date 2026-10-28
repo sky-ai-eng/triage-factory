@@ -6,7 +6,7 @@
 //
 // Two capture paths, both ending in the identical state (a verified identity
 // row, no token retained):
-//   - Connect (one-click OAuth) through the workspace's own GitHub App, or in
+//   - Connect (one-click OAuth) through the org's own GitHub App, or in
 //     multi mode the deployment's App.
 //   - PAT_2 paste, local mode only: the wizard's Continue validates the token,
 //     reads the login, and discards it. Multi mode links identity through
@@ -74,8 +74,8 @@ export function UserIdentityStep({ state, patch, orgId, isLocal, error }: StepCo
 
       {!isLocal && !state.userConnectAvailable && (
         <p className="text-body leading-relaxed text-ink-3">
-          GitHub isn&rsquo;t connected for this workspace yet. Once an admin connects it in
-          Workspace Settings, come back here to connect your account.
+          GitHub isn&rsquo;t connected for this organization yet. Once an admin connects it in
+          organization settings, come back here to connect your account.
         </p>
       )}
 

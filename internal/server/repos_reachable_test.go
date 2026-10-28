@@ -619,12 +619,12 @@ func TestGitHubReposRefreshForcesPastTheTTL(t *testing.T) {
 	}
 }
 
-// seedManagedWorkspace makes the local org one that rides the deployment's
+// seedManagedOrg makes the local org one that rides the deployment's
 // shared App: the class, and the installations it bound. There is deliberately
 // no org_github_apps row — that table is one row per org with a UNIQUE app_id,
-// so a workspace on a shared App cannot hold one, which is the whole reason the
+// so an org on a shared App cannot hold one, which is the whole reason the
 // class is a stated column rather than an inference from row presence.
-func seedManagedWorkspace(t *testing.T, s *Server, installationIDs ...string) {
+func seedManagedOrg(t *testing.T, s *Server, installationIDs ...string) {
 	t.Helper()
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
@@ -644,16 +644,16 @@ func seedManagedWorkspace(t *testing.T, s *Server, installationIDs ...string) {
 	}
 }
 
-// The picker read for a workspace on the deployment's shared App. It used to
+// The picker read for an org on the deployment's shared App. It used to
 // fail before it read a row: the class resolved to a refusal, and the handler
 // treats an unresolvable class as fatal — deliberately, since showing another
 // credential system's idea of the reach is worse than showing an error. With the
 // mirror able to hold the class, it is an ordinary store-backed list with a real
 // count, and nothing about the response distinguishes it from any other tier.
-func TestPickerServesAManagedWorkspaceFromTheMirror(t *testing.T) {
+func TestPickerServesAManagedOrgFromTheMirror(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
-	seedManagedWorkspace(t, srv, "111")
+	seedManagedOrg(t, srv, "111")
 	if err := srv.reachableRepos.ReplaceForInstallationSystem(context.Background(),
 		runmode.LocalDefaultOrgID, domain.GitHubCredentialClassManagedApp, seedRepoHost(t, srv), "111",
 		[]domain.ReachableRepository{
@@ -665,7 +665,7 @@ func TestPickerServesAManagedWorkspaceFromTheMirror(t *testing.T) {
 
 	rec := doJSON(t, srv, http.MethodPost, "/api/github/repos/list", map[string]any{})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("picker = %d for a managed workspace; want 200; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("picker = %d for a managed org; want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var page pickerPage
 	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
@@ -682,19 +682,19 @@ func TestPickerServesAManagedWorkspaceFromTheMirror(t *testing.T) {
 	}
 }
 
-// A managed workspace that has bound nothing is told what will help. Its
-// usability is its installations, exactly as for a workspace on its own App, and
+// A managed org that has bound nothing is told what will help. Its
+// usability is its installations, exactly as for an org on its own App, and
 // the PAT tier's "GitHub is not connected" would read as "add a token" — the one
-// thing that cannot help a workspace whose credential is an App it has yet to
+// thing that cannot help an org whose credential is an App it has yet to
 // install anywhere.
-func TestPickerManagedWorkspaceWithNothingBoundIsNotToldToAddAToken(t *testing.T) {
+func TestPickerManagedOrgWithNothingBoundIsNotToldToAddAToken(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
-	seedManagedWorkspace(t, srv)
+	seedManagedOrg(t, srv)
 
 	rec := doJSON(t, srv, http.MethodPost, "/api/github/repos/list", map[string]any{})
 	if rec.Code != http.StatusConflict {
-		t.Fatalf("picker = %d for a managed workspace with nothing bound; want 409; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("picker = %d for a managed org with nothing bound; want 409; body=%s", rec.Code, rec.Body.String())
 	}
 	if body := rec.Body.String(); !strings.Contains(body, "not installed on any account") {
 		t.Errorf("refusal = %s; want the one that names the installation", body)

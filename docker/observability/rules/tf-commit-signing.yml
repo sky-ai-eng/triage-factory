@@ -86,7 +86,7 @@ groups:
       # active while the others are. A signer just configured reads 0 until
       # its first check finds the key, which takes seconds; the 15 minutes
       # covers that and a check retrying. Critical: only the operator can fix
-      # it, and managed workspaces commit unsigned until they do.
+      # it, and managed organizations commit unsigned until they do.
       - alert: DeploymentCommitSignerDown
         expr: min(tf_deployment_commit_signer_up) == 0
         for: 15m
@@ -96,7 +96,7 @@ groups:
           summary: "The deployment commit signer is not active"
           description: >-
             At least one control pod's deployment signer is not active, and
-            the workspaces on the deployment GitHub App commit unsigned
+            the organizations on the deployment GitHub App commit unsigned
             through that pod until it is. Run triagefactory commit-signer
             status in each control container for the reason, and
             triagefactory commit-signer verify to check it again once fixed.

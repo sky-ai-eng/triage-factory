@@ -24,7 +24,7 @@ import (
 //
 // AlreadyProvisioned is the local arm's answer to "did this call do the
 // work, or find it already done" — the route is idempotent there (one
-// workspace per install), so a caller that cares needs it said. Multi
+// org per install), so a caller that cares needs it said. Multi
 // mode always creates a net-new org, so it is always false; the field is
 // present in both arms rather than omitempty so the route answers one
 // shape in every state.
@@ -84,7 +84,7 @@ func (s *Server) handleOrgGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, orgJSON{ID: org.ID, Name: org.Name, Role: role})
 }
 
-// handleOrgCreate is the "Start your Factory" create-workspace action —
+// handleOrgCreate is the "Start your Factory" create-org action —
 // the destination of the onboarding entry's CTA in both modes. What it
 // does is create the tenant a user works in; the modes differ only in
 // how much of one there is to create.
@@ -106,7 +106,7 @@ func (s *Server) handleOrgGet(w http.ResponseWriter, r *http.Request) {
 // Any authed user may create an org — the data model already allows a
 // user to own multiple. Returns 403 when org creation is disabled on the
 // instance (defense-in-depth behind the UI gate); local is never gated,
-// since refusing there would leave the install with no workspace at all.
+// since refusing there would leave the install with no org at all.
 func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
 		s.createLocalOrg(w, r)
@@ -239,7 +239,7 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) createLocalOrg(w http.ResponseWriter, r *http.Request) {
 	alreadyProvisioned, err := s.ensureLocalOrgProvisioned(r.Context())
 	if err != nil {
-		internalError(w, "orgs", fmt.Errorf("provision local workspace: %w", err))
+		internalError(w, "orgs", fmt.Errorf("provision local organization: %w", err))
 		return
 	}
 

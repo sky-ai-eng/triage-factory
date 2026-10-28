@@ -572,7 +572,7 @@ func (s *gitHubAppsStore) clearAppUnusable(ctx context.Context, orgID, appID str
 	return nil
 }
 
-// RefreshManagedInstallations reconciles a workspace that rides the DEPLOYMENT
+// RefreshManagedInstallations reconciles an org that rides the DEPLOYMENT
 // App. See the GitHubAppsStore interface doc for the invariant it holds: the
 // managed reconcile refreshes bound rows and creates none.
 //
@@ -585,7 +585,7 @@ func (s *gitHubAppsStore) RefreshManagedInstallations(ctx context.Context, orgID
 	// An id that is not a uuid names no org, and an org this method cannot
 	// identify is one it must not reconcile. Refused rather than skipped —
 	// unlike the discovering sibling, which is invoked speculatively per poll
-	// cycle, every caller of this one asked for a specific workspace.
+	// cycle, every caller of this one asked for a specific org.
 	//
 	// The refusal is what matters, not this guard: org_id is a uuid column, so
 	// without it the settings read below fails on the cast instead, which is the
@@ -618,7 +618,7 @@ func (s *gitHubAppsStore) RefreshManagedInstallations(ctx context.Context, orgID
 	if err != nil {
 		return err
 	}
-	// Nothing bound is the ordinary state of a workspace that has not completed
+	// Nothing bound is the ordinary state of an org that has not completed
 	// a bind, and there is nothing a listing could tell us about it: no row to
 	// refresh, and creating one is the thing this method may never do. Answered
 	// without spending the API call.
@@ -650,7 +650,7 @@ func (s *gitHubAppsStore) RefreshAllManagedInstallations(ctx context.Context, de
 	if err != nil {
 		return err
 	}
-	// No managed workspace holds a bound installation: no row to refresh, and
+	// No managed org holds a bound installation: no row to refresh, and
 	// nothing a listing could add without discovering. Answered before the
 	// deployment App is even consulted, so a deployment whose orgs all bring
 	// their own App never minds that it has none.
@@ -666,7 +666,7 @@ func (s *gitHubAppsStore) RefreshAllManagedInstallations(ctx context.Context, de
 	)
 }
 
-// managedInstallationSets reads every managed workspace's live bound
+// managedInstallationSets reads every managed org's live bound
 // installations — id and host — alongside the GitHub base URL the org lists
 // against, grouped by org; ScanManagedInstallationSets keeps as Bound the ones
 // on the org's own host. An org with nothing bound contributes no set: there is

@@ -62,7 +62,7 @@ type Identity struct {
 // the spawner starting a local run, and every signature, which resolves again
 // rather than trusting what the run started with. GitHub resolves the
 // identity an org without a signer commits as; nil resolves none. Deployment
-// resolves a workspace on the deployment App to the deployment's signer; nil,
+// resolves an org on the deployment App to the deployment's signer; nil,
 // as in local mode, on an executor and on a control pod configured with none,
 // resolves no deployment arm.
 type Resolver struct {
@@ -73,7 +73,7 @@ type Resolver struct {
 
 // DeploymentArm is what resolving the deployment signer reads: this control
 // pod's configured signer, the store its health is kept in, and the org
-// settings that say whether a workspace is on the deployment App.
+// settings that say whether an org is on the deployment App.
 type DeploymentArm struct {
 	Signer *DeploymentSigner
 	Health db.DeploymentCommitSignerStore
@@ -86,7 +86,7 @@ type DeploymentArm struct {
 //     the key's health, so a pending or broken signer still authors the
 //     commits, unsigned. Only an active one signs. An org's own signer always
 //     wins, and one that cannot sign never falls back to the deployment's.
-//   - for a workspace on the deployment App, the deployment's signer, by the
+//   - for an org on the deployment App, the deployment's signer, by the
 //     same rule: once a check has read its account it authors the commits
 //     in any status, and signs while it is active.
 //   - the identity the org commits as without a signer: the App's bot or the

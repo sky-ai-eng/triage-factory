@@ -564,7 +564,7 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, conv
 }
 
 // SetDeploymentSigner gives the provisioner the deployment's commit signer, so
-// a workspace on the deployment App with no signer of its own seals it. Call
+// an org on the deployment App with no signer of its own seals it. Call
 // it before the first seal.
 func (m *Manager) SetDeploymentSigner(d *commitsigner.DeploymentSigner) {
 	m.deploymentSigner = d
@@ -572,7 +572,7 @@ func (m *Manager) SetDeploymentSigner(d *commitsigner.DeploymentSigner) {
 
 // commitIdentity is the identity the run's commits are authored and committed
 // as, and how they are signed (commitsigner.Resolver): the org's signer when
-// it has one, else, for a workspace on the deployment App, the deployment's
+// it has one, else, for an org on the deployment App, the deployment's
 // signer, else the App's bot or the PAT's owner. A signer that cannot be read
 // fails the seal rather than sealing the identity the signer would have
 // replaced; the sweeps seal again. With no signer store wired it is the org's

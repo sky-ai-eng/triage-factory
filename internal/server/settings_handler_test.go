@@ -597,10 +597,10 @@ func TestOrgSettingsPatch_RetargetGitHubURLWithPAT_409(t *testing.T) {
 	}
 }
 
-// TestOrgSettingsPatch_RetargetGitHubURLWithInstallation: a workspace bound to
+// TestOrgSettingsPatch_RetargetGitHubURLWithInstallation: an org bound to
 // the deployment's App holds the host its installations are on, like a token or
 // a registration does — moving off it is refused while one is bound there. An
-// installation the workspace left on some other GitHub records its own host and
+// installation the org left on some other GitHub records its own host and
 // is not stranded by the move, so it holds nothing in place.
 func TestOrgSettingsPatch_RetargetGitHubURLWithInstallation(t *testing.T) {
 	for _, tc := range []struct {

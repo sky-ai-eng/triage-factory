@@ -61,7 +61,7 @@ type Server struct {
 	githubDeliveries db.GitHubDeliveryStore  // applied webhook deliveries, so a redelivery is dropped before the mirror write and the bus publish
 	// githubPendingBinds holds the in-flight deployment-App bind ceremonies —
 	// the durable half of the CSRF pair the managed-bind callback consumes to
-	// learn which workspace a returning installation belongs to.
+	// learn which org a returning installation belongs to.
 	githubPendingBinds db.GitHubPendingBindStore
 
 	// deploymentApp is the deployment's own GitHub App credential, read once
@@ -331,8 +331,8 @@ type Server struct {
 	jiraCredentialMu sync.Map // map[orgID]chan struct{}, db.AcquireKeyedLock's gates
 
 	// githubInstallationBindMu is the same mechanism over a different keyspace:
-	// one installation on one GitHub host, rather than one workspace. The
-	// managed bind's uniqueness check asks a question ACROSS workspaces — does
+	// one installation on one GitHub host, rather than one org. The
+	// managed bind's uniqueness check asks a question ACROSS orgs — does
 	// any other org already hold this installation — which a per-org lock
 	// cannot serialize, because the two racers hold different org keys.
 	// Local-mode half of acquireKeyedLock; reach it only through that.
@@ -581,7 +581,7 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	// direction.
 	deploymentApp, err := githubapp.DeploymentAppFromEnv()
 	if err != nil {
-		serverLog.Error("read deployment github app from the environment failed; managed-class orgs will resolve nothing and no workspace can bind one",
+		serverLog.Error("read deployment github app from the environment failed; managed-class orgs will resolve nothing and no organization can bind one",
 			"error", err)
 		deploymentApp = githubapp.DeploymentApp{}
 	}
@@ -873,7 +873,7 @@ func (s *Server) routes() {
 	// from the session and there is no id to address.
 	s.api("GET /api/me/settings", s.handleMeSettingsGet)
 	s.apiMutating("PATCH /api/me/settings", s.handleMeSettingsPatch)
-	// Create the workspace — the "Start your Factory" onboarding CTA in
+	// Create the org — the "Start your Factory" onboarding CTA in
 	// both modes. Multi mints a net-new org (403 when org creation is
 	// disabled on the instance); local provisions its single synthetic
 	// tenant, idempotently.
@@ -1422,7 +1422,7 @@ func (s *Server) routes() {
 	// launch/callback), so it rides apiMutating (CSRF). Org-admin (gated
 	// inside the handler).
 	s.apiMutating("POST /api/orgs/{org_id}/github/app/import", s.handleGitHubAppImport)
-	// Read-only status + install deep-link for the Workspace Settings panel.
+	// Read-only status + install deep-link for the organization settings panel.
 	// Any org member (read), so RequireOrgMember rather than RequireOrgAdmin.
 	s.api("GET /api/orgs/{org_id}/github/app", s.handleGitHubAppStatus)
 	s.api("GET /api/orgs/{org_id}/github/app/install-url", s.handleGitHubAppInstallURL)
@@ -1443,14 +1443,14 @@ func (s *Server) routes() {
 	// cannot reach. Paginated list reads (POST because the paging pair is a
 	// body), org-admin, side-effect-free — opening the panel never asks
 	// GitHub anything. Under github/grant rather than github/app because the
-	// grant is what they are about, whichever App holds it: a workspace on
+	// grant is what they are about, whichever App holds it: an org on
 	// the deployment's App has no App resource of its own and the same two
 	// findings. See github_grant_findings.go.
 	s.apiMutating("POST /api/orgs/{org_id}/github/grant/reach-without-purpose/list", s.handleGitHubGrantReachWithoutPurposeList)
 	s.apiMutating("POST /api/orgs/{org_id}/github/grant/scope-drift/list", s.handleGitHubGrantScopeDriftList)
 
-	// The bind ceremony — how a workspace claims an installation of the
-	// DEPLOYMENT App, the one key that serves many workspaces. Multi-mode only
+	// The bind ceremony — how an org claims an installation of the
+	// DEPLOYMENT App, the one key that serves many orgs. Multi-mode only
 	// (a local binary ships no shared key). Both halves are top-level browser
 	// navigations rather than fetches, so neither takes the CSRF origin check:
 	// the callback arrives from github.com, and that gate would reject the very
@@ -1459,7 +1459,7 @@ func (s *Server) routes() {
 	// and the only one that survives the GitHub round trip.
 	//
 	// The callback carries NO org id, and that is forced: a GitHub App has one
-	// registered callback URL for the whole deployment, so the workspace comes
+	// registered callback URL for the whole deployment, so the org comes
 	// from the consumed pending-bind record rather than from the path.
 	//
 	// It is also mounted RAW rather than through s.api, and takes withSession
@@ -1497,9 +1497,9 @@ func (s *Server) routes() {
 	//   - pat/switch-to: full App teardown, validate + store the new PAT.
 	//   - DELETE github/app: discard a staged (not-yet-live) registration.
 	//   - app/disconnect: full teardown of the LIVE App with nothing bound
-	//     after it — the way out for a workspace moving to the deployment's
+	//     after it — the way out for an org moving to the deployment's
 	//     App. Its own route rather than a widening of the discard, because
-	//     the two are different intents: one leaves the workspace running on
+	//     the two are different intents: one leaves the org running on
 	//     its token, the other takes it dark until something else is bound.
 	//   - app/cutover-preflight, pat/preflight: inform-only reachability
 	//     diffs, each under the flavor it is a preflight for.

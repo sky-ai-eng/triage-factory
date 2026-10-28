@@ -32,26 +32,26 @@
 //
 // Three credential classes render here, and the affordances are per class:
 //
-//   - A workspace with its OWN App: its slug, its installations (with
+//   - An org with its OWN App: its slug, its installations (with
 //     suspension and grant width), both grant findings, and (local mode) the
 //     switch to a token. An App GitHub no longer accepts — deleted there, or
 //     its key deleted there — replaces all of that with what happened and the
 //     ways out, since installations and findings describe an App that is gone.
-//   - A workspace on the DEPLOYMENT's App (multi mode): no App of its own to
+//   - An org on the DEPLOYMENT's App (multi mode): no App of its own to
 //     show and none to register or import — the same treatment the Atlassian
 //     card gives "using the deployment app". What it has is the accounts it
 //     bound, each with its own Disconnect, the findings, Connect for another
-//     account, and Disconnect for the whole workspace: the way out for one that
+//     account, and Disconnect for the whole org: the way out for one that
 //     wants its own App instead. The grant stays on GitHub either way; the copy
 //     says so and links there.
-//   - A workspace with a TOKEN, or nothing: neither finding — a token's reach
+//   - An org with a TOKEN, or nothing: neither finding — a token's reach
 //     is not a grant TF holds — and, with nothing bound, every way in at once:
 //     Connect (only when the deployment offers an App; a default, never the
 //     only option), register, import, or (local mode) a token.
 //
 // Multi mode offers no way to add, replace or switch to a token in any state:
-// a multi workspace's GitHub access is an App, and the server has no route
-// that puts a token in place there. A multi workspace that holds a token
+// a multi org's GitHub access is an App, and the server has no route
+// that puts a token in place there. A multi org that holds a token
 // anyway keeps "Switch to GitHub App…", its way out.
 
 import { useState } from 'react'
@@ -89,7 +89,7 @@ import type { StepContext } from '../../setup/types'
 // The guided-switch state machine. `idle` shows the live mode + the switch
 // affordance (or the staged banner); the rest are the stepper screens, split by
 // direction, with the two `rotate-*` screens serving the same-mode PAT
-// replacement — and, for a workspace with nothing bound, the first token bind,
+// replacement — and, for an org with nothing bound, the first token bind,
 // which is the same two screens (validate, show the reach, commit through the
 // credential's PUT) under different words. The register screen is transient —
 // clicking Register redirects away, and the user returns to `idle` on the
@@ -136,7 +136,7 @@ export default function GitHubAccessControl({
 }) {
   const orgId = ctx.orgId
   const s = ctx.state
-  // Whether any way to a workspace token is offered. Local only: see the
+  // Whether any way to an org token is offered. Local only: see the
   // header.
   const offerToken = ctx.isLocal
   const registered = s.githubAppRegistered
@@ -167,7 +167,7 @@ export default function GitHubAccessControl({
   // fact about the deployment, and until the status read answers, the empty
   // state offers the three paths every deployment has.
   const deploymentAppAvailable = installStatus?.deployment_app_available ?? false
-  // Whether GitHub still accepts the workspace's own App, as the backend's
+  // Whether GitHub still accepts the org's own App, as the backend's
   // installation reconcile last found. Only the status read carries it, so
   // until that read answers the App renders as it otherwise would.
   const unusableReason = installStatus?.app?.unusable_reason ?? null
@@ -356,7 +356,7 @@ export default function GitHubAccessControl({
     }
   }
 
-  // ── Deployment App: disconnect one account, or the whole workspace ──
+  // ── Deployment App: disconnect one account, or the whole org ──
   // The two verbs behind the managed panel's only destructive affordances.
   // Nothing is uninstalled on GitHub — the installation persists there
   // unbound — so the confirm says so. Afterwards the live status is re-read
@@ -366,8 +366,8 @@ export default function GitHubAccessControl({
   const disconnectManaged = async (only?: GitHubAppInstallation) => {
     if (!orgId || busy) return
     const question = only
-      ? `Disconnect @${only.account_login} from this workspace? The App stays installed on GitHub; Triage Factory just stops using it here.`
-      : 'Disconnect this workspace from the deployment’s GitHub App? Every connected account is released. The App stays installed on GitHub.'
+      ? `Disconnect @${only.account_login} from this organization? The App stays installed on GitHub; Triage Factory just stops using it here.`
+      : 'Disconnect this organization from the deployment’s GitHub App? Every connected account is released. The App stays installed on GitHub.'
     if (!confirm(question)) return
     setBusy(true)
     setError(null)
@@ -414,7 +414,7 @@ export default function GitHubAccessControl({
         : 'It no longer exists on GitHub, so nothing changes there.'
     if (
       !confirm(
-        `Remove ${app} from this workspace? ${onGitHub} Until GitHub is connected again, this workspace has no GitHub access.`,
+        `Remove ${app} from this organization? ${onGitHub} Until GitHub is connected again, this organization has no GitHub access.`,
       )
     )
       return
@@ -443,7 +443,7 @@ export default function GitHubAccessControl({
 
   // ── Own App: switch to the deployment's ──
   // The account is asked for first, then the teardown verb, then the
-  // ceremony for that account — one gesture. The workspace holds no
+  // ceremony for that account — one gesture. The org holds no
   // credential for the length of the trip to GitHub; the app shell treats
   // that as setup left unfinished and routes an admin who comes back without
   // an account connected into the setup wizard, which is why the confirm says
@@ -454,7 +454,7 @@ export default function GitHubAccessControl({
     if (!orgId) return false
     if (
       !confirm(
-        `Switch this workspace to the deployment’s GitHub App, connecting ${account}? ${slug ? `The ${slug} App` : 'Your App'} is disconnected first${unusableReason === 'missing' ? '' : ' (it stays registered on GitHub)'}, then you confirm on GitHub. If you leave GitHub without finishing, this workspace has no GitHub access and you’ll be taken back to setup.`,
+        `Switch this organization to the deployment’s GitHub App, connecting ${account}? ${slug ? `The ${slug} App` : 'Your App'} is disconnected first${unusableReason === 'missing' ? '' : ' (it stays registered on GitHub)'}, then you confirm on GitHub. If you leave GitHub without finishing, this organization has no GitHub access and you’ll be taken back to setup.`,
       )
     )
       return false
@@ -833,7 +833,7 @@ export default function GitHubAccessControl({
           <GitHubInstallationList installations={installations} drift={findings.drift} />
           <GitHubGrantFindings findings={findings} />
           {error && <p className="text-ui text-alarm">{error}</p>}
-          {/* The ways off the workspace's own App: the deployment's App where
+          {/* The ways off the org's own App: the deployment's App where
               the deployment offers one, or (local mode) a token. Never a bare
               teardown — see disconnectOwnAppFor. */}
           {((deploymentAppAvailable && orgId) || offerToken) && (
@@ -861,9 +861,9 @@ export default function GitHubAccessControl({
         </>
       ) : managed ? (
         // The deployment's App. Nothing here registers or imports an App —
-        // this workspace rides the operator's — and nothing lists what the
+        // this org rides the operator's — and nothing lists what the
         // shared App can see: the only installations named are the ones this
-        // workspace has bound. Zero of them is an ordinary state (a request an
+        // org has bound. Zero of them is an ordinary state (a request an
         // owner has yet to approve, an install made from GitHub's side that
         // nobody has connected, an uninstall) rather than a fault, and the way
         // out of it is the same Connect button that binds a first account.
@@ -872,15 +872,15 @@ export default function GitHubAccessControl({
             {installCount === 0 ? (
               <>
                 Triage Factory connects to GitHub through this deployment&rsquo;s GitHub App, but no
-                GitHub account is connected to this workspace yet. Connect GitHub to install the App
-                on an account &mdash; or, if the App is already installed there, to attach that
-                installation to this workspace.
+                GitHub account is connected to this organization yet. Connect GitHub to install the
+                App on an account &mdash; or, if the App is already installed there, to attach that
+                installation to this organization.
               </>
             ) : (
               <>
                 Triage Factory connects to GitHub through this deployment&rsquo;s GitHub App,
                 installed on {installCount} account{installCount === 1 ? '' : 's'} connected to this
-                workspace. Which repositories each account grants is chosen on GitHub&rsquo;s
+                organization. Which repositories each account grants is chosen on GitHub&rsquo;s
                 installation page, never here.
               </>
             )}
@@ -900,7 +900,7 @@ export default function GitHubAccessControl({
                 label={installCount === 0 ? 'Connect GitHub…' : 'Connect another account…'}
                 disabled={busy}
               />
-              {/* The way out of the class, for a workspace that wants its own
+              {/* The way out of the class, for an org that wants its own
                   App instead. It releases every bound account; the
                   installations stay on GitHub. */}
               <button
@@ -952,11 +952,11 @@ export default function GitHubAccessControl({
       ) : (
         // Nothing bound. Every way in is offered at once, none hidden behind
         // another: the deployment's App when the deployment has one (the fast
-        // path — a default, never a mandate), an App of the workspace's own,
+        // path — a default, never a mandate), an App of the org's own,
         // an existing App, or (local mode) a token.
         <>
           <p className="text-body leading-relaxed text-ink-3">
-            GitHub access isn&rsquo;t configured for this workspace yet.{' '}
+            GitHub access isn&rsquo;t configured for this organization yet.{' '}
             {deploymentAppAvailable ? (
               <>
                 Connect GitHub to use this deployment&rsquo;s App, or set up a GitHub App of your
@@ -1061,7 +1061,7 @@ function PanelNotice({ headline, children }: { headline: string; children: React
   )
 }
 
-// GitHubAppUnusableNotice says that GitHub no longer accepts the workspace's
+// GitHubAppUnusableNotice says that GitHub no longer accepts the org's
 // own App, which reason, and since when. Both reasons happen on GitHub, never
 // through Triage Factory, so the copy says so — otherwise the first question
 // is what someone here broke.
@@ -1077,7 +1077,7 @@ function GitHubAppUnusableNotice({
   // Whether a token is among the ways back (local mode only).
   offerToken: boolean
 }) {
-  const app = slug ? `The ${slug} App` : 'This workspace’s GitHub App'
+  const app = slug ? `The ${slug} App` : 'This organization’s GitHub App'
   const detected = since ? ` Detected ${timeAgo(since)}.` : ''
   if (reason === 'key_rejected') {
     return (

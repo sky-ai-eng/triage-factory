@@ -460,7 +460,7 @@ export default function LinearTeamRulesGroup({
       {catalogError === '' && !catalogLoading && rows.length === 0 && (
         <p className="text-ui text-ink-3 italic">
           {search.trim() === ''
-            ? 'This workspace’s Linear credential can’t see any teams.'
+            ? 'This organization’s Linear credential can’t see any teams.'
             : `No Linear team matches “${search.trim()}”.`}
         </p>
       )}
@@ -521,7 +521,7 @@ export default function LinearTeamRulesGroup({
       )}
       {!connected && (
         <p className="mb-4 text-ui text-ink-3 italic">
-          Connect Linear under Workspace settings before configuring tracked teams.
+          Connect Linear under organization settings before configuring tracked teams.
         </p>
       )}
       {board}

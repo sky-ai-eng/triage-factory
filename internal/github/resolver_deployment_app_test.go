@@ -24,9 +24,9 @@ import (
 //
 // Every fixture here has a perfectly usable PAT sitting in the secret store,
 // and none of these tests is allowed to reach it. That is the assertion the
-// whole tier turns on: a managed workspace never chose a PAT, so resolving one
+// whole tier turns on: a managed org never chose a PAT, so resolving one
 // on its behalf — on any failure arm, for any reason — would act on a
-// credential the workspace did not pick. The old "no org_github_apps row means
+// credential the org did not pick. The old "no org_github_apps row means
 // PAT" inference would have found that PAT every time.
 
 const (
@@ -389,7 +389,7 @@ func refusalErr(t *testing.T, r Resolver) error {
 
 // assertManagedRefusal pins the shape of every managed-arm refusal: every entry
 // point errors, the error is ErrDeploymentAppUnavailable, it is NOT
-// ErrNoGitHubCredentials (the workspace has nothing to reconnect — the fault is
+// ErrNoGitHubCredentials (the org has nothing to reconnect — the fault is
 // the deployment's), and no credential of any kind comes back.
 func assertManagedRefusal(t *testing.T, r Resolver, gh *deploymentGH, when string) {
 	t.Helper()
@@ -431,7 +431,7 @@ func assertManagedRefusal(t *testing.T, r Resolver, gh *deploymentGH, when strin
 			t.Errorf("%s (%s): err = %v; want ErrDeploymentAppUnavailable", tc.name, when, err)
 		}
 		if errors.Is(err, ErrNoGitHubCredentials) {
-			t.Errorf("%s (%s): the refusal wrapped ErrNoGitHubCredentials; that reads as \"your GitHub is disconnected\" and sends a workspace admin to fix a deployment they do not own", tc.name, when)
+			t.Errorf("%s (%s): the refusal wrapped ErrNoGitHubCredentials; that reads as \"your GitHub is disconnected\" and sends an org admin to fix a deployment they do not own", tc.name, when)
 		}
 		if strings.Contains(tok, "ghp_") {
 			t.Errorf("%s (%s): returned the org's PAT (%q) for a managed org — the one thing this tier may never do", tc.name, when, tok)
@@ -446,7 +446,7 @@ func assertManagedRefusal(t *testing.T, r Resolver, gh *deploymentGH, when strin
 }
 
 // TestResolver_ManagedClass_CommitIdentity pins the bot identity a managed
-// workspace's commits carry, on both halves of the bot-id question.
+// org's commits carry, on both halves of the bot-id question.
 //
 // The numeric-id form is the only one that links a bot's commits to its account
 // on github.com, and the deployment App has no row to hold that id — so it is
@@ -484,7 +484,7 @@ func TestResolver_ManagedClass_CommitIdentity(t *testing.T) {
 // TestResolver_ManagedClass_UnusableApp_StampsNoIdentity covers the one entry
 // point that cannot return an error. A managed org whose deployment App fails
 // its preflight must stamp NOTHING — never the PAT tier's cached login, which
-// would be an identity for a credential the workspace is not acting as.
+// would be an identity for a credential the org is not acting as.
 func TestResolver_ManagedClass_UnusableApp_StampsNoIdentity(t *testing.T) {
 	gh := newDeploymentGH(t)
 	gh.appStatus = http.StatusUnauthorized

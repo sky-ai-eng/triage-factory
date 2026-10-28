@@ -135,10 +135,10 @@ func appRefusal(err error) domain.GitHubAppUnusableReason {
 // For the managed class the reconcile REFRESHES; it never DISCOVERS. It may
 // update rows that already exist and may never create one. Discovery belongs
 // exclusively to the bind ceremony, which is the only thing that can assert
-// that an installation is this workspace's.
+// that an installation is this org's.
 //
 // That is the whole specification, and the filter below is the whole
-// implementation of it. One App key serves every workspace, so
+// implementation of it. One App key serves every org, so
 // GET /app/installations answers with every tenant's installations; stamping
 // orgID on that answer — which is what the per-org-key path above does, and is
 // correct there — would claim every other tenant's installations for whoever
@@ -149,7 +149,7 @@ func appRefusal(err error) domain.GitHubAppUnusableReason {
 // deployment App is on. baseURL is the org's own and is checked, not used: an
 // org whose effective host is another GitHub is refused before any request,
 // because the deployment's key presented to a server that has never seen it
-// earns a 401 that reads like a bad key. The bind refuses such a workspace, so
+// earns a 401 that reads like a bad key. The bind refuses such an org, so
 // this is reached only by one whose base URL moved after it bound.
 //
 // bound is the org's own active installation ids on its own host. Filtering on
@@ -185,11 +185,11 @@ func RefreshBoundInstallations(ctx context.Context, deployment githubapp.Deploym
 	return keepBound(listed, orgID, bound), nil
 }
 
-// ErrManagedWorkspaceOnOtherGitHub is the cause carried when a managed
-// workspace's effective GitHub host is not the deployment's default. Its rows
+// ErrManagedOrgOnOtherGitHub is the cause carried when a managed
+// org's effective GitHub host is not the deployment's default. Its rows
 // are left exactly as they are: the deployment App cannot list them, and "we
 // could not ask" must never be actioned as "GitHub no longer reports this".
-var ErrManagedWorkspaceOnOtherGitHub = errors.New("managed workspace is on a GitHub the deployment app is not on")
+var ErrManagedOrgOnOtherGitHub = errors.New("managed organization is on a GitHub the deployment app is not on")
 
 // managedHostMismatch answers whether orgID, on baseURL, is on the deployment's
 // GitHub — nil when it is, and an error naming both hosts when it is not.
@@ -201,14 +201,14 @@ func managedHostMismatch(orgID, baseURL string) error {
 	if host == "" {
 		host = "no GitHub URL"
 	}
-	return fmt.Errorf("%w: org=%s workspace on %s, deployment app on %s",
-		ErrManagedWorkspaceOnOtherGitHub, orgID, host, deploymentHost)
+	return fmt.Errorf("%w: org=%s on %s, deployment app on %s",
+		ErrManagedOrgOnOtherGitHub, orgID, host, deploymentHost)
 }
 
-// ManagedInstallationSet is one managed workspace's bound installation set: the
+// ManagedInstallationSet is one managed org's bound installation set: the
 // org, its configured base URL ("" for none, which is not the deployment's
 // GitHub), and the ids of the live installations the bind
-// ceremony wrote for it on the host that base URL resolves to. A workspace with
+// ceremony wrote for it on the host that base URL resolves to. An org with
 // live rows only on other hosts still has a set, with an empty Bound, so a base
 // URL that moved off the deployment's GitHub after the bind is still reported.
 type ManagedInstallationSet struct {
@@ -218,7 +218,7 @@ type ManagedInstallationSet struct {
 }
 
 // RefreshManagedInstallationSets is the deployment-scoped sibling of
-// RefreshBoundInstallations: it refreshes EVERY managed workspace's bound
+// RefreshBoundInstallations: it refreshes EVERY managed org's bound
 // installations from ONE listing of the deployment's GitHub, and fans that
 // answer out to the orgs that bound the installations in it.
 //
@@ -234,7 +234,7 @@ type ManagedInstallationSet struct {
 // One listing because there is one GitHub to list: the deployment App is on
 // the deployment's default host and nowhere else. A set whose base URL resolves
 // to another host is not listed against that host — the deployment's key would
-// only earn a 401 there — it is skipped with ErrManagedWorkspaceOnOtherGitHub
+// only earn a 401 there — it is skipped with ErrManagedOrgOnOtherGitHub
 // carried to the return, naming the org and both hosts, and its rows are left
 // exactly as they were. The other sets still refresh.
 //
@@ -244,7 +244,7 @@ type ManagedInstallationSet struct {
 // partial listing changes nothing — the error is returned — because "we could
 // not ask" must never be actioned as "GitHub no longer reports this". A
 // per-org write failure is carried rather than aborting the fan-out: one
-// workspace's write failing is no reason to leave every other workspace stale
+// org's write failing is no reason to leave every other org stale
 // until the next cycle.
 //
 // upsert writes one row (its OrgID already stamped); markRemoved soft-removes

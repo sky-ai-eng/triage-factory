@@ -15,8 +15,8 @@
 // association — check that the installation is associated with the user who
 // authorized. Association is exactly what a read-only contractor has: someone
 // with :read on one repository inside Acme's installation sees that whole
-// installation in GET /user/installations, and could otherwise bind Acme into a
-// workspace they control. The authority gate is the other half.
+// installation in GET /user/installations, and could otherwise bind Acme into an
+// org they control. The authority gate is the other half.
 //
 // Note what authority is ABOUT: not "did this person install it" but "is this
 // person, right now, an admin of the target account". The installer's identity

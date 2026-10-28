@@ -199,7 +199,7 @@ func TestArtifactGet_AppOnlyOrg_Success(t *testing.T) {
 	}
 }
 
-// TestArtifactGet_NoCredentials_NotConfigured: an artifact read on a workspace
+// TestArtifactGet_NoCredentials_NotConfigured: an artifact read on an org
 // with no GitHub credential is 409 NOT_CONFIGURED — server-side configuration
 // the caller must fix, not a transient upstream outage (the 503 it used to
 // answer read as "try again later").

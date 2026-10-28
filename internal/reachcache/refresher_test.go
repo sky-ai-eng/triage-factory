@@ -224,7 +224,7 @@ func TestRunOrgDeclinedBackoffExpiresWithTheTTL(t *testing.T) {
 }
 
 // Both App classes refresh through the grant reconcile, and neither reaches the
-// PAT enumeration. A managed workspace routed to the PAT arm would enumerate
+// PAT enumeration. A managed org routed to the PAT arm would enumerate
 // GET /user/repos against a credential it does not have; one routed nowhere at
 // all would announce a refresh that ran nothing.
 func TestRunOrgAppClassesRefreshThroughTheGrantReconcile(t *testing.T) {

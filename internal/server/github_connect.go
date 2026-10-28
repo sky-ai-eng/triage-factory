@@ -40,9 +40,9 @@ import (
 //     against the org's actual host (github.com OR a GHES host), writing
 //     user_github_identities with source='connect_oauth'.
 //
-// It runs through one of two OAuth clients. A workspace with its own App uses
-// that App's stored client_id/secret and its per-workspace callback. In multi
-// mode, a workspace without one, on the deployment App's GitHub or on none yet,
+// It runs through one of two OAuth clients. An org with its own App uses
+// that App's stored client_id/secret and its per-org callback. In multi
+// mode, an org without one, on the deployment App's GitHub or on none yet,
 // uses the deployment App's client and returns to the one callback that App
 // registers (ManagedBindCallbackPath), where the front door tells a Connect from
 // a bind by this flow's state cookie. Either way the code is exchanged for a
@@ -122,7 +122,7 @@ func (s *Server) orgGitHubHost(ctx context.Context, orgID string) (string, error
 
 // noGitHubURLMessage answers a request that needs the org's GitHub host from
 // an org with no GitHub URL.
-const noGitHubURLMessage = "this workspace has no GitHub URL; an admin sets it in Workspace Settings"
+const noGitHubURLMessage = "this organization has no GitHub URL; an admin sets it in organization settings"
 
 // requireOrgGitHubHost is orgGitHubHost for a route that cannot answer without
 // a host: a read failure is a 500 and an org with no GitHub URL is a 409
@@ -141,7 +141,7 @@ func (s *Server) requireOrgGitHubHost(ctx context.Context, w http.ResponseWriter
 }
 
 // connectClient is the OAuth client a Connect runs through and the GitHub it
-// captures the identity on: the workspace's own App, or the deployment App.
+// captures the identity on: the org's own App, or the deployment App.
 type connectClient struct {
 	ghWeb        string
 	clientID     string
@@ -152,14 +152,14 @@ type connectClient struct {
 	statePath string
 }
 
-// ownAppCanConnect reports whether the workspace's own App can run Connect's
+// ownAppCanConnect reports whether the org's own App can run Connect's
 // code exchange: it needs the client id and a stored client secret both.
 func ownAppCanConnect(app *domain.OrgGitHubApp) bool {
 	return app != nil && app.ClientID != "" && app.ClientSecretRef != ""
 }
 
-// ownAppConnectClient is the workspace's own App as Connect's client, on the
-// workspace's host and its per-workspace callback.
+// ownAppConnectClient is the org's own App as Connect's client, on the
+// org's host and its per-org callback.
 func (s *Server) ownAppConnectClient(orgID, ghWeb string, app *domain.OrgGitHubApp, clientSecret string) connectClient {
 	return connectClient{
 		ghWeb:        ghWeb,
@@ -171,9 +171,9 @@ func (s *Server) ownAppConnectClient(orgID, ghWeb string, app *domain.OrgGitHubA
 }
 
 // deploymentAppServesConnect reports whether Connect runs through the
-// deployment App for a workspace whose GitHub URL is orgBase: multi mode, a
-// configured deployment App, and a workspace on that App's GitHub or on none
-// yet. A workspace with no host links on the App's GitHub, which is the host the
+// deployment App for an org whose GitHub URL is orgBase: multi mode, a
+// configured deployment App, and an org on that App's GitHub or on none
+// yet. An org with no host links on the App's GitHub, which is the host the
 // bind then gives it. Decided from configuration and the stored host alone, so
 // the identity status read can answer it without asking GitHub anything.
 func (s *Server) deploymentAppServesConnect(orgBase string) bool {
@@ -218,10 +218,10 @@ func (s *Server) deploymentAppConnectClient(ctx context.Context, orgID string) (
 
 // handleGitHubConnectStart kicks off the user-to-server OAuth dance:
 // redirect the browser to {host}/login/oauth/authorize with the client_id of
-// the client that serves this workspace and an HMAC-signed CSRF state. The
-// workspace's own App targets the workspace's host, NOT github.com — the whole
+// the client that serves this org and an HMAC-signed CSRF state. The
+// org's own App targets the org's host, NOT github.com — the whole
 // point is binding the correct GHES login for a GHES org; the deployment App
-// targets its own GitHub, which is the workspace's or will be. Any org member
+// targets its own GitHub, which is the org's or will be. Any org member
 // may bind their own identity.
 //
 // GET /api/orgs/{org_id}/github/connect/start?return_to=/some/path
@@ -252,7 +252,7 @@ func (s *Server) handleGitHubConnectStart(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// The workspace's own App first, then the deployment App. With neither
+	// The org's own App first, then the deployment App. With neither
 	// there is no OAuth client to run, so bounce back to the gate page with a
 	// code rather than dead-ending.
 	var client connectClient
@@ -311,7 +311,7 @@ func (s *Server) handleGitHubConnectStart(w http.ResponseWriter, r *http.Request
 	http.Redirect(w, r, target, http.StatusFound)
 }
 
-// handleGitHubConnectCallback completes the dance for the workspace's own
+// handleGitHubConnectCallback completes the dance for the org's own
 // App: validate state/CSRF, then finishGitHubConnect. On any failure it
 // redirects back to the gate page with a distinguishing error code
 // (host_unreachable vs connect_failed vs denied) rather than dead-ending a
@@ -415,7 +415,7 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 // what a path-scoped route gets from RequireOrgMember: a session rather than an
 // API token, the cookie's user as the session's user, that user still a member
 // of the cookie's org, and the org's "Require SSO" asked here. Open to any
-// member, like the per-workspace callback, so it runs before and independently
+// member, like the per-org callback, so it runs before and independently
 // of the bind's admin re-check.
 func (s *Server) completeDeploymentAppConnect(w http.ResponseWriter, r *http.Request, cs *connectState) {
 	ctx := r.Context()
@@ -431,7 +431,7 @@ func (s *Server) completeDeploymentAppConnect(w http.ResponseWriter, r *http.Req
 	}
 	userID := claims.Subject
 	// A refusal before the cookie's org is established goes to the session's
-	// own workspace, never the cookie's: the caller has proven no relationship
+	// own org, never the cookie's: the caller has proven no relationship
 	// to it.
 	fallbackOrg := httpx.OrgIDFrom(ctx)
 	if r.URL.Query().Get("state") != cs.CSRF {
@@ -474,7 +474,7 @@ func (s *Server) completeDeploymentAppConnect(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// The workspace may have moved to another GitHub since the start; the
+	// The org may have moved to another GitHub since the start; the
 	// deployment App then no longer serves it.
 	var orgSet domain.OrgSettings
 	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
@@ -499,7 +499,7 @@ func (s *Server) completeDeploymentAppConnect(w http.ResponseWriter, r *http.Req
 }
 
 // connectReturnTo is where a completed Connect sends the browser: the start's
-// return_to, or the workspace's home when it named none.
+// return_to, or the org's home when it named none.
 func connectReturnTo(raw, orgID string) string {
 	returnTo := normalizeReturnTo(raw)
 	if returnTo == "/" {
@@ -572,7 +572,7 @@ func (s *Server) finishGitHubConnect(w http.ResponseWriter, r *http.Request, org
 // githubIdentityStatusResponse is the read-only shape the onboarding gate
 // polls to decide whether to block. `connected` is the single load-bearing
 // bit; `connect_available` says whether Connect has an OAuth client to run
-// for this workspace, its own App's or the deployment App's.
+// for this org, its own App's or the deployment App's.
 type githubIdentityStatusResponse struct {
 	Connected        bool   `json:"connected"`
 	Login            string `json:"login,omitempty"`
@@ -586,9 +586,9 @@ type githubIdentityStatusResponse struct {
 // the durable supported state runtime tolerates (this endpoint never asserts
 // a row must exist; it just reports presence).
 //
-// A workspace with no GitHub URL that the deployment App serves reports the
+// An org with no GitHub URL that the deployment App serves reports the
 // App's host and reads the user's identity there: that is where Connect links
-// it, and the host the bind gives the workspace, so an admin who linked before
+// it, and the host the bind gives the org, so an admin who linked before
 // binding reads as connected.
 //
 // GET /api/orgs/{org_id}/github/identity
@@ -710,7 +710,7 @@ func validateGitHubIdentityPAT(ctx context.Context, ghWeb, pat string) (auth.Git
 // org's PAT_1 access credential (they may be the same token; they are captured
 // and stored independently). Local mode only: it is the fallback to Connect
 // there, and the only capture path when no GitHub App is registered. In multi
-// mode every set-up workspace has an OAuth client on its own GitHub (its own
+// mode every set-up org has an OAuth client on its own GitHub (its own
 // App, or the deployment App), so Connect is the one way in, and this route
 // does not exist.
 //
@@ -747,7 +747,7 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 	}
 	ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
 	if !okHost {
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your workspace's GitHub URL looks misconfigured. Ask your admin to fix it in Workspace Settings.", Field: "github_pat"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your organization's GitHub URL looks misconfigured. Ask your admin to fix it in organization settings.", Field: "github_pat"})
 		return
 	}
 

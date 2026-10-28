@@ -211,7 +211,7 @@ function useIdentityResolver(
     async (text: string): Promise<Resolution> => {
       const typed = text.trim()
       if (kind === 'jira') return { kind: 'value', value: typed }
-      if (!orgId) return { kind: 'error', error: 'The workspace is still loading; try again.' }
+      if (!orgId) return { kind: 'error', error: 'The organization is still loading; try again.' }
       if (kind === 'github') {
         const found = await findGitHubAccountByLogin(orgId, typed)
         if (!found.ok) return { kind: 'error', error: found.error }

@@ -19,13 +19,13 @@ import (
 
 // Connect through the deployment App, against the bind ceremony's fake GitHub.
 //
-// The workspace has no App of its own, so Connect's OAuth client is the
+// The org has no App of its own, so Connect's OAuth client is the
 // deployment App's and it returns to the callback that App registers — the same
 // URL the bind ceremony returns to. Every refusal case asserts that no identity
 // row was written for the member, because a refusal that still links an
 // identity is the failure that matters.
 
-// connectRig is a bindRig plus a non-admin member of its workspace, signed in,
+// connectRig is a bindRig plus a non-admin member of its org, signed in,
 // with no GitHub identity on the deployment's GitHub.
 type connectRig struct {
 	*bindRig
@@ -42,7 +42,7 @@ func newConnectRig(t *testing.T, gh *fakeGitHub) *connectRig {
 	return &connectRig{bindRig: rig, member: member, memberSID: rig.sidFromResp(resp)}
 }
 
-// addMember makes user a plain member of the rig's workspace.
+// addMember makes user a plain member of the rig's org.
 func (r *bindRig) addMember(t *testing.T, user uuid.UUID) {
 	t.Helper()
 	if _, err := r.h.AdminDB.Exec(
@@ -157,7 +157,7 @@ func (r *bindRig) identityStatus(t *testing.T, sid string) githubIdentityStatusR
 	return out
 }
 
-// assertGateError asserts a redirect to the workspace's Connect gate page
+// assertGateError asserts a redirect to the org's Connect gate page
 // carrying the error code.
 func (r *bindRig) assertGateError(t *testing.T, rec *httptest.ResponseRecorder, code string) {
 	t.Helper()
@@ -169,19 +169,19 @@ func (r *bindRig) assertGateError(t *testing.T, rec *httptest.ResponseRecorder, 
 		t.Fatalf("parse redirect: %v", err)
 	}
 	if u.Path != "/orgs/"+r.orgID.String()+"/connect-github" || u.Query().Get("error") != code {
-		t.Errorf("redirect = %q, want the workspace's gate page with error=%s", rec.Header().Get("Location"), code)
+		t.Errorf("redirect = %q, want the org's gate page with error=%s", rec.Header().Get("Location"), code)
 	}
 }
 
 func TestDeploymentAppConnect_MemberLinksIdentity(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		host func(r *connectRig) string // the workspace's stored host; "" for none
+		host func(r *connectRig) string // the org's stored host; "" for none
 	}{
-		{"workspace on the deployment's GitHub", func(r *connectRig) string { return r.ghBase }},
-		// The admin's case before the bind: the workspace has no host yet, and
+		{"org on the deployment's GitHub", func(r *connectRig) string { return r.ghBase }},
+		// The admin's case before the bind: the org has no host yet, and
 		// links on the App's, which the bind then gives it.
-		{"workspace with no GitHub URL", func(*connectRig) string { return "" }},
+		{"org with no GitHub URL", func(*connectRig) string { return "" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gh := newFakeGitHub()
@@ -251,10 +251,10 @@ func TestDeploymentAppConnect_MemberLinksIdentity(t *testing.T) {
 			if !after.Connected || after.Login != gh.actorLogin {
 				t.Errorf("status after = %+v, want connected as %s", after, gh.actorLogin)
 			}
-			// Linking an identity is not a bind: the workspace's host and
+			// Linking an identity is not a bind: the org's host and
 			// credential are where they were.
 			if got := rig.githubHost(t); got != tc.host(rig) {
-				t.Errorf("workspace host = %q after a link, want %q", got, tc.host(rig))
+				t.Errorf("org host = %q after a link, want %q", got, tc.host(rig))
 			}
 			rig.assertNothingBound(t)
 		})
@@ -262,7 +262,7 @@ func TestDeploymentAppConnect_MemberLinksIdentity(t *testing.T) {
 }
 
 // TestDeploymentAppConnect_AdminLinksThenBinds is the first-login path the
-// setup wizard needs: an admin with no linked identity, on a workspace with no
+// setup wizard needs: an admin with no linked identity, on an org with no
 // GitHub URL, links their identity through Connect and then completes the bind,
 // whose identity proof that link satisfies — no token anywhere.
 func TestDeploymentAppConnect_AdminLinksThenBinds(t *testing.T) {
@@ -289,18 +289,18 @@ func TestDeploymentAppConnect_AdminLinksThenBinds(t *testing.T) {
 		t.Errorf("installations = %d after the bind, want 1", n)
 	}
 	if got := rig.githubHost(t); got != rig.ghBase {
-		t.Errorf("workspace host = %q after the bind, want the App's %q", got, rig.ghBase)
+		t.Errorf("org host = %q after the bind, want the App's %q", got, rig.ghBase)
 	}
 }
 
-// TestDeploymentAppConnect_NotOffered covers the workspaces the deployment App
+// TestDeploymentAppConnect_NotOffered covers the orgs the deployment App
 // cannot serve: Connect is not advertised and its start answers no_app.
 func TestDeploymentAppConnect_NotOffered(t *testing.T) {
-	t.Run("workspace on another GitHub", func(t *testing.T) {
+	t.Run("org on another GitHub", func(t *testing.T) {
 		rig := newConnectRig(t, newFakeGitHub())
 		rig.setGitHubHost(t, "https://ghe.other.example")
 		if st := rig.identityStatus(t, rig.memberSID); st.ConnectAvailable {
-			t.Errorf("connect_available = true for a workspace off the deployment App's GitHub: %+v", st)
+			t.Errorf("connect_available = true for an org off the deployment App's GitHub: %+v", st)
 		}
 		rig.assertGateError(t, rig.startConnect(t, rig.memberSID, rig.returnTo()), "no_app")
 	})
@@ -314,8 +314,8 @@ func TestDeploymentAppConnect_NotOffered(t *testing.T) {
 	})
 }
 
-// TestDeploymentAppConnect_OwnAppIsPreferred: a workspace with its own App keeps
-// today's flow — its client and its per-workspace callback — whatever the
+// TestDeploymentAppConnect_OwnAppIsPreferred: an org with its own App keeps
+// today's flow — its client and its per-org callback — whatever the
 // deployment offers.
 func TestDeploymentAppConnect_OwnAppIsPreferred(t *testing.T) {
 	rig := newConnectRig(t, newFakeGitHub())
@@ -327,13 +327,13 @@ func TestDeploymentAppConnect_OwnAppIsPreferred(t *testing.T) {
 	}
 	u, _ := url.Parse(start.Header().Get("Location"))
 	if got := u.Query().Get("client_id"); got != "Iv1.own_client" {
-		t.Errorf("client_id = %q, want the workspace's own App's", got)
+		t.Errorf("client_id = %q, want the org's own App's", got)
 	}
 	if got, want := u.Query().Get("redirect_uri"), rig.srv.connectCallbackURL(rig.orgID.String()); got != want {
-		t.Errorf("redirect_uri = %q, want the per-workspace callback %q", got, want)
+		t.Errorf("redirect_uri = %q, want the per-org callback %q", got, want)
 	}
 	if c := connectCookieFrom(t, start); c.Path != connectStatePath(rig.orgID.String()) {
-		t.Errorf("state cookie path = %q, want the per-workspace %q", c.Path, connectStatePath(rig.orgID.String()))
+		t.Errorf("state cookie path = %q, want the per-org %q", c.Path, connectStatePath(rig.orgID.String()))
 	}
 }
 
@@ -364,7 +364,7 @@ func TestDeploymentAppConnect_Refusals(t *testing.T) {
 		rig.assertNoIdentity(t, other)
 	})
 
-	t.Run("user no longer in the workspace", func(t *testing.T) {
+	t.Run("user no longer in the org", func(t *testing.T) {
 		rig := newConnectRig(t, newFakeGitHub())
 		cookie, state := rig.connectStarted(t, rig.memberSID, rig.returnTo())
 		if _, err := rig.h.AdminDB.Exec(
@@ -394,7 +394,7 @@ func TestDeploymentAppConnect_Refusals(t *testing.T) {
 		rig.assertNoIdentity(t, rig.member)
 	})
 
-	t.Run("workspace requires SSO", func(t *testing.T) {
+	t.Run("org requires SSO", func(t *testing.T) {
 		rig := newConnectRig(t, newFakeGitHub())
 		ext := &barringLoginExt{}
 		rig.srv.loginExt = ext
@@ -412,7 +412,7 @@ func TestDeploymentAppConnect_Refusals(t *testing.T) {
 		rig.assertNoIdentity(t, rig.member)
 	})
 
-	t.Run("workspace moved to another GitHub", func(t *testing.T) {
+	t.Run("org moved to another GitHub", func(t *testing.T) {
 		rig := newConnectRig(t, newFakeGitHub())
 		cookie, state := rig.connectStarted(t, rig.memberSID, rig.returnTo())
 		rig.setGitHubHost(t, "https://ghe.other.example")

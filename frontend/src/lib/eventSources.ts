@@ -45,11 +45,11 @@ export function sourceUnavailableReason(
 ): string | null {
   switch (state) {
     case 'unconfigured':
-      return `${sourceLabel(kind)} is not connected for this workspace.`
+      return `${sourceLabel(kind)} is not connected for this organization.`
     case 'disabled':
       return `${sourceLabel(kind)} is turned off — an org admin paused it.`
     case 'unlicensed':
-      return `${sourceLabel(kind)} is not enabled for this workspace.`
+      return `${sourceLabel(kind)} is not enabled for this organization.`
     case 'wip':
       return `${sourceLabel(kind)} events aren’t supported yet.`
     default:
@@ -65,5 +65,7 @@ export function sourceUnavailableReason(
  * resolves still says something rather than going quietly inert.
  */
 export function sourceCannotFireNote(kind: string, state: EventSourceState | undefined): string {
-  return sourceUnavailableReason(kind, state) ?? `${sourceLabel(kind)} can’t reach this workspace.`
+  return (
+    sourceUnavailableReason(kind, state) ?? `${sourceLabel(kind)} can’t reach this organization.`
+  )
 }

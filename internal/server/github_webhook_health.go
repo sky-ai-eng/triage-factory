@@ -65,7 +65,7 @@ const (
 // probed is the org's App — tear one down and register another (switch to a PAT
 // and back, discard a staged App and import a different one) and the org id is
 // unchanged while every answer about the old App is now a statement about
-// something the workspace no longer has. Both the read and the write compare it,
+// something the org no longer has. Both the read and the write compare it,
 // which covers the two ways a stale answer could be served: a reader finding the
 // previous App's entry, and a probe that was already in flight when the
 // registration changed landing afterwards and being marked fresh for a full TTL.

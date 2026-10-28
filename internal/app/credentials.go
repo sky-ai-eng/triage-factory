@@ -77,7 +77,7 @@ func (a *App) buildRunCredentials() error {
 	a.modelFor = func(ctx context.Context, orgID, teamID string) (domain.TeamModels, error) {
 		return resolveAIModelForTeam(ctx, a.stores, orgID, teamID)
 	}
-	// The deployment App — the one shared key a managed workspace rides — is
+	// The deployment App — the one shared key a managed org rides — is
 	// operator environment config, read here once for this process's background
 	// consumers: the resolver (so the grant pass, the pollers and the profiler
 	// mint tier-2 installation tokens for a managed org exactly as the server's

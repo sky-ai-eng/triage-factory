@@ -78,7 +78,7 @@ func TestRefreshWebhookHealth_FailurePreservesPriorState(t *testing.T) {
 // An org can tear its App down and register another — switch to a PAT and back,
 // or discard a staged App and import a different one — while its id never
 // changes. Serving the old App's state for the rest of the TTL would report a
-// health, a last-delivery time, and a repair button for something the workspace
+// health, a last-delivery time, and a repair button for something the org
 // no longer has.
 func TestWebhookHealthDTO_AppSwapDropsTheCachedAnswer(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)

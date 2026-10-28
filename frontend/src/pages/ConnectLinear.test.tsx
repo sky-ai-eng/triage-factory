@@ -60,7 +60,7 @@ describe('ConnectLinear', () => {
     expect(await screen.findByRole('button', { name: 'Connect Linear' })).toBeInTheDocument()
     expect(screen.getByText('Or paste a personal API key')).toBeInTheDocument()
     expect(screen.getByText(/linear\.app\/acme/)).toBeInTheDocument()
-    expect(document.body.textContent).toMatch(/stored in your workspace.s secret store/)
+    expect(document.body.textContent).toMatch(/stored in your organization.s secret store/)
   })
 
   it('offers only the key paste with no app', async () => {

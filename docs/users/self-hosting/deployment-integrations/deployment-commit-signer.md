@@ -1,14 +1,14 @@
 # Deployment commit signer
 
-Workspaces on the [deployment GitHub App](deployment-github-app.md) commit as
+Organizations on the [deployment GitHub App](deployment-github-app.md) commit as
 the App's bot, and GitHub never marks a bot's commit Verified unless GitHub
 made it. The deployment commit signer is a GitHub **user** account whose name
-and SSH signing key those workspaces' agent commits carry, so GitHub marks them
+and SSH signing key those organizations' agent commits carry, so GitHub marks them
 Verified and repositories that require signed commits accept them.
 
-A workspace that registers its own signer in **Workspace Settings → Commit
-signing** uses that one instead. A workspace whose own signer is broken
-commits unsigned; it never falls back to the deployment's. Local mode ignores
+An organization that registers its own signer in **Organization → Settings →
+Commit signing** uses that one instead. An organization whose own signer is
+broken commits unsigned; it never falls back to the deployment's. Local mode ignores
 these variables.
 
 ## 1. Create the account
@@ -80,7 +80,7 @@ docker compose up -d
 ## 5. Check it took
 
 Within a minute `control` logs
-`deployment commit signer is active; managed workspaces sign as it`. If it logs
+`deployment commit signer is active; managed organizations sign as it`. If it logs
 `deployment commit signer is pending` followed by
 `the deployment commit signer's key is not among the account's signing keys`,
 step 3 is missing, or GitHub hasn't listed the new key yet (allow a minute).
@@ -90,15 +90,15 @@ docker compose exec control triagefactory commit-signer status   # shows the sig
 docker compose exec control triagefactory commit-signer verify   # checks it again now
 ```
 
-A workspace on the deployment App shows **Commits are signed as
-TriageFactory, this deployment's signing account** under Workspace Settings →
-Commit signing. Runs pick the signer up at their next start.
+An organization on the deployment App shows **Commits are signed as
+TriageFactory, this deployment's signing account** under **Organization →
+Settings → Commit signing**. Runs pick the signer up at their next start.
 
 ## Rotating the key
 
 Add the new public key to the account first, then change the key and restart
-the `control` pods. Until a check finds the new key on the account, workspaces
-don't sign. Leave the old public key on the account unless it may have leaked:
+the `control` pods. Until a check finds the new key on the account,
+organizations don't sign. Leave the old public key on the account unless it may have leaked:
 on a GHES with persistent commit verification off, deleting it turns the
 commits it signed Unverified.
 
@@ -111,7 +111,7 @@ account, and each `control` pod logs a warning saying so.
 ## When it breaks
 
 If the key is removed from the account or GitHub fails a pushed commit for its
-address, workspaces commit unsigned from their next signature, and the
+address, organizations commit unsigned from their next signature, and the
 `DeploymentCommitSignerDown` alert fires after 15 minutes
 ([Monitoring](../monitoring.md#alerts)). `triagefactory commit-signer status` on
 a `control` container shows why. Fix the cause on the account, then run

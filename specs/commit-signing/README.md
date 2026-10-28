@@ -3,7 +3,7 @@
 Design of record for signing the commits delegated agents make, so GitHub
 marks them Verified. An org admin registers a GitHub user account as the org's
 **signer**. Agent commits are authored and committed as that account and
-signed with a key only Triage Factory holds. Workspaces on the deployment
+signed with a key only Triage Factory holds. Orgs on the deployment
 GitHub App get the deployment's signer by default.
 
 Status: **accepted design**; §10 lists what is still open. Builds on the sealed commit identity
@@ -46,7 +46,7 @@ Goals:
    signer and signed. GitHub shows it under the signer's login and avatar,
    and git under the account's profile name (§4.2), so an org names its
    agent's commits by naming the account.
-3. A workspace on the deployment App uses the deployment's signer unless it
+3. An org on the deployment App uses the deployment's signer unless it
    registers its own.
 4. No private key enters a jail. In multi mode no private key leaves the
    control plane.
@@ -179,7 +179,7 @@ read 2026-10-26), for hosts other than github.com:
    (§7). The address is on every commit, so it should not be the one that
    recovers the account.
 5. **One signer per org.** The commit identity resolves, in order, to the
-   org's signer, then the deployment signer (managed workspaces only), then
+   org's signer, then the deployment signer (managed orgs only), then
    today's identity (the App bot or the PAT owner).
 6. **In multi mode every signature is made on the control plane.** A per-org
    key stays in the secret store and the deployment key in control-pod config;
@@ -542,7 +542,7 @@ like an org signer's, and refreshed by id after), `status`, `status_reason`,
 `triagefactory commit-signer status` shows it. Rotating the key in config starts a new row, pending;
 the host in the key keeps a deployment whose default GitHub changed from
 inheriting another host's account. Until a check has read the account,
-`github_user_id` is null and no workspace commits as the signer.
+`github_user_id` is null and no org commits as the signer.
 
 ### 5.5 The bundle
 
@@ -629,7 +629,7 @@ Under `/api/orgs/{org_id}/github/`, beside the App and PAT routes:
   signer a pushed commit broke. It is core and needs no licence. Its health is
   also in a WARN on each control pod and `tf_deployment_commit_signer_up`,
   and its signatures by org in `tf_commit_signatures_total{signer="deployment"}`
-  (§7). A managed workspace's admin sees it through `GET commit-identity`.
+  (§7). A managed org's admin sees it through `GET commit-identity`.
 
 ## 7. Health
 
@@ -678,7 +678,7 @@ The UI explains the common reasons: `unknown_key` (the key is not on the
 account), `no_user` (the email belongs to no account), `unverified_email`
 (verify the email on the account). Any other reason is shown verbatim.
 
-A broken deployment signer stops signing for every managed workspace at the
+A broken deployment signer stops signing for every managed org at the
 next signature. Operators see it in `triagefactory commit-signer status`, in a
 WARN on each control pod, and in `tf_deployment_commit_signer_up`.
 
@@ -696,7 +696,7 @@ off for the rest of the run. The first check that finds the
 key binds it to that account's id and later checks follow the id, as an org
 signer's do: a configured login that no longer names the account is a WARN on
 each check, and signing as another account takes a new key. Its post-push
-check runs in each managed workspace's cycle with that workspace's credential,
+check runs in each managed org's cycle with that org's credential,
 and Verify re-reads the failing commit, from any org, the same way.
 
 ### Metrics
@@ -722,7 +722,7 @@ kind, outcome and reason as attributes.
 The rules worth shipping with it:
 
 ```promql
-tf_deployment_commit_signer_up == 0                                                    # every managed workspace is committing unsigned
+tf_deployment_commit_signer_up == 0                                                    # every managed org is committing unsigned
 increase(tf_commit_signatures_total{reason="committer_mismatch"}[1h]) > 0             # a run asked to sign as someone else
 increase(tf_commit_signatures_total{reason="claim_budget"}[1h]) > 0                   # a run reached its cap
 increase(tf_commit_signatures_total{outcome="unanswered"}[15m]) > 0                   # signatures timing out
@@ -773,7 +773,7 @@ commit id; the allowed-signers file and its read-only mount. The jail's git is A
 well past 2.34. (L)
 
 **Phase 3 — The deployment signer.** The control-pod config, the
-`deployment_commit_signer` table, the managed-workspace default, and the
+`deployment_commit_signer` table, the managed-org default, and the
 `commit-signer` CLI. Add the signer's login to this repository's CLA
 allowlist before enabling it. (M)
 
@@ -781,7 +781,7 @@ allowlist before enabling it. (M)
 reasons in the UI. (M)
 
 *Exit criteria:* in both modes, an org with an active signer pushes commits
-GitHub marks Verified as that account; a managed workspace does the same with
+GitHub marks Verified as that account; a managed org does the same with
 the deployment signer; no executor ever holds a signing key; a signer whose
 key is removed is `broken` within one check, and signing stops at the next
 signature.
@@ -821,7 +821,7 @@ signature.
    commits). A run already going when its signer stops verifying is told to
    rerun the command without signing, so it loses one command, not its
    commits.
-9. **Managed workspaces default to the deployment signer** — the deployment
+9. **Managed orgs default to the deployment signer** — the deployment
    App's bot already authors their commits, so the deployment signer puts no
    new account on them. An org can register its own.
 10. **Signing reaches the governance feeds, not a screen of its own** —
@@ -840,7 +840,7 @@ signature.
     already answers for.
 14. **Budgets as operator config, counted per org and per claim** — §4.7.
     Chosen over fixed numbers, which nobody can size before there is data,
-    and over a per-signer count, which would let one managed workspace spend
+    and over a per-signer count, which would let one managed org spend
     the deployment signer's limit for every other.
 
 ## Related

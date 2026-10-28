@@ -24,7 +24,7 @@ export interface GitHubRepo {
 /** Whether the page below is the mirror's answer or a placeholder for one.
  *
  *  `discovering` is the first-ever open: nothing has been mirrored for this
- *  workspace yet and a refresh has been kicked. It matters because the
+ *  org yet and a refresh has been kicked. It matters because the
  *  alternative — an empty `items` — reads as "you have no repositories", which
  *  is a different and alarming claim. */
 export type RepoListStatus = 'ready' | 'discovering'
@@ -44,12 +44,12 @@ export interface RepoListPage {
 }
 
 /** How many options one page of the picker holds. Large enough that a typical
- *  workspace arrives whole, small enough that a 3,000-repo account does not
+ *  org arrives whole, small enough that a 3,000-repo account does not
  *  land in the DOM at once — the search box below is the affordance for
  *  reaching past it, and it filters server-side. */
 export const REPO_PAGE_SIZE = 100
 
-/** listReachableRepos reads one page of the repositories this workspace's
+/** listReachableRepos reads one page of the repositories this org's
  *  GitHub credentials can reach.
  *
  *  `q` is matched server-side against the slug, the description and the
@@ -75,7 +75,7 @@ export async function listReachableRepos(q: string, pageToken = ''): Promise<Rep
   }
 }
 
-/** refreshReachableRepos asks the server to re-read the workspace's reachable
+/** refreshReachableRepos asks the server to re-read the org's reachable
  *  set from GitHub now, past the staleness window it normally waits out.
  *
  *  It returns as soon as the refresh is accepted — the work happens out of band
@@ -90,7 +90,7 @@ export async function refreshReachableRepos(): Promise<void> {
  *  /api/teams/{id}/github-repos answer in this shape: `id` is the registry row
  *  id the PUT takes, `github_id` is GitHub's id ('' while TF has not learned
  *  it), `owner`/`repo` are the current name, for display, and `retired_at` is
- *  set when GitHub no longer serves the repository to the workspace and has
+ *  set when GitHub no longer serves the repository to the org and has
  *  given its name to another one. A retired row stays in the set until a save
  *  drops it, and nothing polls it; the repository now under the name is a
  *  different candidate, with an id of its own.
@@ -148,7 +148,7 @@ export function refFromCandidate(c: GitHubRepo): RepoRef {
 
 /** registerRepository registers a candidate by its GitHub id (POST /api/repos)
  *  and returns its registry row id — the row TF already holds for it, or a new
- *  one. Refused (422) when the workspace's credentials cannot reach it. */
+ *  one. Refused (422) when the org's credentials cannot reach it. */
 export async function registerRepository(githubId: string): Promise<string> {
   const row = await apiJSON<{ id: string }>('/api/repos', {
     method: 'POST',

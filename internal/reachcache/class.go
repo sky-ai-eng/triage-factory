@@ -63,9 +63,9 @@ func (c *ClassResolver) For(ctx context.Context, orgID string) (domain.GitHubCre
 		// Falls through to the App-XOR-PAT narrowing below.
 	case domain.GitHubCredentialClassManagedApp:
 		// Returned as it stands, and the narrowing below is skipped rather than
-		// forgotten: it reads an org_github_apps row, and a managed workspace has
+		// forgotten: it reads an org_github_apps row, and a managed org has
 		// none — so there is no Active bit that could stage its App behind a PAT.
-		// The workspace is on the deployment's App or it is not, and its reach is
+		// The org is on the deployment's App or it is not, and its reach is
 		// keyed under that App's installations either way.
 		return class, nil
 	default:

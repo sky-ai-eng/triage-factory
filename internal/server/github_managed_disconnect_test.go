@@ -22,10 +22,10 @@ import (
 
 // Leaving the managed class, end to end against the bind rig: the disconnect
 // verbs, and the door guards that keep every other credential bind from
-// leaving a workspace's live installation rows under a class that says it has
+// leaving an org's live installation rows under a class that says it has
 // no App.
 //
-// One assertion runs after every transition here: a workspace has live managed
+// One assertion runs after every transition here: an org has live managed
 // rows if and only if its class is managed_app. A verb that moved one without
 // the other is the failure this file exists to catch, and a status code alone
 // would not catch it.
@@ -46,7 +46,7 @@ func (r *bindRig) bindManaged(t *testing.T, ids ...int64) {
 	r.assertRowsAgreeWithClass(t)
 }
 
-// disconnect drives the whole-workspace verb (only == "") or the narrowed one.
+// disconnect drives the whole-org verb (only == "") or the narrowed one.
 func (r *bindRig) disconnect(t *testing.T, only string) *httptest.ResponseRecorder {
 	t.Helper()
 	path := "/api/orgs/" + r.orgID.String() + "/github/managed/disconnect"
@@ -300,10 +300,10 @@ func TestManagedDisconnect_IsIdempotent(t *testing.T) {
 		t.Errorf("%d credential_removed rows after two disconnects, want 1 — a removal that removed nothing is not an access change", n)
 	}
 
-	// A workspace that never bound anything is the same no-op.
+	// An org that never bound anything is the same no-op.
 	fresh := rig.sibling(t, "never-bound")
 	if rec := fresh.disconnect(t, ""); rec.Code != http.StatusNoContent {
-		t.Errorf("disconnect on a never-bound workspace status=%d, want 204", rec.Code)
+		t.Errorf("disconnect on a never-bound org status=%d, want 204", rec.Code)
 	}
 }
 
@@ -323,7 +323,7 @@ func TestManagedDisconnect_PerInstallation(t *testing.T) {
 	}
 	rig.assertRowsAgreeWithClass(t)
 
-	// The row is the resource: one this workspace does not hold live is 404,
+	// The row is the resource: one this org does not hold live is 404,
 	// whether it was just unbound or never bound at all.
 	if rec := rig.disconnect(t, "5150"); rec.Code != http.StatusNotFound {
 		t.Errorf("unbind of an already-unbound installation status=%d, want 404", rec.Code)
@@ -354,11 +354,11 @@ func TestManagedDisconnect_PerInstallation(t *testing.T) {
 	}
 }
 
-// TestManagedDisconnect_NeverTouchesAnotherWorkspace: the verb answers about
-// this workspace's rows only. A sibling holding its own installation keeps it
+// TestManagedDisconnect_NeverTouchesAnotherOrg: the verb answers about
+// this org's rows only. A sibling holding its own installation keeps it
 // through the caller's disconnect, and the caller cannot name the sibling's
 // installation through the narrowed verb.
-func TestManagedDisconnect_NeverTouchesAnotherWorkspace(t *testing.T) {
+func TestManagedDisconnect_NeverTouchesAnotherOrg(t *testing.T) {
 	gh := newFakeGitHub()
 	first := newBindRig(t, gh)
 	first.bindManaged(t, 4242)
@@ -380,10 +380,10 @@ func TestManagedDisconnect_NeverTouchesAnotherWorkspace(t *testing.T) {
 	second.assertRowsAgreeWithClass(t)
 }
 
-func TestManagedDisconnect_RefusesABYOWorkspace(t *testing.T) {
-	// A BYO workspace's installation rows belong to its own App and are torn
+func TestManagedDisconnect_RefusesABYOOrg(t *testing.T) {
+	// A BYO org's installation rows belong to its own App and are torn
 	// down by its own switch flow. The managed verb refuses rather than
-	// no-ops: a 204 would say the workspace left a class it was never in.
+	// no-ops: a 204 would say the org left a class it was never in.
 	rig := newBindRig(t, newFakeGitHub())
 	if _, err := rig.h.AdminDB.Exec(`
 		INSERT INTO org_settings (org_id, github_credential_class) VALUES ($1, 'byo_app')
@@ -393,14 +393,14 @@ func TestManagedDisconnect_RefusesABYOWorkspace(t *testing.T) {
 	}
 	rec := rig.disconnect(t, "")
 	if rec.Code != http.StatusConflict {
-		t.Errorf("disconnect on a byo_app workspace status=%d body=%s, want 409", rec.Code, rec.Body.String())
+		t.Errorf("disconnect on a byo_app org status=%d body=%s, want 409", rec.Code, rec.Body.String())
 	}
 	if class := rig.credentialClass(t); class != string(domain.GitHubCredentialClassBYOApp) {
 		t.Errorf("class after refused disconnect = %q, want byo_app", class)
 	}
 }
 
-func TestManagedDisconnect_RequiresWorkspaceAdmin(t *testing.T) {
+func TestManagedDisconnect_RequiresOrgAdmin(t *testing.T) {
 	rig := newBindRig(t, newFakeGitHub())
 	rig.bindManaged(t, 4242)
 
@@ -447,14 +447,14 @@ func TestManagedDisconnect_LocalModeIs404(t *testing.T) {
 
 // --- The door guards -------------------------------------------------------
 
-// TestManagedClass_DoorsRefuseAManagedWorkspace is the test set that catches
-// the hole: before the guards, a managed workspace — known class, no App row —
+// TestManagedClass_DoorsRefuseAManagedOrg is the test set that catches
+// the hole: before the guards, a managed org — known class, no App row —
 // walked through every other credential bind, acquired the credential, and
 // kept its bound installation rows live under a class that said it had no App.
 // Each door refuses now, names the disconnect as the way out, and writes
-// nothing: no PAT stored, no App row, class and rows untouched. The workspace
+// nothing: no PAT stored, no App row, class and rows untouched. The org
 // token bind is no door at all in multi mode, where the managed class lives.
-func TestManagedClass_DoorsRefuseAManagedWorkspace(t *testing.T) {
+func TestManagedClass_DoorsRefuseAManagedOrg(t *testing.T) {
 	assertUntouched := func(t *testing.T, rig *bindRig) {
 		t.Helper()
 		if live := rig.liveInstallations(t); fmt.Sprint(live) != "[4242]" {
@@ -479,7 +479,7 @@ func TestManagedClass_DoorsRefuseAManagedWorkspace(t *testing.T) {
 
 		resp := rig.postJSONWithSid("PUT", "/api/orgs/"+rig.orgID.String()+"/github/pat", rig.sid, map[string]string{"pat": "ghp_new"})
 		if resp.StatusCode != http.StatusNotFound {
-			t.Fatalf("PAT bind on a managed workspace status=%d, want 404", resp.StatusCode)
+			t.Fatalf("PAT bind on a managed org status=%d, want 404", resp.StatusCode)
 		}
 		if rig.gh.callCount() != calls {
 			t.Error("the PAT was validated against GitHub on a route that does not exist")
@@ -496,7 +496,7 @@ func TestManagedClass_DoorsRefuseAManagedWorkspace(t *testing.T) {
 		rec := httptest.NewRecorder()
 		rig.srv.mux.ServeHTTP(rec, req)
 		if rec.Code != http.StatusConflict {
-			t.Fatalf("register launch on a managed workspace status=%d, want 409", rec.Code)
+			t.Fatalf("register launch on a managed org status=%d, want 409", rec.Code)
 		}
 		if !strings.Contains(rec.Body.String(), "Disconnect it") {
 			t.Errorf("launch refusal page does not name the disconnect as the way out: %s", rec.Body.String())
@@ -545,7 +545,7 @@ func TestManagedClass_DoorsRefuseAManagedWorkspace(t *testing.T) {
 		rec := httptest.NewRecorder()
 		rig.srv.mux.ServeHTTP(rec, req)
 		if rec.Code != http.StatusConflict {
-			t.Fatalf("register callback on a managed workspace status=%d body=%s, want 409", rec.Code, rec.Body.String())
+			t.Fatalf("register callback on a managed org status=%d body=%s, want 409", rec.Code, rec.Body.String())
 		}
 		if msg := errorMessage(t, rec.Body); msg != managedInTheWayMessage {
 			t.Errorf("refusal message = %q, want %q", msg, managedInTheWayMessage)
@@ -564,7 +564,7 @@ func TestManagedClass_DoorsRefuseAManagedWorkspace(t *testing.T) {
 		resp := rig.postJSONWithSid("POST", "/api/orgs/"+rig.orgID.String()+"/github/app/import", rig.sid,
 			map[string]string{"app_id": "777", "pem": "-----BEGIN RSA PRIVATE KEY-----\nnot-a-key\n-----END RSA PRIVATE KEY-----", "client_secret": "cs"})
 		if resp.StatusCode != http.StatusConflict {
-			t.Fatalf("import on a managed workspace status=%d, want 409", resp.StatusCode)
+			t.Fatalf("import on a managed org status=%d, want 409", resp.StatusCode)
 		}
 		if msg := errorMessage(t, resp.Body); msg != managedInTheWayMessage {
 			t.Errorf("refusal message = %q, want %q", msg, managedInTheWayMessage)
@@ -575,9 +575,9 @@ func TestManagedClass_DoorsRefuseAManagedWorkspace(t *testing.T) {
 		assertUntouched(t, rig)
 	})
 
-	t.Run("a_managed_workspace_with_no_live_row_is_not_in_the_way", func(t *testing.T) {
+	t.Run("a_managed_org_with_no_live_row_is_not_in_the_way", func(t *testing.T) {
 		// The guard is about live rows, not the class alone: once every row is
-		// gone (an uninstall reported by webhook, say) the workspace is free
+		// gone (an uninstall reported by webhook, say) the org is free
 		// to bring an App of its own, so registering one gets the manifest
 		// page rather than the refusal.
 		rig := newBindRig(t, newFakeGitHub())
@@ -590,7 +590,7 @@ func TestManagedClass_DoorsRefuseAManagedWorkspace(t *testing.T) {
 		rec := httptest.NewRecorder()
 		rig.srv.mux.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
-			t.Fatalf("register launch on a managed workspace with no live row status=%d body=%s, want 200", rec.Code, rec.Body.String())
+			t.Fatalf("register launch on a managed org with no live row status=%d body=%s, want 200", rec.Code, rec.Body.String())
 		}
 		if strings.Contains(rec.Body.String(), "Disconnect it") {
 			t.Errorf("launch page carries the managed refusal: %s", rec.Body.String())

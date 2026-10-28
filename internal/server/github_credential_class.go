@@ -72,14 +72,14 @@ func githubCredentialConnected(ctx context.Context, tx db.TxStores, orgID, host 
 		return "", fmt.Errorf("read github token: %w", err)
 	}
 	if creds.GitHubPAT != "" {
-		return "this workspace's GitHub token", nil
+		return "this organization's GitHub token", nil
 	}
 	app, err := tx.GitHubApps.GetForOrg(ctx, orgID)
 	if err != nil {
 		return "", fmt.Errorf("read github app registration: %w", err)
 	}
 	if app != nil {
-		return "this workspace's GitHub App", nil
+		return "this organization's GitHub App", nil
 	}
 	installs, err := tx.GitHubApps.ListInstallationsOnHost(ctx, orgID, host)
 	if err != nil {
@@ -93,7 +93,7 @@ func githubCredentialConnected(ctx context.Context, tx db.TxStores, orgID, host 
 		return "", fmt.Errorf("read commit signer: %w", err)
 	}
 	if signer != nil {
-		return "this workspace's commit signer", nil
+		return "this organization's commit signer", nil
 	}
 	return "", nil
 }
