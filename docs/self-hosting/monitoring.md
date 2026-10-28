@@ -1006,8 +1006,36 @@ min by (upstream, org_id, credential, bucket) (tf_upstream_rate_limit_remaining_
 sum by (upstream, org_id) (rate(tf_upstream_rate_limit_wait_seconds_total[15m]))         # not an alert: how much of the time each org's requests spend waiting
 sum by (org_id, credential, bucket) (tf_upstream_rate_limit_used{upstream="slack"}) / max by (org_id, credential, bucket) (tf_upstream_rate_limit_limit{upstream="slack"})   # not an alert: the share of each Slack method's minute this deployment's pods counted
 max by (org_id, credential) (tf_upstream_rate_limit_near_limit{upstream="jira"})   # not an alert: 1 where any pod's latest reading says a Jira quota is near its limit
-max(tf_upstream_rate_limit_near_limit{upstream="jira", credential="cloud_oauth:deployment"})   # not an alert: 1 when any pod's latest reading, for any org, says the deployment app's shared Jira quota is near its limit (Tier 1 only)
 ```
+
+The bundled Prometheus loads one alert on these readings,
+`JiraDeploymentAppQuotaLow`, from
+[`docker/observability/rules/tf-connections.yml`](../../docker/observability/rules/tf-connections.yml):
+
+```
+max(tf_upstream_rate_limit_near_limit{upstream="jira", credential="cloud_oauth:deployment"}) == 1
+                                                            # for 10m, severity: warning
+```
+
+It fires when any pod's latest reading, for any org, has said for 10 minutes
+that the deployment app's Jira quota is near its limit. It is the one
+rate-limit reading that alerts, because on Tier 1 the quota belongs to the
+deployment: every workspace that connects Jira through the deployment's app
+spends it, and their people's Jira actions from the board (claim, done,
+requeue) wait and then fail together once it runs out. Polling and delegated
+runs use each workspace's service credential, which the quota does not meter.
+Only an operator can change it: ask Atlassian to move the app to a higher tier,
+or have the workspaces that use it most add an Atlassian OAuth app of their own
+or connect with API tokens, after which their people connect Jira again.
+
+A reading stands until the same pod records another for the same workspace,
+and those come from people's actions, so a single near reading can hold the
+rule true for up to an hour and fire it. The 10 minutes keep it from firing on
+a near reading that the workspace's next actions replace. It clears once no
+pod's latest reading for any workspace says near: a Connect's response without
+`X-RateLimit-NearLimit` records 0, and a reading nothing replaces ends an hour
+after its response, or at the reset a 429 states. On Tier 2 each workspace's reading is its own site's quota,
+and the rule then fires for any one workspace's.
 
 In multi mode, the requests a delegated run makes from inside its sandbox spend
 the same budgets without reporting a reading. For every upstream but Slack, the
