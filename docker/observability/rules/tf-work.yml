@@ -44,7 +44,7 @@ groups:
           summary: "Nothing is claiming ready {{ $labels.work_kind }} work"
           description: >-
             {{ $value }} {{ $labels.work_kind }} items are ready to claim, and
-            nothing has claimed one for 5 minutes. The control pod holding the
+            nothing has claimed one for about 10 minutes. The control pod holding the
             background-brain lease drains this queue. Read GET /readyz on each
             control pod to find the holder, then its logs.
 

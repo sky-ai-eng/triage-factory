@@ -1,7 +1,7 @@
 # Alerting rules for commit signing: control pods answering runs' signature
 # requests, the refusals a working run never earns, and the deployment commit
 # signer. Severity and delivery follow tf-connections.yml; the first-sample
-# form `or (x unless x offset <window>)` is explained in tf-runs.yml.
+# form is explained in tf-runs.yml.
 #
 # An org's own signer breaking is not here: the org's key or account causes
 # it, the app shows it to the org's admins under Commit signing, and an
@@ -40,7 +40,7 @@ groups:
           or
           sum by (signer) (
             tf_commit_signatures_total{outcome="unanswered"}
-            unless tf_commit_signatures_total{outcome="unanswered"} offset 15m
+            unless last_over_time(tf_commit_signatures_total{outcome="unanswered"}[15m] offset 15m)
           ) > 0
         labels:
           severity: warning
@@ -65,7 +65,7 @@ groups:
           or
           sum by (reason, org_id) (
             tf_commit_signatures_total{reason=~"claim_budget|claim_inactive|committer_mismatch"}
-            unless tf_commit_signatures_total{reason=~"claim_budget|claim_inactive|committer_mismatch"} offset 1h
+            unless last_over_time(tf_commit_signatures_total{reason=~"claim_budget|claim_inactive|committer_mismatch"}[1h] offset 1h)
           ) > 0
         labels:
           severity: warning
@@ -80,22 +80,25 @@ groups:
             none of these. Each refusal shows as "Commit signing refused" in
             the activity of the run that asked.
 
-      # 0 while the deployment signer is pending or broken. Every control pod
-      # configured with it reports the same status row, so max() makes it one
-      # alert per deployment. A signer just configured reads 0 until its first
-      # check finds the key, which takes seconds; the 15 minutes covers that
-      # and a check retrying. Critical: one fault, which only the operator can
-      # fix, leaves every managed workspace committing unsigned.
+      # 0 while the deployment signer is pending or broken. Each control pod
+      # reports the signer it is configured with, so min() is one alert per
+      # deployment that also catches a pod configured with a key that is not
+      # active while the others are. A signer just configured reads 0 until
+      # its first check finds the key, which takes seconds; the 15 minutes
+      # covers that and a check retrying. Critical: only the operator can fix
+      # it, and managed workspaces commit unsigned until they do.
       - alert: DeploymentCommitSignerDown
-        expr: max(tf_deployment_commit_signer_up) == 0
+        expr: min(tf_deployment_commit_signer_up) == 0
         for: 15m
         labels:
           severity: critical
         annotations:
           summary: "The deployment commit signer is not active"
           description: >-
-            Every workspace on the deployment GitHub App commits unsigned until
-            it is. Run triagefactory commit-signer status in a control
-            container for the reason, and triagefactory commit-signer verify
-            to check it again once fixed. On a GitHub Enterprise Server in
-            private mode the signer cannot be checked and stays pending.
+            At least one control pod's deployment signer is not active, and
+            the workspaces on the deployment GitHub App commit unsigned
+            through that pod until it is. Run triagefactory commit-signer
+            status in each control container for the reason, and
+            triagefactory commit-signer verify to check it again once fixed.
+            On a GitHub Enterprise Server in private mode the signer cannot be
+            checked and stays pending.

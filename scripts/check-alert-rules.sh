@@ -4,8 +4,7 @@
 # own Prometheus image, the version that evaluates them in a deployment:
 #
 #   promtool check rules   every file in docker/observability/rules/ parses
-#   promtool test rules    the cases in scripts/alert-rules/ fire each alert
-#                          on the series it is meant for
+#   promtool test rules    the cases in scripts/alert-rules/ pass
 #
 # Needs Docker. The compose-smoke workflow runs it in CI.
 #
@@ -16,14 +15,16 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
-image=$(sed -nE 's/^[[:space:]]+image:[[:space:]]*(prom\/prometheus:[^[:space:]#]+).*/\1/p' docker-compose.yml)
+image=$(./scripts/ci-images.sh list compose | grep -m1 '^prom/prometheus:' || true)
 if [ -z "$image" ]; then
   echo "check-alert-rules: no prom/prometheus image in docker-compose.yml" >&2
   exit 1
 fi
 
+# As the caller's uid, so a checkout that is not world-readable still reads.
 promtool() {
-  docker run --rm -v "$ROOT:/repo:ro" -w /repo --entrypoint promtool "$image" "$@"
+  docker run --rm --user "$(id -u):$(id -g)" -v "$ROOT:/repo:ro" -w /repo \
+    --entrypoint promtool "$image" "$@"
 }
 
 promtool check rules docker/observability/rules/*.yml

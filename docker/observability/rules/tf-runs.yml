@@ -8,8 +8,11 @@
 # A counter's series appears at its first increment, already at 1, and
 # increase() over a series that starts at 1 and stays there is 0. A rule that
 # has to fire on a counter's first sample therefore adds
-# `or (x unless x offset <window>)`: a series that exists now and did not
-# <window> ago was incremented inside the window.
+# `or (x unless last_over_time(x[<window>] offset <window>))`: a series that
+# exists now and had no sample in the window before this one was incremented
+# inside this one. last_over_time skips the stale markers a failed scrape
+# writes, so a missed scrape does not make an old series look new; a
+# Prometheus outage longer than the window still can, once.
 
 groups:
   - name: tf-runs
@@ -40,7 +43,9 @@ groups:
       # which may run for up to 30 minutes. So a healthy run can go 35 minutes
       # without a checkpoint at the default interval; the threshold is that,
       # and the 10 minutes on top keeps one slow boundary from firing it. With
-      # a longer interval the threshold is 1800 plus the interval.
+      # a longer interval the threshold is 1800 plus the interval. With
+      # checkpoints off (TF_SNAPSHOT_INTERVAL_SEC=0) no claim is measured and
+      # this cannot fire.
       - alert: WorkspaceCheckpointsStale
         expr: max(tf_claims_oldest_checkpoint_age_seconds) > 2100
         for: 10m
@@ -53,8 +58,6 @@ groups:
             {{ $value | humanizeDuration }} ago, so a hard kill of its executor
             would lose that much of its workspace. Check for
             WorkspaceCheckpointsFailing and for problems with the object store.
-            With TF_SNAPSHOT_INTERVAL_SEC=0 checkpoints are off, and this alert
-            fires for every long run.
 
       # A failed checkpoint leaves the last one written in place, so it costs
       # nothing until the executor is hard-killed, when the run comes back
@@ -67,7 +70,7 @@ groups:
           or
           sum(
             tf_workspace_checkpoints_total{outcome="failed"}
-            unless tf_workspace_checkpoints_total{outcome="failed"} offset 1h
+            unless last_over_time(tf_workspace_checkpoints_total{outcome="failed"}[1h] offset 1h)
           ) > 0
         labels:
           severity: warning
@@ -91,7 +94,7 @@ groups:
           or
           sum(
             tf_sidecar_frames_oversized_total
-            unless tf_sidecar_frames_oversized_total offset 1h
+            unless last_over_time(tf_sidecar_frames_oversized_total[1h] offset 1h)
           ) > 0
         labels:
           severity: critical
