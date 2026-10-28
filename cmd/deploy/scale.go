@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"os/signal"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,9 +18,10 @@ import (
 // are the highest-numbered, the ones compose keeps last.
 //
 // As in upgrade, a drain problem is a warning: an executor stopped with
-// runs in flight hands them off with workspace snapshots. A stop or a
-// removal that fails is an error, because compose would then remove other
-// executors, undrained.
+// runs in flight hands them off with workspace snapshots. An interrupt
+// during the drain undoes it and removes nothing. A stop or a removal that
+// fails is an error, because compose would then remove other executors,
+// undrained.
 func scaleDown(ctx context.Context, h *host, dir, project string, n int, timeout time.Duration) error {
 	containers, err := projectContainers(ctx, h, project)
 	if err != nil {
@@ -41,16 +43,18 @@ func scaleDown(ctx context.Context, h *host, dir, project string, n int, timeout
 
 	h.heading("Scale down")
 	const name = "Executors"
+	ictx, stop := signal.NotifyContext(ctx, interruptSignals...)
+	defer stop()
 	var names, containerIDs, drained []string
 	for _, c := range going {
 		names = append(names, strings.TrimPrefix(c.Name, "/"))
 		containerIDs = append(containerIDs, c.ID)
-		if c.State.Status != "running" {
+		if c.State.Status != "running" || ictx.Err() != nil {
 			continue
 		}
-		id, err := instanceIDOf(ctx, h, c)
+		id, err := instanceIDOf(ictx, h, c)
 		if err == nil {
-			err = drainUntilRestart(ctx, h, dir, project, id)
+			err = drainUntilRestart(ictx, h, dir, project, id)
 		}
 		if err != nil {
 			h.report(check{warn, name, fmt.Sprintf("could not drain %s (%v); its runs are handed off when it stops", strings.TrimPrefix(c.Name, "/"), err)})
@@ -58,9 +62,16 @@ func scaleDown(ctx context.Context, h *host, dir, project string, n int, timeout
 		}
 		drained = append(drained, id)
 	}
-	h.report(check{pass, name, fmt.Sprintf("%d of %d to remove: %s; drained %d until they stop", len(going), len(executors), strings.Join(names, ", "), len(drained))})
-	if len(drained) > 0 {
-		waitForRuns(ctx, h, dir, project, drained, h.now(), timeout)
+	if ictx.Err() == nil {
+		h.report(check{pass, name, fmt.Sprintf("%d of %d to remove: %s; drained %d until they stop", len(going), len(executors), strings.Join(names, ", "), len(drained))})
+		if len(drained) > 0 {
+			waitForRuns(ictx, h, dir, project, drained, h.now(), timeout)
+		}
+	}
+	interrupted := ictx.Err() != nil
+	stop()
+	if interrupted {
+		return fmt.Errorf("%w; no executor was removed, and nothing was started", undoDrain(ctx, h, dir, project, drained))
 	}
 
 	// docker stop sends SIGTERM and waits the container's own stop timeout,

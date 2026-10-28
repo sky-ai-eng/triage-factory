@@ -16,7 +16,7 @@ func upRun(t *testing.T, f *fakeHost, b Bundle, dir string, extra ...string) int
 // composeUpArgs is the compose call up and upgrade make for a project and
 // executor count.
 func composeUpArgs(project, executors string) string {
-	return "compose -p " + project + " up -d --scale executor=" + executors
+	return "compose -p " + project + " up -d --remove-orphans --scale executor=" + executors
 }
 
 // wantStreamed asserts the streamed docker calls, space-joined, in order.

@@ -141,6 +141,23 @@ func TestUp_ScaleDown(t *testing.T) {
 			},
 		},
 		{
+			name:     "an interrupt during the drain undoes it and removes nothing",
+			arrange:  interruptOnSleep,
+			args:     []string{"--executors", "2"},
+			wantCode: 1,
+			check: func(t *testing.T, f *fakeHost) {
+				if !strings.Contains(f.errOut.String(), "interrupted; the drain was undone (1 executor(s)); no executor was removed, and nothing was started") {
+					t.Errorf("stderr = %q; want it to say the drain was undone", f.errOut)
+				}
+				if got := undrainCalls(f); strings.Join(got, ",") != "inst-3" {
+					t.Errorf("undrained %q; want inst-3", got)
+				}
+				if f.called("stop") || f.called("rm") || len(f.streamed) > 0 {
+					t.Errorf("an interrupted scale-down removed or started something: %q %q", f.dockerCalls, f.streamed)
+				}
+			},
+		},
+		{
 			name: "a stop that fails stops up before compose",
 			arrange: func(f *fakeHost) {
 				f.dockerReplies["stop"] = dockerReply{stderr: "boom\n", err: errors.New("exit status 1")}

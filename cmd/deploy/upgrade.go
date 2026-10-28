@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/envfile"
@@ -26,7 +28,19 @@ const (
 	// its last run count frozen, for days; waiting on it would only wait
 	// out the timeout.
 	liveHeartbeat = 30 * time.Second
+
+	// drainSettle is how long after the drain an executor's heartbeat must
+	// land for its run count to count. The executor learns of the drain from
+	// its first heartbeat after it, and that heartbeat sampled the count
+	// before it learned, so a claim may have started since. Executors
+	// heartbeat every few seconds, so a heartbeat this long after the drain
+	// had one before it that was also after the drain.
+	drainSettle = 10 * time.Second
 )
+
+// interruptSignals end a drain early, and the drain is then undone: Ctrl-C,
+// and the hangup an SSH session that drops sends.
+var interruptSignals = []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}
 
 // upgradeOptions are upgrade's flags.
 type upgradeOptions struct {
@@ -131,6 +145,10 @@ func upgrade(ctx context.Context, h *host, b Bundle, o upgradeOptions) error {
 	if err != nil {
 		return err
 	}
+	if lost := lostValues(envBase, dir); len(lost) > 0 {
+		h.report(check{fail, "Environment", "missing: " + strings.Join(lost, ", ")})
+		return fmt.Errorf("%s does not set %s, which this deployment already uses, and a generated value would break it: Postgres keeps the password it was initialized with, and only the original keys read what they encrypted or signed. Put the deployment's values back in %s, then run upgrade again. Nothing was changed", envFile, strings.Join(lost, ", "), envFile)
+	}
 	// upgrade takes no input flags: without a terminal to ask on, a value
 	// only the operator can supply has to be in .env already.
 	if keys := missingInputs(envBase); len(keys) > 0 && !h.terminal {
@@ -166,12 +184,20 @@ func upgrade(ctx context.Context, h *host, b Bundle, o upgradeOptions) error {
 	if err != nil {
 		return err
 	}
+	if probe.status == skip {
+		// The pull above put the image on the host, so a probe that cannot
+		// find it tested nothing.
+		h.report(check{fail, probe.name, "docker cannot inspect " + ref + " after pulling it, so the profile was not tested"})
+		return fmt.Errorf("could not test %s's executor seccomp profile on this host; nothing was changed", b.Version)
+	}
 	if failed := h.reportAll([]check{probe}); failed {
 		return fmt.Errorf("%s's executor seccomp profile is refused on this host, so its executor would not start; nothing was changed", b.Version)
 	}
 
 	h.heading("Drain")
-	drainExecutors(ctx, h, dir, st.Project, o.drainTimeout)
+	if err := drainExecutors(ctx, h, dir, st.Project, o.drainTimeout); err != nil {
+		return fmt.Errorf("%w; nothing else was changed", err)
+	}
 
 	if len(envVars) > 0 {
 		if err := writeEnvFill(h, dir, envBase, envVars); err != nil {
@@ -254,6 +280,26 @@ func missingRequired(compose, env []byte, getenv func(string) string) []string {
 	return missing
 }
 
+// lostValues lists the lossyIfReplaced keys env (a .env's content) does not
+// set that dir's docker-compose.yml, as it stands before the upgrade, reads:
+// values the running stack has, which the fill would replace with new ones.
+// A key the release being upgraded from does not read is new, and generating
+// it replaces nothing. An unreadable compose file counts as reading them all.
+func lostValues(env envValues, dir string) []string {
+	compose, err := os.ReadFile(filepath.Join(dir, composeFile))
+	var lost []string
+	for key := range lossyIfReplaced {
+		if env.has(key) {
+			continue
+		}
+		if err != nil || regexp.MustCompile(`\$\{`+key+`\b`).Match(compose) {
+			lost = append(lost, key)
+		}
+	}
+	slices.Sort(lost)
+	return lost
+}
+
 // newSeccompCheck starts image under profile, the new release's seccomp
 // profile, which is not in dir until the re-render. The docker CLI reads a
 // profile itself and hands the daemon its contents, so a copy staged in dir
@@ -287,75 +333,112 @@ type fleetInstance struct {
 
 // drainExecutors drains every live executor that is not draining already,
 // until its next restart, and waits up to timeout for their runs to finish.
-// It drains until restart rather than draining and undraining afterwards,
-// because an upgrade that stopped between the two would leave every
-// executor healthy and taking no work; and it leaves an executor an operator
-// drained alone, so that drain outlives the upgrade.
+// A drain that ends at the restart needs nothing undone once compose
+// recreates the executors, and one left behind by an upgrade killed partway
+// ends at any restart rather than holding through them all. It leaves an
+// executor an operator drained alone, so that drain outlives the upgrade.
 //
-// Nothing here stops the upgrade. An executor stopped with runs in flight
-// hands them off with workspace snapshots, and they resume on the upgraded
-// executors; the drain only spares them the interruption.
-func drainExecutors(ctx context.Context, h *host, dir, project string, timeout time.Duration) {
+// An interrupt (interruptSignals) during the drain undoes it and returns an
+// error, so the stack is left as it was. Nothing else here stops the
+// upgrade: an executor stopped with runs in flight hands them off with
+// workspace snapshots, and they resume on the upgraded executors; the drain
+// only spares them the interruption.
+func drainExecutors(ctx context.Context, h *host, dir, project string, timeout time.Duration) error {
+	ictx, stop := signal.NotifyContext(ctx, interruptSignals...)
+	defer stop()
 	const name = "Executors"
-	out, errOut, err := h.docker(ctx, dir, "compose", "-p", project, "ps", "--status", "running", "--quiet", "control")
+	out, errOut, err := h.docker(ictx, dir, "compose", "-p", project, "ps", "--status", "running", "--quiet", "control")
 	switch {
+	case ictx.Err() != nil:
+		return errors.New("interrupted")
 	case err != nil:
 		h.report(check{warn, name, "could not tell whether control is running (" + firstLine(errOut, err) + "); continuing without a drain"})
-		return
+		return nil
 	case strings.TrimSpace(string(out)) == "":
-		h.report(check{skip, name, "control is not running, so there is nothing to drain"})
-		return
+		h.report(check{warn, name, "control is not running, and the drain runs there; continuing without one, so runs in flight are handed off when their executor stops"})
+		return nil
 	}
-	fleet, err := listFleet(ctx, h, dir, project)
-	if err != nil {
+	fleet, err := listFleet(ictx, h, dir, project)
+	switch {
+	case ictx.Err() != nil:
+		return errors.New("interrupted")
+	case err != nil:
 		h.report(check{warn, name, err.Error() + "; continuing without a drain, so runs in flight are handed off when their executor stops"})
-		return
+		return nil
 	}
 	executors := liveExecutors(fleet)
 	if len(executors) == 0 {
 		h.report(check{skip, name, "no live executors"})
-		return
+		return nil
 	}
 	var drained, already, failed []string
 	for _, e := range executors {
+		if ictx.Err() != nil {
+			break
+		}
 		if e.Drain != "none" {
 			already = append(already, e.ID)
 			continue
 		}
-		if err := drainUntilRestart(ctx, h, dir, project, e.ID); err != nil {
+		if err := drainUntilRestart(ictx, h, dir, project, e.ID); err != nil {
 			h.report(check{warn, name, fmt.Sprintf("could not drain %s (%v); its runs are handed off when it stops", e.ID, err)})
 			failed = append(failed, e.ID)
 			continue
 		}
 		drained = append(drained, e.ID)
 	}
-	drainedAt := h.now()
-	result := check{pass, name, fmt.Sprintf("drained %d until their restart", len(drained))}
-	if len(already) > 0 {
-		result.detail += fmt.Sprintf("; %d already draining (%s)", len(already), strings.Join(already, ", "))
-	}
-	if len(failed) > 0 {
-		result.status = warn
-		result.detail += fmt.Sprintf("; %d not drained (%s)", len(failed), strings.Join(failed, ", "))
-	}
-	h.report(result)
+	if ictx.Err() == nil {
+		drainedAt := h.now()
+		result := check{pass, name, fmt.Sprintf("drained %d until their restart", len(drained))}
+		if len(already) > 0 {
+			result.detail += fmt.Sprintf("; %d already draining (%s)", len(already), strings.Join(already, ", "))
+		}
+		if len(failed) > 0 {
+			result.status = warn
+			result.detail += fmt.Sprintf("; %d not drained (%s)", len(failed), strings.Join(failed, ", "))
+		}
+		h.report(result)
 
-	// An executor that is not draining keeps claiming work, so its run
-	// count says nothing about when the others are done.
-	ids := slices.Concat(drained, already)
-	if len(ids) == 0 {
-		h.report(check{skip, "Runs", "no executor is draining, so there are no runs to wait for"})
-		return
+		// An executor that is not draining keeps claiming work, so its run
+		// count says nothing about when the others are done.
+		if ids := slices.Concat(drained, already); len(ids) > 0 {
+			waitForRuns(ictx, h, dir, project, ids, drainedAt, timeout)
+		} else {
+			h.report(check{skip, "Runs", "no executor is draining, so there are no runs to wait for"})
+		}
 	}
-	waitForRuns(ctx, h, dir, project, ids, drainedAt, timeout)
+	if ictx.Err() != nil {
+		stop() // a second interrupt ends deploy while the drain is undone
+		return undoDrain(ctx, h, dir, project, drained)
+	}
+	return nil
+}
+
+// undoDrain undrains ids, the executors an interrupted drain drained, and
+// returns the interruption, saying what is left drained.
+func undoDrain(ctx context.Context, h *host, dir, project string, ids []string) error {
+	if len(ids) == 0 {
+		return errors.New("interrupted")
+	}
+	var stuck []string
+	for _, id := range ids {
+		if _, _, err := h.docker(ctx, dir, "compose", "-p", project, "exec", "-T", "control",
+			"triagefactory", "instance", "undrain", id); err != nil {
+			stuck = append(stuck, id)
+		}
+	}
+	if len(stuck) > 0 {
+		return fmt.Errorf("interrupted, and %s could not be undrained: they take no new work until they restart, or until `triagefactory instance undrain <id>` runs in the control container", strings.Join(stuck, ", "))
+	}
+	return fmt.Errorf("interrupted; the drain was undone (%d executor(s))", len(ids))
 }
 
 // waitForRuns waits until the draining executors ids report no runs in
-// flight, or until timeout passes. An executor learns of its drain on its
-// next heartbeat, and the run count it reports is the one that heartbeat
-// wrote, so its zero counts only once it has heartbeat since drainedAt: until
-// then it may still be claiming. An executor whose heartbeat has gone stale
-// stopped, its count frozen, and is not waited on.
+// flight, until timeout passes, or until ctx ends. A run count counts only
+// from a heartbeat that landed drainSettle after drainedAt, and an executor
+// that reports none (a restarted one that has not heartbeat yet) is waited
+// on. An executor whose heartbeat has gone stale stopped, its count frozen,
+// and is not waited on.
 func waitForRuns(ctx context.Context, h *host, dir, project string, ids []string, drainedAt time.Time, timeout time.Duration) {
 	const name = "Runs"
 	deadline := h.now().Add(timeout)
@@ -363,6 +446,9 @@ func waitForRuns(ctx context.Context, h *host, dir, project string, ids []string
 	for {
 		polledAt := h.now()
 		fleet, err := listFleet(ctx, h, dir, project)
+		if ctx.Err() != nil {
+			return
+		}
 		if err != nil {
 			h.report(check{warn, name, err.Error() + "; continuing, and runs in flight are handed off when their executor stops"})
 			return
@@ -372,13 +458,14 @@ func waitForRuns(ctx context.Context, h *host, dir, project string, ids []string
 			if !slices.Contains(ids, inst.ID) || inst.HeartbeatAgeSeconds > liveHeartbeat.Seconds() {
 				continue
 			}
-			// The list ran after polledAt, so a heartbeat younger than the
-			// time since the drain landed after it.
-			if inst.HeartbeatAgeSeconds >= polledAt.Sub(drainedAt).Seconds() {
-				unsettled++
-			}
 			if inst.ActiveRuns != nil {
 				runs += *inst.ActiveRuns
+			}
+			// The list ran after polledAt, so the heartbeat landed at least
+			// this long after the drain.
+			sinceDrain := polledAt.Sub(drainedAt).Seconds() - inst.HeartbeatAgeSeconds
+			if inst.ActiveRuns == nil || sinceDrain < drainSettle.Seconds() {
+				unsettled++
 			}
 		}
 		if runs == 0 && unsettled == 0 {
@@ -388,7 +475,7 @@ func waitForRuns(ctx context.Context, h *host, dir, project string, ids []string
 		if !h.now().Before(deadline) {
 			stillGoing := fmt.Sprintf("%d still in flight", runs)
 			if runs == 0 {
-				stillGoing = fmt.Sprintf("%d executor(s) have not heartbeat since the drain", unsettled)
+				stillGoing = fmt.Sprintf("%d executor(s) have reported no run count since the drain took effect", unsettled)
 			}
 			h.report(check{warn, name, fmt.Sprintf("%s after %s; continuing: each executor parks its runs with a workspace snapshot when it stops, and they resume on the upgraded executors", stillGoing, timeout)})
 			return
@@ -397,9 +484,8 @@ func waitForRuns(ctx context.Context, h *host, dir, project string, ids []string
 			fmt.Fprintf(h.stdout, "        waiting for %d run(s) to finish (up to %s)\n", runs, deadline.Sub(h.now()).Round(time.Second))
 			last = runs
 		}
-		if err := h.sleep(ctx, pollInterval); err != nil {
-			h.report(check{warn, name, err.Error()})
-			return
+		if h.sleep(ctx, pollInterval) != nil {
+			return // ctx ended; the caller says what that leaves
 		}
 	}
 }
@@ -469,7 +555,9 @@ WHAT IT DOES
   3. Works out what the new release needs in .env and that this binary can
      generate, the way a re-run of init does: nothing .env has is changed. A
      value compose requires that .env does not set and deploy cannot generate
-     stops the upgrade before anything changes.
+     stops the upgrade before anything changes, and so does one the deployment
+     already uses that .env has lost (POSTGRES_PASSWORD, the encryption keys,
+     GoTrue's signing keys), since a new one would break the deployment.
   4. Pulls the new image if the host lacks it, and starts it under the new
      release's docker/seccomp-profile.json. A failed pull, or a profile this
      host's Docker Engine or libseccomp refuses, stops the upgrade before
@@ -479,13 +567,15 @@ WHAT IT DOES
      container) and waits for their runs to finish, up to --drain-timeout. A run
      still in flight after that is parked with a workspace snapshot when its
      executor stops, and resumes on the upgraded executors. An executor an
-     operator drained stays drained.
+     operator drained stays drained. Interrupting the upgrade during the drain
+     (Ctrl-C) undrains the executors it drained and changes nothing else.
   6. Writes what step 3 found into .env, and re-renders the bundle files and
      the state file.
-  7. Runs docker compose -p <project> up -d --scale executor=<N> with the
-     stored executor count. control migrates the schema as it boots, and the
-     executors come up on the new image; their drain ended when they
-     restarted, so there is nothing to undo.
+  7. Runs docker compose -p <project> up -d --remove-orphans
+     --scale executor=<N> with the stored executor count, which also removes
+     the containers of a service the new release dropped. control migrates
+     the schema as it boots, and the executors come up on the new image; their
+     drain ended when they restarted, so there is nothing to undo.
   8. Waits for the stack to be healthy, as deploy up does.
 
 NOT A ROLLING UPGRADE

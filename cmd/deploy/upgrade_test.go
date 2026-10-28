@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"testing/fstest"
+	"time"
 )
 
 // nextRelease is b as the next patch release would carry it: the version
@@ -261,6 +264,28 @@ func TestUpgrade_Refusals(t *testing.T) {
 			},
 			wantErr: "seccomp profile is refused on this host, so its executor would not start; nothing was changed",
 		},
+		{
+			name: "a pulled image docker cannot inspect",
+			arrange: func(_ *testing.T, f *fakeHost, _ *Bundle, _ string) {
+				f.onStream = nil
+				f.dockerReplies["image inspect"] = dockerReply{err: errors.New("exit status 1")}
+			},
+			wantErr: "could not test v",
+		},
+		{
+			name: "a value the deployment uses that .env has lost",
+			arrange: func(t *testing.T, _ *fakeHost, _ *Bundle, dir string) {
+				setEnvLine(t, dir, "POSTGRES_PASSWORD", "")
+			},
+			wantErr: ".env does not set POSTGRES_PASSWORD, which this deployment already uses",
+		},
+		{
+			name: "a .env that is gone",
+			arrange: func(t *testing.T, _ *fakeHost, _ *Bundle, dir string) {
+				mustRemove(t, filepath.Join(dir, envFile))
+			},
+			wantErr: ".env does not set GOTRUE_JWT_KEYS, POSTGRES_PASSWORD, TF_SECRET_ENCRYPTION_KEY, TF_SESSION_ENCRYPTION_KEY, which",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -395,7 +420,15 @@ func TestUpgrade_DrainNeverStopsTheUpgrade(t *testing.T) {
 			arrange: func(f *fakeHost) {
 				f.dockerReplies[controlRunning] = dockerReply{}
 			},
-			check: "Executors", status: skip, detail: "control is not running",
+			check: "Executors", status: warn, detail: "control is not running, and the drain runs there",
+		},
+		{
+			name: "an executor that reports no run count",
+			arrange: func(f *fakeHost) {
+				f.dockerReplies[fleetList] = dockerReply{stdout: fleetJSON("exec-a:none:null:1")}
+			},
+			args:  []string{"--drain-timeout", "1m"},
+			check: "Runs", status: warn, detail: "1 executor(s) have reported no run count since the drain took effect after 1m0s",
 		},
 	}
 	for _, tt := range tests {
@@ -417,8 +450,8 @@ func TestUpgrade_DrainNeverStopsTheUpgrade(t *testing.T) {
 
 // TestUpgrade_DrainWaitsOnTheDrained: the wait counts only executors that
 // are draining and still heartbeating, and trusts a zero run count only
-// from a heartbeat written after the drain, the one that told the executor
-// to stop claiming.
+// from a heartbeat that landed drainSettle after the drain, once the
+// executor has stopped claiming.
 func TestUpgrade_DrainWaitsOnTheDrained(t *testing.T) {
 	f, next, dir := upgradeFixture(t)
 	// exec-a's drain fails, so it keeps claiming and its runs never settle.
@@ -443,8 +476,84 @@ func TestUpgrade_DrainWaitsOnTheDrained(t *testing.T) {
 		t.Errorf("the drain summary does not name the executor it could not drain:\n%s", out)
 	}
 	wantLine(t, out, "Runs", pass, "none in flight")
-	if waited := f.clock.Sub(start); waited != pollInterval {
-		t.Errorf("waited %s; want one poll (%s): no trusting exec-b's pre-drain zero, no waiting on exec-a or the stopped exec-c", waited, pollInterval)
+	// exec-b's heartbeat is always 1s old when listed, so its zero counts at
+	// the first poll it landed drainSettle after the drain.
+	want := pollInterval
+	for want-time.Second < drainSettle {
+		want += pollInterval
+	}
+	if waited := f.clock.Sub(start); waited != want {
+		t.Errorf("waited %s; want %s: no trusting exec-b's zero before the drain settled, no waiting on exec-a or the stopped exec-c", waited, want)
+	}
+}
+
+// TestUpgrade_InterruptedDrain: an interrupt during the drain wait undrains
+// the executors the upgrade drained, and changes nothing else.
+func TestUpgrade_InterruptedDrain(t *testing.T) {
+	f, next, dir := upgradeFixture(t)
+	f.dockerReplies[fleetList] = dockerReply{stdout: fleetJSON("exec-a:none:2:1", "exec-b:persistent:1:1")}
+	interruptOnSleep(f)
+	before := snapshotDir(t, dir)
+	if code := upgradeRun(t, f, next, dir); code != 1 {
+		t.Fatalf("exit = %d; want 1\n%s%s", code, f.out, f.errOut)
+	}
+	if !strings.Contains(f.errOut.String(), "interrupted; the drain was undone (1 executor(s)); nothing else was changed") {
+		t.Errorf("stderr = %q; want it to say the drain was undone", f.errOut)
+	}
+	if got := undrainCalls(f); strings.Join(got, ",") != "exec-a" {
+		t.Errorf("undrained %q; want exec-a alone, the one the upgrade drained", got)
+	}
+	if len(f.streamed) != 1 {
+		t.Errorf("streamed %q; want the pull alone", f.streamed)
+	}
+	if after := snapshotDir(t, dir); !maps.Equal(before, after) {
+		t.Error("the interrupted upgrade changed the deployment directory")
+	}
+}
+
+// interruptOnSleep makes the next wait's sleep send the test process SIGINT,
+// as Ctrl-C would, and return once that ends the wait's context. A sleep
+// outside a drain, where nothing catches the signal, ends the test binary.
+func interruptOnSleep(f *fakeHost) {
+	f.sleep = func(ctx context.Context, _ time.Duration) error {
+		if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+			panic(err)
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+}
+
+const undrainPrefix = "compose -p triage-factory exec -T control triagefactory instance undrain "
+
+func undrainCalls(f *fakeHost) []string {
+	var out []string
+	for _, call := range f.dockerCalls {
+		if joined := strings.Join(call, " "); strings.HasPrefix(joined, undrainPrefix) {
+			out = append(out, strings.TrimPrefix(joined, undrainPrefix))
+		}
+	}
+	return out
+}
+
+func TestLostValues(t *testing.T) {
+	dir := t.TempDir()
+	// GOTRUE_JWT_KEYS is not read by this compose file, so it is a value
+	// generating adds rather than replaces.
+	mustWrite(t, filepath.Join(dir, composeFile), `services:
+  control:
+    environment:
+      DSN: postgres://u:${POSTGRES_PASSWORD:?missing}@db/x
+      TF_SESSION_ENCRYPTION_KEY: ${TF_SESSION_ENCRYPTION_KEY:-}
+      TF_SECRET_ENCRYPTION_KEY: ${TF_SECRET_ENCRYPTION_KEY:-}
+`)
+	env := envValues("POSTGRES_PASSWORD=\nTF_SESSION_ENCRYPTION_KEY_FILE=/run/secrets/k\n")
+	if got := strings.Join(lostValues(env, dir), ","); got != "POSTGRES_PASSWORD,TF_SECRET_ENCRYPTION_KEY" {
+		t.Errorf("lostValues = %q; want POSTGRES_PASSWORD and TF_SECRET_ENCRYPTION_KEY", got)
+	}
+	mustRemove(t, filepath.Join(dir, composeFile))
+	if got := len(lostValues(env, dir)); got != 3 {
+		t.Errorf("lostValues without a compose file = %d keys; want every unset one (3)", got)
 	}
 }
 

@@ -146,10 +146,13 @@ func pullIfMissing(ctx context.Context, h *host, image string) error {
 // composeUp starts the stack with its stored executor count. Every compose
 // call deploy makes names the project from the state file, so a name chosen
 // at init sticks, and passes the count, because compose resets a scale it is
-// not given back to the file's single replica.
+// not given back to the file's single replica. It removes the containers of
+// a service the compose files no longer define: one a release dropped or
+// renamed would otherwise keep running the old image, and hold any host port
+// its successor publishes.
 func composeUp(ctx context.Context, h *host, dir string, st deployState) error {
 	h.heading("Start")
-	args := []string{"compose", "-p", st.Project, "up", "-d", "--scale", "executor=" + strconv.Itoa(st.Executors)}
+	args := []string{"compose", "-p", st.Project, "up", "-d", "--remove-orphans", "--scale", "executor=" + strconv.Itoa(st.Executors)}
 	if st.BuildFrom != nil {
 		args = append(args, "--build")
 	}
@@ -269,10 +272,11 @@ WHAT IT DOES
   the host lacks it, and starts it under docker/seccomp-profile.json, which an
   older Docker Engine or libseccomp refuses. Then runs
 
-    docker compose -p <project> up -d --scale executor=<N>
+    docker compose -p <project> up -d --remove-orphans --scale executor=<N>
 
-  in the deployment directory (with --build for a source build), and waits up
-  to 5 minutes for every container to be running and healthy, GET /api/health
+  in the deployment directory (with --build for a source build), which also
+  removes the containers of a service the compose files no longer define, and
+  waits up to 5 minutes for every container to be running and healthy, GET /api/health
   to answer 200 and GoTrue to publish a signing key, each on the host port its
   container publishes (3000 and 9999 unless compose.override.yml moves them).
 
@@ -285,4 +289,5 @@ WHAT IT DOES
   control container), up waits up to --drain-timeout for its runs to finish,
   and then stops and removes it before compose runs. A run still in flight
   after that is parked with a workspace snapshot when its executor stops.
+  Interrupting up during the drain (Ctrl-C) undrains them and removes nothing.
 `
