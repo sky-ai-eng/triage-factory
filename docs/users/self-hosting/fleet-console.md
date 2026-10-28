@@ -26,8 +26,8 @@ docker compose exec control triagefactory operator list
 docker compose exec control triagefactory operator remove you@example.com
 ```
 
-Reload the app after granting; no restart is needed. The console is at
-`/<your-org>/fleet`.
+Reload the app after granting; no restart is needed. Open **Fleet** in the
+sidebar.
 
 - **Use a verified email of one of your sign-in methods.** A GitHub address
   counts when GitHub reports it verified. An SSO address counts only when its
