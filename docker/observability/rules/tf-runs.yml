@@ -1,0 +1,108 @@
+# Alerting rules for delegated runs: claims no executor is driving, workspace
+# checkpoints, and the credential sidecar's supervision channel. Loaded by the
+# bundled Prometheus through the rule_files glob in prometheus.yml. Severity
+# and delivery follow tf-connections.yml: critical is a fault an operator can
+# fix, warning needs a look, and nothing is sent anywhere until prometheus.yml
+# points at an Alertmanager.
+#
+# A counter's series appears at its first increment, already at 1, and
+# increase() over a series that starts at 1 and stays there is 0. A rule that
+# has to fire on a counter's first sample therefore adds
+# `or (x unless last_over_time(x[<window>] offset <window>))`: a series that
+# exists now and had no sample in the window before this one was incremented
+# inside this one. last_over_time skips the stale markers a failed scrape
+# writes, so a missed scrape does not make an old series look new; a
+# Prometheus outage longer than the window still can, once.
+
+groups:
+  - name: tf-runs
+    rules:
+      # Every executor's dispatcher takes expired claims over at the top of its
+      # pass, whether or not it has room for new work, so a claim that stays
+      # expired for minutes means no dispatcher is running. The age rather
+      # than the count: the count flickers as engagements end, and the age
+      # grows only when nobody takes them over. The gauge comes from the pod
+      # holding the background brain; max() keeps one series across a lease
+      # handover.
+      - alert: ClaimsExpiredUnreleased
+        expr: max(tf_claims_oldest_expired_age_seconds) > 120
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A run's claim has stayed expired and no executor has taken it over"
+          description: >-
+            The oldest expired claim is {{ $value | humanizeDuration }} past
+            its lease. Every executor takes expired claims over on each pass,
+            so none is running. Check that the executors are up and healthy
+            (their container health checks, and GET /healthz inside each
+            executor container), then read their logs.
+
+      # A live run is checkpointed at most every TF_SNAPSHOT_INTERVAL_SEC
+      # (default 300s), at a tool-batch boundary and never during a tool call,
+      # which may run for up to 30 minutes. So a healthy run can go 35 minutes
+      # without a checkpoint at the default interval; the threshold is that,
+      # and the 10 minutes on top keeps one slow boundary from firing it. With
+      # a longer interval the threshold is 1800 plus the interval. With
+      # checkpoints off (TF_SNAPSHOT_INTERVAL_SEC=0) no claim is measured and
+      # this cannot fire.
+      - alert: WorkspaceCheckpointsStale
+        expr: max(tf_claims_oldest_checkpoint_age_seconds) > 2100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A run's workspace has gone more than 45 minutes without a checkpoint"
+          description: >-
+            The live run longest without a checkpoint last had one
+            {{ $value | humanizeDuration }} ago, so a hard kill of its executor
+            would lose that much of its workspace. Check for
+            WorkspaceCheckpointsFailing and for problems with the object store.
+
+      # A failed checkpoint leaves the last one written in place, so it costs
+      # nothing until the executor is hard-killed, when the run comes back
+      # from older work than it should. A warning: one failure is not an
+      # outage, and a run of them usually means the object store is
+      # unreachable or refusing writes.
+      - alert: WorkspaceCheckpointsFailing
+        expr: |
+          sum(increase(tf_workspace_checkpoints_total{outcome="failed"}[1h])) > 0
+          or
+          sum(
+            tf_workspace_checkpoints_total{outcome="failed"}
+            unless last_over_time(tf_workspace_checkpoints_total{outcome="failed"}[1h] offset 1h)
+          ) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Workspace checkpoints are failing"
+          description: >-
+            At least one live run's workspace checkpoint failed in the last
+            hour, so a hard kill of its executor would lose more work than
+            TF_SNAPSHOT_INTERVAL_SEC allows. Checkpoints are uploaded to the
+            object store, so check that it is reachable and accepting writes,
+            and read the workspace.snapshot spans with reason=checkpoint for
+            the error.
+
+      # A working sidecar refuses to send a frame over the size limit itself,
+      # so an executor receiving one means a sidecar that skipped its own
+      # check. Critical at the first sample: the sidecar holds one run's real
+      # credentials and parses that run's hostile traffic.
+      - alert: SidecarFrameOversized
+        expr: |
+          sum(increase(tf_sidecar_frames_oversized_total[1h])) > 0
+          or
+          sum(
+            tf_sidecar_frames_oversized_total
+            unless last_over_time(tf_sidecar_frames_oversized_total[1h] offset 1h)
+          ) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "A run's credential sidecar sent a supervision frame over the size limit"
+          description: >-
+            A working sidecar never sends a frame over the limit, so treat this
+            sidecar as compromised. The executor closed that run's supervision
+            channel. Its ERROR line, "sidecar sent a supervision frame over the
+            size limit; closed its supervision channel", names the
+            conversation.
