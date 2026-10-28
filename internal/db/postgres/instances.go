@@ -23,13 +23,31 @@ func newInstanceStore(admin queryer) db.InstanceStore {
 
 // NewInstanceStore builds a standalone db.InstanceStore against a pooled
 // *sql.DB — the narrow constructor CLI subcommands use (`triagefactory
-// instance list/drain/undrain`, TFAC-586) instead of building the full
+// instance list/drain/undrain`) instead of building the full
 // db.Stores bundle (New) just to reach .Instances.
 func NewInstanceStore(admin *sql.DB) db.InstanceStore {
 	return newInstanceStore(admin)
 }
 
 var _ db.InstanceStore = (*instanceStore)(nil)
+
+// drainingSQL is whether an instance row is draining, with its columns
+// qualified by qual ("" or a table alias with its dot): an operator drained
+// it, or drained it until its next restart (SetDrainUntilRestart) and it has
+// not registered since. Every read of the drain state uses it, placement's
+// included.
+func drainingSQL(qual string) string {
+	return "(" + qual + "draining OR " + qual + "drain_until_epoch IS NOT DISTINCT FROM " + qual + "boot_epoch)"
+}
+
+// instanceColumns is the column list List and Get scan. The two drain
+// columns are the drain in effect, not the stored ones: whether the instance
+// is draining, and whether only the drain until restart holds.
+var instanceColumns = `id, role, version, boot_epoch, started_at, last_heartbeat_at,
+		       ` + drainingSQL("") + `,
+		       (NOT draining AND drain_until_epoch IS NOT DISTINCT FROM boot_epoch),
+		       max_runs, active_runs, mem_total_mb, mem_available_mb, dispatch_gated,
+		       COALESCE(labels::text, ''), COALESCE(pubkey, '')`
 
 func (s *instanceStore) Register(ctx context.Context, id, role, version, pubkey string) (int64, error) {
 	var bootEpoch int64
@@ -42,7 +60,7 @@ func (s *instanceStore) Register(ctx context.Context, id, role, version, pubkey 
 			version           = EXCLUDED.version,
 			started_at        = EXCLUDED.started_at,
 			last_heartbeat_at = EXCLUDED.last_heartbeat_at,
-			-- pubkey re-stamps every restart alongside boot_epoch (TFAC-614)
+			-- pubkey re-stamps every restart alongside boot_epoch
 			-- — a fresh ephemeral keypair each boot, never preserved. The
 			-- prior boot's capacity/admission snapshot is dead state (e.g. a
 			-- dispatch_gated=true from the crashed life); clear it so
@@ -50,6 +68,8 @@ func (s *instanceStore) Register(ctx context.Context, id, role, version, pubkey 
 			-- first heartbeat repopulates within one interval. draining and
 			-- labels survive on purpose — operator intent outlives a
 			-- restart (a drained instance stays drained until un-drained).
+			-- drain_until_epoch is left alone too: the bump above is what
+			-- ends a drain until restart.
 			pubkey            = EXCLUDED.pubkey,
 			max_runs          = NULL,
 			active_runs       = NULL,
@@ -66,7 +86,7 @@ func (s *instanceStore) Heartbeat(ctx context.Context, id string, bootEpoch int6
 	// operator/control-plane intent and the heartbeat must not clobber them
 	// (see domain.InstanceHeartbeat). draining IS read back via RETURNING
 	// so a running instance learns an operator drained it on its very
-	// next heartbeat, with no separate poll (TFAC-586).
+	// next heartbeat, with no separate poll.
 	var draining bool
 	err := s.admin.QueryRowContext(ctx, `
 		UPDATE instances SET
@@ -77,7 +97,7 @@ func (s *instanceStore) Heartbeat(ctx context.Context, id string, bootEpoch int6
 			mem_available_mb  = $6,
 			dispatch_gated    = $7
 		WHERE id = $1 AND boot_epoch = $2
-		RETURNING draining
+		RETURNING `+drainingSQL("")+`
 	`,
 		id, bootEpoch,
 		intPtrAny(hb.MaxRuns), intPtrAny(hb.ActiveRuns),
@@ -95,9 +115,7 @@ func (s *instanceStore) Heartbeat(ctx context.Context, id string, bootEpoch int6
 
 func (s *instanceStore) List(ctx context.Context) ([]domain.Instance, error) {
 	rows, err := s.admin.QueryContext(ctx, `
-		SELECT id, role, version, boot_epoch, started_at, last_heartbeat_at, draining,
-		       max_runs, active_runs, mem_total_mb, mem_available_mb, dispatch_gated,
-		       COALESCE(labels::text, ''), COALESCE(pubkey, '')
+		SELECT `+instanceColumns+`
 		FROM instances ORDER BY started_at DESC
 	`)
 	if err != nil {
@@ -112,7 +130,7 @@ func (s *instanceStore) List(ctx context.Context) ([]domain.Instance, error) {
 		var dispatchGated sql.NullBool
 		var labels, pubkey string
 		if err := rows.Scan(
-			&inst.ID, &inst.Role, &inst.Version, &inst.BootEpoch, &inst.StartedAt, &inst.LastHeartbeatAt, &inst.Draining,
+			&inst.ID, &inst.Role, &inst.Version, &inst.BootEpoch, &inst.StartedAt, &inst.LastHeartbeatAt, &inst.Draining, &inst.DrainUntilRestart,
 			&maxRuns, &activeRuns, &memTotal, &memAvail, &dispatchGated, &labels, &pubkey,
 		); err != nil {
 			return nil, err
@@ -133,7 +151,20 @@ func (s *instanceStore) List(ctx context.Context) ([]domain.Instance, error) {
 }
 
 func (s *instanceStore) SetDraining(ctx context.Context, id string, draining bool) (bool, error) {
-	res, err := s.admin.ExecContext(ctx, `UPDATE instances SET draining = $2 WHERE id = $1`, id, draining)
+	query := `UPDATE instances SET draining = true WHERE id = $1`
+	if !draining {
+		query = `UPDATE instances SET draining = false, drain_until_epoch = NULL WHERE id = $1`
+	}
+	res, err := s.admin.ExecContext(ctx, query, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+func (s *instanceStore) SetDrainUntilRestart(ctx context.Context, id string) (bool, error) {
+	res, err := s.admin.ExecContext(ctx, `UPDATE instances SET drain_until_epoch = boot_epoch WHERE id = $1`, id)
 	if err != nil {
 		return false, err
 	}
@@ -161,12 +192,10 @@ func (s *instanceStore) Get(ctx context.Context, id string) (*domain.Instance, e
 	var labels, pubkey string
 
 	err := s.admin.QueryRowContext(ctx, `
-		SELECT id, role, version, boot_epoch, started_at, last_heartbeat_at, draining,
-		       max_runs, active_runs, mem_total_mb, mem_available_mb, dispatch_gated,
-		       COALESCE(labels::text, ''), COALESCE(pubkey, '')
+		SELECT `+instanceColumns+`
 		FROM instances WHERE id = $1
 	`, id).Scan(
-		&inst.ID, &inst.Role, &inst.Version, &inst.BootEpoch, &inst.StartedAt, &inst.LastHeartbeatAt, &inst.Draining,
+		&inst.ID, &inst.Role, &inst.Version, &inst.BootEpoch, &inst.StartedAt, &inst.LastHeartbeatAt, &inst.Draining, &inst.DrainUntilRestart,
 		&maxRuns, &activeRuns, &memTotal, &memAvail, &dispatchGated, &labels, &pubkey,
 	)
 	if err == sql.ErrNoRows {

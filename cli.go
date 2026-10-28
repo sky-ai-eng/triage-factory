@@ -7,6 +7,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/capbroker"
 	"github.com/sky-ai-eng/triage-factory/cmd/commitsigner"
+	"github.com/sky-ai-eng/triage-factory/cmd/deploy"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
@@ -90,6 +91,8 @@ func dispatchCLI(args []string) (handled bool, err error) {
 		migrate.Handle(args[1:])
 	case "jwk-init":
 		jwkinit.Handle(args[1:])
+	case "deploy":
+		deploy.Handle(args[1:], deploy.Bundle{Files: deployBundle, Version: Version})
 	case "instance":
 		instance.Handle(args[1:])
 	case "operator":
@@ -117,7 +120,8 @@ func dispatchCLI(args []string) (handled bool, err error) {
 // refused, because none of them can work in a jail and each would fail in a
 // more confusing way than a refusal. install/uninstall/migrate/jwk-init/
 // instance/operator/commit-signer all reach for local state that isn't there
-// (and would create some by reaching), a leading flag means server mode, and the internal
+// (and would create some by reaching), deploy drives a Docker host the jail
+// has none of, a leading flag means server mode, and the internal
 // namespaces — hook, snapshot-capture, cap-broker, run-sidecar — are all
 // host-side callbacks the jail never legitimately invokes.
 //
@@ -201,6 +205,8 @@ USER COMMANDS
   triagefactory migrate status             list applied + pending migrations
   triagefactory instance list              show every registered fleet instance
   triagefactory instance drain <id>        stop new claims, quiesce
+                                           (--until-restart: only until
+                                           the instance next restarts)
   triagefactory instance undrain <id>      resume claims
   triagefactory instance placement ...     inspect / steer run placement
   triagefactory operator add <email>       grant the fleet-console operator flag
@@ -208,6 +214,12 @@ USER COMMANDS
   triagefactory operator list              show deployment operators
   triagefactory commit-signer status       show the deployment commit signer
   triagefactory commit-signer verify       check it against GitHub now
+  triagefactory deploy init                render a self-hosted multi-mode
+                                           deployment (docker compose)
+  triagefactory deploy up                  start it and wait for it to be
+                                           healthy
+  triagefactory deploy upgrade             move it to this binary's version
+  triagefactory deploy doctor              check a deployment and its host
 
 AGENT COMMANDS
   Used by delegated Claude Code agents inside their worktree, not

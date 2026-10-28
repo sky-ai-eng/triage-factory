@@ -136,6 +136,9 @@ func (f *fakeInstanceStore) List(context.Context) ([]domain.Instance, error) {
 func (f *fakeInstanceStore) SetDraining(context.Context, string, bool) (bool, error) {
 	return false, nil
 }
+func (f *fakeInstanceStore) SetDrainUntilRestart(context.Context, string) (bool, error) {
+	return false, nil
+}
 func (f *fakeInstanceStore) DeleteStaleSystem(context.Context, time.Duration) (int, error) {
 	return 0, nil
 }

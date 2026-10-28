@@ -28,7 +28,9 @@
 # Compose files are deployment config, not build inputs. A release commit
 # bumps the image pin in docker-compose.yml and otherwise changes only
 # ignored files, so keeping it out lets the release build reuse the cache of
-# the main build before it.
+# the main build before it. The host binary embeds docker-compose.yml for
+# `triagefactory deploy`; the image's binary never runs deploy, so the
+# Dockerfile builds it against an empty stand-in.
 /docker-compose.yml
 /compose.dev.yml
 

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/sky-ai-eng/triage-factory/internal/envfile"
 )
 
 // TestMintServiceRoleToken verifies the long-lived admin token is an RS256 JWT
@@ -303,6 +304,56 @@ func TestRunGenerate_StdoutReuseEmitsOnlyToken(t *testing.T) {
 	}
 }
 
+// TestGenerate_IssuerFromExplicitPublicURL: the token's iss comes from the
+// publicURL argument alone. TF_PUBLIC_URL in the process env is set to
+// something else to prove Generate never reads it — deploy init passes the URL
+// it is writing to a deployment's .env, which is not the operator's shell.
+func TestGenerate_IssuerFromExplicitPublicURL(t *testing.T) {
+	t.Setenv("TF_PUBLIC_URL", "https://from-env.example")
+	m, err := Generate("", "https://tf.example/")
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if m.Reused() || m.Keys == "" || m.Secret == "" {
+		t.Fatal("fresh Generate did not return a keypair and secret")
+	}
+	priv, kid, err := parseSigningKey(m.Keys)
+	if err != nil {
+		t.Fatalf("parseSigningKey: %v", err)
+	}
+	tok, err := jwt.Parse(m.ServiceRoleToken, func(*jwt.Token) (any, error) { return &priv.PublicKey, nil })
+	if err != nil {
+		t.Fatalf("token does not verify against the returned key: %v", err)
+	}
+	if got := tok.Header["kid"]; got != kid {
+		t.Errorf("header kid = %v; want %q", got, kid)
+	}
+	if iss := tok.Claims.(jwt.MapClaims)["iss"]; iss != "https://tf.example/auth/v1" {
+		t.Errorf("iss = %v; want https://tf.example/auth/v1", iss)
+	}
+	if vars := m.EnvVars(); len(vars) != 3 {
+		t.Errorf("fresh EnvVars has %d entries; want 3", len(vars))
+	}
+
+	reused, err := Generate(m.Keys, "")
+	if err != nil {
+		t.Fatalf("Generate(reuse): %v", err)
+	}
+	if !reused.Reused() || reused.Secret != "" {
+		t.Error("reusing Generate returned a new keypair or secret")
+	}
+	if vars := reused.EnvVars(); len(vars) != 1 || vars[0].Key != "TF_GOTRUE_SERVICE_ROLE_TOKEN" {
+		t.Errorf("reused EnvVars = %+v; want only the token", vars)
+	}
+	tok, err = jwt.Parse(reused.ServiceRoleToken, func(*jwt.Token) (any, error) { return &priv.PublicKey, nil })
+	if err != nil {
+		t.Fatalf("reused token does not verify against the original key: %v", err)
+	}
+	if _, ok := tok.Claims.(jwt.MapClaims)["iss"]; ok {
+		t.Error("empty publicURL still stamped an iss claim")
+	}
+}
+
 // captureStdout redirects os.Stdout for the duration of fn and returns what it
 // wrote.
 func captureStdout(t *testing.T, fn func()) string {
@@ -325,62 +376,14 @@ func captureStdout(t *testing.T, fn func()) string {
 	return buf.String()
 }
 
-// TestUpsertEnvFile_CollapsesDuplicates: an .env with stale duplicate lines (the
-// old append-path relic) collapses to a single in-place line on upsert.
-func TestUpsertEnvFile_CollapsesDuplicates(t *testing.T) {
-	path := filepath.Join(t.TempDir(), ".env")
-	seed := "A=1\nGOTRUE_JWT_KEYS=old1\nB=2\nGOTRUE_JWT_KEYS=old2\n"
-	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if err := upsertEnvFile(path, []envVar{{"GOTRUE_JWT_KEYS", "new"}}); err != nil {
-		t.Fatalf("upsertEnvFile: %v", err)
-	}
-	if got := envValue(t, path, "GOTRUE_JWT_KEYS"); got != "new" {
-		t.Errorf("GOTRUE_JWT_KEYS = %q; want new", got)
-	}
-	assertNoDuplicateKeys(t, path)
-	if envValue(t, path, "A") != "1" || envValue(t, path, "B") != "2" {
-		t.Error("unrelated lines not preserved")
-	}
-}
-
-// TestUpsertEnvFile_PreservesExportPrefix: a `export KEY=` line keeps its export
-// prefix when its value is replaced, so a sourced .env keeps exporting it.
-func TestUpsertEnvFile_PreservesExportPrefix(t *testing.T) {
-	path := filepath.Join(t.TempDir(), ".env")
-	if err := os.WriteFile(path, []byte("export GOTRUE_JWT_KEYS=old\n"), 0o600); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if err := upsertEnvFile(path, []envVar{{"GOTRUE_JWT_KEYS", "new"}}); err != nil {
-		t.Fatalf("upsertEnvFile: %v", err)
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if !strings.Contains(string(b), "export GOTRUE_JWT_KEYS=new") {
-		t.Errorf("export prefix not preserved; got:\n%s", b)
-	}
-}
-
 // envValue returns the last value assigned to key in the .env at path, or "".
-// Unlike production readExistingJWTKeys, it does NOT run unquoteEnvValue — the
-// values jwk-init writes are unquoted, so the tests never need it; a test that
-// writes a quoted value would have to strip the quotes itself.
 func envValue(t *testing.T, path, key string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	val := ""
-	for _, line := range strings.Split(string(b), "\n") {
-		if envLineKey(line) == key {
-			_, v, _ := strings.Cut(line, "=")
-			val = strings.TrimSpace(v)
-		}
-	}
+	val, _ := envfile.Lookup(b, key)
 	return val
 }
 
@@ -393,7 +396,7 @@ func assertNoDuplicateKeys(t *testing.T, path string) {
 	}
 	seen := map[string]int{}
 	for _, line := range strings.Split(string(b), "\n") {
-		if k := envLineKey(line); k != "" {
+		if k := envfile.LineKey(line); k != "" {
 			seen[k]++
 		}
 	}

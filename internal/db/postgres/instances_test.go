@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -326,6 +327,16 @@ func TestInstanceStore_Postgres_GCConformance(t *testing.T) {
 					`UPDATE instances SET last_heartbeat_at = now() - make_interval(secs => $1) WHERE id = $2`, ago.Seconds(), id)
 			},
 		}
+	})
+}
+
+// TestInstanceStore_Postgres_DrainConformance runs the shared drain suite
+// on the superuser connection, the role a control pod's admin pool binds.
+func TestInstanceStore_Postgres_DrainConformance(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunInstanceDrainConformance(t, func(t *testing.T) db.InstanceStore {
+		h.Reset(t)
+		return pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey).Instances
 	})
 }
 

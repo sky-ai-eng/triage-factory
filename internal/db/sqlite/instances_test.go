@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -324,5 +325,12 @@ func TestInstanceStore_SQLite_GCConformance(t *testing.T) {
 				}
 			},
 		}
+	})
+}
+
+// TestInstanceStore_SQLite_DrainConformance runs the shared drain suite.
+func TestInstanceStore_SQLite_DrainConformance(t *testing.T) {
+	dbtest.RunInstanceDrainConformance(t, func(t *testing.T) db.InstanceStore {
+		return sqlitestore.New(newSQLiteForArtifactTest(t)).Instances
 	})
 }
