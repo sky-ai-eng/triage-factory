@@ -144,7 +144,10 @@ func (g *TerminalInvariantGauges) record(counts map[string]terminalCounts, faile
 // enforcement should have closed and did not, and the tasks left open on
 // closed entities, per org, logging each nonzero count and recording every
 // count on g. Returns when ctx is cancelled, closing g for a caller that did
-// not already.
+// not already. The first pass runs at start rather than on the first tick:
+// a pod that just acquired the lease has nothing to report until it counts,
+// and an interval of minutes would leave both gauges empty that long after
+// every handover.
 //
 // Brain-gated (started from the leader-elected background brain, like the
 // firing worker), so exactly one process counts and reports at a time. The
@@ -157,11 +160,11 @@ func (r *Router) RunTerminalInvariantChecker(ctx context.Context, interval time.
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
+		r.checkTerminalInvariant(ctx, g)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			r.checkTerminalInvariant(ctx, g)
 		}
 	}
 }

@@ -462,37 +462,63 @@ func TestTerminalChecker_JiraDoneFollowsAProjectKeyRename(t *testing.T) {
 	}
 }
 
-// TestRunTerminalInvariantChecker_CountsOnItsOwnTicker covers the loop
-// itself — the per-org iteration and the ticker — since a checker nothing
-// drives is not an alarm, and that the loop closes its gauges when it stops.
-func TestRunTerminalInvariantChecker_CountsOnItsOwnTicker(t *testing.T) {
+// waitForGauge polls a checker gauge until the org's value is want, failing
+// the test if it is not within two seconds.
+func waitForGauge(t *testing.T, reader *sdkmetric.ManualReader, name, orgID string, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		v, found := gaugeValue(t, reader, name, orgID)
+		if found && v == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s = (%d, found=%v), want %d", name, v, found, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestRunTerminalInvariantChecker_CountsAtStart: a pod that just acquired
+// the lease reports on its first pass, not an interval later, and the loop
+// closes its gauges when it stops.
+func TestRunTerminalInvariantChecker_CountsAtStart(t *testing.T) {
 	database := newTestDB(t)
 	r := newCheckerRouter(t, database)
 	reader := sdkmetric.NewManualReader()
 	g := NewTerminalInvariantGauges(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
-	seedDivergentEntity(t, database, "github", "owner/repo#ticked", `{"state":"MERGED","merged":true}`, domain.EventGitHubPRCICheckFailed)
+	seedDivergentEntity(t, database, "github", "owner/repo#stranded", `{"state":"MERGED","merged":true}`, domain.EventGitHubPRCICheckFailed)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go func() { r.RunTerminalInvariantChecker(ctx, 20*time.Millisecond, g); close(done) }()
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if v, found := gaugeValue(t, reader, "entity_terminal_active", runmode.LocalDefaultOrgID); found && v == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the gauge never recorded the violation after several ticks")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	go func() { r.RunTerminalInvariantChecker(ctx, time.Hour, g); close(done) }()
+	waitForGauge(t, reader, "entity_terminal_active", runmode.LocalDefaultOrgID, 1)
 
 	cancel()
 	<-done
 	if v, found := gaugeValue(t, reader, "entity_terminal_active", runmode.LocalDefaultOrgID); found {
 		t.Errorf("entity_terminal_active = %d after the checker stopped, want no series", v)
 	}
+}
+
+// TestRunTerminalInvariantChecker_CountsOnItsOwnTicker covers the passes
+// after the first, since a checker that counts once and never again is not
+// an alarm.
+func TestRunTerminalInvariantChecker_CountsOnItsOwnTicker(t *testing.T) {
+	database := newTestDB(t)
+	r := newCheckerRouter(t, database)
+	reader := sdkmetric.NewManualReader()
+	g := NewTerminalInvariantGauges(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.RunTerminalInvariantChecker(ctx, 20*time.Millisecond, g); close(done) }()
+	defer func() { cancel(); <-done }()
+	waitForGauge(t, reader, "entity_terminal_active", runmode.LocalDefaultOrgID, 0)
+
+	seedDivergentEntity(t, database, "github", "owner/repo#ticked", `{"state":"MERGED","merged":true}`, domain.EventGitHubPRCICheckFailed)
+	waitForGauge(t, reader, "entity_terminal_active", runmode.LocalDefaultOrgID, 1)
 }
 
 // testScope is the scope a test keys an entity of source under: what
