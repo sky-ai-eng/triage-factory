@@ -14,7 +14,8 @@ operation of the product.
 
 ## Run it for your organization (self-hosting)
 
-- [Install](users/self-hosting/install.md) — `.env`, signing keys, `docker compose up`
+- [Install](users/self-hosting/install.md) — `triagefactory deploy init` and `deploy up`
+- [Upgrading](users/self-hosting/upgrading.md) — `triagefactory deploy upgrade`
 - Deployment-wide integrations, each optional:
   [GitHub App](users/self-hosting/deployment-github-app.md),
   [Jira (Atlassian) app](users/self-hosting/deployment-jira-app.md),

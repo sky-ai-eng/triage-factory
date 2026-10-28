@@ -20,7 +20,7 @@ workspace.
 
 The App is registered on the deployment's default GitHub, which is github.com
 unless `TF_DEFAULT_GITHUB_HOST` names a GitHub Enterprise Server (set before
-the first workspace was created; see [install](install.md#2-fill-in-env)). A
+the first workspace was created; see [install](install.md#3-render-the-deployment)). A
 workspace whose own GitHub base URL names a different host can't use the
 deployment App and brings its own.
 

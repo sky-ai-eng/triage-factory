@@ -4,7 +4,9 @@
 # + the TF binary as a service. Local-mode (SQLite, the default) doesn't
 # need any of this.
 #
-# Prerequisites — see docs/users/self-hosting/install.md:
+# `triagefactory deploy init` renders this file with the image pinned by a
+# verified digest, and `deploy up` starts it (docs/users/self-hosting/install.md).
+# By hand (docs/contributors/multi-mode-by-hand.md):
 #   1. Create a GitHub OAuth app with callback ${TF_PUBLIC_URL}/auth/v1/callback
 #   2. cp .env.example .env, fill in the placeholders
 #   3. ./triagefactory jwk-init --write-env .env   (writes GOTRUE_JWT_KEYS + GOTRUE_JWT_SECRET)

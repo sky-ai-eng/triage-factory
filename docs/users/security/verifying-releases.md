@@ -6,15 +6,20 @@ us to manage, rotate, or leak, and no key for you to fetch and pin before
 verifying. Each tagged release also carries an SPDX SBOM per archive, and the GHCR
 image carries an SBOM + SLSA provenance attestation alongside its signature.
 
+`triagefactory deploy init`, `deploy up` and `deploy upgrade` check the image's
+signature themselves, against the workflow and tag below, and refuse an image
+that fails. The commands on this page are for checking by hand: a release
+archive, or an image you run without `deploy`.
+
 The `--certificate-identity-regexp` below pins the exact workflow file *and* the
 tag-push trigger that ran it — not just the repo. A bare repo-name match would also
 accept a signature from any other workflow in this repo that happened to hold
 `id-token: write` (e.g. one added on a PR branch), which defeats the point of
 checking provenance at all.
 
-**Release tarball / checksums** — `checksums.txt` is signed as a blob; verifying
-its signature transitively verifies every archive it lists (each line is a sha256
-of one archive):
+**Release archives / checksums** — `checksums.txt` is signed as a blob; verifying
+its signature transitively verifies every archive it lists, the binary tarballs
+and the compose bundle (each line is a sha256 of one archive):
 
 ```sh
 cosign verify-blob --certificate checksums.txt.pem --signature checksums.txt.sig \

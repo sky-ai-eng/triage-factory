@@ -17,7 +17,7 @@ networks at present.
 
 ## Set up
 
-- [Install](install.md) — GitHub OAuth app, `.env`, `jwk-init`, `docker compose up`
+- [Install](install.md) — GitHub OAuth app, `triagefactory deploy init`, `deploy up`
 - [Deployment GitHub App](deployment-github-app.md) — one App every workspace without its own can connect to
 - [Deployment Jira app](deployment-jira-app.md) — one Atlassian OAuth app for one-click Jira Cloud connections
 - [Deployment Linear app](deployment-linear-app.md) — one Linear OAuth app every workspace can install
@@ -27,6 +27,7 @@ networks at present.
 
 ## Operate
 
+- [Upgrading](upgrading.md) — moving to a newer release
 - [Monitoring](monitoring.md) — health endpoints, metrics, traces
 - [Scaling](scaling.md) — more executors, multiple control pods, database pools
 - [Networking](networking.md) — client IPs behind a load balancer

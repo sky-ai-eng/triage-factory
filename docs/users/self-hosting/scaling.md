@@ -17,10 +17,14 @@ Executors are memory-bound; budget about 0.25 GB of RAM per concurrent run. To
 add executors:
 
 ```sh
-docker compose up -d --scale executor=2
-docker compose ps                 # 1 control + 2 executors, all healthy
+triagefactory deploy up --executors 2
 docker compose logs -f executor   # delegate a run and watch an executor pick it up
 ```
+
+`deploy up` stores the count, and every later `deploy up` and `deploy upgrade`
+keeps it. A plain `docker compose up -d` goes back to one executor. Lowering the
+count drains the executors being removed first, and waits up to
+`--drain-timeout` (default `10m`) for their runs.
 
 Executors take no inbound traffic (their only listener is a localhost health
 check), so adding them needs no load balancer.
@@ -70,6 +74,10 @@ Set alongside it:
   docker compose exec control triagefactory instance list
   docker compose exec control triagefactory instance drain <id>
   ```
+
+  A drain lasts until `instance undrain <id>`, restarts included.
+  `instance drain --until-restart <id>` ends on its own when the executor
+  restarts, which is what you want before restarting one.
 
 An executor that dies without SIGTERM (SIGKILL, an out-of-memory kill, a lost
 node) hands nothing off. Its runs move to other executors after 75s, each

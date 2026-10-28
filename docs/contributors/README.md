@@ -5,6 +5,8 @@ how to propose a change, the pull request process, and the CLA. Build, lint
 and test commands are in [CLAUDE.md](../../CLAUDE.md).
 
 - [Contributor License Agreement](CLA.md)
+- [Running multi mode by hand](multi-mode-by-hand.md): the compose stack
+  without `triagefactory deploy`, including a build of your checkout
 - [Building an Enterprise Edition feature](ee-features.md): where `ee/` code
   goes, the seams it registers into, and the rules it follows
 - [Sandbox egress lanes](sandbox-egress.md): how a sandboxed run reaches the

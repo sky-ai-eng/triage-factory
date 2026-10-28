@@ -1,27 +1,41 @@
 # Self-host setup (multi-mode)
 
 This sets up the multi-tenant deployment: Postgres, GoTrue (sign-in), an object
-store, and Triage Factory as a `control` + `executor` pair, all from
-`docker-compose.yml`.
+store, and Triage Factory as a `control` + `executor` pair, run with Docker
+Compose. The `triagefactory` binary renders the deployment, generates its
+secrets and starts it, pinned to the signed release image of its own version.
+
+To run the compose files yourself, or to run a build of your own checkout, see
+[Running multi mode by hand](../../contributors/multi-mode-by-hand.md).
 
 ## 0. Requirements
 
-- A Linux VM or bare-metal host with Docker Engine and Compose v2. The
-  `executor` container needs `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`,
+- A Linux host with Docker Engine, Docker Compose 2 or later, and cgroup v2.
+  The `executor` container needs `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`,
   `CAP_SYS_RESOURCE` and a private cgroup namespace (the compose file sets all
   of these). Managed platforms that block those (managed Kubernetes, Railway,
   Render) can host `control` but not an executor. Details are in the
   [security overview](../security/security-overview.md).
-- A checkout of this repository. The compose file builds the image from source;
-  to run a published image instead, swap each service's `build:` block for the
-  commented `image: ghcr.io/sky-ai-eng/triage-factory:<tag>` line
-  ([verifying releases](../security/verifying-releases.md)).
-- A `triagefactory` binary on the host for the one-time key generation in step 3
-  ([download or build one](../local/install.md)).
+- Ports `3000`, `9999` and `3030` free on the host.
+- Outbound HTTPS to `ghcr.io`, `pkg-containers.githubusercontent.com` and
+  `tuf-repo-cdn.sigstore.dev`, to pull the image and check its signature.
 - A public HTTPS URL that reaches port `3000` on the host, through your TLS
   terminator or load balancer. Everything, sign-in included, is served there.
 
-## 1. Create the GitHub OAuth app (sign-in)
+`triagefactory deploy` checks the host before it writes anything, and says
+which requirement failed.
+
+## 1. Install the binary
+
+```sh
+brew tap sky-ai-eng/tap
+brew install triagefactory
+```
+
+Or download a release tarball ([local install](../local/install.md) covers
+both). The binary's version is the version of the deployment it renders.
+
+## 2. Create the GitHub OAuth app (sign-in)
 
 People sign in to Triage Factory with GitHub. At
 <https://github.com/settings/developers> → **New OAuth App**:
@@ -29,44 +43,36 @@ People sign in to Triage Factory with GitHub. At
 - **Homepage URL:** your public URL, e.g. `https://tfac.example.com`
 - **Authorization callback URL:** `<public URL>/auth/v1/callback`
 
-Keep the **Client ID** and a new **Client secret** for step 2.
+Keep the **Client ID**, and save a new **Client secret** to a file for step 3.
 
-## 2. Fill in `.env`
+## 3. Render the deployment
 
 ```sh
-cp .env.example .env
+triagefactory deploy init --dir /srv/triagefactory \
+  --public-url https://tfac.example.com \
+  --github-client-id <client id> \
+  --github-client-secret-file ./gh-client-secret
 ```
 
-Generate every key and password with `openssl rand -hex 32`. Use hex, not
-base64: some of these values are written into database connection URLs, where
-base64's `/`, `+` and `=` break parsing.
+On a terminal, `init` asks for any of the three values you leave off. It
+checks the release image's signature, then writes the compose files, the
+executor's seccomp profile and a `.env` (mode `0600`) with every password and
+key generated. The rest of this guide runs from that directory; every `deploy`
+command also takes `--dir`.
 
-| Variable                                   | What it is                                                                                                                                                                            |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POSTGRES_PASSWORD`                        | Postgres superuser, used for migrations.                                                                                                                                              |
-| `SUPABASE_AUTH_ADMIN_PASSWORD`             | The database role GoTrue connects as.                                                                                                                                                 |
-| `TF_AUTHENTICATOR_PASSWORD`                | The database role `control` serves requests as.                                                                                                                                       |
-| `TF_SYSTEM_PASSWORD`                       | The least-privilege database role executors connect as.                                                                                                                               |
-| `TF_PUBLIC_URL`                            | Your public URL, no trailing slash.                                                                                                                                                   |
-| `GH_CLIENT_ID`, `GH_CLIENT_SECRET`         | The OAuth app from step 1.                                                                                                                                                            |
-| `TF_SESSION_ENCRYPTION_KEY`                | Encrypts sign-in sessions. Changing it signs everyone out.                                                                                                                            |
-| `TF_COOKIE_SECRET`                         | Signs the short-lived sign-in state cookie. Changing it only breaks sign-ins in progress.                                                                                             |
-| `TF_SECRET_ENCRYPTION_KEY`                 | Encrypts every stored integration credential (GitHub App keys, Jira and Linear tokens). Changing or losing it makes them all unreadable, and every workspace has to enter them again. |
-| `TF_BLOB_ACCESS_KEY`, `TF_BLOB_SECRET_KEY` | Credentials for the bundled SeaweedFS object store. To use S3, R2, or Supabase Storage instead, see [Durable workspace storage](storage.md).                                          |
+Optional settings are documented in the rendered `.env`. Put changes to the
+rendered compose files in `compose.override.yml`, which compose merges on its
+own and `deploy` never writes.
 
-`docker compose up` refuses to start while a required value is blank. Every
-other variable in `.env.example` is optional and documented there.
+**On GitHub Enterprise Server**, set `TF_DEFAULT_GITHUB_HOST` in `.env` to your
+GHES URL (e.g. `https://ghe.example.com`) **before the first workspace is
+created**. Records are keyed under the host they were created with and are
+never migrated, so changing it later means a fresh install.
 
-**On GitHub Enterprise Server**, also set `TF_DEFAULT_GITHUB_HOST` to your GHES
-URL (e.g. `https://ghe.example.com`) **before the first workspace is created**.
-Records are keyed under the host they were created with and are never migrated,
-so changing it later means a fresh install.
-
-To change a database password later, edit `.env` and run
-`docker compose up -d`; the password sidecars reapply it on every boot.
-`POSTGRES_PASSWORD` is the exception: Postgres reads it only when the volume is
-first created, so also run `ALTER USER postgres WITH PASSWORD '…'` inside the
-running `postgres` container.
+Back up `.env`. Losing `TF_SECRET_ENCRYPTION_KEY` makes every stored
+integration credential unreadable, and losing `POSTGRES_PASSWORD` locks
+Triage Factory out of its database. Re-running `init` adds only what `.env`
+is missing.
 
 ### Optional, deployment-wide
 
@@ -80,32 +86,19 @@ running `postgres` container.
 - Behind a load balancer or CDN: set `TF_TRUSTED_PROXY_CIDR` ([Client IP & trusted proxies](networking.md)).
 - Secrets from mounted files instead of `.env`: [Deployment secrets](secrets.md).
 
-## 3. Generate the sign-in signing key
-
-```sh
-./triagefactory jwk-init --write-env .env
-```
-
-This writes `GOTRUE_JWT_KEYS`, `GOTRUE_JWT_SECRET` and
-`TF_GOTRUE_SERVICE_ROLE_TOKEN` into `.env`. Run it after `TF_PUBLIC_URL` is set.
-Re-running it is safe: it keeps an existing keypair and rewrites the lines in
-place. To replace the key on purpose, see
-[Rotating the JWT key](jwt-key-rotation.md).
-
 ## 4. Start the stack
 
 ```sh
-docker compose up -d
+triagefactory deploy up
 ```
 
 This starts Postgres, GoTrue, SeaweedFS, `control` (the API and background
 work; it runs database migrations at boot) and one `executor` (runs agents in
-gVisor sandboxes). Check it came up:
+gVisor sandboxes), then waits until every service is healthy. To check it
+again later:
 
 ```sh
-docker compose ps                              # services running/healthy; the three *-postinit sidecars exited(0)
-curl -fsS http://localhost:3000/api/health     # 200
-curl -s http://localhost:9999/.well-known/jwks.json | jq .   # one public RSA key
+triagefactory deploy doctor
 ```
 
 > **Never run two Triage Factory containers off copies of one data volume.**
@@ -144,8 +137,17 @@ Enterprise license: Acme Corp (features: [sso slack governance fleet]) valid unt
 A missing, invalid or expired token leaves every Enterprise feature off.
 `GET /api/entitlements` shows which features are on.
 
+## Changing a database password
+
+Edit `.env` and run `triagefactory deploy up`; the password sidecars reapply
+the passwords on every boot. `POSTGRES_PASSWORD` is the exception: Postgres
+reads it only when the volume is first created, so also run
+`ALTER USER postgres WITH PASSWORD '…'` inside the running `postgres`
+container.
+
 ## Next steps
 
+- [Upgrading](upgrading.md)
 - [Monitoring & health checks](monitoring.md)
 - [Scaling out](scaling.md): more executors, more control pods
 - [Durable workspace storage](storage.md)

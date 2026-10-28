@@ -52,5 +52,7 @@ recognize one of those names refuses to start the whole container, with an
 error naming the syscall. Upgrade Docker Engine. If you cannot, delete the
 unrecognized names from the rule's `names` array in
 `docker/seccomp-profile.json`; a host that old almost certainly predates the
-syscalls themselves. Changing the profile is covered in
+syscalls themselves. `triagefactory deploy up`, `deploy upgrade` and
+`deploy doctor` start the image under the profile first, so they report this
+before the stack is touched. Changing the profile is covered in
 [Regenerating the seccomp profile](../../contributors/seccomp-profile.md).
