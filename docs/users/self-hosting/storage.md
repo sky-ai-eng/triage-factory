@@ -30,7 +30,8 @@ The two are kept apart for two reasons:
 An executor refuses to start when the two bucket names are the same.
 
 Local mode uses none of this. It keeps snapshots under `~/.triagefactory/blobs`
-and knowledge as plain files, and ignores the variables below.
+and knowledge as plain files, and reads none of the object store variables
+below.
 
 ## Configuration
 
@@ -122,7 +123,7 @@ The `seaweedfs` service still starts but goes unused; to drop it, remove it in a
 compose override, along with `seaweedfs-postinit` from the `depends_on` of
 `control` and `executor`.
 
-Whichever store you use, give the workspace bucket a lifecycle rule that aborts
+Whichever store you use, give both buckets a lifecycle rule that aborts
 incomplete multipart uploads (see [Scaling](scaling.md)).
 
 ### What each service needs

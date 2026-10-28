@@ -137,6 +137,7 @@ alert's description, shown beside it in Grafana, says what to check.
 | `CommitSignaturesRefusedForRun` | warning  | A run asked to sign past its budget, after its engagement ended, or as someone other than the signer.       |
 | `DeploymentCommitSignerDown`    | critical | A control pod's [deployment commit signer](deployment-commit-signer.md) has not been active for 15 minutes. |
 | `AuditRecordsDropped`           | warning  | An agent's write landed without its audit record.                                                           |
+| `TasksOpenOnClosedEntity`       | warning  | An org has tasks open on a pull request or issue that Triage Factory has closed, which is a bug.            |
 | `SlackDeliveriesRetried`        | warning  | Slack retried deliveries to an app in the last 15 minutes.                                                  |
 | `JiraDeploymentAppQuotaLow`     | warning  | The deployment's shared Atlassian app has reported its Jira quota near its limit, for 10 minutes.           |
 
@@ -146,17 +147,18 @@ dashboard's Connections row instead. `WorkspaceCheckpointsStale` assumes the
 default `TF_SNAPSHOT_INTERVAL_SEC`; with a longer interval it fires on healthy
 runs.
 
-`JiraDeploymentAppQuotaLow` is the one rate-limit reading that alerts. On
+`JiraDeploymentAppQuotaLow` is the only alert on rate-limit readings. On
 Atlassian's default tier, every org that connects Jira through the deployment's
-app spends one hourly quota, so people's Jira actions from the board (claim,
-done, requeue) wait and then fail together once it runs out. Polling and
-delegated runs use each org's service credential, which the quota doesn't
-meter. Only you can change it: ask Atlassian to move the app to a higher tier,
-or have the orgs that use it most add an Atlassian OAuth app of their own or
-connect with API tokens. A single near reading can hold the alert true for up
-to an hour, which is why it waits 10 minutes before firing. It clears once no
-pod's latest reading for any org says near. On the per-tenant tier, it fires for
-any one org's reading.
+app shares one hourly quota, and once it runs out, people's Jira actions from
+the board (claim, done, requeue) wait and then fail in all of those orgs at
+once. Polling and delegated runs use each org's own service credential and are
+not affected. Only you can fix it: ask Atlassian to move the app to a higher
+tier, or have the orgs that use it most add an Atlassian OAuth app of their own
+or connect with API tokens, after which their people connect Jira again. A near
+reading counts until a later Jira response for the same org replaces it, for at
+most an hour, so once people stop using Jira the alert can keep firing for up
+to an hour. On Atlassian's per-tenant tier each org has its own quota, and the
+alert fires for any one org's.
 
 ### Delivering alerts
 

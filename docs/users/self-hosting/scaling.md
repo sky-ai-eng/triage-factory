@@ -97,9 +97,10 @@ The `WorkspaceCheckpointsStale` and `WorkspaceCheckpointsFailing` alerts watch
 them ([Monitoring](monitoring.md#alerts)), and the fleet console shows each
 run's checkpoint age.
 
-An interrupted upload leaves an **incomplete multipart upload** in the bucket,
-which is billed and never cleaned up on its own. Give the bucket a lifecycle
-rule that aborts incomplete multipart uploads after a day (on S3,
+An interrupted upload, of a snapshot or a knowledge base document, leaves an
+**incomplete multipart upload** in its bucket, which is billed and never
+cleaned up on its own. Give both buckets a lifecycle rule that aborts
+incomplete multipart uploads after a day (on S3,
 `AbortIncompleteMultipartUpload`; SeaweedFS and MinIO have equivalents).
 
 ## Executor database role (`tf_system`)

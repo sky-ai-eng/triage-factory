@@ -152,7 +152,7 @@ container.
 - [Upgrading](upgrading.md)
 - [Monitoring & health checks](monitoring.md)
 - [Scaling out](scaling.md): more executors, more control pods
-- [Durable workspace storage](storage.md)
+- [Object storage](storage.md)
 - [Deployment secrets](secrets.md)
 - [Rotating the JWT key](jwt-key-rotation.md)
 - [Security model](../security/)
