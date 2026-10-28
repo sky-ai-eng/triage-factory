@@ -16,11 +16,11 @@ operation of the product.
 
 - [Install](users/self-hosting/install.md) — `triagefactory deploy init` and `deploy up`
 - [Upgrading](users/self-hosting/upgrading.md) — `triagefactory deploy upgrade`
-- Deployment-wide integrations, each optional:
-  [GitHub App](users/self-hosting/deployment-github-app.md),
-  [Jira (Atlassian) app](users/self-hosting/deployment-jira-app.md),
-  [Linear app](users/self-hosting/deployment-linear-app.md),
-  [commit signer](users/self-hosting/deployment-commit-signer.md)
+- [Deployment-wide integrations](users/self-hosting/deployment-integrations/README.md), each optional:
+  [GitHub App](users/self-hosting/deployment-integrations/deployment-github-app.md),
+  [Jira (Atlassian) app](users/self-hosting/deployment-integrations/deployment-jira-app.md),
+  [Linear app](users/self-hosting/deployment-integrations/deployment-linear-app.md),
+  [commit signer](users/self-hosting/deployment-integrations/deployment-commit-signer.md)
 - [SSO](users/self-hosting/sso.md) and [Bedrock role mode](users/self-hosting/bedrock-role-mode.md)
 - Operating: [monitoring](users/self-hosting/monitoring.md),
   [scaling](users/self-hosting/scaling.md),
@@ -36,12 +36,12 @@ operation of the product.
 
 ## Which "signing"?
 
-| You want to…                                    | Page                                                                                                                                                                                         |
-| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Have agents' commits show as Verified on GitHub | **Settings → Commit signing** in the app (one workspace), or the [deployment commit signer](users/self-hosting/deployment-commit-signer.md) (every workspace on the deployment's GitHub App) |
-| Rotate the key that signs login sessions        | [JWT key rotation](users/self-hosting/jwt-key-rotation.md)                                                                                                                                   |
-| Set up the key that signs SAML requests         | [SSO](users/self-hosting/sso.md)                                                                                                                                                             |
-| Check a release's signature                     | [Verifying releases](users/security/verifying-releases.md)                                                                                                                                   |
+| You want to…                                    | Page                                                                                                                                                                                                                 |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Have agents' commits show as Verified on GitHub | **Settings → Commit signing** in the app (one workspace), or the [deployment commit signer](users/self-hosting/deployment-integrations/deployment-commit-signer.md) (every workspace on the deployment's GitHub App) |
+| Rotate the key that signs login sessions        | [JWT key rotation](users/self-hosting/jwt-key-rotation.md)                                                                                                                                                           |
+| Set up the key that signs SAML requests         | [SSO](users/self-hosting/sso.md)                                                                                                                                                                                     |
+| Check a release's signature                     | [Verifying releases](users/security/verifying-releases.md)                                                                                                                                                           |
 
 ## Contributing
 

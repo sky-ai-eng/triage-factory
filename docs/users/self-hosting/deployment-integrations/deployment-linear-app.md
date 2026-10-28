@@ -26,14 +26,14 @@ https://linear.app/settings/api/applications/new?distribution=public&developer.n
 
 Check the pre-filled form against this before creating the app:
 
-| Parameter | Value |
-|---|---|
-| `distribution` | `public`, so any Linear workspace can authorize it. |
-| `developer.name` | Your name, as the app's developer. |
-| `oauth.client_name` | `Triage Factory`. Shown on Linear's install page; it is also the name of the app user Triage Factory acts as. Linear refuses names containing "Linear". |
-| `oauth.client_uri` | Your `TF_PUBLIC_URL`. |
+| Parameter             | Value                                                                                                                                                                          |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `distribution`        | `public`, so any Linear workspace can authorize it.                                                                                                                            |
+| `developer.name`      | Your name, as the app's developer.                                                                                                                                             |
+| `oauth.client_name`   | `Triage Factory`. Shown on Linear's install page; it is also the name of the app user Triage Factory acts as. Linear refuses names containing "Linear".                        |
+| `oauth.client_uri`    | Your `TF_PUBLIC_URL`.                                                                                                                                                          |
 | `oauth.redirect_uris` | `<TF_PUBLIC_URL>/api/linear/install/callback` and `<TF_PUBLIC_URL>/api/linear/connect/callback`. Linear requires `https` (it also accepts `http://localhost` for development). |
-| `oauth.grant_types` | `authorization_code` only. |
+| `oauth.grant_types`   | `authorization_code` only.                                                                                                                                                     |
 
 Leave webhooks off; Triage Factory polls Linear. Create the app, then copy its
 **client ID** and **client secret** from the app's page.
@@ -48,7 +48,7 @@ TF_LINEAR_CLIENT_SECRET=<client secret>
 
 Set both or neither; one without the other is logged at boot and treated as
 neither. The secret can be a mounted file via `TF_LINEAR_CLIENT_SECRET_FILE`
-([Deployment secrets](secrets.md)). Only `control` needs these.
+([Deployment secrets](../secrets.md)). Only `control` needs these.
 
 ```sh
 docker compose up -d
@@ -59,7 +59,7 @@ docker compose up -d
 1. `docker compose logs control | grep -i "deployment linear app"` prints
    nothing. A line there names the missing variable.
 2. In a workspace with no Linear app of its own, **Workspace Settings → Linear
-   OAuth app** reads *Using this deployment's Triage Factory app*, and **Linear
+   OAuth app** reads _Using this deployment's Triage Factory app_, and **Linear
    connection** offers **Install Triage Factory**.
 
 ## Rotating the client secret

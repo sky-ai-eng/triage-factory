@@ -62,10 +62,10 @@ TF_GITHUB_COMMIT_SIGNER_KEY_FILE=/run/secrets/tf_commit_signer_key
 # TF_GITHUB_COMMIT_SIGNER_EMAIL=agent@example.com
 ```
 
-| Variable | Required | Meaning |
-|---|---|---|
-| `TF_GITHUB_COMMIT_SIGNER_LOGIN` | with the key | The account's login. Renaming the account later changes nothing; TF follows it by id. |
-| `TF_GITHUB_COMMIT_SIGNER_KEY` | with the login | The unencrypted ed25519 private key in OpenSSH format. Supply it as a file with `TF_GITHUB_COMMIT_SIGNER_KEY_FILE` ([Deployment secrets](secrets.md)). |
+| Variable                        | Required       | Meaning                                                                                                                                                                         |
+| ------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TF_GITHUB_COMMIT_SIGNER_LOGIN` | with the key   | The account's login. Renaming the account later changes nothing; TF follows it by id.                                                                                           |
+| `TF_GITHUB_COMMIT_SIGNER_KEY`   | with the login | The unencrypted ed25519 private key in OpenSSH format. Supply it as a file with `TF_GITHUB_COMMIT_SIGNER_KEY_FILE` ([Deployment secrets](../secrets.md)).                       |
 | `TF_GITHUB_COMMIT_SIGNER_EMAIL` | off github.com | The committer address, verified on the account. On github.com, unset means the account's noreply address. Don't use the account's recovery address: it appears on every commit. |
 
 Half a configuration (a login without a key, a key without a login, an email
@@ -113,7 +113,7 @@ account, and each `control` pod logs a warning saying so.
 If the key is removed from the account or GitHub fails a pushed commit for its
 address, workspaces commit unsigned from their next signature, and the
 `DeploymentCommitSignerDown` alert fires after 15 minutes
-([Monitoring](monitoring.md#alerts)). `triagefactory commit-signer status` on
+([Monitoring](../monitoring.md#alerts)). `triagefactory commit-signer status` on
 a `control` container shows why. Fix the cause on the account, then run
 `triagefactory commit-signer verify` there. A key put back
 on the account also recovers on the next periodic check.

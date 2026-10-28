@@ -35,14 +35,14 @@ TF_ATLASSIAN_CLIENT_SECRET=<secret>
 ```
 
 The secret can be a mounted file via `TF_ATLASSIAN_CLIENT_SECRET_FILE`
-([Deployment secrets](secrets.md)). Only `control` needs these.
+([Deployment secrets](../secrets.md)). Only `control` needs these.
 
 ```sh
 docker compose up -d
 ```
 
-A workspace with no app of its own now reads *Using this deployment's
-Atlassian app* under **Workspace Settings → Atlassian OAuth app**.
+A workspace with no app of its own now reads _Using this deployment's
+Atlassian app_ under **Workspace Settings → Atlassian OAuth app**.
 
 ## Changing the app
 

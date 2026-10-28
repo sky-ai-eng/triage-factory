@@ -633,7 +633,7 @@ services:
       # value is silently ignored. Each secret can also be a mounted file via
       # <NAME>_FILE (both forms forwarded, set one); the private key wants the
       # file form, a PEM being multi-line. See
-      # docs/users/self-hosting/deployment-github-app.md and
+      # docs/users/self-hosting/deployment-integrations/deployment-github-app.md and
       # docs/users/self-hosting/secrets.md.
       TF_GITHUB_APP_ID: ${TF_GITHUB_APP_ID:-}
       TF_GITHUB_APP_PRIVATE_KEY: ${TF_GITHUB_APP_PRIVATE_KEY:-}
@@ -650,7 +650,7 @@ services:
       # sends the control plane a commit digest, never holding the key. The
       # key wants the file form, a private key being multi-line. The email is
       # required when the deployment's GitHub is not github.com. See
-      # docs/users/self-hosting/deployment-commit-signer.md.
+      # docs/users/self-hosting/deployment-integrations/deployment-commit-signer.md.
       TF_GITHUB_COMMIT_SIGNER_LOGIN: ${TF_GITHUB_COMMIT_SIGNER_LOGIN:-}
       TF_GITHUB_COMMIT_SIGNER_KEY: ${TF_GITHUB_COMMIT_SIGNER_KEY:-}
       TF_GITHUB_COMMIT_SIGNER_KEY_FILE: ${TF_GITHUB_COMMIT_SIGNER_KEY_FILE:-}
@@ -754,8 +754,10 @@ services:
       # runs no migrations and no RLS request handlers, so its app pool is
       # effectively idle; both pools ship much smaller ceilings than the API
       # tier (see TF_DB_MAX_OPEN_CONNS and the max_connections arithmetic in
-      # docs/users/self-hosting/scaling.md). Control pods keep the supabase_admin
-      # DSN unchanged — narrowing control is explicitly out of scope.
+      # docs/users/self-hosting/scaling.md). Control pods connect as
+      # supabase_admin: they run migrations, and they already hold every
+      # tenant's data and credentials, so a narrower role there would
+      # protect little.
       TF_DATABASE_URL: postgres://tf_system:${TF_SYSTEM_PASSWORD:?missing TF_SYSTEM_PASSWORD (see .env.example)}@postgres:5432/postgres
       TF_AUTHENTICATOR_PASSWORD: ${TF_AUTHENTICATOR_PASSWORD:?missing TF_AUTHENTICATOR_PASSWORD (see .env.example)}
       # Deliberately NOT set here (TFAC-614): an executor never holds the

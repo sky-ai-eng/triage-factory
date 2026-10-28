@@ -77,10 +77,10 @@ anything, though; it only adds items `.env` is missing.
 ### Optional, deployment-wide
 
 - Invite-only deployment: `TF_PREVENT_ORG_CREATION=true`.
-- A GitHub App every workspace can connect through: [Deployment GitHub App](deployment-github-app.md).
-- A signer for those workspaces' commits: [Deployment commit signer](deployment-commit-signer.md).
-- One-click Jira Cloud connect: [Deployment Jira app](deployment-jira-app.md).
-- One-click Linear install: [Deployment Linear app](deployment-linear-app.md).
+- A GitHub App every workspace can connect through: [Deployment GitHub App](deployment-integrations/deployment-github-app.md).
+- A signer for those workspaces' commits: [Deployment commit signer](deployment-integrations/deployment-commit-signer.md).
+- One-click Jira Cloud connect: [Deployment Jira app](deployment-integrations/deployment-jira-app.md).
+- One-click Linear install: [Deployment Linear app](deployment-integrations/deployment-linear-app.md).
 - SAML sign-in: [SSO](sso.md).
 - Bedrock through a customer IAM role: [Bedrock role mode](bedrock-role-mode.md).
 - Behind a load balancer or CDN: set `TF_TRUSTED_PROXY_CIDR` ([Client IP & trusted proxies](networking.md)).

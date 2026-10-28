@@ -119,27 +119,27 @@ The bundled Prometheus loads the rules in
 [`docker/observability/rules/`](../../../docker/observability/rules/). Each
 alert's description, shown beside it in Grafana, says what to check.
 
-| Alert                           | Severity | Fires when                                                                                                  |
-| ------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------- |
-| `UpstreamFailingFleetWide`      | critical | More than half of the orgs using an upstream are failing against it, for 10 minutes.                        |
-| `UpstreamDownFleetWide`         | critical | More than half of the orgs' last polls got no answer from GitHub or Jira, for 5 minutes.                    |
-| `ConversationsDeferred`         | warning  | Runs have waited 30 minutes on an unavailable model provider, or on GitHub during setup.                    |
-| `BackgroundBrainNotRunning`     | critical | No control pod has run polling, routing and scoring for 5 minutes.                                          |
-| `WorkQueueStopped`              | critical | A queue has ready work that nothing has claimed for about 10 minutes.                                       |
-| `WorkQueueBehind`               | warning  | An org's oldest ready item has waited past the queue's objective, for 5 minutes.                            |
-| `WorkParked`                    | warning  | An org has work parked for 15 minutes, waiting for an admin under **Parked work** in the org settings.      |
-| `ClaimsExpiredUnreleased`       | critical | A run's claim has stayed expired with no executor taking it over.                                           |
-| `WorkspaceCheckpointsStale`     | warning  | A live run has gone 45 minutes without a workspace checkpoint.                                              |
-| `WorkspaceCheckpointsFailing`   | warning  | A workspace checkpoint failed in the last hour.                                                             |
-| `SidecarFrameOversized`         | critical | A run's credential sidecar sent a frame over the size limit. Treat that sidecar as compromised.             |
-| `CommitSigningStalled`          | critical | A commit signature request has waited over 5 seconds for a minute.                                          |
-| `CommitSignaturesUnanswered`    | warning  | Signature requests went unanswered in the last 15 minutes.                                                  |
-| `CommitSignaturesRefusedForRun` | warning  | A run asked to sign past its budget, after its engagement ended, or as someone other than the signer.       |
-| `DeploymentCommitSignerDown`    | critical | A control pod's [deployment commit signer](deployment-commit-signer.md) has not been active for 15 minutes. |
-| `AuditRecordsDropped`           | warning  | An agent's write landed without its audit record.                                                           |
-| `TasksOpenOnClosedEntity`       | warning  | An org has tasks open on a pull request or issue that Triage Factory has closed, which is a bug.            |
-| `SlackDeliveriesRetried`        | warning  | Slack retried deliveries to an app in the last 15 minutes.                                                  |
-| `JiraDeploymentAppQuotaLow`     | warning  | The deployment's shared Atlassian app has reported its Jira quota near its limit, for 10 minutes.           |
+| Alert                           | Severity | Fires when                                                                                                                          |
+| ------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `UpstreamFailingFleetWide`      | critical | More than half of the orgs using an upstream are failing against it, for 10 minutes.                                                |
+| `UpstreamDownFleetWide`         | critical | More than half of the orgs' last polls got no answer from GitHub or Jira, for 5 minutes.                                            |
+| `ConversationsDeferred`         | warning  | Runs have waited 30 minutes on an unavailable model provider, or on GitHub during setup.                                            |
+| `BackgroundBrainNotRunning`     | critical | No control pod has run polling, routing and scoring for 5 minutes.                                                                  |
+| `WorkQueueStopped`              | critical | A queue has ready work that nothing has claimed for about 10 minutes.                                                               |
+| `WorkQueueBehind`               | warning  | An org's oldest ready item has waited past the queue's objective, for 5 minutes.                                                    |
+| `WorkParked`                    | warning  | An org has work parked for 15 minutes, waiting for an admin under **Parked work** in the org settings.                              |
+| `ClaimsExpiredUnreleased`       | critical | A run's claim has stayed expired with no executor taking it over.                                                                   |
+| `WorkspaceCheckpointsStale`     | warning  | A live run has gone 45 minutes without a workspace checkpoint.                                                                      |
+| `WorkspaceCheckpointsFailing`   | warning  | A workspace checkpoint failed in the last hour.                                                                                     |
+| `SidecarFrameOversized`         | critical | A run's credential sidecar sent a frame over the size limit. Treat that sidecar as compromised.                                     |
+| `CommitSigningStalled`          | critical | A commit signature request has waited over 5 seconds for a minute.                                                                  |
+| `CommitSignaturesUnanswered`    | warning  | Signature requests went unanswered in the last 15 minutes.                                                                          |
+| `CommitSignaturesRefusedForRun` | warning  | A run asked to sign past its budget, after its engagement ended, or as someone other than the signer.                               |
+| `DeploymentCommitSignerDown`    | critical | A control pod's [deployment commit signer](deployment-integrations/deployment-commit-signer.md) has not been active for 15 minutes. |
+| `AuditRecordsDropped`           | warning  | An agent's write landed without its audit record.                                                                                   |
+| `TasksOpenOnClosedEntity`       | warning  | An org has tasks open on a pull request or issue that Triage Factory has closed, which is a bug.                                    |
+| `SlackDeliveriesRetried`        | warning  | Slack retried deliveries to an app in the last 15 minutes.                                                                          |
+| `JiraDeploymentAppQuotaLow`     | warning  | The deployment's shared Atlassian app has reported its Jira quota near its limit, for 10 minutes.                                   |
 
 The two fleet-wide connection alerts need at least two orgs. One org's
 failures are usually its own host, VPN or credential, and show on the
