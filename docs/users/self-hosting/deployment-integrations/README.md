@@ -1,9 +1,10 @@
 # Deployment integrations
 
-Apps and accounts you register once for the whole deployment, so workspaces can
-connect without registering their own. Each one is optional: leave its
-variables unset and every workspace sets up its own, as it does by default. A
-workspace that has its own keeps using it. Local mode ignores all of these.
+Information on Apps and accounts you register once for the whole deployment.
+Individual orgs can connect their event-generating integrations through these
+without needing to register their own. Each one is optional: leave its
+variables unset and every org sets up its own, as it does by default. An
+organization that has its own keeps using it. Local mode ignores all of these.
 
 - [GitHub App](deployment-github-app.md) — one App every workspace without its
   own can connect to
