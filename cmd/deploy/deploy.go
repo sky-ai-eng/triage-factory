@@ -21,9 +21,9 @@
 //
 // The binary's version decides the image a release deployment runs, so up
 // refuses a binary that is not the deployment's version, and upgrade is the
-// one way to move a deployment to a newer one. Upgrades are orderly, not
-// zero-downtime: the API is down while control restarts, and runs in flight
-// are drained or handed off with workspace snapshots.
+// one way to move a deployment to a newer one. An upgrade stops and starts
+// the whole stack: the API is down while control restarts, and runs in
+// flight are drained or handed off with workspace snapshots.
 //
 // deploy runs before any server wiring, opens no database, and writes nothing
 // outside the deployment directory.

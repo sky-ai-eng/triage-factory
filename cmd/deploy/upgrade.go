@@ -60,6 +60,13 @@ func runUpgrade(ctx context.Context, args []string, b Bundle, h *host) int {
 // file, a value the new release needs that .env cannot get, the new image's
 // pull and its seccomp profile — is settled before anything changes; from
 // the drain on, the stack is being upgraded.
+//
+// TODO(TFAC-1216): this is a stop-then-start of the whole stack, not a
+// rolling upgrade: control restarts with the API down, and every executor is
+// recreated at once. Running releases N and N+1 side by side waits on that
+// epic's compatibility contract between consecutive releases (the schema
+// and the protocols between pods), and on its decision whether compose gets
+// rolling upgrades at all.
 func upgrade(ctx context.Context, h *host, b Bundle, o upgradeOptions) error {
 	dir, err := deploymentDir(o.dir)
 	if err != nil {
@@ -481,6 +488,9 @@ WHAT IT DOES
      restarted, so there is nothing to undo.
   8. Waits for the stack to be healthy, as deploy up does.
 
-The API is unavailable while control restarts. Zero-downtime upgrades are not
-supported.
+NOT A ROLLING UPGRADE
+  This stops and starts the whole stack. control restarts, and the API is
+  unavailable until it is back; every executor is recreated at the same time.
+  The drain in step 5 only spares runs an interruption mid-turn: it does not
+  keep the deployment serving. Zero-downtime upgrades are not supported yet.
 `
