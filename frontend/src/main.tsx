@@ -272,8 +272,9 @@ function MultiRoutes() {
               </AuthGate>
             }
           />
+          {/* One shell layout for the org pages and the fleet console, so moving
+              between them keeps the shell and its gates mounted. */}
           <Route
-            path="/orgs/:org_id"
             element={
               <AuthGate mode="multi">
                 <RequireSetupComplete>
@@ -288,35 +289,42 @@ function MultiRoutes() {
               </AuthGate>
             }
           >
-            <Route index element={<Factory />} />
-            <Route path="overview" element={<Overview />} />
-            <Route path="triage" element={<Cards />} />
-            <Route path="board" element={<Board />} />
-            <Route path="runs/:conversationID" element={<RunDetail />} />
-            <Route path="prs" element={<PRDashboard />} />
-            <Route path="knowledge" element={<Knowledge />} />
-            {/* Prompts is its own destination. It used to redirect into a tab
-                on /team, which is where the editor lived before the rail gave
-                Prompts a row of its own with Library, Marketplace and Bindings
-                under it. The page is mode-agnostic — it resolves its team from
-                useActiveTeam like every other surface. */}
-            <Route path="prompts" element={<Prompts />} />
-            <Route path="repos" element={<Repos />} />
-            <Route path="usage" element={<Usage />} />
-            <Route path="fleet" element={<Fleet />} />
-            {/* Org surface (TFAC-417) — multi-mode only; mounted under the
-                /orgs/:org_id parent. Non-admins reaching it directly get a
-                read-only roster (OrgPage gates management on org role). */}
-            <Route path="org" element={<OrgPage />} />
-            {/* Team page shell (TFAC-445) — [Members · Settings · Prompts]
-                tabs + a shared team-switcher, plus the zero-team safe landing.
-                Multi-mode only. */}
-            <Route path="team" element={<TeamSettings />} />
-            {/* Within-org prompt marketplace browse page (TFAC-537). Multi-mode
-                only — nothing in LocalRoutes; absence from that table is the
-                mode gate, mirroring org/team above. */}
-            <Route path="marketplace" element={<Marketplace />} />
-            <Route path="settings" element={<Settings />} />
+            <Route path="/orgs/:org_id">
+              <Route index element={<Factory />} />
+              <Route path="overview" element={<Overview />} />
+              <Route path="triage" element={<Cards />} />
+              <Route path="board" element={<Board />} />
+              <Route path="runs/:conversationID" element={<RunDetail />} />
+              <Route path="prs" element={<PRDashboard />} />
+              <Route path="knowledge" element={<Knowledge />} />
+              {/* Prompts is its own destination. It used to redirect into a tab
+                  on /team, which is where the editor lived before the rail gave
+                  Prompts a row of its own with Library, Marketplace and Bindings
+                  under it. The page is mode-agnostic — it resolves its team from
+                  useActiveTeam like every other surface. */}
+              <Route path="prompts" element={<Prompts />} />
+              <Route path="repos" element={<Repos />} />
+              <Route path="usage" element={<Usage />} />
+              {/* Org surface (TFAC-417) — multi-mode only; mounted under the
+                  /orgs/:org_id parent. Non-admins reaching it directly get a
+                  read-only roster (OrgPage gates management on org role). */}
+              <Route path="org" element={<OrgPage />} />
+              {/* Team page shell (TFAC-445) — [Members · Settings · Prompts]
+                  tabs + a shared team-switcher, plus the zero-team safe landing.
+                  Multi-mode only. */}
+              <Route path="team" element={<TeamSettings />} />
+              {/* Within-org prompt marketplace browse page (TFAC-537). Multi-mode
+                  only — nothing in LocalRoutes; absence from that table is the
+                  mode gate, mirroring org/team above. */}
+              <Route path="marketplace" element={<Marketplace />} />
+              <Route path="settings" element={<Settings />} />
+            </Route>
+            {/* The fleet console's subject is the deployment, not an org: it
+                reads only the operator-gated /api/fleet/* routes, so an org
+                segment in its path would be one the page never reads. The rail's
+                other rows resolve against the session's active org, which
+                OrgContext falls back to when the path names none. */}
+            <Route path="/fleet" element={<Fleet />} />
           </Route>
           <Route
             path="/"
