@@ -439,7 +439,7 @@ func TestRunCommitIdentity_SidecarIsTheOrgIdentity(t *testing.T) {
 	const botEmail = "316798692+triage-factory[bot]@users.noreply.github.com"
 
 	t.Run("an identity the executor cannot resolve still gets the trailer", func(t *testing.T) {
-		// The executor's resolver answers nothing, as it does for a workspace on
+		// The executor's resolver answers nothing, as it does for an org on
 		// the deployment App.
 		s := newSpawner(&fakeResolver{}, fakeUsers{login: "alice"})
 		id := s.runCommitIdentity(context.Background(), orgID, sidecarReporting("triage-factory[bot]", botEmail, "316798692"), "manual", "user-1")
