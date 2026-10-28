@@ -3,10 +3,10 @@
 This sets up the multi-tenant deployment: Postgres, GoTrue (sign-in), an object
 store, and Triage Factory as a `control` + `executor` pair, run with Docker
 Compose. The `triagefactory` binary renders the deployment, generates its
-secrets and starts it, pinned to the signed release image of its own version.
+secrets, and starts it, pinned to the signed release image of its own version.
 
-To run the compose files yourself, or to run a build of your own checkout, see
-[Running multi mode by hand](../../contributors/multi-mode-by-hand.md).
+For airgapped deployments, to run the compose files yourself, or to run a build
+of your own checkout, see [Running multi mode by hand](../../contributors/multi-mode-by-hand.md).
 
 ## 0. Requirements
 
@@ -67,12 +67,12 @@ own and `deploy` never writes.
 **On GitHub Enterprise Server**, set `TF_DEFAULT_GITHUB_HOST` in `.env` to your
 GHES URL (e.g. `https://ghe.example.com`) **before the first workspace is
 created**. Records are keyed under the host they were created with and are
-never migrated, so changing it later means a fresh install.
+never migrated, so if you change it later you need a completely fresh install.
 
 Back up `.env`. Losing `TF_SECRET_ENCRYPTION_KEY` makes every stored
 integration credential unreadable, and losing `POSTGRES_PASSWORD` locks
-Triage Factory out of its database. Re-running `init` adds only what `.env`
-is missing.
+Triage Factory out of its database. Re-running `init` won't overwrite
+anything, though; it only adds items `.env` is missing.
 
 ### Optional, deployment-wide
 
@@ -112,17 +112,19 @@ triagefactory deploy doctor
 ## 5. Sign in
 
 Open your public URL and sign in with GitHub. The first person creates the
-organization (unless `TF_PREVENT_ORG_CREATION` is set), and the app walks them
-through connecting GitHub, an issue tracker and a model provider. Workspace
-setup from here on happens in the app.
+first organization (unless `TF_PREVENT_ORG_CREATION` is set), but org creation
+is free and self-hosters are not limited in number of organizations configured.
+On org creation, the app walks you through connecting GitHub, an issue tracker,
+and a model provider. Workspace setup from here on happens in the app.
 
 To give someone the deployment-wide admin view, see
 [Fleet console & operators](fleet-console.md).
 
 ## 6. (Optional) Enable Enterprise features
 
-SSO, Slack, governance and the fleet console need a license token from your
-vendor. Add it to `.env` and restart:
+SSO, Slack, governance and the fleet console need a license token as per the
+product [LICENSE](../../../LICENSE). Once purchased, add it to `.env` and
+restart:
 
 ```sh
 TF_LICENSE=<signed-token>

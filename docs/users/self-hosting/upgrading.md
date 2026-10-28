@@ -29,9 +29,14 @@ on the upgraded executors. Interrupting the upgrade during the drain (Ctrl-C)
 undrains the executors and changes nothing.
 
 **It is not a rolling upgrade.** The whole stack restarts, the API is down until
-`control` is back, and every executor is replaced at once. Upgrade in a quiet
-window.
+`control` is back, and every executor is replaced at once. We do not ship a
+native HA experience (yet).
 
 If you edited a rendered compose file, the upgrade lists it and stops. Move
 the change to `compose.override.yml` and run it again, or pass `--force` to
 overwrite the file.
+
+> Note this only applies to installs following the guidance [here](install.md).
+> For dev builds or deployments created through
+> [the manual path](../../contributors/multi-mode-by-hand.md), follow the guidance
+> in that document.
