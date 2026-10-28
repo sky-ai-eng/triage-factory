@@ -1016,3 +1016,7 @@ UUID in the same batches as the rest and seeded without events.
 ## Configuration
 
 Events can be enabled/disabled on the Event Types settings page. Disabling an event type hides it from the triage queue but does not stop the tracker from detecting it — events are still recorded and can trigger delegation rules.
+
+### Handler predicates
+
+Creating a rule or trigger, editing one and promoting a rule check its `scope_predicate` against the predicate fields of its event type, and report every fault found, each on the key it is about (`scope_predicate.<key>`). A key the event type does not have, including a field name in a different case, is refused with `400 UNKNOWN_FIELD`, and a value of the wrong JSON type with `400 INVALID_FIELD`. A value of the right type that the field does not accept is refused with `422 INVALID_FIELD`: a value outside the field's enum, an empty list entry, or a list entry equal to an earlier one ignoring case. A list is a set, so a repeated entry has no meaning, and refusing it keeps one stored form for each predicate.

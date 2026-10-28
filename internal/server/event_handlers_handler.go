@@ -244,8 +244,9 @@ const fieldScopePredicate = "scope_predicate"
 // accepting both a JSON object and a JSON string holding one is how a single
 // field grows two wire types and callers pick different ones.
 //
-// Faults land on v; the caller must Flush before reading the result.
-func scopePredicateField(v *httpx.Validation, raw json.RawMessage, eventType string) (predicate *string, named bool) {
+// Faults land on bad (400) or unproc (422) by class, as predicateFaults files
+// them; the caller must Flush both before reading the result.
+func scopePredicateField(bad, unproc *httpx.Validation, raw json.RawMessage, eventType string) (predicate *string, named bool) {
 	if raw == nil {
 		return nil, false
 	}
@@ -254,18 +255,45 @@ func scopePredicateField(v *httpx.Validation, raw json.RawMessage, eventType str
 		return nil, true
 	}
 	if !strings.HasPrefix(trimmed, "{") {
-		v.Invalid(fieldScopePredicate, fieldScopePredicate+" must be a JSON object or null")
+		bad.Invalid(fieldScopePredicate, fieldScopePredicate+" must be a JSON object or null")
 		return nil, true
 	}
 	canonical, err := events.ValidatePredicateJSON(eventType, trimmed)
 	if err != nil {
-		v.Invalid(fieldScopePredicate, err.Error())
+		predicateFaults(bad, unproc, err)
 		return nil, true
 	}
 	if canonical == "" {
 		return nil, true
 	}
 	return &canonical, true
+}
+
+// predicateFaults files each fault the predicate validator found under the
+// predicate key it names (scope_predicate.<key>). A predicate that does not
+// fit its event type's schema is a malformed body, 400, with an unknown key
+// answered UNKNOWN_FIELD like one at the top level of the body; a value the
+// schema admits and the field refuses is 422, like an out-of-range priority.
+func predicateFaults(bad, unproc *httpx.Validation, err error) {
+	var pe *events.PredicateError
+	if !errors.As(err, &pe) {
+		bad.Invalid(fieldScopePredicate, err.Error())
+		return
+	}
+	for _, f := range pe.Faults {
+		field := fieldScopePredicate
+		if f.Key != "" {
+			field += "." + f.Key
+		}
+		switch f.Kind {
+		case events.FaultUnknownField:
+			bad.Add(httpx.ErrorItem{Reason: httpx.ReasonUnknownField, Message: f.Message, Field: field})
+		case events.FaultInvalidValue:
+			unproc.Invalid(field, f.Message)
+		default:
+			bad.Invalid(field, f.Message)
+		}
+	}
 }
 
 // eventHandlerCreateCommon is the half of a create body both kinds share.
@@ -486,7 +514,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateRule(w http.ResponseWrit
 	}
 	var predicate *string
 	if eventTypeOK {
-		predicate, _ = scopePredicateField(&bad, req.ScopePredicate, req.EventType)
+		predicate, _ = scopePredicateField(&bad, &unproc, req.ScopePredicate, req.EventType)
 	}
 	priority := 0.5
 	if req.DefaultPriority != nil {
@@ -569,7 +597,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateTrigger(w http.ResponseW
 	}
 	var predicate *string
 	if eventTypeOK {
-		predicate, _ = scopePredicateField(&bad, req.ScopePredicate, req.EventType)
+		predicate, _ = scopePredicateField(&bad, &unproc, req.ScopePredicate, req.EventType)
 	}
 	threshold, minAutonomy := triggerTuningFields(&unproc, req.BreakerThreshold, req.MinAutonomySuitability)
 	if bad.Flush(w, http.StatusBadRequest) {
@@ -771,7 +799,7 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		if c.AppliesToUnowned != nil {
 			updated.AppliesToUnowned = *c.AppliesToUnowned
 		}
-		if predicate, named := scopePredicateField(&bad, c.ScopePredicate, existing.EventType); named {
+		if predicate, named := scopePredicateField(&bad, &unproc, c.ScopePredicate, existing.EventType); named {
 			updated.ScopePredicateJSON = predicate
 		}
 	}
@@ -1024,11 +1052,14 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 	// The predicate is validated against the rule's event type, which promote
 	// never changes. Absent keeps what the rule already matched on.
 	predicate := existing.ScopePredicateJSON
-	var predBad httpx.Validation
-	if next, named := scopePredicateField(&predBad, req.ScopePredicate, existing.EventType); named {
+	var predBad, predUnproc httpx.Validation
+	if next, named := scopePredicateField(&predBad, &predUnproc, req.ScopePredicate, existing.EventType); named {
 		predicate = next
 	}
 	if predBad.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	if predUnproc.Flush(w, http.StatusUnprocessableEntity) {
 		return
 	}
 
