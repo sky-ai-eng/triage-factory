@@ -5682,6 +5682,13 @@ CREATE TABLE public.instances (
     started_at         timestamp with time zone NOT NULL,
     last_heartbeat_at  timestamp with time zone NOT NULL,
     draining           boolean NOT NULL DEFAULT false,
+    -- A drain that ends at the next restart: the boot_epoch that was current
+    -- when it was set. The instance is draining while this equals
+    -- boot_epoch; Register bumps boot_epoch and leaves this column alone, so
+    -- the drain lapses by itself and a value left behind never matches again.
+    -- draining is the operator's drain, which survives restarts; undraining
+    -- clears both. NULL when no such drain was ever set.
+    drain_until_epoch  bigint,
     max_runs           integer,
     active_runs        integer,
     mem_total_mb       integer,

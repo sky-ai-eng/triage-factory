@@ -327,6 +327,81 @@ func TestResolve_Refusals(t *testing.T) {
 	}
 }
 
+// TestVerifyPinned: up re-verifies the digest the state file pins, not the
+// one the tag names now, so a tag moved since init changes nothing.
+func TestVerifyPinned(t *testing.T) {
+	signed := func(f *signingFixture) string {
+		f.attach(f.digest, f.signLayer(f.sigstore, signerIdentity(testVersion), signerIssuer, payload(f.digest.String())))
+		return f.repository + ":" + testVersion + "@" + f.digest.String()
+	}
+	t.Run("verified", func(t *testing.T) {
+		f := newSigningFixture(t)
+		if err := f.verifier().verifyPinned(context.Background(), testVersion, signed(f)); err != nil {
+			t.Fatalf("verifyPinned: %v", err)
+		}
+	})
+	t.Run("the tag moved since the pin", func(t *testing.T) {
+		f := newSigningFixture(t)
+		ref := signed(f)
+		other, err := random.Image(256, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.push(f.repository+":"+testVersion, other)
+		if err := f.verifier().verifyPinned(context.Background(), testVersion, ref); err != nil {
+			t.Fatalf("verifyPinned: %v", err)
+		}
+	})
+
+	tests := []struct {
+		name    string
+		ref     func(f *signingFixture) string
+		version string
+		wantErr string
+	}{
+		{
+			name: "an unsigned digest",
+			ref: func(f *signingFixture) string {
+				return f.repository + ":" + testVersion + "@" + f.digest.String()
+			},
+			wantErr: "has no cosign signature",
+		},
+		{
+			name: "a digest signed for another version",
+			ref: func(f *signingFixture) string {
+				f.attach(f.digest, f.signLayer(f.sigstore, signerIdentity("v1.2.2"), signerIssuer, payload(f.digest.String())))
+				return f.repository + ":" + testVersion + "@" + f.digest.String()
+			},
+			wantErr: "no signature that verifies",
+		},
+		{
+			name:    "a pin of another version",
+			ref:     signed,
+			version: "v1.2.4",
+			wantErr: ":v1.2.4@<digest>",
+		},
+		{
+			name:    "a pin with no digest",
+			ref:     func(f *signingFixture) string { return f.repository + ":" + testVersion },
+			wantErr: "@<digest>",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newSigningFixture(t)
+			ref := tt.ref(f)
+			version := testVersion
+			if tt.version != "" {
+				version = tt.version
+			}
+			err := f.verifier().verifyPinned(context.Background(), version, ref)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("verifyPinned(%s, %s) = %v; want an error mentioning %q", version, ref, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestSignerIdentity(t *testing.T) {
 	got := signerIdentity("v1.17.0")
 	want := "https://github.com/sky-ai-eng/triage-factory/.github/workflows/docker-publish.yml@refs/tags/v1.17.0"

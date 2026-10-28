@@ -15,7 +15,13 @@ type Instance struct {
 	BootEpoch       int64
 	StartedAt       time.Time
 	LastHeartbeatAt time.Time
-	Draining        bool
+
+	// Draining is whether the instance is draining: an operator drained it
+	// until undrained, or drained it until its next restart and it has not
+	// restarted since. DrainUntilRestart is true when only the second kind
+	// holds, so the drain ends when the instance next registers.
+	Draining          bool
+	DrainUntilRestart bool
 
 	// Capacity + admission snapshot, refreshed on every heartbeat.
 	// Executor-capable roles only; nil on pure-control rows.
@@ -31,13 +37,13 @@ type Instance struct {
 
 	// PubKey is this boot's ephemeral X25519 public key (base64), minted
 	// in-memory at process start and never persisted — a restart mints a
-	// fresh one (TFAC-614). Written only by Register, never the
+	// fresh one. Written only by Register, never the
 	// heartbeat; empty on a control/all row that never claims conversations.
 	PubKey string
 }
 
 // Instance roles — the value app.registerInstance stamps here from
-// runmode.Role() (TFAC-582). "all" is the local-only single-process shape
+// runmode.Role(). "all" is the local-only single-process shape
 // (multi rejects it at boot); "control" and "executor" are the two halves of
 // the split every multi deployment runs. These string values MUST match
 // runmode's DeployRole constants (RoleAll / RoleControl / RoleExecutor) —

@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"io/fs"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 )
 
 const (
@@ -68,7 +71,8 @@ func releaseBundle(t *testing.T) Bundle {
 }
 
 // fakeHost is a Linux Docker host with every check passing; tests break the
-// piece they are about. dockerCalls records every docker invocation.
+// piece they are about. dockerCalls records every docker invocation, the
+// streamed ones included, in order.
 type fakeHost struct {
 	*host
 	out         *bytes.Buffer
@@ -77,7 +81,25 @@ type fakeHost struct {
 	// dockerReplies answers a docker call whose args start with the key
 	// (space-joined); unmatched calls succeed with no output.
 	dockerReplies map[string]dockerReply
-	resolved      []string
+	// dockerSeqs answers successive calls whose args start with the key, one
+	// reply per call with the last repeating, ahead of dockerReplies.
+	dockerSeqs map[string][]dockerReply
+	// streamed records the streamed docker calls, each with its directory,
+	// and onStream runs on each before it is answered.
+	streamed []streamCall
+	onStream func(args []string)
+	resolved []string
+	// verified records each verifyImage call as version + " " + ref, and
+	// verifyErr is what verifyImage answers.
+	verified  []string
+	verifyErr error
+	// clock is the time now reports; sleep advances it.
+	clock time.Time
+}
+
+type streamCall struct {
+	dir  string
+	args []string
 }
 
 type dockerReply struct {
@@ -99,6 +121,7 @@ func newFakeHost(t *testing.T) *fakeHost {
 			"version":         {stdout: "29.9.2\n"},
 			"compose version": {stdout: "2.40.3\n"},
 		},
+		dockerSeqs: map[string][]dockerReply{},
 	}
 	f.host = &host{
 		goos:              "linux",
@@ -108,26 +131,71 @@ func newFakeHost(t *testing.T) *fakeHost {
 		cgroupControllers: cgroup,
 		portFree:          func(int) bool { return true },
 		http:              http.DefaultClient,
-		controlURL:        "http://127.0.0.1:1",
-		gotrueURL:         "http://127.0.0.1:1",
 	}
 	f.docker = func(_ context.Context, _ string, args ...string) ([]byte, []byte, error) {
 		f.dockerCalls = append(f.dockerCalls, args)
-		joined := strings.Join(args, " ")
-		best := ""
-		for prefix := range f.dockerReplies {
-			if strings.HasPrefix(joined, prefix) && len(prefix) > len(best) {
-				best = prefix
-			}
-		}
-		r := f.dockerReplies[best]
+		r := f.reply(args)
 		return []byte(r.stdout), []byte(r.stderr), r.err
+	}
+	f.stream = func(_ context.Context, dir string, args ...string) error {
+		f.dockerCalls = append(f.dockerCalls, args)
+		f.streamed = append(f.streamed, streamCall{dir: dir, args: args})
+		if f.onStream != nil {
+			f.onStream(args)
+		}
+		return f.reply(args).err
 	}
 	f.resolveImage = func(_ context.Context, version string) (string, error) {
 		f.resolved = append(f.resolved, version)
 		return imageRepository + ":" + version + "@" + testDigest, nil
 	}
+	f.verifyImage = func(_ context.Context, version, ref string) error {
+		f.verified = append(f.verified, version+" "+ref)
+		return f.verifyErr
+	}
+	f.getenv = func(string) string { return "" }
+	f.clock = time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	f.now = func() time.Time { return f.clock }
+	f.sleep = func(_ context.Context, d time.Duration) error {
+		f.clock = f.clock.Add(d)
+		return nil
+	}
 	return f
+}
+
+// reply answers a docker call: the next reply of the longest matching
+// sequence, else the longest matching reply.
+func (f *fakeHost) reply(args []string) dockerReply {
+	joined := strings.Join(args, " ")
+	longest := func(keys []string) string {
+		best := ""
+		for _, prefix := range keys {
+			if strings.HasPrefix(joined, prefix) && len(prefix) > len(best) {
+				best = prefix
+			}
+		}
+		return best
+	}
+	if key := longest(slices.Collect(maps.Keys(f.dockerSeqs))); key != "" {
+		seq := f.dockerSeqs[key]
+		r := seq[0]
+		if len(seq) > 1 {
+			f.dockerSeqs[key] = seq[1:]
+		}
+		return r
+	}
+	return f.dockerReplies[longest(slices.Collect(maps.Keys(f.dockerReplies)))]
+}
+
+// called reports whether a docker call's args, space-joined, start with
+// prefix.
+func (f *fakeHost) called(prefix string) bool {
+	for _, call := range f.dockerCalls {
+		if strings.HasPrefix(strings.Join(call, " "), prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // noDockerCLI makes the docker CLI missing from PATH.
@@ -212,6 +280,13 @@ func setEnvLine(t *testing.T, dir, key, value string) {
 		out = append(out, line)
 	}
 	if err := os.WriteFile(p, []byte(strings.Join(out, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustRemove(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
 }

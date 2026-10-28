@@ -159,7 +159,7 @@ The GitHub OAuth app's authorization callback URL must be
   %s/auth/v1/callback
 
 Start the stack:
-  cd %s && docker compose up -d
+  triagefactory deploy up --dir %s
 `, dir, len(files), envFile, stateFile, publicURL, dir)
 	return nil
 }
@@ -168,9 +168,7 @@ Start the stack:
 // lacks and touches nothing else. Re-rendering is an upgrade, not this.
 func reinit(h *host, b Bundle, dir string, st deployState, o initOptions) error {
 	if st.Version != b.Version {
-		// TODO(TFAC-1214): name `deploy upgrade` here as the way to move the
-		// deployment to this binary's version once that subcommand exists.
-		return fmt.Errorf("%s was rendered by %s and this binary is %s; init does not re-render a deployment. Run the %s binary against it", dir, st.Version, b.Version, st.Version)
+		return fmt.Errorf("%s was rendered by %s and this binary is %s; init does not re-render a deployment. To fix it, %s", dir, st.Version, b.Version, versionFix(b.Version, st.Version))
 	}
 	if o.project != "" && o.project != st.Project {
 		return fmt.Errorf("--project %s: this deployment's compose project is %s, and init never changes it", o.project, st.Project)
@@ -189,27 +187,52 @@ func reinit(h *host, b Bundle, dir string, st deployState, o initOptions) error 
 		h.report(unverifiedSourceCheck("Source build", *st.BuildFrom))
 	}
 
-	envPath := filepath.Join(dir, envFile)
-	base, err := os.ReadFile(envPath)
-	if errors.Is(err, fs.ErrNotExist) {
-		if base, err = fs.ReadFile(b.Files, envExampleFile); err != nil {
-			return fmt.Errorf("read the embedded %s: %w", envExampleFile, err)
-		}
-	} else if err != nil {
-		return fmt.Errorf("read %s: %w", envPath, err)
-	}
-	values, err := resolveInputs(h, base, o.inputs)
+	base, err := readEnvBase(b, dir)
 	if err != nil {
 		return err
 	}
-	vars, err := envFill(base, values)
+	vars, err := planEnvFill(h, base, o.inputs)
 	if err != nil {
 		return err
 	}
 	if len(vars) == 0 {
-		fmt.Fprintf(h.stdout, "\n%s already holds every value boot needs; nothing changed.\n", envPath)
+		fmt.Fprintf(h.stdout, "\n%s already holds every value boot needs; nothing changed.\n", filepath.Join(dir, envFile))
 		return nil
 	}
+	return writeEnvFill(h, dir, base, vars)
+}
+
+// readEnvBase reads dir's .env, or the embedded .env.example when it has
+// none: what a fill adds to.
+func readEnvBase(b Bundle, dir string) ([]byte, error) {
+	envPath := filepath.Join(dir, envFile)
+	base, err := os.ReadFile(envPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		if base, err = fs.ReadFile(b.Files, envExampleFile); err != nil {
+			return nil, fmt.Errorf("read the embedded %s: %w", envExampleFile, err)
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("read %s: %w", envPath, err)
+	}
+	return base, nil
+}
+
+// planEnvFill works out what to add to base, a .env's content: the
+// operator's inputs from flags or prompts, and every value boot needs that
+// this binary can generate. Nothing base already has is in vars.
+func planEnvFill(h *host, base []byte, in inputFlags) ([]envfile.Var, error) {
+	values, err := resolveInputs(h, base, in)
+	if err != nil {
+		return nil, err
+	}
+	return envFill(base, values)
+}
+
+// writeEnvFill writes vars into dir's .env, whose content was base, and
+// says what changed, warning where a new value strands something the old
+// one made.
+func writeEnvFill(h *host, dir string, base []byte, vars []envfile.Var) error {
+	envPath := filepath.Join(dir, envFile)
 	if err := envfile.WriteAtomic(envPath, envfile.Set(base, vars), 0o600); err != nil {
 		return err
 	}
@@ -317,6 +340,19 @@ func writeDeployment(dir string, create bool, files map[string][]byte, env []byt
 			_ = os.RemoveAll(filepath.Join(dir, name))
 		}
 	}()
+	if err := writeBundleFiles(dir, files); err != nil {
+		return err
+	}
+	if err := envfile.WriteAtomic(filepath.Join(dir, envFile), env, 0o600); err != nil {
+		return err
+	}
+	// Last, so a directory holding a state file holds everything with it.
+	return writeState(dir, st)
+}
+
+// writeBundleFiles writes the rendered bundle files, keyed by slash path,
+// into dir, each atomically at mode 0644 under directories mkdirs creates.
+func writeBundleFiles(dir string, files map[string][]byte) error {
 	for _, path := range slices.Sorted(maps.Keys(files)) {
 		rel := filepath.FromSlash(path)
 		if err := mkdirs(dir, filepath.Dir(rel)); err != nil {
@@ -326,11 +362,7 @@ func writeDeployment(dir string, create bool, files map[string][]byte, env []byt
 			return err
 		}
 	}
-	if err := envfile.WriteAtomic(filepath.Join(dir, envFile), env, 0o600); err != nil {
-		return err
-	}
-	// Last, so a directory holding a state file holds everything with it.
-	return writeState(dir, st)
+	return nil
 }
 
 // topLevelNames are the entries a first init creates directly in the

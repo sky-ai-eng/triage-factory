@@ -6,8 +6,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -24,6 +26,7 @@ func initedFixture(t *testing.T) (*fakeHost, Bundle, string) {
 	f.out.Reset()
 	f.errOut.Reset()
 	f.dockerCalls = nil
+	f.resolved = nil
 	// The image is not on the host and the stack is not up, until a test
 	// says otherwise.
 	f.dockerReplies["image inspect"] = dockerReply{stderr: "No such image\n", err: errors.New("exit status 1")}
@@ -119,7 +122,7 @@ func TestDoctor_BundleWarnings(t *testing.T) {
 		if code := doctorRun(t, f, b, dir); code != 0 {
 			t.Fatalf("exit = %d; want 0\n%s", code, f.out)
 		}
-		wantLine(t, f.out.String(), "Binary version", warn, "and this binary is v99.0.0; run the")
+		wantLine(t, f.out.String(), "Binary version", warn, "and this binary is v99.0.0; run `triagefactory deploy upgrade`")
 	})
 	t.Run("source build", func(t *testing.T) {
 		f := newFakeHost(t)
@@ -189,22 +192,38 @@ func TestDoctor_Seccomp(t *testing.T) {
 
 // stackFixture is a running stack: containers as docker inspect reports
 // them, and HTTP servers standing in for the control service, GoTrue and the
-// public URL.
+// public URL. control and gotrue publish their servers' ports, as a
+// compose.override.yml that moved them would, unless unpublished names
+// the service.
 type stackFixture struct {
-	containers []map[string]any
-	control    int
-	jwks       string
-	public     int
+	containers  []map[string]any
+	control     int
+	jwks        string
+	public      int
+	unpublished string
+}
+
+// fixtureContainer is a container as docker inspect reports it. name is
+// <project>-<service>-<replica number>, the way compose names it, and is also
+// its id.
+func fixtureContainer(name, status string, exit int, health, restart string) map[string]any {
+	state := map[string]any{"Status": status, "ExitCode": exit}
+	if health != "" {
+		state["Health"] = map[string]any{"Status": health}
+	}
+	i := strings.LastIndex(name, "-")
+	service, number := strings.TrimPrefix(name[:i], "triage-factory-"), name[i+1:]
+	return map[string]any{
+		"Id":         name,
+		"Name":       "/" + name,
+		"Config":     map[string]any{"Labels": map[string]any{serviceLabel: service, numberLabel: number}},
+		"State":      state,
+		"HostConfig": map[string]any{"RestartPolicy": map[string]any{"Name": restart}},
+	}
 }
 
 func healthyStack() *stackFixture {
-	c := func(name, status string, exit int, health, restart string) map[string]any {
-		state := map[string]any{"Status": status, "ExitCode": exit}
-		if health != "" {
-			state["Health"] = map[string]any{"Status": health}
-		}
-		return map[string]any{"Name": "/" + name, "State": state, "HostConfig": map[string]any{"RestartPolicy": map[string]any{"Name": restart}}}
-	}
+	c := fixtureContainer
 	return &stackFixture{
 		containers: []map[string]any{
 			c("triage-factory-postgres-1", "running", 0, "healthy", "unless-stopped"),
@@ -212,6 +231,7 @@ func healthyStack() *stackFixture {
 			c("triage-factory-control-1", "running", 0, "healthy", "unless-stopped"),
 			c("triage-factory-executor-1", "running", 0, "healthy", "unless-stopped"),
 			c("triage-factory-tempo-1", "running", 0, "", "unless-stopped"),
+			c("triage-factory-gotrue-1", "running", 0, "healthy", "unless-stopped"),
 		},
 		control: http.StatusOK,
 		jwks:    `{"keys":[{"kty":"RSA","kid":"a"}]}`,
@@ -225,10 +245,6 @@ func (s *stackFixture) apply(t *testing.T, f *fakeHost, dir string) {
 	for i := range ids {
 		ids[i] = strings.Repeat(string(rune('a'+i)), 12)
 	}
-	inspect, _ := json.Marshal(s.containers)
-	f.dockerReplies["ps"] = dockerReply{stdout: strings.Join(ids, "\n") + "\n"}
-	f.dockerReplies["inspect"] = dockerReply{stdout: string(inspect)}
-
 	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/health" {
 			http.NotFound(w, r)
@@ -248,7 +264,26 @@ func (s *stackFixture) apply(t *testing.T, f *fakeHost, dir string) {
 	public := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(s.public) }))
 	t.Cleanup(public.Close)
 
-	f.controlURL, f.gotrueURL = control.URL, gotrue.URL
+	// Docker lists an IPv6 binding beside the IPv4 one; the test servers
+	// listen on IPv4 loopback only, so the checks must take the IPv4 one.
+	publish := func(service string, port int, server *httptest.Server) {
+		if service == s.unpublished {
+			return
+		}
+		u, _ := url.Parse(server.URL)
+		bindings := []map[string]any{{"HostIp": "::", "HostPort": u.Port()}, {"HostIp": "0.0.0.0", "HostPort": u.Port()}}
+		for _, c := range s.containers {
+			if c["Config"].(map[string]any)["Labels"].(map[string]any)[serviceLabel] == service {
+				c["NetworkSettings"] = map[string]any{"Ports": map[string]any{strconv.Itoa(port) + "/tcp": bindings}}
+			}
+		}
+	}
+	publish("control", controlPort, control)
+	publish("gotrue", gotruePort, gotrue)
+
+	inspect, _ := json.Marshal(s.containers)
+	f.dockerReplies["ps"] = dockerReply{stdout: strings.Join(ids, "\n") + "\n"}
+	f.dockerReplies["inspect"] = dockerReply{stdout: string(inspect)}
 	setEnvLine(t, dir, "TF_PUBLIC_URL", public.URL)
 }
 
@@ -261,7 +296,7 @@ func TestDoctor_RunningStack(t *testing.T) {
 		status   status
 		detail   string
 	}{
-		{name: "healthy", check: "Containers", status: pass, detail: "all 5 running and healthy, or finished"},
+		{name: "healthy", check: "Containers", status: pass, detail: "all 6 running and healthy, or finished"},
 		{name: "control health", check: "Control health", status: pass, detail: "answered 200"},
 		{name: "jwks", check: "GoTrue JWKS", status: pass, detail: "1 signing key"},
 		{name: "public URL", check: "Public URL", status: pass, detail: "answered 200"},
@@ -299,6 +334,16 @@ func TestDoctor_RunningStack(t *testing.T) {
 			check: "Containers", status: warn, detail: "still starting: triage-factory-executor-1",
 		},
 		{
+			name:     "control publishes no port",
+			arrange:  func(s *stackFixture) { s.unpublished = "control" },
+			wantCode: 1, check: "Control health", status: fail, detail: "no control container publishes its port 3000 on the host",
+		},
+		{
+			name:     "gotrue publishes no port",
+			arrange:  func(s *stackFixture) { s.unpublished = "gotrue" },
+			wantCode: 1, check: "GoTrue JWKS", status: fail, detail: "no gotrue container publishes its port 9999 on the host",
+		},
+		{
 			name:     "control health failing",
 			arrange:  func(s *stackFixture) { s.control = http.StatusServiceUnavailable },
 			wantCode: 1, check: "Control health", status: fail, detail: "answered 503",
@@ -332,5 +377,37 @@ func TestDoctor_RunningStack(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPublishedURL(t *testing.T) {
+	inspect := func(service string, bindings ...string) container {
+		var c container
+		if err := json.Unmarshal([]byte(`{"Config":{"Labels":{"com.docker.compose.service":"`+service+`"}},
+			"NetworkSettings":{"Ports":{"3000/tcp":[`+strings.Join(bindings, ",")+`]}}}`), &c); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	binding := func(ip, port string) string { return `{"HostIp":"` + ip + `","HostPort":"` + port + `"}` }
+	for _, tt := range []struct {
+		name       string
+		containers []container
+		want       string
+	}{
+		{"any IPv4 address", []container{inspect("control", binding("0.0.0.0", "8080"))}, "http://127.0.0.1:8080"},
+		{"no address", []container{inspect("control", binding("", "8080"))}, "http://127.0.0.1:8080"},
+		{"IPv4 preferred over IPv6", []container{inspect("control", binding("::", "8080"), binding("0.0.0.0", "8080"))}, "http://127.0.0.1:8080"},
+		{"IPv6 only", []container{inspect("control", binding("::", "8080"))}, "http://[::1]:8080"},
+		{"a specific address", []container{inspect("control", binding("10.0.0.5", "3000"))}, "http://10.0.0.5:3000"},
+		{"a specific IPv6 address", []container{inspect("control", binding("fd00::5", "3000"))}, "http://[fd00::5]:3000"},
+		{"another service's port", []container{inspect("grafana", binding("127.0.0.1", "3030")), inspect("control", binding("0.0.0.0", "3000"))}, "http://127.0.0.1:3000"},
+		{"not published", []container{inspect("control")}, ""},
+		{"no such service", []container{inspect("grafana", binding("127.0.0.1", "3030"))}, ""},
+	} {
+		got, ok := publishedURL(tt.containers, "control", controlPort)
+		if got != tt.want || ok != (tt.want != "") {
+			t.Errorf("%s: publishedURL = (%q, %t); want %q", tt.name, got, ok, tt.want)
+		}
 	}
 }
