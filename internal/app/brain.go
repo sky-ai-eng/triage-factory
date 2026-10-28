@@ -87,8 +87,10 @@ func (a *App) startBrain(term int64) {
 	// terminal snapshot, past the grace, no close in flight — and the tasks
 	// open on closed entities, and records both on gauges. Zero is the
 	// steady state; nonzero is an alarm, not a repair, which the poll owns.
-	// Minutes-cadence: a rare-divergence count, not a hot path.
-	go a.router.RunTerminalInvariantChecker(brainCtx, routing.DefaultTerminalCheckInterval)
+	// Minutes-cadence: a rare-divergence count, not a hot path. Its gauges
+	// are built here, under brainMu, for the depth observer's reason below.
+	a.terminalGauges = routing.NewTerminalInvariantGauges(otel.GetMeterProvider())
+	go a.router.RunTerminalInvariantChecker(brainCtx, routing.DefaultTerminalCheckInterval, a.terminalGauges)
 	// Work-queue depth gauges: one measure per registered kind per tick,
 	// reported at scrape time. Brain-gated for the same reason as the checker
 	// above — one process reports, standbys do not — and read-only. Built
@@ -291,9 +293,13 @@ func (a *App) stopBrain(reason string) {
 		a.brainCancel()
 		a.brainCancel = nil
 	}
-	// Unregister the depth gauges before returning, not when the observer's
+	// Unregister the gauges before returning, not when their observer's
 	// goroutine gets around to it, so a re-acquisition that follows this call
 	// never overlaps two callbacks on the same series.
+	if a.terminalGauges != nil {
+		a.terminalGauges.Close()
+		a.terminalGauges = nil
+	}
 	if a.workDepth != nil {
 		a.workDepth.Close()
 		a.workDepth = nil
