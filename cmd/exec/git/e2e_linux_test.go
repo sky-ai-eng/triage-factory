@@ -366,10 +366,15 @@ func (r *signingRun) assertRebased() {
 // agent how a rebase that stopped on a signature carries on. These follow the
 // lines' instructions through git itself, in each of the ways a rebase stops.
 func TestSigningRun_RebaseStoppedBySigning(t *testing.T) {
-	// A commit the rebase picks cleanly and then cannot sign is rescheduled
-	// with its changes left staged. git rebase --continue refuses that, and
-	// after git reset --hard the rescheduled pick applies and signs them.
-	t.Run("a failed pick resumes after a reset", func(t *testing.T) {
+	// A commit the rebase picks cleanly and then cannot sign leaves its
+	// changes staged, and the line's conditional covers both ways git goes
+	// from there. Before 2.56 git reschedules the pick: git rebase --continue
+	// refuses the staged changes, and after git reset --hard the rescheduled
+	// pick applies and signs them. From 2.56 git stops on the pick as it
+	// stops on a conflict, and --continue commits and signs them. Either way
+	// the rebase ends with every commit, and a reset on the wrong branch
+	// would lose one.
+	t.Run("a failed pick resumes as the line says", func(t *testing.T) {
 		key := newKey(t)
 		r := startSigningRun(t, "The Octocat", key, nil)
 		r.topicBehindMain(false)
@@ -382,11 +387,13 @@ func TestSigningRun_RebaseStoppedBySigning(t *testing.T) {
 		if !strings.Contains(errOut, commitsigner.UnansweredLine()) {
 			t.Errorf("the rebase's stderr has no unanswered line:\n%s", errOut)
 		}
-		if _, errOut, err := r.cmd("rebase", "--continue"); err == nil || !strings.Contains(errOut, "staged changes") {
-			t.Fatalf("git rebase --continue over the rescheduled pick = %v, want the staged-changes refusal the line names:\n%s", err, errOut)
+		if _, errOut, err := r.cmd("rebase", "--continue"); err != nil {
+			if !strings.Contains(errOut, "staged changes") {
+				t.Fatalf("git rebase --continue = %v, and it is not the staged-changes refusal the line names:\n%s", err, errOut)
+			}
+			r.run("reset", "-q", "--hard")
+			r.run("rebase", "--continue")
 		}
-		r.run("reset", "-q", "--hard")
-		r.run("rebase", "--continue")
 		r.assertRebased()
 		for _, rev := range []string{"topic~2", "topic~1", "topic"} {
 			r.assertSigned(rev, publicKey(t, key))

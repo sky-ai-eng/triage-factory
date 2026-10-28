@@ -22,9 +22,11 @@ const linePrefix = "triagefactory: "
 // A reason is always a sentence, never a code: the agent cannot look a code up.
 //
 // The lines that mention a rebase follow what git does when a rebase's commit
-// cannot be signed. A commit that fails while the rebase picks it is
-// rescheduled with its changes left staged, and git rebase --continue then
-// refuses until they are reset; the rescheduled pick applies them again. A
+// cannot be signed. A commit that fails while the rebase picks it leaves its
+// changes staged. Before git 2.56 the pick is rescheduled, and git rebase
+// --continue then refuses until they are reset; the rescheduled pick applies
+// them again. From 2.56 the rebase stops on the pick as on a conflict, and
+// --continue commits them, so the reset is conditional on the refusal. A
 // commit that fails inside git rebase --continue, after a conflict was
 // resolved, is not rescheduled, and the next --continue commits the
 // resolution, which a reset would throw away. And a rebase keeps signing

@@ -317,12 +317,15 @@ different account", "GitHub reported a recent commit's email as not verified
 on the signer's account".
 
 The rebase clauses follow what git does when a rebase's commit cannot be
-signed (git 2.43, and the same sequencer code on git's master):
+signed:
 
-- A commit that fails while the rebase picks it is rescheduled with its changes
-  left staged, and `git rebase --continue` refuses with "you have staged
-  changes". `git reset --hard` clears them and the rescheduled pick applies
-  them again.
+- A commit that fails while the rebase picks it leaves its changes staged.
+  Before git 2.56 the pick is rescheduled, and `git rebase --continue` refuses
+  with "you have staged changes"; `git reset --hard` clears them and the
+  rescheduled pick applies them again. From git 2.56 the sequencer treats a
+  failed commit after a clean pick as a stop like a conflict, not a
+  reschedule, so `--continue` commits the staged changes, as it does after a
+  resolved conflict below.
 - A commit that fails inside `git rebase --continue`, after a conflict was
   resolved, is not rescheduled; the next `--continue` commits the resolution,
   which a reset would throw away. Hence "if that refuses".
