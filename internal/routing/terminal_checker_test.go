@@ -3,9 +3,11 @@ package routing
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
+	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -196,7 +198,8 @@ func TestTerminalChecker_CountsBothViolationsAndWritesNothing(t *testing.T) {
 	database := newTestDB(t)
 	r := newCheckerRouter(t, database)
 	reader := sdkmetric.NewManualReader()
-	r.setTerminalGauges(newTerminalInvariantGauges(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	g := NewTerminalInvariantGauges(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	defer g.Close()
 
 	// Count A: a merged PR still active, unpolled for an hour.
 	stranded, strandedTasks := seedDivergentEntity(t, database, "github", "owner/repo#stranded",
@@ -212,13 +215,7 @@ func TestTerminalChecker_CountsBothViolationsAndWritesNothing(t *testing.T) {
 	seedDivergentEntity(t, database, "github", "owner/repo#live", `{"state":"OPEN","merged":false}`, domain.EventGitHubPRCICheckFailed)
 
 	before := tableFingerprint(t, database)
-	a, b, ok := r.checkOrgTerminalInvariant(context.Background(), runmode.LocalDefaultOrgID)
-	if !ok {
-		t.Fatal("pass reported failure")
-	}
-	if a != 1 || b != 1 {
-		t.Errorf("counts = (%d, %d), want (1, 1)", a, b)
-	}
+	r.checkTerminalInvariant(context.Background(), g)
 	if after := tableFingerprint(t, database); after != before {
 		t.Errorf("the checker wrote something\nbefore:\n%s\nafter:\n%s", before, after)
 	}
@@ -242,16 +239,136 @@ func TestTerminalChecker_CountsBothViolationsAndWritesNothing(t *testing.T) {
 	if _, err := testTaskStore(database).CloseSystem(context.Background(), runmode.LocalDefaultOrgID, orphanTasks[0], "user_done", ""); err != nil {
 		t.Fatalf("close the orphan task: %v", err)
 	}
-	a, b, _ = r.checkOrgTerminalInvariant(context.Background(), runmode.LocalDefaultOrgID)
-	if a != 0 || b != 0 {
-		t.Errorf("counts after repair = (%d, %d), want zeros", a, b)
+	r.checkTerminalInvariant(context.Background(), g)
+	if v, found := gaugeValue(t, reader, "entity_terminal_active", runmode.LocalDefaultOrgID); !found || v != 0 {
+		t.Errorf("entity_terminal_active after repair = (%d, found=%v), want 0", v, found)
 	}
-	if v, _ := gaugeValue(t, reader, "entity_terminal_active", runmode.LocalDefaultOrgID); v != 0 {
-		t.Errorf("entity_terminal_active after repair = %d, want 0", v)
+	if v, found := gaugeValue(t, reader, "tasks_open_on_closed_entity", runmode.LocalDefaultOrgID); !found || v != 0 {
+		t.Errorf("tasks_open_on_closed_entity after repair = (%d, found=%v), want 0", v, found)
 	}
-	if v, _ := gaugeValue(t, reader, "tasks_open_on_closed_entity", runmode.LocalDefaultOrgID); v != 0 {
-		t.Errorf("tasks_open_on_closed_entity after repair = %d, want 0", v)
+}
+
+// activeOrgsStub answers ListActiveSystem with the orgs a test sets, so a
+// pass can see an org stop being active.
+type activeOrgsStub struct {
+	dbpkg.OrgsStore
+	ids []string
+}
+
+func (s *activeOrgsStub) ListActiveSystem(context.Context) ([]string, error) { return s.ids, nil }
+
+// failingCandidatesStore fails the checker's candidate read while fail is
+// set, standing in for a database error on one org's pass.
+type failingCandidatesStore struct {
+	dbpkg.EntityStore
+	fail bool
+}
+
+func (s *failingCandidatesStore) ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDone []domain.JiraStatusRef, linearDone []domain.LinearStateRef, unpolledFor time.Duration, limit int) ([]domain.Entity, error) {
+	if s.fail {
+		return nil, errors.New("candidate read failed")
 	}
+	return s.EntityStore.ListActiveTerminalCandidatesSystem(ctx, orgID, jiraDone, linearDone, unpolledFor, limit)
+}
+
+// TestTerminalChecker_PassReplacesOrgs: each pass reports the orgs it read
+// and no others. An org whose read failed keeps the counts it had, and an
+// org that is no longer active stops reporting rather than holding its last
+// count.
+func TestTerminalChecker_PassReplacesOrgs(t *testing.T) {
+	database := newTestDB(t)
+	r := newCheckerRouter(t, database)
+	orgs := &activeOrgsStub{OrgsStore: r.orgs, ids: []string{runmode.LocalDefaultOrgID}}
+	entities := &failingCandidatesStore{EntityStore: r.entities}
+	r.orgs, r.entities = orgs, entities
+	reader := sdkmetric.NewManualReader()
+	g := NewTerminalInvariantGauges(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	defer g.Close()
+
+	// A task left open under an entity closed around the guard.
+	seedDivergentEntity(t, database, "github", "owner/repo#orphan",
+		`{"state":"OPEN","merged":false}`, domain.EventGitHubPRReviewChangesRequested)
+	if _, err := database.Exec(`UPDATE entities SET state = 'closed', closed_at = ? WHERE source_id = 'owner/repo#orphan'`, time.Now().UTC()); err != nil {
+		t.Fatalf("close the entity around the guard: %v", err)
+	}
+
+	// An org whose read fails before it was ever counted has nothing to keep.
+	entities.fail = true
+	r.checkTerminalInvariant(context.Background(), g)
+	if v, found := gaugeValue(t, reader, "tasks_open_on_closed_entity", runmode.LocalDefaultOrgID); found {
+		t.Errorf("tasks_open_on_closed_entity = %d after a failed first read, want no series", v)
+	}
+
+	entities.fail = false
+	r.checkTerminalInvariant(context.Background(), g)
+	if v, found := gaugeValue(t, reader, "tasks_open_on_closed_entity", runmode.LocalDefaultOrgID); !found || v != 1 {
+		t.Fatalf("tasks_open_on_closed_entity = (%d, found=%v), want 1", v, found)
+	}
+
+	entities.fail = true
+	r.checkTerminalInvariant(context.Background(), g)
+	if v, found := gaugeValue(t, reader, "tasks_open_on_closed_entity", runmode.LocalDefaultOrgID); !found || v != 1 {
+		t.Errorf("tasks_open_on_closed_entity = (%d, found=%v) after a failed read, want the previous 1", v, found)
+	}
+
+	entities.fail = false
+	orgs.ids = nil
+	r.checkTerminalInvariant(context.Background(), g)
+	for _, name := range []string{"entity_terminal_active", "tasks_open_on_closed_entity"} {
+		if v, found := gaugeValue(t, reader, name, runmode.LocalDefaultOrgID); found {
+			t.Errorf("%s = %d for an org no longer active, want no series", name, v)
+		}
+	}
+}
+
+// TestTerminalInvariantGauges_CloseStopsReporting is the lease-flap case: a
+// pod that lost the brain stops reporting, and the gauges it builds on the
+// next acquisition report only what their own passes read.
+func TestTerminalInvariantGauges_CloseStopsReporting(t *testing.T) {
+	database := newTestDB(t)
+	r := newCheckerRouter(t, database)
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	seedDivergentEntity(t, database, "github", "owner/repo#stranded", `{"state":"MERGED","merged":true}`, domain.EventGitHubPRCICheckFailed)
+
+	old := NewTerminalInvariantGauges(provider)
+	r.checkTerminalInvariant(context.Background(), old)
+	if v, found := gaugeValue(t, reader, "entity_terminal_active", runmode.LocalDefaultOrgID); !found || v != 1 {
+		t.Fatalf("entity_terminal_active = (%d, found=%v) before demotion, want 1", v, found)
+	}
+
+	old.Close()
+	if v, found := gaugeValue(t, reader, "entity_terminal_active", runmode.LocalDefaultOrgID); found {
+		t.Errorf("entity_terminal_active = %d after Close, want no series", v)
+	}
+
+	fresh := NewTerminalInvariantGauges(provider)
+	defer fresh.Close()
+	if v, found := gaugeValue(t, reader, "entity_terminal_active", runmode.LocalDefaultOrgID); found {
+		t.Errorf("entity_terminal_active = %d before the new holder's first pass, want no series", v)
+	}
+	r.checkTerminalInvariant(context.Background(), fresh)
+	if n := gaugePoints(t, reader, "entity_terminal_active"); n != 1 {
+		t.Errorf("entity_terminal_active has %d points after a re-acquisition, want 1", n)
+	}
+}
+
+// gaugePoints counts a checker gauge's points across every org.
+func gaugePoints(t *testing.T, reader *sdkmetric.ManualReader, name string) int {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	n := 0
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if g, ok := m.Data.(metricdata.Gauge[int64]); ok && m.Name == name {
+				n += len(g.DataPoints)
+			}
+		}
+	}
+	return n
 }
 
 // TestTerminalChecker_UntrackedRepoIsCountedNotEnforced is the case the
@@ -347,26 +464,35 @@ func TestTerminalChecker_JiraDoneFollowsAProjectKeyRename(t *testing.T) {
 
 // TestRunTerminalInvariantChecker_CountsOnItsOwnTicker covers the loop
 // itself — the per-org iteration and the ticker — since a checker nothing
-// drives is not an alarm.
+// drives is not an alarm, and that the loop closes its gauges when it stops.
 func TestRunTerminalInvariantChecker_CountsOnItsOwnTicker(t *testing.T) {
 	database := newTestDB(t)
 	r := newCheckerRouter(t, database)
 	reader := sdkmetric.NewManualReader()
-	r.setTerminalGauges(newTerminalInvariantGauges(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	g := NewTerminalInvariantGauges(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
 	seedDivergentEntity(t, database, "github", "owner/repo#ticked", `{"state":"MERGED","merged":true}`, domain.EventGitHubPRCICheckFailed)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go r.RunTerminalInvariantChecker(ctx, 20*time.Millisecond)
+	done := make(chan struct{})
+	go func() { r.RunTerminalInvariantChecker(ctx, 20*time.Millisecond, g); close(done) }()
 
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	for {
 		if v, found := gaugeValue(t, reader, "entity_terminal_active", runmode.LocalDefaultOrgID); found && v == 1 {
-			return
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the gauge never recorded the violation after several ticks")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("the gauge never recorded the violation after several ticks")
+
+	cancel()
+	<-done
+	if v, found := gaugeValue(t, reader, "entity_terminal_active", runmode.LocalDefaultOrgID); found {
+		t.Errorf("entity_terminal_active = %d after the checker stopped, want no series", v)
+	}
 }
 
 // testScope is the scope a test keys an entity of source under: what

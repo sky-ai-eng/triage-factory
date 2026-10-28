@@ -291,6 +291,10 @@ type App struct {
 	// workers) — stopBrain's actual stop mechanism. nil when the brain
 	// isn't running.
 	brainCancel context.CancelFunc
+	// terminalGauges are the terminal-state checker's gauges, on the same
+	// lifecycle and for the same reason as workDepth below. nil when the
+	// brain isn't running.
+	terminalGauges *routing.TerminalInvariantGauges
 	// workDepth is the brain's work-queue depth observer, whose gauge
 	// callback is registered on the global meter provider. stopBrain closes
 	// it synchronously rather than leaving that to its goroutine's

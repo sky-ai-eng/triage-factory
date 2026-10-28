@@ -8,7 +8,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
 )
 
@@ -52,29 +51,32 @@ const TerminalCheckGrace = 15 * time.Minute
 // terminalCheckLogIDs caps how many ids a nonzero pass names in its log line.
 const terminalCheckLogIDs = 20
 
-// terminalInvariantGauges holds the last counts per org for the two
+// TerminalInvariantGauges holds the last counts per org for the two
 // observable gauges. Observable instruments are read on collection, not on
-// write, so the checker records into these maps and the callback reports
-// whatever is current at scrape time. Instruments are created once from the
-// provider handed in — the global one in production, a manual-reader one in
-// tests.
-type terminalInvariantGauges struct {
-	mu             sync.Mutex
-	activeTerminal map[string]int64
-	openOnClosed   map[string]int64
-	reg            metric.Registration
+// write, so each pass records into the map and the callback reports whatever
+// is current at scrape time.
+//
+// It has workmetrics.DepthObserver's lifecycle: the brain builds one on every
+// acquisition and closes it on demotion, so a pod that lost the lease stops
+// reporting instead of exporting its last counts beside the holder's.
+type TerminalInvariantGauges struct {
+	mu     sync.Mutex
+	counts map[string]terminalCounts // org → its counts at the last pass that read them
+	reg    metric.Registration
 }
 
-// newTerminalInvariantGauges creates the two instruments and registers the
+// terminalCounts is one org's Count A and Count B.
+type terminalCounts struct {
+	activeTerminal, openOnClosed int64
+}
+
+// NewTerminalInvariantGauges creates the two instruments and registers the
 // callback that reports the per-org counts. A provider that cannot build
 // an instrument (never the no-op provider) leaves the gauges unregistered
 // and the checker still logs; instrument creation is not what the checker
 // is for.
-func newTerminalInvariantGauges(provider metric.MeterProvider) *terminalInvariantGauges {
-	g := &terminalInvariantGauges{
-		activeTerminal: map[string]int64{},
-		openOnClosed:   map[string]int64{},
-	}
+func NewTerminalInvariantGauges(provider metric.MeterProvider) *TerminalInvariantGauges {
+	g := &TerminalInvariantGauges{counts: map[string]terminalCounts{}}
 	meter := provider.Meter("internal/routing")
 	active, err := meter.Int64ObservableGauge("entity_terminal_active",
 		metric.WithDescription("Active entities whose stored snapshot is terminal, past the poll grace, with no terminating close in flight"))
@@ -91,11 +93,10 @@ func newTerminalInvariantGauges(provider metric.MeterProvider) *terminalInvarian
 	reg, err := meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		g.mu.Lock()
 		defer g.mu.Unlock()
-		for orgID, n := range g.activeTerminal {
-			o.ObserveInt64(active, n, metric.WithAttributes(telemetry.OrgID(orgID)))
-		}
-		for orgID, n := range g.openOnClosed {
-			o.ObserveInt64(open, n, metric.WithAttributes(telemetry.OrgID(orgID)))
+		for orgID, c := range g.counts {
+			attrs := metric.WithAttributes(telemetry.OrgID(orgID))
+			o.ObserveInt64(active, c.activeTerminal, attrs)
+			o.ObserveInt64(open, c.openOnClosed, attrs)
 		}
 		return nil
 	}, active, open)
@@ -107,43 +108,52 @@ func newTerminalInvariantGauges(provider metric.MeterProvider) *terminalInvarian
 	return g
 }
 
-func (g *terminalInvariantGauges) record(orgID string, activeTerminal, openOnClosed int) {
+// Close unregisters the gauge callback, so a closed gauge set stops
+// reporting, and it has done so when it returns. See
+// workmetrics.DepthObserver.Close for why the brain calls this itself on
+// demotion rather than relying on RunTerminalInvariantChecker's deferred
+// call. Safe to call more than once, and while the checker is still running.
+func (g *TerminalInvariantGauges) Close() {
+	g.mu.Lock()
+	reg := g.reg
+	g.reg = nil
+	g.mu.Unlock()
+	if reg != nil {
+		if err := reg.Unregister(); err != nil {
+			lifecycleLog.Error("terminal checker: unregister gauge callback failed", "error", err)
+		}
+	}
+}
+
+// record replaces the reported counts with one pass's. An org in failed
+// keeps the counts it had, if it had any, because a zero the pass did not
+// establish is worse than a stale number; every other org not in counts
+// drops out.
+func (g *TerminalInvariantGauges) record(counts map[string]terminalCounts, failed []string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.activeTerminal[orgID] = int64(activeTerminal)
-	g.openOnClosed[orgID] = int64(openOnClosed)
-}
-
-// gauges returns the router's gauge set, creating it from the global meter
-// provider on first use. A test wires its own through setTerminalGauges
-// before the first pass.
-func (r *Router) gauges() *terminalInvariantGauges {
-	r.terminalGaugesOnce.Do(func() {
-		if r.terminalGauges == nil {
-			r.terminalGauges = newTerminalInvariantGauges(otel.GetMeterProvider())
+	for _, orgID := range failed {
+		if prev, ok := g.counts[orgID]; ok {
+			counts[orgID] = prev
 		}
-	})
-	return r.terminalGauges
-}
-
-// setTerminalGauges wires a gauge set built on a caller's meter provider, so
-// a test can read the counts back through a manual reader. Call before the
-// first pass; a later call is ignored.
-func (r *Router) setTerminalGauges(g *terminalInvariantGauges) {
-	r.terminalGaugesOnce.Do(func() { r.terminalGauges = g })
+	}
+	g.counts = counts
 }
 
 // RunTerminalInvariantChecker periodically counts the entities the poll's
 // enforcement should have closed and did not, and the tasks left open on
-// closed entities, per org, logging and recording each nonzero count.
-// Returns when ctx is cancelled.
+// closed entities, per org, logging each nonzero count and recording every
+// count on g. Returns when ctx is cancelled, closing g for a caller that did
+// not already.
 //
-// Brain-gated in multi mode (started from the leader-elected background
-// brain, like the firing worker), so exactly one process counts at a time:
-// a courtesy rather than a correctness requirement, since the pass writes
-// nothing, but two pods reporting the same org's gauge would only race each
-// other for the same number.
-func (r *Router) RunTerminalInvariantChecker(ctx context.Context, interval time.Duration) {
+// Brain-gated (started from the leader-elected background brain, like the
+// firing worker), so exactly one process counts and reports at a time. The
+// pass writes nothing, so two counting would be harmless; two reporting is
+// not, because a demoted pod's last counts would sit beside the holder's
+// with nothing to tell them apart. That is why g is the brain's to build
+// and close rather than the router's.
+func (r *Router) RunTerminalInvariantChecker(ctx context.Context, interval time.Duration, g *TerminalInvariantGauges) {
+	defer g.Close()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -151,32 +161,50 @@ func (r *Router) RunTerminalInvariantChecker(ctx context.Context, interval time.
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			orgIDs, err := r.orgs.ListActiveSystem(ctx)
-			if err != nil {
-				lifecycleLog.Error("terminal checker: list orgs failed", "error", err)
-				continue
-			}
-			for _, orgID := range orgIDs {
-				// Checked between orgs and nowhere else, like the drain
-				// worker's between-rows gate: a demoted holder should stop
-				// taking on new passes rather than push every remaining read
-				// through a dead context and log the failure.
-				if ctx.Err() != nil {
-					return
-				}
-				r.checkOrgTerminalInvariant(ctx, orgID)
-			}
+			r.checkTerminalInvariant(ctx, g)
 		}
 	}
 }
 
-// checkOrgTerminalInvariant runs one org's pass and returns the two counts:
+// checkTerminalInvariant runs one pass over every active org and records its
+// counts on g, replacing the previous pass's: an org the list no longer
+// returns (deleted, archived) stops reporting rather than holding its last
+// count forever, and an org whose reads failed keeps its previous counts. A
+// failed org list or a pass cut short by ctx records nothing, since neither
+// established which orgs are active.
+func (r *Router) checkTerminalInvariant(ctx context.Context, g *TerminalInvariantGauges) {
+	orgIDs, err := r.orgs.ListActiveSystem(ctx)
+	if err != nil {
+		lifecycleLog.Error("terminal checker: list orgs failed", "error", err)
+		return
+	}
+	counts := make(map[string]terminalCounts, len(orgIDs))
+	var failed []string
+	for _, orgID := range orgIDs {
+		// Checked between orgs and nowhere else, like the drain worker's
+		// between-rows gate: a demoted holder should stop taking on new
+		// passes rather than push every remaining read through a dead
+		// context and log the failure.
+		if ctx.Err() != nil {
+			return
+		}
+		activeTerminal, openOnClosed, ok := r.checkOrgTerminalInvariant(ctx, orgID)
+		if !ok {
+			failed = append(failed, orgID)
+			continue
+		}
+		counts[orgID] = terminalCounts{activeTerminal: int64(activeTerminal), openOnClosed: int64(openOnClosed)}
+	}
+	g.record(counts, failed)
+}
+
+// checkOrgTerminalInvariant runs one org's reads and returns the two counts:
 // Count A, active entities with a terminal snapshot past the grace and with
 // no close in flight; Count B, open tasks on closed entities. Factored out of
-// RunTerminalInvariantChecker so a per-org failure doesn't bail the whole
-// cycle, and so tests can drive a single deterministic pass instead of
-// racing a ticker. A read failure on either count leaves that gauge at its
-// previous value rather than reporting a zero the pass did not establish.
+// checkTerminalInvariant so a per-org failure doesn't bail the whole pass,
+// and so tests can count a single org without gauges. A read failure on
+// either count returns ok=false, and the pass keeps that org's previous
+// counts rather than reporting a zero it did not establish.
 func (r *Router) checkOrgTerminalInvariant(ctx context.Context, orgID string) (activeTerminal, openOnClosed int, ok bool) {
 	doneByProject := r.jiraDoneStatusesByProject(ctx, orgID)
 	doneByLinearTeam := r.linearDoneStatesByTeam(ctx, orgID)
@@ -209,7 +237,6 @@ func (r *Router) checkOrgTerminalInvariant(ctx context.Context, orgID string) (a
 		lifecycleLog.WarnContext(ctx, "terminal checker: open tasks on closed entities; a close missed them or a mint bypassed the guard",
 			"org", orgID, "count", len(openTasks), "task_ids", capIDs(openTasks))
 	}
-	r.gauges().record(orgID, len(stranded), len(openTasks))
 	return len(stranded), len(openTasks), true
 }
 
