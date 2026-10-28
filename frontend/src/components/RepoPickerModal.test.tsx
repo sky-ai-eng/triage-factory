@@ -5,7 +5,7 @@ import * as repos from '../lib/githubRepos'
 import type { GitHubRepo, RepoListPage } from '../lib/githubRepos'
 
 // The picker fires several overlapping reads by design — a debounced search, a
-// websocket-driven refetch, a poll while the workspace is still being
+// websocket-driven refetch, a poll while the org is still being
 // discovered — so what these tests are about is what happens when those land out
 // of order or outlive the component.
 

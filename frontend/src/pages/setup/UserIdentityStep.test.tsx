@@ -37,7 +37,7 @@ describe('UserIdentityStep — multi mode', () => {
   it('offers no token field when Connect is not advertised, and says why', () => {
     renderStep(false, false)
     expect(screen.queryByPlaceholderText('ghp_…')).not.toBeInTheDocument()
-    expect(screen.getByText(/isn.t connected for this workspace yet/)).toBeInTheDocument()
+    expect(screen.getByText(/isn.t connected for this organization yet/)).toBeInTheDocument()
   })
 
   it('will not finish without a linked identity, even with a token typed', async () => {

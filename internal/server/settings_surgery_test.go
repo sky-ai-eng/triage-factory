@@ -316,7 +316,7 @@ func TestTeamSettingsPatch_RejectsJiraProjects(t *testing.T) {
 // absent from a later PUT is untracked.
 func TestTeamJiraProjectsPut_ReplaceSetRoundTrip(t *testing.T) {
 	// Adding a project is gated against the org's live catalog, so the
-	// workspace is connected to one holding both projects.
+	// org is connected to one holding both projects.
 	s, _ := newServerWithJiraCatalog(t, "SKY", "OPS")
 
 	two := map[string]any{"jira_projects": []map[string]any{

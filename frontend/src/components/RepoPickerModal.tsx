@@ -72,7 +72,7 @@ const SEARCH_DEBOUNCE_MS = 250
  *  long enough to cover a real enumeration of a large account. */
 const REFRESH_SPINNER_TIMEOUT_MS = 30_000
 
-/** How often to re-ask while the workspace has never been looked at. Only the
+/** How often to re-ask while the org has never been looked at. Only the
  *  discovering state polls — a loaded picker waits for the ping — so this is a
  *  backstop for a first open whose websocket ping never lands, not a substitute
  *  for it. */
@@ -193,7 +193,7 @@ export default function RepoPickerModal({
     }
   }, [orgId])
 
-  // Whether the server has ever looked at this workspace's reachable set. It is
+  // Whether the server has ever looked at this org's reachable set. It is
   // a discriminator on the response rather than "items is empty", because an
   // empty list would read as "you have no repositories" — a different and
   // alarming claim.
@@ -315,7 +315,7 @@ export default function RepoPickerModal({
     ),
   )
 
-  // The ping is the fast path, not the only one. While the workspace has never
+  // The ping is the fast path, not the only one. While the org has never
   // been looked at there is nothing on screen at all, so this state needs to
   // resolve even where the ping doesn't land — a socket that reconnected mid
   // refresh, or the setup wizard on a page whose socket isn't up yet. Polls only
@@ -526,7 +526,7 @@ export default function RepoPickerModal({
         {/* Empty, and we know it is empty. The discovering state is handled by
             the skeleton above, so reaching here means the server answered a
             READY page with nothing in it — which is a real answer about the
-            workspace rather than a list that has not loaded. */}
+            org rather than a list that has not loaded. */}
         {!loading && !discovering && !error && repos.length === 0 && (
           <div className="flex flex-col items-center justify-center gap-3 py-8">
             <p className="text-body text-ink-3 text-center">

@@ -304,7 +304,7 @@ var jiraUserClientFailures = []struct {
 	bodySubstr string
 }{
 	{"refused_grant", fmt.Errorf("mint: %w", jira.ErrJiraUserCredentialRefused), http.StatusConflict, httpx.ReasonNotConfigured, "Connect your Jira again"},
-	{"issuing_app_removed", fmt.Errorf("mint: %w", jira.ErrJiraUserCredentialAppRemoved), http.StatusConflict, httpx.ReasonNotConfigured, "was removed from this workspace. Connect your Jira again"},
+	{"issuing_app_removed", fmt.Errorf("mint: %w", jira.ErrJiraUserCredentialAppRemoved), http.StatusConflict, httpx.ReasonNotConfigured, "was removed from this organization. Connect your Jira again"},
 	{"no_credential", jira.ErrNoJiraUserCredential, http.StatusConflict, httpx.ReasonNotConfigured, "connect your Jira"},
 	{"mint_unreachable", fmt.Errorf("mint: %w", &upstream.TransportError{Err: errors.New("dial tcp: connection refused")}), http.StatusBadGateway, httpx.ReasonUpstreamUnavailable, "did not answer"},
 	{"mint_unavailable", fmt.Errorf("mint: %w", &jiraoauth.StatusError{Op: "token request", StatusCode: 503, Class: upstream.Transient}), http.StatusBadGateway, httpx.ReasonUpstreamUnavailable, "did not answer"},

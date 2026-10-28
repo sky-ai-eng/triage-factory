@@ -496,7 +496,7 @@ export default function JiraProjectRulesGroup({
       {catalogError === '' && !catalogLoading && rows.length === 0 && (
         <p className="text-ui text-ink-3 italic">
           {search.trim() === ''
-            ? 'This workspace’s Jira credential can’t see any projects.'
+            ? 'This organization’s Jira credential can’t see any projects.'
             : `No Jira project matches “${search.trim()}”.`}
         </p>
       )}
@@ -555,7 +555,7 @@ export default function JiraProjectRulesGroup({
       )}
       {!connected ? (
         <p className="text-ui text-ink-3 italic">
-          Connect Jira under Workspace settings before configuring tracked projects.
+          Connect Jira under organization settings before configuring tracked projects.
         </p>
       ) : (
         <>

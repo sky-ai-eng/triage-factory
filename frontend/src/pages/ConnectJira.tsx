@@ -16,7 +16,7 @@ import { safeReturnTo } from '../lib/returnTo'
  * captures *identity* (validate, keep the @login, discard the token); Jira
  * captures *access* (validate, STORE the credential, derive identity) — because
  * the Jira user level must act as the user. So the copy is honest about
- * retention: your token is stored, in your workspace's secret store.
+ * retention: your token is stored, in your org's secret store.
  *
  * The paste path follows the org's deployment: a Data Center org binds a single
  * personal access token; a Cloud org binds the Atlassian account email + API
@@ -43,15 +43,15 @@ function jiraErrorBanner(code: string | null, host: string): { text: string } | 
       }
     case 'bad_host':
       return {
-        text: "Your workspace's Jira URL looks misconfigured. Ask your admin to fix it in Workspace Settings, then try again.",
+        text: "Your organization's Jira URL looks misconfigured. Ask your admin to fix it in organization settings, then try again.",
       }
     case 'no_app':
       return {
-        text: 'One-click Connect needs an Atlassian OAuth app, which isn’t configured for this workspace. Paste an API token below instead, or ask your admin to add the app.',
+        text: 'One-click Connect needs an Atlassian OAuth app, which isn’t configured for this organization. Paste an API token below instead, or ask your admin to add the app.',
       }
     case 'not_cloud':
       return {
-        text: 'One-click Connect is for Atlassian Cloud only. This workspace’s Jira is self-hosted (Data Center), so paste a personal access token below to connect.',
+        text: 'One-click Connect is for Atlassian Cloud only. This organization’s Jira is self-hosted (Data Center), so paste a personal access token below to connect.',
       }
     case 'site_mismatch':
       return {
@@ -74,7 +74,7 @@ function disconnectedBanner(reason: string | undefined): { text: string } | null
   switch (reason) {
     case 'app_removed':
       return {
-        text: 'The Jira app your connection was made through was removed from this workspace. Connect your Jira again to act on tickets.',
+        text: 'The Jira app your connection was made through was removed from this organization. Connect your Jira again to act on tickets.',
       }
     case 'refused':
       return {
@@ -335,12 +335,12 @@ export default function ConnectJira() {
               Atlassian API token settings
             </a>
             . Unlike GitHub, it&apos;s stored — it&apos;s needed to act as you on Jira. It stays in
-            your workspace&apos;s secret store and is never shared with other users.
+            your organization&apos;s secret store and is never shared with other users.
           </>
         ) : (
           <>
             Unlike GitHub, your token is stored — it&apos;s needed to act as you on Jira. It stays
-            in your workspace&apos;s secret store and is never shared with other users.
+            in your organization&apos;s secret store and is never shared with other users.
           </>
         )}
       </p>

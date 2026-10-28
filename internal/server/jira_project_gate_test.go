@@ -266,17 +266,17 @@ func TestJiraProjectsPut_UpstreamFailureStoresNothing(t *testing.T) {
 	}
 }
 
-// TestJiraProjectsPut_UnconnectedWorkspaceCannotAdd: with no credential there
+// TestJiraProjectsPut_UnconnectedOrgCannotAdd: with no credential there
 // is no catalog to check against, so an add is refused with the configuration
 // answer rather than stored unverified.
-func TestJiraProjectsPut_UnconnectedWorkspaceCannotAdd(t *testing.T) {
+func TestJiraProjectsPut_UnconnectedOrgCannotAdd(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 
 	rec := putJiraProjects(t, s, "SKY")
 	if rec.Code != http.StatusConflict {
-		t.Fatalf("PUT on an unconnected workspace = %d, want 409; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("PUT on an unconnected org = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 	if reason := decodeErrorItems(t, rec)[0].Reason; reason != "NOT_CONFIGURED" {
 		t.Errorf("reason = %q, want NOT_CONFIGURED", reason)

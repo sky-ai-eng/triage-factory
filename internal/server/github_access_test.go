@@ -434,7 +434,7 @@ func TestGitHubAppDiscard_Active(t *testing.T) {
 // flip and the PAT delete — because it is the second half that sets the stake.
 // Once the PAT is gone the App is the org's only credential, so a discard that
 // proceeds on the stale "staged" answer isn't tearing down an abandoned switch,
-// it is taking the workspace's GitHub access with it.
+// it is taking the org's GitHub access with it.
 //
 // The guard has to be re-evaluated under the lock for the refusal to happen at
 // all; against the unserialized handler the stale answer stands and the
@@ -1286,7 +1286,7 @@ func TestGitHubPATPut_ValidatesAgainstTheCommittedHost(t *testing.T) {
 		t.Errorf("settings version moved %d → %d; the bind writes no settings column", versionAfterCommit, got)
 	}
 
-	// Move the workspace to the other deployment: the token comes off first,
+	// Move the org to the other deployment: the token comes off first,
 	// since the URL does not move while a credential is connected, and the
 	// next bind follows the new setting.
 	if rec := doJSON(t, s, http.MethodDelete, patRoute(), nil); rec.Code != http.StatusOK {

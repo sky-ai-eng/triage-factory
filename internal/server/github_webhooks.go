@@ -88,7 +88,7 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		// One reply for both, deliberately. Answering "this org has no App"
 		// with a 404 and "your signature is wrong" with a 401 would let an
 		// unauthenticated caller walk a list of org ids and learn which
-		// workspaces have a GitHub App registered — an org-existence oracle on
+		// orgs have a GitHub App registered — an org-existence oracle on
 		// a route that requires no credential to reach. Note the empty secret
 		// must short-circuit rather than fall into the HMAC check: verifying
 		// against an empty key is a check anyone can pass. Deliberately no

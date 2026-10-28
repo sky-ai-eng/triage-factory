@@ -260,7 +260,7 @@ function MultiRoutes() {
               bind ceremony started it — installed from the App's public page,
               approved by an owner after a request, reinstalled. Not under
               /orgs/:org_id because the callback has no org to name: the page
-              resolves the workspace from the session (AuthGate signs a
+              resolves the org from the session (AuthGate signs a
               visitor in with this path as the return target) and offers the
               ordinary Connect button. Multi-mode only — the deployment App is
               a multi-mode credential, so LocalRoutes has no such page. */}

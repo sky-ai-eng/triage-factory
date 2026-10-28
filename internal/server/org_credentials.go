@@ -35,11 +35,11 @@ import (
 // credential in sight, and a column with two setters is a column with two
 // validation dialects. So the GitHub bind takes no host in the body — it
 // resolves the org's committed one and validates against that, which is what
-// makes a successful bind mean "this token works for this workspace's GitHub"
+// makes a successful bind mean "this token works for this org's GitHub"
 // rather than "this token works for whichever host the caller passed". The
 // Jira bind is the exception: its body names the host the credential is
 // validated against, and it stores that host. The unbinds clear their host,
-// because a workspace with no credential is not connected to a GitHub or a
+// because an org with no credential is not connected to a GitHub or a
 // Jira; that is the disconnect's own call, not the mirror of a write the bind
 // makes.
 //
@@ -53,7 +53,7 @@ import (
 // githubPATRequest is the PUT /github/pat body: the token, and nothing else.
 // The host it authenticates against is the org's own, read through the
 // resolver — a caller cannot name one, so it cannot name a different one than
-// the workspace is configured for. There is no "leave blank to keep current"
+// the org is configured for. There is no "leave blank to keep current"
 // either: a blank token means the caller had nothing to bind and shouldn't have
 // called at all, which is exactly the ambiguity that disappears once the
 // credential has its own route.
@@ -61,20 +61,20 @@ type githubPATRequest struct {
 	PAT string `json:"pat"`
 }
 
-// refuseWorkspaceTokenInMulti answers 404 for a route that puts a workspace
+// refuseOrgTokenInMulti answers 404 for a route that puts an org
 // GitHub token in place, when this is multi mode, and reports whether it did.
-// A multi workspace's GitHub access is a GitHub App, the deployment's or its
+// A multi org's GitHub access is a GitHub App, the deployment's or its
 // own: an App's installation tokens last an hour and cover only the
 // installation's repositories, where a token is one person's long-lived,
 // unscoped credential, and an App's client secret is what lets members link
 // their GitHub accounts. No setting reopens these routes there, because one
 // would reopen exactly that gap. The unbind (DELETE …/github/pat) stays in both
-// modes, so a workspace that holds a token can always remove it.
+// modes, so an org that holds a token can always remove it.
 //
 // Every token-placing route calls this first, before authorization: a route
 // that does not exist in this mode is a 404 to everyone, the way the
 // deployment-App routes are in local mode.
-func refuseWorkspaceTokenInMulti(w http.ResponseWriter) bool {
+func refuseOrgTokenInMulti(w http.ResponseWriter) bool {
 	if runmode.Current() != runmode.ModeMulti {
 		return false
 	}
@@ -92,11 +92,11 @@ func refuseWorkspaceTokenInMulti(w http.ResponseWriter) bool {
 // (PAT_2) is captured by its own surface, so access and identity stay
 // independent even when the same token is used for both.
 //
-// Local mode only: see refuseWorkspaceTokenInMulti.
+// Local mode only: see refuseOrgTokenInMulti.
 //
 // PUT /api/orgs/{org_id}/github/pat
 func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
-	if refuseWorkspaceTokenInMulti(w) {
+	if refuseOrgTokenInMulti(w) {
 		return
 	}
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
@@ -129,7 +129,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.githubCredentialClass(ctx, orgID); err != nil {
 		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
 			settingsOrgLog.Error("unknown github credential class; refusing to bind a pat", "org", orgID)
-			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this workspace's GitHub credential is managed in a way this version doesn't recognize — don't bind a token here", Field: "pat"})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this organization's GitHub credential is managed in a way this version doesn't recognize — don't bind a token here", Field: "pat"})
 			return
 		}
 		internalError(w, "github-access", err)
@@ -150,16 +150,16 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if app != nil {
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this workspace uses a GitHub App — use the switch flow", Field: "pat"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this organization uses a GitHub App — use the switch flow", Field: "pat"})
 		return
 	}
 
 	// The org's own GitHub URL, the only host a token is checked against or
-	// sent to. A workspace with none sets it first: a token is a credential
+	// sent to. An org with none sets it first: a token is a credential
 	// for one GitHub, and nothing here guesses which.
 	baseURL, err := s.ghResolver.BaseURLFor(ctx, orgID)
 	if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-		writeNotConfigured(w, "set this workspace's GitHub URL before connecting a token: a token works only on the GitHub that issued it")
+		writeNotConfigured(w, "set this organization's GitHub URL before connecting a token: a token works only on the GitHub that issued it")
 		return
 	}
 	if err != nil {
@@ -194,7 +194,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.githubCredentialClass(ctx, orgID); err != nil {
 		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
 			settingsOrgLog.Error("unknown github credential class; refusing to bind a pat", "org", orgID)
-			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this workspace's GitHub credential is managed in a way this version doesn't recognize — don't bind a token here", Field: "pat"})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this organization's GitHub credential is managed in a way this version doesn't recognize — don't bind a token here", Field: "pat"})
 			return
 		}
 		internalError(w, "github-access", err)
@@ -204,7 +204,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "github-access", err)
 		return
 	} else if app != nil {
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this workspace uses a GitHub App — use the switch flow", Field: "pat"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this organization uses a GitHub App — use the switch flow", Field: "pat"})
 		return
 	}
 
@@ -257,15 +257,15 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 }
 
 // errGitHubHostMovedDuringBind refuses a PAT bind whose token was checked
-// against a GitHub URL the workspace no longer has.
-var errGitHubHostMovedDuringBind = errors.New("this workspace's GitHub URL changed while the token was being checked — connect it again")
+// against a GitHub URL the org no longer has.
+var errGitHubHostMovedDuringBind = errors.New("this organization's GitHub URL changed while the token was being checked — connect it again")
 
 // handleGitHubPATDelete unbinds the org's GitHub bot PAT — the disconnect.
 // Idempotent: disconnecting an org that has nothing bound is a 200 with no
 // audit row (a removal that removed nothing isn't an access change).
 //
 // The base URL goes with it ONLY when no App registration remains. Host and
-// credential are the two halves of "this workspace is connected to GitHub", so
+// credential are the two halves of "this org is connected to GitHub", so
 // a plain disconnect clears both — leaving a host behind would render a
 // connected-looking, credential-less GitHub card. But an App registration keeps
 // using that host: a staged App coexists with a live PAT during a PAT→App

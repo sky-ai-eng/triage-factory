@@ -103,7 +103,7 @@ function GitHubIdentitySection({ orgId }: { orgId: string | null }) {
                 button doesn't read as a regression. */}
             {!connectAvailable && (
               <p className="text-ui leading-relaxed text-ink-3">
-                This workspace switched to PAT access; identity capture now uses a personal token
+                This organization switched to PAT access; identity capture now uses a personal token
                 that is verified and discarded.
               </p>
             )}
@@ -256,7 +256,7 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
         <p className="text-ui leading-relaxed text-ink-3">
           Triage Factory acts as you on <span className="text-ink-2">{host}</span> — so the tickets
           it claims and updates are attributed to you, not a shared bot. Unlike GitHub, your token
-          is stored (it&rsquo;s needed to act as you); it stays in your workspace&rsquo;s secret
+          is stored (it&rsquo;s needed to act as you); it stays in your organization&rsquo;s secret
           store and is never shared with other users.
         </p>
 

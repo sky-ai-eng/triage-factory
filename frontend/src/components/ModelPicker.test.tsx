@@ -186,7 +186,7 @@ describe('ModelPicker — one row per model, rendering what the read carries', (
       />,
     )
 
-    expect(screen.getByText(/No models are enabled for this workspace/)).toBeVisible()
+    expect(screen.getByText(/No models are enabled for this organization/)).toBeVisible()
     await userEvent.click(screen.getByRole('radio', { name: /Default/ }))
     expect(onChange).toHaveBeenCalledWith('')
   })

@@ -1,4 +1,4 @@
-// Helpers for the Workspace Settings "Linear OAuth app" card — the Linear
+// Helpers for the org settings "Linear OAuth app" card — the Linear
 // sibling of jiraApp.ts. An admin creates an OAuth app in Linear from a
 // pre-filled link, pastes its client id and secret here, and a Linear
 // workspace admin can then install Triage Factory as an app user. The

@@ -1,4 +1,4 @@
-// The one way a workspace connects a GitHub account to the deployment App: a
+// The one way an org connects a GitHub account to the deployment App: a
 // reveal, then a login. Whether that account already has the App installed is
 // the ceremony's business, not this form's — the panel may not know it, since
 // the answer is per-viewer — so the copy promises only what is true either

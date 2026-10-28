@@ -1,4 +1,4 @@
-// The Atlassian OAuth app card asks before an admin removes the workspace's app
+// The Atlassian OAuth app card asks before an admin removes the org's app
 // or replaces it with a different one, since a Jira connection made through it
 // can only be refreshed by it. Rotating the same app's secret does not ask.
 import { afterEach, describe, expect, it, vi } from 'vitest'

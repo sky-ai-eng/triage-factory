@@ -319,7 +319,7 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 func linearUserCredentialMissingMessage(err error) string {
 	switch {
 	case errors.Is(err, linear.ErrLinearUserCredentialAppRemoved):
-		return "The Linear app your connection was made through was removed from this workspace. Connect your Linear again to act on issues."
+		return "The Linear app your connection was made through was removed from this organization. Connect your Linear again to act on issues."
 	case errors.Is(err, linear.ErrLinearUserCredentialRefused):
 		return "Linear no longer accepts your connection: it was revoked or expired. Connect your Linear again to act on issues."
 	default:

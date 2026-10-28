@@ -53,7 +53,7 @@ export function linearConnectStartURL(orgId: string, returnTo: string): string {
 export function linearDisconnectedText(reason: string | undefined): string | null {
   switch (reason) {
     case 'app_removed':
-      return 'The Linear app your connection was made through was removed from this workspace. Connect your Linear again to act on issues.'
+      return 'The Linear app your connection was made through was removed from this organization. Connect your Linear again to act on issues.'
     case 'refused':
       return 'Linear no longer accepts your connection: it was revoked or expired. Connect your Linear again to act on issues.'
     default:
@@ -76,9 +76,9 @@ export function linearConnectErrorText(code: string | null): string | null {
       // as that approval is untested.
       return 'Linear authorization was cancelled before it finished. If you did not cancel it, your Linear workspace may require an admin to approve Triage Factory first. Ask them, or paste an API key below.'
     case 'no_app':
-      return 'One-click Connect needs a Linear OAuth app, which isn’t configured for this workspace. Paste an API key below instead, or ask your admin to add the app.'
+      return 'One-click Connect needs a Linear OAuth app, which isn’t configured for this organization. Paste an API key below instead, or ask your admin to add the app.'
     case 'not_configured':
-      return 'Your workspace hasn’t connected Linear yet. Ask an admin to connect it in Workspace Settings first.'
+      return 'Your organization hasn’t connected Linear yet. Ask an admin to connect it in organization settings first.'
     case 'workspace_mismatch':
       return 'The Linear account you authorized belongs to a different Linear workspace. Sign in to Linear with your account in the connected workspace, or paste an API key from it below.'
     case 'sso_required':

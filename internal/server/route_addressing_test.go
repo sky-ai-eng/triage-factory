@@ -27,7 +27,7 @@ func TestMovedRoutes_OldPathsAreGone(t *testing.T) {
 	team := runmode.LocalDefaultTeamID
 
 	for _, c := range []struct{ method, path string }{
-		// The workspace-create route: local provisioning is POST /api/orgs.
+		// The org-create route: local provisioning is POST /api/orgs.
 		{http.MethodPost, "/api/setup/start"},
 		// The team-settings siblings, now child collections of the team.
 		{http.MethodGet, "/api/settings/team/" + team + "/repos"},

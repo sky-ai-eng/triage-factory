@@ -34,7 +34,7 @@ func writeJiraUserClientError(w http.ResponseWriter, scope string, err error) {
 	case errors.Is(err, jira.ErrJiraUserCredentialAppRemoved):
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason:  httpx.ReasonNotConfigured,
-			Message: "The Jira app your connection was made through was removed from this workspace. Connect your Jira again to act on tickets.",
+			Message: "The Jira app your connection was made through was removed from this organization. Connect your Jira again to act on tickets.",
 		})
 		return
 	case errors.Is(err, jira.ErrJiraUserCredentialRefused):

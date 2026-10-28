@@ -275,8 +275,8 @@ func newBindRig(t *testing.T, gh *fakeGitHub) *bindRig {
 	sid := rig.sidFromResp(resp)
 
 	// The fake GitHub is the deployment's GitHub: the deployment App is on it,
-	// and the workspace seeded below is pointed at it. A test that wants a
-	// workspace on some OTHER GitHub re-points the workspace, never the
+	// and the org seeded below is pointed at it. A test that wants an
+	// org on some OTHER GitHub re-points the org, never the
 	// deployment.
 	ghBase := gh.start(t)
 	ghbase.SetDefaultBaseURLForTest(t, ghBase)
@@ -334,7 +334,7 @@ func (r *bindRig) unlinkIdentity(t *testing.T, user uuid.UUID) {
 	}
 }
 
-// sibling returns a second workspace on the SAME server, with its own admin
+// sibling returns a second org on the SAME server, with its own admin
 // session and its GitHub pointed at the same fake — what a race between two
 // tenants over one installation needs, and something two separate rigs (two
 // servers) could not express.
@@ -364,7 +364,7 @@ func (r *bindRig) connectAccount(t *testing.T, body string) *httptest.ResponseRe
 	return r.postOrg(t, "/github/managed/connect-account", body)
 }
 
-// postOrg sends a POST to one of the workspace's own routes from the admin's
+// postOrg sends a POST to one of the org's own routes from the admin's
 // signed-in browser.
 func (r *bindRig) postOrg(t *testing.T, route, body string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -492,7 +492,7 @@ func defaultCallbackQuery(installationID int64) string {
 	return fmt.Sprintf("code=gh_code&installation_id=%d&setup_action=install", installationID)
 }
 
-// credentialClass reads the org's stored GitHub credential class. A workspace
+// credentialClass reads the org's stored GitHub credential class. An org
 // that has never had one written has no org_settings row at all, which reads
 // back as "" — the state every refusal below must leave it in.
 func (r *bindRig) credentialClass(t *testing.T) string {
@@ -536,7 +536,7 @@ func (r *bindRig) assertNothingBound(t *testing.T) {
 	}
 }
 
-// setGitHubHost stores the workspace's GitHub host; "" leaves it with none,
+// setGitHubHost stores the org's GitHub host; "" leaves it with none,
 // the state a disconnect leaves it in.
 func (r *bindRig) setGitHubHost(t *testing.T, host string) {
 	t.Helper()
@@ -551,7 +551,7 @@ func (r *bindRig) setGitHubHost(t *testing.T, host string) {
 	}
 }
 
-// githubHost reads the workspace's stored GitHub host, "" for none.
+// githubHost reads the org's stored GitHub host, "" for none.
 func (r *bindRig) githubHost(t *testing.T) string {
 	t.Helper()
 	var host sql.NullString
@@ -572,7 +572,7 @@ func (r *bindRig) watchGitHubChanged() <-chan string {
 	return kicked
 }
 
-// accessChangeCount counts the workspace's change-log rows.
+// accessChangeCount counts the org's change-log rows.
 func (r *bindRig) accessChangeCount(t *testing.T) int {
 	t.Helper()
 	var n int
@@ -662,7 +662,7 @@ func TestManagedBind_OrganizationTarget(t *testing.T) {
 		t.Errorf("credential class = %q, want managed_app", class)
 	}
 	if host := rig.githubHost(t); host != rig.ghBase {
-		t.Errorf("workspace github host = %q after the bind, want it unchanged at %q", host, rig.ghBase)
+		t.Errorf("org github host = %q after the bind, want it unchanged at %q", host, rig.ghBase)
 	}
 }
 
@@ -710,7 +710,7 @@ func TestManagedBind_UserTargetOnSomeoneElsesAccount(t *testing.T) {
 // A read-only contractor with :read on ONE repository inside Acme's
 // installation sees that whole installation in GET /user/installations — so
 // they pass GitHub's own prescribed association check. Without the authority
-// gate they could bind Acme into a workspace they control, where their agents
+// gate they could bind Acme into an org they control, where their agents
 // would then act on Acme's repositories.
 func TestManagedBind_ContractorIsRefused(t *testing.T) {
 	gh := newFakeGitHub()
@@ -850,19 +850,19 @@ func TestManagedBind_Refusals(t *testing.T) {
 	}
 }
 
-// TestManagedBind_WorkspaceOnAnotherGitHubIsRefused: the deployment App is on
-// one GitHub, so a workspace whose github_base_url names another cannot bind
+// TestManagedBind_OrgOnAnotherGitHubIsRefused: the deployment App is on
+// one GitHub, so an org whose github_base_url names another cannot bind
 // it. The refusal names both hosts and points at bringing your own App; it
 // fires at Connect, before any preflight, so the deployment's key is never
 // presented to a GitHub that has not seen it — the fake counts zero calls.
 // Nothing is written and the class does not move.
-func TestManagedBind_WorkspaceOnAnotherGitHubIsRefused(t *testing.T) {
+func TestManagedBind_OrgOnAnotherGitHubIsRefused(t *testing.T) {
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
 	if _, err := rig.h.AdminDB.Exec(`
 		UPDATE org_event_sources SET base_url = $2 WHERE org_id = $1 AND kind = 'github'
 	`, rig.orgID.String(), "https://ghe.example.com/"); err != nil {
-		t.Fatalf("re-point the workspace: %v", err)
+		t.Fatalf("re-point the org: %v", err)
 	}
 
 	rec := rig.start(t)
@@ -877,7 +877,7 @@ func TestManagedBind_WorkspaceOnAnotherGitHubIsRefused(t *testing.T) {
 		}
 	}
 	if n := gh.callCount(); n != 0 {
-		t.Errorf("GitHub served %d requests for a workspace on another host; want 0 — no preflight may be issued", n)
+		t.Errorf("GitHub served %d requests for an org on another host; want 0 — no preflight may be issued", n)
 	}
 	rig.assertNothingBound(t)
 	if host := rig.githubHost(t); host != "https://ghe.example.com/" {
@@ -885,10 +885,10 @@ func TestManagedBind_WorkspaceOnAnotherGitHubIsRefused(t *testing.T) {
 	}
 }
 
-// TestManagedBind_WorkspaceWithNoHostStartsOnTheAppsHost: a workspace with no
+// TestManagedBind_OrgWithNoHostStartsOnTheAppsHost: an org with no
 // GitHub URL starts the ceremony on the deployment App's host. The start
 // writes no host; only a completed bind does.
-func TestManagedBind_WorkspaceWithNoHostStartsOnTheAppsHost(t *testing.T) {
+func TestManagedBind_OrgWithNoHostStartsOnTheAppsHost(t *testing.T) {
 	rig := newBindRig(t, newFakeGitHub())
 	rig.setGitHubHost(t, "")
 
@@ -910,10 +910,10 @@ func TestManagedBind_WorkspaceWithNoHostStartsOnTheAppsHost(t *testing.T) {
 	}
 }
 
-// TestManagedBind_WorkspaceWithNoHostAdoptsTheAppsHost: the bind writes the
-// App's host as the workspace's, beside the installation and the class, and
+// TestManagedBind_OrgWithNoHostAdoptsTheAppsHost: the bind writes the
+// App's host as the org's, beside the installation and the class, and
 // kicks the GitHub-changed hook so the org is polled under it now.
-func TestManagedBind_WorkspaceWithNoHostAdoptsTheAppsHost(t *testing.T) {
+func TestManagedBind_OrgWithNoHostAdoptsTheAppsHost(t *testing.T) {
 	rig := newBindRig(t, newFakeGitHub())
 	rig.setGitHubHost(t, "")
 	kicked := rig.watchGitHubChanged()
@@ -943,7 +943,7 @@ func TestManagedBind_WorkspaceWithNoHostAdoptsTheAppsHost(t *testing.T) {
 }
 
 // TestManagedBind_HostMovedAfterTheStartIsRefused: an admin who points the
-// workspace at another GitHub after the start gets the start's refusal at the
+// org at another GitHub after the start gets the start's refusal at the
 // callback, and nothing is written — no installation, no class, no host, no
 // change-log row. The callback checks the host before it asks GitHub
 // anything, and the bind checks it again in its own transaction.
@@ -1007,8 +1007,8 @@ func TestManagedBind_HostMovedAfterTheStartIsRefused(t *testing.T) {
 }
 
 // TestManagedBind_SwitchFromOwnAppToTheDeploymentApp is the switch the
-// settings page makes: disconnect the workspace's own App, which clears its
-// host, then start the deployment App's ceremony on the workspace that is
+// settings page makes: disconnect the org's own App, which clears its
+// host, then start the deployment App's ceremony on the org that is
 // left.
 func TestManagedBind_SwitchFromOwnAppToTheDeploymentApp(t *testing.T) {
 	rig := newBindRig(t, newFakeGitHub())
@@ -1036,7 +1036,7 @@ func TestManagedBind_SwitchFromOwnAppToTheDeploymentApp(t *testing.T) {
 func TestManagedBind_NoCookieIsTheUnboundInstall(t *testing.T) {
 	// Somebody installed the deployment App from its public page, so GitHub
 	// returned them here with no ceremony behind it. That is an ordinary state,
-	// not an error: the installation exists and belongs to no workspace, and
+	// not an error: the installation exists and belongs to no org, and
 	// the answer is the recovery page — a redirect into the SPA, which is where
 	// the Connect button that finishes the job lives.
 	gh := newFakeGitHub()
@@ -1131,7 +1131,7 @@ func TestManagedBind_NoCookieIsTheUnboundInstall(t *testing.T) {
 // TestManagedBind_RefusedBindIsLoggedForTheOperator pins the other operator
 // signal: a ceremony that came back and did not land leaves one WARN line
 // naming the installation and, once the App has read it, the account it
-// targets — so a self-hoster can tell "went to the wrong workspace" from
+// targets — so a self-hoster can tell "went to the wrong org" from
 // "never connected" without a payload, a code, or a token ever being logged.
 func TestManagedBind_RefusedBindIsLoggedForTheOperator(t *testing.T) {
 	gh := newFakeGitHub()
@@ -1171,8 +1171,8 @@ func TestManagedBind_RefusedBindIsLoggedForTheOperator(t *testing.T) {
 
 // TestManagedBind_CompletingWithoutASessionIsRefused pins the other half of the
 // split. The no-cookie door is open to anyone; the door that WRITES is not.
-// Someone bearing a bind cookie is about to have a credential bound into a
-// workspace, so that branch stays behind withSession and answers 401 without
+// Someone bearing a bind cookie is about to have a credential bound into an
+// org, so that branch stays behind withSession and answers 401 without
 // one — the ordinary authentication failure, not a bind.
 func TestManagedBind_CompletingWithoutASessionIsRefused(t *testing.T) {
 	gh := newFakeGitHub()
@@ -1274,9 +1274,9 @@ func TestManagedBind_SessionIsNotTheInitiator(t *testing.T) {
 		rig.sid = rig.sidFromResp(resp)
 	}
 
-	// Being an admin of the same workspace is not enough: the record names a
+	// Being an admin of the same org is not enough: the record names a
 	// PERSON, and a colleague who did not start this ceremony did not start it.
-	t.Run("another_admin_of_the_same_workspace", func(t *testing.T) {
+	t.Run("another_admin_of_the_same_org", func(t *testing.T) {
 		rig := newBindRig(t, newFakeGitHub())
 		cookie := rig.ceremony(t)
 
@@ -1305,14 +1305,14 @@ func TestManagedBind_SessionIsNotTheInitiator(t *testing.T) {
 	})
 
 	// The disclosure case: a signed-in user with no relationship to the
-	// ceremony's workspace at all. The refusal must not name it — a back-link
+	// ceremony's org at all. The refusal must not name it — a back-link
 	// into its settings would hand out an org id they never asked for, which is
 	// the same thing the bound-elsewhere refusal is careful never to do.
-	t.Run("an_unrelated_user_is_told_nothing_about_the_workspace", func(t *testing.T) {
+	t.Run("an_unrelated_user_is_told_nothing_about_the_org", func(t *testing.T) {
 		rig := newBindRig(t, newFakeGitHub())
 		cookie := rig.ceremony(t)
 
-		// Their own workspace, so they have a session; no membership in the
+		// Their own org, so they have a session; no membership in the
 		// one whose ceremony the cookie belongs to.
 		outsider := rig.seedUser()
 		rig.seedOrg(outsider, "outsider-org-"+uuid.NewString()[:8])
@@ -1322,7 +1322,7 @@ func TestManagedBind_SessionIsNotTheInitiator(t *testing.T) {
 		assertOutcome(t, out, "link_expired")
 		rig.assertNothingBound(t)
 		if body := out.Body.String(); strings.Contains(body, rig.orgID.String()) {
-			t.Errorf("the refusal names the ceremony's workspace to an unrelated user: %s", body)
+			t.Errorf("the refusal names the ceremony's org to an unrelated user: %s", body)
 		}
 	})
 }
@@ -1364,7 +1364,7 @@ func TestManagedBind_RoleRevokedMidCeremony(t *testing.T) {
 	cookie := rig.ceremony(t)
 	demote()
 	out := rig.callback(t, cookie, defaultCallbackQuery(4242))
-	assertOutcome(t, out, "not_workspace_admin")
+	assertOutcome(t, out, "not_org_admin")
 	rig.assertNothingBound(t)
 
 	// ...and on the authorize leg.
@@ -1372,11 +1372,11 @@ func TestManagedBind_RoleRevokedMidCeremony(t *testing.T) {
 	first, state := rig.namedCeremony(t, "acme")
 	demote()
 	out = rig.callback(t, first, namedCallbackQuery(state))
-	assertOutcome(t, out, "not_workspace_admin")
+	assertOutcome(t, out, "not_org_admin")
 	rig.assertNothingBound(t)
 }
 
-func TestManagedBind_ConnectRequiresWorkspaceAdmin(t *testing.T) {
+func TestManagedBind_ConnectRequiresOrgAdmin(t *testing.T) {
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
 
@@ -1391,7 +1391,7 @@ func TestManagedBind_ConnectRequiresWorkspaceAdmin(t *testing.T) {
 
 	rec := rig.start(t)
 	if rec.Code != http.StatusForbidden {
-		t.Errorf("start as a workspace member status=%d, want 403", rec.Code)
+		t.Errorf("start as an org member status=%d, want 403", rec.Code)
 	}
 	var n int
 	if err := rig.h.AdminDB.QueryRow(`SELECT count(*) FROM github_pending_binds`).Scan(&n); err != nil {
@@ -1403,7 +1403,7 @@ func TestManagedBind_ConnectRequiresWorkspaceAdmin(t *testing.T) {
 }
 
 // TestManagedBind_RequiresSSOOfTheRecordsOrg is Require SSO at the callback:
-// the workspace the record names started requiring an SSO this session did not
+// the org the record names started requiring an SSO this session did not
 // come through after the ceremony began. The callback is a browser navigation,
 // so the refusal is the outcome page every other refusal renders, not an API
 // error body, and nothing is bound.
@@ -1431,7 +1431,7 @@ func TestManagedBind_InstallationBoundElsewhere(t *testing.T) {
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
 
-	// Another workspace already holds this installation on this host.
+	// Another org already holds this installation on this host.
 	otherOwner := rig.seedUser()
 	otherOrg, _ := rig.seedOrg(otherOwner, "other-org")
 	if _, err := rig.h.AdminDB.Exec(`
@@ -1446,10 +1446,10 @@ func TestManagedBind_InstallationBoundElsewhere(t *testing.T) {
 	assertOutcome(t, out, "bound_elsewhere")
 	rig.assertNothingBound(t)
 
-	// The refusal must not disclose the other workspace, by id or by slug.
+	// The refusal must not disclose the other org, by id or by slug.
 	body := out.Body.String()
 	if strings.Contains(body, otherOrg.String()) || strings.Contains(body, "other-org") {
-		t.Errorf("the refusal names the other workspace: %s", body)
+		t.Errorf("the refusal names the other org: %s", body)
 	}
 }
 
@@ -1546,7 +1546,7 @@ func TestManagedBind_OrgAlreadyHoldsAPAT(t *testing.T) {
 // route has no org in its path, by construction, so there is nothing for that
 // gate to attach to.
 //
-// The case that makes it concrete: one person administers two workspaces,
+// The case that makes it concrete: one person administers two orgs,
 // starts a ceremony for THIS one in a browser, and completes it on a request
 // that also carries a token sealed to the OTHER. Identity would resolve off the
 // token while the cookie decides the org — a credential bound outside the scope
@@ -1556,7 +1556,7 @@ func TestManagedBind_BearerTokenCannotComplete(t *testing.T) {
 	rig := newBindRig(t, gh)
 	cookie := rig.ceremony(t)
 
-	// The same person also administers a second workspace and holds a LIVE
+	// The same person also administers a second org and holds a LIVE
 	// token sealed to it. Both halves matter: a bogus header would be refused
 	// by the middleware and would prove nothing about this route.
 	otherOrg, _ := rig.seedOrg(rig.userID, "second-org-"+uuid.NewString()[:8])
@@ -1596,9 +1596,9 @@ func TestManagedBind_RebindingTheSameInstallationIsIdempotent(t *testing.T) {
 	if out := rig.callback(t, rig.ceremony(t), defaultCallbackQuery(4242)); out.Code != http.StatusFound {
 		t.Fatalf("first bind status=%d outcome=%q, want 302", out.Code, out.Header().Get("X-TF-Bind-Outcome"))
 	}
-	// A second full ceremony for the installation this workspace already holds
+	// A second full ceremony for the installation this org already holds
 	// is a re-bind, not a collision: the uniqueness refusal is about ANOTHER
-	// workspace.
+	// org.
 	if out := rig.callback(t, rig.ceremony(t), defaultCallbackQuery(4242)); out.Code != http.StatusFound {
 		t.Fatalf("re-bind status=%d outcome=%q, want 302 (idempotent)",
 			out.Code, out.Header().Get("X-TF-Bind-Outcome"))
@@ -1609,7 +1609,7 @@ func TestManagedBind_RebindingTheSameInstallationIsIdempotent(t *testing.T) {
 }
 
 func TestManagedBind_SecondAccountIsAdditive(t *testing.T) {
-	// A workspace may bind several installations — one per GitHub account, which
+	// An org may bind several installations — one per GitHub account, which
 	// is what an enterprise-owned App produces. The class flips on the first
 	// bind and every later one runs the whole ceremony again.
 	gh := newFakeGitHub()
@@ -1637,15 +1637,15 @@ func TestManagedBind_SecondAccountIsAdditive(t *testing.T) {
 	}
 }
 
-// TestManagedBind_TwoWorkspacesRacingOneInstallation is the cross-tenant half
+// TestManagedBind_TwoOrgsRacingOneInstallation is the cross-tenant half
 // of uniqueness, and it is the case a lock keyed by the ORG cannot catch: the
 // two racers hold different org keys, so an org-keyed lock lets both read
 // "nobody owns this" and both write, landing one GitHub account in two
-// workspaces.
+// orgs.
 //
 // The sequential refusal next door passes with or without the installation
 // lock. This is the test that does not.
-func TestManagedBind_TwoWorkspacesRacingOneInstallation(t *testing.T) {
+func TestManagedBind_TwoOrgsRacingOneInstallation(t *testing.T) {
 	gh := newFakeGitHub()
 	first := newBindRig(t, gh)
 	second := first.sibling(t, "rival-org")
@@ -1686,11 +1686,11 @@ func TestManagedBind_TwoWorkspacesRacingOneInstallation(t *testing.T) {
 	done.Wait()
 
 	if wins != 1 {
-		t.Errorf("%d of %d workspaces bound the same installation, want exactly 1", wins, len(racers))
+		t.Errorf("%d of %d orgs bound the same installation, want exactly 1", wins, len(racers))
 	}
 
 	// The assertion that matters is the row count, not the status: one
-	// installation may be live in exactly one workspace, whatever either
+	// installation may be live in exactly one org, whatever either
 	// caller was told.
 	var holders int
 	if err := first.h.AdminDB.QueryRow(`
@@ -1700,7 +1700,7 @@ func TestManagedBind_TwoWorkspacesRacingOneInstallation(t *testing.T) {
 		t.Fatalf("count holders: %v", err)
 	}
 	if holders != 1 {
-		t.Errorf("installation 4242 is live in %d workspaces, want 1 — "+
+		t.Errorf("installation 4242 is live in %d orgs, want 1 — "+
 			"the uniqueness check must serialize on the installation, not on the org", holders)
 	}
 }
@@ -1814,7 +1814,7 @@ func TestManagedBind_RefusalSetIsClosedAndDistinct(t *testing.T) {
 		refuseStaleCeremony,
 		refuseNoInstallation,
 		refuseSessionRequired,
-		refuseNotWorkspaceAdmin,
+		refuseNotOrgAdmin,
 		refuseSSORequired,
 		refuseIdentityUnproven,
 		refuseIdentityNotLinked,
@@ -2393,7 +2393,7 @@ func TestManagedBind_NamedAccount_BoundElsewhere(t *testing.T) {
 	rig := newBindRig(t, gh)
 	other := rig.sibling(t, "other")
 	if out := other.callback(t, other.ceremony(t), defaultCallbackQuery(4242)); out.Code != http.StatusFound {
-		t.Fatalf("seed the other workspace's bind: %d", out.Code)
+		t.Fatalf("seed the other org's bind: %d", out.Code)
 	}
 
 	cookie, state := rig.namedCeremony(t, "acme")
@@ -2401,13 +2401,13 @@ func TestManagedBind_NamedAccount_BoundElsewhere(t *testing.T) {
 	assertOutcome(t, out, "bound_elsewhere")
 	rig.assertNothingBound(t)
 	if strings.Contains(out.Body.String(), other.orgID.String()) {
-		t.Error("the refusal named the other workspace")
+		t.Error("the refusal named the other org")
 	}
 }
 
 // TestManagedBind_NamedAccount_Start pins the start's own contract: the
 // account is validated as a login before it goes anywhere, the request must
-// come from the admin's own page, and a workspace that already holds a
+// come from the admin's own page, and an org that already holds a
 // credential is refused here before anyone is sent to GitHub.
 func TestManagedBind_NamedAccount_Start(t *testing.T) {
 	t.Run("MalformedLoginIsABadField", func(t *testing.T) {
@@ -2451,7 +2451,7 @@ func TestManagedBind_NamedAccount_Start(t *testing.T) {
 		}
 	})
 
-	t.Run("RequiresWorkspaceAdmin", func(t *testing.T) {
+	t.Run("RequiresOrgAdmin", func(t *testing.T) {
 		rig := newBindRig(t, newFakeGitHub())
 		member := rig.seedUser()
 		if _, err := rig.h.AdminDB.Exec(
@@ -2472,7 +2472,7 @@ func TestManagedBind_NamedAccount_Start(t *testing.T) {
 		}
 	})
 
-	t.Run("RefusesAWorkspaceThatHoldsAPAT", func(t *testing.T) {
+	t.Run("RefusesAnOrgThatHoldsAPAT", func(t *testing.T) {
 		gh := newFakeGitHub()
 		rig := newBindRig(t, gh)
 		if err := rig.srv.tx.WithTx(context.Background(), rig.orgID.String(), rig.userID.String(),

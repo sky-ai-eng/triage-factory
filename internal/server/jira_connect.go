@@ -345,7 +345,7 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 	}
 	host, okHost := resolveJiraHost(orgSet.JiraBaseURL)
 	if !okHost {
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your workspace's Jira URL isn't set up yet. Ask your admin to connect Jira in Workspace Settings first.", Field: "jira_pat"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your organization's Jira URL isn't set up yet. Ask your admin to connect Jira in organization settings first.", Field: "jira_pat"})
 		return
 	}
 	cloud := jira.DeploymentForMarker(jira.AuthMethod(authMethod), host) == jira.DeploymentCloud

@@ -66,8 +66,8 @@ export default function StartFactory() {
           </h1>
           <p className="text-body text-ink-3 leading-relaxed">
             Triage Factory runs entirely on your machine — state lives in a local database and your
-            tokens stay in your OS keychain. Get started by setting up your workspace, then connect
-            GitHub and (optionally) Jira.
+            tokens stay in your OS keychain. Get started by setting up your organization, then
+            connect GitHub and (optionally) Jira.
           </p>
         </div>
 

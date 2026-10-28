@@ -1,6 +1,6 @@
 // The grant half of Settings' "GitHub access" section, shared by the two
-// App-class shapes — a workspace with its own App and one riding the
-// deployment's. What a workspace's App installations can reach is a fact about
+// App-class shapes — an org with its own App and one riding the
+// deployment's. What an org's App installations can reach is a fact about
 // the ORG'S credential, identical for every admin who looks: nothing here is
 // narrowed to the viewer's own GitHub access, because delegation mints from the
 // grant and never consults anyone's personal permissions, so a narrowed view
@@ -122,9 +122,9 @@ function GrantWidth({
 
 // GitHubInstallationList renders the accounts the App is installed on, each
 // with its suspension, its grant width, and its settings page on GitHub. When
-// `onDisconnect` is given (the deployment-App workspace), every account carries
+// `onDisconnect` is given (the deployment-App org), every account carries
 // its own Disconnect — the narrowed verb, which is the full disconnect when the
-// account is the last one. A workspace with its own App tears the App down
+// account is the last one. An org with its own App tears the App down
 // through the switch flow instead, so it passes none.
 export function GitHubInstallationList({
   installations,
@@ -258,8 +258,8 @@ function FindingList<T>({
   )
 }
 
-// GitHubGrantFindings renders both findings for an App-class workspace. It is
-// never rendered for a PAT workspace: a token's reach is not a grant TF holds,
+// GitHubGrantFindings renders both findings for an App-class org. It is
+// never rendered for a PAT org: a token's reach is not a grant TF holds,
 // and no copy here may imply one.
 export function GitHubGrantFindings({ findings }: { findings: GrantFindings }) {
   return (

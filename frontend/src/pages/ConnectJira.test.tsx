@@ -47,7 +47,7 @@ describe('ConnectJira', () => {
   it.each([
     [
       'app_removed',
-      'The Jira app your connection was made through was removed from this workspace. Connect your Jira again to act on tickets.',
+      'The Jira app your connection was made through was removed from this organization. Connect your Jira again to act on tickets.',
     ],
     [
       'refused',

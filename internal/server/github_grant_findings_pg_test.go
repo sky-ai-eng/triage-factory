@@ -15,7 +15,7 @@ import (
 
 // The rule most likely to be broken by a well-meaning filter: nothing on the
 // GitHub settings surface is derived from the viewer's own GitHub access. Two
-// admins of one workspace, bound to different GitHub identities — one of them
+// admins of one org, bound to different GitHub identities — one of them
 // to a login that can see none of the repositories — receive byte-identical
 // payloads for the status read and both findings.
 func TestGitHubGrantFindings_MultiMode_AdminsSeeTheSameBytes(t *testing.T) {

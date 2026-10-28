@@ -212,7 +212,7 @@ func TestNewGitHubAppStatusResponse_CarriesActive(t *testing.T) {
 // cannot answer for.
 //
 // A nil App means "no registration of your own", which is equally true of a PAT
-// workspace and a workspace riding the deployment's shared App — and the two
+// org and an org riding the deployment's shared App — and the two
 // want opposite answers. This boolean is what lets the panel tell them apart,
 // which is why it is read off the class rather than off the absence of a row.
 func TestNewGitHubAppStatusResponse_UsingDeploymentDefault(t *testing.T) {
@@ -228,7 +228,7 @@ func TestNewGitHubAppStatusResponse_UsingDeploymentDefault(t *testing.T) {
 	}{
 		{"pat", domain.GitHubCredentialClassPAT, nil, false, false},
 		{"byo app", domain.GitHubCredentialClassBYOApp, byo, false, true},
-		// No App block, because there is no registration of the workspace's own
+		// No App block, because there is no registration of the org's own
 		// to render — and the boolean is what stops that reading as "nothing
 		// configured, go register one".
 		{"managed app", domain.GitHubCredentialClassManagedApp, nil, true, false},
@@ -241,7 +241,7 @@ func TestNewGitHubAppStatusResponse_UsingDeploymentDefault(t *testing.T) {
 			if (resp.App != nil) != tc.wantApp {
 				t.Errorf("app=%+v, want present=%v", resp.App, tc.wantApp)
 			}
-			// A managed workspace's installations are its own rows and are
+			// A managed org's installations are its own rows and are
 			// rendered like anyone else's — they are what it bound the shared
 			// App on.
 			if len(resp.Installations) != 1 {
@@ -396,7 +396,7 @@ func TestGitHubAppStatus_MultiMode(t *testing.T) {
 	})
 }
 
-// TestGitHubAppInstallationsRefresh_NoApp 404s when a workspace whose class
+// TestGitHubAppInstallationsRefresh_NoApp 404s when an org whose class
 // says it brought its own App has no registration row to reconcile with, and
 // never reaches the backfill. The class promises the row; a missing one is a
 // 404 rather than a reconcile against nothing.
@@ -416,12 +416,12 @@ func TestGitHubAppInstallationsRefresh_NoApp(t *testing.T) {
 	}
 }
 
-// TestGitHubAppInstallationsRefresh_ManagedClass admits a workspace riding the
+// TestGitHubAppInstallationsRefresh_ManagedClass admits an org riding the
 // deployment App — and reconciles it through the scoped refresh, never the
 // discovering backfill. That is the whole substance of the class branch: the
 // backfill stamps the requesting org's id on every installation
 // GET /app/installations reports, which under one App key serving many
-// workspaces is every tenant's listing. A managed org holds no org_github_apps
+// orgs is every tenant's listing. A managed org holds no org_github_apps
 // row and can hold none, so the registration read the BYO arm makes is skipped
 // too — requiring it would 404 exactly the orgs this handler was opened to.
 func TestGitHubAppInstallationsRefresh_ManagedClass(t *testing.T) {
@@ -446,7 +446,7 @@ func TestGitHubAppInstallationsRefresh_ManagedClass(t *testing.T) {
 		t.Errorf("managed refresh called %d times, want exactly 1", fake.managedCalls)
 	}
 	if fake.backfillCalls != 0 {
-		t.Errorf("discovering backfill called %d times for a managed workspace; want 0 — under a shared key that listing is every tenant's", fake.backfillCalls)
+		t.Errorf("discovering backfill called %d times for a managed org; want 0 — under a shared key that listing is every tenant's", fake.backfillCalls)
 	}
 	if fake.managedApp.AppID != 42 {
 		t.Errorf("managed refresh got app id %d; want the server's deployment App (42)", fake.managedApp.AppID)
@@ -486,7 +486,7 @@ func TestGitHubAppInstallationsRefresh_ManagedClass_Error(t *testing.T) {
 }
 
 // TestGitHubAppInstallationsRefresh_PATClass_NotFound keeps the one class the
-// handler still refuses: a workspace on a PAT has no App-installation mirror,
+// handler still refuses: an org on a PAT has no App-installation mirror,
 // so there is nothing to reconcile in any credential system.
 func TestGitHubAppInstallationsRefresh_PATClass_NotFound(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -499,7 +499,7 @@ func TestGitHubAppInstallationsRefresh_PATClass_NotFound(t *testing.T) {
 		t.Fatalf("status=%d body=%s, want 404", rec.Code, rec.Body.String())
 	}
 	if fake.backfillCalls != 0 || fake.managedCalls != 0 {
-		t.Errorf("reconciles called (backfill=%d, managed=%d) for a PAT workspace; want none",
+		t.Errorf("reconciles called (backfill=%d, managed=%d) for a PAT org; want none",
 			fake.backfillCalls, fake.managedCalls)
 	}
 }

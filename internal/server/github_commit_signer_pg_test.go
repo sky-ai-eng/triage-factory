@@ -142,10 +142,10 @@ func TestCommitSigner_HostOrderIndependent_Postgres(t *testing.T) {
 	}
 }
 
-// TestCommitIdentity_ManagedWorkspaceSignsAsTheDeploymentSigner: GET
-// commit-identity answers a managed workspace with no signer of its own with
+// TestCommitIdentity_ManagedOrgSignsAsTheDeploymentSigner: GET
+// commit-identity answers a managed org with no signer of its own with
 // the deployment signer, from the same resolution its runs take.
-func TestCommitIdentity_ManagedWorkspaceSignsAsTheDeploymentSigner(t *testing.T) {
+func TestCommitIdentity_ManagedOrgSignsAsTheDeploymentSigner(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
 	admin := pgstore.New(r.h.AdminDB, r.h.AdminDB, pgtest.SecretKey)

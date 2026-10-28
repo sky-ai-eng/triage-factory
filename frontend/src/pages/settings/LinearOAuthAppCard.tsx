@@ -137,7 +137,7 @@ export default function LinearOAuthAppCard({
     if (busy) return
     if (
       !window.confirm(
-        'Remove this Linear OAuth app? Installing Triage Factory in Linear will stop being available unless a deployment app covers your workspace.',
+        'Remove this Linear OAuth app? Installing Triage Factory in Linear will stop being available unless a deployment app covers your organization.',
       )
     ) {
       return
@@ -173,8 +173,8 @@ export default function LinearOAuthAppCard({
 
       {loadFailed && (
         <p role="alert" className="text-ui leading-relaxed text-[var(--color-alarm)]">
-          Could not load this workspace&rsquo;s Linear app, so an app may already be saved. Reload
-          to try again.
+          Could not load this organization&rsquo;s Linear app, so an app may already be saved.
+          Reload to try again.
         </p>
       )}
 
@@ -198,7 +198,7 @@ export default function LinearOAuthAppCard({
         <div className="rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40 px-4 py-3 text-ui text-ink-2">
           Using this deployment&rsquo;s Triage Factory app, so a Linear workspace admin can install
           Triage Factory without registering one. Register your own below only if you need to; it
-          then replaces the deployment&rsquo;s app for this workspace.
+          then replaces the deployment&rsquo;s app for this organization.
         </div>
       )}
 

@@ -118,7 +118,7 @@ func (s *Server) handleLinearLabelGet(w http.ResponseWriter, r *http.Request) {
 // cannot. The team is read first: the labels read filters on the team and
 // answers a team that does not exist with the workspace's labels alone.
 func (s *Server) readLinearTeamLabels(w http.ResponseWriter, r *http.Request, orgID, teamID string) ([]linear.Label, bool) {
-	client, ok := s.linearSystemClient(w, r, orgID, "linear/labels", "Linear is not connected for this workspace")
+	client, ok := s.linearSystemClient(w, r, orgID, "linear/labels", "Linear is not connected for this organization")
 	if !ok {
 		return nil, false
 	}

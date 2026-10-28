@@ -95,7 +95,7 @@ func (s *Server) handleLinearTeamsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, ok := s.linearSystemClient(w, r, orgID, "linear/teams", "Linear is not connected for this workspace")
+	client, ok := s.linearSystemClient(w, r, orgID, "linear/teams", "Linear is not connected for this organization")
 	if !ok {
 		return
 	}
@@ -125,7 +125,7 @@ func (s *Server) handleLinearTeamGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	client, ok := s.linearSystemClient(w, r, orgID, "linear/team", "Linear is not connected for this workspace")
+	client, ok := s.linearSystemClient(w, r, orgID, "linear/team", "Linear is not connected for this organization")
 	if !ok {
 		return
 	}
@@ -193,7 +193,7 @@ func (s *Server) handleLinearStatesList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	client, ok := s.linearSystemClient(w, r, orgID, "linear/states", "Linear is not connected for this workspace")
+	client, ok := s.linearSystemClient(w, r, orgID, "linear/states", "Linear is not connected for this organization")
 	if !ok {
 		return
 	}
@@ -234,7 +234,7 @@ func (s *Server) handleLinearStateGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	client, ok := s.linearSystemClient(w, r, orgID, "linear/state", "Linear is not connected for this workspace")
+	client, ok := s.linearSystemClient(w, r, orgID, "linear/state", "Linear is not connected for this organization")
 	if !ok {
 		return
 	}

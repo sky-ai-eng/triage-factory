@@ -40,7 +40,7 @@ export const WIZARD_SECTIONS: WizardSection[] = [
 // repos, …) rather than inventing parallel shapes, so the wizard keeps
 // round-tripping the identical org_settings / team_settings forms the
 // Settings page and the create-time pages already use.
-// The tracker a workspace sets up in the wizard — one at a time. "none" is a
+// The tracker an org sets up in the wizard — one at a time. "none" is a
 // legitimate end state (GitHub-only). The pick only decides which tracker's
 // steps the wizard shows: an org may connect both, the other one from
 // Settings.
@@ -129,7 +129,7 @@ export interface WizardState {
   // loads it itself in that case, as it does in Settings.
   githubAppStatus: GitHubAppStatus | null
   // Whether the org's GitHub access is the DEPLOYMENT's App — one App key the
-  // operator registered for every workspace, which the org binds installations
+  // operator registered for every org, which the org binds installations
   // to rather than registering an App of its own (multi mode only). It has no
   // App row (githubAppRegistered stays false) and never will; what it has is
   // bound installations, counted in githubAppInstallCount, of which zero is an

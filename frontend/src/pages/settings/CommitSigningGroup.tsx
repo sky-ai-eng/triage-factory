@@ -5,7 +5,7 @@
 //
 //   - no signer, and the org's runs commit unsigned as its GitHub identity;
 //   - no signer, and the runs sign as the deployment's signer (managed
-//     workspaces), which the identity read reports as `deployment`;
+//     orgs), which the identity read reports as `deployment`;
 //   - the org's own signer, pending, active or broken.
 //
 // Every write answers with the signer as it now is. A write can also change

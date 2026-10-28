@@ -82,7 +82,7 @@ func (s *Server) handleLinearUsersList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, ok := s.linearSystemClient(w, r, orgID, "linear/users", "Linear is not connected for this workspace")
+	client, ok := s.linearSystemClient(w, r, orgID, "linear/users", "Linear is not connected for this organization")
 	if !ok {
 		return
 	}
@@ -112,7 +112,7 @@ func (s *Server) handleLinearUserGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	client, ok := s.linearSystemClient(w, r, orgID, "linear/user", "Linear is not connected for this workspace")
+	client, ok := s.linearSystemClient(w, r, orgID, "linear/user", "Linear is not connected for this organization")
 	if !ok {
 		return
 	}

@@ -14,9 +14,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// githubAppStatusResponse is the read-only shape the Workspace Settings
+// githubAppStatusResponse is the read-only shape the organization settings
 // "GitHub access" panel polls to render its state machine. `app` is null
-// when the org has no registered App of its own — a PAT workspace, which the
+// when the org has no registered App of its own — a PAT org, which the
 // panel offers registration, or one riding the deployment's App, which
 // `using_deployment_default` marks so the panel never offers it a second
 // credential it cannot hold.
@@ -25,9 +25,9 @@ type githubAppStatusResponse struct {
 	Installations          []githubAppInstallation `json:"installations"`
 	UsingDeploymentDefault bool                    `json:"using_deployment_default"`
 	// DeploymentAppAvailable is whether this deployment offers a deployment
-	// App for a workspace to bind — a fact about the deployment, not the org,
-	// carried here because the panel's empty state is where it matters: a
-	// workspace with no credential is offered Connect beside registering,
+	// App for an org to bind — a fact about the deployment, not the org,
+	// carried here because the panel's empty state is where it matters: an
+	// org with no credential is offered Connect beside registering,
 	// importing and a token, and only when there is something to connect to.
 	// Always false in local mode, where the managed class does not exist.
 	DeploymentAppAvailable bool `json:"deployment_app_available"`
@@ -132,7 +132,7 @@ func installationSettingsURL(inst domain.OrgGitHubAppInstallation) string {
 // deployment's own App — and those two want opposite answers here. The two
 // own-credential classes report false; the managed class is the arm that
 // reports true, and it says so from the class rather than from the absence of a
-// row, which is the same absence the PAT arm has. A managed workspace's panel
+// row, which is the same absence the PAT arm has. A managed org's panel
 // is its installations: the accounts it bound, each with its suspension, the
 // width of its grant, and the GitHub page where that grant is edited.
 //
@@ -208,7 +208,7 @@ func newGitHubAppStatusResponse(class domain.GitHubCredentialClass, app *domain.
 	return resp
 }
 
-// deploymentAppAvailable is whether a workspace here could bind the
+// deploymentAppAvailable is whether an org here could bind the
 // deployment App: the same three conditions the Connect route exists under.
 // A deployment App read from the environment in local mode is inert, so the
 // mode is part of the answer rather than the configuration alone.
@@ -343,10 +343,10 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 	//
 	// Both App classes are admitted, and they reconcile through different store
 	// methods rather than one method that branches, because they are different
-	// operations. A workspace with its own App key reconciles by DISCOVERY: that
+	// operations. An org with its own App key reconciles by DISCOVERY: that
 	// key lists its own installations and nobody else's, so the listing is
-	// authoritative about whose they are. A workspace on the deployment App
-	// reconciles by REFRESH: one key serves many workspaces, the listing is every
+	// authoritative about whose they are. An org on the deployment App
+	// reconciles by REFRESH: one key serves many orgs, the listing is every
 	// tenant's, and which of them belong here is a fact only the bind asserts —
 	// so that path updates rows the org has already bound and creates none.
 	class, err := s.githubCredentialClass(ctx, orgID)
@@ -363,7 +363,7 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 	}
 
 	// The registration row is the BYO class's promise and the managed class's
-	// impossibility: a workspace riding the shared App holds none and can hold
+	// impossibility: an org riding the shared App holds none and can hold
 	// none, so requiring one would 404 exactly the orgs this handler was just
 	// opened to.
 	var app *domain.OrgGitHubApp
@@ -397,7 +397,7 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 	// registration, and the status read beside this route reports it.
 	var unusable *db.GitHubAppUnusableError
 	if errors.As(rerr, &unusable) {
-		action := " Remove it from this workspace and connect GitHub again."
+		action := " Remove it from this organization and connect GitHub again."
 		if app != nil && !app.Active {
 			action = " Discard it; your personal access token stays the live credential."
 		}

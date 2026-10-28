@@ -4,7 +4,7 @@
 // configured, pointed at another deployment, or delivering into a receiver that
 // refuses every one — and until this line existed, all three looked exactly like
 // an App whose events simply hadn't fired yet. What breaks is the installation
-// mirror: polling stops for the workspace, the repo picker empties, credential
+// mirror: polling stops for the org, the repo picker empties, credential
 // resolution misfires. So the panel says which of those it is, in words that
 // name the consequence rather than the mechanism.
 //

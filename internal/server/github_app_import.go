@@ -34,7 +34,7 @@ import (
 
 // githubAppImportRequest is the import endpoint body. client_secret is
 // required in multi mode and optional in local: it is what lets members sign in
-// with GitHub to link their accounts, and every multi workspace's App is held to
+// with GitHub to link their accounts, and every multi org's App is held to
 // being able to (local can skip it and capture identity from a token instead).
 // webhook_secret and accept_partial are optional: the webhook secret is
 // multi-mode only (local is hookless/backfill); accept_partial acknowledges
@@ -289,8 +289,8 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.PEM) == "" {
 		v.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "The App's private key (PEM) is required.", Field: "pem"})
 	}
-	// Every workspace App in multi mode can run OAuth, so every member of a
-	// setup-complete workspace has a way to link their GitHub account. The
+	// Every org App in multi mode can run OAuth, so every member of a
+	// setup-complete org has a way to link their GitHub account. The
 	// manifest flow always returns a client secret; this is the import's half.
 	if clientSecret == "" && runmode.Current() == runmode.ModeMulti {
 		v.Add(httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "The App's client secret is required: it is what lets members sign in with GitHub to link their accounts.", Field: "client_secret"})
@@ -324,11 +324,11 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve the org's GitHub URL through the resolver so the validation
-	// calls below hit the host the poller and git paths use. A workspace with
+	// calls below hit the host the poller and git paths use. An org with
 	// none sets it first: an App is registered on one GitHub.
 	base, err := s.ghResolver.BaseURLFor(ctx, orgID)
 	if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-		writeNotConfigured(w, "set this workspace's GitHub URL before connecting an App: an App works only on the GitHub it is registered on")
+		writeNotConfigured(w, "set this organization's GitHub URL before connecting an App: an App works only on the GitHub it is registered on")
 		return
 	}
 	if err != nil {

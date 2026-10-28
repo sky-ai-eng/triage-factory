@@ -175,7 +175,7 @@ func (s *Server) handleTeamLinearTeamsPut(w http.ResponseWriter, r *http.Request
 	// workspace stay stored for its rebind.
 	if workspaceID == "" {
 		if len(wishes) > 0 {
-			writeNotConfigured(w, "Linear is not connected for this workspace, so a Linear team or a state mapping cannot be added")
+			writeNotConfigured(w, "Linear is not connected for this organization, so a Linear team or a state mapping cannot be added")
 			return
 		}
 		writeJSON(w, http.StatusOK, teamLinearTeamsResponse{LinearTeams: toLinearTeamSettings(nil)})

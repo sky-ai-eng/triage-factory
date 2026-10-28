@@ -252,7 +252,7 @@ func (s *Server) handleLinearIdentityAPIKey(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if orgSet.LinearWorkspaceID == "" {
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your workspace hasn't connected Linear yet. Ask an admin to connect it in Workspace Settings first.", Field: "api_key"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your organization hasn't connected Linear yet. Ask an admin to connect it in organization settings first.", Field: "api_key"})
 		return
 	}
 
@@ -281,7 +281,7 @@ func (s *Server) handleLinearIdentityAPIKey(w http.ResponseWriter, r *http.Reque
 		notFound(w, "org")
 		return
 	case errors.Is(err, errLinearNotConfigured):
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your workspace hasn't connected Linear yet. Ask an admin to connect it in Workspace Settings first.", Field: "api_key"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your organization hasn't connected Linear yet. Ask an admin to connect it in organization settings first.", Field: "api_key"})
 		return
 	case errors.Is(err, errLinearWorkspaceChanged):
 		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "This key belongs to a different Linear workspace than the one connected to Triage Factory.", Field: "api_key"})

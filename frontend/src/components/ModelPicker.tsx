@@ -100,7 +100,7 @@ export default function ModelPicker({
   // them.
   const note =
     models.length === 0
-      ? 'No models are enabled for this workspace. An org admin chooses which models teams may use.'
+      ? 'No models are enabled for this organization. An org admin chooses which models teams may use.'
       : !models.some(selectable) && models.every((m) => m.availability === 'unconfigured')
         ? 'Connect a provider in Settings → Claude credentials to see the models you can run.'
         : ''

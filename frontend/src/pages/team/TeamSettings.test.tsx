@@ -375,7 +375,7 @@ describe('the sources panel', () => {
 
     // The card says the one sentence that would change the state, loses its
     // numbers, and stops taking a click; the foot counts what is actually on.
-    expect(screen.getByText('Jira is not connected for this workspace.')).toBeInTheDocument()
+    expect(screen.getByText('Jira is not connected for this organization.')).toBeInTheDocument()
     const card = document.querySelector('.tf-src[data-state="unavailable"]')
     expect(card).not.toBeNull()
     expect(card?.getAttribute('data-clickable')).toBeNull()

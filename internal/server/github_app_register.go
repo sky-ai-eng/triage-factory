@@ -129,7 +129,7 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 		return "", "", "", errOrgNotFound
 	}
 	// The managed guard's advisory evaluation: the launch is the bounce page
-	// that sends the admin to GitHub, and a workspace that cannot register an
+	// that sends the admin to GitHub, and an org that cannot register an
 	// App should hear so before it creates one there. The callback re-evaluates
 	// under the lock.
 	if inTheWay, err := s.managedInstallationsInTheWay(ctx, orgID); err != nil {
@@ -139,7 +139,7 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 	}
 
 	// Resolve the GitHub web host through the resolver, the host every later
-	// call for this App goes to. A workspace with no GitHub URL gets
+	// call for this App goes to. An org with no GitHub URL gets
 	// ErrNoGitHubCredentials, which the launch answers as "set it first".
 	ghBase, err := s.ghResolver.BaseURLFor(ctx, orgID)
 	if err != nil {
@@ -231,7 +231,7 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 			// App on an organization to that organization's owners: GitHub
 			// applies the owners-only rule to an App that asks for
 			// organization permissions, and to no other. Remove it and a repo
-			// admin can install the workspace's App — a guard that lives
+			// admin can install the org's App — a guard that lives
 			// nowhere in this codebase, because it is enforced entirely by
 			// GitHub in response to this one line.
 			"members": "read",
@@ -387,7 +387,7 @@ func (s *Server) handleGitHubAppRegisterLaunch(w http.ResponseWriter, r *http.Re
 		switch {
 		case errors.Is(err, errOrgAppExists):
 			s.renderLaunchError(w, http.StatusConflict, orgID, returnTo,
-				"This workspace already has a GitHub App registered. Remove it before registering another.")
+				"This organization already has a GitHub App registered. Remove it before registering another.")
 		case errors.Is(err, errOrgManagedInTheWay):
 			s.renderLaunchError(w, http.StatusConflict, orgID, returnTo, managedInTheWayMessage)
 		case errors.Is(err, ErrUnknownGitHubCredentialClass):
@@ -397,14 +397,14 @@ func (s *Server) handleGitHubAppRegisterLaunch(w http.ResponseWriter, r *http.Re
 			githubAppLog.Error("unknown github credential class; refusing to launch app registration", "org", orgID)
 			s.renderLaunchError(w, http.StatusConflict, orgID, returnTo, unknownGitHubClassMessage)
 		case errors.Is(err, errOrgNotFound):
-			s.renderLaunchError(w, http.StatusNotFound, orgID, returnTo, "Workspace not found.")
+			s.renderLaunchError(w, http.StatusNotFound, orgID, returnTo, "Organization not found.")
 		case errors.Is(err, ghclient.ErrNoGitHubCredentials):
 			s.renderLaunchError(w, http.StatusConflict, orgID, returnTo,
-				"Set this workspace's GitHub URL before registering an App: an App works only on the GitHub it is registered on.")
+				"Set this organization's GitHub URL before registering an App: an App works only on the GitHub it is registered on.")
 		case errors.Is(err, errInvalidGitHubBase):
 			githubAppLog.Error("launch: invalid github base url", "org", orgID)
 			s.renderLaunchError(w, http.StatusInternalServerError, orgID, returnTo,
-				"The configured GitHub base URL is invalid. Update it in Workspace Settings.")
+				"The configured GitHub base URL is invalid. Update it in organization settings.")
 		default:
 			githubAppLog.Error("launch failed", "error", err)
 			s.renderLaunchError(w, http.StatusInternalServerError, orgID, returnTo,
@@ -498,7 +498,7 @@ func (s *Server) renderLaunchError(w http.ResponseWriter, status int, orgID, ret
 
 // handleGitHubAppRegisterCallback exchanges GitHub's temporary code
 // for the App's credentials, writes org_github_apps + vault secrets,
-// and redirects the browser to the workspace settings page.
+// and redirects the browser to the org settings page.
 //
 // GET /api/orgs/{org_id}/github/app/register/callback?code=...&state=...
 func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.Request) {
@@ -571,7 +571,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 	// later call for this App goes to.
 	ghBase, err := s.ghResolver.BaseURLFor(r.Context(), orgID)
 	if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-		writeNotConfigured(w, "set this workspace's GitHub URL before registering an App: an App works only on the GitHub it is registered on")
+		writeNotConfigured(w, "set this organization's GitHub URL before registering an App: an App works only on the GitHub it is registered on")
 		return
 	}
 	if err != nil {
@@ -731,7 +731,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 // settingsRedirectPath returns the SPA route for the Settings page in
 // the active mode. Local mode mounts Settings at /settings; multi mode
 // at /orgs/{org_id}/settings. The #github-app fragment tells the
-// Settings page to select the Workspace tab and refetch App status.
+// Settings page to select the Organization tab and refetch App status.
 func settingsRedirectPath(orgID string) string {
 	if runmode.Current() == runmode.ModeLocal {
 		return "/settings"

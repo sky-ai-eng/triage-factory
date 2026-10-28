@@ -374,7 +374,7 @@ func TestTaskClaim_LinearTask_NoUserCredential_Returns409(t *testing.T) {
 		{"refused", fmt.Errorf("mint: %w", linear.ErrLinearUserCredentialRefused),
 			"Linear no longer accepts your connection: it was revoked or expired. Connect your Linear again to act on issues."},
 		{"app_removed", fmt.Errorf("mint: %w", linear.ErrLinearUserCredentialAppRemoved),
-			"The Linear app your connection was made through was removed from this workspace. Connect your Linear again to act on issues."},
+			"The Linear app your connection was made through was removed from this organization. Connect your Linear again to act on issues."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

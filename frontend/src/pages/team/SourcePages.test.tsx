@@ -1111,7 +1111,7 @@ describe('Linear source page', () => {
     await waitFor(() =>
       expect(
         screen.getByText(
-          'Linear is paused for this workspace. Nothing is polled until it resumes; the mapping stays editable.',
+          'Linear is paused for this organization. Nothing is polled until it resumes; the mapping stays editable.',
         ),
       ).toBeInTheDocument(),
     )
@@ -1128,7 +1128,7 @@ describe('Linear source page', () => {
     await waitFor(() =>
       expect(
         screen.getByText(
-          'Linear is not connected for this workspace. The mapping below is what is stored; a team can still be unwatched.',
+          'Linear is not connected for this organization. The mapping below is what is stored; a team can still be unwatched.',
         ),
       ).toBeInTheDocument(),
     )
@@ -1190,7 +1190,7 @@ describe('Linear source page', () => {
     await waitFor(() =>
       expect(
         screen.getByText(
-          'Linear no longer shows ENG to this workspace’s Linear connection, so nothing is polled from it. The stored mapping stays until it is unwatched.',
+          'Linear no longer shows ENG to this organization’s Linear connection, so nothing is polled from it. The stored mapping stays until it is unwatched.',
         ),
       ).toBeInTheDocument(),
     )

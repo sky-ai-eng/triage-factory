@@ -390,7 +390,7 @@ func (th *teamsHandler) handleTeamCreate(w http.ResponseWriter, r *http.Request)
 		// The caller is a member of the org (requireOrg resolved it from
 		// their own session), so the org is visible to them and the denial
 		// names the role they lack. A 404 here would report their own
-		// workspace missing.
+		// org missing.
 		forbidden(w, "org admin role required")
 		return
 	}

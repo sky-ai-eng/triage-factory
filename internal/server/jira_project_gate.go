@@ -186,17 +186,17 @@ func (s *Server) gateJiraProjects(
 	}
 
 	// The client is resolved only now that something needs verifying, so an
-	// unconnected or turned-off workspace can still remove a project it can no
+	// unconnected or turned-off org can still remove a project it can no
 	// longer map.
 	client, ok := s.jiraSystemClient(w, r, orgID, "settings/team/jira-projects",
-		"Jira is not connected for this workspace, so a project or a status mapping cannot be added")
+		"Jira is not connected for this organization, so a project or a status mapping cannot be added")
 	if !ok {
 		return nil, false
 	}
 	// A connected credential implies a usable site, so this holds only if the
 	// two ever disagree on what a usable base URL is.
 	if site == "" {
-		writeNotConfigured(w, "Jira has no site configured for this workspace, so a project or a status mapping cannot be added")
+		writeNotConfigured(w, "Jira has no site configured for this organization, so a project or a status mapping cannot be added")
 		return nil, false
 	}
 
@@ -208,7 +208,7 @@ func (s *Server) gateJiraProjects(
 		if p.adding {
 			project, err := client.GetProject(r.Context(), p.wish.jiraID)
 			if jira.IsNotFound(err) {
-				v.Invalid(base+".jira_id", "no Jira project "+p.wish.jiraID+" is visible to this workspace's Jira credential")
+				v.Invalid(base+".jira_id", "no Jira project "+p.wish.jiraID+" is visible to this organization's Jira credential")
 				continue
 			}
 			if err == nil && project.ID != p.wish.jiraID {

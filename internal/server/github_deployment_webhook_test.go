@@ -150,8 +150,8 @@ func serveExpectingNoStore(t *testing.T, s *Server, event, sigHeader string, bod
 const boundPRBody = `{"action":"synchronize","number":7,"installation":{"id":4242},"sender":{"login":"octocat","html_url":"https://github.com/octocat"}}`
 
 // TestDeploymentWebhook_BoundInstallation_PublishesUnderOrg is the route
-// working: a delivery GitHub signed, for an installation a workspace bound,
-// lands on the bus under that workspace's id — an id the payload never
+// working: a delivery GitHub signed, for an installation an org bound,
+// lands on the bus under that org's id — an id the payload never
 // carried. The same delivery to the per-org URL is still refused, because the
 // two receivers coexist and a managed org's deliveries do not arrive there.
 func TestDeploymentWebhook_BoundInstallation_PublishesUnderOrg(t *testing.T) {
@@ -168,7 +168,7 @@ func TestDeploymentWebhook_BoundInstallation_PublishesUnderOrg(t *testing.T) {
 	}
 	e := expectPublish(t, got, "webhook:github:pull_request")
 	if e.OrgID != runmode.LocalDefaultOrgID {
-		t.Errorf("published event org = %q, want the bound workspace %q", e.OrgID, runmode.LocalDefaultOrgID)
+		t.Errorf("published event org = %q, want the bound org %q", e.OrgID, runmode.LocalDefaultOrgID)
 	}
 
 	// Coexistence: the per-org URL verifies against the org's OWN secret, and a
@@ -203,7 +203,7 @@ func TestDeploymentWebhook_BoundInstallation_AppliesLifecycle(t *testing.T) {
 // and not an error: the delivery is 2xx, nothing is published, nothing is
 // written — not an installation row (creation is the bind's job alone) and not
 // a dedup row either, which is what lets the same delivery apply once the
-// workspace binds the installation and the operator redelivers it.
+// org binds the installation and the operator redelivers it.
 func TestDeploymentWebhook_UnboundInstallation_AcknowledgedWithoutSideEffect(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	s := newTestServer(t)
@@ -228,7 +228,7 @@ func TestDeploymentWebhook_UnboundInstallation_AcknowledgedWithoutSideEffect(t *
 		t.Fatalf("unbound deliveries recorded %d dedup rows, want 0 — acknowledging is not applying", n)
 	}
 
-	// The workspace binds, the operator redelivers: it applies now.
+	// The org binds, the operator redelivers: it applies now.
 	bindInstallation(t, s, "4242", "https://github.com")
 	if rec := postDeploymentWebhookDelivery(s, "pull_request", signDeployment(pr), pr, delivery); rec.Code != http.StatusNoContent {
 		t.Fatalf("redelivery after bind status = %d, want 204", rec.Code)

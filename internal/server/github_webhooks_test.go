@@ -227,7 +227,7 @@ func TestGitHubWebhook_NonInstallationEvent_PublishesToBus(t *testing.T) {
 // org-existence oracle. The receiver is pre-auth, so anything its reply reveals
 // is revealed to anyone: a 404 for "this org has no App" against a 401 for
 // "your signature is wrong" lets an unauthenticated caller walk a list of org
-// ids and learn which workspaces have a GitHub App registered. Both refusals
+// ids and learn which orgs have a GitHub App registered. Both refusals
 // have to be the same answer, byte for byte — status, body, and the headers
 // that would otherwise differ (a 404 carries a Content-Type the bare 401 does
 // not).
@@ -434,7 +434,7 @@ func TestGitHubWebhook_InstallationUnsuspend(t *testing.T) {
 // the sharp edge: an installation is suspended, then deleted, then the account
 // re-installs the App. The revived row must not inherit the suspension of the
 // installation it replaced — otherwise a user who re-installed to fix things
-// gets a workspace that reads as suspended and no gesture that clears it.
+// gets an org that reads as suspended and no gesture that clears it.
 func TestGitHubWebhook_ReinstallAfterSuspendedDelete(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -811,7 +811,7 @@ func TestGitHubWebhook_RateLimited(t *testing.T) {
 
 // TestGitHubWebhook_NotRateLimitedInLocalMode asserts the limiter is inert in
 // local mode, directly and on this route rather than by reading the wrapper. A
-// local install is N=1 — one user, one workspace, their own laptop — so there
+// local install is N=1 — one user, one org, their own laptop — so there
 // is nothing to throttle and a cap could only cost them deliveries. Driven with
 // the PRODUCTION burst untouched: 3x more requests than the multi-mode budget
 // would allow, all of them served.

@@ -50,7 +50,7 @@ export async function disconnectGitHubPAT(orgId: string): Promise<CredentialResu
 // disconnectJira unbinds the org's Jira service credential and clears the
 // stored host together. This replaced a two-call client-side sequence (clear
 // the secrets, then a sparse settings save to clear the URL) whose failure mode
-// was a half-disconnected workspace the user had to reason about.
+// was a half-disconnected org the user had to reason about.
 export async function disconnectJira(orgId: string): Promise<CredentialResult> {
   return credentialRequest(`/api/orgs/${orgId}/jira/access/credential`, 'DELETE')
 }

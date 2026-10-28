@@ -73,14 +73,14 @@ const TIP_PRIVATE =
   'Private in Linear: only the team’s own members there can see its issues. The tasks they ' +
   'become here are visible to everyone on this team.'
 const TIP_OUT_OF_REACH =
-  'This team is still watched, but Linear no longer shows it to this workspace’s Linear ' +
+  'This team is still watched, but Linear no longer shows it to this organization’s Linear ' +
   'connection. It may have been deleted or made private, or the connection lost access. Nothing ' +
   'is polled from it until access returns; stop watching it to drop its mapping.'
 
 /** The sentence under the prose for a Linear that cannot be read or polled. */
 function offNote(state: EventSourceState | undefined): string | null {
   if (state === 'disabled') {
-    return 'Linear is paused for this workspace. Nothing is polled until it resumes; the mapping stays editable.'
+    return 'Linear is paused for this organization. Nothing is polled until it resumes; the mapping stays editable.'
   }
   const reason = sourceUnavailableReason('linear', state)
   return reason
@@ -580,7 +580,7 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
     ? null
     : shownMissing
       ? {
-          text: `Linear no longer shows ${shown.key} to this workspace’s Linear connection, so nothing is polled from it. The stored mapping stays until it is unwatched.`,
+          text: `Linear no longer shows ${shown.key} to this organization’s Linear connection, so nothing is polled from it. The stored mapping stays until it is unwatched.`,
         }
       : shownStar
         ? {

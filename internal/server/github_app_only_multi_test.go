@@ -14,13 +14,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// A multi workspace's GitHub access is a GitHub App, the deployment's or its
+// A multi org's GitHub access is a GitHub App, the deployment's or its
 // own. What is pinned here, through the full multi-mode stack: the routes that
-// put a workspace token in place do not exist, the one that removes a token
+// put an org token in place do not exist, the one that removes a token
 // still does, and an imported App always arrives with the client secret its
 // members link their GitHub accounts through.
 
-// sendOrg sends method to one of the workspace's own routes from the admin's
+// sendOrg sends method to one of the org's own routes from the admin's
 // signed-in browser, with body as JSON when it is non-nil.
 func (r *bindRig) sendOrg(t *testing.T, method, route string, body any) *httptest.ResponseRecorder {
 	t.Helper()
@@ -40,8 +40,8 @@ func (r *bindRig) sendOrg(t *testing.T, method, route string, body any) *httptes
 	return rec
 }
 
-// seedPAT stores a workspace token directly, the state a development database
-// carried over from before multi workspaces were App-only would be in.
+// seedPAT stores an org token directly, the state a development database
+// carried over from before multi orgs were App-only would be in.
 func (r *bindRig) seedPAT(t *testing.T, pat string) {
 	t.Helper()
 	ctx := t.Context()
@@ -52,7 +52,7 @@ func (r *bindRig) seedPAT(t *testing.T, pat string) {
 	}
 }
 
-func TestWorkspaceTokenRoutes_MultiModeIs404(t *testing.T) {
+func TestOrgTokenRoutes_MultiModeIs404(t *testing.T) {
 	rig := newBindRig(t, newFakeGitHub())
 	rig.seedPAT(t, "ghp_old")
 	calls := rig.gh.callCount()
@@ -76,7 +76,7 @@ func TestWorkspaceTokenRoutes_MultiModeIs404(t *testing.T) {
 		t.Errorf("stored token = %q after the refused binds, want the seeded one", pat)
 	}
 
-	// The unbind stays, so a workspace that holds a token can remove it.
+	// The unbind stays, so an org that holds a token can remove it.
 	if rec := rig.sendOrg(t, http.MethodDelete, "/github/pat", nil); rec.Code != http.StatusOK {
 		t.Fatalf("DELETE /github/pat in multi mode = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}

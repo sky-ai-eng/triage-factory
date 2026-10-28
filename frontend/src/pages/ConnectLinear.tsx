@@ -183,8 +183,8 @@ export default function ConnectLinear() {
 
       <p className="text-reported text-ink-3 leading-relaxed">
         Create a key in Linear under Settings → Account → Security &amp; Access. Whichever way you
-        connect, your key or token is stored in your workspace&apos;s secret store so Triage Factory
-        can act as you, and is never shared with other users.
+        connect, your key or token is stored in your organization&apos;s secret store so Triage
+        Factory can act as you, and is never shared with other users.
       </p>
     </Card>
   )

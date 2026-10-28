@@ -341,7 +341,7 @@ describe('GitHubAccessControl · App webhook health', () => {
   })
 })
 
-// A workspace on the deployment's GitHub App (the managed class). It has no App
+// An org on the deployment's GitHub App (the managed class). It has no App
 // of its own and never will, so the register/import affordances are wrong for
 // it; what it has is bound installations, and zero of them is an ordinary
 // state the section has to render as one — with the same Connect button that
@@ -356,7 +356,7 @@ describe('GitHubAccessControl · deployment App', () => {
     renderControl({ hasGitHubPat: false, githubPatLogin: '', githubAppManaged: true })
 
     expect(
-      screen.getByText(/no GitHub account is connected to this workspace yet/i),
+      screen.getByText(/no GitHub account is connected to this organization yet/i),
     ).toBeInTheDocument()
     connectAs('Connect GitHub…', 'acme')
     await waitFor(() => {
@@ -385,11 +385,11 @@ describe('GitHubAccessControl · deployment App', () => {
     expect(screen.queryByRole('button', { name: /set up a GitHub App/i })).not.toBeInTheDocument()
   })
 
-  it('names only the accounts this workspace has bound, and offers to add another', async () => {
+  it('names only the accounts this org has bound, and offers to add another', async () => {
     installMocks.status = managedStatus([installation({})])
     renderControl({ hasGitHubPat: false, githubPatLogin: '', githubAppManaged: true })
     expect(
-      screen.getByText(/installed on 1 account connected to this workspace/i),
+      screen.getByText(/installed on 1 account connected to this organization/i),
     ).toBeInTheDocument()
     connectAs('Connect another account…', 'beta')
     await waitFor(() => {
@@ -459,7 +459,7 @@ describe('GitHubAccessControl · deployment App', () => {
   it('calls the org-level verb for Disconnect, and renders the no-credential state after', async () => {
     installMocks.status = managedStatus([installation({})])
     ghMocks.disconnectManagedGitHub.mockResolvedValue(undefined)
-    // What the server answers once the workspace has left the class: the
+    // What the server answers once the org has left the class: the
     // rowless default, with the deployment App still on offer.
     ghMocks.getGitHubAppStatus.mockResolvedValue(statusOf({ deployment_app_available: true }))
     const { patch } = renderControl({
@@ -479,7 +479,9 @@ describe('GitHubAccessControl · deployment App', () => {
       githubAppInstallCount: 0,
     })
     // The PAT-class empty state, with all four ways in.
-    expect(await screen.findByText(/isn’t configured for this workspace yet/)).toBeInTheDocument()
+    expect(
+      await screen.findByText(/isn’t configured for this organization yet/),
+    ).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Connect GitHub…' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Register a GitHub App…' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Connect an existing App…' })).toBeInTheDocument()
@@ -580,10 +582,10 @@ describe('GitHubAccessControl · nothing bound', () => {
 
 // The findings and the installation cards, per credential class. What is
 // pinned: the two App classes see both findings with an actionable verb, a
-// token workspace sees neither and no copy implying it holds a grant, an empty
+// token org sees neither and no copy implying it holds a grant, an empty
 // finding says so, opening the panel issues no refresh, and the three grant
 // widths get three different sentences.
-// Leaving the workspace's own App for the deployment's. One affordance, the
+// Leaving the org's own App for the deployment's. One affordance, the
 // one connect form under a different label: the account is asked for first,
 // then the teardown verb, then the ceremony for that account. Deliberately no
 // bare disconnect — a teardown with no replacement lands an admin in the setup
@@ -705,12 +707,12 @@ describe('GitHubAccessControl · the connect form', () => {
   it('surfaces a refused start inline and keeps the form', async () => {
     installMocks.status = statusOf({ deployment_app_available: true })
     ghMocks.startManagedGitHubConnectAccount.mockRejectedValue(
-      new Error('This workspace already has a GitHub personal access token.'),
+      new Error('This organization already has a GitHub personal access token.'),
     )
     renderControl({ hasGitHubPat: false, githubPatLogin: '' })
     connectAs('Connect GitHub…', 'acme-corp')
     expect(
-      await screen.findByText('This workspace already has a GitHub personal access token.'),
+      await screen.findByText('This organization already has a GitHub personal access token.'),
     ).toBeInTheDocument()
     expect(screen.getByRole('textbox')).toBeInTheDocument()
   })
@@ -783,7 +785,7 @@ describe('GitHubAccessControl · grant findings', () => {
     }
   }
 
-  it('renders both findings with their verbs for a workspace with its own App', async () => {
+  it('renders both findings with their verbs for an org with its own App', async () => {
     seedFindings()
     installMocks.status = statusOf({ installations: [installation({})] })
     renderControl(liveApp)
@@ -807,7 +809,7 @@ describe('GitHubAccessControl · grant findings', () => {
     expect(screen.queryByRole('button', { name: 'Connect GitHub…' })).not.toBeInTheDocument()
   })
 
-  it('renders both findings for a workspace on the deployment App', async () => {
+  it('renders both findings for an org on the deployment App', async () => {
     seedFindings()
     installMocks.status = statusOf({
       installations: [installation({})],
@@ -819,7 +821,7 @@ describe('GitHubAccessControl · grant findings', () => {
     expect(screen.getByText('acme/legacy')).toBeInTheDocument()
   })
 
-  it('shows a token workspace neither finding and no grant copy', () => {
+  it('shows a token org neither finding and no grant copy', () => {
     seedFindings()
     installMocks.status = statusOf({})
     renderControl() // a PAT org
@@ -1095,9 +1097,9 @@ describe('GitHubAccessControl · an App GitHub no longer accepts', () => {
   })
 })
 
-// Multi mode: a workspace's GitHub access is a GitHub App, the deployment's or
-// its own, so no state offers a way to add, replace or switch to a token. A
-// workspace that holds one anyway keeps the switch to an App, its way out.
+// Multi mode: an org's GitHub access is a GitHub App, the deployment's or
+// its own, so no state offers a way to add, replace or switch to a token. An
+// org that holds one anyway keeps the switch to an App, its way out.
 describe('GitHubAccessControl · multi mode offers no token', () => {
   const multi = false
   const noTokenButton = () => {
@@ -1163,7 +1165,7 @@ describe('GitHubAccessControl · multi mode offers no token', () => {
     expect(screen.queryByText(/personal access token/i)).not.toBeInTheDocument()
   })
 
-  it('keeps the switch to an App, and no replacement, for a workspace holding a token', () => {
+  it('keeps the switch to an App, and no replacement, for an org holding a token', () => {
     renderControl({}, multi)
     expect(screen.getByRole('button', { name: 'Switch to GitHub App…' })).toBeInTheDocument()
     noTokenButton()

@@ -179,7 +179,7 @@ export function linearInstallErrorText(code: string | null | undefined): string 
     case 'denied':
       return 'The install was cancelled in Linear before it finished. Start it again to connect.'
     case 'no_app':
-      return 'Installing needs a Linear OAuth app, and none is configured for this workspace. Add one in the Linear OAuth app section, or paste an API key instead.'
+      return 'Installing needs a Linear OAuth app, and none is configured for this organization. Add one in the Linear OAuth app section, or paste an API key instead.'
     case 'install_failed':
       return 'Linear did not complete the install. Start it again, or paste an API key instead.'
     case 'workspace_taken':

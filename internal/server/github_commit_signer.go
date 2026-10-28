@@ -147,8 +147,8 @@ type commitSignerCreateRequest struct {
 }
 
 // errGitHubHostMovedDuringSigner refuses a registration whose account was
-// resolved on a GitHub the workspace no longer has.
-var errGitHubHostMovedDuringSigner = errors.New("this workspace's GitHub URL changed while the account was being checked — register the signer again")
+// resolved on a GitHub the org no longer has.
+var errGitHubHostMovedDuringSigner = errors.New("this organization's GitHub URL changed while the account was being checked — register the signer again")
 
 // handleCommitSignerCreate registers the org's signer: it resolves the login
 // on the org's GitHub, which must name a user account (a bot or an
@@ -326,7 +326,7 @@ func (s *Server) handleCommitSignerCreate(w http.ResponseWriter, r *http.Request
 // writeCommitSignerExists answers a registration for an org that has a
 // signer: one per org, and replacing it is a removal and a new registration.
 func writeCommitSignerExists(w http.ResponseWriter, login string) {
-	msg := "this workspace already has a commit signer"
+	msg := "this organization already has a commit signer"
 	if login != "" {
 		msg += ", " + login
 	}
@@ -360,7 +360,7 @@ func (s *Server) commitSignerClient(w http.ResponseWriter, ctx context.Context, 
 	client, err := s.gitHubAccountClient(ctx, orgID)
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-			writeNotConfigured(w, "GitHub is not connected for this workspace")
+			writeNotConfigured(w, "GitHub is not connected for this organization")
 			return nil, false
 		}
 		internalError(w, "commit-signer", err)
@@ -765,7 +765,7 @@ func (s *Server) handleCommitSignerPatch(w http.ResponseWriter, r *http.Request)
 //
 // The PAT unbind and the App disconnect keep the org's GitHub host while a
 // signer exists, so when nothing else is connected on it, this removal is the
-// one that leaves the workspace with no GitHub, and it clears the host as they
+// one that leaves the org with no GitHub, and it clears the host as they
 // would have. Either order of the two removals ends in the same state.
 //
 // DELETE /api/orgs/{org_id}/github/commit-signer
@@ -884,7 +884,7 @@ type commitIdentityAccountJSON struct {
 
 // SetDeploymentCommitSigner gives the server this control pod's deployment
 // commit signer, nil when none is configured, so GET commit-identity resolves a
-// managed workspace the way its runs' commits are resolved.
+// managed org the way its runs' commits are resolved.
 func (s *Server) SetDeploymentCommitSigner(d *commitsigner.DeploymentSigner) {
 	s.deploymentSigner = d
 }

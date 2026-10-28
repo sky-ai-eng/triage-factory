@@ -1,6 +1,6 @@
 // Shared types + persistence helpers for the org-level configuration
 // surface (GitHub + Jira access, poller timing, model cap). The same
-// helpers back the Settings workspace tab and the create-time setup wizard
+// helpers back the Settings org tab and the create-time setup wizard
 // (both modes) — every surface saves through the one field-scoped settings
 // PATCH below, naming only the fields it edited, so there is no parallel
 // persistence path to drift and no save that round-trips a whole form.

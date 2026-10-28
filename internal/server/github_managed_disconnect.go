@@ -16,14 +16,14 @@ import (
 
 // Leaving the managed class — the mirror of the bind ceremony next door.
 //
-// The deployment App is something a workspace CHOOSES. The bind is the only
+// The deployment App is something an org CHOOSES. The bind is the only
 // path into the class, and it lands on an admin's explicit Connect click; this
 // file is the only path out, and it lands on an explicit Disconnect. What it
 // protects is the one fact the rest of the managed machinery reads: a live
-// installation row means "this workspace rides the deployment App". The static
+// installation row means "this org rides the deployment App". The static
 // webhook receiver routes a delivery by that row, the cadence pass refreshes
 // every live row, and the resolver mints tokens from them — none of them
-// consult the credential class. So a workspace whose class moved to byo_app
+// consult the credential class. So an org whose class moved to byo_app
 // while its rows stayed live would keep receiving, and acting on, the
 // deployment App's deliveries under a credential class that says the App is
 // another one. The rows and the class must never disagree, and two things hold that:
@@ -32,8 +32,8 @@ import (
 //     one motion under the App-registration lock;
 //   - the door guards, one predicate called from every other credential bind
 //     (BYO registration start and callback, BYO import), which refuse a
-//     managed workspace that still holds a live row and name the disconnect as
-//     the way out. The workspace token bind needs none: it exists only in
+//     managed org that still holds a live row and name the disconnect as
+//     the way out. The org token bind needs none: it exists only in
 //     local mode, and the deployment App only in multi.
 //
 // Nothing here uninstalls anything on GitHub. The grant is edited on GitHub's
@@ -44,14 +44,14 @@ import (
 // account instead of picking it there.
 
 // managedInTheWayMessage is the one sentence every door says to a managed
-// workspace. Same rule on three routes is the same rule, so it is spelled once.
-const managedInTheWayMessage = "This workspace is connected through the deployment's GitHub App. " +
-	"Disconnect it in Workspace Settings first."
+// org. Same rule on three routes is the same rule, so it is spelled once.
+const managedInTheWayMessage = "This organization is connected through the deployment's GitHub App. " +
+	"Disconnect it in organization settings first."
 
-// unknownGitHubClassMessage is what every door says to a workspace whose class
+// unknownGitHubClassMessage is what every door says to an org whose class
 // this build cannot name. Spelled once for the same reason as the sentence
 // above: the launch page and the JSON doors owe the caller the same answer.
-const unknownGitHubClassMessage = "This workspace's GitHub credential is managed in a way this version doesn't recognize."
+const unknownGitHubClassMessage = "This organization's GitHub credential is managed in a way this version doesn't recognize."
 
 // errOrgManagedInTheWay is the door guard's refusal as an error, for the one
 // door (the registration launch) whose refusals travel as sentinel errors from
@@ -60,11 +60,11 @@ const unknownGitHubClassMessage = "This workspace's GitHub credential is managed
 var errOrgManagedInTheWay = errors.New("org rides the deployment app with a live installation")
 
 // managedInstallationsInTheWay is the door guard's predicate: does this
-// workspace ride the deployment App with at least one live installation row?
+// org ride the deployment App with at least one live installation row?
 // That, and not the class alone, is what the guard is about — the hole it
-// closes is a live row under a different class, so a managed workspace whose
+// closes is a live row under a different class, so a managed org whose
 // rows have all been removed (an uninstall reported by webhook, say) is free to
-// bring an App of its own, as the credential-less workspace it already
+// bring an App of its own, as the credential-less org it already
 // effectively is.
 //
 // Rows on every host count. The class is the org's, not a host's: a live
@@ -100,7 +100,7 @@ func (s *Server) managedInstallationsInTheWay(ctx context.Context, orgID string)
 //
 // at both the advisory and the authoritative (under-lock) evaluation. Both
 // evaluations owe the caller the same sentence, which is why there is one
-// helper and not two spellings of the check. A managed workspace is a 409: the
+// helper and not two spellings of the check. A managed org is a 409: the
 // route is real and the request well-formed, and what is in the way is state
 // the caller can change. An unknown class is a 409 too, for the same reason the
 // PAT bind gives it one — this door cannot write under a class it cannot name.
@@ -122,15 +122,15 @@ func (s *Server) refuseManagedInTheWay(w http.ResponseWriter, ctx context.Contex
 	return true
 }
 
-// handleGitHubManagedDisconnect moves the workspace off the deployment App:
+// handleGitHubManagedDisconnect moves the org off the deployment App:
 // every live installation row is soft-removed and the class returns to the
 // rowless default. Org admin. A verb route because it is a multi-row
 // transition serialized under the App-registration lock, not a field write —
 // disconnectManagedInstallations says exactly what "one motion" means on each
 // dialect.
 //
-// Idempotent: a workspace with nothing bound is a 204 with nothing written —
-// the workspace-addressed verb always finds its workspace, so there is no
+// Idempotent: an org with nothing bound is a 204 with nothing written —
+// the org-addressed verb always finds its org, so there is no
 // resource to 404 about.
 //
 // POST /api/orgs/{org_id}/github/managed/disconnect
@@ -139,14 +139,14 @@ func (s *Server) handleGitHubManagedDisconnect(w http.ResponseWriter, r *http.Re
 }
 
 // handleGitHubManagedInstallationDisconnect is the same verb narrowed to one
-// installation: a workspace holds one per GitHub account and may want to drop
+// installation: an org holds one per GitHub account and may want to drop
 // one account without leaving the class. Dropping the last one IS the full
 // disconnect — the class resets — so the two verbs cannot leave the rows and
 // the class disagreeing.
 //
-// The row is the resource here, so an installation this workspace does not
+// The row is the resource here, so an installation this org does not
 // hold live is a 404 — the same answer as for one it never held, because it is
-// in neither case in the workspace's own list, and another workspace's row is
+// in neither case in the org's own list, and another org's row is
 // nobody's business.
 //
 // POST /api/orgs/{org_id}/github/managed/installations/{installation_id}/disconnect
@@ -161,7 +161,7 @@ func (s *Server) handleGitHubManagedInstallationDisconnect(w http.ResponseWriter
 	s.serveManagedDisconnect(w, r, strconv.FormatInt(id, 10))
 }
 
-// serveManagedDisconnect is both verbs: the whole workspace when only is "",
+// serveManagedDisconnect is both verbs: the whole org when only is "",
 // one installation otherwise.
 func (s *Server) serveManagedDisconnect(w http.ResponseWriter, r *http.Request, only string) {
 	if s.deployCfg == nil || runmode.Current() != runmode.ModeMulti {
@@ -181,7 +181,7 @@ func (s *Server) serveManagedDisconnect(w http.ResponseWriter, r *http.Request, 
 	// transition takes. A BYO registration or import racing this verb lands
 	// wholly before or wholly after it, and whichever runs second reads the
 	// other's committed state: a bind that arrives second meets the guard on an
-	// empty workspace and proceeds, or meets a live row and refuses.
+	// empty org and proceeds, or meets a live row and refuses.
 	release, err := s.acquireKeyedLock(ctx, &s.githubAppRegMu, githubAppRegRMWLockSalt, orgID)
 	if err != nil {
 		internalError(w, "github-access", err)
@@ -189,10 +189,10 @@ func (s *Server) serveManagedDisconnect(w http.ResponseWriter, r *http.Request, 
 	}
 	defer release()
 
-	// The class decides whose rows these are. A BYO workspace's installation
+	// The class decides whose rows these are. A BYO org's installation
 	// rows belong to its own App and are torn down by its own switch flow; this
 	// verb must never touch them, so it refuses rather than no-ops — a 204 here
-	// would tell an admin their workspace left a class it was never in.
+	// would tell an admin their org left a class it was never in.
 	class, err := s.githubCredentialClass(ctx, orgID)
 	if err != nil {
 		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
@@ -205,7 +205,7 @@ func (s *Server) serveManagedDisconnect(w http.ResponseWriter, r *http.Request, 
 	}
 	if class == domain.GitHubCredentialClassBYOApp {
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict,
-			Message: "this workspace uses its own GitHub App — use the switch flow"})
+			Message: "this organization uses its own GitHub App — use the switch flow"})
 		return
 	}
 
@@ -231,9 +231,9 @@ func (s *Server) serveManagedDisconnect(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
-	// The class resets when the workspace's last managed row goes: on the
-	// whole-workspace verb that is always, on the narrowed one only when the
-	// row being dropped is the last. A workspace already on pat with rows still
+	// The class resets when the org's last managed row goes: on the
+	// whole-org verb that is always, on the narrowed one only when the
+	// row being dropped is the last. An org already on pat with rows still
 	// live is the disagreement this file exists to end, so its rows go too and
 	// its class simply stays where it is.
 	resetClass := class == domain.GitHubCredentialClassManagedApp && len(remove) == len(live)
@@ -276,7 +276,7 @@ func (s *Server) serveManagedDisconnect(w http.ResponseWriter, r *http.Request, 
 // rows commit with the request's transaction. Rows-then-class means the worst
 // partial outcome is a managed class over no live rows — a state that resolves
 // nothing, routes nothing, and is exactly what a repeat of this verb converges,
-// since it resets the class of a managed workspace with no rows. The other
+// since it resets the class of a managed org with no rows. The other
 // order could leave a pat class over live rows, which is the hole this verb
 // exists to close.
 func (s *Server) disconnectManagedInstallations(ctx context.Context, orgID, userID string, remove []domain.OrgGitHubAppInstallation, resetClass bool) error {
@@ -285,14 +285,14 @@ func (s *Server) disconnectManagedInstallations(ctx context.Context, orgID, user
 			// The soft-remove is what an installation.deleted delivery does,
 			// cascade included: the reachable-repo rows and the scope marker go
 			// with the row, so nothing keeps vouching for a reach the
-			// workspace no longer has.
+			// org no longer has.
 			if _, err := tx.GitHubApps.MarkInstallationRemoved(ctx, orgID, inst.GitHubHost, inst.InstallationID); err != nil {
 				return fmt.Errorf("remove installation %s: %w", inst.InstallationID, err)
 			}
 		}
 		if resetClass {
 			// pat is the rowless default: a PAT class with no stored PAT is
-			// "unconfigured", the state a fresh workspace with nothing bound
+			// "unconfigured", the state a fresh org with nothing bound
 			// is in.
 			if _, err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassPAT); err != nil {
 				return fmt.Errorf("set github credential class: %w", err)

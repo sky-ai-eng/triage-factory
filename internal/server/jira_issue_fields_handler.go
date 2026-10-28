@@ -91,13 +91,13 @@ func (s *Server) handleJiraPrioritiesList(w http.ResponseWriter, r *http.Request
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	client, ok := s.jiraSystemClient(w, r, orgID, "jira/priorities", "Jira is not connected for this workspace")
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/priorities", "Jira is not connected for this organization")
 	if !ok {
 		return
 	}
 	priorities, err := client.ListPriorities(r.Context())
 	if err != nil {
-		writeJiraUpstream(w, orgID, "the workspace's Jira priorities", err)
+		writeJiraUpstream(w, orgID, "the organization's Jira priorities", err)
 		return
 	}
 	items, next := jiraWindow(priorities, startAt, page.Limit, func(p jira.Priority) jiraPriorityJSON {
@@ -120,13 +120,13 @@ func (s *Server) handleJiraPriorityGet(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "jira priority")
 		return
 	}
-	client, ok := s.jiraSystemClient(w, r, orgID, "jira/priority", "Jira is not connected for this workspace")
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/priority", "Jira is not connected for this organization")
 	if !ok {
 		return
 	}
 	priorities, err := client.ListPriorities(r.Context())
 	if err != nil {
-		writeJiraUpstream(w, orgID, "the workspace's Jira priorities", err)
+		writeJiraUpstream(w, orgID, "the organization's Jira priorities", err)
 		return
 	}
 	i := slices.IndexFunc(priorities, func(p jira.Priority) bool { return p.ID == priorityID })
@@ -162,7 +162,7 @@ func (s *Server) handleJiraIssueTypesList(w http.ResponseWriter, r *http.Request
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	client, ok := s.jiraSystemClient(w, r, orgID, "jira/issue-types", "Jira is not connected for this workspace")
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/issue-types", "Jira is not connected for this organization")
 	if !ok {
 		return
 	}
@@ -201,7 +201,7 @@ func (s *Server) handleJiraIssueTypeGet(w http.ResponseWriter, r *http.Request) 
 		httpx.NotFound(w, "jira issue type")
 		return
 	}
-	client, ok := s.jiraSystemClient(w, r, orgID, "jira/issue-type", "Jira is not connected for this workspace")
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/issue-type", "Jira is not connected for this organization")
 	if !ok {
 		return
 	}

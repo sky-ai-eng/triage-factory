@@ -668,7 +668,7 @@ func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *ht
 		return
 	}
 	if orgSet.GitHubBaseURL == "" {
-		writeNotConfigured(w, "set this workspace's GitHub URL before testing SSH")
+		writeNotConfigured(w, "set this organization's GitHub URL before testing SSH")
 		return
 	}
 	sshHost := worktree.SSHHostFromBaseURL(orgSet.GitHubBaseURL)

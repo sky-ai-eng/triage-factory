@@ -60,7 +60,7 @@ choice:
 The token path is a link under a Connect, not a second button: it exists for the
 reader whose browser cannot complete the redirect, not as an equal choice. An
 account marked `connectOnly` has no token path at all: Continue stands alone.
-Multi mode's GitHub is one, since a workspace there links GitHub identity
+Multi mode's GitHub is one, since an org there links GitHub identity
 through Connect only.
 
 A refusal is the server's own words, in mono, under the field, and the field

@@ -699,7 +699,7 @@ function WizardStack({ teamId, isLocal }: { teamId: string; isLocal: boolean }) 
               Set up Triage Factory
             </h1>
             <p className="text-body leading-relaxed text-ink-3">
-              A few steps to get your workspace ready. Each one saves as you go.
+              A few steps to get your organization ready. Each one saves as you go.
             </p>
           </header>
 

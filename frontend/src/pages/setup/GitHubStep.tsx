@@ -162,7 +162,7 @@ const SOURCE_CARDS: { kind: GitHubAppSource; title: string; detail: string }[] =
 //
 // TODO(TFAC-948): the wizard never offers the deployment App's Connect. Only
 // the Settings empty state does, and that surface sits behind the setup-complete
-// gate, so a workspace with no GitHub credential — every fresh one on a
+// gate, so an org with no GitHub credential — every fresh one on a
 // deployment with a deployment App — cannot reach it. The step needs Connect
 // beside these two cards, offered when the status read reports
 // deployment_app_available.
@@ -282,7 +282,7 @@ export function GitHubAppStep({
       returnTo={returnTo}
     />
   ) : (
-    <p className="text-ui italic text-ink-3">Resolving your workspace…</p>
+    <p className="text-ui italic text-ink-3">Resolving your organization…</p>
   )
 }
 
@@ -301,7 +301,7 @@ export function GitHubAppImportStep({ orgId, isLocal, patch, advance }: StepCont
       }}
     />
   ) : (
-    <p className="text-ui italic text-ink-3">Resolving your workspace…</p>
+    <p className="text-ui italic text-ink-3">Resolving your organization…</p>
   )
 }
 
@@ -316,7 +316,7 @@ export function GitHubAppInstallStep({ orgId, state }: StepContext) {
   // Hook called unconditionally (stable hook order), then branch on orgId.
   const { status, installUrl } = useGitHubAppInstall(orgId)
   if (!orgId) {
-    return <p className="text-ui italic text-ink-3">Resolving your workspace…</p>
+    return <p className="text-ui italic text-ink-3">Resolving your organization…</p>
   }
   return (
     <div className="space-y-5">

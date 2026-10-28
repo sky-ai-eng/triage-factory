@@ -198,7 +198,7 @@ func (s *Server) handleLinearCredentialPut(w http.ResponseWriter, r *http.Reques
 			restore()
 		}
 		if errors.Is(err, errLinearAppInstalled) {
-			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this workspace's Linear access is an installed app — disconnect the installed app first", Field: "api_key"})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this organization's Linear access is an installed app — disconnect the installed app first", Field: "api_key"})
 			return
 		}
 		internalError(w, "linear-access", fmt.Errorf("persist linear credential: %w", err))
@@ -430,7 +430,7 @@ func (s *Server) handleLinearTeamVisibility(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	ctx := r.Context()
-	client, ok := s.linearSystemClient(w, r, orgID, "linear-access", "Linear is not connected for this workspace")
+	client, ok := s.linearSystemClient(w, r, orgID, "linear-access", "Linear is not connected for this organization")
 	if !ok {
 		return
 	}
@@ -465,7 +465,7 @@ func (s *Server) handleLinearTeamVisibility(w http.ResponseWriter, r *http.Reque
 		}
 		teams, err := client.GetTeams(ctx, ids)
 		if err != nil {
-			writeLinearUpstream(w, orgID, "the workspace's tracked Linear teams", err)
+			writeLinearUpstream(w, orgID, "the organization's tracked Linear teams", err)
 			return
 		}
 		for _, t := range teams {

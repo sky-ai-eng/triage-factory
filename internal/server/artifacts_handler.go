@@ -206,7 +206,7 @@ func (ah *artifactsHandler) ghForArtifact(w http.ResponseWriter, r *http.Request
 	if !onHost {
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason:  httpx.ReasonConflict,
-			Message: fmt.Sprintf("this pull request is on %s, and the workspace's GitHub is %s; it can only be acted on from a workspace on its own GitHub", art.Scope, hostOrNotConfigured(host)),
+			Message: fmt.Sprintf("this pull request is on %s, and the organization's GitHub is %s; it can only be acted on from an organization on its own GitHub", art.Scope, hostOrNotConfigured(host)),
 		})
 		return nil, db.ArtifactPullRequest{}, false
 	}
@@ -221,7 +221,7 @@ func (ah *artifactsHandler) ghForArtifact(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 			artifactsLog.Warn("github not configured", "org", orgID, "owner", pr.Owner, "repo", pr.Repo, "error", err)
-			writeNotConfigured(w, "GitHub is not connected for this workspace")
+			writeNotConfigured(w, "GitHub is not connected for this organization")
 			return nil, db.ArtifactPullRequest{}, false
 		}
 		internalError(w, "artifacts", err)

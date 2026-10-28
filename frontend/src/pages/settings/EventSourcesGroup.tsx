@@ -57,7 +57,7 @@ function stateNote(src: EventSourceAvailability): string {
     case 'unconfigured':
       return `${sourceLabel(kind)} is not connected yet — connect it above.`
     case 'unlicensed':
-      return `${sourceLabel(kind)} is not enabled for this workspace.`
+      return `${sourceLabel(kind)} is not enabled for this organization.`
     default:
       return `${sourceLabel(kind)} is not supported yet.`
   }

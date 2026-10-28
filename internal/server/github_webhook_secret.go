@@ -114,7 +114,7 @@ func (s *Server) resolveWebhookSecret(ctx context.Context, orgID string) (string
 		// tenant in its path and is verified against that tenant's own secret;
 		// the shared App signs every tenant's deliveries with ONE secret, so
 		// returning it here would make this endpoint accept a delivery for any
-		// workspace as long as the URL named one — an attacker picking the org id
+		// org as long as the URL named one — an attacker picking the org id
 		// and GitHub supplying the signature. The shared App's deliveries land on
 		// a route with no org in its path, which verifies first and only then
 		// works out whose installation it was.

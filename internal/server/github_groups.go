@@ -372,7 +372,7 @@ type unlistedGitHubOwner struct {
 //
 // Credentials resolve through s.ghResolver.ClientFor, which mints an App
 // installation token for the owner when one is installed (tier 1) and
-// falls back to the org PAT (tier 3) — so App-only workspaces (no PAT)
+// falls back to the org PAT (tier 3) — so App-only orgs (no PAT)
 // can still import their teams. An owner that is a user account, or an
 // organization the credential cannot see, lists cleanly with no teams.
 //

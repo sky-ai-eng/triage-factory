@@ -140,7 +140,7 @@ export function JiraUserAccessStep({ state, patch, orgId, error }: StepContext) 
                 Atlassian API token settings
               </a>
               . Unlike GitHub, it&rsquo;s stored — Triage Factory needs it to act as you on Jira. It
-              stays in your workspace&rsquo;s secret store and is never shared with other users.
+              stays in your organization&rsquo;s secret store and is never shared with other users.
             </p>
           </>
         ) : (
@@ -165,7 +165,8 @@ export function JiraUserAccessStep({ state, patch, orgId, error }: StepContext) 
             </label>
             <p className="text-reported leading-relaxed text-ink-3">
               Unlike GitHub, this token is stored — Triage Factory needs it to act as you on Jira.
-              It stays in your workspace&rsquo;s secret store and is never shared with other users.
+              It stays in your organization&rsquo;s secret store and is never shared with other
+              users.
             </p>
           </>
         )}

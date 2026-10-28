@@ -122,7 +122,7 @@ const EVENT_DISPLAY: Record<string, EventInfo> = {
   'github:pr:unreachable': {
     label: 'Unreachable',
     description:
-      'Triage Factory no longer follows this pull request — the workspace now points at another GitHub host',
+      'Triage Factory no longer follows this pull request — the organization now points at another GitHub host',
     color: 'bg-slate-500/10 text-slate-600',
   },
 

@@ -26,7 +26,7 @@ import (
 // returns "" for the class), and a BYO org's delivery here fails the HMAC.
 //
 // The org is never the payload's own claim about itself. It is whichever
-// workspace the bind ceremony recorded for (host, installation id) — the same
+// org the bind ceremony recorded for (host, installation id) — the same
 // key the ceremony's uniqueness gate reads — so an installation.created for an
 // installation nobody has bound writes nothing: creation is the bind's job
 // alone, and a webhook that could mint a binding would reintroduce exactly the
@@ -37,7 +37,7 @@ import (
 // naming the installation, for the operator who is the only person placed to
 // notice an install that landed nowhere. A 4xx would paint the operator's
 // delivery log red for a normal condition and teach them to ignore it. Because nothing is recorded, a
-// redelivery after the workspace binds the installation applies normally.
+// redelivery after the org binds the installation applies normally.
 //
 // Multi-mode only: the deployment App is a multi-mode credential, so in local
 // mode this route does not exist. Rate-limited at the signed-webhook tier like
@@ -101,7 +101,7 @@ func (s *Server) handleDeploymentGitHubWebhook(w http.ResponseWriter, r *http.Re
 	// mirror has never seen. It routes on the row and never on the org's
 	// credential class, and that is safe because the two cannot disagree: the
 	// disconnect verb soft-removes the rows in the same motion it resets the
-	// class, and every other credential door refuses a managed workspace that
+	// class, and every other credential door refuses a managed org that
 	// still holds a live row.
 	orgID, err := s.githubApps.InstallationOwnerSystem(r.Context(), host, d.installationID)
 	if err != nil {
@@ -110,11 +110,11 @@ func (s *Server) handleDeploymentGitHubWebhook(w http.ResponseWriter, r *http.Re
 	}
 	if orgID == "" {
 		// One line at a level an operator reads by default, because they are
-		// the only person who can act on it: a workspace admin never sees this
+		// the only person who can act on it: an org admin never sees this
 		// installation (it is bound nowhere, so no tenant surface may list it)
 		// and the installer sees only the recovery page. The line names what
 		// the operator needs to tell "nobody has connected this yet" from "it
-		// was connected to the wrong workspace" — the installation, and the
+		// was connected to the wrong org" — the installation, and the
 		// account it targets when the payload is the one that carries it — and
 		// no payload beyond that: an installation event's sender, and every
 		// other event's body, is text somebody on GitHub wrote.

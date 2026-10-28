@@ -1867,7 +1867,7 @@ func TestAuthFlow_LoginClaim_DecidesTheAccountByGitHubID(t *testing.T) {
 // GoTrue GitHub OAuth login provider is github.com whatever
 // TF_DEFAULT_GITHUB_HOST names, so the identity row the login claim mirrors
 // binds under https://github.com by construction — never under the default a
-// GHES self-hoster set for their workspaces.
+// GHES self-hoster set for their orgs.
 func TestAuthFlow_LoginClaim_KeysUnderGitHubComWhateverTheDefault(t *testing.T) {
 	ghbase.SetDefaultBaseURLForTest(t, "https://ghe.example.com")
 	r := newAuthRig(t)
