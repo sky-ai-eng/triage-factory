@@ -93,9 +93,9 @@ up to 30 minutes). Each task keeps one snapshot, overwritten each time, so the
 cost is upload bandwidth and executor CPU, not storage. `0` turns checkpoints
 off; a hard kill then falls back to the last park or blueprint step.
 
-`tf_claims_oldest_checkpoint_age_seconds` and
-`tf_workspace_checkpoints_total{outcome}` track them ([Monitoring](monitoring.md)),
-and the fleet console shows each run's checkpoint age.
+The `WorkspaceCheckpointsStale` and `WorkspaceCheckpointsFailing` alerts watch
+them ([Monitoring](monitoring.md#alerts)), and the fleet console shows each
+run's checkpoint age.
 
 An interrupted upload leaves an **incomplete multipart upload** in the bucket,
 which is billed and never cleaned up on its own. Give the bucket a lifecycle

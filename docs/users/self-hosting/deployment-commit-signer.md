@@ -113,7 +113,7 @@ account, and each `control` pod logs a warning saying so.
 If the key is removed from the account or GitHub fails a pushed commit for its
 address, workspaces commit unsigned from their next signature, `control` logs
 `deployment commit signer is broken; managed workspaces commit unsigned until an operator fixes it`,
-and the `tf_deployment_commit_signer_up` metric reads 0
-([Monitoring](monitoring.md)). Fix the cause on the account, then run
+and the `DeploymentCommitSignerDown` alert fires after 15 minutes
+([Monitoring](monitoring.md#alerts)). Fix the cause on the account, then run
 `triagefactory commit-signer verify` on a `control` container. A key put back
 on the account also recovers on the next periodic check.

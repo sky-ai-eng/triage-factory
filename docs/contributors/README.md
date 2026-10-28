@@ -13,6 +13,9 @@ and test commands are in [CLAUDE.md](../../CLAUDE.md).
   network, and how to support a new package ecosystem
 - [Regenerating the seccomp profile](seccomp-profile.md): finding and
   validating a syscall the executor needs
+- Alerting rules live in `docker/observability/rules/`, with unit tests in
+  `scripts/alert-rules/`. `./scripts/check-alert-rules.sh` runs both through
+  the stack's own `promtool` (needs Docker).
 - Benchmarks: [sandbox capacity](benchmarks/sandbox-bench.md),
   [polling at scale](benchmarks/poll-bench.md),
   [checkpoint freeze](benchmarks/checkpoint-freeze.md),
