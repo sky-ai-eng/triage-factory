@@ -159,9 +159,9 @@ func TestBuildStepConfig_RedelegationRehydratesRatherThanCloning(t *testing.T) {
 	rebuilt := worktree.RunRoot(f.task.ID)
 	t.Cleanup(func() { _ = os.RemoveAll(rebuilt) })
 	f.stampSharedWorktree(t, rebuilt)
-	blobs, err := storage.New()
+	blobs, err := storage.NewWorkspace()
 	if err != nil {
-		t.Fatalf("storage.New: %v", err)
+		t.Fatalf("storage.NewWorkspace: %v", err)
 	}
 	f.s.SetStorage(blobs)
 	src := filepath.Join(t.TempDir(), "workspace")
@@ -232,9 +232,9 @@ func TestBuildStepConfig_RedelegationAfterAFailedRunWithNoBlobBuildsFresh(t *tes
 	swept := filepath.Join(t.TempDir(), "gone")
 	f := seedStepFixture(t, "slack", "redelegate-swept", 1, swept)
 	t.Cleanup(func() { worktree.RemoveRunRoot(f.task.ID) })
-	blobs, err := storage.New()
+	blobs, err := storage.NewWorkspace()
 	if err != nil {
-		t.Fatalf("storage.New: %v", err)
+		t.Fatalf("storage.NewWorkspace: %v", err)
 	}
 	f.s.SetStorage(blobs)
 

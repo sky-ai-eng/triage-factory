@@ -37,14 +37,14 @@ func TestFSStorage_NestedKeyCreatesDirs(t *testing.T) {
 	}
 }
 
-func TestNew_LocalIsFS(t *testing.T) {
+func TestNewWorkspace_LocalIsFS(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	paths.SetForTest(t, t.TempDir())
-	store, err := New()
+	store, err := NewWorkspace()
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("NewWorkspace: %v", err)
 	}
 	if _, ok := store.(*fsStorage); !ok {
-		t.Fatalf("New in local mode = %T; want *fsStorage", store)
+		t.Fatalf("NewWorkspace in local mode = %T; want *fsStorage", store)
 	}
 }

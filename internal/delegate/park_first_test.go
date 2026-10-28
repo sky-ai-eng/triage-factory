@@ -34,9 +34,9 @@ func TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
 	s, database, conversationID, _ := setupAdvanceFixture(t, "park-first-stop")
-	blobs, err := storage.New()
+	blobs, err := storage.NewWorkspace()
 	if err != nil {
-		t.Fatalf("storage.New: %v", err)
+		t.Fatalf("storage.NewWorkspace: %v", err)
 	}
 	held := &heldPutStorage{Storage: blobs, entered: make(chan struct{}, 1), release: make(chan struct{})}
 	s.SetStorage(held)
@@ -121,9 +121,9 @@ func TestParkConversationOpen_FlipsBeforeTheSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
 	s, database, conversationID, _ := setupAdvanceFixture(t, "park-first-idle")
-	blobs, err := storage.New()
+	blobs, err := storage.NewWorkspace()
 	if err != nil {
-		t.Fatalf("storage.New: %v", err)
+		t.Fatalf("storage.NewWorkspace: %v", err)
 	}
 	namespace := taskIDForConversation(t, database, conversationID)
 
@@ -281,9 +281,9 @@ func TestWorkspaceRecoverable_LadderBelowTheBlob(t *testing.T) {
 				if runtime == "native" {
 					markNative(t, database, conversationID)
 				}
-				blobs, err := storage.New()
+				blobs, err := storage.NewWorkspace()
 				if err != nil {
-					t.Fatalf("storage.New: %v", err)
+					t.Fatalf("storage.NewWorkspace: %v", err)
 				}
 				s.SetStorage(blobs)
 				namespace := taskIDForConversation(t, database, conversationID)

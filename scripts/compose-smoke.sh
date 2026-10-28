@@ -9,7 +9,8 @@
 # exercises the S3 *client* against a `weed mini` (allow-all) testcontainer — it
 # never touches the compose *deploy* surface. This script does: the seaweedfs
 # entrypoint's s3.json templating + identity auth (an unauthenticated request
-# must be REJECTED, not served allow-all), the bucket sidecar, postgres role
+# must be REJECTED, not served allow-all, and each key pair reaches only its own
+# bucket), the bucket sidecar and the versioning it sets, postgres role
 # reconciliation, GoTrue, and the TF binary's migrate-up + boot. TFAC-377's
 # compose-level bugs (JSON-injection footgun, tmpfs read perms, auth-on vs
 # allow-all) were caught only by bringing the stack up by hand; this automates
@@ -35,7 +36,8 @@ cd "$ROOT"
 # name) don't collide; the default is an obvious throwaway.
 PROJECT="${TF_SMOKE_PROJECT:-tf-smoke}"
 ENV_FILE=$(mktemp "${TMPDIR:-/tmp}/tf-smoke-env.XXXXXX")
-BUCKET=tf-workspaces            # matches docker-compose.yml's TF_BLOB_BUCKET default
+WORKSPACE_BUCKET=tf-workspaces  # matches docker-compose.yml's TF_WORKSPACE_BUCKET default
+KNOWLEDGE_BUCKET=tf-knowledge    # matches docker-compose.yml's TF_KNOWLEDGE_BUCKET default
 PUBLIC_URL=http://localhost:3000
 HEALTH_TIMEOUT=${HEALTH_TIMEOUT:-300}
 
@@ -91,6 +93,11 @@ fi
 
 echo "Generating throwaway .env ($ENV_FILE)..."
 PG_PASSWORD=$(openssl rand -hex 32)
+# The object-store pairs are kept in variables too: the scoping checks below
+# sign requests as each of them.
+WS_AK=$(openssl rand -hex 32) WS_SK=$(openssl rand -hex 32)
+KW_AK=$(openssl rand -hex 32) KW_SK=$(openssl rand -hex 32)
+KR_AK=$(openssl rand -hex 32) KR_SK=$(openssl rand -hex 32)
 cat > "$ENV_FILE" <<EOF
 POSTGRES_PASSWORD=$PG_PASSWORD
 SUPABASE_AUTH_ADMIN_PASSWORD=$(openssl rand -hex 32)
@@ -102,8 +109,14 @@ GH_CLIENT_SECRET=$(openssl rand -hex 16)
 TF_SESSION_ENCRYPTION_KEY=$(openssl rand -hex 32)
 TF_COOKIE_SECRET=$(openssl rand -hex 32)
 TF_SECRET_ENCRYPTION_KEY=$(openssl rand -hex 32)
-TF_BLOB_ACCESS_KEY=$(openssl rand -hex 32)
-TF_BLOB_SECRET_KEY=$(openssl rand -hex 32)
+TF_WORKSPACE_ACCESS_KEY=$WS_AK
+TF_WORKSPACE_SECRET_KEY=$WS_SK
+TF_KNOWLEDGE_ACCESS_KEY=$KW_AK
+TF_KNOWLEDGE_SECRET_KEY=$KW_SK
+TF_KNOWLEDGE_READER_ACCESS_KEY=$KR_AK
+TF_KNOWLEDGE_READER_SECRET_KEY=$KR_SK
+SEAWEEDFS_ADMIN_ACCESS_KEY=$(openssl rand -hex 32)
+SEAWEEDFS_ADMIN_SECRET_KEY=$(openssl rand -hex 32)
 EOF
 
 # Mint the GoTrue RS256 keypair + service-role token into the same file (the
@@ -203,19 +216,22 @@ for svc in postgres-postinit seaweedfs-postinit postgres-postinit-system; do
 done
 pass "postgres-postinit + seaweedfs-postinit + postgres-postinit-system exited 0"
 
-# 2. The workspace bucket exists and is reachable WITH credentials. head-bucket
-#    exits 0 only if the bucket is present and the request authenticated. Run
-#    through the aws-cli sidecar on the compose network (seaweedfs publishes no
-#    host port); it inherits AWS_* from the service env. Capture output so a
-#    failure surfaces the real aws error (network vs auth vs missing bucket),
-#    not just the generic message — head-bucket prints nothing on success.
-if ! head_out=$(dc run --rm --no-deps --entrypoint aws seaweedfs-postinit \
-    --endpoint-url http://seaweedfs:8333 s3api head-bucket --bucket "$BUCKET" 2>&1); then
-  echo "--- head-bucket error ---" >&2
-  echo "$head_out" >&2
-  fail "bucket '$BUCKET' missing or not reachable with credentials"
-fi
-pass "bucket '$BUCKET' exists (authenticated head-bucket ok)"
+# 2. Both buckets exist and are reachable WITH credentials. head-bucket exits 0
+#    only if the bucket is present and the request authenticated. Run through
+#    the aws-cli sidecar on the compose network (seaweedfs publishes no host
+#    port); it inherits the admin pair as AWS_* from the service env. Capture
+#    output so a failure surfaces the real aws error (network vs auth vs missing
+#    bucket), not just the generic message — head-bucket prints nothing on
+#    success.
+for bucket in "$WORKSPACE_BUCKET" "$KNOWLEDGE_BUCKET"; do
+  if ! head_out=$(dc run --rm --no-deps --entrypoint aws seaweedfs-postinit \
+      --endpoint-url http://seaweedfs:8333 s3api head-bucket --bucket "$bucket" 2>&1); then
+    echo "--- head-bucket error ---" >&2
+    echo "$head_out" >&2
+    fail "bucket '$bucket' missing or not reachable with credentials"
+  fi
+  pass "bucket '$bucket' exists (authenticated head-bucket ok)"
+done
 
 # 3. THE load-bearing assertion: an UNAUTHENTICATED request must be REJECTED.
 #    SeaweedFS serves allow-all when no identity is configured; this proves the
@@ -239,7 +255,57 @@ else
   fail "unauthenticated S3 request failed, but not with 403/AccessDenied (auth state unclear)"
 fi
 
-# 4. /api/health → 200 from the host's published port (the binary booted and is
+# 4. Each key pair reaches only what its role needs. A key pair the s3.json
+#    template scoped wrongly works fine for the role that holds it, so nothing
+#    else here would notice: an executor holding a knowledge pair that can
+#    write is exactly the hole the read-only pair closes. Each refusal is paired
+#    with a request the same pair is allowed, so a refusal is the scoping and
+#    not a key SeaweedFS failed to load.
+s3_as() {
+  local ak=$1 sk=$2
+  shift 2
+  dc run --rm --no-deps -T -e AWS_ACCESS_KEY_ID="$ak" -e AWS_SECRET_ACCESS_KEY="$sk" --entrypoint aws seaweedfs-postinit \
+    --endpoint-url http://seaweedfs:8333 "$@"
+}
+s3_allowed() {
+  local what=$1 out
+  shift
+  out=$(s3_as "$@" 2>&1) || { echo "$out" >&2; fail "$what was refused"; }
+  pass "$what"
+}
+s3_denied() {
+  local what=$1 out
+  shift
+  if out=$(s3_as "$@" 2>&1); then
+    fail "$what SUCCEEDED — the key pair is not limited to what its role needs"
+  fi
+  # Not a bare 403: compose's own lines name the run container by a random hex
+  # suffix, which can contain one.
+  case "$out" in
+    *AccessDenied*|*Forbidden*) pass "$what refused (AccessDenied)" ;;
+    *) echo "$out" >&2; fail "$what failed, but not with AccessDenied (scoping unclear)" ;;
+  esac
+}
+s3_allowed "knowledge writer writes $KNOWLEDGE_BUCKET" "$KW_AK" "$KW_SK" s3api put-object --bucket "$KNOWLEDGE_BUCKET" --key smoke/writer
+s3_allowed "knowledge reader reads $KNOWLEDGE_BUCKET" "$KR_AK" "$KR_SK" s3api head-object --bucket "$KNOWLEDGE_BUCKET" --key smoke/writer
+s3_denied "knowledge reader's write to $KNOWLEDGE_BUCKET" "$KR_AK" "$KR_SK" s3api put-object --bucket "$KNOWLEDGE_BUCKET" --key smoke/reader
+s3_allowed "workspace pair writes $WORKSPACE_BUCKET" "$WS_AK" "$WS_SK" s3api put-object --bucket "$WORKSPACE_BUCKET" --key smoke/workspace
+s3_denied "knowledge writer's write to $WORKSPACE_BUCKET" "$KW_AK" "$KW_SK" s3api put-object --bucket "$WORKSPACE_BUCKET" --key smoke/writer
+
+# 5. Versioning is on for the knowledge bucket and off for the workspace
+#    bucket. The admin pair (the sidecar's own env) reads both; aws-cli prints
+#    None for a bucket whose versioning was never set. Only stdout is captured:
+#    compose reports the run container's lifecycle on stderr.
+for pair in "$KNOWLEDGE_BUCKET:Enabled" "$WORKSPACE_BUCKET:None"; do
+  bucket=${pair%%:*} want=${pair#*:}
+  got=$(dc run --rm --no-deps -T --entrypoint aws seaweedfs-postinit \
+    --endpoint-url http://seaweedfs:8333 s3api get-bucket-versioning --bucket "$bucket" --query Status --output text | tr -d '[:space:]') \
+    || fail "get-bucket-versioning on '$bucket' failed"
+  [ "$got" = "$want" ] || fail "versioning on '$bucket' is '$got', want '$want'"
+done
+pass "versioning enabled on '$KNOWLEDGE_BUCKET' only"
+
+# 6. /api/health → 200 from the host's published port (the binary booted and is
 #    serving). control publishes 3000:3000.
 # No -f: it makes curl exit non-zero on an HTTP error and (version-dependently)
 # garbles or suppresses the -w status code. Without it, curl exits 0 for any
@@ -249,7 +315,7 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' "$PUBLIC_URL/api/health" 2>/dev/n
 [ "$code" = "200" ] || fail "GET /api/health returned ${code:-<none>} (expected 200)"
 pass "GET /api/health → 200"
 
-# 5. Migrations actually applied. A healthy container already implies this (the
+# 7. Migrations actually applied. A healthy container already implies this (the
 #    entrypoint exits non-zero if migrate-up never succeeds), but assert the
 #    goose ledger has rows so the signal is explicit, not inferred.
 gv=$(dc exec -T -e PGPASSWORD="$PG_PASSWORD" postgres \
@@ -260,7 +326,7 @@ case "$gv" in
   *) pass "migrations applied (goose_db_version has $gv rows)" ;;
 esac
 
-# 6. Privilege-separation posture, per role. The failure class this catches
+# 8. Privilege-separation posture, per role. The failure class this catches
 #    is invisible to the health probes: a container boots green while the
 #    split is silently degraded (a broker on the capless control pod, an
 #    orchestrator that kept its capabilities or a supplementary group, or a
@@ -272,7 +338,7 @@ esac
 #                 orchestrator capless + non-root with no supplementary
 #                 group, /run/tf orchestrator-owned at 0711.
 
-# 6a. Control: capless, broker-free.
+# 8a. Control: capless, broker-free.
 posture=$(dc exec -T control sh -c '
   broker=""; orch=""
   for c in /proc/[0-9]*/comm; do
@@ -295,7 +361,7 @@ posture=$(dc exec -T control sh -c '
 ' 2>&1) || fail "control privsep posture: $posture"
 pass "control privsep posture: $posture"
 
-# 6b. Executor: broker-then-drop split.
+# 8b. Executor: broker-then-drop split.
 posture=$(dc exec -T executor sh -c '
   broker=""; orch=""
   for c in /proc/[0-9]*/comm; do
@@ -324,7 +390,7 @@ posture=$(dc exec -T executor sh -c '
 ' 2>&1) || fail "executor privsep posture: $posture"
 pass "executor privsep posture: $posture"
 
-# 6c. Executor: every host tool the cap-broker runs by name is on its PATH.
+# 8c. Executor: every host tool the cap-broker runs by name is on its PATH.
 #     A missing one boots green and fails only when the broker first runs it
 #     (prlimit, for instance, on the first workspace capture).
 tools=$(dc exec -T executor sh -c '
@@ -337,10 +403,10 @@ tools=$(dc exec -T executor sh -c '
 ' 2>&1) || fail "executor host tools: $tools"
 pass "executor host tools on PATH: $tools"
 
-# 7. The observability stack. Each of these fails silently — no crash, no 503,
+# 9. The observability stack. Each of these fails silently — no crash, no 503,
 #    just an empty UI weeks later when someone finally looks.
 
-# 7a. TF resolved the endpoint and installed a tracer provider: the compose
+# 9a. TF resolved the endpoint and installed a tracer provider: the compose
 #     default reached the process env AND the binary accepted it. A dropped env
 #     line leaves every other check in this script passing.
 #
@@ -359,7 +425,7 @@ case "$tf_logs" in
 esac
 pass "control pod installed a tracer provider (logged 'tracing enabled')"
 
-# 7b. Tempo accepts OTLP over HTTP on the address that env var names, and hands
+# 9b. Tempo accepts OTLP over HTTP on the address that env var names, and hands
 #     the trace back. Retrieval is by ID, not search: an ID lookup hits the
 #     ingester immediately, while search waits for the trace to be cut (~10s)
 #     and would make this flaky for no extra coverage. curl runs from the
@@ -392,9 +458,9 @@ done
 [ -n "$stored" ] || fail "tempo accepted an OTLP span but never returned it from /api/traces/$trace_id"
 pass "tempo ingests OTLP/HTTP on :4318 and serves the trace back"
 
-# 7c. The metrics-generator answers a TraceQL metrics query — the query class
+# 9c. The metrics-generator answers a TraceQL metrics query — the query class
 #     Grafana's Traces Drilldown is built on, and a different path through
-#     Tempo from 7b's lookup-by-ID. It runs after 7b deliberately: the
+#     Tempo from 9b's lookup-by-ID. It runs after 9b deliberately: the
 #     generator only holds a tenant once spans have reached it, and until then
 #     a missing local-blocks processor answers an empty result instead of the
 #     error it owes you. With a tenant in place the two failures separate
@@ -419,10 +485,10 @@ for _ in $(seq 1 15); do
   if [[ "$body" =~ \"timestampMs\":\"[0-9]+\",\"value\": ]]; then metrics=yes; break; fi
   sleep 2
 done
-[ -n "$metrics" ] || fail "tempo never counted the span 7b pushed in a TraceQL metrics query (metrics_generator.processors and traces_storage.path in docker/observability/tempo.yaml)"
+[ -n "$metrics" ] || fail "tempo never counted the span 9b pushed in a TraceQL metrics query (metrics_generator.processors and traces_storage.path in docker/observability/tempo.yaml)"
 pass "tempo's local-blocks processor answers TraceQL metrics (what Traces Drilldown queries)"
 
-# 7d. Grafana's provisioning actually applied. Provisioning failures are
+# 9d. Grafana's provisioning actually applied. Provisioning failures are
 #     logged and skipped, not fatal, so a malformed data source or correlation
 #     leaves a running Grafana that simply cannot navigate anything — and the
 #     correlations are the entire point of the file.
@@ -443,7 +509,7 @@ for attr in conversation.id event.id task.id; do
 done
 pass "grafana provisioned both data sources + the conversation/event/task correlations"
 
-# 7e. The dashboards half of the same provisioning, and the same failure mode:
+# 9e. The dashboards half of the same provisioning, and the same failure mode:
 #     a malformed dashboard JSON is logged and skipped, leaving a Grafana that
 #     starts fine and shows an empty home page. Three distinct regressions,
 #     each invisible without its own assertion:
@@ -476,7 +542,7 @@ for uid in tf-tempo tf-prometheus; do
 done
 pass "grafana provisioned tf-overview, serves it as the home dashboard, and its panels address both data sources"
 
-# 7f. Prometheus scrapes both roles. It finds the pods by their compose
+# 9f. Prometheus scrapes both roles. It finds the pods by their compose
 #     service names (dns_sd_configs in docker/observability/prometheus.yml), so
 #     a service renamed in docker-compose.yml and not there resolves to nothing:
 #     the job has no targets, every TF panel goes blank, and no alert fires.

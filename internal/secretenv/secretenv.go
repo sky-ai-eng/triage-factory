@@ -72,8 +72,13 @@ var Secrets = []string{
 	"TF_DATABASE_URL",
 	"TF_DATABASE_DIRECT_URL",
 	"TF_AUTHENTICATOR_PASSWORD",
-	"TF_BLOB_ACCESS_KEY",
-	"TF_BLOB_SECRET_KEY",
+	// One key pair per object-store bucket. A process reads the same names
+	// whichever pair the deployment hands it: an executor's knowledge pair is
+	// the read-only one.
+	"TF_WORKSPACE_ACCESS_KEY",
+	"TF_WORKSPACE_SECRET_KEY",
+	"TF_KNOWLEDGE_ACCESS_KEY",
+	"TF_KNOWLEDGE_SECRET_KEY",
 }
 
 // held is the in-memory secret store, populated by Resolve. A name present

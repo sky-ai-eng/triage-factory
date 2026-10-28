@@ -16,8 +16,9 @@ import (
 )
 
 // generatedSecrets are the values init generates, each 32 random bytes as
-// hex: hex because some are interpolated into URL-form DSNs and one into
-// SeaweedFS's JSON identity, where base64's / + = would break the parse.
+// hex: hex because some are interpolated into URL-form DSNs and the
+// object-store keys into SeaweedFS's JSON identities, where base64's / + =
+// would break the parse.
 var generatedSecrets = []string{
 	"POSTGRES_PASSWORD",
 	"SUPABASE_AUTH_ADMIN_PASSWORD",
@@ -26,8 +27,17 @@ var generatedSecrets = []string{
 	"TF_SESSION_ENCRYPTION_KEY",
 	"TF_COOKIE_SECRET",
 	"TF_SECRET_ENCRYPTION_KEY",
-	"TF_BLOB_ACCESS_KEY",
-	"TF_BLOB_SECRET_KEY",
+	// One key pair per object-store identity: the executors' workspace pair,
+	// the knowledge base's writer (control) and reader (executors), and the
+	// admin pair only seaweedfs-postinit holds.
+	"TF_WORKSPACE_ACCESS_KEY",
+	"TF_WORKSPACE_SECRET_KEY",
+	"TF_KNOWLEDGE_ACCESS_KEY",
+	"TF_KNOWLEDGE_SECRET_KEY",
+	"TF_KNOWLEDGE_READER_ACCESS_KEY",
+	"TF_KNOWLEDGE_READER_SECRET_KEY",
+	"SEAWEEDFS_ADMIN_ACCESS_KEY",
+	"SEAWEEDFS_ADMIN_SECRET_KEY",
 }
 
 // fileForms are the secrets the bundled compose also accepts as a mounted

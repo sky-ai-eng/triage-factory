@@ -78,9 +78,9 @@ type upstreamFixture struct {
 func newUpstreamFixture(t *testing.T, conversationID string) upstreamFixture {
 	t.Helper()
 	f := newStallFixture(t, conversationID, activityTimings{idle: time.Hour})
-	blobs, err := storage.New()
+	blobs, err := storage.NewWorkspace()
 	if err != nil {
-		t.Fatalf("storage.New: %v", err)
+		t.Fatalf("storage.NewWorkspace: %v", err)
 	}
 	f.s.SetStorage(blobs)
 	wtPath := t.TempDir()
