@@ -116,8 +116,10 @@ func seccompProbe(ctx context.Context, h *host, image, profile string) check {
 	return check{pass, name, "Docker starts a container under " + seccompFile}
 }
 
-// container is the part of `docker inspect` the stack checks read.
+// container is the part of `docker inspect` the stack checks and the
+// executor scale-down read.
 type container struct {
+	ID     string `json:"Id"`
 	Name   string
 	Config struct {
 		Labels map[string]string
@@ -159,7 +161,7 @@ const (
 func publishedURL(containers []container, service string, port int) (string, bool) {
 	key := strconv.Itoa(port) + "/tcp"
 	for _, c := range containers {
-		if c.Config.Labels["com.docker.compose.service"] != service {
+		if c.Config.Labels[serviceLabel] != service {
 			continue
 		}
 		bindings := c.NetworkSettings.Ports[key]
@@ -199,33 +201,52 @@ func stackChecks(ctx context.Context, h *host, dir string, st deployState) []che
 	return append(cs, publicURLCheck(ctx, h, dir))
 }
 
-// containerCheck reads the project's containers and folds them into one
-// check. up is false when there are none to check further, because docker
-// could not list them or the project has none. Containers are found by the
-// project label compose puts on them, so the check needs nothing from the
-// compose file or .env.
-func containerCheck(ctx context.Context, h *host, project string) (c check, containers []container, up bool) {
-	ids, errOut, err := h.docker(ctx, "", "ps", "--all", "--quiet", "--filter", "label=com.docker.compose.project="+project)
+// The labels compose puts on every container it creates.
+const (
+	projectLabel = "com.docker.compose.project"
+	serviceLabel = "com.docker.compose.service"
+	numberLabel  = "com.docker.compose.container-number"
+)
+
+// projectContainers inspects every container of the compose project, stopped
+// ones included: none is no containers and no error. They are found by the
+// project label compose puts on them, so this needs nothing from the compose
+// file or .env.
+func projectContainers(ctx context.Context, h *host, project string) ([]container, error) {
+	ids, errOut, err := h.docker(ctx, "", "ps", "--all", "--quiet", "--filter", "label="+projectLabel+"="+project)
 	if err != nil {
-		return check{fail, "Containers", "docker ps failed: " + firstLine(errOut, err)}, nil, false
+		return nil, errors.New("docker ps failed: " + firstLine(errOut, err))
 	}
 	idList := strings.Fields(string(ids))
-	none := check{skip, "Containers", fmt.Sprintf("compose project %s has no containers; the running-stack checks run once it is up", project)}
 	if len(idList) == 0 {
-		return none, nil, false
+		return nil, nil
 	}
 	// A container removed between the two calls (a one-shot run with --rm)
 	// makes inspect exit non-zero while still printing the rest, so its
 	// output is read before its exit status.
 	out, errOut, err := h.docker(ctx, "", append([]string{"inspect"}, idList...)...)
+	var containers []container
 	if jerr := json.Unmarshal(out, &containers); jerr != nil || len(containers) == 0 {
 		if err != nil {
-			return check{fail, "Containers", "docker inspect failed: " + firstLine(errOut, err)}, nil, false
+			return nil, errors.New("docker inspect failed: " + firstLine(errOut, err))
 		}
 		if jerr != nil {
-			return check{fail, "Containers", "read docker inspect: " + jerr.Error()}, nil, false
+			return nil, errors.New("read docker inspect: " + jerr.Error())
 		}
-		return none, nil, false
+	}
+	return containers, nil
+}
+
+// containerCheck reads the project's containers and folds them into one
+// check. up is false when there are none to check further, because docker
+// could not list them or the project has none.
+func containerCheck(ctx context.Context, h *host, project string) (c check, containers []container, up bool) {
+	containers, err := projectContainers(ctx, h, project)
+	switch {
+	case err != nil:
+		return check{fail, "Containers", err.Error()}, nil, false
+	case len(containers) == 0:
+		return check{skip, "Containers", fmt.Sprintf("compose project %s has no containers; the running-stack checks run once it is up", project)}, nil, false
 	}
 	return containersCheck(containers), containers, true
 }

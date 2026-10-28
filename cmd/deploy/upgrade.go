@@ -315,10 +315,8 @@ func drainExecutors(ctx context.Context, h *host, dir, project string, timeout t
 			already = append(already, e.ID)
 			continue
 		}
-		_, errOut, err := h.docker(ctx, dir, "compose", "-p", project, "exec", "-T", "control",
-			"triagefactory", "instance", "drain", "--until-restart", e.ID)
-		if err != nil {
-			h.report(check{warn, name, fmt.Sprintf("could not drain %s (%s); its runs are handed off when it stops", e.ID, firstLine(errOut, err))})
+		if err := drainUntilRestart(ctx, h, dir, project, e.ID); err != nil {
+			h.report(check{warn, name, fmt.Sprintf("could not drain %s (%v); its runs are handed off when it stops", e.ID, err)})
 			failed = append(failed, e.ID)
 			continue
 		}
@@ -397,6 +395,17 @@ func waitForRuns(ctx context.Context, h *host, dir, project string, ids []string
 			return
 		}
 	}
+}
+
+// drainUntilRestart runs `triagefactory instance drain --until-restart id`
+// in the control container.
+func drainUntilRestart(ctx context.Context, h *host, dir, project, id string) error {
+	_, errOut, err := h.docker(ctx, dir, "compose", "-p", project, "exec", "-T", "control",
+		"triagefactory", "instance", "drain", "--until-restart", id)
+	if err != nil {
+		return errors.New(firstLine(errOut, err))
+	}
+	return nil
 }
 
 // listFleet runs `triagefactory instance list --json` in the control

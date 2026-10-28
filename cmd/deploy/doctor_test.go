@@ -203,20 +203,27 @@ type stackFixture struct {
 	unpublished string
 }
 
-func healthyStack() *stackFixture {
-	c := func(name, status string, exit int, health, restart string) map[string]any {
-		state := map[string]any{"Status": status, "ExitCode": exit}
-		if health != "" {
-			state["Health"] = map[string]any{"Status": health}
-		}
-		service := strings.TrimSuffix(strings.TrimPrefix(name, "triage-factory-"), "-1")
-		return map[string]any{
-			"Name":       "/" + name,
-			"Config":     map[string]any{"Labels": map[string]any{"com.docker.compose.service": service}},
-			"State":      state,
-			"HostConfig": map[string]any{"RestartPolicy": map[string]any{"Name": restart}},
-		}
+// fixtureContainer is a container as docker inspect reports it. name is
+// <project>-<service>-<replica number>, the way compose names it, and is also
+// its id.
+func fixtureContainer(name, status string, exit int, health, restart string) map[string]any {
+	state := map[string]any{"Status": status, "ExitCode": exit}
+	if health != "" {
+		state["Health"] = map[string]any{"Status": health}
 	}
+	i := strings.LastIndex(name, "-")
+	service, number := strings.TrimPrefix(name[:i], "triage-factory-"), name[i+1:]
+	return map[string]any{
+		"Id":         name,
+		"Name":       "/" + name,
+		"Config":     map[string]any{"Labels": map[string]any{serviceLabel: service, numberLabel: number}},
+		"State":      state,
+		"HostConfig": map[string]any{"RestartPolicy": map[string]any{"Name": restart}},
+	}
+}
+
+func healthyStack() *stackFixture {
+	c := fixtureContainer
 	return &stackFixture{
 		containers: []map[string]any{
 			c("triage-factory-postgres-1", "running", 0, "healthy", "unless-stopped"),
@@ -266,7 +273,7 @@ func (s *stackFixture) apply(t *testing.T, f *fakeHost, dir string) {
 		u, _ := url.Parse(server.URL)
 		bindings := []map[string]any{{"HostIp": "::", "HostPort": u.Port()}, {"HostIp": "0.0.0.0", "HostPort": u.Port()}}
 		for _, c := range s.containers {
-			if c["Config"].(map[string]any)["Labels"].(map[string]any)["com.docker.compose.service"] == service {
+			if c["Config"].(map[string]any)["Labels"].(map[string]any)[serviceLabel] == service {
 				c["NetworkSettings"] = map[string]any{"Ports": map[string]any{strconv.Itoa(port) + "/tcp": bindings}}
 			}
 		}

@@ -26,6 +26,7 @@ func runUp(ctx context.Context, args []string, b Bundle, h *host) int {
 	fset := newFlagSet("up", upUsage, h)
 	dir := fset.String("dir", ".", "")
 	executors := fset.Int("executors", 0, "")
+	drainTimeout := fset.Duration("drain-timeout", defaultDrainTimeout, "")
 	if code := parseFlags(fset, args, h); code >= 0 {
 		return code
 	}
@@ -35,7 +36,11 @@ func runUp(ctx context.Context, args []string, b Bundle, h *host) int {
 		fmt.Fprintf(h.stderr, "deploy up: --executors %d: the stack runs at least 1 executor\n", *executors)
 		return 2
 	}
-	if err := up(ctx, h, b, *dir, *executors); err != nil {
+	if *drainTimeout < 0 {
+		fmt.Fprintf(h.stderr, "deploy up: --drain-timeout %s is negative\n", *drainTimeout)
+		return 2
+	}
+	if err := up(ctx, h, b, *dir, *executors, *drainTimeout); err != nil {
 		fmt.Fprintf(h.stderr, "deploy up: %v\n", err)
 		return 1
 	}
@@ -43,8 +48,10 @@ func runUp(ctx context.Context, args []string, b Bundle, h *host) int {
 }
 
 // up starts dir's deployment and waits for it to be healthy. executors is
-// the executor count to run and store, or 0 to run the stored count.
-func up(ctx context.Context, h *host, b Bundle, dirFlag string, executors int) error {
+// the executor count to run and store, or 0 to run the stored count; an
+// executor beyond it is drained, for up to drainTimeout, before it is
+// removed.
+func up(ctx context.Context, h *host, b Bundle, dirFlag string, executors int, drainTimeout time.Duration) error {
 	dir, err := deploymentDir(dirFlag)
 	if err != nil {
 		return err
@@ -98,6 +105,9 @@ func up(ctx context.Context, h *host, b Bundle, dirFlag string, executors int) e
 		if err := writeState(dir, st); err != nil {
 			return err
 		}
+	}
+	if err := scaleDown(ctx, h, dir, st.Project, st.Executors, drainTimeout); err != nil {
+		return err
 	}
 	if err := composeUp(ctx, h, dir, st); err != nil {
 		return err
@@ -240,10 +250,13 @@ USAGE
   triagefactory deploy up [flags]
 
 FLAGS
-  --dir DIR        the deployment directory deploy init rendered (default: the
-                   current directory)
-  --executors N    run N executor replicas, and store N for every later up and
-                   upgrade (default: the stored count, 1 after init)
+  --dir DIR            the deployment directory deploy init rendered (default:
+                       the current directory)
+  --executors N        run N executor replicas, and store N for every later up
+                       and upgrade (default: the stored count, 1 after init)
+  --drain-timeout DUR  when the stack runs more executors than that, how long
+                       to wait for the ones it removes to finish their runs
+                       (default: 10m)
 
 WHAT IT DOES
   Checks the host, then that this binary is the deployment's version: a newer
@@ -266,4 +279,10 @@ WHAT IT DOES
   A plain docker compose up -d resets the executor count to 1; deploy up always
   passes the stored count. Running deploy up on a stack that is already up
   changes nothing.
+
+  When the stack runs more executors than that count, the highest-numbered ones
+  go: each is drained (triagefactory instance drain --until-restart, run in the
+  control container), up waits up to --drain-timeout for its runs to finish,
+  and then stops and removes it before compose runs. A run still in flight
+  after that is parked with a workspace snapshot when its executor stops.
 `

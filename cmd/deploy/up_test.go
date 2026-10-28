@@ -257,7 +257,9 @@ func TestUp_WaitsForTheStack(t *testing.T) {
 		f, b, dir := initedFixture(t)
 		healthyStack().apply(t, f, dir)
 		delete(f.dockerReplies, "image inspect")
-		f.dockerSeqs["ps --all"] = []dockerReply{{}, {}, f.dockerReplies["ps"]}
+		// The first answers the scale-down's look at the executors, before
+		// compose runs; the health wait then sees no containers twice.
+		f.dockerSeqs["ps --all"] = []dockerReply{{}, {}, {}, f.dockerReplies["ps"]}
 		start := f.clock
 		if code := upRun(t, f, b, dir); code != 0 {
 			t.Fatalf("exit = %d\n%s%s", code, f.out, f.errOut)
