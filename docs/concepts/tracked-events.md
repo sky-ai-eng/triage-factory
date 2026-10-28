@@ -1028,7 +1028,8 @@ Every `422` fault a write has comes back in one answer: the predicate's value fa
 
 An org admin turns Jira or Linear off for the org with
 `PATCH /api/orgs/{org_id}/sources/{kind}`. The credential stays bound, and TF
-makes no call to the source until it is turned back on. The poll cycle skips
+makes no call to the source until it is turned back on, except to validate a
+credential someone connects or replaces for it. The poll cycle skips
 the source, and every Jira or Linear client TF makes comes out of that
 source's credential resolver, which refuses to resolve one for the org: the
 org's service credential and each user's own credential alike. The resolver

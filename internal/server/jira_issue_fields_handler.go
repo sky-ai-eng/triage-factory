@@ -91,7 +91,7 @@ func (s *Server) handleJiraPrioritiesList(w http.ResponseWriter, r *http.Request
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	client, ok := s.jiraSystemClient(w, r, orgID, "jira/priorities")
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/priorities", "Jira is not connected for this workspace")
 	if !ok {
 		return
 	}
@@ -120,7 +120,7 @@ func (s *Server) handleJiraPriorityGet(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w, "jira priority")
 		return
 	}
-	client, ok := s.jiraSystemClient(w, r, orgID, "jira/priority")
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/priority", "Jira is not connected for this workspace")
 	if !ok {
 		return
 	}
@@ -162,7 +162,7 @@ func (s *Server) handleJiraIssueTypesList(w http.ResponseWriter, r *http.Request
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	client, ok := s.jiraSystemClient(w, r, orgID, "jira/issue-types")
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/issue-types", "Jira is not connected for this workspace")
 	if !ok {
 		return
 	}
@@ -201,7 +201,7 @@ func (s *Server) handleJiraIssueTypeGet(w http.ResponseWriter, r *http.Request) 
 		httpx.NotFound(w, "jira issue type")
 		return
 	}
-	client, ok := s.jiraSystemClient(w, r, orgID, "jira/issue-type")
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/issue-type", "Jira is not connected for this workspace")
 	if !ok {
 		return
 	}

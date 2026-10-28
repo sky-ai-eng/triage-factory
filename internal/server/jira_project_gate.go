@@ -1,13 +1,11 @@
 package server
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"slices"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -131,7 +129,7 @@ func (p projectPlan) needsJira() bool {
 // It writes the response and returns false when the write must not proceed.
 func (s *Server) gateJiraProjects(
 	w http.ResponseWriter, r *http.Request,
-	orgID, userID, site string,
+	orgID, site string,
 	wishes []jiraProjectWish,
 ) ([]domain.JiraProjectStatusRules, bool) {
 	// First pass: settle what each project needs from Jira, without asking yet.
@@ -187,7 +185,11 @@ func (s *Server) gateJiraProjects(
 		return out, true
 	}
 
-	client, ok := s.jiraGateClient(w, r, orgID)
+	// The client is resolved only now that something needs verifying, so an
+	// unconnected or turned-off workspace can still remove a project it can no
+	// longer map.
+	client, ok := s.jiraSystemClient(w, r, orgID, "settings/team/jira-projects",
+		"Jira is not connected for this workspace, so a project or a status mapping cannot be added")
 	if !ok {
 		return nil, false
 	}
@@ -325,27 +327,6 @@ func sameStatusSet(ids []string, stored []domain.JiraStatusRef) bool {
 	slices.Sort(got)
 	slices.Sort(want)
 	return slices.Equal(got, want)
-}
-
-// jiraGateClient resolves the org's Jira service credential into a client,
-// through the resolver every Jira client comes out of, so a Jira an org admin
-// turned off is refused here as everywhere else. It is called only once
-// something actually needs verifying, so an unconnected or turned-off
-// workspace can still remove a project it can no longer map.
-func (s *Server) jiraGateClient(w http.ResponseWriter, r *http.Request, orgID string) (*jira.Client, bool) {
-	client, err := s.jiraResolver.ForSystem(r.Context(), orgID)
-	switch {
-	case errors.Is(err, eventsource.ErrDisabled):
-		writeSourceDisabled(w, eventsource.KindJira)
-		return nil, false
-	case errors.Is(err, jira.ErrNoJiraSystemCredential):
-		writeNotConfigured(w, "Jira is not connected for this workspace, so a project or a status mapping cannot be added")
-		return nil, false
-	case err != nil:
-		internalError(w, "settings/team/jira-projects", err)
-		return nil, false
-	}
-	return client, true
 }
 
 // writeJiraGateStopped ends the gate when Jira stops answering partway through
