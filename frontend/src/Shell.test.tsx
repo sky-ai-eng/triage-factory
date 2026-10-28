@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
-import { MemoryRouter, Route, Routes } from 'react-router'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { MeResponse } from './types'
 
@@ -56,26 +56,29 @@ vi.mock('./hooks/useTeams', () => ({
   }),
 }))
 
+const entMock = vi.hoisted(() => ({ fleet: false }))
 vi.mock('./hooks/useEntitlements', () => ({
   FeatureFleet: 'fleet',
-  useEntitlements: () => ({ has: () => false, loaded: true }),
+  useEntitlements: () => ({ has: (f: string) => f === 'fleet' && entMock.fleet, loaded: true }),
 }))
 
 // The real hook resolves the active org through OrgContext + the deployment
-// config, neither of which this render has a reason to mount.
-vi.mock('./hooks/useOrgHref', () => ({ useOrgHref: () => (p: string) => p }))
+// config, neither of which this render has a reason to mount. It prefixes the
+// way multi mode does, so a path that skips it is visible in a test.
+vi.mock('./hooks/useOrgHref', () => ({ useOrgHref: () => (p: string) => '/orgs/o1' + p }))
 
 import Shell from './Shell'
 import { useShellScope } from './hooks/useShellScope'
 
 beforeEach(() => {
   meMock.me = null
+  entMock.fleet = false
   teamsMock.teams = []
   teamsMock.activeTeamId = ''
   teamsMock.setTeamId = vi.fn()
 })
 
-function me(teams: MeResponse['teams']): MeResponse {
+function me(teams: MeResponse['teams'], isOperator = false): MeResponse {
   return {
     id: 'u1',
     email: 'someone@example.com',
@@ -83,7 +86,7 @@ function me(teams: MeResponse['teams']): MeResponse {
     teams,
     active_org_id: 'o1',
     org_creation_enabled: true,
-    is_operator: false,
+    is_operator: isOperator,
   }
 }
 
@@ -179,5 +182,47 @@ describe('Shell — the scope mark drives the outlet context by id', () => {
     expect(rows).toHaveLength(2)
     fireEvent.click(rows[0])
     expect(teamsMock.setTeamId).toHaveBeenCalledWith('t1')
+  })
+})
+
+// The fleet console's subject is the deployment, so its row is the one rail
+// destination multi mode does not put under the active org.
+function PathProbe() {
+  return <div data-testid="path-probe">{useLocation().pathname}</div>
+}
+
+describe('Shell — the Fleet row is addressed without an org', () => {
+  function renderAt(path: string) {
+    meMock.me = me([], true)
+    entMock.fleet = true
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <Routes>
+          <Route element={<Shell />}>
+            <Route path="*" element={<PathProbe />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    )
+  }
+
+  it('navigates to /fleet, and every other row under the active org', () => {
+    renderAt('/orgs/o1/board')
+
+    fireEvent.click(within(rail()).getByRole('link', { name: 'Fleet' }))
+    expect(screen.getByTestId('path-probe').textContent).toBe('/fleet')
+
+    // Board's name carries its count tail, so it is found by its label.
+    fireEvent.click(within(rail()).getByText('Board'))
+    expect(screen.getByTestId('path-probe').textContent).toBe('/orgs/o1/board')
+  })
+
+  it('lights the Fleet row at /fleet', () => {
+    renderAt('/fleet')
+
+    expect(within(rail()).getByRole('link', { name: 'Fleet' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    )
   })
 })

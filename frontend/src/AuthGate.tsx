@@ -37,7 +37,9 @@ import { isSSORequired } from './lib/apiClient'
  * mandatory-setup gate redirects incomplete users to. In multi it sits
  * outside /orgs/:id and resolves its org from OrgContext (server-active /
  * localStorage / first-org), so MultiAuthGate admits it via the
- * org-resolved branch rather than redirecting it away.
+ * org-resolved branch rather than redirecting it away. /fleet is admitted the
+ * same way: its subject is the deployment, and the org it resolves is only the
+ * one the shell around it acts in.
  */
 
 function Loading() {
@@ -149,7 +151,7 @@ function MultiAuthGate({ children }: { children: React.ReactNode }) {
     return <Navigate to={'/orgs/' + activeOrgId + tail} replace />
   }
   // Authed + has orgs. MultiAuthGate mounts under /orgs/:org_id/* (org in the
-  // path) and the bare /setup wizard (org resolved from OrgContext —
+  // path) and the bare /setup and /fleet pages (org resolved from OrgContext —
   // server-active / localStorage / first-org), so either way an active org is
   // expected. It might still be null briefly between auth resolution and
   // OrgContext picking — render loading until both line up.
