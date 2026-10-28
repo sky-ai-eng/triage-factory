@@ -41,7 +41,7 @@ func init() {
 // its filters could name a project this team does not track and still match.
 // It is held to the tracked set all the same, as Linear's identifier_changed
 // is, so every id a Jira filter accepts is one the editor offers.
-func jiraProjectInFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, predicate, prior *string) ([]string, error) {
+func jiraProjectInFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, predicate, prior *string) ([]PredicateReferenceFault, error) {
 	return trackedIDFaults(predicate, prior, []string{"jira_project_id_in", "old_jira_project_id_in"},
 		"is not the registry id of a Jira project this team tracks "+
 			"(it takes the id of an entry in jira_projects on GET /api/teams/{team_id}/settings, not the project key)",

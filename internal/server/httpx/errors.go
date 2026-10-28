@@ -1,6 +1,9 @@
 package httpx
 
-import "net/http"
+import (
+	"net/http"
+	"slices"
+)
 
 // Reason codes for ErrorItem.Reason — the stable machine vocabulary clients
 // switch on. Append-only: a shipped code is a wire contract, so it is never
@@ -152,6 +155,12 @@ func (v *Validation) Param(name, msg string) {
 // Add records a fully-specified item, for faults the named helpers don't cover.
 func (v *Validation) Add(item ErrorItem) {
 	v.items = append(v.items, item)
+}
+
+// Items returns a copy of the recorded faults, for a caller that reports them
+// together with faults it finds later instead of flushing them now.
+func (v *Validation) Items() []ErrorItem {
+	return slices.Clone(v.items)
 }
 
 // Flush writes every accumulated item with the given status and reports

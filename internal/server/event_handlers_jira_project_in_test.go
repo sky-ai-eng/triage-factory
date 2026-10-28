@@ -303,11 +303,11 @@ func TestJiraProjectInFaults_PlainMemberUnderRLS_Postgres(t *testing.T) {
 	track(rig.orgOwner, rig.teamA, sky)
 	track(rig.memberB, rig.teamB, ops)
 
-	faultsFor := func(projectIn ...string) []string {
+	faultsFor := func(projectIn ...string) []PredicateReferenceFault {
 		t.Helper()
 		b, _ := json.Marshal(map[string]any{"jira_project_id_in": projectIn})
 		predicate := string(b)
-		var faults []string
+		var faults []PredicateReferenceFault
 		if err := rig.s.tx.WithTx(t.Context(), rig.orgID, rig.plainB, func(tx db.TxStores) error {
 			var e error
 			faults, e = jiraProjectInFaults(t.Context(), tx, rig.orgID, rig.teamB, &predicate, nil)

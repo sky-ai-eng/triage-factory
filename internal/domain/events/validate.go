@@ -39,6 +39,12 @@ type PredicateFault struct {
 type PredicateError struct {
 	EventType string
 	Faults    []PredicateFault
+	// Remainder is the canonical predicate with what its value faults refuse
+	// taken out: an enum miss dropped, a list's empty and repeated entries
+	// removed. It is nil when a schema fault left no predicate to read, or
+	// when nothing is left. A caller checks the rest of the predicate against
+	// it, so a write reports every fault at once. It is never stored.
+	Remainder *string
 }
 
 func (e *PredicateError) Error() string {
@@ -83,9 +89,11 @@ func ValidatePredicateJSON(eventType, rawJSON string) (string, error) {
 	pred := reflect.New(s.PredicateType).Elem()
 	fields := predicateFieldIndex(s.PredicateType)
 	var faults []PredicateFault
+	schemaFault := false
 	for _, key := range slices.Sorted(maps.Keys(object)) {
 		i, known := fields[key]
 		if !known {
+			schemaFault = true
 			faults = append(faults, PredicateFault{
 				Kind: FaultUnknownField, Key: key, Message: fmt.Sprintf("%s has no predicate field %q", eventType, key),
 			})
@@ -93,27 +101,36 @@ func ValidatePredicateJSON(eventType, rawJSON string) (string, error) {
 		}
 		f := pred.Field(i)
 		if err := json.Unmarshal(object[key], f.Addr().Interface()); err != nil {
+			schemaFault = true
 			faults = append(faults, PredicateFault{
 				Kind: FaultInvalidType, Key: key, Message: key + " must be " + kindNoun(predicateFieldKind(f.Type())),
 			})
 			continue
 		}
-		faults = append(faults, valueFaults(key, s.PredicateType.Field(i), f)...)
+		faults = append(faults, refuseValues(key, s.PredicateType.Field(i), f)...)
 	}
-	if len(faults) > 0 {
+	if schemaFault {
 		return "", &PredicateError{EventType: eventType, Faults: faults}
 	}
 
-	canonical, err := json.Marshal(pred.Interface())
+	encoded, err := json.Marshal(pred.Interface())
 	if err != nil {
 		return "", fmt.Errorf("re-encode predicate: %w", err)
 	}
 	// If the struct has no non-nil fields after decode, the result is `{}`
 	// which we also treat as match-all.
-	if string(canonical) == "{}" {
-		return "", nil
+	canonical := string(encoded)
+	if canonical == "{}" {
+		canonical = ""
 	}
-	return string(canonical), nil
+	if len(faults) > 0 {
+		pe := &PredicateError{EventType: eventType, Faults: faults}
+		if canonical != "" {
+			pe.Remainder = &canonical
+		}
+		return "", pe
+	}
+	return canonical, nil
 }
 
 // predicateFieldIndex maps each JSON key of a predicate struct to its field
@@ -146,20 +163,24 @@ func kindNoun(kind string) string {
 	}
 }
 
-// valueFaults checks a decoded field for values its type admits and the field
-// does not: a string outside its `enum` tag's list, the closed set the
-// predicate editor offers for it, and an empty or repeated list entry.
-func valueFaults(key string, sf reflect.StructField, f reflect.Value) []PredicateFault {
+// refuseValues checks a decoded field for values its type admits and the
+// field does not, and takes each one out of the field: a string outside its
+// `enum` tag's list, the closed set the predicate editor offers for it, and an
+// empty or repeated list entry.
+func refuseValues(key string, sf reflect.StructField, f reflect.Value) []PredicateFault {
 	if enumTag := sf.Tag.Get("enum"); enumTag != "" && f.Kind() == reflect.Pointer && !f.IsNil() && f.Elem().Kind() == reflect.String {
 		allowed := strings.Split(enumTag, ",")
 		if v := f.Elem().String(); !slices.Contains(allowed, v) {
+			f.SetZero()
 			return []PredicateFault{{
 				Kind: FaultInvalidValue, Key: key, Message: fmt.Sprintf("%s must be one of %s, not %q", key, strings.Join(allowed, ", "), v),
 			}}
 		}
 	}
 	if list, ok := f.Interface().([]string); ok {
-		return listFaults(key, list)
+		kept, faults := listFaults(key, list)
+		f.Set(reflect.ValueOf(kept))
+		return faults
 	}
 	return nil
 }
@@ -170,9 +191,8 @@ func valueFaults(key string, sf reflect.StructField, f reflect.Value) []Predicat
 // predicate changed. Two entries repeat when they are equal ignoring case.
 // That is how the identity lists match, and every other list holds ids, each
 // a number or a UUID, which letter case does not distinguish, so one
-// comparison holds for every list.
-func listFaults(key string, list []string) []PredicateFault {
-	var faults []PredicateFault
+// comparison holds for every list. kept is list without the refused entries.
+func listFaults(key string, list []string) (kept []string, faults []PredicateFault) {
 	first := make(map[string]int, len(list))
 	for i, entry := range list {
 		if entry == "" {
@@ -189,8 +209,9 @@ func listFaults(key string, list []string) []PredicateFault {
 			continue
 		}
 		first[folded] = i
+		kept = append(kept, entry)
 	}
-	return faults
+	return kept, faults
 }
 
 // foldKey maps s to one representative of the strings strings.EqualFold

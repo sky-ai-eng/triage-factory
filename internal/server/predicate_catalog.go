@@ -34,11 +34,12 @@ import (
 // (PredicateReferenceCheck), it asks only about ids the write adds, so an id
 // that went stale upstream never blocks an edit that keeps it.
 //
-// Faults are 422 INVALID_FIELD on scope_predicate. A provider that does not
-// answer establishes nothing, so the write is refused as an upstream error
-// rather than storing an unverified id, unless faults were already found,
-// which are the caller's to fix whatever the provider says. A provider the org
-// has not connected is a 409 NOT_CONFIGURED.
+// Faults are 422 INVALID_FIELD on the key they are in (scope_predicate.<key>).
+// A provider that does not answer establishes nothing, so the write is refused
+// as an upstream error rather than storing an unverified id, unless faults
+// were already found, by this check or before it, which are the caller's to
+// fix whatever the provider says. A provider the org has not connected is a
+// 409 NOT_CONFIGURED.
 // --------------------------------------------------------------------
 
 // predicateCatalog is a provider catalog whose ids some of a source's
@@ -152,10 +153,12 @@ func (s *Server) linearCatalogClient(ctx context.Context, orgID string) (*linear
 
 // checkPredicateCatalog checks every id predicate adds over prior to
 // eventType's catalog fields against teamID's tracked Jira projects or Linear
-// teams, before the write's transaction. It returns the faults, for
-// checkPredicateReferences to report with its own, or writes the response and
-// reports false when the write must not proceed.
-func (eh *eventHandlersHandler) checkPredicateCatalog(w http.ResponseWriter, r *http.Request, orgID, userID, teamID, eventType string, predicate, prior *string) ([]string, bool) {
+// teams, before the write's transaction. It returns its faults, for
+// checkPredicateReferences to report with the registered check's, or writes
+// the response and reports false when the write must not proceed. found is
+// the 422 faults the request met before it, which a stopped check reports
+// ahead of its own (writeCatalogStopped).
+func (eh *eventHandlersHandler) checkPredicateCatalog(w http.ResponseWriter, r *http.Request, orgID, userID, teamID, eventType string, predicate, prior *string, found []httpx.ErrorItem) ([]httpx.ErrorItem, bool) {
 	type entry struct{ field, id string }
 	source, _, _ := strings.Cut(eventType, ":")
 	schema, _ := events.Get(eventType)
@@ -187,19 +190,21 @@ func (eh *eventHandlersHandler) checkPredicateCatalog(w http.ResponseWriter, r *
 		internalError(w, "event_handlers", err)
 		return nil, false
 	}
-	var faults []string
+	var faults []httpx.ErrorItem
 	for _, catalog := range predicateCatalogs {
 		if len(added[catalog]) == 0 {
 			continue
 		}
 		ids, err := catalog.ids(c)
 		if err != nil {
-			writeCatalogStopped(w, orgID, source, faults, err)
+			writeCatalogStopped(w, orgID, source, append(slices.Clone(found), faults...), err)
 			return nil, false
 		}
 		for _, e := range added[catalog] {
 			if !slices.Contains(ids, e.id) {
-				faults = append(faults, fmt.Sprintf("%s: %q %s", e.field, e.id, catalog.hint))
+				faults = append(faults, httpx.ErrorItem{
+					Reason: httpx.ReasonInvalidField, Message: fmt.Sprintf("%s: %q %s", e.field, e.id, catalog.hint), Field: predicateField(e.field),
+				})
 			}
 		}
 	}
@@ -210,16 +215,12 @@ func (eh *eventHandlersHandler) checkPredicateCatalog(w http.ResponseWriter, r *
 // Jira and Linear write gates do: faults already found are reported over the
 // failure, a provider the org has not connected is a 409, and anything else is
 // an upstream error. Nothing is stored either way.
-func writeCatalogStopped(w http.ResponseWriter, orgID, source string, faults []string, err error) {
+func writeCatalogStopped(w http.ResponseWriter, orgID, source string, faults []httpx.ErrorItem, err error) {
 	provider := map[string]string{"jira": "Jira", "linear": "Linear"}[source]
 	if len(faults) > 0 {
 		serverLog.Warn("predicate catalog check could not read a catalog; reporting the faults found first",
 			"org", orgID, "provider", provider, "error", err)
-		items := make([]httpx.ErrorItem, 0, len(faults))
-		for _, msg := range faults {
-			items = append(items, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: msg, Field: fieldScopePredicate})
-		}
-		httpx.WriteErrors(w, http.StatusUnprocessableEntity, items...)
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, faults...)
 		return
 	}
 	if errors.Is(err, jira.ErrNoJiraSystemCredential) || errors.Is(err, linear.ErrNoLinearSystemCredential) {

@@ -145,3 +145,31 @@ func TestPredicateFieldIndexMatchesAdvertisedFields(t *testing.T) {
 		}
 	}
 }
+
+// A predicate refused only for its values hands back the rest of it, without
+// what it refuses, for the caller's other checks to read; a schema fault
+// leaves nothing to read.
+func TestValidatePredicateJSON_Remainder(t *testing.T) {
+	for _, tc := range []struct {
+		pred string
+		want string // "" for no remainder
+	}{
+		{`{"commenter_id_in":["5","","5","6"],"mention_source":"issue","is_draft":true}`, `{"commenter_id_in":["5","6"],"is_draft":true}`},
+		{`{"commenter_id_in":["",""]}`, ""},
+		{`{"commenter_id_in":["5","5"],"repo":"acme/api"}`, ""},
+		{`{"commenter_id_in":["5","5"],"is_draft":"yes"}`, ""},
+	} {
+		_, err := ValidatePredicateJSON(domain.EventGitHubPRMentioned, tc.pred)
+		var pe *PredicateError
+		if !errors.As(err, &pe) {
+			t.Fatalf("%s: err = %v, want a *PredicateError", tc.pred, err)
+		}
+		got := ""
+		if pe.Remainder != nil {
+			got = *pe.Remainder
+		}
+		if got != tc.want {
+			t.Errorf("%s: remainder = %q, want %q", tc.pred, got, tc.want)
+		}
+	}
+}

@@ -39,7 +39,7 @@ func init() {
 // not a GitHub account id (a login, the value a caller would naturally reach
 // for, never equals one), and a requested_team_id_in entry that is not one of
 // the team's GitHub-team mappings.
-func githubPredicateFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, predicate, prior *string) ([]string, error) {
+func githubPredicateFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, predicate, prior *string) ([]PredicateReferenceFault, error) {
 	faults, err := repoInFaults(ctx, tx, orgID, teamID, predicate, prior)
 	if err != nil {
 		return nil, err
@@ -51,8 +51,8 @@ func githubPredicateFaults(ctx context.Context, tx db.TxStores, orgID, teamID st
 		}
 		for _, id := range added {
 			if !domain.IsGitHubID(id) {
-				faults = append(faults, fmt.Sprintf("%s: %q is not a GitHub account id (%s takes GitHub's numeric id for the account, "+
-					"the github_user_id of GET /api/orgs/{org_id}/github/users/by-name/{login}, not a login)", field, id, field))
+				faults = append(faults, PredicateReferenceFault{Key: field, Message: fmt.Sprintf("%s: %q is not a GitHub account id (%s takes GitHub's numeric id for the account, "+
+					"the github_user_id of GET /api/orgs/{org_id}/github/users/by-name/{login}, not a login)", field, id, field)})
 			}
 		}
 	}
@@ -111,7 +111,7 @@ func addedPredicateEntries(predicate, prior *string, field string) ([]string, er
 // match, because the router delivers a team's handlers only events from
 // repositories it tracks. An owner/name, the value a caller would naturally
 // reach for, is refused here rather than stored as a filter that never fires.
-func repoInFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, predicate, prior *string) ([]string, error) {
+func repoInFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, predicate, prior *string) ([]PredicateReferenceFault, error) {
 	added, err := addedPredicateEntries(predicate, prior, "repo_in")
 	if err != nil {
 		return nil, err
@@ -134,11 +134,11 @@ func repoInFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, pre
 			tracked[repo.ID] = true
 		}
 	}
-	var faults []string
+	var faults []PredicateReferenceFault
 	for _, id := range added {
 		if !tracked[id] {
-			faults = append(faults, fmt.Sprintf("repo_in: %q is not the registry id of a repository this team tracks "+
-				"(repo_in takes the id field of POST /api/repos/list, not owner/name)", id))
+			faults = append(faults, PredicateReferenceFault{Key: "repo_in", Message: fmt.Sprintf("repo_in: %q is not the registry id of a repository this team tracks "+
+				"(repo_in takes the id field of POST /api/repos/list, not owner/name)", id)})
 		}
 	}
 	return faults, nil
