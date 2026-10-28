@@ -31,10 +31,10 @@ func stubPredicateReferenceCheck(t *testing.T) *[]checkCall {
 	calls := &[]checkCall{}
 	predicateReferenceMu.Lock()
 	prev, had := predicateReferenceChecks[referenceCheckEventType]
-	predicateReferenceChecks[referenceCheckEventType] = func(_ context.Context, _ db.TxStores, _, teamID string, predicate, prior *string) ([]string, error) {
+	predicateReferenceChecks[referenceCheckEventType] = func(_ context.Context, _ db.TxStores, _, teamID string, predicate, prior *string) ([]PredicateReferenceFault, error) {
 		*calls = append(*calls, checkCall{teamID: teamID, predicate: orNil(predicate), prior: orNil(prior)})
 		if predicate != nil && strings.Contains(*predicate, "forbidden") {
-			return []string{`has_label: "forbidden" is refused`}, nil
+			return []PredicateReferenceFault{{Key: "has_label", Message: `has_label: "forbidden" is refused`}}, nil
 		}
 		return nil, nil
 	}
@@ -69,7 +69,7 @@ func labelRule(t *testing.T, s *Server, label string) *httptest.ResponseRecorder
 }
 
 // wantReferenceFault fails the test unless rec is the stub's one fault: 422
-// INVALID_FIELD on scope_predicate.
+// INVALID_FIELD on the key it names, scope_predicate.has_label.
 func wantReferenceFault(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	if rec.Code != http.StatusUnprocessableEntity {
@@ -87,8 +87,8 @@ func wantReferenceFault(t *testing.T, rec *httptest.ResponseRecorder) {
 		t.Fatalf("errors = %+v, want the check's one fault", body.Errors)
 	}
 	got := body.Errors[0]
-	if got.Reason != "INVALID_FIELD" || got.Field != fieldScopePredicate || got.Message != `has_label: "forbidden" is refused` {
-		t.Errorf("fault = %+v, want the check's message as INVALID_FIELD on %s", got, fieldScopePredicate)
+	if got.Reason != "INVALID_FIELD" || got.Field != "scope_predicate.has_label" || got.Message != `has_label: "forbidden" is refused` {
+		t.Errorf("fault = %+v, want the check's message as INVALID_FIELD on scope_predicate.has_label", got)
 	}
 }
 

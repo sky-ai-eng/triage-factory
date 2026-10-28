@@ -42,7 +42,7 @@ func init() {
 // identifier such as "ENG-12", the value a caller would naturally reach for,
 // is refused rather than stored as a filter that never fires. An empty value
 // is allowed: it matches a parent being cleared.
-func linearParentChangedFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, predicate, prior *string) ([]string, error) {
+func linearParentChangedFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, predicate, prior *string) ([]PredicateReferenceFault, error) {
 	faults, err := linearPredicateFaults(ctx, tx, orgID, teamID, predicate, prior)
 	if err != nil {
 		return nil, err
@@ -56,8 +56,8 @@ func linearParentChangedFaults(ctx context.Context, tx db.TxStores, orgID, teamI
 		return nil, err
 	}
 	if next != "" && next != stored && !isLinearID(next) {
-		faults = append(faults, fmt.Sprintf("new_parent_id: %q is not a Linear issue id "+
-			"(it takes the parent's UUID, the new_parent_id a parent_changed event carries, not its identifier)", next))
+		faults = append(faults, PredicateReferenceFault{Key: "new_parent_id", Message: fmt.Sprintf("new_parent_id: %q is not a Linear issue id "+
+			"(it takes the parent's UUID, the new_parent_id a parent_changed event carries, not its identifier)", next)})
 	}
 	return faults, nil
 }
@@ -92,7 +92,7 @@ var linearPeopleFields = []string{"assignee_in", "creator_in", "commenter_in"}
 // not a Linear user id. A name, the value a caller would naturally reach for,
 // never equals one, so it is refused rather than stored as a filter that never
 // fires.
-func linearPredicateFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, predicate, prior *string) ([]string, error) {
+func linearPredicateFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, predicate, prior *string) ([]PredicateReferenceFault, error) {
 	faults, err := linearTeamInFaults(ctx, tx, orgID, teamID, predicate, prior)
 	if err != nil {
 		return nil, err
@@ -104,8 +104,8 @@ func linearPredicateFaults(ctx context.Context, tx db.TxStores, orgID, teamID st
 		}
 		for _, id := range added {
 			if !isLinearID(id) {
-				faults = append(faults, fmt.Sprintf("%s: %q is not a Linear user id (%s takes the user's UUID, "+
-					"the id of POST /api/orgs/{org_id}/linear/users/list, not a name)", field, id, field))
+				faults = append(faults, PredicateReferenceFault{Key: field, Message: fmt.Sprintf("%s: %q is not a Linear user id (%s takes the user's UUID, "+
+					"the id of POST /api/orgs/{org_id}/linear/users/list, not a name)", field, id, field)})
 			}
 		}
 	}
@@ -126,7 +126,7 @@ func linearPredicateFaults(ctx context.Context, tx db.TxStores, orgID, teamID st
 // still match. It is held to the tracked set all the same: TF stores nothing
 // about a Linear team no team tracks, so there is nothing to check such an id
 // against.
-func linearTeamInFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, predicate, prior *string) ([]string, error) {
+func linearTeamInFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, predicate, prior *string) ([]PredicateReferenceFault, error) {
 	return trackedIDFaults(predicate, prior, []string{"linear_team_id_in", "old_linear_team_id_in"},
 		"is not the id of a Linear team this team tracks "+
 			"(it takes the id of an entry in linear_teams on GET /api/teams/{team_id}/settings, not the team key)",

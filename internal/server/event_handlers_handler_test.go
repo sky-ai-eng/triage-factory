@@ -561,6 +561,9 @@ func TestHandleEventHandlerPromote_RejectsAlreadyTrigger(t *testing.T) {
 func TestHandleEventHandlerPromote_ValidatesTriggerFields(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
+	// The blueprint exists, because a missing one is a 404 answered before
+	// the body's 422s.
+	seedBlueprintForTrigger(t, s, "p-promote")
 	id := createUserRule(t, s)
 
 	for name, body := range map[string]map[string]any{

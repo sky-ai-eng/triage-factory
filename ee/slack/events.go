@@ -156,7 +156,7 @@ func init() {
 // rather than stored as a filter that never fires.
 //
 // Local mode tracks no Slack channels, so there every added entry is refused.
-func channelInFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, predicate, prior *string) ([]string, error) {
+func channelInFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, predicate, prior *string) ([]server.PredicateReferenceFault, error) {
 	priorIn, err := predicateChannelIn(prior)
 	if err != nil {
 		return nil, err
@@ -194,11 +194,11 @@ func channelInFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, 
 	for _, row := range rows {
 		tracked[row.SlackChannelID] = true
 	}
-	var faults []string
+	var faults []server.PredicateReferenceFault
 	for _, id := range added {
 		if !tracked[id] {
-			faults = append(faults, fmt.Sprintf("channel_in: %q is not the registry id of a channel this team tracks "+
-				"(channel_in takes the id field of GET /api/slack/teams/{team_id}/channels, not Slack's channel id)", id))
+			faults = append(faults, server.PredicateReferenceFault{Key: "channel_in", Message: fmt.Sprintf("channel_in: %q is not the registry id of a channel this team tracks "+
+				"(channel_in takes the id field of GET /api/slack/teams/{team_id}/channels, not Slack's channel id)", id)})
 		}
 	}
 	return faults, nil

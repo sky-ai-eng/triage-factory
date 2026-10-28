@@ -1,25 +1,81 @@
 package events
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
+	"unicode"
 )
+
+// FaultKind is what a PredicateFault finds wrong: the predicate's shape
+// against its event type's schema, or a value the shape admits and the field
+// does not.
+type FaultKind int
+
+const (
+	// FaultUnknownField is a key the event type's predicate does not have.
+	FaultUnknownField FaultKind = iota + 1
+	// FaultInvalidType is a value of the wrong JSON type for its key, or a
+	// predicate that is not a JSON object.
+	FaultInvalidType
+	// FaultInvalidValue is a value of the right type that its field refuses:
+	// one outside an enum, or an empty or repeated list entry.
+	FaultInvalidValue
+)
+
+// PredicateFault is one thing wrong with a predicate.
+type PredicateFault struct {
+	Kind FaultKind
+	// Key is the predicate key the fault is about, empty when the fault is
+	// about the predicate as a whole.
+	Key     string
+	Message string
+}
+
+// PredicateError is every fault ValidatePredicateJSON found in a predicate.
+type PredicateError struct {
+	EventType string
+	Faults    []PredicateFault
+	// Remainder is the canonical predicate with what its value faults refuse
+	// taken out: an enum miss dropped, a list's empty and repeated entries
+	// removed. It is nil when a schema fault left no predicate to read, or
+	// when nothing is left. A caller checks the rest of the predicate against
+	// it, so a write reports every fault at once. It is never stored.
+	Remainder *string
+}
+
+func (e *PredicateError) Error() string {
+	messages := make([]string, len(e.Faults))
+	for i, f := range e.Faults {
+		messages[i] = f.Message
+	}
+	return fmt.Sprintf("invalid predicate for %s: %s", e.EventType, strings.Join(messages, "; "))
+}
 
 // ValidatePredicateJSON parses `rawJSON` against the registered predicate
 // type for `eventType`. On success it returns the canonical re-marshalling
-// of the predicate (stable field order); unknown fields are rejected so the
-// DB persists a canonical form; on failure it returns an error describing
-// what was wrong.
+// of the predicate (stable field order); on failure it returns a
+// *PredicateError naming every fault it found. It refuses an unknown key, a
+// known one in a different case included, and a list holding an entry twice,
+// so the DB persists one canonical form per meaning.
 //
 // An empty / whitespace-only rawJSON is treated as "match-all" and returns
 // "" with no error — callers should persist NULL in that case.
 //
 // Used by `task_rules` and `prompt_triggers` CRUD handlers.
 func ValidatePredicateJSON(eventType, rawJSON string) (string, error) {
+	return ValidatePredicateEdit(eventType, rawJSON, nil)
+}
+
+// ValidatePredicateEdit is ValidatePredicateJSON for a write that replaces
+// prior, the predicate a row stores now (nil for none). Stored rows can hold a
+// list with an empty or repeated entry, so a list the write leaves exactly as
+// prior holds it is not checked for them: an edit is refused only for what it
+// changes, as a stale reference never blocks an edit that keeps it.
+func ValidatePredicateEdit(eventType, rawJSON string, prior *string) (string, error) {
 	trimmed := strings.TrimSpace(rawJSON)
 	if trimmed == "" || trimmed == "{}" || trimmed == "null" {
 		return "", nil
@@ -30,52 +86,153 @@ func ValidatePredicateJSON(eventType, rawJSON string) (string, error) {
 		return "", fmt.Errorf("unknown event type %q", eventType)
 	}
 
-	predPtr := reflect.New(s.PredicateType).Interface()
-	dec := json.NewDecoder(bytes.NewReader([]byte(trimmed)))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(predPtr); err != nil {
-		return "", fmt.Errorf("invalid predicate for %s: %w", eventType, err)
+	// Each key is decoded on its own rather than the whole object in one
+	// strict decode, which stops at the first fault and words it in the
+	// decoder's text.
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &object); err != nil {
+		return "", &PredicateError{EventType: eventType, Faults: []PredicateFault{{
+			Kind: FaultInvalidType, Message: "the predicate must be a JSON object",
+		}}}
 	}
-	// TODO(TFAC-1122): a duplicate or empty entry in an _in list is accepted,
-	// and every fault returns as one plain error the handler answers 400, so
-	// an enum miss is not a 422 and an unknown key carries the decoder's text
-	// instead of UNKNOWN_FIELD.
-	if err := checkEnums(reflect.ValueOf(predPtr).Elem()); err != nil {
-		return "", fmt.Errorf("invalid predicate for %s: %w", eventType, err)
+	t := s.PredicateType
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
 	}
-
-	canonical, err := json.Marshal(predPtr)
-	if err != nil {
-		return "", fmt.Errorf("re-encode predicate: %w", err)
+	pred := reflect.New(t).Elem()
+	stored := reflect.New(t).Elem()
+	if prior != nil {
+		// Best-effort: a stored field that no longer decodes is left zero, and
+		// a list compared with it is checked.
+		_ = json.Unmarshal([]byte(*prior), stored.Addr().Interface())
 	}
-	// reflect.New returned a pointer, so predPtr serialises as the struct —
-	// good. If the struct has no non-nil fields after decode, the result is
-	// `{}` which we also treat as match-all.
-	if string(canonical) == "{}" {
-		return "", nil
+	fields := make(map[string]int, len(s.Fields))
+	for _, f := range s.Fields {
+		fields[f.Name] = f.index
 	}
-	return string(canonical), nil
-}
-
-// checkEnums refuses a string field set to a value outside its `enum` tag's
-// list, the closed set the predicate editor offers for it.
-func checkEnums(pred reflect.Value) error {
-	t := pred.Type()
-	for i := 0; i < t.NumField(); i++ {
-		sf := t.Field(i)
-		enumTag := sf.Tag.Get("enum")
-		if enumTag == "" {
+	var faults []PredicateFault
+	schemaFault := false
+	for _, key := range slices.Sorted(maps.Keys(object)) {
+		i, known := fields[key]
+		if !known {
+			schemaFault = true
+			faults = append(faults, PredicateFault{
+				Kind: FaultUnknownField, Key: key, Message: fmt.Sprintf("%s has no predicate field %q", eventType, key),
+			})
 			continue
 		}
 		f := pred.Field(i)
-		if f.Kind() != reflect.Pointer || f.IsNil() || f.Elem().Kind() != reflect.String {
+		if err := json.Unmarshal(object[key], f.Addr().Interface()); err != nil {
+			schemaFault = true
+			faults = append(faults, PredicateFault{
+				Kind: FaultInvalidType, Key: key, Message: key + " must be " + kindNoun(predicateFieldKind(f.Type())),
+			})
 			continue
 		}
+		faults = append(faults, refuseValues(key, t.Field(i), f, stored.Field(i))...)
+	}
+	if schemaFault {
+		return "", &PredicateError{EventType: eventType, Faults: faults}
+	}
+
+	encoded, err := json.Marshal(pred.Interface())
+	if err != nil {
+		return "", fmt.Errorf("re-encode predicate: %w", err)
+	}
+	// If the struct has no non-nil fields after decode, the result is `{}`
+	// which we also treat as match-all.
+	canonical := string(encoded)
+	if canonical == "{}" {
+		canonical = ""
+	}
+	if len(faults) > 0 {
+		pe := &PredicateError{EventType: eventType, Faults: faults}
+		if canonical != "" {
+			pe.Remainder = &canonical
+		}
+		return "", pe
+	}
+	return canonical, nil
+}
+
+// kindNoun names the JSON a FieldSchema.Type takes.
+func kindNoun(kind string) string {
+	switch kind {
+	case "bool":
+		return "true or false"
+	case "int":
+		return "an integer"
+	case "string_list":
+		return "a list of strings"
+	default:
+		return "a string"
+	}
+}
+
+// refuseValues checks a decoded field for values its type admits and the
+// field does not, and takes each one out of the field: a string outside its
+// `enum` tag's list, the closed set the predicate editor offers for it, and an
+// empty or repeated entry in a list that differs from stored, the same field
+// of the predicate the row stores now.
+func refuseValues(key string, sf reflect.StructField, f, stored reflect.Value) []PredicateFault {
+	if enumTag := sf.Tag.Get("enum"); enumTag != "" && f.Kind() == reflect.Pointer && !f.IsNil() && f.Elem().Kind() == reflect.String {
 		allowed := strings.Split(enumTag, ",")
 		if v := f.Elem().String(); !slices.Contains(allowed, v) {
-			name, _, _ := strings.Cut(sf.Tag.Get("json"), ",")
-			return fmt.Errorf("%s must be one of %s, not %q", name, strings.Join(allowed, ", "), v)
+			f.SetZero()
+			return []PredicateFault{{
+				Kind: FaultInvalidValue, Key: key, Message: fmt.Sprintf("%s must be one of %s, not %q", key, strings.Join(allowed, ", "), v),
+			}}
 		}
 	}
+	if list, ok := f.Interface().([]string); ok {
+		if prior := stored.Interface().([]string); prior != nil && slices.Equal(list, prior) {
+			return nil
+		}
+		kept, faults := listFaults(key, list)
+		f.Set(reflect.ValueOf(kept))
+		return faults
+	}
 	return nil
+}
+
+// listFaults refuses an empty entry, which matches only events that lack the
+// value, and a repeated one: a list is a set, and its stored text is the one
+// form of what it means, which the rule editor compares to tell whether a
+// predicate changed. Two entries repeat when they are equal ignoring case.
+// That is how the identity lists match, and every other list holds ids, each
+// a number or a UUID, which letter case does not distinguish, so one
+// comparison holds for every list. kept is list without the refused entries.
+func listFaults(key string, list []string) (kept []string, faults []PredicateFault) {
+	first := make(map[string]int, len(list))
+	for i, entry := range list {
+		if entry == "" {
+			faults = append(faults, PredicateFault{
+				Kind: FaultInvalidValue, Key: key, Message: fmt.Sprintf("%s[%d] is empty", key, i),
+			})
+			continue
+		}
+		folded := foldKey(entry)
+		if j, seen := first[folded]; seen {
+			faults = append(faults, PredicateFault{
+				Kind: FaultInvalidValue, Key: key, Message: fmt.Sprintf("%s[%d] %q repeats %s[%d] %q; entries are compared ignoring case", key, i, entry, key, j, list[j]),
+			})
+			continue
+		}
+		first[folded] = i
+		kept = append(kept, entry)
+	}
+	return kept, faults
+}
+
+// foldKey maps s to one representative of the strings strings.EqualFold
+// counts equal to it: each rune becomes the least rune of its case-folding
+// orbit, which is the equivalence EqualFold tests rune by rune.
+func foldKey(s string) string {
+	return strings.Map(func(r rune) rune {
+		least := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			least = min(least, f)
+		}
+		return least
+	}, s)
 }

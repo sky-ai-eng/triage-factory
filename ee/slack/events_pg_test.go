@@ -14,6 +14,7 @@ import (
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
+	"github.com/sky-ai-eng/triage-factory/internal/server"
 )
 
 func TestChannelInFaults(t *testing.T) {
@@ -51,9 +52,9 @@ func TestChannelInFaults(t *testing.T) {
 		s := `{"channel_in":["` + strings.Join(ids, `","`) + `"]}`
 		return &s
 	}
-	faults := func(predicate, prior *string) []string {
+	faults := func(predicate, prior *string) []server.PredicateReferenceFault {
 		t.Helper()
-		var out []string
+		var out []server.PredicateReferenceFault
 		if err := r.stor.Tx.WithTx(t.Context(), orgID, member, func(tx db.TxStores) error {
 			var e error
 			out, e = channelInFaults(t.Context(), tx, orgID, teamID, predicate, prior)
@@ -88,8 +89,8 @@ func TestChannelInFaults(t *testing.T) {
 				t.Fatalf("faults = %q, want one each for %q", got, tc.refused)
 			}
 			for i, id := range tc.refused {
-				if !strings.HasPrefix(got[i], `channel_in: "`+id+`"`) {
-					t.Errorf("fault %d = %q, want it to name %q", i, got[i], id)
+				if got[i].Key != "channel_in" || !strings.HasPrefix(got[i].Message, `channel_in: "`+id+`"`) {
+					t.Errorf("fault %d = %+v, want it on channel_in, naming %q", i, got[i], id)
 				}
 			}
 		})

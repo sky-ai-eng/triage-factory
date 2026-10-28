@@ -450,8 +450,8 @@ read per project because a team-managed project on Cloud has issue types of its
 own), or one of the instance's priorities
 (`POST /api/orgs/{org_id}/jira/priorities/list`). Saving a handler asks Jira,
 under the org's credential, about each id the write adds: a name or an id Jira
-does not offer the team is refused with `422 INVALID_FIELD` on
-`scope_predicate`, Jira not answering refuses the write with `502
+does not offer the team is refused with `422 INVALID_FIELD` on the key it is in,
+such as `scope_predicate.status_id_in`, Jira not answering refuses the write with `502
 UPSTREAM_UNAVAILABLE`, and a Jira the org has not connected with `409
 NOT_CONFIGURED`. A write that adds no id asks Jira nothing. Events recorded
 before the ids were carried have none, so an id filter never matches them.
@@ -492,7 +492,7 @@ projects the team tracks, so an empty `jira_project_id_in` matches every one
 of them, and each entry must be a project the handler's team tracks on the
 org's current Jira site. Creating, editing or promoting a handler refuses any
 other entry, a project key included, with `422 INVALID_FIELD` on
-`scope_predicate`. An edit is checked only for the entries it adds, so a
+`scope_predicate.jira_project_id_in`. An edit is checked only for the entries it adds, so a
 project the team has since stopped tracking never blocks an edit that leaves
 it in place.
 
@@ -704,7 +704,7 @@ ever see events from Linear teams the team tracks, so an empty
 `linear_team_id_in` matches every one of them, and each entry must be a Linear
 team the handler's team tracks in the org's current Linear workspace. Creating,
 editing or promoting a handler refuses any other entry, a team key included,
-with `422 INVALID_FIELD` on `scope_predicate`. An edit is checked only for the
+with `422 INVALID_FIELD` on `scope_predicate.linear_team_id_in`. An edit is checked only for the
 entries it adds, so a Linear team the team has since stopped tracking never
 blocks an edit that leaves it in place.
 
@@ -714,7 +714,7 @@ display). Its `new_parent_id` filter matches the new parent's UUID, so a
 parent that moves team or whose team key is renamed still matches; an empty
 value matches a cleared parent. A value that is not a Linear id, such as an
 identifier like `ENG-12`, is refused with `422 INVALID_FIELD` on
-`scope_predicate`.
+`scope_predicate.new_parent_id`.
 
 #### Identity
 
@@ -843,7 +843,7 @@ Slack support is an Enterprise, multi-mode-only feature, configured per-org from
 
 Mention-ness is metadata (`SlackMessageMetadata.Mentioned`), not a separate event type — the same taxonomy rule that only splits an event when the two cases are genuinely different situations. A handler can still narrow to explicit mentions with the predicate's `mentioned_only` flag, or to specific channels with `channel_in`, which names channels by their registry id (the `id` field of `GET /api/slack/teams/{team_id}/channels`), not by the ID Slack gives them.
 
-A team's handlers only ever see messages from channels the team tracks, so an empty `channel_in` matches every one of them, and each entry must be a channel the handler's team tracks. Creating, editing or promoting a handler refuses any other entry, Slack's own channel ID included, with `422 INVALID_FIELD` on `scope_predicate`. An edit is checked only for the entries it adds, so a channel the team has since stopped tracking never blocks an edit that leaves it in place. The default trigger TF creates when a team first tracks a channel names no channels, so it fires on every channel the team tracks, including ones tracked later.
+A team's handlers only ever see messages from channels the team tracks, so an empty `channel_in` matches every one of them, and each entry must be a channel the handler's team tracks. Creating, editing or promoting a handler refuses any other entry, Slack's own channel ID included, with `422 INVALID_FIELD` on `scope_predicate.channel_in`. An edit is checked only for the entries it adds, so a channel the team has since stopped tracking never blocks an edit that leaves it in place. The default trigger TF creates when a team first tracks a channel names no channels, so it fires on every channel the team tracks, including ones tracked later.
 
 ### Engaged threads
 
@@ -940,12 +940,12 @@ Every GitHub event's metadata carries the ids beside the logins it names: `autho
 
 A GitHub handler predicate names people and teams by GitHub's id, which a rename does not change, never by login:
 
-- `author_id_in` (every GitHub event), `reviewer_id_in` (the review events), `commenter_id_in` (`commented` and `mentioned`) and `requested_user_id_in` (`review_requested`, `review_request_removed`) take GitHub account ids, matched exactly against `author_id`, `reviewer_id`, `commenter_ids` / `commenter_id` and `requested_user_id`. A team member's id is the `github_user_id` of `GET /api/me` and of the team roster (`POST /api/teams/{team_id}/members/list`). Any other account, a bot included, is resolved from its login through the org's GitHub credential with `GET /api/orgs/{org_id}/github/users/by-name/{login}`, which answers `404` for a login no account holds; `GET /api/orgs/{org_id}/github/users/{github_user_id}` names an id by its current login. Creating, editing or promoting a handler refuses an entry that is not an account id, a login included, with `422 INVALID_FIELD` on `scope_predicate`.
-- `requested_team_id_in` (`review_requested`, `review_request_removed`) takes GitHub team ids, matched against `requested_team_id`. Each entry must be the `github_team_id` of one of the handler's team's GitHub-team mappings (`GET /api/teams/{team_id}/github-groups`), the teams whose review requests route to it, and any other entry, an `org/slug` included, is refused with `422 INVALID_FIELD` on `scope_predicate`.
+- `author_id_in` (every GitHub event), `reviewer_id_in` (the review events), `commenter_id_in` (`commented` and `mentioned`) and `requested_user_id_in` (`review_requested`, `review_request_removed`) take GitHub account ids, matched exactly against `author_id`, `reviewer_id`, `commenter_ids` / `commenter_id` and `requested_user_id`. A team member's id is the `github_user_id` of `GET /api/me` and of the team roster (`POST /api/teams/{team_id}/members/list`). Any other account, a bot included, is resolved from its login through the org's GitHub credential with `GET /api/orgs/{org_id}/github/users/by-name/{login}`, which answers `404` for a login no account holds; `GET /api/orgs/{org_id}/github/users/{github_user_id}` names an id by its current login. Creating, editing or promoting a handler refuses an entry that is not an account id, a login included, with `422 INVALID_FIELD` on the key it is in, such as `scope_predicate.author_id_in`.
+- `requested_team_id_in` (`review_requested`, `review_request_removed`) takes GitHub team ids, matched against `requested_team_id`. Each entry must be the `github_team_id` of one of the handler's team's GitHub-team mappings (`GET /api/teams/{team_id}/github-groups`), the teams whose review requests route to it, and any other entry, an `org/slug` included, is refused with `422 INVALID_FIELD` on `scope_predicate.requested_team_id_in`.
 
 As with `repo_in`, an edit is checked only for the entries it adds. An empty list filters nothing. An event recorded before ids were carries none, so an identity filter never matches it: re-evaluating such an event (a deferred trigger re-scored on an old task, an injected follow-up) finds no match. A GitHub predicate has no login-valued identity field: `author_in`, `author`, `reviewer_in`, `reviewer`, `commenter_in`, `commenter`, `requested_login` and `requested_team` are unknown fields, refused with `400`. A local install's stored predicates are migrated to the id fields, each login replaced by the id of the identity binding holding it on the org's GitHub host. An entry the migration could not resolve, a login no binding with an id holds or a team's `org/slug`, stays as written and matches nothing until the handler is edited.
 
-Every GitHub event's metadata names its repository twice: `repo`, the `owner/name` it had when the event fired, and `repository_id`, the repository's registry row, which a rename does not move. A handler predicate scopes to repositories with `repo_in`, which names them by registry id (the `id` field of `POST /api/repos/list` with `team_id`), not by `owner/name`. A team's handlers only ever see events from repositories the team tracks — the router's team gate asks about the registry row the event's pull request references, never the name in its key — so an empty `repo_in` matches every one of them, and each entry must be a repository the handler's team tracks. Creating, editing or promoting a handler refuses any other entry, an `owner/name` included, with `422 INVALID_FIELD` on `scope_predicate`. An edit is checked only for the entries it adds, so a repository the team has since stopped tracking never blocks an edit that leaves it in place.
+Every GitHub event's metadata names its repository twice: `repo`, the `owner/name` it had when the event fired, and `repository_id`, the repository's registry row, which a rename does not move. A handler predicate scopes to repositories with `repo_in`, which names them by registry id (the `id` field of `POST /api/repos/list` with `team_id`), not by `owner/name`. A team's handlers only ever see events from repositories the team tracks — the router's team gate asks about the registry row the event's pull request references, never the name in its key — so an empty `repo_in` matches every one of them, and each entry must be a repository the handler's team tracks. Creating, editing or promoting a handler refuses any other entry, an `owner/name` included, with `422 INVALID_FIELD` on `scope_predicate.repo_in`. An edit is checked only for the entries it adds, so a repository the team has since stopped tracking never blocks an edit that leaves it in place.
 
 ### Jira Issue Snapshot
 
@@ -1016,3 +1016,9 @@ UUID in the same batches as the rest and seeded without events.
 ## Configuration
 
 Events can be enabled/disabled on the Event Types settings page. Disabling an event type hides it from the triage queue but does not stop the tracker from detecting it — events are still recorded and can trigger delegation rules.
+
+### Handler predicates
+
+Creating a rule or trigger, editing one and promoting a rule check its `scope_predicate` against the predicate fields of its event type, and report every fault found, each on the key it is about (`scope_predicate.<key>`). A key the event type does not have, including a field name in a different case, is refused with `400 UNKNOWN_FIELD`, and a value of the wrong JSON type with `400 INVALID_FIELD`. A value of the right type that the field does not accept is refused with `422 INVALID_FIELD`: a value outside the field's enum, an empty list entry, or a list entry equal to an earlier one ignoring case. A list is a set, so a repeated entry has no meaning, and refusing it keeps one stored form for each predicate. An edit or a promote is checked for these only in a list it changes: a list re-sent exactly as the handler stores it is kept as it is, so a stored list holding an empty or repeated entry never blocks an edit to the handler's other fields.
+
+Every `422` fault a write has comes back in one answer: the predicate's value faults above, the entries the sections above refuse because the team does not track them or Jira or Linear does not offer them, each on the key it is in, and the write's other fields, such as an out-of-range `default_priority` or a `blueprint_id` another team owns. A request with both `400` and `422` faults is answered `400` with only the `400` faults, and its `422` faults are reported once those are fixed. A missing blueprint (`404`) or a blueprint that already has a trigger (`409`) is answered before the `422` faults too. A write with `422` faults is answered with them even when Jira or Linear cannot be asked about its ids, and a create whose `event_type` names a source the org cannot use asks that source nothing.

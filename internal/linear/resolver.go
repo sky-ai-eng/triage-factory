@@ -228,6 +228,10 @@ type Resolver interface {
 	ResolveSystemCredential(ctx context.Context, orgID string) (SystemCredential, error)
 }
 
+// TODO(TFAC-1222): no resolution checks whether an org admin turned Linear off,
+// so every caller outside the pollers, the agenthost funnels and credential
+// sealing (the event-handler catalog check, the pickers, the lifecycle
+// mirror, user claims) still gets a client and calls a turned-off Linear.
 type resolver struct {
 	secrets db.SecretStore
 	orgs    db.OrgsStore
