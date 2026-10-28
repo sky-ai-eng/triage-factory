@@ -342,28 +342,33 @@ services:
       timeout: 3s
       retries: 10
 
-  # S3-compatible object store for durable blueprint workspaces (multi
-  # mode). The TF binary's objectStorage backend snapshots a workspace to
-  # a bucket here so it outlives the executor that created it; the host
-  # worktree is only a warm cache. Self-host runs SeaweedFS — one
-  # self-contained S3 container (Apache-2.0, Go), no Postgres/JWT coupling.
+  # S3-compatible object store for multi mode, holding two buckets with
+  # opposite needs. tf-workspaces holds workspace snapshots: a cache, so a
+  # workspace outlives the executor that created it (the host worktree is only
+  # a warm cache), overwritten on every checkpoint and bounded by TF's own
+  # retention reaper. tf-knowledge holds team knowledge-base documents, the only
+  # copy of what people wrote, so it is versioned. Self-host runs SeaweedFS —
+  # one self-contained S3 container (Apache-2.0, Go), no Postgres/JWT coupling.
   # The SAME aws-sdk-go-v2 client (path-style, BaseEndpoint) points at hosted
   # Supabase Storage / S3 / R2 for SaaS or BYO: only TF_BLOB_ENDPOINT
   # changes, never this compose file. Local mode doesn't run any of this —
   # it writes blobs to the on-disk state-root.
   #
-  # One identity, one input — and never open. SeaweedFS serves UNAUTHENTICATED
-  # when no identity is configured (its allow-all default), so we template a
-  # single-identity s3.json from the same TF_BLOB_ACCESS_KEY / TF_BLOB_SECRET_KEY
-  # the TF binary reads: there's no second credential to drift, and the bundled
-  # store is never reachable without creds on the compose network. The wrapper
-  # writes that config as root to a tmpfs (/run/seaweedfs, declared below), then
-  # execs the image's own /entrypoint.sh, which keeps its /data chown + su-exec
-  # drop to the non-root `seaweed` user + FIPS setup. $$ defers expansion to the
-  # in-container shell. Because the config lives on tmpfs, the templated secret
-  # stays in memory and never lands on the container's writable layer — the same
-  # exposure as the env var it's built from. Keep the creds hex (see .env.example)
-  # so they stay JSON-safe inside the config.
+  # Four identities, each limited to its bucket, and never open. SeaweedFS
+  # serves UNAUTHENTICATED when no identity is configured (its allow-all
+  # default), so we template s3.json from the same key pairs the TF services
+  # read: the workspace pair (read/write/list on the workspace bucket, executor
+  # only), the knowledge writer (read/write/list on the knowledge bucket,
+  # control), the knowledge reader (read/list on the knowledge bucket, the
+  # executor, which only copies knowledge into a run), and an admin pair that
+  # only seaweedfs-postinit holds, to create the buckets and set versioning.
+  # The wrapper writes that config as root to a tmpfs (/run/seaweedfs, declared
+  # below), then execs the image's own /entrypoint.sh, which keeps its /data
+  # chown + su-exec drop to the non-root `seaweed` user + FIPS setup. $$ defers
+  # expansion to the in-container shell. Because the config lives on tmpfs, the
+  # templated secrets stay in memory and never land on the container's writable
+  # layer — the same exposure as the env vars they're built from. Keep the
+  # creds hex (see .env.example) so they stay JSON-safe inside the config.
   seaweedfs:
     image: chrislusf/seaweedfs:4.36
     restart: unless-stopped
@@ -371,25 +376,47 @@ services:
     command:
       - |
         set -eu
-        # These creds are templated verbatim into s3.json, so a literal quote or
-        # backslash would yield malformed JSON and SeaweedFS would fail to load
-        # the identity. Reject them up front with a clear message instead of a
-        # cryptic startup failure; hex creds (see .env.example) never trip this.
-        case "$$TF_BLOB_ACCESS_KEY$$TF_BLOB_SECRET_KEY" in
-          *'"'*|*'\'*) echo "TF_BLOB_ACCESS_KEY/SECRET_KEY must not contain a quote or backslash (they are templated into s3.json) — generate with 'openssl rand -hex 32' (see .env.example)" >&2; exit 1 ;;
+        WS=$$TF_WORKSPACE_BUCKET KB=$$TF_KNOWLEDGE_BUCKET
+        # These values are templated verbatim into s3.json, so a literal quote
+        # or backslash would yield malformed JSON and SeaweedFS would fail to
+        # load the identities. Reject them up front with a clear message
+        # instead of a cryptic startup failure; hex creds (see .env.example)
+        # never trip this.
+        case "$$TF_WORKSPACE_ACCESS_KEY$$TF_WORKSPACE_SECRET_KEY$$TF_KNOWLEDGE_ACCESS_KEY$$TF_KNOWLEDGE_SECRET_KEY$$TF_KNOWLEDGE_READER_ACCESS_KEY$$TF_KNOWLEDGE_READER_SECRET_KEY$$SEAWEEDFS_ADMIN_ACCESS_KEY$$SEAWEEDFS_ADMIN_SECRET_KEY$$WS$$KB" in
+          *'"'*|*'\'*) echo "the object-store keys and bucket names must not contain a quote or backslash (they are templated into s3.json) — generate keys with 'openssl rand -hex 32' (see .env.example)" >&2; exit 1 ;;
         esac
+        # SeaweedFS finds an identity by its access key, so two identities
+        # sharing one would hand a request whichever it finds first: the
+        # executor's read-only pair could act as the writer.
+        if [ "$$(printf '%s\n' "$$TF_WORKSPACE_ACCESS_KEY" "$$TF_KNOWLEDGE_ACCESS_KEY" "$$TF_KNOWLEDGE_READER_ACCESS_KEY" "$$SEAWEEDFS_ADMIN_ACCESS_KEY" | sort -u | wc -l)" -ne 4 ]; then
+          echo "TF_WORKSPACE_ACCESS_KEY, TF_KNOWLEDGE_ACCESS_KEY, TF_KNOWLEDGE_READER_ACCESS_KEY and SEAWEEDFS_ADMIN_ACCESS_KEY must be four different keys (see .env.example)" >&2
+          exit 1
+        fi
         cat > /run/seaweedfs/s3.json <<EOF
-        {"identities":[{"name":"tf","credentials":[{"accessKey":"$$TF_BLOB_ACCESS_KEY","secretKey":"$$TF_BLOB_SECRET_KEY"}],"actions":["Admin","Read","Write","List","Tagging"]}]}
+        {"identities":[
+        {"name":"workspace","credentials":[{"accessKey":"$$TF_WORKSPACE_ACCESS_KEY","secretKey":"$$TF_WORKSPACE_SECRET_KEY"}],"actions":["Read:$$WS","Write:$$WS","List:$$WS"]},
+        {"name":"knowledge-writer","credentials":[{"accessKey":"$$TF_KNOWLEDGE_ACCESS_KEY","secretKey":"$$TF_KNOWLEDGE_SECRET_KEY"}],"actions":["Read:$$KB","Write:$$KB","List:$$KB"]},
+        {"name":"knowledge-reader","credentials":[{"accessKey":"$$TF_KNOWLEDGE_READER_ACCESS_KEY","secretKey":"$$TF_KNOWLEDGE_READER_SECRET_KEY"}],"actions":["Read:$$KB","List:$$KB"]},
+        {"name":"admin","credentials":[{"accessKey":"$$SEAWEEDFS_ADMIN_ACCESS_KEY","secretKey":"$$SEAWEEDFS_ADMIN_SECRET_KEY"}],"actions":["Admin:$$WS","Admin:$$KB"]}
+        ]}
         EOF
         exec /entrypoint.sh server -s3 -s3.config=/run/seaweedfs/s3.json
     environment:
-      TF_BLOB_ACCESS_KEY: ${TF_BLOB_ACCESS_KEY:?missing TF_BLOB_ACCESS_KEY (see .env.example)}
-      TF_BLOB_SECRET_KEY: ${TF_BLOB_SECRET_KEY:?missing TF_BLOB_SECRET_KEY (see .env.example)}
+      TF_WORKSPACE_BUCKET: ${TF_WORKSPACE_BUCKET:-tf-workspaces}
+      TF_KNOWLEDGE_BUCKET: ${TF_KNOWLEDGE_BUCKET:-tf-knowledge}
+      TF_WORKSPACE_ACCESS_KEY: ${TF_WORKSPACE_ACCESS_KEY:?missing TF_WORKSPACE_ACCESS_KEY (see .env.example)}
+      TF_WORKSPACE_SECRET_KEY: ${TF_WORKSPACE_SECRET_KEY:?missing TF_WORKSPACE_SECRET_KEY (see .env.example)}
+      TF_KNOWLEDGE_ACCESS_KEY: ${TF_KNOWLEDGE_ACCESS_KEY:?missing TF_KNOWLEDGE_ACCESS_KEY (see .env.example)}
+      TF_KNOWLEDGE_SECRET_KEY: ${TF_KNOWLEDGE_SECRET_KEY:?missing TF_KNOWLEDGE_SECRET_KEY (see .env.example)}
+      TF_KNOWLEDGE_READER_ACCESS_KEY: ${TF_KNOWLEDGE_READER_ACCESS_KEY:?missing TF_KNOWLEDGE_READER_ACCESS_KEY (see .env.example)}
+      TF_KNOWLEDGE_READER_SECRET_KEY: ${TF_KNOWLEDGE_READER_SECRET_KEY:?missing TF_KNOWLEDGE_READER_SECRET_KEY (see .env.example)}
+      SEAWEEDFS_ADMIN_ACCESS_KEY: ${SEAWEEDFS_ADMIN_ACCESS_KEY:?missing SEAWEEDFS_ADMIN_ACCESS_KEY (see .env.example)}
+      SEAWEEDFS_ADMIN_SECRET_KEY: ${SEAWEEDFS_ADMIN_SECRET_KEY:?missing SEAWEEDFS_ADMIN_SECRET_KEY (see .env.example)}
     volumes:
       - seaweed-data:/data
-    # The s3.json identity is written here (see the auth note above), so the
-    # templated secret stays in memory and never persists on the container's
-    # writable layer.
+    # The s3.json identities are written here (see the auth note above), so
+    # the templated secrets stay in memory and never persist on the
+    # container's writable layer.
     tmpfs:
       - /run/seaweedfs
     # No published ports. The S3 API (8333) is reached only over the compose
@@ -405,24 +432,27 @@ services:
       timeout: 5s
       retries: 10
 
-  # Creates the workspace bucket idempotently on every `docker compose up`,
-  # mirroring postgres-postinit. SeaweedFS ships no `mc`, so this drives the
-  # generic aws-cli against the S3 API: head-bucket succeeds when the bucket
-  # already exists (the re-run no-op), otherwise create-bucket makes it. Reads
-  # the same creds + bucket name TF does, keeping one source of truth across
-  # server, sidecar, and client. The control service waits on this
-  # completing so its first snapshot never races a missing bucket.
+  # Creates both buckets idempotently on every `docker compose up`, mirroring
+  # postgres-postinit, and turns versioning on for the knowledge bucket.
+  # SeaweedFS ships no `mc`, so this drives the generic aws-cli against the S3
+  # API: head-bucket succeeds when a bucket already exists (the re-run no-op),
+  # otherwise create-bucket makes it. It is the one holder of the admin pair;
+  # neither TF service gets it. Versioning is set on every run, not only at
+  # creation, because SeaweedFS lets the knowledge writer change it (it files
+  # PutBucketVersioning under Write), so each `up` puts it back. The workspace
+  # bucket is never versioned: every checkpoint overwrites its snapshot, and
+  # each overwrite would be kept. The control and executor services wait on
+  # this completing so their first write never races a missing bucket.
   seaweedfs-postinit:
     image: amazon/aws-cli:2.35.11
     depends_on:
       seaweedfs: { condition: service_healthy }
     environment:
-      # aws-cli reads AWS_* directly; derive them from the single TF_BLOB pair
-      # so there's no parallel credential to drift (same rule as the server).
-      AWS_ACCESS_KEY_ID: ${TF_BLOB_ACCESS_KEY:?missing TF_BLOB_ACCESS_KEY (see .env.example)}
-      AWS_SECRET_ACCESS_KEY: ${TF_BLOB_SECRET_KEY:?missing TF_BLOB_SECRET_KEY (see .env.example)}
+      AWS_ACCESS_KEY_ID: ${SEAWEEDFS_ADMIN_ACCESS_KEY:?missing SEAWEEDFS_ADMIN_ACCESS_KEY (see .env.example)}
+      AWS_SECRET_ACCESS_KEY: ${SEAWEEDFS_ADMIN_SECRET_KEY:?missing SEAWEEDFS_ADMIN_SECRET_KEY (see .env.example)}
       AWS_DEFAULT_REGION: ${TF_BLOB_REGION:-us-east-1}
-      TF_BLOB_BUCKET: ${TF_BLOB_BUCKET:-tf-workspaces}
+      TF_WORKSPACE_BUCKET: ${TF_WORKSPACE_BUCKET:-tf-workspaces}
+      TF_KNOWLEDGE_BUCKET: ${TF_KNOWLEDGE_BUCKET:-tf-knowledge}
     entrypoint: ["/bin/sh", "-c"]
     # $$ escapes compose interpolation so the inner shell expands the vars
     # against the container env (same pattern as postgres-postinit).
@@ -430,18 +460,27 @@ services:
       - |
         set -eu
         EP=http://seaweedfs:8333
+        # The binary refuses this too, but only once an executor boots; failing
+        # here stops `up` before versioning lands on a shared bucket.
+        if [ "$$TF_WORKSPACE_BUCKET" = "$$TF_KNOWLEDGE_BUCKET" ]; then
+          echo "TF_WORKSPACE_BUCKET and TF_KNOWLEDGE_BUCKET both name '$$TF_WORKSPACE_BUCKET'; they must be different buckets" >&2
+          exit 1
+        fi
         # Idempotent: head-bucket succeeds when the bucket already exists, and we
         # suppress only its expected first-run 404. We deliberately do NOT branch
         # on aws-cli's exit code to tell "missing" from other failures — it
         # returns 254 for both 404 and 403, so that would route an auth error
         # into a misleading create attempt. On any create failure we let aws-cli's
         # own error through and add a hint.
-        if ! aws --endpoint-url "$$EP" s3api head-bucket --bucket "$$TF_BLOB_BUCKET" 2>/dev/null; then
-          aws --endpoint-url "$$EP" s3api create-bucket --bucket "$$TF_BLOB_BUCKET" || {
-            echo "bucket create failed for '$$TF_BLOB_BUCKET' — check TF_BLOB_ACCESS_KEY/SECRET_KEY and that seaweedfs is healthy at $$EP" >&2
-            exit 1
-          }
-        fi
+        for B in "$$TF_WORKSPACE_BUCKET" "$$TF_KNOWLEDGE_BUCKET"; do
+          if ! aws --endpoint-url "$$EP" s3api head-bucket --bucket "$$B" 2>/dev/null; then
+            aws --endpoint-url "$$EP" s3api create-bucket --bucket "$$B" || {
+              echo "bucket create failed for '$$B' — check SEAWEEDFS_ADMIN_ACCESS_KEY/SECRET_KEY and that seaweedfs is healthy at $$EP" >&2
+              exit 1
+            }
+          fi
+        done
+        aws --endpoint-url "$$EP" s3api put-bucket-versioning --bucket "$$TF_KNOWLEDGE_BUCKET" --versioning-configuration Status=Enabled
     restart: "no"
 
   # Triage Factory itself, as the control half. Runs the release image
@@ -472,8 +511,8 @@ services:
       # postgres-postinit is a one-shot; wait for it so the migration
       # step on first boot runs against a reconciled role set.
       postgres-postinit: { condition: service_completed_successfully }
-      # seaweedfs-postinit is a one-shot; wait for the bucket to exist so the
-      # first workspace snapshot doesn't race its creation.
+      # seaweedfs-postinit is a one-shot; wait for the knowledge bucket to
+      # exist so the first upload doesn't race its creation.
       seaweedfs-postinit: { condition: service_completed_successfully }
     environment:
       TF_MODE: multi
@@ -532,7 +571,7 @@ services:
       # form leaves the plain var empty; the binary fails fast at boot with a clear
       # "<NAME> is empty" if it gets NEITHER, so for these three the missing-secret
       # check moves from compose-parse to boot. (The shared/constructed secrets
-      # below — blob keys, DSN — keep `:?` and are not *_FILE-wired here.)
+      # below — object-store keys, DSN — keep `:?` and are not *_FILE-wired here.)
       TF_SESSION_ENCRYPTION_KEY: ${TF_SESSION_ENCRYPTION_KEY:-}
       TF_SESSION_ENCRYPTION_KEY_FILE: ${TF_SESSION_ENCRYPTION_KEY_FILE:-}
       TF_COOKIE_SECRET: ${TF_COOKIE_SECRET:-}
@@ -542,16 +581,17 @@ services:
       # container recreate). See .env.example (TFAC-402).
       TF_SECRET_ENCRYPTION_KEY: ${TF_SECRET_ENCRYPTION_KEY:-}
       TF_SECRET_ENCRYPTION_KEY_FILE: ${TF_SECRET_ENCRYPTION_KEY_FILE:-}
-      # Durable-workspace object store. Defaults target the bundled `seaweedfs`
-      # service; for SaaS / BYO leave the creds and bucket as-is but set
-      # TF_BLOB_ENDPOINT in .env to your hosted Supabase Storage / S3 / R2
-      # endpoint (same client, no compose change). Region is wanted by AWS
-      # S3 / Supabase and ignored by SeaweedFS.
+      # Object store. Defaults target the bundled `seaweedfs` service; for
+      # SaaS / BYO set TF_BLOB_ENDPOINT in .env to your hosted Supabase Storage
+      # / S3 / R2 endpoint (same client, no compose change). Region is wanted
+      # by AWS S3 / Supabase and ignored by SeaweedFS. Control reads and writes
+      # team knowledge, so it holds the knowledge bucket's writer pair, and it
+      # never touches workspace snapshots, so it gets no TF_WORKSPACE_* at all.
       TF_BLOB_ENDPOINT: ${TF_BLOB_ENDPOINT:-http://seaweedfs:8333}
-      TF_BLOB_BUCKET: ${TF_BLOB_BUCKET:-tf-workspaces}
-      TF_BLOB_ACCESS_KEY: ${TF_BLOB_ACCESS_KEY:?missing TF_BLOB_ACCESS_KEY (see .env.example)}
-      TF_BLOB_SECRET_KEY: ${TF_BLOB_SECRET_KEY:?missing TF_BLOB_SECRET_KEY (see .env.example)}
       TF_BLOB_REGION: ${TF_BLOB_REGION:-us-east-1}
+      TF_KNOWLEDGE_BUCKET: ${TF_KNOWLEDGE_BUCKET:-tf-knowledge}
+      TF_KNOWLEDGE_ACCESS_KEY: ${TF_KNOWLEDGE_ACCESS_KEY:?missing TF_KNOWLEDGE_ACCESS_KEY (see .env.example)}
+      TF_KNOWLEDGE_SECRET_KEY: ${TF_KNOWLEDGE_SECRET_KEY:?missing TF_KNOWLEDGE_SECRET_KEY (see .env.example)}
       # Deployment-policy knobs, documented in .env.example. Read from
       # the process env at boot, so they must be forwarded here — a value
       # set only in .env would otherwise be silently ignored. Empty means
@@ -693,7 +733,7 @@ services:
       # control (above) internally too; listed explicitly here for
       # the same belt-and-suspenders clarity as postgres-postinit/postgres.
       postgres-postinit-system: { condition: service_completed_successfully }
-      # The bucket must exist before the first workspace snapshot.
+      # Both buckets must exist before the first snapshot or knowledge read.
       seaweedfs-postinit: { condition: service_completed_successfully }
     environment:
       TF_MODE: multi
@@ -726,12 +766,19 @@ services:
       # Nor the deployment commit signer (TF_GITHUB_COMMIT_SIGNER_*): an
       # executor never holds a signing key. Its runs' sidecars relay commit
       # digests to the control pods, which sign them.
-      # Durable-workspace object store (per-run snapshots + cross-host rehydrate).
+      # Object store: the workspace bucket (per-run snapshots + cross-host
+      # rehydrate) read-write, and the knowledge bucket read-only. An executor
+      # only copies team knowledge into a run, so its TF_KNOWLEDGE_* pair is the
+      # reader's: a compromised executor cannot rewrite the knowledge every
+      # later run on the deployment is staged with.
       TF_BLOB_ENDPOINT: ${TF_BLOB_ENDPOINT:-http://seaweedfs:8333}
-      TF_BLOB_BUCKET: ${TF_BLOB_BUCKET:-tf-workspaces}
-      TF_BLOB_ACCESS_KEY: ${TF_BLOB_ACCESS_KEY:?missing TF_BLOB_ACCESS_KEY (see .env.example)}
-      TF_BLOB_SECRET_KEY: ${TF_BLOB_SECRET_KEY:?missing TF_BLOB_SECRET_KEY (see .env.example)}
       TF_BLOB_REGION: ${TF_BLOB_REGION:-us-east-1}
+      TF_WORKSPACE_BUCKET: ${TF_WORKSPACE_BUCKET:-tf-workspaces}
+      TF_WORKSPACE_ACCESS_KEY: ${TF_WORKSPACE_ACCESS_KEY:?missing TF_WORKSPACE_ACCESS_KEY (see .env.example)}
+      TF_WORKSPACE_SECRET_KEY: ${TF_WORKSPACE_SECRET_KEY:?missing TF_WORKSPACE_SECRET_KEY (see .env.example)}
+      TF_KNOWLEDGE_BUCKET: ${TF_KNOWLEDGE_BUCKET:-tf-knowledge}
+      TF_KNOWLEDGE_ACCESS_KEY: ${TF_KNOWLEDGE_READER_ACCESS_KEY:?missing TF_KNOWLEDGE_READER_ACCESS_KEY (see .env.example)}
+      TF_KNOWLEDGE_SECRET_KEY: ${TF_KNOWLEDGE_READER_SECRET_KEY:?missing TF_KNOWLEDGE_READER_SECRET_KEY (see .env.example)}
       # Public base URL of the control pod — executors take no inbound
       # traffic, but the {{RUN_URL}} prompt deep link points here.
       TF_PUBLIC_URL: ${TF_PUBLIC_URL:?missing TF_PUBLIC_URL (see .env.example)}

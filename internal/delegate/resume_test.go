@@ -161,9 +161,9 @@ func TestFollowUp_RefusalTaxonomy(t *testing.T) {
 		}
 		// A blob store with nothing in it: no snapshot to rehydrate from, so a
 		// run whose worktree is also gone is unrecoverable for real.
-		blobs, err := storage.New()
+		blobs, err := storage.NewWorkspace()
 		if err != nil {
-			t.Fatalf("storage.New: %v", err)
+			t.Fatalf("storage.NewWorkspace: %v", err)
 		}
 		s.SetStorage(blobs)
 		return s

@@ -121,8 +121,14 @@ GH_CLIENT_SECRET=$(openssl rand -hex 16)
 TF_SESSION_ENCRYPTION_KEY=$(openssl rand -hex 32)
 TF_COOKIE_SECRET=$(openssl rand -hex 32)
 TF_SECRET_ENCRYPTION_KEY=$(openssl rand -hex 32)
-TF_BLOB_ACCESS_KEY=$(openssl rand -hex 32)
-TF_BLOB_SECRET_KEY=$(openssl rand -hex 32)
+TF_WORKSPACE_ACCESS_KEY=$(openssl rand -hex 32)
+TF_WORKSPACE_SECRET_KEY=$(openssl rand -hex 32)
+TF_KNOWLEDGE_ACCESS_KEY=$(openssl rand -hex 32)
+TF_KNOWLEDGE_SECRET_KEY=$(openssl rand -hex 32)
+TF_KNOWLEDGE_READER_ACCESS_KEY=$(openssl rand -hex 32)
+TF_KNOWLEDGE_READER_SECRET_KEY=$(openssl rand -hex 32)
+SEAWEEDFS_ADMIN_ACCESS_KEY=$(openssl rand -hex 32)
+SEAWEEDFS_ADMIN_SECRET_KEY=$(openssl rand -hex 32)
 EOF
   fi
   # jwk-init upserts in place and reuses an existing GOTRUE_JWT_KEYS rather
@@ -175,8 +181,18 @@ cmd_run() {
   export TF_GOTRUE_JWKS_URL="http://localhost:9999/.well-known/jwks.json"
   export TF_GOTRUE_ISSUER="${PUBLIC_URL}/auth/v1"
   export TF_BLOB_ENDPOINT="http://localhost:8333"
-  export TF_BLOB_BUCKET="${TF_BLOB_BUCKET:-tf-workspaces}"
   export TF_BLOB_REGION="${TF_BLOB_REGION:-us-east-1}"
+  # The same key pairs docker-compose.yml hands each role: control holds the
+  # knowledge writer and no workspace pair, an executor the workspace pair and
+  # the knowledge reader. The admin pair is seaweedfs-postinit's alone.
+  unset SEAWEEDFS_ADMIN_ACCESS_KEY SEAWEEDFS_ADMIN_SECRET_KEY
+  if [ "$role" = "executor" ]; then
+    export TF_KNOWLEDGE_ACCESS_KEY="$TF_KNOWLEDGE_READER_ACCESS_KEY"
+    export TF_KNOWLEDGE_SECRET_KEY="$TF_KNOWLEDGE_READER_SECRET_KEY"
+  else
+    unset TF_WORKSPACE_ACCESS_KEY TF_WORKSPACE_SECRET_KEY
+  fi
+  unset TF_KNOWLEDGE_READER_ACCESS_KEY TF_KNOWLEDGE_READER_SECRET_KEY
   if [ "$role" = "executor" ]; then
     # No user HTTP on an executor — the localhost healthz is its only
     # listener. Sandboxing needs runsc + the sandbox caps on THIS host;
@@ -222,8 +238,14 @@ GOTRUE_JWT_SECRET=unused
 TF_SESSION_ENCRYPTION_KEY=unused
 TF_COOKIE_SECRET=unused
 TF_SECRET_ENCRYPTION_KEY=unused
-TF_BLOB_ACCESS_KEY=unused
-TF_BLOB_SECRET_KEY=unused
+TF_WORKSPACE_ACCESS_KEY=unused
+TF_WORKSPACE_SECRET_KEY=unused
+TF_KNOWLEDGE_ACCESS_KEY=unused
+TF_KNOWLEDGE_SECRET_KEY=unused
+TF_KNOWLEDGE_READER_ACCESS_KEY=unused
+TF_KNOWLEDGE_READER_SECRET_KEY=unused
+SEAWEEDFS_ADMIN_ACCESS_KEY=unused
+SEAWEEDFS_ADMIN_SECRET_KEY=unused
 GOTRUE_SAML_PRIVATE_KEY=unused
 EOF
   local DC_ENV_FILE="$tmp_env"

@@ -38,16 +38,38 @@ func TestObjectStorage_Conformance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newObjectStorage: %v", err)
 	}
-	ctx := context.Background()
-	if _, err := store.client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(cfg.Bucket)}); err != nil {
+	createBucket(t, store)
+	runConformance(t, store)
+
+	// The knowledge bucket is versioned, where a delete leaves a delete marker
+	// and an overwrite keeps the old version. The backend must not tell the
+	// difference: a deleted key is gone and an overwritten one reads new.
+	versioned := cfg
+	versioned.Bucket = "tf-conformance-versioned"
+	vstore, err := newObjectStorage(versioned)
+	if err != nil {
+		t.Fatalf("newObjectStorage (versioned): %v", err)
+	}
+	createBucket(t, vstore)
+	if _, err := vstore.client.PutBucketVersioning(context.Background(), &s3.PutBucketVersioningInput{
+		Bucket:                  aws.String(versioned.Bucket),
+		VersioningConfiguration: &types.VersioningConfiguration{Status: types.BucketVersioningStatusEnabled},
+	}); err != nil {
+		t.Fatalf("enable versioning: %v", err)
+	}
+	t.Run("versioned", func(t *testing.T) { runConformance(t, vstore) })
+}
+
+func createBucket(t *testing.T, store *objectStorage) {
+	t.Helper()
+	if _, err := store.client.CreateBucket(context.Background(), &s3.CreateBucketInput{Bucket: aws.String(store.bucket)}); err != nil {
 		// A re-run against a reused daemon may already own the bucket.
 		var owned *types.BucketAlreadyOwnedByYou
 		var exists *types.BucketAlreadyExists
 		if !errors.As(err, &owned) && !errors.As(err, &exists) {
-			t.Fatalf("create bucket: %v", err)
+			t.Fatalf("create bucket %s: %v", store.bucket, err)
 		}
 	}
-	runConformance(t, store)
 }
 
 // TestObjectStorage_PreservesBasePath is the regression guard for the whole
@@ -154,65 +176,152 @@ func TestValidateEndpoint(t *testing.T) {
 
 func TestObjectConfigFromEnv(t *testing.T) {
 	t.Run("requires endpoint", func(t *testing.T) {
-		t.Setenv(envBlobBucket, "b")
-		if _, err := ObjectConfigFromEnv(); err == nil {
-			t.Fatal("ObjectConfigFromEnv with no endpoint = nil; want error")
+		t.Setenv(envBlobEndpoint, "")
+		_, err := ObjectConfigFromEnv(WorkspaceBucket)
+		if err == nil || !strings.Contains(err.Error(), envBlobEndpoint) {
+			t.Fatalf("ObjectConfigFromEnv with no endpoint = %v; want an error naming %s", err, envBlobEndpoint)
 		}
 	})
 
-	t.Run("requires bucket", func(t *testing.T) {
+	t.Run("bucket names default per bucket", func(t *testing.T) {
 		t.Setenv(envBlobEndpoint, "http://seaweedfs:8333")
-		if _, err := ObjectConfigFromEnv(); err == nil {
-			t.Fatal("ObjectConfigFromEnv with no bucket = nil; want error")
+		t.Setenv("TF_WORKSPACE_BUCKET", "")
+		t.Setenv("TF_KNOWLEDGE_BUCKET", "")
+		for b, want := range map[Bucket]string{WorkspaceBucket: "tf-workspaces", KnowledgeBucket: "tf-knowledge"} {
+			cfg, err := ObjectConfigFromEnv(b)
+			if err != nil {
+				t.Fatalf("ObjectConfigFromEnv(%s): %v", b.prefix, err)
+			}
+			if cfg.Bucket != want {
+				t.Errorf("ObjectConfigFromEnv(%s).Bucket = %q; want %q", b.prefix, cfg.Bucket, want)
+			}
 		}
 	})
 
-	t.Run("preserves full endpoint URL including base path", func(t *testing.T) {
+	t.Run("each bucket reads its own variables and shares the endpoint", func(t *testing.T) {
 		t.Setenv(envBlobEndpoint, "https://ref.supabase.co/storage/v1/s3")
-		t.Setenv(envBlobBucket, "workspaces")
-		t.Setenv(envBlobAccessKey, "ak")
-		t.Setenv(envBlobSecretKey, "sk")
 		t.Setenv(envBlobRegion, "us-west-2")
-		cfg, err := ObjectConfigFromEnv()
-		if err != nil {
-			t.Fatalf("ObjectConfigFromEnv: %v", err)
+		t.Setenv("TF_WORKSPACE_BUCKET", "ws")
+		t.Setenv("TF_WORKSPACE_ACCESS_KEY", "ws-ak")
+		t.Setenv("TF_WORKSPACE_SECRET_KEY", "ws-sk")
+		t.Setenv("TF_KNOWLEDGE_BUCKET", "kb")
+		t.Setenv("TF_KNOWLEDGE_ACCESS_KEY", "kb-ak")
+		t.Setenv("TF_KNOWLEDGE_SECRET_KEY", "kb-sk")
+		for b, want := range map[Bucket]ObjectConfig{
+			WorkspaceBucket: {Endpoint: "https://ref.supabase.co/storage/v1/s3", Bucket: "ws", AccessKey: "ws-ak", SecretKey: "ws-sk", Region: "us-west-2"},
+			KnowledgeBucket: {Endpoint: "https://ref.supabase.co/storage/v1/s3", Bucket: "kb", AccessKey: "kb-ak", SecretKey: "kb-sk", Region: "us-west-2"},
+		} {
+			cfg, err := ObjectConfigFromEnv(b)
+			if err != nil {
+				t.Fatalf("ObjectConfigFromEnv(%s): %v", b.prefix, err)
+			}
+			if cfg != want {
+				t.Errorf("ObjectConfigFromEnv(%s) = %+v; want %+v", b.prefix, cfg, want)
+			}
 		}
-		want := ObjectConfig{Endpoint: "https://ref.supabase.co/storage/v1/s3", Bucket: "workspaces", AccessKey: "ak", SecretKey: "sk", Region: "us-west-2"}
-		if cfg != want {
-			t.Fatalf("cfg = %+v; want %+v", cfg, want)
+	})
+
+	t.Run("no keys is the AWS default chain", func(t *testing.T) {
+		t.Setenv(envBlobEndpoint, "http://seaweedfs:8333")
+		t.Setenv("TF_KNOWLEDGE_ACCESS_KEY", "")
+		t.Setenv("TF_KNOWLEDGE_SECRET_KEY", "")
+		cfg, err := ObjectConfigFromEnv(KnowledgeBucket)
+		if err != nil {
+			t.Fatalf("ObjectConfigFromEnv with no keys: %v", err)
+		}
+		if cfg.AccessKey != "" || cfg.SecretKey != "" {
+			t.Fatalf("cfg keys = %q/%q; want both empty", cfg.AccessKey, cfg.SecretKey)
+		}
+	})
+
+	t.Run("half a key pair names both variables", func(t *testing.T) {
+		t.Setenv(envBlobEndpoint, "http://seaweedfs:8333")
+		t.Setenv("TF_KNOWLEDGE_ACCESS_KEY", "ak")
+		t.Setenv("TF_KNOWLEDGE_SECRET_KEY", "")
+		_, err := ObjectConfigFromEnv(KnowledgeBucket)
+		if err == nil || !strings.Contains(err.Error(), "TF_KNOWLEDGE_ACCESS_KEY") || !strings.Contains(err.Error(), "TF_KNOWLEDGE_SECRET_KEY") {
+			t.Fatalf("ObjectConfigFromEnv with half a pair = %v; want an error naming both key variables", err)
 		}
 	})
 
 	t.Run("rejects scheme-less endpoint", func(t *testing.T) {
 		t.Setenv(envBlobEndpoint, "seaweedfs:8333")
-		t.Setenv(envBlobBucket, "b")
-		if _, err := ObjectConfigFromEnv(); err == nil {
-			t.Fatal("ObjectConfigFromEnv with scheme-less endpoint = nil; want error")
+		_, err := ObjectConfigFromEnv(WorkspaceBucket)
+		if err == nil || !strings.Contains(err.Error(), envBlobEndpoint) {
+			t.Fatalf("ObjectConfigFromEnv with scheme-less endpoint = %v; want an error naming %s", err, envBlobEndpoint)
 		}
 	})
 }
 
-func TestNew_MultiRequiresBlobConfig(t *testing.T) {
+func TestNewWorkspace_MultiRequiresEndpoint(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	t.Setenv(envBlobEndpoint, "")
-	t.Setenv(envBlobBucket, "")
-	if _, err := New(); err == nil {
-		t.Fatal("New in multi mode with no TF_BLOB_* = nil; want error (multi requires the object store)")
+	if _, err := NewWorkspace(); err == nil {
+		t.Fatal("NewWorkspace in multi mode with no TF_BLOB_ENDPOINT = nil; want error (multi requires the object store)")
 	}
 }
 
-func TestNew_MultiIsObject(t *testing.T) {
+func TestNewWorkspace_MultiIsObject(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	t.Setenv(envBlobEndpoint, "http://seaweedfs:8333")
-	t.Setenv(envBlobBucket, "blobs")
-	t.Setenv(envBlobAccessKey, "ak")
-	t.Setenv(envBlobSecretKey, "sk")
-	store, err := New()
+	t.Setenv("TF_WORKSPACE_BUCKET", "")
+	t.Setenv("TF_KNOWLEDGE_BUCKET", "")
+	t.Setenv("TF_WORKSPACE_ACCESS_KEY", "ak")
+	t.Setenv("TF_WORKSPACE_SECRET_KEY", "sk")
+	store, err := NewWorkspace()
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("NewWorkspace: %v", err)
 	}
-	if _, ok := store.(*objectStorage); !ok {
-		t.Fatalf("New in multi mode = %T; want *objectStorage", store)
+	obj, ok := store.(*objectStorage)
+	if !ok {
+		t.Fatalf("NewWorkspace in multi mode = %T; want *objectStorage", store)
+	}
+	if obj.bucket != "tf-workspaces" {
+		t.Fatalf("NewWorkspace bucket = %q; want tf-workspaces", obj.bucket)
+	}
+}
+
+// TestNewWorkspace_RefusesTheKnowledgeBucket: one bucket for both would put
+// snapshot overwrites under the knowledge base's versioning, and the two key
+// pairs would scope nothing. The refusal names both variables, whichever of
+// them was set — a workspace bucket named after the knowledge default is the
+// same mistake.
+func TestNewWorkspace_RefusesTheKnowledgeBucket(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	t.Setenv(envBlobEndpoint, "http://seaweedfs:8333")
+	for _, tc := range []struct{ name, workspace, knowledge string }{
+		{"both set", "shared", "shared"},
+		{"knowledge default", "tf-knowledge", ""},
+		{"workspace default", "", "tf-workspaces"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TF_WORKSPACE_BUCKET", tc.workspace)
+			t.Setenv("TF_KNOWLEDGE_BUCKET", tc.knowledge)
+			_, err := NewWorkspace()
+			if err == nil || !strings.Contains(err.Error(), "TF_WORKSPACE_BUCKET") || !strings.Contains(err.Error(), "TF_KNOWLEDGE_BUCKET") {
+				t.Fatalf("NewWorkspace with one bucket for both = %v; want an error naming TF_WORKSPACE_BUCKET and TF_KNOWLEDGE_BUCKET", err)
+			}
+		})
+	}
+}
+
+// TestNewObject_KnowledgeNeedsNoWorkspaceConfig: a control pod is given the
+// knowledge variables and no workspace ones, so building the knowledge store
+// must not read them.
+func TestNewObject_KnowledgeNeedsNoWorkspaceConfig(t *testing.T) {
+	t.Setenv(envBlobEndpoint, "http://seaweedfs:8333")
+	t.Setenv("TF_KNOWLEDGE_BUCKET", "")
+	t.Setenv("TF_KNOWLEDGE_ACCESS_KEY", "ak")
+	t.Setenv("TF_KNOWLEDGE_SECRET_KEY", "sk")
+	// Half a pair, which the workspace bucket would refuse if it were read.
+	t.Setenv("TF_WORKSPACE_ACCESS_KEY", "ak")
+	t.Setenv("TF_WORKSPACE_SECRET_KEY", "")
+	store, err := NewObject(KnowledgeBucket)
+	if err != nil {
+		t.Fatalf("NewObject(KnowledgeBucket): %v", err)
+	}
+	if obj := store.(*objectStorage); obj.bucket != "tf-knowledge" {
+		t.Fatalf("NewObject(KnowledgeBucket) bucket = %q; want tf-knowledge", obj.bucket)
 	}
 }
 

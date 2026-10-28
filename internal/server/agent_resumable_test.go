@@ -33,9 +33,9 @@ func withEmptyBlobStore(t *testing.T, s *Server) *delegate.Spawner {
 	t.Helper()
 	paths.SetForTest(t, t.TempDir())
 	spawner := delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6")
-	blobs, err := storage.New()
+	blobs, err := storage.NewWorkspace()
 	if err != nil {
-		t.Fatalf("storage.New: %v", err)
+		t.Fatalf("storage.NewWorkspace: %v", err)
 	}
 	spawner.SetStorage(blobs)
 	s.SetSpawner(spawner)

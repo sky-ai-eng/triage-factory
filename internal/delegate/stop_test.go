@@ -441,9 +441,9 @@ func TestParkConversationOpen_StoppedKeepsTheWorkspace(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
 	s, database, conversationID, _ := setupAdvanceFixture(t, "cancel-park")
-	blobs, err := storage.New()
+	blobs, err := storage.NewWorkspace()
 	if err != nil {
-		t.Fatalf("storage.New: %v", err)
+		t.Fatalf("storage.NewWorkspace: %v", err)
 	}
 	s.SetStorage(blobs)
 
@@ -507,9 +507,9 @@ func TestStop_CrossPodNativeStop_KeepsTheWorkspaceAndStaysResumable(t *testing.T
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "cross-pod-stop")
-	blobs, err := storage.New()
+	blobs, err := storage.NewWorkspace()
 	if err != nil {
-		t.Fatalf("storage.New: %v", err)
+		t.Fatalf("storage.NewWorkspace: %v", err)
 	}
 	s.SetStorage(blobs)
 	markNative(t, database, conversationID)
@@ -615,9 +615,9 @@ func TestRecordNativeResult_GenuineFailureIsStillAFailure(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "native-genuine-fail")
-	blobs, err := storage.New()
+	blobs, err := storage.NewWorkspace()
 	if err != nil {
-		t.Fatalf("storage.New: %v", err)
+		t.Fatalf("storage.NewWorkspace: %v", err)
 	}
 	s.SetStorage(blobs)
 
@@ -804,9 +804,9 @@ func TestRecordNativeResult_ParkedSettlesThroughTheClaim(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "native-guard-park")
-	blobs, err := storage.New()
+	blobs, err := storage.NewWorkspace()
 	if err != nil {
-		t.Fatalf("storage.New: %v", err)
+		t.Fatalf("storage.NewWorkspace: %v", err)
 	}
 	s.SetStorage(blobs)
 	markNative(t, database, conversationID)

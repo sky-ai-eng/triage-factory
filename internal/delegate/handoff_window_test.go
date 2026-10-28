@@ -225,9 +225,9 @@ func TestProcessCompletion_SnapshotLandsBeforeTheTerminalCommits(t *testing.T) {
 	ctx := context.Background()
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "snap-order")
 
-	blobs, err := storage.New()
+	blobs, err := storage.NewWorkspace()
 	if err != nil {
-		t.Fatalf("storage.New: %v", err)
+		t.Fatalf("storage.NewWorkspace: %v", err)
 	}
 	var statusAtPut string
 	var puts int
@@ -265,9 +265,9 @@ func TestFollowUp_ImmediatelyAfterAConclusionFindsACompleteSnapshot(t *testing.T
 	// shape, where a turn's conclusion advances nothing.
 	settleConversationBlueprint(t, database, conversationID, "completed")
 
-	blobs, err := storage.New()
+	blobs, err := storage.NewWorkspace()
 	if err != nil {
-		t.Fatalf("storage.New: %v", err)
+		t.Fatalf("storage.NewWorkspace: %v", err)
 	}
 	s.SetStorage(blobs)
 

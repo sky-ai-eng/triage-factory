@@ -341,22 +341,16 @@ func (a *App) buildExecution() error {
 	// invocations send. Nil-safe inside the spawner on local/non-sandbox.
 	a.spawner.SetStores(a.stores)
 
-	// Durable blob store for the blueprint workspace seam. Local → on-disk
-	// under the state root (no new service, can't brick a local boot); multi
-	// → an S3-compatible store from TF_BLOB_*, validated here so a
-	// misconfigured deployment fails fast rather than on its first snapshot.
-	blobStore, err := storage.New()
+	workspaces, knowledge, err := openBlobStores(a.plan)
 	if err != nil {
-		return fmt.Errorf("storage init: %w", err)
+		return err
 	}
-	a.blobStore = blobStore
-	a.spawner.SetStorage(blobStore)
-
-	// The team knowledge base: one process-wide seam over the same blob store
-	// in multi, plain files under the state root in local. Both halves of the
-	// product read it — the HTTP surface below, and the spawner, which stages
-	// a run's knowledge from it at claim — so it is built once here and shared.
-	a.teamKB = kbstore.New(blobStore)
+	a.spawner.SetStorage(workspaces)
+	// The team knowledge base: the knowledge bucket in multi, plain files under
+	// the state root in local. Both halves of the product read it — the HTTP
+	// surface below, and the spawner, which stages a run's knowledge from it at
+	// claim — so it is built once here and shared.
+	a.teamKB = kbstore.New(knowledge)
 	a.spawner.SetTeamKB(a.teamKB)
 
 	// Cross-pod run control (TFAC-585): the conversation_signals outbox is Postgres-
@@ -391,12 +385,35 @@ func (a *App) buildExecution() error {
 		return nil
 	}
 	a.srv.SetSpawner(a.spawner)
-	// The team knowledge base rides the same blob seam in multi and plain files
-	// under the state root in local (internal/kbstore picks by mode). Wired
-	// here rather than in buildServer because the blob store it is built over
-	// is resolved with the rest of this subsystem.
+	// Wired here rather than in buildServer because the knowledge store is
+	// resolved with the rest of this subsystem.
 	a.srv.SetTeamKB(a.teamKB)
 	return nil
+}
+
+// openBlobStores builds the blob stores the plan's role uses, validated here
+// so a misconfigured deployment fails at boot rather than on its first
+// snapshot or upload.
+//
+// The workspace store is built only where snapshots are read and written, the
+// dispatcher: on-disk under the state root in local, the workspace bucket from
+// TF_WORKSPACE_* in multi. A control pod holds no workspace credentials and
+// gets nil. The knowledge store is built in multi only, for every role, from
+// TF_KNOWLEDGE_*; local keeps knowledge as plain files and gets nil. Which
+// knowledge key pair a process holds is the deployment's choice: control is
+// given the writer, an executor the read-only pair.
+func openBlobStores(plan subsystemPlan) (workspaces, knowledge storage.Storage, err error) {
+	if plan.dispatcher {
+		if workspaces, err = storage.NewWorkspace(); err != nil {
+			return nil, nil, fmt.Errorf("workspace storage init: %w", err)
+		}
+	}
+	if runmode.Current() == runmode.ModeMulti {
+		if knowledge, err = storage.NewObject(storage.KnowledgeBucket); err != nil {
+			return nil, nil, fmt.Errorf("knowledge storage init: %w", err)
+		}
+	}
+	return workspaces, knowledge, nil
 }
 
 // buildRouting wires the durable ingest seam, the poller manager, and the
