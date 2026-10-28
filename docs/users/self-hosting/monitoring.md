@@ -155,22 +155,6 @@ To deliver alerts, add an `alerting:` block to
 Prometheus. Add a rule as another file in the rules directory, then
 `docker compose restart prometheus`.
 
-### Log lines
-
-When an alert or the dashboard points at a problem, these lines say which org
-and why:
-
-- `github connection lost` and `jira connection lost` (WARN, with `org` and
-  `class`), then `<source> connection restored` or
-  `<source> connection no longer checked`.
-- `commit signer is broken; the org's runs commit unsigned until an admin fixes it`,
-  and for the deployment signer
-  `deployment commit signer is broken; managed workspaces commit unsigned until an operator fixes it`.
-- `rate-limit budget low` (below 20% left) and `waiting on a rate limit`.
-- `slack events api: app_rate_limited — Slack is dropping this app's event deliveries`:
-  the app is past Slack's 30,000 events per workspace per hour. Move it to
-  Socket Mode or remove the bot from busy channels.
-
 ## Traces
 
 Tracing is off until `TF_TRACES_ENDPOINT` names an OTLP/HTTP endpoint (Tempo,
