@@ -3,7 +3,7 @@ package poller_test
 // The GitHub poll path end to end: a real poller.Manager and tracker, over real
 // stores, poll a GitHub world while its pull requests change, and each cycle
 // must emit exactly the events the tracker's taxonomy
-// (docs/concepts/tracked-events.md) promises — and none when nothing changed.
+// (specs/tracked-events.md) promises — and none when nothing changed.
 //
 // The world is served by Orrery (github.com/sky-ai-eng/orrery), a deterministic
 // GitHub built from real git, and is authored through its GitHub API. A call

@@ -27,7 +27,7 @@ import (
 // safe set (e.g. mount options) rather than reading the package's own map,
 // so a widened allowlist is caught instead of agreed with.
 //
-// See docs/security/security-overview.md §4.3.
+// See docs/users/security/security-overview.md §4.3.
 
 // parseEgressForTest re-derives, from first principles, the network an
 // accepted egress CIDR resolves to — matching validateEgressCIDR's bare-IP

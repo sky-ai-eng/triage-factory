@@ -39,7 +39,7 @@ startup (via a blank import from `package main`). Core asks
 
 The full recipe — placement rubric, seam catalog, install anatomy, and the
 dormancy contract — is in
-[`docs/ee-feature-packaging.md`](../docs/ee-feature-packaging.md).
+[`docs/contributors/ee-features.md`](../docs/contributors/ee-features.md).
 
 ## What lives here
 

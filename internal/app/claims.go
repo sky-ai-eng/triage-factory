@@ -16,7 +16,7 @@ import (
 // bumps the epoch, and fences whichever OTHER copy is still holding the
 // duplicated state root — two processes sharing one state root crash-loop
 // forever, which IS the operator signal (no backoff, no arbitration; see
-// docs/self-hosting/install.md's duplicated-state-root remediation).
+// docs/users/self-hosting/install.md's duplicated-state-root remediation).
 const ExitCodeIdentitySuperseded = 3
 
 // buildClaims wires the spawner's claim-recovery settings that are resolved

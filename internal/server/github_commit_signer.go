@@ -24,7 +24,7 @@ import (
 
 // The org's commit signer: the GitHub user account its agents' commits are
 // authored, committed and signed as, and the SSH key pair TF signs with
-// (docs/for-agents/specs/commit-signing). TF generates the pair; an org admin
+// (specs/commit-signing). TF generates the pair; an org admin
 // adds the public half to the account as a signing key, and Verify finds it
 // there before the signer is active.
 //

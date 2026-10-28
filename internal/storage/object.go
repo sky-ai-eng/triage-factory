@@ -21,7 +21,7 @@ import (
 )
 
 // The deployment's object-store endpoint and region, shared by every bucket.
-// Documented in docs/self-hosting/storage.md and .env.example.
+// Documented in docs/users/self-hosting/storage.md and .env.example.
 const (
 	envBlobEndpoint = "TF_BLOB_ENDPOINT"
 	envBlobRegion   = "TF_BLOB_REGION"

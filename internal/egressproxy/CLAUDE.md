@@ -6,10 +6,10 @@ registry's certificate itself, terminates the client's TLS with a leaf from
 a CA minted for the engagement, and relays each request the policy admits
 with the response copied back verbatim. Registries are read-only through it:
 GET and HEAD, plus POST to the paths a registry lists as reads. It is one of
-three egress lanes; `docs/security/sandbox-egress.md` has the full picture
+three egress lanes; `docs/contributors/sandbox-egress.md` has the full picture
 and `internal/egressrelay/CLAUDE.md` has the sibling lane's guide. The
 design of record, with every condition this package implements, is
-`docs/for-agents/specs/sandbox-backends/` §6.1.
+`specs/sandbox-backends/` §6.1.
 
 ## Adding an allowlist host (`DefaultRegistries`)
 

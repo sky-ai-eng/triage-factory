@@ -268,7 +268,7 @@ go_group() {
   # tls.Config the package builds lives in internal/egressproxy/tlsconfig.go,
   # and no other non-test file may build one; no file of the package, tests
   # included, may mention InsecureSkipVerify at all
-  # (docs/for-agents/specs/sandbox-backends/ §6.1, condition 8). The
+  # (specs/sandbox-backends/ §6.1, condition 8). The
   # InsecureSkipVerify scan reads every line as written, so a string holding
   # "//" earlier on the line cannot hide it; the tls.Config scan skips
   # whole-line comments only. A tls.Config built under an aliased import, or

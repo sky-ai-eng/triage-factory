@@ -174,10 +174,6 @@ describe('CommitSigningGroup · no signer', () => {
       'Commits are authored by acme[bot] and aren’t signed.',
     )
     expect(screen.getByRole('button', { name: 'Set up signing' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /How to create the signer account/ })).toHaveAttribute(
-      'href',
-      expect.stringContaining('docs/concepts/commit-signing.md'),
-    )
   })
 
   it('asks for the GitHub URL before setup when the org has none', async () => {

@@ -1,6 +1,6 @@
 // Calls for the Settings "Commit signing" section: the org's commit signer and
 // the identity its runs commit as, under /api/orgs/{org_id}/github/
-// (docs/for-agents/specs/commit-signing). Reads are member-gated, writes are
+// (specs/commit-signing). Reads are member-gated, writes are
 // org-admin.
 //
 // Unlike lib/githubApp.ts these let the HttpError escape: the setup form reads
@@ -10,10 +10,6 @@
 import { apiFetch, apiJSON, HttpError } from './apiClient'
 import { hostOf } from './reachability'
 import { timeAgo } from './relativeTime'
-
-/** The guide to creating the signer account, linked from the section. */
-export const COMMIT_SIGNING_GUIDE_URL =
-  'https://github.com/sky-ai-eng/triage-factory/blob/main/docs/concepts/commit-signing.md'
 
 /** Whether a GitHub web base is github.com, the only host with a noreply
  *  address a signer's commits can carry without an address of its own. */

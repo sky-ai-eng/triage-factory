@@ -1,5 +1,5 @@
 # Tempo for the local-mode dev loop — a single `docker run`, no compose, no
-# other containers. See docs/local-mode/tuning.md#tracing for the invocation.
+# other containers. See docs/users/local/tuning.md#tracing for the invocation.
 #
 # The difference from tempo.yaml (the compose profile's config) is which
 # metrics-generator processors run: local-blocks only. That one stores the

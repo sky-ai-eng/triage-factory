@@ -44,7 +44,7 @@ type SidecarRuntime struct {
 //
 // The setuid-from-root transition clears the child's effective/permitted
 // capability sets (standard kernel behavior — see
-// docs/security/privilege-separation.md's own uid-drop verification), which
+// docs/users/security/privilege-separation.md's own uid-drop verification), which
 // is what makes the sidecar capless. Unlike the orchestrator's own drop
 // (docker/entrypoint.sh's `setpriv --bounding-set=-all`), this does NOT
 // also clear the child's capability BOUNDING set — that needs an exec-time

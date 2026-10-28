@@ -4,7 +4,7 @@
 // samples, the conversations timing columns, and llm_spend) and serves it as
 // the operator-gated /api/fleet/* surfaces.
 //
-// EE module shape (docs/ee-feature-packaging.md): core never imports this
+// EE module shape (docs/contributors/ee-features.md): core never imports this
 // package; package main blank-imports it, whose init() registers the route
 // installer. Every handler gates per-request — but on the DEPLOYMENT-scoped
 // gate, not the per-org one: fleet administration is a cross-org console, so it

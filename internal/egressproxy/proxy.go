@@ -11,7 +11,7 @@
 // and sibling runs' proxies. But it also means `pnpm install` / `pip
 // install` cannot fetch dependencies: there is no route to any registry.
 //
-// # The design (sandbox-fleet spec §3, docs/for-agents/specs/sandbox-fleet/README.md)
+// # The design (sandbox-fleet spec §3, specs/sandbox-fleet/README.md)
 //
 // A CONNECT proxy bound on the run's gateway IP becomes the single audited
 // door to the public internet. The L3 layer stays unchanged: it keeps
@@ -48,7 +48,7 @@
 //     copied back verbatim: no rewriting, no decompression, no cache.
 //
 // The interception design of record is
-// docs/for-agents/specs/sandbox-backends/ §6.1, with the conditions this
+// specs/sandbox-backends/ §6.1, with the conditions this
 // package implements.
 //
 // Redirects are out of scope: the proxy follows nothing. The client follows
