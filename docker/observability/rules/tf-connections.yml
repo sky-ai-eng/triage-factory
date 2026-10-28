@@ -1,8 +1,8 @@
 # Alerting rules for TF's connections to the systems it connects to (GitHub,
 # Jira, Slack's Web API, and the LLM providers), read from
-# tf_upstream_requests_total, tf_upstream_up and tf_conversations_deferred.
-# Loaded by the bundled Prometheus through the rule_files glob in
-# prometheus.yml.
+# tf_upstream_requests_total, tf_upstream_up, tf_conversations_deferred and
+# tf_upstream_rate_limit_near_limit. Loaded by the bundled Prometheus through
+# the rule_files glob in prometheus.yml.
 #
 # Every critical alert in this file is fleet-wide on purpose. Each org connects with
 # its own credentials, and often to its own host: a GitHub Enterprise Server
@@ -16,8 +16,9 @@
 # orgs with the number of orgs it has a value for, and never looks at one org:
 # it needs at least two orgs before it can fire, so a single-org deployment
 # gets no page from either and reads the dashboard's "Orgs with failing
-# requests" and "Orgs down" panels instead. ConversationsDeferred is the one
-# rule that fires for a single org, and it is a warning rather than a page.
+# requests" and "Orgs down" panels instead. Two warnings, not pages, can fire
+# on one org's reading: ConversationsDeferred, and JiraDeploymentAppQuotaLow,
+# whose quota belongs to the deployment rather than to the org.
 #
 # Delivery is not configured in this repo. The bundled stack runs no
 # Alertmanager and prometheus.yml has no `alerting:` block, so a firing alert
@@ -152,3 +153,53 @@ groups:
             for what the providers and GitHub's API are answering. A clone or
             fetch that could not reach the git host is not a request counted
             there; the executor's log line for the hand-back names it.
+
+      # The deployment's Atlassian app (TF_ATLASSIAN_CLIENT_ID) is near its
+      # hourly Jira quota. On Atlassian's default tier (Tier 1) the app has one
+      # quota, which every org whose people connect Jira through it spends, so
+      # this is the deployment's condition rather than one org's, and only an
+      # operator can change it. People spend the quota with the Jira writes
+      # they make from the board through their Connect (claim, done, requeue).
+      # Polling and delegated runs use each org's service credential, which
+      # the quota does not meter.
+      #
+      # tf_upstream_rate_limit_near_limit is each pod's latest reading for each
+      # org: 1 when Jira's response said less than 20% of the quota is left,
+      # and 0 when it did not, which is what a Connect's response without
+      # X-RateLimit-NearLimit records. Every org on the app reads the same
+      # quota, so any one reading that says near is enough, and max takes it
+      # across orgs and pods.
+      #
+      # A reading stands until the same pod records another for the same org,
+      # and its series ends an hour after its response, or at the reset a 429
+      # states. The responses come from people's actions, so a near reading
+      # can stand alone for that hour, and no for: shorter than the quota's
+      # window keeps a single one from firing the rule. The 10 minutes keep it
+      # from firing on a near reading that the org's next actions replace with
+      # not-near ones. The rule clears once no pod's latest reading for any org
+      # says near: at the next response for each org, or when the near
+      # reading's series ends.
+      #
+      # On Atlassian's per-tenant tier (Tier 2) each org's reading is of its
+      # own site's quota, and this rule then fires for any one org's.
+      - alert: JiraDeploymentAppQuotaLow
+        expr: max(tf_upstream_rate_limit_near_limit{upstream="jira", credential="cloud_oauth:deployment"}) == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The deployment's Atlassian app is near its shared Jira quota"
+          description: >-
+            For 10 minutes, a reading of the hourly Jira quota of the
+            deployment's Atlassian app (TF_ATLASSIAN_CLIENT_ID) has said that
+            less than 20% of it is left. On Atlassian's default tier every org
+            whose people connect Jira through that app spends this one quota,
+            so as it runs out, the Jira actions people take from the board
+            (claim, done, requeue) wait and then fail in all of those orgs at
+            once. Polling and delegated runs use each org's own service
+            credential and are not affected. Ask Atlassian to move the app to
+            a higher tier, or have the orgs that use it most add an Atlassian
+            OAuth app of their own or connect with API tokens; their people
+            then connect Jira again. sum by (org_id)
+            (increase(tf_upstream_rate_limit_refused_total{upstream="jira", credential="cloud_oauth:deployment"}[1h]))
+            counts the requests the quota has refused.

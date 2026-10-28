@@ -5,6 +5,7 @@
 # so the cases for first-sample rules start the series at 1 rather than 0.
 
 rule_files:
+- ../../docker/observability/rules/tf-connections.yml
 - ../../docker/observability/rules/tf-runs.yml
 - ../../docker/observability/rules/tf-work.yml
 - ../../docker/observability/rules/tf-commit-signing.yml
@@ -502,4 +503,80 @@ tests:
   alert_rule_test:
   - eval_time: 16m
     alertname: DeploymentCommitSignerDown
+    exp_alerts: []
+- name: JiraDeploymentAppQuotaLow fires on one org's near reading held for 10 minutes
+  interval: 1m
+  input_series:
+  - series: 'tf_upstream_rate_limit_near_limit{upstream="jira",credential="cloud_oauth:deployment",bucket="quota",org_id="o1",instance="control-1:9464"}'
+    values: 0 1x15
+  - series: 'tf_upstream_rate_limit_near_limit{upstream="jira",credential="cloud_oauth:deployment",bucket="quota",org_id="o2",instance="control-2:9464"}'
+    values: 0x16
+  alert_rule_test:
+  - eval_time: 10m
+    alertname: JiraDeploymentAppQuotaLow
+    exp_alerts: []
+  - eval_time: 11m
+    alertname: JiraDeploymentAppQuotaLow
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+      exp_annotations:
+        summary: The deployment's Atlassian app is near its shared Jira quota
+        description: 'For 10 minutes, a reading of the hourly Jira quota of the deployment''s Atlassian app (TF_ATLASSIAN_CLIENT_ID) has said that less than 20% of it is left. On Atlassian''s default tier every org whose people connect Jira through that app spends this one quota, so as it runs out, the Jira actions people take from the board (claim, done, requeue) wait and then fail in all of those orgs at once. Polling and delegated runs use each org''s own service credential and are not affected. Ask Atlassian to move the app to a higher tier, or have the orgs that use it most add an Atlassian OAuth app of their own or connect with API tokens; their people then connect Jira again. sum by (org_id) (increase(tf_upstream_rate_limit_refused_total{upstream="jira", credential="cloud_oauth:deployment"}[1h])) counts the requests the quota has refused.'
+- name: JiraDeploymentAppQuotaLow ignores every quota but the deployment app's
+  interval: 1m
+  input_series:
+  - series: 'tf_upstream_rate_limit_near_limit{upstream="jira",credential="cloud_oauth:org",bucket="quota",org_id="o1"}'
+    values: 1x20
+  - series: 'tf_upstream_rate_limit_near_limit{upstream="jira",credential="cloud_api_token",bucket="quota",org_id="o2"}'
+    values: 1x20
+  alert_rule_test:
+  - eval_time: 15m
+    alertname: JiraDeploymentAppQuotaLow
+    exp_alerts: []
+- name: JiraDeploymentAppQuotaLow ignores a near reading replaced within 10 minutes
+  interval: 1m
+  input_series:
+  - series: 'tf_upstream_rate_limit_near_limit{upstream="jira",credential="cloud_oauth:deployment",bucket="quota",org_id="o1"}'
+    values: 1x5 0x15
+  alert_rule_test:
+  - eval_time: 10m
+    alertname: JiraDeploymentAppQuotaLow
+    exp_alerts: []
+  - eval_time: 15m
+    alertname: JiraDeploymentAppQuotaLow
+    exp_alerts: []
+- name: JiraDeploymentAppQuotaLow clears on a reading that is not near
+  interval: 1m
+  input_series:
+  - series: 'tf_upstream_rate_limit_near_limit{upstream="jira",credential="cloud_oauth:deployment",bucket="quota",org_id="o1"}'
+    values: 1x15 0x10
+  alert_rule_test:
+  - eval_time: 15m
+    alertname: JiraDeploymentAppQuotaLow
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+      exp_annotations:
+        summary: The deployment's Atlassian app is near its shared Jira quota
+        description: 'For 10 minutes, a reading of the hourly Jira quota of the deployment''s Atlassian app (TF_ATLASSIAN_CLIENT_ID) has said that less than 20% of it is left. On Atlassian''s default tier every org whose people connect Jira through that app spends this one quota, so as it runs out, the Jira actions people take from the board (claim, done, requeue) wait and then fail in all of those orgs at once. Polling and delegated runs use each org''s own service credential and are not affected. Ask Atlassian to move the app to a higher tier, or have the orgs that use it most add an Atlassian OAuth app of their own or connect with API tokens; their people then connect Jira again. sum by (org_id) (increase(tf_upstream_rate_limit_refused_total{upstream="jira", credential="cloud_oauth:deployment"}[1h])) counts the requests the quota has refused.'
+  - eval_time: 16m
+    alertname: JiraDeploymentAppQuotaLow
+    exp_alerts: []
+- name: JiraDeploymentAppQuotaLow clears when the near reading's series ends
+  interval: 1m
+  input_series:
+  - series: 'tf_upstream_rate_limit_near_limit{upstream="jira",credential="cloud_oauth:deployment",bucket="quota",org_id="o1"}'
+    values: 1x15 stale
+  alert_rule_test:
+  - eval_time: 15m
+    alertname: JiraDeploymentAppQuotaLow
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+      exp_annotations:
+        summary: The deployment's Atlassian app is near its shared Jira quota
+        description: 'For 10 minutes, a reading of the hourly Jira quota of the deployment''s Atlassian app (TF_ATLASSIAN_CLIENT_ID) has said that less than 20% of it is left. On Atlassian''s default tier every org whose people connect Jira through that app spends this one quota, so as it runs out, the Jira actions people take from the board (claim, done, requeue) wait and then fail in all of those orgs at once. Polling and delegated runs use each org''s own service credential and are not affected. Ask Atlassian to move the app to a higher tier, or have the orgs that use it most add an Atlassian OAuth app of their own or connect with API tokens; their people then connect Jira again. sum by (org_id) (increase(tf_upstream_rate_limit_refused_total{upstream="jira", credential="cloud_oauth:deployment"}[1h])) counts the requests the quota has refused.'
+  - eval_time: 16m
+    alertname: JiraDeploymentAppQuotaLow
     exp_alerts: []
