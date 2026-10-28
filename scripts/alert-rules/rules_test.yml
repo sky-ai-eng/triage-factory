@@ -1,0 +1,336 @@
+# Unit tests for the alerting rules in docker/observability/rules/, run by
+# scripts/check-alert-rules.sh with the stack's own promtool. Each case feeds
+# series shaped like the ones TF exports and checks when the alert fires and
+# with which labels. A counter's series appears only at its first increment,
+# so the cases for first-sample rules start the series at 1 rather than 0.
+
+rule_files:
+- ../../docker/observability/rules/tf-runs.yml
+- ../../docker/observability/rules/tf-work.yml
+- ../../docker/observability/rules/tf-commit-signing.yml
+- ../../docker/observability/rules/tf-integrity.yml
+- ../../docker/observability/rules/tf-slack.yml
+evaluation_interval: 1m
+tests:
+- name: ClaimsExpiredUnreleased fires after 5 minutes over 2 minutes expired
+  interval: 1m
+  input_series:
+  - series: tf_claims_oldest_expired_age_seconds
+    values: 0 0 0 150+60x10
+  alert_rule_test:
+  - eval_time: 7m
+    alertname: ClaimsExpiredUnreleased
+    exp_alerts: []
+  - eval_time: 8m
+    alertname: ClaimsExpiredUnreleased
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+      exp_annotations:
+        summary: A run's claim has stayed expired and no executor has taken it over
+        description: The oldest expired claim is 7m 30s past its lease. Every executor takes expired claims over on each pass, so none is running. Check that the executors are up and healthy (their container health checks, and GET /healthz inside each executor container), then read their logs.
+- name: WorkspaceCheckpointsStale fires 10 minutes past 35 minutes without a checkpoint
+  interval: 1m
+  input_series:
+  - series: tf_claims_oldest_checkpoint_age_seconds
+    values: 2000+60x20
+  alert_rule_test:
+  - eval_time: 11m
+    alertname: WorkspaceCheckpointsStale
+    exp_alerts: []
+  - eval_time: 12m
+    alertname: WorkspaceCheckpointsStale
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+      exp_annotations:
+        summary: A run's workspace has gone more than 45 minutes without a checkpoint
+        description: The live run longest without a checkpoint last had one 45m 20s ago, so a hard kill of its executor would lose that much of its workspace. Check for WorkspaceCheckpointsFailing and for problems with the object store. With TF_SNAPSHOT_INTERVAL_SEC=0 checkpoints are off, and this alert fires for every long run.
+- name: WorkspaceCheckpointsFailing fires on a failed-outcome series' first sample, and clears an hour later
+  interval: 1m
+  input_series:
+  - series: 'tf_workspace_checkpoints_total{outcome="failed"}'
+    values: '_x10 1x80'
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: WorkspaceCheckpointsFailing
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: WorkspaceCheckpointsFailing
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+      exp_annotations:
+        summary: Workspace checkpoints are failing
+        description: At least one live run's workspace checkpoint failed in the last hour, so a hard kill of its executor would lose more work than TF_SNAPSHOT_INTERVAL_SEC allows. Checkpoints are uploaded to the object store, so check that it is reachable and accepting writes, and read the workspace.snapshot spans with reason=checkpoint for the error.
+  - eval_time: 75m
+    alertname: WorkspaceCheckpointsFailing
+    exp_alerts: []
+- name: WorkspaceCheckpointsFailing fires when an old series increments
+  interval: 1m
+  input_series:
+  - series: 'tf_workspace_checkpoints_total{outcome="failed"}'
+    values: 1x70 2x30
+  - series: 'tf_workspace_checkpoints_total{outcome="written"}'
+    values: 1+1x100
+  alert_rule_test:
+  - eval_time: 65m
+    alertname: WorkspaceCheckpointsFailing
+    exp_alerts: []
+  - eval_time: 80m
+    alertname: WorkspaceCheckpointsFailing
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+      exp_annotations:
+        summary: Workspace checkpoints are failing
+        description: At least one live run's workspace checkpoint failed in the last hour, so a hard kill of its executor would lose more work than TF_SNAPSHOT_INTERVAL_SEC allows. Checkpoints are uploaded to the object store, so check that it is reachable and accepting writes, and read the workspace.snapshot spans with reason=checkpoint for the error.
+- name: SidecarFrameOversized fires on the counter's first sample
+  interval: 1m
+  input_series:
+  - series: tf_sidecar_frames_oversized_total
+    values: '_x5 1x10'
+  alert_rule_test:
+  - eval_time: 3m
+    alertname: SidecarFrameOversized
+    exp_alerts: []
+  - eval_time: 6m
+    alertname: SidecarFrameOversized
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+      exp_annotations:
+        summary: A run's credential sidecar sent a supervision frame over the size limit
+        description: 'A working sidecar never sends a frame over the limit, so treat this sidecar as compromised. The executor closed that run''s supervision channel. Its ERROR line, "sidecar sent a supervision frame over the size limit; closed its supervision channel", names the conversation.'
+- name: BackgroundBrainNotRunning fires when no pod reports the work queues
+  interval: 1m
+  input_series:
+  - series: 'tf_work_ready{work_kind="event_queue",org_id="o1"}'
+    values: '0x10'
+  alert_rule_test:
+  - eval_time: 4m
+    alertname: BackgroundBrainNotRunning
+    exp_alerts: []
+  - eval_time: 5m
+    alertname: BackgroundBrainNotRunning
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+      exp_annotations:
+        summary: No control pod is running the background brain
+        description: 'No pod has reported the work queues for 5 minutes: either no control pod holds the background-brain lease, or Prometheus cannot scrape the one that does. Polling, routing, scoring and auto-delegation are stopped. Check that control is up, and read GET /readyz on each control pod; its lease field names the holder.'
+- name: BackgroundBrainNotRunning stays quiet while the brain reports
+  interval: 1m
+  input_series:
+  - series: 'tf_work_oldest_ready_age_objective_seconds{work_kind="event_queue"}'
+    values: 60x10
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: BackgroundBrainNotRunning
+    exp_alerts: []
+- name: WorkQueueStopped fires on ready work that nothing has ever claimed
+  interval: 1m
+  input_series:
+  - series: 'tf_work_ready{work_kind="event_queue",org_id="o1"}'
+    values: 3x20
+  alert_rule_test:
+  - eval_time: 4m
+    alertname: WorkQueueStopped
+    exp_alerts: []
+  - eval_time: 6m
+    alertname: WorkQueueStopped
+    exp_alerts:
+    - exp_labels:
+        work_kind: event_queue
+        severity: critical
+      exp_annotations:
+        summary: Nothing is claiming ready event_queue work
+        description: 3 event_queue items are ready to claim, and nothing has claimed one for 5 minutes. The control pod holding the background-brain lease drains this queue. Read GET /readyz on each control pod to find the holder, then its logs.
+- name: WorkQueueStopped stays quiet while work is being claimed
+  interval: 1m
+  input_series:
+  - series: 'tf_work_ready{work_kind="event_queue",org_id="o1"}'
+    values: 3x20
+  - series: 'tf_work_claims_total{work_kind="event_queue",org_id="o1"}'
+    values: 1+1x20
+  alert_rule_test:
+  - eval_time: 10m
+    alertname: WorkQueueStopped
+    exp_alerts: []
+- name: WorkQueueBehind fires per org past the kind's objective
+  interval: 1m
+  input_series:
+  - series: 'tf_work_oldest_ready_age_seconds{work_kind="pending_firings",org_id="o1"}'
+    values: 30 90+60x10
+  - series: 'tf_work_oldest_ready_age_seconds{work_kind="pending_firings",org_id="o2"}'
+    values: 10x11
+  - series: 'tf_work_oldest_ready_age_objective_seconds{work_kind="pending_firings"}'
+    values: 60x11
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: WorkQueueBehind
+    exp_alerts: []
+  - eval_time: 6m
+    alertname: WorkQueueBehind
+    exp_alerts:
+    - exp_labels:
+        work_kind: pending_firings
+        org_id: o1
+        severity: warning
+      exp_annotations:
+        summary: pending_firings work for org o1 is behind
+        description: The oldest ready pending_firings item for org o1 has waited 6m 30s, longer than the queue's objective, for 5 minutes. If WorkQueueStopped is not firing, items are being claimed but not fast enough; compare tf_work_ready and rate(tf_work_completions_total[5m]) for the kind.
+- name: WorkParked fires after 15 minutes of parked work
+  interval: 1m
+  input_series:
+  - series: 'tf_work_parked{work_kind="event_queue",org_id="o1"}'
+    values: 0 2x20
+  alert_rule_test:
+  - eval_time: 15m
+    alertname: WorkParked
+    exp_alerts: []
+  - eval_time: 16m
+    alertname: WorkParked
+    exp_alerts:
+    - exp_labels:
+        work_kind: event_queue
+        org_id: o1
+        severity: warning
+      exp_annotations:
+        summary: event_queue work for org o1 is parked
+        description: 2 event_queue items for org o1 failed permanently or ran out of retries, and will not run until someone redrives or cancels them under Parked work in the org's settings.
+- name: CommitSigningStalled fires after a minute of a request waiting over 5 seconds
+  interval: 1m
+  input_series:
+  - series: tf_commit_signing_oldest_pending_age_seconds
+    values: 0 0 8+60x5
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: CommitSigningStalled
+    exp_alerts: []
+  - eval_time: 3m
+    alertname: CommitSigningStalled
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+      exp_annotations:
+        summary: No control pod is answering commit signature requests
+        description: The oldest signature request has waited 1m 8s; a control pod normally picks one up within two seconds. Runs that sign commits wait, then retry. Check that the control pods are up and reach Postgres, where the requests are queued, and read their logs.
+- name: CommitSigningStalled ignores one slow request
+  interval: 1m
+  input_series:
+  - series: tf_commit_signing_oldest_pending_age_seconds
+    values: 0 9 0 0 0
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: CommitSigningStalled
+    exp_alerts: []
+- name: CommitSignaturesUnanswered fires on the outcome's first sample
+  interval: 1m
+  input_series:
+  - series: 'tf_commit_signatures_total{signer="deployment",outcome="unanswered",org_id="o1"}'
+    values: '_x3 1x20'
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: CommitSignaturesUnanswered
+    exp_alerts:
+    - exp_labels:
+        signer: deployment
+        severity: warning
+      exp_annotations:
+        summary: Commit signature requests went unanswered
+        description: 'Runs'' requests to sign as the deployment signer went unanswered in the last 15 minutes. Runs retry, so a few are harmless. Break it down with sum by (org_id) (increase(tf_commit_signatures_total{outcome="unanswered"}[15m])) and read the control pods'' logs. With a deployment signer, check that every control pod is configured with the same one.'
+- name: CommitSignaturesRefusedForRun fires for its three reasons only
+  interval: 1m
+  input_series:
+  - series: 'tf_commit_signatures_total{signer="org",outcome="refused",reason="committer_mismatch",org_id="o1"}'
+    values: '_x3 1x20'
+  - series: 'tf_commit_signatures_total{signer="org",outcome="refused",reason="org_minute_budget",org_id="o1"}'
+    values: '_x3 1x20'
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: CommitSignaturesRefusedForRun
+    exp_alerts:
+    - exp_labels:
+        reason: committer_mismatch
+        org_id: o1
+        severity: warning
+      exp_annotations:
+        summary: A run in org o1 asked to sign a commit it should not (committer_mismatch)
+        description: 'A signature request was refused with committer_mismatch in the last hour. claim_budget is a run past its cap of TF_MAX_COMMIT_SIGNATURES_PER_CLAIM signatures, claim_inactive is a request after its engagement ended, and committer_mismatch is a commit whose committer is not the signer. A working run produces none of these. Each refusal shows as "Commit signing refused" in the activity of the run that asked.'
+- name: DeploymentCommitSignerDown fires once for the deployment after 15 minutes
+  interval: 1m
+  input_series:
+  - series: 'tf_deployment_commit_signer_up{instance="control-1:9464"}'
+    values: '0x20'
+  - series: 'tf_deployment_commit_signer_up{instance="control-2:9464"}'
+    values: '0x20'
+  alert_rule_test:
+  - eval_time: 14m
+    alertname: DeploymentCommitSignerDown
+    exp_alerts: []
+  - eval_time: 15m
+    alertname: DeploymentCommitSignerDown
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+      exp_annotations:
+        summary: The deployment commit signer is not active
+        description: Every workspace on the deployment GitHub App commits unsigned until it is. Run triagefactory commit-signer status in a control container for the reason, and triagefactory commit-signer verify to check it again once fixed. On a GitHub Enterprise Server in private mode the signer cannot be checked and stays pending.
+- name: DeploymentCommitSignerDown stays quiet while the signer is active
+  interval: 1m
+  input_series:
+  - series: 'tf_deployment_commit_signer_up{instance="control-1:9464"}'
+    values: 1x20
+  alert_rule_test:
+  - eval_time: 16m
+    alertname: DeploymentCommitSignerDown
+    exp_alerts: []
+- name: AuditRecordsDropped fires on the counter's first sample
+  interval: 1m
+  input_series:
+  - series: 'tf_audit_records_dropped_total{stage="record",op="github"}'
+    values: '_x3 1x20'
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: AuditRecordsDropped
+    exp_alerts:
+    - exp_labels:
+        stage: record
+        severity: warning
+      exp_annotations:
+        summary: An agent's write landed without its audit record
+        description: In the last hour, an agent's write under an org credential reached its target, but the audit record of it was lost at the record stage. The WARN or ERROR line logged with each drop names the target. The write itself is not undone.
+- name: TasksOpenOnClosedEntity fires at the first nonzero sample
+  interval: 1m
+  input_series:
+  - series: 'tf_tasks_open_on_closed_entity{org_id="o1"}'
+    values: 0 0 2x5
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: TasksOpenOnClosedEntity
+    exp_alerts: []
+  - eval_time: 3m
+    alertname: TasksOpenOnClosedEntity
+    exp_alerts:
+    - exp_labels:
+        org_id: o1
+        severity: warning
+      exp_annotations:
+        summary: Open tasks on closed entities in org o1
+        description: '2 queued, in-progress or snoozed tasks in org o1 belong to a merged or done entity, which TF''s own guards should prevent. The control pod''s WARN line "terminal checker: open tasks on closed entities; a close missed them or a mint bypassed the guard" names up to twenty of them.'
+- name: SlackDeliveriesRetried fires on the counter's first sample
+  interval: 1m
+  input_series:
+  - series: 'tf_slack_retry_deliveries_total{app_id="A1",transport="events_api"}'
+    values: '_x3 1x20'
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: SlackDeliveriesRetried
+    exp_alerts:
+    - exp_labels:
+        app_id: A1
+        severity: warning
+      exp_annotations:
+        summary: Slack is retrying event deliveries to app A1
+        description: Slack retried event deliveries that TF did not acknowledge in time in the last 15 minutes. On the Events API, sustained retries come before Slack disables the app's event subscription. Check that control answers at the public URL quickly; each retry is also a WARN line in control's log.

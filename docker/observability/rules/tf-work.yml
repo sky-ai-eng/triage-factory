@@ -1,0 +1,88 @@
+# Alerting rules for the background brain and its work queues: the event
+# queue (event_queue), queued auto-delegations (pending_firings) and trigger
+# re-evaluation after scoring (task_rederive_queue), told apart by work_kind.
+# The queue gauges are measured every 30 seconds by the control pod holding
+# the background-brain lease. Severity and delivery follow
+# tf-connections.yml.
+
+groups:
+  - name: tf-work
+    rules:
+      # Every other gauge in this file, and most brain-side gauges elsewhere,
+      # comes from the pod holding the background-brain lease, so with no
+      # holder they all go quiet at once, along with the polling, routing and
+      # scoring they report on. The objective gauge is exported for every work
+      # kind whenever the brain runs, whatever the queues hold, so its absence
+      # is the signal.
+      - alert: BackgroundBrainNotRunning
+        expr: absent(tf_work_oldest_ready_age_objective_seconds)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No control pod is running the background brain"
+          description: >-
+            No pod has reported the work queues for 5 minutes: either no
+            control pod holds the background-brain lease, or Prometheus cannot
+            scrape the one that does. Polling, routing, scoring and
+            auto-delegation are stopped. Check that control is up, and read
+            GET /readyz on each control pod; its lease field names the holder.
+
+      # An idle queue has nothing ready; a stopped one has ready work and
+      # nothing claiming it. The claims counter is per process and has no
+      # series until something is claimed, so the rule reads ready work with
+      # no claims of that kind on any pod rather than a claim rate of zero.
+      - alert: WorkQueueStopped
+        expr: |
+          sum by (work_kind) (tf_work_ready) > 0
+          unless on (work_kind)
+          sum by (work_kind) (rate(tf_work_claims_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Nothing is claiming ready {{ $labels.work_kind }} work"
+          description: >-
+            {{ $value }} {{ $labels.work_kind }} items are ready to claim, and
+            nothing has claimed one for 5 minutes. The control pod holding the
+            background-brain lease drains this queue. Read GET /readyz on each
+            control pod to find the holder, then its logs.
+
+      # Per org, so a warning: one org's burst of events can put its own
+      # queue behind while every other org's drains on time. The objective is
+      # each kind's declared bound on oldest ready age, exported beside the
+      # depths so the rule compares two series rather than hard-coding one.
+      - alert: WorkQueueBehind
+        expr: |
+          tf_work_oldest_ready_age_seconds
+          > on (work_kind) group_left
+          max by (work_kind) (tf_work_oldest_ready_age_objective_seconds)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.work_kind }} work for org {{ $labels.org_id }} is behind"
+          description: >-
+            The oldest ready {{ $labels.work_kind }} item for org
+            {{ $labels.org_id }} has waited {{ $value | humanizeDuration }},
+            longer than the queue's objective, for 5 minutes. If
+            WorkQueueStopped is not firing, items are being claimed but not
+            fast enough; compare tf_work_ready and
+            rate(tf_work_completions_total[5m]) for the kind.
+
+      # Parked work failed permanently or ran out of retries, and stays
+      # parked until an org admin redrives or cancels it. A warning rather
+      # than nothing, because it is work TF failed to do (events not routed,
+      # delegations not fired), whatever the org does about it.
+      - alert: WorkParked
+        expr: tf_work_parked > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.work_kind }} work for org {{ $labels.org_id }} is parked"
+          description: >-
+            {{ $value }} {{ $labels.work_kind }} items for org
+            {{ $labels.org_id }} failed permanently or ran out of retries, and
+            will not run until someone redrives or cancels them under Parked
+            work in the org's settings.

@@ -1,0 +1,29 @@
+# Alerting rule for Slack ingest (Enterprise Edition). Severity and delivery
+# follow tf-connections.yml; the first-sample form
+# `or (x unless x offset <window>)` is explained in tf-runs.yml.
+
+groups:
+  - name: tf-slack
+    rules:
+      # Slack retries a delivery TF did not acknowledge in time, and on the
+      # Events API sustained retries come before Slack disables the app's
+      # event subscription. A warning: deliveries still arrive, and the retry
+      # is the warning Slack gives before it stops sending them.
+      - alert: SlackDeliveriesRetried
+        expr: |
+          sum by (app_id) (increase(tf_slack_retry_deliveries_total[15m])) > 0
+          or
+          sum by (app_id) (
+            tf_slack_retry_deliveries_total
+            unless tf_slack_retry_deliveries_total offset 15m
+          ) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slack is retrying event deliveries to app {{ $labels.app_id }}"
+          description: >-
+            Slack retried event deliveries that TF did not acknowledge in time
+            in the last 15 minutes. On the Events API, sustained retries come
+            before Slack disables the app's event subscription. Check that
+            control answers at the public URL quickly; each retry is also a
+            WARN line in control's log.

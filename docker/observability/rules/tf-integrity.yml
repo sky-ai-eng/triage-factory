@@ -1,0 +1,49 @@
+# Alerting rules for counts that are zero in a correct deployment, where a
+# sample is a bug or an incident and the first one matters. Severity and
+# delivery follow tf-connections.yml; the first-sample form
+# `or (x unless x offset <window>)` is explained in tf-runs.yml.
+#
+# tf_entity_terminal_active is not here: it counts entities in repositories or
+# projects an org stopped tracking whose tasks are still open, which is normal
+# after untracking and stays nonzero until someone dismisses them.
+
+groups:
+  - name: tf-integrity
+    rules:
+      # An agent's write under an org credential landed, and the audit record
+      # of it did not. Nothing an operator does recovers the record, so a
+      # warning, but every one is a gap in the audit log and a bug to report.
+      - alert: AuditRecordsDropped
+        expr: |
+          sum by (stage) (increase(tf_audit_records_dropped_total[1h])) > 0
+          or
+          sum by (stage) (
+            tf_audit_records_dropped_total
+            unless tf_audit_records_dropped_total offset 1h
+          ) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "An agent's write landed without its audit record"
+          description: >-
+            In the last hour, an agent's write under an org credential reached
+            its target, but the audit record of it was lost at the
+            {{ $labels.stage }} stage. The WARN or ERROR line logged with each
+            drop names the target. The write itself is not undone.
+
+      # A terminating close takes every open task with it in one transaction,
+      # and a task mint refuses a closed entity, so any sample means one of
+      # those guards was bypassed. Measured every five minutes by the
+      # terminal-state checker on the pod holding the background brain.
+      - alert: TasksOpenOnClosedEntity
+        expr: tf_tasks_open_on_closed_entity > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Open tasks on closed entities in org {{ $labels.org_id }}"
+          description: >-
+            {{ $value }} queued, in-progress or snoozed tasks in org
+            {{ $labels.org_id }} belong to a merged or done entity, which TF's
+            own guards should prevent. The control pod's WARN line "terminal
+            checker: open tasks on closed entities; a close missed them or a
+            mint bypassed the guard" names up to twenty of them.

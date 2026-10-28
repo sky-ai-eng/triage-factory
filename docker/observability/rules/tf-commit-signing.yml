@@ -1,0 +1,101 @@
+# Alerting rules for commit signing: control pods answering runs' signature
+# requests, the refusals a working run never earns, and the deployment commit
+# signer. Severity and delivery follow tf-connections.yml; the first-sample
+# form `or (x unless x offset <window>)` is explained in tf-runs.yml.
+#
+# An org's own signer breaking is not here: the org's key or account causes
+# it, the app shows it to the org's admins under Commit signing, and an
+# operator cannot fix it.
+
+groups:
+  - name: tf-commit-signing
+    rules:
+      # A control pod picks a request up within about a second and a half
+      # (the doorbell, or the once-a-second sweep that catches a missed one),
+      # so a request still waiting after 5 seconds, for a minute, means no
+      # control pod is signing. The gauge comes from the pod holding the
+      # background brain rather than from the signers, so a queue nobody
+      # drains still reports.
+      - alert: CommitSigningStalled
+        expr: max(tf_commit_signing_oldest_pending_age_seconds) > 5
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No control pod is answering commit signature requests"
+          description: >-
+            The oldest signature request has waited
+            {{ $value | humanizeDuration }}; a control pod normally picks one
+            up within two seconds. Runs that sign commits wait, then retry.
+            Check that the control pods are up and reach Postgres, where the
+            requests are queued, and read their logs.
+
+      # A request the run stopped waiting for, or one a control pod closed
+      # without signing because it could not read what signing needs. The run
+      # retries, so this is a warning; a steady stream means signatures are
+      # failing, not just slow.
+      - alert: CommitSignaturesUnanswered
+        expr: |
+          sum by (signer) (increase(tf_commit_signatures_total{outcome="unanswered"}[15m])) > 0
+          or
+          sum by (signer) (
+            tf_commit_signatures_total{outcome="unanswered"}
+            unless tf_commit_signatures_total{outcome="unanswered"} offset 15m
+          ) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Commit signature requests went unanswered"
+          description: >-
+            Runs' requests to sign as the {{ $labels.signer }} signer went
+            unanswered in the last 15 minutes. Runs retry, so a few are
+            harmless. Break it down with sum by (org_id)
+            (increase(tf_commit_signatures_total{outcome="unanswered"}[15m]))
+            and read the control pods' logs. With a deployment signer, check
+            that every control pod is configured with the same one.
+
+      # Refusals a working run never earns: past its per-claim cap
+      # (claim_budget), asking after its engagement ended (claim_inactive), or
+      # a commit whose committer is not the signer (committer_mismatch). Each
+      # is what a misbehaving or compromised run would produce. Per org, so a
+      # warning.
+      - alert: CommitSignaturesRefusedForRun
+        expr: |
+          sum by (reason, org_id) (increase(tf_commit_signatures_total{reason=~"claim_budget|claim_inactive|committer_mismatch"}[1h])) > 0
+          or
+          sum by (reason, org_id) (
+            tf_commit_signatures_total{reason=~"claim_budget|claim_inactive|committer_mismatch"}
+            unless tf_commit_signatures_total{reason=~"claim_budget|claim_inactive|committer_mismatch"} offset 1h
+          ) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "A run in org {{ $labels.org_id }} asked to sign a commit it should not ({{ $labels.reason }})"
+          description: >-
+            A signature request was refused with {{ $labels.reason }} in the
+            last hour. claim_budget is a run past its cap of
+            TF_MAX_COMMIT_SIGNATURES_PER_CLAIM signatures, claim_inactive is a
+            request after its engagement ended, and committer_mismatch is a
+            commit whose committer is not the signer. A working run produces
+            none of these. Each refusal shows as "Commit signing refused" in
+            the activity of the run that asked.
+
+      # 0 while the deployment signer is pending or broken. Every control pod
+      # configured with it reports the same status row, so max() makes it one
+      # alert per deployment. A signer just configured reads 0 until its first
+      # check finds the key, which takes seconds; the 15 minutes covers that
+      # and a check retrying. Critical: one fault, which only the operator can
+      # fix, leaves every managed workspace committing unsigned.
+      - alert: DeploymentCommitSignerDown
+        expr: max(tf_deployment_commit_signer_up) == 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The deployment commit signer is not active"
+          description: >-
+            Every workspace on the deployment GitHub App commits unsigned until
+            it is. Run triagefactory commit-signer status in a control
+            container for the reason, and triagefactory commit-signer verify
+            to check it again once fixed. On a GitHub Enterprise Server in
+            private mode the signer cannot be checked and stays pending.
