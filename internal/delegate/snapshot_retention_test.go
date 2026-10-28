@@ -488,9 +488,9 @@ func keysContain(keys []domain.SnapshotReapKey, taskID string) bool {
 
 func wireBlobStore(t *testing.T, s *Spawner) {
 	t.Helper()
-	blobs, err := storage.New()
+	blobs, err := storage.NewWorkspace()
 	if err != nil {
-		t.Fatalf("storage.New: %v", err)
+		t.Fatalf("storage.NewWorkspace: %v", err)
 	}
 	s.SetStorage(blobs)
 }

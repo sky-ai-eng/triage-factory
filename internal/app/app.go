@@ -56,7 +56,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
-	"github.com/sky-ai-eng/triage-factory/internal/storage"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/workmetrics"
@@ -201,12 +200,8 @@ type App struct {
 	router           *routing.Router
 	srv              *server.Server
 
-	// blobStore is the process-wide durable blob seam (storage.New): the
-	// blueprint workspace snapshots. Built once in buildExecution and
-	// shared — the spawner gets it via SetStorage.
-	blobStore storage.Storage
 	// teamKB is the process-wide team knowledge-base seam (kbstore.New): the
-	// blob store above in multi, plain files under the state root in local.
+	// knowledge bucket in multi, plain files under the state root in local.
 	// Both the HTTP surface and the delegation spawner read through it.
 	teamKB kbstore.KB
 
@@ -291,6 +286,10 @@ type App struct {
 	// workers) — stopBrain's actual stop mechanism. nil when the brain
 	// isn't running.
 	brainCancel context.CancelFunc
+	// terminalGauges are the terminal-state checker's gauges, on the same
+	// lifecycle and for the same reason as workDepth below. nil when the
+	// brain isn't running.
+	terminalGauges *routing.TerminalInvariantGauges
 	// workDepth is the brain's work-queue depth observer, whose gauge
 	// callback is registered on the global meter provider. stopBrain closes
 	// it synchronously rather than leaving that to its goroutine's

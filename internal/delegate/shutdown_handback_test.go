@@ -230,9 +230,9 @@ func TestShutdown_AStopThatLandedFirstStillParks(t *testing.T) {
 // waits for it and resumes the session from it.
 func TestShutdown_TheHandBackSnapshotsBeforeItLetsGo(t *testing.T) {
 	f := newStallFixture(t, "r-shutdown-sdk", activityTimings{idle: time.Hour})
-	blobs, err := storage.New()
+	blobs, err := storage.NewWorkspace()
 	if err != nil {
-		t.Fatalf("storage.New: %v", err)
+		t.Fatalf("storage.NewWorkspace: %v", err)
 	}
 	f.s.SetStorage(blobs)
 	wtPath := t.TempDir()

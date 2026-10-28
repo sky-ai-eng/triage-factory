@@ -31,7 +31,7 @@ networks at present.
 - [Monitoring](monitoring.md) — health endpoints, metrics, traces
 - [Scaling](scaling.md) — more executors, multiple control pods, database pools
 - [Networking](networking.md) — client IPs behind a load balancer
-- [Storage](storage.md) — durable workspace storage
+- [Object storage](storage.md) — workspace snapshots and team knowledge
 - [Secrets](secrets.md) — supplying secrets from files
 - [JWT key rotation](jwt-key-rotation.md) — rotating the key that signs login sessions
 - [Fleet console](fleet-console.md) — the deployment-wide admin view and operator access

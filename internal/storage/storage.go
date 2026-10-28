@@ -9,11 +9,17 @@
 // executor next owns the shard. That snapshot/rehydrate logic — and the key
 // conventions it uses — live above this package; here we provide only the
 // put/get/delete/exists primitive over opaque, caller-namespaced keys.
+//
+// Multi mode keeps two buckets with opposite needs, each with its own key
+// pair: workspace snapshots (WorkspaceBucket, a cache) and team knowledge
+// (KnowledgeBucket, the only copy of what people wrote). Local mode keeps
+// knowledge as plain files and builds no store for it.
 package storage
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"time"
@@ -79,17 +85,30 @@ type Storage interface {
 	List(ctx context.Context, prefix string) ([]ObjectInfo, error)
 }
 
-// New constructs the process-wide blob store for the current runtime mode.
-// Local mode → fsStorage rooted at <StateRoot>/blobs, needing no external
-// service. Multi mode → objectStorage, configured from the TF_BLOB_* env
-// (endpoint, bucket, access key/secret); a missing or malformed config is
-// a hard error so a misconfigured deployment fails fast at boot rather than
-// on its first snapshot. Call once at startup.
-func New() (Storage, error) {
+// NewWorkspace constructs the store workspace snapshots live in, for the
+// current runtime mode. Local mode → fsStorage rooted at <StateRoot>/blobs,
+// needing no external service. Multi mode → objectStorage over
+// WorkspaceBucket, configured from TF_BLOB_ENDPOINT, TF_BLOB_REGION and
+// TF_WORKSPACE_*; a missing or malformed config is a hard error so a
+// misconfigured deployment fails fast at boot rather than on its first
+// snapshot. Call once at startup.
+//
+// Multi mode also refuses a workspace bucket that is the knowledge bucket.
+// Versioning is a bucket setting, so sharing one would either keep every
+// snapshot overwrite as a version or leave the knowledge base unversioned,
+// and the two key pairs would no longer separate anything. The check lives
+// here, not beside the knowledge store, because a process with no workspace
+// store is given no TF_WORKSPACE_BUCKET, and comparing against the default
+// would refuse a deployment that overrides it elsewhere.
+func NewWorkspace() (Storage, error) {
 	if runmode.Current() == runmode.ModeMulti {
-		cfg, err := ObjectConfigFromEnv()
+		cfg, err := ObjectConfigFromEnv(WorkspaceBucket)
 		if err != nil {
 			return nil, err
+		}
+		if cfg.Bucket == KnowledgeBucket.name() {
+			return nil, fmt.Errorf("%s and %s both name bucket %q; workspace snapshots and team knowledge must live in different buckets",
+				WorkspaceBucket.bucketVar(), KnowledgeBucket.bucketVar(), cfg.Bucket)
 		}
 		return newObjectStorage(cfg)
 	}

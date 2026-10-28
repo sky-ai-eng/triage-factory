@@ -150,8 +150,16 @@ func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID strin
 	}
 }
 
-// workspaceRecoverable reports whether a parked run can still be resumed. Four
-// rungs, most-certain-first, and only the last is a judgement call:
+// workspaceRecoverable reports whether a parked run can still be resumed.
+//
+// A native conversation always can: the engines keep their continuity in
+// different places, and native's is its message rows, so it wakes into a
+// workspace built from nothing when none survives. It is answered before any
+// workspace evidence is read, which is also what keeps a control pod — which
+// serves this check and holds no workspace store — from reading snapshots.
+//
+// An SDK conversation is expired without the session transcript the blob
+// carried, so it walks four rungs, most-certain-first:
 //
 //   - the warm worktree survives on disk (and is not one an older binary laid
 //     out, which the claim removes rather than reuses);
@@ -166,15 +174,15 @@ func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID strin
 //     follow-up on its strength would only move the refusal to the claim,
 //     after the user's message was accepted;
 //   - neither, and no persist is coming (the record says failed, names a write
-//     that never finished, or does not exist). The answer splits on the
-//     runtime here, because the engines keep their continuity in different
-//     places: native wakes into a workspace built from nothing, SDK is expired
-//     without the session transcript the blob carried.
+//     that never finished, or does not exist): expired.
 //
 // A check we can't complete (no storage wired, a blob hiccup) counts as
 // recoverable — a transient inability to verify must never strand a resumable
 // run as expired, and the claim path re-checks for real.
 func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, conv *domain.Conversation) bool {
+	if conv.Runtime == domain.ConversationRuntimeNative {
+		return true
+	}
 	if conv.WorktreePath != "" {
 		if _, err := os.Stat(conv.WorktreePath); err == nil {
 			// A tree an older binary laid out is not one the claim will reuse;
@@ -222,7 +230,7 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, conv *
 			return true
 		}
 	}
-	return conv.Runtime == domain.ConversationRuntimeNative
+	return false
 }
 
 // ResumeOptions configures a ResumeWithMessage invocation. Callers

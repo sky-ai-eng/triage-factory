@@ -85,9 +85,9 @@ func seedParkFleet(t *testing.T) *parkFleet {
 		`UPDATE conversations SET started_at = now() - interval '10 minutes', queued_at = now() - interval '10 minutes' WHERE id = $1`,
 		fx.conversationID)
 
-	blobs, err := storage.New()
+	blobs, err := storage.NewWorkspace()
 	if err != nil {
-		t.Fatalf("storage.New: %v", err)
+		t.Fatalf("storage.NewWorkspace: %v", err)
 	}
 	gate := &gatedPutStorage{Storage: blobs, entered: make(chan struct{}, 1), release: make(chan struct{})}
 

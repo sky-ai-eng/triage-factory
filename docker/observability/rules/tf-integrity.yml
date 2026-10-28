@@ -6,11 +6,6 @@
 # tf_entity_terminal_active is not here: it counts entities in repositories or
 # projects an org stopped tracking whose tasks are still open, which is normal
 # after untracking and stays nonzero until someone dismisses them.
-#
-# TODO(TFAC-1218): alert on tf_tasks_open_on_closed_entity > 0 once the
-# terminal checker's gauge stops reporting on a pod that lost the brain lease
-# and drops orgs that are no longer active. Until then a stale series would
-# keep the alert firing.
 
 groups:
   - name: tf-integrity
@@ -35,3 +30,26 @@ groups:
             its target, but the audit record of it was lost at the
             {{ $labels.stage }} stage. The WARN or ERROR line logged with each
             drop names the target. The write itself is not undone.
+
+      # Closing an entity closes its open tasks in the same transaction, and
+      # a task mint refuses a closed entity in its own, so a task open on a
+      # closed entity means one of those guards was bypassed. The
+      # terminal-state checker counts them every five minutes on the pod
+      # holding the background-brain lease, and only that pod reports; max()
+      # keeps one alert per org across a lease handover. The checker repairs
+      # nothing, so the alert holds until the tasks are closed.
+      - alert: TasksOpenOnClosedEntity
+        expr: max by (org_id) (tf_tasks_open_on_closed_entity) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tasks in org {{ $labels.org_id }} are open on closed entities"
+          description: >-
+            {{ $value }} queued, in-progress or snoozed tasks in org
+            {{ $labels.org_id }} belong to a pull request or issue that TF has
+            closed. Closing an entity closes its open tasks in the same
+            transaction, and a task is never created on a closed entity, so
+            each one is a bug in one of those paths. Each pass logs a WARN
+            line, "terminal checker: open tasks on closed entities", naming up
+            to twenty of the task ids. The checker repairs nothing, so this
+            holds until the tasks are closed.

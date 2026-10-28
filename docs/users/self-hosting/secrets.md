@@ -39,7 +39,7 @@ Prefer the file form for the sensitive keys, above all
 | `TF_ATLASSIAN_CLIENT_SECRET`, `TF_LINEAR_CLIENT_SECRET` | control |
 | `TF_GITHUB_APP_PRIVATE_KEY`, `TF_GITHUB_APP_WEBHOOK_SECRET`, `TF_GITHUB_APP_CLIENT_SECRET` | control |
 | `TF_GITHUB_COMMIT_SIGNER_KEY` | control |
-| `TF_DATABASE_URL`, `TF_DATABASE_DIRECT_URL`, `TF_AUTHENTICATOR_PASSWORD`, `TF_BLOB_ACCESS_KEY`, `TF_BLOB_SECRET_KEY` | no |
+| `TF_DATABASE_URL`, `TF_DATABASE_DIRECT_URL`, `TF_AUTHENTICATOR_PASSWORD`, the object store key pairs (`TF_WORKSPACE_*`, `TF_KNOWLEDGE_*`) | no |
 
 With the bundled compose, set `NAME_FILE` in `.env` and mount the file; the
 variable is already forwarded. The last row is not forwarded because the

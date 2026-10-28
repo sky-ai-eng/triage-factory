@@ -1660,9 +1660,9 @@ func (l *checkoutLedger) deleteLocked(conversationID, repositoryID, ref string) 
 // worktree_path, so nothing re-stamps it).
 func newStorageSpawner(t *testing.T) *Spawner {
 	t.Helper()
-	blobs, err := storage.New()
+	blobs, err := storage.NewWorkspace()
 	if err != nil {
-		t.Fatalf("storage.New: %v", err)
+		t.Fatalf("storage.NewWorkspace: %v", err)
 	}
 	s := NewSpawner(nil, db.Stores{ConversationWorktrees: &checkoutLedger{}}, nil, nil, "")
 	s.SetStorage(blobs)

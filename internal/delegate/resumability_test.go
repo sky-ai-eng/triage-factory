@@ -115,9 +115,9 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 					}
 					// An empty blob store: nothing to cold-rehydrate from, so
 					// removing the worktree really does end the workspace.
-					blobs, err := storage.New()
+					blobs, err := storage.NewWorkspace()
 					if err != nil {
-						t.Fatalf("storage.New: %v", err)
+						t.Fatalf("storage.NewWorkspace: %v", err)
 					}
 					s.SetStorage(blobs)
 					if tc.removeWorkspace {
@@ -217,9 +217,9 @@ func TestParkConversationOpen_FencedIdleParkAnnouncesNothing(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
 	s, database, conversationID, _ := setupAdvanceFixture(t, "fenced-idle")
-	blobs, err := storage.New()
+	blobs, err := storage.NewWorkspace()
 	if err != nil {
-		t.Fatalf("storage.New: %v", err)
+		t.Fatalf("storage.NewWorkspace: %v", err)
 	}
 	s.SetStorage(blobs)
 	hub, captured := capturingHub(t)

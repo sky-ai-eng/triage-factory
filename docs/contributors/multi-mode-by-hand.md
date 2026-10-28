@@ -44,7 +44,7 @@ base64's `/`, `+` and `=` break parsing.
 | `TF_SESSION_ENCRYPTION_KEY`                | Encrypts sign-in sessions. Changing it signs everyone out.                                                                                                                            |
 | `TF_COOKIE_SECRET`                         | Signs the short-lived sign-in state cookie. Changing it only breaks sign-ins in progress.                                                                                             |
 | `TF_SECRET_ENCRYPTION_KEY`                 | Encrypts every stored integration credential (GitHub App keys, Jira and Linear tokens). Changing or losing it makes them all unreadable, and every workspace has to enter them again. |
-| `TF_BLOB_ACCESS_KEY`, `TF_BLOB_SECRET_KEY` | Credentials for the bundled SeaweedFS object store. To use S3, R2, or Supabase Storage instead, see [Durable workspace storage](../users/self-hosting/storage.md).                    |
+| `TF_WORKSPACE_*`, `TF_KNOWLEDGE_*`, `TF_KNOWLEDGE_READER_*`, `SEAWEEDFS_ADMIN_*` | The four `ACCESS_KEY` / `SECRET_KEY` pairs for the bundled SeaweedFS object store. To use S3, R2, or Supabase Storage instead, see [Object storage](../users/self-hosting/storage.md).                    |
 
 `docker compose up` refuses to start while a required value is blank. Every
 other variable in `.env.example` is optional and documented there.

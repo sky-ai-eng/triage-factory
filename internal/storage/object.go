@@ -20,15 +20,44 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
 )
 
-// Env var names for the object backend. Documented in
-// docs/users/self-hosting/storage.md and .env.example.
+// The deployment's object-store endpoint and region, shared by every bucket.
+// Documented in docs/users/self-hosting/storage.md and .env.example.
 const (
-	envBlobEndpoint  = "TF_BLOB_ENDPOINT"
-	envBlobBucket    = "TF_BLOB_BUCKET"
-	envBlobAccessKey = "TF_BLOB_ACCESS_KEY"
-	envBlobSecretKey = "TF_BLOB_SECRET_KEY"
-	envBlobRegion    = "TF_BLOB_REGION"
+	envBlobEndpoint = "TF_BLOB_ENDPOINT"
+	envBlobRegion   = "TF_BLOB_REGION"
 )
+
+// Bucket is one of the deployment's object-store buckets, configured by the
+// variables its prefix names: <prefix>_BUCKET (defaulting to the bucket's
+// name in the bundled stack), <prefix>_ACCESS_KEY and <prefix>_SECRET_KEY.
+// Each bucket has its own key pair so a role can be given exactly the access
+// it needs to each.
+type Bucket struct {
+	prefix      string
+	defaultName string
+}
+
+var (
+	// WorkspaceBucket holds workspace snapshots: a cache that the executors
+	// alone read and write, and that a live run overwrites on every
+	// checkpoint.
+	WorkspaceBucket = Bucket{prefix: "TF_WORKSPACE", defaultName: "tf-workspaces"}
+	// KnowledgeBucket holds team knowledge-base documents, the only copy of
+	// what people wrote. Control pods write it; executors only read it.
+	KnowledgeBucket = Bucket{prefix: "TF_KNOWLEDGE", defaultName: "tf-knowledge"}
+)
+
+func (b Bucket) bucketVar() string    { return b.prefix + "_BUCKET" }
+func (b Bucket) accessKeyVar() string { return b.prefix + "_ACCESS_KEY" }
+func (b Bucket) secretKeyVar() string { return b.prefix + "_SECRET_KEY" }
+
+// name is the bucket's configured name, or its default when unset.
+func (b Bucket) name() string {
+	if v := strings.TrimSpace(os.Getenv(b.bucketVar())); v != "" {
+		return v
+	}
+	return b.defaultName
+}
 
 // objectStorage is the multi-mode backend: an S3-compatible object store
 // reached over the network, so a blob written by one executor is readable
@@ -55,12 +84,12 @@ type ObjectConfig struct {
 	Region    string // S3 wants one; SeaweedFS ignores it. Defaults to us-east-1.
 }
 
-// ObjectConfigFromEnv reads the TF_BLOB_* environment into an ObjectConfig.
-// Endpoint and bucket are required; access key/secret are normally set but
-// left optional so an instance-role / AWS-provider-chain deployment can
-// supply credentials out of band (see newObjectStorage). TF_BLOB_ENDPOINT
-// is a full URL — its scheme selects TLS and any base path is preserved.
-func ObjectConfigFromEnv() (ObjectConfig, error) {
+// ObjectConfigFromEnv reads bucket b's configuration from the environment.
+// TF_BLOB_ENDPOINT is required and is a full URL — its scheme selects TLS and
+// any base path is preserved. The key pair is optional so an instance-role /
+// AWS-provider-chain deployment can supply credentials out of band (see
+// newObjectStorage), but it is both halves or neither.
+func ObjectConfigFromEnv(b Bucket) (ObjectConfig, error) {
 	endpoint := strings.TrimSpace(os.Getenv(envBlobEndpoint))
 	if endpoint == "" {
 		return ObjectConfig{}, fmt.Errorf("%s is required in multi mode", envBlobEndpoint)
@@ -68,17 +97,30 @@ func ObjectConfigFromEnv() (ObjectConfig, error) {
 	if err := validateEndpoint(endpoint); err != nil {
 		return ObjectConfig{}, err
 	}
-	bucket := strings.TrimSpace(os.Getenv(envBlobBucket))
-	if bucket == "" {
-		return ObjectConfig{}, fmt.Errorf("%s is required in multi mode", envBlobBucket)
-	}
-	return ObjectConfig{
+	cfg := ObjectConfig{
 		Endpoint:  endpoint,
-		Bucket:    bucket,
-		AccessKey: strings.TrimSpace(secretenv.Get(envBlobAccessKey)),
-		SecretKey: strings.TrimSpace(secretenv.Get(envBlobSecretKey)),
+		Bucket:    b.name(),
+		AccessKey: strings.TrimSpace(secretenv.Get(b.accessKeyVar())),
+		SecretKey: strings.TrimSpace(secretenv.Get(b.secretKeyVar())),
 		Region:    strings.TrimSpace(os.Getenv(envBlobRegion)),
-	}, nil
+	}
+	// One of two would sign with an empty string for the missing half and
+	// fail every request with an opaque 403; a boot-time error naming both
+	// variables is far easier to act on.
+	if (cfg.AccessKey == "") != (cfg.SecretKey == "") {
+		return ObjectConfig{}, fmt.Errorf("%s and %s must both be set, or both omitted for the AWS default chain", b.accessKeyVar(), b.secretKeyVar())
+	}
+	return cfg, nil
+}
+
+// NewObject builds the object store for bucket b from its environment. It
+// does not create or probe the bucket; the deployment provisions it.
+func NewObject(b Bucket) (Storage, error) {
+	cfg, err := ObjectConfigFromEnv(b)
+	if err != nil {
+		return nil, err
+	}
+	return newObjectStorage(cfg)
 }
 
 // validateEndpoint checks TF_BLOB_ENDPOINT is a full URL aws-sdk's
@@ -130,11 +172,9 @@ func newObjectStorage(cfg ObjectConfig) (*objectStorage, error) {
 
 	var awsCfg aws.Config
 	if cfg.AccessKey != "" || cfg.SecretKey != "" {
-		// Require both or neither. One-of-two would sign with an empty string
-		// for the missing half and fail every request with an opaque 403; a
-		// boot-time error is far easier to act on.
+		// Both or neither, as ObjectConfigFromEnv enforces for the env.
 		if cfg.AccessKey == "" || cfg.SecretKey == "" {
-			return nil, fmt.Errorf("storage: %s and %s must both be set, or both omitted for the AWS default chain", envBlobAccessKey, envBlobSecretKey)
+			return nil, fmt.Errorf("storage: access key and secret key must both be set, or both omitted for the AWS default chain")
 		}
 		awsCfg = aws.Config{
 			Region:      region,

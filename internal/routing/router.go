@@ -147,12 +147,6 @@ type Router struct {
 	// write admitted are claimed at once rather than on the next scan tick.
 	// Capacity one, non-blocking sends.
 	rederiveWake chan struct{}
-
-	// terminalGauges is the checker's gauge set, created from the global
-	// meter provider on the first pass (or from a test's provider through
-	// setTerminalGauges). See terminal_checker.go.
-	terminalGaugesOnce sync.Once
-	terminalGauges     *terminalInvariantGauges
 }
 
 // NewRouter creates a Router. teamAgents is nil-safe — callers wired

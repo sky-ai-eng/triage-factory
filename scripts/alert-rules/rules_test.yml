@@ -408,6 +408,43 @@ tests:
   - eval_time: 91m
     alertname: AuditRecordsDropped
     exp_alerts: []
+- name: TasksOpenOnClosedEntity fires per org on the first nonzero sample
+  interval: 1m
+  input_series:
+  - series: 'tf_tasks_open_on_closed_entity{org_id="o1"}'
+    values: 0 0 2x5
+  - series: 'tf_tasks_open_on_closed_entity{org_id="o2"}'
+    values: 0x7
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: TasksOpenOnClosedEntity
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: TasksOpenOnClosedEntity
+    exp_alerts:
+    - exp_labels:
+        org_id: o1
+        severity: warning
+      exp_annotations:
+        summary: Tasks in org o1 are open on closed entities
+        description: '2 queued, in-progress or snoozed tasks in org o1 belong to a pull request or issue that TF has closed. Closing an entity closes its open tasks in the same transaction, and a task is never created on a closed entity, so each one is a bug in one of those paths. Each pass logs a WARN line, "terminal checker: open tasks on closed entities", naming up to twenty of the task ids. The checker repairs nothing, so this holds until the tasks are closed.'
+- name: TasksOpenOnClosedEntity fires once per org across a lease handover
+  interval: 1m
+  input_series:
+  - series: 'tf_tasks_open_on_closed_entity{instance="control-1:9464",org_id="o1"}'
+    values: 1 1 1 stale
+  - series: 'tf_tasks_open_on_closed_entity{instance="control-2:9464",org_id="o1"}'
+    values: _ _ 1x5
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: TasksOpenOnClosedEntity
+    exp_alerts:
+    - exp_labels:
+        org_id: o1
+        severity: warning
+      exp_annotations:
+        summary: Tasks in org o1 are open on closed entities
+        description: '1 queued, in-progress or snoozed tasks in org o1 belong to a pull request or issue that TF has closed. Closing an entity closes its open tasks in the same transaction, and a task is never created on a closed entity, so each one is a bug in one of those paths. Each pass logs a WARN line, "terminal checker: open tasks on closed entities", naming up to twenty of the task ids. The checker repairs nothing, so this holds until the tasks are closed.'
 - name: SlackDeliveriesRetried fires on a new series' first sample, and clears once 15m has passed
   interval: 1m
   input_series:
