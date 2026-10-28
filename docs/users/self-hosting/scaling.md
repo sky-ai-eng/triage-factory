@@ -3,10 +3,10 @@
 A self-hosted deployment is always split into two roles. `docker compose up`
 starts one of each on the same machine:
 
-| Role | Serves the UI and API | Polls, routes, scores | Runs migrations | Runs agents (gVisor sandboxes) |
-|------|:---:|:---:|:---:|:---:|
-| `control` | ✅ | ✅ | ✅ | ❌ |
-| `executor` | ❌ | ❌ | ❌ | ✅ |
+| Role       | Serves the UI and API | Polls, routes, scores | Runs migrations | Runs agents (gVisor sandboxes) |
+| ---------- | :-------------------: | :-------------------: | :-------------: | :----------------------------: |
+| `control`  |          ✅           |          ✅           |       ✅        |               ❌               |
+| `executor` |          ❌           |          ❌           |       ❌        |               ✅               |
 
 The bundled compose file sets `TF_ROLE` per service; set it yourself only in a
 custom deployment. There is no single-process option in multi mode (`TF_ROLE`
@@ -119,10 +119,10 @@ problem, and keeps running.
 
 Every pod opens two Postgres connection pools. Defaults per pool:
 
-| Role | Per pool | Per pod |
-|------|:---:|:---:|
-| `control` | 25 | 50 |
-| `executor` | 6 | 12 |
+| Role       | Per pool | Per pod |
+| ---------- | :------: | :-----: |
+| `control`  |    25    |   50    |
+| `executor` |    6     |   12    |
 
 The total across pods, plus what GoTrue and admin tools use, must fit in
 Postgres' `max_connections` (100 in the stock `supabase/postgres` image). One
