@@ -84,6 +84,26 @@ func TestSlackMessagePredicate_ChannelIn(t *testing.T) {
 	}
 }
 
+// TestSlackMessagePredicate_ChannelInEntries pins that the core validator's
+// list check reaches this package's schema: channel_in refuses an empty entry
+// and one that repeats another ignoring case.
+func TestSlackMessagePredicate_ChannelInEntries(t *testing.T) {
+	const row = "6f1c2a4e-0000-4000-8000-000000000123"
+	for _, pred := range []string{
+		`{"channel_in":[""]}`,
+		`{"channel_in":["` + row + `","6F1C2A4E-0000-4000-8000-000000000123"]}`,
+	} {
+		_, err := events.ValidatePredicateJSON(domain.EventSlackMessage, pred)
+		var pe *events.PredicateError
+		if !errors.As(err, &pe) || len(pe.Faults) != 1 || pe.Faults[0].Kind != events.FaultInvalidValue || pe.Faults[0].Key != "channel_in" {
+			t.Errorf("%s: err = %v, want one value fault on channel_in", pred, err)
+		}
+	}
+	if got, err := events.ValidatePredicateJSON(domain.EventSlackMessage, `{"channel_in":["`+row+`"]}`); err != nil || got != `{"channel_in":["`+row+`"]}` {
+		t.Errorf("one channel = (%q, %v), want it kept", got, err)
+	}
+}
+
 // TestSlackMessagePredicate_MentionedOnly covers the MentionedOnly
 // narrowing flag: unset (false) matches both mentioned and non-mentioned
 // messages, set (true) requires Mentioned=true on the metadata.

@@ -200,11 +200,11 @@ func TestLinearTeamInFaults_PlainMemberUnderRLS_Postgres(t *testing.T) {
 		 VALUES ($1, 'ws-test', $3, 'ENG', 'Engineering'), ($2, 'ws-test', $4, 'OPS', 'Operations')`,
 		rig.teamA, rig.teamB, linearTeamEng, linearTeamOps)
 
-	faultsFor := func(teamIn ...string) []string {
+	faultsFor := func(teamIn ...string) []PredicateReferenceFault {
 		t.Helper()
 		b, _ := json.Marshal(map[string]any{"linear_team_id_in": teamIn})
 		predicate := string(b)
-		var faults []string
+		var faults []PredicateReferenceFault
 		if err := rig.s.tx.WithTx(t.Context(), rig.orgID, rig.plainB, func(tx db.TxStores) error {
 			var e error
 			faults, e = linearTeamInFaults(t.Context(), tx, rig.orgID, rig.teamB, &predicate, nil)

@@ -47,6 +47,9 @@ type FieldSchema struct {
 	Type        string   `json:"type"`                  // "bool" | "string" | "int" | "string_list"
 	EnumValues  []string `json:"enum_values,omitempty"` // optional, from `enum:"a,b,c"` tag
 	Description string   `json:"description,omitempty"` // from `doc:"..."` tag
+	// index is the field's position in the predicate struct, which the
+	// validator decodes the key into.
+	index int
 }
 
 // Matcher is the type-erased predicate evaluator.
@@ -147,6 +150,7 @@ func fieldsFromPredicate(t reflect.Type) []FieldSchema {
 			Name:        name,
 			Type:        kind,
 			Description: sf.Tag.Get("doc"),
+			index:       i,
 		}
 		if enumTag := sf.Tag.Get("enum"); enumTag != "" {
 			fs.EnumValues = strings.Split(enumTag, ",")

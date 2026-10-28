@@ -244,8 +244,14 @@ const fieldScopePredicate = "scope_predicate"
 // accepting both a JSON object and a JSON string holding one is how a single
 // field grows two wire types and callers pick different ones.
 //
-// Faults land on v; the caller must Flush before reading the result.
-func scopePredicateField(v *httpx.Validation, raw json.RawMessage, eventType string) (predicate *string, named bool) {
+// Faults land on bad (400) or unproc (422) by class, as predicateFaults files
+// them. The caller must Flush bad before reading the result. When the
+// predicate's only faults are on unproc, the result is the rest of it
+// (events.PredicateError.Remainder), for the catalog and reference checks to
+// read, so the write reports every 422 at once; the faults on unproc keep it
+// from being stored. prior is the predicate the row stores now, nil on
+// create (events.ValidatePredicateEdit).
+func scopePredicateField(bad, unproc *httpx.Validation, raw json.RawMessage, eventType string, prior *string) (predicate *string, named bool) {
 	if raw == nil {
 		return nil, false
 	}
@@ -254,18 +260,46 @@ func scopePredicateField(v *httpx.Validation, raw json.RawMessage, eventType str
 		return nil, true
 	}
 	if !strings.HasPrefix(trimmed, "{") {
-		v.Invalid(fieldScopePredicate, fieldScopePredicate+" must be a JSON object or null")
+		bad.Invalid(fieldScopePredicate, fieldScopePredicate+" must be a JSON object or null")
 		return nil, true
 	}
-	canonical, err := events.ValidatePredicateJSON(eventType, trimmed)
+	canonical, err := events.ValidatePredicateEdit(eventType, trimmed, prior)
 	if err != nil {
-		v.Invalid(fieldScopePredicate, err.Error())
+		predicateFaults(bad, unproc, err)
+		var pe *events.PredicateError
+		if errors.As(err, &pe) {
+			return pe.Remainder, true
+		}
 		return nil, true
 	}
 	if canonical == "" {
 		return nil, true
 	}
 	return &canonical, true
+}
+
+// predicateFaults files each fault the predicate validator found under the
+// predicate key it names (scope_predicate.<key>). A predicate that does not
+// fit its event type's schema is a malformed body, 400, with an unknown key
+// answered UNKNOWN_FIELD like one at the top level of the body; a value the
+// schema admits and the field refuses is 422, like an out-of-range priority.
+func predicateFaults(bad, unproc *httpx.Validation, err error) {
+	var pe *events.PredicateError
+	if !errors.As(err, &pe) {
+		bad.Invalid(fieldScopePredicate, err.Error())
+		return
+	}
+	for _, f := range pe.Faults {
+		field := predicateField(f.Key)
+		switch f.Kind {
+		case events.FaultUnknownField:
+			bad.Add(httpx.ErrorItem{Reason: httpx.ReasonUnknownField, Message: f.Message, Field: field})
+		case events.FaultInvalidValue:
+			unproc.Invalid(field, f.Message)
+		default:
+			bad.Invalid(field, f.Message)
+		}
+	}
 }
 
 // eventHandlerCreateCommon is the half of a create body both kinds share.
@@ -362,9 +396,9 @@ func gateEventTypeEntitlement(w http.ResponseWriter, orgID, eventType string) bo
 
 // gateEventTypeSourceAvailability records a 422 fault on v when the org cannot
 // produce events from the source this handler would bind to — no Jira
-// credential, no connected Slack workspace, a source TF has not built. It
-// reports false only when it has already written a response: a failed read is
-// a 500, never a source silently reported off.
+// credential, no connected Slack workspace, a source TF has not built — and
+// reports whether it can. ok is false only when it has already written a
+// response: a failed read is a 500, never a source silently reported off.
 //
 // Create is the only enforcement point there will ever be, which is why it
 // exists at all: event_type is immutable after create, and matchHandlers is an
@@ -377,7 +411,7 @@ func gateEventTypeEntitlement(w http.ResponseWriter, orgID, eventType string) bo
 // does not resolve for this org yet. That is a semantically invalid reference,
 // and it is the caller's to fix — which is exactly what 403 FORBIDDEN would
 // deny.
-func (eh *eventHandlersHandler) gateEventTypeSourceAvailability(w http.ResponseWriter, r *http.Request, v *httpx.Validation, orgID, userID, eventType string) bool {
+func (eh *eventHandlersHandler) gateEventTypeSourceAvailability(w http.ResponseWriter, r *http.Request, v *httpx.Validation, orgID, userID, eventType string) (available, ok bool) {
 	kind := eventsource.KindOf(eventType)
 	var (
 		state eventsource.State
@@ -389,12 +423,13 @@ func (eh *eventHandlersHandler) gateEventTypeSourceAvailability(w http.ResponseW
 		return e
 	}); err != nil {
 		internalError(w, "event_handlers", err)
-		return false
+		return false, false
 	}
 	if known && state != eventsource.StateAvailable {
 		v.Invalid("event_type", sourceUnavailableMessage(kind, state))
+		return false, true
 	}
-	return true
+	return true, true
 }
 
 // sourceUnavailableMessage names the source and what is missing, because the
@@ -417,20 +452,22 @@ func sourceUnavailableMessage(kind string, state eventsource.State) string {
 // insertEventHandler resolves the acting team and writes the composed row,
 // answering 201 with the row the INSERT returned. Shared by both create
 // routes: everything above it differs per kind, everything from here down does
-// not. pickedTeam is the team the caller was gated on, and catalogFaults are
-// what checkPredicateCatalog found in the predicate for that team.
+// not. pickedTeam is the team the caller was gated on, found is the body's 422
+// faults, and catalogFaults are what checkPredicateCatalog found in the
+// predicate for that team; the transaction answers them with the reference
+// check's (checkPredicateReferences).
 //
 // The answer is the stored row, not the composed one: the write decides
 // team_id, source, user_modified and both timestamps, so the struct handed in
 // here is not a picture of what landed.
-func (eh *eventHandlersHandler) insertEventHandler(w http.ResponseWriter, r *http.Request, orgID, userID, pickedTeam string, h domain.EventHandler, catalogFaults []string) {
+func (eh *eventHandlersHandler) insertEventHandler(w http.ResponseWriter, r *http.Request, orgID, userID, pickedTeam string, h domain.EventHandler, found, catalogFaults []httpx.ErrorItem) {
 	var stored domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, pickedTeam)
 		if e != nil {
 			return e
 		}
-		if e := checkPredicateReferences(r.Context(), tx, orgID, teamID, h.EventType, h.ScopePredicateJSON, nil, catalogFaults); e != nil {
+		if e := checkPredicateReferences(r.Context(), tx, orgID, teamID, h.EventType, h.ScopePredicateJSON, nil, found, catalogFaults); e != nil {
 			return e
 		}
 		stored, e = tx.EventHandlers.Create(r.Context(), orgID, teamID, h)
@@ -439,7 +476,7 @@ func (eh *eventHandlersHandler) insertEventHandler(w http.ResponseWriter, r *htt
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
-		if writePredicateReferenceError(w, err) {
+		if writeUnprocessableError(w, err) {
 			return
 		}
 		// A unique-constraint failure leaks schema/index names; translate to a
@@ -474,6 +511,9 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateRule(w http.ResponseWrit
 	// Two accumulators, because the two fault classes carry different
 	// statuses: a malformed body is a 400, a well-formed value outside its
 	// range is a 422. Each class still reports every field it found wrong.
+	// The 400s answer at once; the 422s are carried into the write's
+	// transaction and answered with the predicate reference faults, so one
+	// answer holds every 422 (checkPredicateReferences).
 	var bad, unproc httpx.Validation
 
 	name := strings.TrimSpace(req.Name)
@@ -486,7 +526,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateRule(w http.ResponseWrit
 	}
 	var predicate *string
 	if eventTypeOK {
-		predicate, _ = scopePredicateField(&bad, req.ScopePredicate, req.EventType)
+		predicate, _ = scopePredicateField(&bad, &unproc, req.ScopePredicate, req.EventType, nil)
 	}
 	priority := 0.5
 	if req.DefaultPriority != nil {
@@ -501,10 +541,8 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateRule(w http.ResponseWrit
 	}
 	// After the body is known well-formed, because this one reads the org's
 	// credentials to answer.
-	if !eh.gateEventTypeSourceAvailability(w, r, &unproc, orgID, userID, req.EventType) {
-		return
-	}
-	if unproc.Flush(w, http.StatusUnprocessableEntity) {
+	sourceAvailable, ok := eh.gateEventTypeSourceAvailability(w, r, &unproc, orgID, userID, req.EventType)
+	if !ok {
 		return
 	}
 
@@ -515,9 +553,15 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateRule(w http.ResponseWrit
 	if !ok {
 		return
 	}
-	catalogFaults, ok := eh.checkPredicateCatalog(w, r, orgID, userID, teamID, req.EventType, predicate, nil)
-	if !ok {
-		return
+	// A source the org cannot use is not asked about the predicate's ids: the
+	// event_type fault already refuses the write, and a source an admin turned
+	// off makes no API calls.
+	found := unproc.Items()
+	var catalogFaults []httpx.ErrorItem
+	if sourceAvailable {
+		if catalogFaults, ok = eh.checkPredicateCatalog(w, r, orgID, userID, teamID, req.EventType, predicate, nil, len(found) > 0); !ok {
+			return
+		}
 	}
 
 	sortOrder := 0
@@ -541,7 +585,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateRule(w http.ResponseWrit
 	if req.AppliesToUnowned != nil {
 		h.AppliesToUnowned = *req.AppliesToUnowned
 	}
-	eh.insertEventHandler(w, r, orgID, userID, teamID, h, catalogFaults)
+	eh.insertEventHandler(w, r, orgID, userID, teamID, h, found, catalogFaults)
 }
 
 // handleEventHandlerCreateTrigger authors a kind='trigger' handler.
@@ -569,7 +613,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateTrigger(w http.ResponseW
 	}
 	var predicate *string
 	if eventTypeOK {
-		predicate, _ = scopePredicateField(&bad, req.ScopePredicate, req.EventType)
+		predicate, _ = scopePredicateField(&bad, &unproc, req.ScopePredicate, req.EventType, nil)
 	}
 	threshold, minAutonomy := triggerTuningFields(&unproc, req.BreakerThreshold, req.MinAutonomySuitability)
 	if bad.Flush(w, http.StatusBadRequest) {
@@ -577,10 +621,8 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateTrigger(w http.ResponseW
 	}
 	// After the body is known well-formed, because this one reads the org's
 	// credentials to answer.
-	if !eh.gateEventTypeSourceAvailability(w, r, &unproc, orgID, userID, req.EventType) {
-		return
-	}
-	if unproc.Flush(w, http.StatusUnprocessableEntity) {
+	sourceAvailable, ok := eh.gateEventTypeSourceAvailability(w, r, &unproc, orgID, userID, req.EventType)
+	if !ok {
 		return
 	}
 
@@ -595,19 +637,21 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateTrigger(w http.ResponseW
 	// (blueprint_id, team_id) composite FK, but we resolve the acting team
 	// here and pre-check for a clean 422 instead of a generic constraint
 	// error. Both lookups share one tx so the blueprint's team and the
-	// resolved acting team are read under the same claims.
+	// resolved acting team are read under the same claims. It only reads: the
+	// acting team is recorded as the caller's last-written one by the write
+	// itself (insertEventHandler), which a refused request never commits.
 	var (
 		blueprint           *domain.Blueprint
 		crossTeamBlueprint  bool
 		blueprintHasTrigger bool
 	)
-	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := eh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		blueprint, e = tx.Blueprints.Get(r.Context(), orgID, req.BlueprintID)
 		if e != nil || blueprint == nil {
 			return e
 		}
-		actingTeam, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, teamID)
+		actingTeam, e := teamscope.ResolveActingNoStamp(r.Context(), tx.Teams, tx.Users, orgID, userID, teamID)
 		if e != nil {
 			return e
 		}
@@ -633,11 +677,12 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateTrigger(w http.ResponseW
 		notFound(w, "blueprint")
 		return
 	}
+	// Another team's blueprint is a 422 the body's others are answered with.
+	// Whether it already has a trigger is no concern of a caller who cannot
+	// use it, so the 409 is only for the team's own.
 	if crossTeamBlueprint {
-		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonCrossTeamRef, Message: "blueprint_id references a blueprint owned by another team", Field: "blueprint_id"})
-		return
-	}
-	if blueprintHasTrigger {
+		unproc.Add(crossTeamBlueprintFault)
+	} else if blueprintHasTrigger {
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
 		return
 	}
@@ -662,11 +707,23 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateTrigger(w http.ResponseW
 	if req.AppliesToUnowned != nil {
 		h.AppliesToUnowned = *req.AppliesToUnowned
 	}
-	catalogFaults, ok := eh.checkPredicateCatalog(w, r, orgID, userID, teamID, req.EventType, predicate, nil)
-	if !ok {
-		return
+	// An unavailable source is not asked about the ids, as for a rule.
+	found := unproc.Items()
+	var catalogFaults []httpx.ErrorItem
+	if sourceAvailable {
+		if catalogFaults, ok = eh.checkPredicateCatalog(w, r, orgID, userID, teamID, req.EventType, predicate, nil, len(found) > 0); !ok {
+			return
+		}
 	}
-	eh.insertEventHandler(w, r, orgID, userID, teamID, h, catalogFaults)
+	eh.insertEventHandler(w, r, orgID, userID, teamID, h, found, catalogFaults)
+}
+
+// crossTeamBlueprintFault refuses a blueprint_id naming a blueprint another
+// team owns: a trigger may only fire its own team's blueprints, which the
+// (blueprint_id, team_id) composite FK enforces, and the routes pre-check for
+// a clean 422 instead of a constraint error.
+var crossTeamBlueprintFault = httpx.ErrorItem{
+	Reason: httpx.ReasonCrossTeamRef, Message: "blueprint_id references a blueprint owned by another team", Field: "blueprint_id",
 }
 
 // triggerTuningFields resolves the two trigger knobs both paths into
@@ -771,7 +828,7 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		if c.AppliesToUnowned != nil {
 			updated.AppliesToUnowned = *c.AppliesToUnowned
 		}
-		if predicate, named := scopePredicateField(&bad, c.ScopePredicate, existing.EventType); named {
+		if predicate, named := scopePredicateField(&bad, &unproc, c.ScopePredicate, existing.EventType, existing.ScopePredicateJSON); named {
 			updated.ScopePredicateJSON = predicate
 		}
 	}
@@ -835,24 +892,22 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 	if bad.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	if unproc.Flush(w, http.StatusUnprocessableEntity) {
-		return
-	}
 
-	catalogFaults, ok := eh.checkPredicateCatalog(w, r, orgID, userID, existing.TeamID, existing.EventType, updated.ScopePredicateJSON, existing.ScopePredicateJSON)
+	found := unproc.Items()
+	catalogFaults, ok := eh.checkPredicateCatalog(w, r, orgID, userID, existing.TeamID, existing.EventType, updated.ScopePredicateJSON, existing.ScopePredicateJSON, len(found) > 0)
 	if !ok {
 		return
 	}
 	var stored domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if e := checkPredicateReferences(r.Context(), tx, orgID, existing.TeamID, existing.EventType, updated.ScopePredicateJSON, existing.ScopePredicateJSON, catalogFaults); e != nil {
+		if e := checkPredicateReferences(r.Context(), tx, orgID, existing.TeamID, existing.EventType, updated.ScopePredicateJSON, existing.ScopePredicateJSON, found, catalogFaults); e != nil {
 			return e
 		}
 		var e error
 		stored, e = tx.EventHandlers.Update(r.Context(), orgID, updated)
 		return e
 	}); err != nil {
-		if writePredicateReferenceError(w, err) {
+		if writeUnprocessableError(w, err) {
 			return
 		}
 		// The row was loaded a moment ago, so a miss here means it was deleted
@@ -955,9 +1010,6 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 	if bad.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	if unproc.Flush(w, http.StatusUnprocessableEntity) {
-		return
-	}
 
 	// Viewers can't promote a rule to a trigger (TFAC-447).
 	if !eh.gateHandlerWrite(w, r, orgID, userID, id) {
@@ -1008,27 +1060,24 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 		return
 	}
 	// Same-team guard: a promoted trigger may only fire a blueprint the rule's
-	// own team owns. The DB enforces this via the (blueprint_id, team_id)
-	// composite FK on the Promote UPDATE; pre-check for a clean 422.
+	// own team owns (crossTeamBlueprintFault). A blueprint is fired by exactly
+	// one event, so promoting a second trigger onto one of the team's own
+	// that already has one is a clean 409.
 	if existing.TeamID != "" && blueprint.TeamID != "" && blueprint.TeamID != existing.TeamID {
-		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonCrossTeamRef, Message: "blueprint_id references a blueprint owned by another team", Field: "blueprint_id"})
-		return
-	}
-	// A blueprint is fired by exactly one event: refuse promoting a second
-	// trigger onto an already-triggered blueprint with a clean 409.
-	if blueprintHasTrigger {
+		unproc.Add(crossTeamBlueprintFault)
+	} else if blueprintHasTrigger {
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
 		return
 	}
 
 	// The predicate is validated against the rule's event type, which promote
-	// never changes. Absent keeps what the rule already matched on.
+	// never changes. Absent keeps what the rule already matched on. bad is
+	// empty here, since the body's own 400s were answered above.
 	predicate := existing.ScopePredicateJSON
-	var predBad httpx.Validation
-	if next, named := scopePredicateField(&predBad, req.ScopePredicate, existing.EventType); named {
+	if next, named := scopePredicateField(&bad, &unproc, req.ScopePredicate, existing.EventType, existing.ScopePredicateJSON); named {
 		predicate = next
 	}
-	if predBad.Flush(w, http.StatusBadRequest) {
+	if bad.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -1039,20 +1088,21 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 		MinAutonomySuitability: &minAutonomy,
 		ScopePredicateJSON:     predicate,
 	}
-	catalogFaults, ok := eh.checkPredicateCatalog(w, r, orgID, userID, existing.TeamID, existing.EventType, predicate, existing.ScopePredicateJSON)
+	found := unproc.Items()
+	catalogFaults, ok := eh.checkPredicateCatalog(w, r, orgID, userID, existing.TeamID, existing.EventType, predicate, existing.ScopePredicateJSON, len(found) > 0)
 	if !ok {
 		return
 	}
 	var promoted domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if e := checkPredicateReferences(r.Context(), tx, orgID, existing.TeamID, existing.EventType, predicate, existing.ScopePredicateJSON, catalogFaults); e != nil {
+		if e := checkPredicateReferences(r.Context(), tx, orgID, existing.TeamID, existing.EventType, predicate, existing.ScopePredicateJSON, found, catalogFaults); e != nil {
 			return e
 		}
 		var e error
 		promoted, e = tx.EventHandlers.Promote(r.Context(), orgID, id, target)
 		return e
 	}); err != nil {
-		if writePredicateReferenceError(w, err) {
+		if writeUnprocessableError(w, err) {
 			return
 		}
 		// The blueprintHasTrigger pre-check and this Promote run in separate
@@ -1190,7 +1240,7 @@ func (eh *eventHandlersHandler) handleEventHandlerRetarget(w http.ResponseWriter
 		return
 	}
 	if crossTeam {
-		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonCrossTeamRef, Message: "blueprint_id references a blueprint owned by another team", Field: "blueprint_id"})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, crossTeamBlueprintFault)
 		return
 	}
 	if hasTrigger {

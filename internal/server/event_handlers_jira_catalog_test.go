@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -243,6 +244,62 @@ func TestEventHandlerJiraCatalog_UnconnectedJira(t *testing.T) {
 	code, got := r.patch(t, created["id"].(string), map[string]any{"scope_predicate": map[string]any{"priority_id_in": []string{"2"}}})
 	if code != http.StatusConflict {
 		t.Errorf("= %d, want 409: %v", code, got)
+	}
+}
+
+// The body's own 422s come back in the same answer as the catalog's faults,
+// and win over a Jira that is not connected, with the reference check's,
+// since they are the caller's to fix whatever Jira would say.
+func TestEventHandlerJiraCatalog_AnsweredWithTheBodysFaults(t *testing.T) {
+	r := newJiraCatalogRig(t)
+	code, created := r.createRule(t, domain.EventJiraIssueAssigned, nil)
+	if code != http.StatusCreated {
+		t.Fatalf("seed rule: %d: %v", code, created)
+	}
+	id := created["id"].(string)
+	fields := func(got map[string]any) []string {
+		items, _ := got["errors"].([]any)
+		var out []string
+		for _, raw := range items {
+			item, _ := raw.(map[string]any)
+			out = append(out, fmt.Sprint(item["field"]))
+		}
+		return out
+	}
+
+	code, got := r.patch(t, id, map[string]any{
+		"default_priority": 2,
+		"scope_predicate":  map[string]any{"status_id_in": []string{"In Progress"}},
+	})
+	if want := []string{"default_priority", "scope_predicate.status_id_in"}; code != http.StatusUnprocessableEntity || !slices.Equal(fields(got), want) {
+		t.Errorf("= %d %v, want 422 on %v", code, got, want)
+	}
+
+	unconfigureEventSources(t)
+	code, got = r.patch(t, id, map[string]any{
+		"default_priority": 2,
+		"scope_predicate":  map[string]any{"priority_id_in": []string{"2"}, "jira_project_id_in": []string{r.ops}},
+	})
+	if want := []string{"default_priority", "scope_predicate.jira_project_id_in"}; code != http.StatusUnprocessableEntity || !slices.Equal(fields(got), want) {
+		t.Errorf("unconnected Jira = %d %v, want 422 on %v", code, got, want)
+	}
+}
+
+// A rule for a source an admin turned off is refused on its event_type
+// without asking Jira about its predicate's ids.
+func TestEventHandlerJiraCatalog_TurnedOffSourceIsNotAsked(t *testing.T) {
+	r := newJiraCatalogRig(t)
+	if code, got := r.do(t, http.MethodPatch, orgSourcePath("jira"), map[string]any{"disabled": true}); code != http.StatusOK {
+		t.Fatalf("turn jira off: %d: %v", code, got)
+	}
+	calls := r.fake.Calls()
+	code, got := r.createRule(t, domain.EventJiraIssueAssigned, map[string]any{"status_id_in": []string{"In Progress"}})
+	items, _ := got["errors"].([]any)
+	if code != http.StatusUnprocessableEntity || len(items) != 1 || items[0].(map[string]any)["field"] != "event_type" {
+		t.Errorf("= %d %v, want one 422 on event_type", code, got)
+	}
+	if n := r.fake.Calls(); n != calls {
+		t.Errorf("reached Jira %d times, want none", n-calls)
 	}
 }
 

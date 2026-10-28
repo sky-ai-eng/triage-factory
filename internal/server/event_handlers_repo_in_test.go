@@ -28,7 +28,8 @@ func createRepoRule(t *testing.T, s *Server, repoIn ...string) (int, map[string]
 }
 
 // repoInFaultMessages returns the scope_predicate faults of a 422 answer,
-// failing the test on any other status.
+// failing the test on any other status, or on a fault whose field is not the
+// predicate key its message names.
 func repoInFaultMessages(t *testing.T, code int, body map[string]any) []string {
 	t.Helper()
 	if code != http.StatusUnprocessableEntity {
@@ -38,10 +39,12 @@ func repoInFaultMessages(t *testing.T, code int, body map[string]any) []string {
 	var messages []string
 	for _, raw := range items {
 		item, _ := raw.(map[string]any)
-		if item["reason"] != "INVALID_FIELD" || item["field"] != fieldScopePredicate {
-			t.Errorf("fault = %v, want INVALID_FIELD on %s", item, fieldScopePredicate)
-		}
 		msg, _ := item["message"].(string)
+		field, _ := item["field"].(string)
+		key, keyed := strings.CutPrefix(field, fieldScopePredicate+".")
+		if item["reason"] != "INVALID_FIELD" || !keyed || !strings.HasPrefix(msg, key) {
+			t.Errorf("fault = %v, want INVALID_FIELD on %s.<the key the message names>", item, fieldScopePredicate)
+		}
 		messages = append(messages, msg)
 	}
 	return messages
@@ -200,11 +203,11 @@ func TestRepoInFaults_PlainMemberUnderRLS_Postgres(t *testing.T) {
 	webID := rig.repoID(t, "acme", "web")
 	apiID := rig.repoID(t, "acme", "api")
 
-	faultsFor := func(repoIn ...string) []string {
+	faultsFor := func(repoIn ...string) []PredicateReferenceFault {
 		t.Helper()
 		b, _ := json.Marshal(map[string]any{"repo_in": repoIn})
 		predicate := string(b)
-		var faults []string
+		var faults []PredicateReferenceFault
 		if err := rig.s.tx.WithTx(t.Context(), rig.orgID, rig.plainB, func(tx db.TxStores) error {
 			var e error
 			faults, e = repoInFaults(t.Context(), tx, rig.orgID, rig.teamB, &predicate, nil)
