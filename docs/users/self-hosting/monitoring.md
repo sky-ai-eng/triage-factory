@@ -1,17 +1,17 @@
 # Monitoring
 
 Triage Factory exposes health endpoints, Prometheus metrics, and (when you
-name a backend) OTLP traces. The compose stack ships Prometheus, Tempo and
+name a backend) OTLP traces. The compose stack ships Prometheus, Tempo, and
 Grafana preconfigured for all three.
 
 ## Health endpoints
 
-| Endpoint | Served by | Use it for | Fails (503) when |
-| --- | --- | --- | --- |
-| `GET /api/health` | control, `:3000` | Liveness | Never on a dependency, so a flapping database can't cause a restart loop. |
-| `GET /readyz` | control, `:3000` | Load-balancer rotation, uptime checks | The database is unreachable, migrations are not applied, or a poller has made no progress for 90 seconds. |
-| `GET /healthz` | executor, `127.0.0.1:3001` inside the container | The executor's HEALTHCHECK | See [Executor `/healthz`](#executor-healthz). |
-| `GET /metrics` | every pod, `:9464` | Prometheus scrape | — |
+| Endpoint          | Served by                                       | Use it for                            | Fails (503) when                                                                                          |
+| ----------------- | ----------------------------------------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `GET /api/health` | control, `:3000`                                | Liveness                              | Never on a dependency, so a flapping database can't cause a restart loop.                                 |
+| `GET /readyz`     | control, `:3000`                                | Load-balancer rotation, uptime checks | The database is unreachable, migrations are not applied, or a poller has made no progress for 90 seconds. |
+| `GET /healthz`    | executor, `127.0.0.1:3001` inside the container | The executor's HEALTHCHECK            | See [Executor `/healthz`](#executor-healthz).                                                             |
+| `GET /metrics`    | every pod, `:9464`                              | Prometheus scrape                     | —                                                                                                         |
 
 All four are unauthenticated and carry only counts and opaque org ids. Keep
 `:9464` inside the compose network or cluster.
@@ -26,8 +26,22 @@ curl -fsS http://localhost:3000/readyz | jq .
 {
   "status": "ok",
   "version": "v1.12.0",
-  "checks": {"db": "ok", "migrations": "ok", "poller_github": "ok", "poller_jira": "ok", "poller_linear": "ok"},
-  "sources": {"github": {"<org_id>": {"last_success_unix": 1783300000, "age_seconds": 42, "interval_seconds": 300}}},
+  "checks": {
+    "db": "ok",
+    "migrations": "ok",
+    "poller_github": "ok",
+    "poller_jira": "ok",
+    "poller_linear": "ok"
+  },
+  "sources": {
+    "github": {
+      "<org_id>": {
+        "last_success_unix": 1783300000,
+        "age_seconds": 42,
+        "interval_seconds": 300
+      }
+    }
+  },
   "active_runs": 3
 }
 ```
@@ -46,15 +60,26 @@ access**, not here.
 
 ### Executor `/healthz`
 
-The executor publishes no ports, so read it through the container:
+The executor’s container health check calls this endpoint, so
+`docker compose ps` and `triagefactory deploy doctor` already show whether it
+passes. It listens on the container’s loopback interface only, so to read the
+full response, run `curl` inside the container:
 
 ```sh
 docker compose exec executor curl -fsS http://127.0.0.1:3001/healthz | jq .
 ```
 
 ```json
-{"dispatcher_alive": true, "last_heartbeat_write_age_sec": 3, "heartbeat_ever_written": true,
- "broker_ok": true, "active_runs": 2, "draining": false, "fenced": false, "shutting_down": false}
+{
+  "dispatcher_alive": true,
+  "last_heartbeat_write_age_sec": 3,
+  "heartbeat_ever_written": true,
+  "broker_ok": true,
+  "active_runs": 2,
+  "draining": false,
+  "fenced": false,
+  "shutting_down": false
+}
 ```
 
 It returns 503 when the dispatcher has stopped, the last heartbeat is older
@@ -78,18 +103,18 @@ lease; don't sum those.
 
 A claim is one executor's engagement with one run.
 
-| Metric | Labels | Meaning |
-| --- | --- | --- |
-| `tf_claims_expired` | — | Brain. Claims past their lease. A brief nonzero is a dead engagement before another executor takes it over. |
-| `tf_claims_oldest_expired_age_seconds` | — | Brain. How long the oldest expired claim has waited. Minutes means no dispatcher is running. |
-| `tf_claims_oldest_idle_seconds` | — | Brain. Longest a live claim has gone without activity. One long tool call can hold this high. |
-| `tf_claims_oldest_checkpoint_age_seconds` | — | Brain. Longest a live run's workspace has gone without a checkpoint. |
-| `tf_conversations_deferred` | `org_id` | Brain. Runs waiting to retry because their model provider, or GitHub during setup, was unavailable. |
-| `tf_engagements_stalled_total` | `op` | Runs the stall watchdog stopped, by operation in flight (`provider`, `tool`, `clone`, `permission`, …, `idle`). |
-| `tf_conversations_handed_back_total` | `outcome`, `org_id` | Runs released mid-flight to be picked up again: `requeued`, `requeued_credentials`, `requeued_shutdown`, `requeued_upstream`, `requeued_jail_lost`. |
-| `tf_workspace_checkpoints_total` | `outcome` | `written`, `skipped_unchanged`, `skipped_busy`, `failed`. |
-| `tf_claims_suspend_recoveries_total` | `outcome` | Claims retaken after the machine slept: `reacquired`, `taken`, `failed`. |
-| `tf_sidecar_frames_oversized_total` | — | Oversized messages refused from a run's credential sidecar. Treat any sample as a compromised sidecar; the `ERROR` line names the run. |
+| Metric                                    | Labels              | Meaning                                                                                                                                             |
+| ----------------------------------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tf_claims_expired`                       | —                   | Brain. Claims past their lease. A brief nonzero is a dead engagement before another executor takes it over.                                         |
+| `tf_claims_oldest_expired_age_seconds`    | —                   | Brain. How long the oldest expired claim has waited. Minutes means no dispatcher is running.                                                        |
+| `tf_claims_oldest_idle_seconds`           | —                   | Brain. Longest a live claim has gone without activity. One long tool call can hold this high.                                                       |
+| `tf_claims_oldest_checkpoint_age_seconds` | —                   | Brain. Longest a live run's workspace has gone without a checkpoint.                                                                                |
+| `tf_conversations_deferred`               | `org_id`            | Brain. Runs waiting to retry because their model provider, or GitHub during setup, was unavailable.                                                 |
+| `tf_engagements_stalled_total`            | `op`                | Runs the stall watchdog stopped, by operation in flight (`provider`, `tool`, `clone`, `permission`, …, `idle`).                                     |
+| `tf_conversations_handed_back_total`      | `outcome`, `org_id` | Runs released mid-flight to be picked up again: `requeued`, `requeued_credentials`, `requeued_shutdown`, `requeued_upstream`, `requeued_jail_lost`. |
+| `tf_workspace_checkpoints_total`          | `outcome`           | `written`, `skipped_unchanged`, `skipped_busy`, `failed`.                                                                                           |
+| `tf_claims_suspend_recoveries_total`      | `outcome`           | Claims retaken after the machine slept: `reacquired`, `taken`, `failed`.                                                                            |
+| `tf_sidecar_frames_oversized_total`       | —                   | Oversized messages refused from a run's credential sidecar. Treat any sample as a compromised sidecar; the `ERROR` line names the run.              |
 
 A run idle for 10 minutes, or stuck past an operation's deadline (a tool call
 over 30 minutes, a clone over 10), parks as `stalled` until someone sends it a
@@ -114,12 +139,12 @@ of metrics, labelled `work_kind` and `org_id`. Work that fails permanently or
 exhausts its retries is **parked** until an org admin redrives or cancels it
 under **Parked work** in the org's settings.
 
-| Metric | Meaning |
-| --- | --- |
-| `tf_work_ready`, `tf_work_leased`, `tf_work_deferred`, `tf_work_parked` | Brain. Items claimable, in progress, waiting for a retry time or a busy task, and waiting for a person. |
-| `tf_work_oldest_ready_age_seconds`, `tf_work_oldest_deferred_age_seconds` | Brain. Age of the oldest ready and deferred item. |
-| `tf_work_oldest_ready_age_objective_seconds` | The bound the oldest ready age should stay under. |
-| `tf_work_{claims,reclaims,completions,requeues,parks,deferrals,cancellations,redrives,supersedes,lease_lost}_total` | Counts per disposition. |
+| Metric                                                                                                              | Meaning                                                                                                 |
+| ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `tf_work_ready`, `tf_work_leased`, `tf_work_deferred`, `tf_work_parked`                                             | Brain. Items claimable, in progress, waiting for a retry time or a busy task, and waiting for a person. |
+| `tf_work_oldest_ready_age_seconds`, `tf_work_oldest_deferred_age_seconds`                                           | Brain. Age of the oldest ready and deferred item.                                                       |
+| `tf_work_oldest_ready_age_objective_seconds`                                                                        | The bound the oldest ready age should stay under.                                                       |
+| `tf_work_{claims,reclaims,completions,requeues,parks,deferrals,cancellations,redrives,supersedes,lease_lost}_total` | Counts per disposition.                                                                                 |
 
 ```
 tf_work_parked > 0                                                                                        # for 15m: work waiting for a person
@@ -129,14 +154,14 @@ tf_work_ready > 0 and rate(tf_work_claims_total[5m]) == 0                       
 
 ### Commit signing
 
-| Metric | Labels | Meaning |
-| --- | --- | --- |
-| `tf_commit_signatures_total` | `signer` (`org`, `deployment`), `outcome` (`signed`, `refused`, `unanswered`), `reason`, `org_id` | Signature requests. A refusal's `reason`: `committer_mismatch`, `not_a_commit`, `signer_inactive`, `org_minute_budget`, `claim_budget`, `claim_inactive`. |
-| `tf_commit_signing_oldest_pending_age_seconds` | — | Brain. How long the oldest request no control pod has picked up has waited. |
-| `tf_commit_signing_limit` | `budget` | The configured limits: `TF_MAX_COMMIT_SIGNATURES_PER_ORG_MINUTE` (default 600) and `TF_MAX_COMMIT_SIGNATURES_PER_CLAIM` (default 5000). |
-| `tf_commit_signer_checks_total` | `check` (`verify`, `periodic`, `post_push`), `result` | Health checks of a signer: `valid`, `unknown_key`, `no_user`, `unverified_email`, `key_missing`, `other`, or `error` (GitHub could not be read). |
-| `tf_commit_signer_broken` | `org_id`, `reason` | Brain. 1 for each broken org signer. |
-| `tf_deployment_commit_signer_up` | — | 1 while the [deployment commit signer](deployment-commit-signer.md) is `active`. Reported by every control pod configured with one. |
+| Metric                                         | Labels                                                                                            | Meaning                                                                                                                                                   |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tf_commit_signatures_total`                   | `signer` (`org`, `deployment`), `outcome` (`signed`, `refused`, `unanswered`), `reason`, `org_id` | Signature requests. A refusal's `reason`: `committer_mismatch`, `not_a_commit`, `signer_inactive`, `org_minute_budget`, `claim_budget`, `claim_inactive`. |
+| `tf_commit_signing_oldest_pending_age_seconds` | —                                                                                                 | Brain. How long the oldest request no control pod has picked up has waited.                                                                               |
+| `tf_commit_signing_limit`                      | `budget`                                                                                          | The configured limits: `TF_MAX_COMMIT_SIGNATURES_PER_ORG_MINUTE` (default 600) and `TF_MAX_COMMIT_SIGNATURES_PER_CLAIM` (default 5000).                   |
+| `tf_commit_signer_checks_total`                | `check` (`verify`, `periodic`, `post_push`), `result`                                             | Health checks of a signer: `valid`, `unknown_key`, `no_user`, `unverified_email`, `key_missing`, `other`, or `error` (GitHub could not be read).          |
+| `tf_commit_signer_broken`                      | `org_id`, `reason`                                                                                | Brain. 1 for each broken org signer.                                                                                                                      |
+| `tf_deployment_commit_signer_up`               | —                                                                                                 | 1 while the [deployment commit signer](deployment-commit-signer.md) is `active`. Reported by every control pod configured with one.                       |
 
 TF checks each signer's key on its account about every 15 minutes and checks
 each pushed commit's verification. A failure marks the signer `broken`, and
@@ -162,11 +187,11 @@ Every request TF makes to GitHub, Jira, Linear, Slack, Anthropic or Bedrock is
 counted by how it ended. Requests a delegated run makes from inside its
 sandbox are not.
 
-| Metric | Labels | Meaning |
-| --- | --- | --- |
-| `tf_upstream_requests_total` | `upstream`, `outcome`, `org_id` | Attempts. A retried call counts each attempt. |
-| `tf_upstream_retries_total` | `upstream`, `outcome`, `org_id` | Retries, by the outcome that caused them. |
-| `tf_upstream_up` | `upstream` (`github`, `jira`), `org_id` | Brain. 1 if the org's last poll reached the source, 0 if not. No series while the source is off or unconfigured. |
+| Metric                       | Labels                                  | Meaning                                                                                                          |
+| ---------------------------- | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `tf_upstream_requests_total` | `upstream`, `outcome`, `org_id`         | Attempts. A retried call counts each attempt.                                                                    |
+| `tf_upstream_retries_total`  | `upstream`, `outcome`, `org_id`         | Retries, by the outcome that caused them.                                                                        |
+| `tf_upstream_up`             | `upstream` (`github`, `jira`), `org_id` | Brain. 1 if the org's last poll reached the source, 0 if not. No series while the source is off or unconfigured. |
 
 `outcome` is `ok`, `rate_limited`, `transient` (a 5xx, timeout, transport
 failure, or a non-JSON 403 from a proxy such as a VPN gateway), `auth` (the
@@ -190,14 +215,14 @@ TF exports the latest rate-limit reading per `upstream`, `org_id`,
 `credential` and `bucket`. Org members can read the same numbers at
 `GET /api/orgs/{org_id}/integrations/rate-limits`.
 
-| Metric | Meaning |
-| --- | --- |
+| Metric                                                                                   | Meaning                                                            |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
 | `tf_upstream_rate_limit_remaining`, `_limit`, `_remaining_ratio`, `_until_reset_seconds` | What is left, the bucket size, the share left, and time to refill. |
-| `tf_upstream_rate_limit_used` | Slack: calls this pod made in the last minute. |
-| `tf_upstream_rate_limit_near_limit` | Jira Cloud's hourly `quota`: 1 below 20% left. |
-| `tf_upstream_rate_limit_wait_seconds_total` | Time spent waiting on a rate limit. |
-| `tf_upstream_rate_limit_refused_total` | Slack and Jira rate-limited responses, by bucket. |
-| `tf_upstream_query_cost` | Histogram of GraphQL points per query, by `op`. |
+| `tf_upstream_rate_limit_used`                                                            | Slack: calls this pod made in the last minute.                     |
+| `tf_upstream_rate_limit_near_limit`                                                      | Jira Cloud's hourly `quota`: 1 below 20% left.                     |
+| `tf_upstream_rate_limit_wait_seconds_total`                                              | Time spent waiting on a rate limit.                                |
+| `tf_upstream_rate_limit_refused_total`                                                   | Slack and Jira rate-limited responses, by bucket.                  |
+| `tf_upstream_query_cost`                                                                 | Histogram of GraphQL points per query, by `op`.                    |
 
 `credential` is `installation:<id>` or `pat` (GitHub), `api_key` or
 `app_install` (Linear), `cloud_api_token`, `dc_pat`, `cloud_oauth`,
@@ -215,11 +240,11 @@ reports `rate-limit budget low` (below 20%) and `waiting on a rate limit`.
 
 ### Slack ingest
 
-| Metric | Labels | Meaning |
-| --- | --- | --- |
-| `tf_slack_ingest_events_total` | `app_id`, `outcome` | Every delivery: `accepted`, `channel_moved`, or the reason it was dropped. |
-| `tf_slack_retry_deliveries_total` | `app_id`, `transport` | Deliveries Slack marked as retries. Sustained retries come before Slack disables the app's event subscription. |
-| `tf_slack_app_rate_limited_total` | `app_id` | Slack is dropping events past the app's budget (30,000 per workspace per hour). Move to Socket Mode or remove the bot from busy channels. |
+| Metric                            | Labels                | Meaning                                                                                                                                   |
+| --------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `tf_slack_ingest_events_total`    | `app_id`, `outcome`   | Every delivery: `accepted`, `channel_moved`, or the reason it was dropped.                                                                |
+| `tf_slack_retry_deliveries_total` | `app_id`, `transport` | Deliveries Slack marked as retries. Sustained retries come before Slack disables the app's event subscription.                            |
+| `tf_slack_app_rate_limited_total` | `app_id`              | Slack is dropping events past the app's budget (30,000 per workspace per hour). Move to Socket Mode or remove the bot from busy channels. |
 
 Alert on `sum(increase(tf_slack_retry_deliveries_total[15m])) > 0`.
 
@@ -227,11 +252,11 @@ Alert on `sum(increase(tf_slack_retry_deliveries_total[15m])) > 0`.
 
 These should stay at zero; a sample is a bug or an incident.
 
-| Metric | Labels | Meaning |
-| --- | --- | --- |
-| `tf_audit_records_dropped_total` | `stage`, `op` | An agent's write under an org credential landed, but its audit record was lost. The WARN line names the target. |
-| `tf_tasks_open_on_closed_entity` | `org_id` | Brain. Open tasks on a merged or done entity. |
-| `tf_entity_terminal_active` | `org_id` | Brain. Merged or done entities still active after 15 minutes, usually in an untracked repo or project whose tasks need dismissing. |
+| Metric                            | Labels             | Meaning                                                                                                                                                             |
+| --------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tf_audit_records_dropped_total`  | `stage`, `op`      | An agent's write under an org credential landed, but its audit record was lost. The WARN line names the target.                                                     |
+| `tf_tasks_open_on_closed_entity`  | `org_id`           | Brain. Open tasks on a merged or done entity.                                                                                                                       |
+| `tf_entity_terminal_active`       | `org_id`           | Brain. Merged or done entities still active after 15 minutes, usually in an untracked repo or project whose tasks need dismissing.                                  |
 | `tf_linear_mirror_failures_total` | `reason`, `org_id` | Delegated Linear issues TF couldn't move to IN PROGRESS ★. `transition_failed` usually means that state was deleted; star another on the team's Linear source page. |
 
 `tf_memory_entity_links_skipped_total{role, source, reason, org_id}` counts
@@ -276,11 +301,11 @@ to a scraper that negotiates OpenMetrics.
 
 ### The bundled trace stack
 
-| Service | Role | Published |
-| --- | --- | --- |
-| `tempo` | Trace backend (OTLP/HTTP `:4318`, query `:3200`) | nothing |
-| `prometheus` | Scrapes every pod, stores Tempo's span metrics, evaluates alert rules | nothing |
-| `grafana` | The UI | `127.0.0.1:3030` |
+| Service      | Role                                                                  | Published        |
+| ------------ | --------------------------------------------------------------------- | ---------------- |
+| `tempo`      | Trace backend (OTLP/HTTP `:4318`, query `:3200`)                      | nothing          |
+| `prometheus` | Scrapes every pod, stores Tempo's span metrics, evaluates alert rules | nothing          |
+| `grafana`    | The UI                                                                | `127.0.0.1:3030` |
 
 Open Grafana at <http://localhost:3030> (`ssh -L 3030:localhost:3030` on a
 remote host). It allows anonymous editing with no login, so don't expose it
