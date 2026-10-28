@@ -128,21 +128,44 @@ func TestFoldKeyAgreesWithEqualFold(t *testing.T) {
 	}
 }
 
-// The validator accepts exactly the keys the predicate editor is offered.
-func TestPredicateFieldIndexMatchesAdvertisedFields(t *testing.T) {
-	for eventType, s := range All() {
-		if s.PredicateType == nil {
-			continue
-		}
-		index := predicateFieldIndex(s.PredicateType)
-		if len(index) != len(s.Fields) {
-			t.Errorf("%s: %d indexed keys, %d advertised", eventType, len(index), len(s.Fields))
-		}
-		for _, f := range s.Fields {
-			if _, ok := index[f.Name]; !ok {
-				t.Errorf("%s: %s not indexed", eventType, f.Name)
-			}
-		}
+// pointerPred is a predicate whose matcher has a pointer receiver, so it is
+// registered by its pointer type.
+type pointerPred struct {
+	Kind  *string  `json:"kind,omitempty" enum:"a,b"`
+	IDsIn []string `json:"ids_in,omitempty"`
+}
+
+func (p *pointerPred) Matches(struct{}) bool { return true }
+
+// A predicate type registered by pointer validates as its struct does.
+func TestValidatePredicateJSON_PointerPredicateType(t *testing.T) {
+	const eventType = "test:pointer_predicate"
+	Register(NewSchema[struct{}, *pointerPred](eventType, OwnershipPool))
+	t.Cleanup(func() { Reset(eventType) })
+
+	got, err := ValidatePredicateJSON(eventType, `{"ids_in":["1"],"kind":"a"}`)
+	if err != nil || got != `{"kind":"a","ids_in":["1"]}` {
+		t.Errorf("valid predicate = (%q, %v), want it canonical", got, err)
+	}
+	faults := predicateFaults(t, eventType, `{"ids_in":["1","1"],"kind":"c","other":true}`)
+	if len(faults) != 3 {
+		t.Errorf("faults = %+v, want the repeat, the enum miss and the unknown key", faults)
+	}
+}
+
+// An edit is refused for an empty or repeated entry only in a list it
+// changes: a list re-sent exactly as the row stores it is kept as it is.
+func TestValidatePredicateEdit_KeepsAStoredList(t *testing.T) {
+	prior := `{"author_id_in":["123","123"],"commenter_id_in":["",""]}`
+	got, err := ValidatePredicateEdit(domain.EventGitHubPRCommented, `{"commenter_id_in":["",""],"author_id_in":["123","123"]}`, &prior)
+	if err != nil || got != prior {
+		t.Errorf("re-sent stored lists = (%q, %v), want them kept", got, err)
+	}
+
+	_, err = ValidatePredicateEdit(domain.EventGitHubPRCommented, `{"author_id_in":["123","123","5"],"commenter_id_in":["",""]}`, &prior)
+	var pe *PredicateError
+	if !errors.As(err, &pe) || len(pe.Faults) != 1 || pe.Faults[0].Key != "author_id_in" {
+		t.Errorf("changed list: err = %v, want one repeat on author_id_in", err)
 	}
 }
 

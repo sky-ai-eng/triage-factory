@@ -226,3 +226,36 @@ func TestEventHandlerPredicateFaults_CrossTeamBlueprintJoinsThe422s(t *testing.T
 		}
 	}
 }
+
+// A list the row stores with a repeated entry does not block an edit that
+// re-sends it unchanged, as the trigger panel does on every save; an edit
+// that changes the list is told to fix it.
+func TestEventHandlerPredicateFaults_StoredListKeptByAnEdit(t *testing.T) {
+	s := newTestServer(t)
+	configureEventSources(t, s)
+	id := createUserRule(t, s)
+	const stored = `{"author_id_in":["123","123"]}`
+	if _, err := s.db.ExecContext(t.Context(), `UPDATE event_handlers SET scope_predicate_json = ? WHERE id = ?`, stored, id); err != nil {
+		t.Fatalf("store a repeated entry: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPatch, "/api/event-handlers/"+id, map[string]any{
+		"default_priority": 0.7, "scope_predicate": map[string]any{"author_id_in": []string{"123", "123"}},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH re-sending the stored list = %d: %s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got["scope_predicate_json"] != stored {
+		t.Errorf("predicate = %v, want the stored one kept", got["scope_predicate_json"])
+	}
+
+	rec = doJSON(t, s, http.MethodPatch, "/api/event-handlers/"+id, map[string]any{
+		"scope_predicate": map[string]any{"author_id_in": []string{"123", "123", "5"}},
+	})
+	items := decodeErrorItems(t, rec)
+	if rec.Code != http.StatusUnprocessableEntity || len(items) != 1 || items[0].Field != "scope_predicate.author_id_in" {
+		t.Errorf("PATCH changing the list = %d %+v, want one 422 on scope_predicate.author_id_in", rec.Code, items)
+	}
+}

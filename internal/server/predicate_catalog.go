@@ -37,9 +37,10 @@ import (
 // Faults are 422 INVALID_FIELD on the key they are in (scope_predicate.<key>).
 // A provider that does not answer establishes nothing, so the write is refused
 // as an upstream error rather than storing an unverified id, unless faults
-// were already found, by this check or before it, which are the caller's to
-// fix whatever the provider says. A provider the org has not connected is a
-// 409 NOT_CONFIGURED.
+// were already found, by this check or before it: those are the caller's to
+// fix whatever the provider says, so the write goes on to its reference check
+// and is answered with every 422 it has. A provider the org has not connected
+// is a 409 NOT_CONFIGURED.
 // --------------------------------------------------------------------
 
 // predicateCatalog is a provider catalog whose ids some of a source's
@@ -155,10 +156,12 @@ func (s *Server) linearCatalogClient(ctx context.Context, orgID string) (*linear
 // eventType's catalog fields against teamID's tracked Jira projects or Linear
 // teams, before the write's transaction. It returns its faults, for
 // checkPredicateReferences to report with the registered check's, or writes
-// the response and reports false when the write must not proceed. found is
-// the 422 faults the request met before it, which a stopped check reports
-// ahead of its own (writeCatalogStopped).
-func (eh *eventHandlersHandler) checkPredicateCatalog(w http.ResponseWriter, r *http.Request, orgID, userID, teamID, eventType string, predicate, prior *string, found []httpx.ErrorItem) ([]httpx.ErrorItem, bool) {
+// the response and reports false when the write must not proceed. refused is
+// whether the request already has 422 faults. A catalog it cannot read ends
+// the check; with faults found, by it or before it, it returns those, and the
+// write is still refused, because checkPredicateReferences refuses a write
+// with any fault.
+func (eh *eventHandlersHandler) checkPredicateCatalog(w http.ResponseWriter, r *http.Request, orgID, userID, teamID, eventType string, predicate, prior *string, refused bool) ([]httpx.ErrorItem, bool) {
 	type entry struct{ field, id string }
 	source, _, _ := strings.Cut(eventType, ":")
 	schema, _ := events.Get(eventType)
@@ -197,7 +200,12 @@ func (eh *eventHandlersHandler) checkPredicateCatalog(w http.ResponseWriter, r *
 		}
 		ids, err := catalog.ids(c)
 		if err != nil {
-			writeCatalogStopped(w, orgID, source, append(slices.Clone(found), faults...), err)
+			if refused || len(faults) > 0 {
+				serverLog.Warn("predicate catalog check could not read a catalog; answering with the faults found",
+					"org", orgID, "source", source, "error", err)
+				return faults, true
+			}
+			writeCatalogStopped(w, orgID, source, err)
 			return nil, false
 		}
 		for _, e := range added[catalog] {
@@ -211,18 +219,12 @@ func (eh *eventHandlersHandler) checkPredicateCatalog(w http.ResponseWriter, r *
 	return faults, true
 }
 
-// writeCatalogStopped ends the check when a catalog could not be read, as the
-// Jira and Linear write gates do: faults already found are reported over the
-// failure, a provider the org has not connected is a 409, and anything else is
-// an upstream error. Nothing is stored either way.
-func writeCatalogStopped(w http.ResponseWriter, orgID, source string, faults []httpx.ErrorItem, err error) {
+// writeCatalogStopped ends the check when a catalog could not be read and no
+// fault was found, as the Jira and Linear write gates do: a provider the org
+// has not connected is a 409, and anything else is an upstream error. Nothing
+// is stored either way.
+func writeCatalogStopped(w http.ResponseWriter, orgID, source string, err error) {
 	provider := map[string]string{"jira": "Jira", "linear": "Linear"}[source]
-	if len(faults) > 0 {
-		serverLog.Warn("predicate catalog check could not read a catalog; reporting the faults found first",
-			"org", orgID, "provider", provider, "error", err)
-		httpx.WriteErrors(w, http.StatusUnprocessableEntity, faults...)
-		return
-	}
 	if errors.Is(err, jira.ErrNoJiraSystemCredential) || errors.Is(err, linear.ErrNoLinearSystemCredential) {
 		writeNotConfigured(w, provider+" is not connected for this workspace, so the ids the scope predicate names cannot be checked")
 		return

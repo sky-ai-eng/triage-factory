@@ -67,6 +67,15 @@ func (e *PredicateError) Error() string {
 //
 // Used by `task_rules` and `prompt_triggers` CRUD handlers.
 func ValidatePredicateJSON(eventType, rawJSON string) (string, error) {
+	return ValidatePredicateEdit(eventType, rawJSON, nil)
+}
+
+// ValidatePredicateEdit is ValidatePredicateJSON for a write that replaces
+// prior, the predicate a row stores now (nil for none). Stored rows can hold a
+// list with an empty or repeated entry, so a list the write leaves exactly as
+// prior holds it is not checked for them: an edit is refused only for what it
+// changes, as a stale reference never blocks an edit that keeps it.
+func ValidatePredicateEdit(eventType, rawJSON string, prior *string) (string, error) {
 	trimmed := strings.TrimSpace(rawJSON)
 	if trimmed == "" || trimmed == "{}" || trimmed == "null" {
 		return "", nil
@@ -86,8 +95,21 @@ func ValidatePredicateJSON(eventType, rawJSON string) (string, error) {
 			Kind: FaultInvalidType, Message: "the predicate must be a JSON object",
 		}}}
 	}
-	pred := reflect.New(s.PredicateType).Elem()
-	fields := predicateFieldIndex(s.PredicateType)
+	t := s.PredicateType
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	pred := reflect.New(t).Elem()
+	stored := reflect.New(t).Elem()
+	if prior != nil {
+		// Best-effort: a stored field that no longer decodes is left zero, and
+		// a list compared with it is checked.
+		_ = json.Unmarshal([]byte(*prior), stored.Addr().Interface())
+	}
+	fields := make(map[string]int, len(s.Fields))
+	for _, f := range s.Fields {
+		fields[f.Name] = f.index
+	}
 	var faults []PredicateFault
 	schemaFault := false
 	for _, key := range slices.Sorted(maps.Keys(object)) {
@@ -107,7 +129,7 @@ func ValidatePredicateJSON(eventType, rawJSON string) (string, error) {
 			})
 			continue
 		}
-		faults = append(faults, refuseValues(key, s.PredicateType.Field(i), f)...)
+		faults = append(faults, refuseValues(key, t.Field(i), f, stored.Field(i))...)
 	}
 	if schemaFault {
 		return "", &PredicateError{EventType: eventType, Faults: faults}
@@ -133,22 +155,6 @@ func ValidatePredicateJSON(eventType, rawJSON string) (string, error) {
 	return canonical, nil
 }
 
-// predicateFieldIndex maps each JSON key of a predicate struct to its field
-// index, under the rules fieldsFromPredicate advertises the keys by.
-func predicateFieldIndex(t reflect.Type) map[string]int {
-	index := make(map[string]int, t.NumField())
-	for i := 0; i < t.NumField(); i++ {
-		sf := t.Field(i)
-		if !sf.IsExported() {
-			continue
-		}
-		if name, _, _ := strings.Cut(sf.Tag.Get("json"), ","); name != "" && name != "-" {
-			index[name] = i
-		}
-	}
-	return index
-}
-
 // kindNoun names the JSON a FieldSchema.Type takes.
 func kindNoun(kind string) string {
 	switch kind {
@@ -166,8 +172,9 @@ func kindNoun(kind string) string {
 // refuseValues checks a decoded field for values its type admits and the
 // field does not, and takes each one out of the field: a string outside its
 // `enum` tag's list, the closed set the predicate editor offers for it, and an
-// empty or repeated list entry.
-func refuseValues(key string, sf reflect.StructField, f reflect.Value) []PredicateFault {
+// empty or repeated entry in a list that differs from stored, the same field
+// of the predicate the row stores now.
+func refuseValues(key string, sf reflect.StructField, f, stored reflect.Value) []PredicateFault {
 	if enumTag := sf.Tag.Get("enum"); enumTag != "" && f.Kind() == reflect.Pointer && !f.IsNil() && f.Elem().Kind() == reflect.String {
 		allowed := strings.Split(enumTag, ",")
 		if v := f.Elem().String(); !slices.Contains(allowed, v) {
@@ -178,6 +185,9 @@ func refuseValues(key string, sf reflect.StructField, f reflect.Value) []Predica
 		}
 	}
 	if list, ok := f.Interface().([]string); ok {
+		if prior := stored.Interface().([]string); prior != nil && slices.Equal(list, prior) {
+			return nil
+		}
 		kept, faults := listFaults(key, list)
 		f.Set(reflect.ValueOf(kept))
 		return faults
