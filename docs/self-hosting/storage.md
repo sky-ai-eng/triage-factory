@@ -36,7 +36,9 @@ name the same bucket.
 
 Local mode runs none of this: it writes snapshots to `~/.triagefactory/blobs`,
 keeps knowledge as plain files under the state root, and reads none of the
-variables on this page.
+object-store variables below. (The eviction settings under
+[Executor disk](#executor-disk-evicting-idle-parked-workspaces) apply in local
+mode too.)
 
 ## Configuration
 
@@ -89,11 +91,15 @@ The one-shot `seaweedfs-postinit` sidecar runs on every `up`. It creates each
 bucket that is missing (`head-bucket || create-bucket` via aws-cli), and turns
 versioning on for `tf-knowledge`. It never versions `tf-workspaces`.
 
-SeaweedFS files `PutBucketVersioning` under its `Write` action, so the knowledge
-writer — the control pods' pair — can suspend versioning on `tf-knowledge`. The
-reader pair cannot. Because the sidecar sets versioning on every `up`, not only
-when it creates the bucket, the next `up` turns it back on. On S3 the writer's
-policy can leave that action out (see below).
+SeaweedFS has no separate permission for versioning: its `Write` action also
+covers `PutBucketVersioning` and deleting a specific version. So the knowledge
+writer — the control pods' pair — can suspend versioning on `tf-knowledge` and
+permanently delete old versions; the reader pair can do neither. The sidecar
+sets versioning on every `up`, not only when it creates the bucket, so a
+suspension lasts until the next `up`, but a deleted version is gone. In the
+bundled stack, then, versioning keeps knowledge recoverable from overwrites and
+deletes made through TF, not from someone holding the writer pair. On S3 the
+writer's policy leaves both actions out (see below).
 
 Smoke-test a round trip through the aws-cli sidecar, which holds the admin pair
 (the stack must already be up):

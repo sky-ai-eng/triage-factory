@@ -279,8 +279,10 @@ s3_denied() {
   if out=$(s3_as "$@" 2>&1); then
     fail "$what SUCCEEDED — the key pair is not limited to what its role needs"
   fi
+  # Not a bare 403: compose's own lines name the run container by a random hex
+  # suffix, which can contain one.
   case "$out" in
-    *AccessDenied*|*403*|*Forbidden*) pass "$what refused (AccessDenied)" ;;
+    *AccessDenied*|*Forbidden*) pass "$what refused (AccessDenied)" ;;
     *) echo "$out" >&2; fail "$what failed, but not with AccessDenied (scoping unclear)" ;;
   esac
 }

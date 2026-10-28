@@ -105,6 +105,19 @@ wait_healthy() {
   done
 }
 
+# The object-store key pairs are generated one by one, each only where the env
+# file lacks it, so an env file written by an older checkout gains the pairs
+# the compose file now requires instead of failing its parse.
+fill_object_store_keys() {
+  local key
+  for key in TF_WORKSPACE_ACCESS_KEY TF_WORKSPACE_SECRET_KEY \
+    TF_KNOWLEDGE_ACCESS_KEY TF_KNOWLEDGE_SECRET_KEY \
+    TF_KNOWLEDGE_READER_ACCESS_KEY TF_KNOWLEDGE_READER_SECRET_KEY \
+    SEAWEEDFS_ADMIN_ACCESS_KEY SEAWEEDFS_ADMIN_SECRET_KEY; do
+    grep -q "^$key=" "$ENV_FILE" || echo "$key=$(openssl rand -hex 32)" >>"$ENV_FILE"
+  done
+}
+
 cmd_up() {
   need_bin
 
@@ -121,16 +134,9 @@ GH_CLIENT_SECRET=$(openssl rand -hex 16)
 TF_SESSION_ENCRYPTION_KEY=$(openssl rand -hex 32)
 TF_COOKIE_SECRET=$(openssl rand -hex 32)
 TF_SECRET_ENCRYPTION_KEY=$(openssl rand -hex 32)
-TF_WORKSPACE_ACCESS_KEY=$(openssl rand -hex 32)
-TF_WORKSPACE_SECRET_KEY=$(openssl rand -hex 32)
-TF_KNOWLEDGE_ACCESS_KEY=$(openssl rand -hex 32)
-TF_KNOWLEDGE_SECRET_KEY=$(openssl rand -hex 32)
-TF_KNOWLEDGE_READER_ACCESS_KEY=$(openssl rand -hex 32)
-TF_KNOWLEDGE_READER_SECRET_KEY=$(openssl rand -hex 32)
-SEAWEEDFS_ADMIN_ACCESS_KEY=$(openssl rand -hex 32)
-SEAWEEDFS_ADMIN_SECRET_KEY=$(openssl rand -hex 32)
 EOF
   fi
+  fill_object_store_keys
   # jwk-init upserts in place and reuses an existing GOTRUE_JWT_KEYS rather
   # than rotating it, so this is safe to re-run on every `up`.
   TF_PUBLIC_URL="$PUBLIC_URL" "$BIN" jwk-init --write-env "$ENV_FILE"
@@ -206,6 +212,7 @@ cmd_run() {
 
 cmd_down() {
   if [ -f "$ENV_FILE" ]; then
+    fill_object_store_keys
     dc down -v --remove-orphans
     return
   fi
