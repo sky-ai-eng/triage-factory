@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -220,11 +221,15 @@ func (eh *eventHandlersHandler) checkPredicateCatalog(w http.ResponseWriter, r *
 }
 
 // writeCatalogStopped ends the check when a catalog could not be read and no
-// fault was found, as the Jira and Linear write gates do: a provider the org
-// has not connected is a 409, and anything else is an upstream error. Nothing
-// is stored either way.
+// fault was found, as the Jira and Linear write gates do: a provider an org
+// admin turned off, or one the org has not connected, is a 409, and anything
+// else is an upstream error. Nothing is stored either way.
 func writeCatalogStopped(w http.ResponseWriter, orgID, source string, err error) {
 	provider := map[string]string{"jira": "Jira", "linear": "Linear"}[source]
+	if errors.Is(err, eventsource.ErrDisabled) {
+		writeSourceDisabled(w, source)
+		return
+	}
 	if errors.Is(err, jira.ErrNoJiraSystemCredential) || errors.Is(err, linear.ErrNoLinearSystemCredential) {
 		writeNotConfigured(w, provider+" is not connected for this workspace, so the ids the scope predicate names cannot be checked")
 		return

@@ -90,12 +90,13 @@ type LinearSearchRequest struct {
 //
 // Only local mode reaches it — in multi mode the daemon is always the run's
 // credential sidecar, whose verbs go through proxyCreds — and in local mode the
-// credential lock is an in-process gate that takes no database.
-func newLinearResolver(stores db.Stores) linearclient.Resolver {
+// credential lock is an in-process gate that takes no database. rt is the
+// runtime whose live policy read gates every resolution (resolverGate).
+func newLinearResolver(stores db.Stores, rt Runtime) linearclient.Resolver {
 	apps := linearclient.NewOAuthAppResolver(stores.LinearApps, stores.Secrets, linearclient.DeploymentOAuthAppFromEnv())
 	tokens := linearoauth.NewTokenCache(linearoauth.NewMinter(), apps, stores.Secrets, stores.LinearInstalls,
 		linearoauth.NewCredentialLock(nil))
-	return linearclient.NewResolverWithInstall(stores.Secrets, stores.Orgs, tokens)
+	return linearclient.NewResolverWithInstall(stores.Secrets, stores.Orgs, resolverGate(rt, eventsource.KindLinear), tokens)
 }
 
 // SetLinearResolver overrides the resolver this client's Linear verbs resolve
@@ -131,11 +132,15 @@ func (c *LocalClient) linearSystemClient(ctx context.Context) (*linearclient.Cli
 		return client, nil
 	}
 	if c.linearResolver == nil {
-		c.linearResolver = newLinearResolver(c.stores)
+		c.linearResolver = newLinearResolver(c.stores, c.rt)
 	}
 	client, err := c.linearResolver.ForSystem(ctx, c.info.OrgID)
 	if errors.Is(err, linearclient.ErrNoLinearSystemCredential) {
 		return nil, &SourceRefusal{Kind: eventsource.KindLinear, State: domain.SourceUnconfigured}
+	}
+	var refusal *SourceRefusal
+	if errors.As(err, &refusal) {
+		return nil, err
 	}
 	if err != nil {
 		return nil, c.refuseResolveFailure(eventsource.KindLinear, err)

@@ -196,7 +196,9 @@ func (c UserCredential) UsableFor(d Deployment) bool {
 // is a system operation and the (orgID, userID) are already authorized by
 // upstream middleware (request path) or are the trusted local / poll-cycle
 // identifiers. This lets one resolver serve both request handlers and
-// background callers. Mirrors internal/github.Resolver.
+// background callers. Mirrors internal/github.Resolver. Every resolution first
+// passes the resolver's SourceGate, so no client is made for an org whose
+// admin turned Jira off.
 type Resolver interface {
 	ForSystem(ctx context.Context, orgID string) (*Client, error)
 	ForUser(ctx context.Context, orgID, userID string) (*Client, error)
@@ -231,13 +233,24 @@ type UserAccessToken struct {
 	App OAuthAppSource
 }
 
-// TODO(TFAC-1222): no resolution checks whether an org admin turned Jira off,
-// so every caller outside the pollers, the agenthost funnels and credential
-// sealing (the event-handler catalog check, the pickers, the lifecycle
-// mirror, user claims) still gets a client and calls a turned-off Jira.
+// SourceGate is the check a Resolver runs before every resolution — ForSystem,
+// ForUser and ResolveSystemCredential alike — and before it reads any secret:
+// whether orgID may use Jira at all. nil lets the resolution proceed; any
+// error refuses it and is returned unchanged. The gate the product wires is
+// eventsource.ResolverGate, which refuses a source an org admin turned off
+// with an error wrapping eventsource.ErrDisabled (a sentinel this package
+// cannot name, since eventsource imports it), and refuses a policy it cannot
+// read with the read's own error.
+//
+// It is required, and it lives here rather than at the callers, because every
+// Jira client TF makes comes out of a Resolver: a caller that forgot the
+// check would be a hole in the off switch that nothing else closes.
+type SourceGate func(ctx context.Context, orgID string) error
+
 type resolver struct {
 	secrets db.SecretStore
 	orgs    db.OrgsStore
+	gate    SourceGate
 	oauth   UserAccessTokenSource // nil when OAuth minting isn't wired
 }
 
@@ -245,17 +258,24 @@ type resolver struct {
 // Cloud OAuth minting. Use NewResolverWithOAuth on the request-serving path
 // where per-user Cloud OAuth Connect credentials must resolve; the OAuth-free
 // form is for background callers that only ever take ForSystem (the board-mirror
-// spawner) or that predate Cloud OAuth.
-func NewResolver(secrets db.SecretStore, orgs db.OrgsStore) Resolver {
-	return &resolver{secrets: secrets, orgs: orgs}
+// spawner) or that predate Cloud OAuth. gate is required (SourceGate).
+func NewResolver(secrets db.SecretStore, orgs db.OrgsStore, gate SourceGate) Resolver {
+	return newResolver(secrets, orgs, gate, nil)
 }
 
 // NewResolverWithOAuth builds a Resolver that can mint per-user Cloud OAuth
 // access tokens via the given source (internal/jiraoauth). Everything else is
 // identical to NewResolver; only the AuthMethodCloudOAuth branch of ForUser
 // depends on the source.
-func NewResolverWithOAuth(secrets db.SecretStore, orgs db.OrgsStore, oauth UserAccessTokenSource) Resolver {
-	return &resolver{secrets: secrets, orgs: orgs, oauth: oauth}
+func NewResolverWithOAuth(secrets db.SecretStore, orgs db.OrgsStore, gate SourceGate, oauth UserAccessTokenSource) Resolver {
+	return newResolver(secrets, orgs, gate, oauth)
+}
+
+func newResolver(secrets db.SecretStore, orgs db.OrgsStore, gate SourceGate, oauth UserAccessTokenSource) *resolver {
+	if gate == nil {
+		panic("jira: a Resolver requires a SourceGate")
+	}
+	return &resolver{secrets: secrets, orgs: orgs, gate: gate, oauth: oauth}
 }
 
 // ForSystem resolves the org's Jira service credential into an authenticated
@@ -275,6 +295,9 @@ func NewResolverWithOAuth(secrets db.SecretStore, orgs db.OrgsStore, oauth UserA
 // scheme-appropriate credential is absent; a backend read error propagates so
 // a transient vault/keychain outage isn't misreported as "not configured".
 func (r *resolver) ForSystem(ctx context.Context, orgID string) (*Client, error) {
+	if err := r.gate(ctx, orgID); err != nil {
+		return nil, err
+	}
 	host, err := r.systemSite(ctx, orgID)
 	if err != nil {
 		return nil, err
@@ -340,6 +363,9 @@ type systemCredentialResolver interface {
 // *Client. See SystemCredential's doc for why this exists alongside
 // ForSystem rather than replacing it.
 func (r *resolver) ResolveSystemCredential(ctx context.Context, orgID string) (SystemCredential, error) {
+	if err := r.gate(ctx, orgID); err != nil {
+		return SystemCredential{}, err
+	}
 	host, err := r.systemSite(ctx, orgID)
 	if err != nil {
 		return SystemCredential{}, err
@@ -416,6 +442,9 @@ func (r *resolver) systemSite(ctx context.Context, orgID string) (string, error)
 // app that minted the token (WithOAuthApp). An API token or a PAT is metered
 // by the user it belongs to, and a user may not be a metric label.
 func (r *resolver) ForUser(ctx context.Context, orgID, userID string) (*Client, error) {
+	if err := r.gate(ctx, orgID); err != nil {
+		return nil, err
+	}
 	orgSet, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve jira host for org %s: %w", orgID, err)

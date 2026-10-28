@@ -139,7 +139,7 @@ func NewServer(stores db.Stores, info ConversationInfo, proxyCreds *ProxyCredent
 		info:           info,
 		gateWired:      stores.TeamGitHubRepos != nil && stores.ConversationWorktrees != nil,
 		ghResolver:     resolver,
-		linearResolver: newLinearResolver(stores),
+		linearResolver: newLinearResolver(stores, rt),
 		proxyCreds:     proxyCreds,
 		upstreamGate:   newUpstreamThrottle(maxUpstreamConcurrencyFromEnv()),
 		shutdown:       make(chan struct{}),

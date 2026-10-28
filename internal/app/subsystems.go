@@ -8,6 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/grantmirror"
 	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
@@ -330,8 +331,10 @@ func (a *App) buildExecution() error {
 	// TFAC-300: the board→Jira lifecycle mirror resolves the org's system/bot
 	// Jira credential per write through this resolver (same construction the
 	// server + poller use). A fresh instance is fine — the resolver is stateless,
-	// reading creds fresh each call, so a config-change hot-swap is honored.
-	a.spawner.SetJiraResolver(jira.NewResolver(a.stores.Secrets, a.stores.Orgs))
+	// reading creds and the org's off switch fresh each call, so a config-change
+	// hot-swap is honored and a turned-off Jira is left alone.
+	a.spawner.SetJiraResolver(jira.NewResolver(a.stores.Secrets, a.stores.Orgs,
+		eventsource.ResolverGate(a.stores.OrgEventSources, eventsource.KindJira)))
 	// The board→Linear mirror's sibling seam. It takes the process's one
 	// resolver (buildRunCredentials), so an installed org's token refreshes go
 	// through the same cache the poller and the credential provisioner use.

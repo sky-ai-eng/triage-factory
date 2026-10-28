@@ -920,7 +920,11 @@ func (c *LocalClient) githubPullAnchorURL(ctx context.Context, owner, repo strin
 // permission would reopen the source exactly while the database is unhealthy;
 // the cost of the other mistake is one verb the agent sees fail.
 func (c *LocalClient) requireSourceEnabled(ctx context.Context, kind string) error {
-	off, err := c.rt.SourceDisabled(ctx, kind)
+	return requireSourceEnabled(ctx, c.rt, kind)
+}
+
+func requireSourceEnabled(ctx context.Context, rt Runtime, kind string) error {
+	off, err := rt.SourceDisabled(ctx, kind)
 	if err != nil {
 		return fmt.Errorf("check whether %s is turned off for this organization: %w", eventsource.Label(kind), err)
 	}
@@ -928,6 +932,18 @@ func (c *LocalClient) requireSourceEnabled(ctx context.Context, kind string) err
 		return &SourceRefusal{Kind: kind, State: domain.SourceDisabled}
 	}
 	return nil
+}
+
+// resolverGate is the off-switch check the resolver path's Jira and Linear
+// resolvers run before every resolution (jira.SourceGate, linear.SourceGate):
+// the same live read requireSourceEnabled makes at the funnel ahead of them,
+// so the resolver's backstop refuses with the same SourceRefusal. The runtime
+// reads the run's own org, which is the only org these resolvers are asked
+// about.
+func resolverGate(rt Runtime, kind string) func(ctx context.Context, orgID string) error {
+	return func(ctx context.Context, _ string) error {
+		return requireSourceEnabled(ctx, rt, kind)
+	}
 }
 
 // refuseWithoutProxy is the refusal for a source this engagement has no
@@ -1007,9 +1023,13 @@ func (c *LocalClient) jiraSystemClient(ctx context.Context) (*jiraclient.Client,
 		}
 		return client, nil
 	}
-	client, err := jiraclient.NewResolver(c.stores.Secrets, c.stores.Orgs).ForSystem(ctx, c.info.OrgID)
+	client, err := jiraclient.NewResolver(c.stores.Secrets, c.stores.Orgs, resolverGate(c.rt, eventsource.KindJira)).ForSystem(ctx, c.info.OrgID)
 	if errors.Is(err, jiraclient.ErrNoJiraSystemCredential) {
 		return nil, &SourceRefusal{Kind: eventsource.KindJira, State: domain.SourceUnconfigured}
+	}
+	var refusal *SourceRefusal
+	if errors.As(err, &refusal) {
+		return nil, err
 	}
 	if err != nil {
 		return nil, c.refuseResolveFailure(eventsource.KindJira, err)

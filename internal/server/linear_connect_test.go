@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/linearoauth"
@@ -61,6 +62,7 @@ func newLinearConnectRig(t *testing.T) *linearConnectRig {
 	base := newLinearInstallRig(t)
 	base.fake.set("person")
 	base.s.linearResolver = linear.NewResolverWithOAuth(base.stores.Secrets, base.stores.Orgs,
+		eventsource.ResolverGate(base.stores.OrgEventSources, eventsource.KindLinear),
 		linearoauth.NewTokenCache(base.s.linearOAuthMinter, base.s.linearOAuthApps, base.stores.Secrets, base.stores.LinearInstalls, base.s.linearCredentialLock),
 		linearoauth.NewUserTokenCache(base.s.linearOAuthMinter, base.s.linearOAuthApps, base.stores.Secrets, base.stores.Tx, base.s.linearUserCredentialLock))
 	r := &linearConnectRig{linearInstallRig: base, clientID: "lin-client-1"}
@@ -72,7 +74,8 @@ func newLinearConnectRig(t *testing.T) *linearConnectRig {
 // and the resolver the user token cache built over it.
 func (r *linearConnectRig) useDeploymentApp(deployment linear.OAuthApp) {
 	r.s.linearOAuthApps = linear.NewOAuthAppResolver(r.stores.LinearApps, r.stores.Secrets, deployment)
-	r.s.linearResolver = linear.NewResolverWithOAuth(r.stores.Secrets, r.stores.Orgs, nil,
+	r.s.linearResolver = linear.NewResolverWithOAuth(r.stores.Secrets, r.stores.Orgs,
+		eventsource.ResolverGate(r.stores.OrgEventSources, eventsource.KindLinear), nil,
 		linearoauth.NewUserTokenCache(r.s.linearOAuthMinter, r.s.linearOAuthApps, r.stores.Secrets, r.stores.Tx, r.s.linearUserCredentialLock))
 }
 
@@ -934,7 +937,8 @@ func TestLinearIdentity_MultiMode(t *testing.T) {
 	oauth := newLinearOAuthFake(t)
 	s.linearOAuthMinter = linearoauth.NewMinterWithEndpoints(oauth.URL+"/token", oauth.URL+"/revoke")
 	stores := pgstore.New(rig.h.AdminDB, rig.h.AppDB, pgtest.SecretKey)
-	s.linearResolver = linear.NewResolverWithOAuth(stores.Secrets, stores.Orgs, nil,
+	s.linearResolver = linear.NewResolverWithOAuth(stores.Secrets, stores.Orgs,
+		eventsource.ResolverGate(stores.OrgEventSources, eventsource.KindLinear), nil,
 		linearoauth.NewUserTokenCache(s.linearOAuthMinter, s.linearOAuthApps, stores.Secrets, stores.Tx, s.linearUserCredentialLock))
 
 	alice := rig.seedUser()

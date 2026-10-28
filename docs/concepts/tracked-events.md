@@ -452,8 +452,9 @@ own), or one of the instance's priorities
 under the org's credential, about each id the write adds: a name or an id Jira
 does not offer the team is refused with `422 INVALID_FIELD` on the key it is in,
 such as `scope_predicate.status_id_in`, Jira not answering refuses the write with `502
-UPSTREAM_UNAVAILABLE`, and a Jira the org has not connected with `409
-NOT_CONFIGURED`. A write that adds no id asks Jira nothing. Events recorded
+UPSTREAM_UNAVAILABLE`, a Jira the org has not connected with `409
+NOT_CONFIGURED`, and a Jira an org admin turned off with `409 SOURCE_DISABLED`
+(see [Turning a source off](#turning-a-source-off)). A write that adds no id asks Jira nothing. Events recorded
 before the ids were carried have none, so an id filter never matches them.
 
 Linear's workflow states work the same way: `status_id`, `old_status_id`,
@@ -1022,3 +1023,36 @@ Events can be enabled/disabled on the Event Types settings page. Disabling an ev
 Creating a rule or trigger, editing one and promoting a rule check its `scope_predicate` against the predicate fields of its event type, and report every fault found, each on the key it is about (`scope_predicate.<key>`). A key the event type does not have, including a field name in a different case, is refused with `400 UNKNOWN_FIELD`, and a value of the wrong JSON type with `400 INVALID_FIELD`. A value of the right type that the field does not accept is refused with `422 INVALID_FIELD`: a value outside the field's enum, an empty list entry, or a list entry equal to an earlier one ignoring case. A list is a set, so a repeated entry has no meaning, and refusing it keeps one stored form for each predicate. An edit or a promote is checked for these only in a list it changes: a list re-sent exactly as the handler stores it is kept as it is, so a stored list holding an empty or repeated entry never blocks an edit to the handler's other fields.
 
 Every `422` fault a write has comes back in one answer: the predicate's value faults above, the entries the sections above refuse because the team does not track them or Jira or Linear does not offer them, each on the key it is in, and the write's other fields, such as an out-of-range `default_priority` or a `blueprint_id` another team owns. A request with both `400` and `422` faults is answered `400` with only the `400` faults, and its `422` faults are reported once those are fixed. A missing blueprint (`404`) or a blueprint that already has a trigger (`409`) is answered before the `422` faults too. A write with `422` faults is answered with them even when Jira or Linear cannot be asked about its ids, and a create whose `event_type` names a source the org cannot use asks that source nothing.
+
+### Turning a source off
+
+An org admin turns Jira or Linear off for the org with
+`PATCH /api/orgs/{org_id}/sources/{kind}`. The credential stays bound, and TF
+makes no call to the source until it is turned back on. The poll cycle skips
+the source, and every Jira or Linear client TF makes comes out of that
+source's credential resolver, which refuses to resolve one for the org: the
+org's service credential and each user's own credential alike. The resolver
+reads the org's policy on every resolution, with no cache, and refuses when it
+cannot read it. While the source is off:
+
+- Its catalog reads (Jira projects, statuses, priorities and issue types;
+  Linear teams, workflow states, labels and users) and the Linear
+  team-visibility read answer `409 SOURCE_DISABLED`.
+- A team cannot add or change a tracked Jira project or Linear team, because
+  adding one looks it up: the write answers `409 SOURCE_DISABLED`. A write that
+  only removes one asks the source nothing and still succeeds.
+- Creating a handler for the source is refused with `422 INVALID_FIELD` on
+  `event_type`. Editing or promoting one so that its predicate gains a catalog
+  id answers `409 SOURCE_DISABLED` instead of checking the id, unless the write
+  already has `422` faults, which are answered instead.
+- A person's claim of a task on one of its issues, and the Jira stock deck's
+  claim and done, answer `409 SOURCE_DISABLED` before writing anything. A
+  requeue or an undo still returns the task to the queue and leaves the issue
+  as it is.
+- Delegating a task leaves its issue as it is: the lifecycle mirror skips it.
+- A delegated run's verbs for the source are refused, and the run's credential
+  bundle stops carrying the source's credential at its next seal.
+
+`409 SOURCE_DISABLED` is distinct from `409 NOT_CONFIGURED`: connecting a
+credential fixes the second, and only an org admin turning the source back on
+fixes the first. Turning it back on restores all of the above with no rebind.

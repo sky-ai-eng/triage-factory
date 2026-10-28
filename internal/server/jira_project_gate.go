@@ -1,14 +1,13 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
 
-	"github.com/sky-ai-eng/triage-factory/internal/auth"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -188,7 +187,7 @@ func (s *Server) gateJiraProjects(
 		return out, true
 	}
 
-	client, ok := s.jiraGateClient(w, r, orgID, userID)
+	client, ok := s.jiraGateClient(w, r, orgID)
 	if !ok {
 		return nil, false
 	}
@@ -328,37 +327,25 @@ func sameStatusSet(ids []string, stored []domain.JiraStatusRef) bool {
 	return slices.Equal(got, want)
 }
 
-// jiraGateClient resolves the org's Jira service credential into a client. It
-// is called only once something actually needs verifying, so an unconnected
+// jiraGateClient resolves the org's Jira service credential into a client,
+// through the resolver every Jira client comes out of, so a Jira an org admin
+// turned off is refused here as everywhere else. It is called only once
+// something actually needs verifying, so an unconnected or turned-off
 // workspace can still remove a project it can no longer map.
-func (s *Server) jiraGateClient(w http.ResponseWriter, r *http.Request, orgID, userID string) (*jira.Client, bool) {
-	// Read through the app pool inside WithTx so the org_secrets read runs
-	// under the caller's claims.
-	var (
-		creds  auth.Credentials
-		orgSet domain.OrgSettings
-	)
-	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var lerr error
-		creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
-		if lerr != nil {
-			return fmt.Errorf("load integration credentials: %w", lerr)
-		}
-		orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
-		if lerr != nil {
-			return fmt.Errorf("load org settings: %w", lerr)
-		}
-		return nil
-	}); err != nil {
+func (s *Server) jiraGateClient(w http.ResponseWriter, r *http.Request, orgID string) (*jira.Client, bool) {
+	client, err := s.jiraResolver.ForSystem(r.Context(), orgID)
+	switch {
+	case errors.Is(err, eventsource.ErrDisabled):
+		writeSourceDisabled(w, eventsource.KindJira)
+		return nil, false
+	case errors.Is(err, jira.ErrNoJiraSystemCredential):
+		writeNotConfigured(w, "Jira is not connected for this workspace, so a project or a status mapping cannot be added")
+		return nil, false
+	case err != nil:
 		internalError(w, "settings/team/jira-projects", err)
 		return nil, false
 	}
-	cfg, ok := integrations.JiraSystemConfig(creds, orgSet.JiraBaseURL)
-	if !ok {
-		writeNotConfigured(w, "Jira is not connected for this workspace, so a project or a status mapping cannot be added")
-		return nil, false
-	}
-	return jira.NewClient(cfg).WithOrg(orgID).WithCredential(jira.SystemAuthMethod(cfg.Deployment)), true
+	return client, true
 }
 
 // writeJiraGateStopped ends the gate when Jira stops answering partway through

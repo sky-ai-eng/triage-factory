@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
@@ -173,6 +174,13 @@ func (m *Manager) runLinearCycleForOrg(ctx context.Context, orgID string, now ti
 		return
 	}
 	client, cerr := m.linearResolver.ForSystem(ctx, orgID)
+	if errors.Is(cerr, eventsource.ErrDisabled) {
+		// Turned off after the cycle's skip read the policy: the resolver's own
+		// gate refused, and this is the same deliberate pause.
+		span.SetAttributes(telemetry.Outcome("disabled"))
+		conn.skip("disabled")
+		return
+	}
 	if cerr != nil {
 		span.SetStatus(codes.Error, "resolve system client")
 		linearLog.Log(ctx, upstream.LogLevel(cerr, slog.LevelError), "resolve system client failed", "org", orgID, "error", cerr)

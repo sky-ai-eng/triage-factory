@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -59,6 +60,9 @@ const (
 	testWorkspaceID = "ws-1"
 )
 
+// openGate is the SourceGate of an org whose Linear is on.
+func openGate(context.Context, string) error { return nil }
+
 // orgAPIKey is an org whose service credential is a valid api_key.
 func orgAPIKey() map[string]string {
 	return map[string]string{
@@ -89,7 +93,7 @@ func authorizationOf(t *testing.T, c *Client) string {
 }
 
 func TestForSystem_BuildsAPIKeyClient(t *testing.T) {
-	r := NewResolver(&fakeSecrets{sys: orgAPIKey()}, &fakeOrgs{})
+	r := NewResolver(&fakeSecrets{sys: orgAPIKey()}, &fakeOrgs{}, openGate)
 
 	c, err := r.ForSystem(context.Background(), testOrgID)
 	if err != nil {
@@ -117,7 +121,7 @@ func TestForSystem_MissingCredential(t *testing.T) {
 	}
 	for name, sys := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := NewResolver(&fakeSecrets{sys: sys}, &fakeOrgs{}).ForSystem(context.Background(), testOrgID)
+			_, err := NewResolver(&fakeSecrets{sys: sys}, &fakeOrgs{}, openGate).ForSystem(context.Background(), testOrgID)
 			if !errors.Is(err, ErrNoLinearSystemCredential) {
 				t.Errorf("ForSystem err = %v, want ErrNoLinearSystemCredential", err)
 			}
@@ -129,7 +133,7 @@ func TestForSystem_MissingCredential(t *testing.T) {
 // is the api_key shape: an app install never stores a key under
 // linear_api_key, so the key alone names the shape.
 func TestForSystem_KeyWithoutMarkerIsAPIKey(t *testing.T) {
-	r := NewResolver(&fakeSecrets{sys: map[string]string{keyLinearAPIKey: "lin_api_env"}}, &fakeOrgs{})
+	r := NewResolver(&fakeSecrets{sys: map[string]string{keyLinearAPIKey: "lin_api_env"}}, &fakeOrgs{}, openGate)
 
 	cred, err := r.ResolveSystemCredential(context.Background(), testOrgID)
 	if err != nil {
@@ -173,7 +177,7 @@ func orgAppInstall() map[string]string {
 func TestForSystem_AppInstallBuildsBearerClient(t *testing.T) {
 	exp := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
 	tokens := &fakeInstallTokens{token: "lin_oauth_app", expiresAt: exp}
-	r := NewResolverWithInstall(&fakeSecrets{sys: orgAppInstall()}, &fakeOrgs{}, tokens)
+	r := NewResolverWithInstall(&fakeSecrets{sys: orgAppInstall()}, &fakeOrgs{}, openGate, tokens)
 
 	c, err := r.ForSystem(context.Background(), testOrgID)
 	if err != nil {
@@ -200,13 +204,13 @@ func TestForSystem_AppInstallBuildsBearerClient(t *testing.T) {
 
 func TestForSystem_AppInstallPassesTheSourceError(t *testing.T) {
 	revoked := fmt.Errorf("%w: org=%s (install revoked in linear)", ErrNoLinearSystemCredential, testOrgID)
-	r := NewResolverWithInstall(&fakeSecrets{sys: orgAppInstall()}, &fakeOrgs{}, &fakeInstallTokens{err: revoked})
+	r := NewResolverWithInstall(&fakeSecrets{sys: orgAppInstall()}, &fakeOrgs{}, openGate, &fakeInstallTokens{err: revoked})
 	if _, err := r.ForSystem(context.Background(), testOrgID); !errors.Is(err, ErrNoLinearSystemCredential) {
 		t.Errorf("ForSystem err = %v, want the source's ErrNoLinearSystemCredential", err)
 	}
 
 	outage := errors.New("vault down")
-	r = NewResolverWithInstall(&fakeSecrets{sys: orgAppInstall()}, &fakeOrgs{}, &fakeInstallTokens{err: outage})
+	r = NewResolverWithInstall(&fakeSecrets{sys: orgAppInstall()}, &fakeOrgs{}, openGate, &fakeInstallTokens{err: outage})
 	_, err := r.ForSystem(context.Background(), testOrgID)
 	if !errors.Is(err, outage) || errors.Is(err, ErrNoLinearSystemCredential) {
 		t.Errorf("ForSystem err = %v, want the outage itself, not unconfigured", err)
@@ -218,7 +222,7 @@ func TestForSystem_AppInstallPassesTheSourceError(t *testing.T) {
 // reporting it unconfigured: that is a wiring fault, and rebinding fixes
 // nothing.
 func TestForSystem_AppInstallWithoutSourceIsAnError(t *testing.T) {
-	_, err := NewResolver(&fakeSecrets{sys: orgAppInstall()}, &fakeOrgs{}).ForSystem(context.Background(), testOrgID)
+	_, err := NewResolver(&fakeSecrets{sys: orgAppInstall()}, &fakeOrgs{}, openGate).ForSystem(context.Background(), testOrgID)
 	if err == nil || errors.Is(err, ErrNoLinearSystemCredential) {
 		t.Errorf("ForSystem err = %v, want a wiring error", err)
 	}
@@ -252,7 +256,7 @@ func TestInstallCredential_RoundTrip(t *testing.T) {
 
 func TestForSystem_UnknownMarkerIsNotUnconfigured(t *testing.T) {
 	sys := map[string]string{keyLinearAuthMethod: "saml_v9", keyLinearAPIKey: "lin_api_org"}
-	_, err := NewResolver(&fakeSecrets{sys: sys}, &fakeOrgs{}).ForSystem(context.Background(), testOrgID)
+	_, err := NewResolver(&fakeSecrets{sys: sys}, &fakeOrgs{}, openGate).ForSystem(context.Background(), testOrgID)
 	if err == nil {
 		t.Fatal("ForSystem err = nil, want an unknown-method error")
 	}
@@ -263,7 +267,7 @@ func TestForSystem_UnknownMarkerIsNotUnconfigured(t *testing.T) {
 
 func TestForSystem_BackendError(t *testing.T) {
 	sentinel := errors.New("vault down")
-	_, err := NewResolver(&fakeSecrets{sysErr: sentinel}, &fakeOrgs{}).ForSystem(context.Background(), testOrgID)
+	_, err := NewResolver(&fakeSecrets{sysErr: sentinel}, &fakeOrgs{}, openGate).ForSystem(context.Background(), testOrgID)
 	if !errors.Is(err, sentinel) {
 		t.Errorf("ForSystem err = %v, want the backend error", err)
 	}
@@ -273,7 +277,7 @@ func TestForSystem_BackendError(t *testing.T) {
 }
 
 func TestResolveSystemCredential_APIKey(t *testing.T) {
-	cred, err := NewResolver(&fakeSecrets{sys: orgAPIKey()}, &fakeOrgs{}).ResolveSystemCredential(context.Background(), testOrgID)
+	cred, err := NewResolver(&fakeSecrets{sys: orgAPIKey()}, &fakeOrgs{}, openGate).ResolveSystemCredential(context.Background(), testOrgID)
 	if err != nil {
 		t.Fatalf("ResolveSystemCredential: %v", err)
 	}
@@ -292,7 +296,7 @@ func TestForUser_UsesUserToken(t *testing.T) {
 		sys:  orgAPIKey(),
 		user: map[string]string{UserTokenKey(testWorkspaceID): userEnvelope(t, UserCredential{Method: AuthMethodAPIKey, Token: "lin_api_user"})},
 	}
-	c, err := NewResolver(secrets, &fakeOrgs{workspaceID: testWorkspaceID}).ForUser(context.Background(), testOrgID, testUserID)
+	c, err := NewResolver(secrets, &fakeOrgs{workspaceID: testWorkspaceID}, openGate).ForUser(context.Background(), testOrgID, testUserID)
 	if err != nil {
 		t.Fatalf("ForUser: %v", err)
 	}
@@ -324,7 +328,7 @@ func TestForUser_MissingIsErrNoUserCredential(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			r := NewResolver(&fakeSecrets{user: tc.user}, &fakeOrgs{workspaceID: tc.workspaceID})
+			r := NewResolver(&fakeSecrets{user: tc.user}, &fakeOrgs{workspaceID: tc.workspaceID}, openGate)
 			if _, err := r.ForUser(context.Background(), testOrgID, testUserID); !errors.Is(err, ErrNoLinearUserCredential) {
 				t.Errorf("ForUser err = %v, want ErrNoLinearUserCredential", err)
 			}
@@ -353,7 +357,7 @@ func TestForUser_NeverFallsBackToSystem(t *testing.T) {
 			}
 			secrets := &fakeSecrets{sys: sys, user: tc.user}
 			install := &fakeInstallTokens{token: "app-token", expiresAt: time.Now().Add(time.Hour)}
-			r := NewResolverWithOAuth(secrets, &fakeOrgs{workspaceID: testWorkspaceID}, install, tc.tokens)
+			r := NewResolverWithOAuth(secrets, &fakeOrgs{workspaceID: testWorkspaceID}, openGate, install, tc.tokens)
 
 			_, err := r.ForUser(context.Background(), testOrgID, testUserID)
 			if !errors.Is(err, ErrNoLinearUserCredential) {
@@ -388,7 +392,7 @@ func TestForUser_ConnectOAuthBuildsBearerClient(t *testing.T) {
 		user: map[string]string{UserTokenKey(testWorkspaceID): `{"method":"connect_oauth","refresh_token":"r","client_id":"c","grant_id":"g"}`},
 	}
 	tokens := &fakeUserTokens{token: "user-access"}
-	c, err := NewResolverWithOAuth(secrets, &fakeOrgs{workspaceID: testWorkspaceID}, nil, tokens).ForUser(context.Background(), testOrgID, testUserID)
+	c, err := NewResolverWithOAuth(secrets, &fakeOrgs{workspaceID: testWorkspaceID}, openGate, nil, tokens).ForUser(context.Background(), testOrgID, testUserID)
 	if err != nil {
 		t.Fatalf("ForUser: %v", err)
 	}
@@ -409,7 +413,7 @@ func TestForUser_ConnectOAuthBuildsBearerClient(t *testing.T) {
 func TestForUser_ConnectOAuthSourceErrorsPropagate(t *testing.T) {
 	sentinel := errors.New("token endpoint down")
 	secrets := &fakeSecrets{user: map[string]string{UserTokenKey(testWorkspaceID): `{"method":"connect_oauth","refresh_token":"r","client_id":"c","grant_id":"g"}`}}
-	_, err := NewResolverWithOAuth(secrets, &fakeOrgs{workspaceID: testWorkspaceID}, nil, &fakeUserTokens{err: sentinel}).ForUser(context.Background(), testOrgID, testUserID)
+	_, err := NewResolverWithOAuth(secrets, &fakeOrgs{workspaceID: testWorkspaceID}, openGate, nil, &fakeUserTokens{err: sentinel}).ForUser(context.Background(), testOrgID, testUserID)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("ForUser err = %v, want the source's error", err)
 	}
@@ -420,7 +424,7 @@ func TestForUser_ConnectOAuthSourceErrorsPropagate(t *testing.T) {
 
 func TestForUser_ConnectOAuthWithoutSourceIsAnError(t *testing.T) {
 	secrets := &fakeSecrets{user: map[string]string{UserTokenKey(testWorkspaceID): `{"method":"connect_oauth","refresh_token":"r","client_id":"c","grant_id":"g"}`}}
-	_, err := NewResolverWithInstall(secrets, &fakeOrgs{workspaceID: testWorkspaceID}, nil).ForUser(context.Background(), testOrgID, testUserID)
+	_, err := NewResolverWithInstall(secrets, &fakeOrgs{workspaceID: testWorkspaceID}, openGate, nil).ForUser(context.Background(), testOrgID, testUserID)
 	if err == nil || errors.Is(err, ErrNoLinearUserCredential) {
 		t.Errorf("ForUser err = %v, want a wiring error that is not ErrNoLinearUserCredential", err)
 	}
@@ -434,7 +438,7 @@ func TestForUser_UnreadableCredentialIsNotAbsent(t *testing.T) {
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
 			secrets := &fakeSecrets{user: map[string]string{UserTokenKey(testWorkspaceID): raw}}
-			_, err := NewResolver(secrets, &fakeOrgs{workspaceID: testWorkspaceID}).ForUser(context.Background(), testOrgID, testUserID)
+			_, err := NewResolver(secrets, &fakeOrgs{workspaceID: testWorkspaceID}, openGate).ForUser(context.Background(), testOrgID, testUserID)
 			if err == nil {
 				t.Fatal("ForUser err = nil, want an error")
 			}
@@ -448,8 +452,8 @@ func TestForUser_UnreadableCredentialIsNotAbsent(t *testing.T) {
 func TestForUser_ReadErrorsPropagate(t *testing.T) {
 	sentinel := errors.New("store down")
 	cases := map[string]Resolver{
-		"user secret":  NewResolver(&fakeSecrets{userErr: sentinel}, &fakeOrgs{workspaceID: testWorkspaceID}),
-		"org settings": NewResolver(&fakeSecrets{}, &fakeOrgs{err: sentinel}),
+		"user secret":  NewResolver(&fakeSecrets{userErr: sentinel}, &fakeOrgs{workspaceID: testWorkspaceID}, openGate),
+		"org settings": NewResolver(&fakeSecrets{}, &fakeOrgs{err: sentinel}, openGate),
 	}
 	for name, r := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -498,5 +502,55 @@ func TestUserCredential_Usable(t *testing.T) {
 		if got := tc.cred.Usable(); got != tc.want {
 			t.Errorf("%+v.Usable() = %v, want %v", tc.cred, got, tc.want)
 		}
+	}
+}
+
+// TestResolver_GateRefusesEveryResolutionFirst: a gate that refuses ends every
+// resolution, ForSystem, ForUser and ResolveSystemCredential alike, before the
+// resolver reads a secret or the org's settings (both stores are nil here, so
+// a read would panic), and returns the gate's own error, so a caller can tell
+// a turned-off Linear from a missing credential.
+func TestResolver_GateRefusesEveryResolutionFirst(t *testing.T) {
+	ctx := context.Background()
+	off := errors.New("linear is turned off")
+	var asked []string
+	gate := func(_ context.Context, orgID string) error {
+		asked = append(asked, orgID)
+		return off
+	}
+	r := NewResolverWithOAuth(nil, nil, gate, nil, nil)
+
+	_, sysErr := r.ForSystem(ctx, testOrgID)
+	_, userErr := r.ForUser(ctx, testOrgID, testUserID)
+	_, credErr := r.ResolveSystemCredential(ctx, testOrgID)
+	for name, err := range map[string]error{"ForSystem": sysErr, "ForUser": userErr, "ResolveSystemCredential": credErr} {
+		if !errors.Is(err, off) {
+			t.Errorf("%s = %v, want the gate's refusal", name, err)
+		}
+		if errors.Is(err, ErrNoLinearSystemCredential) || errors.Is(err, ErrNoLinearUserCredential) {
+			t.Errorf("%s = %v, reads as a missing credential", name, err)
+		}
+	}
+	if want := []string{testOrgID, testOrgID, testOrgID}; !slices.Equal(asked, want) {
+		t.Errorf("gate asked about %v, want %v", asked, want)
+	}
+}
+
+// TestNewResolver_RequiresAGate: no constructor builds a resolver that skips
+// the off switch.
+func TestNewResolver_RequiresAGate(t *testing.T) {
+	for name, build := range map[string]func(){
+		"NewResolver":            func() { NewResolver(&fakeSecrets{}, &fakeOrgs{}, nil) },
+		"NewResolverWithInstall": func() { NewResolverWithInstall(&fakeSecrets{}, &fakeOrgs{}, nil, nil) },
+		"NewResolverWithOAuth":   func() { NewResolverWithOAuth(&fakeSecrets{}, &fakeOrgs{}, nil, nil, nil) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Error("built a resolver with no gate")
+				}
+			}()
+			build()
+		})
 	}
 }

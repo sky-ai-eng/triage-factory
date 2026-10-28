@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -481,9 +482,10 @@ func TestRunJiraMirror_SkipsAnIssueOnAnotherSite(t *testing.T) {
 	}
 }
 
-// The mirror stays silent for ErrNoJiraSystemCredential and
-// ErrNoLinearSystemCredential (expected, normal states: an org without that
-// tracker, or creds removed mid-flight) and logs every other
+// The mirror stays silent for ErrNoJiraSystemCredential,
+// ErrNoLinearSystemCredential and eventsource.ErrDisabled (expected, normal
+// states: an org without that tracker, creds removed mid-flight, or the
+// tracker turned off by an org admin) and logs every other
 // ForSystem error (a real failure worth surfacing). Tested as a pure decision
 // rather than by capturing the global logger — that races with the package's
 // many goroutine-spawning tests under -race. The wrapped case matters because
@@ -503,6 +505,9 @@ func TestShouldLogForSystemErr(t *testing.T) {
 	}
 	if shouldLogForSystemErr(fmt.Errorf("%w: org=acme", linear.ErrNoLinearSystemCredential)) {
 		t.Error("wrapped ErrNoLinearSystemCredential: want silent")
+	}
+	if shouldLogForSystemErr(fmt.Errorf("Jira for org acme: %w", eventsource.ErrDisabled)) {
+		t.Error("source turned off by an org admin: want silent")
 	}
 	if !shouldLogForSystemErr(errors.New("vault unreachable")) {
 		t.Error("real backend error: want logged")

@@ -17,6 +17,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
+// openGate is the SourceGate of an org whose Jira is on.
+func openGate(context.Context, string) error { return nil }
+
 // keyedSecrets is a SecretStore stub whose GetSystem reads from a map keyed by
 // the integrations.Key* constants — so a value stored under integrations' public
 // keys is exactly what ForSystem looks up via its own (unexported,
@@ -50,7 +53,7 @@ func TestForSystem_KeysMatchIntegrations(t *testing.T) {
 	secrets := keyedSecrets{vals: map[string]string{
 		integrations.KeyJiraPAT: "tok",
 	}}
-	c, err := jira.NewResolver(secrets, stubOrgs{site: "https://jira.example.com"}).ForSystem(context.Background(), "org-1")
+	c, err := jira.NewResolver(secrets, stubOrgs{site: "https://jira.example.com"}, openGate).ForSystem(context.Background(), "org-1")
 	if err != nil {
 		t.Fatalf("ForSystem with integrations-keyed secrets: %v\n"+
 			"jira.keyJiraPAT has drifted from integrations.KeyJiraPAT", err)
@@ -73,7 +76,7 @@ func TestForSystem_CloudKeysMatchIntegrations(t *testing.T) {
 		integrations.KeyJiraAPIToken:   "tok",
 		integrations.KeyJiraAuthMethod: string(jira.AuthMethodCloudAPIToken),
 	}}
-	c, err := jira.NewResolver(secrets, stubOrgs{site: "https://acme.atlassian.net"}).ForSystem(context.Background(), "org-1")
+	c, err := jira.NewResolver(secrets, stubOrgs{site: "https://acme.atlassian.net"}, openGate).ForSystem(context.Background(), "org-1")
 	if err != nil {
 		t.Fatalf("ForSystem with integrations-keyed cloud secrets: %v\n"+
 			"jira.keyJira{Email,APIToken,AuthMethod} have drifted from integrations.KeyJira*", err)

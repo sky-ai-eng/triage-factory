@@ -14,6 +14,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -244,6 +245,18 @@ func (m *Manager) sourceDisabled(ctx context.Context, source, orgID string) (ski
 		return true, "policy_unreadable"
 	}
 	return slices.Contains(kinds, source), "disabled"
+}
+
+// resolverGate is the off-switch check the cycle's Jira resolver runs before
+// every resolution, over the policy store sourceDisabled reads, so a source
+// turned off between the cycle's skip and its resolution is still refused.
+// With no store wired there is no policy to read, and it allows, as
+// sourceDisabled does.
+func (m *Manager) resolverGate(kind string) jiraclient.SourceGate {
+	if m.EventSources == nil {
+		return func(context.Context, string) error { return nil }
+	}
+	return eventsource.ResolverGate(m.EventSources, kind)
 }
 
 // reviewerResolver builds the per-cycle TF-known reviewer resolver.
@@ -1513,7 +1526,7 @@ func (m *Manager) runJiraCycle(stop <-chan struct{}) {
 	// client. The poller is read-only (discovery), so it's bot-attributed by
 	// design; routing through the resolver keeps system-client construction in
 	// one place alongside the per-user write path.
-	sysResolver := jiraclient.NewResolver(m.secrets, m.orgs)
+	sysResolver := jiraclient.NewResolver(m.secrets, m.orgs, m.resolverGate(eventsource.KindJira))
 	for _, orgID := range orgIDs {
 		// Stop starting NEW per-org batches once this loop is torn down (a
 		// lease demotion or RestartJira closes stop) — see runGitHubCycle.
@@ -1627,6 +1640,13 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 	// guarantees a credential is present, so ForSystem won't report
 	// ErrNoJiraSystemCredential here — handle errors defensively.
 	client, cerr := sysResolver.ForSystem(ctx, orgID)
+	if errors.Is(cerr, eventsource.ErrDisabled) {
+		// Turned off after the skip above read the policy: the resolver's own
+		// gate refused, and this is the same deliberate pause.
+		span.SetAttributes(telemetry.Outcome("disabled"))
+		conn.skip("disabled")
+		return
+	}
 	if cerr != nil {
 		span.SetStatus(codes.Error, "resolve system client")
 		jiraLog.Log(ctx, upstream.LogLevel(cerr, slog.LevelError), "resolve system client failed", "org", orgID, "error", cerr)

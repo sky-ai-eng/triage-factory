@@ -22,6 +22,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -623,6 +624,8 @@ func TestRunLinearMirror_CountsNoFailureForAMoveOrADeliberateSkip(t *testing.T) 
 		{name: "another workspace", state: linearTodo, workspace: "ws-old"},
 		{name: "no linear credential", state: linearTodo, workspace: linearMirrorWorkspace,
 			sysErr: fmt.Errorf("%w: org=acme", linear.ErrNoLinearSystemCredential)},
+		{name: "linear turned off", state: linearTodo, workspace: linearMirrorWorkspace,
+			sysErr: fmt.Errorf("Linear for org acme: %w", eventsource.ErrDisabled)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -62,7 +63,7 @@ func newProvisionRig(t *testing.T, avail eventsource.Availability, linearTokens 
 		},
 		ghResolver:     &fakeScopedResolver{hasCred: true, base: "https://github.com"},
 		jiraResolver:   &countingJira{},
-		linearResolver: linear.NewResolverWithInstall(secrets, nil, linearTokens),
+		linearResolver: linear.NewResolverWithInstall(secrets, nil, linearOn, linearTokens),
 		llm:            noLLM{},
 		sources: func(context.Context, string) (eventsource.Availability, error) {
 			return avail, nil
@@ -185,6 +186,46 @@ func TestProvision_ReSealMovesUnresolvedToSealed(t *testing.T) {
 	}
 	if rig.claims.puts != 2 || rig.claims.sources[eventsource.KindLinear].State != domain.SourceSealed {
 		t.Errorf("claims row after re-seal = %+v (%d puts), want linear sealed", rig.claims.sources, rig.claims.puts)
+	}
+}
+
+// turnedOffJira is a Jira resolver whose gate refuses, as it does for an org
+// whose admin turned Jira off.
+type turnedOffJira struct{ jira.Resolver }
+
+func (turnedOffJira) ResolveSystemCredential(context.Context, string) (jira.SystemCredential, error) {
+	return jira.SystemCredential{}, fmt.Errorf("Jira for org org-1: %w", eventsource.ErrDisabled)
+}
+
+// TestProvision_SourceTurnedOffAfterTheAvailabilityRead covers the seal that
+// races the switch: availability still read the sources as on, and their
+// resolvers' own gates refused. The seal carries on, holding neither
+// credential, and records both sources as what they now are rather than as
+// unresolved or as a failure.
+func TestProvision_SourceTurnedOffAfterTheAvailabilityRead(t *testing.T) {
+	tokens := &installTokens{token: "lin_oauth"}
+	rig := newProvisionRig(t, eventsource.Availability{
+		eventsource.NewSource(eventsource.KindGitHub, eventsource.StateAvailable),
+		eventsource.NewSource(eventsource.KindJira, eventsource.StateAvailable),
+		eventsource.NewSource(eventsource.KindLinear, eventsource.StateAvailable),
+	}, tokens)
+	rig.m.jiraResolver = turnedOffJira{}
+	linearOff := func(context.Context, string) error {
+		return fmt.Errorf("Linear for org org-1: %w", eventsource.ErrDisabled)
+	}
+	rig.m.linearResolver = linear.NewResolverWithInstall(rig.m.stores.Secrets, nil, linearOff, tokens)
+
+	bundle := rig.provision(t)
+	for _, kind := range []string{eventsource.KindJira, eventsource.KindLinear} {
+		if got := bundle.Sources[kind]; got.State != domain.SourceDisabled {
+			t.Errorf("%s = %+v, want disabled", kind, got)
+		}
+	}
+	if bundle.Jira != nil || bundle.Linear != nil {
+		t.Errorf("bundle holds Jira %+v and Linear %+v, want neither", bundle.Jira, bundle.Linear)
+	}
+	if got := bundle.Sources[eventsource.KindGitHub]; got.State != domain.SourceSealed {
+		t.Errorf("github = %+v, want sealed", got)
 	}
 }
 

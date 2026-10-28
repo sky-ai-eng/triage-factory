@@ -47,8 +47,11 @@ func (f *installTokens) AccessTokenForOrg(context.Context, string) (string, time
 // and token source, so the tests below exercise its marker dispatch as well
 // as the provisioner's mapping of its answer.
 func linearResolverFor(values map[string]string, tokens *installTokens) linear.Resolver {
-	return linear.NewResolverWithInstall(&linearSecrets{values: values}, nil, tokens)
+	return linear.NewResolverWithInstall(&linearSecrets{values: values}, nil, linearOn, tokens)
 }
+
+// linearOn is the SourceGate of an org whose Linear is on.
+func linearOn(context.Context, string) error { return nil }
 
 func TestManager_resolveLinear(t *testing.T) {
 	ctx := context.Background()
@@ -245,7 +248,7 @@ func TestProvisionForConversation_SealsLinear(t *testing.T) {
 					ClaimCredentials: claims,
 				},
 				ghResolver:     &fakeScopedResolver{},
-				linearResolver: linear.NewResolverWithInstall(secrets, nil, tc.tokens),
+				linearResolver: linear.NewResolverWithInstall(secrets, nil, linearOn, tc.tokens),
 				llm:            noLLM{},
 				sources:        coreSourcesAvailable,
 			}

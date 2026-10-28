@@ -46,6 +46,7 @@ type jiraIssueFake struct {
 	assignee string // user key, "" when unassigned
 	writes   []jiraWrite
 	issues   []string // what each /issue/ request named, id or key
+	requests int
 }
 
 func newJiraIssueFake(t *testing.T, statusID, assignee string) *jiraIssueFake {
@@ -76,6 +77,7 @@ func (f *jiraIssueFake) client() *jira.Client {
 func (f *jiraIssueFake) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.requests++
 	w.Header().Set("Content-Type", "application/json")
 	path := r.URL.Path
 	if _, rest, ok := strings.Cut(path, "/issue/"); ok {
@@ -132,6 +134,13 @@ func (f *jiraIssueFake) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
+}
+
+// Requests is how many requests of any kind the fake received.
+func (f *jiraIssueFake) Requests() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.requests
 }
 
 func (f *jiraIssueFake) Writes() []jiraWrite {

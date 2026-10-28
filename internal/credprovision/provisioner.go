@@ -118,7 +118,7 @@ func NewManager(stores db.Stores, llm llmResolver, linearResolver linear.Resolve
 		// the brain-side resolver that seals a run's git credential, so a managed
 		// org's run gets a token minted from the shared App rather than nothing.
 		ghResolver:     ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil, ghclient.WithDeploymentAppFromEnv()),
-		jiraResolver:   jira.NewResolver(stores.Secrets, stores.Orgs),
+		jiraResolver:   jira.NewResolver(stores.Secrets, stores.Orgs, eventsource.ResolverGate(stores.OrgEventSources, eventsource.KindJira)),
 		linearResolver: linearResolver,
 		llm:            llm,
 	}
@@ -319,18 +319,26 @@ func (m *Manager) sealSources(ctx context.Context, orgID string, claim db.Awaiti
 	bundle.GitHub = gh
 	manifest[eventsource.KindGitHub] = githubEntry(gh)
 
+	// A source turned off after the availability read above is refused by its
+	// resolver's own gate, and recorded as what it now is.
 	if resolvable[eventsource.KindJira] {
 		jc, err := m.resolveJira(ctx, orgID)
-		if err != nil {
+		switch {
+		case errors.Is(err, eventsource.ErrDisabled):
+			manifest[eventsource.KindJira] = domain.SourceEntry{State: domain.SourceDisabled}
+		case err != nil:
 			return nil, fmt.Errorf("credprovision: resolve jira credentials for org %s: %w", orgID, err)
+		default:
+			bundle.Jira = jc
+			manifest[eventsource.KindJira] = presentEntry(jc != nil, nil)
 		}
-		bundle.Jira = jc
-		manifest[eventsource.KindJira] = presentEntry(jc != nil, nil)
 	}
 
 	if resolvable[eventsource.KindLinear] {
 		lc, err := m.resolveLinear(ctx, orgID)
 		switch {
+		case errors.Is(err, eventsource.ErrDisabled):
+			manifest[eventsource.KindLinear] = domain.SourceEntry{State: domain.SourceDisabled}
 		case err != nil:
 			reason := agenthost.UnresolvedReason(err)
 			log.Warn("resolve the org's Linear credential failed; sealing the bundle without it, and the run's Linear verbs report Linear unavailable until a re-seal resolves it",

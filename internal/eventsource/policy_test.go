@@ -110,3 +110,35 @@ func TestLabel(t *testing.T) {
 		}
 	}
 }
+
+// TestResolverGate_RefusesATurnedOffSourceOnEveryCall: the check a Jira or
+// Linear credential resolver runs before every resolution. Off refuses with
+// ErrDisabled; on lets the resolution through; a failed read refuses with the
+// read's own error, never ErrDisabled, which would send the reader to an admin
+// about a database fault. It reads the policy on every call, so turning the
+// source back on takes effect on the next resolution.
+func TestResolverGate_RefusesATurnedOffSourceOnEveryCall(t *testing.T) {
+	ctx := context.Background()
+	store := &fakePolicyStore{off: []string{KindJira}}
+	gate := ResolverGate(store, KindJira)
+
+	if err := gate(ctx, "org-1"); !errors.Is(err, ErrDisabled) {
+		t.Fatalf("turned off: gate = %v, want ErrDisabled", err)
+	}
+	store.off = nil
+	if err := gate(ctx, "org-1"); err != nil {
+		t.Fatalf("turned back on: gate = %v, want nil", err)
+	}
+	store.err = errors.New("boom")
+	if err := gate(ctx, "org-1"); err == nil || errors.Is(err, ErrDisabled) {
+		t.Fatalf("unreadable policy: gate = %v, want the read's error", err)
+	}
+	if len(store.orgs) != 3 {
+		t.Errorf("read the policy %d times over three resolutions, want 3: a cached answer keeps a turned-off source answering", len(store.orgs))
+	}
+	for _, got := range store.orgs {
+		if got != "org-1" {
+			t.Errorf("read org %q, want org-1", got)
+		}
+	}
+}

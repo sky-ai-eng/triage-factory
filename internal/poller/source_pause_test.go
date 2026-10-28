@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -19,8 +20,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -177,6 +180,53 @@ func TestRunJiraCycleForOrg_PolicyReadFails_SkipsRatherThanPolls(t *testing.T) {
 	// looking for an admin who never touched the switch.
 	if got := spanOutcome(t, recorder, "poll.jira.org"); got != "policy_unreadable" {
 		t.Errorf("span outcome = %q, want %q", got, "policy_unreadable")
+	}
+}
+
+// turnedOffJiraResolver refuses the way the resolver's own gate does once an
+// org admin has turned Jira off.
+type turnedOffJiraResolver struct{ jiraclient.Resolver }
+
+func (turnedOffJiraResolver) ForSystem(_ context.Context, orgID string) (*jiraclient.Client, error) {
+	return nil, fmt.Errorf("Jira for org %s: %w", orgID, eventsource.ErrDisabled)
+}
+
+// TestRunJiraCycleForOrg_ResolverRefusalReadsAsThePause covers Jira turned off
+// between the cycle's own policy read and its client resolution: the
+// resolver's gate refuses, and the cycle records the same deliberate pause as
+// its skip would have, not a failed poll.
+func TestRunJiraCycleForOrg_ResolverRefusalReadsAsThePause(t *testing.T) {
+	recorder := recordSpans(t)
+	ctx := context.Background()
+	database := newMigratedSQLiteForPoller(t)
+	stores := sqlitestore.New(database)
+	org := runmode.LocalDefaultOrgID
+	const site = "https://jira.example.com"
+	if _, err := stores.Orgs.SetSourceBaseURL(ctx, org, "jira", site); err != nil {
+		t.Fatal(err)
+	}
+	project := dbseed.JiraProject(t, database, org, site, "SKY")
+	if err := stores.JiraStatusRules.ReplaceForTeam(ctx, runmode.LocalDefaultTeamID, site,
+		[]domain.JiraProjectStatusRules{{JiraProjectID: project}}); err != nil {
+		t.Fatalf("track SKY: %v", err)
+	}
+	var reported []error
+	m := &Manager{
+		database: database, pub: busPublisher{bus: newTestBus(t)},
+		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
+		orgs: stores.Orgs, users: stores.Users, secrets: jiraSecrets{},
+		jiraRules:    stores.JiraStatusRules,
+		jiraProjects: stores.JiraProjects,
+		EventSources: stores.OrgEventSources,
+		OnError:      func(_, _ string, err error) { reported = append(reported, err) },
+	}
+	m.runJiraCycleForOrg(ctx, turnedOffJiraResolver{}, org, time.Now())
+
+	if got := spanOutcome(t, recorder, "poll.jira.org"); got != "disabled" {
+		t.Errorf("span outcome = %q, want %q", got, "disabled")
+	}
+	if len(reported) != 0 {
+		t.Errorf("reported %v, want no error for a deliberate pause", reported)
 	}
 }
 

@@ -143,6 +143,7 @@ func newLinearInstallRigWith(t *testing.T, deployment linear.OAuthApp) *linearIn
 	r.s.linearOAuthMinter = linearoauth.NewMinterWithEndpoints(r.oauth.URL+"/token", r.oauth.URL+"/revoke")
 	r.s.linearOAuthApps = linear.NewOAuthAppResolver(r.stores.LinearApps, r.stores.Secrets, deployment)
 	r.s.linearResolver = linear.NewResolverWithInstall(r.stores.Secrets, r.stores.Orgs,
+		eventsource.ResolverGate(r.stores.OrgEventSources, eventsource.KindLinear),
 		linearoauth.NewTokenCache(r.s.linearOAuthMinter, r.s.linearOAuthApps, r.stores.Secrets, r.stores.LinearInstalls, r.s.linearCredentialLock))
 	return r
 }
@@ -355,6 +356,7 @@ func TestLinearInstall_HappyPath(t *testing.T) {
 	// Another process, with nothing cached, once the stored token has aged.
 	r.ageStoredAccessToken(t)
 	cold := linear.NewResolverWithInstall(r.stores.Secrets, r.stores.Orgs,
+		eventsource.ResolverGate(r.stores.OrgEventSources, eventsource.KindLinear),
 		linearoauth.NewTokenCache(r.s.linearOAuthMinter, r.s.linearOAuthApps, r.stores.Secrets, r.stores.LinearInstalls, r.s.linearCredentialLock))
 	cred, err = cold.ResolveSystemCredential(t.Context(), runmode.LocalDefaultOrgID)
 	if err != nil {

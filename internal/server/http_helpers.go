@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -45,6 +46,17 @@ func writeNotConfigured(w http.ResponseWriter, msg string) {
 	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 		Reason:  httpx.ReasonNotConfigured,
 		Message: msg,
+	})
+}
+
+// writeSourceDisabled writes the 409 for a request that needs a source an org
+// admin turned off (eventsource.ErrDisabled): every Jira or Linear client is
+// refused for the org while it is off, so the request cannot do its work, and
+// nothing it changes would let it.
+func writeSourceDisabled(w http.ResponseWriter, kind string) {
+	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+		Reason:  httpx.ReasonSourceDisabled,
+		Message: eventsource.Label(kind) + " is turned off for this organization by an org admin; ask an org admin to turn it back on",
 	})
 }
 
