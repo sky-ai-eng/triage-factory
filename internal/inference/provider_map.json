@@ -1,5 +1,7 @@
 {
+ "abliteration": "unsupported",
  "ai21": "unsupported",
+ "aiand": "unsupported",
  "aihubmix": "unsupported",
  "amazon_nova": "unsupported",
  "anthropic": "anthropic",
@@ -54,6 +56,7 @@
  "oci": "unsupported",
  "ollama": "unsupported",
  "openai": "openai",
+ "opencode_go": "unsupported",
  "openinfer": "unsupported",
  "openrouter": "unsupported",
  "ovhcloud": "unsupported",
@@ -64,6 +67,7 @@
  "publicai": "unsupported",
  "qwen_ai_platform": "unsupported",
  "qwencloud": "unsupported",
+ "refuseless": "unsupported",
  "replicate": "unsupported",
  "sagemaker": "unsupported",
  "sail": "unsupported",
