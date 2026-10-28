@@ -138,12 +138,25 @@ alert's description, shown beside it in Grafana, says what to check.
 | `DeploymentCommitSignerDown`    | critical | A control pod's [deployment commit signer](deployment-commit-signer.md) has not been active for 15 minutes. |
 | `AuditRecordsDropped`           | warning  | An agent's write landed without its audit record.                                                           |
 | `SlackDeliveriesRetried`        | warning  | Slack retried deliveries to an app in the last 15 minutes.                                                  |
+| `JiraDeploymentAppQuotaLow`     | warning  | The deployment's shared Atlassian app has reported its Jira quota near its limit, for 10 minutes.           |
 
 The two fleet-wide connection alerts need at least two orgs. One org's
 failures are usually its own host, VPN or credential, and show on the
 dashboard's Connections row instead. `WorkspaceCheckpointsStale` assumes the
 default `TF_SNAPSHOT_INTERVAL_SEC`; with a longer interval it fires on healthy
 runs.
+
+`JiraDeploymentAppQuotaLow` is the one rate-limit reading that alerts. On
+Atlassian's default tier, every org that connects Jira through the deployment's
+app spends one hourly quota, so people's Jira actions from the board (claim,
+done, requeue) wait and then fail together once it runs out. Polling and
+delegated runs use each org's service credential, which the quota doesn't
+meter. Only you can change it: ask Atlassian to move the app to a higher tier,
+or have the orgs that use it most add an Atlassian OAuth app of their own or
+connect with API tokens. A single near reading can hold the alert true for up
+to an hour, which is why it waits 10 minutes before firing. It clears once no
+pod's latest reading for any org says near. On the per-tenant tier, it fires for
+any one org's reading.
 
 ### Delivering alerts
 

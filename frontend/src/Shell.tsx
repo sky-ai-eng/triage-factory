@@ -49,6 +49,10 @@ const PATHS: Record<string, string> = {
   settings: '/settings',
 }
 
+/** Route ids whose page is about the deployment rather than an org. Their path
+ *  is the same in both modes, so multi mode does not put an org in front of it. */
+const DEPLOYMENT_ROUTES = new Set(['fleet'])
+
 /** Longest path first, so a nested path resolves to its own id and not to /. */
 const BY_PATH: Array<[string, string]> = Object.entries(PATHS)
   .filter(([id]) => id !== 'prompts.bindings')
@@ -57,8 +61,8 @@ const BY_PATH: Array<[string, string]> = Object.entries(PATHS)
 
 /** Which rail row is lit, given where the browser actually is. */
 function routeIdFor(pathname: string): string {
-  // Multi mode prefixes every path with /orgs/<id>; strip it so one map serves
-  // both deployment shapes rather than two near-identical ones.
+  // Multi mode prefixes the org pages with /orgs/<id>; strip it so one map
+  // serves both deployment shapes rather than two near-identical ones.
   const rel = pathname.replace(/^\/orgs\/[^/]+/, '') || '/'
   for (const [path, id] of BY_PATH) {
     if (path === '/') continue
@@ -120,7 +124,7 @@ export default function Shell() {
   const onRoute = useCallback(
     (id: string) => {
       const path = PATHS[id]
-      if (path) navigate(orgHref(path))
+      if (path) navigate(DEPLOYMENT_ROUTES.has(id) ? path : orgHref(path))
     },
     [navigate, orgHref],
   )
